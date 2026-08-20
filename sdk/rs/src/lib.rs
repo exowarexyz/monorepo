@@ -20,6 +20,7 @@ pub mod selector;
 pub mod stream_filter;
 pub use credential::API_KEY_ENV;
 pub use keys::{Key, KeyMut, KeyValidationError, Prefix, PrefixError, Value, MAX_KEY_LEN};
+pub use proto::transport::BalancedHttp2Config;
 pub use proto::*;
 extern crate self as exoware_proto;
 
@@ -44,7 +45,6 @@ use exoware_proto::{
     to_domain_reduce_response as proto_to_domain_reduce_response,
     to_proto_reduce_params as proto_to_proto_reduce_params,
     BalancedHttp2Config as ProtoBalancedHttp2Config,
-    BalancedHttp2TransportError as ProtoBalancedHttp2TransportError,
     PreferZstdHttpClient as ProtoPreferZstdHttpClient,
 };
 use futures::future::BoxFuture;
@@ -62,7 +62,6 @@ use crate::proto::transport::{
     BalancedHttp2Transport as ProtoBalancedHttp2Transport,
     ErasedClientTransport as ProtoErasedClientTransport,
     ErasedResponseBody as ProtoErasedResponseBody,
-    MetadataClientTransport as ProtoMetadataClientTransport,
 };
 
 const DEFAULT_RETRY_MAX_ATTEMPTS: usize = 3;
@@ -158,10 +157,15 @@ const STORE_CLIENT_MAX_MESSAGE_BYTES: usize = 256 * 1024 * 1024;
 fn store_connect_client_config(
     base_uri: http::Uri,
     request_compression: ConnectRequestCompression,
+    timeout: Option<Duration>,
 ) -> ClientConfig {
     let config = ClientConfig::new(base_uri)
         .with_compression(proto_connect_compression_registry())
         .with_default_max_message_size(STORE_CLIENT_MAX_MESSAGE_BYTES);
+    let config = match timeout {
+        Some(timeout) => config.with_default_timeout(timeout),
+        None => config,
+    };
     match request_compression.wire_name() {
         Some(name) => config.compress_requests(name),
         None => config,
@@ -1528,7 +1532,7 @@ fn parse_connect_uri(url: &str) -> Result<http::Uri, ClientBuildError> {
 
 fn new_health_client() -> reqwest::Client {
     reqwest::Client::builder()
-        .pool_max_idle_per_host(1)
+        .pool_max_idle_per_host(32)
         .timeout(Duration::from_secs(30))
         .build()
         .expect("failed to build HTTP client")
@@ -1560,8 +1564,6 @@ pub enum ClientBuildError {
     InvalidEndpointUrl { url: String },
     #[error("StoreClientBuilder: failed to configure platform TLS verifier: {0}")]
     TlsConfig(#[source] connectrpc::rustls::Error),
-    #[error("StoreClientBuilder: {0}")]
-    BalancedHttp2(#[from] ProtoBalancedHttp2TransportError),
     #[error("StoreClientBuilder: API key is not valid in an HTTP header (check for control or non-ASCII characters)")]
     InvalidApiKey,
     #[error("{API_KEY_ENV} is set to a value that cannot be an HTTP header. Remove any control or non-ASCII characters from it")]
@@ -1667,11 +1669,12 @@ impl StoreClientBuilder {
 
     /// Uses a consumer-supplied raw connectrpc transport for every Store RPC.
     ///
-    /// The transport receives absolute request URIs for the configured ingest, query, prune,
-    /// retention, and stream origins. It must route each URI to its matching origin. The SDK wraps
-    /// it with bearer authentication, cookie persistence, and `Accept-Encoding: zstd, gzip`.
-    /// Request compression remains controlled by [`Self::connect_request_compression`]. Health and
-    /// readiness probes continue to use the separate Reqwest client.
+    /// The transport must route absolute request URIs to the configured service origins. The SDK
+    /// applies authentication, cookies, compression preferences, and request compression.
+    /// Health and readiness probes are unaffected. [`crate::transport`] re-exports the exact trait
+    /// and body types. Tower middleware that exposes `tower::BoxError` must map it into a concrete
+    /// [`std::error::Error`] before constructing [`crate::transport::ServiceTransport`].
+    /// connectrpc reports transport failures as `unavailable`.
     pub fn client_transport<T>(mut self, transport: T) -> Self
     where
         T: connectrpc::client::ClientTransport,
@@ -1685,11 +1688,9 @@ impl StoreClientBuilder {
 
     /// Uses independent HTTP/2 connection pools for each distinct Store RPC origin.
     ///
-    /// HTTP origins must accept prior-knowledge h2c. HTTPS origins must negotiate HTTP/2 through
-    /// ALPN.
-    ///
-    /// Construction requires a running Tokio runtime because Tower drives each bounded pool in a
-    /// background task. The default transport remains unchanged unless this method is called.
+    /// HTTP origins must accept prior-knowledge h2c. HTTPS origins require HTTP/2 through ALPN.
+    /// The configured request timeout bounds complete unary calls and streaming response headers.
+    /// It does not stop a streaming response after its headers arrive.
     pub fn balanced_http2_transport(mut self, config: ProtoBalancedHttp2Config) -> Self {
         self.rpc_transport = Some(RpcTransportChoice::BalancedHttp2(config));
         self
@@ -1736,7 +1737,7 @@ impl StoreClientBuilder {
         let resolved =
             credential::resolve(self.api_key.map(|key| key.0), env_api_key, unusable_env_key)?;
         let credential = resolved.credential;
-        let connect_http = match self.rpc_transport {
+        let (connect_http, rpc_timeout) = match self.rpc_transport {
             None => {
                 let connect_http = if uses_tls {
                     let tls_config = connectrpc::rustls::ClientConfig::with_platform_verifier()
@@ -1749,37 +1750,25 @@ impl StoreClientBuilder {
                     Some(value) => connect_http.with_authorization(value),
                     None => connect_http,
                 };
-                ProtoErasedClientTransport::new(connect_http)
+                (ProtoErasedClientTransport::new(connect_http), None)
             }
             Some(RpcTransportChoice::Custom(transport)) => {
-                let transport = ProtoMetadataClientTransport::new(transport);
-                let transport = match resolved.header {
-                    Some(value) => transport.with_authorization(value),
-                    None => transport,
-                };
-                ProtoErasedClientTransport::new(transport)
+                (transport.with_metadata(resolved.header), None)
             }
-            Some(RpcTransportChoice::BalancedHttp2(config)) => {
-                let tls_config = if uses_tls {
-                    Some(Arc::new(
+            Some(RpcTransportChoice::BalancedHttp2(mut config)) => {
+                let rpc_timeout = config.request_timeout;
+                if uses_tls && config.tls_config.is_none() {
+                    config = config.with_tls_config(Arc::new(
                         connectrpc::rustls::ClientConfig::with_platform_verifier()
                             .map_err(ClientBuildError::TlsConfig)?,
-                    ))
-                } else {
-                    None
-                };
-                let transport = ProtoBalancedHttp2Transport::new(
-                    rpc_uris.into_iter().cloned(),
-                    config,
-                    tls_config,
-                )?;
+                    ));
+                }
                 let transport =
-                    ProtoMetadataClientTransport::new(ProtoErasedClientTransport::new(transport));
-                let transport = match resolved.header {
-                    Some(value) => transport.with_authorization(value),
-                    None => transport,
-                };
-                ProtoErasedClientTransport::new(transport)
+                    ProtoBalancedHttp2Transport::new(rpc_uris.into_iter().cloned(), config);
+                (
+                    ProtoErasedClientTransport::new(transport).with_metadata(resolved.header),
+                    Some(rpc_timeout),
+                )
             }
         };
         Ok(StoreClient {
@@ -1791,6 +1780,7 @@ impl StoreClientBuilder {
             stream_uri,
             health_http: new_health_client(),
             connect_http,
+            rpc_timeout,
             retry_config: self.retry_config,
             connect_request_compression: self.connect_request_compression,
             credential,
@@ -1810,6 +1800,7 @@ pub struct StoreClient {
     stream_uri: http::Uri,
     health_http: reqwest::Client,
     connect_http: ProtoErasedClientTransport,
+    rpc_timeout: Option<Duration>,
     retry_config: RetryConfig,
     connect_request_compression: ConnectRequestCompression,
     credential: Credential,
@@ -1885,6 +1876,26 @@ impl StoreClient {
         self.connect_request_compression
     }
 
+    fn unary_client_config(&self, base_uri: http::Uri) -> ClientConfig {
+        store_connect_client_config(base_uri, self.connect_request_compression, self.rpc_timeout)
+    }
+
+    fn streaming_client_config(&self, base_uri: http::Uri) -> ClientConfig {
+        store_connect_client_config(base_uri, self.connect_request_compression, None)
+    }
+
+    async fn with_streaming_timeout<T>(
+        &self,
+        future: impl std::future::Future<Output = Result<T, ConnectError>>,
+    ) -> Result<T, ConnectError> {
+        match self.rpc_timeout {
+            Some(timeout) => tokio::time::timeout(timeout, future)
+                .await
+                .map_err(|_| ConnectError::deadline_exceeded("client-side deadline exceeded"))?,
+            None => future.await,
+        }
+    }
+
     pub fn decode_error_details(
         err: &ConnectError,
     ) -> Result<exoware_proto::DecodedConnectError, buffa::DecodeError> {
@@ -1938,8 +1949,7 @@ impl StoreClient {
     }
 
     async fn send_put(&self, kvs: Vec<exoware_proto::common::Entry>) -> Result<u64, ClientError> {
-        let config =
-            store_connect_client_config(self.ingest_uri.clone(), self.connect_request_compression);
+        let config = self.unary_client_config(self.ingest_uri.clone());
         let client = IngestServiceClient::new(self.connect_http.clone(), config);
         let response = client
             .put(ProtoPutRequest {
@@ -1984,20 +1994,19 @@ impl StoreClient {
         min_sequence_number: Option<u64>,
         observed_sequence: Option<Arc<AtomicU64>>,
     ) -> Result<GetManyStream, ClientError> {
-        let config =
-            store_connect_client_config(self.query_uri.clone(), self.connect_request_compression);
+        let config = self.streaming_client_config(self.query_uri.clone());
         let client = QueryServiceClient::new(self.connect_http.clone(), config);
         let effective_min = self.normalize_min_sequence_number(min_sequence_number);
         let max_attempts = self.retry_config.max_attempts.max(1);
         let mut attempt = 1usize;
         loop {
-            match client
-                .get_many(ProtoGetManyRequest {
+            match self
+                .with_streaming_timeout(client.get_many(ProtoGetManyRequest {
                     keys: proto_keys.clone(),
                     min_sequence_number: effective_min,
                     batch_size,
                     ..Default::default()
-                })
+                }))
                 .await
             {
                 Ok(stream) => {
@@ -2035,8 +2044,7 @@ impl StoreClient {
         &self,
         policies: &[crate::prune_policy::PrunePolicy],
     ) -> Result<(), ClientError> {
-        let config =
-            store_connect_client_config(self.prune_uri.clone(), self.connect_request_compression);
+        let config = self.unary_client_config(self.prune_uri.clone());
         let client = PruneServiceClient::new(self.connect_http.clone(), config);
         client
             .prune(ProtoPruneRequest {
@@ -2090,12 +2098,11 @@ impl StoreClient {
             since_sequence_number,
             ..Default::default()
         };
-        let config =
-            store_connect_client_config(self.stream_uri.clone(), self.connect_request_compression);
+        let config = self.streaming_client_config(self.stream_uri.clone());
         let client =
             exoware_proto::log::stream::v1::ServiceClient::new(self.connect_http.clone(), config);
-        let stream = client
-            .subscribe(request)
+        let stream = self
+            .with_streaming_timeout(client.subscribe(request))
             .await
             .map_err(|err| client_error_from_connect(err, self.credential))?;
         Ok(StreamSubscription {
@@ -2113,8 +2120,7 @@ impl StoreClient {
         &self,
         sequence_number: u64,
     ) -> Result<Option<exoware_proto::log::stream::v1::GetResponse>, ClientError> {
-        let config =
-            store_connect_client_config(self.stream_uri.clone(), self.connect_request_compression);
+        let config = self.unary_client_config(self.stream_uri.clone());
         let client =
             exoware_proto::log::stream::v1::ServiceClient::new(self.connect_http.clone(), config);
         match client
@@ -2150,10 +2156,7 @@ impl StoreClient {
                 .into(),
             ..Default::default()
         };
-        let config = store_connect_client_config(
-            self.retention_uri.clone(),
-            self.connect_request_compression,
-        );
+        let config = self.unary_client_config(self.retention_uri.clone());
         let client = exoware_proto::log::retention::v1::ServiceClient::new(
             self.connect_http.clone(),
             config,
@@ -2207,8 +2210,7 @@ impl StoreClient {
             )));
         }
 
-        let config =
-            store_connect_client_config(self.query_uri.clone(), self.connect_request_compression);
+        let config = self.unary_client_config(self.query_uri.clone());
         let client = QueryServiceClient::new(self.connect_http.clone(), config);
         let response = self
             .send_with_retry(|| async {
@@ -2261,8 +2263,7 @@ impl StoreClient {
             ));
         }
 
-        let config =
-            store_connect_client_config(self.query_uri.clone(), self.connect_request_compression);
+        let config = self.streaming_client_config(self.query_uri.clone());
         let client = QueryServiceClient::new(self.connect_http.clone(), config);
         let min_sequence_number = self.normalize_min_sequence_number(options.min_sequence_number);
         let max_attempts = self.retry_config.max_attempts.max(1);
@@ -2272,8 +2273,8 @@ impl StoreClient {
             // but retrying a transient error while opening the stream or before the
             // first frame arrives is still safe. Treat both phases as a single
             // attempt budget so range opens do not multiply retries quadratically.
-            let response = match client
-                .range(ProtoRangeRequest {
+            let response = match self
+                .with_streaming_timeout(client.range(ProtoRangeRequest {
                     start: start.clone().into(),
                     end: end.clone().into(),
                     limit: Some(u32::try_from(limit).unwrap_or(u32::MAX)),
@@ -2281,7 +2282,7 @@ impl StoreClient {
                     mode: mode.to_proto().into(),
                     min_sequence_number,
                     ..Default::default()
-                })
+                }))
                 .await
             {
                 Ok(response) => response,
@@ -2342,8 +2343,7 @@ impl StoreClient {
         ),
         ClientError,
     > {
-        let config =
-            store_connect_client_config(self.query_uri.clone(), self.connect_request_compression);
+        let config = self.unary_client_config(self.query_uri.clone());
         let client = QueryServiceClient::new(self.connect_http.clone(), config);
         let proto_params = proto_to_proto_reduce_params(request.clone());
         let min_sequence_number = self.normalize_min_sequence_number(min_sequence_number);
@@ -3106,7 +3106,8 @@ mod tests {
     }
 
     impl connectrpc::client::ClientTransport for RecordingTransport {
-        type ResponseBody = http_body_util::Empty<Bytes>;
+        type ResponseBody =
+            http_body_util::combinators::UnsyncBoxBody<Bytes, std::convert::Infallible>;
         type Error = ConnectError;
 
         fn send(
@@ -3230,16 +3231,7 @@ mod tests {
             assert_eq!(headers.get(AUTHORIZATION).unwrap(), "Bearer token-abc");
             assert_eq!(headers.get(ACCEPT_ENCODING).unwrap(), "zstd, gzip");
         }
-    }
 
-    #[tokio::test]
-    async fn custom_transport_does_not_bypass_key_validation() {
-        let transport = RecordingTransport::default();
-        let client = StoreClient::builder()
-            .url("http://store.internal")
-            .client_transport(transport.clone())
-            .build()
-            .unwrap();
         let client = PrefixedStoreClient::empty(client);
         let oversized_key = Bytes::from(vec![0; MAX_KEY_LEN + 1]);
 
@@ -3247,37 +3239,21 @@ mod tests {
             client.put(&[(&oversized_key, b"value")]).await,
             Err(ClientError::Prefix(_))
         ));
-        assert!(transport.requests().is_empty());
+        assert_eq!(transport.requests().len(), 5);
     }
 
     #[test]
-    fn balanced_http2_rejects_invalid_configuration() {
-        assert!(matches!(
-            StoreClient::builder()
-                .url("http://store.internal")
-                .balanced_http2_transport(ProtoBalancedHttp2Config::new(0, 32))
-                .build(),
-            Err(ClientBuildError::BalancedHttp2(
-                ProtoBalancedHttp2TransportError::ZeroConnections
-            ))
-        ));
+    fn public_streams_remain_send_and_sync() {
+        fn assert_send_sync<T: Send + Sync>() {}
+
+        assert_send_sync::<RangeStream>();
+        assert_send_sync::<GetManyStream>();
+        assert_send_sync::<StreamSubscription>();
     }
 
     #[test]
-    fn balanced_http2_requires_a_runtime() {
-        assert!(matches!(
-            StoreClient::builder()
-                .url("http://store.internal")
-                .balanced_http2_transport(ProtoBalancedHttp2Config::new(2, 32))
-                .build(),
-            Err(ClientBuildError::BalancedHttp2(
-                ProtoBalancedHttp2TransportError::MissingRuntime
-            ))
-        ));
-    }
-
-    #[tokio::test]
-    async fn balanced_http2_builder_supports_mixed_service_schemes() {
+    fn balanced_http2_builder_supports_mixed_service_schemes() {
+        let timeout = Duration::from_millis(123);
         let client = StoreClient::builder()
             .health_url("https://health.example.com")
             .ingest_url("http://ingest.internal")
@@ -3285,12 +3261,15 @@ mod tests {
             .prune_url("http://prune.internal")
             .retention_url("http://retention.internal")
             .stream_url("https://stream.example.com")
-            .balanced_http2_transport(ProtoBalancedHttp2Config::new(2, 32))
+            .balanced_http2_transport(
+                ProtoBalancedHttp2Config::default().with_request_timeout(timeout),
+            )
             .build()
             .unwrap();
 
         assert_eq!(client.ingest_uri.scheme_str(), Some("http"));
         assert_eq!(client.query_uri.scheme_str(), Some("https"));
+        assert_eq!(client.rpc_timeout, Some(timeout));
     }
 
     #[test]

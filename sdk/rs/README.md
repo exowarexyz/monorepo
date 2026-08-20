@@ -49,3 +49,29 @@ EXOWARE_URL=https://query.<deployment>.<domain> \
 the environment when `.api_key(...)` is not set. This example needs one covering both scopes.
 
 Add `EXOWARE_WRITE_URL` to reach a deployment that serves its write path on a separate origin.
+
+## RPC Transports
+
+High-throughput writers can opt into independent HTTP clients per RPC origin.
+
+```rust
+use std::num::NonZeroUsize;
+use exoware_sdk::{BalancedHttp2Config, StoreClient};
+
+let client = StoreClient::builder()
+    .url("http://localhost:10000")
+    .balanced_http2_transport(
+        BalancedHttp2Config::default()
+            .with_connections_per_origin(NonZeroUsize::new(4).unwrap()),
+    )
+    .build()?;
+```
+
+HTTP uses prior-knowledge h2c. HTTPS requires HTTP/2 through ALPN and uses platform trust by
+default. `with_tls_config` accepts custom roots and client certificates but replaces configured
+ALPN protocols with HTTP/2. Open streams use HTTP/2 PINGs to detect dead peers. The request timeout
+bounds complete unary calls and streaming response headers without stopping a streaming body.
+
+`StoreClientBuilder::client_transport` accepts types re-exported under `exoware_sdk::transport`.
+The SDK still owns authentication, cookies, and compression preferences. Tower services can use
+`ServiceTransport`. A `tower::BoxError` must first be mapped into a concrete `std::error::Error`.
