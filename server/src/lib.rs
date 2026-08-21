@@ -19,7 +19,10 @@ pub use engine::{
     RangeScanBatch, Retention, Sequence, StoreEngine,
 };
 pub use reduce::RangeError;
-pub use stream::{CompiledMatchers, InvalidFilter, StreamHub, StreamNotification, StreamNotifier};
+pub use stream::{
+    CompiledMatchers, CompiledSelector, InvalidFilter, StreamHub, StreamNotification,
+    StreamNotifier,
+};
 pub use validate::{IngestLimits, DEFAULT_MAX_VALUE_LEN};
 
 /// Types used by filtered-batch and matcher APIs, re-exported so backends can
