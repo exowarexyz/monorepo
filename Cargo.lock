@@ -2603,8 +2603,12 @@ dependencies = [
  "exoware-simulator",
  "exoware-sql",
  "futures",
+ "hyper",
+ "hyper-util",
  "reqwest",
+ "tempfile",
  "tokio",
+ "tokio-rustls",
 ]
 
 [[package]]
@@ -2678,7 +2682,10 @@ dependencies = [
  "hex",
  "http",
  "http-body",
+ "http-body-util",
  "hyper",
+ "hyper-rustls",
+ "hyper-util",
  "psl",
  "regex",
  "reqwest",
