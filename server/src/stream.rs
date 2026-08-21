@@ -31,10 +31,25 @@ pub const REASON_BATCH_NOT_FOUND: &str = "BATCH_NOT_FOUND";
 /// Metadata key on `BATCH_EVICTED` errors carrying the lowest retained seq.
 pub const METADATA_OLDEST_RETAINED: &str = "oldest_retained";
 
+/// One validated and compiled stream selector.
 #[derive(Clone, Debug)]
-struct CompiledKeyMatcher {
+pub struct CompiledSelector {
     prefix: Prefix,
     regex: Regex,
+}
+
+impl CompiledSelector {
+    /// The raw prefix used to narrow keys before evaluating the payload regex.
+    pub fn prefix(&self) -> &[u8] {
+        self.prefix.as_bytes()
+    }
+
+    /// Return whether this selector accepts the key.
+    pub fn matches_key(&self, key: &[u8]) -> bool {
+        self.prefix
+            .strip_slice(key)
+            .is_some_and(|payload| self.regex.is_match(payload))
+    }
 }
 
 /// A stream filter rejected during validation or compilation.
@@ -48,7 +63,7 @@ pub struct InvalidFilter(String);
 /// Validated stream matchers compiled for repeated evaluation.
 #[derive(Clone, Debug)]
 pub struct CompiledMatchers {
-    keys: Vec<CompiledKeyMatcher>,
+    keys: Vec<CompiledSelector>,
     values: Option<CompiledFilters>,
 }
 
@@ -64,7 +79,7 @@ impl CompiledMatchers {
                     .map_err(|e| InvalidFilter(e.to_string()))?;
                 let prefix =
                     Prefix::new(mk.prefix.clone()).map_err(|e| InvalidFilter(e.to_string()))?;
-                Ok(CompiledKeyMatcher { prefix, regex })
+                Ok(CompiledSelector { prefix, regex })
             })
             .collect::<Result<Vec<_>, InvalidFilter>>()?;
         let values = CompiledFilters::compile(&filter.value_filters)
@@ -86,12 +101,12 @@ impl CompiledMatchers {
     ///
     /// Selector regular expressions evaluate bytes after the matching prefix.
     pub fn matches_key(&self, key: &[u8]) -> bool {
-        self.keys.iter().any(|matcher| {
-            matcher
-                .prefix
-                .strip_slice(key)
-                .is_some_and(|payload| matcher.regex.is_match(payload))
-        })
+        self.keys.iter().any(|matcher| matcher.matches_key(key))
+    }
+
+    /// The compiled selectors in request order.
+    pub fn selectors(&self) -> &[CompiledSelector] {
+        &self.keys
     }
 
     /// Return whether the configured value filters match the value.
@@ -400,5 +415,32 @@ mod tests {
 
         let without_value_filters = compile_matchers(&filter(1, "(?s).*")).unwrap();
         assert!(without_value_filters.matches_value(b"anything"));
+    }
+
+    #[test]
+    fn compiled_selectors_expose_prefixes_and_preserve_match_semantics() {
+        let filter = StreamFilter {
+            selectors: vec![
+                Selector {
+                    prefix: Bytes::from_static(&[1]),
+                    payload_regex: Utf8::from("^hit$"),
+                },
+                Selector {
+                    prefix: Bytes::from_static(&[1, 2]),
+                    payload_regex: Utf8::from("suffix"),
+                },
+            ],
+            value_filters: vec![],
+        };
+        let matchers = CompiledMatchers::compile(&filter).expect("compile");
+        let selectors = matchers.selectors();
+
+        assert_eq!(selectors.len(), 2);
+        assert_eq!(selectors[0].prefix(), &[1]);
+        assert!(selectors[0].matches_key(&[1, b'h', b'i', b't']));
+        assert!(!selectors[0].matches_key(&[1, b'm', b'i', b's', b's']));
+        assert_eq!(selectors[1].prefix(), &[1, 2]);
+        assert!(selectors[1].matches_key(&[1, 2, b'x', b's', b'u', b'f', b'f', b'i', b'x']));
+        assert!(!selectors[1].matches_key(&[1, b'x', b's', b'u', b'f', b'f', b'i', b'x']));
     }
 }
