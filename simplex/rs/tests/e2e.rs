@@ -20,6 +20,7 @@ use commonware_runtime::{
 use commonware_storage::archive::immutable;
 use commonware_utils::{
     channel::{oneshot, oneshot::Sender as OneshotSender},
+    non_empty,
     sync::Mutex,
     vec::NonEmptyVec,
     Acknowledgement as _, NZUsize, TestRng, NZU16, NZU64,
@@ -206,8 +207,8 @@ fn notarized(block: TestBlock, schemes: &[Scheme]) -> Notarized<TestBlock, Schem
         .iter()
         .map(|scheme| Notarize::sign(scheme, proposal.clone()).expect("notarize"))
         .collect();
-    let proof =
-        Notarization::from_notarizes(&schemes[0], &votes, &Sequential).expect("notarization");
+    let proof = Notarization::from_notarizes(&schemes[0], non_empty![@&votes], &Sequential)
+        .expect("notarization");
     Notarized::new(proof, block).expect("notarized")
 }
 
@@ -217,8 +218,8 @@ fn finalized(block: TestBlock, schemes: &[Scheme]) -> Finalized<TestBlock, Schem
         .iter()
         .map(|scheme| Finalize::sign(scheme, proposal.clone()).expect("finalize"))
         .collect();
-    let proof =
-        Finalization::from_finalizes(&schemes[0], &votes, &Sequential).expect("finalization");
+    let proof = Finalization::from_finalizes(&schemes[0], non_empty![@&votes], &Sequential)
+        .expect("finalization");
     Finalized::new(proof, block).expect("finalized")
 }
 

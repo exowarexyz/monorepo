@@ -18,7 +18,7 @@ use commonware_cryptography::{
 };
 use commonware_math::algebra::Random;
 use commonware_parallel::Sequential;
-use commonware_utils::{ordered::Set, N3f1, TestRng};
+use commonware_utils::{non_empty, ordered::Set, N3f1, TestRng};
 use exoware_sdk::{StoreClient, StoreKeyPrefix, StoreWriteBatch};
 use exoware_simplex::{encode_block_data, keys, Finalized, Notarized, SimplexClient};
 use tracing::info;
@@ -167,8 +167,9 @@ fn demo_schemes() -> Vec<Scheme> {
             .iter()
             .map(|private_key| private_key.public_key()),
     );
-    let (output, shares) = deal::<MinSig, _, N3f1>(&mut rng, Mode::default(), participants.clone())
-        .expect("demo threshold DKG should succeed");
+    let (output, shares) =
+        deal::<MinSig, _, N3f1>(&mut rng, Mode::NonZeroCounter, participants.clone())
+            .expect("demo threshold DKG should succeed");
     let polynomial = output.public().clone();
     shares
         .into_iter()
@@ -194,8 +195,8 @@ fn notarized(block: DemoBlock, schemes: &[Scheme]) -> Notarized<DemoBlock, Schem
         .iter()
         .map(|scheme| Notarize::sign(scheme, proposal.clone()).expect("notarize"))
         .collect();
-    let proof =
-        Notarization::from_notarizes(&schemes[0], &votes, &Sequential).expect("notarization");
+    let proof = Notarization::from_notarizes(&schemes[0], non_empty![@&votes], &Sequential)
+        .expect("notarization");
     Notarized::new(proof, block).expect("notarized")
 }
 
@@ -205,8 +206,8 @@ fn finalized(block: DemoBlock, schemes: &[Scheme]) -> Finalized<DemoBlock, Schem
         .iter()
         .map(|scheme| Finalize::sign(scheme, proposal.clone()).expect("finalize"))
         .collect();
-    let proof =
-        Finalization::from_finalizes(&schemes[0], &votes, &Sequential).expect("finalization");
+    let proof = Finalization::from_finalizes(&schemes[0], non_empty![@&votes], &Sequential)
+        .expect("finalization");
     Finalized::new(proof, block).expect("finalized")
 }
 

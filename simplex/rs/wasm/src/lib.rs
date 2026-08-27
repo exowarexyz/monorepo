@@ -403,7 +403,7 @@ mod tests {
         Blake3, Digest, Hasher, Sha256, Signer as _,
     };
     use commonware_math::algebra::Random;
-    use commonware_utils::{TestRng, TryCollect};
+    use commonware_utils::{non_empty, TestRng, TryCollect};
 
     const DEMO_NAMESPACE: &[u8] = b"_EXOWARE_SIMPLEX_DEMO";
 
@@ -449,7 +449,8 @@ mod tests {
             .map(|scheme| Notarize::sign(scheme, proposal_value.clone()).expect("notarize"))
             .collect();
         let notarization =
-            Notarization::from_notarizes(&schemes[0], &notarizes, &Sequential).unwrap();
+            Notarization::from_notarizes(&schemes[0], non_empty![@&notarizes], &Sequential)
+                .unwrap();
         let mut artifact = notarization.encode().to_vec();
         artifact.extend_from_slice(notarized_header);
 
@@ -478,7 +479,8 @@ mod tests {
             .map(|scheme| Finalize::sign(scheme, proposal_value.clone()).expect("finalize"))
             .collect();
         let finalization =
-            Finalization::from_finalizes(&schemes[0], &finalizes, &Sequential).unwrap();
+            Finalization::from_finalizes(&schemes[0], non_empty![@&finalizes], &Sequential)
+                .unwrap();
         let mut artifact = finalization.encode().to_vec();
         artifact.extend_from_slice(finalized_header);
 
