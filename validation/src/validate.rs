@@ -1812,12 +1812,12 @@ mod tests {
     use super::*;
     use crate::keyspace::DEFAULT_KEY_LEN;
     use axum::Router;
-    use connectrpc::{ConnectError, ConnectRpcService, RequestContext};
+    use connectrpc::{ConnectError, ConnectRpcService, RequestContext, ServiceRequest};
     use exoware_sdk::common::kv::v1::Entry;
     use exoware_sdk::query::{
-        GetManyEntry, GetManyFrame, GetResponse, OwnedGetManyRequestView, OwnedGetRequestView,
-        OwnedRangeRequestView, OwnedReduceRequestView, RangeFrame, ReduceResponse,
-        Service as QueryService, ServiceServer as QueryServiceServer,
+        GetManyEntry, GetManyFrame, GetManyRequest, GetRequest, GetResponse, RangeFrame,
+        RangeRequest, ReduceRequest, ReduceResponse, Service as QueryService,
+        ServiceServer as QueryServiceServer,
     };
     use futures::stream;
     use std::collections::HashSet;
@@ -1836,7 +1836,7 @@ mod tests {
         async fn get(
             &self,
             _ctx: RequestContext,
-            _request: OwnedGetRequestView,
+            _request: ServiceRequest<'_, GetRequest>,
         ) -> connectrpc::ServiceResult<GetResponse> {
             match self {
                 Self::MissingGet => connectrpc::Response::ok(GetResponse::default()),
@@ -1847,7 +1847,7 @@ mod tests {
         async fn get_many(
             &self,
             _ctx: RequestContext,
-            request: OwnedGetManyRequestView,
+            request: ServiceRequest<'_, GetManyRequest>,
         ) -> connectrpc::ServiceResult<connectrpc::ServiceStream<GetManyFrame>> {
             match self {
                 Self::MissingGet => {
@@ -1873,7 +1873,7 @@ mod tests {
         async fn range(
             &self,
             _ctx: RequestContext,
-            _request: OwnedRangeRequestView,
+            _request: ServiceRequest<'_, RangeRequest>,
         ) -> connectrpc::ServiceResult<connectrpc::ServiceStream<RangeFrame>> {
             match self {
                 Self::Duplicate { key, value } => {
@@ -1905,7 +1905,7 @@ mod tests {
         async fn reduce(
             &self,
             _ctx: RequestContext,
-            _request: OwnedReduceRequestView,
+            _request: ServiceRequest<'_, ReduceRequest>,
         ) -> connectrpc::ServiceResult<ReduceResponse> {
             Err(ConnectError::unimplemented("test harness"))
         }

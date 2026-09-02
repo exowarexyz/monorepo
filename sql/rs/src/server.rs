@@ -22,12 +22,12 @@ use std::sync::Arc;
 
 use crate::proto::sql::v1::{
     cell::Kind as ProtoCellKind, Cell as ProtoCell, Column as ProtoColumn, Index as ProtoIndex,
-    IndexLayout as ProtoIndexLayout, ListValue as ProtoListValue, Null as ProtoNull,
-    QueryRequestView, QueryResponse, Row as ProtoRow, Service, ServiceServer, SubscribeRequestView,
-    SubscribeResponse, Table as ProtoTable, TablesRequestView, TablesResponse,
+    IndexLayout as ProtoIndexLayout, ListValue as ProtoListValue, Null as ProtoNull, QueryRequest,
+    QueryResponse, Row as ProtoRow, Service, ServiceServer, SubscribeRequest, SubscribeResponse,
+    Table as ProtoTable, TablesRequest, TablesResponse,
 };
 use bytes::Bytes;
-use connectrpc::{ConnectError, ConnectRpcService, RequestContext as Context};
+use connectrpc::{ConnectError, ConnectRpcService, RequestContext as Context, ServiceRequest};
 use datafusion::arrow::array::{
     Array, ArrayRef, BinaryArray, BinaryViewArray, BooleanArray, Date32Array, Date64Array,
     Decimal128Array, Decimal256Array, FixedSizeBinaryArray, Float32Array, Float64Array, Int32Array,
@@ -244,8 +244,8 @@ pub fn sql_connect_stack(server: Arc<SqlServer>) -> ConnectRpcService<ServiceSer
     ConnectRpcService::new(ServiceServer::new(SqlConnect::new(server)))
         .with_limits(
             connectrpc::Limits::default()
-                .max_request_body_size(MAX_CONNECTRPC_BODY_BYTES)
-                .max_message_size(MAX_CONNECTRPC_BODY_BYTES),
+                .with_max_request_body_size(MAX_CONNECTRPC_BODY_BYTES)
+                .with_max_message_size(MAX_CONNECTRPC_BODY_BYTES),
         )
         .with_compression(exoware_sdk::connect_compression_registry())
 }
@@ -266,7 +266,7 @@ impl Service for SqlConnect {
     fn subscribe(
         &self,
         _ctx: Context,
-        request: buffa::view::OwnedView<SubscribeRequestView<'static>>,
+        request: ServiceRequest<'_, SubscribeRequest>,
     ) -> impl Future<Output = connectrpc::ServiceResult<SubscribeStream>> + Send {
         let server = self.server.clone();
         async move {
@@ -296,7 +296,7 @@ impl Service for SqlConnect {
     fn tables(
         &self,
         _ctx: Context,
-        _request: buffa::view::OwnedView<TablesRequestView<'static>>,
+        _request: ServiceRequest<'_, TablesRequest>,
     ) -> impl Future<Output = connectrpc::ServiceResult<TablesResponse>> + Send {
         let server = self.server.clone();
         async move {
@@ -310,7 +310,7 @@ impl Service for SqlConnect {
     fn query(
         &self,
         _ctx: Context,
-        request: buffa::view::OwnedView<QueryRequestView<'static>>,
+        request: ServiceRequest<'_, QueryRequest>,
     ) -> impl Future<Output = connectrpc::ServiceResult<QueryResponse>> + Send {
         let server = self.server.clone();
         async move {

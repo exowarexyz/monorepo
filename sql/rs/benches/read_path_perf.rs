@@ -9,7 +9,7 @@ use std::time::Instant;
 
 use axum::Router;
 use bytes::Bytes;
-use connectrpc::{Chain, ConnectRpcService, RequestContext as Context};
+use connectrpc::{Chain, ConnectRpcService, RequestContext as Context, ServiceRequest};
 use criterion::{criterion_group, criterion_main, Criterion};
 use datafusion::arrow::datatypes::DataType;
 use datafusion::prelude::SessionContext;
@@ -95,7 +95,7 @@ impl IngestService for BenchIngest {
     async fn put(
         &self,
         _ctx: Context,
-        request: buffa::view::OwnedView<exoware_proto::log::ingest::v1::PutRequestView<'static>>,
+        request: ServiceRequest<'_, exoware_proto::log::ingest::v1::PutRequest>,
     ) -> connectrpc::ServiceResult<ProtoPutResponse> {
         let mut parsed = Vec::<(Key, Bytes)>::new();
         let wire = request.bytes();
@@ -127,7 +127,7 @@ impl QueryService for BenchQuery {
     async fn get(
         &self,
         _ctx: Context,
-        _request: buffa::view::OwnedView<exoware_proto::store::query::v1::GetRequestView<'static>>,
+        _request: ServiceRequest<'_, exoware_proto::store::query::v1::GetRequest>,
     ) -> connectrpc::ServiceResult<ProtoGetResponse> {
         Err(connectrpc::ConnectError::unimplemented("bench"))
     }
@@ -135,9 +135,7 @@ impl QueryService for BenchQuery {
     async fn get_many(
         &self,
         _ctx: Context,
-        _request: buffa::view::OwnedView<
-            exoware_proto::store::query::v1::GetManyRequestView<'static>,
-        >,
+        _request: ServiceRequest<'_, exoware_proto::store::query::v1::GetManyRequest>,
     ) -> connectrpc::ServiceResult<
         connectrpc::ServiceStream<exoware_proto::store::query::v1::GetManyFrame>,
     > {
@@ -147,7 +145,7 @@ impl QueryService for BenchQuery {
     async fn range(
         &self,
         _ctx: Context,
-        request: buffa::view::OwnedView<exoware_proto::store::query::v1::RangeRequestView<'static>>,
+        request: ServiceRequest<'_, exoware_proto::store::query::v1::RangeRequest>,
     ) -> connectrpc::ServiceResult<connectrpc::ServiceStream<ProtoRangeFrame>> {
         let wire = request.bytes();
         let start_key = wire.slice_ref(request.start);
@@ -205,9 +203,7 @@ impl QueryService for BenchQuery {
     async fn reduce(
         &self,
         _ctx: Context,
-        _request: buffa::view::OwnedView<
-            exoware_proto::store::query::v1::ReduceRequestView<'static>,
-        >,
+        _request: ServiceRequest<'_, exoware_proto::store::query::v1::ReduceRequest>,
     ) -> connectrpc::ServiceResult<ProtoReduceResponse> {
         Err(connectrpc::ConnectError::unimplemented("bench"))
     }

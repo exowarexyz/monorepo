@@ -32,7 +32,7 @@ fn main() {
     let mut buffa_config = connectrpc_build::CodeGenConfig::default();
     buffa_config.generate_json = true;
     buffa_config.file_per_package = true;
-    buffa_config.bytes_fields = vec![".".into()];
+    buffa_config.bytes_fields = vec![(".".into(), buffa_codegen::BytesRepr::Bytes)];
 
     connectrpc_build::Config::new()
         .files(SQL_PROTO_FILES)

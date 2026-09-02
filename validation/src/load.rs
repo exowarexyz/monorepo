@@ -235,10 +235,9 @@ mod tests {
     use crate::client::RequestCompression;
     use crate::keyspace::DEFAULT_KEY_LEN;
     use axum::Router;
-    use connectrpc::{ConnectError, ConnectRpcService, RequestContext};
+    use connectrpc::{ConnectError, ConnectRpcService, RequestContext, ServiceRequest};
     use exoware_sdk::ingest::{
-        OwnedPutRequestView, PutResponse, Service as IngestService,
-        ServiceServer as IngestServiceServer,
+        PutRequest, PutResponse, Service as IngestService, ServiceServer as IngestServiceServer,
     };
 
     #[derive(Clone, Copy)]
@@ -259,7 +258,7 @@ mod tests {
         async fn put(
             &self,
             _ctx: RequestContext,
-            _request: OwnedPutRequestView,
+            _request: ServiceRequest<'_, PutRequest>,
         ) -> connectrpc::ServiceResult<PutResponse> {
             let call = self.puts.fetch_add(1, Ordering::SeqCst) + 1;
             match self.fault {

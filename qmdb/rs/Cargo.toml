@@ -37,7 +37,8 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 
 [build-dependencies]
-connectrpc-build = "0.6.0"
+buffa-codegen = { workspace = true }
+connectrpc-build = { workspace = true }
 
 [dev-dependencies]
 exoware-qmdb = { path = ".", features = ["test-utils"] }

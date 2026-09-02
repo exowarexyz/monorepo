@@ -24,10 +24,12 @@ use commonware_storage::{
 use commonware_utils::Array;
 use commonware_utils::{NZUsize, NZU64};
 use connectrpc::client::ClientConfig;
-use connectrpc::{ConnectError, ConnectRpcService, ErrorCode, RequestContext as Context};
+use connectrpc::{
+    ConnectError, ConnectRpcService, ErrorCode, RequestContext as Context, ServiceRequest,
+};
 use exoware_qmdb::proto::qmdb::v1::{
-    GetOperationRangeRequestView, GetOperationRangeResponse, OperationLogService,
-    OperationLogServiceClient, OperationLogServiceServer, SubscribeRequestView, SubscribeResponse,
+    GetOperationRangeRequest, GetOperationRangeResponse, OperationLogService,
+    OperationLogServiceClient, OperationLogServiceServer, SubscribeRequest, SubscribeResponse,
 };
 use exoware_qmdb::{
     CurrentBoundaryState, ImmutableWriter, KeylessWriter, OrderedWriter, QmdbError,
@@ -353,7 +355,7 @@ impl OperationLogService for StaticOperationLogService {
     async fn get_operation_range(
         &self,
         _ctx: Context,
-        _request: buffa::view::OwnedView<GetOperationRangeRequestView<'static>>,
+        _request: ServiceRequest<'_, GetOperationRangeRequest>,
     ) -> connectrpc::ServiceResult<GetOperationRangeResponse> {
         Err(ConnectError::new(
             ErrorCode::Unimplemented,
@@ -364,7 +366,7 @@ impl OperationLogService for StaticOperationLogService {
     fn subscribe(
         &self,
         _ctx: Context,
-        _request: buffa::view::OwnedView<SubscribeRequestView<'static>>,
+        _request: ServiceRequest<'_, SubscribeRequest>,
     ) -> impl std::future::Future<
         Output = connectrpc::ServiceResult<connectrpc::ServiceStream<SubscribeResponse>>,
     > + Send {
@@ -389,7 +391,7 @@ impl OperationLogService for StaticOperationRangeService {
     async fn get_operation_range(
         &self,
         _ctx: Context,
-        _request: buffa::view::OwnedView<GetOperationRangeRequestView<'static>>,
+        _request: ServiceRequest<'_, GetOperationRangeRequest>,
     ) -> connectrpc::ServiceResult<GetOperationRangeResponse> {
         connectrpc::Response::ok(self.operation_range_response.clone())
     }
@@ -397,7 +399,7 @@ impl OperationLogService for StaticOperationRangeService {
     async fn subscribe(
         &self,
         _ctx: Context,
-        _request: buffa::view::OwnedView<SubscribeRequestView<'static>>,
+        _request: ServiceRequest<'_, SubscribeRequest>,
     ) -> connectrpc::ServiceResult<connectrpc::ServiceStream<SubscribeResponse>> {
         Err(ConnectError::new(
             ErrorCode::Unimplemented,

@@ -37,7 +37,8 @@ cookie_store = { version = "0.22.1", default-features = false }
 psl = "2.1.212"
 
 [build-dependencies]
-connectrpc-build = "0.6.0"
+buffa-codegen = { workspace = true }
+connectrpc-build = { workspace = true }
 
 [dev-dependencies]
 hex = { workspace = true }
