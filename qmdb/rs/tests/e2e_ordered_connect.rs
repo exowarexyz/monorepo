@@ -21,7 +21,7 @@ use commonware_storage::qmdb::{
 use commonware_storage::translator::TwoCap;
 use commonware_utils::{NZUsize, NZU16, NZU64};
 use connectrpc::client::ClientConfig;
-use connectrpc::{Chain, ConnectRpcService, RequestContext as Context};
+use connectrpc::{Chain, ConnectRpcService, RequestContext as Context, ServiceRequest};
 use exoware_qmdb::proto::qmdb::v1::{
     current_key_lookup_result, GetManyRequest as ProtoGetManyRequest,
     GetManyResponse as ProtoGetManyResponse, GetRangeRequest as ProtoGetRangeRequest,
@@ -294,7 +294,7 @@ impl KeyLookupService for StaticQmdbService {
     fn get(
         &self,
         _ctx: Context,
-        _request: buffa::view::OwnedView<exoware_qmdb::proto::qmdb::v1::GetRequestView<'static>>,
+        _request: ServiceRequest<'_, ProtoGetRequest>,
     ) -> impl std::future::Future<Output = connectrpc::ServiceResult<ProtoGetResponse>> + Send {
         let response = self.get_response.clone();
         async move { connectrpc::Response::ok(response) }
@@ -303,9 +303,7 @@ impl KeyLookupService for StaticQmdbService {
     fn get_many(
         &self,
         _ctx: Context,
-        _request: buffa::view::OwnedView<
-            exoware_qmdb::proto::qmdb::v1::GetManyRequestView<'static>,
-        >,
+        _request: ServiceRequest<'_, ProtoGetManyRequest>,
     ) -> impl std::future::Future<Output = connectrpc::ServiceResult<ProtoGetManyResponse>> + Send
     {
         let response = self.get_many_response.clone();
@@ -317,9 +315,7 @@ impl OrderedKeyRangeService for StaticQmdbService {
     fn get_range(
         &self,
         _ctx: Context,
-        _request: buffa::view::OwnedView<
-            exoware_qmdb::proto::qmdb::v1::GetRangeRequestView<'static>,
-        >,
+        _request: ServiceRequest<'_, ProtoGetRangeRequest>,
     ) -> impl std::future::Future<Output = connectrpc::ServiceResult<ProtoGetRangeResponse>> + Send
     {
         let response = self.get_range_response.clone();

@@ -66,7 +66,9 @@ pub fn parse_set_retention_request_view(
     let Some(policy_view) = req.policy.as_option() else {
         return Ok(None);
     };
-    let policy = policy_view.to_owned_message();
+    let policy = policy_view
+        .to_owned_message()
+        .map_err(|error| error.to_string())?;
     Ok(Some(parse_retention_policy_from_proto(&policy)?))
 }
 

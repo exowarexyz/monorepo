@@ -11,19 +11,23 @@ use std::sync::Arc;
 use bytes::Bytes;
 use connectrpc::{
     Chain, ConnectError, ConnectRpcService, Limits, PreEncoded, RequestContext as Context,
+    ServiceRequest,
 };
 use exoware_proto::common::Entry;
 use exoware_proto::google::rpc::{ErrorInfo, RetryInfo};
 use exoware_proto::ingest::{
     PutResponse as ProtoPutResponse, Service as IngestApi, ServiceServer as IngestServiceServer,
 };
+#[cfg(test)]
+use exoware_proto::log::retention::v1::SetRetentionRequestView;
 use exoware_proto::log::retention::v1::{
-    Service as RetentionApi, ServiceServer as RetentionServiceServer, SetRetentionRequestView,
-    SetRetentionResponse,
+    Service as RetentionApi, ServiceServer as RetentionServiceServer, SetRetentionResponse,
 };
+#[cfg(test)]
+use exoware_proto::log::stream::v1::GetRequestView;
 use exoware_proto::log::stream::v1::{
-    GetRequestView, GetResponse as StreamGetResponse, Service as StreamApi,
-    ServiceServer as StreamServiceServer, SubscribeRequestView, SubscribeResponse,
+    GetResponse as StreamGetResponse, Service as StreamApi, ServiceServer as StreamServiceServer,
+    SubscribeRequestView, SubscribeResponse,
 };
 use exoware_proto::prune::{
     PruneResponse, Service as PruneApi, ServiceServer as PruneServiceServer,
@@ -67,7 +71,7 @@ const SUBSCRIBE_GET_BATCH_LOOKAHEAD: usize = 8;
 fn query_detail(sequence_number: u64, extra: QueryExtra) -> Detail {
     Detail {
         sequence_number,
-        extra,
+        extra: extra.into_iter().collect(),
         ..Default::default()
     }
 }
@@ -443,7 +447,7 @@ where
     async fn put(
         &self,
         _ctx: Context,
-        request: buffa::view::OwnedView<exoware_proto::log::ingest::v1::PutRequestView<'static>>,
+        request: ServiceRequest<'_, exoware_proto::log::ingest::v1::PutRequest>,
     ) -> connectrpc::ServiceResult<ProtoPutResponse> {
         if !self.state.ready.load(Ordering::SeqCst) {
             return Err(with_retry_hint(
@@ -459,7 +463,7 @@ where
             ));
         }
 
-        validate::validate_put_request(&request, self.state.limits)?;
+        validate::validate_put_request(request.view(), self.state.limits)?;
 
         let wire = request.bytes();
         let mut batch = Vec::with_capacity(request.kvs.len());
@@ -563,9 +567,9 @@ where
     async fn get(
         &self,
         _ctx: Context,
-        request: buffa::view::OwnedView<exoware_proto::store::query::v1::GetRequestView<'static>>,
+        request: ServiceRequest<'_, exoware_proto::store::query::v1::GetRequest>,
     ) -> connectrpc::ServiceResult<GetResponse> {
-        validate::validate_get_request(&request)?;
+        validate::validate_get_request(request.view())?;
         let token = self.ensure_min_sequence_number(request.min_sequence_number)?;
         let wire = request.bytes();
         let key: Key = wire.slice_ref(request.key);
@@ -586,11 +590,9 @@ where
     async fn get_many(
         &self,
         _ctx: Context,
-        request: buffa::view::OwnedView<
-            exoware_proto::store::query::v1::GetManyRequestView<'static>,
-        >,
+        request: ServiceRequest<'_, exoware_proto::store::query::v1::GetManyRequest>,
     ) -> connectrpc::ServiceResult<connectrpc::ServiceStream<GetManyFrame>> {
-        validate::validate_get_many_request(&request)?;
+        validate::validate_get_many_request(request.view())?;
         let sequence_number = self.ensure_min_sequence_number(request.min_sequence_number)?;
 
         let wire = request.bytes();
@@ -638,9 +640,9 @@ where
     async fn range(
         &self,
         _ctx: Context,
-        request: buffa::view::OwnedView<exoware_proto::store::query::v1::RangeRequestView<'static>>,
+        request: ServiceRequest<'_, exoware_proto::store::query::v1::RangeRequest>,
     ) -> connectrpc::ServiceResult<connectrpc::ServiceStream<RangeFrame>> {
-        validate::validate_range_request(&request)?;
+        validate::validate_range_request(request.view())?;
         let sequence_number = self.ensure_min_sequence_number(request.min_sequence_number)?;
         let wire = request.bytes();
         let start_key: Key = wire.slice_ref(request.start);
@@ -671,11 +673,9 @@ where
     async fn reduce(
         &self,
         _ctx: Context,
-        request: buffa::view::OwnedView<
-            exoware_proto::store::query::v1::ReduceRequestView<'static>,
-        >,
+        request: ServiceRequest<'_, exoware_proto::store::query::v1::ReduceRequest>,
     ) -> connectrpc::ServiceResult<ReduceResponse> {
-        validate::validate_reduce_request(&request)?;
+        validate::validate_reduce_request(request.view())?;
         let token = self.ensure_min_sequence_number(request.min_sequence_number)?;
         let wire = request.bytes();
         let start_key: Key = wire.slice_ref(request.start);
@@ -786,10 +786,10 @@ where
     async fn prune(
         &self,
         _ctx: Context,
-        request: buffa::view::OwnedView<exoware_proto::store::prune::v1::PruneRequestView<'static>>,
+        request: ServiceRequest<'_, exoware_proto::store::prune::v1::PruneRequest>,
     ) -> connectrpc::ServiceResult<PruneResponse> {
-        validate::validate_prune_request(&request)?;
-        let document = exoware_proto::parse_and_validate_policy_document(&request)
+        validate::validate_prune_request(request.view())?;
+        let document = exoware_proto::parse_and_validate_policy_document(request.view())
             .map_err(|e| ConnectError::invalid_argument(e.to_string()))?;
 
         self.state
@@ -836,7 +836,7 @@ where
             ErrorInfo {
                 reason: crate::stream::REASON_BATCH_EVICTED.to_string(),
                 domain: crate::stream::STREAM_ERROR_DOMAIN.to_string(),
-                metadata,
+                metadata: metadata.into_iter().collect(),
                 ..Default::default()
             },
         )
@@ -1077,9 +1077,9 @@ where
     async fn subscribe(
         &self,
         _ctx: Context,
-        request: buffa::view::OwnedView<SubscribeRequestView<'static>>,
+        request: ServiceRequest<'_, exoware_proto::log::stream::v1::SubscribeRequest>,
     ) -> connectrpc::ServiceResult<connectrpc::ServiceStream<SubscribeResponse>> {
-        let filter = domain_filter_from_subscribe_view(&request)?;
+        let filter = domain_filter_from_subscribe_view(request.view())?;
         let since = request.since_sequence_number;
 
         // Snapshot the published frontier to bound replay and subscribe for
@@ -1142,7 +1142,7 @@ where
     async fn get(
         &self,
         _ctx: Context,
-        request: buffa::view::OwnedView<GetRequestView<'static>>,
+        request: ServiceRequest<'_, exoware_proto::log::stream::v1::GetRequest>,
     ) -> connectrpc::ServiceResult<PreEncoded<StreamGetResponse>> {
         let seq = request.sequence_number;
         match self
@@ -1204,12 +1204,12 @@ where
     async fn set_retention(
         &self,
         _ctx: Context,
-        request: buffa::view::OwnedView<SetRetentionRequestView<'static>>,
+        request: ServiceRequest<'_, exoware_proto::log::retention::v1::SetRetentionRequest>,
     ) -> connectrpc::ServiceResult<SetRetentionResponse> {
         // Parse the wire shape, then authoritatively validate: buf.validate
         // annotations on the proto are documentation, so the handler enforces
         // the rule (e.g. keep_latest count > 0), mirroring the Prune handler.
-        let policy = exoware_proto::parse_set_retention_request_view(&request)
+        let policy = exoware_proto::parse_set_retention_request_view(request.view())
             .map_err(ConnectError::invalid_argument)?;
         if let Some(policy) = policy.as_ref() {
             exoware_proto::validate_retention_policy(policy)
@@ -1231,8 +1231,8 @@ where
 
 fn connect_limits() -> Limits {
     Limits::default()
-        .max_request_body_size(MAX_CONNECTRPC_BODY_BYTES)
-        .max_message_size(MAX_CONNECTRPC_BODY_BYTES)
+        .with_max_request_body_size(MAX_CONNECTRPC_BODY_BYTES)
+        .with_max_message_size(MAX_CONNECTRPC_BODY_BYTES)
 }
 
 pub(crate) type IngestService<I> = ConnectRpcService<IngestServiceServer<IngestConnect<I>>>;
@@ -2223,6 +2223,7 @@ mod tests {
         let bytes = subscribe_request_bytes(since_sequence_number);
         let request = buffa::view::OwnedView::<SubscribeRequestView<'static>>::decode(bytes.into())
             .expect("decode subscribe request");
+        let request = ServiceRequest::from_parts(request.reborrow(), request.bytes());
         Ok(StreamApi::subscribe(connect, Context::default(), request)
             .await?
             .body)
@@ -2256,6 +2257,7 @@ mod tests {
         let request =
             buffa::view::OwnedView::<SetRetentionRequestView<'static>>::decode(bytes.into())
                 .expect("decode set_retention request");
+        let request = ServiceRequest::from_parts(request.reborrow(), request.bytes());
         Ok(
             RetentionApi::set_retention(connect, Context::default(), request)
                 .await?
@@ -2269,6 +2271,7 @@ mod tests {
         let connect = PruneConnect::new(PruneState::new(prune.clone()));
         let request = prune_request(vec![keys_drop_all_policy()]);
 
+        let request = ServiceRequest::from_parts(request.reborrow(), request.bytes());
         PruneApi::prune(&connect, Context::default(), request)
             .await
             .expect("prune");
@@ -2292,6 +2295,7 @@ mod tests {
         };
         let request = prune_request(vec![invalid_policy]);
 
+        let request = ServiceRequest::from_parts(request.reborrow(), request.bytes());
         let err = PruneApi::prune(&connect, Context::default(), request)
             .await
             .expect_err("invalid prune");
@@ -2306,6 +2310,7 @@ mod tests {
         let connect = PruneConnect::new(PruneState::new(prune.clone()));
         let request = prune_request(vec![keys_keep_latest_policy(0)]);
 
+        let request = ServiceRequest::from_parts(request.reborrow(), request.bytes());
         let err = PruneApi::prune(&connect, Context::default(), request)
             .await
             .expect_err("invalid prune");
@@ -2379,6 +2384,7 @@ mod tests {
         >::decode(bytes.into())
         .expect("decode get request");
 
+        let request = ServiceRequest::from_parts(request.reborrow(), request.bytes());
         let response = QueryApi::get(&connect, Context::default(), request)
             .await
             .expect("get")
@@ -2408,6 +2414,7 @@ mod tests {
         >::decode(bytes.into())
         .expect("decode get request");
 
+        let request = ServiceRequest::from_parts(request.reborrow(), request.bytes());
         let response = QueryApi::get(&connect, Context::default(), request)
             .await
             .expect("get")
@@ -2443,7 +2450,9 @@ mod tests {
         let state = IngestState::new(engine).with_limits(IngestLimits { max_value_len: 4 });
         let connect = IngestConnect::new(state);
 
-        let err = IngestApi::put(&connect, Context::default(), put_request(5))
+        let request = put_request(5);
+        let request = ServiceRequest::from_parts(request.reborrow(), request.bytes());
+        let err = IngestApi::put(&connect, Context::default(), request)
             .await
             .expect_err("put should reject oversized value");
 
@@ -2458,7 +2467,9 @@ mod tests {
         });
         let connect = IngestConnect::new(IngestState::new(engine));
 
-        let err = IngestApi::put(&connect, Context::default(), put_request(1))
+        let request = put_request(1);
+        let request = ServiceRequest::from_parts(request.reborrow(), request.bytes());
+        let err = IngestApi::put(&connect, Context::default(), request)
             .await
             .expect_err("transient put failure should surface");
 
@@ -2481,7 +2492,9 @@ mod tests {
         });
         let connect = IngestConnect::new(IngestState::new(engine));
 
-        let err = IngestApi::put(&connect, Context::default(), put_request(1))
+        let request = put_request(1);
+        let request = ServiceRequest::from_parts(request.reborrow(), request.bytes());
+        let err = IngestApi::put(&connect, Context::default(), request)
             .await
             .expect_err("fatal put failure should surface");
 
@@ -2497,7 +2510,9 @@ mod tests {
         state.ready.store(false, Ordering::SeqCst);
         let connect = IngestConnect::new(state);
 
-        let err = IngestApi::put(&connect, Context::default(), put_request(1))
+        let request = put_request(1);
+        let request = ServiceRequest::from_parts(request.reborrow(), request.bytes());
+        let err = IngestApi::put(&connect, Context::default(), request)
             .await
             .expect_err("not-ready gate should reject");
 
@@ -2560,6 +2575,7 @@ mod tests {
         >::decode(bytes.into())
         .expect("decode reduce request");
 
+        let request = ServiceRequest::from_parts(request.reborrow(), request.bytes());
         let response = QueryApi::reduce(&connect, Context::default(), request)
             .await
             .expect("reduce")
@@ -2603,6 +2619,7 @@ mod tests {
         >::decode(bytes.into())
         .expect("decode reduce request");
 
+        let request = ServiceRequest::from_parts(request.reborrow(), request.bytes());
         let response = QueryApi::reduce(&connect, Context::default(), request)
             .await
             .expect("reduce")
@@ -2632,6 +2649,7 @@ mod tests {
         >::decode(bytes.into())
         .expect("decode get_many request");
 
+        let request = ServiceRequest::from_parts(request.reborrow(), request.bytes());
         let mut stream = QueryApi::get_many(&connect, Context::default(), request)
             .await
             .expect("get_many")
@@ -2679,6 +2697,7 @@ mod tests {
         >::decode(bytes.into())
         .expect("decode range request");
 
+        let request = ServiceRequest::from_parts(request.reborrow(), request.bytes());
         let mut stream = QueryApi::range(&connect, Context::default(), request)
             .await
             .expect("range")
@@ -2733,6 +2752,7 @@ mod tests {
         >::decode(bytes.into())
         .expect("decode range request");
 
+        let request = ServiceRequest::from_parts(request.reborrow(), request.bytes());
         let mut stream = QueryApi::range(&connect, Context::default(), request)
             .await
             .expect("range")
@@ -2845,6 +2865,7 @@ mod tests {
             .into(),
         )
         .expect("decode get request");
+        let request = ServiceRequest::from_parts(request.reborrow(), request.bytes());
         StreamApi::get(&connect, Context::default(), request)
             .await
             .expect("get");

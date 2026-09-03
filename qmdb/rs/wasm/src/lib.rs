@@ -1388,7 +1388,8 @@ pub fn decode_historical_multi_proof_operations(
 ) -> Result<JsValue, JsValue> {
     let proto = HistoricalMultiProofView::decode_view(bytes)
         .map_err(|err| js_err(format!("decode historical multi proof: {err}")))?
-        .to_owned_message();
+        .to_owned_message()
+        .map_err(|err| js_err(format!("materialize historical multi proof: {err}")))?;
     with_hash_family!(hash_family, "historical multi proof", {
         match normalize_family(merkle_family, "historical multi proof").map_err(js_err)? {
             "mmr" => {
@@ -1417,7 +1418,8 @@ pub fn verify_historical_multi_proof(
 ) -> Result<JsValue, JsValue> {
     let proto = HistoricalMultiProofView::decode_view(bytes)
         .map_err(|err| js_err(format!("decode historical multi proof: {err}")))?
-        .to_owned_message();
+        .to_owned_message()
+        .map_err(|err| js_err(format!("materialize historical multi proof: {err}")))?;
     with_hash_family!(hash_family, "historical multi proof", {
         let root = decode_digest::<<H as commonware_cryptography::Hasher>::Digest>(
             root,
@@ -1449,7 +1451,12 @@ pub fn verify_historical_operation_range_proof(
 ) -> Result<JsValue, JsValue> {
     let proto = HistoricalOperationRangeProofView::decode_view(bytes)
         .map_err(|err| js_err(format!("decode historical operation range proof: {err}")))?
-        .to_owned_message();
+        .to_owned_message()
+        .map_err(|err| {
+            js_err(format!(
+                "materialize historical operation range proof: {err}"
+            ))
+        })?;
     with_hash_family!(hash_family, "historical operation range proof", {
         let root = decode_digest::<<H as commonware_cryptography::Hasher>::Digest>(
             root,
@@ -1483,7 +1490,12 @@ pub fn verify_historical_raw_operation_range_proof(
 ) -> Result<JsValue, JsValue> {
     let proto = HistoricalOperationRangeProofView::decode_view(bytes)
         .map_err(|err| js_err(format!("decode historical operation range proof: {err}")))?
-        .to_owned_message();
+        .to_owned_message()
+        .map_err(|err| {
+            js_err(format!(
+                "materialize historical operation range proof: {err}"
+            ))
+        })?;
     with_hash_family!(hash_family, "historical operation range proof", {
         let root = decode_digest::<<H as commonware_cryptography::Hasher>::Digest>(
             root,
@@ -1517,7 +1529,12 @@ pub fn verify_historical_fixed_keyless_append_proof(
 ) -> Result<JsValue, JsValue> {
     let proto = HistoricalOperationRangeProofView::decode_view(bytes)
         .map_err(|err| js_err(format!("decode historical operation range proof: {err}")))?
-        .to_owned_message();
+        .to_owned_message()
+        .map_err(|err| {
+            js_err(format!(
+                "materialize historical operation range proof: {err}"
+            ))
+        })?;
     with_hash_family!(hash_family, "historical operation range proof", {
         let root = decode_digest::<<H as commonware_cryptography::Hasher>::Digest>(
             root,
@@ -1580,7 +1597,12 @@ pub fn verify_historical_fixed_unordered_update_proof(
 ) -> Result<JsValue, JsValue> {
     let proto = HistoricalOperationRangeProofView::decode_view(bytes)
         .map_err(|err| js_err(format!("decode historical operation range proof: {err}")))?
-        .to_owned_message();
+        .to_owned_message()
+        .map_err(|err| {
+            js_err(format!(
+                "materialize historical operation range proof: {err}"
+            ))
+        })?;
     with_hash_family!(hash_family, "historical operation range proof", {
         let root = decode_digest::<<H as commonware_cryptography::Hasher>::Digest>(
             root,
@@ -1643,7 +1665,8 @@ pub fn verify_current_operation_range_proof(
 ) -> Result<JsValue, JsValue> {
     let proto = CurrentOperationRangeProofView::decode_view(bytes)
         .map_err(|err| js_err(format!("decode current operation range proof: {err}")))?
-        .to_owned_message();
+        .to_owned_message()
+        .map_err(|err| js_err(format!("materialize current operation range proof: {err}")))?;
     with_hash_family!(hash_family, "current operation range proof", {
         let root = decode_digest::<<H as commonware_cryptography::Hasher>::Digest>(
             root,
@@ -1685,7 +1708,8 @@ pub fn verify_current_key_value_proof(
 ) -> Result<JsValue, JsValue> {
     let proto = CurrentKeyValueProofView::decode_view(bytes)
         .map_err(|err| js_err(format!("decode current key-value proof: {err}")))?
-        .to_owned_message();
+        .to_owned_message()
+        .map_err(|err| js_err(format!("materialize current key-value proof: {err}")))?;
     with_hash_family!(hash_family, "current key-value proof", {
         let root =
             decode_digest::<<H as commonware_cryptography::Hasher>::Digest>(root, "current root")
@@ -1732,7 +1756,8 @@ pub fn verify_get_many_response(
 ) -> Result<JsValue, JsValue> {
     let proto = GetManyResponseView::decode_view(bytes)
         .map_err(|err| js_err(format!("decode getMany response: {err}")))?
-        .to_owned_message();
+        .to_owned_message()
+        .map_err(|err| js_err(format!("materialize getMany response: {err}")))?;
     let requested_keys = js_key_array_to_vec(requested_keys)?;
     with_hash_family!(hash_family, "getMany response", {
         let current_root = decode_digest::<<H as commonware_cryptography::Hasher>::Digest>(
@@ -1777,7 +1802,8 @@ pub fn verify_get_range_response(
 ) -> Result<JsValue, JsValue> {
     let proto = GetRangeResponseView::decode_view(bytes)
         .map_err(|err| js_err(format!("decode getRange response: {err}")))?
-        .to_owned_message();
+        .to_owned_message()
+        .map_err(|err| js_err(format!("materialize getRange response: {err}")))?;
     let end_key = has_end_key.then_some(end_key);
     with_hash_family!(hash_family, "getRange response", {
         let current_root = decode_digest::<<H as commonware_cryptography::Hasher>::Digest>(

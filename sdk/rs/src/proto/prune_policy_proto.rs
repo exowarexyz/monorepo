@@ -209,7 +209,8 @@ pub fn parse_prune_policy_document_from_prune_request_view(
 ) -> Result<PrunePolicyDocument, String> {
     let mut policies = Vec::with_capacity(req.policies.len());
     for p in req.policies.iter() {
-        policies.push(parse_prune_policy_from_proto(&p.to_owned_message())?);
+        let policy = p.to_owned_message().map_err(|error| error.to_string())?;
+        policies.push(parse_prune_policy_from_proto(&policy)?);
     }
     Ok(PrunePolicyDocument {
         version: PRUNE_POLICY_DOCUMENT_VERSION,

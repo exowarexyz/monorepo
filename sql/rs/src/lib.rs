@@ -66,17 +66,21 @@ mod tests {
 
     use axum::Router;
     use bytes::Bytes;
-    use connectrpc::{Chain, ConnectError, ConnectRpcService, RequestContext as Context};
+    use connectrpc::{
+        Chain, ConnectError, ConnectRpcService, RequestContext as Context, ServiceRequest,
+    };
     use exoware_sdk::common::kv::v1::Entry as ProtoEntry;
     use exoware_sdk::connect_compression_registry;
     use exoware_sdk::kv_codec::{eval_expr, expr_needs_value};
     use exoware_sdk::log::ingest::v1::{
-        PutResponse as ProtoPutResponse, Service as IngestService,
+        PutRequest as ProtoPutRequest, PutResponse as ProtoPutResponse, Service as IngestService,
         ServiceServer as IngestServiceServer,
     };
     use exoware_sdk::store::query::v1::{
         GetManyEntry as ProtoGetManyEntry, GetManyFrame as ProtoGetManyFrame,
+        GetManyRequest as ProtoGetManyRequest, GetRequest as ProtoGetRequest,
         GetResponse as ProtoGetResponse, RangeFrame as ProtoRangeFrame,
+        RangeRequest as ProtoRangeRequest, ReduceRequest as ProtoReduceRequest,
         ReduceResponse as ProtoReduceResponse, Service as QueryService,
         ServiceServer as QueryServiceServer,
     };
@@ -324,7 +328,7 @@ mod tests {
         async fn put(
             &self,
             _ctx: Context,
-            request: buffa::view::OwnedView<exoware_sdk::log::ingest::v1::PutRequestView<'static>>,
+            request: ServiceRequest<'_, ProtoPutRequest>,
         ) -> connectrpc::ServiceResult<ProtoPutResponse> {
             let mut parsed = Vec::<(Key, Bytes)>::new();
             let wire = request.bytes();
@@ -356,7 +360,7 @@ mod tests {
         async fn get(
             &self,
             _ctx: Context,
-            request: buffa::view::OwnedView<exoware_sdk::store::query::v1::GetRequestView<'static>>,
+            request: ServiceRequest<'_, ProtoGetRequest>,
         ) -> connectrpc::ServiceResult<ProtoGetResponse> {
             ensure_min_sequence_number(&self.state.sequence_number, request.min_sequence_number)?;
             let key: Key = request.bytes().slice_ref(request.key);
@@ -373,9 +377,7 @@ mod tests {
         async fn range(
             &self,
             _ctx: Context,
-            request: buffa::view::OwnedView<
-                exoware_sdk::store::query::v1::RangeRequestView<'static>,
-            >,
+            request: ServiceRequest<'_, ProtoRangeRequest>,
         ) -> connectrpc::ServiceResult<connectrpc::ServiceStream<ProtoRangeFrame>> {
             ensure_min_sequence_number(&self.state.sequence_number, request.min_sequence_number)?;
             self.state.range_calls.fetch_add(1, AtomicOrdering::SeqCst);
@@ -447,9 +449,7 @@ mod tests {
         async fn get_many(
             &self,
             _ctx: Context,
-            request: buffa::view::OwnedView<
-                exoware_sdk::store::query::v1::GetManyRequestView<'static>,
-            >,
+            request: ServiceRequest<'_, ProtoGetManyRequest>,
         ) -> connectrpc::ServiceResult<connectrpc::ServiceStream<ProtoGetManyFrame>> {
             ensure_min_sequence_number(&self.state.sequence_number, request.min_sequence_number)?;
             let batch_size = usize::try_from(request.batch_size)
@@ -488,9 +488,7 @@ mod tests {
         async fn reduce(
             &self,
             _ctx: Context,
-            request: buffa::view::OwnedView<
-                exoware_sdk::store::query::v1::ReduceRequestView<'static>,
-            >,
+            request: ServiceRequest<'_, ProtoReduceRequest>,
         ) -> connectrpc::ServiceResult<ProtoReduceResponse> {
             ensure_min_sequence_number(&self.state.sequence_number, request.min_sequence_number)?;
             self.state
@@ -6876,9 +6874,7 @@ mod tests {
         async fn get(
             &self,
             _ctx: Context,
-            _request: buffa::view::OwnedView<
-                exoware_sdk::store::query::v1::GetRequestView<'static>,
-            >,
+            _request: ServiceRequest<'_, ProtoGetRequest>,
         ) -> connectrpc::ServiceResult<ProtoGetResponse> {
             Err(ConnectError::unimplemented("test harness"))
         }
@@ -6886,9 +6882,7 @@ mod tests {
         async fn get_many(
             &self,
             _ctx: Context,
-            _request: buffa::view::OwnedView<
-                exoware_sdk::store::query::v1::GetManyRequestView<'static>,
-            >,
+            _request: ServiceRequest<'_, ProtoGetManyRequest>,
         ) -> connectrpc::ServiceResult<connectrpc::ServiceStream<ProtoGetManyFrame>> {
             Err(ConnectError::unimplemented("test harness"))
         }
@@ -6896,9 +6890,7 @@ mod tests {
         async fn range(
             &self,
             _ctx: Context,
-            _request: buffa::view::OwnedView<
-                exoware_sdk::store::query::v1::RangeRequestView<'static>,
-            >,
+            _request: ServiceRequest<'_, ProtoRangeRequest>,
         ) -> connectrpc::ServiceResult<connectrpc::ServiceStream<ProtoRangeFrame>> {
             let first_chunk_sent = self.first_chunk_sent.clone();
             let release_second_chunk = self.release_second_chunk.clone();
@@ -6929,9 +6921,7 @@ mod tests {
         async fn reduce(
             &self,
             _ctx: Context,
-            _request: buffa::view::OwnedView<
-                exoware_sdk::store::query::v1::ReduceRequestView<'static>,
-            >,
+            _request: ServiceRequest<'_, ProtoReduceRequest>,
         ) -> connectrpc::ServiceResult<ProtoReduceResponse> {
             Err(ConnectError::unimplemented("test harness"))
         }
@@ -6950,9 +6940,7 @@ mod tests {
         async fn get(
             &self,
             _ctx: Context,
-            _request: buffa::view::OwnedView<
-                exoware_sdk::store::query::v1::GetRequestView<'static>,
-            >,
+            _request: ServiceRequest<'_, ProtoGetRequest>,
         ) -> connectrpc::ServiceResult<ProtoGetResponse> {
             Err(ConnectError::unimplemented("test harness"))
         }
@@ -6960,9 +6948,7 @@ mod tests {
         async fn get_many(
             &self,
             _ctx: Context,
-            _request: buffa::view::OwnedView<
-                exoware_sdk::store::query::v1::GetManyRequestView<'static>,
-            >,
+            _request: ServiceRequest<'_, ProtoGetManyRequest>,
         ) -> connectrpc::ServiceResult<connectrpc::ServiceStream<ProtoGetManyFrame>> {
             Err(ConnectError::unimplemented("test harness"))
         }
@@ -6970,9 +6956,7 @@ mod tests {
         async fn range(
             &self,
             _ctx: Context,
-            request: buffa::view::OwnedView<
-                exoware_sdk::store::query::v1::RangeRequestView<'static>,
-            >,
+            request: ServiceRequest<'_, ProtoRangeRequest>,
         ) -> connectrpc::ServiceResult<connectrpc::ServiceStream<ProtoRangeFrame>> {
             let limit = request.limit.map(|v| v as usize).unwrap_or(usize::MAX);
             self.observed_limit.store(limit, AtomicOrdering::SeqCst);
@@ -7010,9 +6994,7 @@ mod tests {
         async fn reduce(
             &self,
             _ctx: Context,
-            _request: buffa::view::OwnedView<
-                exoware_sdk::store::query::v1::ReduceRequestView<'static>,
-            >,
+            _request: ServiceRequest<'_, ProtoReduceRequest>,
         ) -> connectrpc::ServiceResult<ProtoReduceResponse> {
             Err(ConnectError::unimplemented("test harness"))
         }
@@ -7028,9 +7010,7 @@ mod tests {
         async fn get(
             &self,
             _ctx: Context,
-            _request: buffa::view::OwnedView<
-                exoware_sdk::store::query::v1::GetRequestView<'static>,
-            >,
+            _request: ServiceRequest<'_, ProtoGetRequest>,
         ) -> connectrpc::ServiceResult<ProtoGetResponse> {
             Err(ConnectError::unimplemented("test harness"))
         }
@@ -7038,9 +7018,7 @@ mod tests {
         async fn get_many(
             &self,
             _ctx: Context,
-            _request: buffa::view::OwnedView<
-                exoware_sdk::store::query::v1::GetManyRequestView<'static>,
-            >,
+            _request: ServiceRequest<'_, ProtoGetManyRequest>,
         ) -> connectrpc::ServiceResult<connectrpc::ServiceStream<ProtoGetManyFrame>> {
             Err(ConnectError::unimplemented("test harness"))
         }
@@ -7048,9 +7026,7 @@ mod tests {
         async fn range(
             &self,
             _ctx: Context,
-            request: buffa::view::OwnedView<
-                exoware_sdk::store::query::v1::RangeRequestView<'static>,
-            >,
+            request: ServiceRequest<'_, ProtoRangeRequest>,
         ) -> connectrpc::ServiceResult<connectrpc::ServiceStream<ProtoRangeFrame>> {
             let limit = request
                 .limit
@@ -7072,9 +7048,7 @@ mod tests {
         async fn reduce(
             &self,
             _ctx: Context,
-            _request: buffa::view::OwnedView<
-                exoware_sdk::store::query::v1::ReduceRequestView<'static>,
-            >,
+            _request: ServiceRequest<'_, ProtoReduceRequest>,
         ) -> connectrpc::ServiceResult<ProtoReduceResponse> {
             Err(ConnectError::unimplemented("test harness"))
         }

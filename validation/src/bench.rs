@@ -531,16 +531,15 @@ mod tests {
     use crate::keyspace::DEFAULT_KEY_LEN;
     use axum::Router;
     use clap::Parser;
-    use connectrpc::{Chain, ConnectError, ConnectRpcService, RequestContext};
+    use connectrpc::{Chain, ConnectError, ConnectRpcService, RequestContext, ServiceRequest};
     use exoware_sdk::common::kv::v1::Entry;
     use exoware_sdk::ingest::{
-        OwnedPutRequestView, PutResponse, Service as IngestService,
-        ServiceServer as IngestServiceServer,
+        PutRequest, PutResponse, Service as IngestService, ServiceServer as IngestServiceServer,
     };
     use exoware_sdk::query::{
-        GetManyFrame, GetResponse, OwnedGetManyRequestView, OwnedGetRequestView,
-        OwnedRangeRequestView, OwnedReduceRequestView, RangeFrame, ReduceResponse,
-        Service as QueryService, ServiceServer as QueryServiceServer,
+        GetManyFrame, GetManyRequest, GetRequest, GetResponse, RangeFrame, RangeRequest,
+        ReduceRequest, ReduceResponse, Service as QueryService,
+        ServiceServer as QueryServiceServer,
     };
     use futures::stream;
 
@@ -585,7 +584,7 @@ mod tests {
         async fn put(
             &self,
             _ctx: RequestContext,
-            request: OwnedPutRequestView,
+            request: ServiceRequest<'_, PutRequest>,
         ) -> connectrpc::ServiceResult<PutResponse> {
             self.batch_sizes
                 .lock()
@@ -603,7 +602,7 @@ mod tests {
         async fn get(
             &self,
             _ctx: RequestContext,
-            _request: OwnedGetRequestView,
+            _request: ServiceRequest<'_, GetRequest>,
         ) -> connectrpc::ServiceResult<GetResponse> {
             Err(ConnectError::unimplemented("test harness"))
         }
@@ -611,7 +610,7 @@ mod tests {
         async fn get_many(
             &self,
             _ctx: RequestContext,
-            _request: OwnedGetManyRequestView,
+            _request: ServiceRequest<'_, GetManyRequest>,
         ) -> connectrpc::ServiceResult<connectrpc::ServiceStream<GetManyFrame>> {
             Err(ConnectError::unimplemented("test harness"))
         }
@@ -619,7 +618,7 @@ mod tests {
         async fn range(
             &self,
             _ctx: RequestContext,
-            request: OwnedRangeRequestView,
+            request: ServiceRequest<'_, RangeRequest>,
         ) -> connectrpc::ServiceResult<connectrpc::ServiceStream<RangeFrame>> {
             self.ranges
                 .lock()
@@ -645,7 +644,7 @@ mod tests {
         async fn reduce(
             &self,
             _ctx: RequestContext,
-            _request: OwnedReduceRequestView,
+            _request: ServiceRequest<'_, ReduceRequest>,
         ) -> connectrpc::ServiceResult<ReduceResponse> {
             Err(ConnectError::unimplemented("test harness"))
         }
@@ -656,7 +655,7 @@ mod tests {
         async fn put(
             &self,
             _ctx: RequestContext,
-            request: OwnedPutRequestView,
+            request: ServiceRequest<'_, PutRequest>,
         ) -> connectrpc::ServiceResult<PutResponse> {
             let mut state = self.state.lock().expect("store state lock");
             if state.reject_writes {
@@ -679,7 +678,7 @@ mod tests {
         async fn get(
             &self,
             _ctx: RequestContext,
-            request: OwnedGetRequestView,
+            request: ServiceRequest<'_, GetRequest>,
         ) -> connectrpc::ServiceResult<GetResponse> {
             let mut state = self.state.lock().expect("store state lock");
             let value = state
@@ -698,7 +697,7 @@ mod tests {
         async fn get_many(
             &self,
             _ctx: RequestContext,
-            _request: OwnedGetManyRequestView,
+            _request: ServiceRequest<'_, GetManyRequest>,
         ) -> connectrpc::ServiceResult<connectrpc::ServiceStream<GetManyFrame>> {
             Err(ConnectError::unimplemented("test harness"))
         }
@@ -706,7 +705,7 @@ mod tests {
         async fn range(
             &self,
             _ctx: RequestContext,
-            _request: OwnedRangeRequestView,
+            _request: ServiceRequest<'_, RangeRequest>,
         ) -> connectrpc::ServiceResult<connectrpc::ServiceStream<RangeFrame>> {
             Err(ConnectError::unimplemented("test harness"))
         }
@@ -714,7 +713,7 @@ mod tests {
         async fn reduce(
             &self,
             _ctx: RequestContext,
-            _request: OwnedReduceRequestView,
+            _request: ServiceRequest<'_, ReduceRequest>,
         ) -> connectrpc::ServiceResult<ReduceResponse> {
             Err(ConnectError::unimplemented("test harness"))
         }

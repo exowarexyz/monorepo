@@ -21,16 +21,15 @@ use commonware_storage::{
 };
 
 use crate::proto::qmdb::v1::{
-    CurrentOperationService, CurrentOperationServiceServer, GetCurrentOperationRangeRequestView,
-    GetCurrentOperationRangeResponse, GetManyRequestView, GetManyResponse,
-    GetOperationRangeRequestView, GetOperationRangeResponse, GetRangeRequestView, GetRangeResponse,
-    GetRequestView, GetResponse, KeyLookupService, KeyLookupServiceServer, OperationLogService,
-    OperationLogServiceServer, OrderedKeyRangeService, OrderedKeyRangeServiceServer,
-    SubscribeRequestView, SubscribeResponse,
+    CurrentOperationService, CurrentOperationServiceServer, GetCurrentOperationRangeRequest,
+    GetCurrentOperationRangeResponse, GetManyRequest, GetManyResponse, GetOperationRangeRequest,
+    GetOperationRangeResponse, GetRangeRequest, GetRangeResponse, GetRequest, GetResponse,
+    KeyLookupService, KeyLookupServiceServer, OperationLogService, OperationLogServiceServer,
+    OrderedKeyRangeService, OrderedKeyRangeServiceServer, SubscribeRequest, SubscribeResponse,
 };
 use connectrpc::{
     Chain, ConnectError, ConnectRpcService, ErrorCode, Limits, PreEncoded,
-    RequestContext as Context,
+    RequestContext as Context, ServiceRequest,
 };
 use exoware_sdk::common::kv::v1::filter::KindView as ProtoFilterKindView;
 use exoware_sdk::stream_filter::{CompiledFilters, Filter};
@@ -54,8 +53,8 @@ pub struct OperationKv {
 
 fn connect_limits() -> Limits {
     Limits::default()
-        .max_request_body_size(MAX_CONNECTRPC_BODY_BYTES)
-        .max_message_size(MAX_CONNECTRPC_BODY_BYTES)
+        .with_max_request_body_size(MAX_CONNECTRPC_BODY_BYTES)
+        .with_max_message_size(MAX_CONNECTRPC_BODY_BYTES)
 }
 
 fn qmdb_error_to_connect(err: QmdbError) -> ConnectError {
@@ -844,7 +843,7 @@ where
     fn get(
         &self,
         _ctx: Context,
-        request: buffa::view::OwnedView<GetRequestView<'static>>,
+        request: ServiceRequest<'_, GetRequest>,
     ) -> impl Future<Output = connectrpc::ServiceResult<PreEncoded<GetResponse>>> + Send {
         let client = self.client.clone();
         async move {
@@ -863,7 +862,7 @@ where
     fn get_many(
         &self,
         _ctx: Context,
-        request: buffa::view::OwnedView<GetManyRequestView<'static>>,
+        request: ServiceRequest<'_, GetManyRequest>,
     ) -> impl Future<Output = connectrpc::ServiceResult<PreEncoded<GetManyResponse>>> + Send {
         let client = self.client.clone();
         async move {
@@ -902,7 +901,7 @@ where
     fn get(
         &self,
         _ctx: Context,
-        request: buffa::view::OwnedView<GetRequestView<'static>>,
+        request: ServiceRequest<'_, GetRequest>,
     ) -> impl Future<Output = connectrpc::ServiceResult<PreEncoded<GetResponse>>> + Send {
         let client = self.client.clone();
         async move {
@@ -918,7 +917,7 @@ where
     fn get_many(
         &self,
         _ctx: Context,
-        request: buffa::view::OwnedView<GetManyRequestView<'static>>,
+        request: ServiceRequest<'_, GetManyRequest>,
     ) -> impl Future<Output = connectrpc::ServiceResult<PreEncoded<GetManyResponse>>> + Send {
         let client = self.client.clone();
         async move {
@@ -955,7 +954,7 @@ where
     fn get_range(
         &self,
         _ctx: Context,
-        request: buffa::view::OwnedView<GetRangeRequestView<'static>>,
+        request: ServiceRequest<'_, GetRangeRequest>,
     ) -> impl Future<Output = connectrpc::ServiceResult<PreEncoded<GetRangeResponse>>> + Send {
         let client = self.client.clone();
         async move {
@@ -981,7 +980,7 @@ impl<B: OperationLogBackend> OperationLogService for OperationLogConnect<B> {
     fn get_operation_range(
         &self,
         _ctx: Context,
-        request: buffa::view::OwnedView<GetOperationRangeRequestView<'static>>,
+        request: ServiceRequest<'_, GetOperationRangeRequest>,
     ) -> impl Future<Output = connectrpc::ServiceResult<PreEncoded<GetOperationRangeResponse>>> + Send
     {
         let backend = self.backend.clone();
@@ -1001,7 +1000,7 @@ impl<B: OperationLogBackend> OperationLogService for OperationLogConnect<B> {
     fn subscribe(
         &self,
         _ctx: Context,
-        request: buffa::view::OwnedView<SubscribeRequestView<'static>>,
+        request: ServiceRequest<'_, SubscribeRequest>,
     ) -> impl Future<
         Output = connectrpc::ServiceResult<
             connectrpc::ServiceStream<PreEncoded<SubscribeResponse>>,
@@ -1067,7 +1066,7 @@ where
     fn get_current_operation_range(
         &self,
         _ctx: Context,
-        request: buffa::view::OwnedView<GetCurrentOperationRangeRequestView<'static>>,
+        request: ServiceRequest<'_, GetCurrentOperationRangeRequest>,
     ) -> impl Future<Output = connectrpc::ServiceResult<PreEncoded<GetCurrentOperationRangeResponse>>>
            + Send {
         let backend = self.backend.clone();

@@ -54,7 +54,7 @@ fn main() {
     buffa_config.file_per_package = true;
     buffa_config.bytes_fields = SDK_BYTES_FIELDS
         .iter()
-        .map(|field| (*field).into())
+        .map(|field| ((*field).into(), buffa_codegen::BytesRepr::Bytes))
         .collect();
 
     connectrpc_build::Config::new()
