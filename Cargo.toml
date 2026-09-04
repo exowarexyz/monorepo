@@ -35,18 +35,19 @@ axum = "0.8.1"
 base64 = "0.22.1"
 hex = "0.4"
 regex = "1"
-commonware-codec = { git = "https://github.com/commonwarexyz/monorepo.git", rev = "92036f4beefedc9817f0954d98fb99e0b52431cb" }
-commonware-actor = { git = "https://github.com/commonwarexyz/monorepo.git", rev = "92036f4beefedc9817f0954d98fb99e0b52431cb" }
-commonware-consensus = { git = "https://github.com/commonwarexyz/monorepo.git", rev = "92036f4beefedc9817f0954d98fb99e0b52431cb" }
-commonware-cryptography = { git = "https://github.com/commonwarexyz/monorepo.git", rev = "92036f4beefedc9817f0954d98fb99e0b52431cb" }
-commonware-glue = { git = "https://github.com/commonwarexyz/monorepo.git", rev = "92036f4beefedc9817f0954d98fb99e0b52431cb" }
-commonware-math = { git = "https://github.com/commonwarexyz/monorepo.git", rev = "92036f4beefedc9817f0954d98fb99e0b52431cb" }
-commonware-parallel = { git = "https://github.com/commonwarexyz/monorepo.git", rev = "92036f4beefedc9817f0954d98fb99e0b52431cb" }
-commonware-p2p = { git = "https://github.com/commonwarexyz/monorepo.git", rev = "92036f4beefedc9817f0954d98fb99e0b52431cb" }
-commonware-resolver = { git = "https://github.com/commonwarexyz/monorepo.git", rev = "92036f4beefedc9817f0954d98fb99e0b52431cb" }
-commonware-runtime = { git = "https://github.com/commonwarexyz/monorepo.git", rev = "92036f4beefedc9817f0954d98fb99e0b52431cb" }
-commonware-storage = { git = "https://github.com/commonwarexyz/monorepo.git", rev = "92036f4beefedc9817f0954d98fb99e0b52431cb" }
-commonware-utils = { git = "https://github.com/commonwarexyz/monorepo.git", rev = "92036f4beefedc9817f0954d98fb99e0b52431cb" }
+commonware-codec = "2026.9.0"
+commonware-coding = "2026.9.0"
+commonware-actor = "2026.9.0"
+commonware-consensus = "2026.9.0"
+commonware-cryptography = "2026.9.0"
+commonware-glue = "2026.9.0"
+commonware-math = "2026.9.0"
+commonware-parallel = "2026.9.0"
+commonware-p2p = "2026.9.0"
+commonware-resolver = "2026.9.0"
+commonware-runtime = "2026.9.0"
+commonware-storage = "2026.9.0"
+commonware-utils = "2026.9.0"
 rocksdb = "0.24.0"
 mimalloc = "0.1.52"
 rand = "0.10.2"

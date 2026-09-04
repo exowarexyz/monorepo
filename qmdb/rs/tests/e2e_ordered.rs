@@ -381,6 +381,7 @@ where
                     items_per_blob: NZU64!(8),
                     page_cache,
                     write_buffer: NZUsize!(1024),
+                    replay_buffer: NZUsize!(1024),
                 },
                 grafted_metadata_partition: "ordered_fixed_grafted_metadata".to_string(),
                 translator: TwoCap,
@@ -1016,4 +1017,115 @@ async fn multi_proof() {
         .await
         .expect("multi_proof_at");
     assert_eq!(result.operations.len(), 2);
+}
+
+struct CountingQuery {
+    store: std::sync::Arc<exoware_simulator::RocksStore>,
+    bitmap_chunks: std::sync::Mutex<BTreeSet<u64>>,
+}
+
+impl exoware_server::Sequence for CountingQuery {
+    fn current_sequence(&self) -> u64 {
+        exoware_server::Sequence::current_sequence(self.store.as_ref())
+    }
+}
+
+impl exoware_server::Query for CountingQuery {
+    type RangeScan = <exoware_simulator::RocksStore as exoware_server::Query>::RangeScan;
+
+    async fn get(
+        &self,
+        key: bytes::Bytes,
+    ) -> Result<(Option<bytes::Bytes>, exoware_server::QueryExtra), String> {
+        exoware_server::Query::get(self.store.as_ref(), key).await
+    }
+
+    async fn get_many(
+        &self,
+        keys: Vec<bytes::Bytes>,
+    ) -> Result<
+        (
+            Vec<(bytes::Bytes, Option<bytes::Bytes>)>,
+            exoware_server::QueryExtra,
+        ),
+        String,
+    > {
+        exoware_server::Query::get_many(self.store.as_ref(), keys).await
+    }
+
+    async fn range_scan(
+        &self,
+        start: bytes::Bytes,
+        end: bytes::Bytes,
+        limit: usize,
+        forward: bool,
+    ) -> Result<Self::RangeScan, String> {
+        // The documented chunk row layout is family, chunk index, boundary location
+        if start.first() == Some(&0x07) && start.len() == 17 {
+            self.bitmap_chunks
+                .lock()
+                .unwrap()
+                .insert(u64::from_be_bytes(start[1..9].try_into().unwrap()));
+        }
+        exoware_server::Query::range_scan(self.store.as_ref(), start, end, limit, forward).await
+    }
+}
+
+async fn assert_point_proof_reads_bounded_bitmap_chunks<F: Graftable>() {
+    let store = std::sync::Arc::new(
+        exoware_simulator::RocksStore::open_owned(tempfile::tempdir().unwrap(), None).unwrap(),
+    );
+    let query = std::sync::Arc::new(CountingQuery {
+        store: store.clone(),
+        bitmap_chunks: Default::default(),
+    });
+    let (store_server, store_url) = common::spawn_operation_log_service(
+        exoware_server::connect_stack(exoware_server::AppState::new(store)),
+    )
+    .await;
+    let (query_server, query_url) = common::spawn_operation_log_service(
+        exoware_server::query_service(exoware_server::QueryState::new(query.clone())),
+    )
+    .await;
+    let client = StoreClient::builder()
+        .url(&store_url)
+        .query_url(&query_url)
+        .build()
+        .unwrap();
+    let local = build_local_db_with_write_count::<F, N>("bounded_bitmap_proof", 2048).await;
+    assert!(local.operations.len() / (N * 8) > 3);
+    let writer: TestOrderedWriter<F> =
+        OrderedWriter::fresh(PrefixedStoreClient::empty(client.clone()));
+    common::commit_ordered_upload(&writer, &local.operations, &local.current_boundary)
+        .await
+        .unwrap();
+    let reader: TestOrderedClient<F> = OrderedClient::new(
+        PrefixedStoreClient::empty(client),
+        op_cfg::<F>(),
+        update_row_cfg(),
+    );
+    query.bitmap_chunks.lock().unwrap().clear();
+    let proof = reader
+        .key_value_proof_raw_at(local.latest_location, b"k-00000007")
+        .await
+        .unwrap();
+    assert_eq!(proof.root, local.current_boundary.root);
+    assert!(proof.verify::<Sha256>());
+    let chunks = query.bitmap_chunks.lock().unwrap().clone();
+    assert!(
+        chunks.len() <= 3,
+        "point proof fetched unrelated bitmap chunks: {chunks:?}"
+    );
+    store_server.abort();
+    query_server.abort();
+}
+
+#[tokio::test]
+async fn ordered_mmr_point_proof_reads_bounded_bitmap_chunks() {
+    assert_point_proof_reads_bounded_bitmap_chunks::<mmr::Family>().await;
+}
+
+#[tokio::test]
+async fn ordered_mmb_point_proof_reads_bounded_bitmap_chunks() {
+    assert_point_proof_reads_bounded_bitmap_chunks::<mmb::Family>().await;
 }

@@ -171,6 +171,7 @@ struct LocalBatch {
 }
 
 struct MmbLocalBatch {
+    ops_root: Digest,
     operations: Vec<MmbBatchOperation>,
     current_boundary: CurrentBoundaryState<Digest, N, mmb::Family>,
     inactivity_floor: Location<mmb::Family>,
@@ -355,10 +356,12 @@ async fn build_mmb_local_batch() -> MmbLocalBatch {
                 "MMB fixture must exercise nonzero inactivity floor and multiple sync batches"
             );
             let boundary = boundary_from_mmb_local_db(&db, &ops).await;
+            let ops_root = db.ops_root();
             db = db.sync().await.expect("sync");
             db.destroy().await.expect("destroy");
 
             MmbLocalBatch {
+                ops_root,
                 operations: ops,
                 current_boundary: boundary,
                 inactivity_floor,
@@ -420,6 +423,7 @@ async fn build_mmb_growing_local_batch() -> MmbGrowingLocalBatch {
                     let boundary = boundary_from_mmb_local_db(&db, &ops).await;
                     initial_len = Some(ops.len());
                     initial = Some(MmbLocalBatch {
+                        ops_root: db.ops_root(),
                         operations: ops.clone(),
                         current_boundary: boundary,
                         inactivity_floor,
@@ -441,12 +445,14 @@ async fn build_mmb_growing_local_batch() -> MmbGrowingLocalBatch {
                 "MMB growing fixture must add enough operations for multiple updated sync fetches"
             );
             let boundary = boundary_from_mmb_local_db(&db, &ops).await;
+            let ops_root = db.ops_root();
             db = db.sync().await.expect("sync");
             db.destroy().await.expect("destroy");
 
             MmbGrowingLocalBatch {
                 initial,
                 updated: MmbLocalBatch {
+                    ops_root,
                     operations: ops,
                     current_boundary: boundary,
                     inactivity_floor,
@@ -689,7 +695,7 @@ async fn ordered_mmb_sync_resolvers_return_pinned_nodes_for_nonzero_fetches() {
             mmb_op_cfg(),
         );
     let any_target = any_resolver
-        .target_range(start, op_count)
+        .target_range(start, op_count, &local.ops_root)
         .await
         .expect("any nonzero sync target");
     let (any_response, _) = any_resolver
@@ -1280,7 +1286,10 @@ async fn ordered_mmb_operation_log_any_sync_from_connect_api_reconstructs_any_db
         mmb_op_cfg(),
     );
     let op_count = Location::new(local.operations.len() as u64);
-    let target = resolver.target(op_count).await.expect("any sync target");
+    let target = resolver
+        .target(op_count, &local.ops_root)
+        .await
+        .expect("any sync target");
     let target_root = target.root;
 
     tokio::task::spawn_blocking(move || {
@@ -1354,7 +1363,7 @@ async fn ordered_mmb_operation_log_any_sync_from_nonzero_connect_api_reconstruct
     );
     let op_count = Location::new(local.operations.len() as u64);
     let target = resolver
-        .target_range(start, op_count)
+        .target_range(start, op_count, &local.ops_root)
         .await
         .expect("any nonzero sync target");
     let target_root = target.root;
@@ -1447,7 +1456,7 @@ async fn ordered_mmb_operation_log_any_sync_accepts_target_update_from_growing_b
     let initial_op_count = Location::new(local.initial.operations.len() as u64);
     let updated_op_count = Location::new(local.updated.operations.len() as u64);
     let initial_target = resolver
-        .target_range(start, initial_op_count)
+        .target_range(start, initial_op_count, &local.initial.ops_root)
         .await
         .expect("initial nonzero any sync target");
     let expected_initial_target = initial_target.clone();
@@ -1502,7 +1511,7 @@ async fn ordered_mmb_operation_log_any_sync_accepts_target_update_from_growing_b
 
     commit_mmb_upload(&store_client, &local.updated).await;
     let updated_target = target_resolver
-        .target_range(start, updated_op_count)
+        .target_range(start, updated_op_count, &local.updated.ops_root)
         .await
         .expect("updated nonzero any sync target");
     assert_ne!(updated_target, expected_initial_target);

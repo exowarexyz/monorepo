@@ -487,3 +487,37 @@ async fn marshal_resolver_sinks_finalized_chain_from_simplex_api() {
 
     assert_eq!(delivered, expected_blocks);
 }
+
+#[tokio::test]
+async fn round_indices_retain_same_view_across_epochs() {
+    let simplex = SimplexClient::new(PrefixedStoreClient::empty(local_store_client().await));
+    let schemes = schemes();
+    let mut expected = Vec::new();
+    for epoch in [0, 1, u32::MAX as u64 + 1] {
+        let mut block = TestBlock::new(epoch + 1, b"epoch boundary");
+        block.context.round = Round::new(Epoch::new(epoch), View::new(7));
+        block.digest = block.compute_digest();
+        let notarized = notarized(block.clone(), &schemes);
+        let finalized = finalized(block, &schemes);
+        simplex.upload_notarized(&notarized).await.unwrap();
+        simplex.upload_finalized(&finalized).await.unwrap();
+        expected.push((notarized, finalized));
+    }
+    for (notarized, finalized) in expected {
+        let round = notarized.header.context.round;
+        assert_eq!(
+            simplex
+                .get_notarized_by_round::<TestBlock, Scheme, Sha256Digest>(round, &(10, 1024))
+                .await
+                .unwrap(),
+            Some(notarized)
+        );
+        assert_eq!(
+            simplex
+                .get_finalized_by_round::<TestBlock, Scheme, Sha256Digest>(round, &(10, 1024))
+                .await
+                .unwrap(),
+            Some(finalized)
+        );
+    }
+}

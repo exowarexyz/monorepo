@@ -17,3 +17,17 @@ current-boundary-backed services. Operation-log-only backends are a separate
 contract and use a trusted operation-log root. The client is configured with a
 Merkle family (`mmr` by default) and uses that for all proof decoding and
 verification.
+
+
+Operation range verification binds the exact requested start, count, and tip;
+key ranges enforce linear ordering, bounds, and pagination. The corresponding
+WASM range exports receive the requested tip/start/maximum (and key-range limit)
+in addition to proof bytes. Rebuild the WASM bindings together with the TS client.
+Absolute positions use `bigint`; batch limits and WASM byte-size arguments must
+fit their unsigned 32-bit representation.
+
+Subscription decoding checks internal proof consistency. Compare the returned
+root with an independently trusted root for the frame tip before using its
+operations. A server-provided root is not a trust anchor. `sha256` and `blake3`
+provide cryptographic hashing; `crc32c` is a checksum mode for accidental
+corruption and is unsuitable for authenticating an untrusted proof provider.

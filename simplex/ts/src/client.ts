@@ -16,8 +16,10 @@ export enum SimplexRecordKind {
   HeaderByDigest = 0x10,
   BlockByDigest = 0x11,
   NotarizationByView = 0x20,
+  NotarizationByRound = 0x21,
   FinalizationByView = 0x30,
   FinalizedByHeight = 0x31,
+  FinalizationByRound = 0x32,
 }
 
 export interface PreparedSimplexEntry {
@@ -53,6 +55,7 @@ export interface BlockUpload extends HeaderUpload {
 }
 
 export interface NotarizationUpload {
+  epoch?: U64Like;
   view: U64Like;
   notarized: BytesLike;
   header?: BytesLike;
@@ -61,6 +64,7 @@ export interface NotarizationUpload {
 }
 
 export interface FinalizationUpload {
+  epoch?: U64Like;
   view: U64Like;
   height: U64Like;
   finalized: BytesLike;
@@ -79,12 +83,14 @@ export interface SimplexVerificationContext {
 
 export interface SimplexNotarizationVerificationContext extends SimplexVerificationContext {
   kind: 'notarization';
+  epoch?: bigint;
   view: bigint;
 }
 
 export interface SimplexFinalizationVerificationContext extends SimplexVerificationContext {
   kind: 'finalization';
-  index: 'view' | 'height' | 'latest';
+  index: 'view' | 'round' | 'height' | 'latest';
+  epoch?: bigint;
   view?: bigint;
   height?: bigint;
 }
@@ -128,6 +134,7 @@ export type SimplexIdentity =
   | 'secp256r1';
 
 export interface VerifiedSimplexCertificate {
+  epoch: bigint;
   scheme: SimplexScheme;
   view: bigint;
   parent: bigint;
@@ -236,7 +243,8 @@ export interface RawSimplexBlockEntry extends SimplexBlockData {
 
 export interface RawSimplexNotarizationEntry {
   type: 'notarization';
-  kind: SimplexRecordKind.NotarizationByView;
+  kind: SimplexRecordKind.NotarizationByView | SimplexRecordKind.NotarizationByRound;
+  epoch?: bigint;
   key: Uint8Array;
   view: bigint;
   notarized: Uint8Array;
@@ -244,8 +252,9 @@ export interface RawSimplexNotarizationEntry {
 
 export interface RawSimplexFinalizationByViewEntry {
   type: 'finalization';
-  kind: SimplexRecordKind.FinalizationByView;
-  index: 'view';
+  kind: SimplexRecordKind.FinalizationByView | SimplexRecordKind.FinalizationByRound;
+  index: 'view' | 'round';
+  epoch?: bigint;
   key: Uint8Array;
   view: bigint;
   finalized: Uint8Array;
@@ -429,6 +438,21 @@ export function finalizationByViewKey(view: U64Like): Uint8Array {
   return keyFromParts(SimplexRecordKind.FinalizationByView, u64Bytes(view));
 }
 
+function roundKey(kind: SimplexRecordKind, epoch: U64Like, view: U64Like): Uint8Array {
+  const suffix = new Uint8Array(16);
+  suffix.set(u64Bytes(epoch));
+  suffix.set(u64Bytes(view), 8);
+  return keyFromParts(kind, suffix);
+}
+
+export function notarizationByRoundKey(epoch: U64Like, view: U64Like): Uint8Array {
+  return roundKey(SimplexRecordKind.NotarizationByRound, epoch, view);
+}
+
+export function finalizationByRoundKey(epoch: U64Like, view: U64Like): Uint8Array {
+  return roundKey(SimplexRecordKind.FinalizationByRound, epoch, view);
+}
+
 export function finalizedByHeightKey(height: U64Like): Uint8Array {
   return keyFromParts(SimplexRecordKind.FinalizedByHeight, u64Bytes(height));
 }
@@ -530,6 +554,10 @@ async function normalizeAndVerifyCertificate(
   if (!certificate) {
     return null;
   }
+  if ((context.view !== undefined && certificate.view !== context.view)
+    || (context.epoch !== undefined && certificate.epoch !== context.epoch)) {
+    return null;
+  }
   if (verifyHeader) {
     const verified = await verifyHeader({
       certificate,
@@ -557,6 +585,7 @@ function normalizeVerifiedCertificate(
   const record = value as Record<string, unknown>;
   return {
     scheme: schemeFromUnknown(record.scheme),
+    epoch: u64FromUnknown(record.epoch, 'epoch'),
     view: u64FromUnknown(record.view, 'view'),
     parent: u64FromUnknown(record.parent, 'parent'),
     payload: bytesFromUnknown(record.payload, 'payload'),
@@ -583,13 +612,13 @@ function schemeFromUnknown(value: unknown): SimplexScheme {
 
 function u64FromUnknown(value: unknown, field: string): bigint {
   if (typeof value === 'bigint') {
-    return value;
+    return normalizeU64(value);
   }
   if (typeof value === 'number' && Number.isSafeInteger(value) && value >= 0) {
     return BigInt(value);
   }
   if (typeof value === 'string' && /^[0-9]+$/.test(value)) {
-    return BigInt(value);
+    return normalizeU64(value);
   }
   throw new Error(`simplex verifier returned invalid ${field}`);
 }
@@ -683,6 +712,12 @@ function decodeRawStreamEntry(key: Uint8Array, value: Uint8Array): RawSimplexStr
         body: block.body,
       };
     }
+    case SimplexRecordKind.NotarizationByRound:
+      if (key.length !== 18) throw new Error('invalid notarization round key');
+      return { type: 'notarization', kind, key, epoch: u64FromKey(key.slice(0, 10)), view: u64FromKey(key.slice(8)), notarized: value };
+    case SimplexRecordKind.FinalizationByRound:
+      if (key.length !== 18) throw new Error('invalid finalization round key');
+      return { type: 'finalization', kind, index: 'round', key, epoch: u64FromKey(key.slice(0, 10)), view: u64FromKey(key.slice(8)), finalized: value };
     case SimplexRecordKind.NotarizationByView:
       return {
         type: 'notarization',
@@ -788,6 +823,10 @@ export class SimplexClient<TNotarization = unknown, TFinalization = unknown> {
       prepared(
         [
           {
+            key: notarizationByRoundKey(input.epoch ?? 0n, input.view),
+            value: toSimplexBytes(input.notarized),
+          },
+          {
             key: notarizationByViewKey(input.view),
             value: toSimplexBytes(input.notarized),
           },
@@ -820,6 +859,10 @@ export class SimplexClient<TNotarization = unknown, TFinalization = unknown> {
     entries.push(
       prepared(
         [
+          {
+            key: finalizationByRoundKey(input.epoch ?? 0n, input.view),
+            value: copyBytes(finalized),
+          },
           {
             key: finalizationByViewKey(input.view),
             value: finalized,
@@ -901,6 +944,22 @@ export class SimplexClient<TNotarization = unknown, TFinalization = unknown> {
     });
   }
 
+  async getNotarizationByRound(epoch: U64Like, view: U64Like): Promise<TNotarization | null> {
+    const key = notarizationByRoundKey(epoch, view);
+    const raw = (await this.getRaw(key)) ?? (await this.getNotarizationRaw(view));
+    if (raw === null) {
+      return null;
+    }
+    return this.verifyNotarization(raw, {
+      kind: 'notarization',
+      source: 'get',
+      key,
+      value: raw,
+      epoch: normalizeU64(epoch),
+      view: normalizeU64(view),
+    });
+  }
+
   async getNotarizationRaw(view: U64Like): Promise<Uint8Array | null> {
     return this.getRaw(notarizationByViewKey(view));
   }
@@ -917,6 +976,23 @@ export class SimplexClient<TNotarization = unknown, TFinalization = unknown> {
       source: 'get',
       key,
       value: raw,
+      view: normalizeU64(view),
+    });
+  }
+
+  async getFinalizationByRound(epoch: U64Like, view: U64Like): Promise<TFinalization | null> {
+    const key = finalizationByRoundKey(epoch, view);
+    const raw = (await this.getRaw(key)) ?? (await this.getFinalizationByViewRaw(view));
+    if (raw === null) {
+      return null;
+    }
+    return this.verifyFinalization(raw, {
+      kind: 'finalization',
+      index: 'round',
+      source: 'get',
+      key,
+      value: raw,
+      epoch: normalizeU64(epoch),
       view: normalizeU64(view),
     });
   }
@@ -1034,14 +1110,26 @@ export class SimplexClient<TNotarization = unknown, TFinalization = unknown> {
   ): AsyncIterable<SimplexStreamBatch<RawSimplexCertificateStreamEntry>> {
     const kinds = [
       SimplexRecordKind.NotarizationByView,
+      SimplexRecordKind.NotarizationByRound,
       SimplexRecordKind.FinalizationByView,
+      SimplexRecordKind.FinalizationByRound,
       ...(options.includeFinalizedByHeight ? [SimplexRecordKind.FinalizedByHeight] : []),
     ];
     for await (const batch of this.subscribeRaw(kinds, options, callOptions)) {
+      const certificates = batch.entries.flatMap((entry) =>
+        entry.type === 'header' || entry.type === 'block' ? [] : [entry],
+      );
+      const identity = (entry: RawSimplexNotarizationEntry | RawSimplexFinalizationByViewEntry) =>
+        `${entry.type}:${entry.view}:${bytesToHex(entry.type === 'notarization' ? entry.notarized : entry.finalized)}`;
+      const rounds = new Set(certificates.flatMap((entry) =>
+        entry.kind === SimplexRecordKind.NotarizationByRound || entry.kind === SimplexRecordKind.FinalizationByRound
+          ? [identity(entry as RawSimplexNotarizationEntry | RawSimplexFinalizationByViewEntry)] : [],
+      ));
       yield {
         sequenceNumber: batch.sequenceNumber,
-        entries: batch.entries.flatMap((entry) =>
-          entry.type === 'header' || entry.type === 'block' ? [] : [entry],
+        entries: certificates.filter((entry) =>
+          !(entry.kind === SimplexRecordKind.NotarizationByView || entry.kind === SimplexRecordKind.FinalizationByView)
+          || !rounds.has(identity(entry as RawSimplexNotarizationEntry | RawSimplexFinalizationByViewEntry)),
         ),
       };
     }
@@ -1060,30 +1148,34 @@ export class SimplexClient<TNotarization = unknown, TFinalization = unknown> {
             source: 'stream',
             key: entry.key,
             value: entry.notarized,
+            epoch: entry.epoch,
             view: entry.view,
           });
           entries.push({
             type: 'notarization',
             kind: entry.kind,
             key: entry.key,
+            epoch: entry.epoch,
             view: entry.view,
             raw: entry.notarized,
             certificate,
           });
-        } else if (entry.index === 'view') {
+        } else if (entry.index !== 'height') {
           const certificate = await this.verifyFinalization(entry.finalized, {
             kind: 'finalization',
-            index: 'view',
+            index: entry.index,
             source: 'stream',
             key: entry.key,
             value: entry.finalized,
+            epoch: entry.epoch,
             view: entry.view,
           });
           entries.push({
             type: 'finalization',
             kind: entry.kind,
-            index: 'view',
+            index: entry.index,
             key: entry.key,
+            epoch: entry.epoch,
             view: entry.view,
             raw: entry.finalized,
             certificate,

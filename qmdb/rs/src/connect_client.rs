@@ -1,3 +1,4 @@
+use crate::request::{validate_key_range, OperationWindow};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Display;
 use std::marker::PhantomData;
@@ -289,6 +290,7 @@ where
     ) -> Result<VerifiedKeyRange<H::Digest, K, V, F, E>, QmdbError> {
         let start_key = request.start_key.clone();
         let end_key = request.end_key.clone();
+        let limit = request.limit;
         let response = self
             .range_rpc
             .get_range(request)
@@ -301,6 +303,7 @@ where
             expected_root,
             start_key.as_ref(),
             end_key.as_deref(),
+            limit,
             self.op_cfg.as_ref(),
             self.update_cfg.as_ref(),
             self.key_cfg.as_ref(),
@@ -550,24 +553,33 @@ where
         }
     }
 
+    /// Discover a target only under an independently trusted operation-log root
     pub async fn target(
         &self,
         op_count: Location<F>,
+        expected_ops_root: &H::Digest,
     ) -> Result<SyncTarget<F, H::Digest>, QmdbError> {
-        self.target_range(Location::new(0), op_count).await
+        self.target_range(Location::new(0), op_count, expected_ops_root)
+            .await
     }
 
     pub async fn target_range(
         &self,
         start_loc: Location<F>,
         op_count: Location<F>,
+        expected_ops_root: &H::Digest,
     ) -> Result<SyncTarget<F, H::Digest>, QmdbError> {
         let range = sync_range(start_loc, op_count)?;
         let proto = self
             .operation_range_proto(op_count, start_loc, NonZeroU64::MIN)
             .await?;
         let root = decode_digest::<H::Digest>(proto.ops_root.as_ref(), "operation sync root")?;
-        Ok(SyncTarget::new(root, range))
+        if root != *expected_ops_root {
+            return Err(QmdbError::CorruptData(
+                "operation sync root differs from trusted root".into(),
+            ));
+        }
+        Ok(SyncTarget::new(*expected_ops_root, range))
     }
 
     async fn operation_range_proto(
@@ -582,9 +594,8 @@ where
                 "cannot fetch sync operations for an empty target".to_string(),
             ));
         };
-        let max_locations = u32::try_from(max_ops.get()).map_err(|err| {
-            QmdbError::CorruptData(format!("sync fetch batch size exceeds API limit: {err}"))
-        })?;
+        // The upstream maximum permits a smaller transport batch
+        let max_locations = u32::try_from(max_ops.get()).unwrap_or(u32::MAX);
         fetch_operation_range_proof(
             &self.client.rpc,
             GetOperationRangeRequest {
@@ -915,6 +926,9 @@ where
         expected_root: &H::Digest,
     ) -> Result<CurrentOperationRangeProof<H::Digest, Op, N, F>, QmdbError> {
         let tip = Location::<F>::new(request.tip);
+        let window =
+            OperationWindow::new(request.tip, request.start_location, request.max_locations)
+                .map_err(|message| QmdbError::CorruptData(message.into()))?;
         let response = self
             .rpc
             .get_current_operation_range(request)
@@ -931,6 +945,7 @@ where
             proof,
             self.op_cfg.as_ref(),
             expected_root,
+            window,
         )?;
         Ok(CurrentOperationRangeProof {
             tip,
@@ -1010,6 +1025,9 @@ where
         expected_root: &H::Digest,
     ) -> Result<OperationLogRangeProof<H::Digest, Op, F>, QmdbError> {
         let tip = Location::<F>::new(request.tip);
+        let window =
+            OperationWindow::new(request.tip, request.start_location, request.max_locations)
+                .map_err(|message| QmdbError::CorruptData(message.into()))?;
         let proof = fetch_operation_range_proof(
             &self.rpc,
             request,
@@ -1020,6 +1038,7 @@ where
             &proof,
             self.op_cfg.as_ref(),
             expected_root,
+            window,
         )?;
         Ok(OperationLogRangeProof {
             tip,
@@ -1163,7 +1182,7 @@ where
 }
 
 enum ExclusionBoundary<K> {
-    Span { start: K, end: K },
+    Span { end: K },
     Empty,
 }
 
@@ -1209,6 +1228,7 @@ fn verify_operation_range_from_proto<F, H, Op>(
     proto: &HistoricalOperationRangeProof,
     op_cfg: &Op::Cfg,
     root: &H::Digest,
+    window: OperationWindow,
 ) -> Result<(H::Digest, Vec<(Location<F>, Op)>), QmdbError>
 where
     F: Graftable,
@@ -1230,6 +1250,13 @@ where
                 "failed to decode historical operation range proof: {err}"
             ))
         })?;
+    window
+        .validate(
+            proto.start_location,
+            proto.encoded_operations.len(),
+            proof.leaves.as_u64(),
+        )
+        .map_err(|message| QmdbError::CorruptData(message.into()))?;
     let start = Location::<F>::new(proto.start_location);
     let decoded_operations = proto
         .encoded_operations
@@ -1279,6 +1306,7 @@ fn verify_current_operation_range_from_proto<F, H, Op, const N: usize>(
     proto: &ProtoCurrentOperationRangeProof,
     op_cfg: &Op::Cfg,
     root: &H::Digest,
+    window: OperationWindow,
 ) -> Result<(H::Digest, Vec<(Location<F>, Op)>, Vec<[u8; N]>), QmdbError>
 where
     F: Graftable,
@@ -1298,6 +1326,13 @@ where
                 "failed to decode current operation range proof: {err}"
             ))
         })?;
+    window
+        .validate(
+            proto.start_location,
+            proto.encoded_operations.len(),
+            proof.proof.leaves.as_u64(),
+        )
+        .map_err(|message| QmdbError::CorruptData(message.into()))?;
     let start = Location::<F>::new(proto.start_location);
     let decoded_operations = proto
         .encoded_operations
@@ -1494,20 +1529,11 @@ where
     }
     let boundary = match proof {
         ExclusionProof::KeyValue(_, update) => ExclusionBoundary::Span {
-            start: update.key,
             end: update.next_key,
         },
         ExclusionProof::Commit(_, _) => ExclusionBoundary::Empty,
     };
     Ok(boundary)
-}
-
-fn span_contains_key<K: Ord>(span_start: &K, span_end: &K, key: &K) -> bool {
-    if span_start >= span_end {
-        key >= span_start || key < span_end
-    } else {
-        key >= span_start && key < span_end
-    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1516,6 +1542,7 @@ fn verify_get_range_from_proto<F, H, K, V, const N: usize, E>(
     root: &H::Digest,
     start_key: &[u8],
     end_key: Option<&[u8]>,
+    limit: u32,
     op_cfg: &<ordered::Operation<F, K, E> as Read>::Cfg,
     update_cfg: &<ordered::Update<K, E> as Read>::Cfg,
     key_cfg: &K::Cfg,
@@ -1571,117 +1598,63 @@ where
         entries.push(verified);
     }
 
-    if let Some(first) = entries.first() {
-        let ordered::Operation::Update(first_update) = &first.operation else {
-            unreachable!("range entries were checked as updates");
-        };
-        if first_update.key != start_key {
-            let start_proof = response.start_proof.as_option().ok_or_else(|| {
-                QmdbError::CorruptData(
-                    "qmdb get_range response missing start boundary proof".to_string(),
-                )
-            })?;
-            match verify_key_exclusion_from_proto::<F, H, K, V, N, E>(
-                start_proof,
-                encoded_start_key,
-                root,
-                update_cfg,
-                key_cfg,
-                value_cfg,
-            )? {
-                ExclusionBoundary::Span { end, .. } if end == first_update.key => {}
-                ExclusionBoundary::Span { .. } | ExclusionBoundary::Empty => {
-                    return Err(QmdbError::ProofVerification {
-                        kind: crate::ProofKind::CurrentKeyExclusion,
-                    })
-                }
-            }
-        }
-    } else {
-        let start_proof = response.start_proof.as_option().ok_or_else(|| {
-            QmdbError::CorruptData(
-                "empty qmdb get_range response missing start boundary proof".to_string(),
-            )
+    let keys = entries
+        .iter()
+        .map(|entry| match &entry.operation {
+            ordered::Operation::Update(update) => (&update.key, &update.next_key),
+            _ => unreachable!("range entries were checked as updates"),
+        })
+        .collect::<Vec<_>>();
+    let start_successor = if keys.first().is_none_or(|(key, _)| **key != start_key) {
+        let proof = response.start_proof.as_option().ok_or_else(|| {
+            QmdbError::CorruptData("key range missing start boundary proof".into())
         })?;
-        let boundary = verify_key_exclusion_from_proto::<F, H, K, V, N, E>(
-            start_proof,
+        match verify_key_exclusion_from_proto::<F, H, K, V, N, E>(
+            proof,
             encoded_start_key,
             root,
             update_cfg,
             key_cfg,
             value_cfg,
-        )?;
-        match (end_key.as_ref(), boundary) {
-            (Some(end_key), ExclusionBoundary::Span { start, end })
-                if !span_contains_key(&start, &end, end_key) && end != *end_key =>
-            {
-                return Err(QmdbError::ProofVerification {
-                    kind: crate::ProofKind::CurrentKeyExclusion,
-                });
-            }
-            (None, ExclusionBoundary::Span { end, .. }) if end > start_key => {
-                return Err(QmdbError::ProofVerification {
-                    kind: crate::ProofKind::CurrentKeyExclusion,
-                });
-            }
-            _ => {}
+        )? {
+            ExclusionBoundary::Span { end, .. } => Some(end),
+            ExclusionBoundary::Empty => None,
         }
-    }
-
-    for pair in entries.windows(2) {
-        let ordered::Operation::Update(left) = &pair[0].operation else {
-            unreachable!("range entries were checked as updates");
-        };
-        let ordered::Operation::Update(right) = &pair[1].operation else {
-            unreachable!("range entries were checked as updates");
-        };
-        if left.next_key != right.key {
-            return Err(QmdbError::ProofVerification {
-                kind: crate::ProofKind::CurrentKeyValue,
-            });
-        }
-    }
-
-    if response.has_more {
-        let Some(last) = entries.last() else {
-            return Err(QmdbError::CorruptData(
-                "truncated qmdb get_range response has no final entry".to_string(),
-            ));
-        };
-        let ordered::Operation::Update(last_update) = &last.operation else {
-            unreachable!("range entries were checked as updates");
-        };
-        let next_start_key =
+    } else {
+        None
+    };
+    let next_start = if response.has_more {
+        Some(
             K::decode_cfg(response.next_start_key.as_slice(), key_cfg).map_err(|err| {
-                QmdbError::CorruptData(format!("failed to decode range next_start_key: {err}"))
-            })?;
-        if next_start_key != last_update.next_key {
-            return Err(QmdbError::ProofVerification {
-                kind: crate::ProofKind::CurrentKeyValue,
-            });
+                QmdbError::CorruptData(format!("failed to decode range continuation: {err}"))
+            })?,
+        )
+    } else {
+        if !response.next_start_key.is_empty() {
+            return Err(QmdbError::CorruptData(
+                "complete key range has a continuation".into(),
+            ));
         }
-    } else if let Some(first) = entries.first() {
-        let last = entries.last().expect("first exists");
-        let ordered::Operation::Update(first_update) = &first.operation else {
-            unreachable!("range entries were checked as updates");
-        };
-        let ordered::Operation::Update(last_update) = &last.operation else {
-            unreachable!("range entries were checked as updates");
-        };
-        if let Some(end_key) = end_key.as_ref() {
-            if last_update.next_key != *end_key
-                && !span_contains_key(&last_update.key, &last_update.next_key, end_key)
-            {
-                return Err(QmdbError::ProofVerification {
-                    kind: crate::ProofKind::CurrentKeyValue,
-                });
+        None
+    };
+    validate_key_range(
+        &start_key,
+        end_key.as_ref(),
+        limit,
+        &keys,
+        start_successor.as_ref(),
+        response.has_more,
+        next_start.as_ref(),
+    )
+    .map_err(|message| {
+        if keys.is_empty() {
+            QmdbError::ProofVerification {
+                kind: crate::ProofKind::CurrentKeyExclusion,
             }
-        } else if last_update.next_key > first_update.key {
-            return Err(QmdbError::ProofVerification {
-                kind: crate::ProofKind::CurrentKeyValue,
-            });
+        } else {
+            QmdbError::CorruptData(message.into())
         }
-    }
+    })?;
 
     Ok(VerifiedKeyRange {
         entries,

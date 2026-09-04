@@ -1,4 +1,5 @@
 use commonware_codec::{Decode, DecodeExt, Encode, Read};
+use commonware_coding::ReedSolomon;
 use commonware_consensus::{
     simplex::{
         scheme::{
@@ -14,7 +15,7 @@ use commonware_consensus::{
 use commonware_cryptography::{
     blake3,
     bls12381::primitives::variant::{MinPk, MinSig, Variant},
-    ed25519, secp256r1, sha256, transcript, Digest, PublicKey,
+    ed25519, secp256r1, sha256, transcript, Digest, Digestible, PublicKey,
 };
 use commonware_parallel::Sequential;
 use commonware_utils::{
@@ -29,9 +30,25 @@ const MAX_PARTICIPANTS: usize = 10_000;
 const MAX_HEADER_BYTES: usize = 16 * 1024 * 1024;
 type Secp256r1PublicKey = secp256r1::standard::PublicKey;
 
+// Certificate verification treats each commitment digest as 32 opaque bytes
+// These types preserve that wire layout and validate the embedded coding config
+type CodingCommitment = Commitment<CommitmentBlock, ReedSolomon<sha256::Sha256>, sha256::Sha256>;
+
+#[derive(Clone)]
+struct CommitmentBlock(sha256::Digest);
+
+impl Digestible for CommitmentBlock {
+    type Digest = sha256::Digest;
+
+    fn digest(&self) -> Self::Digest {
+        self.0
+    }
+}
+
 #[derive(Serialize)]
 struct VerifiedCertificate {
     scheme: String,
+    epoch: u64,
     view: u64,
     parent: u64,
     payload: Vec<u8>,
@@ -95,6 +112,7 @@ where
     let header = read_header(reader, "notarized artifact")?;
     Ok(VerifiedCertificate {
         scheme: scheme_name.to_string(),
+        epoch: proof.round().epoch().get(),
         view: proof.view().get(),
         parent: proof.proposal.parent.get(),
         payload: proof.proposal.payload.as_ref().to_vec(),
@@ -122,6 +140,7 @@ where
     let header = read_header(reader, "finalized artifact")?;
     Ok(VerifiedCertificate {
         scheme: scheme_name.to_string(),
+        epoch: proof.round().epoch().get(),
         view: proof.view().get(),
         parent: proof.proposal.parent.get(),
         payload: proof.proposal.payload.as_ref().to_vec(),
@@ -317,7 +336,7 @@ fn verify_for_payload(
             bytes,
             artifact,
         ),
-        "coding-commitment" => verify_for_scheme::<Commitment>(
+        "coding-commitment" => verify_for_scheme::<CodingCommitment>(
             identity_name,
             scheme_name,
             namespace,
@@ -421,12 +440,30 @@ mod tests {
         )
     }
 
-    fn commitment_payload(header: &[u8]) -> Commitment {
+    fn commitment_payload(header: &[u8]) -> CodingCommitment {
         let seed = header.iter().fold(0u64, |acc, byte| {
             acc.wrapping_mul(257).wrapping_add(u64::from(*byte))
         });
         let mut rng = TestRng::new(seed);
-        Commitment::random(&mut rng)
+        CodingCommitment::random(&mut rng)
+    }
+
+    #[test]
+    fn coding_commitment_preserves_wire_layout() {
+        let mut bytes: [u8; 100] = core::array::from_fn(|i| i as u8);
+        bytes[96..].copy_from_slice(&[0, 4, 0, 2]);
+        let commitment = CodingCommitment::decode(bytes.as_slice()).expect("coding commitment");
+        assert_eq!(commitment.block().as_ref(), &bytes[..32]);
+        assert_eq!(commitment.root().as_ref(), &bytes[32..64]);
+        assert_eq!(commitment.context().as_ref(), &bytes[64..96]);
+        assert_eq!(commitment.config().minimum_shards.get(), 4);
+        assert_eq!(commitment.config().extra_shards.get(), 2);
+        assert_eq!(commitment.encode().as_ref(), bytes.as_slice());
+
+        bytes[96..98].fill(0);
+        assert!(CodingCommitment::decode(bytes.as_slice()).is_err());
+        bytes[96..].copy_from_slice(&[0, 4, 0, 0]);
+        assert!(CodingCommitment::decode(bytes.as_slice()).is_err());
     }
 
     fn verify_round_trip<S, D>(
@@ -654,7 +691,7 @@ mod tests {
         S: Scheme<sha256::Digest>
             + Scheme<blake3::Digest>
             + Scheme<transcript::Summary>
-            + Scheme<Commitment>,
+            + Scheme<CodingCommitment>,
         <S::Certificate as Read>::Cfg: Clone,
     {
         verify_round_trip(

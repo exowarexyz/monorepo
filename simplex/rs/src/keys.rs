@@ -1,5 +1,5 @@
 use bytes::{BufMut, Bytes, BytesMut};
-use commonware_consensus::types::{Height, View};
+use commonware_consensus::types::{Height, Round, View};
 use commonware_cryptography::Digest;
 use exoware_sdk::keys::Key;
 
@@ -11,8 +11,10 @@ pub enum RecordKind {
     HeaderByDigest = 0x10,
     BlockByDigest = 0x11,
     NotarizationByView = 0x20,
+    NotarizationByRound = 0x21,
     FinalizationByView = 0x30,
     FinalizedByHeight = 0x31,
+    FinalizationByRound = 0x32,
 }
 
 impl RecordKind {
@@ -51,6 +53,21 @@ pub fn notarization_by_view(view: View) -> Key {
 
 pub fn finalization_by_view(view: View) -> Key {
     key_from_parts(RecordKind::FinalizationByView, &u64_suffix(view.get()))
+}
+
+fn round_key(kind: RecordKind, round: Round) -> Key {
+    let mut suffix = [0; 16];
+    suffix[..8].copy_from_slice(&round.epoch().get().to_be_bytes());
+    suffix[8..].copy_from_slice(&round.view().get().to_be_bytes());
+    key_from_parts(kind, &suffix)
+}
+
+pub fn notarization_by_round(round: Round) -> Key {
+    round_key(RecordKind::NotarizationByRound, round)
+}
+
+pub fn finalization_by_round(round: Round) -> Key {
+    round_key(RecordKind::FinalizationByRound, round)
 }
 
 pub fn finalized_by_height(height: Height) -> Key {

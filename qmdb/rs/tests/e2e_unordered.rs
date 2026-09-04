@@ -139,6 +139,7 @@ async fn build_fixed_local_db() -> FixedLocalReference {
                     items_per_blob: NZU64!(8),
                     page_cache,
                     write_buffer: NZUsize!(1024),
+                    replay_buffer: NZUsize!(1024),
                 },
                 translator: TwoCap,
                 init_cache_size: None,

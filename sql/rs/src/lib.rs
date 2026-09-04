@@ -6929,6 +6929,7 @@ mod tests {
 
     #[derive(Clone)]
     struct ObservedLimitRangeHarness {
+        request_received: Arc<Notify>,
         release_second_chunk: Arc<Notify>,
         observed_limit: Arc<AtomicUsize>,
         observed_mode: Arc<AtomicUsize>,
@@ -6966,9 +6967,12 @@ mod tests {
                 Err(_) => usize::MAX,
             };
             self.observed_mode.store(mode, AtomicOrdering::SeqCst);
+            self.request_received.notify_one();
             let release_second_chunk = self.release_second_chunk.clone();
             let first_frame = self.first_frame.clone();
             let second_frame = self.second_frame.clone();
+
+            // Keep the response open after the first frame even when it satisfies the limit
             let stream = stream::try_unfold(0u8, move |state| {
                 let release_second_chunk = release_second_chunk.clone();
                 let first_frame = first_frame.clone();
@@ -6977,8 +6981,8 @@ mod tests {
                     match state {
                         0 => Ok(Some((first_frame, 1))),
                         1 => {
+                            release_second_chunk.notified().await;
                             if limit > 1 {
-                                release_second_chunk.notified().await;
                                 Ok(Some((second_frame, 2)))
                             } else {
                                 Ok(None)
@@ -7149,6 +7153,7 @@ mod tests {
 
     #[tokio::test]
     async fn kv_scan_sql_limit_is_pushed_upstream_on_exact_streaming_scan() {
+        let request_received = Arc::new(Notify::new());
         let release_second_chunk = Arc::new(Notify::new());
         let observed_limit = Arc::new(AtomicUsize::new(0));
         let observed_mode = Arc::new(AtomicUsize::new(usize::MAX));
@@ -7165,6 +7170,7 @@ mod tests {
         let second_frame = proto_range_entries_frame(vec![(second_key, encoded_row)]);
 
         let harness = ObservedLimitRangeHarness {
+            request_received: request_received.clone(),
             release_second_chunk: release_second_chunk.clone(),
             observed_limit: observed_limit.clone(),
             observed_mode,
@@ -7194,25 +7200,28 @@ mod tests {
             .expect("schema");
         let ctx = SessionContext::new();
         schema.register_all(&ctx).expect("register");
-        let batches = tokio::time::timeout(Duration::from_millis(200), async {
-            ctx.sql("SELECT id FROM items LIMIT 1")
-                .await
-                .expect("query")
-                .collect()
-                .await
-                .expect("collect")
-        })
-        .await
-        .expect("query with LIMIT 1 should finish without waiting for a delayed second chunk");
+        let (batches, ()) = tokio::join!(
+            async {
+                ctx.sql("SELECT id FROM items LIMIT 1")
+                    .await
+                    .expect("query")
+                    .collect()
+                    .await
+                    .expect("collect")
+            },
+            async {
+                request_received.notified().await;
+                assert_eq!(
+                    observed_limit.load(AtomicOrdering::SeqCst),
+                    1,
+                    "exact streaming scan should push SQL LIMIT upstream"
+                );
+            }
+        );
 
         assert_eq!(
             batches.iter().map(|batch| batch.num_rows()).sum::<usize>(),
             1
-        );
-        assert_eq!(
-            observed_limit.load(AtomicOrdering::SeqCst),
-            1,
-            "exact streaming scan should push SQL LIMIT upstream"
         );
         release_second_chunk.notify_one();
     }
@@ -7236,14 +7245,52 @@ mod tests {
             .expect("limit pushdown");
 
         let scan = optimized
-            .as_any()
             .downcast_ref::<KvScanExec>()
             .expect("physical limit should be converted to a scan fetch");
         assert_eq!(scan.fetch(), Some(1));
     }
 
+    #[test]
+    fn kv_scan_native_sort_pushdown_preserves_limit() {
+        use datafusion::arrow::compute::SortOptions;
+        use datafusion::physical_expr::expressions::Column;
+        use datafusion::physical_expr::{LexOrdering, PhysicalSortExpr};
+        use datafusion::physical_optimizer::pushdown_sort::PushdownSort;
+        use datafusion::physical_plan::sorts::sort::SortExec;
+
+        let model = Arc::new(simple_int64_model(0));
+        let scan = Arc::new(KvScanExec::new(
+            PrefixedStoreClient::empty(StoreClient::new("http://127.0.0.1:0")),
+            model.clone(),
+            Arc::new(Vec::new()),
+            QueryPredicate::default(),
+            None,
+            model.schema.clone(),
+            None,
+        ));
+        let ordering = LexOrdering::new([PhysicalSortExpr {
+            expr: Arc::new(Column::new("id", 0)),
+            options: SortOptions {
+                descending: true,
+                nulls_first: false,
+            },
+        }])
+        .expect("ordering");
+        let sorted = Arc::new(SortExec::new(ordering, scan).with_fetch(Some(1)));
+
+        let optimized = PushdownSort::new()
+            .optimize(sorted, &ConfigOptions::new())
+            .expect("native sort pushdown");
+        let scan = optimized
+            .downcast_ref::<KvScanExec>()
+            .expect("native sort pushdown should eliminate the sort");
+        assert_eq!(scan.fetch(), Some(1));
+        assert_eq!(scan.direction, ScanDirection::Reverse);
+    }
+
     #[tokio::test]
     async fn kv_scan_activity_desc_order_pushes_reverse_range_limit() {
+        let request_received = Arc::new(Notify::new());
         let release_second_chunk = Arc::new(Notify::new());
         let observed_limit = Arc::new(AtomicUsize::new(0));
         let observed_mode = Arc::new(AtomicUsize::new(usize::MAX));
@@ -7298,6 +7345,7 @@ mod tests {
         let second_frame = proto_range_entries_frame(vec![(sender_key, encoded_row)]);
 
         let harness = ObservedLimitRangeHarness {
+            request_received: request_received.clone(),
             release_second_chunk: release_second_chunk.clone(),
             observed_limit: observed_limit.clone(),
             observed_mode: observed_mode.clone(),
@@ -7338,36 +7386,39 @@ mod tests {
         let ctx = SessionContext::new();
         schema.register_all(&ctx).expect("register");
 
-        let batches = tokio::time::timeout(Duration::from_millis(200), async {
-            ctx.sql(
-                "SELECT height, index, role \
-                 FROM tx_activity \
-                 WHERE account = 7 \
-                 ORDER BY height DESC, index DESC, role DESC \
-                 LIMIT 1",
-            )
-            .await
-            .expect("query")
-            .collect()
-            .await
-            .expect("collect")
-        })
-        .await
-        .expect("activity DESC LIMIT query should not wait for a delayed second chunk");
+        let (batches, ()) = tokio::join!(
+            async {
+                ctx.sql(
+                    "SELECT height, index, role \
+                     FROM tx_activity \
+                     WHERE account = 7 \
+                     ORDER BY height DESC, index DESC, role DESC \
+                     LIMIT 1",
+                )
+                .await
+                .expect("query")
+                .collect()
+                .await
+                .expect("collect")
+            },
+            async {
+                request_received.notified().await;
+                assert_eq!(
+                    observed_mode.load(AtomicOrdering::SeqCst),
+                    1,
+                    "activity DESC primary-key order should use reverse range traversal"
+                );
+                assert_eq!(
+                    observed_limit.load(AtomicOrdering::SeqCst),
+                    1,
+                    "activity DESC LIMIT should push the top-K limit to the range request"
+                );
+            }
+        );
 
         assert_eq!(
             batches.iter().map(|batch| batch.num_rows()).sum::<usize>(),
             1
-        );
-        assert_eq!(
-            observed_mode.load(AtomicOrdering::SeqCst),
-            1,
-            "activity DESC primary-key order should use reverse range traversal"
-        );
-        assert_eq!(
-            observed_limit.load(AtomicOrdering::SeqCst),
-            1,
-            "activity DESC LIMIT should push the top-K limit to the range request"
         );
         release_second_chunk.notify_one();
     }
@@ -7693,6 +7744,63 @@ mod tests {
             3,
             "reverse OFFSET scan should fetch only offset + limit IN ranges"
         );
+
+        let _ = shutdown_tx.send(());
+    }
+
+    #[tokio::test]
+    async fn kv_scan_native_sort_pushdown_preserves_nested_limits() {
+        use datafusion::physical_optimizer::pushdown_sort::PushdownSort;
+
+        let state = MockState {
+            kv: Arc::new(Mutex::new(BTreeMap::new())),
+            range_calls: Arc::new(AtomicUsize::new(0)),
+            range_reduce_calls: Arc::new(AtomicUsize::new(0)),
+            sequence_number: Arc::new(AtomicU64::new(0)),
+        };
+        let (base_url, shutdown_tx) = spawn_mock_server(state).await;
+        let client = StoreClient::new(&base_url);
+        let schema = KvSchema::new(PrefixedStoreClient::empty(client))
+            .table(
+                "events",
+                vec![TableColumnConfig::new("id", DataType::Int64, false)],
+                vec!["id".to_string()],
+                vec![],
+            )
+            .expect("schema");
+        let mut writer = schema.batch_writer();
+        for id in [1, 2, 3, 4] {
+            writer
+                .insert("events", vec![CellValue::Int64(id)])
+                .expect("row");
+        }
+        writer.flush().await.expect("seed rows");
+
+        let ctx = SessionContext::new();
+        schema.register_all(&ctx).expect("register");
+        for (inner, outer, expected) in [("ASC", "DESC", 2), ("DESC", "ASC", 3)] {
+            let sql = format!(
+                "SELECT id FROM \
+                 (SELECT id FROM events ORDER BY id {inner} LIMIT 2) AS limited \
+                 ORDER BY id {outer} LIMIT 1"
+            );
+            let plan = ctx
+                .sql(&sql)
+                .await
+                .expect("query")
+                .create_physical_plan()
+                .await
+                .expect("physical plan");
+
+            // Reapplying sort pushdown must preserve the rows selected by the inner limit
+            let plan = PushdownSort::new()
+                .optimize(plan, &ConfigOptions::new())
+                .expect("native sort pushdown");
+            let batches = datafusion::physical_plan::collect(plan, ctx.task_ctx())
+                .await
+                .expect("collect");
+            assert_eq!(collect_i64_column(&batches, 0), vec![expected], "{sql}");
+        }
 
         let _ = shutdown_tx.send(());
     }

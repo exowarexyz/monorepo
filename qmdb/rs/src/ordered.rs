@@ -19,16 +19,15 @@ use commonware_storage::{
         operation::{Key as QmdbKey, Operation as _},
     },
 };
-use commonware_utils::bitmap::Readable as BitmapReadable;
 use exoware_sdk::keys::Key;
 use exoware_sdk::{PrefixedStoreClient, RangeMode, SerializableReadSession};
 
 use crate::codec::{
-    bitmap_chunk_bits, chunk_index_for_location, clear_below_floor,
-    decode_current_boundary_metadata, decode_update_index_value_present, decode_update_location,
-    decode_update_raw_key, encode_chunk_key, encode_current_meta_key, encode_operation_key,
-    encode_ops_root_witness_key, encode_update_key, merkle_size_for_watermark,
-    op_count_for_watermark, CurrentBoundaryMetadata, UPDATE_PREFIX,
+    chunk_index_for_location, clear_below_floor, decode_current_boundary_metadata,
+    decode_update_index_value_present, decode_update_location, decode_update_raw_key,
+    encode_chunk_key, encode_current_meta_key, encode_operation_key, encode_ops_root_witness_key,
+    encode_update_key, merkle_size_for_watermark, op_count_for_watermark, CurrentBoundaryMetadata,
+    UPDATE_PREFIX,
 };
 use crate::connect::OperationKv;
 use crate::core::HistoricalOpsClientCore;
@@ -39,17 +38,10 @@ use crate::proof::{
     RawMultiProof, VariantRoot, VerifiedCurrentRange, VerifiedKeyValue, VerifiedMultiOperations,
     VerifiedOperationRange, VerifiedVariantRange,
 };
-use crate::storage::{KvCurrentStorage, KvMerkleStorage};
+use crate::storage::{KvCurrentStorage, KvMerkleStorage, ProofBitmap};
 use crate::{QmdbVariant, VersionedValue, WriterState};
 
 const ACTIVE_OPERATION_GET_MANY_BATCH: usize = 1024;
-
-#[derive(Clone, Debug)]
-struct MaterializedBitmapStatus<const N: usize> {
-    len: u64,
-    pruned_chunks: usize,
-    chunks: std::collections::BTreeMap<usize, [u8; N]>,
-}
 
 #[derive(Clone, Debug)]
 struct ActiveOrderedOperation<
@@ -61,46 +53,6 @@ struct ActiveOrderedOperation<
     key: K,
     location: Location<F>,
     operation: ordered::Operation<F, K, E>,
-}
-
-impl<const N: usize> BitmapReadable<N> for MaterializedBitmapStatus<N> {
-    fn complete_chunks(&self) -> usize {
-        (self.len / bitmap_chunk_bits::<N>()) as usize
-    }
-
-    fn get_chunk(&self, chunk: usize) -> [u8; N] {
-        if chunk < self.pruned_chunks {
-            [0u8; N]
-        } else {
-            *self
-                .chunks
-                .get(&chunk)
-                .expect("materialized current bitmap status missing chunk")
-        }
-    }
-
-    fn last_chunk(&self) -> ([u8; N], u64) {
-        if self.len == 0 {
-            return ([0u8; N], 0);
-        }
-        let chunk_bits = bitmap_chunk_bits::<N>();
-        let rem = self.len % chunk_bits;
-        let bits_in_last = if rem == 0 { chunk_bits } else { rem };
-        let idx = if rem == 0 {
-            self.complete_chunks().saturating_sub(1)
-        } else {
-            self.complete_chunks()
-        };
-        (self.get_chunk(idx), bits_in_last)
-    }
-
-    fn pruned_chunks(&self) -> usize {
-        self.pruned_chunks
-    }
-
-    fn len(&self) -> u64 {
-        self.len
-    }
 }
 
 #[derive(Clone)]
@@ -1185,61 +1137,20 @@ where
             .await
     }
 
-    async fn materialize_bitmap_status(
+    async fn proof_bitmap(
         &self,
         session: &SerializableReadSession,
         watermark: Location<F>,
         inactivity_floor: Location<F>,
-    ) -> Result<MaterializedBitmapStatus<N>, QmdbError> {
-        let leaves = watermark
-            .checked_add(1)
-            .ok_or_else(|| QmdbError::CorruptData("watermark overflow".to_string()))?;
-        let len = *leaves;
-        let chunk_bits = bitmap_chunk_bits::<N>();
+        location: Option<Location<F>>,
+    ) -> Result<ProofBitmap<N>, QmdbError> {
         let metadata = self
             .load_current_boundary_metadata(session, watermark)
             .await?;
-        let pruned_chunks_u64 = metadata.pruned_chunks;
-        let pruned_chunks = usize::try_from(pruned_chunks_u64).map_err(|_| {
-            QmdbError::CorruptData("current bitmap pruned chunk count overflows usize".to_string())
-        })?;
-        let last_chunk = if len == 0 {
-            None
-        } else if len % chunk_bits == 0 {
-            Some((len / chunk_bits).saturating_sub(1))
-        } else {
-            Some(len / chunk_bits)
-        };
-
-        let mut chunks = std::collections::BTreeMap::new();
-        if let Some(last_chunk) = last_chunk.filter(|last| *last >= pruned_chunks_u64) {
-            let loaded = futures::future::try_join_all((pruned_chunks_u64..=last_chunk).map(
-                |chunk_index| async move {
-                    let chunk = self
-                        .load_bitmap_chunk_with_floor(
-                            session,
-                            watermark,
-                            inactivity_floor,
-                            chunk_index,
-                        )
-                        .await?;
-                    let chunk_index = usize::try_from(chunk_index).map_err(|_| {
-                        QmdbError::CorruptData(
-                            "current bitmap chunk index overflows usize".to_string(),
-                        )
-                    })?;
-                    Ok::<_, QmdbError>((chunk_index, chunk))
-                },
-            ))
-            .await?;
-            chunks.extend(loaded);
-        }
-
-        Ok(MaterializedBitmapStatus {
-            len,
-            pruned_chunks,
-            chunks,
+        ProofBitmap::load(watermark, metadata.pruned_chunks, location, |chunk| {
+            self.load_bitmap_chunk_with_floor(session, watermark, inactivity_floor, chunk)
         })
+        .await
     }
 
     async fn build_current_range_proof(
@@ -1251,7 +1162,7 @@ where
     ) -> Result<RangeProof<F, H::Digest>, QmdbError> {
         let inactivity_floor = self.load_inactivity_floor_at(session, watermark).await?;
         let status = self
-            .materialize_bitmap_status(session, watermark, inactivity_floor)
+            .proof_bitmap(session, watermark, inactivity_floor, None)
             .await?;
         let storage = KvCurrentStorage::<F, H::Digest, N> {
             session,
@@ -1285,7 +1196,7 @@ where
             .await?;
         let inactivity_floor = self.load_inactivity_floor_at(session, watermark).await?;
         let status = self
-            .materialize_bitmap_status(session, watermark, inactivity_floor)
+            .proof_bitmap(session, watermark, inactivity_floor, Some(location))
             .await?;
         let storage = KvCurrentStorage::<F, H::Digest, N> {
             session,

@@ -38,6 +38,7 @@ pub mod error;
 pub mod proof;
 pub mod proto;
 pub mod prune;
+mod request;
 pub(crate) mod storage;
 
 mod immutable;

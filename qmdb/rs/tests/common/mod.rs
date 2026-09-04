@@ -45,6 +45,7 @@ pub fn merkle_config(prefix: &str, page_cache: CacheRef) -> MerkleConfig<Sequent
         metadata_partition: format!("{prefix}-mmr-metadata"),
         items_per_blob: NZU64!(8),
         write_buffer: NZUsize!(1024),
+        replay_buffer: NZUsize!(1024),
         strategy: Sequential,
         page_cache,
     }
@@ -64,6 +65,7 @@ pub fn variable_journal_config<C>(
         codec_config,
         page_cache,
         write_buffer: NZUsize!(1024),
+        replay_buffer: NZUsize!(1024),
     }
 }
 
@@ -146,7 +148,6 @@ pub fn immutable_variable_config<C>(
         merkle_config: merkle_config(prefix, page_cache.clone()),
         log: variable_journal_config(prefix, page_cache, codec_config, items_per_section),
         translator: TwoCap,
-        init_cache_size: None,
         init_buffer: NZUsize!(1 << 21),
     }
 }

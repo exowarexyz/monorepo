@@ -75,9 +75,15 @@ async function sha256(bytes: Uint8Array): Promise<Uint8Array> {
 }
 
 async function verifyDemoHeader({
+  certificate,
+  context,
   payload,
   header,
 }: SimplexHeaderVerification): Promise<boolean> {
+  // The demo seeder uses the block height as its signed Simplex view
+  if (context.kind === 'finalization' && context.height !== undefined && certificate.view !== context.height) {
+    return false;
+  }
   return bytesEqual(payload, await sha256(header));
 }
 
@@ -91,6 +97,7 @@ async function verifyDemoBlock(header: Uint8Array, body: Uint8Array): Promise<bo
 function renderCertificate(value: VerifiedSimplexCertificate): string {
   return [
     `scheme ${value.scheme}`,
+    `epoch ${value.epoch.toString()}`,
     `view ${value.view.toString()}`,
     `parent ${value.parent.toString()}`,
     `payload ${renderBytes(value.payload)}`,
@@ -915,8 +922,8 @@ export function SimplexPanel({
                   entry.type === 'notarization'
                     ? `notarization view ${entry.view.toString()}`
                     : `finalization ${entry.index} ${
-                        entry.index === 'view'
-                          ? entry.view.toString()
+                        entry.index !== 'height'
+                          ? `${entry.epoch === undefined ? '' : `${entry.epoch.toString()}:`}${entry.view.toString()}`
                           : entry.height.toString()
                       }`;
                 return (

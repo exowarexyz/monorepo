@@ -1,22 +1,20 @@
-use std::any::Any;
 use std::collections::HashSet;
 use std::fmt;
 use std::sync::Arc;
 
 use datafusion::arrow::datatypes::SchemaRef;
 use datafusion::arrow::record_batch::RecordBatch;
-use datafusion::common::config::ConfigOptions;
-use datafusion::common::tree_node::{Transformed, TransformedResult, TreeNode};
+use datafusion::common::tree_node::TreeNodeRecursion;
 use datafusion::common::{DataFusionError, Result as DataFusionResult};
 use datafusion::execution::context::TaskContext;
 use datafusion::physical_expr::expressions::Column;
-use datafusion::physical_expr::{EquivalenceProperties, Partitioning, PhysicalSortExpr};
-use datafusion::physical_optimizer::PhysicalOptimizerRule;
+use datafusion::physical_expr::{
+    EquivalenceProperties, Partitioning, PhysicalExpr, PhysicalSortExpr,
+};
 use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
-use datafusion::physical_plan::sorts::sort::SortExec;
 use datafusion::physical_plan::{
-    coop::CooperativeExec, stream::RecordBatchStreamAdapter, DisplayAs, DisplayFormatType,
-    ExecutionPlan, PlanProperties, SendableRecordBatchStream, SortOrderPushdownResult,
+    stream::RecordBatchStreamAdapter, DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties,
+    SendableRecordBatchStream, SortOrderPushdownResult,
 };
 use exoware_sdk::keys::Key;
 use exoware_sdk::kv_codec::decode_stored_row;
@@ -56,26 +54,26 @@ pub(crate) struct KvScanExec {
     pub(crate) direction: ScanDirection,
     pub(crate) projected_schema: SchemaRef,
     pub(crate) projection: Option<Vec<usize>>,
-    pub(crate) properties: PlanProperties,
+    pub(crate) properties: Arc<PlanProperties>,
 }
 
 impl KvScanExec {
     fn make_properties(
         projected_schema: SchemaRef,
         output_ordering: Option<Vec<PhysicalSortExpr>>,
-    ) -> PlanProperties {
+    ) -> Arc<PlanProperties> {
         let equivalence_properties = match output_ordering {
             Some(ordering) if !ordering.is_empty() => {
                 EquivalenceProperties::new_with_orderings(projected_schema.clone(), [ordering])
             }
             _ => EquivalenceProperties::new(projected_schema.clone()),
         };
-        PlanProperties::new(
+        Arc::new(PlanProperties::new(
             equivalence_properties,
             Partitioning::UnknownPartitioning(1),
             EmissionType::Incremental,
             Boundedness::Bounded,
-        )
+        ))
     }
 
     pub(crate) fn new(
@@ -160,13 +158,16 @@ impl KvScanExec {
             if sort_expr.options.descending != first_desc {
                 return Ok(None);
             }
-            let Some(column) = sort_expr.expr.as_any().downcast_ref::<Column>() else {
+            let Some(column) = sort_expr.expr.downcast_ref::<Column>() else {
                 return Ok(None);
             };
-            let Some(&actual_col_idx) = self.model.columns_by_name.get(column.name()) else {
-                return Ok(None);
-            };
-            if actual_col_idx != expected_col_idx {
+            let actual_col_idx = self
+                .projection
+                .as_ref()
+                .map_or(Some(column.index()), |proj| {
+                    proj.get(column.index()).copied()
+                });
+            if actual_col_idx != Some(expected_col_idx) {
                 return Ok(None);
             }
         }
@@ -249,20 +250,23 @@ impl ExecutionPlan for KvScanExec {
         "KvScanExec"
     }
 
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn schema(&self) -> SchemaRef {
         self.projected_schema.clone()
     }
 
-    fn properties(&self) -> &PlanProperties {
+    fn properties(&self) -> &Arc<PlanProperties> {
         &self.properties
     }
 
     fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
         vec![]
+    }
+
+    fn apply_expressions(
+        &self,
+        _f: &mut dyn FnMut(&Arc<dyn PhysicalExpr>) -> DataFusionResult<TreeNodeRecursion>,
+    ) -> DataFusionResult<TreeNodeRecursion> {
+        Ok(TreeNodeRecursion::Continue)
     }
 
     fn with_new_children(
@@ -346,7 +350,11 @@ impl ExecutionPlan for KvScanExec {
         let Some(direction) = self.order_direction_for_primary_key(order)? else {
             return Ok(SortOrderPushdownResult::Unsupported);
         };
-        Ok(SortOrderPushdownResult::Inexact {
+        // A fetch selects rows in the current traversal direction
+        if self.limit.is_some() && direction != self.direction {
+            return Ok(SortOrderPushdownResult::Unsupported);
+        }
+        Ok(SortOrderPushdownResult::Exact {
             inner: Arc::new(self.with_ordering(direction, order.to_vec())),
         })
     }
@@ -735,90 +743,4 @@ async fn range_stream_with_direction(
         )
         .await
         .map_err(|e| DataFusionError::External(Box::new(e)))
-}
-
-#[derive(Debug, Clone, Default)]
-pub(crate) struct KvTopKSortPushdownRule;
-
-impl KvTopKSortPushdownRule {
-    pub(crate) fn new() -> Self {
-        Self
-    }
-}
-
-impl PhysicalOptimizerRule for KvTopKSortPushdownRule {
-    fn optimize(
-        &self,
-        plan: Arc<dyn ExecutionPlan>,
-        config: &ConfigOptions,
-    ) -> DataFusionResult<Arc<dyn ExecutionPlan>> {
-        if !config.optimizer.enable_sort_pushdown {
-            return Ok(plan);
-        }
-
-        plan.transform_down(|plan: Arc<dyn ExecutionPlan>| {
-            let Some(sort_exec) = plan.as_any().downcast_ref::<SortExec>() else {
-                return Ok(Transformed::no(plan));
-            };
-            let Some(fetch) = sort_exec.fetch() else {
-                return Ok(Transformed::no(plan));
-            };
-            let Some(ordered_scan) = push_topk_fetch_to_ordered_scan(
-                sort_exec.input().clone(),
-                sort_exec.expr(),
-                fetch,
-            )?
-            else {
-                return Ok(Transformed::no(plan));
-            };
-            let sort = SortExec::new(sort_exec.expr().clone(), ordered_scan)
-                .with_fetch(Some(fetch))
-                .with_preserve_partitioning(sort_exec.preserve_partitioning());
-            Ok(Transformed::yes(Arc::new(sort) as Arc<dyn ExecutionPlan>))
-        })
-        .data()
-    }
-
-    fn name(&self) -> &str {
-        "kv_topk_sort_pushdown"
-    }
-
-    fn schema_check(&self) -> bool {
-        true
-    }
-}
-
-fn push_topk_fetch_to_ordered_scan(
-    plan: Arc<dyn ExecutionPlan>,
-    order: &[PhysicalSortExpr],
-    fetch: usize,
-) -> DataFusionResult<Option<Arc<dyn ExecutionPlan>>> {
-    if let Some(scan_exec) = plan.as_any().downcast_ref::<KvScanExec>() {
-        let Some(direction) = scan_exec.order_direction_for_primary_key(order)? else {
-            return Ok(None);
-        };
-        let limit = Some(
-            scan_exec
-                .limit
-                .map_or(fetch, |existing| existing.min(fetch)),
-        );
-        return Ok(Some(Arc::new(scan_exec.with_scan_options(
-            limit,
-            direction,
-            Some(order.to_vec()),
-        ))));
-    }
-
-    if plan.as_any().downcast_ref::<CooperativeExec>().is_none() {
-        return Ok(None);
-    }
-    let children = plan.children();
-    if children.len() != 1 {
-        return Ok(None);
-    }
-    let Some(new_child) = push_topk_fetch_to_ordered_scan(Arc::clone(children[0]), order, fetch)?
-    else {
-        return Ok(None);
-    };
-    plan.with_new_children(vec![new_child]).map(Some)
 }

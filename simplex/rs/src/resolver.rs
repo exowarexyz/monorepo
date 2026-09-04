@@ -167,6 +167,6 @@ async fn fetch_value<D: Digest>(
     match key {
         MarshalKey::Block(commitment) => client.get_header_raw(&commitment).await,
         MarshalKey::Finalized { height } => client.get_finalized_by_height_raw(height).await,
-        MarshalKey::Notarized { round } => client.get_notarized_raw(round.view()).await,
+        MarshalKey::Notarized { round } => client.get_notarized_by_round_raw(round).await,
     }
 }

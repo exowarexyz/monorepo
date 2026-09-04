@@ -5,8 +5,8 @@ Store. The package mirrors the Rust `exoware-simplex` key layout:
 
 - header bytes by digest
 - full `{ header, body }` block data by digest
-- notarized `{ proof, header }` bytes by Simplex view
-- finalized `{ proof, header }` bytes by Simplex view
+- notarized `{ proof, header }` bytes by Simplex epoch and view
+- finalized `{ proof, header }` bytes by Simplex epoch and view
 - finalized `{ proof, header }` bytes by block height
 
 The TypeScript client uploads raw encoded bytes. Certificate reads verify bytes
@@ -18,6 +18,7 @@ import { SimplexClient } from '@exowarexyz/simplex';
 
 const simplex = new SimplexClient('http://localhost:10000');
 await simplex.uploadFinalization({
+  epoch: 0n,
   view: 42n,
   height: 42n,
   digest: '0x...',
@@ -29,8 +30,10 @@ await simplex.uploadFinalization({
 
 Use `prepareHeader`, `prepareBlock`, `prepareNotarization`, and
 `prepareFinalization` to stage multiple Simplex rows into one
-`StoreWriteBatch`. Finalizations are stored by view and by height so callers can
-fetch a specific view or the latest finalized height index.
+`StoreWriteBatch`. Finalizations are stored by round and height, with a legacy view alias. Use
+`getNotarizationByRound(epoch, view)` and `getFinalizationByRound(epoch, view)`
+when epochs can change. Raw uploads must provide the encoded certificate's
+epoch and view; omitted upload epochs default to zero.
 
 Use `getHeader` or `subscribeHeaders` when only header bytes are needed. Use
 `getBlock` or `subscribeBlocks` when the caller needs the full
@@ -131,3 +134,16 @@ const verifier = await createWasmSimplexVerifier({
   verifyHeader: createWasmSimplexHeaderVerifier(myBlockVerifierWasm),
 });
 ```
+
+
+The built-in verifier returns the signed `epoch` and checks any requested epoch
+and view before application header verification. Custom verifiers receive the
+same context and own those checks, including height/header binding. Select
+verification material for the certificate's epoch; storing an epoch does not
+make its signing keys trusted.
+
+Round reads fall back to legacy view rows and verify their requested identity.
+Certificate subscriptions include both layouts and suppress legacy aliases
+when a matching canonical record appears in the same Store frame. Existing
+legacy history remains readable, but view-only rows cannot preserve multiple
+epochs at the same view. Re-upload retained artifacts to backfill round indices.

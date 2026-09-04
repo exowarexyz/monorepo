@@ -509,6 +509,7 @@ where
 
 #[derive(Clone, Debug)]
 struct PendingBatch<F: Family> {
+    latest: Location<F>,
     sequence_number: u64,
     matched: Vec<(Location<F>, Vec<u8>)>,
 }
@@ -581,7 +582,7 @@ struct BatchSubscribeStream<D: commonware_cryptography::Digest, F: Graftable> {
             + 'static,
     >,
     sub: exoware_sdk::StreamSubscription,
-    pending: BTreeMap<Location<F>, PendingBatch<F>>,
+    pending: VecDeque<PendingBatch<F>>,
     watermarks: BTreeMap<Location<F>, u64>,
     ready: VecDeque<ReadyBatch<F>>,
     building: Option<BoxFuture<'static, Result<PreEncoded<SubscribeResponse>, ConnectError>>>,
@@ -634,7 +635,7 @@ impl<D: commonware_cryptography::Digest, F: Graftable> BatchSubscribeStream<D, F
             extract_kv,
             build_proof,
             sub,
-            pending: BTreeMap::new(),
+            pending: VecDeque::new(),
             watermarks: BTreeMap::new(),
             ready: VecDeque::new(),
             building: None,
@@ -687,7 +688,9 @@ impl<D: commonware_cryptography::Digest, F: Graftable> BatchSubscribeStream<D, F
                         matched.push((location, entry.value.to_vec()));
                     }
                 }
-                sub::RowFamily::Presence => latest = Some(location),
+                sub::RowFamily::Presence => {
+                    latest = Some(latest.map_or(location, |previous| previous.max(location)))
+                }
                 sub::RowFamily::Watermark => {
                     self.watermarks
                         .entry(location)
@@ -701,13 +704,11 @@ impl<D: commonware_cryptography::Digest, F: Graftable> BatchSubscribeStream<D, F
                 Box::new(ConnectError::internal("qmdb batch missing presence row"))
             })?;
             matched.sort_by_key(|(loc, _)| *loc);
-            self.pending.insert(
+            self.pending.push_back(PendingBatch {
                 latest,
-                PendingBatch {
-                    sequence_number: frame.sequence_number,
-                    matched,
-                },
-            );
+                sequence_number: frame.sequence_number,
+                matched,
+            });
         }
 
         self.drain_ready();
@@ -720,15 +721,17 @@ impl<D: commonware_cryptography::Digest, F: Graftable> BatchSubscribeStream<D, F
 }
 
 fn drain_ready<F: Family>(
-    pending: &mut BTreeMap<Location<F>, PendingBatch<F>>,
+    pending: &mut VecDeque<PendingBatch<F>>,
     watermarks: &mut BTreeMap<Location<F>, u64>,
     ready: &mut VecDeque<ReadyBatch<F>>,
 ) {
-    while let Some((&latest, _)) = pending.iter().next() {
-        let Some((&watermark, &watermark_sequence)) = watermarks.range(latest..).next() else {
+    // Resume cursors follow Store order even when operation ranges commit out of order
+    while let Some(batch) = pending.front() {
+        let Some((&watermark, &watermark_sequence)) = watermarks.range(batch.latest..).next()
+        else {
             break;
         };
-        let (_, batch) = pending.pop_first().expect("pending is not empty");
+        let batch = pending.pop_front().expect("pending is not empty");
         ready.push_back(ReadyBatch {
             watermark,
             batch_sequence: batch.sequence_number,
@@ -737,10 +740,11 @@ fn drain_ready<F: Family>(
         });
     }
 
-    if let Some(&floor) = pending
-        .keys()
-        .next()
-        .or_else(|| watermarks.keys().next_back())
+    if let Some(floor) = pending
+        .iter()
+        .map(|batch| batch.latest)
+        .min()
+        .or_else(|| watermarks.keys().next_back().copied())
     {
         *watermarks = watermarks.split_off(&floor);
     }
@@ -1211,8 +1215,12 @@ where
 mod tests {
     use super::*;
 
-    fn pending(sequence_number: u64) -> PendingBatch<commonware_storage::merkle::mmr::Family> {
+    fn pending(
+        latest: u64,
+        sequence_number: u64,
+    ) -> PendingBatch<commonware_storage::merkle::mmr::Family> {
         PendingBatch {
+            latest: Location::new(latest),
             sequence_number,
             matched: vec![(
                 Location::<commonware_storage::merkle::mmr::Family>::new(sequence_number),
@@ -1257,20 +1265,7 @@ mod tests {
         // watermark at location 12 (published at store seq 15). If they all
         // emitted the same resume cursor, a client that received only the
         // first batch and reconnected at resume+1 would skip the other two.
-        let mut pending = BTreeMap::from([
-            (
-                Location::<commonware_storage::merkle::mmr::Family>::new(10),
-                pending(10),
-            ),
-            (
-                Location::<commonware_storage::merkle::mmr::Family>::new(11),
-                pending(11),
-            ),
-            (
-                Location::<commonware_storage::merkle::mmr::Family>::new(12),
-                pending(12),
-            ),
-        ]);
+        let mut pending = VecDeque::from([pending(10, 10), pending(11, 11), pending(12, 12)]);
         let mut watermarks = BTreeMap::from([(
             Location::<commonware_storage::merkle::mmr::Family>::new(12),
             15u64,
@@ -1301,5 +1296,44 @@ mod tests {
             .filter(|&seq| seq >= next_since)
             .collect();
         assert_eq!(not_yet_delivered, vec![11, 12]);
+    }
+
+    #[test]
+    fn out_of_order_uploads_preserve_subscription_replay_order() {
+        type F = commonware_storage::merkle::mmr::Family;
+        let mut pending = VecDeque::from([pending(20, 10), pending(10, 11)]);
+        let mut watermarks = BTreeMap::from([(Location::<F>::new(20), 12)]);
+        let mut ready = VecDeque::new();
+        drain_ready(&mut pending, &mut watermarks, &mut ready);
+        let cursors = ready
+            .iter()
+            .map(|batch| batch.batch_sequence)
+            .collect::<Vec<_>>();
+        assert_eq!(cursors, [10, 11]);
+        let resume = cursors[0] + 1;
+        assert!(cursors[1..].iter().all(|cursor| *cursor >= resume));
+        assert!(ready.iter().all(|batch| batch.read_floor_sequence == 12));
+    }
+
+    #[test]
+    fn subscription_waits_for_earlier_store_sequence_to_be_published() {
+        type F = commonware_storage::merkle::mmr::Family;
+        let mut pending = VecDeque::from([pending(20, 10), pending(10, 11)]);
+        let mut watermarks = BTreeMap::from([(Location::<F>::new(10), 11)]);
+        let mut ready = VecDeque::new();
+        drain_ready(&mut pending, &mut watermarks, &mut ready);
+        assert!(
+            ready.is_empty(),
+            "a cursor must not skip an unpublished earlier Store frame"
+        );
+        watermarks.insert(Location::new(20), 12);
+        drain_ready(&mut pending, &mut watermarks, &mut ready);
+        assert_eq!(
+            ready
+                .iter()
+                .map(|batch| batch.batch_sequence)
+                .collect::<Vec<_>>(),
+            [10, 11]
+        );
     }
 }

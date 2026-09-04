@@ -186,6 +186,7 @@ where
                     items_per_blob: NZU64!(7),
                     page_cache,
                     write_buffer: NZUsize!(1024),
+                    replay_buffer: NZUsize!(1024),
                 },
             };
             let mut db: FixedLocalDb<F> = FixedLocalDb::init(context.child("keyless_fixed"), cfg)

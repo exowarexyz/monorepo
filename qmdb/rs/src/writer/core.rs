@@ -201,7 +201,10 @@ impl<D: Digest, F: Family, S: Strategy> WriterCore<D, F, S> {
 
         let result = self
             .strategy
-            .spawn(move |strategy| build(ctx, strategy))
+            .spawn(
+                usize::try_from(ops_len).unwrap_or(usize::MAX),
+                move |strategy| build(ctx, strategy),
+            )
             .await?;
 
         let mut state = self.state.lock().await;

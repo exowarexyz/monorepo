@@ -204,12 +204,14 @@ async fn seed(
                     metadata_partition: "mmb-metadata".into(),
                     items_per_blob: NZU64!(8),
                     write_buffer: NZUsize!(1024),
+                    replay_buffer: NZUsize!(1024),
                     strategy: Sequential,
                     page_cache: page_cache.clone(),
                 },
                 journal_config: JournalConfig {
                     partition: "mmb-log".into(),
                     write_buffer: NZUsize!(1024),
+                    replay_buffer: NZUsize!(1024),
                     compression: None,
                     codec_config: (
                         ((0..=MAX_OPERATION_SIZE).into(), ()),

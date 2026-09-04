@@ -63,6 +63,84 @@ fn validated_client(
     OperationLogClient::plaintext(base, ((0..=10000).into(), ()))
 }
 
+#[tokio::test]
+async fn shared_upload_subscription_uses_highest_presence() {
+    use commonware_cryptography::Sha256;
+    use commonware_storage::merkle::Position;
+    use commonware_storage::qmdb::any::value::VariableEncoding;
+    use exoware_qmdb::build_keyless_upload;
+    use exoware_sdk::StoreWriteBatch;
+
+    let store = common::local_store_client().await;
+    let writer: KeylessWriter<mmr::Family, Sha256, Vec<u8>> =
+        KeylessWriter::fresh(PrefixedStoreClient::empty(store.clone()));
+    let operations = vec![
+        KeylessOperation::Append(b"first".to_vec()),
+        KeylessOperation::Commit(None, Location::new(0)),
+        KeylessOperation::Append(b"second".to_vec()),
+        KeylessOperation::Commit(None, Location::new(0)),
+    ];
+    let root = build_keyless_upload::<mmr::Family, Sha256, Vec<u8>, VariableEncoding<Vec<u8>>>(
+        Vec::new(),
+        Position::new(0),
+        Location::new(3),
+        &operations,
+        None,
+    )
+    .unwrap()
+    .new_root;
+    let mut first = writer
+        .prepare_upload(operations[..2].to_vec())
+        .await
+        .unwrap();
+    let mut second = writer
+        .prepare_upload(operations[2..].to_vec())
+        .await
+        .unwrap();
+    let publication = writer
+        .prepare_flush_for_uploads([&first, &second])
+        .await
+        .unwrap()
+        .unwrap();
+    let mut batch = StoreWriteBatch::new();
+    // An atomic batch may stage its upload ranges in either order
+    writer.stage_upload(&mut second, &mut batch).unwrap();
+    writer.stage_upload(&mut first, &mut batch).unwrap();
+    writer.stage_flush(&publication, &mut batch).unwrap();
+    let sequence = batch.commit(&store).await.unwrap();
+    writer.mark_upload_persisted(first, sequence).await;
+    writer.mark_upload_persisted(second, sequence).await;
+    writer.mark_flush_persisted(publication, sequence).await;
+
+    let reader = Arc::new(TestKeylessClient::new(
+        PrefixedStoreClient::empty(store),
+        ((0..=10000).into(), ()),
+    ));
+    let (server, url) = spawn_qmdb_server(reader).await;
+    let mut stream = validated_client(&url)
+        .subscribe(ProtoSubscribeRequest {
+            since_sequence_number: Some(sequence),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let frame = stream
+        .message_with_root(common::trusted_root(root))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(frame.resume_sequence_number, sequence);
+    assert_eq!(
+        frame.operations,
+        operations
+            .into_iter()
+            .enumerate()
+            .map(|(index, operation)| (Location::new(index as u64), operation))
+            .collect::<Vec<_>>()
+    );
+    server.abort();
+}
+
 struct LocalBatch {
     operations: Vec<BatchOperation>,
     root: Digest,
@@ -232,8 +310,15 @@ async fn keyless_operation_log_sync_resolver_fetches_api_batches() {
         BatchOperation,
     >::plaintext(&qmdb_url, ((0..=10000).into(), ()));
     let op_count = Location::new(local.operations.len() as u64);
-    let target = resolver.target(op_count).await.expect("sync target");
+    let target = resolver
+        .target(op_count, &local.root)
+        .await
+        .expect("sync target");
     assert_eq!(target.root, local.root);
+    assert!(resolver
+        .target(op_count, &commonware_cryptography::Sha256::fill(0xff))
+        .await
+        .is_err());
 
     let (response, callback) = resolver
         .serve(Request::Operations {
@@ -258,6 +343,19 @@ async fn keyless_operation_log_sync_resolver_fetches_api_batches() {
         callback.is_none(),
         "direct sync resolver fetches do not allocate an unused validation callback"
     );
+
+    let (response, _) = resolver
+        .serve(Request::Operations {
+            size: op_count,
+            start: Location::new(0),
+            max_ops: std::num::NonZeroU64::MAX,
+        })
+        .await
+        .expect("a large maximum permits a smaller API batch");
+    let Response::Operations { operations, .. } = response else {
+        panic!("operation request returned boundary response");
+    };
+    assert_eq!(operations, local.operations);
 }
 
 #[tokio::test]
@@ -283,7 +381,7 @@ async fn keyless_commonware_glue_state_sync_uses_operation_log_resolver() {
     >::plaintext(&qmdb_url, ((0..=10000).into(), ()));
     let op_count = Location::new(local.operations.len() as u64);
     let target = resolver
-        .target_range(local.inactivity_floor, op_count)
+        .target_range(local.inactivity_floor, op_count, &local.root)
         .await
         .expect("limited sync target");
     assert_eq!(target.root, local.root);

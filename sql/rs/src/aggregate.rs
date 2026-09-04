@@ -1,4 +1,3 @@
-use std::any::Any;
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
@@ -10,13 +9,13 @@ use datafusion::arrow::compute::cast;
 use datafusion::arrow::datatypes::{i256, DataType, SchemaRef, TimeUnit};
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::catalog::Session;
-use datafusion::common::tree_node::{Transformed, TreeNode};
+use datafusion::common::tree_node::{Transformed, TreeNode, TreeNodeRecursion};
 use datafusion::common::{DataFusionError, Result as DataFusionResult, ScalarValue};
 use datafusion::datasource::{provider_as_source, source_as_provider, TableProvider};
 use datafusion::execution::context::TaskContext;
 use datafusion::logical_expr::{Expr, LogicalPlan, LogicalPlanBuilder, Operator, TableType};
 use datafusion::optimizer::optimizer::OptimizerRule;
-use datafusion::physical_expr::{EquivalenceProperties, Partitioning};
+use datafusion::physical_expr::{EquivalenceProperties, Partitioning, PhysicalExpr};
 use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
 use datafusion::physical_plan::{
     stream::RecordBatchStreamAdapter, DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties,
@@ -151,7 +150,7 @@ pub(crate) struct KvAggregateExec {
     pub(crate) spec: AggregatePushdownSpec,
     pub(crate) projection: Option<Vec<usize>>,
     pub(crate) projected_schema: SchemaRef,
-    pub(crate) properties: PlanProperties,
+    pub(crate) properties: Arc<PlanProperties>,
 }
 
 impl KvAggregatePushdownRule {
@@ -202,7 +201,7 @@ impl KvAggregatePushdownRule {
         let Ok(provider) = source_as_provider(&scan.source) else {
             return Ok(Transformed::no(LogicalPlan::Aggregate(aggregate)));
         };
-        let Some(kv_table) = provider.as_any().downcast_ref::<KvTable>() else {
+        let Some(kv_table) = provider.downcast_ref::<KvTable>() else {
             return Ok(Transformed::no(LogicalPlan::Aggregate(aggregate)));
         };
         let Some(spec) = try_build_aggregate_pushdown_spec(
@@ -270,10 +269,6 @@ impl OptimizerRule for KvAggregatePushdownRule {
 
 #[async_trait]
 impl TableProvider for KvAggregateTable {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn schema(&self) -> SchemaRef {
         self.spec.schema.clone()
     }
@@ -307,12 +302,12 @@ impl KvAggregateExec {
         projection: Option<Vec<usize>>,
         projected_schema: SchemaRef,
     ) -> Self {
-        let properties = PlanProperties::new(
+        let properties = Arc::new(PlanProperties::new(
             EquivalenceProperties::new(projected_schema.clone()),
             Partitioning::UnknownPartitioning(1),
             EmissionType::Incremental,
             Boundedness::Bounded,
-        );
+        ));
         Self {
             spec,
             projection,
@@ -352,20 +347,23 @@ impl ExecutionPlan for KvAggregateExec {
         "KvAggregateExec"
     }
 
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn schema(&self) -> SchemaRef {
         self.projected_schema.clone()
     }
 
-    fn properties(&self) -> &PlanProperties {
+    fn properties(&self) -> &Arc<PlanProperties> {
         &self.properties
     }
 
     fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
         vec![]
+    }
+
+    fn apply_expressions(
+        &self,
+        _f: &mut dyn FnMut(&Arc<dyn PhysicalExpr>) -> DataFusionResult<TreeNodeRecursion>,
+    ) -> DataFusionResult<TreeNodeRecursion> {
+        Ok(TreeNodeRecursion::Continue)
     }
 
     fn with_new_children(

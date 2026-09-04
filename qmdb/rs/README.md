@@ -22,7 +22,7 @@ Merkle family (`F: merkle::Family`, or `F: merkle::Graftable` for current QMDB).
 They are also generic over Commonware value encodings (`E: ValueEncoding`):
 the default is `VariableEncoding<V>`, and callers can select `FixedEncoding<V>`
 for the fixed operation/proof variants.
-The demo CLI uses MMR, but the store-backed library path is tested with both
+The demo CLI uses MMB, but the store-backed library path is tested with both
 MMR and MMB. QMDB row keys are scoped by the SDK `StoreKeyPrefix` / Store
 namespace supplied to the client; they do not embed a separate Merkle-family tag.
 
@@ -132,14 +132,6 @@ The update-row family is keyed by:
 - global operation location
 
 This makes historical "latest update for key at or below watermark" lookups fast.
-
-Authenticated backends (immutable and keyless) store their rows under these same
-shared families. Their operation, node, watermark, and presence rows reserve the
-first payload byte for a backend namespace tag: `1` for immutable, `2` for
-keyless. The immutable backend also writes keyed historical update rows (its
-index for `get_at` lookups) using exactly the key layout described above and no
-namespace tag: the keyless backend stores no rows in this family, so it needs
-none.
 
 ### Compaction prune-policy helpers
 
@@ -661,3 +653,32 @@ implementations and check:
 
 There is also explicit coverage for current proofs below a later published low
 watermark.
+
+### Proof request and sync contracts
+
+Unary operation range clients bind verified proofs to the exact requested
+`[start, min(start + max_locations, tip + 1))` window. Ordered key-range
+verification enforces a linear interval and forward pagination over the
+cyclic authenticated successor links.
+
+`OperationLogSyncResolver::target` and `target_range` require an independently
+trusted operation-log root. `CurrentSyncResolver` derives that root using a
+witness checked against its configured trusted current root. Source requests
+retain u64 absolute locations and cap oversized batch maxima to the u32 RPC
+limit; a maximum permits a smaller batch. Subscription resume cursors follow
+Store sequence order even when operation ranges are uploaded out of order.
+
+Current proof construction reads persisted Merkle nodes and at most the queried,
+pending, and partial bitmap chunks. Ordered exclusion and key-range discovery
+still scan retained update history and active keys; their cost grows with that
+history even for a small limit. Generic key ordering is `K::Ord`, which need not
+match raw-byte ordering, so an index optimization must preserve that contract.
+`recover_boundary_state` also requires cumulative before/after operation logs;
+its write-side memory and scanning cost grows with history. Writer frontier
+recovery instead fetches only the final operation and its checkpoint proof.
+
+A prepared upload must receive one success or failure notification. Drive its
+commit future to completion. If that future is canceled or the prepared handle
+is abandoned, discard the writer and reconstruct it from caller-owned committed
+state; cancellation does not synthesize an acknowledgment. Canceling CPU
+preparation before a handle is returned leaves the prior frontier intact.

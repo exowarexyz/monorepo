@@ -125,3 +125,103 @@ impl<F: Graftable, D: Digest, const N: usize> MerkleStorage<F> for KvCurrentStor
         })
     }
 }
+
+/// Bitmap metadata and the chunks consumed by one native current proof
+pub(crate) struct ProofBitmap<const N: usize> {
+    len: u64,
+    complete_chunks: usize,
+    pub(crate) pruned_chunks: usize,
+    chunks: std::collections::BTreeMap<usize, [u8; N]>,
+}
+
+impl<const N: usize> ProofBitmap<N> {
+    pub(crate) async fn load<F, Load, Fut>(
+        watermark: Location<F>,
+        pruned_chunks: u64,
+        location: Option<Location<F>>,
+        mut load: Load,
+    ) -> Result<Self, crate::QmdbError>
+    where
+        F: Graftable,
+        Load: FnMut(u64) -> Fut,
+        Fut: std::future::Future<Output = Result<[u8; N], crate::QmdbError>>,
+    {
+        let len = crate::codec::op_count_for_watermark(watermark)?.as_u64();
+        let chunk_bits = crate::codec::bitmap_chunk_bits::<N>();
+        let complete = len / chunk_bits;
+        let graftable = grafting::graftable_chunks::<F>(len, grafting::height::<N>()).min(complete);
+        if pruned_chunks > graftable || complete - graftable > 1 {
+            return Err(crate::QmdbError::CorruptData(
+                "invalid current bitmap window".into(),
+            ));
+        }
+        let index = |value| {
+            usize::try_from(value).map_err(|_| {
+                crate::QmdbError::CorruptData("current bitmap chunk index exceeds usize".into())
+            })
+        };
+        let complete_chunks = index(complete)?;
+        let mut required = std::collections::BTreeSet::new();
+        if len % chunk_bits != 0 {
+            required.insert(complete);
+        }
+        if complete > graftable {
+            required.insert(graftable);
+        }
+        if let Some(location) = location {
+            if location > watermark {
+                return Err(crate::QmdbError::CorruptData(
+                    "current proof location exceeds watermark".into(),
+                ));
+            }
+            required.insert(location.as_u64() / chunk_bits);
+        }
+        let mut chunks = std::collections::BTreeMap::new();
+        for chunk in required.into_iter().filter(|chunk| *chunk >= pruned_chunks) {
+            chunks.insert(index(chunk)?, load(chunk).await?);
+        }
+        Ok(Self {
+            len,
+            complete_chunks,
+            pruned_chunks: index(pruned_chunks)?,
+            chunks,
+        })
+    }
+}
+
+impl<const N: usize> commonware_utils::bitmap::Readable<N> for ProofBitmap<N> {
+    fn complete_chunks(&self) -> usize {
+        self.complete_chunks
+    }
+
+    fn get_chunk(&self, chunk: usize) -> [u8; N] {
+        if chunk < self.pruned_chunks {
+            [0; N]
+        } else {
+            *self
+                .chunks
+                .get(&chunk)
+                .expect("current proof requested an unloaded bitmap chunk")
+        }
+    }
+
+    fn last_chunk(&self) -> ([u8; N], u64) {
+        let bits = self.len % crate::codec::bitmap_chunk_bits::<N>();
+        let (index, bits) = if bits == 0 {
+            (
+                self.complete_chunks - 1,
+                crate::codec::bitmap_chunk_bits::<N>(),
+            )
+        } else {
+            (self.complete_chunks, bits)
+        };
+        (self.get_chunk(index), bits)
+    }
+
+    fn pruned_chunks(&self) -> usize {
+        self.pruned_chunks
+    }
+    fn len(&self) -> u64 {
+        self.len
+    }
+}
