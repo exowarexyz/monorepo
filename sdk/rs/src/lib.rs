@@ -448,7 +448,8 @@ impl PrefixedStoreClient {
         SerializableReadSession {
             client: self.clone(),
             state: Arc::new(SessionState {
-                sequence: Arc::new(AtomicU64::new(sequence)),
+                minimum_sequence: sequence,
+                sequence: Arc::new(AtomicU64::new(0)),
                 init_gate: tokio::sync::Mutex::new(()),
             }),
         }
@@ -1029,7 +1030,13 @@ impl RangeStream {
         }
         match self.stream.message().await? {
             Some(frame) => {
-                self.pending_frame = Some(frame.to_owned_message());
+                let frame = frame.to_owned_message();
+                if let (Some(sequence_store), Some(detail)) =
+                    (&self.observed_sequence, frame.detail.as_option())
+                {
+                    sequence_store.fetch_max(detail.sequence_number, Ordering::SeqCst);
+                }
+                self.pending_frame = Some(frame);
                 Ok(())
             }
             None => {
@@ -1150,7 +1157,13 @@ impl GetManyStream {
         }
         match self.stream.message().await? {
             Some(frame) => {
-                self.pending_frame = Some(frame.to_owned_message());
+                let frame = frame.to_owned_message();
+                if let (Some(sequence_store), Some(detail)) =
+                    (&self.observed_sequence, frame.detail.as_option())
+                {
+                    sequence_store.fetch_max(detail.sequence_number, Ordering::SeqCst);
+                }
+                self.pending_frame = Some(frame);
                 Ok(())
             }
             None => {
@@ -1678,20 +1691,14 @@ pub struct StoreClient {
     credential: Credential,
 }
 
-/// A session that enforces monotonic read consistency via a fixed `min_sequence_number` floor.
+/// A session whose read floor advances to the highest Store sequence observed.
 ///
-/// `StoreClient` itself does not retain any client-global observed sequence.
-/// Plain query reads are stateless unless the caller passes an explicit
-/// `min_sequence_number`.
+/// An explicit initial floor constrains reads without claiming that any read has
+/// evaluated at that sequence. Reads started after a response is observed use
+/// at least its sequence. Clones share the floor, including updates from streams.
 ///
-/// A `SerializableReadSession` is the explicit consistency mechanism. The first
-/// successful unary read seeds the session from the server-reported sequence,
-/// and every later read passes that fixed floor so the server guarantees all
-/// responses reflect at least that point in the write log.
-///
-/// Streamed query reads (`get_many`, `range_stream`, `range_reduce_stream`) expose their sequence in
-/// each returned chunk's detail, so if one of those is the first successful
-/// read, the session is pinned once the first detail-bearing chunk is consumed.
+/// Streamed reads record response sequences as frames arrive, including the
+/// first frame fetched before the stream is returned to the caller.
 #[derive(Clone, Debug)]
 pub struct SerializableReadSession {
     client: PrefixedStoreClient,
@@ -1700,12 +1707,20 @@ pub struct SerializableReadSession {
 
 #[derive(Debug)]
 struct SessionState {
+    minimum_sequence: u64,
     sequence: Arc<AtomicU64>,
     init_gate: tokio::sync::Mutex<()>,
 }
 
 impl SessionState {
     fn fixed_sequence(&self) -> Option<u64> {
+        let sequence = self.sequence.load(Ordering::Acquire);
+        (sequence > 0)
+            .then_some(sequence)
+            .or_else(|| (self.minimum_sequence > 0).then_some(self.minimum_sequence))
+    }
+
+    fn evaluated_sequence(&self) -> Option<u64> {
         let sequence = self.sequence.load(Ordering::Acquire);
         (sequence > 0).then_some(sequence)
     }
@@ -2218,14 +2233,19 @@ impl StoreClient {
                                 "reduction stream returned no frames",
                             )
                         })?;
-                    Ok((stream, Some(first)))
+                    Ok((stream, first))
                 })
             })
             .await?;
         let observed_sequence = options.observed_sequence;
+        if let (Some(sequence), Some(detail)) =
+            (&observed_sequence, first.view().detail.as_option())
+        {
+            sequence.fetch_max(detail.sequence_number, Ordering::SeqCst);
+        }
         let credential = self.credential;
         Ok(
-            futures::stream::try_unfold((stream, first), move |(mut stream, first)| {
+            futures::stream::try_unfold((stream, Some(first)), move |(mut stream, first)| {
                 let observed_sequence = observed_sequence.clone();
                 async move {
                     let frame = if let Some(frame) = first {
@@ -2236,15 +2256,17 @@ impl StoreClient {
                             .await
                             .map_err(|err| client_error_from_connect(err, credential))?
                         {
-                            Some(frame) => frame,
+                            Some(frame) => {
+                                if let (Some(sequence), Some(detail)) =
+                                    (&observed_sequence, frame.view().detail.as_option())
+                                {
+                                    sequence.fetch_max(detail.sequence_number, Ordering::SeqCst);
+                                }
+                                frame
+                            }
                             None => return Ok(None),
                         }
                     };
-                    if let (Some(sequence), Some(detail)) =
-                        (&observed_sequence, frame.view().detail.as_option())
-                    {
-                        sequence.fetch_max(detail.sequence_number, Ordering::SeqCst);
-                    }
                     Ok(Some((frame, (stream, None))))
                 }
             })
@@ -2661,23 +2683,32 @@ impl<'a> Retention<'a> {
 }
 
 impl SerializableReadSession {
-    /// Fixed sequence floor for this session, if one has been established yet.
+    /// Minimum Store sequence requested by subsequent reads.
     ///
-    /// Fresh sessions start with `None` unless created via
-    /// [`PrefixedStoreClient::create_session_with_sequence`]. A first streamed query
-    /// read (`get_many`, `range_stream`) sets this once a detail-bearing chunk
-    /// is consumed.
+    /// Before any response, this is the explicitly configured floor, if present.
+    /// It advances as reads observe newer Store sequences.
     pub fn fixed_sequence(&self) -> Option<u64> {
         self.state.fixed_sequence()
+    }
+
+    /// Highest Store sequence reported by a read in this session.
+    pub fn evaluated_sequence(&self) -> Option<u64> {
+        self.state.evaluated_sequence()
     }
 
     pub async fn get(&self, key: &Key) -> Result<Option<Bytes>, ClientError> {
         let seeded_client = self.client.clone();
         let unseeded_client = self.client.clone();
         self.run_read(
-            move |sequence| {
+            move |sequence, observed_sequence| {
                 let client = seeded_client.clone();
-                async move { client.get_with_min_sequence_number(key, sequence).await }
+                async move {
+                    let (response, detail) = client.send_get(key, Some(sequence)).await?;
+                    if let (Some(observed_sequence), Some(detail)) = (observed_sequence, detail) {
+                        observed_sequence.fetch_max(detail.sequence_number, Ordering::SeqCst);
+                    }
+                    Ok(response.value)
+                }
             },
             move |observed_sequence| {
                 let client = unseeded_client.clone();
@@ -2706,13 +2737,13 @@ impl SerializableReadSession {
         let keys_seeded = keys_owned.clone();
         let keys_unseeded = keys_owned;
         self.run_read(
-            move |sequence| {
+            move |sequence, observed_sequence| {
                 let client = seeded_client.clone();
                 let keys = keys_seeded.clone();
                 async move {
                     let refs: Vec<&Key> = keys.iter().collect();
                     client
-                        .get_many_with_min_sequence_number(&refs, batch_size, sequence)
+                        .get_many_internal(&refs, batch_size, Some(sequence), observed_sequence)
                         .await
                 }
             },
@@ -2750,12 +2781,23 @@ impl SerializableReadSession {
         let seeded_client = self.client.clone();
         let unseeded_client = self.client.clone();
         self.run_read(
-            move |sequence| {
+            move |sequence, observed_sequence| {
                 let client = seeded_client.clone();
                 async move {
-                    client
-                        .range_with_mode_and_min_sequence_number(start, end, limit, mode, sequence)
-                        .await
+                    let stream = client
+                        .range_stream_internal(
+                            start,
+                            end,
+                            limit,
+                            limit.max(1),
+                            mode,
+                            QueryStreamReadOptions {
+                                min_sequence_number: Some(sequence),
+                                observed_sequence,
+                            },
+                        )
+                        .await;
+                    stream?.collect().await
                 }
             },
             move |observed_sequence| {
@@ -2803,12 +2845,20 @@ impl SerializableReadSession {
         let seeded_client = self.client.clone();
         let unseeded_client = self.client.clone();
         self.run_read(
-            move |sequence| {
+            move |sequence, observed_sequence| {
                 let client = seeded_client.clone();
                 async move {
                     client
-                        .range_stream_with_mode_and_min_sequence_number(
-                            start, end, limit, batch_size, mode, sequence,
+                        .range_stream_internal(
+                            start,
+                            end,
+                            limit,
+                            batch_size,
+                            mode,
+                            QueryStreamReadOptions {
+                                min_sequence_number: Some(sequence),
+                                observed_sequence,
+                            },
                         )
                         .await
                 }
@@ -2855,14 +2905,14 @@ impl SerializableReadSession {
         request: &DomainRangeReduceRequest,
     ) -> Result<ReduceStream, ClientError> {
         self.run_read(
-            |sequence| {
+            |sequence, observed_sequence| {
                 self.client.range_reduce_stream_internal(
                     start,
                     end,
                     request,
                     QueryStreamReadOptions {
                         min_sequence_number: Some(sequence),
-                        observed_sequence: None,
+                        observed_sequence,
                     },
                 )
             },
@@ -2887,23 +2937,28 @@ impl SerializableReadSession {
         unseeded_call: UnseededCall,
     ) -> Result<T, ClientError>
     where
-        SeededCall: Fn(u64) -> SeededFut,
+        SeededCall: Fn(u64, Option<Arc<AtomicU64>>) -> SeededFut,
         SeededFut: std::future::Future<Output = Result<T, ClientError>>,
         UnseededCall: Fn(Arc<AtomicU64>) -> UnseededFut,
         UnseededFut: std::future::Future<Output = Result<T, ClientError>>,
     {
-        if let Some(sequence) = self.fixed_sequence() {
-            return seeded_call(sequence).await;
+        if let Some(sequence) = self.evaluated_sequence() {
+            return seeded_call(sequence, Some(self.state.sequence.clone())).await;
         }
 
         let gate = self.state.init_gate.lock().await;
 
-        if let Some(sequence) = self.fixed_sequence() {
+        if let Some(sequence) = self.evaluated_sequence() {
             drop(gate);
-            return seeded_call(sequence).await;
+            return seeded_call(sequence, Some(self.state.sequence.clone())).await;
         }
 
-        let result = unseeded_call(self.state.sequence.clone()).await;
+        let observed_sequence = self.state.sequence.clone();
+        let result = if self.state.minimum_sequence > 0 {
+            seeded_call(self.state.minimum_sequence, Some(observed_sequence)).await
+        } else {
+            unseeded_call(observed_sequence).await
+        };
         drop(gate);
         result
     }
@@ -2958,6 +3013,7 @@ fn retry_backoff_delay(attempt: usize, retry_config: RetryConfig) -> Duration {
 mod tests {
     use super::*;
     use crate::kv_codec::{KvFieldKind, KvPredicate, KvPredicateCheck, KvPredicateConstraint};
+    use buffa::Message as _;
     use exoware_proto::query::TraversalMode as ProtoTraversalMode;
     use http::header::{ACCEPT_ENCODING, AUTHORIZATION};
 
@@ -3203,7 +3259,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reduce_retries_before_first_frame_and_observes_consumed_details() {
+    async fn reduce_retries_before_first_frame_and_observes_response_details() {
         let transport = ReduceTransport::new([
             reduce_body(
                 &[],
@@ -3249,7 +3305,7 @@ mod tests {
             session.range_reduce(&start, &end, &request).await.unwrap(),
             vec![Some(KvReducedValue::UInt64(3))]
         );
-        assert_eq!(session.fixed_sequence(), Some(47));
+        assert_eq!(session.fixed_sequence(), Some(50));
         let requests = transport.requests.lock().unwrap();
         assert_eq!(requests.len(), 3);
         assert_eq!(requests[0].min_sequence_number, None);
@@ -3326,6 +3382,112 @@ mod tests {
                 .rpc_code(),
             Some(ErrorCode::Unavailable)
         );
+    }
+
+    #[derive(Clone, Debug, Default)]
+    struct SessionSequenceTransport {
+        requested_floors: Arc<std::sync::Mutex<Vec<Option<u64>>>>,
+    }
+
+    impl connectrpc::client::ClientTransport for SessionSequenceTransport {
+        type ResponseBody =
+            http_body_util::combinators::UnsyncBoxBody<Bytes, std::convert::Infallible>;
+        type Error = ConnectError;
+
+        fn send(
+            &self,
+            request: http::Request<connectrpc::client::ClientBody>,
+        ) -> connectrpc::client::BoxFuture<
+            'static,
+            Result<http::Response<Self::ResponseBody>, Self::Error>,
+        > {
+            let requested_floors = self.requested_floors.clone();
+            Box::pin(async move {
+                let (parts, body) = request.into_parts();
+                let body = http_body_util::BodyExt::collect(body)
+                    .await
+                    .unwrap()
+                    .to_bytes();
+                let path = parts.uri.path();
+                let streaming = path.ends_with("/GetMany")
+                    || path.ends_with("/Range")
+                    || path.ends_with("/Reduce");
+                let payload = if streaming { &body[5..] } else { &body[..] };
+                let requested_floor = match path {
+                    "/store.query.v1.Service/Get" => {
+                        proto_query::GetRequest::decode_from_slice(payload)
+                            .unwrap()
+                            .min_sequence_number
+                    }
+                    "/store.query.v1.Service/GetMany" => {
+                        proto_query::GetManyRequest::decode_from_slice(payload)
+                            .unwrap()
+                            .min_sequence_number
+                    }
+                    "/store.query.v1.Service/Range" => {
+                        proto_query::RangeRequest::decode_from_slice(payload)
+                            .unwrap()
+                            .min_sequence_number
+                    }
+                    "/store.query.v1.Service/Reduce" => {
+                        proto_query::ReduceRequest::decode_from_slice(payload)
+                            .unwrap()
+                            .min_sequence_number
+                    }
+                    path => {
+                        return Err(ConnectError::unimplemented(format!(
+                            "unexpected test request path {path}"
+                        )));
+                    }
+                };
+                let sequence_number = {
+                    let mut floors = requested_floors.lock().unwrap();
+                    floors.push(requested_floor);
+                    40 + u64::try_from(floors.len()).unwrap()
+                };
+                let detail = proto_query::Detail {
+                    sequence_number,
+                    ..Default::default()
+                };
+                let payload = match path {
+                    "/store.query.v1.Service/Get" => proto_query::GetResponse {
+                        detail: detail.into(),
+                        ..Default::default()
+                    }
+                    .encode_to_bytes(),
+                    "/store.query.v1.Service/GetMany" => proto_query::GetManyFrame {
+                        detail: detail.into(),
+                        ..Default::default()
+                    }
+                    .encode_to_bytes(),
+                    "/store.query.v1.Service/Range" => proto_query::RangeFrame {
+                        detail: detail.into(),
+                        ..Default::default()
+                    }
+                    .encode_to_bytes(),
+                    "/store.query.v1.Service/Reduce" => {
+                        count_frame(Some(sequence_number)).encode_to_bytes()
+                    }
+                    _ => unreachable!(),
+                };
+                let (body, content_type) = if streaming {
+                    let mut envelope = Vec::with_capacity(payload.len() + 12);
+                    envelope.push(0);
+                    envelope
+                        .extend_from_slice(&u32::try_from(payload.len()).unwrap().to_be_bytes());
+                    envelope.extend_from_slice(&payload);
+                    envelope.extend_from_slice(&[2, 0, 0, 0, 2, b'{', b'}']);
+                    (Bytes::from(envelope), "application/connect+proto")
+                } else {
+                    (payload, "application/proto")
+                };
+                let body = http_body_util::BodyExt::boxed_unsync(http_body_util::Full::new(body));
+                Ok(http::Response::builder()
+                    .header(http::header::CONTENT_TYPE, content_type)
+                    .body(body)
+                    .unwrap())
+            })
+        }
     }
 
     async fn assert_streaming_deadline<T>(
@@ -3506,6 +3668,94 @@ mod tests {
         .await;
     }
 
+    #[tokio::test]
+    async fn session_stream_prefetch_records_sequence_before_returning() {
+        let client = StoreClient::builder()
+            .url("http://query.internal")
+            .retry_config(RetryConfig::disabled())
+            .client_transport(SessionSequenceTransport::default())
+            .build()
+            .unwrap()
+            .prefixed(StoreKeyPrefix::new("prefetch/").unwrap());
+        let key = Key::from(b"key".to_vec());
+        let start = Key::from(b"a".to_vec());
+        let end = Key::from(b"z".to_vec());
+
+        let get_many_session = client.create_session();
+        let _stream = get_many_session.get_many(&[&key], 1).await.unwrap();
+        assert_eq!(get_many_session.fixed_sequence(), Some(41));
+        assert_eq!(get_many_session.evaluated_sequence(), Some(41));
+
+        let range_session = client.create_session();
+        let _stream = range_session
+            .range_stream(&start, &end, 1, 1)
+            .await
+            .unwrap();
+        assert_eq!(range_session.fixed_sequence(), Some(42));
+        assert_eq!(range_session.evaluated_sequence(), Some(42));
+
+        let reduce_session = client.create_session();
+        let _stream = reduce_session
+            .range_reduce_stream(&start, &end, &count_request())
+            .await
+            .unwrap();
+        assert_eq!(reduce_session.fixed_sequence(), Some(43));
+        assert_eq!(reduce_session.evaluated_sequence(), Some(43));
+    }
+
+    #[tokio::test]
+    async fn session_reads_advance_the_floor_across_all_read_methods() {
+        for initial_sequence in [0, 27] {
+            let transport = SessionSequenceTransport::default();
+            let client = StoreClient::builder()
+                .url("http://query.internal")
+                .retry_config(RetryConfig::disabled())
+                .client_transport(transport.clone())
+                .build()
+                .unwrap()
+                .prefixed(StoreKeyPrefix::new("session/").unwrap());
+            let session = client.create_session_with_sequence(initial_sequence);
+            let shared_session = session.clone();
+            let key = Key::from(b"key".to_vec());
+            let start = Key::from(b"a".to_vec());
+            let end = Key::from(b"z".to_vec());
+            let reduction = count_request();
+
+            assert_eq!(session.evaluated_sequence(), None);
+            assert_eq!(session.get(&key).await.unwrap(), None);
+            assert_eq!(session.evaluated_sequence(), Some(41));
+            shared_session.get_many(&[&key], 1).await.unwrap();
+            assert_eq!(session.evaluated_sequence(), Some(42));
+            session.range_stream(&start, &end, 1, 1).await.unwrap();
+            assert_eq!(session.evaluated_sequence(), Some(43));
+            session.range(&start, &end, 1).await.unwrap();
+            assert_eq!(session.evaluated_sequence(), Some(44));
+            session
+                .range_reduce(&start, &end, &reduction)
+                .await
+                .unwrap();
+            assert_eq!(session.evaluated_sequence(), Some(45));
+            let _stream = session
+                .range_reduce_stream(&start, &end, &reduction)
+                .await
+                .unwrap();
+
+            assert_eq!(session.fixed_sequence(), Some(46));
+            assert_eq!(shared_session.evaluated_sequence(), Some(46));
+            assert_eq!(
+                *transport.requested_floors.lock().unwrap(),
+                vec![
+                    (initial_sequence > 0).then_some(initial_sequence),
+                    Some(41),
+                    Some(42),
+                    Some(43),
+                    Some(44),
+                    Some(45),
+                ]
+            );
+        }
+    }
+
     #[test]
     fn public_streams_remain_send_and_sync() {
         fn assert_send_sync<T: Send + Sync>() {}
@@ -3675,6 +3925,7 @@ mod tests {
         let client = PrefixedStoreClient::empty(StoreClient::new("http://localhost:10000/"));
         let session = client.create_session();
         assert_eq!(session.fixed_sequence(), None);
+        assert_eq!(session.evaluated_sequence(), None);
     }
 
     #[test]
@@ -3738,6 +3989,7 @@ mod tests {
         let client = PrefixedStoreClient::empty(StoreClient::new("http://localhost:10000/"));
         let session = client.create_session_with_sequence(27);
         assert_eq!(session.fixed_sequence(), Some(27));
+        assert_eq!(session.evaluated_sequence(), None);
     }
 
     #[test]
