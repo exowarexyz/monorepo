@@ -9,7 +9,7 @@ use datafusion::common::{DataFusionError, Result as DataFusionResult};
 use datafusion::execution::context::TaskContext;
 use datafusion::physical_expr::expressions::Column;
 use datafusion::physical_expr::{
-    EquivalenceProperties, Partitioning, PhysicalExpr, PhysicalSortExpr,
+    EquivalenceProperties, LexOrdering, Partitioning, PhysicalExpr, PhysicalSortExpr,
 };
 use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
 use datafusion::physical_plan::{
@@ -44,14 +44,22 @@ impl ScanDirection {
     }
 }
 
+/// An output ordering proven to match primary-key traversal.
+#[derive(Debug, Clone)]
+struct ScanOrdering {
+    expressions: LexOrdering,
+    direction: ScanDirection,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct KvScanExec {
     pub(crate) client: PrefixedStoreClient,
     pub(crate) model: Arc<TableModel>,
     pub(crate) index_specs: Arc<Vec<ResolvedIndexSpec>>,
     pub(crate) predicate: QueryPredicate,
-    pub(crate) limit: Option<usize>,
-    pub(crate) direction: ScanDirection,
+    pub(crate) fetch: Option<usize>,
+    /// Without a required ordering, traversal is unconstrained and defaults to forward.
+    ordering: Option<ScanOrdering>,
     pub(crate) projected_schema: SchemaRef,
     pub(crate) projection: Option<Vec<usize>>,
     pub(crate) properties: Arc<PlanProperties>,
@@ -60,13 +68,14 @@ pub(crate) struct KvScanExec {
 impl KvScanExec {
     fn make_properties(
         projected_schema: SchemaRef,
-        output_ordering: Option<Vec<PhysicalSortExpr>>,
+        ordering: Option<&ScanOrdering>,
     ) -> Arc<PlanProperties> {
-        let equivalence_properties = match output_ordering {
-            Some(ordering) if !ordering.is_empty() => {
-                EquivalenceProperties::new_with_orderings(projected_schema.clone(), [ordering])
-            }
-            _ => EquivalenceProperties::new(projected_schema.clone()),
+        let equivalence_properties = match ordering {
+            Some(ordering) => EquivalenceProperties::new_with_orderings(
+                projected_schema.clone(),
+                [ordering.expressions.clone()],
+            ),
+            None => EquivalenceProperties::new(projected_schema.clone()),
         };
         Arc::new(PlanProperties::new(
             equivalence_properties,
@@ -81,7 +90,7 @@ impl KvScanExec {
         model: Arc<TableModel>,
         index_specs: Arc<Vec<ResolvedIndexSpec>>,
         predicate: QueryPredicate,
-        limit: Option<usize>,
+        fetch: Option<usize>,
         projected_schema: SchemaRef,
         projection: Option<Vec<usize>>,
     ) -> Self {
@@ -91,40 +100,38 @@ impl KvScanExec {
             model,
             index_specs,
             predicate,
-            limit,
-            direction: ScanDirection::Forward,
+            fetch,
+            ordering: None,
             projected_schema,
             projection,
             properties,
         }
     }
 
-    fn with_scan_options(
-        &self,
-        limit: Option<usize>,
-        direction: ScanDirection,
-        output_ordering: Option<Vec<PhysicalSortExpr>>,
-    ) -> Self {
-        let properties = Self::make_properties(self.projected_schema.clone(), output_ordering);
+    fn with_scan_options(&self, fetch: Option<usize>, ordering: Option<ScanOrdering>) -> Self {
+        let properties = Self::make_properties(self.projected_schema.clone(), ordering.as_ref());
         Self {
             client: self.client.clone(),
             model: self.model.clone(),
             index_specs: self.index_specs.clone(),
             predicate: self.predicate.clone(),
-            limit,
-            direction,
+            fetch,
+            ordering,
             projected_schema: self.projected_schema.clone(),
             projection: self.projection.clone(),
             properties,
         }
     }
 
-    fn with_ordering(
-        &self,
-        direction: ScanDirection,
-        output_ordering: Vec<PhysicalSortExpr>,
-    ) -> Self {
-        self.with_scan_options(self.limit, direction, Some(output_ordering))
+    fn with_ordering(&self, ordering: ScanOrdering) -> Self {
+        self.with_scan_options(self.fetch, Some(ordering))
+    }
+
+    pub(crate) fn scan_direction(&self) -> ScanDirection {
+        // Forward is an execution default, not an ordering guarantee.
+        self.ordering
+            .as_ref()
+            .map_or(ScanDirection::Forward, |ordering| ordering.direction)
     }
 
     fn order_direction_for_primary_key(
@@ -231,15 +238,16 @@ impl DisplayAs for KvScanExec {
             Ok(diag) => write!(
                 f,
                 "KvScanExec: limit={:?}, direction={:?}, {}, query_stats={}",
-                self.limit,
-                self.direction,
+                self.fetch,
+                self.scan_direction(),
                 format_access_path_diagnostics(&diag),
                 format_query_stats_explain(QueryStatsExplainSurface::StreamedRangeDetail)
             ),
             Err(err) => write!(
                 f,
                 "KvScanExec: limit={:?}, direction={:?}, diagnostics_error={err}",
-                self.limit, self.direction
+                self.fetch,
+                self.scan_direction()
             ),
         }
     }
@@ -297,8 +305,8 @@ impl ExecutionPlan for KvScanExec {
         let model = self.model.clone();
         let index_specs = self.index_specs.clone();
         let predicate = self.predicate.clone();
-        let limit = self.limit;
-        let direction = self.direction;
+        let fetch = self.fetch;
+        let direction = self.scan_direction();
         let projection = self.projection.clone();
         let projected_schema = self.projected_schema.clone();
         let access_plan = Arc::new(ScanAccessPlan::new(&model, &projection, &predicate));
@@ -311,7 +319,7 @@ impl ExecutionPlan for KvScanExec {
                 projected_schema: &projected_schema,
                 access_plan: &access_plan,
             };
-            if let Err(e) = stream_kv_scan(&mut tx, &ctx, &index_specs, limit, direction).await {
+            if let Err(e) = stream_kv_scan(&mut tx, &ctx, &index_specs, fetch, direction).await {
                 let _ = tx.send(Err(e)).await;
             }
         });
@@ -323,39 +331,54 @@ impl ExecutionPlan for KvScanExec {
     }
 
     fn with_fetch(&self, limit: Option<usize>) -> Option<Arc<dyn ExecutionPlan>> {
-        let limit = match (self.limit, limit) {
+        let fetch = match (self.fetch, limit) {
             (Some(existing), Some(limit)) => Some(existing.min(limit)),
             (None, Some(limit)) => Some(limit),
             (_, None) => None,
         };
         Some(Arc::new(
-            self.with_scan_options(
-                limit,
-                self.direction,
-                self.properties
-                    .output_ordering()
-                    .map(|ordering| ordering.iter().cloned().collect::<Vec<PhysicalSortExpr>>()),
-            ),
+            self.with_scan_options(fetch, self.ordering.clone()),
         ))
     }
 
     fn fetch(&self) -> Option<usize> {
-        self.limit
+        self.fetch
     }
 
     fn try_pushdown_sort(
         &self,
         order: &[PhysicalSortExpr],
     ) -> DataFusionResult<SortOrderPushdownResult<Arc<dyn ExecutionPlan>>> {
-        let Some(direction) = self.order_direction_for_primary_key(order)? else {
+        let Some(expressions) = LexOrdering::new(order.iter().cloned()) else {
             return Ok(SortOrderPushdownResult::Unsupported);
         };
-        // A fetch selects rows in the current traversal direction
-        if self.limit.is_some() && direction != self.direction {
+        if self
+            .properties
+            .equivalence_properties()
+            .ordering_satisfy(expressions.clone())?
+        {
+            return Ok(SortOrderPushdownResult::Exact {
+                inner: Arc::new(self.clone()),
+            });
+        }
+        let Some(direction) = self.order_direction_for_primary_key(&expressions)? else {
+            return Ok(SortOrderPushdownResult::Unsupported);
+        };
+        // Do not reverse the order of a fetch.
+        if self.fetch.is_some()
+            && self
+                .ordering
+                .as_ref()
+                .is_some_and(|current| direction != current.direction)
+        {
             return Ok(SortOrderPushdownResult::Unsupported);
         }
+        let ordering = ScanOrdering {
+            expressions,
+            direction,
+        };
         Ok(SortOrderPushdownResult::Exact {
-            inner: Arc::new(self.with_ordering(direction, order.to_vec())),
+            inner: Arc::new(self.with_ordering(ordering)),
         })
     }
 }

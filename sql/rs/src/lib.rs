@@ -7285,7 +7285,164 @@ mod tests {
             .downcast_ref::<KvScanExec>()
             .expect("native sort pushdown should eliminate the sort");
         assert_eq!(scan.fetch(), Some(1));
-        assert_eq!(scan.direction, ScanDirection::Reverse);
+        assert_eq!(scan.scan_direction(), ScanDirection::Reverse);
+    }
+
+    #[test]
+    fn kv_scan_sort_pushdown_respects_ordering_strength() {
+        use datafusion::arrow::compute::SortOptions;
+        use datafusion::physical_expr::expressions::Column;
+        use datafusion::physical_expr::{LexOrdering, PhysicalSortExpr};
+        use datafusion::physical_plan::SortOrderPushdownResult;
+
+        let config = KvTableConfig::new(
+            0,
+            vec![
+                TableColumnConfig::new("account", DataType::Int64, false),
+                TableColumnConfig::new("height", DataType::Int64, false),
+            ],
+            vec!["account".to_string(), "height".to_string()],
+            vec![],
+        )
+        .expect("config");
+        let model = Arc::new(TableModel::from_config(&config).expect("model"));
+        let scan = KvScanExec::new(
+            PrefixedStoreClient::empty(StoreClient::new("http://127.0.0.1:0")),
+            model.clone(),
+            Arc::new(Vec::new()),
+            QueryPredicate::default(),
+            Some(2),
+            model.schema.clone(),
+            None,
+        );
+        let ordering = LexOrdering::new([
+            PhysicalSortExpr {
+                expr: Arc::new(Column::new("account", 0)),
+                options: SortOptions::default(),
+            },
+            PhysicalSortExpr {
+                expr: Arc::new(Column::new("height", 1)),
+                options: SortOptions::default(),
+            },
+        ])
+        .expect("ordering");
+
+        let SortOrderPushdownResult::Exact { inner } = scan
+            .try_pushdown_sort(&ordering)
+            .expect("initial sort pushdown")
+        else {
+            panic!("primary-key ordering should be exact");
+        };
+        let ordered_scan = inner.downcast_ref::<KvScanExec>().expect("ordered scan");
+        let prefix = [ordering.first().clone()];
+        let SortOrderPushdownResult::Exact { inner } = ordered_scan
+            .try_pushdown_sort(&prefix)
+            .expect("redundant sort pushdown")
+        else {
+            panic!("stronger ordering should exactly satisfy its prefix");
+        };
+        let prefix_scan = inner.downcast_ref::<KvScanExec>().expect("ordered scan");
+
+        assert!(Arc::ptr_eq(
+            &ordered_scan.properties,
+            &prefix_scan.properties
+        ));
+        assert_eq!(
+            prefix_scan
+                .properties
+                .output_ordering()
+                .expect("output ordering")
+                .len(),
+            2
+        );
+
+        let SortOrderPushdownResult::Exact { inner } = scan
+            .try_pushdown_sort(&prefix)
+            .expect("prefix sort pushdown")
+        else {
+            panic!("primary-key prefix ordering should be exact");
+        };
+        let prefix_scan = inner.downcast_ref::<KvScanExec>().expect("ordered scan");
+        let SortOrderPushdownResult::Exact { inner } = prefix_scan
+            .try_pushdown_sort(&ordering)
+            .expect("stronger sort pushdown")
+        else {
+            panic!("full primary-key ordering should be exact");
+        };
+        let stronger_scan = inner.downcast_ref::<KvScanExec>().expect("ordered scan");
+
+        assert!(!Arc::ptr_eq(
+            &prefix_scan.properties,
+            &stronger_scan.properties
+        ));
+        assert_eq!(
+            stronger_scan
+                .properties
+                .output_ordering()
+                .expect("output ordering")
+                .len(),
+            2
+        );
+        assert_eq!(stronger_scan.fetch(), Some(2));
+        assert_eq!(stronger_scan.scan_direction(), ScanDirection::Forward);
+    }
+
+    #[tokio::test]
+    async fn kv_scan_reverse_sort_pushdown_survives_limit_pushdown_first() {
+        use datafusion::execution::SessionStateBuilder;
+        use datafusion::physical_optimizer::pushdown_sort::PushdownSort;
+        use datafusion::physical_plan::sorts::sort::SortExec;
+
+        // Control the pass order that exposed the lost reverse pushdown.
+        let state = SessionStateBuilder::new_with_default_features()
+            .with_physical_optimizer_rules(vec![])
+            .build();
+        let ctx = SessionContext::new_with_state(state);
+        let schema = KvSchema::new(PrefixedStoreClient::empty(StoreClient::new(
+            "http://127.0.0.1:0",
+        )))
+        .table(
+            "events",
+            vec![TableColumnConfig::new("id", DataType::Int64, false)],
+            vec!["id".to_string()],
+            vec![],
+        )
+        .expect("schema");
+        schema.register_all(&ctx).expect("register");
+
+        let plan = ctx
+            .sql(
+                "SELECT id FROM (SELECT id FROM events LIMIT 2) AS limited \
+                 ORDER BY id DESC",
+            )
+            .await
+            .expect("query")
+            .create_physical_plan()
+            .await
+            .expect("physical plan");
+        let plan = LimitPushdown::new()
+            .optimize(plan, &ConfigOptions::new())
+            .expect("limit pushdown");
+        let sort = plan
+            .downcast_ref::<SortExec>()
+            .expect("sort should remain after limit pushdown");
+        let scan = sort
+            .input()
+            .downcast_ref::<KvScanExec>()
+            .expect("inner limit should be pushed into the scan");
+        assert_eq!(scan.fetch(), Some(2));
+        assert_eq!(scan.scan_direction(), ScanDirection::Forward);
+        assert!(scan.properties.output_ordering().is_none());
+
+        let plan = PushdownSort::new()
+            .optimize(plan, &ConfigOptions::new())
+            .expect("sort pushdown");
+        let scan = plan
+            .downcast_ref::<KvScanExec>()
+            .expect("unordered fetch must not prevent exact sort pushdown");
+        assert_eq!(scan.fetch(), Some(2));
+        assert_eq!(scan.scan_direction(), ScanDirection::Reverse);
+        assert!(scan.properties.output_ordering().is_some());
     }
 
     #[tokio::test]
@@ -7779,13 +7936,8 @@ mod tests {
         let ctx = SessionContext::new();
         schema.register_all(&ctx).expect("register");
 
-        // A bare inner LIMIT reaches the scan before sort pushdown runs, so the outer sort
-        // must keep its own direction (or share the scan's) without widening the inner page
-        for (outer, limit, expected) in [
-            ("DESC", 1, vec![2]),
-            ("ASC", 1, vec![1]),
-            ("ASC", 5, vec![1, 2]),
-        ] {
+        // Without an inner ORDER BY, LIMIT constrains the row count but not the selected rows.
+        for (outer, limit, expected_len) in [("DESC", 1, 1), ("ASC", 1, 1), ("ASC", 5, 2)] {
             let sql = format!(
                 "SELECT id FROM (SELECT id FROM events LIMIT 2) AS limited \
                  ORDER BY id {outer} LIMIT {limit}"
@@ -7797,7 +7949,20 @@ mod tests {
                 .collect()
                 .await
                 .expect("collect");
-            assert_eq!(collect_i64_column(&batches, 0), expected, "{sql}");
+            let values = collect_i64_column(&batches, 0);
+            assert_eq!(values.len(), expected_len, "{sql}");
+            assert!(
+                values.iter().all(|id| (1..=4).contains(id)),
+                "query returned a row outside the source: {sql}: {values:?}"
+            );
+            assert!(
+                values.windows(2).all(|pair| match outer {
+                    "ASC" => pair[0] <= pair[1],
+                    "DESC" => pair[0] >= pair[1],
+                    _ => unreachable!("test only supplies supported ordering"),
+                }),
+                "query did not respect its outer ordering: {sql}: {values:?}"
+            );
         }
 
         for (inner, outer, limit, expected) in [
@@ -7819,7 +7984,7 @@ mod tests {
                 .await
                 .expect("physical plan");
 
-            // Reapplying sort pushdown must preserve the rows selected by the inner limit
+            // Reapplying sort pushdown must preserve the rows selected by the inner limit.
             let plan = PushdownSort::new()
                 .optimize(plan, &ConfigOptions::new())
                 .expect("native sort pushdown");
