@@ -236,21 +236,11 @@ async fn upload_certificates(
     batch.push(
         store,
         &keys::notarization_by_round(notarized.proof.round()),
-        notarized_bytes.clone(),
-    )?;
-    batch.push(
-        store,
-        &keys::notarization_by_view(notarized.proof.view()),
         notarized_bytes,
     )?;
     batch.push(
         store,
         &keys::finalization_by_round(finalized.proof.round()),
-        finalized_bytes.clone(),
-    )?;
-    batch.push(
-        store,
-        &keys::finalization_by_view(finalized.proof.view()),
         finalized_bytes.clone(),
     )?;
     batch.push(

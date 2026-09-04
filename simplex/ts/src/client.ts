@@ -15,9 +15,7 @@ export const FORMAT_VERSION = 0;
 export enum SimplexRecordKind {
   HeaderByDigest = 0x10,
   BlockByDigest = 0x11,
-  NotarizationByView = 0x20,
   NotarizationByRound = 0x21,
-  FinalizationByView = 0x30,
   FinalizedByHeight = 0x31,
   FinalizationByRound = 0x32,
 }
@@ -83,17 +81,16 @@ export interface SimplexVerificationContext {
 
 export interface SimplexNotarizationVerificationContext extends SimplexVerificationContext {
   kind: 'notarization';
-  epoch?: bigint;
+  epoch: bigint;
   view: bigint;
 }
 
-export interface SimplexFinalizationVerificationContext extends SimplexVerificationContext {
+export type SimplexFinalizationVerificationContext = SimplexVerificationContext & {
   kind: 'finalization';
-  index: 'view' | 'round' | 'height' | 'latest';
-  epoch?: bigint;
-  view?: bigint;
-  height?: bigint;
-}
+} & (
+  | { index: 'round'; epoch: bigint; view: bigint }
+  | { index: 'height' | 'latest'; height: bigint }
+);
 
 export interface SimplexCertificateVerifier<TNotarization = unknown, TFinalization = unknown> {
   verifyNotarization(
@@ -243,18 +240,18 @@ export interface RawSimplexBlockEntry extends SimplexBlockData {
 
 export interface RawSimplexNotarizationEntry {
   type: 'notarization';
-  kind: SimplexRecordKind.NotarizationByView | SimplexRecordKind.NotarizationByRound;
-  epoch?: bigint;
+  kind: SimplexRecordKind.NotarizationByRound;
+  epoch: bigint;
   key: Uint8Array;
   view: bigint;
   notarized: Uint8Array;
 }
 
-export interface RawSimplexFinalizationByViewEntry {
+export interface RawSimplexFinalizationByRoundEntry {
   type: 'finalization';
-  kind: SimplexRecordKind.FinalizationByView | SimplexRecordKind.FinalizationByRound;
-  index: 'view' | 'round';
-  epoch?: bigint;
+  kind: SimplexRecordKind.FinalizationByRound;
+  index: 'round';
+  epoch: bigint;
   key: Uint8Array;
   view: bigint;
   finalized: Uint8Array;
@@ -273,12 +270,12 @@ export type RawSimplexStreamEntry =
   | RawSimplexHeaderEntry
   | RawSimplexBlockEntry
   | RawSimplexNotarizationEntry
-  | RawSimplexFinalizationByViewEntry
+  | RawSimplexFinalizationByRoundEntry
   | RawSimplexFinalizationByHeightEntry;
 
 export type RawSimplexCertificateStreamEntry =
   | RawSimplexNotarizationEntry
-  | RawSimplexFinalizationByViewEntry
+  | RawSimplexFinalizationByRoundEntry
   | RawSimplexFinalizationByHeightEntry;
 
 export type VerifiedSimplexCertificateStreamEntry<TNotarization, TFinalization> =
@@ -286,7 +283,7 @@ export type VerifiedSimplexCertificateStreamEntry<TNotarization, TFinalization> 
       raw: Uint8Array;
       certificate: TNotarization;
     })
-  | (Omit<RawSimplexFinalizationByViewEntry, 'finalized'> & {
+  | (Omit<RawSimplexFinalizationByRoundEntry, 'finalized'> & {
       raw: Uint8Array;
       certificate: TFinalization;
     })
@@ -430,14 +427,6 @@ export function blockByDigestKey(digest: BytesLike): Uint8Array {
   return keyFromParts(SimplexRecordKind.BlockByDigest, toSimplexBytes(digest));
 }
 
-export function notarizationByViewKey(view: U64Like): Uint8Array {
-  return keyFromParts(SimplexRecordKind.NotarizationByView, u64Bytes(view));
-}
-
-export function finalizationByViewKey(view: U64Like): Uint8Array {
-  return keyFromParts(SimplexRecordKind.FinalizationByView, u64Bytes(view));
-}
-
 function roundKey(kind: SimplexRecordKind, epoch: U64Like, view: U64Like): Uint8Array {
   const suffix = new Uint8Array(16);
   suffix.set(u64Bytes(epoch));
@@ -554,9 +543,10 @@ async function normalizeAndVerifyCertificate(
   if (!certificate) {
     return null;
   }
-  if ((context.view !== undefined && certificate.view !== context.view)
-    || (context.epoch !== undefined && certificate.epoch !== context.epoch)) {
-    return null;
+  if (context.kind === 'notarization' || context.index === 'round') {
+    if (certificate.view !== context.view || certificate.epoch !== context.epoch) {
+      return null;
+    }
   }
   if (verifyHeader) {
     const verified = await verifyHeader({
@@ -679,20 +669,6 @@ function u64FromKey(key: Uint8Array): bigint {
   return u64At(key, 2);
 }
 
-type RawSimplexRoundCapableEntry = RawSimplexNotarizationEntry | RawSimplexFinalizationByViewEntry;
-
-function isRoundEntry(entry: RawSimplexCertificateStreamEntry): entry is RawSimplexRoundCapableEntry {
-  return entry.kind === SimplexRecordKind.NotarizationByRound || entry.kind === SimplexRecordKind.FinalizationByRound;
-}
-
-function isViewEntry(entry: RawSimplexCertificateStreamEntry): entry is RawSimplexRoundCapableEntry {
-  return entry.kind === SimplexRecordKind.NotarizationByView || entry.kind === SimplexRecordKind.FinalizationByView;
-}
-
-function certificateIdentity(entry: RawSimplexRoundCapableEntry): string {
-  return `${entry.type}:${entry.view}:${bytesToHex(entry.type === 'notarization' ? entry.notarized : entry.finalized)}`;
-}
-
 function streamMatchKind(kind: SimplexRecordKind) {
   return {
     prefix: new Uint8Array([FORMAT_VERSION, kind]),
@@ -749,23 +725,6 @@ function decodeRawStreamEntry(key: Uint8Array, value: Uint8Array): RawSimplexStr
         key,
         epoch: u64At(key, 2),
         view: u64At(key, 10),
-        finalized: value,
-      };
-    case SimplexRecordKind.NotarizationByView:
-      return {
-        type: 'notarization',
-        kind,
-        key,
-        view: u64FromKey(key),
-        notarized: value,
-      };
-    case SimplexRecordKind.FinalizationByView:
-      return {
-        type: 'finalization',
-        kind,
-        index: 'view',
-        key,
-        view: u64FromKey(key),
         finalized: value,
       };
     case SimplexRecordKind.FinalizedByHeight:
@@ -859,10 +818,6 @@ export class SimplexClient<TNotarization = unknown, TFinalization = unknown> {
             key: notarizationByRoundKey(input.epoch, input.view),
             value: toSimplexBytes(input.notarized),
           },
-          {
-            key: notarizationByViewKey(input.view),
-            value: toSimplexBytes(input.notarized),
-          },
         ],
         { ...emptySummary(), notarizations: 1 },
       ),
@@ -897,12 +852,8 @@ export class SimplexClient<TNotarization = unknown, TFinalization = unknown> {
             value: copyBytes(finalized),
           },
           {
-            key: finalizationByViewKey(input.view),
-            value: finalized,
-          },
-          {
             key: finalizedByHeightKey(input.height),
-            value: copyBytes(finalized),
+            value: finalized,
           },
         ],
         { ...emptySummary(), finalizations: 1, finalizedHeightIndexes: 1 },
@@ -962,29 +913,9 @@ export class SimplexClient<TNotarization = unknown, TFinalization = unknown> {
     return this.getRaw(blockByDigestKey(digest));
   }
 
-  async getNotarization(view: U64Like): Promise<TNotarization | null> {
-    const key = notarizationByViewKey(view);
-    const raw = await this.getRaw(key);
-    if (raw === null) {
-      return null;
-    }
-    return this.verifyNotarization(raw, {
-      kind: 'notarization',
-      source: 'get',
-      key,
-      value: raw,
-      view: normalizeU64(view),
-    });
-  }
-
   async getNotarizationByRound(epoch: U64Like, view: U64Like): Promise<TNotarization | null> {
-    let key = notarizationByRoundKey(epoch, view);
-    let raw = await this.getRaw(key);
-    if (raw === null) {
-      // Legacy rows are keyed by view only, so verification checks the requested epoch
-      key = notarizationByViewKey(view);
-      raw = await this.getRaw(key);
-    }
+    const key = notarizationByRoundKey(epoch, view);
+    const raw = await this.getRaw(key);
     if (raw === null) {
       return null;
     }
@@ -998,34 +929,13 @@ export class SimplexClient<TNotarization = unknown, TFinalization = unknown> {
     });
   }
 
-  async getNotarizationRaw(view: U64Like): Promise<Uint8Array | null> {
-    return this.getRaw(notarizationByViewKey(view));
-  }
-
-  async getFinalizationByView(view: U64Like): Promise<TFinalization | null> {
-    const key = finalizationByViewKey(view);
-    const raw = await this.getRaw(key);
-    if (raw === null) {
-      return null;
-    }
-    return this.verifyFinalization(raw, {
-      kind: 'finalization',
-      index: 'view',
-      source: 'get',
-      key,
-      value: raw,
-      view: normalizeU64(view),
-    });
+  async getNotarizationByRoundRaw(epoch: U64Like, view: U64Like): Promise<Uint8Array | null> {
+    return this.getRaw(notarizationByRoundKey(epoch, view));
   }
 
   async getFinalizationByRound(epoch: U64Like, view: U64Like): Promise<TFinalization | null> {
-    let key = finalizationByRoundKey(epoch, view);
-    let raw = await this.getRaw(key);
-    if (raw === null) {
-      // Legacy rows are keyed by view only, so verification checks the requested epoch
-      key = finalizationByViewKey(view);
-      raw = await this.getRaw(key);
-    }
+    const key = finalizationByRoundKey(epoch, view);
+    const raw = await this.getRaw(key);
     if (raw === null) {
       return null;
     }
@@ -1040,8 +950,8 @@ export class SimplexClient<TNotarization = unknown, TFinalization = unknown> {
     });
   }
 
-  async getFinalizationByViewRaw(view: U64Like): Promise<Uint8Array | null> {
-    return this.getRaw(finalizationByViewKey(view));
+  async getFinalizationByRoundRaw(epoch: U64Like, view: U64Like): Promise<Uint8Array | null> {
+    return this.getRaw(finalizationByRoundKey(epoch, view));
   }
 
   async getFinalizationByHeight(height: U64Like): Promise<TFinalization | null> {
@@ -1152,22 +1062,15 @@ export class SimplexClient<TNotarization = unknown, TFinalization = unknown> {
     callOptions?: Parameters<StoreClient['subscribe']>[1],
   ): AsyncIterable<SimplexStreamBatch<RawSimplexCertificateStreamEntry>> {
     const kinds = [
-      SimplexRecordKind.NotarizationByView,
       SimplexRecordKind.NotarizationByRound,
-      SimplexRecordKind.FinalizationByView,
       SimplexRecordKind.FinalizationByRound,
       ...(options.includeFinalizedByHeight ? [SimplexRecordKind.FinalizedByHeight] : []),
     ];
     for await (const batch of this.subscribeRaw(kinds, options, callOptions)) {
-      const certificates = batch.entries.flatMap((entry) =>
-        entry.type === 'header' || entry.type === 'block' ? [] : [entry],
-      );
-      // Uploads write a round row and a legacy view alias with the same bytes, so keep the round row
-      const rounds = new Set(certificates.filter(isRoundEntry).map(certificateIdentity));
       yield {
         sequenceNumber: batch.sequenceNumber,
-        entries: certificates.filter(
-          (entry) => !isViewEntry(entry) || !rounds.has(certificateIdentity(entry)),
+        entries: batch.entries.flatMap((entry) =>
+          entry.type === 'header' || entry.type === 'block' ? [] : [entry],
         ),
       };
     }

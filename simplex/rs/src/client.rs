@@ -1,6 +1,6 @@
 use bytes::Bytes;
 use commonware_codec::{Decode, Encode};
-use commonware_consensus::{Block, Viewable};
+use commonware_consensus::Block;
 use commonware_cryptography::{certificate, Digest};
 use exoware_sdk::keys::Key;
 use exoware_sdk::{ClientError, PrefixedStoreClient, RangeMode, StoreBatchUpload, StoreWriteBatch};
@@ -66,8 +66,8 @@ impl PreparedUpload {
 ///
 /// - header bytes by header digest
 /// - full `{ header, body }` bytes by header digest
-/// - notarized `{ proof, header }` bytes by Simplex round and legacy view
-/// - finalized `{ proof, header }` bytes by Simplex round and legacy view
+/// - notarized `{ proof, header }` bytes by Simplex round
+/// - finalized `{ proof, header }` bytes by Simplex round
 /// - finalized `{ proof, header }` bytes by header height
 #[derive(Clone, Debug)]
 pub struct SimplexClient {
@@ -137,9 +137,8 @@ impl SimplexClient {
         prepared.summary.notarizations = 1;
         prepared.push(
             keys::notarization_by_round(notarized.proof.round()),
-            encoded.clone(),
+            encoded,
         );
-        prepared.push(keys::notarization_by_view(notarized.proof.view()), encoded);
         Ok(prepared)
     }
 
@@ -162,10 +161,6 @@ impl SimplexClient {
         prepared.summary.finalized_height_indexes = 1;
         prepared.push(
             keys::finalization_by_round(finalized.proof.round()),
-            encoded.clone(),
-        );
-        prepared.push(
-            keys::finalization_by_view(finalized.proof.view()),
             encoded.clone(),
         );
         prepared.push(
@@ -262,42 +257,18 @@ impl SimplexClient {
         self.get_raw(keys::block_by_digest(digest)).await
     }
 
-    pub async fn get_notarized_raw(
-        &self,
-        view: commonware_consensus::types::View,
-    ) -> Result<Option<Bytes>, SimplexError> {
-        self.get_raw(keys::notarization_by_view(view)).await
-    }
-
-    pub async fn get_finalized_by_view_raw(
-        &self,
-        view: commonware_consensus::types::View,
-    ) -> Result<Option<Bytes>, SimplexError> {
-        self.get_raw(keys::finalization_by_view(view)).await
-    }
-
-    /// Notarization bytes for `round`, falling back to the legacy view row. A legacy row may
-    /// belong to another epoch: typed readers and Marshal check the decoded round.
     pub async fn get_notarized_by_round_raw(
         &self,
         round: commonware_consensus::types::Round,
     ) -> Result<Option<Bytes>, SimplexError> {
-        match self.get_raw(keys::notarization_by_round(round)).await? {
-            Some(bytes) => Ok(Some(bytes)),
-            None => self.get_notarized_raw(round.view()).await,
-        }
+        self.get_raw(keys::notarization_by_round(round)).await
     }
 
-    /// Finalization bytes for `round`, falling back to the legacy view row. A legacy row may
-    /// belong to another epoch: typed readers check the decoded round.
     pub async fn get_finalized_by_round_raw(
         &self,
         round: commonware_consensus::types::Round,
     ) -> Result<Option<Bytes>, SimplexError> {
-        match self.get_raw(keys::finalization_by_round(round)).await? {
-            Some(bytes) => Ok(Some(bytes)),
-            None => self.get_finalized_by_view_raw(round.view()).await,
-        }
+        self.get_raw(keys::finalization_by_round(round)).await
     }
 
     pub async fn get_finalized_by_height_raw(
@@ -341,26 +312,6 @@ impl SimplexClient {
         )
     }
 
-    pub async fn get_notarized<B, S, D>(
-        &self,
-        view: commonware_consensus::types::View,
-        cfg: &<Notarized<B, S, D> as commonware_codec::Read>::Cfg,
-    ) -> Result<Option<Notarized<B, S, D>>, SimplexError>
-    where
-        B: Block<Digest = D>,
-        S: certificate::Scheme,
-        D: Digest,
-        <S::Certificate as commonware_codec::Read>::Cfg: Clone,
-    {
-        self.decode_indexed(
-            self.get_notarized_raw(view).await?,
-            cfg,
-            |value: &Notarized<B, S, D>| value.proof.view() == view,
-        )
-    }
-
-    /// Typed [Self::get_notarized_by_round_raw]; a legacy row for another epoch is rejected with
-    /// [SimplexError::RecordKeyMismatch].
     pub async fn get_notarized_by_round<B, S, D>(
         &self,
         round: commonware_consensus::types::Round,
@@ -397,26 +348,6 @@ impl SimplexClient {
         )
     }
 
-    pub async fn get_finalized_by_view<B, S, D>(
-        &self,
-        view: commonware_consensus::types::View,
-        cfg: &<Finalized<B, S, D> as commonware_codec::Read>::Cfg,
-    ) -> Result<Option<Finalized<B, S, D>>, SimplexError>
-    where
-        B: Block<Digest = D>,
-        S: certificate::Scheme,
-        D: Digest,
-        <S::Certificate as commonware_codec::Read>::Cfg: Clone,
-    {
-        self.decode_indexed(
-            self.get_finalized_by_view_raw(view).await?,
-            cfg,
-            |value: &Finalized<B, S, D>| value.proof.view() == view,
-        )
-    }
-
-    /// Typed [Self::get_finalized_by_round_raw]; a legacy row for another epoch is rejected with
-    /// [SimplexError::RecordKeyMismatch].
     pub async fn get_finalized_by_round<B, S, D>(
         &self,
         round: commonware_consensus::types::Round,

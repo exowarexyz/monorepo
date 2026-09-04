@@ -1,5 +1,5 @@
 use bytes::{BufMut, Bytes, BytesMut};
-use commonware_consensus::types::{Height, Round, View};
+use commonware_consensus::types::{Height, Round};
 use commonware_cryptography::Digest;
 use exoware_sdk::keys::Key;
 
@@ -10,9 +10,7 @@ pub const FORMAT_VERSION: u8 = 0;
 pub enum RecordKind {
     HeaderByDigest = 0x10,
     BlockByDigest = 0x11,
-    NotarizationByView = 0x20,
     NotarizationByRound = 0x21,
-    FinalizationByView = 0x30,
     FinalizedByHeight = 0x31,
     FinalizationByRound = 0x32,
 }
@@ -45,14 +43,6 @@ pub fn header_by_digest<D: Digest>(digest: &D) -> Key {
 
 pub fn block_by_digest<D: Digest>(digest: &D) -> Key {
     key_from_parts(RecordKind::BlockByDigest, digest.as_ref())
-}
-
-pub fn notarization_by_view(view: View) -> Key {
-    key_from_parts(RecordKind::NotarizationByView, &u64_suffix(view.get()))
-}
-
-pub fn finalization_by_view(view: View) -> Key {
-    key_from_parts(RecordKind::FinalizationByView, &u64_suffix(view.get()))
 }
 
 fn round_key(kind: RecordKind, round: Round) -> Key {

@@ -64,12 +64,8 @@ simulator still advances the latest finalized height index; pass
 
 Round indices encode epoch and view as two big-endian u64 fields under record
 kinds `0x21` (notarization) and `0x32` (finalization). `MarshalResolver` uses the
-complete requested round. Uploads also write the legacy view indices (`0x20`
-and `0x30`); round reads fall back to those rows when no canonical row exists.
-Typed reads and Marshal reject a legacy certificate for a different round.
-A view-only index retains one artifact per view across all epochs. Re-upload
-historical artifacts to populate round indices; already overwritten artifacts
-cannot be recovered from the legacy index alone.
+complete requested round. Round indices retain certificates from different
+epochs even when they share a view.
 
 Rust typed reads check the requested digest, height, or round and decode the
 payload/header binding. Signature verification remains the caller's or

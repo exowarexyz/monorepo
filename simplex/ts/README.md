@@ -30,11 +30,11 @@ await simplex.uploadFinalization({
 
 Use `prepareHeader`, `prepareBlock`, `prepareNotarization`, and
 `prepareFinalization` to stage multiple Simplex rows into one
-`StoreWriteBatch`. Finalizations are stored by round and height, with a legacy view alias. Use
+`StoreWriteBatch`. Finalizations are stored by round and height. Use
 `getNotarizationByRound(epoch, view)` and `getFinalizationByRound(epoch, view)`
-when epochs can change. Raw uploads must provide the encoded certificate's
-`epoch` and `view`: the client does not decode certificate bytes, so a wrong
-value mis-keys the round row.
+for round lookups. Raw uploads must provide the encoded certificate's `epoch`
+and `view`. The client does not decode certificate bytes, so a wrong value
+mis-keys the round row.
 
 Use `getHeader` or `subscribeHeaders` when only header bytes are needed. Use
 `getBlock` or `subscribeBlocks` when the caller needs the full
@@ -43,15 +43,15 @@ Use `getHeader` or `subscribeHeaders` when only header bytes are needed. Use
 ## Verification
 
 Pass a `SimplexCertificateVerifier` to verify opaque certificate records before
-`getNotarization`, `getFinalizationByView`, `getFinalizationByHeight`,
+`getNotarizationByRound`, `getFinalizationByRound`, `getFinalizationByHeight`,
 `latestFinalization`, or `subscribeCertificates` returns them:
 
 ```ts
 import { SimplexClient, type SimplexCertificateVerifier } from '@exowarexyz/simplex';
 
 const verifier: SimplexCertificateVerifier = {
-  verifyNotarization: async (bytes, context) => verifyMyNotarization(bytes, context.view),
-  verifyFinalization: async (bytes, context) => verifyMyFinalization(bytes, context.index),
+  verifyNotarization: async (bytes, context) => verifyMyNotarization(bytes, context.epoch, context.view),
+  verifyFinalization: async (bytes, context) => verifyMyFinalization(bytes, context),
 };
 
 const simplex = new SimplexClient('http://localhost:10000', { verifier });
@@ -144,8 +144,6 @@ context and own those checks, including height/header binding. Select
 verification material for the certificate's epoch; storing an epoch does not
 make its signing keys trusted.
 
-Round reads fall back to legacy view rows and verify their requested identity.
-Certificate subscriptions include both layouts and suppress legacy aliases
-when a matching canonical record appears in the same Store frame. Existing
-legacy history remains readable, but view-only rows cannot preserve multiple
-epochs at the same view. Re-upload retained artifacts to backfill round indices.
+Certificate subscriptions emit round entries with both epoch and view. Set
+`includeFinalizedByHeight` to also receive finalization entries indexed by
+height.

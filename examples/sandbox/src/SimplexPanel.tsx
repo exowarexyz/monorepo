@@ -57,7 +57,7 @@ interface VerifiedFullBlock {
   block: SimplexBlockData;
 }
 
-const READ_CERTIFICATE_IDS = ['notarization', 'latest', 'view', 'height'] as const;
+const READ_CERTIFICATE_IDS = ['notarization', 'latest', 'round', 'height'] as const;
 type ReadCertificateId = typeof READ_CERTIFICATE_IDS[number];
 type ReadCertificates = Record<ReadCertificateId, VerifiedSimplexCertificate | null>;
 
@@ -81,7 +81,7 @@ async function verifyDemoHeader({
   header,
 }: SimplexHeaderVerification): Promise<boolean> {
   // The demo seeder uses the block height as its signed Simplex view
-  if (context.kind === 'finalization' && context.height !== undefined && certificate.view !== context.height) {
+  if (context.kind === 'finalization' && context.index !== 'round' && certificate.view !== context.height) {
     return false;
   }
   return bytesEqual(payload, await sha256(header));
@@ -94,8 +94,8 @@ async function verifyDemoBlock(header: Uint8Array, body: Uint8Array): Promise<bo
   return bytesEqual(header.slice(header.byteLength - 32), await sha256(body));
 }
 
-function formatRound(epoch: bigint | undefined, view: bigint): string {
-  return epoch === undefined ? view.toString() : `${epoch.toString()}:${view.toString()}`;
+function formatRound(epoch: bigint, view: bigint): string {
+  return `${epoch.toString()}:${view.toString()}`;
 }
 
 function renderCertificate(value: VerifiedSimplexCertificate): string {
@@ -114,7 +114,7 @@ function emptyReadCertificates(): ReadCertificates {
   return {
     notarization: null,
     latest: null,
-    view: null,
+    round: null,
     height: null,
   };
 }
@@ -177,11 +177,13 @@ export function SimplexPanel({
   const [isReadingBlock, setIsReadingBlock] = useState(false);
   const [isReadingNotarization, setIsReadingNotarization] = useState(false);
   const [isReadingLatest, setIsReadingLatest] = useState(false);
-  const [isReadingViewFinalization, setIsReadingViewFinalization] = useState(false);
+  const [isReadingRoundFinalization, setIsReadingRoundFinalization] = useState(false);
   const [isReadingHeightFinalization, setIsReadingHeightFinalization] = useState(false);
   const [isSubscribing, setIsSubscribing] = useState(false);
   const [verifyingFullBlockId, setVerifyingFullBlockId] = useState<string | null>(null);
+  const [notarizationEpoch, setNotarizationEpoch] = useState('0');
   const [notarizationView, setNotarizationView] = useState('');
+  const [finalizationEpoch, setFinalizationEpoch] = useState('0');
   const [finalizationIndex, setFinalizationIndex] = useState('');
   const [sinceSequenceNumber, setSinceSequenceNumber] = useState('');
   const [streamEvents, setStreamEvents] = useState<VerifiedSimplexEvent[]>([]);
@@ -199,9 +201,9 @@ export function SimplexPanel({
   const [latestFinalization, setLatestFinalization] =
     useState<VerifiedSimplexCertificate | null>(null);
   const [latestFinalizationMissing, setLatestFinalizationMissing] = useState(false);
-  const [viewFinalization, setViewFinalization] =
+  const [roundFinalization, setRoundFinalization] =
     useState<VerifiedSimplexCertificate | null>(null);
-  const [viewFinalizationMissing, setViewFinalizationMissing] = useState(false);
+  const [roundFinalizationMissing, setRoundFinalizationMissing] = useState(false);
   const [heightFinalization, setHeightFinalization] =
     useState<VerifiedSimplexCertificate | null>(null);
   const [heightFinalizationMissing, setHeightFinalizationMissing] = useState(false);
@@ -286,8 +288,8 @@ export function SimplexPanel({
       setNotarizationMissing(false);
       setLatestFinalization(null);
       setLatestFinalizationMissing(false);
-      setViewFinalization(null);
-      setViewFinalizationMissing(false);
+      setRoundFinalization(null);
+      setRoundFinalizationMissing(false);
       setHeightFinalization(null);
       setHeightFinalizationMissing(false);
       setStreamEvents([]);
@@ -343,7 +345,7 @@ export function SimplexPanel({
     }
   };
 
-  const readNotarizationByView = async () => {
+  const readNotarizationByRound = async () => {
     setIsReadingNotarization(true);
     setReadCertificateRef('notarization', null);
     setNotarization(null);
@@ -354,11 +356,15 @@ export function SimplexPanel({
       return next;
     });
     try {
+      const epoch = notarizationEpoch.trim();
+      if (!/^\d+$/.test(epoch)) {
+        throw new Error('Notarization epoch must be a non-negative integer');
+      }
       const view = notarizationView.trim();
       if (!/^\d+$/.test(view)) {
         throw new Error('Notarization view must be a non-negative integer');
       }
-      const nextNotarization = await client.getNotarization(view);
+      const nextNotarization = await client.getNotarizationByRound(epoch, view);
       setReadCertificateRef('notarization', nextNotarization);
       setNotarization(nextNotarization);
       setNotarizationMissing(nextNotarization === null);
@@ -366,8 +372,8 @@ export function SimplexPanel({
         'success',
         nextNotarization ? 'Simplex Notarization Loaded' : 'Simplex Notarization Missing',
         nextNotarization
-          ? `view ${nextNotarization.view.toString()}`
-          : `No notarized certificate at view ${view}`,
+          ? `round ${formatRound(nextNotarization.epoch, nextNotarization.view)}`
+          : `No notarized certificate at round ${epoch}:${view}`,
       );
     } catch (error) {
       showNotification('error', 'Simplex Notarization Read Failed', String(error));
@@ -394,7 +400,7 @@ export function SimplexPanel({
       showNotification(
         'success',
         finalization ? 'Simplex Finalization Loaded' : 'Simplex Finalization Missing',
-        finalization ? `view ${finalization.view.toString()}` : 'No finalized height index yet',
+        finalization ? `round ${formatRound(finalization.epoch, finalization.view)}` : 'No finalized height index yet',
       );
     } catch (error) {
       showNotification('error', 'Simplex Finalization Read Failed', String(error));
@@ -411,33 +417,37 @@ export function SimplexPanel({
     return value;
   };
 
-  const readViewFinalization = async () => {
-    setIsReadingViewFinalization(true);
-    setReadCertificateRef('view', null);
-    setViewFinalization(null);
-    setViewFinalizationMissing(false);
+  const readRoundFinalization = async () => {
+    setIsReadingRoundFinalization(true);
+    setReadCertificateRef('round', null);
+    setRoundFinalization(null);
+    setRoundFinalizationMissing(false);
     setVerifiedFullBlocks((previous) => {
       const next = { ...previous };
-      delete next.view;
+      delete next.round;
       return next;
     });
     try {
+      const epoch = finalizationEpoch.trim();
+      if (!/^\d+$/.test(epoch)) {
+        throw new Error('Finalization epoch must be a non-negative integer');
+      }
       const view = readFinalizationIndex('view');
-      const finalization = await client.getFinalizationByView(view);
-      setReadCertificateRef('view', finalization);
-      setViewFinalization(finalization);
-      setViewFinalizationMissing(finalization === null);
+      const finalization = await client.getFinalizationByRound(epoch, view);
+      setReadCertificateRef('round', finalization);
+      setRoundFinalization(finalization);
+      setRoundFinalizationMissing(finalization === null);
       showNotification(
         'success',
         finalization ? 'Simplex Finalization Loaded' : 'Simplex Finalization Missing',
         finalization
-          ? `view ${finalization.view.toString()}`
-          : `No finalized certificate at view ${view}`,
+          ? `round ${formatRound(finalization.epoch, finalization.view)}`
+          : `No finalized certificate at round ${epoch}:${view}`,
       );
     } catch (error) {
       showNotification('error', 'Simplex Finalization Read Failed', String(error));
     } finally {
-      setIsReadingViewFinalization(false);
+      setIsReadingRoundFinalization(false);
     }
   };
 
@@ -659,7 +669,17 @@ export function SimplexPanel({
           </button>
         </div>
         <div className="form-row">
-          <div className="form-group form-group-wide">
+          <div className="form-group">
+            <label htmlFor="simplex-notarization-epoch">Notarization Epoch</label>
+            <input
+              id="simplex-notarization-epoch"
+              type="number"
+              min="0"
+              value={notarizationEpoch}
+              onChange={(event) => setNotarizationEpoch(event.target.value)}
+            />
+          </div>
+          <div className="form-group">
             <label htmlFor="simplex-notarization-view">Notarization View</label>
             <input
               id="simplex-notarization-view"
@@ -673,18 +693,29 @@ export function SimplexPanel({
         <div className="button-row">
           <button
             className={`btn-primary ${isReadingNotarization ? 'loading' : ''}`}
-            onClick={readNotarizationByView}
+            onClick={readNotarizationByRound}
             disabled={
               isReadingNotarization
               || verifierStatus !== 'ready'
+              || !notarizationEpoch.trim()
               || !notarizationView.trim()
             }
           >
-            {isReadingNotarization ? 'Loading...' : 'By View'}
+            {isReadingNotarization ? 'Loading...' : 'By Round'}
           </button>
         </div>
         <div className="form-row">
-          <div className="form-group form-group-wide">
+          <div className="form-group">
+            <label htmlFor="simplex-finalization-epoch">Finalization Epoch</label>
+            <input
+              id="simplex-finalization-epoch"
+              type="number"
+              min="0"
+              value={finalizationEpoch}
+              onChange={(event) => setFinalizationEpoch(event.target.value)}
+            />
+          </div>
+          <div className="form-group">
             <label htmlFor="simplex-finalization-index">Finalization View or Height</label>
             <input
               id="simplex-finalization-index"
@@ -697,15 +728,16 @@ export function SimplexPanel({
         </div>
         <div className="button-row">
           <button
-            className={`btn-primary ${isReadingViewFinalization ? 'loading' : ''}`}
-            onClick={readViewFinalization}
+            className={`btn-primary ${isReadingRoundFinalization ? 'loading' : ''}`}
+            onClick={readRoundFinalization}
             disabled={
-              isReadingViewFinalization
+              isReadingRoundFinalization
               || verifierStatus !== 'ready'
+              || !finalizationEpoch.trim()
               || !finalizationIndex.trim()
             }
           >
-            {isReadingViewFinalization ? 'Loading...' : 'By View'}
+            {isReadingRoundFinalization ? 'Loading...' : 'By Round'}
           </button>
           <button
             className={`btn-primary ${isReadingHeightFinalization ? 'loading' : ''}`}
@@ -744,7 +776,7 @@ export function SimplexPanel({
         {notarization && (
           <div className="result fade-in">
             <div className="result-title-row">
-              <h4>Notarization By View</h4>
+              <h4>Notarization By Round</h4>
               <button
                 className={`btn-secondary btn-compact ${
                   verifyingFullBlockId === 'notarization' ? 'loading' : ''
@@ -772,7 +804,7 @@ export function SimplexPanel({
         {notarizationMissing && (
           <div className="result fade-in">
             <h4>No Notarization</h4>
-            <p>No notarized certificate is stored at view {notarizationView.trim()}.</p>
+            <p>No notarized certificate is stored at epoch {notarizationEpoch.trim()}, view {notarizationView.trim()}.</p>
           </div>
         )}
         {latestFinalization && (
@@ -807,36 +839,36 @@ export function SimplexPanel({
             <p>No finalized height index is stored.</p>
           </div>
         )}
-        {viewFinalization && (
+        {roundFinalization && (
           <div className="result fade-in">
             <div className="result-title-row">
-              <h4>Finalization By View</h4>
+              <h4>Finalization By Round</h4>
               <button
                 className={`btn-secondary btn-compact ${
-                  verifyingFullBlockId === 'view' ? 'loading' : ''
+                  verifyingFullBlockId === 'round' ? 'loading' : ''
                 }`}
-                onClick={() => void verifyReadFullBlock('view')}
+                onClick={() => void verifyReadFullBlock('round')}
                 disabled={verifyingFullBlockId !== null}
               >
-                {verifyingFullBlockId === 'view' ? 'Verifying...' : 'Verify Full Block'}
+                {verifyingFullBlockId === 'round' ? 'Verifying...' : 'Verify Full Block'}
               </button>
             </div>
-            <pre>{renderCertificate(viewFinalization)}</pre>
-            {verifiedFullBlocks.view && (
+            <pre>{renderCertificate(roundFinalization)}</pre>
+            {verifiedFullBlocks.round && (
               <div className="result-detail">
-                <p><strong>Digest:</strong> {verifiedFullBlocks.view.digestHex}</p>
+                <p><strong>Digest:</strong> {verifiedFullBlocks.round.digestHex}</p>
                 <pre>{[
-                  `header ${renderBytes(verifiedFullBlocks.view.block.header)}`,
-                  `body ${renderBytes(verifiedFullBlocks.view.block.body)}`,
+                  `header ${renderBytes(verifiedFullBlocks.round.block.header)}`,
+                  `body ${renderBytes(verifiedFullBlocks.round.block.body)}`,
                 ].join('\n')}</pre>
               </div>
             )}
           </div>
         )}
-        {viewFinalizationMissing && (
+        {roundFinalizationMissing && (
           <div className="result fade-in">
             <h4>No Finalization</h4>
-            <p>No finalized certificate is stored at view {finalizationIndex.trim()}.</p>
+            <p>No finalized certificate is stored at epoch {finalizationEpoch.trim()}, view {finalizationIndex.trim()}.</p>
           </div>
         )}
         {heightFinalization && (
@@ -924,7 +956,7 @@ export function SimplexPanel({
                 const eventId = streamEventId({ sequenceNumber, entry });
                 const title =
                   entry.type === 'notarization'
-                    ? `notarization view ${formatRound(entry.epoch, entry.view)}`
+                    ? `notarization round ${formatRound(entry.epoch, entry.view)}`
                     : `finalization ${entry.index} ${
                         entry.index !== 'height'
                           ? formatRound(entry.epoch, entry.view)

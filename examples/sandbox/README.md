@@ -144,8 +144,9 @@ With the simulator running above:
 3. **In the UI**:
    - **Connection** accepts the scheme, namespace, and verifier material printed
      by `simplex seed`.
-   - **Read** fetches a block by digest, a notarization by view, a finalization
-     by view or height, or the latest finalized height index. Certificate reads
+   - **Read** fetches a block by digest, a notarization by round, a finalization
+     by round or height, or the latest finalized height index. Round lookups
+     require an epoch and view. The demo seeder uses epoch zero. Certificate reads
      are verified before display. From a verified certificate, use **Verify Full
      Block** to fetch the digest-indexed block, compare its header to the
      certified header, and verify the demo body commitment.
