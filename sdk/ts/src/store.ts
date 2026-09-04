@@ -56,6 +56,7 @@ export interface QueryResultItem {
 }
 
 export interface QueryResult {
+    sequenceNumber: bigint;
     results: QueryResultItem[];
 }
 
@@ -456,6 +457,7 @@ async function performGet(
     minSequenceNumber?: bigint,
     detailObserver?: DetailObserver,
     prefix?: StoreKeyPrefix,
+    options?: CallOptions,
 ): Promise<GetResult | null> {
     const effective = normalizeMinSequenceNumber(minSequenceNumber);
     const req = create(QueryGetRequestSchema, {
@@ -463,7 +465,7 @@ async function performGet(
         ...(effective !== undefined ? { minSequenceNumber: effective } : {}),
     });
     try {
-        const res = await client.query.get(req);
+        const res = await client.query.get(req, options);
         if (res.detail) {
             detailObserver?.(res.detail);
         }
@@ -526,6 +528,7 @@ async function performQuery(
     minSequenceNumber?: bigint,
     detailObserver?: DetailObserver,
     prefix?: StoreKeyPrefix,
+    options?: CallOptions,
 ): Promise<QueryResult> {
     const effective = normalizeMinSequenceNumber(minSequenceNumber);
     const physicalRange = encodeStoreRange(prefix, start, end);
@@ -538,17 +541,19 @@ async function performQuery(
         ...(effective !== undefined ? { minSequenceNumber: effective } : {}),
     });
     const results: QueryResultItem[] = [];
+    let sequenceNumber = 0n;
     try {
-        const stream = client.query.range(req);
+        const stream = client.query.range(req, options);
         for await (const frame of stream) {
             for (const row of frame.results) {
                 results.push({ key: decodeStoreKey(prefix, row.key), value: row.value });
             }
             if (frame.detail) {
+                sequenceNumber = frame.detail.sequenceNumber;
                 detailObserver?.(frame.detail);
             }
         }
-        return { results };
+        return { sequenceNumber, results };
     } catch (e) {
         mapConnectToHttpError(e, client.credential);
     }
@@ -700,11 +705,12 @@ export class SerializableReadSession {
         }
     }
 
-    async get(key: Uint8Array): Promise<GetResult | null> {
+    async get(key: Uint8Array, options?: CallOptions): Promise<GetResult | null> {
         return this.runRead(
-            (sequence) => performGet(this.client, key, sequence, undefined, this.keyPrefix),
+            (sequence) =>
+                performGet(this.client, key, sequence, undefined, this.keyPrefix, options),
             (detailObserver) =>
-                performGet(this.client, key, undefined, detailObserver, this.keyPrefix),
+                performGet(this.client, key, undefined, detailObserver, this.keyPrefix, options),
         );
     }
 
@@ -875,8 +881,12 @@ export class StoreClient {
         }
     }
 
-    async get(key: Uint8Array, minSequenceNumber?: bigint): Promise<GetResult | null> {
-        return performGet(this.client, key, minSequenceNumber, undefined, this.keyPrefix);
+    async get(
+        key: Uint8Array,
+        minSequenceNumber?: bigint,
+        options?: CallOptions,
+    ): Promise<GetResult | null> {
+        return performGet(this.client, key, minSequenceNumber, undefined, this.keyPrefix, options);
     }
 
     async getMany(
@@ -903,6 +913,7 @@ export class StoreClient {
         batchSize: number = 4096,
         mode: TraversalMode = TraversalMode.FORWARD,
         minSequenceNumber?: bigint,
+        options?: CallOptions,
     ): Promise<QueryResult> {
         return performQuery(
             this.client,
@@ -914,6 +925,7 @@ export class StoreClient {
             minSequenceNumber,
             undefined,
             this.keyPrefix,
+            options,
         );
     }
 
