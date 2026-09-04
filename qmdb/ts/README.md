@@ -18,7 +18,6 @@ contract and use a trusted operation-log root. The client is configured with a
 Merkle family (`mmr` by default) and uses that for all proof decoding and
 verification.
 
-
 Operation range verification binds the exact requested start, count, and tip;
 key ranges enforce linear ordering, bounds, and pagination. The corresponding
 WASM range exports receive the requested tip/start/maximum (and key-range limit)

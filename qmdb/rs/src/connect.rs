@@ -688,9 +688,7 @@ impl<D: commonware_cryptography::Digest, F: Graftable> BatchSubscribeStream<D, F
                         matched.push((location, entry.value.to_vec()));
                     }
                 }
-                sub::RowFamily::Presence => {
-                    latest = Some(latest.map_or(location, |previous| previous.max(location)))
-                }
+                sub::RowFamily::Presence => latest = latest.max(Some(location)),
                 sub::RowFamily::Watermark => {
                     self.watermarks
                         .entry(location)
@@ -725,7 +723,8 @@ fn drain_ready<F: Family>(
     watermarks: &mut BTreeMap<Location<F>, u64>,
     ready: &mut VecDeque<ReadyBatch<F>>,
 ) {
-    // Resume cursors follow Store order even when operation ranges commit out of order
+    // Emit in Store order: a frame waits until every earlier frame is covered by a published
+    // watermark, so a resume cursor never skips an unpublished frame (tips may arrive unordered)
     while let Some(batch) = pending.front() {
         let Some((&watermark, &watermark_sequence)) = watermarks.range(batch.latest..).next()
         else {

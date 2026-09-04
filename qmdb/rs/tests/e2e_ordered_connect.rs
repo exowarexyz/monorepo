@@ -733,12 +733,7 @@ async fn ordered_connect_client_rejects_empty_unbounded_get_range_before_next_ke
         )
         .await
         .expect_err("bounded empty proof must not verify an unbounded range");
-    assert!(matches!(
-        err,
-        QmdbError::ProofVerification {
-            kind: exoware_qmdb::ProofKind::CurrentKeyExclusion
-        }
-    ));
+    assert!(err.to_string().contains("in-range successor"), "{err}");
 }
 
 #[tokio::test]
@@ -920,4 +915,77 @@ async fn ordered_connect_client_rejects_get_many_proof_for_different_key() {
             kind: exoware_qmdb::ProofKind::CurrentKeyValue
         }
     ));
+}
+
+#[tokio::test]
+async fn ordered_connect_client_rejects_get_range_page_shorter_than_limit() {
+    let store_client = common::local_store_client().await;
+    let local = build_local_batch().await;
+    commit_upload(&store_client, &local).await;
+
+    let ordered_client = Arc::new(TestOrderedClient::new(
+        PrefixedStoreClient::empty(store_client.clone()),
+        op_cfg(),
+        update_row_cfg(),
+    ));
+    let (_qmdb_server, qmdb_url) = spawn_qmdb_server(ordered_client.clone()).await;
+    let rpc = rpc_client(&qmdb_url);
+    let range_rpc = range_rpc_client(&qmdb_url);
+
+    let raw_get_response = rpc
+        .get(ProtoGetRequest {
+            key: encoded_key(b"alpha"),
+            tip: local.latest_location.as_u64(),
+            ..Default::default()
+        })
+        .await
+        .expect("get")
+        .into_view()
+        .to_owned_message();
+    let raw_get_many_response = rpc
+        .get_many(ProtoGetManyRequest {
+            keys: vec![encoded_key(b"alpha")],
+            tip: local.latest_location.as_u64(),
+            ..Default::default()
+        })
+        .await
+        .expect("get_many")
+        .into_view()
+        .to_owned_message();
+    // A one-entry page with a continuation is a valid answer for limit 1 only
+    let raw_get_range_response = range_rpc
+        .get_range(ProtoGetRangeRequest {
+            start_key: encoded_key(b"a"),
+            limit: 1,
+            tip: local.latest_location.as_u64(),
+            ..Default::default()
+        })
+        .await
+        .expect("get_range")
+        .into_view()
+        .to_owned_message();
+    assert!(raw_get_range_response.has_more);
+    assert_eq!(raw_get_range_response.entries.len(), 1);
+
+    let (_static_server, static_url) = spawn_static_server(StaticQmdbService {
+        get_response: raw_get_response,
+        get_many_response: raw_get_many_response,
+        get_range_response: raw_get_range_response,
+    })
+    .await;
+    let client = validated_client(&static_url);
+
+    let err = client
+        .get_range(
+            ProtoGetRangeRequest {
+                start_key: encoded_key(b"a"),
+                limit: 2,
+                tip: local.latest_location.as_u64(),
+                ..Default::default()
+            },
+            &local.current_boundary.root,
+        )
+        .await
+        .expect_err("a page shorter than the requested limit must not claim a continuation");
+    assert!(err.to_string().contains("continuation"), "{err}");
 }

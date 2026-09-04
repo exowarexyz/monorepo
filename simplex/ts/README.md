@@ -33,7 +33,8 @@ Use `prepareHeader`, `prepareBlock`, `prepareNotarization`, and
 `StoreWriteBatch`. Finalizations are stored by round and height, with a legacy view alias. Use
 `getNotarizationByRound(epoch, view)` and `getFinalizationByRound(epoch, view)`
 when epochs can change. Raw uploads must provide the encoded certificate's
-epoch and view; omitted upload epochs default to zero.
+`epoch` and `view`: the client does not decode certificate bytes, so a wrong
+value mis-keys the round row.
 
 Use `getHeader` or `subscribeHeaders` when only header bytes are needed. Use
 `getBlock` or `subscribeBlocks` when the caller needs the full
@@ -135,10 +136,11 @@ const verifier = await createWasmSimplexVerifier({
 });
 ```
 
-
 The built-in verifier returns the signed `epoch` and checks any requested epoch
-and view before application header verification. Custom verifiers receive the
-same context and own those checks, including height/header binding. Select
+and view before application header verification. Verifier results must include
+`epoch` (rebuild the bundled WASM together with this package, and return it from
+any custom `createSimplexVerifier` module). Custom verifiers receive the same
+context and own those checks, including height/header binding. Select
 verification material for the certificate's epoch; storing an epoch does not
 make its signing keys trusted.
 

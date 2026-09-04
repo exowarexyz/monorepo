@@ -12,6 +12,8 @@ test('WASM size arguments reject narrowing before initialization', async () => {
   const request = { tip: 2n, startLocation: 1n, maxLocations: 1 };
   await assert.rejects(client.getFixedUnorderedUpdate(request, '', 1n, '', 2 ** 32), /32-bit/);
   await assert.rejects(client.getFixedKeylessAppend(request, '', 1n << 64n, ''), /64-bit/);
+  const ordered = new OrderedQmdbClient('http://127.0.0.1:1');
+  await assert.rejects(ordered.getRange({ startKey: '', limit: 0, tip: 1n }, ''), /32-bit/);
 });
 
 test('operation windows reject invalid bounds before initialization', async () => {

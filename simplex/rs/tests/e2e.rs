@@ -2,7 +2,7 @@ use std::{sync::Arc, time::Duration};
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use commonware_actor::Feedback;
-use commonware_codec::{Decode, EncodeSize, Error, Read, ReadExt, Write};
+use commonware_codec::{Decode, Encode, EncodeSize, Error, Read, ReadExt, Write};
 use commonware_consensus::{
     marshal::{core::Actor, standard::Standard, Config as MarshalConfig, Start, Update},
     simplex::types::{Finalization, Finalize, Notarization, Notarize, Proposal},
@@ -25,8 +25,10 @@ use commonware_utils::{
     vec::NonEmptyVec,
     Acknowledgement as _, NZUsize, TestRng, NZU16, NZU64,
 };
-use exoware_sdk::{PrefixedStoreClient, RetryConfig, StoreBatchUpload, StoreClient};
-use exoware_simplex::{Finalized, MarshalResolver, Notarized, SimplexClient};
+use exoware_sdk::{
+    PrefixedStoreClient, RetryConfig, StoreBatchUpload, StoreClient, StoreWriteBatch,
+};
+use exoware_simplex::{keys, Finalized, MarshalResolver, Notarized, SimplexClient, SimplexError};
 
 const NAMESPACE: &[u8] = b"_EXOWARE_SIMPLEX_TEST";
 
@@ -520,4 +522,65 @@ async fn round_indices_retain_same_view_across_epochs() {
             Some(finalized)
         );
     }
+}
+
+#[tokio::test]
+async fn round_reads_fall_back_to_legacy_view_rows_and_check_the_round() {
+    let store = local_store_client().await;
+    let client = PrefixedStoreClient::empty(store.clone());
+    let simplex = SimplexClient::new(client.clone());
+    let schemes = schemes();
+    let mut block = TestBlock::new(9, b"legacy");
+    block.context.round = Round::new(Epoch::new(1), View::new(9));
+    block.digest = block.compute_digest();
+    let notarized = notarized(block.clone(), &schemes);
+    let finalized = finalized(block, &schemes);
+
+    // Writers that predate round indices stored only view-keyed rows
+    let mut batch = StoreWriteBatch::new();
+    batch
+        .push(
+            &client,
+            &keys::notarization_by_view(View::new(9)),
+            notarized.encode(),
+        )
+        .unwrap();
+    batch
+        .push(
+            &client,
+            &keys::finalization_by_view(View::new(9)),
+            finalized.encode(),
+        )
+        .unwrap();
+    batch.commit(&store).await.unwrap();
+
+    let cfg = (10, 1024);
+    let round = Round::new(Epoch::new(1), View::new(9));
+    assert_eq!(
+        simplex
+            .get_notarized_by_round::<TestBlock, Scheme, Sha256Digest>(round, &cfg)
+            .await
+            .unwrap(),
+        Some(notarized)
+    );
+    assert_eq!(
+        simplex
+            .get_finalized_by_round::<TestBlock, Scheme, Sha256Digest>(round, &cfg)
+            .await
+            .unwrap(),
+        Some(finalized)
+    );
+    let other_epoch = Round::new(Epoch::new(2), View::new(9));
+    assert!(matches!(
+        simplex
+            .get_notarized_by_round::<TestBlock, Scheme, Sha256Digest>(other_epoch, &cfg)
+            .await,
+        Err(SimplexError::RecordKeyMismatch)
+    ));
+    assert!(matches!(
+        simplex
+            .get_finalized_by_round::<TestBlock, Scheme, Sha256Digest>(other_epoch, &cfg)
+            .await,
+        Err(SimplexError::RecordKeyMismatch)
+    ));
 }

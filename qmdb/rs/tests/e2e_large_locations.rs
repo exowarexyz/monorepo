@@ -41,6 +41,7 @@ async fn check_large_frontier<F: Graftable + PartialEq>(family: &str, start: u64
     let reference = Mem::<F, Digest>::from_components(Vec::new(), start, pins).unwrap();
     let mut seed = StoreWriteBatch::new();
     for (position, _, digest) in &peaks {
+        // Raw node rows are the NODE_FAMILY byte (0x05 in codec.rs) then the big-endian position
         let mut key = vec![0x05];
         key.extend_from_slice(&position.as_u64().to_be_bytes());
         seed.push(&client, &Bytes::from(key), digest.encode())
@@ -105,7 +106,11 @@ async fn check_large_frontier<F: Graftable + PartialEq>(family: &str, start: u64
         "../ts/test/fixtures/{family}-{}.txt",
         start.as_u64()
     ));
-    // The same proof bytes exercise the generated WASM exports in the browser client tests
+    // The same proof bytes exercise the generated WASM exports in the browser client tests.
+    // Set UPDATE_FIXTURES=1 to rewrite them after an intentional encoding change.
+    if std::env::var_os("UPDATE_FIXTURES").is_some() {
+        std::fs::write(&fixture_path, &fixture).unwrap();
+    }
     assert_eq!(std::fs::read_to_string(fixture_path).unwrap(), fixture);
     let rpc = OperationLogClient::<_, F, Sha256, Operation<F, Vec<u8>>>::plaintext(
         &url,

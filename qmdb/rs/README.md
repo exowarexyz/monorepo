@@ -669,7 +669,7 @@ limit; a maximum permits a smaller batch. Subscription resume cursors follow
 Store sequence order even when operation ranges are uploaded out of order.
 
 Current proof construction reads persisted Merkle nodes and at most the queried,
-pending, and partial bitmap chunks. Ordered exclusion and key-range discovery
+pending, and last bitmap chunks. Ordered exclusion and key-range discovery
 still scan retained update history and active keys; their cost grows with that
 history even for a small limit. Generic key ordering is `K::Ord`, which need not
 match raw-byte ordering, so an index optimization must preserve that contract.

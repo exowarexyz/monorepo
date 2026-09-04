@@ -59,6 +59,7 @@ test('stages block and finalization rows into one StoreWriteBatch', () => {
   });
 
   const upload = simplex.prepareFinalization({
+    epoch: 0,
     view: 7,
     height: 11,
     digest: 'd0',
@@ -315,7 +316,7 @@ test('Simplex WASM verifier adapter is scheme-parameterized', async () => {
     }),
     {
       scheme: 'bls12381-threshold-vrf-min-sig',
-        epoch: 0n,
+      epoch: 0n,
       view: 11n,
       parent: 10n,
       payload: new Uint8Array([0x0a]),
@@ -335,7 +336,7 @@ test('Simplex WASM verifier adapter is scheme-parameterized', async () => {
     }),
     {
       scheme: 'bls12381-threshold-vrf-min-sig',
-        epoch: 0n,
+      epoch: 0n,
       view: 12n,
       parent: 11n,
       payload: new Uint8Array([0x0a]),
@@ -357,7 +358,7 @@ test('Simplex WASM verifier adapter supports coding commitment payloads', async 
         calls.push(`notarized:${payload}:${identity}:${scheme}:${bytesToHex(bytes)}`);
         return {
           scheme,
-        epoch: 0n,
+          epoch: 0n,
           view: 3n,
           parent: 2n,
           payload: namespace,
@@ -369,7 +370,7 @@ test('Simplex WASM verifier adapter supports coding commitment payloads', async 
         calls.push(`finalized:${payload}:${identity}:${scheme}:${bytesToHex(bytes)}`);
         return {
           scheme,
-        epoch: 0n,
+          epoch: 0n,
           view: 4n,
           parent: 3n,
           payload: namespace,
@@ -417,7 +418,7 @@ test('Simplex WASM verifier adapter passes non-SHA payloads through', async () =
         calls.push(`notarized:${payload}:${identity}:${scheme}:${bytesToHex(bytes)}`);
         return {
           scheme,
-        epoch: 0n,
+          epoch: 0n,
           view: 5n,
           parent: 4n,
           payload: namespace,
@@ -429,7 +430,7 @@ test('Simplex WASM verifier adapter passes non-SHA payloads through', async () =
         calls.push(`finalized:${payload}:${identity}:${scheme}:${bytesToHex(bytes)}`);
         return {
           scheme,
-        epoch: 0n,
+          epoch: 0n,
           view: 6n,
           parent: 5n,
           payload: namespace,

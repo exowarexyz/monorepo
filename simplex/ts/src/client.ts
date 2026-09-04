@@ -55,7 +55,7 @@ export interface BlockUpload extends HeaderUpload {
 }
 
 export interface NotarizationUpload {
-  epoch?: U64Like;
+  epoch: U64Like;
   view: U64Like;
   notarized: BytesLike;
   header?: BytesLike;
@@ -64,7 +64,7 @@ export interface NotarizationUpload {
 }
 
 export interface FinalizationUpload {
-  epoch?: U64Like;
+  epoch: U64Like;
   view: U64Like;
   height: U64Like;
   finalized: BytesLike;
@@ -664,15 +664,33 @@ function mergePrepared(items: PreparedSimplexUpload[]): PreparedSimplexUpload {
   return { entries, summary };
 }
 
+function u64At(bytes: Uint8Array, offset: number): bigint {
+  let value = 0n;
+  for (let i = offset; i < offset + 8; i++) {
+    value = (value << 8n) | BigInt(bytes[i]);
+  }
+  return value;
+}
+
 function u64FromKey(key: Uint8Array): bigint {
   if (key.length !== 10) {
     throw new Error(`invalid simplex u64 key length ${key.length}`);
   }
-  let value = 0n;
-  for (let i = 2; i < 10; i++) {
-    value = (value << 8n) | BigInt(key[i]);
-  }
-  return value;
+  return u64At(key, 2);
+}
+
+type RawSimplexRoundCapableEntry = RawSimplexNotarizationEntry | RawSimplexFinalizationByViewEntry;
+
+function isRoundEntry(entry: RawSimplexCertificateStreamEntry): entry is RawSimplexRoundCapableEntry {
+  return entry.kind === SimplexRecordKind.NotarizationByRound || entry.kind === SimplexRecordKind.FinalizationByRound;
+}
+
+function isViewEntry(entry: RawSimplexCertificateStreamEntry): entry is RawSimplexRoundCapableEntry {
+  return entry.kind === SimplexRecordKind.NotarizationByView || entry.kind === SimplexRecordKind.FinalizationByView;
+}
+
+function certificateIdentity(entry: RawSimplexRoundCapableEntry): string {
+  return `${entry.type}:${entry.view}:${bytesToHex(entry.type === 'notarization' ? entry.notarized : entry.finalized)}`;
 }
 
 function streamMatchKind(kind: SimplexRecordKind) {
@@ -714,10 +732,25 @@ function decodeRawStreamEntry(key: Uint8Array, value: Uint8Array): RawSimplexStr
     }
     case SimplexRecordKind.NotarizationByRound:
       if (key.length !== 18) throw new Error('invalid notarization round key');
-      return { type: 'notarization', kind, key, epoch: u64FromKey(key.slice(0, 10)), view: u64FromKey(key.slice(8)), notarized: value };
+      return {
+        type: 'notarization',
+        kind,
+        key,
+        epoch: u64At(key, 2),
+        view: u64At(key, 10),
+        notarized: value,
+      };
     case SimplexRecordKind.FinalizationByRound:
       if (key.length !== 18) throw new Error('invalid finalization round key');
-      return { type: 'finalization', kind, index: 'round', key, epoch: u64FromKey(key.slice(0, 10)), view: u64FromKey(key.slice(8)), finalized: value };
+      return {
+        type: 'finalization',
+        kind,
+        index: 'round',
+        key,
+        epoch: u64At(key, 2),
+        view: u64At(key, 10),
+        finalized: value,
+      };
     case SimplexRecordKind.NotarizationByView:
       return {
         type: 'notarization',
@@ -823,7 +856,7 @@ export class SimplexClient<TNotarization = unknown, TFinalization = unknown> {
       prepared(
         [
           {
-            key: notarizationByRoundKey(input.epoch ?? 0n, input.view),
+            key: notarizationByRoundKey(input.epoch, input.view),
             value: toSimplexBytes(input.notarized),
           },
           {
@@ -860,7 +893,7 @@ export class SimplexClient<TNotarization = unknown, TFinalization = unknown> {
       prepared(
         [
           {
-            key: finalizationByRoundKey(input.epoch ?? 0n, input.view),
+            key: finalizationByRoundKey(input.epoch, input.view),
             value: copyBytes(finalized),
           },
           {
@@ -945,8 +978,13 @@ export class SimplexClient<TNotarization = unknown, TFinalization = unknown> {
   }
 
   async getNotarizationByRound(epoch: U64Like, view: U64Like): Promise<TNotarization | null> {
-    const key = notarizationByRoundKey(epoch, view);
-    const raw = (await this.getRaw(key)) ?? (await this.getNotarizationRaw(view));
+    let key = notarizationByRoundKey(epoch, view);
+    let raw = await this.getRaw(key);
+    if (raw === null) {
+      // Legacy rows are keyed by view only, so verification checks the requested epoch
+      key = notarizationByViewKey(view);
+      raw = await this.getRaw(key);
+    }
     if (raw === null) {
       return null;
     }
@@ -981,8 +1019,13 @@ export class SimplexClient<TNotarization = unknown, TFinalization = unknown> {
   }
 
   async getFinalizationByRound(epoch: U64Like, view: U64Like): Promise<TFinalization | null> {
-    const key = finalizationByRoundKey(epoch, view);
-    const raw = (await this.getRaw(key)) ?? (await this.getFinalizationByViewRaw(view));
+    let key = finalizationByRoundKey(epoch, view);
+    let raw = await this.getRaw(key);
+    if (raw === null) {
+      // Legacy rows are keyed by view only, so verification checks the requested epoch
+      key = finalizationByViewKey(view);
+      raw = await this.getRaw(key);
+    }
     if (raw === null) {
       return null;
     }
@@ -1119,17 +1162,12 @@ export class SimplexClient<TNotarization = unknown, TFinalization = unknown> {
       const certificates = batch.entries.flatMap((entry) =>
         entry.type === 'header' || entry.type === 'block' ? [] : [entry],
       );
-      const identity = (entry: RawSimplexNotarizationEntry | RawSimplexFinalizationByViewEntry) =>
-        `${entry.type}:${entry.view}:${bytesToHex(entry.type === 'notarization' ? entry.notarized : entry.finalized)}`;
-      const rounds = new Set(certificates.flatMap((entry) =>
-        entry.kind === SimplexRecordKind.NotarizationByRound || entry.kind === SimplexRecordKind.FinalizationByRound
-          ? [identity(entry as RawSimplexNotarizationEntry | RawSimplexFinalizationByViewEntry)] : [],
-      ));
+      // Uploads write a round row and a legacy view alias with the same bytes, so keep the round row
+      const rounds = new Set(certificates.filter(isRoundEntry).map(certificateIdentity));
       yield {
         sequenceNumber: batch.sequenceNumber,
-        entries: certificates.filter((entry) =>
-          !(entry.kind === SimplexRecordKind.NotarizationByView || entry.kind === SimplexRecordKind.FinalizationByView)
-          || !rounds.has(identity(entry as RawSimplexNotarizationEntry | RawSimplexFinalizationByViewEntry)),
+        entries: certificates.filter(
+          (entry) => !isViewEntry(entry) || !rounds.has(certificateIdentity(entry)),
         ),
       };
     }

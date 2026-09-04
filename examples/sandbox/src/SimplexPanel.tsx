@@ -94,6 +94,10 @@ async function verifyDemoBlock(header: Uint8Array, body: Uint8Array): Promise<bo
   return bytesEqual(header.slice(header.byteLength - 32), await sha256(body));
 }
 
+function formatRound(epoch: bigint | undefined, view: bigint): string {
+  return epoch === undefined ? view.toString() : `${epoch.toString()}:${view.toString()}`;
+}
+
 function renderCertificate(value: VerifiedSimplexCertificate): string {
   return [
     `scheme ${value.scheme}`,
@@ -920,10 +924,10 @@ export function SimplexPanel({
                 const eventId = streamEventId({ sequenceNumber, entry });
                 const title =
                   entry.type === 'notarization'
-                    ? `notarization view ${entry.view.toString()}`
+                    ? `notarization view ${formatRound(entry.epoch, entry.view)}`
                     : `finalization ${entry.index} ${
                         entry.index !== 'height'
-                          ? `${entry.epoch === undefined ? '' : `${entry.epoch.toString()}:`}${entry.view.toString()}`
+                          ? formatRound(entry.epoch, entry.view)
                           : entry.height.toString()
                       }`;
                 return (

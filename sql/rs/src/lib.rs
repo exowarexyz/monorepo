@@ -7778,11 +7778,38 @@ mod tests {
 
         let ctx = SessionContext::new();
         schema.register_all(&ctx).expect("register");
-        for (inner, outer, expected) in [("ASC", "DESC", 2), ("DESC", "ASC", 3)] {
+
+        // A bare inner LIMIT reaches the scan before sort pushdown runs, so the outer sort
+        // must keep its own direction (or share the scan's) without widening the inner page
+        for (outer, limit, expected) in [
+            ("DESC", 1, vec![2]),
+            ("ASC", 1, vec![1]),
+            ("ASC", 5, vec![1, 2]),
+        ] {
+            let sql = format!(
+                "SELECT id FROM (SELECT id FROM events LIMIT 2) AS limited \
+                 ORDER BY id {outer} LIMIT {limit}"
+            );
+            let batches = ctx
+                .sql(&sql)
+                .await
+                .expect("query")
+                .collect()
+                .await
+                .expect("collect");
+            assert_eq!(collect_i64_column(&batches, 0), expected, "{sql}");
+        }
+
+        for (inner, outer, limit, expected) in [
+            ("ASC", "DESC", 1, vec![2]),
+            ("DESC", "ASC", 1, vec![3]),
+            ("ASC", "ASC", 5, vec![1, 2]),
+            ("DESC", "DESC", 5, vec![4, 3]),
+        ] {
             let sql = format!(
                 "SELECT id FROM \
                  (SELECT id FROM events ORDER BY id {inner} LIMIT 2) AS limited \
-                 ORDER BY id {outer} LIMIT 1"
+                 ORDER BY id {outer} LIMIT {limit}"
             );
             let plan = ctx
                 .sql(&sql)
@@ -7799,7 +7826,7 @@ mod tests {
             let batches = datafusion::physical_plan::collect(plan, ctx.task_ctx())
                 .await
                 .expect("collect");
-            assert_eq!(collect_i64_column(&batches, 0), vec![expected], "{sql}");
+            assert_eq!(collect_i64_column(&batches, 0), expected, "{sql}");
         }
 
         let _ = shutdown_tx.send(());

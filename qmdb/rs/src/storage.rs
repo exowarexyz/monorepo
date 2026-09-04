@@ -130,6 +130,7 @@ impl<F: Graftable, D: Digest, const N: usize> MerkleStorage<F> for KvCurrentStor
 pub(crate) struct ProofBitmap<const N: usize> {
     len: u64,
     complete_chunks: usize,
+    last_chunk: usize,
     pub(crate) pruned_chunks: usize,
     chunks: std::collections::BTreeMap<usize, [u8; N]>,
 }
@@ -160,11 +161,10 @@ impl<const N: usize> ProofBitmap<N> {
                 crate::QmdbError::CorruptData("current bitmap chunk index exceeds usize".into())
             })
         };
-        let complete_chunks = index(complete)?;
-        let mut required = std::collections::BTreeSet::new();
-        if len % chunk_bits != 0 {
-            required.insert(complete);
-        }
+        // Current proof construction reads only the last chunk (`last_chunk`), the pending
+        // chunk (if any) and the queried chunk (`get_chunk`)
+        let last = (len - 1) / chunk_bits;
+        let mut required = std::collections::BTreeSet::from([last]);
         if complete > graftable {
             required.insert(graftable);
         }
@@ -176,13 +176,21 @@ impl<const N: usize> ProofBitmap<N> {
             }
             required.insert(location.as_u64() / chunk_bits);
         }
-        let mut chunks = std::collections::BTreeMap::new();
-        for chunk in required.into_iter().filter(|chunk| *chunk >= pruned_chunks) {
-            chunks.insert(index(chunk)?, load(chunk).await?);
-        }
+        let required = required
+            .into_iter()
+            .filter(|chunk| *chunk >= pruned_chunks)
+            .collect::<Vec<_>>();
+        let loaded =
+            futures::future::try_join_all(required.iter().map(|chunk| load(*chunk))).await?;
+        let chunks = required
+            .into_iter()
+            .zip(loaded)
+            .map(|(chunk, data)| Ok((index(chunk)?, data)))
+            .collect::<Result<_, crate::QmdbError>>()?;
         Ok(Self {
             len,
-            complete_chunks,
+            complete_chunks: index(complete)?,
+            last_chunk: index(last)?,
             pruned_chunks: index(pruned_chunks)?,
             chunks,
         })
@@ -206,22 +214,83 @@ impl<const N: usize> commonware_utils::bitmap::Readable<N> for ProofBitmap<N> {
     }
 
     fn last_chunk(&self) -> ([u8; N], u64) {
-        let bits = self.len % crate::codec::bitmap_chunk_bits::<N>();
-        let (index, bits) = if bits == 0 {
-            (
-                self.complete_chunks - 1,
-                crate::codec::bitmap_chunk_bits::<N>(),
-            )
-        } else {
-            (self.complete_chunks, bits)
-        };
-        (self.get_chunk(index), bits)
+        let bits = (self.len - 1) % crate::codec::bitmap_chunk_bits::<N>() + 1;
+        (self.get_chunk(self.last_chunk), bits)
     }
 
     fn pruned_chunks(&self) -> usize {
         self.pruned_chunks
     }
+
     fn len(&self) -> u64 {
         self.len
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use commonware_storage::merkle::{mmb, mmr};
+    use commonware_utils::bitmap::Readable as _;
+
+    // N = 1 gives eight-bit chunks (grafting height 3)
+    fn load<F: Graftable>(
+        watermark: u64,
+        pruned_chunks: u64,
+        location: Option<u64>,
+    ) -> Result<(ProofBitmap<1>, Vec<u64>), crate::QmdbError> {
+        let mut requested = Vec::new();
+        let bitmap = futures::executor::block_on(ProofBitmap::<1>::load(
+            Location::<F>::new(watermark),
+            pruned_chunks,
+            location.map(Location::<F>::new),
+            |chunk| {
+                requested.push(chunk);
+                async move { Ok([chunk as u8]) }
+            },
+        ))?;
+        Ok((bitmap, requested))
+    }
+
+    #[test]
+    fn loads_last_chunk_for_partial_and_aligned_lengths() {
+        let (bitmap, requested) = load::<mmr::Family>(12, 0, None).unwrap();
+        assert_eq!(requested, [1]);
+        assert_eq!(bitmap.last_chunk(), ([1], 5));
+        assert_eq!(bitmap.complete_chunks(), 1);
+
+        let (bitmap, requested) = load::<mmr::Family>(15, 0, None).unwrap();
+        assert_eq!(requested, [1]);
+        assert_eq!(bitmap.last_chunk(), ([1], 8));
+        assert_eq!(bitmap.complete_chunks(), 2);
+    }
+
+    #[test]
+    fn loads_queried_chunk_and_serves_pruned_chunks_as_zeros() {
+        let (bitmap, requested) = load::<mmr::Family>(20, 0, Some(3)).unwrap();
+        assert_eq!(requested, [0, 2]);
+        assert_eq!(bitmap.get_chunk(0), [0]);
+        assert_eq!(bitmap.get_chunk(2), [2]);
+
+        let (bitmap, requested) = load::<mmr::Family>(20, 1, Some(3)).unwrap();
+        assert_eq!(requested, [2]);
+        assert_eq!(bitmap.pruned_chunks(), 1);
+        assert_eq!(bitmap.get_chunk(0), [0]);
+    }
+
+    #[test]
+    fn loads_pending_chunk_for_mmb() {
+        // Chunk 0 of an MMB is graftable once 11 leaves exist, so 17 leaves leave chunk 1 pending
+        let (bitmap, requested) = load::<mmb::Family>(16, 0, None).unwrap();
+        assert_eq!(requested, [1, 2]);
+        assert_eq!(bitmap.get_chunk(1), [1]);
+        assert_eq!(bitmap.last_chunk(), ([2], 1));
+    }
+
+    #[test]
+    fn rejects_invalid_windows() {
+        assert!(load::<mmr::Family>(12, 2, None).is_err());
+        assert!(load::<mmr::Family>(12, 0, Some(13)).is_err());
+        assert!(load::<mmb::Family>(9, 1, None).is_err());
     }
 }

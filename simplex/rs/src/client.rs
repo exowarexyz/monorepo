@@ -133,15 +133,13 @@ impl SimplexClient {
         }
 
         let mut prepared = self.prepare_header(&notarized.header);
+        let encoded = notarized.encode();
         prepared.summary.notarizations = 1;
         prepared.push(
             keys::notarization_by_round(notarized.proof.round()),
-            notarized.encode(),
+            encoded.clone(),
         );
-        prepared.push(
-            keys::notarization_by_view(notarized.proof.view()),
-            notarized.encode(),
-        );
+        prepared.push(keys::notarization_by_view(notarized.proof.view()), encoded);
         Ok(prepared)
     }
 
@@ -278,24 +276,26 @@ impl SimplexClient {
         self.get_raw(keys::finalization_by_view(view)).await
     }
 
+    /// Notarization bytes for `round`, falling back to the legacy view row. A legacy row may
+    /// belong to another epoch: typed readers and Marshal check the decoded round.
     pub async fn get_notarized_by_round_raw(
         &self,
         round: commonware_consensus::types::Round,
     ) -> Result<Option<Bytes>, SimplexError> {
         match self.get_raw(keys::notarization_by_round(round)).await? {
             Some(bytes) => Ok(Some(bytes)),
-            // Typed readers and Marshal validate the requested round on legacy records
             None => self.get_notarized_raw(round.view()).await,
         }
     }
 
+    /// Finalization bytes for `round`, falling back to the legacy view row. A legacy row may
+    /// belong to another epoch: typed readers check the decoded round.
     pub async fn get_finalized_by_round_raw(
         &self,
         round: commonware_consensus::types::Round,
     ) -> Result<Option<Bytes>, SimplexError> {
         match self.get_raw(keys::finalization_by_round(round)).await? {
             Some(bytes) => Ok(Some(bytes)),
-            // Typed readers and Marshal validate the requested round on legacy records
             None => self.get_finalized_by_view_raw(round.view()).await,
         }
     }
@@ -320,14 +320,9 @@ impl SimplexClient {
         B: Block<Digest = D>,
         D: Digest,
     {
-        let decoded: Option<B> = self.decode_optional(self.get_header_raw(digest).await?, cfg)?;
-        if decoded
-            .as_ref()
-            .is_some_and(|value| value.digest() != *digest)
-        {
-            return Err(SimplexError::RecordKeyMismatch);
-        }
-        Ok(decoded)
+        self.decode_indexed(self.get_header_raw(digest).await?, cfg, |value: &B| {
+            value.digest() == *digest
+        })
     }
 
     pub async fn get_block<B, D>(
@@ -339,15 +334,11 @@ impl SimplexClient {
         B: Block<Digest = D>,
         D: Digest,
     {
-        let decoded: Option<BlockData<B>> =
-            self.decode_optional(self.get_block_raw(digest).await?, cfg)?;
-        if decoded
-            .as_ref()
-            .is_some_and(|value| value.header.digest() != *digest)
-        {
-            return Err(SimplexError::RecordKeyMismatch);
-        }
-        Ok(decoded)
+        self.decode_indexed(
+            self.get_block_raw(digest).await?,
+            cfg,
+            |value: &BlockData<B>| value.header.digest() == *digest,
+        )
     }
 
     pub async fn get_notarized<B, S, D>(
@@ -361,17 +352,15 @@ impl SimplexClient {
         D: Digest,
         <S::Certificate as commonware_codec::Read>::Cfg: Clone,
     {
-        let decoded: Option<Notarized<B, S, D>> =
-            self.decode_optional(self.get_notarized_raw(view).await?, cfg)?;
-        if decoded
-            .as_ref()
-            .is_some_and(|value| value.proof.view() != view)
-        {
-            return Err(SimplexError::RecordKeyMismatch);
-        }
-        Ok(decoded)
+        self.decode_indexed(
+            self.get_notarized_raw(view).await?,
+            cfg,
+            |value: &Notarized<B, S, D>| value.proof.view() == view,
+        )
     }
 
+    /// Typed [Self::get_notarized_by_round_raw]; a legacy row for another epoch is rejected with
+    /// [SimplexError::RecordKeyMismatch].
     pub async fn get_notarized_by_round<B, S, D>(
         &self,
         round: commonware_consensus::types::Round,
@@ -383,15 +372,11 @@ impl SimplexClient {
         D: Digest,
         <S::Certificate as commonware_codec::Read>::Cfg: Clone,
     {
-        let decoded: Option<Notarized<B, S, D>> =
-            self.decode_optional(self.get_notarized_by_round_raw(round).await?, cfg)?;
-        if decoded
-            .as_ref()
-            .is_some_and(|value| value.proof.round() != round)
-        {
-            return Err(SimplexError::RecordKeyMismatch);
-        }
-        Ok(decoded)
+        self.decode_indexed(
+            self.get_notarized_by_round_raw(round).await?,
+            cfg,
+            |value: &Notarized<B, S, D>| value.proof.round() == round,
+        )
     }
 
     pub async fn get_finalized_by_height<B, S, D>(
@@ -405,15 +390,11 @@ impl SimplexClient {
         D: Digest,
         <S::Certificate as commonware_codec::Read>::Cfg: Clone,
     {
-        let decoded: Option<Finalized<B, S, D>> =
-            self.decode_optional(self.get_finalized_by_height_raw(height).await?, cfg)?;
-        if decoded
-            .as_ref()
-            .is_some_and(|value| value.header.height() != height)
-        {
-            return Err(SimplexError::RecordKeyMismatch);
-        }
-        Ok(decoded)
+        self.decode_indexed(
+            self.get_finalized_by_height_raw(height).await?,
+            cfg,
+            |value: &Finalized<B, S, D>| value.header.height() == height,
+        )
     }
 
     pub async fn get_finalized_by_view<B, S, D>(
@@ -427,17 +408,15 @@ impl SimplexClient {
         D: Digest,
         <S::Certificate as commonware_codec::Read>::Cfg: Clone,
     {
-        let decoded: Option<Finalized<B, S, D>> =
-            self.decode_optional(self.get_finalized_by_view_raw(view).await?, cfg)?;
-        if decoded
-            .as_ref()
-            .is_some_and(|value| value.proof.view() != view)
-        {
-            return Err(SimplexError::RecordKeyMismatch);
-        }
-        Ok(decoded)
+        self.decode_indexed(
+            self.get_finalized_by_view_raw(view).await?,
+            cfg,
+            |value: &Finalized<B, S, D>| value.proof.view() == view,
+        )
     }
 
+    /// Typed [Self::get_finalized_by_round_raw]; a legacy row for another epoch is rejected with
+    /// [SimplexError::RecordKeyMismatch].
     pub async fn get_finalized_by_round<B, S, D>(
         &self,
         round: commonware_consensus::types::Round,
@@ -449,15 +428,11 @@ impl SimplexClient {
         D: Digest,
         <S::Certificate as commonware_codec::Read>::Cfg: Clone,
     {
-        let decoded: Option<Finalized<B, S, D>> =
-            self.decode_optional(self.get_finalized_by_round_raw(round).await?, cfg)?;
-        if decoded
-            .as_ref()
-            .is_some_and(|value| value.proof.round() != round)
-        {
-            return Err(SimplexError::RecordKeyMismatch);
-        }
-        Ok(decoded)
+        self.decode_indexed(
+            self.get_finalized_by_round_raw(round).await?,
+            cfg,
+            |value: &Finalized<B, S, D>| value.proof.round() == round,
+        )
     }
 
     pub async fn latest_finalized<B, S, D>(
@@ -485,6 +460,20 @@ impl SimplexClient {
             .range_with_mode(&start, &end, 1, RangeMode::Reverse)
             .await?;
         Ok(rows.into_iter().next().map(|(_, value)| value))
+    }
+
+    /// Decode a record and reject one that does not belong to the requested index
+    fn decode_indexed<T: Decode>(
+        &self,
+        value: Option<Bytes>,
+        cfg: &T::Cfg,
+        matches: impl FnOnce(&T) -> bool,
+    ) -> Result<Option<T>, SimplexError> {
+        let decoded = self.decode_optional::<T>(value, cfg)?;
+        if decoded.as_ref().is_some_and(|value| !matches(value)) {
+            return Err(SimplexError::RecordKeyMismatch);
+        }
+        Ok(decoded)
     }
 
     fn decode_optional<T: Decode>(

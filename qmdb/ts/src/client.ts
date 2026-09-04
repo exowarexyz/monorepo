@@ -254,7 +254,7 @@ function assertOperationWindow(request: OperationRangeRequest): void {
   assertU64(request.tip, 'tip');
   assertU64(request.startLocation, 'startLocation');
   assertU32(request.maxLocations, 'maxLocations', true);
-  if (request.startLocation > request.tip || request.tip === 0xffff_ffff_ffff_ffffn) {
+  if (request.startLocation > request.tip) {
     throw new Error('invalid operation window');
   }
 }
@@ -443,7 +443,6 @@ export class OrderedQmdbClient {
     expectedRoot: BytesLike,
     options?: CallOptions,
   ): Promise<VerifiedCurrentKeyValueProof> {
-    assertU64(tip, 'tip');
     await ensureWasm();
     const requestedKey = encode_vec_key(copyBytes(key));
     const response = await this.lookup.get(
@@ -474,7 +473,6 @@ export class OrderedQmdbClient {
     expectedRoot: BytesLike,
     options?: CallOptions,
   ): Promise<VerifiedCurrentKeyLookupProof> {
-    assertU64(tip, 'tip');
     await ensureWasm();
     const requestedKeys = keys.map((key) => encode_vec_key(copyBytes(key)));
     assertDistinctKeys(requestedKeys);
@@ -507,9 +505,8 @@ export class OrderedQmdbClient {
     expectedRoot: BytesLike,
     options?: CallOptions,
   ): Promise<VerifiedCurrentKeyRangeProof> {
-    await ensureWasm();
-    assertU64(request.tip, 'tip');
     assertU32(request.limit, 'limit', true);
+    await ensureWasm();
     const startKey = encode_vec_key(copyBytes(request.startKey));
     const endKey =
       request.endKey === undefined

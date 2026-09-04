@@ -553,7 +553,7 @@ where
         }
     }
 
-    /// Discover a target only under an independently trusted operation-log root
+    /// Discover a sync target for `[0, op_count)` under an independently trusted operation-log root
     pub async fn target(
         &self,
         op_count: Location<F>,
@@ -563,6 +563,7 @@ where
             .await
     }
 
+    /// Discover a sync target for `[start_loc, op_count)`; the API root must equal `expected_ops_root`
     pub async fn target_range(
         &self,
         start_loc: Location<F>,
@@ -1181,11 +1182,6 @@ where
     }
 }
 
-enum ExclusionBoundary<K> {
-    Span { end: K },
-    Empty,
-}
-
 fn verify_multi_from_proto<F, H, Op>(
     proto: &HistoricalMultiProof,
     op_cfg: &Op::Cfg,
@@ -1487,6 +1483,8 @@ where
     })
 }
 
+/// Verify an exclusion proof and return the authenticated successor of the requested key
+/// (`None` when the proof shows an empty database)
 fn verify_key_exclusion_from_proto<F, H, K, V, const N: usize, E>(
     proto: &ProtoCurrentKeyExclusionProof,
     requested_key: &[u8],
@@ -1494,7 +1492,7 @@ fn verify_key_exclusion_from_proto<F, H, K, V, const N: usize, E>(
     update_cfg: &<ordered::Update<K, E> as Read>::Cfg,
     key_cfg: &K::Cfg,
     value_cfg: &V::Cfg,
-) -> Result<ExclusionBoundary<K>, QmdbError>
+) -> Result<Option<K>, QmdbError>
 where
     F: Graftable,
     H: Hasher,
@@ -1527,13 +1525,10 @@ where
             kind: crate::ProofKind::CurrentKeyExclusion,
         });
     }
-    let boundary = match proof {
-        ExclusionProof::KeyValue(_, update) => ExclusionBoundary::Span {
-            end: update.next_key,
-        },
-        ExclusionProof::Commit(_, _) => ExclusionBoundary::Empty,
-    };
-    Ok(boundary)
+    Ok(match proof {
+        ExclusionProof::KeyValue(_, update) => Some(update.next_key),
+        ExclusionProof::Commit(_, _) => None,
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1609,34 +1604,23 @@ where
         let proof = response.start_proof.as_option().ok_or_else(|| {
             QmdbError::CorruptData("key range missing start boundary proof".into())
         })?;
-        match verify_key_exclusion_from_proto::<F, H, K, V, N, E>(
+        verify_key_exclusion_from_proto::<F, H, K, V, N, E>(
             proof,
             encoded_start_key,
             root,
             update_cfg,
             key_cfg,
             value_cfg,
-        )? {
-            ExclusionBoundary::Span { end, .. } => Some(end),
-            ExclusionBoundary::Empty => None,
-        }
+        )?
     } else {
         None
     };
-    let next_start = if response.has_more {
-        Some(
-            K::decode_cfg(response.next_start_key.as_slice(), key_cfg).map_err(|err| {
-                QmdbError::CorruptData(format!("failed to decode range continuation: {err}"))
-            })?,
-        )
-    } else {
-        if !response.next_start_key.is_empty() {
-            return Err(QmdbError::CorruptData(
-                "complete key range has a continuation".into(),
-            ));
-        }
-        None
-    };
+    let next_start = (!response.next_start_key.is_empty())
+        .then(|| K::decode_cfg(response.next_start_key.as_slice(), key_cfg))
+        .transpose()
+        .map_err(|err| {
+            QmdbError::CorruptData(format!("failed to decode range continuation: {err}"))
+        })?;
     validate_key_range(
         &start_key,
         end_key.as_ref(),
@@ -1646,15 +1630,7 @@ where
         response.has_more,
         next_start.as_ref(),
     )
-    .map_err(|message| {
-        if keys.is_empty() {
-            QmdbError::ProofVerification {
-                kind: crate::ProofKind::CurrentKeyExclusion,
-            }
-        } else {
-            QmdbError::CorruptData(message.into())
-        }
-    })?;
+    .map_err(|message| QmdbError::CorruptData(message.into()))?;
 
     Ok(VerifiedKeyRange {
         entries,

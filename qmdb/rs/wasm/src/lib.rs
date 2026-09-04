@@ -59,11 +59,6 @@ fn decode_vec_key_wire(encoded_key: &[u8]) -> Result<Vec<u8>, String> {
         .map_err(|err| format!("failed to decode QMDB key: {err}"))
 }
 
-enum ExclusionBoundary {
-    Span { end: Vec<u8> },
-    Empty,
-}
-
 #[derive(Debug)]
 struct CurrentProofConfig {
     chunk_size: usize,
@@ -821,7 +816,7 @@ fn verify_key_exclusion_from_proto<F, H>(
     requested_key: &[u8],
     current_root: &H::Digest,
     config: &CurrentProofConfig,
-) -> Result<ExclusionBoundary, String>
+) -> Result<Option<Vec<u8>>, String>
 where
     F: merkle::Graftable,
     H: commonware_cryptography::Hasher,
@@ -844,14 +839,12 @@ where
             }
             let operation = OrderedOperation::Update(update.clone());
             verify_operation_proof::<F, H>(&proof, &operation, current_root, config)?;
-            Ok(ExclusionBoundary::Span {
-                end: update.next_key,
-            })
+            Ok(Some(update.next_key))
         }
         ExclusionProof::Commit(proof, value) => {
             let operation = OrderedOperation::CommitFloor(value, proof.loc);
             verify_operation_proof::<F, H>(&proof, &operation, current_root, config)?;
-            Ok(ExclusionBoundary::Empty)
+            Ok(None)
         }
     }
 }
@@ -1286,28 +1279,20 @@ where
             .start_proof
             .as_option()
             .ok_or_else(|| js_err("key range missing start boundary proof"))?;
-        match verify_key_exclusion_from_proto::<F, H>(
+        verify_key_exclusion_from_proto::<F, H>(
             proof,
             &encode_vec_key_wire(&start_key),
             current_root,
             config,
         )
         .map_err(js_err)?
-        {
-            ExclusionBoundary::Span { end, .. } => Some(end),
-            ExclusionBoundary::Empty => None,
-        }
     } else {
         None
     };
-    let next_start = if proto.has_more {
-        Some(decode_vec_key_wire(&proto.next_start_key).map_err(js_err)?)
-    } else {
-        if !proto.next_start_key.is_empty() {
-            return Err(js_err("complete key range has a continuation"));
-        }
-        None
-    };
+    let next_start = (!proto.next_start_key.is_empty())
+        .then(|| decode_vec_key_wire(&proto.next_start_key))
+        .transpose()
+        .map_err(js_err)?;
     validate_key_range(
         &start_key,
         end_key.as_ref(),
