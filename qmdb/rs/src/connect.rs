@@ -514,6 +514,69 @@ struct PendingBatch<F: Family> {
     matched: Vec<(Location<F>, Vec<u8>)>,
 }
 
+struct PendingBatches<F: Family> {
+    batches: VecDeque<PendingBatch<F>>,
+
+    // Tips can arrive out of order, but batches drain only from the front. Keep
+    // each tip no greater than any later tip, including duplicates, so the next
+    // minimum is available when the current one drains.
+    minimums: VecDeque<Location<F>>,
+}
+
+impl<F: Family> PendingBatches<F> {
+    fn new() -> Self {
+        Self {
+            batches: VecDeque::new(),
+            minimums: VecDeque::new(),
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.batches.len()
+    }
+
+    fn push_back(&mut self, batch: PendingBatch<F>) {
+        while self.minimums.back().is_some_and(|&tip| tip > batch.latest) {
+            self.minimums.pop_back();
+        }
+        self.minimums.push_back(batch.latest);
+        self.batches.push_back(batch);
+    }
+
+    fn drain_ready(
+        &mut self,
+        watermarks: &mut BTreeMap<Location<F>, u64>,
+        ready: &mut VecDeque<ReadyBatch<F>>,
+    ) {
+        // Preserve Store order so a resume cursor cannot skip an unpublished frame.
+        while let Some(batch) = self.batches.front() {
+            let Some((&watermark, &watermark_sequence)) = watermarks.range(batch.latest..).next()
+            else {
+                break;
+            };
+            let batch = self.batches.pop_front().expect("pending is not empty");
+            if self.minimums.front() == Some(&batch.latest) {
+                self.minimums.pop_front();
+            }
+            ready.push_back(ReadyBatch {
+                watermark,
+                batch_sequence: batch.sequence_number,
+                read_floor_sequence: batch.sequence_number.max(watermark_sequence),
+                matched: batch.matched,
+            });
+        }
+
+        if let Some(floor) = self
+            .minimums
+            .front()
+            .copied()
+            .or_else(|| watermarks.keys().next_back().copied())
+        {
+            *watermarks = watermarks.split_off(&floor);
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 struct ReadyBatch<F: Family> {
     watermark: Location<F>,
@@ -582,7 +645,7 @@ struct BatchSubscribeStream<D: commonware_cryptography::Digest, F: Graftable> {
             + 'static,
     >,
     sub: exoware_sdk::StreamSubscription,
-    pending: VecDeque<PendingBatch<F>>,
+    pending: PendingBatches<F>,
     watermarks: BTreeMap<Location<F>, u64>,
     ready: VecDeque<ReadyBatch<F>>,
     building: Option<BoxFuture<'static, Result<PreEncoded<SubscribeResponse>, ConnectError>>>,
@@ -635,7 +698,7 @@ impl<D: commonware_cryptography::Digest, F: Graftable> BatchSubscribeStream<D, F
             extract_kv,
             build_proof,
             sub,
-            pending: VecDeque::new(),
+            pending: PendingBatches::new(),
             watermarks: BTreeMap::new(),
             ready: VecDeque::new(),
             building: None,
@@ -709,43 +772,9 @@ impl<D: commonware_cryptography::Digest, F: Graftable> BatchSubscribeStream<D, F
             });
         }
 
-        self.drain_ready();
+        self.pending
+            .drain_ready(&mut self.watermarks, &mut self.ready);
         Ok(())
-    }
-
-    fn drain_ready(&mut self) {
-        drain_ready(&mut self.pending, &mut self.watermarks, &mut self.ready);
-    }
-}
-
-fn drain_ready<F: Family>(
-    pending: &mut VecDeque<PendingBatch<F>>,
-    watermarks: &mut BTreeMap<Location<F>, u64>,
-    ready: &mut VecDeque<ReadyBatch<F>>,
-) {
-    // Emit in Store order: a frame waits until every earlier frame is covered by a published
-    // watermark, so a resume cursor never skips an unpublished frame (tips may arrive unordered)
-    while let Some(batch) = pending.front() {
-        let Some((&watermark, &watermark_sequence)) = watermarks.range(batch.latest..).next()
-        else {
-            break;
-        };
-        let batch = pending.pop_front().expect("pending is not empty");
-        ready.push_back(ReadyBatch {
-            watermark,
-            batch_sequence: batch.sequence_number,
-            read_floor_sequence: batch.sequence_number.max(watermark_sequence),
-            matched: batch.matched,
-        });
-    }
-
-    if let Some(floor) = pending
-        .iter()
-        .map(|batch| batch.latest)
-        .min()
-        .or_else(|| watermarks.keys().next_back().copied())
-    {
-        *watermarks = watermarks.split_off(&floor);
     }
 }
 
@@ -1264,14 +1293,17 @@ mod tests {
         // watermark at location 12 (published at store seq 15). If they all
         // emitted the same resume cursor, a client that received only the
         // first batch and reconnected at resume+1 would skip the other two.
-        let mut pending = VecDeque::from([pending(10, 10), pending(11, 11), pending(12, 12)]);
+        let mut batches = PendingBatches::new();
+        for sequence in 10..=12 {
+            batches.push_back(pending(sequence, sequence));
+        }
         let mut watermarks = BTreeMap::from([(
             Location::<commonware_storage::merkle::mmr::Family>::new(12),
             15u64,
         )]);
         let mut ready = VecDeque::new();
 
-        drain_ready(&mut pending, &mut watermarks, &mut ready);
+        batches.drain_ready(&mut watermarks, &mut ready);
 
         assert_eq!(ready.len(), 3);
         let cursors: Vec<u64> = ready.iter().map(|b| b.batch_sequence).collect();
@@ -1300,10 +1332,12 @@ mod tests {
     #[test]
     fn out_of_order_uploads_preserve_subscription_replay_order() {
         type F = commonware_storage::merkle::mmr::Family;
-        let mut pending = VecDeque::from([pending(20, 10), pending(10, 11)]);
+        let mut batches = PendingBatches::new();
+        batches.push_back(pending(20, 10));
+        batches.push_back(pending(10, 11));
         let mut watermarks = BTreeMap::from([(Location::<F>::new(20), 12)]);
         let mut ready = VecDeque::new();
-        drain_ready(&mut pending, &mut watermarks, &mut ready);
+        batches.drain_ready(&mut watermarks, &mut ready);
         let cursors = ready
             .iter()
             .map(|batch| batch.batch_sequence)
@@ -1317,16 +1351,18 @@ mod tests {
     #[test]
     fn subscription_waits_for_earlier_store_sequence_to_be_published() {
         type F = commonware_storage::merkle::mmr::Family;
-        let mut pending = VecDeque::from([pending(20, 10), pending(10, 11)]);
+        let mut batches = PendingBatches::new();
+        batches.push_back(pending(20, 10));
+        batches.push_back(pending(10, 11));
         let mut watermarks = BTreeMap::from([(Location::<F>::new(10), 11)]);
         let mut ready = VecDeque::new();
-        drain_ready(&mut pending, &mut watermarks, &mut ready);
+        batches.drain_ready(&mut watermarks, &mut ready);
         assert!(
             ready.is_empty(),
             "a cursor must not skip an unpublished earlier Store frame"
         );
         watermarks.insert(Location::new(20), 12);
-        drain_ready(&mut pending, &mut watermarks, &mut ready);
+        batches.drain_ready(&mut watermarks, &mut ready);
         assert_eq!(
             ready
                 .iter()
@@ -1334,5 +1370,70 @@ mod tests {
                 .collect::<Vec<_>>(),
             [10, 11]
         );
+    }
+
+    #[test]
+    fn subscription_prunes_watermarks_after_partial_drains() {
+        type F = commonware_storage::merkle::mmr::Family;
+        let mut batches = PendingBatches::new();
+        for (sequence, latest) in [5, 20, 5, 30, 10, 10, 40].into_iter().enumerate() {
+            batches.push_back(pending(latest, sequence as u64));
+        }
+        let mut watermarks = BTreeMap::from([
+            (Location::<F>::new(4), 7),
+            (Location::new(5), 8),
+            (Location::new(10), 9),
+        ]);
+        let mut ready = VecDeque::new();
+
+        // The later batch at tip 5 still needs its watermark after the first drains.
+        batches.drain_ready(&mut watermarks, &mut ready);
+        assert_eq!(batches.len(), 6);
+        assert_eq!(
+            watermarks.keys().copied().collect::<Vec<_>>(),
+            [Location::new(5), Location::new(10)]
+        );
+
+        watermarks.insert(Location::new(20), 10);
+        batches.drain_ready(&mut watermarks, &mut ready);
+        assert_eq!(batches.len(), 4);
+        assert_eq!(
+            watermarks.keys().copied().collect::<Vec<_>>(),
+            [Location::new(10), Location::new(20)]
+        );
+
+        watermarks.insert(Location::new(30), 11);
+        batches.drain_ready(&mut watermarks, &mut ready);
+        assert_eq!(batches.len(), 1);
+        assert!(watermarks.is_empty());
+
+        watermarks.insert(Location::new(40), 12);
+        batches.drain_ready(&mut watermarks, &mut ready);
+        assert_eq!(batches.len(), 0);
+        assert_eq!(watermarks, BTreeMap::from([(Location::new(40), 12)]));
+        assert_eq!(
+            ready
+                .iter()
+                .map(|batch| (
+                    batch.batch_sequence,
+                    *batch.watermark,
+                    batch.read_floor_sequence
+                ))
+                .collect::<Vec<_>>(),
+            [
+                (0, 5, 8),
+                (1, 20, 10),
+                (2, 5, 8),
+                (3, 30, 11),
+                (4, 10, 9),
+                (5, 10, 9),
+                (6, 40, 12)
+            ]
+        );
+
+        batches.push_back(pending(50, 13));
+        batches.drain_ready(&mut watermarks, &mut ready);
+        assert_eq!(batches.len(), 1);
+        assert!(watermarks.is_empty());
     }
 }
