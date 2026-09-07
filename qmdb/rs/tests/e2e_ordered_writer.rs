@@ -85,18 +85,12 @@ fn op_cfg() -> <BatchOperation as commonware_codec::Read>::Cfg {
     )
 }
 
-fn update_row_cfg() -> (
-    <Vec<u8> as commonware_codec::Read>::Cfg,
-    <Vec<u8> as commonware_codec::Read>::Cfg,
-) {
-    (
-        ((0..=MAX_OPERATION_SIZE).into(), ()),
-        ((0..=MAX_OPERATION_SIZE).into(), ()),
-    )
+fn key_cfg() -> <Vec<u8> as commonware_codec::Read>::Cfg {
+    ((0..=MAX_OPERATION_SIZE).into(), ())
 }
 
 fn fresh_reader(c: StoreClient) -> TestReader {
-    TestReader::new(PrefixedStoreClient::empty(c), op_cfg(), update_row_cfg())
+    TestReader::new(PrefixedStoreClient::empty(c), op_cfg(), key_cfg())
 }
 
 fn fresh_writer(c: StoreClient) -> TestWriter {

@@ -28,28 +28,6 @@ use crate::filter::*;
 use crate::predicate::*;
 use crate::types::*;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ScanDirection {
-    Forward,
-    Reverse,
-}
-
-impl ScanDirection {
-    fn range_mode(self) -> RangeMode {
-        match self {
-            Self::Forward => RangeMode::Forward,
-            Self::Reverse => RangeMode::Reverse,
-        }
-    }
-}
-
-/// An output ordering proven to match primary-key traversal.
-#[derive(Debug, Clone)]
-struct ScanOrdering {
-    expressions: LexOrdering,
-    direction: ScanDirection,
-}
-
 #[derive(Debug, Clone)]
 pub(crate) struct KvScanExec {
     pub(crate) client: PrefixedStoreClient,
@@ -58,7 +36,7 @@ pub(crate) struct KvScanExec {
     pub(crate) predicate: QueryPredicate,
     pub(crate) fetch: Option<usize>,
     /// Without a required ordering, traversal is unconstrained and defaults to forward.
-    ordering: Option<ScanOrdering>,
+    direction: Option<RangeMode>,
     pub(crate) projection: Option<Vec<usize>>,
     pub(crate) properties: Arc<PlanProperties>,
 }
@@ -66,13 +44,12 @@ pub(crate) struct KvScanExec {
 impl KvScanExec {
     fn make_properties(
         projected_schema: SchemaRef,
-        ordering: Option<&ScanOrdering>,
+        ordering: Option<LexOrdering>,
     ) -> Arc<PlanProperties> {
         let equivalence_properties = match ordering {
-            Some(ordering) => EquivalenceProperties::new_with_orderings(
-                projected_schema,
-                [ordering.expressions.clone()],
-            ),
+            Some(ordering) => {
+                EquivalenceProperties::new_with_orderings(projected_schema, [ordering])
+            }
             None => EquivalenceProperties::new(projected_schema),
         };
         Arc::new(PlanProperties::new(
@@ -99,36 +76,34 @@ impl KvScanExec {
             index_specs,
             predicate,
             fetch,
-            ordering: None,
+            direction: None,
             projection,
             properties,
         }
     }
 
-    fn with_ordering(&self, ordering: ScanOrdering) -> Self {
-        let properties = Self::make_properties(self.schema(), Some(&ordering));
+    fn with_ordering(&self, ordering: LexOrdering, direction: RangeMode) -> Self {
+        let properties = Self::make_properties(self.schema(), Some(ordering));
         Self {
             client: self.client.clone(),
             model: self.model.clone(),
             index_specs: self.index_specs.clone(),
             predicate: self.predicate.clone(),
             fetch: self.fetch,
-            ordering: Some(ordering),
+            direction: Some(direction),
             projection: self.projection.clone(),
             properties,
         }
     }
 
-    pub(crate) fn scan_direction(&self) -> ScanDirection {
-        self.ordering
-            .as_ref()
-            .map_or(ScanDirection::Forward, |ordering| ordering.direction)
+    pub(crate) fn scan_direction(&self) -> RangeMode {
+        self.direction.unwrap_or(RangeMode::Forward)
     }
 
     fn order_direction_for_primary_key(
         &self,
         order: &LexOrdering,
-    ) -> DataFusionResult<Option<ScanDirection>> {
+    ) -> DataFusionResult<Option<RangeMode>> {
         if self.predicate.contradiction {
             return Ok(None);
         }
@@ -147,9 +122,9 @@ impl KvScanExec {
 
         let first_desc = order[0].options.descending;
         let direction = if first_desc {
-            ScanDirection::Reverse
+            RangeMode::Reverse
         } else {
-            ScanDirection::Forward
+            RangeMode::Forward
         };
 
         for (sort_expr, &expected_col_idx) in order.iter().zip(key_columns.iter()) {
@@ -225,20 +200,19 @@ impl KvScanExec {
 
 impl DisplayAs for KvScanExec {
     fn fmt_as(&self, _t: DisplayFormatType, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let direction = self.ordering.as_ref().map(|ordering| ordering.direction);
         match self.plan_diagnostics() {
             Ok(diag) => write!(
                 f,
                 "KvScanExec: fetch={:?}, direction={:?}, {}, query_stats={}",
                 self.fetch,
-                direction,
+                self.direction,
                 format_access_path_diagnostics(&diag),
                 format_query_stats_explain(QueryStatsExplainSurface::StreamedRangeDetail)
             ),
             Err(err) => write!(
                 f,
                 "KvScanExec: fetch={:?}, direction={:?}, diagnostics_error={err}",
-                self.fetch, direction
+                self.fetch, self.direction
             ),
         }
     }
@@ -352,19 +326,11 @@ impl ExecutionPlan for KvScanExec {
             return Ok(SortOrderPushdownResult::Unsupported);
         };
         // Reversing under a fetch would change which rows the limit selects.
-        if self.fetch.is_some()
-            && self
-                .ordering
-                .as_ref()
-                .is_some_and(|current| direction != current.direction)
-        {
+        if self.fetch.is_some() && self.direction.is_some_and(|current| direction != current) {
             return Ok(SortOrderPushdownResult::Unsupported);
         }
         Ok(SortOrderPushdownResult::Exact {
-            inner: Arc::new(self.with_ordering(ScanOrdering {
-                expressions,
-                direction,
-            })),
+            inner: Arc::new(self.with_ordering(expressions, direction)),
         })
     }
 }
@@ -404,7 +370,7 @@ pub(crate) async fn stream_kv_scan(
     ctx: &ScanCtx<'_>,
     index_specs: &[ResolvedIndexSpec],
     limit: Option<usize>,
-    direction: ScanDirection,
+    direction: RangeMode,
 ) -> DataFusionResult<()> {
     if ctx.predicate.contradiction {
         return Ok(());
@@ -442,7 +408,7 @@ pub(crate) async fn stream_pk_scan(
     flush_threshold: usize,
     target_rows: usize,
     exact: bool,
-    direction: ScanDirection,
+    direction: RangeMode,
 ) -> DataFusionResult<()> {
     let ranges = ctx.predicate.primary_key_ranges(ctx.model)?;
     let mut emitted = 0usize;
@@ -537,7 +503,7 @@ pub(crate) async fn stream_index_lookup_scan(
             range,
             usize::MAX,
             flush_threshold,
-            ScanDirection::Forward,
+            RangeMode::Forward,
         )
         .await?;
         while let Some(chunk) = stream
@@ -651,7 +617,7 @@ pub(crate) async fn stream_index_scan(
             range,
             usize::MAX,
             flush_threshold,
-            ScanDirection::Forward,
+            RangeMode::Forward,
         )
         .await?;
         while let Some(chunk) = stream
@@ -724,11 +690,11 @@ pub(crate) async fn stream_index_scan(
 
 fn ordered_ranges<'a>(
     ranges: &'a [KeyRange],
-    direction: ScanDirection,
+    direction: RangeMode,
 ) -> Box<dyn Iterator<Item = &'a KeyRange> + Send + 'a> {
     match direction {
-        ScanDirection::Forward => Box::new(ranges.iter()),
-        ScanDirection::Reverse => Box::new(ranges.iter().rev()),
+        RangeMode::Forward => Box::new(ranges.iter()),
+        RangeMode::Reverse => Box::new(ranges.iter().rev()),
     }
 }
 
@@ -737,16 +703,10 @@ async fn range_stream_with_direction(
     range: &KeyRange,
     limit: usize,
     batch_size: usize,
-    direction: ScanDirection,
+    direction: RangeMode,
 ) -> DataFusionResult<RangeStream> {
     session
-        .range_stream_with_mode(
-            &range.start,
-            &range.end,
-            limit,
-            batch_size,
-            direction.range_mode(),
-        )
+        .range_stream_with_mode(&range.start, &range.end, limit, batch_size, direction)
         .await
         .map_err(|e| DataFusionError::External(Box::new(e)))
 }

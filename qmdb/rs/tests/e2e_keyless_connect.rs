@@ -286,10 +286,7 @@ async fn keyless_connect_get_operation_range_returns_verifiable_proof() {
 
     assert_eq!(proof.root, local.root);
     assert_eq!(proof.start_location, Location::new(1));
-    assert_eq!(
-        proof.operations,
-        vec![(Location::new(1), local.operations[1].clone())]
-    );
+    assert_eq!(proof.operations, vec![local.operations[1].clone()]);
 }
 
 #[tokio::test]

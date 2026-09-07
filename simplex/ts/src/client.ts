@@ -209,7 +209,6 @@ export interface SimplexBlockData {
 
 export interface RawSimplexHeaderEntry {
   type: 'header';
-  kind: SimplexRecordKind.HeaderByDigest;
   key: Uint8Array;
   digest: Uint8Array;
   header: Uint8Array;
@@ -217,7 +216,6 @@ export interface RawSimplexHeaderEntry {
 
 export interface RawSimplexBlockEntry extends SimplexBlockData {
   type: 'block';
-  kind: SimplexRecordKind.BlockByDigest;
   key: Uint8Array;
   digest: Uint8Array;
   raw: Uint8Array;
@@ -225,7 +223,6 @@ export interface RawSimplexBlockEntry extends SimplexBlockData {
 
 export interface RawSimplexNotarizationEntry {
   type: 'notarization';
-  kind: SimplexRecordKind.NotarizationByRound;
   epoch: bigint;
   key: Uint8Array;
   view: bigint;
@@ -234,7 +231,6 @@ export interface RawSimplexNotarizationEntry {
 
 export interface RawSimplexFinalizationByRoundEntry {
   type: 'finalization';
-  kind: SimplexRecordKind.FinalizationByRound;
   index: 'round';
   epoch: bigint;
   key: Uint8Array;
@@ -244,7 +240,6 @@ export interface RawSimplexFinalizationByRoundEntry {
 
 export interface RawSimplexFinalizationByHeightEntry {
   type: 'finalization';
-  kind: SimplexRecordKind.FinalizedByHeight;
   index: 'height';
   key: Uint8Array;
   height: bigint;
@@ -327,8 +322,8 @@ export function encodeSimplexBlockData(
   header: BytesLike,
   body: BytesLike = new Uint8Array(),
 ): Uint8Array {
-  const headerBytes = toSimplexBytes(header);
-  const bodyBytes = toSimplexBytes(body);
+  const headerBytes = typeof header === 'string' ? hexToBytes(header) : header;
+  const bodyBytes = typeof body === 'string' ? hexToBytes(body) : body;
   if (headerBytes.byteLength > 0xffff_ffff) {
     throw new RangeError('header simplex block exceeds u32 length');
   }
@@ -629,7 +624,6 @@ function decodeRawStreamEntry(key: Uint8Array, value: Uint8Array): RawSimplexStr
     case SimplexRecordKind.HeaderByDigest:
       return {
         type: 'header',
-        kind,
         key,
         digest: key.slice(1),
         header: value,
@@ -638,7 +632,6 @@ function decodeRawStreamEntry(key: Uint8Array, value: Uint8Array): RawSimplexStr
       const block = decodeSimplexBlockData(value);
       return {
         type: 'block',
-        kind,
         key,
         digest: key.slice(1),
         raw: value,
@@ -649,7 +642,6 @@ function decodeRawStreamEntry(key: Uint8Array, value: Uint8Array): RawSimplexStr
     case SimplexRecordKind.NotarizationByRound:
       return {
         type: 'notarization',
-        kind,
         key,
         ...roundFromKey(key),
         notarized: value,
@@ -657,7 +649,6 @@ function decodeRawStreamEntry(key: Uint8Array, value: Uint8Array): RawSimplexStr
     case SimplexRecordKind.FinalizationByRound:
       return {
         type: 'finalization',
-        kind,
         index: 'round',
         key,
         ...roundFromKey(key),
@@ -666,7 +657,6 @@ function decodeRawStreamEntry(key: Uint8Array, value: Uint8Array): RawSimplexStr
     case SimplexRecordKind.FinalizedByHeight:
       return {
         type: 'finalization',
-        kind,
         index: 'height',
         key,
         height: u64FromKey(key),
@@ -713,7 +703,6 @@ export class SimplexClient<TNotarization = unknown, TFinalization = unknown> {
 
   prepareBlock(input: BlockUpload): PreparedSimplexUpload {
     const header = toSimplexBytes(input.header);
-    const body = input.body === undefined ? new Uint8Array() : toSimplexBytes(input.body);
     return {
       entries: [
         {
@@ -722,7 +711,7 @@ export class SimplexClient<TNotarization = unknown, TFinalization = unknown> {
         },
         {
           key: blockByDigestKey(input.digest),
-          value: encodeSimplexBlockData(header, body),
+          value: encodeSimplexBlockData(header, input.body),
         },
       ],
       summary: { ...emptySummary(), headers: 1, blocks: 1 },
@@ -977,7 +966,7 @@ export class SimplexClient<TNotarization = unknown, TFinalization = unknown> {
       for (const entry of batch.entries) {
         if (entry.type === 'notarization') {
           const { notarized, ...event } = entry;
-          const { type: _type, kind: _kind, ...index } = event;
+          const { type: _type, ...index } = event;
           const certificate = await this.verifyNotarization(notarized, {
             kind: 'notarization',
             source: 'stream',
@@ -987,7 +976,7 @@ export class SimplexClient<TNotarization = unknown, TFinalization = unknown> {
           entries.push({ ...event, raw: notarized, certificate });
         } else {
           const { finalized, ...event } = entry;
-          const { type: _type, kind: _kind, ...index } = event;
+          const { type: _type, ...index } = event;
           const certificate = await this.verifyFinalization(finalized, {
             kind: 'finalization',
             source: 'stream',

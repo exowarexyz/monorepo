@@ -7289,7 +7289,7 @@ mod tests {
             .downcast_ref::<KvScanExec>()
             .expect("native sort pushdown should eliminate the sort");
         assert_eq!(scan.fetch(), Some(1));
-        assert_eq!(scan.scan_direction(), ScanDirection::Reverse);
+        assert_eq!(scan.scan_direction(), RangeMode::Reverse);
     }
 
     #[test]
@@ -7388,7 +7388,7 @@ mod tests {
             2
         );
         assert_eq!(stronger_scan.fetch(), Some(2));
-        assert_eq!(stronger_scan.scan_direction(), ScanDirection::Forward);
+        assert_eq!(stronger_scan.scan_direction(), RangeMode::Forward);
     }
 
     #[tokio::test]
@@ -7435,7 +7435,7 @@ mod tests {
             .downcast_ref::<KvScanExec>()
             .expect("inner limit should be pushed into the scan");
         assert_eq!(scan.fetch(), Some(2));
-        assert_eq!(scan.scan_direction(), ScanDirection::Forward);
+        assert_eq!(scan.scan_direction(), RangeMode::Forward);
         assert!(scan.properties.output_ordering().is_none());
 
         let plan = PushdownSort::new()
@@ -7445,7 +7445,7 @@ mod tests {
             .downcast_ref::<KvScanExec>()
             .expect("unordered fetch must not prevent exact sort pushdown");
         assert_eq!(scan.fetch(), Some(2));
-        assert_eq!(scan.scan_direction(), ScanDirection::Reverse);
+        assert_eq!(scan.scan_direction(), RangeMode::Reverse);
         assert!(scan.properties.output_ordering().is_some());
     }
 

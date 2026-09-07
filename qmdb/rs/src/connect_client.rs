@@ -77,9 +77,6 @@ where
     K: QmdbKey + commonware_codec::Codec,
     V: commonware_codec::Codec + Clone + Send + Sync,
     E: ValueEncoding<Value = V>,
-    K::Cfg: Clone,
-    <ordered::Update<K, E> as Read>::Cfg: Clone,
-    V::Cfg: Clone,
     ordered::Operation<F, K, E>: Decode + Encode + Read,
     ordered::Update<K, E>: Read,
     ExclusionProof<F, K, E, H::Digest, N>:
@@ -114,9 +111,6 @@ where
     K: QmdbKey + commonware_codec::Codec,
     V: commonware_codec::Codec + Clone + Send + Sync,
     E: ValueEncoding<Value = V>,
-    K::Cfg: Clone,
-    <ordered::Update<K, E> as Read>::Cfg: Clone,
-    V::Cfg: Clone,
     ordered::Operation<F, K, E>: Decode + Encode + Read,
     ordered::Update<K, E>: Read,
     ExclusionProof<F, K, E, H::Digest, N>:
@@ -473,7 +467,7 @@ pub struct OperationLogRangeProof<D: Digest, Op, F: Family> {
     pub tip: Location<F>,
     pub root: D,
     pub start_location: Location<F>,
-    pub operations: Vec<(Location<F>, Op)>,
+    pub operations: Vec<Op>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -481,7 +475,7 @@ pub struct CurrentOperationRangeProof<D: Digest, Op, const N: usize, F: Graftabl
     pub tip: Location<F>,
     pub root: D,
     pub start_location: Location<F>,
-    pub operations: Vec<(Location<F>, Op)>,
+    pub operations: Vec<Op>,
     pub chunks: Vec<[u8; N]>,
 }
 
@@ -990,7 +984,7 @@ fn verify_operation_range_from_proto<F, H, Op>(
     op_cfg: &Op::Cfg,
     root: &H::Digest,
     window: OperationWindow,
-) -> Result<(H::Digest, Vec<(Location<F>, Op)>), QmdbError>
+) -> Result<(H::Digest, Vec<Op>), QmdbError>
 where
     F: Graftable,
     H: Hasher,
@@ -1047,20 +1041,7 @@ where
             kind: crate::ProofKind::RangeCheckpoint,
         });
     }
-    let operations = decoded_operations
-        .into_iter()
-        .enumerate()
-        .map(|(offset, operation)| {
-            let offset = u64::try_from(offset).map_err(|err| {
-                QmdbError::CorruptData(format!("operation range offset overflow: {err}"))
-            })?;
-            let location = start.checked_add(offset).ok_or_else(|| {
-                QmdbError::CorruptData("operation range location overflow".to_string())
-            })?;
-            Ok((location, operation))
-        })
-        .collect::<Result<Vec<_>, QmdbError>>()?;
-    Ok((*root, operations))
+    Ok((*root, decoded_operations))
 }
 
 fn verify_current_operation_range_from_proto<F, H, Op, const N: usize>(
@@ -1068,7 +1049,7 @@ fn verify_current_operation_range_from_proto<F, H, Op, const N: usize>(
     op_cfg: &Op::Cfg,
     root: &H::Digest,
     window: OperationWindow,
-) -> Result<(H::Digest, Vec<(Location<F>, Op)>, Vec<[u8; N]>), QmdbError>
+) -> Result<(H::Digest, Vec<Op>, Vec<[u8; N]>), QmdbError>
 where
     F: Graftable,
     H: Hasher,
@@ -1124,20 +1105,7 @@ where
             kind: crate::ProofKind::CurrentRange,
         });
     }
-    let operations = decoded_operations
-        .into_iter()
-        .enumerate()
-        .map(|(offset, operation)| {
-            let offset = u64::try_from(offset).map_err(|err| {
-                QmdbError::CorruptData(format!("current operation range offset overflow: {err}"))
-            })?;
-            let location = start.checked_add(offset).ok_or_else(|| {
-                QmdbError::CorruptData("current operation range location overflow".to_string())
-            })?;
-            Ok((location, operation))
-        })
-        .collect::<Result<Vec<_>, QmdbError>>()?;
-    Ok((*root, operations, chunks))
+    Ok((*root, decoded_operations, chunks))
 }
 
 fn verify_key_value_from_proto<F, H, Op, const N: usize>(
@@ -1221,8 +1189,6 @@ where
     K: QmdbKey + commonware_codec::Codec,
     V: commonware_codec::Codec + Clone + Send + Sync,
     E: ValueEncoding<Value = V>,
-    <ordered::Update<K, E> as Read>::Cfg: Clone,
-    V::Cfg: Clone,
     ordered::Operation<F, K, E>: Decode + Encode + Read,
     ordered::Update<K, E>: Read,
     ExclusionProof<F, K, E, H::Digest, N>:
@@ -1271,9 +1237,6 @@ where
     K: QmdbKey + commonware_codec::Codec,
     V: commonware_codec::Codec + Clone + Send + Sync,
     E: ValueEncoding<Value = V>,
-    K::Cfg: Clone,
-    <ordered::Update<K, E> as Read>::Cfg: Clone,
-    V::Cfg: Clone,
     ordered::Operation<F, K, E>: Decode + Encode + Read,
     ordered::Update<K, E>: Read,
     ExclusionProof<F, K, E, H::Digest, N>:

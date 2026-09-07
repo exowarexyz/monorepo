@@ -446,10 +446,7 @@ async fn mirror_ordered_from_local() {
             ((0..=MAX_OPERATION_SIZE).into(), ()),
             ((0..=MAX_OPERATION_SIZE).into(), ()),
         ),
-        (
-            ((0..=MAX_OPERATION_SIZE).into(), ()),
-            ((0..=MAX_OPERATION_SIZE).into(), ()),
-        ),
+        ((0..=MAX_OPERATION_SIZE).into(), ()),
     );
     assert_eq!(
         reader.current_root_at(latest1).await.expect("root_at 1"),

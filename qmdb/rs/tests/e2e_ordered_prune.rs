@@ -237,10 +237,7 @@ async fn mirror_ordered_prune_past_chunk_zero() {
             ((0..=MAX_OPERATION_SIZE).into(), ()),
             ((0..=MAX_OPERATION_SIZE).into(), ()),
         ),
-        (
-            ((0..=MAX_OPERATION_SIZE).into(), ()),
-            ((0..=MAX_OPERATION_SIZE).into(), ()),
-        ),
+        ((0..=MAX_OPERATION_SIZE).into(), ()),
     );
 
     for outcome in &batches {

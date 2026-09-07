@@ -44,7 +44,6 @@ where
     V: Codec + Send + Sync,
     E: ValueEncoding<Value = V>,
     keyless::Operation<F, E>: CodecRead,
-    <keyless::Operation<F, E> as CodecRead>::Cfg: Clone,
 {
     fn clone(&self) -> Self {
         Self {
@@ -73,7 +72,6 @@ where
     F: Graftable,
     H: Hasher,
     V: Codec + Clone + Send + Sync,
-    V::Cfg: Clone,
     E: ValueEncoding<Value = V>,
     keyless::Operation<F, E>: Encode + Decode + Clone,
 {

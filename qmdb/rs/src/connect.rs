@@ -283,7 +283,6 @@ where
     H: Hasher + Send + Sync + 'static,
     K: commonware_storage::qmdb::operation::Key + commonware_codec::Codec + Send + Sync + 'static,
     V: commonware_codec::Codec + Clone + AsRef<[u8]> + Send + Sync + 'static,
-    V::Cfg: Clone,
     E: ValueEncoding<Value = V> + Send + Sync + 'static,
     unordered::Operation<F, K, E>: Encode + commonware_codec::Decode,
 {
@@ -339,8 +338,6 @@ where
         + Sync
         + 'static,
     V: commonware_codec::Codec + Clone + AsRef<[u8]> + Send + Sync + 'static,
-    V::Cfg: Clone,
-    K::Cfg: Clone,
     E: ValueEncoding<Value = V> + Send + Sync + 'static,
     immutable::Operation<F, K, E>: Encode + commonware_codec::Decode + Clone,
 {
@@ -389,7 +386,6 @@ where
     F: Graftable,
     H: Hasher + Send + Sync + 'static,
     V: commonware_codec::Codec + Clone + AsRef<[u8]> + Send + Sync + 'static,
-    V::Cfg: Clone,
     E: ValueEncoding<Value = V> + Send + Sync + 'static,
     keyless::Operation<F, E>: Encode + commonware_codec::Decode + Clone,
 {
@@ -480,7 +476,6 @@ where
         + Sync
         + 'static,
     V: commonware_codec::Codec + Clone + AsRef<[u8]> + Send + Sync + 'static,
-    V::Cfg: Clone,
     E: ValueEncoding<Value = V> + Send + Sync + 'static,
     unordered::Operation<F, K, E>: Encode + commonware_codec::Decode,
 {
@@ -927,7 +922,6 @@ where
         + Sync
         + 'static,
     V: commonware_codec::Codec + Clone + AsRef<[u8]> + Send + Sync + 'static,
-    V::Cfg: Clone,
     E: ValueEncoding<Value = V> + Send + Sync + 'static,
     unordered::Operation<F, K, E>: Encode + commonware_codec::Decode,
 {
@@ -1172,7 +1166,6 @@ pub fn unordered_connect_stack<
     client: Arc<UnorderedClient<F, H, K, V, E>>,
 ) -> ConnectRpcService<impl ::connectrpc::Dispatcher>
 where
-    V::Cfg: Clone,
     unordered::Operation<F, K, E>: Encode + commonware_codec::Decode,
 {
     wrap_stack(Chain(
@@ -1196,7 +1189,6 @@ pub fn unordered_operation_log_connect_stack<
     client: Arc<UnorderedClient<F, H, K, V, E>>,
 ) -> ConnectRpcService<impl ::connectrpc::Dispatcher>
 where
-    V::Cfg: Clone,
     unordered::Operation<F, K, E>: Encode + commonware_codec::Decode,
 {
     wrap_stack(OperationLogServiceServer::new(OperationLogConnect::new(
@@ -1214,8 +1206,6 @@ pub fn immutable_operation_log_connect_stack<
     client: Arc<ImmutableClient<F, H, K, V, E>>,
 ) -> ConnectRpcService<impl ::connectrpc::Dispatcher>
 where
-    V::Cfg: Clone,
-    K::Cfg: Clone,
     immutable::Operation<F, K, E>: Encode + commonware_codec::Decode + Clone,
 {
     wrap_stack(OperationLogServiceServer::new(OperationLogConnect::new(
@@ -1232,7 +1222,6 @@ pub fn keyless_operation_log_connect_stack<
     client: Arc<KeylessClient<F, H, V, E>>,
 ) -> ConnectRpcService<impl ::connectrpc::Dispatcher>
 where
-    V::Cfg: Clone,
     keyless::Operation<F, E>: Encode + commonware_codec::Decode + Clone,
 {
     wrap_stack(OperationLogServiceServer::new(OperationLogConnect::new(

@@ -154,21 +154,8 @@ fn op_cfg<F: Family>() -> <BatchOperation<F> as commonware_codec::Read>::Cfg {
     )
 }
 
-fn update_row_cfg() -> (
-    <Vec<u8> as commonware_codec::Read>::Cfg,
-    <Vec<u8> as commonware_codec::Read>::Cfg,
-) {
-    (
-        ((0..=MAX_OPERATION_SIZE).into(), ()),
-        ((0..=MAX_OPERATION_SIZE).into(), ()),
-    )
-}
-
-fn fixed_update_row_cfg() -> (
-    <Digest as commonware_codec::Read>::Cfg,
-    <Digest as commonware_codec::Read>::Cfg,
-) {
-    ((), ())
+fn key_cfg() -> <Vec<u8> as commonware_codec::Read>::Cfg {
+    ((0..=MAX_OPERATION_SIZE).into(), ())
 }
 
 struct LocalReference<F: Graftable> {
@@ -453,7 +440,7 @@ async fn ordered_round_trip() {
     let c = TestOrderedClient::<mmr::Family>::new(
         PrefixedStoreClient::empty(client.clone()),
         op_cfg::<mmr::Family>(),
-        update_row_cfg(),
+        key_cfg(),
     );
     let watermark = c.writer_location_watermark().await.expect("watermark");
     assert_eq!(watermark, Some(local.latest_location));
@@ -495,7 +482,7 @@ async fn ordered_mmb_round_trip() {
     let c = TestOrderedClient::<mmb::Family>::new(
         PrefixedStoreClient::empty(client.clone()),
         op_cfg::<mmb::Family>(),
-        update_row_cfg(),
+        key_cfg(),
     );
     let watermark = c.writer_location_watermark().await.expect("watermark");
     assert_eq!(watermark, Some(local.latest_location));
@@ -551,7 +538,7 @@ async fn ordered_mmb_multi_peak_grafted_chunk_round_trip() {
     let c: OrderedClient<mmb::Family, Sha256, Vec<u8>, Vec<u8>, N> = OrderedClient::new(
         PrefixedStoreClient::empty(client.clone()),
         op_cfg::<mmb::Family>(),
-        update_row_cfg(),
+        key_cfg(),
     );
     let current = c
         .current_operation_range_proof(
@@ -680,7 +667,7 @@ async fn assert_incremental_seed_batches_keep_current_proofs_verifiable<F>(
     let c: TestOrderedClient<F> = OrderedClient::new(
         PrefixedStoreClient::empty(client.clone()),
         op_cfg::<F>(),
-        update_row_cfg(),
+        key_cfg(),
     );
     let key_proof = c
         .key_value_proof_at(latest_location, latest_key.as_slice())
@@ -837,7 +824,7 @@ async fn ordered_mmb_persistent_interleaved_seed_batches_keep_current_proofs_ver
     let c: TestOrderedClient<mmb::Family> = OrderedClient::new(
         PrefixedStoreClient::empty(client.clone()),
         op_cfg::<mmb::Family>(),
-        update_row_cfg(),
+        key_cfg(),
     );
     assert_eq!(
         c.current_root_at(latest_location)
@@ -878,7 +865,7 @@ async fn ordered_fixed_round_trip() {
     let c = FixedTestOrderedClient::<mmr::Family>::new(
         PrefixedStoreClient::empty(client.clone()),
         (),
-        fixed_update_row_cfg(),
+        (),
     );
     let watermark = c.writer_location_watermark().await.expect("watermark");
     assert_eq!(watermark, Some(local.latest_location));
@@ -940,7 +927,7 @@ async fn current_root_at() {
     let c = TestOrderedClient::<mmr::Family>::new(
         PrefixedStoreClient::empty(client.clone()),
         op_cfg::<mmr::Family>(),
-        update_row_cfg(),
+        key_cfg(),
     );
     let root = c
         .current_root_at(local.latest_location)
@@ -959,7 +946,7 @@ async fn current_operation_range_proof() {
     let c = TestOrderedClient::<mmr::Family>::new(
         PrefixedStoreClient::empty(client.clone()),
         op_cfg::<mmr::Family>(),
-        update_row_cfg(),
+        key_cfg(),
     );
     let proof = c
         .current_operation_range_proof(
@@ -982,7 +969,7 @@ async fn key_value_proof() {
     let c = TestOrderedClient::<mmr::Family>::new(
         PrefixedStoreClient::empty(client.clone()),
         op_cfg::<mmr::Family>(),
-        update_row_cfg(),
+        key_cfg(),
     );
     let result = c
         .key_value_proof_at(local.latest_location, b"alpha".as_slice())
@@ -1007,7 +994,7 @@ async fn multi_proof() {
     let c = TestOrderedClient::<mmr::Family>::new(
         PrefixedStoreClient::empty(client.clone()),
         op_cfg::<mmr::Family>(),
-        update_row_cfg(),
+        key_cfg(),
     );
     let result = c
         .multi_proof_at(
@@ -1099,11 +1086,8 @@ async fn assert_point_proof_reads_bounded_bitmap_chunks<F: Graftable>() {
     common::commit_ordered_upload(&writer, &local.operations, &local.current_boundary)
         .await
         .unwrap();
-    let reader: TestOrderedClient<F> = OrderedClient::new(
-        PrefixedStoreClient::empty(client),
-        op_cfg::<F>(),
-        update_row_cfg(),
-    );
+    let reader: TestOrderedClient<F> =
+        OrderedClient::new(PrefixedStoreClient::empty(client), op_cfg::<F>(), key_cfg());
     query.bitmap_chunks.lock().unwrap().clear();
     let proof = reader
         .key_value_proof_raw_at(local.latest_location, b"k-00000007")

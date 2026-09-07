@@ -117,15 +117,7 @@ async fn check_large_frontier<F: Graftable + PartialEq>(family: &str, start: u64
         .await
         .unwrap();
     assert_eq!(verified.start_location, start);
-    assert_eq!(
-        verified.operations,
-        operations
-            .iter()
-            .cloned()
-            .enumerate()
-            .map(|(index, operation)| (start + index as u64, operation))
-            .collect::<Vec<_>>()
-    );
+    assert_eq!(verified.operations, operations);
     let (response, _) = rpc
         .serve(Request::Operations {
             size: end,

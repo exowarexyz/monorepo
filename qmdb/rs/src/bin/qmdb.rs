@@ -88,14 +88,8 @@ fn op_cfg() -> <QmdbOperation<DemoFamily, Vec<u8>, Vec<u8>> as commonware_codec:
     )
 }
 
-fn update_row_cfg() -> (
-    <Vec<u8> as commonware_codec::Read>::Cfg,
-    <Vec<u8> as commonware_codec::Read>::Cfg,
-) {
-    (
-        ((0..=MAX_OPERATION_SIZE).into(), ()),
-        ((0..=MAX_OPERATION_SIZE).into(), ()),
-    )
+fn key_cfg() -> <Vec<u8> as commonware_codec::Read>::Cfg {
+    ((0..=MAX_OPERATION_SIZE).into(), ())
 }
 
 async fn boundary_from_local_db(
@@ -152,7 +146,7 @@ async fn run(
         OrderedClient::<DemoFamily, Sha256, Vec<u8>, Vec<u8>, N>::new(
             StoreClient::new(store_url).prefixed(StoreKeyPrefix::identity()),
             op_cfg(),
-            update_row_cfg(),
+            key_cfg(),
         ),
     );
     let app = Router::new()
@@ -189,7 +183,7 @@ async fn seed(
     let reader = OrderedClient::<DemoFamily, Sha256, Vec<u8>, Vec<u8>, N>::new(
         store.clone(),
         op_cfg(),
-        update_row_cfg(),
+        key_cfg(),
     );
 
     tokio::task::spawn_blocking(move || {

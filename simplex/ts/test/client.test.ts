@@ -115,7 +115,6 @@ test('streams header and full block data separately', async () => {
   assert.deepEqual(headerBatches[0].entries, [
     {
       type: 'header',
-      kind: SimplexRecordKind.HeaderByDigest,
       key: headerByDigestKey('01'),
       digest: new Uint8Array([0x01]),
       header: new Uint8Array([0xaa]),
@@ -129,7 +128,6 @@ test('streams header and full block data separately', async () => {
   assert.deepEqual(blockBatches[0].entries, [
     {
       type: 'block',
-      kind: SimplexRecordKind.BlockByDigest,
       key: blockByDigestKey('01'),
       digest: new Uint8Array([0x01]),
       raw: full,
