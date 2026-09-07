@@ -101,13 +101,6 @@ export interface SimplexCertificateVerifier<TNotarization = unknown, TFinalizati
   ): MaybePromise<TFinalization | null | undefined | false>;
 }
 
-export interface SimplexWasmVerifierModule<TNotarization = unknown, TFinalization = unknown> {
-  parse_notarized?: (verificationKey: Uint8Array, bytes: Uint8Array) => TNotarization | null | undefined | false;
-  parse_finalized?: (verificationKey: Uint8Array, bytes: Uint8Array) => TFinalization | null | undefined | false;
-  verify_notarized?: (verificationKey: Uint8Array, bytes: Uint8Array) => TNotarization | null | undefined | false;
-  verify_finalized?: (verificationKey: Uint8Array, bytes: Uint8Array) => TFinalization | null | undefined | false;
-}
-
 export type SimplexScheme =
   | 'ed25519'
   | 'secp256r1'
@@ -447,25 +440,6 @@ export function rangeForKind(kind: SimplexRecordKind): { start: Uint8Array; end:
   return {
     start: new Uint8Array([kind]),
     end: new Uint8Array([kind + 1]),
-  };
-}
-
-export function createWasmSimplexVerifier<TNotarization = unknown, TFinalization = unknown>(
-  module: SimplexWasmVerifierModule<TNotarization, TFinalization>,
-  verificationKey: BytesLike,
-): SimplexCertificateVerifier<TNotarization, TFinalization> {
-  const key = toSimplexBytes(verificationKey);
-  const verifyNotarized = module.verify_notarized ?? module.parse_notarized;
-  const verifyFinalized = module.verify_finalized ?? module.parse_finalized;
-  if (!verifyNotarized) {
-    throw new Error('simplex WASM verifier missing verify_notarized/parse_notarized');
-  }
-  if (!verifyFinalized) {
-    throw new Error('simplex WASM verifier missing verify_finalized/parse_finalized');
-  }
-  return {
-    verifyNotarization: (bytes) => verifyNotarized(copyBytes(key), copyBytes(bytes)),
-    verifyFinalization: (bytes) => verifyFinalized(copyBytes(key), copyBytes(bytes)),
   };
 }
 

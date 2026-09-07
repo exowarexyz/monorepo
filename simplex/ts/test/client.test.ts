@@ -8,7 +8,6 @@ import {
   createSimplexVerifier,
   createWasmSimplexBlockVerifier,
   createWasmSimplexHeaderVerifier,
-  createWasmSimplexVerifier,
   blockByDigestKey,
   bytesToHex,
   decodeSimplexBlockData,
@@ -161,34 +160,6 @@ test('certificate getters require and apply a verifier', async () => {
   assert.deepEqual(await simplex.getNotarizationByRound(0, 3), { view: 3n });
   assert.deepEqual(await simplex.getFinalizationByRound(0, 4), { index: 'round' });
   assert.deepEqual(await simplex.getNotarizationByRoundRaw(0, 3), new Uint8Array([0xa3]));
-});
-
-test('WASM verifier adapter passes opaque bytes and configured key', () => {
-  const verifier = createWasmSimplexVerifier(
-    {
-      parse_notarized: (key, bytes) => ({
-        key: bytesToHex(key),
-        bytes: bytesToHex(bytes),
-      }),
-      parse_finalized: (key, bytes) => ({
-        key: bytesToHex(key),
-        bytes: bytesToHex(bytes),
-      }),
-    },
-    '0xabcd',
-  );
-
-  assert.deepEqual(
-    verifier.verifyNotarization(new Uint8Array([1, 2]), {
-      kind: 'notarization',
-      source: 'get',
-      key: notarizationByRoundKey(0, 1),
-      value: new Uint8Array([1, 2]),
-      epoch: 0n,
-      view: 1n,
-    }),
-    { key: 'abcd', bytes: '0102' },
-  );
 });
 
 test('WASM header verifier adapter passes payload and header', () => {

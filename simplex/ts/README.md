@@ -56,10 +56,6 @@ const simplex = new SimplexClient('http://localhost:10000', { verifier });
 const latest = await simplex.latestFinalization();
 ```
 
-The generic `createWasmSimplexVerifier` adapter supports caller-owned WASM
-modules that expose `verify_notarized` / `verify_finalized` functions and treat
-certificates as opaque values.
-
 For upstream Commonware Simplex certificate types, build the optional WASM
 module and use `@exowarexyz/simplex/wasm`:
 

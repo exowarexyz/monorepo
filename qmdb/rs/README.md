@@ -661,8 +661,9 @@ Unary operation range clients bind verified proofs to the exact requested
 verification enforces a linear interval and forward pagination over the
 cyclic authenticated successor links.
 
-`OperationLogSyncResolver::target` and `target_range` require an independently
-trusted operation-log root. `CurrentSyncResolver` derives that root using a
-witness checked against its configured trusted current root.
+`OperationLogClient` implements Commonware's sync `Source`. Construct the
+Commonware sync `Target` from an independently trusted operation-log root and
+the operation range to retain. `OperationLogClient::current_sync_target` derives
+that target using a witness checked against the supplied trusted current root.
 
 Generic key ordering is `K::Ord`, which need not match raw-byte ordering.

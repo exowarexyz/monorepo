@@ -13,7 +13,7 @@ use commonware_glue::stateful::db::{StateSyncDb, SyncEngineConfig};
 use commonware_runtime::{deterministic, tokio as cw_tokio, Runner as _};
 use commonware_storage::merkle::{mmr, Location};
 use commonware_storage::qmdb::keyless::variable::{Db as Keyless, Operation as KeylessOperation};
-use commonware_storage::qmdb::sync::{Request, Response, Source as _};
+use commonware_storage::qmdb::sync::{Request, Response, Source as _, Target};
 use commonware_utils::channel::mpsc;
 use commonware_utils::{NZUsize, NZU16, NZU64};
 use exoware_qmdb::proto::qmdb::v1::{
@@ -22,7 +22,7 @@ use exoware_qmdb::proto::qmdb::v1::{
 };
 use exoware_qmdb::{
     keyless_operation_log_connect_stack, KeylessClient, KeylessWriter, OperationLogClient,
-    OperationLogSubscribeProof, OperationLogSyncResolver, QmdbError,
+    OperationLogSubscribeProof, QmdbError,
 };
 use exoware_sdk::common::kv::v1::{filter as proto_filter, Filter as ProtoFilter};
 use exoware_sdk::proto::PreferZstdHttpClient;
@@ -293,7 +293,7 @@ async fn keyless_connect_get_operation_range_returns_verifiable_proof() {
 }
 
 #[tokio::test]
-async fn keyless_operation_log_sync_resolver_fetches_api_batches() {
+async fn keyless_operation_log_source_fetches_api_batches() {
     let store_client = common::local_store_client().await;
     let local = build_local_batch().await;
     commit_upload(&store_client, &local).await;
@@ -303,26 +303,13 @@ async fn keyless_operation_log_sync_resolver_fetches_api_batches() {
         ((0..=10000).into(), ()),
     ));
     let (_qmdb_server, qmdb_url) = spawn_qmdb_server(keyless_client).await;
-    let resolver = OperationLogSyncResolver::<
+    let resolver = OperationLogClient::<
         _,
         mmr::Family,
         commonware_cryptography::Sha256,
         BatchOperation,
     >::plaintext(&qmdb_url, ((0..=10000).into(), ()));
     let op_count = Location::new(local.operations.len() as u64);
-    let target = resolver
-        .target(op_count, &local.root)
-        .await
-        .expect("sync target");
-    assert_eq!(target.root, local.root);
-    assert!(matches!(
-        resolver
-            .target(op_count, &commonware_cryptography::Sha256::fill(0xff))
-            .await,
-        Err(QmdbError::ProofVerification {
-            kind: exoware_qmdb::ProofKind::RangeCheckpoint
-        })
-    ));
 
     let (response, callback) = resolver
         .serve(Request::Operations {
@@ -342,10 +329,10 @@ async fn keyless_operation_log_sync_resolver_fetches_api_batches() {
         .iter()
         .map(|operation| operation.encode())
         .collect::<Vec<_>>();
-    assert!(proof.verify_range_inclusion(&hasher, &elements, Location::new(0), &target.root));
+    assert!(proof.verify_range_inclusion(&hasher, &elements, Location::new(0), &local.root));
     assert!(
         callback.is_none(),
-        "direct sync resolver fetches do not allocate an unused validation callback"
+        "direct sync source fetches do not allocate an unused validation callback"
     );
 
     let (response, _) = resolver
@@ -363,7 +350,7 @@ async fn keyless_operation_log_sync_resolver_fetches_api_batches() {
 }
 
 #[tokio::test]
-async fn keyless_commonware_glue_state_sync_uses_operation_log_resolver() {
+async fn keyless_commonware_glue_state_sync_uses_operation_log_client() {
     let store_client = common::local_store_client().await;
     let local = build_local_batch().await;
     assert!(
@@ -377,20 +364,17 @@ async fn keyless_commonware_glue_state_sync_uses_operation_log_resolver() {
         ((0..=10000).into(), ()),
     ));
     let (_qmdb_server, qmdb_url) = spawn_qmdb_server(keyless_client).await;
-    let resolver = OperationLogSyncResolver::<
+    let resolver = OperationLogClient::<
         _,
         mmr::Family,
         commonware_cryptography::Sha256,
         BatchOperation,
     >::plaintext(&qmdb_url, ((0..=10000).into(), ()));
     let op_count = Location::new(local.operations.len() as u64);
-    let target = resolver
-        .target_range(local.inactivity_floor, op_count, &local.root)
-        .await
-        .expect("limited sync target");
-    assert_eq!(target.root, local.root);
-    assert_eq!(target.range.start(), local.inactivity_floor);
-    assert_eq!(target.range.end(), op_count);
+    let target = Target::new(
+        local.root,
+        commonware_utils::non_empty_range!(local.inactivity_floor, op_count),
+    );
 
     let start = local.inactivity_floor;
     let start_index = usize::try_from(*start).expect("start fits usize");

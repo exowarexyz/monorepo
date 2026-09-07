@@ -32,7 +32,6 @@ use exoware_sdk::kv_codec::{
     KvPredicate, KvPredicateCheck, KvPredicateConstraint, KvReducedValue,
 };
 use exoware_sdk::{PrefixedStoreClient, SerializableReadSession};
-use futures::SinkExt;
 
 use crate::diagnostics::*;
 use crate::filter::*;
@@ -389,20 +388,13 @@ impl ExecutionPlan for KvAggregateExec {
             )));
         }
 
-        let (mut tx, rx) = futures::channel::mpsc::channel::<DataFusionResult<RecordBatch>>(1);
-        let spec = self.spec.clone();
-        let projection = self.projection.clone();
-        let projected_schema = self.projected_schema.clone();
-
-        tokio::spawn(async move {
-            let batch =
-                execute_aggregate_pushdown(spec, projection, projected_schema.clone()).await;
-            let _ = tx.send(batch).await;
-        });
-
         Ok(Box::pin(RecordBatchStreamAdapter::new(
             self.projected_schema.clone(),
-            rx,
+            futures::stream::once(execute_aggregate_pushdown(
+                self.spec.clone(),
+                self.projection.clone(),
+                self.projected_schema.clone(),
+            )),
         )))
     }
 }

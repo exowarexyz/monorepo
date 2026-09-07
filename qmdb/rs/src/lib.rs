@@ -78,9 +78,9 @@ pub use connect::{
     OrderedConnect, UnorderedConnect,
 };
 pub use connect_client::{
-    CurrentOperationClient, CurrentOperationRangeProof, CurrentSyncResolver, OperationLogClient,
-    OperationLogRangeProof, OperationLogSubscribeProof, OperationLogSubscription,
-    OperationLogSyncResolver, OrderedConnectClient, UnorderedConnectClient,
+    CurrentOperationClient, CurrentOperationRangeProof, OperationLogClient, OperationLogRangeProof,
+    OperationLogSubscribeProof, OperationLogSubscription, OrderedConnectClient,
+    UnorderedConnectClient,
 };
 
 use commonware_codec::Encode;

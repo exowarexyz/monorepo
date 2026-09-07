@@ -28,8 +28,8 @@ use exoware_qmdb::proto::qmdb::v1::{
 };
 use exoware_qmdb::{
     ordered_connect_stack, recover_boundary_state, CurrentBoundaryState, CurrentOperationClient,
-    CurrentSyncResolver, OperationLogClient, OperationLogSubscribeProof, OperationLogSyncResolver,
-    OrderedClient, OrderedWriter, QmdbError, MAX_OPERATION_SIZE,
+    OperationLogClient, OperationLogSubscribeProof, OrderedClient, OrderedWriter, QmdbError,
+    MAX_OPERATION_SIZE,
 };
 use exoware_sdk::common::kv::v1::{filter as proto_filter, Filter as ProtoFilter};
 use exoware_sdk::proto::PreferZstdHttpClient;
@@ -530,13 +530,18 @@ async fn ordered_current_state_sync_from_connect_api_reconstructs_current_db() {
         update_row_cfg(),
     ));
     let (_qmdb_server, qmdb_url) = spawn_qmdb_server(ordered_client).await;
-    let resolver = CurrentSyncResolver::<_, mmr::Family, Sha256, BatchOperation>::plaintext(
+    let resolver = OperationLogClient::<_, mmr::Family, Sha256, BatchOperation>::plaintext(
         &qmdb_url,
-        local.current_boundary.root,
         op_cfg(),
     );
     let op_count = Location::new(local.operations.len() as u64);
-    let target = resolver.target(op_count).await.expect("api sync target");
+    let target = resolver
+        .current_sync_target(
+            commonware_utils::non_empty_range!(Location::new(0), op_count),
+            &local.current_boundary.root,
+        )
+        .await
+        .expect("api sync target");
     assert_eq!(target.range.start(), Location::new(0));
     assert_eq!(target.range.end(), op_count);
 
@@ -614,14 +619,16 @@ async fn ordered_mmb_current_state_sync_from_nonzero_connect_api_reconstructs_cu
         update_row_cfg(),
     ));
     let (_qmdb_server, qmdb_url) = spawn_mmb_qmdb_server(ordered_client).await;
-    let resolver = CurrentSyncResolver::<_, mmb::Family, Sha256, MmbBatchOperation>::plaintext(
+    let resolver = OperationLogClient::<_, mmb::Family, Sha256, MmbBatchOperation>::plaintext(
         &qmdb_url,
-        local.current_boundary.root,
         mmb_op_cfg(),
     );
     let op_count = Location::new(local.operations.len() as u64);
     let target = resolver
-        .target_range(start, op_count)
+        .current_sync_target(
+            commonware_utils::non_empty_range!(start, op_count),
+            &local.current_boundary.root,
+        )
         .await
         .expect("api nonzero current sync target");
     let expected_current_root = local.current_boundary.root;
@@ -669,7 +676,7 @@ async fn ordered_mmb_current_state_sync_from_nonzero_connect_api_reconstructs_cu
 }
 
 #[tokio::test]
-async fn ordered_mmb_sync_resolvers_return_pinned_nodes_for_nonzero_fetches() {
+async fn ordered_mmb_sync_source_returns_pinned_nodes_for_nonzero_fetches() {
     let store_client = common::local_store_client().await;
     let local = build_mmb_local_batch().await;
     let start = Location::<mmb::Family>::new(3);
@@ -689,72 +696,47 @@ async fn ordered_mmb_sync_resolvers_return_pinned_nodes_for_nonzero_fetches() {
     let op_count = Location::new(local.operations.len() as u64);
     let hasher = commonware_storage::qmdb::hasher::<Sha256>();
 
-    let any_resolver =
-        OperationLogSyncResolver::<_, mmb::Family, Sha256, MmbBatchOperation>::plaintext(
-            &qmdb_url,
-            mmb_op_cfg(),
-        );
-    let any_target = any_resolver
-        .target_range(start, op_count, &local.ops_root)
-        .await
-        .expect("any nonzero sync target");
-    let (any_response, _) = any_resolver
+    let source = OperationLogClient::<_, mmb::Family, Sha256, MmbBatchOperation>::plaintext(
+        &qmdb_url,
+        mmb_op_cfg(),
+    );
+    let (response, _) = source
         .serve(Request::Boundary {
             size: op_count,
             start,
         })
         .await
-        .expect("any resolver nonzero pinned fetch");
+        .expect("source nonzero pinned fetch");
     let Response::Boundary {
-        proof: any_proof,
-        op: any_op,
-        pinned_nodes: any_pinned_nodes,
-    } = any_response
+        proof,
+        op,
+        pinned_nodes,
+    } = response
     else {
         panic!("boundary request returned operations response");
     };
-    assert!(!any_pinned_nodes.is_empty());
-    let any_elements = [any_op.encode()];
-    assert!(any_proof.verify_proof_and_pinned_nodes(
+    assert!(!pinned_nodes.is_empty());
+    let elements = [op.encode()];
+    assert!(proof.verify_proof_and_pinned_nodes(
         &hasher,
-        &any_elements,
+        &elements,
         start,
-        &any_pinned_nodes,
-        &any_target.root,
+        &pinned_nodes,
+        &local.ops_root,
     ));
 
-    let current_resolver =
-        CurrentSyncResolver::<_, mmb::Family, Sha256, MmbBatchOperation>::plaintext(
-            &qmdb_url,
-            local.current_boundary.root,
-            mmb_op_cfg(),
-        );
-    let current_target = current_resolver
-        .target_range(start, op_count)
+    let current_target = source
+        .current_sync_target(
+            commonware_utils::non_empty_range!(start, op_count),
+            &local.current_boundary.root,
+        )
         .await
         .expect("current nonzero sync target");
-    let (current_response, _) = current_resolver
-        .serve(Request::Boundary {
-            size: op_count,
-            start,
-        })
-        .await
-        .expect("current resolver nonzero pinned fetch");
-    let Response::Boundary {
-        proof: current_proof,
-        op: current_op,
-        pinned_nodes: current_pinned_nodes,
-    } = current_response
-    else {
-        panic!("boundary request returned operations response");
-    };
-    assert!(!current_pinned_nodes.is_empty());
-    let current_elements = [current_op.encode()];
-    assert!(current_proof.verify_proof_and_pinned_nodes(
+    assert!(proof.verify_proof_and_pinned_nodes(
         &hasher,
-        &current_elements,
+        &elements,
         start,
-        &current_pinned_nodes,
+        &pinned_nodes,
         &current_target.root,
     ));
 }
@@ -1281,15 +1263,15 @@ async fn ordered_mmb_operation_log_any_sync_from_connect_api_reconstructs_any_db
         update_row_cfg(),
     ));
     let (_qmdb_server, qmdb_url) = spawn_mmb_qmdb_server(ordered_client).await;
-    let resolver = OperationLogSyncResolver::<_, mmb::Family, Sha256, MmbBatchOperation>::plaintext(
+    let resolver = OperationLogClient::<_, mmb::Family, Sha256, MmbBatchOperation>::plaintext(
         &qmdb_url,
         mmb_op_cfg(),
     );
     let op_count = Location::new(local.operations.len() as u64);
-    let target = resolver
-        .target(op_count, &local.ops_root)
-        .await
-        .expect("any sync target");
+    let target = qmdb_sync::Target::new(
+        local.ops_root,
+        commonware_utils::non_empty_range!(Location::new(0), op_count),
+    );
     let target_root = target.root;
 
     tokio::task::spawn_blocking(move || {
@@ -1357,15 +1339,15 @@ async fn ordered_mmb_operation_log_any_sync_from_nonzero_connect_api_reconstruct
         update_row_cfg(),
     ));
     let (_qmdb_server, qmdb_url) = spawn_mmb_qmdb_server(ordered_client).await;
-    let resolver = OperationLogSyncResolver::<_, mmb::Family, Sha256, MmbBatchOperation>::plaintext(
+    let resolver = OperationLogClient::<_, mmb::Family, Sha256, MmbBatchOperation>::plaintext(
         &qmdb_url,
         mmb_op_cfg(),
     );
     let op_count = Location::new(local.operations.len() as u64);
-    let target = resolver
-        .target_range(start, op_count, &local.ops_root)
-        .await
-        .expect("any nonzero sync target");
+    let target = qmdb_sync::Target::new(
+        local.ops_root,
+        commonware_utils::non_empty_range!(start, op_count),
+    );
     let target_root = target.root;
 
     tokio::task::spawn_blocking(move || {
@@ -1448,17 +1430,16 @@ async fn ordered_mmb_operation_log_any_sync_accepts_target_update_from_growing_b
         update_row_cfg(),
     ));
     let (_qmdb_server, qmdb_url) = spawn_mmb_qmdb_server(ordered_client).await;
-    let resolver = OperationLogSyncResolver::<_, mmb::Family, Sha256, MmbBatchOperation>::plaintext(
+    let resolver = OperationLogClient::<_, mmb::Family, Sha256, MmbBatchOperation>::plaintext(
         &qmdb_url,
         mmb_op_cfg(),
     );
-    let target_resolver = resolver.clone();
     let initial_op_count = Location::new(local.initial.operations.len() as u64);
     let updated_op_count = Location::new(local.updated.operations.len() as u64);
-    let initial_target = resolver
-        .target_range(start, initial_op_count, &local.initial.ops_root)
-        .await
-        .expect("initial nonzero any sync target");
+    let initial_target = qmdb_sync::Target::new(
+        local.initial.ops_root,
+        commonware_utils::non_empty_range!(start, initial_op_count),
+    );
     let expected_initial_target = initial_target.clone();
 
     let (update_tx, update_rx) = mpsc::channel(1);
@@ -1510,10 +1491,10 @@ async fn ordered_mmb_operation_log_any_sync_accepts_target_update_from_growing_b
     assert_eq!(reached_initial, expected_initial_target);
 
     commit_mmb_upload(&store_client, &local.updated).await;
-    let updated_target = target_resolver
-        .target_range(start, updated_op_count, &local.updated.ops_root)
-        .await
-        .expect("updated nonzero any sync target");
+    let updated_target = qmdb_sync::Target::new(
+        local.updated.ops_root,
+        commonware_utils::non_empty_range!(start, updated_op_count),
+    );
     assert_ne!(updated_target, expected_initial_target);
     update_tx
         .send(updated_target.clone())

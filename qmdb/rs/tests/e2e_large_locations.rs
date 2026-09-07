@@ -18,7 +18,7 @@ use commonware_storage::qmdb::{
 use exoware_qmdb::proto::qmdb::v1::GetOperationRangeRequest;
 use exoware_qmdb::{
     keyless_operation_log_connect_stack, KeylessClient, KeylessWriter, OperationLogClient,
-    OperationLogSyncResolver, WriterState,
+    WriterState,
 };
 use exoware_sdk::{PrefixedStoreClient, StoreBatchUpload, StoreWriteBatch};
 
@@ -126,13 +126,7 @@ async fn check_large_frontier<F: Graftable + PartialEq>(family: &str, start: u64
             .map(|(index, operation)| (start + index as u64, operation))
             .collect::<Vec<_>>()
     );
-    let resolver =
-        OperationLogSyncResolver::<_, F, Sha256, Operation<F, Vec<u8>>>::plaintext(&url, config);
-    let target = resolver
-        .target_range(start, end, &expected_root)
-        .await
-        .unwrap();
-    let (response, _) = resolver
+    let (response, _) = rpc
         .serve(Request::Operations {
             size: end,
             start,
@@ -148,7 +142,7 @@ async fn check_large_frontier<F: Graftable + PartialEq>(family: &str, start: u64
         panic!("expected operation batch")
     };
     let encoded = received.iter().map(Encode::encode).collect::<Vec<_>>();
-    assert!(proof.verify_range_inclusion(&hasher, &encoded, start, &target.root));
+    assert!(proof.verify_range_inclusion(&hasher, &encoded, start, &expected_root));
     assert_eq!(received, operations);
     server.abort();
 }
