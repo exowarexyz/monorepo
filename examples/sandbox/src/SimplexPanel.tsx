@@ -75,15 +75,9 @@ async function sha256(bytes: Uint8Array): Promise<Uint8Array> {
 }
 
 async function verifyDemoHeader({
-  certificate,
-  context,
   payload,
   header,
 }: SimplexHeaderVerification): Promise<boolean> {
-  // The demo seeder uses the block height as its signed Simplex view
-  if (context.kind === 'finalization' && context.index !== 'round' && certificate.view !== context.height) {
-    return false;
-  }
   return bytesEqual(payload, await sha256(header));
 }
 
@@ -96,6 +90,14 @@ async function verifyDemoBlock(header: Uint8Array, body: Uint8Array): Promise<bo
 
 function formatRound(epoch: bigint, view: bigint): string {
   return `${epoch.toString()}:${view.toString()}`;
+}
+
+function readNonNegativeInteger(value: string, label: string): string {
+  const trimmed = value.trim();
+  if (!/^\d+$/.test(trimmed)) {
+    throw new Error(`${label} must be a non-negative integer`);
+  }
+  return trimmed;
 }
 
 function renderCertificate(value: VerifiedSimplexCertificate): string {
@@ -356,14 +358,8 @@ export function SimplexPanel({
       return next;
     });
     try {
-      const epoch = notarizationEpoch.trim();
-      if (!/^\d+$/.test(epoch)) {
-        throw new Error('Notarization epoch must be a non-negative integer');
-      }
-      const view = notarizationView.trim();
-      if (!/^\d+$/.test(view)) {
-        throw new Error('Notarization view must be a non-negative integer');
-      }
+      const epoch = readNonNegativeInteger(notarizationEpoch, 'Notarization epoch');
+      const view = readNonNegativeInteger(notarizationView, 'Notarization view');
       const nextNotarization = await client.getNotarizationByRound(epoch, view);
       setReadCertificateRef('notarization', nextNotarization);
       setNotarization(nextNotarization);
@@ -409,14 +405,6 @@ export function SimplexPanel({
     }
   };
 
-  const readFinalizationIndex = (label: 'view' | 'height') => {
-    const value = finalizationIndex.trim();
-    if (!/^\d+$/.test(value)) {
-      throw new Error(`Finalization ${label} must be a non-negative integer`);
-    }
-    return value;
-  };
-
   const readRoundFinalization = async () => {
     setIsReadingRoundFinalization(true);
     setReadCertificateRef('round', null);
@@ -428,11 +416,8 @@ export function SimplexPanel({
       return next;
     });
     try {
-      const epoch = finalizationEpoch.trim();
-      if (!/^\d+$/.test(epoch)) {
-        throw new Error('Finalization epoch must be a non-negative integer');
-      }
-      const view = readFinalizationIndex('view');
+      const epoch = readNonNegativeInteger(finalizationEpoch, 'Finalization epoch');
+      const view = readNonNegativeInteger(finalizationIndex, 'Finalization view');
       const finalization = await client.getFinalizationByRound(epoch, view);
       setReadCertificateRef('round', finalization);
       setRoundFinalization(finalization);
@@ -462,7 +447,7 @@ export function SimplexPanel({
       return next;
     });
     try {
-      const height = readFinalizationIndex('height');
+      const height = readNonNegativeInteger(finalizationIndex, 'Finalization height');
       const finalization = await client.getFinalizationByHeight(height);
       setReadCertificateRef('height', finalization);
       setHeightFinalization(finalization);

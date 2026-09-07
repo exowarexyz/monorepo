@@ -657,10 +657,6 @@ where
         .start_proof
         .as_ref()
         .map(|proof| key_exclusion_proof_len(&proof.proof));
-    let end_proof_len = proof
-        .end_proof
-        .as_ref()
-        .map(|proof| key_exclusion_proof_len(&proof.proof));
     let len = entry_lens
         .iter()
         .map(|inner| message_field_len(1, *inner))
@@ -668,11 +664,8 @@ where
         + start_proof_len
             .map(|inner| message_field_len(2, inner))
             .unwrap_or_default()
-        + end_proof_len
-            .map(|inner| message_field_len(3, inner))
-            .unwrap_or_default()
-        + bool_field_len(4, proof.has_more)
-        + bytes_field_len(5, &proof.next_start_key);
+        + bool_field_len(3, proof.has_more)
+        + bytes_field_len(4, &proof.next_start_key);
     PreEncoded::from_bytes_unchecked(message_bytes(len, |buf| {
         for (entry, entry_len) in proof.entries.iter().zip(entry_lens) {
             write_message_field(buf, 1, entry_len);
@@ -682,12 +675,8 @@ where
             write_message_field(buf, 2, proof_len);
             write_key_exclusion_proof(buf, &proof.proof);
         }
-        if let (Some(proof), Some(proof_len)) = (&proof.end_proof, end_proof_len) {
-            write_message_field(buf, 3, proof_len);
-            write_key_exclusion_proof(buf, &proof.proof);
-        }
-        write_bool_field(buf, 4, proof.has_more);
-        write_bytes_field(buf, 5, &proof.next_start_key);
+        write_bool_field(buf, 3, proof.has_more);
+        write_bytes_field(buf, 4, &proof.next_start_key);
     }))
 }
 

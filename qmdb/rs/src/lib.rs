@@ -39,6 +39,8 @@ pub mod proof;
 pub mod proto;
 pub mod prune;
 mod request;
+#[cfg(test)]
+mod request_tests;
 pub(crate) mod storage;
 
 mod immutable;

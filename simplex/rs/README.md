@@ -2,8 +2,7 @@
 
 Store-backed upload helpers for Commonware Simplex artifacts.
 
-The crate uses the Commonware Library release selected by the workspace
-`Cargo.toml` and stores encoded artifacts in Exoware Store rows:
+The crate stores encoded artifacts in Exoware Store rows:
 
 - header bytes by digest
 - full `{ header, body }` block data by digest
@@ -63,11 +62,7 @@ simulator still advances the latest finalized height index; pass
 `--start-height` to override it.
 
 Round indices encode epoch and view as two big-endian u64 fields under record
-kinds `0x21` (notarization) and `0x32` (finalization). `MarshalResolver` uses the
-complete requested round. Round indices retain certificates from different
-epochs even when they share a view.
-
-Rust typed reads check the requested digest, height, or round and decode the
-payload/header binding. Signature verification remains the caller's or
-Commonware Marshal's responsibility. Applications own the epoch-scoped
-verification material and header/body commitment rules.
+kinds `0x20` (notarization) and `0x30` (finalization). Typed reads reject a
+record whose digest, height, or round does not match the requested index.
+Signature verification remains the caller's or Commonware Marshal's
+responsibility.

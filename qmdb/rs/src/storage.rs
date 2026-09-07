@@ -8,7 +8,7 @@ use commonware_storage::merkle::{
 use commonware_storage::qmdb::current::grafting;
 use exoware_sdk::{RangeMode, SerializableReadSession};
 
-use crate::codec::{encode_grafted_node_key, encode_node_key};
+use crate::codec::{chunk_index_for_location, encode_grafted_node_key, encode_node_key};
 
 pub(crate) struct KvMerkleStorage<'a, F: Family, D: Digest> {
     pub(crate) session: &'a SerializableReadSession,
@@ -161,10 +161,14 @@ impl<const N: usize> ProofBitmap<N> {
                 crate::QmdbError::CorruptData("current bitmap chunk index exceeds usize".into())
             })
         };
-        // Current proof construction reads only the last chunk (`last_chunk`), the pending
-        // chunk (if any) and the queried chunk (`get_chunk`)
-        let last = (len - 1) / chunk_bits;
-        let mut required = std::collections::BTreeSet::from([last]);
+        // Current proof construction reads the partial trailing chunk (`last_chunk`, only when
+        // the length is not chunk-aligned), the pending chunk (if any) and the queried chunk
+        // (`get_chunk`). Upstream rejects a queried location in a pruned chunk before reading it.
+        let last = chunk_index_for_location::<F, N>(watermark);
+        let mut required = std::collections::BTreeSet::new();
+        if len % chunk_bits != 0 {
+            required.insert(last);
+        }
         if complete > graftable {
             required.insert(graftable);
         }
@@ -174,12 +178,12 @@ impl<const N: usize> ProofBitmap<N> {
                     "current proof location exceeds watermark".into(),
                 ));
             }
-            required.insert(location.as_u64() / chunk_bits);
+            let chunk = chunk_index_for_location::<F, N>(location);
+            if chunk >= pruned_chunks {
+                required.insert(chunk);
+            }
         }
-        let required = required
-            .into_iter()
-            .filter(|chunk| *chunk >= pruned_chunks)
-            .collect::<Vec<_>>();
+        let required = required.into_iter().collect::<Vec<_>>();
         let loaded =
             futures::future::try_join_all(required.iter().map(|chunk| load(*chunk))).await?;
         let chunks = required
@@ -203,14 +207,10 @@ impl<const N: usize> commonware_utils::bitmap::Readable<N> for ProofBitmap<N> {
     }
 
     fn get_chunk(&self, chunk: usize) -> [u8; N] {
-        if chunk < self.pruned_chunks {
-            [0; N]
-        } else {
-            *self
-                .chunks
-                .get(&chunk)
-                .expect("current proof requested an unloaded bitmap chunk")
-        }
+        *self
+            .chunks
+            .get(&chunk)
+            .expect("current proof requested an unloaded bitmap chunk")
     }
 
     fn last_chunk(&self) -> ([u8; N], u64) {
@@ -253,29 +253,34 @@ mod tests {
     }
 
     #[test]
-    fn loads_last_chunk_for_partial_and_aligned_lengths() {
+    fn loads_last_chunk_only_for_partial_lengths() {
         let (bitmap, requested) = load::<mmr::Family>(12, 0, None).unwrap();
         assert_eq!(requested, [1]);
         assert_eq!(bitmap.last_chunk(), ([1], 5));
         assert_eq!(bitmap.complete_chunks(), 1);
 
+        // An aligned MMR bitmap has neither a partial nor a pending chunk
         let (bitmap, requested) = load::<mmr::Family>(15, 0, None).unwrap();
-        assert_eq!(requested, [1]);
-        assert_eq!(bitmap.last_chunk(), ([1], 8));
+        assert!(requested.is_empty());
         assert_eq!(bitmap.complete_chunks(), 2);
+        assert_eq!(bitmap.len(), 16);
     }
 
     #[test]
-    fn loads_queried_chunk_and_serves_pruned_chunks_as_zeros() {
+    fn loads_queried_chunk_and_skips_pruned_locations() {
         let (bitmap, requested) = load::<mmr::Family>(20, 0, Some(3)).unwrap();
         assert_eq!(requested, [0, 2]);
         assert_eq!(bitmap.get_chunk(0), [0]);
         assert_eq!(bitmap.get_chunk(2), [2]);
 
+        // Upstream rejects a pruned location before reading its chunk
         let (bitmap, requested) = load::<mmr::Family>(20, 1, Some(3)).unwrap();
         assert_eq!(requested, [2]);
         assert_eq!(bitmap.pruned_chunks(), 1);
-        assert_eq!(bitmap.get_chunk(0), [0]);
+
+        // The queried chunk and the partial chunk coincide
+        let (_, requested) = load::<mmr::Family>(20, 0, Some(19)).unwrap();
+        assert_eq!(requested, [2]);
     }
 
     #[test]
@@ -285,6 +290,11 @@ mod tests {
         assert_eq!(requested, [1, 2]);
         assert_eq!(bitmap.get_chunk(1), [1]);
         assert_eq!(bitmap.last_chunk(), ([2], 1));
+
+        // An aligned MMB bitmap still needs its pending chunk
+        let (bitmap, requested) = load::<mmb::Family>(15, 0, None).unwrap();
+        assert_eq!(requested, [1]);
+        assert_eq!(bitmap.get_chunk(1), [1]);
     }
 
     #[test]

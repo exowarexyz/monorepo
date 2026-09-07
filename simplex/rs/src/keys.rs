@@ -10,9 +10,9 @@ pub const FORMAT_VERSION: u8 = 0;
 pub enum RecordKind {
     HeaderByDigest = 0x10,
     BlockByDigest = 0x11,
-    NotarizationByRound = 0x21,
+    NotarizationByRound = 0x20,
+    FinalizationByRound = 0x30,
     FinalizedByHeight = 0x31,
-    FinalizationByRound = 0x32,
 }
 
 impl RecordKind {
@@ -31,10 +31,6 @@ fn key_from_parts(kind: RecordKind, suffix: &[u8]) -> Key {
     key.put_u8(kind.as_u8());
     key.put_slice(suffix);
     key.freeze()
-}
-
-fn u64_suffix(value: u64) -> [u8; 8] {
-    value.to_be_bytes()
 }
 
 pub fn header_by_digest<D: Digest>(digest: &D) -> Key {
@@ -61,7 +57,12 @@ pub fn finalization_by_round(round: Round) -> Key {
 }
 
 pub fn finalized_by_height(height: Height) -> Key {
-    key_from_parts(RecordKind::FinalizedByHeight, &u64_suffix(height.get()))
+    key_from_parts(RecordKind::FinalizedByHeight, &height.get().to_be_bytes())
+}
+
+pub fn finalized_height_from_key(key: &[u8]) -> Option<Height> {
+    let suffix = key.strip_prefix(RecordKind::FinalizedByHeight.prefix().as_slice())?;
+    Some(Height::new(u64::from_be_bytes(suffix.try_into().ok()?)))
 }
 
 pub fn range_for_kind(kind: RecordKind) -> (Key, Key) {

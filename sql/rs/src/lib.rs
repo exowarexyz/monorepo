@@ -7200,24 +7200,28 @@ mod tests {
             .expect("schema");
         let ctx = SessionContext::new();
         schema.register_all(&ctx).expect("register");
-        let (batches, ()) = tokio::join!(
-            async {
-                ctx.sql("SELECT id FROM items LIMIT 1")
-                    .await
-                    .expect("query")
-                    .collect()
-                    .await
-                    .expect("collect")
-            },
-            async {
-                request_received.notified().await;
-                assert_eq!(
-                    observed_limit.load(AtomicOrdering::SeqCst),
-                    1,
-                    "exact streaming scan should push SQL LIMIT upstream"
-                );
-            }
-        );
+        let (batches, ()) = tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::join!(
+                async {
+                    ctx.sql("SELECT id FROM items LIMIT 1")
+                        .await
+                        .expect("query")
+                        .collect()
+                        .await
+                        .expect("collect")
+                },
+                async {
+                    request_received.notified().await;
+                    assert_eq!(
+                        observed_limit.load(AtomicOrdering::SeqCst),
+                        1,
+                        "exact streaming scan should push SQL LIMIT upstream"
+                    );
+                }
+            )
+        })
+        .await
+        .expect("query with LIMIT 1 should finish without waiting for a delayed second chunk");
 
         assert_eq!(
             batches.iter().map(|batch| batch.num_rows()).sum::<usize>(),
@@ -7543,35 +7547,39 @@ mod tests {
         let ctx = SessionContext::new();
         schema.register_all(&ctx).expect("register");
 
-        let (batches, ()) = tokio::join!(
-            async {
-                ctx.sql(
-                    "SELECT height, index, role \
-                     FROM tx_activity \
-                     WHERE account = 7 \
-                     ORDER BY height DESC, index DESC, role DESC \
-                     LIMIT 1",
-                )
-                .await
-                .expect("query")
-                .collect()
-                .await
-                .expect("collect")
-            },
-            async {
-                request_received.notified().await;
-                assert_eq!(
-                    observed_mode.load(AtomicOrdering::SeqCst),
-                    1,
-                    "activity DESC primary-key order should use reverse range traversal"
-                );
-                assert_eq!(
-                    observed_limit.load(AtomicOrdering::SeqCst),
-                    1,
-                    "activity DESC LIMIT should push the top-K limit to the range request"
-                );
-            }
-        );
+        let (batches, ()) = tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::join!(
+                async {
+                    ctx.sql(
+                        "SELECT height, index, role \
+                         FROM tx_activity \
+                         WHERE account = 7 \
+                         ORDER BY height DESC, index DESC, role DESC \
+                         LIMIT 1",
+                    )
+                    .await
+                    .expect("query")
+                    .collect()
+                    .await
+                    .expect("collect")
+                },
+                async {
+                    request_received.notified().await;
+                    assert_eq!(
+                        observed_mode.load(AtomicOrdering::SeqCst),
+                        1,
+                        "activity DESC primary-key order should use reverse range traversal"
+                    );
+                    assert_eq!(
+                        observed_limit.load(AtomicOrdering::SeqCst),
+                        1,
+                        "activity DESC LIMIT should push the top-K limit to the range request"
+                    );
+                }
+            )
+        })
+        .await
+        .expect("activity DESC LIMIT query should not wait for a delayed second chunk");
 
         assert_eq!(
             batches.iter().map(|batch| batch.num_rows()).sum::<usize>(),
@@ -7625,11 +7633,11 @@ mod tests {
         );
         assert!(explain.contains("KvScanExec:"));
         assert!(
-            explain.contains("KvScanExec: limit=None"),
+            explain.contains("KvScanExec: fetch=None"),
             "mixed direction order cannot be a bounded key-order scan:\n{explain}"
         );
         assert!(
-            !explain.contains("KvScanExec: limit=Some(1)"),
+            !explain.contains("KvScanExec: fetch=Some(1)"),
             "mixed direction order incorrectly pushed top-K into the scan:\n{explain}"
         );
 
@@ -7684,11 +7692,11 @@ mod tests {
             "unsupported filter should remain above scan:\n{explain}"
         );
         assert!(
-            explain.contains("KvScanExec: limit=None"),
+            explain.contains("KvScanExec: fetch=None"),
             "top-K fetch must not cross a row-dropping filter:\n{explain}"
         );
         assert!(
-            !explain.contains("KvScanExec: limit=Some(1)"),
+            !explain.contains("KvScanExec: fetch=Some(1)"),
             "top-K fetch crossed a filter into the scan:\n{explain}"
         );
 
@@ -7758,7 +7766,7 @@ mod tests {
                    LIMIT 1";
         let explain = physical_plan_text(&explain_plan_rows(&ctx, sql).await);
         assert!(
-            explain.contains("KvScanExec: limit=Some(1), direction=Reverse"),
+            explain.contains("KvScanExec: fetch=Some(1), direction=Some(Reverse)"),
             "test must exercise reverse top-K scan pushdown:\n{explain}"
         );
 
@@ -7825,7 +7833,7 @@ mod tests {
                    LIMIT 3";
         let explain = physical_plan_text(&explain_plan_rows(&ctx, sql).await);
         assert!(
-            explain.contains("KvScanExec: limit=Some(3), direction=Reverse"),
+            explain.contains("KvScanExec: fetch=Some(3), direction=Some(Reverse)"),
             "test must exercise reverse top-K scan pushdown over IN ranges:\n{explain}"
         );
 
@@ -7883,7 +7891,7 @@ mod tests {
                    LIMIT 2 OFFSET 1";
         let explain = physical_plan_text(&explain_plan_rows(&ctx, sql).await);
         assert!(
-            explain.contains("KvScanExec: limit=Some(3), direction=Reverse"),
+            explain.contains("KvScanExec: fetch=Some(3), direction=Some(Reverse)"),
             "OFFSET requires fetching offset + limit rows from the reverse scan:\n{explain}"
         );
 

@@ -279,7 +279,7 @@ impl SimplexClient {
     }
 
     pub async fn latest_finalized_raw(&self) -> Result<Option<Bytes>, SimplexError> {
-        self.latest_raw(RecordKind::FinalizedByHeight).await
+        Ok(self.latest_finalized_row().await?.map(|(_, value)| value))
     }
 
     pub async fn get_header<B, D>(
@@ -376,45 +376,44 @@ impl SimplexClient {
         D: Digest,
         <S::Certificate as commonware_codec::Read>::Cfg: Clone,
     {
-        self.decode_optional(self.latest_finalized_raw().await?, cfg)
+        let Some((key, value)) = self.latest_finalized_row().await? else {
+            return Ok(None);
+        };
+        let height =
+            keys::finalized_height_from_key(&key).ok_or(SimplexError::RecordKeyMismatch)?;
+        self.decode_indexed(Some(value), cfg, |value: &Finalized<B, S, D>| {
+            value.header.height() == height
+        })
     }
 
     async fn get_raw(&self, key: Key) -> Result<Option<Bytes>, SimplexError> {
         Ok(self.client.query().get(&key).await?)
     }
 
-    async fn latest_raw(&self, kind: RecordKind) -> Result<Option<Bytes>, SimplexError> {
-        let (start, end) = keys::range_for_kind(kind);
+    async fn latest_finalized_row(&self) -> Result<Option<(Key, Bytes)>, SimplexError> {
+        let (start, end) = keys::range_for_kind(RecordKind::FinalizedByHeight);
         let rows = self
             .client
             .query()
             .range_with_mode(&start, &end, 1, RangeMode::Reverse)
             .await?;
-        Ok(rows.into_iter().next().map(|(_, value)| value))
+        Ok(rows.into_iter().next())
     }
 
-    /// Decode a record and reject one that does not belong to the requested index
     fn decode_indexed<T: Decode>(
         &self,
         value: Option<Bytes>,
         cfg: &T::Cfg,
         matches: impl FnOnce(&T) -> bool,
     ) -> Result<Option<T>, SimplexError> {
-        let decoded = self.decode_optional::<T>(value, cfg)?;
-        if decoded.as_ref().is_some_and(|value| !matches(value)) {
+        let Some(bytes) = value else {
+            return Ok(None);
+        };
+        let decoded = T::decode_cfg(bytes, cfg)?;
+        if !matches(&decoded) {
             return Err(SimplexError::RecordKeyMismatch);
         }
-        Ok(decoded)
-    }
-
-    fn decode_optional<T: Decode>(
-        &self,
-        value: Option<Bytes>,
-        cfg: &T::Cfg,
-    ) -> Result<Option<T>, SimplexError> {
-        value
-            .map(|bytes| T::decode_cfg(bytes, cfg).map_err(SimplexError::from))
-            .transpose()
+        Ok(Some(decoded))
     }
 }
 

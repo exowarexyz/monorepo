@@ -481,7 +481,6 @@ pub struct RawKeyRangeProof<
     pub watermark: Location<F>,
     pub entries: Vec<RawKeyRangeEntry<D, K, V, N, F, E>>,
     pub start_proof: Option<RawKeyExclusionProof<D, K, V, N, F, E>>,
-    pub end_proof: Option<RawKeyExclusionProof<D, K, V, N, F, E>>,
     pub has_more: bool,
     pub next_start_key: Bytes,
 }

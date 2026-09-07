@@ -563,7 +563,7 @@ where
             .await
     }
 
-    /// Discover a sync target for `[start_loc, op_count)`; the API root must equal `expected_ops_root`
+    /// Discover a sync target for `[start_loc, op_count)` under an independently trusted operation-log root
     pub async fn target_range(
         &self,
         start_loc: Location<F>,
@@ -576,9 +576,9 @@ where
             .await?;
         let root = decode_digest::<H::Digest>(proto.ops_root.as_ref(), "operation sync root")?;
         if root != *expected_ops_root {
-            return Err(QmdbError::CorruptData(
-                "operation sync root differs from trusted root".into(),
-            ));
+            return Err(QmdbError::ProofVerification {
+                kind: crate::ProofKind::RangeCheckpoint,
+            });
         }
         Ok(SyncTarget::new(*expected_ops_root, range))
     }
@@ -929,7 +929,7 @@ where
         let tip = Location::<F>::new(request.tip);
         let window =
             OperationWindow::new(request.tip, request.start_location, request.max_locations)
-                .map_err(|message| QmdbError::CorruptData(message.into()))?;
+                .map_err(QmdbError::RangeMismatch)?;
         let response = self
             .rpc
             .get_current_operation_range(request)
@@ -1028,7 +1028,7 @@ where
         let tip = Location::<F>::new(request.tip);
         let window =
             OperationWindow::new(request.tip, request.start_location, request.max_locations)
-                .map_err(|message| QmdbError::CorruptData(message.into()))?;
+                .map_err(QmdbError::RangeMismatch)?;
         let proof = fetch_operation_range_proof(
             &self.rpc,
             request,
@@ -1150,36 +1150,31 @@ where
     H::Digest: DecodeExt<()>,
     H: Hasher,
 {
-    match (ops_root.is_empty(), ops_root_witness.is_empty()) {
-        (true, true) => Ok(*expected_root),
-        (false, true) => {
-            let ops_root = decode_digest::<H::Digest>(ops_root, "historical ops root")?;
-            if ops_root != *expected_root {
-                return Err(QmdbError::ProofVerification {
-                    kind: crate::ProofKind::BatchMulti,
-                });
-            }
-            Ok(ops_root)
-        }
-        (false, false) => {
-            let ops_root = decode_digest::<H::Digest>(ops_root, "historical ops root")?;
-            let witness =
-                OpsRootWitness::<F, H::Digest>::decode(ops_root_witness).map_err(|err| {
-                    QmdbError::CorruptData(format!(
-                        "failed to decode historical ops-root witness: {err}"
-                    ))
-                })?;
-            if !witness.verify::<H>(&ops_root, expected_root) {
-                return Err(QmdbError::ProofVerification {
-                    kind: crate::ProofKind::BatchMulti,
-                });
-            }
-            Ok(ops_root)
-        }
-        _ => Err(QmdbError::CorruptData(
-            "historical proof missing ops_root for ops_root_witness".to_string(),
-        )),
+    if ops_root.is_empty() {
+        return Err(QmdbError::CorruptData(
+            "historical proof missing ops_root".to_string(),
+        ));
     }
+    let ops_root = decode_digest::<H::Digest>(ops_root, "historical ops root")?;
+    if ops_root_witness.is_empty() {
+        if ops_root != *expected_root {
+            return Err(QmdbError::ProofVerification {
+                kind: crate::ProofKind::BatchMulti,
+            });
+        }
+        return Ok(ops_root);
+    }
+    let witness = OpsRootWitness::<F, H::Digest>::decode(ops_root_witness).map_err(|err| {
+        QmdbError::CorruptData(format!(
+            "failed to decode historical ops-root witness: {err}"
+        ))
+    })?;
+    if !witness.verify::<H>(&ops_root, expected_root) {
+        return Err(QmdbError::ProofVerification {
+            kind: crate::ProofKind::BatchMulti,
+        });
+    }
+    Ok(ops_root)
 }
 
 fn verify_multi_from_proto<F, H, Op>(
@@ -1252,7 +1247,7 @@ where
             proto.encoded_operations.len(),
             proof.leaves.as_u64(),
         )
-        .map_err(|message| QmdbError::CorruptData(message.into()))?;
+        .map_err(QmdbError::RangeMismatch)?;
     let start = Location::<F>::new(proto.start_location);
     let decoded_operations = proto
         .encoded_operations
@@ -1328,7 +1323,7 @@ where
             proto.encoded_operations.len(),
             proof.proof.leaves.as_u64(),
         )
-        .map_err(|message| QmdbError::CorruptData(message.into()))?;
+        .map_err(QmdbError::RangeMismatch)?;
     let start = Location::<F>::new(proto.start_location);
     let decoded_operations = proto
         .encoded_operations
@@ -1630,7 +1625,7 @@ where
         response.has_more,
         next_start.as_ref(),
     )
-    .map_err(|message| QmdbError::CorruptData(message.into()))?;
+    .map_err(QmdbError::RangeMismatch)?;
 
     Ok(VerifiedKeyRange {
         entries,

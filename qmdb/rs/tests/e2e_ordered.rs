@@ -1060,7 +1060,7 @@ impl exoware_server::Query for CountingQuery {
         limit: usize,
         forward: bool,
     ) -> Result<Self::RangeScan, String> {
-        // The documented chunk row layout is family, chunk index, boundary location
+        // Chunk row key: family byte 0x07, u64 chunk index, u64 boundary location
         if start.first() == Some(&0x07) && start.len() == 17 {
             self.bitmap_chunks
                 .lock()

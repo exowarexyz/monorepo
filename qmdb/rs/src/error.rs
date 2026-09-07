@@ -85,6 +85,8 @@ pub enum QmdbError {
     },
     #[error("{kind} proof failed verification")]
     ProofVerification { kind: ProofKind },
+    #[error("range proof does not satisfy the request: {0}")]
+    RangeMismatch(&'static str),
     #[error("corrupt qmdb data: {0}")]
     CorruptData(String),
     #[error("commonware merkle error: {0}")]

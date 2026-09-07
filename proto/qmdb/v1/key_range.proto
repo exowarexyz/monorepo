@@ -27,11 +27,10 @@ message GetRangeRequest {
 // Ordered current key-range proof response. Key fields are codec-encoded
 // logical QMDB keys (`K::encode()` bytes). `start_proof`, when present,
 // authenticates the boundary before the first returned key (or the entire empty
-// range). `end_proof`, when present, authenticates the exclusive end boundary.
+// range). The last entry's authenticated successor closes the range.
 message GetRangeResponse {
   repeated CurrentKeyRangeEntry entries = 1;
   optional CurrentKeyExclusionProof start_proof = 2;
-  optional CurrentKeyExclusionProof end_proof = 3;
-  bool has_more = 4;
-  bytes next_start_key = 5;
+  bool has_more = 3;
+  bytes next_start_key = 4;
 }

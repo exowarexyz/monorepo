@@ -13,7 +13,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file qmdb/v1/key_range.proto.
  */
 export const file_qmdb_v1_key_range: GenFile = /*@__PURE__*/
-  fileDesc("ChdxbWRiL3YxL2tleV9yYW5nZS5wcm90bxIHcW1kYi52MSJrCg9HZXRSYW5nZVJlcXVlc3QSEQoJc3RhcnRfa2V5GAEgASgMEhQKB2VuZF9rZXkYAiABKAxIAIgBARIWCgVsaW1pdBgDIAEoDUIHukgEKgIgABILCgN0aXAYBCABKARCCgoIX2VuZF9rZXkiggIKEEdldFJhbmdlUmVzcG9uc2USLgoHZW50cmllcxgBIAMoCzIdLnFtZGIudjEuQ3VycmVudEtleVJhbmdlRW50cnkSOwoLc3RhcnRfcHJvb2YYAiABKAsyIS5xbWRiLnYxLkN1cnJlbnRLZXlFeGNsdXNpb25Qcm9vZkgAiAEBEjkKCWVuZF9wcm9vZhgDIAEoCzIhLnFtZGIudjEuQ3VycmVudEtleUV4Y2x1c2lvblByb29mSAGIAQESEAoIaGFzX21vcmUYBCABKAgSFgoObmV4dF9zdGFydF9rZXkYBSABKAxCDgoMX3N0YXJ0X3Byb29mQgwKCl9lbmRfcHJvb2YyWQoWT3JkZXJlZEtleVJhbmdlU2VydmljZRI/CghHZXRSYW5nZRIYLnFtZGIudjEuR2V0UmFuZ2VSZXF1ZXN0GhkucW1kYi52MS5HZXRSYW5nZVJlc3BvbnNlYgZwcm90bzM", [file_buf_validate_validate, file_qmdb_v1_proof]);
+  fileDesc("ChdxbWRiL3YxL2tleV9yYW5nZS5wcm90bxIHcW1kYi52MSJrCg9HZXRSYW5nZVJlcXVlc3QSEQoJc3RhcnRfa2V5GAEgASgMEhQKB2VuZF9rZXkYAiABKAxIAIgBARIWCgVsaW1pdBgDIAEoDUIHukgEKgIgABILCgN0aXAYBCABKARCCgoIX2VuZF9rZXkiuQEKEEdldFJhbmdlUmVzcG9uc2USLgoHZW50cmllcxgBIAMoCzIdLnFtZGIudjEuQ3VycmVudEtleVJhbmdlRW50cnkSOwoLc3RhcnRfcHJvb2YYAiABKAsyIS5xbWRiLnYxLkN1cnJlbnRLZXlFeGNsdXNpb25Qcm9vZkgAiAEBEhAKCGhhc19tb3JlGAMgASgIEhYKDm5leHRfc3RhcnRfa2V5GAQgASgMQg4KDF9zdGFydF9wcm9vZjJZChZPcmRlcmVkS2V5UmFuZ2VTZXJ2aWNlEj8KCEdldFJhbmdlEhgucW1kYi52MS5HZXRSYW5nZVJlcXVlc3QaGS5xbWRiLnYxLkdldFJhbmdlUmVzcG9uc2ViBnByb3RvMw", [file_buf_validate_validate, file_qmdb_v1_proof]);
 
 /**
  * Current ordered key range proof request. Key fields are codec-encoded logical
@@ -57,7 +57,7 @@ export const GetRangeRequestSchema: GenMessage<GetRangeRequest> = /*@__PURE__*/
  * Ordered current key-range proof response. Key fields are codec-encoded
  * logical QMDB keys (`K::encode()` bytes). `start_proof`, when present,
  * authenticates the boundary before the first returned key (or the entire empty
- * range). `end_proof`, when present, authenticates the exclusive end boundary.
+ * range). The last entry's authenticated successor closes the range.
  *
  * @generated from message qmdb.v1.GetRangeResponse
  */
@@ -73,17 +73,12 @@ export type GetRangeResponse = Message<"qmdb.v1.GetRangeResponse"> & {
   startProof?: CurrentKeyExclusionProof;
 
   /**
-   * @generated from field: optional qmdb.v1.CurrentKeyExclusionProof end_proof = 3;
-   */
-  endProof?: CurrentKeyExclusionProof;
-
-  /**
-   * @generated from field: bool has_more = 4;
+   * @generated from field: bool has_more = 3;
    */
   hasMore: boolean;
 
   /**
-   * @generated from field: bytes next_start_key = 5;
+   * @generated from field: bytes next_start_key = 4;
    */
   nextStartKey: Uint8Array;
 };

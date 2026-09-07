@@ -30,9 +30,7 @@ await simplex.uploadFinalization({
 
 Use `prepareHeader`, `prepareBlock`, `prepareNotarization`, and
 `prepareFinalization` to stage multiple Simplex rows into one
-`StoreWriteBatch`. Finalizations are stored by round and height. Use
-`getNotarizationByRound(epoch, view)` and `getFinalizationByRound(epoch, view)`
-for round lookups. Raw uploads must provide the encoded certificate's `epoch`
+`StoreWriteBatch`. Raw uploads must provide the encoded certificate's `epoch`
 and `view`. The client does not decode certificate bytes, so a wrong value
 mis-keys the round row.
 
@@ -137,13 +135,5 @@ const verifier = await createWasmSimplexVerifier({
 ```
 
 The built-in verifier returns the signed `epoch` and checks any requested epoch
-and view before application header verification. Verifier results must include
-`epoch` (rebuild the bundled WASM together with this package, and return it from
-any custom `createSimplexVerifier` module). Custom verifiers receive the same
-context and own those checks, including height/header binding. Select
-verification material for the certificate's epoch; storing an epoch does not
-make its signing keys trusted.
-
-Certificate subscriptions emit round entries with both epoch and view. Set
-`includeFinalizedByHeight` to also receive finalization entries indexed by
-height.
+and view before application header verification. Custom verifiers receive the
+same context and own those checks, including height/header binding.

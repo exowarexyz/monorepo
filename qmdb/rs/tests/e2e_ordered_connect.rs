@@ -6,9 +6,7 @@ mod common;
 
 use std::num::NonZeroU64;
 use std::sync::Arc;
-use std::time::Duration;
 
-use axum::{routing::get, Router};
 use commonware_codec::Encode;
 use commonware_cryptography::Sha256;
 use commonware_runtime::tokio as cw_tokio;
@@ -57,44 +55,10 @@ fn encoded_key(key: &[u8]) -> Vec<u8> {
     key.to_vec().encode().to_vec()
 }
 
-async fn health() -> &'static str {
-    "ok"
-}
-
-async fn wait_for_health(base: &str) {
-    let url = format!("{base}/health");
-    let client = reqwest::Client::new();
-    for _ in 0..200 {
-        if client
-            .get(&url)
-            .send()
-            .await
-            .ok()
-            .is_some_and(|res| res.status().is_success())
-        {
-            return;
-        }
-        tokio::time::sleep(Duration::from_millis(25)).await;
-    }
-    panic!("qmdb server did not become ready at {url}");
-}
-
 async fn spawn_qmdb_server(
     client: Arc<TestOrderedClient>,
 ) -> (tokio::task::JoinHandle<()>, String) {
-    let app = Router::new()
-        .route("/health", get(health))
-        .fallback_service(ordered_connect_stack(client));
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind qmdb server");
-    let port = listener.local_addr().expect("local addr").port();
-    let url = format!("http://127.0.0.1:{port}");
-    let handle = tokio::spawn(async move {
-        let _ = axum::serve(listener, app).await;
-    });
-    wait_for_health(&url).await;
-    (handle, url)
+    common::spawn_operation_log_service(ordered_connect_stack(client)).await
 }
 
 fn rpc_client(base: &str) -> KeyLookupServiceClient<PreferZstdHttpClient> {
@@ -324,25 +288,14 @@ impl OrderedKeyRangeService for StaticQmdbService {
 }
 
 async fn spawn_static_server(service: StaticQmdbService) -> (tokio::task::JoinHandle<()>, String) {
-    let app = Router::new()
-        .route("/health", get(health))
-        .fallback_service(
-            ConnectRpcService::new(Chain(
-                KeyLookupServiceServer::new(service.clone()),
-                OrderedKeyRangeServiceServer::new(service),
-            ))
-            .with_compression(exoware_sdk::connect_compression_registry()),
-        );
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind static qmdb server");
-    let port = listener.local_addr().expect("local addr").port();
-    let url = format!("http://127.0.0.1:{port}");
-    let handle = tokio::spawn(async move {
-        let _ = axum::serve(listener, app).await;
-    });
-    wait_for_health(&url).await;
-    (handle, url)
+    common::spawn_operation_log_service(
+        ConnectRpcService::new(Chain(
+            KeyLookupServiceServer::new(service.clone()),
+            OrderedKeyRangeServiceServer::new(service),
+        ))
+        .with_compression(exoware_sdk::connect_compression_registry()),
+    )
+    .await
 }
 
 fn tamper_get_response(mut response: ProtoGetResponse) -> ProtoGetResponse {
@@ -733,7 +686,7 @@ async fn ordered_connect_client_rejects_empty_unbounded_get_range_before_next_ke
         )
         .await
         .expect_err("bounded empty proof must not verify an unbounded range");
-    assert!(err.to_string().contains("in-range successor"), "{err}");
+    assert!(matches!(err, QmdbError::RangeMismatch(_)), "{err}");
 }
 
 #[tokio::test]
@@ -987,5 +940,5 @@ async fn ordered_connect_client_rejects_get_range_page_shorter_than_limit() {
         )
         .await
         .expect_err("a page shorter than the requested limit must not claim a continuation");
-    assert!(err.to_string().contains("continuation"), "{err}");
+    assert!(matches!(err, QmdbError::RangeMismatch(_)), "{err}");
 }

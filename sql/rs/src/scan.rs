@@ -123,12 +123,7 @@ impl KvScanExec {
         }
     }
 
-    fn with_ordering(&self, ordering: ScanOrdering) -> Self {
-        self.with_scan_options(self.fetch, Some(ordering))
-    }
-
     pub(crate) fn scan_direction(&self) -> ScanDirection {
-        // Forward is an execution default, not an ordering guarantee.
         self.ordering
             .as_ref()
             .map_or(ScanDirection::Forward, |ordering| ordering.direction)
@@ -136,9 +131,9 @@ impl KvScanExec {
 
     fn order_direction_for_primary_key(
         &self,
-        order: &[PhysicalSortExpr],
+        order: &LexOrdering,
     ) -> DataFusionResult<Option<ScanDirection>> {
-        if order.is_empty() || self.predicate.contradiction {
+        if self.predicate.contradiction {
             return Ok(None);
         }
         if self
@@ -234,20 +229,20 @@ impl KvScanExec {
 
 impl DisplayAs for KvScanExec {
     fn fmt_as(&self, _t: DisplayFormatType, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let direction = self.ordering.as_ref().map(|ordering| ordering.direction);
         match self.plan_diagnostics() {
             Ok(diag) => write!(
                 f,
-                "KvScanExec: limit={:?}, direction={:?}, {}, query_stats={}",
+                "KvScanExec: fetch={:?}, direction={:?}, {}, query_stats={}",
                 self.fetch,
-                self.scan_direction(),
+                direction,
                 format_access_path_diagnostics(&diag),
                 format_query_stats_explain(QueryStatsExplainSurface::StreamedRangeDetail)
             ),
             Err(err) => write!(
                 f,
-                "KvScanExec: limit={:?}, direction={:?}, diagnostics_error={err}",
-                self.fetch,
-                self.scan_direction()
+                "KvScanExec: fetch={:?}, direction={:?}, diagnostics_error={err}",
+                self.fetch, direction
             ),
         }
     }
@@ -364,7 +359,7 @@ impl ExecutionPlan for KvScanExec {
         let Some(direction) = self.order_direction_for_primary_key(&expressions)? else {
             return Ok(SortOrderPushdownResult::Unsupported);
         };
-        // Do not reverse the order of a fetch.
+        // Reversing under a fetch would change which rows the limit selects.
         if self.fetch.is_some()
             && self
                 .ordering
@@ -373,12 +368,14 @@ impl ExecutionPlan for KvScanExec {
         {
             return Ok(SortOrderPushdownResult::Unsupported);
         }
-        let ordering = ScanOrdering {
-            expressions,
-            direction,
-        };
         Ok(SortOrderPushdownResult::Exact {
-            inner: Arc::new(self.with_ordering(ordering)),
+            inner: Arc::new(self.with_scan_options(
+                self.fetch,
+                Some(ScanOrdering {
+                    expressions,
+                    direction,
+                }),
+            )),
         })
     }
 }

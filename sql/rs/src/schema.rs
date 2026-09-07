@@ -128,7 +128,8 @@ impl KvSchema {
     }
 
     pub fn register_all(self, ctx: &SessionContext) -> DataFusionResult<()> {
-        register_kv_optimizers(ctx);
+        let _ = ctx.remove_optimizer_rule("kv_aggregate_pushdown");
+        ctx.add_optimizer_rule(Arc::new(KvAggregatePushdownRule::new()));
         for (name, config) in &self.tables {
             register_kv_table(ctx, name, self.client.clone(), config.clone())?;
         }
@@ -388,11 +389,6 @@ impl KvSchema {
         send_backfill_event(progress_tx, IndexBackfillEvent::Completed { report });
         Ok(report)
     }
-}
-
-fn register_kv_optimizers(ctx: &SessionContext) {
-    let _ = ctx.remove_optimizer_rule("kv_aggregate_pushdown");
-    ctx.add_optimizer_rule(Arc::new(KvAggregatePushdownRule::new()));
 }
 
 pub(crate) fn send_backfill_event(

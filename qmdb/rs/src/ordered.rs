@@ -38,6 +38,7 @@ use crate::proof::{
     RawMultiProof, VariantRoot, VerifiedCurrentRange, VerifiedKeyValue, VerifiedMultiOperations,
     VerifiedOperationRange, VerifiedVariantRange,
 };
+use crate::request::span_contains;
 use crate::storage::{KvCurrentStorage, KvMerkleStorage, ProofBitmap};
 use crate::{QmdbVariant, VersionedValue, WriterState};
 
@@ -853,14 +854,6 @@ where
         Ok(active)
     }
 
-    fn span_contains_requested(span_start: &K, span_end: &K, requested_key: &K) -> bool {
-        if span_start >= span_end {
-            requested_key >= span_start || requested_key < span_end
-        } else {
-            requested_key >= span_start && requested_key < span_end
-        }
-    }
-
     async fn key_exclusion_proof_in_session(
         &self,
         session: &SerializableReadSession,
@@ -905,7 +898,7 @@ where
                         "cannot build exclusion proof for active key".to_string(),
                     ));
                 }
-                if Self::span_contains_requested(&update.key, &update.next_key, key) {
+                if span_contains(&update.key, &update.next_key, key) {
                     span = Some((active.location, update.clone()));
                     break;
                 }
@@ -1050,33 +1043,10 @@ where
             Bytes::new()
         };
 
-        let end_proof = if !has_more {
-            if let Some(end_key) = end_key {
-                match self
-                    .key_value_proof_raw_in_session(&session, watermark, end_key.as_ref())
-                    .await
-                {
-                    Ok(_) => None,
-                    Err(QmdbError::ProofKeyNotFound { .. } | QmdbError::KeyNotActive { .. }) => {
-                        Some(
-                            self.key_exclusion_proof_in_session(&session, watermark, &end_key)
-                                .await?,
-                        )
-                    }
-                    Err(err) => return Err(err),
-                }
-            } else {
-                None
-            }
-        } else {
-            None
-        };
-
         Ok(RawKeyRangeProof {
             watermark,
             entries,
             start_proof,
-            end_proof,
             has_more,
             next_start_key,
         })

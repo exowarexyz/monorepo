@@ -86,6 +86,7 @@ fn qmdb_error_to_connect(err: QmdbError) -> ConnectError {
         QmdbError::SyncFetchCancelled => ConnectError::canceled(err.to_string()),
         QmdbError::Stream(_) => ConnectError::unavailable(err.to_string()),
         QmdbError::ProofVerification { .. }
+        | QmdbError::RangeMismatch(_)
         | QmdbError::CorruptData(_)
         | QmdbError::CommonwareMerkle(_)
         | QmdbError::WriterPoisoned(_) => ConnectError::internal(err.to_string()),

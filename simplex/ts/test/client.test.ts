@@ -77,7 +77,7 @@ test('stages block and finalization rows into one StoreWriteBatch', () => {
   assert.equal(batch.length, 4);
   assert.deepEqual(
     batch.entries().map((entry) => bytesToHex(entry.key)),
-    ['0010d0', '0011d0', '003200000000000000000000000000000007', '0031000000000000000b'],
+    ['0010d0', '0011d0', '003000000000000000000000000000000007', '0031000000000000000b'],
   );
   assert.deepEqual(decodeSimplexBlockData(batch.entries()[1].value), {
     header: new Uint8Array([0xb0]),
@@ -280,8 +280,8 @@ test('Simplex WASM verifier adapter is scheme-parameterized', async () => {
       verify_finalized_payload: (payload, identity, scheme, namespace, material, bytes) => ({
         scheme,
         epoch: 0n,
-        view: '12',
-        parent: 11,
+        view: 12n,
+        parent: 11n,
         payload: payload === 'sha256' ? Array.from(namespace) : [],
         certificate: Array.from(material),
         header: Array.from(bytes),
@@ -600,8 +600,8 @@ test('streams and verifies certificate entries', async () => {
 
   assert.deepEqual(capturedFilters, {
     selectors: [
-      { prefix: new Uint8Array([0x00, 0x21]), payloadRegex: '(?s-u).*' },
-      { prefix: new Uint8Array([0x00, 0x32]), payloadRegex: '(?s-u).*' },
+      { prefix: new Uint8Array([0x00, 0x20]), payloadRegex: '(?s-u).*' },
+      { prefix: new Uint8Array([0x00, 0x30]), payloadRegex: '(?s-u).*' },
       { prefix: new Uint8Array([0x00, 0x31]), payloadRegex: '(?s-u).*' },
     ],
     sinceSequenceNumber: 10n,
@@ -678,5 +678,49 @@ test('built-in certificate verification binds epoch and view to the request', as
   assert.equal(await verifier.verifyNotarization(new Uint8Array(), { ...context, view: 8n }), null);
   assert.equal(await verifier.verifyNotarization(new Uint8Array(), { ...context, epoch: 3n }), null);
   assert.notDeepEqual(notarizationByRoundKey(2, 7), notarizationByRoundKey(3, 7));
-  assert.equal(bytesToHex(finalizationByRoundKey(0x100000000n, 7)), '003200000001000000000000000000000007');
+  assert.equal(bytesToHex(finalizationByRoundKey(0x100000000n, 7)), '003000000001000000000000000000000007');
+
+  // The bundled WASM emits u64 fields as BigInt; nothing else is accepted
+  const numeric = createSimplexVerifier({ verify_notarized_payload: () => ({ ...certificate, epoch: 2 }), verify_finalized_payload: () => certificate },
+    { scheme: 'ed25519', payload: 'sha256', identity: 'ed25519', namespace: '', verificationMaterial: '' });
+  await assert.rejects(async () => numeric.verifyNotarization(new Uint8Array(), context), /invalid epoch/);
+});
+
+test('latest finalization passes the indexed height to the verifier', async () => {
+  const store = new Client('http://127.0.0.1:1').store();
+  store.query = async () => ({
+    results: [{ key: finalizedByHeightKey(11), value: new Uint8Array([0xb0]) }],
+  });
+  const verifier: SimplexCertificateVerifier<unknown, { height: bigint }> = {
+    verifyNotarization: () => null,
+    verifyFinalization: (bytes, context) => {
+      assert.equal(bytes[0], 0xb0);
+      assert.equal(context.kind, 'finalization');
+      assert.equal(context.index, 'latest');
+      return context.index === 'latest' ? { height: context.height } : null;
+    },
+  };
+  const simplex = new SimplexClient(store, { verifier });
+  assert.deepEqual(await simplex.latestFinalization(), { height: 11n });
+  assert.deepEqual(await simplex.latestFinalizationRaw(), new Uint8Array([0xb0]));
+});
+
+test('certificate streams reject round keys of the wrong width', async () => {
+  const store = new Client('http://127.0.0.1:1').store();
+  store.subscribe = async function* () {
+    yield {
+      sequenceNumber: 1n,
+      entries: [{ key: notarizationByRoundKey(0, 7).slice(0, 17), value: new Uint8Array([0x70]) }],
+    };
+  };
+  const verifier: SimplexCertificateVerifier = {
+    verifyNotarization: () => null,
+    verifyFinalization: () => null,
+  };
+  const simplex = new SimplexClient(store, { verifier });
+  await assert.rejects(async () => {
+    for await (const batch of simplex.subscribeCertificates()) {
+      assert.fail(`decoded a malformed key: ${batch.entries.length}`);
+    }
+  }, /invalid simplex round key length/);
 });

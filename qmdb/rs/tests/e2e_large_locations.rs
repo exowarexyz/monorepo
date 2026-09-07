@@ -7,7 +7,7 @@ use std::sync::Arc;
 use buffa::Message as _;
 use bytes::Bytes;
 use commonware_codec::Encode;
-use commonware_cryptography::Sha256;
+use commonware_cryptography::{sha256::Digest, Sha256};
 use commonware_storage::merkle::{
     hasher::Hasher as _, mem::Mem, mmb, mmr, Graftable, Location, Position,
 };
@@ -21,8 +21,6 @@ use exoware_qmdb::{
     OperationLogSyncResolver, WriterState,
 };
 use exoware_sdk::{PrefixedStoreClient, StoreBatchUpload, StoreWriteBatch};
-
-type Digest = commonware_cryptography::sha256::Digest;
 
 async fn check_large_frontier<F: Graftable + PartialEq>(family: &str, start: u64) {
     let store = common::local_store_client().await;
@@ -86,13 +84,14 @@ async fn check_large_frontier<F: Graftable + PartialEq>(family: &str, start: u64
     assert_eq!(state.ops_size, reference_batch.size());
     let (server, url) =
         common::spawn_operation_log_service(keyless_operation_log_connect_stack(reader)).await;
+    let request = GetOperationRangeRequest {
+        tip: (end - 1).as_u64(),
+        start_location: start.as_u64(),
+        max_locations: 10,
+        ..Default::default()
+    };
     let raw = common::operation_log_rpc_client(&url)
-        .get_operation_range(GetOperationRangeRequest {
-            tip: (end - 1).as_u64(),
-            start_location: start.as_u64(),
-            max_locations: 10,
-            ..Default::default()
-        })
+        .get_operation_range(request.clone())
         .await
         .unwrap()
         .into_view()
@@ -112,20 +111,9 @@ async fn check_large_frontier<F: Graftable + PartialEq>(family: &str, start: u64
         std::fs::write(&fixture_path, &fixture).unwrap();
     }
     assert_eq!(std::fs::read_to_string(fixture_path).unwrap(), fixture);
-    let rpc = OperationLogClient::<_, F, Sha256, Operation<F, Vec<u8>>>::plaintext(
-        &url,
-        ((0..=10000).into(), ()),
-    );
+    let rpc = OperationLogClient::<_, F, Sha256, Operation<F, Vec<u8>>>::plaintext(&url, config);
     let verified = rpc
-        .get_operation_range(
-            GetOperationRangeRequest {
-                tip: (end - 1).as_u64(),
-                start_location: start.as_u64(),
-                max_locations: 10,
-                ..Default::default()
-            },
-            &expected_root,
-        )
+        .get_operation_range(request, &expected_root)
         .await
         .unwrap();
     assert_eq!(verified.start_location, start);
@@ -138,10 +126,8 @@ async fn check_large_frontier<F: Graftable + PartialEq>(family: &str, start: u64
             .map(|(index, operation)| (start + index as u64, operation))
             .collect::<Vec<_>>()
     );
-    let resolver = OperationLogSyncResolver::<_, F, Sha256, Operation<F, Vec<u8>>>::plaintext(
-        &url,
-        ((0..=10000).into(), ()),
-    );
+    let resolver =
+        OperationLogSyncResolver::<_, F, Sha256, Operation<F, Vec<u8>>>::plaintext(&url, config);
     let target = resolver
         .target_range(start, end, &expected_root)
         .await

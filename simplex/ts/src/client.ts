@@ -15,9 +15,9 @@ export const FORMAT_VERSION = 0;
 export enum SimplexRecordKind {
   HeaderByDigest = 0x10,
   BlockByDigest = 0x11,
-  NotarizationByRound = 0x21,
+  NotarizationByRound = 0x20,
+  FinalizationByRound = 0x30,
   FinalizedByHeight = 0x31,
-  FinalizationByRound = 0x32,
 }
 
 export interface PreparedSimplexEntry {
@@ -601,16 +601,10 @@ function schemeFromUnknown(value: unknown): SimplexScheme {
 }
 
 function u64FromUnknown(value: unknown, field: string): bigint {
-  if (typeof value === 'bigint') {
-    return normalizeU64(value);
+  if (typeof value !== 'bigint' || value < 0n || value > 0xffff_ffff_ffff_ffffn) {
+    throw new Error(`simplex verifier returned invalid ${field}`);
   }
-  if (typeof value === 'number' && Number.isSafeInteger(value) && value >= 0) {
-    return BigInt(value);
-  }
-  if (typeof value === 'string' && /^[0-9]+$/.test(value)) {
-    return normalizeU64(value);
-  }
-  throw new Error(`simplex verifier returned invalid ${field}`);
+  return value;
 }
 
 function bytesFromUnknown(value: unknown, field: string): Uint8Array {
@@ -636,10 +630,6 @@ function emptySummary(): SimplexUploadSummary {
   };
 }
 
-function prepared(entries: PreparedSimplexEntry[], summary: SimplexUploadSummary): PreparedSimplexUpload {
-  return { entries, summary };
-}
-
 function mergePrepared(items: PreparedSimplexUpload[]): PreparedSimplexUpload {
   const summary = emptySummary();
   const entries: PreparedSimplexEntry[] = [];
@@ -660,6 +650,13 @@ function u64At(bytes: Uint8Array, offset: number): bigint {
     value = (value << 8n) | BigInt(bytes[i]);
   }
   return value;
+}
+
+function roundFromKey(key: Uint8Array): { epoch: bigint; view: bigint } {
+  if (key.length !== 18) {
+    throw new Error(`invalid simplex round key length ${key.length}`);
+  }
+  return { epoch: u64At(key, 2), view: u64At(key, 10) };
 }
 
 function u64FromKey(key: Uint8Array): bigint {
@@ -707,24 +704,20 @@ function decodeRawStreamEntry(key: Uint8Array, value: Uint8Array): RawSimplexStr
       };
     }
     case SimplexRecordKind.NotarizationByRound:
-      if (key.length !== 18) throw new Error('invalid notarization round key');
       return {
         type: 'notarization',
         kind,
         key,
-        epoch: u64At(key, 2),
-        view: u64At(key, 10),
+        ...roundFromKey(key),
         notarized: value,
       };
     case SimplexRecordKind.FinalizationByRound:
-      if (key.length !== 18) throw new Error('invalid finalization round key');
       return {
         type: 'finalization',
         kind,
         index: 'round',
         key,
-        epoch: u64At(key, 2),
-        view: u64At(key, 10),
+        ...roundFromKey(key),
         finalized: value,
       };
     case SimplexRecordKind.FinalizedByHeight:
@@ -764,22 +757,22 @@ export class SimplexClient<TNotarization = unknown, TFinalization = unknown> {
 
   prepareHeader(input: HeaderUpload): PreparedSimplexUpload {
     const header = toSimplexBytes(input.header);
-    return prepared(
-      [
+    return {
+      entries: [
         {
           key: headerByDigestKey(input.digest),
           value: header,
         },
       ],
-      { ...emptySummary(), headers: 1 },
-    );
+      summary: { ...emptySummary(), headers: 1 },
+    };
   }
 
   prepareBlock(input: BlockUpload): PreparedSimplexUpload {
     const header = toSimplexBytes(input.header);
     const body = input.body === undefined ? new Uint8Array() : toSimplexBytes(input.body);
-    return prepared(
-      [
+    return {
+      entries: [
         {
           key: headerByDigestKey(input.digest),
           value: header,
@@ -789,8 +782,8 @@ export class SimplexClient<TNotarization = unknown, TFinalization = unknown> {
           value: encodeSimplexBlockData(header, body),
         },
       ],
-      { ...emptySummary(), headers: 1, blocks: 1 },
-    );
+      summary: { ...emptySummary(), headers: 1, blocks: 1 },
+    };
   }
 
   prepareNotarization(input: NotarizationUpload): PreparedSimplexUpload {
@@ -811,17 +804,15 @@ export class SimplexClient<TNotarization = unknown, TFinalization = unknown> {
         }),
       );
     }
-    entries.push(
-      prepared(
-        [
-          {
-            key: notarizationByRoundKey(input.epoch, input.view),
-            value: toSimplexBytes(input.notarized),
-          },
-        ],
-        { ...emptySummary(), notarizations: 1 },
-      ),
-    );
+    entries.push({
+      entries: [
+        {
+          key: notarizationByRoundKey(input.epoch, input.view),
+          value: toSimplexBytes(input.notarized),
+        },
+      ],
+      summary: { ...emptySummary(), notarizations: 1 },
+    });
     return mergePrepared(entries);
   }
 
@@ -844,21 +835,19 @@ export class SimplexClient<TNotarization = unknown, TFinalization = unknown> {
       );
     }
     const finalized = toSimplexBytes(input.finalized);
-    entries.push(
-      prepared(
-        [
-          {
-            key: finalizationByRoundKey(input.epoch, input.view),
-            value: copyBytes(finalized),
-          },
-          {
-            key: finalizedByHeightKey(input.height),
-            value: finalized,
-          },
-        ],
-        { ...emptySummary(), finalizations: 1, finalizedHeightIndexes: 1 },
-      ),
-    );
+    entries.push({
+      entries: [
+        {
+          key: finalizationByRoundKey(input.epoch, input.view),
+          value: copyBytes(finalized),
+        },
+        {
+          key: finalizedByHeightKey(input.height),
+          value: finalized,
+        },
+      ],
+      summary: { ...emptySummary(), finalizations: 1, finalizedHeightIndexes: 1 },
+    });
     return mergePrepared(entries);
   }
 

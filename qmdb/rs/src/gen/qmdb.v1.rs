@@ -2440,7 +2440,7 @@ pub const __GET_RANGE_REQUEST_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = :
 /// Ordered current key-range proof response. Key fields are codec-encoded
 /// logical QMDB keys (`K::encode()` bytes). `start_proof`, when present,
 /// authenticates the boundary before the first returned key (or the entire empty
-/// range). `end_proof`, when present, authenticates the exclusive end boundary.
+/// range). The last entry's authenticated successor closes the range.
 #[derive(Clone, PartialEq, Default)]
 #[derive(::serde::Serialize, ::serde::Deserialize)]
 #[serde(default)]
@@ -2462,17 +2462,7 @@ pub struct GetRangeResponse {
         CurrentKeyExclusionProof,
         ::buffa::Inline<CurrentKeyExclusionProof>,
     >,
-    /// Field 3: `end_proof`
-    #[serde(
-        rename = "endProof",
-        alias = "end_proof",
-        skip_serializing_if = "::buffa::json_helpers::skip_if::is_unset_message_field"
-    )]
-    pub end_proof: ::buffa::MessageField<
-        CurrentKeyExclusionProof,
-        ::buffa::Inline<CurrentKeyExclusionProof>,
-    >,
-    /// Field 4: `has_more`
+    /// Field 3: `has_more`
     #[serde(
         rename = "hasMore",
         alias = "has_more",
@@ -2480,7 +2470,7 @@ pub struct GetRangeResponse {
         skip_serializing_if = "::buffa::json_helpers::skip_if::is_false"
     )]
     pub has_more: bool,
-    /// Field 5: `next_start_key`
+    /// Field 4: `next_start_key`
     #[serde(
         rename = "nextStartKey",
         alias = "next_start_key",
@@ -2497,7 +2487,6 @@ impl ::core::fmt::Debug for GetRangeResponse {
         f.debug_struct("GetRangeResponse")
             .field("entries", &self.entries)
             .field("start_proof", &self.start_proof)
-            .field("end_proof", &self.end_proof)
             .field("has_more", &self.has_more)
             .field("next_start_key", &self.next_start_key)
             .finish()
@@ -2546,14 +2535,6 @@ impl ::buffa::Message for GetRangeResponse {
                 += 1u64 + ::buffa::encoding::varint_len(inner_size as u64) as u64
                     + inner_size as u64;
         }
-        if self.end_proof.is_set() {
-            let __slot = __cache.reserve();
-            let inner_size = self.end_proof.compute_size(__cache);
-            __cache.set(__slot, inner_size);
-            size
-                += 1u64 + ::buffa::encoding::varint_len(inner_size as u64) as u64
-                    + inner_size as u64;
-        }
         if self.has_more {
             size += 1u64 + ::buffa::types::BOOL_ENCODED_LEN as u64;
         }
@@ -2587,19 +2568,11 @@ impl ::buffa::Message for GetRangeResponse {
             );
             self.start_proof.write_to(__cache, buf);
         }
-        if self.end_proof.is_set() {
-            ::buffa::types::put_len_delimited_header(
-                3u32,
-                u64::from(__cache.consume_next()),
-                buf,
-            );
-            self.end_proof.write_to(__cache, buf);
-        }
         if self.has_more {
-            ::buffa::types::put_bool_field(4u32, self.has_more, buf);
+            ::buffa::types::put_bool_field(3u32, self.has_more, buf);
         }
         if !self.next_start_key.is_empty() {
-            ::buffa::types::put_shared_bytes_field(5u32, &self.next_start_key, buf);
+            ::buffa::types::put_shared_bytes_field(4u32, &self.next_start_key, buf);
         }
         self.__buffa_unknown_fields.write_to(buf);
     }
@@ -2640,22 +2613,11 @@ impl ::buffa::Message for GetRangeResponse {
             3u32 => {
                 ::buffa::encoding::check_wire_type(
                     tag,
-                    ::buffa::encoding::WireType::LengthDelimited,
-                )?;
-                ::buffa::Message::merge_length_delimited(
-                    self.end_proof.get_or_insert_default(),
-                    buf,
-                    ctx,
-                )?;
-            }
-            4u32 => {
-                ::buffa::encoding::check_wire_type(
-                    tag,
                     ::buffa::encoding::WireType::Varint,
                 )?;
                 self.has_more = ::buffa::types::decode_bool(buf)?;
             }
-            5u32 => {
+            4u32 => {
                 ::buffa::encoding::check_wire_type(
                     tag,
                     ::buffa::encoding::WireType::LengthDelimited,
@@ -2672,7 +2634,6 @@ impl ::buffa::Message for GetRangeResponse {
     fn clear(&mut self) {
         self.entries.clear();
         self.start_proof = ::buffa::MessageField::none();
-        self.end_proof = ::buffa::MessageField::none();
         self.has_more = false;
         self.next_start_key.clear();
         self.__buffa_unknown_fields.clear();
@@ -8327,7 +8288,7 @@ pub mod __buffa {
         /// Ordered current key-range proof response. Key fields are codec-encoded
         /// logical QMDB keys (`K::encode()` bytes). `start_proof`, when present,
         /// authenticates the boundary before the first returned key (or the entire empty
-        /// range). `end_proof`, when present, authenticates the exclusive end boundary.
+        /// range). The last entry's authenticated successor closes the range.
         #[derive(Clone, Debug, Default)]
         pub struct GetRangeResponseView<'a> {
             /// Field 1: `entries`
@@ -8339,13 +8300,9 @@ pub mod __buffa {
             pub start_proof: ::buffa::MessageFieldView<
                 super::super::__buffa::view::CurrentKeyExclusionProofView<'a>,
             >,
-            /// Field 3: `end_proof`
-            pub end_proof: ::buffa::MessageFieldView<
-                super::super::__buffa::view::CurrentKeyExclusionProofView<'a>,
-            >,
-            /// Field 4: `has_more`
+            /// Field 3: `has_more`
             pub has_more: bool,
-            /// Field 5: `next_start_key`
+            /// Field 4: `next_start_key`
             pub next_start_key: &'a [u8],
             pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
         }
@@ -8409,36 +8366,11 @@ pub mod __buffa {
                     3u32 => {
                         ::buffa::encoding::check_wire_type(
                             tag,
-                            ::buffa::encoding::WireType::LengthDelimited,
-                        )?;
-                        let __sub_ctx = ctx.descend()?;
-                        let sub = ::buffa::types::borrow_bytes(&mut cur)?;
-                        match view.end_proof.as_mut() {
-                            Some(existing) => {
-                                ::buffa::MessageView::merge_into_view(
-                                    existing,
-                                    sub,
-                                    __sub_ctx,
-                                )?
-                            }
-                            None => {
-                                view.end_proof = ::buffa::MessageFieldView::set(
-                                    <super::super::__buffa::view::CurrentKeyExclusionProofView as ::buffa::MessageView>::decode_view_ctx(
-                                        sub,
-                                        __sub_ctx,
-                                    )?,
-                                );
-                            }
-                        }
-                    }
-                    4u32 => {
-                        ::buffa::encoding::check_wire_type(
-                            tag,
                             ::buffa::encoding::WireType::Varint,
                         )?;
                         view.has_more = ::buffa::types::decode_bool(&mut cur)?;
                     }
-                    5u32 => {
+                    4u32 => {
                         ::buffa::encoding::check_wire_type(
                             tag,
                             ::buffa::encoding::WireType::LengthDelimited,
@@ -8508,15 +8440,6 @@ pub mod __buffa {
                         }
                         None => ::buffa::MessageField::none(),
                     },
-                    end_proof: match self.end_proof.as_option() {
-                        Some(v) => {
-                            ::buffa::MessageField::<
-                                super::super::CurrentKeyExclusionProof,
-                                ::buffa::Inline<super::super::CurrentKeyExclusionProof>,
-                            >::some(v.to_owned_from_source(__buffa_src)?)
-                        }
-                        None => ::buffa::MessageField::none(),
-                    },
                     has_more: self.has_more,
                     next_start_key: (self.next_start_key).to_vec(),
                     __buffa_unknown_fields: self
@@ -8544,14 +8467,6 @@ pub mod __buffa {
                 if self.start_proof.is_set() {
                     let __slot = __cache.reserve();
                     let inner_size = self.start_proof.compute_size(__cache);
-                    __cache.set(__slot, inner_size);
-                    size
-                        += 1u64 + ::buffa::encoding::varint_len(inner_size as u64) as u64
-                            + inner_size as u64;
-                }
-                if self.end_proof.is_set() {
-                    let __slot = __cache.reserve();
-                    let inner_size = self.end_proof.compute_size(__cache);
                     __cache.set(__slot, inner_size);
                     size
                         += 1u64 + ::buffa::encoding::varint_len(inner_size as u64) as u64
@@ -8593,20 +8508,12 @@ pub mod __buffa {
                     );
                     self.start_proof.write_to(__cache, buf);
                 }
-                if self.end_proof.is_set() {
-                    ::buffa::types::put_len_delimited_header(
-                        3u32,
-                        u64::from(__cache.consume_next()),
-                        buf,
-                    );
-                    self.end_proof.write_to(__cache, buf);
-                }
                 if self.has_more {
-                    ::buffa::types::put_bool_field(4u32, self.has_more, buf);
+                    ::buffa::types::put_bool_field(3u32, self.has_more, buf);
                 }
                 if !self.next_start_key.is_empty() {
                     ::buffa::types::put_shared_bytes_field(
-                        5u32,
+                        4u32,
                         &self.next_start_key,
                         buf,
                     );
@@ -8641,12 +8548,6 @@ pub mod __buffa {
                         .as_option()
                     {
                         __map.serialize_entry("startProof", __v)?;
-                    }
-                }
-                {
-                    if let ::core::option::Option::Some(__v) = self.end_proof.as_option()
-                    {
-                        __map.serialize_entry("endProof", __v)?;
                     }
                 }
                 if self.has_more {
@@ -8773,21 +8674,12 @@ pub mod __buffa {
             > {
                 &self.0.reborrow().start_proof
             }
-            /// Field 3: `end_proof`
-            #[must_use]
-            pub fn end_proof(
-                &self,
-            ) -> &::buffa::MessageFieldView<
-                super::super::__buffa::view::CurrentKeyExclusionProofView<'_>,
-            > {
-                &self.0.reborrow().end_proof
-            }
-            /// Field 4: `has_more`
+            /// Field 3: `has_more`
             #[must_use]
             pub fn has_more(&self) -> bool {
                 self.0.reborrow().has_more
             }
-            /// Field 5: `next_start_key`
+            /// Field 4: `next_start_key`
             #[must_use]
             pub fn next_start_key(&self) -> &'_ [u8] {
                 self.0.reborrow().next_start_key

@@ -234,10 +234,6 @@ function assertHashFamily(value: HashFamily, label: string): void {
   }
 }
 
-function assertCurrentChunkSize(value: number, label: string): void {
-  assertU32(value, `${label} current chunk size`, true);
-}
-
 function assertU32(value: number, label: string, nonzero = false): void {
   if (!Number.isInteger(value) || value < (nonzero ? 1 : 0) || value > 0xffff_ffff) {
     throw new Error(`${label} must fit in ${nonzero ? 'a positive' : 'an unsigned'} 32-bit integer`);
@@ -426,7 +422,7 @@ export class OrderedQmdbClient {
     } = options;
     assertMerkleFamily(merkleFamily, 'qmdb client');
     assertHashFamily(hashFamily, 'qmdb client');
-    assertCurrentChunkSize(currentChunkSize, 'qmdb client');
+    assertU32(currentChunkSize, 'qmdb client current chunk size', true);
     this.merkleFamily = merkleFamily;
     this.hashFamily = hashFamily;
     this.currentChunkSize = currentChunkSize;
