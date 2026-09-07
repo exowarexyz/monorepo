@@ -27,7 +27,7 @@ use crate::core::HistoricalOpsClientCore;
 use crate::error::{error_key, QmdbError};
 use crate::proof::{
     CurrentOperationRangeProofResult, OperationRangeCheckpoint, RawBatchMultiProof,
-    RawUnorderedKeyValueProof, VerifiedOperationRange, VerifiedUnorderedKeyValue,
+    RawKeyValueProof, VerifiedKeyValue, VerifiedOperationRange,
 };
 use crate::storage::{KvCurrentStorage, KvMerkleStorage, ProofBitmap};
 use crate::{VersionedValue, WriterState};
@@ -404,7 +404,7 @@ where
         session: &SerializableReadSession,
         watermark: Location<F>,
         key: Q,
-    ) -> Result<RawUnorderedKeyValueProof<H::Digest, K, V, N, F, E>, QmdbError>
+    ) -> Result<RawKeyValueProof<H::Digest, unordered::Operation<F, K, E>, N, F>, QmdbError>
     where
         K: commonware_utils::Array,
     {
@@ -451,7 +451,7 @@ where
             .build_current_operation_proof::<N>(session, watermark, location)
             .await?;
 
-        let raw = RawUnorderedKeyValueProof {
+        let raw = RawKeyValueProof {
             watermark,
             root,
             proof,
@@ -470,7 +470,7 @@ where
         &self,
         watermark: Location<F>,
         key: Q,
-    ) -> Result<RawUnorderedKeyValueProof<H::Digest, K, V, N, F, E>, QmdbError>
+    ) -> Result<RawKeyValueProof<H::Digest, unordered::Operation<F, K, E>, N, F>, QmdbError>
     where
         K: commonware_utils::Array,
     {
@@ -484,12 +484,12 @@ where
         &self,
         watermark: Location<F>,
         key: Q,
-    ) -> Result<VerifiedUnorderedKeyValue<H::Digest, K, V, F, E>, QmdbError>
+    ) -> Result<VerifiedKeyValue<H::Digest, unordered::Operation<F, K, E>, F>, QmdbError>
     where
         K: commonware_utils::Array,
     {
         let raw = self.key_value_proof_raw_at::<N, _>(watermark, key).await?;
-        Ok(VerifiedUnorderedKeyValue {
+        Ok(VerifiedKeyValue {
             root: raw.root,
             location: raw.proof.loc,
             operation: raw.operation,
@@ -504,7 +504,7 @@ where
         &self,
         watermark: Location<F>,
         keys: &[Q],
-    ) -> Result<Vec<RawUnorderedKeyValueProof<H::Digest, K, V, N, F, E>>, QmdbError>
+    ) -> Result<Vec<RawKeyValueProof<H::Digest, unordered::Operation<F, K, E>, N, F>>, QmdbError>
     where
         K: commonware_utils::Array,
     {

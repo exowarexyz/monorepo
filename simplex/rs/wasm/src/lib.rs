@@ -47,7 +47,6 @@ impl Digestible for CommitmentBlock {
 
 #[derive(Serialize)]
 struct VerifiedCertificate {
-    scheme: String,
     epoch: u64,
     view: u64,
     parent: u64,
@@ -93,11 +92,7 @@ where
     V::Public::decode(bytes)
 }
 
-fn verify_notarized<S, D>(
-    scheme_name: &str,
-    scheme: S,
-    bytes: &[u8],
-) -> Result<VerifiedCertificate, String>
+fn verify_notarized<S, D>(scheme: S, bytes: &[u8]) -> Result<VerifiedCertificate, String>
 where
     S: commonware_consensus::simplex::scheme::Scheme<D>,
     D: Digest,
@@ -111,7 +106,6 @@ where
     }
     let header = read_header(reader, "notarized artifact")?;
     Ok(VerifiedCertificate {
-        scheme: scheme_name.to_string(),
         epoch: proof.round().epoch().get(),
         view: proof.view().get(),
         parent: proof.proposal.parent.get(),
@@ -121,11 +115,7 @@ where
     })
 }
 
-fn verify_finalized<S, D>(
-    scheme_name: &str,
-    scheme: S,
-    bytes: &[u8],
-) -> Result<VerifiedCertificate, String>
+fn verify_finalized<S, D>(scheme: S, bytes: &[u8]) -> Result<VerifiedCertificate, String>
 where
     S: commonware_consensus::simplex::scheme::Scheme<D>,
     D: Digest,
@@ -139,7 +129,6 @@ where
     }
     let header = read_header(reader, "finalized artifact")?;
     Ok(VerifiedCertificate {
-        scheme: scheme_name.to_string(),
         epoch: proof.round().epoch().get(),
         view: proof.view().get(),
         parent: proof.proposal.parent.get(),
@@ -157,7 +146,6 @@ enum ArtifactKind {
 
 fn verify_artifact<S, D>(
     artifact: ArtifactKind,
-    scheme_name: &str,
     scheme: S,
     bytes: &[u8],
 ) -> Result<VerifiedCertificate, String>
@@ -167,8 +155,8 @@ where
     <S::Certificate as Read>::Cfg: Clone,
 {
     match artifact {
-        ArtifactKind::Notarized => verify_notarized(scheme_name, scheme, bytes),
-        ArtifactKind::Finalized => verify_finalized(scheme_name, scheme, bytes),
+        ArtifactKind::Notarized => verify_notarized(scheme, bytes),
+        ArtifactKind::Finalized => verify_finalized(scheme, bytes),
     }
 }
 
@@ -189,7 +177,6 @@ where
                 .map_err(|err| format!("failed to decode secp256r1 participants: {err}"))?;
             verify_artifact::<_, D>(
                 artifact,
-                scheme_name,
                 simplex_secp256r1::Scheme::<P>::verifier(namespace, participants),
                 bytes,
             )
@@ -200,7 +187,6 @@ where
                     .map_err(|err| format!("failed to decode multisig participants: {err}"))?;
             verify_artifact::<_, D>(
                 artifact,
-                scheme_name,
                 bls12381_multisig::Scheme::<P, MinPk>::verifier(namespace, participants),
                 bytes,
             )
@@ -211,7 +197,6 @@ where
                     .map_err(|err| format!("failed to decode multisig participants: {err}"))?;
             verify_artifact::<_, D>(
                 artifact,
-                scheme_name,
                 bls12381_multisig::Scheme::<P, MinSig>::verifier(namespace, participants),
                 bytes,
             )
@@ -221,7 +206,6 @@ where
                 .map_err(|err| format!("failed to decode threshold identity: {err}"))?;
             verify_artifact::<_, D>(
                 artifact,
-                scheme_name,
                 threshold_standard::Scheme::<P, MinPk>::certificate_verifier(namespace, identity),
                 bytes,
             )
@@ -231,7 +215,6 @@ where
                 .map_err(|err| format!("failed to decode threshold identity: {err}"))?;
             verify_artifact::<_, D>(
                 artifact,
-                scheme_name,
                 threshold_standard::Scheme::<P, MinSig>::certificate_verifier(namespace, identity),
                 bytes,
             )
@@ -241,7 +224,6 @@ where
                 .map_err(|err| format!("failed to decode threshold VRF identity: {err}"))?;
             verify_artifact::<_, D>(
                 artifact,
-                scheme_name,
                 threshold_vrf::Scheme::<P, MinPk>::certificate_verifier(namespace, identity),
                 bytes,
             )
@@ -251,7 +233,6 @@ where
                 .map_err(|err| format!("failed to decode threshold VRF identity: {err}"))?;
             verify_artifact::<_, D>(
                 artifact,
-                scheme_name,
                 threshold_vrf::Scheme::<P, MinSig>::certificate_verifier(namespace, identity),
                 bytes,
             )
@@ -277,7 +258,6 @@ fn verify_for_scheme<D: Digest>(
             .map_err(|err| format!("failed to decode ed25519 participants: {err}"))?;
         return verify_artifact::<_, D>(
             artifact,
-            scheme_name,
             simplex_ed25519::Scheme::verifier(namespace, participants),
             bytes,
         );
@@ -502,7 +482,6 @@ mod tests {
         )
         .expect("verify notarization");
 
-        assert_eq!(verified.scheme, scheme_name);
         assert_eq!(verified.view, 2);
         assert_eq!(verified.parent, 1);
         assert_eq!(verified.payload, notarized_payload.as_ref());
@@ -532,7 +511,6 @@ mod tests {
         )
         .expect("verify finalization");
 
-        assert_eq!(verified.scheme, scheme_name);
         assert_eq!(verified.view, 2);
         assert_eq!(verified.parent, 1);
         assert_eq!(verified.payload, finalized_payload.as_ref());

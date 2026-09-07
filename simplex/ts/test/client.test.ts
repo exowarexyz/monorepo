@@ -249,8 +249,7 @@ test('Simplex WASM verifier adapter is scheme-parameterized', async () => {
   const headerVerifications: string[] = [];
   const verifier = createSimplexVerifier(
     {
-      verify_notarized_payload: (payload, identity, scheme, namespace, material, bytes) => ({
-        scheme,
+      verify_notarized_payload: (payload, identity, _scheme, namespace, material, bytes) => ({
         epoch: 0n,
         view: 11n,
         parent: 10n,
@@ -258,8 +257,7 @@ test('Simplex WASM verifier adapter is scheme-parameterized', async () => {
         certificate: material,
         header: bytes,
       }),
-      verify_finalized_payload: (payload, identity, scheme, namespace, material, bytes) => ({
-        scheme,
+      verify_finalized_payload: (payload, identity, _scheme, namespace, material, bytes) => ({
         epoch: 0n,
         view: 12n,
         parent: 11n,

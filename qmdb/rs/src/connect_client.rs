@@ -26,8 +26,7 @@ use commonware_storage::{
         },
         current::ordered::ExclusionProof,
         current::proof::{OperationProof, OpsRootWitness, RangeProof},
-        current::unordered::db::KeyValueProof as UnorderedKeyValueProof,
-        operation::Key as QmdbKey,
+        operation::{Key as QmdbKey, Operation},
         sync::{
             FeedbackTx, Request as SyncRequest, Response as SyncResponse, Source,
             Target as SyncTarget,
@@ -45,7 +44,6 @@ use http_body::Body;
 use crate::codec::decode_digest;
 use crate::proof::{
     verify_ordered_exclusion_proof, VerifiedKeyLookup, VerifiedKeyRange, VerifiedKeyValue,
-    VerifiedUnorderedKeyValue,
 };
 use crate::QmdbError;
 
@@ -165,7 +163,7 @@ where
         &self,
         request: GetRequest,
         expected_root: &H::Digest,
-    ) -> Result<VerifiedKeyValue<H::Digest, K, V, F, E>, QmdbError> {
+    ) -> Result<VerifiedKeyValue<H::Digest, ordered::Operation<F, K, E>, F>, QmdbError> {
         let requested_key = request.key.clone();
         let decoded_requested_key = K::decode_cfg(requested_key.as_slice(), self.key_cfg.as_ref())
             .map_err(|err| {
@@ -182,7 +180,7 @@ where
             .proof
             .as_option()
             .ok_or_else(|| QmdbError::CorruptData("qmdb get response missing proof".to_string()))?;
-        let verified = verify_key_value_from_proto::<F, H, K, V, N, E>(
+        let verified = verify_key_value_from_proto::<F, H, ordered::Operation<F, K, E>, N>(
             proof,
             expected_root,
             self.op_cfg.as_ref(),
@@ -243,11 +241,12 @@ where
                 })?;
                 match result.result.as_ref() {
                     Some(current_key_lookup_result::Result::Hit(proof)) => {
-                        let verified = verify_key_value_from_proto::<F, H, K, V, N, E>(
-                            proof,
-                            expected_root,
-                            self.op_cfg.as_ref(),
-                        )?;
+                        let verified =
+                            verify_key_value_from_proto::<F, H, ordered::Operation<F, K, E>, N>(
+                                proof,
+                                expected_root,
+                                self.op_cfg.as_ref(),
+                            )?;
                         let ordered::Operation::Update(update) = &verified.operation else {
                             return Err(QmdbError::CorruptData(
                                 "qmdb get_many hit proof did not verify an update".to_string(),
@@ -382,7 +381,7 @@ where
         &self,
         request: GetRequest,
         expected_root: &H::Digest,
-    ) -> Result<VerifiedUnorderedKeyValue<H::Digest, K, V, F, E>, QmdbError> {
+    ) -> Result<VerifiedKeyValue<H::Digest, unordered::Operation<F, K, E>, F>, QmdbError> {
         let requested_key = request.key.clone();
         let response = self
             .rpc
@@ -407,7 +406,7 @@ where
         &self,
         request: GetManyRequest,
         expected_root: &H::Digest,
-    ) -> Result<Vec<VerifiedUnorderedKeyValue<H::Digest, K, V, F, E>>, QmdbError> {
+    ) -> Result<Vec<VerifiedKeyValue<H::Digest, unordered::Operation<F, K, E>, F>>, QmdbError> {
         let requested_keys = request.keys.clone();
         let response = self
             .rpc
@@ -422,7 +421,6 @@ where
                 return Err(QmdbError::DuplicateRequestedKey { key: key.clone() });
             }
         }
-        let mut returned = BTreeSet::<&[u8]>::new();
         let mut last_index = None;
         response
             .results
@@ -433,11 +431,6 @@ where
                         kind: crate::ProofKind::CurrentKeyValue,
                     });
                 };
-                if !returned.insert(result.key.as_slice()) {
-                    return Err(QmdbError::ProofVerification {
-                        kind: crate::ProofKind::CurrentKeyValue,
-                    });
-                }
                 if last_index.is_some_and(|last| request_index <= last) {
                     return Err(QmdbError::ProofVerification {
                         kind: crate::ProofKind::CurrentKeyValue,
@@ -1147,32 +1140,27 @@ where
     Ok((*root, operations, chunks))
 }
 
-fn verify_key_value_from_proto<F, H, K, V, const N: usize, E>(
+fn verify_key_value_from_proto<F, H, Op, const N: usize>(
     proto: &ProtoCurrentKeyValueProof,
     root: &H::Digest,
-    op_cfg: &<ordered::Operation<F, K, E> as Read>::Cfg,
-) -> Result<VerifiedKeyValue<H::Digest, K, V, F, E>, QmdbError>
+    op_cfg: &Op::Cfg,
+) -> Result<VerifiedKeyValue<H::Digest, Op, F>, QmdbError>
 where
     F: Graftable,
     H: Hasher,
     H::Digest: DecodeExt<()>,
-    K: QmdbKey + commonware_codec::Codec,
-    V: commonware_codec::Codec + Clone + Send + Sync,
-    E: ValueEncoding<Value = V>,
-    ordered::Operation<F, K, E>: Decode + Encode + Read,
+    Op: commonware_codec::Codec + Clone + Operation<F>,
 {
-    let operation =
-        ordered::Operation::<F, K, E>::decode_cfg(proto.encoded_operation.as_ref(), op_cfg)
-            .map_err(|err| {
-                QmdbError::CorruptData(format!(
-                    "failed to decode current key-value operation: {err}",
-                ))
-            })?;
-    let ordered::Operation::Update(_) = &operation else {
+    let operation = Op::decode_cfg(proto.encoded_operation.as_ref(), op_cfg).map_err(|err| {
+        QmdbError::CorruptData(format!(
+            "failed to decode current key-value operation: {err}",
+        ))
+    })?;
+    if !operation.is_update() {
         return Err(QmdbError::CorruptData(
             "current key-value proof operation must be an update".to_string(),
         ));
-    };
+    }
     let max_digests = proof_digest_cap::<H::Digest>(&proto.proof);
     let proof = OperationProof::<F, H::Digest, N>::decode_cfg(proto.proof.as_ref(), &max_digests)
         .map_err(|err| {
@@ -1195,7 +1183,7 @@ fn verify_unordered_key_value_from_proto<F, H, K, V, const N: usize, E>(
     requested_key: &[u8],
     root: &H::Digest,
     op_cfg: &<unordered::Operation<F, K, E> as Read>::Cfg,
-) -> Result<VerifiedUnorderedKeyValue<H::Digest, K, V, F, E>, QmdbError>
+) -> Result<VerifiedKeyValue<H::Digest, unordered::Operation<F, K, E>, F>, QmdbError>
 where
     F: Graftable,
     H: Hasher,
@@ -1205,39 +1193,15 @@ where
     E: ValueEncoding<Value = V>,
     unordered::Operation<F, K, E>: Decode + Encode + Read,
 {
-    let operation =
-        unordered::Operation::<F, K, E>::decode_cfg(proto.encoded_operation.as_ref(), op_cfg)
-            .map_err(|err| {
-                QmdbError::CorruptData(format!(
-                    "failed to decode unordered current key-value operation: {err}",
-                ))
-            })?;
-    let unordered::Operation::Update(update) = &operation else {
-        return Err(QmdbError::CorruptData(
-            "unordered current key-value proof operation must be an update".to_string(),
-        ));
-    };
-    if update.0.as_ref() != requested_key {
+    let verified =
+        verify_key_value_from_proto::<F, H, unordered::Operation<F, K, E>, N>(proto, root, op_cfg)?;
+    if !matches!(&verified.operation, unordered::Operation::Update(update) if update.0.as_ref() == requested_key)
+    {
         return Err(QmdbError::ProofVerification {
             kind: crate::ProofKind::CurrentKeyValue,
         });
     }
-    let max_digests = proof_digest_cap::<H::Digest>(&proto.proof);
-    let proof =
-        UnorderedKeyValueProof::<F, H::Digest, N>::decode_cfg(proto.proof.as_ref(), &max_digests)
-            .map_err(|err| {
-            QmdbError::CorruptData(format!("failed to decode unordered current proof: {err}"))
-        })?;
-    if !proof.verify::<H, _>(operation.clone(), root) {
-        return Err(QmdbError::ProofVerification {
-            kind: crate::ProofKind::CurrentKeyValue,
-        });
-    }
-    Ok(VerifiedUnorderedKeyValue {
-        root: *root,
-        location: proof.loc,
-        operation,
-    })
+    Ok(verified)
 }
 
 /// Verify an exclusion proof and return the authenticated successor of the requested key
@@ -1329,9 +1293,12 @@ where
         .transpose()?;
     let mut entries = Vec::with_capacity(response.entries.len());
     for proof in &response.entries {
-        entries.push(verify_key_value_from_proto::<F, H, K, V, N, E>(
-            proof, root, op_cfg,
-        )?);
+        entries.push(verify_key_value_from_proto::<
+            F,
+            H,
+            ordered::Operation<F, K, E>,
+            N,
+        >(proof, root, op_cfg)?);
     }
 
     let keys = entries

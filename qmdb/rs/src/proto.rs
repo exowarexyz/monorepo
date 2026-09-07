@@ -35,7 +35,6 @@ use self::qmdb::v1::{
 use crate::proof::{
     CurrentOperationRangeProofResult, OperationRangeCheckpoint, RawBatchMultiProof,
     RawKeyExclusionProof, RawKeyLookupProof, RawKeyRangeProof, RawKeyValueProof,
-    RawUnorderedKeyValueProof,
 };
 
 const WIRE_VARINT: u64 = buffa::encoding::WireType::Varint as u64;
@@ -268,19 +267,6 @@ fn write_current_operation_range_proof<D: Digest, Op: Encode, const N: usize, F:
     }
 }
 
-fn current_key_value_proof_len<P: Encode, Op: Encode>(proof: &P, operation: &Op) -> usize {
-    codec_field_len(1, proof) + codec_field_len(2, operation)
-}
-
-fn write_current_key_value_proof<P: Encode, Op: Encode>(
-    buf: &mut impl BufMut,
-    proof: &P,
-    operation: &Op,
-) {
-    write_codec_field(buf, 1, proof);
-    write_codec_field(buf, 2, operation);
-}
-
 fn key_exclusion_proof_len<P: Encode>(proof: &P) -> usize {
     codec_field_len(1, proof)
 }
@@ -289,106 +275,37 @@ fn write_key_exclusion_proof<P: Encode>(buf: &mut impl BufMut, proof: &P) {
     write_codec_field(buf, 1, proof);
 }
 
-fn ordered_key_value_proof_len<
-    D: Digest,
-    K: QmdbKey + commonware_codec::Codec,
-    V: commonware_codec::Codec + Clone + Send + Sync,
-    const N: usize,
-    F: Graftable,
-    E: ValueEncoding<Value = V>,
->(
-    proof: &RawKeyValueProof<D, K, V, N, F, E>,
-) -> usize
-where
-    ordered::Operation<F, K, E>: Encode,
-{
-    current_key_value_proof_len(&proof.proof, &proof.operation)
+fn key_value_proof_len<D: Digest, Op: Encode, const N: usize, F: Graftable>(
+    proof: &RawKeyValueProof<D, Op, N, F>,
+) -> usize {
+    codec_field_len(1, &proof.proof) + codec_field_len(2, &proof.operation)
 }
 
-fn write_ordered_key_value_proof<
-    D: Digest,
-    K: QmdbKey + commonware_codec::Codec,
-    V: commonware_codec::Codec + Clone + Send + Sync,
-    const N: usize,
-    F: Graftable,
-    E: ValueEncoding<Value = V>,
->(
+fn write_key_value_proof<D: Digest, Op: Encode, const N: usize, F: Graftable>(
     buf: &mut impl BufMut,
-    proof: &RawKeyValueProof<D, K, V, N, F, E>,
-) where
-    ordered::Operation<F, K, E>: Encode,
-{
-    write_current_key_value_proof(buf, &proof.proof, &proof.operation);
+    proof: &RawKeyValueProof<D, Op, N, F>,
+) {
+    write_codec_field(buf, 1, &proof.proof);
+    write_codec_field(buf, 2, &proof.operation);
 }
 
-fn unordered_key_value_proof_len<
-    D: Digest,
-    K: QmdbKey + commonware_codec::Codec,
-    V: commonware_codec::Codec + Clone + Send + Sync,
-    const N: usize,
-    F: Graftable,
-    E: ValueEncoding<Value = V>,
->(
-    proof: &RawUnorderedKeyValueProof<D, K, V, N, F, E>,
-) -> usize
-where
-    unordered::Operation<F, K, E>: Encode,
-{
-    current_key_value_proof_len(&proof.proof, &proof.operation)
-}
-
-fn write_unordered_key_value_proof<
-    D: Digest,
-    K: QmdbKey + commonware_codec::Codec,
-    V: commonware_codec::Codec + Clone + Send + Sync,
-    const N: usize,
-    F: Graftable,
-    E: ValueEncoding<Value = V>,
->(
-    buf: &mut impl BufMut,
-    proof: &RawUnorderedKeyValueProof<D, K, V, N, F, E>,
-) where
-    unordered::Operation<F, K, E>: Encode,
-{
-    write_current_key_value_proof(buf, &proof.proof, &proof.operation);
-}
-
-fn key_lookup_result_hit_len<
-    D: Digest,
-    K: QmdbKey + commonware_codec::Codec,
-    V: commonware_codec::Codec + Clone + Send + Sync,
-    const N: usize,
-    F: Graftable,
-    E: ValueEncoding<Value = V>,
->(
+fn key_lookup_result_hit_len<D: Digest, Op: Encode, const N: usize, F: Graftable>(
     key: &[u8],
-    proof: &RawKeyValueProof<D, K, V, N, F, E>,
-) -> usize
-where
-    ordered::Operation<F, K, E>: Encode,
-{
-    let proof_len = ordered_key_value_proof_len(proof);
+    proof: &RawKeyValueProof<D, Op, N, F>,
+) -> usize {
+    let proof_len = key_value_proof_len(proof);
     bytes_field_len(1, key) + message_field_len(2, proof_len)
 }
 
-fn write_key_lookup_result_hit<
-    D: Digest,
-    K: QmdbKey + commonware_codec::Codec,
-    V: commonware_codec::Codec + Clone + Send + Sync,
-    const N: usize,
-    F: Graftable,
-    E: ValueEncoding<Value = V>,
->(
+fn write_key_lookup_result_hit<D: Digest, Op: Encode, const N: usize, F: Graftable>(
     buf: &mut impl BufMut,
     key: &[u8],
-    proof: &RawKeyValueProof<D, K, V, N, F, E>,
-) where
-    ordered::Operation<F, K, E>: Encode,
-{
+    proof: &RawKeyValueProof<D, Op, N, F>,
+) {
     write_bytes_field(buf, 1, key);
-    let proof_len = ordered_key_value_proof_len(proof);
+    let proof_len = key_value_proof_len(proof);
     write_message_field(buf, 2, proof_len);
-    write_ordered_key_value_proof(buf, proof);
+    write_key_value_proof(buf, proof);
 }
 
 fn key_lookup_result_miss_len<
@@ -429,83 +346,14 @@ fn write_key_lookup_result_miss<
     write_key_exclusion_proof(buf, &proof.proof);
 }
 
-fn unordered_key_lookup_result_len<
-    D: Digest,
-    K: QmdbKey + commonware_codec::Codec,
-    V: commonware_codec::Codec + Clone + Send + Sync,
-    const N: usize,
-    F: Graftable,
-    E: ValueEncoding<Value = V>,
->(
-    key: &[u8],
-    proof: &RawUnorderedKeyValueProof<D, K, V, N, F, E>,
-) -> usize
-where
-    unordered::Operation<F, K, E>: Encode,
-{
-    let proof_len = unordered_key_value_proof_len(proof);
-    bytes_field_len(1, key) + message_field_len(2, proof_len)
-}
-
-fn write_unordered_key_lookup_result<
-    D: Digest,
-    K: QmdbKey + commonware_codec::Codec,
-    V: commonware_codec::Codec + Clone + Send + Sync,
-    const N: usize,
-    F: Graftable,
-    E: ValueEncoding<Value = V>,
->(
-    buf: &mut impl BufMut,
-    key: &[u8],
-    proof: &RawUnorderedKeyValueProof<D, K, V, N, F, E>,
-) where
-    unordered::Operation<F, K, E>: Encode,
-{
-    write_bytes_field(buf, 1, key);
-    let proof_len = unordered_key_value_proof_len(proof);
-    write_message_field(buf, 2, proof_len);
-    write_unordered_key_value_proof(buf, proof);
-}
-
-pub(crate) fn ordered_get_response<
-    D: Digest,
-    K: QmdbKey + commonware_codec::Codec,
-    V: commonware_codec::Codec + Clone + Send + Sync,
-    const N: usize,
-    F: Graftable,
-    E: ValueEncoding<Value = V>,
->(
-    proof: &RawKeyValueProof<D, K, V, N, F, E>,
-) -> PreEncoded<GetResponse>
-where
-    ordered::Operation<F, K, E>: Encode,
-{
-    let proof_len = ordered_key_value_proof_len(proof);
+pub(crate) fn get_response<D: Digest, Op: Encode, const N: usize, F: Graftable>(
+    proof: &RawKeyValueProof<D, Op, N, F>,
+) -> PreEncoded<GetResponse> {
+    let proof_len = key_value_proof_len(proof);
     let len = message_field_len(1, proof_len);
     PreEncoded::from_bytes_unchecked(message_bytes(len, |buf| {
         write_message_field(buf, 1, proof_len);
-        write_ordered_key_value_proof(buf, proof);
-    }))
-}
-
-pub(crate) fn unordered_get_response<
-    D: Digest,
-    K: QmdbKey + commonware_codec::Codec,
-    V: commonware_codec::Codec + Clone + Send + Sync,
-    const N: usize,
-    F: Graftable,
-    E: ValueEncoding<Value = V>,
->(
-    proof: &RawUnorderedKeyValueProof<D, K, V, N, F, E>,
-) -> PreEncoded<GetResponse>
-where
-    unordered::Operation<F, K, E>: Encode,
-{
-    let proof_len = unordered_key_value_proof_len(proof);
-    let len = message_field_len(1, proof_len);
-    PreEncoded::from_bytes_unchecked(message_bytes(len, |buf| {
-        write_message_field(buf, 1, proof_len);
-        write_unordered_key_value_proof(buf, proof);
+        write_key_value_proof(buf, proof);
     }))
 }
 
@@ -555,8 +403,8 @@ pub(crate) fn unordered_get_many_response<
     F: Graftable,
     E: ValueEncoding<Value = V>,
 >(
-    proofs: &[RawUnorderedKeyValueProof<D, K, V, N, F, E>],
-    key_for: impl Fn(&RawUnorderedKeyValueProof<D, K, V, N, F, E>) -> Bytes,
+    proofs: &[RawKeyValueProof<D, unordered::Operation<F, K, E>, N, F>],
+    key_for: impl Fn(&RawKeyValueProof<D, unordered::Operation<F, K, E>, N, F>) -> Bytes,
 ) -> PreEncoded<GetManyResponse>
 where
     unordered::Operation<F, K, E>: Encode,
@@ -567,7 +415,7 @@ where
         .collect::<Vec<_>>();
     let result_lens = keyed
         .iter()
-        .map(|(key, proof)| unordered_key_lookup_result_len(key, proof))
+        .map(|(key, proof)| key_lookup_result_hit_len(key, proof))
         .collect::<Vec<_>>();
     let len = result_lens
         .iter()
@@ -576,7 +424,7 @@ where
     PreEncoded::from_bytes_unchecked(message_bytes(len, |buf| {
         for ((key, proof), result_len) in keyed.iter().zip(result_lens) {
             write_message_field(buf, 1, result_len);
-            write_unordered_key_lookup_result(buf, key, proof);
+            write_key_lookup_result_hit(buf, key, proof);
         }
     }))
 }
@@ -598,7 +446,7 @@ where
     let entry_lens = proof
         .entries
         .iter()
-        .map(ordered_key_value_proof_len)
+        .map(key_value_proof_len)
         .collect::<Vec<_>>();
     let start_proof_len = proof
         .start_proof
@@ -614,7 +462,7 @@ where
     PreEncoded::from_bytes_unchecked(message_bytes(len, |buf| {
         for (entry, entry_len) in proof.entries.iter().zip(entry_lens) {
             write_message_field(buf, 1, entry_len);
-            write_ordered_key_value_proof(buf, entry);
+            write_key_value_proof(buf, entry);
         }
         if let (Some(proof), Some(proof_len)) = (&proof.start_proof, start_proof_len) {
             write_message_field(buf, 2, proof_len);

@@ -467,44 +467,51 @@ export function createSimplexVerifier(
     throw new Error('simplex WASM verifier missing payload support');
   }
   return {
-    verifyNotarization: (bytes, context) =>
-      normalizeAndVerifyCertificate(
+    verifyNotarization: (bytes, context) => {
+      const scheme = options.scheme;
+      return normalizeAndVerifyCertificate(
         module.verify_notarized_payload(
           options.payload,
           options.identity,
-          options.scheme,
+          scheme,
           copyBytes(namespace),
           copyBytes(verificationMaterial),
           copyBytes(bytes),
         ),
+        scheme,
         bytes,
         context,
         options.verifyHeader,
-      ),
-    verifyFinalization: (bytes, context) =>
-      normalizeAndVerifyCertificate(
+      );
+    },
+    verifyFinalization: (bytes, context) => {
+      const scheme = options.scheme;
+      return normalizeAndVerifyCertificate(
         module.verify_finalized_payload(
           options.payload,
           options.identity,
-          options.scheme,
+          scheme,
           copyBytes(namespace),
           copyBytes(verificationMaterial),
           copyBytes(bytes),
         ),
+        scheme,
         bytes,
         context,
         options.verifyHeader,
-      ),
+      );
+    },
   };
 }
 
 async function normalizeAndVerifyCertificate(
   value: unknown,
+  scheme: SimplexScheme,
   raw: Uint8Array,
   context: SimplexCertificateVerificationContext,
   verifyHeader?: SimplexHeaderVerifier,
 ): Promise<VerifiedSimplexCertificate | null> {
-  const certificate = normalizeVerifiedCertificate(value);
+  const certificate = normalizeVerifiedCertificate(value, scheme);
   if (!certificate) {
     return null;
   }
@@ -530,6 +537,7 @@ async function normalizeAndVerifyCertificate(
 
 function normalizeVerifiedCertificate(
   value: unknown,
+  scheme: SimplexScheme,
 ): VerifiedSimplexCertificate | null {
   if (!value) {
     return null;
@@ -539,7 +547,7 @@ function normalizeVerifiedCertificate(
   }
   const record = value as Record<string, unknown>;
   return {
-    scheme: schemeFromUnknown(record.scheme),
+    scheme,
     epoch: u64FromUnknown(record.epoch, 'epoch'),
     view: u64FromUnknown(record.view, 'view'),
     parent: u64FromUnknown(record.parent, 'parent'),
@@ -547,22 +555,6 @@ function normalizeVerifiedCertificate(
     certificate: bytesFromUnknown(record.certificate, 'certificate'),
     header: bytesFromUnknown(record.header, 'header'),
   };
-}
-
-function schemeFromUnknown(value: unknown): SimplexScheme {
-  switch (value) {
-    case 'ed25519':
-    case 'secp256r1':
-    case 'bls12381-multisig-min-pk':
-    case 'bls12381-multisig-min-sig':
-    case 'bls12381-threshold-standard-min-pk':
-    case 'bls12381-threshold-standard-min-sig':
-    case 'bls12381-threshold-vrf-min-pk':
-    case 'bls12381-threshold-vrf-min-sig':
-      return value;
-    default:
-      throw new Error(`simplex verifier returned unsupported scheme ${String(value)}`);
-  }
 }
 
 function u64FromUnknown(value: unknown, field: string): bigint {
@@ -984,61 +976,25 @@ export class SimplexClient<TNotarization = unknown, TFinalization = unknown> {
       const entries: VerifiedSimplexCertificateStreamEntry<TNotarization, TFinalization>[] = [];
       for (const entry of batch.entries) {
         if (entry.type === 'notarization') {
-          const certificate = await this.verifyNotarization(entry.notarized, {
+          const { notarized, ...event } = entry;
+          const { type: _type, kind: _kind, ...index } = event;
+          const certificate = await this.verifyNotarization(notarized, {
             kind: 'notarization',
             source: 'stream',
-            key: entry.key,
-            value: entry.notarized,
-            epoch: entry.epoch,
-            view: entry.view,
+            ...index,
+            value: notarized,
           });
-          entries.push({
-            type: 'notarization',
-            kind: entry.kind,
-            key: entry.key,
-            epoch: entry.epoch,
-            view: entry.view,
-            raw: entry.notarized,
-            certificate,
-          });
-        } else if (entry.index !== 'height') {
-          const certificate = await this.verifyFinalization(entry.finalized, {
-            kind: 'finalization',
-            index: entry.index,
-            source: 'stream',
-            key: entry.key,
-            value: entry.finalized,
-            epoch: entry.epoch,
-            view: entry.view,
-          });
-          entries.push({
-            type: 'finalization',
-            kind: entry.kind,
-            index: entry.index,
-            key: entry.key,
-            epoch: entry.epoch,
-            view: entry.view,
-            raw: entry.finalized,
-            certificate,
-          });
+          entries.push({ ...event, raw: notarized, certificate });
         } else {
-          const certificate = await this.verifyFinalization(entry.finalized, {
+          const { finalized, ...event } = entry;
+          const { type: _type, kind: _kind, ...index } = event;
+          const certificate = await this.verifyFinalization(finalized, {
             kind: 'finalization',
-            index: 'height',
             source: 'stream',
-            key: entry.key,
-            value: entry.finalized,
-            height: entry.height,
+            ...index,
+            value: finalized,
           });
-          entries.push({
-            type: 'finalization',
-            kind: entry.kind,
-            index: 'height',
-            key: entry.key,
-            height: entry.height,
-            raw: entry.finalized,
-            certificate,
-          });
+          entries.push({ ...event, raw: finalized, certificate });
         }
       }
       yield {

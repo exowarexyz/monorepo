@@ -105,15 +105,15 @@ impl KvScanExec {
         }
     }
 
-    fn with_scan_options(&self, fetch: Option<usize>, ordering: Option<ScanOrdering>) -> Self {
-        let properties = Self::make_properties(self.schema(), ordering.as_ref());
+    fn with_ordering(&self, ordering: ScanOrdering) -> Self {
+        let properties = Self::make_properties(self.schema(), Some(&ordering));
         Self {
             client: self.client.clone(),
             model: self.model.clone(),
             index_specs: self.index_specs.clone(),
             predicate: self.predicate.clone(),
-            fetch,
-            ordering,
+            fetch: self.fetch,
+            ordering: Some(ordering),
             projection: self.projection.clone(),
             properties,
         }
@@ -322,9 +322,10 @@ impl ExecutionPlan for KvScanExec {
             (None, Some(limit)) => Some(limit),
             (_, None) => None,
         };
-        Some(Arc::new(
-            self.with_scan_options(fetch, self.ordering.clone()),
-        ))
+        Some(Arc::new(Self {
+            fetch,
+            ..self.clone()
+        }))
     }
 
     fn fetch(&self) -> Option<usize> {
@@ -360,13 +361,10 @@ impl ExecutionPlan for KvScanExec {
             return Ok(SortOrderPushdownResult::Unsupported);
         }
         Ok(SortOrderPushdownResult::Exact {
-            inner: Arc::new(self.with_scan_options(
-                self.fetch,
-                Some(ScanOrdering {
-                    expressions,
-                    direction,
-                }),
-            )),
+            inner: Arc::new(self.with_ordering(ScanOrdering {
+                expressions,
+                direction,
+            })),
         })
     }
 }

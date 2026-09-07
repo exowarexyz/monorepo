@@ -664,7 +664,7 @@ where
         session: &SerializableReadSession,
         watermark: Location<F>,
         key: Q,
-    ) -> Result<RawKeyValueProof<H::Digest, K, V, N, F, E>, QmdbError> {
+    ) -> Result<RawKeyValueProof<H::Digest, ordered::Operation<F, K, E>, N, F>, QmdbError> {
         self.core()
             .require_published_watermark(session, watermark)
             .await?;
@@ -733,7 +733,7 @@ where
         &self,
         watermark: Location<F>,
         key: Q,
-    ) -> Result<RawKeyValueProof<H::Digest, K, V, N, F, E>, QmdbError> {
+    ) -> Result<RawKeyValueProof<H::Digest, ordered::Operation<F, K, E>, N, F>, QmdbError> {
         let session = self.client.create_session();
         self.key_value_proof_raw_in_session(&session, watermark, key)
             .await
@@ -746,7 +746,7 @@ where
         &self,
         watermark: Location<F>,
         key: Q,
-    ) -> Result<VerifiedKeyValue<H::Digest, K, V, F, E>, QmdbError> {
+    ) -> Result<VerifiedKeyValue<H::Digest, ordered::Operation<F, K, E>, F>, QmdbError> {
         let raw = self.key_value_proof_raw_at(watermark, key).await?;
         Ok(VerifiedKeyValue {
             root: raw.root,

@@ -59,8 +59,7 @@ pub use ordered::OrderedClient;
 pub use proof::{
     CurrentOperationRangeProofResult, OperationRangeCheckpoint, RawKeyValueProof, RawMultiProof,
     VariantRoot, VerifiedCurrentRange, VerifiedKeyLookup, VerifiedKeyRange, VerifiedKeyValue,
-    VerifiedMultiOperations, VerifiedOperationRange, VerifiedUnorderedKeyValue,
-    VerifiedVariantRange,
+    VerifiedMultiOperations, VerifiedOperationRange, VerifiedVariantRange,
 };
 pub use unordered::UnorderedClient;
 pub use writer::{

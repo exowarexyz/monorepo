@@ -185,17 +185,13 @@ export function SimplexPanel({
   const [blockReadResult, setBlockReadResult] = useState<SimplexBlockData | null>(null);
 
   const [notarization, setNotarization] =
-    useState<VerifiedSimplexCertificate | null>(null);
-  const [notarizationMissing, setNotarizationMissing] = useState(false);
+    useState<VerifiedSimplexCertificate | null>();
   const [latestFinalization, setLatestFinalization] =
-    useState<VerifiedSimplexCertificate | null>(null);
-  const [latestFinalizationMissing, setLatestFinalizationMissing] = useState(false);
+    useState<VerifiedSimplexCertificate | null>();
   const [roundFinalization, setRoundFinalization] =
-    useState<VerifiedSimplexCertificate | null>(null);
-  const [roundFinalizationMissing, setRoundFinalizationMissing] = useState(false);
+    useState<VerifiedSimplexCertificate | null>();
   const [heightFinalization, setHeightFinalization] =
-    useState<VerifiedSimplexCertificate | null>(null);
-  const [heightFinalizationMissing, setHeightFinalizationMissing] = useState(false);
+    useState<VerifiedSimplexCertificate | null>();
 
   useEffect(() => {
     showNotificationRef.current = showNotification;
@@ -255,14 +251,10 @@ export function SimplexPanel({
       subscribeAbortRef.current?.abort();
       subscribeAbortRef.current = null;
       setIsSubscribing(false);
-      setNotarization(null);
-      setNotarizationMissing(false);
-      setLatestFinalization(null);
-      setLatestFinalizationMissing(false);
-      setRoundFinalization(null);
-      setRoundFinalizationMissing(false);
-      setHeightFinalization(null);
-      setHeightFinalizationMissing(false);
+      setNotarization(undefined);
+      setLatestFinalization(undefined);
+      setRoundFinalization(undefined);
+      setHeightFinalization(undefined);
       setStreamEvents([]);
       setVerifiedFullBlocks({});
       setAppliedVerifierConfig({
@@ -318,8 +310,7 @@ export function SimplexPanel({
 
   const readNotarizationByRound = async () => {
     setIsReadingNotarization(true);
-    setNotarization(null);
-    setNotarizationMissing(false);
+    setNotarization(undefined);
     setVerifiedFullBlocks((previous) => {
       const next = { ...previous };
       delete next.notarization;
@@ -330,7 +321,6 @@ export function SimplexPanel({
       const view = readNonNegativeInteger(notarizationView, 'Notarization view');
       const nextNotarization = await client.getNotarizationByRound(epoch, view);
       setNotarization(nextNotarization);
-      setNotarizationMissing(nextNotarization === null);
       showNotification(
         'success',
         nextNotarization ? 'Simplex Notarization Loaded' : 'Simplex Notarization Missing',
@@ -347,8 +337,7 @@ export function SimplexPanel({
 
   const readLatestFinalization = async () => {
     setIsReadingLatest(true);
-    setLatestFinalization(null);
-    setLatestFinalizationMissing(false);
+    setLatestFinalization(undefined);
     setVerifiedFullBlocks((previous) => {
       const next = { ...previous };
       delete next.latest;
@@ -357,7 +346,6 @@ export function SimplexPanel({
     try {
       const finalization = await client.latestFinalization();
       setLatestFinalization(finalization);
-      setLatestFinalizationMissing(finalization === null);
       showNotification(
         'success',
         finalization ? 'Simplex Finalization Loaded' : 'Simplex Finalization Missing',
@@ -372,8 +360,7 @@ export function SimplexPanel({
 
   const readRoundFinalization = async () => {
     setIsReadingRoundFinalization(true);
-    setRoundFinalization(null);
-    setRoundFinalizationMissing(false);
+    setRoundFinalization(undefined);
     setVerifiedFullBlocks((previous) => {
       const next = { ...previous };
       delete next.round;
@@ -384,7 +371,6 @@ export function SimplexPanel({
       const view = readNonNegativeInteger(finalizationIndex, 'Finalization view');
       const finalization = await client.getFinalizationByRound(epoch, view);
       setRoundFinalization(finalization);
-      setRoundFinalizationMissing(finalization === null);
       showNotification(
         'success',
         finalization ? 'Simplex Finalization Loaded' : 'Simplex Finalization Missing',
@@ -401,8 +387,7 @@ export function SimplexPanel({
 
   const readHeightFinalization = async () => {
     setIsReadingHeightFinalization(true);
-    setHeightFinalization(null);
-    setHeightFinalizationMissing(false);
+    setHeightFinalization(undefined);
     setVerifiedFullBlocks((previous) => {
       const next = { ...previous };
       delete next.height;
@@ -412,7 +397,6 @@ export function SimplexPanel({
       const height = readNonNegativeInteger(finalizationIndex, 'Finalization height');
       const finalization = await client.getFinalizationByHeight(height);
       setHeightFinalization(finalization);
-      setHeightFinalizationMissing(finalization === null);
       showNotification(
         'success',
         finalization ? 'Simplex Finalization Loaded' : 'Simplex Finalization Missing',
@@ -728,7 +712,7 @@ export function SimplexPanel({
             )}
           </div>
         )}
-        {notarizationMissing && (
+        {notarization === null && (
           <div className="result fade-in">
             <h4>No Notarization</h4>
             <p>No notarized certificate is stored at epoch {notarizationEpoch.trim()}, view {notarizationView.trim()}.</p>
@@ -760,7 +744,7 @@ export function SimplexPanel({
             )}
           </div>
         )}
-        {latestFinalizationMissing && (
+        {latestFinalization === null && (
           <div className="result fade-in">
             <h4>No Finalization</h4>
             <p>No finalized height index is stored.</p>
@@ -792,7 +776,7 @@ export function SimplexPanel({
             )}
           </div>
         )}
-        {roundFinalizationMissing && (
+        {roundFinalization === null && (
           <div className="result fade-in">
             <h4>No Finalization</h4>
             <p>No finalized certificate is stored at epoch {finalizationEpoch.trim()}, view {finalizationIndex.trim()}.</p>
@@ -824,7 +808,7 @@ export function SimplexPanel({
             )}
           </div>
         )}
-        {heightFinalizationMissing && (
+        {heightFinalization === null && (
           <div className="result fade-in">
             <h4>No Finalization</h4>
             <p>No finalized certificate is stored at height {finalizationIndex.trim()}.</p>

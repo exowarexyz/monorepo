@@ -888,7 +888,7 @@ where
                 .key_value_proof_raw_at(tip, key.as_ref())
                 .await
                 .map_err(qmdb_error_to_connect)?;
-            connectrpc::Response::ok(crate::proto::ordered_get_response(&proof))
+            connectrpc::Response::ok(crate::proto::get_response(&proof))
         }
     }
 
@@ -943,7 +943,7 @@ where
                 .key_value_proof_raw_at::<N, _>(tip, request.key)
                 .await
                 .map_err(qmdb_error_to_connect)?;
-            connectrpc::Response::ok(crate::proto::unordered_get_response(&proof))
+            connectrpc::Response::ok(crate::proto::get_response(&proof))
         }
     }
 

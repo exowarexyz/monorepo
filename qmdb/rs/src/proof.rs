@@ -8,15 +8,14 @@ use commonware_storage::{
     },
     qmdb::{
         any::{
-            ordered, unordered,
+            ordered,
             value::{ValueEncoding, VariableEncoding},
         },
         current::{
             ordered::ExclusionProof,
             proof::{OperationProof, OpsRootWitness, RangeProof},
-            unordered::db::KeyValueProof as UnorderedKeyValueProof,
         },
-        operation::Key as QmdbKey,
+        operation::{Key as QmdbKey, Operation},
         verify::verify_multi_proof,
     },
 };
@@ -41,14 +40,9 @@ pub struct OperationRangeCheckpoint<D: Digest, F: Graftable> {
 impl<D: Digest, F: Graftable> OperationRangeCheckpoint<D, F> {
     pub fn verify<H: Hasher<Digest = D>>(&self) -> bool {
         let hasher = commonware_storage::qmdb::hasher::<H>();
-        let operations = self
-            .encoded_operations
-            .iter()
-            .map(Vec::as_slice)
-            .collect::<Vec<_>>();
         self.proof.verify_proof_and_pinned_nodes(
             &hasher,
-            &operations,
+            &self.encoded_operations,
             self.start_location,
             &self.pinned_nodes,
             &self.root,
@@ -309,21 +303,14 @@ where
     Ok(checkpoint)
 }
 
-/// Current ordered key-value proof payload.
+/// Current proof for one active key's update operation.
 #[derive(Clone, Debug, PartialEq)]
 #[must_use]
-pub struct RawKeyValueProof<
-    D: Digest,
-    K: QmdbKey + Codec,
-    V: Codec + Clone + Send + Sync,
-    const N: usize,
-    F: Graftable,
-    E: ValueEncoding<Value = V> = VariableEncoding<V>,
-> {
+pub struct RawKeyValueProof<D: Digest, Op, const N: usize, F: Graftable> {
     pub watermark: Location<F>,
     pub root: D,
     pub proof: OperationProof<F, D, N>,
-    pub operation: ordered::Operation<F, K, E>,
+    pub operation: Op,
 }
 
 type OrderedVerifierDb<F, K, E, H, const N: usize> =
@@ -360,19 +347,12 @@ where
     OrderedVerifierDb::<F, K, E, H, N>::verify_exclusion_proof(key, proof, root)
 }
 
-impl<
-        D: Digest,
-        K: QmdbKey + Codec,
-        V: Codec + Clone + Send + Sync,
-        const N: usize,
-        F: Graftable,
-        E: ValueEncoding<Value = V>,
-    > RawKeyValueProof<D, K, V, N, F, E>
+impl<D: Digest, Op, const N: usize, F: Graftable> RawKeyValueProof<D, Op, N, F>
 where
-    ordered::Operation<F, K, E>: Codec + Clone,
+    Op: Codec + Clone + Operation<F>,
 {
     pub fn verify<H: Hasher<Digest = D>>(&self) -> bool {
-        matches!(self.operation, ordered::Operation::Update(_))
+        self.operation.is_update()
             && self
                 .proof
                 .verify::<H, _>(self.operation.clone(), &self.root)
@@ -426,7 +406,7 @@ pub enum RawKeyLookupProof<
     F: Graftable,
     E: ValueEncoding<Value = V> = VariableEncoding<V>,
 > {
-    Hit(RawKeyValueProof<D, K, V, N, F, E>),
+    Hit(RawKeyValueProof<D, ordered::Operation<F, K, E>, N, F>),
     Miss(RawKeyExclusionProof<D, K, V, N, F, E>),
 }
 
@@ -441,47 +421,8 @@ pub struct RawKeyRangeProof<
     E: ValueEncoding<Value = V> = VariableEncoding<V>,
 > {
     pub watermark: Location<F>,
-    pub entries: Vec<RawKeyValueProof<D, K, V, N, F, E>>,
+    pub entries: Vec<RawKeyValueProof<D, ordered::Operation<F, K, E>, N, F>>,
     pub start_proof: Option<RawKeyExclusionProof<D, K, V, N, F, E>>,
-}
-
-/// Current unordered proof for one active key. Missing-key proofs are
-/// intentionally unsupported for unordered QMDB because Commonware does not
-/// expose exclusion semantics for that variant.
-#[derive(Clone, Debug, PartialEq)]
-#[must_use]
-pub struct RawUnorderedKeyValueProof<
-    D: Digest,
-    K: QmdbKey + Codec,
-    V: Codec + Clone + Send + Sync,
-    const N: usize,
-    F: Graftable,
-    E: ValueEncoding<Value = V> = VariableEncoding<V>,
-> {
-    pub watermark: Location<F>,
-    pub root: D,
-    pub proof: UnorderedKeyValueProof<F, D, N>,
-    pub operation: unordered::Operation<F, K, E>,
-}
-
-impl<
-        D: Digest,
-        K: QmdbKey + Codec,
-        V: Codec + Clone + Send + Sync,
-        const N: usize,
-        F: Graftable,
-        E: ValueEncoding<Value = V>,
-    > RawUnorderedKeyValueProof<D, K, V, N, F, E>
-where
-    unordered::Operation<F, K, E>: Codec + Clone,
-{
-    pub fn verify<H: Hasher<Digest = D>>(&self) -> bool {
-        if !matches!(self.operation, unordered::Operation::Update(_)) {
-            return false;
-        }
-        self.proof
-            .verify::<H, _>(self.operation.clone(), &self.root)
-    }
 }
 
 // `Verified*` types below all share one invariant: the Merkle proof has already
@@ -513,34 +454,12 @@ pub struct VerifiedMultiOperations<
 }
 
 /// A single key's `Update` operation verified against the current-state root.
-/// `operation.next_key` is the value that verification was checked against.
 #[derive(Clone, Debug, PartialEq)]
 #[must_use]
-pub struct VerifiedKeyValue<
-    D: Digest,
-    K: QmdbKey + Codec,
-    V: Codec + Clone + Send + Sync,
-    F: Family,
-    E: ValueEncoding<Value = V> = VariableEncoding<V>,
-> {
+pub struct VerifiedKeyValue<D: Digest, Op, F: Family> {
     pub root: D,
     pub location: Location<F>,
-    pub operation: ordered::Operation<F, K, E>,
-}
-
-/// One current unordered key-value proof verified against the current root.
-#[derive(Clone, Debug, PartialEq)]
-#[must_use]
-pub struct VerifiedUnorderedKeyValue<
-    D: Digest,
-    K: QmdbKey + Codec,
-    V: Codec + Clone + Send + Sync,
-    F: Family,
-    E: ValueEncoding<Value = V> = VariableEncoding<V>,
-> {
-    pub root: D,
-    pub location: Location<F>,
-    pub operation: unordered::Operation<F, K, E>,
+    pub operation: Op,
 }
 
 /// A verified current lookup result for one requested key.
@@ -553,7 +472,7 @@ pub enum VerifiedKeyLookup<
     F: Family,
     E: ValueEncoding<Value = V> = VariableEncoding<V>,
 > {
-    Hit(VerifiedKeyValue<D, K, V, F, E>),
+    Hit(VerifiedKeyValue<D, ordered::Operation<F, K, E>, F>),
     Miss { key: Bytes },
 }
 
@@ -567,7 +486,7 @@ pub struct VerifiedKeyRange<
     F: Family,
     E: ValueEncoding<Value = V> = VariableEncoding<V>,
 > {
-    pub entries: Vec<VerifiedKeyValue<D, K, V, F, E>>,
+    pub entries: Vec<VerifiedKeyValue<D, ordered::Operation<F, K, E>, F>>,
     pub next_start_key: Option<Bytes>,
 }
 
@@ -631,39 +550,6 @@ pub struct VariantRoot<D: Digest, F: Family> {
 
 #[derive(Clone, Debug, PartialEq)]
 #[must_use]
-pub(crate) struct MultiProofResult<
-    D: Digest,
-    K: QmdbKey + Codec,
-    V: Codec + Clone + Send + Sync,
-    F: Family,
-    E: ValueEncoding<Value = V> = VariableEncoding<V>,
-> {
-    pub watermark: Location<F>,
-    pub root: D,
-    pub proof: Proof<F, D>,
-    pub operations: Vec<(Location<F>, ordered::Operation<F, K, E>)>,
-}
-
-impl<
-        D: Digest,
-        K: QmdbKey + Codec,
-        V: Codec + Clone + Send + Sync,
-        F: Family,
-        E: ValueEncoding<Value = V>,
-    > From<MultiProofResult<D, K, V, F, E>> for RawMultiProof<D, K, V, F, E>
-{
-    fn from(value: MultiProofResult<D, K, V, F, E>) -> Self {
-        Self {
-            watermark: value.watermark,
-            root: value.root,
-            proof: value.proof,
-            operations: value.operations,
-        }
-    }
-}
-
-#[derive(Clone, Debug, PartialEq)]
-#[must_use]
 pub struct CurrentOperationRangeProofResult<D: Digest, Op, const N: usize, F: Graftable> {
     pub watermark: Location<F>,
     pub root: D,
@@ -684,40 +570,5 @@ where
             &self.chunks,
             &self.root,
         )
-    }
-}
-
-#[derive(Clone, Debug, PartialEq)]
-#[must_use]
-pub(crate) struct KeyValueProofResult<
-    D: Digest,
-    K: QmdbKey + Codec,
-    V: Codec + Clone + Send + Sync,
-    const N: usize,
-    F: Graftable,
-    E: ValueEncoding<Value = V> = VariableEncoding<V>,
-> {
-    pub watermark: Location<F>,
-    pub root: D,
-    pub proof: OperationProof<F, D, N>,
-    pub operation: ordered::Operation<F, K, E>,
-}
-
-impl<
-        D: Digest,
-        K: QmdbKey + Codec,
-        V: Codec + Clone + Send + Sync,
-        const N: usize,
-        F: Graftable,
-        E: ValueEncoding<Value = V>,
-    > From<KeyValueProofResult<D, K, V, N, F, E>> for RawKeyValueProof<D, K, V, N, F, E>
-{
-    fn from(value: KeyValueProofResult<D, K, V, N, F, E>) -> Self {
-        Self {
-            watermark: value.watermark,
-            root: value.root,
-            proof: value.proof,
-            operation: value.operation,
-        }
     }
 }
