@@ -14,18 +14,24 @@ before returning when the client is constructed with a verifier. Use the `*Raw`
 read methods when you explicitly want unverified bytes.
 
 ```ts
+import { Client, StoreWriteBatch } from '@exowarexyz/sdk';
 import { SimplexClient } from '@exowarexyz/simplex';
 
-const simplex = new SimplexClient('http://localhost:10000');
-await simplex.uploadFinalization({
-  epoch: 0n,
-  view: 42n,
-  height: 42n,
+const store = new Client('http://localhost:10000').store();
+const simplex = new SimplexClient(store);
+const batch = new StoreWriteBatch();
+simplex.stageUpload(simplex.prepareBlock({
   digest: '0x...',
   header: '0x...',
   body: '0x...',
+}), batch);
+simplex.stageUpload(simplex.prepareFinalization({
+  epoch: 0n,
+  view: 42n,
+  height: 42n,
   finalized: '0x...',
-});
+}), batch);
+await batch.commit(store);
 ```
 
 Use `prepareHeader`, `prepareBlock`, `prepareNotarization`, and

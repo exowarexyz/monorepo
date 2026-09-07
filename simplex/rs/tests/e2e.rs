@@ -28,7 +28,9 @@ use commonware_utils::{
 use exoware_sdk::{
     PrefixedStoreClient, RetryConfig, StoreBatchUpload, StoreClient, StoreWriteBatch,
 };
-use exoware_simplex::{keys, Finalized, MarshalResolver, Notarized, SimplexClient, SimplexError};
+use exoware_simplex::{
+    init_marshal_resolver, keys, Finalized, Notarized, SimplexClient, SimplexError,
+};
 
 const NAMESPACE: &[u8] = b"_EXOWARE_SIMPLEX_TEST";
 
@@ -469,7 +471,7 @@ async fn marshal_resolver_sinks_finalized_chain_from_simplex_api() {
                         .try_into()
                         .expect("block count with genesis"),
                 );
-                let (resolver_rx, resolver) = MarshalResolver::<Sha256Digest, PublicKey>::init(
+                let (resolver_rx, resolver) = init_marshal_resolver::<_, Sha256Digest, PublicKey>(
                     context.child("resolver"),
                     NZUsize!(100),
                     simplex,

@@ -59,24 +59,30 @@ test('stages block and finalization rows into one StoreWriteBatch', () => {
     },
   });
 
-  const upload = simplex.prepareFinalization({
+  const block = simplex.prepareBlock({ digest: 'd0', header: 'b0', body: 'c0c1' });
+  const finalization = simplex.prepareFinalization({
     epoch: 0,
     view: 7,
     height: 11,
-    digest: 'd0',
-    header: 'b0',
-    body: 'c0c1',
     finalized: 'f1',
   });
-  assert.deepEqual(upload.summary, {
+  assert.deepEqual(block.summary, {
     headers: 1,
     blocks: 1,
+    notarizations: 0,
+    finalizations: 0,
+    finalizedHeightIndexes: 0,
+  });
+  assert.deepEqual(finalization.summary, {
+    headers: 0,
+    blocks: 0,
     notarizations: 0,
     finalizations: 1,
     finalizedHeightIndexes: 1,
   });
 
-  const batch = simplex.stageUpload(upload, new StoreWriteBatch());
+  const batch = simplex.stageUpload(block, new StoreWriteBatch());
+  simplex.stageUpload(finalization, batch);
   assert.equal(batch.length, 4);
   assert.deepEqual(
     batch.entries().map((entry) => bytesToHex(entry.key)),

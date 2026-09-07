@@ -171,8 +171,7 @@ export interface VerifiedCurrentKeyRangeEntry {
 
 export interface VerifiedCurrentKeyRangeProof {
   entries: VerifiedCurrentKeyRangeEntry[];
-  hasMore: boolean;
-  nextStartKey: Uint8Array;
+  nextStartKey: Uint8Array | null;
   proofSizeBytes: number;
 }
 

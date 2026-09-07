@@ -7,7 +7,6 @@ mod common;
 use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroU64;
 
-use commonware_codec::Encode;
 use commonware_cryptography::Sha256;
 use commonware_runtime::tokio as cw_tokio;
 use commonware_runtime::Runner as _;
@@ -18,6 +17,7 @@ use commonware_storage::qmdb::any::ordered::variable::Operation as QmdbOperation
 use commonware_storage::qmdb::any::value::FixedEncoding;
 use commonware_storage::qmdb::current::ordered::fixed::Db as LocalFixedQmdbDb;
 use commonware_storage::qmdb::current::ordered::variable::Db as LocalQmdbDb;
+use commonware_storage::qmdb::operation::Operation as _;
 use commonware_storage::translator::TwoCap;
 use commonware_utils::{NZUsize, NZU16, NZU64};
 use exoware_qmdb::MAX_OPERATION_SIZE;
@@ -731,8 +731,8 @@ async fn assert_incremental_seed_batches_keep_current_proofs_verifiable<F>(
         .collect::<Vec<_>>();
     assert_eq!(raw_range.entries.len(), expected_range_keys.len());
     for (entry, expected_key) in raw_range.entries.iter().zip(expected_range_keys) {
-        assert_eq!(entry.key, expected_key.encode().to_vec());
-        assert!(entry.proof.verify::<Sha256>());
+        assert_eq!(entry.operation.key(), Some(&expected_key));
+        assert!(entry.verify::<Sha256>());
     }
 }
 

@@ -9,8 +9,7 @@ use crate::proto::qmdb::v1::{
 };
 use buffa::MessageView;
 use commonware_codec::{
-    types::lazy::Lazy, Decode, DecodeExt, DecodeRangeExt, Encode, FixedSize, RangeCfg, Read,
-    ReadExt,
+    Decode, DecodeExt, DecodeRangeExt, Encode, FixedSize, RangeCfg, Read, ReadExt,
 };
 use commonware_cryptography::{Blake3, Crc32, Digest, Sha256};
 use commonware_storage::{
@@ -538,15 +537,6 @@ where
             Ok((location, bytes.to_vec()))
         })
         .collect::<Result<Vec<_>, String>>()?;
-    let raw_operations = proto
-        .encoded_operations
-        .iter()
-        .map(|bytes| {
-            // Preserve the exact operation encoding used as a Merkle leaf.
-            // Decoding as Vec<u8>/Bytes would reinterpret these bytes as a length-prefixed value.
-            Lazy::<Vec<u8>>::deferred(&mut bytes.as_ref(), ((0..=MAX_OPERATION_SIZE).into(), ()))
-        })
-        .collect::<Vec<_>>();
     let pinned_nodes = proto
         .pinned_nodes
         .iter()
@@ -557,10 +547,10 @@ where
             )
         })
         .collect::<Result<Vec<_>, String>>()?;
-    if !verify_proof_and_pinned_nodes::<H, _, _>(
-        &proof,
+    if !proof.verify_proof_and_pinned_nodes(
+        &commonware_storage::qmdb::hasher::<H>(),
+        &proto.encoded_operations,
         start,
-        &raw_operations,
         &pinned_nodes,
         &target_root,
     ) {
@@ -659,25 +649,6 @@ where
     })
 }
 
-fn read_key_value_proof<F, D>(
-    bytes: &[u8],
-    max_digests: usize,
-    config: &CurrentProofConfig,
-) -> Result<(OperationProof<F, D>, Vec<u8>), String>
-where
-    F: merkle::Graftable,
-    D: Digest + DecodeExt<()>,
-{
-    let mut buf = bytes;
-    let proof = read_operation_proof::<F, D>(&mut buf, max_digests, config)?;
-    let next_key = Vec::<u8>::read_cfg(&mut buf, &((0..=MAX_OPERATION_SIZE).into(), ()))
-        .map_err(|err| format!("failed to decode current key-value proof next_key: {err}"))?;
-    if !buf.is_empty() {
-        return Err("current key-value proof has trailing bytes".to_string());
-    }
-    Ok((proof, next_key))
-}
-
 fn read_exclusion_proof<F, D>(
     bytes: &[u8],
     max_digests: usize,
@@ -763,14 +734,14 @@ where
         &op_cfg::<F>(),
     )
     .map_err(|err| format!("failed to decode current key-value operation: {err}"))?;
-    let OrderedOperation::Update(update) = &operation else {
+    let OrderedOperation::Update(_) = &operation else {
         return Err("current key-value proof operation must be an update".to_string());
     };
     let max_digests = proof_digest_cap::<H::Digest>(&proto.proof);
-    let (proof, next_key) =
-        read_key_value_proof::<F, H::Digest>(&proto.proof, max_digests, config)?;
-    if next_key != update.next_key {
-        return Err("current key-value proof next_key mismatch".to_string());
+    let mut buf = proto.proof.as_ref();
+    let proof = read_operation_proof::<F, H::Digest>(&mut buf, max_digests, config)?;
+    if !buf.is_empty() {
+        return Err("current key-value proof has trailing bytes".to_string());
     }
     verify_operation_proof::<F, H>(&proof, &operation, root, config)?;
     Ok((proof.loc, operation))
@@ -1226,20 +1197,12 @@ where
         .map(|key| decode_vec_key_wire(key).map_err(js_err))
         .transpose()?;
     let mut decoded = Vec::new();
-    for entry in &proto.entries {
-        let proof = entry
-            .proof
-            .as_option()
-            .ok_or_else(|| js_err("getRange entry missing proof"))?;
+    for proof in &proto.entries {
         let (location, operation) =
             verify_key_value_from_proto::<F, H>(proof, current_root, config).map_err(js_err)?;
         let OrderedOperation::Update(update) = operation else {
             return Err(js_err("getRange entry proof did not verify an update"));
         };
-        let entry_key = decode_vec_key_wire(entry.key.as_slice()).map_err(js_err)?;
-        if update.key != entry_key {
-            return Err(js_err("getRange entry key does not match proof operation"));
-        }
         decoded.push((location, update));
     }
 
@@ -1257,20 +1220,15 @@ where
     } else {
         None
     };
-    let next_start = (!proto.next_start_key.is_empty())
-        .then(|| decode_vec_key_wire(&proto.next_start_key))
-        .transpose()
-        .map_err(js_err)?;
-    validate_key_range(
+    let next_start = validate_key_range(
         &start_key,
         end_key.as_ref(),
         limit,
         &keys,
         start_successor.as_ref(),
-        proto.has_more,
-        next_start.as_ref(),
     )
-    .map_err(js_err)?;
+    .map_err(js_err)?
+    .cloned();
 
     let entries = Array::new();
     for (location, update) in decoded {
@@ -1287,11 +1245,10 @@ where
 
     let verified = Object::new();
     set_field(&verified, "entries", &entries.into())?;
-    set_field(&verified, "hasMore", &JsValue::from_bool(proto.has_more))?;
     set_field(
         &verified,
         "nextStartKey",
-        &bytes_to_js(&next_start.unwrap_or_default()),
+        &next_start.map_or(JsValue::NULL, |key| bytes_to_js(&key)),
     )?;
     Ok(verified.into())
 }
@@ -1817,10 +1774,7 @@ mod tests {
             value::FixedEncoding,
         },
         current::{
-            ordered::{
-                db::KeyValueProof as UpstreamKeyValueProof,
-                ExclusionProof as UpstreamExclusionProof,
-            },
+            ordered::ExclusionProof as UpstreamExclusionProof,
             proof::OperationProof as UpstreamOperationProof,
         },
         keyless,
@@ -2207,19 +2161,16 @@ mod tests {
             ExclusionProof::KeyValue(..) => panic!("commit exclusion proof decoded as a key-value"),
         }
 
-        let key_value_proof = UpstreamKeyValueProof::<F, Vec<u8>, Sha256Digest, N> {
-            proof: expected.clone(),
-            next_key: b"k2".to_vec(),
-        }
-        .encode();
-        let (decoded, next_key) = read_key_value_proof::<F, Sha256Digest>(
-            &key_value_proof,
-            proof_digest_cap::<Sha256Digest>(&key_value_proof),
+        let encoded = expected.encode();
+        let mut buf = encoded.as_ref();
+        let decoded = read_operation_proof::<F, Sha256Digest>(
+            &mut buf,
+            proof_digest_cap::<Sha256Digest>(&encoded),
             &config,
         )
         .unwrap();
+        assert!(buf.is_empty());
         assert_proof(&decoded);
-        assert_eq!(next_key, b"k2".to_vec());
     }
 
     #[test]

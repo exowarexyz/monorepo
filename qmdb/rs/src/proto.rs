@@ -71,21 +71,6 @@ fn write_u64_field(buf: &mut impl BufMut, field: u32, value: u64) {
     }
 }
 
-fn bool_field_len(field: u32, value: bool) -> usize {
-    if value {
-        tag_len(field, WIRE_VARINT) + 1
-    } else {
-        0
-    }
-}
-
-fn write_bool_field(buf: &mut impl BufMut, field: u32, value: bool) {
-    if value {
-        write_tag(buf, field, buffa::encoding::WireType::Varint);
-        buffa::encoding::encode_varint(1, buf);
-    }
-}
-
 fn length_delimited_len(field: u32, len: usize) -> usize {
     tag_len(field, WIRE_LENGTH_DELIMITED) + buffa::encoding::varint_len(len as u64) + len
 }
@@ -596,44 +581,6 @@ where
     }))
 }
 
-fn key_range_entry_len<
-    D: Digest,
-    K: QmdbKey + commonware_codec::Codec,
-    V: commonware_codec::Codec + Clone + Send + Sync,
-    const N: usize,
-    F: Graftable,
-    E: ValueEncoding<Value = V>,
->(
-    key: &[u8],
-    proof: &RawKeyValueProof<D, K, V, N, F, E>,
-) -> usize
-where
-    ordered::Operation<F, K, E>: Encode,
-{
-    let proof_len = ordered_key_value_proof_len(proof);
-    bytes_field_len(1, key) + message_field_len(2, proof_len)
-}
-
-fn write_key_range_entry<
-    D: Digest,
-    K: QmdbKey + commonware_codec::Codec,
-    V: commonware_codec::Codec + Clone + Send + Sync,
-    const N: usize,
-    F: Graftable,
-    E: ValueEncoding<Value = V>,
->(
-    buf: &mut impl BufMut,
-    key: &[u8],
-    proof: &RawKeyValueProof<D, K, V, N, F, E>,
-) where
-    ordered::Operation<F, K, E>: Encode,
-{
-    write_bytes_field(buf, 1, key);
-    let proof_len = ordered_key_value_proof_len(proof);
-    write_message_field(buf, 2, proof_len);
-    write_ordered_key_value_proof(buf, proof);
-}
-
 pub(crate) fn get_range_response<
     D: Digest,
     K: QmdbKey + commonware_codec::Codec,
@@ -651,7 +598,7 @@ where
     let entry_lens = proof
         .entries
         .iter()
-        .map(|entry| key_range_entry_len(&entry.key, &entry.proof))
+        .map(ordered_key_value_proof_len)
         .collect::<Vec<_>>();
     let start_proof_len = proof
         .start_proof
@@ -663,20 +610,16 @@ where
         .sum::<usize>()
         + start_proof_len
             .map(|inner| message_field_len(2, inner))
-            .unwrap_or_default()
-        + bool_field_len(3, proof.has_more)
-        + bytes_field_len(4, &proof.next_start_key);
+            .unwrap_or_default();
     PreEncoded::from_bytes_unchecked(message_bytes(len, |buf| {
         for (entry, entry_len) in proof.entries.iter().zip(entry_lens) {
             write_message_field(buf, 1, entry_len);
-            write_key_range_entry(buf, &entry.key, &entry.proof);
+            write_ordered_key_value_proof(buf, entry);
         }
         if let (Some(proof), Some(proof_len)) = (&proof.start_proof, start_proof_len) {
             write_message_field(buf, 2, proof_len);
             write_key_exclusion_proof(buf, &proof.proof);
         }
-        write_bool_field(buf, 3, proof.has_more);
-        write_bytes_field(buf, 4, &proof.next_start_key);
     }))
 }
 

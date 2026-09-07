@@ -853,10 +853,10 @@ pub const __CURRENT_OPERATION_RANGE_PROOF_JSON_ANY: ::buffa::type_registry::Json
     from_json: ::buffa::type_registry::any_from_json::<CurrentOperationRangeProof>,
     is_wkt: false,
 };
-/// Current proof for one active key. `proof` is opaque Commonware proof bytes
-/// encoded with `commonware-codec`: ordered endpoints use
-/// `current::ordered::db::KeyValueProof`; unordered endpoints use
-/// `current::proof::OperationProof`.
+/// Current proof for one active key. `proof` is an opaque Commonware
+/// `current::proof::OperationProof` encoded with `commonware-codec`.
+/// The authenticated update in `encoded_operation` contains the key and value,
+/// plus the successor key for ordered endpoints.
 #[derive(Clone, PartialEq, Default)]
 #[derive(::serde::Serialize, ::serde::Deserialize)]
 #[serde(default)]
@@ -1464,172 +1464,6 @@ pub mod current_key_lookup_result {
     #[doc(inline)]
     pub use super::__buffa::view::oneof::current_key_lookup_result::Result as ResultView;
 }
-#[derive(Clone, PartialEq, Default)]
-#[derive(::serde::Serialize, ::serde::Deserialize)]
-#[serde(default)]
-pub struct CurrentKeyRangeEntry {
-    /// Codec-encoded logical QMDB key (`K::encode()` bytes).
-    ///
-    /// Field 1: `key`
-    #[serde(
-        rename = "key",
-        with = "::buffa::json_helpers::bytes",
-        skip_serializing_if = "::buffa::json_helpers::skip_if::is_empty_bytes"
-    )]
-    pub key: ::buffa::alloc::vec::Vec<u8>,
-    /// Field 2: `proof`
-    #[serde(
-        rename = "proof",
-        skip_serializing_if = "::buffa::json_helpers::skip_if::is_unset_message_field"
-    )]
-    pub proof: ::buffa::MessageField<
-        CurrentKeyValueProof,
-        ::buffa::Inline<CurrentKeyValueProof>,
-    >,
-    #[serde(skip)]
-    #[doc(hidden)]
-    pub __buffa_unknown_fields: ::buffa::UnknownFields,
-}
-impl ::core::fmt::Debug for CurrentKeyRangeEntry {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_struct("CurrentKeyRangeEntry")
-            .field("key", &self.key)
-            .field("proof", &self.proof)
-            .finish()
-    }
-}
-impl CurrentKeyRangeEntry {
-    /// Protobuf type URL for this message, for use with `Any::pack` and
-    /// `Any::unpack_if`.
-    ///
-    /// Format: `type.googleapis.com/<fully.qualified.TypeName>`
-    pub const TYPE_URL: &'static str = "type.googleapis.com/qmdb.v1.CurrentKeyRangeEntry";
-}
-::buffa::impl_default_instance!(CurrentKeyRangeEntry);
-impl ::buffa::MessageName for CurrentKeyRangeEntry {
-    const PACKAGE: &'static str = "qmdb.v1";
-    const NAME: &'static str = "CurrentKeyRangeEntry";
-    const FULL_NAME: &'static str = "qmdb.v1.CurrentKeyRangeEntry";
-    const TYPE_URL: &'static str = "type.googleapis.com/qmdb.v1.CurrentKeyRangeEntry";
-}
-impl ::buffa::Message for CurrentKeyRangeEntry {
-    /// Returns the total encoded size in bytes.
-    ///
-    /// Accumulates in `u64` (which cannot overflow for in-memory
-    /// data) and saturates to `u32` at return, so a message whose
-    /// encoded size exceeds the 2 GiB protobuf limit yields a value
-    /// above [`::buffa::MAX_MESSAGE_BYTES`] that the encode entry
-    /// points reject, never a silently wrapped size.
-    #[allow(clippy::let_and_return)]
-    fn compute_size(&self, __cache: &mut ::buffa::SizeCache) -> u32 {
-        #[allow(unused_imports)]
-        use ::buffa::Enumeration as _;
-        let mut size = 0u64;
-        if !self.key.is_empty() {
-            size += 1u64 + ::buffa::types::bytes_encoded_len(&self.key) as u64;
-        }
-        if self.proof.is_set() {
-            let __slot = __cache.reserve();
-            let inner_size = self.proof.compute_size(__cache);
-            __cache.set(__slot, inner_size);
-            size
-                += 1u64 + ::buffa::encoding::varint_len(inner_size as u64) as u64
-                    + inner_size as u64;
-        }
-        size += self.__buffa_unknown_fields.encoded_len() as u64;
-        ::buffa::saturate_size(size)
-    }
-    fn write_to(
-        &self,
-        __cache: &mut ::buffa::SizeCache,
-        buf: &mut impl ::buffa::EncodeSink,
-    ) {
-        #[allow(unused_imports)]
-        use ::buffa::Enumeration as _;
-        if !self.key.is_empty() {
-            ::buffa::types::put_shared_bytes_field(1u32, &self.key, buf);
-        }
-        if self.proof.is_set() {
-            ::buffa::types::put_len_delimited_header(
-                2u32,
-                u64::from(__cache.consume_next()),
-                buf,
-            );
-            self.proof.write_to(__cache, buf);
-        }
-        self.__buffa_unknown_fields.write_to(buf);
-    }
-    fn merge_field(
-        &mut self,
-        tag: ::buffa::encoding::Tag,
-        buf: &mut impl ::buffa::bytes::Buf,
-        ctx: ::buffa::DecodeContext<'_>,
-    ) -> ::core::result::Result<(), ::buffa::DecodeError> {
-        #[allow(unused_imports)]
-        use ::buffa::bytes::Buf as _;
-        #[allow(unused_imports)]
-        use ::buffa::Enumeration as _;
-        match tag.field_number() {
-            1u32 => {
-                ::buffa::encoding::check_wire_type(
-                    tag,
-                    ::buffa::encoding::WireType::LengthDelimited,
-                )?;
-                ::buffa::types::merge_bytes(&mut self.key, buf)?;
-            }
-            2u32 => {
-                ::buffa::encoding::check_wire_type(
-                    tag,
-                    ::buffa::encoding::WireType::LengthDelimited,
-                )?;
-                ::buffa::Message::merge_length_delimited(
-                    self.proof.get_or_insert_default(),
-                    buf,
-                    ctx,
-                )?;
-            }
-            _ => {
-                self.__buffa_unknown_fields
-                    .push(::buffa::encoding::decode_unknown_field(tag, buf, ctx)?);
-            }
-        }
-        ::core::result::Result::Ok(())
-    }
-    fn clear(&mut self) {
-        self.key.clear();
-        self.proof = ::buffa::MessageField::none();
-        self.__buffa_unknown_fields.clear();
-    }
-}
-impl ::buffa::ExtensionSet for CurrentKeyRangeEntry {
-    const PROTO_FQN: &'static str = "qmdb.v1.CurrentKeyRangeEntry";
-    fn unknown_fields(&self) -> &::buffa::UnknownFields {
-        &self.__buffa_unknown_fields
-    }
-    fn unknown_fields_mut(&mut self) -> &mut ::buffa::UnknownFields {
-        &mut self.__buffa_unknown_fields
-    }
-}
-impl ::buffa::json_helpers::ProtoElemJson for CurrentKeyRangeEntry {
-    fn serialize_proto_json<S: ::serde::Serializer>(
-        v: &Self,
-        s: S,
-    ) -> ::core::result::Result<S::Ok, S::Error> {
-        ::serde::Serialize::serialize(v, s)
-    }
-    fn deserialize_proto_json<'de, D: ::serde::Deserializer<'de>>(
-        d: D,
-    ) -> ::core::result::Result<Self, D::Error> {
-        <Self as ::serde::Deserialize>::deserialize(d)
-    }
-}
-#[doc(hidden)]
-pub const __CURRENT_KEY_RANGE_ENTRY_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type_registry::JsonAnyEntry {
-    type_url: "type.googleapis.com/qmdb.v1.CurrentKeyRangeEntry",
-    to_json: ::buffa::type_registry::any_to_json::<CurrentKeyRangeEntry>,
-    from_json: ::buffa::type_registry::any_from_json::<CurrentKeyRangeEntry>,
-    is_wkt: false,
-};
 /// Current key proof request.
 #[derive(Clone, PartialEq, Default)]
 #[derive(::serde::Serialize, ::serde::Deserialize)]
@@ -2440,7 +2274,9 @@ pub const __GET_RANGE_REQUEST_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = :
 /// Ordered current key-range proof response. Key fields are codec-encoded
 /// logical QMDB keys (`K::encode()` bytes). `start_proof`, when present,
 /// authenticates the boundary before the first returned key (or the entire empty
-/// range). The last entry's authenticated successor closes the range.
+/// range). The last entry's authenticated successor closes the range or gives
+/// the next start key when it advances within the requested interval. A page
+/// with such a continuation must contain exactly the requested limit.
 #[derive(Clone, PartialEq, Default)]
 #[derive(::serde::Serialize, ::serde::Deserialize)]
 #[serde(default)]
@@ -2451,7 +2287,7 @@ pub struct GetRangeResponse {
         skip_serializing_if = "::buffa::json_helpers::skip_if::is_empty_vec",
         deserialize_with = "::buffa::json_helpers::null_as_default"
     )]
-    pub entries: ::buffa::alloc::vec::Vec<CurrentKeyRangeEntry>,
+    pub entries: ::buffa::alloc::vec::Vec<CurrentKeyValueProof>,
     /// Field 2: `start_proof`
     #[serde(
         rename = "startProof",
@@ -2462,22 +2298,6 @@ pub struct GetRangeResponse {
         CurrentKeyExclusionProof,
         ::buffa::Inline<CurrentKeyExclusionProof>,
     >,
-    /// Field 3: `has_more`
-    #[serde(
-        rename = "hasMore",
-        alias = "has_more",
-        with = "::buffa::json_helpers::proto_bool",
-        skip_serializing_if = "::buffa::json_helpers::skip_if::is_false"
-    )]
-    pub has_more: bool,
-    /// Field 4: `next_start_key`
-    #[serde(
-        rename = "nextStartKey",
-        alias = "next_start_key",
-        with = "::buffa::json_helpers::bytes",
-        skip_serializing_if = "::buffa::json_helpers::skip_if::is_empty_bytes"
-    )]
-    pub next_start_key: ::buffa::alloc::vec::Vec<u8>,
     #[serde(skip)]
     #[doc(hidden)]
     pub __buffa_unknown_fields: ::buffa::UnknownFields,
@@ -2487,8 +2307,6 @@ impl ::core::fmt::Debug for GetRangeResponse {
         f.debug_struct("GetRangeResponse")
             .field("entries", &self.entries)
             .field("start_proof", &self.start_proof)
-            .field("has_more", &self.has_more)
-            .field("next_start_key", &self.next_start_key)
             .finish()
     }
 }
@@ -2535,13 +2353,6 @@ impl ::buffa::Message for GetRangeResponse {
                 += 1u64 + ::buffa::encoding::varint_len(inner_size as u64) as u64
                     + inner_size as u64;
         }
-        if self.has_more {
-            size += 1u64 + ::buffa::types::BOOL_ENCODED_LEN as u64;
-        }
-        if !self.next_start_key.is_empty() {
-            size
-                += 1u64 + ::buffa::types::bytes_encoded_len(&self.next_start_key) as u64;
-        }
         size += self.__buffa_unknown_fields.encoded_len() as u64;
         ::buffa::saturate_size(size)
     }
@@ -2567,12 +2378,6 @@ impl ::buffa::Message for GetRangeResponse {
                 buf,
             );
             self.start_proof.write_to(__cache, buf);
-        }
-        if self.has_more {
-            ::buffa::types::put_bool_field(3u32, self.has_more, buf);
-        }
-        if !self.next_start_key.is_empty() {
-            ::buffa::types::put_shared_bytes_field(4u32, &self.next_start_key, buf);
         }
         self.__buffa_unknown_fields.write_to(buf);
     }
@@ -2610,20 +2415,6 @@ impl ::buffa::Message for GetRangeResponse {
                     ctx,
                 )?;
             }
-            3u32 => {
-                ::buffa::encoding::check_wire_type(
-                    tag,
-                    ::buffa::encoding::WireType::Varint,
-                )?;
-                self.has_more = ::buffa::types::decode_bool(buf)?;
-            }
-            4u32 => {
-                ::buffa::encoding::check_wire_type(
-                    tag,
-                    ::buffa::encoding::WireType::LengthDelimited,
-                )?;
-                ::buffa::types::merge_bytes(&mut self.next_start_key, buf)?;
-            }
             _ => {
                 self.__buffa_unknown_fields
                     .push(::buffa::encoding::decode_unknown_field(tag, buf, ctx)?);
@@ -2634,8 +2425,6 @@ impl ::buffa::Message for GetRangeResponse {
     fn clear(&mut self) {
         self.entries.clear();
         self.start_proof = ::buffa::MessageField::none();
-        self.has_more = false;
-        self.next_start_key.clear();
         self.__buffa_unknown_fields.clear();
     }
 }
@@ -5356,10 +5145,10 @@ pub mod __buffa {
                 ::serde::Serialize::serialize(&self.0, __s)
             }
         }
-        /// Current proof for one active key. `proof` is opaque Commonware proof bytes
-        /// encoded with `commonware-codec`: ordered endpoints use
-        /// `current::ordered::db::KeyValueProof`; unordered endpoints use
-        /// `current::proof::OperationProof`.
+        /// Current proof for one active key. `proof` is an opaque Commonware
+        /// `current::proof::OperationProof` encoded with `commonware-codec`.
+        /// The authenticated update in `encoded_operation` contains the key and value,
+        /// plus the successor key for ordered endpoints.
         #[derive(Clone, Debug, Default)]
         pub struct CurrentKeyValueProofView<'a> {
             /// Field 1: `proof`
@@ -6377,346 +6166,6 @@ pub mod __buffa {
             type ViewHandle = CurrentKeyLookupResultOwnedView;
         }
         impl ::serde::Serialize for CurrentKeyLookupResultOwnedView {
-            fn serialize<__S: ::serde::Serializer>(
-                &self,
-                __s: __S,
-            ) -> ::core::result::Result<__S::Ok, __S::Error> {
-                ::serde::Serialize::serialize(&self.0, __s)
-            }
-        }
-        #[derive(Clone, Debug, Default)]
-        pub struct CurrentKeyRangeEntryView<'a> {
-            /// Codec-encoded logical QMDB key (`K::encode()` bytes).
-            ///
-            /// Field 1: `key`
-            pub key: &'a [u8],
-            /// Field 2: `proof`
-            pub proof: ::buffa::MessageFieldView<
-                super::super::__buffa::view::CurrentKeyValueProofView<'a>,
-            >,
-            pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
-        }
-        impl<'a> ::buffa::MessageView<'a> for CurrentKeyRangeEntryView<'a> {
-            type Owned = super::super::CurrentKeyRangeEntry;
-            fn decode_view(
-                buf: &'a [u8],
-            ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
-                let __limit = ::core::cell::Cell::new(
-                    ::buffa::DEFAULT_UNKNOWN_FIELD_LIMIT,
-                );
-                <Self as ::buffa::MessageView>::decode_view_ctx(
-                    buf,
-                    ::buffa::DecodeContext::new(::buffa::RECURSION_LIMIT, &__limit),
-                )
-            }
-            fn decode_view_with_ctx(
-                buf: &'a [u8],
-                ctx: ::buffa::DecodeContext<'_>,
-            ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
-                <Self as ::buffa::MessageView>::decode_view_ctx(buf, ctx)
-            }
-            #[inline]
-            fn merge_view_field(
-                &mut self,
-                tag: ::buffa::encoding::Tag,
-                cur: &'a [u8],
-                before_tag: &'a [u8],
-                ctx: ::buffa::DecodeContext<'_>,
-            ) -> ::core::result::Result<&'a [u8], ::buffa::DecodeError> {
-                let _ = ctx;
-                #[allow(unused_variables)]
-                let view = self;
-                let mut cur = cur;
-                match tag.field_number() {
-                    1u32 => {
-                        ::buffa::encoding::check_wire_type(
-                            tag,
-                            ::buffa::encoding::WireType::LengthDelimited,
-                        )?;
-                        view.key = ::buffa::types::borrow_bytes(&mut cur)?;
-                    }
-                    2u32 => {
-                        ::buffa::encoding::check_wire_type(
-                            tag,
-                            ::buffa::encoding::WireType::LengthDelimited,
-                        )?;
-                        let __sub_ctx = ctx.descend()?;
-                        let sub = ::buffa::types::borrow_bytes(&mut cur)?;
-                        match view.proof.as_mut() {
-                            Some(existing) => {
-                                ::buffa::MessageView::merge_into_view(
-                                    existing,
-                                    sub,
-                                    __sub_ctx,
-                                )?
-                            }
-                            None => {
-                                view.proof = ::buffa::MessageFieldView::set(
-                                    <super::super::__buffa::view::CurrentKeyValueProofView as ::buffa::MessageView>::decode_view_ctx(
-                                        sub,
-                                        __sub_ctx,
-                                    )?,
-                                );
-                            }
-                        }
-                    }
-                    _ => {
-                        ::buffa::encoding::skip_field_depth(tag, &mut cur, ctx.depth())?;
-                        let span_len = before_tag.len() - cur.len();
-                        view.__buffa_unknown_fields
-                            .push_record(before_tag, span_len, ctx)?;
-                    }
-                }
-                ::core::result::Result::Ok(cur)
-            }
-            fn to_owned_message(
-                &self,
-            ) -> ::core::result::Result<
-                super::super::CurrentKeyRangeEntry,
-                ::buffa::DecodeError,
-            > {
-                self.to_owned_from_source(None)
-            }
-            #[allow(clippy::useless_conversion, clippy::needless_update)]
-            fn to_owned_from_source(
-                &self,
-                __buffa_src: ::core::option::Option<&::buffa::bytes::Bytes>,
-            ) -> ::core::result::Result<
-                super::super::CurrentKeyRangeEntry,
-                ::buffa::DecodeError,
-            > {
-                #[allow(unused_imports)]
-                use ::buffa::alloc::string::ToString as _;
-                let _ = __buffa_src;
-                ::core::result::Result::Ok(super::super::CurrentKeyRangeEntry {
-                    key: (self.key).to_vec(),
-                    proof: match self.proof.as_option() {
-                        Some(v) => {
-                            ::buffa::MessageField::<
-                                super::super::CurrentKeyValueProof,
-                                ::buffa::Inline<super::super::CurrentKeyValueProof>,
-                            >::some(v.to_owned_from_source(__buffa_src)?)
-                        }
-                        None => ::buffa::MessageField::none(),
-                    },
-                    __buffa_unknown_fields: self
-                        .__buffa_unknown_fields
-                        .to_owned()?
-                        .into(),
-                    ..::core::default::Default::default()
-                })
-            }
-        }
-        impl<'a> ::buffa::ViewEncode<'a> for CurrentKeyRangeEntryView<'a> {
-            #[allow(clippy::needless_borrow, clippy::let_and_return)]
-            fn compute_size(&self, __cache: &mut ::buffa::SizeCache) -> u32 {
-                #[allow(unused_imports)]
-                use ::buffa::Enumeration as _;
-                let mut size = 0u64;
-                if !self.key.is_empty() {
-                    size += 1u64 + ::buffa::types::bytes_encoded_len(&self.key) as u64;
-                }
-                if self.proof.is_set() {
-                    let __slot = __cache.reserve();
-                    let inner_size = self.proof.compute_size(__cache);
-                    __cache.set(__slot, inner_size);
-                    size
-                        += 1u64 + ::buffa::encoding::varint_len(inner_size as u64) as u64
-                            + inner_size as u64;
-                }
-                size += self.__buffa_unknown_fields.encoded_len() as u64;
-                ::buffa::saturate_size(size)
-            }
-            #[allow(clippy::needless_borrow)]
-            fn write_to(
-                &self,
-                __cache: &mut ::buffa::SizeCache,
-                buf: &mut impl ::buffa::EncodeSink,
-            ) {
-                #[allow(unused_imports)]
-                use ::buffa::Enumeration as _;
-                if !self.key.is_empty() {
-                    ::buffa::types::put_shared_bytes_field(1u32, &self.key, buf);
-                }
-                if self.proof.is_set() {
-                    ::buffa::types::put_len_delimited_header(
-                        2u32,
-                        u64::from(__cache.consume_next()),
-                        buf,
-                    );
-                    self.proof.write_to(__cache, buf);
-                }
-                self.__buffa_unknown_fields.write_to(buf);
-            }
-        }
-        /// Serializes this view as protobuf JSON.
-        ///
-        /// Implicit-presence fields with default values are omitted, `required`
-        /// fields are always emitted, explicit-presence (`optional`) fields are
-        /// emitted only when set, bytes fields are base64-encoded, and enum
-        /// values are their proto name strings.
-        ///
-        /// This impl uses `serialize_map(None)` because the number of emitted
-        /// fields depends on default-omission rules; serializers that require
-        /// known map lengths (e.g. `bincode`) will return a runtime error.
-        /// Use the owned message type for those formats.
-        impl<'__a> ::serde::Serialize for CurrentKeyRangeEntryView<'__a> {
-            fn serialize<__S: ::serde::Serializer>(
-                &self,
-                __s: __S,
-            ) -> ::core::result::Result<__S::Ok, __S::Error> {
-                use ::serde::ser::SerializeMap as _;
-                let mut __map = __s.serialize_map(::core::option::Option::None)?;
-                if !::buffa::json_helpers::skip_if::is_empty_bytes(self.key) {
-                    __map
-                        .serialize_entry(
-                            "key",
-                            &::buffa::json_helpers::BytesJson(self.key),
-                        )?;
-                }
-                {
-                    if let ::core::option::Option::Some(__v) = self.proof.as_option() {
-                        __map.serialize_entry("proof", __v)?;
-                    }
-                }
-                __map.end()
-            }
-        }
-        impl<'a> ::buffa::MessageName for CurrentKeyRangeEntryView<'a> {
-            const PACKAGE: &'static str = "qmdb.v1";
-            const NAME: &'static str = "CurrentKeyRangeEntry";
-            const FULL_NAME: &'static str = "qmdb.v1.CurrentKeyRangeEntry";
-            const TYPE_URL: &'static str = "type.googleapis.com/qmdb.v1.CurrentKeyRangeEntry";
-        }
-        ::buffa::impl_default_view_instance!(CurrentKeyRangeEntryView);
-        ::buffa::impl_view_reborrow!(CurrentKeyRangeEntryView);
-        /** Self-contained, `'static` owned view of a `CurrentKeyRangeEntry` message.
-
- Wraps [`::buffa::OwnedView`]`<`[`CurrentKeyRangeEntryView`]`<'static>>`: the decoded view and the [`::buffa::bytes::Bytes`] buffer it borrows from travel together, so the handle is `'static` and `Send + Sync` — suitable for async handlers, spawned tasks, and anywhere a `'static` bound is required.
-
- Field accessors return borrows tied to `&self`. Use [`Self::view`] to get the full [`CurrentKeyRangeEntryView`] when you need struct patterns, iteration helpers, or to pass the view to lifetime-parameterised code.*/
-        #[derive(Clone, Debug)]
-        pub struct CurrentKeyRangeEntryOwnedView(
-            ::buffa::OwnedView<CurrentKeyRangeEntryView<'static>>,
-        );
-        impl CurrentKeyRangeEntryOwnedView {
-            /// Decode an owned view from a [`::buffa::bytes::Bytes`] buffer.
-            ///
-            /// The view borrows directly from the buffer's data; the buffer is
-            /// retained inside the returned handle.
-            ///
-            /// # Errors
-            ///
-            /// Returns [`::buffa::DecodeError`] if the buffer contains invalid
-            /// protobuf data.
-            pub fn decode(
-                bytes: ::buffa::bytes::Bytes,
-            ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
-                ::core::result::Result::Ok(
-                    CurrentKeyRangeEntryOwnedView(::buffa::OwnedView::decode(bytes)?),
-                )
-            }
-            /// Decode with custom [`::buffa::DecodeOptions`] (recursion limit,
-            /// max message size).
-            ///
-            /// # Errors
-            ///
-            /// Returns [`::buffa::DecodeError`] if the buffer is invalid or
-            /// exceeds the configured limits.
-            pub fn decode_with_options(
-                bytes: ::buffa::bytes::Bytes,
-                opts: &::buffa::DecodeOptions,
-            ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
-                ::core::result::Result::Ok(
-                    CurrentKeyRangeEntryOwnedView(
-                        ::buffa::OwnedView::decode_with_options(bytes, opts)?,
-                    ),
-                )
-            }
-            /// Build from an owned message via an encode → decode round-trip.
-            ///
-            /// # Errors
-            ///
-            /// Returns [`::buffa::DecodeError::MessageTooLarge`] if the
-            /// message's encoded size exceeds the 2 GiB protobuf limit, or
-            /// another [`::buffa::DecodeError`] if the re-encoded bytes are
-            /// somehow invalid (should not happen for well-formed messages).
-            pub fn from_owned(
-                msg: &super::super::CurrentKeyRangeEntry,
-            ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
-                ::core::result::Result::Ok(
-                    CurrentKeyRangeEntryOwnedView(::buffa::OwnedView::from_owned(msg)?),
-                )
-            }
-            /// Borrow the full [`CurrentKeyRangeEntryView`] with its lifetime tied to `&self`.
-            #[must_use]
-            pub fn view(&self) -> &CurrentKeyRangeEntryView<'_> {
-                self.0.reborrow()
-            }
-            /// Convert to the owned message type.
-            ///
-            /// Infallible: this type's constructors wire-decode their
-            /// buffer, and a view produced by wire decoding always
-            /// converts. Delegates to [`::buffa::OwnedView::to_owned_message`],
-            /// whose contract also governs handles converted from a raw
-            /// [`::buffa::OwnedView`].
-            #[must_use]
-            pub fn to_owned_message(&self) -> super::super::CurrentKeyRangeEntry {
-                self.0.to_owned_message()
-            }
-            /// The underlying bytes buffer.
-            #[must_use]
-            pub fn bytes(&self) -> &::buffa::bytes::Bytes {
-                self.0.bytes()
-            }
-            /// Consume the handle, returning the underlying bytes buffer.
-            #[must_use]
-            pub fn into_bytes(self) -> ::buffa::bytes::Bytes {
-                self.0.into_bytes()
-            }
-            /// Codec-encoded logical QMDB key (`K::encode()` bytes).
-            ///
-            /// Field 1: `key`
-            #[must_use]
-            pub fn key(&self) -> &'_ [u8] {
-                self.0.reborrow().key
-            }
-            /// Field 2: `proof`
-            #[must_use]
-            pub fn proof(
-                &self,
-            ) -> &::buffa::MessageFieldView<
-                super::super::__buffa::view::CurrentKeyValueProofView<'_>,
-            > {
-                &self.0.reborrow().proof
-            }
-        }
-        impl ::core::convert::From<::buffa::OwnedView<CurrentKeyRangeEntryView<'static>>>
-        for CurrentKeyRangeEntryOwnedView {
-            fn from(
-                inner: ::buffa::OwnedView<CurrentKeyRangeEntryView<'static>>,
-            ) -> Self {
-                CurrentKeyRangeEntryOwnedView(inner)
-            }
-        }
-        impl ::core::convert::From<CurrentKeyRangeEntryOwnedView>
-        for ::buffa::OwnedView<CurrentKeyRangeEntryView<'static>> {
-            fn from(wrapper: CurrentKeyRangeEntryOwnedView) -> Self {
-                wrapper.0
-            }
-        }
-        impl ::core::convert::AsRef<
-            ::buffa::OwnedView<CurrentKeyRangeEntryView<'static>>,
-        > for CurrentKeyRangeEntryOwnedView {
-            fn as_ref(&self) -> &::buffa::OwnedView<CurrentKeyRangeEntryView<'static>> {
-                &self.0
-            }
-        }
-        impl ::buffa::HasMessageView for super::super::CurrentKeyRangeEntry {
-            type View<'a> = CurrentKeyRangeEntryView<'a>;
-            type ViewHandle = CurrentKeyRangeEntryOwnedView;
-        }
-        impl ::serde::Serialize for CurrentKeyRangeEntryOwnedView {
             fn serialize<__S: ::serde::Serializer>(
                 &self,
                 __s: __S,
@@ -8288,22 +7737,20 @@ pub mod __buffa {
         /// Ordered current key-range proof response. Key fields are codec-encoded
         /// logical QMDB keys (`K::encode()` bytes). `start_proof`, when present,
         /// authenticates the boundary before the first returned key (or the entire empty
-        /// range). The last entry's authenticated successor closes the range.
+        /// range). The last entry's authenticated successor closes the range or gives
+        /// the next start key when it advances within the requested interval. A page
+        /// with such a continuation must contain exactly the requested limit.
         #[derive(Clone, Debug, Default)]
         pub struct GetRangeResponseView<'a> {
             /// Field 1: `entries`
             pub entries: ::buffa::RepeatedView<
                 'a,
-                super::super::__buffa::view::CurrentKeyRangeEntryView<'a>,
+                super::super::__buffa::view::CurrentKeyValueProofView<'a>,
             >,
             /// Field 2: `start_proof`
             pub start_proof: ::buffa::MessageFieldView<
                 super::super::__buffa::view::CurrentKeyExclusionProofView<'a>,
             >,
-            /// Field 3: `has_more`
-            pub has_more: bool,
-            /// Field 4: `next_start_key`
-            pub next_start_key: &'a [u8],
             pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
         }
         impl<'a> ::buffa::MessageView<'a> for GetRangeResponseView<'a> {
@@ -8363,20 +7810,6 @@ pub mod __buffa {
                             }
                         }
                     }
-                    3u32 => {
-                        ::buffa::encoding::check_wire_type(
-                            tag,
-                            ::buffa::encoding::WireType::Varint,
-                        )?;
-                        view.has_more = ::buffa::types::decode_bool(&mut cur)?;
-                    }
-                    4u32 => {
-                        ::buffa::encoding::check_wire_type(
-                            tag,
-                            ::buffa::encoding::WireType::LengthDelimited,
-                        )?;
-                        view.next_start_key = ::buffa::types::borrow_bytes(&mut cur)?;
-                    }
                     1u32 => {
                         ::buffa::encoding::check_wire_type(
                             tag,
@@ -8386,12 +7819,12 @@ pub mod __buffa {
                         let sub = ::buffa::types::borrow_bytes(&mut cur)?;
                         ctx.register_element_memory(
                             ::core::mem::size_of::<
-                                super::super::__buffa::view::CurrentKeyRangeEntryView,
+                                super::super::__buffa::view::CurrentKeyValueProofView,
                             >(),
                         )?;
                         view.entries
                             .push(
-                                <super::super::__buffa::view::CurrentKeyRangeEntryView as ::buffa::MessageView>::decode_view_ctx(
+                                <super::super::__buffa::view::CurrentKeyValueProofView as ::buffa::MessageView>::decode_view_ctx(
                                     sub,
                                     __sub_ctx,
                                 )?,
@@ -8440,8 +7873,6 @@ pub mod __buffa {
                         }
                         None => ::buffa::MessageField::none(),
                     },
-                    has_more: self.has_more,
-                    next_start_key: (self.next_start_key).to_vec(),
                     __buffa_unknown_fields: self
                         .__buffa_unknown_fields
                         .to_owned()?
@@ -8472,15 +7903,6 @@ pub mod __buffa {
                         += 1u64 + ::buffa::encoding::varint_len(inner_size as u64) as u64
                             + inner_size as u64;
                 }
-                if self.has_more {
-                    size += 1u64 + ::buffa::types::BOOL_ENCODED_LEN as u64;
-                }
-                if !self.next_start_key.is_empty() {
-                    size
-                        += 1u64
-                            + ::buffa::types::bytes_encoded_len(&self.next_start_key)
-                                as u64;
-                }
                 size += self.__buffa_unknown_fields.encoded_len() as u64;
                 ::buffa::saturate_size(size)
             }
@@ -8507,16 +7929,6 @@ pub mod __buffa {
                         buf,
                     );
                     self.start_proof.write_to(__cache, buf);
-                }
-                if self.has_more {
-                    ::buffa::types::put_bool_field(3u32, self.has_more, buf);
-                }
-                if !self.next_start_key.is_empty() {
-                    ::buffa::types::put_shared_bytes_field(
-                        4u32,
-                        &self.next_start_key,
-                        buf,
-                    );
                 }
                 self.__buffa_unknown_fields.write_to(buf);
             }
@@ -8549,16 +7961,6 @@ pub mod __buffa {
                     {
                         __map.serialize_entry("startProof", __v)?;
                     }
-                }
-                if self.has_more {
-                    __map.serialize_entry("hasMore", &self.has_more)?;
-                }
-                if !::buffa::json_helpers::skip_if::is_empty_bytes(self.next_start_key) {
-                    __map
-                        .serialize_entry(
-                            "nextStartKey",
-                            &::buffa::json_helpers::BytesJson(self.next_start_key),
-                        )?;
                 }
                 __map.end()
             }
@@ -8661,7 +8063,7 @@ pub mod __buffa {
                 &self,
             ) -> &::buffa::RepeatedView<
                 '_,
-                super::super::__buffa::view::CurrentKeyRangeEntryView<'_>,
+                super::super::__buffa::view::CurrentKeyValueProofView<'_>,
             > {
                 &self.0.reborrow().entries
             }
@@ -8673,16 +8075,6 @@ pub mod __buffa {
                 super::super::__buffa::view::CurrentKeyExclusionProofView<'_>,
             > {
                 &self.0.reborrow().start_proof
-            }
-            /// Field 3: `has_more`
-            #[must_use]
-            pub fn has_more(&self) -> bool {
-                self.0.reborrow().has_more
-            }
-            /// Field 4: `next_start_key`
-            #[must_use]
-            pub fn next_start_key(&self) -> &'_ [u8] {
-                self.0.reborrow().next_start_key
             }
         }
         impl ::core::convert::From<::buffa::OwnedView<GetRangeResponseView<'static>>>
@@ -10944,10 +10336,6 @@ pub use self::__buffa::view::CurrentKeyExclusionProofOwnedView;
 pub use self::__buffa::view::CurrentKeyLookupResultView;
 #[doc(inline)]
 pub use self::__buffa::view::CurrentKeyLookupResultOwnedView;
-#[doc(inline)]
-pub use self::__buffa::view::CurrentKeyRangeEntryView;
-#[doc(inline)]
-pub use self::__buffa::view::CurrentKeyRangeEntryOwnedView;
 #[doc(inline)]
 pub use self::__buffa::view::GetRequestView;
 #[doc(inline)]

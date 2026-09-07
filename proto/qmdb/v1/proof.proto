@@ -61,10 +61,10 @@ message CurrentOperationRangeProof {
   repeated bytes chunks = 4;
 }
 
-// Current proof for one active key. `proof` is opaque Commonware proof bytes
-// encoded with `commonware-codec`: ordered endpoints use
-// `current::ordered::db::KeyValueProof`; unordered endpoints use
-// `current::proof::OperationProof`.
+// Current proof for one active key. `proof` is an opaque Commonware
+// `current::proof::OperationProof` encoded with `commonware-codec`.
+// The authenticated update in `encoded_operation` contains the key and value,
+// plus the successor key for ordered endpoints.
 message CurrentKeyValueProof {
   bytes proof = 1;
   bytes encoded_operation = 2;
@@ -84,10 +84,4 @@ message CurrentKeyLookupResult {
     CurrentKeyValueProof hit = 2;
     CurrentKeyExclusionProof miss = 3;
   }
-}
-
-message CurrentKeyRangeEntry {
-  // Codec-encoded logical QMDB key (`K::encode()` bytes).
-  bytes key = 1;
-  CurrentKeyValueProof proof = 2;
 }

@@ -54,9 +54,6 @@ export interface NotarizationUpload {
   epoch: U64Like;
   view: U64Like;
   notarized: BytesLike;
-  header?: BytesLike;
-  digest?: BytesLike;
-  body?: BytesLike;
 }
 
 export interface FinalizationUpload {
@@ -64,9 +61,6 @@ export interface FinalizationUpload {
   view: U64Like;
   height: U64Like;
   finalized: BytesLike;
-  header?: BytesLike;
-  digest?: BytesLike;
-  body?: BytesLike;
 }
 
 export type MaybePromise<T> = T | Promise<T>;
@@ -601,20 +595,6 @@ function emptySummary(): SimplexUploadSummary {
   };
 }
 
-function mergePrepared(items: PreparedSimplexUpload[]): PreparedSimplexUpload {
-  const summary = emptySummary();
-  const entries: PreparedSimplexEntry[] = [];
-  for (const item of items) {
-    summary.headers += item.summary.headers;
-    summary.blocks += item.summary.blocks;
-    summary.notarizations += item.summary.notarizations;
-    summary.finalizations += item.summary.finalizations;
-    summary.finalizedHeightIndexes += item.summary.finalizedHeightIndexes;
-    entries.push(...item.entries);
-  }
-  return { entries, summary };
-}
-
 function u64At(bytes: Uint8Array, offset: number): bigint {
   let value = 0n;
   for (let i = offset; i < offset + 8; i++) {
@@ -758,24 +738,7 @@ export class SimplexClient<TNotarization = unknown, TFinalization = unknown> {
   }
 
   prepareNotarization(input: NotarizationUpload): PreparedSimplexUpload {
-    const entries: PreparedSimplexUpload[] = [];
-    if (
-      input.header !== undefined ||
-      input.digest !== undefined ||
-      input.body !== undefined
-    ) {
-      if (input.header === undefined || input.digest === undefined) {
-        throw new Error('header and digest must be provided together');
-      }
-      entries.push(
-        this.prepareBlock({
-          header: input.header,
-          digest: input.digest,
-          body: input.body,
-        }),
-      );
-    }
-    entries.push({
+    return {
       entries: [
         {
           key: notarizationByRoundKey(input.epoch, input.view),
@@ -783,30 +746,12 @@ export class SimplexClient<TNotarization = unknown, TFinalization = unknown> {
         },
       ],
       summary: { ...emptySummary(), notarizations: 1 },
-    });
-    return mergePrepared(entries);
+    };
   }
 
   prepareFinalization(input: FinalizationUpload): PreparedSimplexUpload {
-    const entries: PreparedSimplexUpload[] = [];
-    if (
-      input.header !== undefined ||
-      input.digest !== undefined ||
-      input.body !== undefined
-    ) {
-      if (input.header === undefined || input.digest === undefined) {
-        throw new Error('header and digest must be provided together');
-      }
-      entries.push(
-        this.prepareBlock({
-          header: input.header,
-          digest: input.digest,
-          body: input.body,
-        }),
-      );
-    }
     const finalized = toSimplexBytes(input.finalized);
-    entries.push({
+    return {
       entries: [
         {
           key: finalizationByRoundKey(input.epoch, input.view),
@@ -818,8 +763,7 @@ export class SimplexClient<TNotarization = unknown, TFinalization = unknown> {
         },
       ],
       summary: { ...emptySummary(), finalizations: 1, finalizedHeightIndexes: 1 },
-    });
-    return mergePrepared(entries);
+    };
   }
 
   stageUpload(upload: PreparedSimplexUpload, batch = new StoreWriteBatch()): StoreWriteBatch {

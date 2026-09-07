@@ -15,11 +15,11 @@ mod common;
 
 use std::num::NonZeroU64;
 
-use commonware_codec::Encode;
 use commonware_cryptography::Sha256;
 use commonware_runtime::tokio as cw_tokio;
 use commonware_runtime::{buffer::paged::CacheRef, Runner as _, Supervisor as _};
 use commonware_storage::merkle::{mmr, Location};
+use commonware_storage::qmdb::operation::Operation as _;
 use commonware_storage::qmdb::{
     any::ordered::variable::Operation as OrderedOp,
     current::ordered::variable::Db as LocalOrderedDb,
@@ -315,7 +315,7 @@ async fn mirror_ordered_prune_past_chunk_zero() {
     assert_eq!(old_range.watermark, first.watermark);
     assert_eq!(old_range.entries.len(), 1);
     let entry = &old_range.entries[0];
-    assert_eq!(entry.key, b"k-00000000".to_vec().encode().to_vec());
-    assert_eq!(entry.proof.root, first.root);
-    assert!(entry.proof.verify::<Sha256>());
+    assert_eq!(entry.operation.key(), Some(&b"k-00000000".to_vec()));
+    assert_eq!(entry.root, first.root);
+    assert!(entry.verify::<Sha256>());
 }

@@ -148,7 +148,6 @@ pub(crate) struct AggregatePushdownSpec {
 pub(crate) struct KvAggregateExec {
     pub(crate) spec: AggregatePushdownSpec,
     pub(crate) projection: Option<Vec<usize>>,
-    pub(crate) projected_schema: SchemaRef,
     pub(crate) properties: Arc<PlanProperties>,
 }
 
@@ -302,7 +301,7 @@ impl KvAggregateExec {
         projected_schema: SchemaRef,
     ) -> Self {
         let properties = Arc::new(PlanProperties::new(
-            EquivalenceProperties::new(projected_schema.clone()),
+            EquivalenceProperties::new(projected_schema),
             Partitioning::UnknownPartitioning(1),
             EmissionType::Incremental,
             Boundedness::Bounded,
@@ -310,7 +309,6 @@ impl KvAggregateExec {
         Self {
             spec,
             projection,
-            projected_schema,
             properties,
         }
     }
@@ -344,10 +342,6 @@ impl DisplayAs for KvAggregateExec {
 impl ExecutionPlan for KvAggregateExec {
     fn name(&self) -> &str {
         "KvAggregateExec"
-    }
-
-    fn schema(&self) -> SchemaRef {
-        self.projected_schema.clone()
     }
 
     fn properties(&self) -> &Arc<PlanProperties> {
@@ -389,11 +383,11 @@ impl ExecutionPlan for KvAggregateExec {
         }
 
         Ok(Box::pin(RecordBatchStreamAdapter::new(
-            self.projected_schema.clone(),
+            self.schema(),
             futures::stream::once(execute_aggregate_pushdown(
                 self.spec.clone(),
                 self.projection.clone(),
-                self.projected_schema.clone(),
+                self.schema(),
             )),
         )))
     }

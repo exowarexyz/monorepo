@@ -24,8 +24,8 @@ use commonware_storage::{
             ordered, unordered,
             value::{ValueEncoding, VariableEncoding},
         },
-        current::ordered::{db::KeyValueProof, ExclusionProof},
-        current::proof::{OpsRootWitness, RangeProof},
+        current::ordered::ExclusionProof,
+        current::proof::{OperationProof, OpsRootWitness, RangeProof},
         current::unordered::db::KeyValueProof as UnorderedKeyValueProof,
         operation::Key as QmdbKey,
         sync::{
@@ -44,8 +44,8 @@ use http_body::Body;
 
 use crate::codec::decode_digest;
 use crate::proof::{
-    verify_ordered_exclusion_proof, verify_ordered_key_value_proof, VerifiedKeyLookup,
-    VerifiedKeyRange, VerifiedKeyValue, VerifiedUnorderedKeyValue,
+    verify_ordered_exclusion_proof, VerifiedKeyLookup, VerifiedKeyRange, VerifiedKeyValue,
+    VerifiedUnorderedKeyValue,
 };
 use crate::QmdbError;
 
@@ -186,7 +186,6 @@ where
             proof,
             expected_root,
             self.op_cfg.as_ref(),
-            self.key_cfg.as_ref(),
         )?;
         let ordered::Operation::Update(update) = &verified.operation else {
             return Err(QmdbError::CorruptData(
@@ -248,7 +247,6 @@ where
                             proof,
                             expected_root,
                             self.op_cfg.as_ref(),
-                            self.key_cfg.as_ref(),
                         )?;
                         let ordered::Operation::Update(update) = &verified.operation else {
                             return Err(QmdbError::CorruptData(
@@ -1153,7 +1151,6 @@ fn verify_key_value_from_proto<F, H, K, V, const N: usize, E>(
     proto: &ProtoCurrentKeyValueProof,
     root: &H::Digest,
     op_cfg: &<ordered::Operation<F, K, E> as Read>::Cfg,
-    key_cfg: &K::Cfg,
 ) -> Result<VerifiedKeyValue<H::Digest, K, V, F, E>, QmdbError>
 where
     F: Graftable,
@@ -1162,7 +1159,6 @@ where
     K: QmdbKey + commonware_codec::Codec,
     V: commonware_codec::Codec + Clone + Send + Sync,
     E: ValueEncoding<Value = V>,
-    K::Cfg: Clone,
     ordered::Operation<F, K, E>: Decode + Encode + Read,
 {
     let operation =
@@ -1172,37 +1168,24 @@ where
                     "failed to decode current key-value operation: {err}",
                 ))
             })?;
-    let ordered::Operation::Update(update) = &operation else {
+    let ordered::Operation::Update(_) = &operation else {
         return Err(QmdbError::CorruptData(
             "current key-value proof operation must be an update".to_string(),
         ));
     };
     let max_digests = proof_digest_cap::<H::Digest>(&proto.proof);
-    let proof = KeyValueProof::<F, K, H::Digest, N>::decode_cfg(
-        proto.proof.as_ref(),
-        &(max_digests, key_cfg.clone()),
-    )
-    .map_err(|err| {
+    let proof = OperationProof::<F, H::Digest, N>::decode_cfg(proto.proof.as_ref(), &max_digests)
+        .map_err(|err| {
         QmdbError::CorruptData(format!("failed to decode current key-value proof: {err}"))
     })?;
-    if proof.next_key != update.next_key {
-        return Err(QmdbError::ProofVerification {
-            kind: crate::ProofKind::CurrentKeyValue,
-        });
-    }
-    if !verify_ordered_key_value_proof::<F, H, K, E, N>(
-        update.key.clone(),
-        update.value.clone(),
-        &proof,
-        root,
-    ) {
+    if !proof.verify::<H, _>(operation.clone(), root) {
         return Err(QmdbError::ProofVerification {
             kind: crate::ProofKind::CurrentKeyValue,
         });
     }
     Ok(VerifiedKeyValue {
         root: *root,
-        location: proof.proof.loc,
+        location: proof.loc,
         operation,
     })
 }
@@ -1345,26 +1328,10 @@ where
         })
         .transpose()?;
     let mut entries = Vec::with_capacity(response.entries.len());
-    for entry in &response.entries {
-        let proof = entry.proof.as_option().ok_or_else(|| {
-            QmdbError::CorruptData("qmdb get_range entry missing proof".to_string())
-        })?;
-        let verified =
-            verify_key_value_from_proto::<F, H, K, V, N, E>(proof, root, op_cfg, key_cfg)?;
-        let ordered::Operation::Update(update) = &verified.operation else {
-            return Err(QmdbError::CorruptData(
-                "qmdb get_range entry proof did not verify an update".to_string(),
-            ));
-        };
-        let entry_key = K::decode_cfg(entry.key.as_slice(), key_cfg).map_err(|err| {
-            QmdbError::CorruptData(format!("failed to decode range entry key: {err}"))
-        })?;
-        if update.key != entry_key {
-            return Err(QmdbError::ProofVerification {
-                kind: crate::ProofKind::CurrentKeyValue,
-            });
-        }
-        entries.push(verified);
+    for proof in &response.entries {
+        entries.push(verify_key_value_from_proto::<F, H, K, V, N, E>(
+            proof, root, op_cfg,
+        )?);
     }
 
     let keys = entries
@@ -1389,26 +1356,18 @@ where
     } else {
         None
     };
-    let next_start = (!response.next_start_key.is_empty())
-        .then(|| K::decode_cfg(response.next_start_key.as_slice(), key_cfg))
-        .transpose()
-        .map_err(|err| {
-            QmdbError::CorruptData(format!("failed to decode range continuation: {err}"))
-        })?;
-    validate_key_range(
+    let next_start_key = validate_key_range(
         &start_key,
         end_key.as_ref(),
         limit,
         &keys,
         start_successor.as_ref(),
-        response.has_more,
-        next_start.as_ref(),
     )
-    .map_err(QmdbError::RangeMismatch)?;
+    .map_err(QmdbError::RangeMismatch)?
+    .map(Encode::encode);
 
     Ok(VerifiedKeyRange {
         entries,
-        has_more: response.has_more,
-        next_start_key: Bytes::from(response.next_start_key.clone()),
+        next_start_key,
     })
 }

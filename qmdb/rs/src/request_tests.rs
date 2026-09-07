@@ -60,18 +60,11 @@ fn linear_key_ranges_match_sorted_map_pages() {
                     })
                     .collect::<Vec<_>>();
                 let successor = keys.iter().find(|key| **key > start).or(keys.first());
-                let more = matching.len() > limit as usize;
-                let next = more.then(|| selected.last().unwrap().1);
-                assert!(validate_key_range(
-                    &start,
-                    Some(&end),
-                    limit,
-                    &selected,
-                    successor,
-                    more,
-                    next
-                )
-                .is_ok());
+                let next = matching.get(limit as usize).copied();
+                assert_eq!(
+                    validate_key_range(&start, Some(&end), limit, &selected, successor).unwrap(),
+                    next,
+                );
             }
         }
     }
@@ -79,51 +72,21 @@ fn linear_key_ranges_match_sorted_map_pages() {
 
 #[test]
 fn key_ranges_reject_wraparound_and_incomplete_pages() {
-    assert!(validate_key_range(&1, Some(&7), 3, &[], Some(&2), false, None).is_err());
-    assert!(validate_key_range(&1, Some(&7), 3, &[(&2, &4)], Some(&2), false, None).is_err());
-    assert!(validate_key_range(
-        &4,
-        None,
-        3,
-        &[(&4, &6), (&6, &2), (&2, &4)],
-        None,
-        false,
-        None
-    )
-    .is_err());
-    assert!(validate_key_range(&4, Some(&6), 2, &[(&4, &6)], None, true, Some(&6)).is_err());
-    assert!(validate_key_range(
-        &1,
-        Some(&7),
-        1,
-        &[(&2, &4), (&4, &6)],
-        Some(&2),
-        false,
-        None
-    )
-    .is_err());
-    // A complete page cannot carry a continuation
-    assert!(validate_key_range(
-        &1,
-        Some(&7),
-        3,
-        &[(&2, &4), (&4, &6), (&6, &2)],
-        Some(&2),
-        false,
-        Some(&2)
-    )
-    .is_err());
+    assert!(validate_key_range(&1, Some(&7), 3, &[], Some(&2)).is_err());
+    assert!(validate_key_range(&1, Some(&7), 3, &[(&2, &4)], Some(&2)).is_err());
+    assert!(validate_key_range(&4, None, 3, &[(&4, &6), (&6, &2), (&2, &4)], None).is_err());
+    assert!(validate_key_range(&1, Some(&7), 1, &[(&2, &4), (&4, &6)], Some(&2)).is_err());
     // An empty-database start proof cannot precede entries
-    assert!(validate_key_range(&1, Some(&7), 3, &[(&2, &4)], None, false, None).is_err());
-    // The continuation must be the last entry's authenticated successor
-    assert!(validate_key_range(&1, Some(&7), 1, &[(&2, &4)], Some(&2), true, Some(&5)).is_err());
+    assert!(validate_key_range(&1, Some(&7), 3, &[(&2, &4)], None).is_err());
 }
 
 #[test]
 fn single_key_databases_accept_self_successors() {
-    assert!(validate_key_range(&0, None, 5, &[(&3, &3)], Some(&3), false, None).is_ok());
-    assert!(validate_key_range(&3, None, 5, &[(&3, &3)], None, false, None).is_ok());
+    assert_eq!(
+        validate_key_range(&0, None, 5, &[(&3, &3)], Some(&3)),
+        Ok(None)
+    );
+    assert_eq!(validate_key_range(&3, None, 5, &[(&3, &3)], None), Ok(None));
     // A start above the only key wraps to it, so an empty page is complete
-    assert!(validate_key_range(&4, None, 5, &[], Some(&3), false, None).is_ok());
-    assert!(validate_key_range(&0, None, 5, &[(&3, &3)], Some(&3), true, Some(&3)).is_err());
+    assert_eq!(validate_key_range(&4, None, 5, &[], Some(&3)), Ok(None));
 }

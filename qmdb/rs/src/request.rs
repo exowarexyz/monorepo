@@ -73,15 +73,13 @@ pub(crate) fn span_contains<K: Ord>(start: &K, end: &K, key: &K) -> bool {
 }
 
 /// Entries and the start exclusion's successor must already be authenticated
-pub(crate) fn validate_key_range<K: Ord>(
+pub(crate) fn validate_key_range<'a, K: Ord>(
     start: &K,
     end: Option<&K>,
     limit: u32,
-    entries: &[(&K, &K)],
+    entries: &[(&'a K, &'a K)],
     start_successor: Option<&K>,
-    has_more: bool,
-    next_start: Option<&K>,
-) -> Result<(), &'static str> {
+) -> Result<Option<&'a K>, &'static str> {
     if limit == 0 || end.is_some_and(|end| end <= start) || entries.len() > limit as usize {
         return Err("invalid key range bounds or entry count");
     }
@@ -102,26 +100,13 @@ pub(crate) fn validate_key_range<K: Ord>(
     } else if start_successor.is_some_and(|next| next > start && end.is_none_or(|end| next < end)) {
         return Err("empty key range omits an in-range successor");
     }
-    match entries.last() {
-        Some(&(last, next)) if has_more => {
-            if entries.len() != limit as usize
-                || next <= last
-                || end.is_some_and(|end| next >= end)
-                || next_start != Some(next)
-            {
-                return Err("key range continuation does not advance within requested interval");
-            }
-        }
-        Some(&(last, next)) => {
-            if next > last && end.is_none_or(|end| next < end) {
+    if let Some(&(last, next)) = entries.last() {
+        if next > last && end.is_none_or(|end| next < end) {
+            if entries.len() != limit as usize {
                 return Err("key range stops before an in-range successor");
             }
+            return Ok(Some(next));
         }
-        None if has_more => return Err("empty key range cannot have a continuation"),
-        None => {}
     }
-    if !has_more && next_start.is_some() {
-        return Err("complete key range has an unexpected continuation");
-    }
-    Ok(())
+    Ok(None)
 }

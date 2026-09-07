@@ -13,14 +13,13 @@ use datafusion::physical_expr::{
 };
 use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
 use datafusion::physical_plan::{
-    stream::RecordBatchStreamAdapter, DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties,
-    SendableRecordBatchStream, SortOrderPushdownResult,
+    stream::RecordBatchReceiverStreamBuilder, DisplayAs, DisplayFormatType, ExecutionPlan,
+    PlanProperties, SendableRecordBatchStream, SortOrderPushdownResult,
 };
 use exoware_sdk::keys::Key;
 use exoware_sdk::kv_codec::decode_stored_row;
 use exoware_sdk::PrefixedStoreClient;
 use exoware_sdk::{RangeMode, RangeStream, SerializableReadSession};
-use futures::SinkExt;
 
 use crate::builder::*;
 use crate::codec::*;
@@ -60,7 +59,6 @@ pub(crate) struct KvScanExec {
     pub(crate) fetch: Option<usize>,
     /// Without a required ordering, traversal is unconstrained and defaults to forward.
     ordering: Option<ScanOrdering>,
-    pub(crate) projected_schema: SchemaRef,
     pub(crate) projection: Option<Vec<usize>>,
     pub(crate) properties: Arc<PlanProperties>,
 }
@@ -72,10 +70,10 @@ impl KvScanExec {
     ) -> Arc<PlanProperties> {
         let equivalence_properties = match ordering {
             Some(ordering) => EquivalenceProperties::new_with_orderings(
-                projected_schema.clone(),
+                projected_schema,
                 [ordering.expressions.clone()],
             ),
-            None => EquivalenceProperties::new(projected_schema.clone()),
+            None => EquivalenceProperties::new(projected_schema),
         };
         Arc::new(PlanProperties::new(
             equivalence_properties,
@@ -94,7 +92,7 @@ impl KvScanExec {
         projected_schema: SchemaRef,
         projection: Option<Vec<usize>>,
     ) -> Self {
-        let properties = Self::make_properties(projected_schema.clone(), None);
+        let properties = Self::make_properties(projected_schema, None);
         Self {
             client,
             model,
@@ -102,14 +100,13 @@ impl KvScanExec {
             predicate,
             fetch,
             ordering: None,
-            projected_schema,
             projection,
             properties,
         }
     }
 
     fn with_scan_options(&self, fetch: Option<usize>, ordering: Option<ScanOrdering>) -> Self {
-        let properties = Self::make_properties(self.projected_schema.clone(), ordering.as_ref());
+        let properties = Self::make_properties(self.schema(), ordering.as_ref());
         Self {
             client: self.client.clone(),
             model: self.model.clone(),
@@ -117,7 +114,6 @@ impl KvScanExec {
             predicate: self.predicate.clone(),
             fetch,
             ordering,
-            projected_schema: self.projected_schema.clone(),
             projection: self.projection.clone(),
             properties,
         }
@@ -253,10 +249,6 @@ impl ExecutionPlan for KvScanExec {
         "KvScanExec"
     }
 
-    fn schema(&self) -> SchemaRef {
-        self.projected_schema.clone()
-    }
-
     fn properties(&self) -> &Arc<PlanProperties> {
         &self.properties
     }
@@ -295,7 +287,8 @@ impl ExecutionPlan for KvScanExec {
             )));
         }
 
-        let (mut tx, rx) = futures::channel::mpsc::channel::<DataFusionResult<RecordBatch>>(2);
+        let mut builder = RecordBatchReceiverStreamBuilder::new(self.schema(), 2);
+        let tx = builder.tx();
         let session = self.client.create_session();
         let model = self.model.clone();
         let index_specs = self.index_specs.clone();
@@ -303,10 +296,10 @@ impl ExecutionPlan for KvScanExec {
         let fetch = self.fetch;
         let direction = self.scan_direction();
         let projection = self.projection.clone();
-        let projected_schema = self.projected_schema.clone();
-        let access_plan = Arc::new(ScanAccessPlan::new(&model, &projection, &predicate));
+        let projected_schema = self.schema();
+        let access_plan = ScanAccessPlan::new(&model, &projection, &predicate);
 
-        tokio::spawn(async move {
+        builder.spawn(async move {
             let ctx = ScanCtx {
                 session: &session,
                 model: &model,
@@ -314,15 +307,13 @@ impl ExecutionPlan for KvScanExec {
                 projected_schema: &projected_schema,
                 access_plan: &access_plan,
             };
-            if let Err(e) = stream_kv_scan(&mut tx, &ctx, &index_specs, fetch, direction).await {
+            if let Err(e) = stream_kv_scan(&tx, &ctx, &index_specs, fetch, direction).await {
                 let _ = tx.send(Err(e)).await;
             }
+            Ok(())
         });
 
-        Ok(Box::pin(RecordBatchStreamAdapter::new(
-            self.projected_schema.clone(),
-            rx,
-        )))
+        Ok(builder.build())
     }
 
     fn with_fetch(&self, limit: Option<usize>) -> Option<Arc<dyn ExecutionPlan>> {
@@ -389,7 +380,7 @@ pub(crate) struct ScanCtx<'a> {
 }
 
 pub(crate) async fn flush_projected_batch(
-    tx: &mut futures::channel::mpsc::Sender<DataFusionResult<RecordBatch>>,
+    tx: &tokio::sync::mpsc::Sender<DataFusionResult<RecordBatch>>,
     ctx: &ScanCtx<'_>,
     batch_builder: &mut ProjectedBatchBuilder,
     emitted: &mut usize,
@@ -411,7 +402,7 @@ pub(crate) async fn flush_projected_batch(
 }
 
 pub(crate) async fn stream_kv_scan(
-    tx: &mut futures::channel::mpsc::Sender<DataFusionResult<RecordBatch>>,
+    tx: &tokio::sync::mpsc::Sender<DataFusionResult<RecordBatch>>,
     ctx: &ScanCtx<'_>,
     index_specs: &[ResolvedIndexSpec],
     limit: Option<usize>,
@@ -448,7 +439,7 @@ pub(crate) async fn stream_kv_scan(
 }
 
 pub(crate) async fn stream_pk_scan(
-    tx: &mut futures::channel::mpsc::Sender<DataFusionResult<RecordBatch>>,
+    tx: &tokio::sync::mpsc::Sender<DataFusionResult<RecordBatch>>,
     ctx: &ScanCtx<'_>,
     flush_threshold: usize,
     target_rows: usize,
@@ -521,7 +512,7 @@ pub(crate) async fn stream_pk_scan(
 }
 
 pub(crate) async fn stream_index_lookup_scan(
-    tx: &mut futures::channel::mpsc::Sender<DataFusionResult<RecordBatch>>,
+    tx: &tokio::sync::mpsc::Sender<DataFusionResult<RecordBatch>>,
     ctx: &ScanCtx<'_>,
     index_specs: &[ResolvedIndexSpec],
     plan: &IndexPlan,
@@ -539,7 +530,7 @@ pub(crate) async fn stream_index_lookup_scan(
     let mut emitted = 0usize;
     let mut batch_builder = ProjectedBatchBuilder::from_access_plan(ctx.model, ctx.access_plan);
 
-    for range in &plan.ranges {
+    'ranges: for range in &plan.ranges {
         if emitted + batch_builder.row_count() >= target_rows {
             break;
         }
@@ -558,9 +549,6 @@ pub(crate) async fn stream_index_lookup_scan(
         {
             let mut pk_batch: Vec<Key> = Vec::new();
             for (key, _index_value) in &chunk.rows {
-                if emitted + batch_builder.row_count() + pk_batch.len() >= target_rows {
-                    break;
-                }
                 if !key_predicate_plan.matches_key(key) {
                     continue;
                 }
@@ -614,6 +602,10 @@ pub(crate) async fn stream_index_lookup_scan(
                         if !batch_builder.append_archived_row(&pk_values, &archived)? {
                             continue;
                         }
+                        // Only rows that survive the base-row checks count toward the limit
+                        if emitted + batch_builder.row_count() >= target_rows {
+                            break 'ranges;
+                        }
                         if batch_builder.row_count() >= flush_threshold
                             && !flush_projected_batch(tx, ctx, &mut batch_builder, &mut emitted)
                                 .await?
@@ -623,10 +615,6 @@ pub(crate) async fn stream_index_lookup_scan(
                     }
                 }
             }
-
-            if emitted + batch_builder.row_count() >= target_rows {
-                break;
-            }
         }
     }
     let _ = flush_projected_batch(tx, ctx, &mut batch_builder, &mut emitted).await?;
@@ -634,7 +622,7 @@ pub(crate) async fn stream_index_lookup_scan(
 }
 
 pub(crate) async fn stream_index_scan(
-    tx: &mut futures::channel::mpsc::Sender<DataFusionResult<RecordBatch>>,
+    tx: &tokio::sync::mpsc::Sender<DataFusionResult<RecordBatch>>,
     ctx: &ScanCtx<'_>,
     index_specs: &[ResolvedIndexSpec],
     plan: &IndexPlan,

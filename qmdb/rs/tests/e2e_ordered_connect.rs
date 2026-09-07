@@ -499,7 +499,7 @@ async fn ordered_connect_get_range_verifies_complete_empty_and_partial_pages() {
         )
         .await
         .expect("complete get_range");
-    assert!(!complete.has_more);
+    assert!(complete.next_start_key.is_none());
     let complete_keys = complete
         .entries
         .iter()
@@ -523,9 +523,8 @@ async fn ordered_connect_get_range_verifies_complete_empty_and_partial_pages() {
         )
         .await
         .expect("partial get_range");
-    assert!(partial.has_more);
     assert_eq!(partial.entries.len(), 1);
-    assert_eq!(partial.next_start_key, encoded_key(b"beta"));
+    assert_eq!(partial.next_start_key, Some(encoded_key(b"beta").into()));
 
     let empty = client
         .get_range(
@@ -540,7 +539,7 @@ async fn ordered_connect_get_range_verifies_complete_empty_and_partial_pages() {
         )
         .await
         .expect("empty get_range");
-    assert!(!empty.has_more);
+    assert!(empty.next_start_key.is_none());
     assert!(empty.entries.is_empty());
 }
 
@@ -917,7 +916,6 @@ async fn ordered_connect_client_rejects_get_range_page_shorter_than_limit() {
         .expect("get_range")
         .into_view()
         .to_owned_message();
-    assert!(raw_get_range_response.has_more);
     assert_eq!(raw_get_range_response.entries.len(), 1);
 
     let (_static_server, static_url) = spawn_static_server(StaticQmdbService {
@@ -939,6 +937,6 @@ async fn ordered_connect_client_rejects_get_range_page_shorter_than_limit() {
             &local.current_boundary.root,
         )
         .await
-        .expect_err("a page shorter than the requested limit must not claim a continuation");
+        .expect_err("a short page must not omit an in-range successor");
     assert!(matches!(err, QmdbError::RangeMismatch(_)), "{err}");
 }

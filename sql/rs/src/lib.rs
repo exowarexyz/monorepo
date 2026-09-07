@@ -8063,6 +8063,78 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn kv_scan_index_lookup_limit_counts_rows_after_residual_filtering() {
+        let state = MockState {
+            kv: Arc::new(Mutex::new(BTreeMap::new())),
+            range_calls: Arc::new(AtomicUsize::new(0)),
+            range_reduce_calls: Arc::new(AtomicUsize::new(0)),
+            sequence_number: Arc::new(AtomicU64::new(0)),
+        };
+        let (base_url, shutdown_tx) = spawn_mock_server(state).await;
+        let schema = KvSchema::new(PrefixedStoreClient::empty(StoreClient::new(&base_url)))
+            .table(
+                "orders",
+                vec![
+                    TableColumnConfig::new("id", DataType::Int64, false),
+                    TableColumnConfig::new("status", DataType::Utf8, false),
+                    TableColumnConfig::new("amount_cents", DataType::Int64, false),
+                ],
+                vec!["id".to_string()],
+                vec![IndexSpec::new("status_idx", vec!["status".to_string()]).expect("index")],
+            )
+            .expect("schema");
+        let mut writer = schema.batch_writer();
+        for (id, amount) in [(1, 20), (2, 0), (3, 10), (4, 20)] {
+            writer
+                .insert(
+                    "orders",
+                    vec![
+                        CellValue::Int64(id),
+                        CellValue::Utf8("open".to_string()),
+                        CellValue::Int64(amount),
+                    ],
+                )
+                .expect("row");
+        }
+        writer.flush().await.expect("seed rows");
+
+        let ctx = SessionContext::new();
+        schema.register_all(&ctx).expect("register");
+        // The two-row index frames contain one matching row followed by a rejection,
+        // then a row whose residual predicate can either fail or satisfy the limit
+        for minimum in [20, 10] {
+            let mut plan = ctx
+                .sql(&format!(
+                    "SELECT id FROM orders WHERE status = 'open' AND amount_cents >= {minimum} LIMIT 2"
+                ))
+                .await
+                .expect("query")
+                .create_physical_plan()
+                .await
+                .expect("physical plan");
+            // Read the scan directly so an outer limit cannot hide excess output
+            while let Some(child) = plan.children().first() {
+                plan = (*child).clone();
+            }
+            assert!(plan.downcast_ref::<KvScanExec>().is_some());
+            assert_eq!(plan.fetch(), Some(2));
+            let batches = datafusion::physical_plan::collect(plan, ctx.task_ctx())
+                .await
+                .expect("collect scan");
+            let mut ids = collect_i64_column(&batches, 0);
+            ids.sort_unstable();
+            assert_eq!(ids.len(), 2, "minimum {minimum}: {ids:?}");
+            if minimum == 20 {
+                assert_eq!(ids, vec![1, 4]);
+            } else {
+                assert!(ids.iter().all(|id| [1, 3, 4].contains(id)));
+                assert_ne!(ids[0], ids[1]);
+            }
+        }
+        let _ = shutdown_tx.send(());
+    }
+
+    #[tokio::test]
     async fn kv_scan_index_limit_does_not_push_upstream_when_seen_dedup_can_drop_entries() {
         let observed_limit = Arc::new(AtomicUsize::new(0));
         let config = KvTableConfig::new(

@@ -80,10 +80,6 @@ impl SimplexClient {
         Self { client }
     }
 
-    pub fn store_client(&self) -> &PrefixedStoreClient {
-        &self.client
-    }
-
     pub fn into_store_client(self) -> PrefixedStoreClient {
         self.client
     }
@@ -169,33 +165,6 @@ impl SimplexClient {
         );
         Ok(prepared)
     }
-
-    pub fn stage_upload(
-        &self,
-        prepared: &PreparedUpload,
-        batch: &mut StoreWriteBatch,
-    ) -> Result<(), SimplexError> {
-        if prepared.is_empty() {
-            return Err(SimplexError::EmptyUpload);
-        }
-        for entry in prepared.entries() {
-            batch.push(&self.client, &entry.key, entry.value.clone())?;
-        }
-        Ok(())
-    }
-
-    pub async fn mark_upload_persisted(
-        &self,
-        prepared: PreparedUpload,
-        sequence_number: u64,
-    ) -> UploadReceipt {
-        UploadReceipt {
-            store_sequence_number: sequence_number,
-            summary: prepared.summary,
-        }
-    }
-
-    pub async fn mark_upload_failed(&self, _prepared: PreparedUpload, _err: impl ToString) {}
 
     pub async fn upload_header<B>(&self, header: &B) -> Result<UploadReceipt, SimplexError>
     where
@@ -431,7 +400,13 @@ impl StoreBatchUpload for SimplexClient {
         prepared: &mut Self::Prepared,
         batch: &mut StoreWriteBatch,
     ) -> Result<(), Self::Error> {
-        SimplexClient::stage_upload(self, prepared, batch)
+        if prepared.is_empty() {
+            return Err(SimplexError::EmptyUpload);
+        }
+        for entry in prepared.entries() {
+            batch.push(&self.client, &entry.key, entry.value.clone())?;
+        }
+        Ok(())
     }
 
     fn commit_error(&self, error: ClientError) -> Self::Error {
@@ -448,7 +423,12 @@ impl StoreBatchUpload for SimplexClient {
         Self::Prepared: 'a,
     {
         Box::pin(async move {
-            SimplexClient::mark_upload_persisted(self, prepared, sequence_number).await
+            let summary = prepared.summary();
+            drop(prepared);
+            UploadReceipt {
+                store_sequence_number: sequence_number,
+                summary,
+            }
         })
     }
 
@@ -462,7 +442,7 @@ impl StoreBatchUpload for SimplexClient {
         Self::Prepared: 'a,
     {
         Box::pin(async move {
-            SimplexClient::mark_upload_failed(self, prepared, error).await;
+            drop((prepared, error));
         })
     }
 }

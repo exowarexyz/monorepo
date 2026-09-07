@@ -1,7 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::marker::PhantomData;
 
-use bytes::Bytes;
 use commonware_codec::{Codec, Decode, DecodeExt, Encode};
 use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
@@ -13,7 +12,7 @@ use commonware_storage::{
             value::{ValueEncoding, VariableEncoding},
         },
         current::{
-            ordered::{db::KeyValueProof, ExclusionProof},
+            ordered::ExclusionProof,
             proof::{OperationProof, OpsRootWitness, RangeProof},
         },
         operation::{Key as QmdbKey, Operation as _},
@@ -34,8 +33,8 @@ use crate::core::HistoricalOpsClientCore;
 use crate::error::{error_key, QmdbError};
 use crate::proof::{
     CurrentOperationRangeProofResult, OperationRangeCheckpoint, RawBatchMultiProof,
-    RawKeyExclusionProof, RawKeyLookupProof, RawKeyRangeEntry, RawKeyRangeProof, RawKeyValueProof,
-    RawMultiProof, VariantRoot, VerifiedCurrentRange, VerifiedKeyValue, VerifiedMultiOperations,
+    RawKeyExclusionProof, RawKeyLookupProof, RawKeyRangeProof, RawKeyValueProof, RawMultiProof,
+    VariantRoot, VerifiedCurrentRange, VerifiedKeyValue, VerifiedMultiOperations,
     VerifiedOperationRange, VerifiedVariantRange,
 };
 use crate::request::span_contains;
@@ -711,13 +710,9 @@ where
             )));
         }
         let root = self.load_current_boundary_root(session, watermark).await?;
-        let operation_proof = self
+        let proof = self
             .build_current_operation_proof(session, watermark, location)
             .await?;
-        let proof = KeyValueProof {
-            proof: operation_proof,
-            next_key: update.next_key.clone(),
-        };
 
         let raw = RawKeyValueProof {
             watermark,
@@ -755,7 +750,7 @@ where
         let raw = self.key_value_proof_raw_at(watermark, key).await?;
         Ok(VerifiedKeyValue {
             root: raw.root,
-            location: raw.proof.proof.loc,
+            location: raw.proof.loc,
             operation: raw.operation,
         })
     }
@@ -994,30 +989,25 @@ where
         let active = self
             .active_ordered_updates_in_session(&session, watermark)
             .await?;
-        let matching: Vec<_> = active
+        let selected = active
             .into_iter()
             .filter(|entry| {
                 entry.key >= start_key && end_key.as_ref().is_none_or(|end| entry.key < *end)
             })
-            .collect();
-        let limit = limit as usize;
-        let has_more = matching.len() > limit;
-        let selected = matching.into_iter().take(limit).collect::<Vec<_>>();
+            .take(limit as usize)
+            .collect::<Vec<_>>();
 
         let mut entries = Vec::with_capacity(selected.len());
         for entry in &selected {
             let proof = self
                 .key_value_proof_raw_in_session(&session, watermark, entry.key.as_ref())
                 .await?;
-            entries.push(RawKeyRangeEntry {
-                key: entry.key.encode(),
-                proof,
-            });
+            entries.push(proof);
         }
 
         let start_proof = if entries
             .first()
-            .is_some_and(|entry| entry.proof.operation.key() == Some(&start_key))
+            .is_some_and(|entry| entry.operation.key() == Some(&start_key))
         {
             None
         } else {
@@ -1027,28 +1017,10 @@ where
             )
         };
 
-        let next_start_key = if has_more {
-            entries
-                .last()
-                .and_then(|entry| match &entry.proof.operation {
-                    ordered::Operation::Update(update) => Some(update.next_key.encode()),
-                    _ => None,
-                })
-                .ok_or_else(|| {
-                    QmdbError::CorruptData(
-                        "truncated key range did not include a final update entry".to_string(),
-                    )
-                })?
-        } else {
-            Bytes::new()
-        };
-
         Ok(RawKeyRangeProof {
             watermark,
             entries,
             start_proof,
-            has_more,
-            next_start_key,
         })
     }
 

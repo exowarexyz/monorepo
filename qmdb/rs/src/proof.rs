@@ -12,8 +12,8 @@ use commonware_storage::{
             value::{ValueEncoding, VariableEncoding},
         },
         current::{
-            ordered::{db::KeyValueProof, ExclusionProof},
-            proof::{OpsRootWitness, RangeProof},
+            ordered::ExclusionProof,
+            proof::{OperationProof, OpsRootWitness, RangeProof},
             unordered::db::KeyValueProof as UnorderedKeyValueProof,
         },
         operation::Key as QmdbKey,
@@ -322,7 +322,7 @@ pub struct RawKeyValueProof<
 > {
     pub watermark: Location<F>,
     pub root: D,
-    pub proof: KeyValueProof<F, K, D, N>,
+    pub proof: OperationProof<F, D, N>,
     pub operation: ordered::Operation<F, K, E>,
 }
 
@@ -344,22 +344,6 @@ type OrderedVerifierDb<F, K, E, H, const N: usize> =
         N,
         commonware_parallel::Sequential,
     >;
-
-pub(crate) fn verify_ordered_key_value_proof<F, H, K, E, const N: usize>(
-    key: K,
-    value: E::Value,
-    proof: &KeyValueProof<F, K, H::Digest, N>,
-    root: &H::Digest,
-) -> bool
-where
-    F: Graftable,
-    H: Hasher,
-    K: QmdbKey + Codec,
-    E: ValueEncoding,
-    ordered::Operation<F, K, E>: Codec,
-{
-    OrderedVerifierDb::<F, K, E, H, N>::verify_key_value_proof(key, value, proof, root)
-}
 
 pub(crate) fn verify_ordered_exclusion_proof<F, H, K, E, const N: usize>(
     key: &K,
@@ -388,18 +372,10 @@ where
     ordered::Operation<F, K, E>: Codec + Clone,
 {
     pub fn verify<H: Hasher<Digest = D>>(&self) -> bool {
-        let ordered::Operation::Update(update) = &self.operation else {
-            return false;
-        };
-        if self.proof.next_key != update.next_key {
-            return false;
-        }
-        verify_ordered_key_value_proof::<F, H, K, E, N>(
-            update.key.clone(),
-            update.value.clone(),
-            &self.proof,
-            &self.root,
-        )
+        matches!(self.operation, ordered::Operation::Update(_))
+            && self
+                .proof
+                .verify::<H, _>(self.operation.clone(), &self.root)
     }
 }
 
@@ -456,20 +432,6 @@ pub enum RawKeyLookupProof<
 
 #[derive(Clone, Debug, PartialEq)]
 #[must_use]
-pub struct RawKeyRangeEntry<
-    D: Digest,
-    K: QmdbKey + Codec,
-    V: Codec + Clone + Send + Sync,
-    const N: usize,
-    F: Graftable,
-    E: ValueEncoding<Value = V> = VariableEncoding<V>,
-> {
-    pub key: Bytes,
-    pub proof: RawKeyValueProof<D, K, V, N, F, E>,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-#[must_use]
 pub struct RawKeyRangeProof<
     D: Digest,
     K: QmdbKey + Codec,
@@ -479,10 +441,8 @@ pub struct RawKeyRangeProof<
     E: ValueEncoding<Value = V> = VariableEncoding<V>,
 > {
     pub watermark: Location<F>,
-    pub entries: Vec<RawKeyRangeEntry<D, K, V, N, F, E>>,
+    pub entries: Vec<RawKeyValueProof<D, K, V, N, F, E>>,
     pub start_proof: Option<RawKeyExclusionProof<D, K, V, N, F, E>>,
-    pub has_more: bool,
-    pub next_start_key: Bytes,
 }
 
 /// Current unordered proof for one active key. Missing-key proofs are
@@ -608,8 +568,7 @@ pub struct VerifiedKeyRange<
     E: ValueEncoding<Value = V> = VariableEncoding<V>,
 > {
     pub entries: Vec<VerifiedKeyValue<D, K, V, F, E>>,
-    pub has_more: bool,
-    pub next_start_key: Bytes,
+    pub next_start_key: Option<Bytes>,
 }
 
 /// Contiguous range of operations plus bitmap chunks verified against the
@@ -740,7 +699,7 @@ pub(crate) struct KeyValueProofResult<
 > {
     pub watermark: Location<F>,
     pub root: D,
-    pub proof: KeyValueProof<F, K, D, N>,
+    pub proof: OperationProof<F, D, N>,
     pub operation: ordered::Operation<F, K, E>,
 }
 
