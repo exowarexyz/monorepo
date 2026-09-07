@@ -17,7 +17,7 @@ Explore the Exoware API.
    cargo run --package exoware-simulator -- --verbose server run --port 8080
    ```
 
-   Point the web app at this URL via `VITE_SIMULATOR_URL` (see below). The simulator does not require a bearer token; optional `VITE_TOKEN` is only used if your SDK client is configured with one.
+   Point the web app at this URL via `VITE_SIMULATOR_URL` (see below). The simulator does not require a bearer token. The optional `VITE_TOKEN` is only used if your SDK client is configured with one.
 
 2. **Install dependencies and run the web app**
 
@@ -63,8 +63,8 @@ The QMDB panel is only rendered when `VITE_QMDB_URL` is set, since it requires
 a separate ConnectRPC server (not the simulator) running alongside the
 simulator. The demo uses ordered QMDB over MMB. It verifies every `Get` /
 `GetMany` proof against a **user-supplied
-expected root**. Without the root the UI cannot anchor trust — the server
-could return an internally-consistent but fabricated proof. Paste both the tip
+expected root**. Without the root the UI cannot anchor trust, because the
+server could return an internally-consistent but fabricated proof. Paste both the tip
 (location) and the matching root (hex) into the UI per query.
 
 In addition to the simulator running above:
@@ -76,10 +76,10 @@ In addition to the simulator running above:
      run --store-url http://127.0.0.1:8080
    ```
 
-2. **Stream fresh batches** (keeps running; prints a `tip=N root=0x..` line
+2. **Stream fresh batches** (keeps running and prints a `tip=N root=0x..` line
    every few seconds). Local ordered-QMDB MMB state
    persists under `$HOME/.exoware_qmdb_mmb_seed` so ctrl-c / restart resumes where
-   the previous run left off; delete the directory to reset, or override the
+   the previous run left off. Delete the directory to reset, or override the
    location with `--directory`.
 
    ```bash
@@ -103,8 +103,8 @@ In addition to the simulator running above:
    then pick a key (e.g. `k-00000000`):
    - **Get Proof** verifies against the pasted current root and reports proof size.
    - **Get Many** verifies current hit/miss lookup proofs against the same root and reports proof size.
-   - **Get Range** verifies an ordered current range plus boundary proofs
-     against the same root and reports proof size.
+   - **Get Range** verifies an ordered current range plus its start boundary
+     proof against the same root and reports proof size.
    - **Get Historical Operation Range** verifies a contiguous historical
      operation-log range against the same trusted root and reports proof size.
    - **Subscribe** verifies each emitted historical proof from the trusted
@@ -124,7 +124,7 @@ artifact bytes.
 
 With the simulator running above:
 
-1. **Seed finalized Simplex blocks** (keeps running; every `--interval-secs` it
+1. **Seed finalized Simplex blocks** (keeps running, and every `--interval-secs` it
    uploads a dummy block plus notarization/finalization records that include
    only the certified header). The first lines print the threshold verifier
    material to paste into the Simplex panel. The default start height is
@@ -169,7 +169,7 @@ In addition to the simulator running above:
      run --store-url http://127.0.0.1:8080
    ```
 
-2. **Seed rows** (keeps running; every `--interval-secs` it inserts 5 orders
+2. **Seed rows** (keeps running, and every `--interval-secs` it inserts 5 orders
    into `orders_kv` via `INSERT ... VALUES`). The server decodes each ingest
    batch and re-runs the subscriber's SQL WHERE predicate against just those
    rows, emitting one frame per matching batch.

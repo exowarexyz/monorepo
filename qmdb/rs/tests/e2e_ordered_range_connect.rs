@@ -77,7 +77,7 @@ type MmbAnyLocalDb = AnyOrderedQmdbDb<
 async fn spawn_qmdb_server(
     client: Arc<TestOrderedClient>,
 ) -> (tokio::task::JoinHandle<()>, String) {
-    common::spawn_operation_log_service(ordered_connect_stack(client)).await
+    common::spawn_connect_service(ordered_connect_stack(client)).await
 }
 
 fn validated_client(
@@ -95,7 +95,7 @@ fn current_operation_client(
 async fn spawn_mmb_qmdb_server(
     client: Arc<MmbTestOrderedClient>,
 ) -> (tokio::task::JoinHandle<()>, String) {
-    common::spawn_operation_log_service(ordered_connect_stack(client)).await
+    common::spawn_connect_service(ordered_connect_stack(client)).await
 }
 
 fn mmb_validated_client(

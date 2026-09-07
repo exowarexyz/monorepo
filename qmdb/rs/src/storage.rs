@@ -264,6 +264,11 @@ mod tests {
         assert!(requested.is_empty());
         assert_eq!(bitmap.complete_chunks(), 2);
         assert_eq!(bitmap.len(), 16);
+
+        // Pruning every complete chunk of an aligned bitmap leaves nothing to read
+        let (bitmap, requested) = load::<mmr::Family>(15, 2, None).unwrap();
+        assert!(requested.is_empty());
+        assert_eq!(bitmap.pruned_chunks(), 2);
     }
 
     #[test]
@@ -295,6 +300,31 @@ mod tests {
         let (bitmap, requested) = load::<mmb::Family>(15, 0, None).unwrap();
         assert_eq!(requested, [1]);
         assert_eq!(bitmap.get_chunk(1), [1]);
+
+        // A queried location inside the pending chunk does not load it twice
+        let (_, requested) = load::<mmb::Family>(16, 0, Some(8)).unwrap();
+        assert_eq!(requested, [1, 2]);
+    }
+
+    #[test]
+    fn readable_view_matches_commonware_prunable_bitmap() {
+        use commonware_utils::bitmap::{Prunable, Readable};
+        for (watermark, pruned) in [(12u64, 0usize), (15, 0), (20, 1), (23, 2)] {
+            let mut prunable = Prunable::<1>::new_with_pruned_chunks(pruned).unwrap();
+            while Readable::len(&prunable) <= watermark {
+                prunable.push(false);
+            }
+            let (bitmap, _) = load::<mmr::Family>(watermark, pruned as u64, None).unwrap();
+            assert_eq!(bitmap.len(), Readable::len(&prunable));
+            assert_eq!(
+                bitmap.complete_chunks(),
+                Readable::complete_chunks(&prunable)
+            );
+            assert_eq!(bitmap.pruned_chunks(), Readable::pruned_chunks(&prunable));
+            if !prunable.is_chunk_aligned() {
+                assert_eq!(bitmap.last_chunk().1, Readable::last_chunk(&prunable).1);
+            }
+        }
     }
 
     #[test]

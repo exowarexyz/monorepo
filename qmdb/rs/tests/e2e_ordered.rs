@@ -1060,8 +1060,8 @@ impl exoware_server::Query for CountingQuery {
         limit: usize,
         forward: bool,
     ) -> Result<Self::RangeScan, String> {
-        // Chunk row key: family byte 0x07, u64 chunk index, u64 boundary location
-        if start.first() == Some(&0x07) && start.len() == 17 {
+        // A chunk row key is the chunk family byte, the u64 chunk index, then the u64 boundary location
+        if start.first() == Some(&exoware_qmdb::CHUNK_FAMILY) && start.len() == 17 {
             self.bitmap_chunks
                 .lock()
                 .unwrap()
@@ -1079,13 +1079,13 @@ async fn assert_point_proof_reads_bounded_bitmap_chunks<F: Graftable>() {
         store: store.clone(),
         bitmap_chunks: Default::default(),
     });
-    let (store_server, store_url) = common::spawn_operation_log_service(
-        exoware_server::connect_stack(exoware_server::AppState::new(store)),
-    )
+    let (store_server, store_url) = common::spawn_connect_service(exoware_server::connect_stack(
+        exoware_server::AppState::new(store),
+    ))
     .await;
-    let (query_server, query_url) = common::spawn_operation_log_service(
-        exoware_server::query_service(exoware_server::QueryState::new(query.clone())),
-    )
+    let (query_server, query_url) = common::spawn_connect_service(exoware_server::query_service(
+        exoware_server::QueryState::new(query.clone()),
+    ))
     .await;
     let client = StoreClient::builder()
         .url(&store_url)

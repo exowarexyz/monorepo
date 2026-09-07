@@ -928,8 +928,7 @@ where
     ) -> Result<CurrentOperationRangeProof<H::Digest, Op, N, F>, QmdbError> {
         let tip = Location::<F>::new(request.tip);
         let window =
-            OperationWindow::new(request.tip, request.start_location, request.max_locations)
-                .map_err(QmdbError::RangeMismatch)?;
+            OperationWindow::new(request.tip, request.start_location, request.max_locations)?;
         let response = self
             .rpc
             .get_current_operation_range(request)
@@ -1027,8 +1026,7 @@ where
     ) -> Result<OperationLogRangeProof<H::Digest, Op, F>, QmdbError> {
         let tip = Location::<F>::new(request.tip);
         let window =
-            OperationWindow::new(request.tip, request.start_location, request.max_locations)
-                .map_err(QmdbError::RangeMismatch)?;
+            OperationWindow::new(request.tip, request.start_location, request.max_locations)?;
         let proof = fetch_operation_range_proof(
             &self.rpc,
             request,

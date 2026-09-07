@@ -58,7 +58,7 @@ fn encoded_key(key: &[u8]) -> Vec<u8> {
 async fn spawn_qmdb_server(
     client: Arc<TestOrderedClient>,
 ) -> (tokio::task::JoinHandle<()>, String) {
-    common::spawn_operation_log_service(ordered_connect_stack(client)).await
+    common::spawn_connect_service(ordered_connect_stack(client)).await
 }
 
 fn rpc_client(base: &str) -> KeyLookupServiceClient<PreferZstdHttpClient> {
@@ -288,7 +288,7 @@ impl OrderedKeyRangeService for StaticQmdbService {
 }
 
 async fn spawn_static_server(service: StaticQmdbService) -> (tokio::task::JoinHandle<()>, String) {
-    common::spawn_operation_log_service(
+    common::spawn_connect_service(
         ConnectRpcService::new(Chain(
             KeyLookupServiceServer::new(service.clone()),
             OrderedKeyRangeServiceServer::new(service),

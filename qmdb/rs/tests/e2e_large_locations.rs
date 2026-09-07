@@ -39,8 +39,8 @@ async fn check_large_frontier<F: Graftable + PartialEq>(family: &str, start: u64
     let reference = Mem::<F, Digest>::from_components(Vec::new(), start, pins).unwrap();
     let mut seed = StoreWriteBatch::new();
     for (position, _, digest) in &peaks {
-        // Raw node rows are the NODE_FAMILY byte (0x05 in codec.rs) then the big-endian position
-        let mut key = vec![0x05];
+        // Raw node rows are the node family byte then the big-endian position
+        let mut key = vec![exoware_qmdb::NODE_FAMILY];
         key.extend_from_slice(&position.as_u64().to_be_bytes());
         seed.push(&client, &Bytes::from(key), digest.encode())
             .unwrap();
@@ -83,7 +83,7 @@ async fn check_large_frontier<F: Graftable + PartialEq>(family: &str, start: u64
     assert_eq!(state.next_location, end);
     assert_eq!(state.ops_size, reference_batch.size());
     let (server, url) =
-        common::spawn_operation_log_service(keyless_operation_log_connect_stack(reader)).await;
+        common::spawn_connect_service(keyless_operation_log_connect_stack(reader)).await;
     let request = GetOperationRangeRequest {
         tip: (end - 1).as_u64(),
         start_location: start.as_u64(),

@@ -31,6 +31,8 @@
 mod auth;
 mod boundary;
 pub(crate) mod codec;
+#[cfg(feature = "test-utils")]
+pub use codec::{CHUNK_FAMILY, NODE_FAMILY};
 mod connect;
 mod connect_client;
 mod core;

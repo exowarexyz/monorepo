@@ -151,9 +151,9 @@ mod tests {
     #[test]
     fn stage_rows_encodes_under_the_clients_namespace() {
         let client = StoreClient::new("http://localhost:10000")
-            .prefixed(StoreKeyPrefix::new(vec![0x07]).unwrap());
+            .prefixed(StoreKeyPrefix::new(b"ns-a".to_vec()).unwrap());
         let other = StoreClient::new("http://localhost:10000")
-            .prefixed(StoreKeyPrefix::new(vec![0x08]).unwrap());
+            .prefixed(StoreKeyPrefix::new(b"ns-b".to_vec()).unwrap());
 
         let rows = vec![
             (Key::from_static(b"row-a"), b"va".to_vec()),

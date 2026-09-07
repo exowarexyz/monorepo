@@ -75,19 +75,19 @@ type LocalCurrentDb = LocalCurrentUnorderedDb<
 async fn spawn_qmdb_range_server(
     client: Arc<TestUnorderedClient>,
 ) -> (tokio::task::JoinHandle<()>, String) {
-    common::spawn_operation_log_service(unordered_operation_log_connect_stack(client)).await
+    common::spawn_connect_service(unordered_operation_log_connect_stack(client)).await
 }
 
 async fn spawn_mmb_qmdb_range_server(
     client: Arc<MmbTestUnorderedClient>,
 ) -> (tokio::task::JoinHandle<()>, String) {
-    common::spawn_operation_log_service(unordered_operation_log_connect_stack(client)).await
+    common::spawn_connect_service(unordered_operation_log_connect_stack(client)).await
 }
 
 async fn spawn_qmdb_full_server(
     client: Arc<FixedTestUnorderedClient>,
 ) -> (tokio::task::JoinHandle<()>, String) {
-    common::spawn_operation_log_service(unordered_connect_stack::<
+    common::spawn_connect_service(unordered_connect_stack::<
         mmr::Family,
         Sha256,
         Digest,

@@ -1381,8 +1381,8 @@ pub fn verify_historical_operation_range_proof(
     expected_start: u64,
     max_locations: u32,
 ) -> Result<JsValue, JsValue> {
-    let window =
-        OperationWindow::new(expected_tip, expected_start, max_locations).map_err(js_err)?;
+    let window = OperationWindow::new(expected_tip, expected_start, max_locations)
+        .map_err(|err| js_err(err.to_string()))?;
     let proto = HistoricalOperationRangeProofView::decode_view(bytes)
         .map_err(|err| js_err(format!("decode historical operation range proof: {err}")))?
         .to_owned_message()
@@ -1425,8 +1425,8 @@ pub fn verify_historical_raw_operation_range_proof(
     expected_start: u64,
     max_locations: u32,
 ) -> Result<JsValue, JsValue> {
-    let window =
-        OperationWindow::new(expected_tip, expected_start, max_locations).map_err(js_err)?;
+    let window = OperationWindow::new(expected_tip, expected_start, max_locations)
+        .map_err(|err| js_err(err.to_string()))?;
     let proto = HistoricalOperationRangeProofView::decode_view(bytes)
         .map_err(|err| js_err(format!("decode historical operation range proof: {err}")))?
         .to_owned_message()
@@ -1472,8 +1472,8 @@ pub fn verify_historical_fixed_keyless_append_proof(
     expected_start: u64,
     max_locations: u32,
 ) -> Result<JsValue, JsValue> {
-    let window =
-        OperationWindow::new(expected_tip, expected_start, max_locations).map_err(js_err)?;
+    let window = OperationWindow::new(expected_tip, expected_start, max_locations)
+        .map_err(|err| js_err(err.to_string()))?;
     let proto = HistoricalOperationRangeProofView::decode_view(bytes)
         .map_err(|err| js_err(format!("decode historical operation range proof: {err}")))?
         .to_owned_message()
@@ -1548,8 +1548,8 @@ pub fn verify_historical_fixed_unordered_update_proof(
     expected_start: u64,
     max_locations: u32,
 ) -> Result<JsValue, JsValue> {
-    let window =
-        OperationWindow::new(expected_tip, expected_start, max_locations).map_err(js_err)?;
+    let window = OperationWindow::new(expected_tip, expected_start, max_locations)
+        .map_err(|err| js_err(err.to_string()))?;
     let proto = HistoricalOperationRangeProofView::decode_view(bytes)
         .map_err(|err| js_err(format!("decode historical operation range proof: {err}")))?
         .to_owned_message()
@@ -1624,8 +1624,8 @@ pub fn verify_current_operation_range_proof(
     expected_start: u64,
     max_locations: u32,
 ) -> Result<JsValue, JsValue> {
-    let window =
-        OperationWindow::new(expected_tip, expected_start, max_locations).map_err(js_err)?;
+    let window = OperationWindow::new(expected_tip, expected_start, max_locations)
+        .map_err(|err| js_err(err.to_string()))?;
     let proto = CurrentOperationRangeProofView::decode_view(bytes)
         .map_err(|err| js_err(format!("decode current operation range proof: {err}")))?
         .to_owned_message()
@@ -1815,6 +1815,13 @@ mod tests {
         any::{
             unordered::{Operation as UnorderedOperation, Update as UnorderedUpdate},
             value::FixedEncoding,
+        },
+        current::{
+            ordered::{
+                db::KeyValueProof as UpstreamKeyValueProof,
+                ExclusionProof as UpstreamExclusionProof,
+            },
+            proof::OperationProof as UpstreamOperationProof,
         },
         keyless,
     };
@@ -2117,6 +2124,139 @@ mod tests {
         );
     }
 
+    fn synthetic_operation_proof<F, const N: usize>(
+        pending_chunk_digest: F::PendingChunk<Sha256Digest>,
+    ) -> UpstreamOperationProof<F, Sha256Digest, N>
+    where
+        F: merkle::Graftable,
+    {
+        UpstreamOperationProof {
+            loc: Location::new(9),
+            chunk: core::array::from_fn(|index| index as u8),
+            range_proof: RangeProof {
+                proof: merkle::Proof {
+                    leaves: Location::new(21),
+                    inactive_peaks: 1,
+                    digests: vec![Sha256::fill(0xA1), Sha256::fill(0xA2)],
+                },
+                pending_chunk_digest,
+                partial_chunk_digest: Some(Sha256::fill(0xB3)),
+                ops_root: Sha256::fill(0xC4),
+            },
+        }
+    }
+
+    // The WASM readers mirror Commonware's proof encodings with a runtime chunk size, so an
+    // upstream layout or tag change must fail here rather than in the browser
+    fn assert_current_proofs_decode<F, const N: usize>(
+        pending_chunk_digest: F::PendingChunk<Sha256Digest>,
+    ) where
+        F: merkle::Graftable + PartialEq,
+    {
+        let config = current_proof_config::<Sha256Digest>(N, "test").unwrap();
+        let expected = synthetic_operation_proof::<F, N>(pending_chunk_digest);
+        let update = Update::<Vec<u8>, VariableEncoding<Vec<u8>>> {
+            key: b"k1".to_vec(),
+            value: b"v1".to_vec(),
+            next_key: b"k2".to_vec(),
+        };
+        let assert_proof = |decoded: &OperationProof<F, Sha256Digest>| {
+            assert_eq!(decoded.loc, expected.loc);
+            assert_eq!(decoded.chunk, expected.chunk.to_vec());
+            assert_eq!(decoded.range_proof, expected.range_proof);
+        };
+
+        let key_value = UpstreamExclusionProof::<
+            F,
+            Vec<u8>,
+            VariableEncoding<Vec<u8>>,
+            Sha256Digest,
+            N,
+        >::KeyValue(expected.clone(), update.clone())
+        .encode();
+        match read_exclusion_proof::<F, Sha256Digest>(
+            &key_value,
+            proof_digest_cap::<Sha256Digest>(&key_value),
+            &config,
+        )
+        .unwrap()
+        {
+            ExclusionProof::KeyValue(decoded, decoded_update) => {
+                assert_proof(&decoded);
+                assert_eq!(decoded_update, update);
+            }
+            ExclusionProof::Commit(..) => panic!("key-value exclusion proof decoded as a commit"),
+        }
+
+        let commit = UpstreamExclusionProof::<F, Vec<u8>, VariableEncoding<Vec<u8>>, Sha256Digest, N>::Commit(
+            expected.clone(),
+            Some(b"meta".to_vec()),
+        )
+        .encode();
+        match read_exclusion_proof::<F, Sha256Digest>(
+            &commit,
+            proof_digest_cap::<Sha256Digest>(&commit),
+            &config,
+        )
+        .unwrap()
+        {
+            ExclusionProof::Commit(decoded, value) => {
+                assert_proof(&decoded);
+                assert_eq!(value, Some(b"meta".to_vec()));
+            }
+            ExclusionProof::KeyValue(..) => panic!("commit exclusion proof decoded as a key-value"),
+        }
+
+        let key_value_proof = UpstreamKeyValueProof::<F, Vec<u8>, Sha256Digest, N> {
+            proof: expected.clone(),
+            next_key: b"k2".to_vec(),
+        }
+        .encode();
+        let (decoded, next_key) = read_key_value_proof::<F, Sha256Digest>(
+            &key_value_proof,
+            proof_digest_cap::<Sha256Digest>(&key_value_proof),
+            &config,
+        )
+        .unwrap();
+        assert_proof(&decoded);
+        assert_eq!(next_key, b"k2".to_vec());
+    }
+
+    #[test]
+    fn decodes_commonware_current_proofs_for_mmr() {
+        assert_current_proofs_decode::<mmr::Family, 32>(merkle::Unused);
+    }
+
+    #[test]
+    fn decodes_commonware_current_proofs_for_mmb() {
+        assert_current_proofs_decode::<mmb::Family, 32>(Some(Sha256::fill(0xD5)));
+    }
+
+    #[test]
+    fn fixed_operation_tags_follow_commonware_encodings() {
+        type Keyless<F> = keyless::Operation<F, FixedEncoding<Sha256Digest>>;
+        type Unordered<F> = UnorderedOperation<F, Sha256Digest, FixedEncoding<u64>>;
+
+        let value = Sha256::fill(0x22);
+        let commit = Keyless::<mmr::Family>::Commit(Some(value), Location::new(3)).encode();
+        assert_eq!(
+            fixed_keyless_append_value(&commit, value.as_ref()).unwrap_err(),
+            "expected keyless location is not an append"
+        );
+
+        let key = Sha256::fill(0x44);
+        let delete = Unordered::<mmr::Family>::Delete(key).encode();
+        assert_eq!(
+            fixed_unordered_update_value(&delete, key.as_ref(), u64::SIZE).unwrap_err(),
+            "expected unordered location is a delete"
+        );
+        let commit = Unordered::<mmr::Family>::CommitFloor(Some(7), Location::new(2)).encode();
+        assert_eq!(
+            fixed_unordered_update_value(&commit, key.as_ref(), u64::SIZE).unwrap_err(),
+            "expected unordered location is a commit"
+        );
+    }
+
     #[test]
     fn verifies_fixed_keyless_append_operation() {
         type Operation<F> = keyless::Operation<F, FixedEncoding<Sha256Digest>>;
@@ -2403,6 +2543,17 @@ mod tests {
             decode_multi_with_embedded_root_from_proto::<mmr::Family, Sha256>(&proto).unwrap_err();
 
         assert_eq!(err, "historical multi proof missing embedded ops_root");
+    }
+
+    #[test]
+    fn rejects_historical_operation_range_without_ops_root() {
+        let (mut proto, root, _, window) = historical_range_fixture::<mmr::Family>();
+        proto.ops_root.clear();
+
+        let err = verify_operation_range_from_proto::<mmr::Family, Sha256>(&proto, &root, window)
+            .unwrap_err();
+
+        assert_eq!(err, "historical proof missing ops_root");
     }
 
     #[test]

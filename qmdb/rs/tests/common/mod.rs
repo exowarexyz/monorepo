@@ -308,7 +308,7 @@ pub async fn wait_for_health(base: &str) {
 /// Bind a QMDB operation-log `ConnectRpcService` stack to a random local port
 /// alongside `/health`, and block until it responds.
 #[allow(dead_code)]
-pub async fn spawn_operation_log_service<D>(
+pub async fn spawn_connect_service<D>(
     dispatcher: ConnectRpcService<D>,
 ) -> (tokio::task::JoinHandle<()>, String)
 where
@@ -413,7 +413,7 @@ impl OperationLogService for StaticOperationRangeService {
 pub async fn spawn_static_operation_log_service(
     service: StaticOperationLogService,
 ) -> (tokio::task::JoinHandle<()>, String) {
-    spawn_operation_log_service(
+    spawn_connect_service(
         ConnectRpcService::new(OperationLogServiceServer::new(service))
             .with_compression(exoware_sdk::connect_compression_registry()),
     )
@@ -424,7 +424,7 @@ pub async fn spawn_static_operation_log_service(
 pub async fn spawn_static_operation_range_service(
     service: StaticOperationRangeService,
 ) -> (tokio::task::JoinHandle<()>, String) {
-    spawn_operation_log_service(
+    spawn_connect_service(
         ConnectRpcService::new(OperationLogServiceServer::new(service))
             .with_compression(exoware_sdk::connect_compression_registry()),
     )

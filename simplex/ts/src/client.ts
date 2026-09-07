@@ -10,14 +10,12 @@ import {
 export type BytesLike = Uint8Array | string;
 export type U64Like = bigint | number | string;
 
-export const FORMAT_VERSION = 0;
-
 export enum SimplexRecordKind {
-  HeaderByDigest = 0x10,
-  BlockByDigest = 0x11,
-  NotarizationByRound = 0x20,
-  FinalizationByRound = 0x30,
-  FinalizedByHeight = 0x31,
+  HeaderByDigest = 1,
+  BlockByDigest = 2,
+  NotarizationByRound = 3,
+  FinalizationByRound = 4,
+  FinalizedByHeight = 5,
 }
 
 export interface PreparedSimplexEntry {
@@ -412,10 +410,9 @@ function u64Bytes(value: U64Like): Uint8Array {
 }
 
 function keyFromParts(kind: SimplexRecordKind, suffix: Uint8Array): Uint8Array {
-  const out = new Uint8Array(2 + suffix.length);
-  out[0] = FORMAT_VERSION;
-  out[1] = kind;
-  out.set(suffix, 2);
+  const out = new Uint8Array(1 + suffix.length);
+  out[0] = kind;
+  out.set(suffix, 1);
   return out;
 }
 
@@ -448,8 +445,8 @@ export function finalizedByHeightKey(height: U64Like): Uint8Array {
 
 export function rangeForKind(kind: SimplexRecordKind): { start: Uint8Array; end: Uint8Array } {
   return {
-    start: new Uint8Array([FORMAT_VERSION, kind]),
-    end: new Uint8Array([FORMAT_VERSION, kind + 1]),
+    start: new Uint8Array([kind]),
+    end: new Uint8Array([kind + 1]),
   };
 }
 
@@ -653,22 +650,22 @@ function u64At(bytes: Uint8Array, offset: number): bigint {
 }
 
 function roundFromKey(key: Uint8Array): { epoch: bigint; view: bigint } {
-  if (key.length !== 18) {
+  if (key.length !== 17) {
     throw new Error(`invalid simplex round key length ${key.length}`);
   }
-  return { epoch: u64At(key, 2), view: u64At(key, 10) };
+  return { epoch: u64At(key, 1), view: u64At(key, 9) };
 }
 
 function u64FromKey(key: Uint8Array): bigint {
-  if (key.length !== 10) {
+  if (key.length !== 9) {
     throw new Error(`invalid simplex u64 key length ${key.length}`);
   }
-  return u64At(key, 2);
+  return u64At(key, 1);
 }
 
 function streamMatchKind(kind: SimplexRecordKind) {
   return {
-    prefix: new Uint8Array([FORMAT_VERSION, kind]),
+    prefix: new Uint8Array([kind]),
     payloadRegex: STREAM_PAYLOAD_REGEX,
   };
 }
@@ -678,17 +675,17 @@ function normalizeKinds(kinds: SimplexRecordKind | readonly SimplexRecordKind[])
 }
 
 function decodeRawStreamEntry(key: Uint8Array, value: Uint8Array): RawSimplexStreamEntry {
-  if (key.length < 2 || key[0] !== FORMAT_VERSION) {
+  if (key.length === 0) {
     throw new Error('invalid simplex stream key');
   }
-  const kind = key[1] as SimplexRecordKind;
+  const kind = key[0] as SimplexRecordKind;
   switch (kind) {
     case SimplexRecordKind.HeaderByDigest:
       return {
         type: 'header',
         kind,
         key,
-        digest: key.slice(2),
+        digest: key.slice(1),
         header: value,
       };
     case SimplexRecordKind.BlockByDigest: {
@@ -697,7 +694,7 @@ function decodeRawStreamEntry(key: Uint8Array, value: Uint8Array): RawSimplexStr
         type: 'block',
         kind,
         key,
-        digest: key.slice(2),
+        digest: key.slice(1),
         raw: value,
         header: block.header,
         body: block.body,
@@ -964,15 +961,7 @@ export class SimplexClient<TNotarization = unknown, TFinalization = unknown> {
   }
 
   async latestFinalization(): Promise<TFinalization | null> {
-    const range = rangeForKind(SimplexRecordKind.FinalizedByHeight);
-    const result = await this.store.query(
-      range.start,
-      range.end,
-      1,
-      4096,
-      TraversalMode.REVERSE,
-    );
-    const row = result.results[0];
+    const row = await this.latestFinalizedRow();
     if (!row) {
       return null;
     }
@@ -987,6 +976,10 @@ export class SimplexClient<TNotarization = unknown, TFinalization = unknown> {
   }
 
   async latestFinalizationRaw(): Promise<Uint8Array | null> {
+    return (await this.latestFinalizedRow())?.value ?? null;
+  }
+
+  private async latestFinalizedRow(): Promise<{ key: Uint8Array; value: Uint8Array } | null> {
     const range = rangeForKind(SimplexRecordKind.FinalizedByHeight);
     const result = await this.store.query(
       range.start,
@@ -995,7 +988,7 @@ export class SimplexClient<TNotarization = unknown, TFinalization = unknown> {
       4096,
       TraversalMode.REVERSE,
     );
-    return result.results[0]?.value ?? null;
+    return result.results[0] ?? null;
   }
 
   async *subscribeRaw(

@@ -1,5 +1,26 @@
 //! Request constraints shared by native and browser proof consumers
 
+/// A requested operation window that cannot be served regardless of the response
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum InvalidWindow {
+    TipOverflow,
+    StartOutOfBounds { start: u64, count: u64 },
+    ZeroMaximum,
+}
+
+impl core::fmt::Display for InvalidWindow {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::TipOverflow => f.write_str("operation tip overflow"),
+            Self::StartOutOfBounds { start, count } => write!(
+                f,
+                "range proof start {start} is out of bounds for watermark with {count} leaves"
+            ),
+            Self::ZeroMaximum => f.write_str("range proof max_locations must be > 0"),
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 pub(crate) struct OperationWindow {
     leaves: u64,
@@ -8,10 +29,16 @@ pub(crate) struct OperationWindow {
 }
 
 impl OperationWindow {
-    pub(crate) fn new(tip: u64, start: u64, maximum: u32) -> Result<Self, &'static str> {
-        let leaves = tip.checked_add(1).ok_or("operation tip overflow")?;
-        if start >= leaves || maximum == 0 {
-            return Err("invalid requested operation window");
+    pub(crate) fn new(tip: u64, start: u64, maximum: u32) -> Result<Self, InvalidWindow> {
+        let leaves = tip.checked_add(1).ok_or(InvalidWindow::TipOverflow)?;
+        if maximum == 0 {
+            return Err(InvalidWindow::ZeroMaximum);
+        }
+        if start >= leaves {
+            return Err(InvalidWindow::StartOutOfBounds {
+                start,
+                count: leaves,
+            });
         }
         Ok(Self {
             leaves,

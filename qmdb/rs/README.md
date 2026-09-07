@@ -23,7 +23,7 @@ They are also generic over Commonware value encodings (`E: ValueEncoding`):
 the default is `VariableEncoding<V>`, and callers can select `FixedEncoding<V>`
 for the fixed operation/proof variants.
 The demo CLI uses MMB. QMDB row keys are scoped by the SDK `StoreKeyPrefix` /
-Store namespace supplied to the client; they do not embed a separate
+Store namespace supplied to the client. They do not embed a separate
 Merkle-family tag.
 
 All backends share the same upload -> publish watermark -> operation-log root /
@@ -123,7 +123,7 @@ byte is shared across every backend variant (ordered, unordered, immutable,
 keyless) by design: the same kind of row always uses the same byte. Independent
 instances are kept apart by the SDK `StoreKeyPrefix` / Store namespace that wraps
 these keys, so construct each client or writer from the `StoreKeyPrefix` / Store
-namespace it should own; that outer namespace is how separate instances coexist
+namespace it should own. That outer namespace is how separate instances coexist
 on one Store.
 
 The update-row family is keyed by:
@@ -334,15 +334,14 @@ what is NOT uploaded:
 
 ## Two-phase upload and publication
 
-The intended flow is now:
+The flow is:
 
 1. upload exact ordered operations for a batch boundary
 2. upload the sparse current-state rows for that same batch boundary
 3. later, publish a low watermark once you know which uploaded batch boundaries
    form the largest contiguous trusted prefix
 
-The key point is that watermark publication no longer computes current-state
-rows. It only:
+Watermark publication does not compute current-state rows. It only:
 
 - checks that the requested watermark is an uploaded batch boundary
 - checks that current boundary state has already been uploaded for that boundary
@@ -455,7 +454,7 @@ Each backend exposes a `*Writer` helper for sole-writer ingest. Writers hold
 cached Merkle peaks + a pending-batch queue in memory. `prepare_upload` encodes
 store rows with zero store reads in the hot loop.
 Construction always starts from caller-supplied frontier state. Multiple
-`prepare_upload` calls may be issued concurrently against the same writer; the
+`prepare_upload` calls may be issued concurrently against the same writer. The
 writer handles location assignment, in-flight pipelining, and contiguous
 watermark publication internally. Callers own the enclosing `StoreWriteBatch`:
 stage prepared uploads and prepared watermark publications from one or more
@@ -475,11 +474,11 @@ The generic Store traits cover the prepared-handle lifecycle:
 QMDB uses `StorePublicationFrontierWriter` for the part SQL does not have: the
 in-memory frontier, in-flight upload queue, and catch-up watermark flush.
 Upload preparation remains an inherent method because each backend's inputs
-differ; ordered QMDB, for example, also needs caller-supplied current boundary
+differ. Ordered QMDB, for example, also needs caller-supplied current boundary
 state.
 Each `prepare_upload` input must be one or more complete finalized local
-batches. Ordered/unordered uploads must end at `CommitFloor`; keyless/immutable
-uploads must end at `Commit`. Splitting a local operation log at arbitrary
+batches. Ordered/unordered uploads must end at `CommitFloor`, and
+keyless/immutable uploads must end at `Commit`. Splitting a local operation log at arbitrary
 offsets loses the inactivity floor needed to compute the operation-log root.
 
 ```rust,ignore
@@ -495,7 +494,7 @@ let writer: Arc<KeylessWriter<mmr::Family, Sha256, Vec<u8>>> =
 let prepared = writer.prepare_upload(batch_ops).await?;
 let receipt = writer.commit_upload(prepared).await?;
 
-// Pipelined usage — prepare/commit concurrent Store batches up to a bounded depth.
+// Pipelined usage that prepares and commits concurrent Store batches up to a bounded depth.
 use futures::stream::{FuturesUnordered, StreamExt};
 let mut in_flight = FuturesUnordered::new();
 for batch in batches {
@@ -557,12 +556,12 @@ Every batch's PUT carries a watermark row at the **latest safe location**:
 | non-empty, nothing ACKd yet | *omitted* |
 
 The "contiguous-acked prefix" is the longest prefix of dispatched batches for
-which every batch has returned `Ok`. Popping advances in ACK order (handled
-internally per-batch via a `dispatch_id` — out-of-order ACKs across HTTP/2
-streams are handled correctly).
+which every batch has returned `Ok`. Popping advances in ACK order, tracked per
+batch with a `dispatch_id`, so out-of-order ACKs across HTTP/2 streams are
+handled correctly.
 
 Under steady-state bounded-concurrency pipelining the published watermark
-lags the dispatch frontier by at most the pipeline depth — never unbounded.
+lags the dispatch frontier by at most the pipeline depth, never unbounded.
 
 ### Flush
 
@@ -576,8 +575,8 @@ the same Store batch as prepared uploads. Needed only:
 - if you want to block until all pending writes are both ACKd and
   watermarked (e.g. before a graceful shutdown).
 
-Not needed between batches in steady state — the per-batch rule keeps the
-watermark advancing on its own.
+Not needed between batches in steady state, because the per-batch rule keeps
+the watermark advancing on its own.
 
 ### Failure recovery
 
@@ -588,28 +587,26 @@ reconstructed from a local Commonware proof) and re-submits any still-pending
 batches from its own durable source. Re-submission is safe: PUT rows are
 content-addressed by key and Merkle math is deterministic. A prepared upload
 whose commit future is cancelled or whose handle is dropped never acknowledges
-itself; treat it as a reported failure and rebuild the writer. Cancelling
+itself. Treat it as a reported failure and rebuild the writer. Cancelling
 `prepare_upload` before it returns leaves the frontier intact.
 
 ### Sole-writer contract
 
 Writers assume they are the only publisher for a namespace at a time.
 Concurrent writers would race on Merkle peak extension and corrupt each other's
-state. The store's ingest layer does not enforce this — it's on the caller.
+state. The store's ingest layer does not enforce this, so it is on the caller.
 
 ## Live Proofs
 
-The old client-side `stream_batches(since)` API has been removed.
-
-Live QMDB keyed proofs now go through ConnectRPC services:
+Live QMDB keyed proofs go through ConnectRPC services:
 
 - `qmdb.v1.KeyLookupService.Get` returns a current proof for one logical key.
 - `qmdb.v1.KeyLookupService.GetMany` returns current proofs for explicit
-  logical keys in request order. Ordered QMDB returns hit and miss proofs;
-  unordered QMDB returns hit proofs only and omits missing keys because
+  logical keys in request order. Ordered QMDB returns hit and miss proofs.
+  Unordered QMDB returns hit proofs only and omits missing keys because
   Commonware does not expose unordered exclusion proofs.
 - `qmdb.v1.OrderedKeyRangeService.GetRange` returns an ordered current key
-  range plus boundary proofs. Only ordered QMDB exposes this service.
+  range plus a start boundary proof. Only ordered QMDB exposes this service.
 - `qmdb.v1.OperationLogService.GetOperationRange` returns a historical
   operation-log range proof for a contiguous operation interval. This is the
   unary state-sync/catch-up path and is backend-generic.
@@ -629,7 +626,7 @@ Immutable and keyless Connect stacks expose only `qmdb.v1.OperationLogService` t
 They do not expose proof-bearing logical point-read RPCs even though Rust
 `get_at` helpers exist. Unordered current key-value proofs require the same
 current-boundary publication path that ordered uses, and the current unordered
-Connect stack follows Commonware's array-key requirement; callers that upload
+Connect stack follows Commonware's array-key requirement. Callers that upload
 only historical unordered rows should mount `unordered_operation_log_connect_stack`,
 while callers that upload current-boundary rows can mount `unordered_connect_stack`
 for present-key `Get` / `GetMany` and current operation ranges.

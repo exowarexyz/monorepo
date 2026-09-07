@@ -49,7 +49,7 @@ type BatchOperation = KeylessOperation<mmr::Family, Vec<u8>>;
 async fn spawn_qmdb_server(
     client: Arc<TestKeylessClient>,
 ) -> (tokio::task::JoinHandle<()>, String) {
-    common::spawn_operation_log_service(keyless_operation_log_connect_stack(client)).await
+    common::spawn_connect_service(keyless_operation_log_connect_stack(client)).await
 }
 
 fn validated_client(
@@ -315,10 +315,14 @@ async fn keyless_operation_log_sync_resolver_fetches_api_batches() {
         .await
         .expect("sync target");
     assert_eq!(target.root, local.root);
-    assert!(resolver
-        .target(op_count, &commonware_cryptography::Sha256::fill(0xff))
-        .await
-        .is_err());
+    assert!(matches!(
+        resolver
+            .target(op_count, &commonware_cryptography::Sha256::fill(0xff))
+            .await,
+        Err(QmdbError::ProofVerification {
+            kind: exoware_qmdb::ProofKind::RangeCheckpoint
+        })
+    ));
 
     let (response, callback) = resolver
         .serve(Request::Operations {

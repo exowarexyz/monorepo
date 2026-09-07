@@ -38,6 +38,19 @@ impl std::fmt::Display for ProofKind {
     }
 }
 
+impl From<crate::request::InvalidWindow> for QmdbError {
+    fn from(err: crate::request::InvalidWindow) -> Self {
+        use crate::request::InvalidWindow;
+        match err {
+            InvalidWindow::TipOverflow => Self::CorruptData(err.to_string()),
+            InvalidWindow::StartOutOfBounds { start, count } => {
+                Self::RangeStartOutOfBounds { start, count }
+            }
+            InvalidWindow::ZeroMaximum => Self::InvalidRangeLength,
+        }
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum QmdbError {
     #[error(transparent)]

@@ -1,6 +1,6 @@
 //! Request constraint tests, kept outside `request.rs` so the WASM include compiles them once
 
-use crate::request::{span_contains, validate_key_range, OperationWindow};
+use crate::request::{span_contains, validate_key_range, InvalidWindow, OperationWindow};
 
 #[test]
 fn spans_wrap_past_the_greatest_key() {
@@ -24,9 +24,21 @@ fn operation_windows_preserve_large_absolute_positions() {
         assert!(window.validate(start, 2, start + 3).is_err());
         assert!(window.validate(start, 3, start + 4).is_err());
     }
-    assert!(OperationWindow::new(u64::MAX, 0, 1).is_err());
-    assert!(OperationWindow::new(10, 11, 1).is_err());
-    assert!(OperationWindow::new(10, 0, 0).is_err());
+    assert!(matches!(
+        OperationWindow::new(u64::MAX, 0, 1),
+        Err(InvalidWindow::TipOverflow)
+    ));
+    assert!(matches!(
+        OperationWindow::new(10, 11, 1),
+        Err(InvalidWindow::StartOutOfBounds {
+            start: 11,
+            count: 11
+        })
+    ));
+    assert!(matches!(
+        OperationWindow::new(10, 0, 0),
+        Err(InvalidWindow::ZeroMaximum)
+    ));
 }
 
 #[test]
@@ -95,10 +107,10 @@ fn key_ranges_reject_wraparound_and_incomplete_pages() {
         &1,
         Some(&7),
         3,
-        &[(&2, &4), (&4, &6)],
+        &[(&2, &4), (&4, &6), (&6, &2)],
         Some(&2),
         false,
-        Some(&6)
+        Some(&2)
     )
     .is_err());
     // An empty-database start proof cannot precede entries

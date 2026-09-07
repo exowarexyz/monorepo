@@ -1,6 +1,7 @@
 use commonware_codec::DecodeExt;
 use commonware_cryptography::Digest;
 use commonware_storage::merkle::{Family, Location, Position};
+use commonware_utils::bitmap::Prunable;
 use exoware_sdk::keys::{Key, KeyMut, Prefix};
 
 use crate::error::QmdbError;
@@ -17,9 +18,9 @@ pub(crate) const UPDATE_FAMILY: u8 = 0x1;
 pub(crate) const PRESENCE_FAMILY: u8 = 0x2;
 pub(crate) const WATERMARK_FAMILY: u8 = 0x3;
 pub(crate) const OP_FAMILY: u8 = 0x4;
-pub(crate) const NODE_FAMILY: u8 = 0x5;
+pub const NODE_FAMILY: u8 = 0x5;
 pub(crate) const GRAFTED_NODE_FAMILY: u8 = 0x6;
-pub(crate) const CHUNK_FAMILY: u8 = 0x7;
+pub const CHUNK_FAMILY: u8 = 0x7;
 pub(crate) const CURRENT_META_FAMILY: u8 = 0x8;
 pub(crate) const OPS_ROOT_WITNESS_FAMILY: u8 = 0x9;
 
@@ -44,7 +45,7 @@ pub(crate) const CHUNK_PREFIX: Prefix = Prefix::from_static(&[CHUNK_FAMILY]);
 pub(crate) const OPS_ROOT_WITNESS_PREFIX: Prefix = Prefix::from_static(&[OPS_ROOT_WITNESS_FAMILY]);
 
 pub(crate) const fn bitmap_chunk_bits<const N: usize>() -> u64 {
-    (N as u64) * 8
+    Prunable::<N>::CHUNK_SIZE_BITS
 }
 
 pub(crate) fn chunk_index_for_location<F: Family, const N: usize>(location: Location<F>) -> u64 {

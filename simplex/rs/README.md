@@ -39,8 +39,7 @@ shared `StoreWriteBatch`.
 
 Finalized records can be read back by round, by height, or as the latest
 finalized height index. Header bytes can be read independently with
-`get_header`; the full `{ header, body }` envelope can be read with
-`get_block`. The certificate wrappers validate that the certificate payload
+`get_header`, and the full `{ header, body }` envelope with `get_block`. The certificate wrappers validate that the certificate payload
 digest matches the paired header's `Block::digest()` during construction and
 decoding. If the body must be authenticated, make that commitment part of the
 header format and store the full block separately with `upload_block` or
@@ -58,11 +57,11 @@ The seeder prints the scheme, namespace, and encoded threshold verification
 material used by the emitted certificates. Paste those values into the sandbox
 Simplex panel before fetching or subscribing to verified certificates. By
 default, seeding starts at a time-based height so restarting against a reused
-simulator still advances the latest finalized height index; pass
+simulator still advances the latest finalized height index. Pass
 `--start-height` to override it.
 
-Round indices encode epoch and view as two big-endian u64 fields under record
-kinds `0x20` (notarization) and `0x30` (finalization). Typed reads reject a
-record whose digest, height, or round does not match the requested index.
+Round indices encode epoch and view as two big-endian u64 fields. Typed reads
+reject a record whose digest, height, or round does not match the requested
+index.
 Signature verification remains the caller's or Commonware Marshal's
 responsibility.

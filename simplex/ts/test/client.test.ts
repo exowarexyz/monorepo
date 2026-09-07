@@ -29,12 +29,16 @@ test('hex helpers round trip optional 0x prefix', () => {
 });
 
 test('simplex keys match the Rust key layout', () => {
-  assert.equal(bytesToHex(headerByDigestKey('aabbcc')), '0010aabbcc');
-  assert.equal(bytesToHex(blockByDigestKey('aabbcc')), '0011aabbcc');
-  assert.equal(bytesToHex(finalizedByHeightKey(258n)), '00310000000000000102');
+  // simplex/rs/src/keys.rs::tests::key_layout asserts the same bytes
+  const digest = 'ab'.repeat(32);
+  assert.equal(bytesToHex(headerByDigestKey(digest)), `01${digest}`);
+  assert.equal(bytesToHex(blockByDigestKey(digest)), `02${digest}`);
+  assert.equal(bytesToHex(notarizationByRoundKey(0x100000000n, 7)), '0300000001000000000000000000000007');
+  assert.equal(bytesToHex(finalizationByRoundKey(0x100000000n, 7)), '0400000001000000000000000000000007');
+  assert.equal(bytesToHex(finalizedByHeightKey(258n)), '050000000000000102');
   const range = rangeForKind(SimplexRecordKind.FinalizedByHeight);
-  assert.equal(bytesToHex(range.start), '0031');
-  assert.equal(bytesToHex(range.end), '0032');
+  assert.equal(bytesToHex(range.start), '05');
+  assert.equal(bytesToHex(range.end), '06');
 });
 
 test('u64 helper rejects unsafe JavaScript numbers', () => {
@@ -77,7 +81,7 @@ test('stages block and finalization rows into one StoreWriteBatch', () => {
   assert.equal(batch.length, 4);
   assert.deepEqual(
     batch.entries().map((entry) => bytesToHex(entry.key)),
-    ['0010d0', '0011d0', '003000000000000000000000000000000007', '0031000000000000000b'],
+    ['01d0', '02d0', '0400000000000000000000000000000007', '05000000000000000b'],
   );
   assert.deepEqual(decodeSimplexBlockData(batch.entries()[1].value), {
     header: new Uint8Array([0xb0]),
@@ -600,9 +604,9 @@ test('streams and verifies certificate entries', async () => {
 
   assert.deepEqual(capturedFilters, {
     selectors: [
-      { prefix: new Uint8Array([0x00, 0x20]), payloadRegex: '(?s-u).*' },
-      { prefix: new Uint8Array([0x00, 0x30]), payloadRegex: '(?s-u).*' },
-      { prefix: new Uint8Array([0x00, 0x31]), payloadRegex: '(?s-u).*' },
+      { prefix: rangeForKind(SimplexRecordKind.NotarizationByRound).start, payloadRegex: '(?s-u).*' },
+      { prefix: rangeForKind(SimplexRecordKind.FinalizationByRound).start, payloadRegex: '(?s-u).*' },
+      { prefix: rangeForKind(SimplexRecordKind.FinalizedByHeight).start, payloadRegex: '(?s-u).*' },
     ],
     sinceSequenceNumber: 10n,
   });
@@ -678,9 +682,8 @@ test('built-in certificate verification binds epoch and view to the request', as
   assert.equal(await verifier.verifyNotarization(new Uint8Array(), { ...context, view: 8n }), null);
   assert.equal(await verifier.verifyNotarization(new Uint8Array(), { ...context, epoch: 3n }), null);
   assert.notDeepEqual(notarizationByRoundKey(2, 7), notarizationByRoundKey(3, 7));
-  assert.equal(bytesToHex(finalizationByRoundKey(0x100000000n, 7)), '003000000001000000000000000000000007');
 
-  // The bundled WASM emits u64 fields as BigInt; nothing else is accepted
+  // The bundled WASM emits u64 fields as BigInt, so nothing else is accepted
   const numeric = createSimplexVerifier({ verify_notarized_payload: () => ({ ...certificate, epoch: 2 }), verify_finalized_payload: () => certificate },
     { scheme: 'ed25519', payload: 'sha256', identity: 'ed25519', namespace: '', verificationMaterial: '' });
   await assert.rejects(async () => numeric.verifyNotarization(new Uint8Array(), context), /invalid epoch/);
@@ -710,7 +713,7 @@ test('certificate streams reject round keys of the wrong width', async () => {
   store.subscribe = async function* () {
     yield {
       sequenceNumber: 1n,
-      entries: [{ key: notarizationByRoundKey(0, 7).slice(0, 17), value: new Uint8Array([0x70]) }],
+      entries: [{ key: notarizationByRoundKey(0, 7).slice(0, 16), value: new Uint8Array([0x70]) }],
     };
   };
   const verifier: SimplexCertificateVerifier = {

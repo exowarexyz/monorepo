@@ -42,7 +42,7 @@ type BatchOperation = ImmutableOperation<mmr::Family, FixedBytes<32>, Vec<u8>>;
 async fn spawn_qmdb_server(
     client: Arc<TestImmutableClient>,
 ) -> (tokio::task::JoinHandle<()>, String) {
-    common::spawn_operation_log_service(immutable_operation_log_connect_stack(client)).await
+    common::spawn_connect_service(immutable_operation_log_connect_stack(client)).await
 }
 
 fn validated_client(

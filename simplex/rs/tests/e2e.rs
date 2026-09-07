@@ -576,4 +576,21 @@ async fn round_reads_reject_certificates_stored_under_another_round() {
             Err(SimplexError::RecordKeyMismatch)
         ));
     }
+
+    // A mis-keyed height row sorts last, so the latest-finalized read must reject it
+    let mut batch = StoreWriteBatch::new();
+    batch
+        .push(
+            &client,
+            &keys::finalized_by_height(Height::new(u64::MAX)),
+            finalized.encode(),
+        )
+        .unwrap();
+    batch.commit(&store).await.unwrap();
+    assert!(matches!(
+        simplex
+            .latest_finalized::<TestBlock, Scheme, Sha256Digest>(&(10, 1024))
+            .await,
+        Err(SimplexError::RecordKeyMismatch)
+    ));
 }
