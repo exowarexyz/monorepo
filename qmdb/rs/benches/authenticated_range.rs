@@ -7,7 +7,7 @@ use commonware_storage::{
     merkle::{mem::Mem, mmr, Family as _, Location, Proof},
     qmdb::keyless::variable::Operation,
 };
-use criterion::{criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion, Throughput};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use exoware_qmdb::{prepare_authenticated_range, AuthenticatedOperationRange};
 
 type Family = mmr::Family;
@@ -89,19 +89,15 @@ fn bench_strategy<S: Strategy>(
 ) {
     let authenticated = source.view();
     let operation_cfg = (RangeCfg::from(..=VALUE_SIZE), ());
-    bencher.iter_batched(
-        || (),
-        |()| {
-            prepare_authenticated_range::<Family, Sha256, BatchOperation, S>(
-                &authenticated,
-                &source.root,
-                &operation_cfg,
-                strategy,
-            )
-            .expect("prepare authenticated continuation")
-        },
-        BatchSize::LargeInput,
-    );
+    bencher.iter(|| {
+        prepare_authenticated_range::<Family, Sha256, BatchOperation, S>(
+            &authenticated,
+            &source.root,
+            &operation_cfg,
+            strategy,
+        )
+        .expect("prepare authenticated continuation")
+    });
 }
 
 fn authenticated_range(criterion: &mut Criterion) {
