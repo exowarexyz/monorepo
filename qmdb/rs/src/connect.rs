@@ -175,11 +175,13 @@ trait OperationLogBackend: Clone + Send + Sync + 'static {
     ) -> impl Future<Output = Result<RawBatchMultiProof<Self::Digest, Self::Family>, QmdbError>> + Send;
     fn operation_range_checkpoint(
         &self,
+        read_floor_sequence: u64,
         watermark: Location<Self::Family>,
         start_location: Location<Self::Family>,
         max_locations: u32,
-    ) -> impl Future<Output = Result<OperationRangeCheckpoint<Self::Digest, Self::Family>, QmdbError>>
-           + Send;
+    ) -> impl Future<
+        Output = Result<(OperationRangeCheckpoint<Self::Digest, Self::Family>, u64), QmdbError>,
+    > + Send;
 }
 
 /// Wrapper that bridges any `OperationLogBackend` into a concrete
@@ -270,12 +272,19 @@ where
 
     fn operation_range_checkpoint(
         &self,
+        read_floor_sequence: u64,
         watermark: Location<F>,
         start_location: Location<F>,
         max_locations: u32,
-    ) -> impl Future<Output = Result<OperationRangeCheckpoint<Self::Digest, F>, QmdbError>> + Send
+    ) -> impl Future<Output = Result<(OperationRangeCheckpoint<Self::Digest, F>, u64), QmdbError>> + Send
     {
-        OrderedClient::operation_range_checkpoint(self, watermark, start_location, max_locations)
+        OrderedClient::operation_range_checkpoint_with_read_floor(
+            self,
+            read_floor_sequence,
+            watermark,
+            start_location,
+            max_locations,
+        )
     }
 }
 
@@ -319,12 +328,19 @@ where
 
     fn operation_range_checkpoint(
         &self,
+        read_floor_sequence: u64,
         watermark: Location<F>,
         start_location: Location<F>,
         max_locations: u32,
-    ) -> impl Future<Output = Result<OperationRangeCheckpoint<Self::Digest, F>, QmdbError>> + Send
+    ) -> impl Future<Output = Result<(OperationRangeCheckpoint<Self::Digest, F>, u64), QmdbError>> + Send
     {
-        UnorderedClient::operation_range_checkpoint(self, watermark, start_location, max_locations)
+        UnorderedClient::operation_range_checkpoint_with_read_floor(
+            self,
+            read_floor_sequence,
+            watermark,
+            start_location,
+            max_locations,
+        )
     }
 }
 
@@ -368,12 +384,19 @@ where
 
     fn operation_range_checkpoint(
         &self,
+        read_floor_sequence: u64,
         watermark: Location<F>,
         start_location: Location<F>,
         max_locations: u32,
-    ) -> impl Future<Output = Result<OperationRangeCheckpoint<Self::Digest, F>, QmdbError>> + Send
+    ) -> impl Future<Output = Result<(OperationRangeCheckpoint<Self::Digest, F>, u64), QmdbError>> + Send
     {
-        ImmutableClient::operation_range_checkpoint(self, watermark, start_location, max_locations)
+        ImmutableClient::operation_range_checkpoint_with_read_floor(
+            self,
+            read_floor_sequence,
+            watermark,
+            start_location,
+            max_locations,
+        )
     }
 }
 
@@ -417,12 +440,19 @@ where
 
     fn operation_range_checkpoint(
         &self,
+        read_floor_sequence: u64,
         watermark: Location<F>,
         start_location: Location<F>,
         max_locations: u32,
-    ) -> impl Future<Output = Result<OperationRangeCheckpoint<Self::Digest, F>, QmdbError>> + Send
+    ) -> impl Future<Output = Result<(OperationRangeCheckpoint<Self::Digest, F>, u64), QmdbError>> + Send
     {
-        KeylessClient::operation_range_checkpoint(self, watermark, start_location, max_locations)
+        KeylessClient::operation_range_checkpoint_with_read_floor(
+            self,
+            read_floor_sequence,
+            watermark,
+            start_location,
+            max_locations,
+        )
     }
 }
 
@@ -1019,15 +1049,19 @@ impl<B: OperationLogBackend> OperationLogService for OperationLogConnect<B> {
     {
         let backend = self.backend.clone();
         async move {
-            let proof = backend
+            let (proof, sequence_number) = backend
                 .operation_range_checkpoint(
+                    request.min_sequence_number.unwrap_or_default(),
                     Location::new(request.tip),
                     Location::new(request.start_location),
                     request.max_locations,
                 )
                 .await
                 .map_err(qmdb_error_to_connect)?;
-            connectrpc::Response::ok(crate::proto::get_operation_range_response(&proof))
+            connectrpc::Response::ok(crate::proto::get_operation_range_response(
+                &proof,
+                sequence_number,
+            ))
         }
     }
 

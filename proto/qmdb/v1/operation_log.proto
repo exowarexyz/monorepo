@@ -64,8 +64,15 @@ message GetOperationRangeRequest {
   uint64 tip = 1;
   uint64 start_location = 2;
   uint32 max_locations = 3 [(buf.validate.field).uint32.gt = 0];
+
+  // Minimum Store sequence required by reads used to build this proof.
+  optional uint64 min_sequence_number = 4;
 }
 
 message GetOperationRangeResponse {
   HistoricalOperationRangeProof proof = 1;
+
+  // Highest Store sequence observed while building the proof.
+  // This is freshness metadata and is not authenticated by the proof.
+  uint64 sequence_number = 2;
 }

@@ -2915,6 +2915,16 @@ pub struct GetOperationRangeRequest {
         skip_serializing_if = "::buffa::json_helpers::skip_if::is_zero_u32"
     )]
     pub max_locations: u32,
+    /// Minimum Store sequence required by reads used to build this proof.
+    ///
+    /// Field 4: `min_sequence_number`
+    #[serde(
+        rename = "minSequenceNumber",
+        alias = "min_sequence_number",
+        with = "::buffa::json_helpers::opt_uint64",
+        skip_serializing_if = "::core::option::Option::is_none"
+    )]
+    pub min_sequence_number: ::core::option::Option<u64>,
     #[serde(skip)]
     #[doc(hidden)]
     pub __buffa_unknown_fields: ::buffa::UnknownFields,
@@ -2925,6 +2935,7 @@ impl ::core::fmt::Debug for GetOperationRangeRequest {
             .field("tip", &self.tip)
             .field("start_location", &self.start_location)
             .field("max_locations", &self.max_locations)
+            .field("min_sequence_number", &self.min_sequence_number)
             .finish()
     }
 }
@@ -2934,6 +2945,15 @@ impl GetOperationRangeRequest {
     ///
     /// Format: `type.googleapis.com/<fully.qualified.TypeName>`
     pub const TYPE_URL: &'static str = "type.googleapis.com/qmdb.v1.GetOperationRangeRequest";
+}
+impl GetOperationRangeRequest {
+    #[must_use = "with_* setters return `self` by value; assign or chain the result"]
+    #[inline]
+    ///Sets [`Self::min_sequence_number`] to `Some(value)`, consuming and returning `self`.
+    pub fn with_min_sequence_number(mut self, value: u64) -> Self {
+        self.min_sequence_number = Some(value);
+        self
+    }
 }
 ::buffa::impl_default_instance!(GetOperationRangeRequest);
 impl ::buffa::MessageName for GetOperationRangeRequest {
@@ -2965,6 +2985,9 @@ impl ::buffa::Message for GetOperationRangeRequest {
         if self.max_locations != 0u32 {
             size += 1u64 + ::buffa::types::uint32_encoded_len(self.max_locations) as u64;
         }
+        if let Some(v) = self.min_sequence_number {
+            size += 1u64 + ::buffa::types::uint64_encoded_len(v) as u64;
+        }
         size += self.__buffa_unknown_fields.encoded_len() as u64;
         ::buffa::saturate_size(size)
     }
@@ -2983,6 +3006,9 @@ impl ::buffa::Message for GetOperationRangeRequest {
         }
         if self.max_locations != 0u32 {
             ::buffa::types::put_uint32_field(3u32, self.max_locations, buf);
+        }
+        if let Some(v) = self.min_sequence_number {
+            ::buffa::types::put_uint64_field(4u32, v, buf);
         }
         self.__buffa_unknown_fields.write_to(buf);
     }
@@ -3018,6 +3044,15 @@ impl ::buffa::Message for GetOperationRangeRequest {
                 )?;
                 self.max_locations = ::buffa::types::decode_uint32(buf)?;
             }
+            4u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::Varint,
+                )?;
+                self.min_sequence_number = ::core::option::Option::Some(
+                    ::buffa::types::decode_uint64(buf)?,
+                );
+            }
             _ => {
                 self.__buffa_unknown_fields
                     .push(::buffa::encoding::decode_unknown_field(tag, buf, ctx)?);
@@ -3029,6 +3064,7 @@ impl ::buffa::Message for GetOperationRangeRequest {
         self.tip = 0u64;
         self.start_location = 0u64;
         self.max_locations = 0u32;
+        self.min_sequence_number = ::core::option::Option::None;
         self.__buffa_unknown_fields.clear();
     }
 }
@@ -3074,13 +3110,27 @@ pub struct GetOperationRangeResponse {
         HistoricalOperationRangeProof,
         ::buffa::Inline<HistoricalOperationRangeProof>,
     >,
+    /// Highest Store sequence observed while building the proof.
+    /// This is freshness metadata and is not authenticated by the proof.
+    ///
+    /// Field 2: `sequence_number`
+    #[serde(
+        rename = "sequenceNumber",
+        alias = "sequence_number",
+        with = "::buffa::json_helpers::uint64",
+        skip_serializing_if = "::buffa::json_helpers::skip_if::is_zero_u64"
+    )]
+    pub sequence_number: u64,
     #[serde(skip)]
     #[doc(hidden)]
     pub __buffa_unknown_fields: ::buffa::UnknownFields,
 }
 impl ::core::fmt::Debug for GetOperationRangeResponse {
     fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_struct("GetOperationRangeResponse").field("proof", &self.proof).finish()
+        f.debug_struct("GetOperationRangeResponse")
+            .field("proof", &self.proof)
+            .field("sequence_number", &self.sequence_number)
+            .finish()
     }
 }
 impl GetOperationRangeResponse {
@@ -3118,6 +3168,11 @@ impl ::buffa::Message for GetOperationRangeResponse {
                 += 1u64 + ::buffa::encoding::varint_len(inner_size as u64) as u64
                     + inner_size as u64;
         }
+        if self.sequence_number != 0u64 {
+            size
+                += 1u64
+                    + ::buffa::types::uint64_encoded_len(self.sequence_number) as u64;
+        }
         size += self.__buffa_unknown_fields.encoded_len() as u64;
         ::buffa::saturate_size(size)
     }
@@ -3135,6 +3190,9 @@ impl ::buffa::Message for GetOperationRangeResponse {
                 buf,
             );
             self.proof.write_to(__cache, buf);
+        }
+        if self.sequence_number != 0u64 {
+            ::buffa::types::put_uint64_field(2u32, self.sequence_number, buf);
         }
         self.__buffa_unknown_fields.write_to(buf);
     }
@@ -3160,6 +3218,13 @@ impl ::buffa::Message for GetOperationRangeResponse {
                     ctx,
                 )?;
             }
+            2u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::Varint,
+                )?;
+                self.sequence_number = ::buffa::types::decode_uint64(buf)?;
+            }
             _ => {
                 self.__buffa_unknown_fields
                     .push(::buffa::encoding::decode_unknown_field(tag, buf, ctx)?);
@@ -3169,6 +3234,7 @@ impl ::buffa::Message for GetOperationRangeResponse {
     }
     fn clear(&mut self) {
         self.proof = ::buffa::MessageField::none();
+        self.sequence_number = 0u64;
         self.__buffa_unknown_fields.clear();
     }
 }
@@ -8918,6 +8984,10 @@ pub mod __buffa {
             pub start_location: u64,
             /// Field 3: `max_locations`
             pub max_locations: u32,
+            /// Minimum Store sequence required by reads used to build this proof.
+            ///
+            /// Field 4: `min_sequence_number`
+            pub min_sequence_number: ::core::option::Option<u64>,
             pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
         }
         impl<'a> ::buffa::MessageView<'a> for GetOperationRangeRequestView<'a> {
@@ -8973,6 +9043,15 @@ pub mod __buffa {
                         )?;
                         view.max_locations = ::buffa::types::decode_uint32(&mut cur)?;
                     }
+                    4u32 => {
+                        ::buffa::encoding::check_wire_type(
+                            tag,
+                            ::buffa::encoding::WireType::Varint,
+                        )?;
+                        view.min_sequence_number = Some(
+                            ::buffa::types::decode_uint64(&mut cur)?,
+                        );
+                    }
                     _ => {
                         ::buffa::encoding::skip_field_depth(tag, &mut cur, ctx.depth())?;
                         let span_len = before_tag.len() - cur.len();
@@ -9005,6 +9084,7 @@ pub mod __buffa {
                     tip: self.tip,
                     start_location: self.start_location,
                     max_locations: self.max_locations,
+                    min_sequence_number: self.min_sequence_number,
                     __buffa_unknown_fields: self
                         .__buffa_unknown_fields
                         .to_owned()?
@@ -9034,6 +9114,9 @@ pub mod __buffa {
                             + ::buffa::types::uint32_encoded_len(self.max_locations)
                                 as u64;
                 }
+                if let Some(v) = self.min_sequence_number {
+                    size += 1u64 + ::buffa::types::uint64_encoded_len(v) as u64;
+                }
                 size += self.__buffa_unknown_fields.encoded_len() as u64;
                 ::buffa::saturate_size(size)
             }
@@ -9053,6 +9136,9 @@ pub mod __buffa {
                 }
                 if self.max_locations != 0u32 {
                     ::buffa::types::put_uint32_field(3u32, self.max_locations, buf);
+                }
+                if let Some(v) = self.min_sequence_number {
+                    ::buffa::types::put_uint64_field(4u32, v, buf);
                 }
                 self.__buffa_unknown_fields.write_to(buf);
             }
@@ -9094,6 +9180,13 @@ pub mod __buffa {
                         .serialize_entry(
                             "maxLocations",
                             &::buffa::json_helpers::ProtoJson(&self.max_locations),
+                        )?;
+                }
+                if let ::core::option::Option::Some(__v) = self.min_sequence_number {
+                    __map
+                        .serialize_entry(
+                            "minSequenceNumber",
+                            &::buffa::json_helpers::ProtoJson(&__v),
                         )?;
                 }
                 __map.end()
@@ -9208,6 +9301,13 @@ pub mod __buffa {
             pub fn max_locations(&self) -> u32 {
                 self.0.reborrow().max_locations
             }
+            /// Minimum Store sequence required by reads used to build this proof.
+            ///
+            /// Field 4: `min_sequence_number`
+            #[must_use]
+            pub fn min_sequence_number(&self) -> ::core::option::Option<u64> {
+                self.0.reborrow().min_sequence_number
+            }
         }
         impl ::core::convert::From<
             ::buffa::OwnedView<GetOperationRangeRequestView<'static>>,
@@ -9251,6 +9351,11 @@ pub mod __buffa {
             pub proof: ::buffa::MessageFieldView<
                 super::super::__buffa::view::HistoricalOperationRangeProofView<'a>,
             >,
+            /// Highest Store sequence observed while building the proof.
+            /// This is freshness metadata and is not authenticated by the proof.
+            ///
+            /// Field 2: `sequence_number`
+            pub sequence_number: u64,
             pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
         }
         impl<'a> ::buffa::MessageView<'a> for GetOperationRangeResponseView<'a> {
@@ -9310,6 +9415,13 @@ pub mod __buffa {
                             }
                         }
                     }
+                    2u32 => {
+                        ::buffa::encoding::check_wire_type(
+                            tag,
+                            ::buffa::encoding::WireType::Varint,
+                        )?;
+                        view.sequence_number = ::buffa::types::decode_uint64(&mut cur)?;
+                    }
                     _ => {
                         ::buffa::encoding::skip_field_depth(tag, &mut cur, ctx.depth())?;
                         let span_len = before_tag.len() - cur.len();
@@ -9348,6 +9460,7 @@ pub mod __buffa {
                         }
                         None => ::buffa::MessageField::none(),
                     },
+                    sequence_number: self.sequence_number,
                     __buffa_unknown_fields: self
                         .__buffa_unknown_fields
                         .to_owned()?
@@ -9370,6 +9483,12 @@ pub mod __buffa {
                         += 1u64 + ::buffa::encoding::varint_len(inner_size as u64) as u64
                             + inner_size as u64;
                 }
+                if self.sequence_number != 0u64 {
+                    size
+                        += 1u64
+                            + ::buffa::types::uint64_encoded_len(self.sequence_number)
+                                as u64;
+                }
                 size += self.__buffa_unknown_fields.encoded_len() as u64;
                 ::buffa::saturate_size(size)
             }
@@ -9388,6 +9507,9 @@ pub mod __buffa {
                         buf,
                     );
                     self.proof.write_to(__cache, buf);
+                }
+                if self.sequence_number != 0u64 {
+                    ::buffa::types::put_uint64_field(2u32, self.sequence_number, buf);
                 }
                 self.__buffa_unknown_fields.write_to(buf);
             }
@@ -9414,6 +9536,13 @@ pub mod __buffa {
                     if let ::core::option::Option::Some(__v) = self.proof.as_option() {
                         __map.serialize_entry("proof", __v)?;
                     }
+                }
+                if !::buffa::json_helpers::skip_if::is_zero_u64(&self.sequence_number) {
+                    __map
+                        .serialize_entry(
+                            "sequenceNumber",
+                            &::buffa::json_helpers::ProtoJson(&self.sequence_number),
+                        )?;
                 }
                 __map.end()
             }
@@ -9522,6 +9651,14 @@ pub mod __buffa {
                 super::super::__buffa::view::HistoricalOperationRangeProofView<'_>,
             > {
                 &self.0.reborrow().proof
+            }
+            /// Highest Store sequence observed while building the proof.
+            /// This is freshness metadata and is not authenticated by the proof.
+            ///
+            /// Field 2: `sequence_number`
+            #[must_use]
+            pub fn sequence_number(&self) -> u64 {
+                self.0.reborrow().sequence_number
             }
         }
         impl ::core::convert::From<

@@ -473,12 +473,14 @@ where
 
 pub(crate) fn get_operation_range_response<D: Digest, F: Graftable>(
     proof: &OperationRangeCheckpoint<D, F>,
+    sequence_number: u64,
 ) -> PreEncoded<GetOperationRangeResponse> {
     let proof_len = operation_range_checkpoint_len(proof);
-    let len = message_field_len(1, proof_len);
+    let len = message_field_len(1, proof_len) + varint_field_len(2, sequence_number);
     PreEncoded::from_bytes_unchecked(message_bytes(len, |buf| {
         write_message_field(buf, 1, proof_len);
         write_operation_range_checkpoint(buf, proof);
+        write_u64_field(buf, 2, sequence_number);
     }))
 }
 

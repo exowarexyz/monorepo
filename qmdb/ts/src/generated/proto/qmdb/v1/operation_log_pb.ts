@@ -15,7 +15,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file qmdb/v1/operation_log.proto.
  */
 export const file_qmdb_v1_operation_log: GenFile = /*@__PURE__*/
-  fileDesc("ChtxbWRiL3YxL29wZXJhdGlvbl9sb2cucHJvdG8SB3FtZGIudjEivgEKEFN1YnNjcmliZVJlcXVlc3QSNAoLa2V5X2ZpbHRlcnMYASADKAsyFC5jb21tb24ua3YudjEuRmlsdGVyQgm6SAaSAQMQgAgSNgoNdmFsdWVfZmlsdGVycxgCIAMoCzIULmNvbW1vbi5rdi52MS5GaWx0ZXJCCbpIBpIBAxCACBIiChVzaW5jZV9zZXF1ZW5jZV9udW1iZXIYAyABKARIAIgBAUIYChZfc2luY2Vfc2VxdWVuY2VfbnVtYmVyIm4KEVN1YnNjcmliZVJlc3BvbnNlEh4KFnJlc3VtZV9zZXF1ZW5jZV9udW1iZXIYASABKAQSLAoFcHJvb2YYAiABKAsyHS5xbWRiLnYxLkhpc3RvcmljYWxNdWx0aVByb29mEgsKA3RpcBgDIAEoBCJfChhHZXRPcGVyYXRpb25SYW5nZVJlcXVlc3QSCwoDdGlwGAEgASgEEhYKDnN0YXJ0X2xvY2F0aW9uGAIgASgEEh4KDW1heF9sb2NhdGlvbnMYAyABKA1CB7pIBCoCIAAiUgoZR2V0T3BlcmF0aW9uUmFuZ2VSZXNwb25zZRI1CgVwcm9vZhgBIAEoCzImLnFtZGIudjEuSGlzdG9yaWNhbE9wZXJhdGlvblJhbmdlUHJvb2YytwEKE09wZXJhdGlvbkxvZ1NlcnZpY2USWgoRR2V0T3BlcmF0aW9uUmFuZ2USIS5xbWRiLnYxLkdldE9wZXJhdGlvblJhbmdlUmVxdWVzdBoiLnFtZGIudjEuR2V0T3BlcmF0aW9uUmFuZ2VSZXNwb25zZRJECglTdWJzY3JpYmUSGS5xbWRiLnYxLlN1YnNjcmliZVJlcXVlc3QaGi5xbWRiLnYxLlN1YnNjcmliZVJlc3BvbnNlMAFiBnByb3RvMw", [file_buf_validate_validate, file_qmdb_v1_proof, file_common_v1_kv]);
+  fileDesc("ChtxbWRiL3YxL29wZXJhdGlvbl9sb2cucHJvdG8SB3FtZGIudjEivgEKEFN1YnNjcmliZVJlcXVlc3QSNAoLa2V5X2ZpbHRlcnMYASADKAsyFC5jb21tb24ua3YudjEuRmlsdGVyQgm6SAaSAQMQgAgSNgoNdmFsdWVfZmlsdGVycxgCIAMoCzIULmNvbW1vbi5rdi52MS5GaWx0ZXJCCbpIBpIBAxCACBIiChVzaW5jZV9zZXF1ZW5jZV9udW1iZXIYAyABKARIAIgBAUIYChZfc2luY2Vfc2VxdWVuY2VfbnVtYmVyIm4KEVN1YnNjcmliZVJlc3BvbnNlEh4KFnJlc3VtZV9zZXF1ZW5jZV9udW1iZXIYASABKAQSLAoFcHJvb2YYAiABKAsyHS5xbWRiLnYxLkhpc3RvcmljYWxNdWx0aVByb29mEgsKA3RpcBgDIAEoBCKZAQoYR2V0T3BlcmF0aW9uUmFuZ2VSZXF1ZXN0EgsKA3RpcBgBIAEoBBIWCg5zdGFydF9sb2NhdGlvbhgCIAEoBBIeCg1tYXhfbG9jYXRpb25zGAMgASgNQge6SAQqAiAAEiAKE21pbl9zZXF1ZW5jZV9udW1iZXIYBCABKARIAIgBAUIWChRfbWluX3NlcXVlbmNlX251bWJlciJrChlHZXRPcGVyYXRpb25SYW5nZVJlc3BvbnNlEjUKBXByb29mGAEgASgLMiYucW1kYi52MS5IaXN0b3JpY2FsT3BlcmF0aW9uUmFuZ2VQcm9vZhIXCg9zZXF1ZW5jZV9udW1iZXIYAiABKAQytwEKE09wZXJhdGlvbkxvZ1NlcnZpY2USWgoRR2V0T3BlcmF0aW9uUmFuZ2USIS5xbWRiLnYxLkdldE9wZXJhdGlvblJhbmdlUmVxdWVzdBoiLnFtZGIudjEuR2V0T3BlcmF0aW9uUmFuZ2VSZXNwb25zZRJECglTdWJzY3JpYmUSGS5xbWRiLnYxLlN1YnNjcmliZVJlcXVlc3QaGi5xbWRiLnYxLlN1YnNjcmliZVJlc3BvbnNlMAFiBnByb3RvMw", [file_buf_validate_validate, file_qmdb_v1_proof, file_common_v1_kv]);
 
 /**
  * Subscribe to operations whose logical key and/or value match the given
@@ -120,6 +120,13 @@ export type GetOperationRangeRequest = Message<"qmdb.v1.GetOperationRangeRequest
    * @generated from field: uint32 max_locations = 3;
    */
   maxLocations: number;
+
+  /**
+   * Minimum Store sequence required by reads used to build this proof.
+   *
+   * @generated from field: optional uint64 min_sequence_number = 4;
+   */
+  minSequenceNumber?: bigint;
 };
 
 /**
@@ -137,6 +144,14 @@ export type GetOperationRangeResponse = Message<"qmdb.v1.GetOperationRangeRespon
    * @generated from field: qmdb.v1.HistoricalOperationRangeProof proof = 1;
    */
   proof?: HistoricalOperationRangeProof;
+
+  /**
+   * Highest Store sequence observed while building the proof.
+   * This is freshness metadata and is not authenticated by the proof.
+   *
+   * @generated from field: uint64 sequence_number = 2;
+   */
+  sequenceNumber: bigint;
 };
 
 /**
