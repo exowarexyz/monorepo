@@ -227,7 +227,7 @@ where
         &locations,
     )
     .await
-    .map_err(|e| crate::QmdbError::CommonwareMerkle(e.to_string()))?;
+    .map_err(crate::error::merkle_error)?;
     let raw = RawBatchMultiProof {
         watermark,
         root,
@@ -268,7 +268,7 @@ where
         inactive_peaks,
     )
     .await
-    .map_err(|e| crate::QmdbError::CommonwareMerkle(e.to_string()))?;
+    .map_err(crate::error::merkle_error)?;
     let pinned_nodes = if start_location == Location::new(0) {
         Vec::new()
     } else {
@@ -276,7 +276,7 @@ where
             storage
                 .get_node(position)
                 .await
-                .map_err(|e| crate::QmdbError::CommonwareMerkle(e.to_string()))?
+                .map_err(crate::error::merkle_error)?
                 .ok_or_else(|| {
                     crate::QmdbError::CommonwareMerkle(format!(
                         "missing pinned node at position {position}"

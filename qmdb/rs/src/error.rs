@@ -1,4 +1,37 @@
-use exoware_sdk::ClientError;
+use commonware_storage::{merkle, qmdb};
+use exoware_sdk::{ClientError, ConnectError};
+
+// Native Merkle errors cannot carry RPC codes. Reserve this tag to preserve Store retryability.
+const STORE_READ_ABORTED: &str = "exoware-qmdb Store read aborted";
+
+pub(crate) fn store_read_error<F: merkle::Family>(
+    error: ClientError,
+    message: &'static str,
+) -> merkle::Error<F> {
+    if error.rpc_code() == Some(connectrpc::ErrorCode::Aborted) {
+        merkle::Error::DataCorrupted(STORE_READ_ABORTED)
+    } else {
+        merkle::Error::DataCorrupted(message)
+    }
+}
+
+pub(crate) fn merkle_error<F: merkle::Family>(error: merkle::Error<F>) -> QmdbError {
+    match error {
+        merkle::Error::DataCorrupted(STORE_READ_ABORTED) => {
+            ClientError::Rpc(Box::new(ConnectError::aborted(STORE_READ_ABORTED))).into()
+        }
+        error => QmdbError::CommonwareMerkle(error.to_string()),
+    }
+}
+
+pub(crate) fn current_proof_error<F: merkle::Family>(error: qmdb::Error<F>) -> QmdbError {
+    match error {
+        qmdb::Error::Merkle(merkle::Error::DataCorrupted(STORE_READ_ABORTED)) => {
+            ClientError::Rpc(Box::new(ConnectError::aborted(STORE_READ_ABORTED))).into()
+        }
+        error => QmdbError::CommonwareMerkle(error.to_string()),
+    }
+}
 
 pub(crate) fn error_key<K: AsRef<[u8]> + ?Sized>(key: &K) -> Vec<u8> {
     key.as_ref().to_vec()
@@ -100,4 +133,47 @@ pub enum QmdbError {
     CommonwareMerkle(String),
     #[error("qmdb stream transport error: {0}")]
     Stream(String),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use commonware_storage::merkle::mmr;
+    use connectrpc::ErrorCode;
+
+    #[test]
+    fn proof_boundaries_preserve_only_structured_store_aborts() {
+        for code in [
+            ErrorCode::Aborted,
+            ErrorCode::Internal,
+            ErrorCode::Unavailable,
+        ] {
+            let failure = || {
+                store_read_error::<mmr::Family>(
+                    ClientError::Rpc(Box::new(ConnectError::new(code, STORE_READ_ABORTED))),
+                    "node fetch failed",
+                )
+            };
+            for error in [
+                merkle_error(failure()),
+                current_proof_error(qmdb::Error::Merkle(failure())),
+            ] {
+                if code == ErrorCode::Aborted {
+                    assert!(
+                        matches!(error, QmdbError::Client(error) if error.rpc_code() == Some(code))
+                    );
+                } else {
+                    assert!(matches!(error, QmdbError::CommonwareMerkle(_)));
+                }
+            }
+        }
+        for error in [
+            merkle_error(merkle::Error::<mmr::Family>::DataCorrupted("invalid node")),
+            current_proof_error(qmdb::Error::Merkle(
+                merkle::Error::<mmr::Family>::ElementPruned(merkle::Position::new(0)),
+            )),
+        ] {
+            assert!(matches!(error, QmdbError::CommonwareMerkle(_)));
+        }
+    }
 }

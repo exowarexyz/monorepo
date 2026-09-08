@@ -1073,14 +1073,16 @@ impl RangeStream {
                     self.final_count = Some(self.rows_seen);
                     return Ok(None);
                 };
-                frame.to_owned_message()
+                let frame = frame.to_owned_message();
+                if let (Some(sequence_store), Some(detail)) =
+                    (&self.observed_sequence, frame.detail.as_option())
+                {
+                    sequence_store.fetch_max(detail.sequence_number, Ordering::SeqCst);
+                }
+                frame
             };
 
             let detail = frame.detail.as_option().cloned();
-            if let (Some(sequence_store), Some(detail)) = (&self.observed_sequence, detail.as_ref())
-            {
-                sequence_store.fetch_max(detail.sequence_number, Ordering::SeqCst);
-            }
             let n = frame.results.len();
 
             // Hide default/empty wire frames from the SDK's semantic chunk stream.
@@ -1197,14 +1199,16 @@ impl GetManyStream {
                     }
                     return Ok(None);
                 };
-                frame.to_owned_message()
+                let frame = frame.to_owned_message();
+                if let (Some(sequence_store), Some(detail)) =
+                    (&self.observed_sequence, frame.detail.as_option())
+                {
+                    sequence_store.fetch_max(detail.sequence_number, Ordering::SeqCst);
+                }
+                frame
             };
 
             let detail = frame.detail.as_option().cloned();
-            if let (Some(sequence_store), Some(detail)) = (&self.observed_sequence, detail.as_ref())
-            {
-                sequence_store.fetch_max(detail.sequence_number, Ordering::SeqCst);
-            }
             let n = frame.results.len();
 
             // Hide default/empty wire frames from the SDK's semantic chunk stream.
@@ -2696,31 +2700,22 @@ impl SerializableReadSession {
         self.state.evaluated_sequence()
     }
 
+    /// Share this session's freshness state with another client for the same Store.
+    pub fn with_client(&self, client: PrefixedStoreClient) -> Self {
+        Self {
+            client,
+            state: self.state.clone(),
+        }
+    }
+
     pub async fn get(&self, key: &Key) -> Result<Option<Bytes>, ClientError> {
-        let seeded_client = self.client.clone();
-        let unseeded_client = self.client.clone();
-        self.run_read(
-            move |sequence, observed_sequence| {
-                let client = seeded_client.clone();
-                async move {
-                    let (response, detail) = client.send_get(key, Some(sequence)).await?;
-                    if let (Some(observed_sequence), Some(detail)) = (observed_sequence, detail) {
-                        observed_sequence.fetch_max(detail.sequence_number, Ordering::SeqCst);
-                    }
-                    Ok(response.value)
-                }
-            },
-            move |observed_sequence| {
-                let client = unseeded_client.clone();
-                async move {
-                    let (response, detail) = client.send_get(key, None).await?;
-                    if let Some(detail) = detail {
-                        observed_sequence.fetch_max(detail.sequence_number, Ordering::SeqCst);
-                    }
-                    Ok(response.value)
-                }
-            },
-        )
+        self.run_read(|sequence, observed_sequence| async move {
+            let (response, detail) = self.client.send_get(key, sequence).await?;
+            if let Some(detail) = detail {
+                observed_sequence.fetch_max(detail.sequence_number, Ordering::SeqCst);
+            }
+            Ok(response.value)
+        })
         .await
     }
 
@@ -2729,35 +2724,10 @@ impl SerializableReadSession {
         keys: &[&Key],
         batch_size: u32,
     ) -> Result<GetManyStream, ClientError> {
-        // `Key` is `Bytes`; cloning shares the backing buffer (refcount bump)
-        // instead of deep-copying each key.
-        let keys_owned: Vec<Key> = keys.iter().map(|k| (**k).clone()).collect();
-        let seeded_client = self.client.clone();
-        let unseeded_client = self.client.clone();
-        let keys_seeded = keys_owned.clone();
-        let keys_unseeded = keys_owned;
-        self.run_read(
-            move |sequence, observed_sequence| {
-                let client = seeded_client.clone();
-                let keys = keys_seeded.clone();
-                async move {
-                    let refs: Vec<&Key> = keys.iter().collect();
-                    client
-                        .get_many_internal(&refs, batch_size, Some(sequence), observed_sequence)
-                        .await
-                }
-            },
-            move |observed_sequence| {
-                let client = unseeded_client.clone();
-                let keys = keys_unseeded.clone();
-                async move {
-                    let refs: Vec<&Key> = keys.iter().collect();
-                    client
-                        .get_many_internal(&refs, batch_size, None, Some(observed_sequence))
-                        .await
-                }
-            },
-        )
+        self.run_read(|sequence, observed_sequence| {
+            self.client
+                .get_many_internal(keys, batch_size, sequence, Some(observed_sequence))
+        })
         .await
     }
 
@@ -2778,48 +2748,23 @@ impl SerializableReadSession {
         limit: usize,
         mode: RangeMode,
     ) -> Result<Vec<(Key, Bytes)>, ClientError> {
-        let seeded_client = self.client.clone();
-        let unseeded_client = self.client.clone();
-        self.run_read(
-            move |sequence, observed_sequence| {
-                let client = seeded_client.clone();
-                async move {
-                    let stream = client
-                        .range_stream_internal(
-                            start,
-                            end,
-                            limit,
-                            limit.max(1),
-                            mode,
-                            QueryStreamReadOptions {
-                                min_sequence_number: Some(sequence),
-                                observed_sequence,
-                            },
-                        )
-                        .await;
-                    stream?.collect().await
-                }
-            },
-            move |observed_sequence| {
-                let client = unseeded_client.clone();
-                async move {
-                    let stream = client
-                        .range_stream_internal(
-                            start,
-                            end,
-                            limit,
-                            limit.max(1),
-                            mode,
-                            QueryStreamReadOptions {
-                                min_sequence_number: None,
-                                observed_sequence: Some(observed_sequence),
-                            },
-                        )
-                        .await;
-                    stream?.collect().await
-                }
-            },
-        )
+        self.run_read(|sequence, observed_sequence| async move {
+            self.client
+                .range_stream_internal(
+                    start,
+                    end,
+                    limit,
+                    limit.max(1),
+                    mode,
+                    QueryStreamReadOptions {
+                        min_sequence_number: sequence,
+                        observed_sequence: Some(observed_sequence),
+                    },
+                )
+                .await?
+                .collect()
+                .await
+        })
         .await
     }
 
@@ -2842,46 +2787,19 @@ impl SerializableReadSession {
         batch_size: usize,
         mode: RangeMode,
     ) -> Result<RangeStream, ClientError> {
-        let seeded_client = self.client.clone();
-        let unseeded_client = self.client.clone();
-        self.run_read(
-            move |sequence, observed_sequence| {
-                let client = seeded_client.clone();
-                async move {
-                    client
-                        .range_stream_internal(
-                            start,
-                            end,
-                            limit,
-                            batch_size,
-                            mode,
-                            QueryStreamReadOptions {
-                                min_sequence_number: Some(sequence),
-                                observed_sequence,
-                            },
-                        )
-                        .await
-                }
-            },
-            move |observed_sequence| {
-                let client = unseeded_client.clone();
-                async move {
-                    client
-                        .range_stream_internal(
-                            start,
-                            end,
-                            limit,
-                            batch_size,
-                            mode,
-                            QueryStreamReadOptions {
-                                min_sequence_number: None,
-                                observed_sequence: Some(observed_sequence),
-                            },
-                        )
-                        .await
-                }
-            },
-        )
+        self.run_read(|sequence, observed_sequence| {
+            self.client.range_stream_internal(
+                start,
+                end,
+                limit,
+                batch_size,
+                mode,
+                QueryStreamReadOptions {
+                    min_sequence_number: sequence,
+                    observed_sequence: Some(observed_sequence),
+                },
+            )
+        })
         .await
     }
 
@@ -2904,61 +2822,37 @@ impl SerializableReadSession {
         end: &Key,
         request: &DomainRangeReduceRequest,
     ) -> Result<ReduceStream, ClientError> {
-        self.run_read(
-            |sequence, observed_sequence| {
-                self.client.range_reduce_stream_internal(
-                    start,
-                    end,
-                    request,
-                    QueryStreamReadOptions {
-                        min_sequence_number: Some(sequence),
-                        observed_sequence,
-                    },
-                )
-            },
-            |observed_sequence| {
-                self.client.range_reduce_stream_internal(
-                    start,
-                    end,
-                    request,
-                    QueryStreamReadOptions {
-                        min_sequence_number: None,
-                        observed_sequence: Some(observed_sequence),
-                    },
-                )
-            },
-        )
+        self.run_read(|sequence, observed_sequence| {
+            self.client.range_reduce_stream_internal(
+                start,
+                end,
+                request,
+                QueryStreamReadOptions {
+                    min_sequence_number: sequence,
+                    observed_sequence: Some(observed_sequence),
+                },
+            )
+        })
         .await
     }
 
-    async fn run_read<T, SeededCall, SeededFut, UnseededCall, UnseededFut>(
-        &self,
-        seeded_call: SeededCall,
-        unseeded_call: UnseededCall,
-    ) -> Result<T, ClientError>
+    async fn run_read<T, Call, Fut>(&self, call: Call) -> Result<T, ClientError>
     where
-        SeededCall: Fn(u64, Option<Arc<AtomicU64>>) -> SeededFut,
-        SeededFut: std::future::Future<Output = Result<T, ClientError>>,
-        UnseededCall: Fn(Arc<AtomicU64>) -> UnseededFut,
-        UnseededFut: std::future::Future<Output = Result<T, ClientError>>,
+        Call: FnOnce(Option<u64>, Arc<AtomicU64>) -> Fut,
+        Fut: std::future::Future<Output = Result<T, ClientError>>,
     {
-        if let Some(sequence) = self.evaluated_sequence() {
-            return seeded_call(sequence, Some(self.state.sequence.clone())).await;
+        if let Some(sequence) = self.fixed_sequence() {
+            return call(Some(sequence), self.state.sequence.clone()).await;
         }
 
         let gate = self.state.init_gate.lock().await;
 
-        if let Some(sequence) = self.evaluated_sequence() {
+        if let Some(sequence) = self.fixed_sequence() {
             drop(gate);
-            return seeded_call(sequence, Some(self.state.sequence.clone())).await;
+            return call(Some(sequence), self.state.sequence.clone()).await;
         }
 
-        let observed_sequence = self.state.sequence.clone();
-        let result = if self.state.minimum_sequence > 0 {
-            seeded_call(self.state.minimum_sequence, Some(observed_sequence)).await
-        } else {
-            unseeded_call(observed_sequence).await
-        };
+        let result = call(None, self.state.sequence.clone()).await;
         drop(gate);
         result
     }

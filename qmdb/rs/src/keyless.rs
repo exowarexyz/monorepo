@@ -169,14 +169,27 @@ where
         let session = self
             .client
             .create_session_with_sequence(read_floor_sequence);
-        let proof = self
-            .operation_range_checkpoint_in_session(
-                &session,
-                watermark,
-                start_location,
-                max_locations,
-            )
-            .await?;
+        require_published_auth_watermark(&session, watermark).await?;
+        let end = crate::proof::resolve_range_bounds(watermark, start_location, max_locations)?;
+        let storage = KvMerkleStorage::<F, H::Digest> {
+            session: &session,
+            size: merkle_size_for_watermark(watermark)?,
+            _marker: PhantomData::<H::Digest>,
+        };
+        let inactive_peaks = self.inactive_peaks_at(&session, watermark).await?;
+        let root = compute_auth_root::<F, H>(&session, watermark, inactive_peaks).await?;
+        let encoded_operations =
+            load_auth_operation_bytes_range(&session, start_location, end).await?;
+        let proof = crate::proof::build_operation_range_checkpoint::<F, H, _>(
+            &storage,
+            watermark,
+            start_location,
+            end,
+            root,
+            inactive_peaks,
+            encoded_operations,
+        )
+        .await?;
         let sequence_number = session.evaluated_sequence().ok_or_else(|| {
             QmdbError::CorruptData(
                 "operation range proof did not evaluate a Store sequence".to_string(),
@@ -226,36 +239,6 @@ where
             )));
         };
         auth_inactive_peaks(watermark, floor)
-    }
-
-    async fn operation_range_checkpoint_in_session(
-        &self,
-        session: &SerializableReadSession,
-        watermark: Location<F>,
-        start_location: Location<F>,
-        max_locations: u32,
-    ) -> Result<OperationRangeCheckpoint<H::Digest, F>, QmdbError> {
-        require_published_auth_watermark(session, watermark).await?;
-        let end = crate::proof::resolve_range_bounds(watermark, start_location, max_locations)?;
-        let storage = KvMerkleStorage::<F, H::Digest> {
-            session,
-            size: merkle_size_for_watermark(watermark)?,
-            _marker: PhantomData::<H::Digest>,
-        };
-        let inactive_peaks = self.inactive_peaks_at(session, watermark).await?;
-        let root = compute_auth_root::<F, H>(session, watermark, inactive_peaks).await?;
-        let encoded_operations =
-            load_auth_operation_bytes_range(session, start_location, end).await?;
-        crate::proof::build_operation_range_checkpoint::<F, H, _>(
-            &storage,
-            watermark,
-            start_location,
-            end,
-            root,
-            inactive_peaks,
-            encoded_operations,
-        )
-        .await
     }
 
     /// Verified contiguous range of operations.

@@ -167,10 +167,15 @@ cargo run -p exoware-sql --example versioned_kv    # versioned composite PK demo
 
 ## Scan consistency
 
-All reads within a single DataFusion scan use a `SerializableReadSession`.
-The first response establishes a minimum sequence number for subsequent reads,
-including index lookups. Later reads may observe newer inserts. This is a
-sequence floor, not an MVCC snapshot.
+Store reads within one `Query` RPC share a `SerializableReadSession`.
+The request can supply an initial minimum sequence. Each observed response
+advances the floor for subsequent reads, including pagination, index lookups,
+and aggregate reductions. This preserves monotonic freshness across query
+workers behind a load balancer. It does not provide snapshot isolation.
+
+Embedded DataFusion contexts share a request session when created with
+`query_context_with_min_sequence`. Otherwise each scan or aggregate creates
+its own session.
 
 Primary keys identify immutable rows. Inserting the same primary key more than
 once has undefined behavior. The write path does not enforce uniqueness. Use a
