@@ -1,15 +1,7 @@
-//! Regression for the ordered current-boundary recovery path across local
-//! bitmap-chunk pruning. Drives enough batches that the local
-//! `current::ordered::Db` prunes its first bitmap chunk (locations 0..=255
-//! fall below the inactivity floor), and verifies:
-//!
-//! 1. `recover_boundary_state` no longer requests a range proof at the
-//!    previous batch's `CommitFloor` location, so boundary recovery does not panic
-//!    with `operation pruned: Location(255)` once chunk 0 is pruned.
-//! 2. The remote `current_root_at` matches the local root at every batch
-//!    boundary, including old watermarks where the stored bitmap chunk still
-//!    carries an unmasked stale `CommitFloor` bit. The server-side masking in
-//!    `load_bitmap_chunk` folds that bit to 0 at read time.
+//! Ordered current-boundary recovery across local bitmap-chunk pruning.
+//! Recovery must skip pruned chunks, including the previous commit's chunk.
+//! Remote current roots and proofs must match the source at every batch boundary,
+//! including historical watermarks and keys below the latest inactivity floor.
 
 mod common;
 

@@ -629,6 +629,163 @@ async fn test_unordered_current_operation_range_connect_returns_verifiable_proof
     assert!(!proof.chunks.is_empty());
 }
 
+async fn aligned_commit_boundary<F: commonware_storage::merkle::Graftable + PartialEq>(
+    case_name: &'static str,
+) where
+    F::PendingChunk<Digest>: 'static,
+{
+    type Operation<F> = UnorderedQmdbOperation<F, Digest, Vec<u8>>;
+    type Db<F> = LocalCurrentUnorderedDb<
+        F,
+        cw_tokio::Context,
+        Digest,
+        Vec<u8>,
+        Sha256,
+        TwoCap,
+        N,
+        commonware_parallel::Sequential,
+    >;
+    fn key(index: u16) -> Digest {
+        let mut key = Sha256::fill(0);
+        key.0[..2].copy_from_slice(&index.to_be_bytes());
+        key
+    }
+    let snapshots = tokio::task::spawn_blocking(move || {
+        cw_tokio::Runner::default().start(|context| async move {
+            use commonware_runtime::{buffer::paged::CacheRef, Supervisor as _};
+            let cache = CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(8));
+            let cfg = common::current_variable_config(
+                case_name,
+                cache,
+                ((), ((0..=MAX_OPERATION_SIZE).into(), ())),
+                NZU64!(8),
+            );
+            let mut db = Db::<F>::init(context.child(case_name), cfg)
+                .await
+                .expect("source init");
+            let mut previous: Vec<Operation<F>> = Vec::new();
+            let mut snapshots = Vec::new();
+            for round in 0..2 {
+                let mut batch = db.new_batch();
+                if round == 0 {
+                    // Fresh writes plus one floor move and the commit fill two bitmap chunks
+                    for index in 1u16..=509 {
+                        batch = batch.write(key(index), Some(index.to_be_bytes().to_vec()));
+                    }
+                }
+                let batch = batch
+                    .merkleize(&db, None::<Vec<u8>>)
+                    .await
+                    .expect("source merkleize");
+                (db, _) = db.apply_batch(batch).await.expect("source apply");
+                assert_eq!(*db.bounds().end, if round == 0 { 512 } else { 514 });
+                let (_, operations): (_, Vec<Operation<F>>) = db
+                    .ops_historical_proof(
+                        db.bounds().end,
+                        Location::new(0),
+                        NonZeroU64::new(*db.bounds().end).unwrap(),
+                    )
+                    .await
+                    .expect("source operations");
+
+                assert!(matches!(
+                    operations.last(),
+                    Some(Operation::CommitFloor(_, floor)) if floor.as_u64() == round + 2
+                ));
+
+                // The empty second batch moves an early key and clears commit 511 in chunk 1
+                let (proof, proof_ops, chunks) = db
+                    .range_proof(Location::new(257), NZU64!(1))
+                    .await
+                    .expect("source current proof");
+                assert!(proof.verify::<Sha256, _, N>(
+                    Location::new(257),
+                    &proof_ops,
+                    &chunks,
+                    &db.root(),
+                ));
+                assert_eq!(chunks[0][N - 1] & 0x80 != 0, round == 0);
+                let source = &db;
+                let boundary = recover_boundary_state::<F, Sha256, _, N, _, _>(
+                    (!previous.is_empty()).then_some(previous.as_slice()),
+                    &operations,
+                    db.root(),
+                    0,
+                    db.ops_root_witness()
+                        .await
+                        .expect("source ops root witness"),
+                    |location| async move {
+                        let (proof, _, mut chunks) = source
+                            .range_proof(location, NZU64!(1))
+                            .await
+                            .map_err(|error| QmdbError::CorruptData(error.to_string()))?;
+                        Ok((proof, chunks.pop().expect("source bitmap chunk")))
+                    },
+                )
+                .await
+                .expect("recover current boundary");
+                previous = operations.clone();
+                snapshots.push((operations, boundary));
+            }
+            db.destroy().await.expect("destroy source");
+            snapshots
+        })
+    })
+    .await
+    .expect("join source");
+
+    let store = common::local_store_client().await;
+    let prefixed = PrefixedStoreClient::empty(store);
+    let op_cfg = ((), ((0..=MAX_OPERATION_SIZE).into(), ()));
+    let client = Arc::new(UnorderedClient::<F, Sha256, Digest, Vec<u8>>::new(
+        prefixed.clone(),
+        op_cfg,
+    ));
+    let (server, url) =
+        common::spawn_connect_service(unordered_connect_stack::<F, Sha256, Digest, Vec<u8>, N, _>(
+            client,
+            (),
+        ))
+        .await;
+    let connect_client =
+        UnorderedConnectClient::<_, F, Sha256, Digest, Vec<u8>, N>::plaintext(&url, op_cfg);
+    for (operations, boundary) in snapshots {
+        common::commit_current_operations(&prefixed, &operations, &op_cfg, &boundary)
+            .await
+            .expect("publish current boundary");
+        let proof = connect_client
+            .get(
+                ProtoGetRequest {
+                    key: key(257).as_ref().to_vec(),
+                    tip: operations.len() as u64 - 1,
+                    ..Default::default()
+                },
+                &boundary.root,
+            )
+            .await
+            .expect("current proof after aligned commit boundary");
+        assert_eq!(proof.location, Location::new(257));
+        assert_eq!(proof.operation, operations[257]);
+    }
+    server.abort();
+}
+
+#[tokio::test]
+async fn test_current_unordered_variable_fixed_keys_variable_values_mmr_aligned_commit_boundary() {
+    aligned_commit_boundary::<mmr::Family>(
+        "current_unordered_variable_fixed_keys_variable_values_mmr_aligned_commit_boundary",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn test_current_unordered_variable_fixed_keys_variable_values_mmb_aligned_commit_boundary() {
+    aligned_commit_boundary::<mmb::Family>(
+        "current_unordered_variable_fixed_keys_variable_values_mmb_aligned_commit_boundary",
+    )
+    .await;
+}
+
 #[tokio::test]
 async fn test_unordered_connect_omits_missing_and_rejects_duplicate_range_and_stale_root() {
     let store_client = common::local_store_client().await;

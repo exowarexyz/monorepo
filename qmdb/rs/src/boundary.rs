@@ -356,6 +356,15 @@ where
         }
     }
 
+    // Each batch clears the previous commit bit even when no key in that chunk changes
+    if let Some(index) = previous.len().checked_sub(1) {
+        let location = Location::new(index as u64);
+        let chunk_index = chunk_index_for_location::<F, N>(location);
+        if chunk_index >= pruned_chunks {
+            changed.entry(chunk_index).or_insert(location);
+        }
+    }
+
     changed
 }
 
