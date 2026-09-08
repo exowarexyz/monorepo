@@ -1135,19 +1135,12 @@ pub const __CURRENT_KEY_EXCLUSION_PROOF_JSON_ANY: ::buffa::type_registry::JsonAn
     from_json: ::buffa::type_registry::any_from_json::<CurrentKeyExclusionProof>,
     is_wkt: false,
 };
+/// Ordered results correspond one-for-one to requested keys. Unordered results
+/// contain only hits, whose authenticated operations identify their keys.
 #[derive(Clone, PartialEq, Default)]
 #[derive(::serde::Serialize)]
 #[serde(default)]
 pub struct CurrentKeyLookupResult {
-    /// Codec-encoded logical QMDB key (`K::encode()` bytes).
-    ///
-    /// Field 1: `key`
-    #[serde(
-        rename = "key",
-        with = "::buffa::json_helpers::bytes",
-        skip_serializing_if = "::buffa::json_helpers::skip_if::is_empty_bytes"
-    )]
-    pub key: ::buffa::alloc::vec::Vec<u8>,
     #[serde(flatten)]
     pub result: ::core::option::Option<
         __buffa::oneof::current_key_lookup_result::Result,
@@ -1158,10 +1151,7 @@ pub struct CurrentKeyLookupResult {
 }
 impl ::core::fmt::Debug for CurrentKeyLookupResult {
     fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_struct("CurrentKeyLookupResult")
-            .field("key", &self.key)
-            .field("result", &self.result)
-            .finish()
+        f.debug_struct("CurrentKeyLookupResult").field("result", &self.result).finish()
     }
 }
 impl CurrentKeyLookupResult {
@@ -1191,9 +1181,6 @@ impl ::buffa::Message for CurrentKeyLookupResult {
         #[allow(unused_imports)]
         use ::buffa::Enumeration as _;
         let mut size = 0u64;
-        if !self.key.is_empty() {
-            size += 1u64 + ::buffa::types::bytes_encoded_len(&self.key) as u64;
-        }
         if let ::core::option::Option::Some(ref v) = self.result {
             match v {
                 __buffa::oneof::current_key_lookup_result::Result::Hit(x) => {
@@ -1224,14 +1211,11 @@ impl ::buffa::Message for CurrentKeyLookupResult {
     ) {
         #[allow(unused_imports)]
         use ::buffa::Enumeration as _;
-        if !self.key.is_empty() {
-            ::buffa::types::put_shared_bytes_field(1u32, &self.key, buf);
-        }
         if let ::core::option::Option::Some(ref v) = self.result {
             match v {
                 __buffa::oneof::current_key_lookup_result::Result::Hit(x) => {
                     ::buffa::types::put_len_delimited_header(
-                        2u32,
+                        1u32,
                         u64::from(__cache.consume_next()),
                         buf,
                     );
@@ -1239,7 +1223,7 @@ impl ::buffa::Message for CurrentKeyLookupResult {
                 }
                 __buffa::oneof::current_key_lookup_result::Result::Miss(x) => {
                     ::buffa::types::put_len_delimited_header(
-                        3u32,
+                        2u32,
                         u64::from(__cache.consume_next()),
                         buf,
                     );
@@ -1265,13 +1249,6 @@ impl ::buffa::Message for CurrentKeyLookupResult {
                     tag,
                     ::buffa::encoding::WireType::LengthDelimited,
                 )?;
-                ::buffa::types::merge_bytes(&mut self.key, buf)?;
-            }
-            2u32 => {
-                ::buffa::encoding::check_wire_type(
-                    tag,
-                    ::buffa::encoding::WireType::LengthDelimited,
-                )?;
                 if let ::core::option::Option::Some(
                     __buffa::oneof::current_key_lookup_result::Result::Hit(
                         ref mut existing,
@@ -1289,7 +1266,7 @@ impl ::buffa::Message for CurrentKeyLookupResult {
                     );
                 }
             }
-            3u32 => {
+            2u32 => {
                 ::buffa::encoding::check_wire_type(
                     tag,
                     ::buffa::encoding::WireType::LengthDelimited,
@@ -1319,7 +1296,6 @@ impl ::buffa::Message for CurrentKeyLookupResult {
         ::core::result::Result::Ok(())
     }
     fn clear(&mut self) {
-        self.key.clear();
         self.result = ::core::option::Option::None;
         self.__buffa_unknown_fields.clear();
     }
@@ -1348,30 +1324,11 @@ impl<'de> serde::Deserialize<'de> for CurrentKeyLookupResult {
                 self,
                 mut map: A,
             ) -> ::core::result::Result<CurrentKeyLookupResult, A::Error> {
-                let mut __f_key: ::core::option::Option<::buffa::alloc::vec::Vec<u8>> = None;
                 let mut __oneof_result: ::core::option::Option<
                     __buffa::oneof::current_key_lookup_result::Result,
                 > = None;
                 while let Some(key) = map.next_key::<::buffa::alloc::string::String>()? {
                     match key.as_str() {
-                        "key" => {
-                            __f_key = Some({
-                                struct _S;
-                                impl<'de> serde::de::DeserializeSeed<'de> for _S {
-                                    type Value = ::buffa::alloc::vec::Vec<u8>;
-                                    fn deserialize<D: serde::Deserializer<'de>>(
-                                        self,
-                                        d: D,
-                                    ) -> ::core::result::Result<
-                                        ::buffa::alloc::vec::Vec<u8>,
-                                        D::Error,
-                                    > {
-                                        ::buffa::json_helpers::bytes::deserialize(d)
-                                    }
-                                }
-                                map.next_value_seed(_S)?
-                            });
-                        }
                         "hit" => {
                             let v: ::core::option::Option<CurrentKeyValueProof> = map
                                 .next_value_seed(
@@ -1426,9 +1383,6 @@ impl<'de> serde::Deserialize<'de> for CurrentKeyLookupResult {
                     }
                 }
                 let mut __r = <CurrentKeyLookupResult as ::core::default::Default>::default();
-                if let ::core::option::Option::Some(v) = __f_key {
-                    __r.key = v;
-                }
                 __r.result = __oneof_result;
                 Ok(__r)
             }
@@ -1478,7 +1432,7 @@ pub struct GetRequest {
         skip_serializing_if = "::buffa::json_helpers::skip_if::is_empty_bytes"
     )]
     pub key: ::buffa::alloc::vec::Vec<u8>,
-    /// Published ordered-QMDB batch-boundary to prove against. The client must
+    /// Published QMDB batch-boundary to prove against. The client must
     /// already know the trusted current/global root for this tip.
     ///
     /// Field 2: `tip`
@@ -2687,12 +2641,15 @@ pub const __SUBSCRIBE_REQUEST_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = :
     from_json: ::buffa::type_registry::any_from_json::<SubscribeRequest>,
     is_wkt: false,
 };
-/// One emitted proof for a subscribed batch.
+/// One emitted proof for a subscribed batch. Its published QMDB tip is the
+/// embedded Merkle proof's leaf count minus one. Current-boundary endpoints
+/// include an ops-root witness that binds the operation-log root to the trusted
+/// current root for that tip. Operation-log-only endpoints omit the witness.
 #[derive(Clone, PartialEq, Default)]
 #[derive(::serde::Serialize, ::serde::Deserialize)]
 #[serde(default)]
 pub struct SubscribeResponse {
-    /// Underlying store stream sequence that made this proof readable end-to-end.
+    /// Store sequence of the operation batch. A later watermark may publish it.
     ///
     /// Field 1: `resume_sequence_number`
     #[serde(
@@ -2711,19 +2668,6 @@ pub struct SubscribeResponse {
         HistoricalMultiProof,
         ::buffa::Inline<HistoricalMultiProof>,
     >,
-    /// Published backend tip. Current-boundary-backed endpoints include an
-    /// ops-root witness so clients can authenticate the historical operation-log
-    /// root from their trusted current/global root for this tip. Operation-log-only
-    /// endpoints omit the witness; clients authenticate the embedded ops root
-    /// out-of-band for this tip.
-    ///
-    /// Field 3: `tip`
-    #[serde(
-        rename = "tip",
-        with = "::buffa::json_helpers::uint64",
-        skip_serializing_if = "::buffa::json_helpers::skip_if::is_zero_u64"
-    )]
-    pub tip: u64,
     #[serde(skip)]
     #[doc(hidden)]
     pub __buffa_unknown_fields: ::buffa::UnknownFields,
@@ -2733,7 +2677,6 @@ impl ::core::fmt::Debug for SubscribeResponse {
         f.debug_struct("SubscribeResponse")
             .field("resume_sequence_number", &self.resume_sequence_number)
             .field("proof", &self.proof)
-            .field("tip", &self.tip)
             .finish()
     }
 }
@@ -2778,9 +2721,6 @@ impl ::buffa::Message for SubscribeResponse {
                 += 1u64 + ::buffa::encoding::varint_len(inner_size as u64) as u64
                     + inner_size as u64;
         }
-        if self.tip != 0u64 {
-            size += 1u64 + ::buffa::types::uint64_encoded_len(self.tip) as u64;
-        }
         size += self.__buffa_unknown_fields.encoded_len() as u64;
         ::buffa::saturate_size(size)
     }
@@ -2801,9 +2741,6 @@ impl ::buffa::Message for SubscribeResponse {
                 buf,
             );
             self.proof.write_to(__cache, buf);
-        }
-        if self.tip != 0u64 {
-            ::buffa::types::put_uint64_field(3u32, self.tip, buf);
         }
         self.__buffa_unknown_fields.write_to(buf);
     }
@@ -2836,13 +2773,6 @@ impl ::buffa::Message for SubscribeResponse {
                     ctx,
                 )?;
             }
-            3u32 => {
-                ::buffa::encoding::check_wire_type(
-                    tag,
-                    ::buffa::encoding::WireType::Varint,
-                )?;
-                self.tip = ::buffa::types::decode_uint64(buf)?;
-            }
             _ => {
                 self.__buffa_unknown_fields
                     .push(::buffa::encoding::decode_unknown_field(tag, buf, ctx)?);
@@ -2853,7 +2783,6 @@ impl ::buffa::Message for SubscribeResponse {
     fn clear(&mut self) {
         self.resume_sequence_number = 0u64;
         self.proof = ::buffa::MessageField::none();
-        self.tip = 0u64;
         self.__buffa_unknown_fields.clear();
     }
 }
@@ -5732,12 +5661,10 @@ pub mod __buffa {
                 ::serde::Serialize::serialize(&self.0, __s)
             }
         }
+        /// Ordered results correspond one-for-one to requested keys. Unordered results
+        /// contain only hits, whose authenticated operations identify their keys.
         #[derive(Clone, Debug, Default)]
         pub struct CurrentKeyLookupResultView<'a> {
-            /// Codec-encoded logical QMDB key (`K::encode()` bytes).
-            ///
-            /// Field 1: `key`
-            pub key: &'a [u8],
             pub result: ::core::option::Option<
                 super::super::__buffa::view::oneof::current_key_lookup_result::Result<'a>,
             >,
@@ -5780,13 +5707,6 @@ pub mod __buffa {
                             tag,
                             ::buffa::encoding::WireType::LengthDelimited,
                         )?;
-                        view.key = ::buffa::types::borrow_bytes(&mut cur)?;
-                    }
-                    2u32 => {
-                        ::buffa::encoding::check_wire_type(
-                            tag,
-                            ::buffa::encoding::WireType::LengthDelimited,
-                        )?;
                         let __sub_ctx = ctx.descend()?;
                         let sub = ::buffa::types::borrow_bytes(&mut cur)?;
                         if let Some(
@@ -5813,7 +5733,7 @@ pub mod __buffa {
                             );
                         }
                     }
-                    3u32 => {
+                    2u32 => {
                         ::buffa::encoding::check_wire_type(
                             tag,
                             ::buffa::encoding::WireType::LengthDelimited,
@@ -5873,7 +5793,6 @@ pub mod __buffa {
                 use ::buffa::alloc::string::ToString as _;
                 let _ = __buffa_src;
                 ::core::result::Result::Ok(super::super::CurrentKeyLookupResult {
-                    key: (self.key).to_vec(),
                     result: match self.result.as_ref() {
                         ::core::option::Option::Some(v) => {
                             ::core::option::Option::Some(
@@ -5915,9 +5834,6 @@ pub mod __buffa {
                 #[allow(unused_imports)]
                 use ::buffa::Enumeration as _;
                 let mut size = 0u64;
-                if !self.key.is_empty() {
-                    size += 1u64 + ::buffa::types::bytes_encoded_len(&self.key) as u64;
-                }
                 if let ::core::option::Option::Some(ref v) = self.result {
                     match v {
                         super::super::__buffa::view::oneof::current_key_lookup_result::Result::Hit(
@@ -5953,16 +5869,13 @@ pub mod __buffa {
             ) {
                 #[allow(unused_imports)]
                 use ::buffa::Enumeration as _;
-                if !self.key.is_empty() {
-                    ::buffa::types::put_shared_bytes_field(1u32, &self.key, buf);
-                }
                 if let ::core::option::Option::Some(ref v) = self.result {
                     match v {
                         super::super::__buffa::view::oneof::current_key_lookup_result::Result::Hit(
                             x,
                         ) => {
                             ::buffa::types::put_len_delimited_header(
-                                2u32,
+                                1u32,
                                 u64::from(__cache.consume_next()),
                                 buf,
                             );
@@ -5972,7 +5885,7 @@ pub mod __buffa {
                             x,
                         ) => {
                             ::buffa::types::put_len_delimited_header(
-                                3u32,
+                                2u32,
                                 u64::from(__cache.consume_next()),
                                 buf,
                             );
@@ -6001,13 +5914,6 @@ pub mod __buffa {
             ) -> ::core::result::Result<__S::Ok, __S::Error> {
                 use ::serde::ser::SerializeMap as _;
                 let mut __map = __s.serialize_map(::core::option::Option::None)?;
-                if !::buffa::json_helpers::skip_if::is_empty_bytes(self.key) {
-                    __map
-                        .serialize_entry(
-                            "key",
-                            &::buffa::json_helpers::BytesJson(self.key),
-                        )?;
-                }
                 if let ::core::option::Option::Some(ref __ov) = self.result {
                     match __ov {
                         super::super::__buffa::view::oneof::current_key_lookup_result::Result::Hit(
@@ -6117,13 +6023,6 @@ pub mod __buffa {
             pub fn into_bytes(self) -> ::buffa::bytes::Bytes {
                 self.0.into_bytes()
             }
-            /// Codec-encoded logical QMDB key (`K::encode()` bytes).
-            ///
-            /// Field 1: `key`
-            #[must_use]
-            pub fn key(&self) -> &'_ [u8] {
-                self.0.reborrow().key
-            }
             /// Oneof `result`.
             #[must_use]
             pub fn result(
@@ -6179,7 +6078,7 @@ pub mod __buffa {
             ///
             /// Field 1: `key`
             pub key: &'a [u8],
-            /// Published ordered-QMDB batch-boundary to prove against. The client must
+            /// Published QMDB batch-boundary to prove against. The client must
             /// already know the trusted current/global root for this tip.
             ///
             /// Field 2: `tip`
@@ -6429,7 +6328,7 @@ pub mod __buffa {
             pub fn key(&self) -> &'_ [u8] {
                 self.0.reborrow().key
             }
-            /// Published ordered-QMDB batch-boundary to prove against. The client must
+            /// Published QMDB batch-boundary to prove against. The client must
             /// already know the trusted current/global root for this tip.
             ///
             /// Field 2: `tip`
@@ -8516,10 +8415,13 @@ pub mod __buffa {
                 ::serde::Serialize::serialize(&self.0, __s)
             }
         }
-        /// One emitted proof for a subscribed batch.
+        /// One emitted proof for a subscribed batch. Its published QMDB tip is the
+        /// embedded Merkle proof's leaf count minus one. Current-boundary endpoints
+        /// include an ops-root witness that binds the operation-log root to the trusted
+        /// current root for that tip. Operation-log-only endpoints omit the witness.
         #[derive(Clone, Debug, Default)]
         pub struct SubscribeResponseView<'a> {
-            /// Underlying store stream sequence that made this proof readable end-to-end.
+            /// Store sequence of the operation batch. A later watermark may publish it.
             ///
             /// Field 1: `resume_sequence_number`
             pub resume_sequence_number: u64,
@@ -8527,14 +8429,6 @@ pub mod __buffa {
             pub proof: ::buffa::MessageFieldView<
                 super::super::__buffa::view::HistoricalMultiProofView<'a>,
             >,
-            /// Published backend tip. Current-boundary-backed endpoints include an
-            /// ops-root witness so clients can authenticate the historical operation-log
-            /// root from their trusted current/global root for this tip. Operation-log-only
-            /// endpoints omit the witness; clients authenticate the embedded ops root
-            /// out-of-band for this tip.
-            ///
-            /// Field 3: `tip`
-            pub tip: u64,
             pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
         }
         impl<'a> ::buffa::MessageView<'a> for SubscribeResponseView<'a> {
@@ -8603,13 +8497,6 @@ pub mod __buffa {
                             }
                         }
                     }
-                    3u32 => {
-                        ::buffa::encoding::check_wire_type(
-                            tag,
-                            ::buffa::encoding::WireType::Varint,
-                        )?;
-                        view.tip = ::buffa::types::decode_uint64(&mut cur)?;
-                    }
                     _ => {
                         ::buffa::encoding::skip_field_depth(tag, &mut cur, ctx.depth())?;
                         let span_len = before_tag.len() - cur.len();
@@ -8649,7 +8536,6 @@ pub mod __buffa {
                         }
                         None => ::buffa::MessageField::none(),
                     },
-                    tip: self.tip,
                     __buffa_unknown_fields: self
                         .__buffa_unknown_fields
                         .to_owned()?
@@ -8679,9 +8565,6 @@ pub mod __buffa {
                         += 1u64 + ::buffa::encoding::varint_len(inner_size as u64) as u64
                             + inner_size as u64;
                 }
-                if self.tip != 0u64 {
-                    size += 1u64 + ::buffa::types::uint64_encoded_len(self.tip) as u64;
-                }
                 size += self.__buffa_unknown_fields.encoded_len() as u64;
                 ::buffa::saturate_size(size)
             }
@@ -8707,9 +8590,6 @@ pub mod __buffa {
                         buf,
                     );
                     self.proof.write_to(__cache, buf);
-                }
-                if self.tip != 0u64 {
-                    ::buffa::types::put_uint64_field(3u32, self.tip, buf);
                 }
                 self.__buffa_unknown_fields.write_to(buf);
             }
@@ -8747,13 +8627,6 @@ pub mod __buffa {
                     if let ::core::option::Option::Some(__v) = self.proof.as_option() {
                         __map.serialize_entry("proof", __v)?;
                     }
-                }
-                if !::buffa::json_helpers::skip_if::is_zero_u64(&self.tip) {
-                    __map
-                        .serialize_entry(
-                            "tip",
-                            &::buffa::json_helpers::ProtoJson(&self.tip),
-                        )?;
                 }
                 __map.end()
             }
@@ -8850,7 +8723,7 @@ pub mod __buffa {
             pub fn into_bytes(self) -> ::buffa::bytes::Bytes {
                 self.0.into_bytes()
             }
-            /// Underlying store stream sequence that made this proof readable end-to-end.
+            /// Store sequence of the operation batch. A later watermark may publish it.
             ///
             /// Field 1: `resume_sequence_number`
             #[must_use]
@@ -8865,17 +8738,6 @@ pub mod __buffa {
                 super::super::__buffa::view::HistoricalMultiProofView<'_>,
             > {
                 &self.0.reborrow().proof
-            }
-            /// Published backend tip. Current-boundary-backed endpoints include an
-            /// ops-root witness so clients can authenticate the historical operation-log
-            /// root from their trusted current/global root for this tip. Operation-log-only
-            /// endpoints omit the witness; clients authenticate the embedded ops root
-            /// out-of-band for this tip.
-            ///
-            /// Field 3: `tip`
-            #[must_use]
-            pub fn tip(&self) -> u64 {
-                self.0.reborrow().tip
             }
         }
         impl ::core::convert::From<::buffa::OwnedView<SubscribeResponseView<'static>>>

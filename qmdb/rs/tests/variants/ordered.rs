@@ -322,7 +322,8 @@ async fn verify_snapshots<F, K, V, E>(
         let mut data = StoreWriteBatch::new();
         stage_authenticated_range(&prefixed, prepared, &mut data)
             .expect("stage authenticated source range");
-        data.commit(prefixed.client())
+        let data_sequence = data
+            .commit(prefixed.client())
             .await
             .expect("persist source proof rows");
         let mut publication = StoreWriteBatch::new();
@@ -373,6 +374,52 @@ async fn verify_snapshots<F, K, V, E>(
                 let ranges = OrderedKeyRangeServiceClient::new(
                     PreferZstdHttpClient::plaintext(),
                     ClientConfig::new(url.parse().unwrap()),
+                );
+                let subscribe_request = SubscribeRequest {
+                    since_sequence_number: Some(data_sequence),
+                    key_filters: vec![exoware_sdk::common::kv::v1::Filter {
+                        kind: Some(exoware_sdk::common::kv::v1::filter::Kind::Exact(
+                            all_keys[0].as_ref().to_vec().into(),
+                        )),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                };
+                let mut stream = common::operation_log_rpc_client(&url)
+                    .subscribe(subscribe_request.clone())
+                    .await
+                    .unwrap();
+                let response = stream.message().await.unwrap().unwrap().to_owned_message();
+                assert_eq!(response.resume_sequence_number, data_sequence);
+                let expected = std::iter::once(tip.as_u64().to_string())
+                    .chain(
+                        delta
+                            .iter()
+                            .enumerate()
+                            .filter_map(|(offset, op)| match op {
+                                Operation::Update(update) if update.key == all_keys[0] => {
+                                    Some(format!(
+                                        "{} {} {}",
+                                        hex::encode(update.key.as_ref()),
+                                        hex::encode(update.value.as_ref()),
+                                        previous_count + offset,
+                                    ))
+                                }
+                                _ => None,
+                            }),
+                    )
+                    .collect::<Vec<_>>();
+                let operations = &response.proof.as_option().unwrap().operations;
+                assert!(!operations.is_empty());
+                assert_eq!(operations.len(), expected.len() - 1);
+                assert!(operations.iter().all(|op| op.location < *tip));
+                crate::browser::assert_current_fixture(
+                    &format!("{name}_subscribe"),
+                    &snapshot.root,
+                    N,
+                    &subscribe_request,
+                    &response,
+                    &expected,
                 );
                 let expected_row = |key: &K| {
                     let key_hex = hex::encode(key.as_ref());
@@ -500,6 +547,7 @@ async fn verify_snapshots<F, K, V, E>(
             .await
             .expect("authenticate subscription")
             .expect("batch frame");
+        assert_eq!(frame.tip, tip);
         assert_eq!(frame.root, snapshot.root);
         assert_eq!(
             frame.operations,

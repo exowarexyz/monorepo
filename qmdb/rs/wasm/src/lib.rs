@@ -350,6 +350,7 @@ fn decode_multi_with_embedded_root_from_proto<F, H>(
     proto: &HistoricalMultiProof,
 ) -> Result<
     (
+        Location<F>,
         H::Digest,
         Vec<(Location<F>, OrderedOperation<F, Vec<u8>, Vec<u8>>)>,
     ),
@@ -373,17 +374,21 @@ where
     let max_digests = proof_digest_cap::<H::Digest>(&proto.proof);
     let proof = merkle::Proof::<F, H::Digest>::decode_cfg(proto.proof.as_ref(), &max_digests)
         .map_err(|err| format!("failed to decode historical multi proof: {err}"))?;
+    let tip = proof
+        .leaves
+        .checked_sub(1)
+        .ok_or_else(|| "subscription proof has no leaves".to_string())?;
     if !verify_multi_proof::<H, _, _>(&proof, &operations, &ops_root) {
         return Err("historical multi proof failed verification".to_string());
     }
     if proto.ops_root_witness.is_empty() {
-        return Ok((ops_root, operations));
+        return Ok((tip, ops_root, operations));
     }
     let witness =
         OpsRootWitness::<F, H::Digest>::decode(proto.ops_root_witness.as_ref()).map_err(|err| {
             format!("failed to decode historical multi proof ops-root witness: {err}")
         })?;
-    Ok((witness.root::<H>(&ops_root), operations))
+    Ok((tip, witness.root::<H>(&ops_root), operations))
 }
 
 fn decode_multi_operations_from_proto<F>(
@@ -1136,9 +1141,6 @@ where
     }
     let results = Array::new();
     for (result, requested_key) in proto.results.iter().zip(requested_keys) {
-        if result.key.as_slice() != requested_key.as_slice() {
-            return Err(js_err("getMany result key does not match requested key"));
-        }
         let decoded_requested_key =
             decode_vec_key_wire(requested_key.as_slice()).map_err(js_err)?;
         let entry = Object::new();
@@ -1273,16 +1275,20 @@ pub fn decode_historical_multi_proof_operations(
     with_hash_family!(hash_family, "historical multi proof", {
         match normalize_family(merkle_family, "historical multi proof").map_err(js_err)? {
             "mmr" => {
-                let (root, operations) =
+                let (tip, root, operations) =
                     decode_multi_with_embedded_root_from_proto::<mmr::Family, H>(&proto)
                         .map_err(js_err)?;
-                historical_to_js(root, operations)
+                let decoded = Object::from(historical_to_js(root, operations)?);
+                set_field(&decoded, "tip", &location_to_bigint(tip))?;
+                Ok(decoded.into())
             }
             "mmb" => {
-                let (root, operations) =
+                let (tip, root, operations) =
                     decode_multi_with_embedded_root_from_proto::<mmb::Family, H>(&proto)
                         .map_err(js_err)?;
-                historical_to_js(root, operations)
+                let decoded = Object::from(historical_to_js(root, operations)?);
+                set_field(&decoded, "tip", &location_to_bigint(tip))?;
+                Ok(decoded.into())
             }
             _ => unreachable!("normalize_family only returns supported values"),
         }
@@ -1960,11 +1966,7 @@ mod tests {
         merkle.apply_batch(&batch).unwrap();
 
         let root = merkle.root(&hasher, 0).unwrap();
-        let locations = vec![
-            Location::<F>::new(0),
-            Location::<F>::new(2),
-            Location::<F>::new(4),
-        ];
+        let locations = vec![Location::<F>::new(0), Location::<F>::new(2)];
         let proof = futures::executor::block_on(merkle::verification::multi_proof(
             &merkle,
             0,
@@ -2453,9 +2455,10 @@ mod tests {
     fn test_decodes_subscribe_multi_proof_without_ops_root_witness() {
         let (proto, ops_root, expected) = historical_multi_fixture::<mmr::Family>();
 
-        let (root, verified) =
+        let (tip, root, verified) =
             decode_multi_with_embedded_root_from_proto::<mmr::Family, Sha256>(&proto).unwrap();
 
+        assert_eq!(tip, Location::new(4));
         assert_eq!(root, ops_root);
         assert_eq!(verified, expected);
     }
@@ -2471,12 +2474,42 @@ mod tests {
         let current_root = witness.root::<Sha256>(&ops_root);
         proto.ops_root_witness = witness.encode();
 
-        let (root, verified) =
+        let (tip, root, verified) =
             decode_multi_with_embedded_root_from_proto::<mmb::Family, Sha256>(&proto).unwrap();
 
+        assert_eq!(tip, Location::new(4));
         assert_eq!(root, current_root);
         assert_ne!(root, ops_root);
         assert_eq!(verified, expected);
+    }
+
+    fn empty_subscription<F: merkle::Graftable>() {
+        let hasher = commonware_storage::qmdb::hasher::<Sha256>();
+        let root = Mem::<F, Sha256Digest>::new().root(&hasher, 0).unwrap();
+        let proof = merkle::Proof::<F, Sha256Digest> {
+            leaves: Location::new(0),
+            inactive_peaks: 0,
+            digests: Vec::new(),
+        };
+        let proto = HistoricalMultiProof {
+            proof: proof.encode(),
+            ops_root: root.encode(),
+            ..Default::default()
+        };
+        assert_eq!(
+            decode_multi_with_embedded_root_from_proto::<F, Sha256>(&proto).unwrap_err(),
+            "subscription proof has no leaves",
+        );
+    }
+
+    #[test]
+    fn test_subscription_mmr_empty_proof() {
+        empty_subscription::<mmr::Family>();
+    }
+
+    #[test]
+    fn test_subscription_mmb_empty_proof() {
+        empty_subscription::<mmb::Family>();
     }
 
     #[test]

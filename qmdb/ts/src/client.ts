@@ -551,14 +551,14 @@ export class OrderedQmdbClient {
         throw new Error('qmdb subscribe response missing proof');
       }
       const proofBytes = toBinary(HistoricalMultiProofSchema, frame.proof);
-      const proof = decode_historical_multi_proof_operations(
+      const { tip, ...proof } = decode_historical_multi_proof_operations(
         proofBytes,
         this.merkleFamily,
         this.hashFamily,
-      ) as Omit<DecodedHistoricalMultiProof, 'proofSizeBytes'>;
+      ) as Omit<DecodedHistoricalMultiProof, 'proofSizeBytes'> & { tip: bigint };
       yield {
         resumeSequenceNumber: frame.resumeSequenceNumber,
-        tip: frame.tip,
+        tip,
         proof: { ...proof, proofSizeBytes: proofBytes.length },
       };
     }

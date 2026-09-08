@@ -874,7 +874,7 @@ async fn test_ordered_connect_client_rejects_get_many_proof_for_different_key() 
     let (_qmdb_server, qmdb_url) = spawn_qmdb_server(ordered_client.clone()).await;
     let rpc = rpc_client(&qmdb_url);
 
-    let mut raw_get_many_response = rpc
+    let raw_get_many_response = rpc
         .get_many(ProtoGetManyRequest {
             keys: vec![encoded_key(b"beta")],
             tip: source.latest_location.as_u64(),
@@ -884,11 +884,6 @@ async fn test_ordered_connect_client_rejects_get_many_proof_for_different_key() 
         .expect("get_many")
         .into_view()
         .to_owned_message();
-    raw_get_many_response
-        .results
-        .first_mut()
-        .expect("get_many result")
-        .key = encoded_key(b"alpha");
 
     let (_static_server, static_url) = spawn_static_server(StaticQmdbService {
         get_response: ProtoGetResponse::default(),

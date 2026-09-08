@@ -9,7 +9,6 @@ use std::task::{Context as TaskContext, Poll};
 use bytes::Bytes;
 use commonware_codec::Encode;
 use commonware_cryptography::Hasher;
-use commonware_storage::qmdb::operation::Operation as _;
 use commonware_storage::{
     merkle::{Family, Graftable, Location},
     qmdb::{
@@ -891,11 +890,10 @@ where
         let client = self.client.clone();
         async move {
             let tip = Location::new(request.tip);
-            let wire = request.bytes();
-            let keys: Vec<Bytes> = request.keys.iter().map(|key| wire.slice_ref(key)).collect();
-            let decoded_keys = keys
+            let decoded_keys = request
+                .keys
                 .iter()
-                .map(|key| client.decode_key(key.as_ref()))
+                .map(|key| client.decode_key(key))
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(|error| {
                     ConnectError::invalid_argument(format!("invalid QMDB key: {error}"))
@@ -904,7 +902,7 @@ where
                 .key_lookup_proofs_raw_at(tip, &decoded_keys)
                 .await
                 .map_err(qmdb_error_to_connect)?;
-            connectrpc::Response::ok(crate::proto::ordered_get_many_response(&keys, &proofs))
+            connectrpc::Response::ok(crate::proto::ordered_get_many_response(&proofs))
         }
     }
 }
@@ -959,16 +957,7 @@ where
                 .key_lookup_proofs_raw_at::<N, _>(tip, &keys)
                 .await
                 .map_err(qmdb_error_to_connect)?;
-            connectrpc::Response::ok(crate::proto::unordered_get_many_response(
-                &proofs,
-                |proof| {
-                    let key = proof
-                        .operation
-                        .key()
-                        .expect("get_many proofs are verified updates");
-                    key.encode()
-                },
-            ))
+            connectrpc::Response::ok(crate::proto::unordered_get_many_response(&proofs))
         }
     }
 }

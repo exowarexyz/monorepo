@@ -1081,6 +1081,117 @@ async fn test_unordered_connect_omits_missing_and_rejects_duplicate_range_and_st
 }
 
 #[tokio::test]
+async fn test_current_unordered_variable_fixed_keys_variable_values_mmr_get_many_key_binding() {
+    use exoware_qmdb::proto::qmdb::v1::{
+        current_key_lookup_result, CurrentKeyLookupResult, GetManyResponse, GetResponse,
+        KeyLookupService, KeyLookupServiceServer,
+    };
+
+    #[derive(Clone)]
+    struct StaticLookup(GetManyResponse);
+
+    #[allow(refining_impl_trait)]
+    impl KeyLookupService for StaticLookup {
+        async fn get(
+            &self,
+            _: connectrpc::RequestContext,
+            _: connectrpc::ServiceRequest<'_, ProtoGetRequest>,
+        ) -> connectrpc::ServiceResult<GetResponse> {
+            Err(connectrpc::ConnectError::unimplemented("unused"))
+        }
+
+        async fn get_many(
+            &self,
+            _: connectrpc::RequestContext,
+            _: connectrpc::ServiceRequest<'_, ProtoGetManyRequest>,
+        ) -> connectrpc::ServiceResult<GetManyResponse> {
+            connectrpc::Response::ok(self.0.clone())
+        }
+    }
+
+    let store = common::local_store_client().await;
+    let source = build_current_source_batch().await;
+    commit_current_upload(&store, &source).await;
+    let client = Arc::new(FixedKeyClient::new(
+        PrefixedStoreClient::empty(store),
+        fixed_key_op_cfg(),
+    ));
+    let (server, url) = spawn_qmdb_full_server(client).await;
+    let request = ProtoGetManyRequest {
+        keys: vec![
+            source.alpha.as_ref().to_vec(),
+            source.beta.as_ref().to_vec(),
+        ],
+        tip: *source.latest_location,
+        ..Default::default()
+    };
+    let response = key_lookup_rpc_client(&url)
+        .get_many(request.clone())
+        .await
+        .unwrap()
+        .into_view()
+        .to_owned_message();
+    server.abort();
+    let [alpha, beta] = response.results.as_slice() else {
+        panic!("two source hits")
+    };
+    let miss = CurrentKeyLookupResult {
+        result: Some(current_key_lookup_result::Result::Miss(Default::default())),
+        ..Default::default()
+    };
+    for (keys, results, valid) in [
+        (request.keys.clone(), vec![beta.clone()], true),
+        (
+            request.keys.clone(),
+            vec![beta.clone(), alpha.clone()],
+            false,
+        ),
+        (
+            request.keys.clone(),
+            vec![alpha.clone(), alpha.clone()],
+            false,
+        ),
+        (vec![request.keys[0].clone()], vec![beta.clone()], false),
+        (request.keys.clone(), vec![miss], false),
+        (
+            request.keys.clone(),
+            vec![CurrentKeyLookupResult::default()],
+            false,
+        ),
+    ] {
+        let (server, url) = common::spawn_connect_service(connectrpc::ConnectRpcService::new(
+            KeyLookupServiceServer::new(StaticLookup(GetManyResponse {
+                results,
+                ..Default::default()
+            })),
+        ))
+        .await;
+        let result = key_lookup_client(&url)
+            .get_many(
+                ProtoGetManyRequest {
+                    keys,
+                    ..request.clone()
+                },
+                &source.root,
+            )
+            .await;
+        server.abort();
+        if valid {
+            let hits = result.expect("unordered omissions are allowed");
+            assert_eq!(hits.len(), 1);
+            assert!(
+                matches!(&hits[0].operation, FixedKeyOperation::Update(update) if update.0 == source.beta)
+            );
+        } else {
+            assert!(matches!(
+                result,
+                Err(QmdbError::ProofVerification { .. } | QmdbError::CorruptData(_))
+            ));
+        }
+    }
+}
+
+#[tokio::test]
 async fn test_unordered_connect_subscribe_emits_verifiable_range_proof() {
     let store_client = common::local_store_client().await;
     let source = build_any_source_batch().await;

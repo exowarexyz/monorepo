@@ -4,9 +4,10 @@ import test from 'node:test';
 import { fromBinary, toBinary } from '@bufbuild/protobuf';
 import { GetRequestSchema, GetResponseSchema, GetManyRequestSchema, GetManyResponseSchema } from '../dist/generated/proto/qmdb/v1/key_lookup_pb.js';
 import { GetRangeRequestSchema, GetRangeResponseSchema } from '../dist/generated/proto/qmdb/v1/key_range_pb.js';
-import { CurrentKeyValueProofSchema } from '../dist/generated/proto/qmdb/v1/proof_pb.js';
+import { SubscribeRequestSchema, SubscribeResponseSchema } from '../dist/generated/proto/qmdb/v1/operation_log_pb.js';
+import { CurrentKeyValueProofSchema, HistoricalMultiProofSchema } from '../dist/generated/proto/qmdb/v1/proof_pb.js';
 import {
-  encode_vec_key, initSync, verify_current_key_value_proof,
+  decode_historical_multi_proof_operations, encode_vec_key, initSync, verify_current_key_value_proof,
   verify_get_many_response, verify_get_range_response,
 } from '../dist/generated/wasm/exoware_qmdb_wasm.js';
 
@@ -70,8 +71,27 @@ for (const family of ['mmr', 'mmb']) {
       if (value !== '-') assertHit(result, many.expected[index]);
     });
     assert.throws(() => verifyMany(many.responseBytes, wrongRoot));
-    many.response.results.reverse();
-    assert.throws(() => verifyMany(toBinary(GetManyResponseSchema, many.response)));
+    const [hit, miss, otherHit] = many.response.results;
+    for (const results of [
+      [hit, miss], [hit, miss, otherHit, hit], [hit, miss, hit],
+      [miss, miss, otherHit], [otherHit, miss, hit],
+    ]) {
+      assert.throws(() => verifyMany(toBinary(GetManyResponseSchema, { ...many.response, results })));
+    }
+    assert.throws(() => verify_get_many_response(many.responseBytes, many.root, family,
+      'sha256', many.chunkSize, [many.request.keys[0], many.request.keys[0], many.request.keys[2]]));
+
+    const subscribe = fixture(family, 'subscribe', SubscribeRequestSchema, SubscribeResponseSchema);
+    const decoded = decode_historical_multi_proof_operations(
+      toBinary(HistoricalMultiProofSchema, subscribe.response.proof), family, 'sha256');
+    assert.equal(typeof decoded.tip, 'bigint');
+    assert.equal(decoded.tip, BigInt(subscribe.expected[0]));
+    assert.deepEqual(Buffer.from(decoded.root), subscribe.root);
+    assert.equal(decoded.operations.length, subscribe.expected.length - 1);
+    decoded.operations.forEach((entry, index) => {
+      assert.ok(entry.location < decoded.tip);
+      assertHit(entry, subscribe.expected[index + 1]);
+    });
 
     const first = fixture(family, 'range_first', GetRangeRequestSchema, GetRangeResponseSchema);
     const last = fixture(family, 'range_last', GetRangeRequestSchema, GetRangeResponseSchema);

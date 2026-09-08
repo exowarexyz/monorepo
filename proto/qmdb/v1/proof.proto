@@ -77,11 +77,11 @@ message CurrentKeyExclusionProof {
   bytes proof = 1;
 }
 
+// Ordered results correspond one-for-one to requested keys. Unordered results
+// contain only hits, whose authenticated operations identify their keys.
 message CurrentKeyLookupResult {
-  // Codec-encoded logical QMDB key (`K::encode()` bytes).
-  bytes key = 1;
   oneof result {
-    CurrentKeyValueProof hit = 2;
-    CurrentKeyExclusionProof miss = 3;
+    CurrentKeyValueProof hit = 1;
+    CurrentKeyExclusionProof miss = 2;
   }
 }

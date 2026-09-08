@@ -1137,6 +1137,7 @@ async fn test_ordered_range_connect_subscribe_emits_multi_proof_for_matching_key
     let expected = all_operations_for_key(&source.operations, b"alpha");
     assert!(!expected.is_empty());
     assert!(frame.resume_sequence_number > 0);
+    assert_eq!(frame.tip.as_u64(), source.operations.len() as u64 - 1);
     assert_eq!(frame.operations, expected);
 }
 
@@ -1203,6 +1204,7 @@ async fn test_ordered_mmb_range_connect_subscribe_verifies_range_and_multi_proof
 
     let expected_filtered = all_mmb_operations_for_key(&source.operations, b"alpha");
     assert!(!expected_filtered.is_empty());
+    assert_eq!(multi_frame.tip.as_u64(), source.operations.len() as u64 - 1);
     assert_eq!(multi_frame.operations, expected_filtered);
 }
 

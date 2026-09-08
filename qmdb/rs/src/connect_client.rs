@@ -221,11 +221,6 @@ where
             .iter()
             .zip(requested_keys.iter())
             .map(|(result, requested_key)| {
-                if result.key.as_slice() != requested_key.as_slice() {
-                    return Err(QmdbError::ProofVerification {
-                        kind: crate::ProofKind::CurrentKeyValue,
-                    });
-                }
                 let decoded_requested_key = K::decode_cfg(
                     requested_key.as_slice(),
                     self.key_cfg.as_ref(),
@@ -420,7 +415,32 @@ where
             .results
             .iter()
             .map(|result| {
-                let Some(&request_index) = requested.get(result.key.as_slice()) else {
+                let verified = match result.result.as_ref() {
+                    Some(current_key_lookup_result::Result::Hit(proof)) => {
+                        verify_key_value_from_proto::<F, H, unordered::Operation<F, K, E>, N>(
+                            proof,
+                            expected_root,
+                            self.op_cfg.as_ref(),
+                        )?
+                    }
+                    Some(current_key_lookup_result::Result::Miss(_)) => {
+                        return Err(QmdbError::CorruptData(
+                            "unordered get_many response must not include miss proofs".to_string(),
+                        ));
+                    }
+                    None => {
+                        return Err(QmdbError::CorruptData(
+                            "qmdb get_many result missing hit proof".to_string(),
+                        ));
+                    }
+                };
+                let unordered::Operation::Update(update) = &verified.operation else {
+                    return Err(QmdbError::ProofVerification {
+                        kind: crate::ProofKind::CurrentKeyValue,
+                    });
+                };
+                let key = update.0.encode();
+                let Some(&request_index) = requested.get(key.as_ref()) else {
                     return Err(QmdbError::ProofVerification {
                         kind: crate::ProofKind::CurrentKeyValue,
                     });
@@ -431,24 +451,7 @@ where
                     });
                 }
                 last_index = Some(request_index);
-                match result.result.as_ref() {
-                    Some(current_key_lookup_result::Result::Hit(proof)) => {
-                        verify_unordered_key_value_from_proto::<F, H, K, V, N, E>(
-                            proof,
-                            result.key.as_slice(),
-                            expected_root,
-                            self.op_cfg.as_ref(),
-                        )
-                    }
-                    Some(current_key_lookup_result::Result::Miss(_)) => {
-                        Err(QmdbError::CorruptData(
-                            "unordered get_many response must not include miss proofs".to_string(),
-                        ))
-                    }
-                    None => Err(QmdbError::CorruptData(
-                        "qmdb get_many result missing hit proof".to_string(),
-                    )),
-                }
+                Ok(verified)
             })
             .collect()
     }
@@ -540,12 +543,19 @@ where
         let proof = frame.proof.as_option().ok_or_else(|| {
             QmdbError::CorruptData("qmdb subscribe response missing proof".to_string())
         })?;
-        let tip = Location::<F>::new(frame.tip);
+        let max_digests = proof_digest_cap::<H::Digest>(&proof.proof);
+        let merkle_proof = Proof::<F, H::Digest>::decode_cfg(proof.proof.as_ref(), &max_digests)
+            .map_err(|err| {
+                QmdbError::CorruptData(format!("failed to decode historical multi proof: {err}"))
+            })?;
+        let tip = merkle_proof.leaves.checked_sub(1).ok_or_else(|| {
+            QmdbError::CorruptData("subscription proof has no leaves".to_string())
+        })?;
         let expected_root = root_for_tip(tip)?;
         let (root, operations) = verify_multi_from_proto::<F, H, Op>(
             proof,
+            &merkle_proof,
             self.op_cfg.as_ref(),
-            crate::ProofKind::BatchMulti,
             &expected_root,
         )?;
         Ok(Some(OperationLogSubscribeProof {
@@ -943,8 +953,8 @@ where
 
 fn verify_multi_from_proto<F, H, Op>(
     proto: &HistoricalMultiProof,
+    proof: &Proof<F, H::Digest>,
     op_cfg: &Op::Cfg,
-    kind: crate::ProofKind,
     root: &H::Digest,
 ) -> Result<(H::Digest, Vec<(Location<F>, Op)>), QmdbError>
 where
@@ -968,13 +978,10 @@ where
         .collect::<Result<Vec<_>, QmdbError>>()?;
     let target_root =
         historical_target_root::<F, H>(&proto.ops_root, &proto.ops_root_witness, root)?;
-    let max_digests = proof_digest_cap::<H::Digest>(&proto.proof);
-    let proof =
-        Proof::<F, H::Digest>::decode_cfg(proto.proof.as_ref(), &max_digests).map_err(|err| {
-            QmdbError::CorruptData(format!("failed to decode historical multi proof: {err}"))
-        })?;
-    if !verify_multi_proof::<H, _, _>(&proof, &operations, &target_root) {
-        return Err(QmdbError::ProofVerification { kind });
+    if !verify_multi_proof::<H, _, _>(proof, &operations, &target_root) {
+        return Err(QmdbError::ProofVerification {
+            kind: crate::ProofKind::BatchMulti,
+        });
     }
     Ok((*root, operations))
 }
