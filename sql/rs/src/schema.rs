@@ -14,7 +14,6 @@ use datafusion::prelude::SessionContext;
 use exoware_sdk::kv_codec::decode_stored_row;
 use exoware_sdk::PrefixedStoreClient;
 
-use crate::aggregate::KvAggregatePushdownRule;
 use crate::codec::*;
 use crate::predicate::*;
 use crate::scan::*;
@@ -127,9 +126,11 @@ impl KvSchema {
         &self.tables
     }
 
+    /// Registers the tables in an existing DataFusion session.
+    ///
+    /// Create the session with [`crate::session_state_builder`] to enable Store
+    /// aggregate reduction. Other sessions execute aggregates through DataFusion.
     pub fn register_all(self, ctx: &SessionContext) -> DataFusionResult<()> {
-        let _ = ctx.remove_optimizer_rule("kv_aggregate_pushdown");
-        ctx.add_optimizer_rule(Arc::new(KvAggregatePushdownRule::new()));
         for (name, config) in &self.tables {
             register_kv_table(ctx, name, self.client.clone(), config.clone())?;
         }

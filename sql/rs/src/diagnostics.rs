@@ -1,6 +1,6 @@
 use datafusion::common::Result as DataFusionResult;
 
-use crate::aggregate::{AggregateAccessPath, AggregatePushdownSpec};
+use crate::aggregate::AggregateAccessPath;
 use crate::codec::*;
 use crate::filter::*;
 use crate::predicate::*;
@@ -26,11 +26,6 @@ pub(crate) struct AggregatePushdownDiagnostics {
 
 pub(crate) type ChosenAggregateAccessPath =
     (Vec<KeyRange>, AggregateAccessPath, Option<usize>, bool);
-
-#[derive(Debug)]
-pub(crate) struct KvAggregateTable {
-    pub(crate) spec: AggregatePushdownSpec,
-}
 
 pub(crate) enum QueryStatsExplainSurface {
     StreamedRangeDetail,

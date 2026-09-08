@@ -15,7 +15,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let base_url =
         std::env::var("EXOWARE_URL").unwrap_or_else(|_| "http://localhost:10000".to_string());
     let client = StoreClient::new(&base_url);
-    let ctx = SessionContext::new();
+    let ctx = SessionContext::new_with_state(exoware_sql::session_state_builder().build());
 
     // -- Define the versioned document table --
     let schema = build_schema(client)?;

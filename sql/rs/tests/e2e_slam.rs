@@ -72,7 +72,7 @@ async fn sql_full_pipeline_insert_and_query() {
         )
         .expect("schema");
 
-    let ctx = SessionContext::new();
+    let ctx = SessionContext::new_with_state(exoware_sql::session_state_builder().build());
     read_schema.register_all(&ctx).expect("register tables");
 
     // Full scan (all rows are now visible)

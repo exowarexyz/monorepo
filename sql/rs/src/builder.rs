@@ -7,7 +7,7 @@ use datafusion::arrow::array::{
 };
 use datafusion::arrow::compute::cast;
 use datafusion::arrow::datatypes::{i256, DataType, SchemaRef};
-use datafusion::arrow::record_batch::RecordBatch;
+use datafusion::arrow::record_batch::{RecordBatch, RecordBatchOptions};
 use datafusion::common::{DataFusionError, Result as DataFusionResult};
 use exoware_sdk::kv_codec::{StoredRow, StoredValue};
 
@@ -502,6 +502,10 @@ impl ProjectedBatchBuilder {
             .into_iter()
             .map(ColumnBuilder::finish)
             .collect::<DataFusionResult<Vec<_>>>()?;
-        Ok(RecordBatch::try_new(projected_schema.clone(), columns)?)
+        Ok(RecordBatch::try_new_with_options(
+            projected_schema.clone(),
+            columns,
+            &RecordBatchOptions::new().with_row_count(Some(self.row_count)),
+        )?)
     }
 }

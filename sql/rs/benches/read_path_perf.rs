@@ -293,7 +293,7 @@ fn bench_exoware_sql_end_to_end_index_scan(c: &mut Criterion) {
 
     build_dataset(&schema, &runtime);
 
-    let ctx = SessionContext::new();
+    let ctx = SessionContext::new_with_state(exoware_sql::session_state_builder().build());
     schema.register_all(&ctx).expect("register table");
     let ctx = Arc::new(ctx);
 

@@ -1,6 +1,7 @@
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -10,10 +11,14 @@ use datafusion::arrow::datatypes::{i256, DataType, SchemaRef, TimeUnit};
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::catalog::Session;
 use datafusion::common::tree_node::{Transformed, TreeNode, TreeNodeRecursion};
-use datafusion::common::{Column, DataFusionError, Result as DataFusionResult, ScalarValue};
-use datafusion::datasource::{provider_as_source, source_as_provider, TableProvider};
-use datafusion::execution::context::TaskContext;
-use datafusion::logical_expr::{Expr, LogicalPlan, LogicalPlanBuilder, Operator, TableType};
+use datafusion::common::{DFSchemaRef, DataFusionError, Result as DataFusionResult, ScalarValue};
+use datafusion::datasource::source_as_provider;
+use datafusion::execution::context::{QueryPlanner, TaskContext};
+use datafusion::logical_expr::physical_planning_context::PhysicalPlanningContext;
+use datafusion::logical_expr::{
+    Aggregate, Expr, Extension, LogicalPlan, Operator, UserDefinedLogicalNode,
+    UserDefinedLogicalNodeCore,
+};
 use datafusion::optimizer::optimizer::OptimizerRule;
 use datafusion::physical_expr::{EquivalenceProperties, Partitioning, PhysicalExpr};
 use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
@@ -21,6 +26,7 @@ use datafusion::physical_plan::{
     stream::RecordBatchStreamAdapter, DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties,
     SendableRecordBatchStream,
 };
+use datafusion::physical_planner::{DefaultPhysicalPlanner, ExtensionPlanner, PhysicalPlanner};
 use exoware_proto::to_domain_reduce_response;
 use exoware_proto::{
     RangeReduceGroup, RangeReduceOp, RangeReduceRequest, RangeReduceResponse, RangeReduceResult,
@@ -147,7 +153,6 @@ pub(crate) struct AggregatePushdownSpec {
 #[derive(Debug)]
 pub(crate) struct KvAggregateExec {
     pub(crate) spec: AggregatePushdownSpec,
-    pub(crate) projection: Option<Vec<usize>>,
     pub(crate) properties: Arc<PlanProperties>,
 }
 
@@ -213,23 +218,9 @@ impl KvAggregatePushdownRule {
             return Ok(Transformed::no(LogicalPlan::Aggregate(aggregate)));
         };
 
-        // A table scan qualifies every output field with the table name, but the
-        // aggregate emitted its aggregate columns unqualified. The optimizer rejects
-        // any rule that changes the plan schema, so re-alias each column back to the
-        // qualifier and name the aggregate produced.
-        let table_name = scan.table_name.clone();
-        let table = Arc::new(KvAggregateTable { spec });
-        let restored_columns = aggregate
-            .schema
-            .iter()
-            .map(|(qualifier, field)| {
-                Expr::Column(Column::new(Some(table_name.clone()), field.name()))
-                    .alias_qualified(qualifier.cloned(), field.name())
-            })
-            .collect::<Vec<_>>();
-        let plan = LogicalPlanBuilder::scan(table_name, provider_as_source(table), None)?
-            .project(restored_columns)?
-            .build()?;
+        let plan = LogicalPlan::Extension(Extension {
+            node: Arc::new(KvAggregateNode { aggregate, spec }),
+        });
         Ok(Transformed::yes(plan))
     }
 }
@@ -278,52 +269,115 @@ impl OptimizerRule for KvAggregatePushdownRule {
     }
 }
 
-#[async_trait]
-impl TableProvider for KvAggregateTable {
-    fn schema(&self) -> SchemaRef {
-        self.spec.schema.clone()
+#[derive(Debug, Clone)]
+struct KvAggregateNode {
+    // The original aggregate owns the output schema and logical identity of the compiled Store job
+    aggregate: Aggregate,
+    spec: AggregatePushdownSpec,
+}
+
+impl PartialEq for KvAggregateNode {
+    fn eq(&self, other: &Self) -> bool {
+        self.aggregate == other.aggregate
+    }
+}
+
+impl Eq for KvAggregateNode {}
+
+impl PartialOrd for KvAggregateNode {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        self.aggregate.partial_cmp(&other.aggregate)
+    }
+}
+
+impl Hash for KvAggregateNode {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.aggregate.hash(state);
+    }
+}
+
+impl UserDefinedLogicalNodeCore for KvAggregateNode {
+    fn name(&self) -> &str {
+        "KvAggregate"
     }
 
-    fn table_type(&self) -> TableType {
-        TableType::Temporary
+    fn inputs(&self) -> Vec<&LogicalPlan> {
+        vec![]
     }
 
-    async fn scan(
+    fn schema(&self) -> &DFSchemaRef {
+        &self.aggregate.schema
+    }
+
+    fn expressions(&self) -> Vec<Expr> {
+        vec![]
+    }
+
+    fn fmt_for_explain(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "KvAggregate: grouped={}", self.spec.diagnostics.grouped)
+    }
+
+    fn with_exprs_and_inputs(
         &self,
-        _state: &dyn Session,
-        projection: Option<&Vec<usize>>,
-        _filters: &[Expr],
-        _limit: Option<usize>,
-    ) -> DataFusionResult<Arc<dyn ExecutionPlan>> {
-        let projected_schema = match projection {
-            Some(proj) => Arc::new(self.spec.schema.project(proj)?),
-            None => self.spec.schema.clone(),
+        exprs: Vec<Expr>,
+        inputs: Vec<LogicalPlan>,
+    ) -> DataFusionResult<Self> {
+        if !exprs.is_empty() || !inputs.is_empty() {
+            return Err(DataFusionError::Internal(
+                "KvAggregate has no expressions or inputs".to_string(),
+            ));
+        }
+        Ok(self.clone())
+    }
+}
+
+/// Plans Store aggregates when composing a custom DataFusion physical planner.
+#[derive(Debug, Default)]
+pub struct KvAggregateExtensionPlanner;
+
+#[async_trait]
+impl ExtensionPlanner for KvAggregateExtensionPlanner {
+    async fn plan_extension(
+        &self,
+        _planner: &dyn PhysicalPlanner,
+        node: &dyn UserDefinedLogicalNode,
+        _logical_inputs: &[&LogicalPlan],
+        _physical_inputs: &[Arc<dyn ExecutionPlan>],
+        _session: &dyn Session,
+        _planning_ctx: &PhysicalPlanningContext,
+    ) -> DataFusionResult<Option<Arc<dyn ExecutionPlan>>> {
+        let Some(node) = node.as_any().downcast_ref::<KvAggregateNode>() else {
+            return Ok(None);
         };
-        Ok(Arc::new(KvAggregateExec::new(
-            self.spec.clone(),
-            projection.cloned(),
-            projected_schema,
-        )))
+        Ok(Some(Arc::new(KvAggregateExec::new(node.spec.clone()))))
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct KvQueryPlanner;
+
+#[async_trait]
+impl QueryPlanner for KvQueryPlanner {
+    async fn create_physical_plan(
+        &self,
+        plan: &LogicalPlan,
+        session: &dyn Session,
+    ) -> DataFusionResult<Arc<dyn ExecutionPlan>> {
+        DefaultPhysicalPlanner::with_extension_planners(vec![Arc::new(KvAggregateExtensionPlanner)])
+            .create_physical_plan(plan, session)
+            .await
     }
 }
 
 impl KvAggregateExec {
-    pub(crate) fn new(
-        spec: AggregatePushdownSpec,
-        projection: Option<Vec<usize>>,
-        projected_schema: SchemaRef,
-    ) -> Self {
+    pub(crate) fn new(spec: AggregatePushdownSpec) -> Self {
         let properties = Arc::new(PlanProperties::new(
-            EquivalenceProperties::new(projected_schema),
+            EquivalenceProperties::new(spec.schema.clone()),
             Partitioning::UnknownPartitioning(1),
             EmissionType::Incremental,
             Boundedness::Bounded,
         ));
-        Self {
-            spec,
-            projection,
-            properties,
-        }
+        Self { spec, properties }
     }
 }
 
@@ -397,11 +451,7 @@ impl ExecutionPlan for KvAggregateExec {
 
         Ok(Box::pin(RecordBatchStreamAdapter::new(
             self.schema(),
-            futures::stream::once(execute_aggregate_pushdown(
-                self.spec.clone(),
-                self.projection.clone(),
-                self.schema(),
-            )),
+            futures::stream::once(execute_aggregate_pushdown(self.spec.clone())),
         )))
     }
 }
@@ -650,8 +700,6 @@ impl GroupAccumulatorState {
 
 pub(crate) async fn execute_aggregate_pushdown(
     spec: AggregatePushdownSpec,
-    projection: Option<Vec<usize>>,
-    projected_schema: SchemaRef,
 ) -> DataFusionResult<RecordBatch> {
     let session = spec.client.create_session();
     let mut groups = BTreeMap::<Vec<u8>, GroupAccumulatorState>::new();
@@ -748,7 +796,7 @@ pub(crate) async fn execute_aggregate_pushdown(
         rows.push(row);
     }
 
-    build_projected_record_batch(rows, spec.schema, projection, projected_schema)
+    build_aggregate_record_batch(rows, spec.schema)
 }
 
 pub(crate) fn finalize_avg(
@@ -940,25 +988,20 @@ pub(crate) fn finalize_aggregate_output(
     }
 }
 
-pub(crate) fn build_projected_record_batch(
+pub(crate) fn build_aggregate_record_batch(
     rows: Vec<Vec<ScalarValue>>,
-    full_schema: SchemaRef,
-    projection: Option<Vec<usize>>,
-    projected_schema: SchemaRef,
+    schema: SchemaRef,
 ) -> DataFusionResult<RecordBatch> {
-    let projected_indices = projection.unwrap_or_else(|| (0..full_schema.fields().len()).collect());
-    let mut arrays = Vec::with_capacity(projected_indices.len());
-    for (projected_pos, idx) in projected_indices.into_iter().enumerate() {
+    let mut arrays = Vec::with_capacity(schema.fields().len());
+    for (idx, field) in schema.fields().iter().enumerate() {
         if rows.is_empty() {
-            arrays.push(new_empty_array(
-                projected_schema.field(projected_pos).data_type(),
-            ));
+            arrays.push(new_empty_array(field.data_type()));
         } else {
             let values = rows.iter().map(|row| row[idx].clone());
             arrays.push(ScalarValue::iter_to_array(values)?);
         }
     }
-    RecordBatch::try_new(projected_schema, arrays).map_err(Into::into)
+    RecordBatch::try_new(schema, arrays).map_err(Into::into)
 }
 
 pub(crate) fn total_aggregate_outputs(jobs: &[CombinedAggregateJob]) -> usize {

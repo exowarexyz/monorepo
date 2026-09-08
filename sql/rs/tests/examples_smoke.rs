@@ -100,7 +100,7 @@ fn collect_two_strings(
 #[tokio::test]
 async fn orders_example_queries_work_end_to_end() {
     let client = common::local_store_client().await;
-    let ctx = SessionContext::new();
+    let ctx = SessionContext::new_with_state(exoware_sql::session_state_builder().build());
 
     KvSchema::new(PrefixedStoreClient::empty(client))
         .orders_table("orders_kv", default_orders_index_specs())
@@ -181,7 +181,7 @@ async fn orders_example_queries_work_end_to_end() {
 #[tokio::test]
 async fn join_example_queries_work_end_to_end() {
     let client = common::local_store_client().await;
-    let ctx = SessionContext::new();
+    let ctx = SessionContext::new_with_state(exoware_sql::session_state_builder().build());
 
     KvSchema::new(PrefixedStoreClient::empty(client))
         .table(
@@ -290,7 +290,7 @@ async fn join_example_queries_work_end_to_end() {
 #[tokio::test]
 async fn versioned_example_queries_work_end_to_end() {
     let client = common::local_store_client().await;
-    let ctx = SessionContext::new();
+    let ctx = SessionContext::new_with_state(exoware_sql::session_state_builder().build());
     let writer_client = client.clone();
 
     let schema = KvSchema::new(PrefixedStoreClient::empty(client))
@@ -410,7 +410,7 @@ async fn versioned_example_queries_work_end_to_end() {
 #[tokio::test]
 async fn fixed_binary_example_filters_work_end_to_end() {
     let client = common::local_store_client().await;
-    let ctx = SessionContext::new();
+    let ctx = SessionContext::new_with_state(exoware_sql::session_state_builder().build());
     let writer_client = client.clone();
 
     let schema = KvSchema::new(PrefixedStoreClient::empty(client))
