@@ -19,7 +19,7 @@ function clientFor(t, body, streaming = false) {
 }
 
 async function queryFixture(t, name) {
-  const body = toBinary(QueryResponseSchema, create(QueryResponseSchema, { arrowIpc: await fixture(name) }));
+  const body = toBinary(QueryResponseSchema, create(QueryResponseSchema, { results: await fixture(name) }));
   return clientFor(t, body).query('SELECT fixture');
 }
 
@@ -97,10 +97,10 @@ test('duplicate column names retain distinct positional types', async (t) => {
 });
 
 test('subscription frames decode independently and retain their sequence', async (t) => {
-  const arrowIpc = await fixture('subscription');
+  const results = await fixture('subscription');
   const envelopes = [42n, 43n].map((sequenceNumber) => ({
     flags: 0,
-    data: toBinary(SubscribeResponseSchema, create(SubscribeResponseSchema, { sequenceNumber, arrowIpc })),
+    data: toBinary(SubscribeResponseSchema, create(SubscribeResponseSchema, { sequenceNumber, results })),
   }));
   envelopes.push({ flags: 2, data: new TextEncoder().encode('{}') });
   const frames = [];
@@ -112,8 +112,8 @@ test('subscription frames decode independently and retain their sequence', async
 });
 
 test('missing or malformed IPC rejects the query', async (t) => {
-  for (const arrowIpc of [new Uint8Array(), new Uint8Array([1, 2, 3, 4]), (await fixture('computed')).subarray(0, 20)]) {
-    const body = toBinary(QueryResponseSchema, create(QueryResponseSchema, { arrowIpc }));
+  for (const results of [new Uint8Array(), new Uint8Array([1, 2, 3, 4]), (await fixture('computed')).subarray(0, 20)]) {
+    const body = toBinary(QueryResponseSchema, create(QueryResponseSchema, { results }));
     await assert.rejects(clientFor(t, body).query('SELECT fixture'));
   }
 });

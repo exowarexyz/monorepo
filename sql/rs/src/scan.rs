@@ -190,11 +190,10 @@ impl KvScanExec {
         let filter_access = ScanFilter::access_plan(&self.model, filters);
         let access = self.access_plan_with_filter(Some(&filter_access.1));
         let mut cover_filter = None;
-        if let Some(plan) = self.predicate.choose_index_plan(
-            &self.model,
-            &self.index_specs,
-            &access.required_non_pk_columns,
-        )? {
+        if let Some(plan) =
+            self.predicate
+                .choose_index_plan(&self.model, &self.index_specs, &access)?
+        {
             let spec = &self.index_specs[plan.spec_idx];
             if !access.index_covers_required_non_pk(spec) {
                 let available = filters
@@ -266,15 +265,14 @@ impl KvScanExec {
         if self.predicate.contradiction {
             return Ok(None);
         }
-        let index_plan = self.predicate.choose_index_plan(
-            &self.model,
-            &self.index_specs,
-            &self.access_plan().required_non_pk_columns,
-        )?;
+        let access_plan = self.access_plan();
+        let index_plan =
+            self.predicate
+                .choose_index_plan(&self.model, &self.index_specs, &access_plan)?;
         let key_columns = if let Some(plan) = index_plan {
             let spec = &self.index_specs[plan.spec_idx];
             if spec.layout != IndexLayout::Lexicographic
-                || !self.access_plan().index_covers_required_non_pk(spec)
+                || !access_plan.index_covers_required_non_pk(spec)
             {
                 return Ok(None);
             }
@@ -671,11 +669,10 @@ pub(crate) async fn stream_kv_scan(
         return stream_point_scan(tx, ctx, &keys, flush_threshold, target_rows).await;
     }
 
-    if let Some(plan) = ctx.predicate.choose_index_plan(
-        ctx.model,
-        index_specs,
-        &ctx.access_plan.required_non_pk_columns,
-    )? {
+    if let Some(plan) = ctx
+        .predicate
+        .choose_index_plan(ctx.model, index_specs, ctx.access_plan)?
+    {
         if plan.ranges.is_empty() {
             return Ok(());
         }

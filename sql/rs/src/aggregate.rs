@@ -1181,11 +1181,9 @@ pub(crate) fn choose_aggregate_access_path(
     predicate: &QueryPredicate,
     access_plan: &ScanAccessPlan,
 ) -> DataFusionResult<Option<ChosenAggregateAccessPath>> {
-    if let Some(index_plan) = predicate.choose_index_plan(
-        &table.model,
-        &table.index_specs,
-        &access_plan.required_non_pk_columns,
-    )? {
+    if let Some(index_plan) =
+        predicate.choose_index_plan(&table.model, &table.index_specs, access_plan)?
+    {
         if !index_plan.ranges.is_empty()
             && access_plan.index_covers_required_non_pk(&table.index_specs[index_plan.spec_idx])
         {

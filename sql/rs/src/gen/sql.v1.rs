@@ -1272,21 +1272,20 @@ pub struct QueryResponse {
     /// Complete Arrow IPC stream containing the result schema and record batches.
     /// The schema is present even when the query returns no rows.
     ///
-    /// Field 1: `arrow_ipc`
+    /// Field 1: `results`
     #[serde(
-        rename = "arrowIpc",
-        alias = "arrow_ipc",
+        rename = "results",
         with = "::buffa::json_helpers::bytes",
         skip_serializing_if = "::buffa::json_helpers::skip_if::is_empty_bytes"
     )]
-    pub arrow_ipc: ::buffa::bytes::Bytes,
+    pub results: ::buffa::bytes::Bytes,
     #[serde(skip)]
     #[doc(hidden)]
     pub __buffa_unknown_fields: ::buffa::UnknownFields,
 }
 impl ::core::fmt::Debug for QueryResponse {
     fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_struct("QueryResponse").field("arrow_ipc", &self.arrow_ipc).finish()
+        f.debug_struct("QueryResponse").field("results", &self.results).finish()
     }
 }
 impl QueryResponse {
@@ -1316,8 +1315,8 @@ impl ::buffa::Message for QueryResponse {
         #[allow(unused_imports)]
         use ::buffa::Enumeration as _;
         let mut size = 0u64;
-        if !self.arrow_ipc.is_empty() {
-            size += 1u64 + ::buffa::types::bytes_encoded_len(&self.arrow_ipc) as u64;
+        if !self.results.is_empty() {
+            size += 1u64 + ::buffa::types::bytes_encoded_len(&self.results) as u64;
         }
         size += self.__buffa_unknown_fields.encoded_len() as u64;
         ::buffa::saturate_size(size)
@@ -1329,8 +1328,8 @@ impl ::buffa::Message for QueryResponse {
     ) {
         #[allow(unused_imports)]
         use ::buffa::Enumeration as _;
-        if !self.arrow_ipc.is_empty() {
-            ::buffa::types::put_shared_bytes_field(1u32, &self.arrow_ipc, buf);
+        if !self.results.is_empty() {
+            ::buffa::types::put_shared_bytes_field(1u32, &self.results, buf);
         }
         self.__buffa_unknown_fields.write_to(buf);
     }
@@ -1350,7 +1349,7 @@ impl ::buffa::Message for QueryResponse {
                     tag,
                     ::buffa::encoding::WireType::LengthDelimited,
                 )?;
-                self.arrow_ipc = ::buffa::types::decode_bytes_to_bytes(buf)?;
+                self.results = ::buffa::types::decode_bytes_to_bytes(buf)?;
             }
             _ => {
                 self.__buffa_unknown_fields
@@ -1360,7 +1359,7 @@ impl ::buffa::Message for QueryResponse {
         ::core::result::Result::Ok(())
     }
     fn clear(&mut self) {
-        self.arrow_ipc = ::core::default::Default::default();
+        self.results = ::core::default::Default::default();
         self.__buffa_unknown_fields.clear();
     }
 }
@@ -1608,14 +1607,13 @@ pub struct SubscribeResponse {
     /// Complete Arrow IPC stream containing the table schema and matching rows.
     /// Each frame decodes independently. Empty frames are not delivered.
     ///
-    /// Field 2: `arrow_ipc`
+    /// Field 2: `results`
     #[serde(
-        rename = "arrowIpc",
-        alias = "arrow_ipc",
+        rename = "results",
         with = "::buffa::json_helpers::bytes",
         skip_serializing_if = "::buffa::json_helpers::skip_if::is_empty_bytes"
     )]
-    pub arrow_ipc: ::buffa::bytes::Bytes,
+    pub results: ::buffa::bytes::Bytes,
     #[serde(skip)]
     #[doc(hidden)]
     pub __buffa_unknown_fields: ::buffa::UnknownFields,
@@ -1624,7 +1622,7 @@ impl ::core::fmt::Debug for SubscribeResponse {
     fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
         f.debug_struct("SubscribeResponse")
             .field("sequence_number", &self.sequence_number)
-            .field("arrow_ipc", &self.arrow_ipc)
+            .field("results", &self.results)
             .finish()
     }
 }
@@ -1660,8 +1658,8 @@ impl ::buffa::Message for SubscribeResponse {
                 += 1u64
                     + ::buffa::types::uint64_encoded_len(self.sequence_number) as u64;
         }
-        if !self.arrow_ipc.is_empty() {
-            size += 1u64 + ::buffa::types::bytes_encoded_len(&self.arrow_ipc) as u64;
+        if !self.results.is_empty() {
+            size += 1u64 + ::buffa::types::bytes_encoded_len(&self.results) as u64;
         }
         size += self.__buffa_unknown_fields.encoded_len() as u64;
         ::buffa::saturate_size(size)
@@ -1676,8 +1674,8 @@ impl ::buffa::Message for SubscribeResponse {
         if self.sequence_number != 0u64 {
             ::buffa::types::put_uint64_field(1u32, self.sequence_number, buf);
         }
-        if !self.arrow_ipc.is_empty() {
-            ::buffa::types::put_shared_bytes_field(2u32, &self.arrow_ipc, buf);
+        if !self.results.is_empty() {
+            ::buffa::types::put_shared_bytes_field(2u32, &self.results, buf);
         }
         self.__buffa_unknown_fields.write_to(buf);
     }
@@ -1704,7 +1702,7 @@ impl ::buffa::Message for SubscribeResponse {
                     tag,
                     ::buffa::encoding::WireType::LengthDelimited,
                 )?;
-                self.arrow_ipc = ::buffa::types::decode_bytes_to_bytes(buf)?;
+                self.results = ::buffa::types::decode_bytes_to_bytes(buf)?;
             }
             _ => {
                 self.__buffa_unknown_fields
@@ -1715,7 +1713,7 @@ impl ::buffa::Message for SubscribeResponse {
     }
     fn clear(&mut self) {
         self.sequence_number = 0u64;
-        self.arrow_ipc = ::core::default::Default::default();
+        self.results = ::core::default::Default::default();
         self.__buffa_unknown_fields.clear();
     }
 }
@@ -3731,8 +3729,8 @@ pub mod __buffa {
             /// Complete Arrow IPC stream containing the result schema and record batches.
             /// The schema is present even when the query returns no rows.
             ///
-            /// Field 1: `arrow_ipc`
-            pub arrow_ipc: &'a [u8],
+            /// Field 1: `results`
+            pub results: &'a [u8],
             pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
         }
         impl<'a> ::buffa::MessageView<'a> for QueryResponseView<'a> {
@@ -3772,7 +3770,7 @@ pub mod __buffa {
                             tag,
                             ::buffa::encoding::WireType::LengthDelimited,
                         )?;
-                        view.arrow_ipc = ::buffa::types::borrow_bytes(&mut cur)?;
+                        view.results = ::buffa::types::borrow_bytes(&mut cur)?;
                     }
                     _ => {
                         ::buffa::encoding::skip_field_depth(tag, &mut cur, ctx.depth())?;
@@ -3803,10 +3801,7 @@ pub mod __buffa {
                 use ::buffa::alloc::string::ToString as _;
                 let _ = __buffa_src;
                 ::core::result::Result::Ok(super::super::QueryResponse {
-                    arrow_ipc: ::buffa::view::bytes_from_source(
-                        __buffa_src,
-                        self.arrow_ipc,
-                    ),
+                    results: ::buffa::view::bytes_from_source(__buffa_src, self.results),
                     __buffa_unknown_fields: self
                         .__buffa_unknown_fields
                         .to_owned()?
@@ -3821,10 +3816,10 @@ pub mod __buffa {
                 #[allow(unused_imports)]
                 use ::buffa::Enumeration as _;
                 let mut size = 0u64;
-                if !self.arrow_ipc.is_empty() {
+                if !self.results.is_empty() {
                     size
                         += 1u64
-                            + ::buffa::types::bytes_encoded_len(&self.arrow_ipc) as u64;
+                            + ::buffa::types::bytes_encoded_len(&self.results) as u64;
                 }
                 size += self.__buffa_unknown_fields.encoded_len() as u64;
                 ::buffa::saturate_size(size)
@@ -3837,8 +3832,8 @@ pub mod __buffa {
             ) {
                 #[allow(unused_imports)]
                 use ::buffa::Enumeration as _;
-                if !self.arrow_ipc.is_empty() {
-                    ::buffa::types::put_shared_bytes_field(1u32, &self.arrow_ipc, buf);
+                if !self.results.is_empty() {
+                    ::buffa::types::put_shared_bytes_field(1u32, &self.results, buf);
                 }
                 self.__buffa_unknown_fields.write_to(buf);
             }
@@ -3861,11 +3856,11 @@ pub mod __buffa {
             ) -> ::core::result::Result<__S::Ok, __S::Error> {
                 use ::serde::ser::SerializeMap as _;
                 let mut __map = __s.serialize_map(::core::option::Option::None)?;
-                if !::buffa::json_helpers::skip_if::is_empty_bytes(self.arrow_ipc) {
+                if !::buffa::json_helpers::skip_if::is_empty_bytes(self.results) {
                     __map
                         .serialize_entry(
-                            "arrowIpc",
-                            &::buffa::json_helpers::BytesJson(self.arrow_ipc),
+                            "results",
+                            &::buffa::json_helpers::BytesJson(self.results),
                         )?;
                 }
                 __map.end()
@@ -3966,10 +3961,10 @@ pub mod __buffa {
             /// Complete Arrow IPC stream containing the result schema and record batches.
             /// The schema is present even when the query returns no rows.
             ///
-            /// Field 1: `arrow_ipc`
+            /// Field 1: `results`
             #[must_use]
-            pub fn arrow_ipc(&self) -> &'_ [u8] {
-                self.0.reborrow().arrow_ipc
+            pub fn results(&self) -> &'_ [u8] {
+                self.0.reborrow().results
             }
         }
         impl ::core::convert::From<::buffa::OwnedView<QueryResponseView<'static>>>
@@ -4356,8 +4351,8 @@ pub mod __buffa {
             /// Complete Arrow IPC stream containing the table schema and matching rows.
             /// Each frame decodes independently. Empty frames are not delivered.
             ///
-            /// Field 2: `arrow_ipc`
-            pub arrow_ipc: &'a [u8],
+            /// Field 2: `results`
+            pub results: &'a [u8],
             pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
         }
         impl<'a> ::buffa::MessageView<'a> for SubscribeResponseView<'a> {
@@ -4404,7 +4399,7 @@ pub mod __buffa {
                             tag,
                             ::buffa::encoding::WireType::LengthDelimited,
                         )?;
-                        view.arrow_ipc = ::buffa::types::borrow_bytes(&mut cur)?;
+                        view.results = ::buffa::types::borrow_bytes(&mut cur)?;
                     }
                     _ => {
                         ::buffa::encoding::skip_field_depth(tag, &mut cur, ctx.depth())?;
@@ -4436,10 +4431,7 @@ pub mod __buffa {
                 let _ = __buffa_src;
                 ::core::result::Result::Ok(super::super::SubscribeResponse {
                     sequence_number: self.sequence_number,
-                    arrow_ipc: ::buffa::view::bytes_from_source(
-                        __buffa_src,
-                        self.arrow_ipc,
-                    ),
+                    results: ::buffa::view::bytes_from_source(__buffa_src, self.results),
                     __buffa_unknown_fields: self
                         .__buffa_unknown_fields
                         .to_owned()?
@@ -4460,10 +4452,10 @@ pub mod __buffa {
                             + ::buffa::types::uint64_encoded_len(self.sequence_number)
                                 as u64;
                 }
-                if !self.arrow_ipc.is_empty() {
+                if !self.results.is_empty() {
                     size
                         += 1u64
-                            + ::buffa::types::bytes_encoded_len(&self.arrow_ipc) as u64;
+                            + ::buffa::types::bytes_encoded_len(&self.results) as u64;
                 }
                 size += self.__buffa_unknown_fields.encoded_len() as u64;
                 ::buffa::saturate_size(size)
@@ -4479,8 +4471,8 @@ pub mod __buffa {
                 if self.sequence_number != 0u64 {
                     ::buffa::types::put_uint64_field(1u32, self.sequence_number, buf);
                 }
-                if !self.arrow_ipc.is_empty() {
-                    ::buffa::types::put_shared_bytes_field(2u32, &self.arrow_ipc, buf);
+                if !self.results.is_empty() {
+                    ::buffa::types::put_shared_bytes_field(2u32, &self.results, buf);
                 }
                 self.__buffa_unknown_fields.write_to(buf);
             }
@@ -4510,11 +4502,11 @@ pub mod __buffa {
                             &::buffa::json_helpers::ProtoJson(&self.sequence_number),
                         )?;
                 }
-                if !::buffa::json_helpers::skip_if::is_empty_bytes(self.arrow_ipc) {
+                if !::buffa::json_helpers::skip_if::is_empty_bytes(self.results) {
                     __map
                         .serialize_entry(
-                            "arrowIpc",
-                            &::buffa::json_helpers::BytesJson(self.arrow_ipc),
+                            "results",
+                            &::buffa::json_helpers::BytesJson(self.results),
                         )?;
                 }
                 __map.end()
@@ -4623,10 +4615,10 @@ pub mod __buffa {
             /// Complete Arrow IPC stream containing the table schema and matching rows.
             /// Each frame decodes independently. Empty frames are not delivered.
             ///
-            /// Field 2: `arrow_ipc`
+            /// Field 2: `results`
             #[must_use]
-            pub fn arrow_ipc(&self) -> &'_ [u8] {
-                self.0.reborrow().arrow_ipc
+            pub fn results(&self) -> &'_ [u8] {
+                self.0.reborrow().results
             }
         }
         impl ::core::convert::From<::buffa::OwnedView<SubscribeResponseView<'static>>>

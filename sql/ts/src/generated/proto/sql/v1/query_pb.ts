@@ -11,7 +11,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file sql/v1/query.proto.
  */
 export const file_sql_v1_query: GenFile = /*@__PURE__*/
-  fileDesc("ChJzcWwvdjEvcXVlcnkucHJvdG8SBnNxbC52MSIoCgxRdWVyeVJlcXVlc3QSGAoDc3FsGAEgASgJQgu6SAhyBhABGP//AyIiCg1RdWVyeVJlc3BvbnNlEhEKCWFycm93X2lwYxgBIAEoDGIGcHJvdG8z", [file_buf_validate_validate]);
+  fileDesc("ChJzcWwvdjEvcXVlcnkucHJvdG8SBnNxbC52MSIoCgxRdWVyeVJlcXVlc3QSGAoDc3FsGAEgASgJQgu6SAhyBhABGP//AyIgCg1RdWVyeVJlc3BvbnNlEg8KB3Jlc3VsdHMYASABKAxiBnByb3RvMw", [file_buf_validate_validate]);
 
 /**
  * Ad-hoc SQL statement.
@@ -42,9 +42,9 @@ export type QueryResponse = Message<"sql.v1.QueryResponse"> & {
    * Complete Arrow IPC stream containing the result schema and record batches.
    * The schema is present even when the query returns no rows.
    *
-   * @generated from field: bytes arrow_ipc = 1;
+   * @generated from field: bytes results = 1;
    */
-  arrowIpc: Uint8Array;
+  results: Uint8Array;
 };
 
 /**

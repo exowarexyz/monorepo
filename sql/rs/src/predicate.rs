@@ -7,6 +7,7 @@ use exoware_sdk::keys::{Key, Prefix};
 use exoware_sdk::kv_codec::interleave_ordered_key_fields;
 
 use crate::codec::*;
+use crate::filter::ScanAccessPlan;
 use crate::types::*;
 
 #[derive(Debug, Clone)]
@@ -882,7 +883,7 @@ impl QueryPredicate {
         &self,
         model: &TableModel,
         specs: &[ResolvedIndexSpec],
-        required_non_pk_columns: &[bool],
+        access_plan: &ScanAccessPlan,
     ) -> DataFusionResult<Option<IndexPlan>> {
         if self.contradiction || self.has_primary_key_points(model) {
             return Ok(None);
@@ -946,11 +947,7 @@ impl QueryPredicate {
             let rank = |plan: &IndexPlan| {
                 (
                     plan.constrained_column_count,
-                    self.index_covers_required_non_pk(
-                        model,
-                        &specs[plan.spec_idx],
-                        required_non_pk_columns,
-                    ),
+                    access_plan.index_covers_required_non_pk(&specs[plan.spec_idx]),
                     specs[plan.spec_idx].layout == IndexLayout::Lexicographic,
                     std::cmp::Reverse(plan.ranges.len()),
                 )
@@ -963,26 +960,6 @@ impl QueryPredicate {
             }
         }
         Ok(best)
-    }
-
-    pub(crate) fn index_covers_required_non_pk(
-        &self,
-        model: &TableModel,
-        spec: &ResolvedIndexSpec,
-        required_non_pk_columns: &[bool],
-    ) -> bool {
-        required_non_pk_columns
-            .iter()
-            .enumerate()
-            .all(|(i, required)| !*required || spec.value_column_mask[i])
-            && self
-                .constraints
-                .keys()
-                .copied()
-                .filter(|col_idx| model.pk_position(*col_idx).is_none())
-                .all(|col_idx| {
-                    spec.value_column_mask[col_idx] || spec.key_columns.contains(&col_idx)
-                })
     }
 
     pub(crate) fn expand_index_ranges(

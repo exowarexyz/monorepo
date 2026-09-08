@@ -335,12 +335,12 @@ impl Service for SqlConnect {
                     .write(&batch)
                     .map_err(|error| datafusion_error_to_connect(error.into()))?;
             }
-            let arrow_ipc = writer
+            let results = writer
                 .into_inner()
                 .map_err(|error| datafusion_error_to_connect(error.into()))?
                 .into();
             connectrpc::Response::ok(QueryResponse {
-                arrow_ipc,
+                results,
                 ..Default::default()
             })
         }
@@ -487,13 +487,13 @@ fn evaluate_batch(
     writer
         .write(&filtered)
         .map_err(|error| datafusion_error_to_connect(error.into()))?;
-    let arrow_ipc = writer
+    let results = writer
         .into_inner()
         .map_err(|error| datafusion_error_to_connect(error.into()))?
         .into();
     Ok(Some(SubscribeResponse {
         sequence_number,
-        arrow_ipc,
+        results,
         ..Default::default()
     }))
 }
@@ -757,7 +757,7 @@ mod tests {
                 .await
                 .unwrap()
                 .into_owned();
-            let reader = StreamReader::try_new(response.arrow_ipc.as_ref(), None).unwrap();
+            let reader = StreamReader::try_new(response.results.as_ref(), None).unwrap();
             assert_eq!(reader.schema(), schema, "{name}");
             let actual = reader.collect::<Result<Vec<_>, _>>().unwrap();
             assert_eq!(
@@ -765,7 +765,7 @@ mod tests {
                 concat_batches(&schema, &expected).unwrap(),
                 "{name}"
             );
-            check_ipc_fixture(name, &response.arrow_ipc);
+            check_ipc_fixture(name, &response.results);
         }
         task.abort();
     }
@@ -1086,7 +1086,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(response.sequence_number, 42);
-        let reader = StreamReader::try_new(response.arrow_ipc.as_ref(), None).unwrap();
+        let reader = StreamReader::try_new(response.results.as_ref(), None).unwrap();
         assert_eq!(reader.schema(), state.schema);
         let batches = reader.collect::<Result<Vec<_>, _>>().unwrap();
         assert_eq!(batches.len(), 1);
@@ -1096,7 +1096,7 @@ mod tests {
             .downcast_ref::<Int64Array>()
             .unwrap();
         assert_eq!(ids.values().as_ref(), &[2, 3]);
-        check_ipc_fixture("subscription.arrow", &response.arrow_ipc);
+        check_ipc_fixture("subscription.arrow", &response.results);
 
         let predicate = compile_subscription_predicate(
             &ctx,

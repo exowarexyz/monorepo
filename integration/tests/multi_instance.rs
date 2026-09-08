@@ -434,7 +434,7 @@ async fn test_sql_streaming_is_isolated_by_store_prefix() {
         .expect("sql b frame")
         .to_owned_message();
     assert_eq!(frame_b.sequence_number, seq_b);
-    let batches_b = StreamReader::try_new(frame_b.arrow_ipc.as_ref(), None)
+    let batches_b = StreamReader::try_new(frame_b.results.as_ref(), None)
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
@@ -455,7 +455,7 @@ async fn test_sql_streaming_is_isolated_by_store_prefix() {
         .expect("sql a frame")
         .to_owned_message();
     assert_eq!(frame_a.sequence_number, seq_a);
-    let batches_a = StreamReader::try_new(frame_a.arrow_ipc.as_ref(), None)
+    let batches_a = StreamReader::try_new(frame_a.results.as_ref(), None)
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();

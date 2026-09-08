@@ -11,7 +11,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file sql/v1/stream.proto.
  */
 export const file_sql_v1_stream: GenFile = /*@__PURE__*/
-  fileDesc("ChNzcWwvdjEvc3RyZWFtLnByb3RvEgZzcWwudjEiiAEKEFN1YnNjcmliZVJlcXVlc3QSGQoFdGFibGUYASABKAlCCrpIB3IFEAEY/wESGwoJd2hlcmVfc3FsGAIgASgJQgi6SAVyAxiAIBIiChVzaW5jZV9zZXF1ZW5jZV9udW1iZXIYAyABKARIAIgBAUIYChZfc2luY2Vfc2VxdWVuY2VfbnVtYmVyIj8KEVN1YnNjcmliZVJlc3BvbnNlEhcKD3NlcXVlbmNlX251bWJlchgBIAEoBBIRCglhcnJvd19pcGMYAiABKAxiBnByb3RvMw", [file_buf_validate_validate]);
+  fileDesc("ChNzcWwvdjEvc3RyZWFtLnByb3RvEgZzcWwudjEiiAEKEFN1YnNjcmliZVJlcXVlc3QSGQoFdGFibGUYASABKAlCCrpIB3IFEAEY/wESGwoJd2hlcmVfc3FsGAIgASgJQgi6SAVyAxiAIBIiChVzaW5jZV9zZXF1ZW5jZV9udW1iZXIYAyABKARIAIgBAUIYChZfc2luY2Vfc2VxdWVuY2VfbnVtYmVyIj0KEVN1YnNjcmliZVJlc3BvbnNlEhcKD3NlcXVlbmNlX251bWJlchgBIAEoBBIPCgdyZXN1bHRzGAIgASgMYgZwcm90bzM", [file_buf_validate_validate]);
 
 /**
  * Stream every batch whose rows match `where_sql`.
@@ -72,9 +72,9 @@ export type SubscribeResponse = Message<"sql.v1.SubscribeResponse"> & {
    * Complete Arrow IPC stream containing the table schema and matching rows.
    * Each frame decodes independently. Empty frames are not delivered.
    *
-   * @generated from field: bytes arrow_ipc = 2;
+   * @generated from field: bytes results = 2;
    */
-  arrowIpc: Uint8Array;
+  results: Uint8Array;
 };
 
 /**

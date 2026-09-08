@@ -67,7 +67,7 @@ function decodeTableStream(bytes: Uint8Array): Table {
 function decodeSubscribe(response: SqlSubscribeResponse): DecodedSubscribeFrame {
   return {
     sequenceNumber: response.sequenceNumber,
-    table: decodeTableStream(response.arrowIpc),
+    table: decodeTableStream(response.results),
   };
 }
 
@@ -126,7 +126,7 @@ export class SqlClient {
       create(SqlQueryRequestSchema, { sql }),
       options,
     );
-    return decodeTableStream(response.arrowIpc);
+    return decodeTableStream(response.results);
   }
 
   async tables(options?: CallOptions): Promise<DecodedTable[]> {

@@ -16,5 +16,5 @@ message QueryRequest {
 message QueryResponse {
   // Complete Arrow IPC stream containing the result schema and record batches.
   // The schema is present even when the query returns no rows.
-  bytes arrow_ipc = 1;
+  bytes results = 1;
 }

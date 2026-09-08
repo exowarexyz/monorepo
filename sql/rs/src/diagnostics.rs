@@ -78,9 +78,7 @@ pub(crate) fn build_scan_access_path_diagnostics(
         });
     }
 
-    if let Some(index_plan) =
-        predicate.choose_index_plan(model, index_specs, &access_plan.required_non_pk_columns)?
-    {
+    if let Some(index_plan) = predicate.choose_index_plan(model, index_specs, access_plan)? {
         let spec = &index_specs[index_plan.spec_idx];
         let exact =
             complete_ranges && access_plan.predicate_fully_enforced_by_index_key(model, spec);

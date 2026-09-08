@@ -1115,8 +1115,9 @@ mod tests {
                 max: Some(20),
             },
         );
+        let access_plan = ScanAccessPlan::new(&model, &Some(vec![]), &predicate);
         let plan = predicate
-            .choose_index_plan(&model, &specs, &[])
+            .choose_index_plan(&model, &specs, &access_plan)
             .expect("plan")
             .expect("exists");
         assert_eq!(plan.spec_idx, 0);
@@ -1160,8 +1161,9 @@ mod tests {
             },
         );
 
+        let access_plan = ScanAccessPlan::new(&model, &Some(vec![]), &predicate);
         let plan = predicate
-            .choose_index_plan(&model, &specs, &[])
+            .choose_index_plan(&model, &specs, &access_plan)
             .expect("plan")
             .expect("exists");
         assert_eq!(specs[plan.spec_idx].name, "status_covering");
@@ -1188,8 +1190,9 @@ mod tests {
             },
         );
 
+        let access_plan = ScanAccessPlan::new(&model, &Some(vec![]), &predicate);
         let plan = predicate
-            .choose_index_plan(&model, &specs, &[])
+            .choose_index_plan(&model, &specs, &access_plan)
             .expect("plan")
             .expect("exists");
         assert_eq!(specs[plan.spec_idx].name, "xy_z");
@@ -1717,8 +1720,9 @@ mod tests {
         let mut pred = QueryPredicate::default();
         pred.constraints
             .insert(active_idx, PredicateConstraint::BoolEq(true));
+        let access_plan = ScanAccessPlan::new(&model, &Some(vec![]), &pred);
         let plan = pred
-            .choose_index_plan(&model, &specs, &[])
+            .choose_index_plan(&model, &specs, &access_plan)
             .expect("plan")
             .expect("should find index");
         assert_eq!(plan.spec_idx, 0);
@@ -3915,8 +3919,9 @@ mod tests {
             region_idx,
             PredicateConstraint::StringIn(vec!["us-east".to_string(), "us-west".to_string()]),
         );
+        let access_plan = ScanAccessPlan::new(&model, &Some(vec![]), &pred);
         let plan = pred
-            .choose_index_plan(&model, &specs, &[])
+            .choose_index_plan(&model, &specs, &access_plan)
             .expect("plan")
             .expect("should find index");
         assert_eq!(plan.ranges.len(), 2);
@@ -5809,8 +5814,9 @@ mod tests {
             None,
         ));
         let pred = QueryPredicate::from_filters(&[filter], &model);
+        let access_plan = ScanAccessPlan::new(&model, &Some(vec![]), &pred);
         let plan = pred
-            .choose_index_plan(&model, &specs, &[])
+            .choose_index_plan(&model, &specs, &access_plan)
             .unwrap()
             .expect("fixed-binary equality should choose an index");
 
@@ -5845,8 +5851,9 @@ mod tests {
             None,
         ));
         let pred = QueryPredicate::from_filters(&[filter], &model);
+        let access_plan = ScanAccessPlan::new(&model, &Some(vec![]), &pred);
         let plan = pred
-            .choose_index_plan(&model, &specs, &[])
+            .choose_index_plan(&model, &specs, &access_plan)
             .unwrap()
             .expect("decimal256 range should choose an index");
 

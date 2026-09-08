@@ -32,5 +32,5 @@ message SubscribeResponse {
   uint64 sequence_number = 1;
   // Complete Arrow IPC stream containing the table schema and matching rows.
   // Each frame decodes independently. Empty frames are not delivered.
-  bytes arrow_ipc = 2;
+  bytes results = 2;
 }
