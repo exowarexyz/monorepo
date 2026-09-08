@@ -781,26 +781,42 @@ export class SimplexClient<TNotarization = unknown, TFinalization = unknown> {
     return this.uploadPrepared(this.prepareFinalization(input));
   }
 
-  async getHeader(digest: BytesLike): Promise<Uint8Array | null> {
-    return this.getHeaderRaw(digest);
+  async getHeader(
+    digest: BytesLike,
+    minSequenceNumber?: bigint,
+  ): Promise<Uint8Array | null> {
+    return this.getHeaderRaw(digest, minSequenceNumber);
   }
 
-  async getHeaderRaw(digest: BytesLike): Promise<Uint8Array | null> {
-    return this.getRaw(headerByDigestKey(digest));
+  async getHeaderRaw(
+    digest: BytesLike,
+    minSequenceNumber?: bigint,
+  ): Promise<Uint8Array | null> {
+    return this.getRaw(headerByDigestKey(digest), minSequenceNumber);
   }
 
-  async getBlock(digest: BytesLike): Promise<SimplexBlockData | null> {
-    const raw = await this.getBlockRaw(digest);
+  async getBlock(
+    digest: BytesLike,
+    minSequenceNumber?: bigint,
+  ): Promise<SimplexBlockData | null> {
+    const raw = await this.getBlockRaw(digest, minSequenceNumber);
     return raw === null ? null : decodeSimplexBlockData(raw);
   }
 
-  async getBlockRaw(digest: BytesLike): Promise<Uint8Array | null> {
-    return this.getRaw(blockByDigestKey(digest));
+  async getBlockRaw(
+    digest: BytesLike,
+    minSequenceNumber?: bigint,
+  ): Promise<Uint8Array | null> {
+    return this.getRaw(blockByDigestKey(digest), minSequenceNumber);
   }
 
-  async getNotarizationByRound(epoch: U64Like, view: U64Like): Promise<TNotarization | null> {
+  async getNotarizationByRound(
+    epoch: U64Like,
+    view: U64Like,
+    minSequenceNumber?: bigint,
+  ): Promise<TNotarization | null> {
     const key = notarizationByRoundKey(epoch, view);
-    const raw = await this.getRaw(key);
+    const raw = await this.getRaw(key, minSequenceNumber);
     if (raw === null) {
       return null;
     }
@@ -814,13 +830,21 @@ export class SimplexClient<TNotarization = unknown, TFinalization = unknown> {
     });
   }
 
-  async getNotarizationByRoundRaw(epoch: U64Like, view: U64Like): Promise<Uint8Array | null> {
-    return this.getRaw(notarizationByRoundKey(epoch, view));
+  async getNotarizationByRoundRaw(
+    epoch: U64Like,
+    view: U64Like,
+    minSequenceNumber?: bigint,
+  ): Promise<Uint8Array | null> {
+    return this.getRaw(notarizationByRoundKey(epoch, view), minSequenceNumber);
   }
 
-  async getFinalizationByRound(epoch: U64Like, view: U64Like): Promise<TFinalization | null> {
+  async getFinalizationByRound(
+    epoch: U64Like,
+    view: U64Like,
+    minSequenceNumber?: bigint,
+  ): Promise<TFinalization | null> {
     const key = finalizationByRoundKey(epoch, view);
-    const raw = await this.getRaw(key);
+    const raw = await this.getRaw(key, minSequenceNumber);
     if (raw === null) {
       return null;
     }
@@ -835,13 +859,21 @@ export class SimplexClient<TNotarization = unknown, TFinalization = unknown> {
     });
   }
 
-  async getFinalizationByRoundRaw(epoch: U64Like, view: U64Like): Promise<Uint8Array | null> {
-    return this.getRaw(finalizationByRoundKey(epoch, view));
+  async getFinalizationByRoundRaw(
+    epoch: U64Like,
+    view: U64Like,
+    minSequenceNumber?: bigint,
+  ): Promise<Uint8Array | null> {
+    return this.getRaw(finalizationByRoundKey(epoch, view), minSequenceNumber);
   }
 
-  async getFinalizationByHeight(height: U64Like): Promise<TFinalization | null> {
+  async getFinalizationByHeight(
+    height: U64Like,
+    minSequenceNumber?: bigint,
+    callOptions?: Parameters<StoreClient['get']>[2],
+  ): Promise<TFinalization | null> {
     const key = finalizedByHeightKey(height);
-    const raw = await this.getRaw(key);
+    const raw = await this.getRaw(key, minSequenceNumber, callOptions);
     if (raw === null) {
       return null;
     }
@@ -855,12 +887,16 @@ export class SimplexClient<TNotarization = unknown, TFinalization = unknown> {
     });
   }
 
-  async getFinalizationByHeightRaw(height: U64Like): Promise<Uint8Array | null> {
-    return this.getRaw(finalizedByHeightKey(height));
+  async getFinalizationByHeightRaw(
+    height: U64Like,
+    minSequenceNumber?: bigint,
+    callOptions?: Parameters<StoreClient['get']>[2],
+  ): Promise<Uint8Array | null> {
+    return this.getRaw(finalizedByHeightKey(height), minSequenceNumber, callOptions);
   }
 
-  async latestFinalization(): Promise<TFinalization | null> {
-    const row = await this.latestFinalizedRow();
+  async latestFinalization(minSequenceNumber?: bigint): Promise<TFinalization | null> {
+    const row = await this.latestFinalizedRow(minSequenceNumber);
     if (!row) {
       return null;
     }
@@ -874,11 +910,13 @@ export class SimplexClient<TNotarization = unknown, TFinalization = unknown> {
     });
   }
 
-  async latestFinalizationRaw(): Promise<Uint8Array | null> {
-    return (await this.latestFinalizedRow())?.value ?? null;
+  async latestFinalizationRaw(minSequenceNumber?: bigint): Promise<Uint8Array | null> {
+    return (await this.latestFinalizedRow(minSequenceNumber))?.value ?? null;
   }
 
-  private async latestFinalizedRow(): Promise<{ key: Uint8Array; value: Uint8Array } | null> {
+  private async latestFinalizedRow(
+    minSequenceNumber?: bigint,
+  ): Promise<{ key: Uint8Array; value: Uint8Array } | null> {
     const range = rangeForKind(SimplexRecordKind.FinalizedByHeight);
     const result = await this.store.query(
       range.start,
@@ -886,6 +924,7 @@ export class SimplexClient<TNotarization = unknown, TFinalization = unknown> {
       1,
       4096,
       TraversalMode.REVERSE,
+      minSequenceNumber,
     );
     return result.results[0] ?? null;
   }
@@ -993,8 +1032,12 @@ export class SimplexClient<TNotarization = unknown, TFinalization = unknown> {
     }
   }
 
-  private async getRaw(key: Uint8Array): Promise<Uint8Array | null> {
-    const result = await this.store.get(key);
+  private async getRaw(
+    key: Uint8Array,
+    minSequenceNumber?: bigint,
+    callOptions?: Parameters<StoreClient['get']>[2],
+  ): Promise<Uint8Array | null> {
+    const result = await this.store.get(key, minSequenceNumber, callOptions);
     return result?.value ?? null;
   }
 
