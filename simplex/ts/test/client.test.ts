@@ -166,6 +166,131 @@ test('certificate getters require and apply a verifier', async () => {
   assert.deepEqual(await simplex.getNotarizationByRoundRaw(0, 3), new Uint8Array([0xa3]));
 });
 
+test('unary point reads forward minimum sequence numbers', async () => {
+  const store = new Client('http://127.0.0.1:1').store();
+  const minSequenceNumber = 23n;
+  const rows = new Map<string, Uint8Array>([
+    [bytesToHex(headerByDigestKey('01')), new Uint8Array([0xa1])],
+    [bytesToHex(blockByDigestKey('02')), encodeSimplexBlockData('a2', 'b2')],
+    [bytesToHex(notarizationByRoundKey(2, 3)), new Uint8Array([0xa3])],
+    [bytesToHex(finalizationByRoundKey(2, 4)), new Uint8Array([0xa4])],
+    [bytesToHex(finalizedByHeightKey(5)), new Uint8Array([0xa5])],
+  ]);
+  const calls: Array<[string, bigint | undefined]> = [];
+  store.get = async (key: Uint8Array, minimum?: bigint) => {
+    calls.push([bytesToHex(key), minimum]);
+    const value = rows.get(bytesToHex(key));
+    return value ? { value } : null;
+  };
+
+  const verifier: SimplexCertificateVerifier<Uint8Array, Uint8Array> = {
+    verifyNotarization: (bytes) => bytes,
+    verifyFinalization: (bytes) => bytes,
+  };
+  const simplex = new SimplexClient(store, { verifier });
+
+  await simplex.getHeader('01', minSequenceNumber);
+  await simplex.getHeaderRaw('01', minSequenceNumber);
+  await simplex.getBlock('02', minSequenceNumber);
+  await simplex.getBlockRaw('02', minSequenceNumber);
+  await simplex.getNotarizationByRound(2, 3, minSequenceNumber);
+  await simplex.getNotarizationByRoundRaw(2, 3, minSequenceNumber);
+  await simplex.getFinalizationByRound(2, 4, minSequenceNumber);
+  await simplex.getFinalizationByRoundRaw(2, 4, minSequenceNumber);
+  await simplex.getFinalizationByHeight(5, minSequenceNumber);
+  await simplex.getFinalizationByHeightRaw(5, minSequenceNumber);
+
+  assert.deepEqual(calls, [
+    [bytesToHex(headerByDigestKey('01')), minSequenceNumber],
+    [bytesToHex(headerByDigestKey('01')), minSequenceNumber],
+    [bytesToHex(blockByDigestKey('02')), minSequenceNumber],
+    [bytesToHex(blockByDigestKey('02')), minSequenceNumber],
+    [bytesToHex(notarizationByRoundKey(2, 3)), minSequenceNumber],
+    [bytesToHex(notarizationByRoundKey(2, 3)), minSequenceNumber],
+    [bytesToHex(finalizationByRoundKey(2, 4)), minSequenceNumber],
+    [bytesToHex(finalizationByRoundKey(2, 4)), minSequenceNumber],
+    [bytesToHex(finalizedByHeightKey(5)), minSequenceNumber],
+    [bytesToHex(finalizedByHeightKey(5)), minSequenceNumber],
+  ]);
+});
+
+test('exact-height reads forward Connect call options', async () => {
+  const client = new Client('http://127.0.0.1:1');
+  const store = client.store();
+  const minSequenceNumber = 31n;
+  const value = new Uint8Array([0xa5]);
+  const controller = new AbortController();
+  const callOptions = { signal: controller.signal, timeoutMs: 1_234 };
+  const calls: Array<{
+    key: string;
+    minSequenceNumber: bigint | undefined;
+    options: Parameters<typeof client.query.get>[1];
+  }> = [];
+  const connectGet = client.query.get;
+  type QueryGetResponse = Awaited<ReturnType<typeof connectGet>>;
+
+  client.query.get = async (request, options) => {
+    assert.ok(request.key);
+    calls.push({
+      key: bytesToHex(request.key),
+      minSequenceNumber: request.minSequenceNumber,
+      options,
+    });
+    return { value } as QueryGetResponse;
+  };
+
+  const verifier: SimplexCertificateVerifier<Uint8Array, Uint8Array> = {
+    verifyNotarization: (bytes) => bytes,
+    verifyFinalization: (bytes) => bytes,
+  };
+  const simplex = new SimplexClient(store, { verifier });
+
+  assert.deepEqual(
+    await simplex.getFinalizationByHeight(5, minSequenceNumber, callOptions),
+    value,
+  );
+  assert.deepEqual(
+    await simplex.getFinalizationByHeightRaw(5, minSequenceNumber, callOptions),
+    value,
+  );
+  assert.deepEqual(
+    calls.map(({ key, minSequenceNumber: minimum }) => [key, minimum]),
+    [
+      [bytesToHex(finalizedByHeightKey(5)), minSequenceNumber],
+      [bytesToHex(finalizedByHeightKey(5)), minSequenceNumber],
+    ],
+  );
+  assert.equal(calls[0].options, callOptions);
+  assert.equal(calls[1].options, callOptions);
+  assert.equal(calls[0].options?.signal, controller.signal);
+  assert.equal(calls[1].options?.signal, controller.signal);
+});
+
+test('latest finalization reads forward minimum sequence numbers', async () => {
+  const store = new Client('http://127.0.0.1:1').store();
+  const minSequenceNumber = 29n;
+  const key = finalizedByHeightKey(7);
+  const value = new Uint8Array([0xa7]);
+  const calls: Parameters<typeof store.query>[] = [];
+  store.query = async (...args: Parameters<typeof store.query>) => {
+    calls.push(args);
+    return {
+      results: [{ key, value }],
+      sequenceNumber: minSequenceNumber,
+    };
+  };
+
+  const verifier: SimplexCertificateVerifier<Uint8Array, Uint8Array> = {
+    verifyNotarization: (bytes) => bytes,
+    verifyFinalization: (bytes) => bytes,
+  };
+  const simplex = new SimplexClient(store, { verifier });
+
+  assert.deepEqual(await simplex.latestFinalization(minSequenceNumber), value);
+  assert.deepEqual(await simplex.latestFinalizationRaw(minSequenceNumber), value);
+  assert.deepEqual(calls.map((call) => call[5]), [minSequenceNumber, minSequenceNumber]);
+});
+
 test('WASM header verifier adapter passes payload and header', () => {
   const calls: string[] = [];
   const verifyHeader = createWasmSimplexHeaderVerifier({
@@ -662,6 +787,7 @@ test('latest finalization passes the indexed height to the verifier', async () =
   const store = new Client('http://127.0.0.1:1').store();
   store.query = async () => ({
     results: [{ key: finalizedByHeightKey(11), value: new Uint8Array([0xb0]) }],
+    sequenceNumber: 1n,
   });
   const verifier: SimplexCertificateVerifier<unknown, { height: bigint }> = {
     verifyNotarization: () => null,
