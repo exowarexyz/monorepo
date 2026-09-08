@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
-import { create, toBinary } from '@bufbuild/protobuf';
+import { create, fromBinary, toBinary } from '@bufbuild/protobuf';
 import { encodeEnvelopes } from '@connectrpc/connect/protocol';
 import { DataType, SqlClient, Table, TimeUnit } from '../dist/index.js';
-import { QueryResponseSchema } from '../dist/generated/proto/sql/v1/query_pb.js';
+import { QueryRequestSchema, QueryResponseSchema } from '../dist/generated/proto/sql/v1/query_pb.js';
 import { SubscribeResponseSchema } from '../dist/generated/proto/sql/v1/stream_pb.js';
 
 const fixture = (name) => readFile(new URL(`fixtures/${name}.arrow`, import.meta.url));
@@ -19,12 +19,15 @@ function clientFor(t, body, streaming = false) {
 }
 
 async function queryFixture(t, name) {
-  const body = toBinary(QueryResponseSchema, create(QueryResponseSchema, { results: await fixture(name) }));
-  return clientFor(t, body).query('SELECT fixture');
+  const sequenceNumber = 9007199254740993n;
+  const body = toBinary(QueryResponseSchema, create(QueryResponseSchema, { sequenceNumber, results: await fixture(name) }));
+  const response = await clientFor(t, body).query('SELECT fixture');
+  assert.equal(response.sequenceNumber, sequenceNumber);
+  return response;
 }
 
 test('Rust SQL results retain computed types and exact column buffers', async (t) => {
-  const table = await queryFixture(t, 'computed');
+  const { table } = await queryFixture(t, 'computed');
   assert.ok(table instanceof Table);
   assert.equal(table.numRows, 1);
   const column = (name) => table.getChild(name);
@@ -56,7 +59,7 @@ test('Rust SQL results retain computed types and exact column buffers', async (t
 });
 
 test('Rust batch layouts preserve nulls, views, nested values, and wide decimals', async (t) => {
-  const table = await queryFixture(t, 'layouts');
+  const { table } = await queryFixture(t, 'layouts');
   const column = (name) => table.getChild(name);
   assert.equal(table.numRows, 3);
   assert.equal(column('dates').data[0].values[0], 9223372036828800000n);
@@ -80,20 +83,45 @@ test('Rust batch layouts preserve nulls, views, nested values, and wide decimals
 });
 
 test('empty results retain schema and zero-column results retain row count', async (t) => {
-  const empty = await queryFixture(t, 'empty');
+  const { table: empty } = await queryFixture(t, 'empty');
   assert.equal(empty.numRows, 0);
   assert.equal(empty.getChild('decimal_fraction').type.scale, 2);
-  const zero = await queryFixture(t, 'zero_columns');
+  const { table: zero } = await queryFixture(t, 'zero_columns');
   assert.equal(zero.numCols, 0);
   assert.equal(zero.numRows, 3);
 });
 
 test('duplicate column names retain distinct positional types', async (t) => {
-  const table = await queryFixture(t, 'duplicates');
+  const { table } = await queryFixture(t, 'duplicates');
   assert.deepEqual(table.schema.fields.map((field) => field.name), ['id', 'id']);
   assert.deepEqual(table.schema.fields.map((field) => field.type.toString()), ['Int64', 'Utf8']);
   assert.equal(table.getChildAt(0).get(0), 1n);
   assert.equal(table.getChildAt(1).get(0), 'two');
+});
+
+test('queries forward optional sequence floors and call options', async (t) => {
+  const results = await fixture('empty');
+  for (const minSequenceNumber of [undefined, 0n, 9007199254740993n]) {
+    await t.test(String(minSequenceNumber), async (t) => {
+      const sequenceNumber = minSequenceNumber ?? 0n;
+      const body = toBinary(QueryResponseSchema, create(QueryResponseSchema, { sequenceNumber, results }));
+      t.mock.method(globalThis, 'fetch', async (_input, init) => {
+        const request = fromBinary(QueryRequestSchema, init.body);
+        assert.equal(request.sql, 'SELECT fixture');
+        assert.equal(request.minSequenceNumber, minSequenceNumber);
+        assert.equal(new Headers(init.headers).get('x-query-test'), 'forwarded');
+        return new Response(body, { headers: { 'content-type': 'application/proto' } });
+      });
+
+      const client = new SqlClient('http://sql.test', { token: '' });
+      const response = await client.query('SELECT fixture', {
+        minSequenceNumber,
+        headers: { 'x-query-test': 'forwarded' },
+      });
+      assert.equal(response.sequenceNumber, sequenceNumber);
+      assert.equal(response.table.numRows, 0);
+    });
+  }
 });
 
 test('subscription frames decode independently and retain their sequence', async (t) => {

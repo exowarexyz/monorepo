@@ -448,6 +448,10 @@ impl TableProvider for KvTable {
             projection.cloned(),
         );
         scan.set_filters(state, filters)?;
+        let scan = match request_read_session(state) {
+            Some(read_session) => scan.with_read_session(read_session),
+            None => scan,
+        };
         Ok(Arc::new(scan))
     }
 

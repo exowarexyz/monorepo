@@ -1151,13 +1151,26 @@ pub struct QueryRequest {
         skip_serializing_if = "::buffa::json_helpers::skip_if::is_empty_str"
     )]
     pub sql: ::buffa::alloc::string::String,
+    /// Minimum Store sequence required by reads in this query.
+    ///
+    /// Field 2: `min_sequence_number`
+    #[serde(
+        rename = "minSequenceNumber",
+        alias = "min_sequence_number",
+        with = "::buffa::json_helpers::opt_uint64",
+        skip_serializing_if = "::core::option::Option::is_none"
+    )]
+    pub min_sequence_number: ::core::option::Option<u64>,
     #[serde(skip)]
     #[doc(hidden)]
     pub __buffa_unknown_fields: ::buffa::UnknownFields,
 }
 impl ::core::fmt::Debug for QueryRequest {
     fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_struct("QueryRequest").field("sql", &self.sql).finish()
+        f.debug_struct("QueryRequest")
+            .field("sql", &self.sql)
+            .field("min_sequence_number", &self.min_sequence_number)
+            .finish()
     }
 }
 impl QueryRequest {
@@ -1166,6 +1179,15 @@ impl QueryRequest {
     ///
     /// Format: `type.googleapis.com/<fully.qualified.TypeName>`
     pub const TYPE_URL: &'static str = "type.googleapis.com/sql.v1.QueryRequest";
+}
+impl QueryRequest {
+    #[must_use = "with_* setters return `self` by value; assign or chain the result"]
+    #[inline]
+    ///Sets [`Self::min_sequence_number`] to `Some(value)`, consuming and returning `self`.
+    pub fn with_min_sequence_number(mut self, value: u64) -> Self {
+        self.min_sequence_number = Some(value);
+        self
+    }
 }
 ::buffa::impl_default_instance!(QueryRequest);
 impl ::buffa::MessageName for QueryRequest {
@@ -1190,6 +1212,9 @@ impl ::buffa::Message for QueryRequest {
         if !self.sql.is_empty() {
             size += 1u64 + ::buffa::types::string_encoded_len(&self.sql) as u64;
         }
+        if let Some(v) = self.min_sequence_number {
+            size += 1u64 + ::buffa::types::uint64_encoded_len(v) as u64;
+        }
         size += self.__buffa_unknown_fields.encoded_len() as u64;
         ::buffa::saturate_size(size)
     }
@@ -1202,6 +1227,9 @@ impl ::buffa::Message for QueryRequest {
         use ::buffa::Enumeration as _;
         if !self.sql.is_empty() {
             ::buffa::types::put_string_field(1u32, &self.sql, buf);
+        }
+        if let Some(v) = self.min_sequence_number {
+            ::buffa::types::put_uint64_field(2u32, v, buf);
         }
         self.__buffa_unknown_fields.write_to(buf);
     }
@@ -1223,6 +1251,15 @@ impl ::buffa::Message for QueryRequest {
                 )?;
                 ::buffa::types::merge_string(&mut self.sql, buf)?;
             }
+            2u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::Varint,
+                )?;
+                self.min_sequence_number = ::core::option::Option::Some(
+                    ::buffa::types::decode_uint64(buf)?,
+                );
+            }
             _ => {
                 self.__buffa_unknown_fields
                     .push(::buffa::encoding::decode_unknown_field(tag, buf, ctx)?);
@@ -1232,6 +1269,7 @@ impl ::buffa::Message for QueryRequest {
     }
     fn clear(&mut self) {
         self.sql.clear();
+        self.min_sequence_number = ::core::option::Option::None;
         self.__buffa_unknown_fields.clear();
     }
 }
@@ -1279,13 +1317,27 @@ pub struct QueryResponse {
         skip_serializing_if = "::buffa::json_helpers::skip_if::is_empty_bytes"
     )]
     pub results: ::buffa::bytes::Bytes,
+    /// Highest Store sequence observed. Queries that skip Store reads return
+    /// the requested floor.
+    ///
+    /// Field 3: `sequence_number`
+    #[serde(
+        rename = "sequenceNumber",
+        alias = "sequence_number",
+        with = "::buffa::json_helpers::uint64",
+        skip_serializing_if = "::buffa::json_helpers::skip_if::is_zero_u64"
+    )]
+    pub sequence_number: u64,
     #[serde(skip)]
     #[doc(hidden)]
     pub __buffa_unknown_fields: ::buffa::UnknownFields,
 }
 impl ::core::fmt::Debug for QueryResponse {
     fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_struct("QueryResponse").field("results", &self.results).finish()
+        f.debug_struct("QueryResponse")
+            .field("results", &self.results)
+            .field("sequence_number", &self.sequence_number)
+            .finish()
     }
 }
 impl QueryResponse {
@@ -1318,6 +1370,11 @@ impl ::buffa::Message for QueryResponse {
         if !self.results.is_empty() {
             size += 1u64 + ::buffa::types::bytes_encoded_len(&self.results) as u64;
         }
+        if self.sequence_number != 0u64 {
+            size
+                += 1u64
+                    + ::buffa::types::uint64_encoded_len(self.sequence_number) as u64;
+        }
         size += self.__buffa_unknown_fields.encoded_len() as u64;
         ::buffa::saturate_size(size)
     }
@@ -1330,6 +1387,9 @@ impl ::buffa::Message for QueryResponse {
         use ::buffa::Enumeration as _;
         if !self.results.is_empty() {
             ::buffa::types::put_shared_bytes_field(1u32, &self.results, buf);
+        }
+        if self.sequence_number != 0u64 {
+            ::buffa::types::put_uint64_field(3u32, self.sequence_number, buf);
         }
         self.__buffa_unknown_fields.write_to(buf);
     }
@@ -1351,6 +1411,13 @@ impl ::buffa::Message for QueryResponse {
                 )?;
                 self.results = ::buffa::types::decode_bytes_to_bytes(buf)?;
             }
+            3u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::Varint,
+                )?;
+                self.sequence_number = ::buffa::types::decode_uint64(buf)?;
+            }
             _ => {
                 self.__buffa_unknown_fields
                     .push(::buffa::encoding::decode_unknown_field(tag, buf, ctx)?);
@@ -1360,6 +1427,7 @@ impl ::buffa::Message for QueryResponse {
     }
     fn clear(&mut self) {
         self.results = ::core::default::Default::default();
+        self.sequence_number = 0u64;
         self.__buffa_unknown_fields.clear();
     }
 }
@@ -3468,6 +3536,10 @@ pub mod __buffa {
         pub struct QueryRequestView<'a> {
             /// Field 1: `sql`
             pub sql: &'a str,
+            /// Minimum Store sequence required by reads in this query.
+            ///
+            /// Field 2: `min_sequence_number`
+            pub min_sequence_number: ::core::option::Option<u64>,
             pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
         }
         impl<'a> ::buffa::MessageView<'a> for QueryRequestView<'a> {
@@ -3509,6 +3581,15 @@ pub mod __buffa {
                         )?;
                         view.sql = ::buffa::types::borrow_str(&mut cur)?;
                     }
+                    2u32 => {
+                        ::buffa::encoding::check_wire_type(
+                            tag,
+                            ::buffa::encoding::WireType::Varint,
+                        )?;
+                        view.min_sequence_number = Some(
+                            ::buffa::types::decode_uint64(&mut cur)?,
+                        );
+                    }
                     _ => {
                         ::buffa::encoding::skip_field_depth(tag, &mut cur, ctx.depth())?;
                         let span_len = before_tag.len() - cur.len();
@@ -3539,6 +3620,7 @@ pub mod __buffa {
                 let _ = __buffa_src;
                 ::core::result::Result::Ok(super::super::QueryRequest {
                     sql: self.sql.to_string(),
+                    min_sequence_number: self.min_sequence_number,
                     __buffa_unknown_fields: self
                         .__buffa_unknown_fields
                         .to_owned()?
@@ -3556,6 +3638,9 @@ pub mod __buffa {
                 if !self.sql.is_empty() {
                     size += 1u64 + ::buffa::types::string_encoded_len(&self.sql) as u64;
                 }
+                if let Some(v) = self.min_sequence_number {
+                    size += 1u64 + ::buffa::types::uint64_encoded_len(v) as u64;
+                }
                 size += self.__buffa_unknown_fields.encoded_len() as u64;
                 ::buffa::saturate_size(size)
             }
@@ -3569,6 +3654,9 @@ pub mod __buffa {
                 use ::buffa::Enumeration as _;
                 if !self.sql.is_empty() {
                     ::buffa::types::put_string_field(1u32, &self.sql, buf);
+                }
+                if let Some(v) = self.min_sequence_number {
+                    ::buffa::types::put_uint64_field(2u32, v, buf);
                 }
                 self.__buffa_unknown_fields.write_to(buf);
             }
@@ -3593,6 +3681,13 @@ pub mod __buffa {
                 let mut __map = __s.serialize_map(::core::option::Option::None)?;
                 if !::buffa::json_helpers::skip_if::is_empty_str(self.sql) {
                     __map.serialize_entry("sql", self.sql)?;
+                }
+                if let ::core::option::Option::Some(__v) = self.min_sequence_number {
+                    __map
+                        .serialize_entry(
+                            "minSequenceNumber",
+                            &::buffa::json_helpers::ProtoJson(&__v),
+                        )?;
                 }
                 __map.end()
             }
@@ -3692,6 +3787,13 @@ pub mod __buffa {
             pub fn sql(&self) -> &'_ str {
                 self.0.reborrow().sql
             }
+            /// Minimum Store sequence required by reads in this query.
+            ///
+            /// Field 2: `min_sequence_number`
+            #[must_use]
+            pub fn min_sequence_number(&self) -> ::core::option::Option<u64> {
+                self.0.reborrow().min_sequence_number
+            }
         }
         impl ::core::convert::From<::buffa::OwnedView<QueryRequestView<'static>>>
         for QueryRequestOwnedView {
@@ -3731,6 +3833,11 @@ pub mod __buffa {
             ///
             /// Field 1: `results`
             pub results: &'a [u8],
+            /// Highest Store sequence observed. Queries that skip Store reads return
+            /// the requested floor.
+            ///
+            /// Field 3: `sequence_number`
+            pub sequence_number: u64,
             pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
         }
         impl<'a> ::buffa::MessageView<'a> for QueryResponseView<'a> {
@@ -3772,6 +3879,13 @@ pub mod __buffa {
                         )?;
                         view.results = ::buffa::types::borrow_bytes(&mut cur)?;
                     }
+                    3u32 => {
+                        ::buffa::encoding::check_wire_type(
+                            tag,
+                            ::buffa::encoding::WireType::Varint,
+                        )?;
+                        view.sequence_number = ::buffa::types::decode_uint64(&mut cur)?;
+                    }
                     _ => {
                         ::buffa::encoding::skip_field_depth(tag, &mut cur, ctx.depth())?;
                         let span_len = before_tag.len() - cur.len();
@@ -3802,6 +3916,7 @@ pub mod __buffa {
                 let _ = __buffa_src;
                 ::core::result::Result::Ok(super::super::QueryResponse {
                     results: ::buffa::view::bytes_from_source(__buffa_src, self.results),
+                    sequence_number: self.sequence_number,
                     __buffa_unknown_fields: self
                         .__buffa_unknown_fields
                         .to_owned()?
@@ -3821,6 +3936,12 @@ pub mod __buffa {
                         += 1u64
                             + ::buffa::types::bytes_encoded_len(&self.results) as u64;
                 }
+                if self.sequence_number != 0u64 {
+                    size
+                        += 1u64
+                            + ::buffa::types::uint64_encoded_len(self.sequence_number)
+                                as u64;
+                }
                 size += self.__buffa_unknown_fields.encoded_len() as u64;
                 ::buffa::saturate_size(size)
             }
@@ -3834,6 +3955,9 @@ pub mod __buffa {
                 use ::buffa::Enumeration as _;
                 if !self.results.is_empty() {
                     ::buffa::types::put_shared_bytes_field(1u32, &self.results, buf);
+                }
+                if self.sequence_number != 0u64 {
+                    ::buffa::types::put_uint64_field(3u32, self.sequence_number, buf);
                 }
                 self.__buffa_unknown_fields.write_to(buf);
             }
@@ -3861,6 +3985,13 @@ pub mod __buffa {
                         .serialize_entry(
                             "results",
                             &::buffa::json_helpers::BytesJson(self.results),
+                        )?;
+                }
+                if !::buffa::json_helpers::skip_if::is_zero_u64(&self.sequence_number) {
+                    __map
+                        .serialize_entry(
+                            "sequenceNumber",
+                            &::buffa::json_helpers::ProtoJson(&self.sequence_number),
                         )?;
                 }
                 __map.end()
@@ -3965,6 +4096,14 @@ pub mod __buffa {
             #[must_use]
             pub fn results(&self) -> &'_ [u8] {
                 self.0.reborrow().results
+            }
+            /// Highest Store sequence observed. Queries that skip Store reads return
+            /// the requested floor.
+            ///
+            /// Field 3: `sequence_number`
+            #[must_use]
+            pub fn sequence_number(&self) -> u64 {
+                self.0.reborrow().sequence_number
             }
         }
         impl ::core::convert::From<::buffa::OwnedView<QueryResponseView<'static>>>

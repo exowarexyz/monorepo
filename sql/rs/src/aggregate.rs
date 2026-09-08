@@ -144,6 +144,7 @@ pub(crate) struct CombinedAggregateJob {
 #[derive(Debug, Clone)]
 pub(crate) struct AggregatePushdownSpec {
     pub(crate) client: PrefixedStoreClient,
+    pub(crate) read_session: Option<SerializableReadSession>,
     pub(crate) group_count: usize,
     pub(crate) seed_job: Option<AggregateReduceJob>,
     pub(crate) aggregate_jobs: Vec<CombinedAggregateJob>,
@@ -446,8 +447,10 @@ impl ExtensionPlanner for KvAggregateExtensionPlanner {
                 })
                 .collect(),
         );
+        let mut spec = node.spec.clone();
+        spec.read_session = request_read_session(session);
         let source = Arc::new(KvAggregateExec {
-            spec: node.spec.clone(),
+            spec,
             properties: Arc::new(PlanProperties::new(
                 EquivalenceProperties::new(state_schema),
                 Partitioning::UnknownPartitioning(1),
@@ -552,7 +555,11 @@ impl ExecutionPlan for KvAggregateExec {
             )));
         }
 
-        let session = self.spec.client.create_session();
+        let session = self
+            .spec
+            .read_session
+            .clone()
+            .unwrap_or_else(|| self.spec.client.create_session());
         let source = Arc::new(self.clone());
         let concurrency = context.session_config().target_partitions().max(1);
         let jobs = self
@@ -1004,6 +1011,7 @@ pub(crate) fn try_build_aggregate_pushdown_spec(
         .collect();
     Ok(Some(AggregatePushdownSpec {
         client: table.client.clone(),
+        read_session: None,
         group_count: compiled_group_exprs.len(),
         seed_job: seed_job.as_ref().map(|(job, _)| job.clone()),
         aggregate_jobs,
