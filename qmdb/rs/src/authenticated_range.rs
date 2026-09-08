@@ -14,6 +14,7 @@ use commonware_storage::{
             operation::{Operation as AnyOperation, Update},
             value::ValueEncoding,
         },
+        current::grafting,
         immutable, keyless,
         operation::{Floored, Key as QmdbKey},
     },
@@ -22,10 +23,12 @@ use exoware_sdk::{keys::Key, PrefixedStoreClient, StoreWriteBatch};
 
 use crate::{
     codec::{
-        encode_node_key, encode_operation_key, encode_presence_key, encode_update_index_value,
-        encode_update_key, encode_watermark_key, ensure_encoded_value_size,
+        encode_chunk_key, encode_current_meta_key, encode_grafted_node_key, encode_node_key,
+        encode_operation_key, encode_ops_root_witness_key, encode_presence_key,
+        encode_update_index_value, encode_update_key, encode_watermark_key,
+        ensure_encoded_value_size, CurrentBoundaryMetadata,
     },
-    core::{extend_merkle_from_pinned_nodes, PreparedCurrentBoundaryUpload},
+    core::extend_merkle_from_pinned_nodes,
     CurrentBoundaryState, ProofKind, QmdbError,
 };
 
@@ -124,7 +127,34 @@ impl<D: Digest, F: Graftable> PreparedAuthenticatedRange<D, F> {
             ));
         }
         self.rows
-            .extend(PreparedCurrentBoundaryUpload::build(self.latest_location, boundary)?.rows);
+            .reserve(2 + boundary.chunks.len() + boundary.grafted_nodes.len());
+        self.rows.push((
+            encode_current_meta_key(self.latest_location),
+            CurrentBoundaryMetadata {
+                root: boundary.root,
+                pruned_chunks: boundary.pruned_chunks,
+            }
+            .encode()
+            .to_vec(),
+        ));
+        self.rows.push((
+            encode_ops_root_witness_key(self.latest_location),
+            boundary.ops_root_witness.encode().to_vec(),
+        ));
+        for &(chunk_index, chunk) in &boundary.chunks {
+            self.rows.push((
+                encode_chunk_key(chunk_index, self.latest_location),
+                chunk.encode().to_vec(),
+            ));
+        }
+        for &(ops_position, digest) in &boundary.grafted_nodes {
+            let grafted_position =
+                grafting::ops_to_grafted_pos::<F>(ops_position, grafting::height::<N>());
+            self.rows.push((
+                encode_grafted_node_key(grafted_position, self.latest_location),
+                digest.encode().to_vec(),
+            ));
+        }
         Ok(self)
     }
 }
@@ -712,6 +742,42 @@ mod tests {
             .unwrap()
             .with_current_boundary::<Sha256, 32>(&boundary)
             .is_err());
+    }
+
+    #[test]
+    fn test_current_boundary_upload_keys_grafted_nodes_by_grafted_space_position() {
+        let digest = Sha256::hash(&[b"grafted-node"]);
+        let ops_position = Position::new(2046);
+        let latest_location = Location::new(1024);
+        let witness = commonware_storage::qmdb::current::proof::OpsRootWitness::<mmr::Family, _> {
+            grafted_root: digest,
+            pending_chunk_digest: Default::default(),
+            partial_chunk: None,
+        };
+        let boundary = CurrentBoundaryState::<_, 32, mmr::Family> {
+            root: witness.root::<Sha256>(&digest),
+            pruned_chunks: 0,
+            ops_root_witness: witness,
+            chunks: Vec::new(),
+            grafted_nodes: vec![(ops_position, digest)],
+        };
+        let prepared = PreparedAuthenticatedRange {
+            rows: Vec::new(),
+            start_location: Location::new(0),
+            latest_location,
+            ops_root: digest,
+        }
+        .with_current_boundary::<Sha256, 32>(&boundary)
+        .expect("matching binding");
+        let grafted_position = grafting::ops_to_grafted_pos(ops_position, grafting::height::<32>());
+        let expected_key = encode_grafted_node_key(grafted_position, latest_location);
+        let stale_ops_key = encode_grafted_node_key(ops_position, latest_location);
+
+        assert!(prepared
+            .rows
+            .iter()
+            .any(|(key, value)| key == &expected_key && value.as_slice() == digest.as_ref()));
+        assert!(!prepared.rows.iter().any(|(key, _)| key == &stale_ops_key));
     }
 
     #[test]

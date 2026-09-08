@@ -1,22 +1,20 @@
 use std::marker::PhantomData;
 use std::time::Duration;
 
-use commonware_codec::{Codec, Encode};
+use commonware_codec::Codec;
 use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::Strategy;
 use commonware_storage::merkle::{
-    hasher::Hasher as MerkleHasher, mem::Mem, Family, Graftable, Location, Position,
+    hasher::Hasher as MerkleHasher, mem::Mem, Family, Location, Position,
 };
-use commonware_storage::qmdb::current::grafting;
 use exoware_sdk::keys::Key;
 use exoware_sdk::{ClientError, PrefixedStoreClient, RangeMode, SerializableReadSession};
 
 use crate::codec::{
     decode_digest, decode_operation_location_key, decode_update_location,
-    decode_watermark_location, encode_chunk_key, encode_current_meta_key, encode_grafted_node_key,
-    encode_node_key, encode_operation_key, encode_ops_root_witness_key, encode_presence_key,
+    decode_watermark_location, encode_node_key, encode_operation_key, encode_presence_key,
     encode_update_key, encode_watermark_key, ensure_encoded_value_size, merkle_size_for_watermark,
-    CurrentBoundaryMetadata, WATERMARK_PREFIX,
+    WATERMARK_PREFIX,
 };
 use crate::error::QmdbError;
 use crate::VersionedValue;
@@ -303,50 +301,6 @@ impl<'a, F: Family, D: Digest, K: Codec, V: Codec> HistoricalOpsClientCore<'a, F
     }
 }
 
-#[derive(Clone, Debug)]
-pub(crate) struct PreparedCurrentBoundaryUpload {
-    pub(crate) rows: Vec<(Key, Vec<u8>)>,
-}
-
-impl PreparedCurrentBoundaryUpload {
-    pub(crate) fn build<F: Graftable, D: Digest, const N: usize>(
-        latest_location: Location<F>,
-        current_boundary: &crate::CurrentBoundaryState<D, N, F>,
-    ) -> Result<Self, QmdbError> {
-        let mut rows = Vec::with_capacity(
-            2 + current_boundary.chunks.len() + current_boundary.grafted_nodes.len(),
-        );
-        rows.push((
-            encode_current_meta_key(latest_location),
-            CurrentBoundaryMetadata {
-                root: current_boundary.root,
-                pruned_chunks: current_boundary.pruned_chunks,
-            }
-            .encode()
-            .to_vec(),
-        ));
-        rows.push((
-            encode_ops_root_witness_key(latest_location),
-            current_boundary.ops_root_witness.encode().to_vec(),
-        ));
-        for &(chunk_index, chunk) in &current_boundary.chunks {
-            rows.push((
-                encode_chunk_key(chunk_index, latest_location),
-                chunk.encode().to_vec(),
-            ));
-        }
-        for &(ops_position, digest) in &current_boundary.grafted_nodes {
-            let grafted_position =
-                grafting::ops_to_grafted_pos::<F>(ops_position, grafting::height::<N>());
-            rows.push((
-                encode_grafted_node_key(grafted_position, latest_location),
-                digest.encode().to_vec(),
-            ));
-        }
-        Ok(Self { rows })
-    }
-}
-
 /// Extend a pinned prefix with encoded operations, returning the root, frontier,
 /// and every new node needed to serve proofs.
 pub(crate) struct MerkleExtension<F: Family, D: Digest> {
@@ -428,46 +382,4 @@ where
         root,
         new_nodes,
     })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use commonware_cryptography::Sha256;
-    use commonware_storage::merkle::mmr;
-
-    #[test]
-    fn test_current_boundary_upload_keys_grafted_nodes_by_grafted_space_position() {
-        let digest = Sha256::hash(&[b"grafted-node".as_slice()]);
-
-        let ops_position = Position::new(2046);
-        let latest_location = Location::new(1024);
-        let boundary = crate::CurrentBoundaryState::<_, 32, mmr::Family> {
-            root: digest,
-            pruned_chunks: 0,
-            ops_root_witness: commonware_storage::qmdb::current::proof::OpsRootWitness {
-                grafted_root: digest,
-                pending_chunk_digest:
-                    <mmr::Family as commonware_storage::merkle::Graftable>::PendingChunk::<
-                        commonware_cryptography::sha256::Digest,
-                    >::try_from(None::<commonware_cryptography::sha256::Digest>)
-                    .expect("MMR has no pending chunk"),
-                partial_chunk: None,
-            },
-            chunks: Vec::new(),
-            grafted_nodes: vec![(ops_position, digest)],
-        };
-
-        let upload =
-            PreparedCurrentBoundaryUpload::build(latest_location, &boundary).expect("upload");
-        let grafted_position = grafting::ops_to_grafted_pos(ops_position, grafting::height::<32>());
-        let expected_key = encode_grafted_node_key(grafted_position, latest_location);
-        let stale_ops_key = encode_grafted_node_key(ops_position, latest_location);
-
-        assert!(upload
-            .rows
-            .iter()
-            .any(|(key, value)| key == &expected_key && value.as_slice() == digest.as_ref()));
-        assert!(!upload.rows.iter().any(|(key, _)| key == &stale_ops_key));
-    }
 }
