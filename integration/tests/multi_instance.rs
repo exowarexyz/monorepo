@@ -12,6 +12,7 @@ use commonware_storage::qmdb::keyless::variable::Operation as KeylessOperation;
 use connectrpc::client::ClientConfig;
 use datafusion::arrow::array::Int64Array;
 use datafusion::arrow::datatypes::DataType;
+use datafusion::arrow::ipc::reader::StreamReader;
 use exoware_qmdb::proto::qmdb::v1::SubscribeRequest as QmdbSubscribeRequest;
 use exoware_qmdb::{
     keyless_operation_log_connect_stack, stage_authenticated_range, stage_watermark, KeylessClient,
@@ -30,7 +31,7 @@ use exoware_sdk::{
     StoreWriteBatch, StreamSubscription, StreamSubscriptionFrame,
 };
 use exoware_sql::proto::sql::v1::{
-    cell, ServiceClient as SqlServiceClient, SubscribeRequest as SqlSubscribeRequest,
+    ServiceClient as SqlServiceClient, SubscribeRequest as SqlSubscribeRequest,
 };
 use exoware_sql::{sql_connect_stack, CellValue, KvSchema, SqlServer, TableColumnConfig};
 use futures::stream::{FuturesUnordered, StreamExt};
@@ -247,13 +248,6 @@ fn sorted_qmdb_operations(mut ops: Vec<QmdbOperation>) -> Vec<QmdbOperation> {
     ops
 }
 
-fn row_int64(row: &exoware_sql::proto::sql::v1::Row, index: usize) -> i64 {
-    match row.cells.get(index).and_then(|cell| cell.kind.as_ref()) {
-        Some(cell::Kind::Int64Value(value)) => *value,
-        other => panic!("expected int64 cell at {index}, got {other:?}"),
-    }
-}
-
 fn expected_qmdb_frame(ops: &[QmdbOperation]) -> Vec<(QmdbLocation, QmdbOperation)> {
     ops.iter()
         .enumerate()
@@ -440,10 +434,12 @@ async fn test_sql_streaming_is_isolated_by_store_prefix() {
         .expect("sql b frame")
         .to_owned_message();
     assert_eq!(frame_b.sequence_number, seq_b);
-    assert_eq!(frame_b.column, vec!["id", "amount_cents"]);
-    assert_eq!(frame_b.rows.len(), 1);
-    assert_eq!(row_int64(&frame_b.rows[0], 0), 9);
-    assert_eq!(row_int64(&frame_b.rows[0], 1), 900);
+    let batches_b = StreamReader::try_new(frame_b.arrow_ipc.as_ref(), None)
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(collect_int64_column(&batches_b, 0), vec![9]);
+    assert_eq!(collect_int64_column(&batches_b, 1), vec![900]);
 
     let mut writer_a = make_sql_schema(client_a).batch_writer();
     writer_a
@@ -459,10 +455,12 @@ async fn test_sql_streaming_is_isolated_by_store_prefix() {
         .expect("sql a frame")
         .to_owned_message();
     assert_eq!(frame_a.sequence_number, seq_a);
-    assert_eq!(frame_a.column, vec!["id", "amount_cents"]);
-    assert_eq!(frame_a.rows.len(), 1);
-    assert_eq!(row_int64(&frame_a.rows[0], 0), 4);
-    assert_eq!(row_int64(&frame_a.rows[0], 1), 400);
+    let batches_a = StreamReader::try_new(frame_a.arrow_ipc.as_ref(), None)
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(collect_int64_column(&batches_a, 0), vec![4]);
+    assert_eq!(collect_int64_column(&batches_a, 1), vec![400]);
 }
 
 fn make_sql_schema(client: PrefixedStoreClient) -> KvSchema {

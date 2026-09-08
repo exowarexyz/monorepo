@@ -926,8 +926,8 @@ export type RangeReduceGroup = Message<"store.query.v1.RangeReduceGroup"> & {
   groupValues: KvReducedValue[];
 
   /**
-   * Parallel to `group_values`; false when the corresponding group value is
-   * NULL (the proto value is a default zero, but should be treated as absent).
+   * One flag per group-by expression. False represents NULL. True consumes
+   * the next value from the dense `group_values` list.
    *
    * @generated from field: repeated bool group_values_present = 2;
    */

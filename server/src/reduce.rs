@@ -81,7 +81,7 @@ impl ReductionState {
                 };
                 match sum {
                     Some(existing) => existing
-                        .checked_add_assign(&value)
+                        .wrapping_add_assign(&value)
                         .map_err(RangeError::Reduce),
                     None => {
                         *sum = Some(value);
@@ -257,29 +257,24 @@ fn extract_reduce_row(
         .any(expr_needs_value)
         || request.filter.as_ref().is_some_and(predicate_needs_value);
     let decoded = if needs_value {
-        match decode_stored_row(value.as_ref()) {
-            Ok(row) => Some(row),
-            Err(_) => return Ok(None),
-        }
+        Some(
+            decode_stored_row(value.as_ref())
+                .map_err(|error| RangeError::Reduce(error.to_string()))?,
+        )
     } else {
         None
     };
     let archived = decoded.as_ref();
 
     if let Some(filter) = &request.filter {
-        match eval_predicate(key, archived, filter) {
-            Ok(true) => {}
-            Ok(false) => return Ok(None),
-            Err(_) => return Ok(None),
+        if !eval_predicate(key, archived, filter).map_err(RangeError::Reduce)? {
+            return Ok(None);
         }
     }
 
     let mut group_values = Vec::with_capacity(request.group_by.len());
     for expr in &request.group_by {
-        let extracted_value = match eval_expr(key, archived, expr) {
-            Ok(value) => value,
-            Err(_) => return Ok(None),
-        };
+        let extracted_value = eval_expr(key, archived, expr).map_err(RangeError::Reduce)?;
         group_values.push(extracted_value);
     }
     canonicalize_reduced_group_values(&mut group_values);
@@ -288,10 +283,7 @@ fn extract_reduce_row(
     for reducer in &request.reducers {
         let extracted_value = match (&reducer.expr, archived) {
             (None, _) => None,
-            (Some(expr), _) => match eval_expr(key, archived, expr) {
-                Ok(value) => value,
-                Err(_) => return Ok(None),
-            },
+            (Some(expr), _) => eval_expr(key, archived, expr).map_err(RangeError::Reduce)?,
         };
         reducer_values.push(extracted_value);
     }
@@ -438,6 +430,63 @@ mod tests {
             reducer.update(key, value)?;
         }
         Ok(reducer.finish())
+    }
+
+    #[test]
+    fn malformed_rows_and_expression_errors_fail_instead_of_skipping_rows() {
+        let sum = reducer(RangeReduceOp::SumField, Some(int64_value_field(0)));
+        let request = scalar_request(vec![reducer(RangeReduceOp::CountAll, None), sum]);
+        let malformed = [(Key::from(b"a".to_vec()), Bytes::from_static(b"invalid row"))];
+        assert!(reduce(&malformed, &request).is_err());
+        let rows = [make_row(b"a", vec![Some(StoredValue::Int64(7))])];
+        let divide_zero = KvExpr::Div(
+            Box::new(int64_value_field(0)),
+            Box::new(KvExpr::Literal(KvReducedValue::Int64(0))),
+        );
+        let mut request = scalar_request(vec![
+            reducer(RangeReduceOp::CountAll, None),
+            reducer(RangeReduceOp::SumField, Some(divide_zero.clone())),
+        ]);
+        assert!(reduce(&rows, &request).is_err());
+        request.reducers.truncate(1);
+        request.group_by = vec![divide_zero];
+        assert!(reduce(&rows, &request).is_err());
+        request.group_by.clear();
+        request.filter = Some(KvPredicate {
+            checks: vec![KvPredicateCheck {
+                field: KvFieldRef::Value {
+                    index: 2,
+                    kind: KvFieldKind::Int64,
+                    nullable: true,
+                },
+                constraint: KvPredicateConstraint::IsNotNull,
+            }],
+            contradiction: false,
+        });
+        assert!(reduce(&rows, &request).is_err());
+    }
+
+    #[test]
+    fn fused_reducers_retain_rows_when_integer_arithmetic_wraps() {
+        let rows = [
+            make_row(b"a", vec![Some(StoredValue::Int64(i64::MAX))]),
+            make_row(b"b", vec![Some(StoredValue::Int64(2))]),
+        ];
+        let request = scalar_request(vec![
+            reducer(RangeReduceOp::CountAll, None),
+            reducer(RangeReduceOp::SumField, Some(int64_value_field(0))),
+            reducer(
+                RangeReduceOp::SumField,
+                Some(KvExpr::Add(
+                    Box::new(int64_value_field(0)),
+                    Box::new(KvExpr::Literal(KvReducedValue::Int64(1))),
+                )),
+            ),
+        ]);
+        let response = reduce(&rows, &request).unwrap();
+        assert_eq!(response.results[0].value, result_u64(2));
+        assert_eq!(response.results[1].value, result_i64(i64::MIN + 1));
+        assert_eq!(response.results[2].value, result_i64(i64::MIN + 3));
     }
 
     #[test]

@@ -189,47 +189,24 @@ pub enum KvReducedValue {
 }
 
 impl KvReducedValue {
-    pub fn checked_add_assign(&mut self, rhs: &Self) -> Result<(), String> {
+    /// Add numeric partials with wrapping integer/decimal arithmetic, as Arrow SUM does.
+    pub fn wrapping_add_assign(&mut self, rhs: &Self) -> Result<(), String> {
         match (self, rhs) {
-            (Self::Int64(lhs), Self::Int64(rhs)) => {
-                *lhs = lhs
-                    .checked_add(*rhs)
-                    .ok_or_else(|| "Int64 sum overflow".to_string())?;
-                Ok(())
-            }
-            (Self::UInt64(lhs), Self::UInt64(rhs)) => {
-                *lhs = lhs
-                    .checked_add(*rhs)
-                    .ok_or_else(|| "UInt64 sum overflow".to_string())?;
-                Ok(())
-            }
-            (Self::Float64(lhs), Self::Float64(rhs)) => {
-                *lhs += *rhs;
-                Ok(())
-            }
-            (Self::Decimal128(lhs), Self::Decimal128(rhs)) => {
-                *lhs = lhs
-                    .checked_add(*rhs)
-                    .ok_or_else(|| "Decimal128 sum overflow".to_string())?;
-                Ok(())
-            }
+            (Self::Int64(lhs), Self::Int64(rhs)) => *lhs = lhs.wrapping_add(*rhs),
+            (Self::UInt64(lhs), Self::UInt64(rhs)) => *lhs = lhs.wrapping_add(*rhs),
+            (Self::Float64(lhs), Self::Float64(rhs)) => *lhs += *rhs,
+            (Self::Decimal128(lhs), Self::Decimal128(rhs)) => *lhs = lhs.wrapping_add(*rhs),
             (Self::Decimal256(lhs), Self::Decimal256(rhs)) => {
-                let lhs_neg = lhs[31] & 0x80 != 0;
-                let rhs_neg = rhs[31] & 0x80 != 0;
                 let mut carry = 0u16;
-                for i in 0..32 {
-                    let sum = lhs[i] as u16 + rhs[i] as u16 + carry;
-                    lhs[i] = sum as u8;
+                for (lhs, rhs) in lhs.iter_mut().zip(rhs) {
+                    let sum = u16::from(*lhs) + u16::from(*rhs) + carry;
+                    *lhs = sum as u8;
                     carry = sum >> 8;
                 }
-                let result_neg = lhs[31] & 0x80 != 0;
-                if lhs_neg == rhs_neg && result_neg != lhs_neg {
-                    return Err("Decimal256 sum overflow".to_string());
-                }
-                Ok(())
             }
-            _ => Err("sum type mismatch".to_string()),
+            _ => return Err("sum type mismatch".to_string()),
         }
+        Ok(())
     }
 
     pub fn partial_cmp_same_kind(&self, rhs: &Self) -> Option<Ordering> {
@@ -251,9 +228,7 @@ impl KvReducedValue {
 }
 
 fn canonicalize_group_float(value: f64) -> f64 {
-    if value.is_nan() {
-        f64::NAN
-    } else if value == 0.0 {
+    if value == 0.0 {
         0.0
     } else {
         value
@@ -486,6 +461,7 @@ pub fn expr_needs_value(expr: &KvExpr) -> bool {
     }
 }
 
+/// Evaluate a scalar expression. Integer addition, subtraction, and multiplication wrap.
 pub fn eval_expr(
     key: &Key,
     archived: Option<&StoredRow>,
@@ -496,14 +472,12 @@ pub fn eval_expr(
         KvExpr::Literal(value) => Ok(Some(value.clone())),
         KvExpr::Add(left, right) => {
             eval_numeric_binary_op(key, archived, left, right, |lhs, rhs| match (lhs, rhs) {
-                (KvReducedValue::Int64(lhs), KvReducedValue::Int64(rhs)) => lhs
-                    .checked_add(rhs)
-                    .map(KvReducedValue::Int64)
-                    .ok_or_else(|| "Int64 add overflow".to_string()),
-                (KvReducedValue::UInt64(lhs), KvReducedValue::UInt64(rhs)) => lhs
-                    .checked_add(rhs)
-                    .map(KvReducedValue::UInt64)
-                    .ok_or_else(|| "UInt64 add overflow".to_string()),
+                (KvReducedValue::Int64(lhs), KvReducedValue::Int64(rhs)) => {
+                    Ok(KvReducedValue::Int64(lhs.wrapping_add(rhs)))
+                }
+                (KvReducedValue::UInt64(lhs), KvReducedValue::UInt64(rhs)) => {
+                    Ok(KvReducedValue::UInt64(lhs.wrapping_add(rhs)))
+                }
                 (KvReducedValue::Float64(lhs), KvReducedValue::Float64(rhs)) => {
                     Ok(KvReducedValue::Float64(lhs + rhs))
                 }
@@ -524,14 +498,12 @@ pub fn eval_expr(
         }
         KvExpr::Sub(left, right) => {
             eval_numeric_binary_op(key, archived, left, right, |lhs, rhs| match (lhs, rhs) {
-                (KvReducedValue::Int64(lhs), KvReducedValue::Int64(rhs)) => lhs
-                    .checked_sub(rhs)
-                    .map(KvReducedValue::Int64)
-                    .ok_or_else(|| "Int64 subtract overflow".to_string()),
-                (KvReducedValue::UInt64(lhs), KvReducedValue::UInt64(rhs)) => lhs
-                    .checked_sub(rhs)
-                    .map(KvReducedValue::UInt64)
-                    .ok_or_else(|| "UInt64 subtract overflow".to_string()),
+                (KvReducedValue::Int64(lhs), KvReducedValue::Int64(rhs)) => {
+                    Ok(KvReducedValue::Int64(lhs.wrapping_sub(rhs)))
+                }
+                (KvReducedValue::UInt64(lhs), KvReducedValue::UInt64(rhs)) => {
+                    Ok(KvReducedValue::UInt64(lhs.wrapping_sub(rhs)))
+                }
                 (KvReducedValue::Float64(lhs), KvReducedValue::Float64(rhs)) => {
                     Ok(KvReducedValue::Float64(lhs - rhs))
                 }
@@ -552,14 +524,12 @@ pub fn eval_expr(
         }
         KvExpr::Mul(left, right) => {
             eval_numeric_binary_op(key, archived, left, right, |lhs, rhs| match (lhs, rhs) {
-                (KvReducedValue::Int64(lhs), KvReducedValue::Int64(rhs)) => lhs
-                    .checked_mul(rhs)
-                    .map(KvReducedValue::Int64)
-                    .ok_or_else(|| "Int64 multiply overflow".to_string()),
-                (KvReducedValue::UInt64(lhs), KvReducedValue::UInt64(rhs)) => lhs
-                    .checked_mul(rhs)
-                    .map(KvReducedValue::UInt64)
-                    .ok_or_else(|| "UInt64 multiply overflow".to_string()),
+                (KvReducedValue::Int64(lhs), KvReducedValue::Int64(rhs)) => {
+                    Ok(KvReducedValue::Int64(lhs.wrapping_mul(rhs)))
+                }
+                (KvReducedValue::UInt64(lhs), KvReducedValue::UInt64(rhs)) => {
+                    Ok(KvReducedValue::UInt64(lhs.wrapping_mul(rhs)))
+                }
                 (KvReducedValue::Float64(lhs), KvReducedValue::Float64(rhs)) => {
                     Ok(KvReducedValue::Float64(lhs * rhs))
                 }
@@ -626,10 +596,16 @@ pub fn eval_expr(
             match value {
                 KvReducedValue::Date32(days) => Ok(Some(KvReducedValue::Date32(days))),
                 KvReducedValue::Date64(millis) => Ok(Some(KvReducedValue::Date64(
-                    millis.div_euclid(DAY_MILLIS) * DAY_MILLIS,
+                    millis
+                        .div_euclid(DAY_MILLIS)
+                        .checked_mul(DAY_MILLIS)
+                        .ok_or_else(|| "Date64 day truncation overflow".to_string())?,
                 ))),
                 KvReducedValue::Timestamp(micros) => Ok(Some(KvReducedValue::Timestamp(
-                    micros.div_euclid(DAY_MICROS) * DAY_MICROS,
+                    micros
+                        .div_euclid(DAY_MICROS)
+                        .checked_mul(DAY_MICROS)
+                        .ok_or_else(|| "Timestamp day truncation overflow".to_string())?,
                 ))),
                 _ => {
                     Err("date_trunc('day', ...) requires Date32/Date64/Timestamp input".to_string())
@@ -990,27 +966,13 @@ fn in_i128_bounds(value: i128, min: Option<i128>, max: Option<i128>) -> bool {
 }
 
 fn in_f64_bounds(value: f64, min: &Option<(f64, bool)>, max: &Option<(f64, bool)>) -> bool {
-    let lower_ok = match min {
-        Some((bound, inclusive)) => {
-            if *inclusive {
-                value >= *bound
-            } else {
-                value > *bound
-            }
-        }
-        None => true,
-    };
-    let upper_ok = match max {
-        Some((bound, inclusive)) => {
-            if *inclusive {
-                value <= *bound
-            } else {
-                value < *bound
-            }
-        }
-        None => true,
-    };
-    lower_ok && upper_ok
+    min.is_none_or(|(bound, inclusive)| {
+        let order = value.total_cmp(&bound);
+        order.is_gt() || (inclusive && order.is_eq())
+    }) && max.is_none_or(|(bound, inclusive)| {
+        let order = value.total_cmp(&bound);
+        order.is_lt() || (inclusive && order.is_eq())
+    })
 }
 
 fn decode_i64_ordered(bytes: [u8; 8]) -> i64 {
@@ -1081,6 +1043,91 @@ mod tests {
     use commonware_codec::Encode;
 
     #[test]
+    fn integer_expressions_wrap_and_float_bounds_follow_total_order() {
+        let key = Key::default();
+        let cases = [
+            (
+                KvExpr::Add(
+                    Box::new(KvExpr::Literal(KvReducedValue::Int64(i64::MAX))),
+                    Box::new(KvExpr::Literal(KvReducedValue::Int64(1))),
+                ),
+                KvReducedValue::Int64(i64::MIN),
+            ),
+            (
+                KvExpr::Sub(
+                    Box::new(KvExpr::Literal(KvReducedValue::UInt64(0))),
+                    Box::new(KvExpr::Literal(KvReducedValue::UInt64(1))),
+                ),
+                KvReducedValue::UInt64(u64::MAX),
+            ),
+            (
+                KvExpr::Mul(
+                    Box::new(KvExpr::Literal(KvReducedValue::Int64(i64::MAX))),
+                    Box::new(KvExpr::Literal(KvReducedValue::Int64(2))),
+                ),
+                KvReducedValue::Int64(-2),
+            ),
+        ];
+        for (expr, expected) in cases {
+            assert_eq!(eval_expr(&key, None, &expr).unwrap(), Some(expected));
+        }
+        for value in [
+            f64::NEG_INFINITY,
+            -0.0,
+            0.0,
+            f64::INFINITY,
+            f64::NAN,
+            -f64::NAN,
+        ] {
+            assert!(in_f64_bounds(value, &None, &None));
+            for bound in [-0.0, 0.0, f64::NAN, -f64::NAN] {
+                assert_eq!(
+                    in_f64_bounds(value, &Some((bound, true)), &None),
+                    value.total_cmp(&bound).is_ge()
+                );
+                assert_eq!(
+                    in_f64_bounds(value, &None, &Some((bound, false))),
+                    value.total_cmp(&bound).is_lt()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn wrapping_sums_support_integer_and_decimal_extremes() {
+        let cases = [
+            (
+                KvReducedValue::Int64(i64::MAX),
+                KvReducedValue::Int64(1),
+                KvReducedValue::Int64(i64::MIN),
+            ),
+            (
+                KvReducedValue::UInt64(u64::MAX),
+                KvReducedValue::UInt64(1),
+                KvReducedValue::UInt64(0),
+            ),
+            (
+                KvReducedValue::Decimal128(i128::MAX),
+                KvReducedValue::Decimal128(1),
+                KvReducedValue::Decimal128(i128::MIN),
+            ),
+            (
+                KvReducedValue::Decimal256([255; 32]),
+                KvReducedValue::Decimal256({
+                    let mut one = [0; 32];
+                    one[0] = 1;
+                    one
+                }),
+                KvReducedValue::Decimal256([0; 32]),
+            ),
+        ];
+        for (mut value, addend, expected) in cases {
+            value.wrapping_add_assign(&addend).unwrap();
+            assert_eq!(value, expected);
+        }
+    }
+
+    #[test]
     fn fixed_utf8_key_round_trip() {
         let mut key = vec![0u8; MAX_KEY_LEN];
         key[4..8].copy_from_slice(b"west");
@@ -1123,7 +1170,7 @@ mod tests {
     }
 
     #[test]
-    fn reduced_group_key_canonicalizes_signed_zero_and_nan_payloads() {
+    fn reduced_group_key_canonicalizes_zero_and_preserves_nan_payloads() {
         let pos_zero = vec![Some(KvReducedValue::Float64(0.0))];
         let neg_zero = vec![Some(KvReducedValue::Float64(-0.0))];
         assert_eq!(
@@ -1135,7 +1182,7 @@ mod tests {
         let payload_nan = vec![Some(KvReducedValue::Float64(f64::from_bits(
             0x7ff8_0000_0000_0001,
         )))];
-        assert_eq!(
+        assert_ne!(
             encode_reduced_group_key(&canonical_nan),
             encode_reduced_group_key(&payload_nan)
         );

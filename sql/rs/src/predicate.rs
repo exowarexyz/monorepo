@@ -4,7 +4,7 @@ use datafusion::arrow::datatypes::i256;
 use datafusion::common::{DataFusionError, Result as DataFusionResult, ScalarValue};
 use datafusion::logical_expr::{Expr, Operator};
 use exoware_sdk::keys::{Key, Prefix};
-use exoware_sdk::kv_codec::{interleave_ordered_key_fields, StoredValue};
+use exoware_sdk::kv_codec::interleave_ordered_key_fields;
 
 use crate::codec::*;
 use crate::types::*;
@@ -143,6 +143,28 @@ pub(crate) fn primary_key_range_constraint(
                     .map(|value| PrimaryKeyTerminalRange {
                         lower: CellValue::FixedBinary(value.clone()),
                         upper: CellValue::FixedBinary(value.clone()),
+                    })
+                    .collect(),
+            )
+        }
+        (ColumnKind::Utf8, PredicateConstraint::StringIn(values)) => {
+            PrimaryKeyRangeConstraint::Terminal(
+                values
+                    .iter()
+                    .map(|v| PrimaryKeyTerminalRange {
+                        lower: CellValue::Utf8(v.clone()),
+                        upper: CellValue::Utf8(v.clone()),
+                    })
+                    .collect(),
+            )
+        }
+        (ColumnKind::FixedSizeBinary(_), PredicateConstraint::FixedBinaryIn(values)) => {
+            PrimaryKeyRangeConstraint::Terminal(
+                values
+                    .iter()
+                    .map(|v| PrimaryKeyTerminalRange {
+                        lower: CellValue::FixedBinary(v.clone()),
+                        upper: CellValue::FixedBinary(v.clone()),
                     })
                     .collect(),
             )
@@ -288,6 +310,12 @@ impl QueryPredicate {
                 };
                 if literal.is_null() {
                     return true;
+                }
+                let data_type = model.schema.field(col_idx).data_type();
+                if literal.data_type() != *data_type
+                    && model.columns[col_idx].kind != ColumnKind::Utf8
+                {
+                    return false;
                 }
                 let range_ops = matches!(
                     op,
@@ -854,8 +882,9 @@ impl QueryPredicate {
         &self,
         model: &TableModel,
         specs: &[ResolvedIndexSpec],
+        required_non_pk_columns: &[bool],
     ) -> DataFusionResult<Option<IndexPlan>> {
-        if self.contradiction {
+        if self.contradiction || self.has_primary_key_points(model) {
             return Ok(None);
         }
         let mut best: Option<IndexPlan> = None;
@@ -895,41 +924,42 @@ impl QueryPredicate {
                     (ranges, constrained_column_count, constrained_column_count)
                 }
             };
+            let mut ranges = ranges;
+            ranges.sort_by(|left, right| left.start.cmp(&right.start));
+            let mut disjoint: Vec<KeyRange> = Vec::with_capacity(ranges.len());
+            for range in ranges {
+                match disjoint.last_mut() {
+                    Some(last) if range.start <= last.end => {
+                        if range.end > last.end {
+                            last.end = range.end;
+                        }
+                    }
+                    _ => disjoint.push(range),
+                }
+            }
             let candidate = IndexPlan {
                 spec_idx,
-                ranges,
+                ranges: disjoint,
                 constrained_prefix_len,
                 constrained_column_count,
             };
-            match &best {
-                None => best = Some(candidate),
-                Some(prev)
-                    if candidate.constrained_column_count > prev.constrained_column_count =>
-                {
-                    best = Some(candidate)
-                }
-                Some(prev)
-                    if candidate.constrained_column_count == prev.constrained_column_count
-                        && self.index_covers_required_non_pk(model, &specs[candidate.spec_idx])
-                        && !self.index_covers_required_non_pk(model, &specs[prev.spec_idx]) =>
-                {
-                    best = Some(candidate)
-                }
-                Some(prev)
-                    if candidate.constrained_column_count == prev.constrained_column_count
-                        && specs[candidate.spec_idx].layout == IndexLayout::Lexicographic
-                        && specs[prev.spec_idx].layout == IndexLayout::ZOrder =>
-                {
-                    best = Some(candidate)
-                }
-                Some(prev)
-                    if candidate.constrained_column_count == prev.constrained_column_count
-                        && specs[candidate.spec_idx].layout == specs[prev.spec_idx].layout
-                        && candidate.ranges.len() < prev.ranges.len() =>
-                {
-                    best = Some(candidate)
-                }
-                _ => {}
+            let rank = |plan: &IndexPlan| {
+                (
+                    plan.constrained_column_count,
+                    self.index_covers_required_non_pk(
+                        model,
+                        &specs[plan.spec_idx],
+                        required_non_pk_columns,
+                    ),
+                    specs[plan.spec_idx].layout == IndexLayout::Lexicographic,
+                    std::cmp::Reverse(plan.ranges.len()),
+                )
+            };
+            if best
+                .as_ref()
+                .is_none_or(|previous| rank(&candidate) > rank(previous))
+            {
+                best = Some(candidate);
             }
         }
         Ok(best)
@@ -939,12 +969,20 @@ impl QueryPredicate {
         &self,
         model: &TableModel,
         spec: &ResolvedIndexSpec,
+        required_non_pk_columns: &[bool],
     ) -> bool {
-        self.constraints
-            .keys()
-            .copied()
-            .filter(|col_idx| model.pk_position(*col_idx).is_none())
-            .all(|col_idx| spec.value_column_mask[col_idx] || spec.key_columns.contains(&col_idx))
+        required_non_pk_columns
+            .iter()
+            .enumerate()
+            .all(|(i, required)| !*required || spec.value_column_mask[i])
+            && self
+                .constraints
+                .keys()
+                .copied()
+                .filter(|col_idx| model.pk_position(*col_idx).is_none())
+                .all(|col_idx| {
+                    spec.value_column_mask[col_idx] || spec.key_columns.contains(&col_idx)
+                })
     }
 
     pub(crate) fn expand_index_ranges(
@@ -988,8 +1026,13 @@ impl QueryPredicate {
         }
 
         let mut combos: Vec<HashMap<usize, PredicateConstraint>> = vec![HashMap::new()];
+        let mut expanded_prefix_len = 0;
         for (col_idx, singles) in &col_values {
-            let mut next = Vec::new();
+            if combos.len().saturating_mul(singles.len()) > 4096 {
+                return Err("index range budget exceeded".into());
+            }
+            expanded_prefix_len += 1;
+            let mut next = Vec::with_capacity(combos.len() * singles.len());
             for combo in &combos {
                 for single in singles {
                     let mut c = combo.clone();
@@ -998,9 +1041,6 @@ impl QueryPredicate {
                 }
             }
             combos = next;
-            if combos.len() > 256 {
-                return Err("too many index range combinations".to_string());
-            }
         }
 
         let mut ranges = Vec::with_capacity(combos.len());
@@ -1014,20 +1054,10 @@ impl QueryPredicate {
                 constraints: tmp_constraints,
                 contradiction: self.contradiction,
             };
-            let start = tmp.encode_index_bound_key(
-                table_prefix,
-                model,
-                spec,
-                constrained_prefix_len,
-                false,
-            )?;
-            let end = tmp.encode_index_bound_key(
-                table_prefix,
-                model,
-                spec,
-                constrained_prefix_len,
-                true,
-            )?;
+            let start =
+                tmp.encode_index_bound_key(table_prefix, model, spec, expanded_prefix_len, false)?;
+            let end =
+                tmp.encode_index_bound_key(table_prefix, model, spec, expanded_prefix_len, true)?;
             if start <= end {
                 ranges.push(KeyRange { start, end });
             }
@@ -1138,7 +1168,7 @@ impl QueryPredicate {
                 min.is_some() && min == max
             }
             (ColumnKind::Float64, PredicateConstraint::FloatRange { min, max }) => {
-                matches!((min, max), (Some((lhs, true)), Some((rhs, true))) if lhs == rhs)
+                matches!((min, max), (Some((lhs, true)), Some((rhs, true))) if lhs.total_cmp(rhs).is_eq())
             }
             (ColumnKind::Decimal128, PredicateConstraint::Decimal128Range { min, max }) => {
                 min.is_some() && min == max
@@ -1230,7 +1260,10 @@ impl QueryPredicate {
 
         let mut combos: Vec<HashMap<usize, PredicateConstraint>> = vec![HashMap::new()];
         for (col_idx, singles) in &col_values {
-            let mut next = Vec::new();
+            if combos.len().saturating_mul(singles.len()) > 4096 {
+                return Err("index range budget exceeded".into());
+            }
+            let mut next = Vec::with_capacity(combos.len() * singles.len());
             for combo in &combos {
                 for single in singles {
                     let mut c = combo.clone();
@@ -1239,9 +1272,6 @@ impl QueryPredicate {
                 }
             }
             combos = next;
-            if combos.len() > 256 {
-                return Err("too many z-order index range combinations".to_string());
-            }
         }
 
         let mut ranges = Vec::with_capacity(combos.len());
@@ -1276,219 +1306,19 @@ impl QueryPredicate {
         // and narrower left zero padding that sorted the lower bound above
         // rows sitting exactly on it.
         let mut key = Vec::with_capacity(prefix.max_payload_len());
+        let unconstrained = Self::default();
         for (idx, col_idx) in spec.key_columns.iter().copied().enumerate() {
-            let col = model.column(col_idx);
-            let use_constraint = idx < constrained_prefix_len;
-            match col.kind {
-                ColumnKind::Utf8 => {
-                    let bytes = if use_constraint {
-                        let Some(PredicateConstraint::StringEq(v)) = self.constraints.get(&col_idx)
-                        else {
-                            return Err(format!("missing string constraint for '{}'", col.name));
-                        };
-                        encode_string_variable(v)?
-                    } else if upper {
-                        vec![0xFFu8]
-                    } else {
-                        vec![STRING_KEY_TERMINATOR]
-                    };
-                    key.extend_from_slice(&bytes);
-                }
-                ColumnKind::Boolean => {
-                    let value = if use_constraint {
-                        let Some(PredicateConstraint::BoolEq(v)) = self.constraints.get(&col_idx)
-                        else {
-                            return Err(format!("missing bool constraint for '{}'", col.name));
-                        };
-                        *v
-                    } else {
-                        upper
-                    };
-                    key.push(u8::from(value));
-                }
-                ColumnKind::Int64 => {
-                    let value = if use_constraint {
-                        let Some(PredicateConstraint::IntRange { min, max }) =
-                            self.constraints.get(&col_idx)
-                        else {
-                            return Err(format!("missing int constraint for '{}'", col.name));
-                        };
-                        if upper {
-                            max.unwrap_or(i64::MAX)
-                        } else {
-                            min.unwrap_or(i64::MIN)
-                        }
-                    } else if upper {
-                        i64::MAX
-                    } else {
-                        i64::MIN
-                    };
-                    key.extend_from_slice(&encode_i64_ordered(value));
-                }
-                ColumnKind::Float64 => {
-                    let value = if use_constraint {
-                        let Some(PredicateConstraint::FloatRange { min, max }) =
-                            self.constraints.get(&col_idx)
-                        else {
-                            return Err(format!("missing float constraint for '{}'", col.name));
-                        };
-                        if upper {
-                            max.map(|(v, _)| v).unwrap_or(f64::INFINITY)
-                        } else {
-                            min.map(|(v, _)| v).unwrap_or(f64::NEG_INFINITY)
-                        }
-                    } else if upper {
-                        f64::INFINITY
-                    } else {
-                        f64::NEG_INFINITY
-                    };
-                    key.extend_from_slice(&encode_f64_ordered(value));
-                }
-                ColumnKind::Date32 => {
-                    let raw = if use_constraint {
-                        let Some(PredicateConstraint::IntRange { min, max }) =
-                            self.constraints.get(&col_idx)
-                        else {
-                            return Err(format!("missing date32 constraint for '{}'", col.name));
-                        };
-                        if upper {
-                            max.unwrap_or(i32::MAX as i64)
-                        } else {
-                            min.unwrap_or(i32::MIN as i64)
-                        }
-                    } else if upper {
-                        i32::MAX as i64
-                    } else {
-                        i32::MIN as i64
-                    };
-                    let value = raw.clamp(i32::MIN as i64, i32::MAX as i64) as i32;
-                    key.extend_from_slice(&encode_i32_ordered(value));
-                }
-                ColumnKind::Date64 => {
-                    let value = if use_constraint {
-                        let Some(PredicateConstraint::IntRange { min, max }) =
-                            self.constraints.get(&col_idx)
-                        else {
-                            return Err(format!("missing date64 constraint for '{}'", col.name));
-                        };
-                        if upper {
-                            max.unwrap_or(i64::MAX)
-                        } else {
-                            min.unwrap_or(i64::MIN)
-                        }
-                    } else if upper {
-                        i64::MAX
-                    } else {
-                        i64::MIN
-                    };
-                    key.extend_from_slice(&encode_i64_ordered(value));
-                }
-                ColumnKind::Timestamp => {
-                    let value = if use_constraint {
-                        let Some(PredicateConstraint::IntRange { min, max }) =
-                            self.constraints.get(&col_idx)
-                        else {
-                            return Err(format!("missing timestamp constraint for '{}'", col.name));
-                        };
-                        if upper {
-                            max.unwrap_or(i64::MAX)
-                        } else {
-                            min.unwrap_or(i64::MIN)
-                        }
-                    } else if upper {
-                        i64::MAX
-                    } else {
-                        i64::MIN
-                    };
-                    key.extend_from_slice(&encode_i64_ordered(value));
-                }
-                ColumnKind::Decimal128 => {
-                    let value = if use_constraint {
-                        let Some(PredicateConstraint::Decimal128Range { min, max }) =
-                            self.constraints.get(&col_idx)
-                        else {
-                            return Err(format!(
-                                "missing decimal128 constraint for '{}'",
-                                col.name
-                            ));
-                        };
-                        if upper {
-                            max.unwrap_or(i128::MAX)
-                        } else {
-                            min.unwrap_or(i128::MIN)
-                        }
-                    } else if upper {
-                        i128::MAX
-                    } else {
-                        i128::MIN
-                    };
-                    key.extend_from_slice(&encode_i128_ordered(value));
-                }
-                ColumnKind::UInt64 => {
-                    let value = if use_constraint {
-                        let (lower, upper_bound) = self.uint64_bounds(col_idx);
-                        if upper {
-                            upper_bound
-                        } else {
-                            lower
-                        }
-                    } else if upper {
-                        u64::MAX
-                    } else {
-                        0
-                    };
-                    key.extend_from_slice(&value.to_be_bytes());
-                }
-                ColumnKind::Decimal256 => {
-                    let value = if use_constraint {
-                        let Some(PredicateConstraint::Decimal256Range { min, max }) =
-                            self.constraints.get(&col_idx)
-                        else {
-                            return Err(format!(
-                                "missing decimal256 constraint for '{}'",
-                                col.name
-                            ));
-                        };
-                        if upper {
-                            max.unwrap_or(i256::MAX)
-                        } else {
-                            min.unwrap_or(i256::MIN)
-                        }
-                    } else if upper {
-                        i256::MAX
-                    } else {
-                        i256::MIN
-                    };
-                    key.extend_from_slice(&encode_i256_ordered(value));
-                }
-                ColumnKind::FixedSizeBinary(n) => {
-                    if use_constraint {
-                        let Some(PredicateConstraint::FixedBinaryEq(data)) =
-                            self.constraints.get(&col_idx)
-                        else {
-                            return Err(format!(
-                                "missing fixed-binary constraint for '{}'",
-                                col.name
-                            ));
-                        };
-                        if data.len() > n {
-                            return Err(format!(
-                                "fixed-binary constraint for '{}' exceeds width {}",
-                                col.name, n
-                            ));
-                        }
-                        key.extend_from_slice(data);
-                        key.resize(key.len() + (n - data.len()), 0x00);
-                    } else {
-                        key.resize(key.len() + n, if upper { 0xFF } else { 0x00 });
-                    }
-                }
-                ColumnKind::Binary | ColumnKind::List(_) => {
-                    unreachable!("binary and list columns cannot be indexed")
-                }
-            }
+            let predicate = if idx < constrained_prefix_len {
+                self
+            } else {
+                &unconstrained
+            };
+            key.extend_from_slice(&predicate.ordered_index_bound_bytes_for_column(
+                col_idx,
+                model.column(col_idx),
+                upper,
+            )?);
         }
-
         self.finish_index_bound_key(model, prefix, key, upper)
     }
 
@@ -1616,21 +1446,19 @@ impl QueryPredicate {
                 encode_i64_ordered(value).to_vec()
             }
             ColumnKind::Float64 => {
-                let value = if let Some(constraint) = self.constraints.get(&col_idx) {
-                    let PredicateConstraint::FloatRange { min, max } = constraint else {
-                        return Err(format!("missing float constraint for '{}'", col.name));
-                    };
-                    if upper {
-                        max.map(|(v, _)| v).unwrap_or(f64::INFINITY)
-                    } else {
-                        min.map(|(v, _)| v).unwrap_or(f64::NEG_INFINITY)
+                let bound = match self.constraints.get(&col_idx) {
+                    Some(PredicateConstraint::FloatRange { min, max }) => {
+                        if upper {
+                            *max
+                        } else {
+                            *min
+                        }
                     }
-                } else if upper {
-                    f64::INFINITY
-                } else {
-                    f64::NEG_INFINITY
+                    _ => None,
                 };
-                encode_f64_ordered(value).to_vec()
+                bound
+                    .map(|(value, _)| encode_f64_ordered(value).to_vec())
+                    .unwrap_or_else(|| vec![if upper { 0xff } else { 0 }; 8])
             }
             ColumnKind::Date32 => {
                 let raw = if let Some(constraint) = self.constraints.get(&col_idx) {
@@ -1761,6 +1589,95 @@ impl QueryPredicate {
             }
             _ => (0, u64::MAX),
         }
+    }
+
+    fn has_primary_key_points(&self, model: &TableModel) -> bool {
+        let mut count = 1usize;
+        for (&column, &kind) in model
+            .primary_key_indices
+            .iter()
+            .zip(&model.primary_key_kinds)
+        {
+            let Some(constraint) = self.constraints.get(&column) else {
+                return false;
+            };
+            if !Self::constraint_is_point(kind, constraint) {
+                return false;
+            }
+            let values = match constraint {
+                PredicateConstraint::StringIn(v) => v.len(),
+                PredicateConstraint::IntIn(v) => v.len(),
+                PredicateConstraint::UInt64In(v) => v.len(),
+                PredicateConstraint::FixedBinaryIn(v) => v.len(),
+                _ => 1,
+            };
+            count = count.saturating_mul(values);
+            if count > 4096 {
+                return false;
+            }
+        }
+        true
+    }
+
+    pub(crate) fn primary_key_points(
+        &self,
+        model: &TableModel,
+    ) -> DataFusionResult<Option<Vec<Key>>> {
+        if !self.has_primary_key_points(model) {
+            return Ok(None);
+        }
+        let mut keys = vec![Vec::new()];
+        for (&column, &kind) in model
+            .primary_key_indices
+            .iter()
+            .zip(&model.primary_key_kinds)
+        {
+            let Some(constraint) = self.constraints.get(&column) else {
+                return Ok(None);
+            };
+            let values = match constraint {
+                PredicateConstraint::StringIn(v) => {
+                    v.iter().cloned().map(CellValue::Utf8).collect()
+                }
+                PredicateConstraint::IntIn(v) => v.iter().copied().map(CellValue::Int64).collect(),
+                PredicateConstraint::UInt64In(v) => {
+                    v.iter().copied().map(CellValue::UInt64).collect()
+                }
+                PredicateConstraint::FixedBinaryIn(v) => {
+                    v.iter().cloned().map(CellValue::FixedBinary).collect()
+                }
+                _ => match primary_key_range_constraint(kind, constraint) {
+                    PrimaryKeyRangeConstraint::Point(point) => vec![point.value],
+                    _ => return Ok(None),
+                },
+            };
+            let mut next = Vec::with_capacity(keys.len() * values.len());
+            for prefix in &keys {
+                for value in &values {
+                    let Ok(bytes) = encode_cell_into_ordered_key_bytes(value, kind) else {
+                        continue;
+                    };
+                    if prefix.len() + bytes.len() <= model.primary_key_prefix.max_payload_len() {
+                        let mut key = prefix.clone();
+                        key.extend_from_slice(&bytes);
+                        next.push(key);
+                    }
+                }
+            }
+            keys = next;
+        }
+        let mut keys = keys
+            .into_iter()
+            .map(|payload| {
+                model
+                    .primary_key_prefix
+                    .encode(&payload)
+                    .map_err(|e| DataFusionError::Execution(e.to_string()))
+            })
+            .collect::<DataFusionResult<Vec<_>>>()?;
+        keys.sort();
+        keys.dedup();
+        Ok(Some(keys))
     }
 
     pub(crate) fn primary_key_ranges(&self, model: &TableModel) -> DataFusionResult<Vec<KeyRange>> {
@@ -1921,7 +1838,9 @@ pub(crate) fn describe_integral_range(min: Option<String>, max: Option<String>) 
 
 pub(crate) fn describe_float_range(min: Option<(f64, bool)>, max: Option<(f64, bool)>) -> String {
     match (min, max) {
-        (Some((min, true)), Some((max, true))) if min == max => format!("= {}", format_float(min)),
+        (Some((min, true)), Some((max, true))) if min.total_cmp(&max).is_eq() => {
+            format!("= {}", format_float(min))
+        }
         (Some((min, min_inclusive)), Some((max, max_inclusive))) => format!(
             "{} {} AND {} {}",
             if min_inclusive { ">=" } else { ">" },
@@ -1974,6 +1893,7 @@ pub(crate) fn hex_preview(bytes: &[u8]) -> String {
     encoded
 }
 
+#[cfg(test)]
 pub(crate) fn matches_constraint(value: &CellValue, constraint: &PredicateConstraint) -> bool {
     match (value, constraint) {
         (CellValue::Null, PredicateConstraint::IsNull) => return true,
@@ -1998,8 +1918,13 @@ pub(crate) fn matches_constraint(value: &CellValue, constraint: &PredicateConstr
         (CellValue::Timestamp(v), PredicateConstraint::IntRange { min, max }) => {
             in_i64_bounds(*v, *min, *max)
         }
-        (CellValue::Float64(v), PredicateConstraint::FloatRange { min, max }) => {
-            in_f64_bounds(*v, min, max)
+        (CellValue::Float64(v), PredicateConstraint::FloatRange { .. }) => {
+            match crate::filter::compile_encoded_constraint(ColumnKind::Float64, constraint) {
+                crate::filter::EncodedConstraintCompile::Encoded(bound) => {
+                    crate::filter::matches_encoded_constraint(&encode_f64_ordered(*v), &bound)
+                }
+                _ => false,
+            }
         }
         (CellValue::Decimal128(v), PredicateConstraint::Decimal128Range { min, max }) => {
             in_i128_bounds(*v, *min, *max)
@@ -2037,121 +1962,6 @@ pub(crate) fn matches_constraint(value: &CellValue, constraint: &PredicateConstr
     }
 }
 
-pub(crate) fn matches_archived_non_pk_constraint(
-    col: &ResolvedColumn,
-    stored_opt: Option<&StoredValue>,
-    constraint: &PredicateConstraint,
-) -> bool {
-    match stored_opt {
-        None => {
-            if !col.nullable {
-                return false;
-            }
-            matches!(constraint, PredicateConstraint::IsNull)
-        }
-        Some(_) if matches!(constraint, PredicateConstraint::IsNull) => false,
-        Some(_) if matches!(constraint, PredicateConstraint::IsNotNull) => true,
-        Some(stored) => match (col.kind, stored, constraint) {
-            (ColumnKind::Utf8, StoredValue::Utf8(v), PredicateConstraint::StringEq(expected)) => {
-                v.as_str() == expected
-            }
-            (ColumnKind::Utf8, StoredValue::Utf8(v), PredicateConstraint::StringIn(values)) => {
-                values.iter().any(|candidate| candidate == v.as_str())
-            }
-            (
-                ColumnKind::Boolean,
-                StoredValue::Boolean(v),
-                PredicateConstraint::BoolEq(expected),
-            ) => *v == *expected,
-            (
-                ColumnKind::Int64,
-                StoredValue::Int64(v),
-                PredicateConstraint::IntRange { min, max },
-            ) => in_i64_bounds(*v, *min, *max),
-            (
-                ColumnKind::Date32,
-                StoredValue::Int64(v),
-                PredicateConstraint::IntRange { min, max },
-            ) => in_i64_bounds(*v as i32 as i64, *min, *max),
-            (
-                ColumnKind::Date64,
-                StoredValue::Int64(v),
-                PredicateConstraint::IntRange { min, max },
-            ) => in_i64_bounds(*v, *min, *max),
-            (
-                ColumnKind::Timestamp,
-                StoredValue::Int64(v),
-                PredicateConstraint::IntRange { min, max },
-            ) => in_i64_bounds(*v, *min, *max),
-            (
-                ColumnKind::Float64,
-                StoredValue::Float64(v),
-                PredicateConstraint::FloatRange { min, max },
-            ) => in_f64_bounds(*v, min, max),
-            (
-                ColumnKind::Float64,
-                StoredValue::Int64(v),
-                PredicateConstraint::FloatRange { min, max },
-            ) => in_f64_bounds(*v as f64, min, max),
-            (
-                ColumnKind::Decimal128,
-                StoredValue::Bytes(bytes),
-                PredicateConstraint::Decimal128Range { min, max },
-            ) => {
-                let Ok(arr) = <[u8; 16]>::try_from(bytes.as_slice()) else {
-                    return false;
-                };
-                in_i128_bounds(i128::from_le_bytes(arr), *min, *max)
-            }
-            (
-                ColumnKind::Decimal256,
-                StoredValue::Bytes(bytes),
-                PredicateConstraint::Decimal256Range { min, max },
-            ) => {
-                let Ok(arr) = <[u8; 32]>::try_from(bytes.as_slice()) else {
-                    return false;
-                };
-                let value = i256::from_le_bytes(arr);
-                if let Some(min) = min {
-                    if value < *min {
-                        return false;
-                    }
-                }
-                if let Some(max) = max {
-                    if value > *max {
-                        return false;
-                    }
-                }
-                true
-            }
-            (
-                ColumnKind::UInt64,
-                StoredValue::UInt64(v),
-                PredicateConstraint::UInt64Range { min, max },
-            ) => in_u64_bounds(*v, *min, *max),
-            (ColumnKind::UInt64, StoredValue::UInt64(v), PredicateConstraint::UInt64In(values)) => {
-                values.contains(v)
-            }
-            (ColumnKind::Int64, StoredValue::Int64(v), PredicateConstraint::IntIn(values)) => {
-                values.contains(v)
-            }
-            (
-                ColumnKind::FixedSizeBinary(_),
-                StoredValue::Bytes(v),
-                PredicateConstraint::FixedBinaryEq(expected),
-            ) => v.as_slice() == expected.as_slice(),
-            (
-                ColumnKind::FixedSizeBinary(_),
-                StoredValue::Bytes(v),
-                PredicateConstraint::FixedBinaryIn(values),
-            ) => values
-                .iter()
-                .any(|candidate| candidate.as_slice() == v.as_slice()),
-            _ => false,
-        },
-    }
-}
-
 pub(crate) fn in_i64_bounds(value: i64, min: Option<i64>, max: Option<i64>) -> bool {
     if let Some(min) = min {
         if value < min {
@@ -2174,41 +1984,6 @@ pub(crate) fn in_u64_bounds(value: u64, min: Option<u64>, max: Option<u64>) -> b
     }
     if let Some(max) = max {
         if value > max {
-            return false;
-        }
-    }
-    true
-}
-
-pub(crate) fn in_f64_bounds(
-    value: f64,
-    lower: &Option<(f64, bool)>,
-    upper: &Option<(f64, bool)>,
-) -> bool {
-    if value.is_nan() {
-        return false;
-    }
-    if let Some((bound, inclusive)) = lower {
-        if bound.is_nan() {
-            return false;
-        }
-        if *inclusive {
-            if value < *bound {
-                return false;
-            }
-        } else if value <= *bound {
-            return false;
-        }
-    }
-    if let Some((bound, inclusive)) = upper {
-        if bound.is_nan() {
-            return false;
-        }
-        if *inclusive {
-            if value > *bound {
-                return false;
-            }
-        } else if value >= *bound {
             return false;
         }
     }
@@ -2317,23 +2092,22 @@ pub(crate) fn apply_float_constraint(
     value: f64,
     contradiction: &mut bool,
 ) {
-    if value.is_nan() {
-        *contradiction = true;
-        return;
-    }
+    // DataFusion normalizes signed zero before comparison, while stored keys preserve its bits
+    let lower = if value == 0.0 { -0.0 } else { value };
+    let upper = if value == 0.0 { 0.0 } else { value };
     match op {
         Operator::Eq => {
-            merge_float_lower(lo, value, true);
-            merge_float_upper(hi, value, true);
+            merge_float_lower(lo, lower, true);
+            merge_float_upper(hi, upper, true);
         }
-        Operator::Gt => merge_float_lower(lo, value, false),
-        Operator::GtEq => merge_float_lower(lo, value, true),
-        Operator::Lt => merge_float_upper(hi, value, false),
-        Operator::LtEq => merge_float_upper(hi, value, true),
+        Operator::Gt => merge_float_lower(lo, upper, false),
+        Operator::GtEq => merge_float_lower(lo, lower, true),
+        Operator::Lt => merge_float_upper(hi, lower, false),
+        Operator::LtEq => merge_float_upper(hi, upper, true),
         _ => return,
     }
     if let (Some((lo_v, lo_inc)), Some((hi_v, hi_inc))) = (&*lo, &*hi) {
-        if lo_v > hi_v || (lo_v == hi_v && !(*lo_inc && *hi_inc)) {
+        if lo_v.total_cmp(hi_v).is_gt() || (lo_v.total_cmp(hi_v).is_eq() && !(*lo_inc && *hi_inc)) {
             *contradiction = true;
         }
     }
@@ -2342,9 +2116,9 @@ pub(crate) fn apply_float_constraint(
 pub(crate) fn merge_float_lower(current: &mut Option<(f64, bool)>, value: f64, inclusive: bool) {
     *current = Some(match *current {
         Some((existing, existing_inc)) => {
-            if value > existing {
+            if value.total_cmp(&existing).is_gt() {
                 (value, inclusive)
-            } else if value == existing {
+            } else if value.total_cmp(&existing).is_eq() {
                 (value, existing_inc && inclusive)
             } else {
                 (existing, existing_inc)
@@ -2357,9 +2131,9 @@ pub(crate) fn merge_float_lower(current: &mut Option<(f64, bool)>, value: f64, i
 pub(crate) fn merge_float_upper(current: &mut Option<(f64, bool)>, value: f64, inclusive: bool) {
     *current = Some(match *current {
         Some((existing, existing_inc)) => {
-            if value < existing {
+            if value.total_cmp(&existing).is_lt() {
                 (value, inclusive)
-            } else if value == existing {
+            } else if value.total_cmp(&existing).is_eq() {
                 (value, existing_inc && inclusive)
             } else {
                 (existing, existing_inc)
@@ -2369,6 +2143,7 @@ pub(crate) fn merge_float_upper(current: &mut Option<(f64, bool)>, value: f64, i
     });
 }
 
+#[cfg(test)]
 pub(crate) fn in_i128_bounds(value: i128, min: Option<i128>, max: Option<i128>) -> bool {
     if let Some(min) = min {
         if value < min {
@@ -2561,21 +2336,17 @@ pub(crate) fn parse_simple_comparison(expr: &Expr) -> Option<(String, Operator, 
 }
 
 pub(crate) fn reverse_operator(op: Operator) -> Option<Operator> {
-    match op {
-        Operator::Eq => Some(Operator::Eq),
-        Operator::Lt => Some(Operator::Gt),
-        Operator::LtEq => Some(Operator::GtEq),
-        Operator::Gt => Some(Operator::Lt),
-        Operator::GtEq => Some(Operator::LtEq),
-        _ => None,
-    }
+    matches!(
+        op,
+        Operator::Eq | Operator::Lt | Operator::LtEq | Operator::Gt | Operator::GtEq
+    )
+    .then(|| op.swap())
+    .flatten()
 }
 
 pub(crate) fn extract_column_name(expr: &Expr) -> Option<&str> {
     match expr {
         Expr::Column(col) => Some(col.name.as_str()),
-        Expr::Cast(cast) => extract_column_name(cast.expr.as_ref()),
-        Expr::TryCast(cast) => extract_column_name(cast.expr.as_ref()),
         _ => None,
     }
 }
@@ -2583,8 +2354,6 @@ pub(crate) fn extract_column_name(expr: &Expr) -> Option<&str> {
 pub(crate) fn extract_literal(expr: &Expr) -> Option<&ScalarValue> {
     match expr {
         Expr::Literal(value, _) => Some(value),
-        Expr::Cast(cast) => extract_literal(cast.expr.as_ref()),
-        Expr::TryCast(cast) => extract_literal(cast.expr.as_ref()),
         _ => None,
     }
 }

@@ -39,8 +39,8 @@ use exoware_proto::query::{
 use exoware_proto::stream_filter::{Filter, StreamFilter};
 use exoware_proto::{
     connect_compression_registry, parse_range_traversal_direction,
-    to_domain_reduce_request_from_view, to_proto_optional_reduced_value, to_proto_reduced_value,
-    with_error_info_detail, with_query_detail, with_retry_info_detail, RangeTraversalDirection,
+    to_domain_reduce_request_from_view, to_proto_reduce_response, with_error_info_detail,
+    with_query_detail, with_retry_info_detail, RangeTraversalDirection,
 };
 use exoware_sdk as exoware_proto;
 use exoware_sdk::common::kv::v1::filter::KindView as ProtoFilterKindView;
@@ -683,6 +683,9 @@ where
         let domain = to_domain_reduce_request_from_view(&request.params)
             .map_err(validate::reduce_params_error)?;
 
+        let mut reducer = RangeReducer::new(&domain)
+            .map_err(|error| validate::reduce_params_error(error.to_string()))?;
+
         let mut rows = self
             .state
             .query
@@ -690,8 +693,6 @@ where
             .await
             .map_err(ConnectError::internal)?;
 
-        let mut reducer = RangeReducer::new(&domain)
-            .map_err(|e: crate::RangeError| ConnectError::internal(e.to_string()))?;
         let mut latest_extra = None;
         let final_extra = loop {
             let batch = rows
@@ -709,47 +710,17 @@ where
             for (key, value) in batch.rows {
                 reducer
                     .update(&key, &value)
-                    .map_err(|e: crate::RangeError| ConnectError::internal(e.to_string()))?;
+                    .map_err(|error| ConnectError::failed_precondition(error.to_string()))?;
             }
         };
         let response = reducer.finish();
 
         let detail = query_detail(token, final_extra);
 
+        let (results, groups) = to_proto_reduce_response(response);
         connectrpc::Response::ok(ReduceResponse {
-            results: response
-                .results
-                .into_iter()
-                .map(|result| exoware_proto::query::RangeReduceResult {
-                    value: result.value.map(to_proto_reduced_value).into(),
-                    ..Default::default()
-                })
-                .collect(),
-            groups: response
-                .groups
-                .into_iter()
-                .map(|group| {
-                    let group_values_present =
-                        group.group_values.iter().map(Option::is_some).collect();
-                    exoware_proto::query::RangeReduceGroup {
-                        group_values: group
-                            .group_values
-                            .into_iter()
-                            .map(to_proto_optional_reduced_value)
-                            .collect(),
-                        group_values_present,
-                        results: group
-                            .results
-                            .into_iter()
-                            .map(|result| exoware_proto::query::RangeReduceResult {
-                                value: result.value.map(to_proto_reduced_value).into(),
-                                ..Default::default()
-                            })
-                            .collect(),
-                        ..Default::default()
-                    }
-                })
-                .collect(),
+            results,
+            groups,
             detail: Some(detail).into(),
             ..Default::default()
         })

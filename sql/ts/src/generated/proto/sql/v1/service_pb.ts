@@ -18,16 +18,14 @@ export const file_sql_v1_service: GenFile = /*@__PURE__*/
   fileDesc("ChRzcWwvdjEvc2VydmljZS5wcm90bxIGc3FsLnYxMrwBCgdTZXJ2aWNlEkIKCVN1YnNjcmliZRIYLnNxbC52MS5TdWJzY3JpYmVSZXF1ZXN0Ghkuc3FsLnYxLlN1YnNjcmliZVJlc3BvbnNlMAESNAoFUXVlcnkSFC5zcWwudjEuUXVlcnlSZXF1ZXN0GhUuc3FsLnYxLlF1ZXJ5UmVzcG9uc2USNwoGVGFibGVzEhUuc3FsLnYxLlRhYmxlc1JlcXVlc3QaFi5zcWwudjEuVGFibGVzUmVzcG9uc2ViBnByb3RvMw", [file_sql_v1_query, file_sql_v1_schema, file_sql_v1_stream]);
 
 /**
- * Streaming SQL predicate service over a server-side `KvSchema`.
- *
- * The server registers a fixed set of SQL tables at startup (schema lives on
- * the server, not the wire). Each RPC names one of those tables.
+ * SQL queries and ingest subscriptions over a server-side `KvSchema`.
+ * Results carry their Arrow schemas and column buffers in IPC streams.
  *
  * @generated from service sql.v1.Service
  */
 export const Service: GenService<{
   /**
-   * Re-run a SQL WHERE predicate against every incoming batch that touches
+   * Evaluate a compiled scalar predicate against every incoming batch that touches
    * `table`'s primary-key family. Emits one `SubscribeResponse` per
    * matched batch containing just the rows that satisfied the predicate.
    *

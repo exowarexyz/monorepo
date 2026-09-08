@@ -6759,8 +6759,8 @@ pub struct RangeReduceGroup {
         deserialize_with = "::buffa::json_helpers::null_as_default"
     )]
     pub group_values: ::buffa::alloc::vec::Vec<KvReducedValue>,
-    /// Parallel to `group_values`; false when the corresponding group value is
-    /// NULL (the proto value is a default zero, but should be treated as absent).
+    /// One flag per group-by expression. False represents NULL. True consumes
+    /// the next value from the dense `group_values` list.
     ///
     /// Field 2: `group_values_present`
     #[serde(
@@ -18626,8 +18626,8 @@ pub mod __buffa {
                 'a,
                 super::super::__buffa::view::KvReducedValueView<'a>,
             >,
-            /// Parallel to `group_values`; false when the corresponding group value is
-            /// NULL (the proto value is a default zero, but should be treated as absent).
+            /// One flag per group-by expression. False represents NULL. True consumes
+            /// the next value from the dense `group_values` list.
             ///
             /// Field 2: `group_values_present`
             pub group_values_present: ::buffa::RepeatedView<'a, bool>,
@@ -18990,8 +18990,8 @@ pub mod __buffa {
             > {
                 &self.0.reborrow().group_values
             }
-            /// Parallel to `group_values`; false when the corresponding group value is
-            /// NULL (the proto value is a default zero, but should be treated as absent).
+            /// One flag per group-by expression. False represents NULL. True consumes
+            /// the next value from the dense `group_values` list.
             ///
             /// Field 2: `group_values_present`
             #[must_use]

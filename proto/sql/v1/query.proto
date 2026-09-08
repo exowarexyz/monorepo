@@ -3,7 +3,6 @@ syntax = "proto3";
 package sql.v1;
 
 import "buf/validate/validate.proto";
-import "sql/v1/common.proto";
 
 // Ad-hoc SQL statement.
 message QueryRequest {
@@ -15,6 +14,7 @@ message QueryRequest {
 
 // Result set from `Query`.
 message QueryResponse {
-  repeated string column = 1;
-  repeated Row rows = 2;
+  // Complete Arrow IPC stream containing the result schema and record batches.
+  // The schema is present even when the query returns no rows.
+  bytes arrow_ipc = 1;
 }

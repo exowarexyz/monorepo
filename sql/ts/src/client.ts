@@ -1,3 +1,4 @@
+import { RecordBatchReader, Table } from 'apache-arrow';
 import { create } from '@bufbuild/protobuf';
 import { createClient, type CallOptions, type Client as ConnectClient } from '@connectrpc/connect';
 import {
@@ -6,7 +7,6 @@ import {
 } from '@exowarexyz/sdk';
 import {
   QueryRequestSchema as SqlQueryRequestSchema,
-  type QueryResponse as SqlQueryResponse,
 } from './generated/proto/sql/v1/query_pb.js';
 import {
   IndexLayout as SqlIndexLayout,
@@ -20,50 +20,11 @@ import {
   SubscribeRequestSchema as SqlSubscribeRequestSchema,
   type SubscribeResponse as SqlSubscribeResponse,
 } from './generated/proto/sql/v1/stream_pb.js';
-import {
-  type Cell as SqlCell,
-  type Row as SqlRow,
-} from './generated/proto/sql/v1/common_pb.js';
-
 export type SqlClientOptions = SdkClientOptions;
-
-/**
- * Typed view of a single row cell.
- *
- * - `null` is SQL NULL (wire `null_value`).
- * - `bigint` covers Int64, UInt64 (unsigned), Date64, and Timestamp.
- * - `number` covers Float64 and Date32 (days since epoch).
- * - `Uint8Array` covers FixedSizeBinary, variable-length Binary, and the
- *   big-endian encodings of Decimal128 (16 bytes) / Decimal256 (32 bytes).
- * - `CellValue[]` covers `List<...>` columns; elements use the same type.
- * - The `undefined` case means the server sent an unknown oneof variant.
- */
-export type CellValue =
-  | bigint
-  | number
-  | boolean
-  | string
-  | Uint8Array
-  | CellValue[]
-  | null
-  | undefined;
-
-export interface DecodedRow {
-  /** Column → value. Columns are in the same order as the `columns` array. */
-  values: Record<string, CellValue>;
-  /** Parallel array of values for positional access. */
-  cells: CellValue[];
-}
-
-export interface DecodedQueryResult {
-  columns: string[];
-  rows: DecodedRow[];
-}
 
 export interface DecodedSubscribeFrame {
   sequenceNumber: bigint;
-  columns: string[];
-  rows: DecodedRow[];
+  table: Table;
 }
 
 export interface DecodedColumn {
@@ -92,59 +53,21 @@ export interface DecodedTable {
   indexes: DecodedIndex[];
 }
 
-function cellToValue(cell: SqlCell): CellValue {
-  switch (cell.kind.case) {
-    case 'nullValue':
-      return null;
-    case 'int64Value':
-    case 'uint64Value':
-    case 'date64Value':
-    case 'timestampValue':
-      return cell.kind.value;
-    case 'float64Value':
-    case 'date32Value':
-      return cell.kind.value;
-    case 'booleanValue':
-      return cell.kind.value;
-    case 'utf8Value':
-      return cell.kind.value;
-    case 'fixedSizeBinaryValue':
-    case 'binaryValue':
-    case 'decimal128Value':
-    case 'decimal256Value':
-      return cell.kind.value;
-    case 'listValue':
-      return cell.kind.value.elements.map(cellToValue);
-    default:
-      // Unknown oneof variant (forward-compatibility safeguard). Distinct
-      // from SQL NULL (`null`).
-      return undefined;
+function decodeTableStream(bytes: Uint8Array): Table {
+  const reader = RecordBatchReader.from(bytes).open();
+  if (!reader.schema) {
+    throw new Error('SQL response is missing its Arrow schema');
   }
-}
-
-function decodeRow(row: SqlRow, columns: string[]): DecodedRow {
-  const cells = row.cells.map(cellToValue);
-  const values: Record<string, CellValue> = {};
-  columns.forEach((column, index) => {
-    values[column] = cells[index] ?? null;
-  });
-  return { values, cells };
-}
-
-function decodeQuery(response: SqlQueryResponse): DecodedQueryResult {
-  const columns = response.column;
-  return {
-    columns,
-    rows: response.rows.map((row) => decodeRow(row, columns)),
-  };
+  const schema = reader.schema;
+  // Arrow 21.2 merges duplicate field names when rebuilding batch schemas
+  const batches = reader.readAll().map((batch) => Object.assign(batch, { schema }));
+  return new Table(schema, batches);
 }
 
 function decodeSubscribe(response: SqlSubscribeResponse): DecodedSubscribeFrame {
-  const columns = response.column;
   return {
     sequenceNumber: response.sequenceNumber,
-    columns,
-    rows: response.rows.map((row) => decodeRow(row, columns)),
+    table: decodeTableStream(response.arrowIpc),
   };
 }
 
@@ -185,25 +108,25 @@ function decodeTable(table: SqlTable): DecodedTable {
 /**
  * Thin wrapper around the `sql.v1.Service` Connect client.
  *
- * `subscribe` re-runs the server-side predicate on every ingest batch that
- * touches the named table and yields one frame per batch of matching rows.
+ * `subscribe` evaluates a compiled scalar predicate on every ingest batch
+ * that touches the named table and yields one frame per batch of matching rows.
  * `query` runs an arbitrary SQL statement against the server's session and
- * returns rows as typed cells.
+ * returns a native Arrow Table with its result schema and column buffers.
  */
 export class SqlClient {
   private readonly rpc: ConnectClient<typeof SqlService>;
 
   constructor(baseUrl: string, options: SqlClientOptions = {}) {
-    const transport = createTransport(baseUrl, options);
+    const transport = createTransport(baseUrl, { useBinaryFormat: true, ...options });
     this.rpc = createClient(SqlService, transport);
   }
 
-  async query(sql: string, options?: CallOptions): Promise<DecodedQueryResult> {
+  async query(sql: string, options?: CallOptions): Promise<Table> {
     const response = await this.rpc.query(
       create(SqlQueryRequestSchema, { sql }),
       options,
     );
-    return decodeQuery(response);
+    return decodeTableStream(response.arrowIpc);
   }
 
   async tables(options?: CallOptions): Promise<DecodedTable[]> {
@@ -217,6 +140,12 @@ export class SqlClient {
   async *subscribe(
     request: {
       table: string;
+      /**
+       * Scalar SQL boolean expression over the table's columns, without WHERE.
+       * Empty emits every row. Subqueries, aggregates, window functions, and
+       * row-expanding expressions are unsupported. Stable time functions use
+       * the subscription start time. Volatile functions run for each batch.
+       */
       whereSql?: string;
       sinceSequenceNumber?: bigint;
     },

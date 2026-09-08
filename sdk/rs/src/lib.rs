@@ -278,6 +278,13 @@ impl StoreKeyPrefix {
             .map_err(|_| StoreKeyPrefixError::PrefixMismatch)
     }
 
+    /// Return the smallest valid logical key strictly greater than `key`, or
+    /// `None` when no later key remains under this prefix.
+    pub fn next_key(&self, key: &Key) -> Result<Option<Key>, StoreKeyPrefixError> {
+        let physical = self.encode_key(key)?;
+        Ok(crate::keys::next_key(&physical).and_then(|next| self.decode_key(&next).ok()))
+    }
+
     /// Encode an inclusive logical range into the physical Store keyspace.
     ///
     /// Empty `end` means unbounded in the logical keyspace and is narrowed to
@@ -2158,7 +2165,8 @@ impl StoreClient {
                         .range(ProtoRangeRequest {
                             start: start.clone().into(),
                             end: end.clone().into(),
-                            limit: Some(u32::try_from(limit).unwrap_or(u32::MAX)),
+                            limit: (limit != usize::MAX)
+                                .then(|| u32::try_from(limit).unwrap_or(u32::MAX)),
                             batch_size: u32::try_from(batch_size).unwrap_or(u32::MAX),
                             mode: mode.to_proto().into(),
                             min_sequence_number,
@@ -3397,6 +3405,36 @@ mod tests {
         let physical = prefix.encode_key(&logical).unwrap();
         assert!(prefix.matches(&physical));
         assert_eq!(prefix.decode_key(&physical).unwrap(), logical);
+    }
+
+    #[test]
+    fn store_key_prefix_next_key_respects_namespace_capacity() {
+        for prefix in [
+            StoreKeyPrefix::identity(),
+            StoreKeyPrefix::new(Bytes::from_static(b"tenant/")).unwrap(),
+        ] {
+            assert_eq!(
+                prefix.next_key(&Bytes::from_static(b"row")).unwrap(),
+                Some(Bytes::from_static(b"row\0")),
+            );
+            let capacity = prefix.max_logical_key_len();
+            let mut key = vec![0; capacity];
+            key[capacity - 2] = 0x12;
+            key[capacity - 1] = 0xFF;
+            let next = prefix.next_key(&Bytes::from(key)).unwrap().unwrap();
+            assert_eq!(next.len(), capacity - 1);
+            assert_eq!(next[capacity - 2], 0x13);
+            assert!(prefix.encode_key(&next).is_ok());
+            assert_eq!(
+                prefix.next_key(&Bytes::from(vec![0xFF; capacity])).unwrap(),
+                None,
+            );
+            assert!(prefix
+                .next_key(&Bytes::from(vec![0; capacity + 1]))
+                .is_err());
+        }
+        let prefix = StoreKeyPrefix::new(vec![0; MAX_KEY_LEN]).unwrap();
+        assert_eq!(prefix.next_key(&Bytes::new()).unwrap(), None);
     }
 
     #[test]

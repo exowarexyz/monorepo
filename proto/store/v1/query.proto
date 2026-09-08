@@ -304,8 +304,8 @@ message RangeReduceGroup {
   // The evaluated group-by expression values for this group, in the same
   // order as `ReduceParams.group_by`.
   repeated KvReducedValue group_values = 1;
-  // Parallel to `group_values`; false when the corresponding group value is
-  // NULL (the proto value is a default zero, but should be treated as absent).
+  // One flag per group-by expression. False represents NULL. True consumes
+  // the next value from the dense `group_values` list.
   repeated bool group_values_present = 2;
   // Reducer results for this group, in the same order as
   // `ReduceParams.reducers`.

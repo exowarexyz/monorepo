@@ -2,7 +2,7 @@ use std::cmp::Ordering;
 use std::collections::HashMap;
 
 use exoware_sdk::keys::{Key, Prefix};
-use exoware_sdk::kv_codec::{eval_predicate, KvPredicate, KvPredicateCheck, StoredRow};
+use exoware_sdk::kv_codec::{eval_predicate, KvPredicate, KvPredicateCheck};
 
 use crate::aggregate::{
     compile_kv_predicate_constraint, index_row_field_ref, pk_field_ref_for_secondary_index,
@@ -166,36 +166,6 @@ impl ScanAccessPlan {
             projection_sources,
             predicate_checks,
         }
-    }
-
-    pub(crate) fn matches_archived_row(
-        &self,
-        pk_values: &[CellValue],
-        archived: &StoredRow,
-    ) -> bool {
-        for check in &self.predicate_checks {
-            match check {
-                PredicateAccess::Pk { pk_pos, constraint } => {
-                    let Some(value) = pk_values.get(*pk_pos) else {
-                        return false;
-                    };
-                    if !matches_constraint(value, constraint) {
-                        return false;
-                    }
-                }
-                PredicateAccess::NonPk {
-                    col_idx,
-                    col,
-                    constraint,
-                } => {
-                    let stored_opt = archived.values.get(*col_idx).and_then(|v| v.as_ref());
-                    if !matches_archived_non_pk_constraint(col, stored_opt, constraint) {
-                        return false;
-                    }
-                }
-            }
-        }
-        true
     }
 
     pub(crate) fn compile_index_predicate_plan(
@@ -559,9 +529,6 @@ pub(crate) fn compile_encoded_constraint(
             EncodedConstraintCompile::Encoded(EncodedIndexConstraint::Range { min, max })
         }
         (ColumnKind::Float64, PredicateConstraint::FloatRange { min, max }) => {
-            if min.is_some_and(|(v, _)| v.is_nan()) || max.is_some_and(|(v, _)| v.is_nan()) {
-                return EncodedConstraintCompile::Impossible;
-            }
             let min = min.map(|(v, inclusive)| (encode_f64_ordered(v).to_vec(), inclusive));
             let max = max.map(|(v, inclusive)| (encode_f64_ordered(v).to_vec(), inclusive));
             EncodedConstraintCompile::Encoded(EncodedIndexConstraint::Range { min, max })

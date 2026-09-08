@@ -5,15 +5,13 @@
 import type { GenFile, GenMessage } from "@bufbuild/protobuf/codegenv1";
 import { fileDesc, messageDesc } from "@bufbuild/protobuf/codegenv1";
 import { file_buf_validate_validate } from "../../buf/validate/validate_pb.js";
-import type { Row } from "./common_pb.js";
-import { file_sql_v1_common } from "./common_pb.js";
 import type { Message } from "@bufbuild/protobuf";
 
 /**
  * Describes the file sql/v1/stream.proto.
  */
 export const file_sql_v1_stream: GenFile = /*@__PURE__*/
-  fileDesc("ChNzcWwvdjEvc3RyZWFtLnByb3RvEgZzcWwudjEiiAEKEFN1YnNjcmliZVJlcXVlc3QSGQoFdGFibGUYASABKAlCCrpIB3IFEAEY/wESGwoJd2hlcmVfc3FsGAIgASgJQgi6SAVyAxiAIBIiChVzaW5jZV9zZXF1ZW5jZV9udW1iZXIYAyABKARIAIgBAUIYChZfc2luY2Vfc2VxdWVuY2VfbnVtYmVyIlcKEVN1YnNjcmliZVJlc3BvbnNlEhcKD3NlcXVlbmNlX251bWJlchgBIAEoBBIOCgZjb2x1bW4YAiADKAkSGQoEcm93cxgDIAMoCzILLnNxbC52MS5Sb3diBnByb3RvMw", [file_buf_validate_validate, file_sql_v1_common]);
+  fileDesc("ChNzcWwvdjEvc3RyZWFtLnByb3RvEgZzcWwudjEiiAEKEFN1YnNjcmliZVJlcXVlc3QSGQoFdGFibGUYASABKAlCCrpIB3IFEAEY/wESGwoJd2hlcmVfc3FsGAIgASgJQgi6SAVyAxiAIBIiChVzaW5jZV9zZXF1ZW5jZV9udW1iZXIYAyABKARIAIgBAUIYChZfc2luY2Vfc2VxdWVuY2VfbnVtYmVyIj8KEVN1YnNjcmliZVJlc3BvbnNlEhcKD3NlcXVlbmNlX251bWJlchgBIAEoBBIRCglhcnJvd19pcGMYAiABKAxiBnByb3RvMw", [file_buf_validate_validate]);
 
 /**
  * Stream every batch whose rows match `where_sql`.
@@ -29,9 +27,12 @@ export type SubscribeRequest = Message<"sql.v1.SubscribeRequest"> & {
   table: string;
 
   /**
-   * SQL boolean predicate evaluated against the decoded rows from each
-   * incoming batch (no `WHERE` keyword). Empty means "emit every decoded
-   * row". Bounded to keep server-side compile cost predictable.
+   * Scalar SQL boolean expression over this table's columns (no `WHERE`
+   * keyword). Compiled once before subscribing, then evaluated for each batch.
+   * Empty means "emit every decoded row". Subqueries, aggregates, window
+   * functions, and row-expanding expressions are not supported. Stable time
+   * functions use the subscription start time. Volatile functions run for
+   * each batch. Bounded to keep server-side compile cost predictable.
    *
    * @generated from field: string where_sql = 2;
    */
@@ -68,19 +69,12 @@ export type SubscribeResponse = Message<"sql.v1.SubscribeResponse"> & {
   sequenceNumber: bigint;
 
   /**
-   * Column names in `rows[].cells` order.
+   * Complete Arrow IPC stream containing the table schema and matching rows.
+   * Each frame decodes independently. Empty frames are not delivered.
    *
-   * @generated from field: repeated string column = 2;
+   * @generated from field: bytes arrow_ipc = 2;
    */
-  column: string[];
-
-  /**
-   * Rows that satisfied `where_sql` from this batch. Empty frames are not
-   * delivered.
-   *
-   * @generated from field: repeated sql.v1.Row rows = 3;
-   */
-  rows: Row[];
+  arrowIpc: Uint8Array;
 };
 
 /**
