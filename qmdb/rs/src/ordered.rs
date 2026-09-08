@@ -142,9 +142,8 @@ where
         }
     }
 
-    pub(crate) fn decode_key(&self, encoded_key: &[u8]) -> Result<K, QmdbError> {
+    pub(crate) fn decode_key(&self, encoded_key: &[u8]) -> Result<K, commonware_codec::Error> {
         K::decode_cfg(encoded_key, &self.key_cfg)
-            .map_err(|err| QmdbError::CorruptData(format!("failed to decode QMDB key: {err}")))
     }
 
     pub async fn writer_location_watermark(&self) -> Result<Option<Location<F>>, QmdbError> {
@@ -561,7 +560,7 @@ where
     }
 
     /// Verified current-state proof for a single key. The returned
-    /// `operation` is the matching `Update`; its `next_key` is the value
+    /// `operation` is the matching `Update`. Its `next_key` is the value
     /// the proof was verified against.
     pub async fn key_value_proof_at<Q: AsRef<[u8]>>(
         &self,

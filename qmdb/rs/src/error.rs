@@ -100,6 +100,4 @@ pub enum QmdbError {
     CommonwareMerkle(String),
     #[error("qmdb stream transport error: {0}")]
     Stream(String),
-    #[error("sync operation fetch was cancelled")]
-    SyncFetchCancelled,
 }

@@ -357,6 +357,124 @@ async fn verify_snapshots<F, K, V, E>(
                 &response,
                 &packet.encoded_operations,
             );
+
+            if case_name.starts_with("test_current_ordered_variable_variable_keys_variable_values_")
+            {
+                use connectrpc::client::ClientConfig;
+                use exoware_qmdb::proto::qmdb::v1::{
+                    KeyLookupServiceClient, OrderedKeyRangeServiceClient,
+                };
+
+                let name = case_name.strip_prefix("test_").unwrap();
+                let rpc = KeyLookupServiceClient::new(
+                    PreferZstdHttpClient::plaintext(),
+                    ClientConfig::new(url.parse().unwrap()),
+                );
+                let ranges = OrderedKeyRangeServiceClient::new(
+                    PreferZstdHttpClient::plaintext(),
+                    ClientConfig::new(url.parse().unwrap()),
+                );
+                let expected_row = |key: &K| {
+                    let key_hex = hex::encode(key.as_ref());
+                    match snapshot.values.get(key) {
+                        None => format!("{key_hex} - -"),
+                        Some(value) => {
+                            let location = snapshot.operations.iter().rposition(|operation| {
+                                matches!(operation, Operation::Update(update) if &update.key == key)
+                            }).expect("source update");
+                            format!("{key_hex} {} {location}", hex::encode(value.as_ref()))
+                        }
+                    }
+                };
+                let request = GetRequest {
+                    key: all_keys[0].encode().to_vec(),
+                    tip: *tip,
+                    ..Default::default()
+                };
+                let response = rpc
+                    .get(request.clone())
+                    .await
+                    .unwrap()
+                    .into_view()
+                    .to_owned_message();
+                crate::browser::assert_current_fixture(
+                    &format!("{name}_get"),
+                    &snapshot.root,
+                    N,
+                    &request,
+                    &response,
+                    &[expected_row(&all_keys[0])],
+                );
+
+                let indices = [3, 1, 0];
+                let request = GetManyRequest {
+                    keys: indices
+                        .map(|index| all_keys[index].encode().to_vec())
+                        .to_vec(),
+                    tip: *tip,
+                    ..Default::default()
+                };
+                let response = rpc
+                    .get_many(request.clone())
+                    .await
+                    .unwrap()
+                    .into_view()
+                    .to_owned_message();
+                crate::browser::assert_current_fixture(
+                    &format!("{name}_get_many"),
+                    &snapshot.root,
+                    N,
+                    &request,
+                    &response,
+                    &indices.map(|index| expected_row(&all_keys[index])),
+                );
+
+                for (suffix, start, end, limit) in [
+                    ("range_first", 1, None, 2),
+                    ("range_last", 5, None, 2),
+                    ("range_empty", 1, Some(2), 2),
+                ] {
+                    let request = GetRangeRequest {
+                        start_key: all_keys[start].encode().to_vec(),
+                        end_key: end.map(|index| all_keys[index].encode().to_vec()),
+                        limit,
+                        tip: *tip,
+                        ..Default::default()
+                    };
+                    let response = ranges
+                        .get_range(request.clone())
+                        .await
+                        .unwrap()
+                        .into_view()
+                        .to_owned_message();
+                    let expected_keys = snapshot
+                        .values
+                        .keys()
+                        .filter(|key| {
+                            **key >= all_keys[start]
+                                && end.is_none_or(|index| **key < all_keys[index])
+                        })
+                        .collect::<Vec<_>>();
+                    let next = expected_keys
+                        .get(limit as usize)
+                        .map_or_else(|| "-".to_string(), |key| hex::encode(key.as_ref()));
+                    let mut expected = vec![next];
+                    expected.extend(
+                        expected_keys
+                            .into_iter()
+                            .take(limit as usize)
+                            .map(expected_row),
+                    );
+                    crate::browser::assert_current_fixture(
+                        &format!("{name}_{suffix}"),
+                        &snapshot.root,
+                        N,
+                        &request,
+                        &response,
+                        &expected,
+                    );
+                }
+            }
         }
         assert_ne!(snapshot.root, wrong_root);
         let queried = native

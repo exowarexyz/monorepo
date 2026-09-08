@@ -69,3 +69,33 @@ pub fn assert_fixture(
         "browser fixture {name} must match the native source proof",
     );
 }
+
+/// Bind browser current-query fixtures to native responses and source-state expectations
+pub fn assert_current_fixture(
+    name: &str,
+    root: &commonware_cryptography::sha256::Digest,
+    chunk_size: usize,
+    request: &impl buffa::Message,
+    response: &impl buffa::Message,
+    expected: &[String],
+) {
+    let fixture = format!(
+        "{}\n{chunk_size}\n{}\n{}\n{}\n",
+        hex::encode(root),
+        hex::encode(request.encode_to_vec()),
+        hex::encode(response.encode_to_vec()),
+        expected.join("\n")
+    );
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../ts/test/fixtures/current")
+        .join(format!("{name}.txt"));
+    if std::env::var_os("UPDATE_FIXTURES").is_some() {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, &fixture).unwrap();
+    }
+    assert_eq!(
+        std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("read {}: {error}", path.display())),
+        fixture
+    );
+}

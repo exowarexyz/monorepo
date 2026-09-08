@@ -83,7 +83,6 @@ fn qmdb_error_to_connect(err: QmdbError) -> ConnectError {
         | QmdbError::CurrentBoundaryStateMissing { .. } => {
             ConnectError::failed_precondition(err.to_string())
         }
-        QmdbError::SyncFetchCancelled => ConnectError::canceled(err.to_string()),
         QmdbError::Stream(_) => ConnectError::unavailable(err.to_string()),
         QmdbError::ProofVerification { .. }
         | QmdbError::RangeMismatch(_)
@@ -569,7 +568,7 @@ impl<F: Family> PendingBatches<F> {
 struct ReadyBatch<F: Family> {
     watermark: Location<F>,
     /// Store sequence of this batch's ops frame. Emitted as
-    /// `resume_sequence_number`; unique per batch, so a client reconnecting
+    /// `resume_sequence_number`. It is unique per batch, so a client reconnecting
     /// at `resume + 1` skips only this batch. When multiple pending batches
     /// share a single authorizing watermark, each must carry its own
     /// per-batch sequence here or the reconnect cursor would jump past
@@ -872,9 +871,9 @@ where
     ) -> impl Future<Output = connectrpc::ServiceResult<PreEncoded<GetResponse>>> + Send {
         let client = self.client.clone();
         async move {
-            let key = client
-                .decode_key(request.key)
-                .map_err(qmdb_error_to_connect)?;
+            let key = client.decode_key(request.key).map_err(|error| {
+                ConnectError::invalid_argument(format!("invalid QMDB key: {error}"))
+            })?;
             let tip = Location::new(request.tip);
             let proof = client
                 .key_value_proof_raw_at(tip, key.as_ref())
@@ -898,7 +897,9 @@ where
                 .iter()
                 .map(|key| client.decode_key(key.as_ref()))
                 .collect::<Result<Vec<_>, _>>()
-                .map_err(qmdb_error_to_connect)?;
+                .map_err(|error| {
+                    ConnectError::invalid_argument(format!("invalid QMDB key: {error}"))
+                })?;
             let proofs = client
                 .key_lookup_proofs_raw_at(tip, &decoded_keys)
                 .await
@@ -990,14 +991,16 @@ where
         let client = self.client.clone();
         async move {
             let tip = Location::new(request.tip);
-            let start_key = client
-                .decode_key(request.start_key)
-                .map_err(qmdb_error_to_connect)?;
+            let start_key = client.decode_key(request.start_key).map_err(|error| {
+                ConnectError::invalid_argument(format!("invalid QMDB key: {error}"))
+            })?;
             let end_key = request
                 .end_key
                 .map(|key| client.decode_key(key))
                 .transpose()
-                .map_err(qmdb_error_to_connect)?;
+                .map_err(|error| {
+                    ConnectError::invalid_argument(format!("invalid QMDB key: {error}"))
+                })?;
             let proof = client
                 .key_range_proof_raw_at(tip, start_key, end_key, request.limit)
                 .await
@@ -1492,13 +1495,6 @@ mod authenticated_upload_subscription_tests {
         }
     }
 
-    fn presence(location: u64) -> StreamSubscriptionEntry {
-        StreamSubscriptionEntry {
-            key: crate::codec::encode_presence_key(Location::<F>::new(location)),
-            value: Bytes::new(),
-        }
-    }
-
     #[tokio::test]
     async fn test_data_only_frames_wait_for_publication_and_keep_store_order() {
         let mut stream = stream().await;
@@ -1608,7 +1604,6 @@ mod authenticated_upload_subscription_tests {
                     operation(0, b"zero"),
                     operation(1, b"one"),
                     operation(0, b"zero"),
-                    presence(1),
                     watermark(1),
                 ],
             })
@@ -1632,7 +1627,6 @@ mod authenticated_upload_subscription_tests {
                 entries: vec![
                     operation(0, b"zero"),
                     operation(0, b"different"),
-                    presence(0),
                     watermark(0)
                 ],
             })

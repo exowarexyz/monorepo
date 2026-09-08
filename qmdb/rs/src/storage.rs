@@ -12,6 +12,10 @@ use exoware_sdk::{RangeMode, SerializableReadSession};
 
 use crate::codec::{chunk_index_for_location, encode_grafted_node_key, encode_node_key};
 
+#[cfg(test)]
+#[path = "storage/read_tests.rs"]
+mod read_tests;
+
 pub(crate) struct KvMerkleStorage<'a, F: Family, D: Digest> {
     pub(crate) session: &'a SerializableReadSession,
     pub(crate) size: Position<F>,
@@ -35,14 +39,61 @@ impl<F: Family, D: Digest> MerkleStorage<F> for KvMerkleStorage<'_, F, D> {
         let Some(bytes) = bytes else {
             return Ok(None);
         };
+        Self::decode_node(bytes.as_ref()).map(Some)
+    }
+
+    async fn get_nodes(&self, positions: &[Position<F>]) -> Result<Vec<D>, merkle::Error<F>> {
+        assert!(
+            positions.is_sorted_by(|a, b| a < b),
+            "positions must be strictly increasing"
+        );
+        let nodes = self.load_nodes(positions).await?;
+        positions
+            .iter()
+            .zip(nodes)
+            .map(|(&position, node)| node.ok_or(merkle::Error::ElementPruned(position)))
+            .collect()
+    }
+}
+
+impl<F: Family, D: Digest> KvMerkleStorage<'_, F, D> {
+    fn decode_node(bytes: &[u8]) -> Result<D, merkle::Error<F>> {
         if bytes.len() != D::SIZE {
             return Err(merkle::Error::DataCorrupted(
                 "exoware-qmdb node digest has invalid length",
             ));
         }
-        D::decode(bytes.as_ref())
-            .map(Some)
+        D::decode(bytes)
             .map_err(|_| merkle::Error::DataCorrupted("exoware-qmdb node digest decode failed"))
+    }
+
+    async fn load_nodes(
+        &self,
+        positions: &[Position<F>],
+    ) -> Result<Vec<Option<D>>, merkle::Error<F>> {
+        if positions.is_empty() {
+            return Ok(Vec::new());
+        }
+        let keys = positions
+            .iter()
+            .map(|&position| encode_node_key(position))
+            .collect::<Vec<_>>();
+        let refs = keys.iter().collect::<Vec<_>>();
+        let rows = self
+            .session
+            .get_many(&refs, u32::try_from(keys.len()).unwrap_or(u32::MAX))
+            .await
+            .map_err(|_| merkle::Error::DataCorrupted("exoware-qmdb node fetch failed"))?
+            .collect()
+            .await
+            .map_err(|_| merkle::Error::DataCorrupted("exoware-qmdb node fetch failed"))?;
+        keys.iter()
+            .map(|key| {
+                rows.get(key)
+                    .map(|bytes| Self::decode_node(bytes.as_ref()))
+                    .transpose()
+            })
+            .collect()
     }
 }
 
@@ -63,6 +114,49 @@ impl<F: Graftable, H: Hasher, const N: usize> MerkleStorage<F> for KvCurrentStor
 
     async fn get_node(&self, position: Position<F>) -> Result<Option<H::Digest>, merkle::Error<F>> {
         self.get_node_inner(position).await
+    }
+
+    async fn get_nodes(
+        &self,
+        positions: &[Position<F>],
+    ) -> Result<Vec<H::Digest>, merkle::Error<F>> {
+        assert!(
+            positions.is_sorted_by(|a, b| a < b),
+            "positions must be strictly increasing"
+        );
+        let grafting_height = grafting::height::<N>();
+        let (ops_positions, current_positions): (Vec<_>, Vec<_>) = positions
+            .iter()
+            .copied()
+            .partition(|position| F::pos_to_height(*position) < grafting_height);
+        let ops = KvMerkleStorage::<F, H::Digest> {
+            session: self.session,
+            size: self.size,
+            _marker: PhantomData,
+        };
+        let (ops_nodes, current_nodes) = futures::try_join!(
+            ops.load_nodes(&ops_positions),
+            futures::future::try_join_all(
+                current_positions
+                    .iter()
+                    .map(|&position| self.get_node_inner(position))
+            ),
+        )?;
+        let mut ops_nodes = ops_nodes.into_iter();
+        let mut current_nodes = current_nodes.into_iter();
+        // Resolve absent nodes in request order after all independent reads complete
+        positions
+            .iter()
+            .map(|&position| {
+                let node = if F::pos_to_height(position) < grafting_height {
+                    ops_nodes.next()
+                } else {
+                    current_nodes.next()
+                }
+                .expect("one result per requested position");
+                node.ok_or(merkle::Error::ElementPruned(position))
+            })
+            .collect()
     }
 }
 
@@ -94,7 +188,8 @@ impl<F: Graftable, H: Hasher, const N: usize> KvCurrentStorage<'_, F, H, N> {
         }
 
         // A parent can cover both discarded all-zero chunks and retained chunks with active bits
-        // Activity changes before pruning can change its hash; pruning itself preserves the root
+        // Activity changes before pruning can change its hash
+        // Pruning itself preserves the root
         // Boundary deltas omit discarded chunks, so only wholly retained nodes reuse stored current hashes
         if *leftmost >= self.pruned_chunks {
             let start = encode_grafted_node_key(grafted_position, Location::new(0));

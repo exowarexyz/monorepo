@@ -11,7 +11,7 @@ use crate::MAX_OPERATION_SIZE;
 // instance or backend it belongs to. The same semantic row therefore uses the
 // same family byte across ALL backend variants (ordered, unordered, immutable,
 // keyless). Instance identity lives solely in the outer Store
-// namespace (the SDK `StoreKeyPrefix`); a single raw Store keyspace must never
+// namespace (the SDK `StoreKeyPrefix`). A single raw Store keyspace must never
 // be shared across multiple QMDB backends or instances, so reusing family bytes
 // across variants is safe.
 pub(crate) const UPDATE_FAMILY: u8 = 0x1;
@@ -363,7 +363,7 @@ pub(crate) fn encode_chunk_key<F: Family>(chunk_index: u64, watermark: Location<
 
 /// Clear every bitmap bit below `floor` within the chunk at `chunk_index`.
 ///
-/// Bits below the inactivity floor are definitionally 0 at any watermark; the
+/// Bits below the inactivity floor are definitionally 0 at any watermark. The
 /// producer does not republish a chunk every time floor advancement flips one
 /// of its bits, so the stored payload may carry stale 1s. Fold those clears
 /// in deterministically at read time. Mirrors the bit layout used by

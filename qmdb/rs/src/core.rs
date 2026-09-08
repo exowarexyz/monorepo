@@ -77,7 +77,7 @@ pub(crate) struct HistoricalOpsClientCore<'a, F: Family, D: Digest, K: Codec, V:
 
 /// Maps the operation recorded at an update-index row's location into a
 /// `VersionedValue`, verifying it matches the requested key. Each QMDB variant
-/// loads and matches its own operation enum; the shared scan-and-await pipeline
+/// loads and matches its own operation enum. The shared scan-and-await pipeline
 /// lives in [`HistoricalOpsClientCore::query_many_at`].
 pub(crate) trait LatestValueResolver<F: Family, K: Codec, V: Codec> {
     fn resolve_latest_value(

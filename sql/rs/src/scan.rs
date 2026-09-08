@@ -476,9 +476,6 @@ pub(crate) async fn stream_index_lookup_scan(
     let mut batch_builder = ProjectedBatchBuilder::from_access_plan(ctx.model, ctx.access_plan);
 
     'ranges: for range in &plan.ranges {
-        if emitted + batch_builder.row_count() >= target_rows {
-            break;
-        }
         let mut stream = range_stream_with_direction(
             ctx.session,
             range,

@@ -1250,6 +1250,13 @@ where
         expected_boundaries.push((latest, root, value));
     }
     assert_eq!(qmdb_client.writer_location_watermark().await.unwrap(), None);
+    for (boundary, _, _) in &expected_boundaries {
+        assert!(matches!(
+            qmdb_client.current_root_at(*boundary).await,
+            Err(exoware_qmdb::QmdbError::WatermarkTooLow { requested, available: 0 })
+                if requested == boundary.as_u64()
+        ));
+    }
 
     // Publish once after both prefixes and their versioned current boundary rows are durable
     let latest = expected_boundaries.last().unwrap().0;

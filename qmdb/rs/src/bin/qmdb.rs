@@ -72,7 +72,7 @@ enum Command {
         #[arg(long, default_value_t = 2)]
         interval_secs: u64,
         /// Persistent directory for the local ordered-QMDB state. Reusing the
-        /// same directory across restarts preserves the write log; deleting it
+        /// same directory across restarts preserves the write log. Deleting it
         /// resets the demo. Defaults to `$HOME/.exoware_qmdb_mmb_seed`.
         #[arg(long)]
         directory: Option<PathBuf>,

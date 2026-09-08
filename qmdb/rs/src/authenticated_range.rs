@@ -50,7 +50,7 @@ pub struct AuthenticatedOperationRange<'a, D: Digest, F: Family> {
 pub trait UploadOperation<F: Family>: Codec + Floored<F> {
     /// Return the affected key and whether its value is present after this operation.
     ///
-    /// Commits and keyless operations return `None`; deletions return `Some((key, false))`.
+    /// Commits and keyless operations return `None`. Deletions return `Some((key, false))`.
     fn indexed_key(&self) -> Option<(&[u8], bool)>;
 }
 
@@ -116,7 +116,7 @@ impl<D: Digest, F: Graftable> PreparedAuthenticatedRange<D, F> {
     /// The boundary, including its `pruned_chunks` count, must come from the same trusted producer.
     /// Use `recover_boundary_state` to authenticate recovered chunks and nodes against that
     /// producer's current root. This method checks only the binding to the verified operation
-    /// root; it does not authenticate the supplied chunks, nodes, or pruned chunk count.
+    /// root. It does not authenticate the supplied chunks, nodes, or pruned chunk count.
     pub fn with_current_boundary<H: Hasher<Digest = D>, const N: usize>(
         mut self,
         boundary: &CurrentBoundaryState<D, N, F>,

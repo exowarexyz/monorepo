@@ -311,6 +311,64 @@ fn tamper_get_many_response(mut response: ProtoGetManyResponse) -> ProtoGetManyR
 }
 
 #[tokio::test]
+async fn test_ordered_connect_rejects_malformed_request_keys() {
+    let ordered_client = Arc::new(TestOrderedClient::new(
+        PrefixedStoreClient::empty(StoreClient::new("http://127.0.0.1:1")),
+        op_cfg(),
+        key_cfg(),
+    ));
+    let (server, url) = spawn_qmdb_server(ordered_client).await;
+    let lookup = rpc_client(&url);
+    let ranges = range_rpc_client(&url);
+    // A one-byte value length without its payload is invalid Vec key encoding
+    let malformed = vec![1];
+    let errors = [
+        lookup
+            .get(ProtoGetRequest {
+                key: malformed.clone(),
+                tip: 1,
+                ..Default::default()
+            })
+            .await
+            .unwrap_err()
+            .code,
+        lookup
+            .get_many(ProtoGetManyRequest {
+                keys: vec![encoded_key(b"alpha"), malformed.clone()],
+                tip: 1,
+                ..Default::default()
+            })
+            .await
+            .unwrap_err()
+            .code,
+        ranges
+            .get_range(ProtoGetRangeRequest {
+                start_key: malformed.clone(),
+                end_key: Some(encoded_key(b"omega")),
+                limit: 1,
+                tip: 1,
+                ..Default::default()
+            })
+            .await
+            .unwrap_err()
+            .code,
+        ranges
+            .get_range(ProtoGetRangeRequest {
+                start_key: encoded_key(b"alpha"),
+                end_key: Some(malformed),
+                limit: 1,
+                tip: 1,
+                ..Default::default()
+            })
+            .await
+            .unwrap_err()
+            .code,
+    ];
+    assert_eq!(errors, [connectrpc::ErrorCode::InvalidArgument; 4]);
+    server.abort();
+}
+
+#[tokio::test]
 async fn test_ordered_connect_get_returns_current_key_value_proof() {
     let store_client = common::local_store_client().await;
     let source = build_source_batch().await;

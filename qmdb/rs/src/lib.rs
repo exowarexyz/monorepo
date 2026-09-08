@@ -110,7 +110,7 @@ pub struct CurrentBoundaryState<D: Digest, const N: usize, F: Graftable> {
     /// Canonical current-state root at this batch boundary.
     pub root: D,
     /// Number of complete, all-zero chunks discarded from the start of the source bitmap.
-    /// Source pruning preserves the root; this count does not delete backend rows.
+    /// Source pruning preserves the root. This count does not delete backend rows.
     pub pruned_chunks: u64,
     /// Proof that the raw operation-log root is committed by `root`.
     pub ops_root_witness: OpsRootWitness<F, D>,

@@ -73,7 +73,9 @@ use exoware_qmdb::{
     prepare_authenticated_range, stage_authenticated_range, stage_watermark,
     AuthenticatedOperationRange,
 };
-use exoware_sdk::StoreWriteBatch;
+use exoware_sdk::{PrefixedStoreClient, StoreClient, StoreWriteBatch};
+
+let client = PrefixedStoreClient::empty(StoreClient::new(store_url));
 
 let range = AuthenticatedOperationRange {
     start_location,
@@ -232,8 +234,9 @@ and regexes over logical keys and values. Reconnect from
 Subscription delivery follows Store write frames and waits for the caller to
 publish a watermark covering each frame's operations. Data rows may span Store
 writes. Individual frames may contain only part of an uploaded range.
-Overlapping operation locations in one frame are deduplicated. Retries in separate frames can deliver
-operations again, so consumers must tolerate at-least-once delivery.
+Overlapping operation locations in one frame are deduplicated. Retries in
+separate frames can deliver operations again, so consumers must tolerate
+at-least-once delivery.
 
 `OperationLogClient` also implements Commonware's sync `Source`. Construct a
 sync target from a trusted operation-log root and retention range, or use
@@ -299,6 +302,10 @@ Every case checks its final Connect proof against a browser fixture. The browser
 matrix independently enumerates all 72 names and verifies those raw historical
 proofs with WASM, including current-root witnesses and rejection of tampered
 roots, requests, and operations.
+
+The current ordered variable-key/value MMR and MMB cases also produce current
+query fixtures. Browser tests verify key hits, authenticated misses, bounded
+empty ranges, and pagination against those source-backed responses.
 
 ```sh
 cargo test -p exoware-qmdb --test e2e_variants
