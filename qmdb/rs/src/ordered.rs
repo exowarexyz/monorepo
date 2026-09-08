@@ -384,7 +384,22 @@ where
         start_location: Location<F>,
         max_locations: u32,
     ) -> Result<OperationRangeCheckpoint<H::Digest, F>, QmdbError> {
-        let session = self.client.create_session();
+        let (proof, _) = self
+            .operation_range_checkpoint_with_read_floor(0, watermark, start_location, max_locations)
+            .await?;
+        Ok(proof)
+    }
+
+    pub(crate) async fn operation_range_checkpoint_with_read_floor(
+        &self,
+        read_floor_sequence: u64,
+        watermark: Location<F>,
+        start_location: Location<F>,
+        max_locations: u32,
+    ) -> Result<(OperationRangeCheckpoint<H::Digest, F>, u64), QmdbError> {
+        let session = self
+            .client
+            .create_session_with_sequence(read_floor_sequence);
         self.core()
             .require_published_watermark(&session, watermark)
             .await?;
@@ -414,7 +429,12 @@ where
         )
         .await?;
         checkpoint.ops_root_witness = self.load_ops_root_witness(&session, watermark).await?;
-        Ok(checkpoint)
+        let sequence_number = session.evaluated_sequence().ok_or_else(|| {
+            QmdbError::CorruptData(
+                "operation range proof did not evaluate a Store sequence".to_string(),
+            )
+        })?;
+        Ok((checkpoint, sequence_number))
     }
 
     /// Verified raw current-state proof for a contiguous operation range.

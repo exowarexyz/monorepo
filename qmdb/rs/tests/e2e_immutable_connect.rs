@@ -200,22 +200,38 @@ async fn test_immutable_connect_get_operation_range_returns_verifiable_proof() {
     let (_qmdb_server, qmdb_url) = spawn_qmdb_server(immutable_client).await;
     let connect_client = operation_log_client(&qmdb_url);
 
-    let proof = connect_client
-        .get_operation_range(
-            ProtoGetOperationRangeRequest {
-                tip: u64::try_from(source.operations.len() - 1).expect("tip fits"),
-                start_location: 1,
-                max_locations: 1,
-                ..Default::default()
-            },
-            &source.root,
-        )
-        .await
-        .expect("get operation range");
+    for min_sequence_number in [None, Some(1)] {
+        let proof = connect_client
+            .get_operation_range(
+                ProtoGetOperationRangeRequest {
+                    tip: u64::try_from(source.operations.len() - 1).expect("tip fits"),
+                    start_location: 1,
+                    max_locations: 1,
+                    min_sequence_number,
+                    ..Default::default()
+                },
+                &source.root,
+            )
+            .await
+            .expect("get operation range");
 
-    assert_eq!(proof.root, source.root);
-    assert_eq!(proof.start_location, Location::new(1));
-    assert_eq!(proof.operations, vec![source.operations[1].clone()]);
+        assert!(proof.sequence_number >= 1);
+        assert_eq!(proof.root, source.root);
+        assert_eq!(proof.start_location, Location::new(1));
+        assert_eq!(proof.operations, vec![source.operations[1].clone()]);
+    }
+
+    let error = common::operation_log_rpc_client(&qmdb_url)
+        .get_operation_range(ProtoGetOperationRangeRequest {
+            tip: u64::try_from(source.operations.len() - 1).expect("tip fits"),
+            start_location: 1,
+            max_locations: 1,
+            min_sequence_number: Some(u64::MAX),
+            ..Default::default()
+        })
+        .await
+        .expect_err("unavailable sequence floor");
+    assert_eq!(error.code, connectrpc::ErrorCode::Aborted);
 }
 
 #[tokio::test]
