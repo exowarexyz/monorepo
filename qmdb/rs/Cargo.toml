@@ -18,6 +18,7 @@ bytes = { workspace = true }
 buffa = { workspace = true }
 clap = { workspace = true, features = ["derive"] }
 commonware-codec = { workspace = true }
+commonware-macros = { workspace = true }
 commonware-parallel = { workspace = true }
 commonware-runtime = { workspace = true }
 futures = { workspace = true }

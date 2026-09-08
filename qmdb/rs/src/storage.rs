@@ -1,9 +1,11 @@
 use std::marker::PhantomData;
 
-use commonware_codec::DecodeExt;
-use commonware_cryptography::Digest;
+use commonware_codec::{DecodeExt, FixedSize};
+use commonware_cryptography::{Digest, Hasher};
+use commonware_macros::boxed;
 use commonware_storage::merkle::{
-    self, storage::Storage as MerkleStorage, Family, Graftable, Location, Position,
+    self, hasher::Hasher as _, storage::Storage as MerkleStorage, Family, Graftable, Location,
+    Position,
 };
 use commonware_storage::qmdb::current::grafting;
 use exoware_sdk::{RangeMode, SerializableReadSession};
@@ -44,39 +46,41 @@ impl<F: Family, D: Digest> MerkleStorage<F> for KvMerkleStorage<'_, F, D> {
     }
 }
 
-pub(crate) struct KvCurrentStorage<'a, F: Graftable, D: Digest, const N: usize> {
+pub(crate) struct KvCurrentStorage<'a, F: Graftable, H: Hasher, const N: usize> {
     pub(crate) session: &'a SerializableReadSession,
     pub(crate) watermark: Location<F>,
     pub(crate) pruned_chunks: u64,
     pub(crate) size: Position<F>,
-    pub(crate) _marker: PhantomData<D>,
+    pub(crate) _marker: PhantomData<H>,
 }
 
-impl<F: Graftable, D: Digest, const N: usize> MerkleStorage<F> for KvCurrentStorage<'_, F, D, N> {
-    type Digest = D;
+impl<F: Graftable, H: Hasher, const N: usize> MerkleStorage<F> for KvCurrentStorage<'_, F, H, N> {
+    type Digest = H::Digest;
 
     fn size(&self) -> Position<F> {
         self.size
     }
 
-    async fn get_node(&self, position: Position<F>) -> Result<Option<D>, merkle::Error<F>> {
+    async fn get_node(&self, position: Position<F>) -> Result<Option<H::Digest>, merkle::Error<F>> {
+        self.get_node_inner(position).await
+    }
+}
+
+impl<F: Graftable, H: Hasher, const N: usize> KvCurrentStorage<'_, F, H, N> {
+    #[boxed]
+    async fn get_node_inner(
+        &self,
+        position: Position<F>,
+    ) -> Result<Option<H::Digest>, merkle::Error<F>> {
+        let ops = KvMerkleStorage::<F, H::Digest> {
+            session: self.session,
+            size: self.size,
+            _marker: PhantomData,
+        };
         let grafting_height = grafting::height::<N>();
-        if F::pos_to_height(position) < grafting_height {
-            let key = encode_node_key(position);
-            let bytes = self.session.get(&key).await.map_err(|_| {
-                merkle::Error::DataCorrupted("exoware-qmdb current ops node fetch failed")
-            })?;
-            let Some(bytes) = bytes else {
-                return Ok(None);
-            };
-            if bytes.len() != D::SIZE {
-                return Err(merkle::Error::DataCorrupted(
-                    "exoware-qmdb current ops node has invalid length",
-                ));
-            }
-            return D::decode(bytes.as_ref()).map(Some).map_err(|_| {
-                merkle::Error::DataCorrupted("exoware-qmdb current ops node decode failed")
-            });
+        let ops_height = F::pos_to_height(position);
+        if ops_height < grafting_height {
+            return ops.get_node(position).await;
         }
 
         let grafted_position = grafting::ops_to_grafted_pos::<F>(position, grafting_height);
@@ -86,43 +90,49 @@ impl<F: Graftable, D: Digest, const N: usize> MerkleStorage<F> for KvCurrentStor
             merkle::Error::DataCorrupted("exoware-qmdb current grafted height overflow")
         })?;
         if (*leftmost).saturating_add(covered_chunks) <= self.pruned_chunks {
-            let key = encode_node_key(position);
-            let bytes = self.session.get(&key).await.map_err(|_| {
-                merkle::Error::DataCorrupted("exoware-qmdb current pruned ops node fetch failed")
-            })?;
-            let Some(bytes) = bytes else {
-                return Ok(None);
-            };
-            if bytes.len() != D::SIZE {
-                return Err(merkle::Error::DataCorrupted(
-                    "exoware-qmdb current pruned ops node has invalid length",
-                ));
-            }
-            return D::decode(bytes.as_ref()).map(Some).map_err(|_| {
-                merkle::Error::DataCorrupted("exoware-qmdb current pruned ops node decode failed")
-            });
+            return ops.get_node(position).await;
         }
 
-        let start = encode_grafted_node_key(grafted_position, Location::new(0));
-        let end = encode_grafted_node_key(grafted_position, self.watermark);
-        let rows = self
-            .session
-            .range_with_mode(&start, &end, 1, RangeMode::Reverse)
-            .await
-            .map_err(|_| {
-                merkle::Error::DataCorrupted("exoware-qmdb current grafted node fetch failed")
-            })?;
-        let Some((_, bytes)) = rows.into_iter().next() else {
+        // A parent can cover both discarded all-zero chunks and retained chunks with active bits
+        // Activity changes before pruning can change its hash; pruning itself preserves the root
+        // Boundary deltas omit discarded chunks, so only wholly retained nodes reuse stored current hashes
+        if *leftmost >= self.pruned_chunks {
+            let start = encode_grafted_node_key(grafted_position, Location::new(0));
+            let end = encode_grafted_node_key(grafted_position, self.watermark);
+            let rows = self
+                .session
+                .range_with_mode(&start, &end, 1, RangeMode::Reverse)
+                .await
+                .map_err(|_| {
+                    merkle::Error::DataCorrupted("exoware-qmdb current grafted node fetch failed")
+                })?;
+            if let Some((_, bytes)) = rows.into_iter().next() {
+                if bytes.len() != H::Digest::SIZE {
+                    return Err(merkle::Error::DataCorrupted(
+                        "exoware-qmdb current grafted node has invalid length",
+                    ));
+                }
+                return H::Digest::decode(bytes.as_ref()).map(Some).map_err(|_| {
+                    merkle::Error::DataCorrupted("exoware-qmdb current grafted node decode failed")
+                });
+            }
+        }
+
+        // Grafted leaves require bitmap data and cannot be reconstructed from operation children
+        if grafted_height == 0 {
+            return Ok(None);
+        }
+
+        // Rebuild parents spanning the pruning boundary and absent delayed-merge parents from children
+        let (left, right) = F::children(position, ops_height);
+        let Some(left) = self.get_node_inner(left).await? else {
             return Ok(None);
         };
-        if bytes.len() != D::SIZE {
-            return Err(merkle::Error::DataCorrupted(
-                "exoware-qmdb current grafted node has invalid length",
-            ));
-        }
-        D::decode(bytes.as_ref()).map(Some).map_err(|_| {
-            merkle::Error::DataCorrupted("exoware-qmdb current grafted node decode failed")
-        })
+        let Some(right) = self.get_node_inner(right).await? else {
+            return Ok(None);
+        };
+        let hasher = commonware_storage::qmdb::hasher::<H>();
+        Ok(Some(hasher.node_digest(position, &left, &right)))
     }
 }
 

@@ -920,7 +920,7 @@ where
         let status = self
             .proof_bitmap(session, watermark, inactivity_floor, None)
             .await?;
-        let storage = KvCurrentStorage::<F, H::Digest, N> {
+        let storage = KvCurrentStorage::<F, H, N> {
             session,
             watermark,
             pruned_chunks: status.pruned_chunks as u64,
@@ -954,7 +954,7 @@ where
         let status = self
             .proof_bitmap(session, watermark, inactivity_floor, Some(location))
             .await?;
-        let storage = KvCurrentStorage::<F, H::Digest, N> {
+        let storage = KvCurrentStorage::<F, H, N> {
             session,
             watermark,
             pruned_chunks: status.pruned_chunks as u64,

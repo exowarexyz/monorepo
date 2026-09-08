@@ -102,7 +102,7 @@ where
 ///
 /// The caller must obtain `root`, `pruned_chunks`, and `ops_root_witness` from the
 /// same trusted local state. This function authenticates recovered chunks and nodes
-/// against `root`; it does not independently authenticate pruning metadata.
+/// against `root`; it does not independently authenticate the pruned chunk count.
 /// Attach the result with [`crate::PreparedAuthenticatedRange::with_current_boundary`].
 pub async fn recover_boundary_state<M, H, Op, const N: usize, Prove, Fut>(
     previous_operations: Option<&[Op]>,

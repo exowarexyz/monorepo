@@ -110,10 +110,10 @@ impl<D: Digest, F: Family> PreparedAuthenticatedRange<D, F> {
 impl<D: Digest, F: Graftable> PreparedAuthenticatedRange<D, F> {
     /// Add caller-authenticated current-state boundary rows for this operation root.
     ///
-    /// The boundary, including its pruning metadata, must come from the same trusted producer.
+    /// The boundary, including its `pruned_chunks` count, must come from the same trusted producer.
     /// Use `recover_boundary_state` to authenticate recovered chunks and nodes against that
     /// producer's current root. This method checks only the binding to the verified operation
-    /// root; it does not authenticate the supplied chunks, nodes, or pruning metadata.
+    /// root; it does not authenticate the supplied chunks, nodes, or pruned chunk count.
     pub fn with_current_boundary<H: Hasher<Digest = D>, const N: usize>(
         mut self,
         boundary: &CurrentBoundaryState<D, N, F>,

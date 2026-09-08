@@ -2697,6 +2697,7 @@ dependencies = [
  "commonware-codec",
  "commonware-cryptography",
  "commonware-glue",
+ "commonware-macros",
  "commonware-parallel",
  "commonware-runtime",
  "commonware-storage",

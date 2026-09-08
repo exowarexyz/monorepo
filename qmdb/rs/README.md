@@ -142,19 +142,19 @@ let prepared = prepared.with_current_boundary::<H, N>(&boundary)?;
 ```
 
 The boundary contains the trusted current root, an `OpsRootWitness`, bitmap
-chunk deltas, grafted-node deltas, and pruning metadata for the packet's final
+chunk deltas, grafted-node deltas, and `pruned_chunks` for the packet's final
 location. Its family, hasher, and chunk size `N` must match the source DB.
 
 `with_current_boundary` checks that the witness binds the authenticated
 operation-log root to `boundary.root`. The caller must already have
 authenticated the boundary's bitmap chunks and grafted nodes against its trusted
-current root. Pruning metadata must also come from that trusted state. The attachment method
-does not verify chunks, nodes, or pruning metadata by itself.
+current root. The `pruned_chunks` count must also come from that trusted state.
+The attachment method does not verify chunks, nodes, or that count by itself.
 
 `recover_boundary_state` is the shared proof-based helper for deriving this
 material from a Commonware current DB. For an incremental boundary it takes the
 cumulative operation logs before and after one finalized batch, the trusted
-current root, pruning metadata, the operation-root witness, and current range
+current root, `pruned_chunks`, the operation-root witness, and current range
 proofs from that same state. Passing no previous log derives a complete boundary
 from the retained operation prefix, including bootstrap or restart material.
 It verifies the supplied current proofs and derives the boundary rows without
@@ -164,6 +164,29 @@ Current rows are versioned by the final operation location of their batch.
 Only changed chunks and grafted nodes need new rows; unchanged rows are inherited
 from earlier boundaries. Current proof reads fetch those versioned rows and
 persisted operation Merkle nodes instead of replaying the complete log.
+Internal nodes absent from a sparse boundary can be reconstructed from their
+authenticated children, including parents created by delayed MMB merges.
+
+`pruned_chunks` counts the complete, all-zero bitmap chunks discarded from the
+start of the source bitmap. A parent spans the pruning boundary when it covers
+chunks on both sides of that boundary. This is expected during normal updates
+and pruning. For example:
+
+1. A parent covers bitmap chunks 0 and 1.
+2. Updates make chunk 0 entirely inactive, so the source discards it.
+3. Chunk 1 still contains active operations.
+4. Their parent now spans the pruning boundary.
+
+A proof for an active operation can still need that parent hash. The backend
+computes it from chunk 0's operation-tree hash and chunk 1's current hash, using
+the requested historical boundary. An all-zero bitmap chunk preserves its
+operation-tree hash, so the discarded bitmap data is not needed to compute it.
+
+The activity changes happen before pruning and can change the parent hash.
+Pruning itself preserves the root. Since boundary deltas omit discarded chunks,
+the backend recomputes parents spanning the boundary instead of relying on an
+older stored parent hash. The `pruned_chunks` count does not delete backend rows
+or configure retention.
 
 Proof capture timing belongs to the source producer. Commonware `any`,
 immutable, and keyless finalized batches expose operations, a root, a proof,
@@ -220,8 +243,10 @@ against a trusted current root.
 
 The update-row pruning helpers `prune::keep_latest_updates(count)` and
 `prune::keep_positions_gte(min_location)` return SDK prune policies using the
-actual prefix-free key layout. Pruning removes historical data, so choose a
-policy that retains the locations needed by the application's reads and proofs.
+actual prefix-free key layout. Applications explicitly choose Store-row pruning
+and replay-log retention policies; source bitmap pruning does not trigger either.
+Retain the rows needed to serve the application's promised historical reads and
+proofs.
 
 ## Browser scope
 
