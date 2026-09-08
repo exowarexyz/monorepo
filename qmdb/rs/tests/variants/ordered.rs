@@ -15,19 +15,19 @@ use commonware_runtime::{
     buffer::paged::CacheRef, tokio as cw_tokio, Runner as _, Supervisor as _,
 };
 use commonware_storage::{
-    journal::contiguous::fixed::Config as FixedJournalConfig,
     merkle::{mmb, mmr, Graftable, Location, Proof},
     qmdb::{
         any::{
-            self, ordered,
+            ordered,
             value::{FixedEncoding, ValueEncoding, VariableEncoding},
         },
-        current::{self, ordered::ExclusionProof},
+        current::ordered::ExclusionProof,
         operation::Key as QmdbKey,
     },
-    translator::TwoCap,
 };
-use commonware_utils::{bitmap::Readable as _, sequence::FixedBytes, NZUsize, NZU16, NZU64};
+use commonware_utils::{
+    bitmap::Readable as _, iter::zip_eq, sequence::FixedBytes, NZUsize, NZU16, NZU64,
+};
 use exoware_qmdb::proto::qmdb::v1::{
     GetCurrentOperationRangeRequest, GetManyRequest, GetOperationRangeRequest, GetRangeRequest,
     GetRequest, SubscribeRequest,
@@ -36,8 +36,7 @@ use exoware_qmdb::{
     ordered_connect_stack, ordered_operation_log_connect_stack, prepare_authenticated_range,
     recover_boundary_state, stage_authenticated_range, stage_watermark,
     AuthenticatedOperationRange, CurrentBoundaryState, CurrentOperationClient, OperationLogClient,
-    OrderedClient, OrderedConnectClient, QmdbError, UploadOperation, VerifiedKeyLookup,
-    MAX_OPERATION_SIZE,
+    OrderedClient, OrderedConnectClient, UploadOperation, VerifiedKeyLookup, MAX_OPERATION_SIZE,
 };
 use exoware_sdk::{proto::PreferZstdHttpClient, PrefixedStoreClient, StoreWriteBatch};
 
@@ -364,8 +363,7 @@ async fn verify_snapshots<F, K, V, E>(
             .query_many_at(&all_keys, tip)
             .await
             .expect("native ordered lookup rows");
-        assert_eq!(queried.len(), all_keys.len());
-        for (key, row) in all_keys.iter().zip(queried) {
+        for (key, row) in zip_eq(&all_keys, queried) {
             assert_eq!(
                 row.as_ref().and_then(|row| row.value.clone()),
                 snapshot.values.get(key).cloned()
@@ -628,54 +626,6 @@ async fn verify_snapshots<F, K, V, E>(
     }
 }
 
-macro_rules! source_type {
-    (any, $encoding:ident, $family:ty, $key:ty, $value:ty) => {
-        any::ordered::$encoding::Db<$family, cw_tokio::Context, $key, $value, Sha256, TwoCap, Sequential>
-    };
-    (current, $encoding:ident, $family:ty, $key:ty, $value:ty) => {
-        current::ordered::$encoding::Db<$family, cw_tokio::Context, $key, $value, Sha256, TwoCap, N, Sequential>
-    };
-}
-
-macro_rules! journal_config {
-    (variable, $prefix:expr, $cache:expr, $cfg:expr) => {
-        common::variable_journal_config($prefix, $cache, $cfg, NZU64!(8))
-    };
-    (fixed, $prefix:expr, $cache:expr, $cfg:expr) => {
-        FixedJournalConfig {
-            partition: format!("{}-log", $prefix),
-            items_per_blob: NZU64!(8),
-            page_cache: $cache,
-            write_buffer: NZUsize!(1024),
-            replay_buffer: NZUsize!(1024),
-        }
-    };
-}
-
-macro_rules! source_config {
-    (any, $encoding:ident, $prefix:expr, $cache:expr, $cfg:expr) => {
-        any::Config {
-            merkle_config: common::merkle_config($prefix, $cache.clone()),
-            journal_config: journal_config!($encoding, $prefix, $cache, $cfg),
-            translator: TwoCap,
-            init_cache_size: None,
-            init_buffer: NZUsize!(1 << 21),
-            init_concurrency: (),
-        }
-    };
-    (current, $encoding:ident, $prefix:expr, $cache:expr, $cfg:expr) => {
-        current::Config {
-            merkle_config: common::merkle_config($prefix, $cache.clone()),
-            journal_config: journal_config!($encoding, $prefix, $cache, $cfg),
-            grafted_metadata_partition: format!("{}-grafted-metadata", $prefix),
-            translator: TwoCap,
-            init_cache_size: None,
-            init_buffer: NZUsize!(1 << 21),
-            init_concurrency: (),
-        }
-    };
-}
-
 macro_rules! capture_source_batch {
     (any, $family:ty, $db:ident, $batch:ident) => {{
         let (start_location, operations) = $batch.operations();
@@ -787,19 +737,7 @@ macro_rules! source_snapshot {
             root,
             0,
             $db.ops_root_witness().await.expect("source root witness"),
-            |location| {
-                let db = &$db;
-                async move {
-                    let (proof, _, mut chunks) =
-                        db.range_proof(location, NZU64!(1)).await.map_err(|error| {
-                            QmdbError::CorruptData(format!("source range proof: {error}"))
-                        })?;
-                    let chunk = chunks.pop().ok_or_else(|| {
-                        QmdbError::CorruptData("source range proof omitted chunk".into())
-                    })?;
-                    Ok((proof, chunk))
-                }
-            },
+            |location| common::current_proof_chunk($db.range_proof(location, NZU64!(1))),
         )
         .await
         .expect("recover source current boundary");
@@ -849,7 +787,14 @@ macro_rules! variant_case {
     ($name:ident, $state:ident, $encoding:ident, $family:ty, $fixture:ident) => {
         #[tokio::test]
         async fn $name() {
-            type Source = source_type!($state, $encoding, $family, $fixture::Key, $fixture::Value);
+            type Source = source_type!(
+                $state,
+                ordered,
+                $encoding,
+                $family,
+                $fixture::Key,
+                $fixture::Value
+            );
             type Op = Operation<$family, $fixture::Key, $fixture::Encoding>;
             let snapshots = tokio::task::spawn_blocking(|| {
                 cw_tokio::Runner::default().start(|context| async move {

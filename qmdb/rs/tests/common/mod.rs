@@ -12,7 +12,11 @@ use commonware_runtime::buffer::paged::CacheRef;
 use commonware_storage::{
     journal::contiguous::variable::Config as VariableJournalConfig,
     merkle::{full::Config as MerkleConfig, Family, Graftable},
-    qmdb::{any, current, immutable, keyless},
+    qmdb::{
+        any,
+        current::{self, proof::RangeProof},
+        immutable, keyless,
+    },
     translator::TwoCap,
 };
 use commonware_utils::{NZUsize, NZU64};
@@ -159,62 +163,26 @@ where
     panic!("{label}: exhausted retries");
 }
 
-/// Build a proof fixture with Commonware, independently of the Exoware adapter
+mod operations;
+#[allow(unused_imports)]
+pub use operations::prepare_operations;
+
+/// Extract the one operation's bitmap chunk from a native current range proof
 #[allow(dead_code)]
-pub fn prepare_operations<F, Op>(
-    operations: &[Op],
-    cfg: &Op::Cfg,
-) -> (
-    commonware_cryptography::sha256::Digest,
-    exoware_qmdb::PreparedAuthenticatedRange<commonware_cryptography::sha256::Digest, F>,
-)
+pub async fn current_proof_chunk<F, D, Op, E, const N: usize>(
+    proof: impl std::future::Future<Output = Result<(RangeProof<F, D>, Vec<Op>, Vec<[u8; N]>), E>>,
+) -> Result<(RangeProof<F, D>, [u8; N]), QmdbError>
 where
-    F: Family,
-    Op: exoware_qmdb::UploadOperation<F>,
+    F: Graftable,
+    D: Digest,
+    E: std::fmt::Display,
 {
-    use commonware_cryptography::Sha256;
-    use commonware_storage::merkle::{hasher::Hasher as _, mem::Mem, Location, Position};
-    let encoded = operations
-        .iter()
-        .map(|op| op.encode().to_vec())
-        .collect::<Vec<_>>();
-    let hasher = commonware_storage::qmdb::hasher::<Sha256>();
-    let base = Mem::<F, commonware_cryptography::sha256::Digest>::new();
-    let digests = encoded.iter().enumerate().map(|(index, op)| {
-        hasher.leaf_digest(
-            Position::try_from(Location::<F>::new(index as u64)).unwrap(),
-            op,
-        )
-    });
-    let merkle = base
-        .new_batch()
-        .add_leaf_digests(digests)
-        .merkleize(&base, &hasher);
-    let end = Location::new(operations.len() as u64);
-    let floor = operations
-        .last()
-        .unwrap()
-        .has_floor()
-        .expect("final commit");
-    let inactive = F::inactive_peaks(end, floor);
-    let root = merkle.root(&base, &hasher, inactive).unwrap();
-    let proof = merkle
-        .range_proof(&base, &hasher, Location::new(0)..end, inactive)
-        .unwrap();
-    let range = exoware_qmdb::AuthenticatedOperationRange {
-        start_location: Location::new(0),
-        proof: &proof,
-        pinned_nodes: &[],
-        encoded_operations: &encoded,
-    };
-    let prepared = exoware_qmdb::prepare_authenticated_range::<F, Sha256, Op, Sequential>(
-        &range,
-        &root,
-        cfg,
-        &Sequential,
-    )
-    .expect("prepare authenticated fixture");
-    (root, prepared)
+    let (proof, operations, chunks) = proof
+        .await
+        .map_err(|error| QmdbError::CorruptData(error.to_string()))?;
+    assert_eq!(operations.len(), 1, "one source operation");
+    assert_eq!(chunks.len(), 1, "one source bitmap chunk");
+    Ok((proof, chunks[0]))
 }
 
 #[allow(dead_code)]

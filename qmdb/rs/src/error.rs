@@ -55,12 +55,6 @@ impl From<crate::request::InvalidWindow> for QmdbError {
 pub enum QmdbError {
     #[error(transparent)]
     Client(#[from] ClientError),
-    #[error("uploaded location range [{start_location}, {latest_location}] is invalid for {count} operations")]
-    InvalidLocationRange {
-        start_location: u64,
-        latest_location: u64,
-        count: usize,
-    },
     #[error("batch must contain at least one operation")]
     EmptyBatch,
     #[error("proof request must contain at least one key")]

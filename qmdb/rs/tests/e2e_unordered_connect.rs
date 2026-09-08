@@ -107,7 +107,7 @@ fn operation_log_client(
 fn mmb_operation_log_client(
     base: &str,
 ) -> OperationLogClient<PreferZstdHttpClient, mmb::Family, Sha256, MmbBatchOperation> {
-    OperationLogClient::plaintext(base, mmb_op_cfg())
+    OperationLogClient::plaintext(base, op_cfg())
 }
 
 fn key_lookup_client(
@@ -137,13 +137,6 @@ fn ordered_range_rpc_client(base: &str) -> OrderedKeyRangeServiceClient<PreferZs
 }
 
 fn op_cfg() -> <BatchOperation as commonware_codec::Read>::Cfg {
-    (
-        ((0..=MAX_OPERATION_SIZE).into(), ()),
-        ((0..=MAX_OPERATION_SIZE).into(), ()),
-    )
-}
-
-fn mmb_op_cfg() -> <MmbBatchOperation as commonware_codec::Read>::Cfg {
     (
         ((0..=MAX_OPERATION_SIZE).into(), ()),
         ((0..=MAX_OPERATION_SIZE).into(), ()),
@@ -186,25 +179,7 @@ async fn boundary_from_current_source_db(
         db.root(),
         0,
         ops_root_witness,
-        |location| async move {
-            let (proof, mut proof_ops, mut chunks) =
-                db.range_proof(location, NZU64!(1)).await.map_err(|error| {
-                    exoware_qmdb::QmdbError::CorruptData(format!(
-                        "local current unordered range proof at {location}: {error}"
-                    ))
-                })?;
-            proof_ops.pop().ok_or_else(|| {
-                exoware_qmdb::QmdbError::CorruptData(format!(
-                    "local current unordered range proof at {location} returned no operations"
-                ))
-            })?;
-            let chunk = chunks.pop().ok_or_else(|| {
-                exoware_qmdb::QmdbError::CorruptData(format!(
-                    "local current unordered range proof at {location} returned no chunks"
-                ))
-            })?;
-            Ok((proof, chunk))
-        },
+        |location| common::current_proof_chunk(db.range_proof(location, NZU64!(1))),
     )
     .await
     .expect("recover unordered current boundary")
@@ -445,7 +420,7 @@ async fn commit_mmb_upload(store_client: &StoreClient, batch: &MmbAnySourceBatch
     common::commit_operations::<mmb::Family, MmbBatchOperation>(
         &PrefixedStoreClient::empty(store_client.clone()),
         &batch.operations,
-        &mmb_op_cfg(),
+        &op_cfg(),
     )
     .await
     .expect("commit upload");
@@ -714,13 +689,7 @@ async fn aligned_commit_boundary<F: commonware_storage::merkle::Graftable + Part
                     db.ops_root_witness()
                         .await
                         .expect("source ops root witness"),
-                    |location| async move {
-                        let (proof, _, mut chunks) = source
-                            .range_proof(location, NZU64!(1))
-                            .await
-                            .map_err(|error| QmdbError::CorruptData(error.to_string()))?;
-                        Ok((proof, chunks.pop().expect("source bitmap chunk")))
-                    },
+                    |location| common::current_proof_chunk(source.range_proof(location, NZU64!(1))),
                 )
                 .await
                 .expect("recover current boundary");
@@ -909,13 +878,7 @@ async fn current_boundary_nodes<F: commonware_storage::merkle::Graftable + Parti
                     db.ops_root_witness()
                         .await
                         .expect("source ops root witness"),
-                    |location| async move {
-                        let (proof, _, mut chunks) = source
-                            .range_proof(location, NZU64!(1))
-                            .await
-                            .map_err(|error| QmdbError::CorruptData(error.to_string()))?;
-                        Ok((proof, chunks.pop().expect("source bitmap chunk")))
-                    },
+                    |location| common::current_proof_chunk(source.range_proof(location, NZU64!(1))),
                 )
                 .await
                 .expect("recover current boundary");
@@ -1170,7 +1133,7 @@ async fn test_unordered_mmb_connect_subscribe_emits_verifiable_range_proof() {
     );
     let unordered_client = Arc::new(MmbTestUnorderedClient::new(
         PrefixedStoreClient::empty(store_client.clone()),
-        mmb_op_cfg(),
+        op_cfg(),
     ));
     let (_qmdb_server, qmdb_url) = spawn_mmb_qmdb_range_server(unordered_client).await;
     let connect_client = mmb_operation_log_client(&qmdb_url);

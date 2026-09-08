@@ -72,7 +72,6 @@ fn qmdb_error_to_connect(err: QmdbError) -> ConnectError {
         | QmdbError::InvalidRangeLength
         | QmdbError::InvalidKeyRange { .. }
         | QmdbError::DuplicateRequestedKey { .. }
-        | QmdbError::InvalidLocationRange { .. }
         | QmdbError::RangeStartOutOfBounds { .. }
         | QmdbError::EncodedValueTooLarge { .. }
         | QmdbError::SortableKeyTooLarge { .. } => ConnectError::invalid_argument(err.to_string()),

@@ -640,22 +640,45 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_parallel_preparation_produces_identical_rows() {
-        let operations = committed_encoded_operations::<mmb::Family>();
-        let authenticated = authenticated_range_fixture::<mmb::Family>(&operations, 1, 0);
-        let sequential = authenticated.prepare().expect("sequential preparation");
+    fn assert_parallel_preparation<F: Family + PartialEq>() {
+        // Force parallel work even for this small fixture
         let strategy = Rayon::new(NonZeroUsize::new(2).unwrap())
             .expect("Rayon strategy")
             .manual();
-        let parallel = prepare_authenticated_range::<
-            mmb::Family,
-            Sha256,
-            FixedKeylessOperation<mmb::Family>,
-            _,
-        >(&authenticated.view(), &authenticated.root, &(), &strategy)
-        .expect("parallel preparation");
-        assert_eq!(parallel, sequential);
+        for floor in [0, 512] {
+            let mut operations = vec![FixedKeylessOperation::<F>::Commit(None, Location::new(0))];
+            operations.extend(
+                (1u64..769).map(|index| {
+                    FixedKeylessOperation::Append(FixedBytes::new(index.to_be_bytes()))
+                }),
+            );
+            operations.push(FixedKeylessOperation::Commit(None, Location::new(floor)));
+            let inactive_peaks =
+                F::inactive_peaks(Location::new(operations.len() as u64), Location::new(floor));
+            assert_eq!(inactive_peaks == 0, floor == 0);
+            let authenticated =
+                authenticated_range_fixture::<F>(&encode(&operations), 513, inactive_peaks);
+            assert!(!authenticated.pinned_nodes.is_empty());
+            let sequential = authenticated.prepare().expect("sequential preparation");
+            let parallel = prepare_authenticated_range::<F, Sha256, FixedKeylessOperation<F>, _>(
+                &authenticated.view(),
+                &authenticated.root,
+                &(),
+                &strategy,
+            )
+            .expect("parallel preparation");
+            assert_eq!(parallel, sequential);
+        }
+    }
+
+    #[test]
+    fn test_parallel_preparation_mmr() {
+        assert_parallel_preparation::<mmr::Family>();
+    }
+
+    #[test]
+    fn test_parallel_preparation_mmb() {
+        assert_parallel_preparation::<mmb::Family>();
     }
 
     #[test]

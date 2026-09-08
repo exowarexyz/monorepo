@@ -100,7 +100,7 @@ async fn spawn_mmb_qmdb_server(
 fn mmb_operation_log_client(
     base: &str,
 ) -> OperationLogClient<PreferZstdHttpClient, mmb::Family, Sha256, MmbBatchOperation> {
-    OperationLogClient::plaintext(base, mmb_op_cfg())
+    OperationLogClient::plaintext(base, op_cfg())
 }
 
 async fn boundary_from_source_db(
@@ -115,38 +115,13 @@ async fn boundary_from_source_db(
         db.root(),
         0,
         ops_root_witness,
-        |location| async move {
-            let (proof, mut proof_ops, mut chunks) =
-                db.range_proof(location, NZU64!(1)).await.map_err(|error| {
-                    exoware_qmdb::QmdbError::CorruptData(format!(
-                        "local current range proof at {location}: {error}"
-                    ))
-                })?;
-            proof_ops.pop().ok_or_else(|| {
-                exoware_qmdb::QmdbError::CorruptData(format!(
-                    "local current range proof at {location} returned no operations"
-                ))
-            })?;
-            let chunk = chunks.pop().ok_or_else(|| {
-                exoware_qmdb::QmdbError::CorruptData(format!(
-                    "local current range proof at {location} returned no chunks"
-                ))
-            })?;
-            Ok((proof, chunk))
-        },
+        |location| common::current_proof_chunk(db.range_proof(location, NZU64!(1))),
     )
     .await
     .expect("recover_boundary_state")
 }
 
 fn op_cfg() -> <BatchOperation as commonware_codec::Read>::Cfg {
-    (
-        ((0..=MAX_OPERATION_SIZE).into(), ()),
-        ((0..=MAX_OPERATION_SIZE).into(), ()),
-    )
-}
-
-fn mmb_op_cfg() -> <MmbBatchOperation as commonware_codec::Read>::Cfg {
     (
         ((0..=MAX_OPERATION_SIZE).into(), ()),
         ((0..=MAX_OPERATION_SIZE).into(), ()),
@@ -264,25 +239,7 @@ async fn boundary_from_mmb_source_db(
         db.root(),
         0,
         ops_root_witness,
-        |location| async move {
-            let (proof, mut proof_ops, mut chunks) =
-                db.range_proof(location, NZU64!(1)).await.map_err(|error| {
-                    exoware_qmdb::QmdbError::CorruptData(format!(
-                        "local current range proof at {location}: {error}"
-                    ))
-                })?;
-            proof_ops.pop().ok_or_else(|| {
-                exoware_qmdb::QmdbError::CorruptData(format!(
-                    "local current range proof at {location} returned no operations"
-                ))
-            })?;
-            let chunk = chunks.pop().ok_or_else(|| {
-                exoware_qmdb::QmdbError::CorruptData(format!(
-                    "local current range proof at {location} returned no chunks"
-                ))
-            })?;
-            Ok((proof, chunk))
-        },
+        |location| common::current_proof_chunk(db.range_proof(location, NZU64!(1))),
     )
     .await
     .expect("recover_boundary_state")
@@ -483,7 +440,7 @@ async fn commit_mmb_upload(store_client: &StoreClient, batch: &MmbSourceBatch) {
     common::commit_current_operations(
         &upload_client,
         &batch.operations,
-        &mmb_op_cfg(),
+        &op_cfg(),
         &batch.current_boundary,
     )
     .await
@@ -629,13 +586,13 @@ async fn test_ordered_mmb_current_state_sync_from_nonzero_connect_api_reconstruc
 
     let ordered_client = Arc::new(MmbTestOrderedClient::new(
         PrefixedStoreClient::empty(store_client.clone()),
-        mmb_op_cfg(),
+        op_cfg(),
         key_cfg(),
     ));
     let (_qmdb_server, qmdb_url) = spawn_mmb_qmdb_server(ordered_client).await;
     let resolver = OperationLogClient::<_, mmb::Family, Sha256, MmbBatchOperation>::plaintext(
         &qmdb_url,
-        mmb_op_cfg(),
+        op_cfg(),
     );
     let op_count = Location::new(source.operations.len() as u64);
     let target = resolver
@@ -655,7 +612,7 @@ async fn test_ordered_mmb_current_state_sync_from_nonzero_connect_api_reconstruc
             let cfg = common::current_variable_config(
                 "current_ordered_variable_mmb_nonzero_sync_target",
                 page_cache,
-                mmb_op_cfg(),
+                op_cfg(),
                 NZU64!(8),
             );
             let db: MmbCurrentDb = qmdb_sync::sync(qmdb_sync::engine::Config {
@@ -703,7 +660,7 @@ async fn test_ordered_mmb_sync_source_returns_pinned_nodes_for_nonzero_fetches()
 
     let ordered_client = Arc::new(MmbTestOrderedClient::new(
         PrefixedStoreClient::empty(store_client.clone()),
-        mmb_op_cfg(),
+        op_cfg(),
         key_cfg(),
     ));
     let (_qmdb_server, qmdb_url) = spawn_mmb_qmdb_server(ordered_client).await;
@@ -712,7 +669,7 @@ async fn test_ordered_mmb_sync_source_returns_pinned_nodes_for_nonzero_fetches()
 
     let connect_client = OperationLogClient::<_, mmb::Family, Sha256, MmbBatchOperation>::plaintext(
         &qmdb_url,
-        mmb_op_cfg(),
+        op_cfg(),
     );
     let (response, _) = connect_client
         .serve(Request::Boundary {
@@ -768,7 +725,7 @@ async fn test_ordered_mmb_operation_range_client_rejects_missing_nonzero_pinned_
 
     let ordered_client = Arc::new(MmbTestOrderedClient::new(
         PrefixedStoreClient::empty(store_client.clone()),
-        mmb_op_cfg(),
+        op_cfg(),
         key_cfg(),
     ));
     let (_qmdb_server, qmdb_url) = spawn_mmb_qmdb_server(ordered_client).await;
@@ -833,7 +790,7 @@ async fn test_ordered_mmb_operation_range_client_rejects_extra_nonzero_pinned_no
 
     let ordered_client = Arc::new(MmbTestOrderedClient::new(
         PrefixedStoreClient::empty(store_client.clone()),
-        mmb_op_cfg(),
+        op_cfg(),
         key_cfg(),
     ));
     let (_qmdb_server, qmdb_url) = spawn_mmb_qmdb_server(ordered_client).await;
@@ -884,7 +841,7 @@ async fn test_ordered_mmb_operation_range_client_rejects_zero_start_pinned_nodes
 
     let ordered_client = Arc::new(MmbTestOrderedClient::new(
         PrefixedStoreClient::empty(store_client.clone()),
-        mmb_op_cfg(),
+        op_cfg(),
         key_cfg(),
     ));
     let (_qmdb_server, qmdb_url) = spawn_mmb_qmdb_server(ordered_client).await;
@@ -1193,7 +1150,7 @@ async fn test_ordered_mmb_range_connect_subscribe_verifies_range_and_multi_proof
     );
     let ordered_client = Arc::new(MmbTestOrderedClient::new(
         PrefixedStoreClient::empty(store_client.clone()),
-        mmb_op_cfg(),
+        op_cfg(),
         key_cfg(),
     ));
     let (_qmdb_server, qmdb_url) = spawn_mmb_qmdb_server(ordered_client).await;
@@ -1264,13 +1221,13 @@ async fn test_ordered_mmb_operation_log_any_sync_from_connect_api_reconstructs_a
 
     let ordered_client = Arc::new(MmbTestOrderedClient::new(
         PrefixedStoreClient::empty(store_client.clone()),
-        mmb_op_cfg(),
+        op_cfg(),
         key_cfg(),
     ));
     let (_qmdb_server, qmdb_url) = spawn_mmb_qmdb_server(ordered_client).await;
     let resolver = OperationLogClient::<_, mmb::Family, Sha256, MmbBatchOperation>::plaintext(
         &qmdb_url,
-        mmb_op_cfg(),
+        op_cfg(),
     );
     let op_count = Location::new(source.operations.len() as u64);
     let target = qmdb_sync::Target::new(
@@ -1287,7 +1244,7 @@ async fn test_ordered_mmb_operation_log_any_sync_from_connect_api_reconstructs_a
             let cfg = common::any_variable_config(
                 "any_ordered_variable_mmb_sync_target",
                 page_cache,
-                mmb_op_cfg(),
+                op_cfg(),
                 NZU64!(8),
             );
             let db: MmbAnyDb = qmdb_sync::sync(qmdb_sync::engine::Config {
@@ -1340,13 +1297,13 @@ async fn test_ordered_mmb_operation_log_any_sync_from_nonzero_connect_api_recons
 
     let ordered_client = Arc::new(MmbTestOrderedClient::new(
         PrefixedStoreClient::empty(store_client.clone()),
-        mmb_op_cfg(),
+        op_cfg(),
         key_cfg(),
     ));
     let (_qmdb_server, qmdb_url) = spawn_mmb_qmdb_server(ordered_client).await;
     let resolver = OperationLogClient::<_, mmb::Family, Sha256, MmbBatchOperation>::plaintext(
         &qmdb_url,
-        mmb_op_cfg(),
+        op_cfg(),
     );
     let op_count = Location::new(source.operations.len() as u64);
     let target = qmdb_sync::Target::new(
@@ -1363,7 +1320,7 @@ async fn test_ordered_mmb_operation_log_any_sync_from_nonzero_connect_api_recons
             let cfg = common::any_variable_config(
                 "any_ordered_variable_mmb_nonzero_sync_target",
                 page_cache,
-                mmb_op_cfg(),
+                op_cfg(),
                 NZU64!(8),
             );
             let db: MmbAnyDb = qmdb_sync::sync(qmdb_sync::engine::Config {
@@ -1431,13 +1388,13 @@ async fn test_ordered_mmb_operation_log_any_sync_accepts_target_update_from_grow
 
     let ordered_client = Arc::new(MmbTestOrderedClient::new(
         PrefixedStoreClient::empty(store_client.clone()),
-        mmb_op_cfg(),
+        op_cfg(),
         key_cfg(),
     ));
     let (_qmdb_server, qmdb_url) = spawn_mmb_qmdb_server(ordered_client).await;
     let resolver = OperationLogClient::<_, mmb::Family, Sha256, MmbBatchOperation>::plaintext(
         &qmdb_url,
-        mmb_op_cfg(),
+        op_cfg(),
     );
     let initial_op_count = Location::new(source.initial.operations.len() as u64);
     let updated_op_count = Location::new(source.updated.operations.len() as u64);
@@ -1459,7 +1416,7 @@ async fn test_ordered_mmb_operation_log_any_sync_accepts_target_update_from_grow
             let cfg = common::any_variable_config(
                 "any_ordered_variable_mmb_growing_sync_target",
                 page_cache,
-                mmb_op_cfg(),
+                op_cfg(),
                 NZU64!(8),
             );
             let db: MmbAnyDb = qmdb_sync::sync(qmdb_sync::engine::Config {
@@ -1621,7 +1578,7 @@ async fn test_ordered_range_connect_subscribe_filters_by_value_regex_without_key
     let (_qmdb_server, qmdb_url) = spawn_qmdb_server(ordered_client.clone()).await;
     let connect_client = operation_log_client(&qmdb_url);
 
-    // Regex matches the literal "one" — the value written for key "alpha" but
+    // Regex matches the literal "one", the value written for key "alpha" but
     // not for "beta". The client supplies no key filter.
     let mut stream = connect_client
         .subscribe(ProtoSubscribeRequest {

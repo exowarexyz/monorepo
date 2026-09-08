@@ -68,25 +68,7 @@ where
         db.root(),
         0,
         ops_root_witness,
-        |location| async move {
-            let (proof, mut proof_ops, mut chunks) =
-                db.range_proof(location, NZU64!(1)).await.map_err(|error| {
-                    exoware_qmdb::QmdbError::CorruptData(format!(
-                        "local current range proof at {location}: {error}"
-                    ))
-                })?;
-            proof_ops.pop().ok_or_else(|| {
-                exoware_qmdb::QmdbError::CorruptData(format!(
-                    "local current range proof at {location} returned no operations"
-                ))
-            })?;
-            let chunk = chunks.pop().ok_or_else(|| {
-                exoware_qmdb::QmdbError::CorruptData(format!(
-                    "local current range proof at {location} returned no chunks"
-                ))
-            })?;
-            Ok((proof, chunk))
-        },
+        |location| common::current_proof_chunk(db.range_proof(location, NZU64!(1))),
     )
     .await
     .expect("recover_boundary_state")
@@ -125,25 +107,7 @@ where
         db.root(),
         0,
         ops_root_witness,
-        |location| async move {
-            let (proof, mut proof_ops, mut chunks) =
-                db.range_proof(location, NZU64!(1)).await.map_err(|error| {
-                    exoware_qmdb::QmdbError::CorruptData(format!(
-                        "local fixed current range proof at {location}: {error}"
-                    ))
-                })?;
-            proof_ops.pop().ok_or_else(|| {
-                exoware_qmdb::QmdbError::CorruptData(format!(
-                    "local fixed current range proof at {location} returned no operations"
-                ))
-            })?;
-            let chunk = chunks.pop().ok_or_else(|| {
-                exoware_qmdb::QmdbError::CorruptData(format!(
-                    "local fixed current range proof at {location} returned no chunks"
-                ))
-            })?;
-            Ok((proof, chunk))
-        },
+        |location| common::current_proof_chunk(db.range_proof(location, NZU64!(1))),
     )
     .await
     .expect("recover fixed boundary state")
@@ -271,25 +235,7 @@ where
         db.root(),
         0,
         ops_root_witness,
-        |location| async move {
-            let (proof, mut proof_ops, mut chunks) =
-                db.range_proof(location, NZU64!(1)).await.map_err(|error| {
-                    exoware_qmdb::QmdbError::CorruptData(format!(
-                        "local current range proof at {location}: {error}"
-                    ))
-                })?;
-            proof_ops.pop().ok_or_else(|| {
-                exoware_qmdb::QmdbError::CorruptData(format!(
-                    "local current range proof at {location} returned no operations"
-                ))
-            })?;
-            let chunk = chunks.pop().ok_or_else(|| {
-                exoware_qmdb::QmdbError::CorruptData(format!(
-                    "local current range proof at {location} returned no chunks"
-                ))
-            })?;
-            Ok((proof, chunk))
-        },
+        |location| common::current_proof_chunk(db.range_proof(location, NZU64!(1))),
     )
     .await
     .expect("recover boundary state")

@@ -10,7 +10,6 @@ use commonware_codec::{Codec, Encode, Read};
 use commonware_cryptography::Sha256;
 use commonware_parallel::Sequential;
 use commonware_runtime::{tokio as cw_tokio, Runner as _};
-use commonware_storage::journal::contiguous::fixed::Config as FixedJournalConfig;
 use commonware_storage::merkle::{mmb, mmr, Graftable, Location, Proof};
 use commonware_storage::qmdb::{
     any::{
@@ -19,8 +18,7 @@ use commonware_storage::qmdb::{
     },
     operation::Key as QmdbKey,
 };
-use commonware_storage::translator::TwoCap;
-use commonware_utils::{NZUsize, NZU16, NZU64};
+use commonware_utils::{iter::zip_eq, NZUsize, NZU16, NZU64};
 use exoware_qmdb::proto::qmdb::v1::{
     GetCurrentOperationRangeRequest, GetManyRequest, GetOperationRangeRequest, GetRequest,
 };
@@ -154,7 +152,7 @@ async fn check_mirror<F, K, V, E>(
             .query_many_at(&keys, tip)
             .await
             .expect("native lookup");
-        for (found, expected) in found.iter().zip(&snapshot.values) {
+        for (found, expected) in zip_eq(&found, &snapshot.values) {
             assert_eq!(
                 found.as_ref().and_then(|item| item.value.as_ref()),
                 expected.as_ref()
@@ -388,58 +386,6 @@ macro_rules! op_cfg {
     };
 }
 
-macro_rules! db_type {
-    (any, $encoding:ident, $f:ty, $k:ty, $v:ty) => {
-        commonware_storage::qmdb::any::unordered::$encoding::Db<
-            $f, cw_tokio::Context, $k, $v, Sha256, TwoCap, Sequential,
-        >
-    };
-    (current, $encoding:ident, $f:ty, $k:ty, $v:ty) => {
-        commonware_storage::qmdb::current::unordered::$encoding::Db<
-            $f, cw_tokio::Context, $k, $v, Sha256, TwoCap, N, Sequential,
-        >
-    };
-}
-
-macro_rules! journal_config {
-    (variable, $prefix:expr, $cache:expr, $cfg:expr) => {
-        common::variable_journal_config($prefix, $cache, $cfg, NZU64!(8))
-    };
-    (fixed, $prefix:expr, $cache:expr, $cfg:expr) => {
-        FixedJournalConfig {
-            partition: format!("{}-log", $prefix),
-            items_per_blob: NZU64!(8),
-            page_cache: $cache,
-            write_buffer: NZUsize!(1024),
-            replay_buffer: NZUsize!(1024),
-        }
-    };
-}
-
-macro_rules! db_config {
-    (any, $encoding:ident, $prefix:expr, $cache:expr, $cfg:expr) => {
-        commonware_storage::qmdb::any::Config {
-            merkle_config: common::merkle_config($prefix, $cache.clone()),
-            journal_config: journal_config!($encoding, $prefix, $cache, $cfg),
-            translator: TwoCap,
-            init_cache_size: None,
-            init_buffer: NZUsize!(1 << 21),
-            init_concurrency: (),
-        }
-    };
-    (current, $encoding:ident, $prefix:expr, $cache:expr, $cfg:expr) => {
-        commonware_storage::qmdb::current::Config {
-            merkle_config: common::merkle_config($prefix, $cache.clone()),
-            journal_config: journal_config!($encoding, $prefix, $cache, $cfg),
-            grafted_metadata_partition: format!("{}-grafted-metadata", $prefix),
-            translator: TwoCap,
-            init_cache_size: None,
-            init_buffer: NZUsize!(1 << 21),
-            init_concurrency: (),
-        }
-    };
-}
-
 macro_rules! source_proof {
     (any, $db:ident, $count:expr) => {
         $db.historical_proof($db.bounds().end, Location::new(0), $count)
@@ -477,14 +423,7 @@ macro_rules! current_boundary {
                 $db.ops_root_witness()
                     .await
                     .expect("source ops root witness"),
-                |location| async move {
-                    let (proof, proof_ops, mut chunks) = source
-                        .range_proof(location, NZU64!(1))
-                        .await
-                        .map_err(|error| exoware_qmdb::QmdbError::CorruptData(error.to_string()))?;
-                    assert_eq!(proof_ops.len(), 1);
-                    Ok((proof, chunks.pop().expect("source bitmap chunk")))
-                },
+                |location| common::current_proof_chunk(source.range_proof(location, NZU64!(1))),
             )
             .await
             .expect("recover source current boundary"),
@@ -528,7 +467,7 @@ macro_rules! case {
             type V = value_type!($value);
             type E = encoding_type!($encoding, V);
             type Op = unordered::Operation<F, K, E>;
-            type Db = db_type!($state, $encoding, F, K, V);
+            type Db = source_type!($state, unordered, $encoding, F, K, V);
 
             let keys: Vec<K> = keys!($key);
             let source_keys = keys.clone();
@@ -536,7 +475,7 @@ macro_rules! case {
                 cw_tokio::Runner::default().start(|context| async move {
                     use commonware_runtime::{buffer::paged::CacheRef, Supervisor as _};
                     let cache = CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(8));
-                    let cfg = db_config!(
+                    let cfg = source_config!(
                         $state,
                         $encoding,
                         stringify!($name),

@@ -2666,7 +2666,6 @@ dependencies = [
  "axum",
  "buffa",
  "bytes",
- "commonware-codec",
  "commonware-cryptography",
  "commonware-parallel",
  "commonware-storage",

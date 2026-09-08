@@ -10,7 +10,7 @@ use std::num::NonZeroU64;
 use commonware_cryptography::Sha256;
 use commonware_runtime::tokio as cw_tokio;
 use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner as _, Supervisor as _};
-use commonware_storage::merkle::{mmr, Location, Proof as BatchProof};
+use commonware_storage::merkle::{mmr, Location};
 use commonware_storage::qmdb::{
     any::unordered::variable::Db as LocalUnorderedDb,
     current::ordered::variable::Db as LocalOrderedDb,
@@ -34,7 +34,7 @@ async fn test_mirror_keyless_from_local() {
     let store_client = common::local_store_client().await;
 
     // Apply one batch locally and upload its authenticated operation prefix
-    let (ops1, _proof1, latest1, root1) = build_keyless_source(vec![vec![
+    let (ops1, latest1, root1) = build_keyless_source(vec![vec![
         b"alpha".to_vec(),
         b"beta".to_vec(),
         b"gamma".to_vec(),
@@ -59,7 +59,7 @@ async fn test_mirror_keyless_from_local() {
     );
 
     // Upload the complete operation prefix after a second local batch
-    let (ops_total, _proof_total, latest2, root2) = build_keyless_source(vec![
+    let (ops_total, latest2, root2) = build_keyless_source(vec![
         vec![b"alpha".to_vec(), b"beta".to_vec(), b"gamma".to_vec()],
         vec![b"delta".to_vec(), b"epsilon".to_vec()],
     ])
@@ -82,7 +82,6 @@ async fn build_keyless_source(
     batches: Vec<Vec<Vec<u8>>>,
 ) -> (
     Vec<KeylessOperation<mmr::Family, Vec<u8>>>,
-    BatchProof<mmr::Family, Digest>,
     Location<mmr::Family>,
     Digest,
 ) {
@@ -120,13 +119,13 @@ async fn build_keyless_source(
             }
             let latest = db.bounds().end - 1;
             let n = NonZeroU64::new(*latest + 1).unwrap();
-            let (proof, ops) = db
+            let (_, ops) = db
                 .historical_proof(latest + 1, Location::<mmr::Family>::new(0), n)
                 .await
                 .expect("historical_proof");
             let root = db.root();
             db.destroy().await.expect("destroy");
-            (ops, proof, latest, root)
+            (ops, latest, root)
         })
     })
     .await
@@ -142,7 +141,7 @@ type UnorderedOp =
 async fn test_mirror_unordered_from_local() {
     let store_client = common::local_store_client().await;
 
-    let (ops1, _proof1, latest1, root1) = build_any_unordered_source(vec![vec![
+    let (ops1, latest1, root1) = build_any_unordered_source(vec![vec![
         (b"alpha".to_vec(), Some(b"one".to_vec())),
         (b"beta".to_vec(), Some(b"two".to_vec())),
     ]])
@@ -171,7 +170,7 @@ async fn test_mirror_unordered_from_local() {
         "remote root must match local (after batch 1)"
     );
 
-    let (ops_total, _proof_total, latest2, root2) = build_any_unordered_source(vec![
+    let (ops_total, latest2, root2) = build_any_unordered_source(vec![
         vec![
             (b"alpha".to_vec(), Some(b"one".to_vec())),
             (b"beta".to_vec(), Some(b"two".to_vec())),
@@ -203,12 +202,7 @@ type UnorderedBatch = Vec<(Vec<u8>, Option<Vec<u8>>)>;
 
 async fn build_any_unordered_source(
     batches: Vec<UnorderedBatch>,
-) -> (
-    Vec<UnorderedOp>,
-    BatchProof<mmr::Family, Digest>,
-    Location<mmr::Family>,
-    Digest,
-) {
+) -> (Vec<UnorderedOp>, Location<mmr::Family>, Digest) {
     tokio::task::spawn_blocking(move || {
         cw_tokio::Runner::default().start(|context| async move {
             let page_cache = CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(8));
@@ -247,13 +241,13 @@ async fn build_any_unordered_source(
             }
             let latest = db.bounds().end - 1;
             let n = NonZeroU64::new(*latest + 1).unwrap();
-            let (proof, ops) = db
+            let (_, ops) = db
                 .historical_proof(latest + 1, Location::<mmr::Family>::new(0), n)
                 .await
                 .expect("historical_proof");
             let root = db.root();
             db.destroy().await.expect("destroy");
-            (ops, proof, latest, root)
+            (ops, latest, root)
         })
     })
     .await
@@ -268,7 +262,7 @@ type ImmK = FixedBytes<32>;
 async fn test_mirror_immutable_from_local() {
     let store_client = common::local_store_client().await;
 
-    let (ops1, _proof1, latest1, root1) = build_immutable_source(vec![vec![
+    let (ops1, latest1, root1) = build_immutable_source(vec![vec![
         (FixedBytes::new([0x11; 32]), b"one".to_vec()),
         (FixedBytes::new([0x22; 32]), b"two".to_vec()),
     ]])
@@ -291,7 +285,7 @@ async fn test_mirror_immutable_from_local() {
         "remote root must match local (after batch 1)"
     );
 
-    let (ops_total, _proof_total, latest2, root2) = build_immutable_source(vec![
+    let (ops_total, latest2, root2) = build_immutable_source(vec![
         vec![
             (FixedBytes::new([0x11; 32]), b"one".to_vec()),
             (FixedBytes::new([0x22; 32]), b"two".to_vec()),
@@ -317,7 +311,6 @@ async fn build_immutable_source(
     batches: Vec<Vec<(ImmK, Vec<u8>)>>,
 ) -> (
     Vec<ImmutableOperation<mmr::Family, ImmK, Vec<u8>>>,
-    BatchProof<mmr::Family, Digest>,
     Location<mmr::Family>,
     Digest,
 ) {
@@ -357,13 +350,13 @@ async fn build_immutable_source(
             }
             let latest = db.bounds().end - 1;
             let n = NonZeroU64::new(*latest + 1).unwrap();
-            let (proof, ops) = db
+            let (_, ops) = db
                 .historical_proof(latest + 1, Location::<mmr::Family>::new(0), n)
                 .await
                 .expect("historical_proof");
             let root = db.root();
             db.destroy().await.expect("destroy");
-            (ops, proof, latest, root)
+            (ops, latest, root)
         })
     })
     .await
@@ -397,25 +390,7 @@ async fn boundary_from_current_ordered_source(
         db.root(),
         0,
         ops_root_witness,
-        |location| async move {
-            let (proof, mut proof_ops, mut chunks) =
-                db.range_proof(location, NZU64!(1)).await.map_err(|error| {
-                    exoware_qmdb::QmdbError::CorruptData(format!(
-                        "local current range proof at {location}: {error}"
-                    ))
-                })?;
-            proof_ops.pop().ok_or_else(|| {
-                exoware_qmdb::QmdbError::CorruptData(format!(
-                    "local current range proof at {location} returned no operations"
-                ))
-            })?;
-            let chunk = chunks.pop().ok_or_else(|| {
-                exoware_qmdb::QmdbError::CorruptData(format!(
-                    "local current range proof at {location} returned no chunks"
-                ))
-            })?;
-            Ok((proof, chunk))
-        },
+        |location| common::current_proof_chunk(db.range_proof(location, NZU64!(1))),
     )
     .await
     .expect("recover_boundary_state")
@@ -425,7 +400,7 @@ async fn boundary_from_current_ordered_source(
 async fn test_mirror_ordered_from_local() {
     let store_client = common::local_store_client().await;
 
-    let (ops1, _proof1, latest1, root1, boundary1) = build_current_ordered_source(
+    let (ops1, latest1, root1, boundary1) = build_current_ordered_source(
         vec![vec![
             (b"alpha".to_vec(), Some(b"one".to_vec())),
             (b"beta".to_vec(), Some(b"two".to_vec())),
@@ -464,7 +439,7 @@ async fn test_mirror_ordered_from_local() {
     );
 
     // Compute the per-batch boundary delta for the new batch
-    let (ops_total, _proof_total, latest2, root2, boundary_delta) = build_current_ordered_source(
+    let (ops_total, latest2, root2, boundary_delta) = build_current_ordered_source(
         vec![
             vec![
                 (b"alpha".to_vec(), Some(b"one".to_vec())),
@@ -504,13 +479,11 @@ async fn build_current_ordered_source(
     previous_operations: Option<Vec<OrderedOp>>,
 ) -> (
     Vec<OrderedOp>,
-    BatchProof<mmr::Family, Digest>,
     Location<mmr::Family>,
     Digest,
     CurrentBoundaryState<Digest, N, mmr::Family>,
 ) {
-    let batches_clone = batches.clone();
-    let (ops, proof, latest, root, boundary) = tokio::task::spawn_blocking(move || {
+    tokio::task::spawn_blocking(move || {
         cw_tokio::Runner::default().start(|context| async move {
             let page_cache = CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(8));
             let cfg = common::current_variable_config(
@@ -537,7 +510,7 @@ async fn build_current_ordered_source(
             )
             .await
             .expect("init");
-            for batch in batches_clone {
+            for batch in batches {
                 let finalized = {
                     let mut b = db.new_batch();
                     for (k, v) in batch {
@@ -549,7 +522,7 @@ async fn build_current_ordered_source(
             }
             let latest = db.bounds().end - 1;
             let n = NonZeroU64::new(*latest + 1).unwrap();
-            let (proof, ops) = db
+            let (_, ops) = db
                 .ops_historical_proof(latest + 1, Location::<mmr::Family>::new(0), n)
                 .await
                 .expect("ops_historical_proof");
@@ -559,10 +532,9 @@ async fn build_current_ordered_source(
             let root = db.root();
             db = db.sync().await.expect("sync");
             db.destroy().await.expect("destroy");
-            (ops, proof, latest, root, boundary)
+            (ops, latest, root, boundary)
         })
     })
     .await
-    .expect("join");
-    (ops, proof, latest, root, boundary)
+    .expect("join")
 }

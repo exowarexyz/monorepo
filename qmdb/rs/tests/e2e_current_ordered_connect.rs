@@ -94,25 +94,7 @@ async fn boundary_from_source_db(
         db.root(),
         0,
         ops_root_witness,
-        |location| async move {
-            let (proof, mut proof_ops, mut chunks) =
-                db.range_proof(location, NZU64!(1)).await.map_err(|error| {
-                    exoware_qmdb::QmdbError::CorruptData(format!(
-                        "local current range proof at {location}: {error}"
-                    ))
-                })?;
-            proof_ops.pop().ok_or_else(|| {
-                exoware_qmdb::QmdbError::CorruptData(format!(
-                    "local current range proof at {location} returned no operations"
-                ))
-            })?;
-            let chunk = chunks.pop().ok_or_else(|| {
-                exoware_qmdb::QmdbError::CorruptData(format!(
-                    "local current range proof at {location} returned no chunks"
-                ))
-            })?;
-            Ok((proof, chunk))
-        },
+        |location| common::current_proof_chunk(db.range_proof(location, NZU64!(1))),
     )
     .await
     .expect("recover_boundary_state")
@@ -147,17 +129,16 @@ async fn build_source_batch() -> SourceBatch {
 }
 
 async fn build_source_batch_with_writes(
-    partition_prefix: &str,
+    partition_prefix: &'static str,
     writes: &[(Vec<u8>, Vec<u8>)],
 ) -> SourceBatch {
-    let partition_prefix = partition_prefix.to_string();
     let writes = writes.to_vec();
-    tokio::task::spawn_blocking(|| {
+    tokio::task::spawn_blocking(move || {
         cw_tokio::Runner::default().start(|context| async move {
             use commonware_runtime::{buffer::paged::CacheRef, Supervisor as _};
             let page_cache = CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(8));
             let cfg = common::current_variable_config(
-                &partition_prefix,
+                partition_prefix,
                 page_cache,
                 (
                     ((0..=MAX_OPERATION_SIZE).into(), ()),
@@ -165,12 +146,9 @@ async fn build_source_batch_with_writes(
                 ),
                 NZU64!(8),
             );
-            let mut db: Db = Db::init(
-                context.child("current_ordered_variable_mmr_connect_source"),
-                cfg,
-            )
-            .await
-            .expect("init");
+            let mut db: Db = Db::init(context.child(partition_prefix), cfg)
+                .await
+                .expect("init");
 
             let finalized = {
                 let mut batch = db.new_batch();

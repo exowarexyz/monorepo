@@ -572,7 +572,7 @@ async fn test_keyless_connect_subscribe_rejects_key_filters() {
         .expect("subscribe opens");
 
     // Even if we upload a batch that would otherwise match, the stream must
-    // not emit a proof — keyless rejects key_filters server-side before it
+    // not emit a proof because keyless rejects key_filters server-side before it
     // opens the store subscription.
     commit_upload(&store_client, &source).await;
 

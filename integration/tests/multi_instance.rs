@@ -1,14 +1,13 @@
+#[path = "../../qmdb/rs/tests/common/operations.rs"]
+mod qmdb;
+
 use std::sync::Arc;
 use std::time::Duration;
 
 use axum::{routing::get, Router};
 use bytes::Bytes;
-use commonware_codec::Encode;
 use commonware_cryptography::Sha256;
-use commonware_parallel::Sequential;
-use commonware_storage::merkle::{
-    hasher::Hasher as _, mem::Mem, mmr, Family as _, Location, Position,
-};
+use commonware_storage::merkle::{mmr, Location};
 use commonware_storage::qmdb::keyless::variable::Operation as KeylessOperation;
 use connectrpc::client::ClientConfig;
 use datafusion::arrow::array::Int64Array;
@@ -16,9 +15,8 @@ use datafusion::arrow::datatypes::DataType;
 use datafusion::prelude::SessionContext;
 use exoware_qmdb::proto::qmdb::v1::SubscribeRequest as QmdbSubscribeRequest;
 use exoware_qmdb::{
-    keyless_operation_log_connect_stack, prepare_authenticated_range, stage_authenticated_range,
-    stage_watermark, AuthenticatedOperationRange, KeylessClient, OperationLogClient,
-    OperationLogSubscribeProof, PreparedAuthenticatedRange, QmdbError,
+    keyless_operation_log_connect_stack, stage_authenticated_range, stage_watermark, KeylessClient,
+    OperationLogClient, OperationLogSubscribeProof, QmdbError,
 };
 use exoware_sdk::keys::Key;
 use exoware_sdk::kv_codec::Utf8;
@@ -153,57 +151,11 @@ fn keyless_reader(client: PrefixedStoreClient) -> QmdbReader {
     QmdbReader::new(client, ((0..=10000).into(), ()))
 }
 
-// Build source proofs independently of the Exoware upload adapter
-fn prepare_qmdb_upload(
-    operations: &[QmdbOperation],
-) -> (Digest, PreparedAuthenticatedRange<Digest, QmdbFamily>) {
-    let encoded = operations
-        .iter()
-        .map(|op| op.encode().to_vec())
-        .collect::<Vec<_>>();
-    let hasher = commonware_storage::qmdb::hasher::<Sha256>();
-    let base = Mem::<QmdbFamily, Digest>::new();
-    let digests = encoded.iter().enumerate().map(|(index, op)| {
-        hasher.leaf_digest(
-            Position::try_from(QmdbLocation::new(index as u64)).unwrap(),
-            op,
-        )
-    });
-    let merkle = base
-        .new_batch()
-        .add_leaf_digests(digests)
-        .merkleize(&base, &hasher);
-    let end = QmdbLocation::new(operations.len() as u64);
-    let floor = match operations.last().expect("nonempty operation range") {
-        QmdbOperation::Commit(_, floor) => *floor,
-        _ => panic!("operation range must end at a commit"),
-    };
-    let inactive = QmdbFamily::inactive_peaks(end, floor);
-    let root = merkle.root(&base, &hasher, inactive).unwrap();
-    let proof = merkle
-        .range_proof(&base, &hasher, QmdbLocation::new(0)..end, inactive)
-        .unwrap();
-    let range = AuthenticatedOperationRange {
-        start_location: QmdbLocation::new(0),
-        proof: &proof,
-        pinned_nodes: &[],
-        encoded_operations: &encoded,
-    };
-    let prepared = prepare_authenticated_range::<QmdbFamily, Sha256, QmdbOperation, Sequential>(
-        &range,
-        &root,
-        &((0..=10000).into(), ()),
-        &Sequential,
-    )
-    .expect("prepare authenticated fixture");
-    (root, prepared)
-}
-
 async fn commit_qmdb_upload(
     client: &PrefixedStoreClient,
     operations: &[QmdbOperation],
 ) -> Result<u64, QmdbError> {
-    let (_, prepared) = prepare_qmdb_upload(operations);
+    let (_, prepared) = qmdb::prepare_operations(operations, &((0..=10000).into(), ()));
     let latest = prepared.latest_location();
     let mut batch = StoreWriteBatch::new();
     stage_authenticated_range(client, prepared, &mut batch)?;
@@ -247,8 +199,11 @@ async fn drive_qmdb_uploads(
     let mut expected = Vec::new();
     let mut in_flight = FuturesUnordered::new();
     for operations in batches {
+        let start = QmdbLocation::new(expected.len() as u64);
         expected.extend(operations);
-        let (_, prepared) = prepare_qmdb_upload(&expected);
+        let (_, prepared) =
+            qmdb::prepare_operation_range(&expected, start, &((0..=10000).into(), ()));
+
         let mut data = StoreWriteBatch::new();
         stage_authenticated_range(&client, prepared, &mut data).expect("stage qmdb data");
         let client = client.clone();
@@ -612,8 +567,14 @@ async fn test_prefixed_qmdb_uploads_handle_concurrent_inflight_batches_per_insta
 
     assert_eq!(proof_a.root, root_a);
     assert_eq!(proof_b.root, root_b);
-    assert_eq!(root_a, prepare_qmdb_upload(&expected_a).0);
-    assert_eq!(root_b, prepare_qmdb_upload(&expected_b).0);
+    assert_eq!(
+        root_a,
+        qmdb::prepare_operations(&expected_a, &((0..=10000).into(), ())).0
+    );
+    assert_eq!(
+        root_b,
+        qmdb::prepare_operations(&expected_b, &((0..=10000).into(), ())).0
+    );
     assert_eq!(
         sorted_qmdb_operations(proof_a.operations),
         sorted_qmdb_operations(expected_a)
@@ -638,8 +599,12 @@ async fn test_prepared_sql_and_qmdb_batches_commit_atomically_with_sequence_rece
     let ops1 = qmdb_operations("atomic", 0);
     let ops2 = qmdb_operations("atomic", 1);
     let expected_qmdb: Vec<QmdbOperation> = ops1.iter().chain(&ops2).cloned().collect();
-    let (_, prepared_qmdb_1) = prepare_qmdb_upload(&ops1);
-    let (expected_root, prepared_qmdb_2) = prepare_qmdb_upload(&expected_qmdb);
+    let (_, prepared_qmdb_1) = qmdb::prepare_operations(&ops1, &((0..=10000).into(), ()));
+    let (expected_root, prepared_qmdb_2) = qmdb::prepare_operation_range(
+        &expected_qmdb,
+        QmdbLocation::new(ops1.len() as u64),
+        &((0..=10000).into(), ()),
+    );
     let mut prepared_sql = sql_writer
         .prepare_flush()
         .expect("prepare sql")
