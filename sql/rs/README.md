@@ -21,11 +21,10 @@ give each instance a distinct SDK `StoreKeyPrefix` and pass that prefixed
 
 ```rust
 use exoware_sdk::StoreClient;
-use exoware_sql::{session_state_builder, IndexSpec, KvSchema, TableColumnConfig};
+use exoware_sql::{session_context, IndexSpec, KvSchema, TableColumnConfig};
 use datafusion::arrow::datatypes::DataType;
-use datafusion::prelude::SessionContext;
 
-let ctx = SessionContext::new_with_state(session_state_builder().build());
+let ctx = session_context();
 let client = StoreClient::new("http://localhost:10000");
 
 KvSchema::new(client)
@@ -46,13 +45,6 @@ KvSchema::new(client)
 // Standard SQL JOINs are supported:
 // SELECT c.name, o.amount FROM orders o JOIN customers c ON ...
 ```
-
-`session_state_builder()` installs the DataFusion logical and physical planners
-that execute supported aggregates with Store Reduce. Configure the returned
-`SessionStateBuilder` before building the session. If you supply a custom query
-planner, include `KvAggregateExtensionPlanner` in its `DefaultPhysicalPlanner`.
-Registering tables in a plain DataFusion session also works, with aggregates
-computed by DataFusion.
 
 A convenience method `.orders_table(name, index_specs)` registers the
 pre-defined orders schema (region, customer_id, order_id, amount_cents, status).

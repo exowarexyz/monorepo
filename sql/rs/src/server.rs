@@ -149,7 +149,7 @@ impl SqlServer {
             streams.insert(name.clone(), TableStream::new(model, indexes));
             table_names.push(name.clone());
         }
-        let ctx = SessionContext::new_with_state(crate::session_state_builder().build());
+        let ctx = crate::session_context();
         schema.register_all(&ctx)?;
         Ok(Self {
             ctx: Arc::new(ctx),

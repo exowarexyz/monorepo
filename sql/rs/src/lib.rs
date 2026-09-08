@@ -23,6 +23,11 @@ pub use types::{
 };
 pub use writer::{BatchReceipt, BatchWriter, PreparedBatch, TableWriter};
 
+/// Creates a DataFusion session with Store aggregate reduction enabled.
+pub fn session_context() -> datafusion::prelude::SessionContext {
+    datafusion::prelude::SessionContext::new_with_state(session_state_builder().build())
+}
+
 /// Creates a DataFusion session builder with Store aggregate reduction enabled.
 ///
 /// Configure the returned builder before passing its state to
@@ -800,7 +805,7 @@ mod tests {
                     .with_cover_columns(vec!["amount_cents".to_string()])],
             )
             .expect("schema");
-        let ctx = SessionContext::new_with_state(session_state_builder().build());
+        let ctx = session_context();
         schema.register_all(&ctx).expect("register");
 
         let explain =
@@ -843,7 +848,7 @@ mod tests {
                     .with_cover_columns(vec!["amount_cents".to_string()])],
             )
             .expect("schema");
-        let ctx = SessionContext::new_with_state(session_state_builder().build());
+        let ctx = session_context();
         schema.register_all(&ctx).expect("register");
 
         let explain = physical_plan_text(
@@ -896,7 +901,7 @@ mod tests {
                 ],
             )
             .expect("schema");
-        let ctx = SessionContext::new_with_state(session_state_builder().build());
+        let ctx = session_context();
         schema.register_all(&ctx).expect("register");
 
         let explain = physical_plan_text(
@@ -940,7 +945,7 @@ mod tests {
                     .with_cover_columns(vec!["amount_cents".to_string()])],
             )
             .expect("schema");
-        let ctx = SessionContext::new_with_state(session_state_builder().build());
+        let ctx = session_context();
         schema.register_all(&ctx).expect("register");
 
         let explain = physical_plan_text(
@@ -3110,7 +3115,7 @@ mod tests {
         }
         writer.flush().await.expect("flush");
 
-        let ctx = SessionContext::new_with_state(session_state_builder().build());
+        let ctx = session_context();
         schema.register_all(&ctx).expect("register");
 
         for (name, expected_age) in [("alice", 30i64), ("bob", 25), ("", 99)] {
@@ -3213,7 +3218,7 @@ mod tests {
         }
         writer.flush().await.expect("flush");
 
-        let ctx = SessionContext::new_with_state(session_state_builder().build());
+        let ctx = session_context();
         schema.register_all(&ctx).expect("register");
 
         for table in ["orders_nc", "orders_cov"] {
@@ -3730,7 +3735,7 @@ mod tests {
 
     #[tokio::test]
     async fn kv_schema_three_way_join() {
-        let ctx = SessionContext::new_with_state(session_state_builder().build());
+        let ctx = session_context();
         let client = StoreClient::new("http://localhost:10000");
 
         KvSchema::new(PrefixedStoreClient::empty(client))
@@ -6451,7 +6456,7 @@ mod tests {
             guard.insert(key, Bytes::new());
         }
 
-        let ctx = SessionContext::new_with_state(session_state_builder().build());
+        let ctx = session_context();
         schema.register_all(&ctx).expect("register");
         let df = ctx
             .sql("SELECT amount_cents FROM orders WHERE status = 'open'")
@@ -6518,7 +6523,7 @@ mod tests {
             guard.insert(key, Bytes::from_static(b"not-codec"));
         }
 
-        let ctx = SessionContext::new_with_state(session_state_builder().build());
+        let ctx = session_context();
         schema.register_all(&ctx).expect("register");
         let df = ctx
             .sql("SELECT amount_cents FROM orders WHERE status = 'open'")
@@ -6593,7 +6598,7 @@ mod tests {
             .expect("row");
         writer.flush().await.expect("flush");
 
-        let ctx = SessionContext::new_with_state(session_state_builder().build());
+        let ctx = session_context();
         schema.register_all(&ctx).expect("register");
 
         let df = ctx
@@ -7215,7 +7220,7 @@ mod tests {
                 vec![],
             )
             .expect("schema");
-        let ctx = SessionContext::new_with_state(session_state_builder().build());
+        let ctx = session_context();
         schema.register_all(&ctx).expect("register");
         let (batches, ()) = tokio::time::timeout(Duration::from_secs(5), async {
             tokio::join!(
@@ -7560,7 +7565,7 @@ mod tests {
                 vec![],
             )
             .expect("schema");
-        let ctx = SessionContext::new_with_state(session_state_builder().build());
+        let ctx = session_context();
         schema.register_all(&ctx).expect("register");
 
         let (batches, ()) = tokio::time::timeout(Duration::from_secs(5), async {
@@ -7633,7 +7638,7 @@ mod tests {
                 vec![],
             )
             .expect("schema");
-        let ctx = SessionContext::new_with_state(session_state_builder().build());
+        let ctx = session_context();
         schema.register_all(&ctx).expect("register");
 
         let explain = physical_plan_text(
@@ -7689,7 +7694,7 @@ mod tests {
                 vec![],
             )
             .expect("schema");
-        let ctx = SessionContext::new_with_state(session_state_builder().build());
+        let ctx = session_context();
         schema.register_all(&ctx).expect("register");
 
         let explain = physical_plan_text(
@@ -7773,7 +7778,7 @@ mod tests {
             .expect("matching lower key");
         writer.flush().await.expect("seed rows");
 
-        let ctx = SessionContext::new_with_state(session_state_builder().build());
+        let ctx = session_context();
         schema.register_all(&ctx).expect("register");
         let sql = "SELECT account, height \
                    FROM tx_activity \
@@ -7840,7 +7845,7 @@ mod tests {
         }
         writer.flush().await.expect("seed rows");
 
-        let ctx = SessionContext::new_with_state(session_state_builder().build());
+        let ctx = session_context();
         schema.register_all(&ctx).expect("register");
         let sql = "SELECT id \
                    FROM events \
@@ -7898,7 +7903,7 @@ mod tests {
         }
         writer.flush().await.expect("seed rows");
 
-        let ctx = SessionContext::new_with_state(session_state_builder().build());
+        let ctx = session_context();
         schema.register_all(&ctx).expect("register");
         let sql = "SELECT id \
                    FROM events \
@@ -7957,7 +7962,7 @@ mod tests {
         }
         writer.flush().await.expect("seed rows");
 
-        let ctx = SessionContext::new_with_state(session_state_builder().build());
+        let ctx = session_context();
         schema.register_all(&ctx).expect("register");
 
         // Without an inner ORDER BY, LIMIT constrains the row count but not the selected rows.
@@ -8046,7 +8051,7 @@ mod tests {
             .expect("row");
         writer.flush().await.expect("seed rows");
 
-        let ctx = SessionContext::new_with_state(session_state_builder().build());
+        let ctx = session_context();
         schema.register_all(&ctx).expect("register");
 
         let oversized = "a".repeat(
@@ -8114,7 +8119,7 @@ mod tests {
         }
         writer.flush().await.expect("seed rows");
 
-        let ctx = SessionContext::new_with_state(session_state_builder().build());
+        let ctx = session_context();
         schema.register_all(&ctx).expect("register");
         // The two-row index frames contain one matching row followed by a rejection,
         // then a row whose residual predicate can either fail or satisfy the limit
@@ -8244,7 +8249,7 @@ mod tests {
                     .with_cover_columns(vec!["status".to_string(), "amount_cents".to_string()])],
             )
             .expect("schema");
-        let ctx = SessionContext::new_with_state(session_state_builder().build());
+        let ctx = session_context();
         schema.register_all(&ctx).expect("register");
 
         let batches = ctx
@@ -8323,7 +8328,7 @@ mod tests {
         }
         writer.flush().await.expect("flush");
 
-        let ctx = SessionContext::new_with_state(session_state_builder().build());
+        let ctx = session_context();
         schema.register_all(&ctx).expect("register");
 
         let batches = ctx
@@ -8405,7 +8410,7 @@ mod tests {
         }
         writer.flush().await.expect("flush");
 
-        let ctx = SessionContext::new_with_state(session_state_builder().build());
+        let ctx = session_context();
         schema.register_all(&ctx).expect("register");
 
         state.range_calls.store(0, AtomicOrdering::SeqCst);
@@ -8486,7 +8491,7 @@ mod tests {
         }
         writer.flush().await.expect("flush");
 
-        let ctx = SessionContext::new_with_state(session_state_builder().build());
+        let ctx = session_context();
         schema.register_all(&ctx).expect("register");
 
         state.range_calls.store(0, AtomicOrdering::SeqCst);
@@ -8583,7 +8588,7 @@ mod tests {
         }
         writer.flush().await.expect("flush");
 
-        let ctx = SessionContext::new_with_state(session_state_builder().build());
+        let ctx = session_context();
         schema.register_all(&ctx).expect("register");
 
         state.range_calls.store(0, AtomicOrdering::SeqCst);
@@ -8703,7 +8708,7 @@ mod tests {
         }
         writer.flush().await.expect("flush");
 
-        let ctx = SessionContext::new_with_state(session_state_builder().build());
+        let ctx = session_context();
         schema.register_all(&ctx).expect("register");
 
         state.range_calls.store(0, AtomicOrdering::SeqCst);
@@ -8790,7 +8795,7 @@ mod tests {
         }
         writer.flush().await.expect("flush");
 
-        let ctx = SessionContext::new_with_state(session_state_builder().build());
+        let ctx = session_context();
         schema.register_all(&ctx).expect("register");
 
         state.range_calls.store(0, AtomicOrdering::SeqCst);
@@ -8877,7 +8882,7 @@ mod tests {
         }
         writer.flush().await.expect("flush");
 
-        let ctx = SessionContext::new_with_state(session_state_builder().build());
+        let ctx = session_context();
         schema.register_all(&ctx).expect("register");
 
         state.range_calls.store(0, AtomicOrdering::SeqCst);
@@ -8961,7 +8966,7 @@ mod tests {
         }
         writer.flush().await.expect("flush");
 
-        let ctx = SessionContext::new_with_state(session_state_builder().build());
+        let ctx = session_context();
         schema.register_all(&ctx).expect("register");
 
         state.range_calls.store(0, AtomicOrdering::SeqCst);
@@ -9048,7 +9053,7 @@ mod tests {
         }
         writer.flush().await.expect("flush");
 
-        let ctx = SessionContext::new_with_state(session_state_builder().build());
+        let ctx = session_context();
         schema.register_all(&ctx).expect("register");
 
         state.range_calls.store(0, AtomicOrdering::SeqCst);
@@ -9136,7 +9141,7 @@ mod tests {
         }
         writer.flush().await.expect("flush");
 
-        let ctx = SessionContext::new_with_state(session_state_builder().build());
+        let ctx = session_context();
         schema.register_all(&ctx).expect("register");
 
         state.range_calls.store(0, AtomicOrdering::SeqCst);
@@ -9217,7 +9222,7 @@ mod tests {
         }
         writer.flush().await.expect("flush");
 
-        let ctx = SessionContext::new_with_state(session_state_builder().build());
+        let ctx = session_context();
         schema.register_all(&ctx).expect("register");
 
         state.range_calls.store(0, AtomicOrdering::SeqCst);
@@ -9302,7 +9307,7 @@ mod tests {
         }
         writer.flush().await.expect("flush");
 
-        let ctx = SessionContext::new_with_state(session_state_builder().build());
+        let ctx = session_context();
         schema.register_all(&ctx).expect("register");
 
         state.range_calls.store(0, AtomicOrdering::SeqCst);
@@ -9382,7 +9387,7 @@ mod tests {
         }
         writer.flush().await.expect("flush");
 
-        let ctx = SessionContext::new_with_state(session_state_builder().build());
+        let ctx = session_context();
         schema.register_all(&ctx).expect("register");
 
         state.range_calls.store(0, AtomicOrdering::SeqCst);
@@ -9483,7 +9488,7 @@ mod tests {
         }
         writer.flush().await.expect("flush");
 
-        let ctx = SessionContext::new_with_state(session_state_builder().build());
+        let ctx = session_context();
         schema.register_all(&ctx).expect("register");
 
         state.range_calls.store(0, AtomicOrdering::SeqCst);
@@ -9591,7 +9596,7 @@ mod tests {
         }
         writer.flush().await.expect("flush");
 
-        let ctx = SessionContext::new_with_state(session_state_builder().build());
+        let ctx = session_context();
         schema.register_all(&ctx).expect("register");
 
         state.range_calls.store(0, AtomicOrdering::SeqCst);
@@ -9961,7 +9966,7 @@ mod tests {
         }
         writer.flush().await.expect("flush");
 
-        let ctx = SessionContext::new_with_state(session_state_builder().build());
+        let ctx = session_context();
         schema.register_all(&ctx).expect("register");
 
         // Without an alias the optimizer drops the identity projection above the
@@ -10062,7 +10067,7 @@ mod tests {
         }
         writer.flush().await.expect("flush");
 
-        let ctx = SessionContext::new_with_state(session_state_builder().build());
+        let ctx = session_context();
         schema.register_all(&ctx).expect("register");
 
         state.range_calls.store(0, AtomicOrdering::SeqCst);
@@ -10146,7 +10151,7 @@ mod tests {
         }
         writer.flush().await.expect("flush");
 
-        let ctx = SessionContext::new_with_state(session_state_builder().build());
+        let ctx = session_context();
         schema.register_all(&ctx).expect("register");
 
         state.range_calls.store(0, AtomicOrdering::SeqCst);
@@ -10211,7 +10216,6 @@ mod tests {
 
     mod e2e {
         use super::*;
-        use datafusion::prelude::SessionContext;
         use exoware_sdk::StoreClient;
 
         struct TestServers {
@@ -10284,7 +10288,7 @@ mod tests {
             }
             writer.flush().await.expect("flush batch");
 
-            let ctx = SessionContext::new_with_state(session_state_builder().build());
+            let ctx = session_context();
             schema.register_all(&ctx).expect("register tables");
 
             let batches = ctx

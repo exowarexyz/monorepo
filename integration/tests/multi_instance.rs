@@ -12,7 +12,6 @@ use commonware_storage::qmdb::keyless::variable::Operation as KeylessOperation;
 use connectrpc::client::ClientConfig;
 use datafusion::arrow::array::Int64Array;
 use datafusion::arrow::datatypes::DataType;
-use datafusion::prelude::SessionContext;
 use exoware_qmdb::proto::qmdb::v1::SubscribeRequest as QmdbSubscribeRequest;
 use exoware_qmdb::{
     keyless_operation_log_connect_stack, stage_authenticated_range, stage_watermark, KeylessClient,
@@ -481,7 +480,7 @@ fn make_sql_schema(client: PrefixedStoreClient) -> KvSchema {
 }
 
 async fn query_sql_items(client: PrefixedStoreClient) -> (Vec<i64>, Vec<i64>) {
-    let ctx = SessionContext::new_with_state(exoware_sql::session_state_builder().build());
+    let ctx = exoware_sql::session_context();
     make_sql_schema(client)
         .register_all(&ctx)
         .expect("register schema");
