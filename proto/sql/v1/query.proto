@@ -11,10 +11,17 @@ message QueryRequest {
     (buf.validate.field).string.min_len = 1,
     (buf.validate.field).string.max_len = 65535
   ];
+
+  // Minimum Store sequence required by reads in this query.
+  optional uint64 min_sequence_number = 2;
 }
 
 // Result set from `Query`.
 message QueryResponse {
   repeated string column = 1;
   repeated Row rows = 2;
+
+  // Highest Store sequence observed. Queries that skip Store reads return
+  // the requested floor.
+  uint64 sequence_number = 3;
 }

@@ -2,10 +2,23 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use datafusion::arrow::datatypes::{i256, DataType, Field, Schema, SchemaRef, TimeUnit};
+use datafusion::catalog::Session;
 use exoware_sdk::keys::{Key, Prefix};
 use exoware_sdk::PrefixedStoreClient;
+use exoware_sdk::SerializableReadSession;
 
 use crate::codec::{primary_key_prefix, secondary_index_prefix};
+
+// A config extension lets every Store scan in a query share one read floor.
+#[derive(Debug)]
+pub(crate) struct RequestReadSession(pub(crate) SerializableReadSession);
+
+pub(crate) fn request_read_session(state: &dyn Session) -> Option<SerializableReadSession> {
+    state
+        .config()
+        .get_extension::<RequestReadSession>()
+        .map(|request| request.0.clone())
+}
 
 /// Every table/index family is named by a single packed byte
 /// `(table_prefix << 4) | discriminator`: the high nibble is the table prefix

@@ -2,12 +2,23 @@
 
 mod common;
 
-use datafusion::arrow::array::Int64Array;
+use std::sync::Arc;
+
+use axum::Router;
+use connectrpc::client::ClientConfig;
+use connectrpc::ErrorCode;
+use datafusion::arrow::array::{ArrayRef, Int64Array};
 use datafusion::arrow::datatypes::DataType;
+use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::common::ScalarValue;
+use datafusion::datasource::{MemTable, ViewTable};
 use datafusion::prelude::SessionContext;
+use exoware_sdk::proto::PreferZstdHttpClient;
 use exoware_sdk::PrefixedStoreClient;
-use exoware_sql::{CellValue, IndexSpec, KvSchema, TableColumnConfig};
+use exoware_sql::proto::sql::v1::{QueryRequest, ServiceClient};
+use exoware_sql::{
+    sql_connect_stack, CellValue, IndexSpec, KvSchema, SqlServer, TableColumnConfig,
+};
 
 #[tokio::test]
 async fn sql_full_pipeline_insert_and_query() {
@@ -231,4 +242,283 @@ async fn sql_full_pipeline_insert_and_query() {
         ScalarValue::Int64(Some(v)) => assert_eq!(v, 200 + 300 + 400),
         other => panic!("unexpected sum type: {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn connect_query_enforces_sequence_floor_and_returns_evaluated_sequence() {
+    let store_client = common::local_store_client().await;
+    let schema = KvSchema::new(PrefixedStoreClient::empty(store_client))
+        .table(
+            "items",
+            vec![
+                TableColumnConfig::new("id", DataType::Int64, false),
+                TableColumnConfig::new("value", DataType::Utf8, false),
+                TableColumnConfig::new("amount", DataType::Int64, false),
+            ],
+            vec!["id".to_string()],
+            vec![IndexSpec::lexicographic("value_idx", vec!["value".to_string()]).expect("index")],
+        )
+        .expect("schema");
+    let mut writer = schema.batch_writer();
+    writer
+        .insert(
+            "items",
+            vec![
+                CellValue::Int64(1),
+                CellValue::Utf8("one".to_string()),
+                CellValue::Int64(10),
+            ],
+        )
+        .expect("insert");
+    let write_sequence = writer.flush().await.expect("flush");
+
+    let server = Arc::new(SqlServer::new(schema).expect("SQL server"));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind SQL server");
+    let base = format!("http://{}", listener.local_addr().expect("SQL address"));
+    let app = Router::new().fallback_service(sql_connect_stack(server));
+    let handle = tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve SQL");
+    });
+    let client = ServiceClient::new(
+        PreferZstdHttpClient::plaintext(),
+        ClientConfig::new(base.parse().expect("SQL URI")),
+    );
+
+    for sql in [
+        "SELECT value FROM items WHERE id = 1",
+        "SELECT id FROM items ORDER BY id DESC LIMIT 1",
+        "SELECT id FROM items WHERE value = 'one'",
+        "SELECT amount FROM items WHERE value = 'one'",
+        "SELECT COUNT(*) FROM items",
+        "SELECT value, SUM(amount) AS total FROM items GROUP BY value",
+        "SELECT a.value FROM items a JOIN items b ON a.id = b.id",
+    ] {
+        for min_sequence_number in [None, Some(write_sequence)] {
+            let response = client
+                .query(QueryRequest {
+                    sql: sql.to_string(),
+                    min_sequence_number,
+                    ..Default::default()
+                })
+                .await
+                .expect("query")
+                .into_view()
+                .to_owned_message();
+            assert!(response.sequence_number >= write_sequence, "{sql}");
+            assert_eq!(response.rows.len(), 1, "{sql}");
+        }
+
+        let error = client
+            .query(QueryRequest {
+                sql: sql.to_string(),
+                min_sequence_number: Some(u64::MAX),
+                ..Default::default()
+            })
+            .await
+            .expect_err("unavailable sequence floor");
+        assert_eq!(error.code, ErrorCode::Aborted, "{sql} returned {error:?}");
+    }
+
+    let response = client
+        .query(QueryRequest {
+            sql: "SELECT value FROM items WHERE id = 2".to_string(),
+            min_sequence_number: Some(write_sequence),
+            ..Default::default()
+        })
+        .await
+        .expect("empty query")
+        .into_view()
+        .to_owned_message();
+    assert!(response.sequence_number >= write_sequence);
+    assert!(response.rows.is_empty());
+
+    for sql in ["SELECT 1", "SELECT value FROM items WHERE false"] {
+        let response = client
+            .query(QueryRequest {
+                sql: sql.to_string(),
+                min_sequence_number: Some(u64::MAX),
+                ..Default::default()
+            })
+            .await
+            .expect("query without Store reads")
+            .into_view()
+            .to_owned_message();
+        assert_eq!(response.sequence_number, u64::MAX, "{sql}");
+    }
+
+    handle.abort();
+}
+
+#[tokio::test]
+async fn connect_query_retains_configured_session_tables() {
+    let store_client = common::local_store_client().await;
+    let schema = KvSchema::new(PrefixedStoreClient::empty(store_client))
+        .table(
+            "items",
+            vec![
+                TableColumnConfig::new("id", DataType::Int64, false),
+                TableColumnConfig::new("value", DataType::Utf8, false),
+            ],
+            vec!["id".to_string()],
+            Vec::new(),
+        )
+        .expect("schema");
+    let mut writer = schema.batch_writer();
+    writer
+        .insert(
+            "items",
+            vec![CellValue::Int64(1), CellValue::Utf8("one".to_string())],
+        )
+        .expect("insert");
+    let write_sequence = writer.flush().await.expect("flush");
+
+    let configured_batch = RecordBatch::try_from_iter(vec![(
+        "id",
+        Arc::new(Int64Array::from(vec![1])) as ArrayRef,
+    )])
+    .expect("configured batch");
+    let configured_table =
+        MemTable::try_new(configured_batch.schema(), vec![vec![configured_batch]])
+            .expect("configured table");
+    let server = SqlServer::new(schema).expect("SQL server");
+    server
+        .session()
+        .register_table("configured_ids", Arc::new(configured_table))
+        .expect("register configured table");
+    let server = Arc::new(server);
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind SQL server");
+    let base = format!("http://{}", listener.local_addr().expect("SQL address"));
+    let app = Router::new().fallback_service(sql_connect_stack(server));
+    let handle = tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve SQL");
+    });
+    let client = ServiceClient::new(
+        PreferZstdHttpClient::plaintext(),
+        ClientConfig::new(base.parse().expect("SQL URI")),
+    );
+
+    let response = client
+        .query(QueryRequest {
+            sql: "SELECT items.value FROM items JOIN configured_ids USING (id)".to_string(),
+            min_sequence_number: Some(write_sequence),
+            ..Default::default()
+        })
+        .await
+        .expect("query configured table")
+        .into_view()
+        .to_owned_message();
+    assert!(response.sequence_number >= write_sequence);
+    assert_eq!(response.rows.len(), 1);
+
+    handle.abort();
+}
+
+#[tokio::test]
+async fn connect_query_rebinds_configured_views_to_sequence_floor() {
+    let store_client = common::local_store_client().await;
+    let schema = KvSchema::new(PrefixedStoreClient::empty(store_client))
+        .table(
+            "items",
+            vec![
+                TableColumnConfig::new("id", DataType::Int64, false),
+                TableColumnConfig::new("value", DataType::Utf8, false),
+            ],
+            vec!["id".to_string()],
+            Vec::new(),
+        )
+        .expect("schema");
+    let mut writer = schema.batch_writer();
+    writer
+        .insert(
+            "items",
+            vec![CellValue::Int64(1), CellValue::Utf8("one".to_string())],
+        )
+        .expect("insert");
+    let write_sequence = writer.flush().await.expect("flush");
+
+    let server = SqlServer::new(schema).expect("SQL server");
+    server
+        .session()
+        .sql("CREATE VIEW configured_items AS SELECT value FROM items WHERE id = 1")
+        .await
+        .expect("create configured view");
+    let programmatic_plan = server
+        .session()
+        .sql("SELECT value FROM items WHERE id = 1")
+        .await
+        .expect("plan programmatic view")
+        .into_unoptimized_plan();
+    server
+        .session()
+        .register_table(
+            "programmatic_items",
+            Arc::new(ViewTable::new(programmatic_plan, None)),
+        )
+        .expect("register programmatic view");
+    let server = Arc::new(server);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind SQL server");
+    let base = format!("http://{}", listener.local_addr().expect("SQL address"));
+    let app = Router::new().fallback_service(sql_connect_stack(server));
+    let handle = tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve SQL");
+    });
+    let client = ServiceClient::new(
+        PreferZstdHttpClient::plaintext(),
+        ClientConfig::new(base.parse().expect("SQL URI")),
+    );
+
+    let response = client
+        .query(QueryRequest {
+            sql: "SELECT value FROM configured_items".to_string(),
+            min_sequence_number: Some(write_sequence),
+            ..Default::default()
+        })
+        .await
+        .expect("query configured view")
+        .into_view()
+        .to_owned_message();
+    assert!(response.sequence_number >= write_sequence);
+    assert_eq!(response.rows.len(), 1);
+
+    let response = client
+        .query(QueryRequest {
+            sql: "SELECT value FROM programmatic_items".to_string(),
+            min_sequence_number: Some(write_sequence),
+            ..Default::default()
+        })
+        .await
+        .expect("query programmatic view")
+        .into_view()
+        .to_owned_message();
+    assert!(response.sequence_number >= write_sequence);
+    assert_eq!(response.rows.len(), 1);
+
+    let error = client
+        .query(QueryRequest {
+            sql: "SELECT value FROM configured_items".to_string(),
+            min_sequence_number: Some(u64::MAX),
+            ..Default::default()
+        })
+        .await
+        .expect_err("unavailable sequence floor through view");
+    assert_eq!(error.code, ErrorCode::Aborted);
+
+    let error = client
+        .query(QueryRequest {
+            sql: "SELECT value FROM programmatic_items".to_string(),
+            min_sequence_number: Some(u64::MAX),
+            ..Default::default()
+        })
+        .await
+        .expect_err("unavailable sequence floor through programmatic view");
+    assert_eq!(error.code, ErrorCode::Aborted);
+
+    handle.abort();
 }

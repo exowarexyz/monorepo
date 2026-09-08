@@ -31,6 +31,7 @@ use crate::types::*;
 #[derive(Debug, Clone)]
 pub(crate) struct KvScanExec {
     pub(crate) client: PrefixedStoreClient,
+    pub(crate) read_session: Option<SerializableReadSession>,
     pub(crate) model: Arc<TableModel>,
     pub(crate) index_specs: Arc<Vec<ResolvedIndexSpec>>,
     pub(crate) predicate: QueryPredicate,
@@ -72,6 +73,7 @@ impl KvScanExec {
         let properties = Self::make_properties(projected_schema, None);
         Self {
             client,
+            read_session: None,
             model,
             index_specs,
             predicate,
@@ -80,6 +82,11 @@ impl KvScanExec {
             projection,
             properties,
         }
+    }
+
+    pub(crate) fn with_read_session(mut self, read_session: SerializableReadSession) -> Self {
+        self.read_session = Some(read_session);
+        self
     }
 
     pub(crate) fn scan_direction(&self) -> RangeMode {
@@ -240,7 +247,10 @@ impl ExecutionPlan for KvScanExec {
 
         let mut builder = RecordBatchReceiverStreamBuilder::new(self.schema(), 2);
         let tx = builder.tx();
-        let session = self.client.create_session();
+        let session = self
+            .read_session
+            .clone()
+            .unwrap_or_else(|| self.client.create_session());
         let model = self.model.clone();
         let index_specs = self.index_specs.clone();
         let predicate = self.predicate.clone();

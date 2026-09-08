@@ -137,6 +137,7 @@ pub(crate) struct AggregateGroupPlan {
 #[derive(Debug, Clone)]
 pub(crate) struct AggregatePushdownSpec {
     pub(crate) client: PrefixedStoreClient,
+    pub(crate) read_session: Option<SerializableReadSession>,
     pub(crate) group_plans: Vec<AggregateGroupPlan>,
     pub(crate) seed_job: Option<AggregateReduceJob>,
     pub(crate) aggregate_jobs: Vec<CombinedAggregateJob>,
@@ -277,7 +278,7 @@ impl TableProvider for KvAggregateTable {
 
     async fn scan(
         &self,
-        _state: &dyn Session,
+        state: &dyn Session,
         projection: Option<&Vec<usize>>,
         _filters: &[Expr],
         _limit: Option<usize>,
@@ -286,8 +287,10 @@ impl TableProvider for KvAggregateTable {
             Some(proj) => Arc::new(self.spec.schema.project(proj)?),
             None => self.spec.schema.clone(),
         };
+        let mut spec = self.spec.clone();
+        spec.read_session = request_read_session(state);
         Ok(Arc::new(KvAggregateExec::new(
-            self.spec.clone(),
+            spec,
             projection.cloned(),
             projected_schema,
         )))
@@ -640,7 +643,10 @@ pub(crate) async fn execute_aggregate_pushdown(
     projection: Option<Vec<usize>>,
     projected_schema: SchemaRef,
 ) -> DataFusionResult<RecordBatch> {
-    let session = spec.client.create_session();
+    let session = spec
+        .read_session
+        .clone()
+        .unwrap_or_else(|| spec.client.create_session());
     let mut groups = BTreeMap::<Vec<u8>, GroupAccumulatorState>::new();
     if spec.group_plans.is_empty() {
         groups.insert(
@@ -1107,6 +1113,7 @@ pub(crate) fn try_build_aggregate_pushdown_spec(
 
     Ok(Some(AggregatePushdownSpec {
         client: table.client.clone(),
+        read_session: None,
         group_plans: compiled_group_exprs
             .iter()
             .map(|group| AggregateGroupPlan {

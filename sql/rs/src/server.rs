@@ -39,6 +39,7 @@ use datafusion::arrow::datatypes::{DataType, SchemaRef, TimeUnit};
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::common::{DataFusionError, Result as DataFusionResult};
 use datafusion::datasource::MemTable;
+use datafusion::execution::SessionStateBuilder;
 use datafusion::prelude::SessionContext;
 use exoware_sdk::keys::Key;
 use exoware_sdk::kv_codec::{decode_stored_row, Utf8};
@@ -54,11 +55,28 @@ use crate::codec::decode_primary_key_selected;
 use crate::filter::ScanAccessPlan;
 use crate::predicate::QueryPredicate;
 use crate::schema::KvSchema;
-use crate::types::{IndexLayout, ResolvedIndexSpec, TableModel};
+use crate::types::{IndexLayout, RequestReadSession, ResolvedIndexSpec, TableModel};
 
 const MAX_CONNECTRPC_BODY_BYTES: usize = 256 * 1024 * 1024;
 
 type SubscribeStream = Pin<Box<dyn Stream<Item = Result<SubscribeResponse, ConnectError>> + Send>>;
+
+/// Build a query context whose Store scans share the supplied minimum sequence.
+pub fn query_context_with_min_sequence(
+    ctx: &SessionContext,
+    store: &PrefixedStoreClient,
+    min_sequence_number: u64,
+) -> SessionContext {
+    let read_session = store.create_session_with_sequence(min_sequence_number);
+
+    // Extend the cloned state before rebuilding so DataFusion preserves its catalog.
+    let mut state = ctx.state();
+    state
+        .config_mut()
+        .set_extension(Arc::new(RequestReadSession(read_session)));
+    let state = SessionStateBuilder::new_from_existing(state).build();
+    SessionContext::new_with_state(state)
+}
 
 /// One registered table's streaming-decode state.
 #[derive(Clone)]
@@ -163,6 +181,16 @@ impl SqlServer {
     /// without going through the connect API.
     pub fn session(&self) -> &SessionContext {
         &self.ctx
+    }
+
+    fn query_session(
+        &self,
+        min_sequence_number: u64,
+    ) -> (SessionContext, exoware_sdk::SerializableReadSession) {
+        let ctx = query_context_with_min_sequence(&self.ctx, &self.store, min_sequence_number);
+        let read_session = crate::types::request_read_session(&ctx.state())
+            .expect("query context must retain its Store read session");
+        (ctx, read_session)
     }
 
     #[allow(clippy::result_large_err)]
@@ -284,7 +312,7 @@ impl Service for SqlConnect {
                 .stream()
                 .subscribe(filter, since)
                 .await
-                .map_err(client_error_to_connect)?;
+                .map_err(|err| client_error_to_connect(&err))?;
 
             let output = Box::pin(BatchPredicateStream::new(
                 sub, stream, table_name, where_sql,
@@ -315,19 +343,24 @@ impl Service for SqlConnect {
         let server = self.server.clone();
         async move {
             let sql = request.sql.to_string();
-            let df = server
-                .ctx
-                .sql(&sql)
-                .await
-                .map_err(datafusion_error_to_connect)?;
+            let min_sequence_number = request.min_sequence_number.unwrap_or_default();
+            let (ctx, read_session) = server.query_session(min_sequence_number);
+            let df = ctx.sql(&sql).await.map_err(datafusion_error_to_connect)?;
             let schema = df.schema().clone();
             let batches = df.collect().await.map_err(datafusion_error_to_connect)?;
             let columns: Vec<String> = schema.fields().iter().map(|f| f.name().clone()).collect();
             let rows =
                 record_batches_to_proto_rows(&batches).map_err(datafusion_error_to_connect)?;
+
+            // Queries that skip Store reads preserve the requested floor so
+            // callers can carry it into subsequent reads.
+            let sequence_number = read_session
+                .evaluated_sequence()
+                .unwrap_or(min_sequence_number);
             connectrpc::Response::ok(QueryResponse {
                 column: columns,
                 rows,
+                sequence_number,
                 ..Default::default()
             })
         }
@@ -431,7 +464,7 @@ fn subscription_stream(sub: StreamSubscription) -> SubscriptionStream {
         match sub.next().await {
             Ok(Some(frame)) => Some((Ok(frame), Some(sub))),
             Ok(None) => None,
-            Err(err) => Some((Err(client_error_to_connect(err)), None)),
+            Err(err) => Some((Err(client_error_to_connect(&err)), None)),
         }
     }))
 }
@@ -784,17 +817,21 @@ fn list_array_to_proto(elements: &ArrayRef) -> DataFusionResult<ProtoListValue> 
 }
 
 fn datafusion_error_to_connect(err: DataFusionError) -> ConnectError {
-    match err {
+    match err.find_root() {
         DataFusionError::Plan(msg)
         | DataFusionError::SQL(_, Some(msg))
         | DataFusionError::Configuration(msg)
-        | DataFusionError::NotImplemented(msg) => ConnectError::invalid_argument(msg),
+        | DataFusionError::NotImplemented(msg) => ConnectError::invalid_argument(msg.clone()),
         DataFusionError::SchemaError(err, _) => ConnectError::invalid_argument(err.to_string()),
+        DataFusionError::External(err) => match err.downcast_ref::<exoware_sdk::ClientError>() {
+            Some(err) => client_error_to_connect(err),
+            None => ConnectError::internal(err.to_string()),
+        },
         other => ConnectError::internal(other.to_string()),
     }
 }
 
-fn client_error_to_connect(err: exoware_sdk::ClientError) -> ConnectError {
+fn client_error_to_connect(err: &exoware_sdk::ClientError) -> ConnectError {
     if let Some(rpc) = err.rpc_error() {
         ConnectError::new(rpc.code, rpc.message.clone().unwrap_or_default())
     } else {
@@ -811,12 +848,26 @@ fn _assert_projected_column_indices_visible() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use exoware_sdk::StoreClient;
     use std::collections::VecDeque;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Mutex;
 
     use futures::channel::oneshot;
     use futures::StreamExt;
+
+    #[test]
+    fn query_context_installs_the_supplied_store_sequence_floor() {
+        let ctx = SessionContext::new();
+        let store = PrefixedStoreClient::empty(StoreClient::new("http://localhost:10000"));
+        let query_ctx = query_context_with_min_sequence(&ctx, &store, 41);
+        let first = crate::types::request_read_session(&query_ctx.state()).unwrap();
+        let second = crate::types::request_read_session(&query_ctx.state()).unwrap();
+
+        assert_eq!(first.fixed_sequence(), Some(41));
+        assert_eq!(second.fixed_sequence(), Some(41));
+        assert!(crate::types::request_read_session(&ctx.state()).is_none());
+    }
 
     enum ControlledEvent {
         Frame(u64),

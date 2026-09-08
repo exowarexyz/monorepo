@@ -26,6 +26,9 @@ import {
 } from './generated/proto/sql/v1/common_pb.js';
 
 export type SqlClientOptions = SdkClientOptions;
+export type SqlQueryOptions = CallOptions & {
+  minSequenceNumber?: bigint;
+};
 
 /**
  * Typed view of a single row cell.
@@ -56,6 +59,7 @@ export interface DecodedRow {
 }
 
 export interface DecodedQueryResult {
+  sequenceNumber: bigint;
   columns: string[];
   rows: DecodedRow[];
 }
@@ -134,6 +138,7 @@ function decodeRow(row: SqlRow, columns: string[]): DecodedRow {
 function decodeQuery(response: SqlQueryResponse): DecodedQueryResult {
   const columns = response.column;
   return {
+    sequenceNumber: response.sequenceNumber,
     columns,
     rows: response.rows.map((row) => decodeRow(row, columns)),
   };
@@ -198,10 +203,17 @@ export class SqlClient {
     this.rpc = createClient(SqlService, transport);
   }
 
-  async query(sql: string, options?: CallOptions): Promise<DecodedQueryResult> {
+  async query(
+    sql: string,
+    options: SqlQueryOptions = {},
+  ): Promise<DecodedQueryResult> {
+    const { minSequenceNumber, ...callOptions } = options;
     const response = await this.rpc.query(
-      create(SqlQueryRequestSchema, { sql }),
-      options,
+      create(SqlQueryRequestSchema, {
+        sql,
+        ...(minSequenceNumber !== undefined ? { minSequenceNumber } : {}),
+      }),
+      callOptions,
     );
     return decodeQuery(response);
   }

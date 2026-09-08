@@ -9,4 +9,5 @@ export {
   type DecodedSubscribeFrame,
   type DecodedTable,
   type SqlClientOptions,
+  type SqlQueryOptions,
 } from './client.js';

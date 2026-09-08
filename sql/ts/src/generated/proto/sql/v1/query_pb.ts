@@ -13,7 +13,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file sql/v1/query.proto.
  */
 export const file_sql_v1_query: GenFile = /*@__PURE__*/
-  fileDesc("ChJzcWwvdjEvcXVlcnkucHJvdG8SBnNxbC52MSIoCgxRdWVyeVJlcXVlc3QSGAoDc3FsGAEgASgJQgu6SAhyBhABGP//AyI6Cg1RdWVyeVJlc3BvbnNlEg4KBmNvbHVtbhgBIAMoCRIZCgRyb3dzGAIgAygLMgsuc3FsLnYxLlJvd2IGcHJvdG8z", [file_buf_validate_validate, file_sql_v1_common]);
+  fileDesc("ChJzcWwvdjEvcXVlcnkucHJvdG8SBnNxbC52MSJiCgxRdWVyeVJlcXVlc3QSGAoDc3FsGAEgASgJQgu6SAhyBhABGP//AxIgChNtaW5fc2VxdWVuY2VfbnVtYmVyGAIgASgESACIAQFCFgoUX21pbl9zZXF1ZW5jZV9udW1iZXIiUwoNUXVlcnlSZXNwb25zZRIOCgZjb2x1bW4YASADKAkSGQoEcm93cxgCIAMoCzILLnNxbC52MS5Sb3cSFwoPc2VxdWVuY2VfbnVtYmVyGAMgASgEYgZwcm90bzM", [file_buf_validate_validate, file_sql_v1_common]);
 
 /**
  * Ad-hoc SQL statement.
@@ -25,6 +25,13 @@ export type QueryRequest = Message<"sql.v1.QueryRequest"> & {
    * @generated from field: string sql = 1;
    */
   sql: string;
+
+  /**
+   * Minimum Store sequence required by reads in this query.
+   *
+   * @generated from field: optional uint64 min_sequence_number = 2;
+   */
+  minSequenceNumber?: bigint;
 };
 
 /**
@@ -49,6 +56,14 @@ export type QueryResponse = Message<"sql.v1.QueryResponse"> & {
    * @generated from field: repeated sql.v1.Row rows = 2;
    */
   rows: Row[];
+
+  /**
+   * Highest Store sequence observed. Queries that skip Store reads return
+   * the requested floor.
+   *
+   * @generated from field: uint64 sequence_number = 3;
+   */
+  sequenceNumber: bigint;
 };
 
 /**
