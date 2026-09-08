@@ -32,11 +32,9 @@ impl<F: Family, D: Digest> MerkleStorage<F> for KvMerkleStorage<'_, F, D> {
 
     async fn get_node(&self, position: Position<F>) -> Result<Option<D>, merkle::Error<F>> {
         let key = encode_node_key(position);
-        let bytes = self
-            .session
-            .get(&key)
-            .await
-            .map_err(|_| merkle::Error::DataCorrupted("exoware-qmdb node fetch failed"))?;
+        let bytes = self.session.get(&key).await.map_err(|error| {
+            crate::error::store_read_error(error, "exoware-qmdb node fetch failed")
+        })?;
         let Some(bytes) = bytes else {
             return Ok(None);
         };
@@ -87,10 +85,14 @@ impl<F: Family, D: Digest> KvMerkleStorage<'_, F, D> {
             .session
             .get_many(&refs, u32::try_from(keys.len()).unwrap_or(u32::MAX))
             .await
-            .map_err(|_| merkle::Error::DataCorrupted("exoware-qmdb node fetch failed"))?
+            .map_err(|error| {
+                crate::error::store_read_error(error, "exoware-qmdb node fetch failed")
+            })?
             .collect()
             .await
-            .map_err(|_| merkle::Error::DataCorrupted("exoware-qmdb node fetch failed"))?;
+            .map_err(|error| {
+                crate::error::store_read_error(error, "exoware-qmdb node fetch failed")
+            })?;
 
         // Decode in request order so a later malformed node cannot mask an earlier missing node.
         Ok(keys.iter().map(|key| rows.get(key).cloned()).collect())
@@ -203,8 +205,11 @@ impl<F: Graftable, H: Hasher, const N: usize> KvCurrentStorage<'_, F, H, N> {
                 .session
                 .range_with_mode(&start, &end, 1, RangeMode::Reverse)
                 .await
-                .map_err(|_| {
-                    merkle::Error::DataCorrupted("exoware-qmdb current grafted node fetch failed")
+                .map_err(|error| {
+                    crate::error::store_read_error(
+                        error,
+                        "exoware-qmdb current grafted node fetch failed",
+                    )
                 })?;
             if let Some((_, bytes)) = rows.into_iter().next() {
                 if bytes.len() != H::Digest::SIZE {
@@ -444,6 +449,3 @@ mod tests {
         assert!(load::<mmb::Family>(9, 1, None).is_err());
     }
 }
-
-#[cfg(test)]
-mod node_tests;

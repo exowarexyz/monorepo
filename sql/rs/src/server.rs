@@ -39,7 +39,7 @@ use datafusion::arrow::datatypes::{DataType, SchemaRef, TimeUnit};
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::common::{DataFusionError, Result as DataFusionResult};
 use datafusion::datasource::MemTable;
-use datafusion::execution::SessionStateBuilder;
+use datafusion::logical_expr::{DdlStatement, LogicalPlan, Statement};
 use datafusion::prelude::SessionContext;
 use exoware_sdk::keys::Key;
 use exoware_sdk::kv_codec::{decode_stored_row, Utf8};
@@ -69,12 +69,10 @@ pub fn query_context_with_min_sequence(
 ) -> SessionContext {
     let read_session = store.create_session_with_sequence(min_sequence_number);
 
-    // Extend the cloned state before rebuilding so DataFusion preserves its catalog.
     let mut state = ctx.state();
     state
         .config_mut()
         .set_extension(Arc::new(RequestReadSession(read_session)));
-    let state = SessionStateBuilder::new_from_existing(state).build();
     SessionContext::new_with_state(state)
 }
 
@@ -188,7 +186,7 @@ impl SqlServer {
         min_sequence_number: u64,
     ) -> (SessionContext, exoware_sdk::SerializableReadSession) {
         let ctx = query_context_with_min_sequence(&self.ctx, &self.store, min_sequence_number);
-        let read_session = crate::types::request_read_session(&ctx.state())
+        let read_session = crate::types::request_read_session(ctx.state().config(), &self.store)
             .expect("query context must retain its Store read session");
         (ctx, read_session)
     }
@@ -345,7 +343,29 @@ impl Service for SqlConnect {
             let sql = request.sql.to_string();
             let min_sequence_number = request.min_sequence_number.unwrap_or_default();
             let (ctx, read_session) = server.query_session(min_sequence_number);
-            let df = ctx.sql(&sql).await.map_err(datafusion_error_to_connect)?;
+            let plan = ctx
+                .state()
+                .create_logical_plan(&sql)
+                .await
+                .map_err(datafusion_error_to_connect)?;
+
+            // Session commands must outlive the request. Data reads keep the request's floor.
+            let execution_ctx = match &plan {
+                LogicalPlan::Statement(
+                    Statement::SetVariable(_)
+                    | Statement::ResetVariable(_)
+                    | Statement::Prepare(_)
+                    | Statement::Deallocate(_),
+                )
+                | LogicalPlan::Ddl(
+                    DdlStatement::CreateFunction(_) | DdlStatement::DropFunction(_),
+                ) => server.ctx.as_ref(),
+                _ => &ctx,
+            };
+            let df = execution_ctx
+                .execute_logical_plan(plan)
+                .await
+                .map_err(datafusion_error_to_connect)?;
             let schema = df.schema().clone();
             let batches = df.collect().await.map_err(datafusion_error_to_connect)?;
             let columns: Vec<String> = schema.fields().iter().map(|f| f.name().clone()).collect();
@@ -861,12 +881,13 @@ mod tests {
         let ctx = SessionContext::new();
         let store = PrefixedStoreClient::empty(StoreClient::new("http://localhost:10000"));
         let query_ctx = query_context_with_min_sequence(&ctx, &store, 41);
-        let first = crate::types::request_read_session(&query_ctx.state()).unwrap();
-        let second = crate::types::request_read_session(&query_ctx.state()).unwrap();
+        let first = crate::types::request_read_session(query_ctx.state().config(), &store).unwrap();
+        let second =
+            crate::types::request_read_session(query_ctx.state().config(), &store).unwrap();
 
         assert_eq!(first.fixed_sequence(), Some(41));
         assert_eq!(second.fixed_sequence(), Some(41));
-        assert!(crate::types::request_read_session(&ctx.state()).is_none());
+        assert!(crate::types::request_read_session(ctx.state().config(), &store).is_none());
     }
 
     enum ControlledEvent {

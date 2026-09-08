@@ -12,10 +12,12 @@ use exoware_sdk::{
         Detail, GetManyEntry, GetManyFrame, GetManyRequest, GetRequest, GetResponse, RangeFrame,
         RangeRequest, ReduceRequest, ReduceResponse, Service, ServiceServer,
     },
-    PrefixedStoreClient, StoreClient,
+    PrefixedStoreClient, StoreClient, StoreKeyPrefix,
 };
+use futures::FutureExt as _;
 use std::{
     collections::BTreeMap,
+    panic::AssertUnwindSafe,
     sync::{Arc, Mutex},
 };
 
@@ -24,6 +26,9 @@ struct NodeQueries {
     rows: BTreeMap<Key, Bytes>,
     calls: Arc<Mutex<Vec<(&'static str, usize)>>>,
     range_barrier: Option<Arc<tokio::sync::Barrier>>,
+    requests: Arc<Mutex<Vec<GetManyRequest>>>,
+    sequence: Option<u64>,
+    fail_stream: bool,
 }
 
 impl Service for NodeQueries {
@@ -53,12 +58,21 @@ impl Service for NodeQueries {
             .lock()
             .unwrap()
             .push(("many", request.keys.len()));
+        self.requests
+            .lock()
+            .unwrap()
+            .push(request.to_owned_message());
+        let sequence = self
+            .sequence
+            .map(|sequence| sequence.max(request.min_sequence_number.unwrap_or_default()));
+
         // Legal out-of-order frames require the adapter to recover requested slot order
-        let frames = request
+        let mut frames = request
             .keys
             .iter()
             .rev()
-            .map(|key| {
+            .enumerate()
+            .map(|(index, key)| {
                 Ok(GetManyFrame {
                     results: vec![GetManyEntry {
                         key: key.to_vec(),
@@ -66,7 +80,7 @@ impl Service for NodeQueries {
                         ..Default::default()
                     }],
                     detail: Some(Detail {
-                        sequence_number: 1,
+                        sequence_number: sequence.map_or(1, |sequence| sequence + index as u64 + 1),
                         ..Default::default()
                     })
                     .into(),
@@ -74,6 +88,9 @@ impl Service for NodeQueries {
                 })
             })
             .collect::<Vec<_>>();
+        if self.fail_stream {
+            frames.push(Err(ConnectError::unavailable("test stream failure")));
+        }
         Ok(connectrpc::Response::stream(futures::stream::iter(frames)))
     }
 
@@ -209,15 +226,21 @@ async fn test_merkle_proofs_batch_node_reads() {
     assert_batched_proofs::<mmb::Family>().await;
 }
 
-#[tokio::test]
-async fn test_current_nodes_batch_operations_and_overlap_grafted_reads() {
-    let positions = [0, 14, 15, 29].map(Position::<mmr::Family>::new);
-    let digests = positions.map(|position| Sha256::hash(&[&position.as_u64().to_be_bytes()]));
+async fn assert_current_nodes(positions: &[u64], expected_calls: &[(&str, usize)]) {
+    let positions = positions
+        .iter()
+        .copied()
+        .map(Position::<mmr::Family>::new)
+        .collect::<Vec<_>>();
+    let digests = positions
+        .iter()
+        .map(|position| Sha256::hash(&[&position.as_u64().to_be_bytes()]))
+        .collect::<Vec<_>>();
     let watermark = Location::new(15);
     let queries = NodeQueries {
         rows: positions
             .iter()
-            .zip(digests)
+            .zip(&digests)
             .map(|(&position, digest)| {
                 let key = if mmr::Family::pos_to_height(position) < grafting::height::<1>() {
                     encode_node_key(position)
@@ -254,6 +277,161 @@ async fn test_current_nodes_batch_operations_and_overlap_grafted_reads() {
     assert_eq!(nodes, digests);
     let mut requested = calls.lock().unwrap().clone();
     requested.sort();
-    assert_eq!(requested, [("many", 2), ("range", 1), ("range", 1)]);
+    assert_eq!(requested, expected_calls);
+    server.abort();
+}
+
+#[tokio::test]
+async fn test_current_nodes_batch_operations_and_overlap_grafted_reads() {
+    assert_current_nodes(&[0, 14, 15, 29], &[("many", 2), ("range", 1), ("range", 1)]).await;
+    assert_current_nodes(&[14, 29], &[("range", 1), ("range", 1)]).await;
+}
+
+impl NodeQueries {
+    fn prefix() -> StoreKeyPrefix {
+        StoreKeyPrefix::new("proof/").unwrap()
+    }
+
+    fn key<F: Family>(position: u64) -> Key {
+        Self::prefix()
+            .encode_key(&encode_node_key(Position::<F>::new(position)))
+            .unwrap()
+    }
+
+    async fn session(&self) -> (SerializableReadSession, tokio::task::JoinHandle<()>) {
+        let (client, task) = serve(self.clone()).await;
+        (
+            client
+                .client()
+                .prefixed(Self::prefix())
+                .create_session_with_sequence(17),
+            task,
+        )
+    }
+}
+
+fn storage<F: Family>(session: &SerializableReadSession) -> KvMerkleStorage<'_, F, Digest> {
+    KvMerkleStorage {
+        session,
+        size: Position::new(100),
+        _marker: PhantomData,
+    }
+}
+
+#[tokio::test]
+async fn batches_nodes_in_order_and_tracks_the_observed_sequence() {
+    let positions = [0, 3, 8].map(Position::<mmr::Family>::new);
+    let digests = [1, 2, 3].map(|byte| Digest::decode(&[byte; 32][..]).unwrap());
+    let store = NodeQueries {
+        sequence: Some(40),
+        rows: positions
+            .iter()
+            .zip(&digests)
+            .map(|(position, digest)| {
+                (
+                    NodeQueries::key::<mmr::Family>(**position),
+                    Bytes::copy_from_slice(digest.as_ref()),
+                )
+            })
+            .collect(),
+        ..Default::default()
+    };
+    let (session, server) = store.session().await;
+    let storage = storage::<mmr::Family>(&session);
+
+    assert_eq!(storage.get_nodes(&positions).await.unwrap(), digests);
+    assert_eq!(session.evaluated_sequence(), Some(43));
+    assert_eq!(session.fixed_sequence(), Some(43));
+    {
+        let requests = store.requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].min_sequence_number, Some(17));
+        assert_eq!(requests[0].batch_size, 3);
+        assert_eq!(
+            requests[0].keys,
+            positions.map(|position| NodeQueries::key::<mmr::Family>(*position).to_vec())
+        );
+    }
+
+    assert_eq!(
+        storage.get_nodes(&positions[..1]).await.unwrap(),
+        digests[..1]
+    );
+    assert_eq!(
+        store.requests.lock().unwrap()[1].min_sequence_number,
+        Some(43)
+    );
+    assert_eq!(session.evaluated_sequence(), Some(44));
+    server.abort();
+}
+
+#[tokio::test]
+async fn rejects_positions_that_are_not_strictly_increasing() {
+    let store = NodeQueries::default();
+    let (session, server) = store.session().await;
+    let storage = storage::<mmr::Family>(&session);
+    for positions in [[3, 0], [3, 3]] {
+        let positions = positions.map(Position::new);
+        assert!(AssertUnwindSafe(storage.get_nodes(&positions))
+            .catch_unwind()
+            .await
+            .is_err());
+    }
+    assert!(store.requests.lock().unwrap().is_empty());
+    server.abort();
+}
+
+#[tokio::test]
+async fn reports_the_first_missing_or_malformed_node_in_request_order() {
+    let positions = [0, 3, 8].map(Position::<mmr::Family>::new);
+    for malformed in [None, Some(0), Some(3)] {
+        let store = NodeQueries {
+            rows: malformed
+                .map(|position| {
+                    (
+                        NodeQueries::key::<mmr::Family>(position),
+                        Bytes::from_static(b"invalid digest"),
+                    )
+                })
+                .into_iter()
+                .collect(),
+            ..Default::default()
+        };
+        let (session, server) = store.session().await;
+        let error = storage::<mmr::Family>(&session)
+            .get_nodes(&positions)
+            .await
+            .unwrap_err();
+        if malformed == Some(0) {
+            assert!(matches!(
+                error,
+                merkle::Error::DataCorrupted("exoware-qmdb node digest has invalid length")
+            ));
+        } else {
+            assert!(
+                matches!(error, merkle::Error::ElementPruned(position) if position == positions[0])
+            );
+        }
+        assert_eq!(store.requests.lock().unwrap().len(), 1);
+        server.abort();
+    }
+}
+
+#[tokio::test]
+async fn preserves_fetch_errors_after_streamed_results() {
+    let store = NodeQueries {
+        fail_stream: true,
+        ..Default::default()
+    };
+    let (session, server) = store.session().await;
+    let error = storage::<mmr::Family>(&session)
+        .get_nodes(&[Position::new(0)])
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        merkle::Error::DataCorrupted("exoware-qmdb node fetch failed")
+    ));
+    assert_eq!(store.requests.lock().unwrap().len(), 1);
     server.abort();
 }

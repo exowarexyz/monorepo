@@ -954,7 +954,7 @@ where
             self.compute_ops_root(session, watermark).await?,
         )
         .await
-        .map_err(|e| QmdbError::CommonwareMerkle(e.to_string()))
+        .map_err(crate::error::current_proof_error)
     }
 
     async fn build_current_operation_proof(
@@ -988,7 +988,7 @@ where
             self.compute_ops_root(session, watermark).await?,
         )
         .await
-        .map_err(|e| QmdbError::CommonwareMerkle(e.to_string()))
+        .map_err(crate::error::current_proof_error)
     }
 
     async fn load_inactivity_floor_at(

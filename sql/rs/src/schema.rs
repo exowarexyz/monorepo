@@ -440,7 +440,7 @@ impl TableProvider for KvTable {
 
     async fn scan(
         &self,
-        state: &dyn Session,
+        _state: &dyn Session,
         projection: Option<&Vec<usize>>,
         filters: &[Expr],
         limit: Option<usize>,
@@ -450,7 +450,7 @@ impl TableProvider for KvTable {
             Some(proj) => Arc::new(self.model.schema.project(proj)?),
             None => self.model.schema.clone(),
         };
-        let scan = KvScanExec::new(
+        Ok(Arc::new(KvScanExec::new(
             self.client.clone(),
             self.model.clone(),
             self.index_specs.clone(),
@@ -458,12 +458,7 @@ impl TableProvider for KvTable {
             limit,
             projected_schema,
             projection.cloned(),
-        );
-        let scan = match request_read_session(state) {
-            Some(read_session) => scan.with_read_session(read_session),
-            None => scan,
-        };
-        Ok(Arc::new(scan))
+        )))
     }
 
     async fn insert_into(
