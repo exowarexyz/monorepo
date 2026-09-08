@@ -10,7 +10,7 @@ use datafusion::arrow::datatypes::{i256, DataType, SchemaRef, TimeUnit};
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::catalog::Session;
 use datafusion::common::tree_node::{Transformed, TreeNode, TreeNodeRecursion};
-use datafusion::common::{DataFusionError, Result as DataFusionResult, ScalarValue};
+use datafusion::common::{Column, DataFusionError, Result as DataFusionResult, ScalarValue};
 use datafusion::datasource::{provider_as_source, source_as_provider, TableProvider};
 use datafusion::execution::context::TaskContext;
 use datafusion::logical_expr::{Expr, LogicalPlan, LogicalPlanBuilder, Operator, TableType};
@@ -213,10 +213,23 @@ impl KvAggregatePushdownRule {
             return Ok(Transformed::no(LogicalPlan::Aggregate(aggregate)));
         };
 
+        // A table scan qualifies every output field with the table name, but the
+        // aggregate emitted its aggregate columns unqualified. The optimizer rejects
+        // any rule that changes the plan schema, so re-alias each column back to the
+        // qualifier and name the aggregate produced.
+        let table_name = scan.table_name.clone();
         let table = Arc::new(KvAggregateTable { spec });
-        let plan =
-            LogicalPlanBuilder::scan(scan.table_name.clone(), provider_as_source(table), None)?
-                .build()?;
+        let restored_columns = aggregate
+            .schema
+            .iter()
+            .map(|(qualifier, field)| {
+                Expr::Column(Column::new(Some(table_name.clone()), field.name()))
+                    .alias_qualified(qualifier.cloned(), field.name())
+            })
+            .collect::<Vec<_>>();
+        let plan = LogicalPlanBuilder::scan(table_name, provider_as_source(table), None)?
+            .project(restored_columns)?
+            .build()?;
         Ok(Transformed::yes(plan))
     }
 }

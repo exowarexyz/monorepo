@@ -9622,6 +9622,114 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn aggregate_pushdown_supports_unaliased_aggregate_columns() {
+        let state = MockState {
+            kv: Arc::new(Mutex::new(BTreeMap::new())),
+            range_calls: Arc::new(AtomicUsize::new(0)),
+            range_reduce_calls: Arc::new(AtomicUsize::new(0)),
+            sequence_number: Arc::new(AtomicU64::new(0)),
+        };
+        let (base_url, shutdown_tx) = spawn_mock_server(state.clone()).await;
+        let client = StoreClient::new(&base_url);
+
+        let schema = KvSchema::new(PrefixedStoreClient::empty(client))
+            .table(
+                "orders",
+                vec![
+                    TableColumnConfig::new("id", DataType::Int64, false),
+                    TableColumnConfig::new("status", DataType::Utf8, false),
+                    TableColumnConfig::new("amount_cents", DataType::Int64, false),
+                ],
+                vec!["id".to_string()],
+                vec![IndexSpec::new("status_idx", vec!["status".to_string()])
+                    .expect("valid")
+                    .with_cover_columns(vec!["amount_cents".to_string()])],
+            )
+            .expect("schema");
+
+        let mut writer = schema.batch_writer();
+        for (id, status, amount) in [(1, "open", 10), (2, "open", 30), (3, "closed", 15)] {
+            writer
+                .insert(
+                    "orders",
+                    vec![
+                        CellValue::Int64(id),
+                        CellValue::Utf8(status.to_string()),
+                        CellValue::Int64(amount),
+                    ],
+                )
+                .expect("row");
+        }
+        writer.flush().await.expect("flush");
+
+        let ctx = SessionContext::new();
+        schema.register_all(&ctx).expect("register");
+
+        // Without an alias the optimizer drops the identity projection above the
+        // aggregate, so the pushdown rewrite becomes the plan root and must
+        // reproduce the aggregate's output qualifiers exactly to plan at all.
+        let grouped_sql =
+            "SELECT status, SUM(amount_cents) FROM orders GROUP BY status ORDER BY status";
+        let explain = physical_plan_text(&explain_plan_rows(&ctx, grouped_sql).await);
+        assert!(explain.contains("KvAggregateExec:"), "{explain}");
+
+        state.range_calls.store(0, AtomicOrdering::SeqCst);
+        state.range_reduce_calls.store(0, AtomicOrdering::SeqCst);
+
+        let batches = ctx
+            .sql(grouped_sql)
+            .await
+            .expect("query")
+            .collect()
+            .await
+            .expect("collect");
+
+        assert_eq!(batches.iter().map(|b| b.num_rows()).sum::<usize>(), 2);
+        let batch = &batches[0];
+        assert_eq!(
+            ScalarValue::try_from_array(batch.column(0), 0).expect("status scalar"),
+            ScalarValue::Utf8(Some("closed".to_string()))
+        );
+        assert_eq!(
+            ScalarValue::try_from_array(batch.column(1), 0).expect("sum scalar"),
+            ScalarValue::Int64(Some(15))
+        );
+        assert_eq!(
+            ScalarValue::try_from_array(batch.column(0), 1).expect("status scalar"),
+            ScalarValue::Utf8(Some("open".to_string()))
+        );
+        assert_eq!(
+            ScalarValue::try_from_array(batch.column(1), 1).expect("sum scalar"),
+            ScalarValue::Int64(Some(40))
+        );
+        assert_eq!(state.range_calls.load(AtomicOrdering::SeqCst), 0);
+        assert!(
+            state.range_reduce_calls.load(AtomicOrdering::SeqCst) >= 1,
+            "unaliased group-by aggregate should use grouped range reduction path"
+        );
+
+        let total_sql = "SELECT SUM(amount_cents) FROM orders";
+        let explain = physical_plan_text(&explain_plan_rows(&ctx, total_sql).await);
+        assert!(explain.contains("KvAggregateExec:"), "{explain}");
+
+        let batches = ctx
+            .sql(total_sql)
+            .await
+            .expect("query")
+            .collect()
+            .await
+            .expect("collect");
+
+        assert_eq!(batches.iter().map(|b| b.num_rows()).sum::<usize>(), 1);
+        assert_eq!(
+            ScalarValue::try_from_array(batches[0].column(0), 0).expect("sum scalar"),
+            ScalarValue::Int64(Some(55))
+        );
+
+        let _ = shutdown_tx.send(());
+    }
+
+    #[tokio::test]
     async fn aggregate_pushdown_group_by_float_canonicalizes_signed_zero() {
         let state = MockState {
             kv: Arc::new(Mutex::new(BTreeMap::new())),
