@@ -253,7 +253,7 @@ mod tests {
     }
 
     #[test]
-    fn loads_last_chunk_only_for_partial_lengths() {
+    fn test_loads_last_chunk_only_for_partial_lengths() {
         let (bitmap, requested) = load::<mmr::Family>(12, 0, None).unwrap();
         assert_eq!(requested, [1]);
         assert_eq!(bitmap.last_chunk(), ([1], 5));
@@ -272,7 +272,7 @@ mod tests {
     }
 
     #[test]
-    fn loads_queried_chunk_and_skips_pruned_locations() {
+    fn test_loads_queried_chunk_and_skips_pruned_locations() {
         let (bitmap, requested) = load::<mmr::Family>(20, 0, Some(3)).unwrap();
         assert_eq!(requested, [0, 2]);
         assert_eq!(bitmap.get_chunk(0), [0]);
@@ -289,7 +289,7 @@ mod tests {
     }
 
     #[test]
-    fn loads_pending_chunk_for_mmb() {
+    fn test_loads_pending_chunk_for_mmb() {
         // Chunk 0 of an MMB is graftable once 11 leaves exist, so 17 leaves leave chunk 1 pending
         let (bitmap, requested) = load::<mmb::Family>(16, 0, None).unwrap();
         assert_eq!(requested, [1, 2]);
@@ -307,7 +307,7 @@ mod tests {
     }
 
     #[test]
-    fn readable_view_matches_commonware_prunable_bitmap() {
+    fn test_readable_view_matches_commonware_prunable_bitmap() {
         use commonware_utils::bitmap::{Prunable, Readable};
         for (watermark, pruned) in [(12u64, 0usize), (15, 0), (20, 1), (23, 2)] {
             let mut prunable = Prunable::<1>::new_with_pruned_chunks(pruned).unwrap();
@@ -328,7 +328,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_invalid_windows() {
+    fn test_rejects_invalid_windows() {
         assert!(load::<mmr::Family>(12, 2, None).is_err());
         assert!(load::<mmr::Family>(12, 0, Some(13)).is_err());
         assert!(load::<mmb::Family>(9, 1, None).is_err());

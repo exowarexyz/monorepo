@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs';
 import { OrderedQmdbClient, QmdbOperationLogClient } from '../dist/client.js';
 import { initSync, verify_historical_raw_operation_range_proof } from '../dist/generated/wasm/exoware_qmdb_wasm.js';
 
-test('WASM size arguments reject narrowing before initialization', async () => {
+test('test_size_arguments_reject_narrowing_before_initialization', async () => {
   for (const currentChunkSize of [0, -1, 1.5, 2 ** 32, Number.MAX_SAFE_INTEGER]) {
     assert.throws(() => new OrderedQmdbClient('http://127.0.0.1:1', { currentChunkSize }), /32-bit/);
   }
@@ -16,7 +16,7 @@ test('WASM size arguments reject narrowing before initialization', async () => {
   await assert.rejects(ordered.getRange({ startKey: '', limit: 0, tip: 1n }, ''), /32-bit/);
 });
 
-test('operation windows reject invalid bounds before initialization', async () => {
+test('test_operation_windows_reject_invalid_bounds_before_initialization', async () => {
   const clients = [new QmdbOperationLogClient('http://127.0.0.1:1'), new OrderedQmdbClient('http://127.0.0.1:1')];
   const valid = { tip: (1n << 53n) + 2n, startLocation: (1n << 53n) + 1n, maxLocations: 1 };
   for (const client of clients) {
@@ -32,12 +32,12 @@ test('operation windows reject invalid bounds before initialization', async () =
   }
 });
 
-test('WASM verifies native Store proofs without narrowing absolute locations', () => {
+test('test_keyless_variable_variable_values_large_locations', () => {
   initSync({ module: readFileSync(new URL('../dist/generated/wasm/exoware_qmdb_wasm_bg.wasm', import.meta.url)) });
   for (const family of ['mmr', 'mmb']) {
     for (const start of [(1n << 32n) - 2n, (1n << 53n) + 1n]) {
-      // Rust's e2e_large_locations checks these fixtures against a trusted pruned frontier
-      const [rootHex, proofHex] = readFileSync(new URL(`fixtures/${family}-${start}.txt`, import.meta.url), 'utf8').trim().split('\n');
+      // Rust's e2e_keyless_large_locations checks these fixtures against a trusted pruned frontier
+      const [rootHex, proofHex] = readFileSync(new URL(`fixtures/keyless_variable_variable_values_${family}_start_${start}.txt`, import.meta.url), 'utf8').trim().split('\n');
       const root = Buffer.from(rootHex, 'hex');
       const proof = Buffer.from(proofHex, 'hex');
       const verified = verify_historical_raw_operation_range_proof(proof, root, family, 'sha256', start + 2n, start, 10);

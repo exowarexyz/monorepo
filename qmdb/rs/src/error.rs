@@ -74,7 +74,7 @@ pub enum QmdbError {
     },
     #[error("duplicate key in proof request: {key:?}")]
     DuplicateRequestedKey { key: Vec<u8> },
-    #[error("requested location {requested} is above published writer watermark {available}")]
+    #[error("requested location {requested} is above published watermark {available}")]
     WatermarkTooLow { requested: u64, available: u64 },
     #[error("proof key not found at watermark {watermark}: {key:?}")]
     ProofKeyNotFound { watermark: u64, key: Vec<u8> },
@@ -108,6 +108,4 @@ pub enum QmdbError {
     Stream(String),
     #[error("sync operation fetch was cancelled")]
     SyncFetchCancelled,
-    #[error("writer is poisoned after an earlier upload failure: {0}")]
-    WriterPoisoned(String),
 }

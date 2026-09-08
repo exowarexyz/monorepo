@@ -7,11 +7,7 @@ use commonware_parallel::Strategy;
 use commonware_storage::merkle::{
     hasher::Hasher as MerkleHasher, mem::Mem, Family, Graftable, Location, Position,
 };
-use commonware_storage::qmdb::{
-    any::{ordered, unordered, value::ValueEncoding},
-    current::grafting,
-    operation::Key as QmdbKey,
-};
+use commonware_storage::qmdb::current::grafting;
 use exoware_sdk::keys::Key;
 use exoware_sdk::{ClientError, PrefixedStoreClient, RangeMode, SerializableReadSession};
 
@@ -19,8 +15,8 @@ use crate::codec::{
     decode_digest, decode_operation_location_key, decode_update_location,
     decode_watermark_location, encode_chunk_key, encode_current_meta_key, encode_grafted_node_key,
     encode_node_key, encode_operation_key, encode_ops_root_witness_key, encode_presence_key,
-    encode_update_index_value, encode_update_key, encode_watermark_key, ensure_encoded_value_size,
-    merkle_size_for_watermark, CurrentBoundaryMetadata, WATERMARK_PREFIX,
+    encode_update_key, encode_watermark_key, ensure_encoded_value_size, merkle_size_for_watermark,
+    CurrentBoundaryMetadata, WATERMARK_PREFIX,
 };
 use crate::error::QmdbError;
 use crate::VersionedValue;
@@ -308,124 +304,6 @@ impl<'a, F: Family, D: Digest, K: Codec, V: Codec> HistoricalOpsClientCore<'a, F
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct PreparedUpload {
-    pub(crate) operation_count: u32,
-    pub(crate) keyed_operation_count: u32,
-    /// Op rows in location order. Values are canonical encoded bytes; writers
-    /// feed references from here to `extend_merkle_from_peaks` without cloning.
-    pub(crate) op_rows: Vec<(Key, Vec<u8>)>,
-    /// Update-index rows (for keyed ops) plus the presence row. Order is
-    /// opaque to the store — rows are indexed by key, not position.
-    pub(crate) aux_rows: Vec<(Key, Vec<u8>)>,
-}
-
-impl PreparedUpload {
-    /// Byte-slice view over the op rows for feeding to `extend_merkle_from_peaks`.
-    pub(crate) fn op_bytes(&self) -> impl Iterator<Item = &[u8]> {
-        self.op_rows.iter().map(|(_, v)| v.as_slice())
-    }
-
-    /// Consume the two row vectors into a single `Vec` for dispatch.
-    pub(crate) fn into_all_rows(self) -> Vec<(Key, Vec<u8>)> {
-        let mut rows = self.op_rows;
-        rows.extend(self.aux_rows);
-        rows
-    }
-}
-
-impl PreparedUpload {
-    pub(crate) fn build<
-        F: Family,
-        K: QmdbKey + Codec,
-        V: Codec + Clone + Send + Sync,
-        E: ValueEncoding<Value = V>,
-    >(
-        latest_location: Location<F>,
-        operations: &[ordered::Operation<F, K, E>],
-    ) -> Result<Self, QmdbError>
-    where
-        ordered::Operation<F, K, E>: Encode,
-    {
-        Self::build_from_ops(latest_location, operations, |op| match op {
-            ordered::Operation::Update(ordered::Update {
-                key,
-                value,
-                next_key: _,
-            }) => Some((key, Some(value))),
-            ordered::Operation::Delete(key) => Some((key, None)),
-            ordered::Operation::CommitFloor(_, _) => None,
-        })
-    }
-
-    pub(crate) fn build_unordered<
-        F: Family,
-        K: QmdbKey + Codec,
-        V: Codec + Clone + Send + Sync,
-        E: ValueEncoding<Value = V>,
-    >(
-        latest_location: Location<F>,
-        operations: &[unordered::Operation<F, K, E>],
-    ) -> Result<Self, QmdbError>
-    where
-        unordered::Operation<F, K, E>: Encode,
-    {
-        Self::build_from_ops(latest_location, operations, |op| match op {
-            unordered::Operation::Update(unordered::Update(key, value)) => Some((key, Some(value))),
-            unordered::Operation::Delete(key) => Some((key, None)),
-            unordered::Operation::CommitFloor(_, _) => None,
-        })
-    }
-
-    fn build_from_ops<F: Family, Op: Encode, K: AsRef<[u8]> + Encode + Clone, V: Encode + Clone>(
-        latest_location: Location<F>,
-        operations: &[Op],
-        extract_keyed: impl Fn(&Op) -> Option<(&K, Option<&V>)>,
-    ) -> Result<Self, QmdbError> {
-        let mut op_rows = Vec::<(Key, Vec<u8>)>::with_capacity(operations.len());
-        let mut aux_rows = Vec::<(Key, Vec<u8>)>::with_capacity(operations.len() + 1);
-        let mut keyed_operation_count = 0u32;
-        let count_u64 = operations.len() as u64;
-        let Some(start_location) = latest_location
-            .checked_add(1)
-            .and_then(|n| n.checked_sub(count_u64))
-        else {
-            return Err(QmdbError::InvalidLocationRange {
-                start_location: 0,
-                latest_location: latest_location.as_u64(),
-                count: operations.len(),
-            });
-        };
-
-        for (index, op) in operations.iter().enumerate() {
-            let location = start_location + index as u64;
-            let encoded = op.encode().to_vec();
-            ensure_encoded_value_size(encoded.len())?;
-            op_rows.push((encode_operation_key(location), encoded));
-
-            if let Some((key, value)) = extract_keyed(op) {
-                keyed_operation_count += 1;
-                aux_rows.push((
-                    encode_update_key(key.as_ref(), location)?,
-                    encode_update_index_value(value.is_some()),
-                ));
-            }
-        }
-
-        let operation_count = u32::try_from(operations.len()).map_err(|_| {
-            QmdbError::CorruptData("operation count does not fit in u32".to_string())
-        })?;
-        aux_rows.push((encode_presence_key(latest_location), Vec::new()));
-
-        Ok(Self {
-            operation_count,
-            keyed_operation_count,
-            op_rows,
-            aux_rows,
-        })
-    }
-}
-
-#[derive(Clone, Debug)]
 pub(crate) struct PreparedCurrentBoundaryUpload {
     pub(crate) rows: Vec<(Key, Vec<u8>)>,
 }
@@ -469,88 +347,13 @@ impl PreparedCurrentBoundaryUpload {
     }
 }
 
-/// Pure Merkle-family extension: from existing peaks + size, fold
-/// `encoded_operations` into new leaves and compute the resulting peaks, size,
-/// root, and the full list of newly-created nodes the caller can persist.
+/// Extend a pinned prefix with encoded operations, returning the root, frontier,
+/// and every new node needed to serve proofs.
 pub(crate) struct MerkleExtension<F: Family, D: Digest> {
     pub(crate) size: Position<F>,
     pub(crate) peaks: Vec<(Position<F>, u32, D)>,
     pub(crate) root: D,
     pub(crate) new_nodes: Vec<(Position<F>, D)>,
-}
-
-pub(crate) fn extend_merkle_from_peaks<F, H, S, I>(
-    peaks: Vec<(Position<F>, u32, H::Digest)>,
-    previous_size: Position<F>,
-    encoded_operations: I,
-    strategy: &S,
-) -> Result<MerkleExtension<F, H::Digest>, QmdbError>
-where
-    F: Family,
-    H: Hasher,
-    S: Strategy,
-    I: IntoIterator + Send,
-    I::Item: AsRef<[u8]> + Send,
-    I::IntoIter: Send,
-{
-    extend_merkle_from_peaks_with_inactive_peaks::<F, H, S, I>(
-        peaks,
-        previous_size,
-        encoded_operations,
-        0,
-        strategy,
-    )
-}
-
-pub(crate) fn extend_merkle_from_peaks_with_inactive_peaks<F, H, S, I>(
-    peaks: Vec<(Position<F>, u32, H::Digest)>,
-    previous_size: Position<F>,
-    encoded_operations: I,
-    inactive_peaks: usize,
-    strategy: &S,
-) -> Result<MerkleExtension<F, H::Digest>, QmdbError>
-where
-    F: Family,
-    H: Hasher,
-    S: Strategy,
-    I: IntoIterator + Send,
-    I::Item: AsRef<[u8]> + Send,
-    I::IntoIter: Send,
-{
-    let previous_leaves = Location::<F>::try_from(previous_size)
-        .map_err(|e| QmdbError::CorruptData(format!("invalid incremental ops size: {e}")))?;
-    let mut peak_map: std::collections::BTreeMap<Position<F>, (u32, H::Digest)> = peaks
-        .into_iter()
-        .map(|(pos, height, digest)| (pos, (height, digest)))
-        .collect();
-    let pinned_nodes = F::peaks(previous_size)
-        .map(|(pos, height)| {
-            let (actual_height, digest) = peak_map.remove(&pos).ok_or_else(|| {
-                QmdbError::CorruptData(format!(
-                    "missing peak {pos} while extending merkle tree"
-                ))
-            })?;
-            if actual_height != height {
-                return Err(QmdbError::CorruptData(format!(
-                    "peak {pos} height mismatch while extending merkle tree: expected {height}, got {actual_height}"
-                )));
-            }
-            Ok(digest)
-        })
-        .collect::<Result<Vec<_>, QmdbError>>()?;
-    if let Some((extra_pos, _)) = peak_map.first_key_value() {
-        return Err(QmdbError::CorruptData(format!(
-            "unexpected peak {extra_pos} while extending merkle tree"
-        )));
-    }
-
-    extend_merkle_from_pinned_nodes::<F, H, S, I>(
-        pinned_nodes,
-        previous_leaves,
-        encoded_operations,
-        inactive_peaks,
-        strategy,
-    )
 }
 
 pub(crate) fn extend_merkle_from_pinned_nodes<F, H, S, I>(
@@ -631,64 +434,10 @@ where
 mod tests {
     use super::*;
     use commonware_cryptography::Sha256;
-    use commonware_parallel::{Rayon, Sequential};
-    use commonware_storage::merkle::{mmb, mmr};
-    use std::num::NonZeroUsize;
-
-    fn assert_parallel_extension_matches<F: Family>() {
-        let prefix = (0u64..17)
-            .map(|i| format!("prefix-{i}").into_bytes())
-            .collect::<Vec<_>>();
-        let suffix = (0u64..257)
-            .map(|i| format!("suffix-{i}").into_bytes())
-            .collect::<Vec<_>>();
-        let base = extend_merkle_from_peaks::<F, Sha256, Sequential, _>(
-            Vec::new(),
-            Position::new(0),
-            prefix.iter().map(Vec::as_slice),
-            &Sequential,
-        )
-        .expect("build resumed frontier");
-        assert!(!base.peaks.is_empty());
-
-        let sequential = extend_merkle_from_peaks_with_inactive_peaks::<F, Sha256, Sequential, _>(
-            base.peaks.clone(),
-            base.size,
-            suffix.iter().map(Vec::as_slice),
-            1,
-            &Sequential,
-        )
-        .expect("extend sequentially");
-        let parallel_strategy = Rayon::new(NonZeroUsize::new(4).expect("nonzero thread count"))
-            .expect("build rayon strategy")
-            .manual();
-        let parallel = extend_merkle_from_peaks_with_inactive_peaks::<F, Sha256, _, _>(
-            base.peaks,
-            base.size,
-            suffix.iter().map(Vec::as_slice),
-            1,
-            &parallel_strategy,
-        )
-        .expect("extend in parallel");
-
-        assert_eq!(parallel.size, sequential.size);
-        assert_eq!(parallel.peaks, sequential.peaks);
-        assert_eq!(parallel.root, sequential.root);
-        assert_eq!(parallel.new_nodes, sequential.new_nodes);
-    }
+    use commonware_storage::merkle::mmr;
 
     #[test]
-    fn parallel_merkle_extension_matches_sequential_mmr() {
-        assert_parallel_extension_matches::<mmr::Family>();
-    }
-
-    #[test]
-    fn parallel_merkle_extension_matches_sequential_mmb() {
-        assert_parallel_extension_matches::<mmb::Family>();
-    }
-
-    #[test]
-    fn current_boundary_upload_keys_grafted_nodes_by_grafted_space_position() {
+    fn test_current_boundary_upload_keys_grafted_nodes_by_grafted_space_position() {
         let digest = Sha256::hash(&[b"grafted-node".as_slice()]);
 
         let ops_position = Position::new(2046);

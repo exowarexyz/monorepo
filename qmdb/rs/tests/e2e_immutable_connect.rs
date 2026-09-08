@@ -19,14 +19,14 @@ use exoware_qmdb::proto::qmdb::v1::{
     SubscribeRequest as ProtoSubscribeRequest,
 };
 use exoware_qmdb::{
-    immutable_operation_log_connect_stack, ImmutableClient, ImmutableWriter, OperationLogClient,
+    immutable_operation_log_connect_stack, ImmutableClient, OperationLogClient,
     OperationLogSubscribeProof, QmdbError,
 };
 use exoware_sdk::proto::PreferZstdHttpClient;
 use exoware_sdk::{PrefixedStoreClient, StoreClient};
 
 type Digest = commonware_cryptography::sha256::Digest;
-type LocalDb = Immutable<
+type Db = Immutable<
     mmr::Family,
     deterministic::Context,
     FixedBytes<32>,
@@ -40,12 +40,12 @@ type TestImmutableClient =
 type BatchOperation = ImmutableOperation<mmr::Family, FixedBytes<32>, Vec<u8>>;
 
 async fn spawn_qmdb_server(
-    client: Arc<TestImmutableClient>,
+    qmdb_client: Arc<TestImmutableClient>,
 ) -> (tokio::task::JoinHandle<()>, String) {
-    common::spawn_connect_service(immutable_operation_log_connect_stack(client)).await
+    common::spawn_connect_service(immutable_operation_log_connect_stack(qmdb_client)).await
 }
 
-fn validated_client(
+fn operation_log_client(
     base: &str,
 ) -> OperationLogClient<
     PreferZstdHttpClient,
@@ -56,24 +56,29 @@ fn validated_client(
     OperationLogClient::plaintext(base, ((), ((0..=10000).into(), ())))
 }
 
-struct LocalBatch {
+struct SourceBatch {
     operations: Vec<BatchOperation>,
     root: Digest,
     inactivity_floor: Location<mmr::Family>,
 }
 
-async fn build_local_batch() -> LocalBatch {
+async fn build_source_batch() -> SourceBatch {
     tokio::task::spawn_blocking(|| {
         deterministic::Runner::default().start(|context| async move {
             use commonware_runtime::{buffer::paged::CacheRef, Supervisor as _};
             let page_cache = CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(8));
             let cfg = common::immutable_variable_config(
-                "immutable-connect",
+                "immutable_variable_full_mmr_connect_source",
                 page_cache,
                 ((), ((0..=10000).into(), ())),
                 NZU64!(5),
             );
-            let mut db: LocalDb = LocalDb::init(context.child("db"), cfg).await.expect("init");
+            let mut db: Db = Db::init(
+                context.child("immutable_variable_full_mmr_connect_source"),
+                cfg,
+            )
+            .await
+            .expect("init");
 
             let key_a = FixedBytes::new([0x11; 32]);
             let key_b = FixedBytes::new([0x22; 32]);
@@ -106,7 +111,7 @@ async fn build_local_batch() -> LocalBatch {
             let root = db.root();
             db.destroy().await.expect("destroy");
 
-            LocalBatch {
+            SourceBatch {
                 operations: ops,
                 root,
                 inactivity_floor,
@@ -124,24 +129,22 @@ fn latest_inactivity_floor(ops: &[BatchOperation]) -> Location<mmr::Family> {
     }
 }
 
-async fn commit_upload(client: &StoreClient, batch: &LocalBatch) {
-    let writer: ImmutableWriter<
-        mmr::Family,
-        commonware_cryptography::Sha256,
-        FixedBytes<32>,
-        Vec<u8>,
-    > = ImmutableWriter::fresh(PrefixedStoreClient::empty(client.clone()));
-    common::commit_immutable_upload(&writer, &batch.operations)
-        .await
-        .expect("commit upload");
+async fn commit_upload(store_client: &StoreClient, batch: &SourceBatch) {
+    common::commit_operations::<mmr::Family, BatchOperation>(
+        &PrefixedStoreClient::empty(store_client.clone()),
+        &batch.operations,
+        &((), ((0..=10000).into(), ())),
+    )
+    .await
+    .expect("commit upload");
 }
 
 #[tokio::test]
-async fn immutable_connect_subscribe_emits_verifiable_multi_proof() {
+async fn test_immutable_connect_subscribe_emits_verifiable_multi_proof() {
     let store_client = common::local_store_client().await;
-    let local = build_local_batch().await;
+    let source = build_source_batch().await;
     assert!(
-        *local.inactivity_floor > 0,
+        *source.inactivity_floor > 0,
         "test must not rely on inactivity_floor = 0"
     );
     let immutable_client = Arc::new(TestImmutableClient::new(
@@ -149,20 +152,20 @@ async fn immutable_connect_subscribe_emits_verifiable_multi_proof() {
         ((), ((0..=10000).into(), ())),
     ));
     let (_qmdb_server, qmdb_url) = spawn_qmdb_server(immutable_client).await;
-    let client = validated_client(&qmdb_url);
+    let connect_client = operation_log_client(&qmdb_url);
 
-    let mut stream = client
+    let mut stream = connect_client
         .subscribe(ProtoSubscribeRequest::default())
         .await
         .expect("subscribe");
 
     tokio::time::sleep(Duration::from_millis(50)).await;
-    commit_upload(&store_client, &local).await;
+    commit_upload(&store_client, &source).await;
 
     let frame: OperationLogSubscribeProof<Digest, BatchOperation, mmr::Family> =
         tokio::time::timeout(
             Duration::from_secs(5),
-            stream.message_with_root(common::trusted_root(local.root)),
+            stream.message_with_root(common::trusted_root(source.root)),
         )
         .await
         .expect("timeout")
@@ -170,8 +173,8 @@ async fn immutable_connect_subscribe_emits_verifiable_multi_proof() {
         .expect("stream frame");
 
     assert!(frame.resume_sequence_number > 0);
-    assert_eq!(frame.root, local.root);
-    let expected: Vec<(Location<mmr::Family>, BatchOperation)> = local
+    assert_eq!(frame.root, source.root);
+    let expected: Vec<(Location<mmr::Family>, BatchOperation)> = source
         .operations
         .iter()
         .enumerate()
@@ -181,49 +184,49 @@ async fn immutable_connect_subscribe_emits_verifiable_multi_proof() {
 }
 
 #[tokio::test]
-async fn immutable_connect_get_operation_range_returns_verifiable_proof() {
+async fn test_immutable_connect_get_operation_range_returns_verifiable_proof() {
     let store_client = common::local_store_client().await;
-    let local = build_local_batch().await;
+    let source = build_source_batch().await;
     assert!(
-        *local.inactivity_floor > 0,
+        *source.inactivity_floor > 0,
         "test must not rely on inactivity_floor = 0"
     );
-    commit_upload(&store_client, &local).await;
+    commit_upload(&store_client, &source).await;
 
     let immutable_client = Arc::new(TestImmutableClient::new(
         PrefixedStoreClient::empty(store_client.clone()),
         ((), ((0..=10000).into(), ())),
     ));
     let (_qmdb_server, qmdb_url) = spawn_qmdb_server(immutable_client).await;
-    let client = validated_client(&qmdb_url);
+    let connect_client = operation_log_client(&qmdb_url);
 
-    let proof = client
+    let proof = connect_client
         .get_operation_range(
             ProtoGetOperationRangeRequest {
-                tip: u64::try_from(local.operations.len() - 1).expect("tip fits"),
+                tip: u64::try_from(source.operations.len() - 1).expect("tip fits"),
                 start_location: 1,
                 max_locations: 1,
                 ..Default::default()
             },
-            &local.root,
+            &source.root,
         )
         .await
         .expect("get operation range");
 
-    assert_eq!(proof.root, local.root);
+    assert_eq!(proof.root, source.root);
     assert_eq!(proof.start_location, Location::new(1));
-    assert_eq!(proof.operations, vec![local.operations[1].clone()]);
+    assert_eq!(proof.operations, vec![source.operations[1].clone()]);
 }
 
 #[tokio::test]
-async fn immutable_connect_client_rejects_invalid_streamed_proof() {
+async fn test_immutable_connect_client_rejects_invalid_streamed_proof() {
     let store_client = common::local_store_client().await;
-    let local = build_local_batch().await;
+    let source = build_source_batch().await;
     assert!(
-        *local.inactivity_floor > 0,
+        *source.inactivity_floor > 0,
         "test must not rely on inactivity_floor = 0"
     );
-    commit_upload(&store_client, &local).await;
+    commit_upload(&store_client, &source).await;
 
     let immutable_client = Arc::new(TestImmutableClient::new(
         PrefixedStoreClient::empty(store_client.clone()),
@@ -250,14 +253,14 @@ async fn immutable_connect_client_rejects_invalid_streamed_proof() {
             subscribe_response: common::tamper_subscribe_response(raw_response),
         })
         .await;
-    let client = validated_client(&static_url);
-    let mut stream = client
+    let connect_client = operation_log_client(&static_url);
+    let mut stream = connect_client
         .subscribe(ProtoSubscribeRequest::default())
         .await
         .expect("subscribe");
 
     let err = stream
-        .message_with_root(common::trusted_root(local.root))
+        .message_with_root(common::trusted_root(source.root))
         .await
         .expect_err("tampered streamed proof should fail");
     assert!(matches!(

@@ -54,8 +54,7 @@ export const GetRangeRequestSchema: GenMessage<GetRangeRequest> = /*@__PURE__*/
   messageDesc(file_qmdb_v1_key_range, 0);
 
 /**
- * Ordered current key-range proof response. Key fields are codec-encoded
- * logical QMDB keys (`K::encode()` bytes). `start_proof`, when present,
+ * Ordered current key-range proof response. `start_proof`, when present,
  * authenticates the boundary before the first returned key (or the entire empty
  * range). The last entry's authenticated successor closes the range or gives
  * the next start key when it advances within the requested interval. A page

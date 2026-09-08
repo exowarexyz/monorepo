@@ -308,7 +308,7 @@ pub struct UnorderedConnectClient<
     T,
     F: Graftable,
     H: Hasher,
-    K: commonware_utils::Array + QmdbKey + commonware_codec::Codec,
+    K: QmdbKey + commonware_codec::Codec,
     V: commonware_codec::Codec + Clone + Send + Sync,
     const N: usize,
     E: ValueEncoding<Value = V> = VariableEncoding<V>,
@@ -325,7 +325,7 @@ where
     F: Graftable,
     H: Hasher,
     H::Digest: DecodeExt<()>,
-    K: commonware_utils::Array + QmdbKey + commonware_codec::Codec,
+    K: QmdbKey + commonware_codec::Codec,
     V: commonware_codec::Codec + Clone + Send + Sync,
     E: ValueEncoding<Value = V>,
     unordered::Operation<F, K, E>: Decode + Encode + Read,
@@ -347,7 +347,7 @@ where
     F: Graftable,
     H: Hasher,
     H::Digest: DecodeExt<()>,
-    K: commonware_utils::Array + QmdbKey + commonware_codec::Codec,
+    K: QmdbKey + commonware_codec::Codec,
     V: commonware_codec::Codec + Clone + Send + Sync,
     E: ValueEncoding<Value = V>,
     unordered::Operation<F, K, E>: Decode + Encode + Read,
@@ -644,8 +644,8 @@ where
 }
 
 /// Client for `qmdb.v1.OperationLogService`, parameterized on the Merkle
-/// family and backend operation type. Implements Commonware QMDB sync [`Source`];
-/// callers supply a target with an independently trusted operation-log root.
+/// family and backend operation type. Implements Commonware QMDB sync [`Source`].
+/// Callers supply a target with an independently trusted operation-log root.
 pub struct OperationLogClient<T, F: Graftable, H: Hasher, Op: Encode + Read> {
     rpc: OperationLogServiceClient<T>,
     op_cfg: Arc<Op::Cfg>,
@@ -897,9 +897,9 @@ where
         ))
     })?;
     if !witness.verify::<H>(&ops_root, current_root) {
-        return Err(QmdbError::CorruptData(
-            "current sync ops-root witness failed verification".to_string(),
-        ));
+        return Err(QmdbError::ProofVerification {
+            kind: crate::ProofKind::RangeCheckpoint,
+        });
     }
     Ok(SyncTarget::new(ops_root, range))
 }
@@ -1156,14 +1156,14 @@ where
     F: Graftable,
     H: Hasher,
     H::Digest: DecodeExt<()>,
-    K: commonware_utils::Array + QmdbKey + commonware_codec::Codec,
+    K: QmdbKey + commonware_codec::Codec,
     V: commonware_codec::Codec + Clone + Send + Sync,
     E: ValueEncoding<Value = V>,
     unordered::Operation<F, K, E>: Decode + Encode + Read,
 {
     let verified =
         verify_key_value_from_proto::<F, H, unordered::Operation<F, K, E>, N>(proto, root, op_cfg)?;
-    if !matches!(&verified.operation, unordered::Operation::Update(update) if update.0.as_ref() == requested_key)
+    if !matches!(&verified.operation, unordered::Operation::Update(update) if update.0.encode().as_ref() == requested_key)
     {
         return Err(QmdbError::ProofVerification {
             kind: crate::ProofKind::CurrentKeyValue,

@@ -14,20 +14,20 @@ use commonware_storage::qmdb::keyless::fixed::{
 };
 use commonware_storage::qmdb::keyless::variable::{Db as Keyless, Operation as KeylessOperation};
 use commonware_utils::{NZUsize, NZU16, NZU64};
-use exoware_qmdb::{KeylessClient, KeylessWriter, WriterState};
+use exoware_qmdb::KeylessClient;
 use exoware_sdk::{PrefixedStoreClient, StoreClient};
 
 use common::retry;
 
 type Digest = commonware_cryptography::sha256::Digest;
-type LocalDb<F> = Keyless<
+type VariableDb<F> = Keyless<
     F,
     deterministic::Context,
     Vec<u8>,
     commonware_cryptography::Sha256,
     commonware_parallel::Sequential,
 >;
-type FixedLocalDb<F> = FixedKeyless<
+type FixedDb<F> = FixedKeyless<
     F,
     deterministic::Context,
     Digest,
@@ -35,33 +35,25 @@ type FixedLocalDb<F> = FixedKeyless<
     commonware_parallel::Sequential,
 >;
 
-type TestKeylessClient<F> = KeylessClient<F, commonware_cryptography::Sha256, Vec<u8>>;
-type TestKeylessWriter<F> = KeylessWriter<F, commonware_cryptography::Sha256, Vec<u8>>;
-type FixedTestKeylessClient<F> =
+type VariableClient<F> = KeylessClient<F, commonware_cryptography::Sha256, Vec<u8>>;
+type FixedClient<F> =
     KeylessClient<F, commonware_cryptography::Sha256, Digest, FixedEncoding<Digest>>;
-type FixedTestKeylessWriter<F> =
-    KeylessWriter<F, commonware_cryptography::Sha256, Digest, FixedEncoding<Digest>>;
 
-fn fresh_keyless<F: Graftable>(c: StoreClient) -> TestKeylessClient<F> {
-    TestKeylessClient::new(PrefixedStoreClient::empty(c), ((0..=10000).into(), ()))
+fn variable_client<F: Graftable>(store_client: StoreClient) -> VariableClient<F> {
+    VariableClient::new(
+        PrefixedStoreClient::empty(store_client),
+        ((0..=10000).into(), ()),
+    )
 }
 
-fn fresh_writer<F: Family>(c: StoreClient) -> TestKeylessWriter<F> {
-    TestKeylessWriter::fresh(PrefixedStoreClient::empty(c))
-}
-
-fn fresh_fixed_keyless<F: Graftable>(c: StoreClient) -> FixedTestKeylessClient<F>
+fn fixed_client<F: Graftable>(store_client: StoreClient) -> FixedClient<F>
 where
     FixedKeylessOperation<F, Digest>: commonware_codec::Read<Cfg = ()>,
 {
-    FixedTestKeylessClient::new(PrefixedStoreClient::empty(c), ())
+    FixedClient::new(PrefixedStoreClient::empty(store_client), ())
 }
 
-fn fresh_fixed_writer<F: Family>(c: StoreClient) -> FixedTestKeylessWriter<F> {
-    FixedTestKeylessWriter::fresh(PrefixedStoreClient::empty(c))
-}
-
-struct LocalReference<F: Family> {
+struct VariableSource<F: Family> {
     latest_location: Location<F>,
     root: Digest,
     operations: Vec<KeylessOperation<F, Vec<u8>>>,
@@ -72,7 +64,7 @@ struct LocalReference<F: Family> {
     queried_value: Vec<u8>,
 }
 
-struct FixedLocalReference<F: Family> {
+struct FixedSource<F: Family> {
     latest_location: Location<F>,
     root: Digest,
     operations: Vec<FixedKeylessOperation<F, Digest>>,
@@ -80,7 +72,7 @@ struct FixedLocalReference<F: Family> {
     queried_value: Digest,
 }
 
-async fn build_local_db<F: Family>() -> LocalReference<F>
+async fn build_variable_source<F: Family>() -> VariableSource<F>
 where
     KeylessOperation<F, Vec<u8>>:
         commonware_codec::Codec<Cfg = <Vec<u8> as commonware_codec::Read>::Cfg> + Clone,
@@ -89,9 +81,16 @@ where
         deterministic::Runner::default().start(|context| async move {
             use commonware_runtime::{buffer::paged::CacheRef, Supervisor as _};
             let page_cache = CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(8));
-            let cfg =
-                common::keyless_config("keyless", page_cache, ((0..=10000).into(), ()), NZU64!(7));
-            let mut db: LocalDb<F> = LocalDb::init(context.child("db"), cfg).await.expect("init");
+            let cfg = common::keyless_variable_config(
+                "keyless_variable_full_source",
+                page_cache,
+                ((0..=10000).into(), ()),
+                NZU64!(7),
+            );
+            let mut db: VariableDb<F> =
+                VariableDb::init(context.child("keyless_variable_full_source"), cfg)
+                    .await
+                    .expect("init");
 
             let first = b"first-value".to_vec();
             let second = b"second-value".to_vec();
@@ -155,7 +154,7 @@ where
                 })
                 .expect("value location");
 
-            LocalReference {
+            VariableSource {
                 latest_location: latest,
                 root,
                 operations: ops,
@@ -171,7 +170,7 @@ where
     .expect("join")
 }
 
-async fn build_fixed_local_db<F: Family>() -> FixedLocalReference<F>
+async fn build_fixed_source<F: Family>() -> FixedSource<F>
 where
     FixedKeylessOperation<F, Digest>: commonware_codec::CodecFixed<Cfg = ()> + Clone,
 {
@@ -180,16 +179,16 @@ where
             use commonware_runtime::{buffer::paged::CacheRef, Supervisor as _};
             let page_cache = CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(8));
             let cfg = commonware_storage::qmdb::keyless::Config {
-                merkle: common::merkle_config("keyless_fixed", page_cache.clone()),
+                merkle: common::merkle_config("keyless_fixed_full_source", page_cache.clone()),
                 log: FixedJournalConfig {
-                    partition: "keyless_fixed_log".to_string(),
+                    partition: "keyless_fixed_full_source-log".to_string(),
                     items_per_blob: NZU64!(7),
                     page_cache,
                     write_buffer: NZUsize!(1024),
                     replay_buffer: NZUsize!(1024),
                 },
             };
-            let mut db: FixedLocalDb<F> = FixedLocalDb::init(context.child("keyless_fixed"), cfg)
+            let mut db: FixedDb<F> = FixedDb::init(context.child("keyless_fixed_full_source"), cfg)
                 .await
                 .expect("init fixed");
 
@@ -220,7 +219,7 @@ where
                 })
                 .expect("fixed value location");
 
-            FixedLocalReference {
+            FixedSource {
                 latest_location: latest,
                 root,
                 operations: ops,
@@ -238,58 +237,53 @@ where
     KeylessOperation<F, Vec<u8>>:
         commonware_codec::Codec<Cfg = <Vec<u8> as commonware_codec::Read>::Cfg> + Clone + PartialEq,
 {
-    let client = common::local_store_client().await;
-    let local = build_local_db::<F>().await;
+    let store_client = common::local_store_client().await;
+    let source = build_variable_source::<F>().await;
 
-    let state = fresh_keyless::<F>(client.clone())
-        .recover_writer_state()
-        .await
-        .expect("recover empty writer state");
-    let empty_state = WriterState::empty();
-    assert_eq!(state.peaks, empty_state.peaks);
-    assert_eq!(state.ops_size, empty_state.ops_size);
-    assert_eq!(state.next_location, empty_state.next_location);
-
-    let writer = fresh_writer::<F>(client.clone());
-    common::commit_keyless_upload(&writer, &local.operations)
-        .await
-        .expect("commit upload");
+    let upload_client = PrefixedStoreClient::empty(store_client.clone());
+    common::commit_operations::<F, _>(
+        &upload_client,
+        &source.operations,
+        &((0..=10000).into(), ()),
+    )
+    .await
+    .expect("commit upload");
 
     let root = retry(
         || {
-            let c = fresh_keyless::<F>(client.clone());
-            let loc = local.latest_location;
-            async move { c.root_at(loc).await }
+            let qmdb_client = variable_client::<F>(store_client.clone());
+            let loc = source.latest_location;
+            async move { qmdb_client.root_at(loc).await }
         },
         "root_at",
     )
     .await;
-    assert_eq!(root, local.root, "remote root must match local DB root");
+    assert_eq!(root, source.root, "remote root must match local DB root");
 
-    let c = fresh_keyless::<F>(client.clone());
-    let got: Vec<u8> = c
-        .get_at(local.queried_location, local.latest_location)
+    let qmdb_client = variable_client::<F>(store_client.clone());
+    let got: Vec<u8> = qmdb_client
+        .get_at(source.queried_location, source.latest_location)
         .await
         .expect("get_at")
         .expect("present");
-    assert_eq!(got, local.queried_value);
+    assert_eq!(got, source.queried_value);
 
-    let proof = c
+    let proof = qmdb_client
         .operation_range_proof(
-            local.latest_location,
+            source.latest_location,
             Location::new(0),
-            local.operations.len() as u32,
+            source.operations.len() as u32,
         )
         .await
         .expect("proof");
-    assert_eq!(proof.root, local.root);
-    assert_eq!(proof.operations, local.operations);
+    assert_eq!(proof.root, source.root);
+    assert_eq!(proof.operations, source.operations);
 
-    let checkpoint = c
+    let checkpoint = qmdb_client
         .operation_range_checkpoint(
-            local.latest_location,
+            source.latest_location,
             Location::new(0),
-            local.operations.len() as u32,
+            source.operations.len() as u32,
         )
         .await
         .expect("checkpoint");
@@ -305,12 +299,6 @@ where
     assert!(malformed_checkpoint
         .reconstruct_peaks::<commonware_cryptography::Sha256>()
         .is_err());
-    assert!(
-        WriterState::<Digest, F>::from_checkpoint::<commonware_cryptography::Sha256>(
-            &malformed_checkpoint,
-        )
-        .is_err()
-    );
     let peaks = checkpoint
         .reconstruct_peaks::<commonware_cryptography::Sha256>()
         .expect("reconstruct_peaks");
@@ -324,8 +312,8 @@ where
     .expect("reconstruct root");
     assert_eq!(reconstructed_root, checkpoint.root);
 
-    let suffix_checkpoint = c
-        .operation_range_checkpoint(local.latest_location, local.latest_location, 1)
+    let suffix_checkpoint = qmdb_client
+        .operation_range_checkpoint(source.latest_location, source.latest_location, 1)
         .await
         .expect("suffix checkpoint");
     assert!(suffix_checkpoint.verify::<commonware_cryptography::Sha256>());
@@ -373,10 +361,6 @@ where
         assert!(malformed
             .reconstruct_peaks::<commonware_cryptography::Sha256>()
             .is_err());
-        assert!(
-            WriterState::<Digest, F>::from_checkpoint::<commonware_cryptography::Sha256>(malformed)
-                .is_err()
-        );
     }
 
     let mut checkpoint_with_wrong_watermark = suffix_checkpoint.clone();
@@ -385,109 +369,95 @@ where
     assert!(checkpoint_with_wrong_watermark
         .reconstruct_peaks::<commonware_cryptography::Sha256>()
         .is_err());
-    assert!(
-        WriterState::<Digest, F>::from_checkpoint::<commonware_cryptography::Sha256>(
-            &checkpoint_with_wrong_watermark,
-        )
-        .is_err()
-    );
 
-    let middle_checkpoint = c
-        .operation_range_checkpoint(local.latest_location, local.latest_location - 1, 1)
+    let middle_checkpoint = qmdb_client
+        .operation_range_checkpoint(source.latest_location, source.latest_location - 1, 1)
         .await
         .expect("middle checkpoint");
     assert!(middle_checkpoint.verify::<commonware_cryptography::Sha256>());
     assert!(middle_checkpoint
         .reconstruct_peaks::<commonware_cryptography::Sha256>()
         .is_err());
-    assert!(
-        WriterState::<Digest, F>::from_checkpoint::<commonware_cryptography::Sha256>(
-            &middle_checkpoint,
-        )
-        .is_err()
-    );
 
-    let expected_state =
-        WriterState::<Digest, F>::from_checkpoint::<commonware_cryptography::Sha256>(
-            &suffix_checkpoint,
-        )
-        .expect("writer state from suffix checkpoint");
-    let state = c
-        .recover_writer_state()
-        .await
-        .expect("recover writer state");
-    assert_eq!(state.peaks, expected_state.peaks);
-    assert_eq!(state.ops_size, expected_state.ops_size);
-    assert_eq!(state.next_location, expected_state.next_location);
-    let resumed_writer =
-        TestKeylessWriter::<F>::new(PrefixedStoreClient::empty(client.clone()), state);
-    let receipt = common::commit_keyless_upload(&resumed_writer, &local.continuation_operations)
-        .await
-        .expect("continued upload");
-    assert_eq!(receipt.latest_location, local.continued_latest_location);
+    let mut continued_operations = source.operations.clone();
+    continued_operations.extend_from_slice(&source.continuation_operations);
+    common::commit_operations::<F, _>(
+        &upload_client,
+        &continued_operations,
+        &((0..=10000).into(), ()),
+    )
+    .await
+    .expect("continued upload");
+    assert_eq!(
+        qmdb_client
+            .writer_location_watermark()
+            .await
+            .expect("continued watermark"),
+        Some(source.continued_latest_location),
+    );
 
     let continued_root = retry(
         || {
-            let c = fresh_keyless::<F>(client.clone());
-            let loc = local.continued_latest_location;
-            async move { c.root_at(loc).await }
+            let qmdb_client = variable_client::<F>(store_client.clone());
+            let loc = source.continued_latest_location;
+            async move { qmdb_client.root_at(loc).await }
         },
         "continued root_at",
     )
     .await;
-    assert_eq!(continued_root, local.continued_root);
+    assert_eq!(continued_root, source.continued_root);
 }
 
 #[tokio::test]
-async fn keyless_fixed_round_trip() {
-    let client = common::local_store_client().await;
-    let local = build_fixed_local_db::<mmr::Family>().await;
+async fn test_keyless_fixed_round_trip() {
+    let store_client = common::local_store_client().await;
+    let source = build_fixed_source::<mmr::Family>().await;
 
-    let writer = fresh_fixed_writer::<mmr::Family>(client.clone());
-    common::commit_keyless_upload(&writer, &local.operations)
+    let upload_client = PrefixedStoreClient::empty(store_client.clone());
+    common::commit_operations::<mmr::Family, _>(&upload_client, &source.operations, &())
         .await
         .expect("commit fixed upload");
 
     let root = retry(
         || {
-            let c = fresh_fixed_keyless::<mmr::Family>(client.clone());
-            let loc = local.latest_location;
-            async move { c.root_at(loc).await }
+            let qmdb_client = fixed_client::<mmr::Family>(store_client.clone());
+            let loc = source.latest_location;
+            async move { qmdb_client.root_at(loc).await }
         },
         "fixed root_at",
     )
     .await;
     assert_eq!(
-        root, local.root,
+        root, source.root,
         "remote root must match local fixed DB root"
     );
 
-    let c = fresh_fixed_keyless::<mmr::Family>(client.clone());
-    let got: Digest = c
-        .get_at(local.queried_location, local.latest_location)
+    let qmdb_client = fixed_client::<mmr::Family>(store_client.clone());
+    let got: Digest = qmdb_client
+        .get_at(source.queried_location, source.latest_location)
         .await
         .expect("fixed get_at")
         .expect("present");
-    assert_eq!(got, local.queried_value);
+    assert_eq!(got, source.queried_value);
 
-    let proof = c
+    let proof = qmdb_client
         .operation_range_proof(
-            local.latest_location,
+            source.latest_location,
             Location::new(0),
-            local.operations.len() as u32,
+            source.operations.len() as u32,
         )
         .await
         .expect("fixed proof");
-    assert_eq!(proof.root, local.root);
-    assert_eq!(proof.operations, local.operations);
+    assert_eq!(proof.root, source.root);
+    assert_eq!(proof.operations, source.operations);
 }
 
 #[tokio::test]
-async fn keyless_round_trip() {
+async fn test_keyless_round_trip() {
     keyless_round_trip_for_family::<mmr::Family>().await;
 }
 
 #[tokio::test]
-async fn keyless_mmb_round_trip() {
+async fn test_keyless_mmb_round_trip() {
     keyless_round_trip_for_family::<mmb::Family>().await;
 }

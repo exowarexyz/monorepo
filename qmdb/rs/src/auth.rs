@@ -1,14 +1,12 @@
-use commonware_codec::{Decode, Encode};
+use commonware_codec::Decode;
 use commonware_cryptography::Hasher;
 use commonware_storage::merkle::{hasher::Hasher as MerkleHasher, Family, Location, Position};
-use commonware_utils::Array;
 use exoware_sdk::keys::Key;
 use exoware_sdk::{RangeMode, SerializableReadSession};
 
 use crate::codec::{
     decode_digest, decode_operation_location_key, decode_watermark_location, encode_node_key,
-    encode_operation_key, encode_presence_key, encode_update_index_value, encode_update_key,
-    encode_watermark_key, ensure_encoded_value_size, merkle_size_for_watermark,
+    encode_operation_key, encode_update_key, encode_watermark_key, merkle_size_for_watermark,
     op_count_for_watermark, WATERMARK_PREFIX,
 };
 use crate::error::QmdbError;
@@ -62,94 +60,6 @@ pub(crate) async fn require_published_auth_watermark<F: Family>(
         });
     }
     Ok(())
-}
-
-/// Consumes `encoded_operations` into the returned `PreparedUpload`'s
-/// `op_rows` — no clones.
-pub(crate) fn build_auth_upload_rows<F: Family>(
-    latest_location: Location<F>,
-    encoded_operations: Vec<Vec<u8>>,
-) -> Result<crate::core::PreparedUpload, QmdbError> {
-    let count = encoded_operations.len();
-    let count_u64 = count as u64;
-    let Some(start_location) = latest_location
-        .checked_add(1)
-        .and_then(|next| next.checked_sub(count_u64))
-    else {
-        return Err(QmdbError::InvalidLocationRange {
-            start_location: 0,
-            latest_location: latest_location.as_u64(),
-            count,
-        });
-    };
-    let mut op_rows = Vec::<(Key, Vec<u8>)>::with_capacity(count);
-    for (index, encoded) in encoded_operations.into_iter().enumerate() {
-        ensure_encoded_value_size(encoded.len())?;
-        op_rows.push((encode_operation_key(start_location + index as u64), encoded));
-    }
-    let operation_count = u32::try_from(count).map_err(|_| {
-        QmdbError::CorruptData("authenticated operation count overflow".to_string())
-    })?;
-    Ok(crate::core::PreparedUpload {
-        operation_count,
-        keyed_operation_count: 0,
-        op_rows,
-        aux_rows: vec![(encode_presence_key(latest_location), Vec::new())],
-    })
-}
-
-/// Encodes `operations` exactly once — the encoded bytes move into the
-/// returned `PreparedUpload`'s `op_rows`.
-pub(crate) fn build_auth_immutable_upload_rows<F: Family, K, E>(
-    latest_location: Location<F>,
-    operations: &[commonware_storage::qmdb::immutable::Operation<F, K, E>],
-) -> Result<crate::core::PreparedUpload, QmdbError>
-where
-    K: Array + commonware_codec::Codec + Clone + AsRef<[u8]>,
-    E: commonware_storage::qmdb::any::value::ValueEncoding,
-    E::Value: commonware_codec::Codec + Clone + Send + Sync,
-    commonware_storage::qmdb::immutable::Operation<F, K, E>: Encode,
-{
-    use commonware_storage::qmdb::immutable::Operation as ImmutableOperation;
-
-    let count = operations.len();
-    let count_u64 = count as u64;
-    let Some(start_location) = latest_location
-        .checked_add(1)
-        .and_then(|next| next.checked_sub(count_u64))
-    else {
-        return Err(QmdbError::InvalidLocationRange {
-            start_location: 0,
-            latest_location: latest_location.as_u64(),
-            count,
-        });
-    };
-    let mut op_rows = Vec::<(Key, Vec<u8>)>::with_capacity(count);
-    let mut aux_rows = Vec::<(Key, Vec<u8>)>::with_capacity(count + 1);
-    let mut keyed_operation_count = 0u32;
-    for (index, operation) in operations.iter().enumerate() {
-        let location = start_location + index as u64;
-        let encoded = operation.encode().to_vec();
-        ensure_encoded_value_size(encoded.len())?;
-        op_rows.push((encode_operation_key(location), encoded));
-        if let ImmutableOperation::Set(key, _) = operation {
-            keyed_operation_count += 1;
-            aux_rows.push((
-                encode_update_key(key.as_ref(), location)?,
-                encode_update_index_value(true),
-            ));
-        }
-    }
-    aux_rows.push((encode_presence_key(latest_location), Vec::new()));
-    let operation_count = u32::try_from(count).map_err(|_| {
-        QmdbError::CorruptData("authenticated operation count overflow".to_string())
-    })?;
-    Ok(crate::core::PreparedUpload {
-        operation_count,
-        keyed_operation_count,
-        op_rows,
-        aux_rows,
-    })
 }
 
 pub(crate) fn auth_inactive_peaks<F: Family>(
@@ -259,47 +169,4 @@ pub(crate) async fn load_auth_operation_bytes_range<F: Family>(
         operations.push(value.to_vec());
     }
     Ok(operations)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::codec::{decode_update_index_value_present, encode_update_index_value};
-    use commonware_storage::merkle::mmr;
-    use commonware_storage::qmdb::any::value::VariableEncoding;
-    use commonware_storage::qmdb::immutable::Operation as ImmutableOperation;
-    use commonware_utils::sequence::FixedBytes;
-
-    type TestOp = ImmutableOperation<mmr::Family, FixedBytes<32>, VariableEncoding<Vec<u8>>>;
-
-    #[test]
-    fn immutable_update_rows_store_only_a_presence_flag() {
-        let key = FixedBytes::<32>::new([0x11; 32]);
-        let value = b"a value long enough to dwarf a one byte presence flag".to_vec();
-        let ops = vec![
-            TestOp::Set(key.clone(), value),
-            TestOp::Commit(None, Location::new(0)),
-        ];
-
-        let prepared = build_auth_immutable_upload_rows::<
-            mmr::Family,
-            FixedBytes<32>,
-            VariableEncoding<Vec<u8>>,
-        >(Location::new(1), &ops)
-        .expect("build immutable upload rows");
-
-        assert_eq!(prepared.keyed_operation_count, 1);
-
-        let update_key = encode_update_key(key.as_ref(), Location::<mmr::Family>::new(0))
-            .expect("encode update key");
-        let (_, row_value) = prepared
-            .aux_rows
-            .iter()
-            .find(|(row_key, _)| *row_key == update_key)
-            .expect("immutable update row present");
-
-        assert_eq!(row_value, &encode_update_index_value(true));
-        assert_eq!(row_value.len(), 1, "update index row must be a single byte");
-        assert!(decode_update_index_value_present(row_value).expect("decode presence"));
-    }
 }

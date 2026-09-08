@@ -423,26 +423,22 @@ impl StoreBatchUpload for SimplexClient {
         Self::Prepared: 'a,
     {
         Box::pin(async move {
-            let summary = prepared.summary();
-            drop(prepared);
             UploadReceipt {
                 store_sequence_number: sequence_number,
-                summary,
+                summary: prepared.summary(),
             }
         })
     }
 
     fn mark_upload_failed<'a>(
         &'a self,
-        prepared: Self::Prepared,
-        error: String,
+        _prepared: Self::Prepared,
+        _error: String,
     ) -> BoxFuture<'a, ()>
     where
         Self: Sync + 'a,
         Self::Prepared: 'a,
     {
-        Box::pin(async move {
-            drop((prepared, error));
-        })
+        Box::pin(async {})
     }
 }

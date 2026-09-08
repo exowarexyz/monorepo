@@ -3,7 +3,7 @@
 use crate::request::{span_contains, validate_key_range, InvalidWindow, OperationWindow};
 
 #[test]
-fn spans_wrap_past_the_greatest_key() {
+fn test_spans_wrap_past_the_greatest_key() {
     assert!(span_contains(&2, &6, &2));
     assert!(span_contains(&2, &6, &5));
     assert!(!span_contains(&2, &6, &6));
@@ -16,7 +16,7 @@ fn spans_wrap_past_the_greatest_key() {
 }
 
 #[test]
-fn operation_windows_preserve_large_absolute_positions() {
+fn test_operation_windows_preserve_large_absolute_positions() {
     for start in [u32::MAX as u64 - 1, u32::MAX as u64 + 1, (1u64 << 53) + 1] {
         let window = OperationWindow::new(start + 2, start, 10).unwrap();
         assert!(window.validate(start, 3, start + 3).is_ok());
@@ -42,7 +42,7 @@ fn operation_windows_preserve_large_absolute_positions() {
 }
 
 #[test]
-fn linear_key_ranges_match_sorted_map_pages() {
+fn test_linear_key_ranges_match_sorted_map_pages() {
     let keys = [2, 4, 6];
     for start in 0..9 {
         for end in (start + 1)..10 {
@@ -71,17 +71,21 @@ fn linear_key_ranges_match_sorted_map_pages() {
 }
 
 #[test]
-fn key_ranges_reject_wraparound_and_incomplete_pages() {
+fn test_key_ranges_reject_wraparound_and_incomplete_pages() {
     assert!(validate_key_range(&1, Some(&7), 3, &[], Some(&2)).is_err());
     assert!(validate_key_range(&1, Some(&7), 3, &[(&2, &4)], Some(&2)).is_err());
     assert!(validate_key_range(&4, None, 3, &[(&4, &6), (&6, &2), (&2, &4)], None).is_err());
     assert!(validate_key_range(&1, Some(&7), 1, &[(&2, &4), (&4, &6)], Some(&2)).is_err());
     // An empty-database start proof cannot precede entries
     assert!(validate_key_range(&1, Some(&7), 3, &[(&2, &4)], None).is_err());
+    // Entries must chain through their authenticated successors
+    assert!(validate_key_range(&1, Some(&7), 3, &[(&2, &4), (&6, &2)], Some(&2)).is_err());
+    assert!(validate_key_range(&1, Some(&7), 0, &[], Some(&2)).is_err());
+    assert!(validate_key_range(&7, Some(&7), 3, &[], None).is_err());
 }
 
 #[test]
-fn single_key_databases_accept_self_successors() {
+fn test_single_key_databases_accept_self_successors() {
     assert_eq!(
         validate_key_range(&0, None, 5, &[(&3, &3)], Some(&3)),
         Ok(None)

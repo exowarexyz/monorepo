@@ -966,21 +966,21 @@ export class SimplexClient<TNotarization = unknown, TFinalization = unknown> {
       for (const entry of batch.entries) {
         if (entry.type === 'notarization') {
           const { notarized, ...event } = entry;
-          const { type: _type, ...index } = event;
+          const { type: _type, ...fields } = event;
           const certificate = await this.verifyNotarization(notarized, {
             kind: 'notarization',
             source: 'stream',
-            ...index,
+            ...fields,
             value: notarized,
           });
           entries.push({ ...event, raw: notarized, certificate });
         } else {
           const { finalized, ...event } = entry;
-          const { type: _type, ...index } = event;
+          const { type: _type, ...fields } = event;
           const certificate = await this.verifyFinalization(finalized, {
             kind: 'finalization',
             source: 'stream',
-            ...index,
+            ...fields,
             value: finalized,
           });
           entries.push({ ...event, raw: finalized, certificate });

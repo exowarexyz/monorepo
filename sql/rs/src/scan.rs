@@ -82,20 +82,6 @@ impl KvScanExec {
         }
     }
 
-    fn with_ordering(&self, ordering: LexOrdering, direction: RangeMode) -> Self {
-        let properties = Self::make_properties(self.schema(), Some(ordering));
-        Self {
-            client: self.client.clone(),
-            model: self.model.clone(),
-            index_specs: self.index_specs.clone(),
-            predicate: self.predicate.clone(),
-            fetch: self.fetch,
-            direction: Some(direction),
-            projection: self.projection.clone(),
-            properties,
-        }
-    }
-
     pub(crate) fn scan_direction(&self) -> RangeMode {
         self.direction.unwrap_or(RangeMode::Forward)
     }
@@ -148,26 +134,18 @@ impl KvScanExec {
         Ok(Some(direction))
     }
 
-    fn primary_key_order_columns_after_eq_prefix(&self) -> Vec<usize> {
+    fn primary_key_order_columns_after_eq_prefix(&self) -> &[usize] {
         let mut prefix_encoded_width = 0usize;
-        let mut key_columns = Vec::new();
-        let mut in_order_tail = false;
 
-        for (&col_idx, &kind) in self
+        for (position, (&col_idx, &kind)) in self
             .model
             .primary_key_indices
             .iter()
             .zip(self.model.primary_key_kinds.iter())
+            .enumerate()
         {
-            if in_order_tail {
-                key_columns.push(col_idx);
-                continue;
-            }
-
             let Some(constraint) = self.predicate.constraints.get(&col_idx) else {
-                in_order_tail = true;
-                key_columns.push(col_idx);
-                continue;
+                return &self.model.primary_key_indices[position..];
             };
             match primary_key_range_constraint_for_prefix(
                 &self.model,
@@ -179,13 +157,12 @@ impl KvScanExec {
                     prefix_encoded_width += point.encoded_width;
                 }
                 PrimaryKeyRangeConstraint::Terminal(_) | PrimaryKeyRangeConstraint::NotEnforced => {
-                    in_order_tail = true;
-                    key_columns.push(col_idx);
+                    return &self.model.primary_key_indices[position..];
                 }
             }
         }
 
-        key_columns
+        &[]
     }
 
     pub(crate) fn plan_diagnostics(&self) -> DataFusionResult<AccessPathDiagnostics> {
@@ -330,7 +307,11 @@ impl ExecutionPlan for KvScanExec {
             return Ok(SortOrderPushdownResult::Unsupported);
         }
         Ok(SortOrderPushdownResult::Exact {
-            inner: Arc::new(self.with_ordering(expressions, direction)),
+            inner: Arc::new(Self {
+                direction: Some(direction),
+                properties: Self::make_properties(self.schema(), Some(expressions)),
+                ..self.clone()
+            }),
         })
     }
 }

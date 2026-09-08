@@ -364,7 +364,7 @@ pub(crate) fn encode_chunk_key<F: Family>(chunk_index: u64, watermark: Location<
 /// Clear every bitmap bit below `floor` within the chunk at `chunk_index`.
 ///
 /// Bits below the inactivity floor are definitionally 0 at any watermark; the
-/// writer does not republish a chunk every time floor advancement flips one
+/// producer does not republish a chunk every time floor advancement flips one
 /// of its bits, so the stored payload may carry stale 1s. Fold those clears
 /// in deterministically at read time. Mirrors the bit layout used by
 /// `commonware_utils::bitmap::BitMap`: byte offset within the chunk is
@@ -401,10 +401,6 @@ pub(crate) fn decode_operation_location_key<F: Family>(
     decode_prefixed_location(&OPERATION_PREFIX, key, "operation")
 }
 
-pub(crate) fn decode_presence_location<F: Family>(key: &Key) -> Result<Location<F>, QmdbError> {
-    decode_prefixed_location(&PRESENCE_PREFIX, key, "presence")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -413,7 +409,7 @@ mod tests {
     use commonware_storage::merkle::mmr;
 
     #[test]
-    fn current_boundary_metadata_uses_commonware_codec_layout() {
+    fn test_current_boundary_metadata_uses_commonware_codec_layout() {
         let root = Sha256::fill(0xA5);
         let metadata = CurrentBoundaryMetadata {
             root,
@@ -459,7 +455,7 @@ mod tests {
     }
 
     #[test]
-    fn clear_below_floor_matches_bitwise_reference() {
+    fn test_clear_below_floor_matches_bitwise_reference() {
         const N: usize = 4;
         let chunk_bits = bitmap_chunk_bits::<N>();
         for chunk_index in 0..3u64 {

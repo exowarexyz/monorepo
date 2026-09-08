@@ -337,7 +337,6 @@ test('Simplex WASM verifier adapter supports coding commitment payloads', async 
       verify_notarized_payload: (payload, identity, scheme, namespace, material, bytes) => {
         calls.push(`notarized:${payload}:${identity}:${scheme}:${bytesToHex(bytes)}`);
         return {
-          scheme,
           epoch: 0n,
           view: 3n,
           parent: 2n,
@@ -349,7 +348,6 @@ test('Simplex WASM verifier adapter supports coding commitment payloads', async 
       verify_finalized_payload: (payload, identity, scheme, namespace, material, bytes) => {
         calls.push(`finalized:${payload}:${identity}:${scheme}:${bytesToHex(bytes)}`);
         return {
-          scheme,
           epoch: 0n,
           view: 4n,
           parent: 3n,
@@ -399,7 +397,6 @@ test('Simplex WASM verifier adapter passes non-SHA payloads through', async () =
       verify_notarized_payload: (payload, identity, scheme, namespace, material, bytes) => {
         calls.push(`notarized:${payload}:${identity}:${scheme}:${bytesToHex(bytes)}`);
         return {
-          scheme,
           epoch: 0n,
           view: 5n,
           parent: 4n,
@@ -411,7 +408,6 @@ test('Simplex WASM verifier adapter passes non-SHA payloads through', async () =
       verify_finalized_payload: (payload, identity, scheme, namespace, material, bytes) => {
         calls.push(`finalized:${payload}:${identity}:${scheme}:${bytesToHex(bytes)}`);
         return {
-          scheme,
           epoch: 0n,
           view: 6n,
           parent: 5n,

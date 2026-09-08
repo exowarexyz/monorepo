@@ -21,10 +21,9 @@ use commonware_storage::{
 };
 
 use crate::QmdbError;
-use crate::QmdbVariant;
 
 /// Historical operation range plus the raw Merkle proof material used to verify
-/// it. This is suitable for checkpointing and writer-frontier recovery.
+/// it. This is suitable for checkpointing and local Merkle continuation.
 #[derive(Clone, Debug, PartialEq)]
 #[must_use]
 pub struct OperationRangeCheckpoint<D: Digest, F: Graftable> {
@@ -49,14 +48,14 @@ impl<D: Digest, F: Graftable> OperationRangeCheckpoint<D, F> {
         )
     }
 
-    /// Reconstruct the writer frontier from an authenticated range ending at the watermark.
+    /// Reconstruct the Merkle frontier from an authenticated range ending at the watermark.
     pub fn reconstruct_peaks<H: Hasher<Digest = D>>(
         &self,
     ) -> Result<Vec<(Position<F>, u32, D)>, QmdbError> {
         self.reconstruct_peaks_with_strategy::<H, Sequential>(&Sequential)
     }
 
-    /// Reconstruct the writer frontier using `strategy` for Merkle hashing.
+    /// Reconstruct the Merkle frontier using `strategy` for Merkle hashing.
     pub fn reconstruct_peaks_with_strategy<H, S>(
         &self,
         strategy: &S,
@@ -506,46 +505,6 @@ pub struct VerifiedCurrentRange<
     pub start_location: Location<F>,
     pub operations: Vec<ordered::Operation<F, K, E>>,
     pub chunks: Vec<[u8; N]>,
-}
-
-/// Variant-tagged verified range: either the historical (`Any`) shape without
-/// chunks, or the current-state shape with bitmap chunks.
-#[derive(Clone, Debug, PartialEq)]
-#[must_use]
-pub enum VerifiedVariantRange<
-    D: Digest,
-    K: QmdbKey + Codec,
-    V: Codec + Clone + Send + Sync,
-    const N: usize,
-    F: Family,
-    E: ValueEncoding<Value = V> = VariableEncoding<V>,
-> {
-    Any(VerifiedOperationRange<D, ordered::Operation<F, K, E>, F>),
-    Current(VerifiedCurrentRange<D, K, V, N, F, E>),
-}
-
-impl<
-        D: Digest,
-        K: QmdbKey + Codec,
-        V: Codec + Clone + Send + Sync,
-        const N: usize,
-        F: Graftable,
-        E: ValueEncoding<Value = V>,
-    > VerifiedVariantRange<D, K, V, N, F, E>
-{
-    pub fn variant(&self) -> QmdbVariant {
-        match self {
-            Self::Any(_) => QmdbVariant::Any,
-            Self::Current(_) => QmdbVariant::Current,
-        }
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct VariantRoot<D: Digest, F: Family> {
-    pub watermark: Location<F>,
-    pub variant: QmdbVariant,
-    pub root: D,
 }
 
 #[derive(Clone, Debug, PartialEq)]

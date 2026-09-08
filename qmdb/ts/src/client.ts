@@ -202,10 +202,6 @@ function toBytes(value: BytesLike): Uint8Array {
   return typeof value === 'string' ? new TextEncoder().encode(value) : value;
 }
 
-function copyBytes(value: BytesLike): Uint8Array {
-  return new Uint8Array(toBytes(value));
-}
-
 function keyId(key: Uint8Array): string {
   return Array.from(key).join(',');
 }
@@ -439,7 +435,7 @@ export class OrderedQmdbClient {
     options?: CallOptions,
   ): Promise<VerifiedCurrentKeyValueProof> {
     await ensureWasm();
-    const requestedKey = encode_vec_key(copyBytes(key));
+    const requestedKey = encode_vec_key(toBytes(key));
     const response = await this.lookup.get(
       create(GetRequestSchema, {
         key: requestedKey,
@@ -469,7 +465,7 @@ export class OrderedQmdbClient {
     options?: CallOptions,
   ): Promise<VerifiedCurrentKeyLookupProof> {
     await ensureWasm();
-    const requestedKeys = keys.map((key) => encode_vec_key(copyBytes(key)));
+    const requestedKeys = keys.map((key) => encode_vec_key(toBytes(key)));
     assertDistinctKeys(requestedKeys);
     const response = await this.lookup.getMany(
       create(GetManyRequestSchema, {
@@ -502,11 +498,11 @@ export class OrderedQmdbClient {
   ): Promise<VerifiedCurrentKeyRangeProof> {
     assertU32(request.limit, 'limit', true);
     await ensureWasm();
-    const startKey = encode_vec_key(copyBytes(request.startKey));
+    const startKey = encode_vec_key(toBytes(request.startKey));
     const endKey =
       request.endKey === undefined
         ? undefined
-        : encode_vec_key(copyBytes(request.endKey));
+        : encode_vec_key(toBytes(request.endKey));
     const response = await this.orderedRange.getRange(
       create(GetRangeRequestSchema, {
         startKey,

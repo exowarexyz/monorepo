@@ -7,15 +7,13 @@ use exoware_sdk::stream_filter::StreamFilter;
 use exoware_sdk::{PrefixedStoreClient, StreamSubscription};
 
 use crate::codec::{
-    decode_operation_location_key, decode_presence_location, decode_watermark_location,
-    OPERATION_PREFIX, PRESENCE_PREFIX, WATERMARK_PREFIX,
+    decode_operation_location_key, decode_watermark_location, OPERATION_PREFIX, WATERMARK_PREFIX,
 };
 use crate::QmdbError;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum RowFamily {
     Op,
-    Presence,
     Watermark,
 }
 
@@ -50,8 +48,7 @@ pub(crate) async fn open_store_subscription(
         .map_err(|err| QmdbError::Stream(err.to_string()))
 }
 
-/// Build the classifier + stream filter selecting the Op / Presence /
-/// Watermark rows of a QMDB backend's historical op log.
+/// Select operation and publication rows from a QMDB historical log.
 pub(crate) fn classify_and_filter<F: Family>() -> (RowClassifier<F>, StreamFilter) {
     use exoware_sdk::keys::{Key as StoreKey, Prefix};
     use exoware_sdk::kv_codec::Utf8;
@@ -63,19 +60,13 @@ pub(crate) fn classify_and_filter<F: Family>() -> (RowClassifier<F>, StreamFilte
     }
 
     let op_prefix = OPERATION_PREFIX.as_bytes().clone();
-    let presence_prefix = PRESENCE_PREFIX.as_bytes().clone();
     let watermark_prefix = WATERMARK_PREFIX.as_bytes().clone();
 
-    let compiled: [RowRule<F>; 3] = [
+    let compiled: [RowRule<F>; 2] = [
         RowRule {
             prefix: OPERATION_PREFIX,
             family: RowFamily::Op,
             decode: Arc::new(|key| decode_operation_location_key::<F>(key).ok()),
-        },
-        RowRule {
-            prefix: PRESENCE_PREFIX,
-            family: RowFamily::Presence,
-            decode: Arc::new(|key| decode_presence_location::<F>(key).ok()),
         },
         RowRule {
             prefix: WATERMARK_PREFIX,
@@ -101,10 +92,6 @@ pub(crate) fn classify_and_filter<F: Family>() -> (RowClassifier<F>, StreamFilte
                 payload_regex: Utf8::from(payload_regex.as_str()),
             },
             Selector {
-                prefix: presence_prefix,
-                payload_regex: Utf8::from(payload_regex.as_str()),
-            },
-            Selector {
                 prefix: watermark_prefix,
                 payload_regex: Utf8::from(payload_regex.as_str()),
             },
@@ -121,22 +108,21 @@ mod tests {
     use exoware_sdk::selector::compile_payload_regex;
 
     use super::{classify_and_filter, RowFamily};
-    use crate::codec::{encode_operation_key, encode_presence_key, encode_watermark_key};
+    use crate::codec::{encode_operation_key, encode_watermark_key};
 
     const LOCATIONS: [u64; 4] = [0, 1, 0x0102_0304_0506_0708, u64::MAX];
 
     // The payload regexes re-state the codec's row layouts, and the server
     // drops any row a selector fails to match, so pin them together: every
-    // Op / Presence / Watermark key the codec can produce must match its
+    // operation and watermark key the codec can produce must match its
     // selector's regex in full and classify to the same family and location.
     #[test]
-    fn backend_selectors_match_their_row_payloads() {
+    fn test_backend_selectors_match_their_row_payloads() {
         let (classifier, filter) = classify_and_filter::<mmr::Family>();
         for location in LOCATIONS {
             let loc = Location::new(location);
-            let rows: [(RowFamily, Key); 3] = [
+            let rows: [(RowFamily, Key); 2] = [
                 (RowFamily::Op, encode_operation_key(loc)),
-                (RowFamily::Presence, encode_presence_key(loc)),
                 (RowFamily::Watermark, encode_watermark_key(loc)),
             ];
             for (family, key) in rows {

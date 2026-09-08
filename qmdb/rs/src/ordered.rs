@@ -3,7 +3,6 @@ use std::marker::PhantomData;
 
 use commonware_codec::{Codec, Decode, DecodeExt, Encode};
 use commonware_cryptography::Hasher;
-use commonware_parallel::Strategy;
 use commonware_storage::{
     merkle::{Graftable, Location},
     qmdb::{
@@ -34,12 +33,11 @@ use crate::error::{error_key, QmdbError};
 use crate::proof::{
     CurrentOperationRangeProofResult, OperationRangeCheckpoint, RawBatchMultiProof,
     RawKeyExclusionProof, RawKeyLookupProof, RawKeyRangeProof, RawKeyValueProof, RawMultiProof,
-    VariantRoot, VerifiedCurrentRange, VerifiedKeyValue, VerifiedMultiOperations,
-    VerifiedOperationRange, VerifiedVariantRange,
+    VerifiedCurrentRange, VerifiedKeyValue, VerifiedMultiOperations, VerifiedOperationRange,
 };
 use crate::request::span_contains;
 use crate::storage::{KvCurrentStorage, KvMerkleStorage, ProofBitmap};
-use crate::{QmdbVariant, VersionedValue, WriterState};
+use crate::VersionedValue;
 
 const ACTIVE_OPERATION_GET_MANY_BATCH: usize = 1024;
 
@@ -153,81 +151,23 @@ where
         self.core().writer_location_watermark().await
     }
 
-    /// Recover writer state at the latest published watermark.
-    ///
-    /// Returns empty state when no watermark has been published.
-    pub async fn recover_writer_state(&self) -> Result<WriterState<H::Digest, F>, QmdbError> {
-        crate::recover_writer_state::<F, H, _, _>(
-            self.writer_location_watermark().await?,
-            |watermark, start_location, max_locations| {
-                self.operation_range_checkpoint(watermark, start_location, max_locations)
-            },
-        )
-        .await
-    }
-
-    /// Recover writer state using `strategy` for Merkle hashing.
-    pub async fn recover_writer_state_with_strategy<S: Strategy>(
-        &self,
-        strategy: &S,
-    ) -> Result<WriterState<H::Digest, F>, QmdbError> {
-        crate::recover_writer_state_with_strategy::<F, H, S, _, _>(
-            self.writer_location_watermark().await?,
-            |watermark, start_location, max_locations| {
-                self.operation_range_checkpoint(watermark, start_location, max_locations)
-            },
-            strategy,
-        )
-        .await
-    }
-
     pub async fn root_at(&self, watermark: Location<F>) -> Result<H::Digest, QmdbError> {
-        Ok(self
-            .root_for_variant(watermark, QmdbVariant::Any)
-            .await?
-            .root)
+        let session = self.client.create_session();
+        self.core()
+            .require_published_watermark(&session, watermark)
+            .await?;
+        self.compute_ops_root(&session, watermark).await
     }
 
     pub async fn current_root_at(&self, watermark: Location<F>) -> Result<H::Digest, QmdbError> {
-        Ok(self
-            .root_for_variant(watermark, QmdbVariant::Current)
-            .await?
-            .root)
-    }
-
-    pub async fn root_for_variant(
-        &self,
-        watermark: Location<F>,
-        variant: QmdbVariant,
-    ) -> Result<VariantRoot<H::Digest, F>, QmdbError> {
         let session = self.client.create_session();
-        self.root_for_variant_in_session(&session, watermark, variant)
-            .await
-    }
-
-    async fn root_for_variant_in_session(
-        &self,
-        session: &SerializableReadSession,
-        watermark: Location<F>,
-        variant: QmdbVariant,
-    ) -> Result<VariantRoot<H::Digest, F>, QmdbError> {
         self.core()
-            .require_published_watermark(session, watermark)
+            .require_published_watermark(&session, watermark)
             .await?;
-        let root = match variant {
-            QmdbVariant::Any => self.compute_ops_root(session, watermark).await?,
-            QmdbVariant::Current => {
-                self.core()
-                    .require_batch_boundary(session, watermark)
-                    .await?;
-                self.load_current_boundary_root(session, watermark).await?
-            }
-        };
-        Ok(VariantRoot {
-            watermark,
-            variant,
-            root,
-        })
+        self.core()
+            .require_batch_boundary(&session, watermark)
+            .await?;
+        self.load_current_boundary_root(&session, watermark).await
     }
 
     pub async fn query_many_at<Q: AsRef<[u8]>>(
@@ -385,7 +325,7 @@ where
             operations,
         )
         .await?;
-        proof.ops_root_witness = Some(self.load_ops_root_witness(&session, watermark).await?);
+        proof.ops_root_witness = self.load_ops_root_witness(&session, watermark).await?;
         Ok(proof)
     }
 
@@ -474,28 +414,8 @@ where
             encoded_operations,
         )
         .await?;
-        checkpoint.ops_root_witness = Some(self.load_ops_root_witness(&session, watermark).await?);
+        checkpoint.ops_root_witness = self.load_ops_root_witness(&session, watermark).await?;
         Ok(checkpoint)
-    }
-
-    /// Verified contiguous range of operations for the given variant.
-    pub async fn operation_range_proof_for_variant(
-        &self,
-        watermark: Location<F>,
-        variant: QmdbVariant,
-        start_location: Location<F>,
-        max_locations: u32,
-    ) -> Result<VerifiedVariantRange<H::Digest, K, V, N, F, E>, QmdbError> {
-        match variant {
-            QmdbVariant::Any => self
-                .operation_range_proof(watermark, start_location, max_locations)
-                .await
-                .map(VerifiedVariantRange::Any),
-            QmdbVariant::Current => self
-                .current_operation_range_proof(watermark, start_location, max_locations)
-                .await
-                .map(VerifiedVariantRange::Current),
-        }
     }
 
     /// Verified raw current-state proof for a contiguous operation range.
@@ -949,17 +869,17 @@ where
         &self,
         session: &SerializableReadSession,
         location: Location<F>,
-    ) -> Result<OpsRootWitness<F, H::Digest>, QmdbError> {
+    ) -> Result<Option<OpsRootWitness<F, H::Digest>>, QmdbError> {
         let Some(bytes) = session.get(&encode_ops_root_witness_key(location)).await? else {
-            return Err(QmdbError::CurrentBoundaryStateMissing {
-                location: location.as_u64(),
-            });
+            return Ok(None);
         };
-        OpsRootWitness::<F, H::Digest>::decode(bytes.as_ref()).map_err(|e| {
-            QmdbError::CorruptData(format!(
-                "current ops-root witness at {location} decode error: {e}"
-            ))
-        })
+        OpsRootWitness::<F, H::Digest>::decode(bytes.as_ref())
+            .map(Some)
+            .map_err(|e| {
+                QmdbError::CorruptData(format!(
+                    "current ops-root witness at {location} decode error: {e}"
+                ))
+            })
     }
 
     pub(crate) async fn compute_ops_root(

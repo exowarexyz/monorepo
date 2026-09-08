@@ -2271,8 +2271,7 @@ pub const __GET_RANGE_REQUEST_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = :
     from_json: ::buffa::type_registry::any_from_json::<GetRangeRequest>,
     is_wkt: false,
 };
-/// Ordered current key-range proof response. Key fields are codec-encoded
-/// logical QMDB keys (`K::encode()` bytes). `start_proof`, when present,
+/// Ordered current key-range proof response. `start_proof`, when present,
 /// authenticates the boundary before the first returned key (or the entire empty
 /// range). The last entry's authenticated successor closes the range or gives
 /// the next start key when it advances within the requested interval. A page
@@ -7734,8 +7733,7 @@ pub mod __buffa {
                 ::serde::Serialize::serialize(&self.0, __s)
             }
         }
-        /// Ordered current key-range proof response. Key fields are codec-encoded
-        /// logical QMDB keys (`K::encode()` bytes). `start_proof`, when present,
+        /// Ordered current key-range proof response. `start_proof`, when present,
         /// authenticates the boundary before the first returned key (or the entire empty
         /// range). The last entry's authenticated successor closes the range or gives
         /// the next start key when it advances within the requested interval. A page

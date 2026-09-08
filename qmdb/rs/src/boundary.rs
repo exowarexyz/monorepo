@@ -73,8 +73,8 @@ where
 /// Recover the current-boundary delta for one batch from local proof material
 /// emitted by a Commonware `current` QMDB.
 ///
-/// This is the bridge between a caller-owned local Commonware current DB and a
-/// writer that publishes current-state rows. Callers apply a batch locally,
+/// This derives upload rows from a caller-owned local Commonware current DB.
+/// Callers apply a batch locally,
 /// then use this function to recover the exact versioned current-state rows
 /// that must be uploaded for that batch boundary:
 ///
@@ -86,22 +86,24 @@ where
 /// - `grafted_nodes`: only the complete-chunk grafted nodes whose digests
 ///   changed at this boundary
 ///
-/// `previous_operations` and `operations` are the cumulative ordered-op logs
+/// `previous_operations` and `operations` are the cumulative operation logs
 /// before and after one finalized local batch respectively, not just the delta
 /// batch itself. In the intended flow `operations` therefore includes the
 /// new batch's appended `CommitFloor`, and `previous_operations` is the exact
 /// cumulative prefix immediately before that batch was applied.
 ///
-/// This function is not meant for arbitrary diffs between unrelated op slices;
-/// it assumes the caller is recovering the boundary rows for exactly one newly
-/// applied local batch.
+/// With a previous log, the inputs must differ by exactly one finalized batch.
+/// With no previous log, the function recovers a complete boundary from the
+/// retained prefix, including bootstrap and restart material.
 ///
 /// `prove_at(location)` must return a current range proof plus the bitmap
 /// chunk for that exact `location`, taken from the same local DB state as
 /// `root`.
 ///
-/// The returned [`CurrentBoundaryState`] can be passed directly to ordered or
-/// unordered writer APIs that accept current-boundary state.
+/// The caller must obtain `root`, `pruned_chunks`, and `ops_root_witness` from the
+/// same trusted local state. This function authenticates recovered chunks and nodes
+/// against `root`; it does not independently authenticate pruning metadata.
+/// Attach the result with [`crate::PreparedAuthenticatedRange::with_current_boundary`].
 pub async fn recover_boundary_state<M, H, Op, const N: usize, Prove, Fut>(
     previous_operations: Option<&[Op]>,
     operations: &[Op],
@@ -606,7 +608,7 @@ mod tests {
     }
 
     #[test]
-    fn rewrite_pulls_in_old_update_chunk_when_floor_preserves_it() {
+    fn test_rewrite_pulls_in_old_update_chunk_when_floor_preserves_it() {
         // No trailing CommitFloor -> floor defaults to 0 -> no filtering.
         // The rewrite of "target" pulls in its old-location chunk.
         let previous = previous_ops();
@@ -626,7 +628,7 @@ mod tests {
     }
 
     #[test]
-    fn floor_crossed_chunks_are_published() {
+    fn test_floor_crossed_chunks_are_published() {
         // Trailing CommitFloor(floor=16) means chunks 0 and 1 (covering
         // locations 0..15) become logically zeroed. They still need to be
         // published so remote proof builders can materialize the same bitmap
@@ -653,7 +655,7 @@ mod tests {
     }
 
     #[test]
-    fn straddling_chunk_keeps_first_new_representative() {
+    fn test_straddling_chunk_keeps_first_new_representative() {
         // With floor=18, chunks 0 and 1 (locations 0..15) become logically
         // zeroed and chunk 2 (locations 16..23) straddles the new floor. The
         // first appended operation also lands in chunk 2, so that newer
@@ -682,7 +684,7 @@ mod tests {
     }
 
     #[test]
-    fn pruned_chunks_are_not_represented() {
+    fn test_pruned_chunks_are_not_represented() {
         let previous = previous_ops();
         let mut operations = previous.clone();
         operations.push(update(b"target", b"new"));
@@ -698,7 +700,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_inputs_that_do_not_end_with_commit_floor() {
+    fn test_rejects_inputs_that_do_not_end_with_commit_floor() {
         let previous = previous_ops();
         let mut operations = previous.clone();
         operations.push(update(b"target", b"new"));
@@ -712,7 +714,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_delta_with_multiple_commit_floors() {
+    fn test_rejects_delta_with_multiple_commit_floors() {
         let previous = previous_ops();
         let mut operations = previous.clone();
         operations.push(commit(16));
@@ -727,7 +729,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_non_prefix_previous_operations() {
+    fn test_rejects_non_prefix_previous_operations() {
         let previous = previous_ops();
         let mut operations = previous.clone();
         operations[3] = update(b"mutated", b"value");

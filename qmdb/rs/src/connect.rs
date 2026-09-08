@@ -9,6 +9,7 @@ use std::task::{Context as TaskContext, Poll};
 use bytes::Bytes;
 use commonware_codec::Encode;
 use commonware_cryptography::Hasher;
+use commonware_storage::qmdb::operation::Operation as _;
 use commonware_storage::{
     merkle::{Family, Graftable, Location},
     qmdb::{
@@ -88,8 +89,7 @@ fn qmdb_error_to_connect(err: QmdbError) -> ConnectError {
         QmdbError::ProofVerification { .. }
         | QmdbError::RangeMismatch(_)
         | QmdbError::CorruptData(_)
-        | QmdbError::CommonwareMerkle(_)
-        | QmdbError::WriterPoisoned(_) => ConnectError::internal(err.to_string()),
+        | QmdbError::CommonwareMerkle(_) => ConnectError::internal(err.to_string()),
     }
 }
 
@@ -111,7 +111,7 @@ pub struct OrderedConnect<
 pub struct UnorderedConnect<
     F: Graftable,
     H: Hasher,
-    K: commonware_utils::Array + commonware_storage::qmdb::operation::Key + commonware_codec::Codec,
+    K: commonware_storage::qmdb::operation::Key + commonware_codec::Codec,
     V: commonware_codec::Codec + Clone + Send + Sync,
     const N: usize,
     E: ValueEncoding<Value = V> = VariableEncoding<V>,
@@ -119,19 +119,23 @@ pub struct UnorderedConnect<
     unordered::Operation<F, K, E>: commonware_codec::Read,
 {
     client: Arc<UnorderedClient<F, H, K, V, E>>,
+    key_cfg: Arc<K::Cfg>,
 }
 
 impl<F, H, K, V, const N: usize, E> UnorderedConnect<F, H, K, V, N, E>
 where
     F: Graftable,
     H: Hasher,
-    K: commonware_utils::Array + commonware_storage::qmdb::operation::Key + commonware_codec::Codec,
+    K: commonware_storage::qmdb::operation::Key + commonware_codec::Codec,
     V: commonware_codec::Codec + Clone + Send + Sync,
     E: ValueEncoding<Value = V>,
     unordered::Operation<F, K, E>: commonware_codec::Read,
 {
-    pub fn new(client: Arc<UnorderedClient<F, H, K, V, E>>) -> Self {
-        Self { client }
+    pub fn new(client: Arc<UnorderedClient<F, H, K, V, E>>, key_cfg: K::Cfg) -> Self {
+        Self {
+            client,
+            key_cfg: Arc::new(key_cfg),
+        }
     }
 }
 
@@ -330,13 +334,7 @@ impl<F, H, K, V, E> OperationLogBackend for Arc<ImmutableClient<F, H, K, V, E>>
 where
     F: Graftable,
     H: Hasher + Send + Sync + 'static,
-    K: commonware_utils::Array
-        + commonware_codec::Codec
-        + Clone
-        + AsRef<[u8]>
-        + Send
-        + Sync
-        + 'static,
+    K: commonware_storage::qmdb::operation::Key + Send + Sync + 'static,
     V: commonware_codec::Codec + Clone + AsRef<[u8]> + Send + Sync + 'static,
     E: ValueEncoding<Value = V> + Send + Sync + 'static,
     immutable::Operation<F, K, E>: Encode + commonware_codec::Decode + Clone,
@@ -469,12 +467,7 @@ impl<F, H, K, V, const N: usize, E> CurrentOperationRangeBackend<N>
 where
     F: Graftable,
     H: Hasher + Send + Sync + 'static,
-    K: commonware_utils::Array
-        + commonware_storage::qmdb::operation::Key
-        + commonware_codec::Codec
-        + Send
-        + Sync
-        + 'static,
+    K: commonware_storage::qmdb::operation::Key + commonware_codec::Codec + Send + Sync + 'static,
     V: commonware_codec::Codec + Clone + AsRef<[u8]> + Send + Sync + 'static,
     E: ValueEncoding<Value = V> + Send + Sync + 'static,
     unordered::Operation<F, K, E>: Encode + commonware_codec::Decode,
@@ -721,7 +714,6 @@ impl<D: commonware_cryptography::Digest, F: Graftable> BatchSubscribeStream<D, F
         &mut self,
         frame: &exoware_sdk::StreamSubscriptionFrame,
     ) -> Result<(), Box<ConnectError>> {
-        let mut saw_operation = false;
         let mut latest: Option<Location<F>> = None;
         let mut matched: Vec<(Location<F>, Vec<u8>)> = Vec::new();
         let needs_decode = self.key_matcher.is_some() || self.value_matcher.is_some();
@@ -733,7 +725,7 @@ impl<D: commonware_cryptography::Digest, F: Graftable> BatchSubscribeStream<D, F
             };
             match family {
                 sub::RowFamily::Op => {
-                    saw_operation = true;
+                    latest = latest.max(Some(location));
                     let include = if needs_decode {
                         let OperationKv { key, value } =
                             (self.extract_kv)(location, entry.value.as_ref())
@@ -747,7 +739,6 @@ impl<D: commonware_cryptography::Digest, F: Graftable> BatchSubscribeStream<D, F
                         matched.push((location, entry.value.to_vec()));
                     }
                 }
-                sub::RowFamily::Presence => latest = latest.max(Some(location)),
                 sub::RowFamily::Watermark => {
                     self.watermarks
                         .entry(location)
@@ -756,11 +747,18 @@ impl<D: commonware_cryptography::Digest, F: Graftable> BatchSubscribeStream<D, F
             }
         }
 
-        if saw_operation && !matched.is_empty() {
-            let latest = latest.ok_or_else(|| {
-                Box::new(ConnectError::internal("qmdb batch missing presence row"))
-            })?;
+        if !matched.is_empty() {
+            let latest = latest.expect("matched operations determine the frame tip");
             matched.sort_by_key(|(loc, _)| *loc);
+            if matched
+                .windows(2)
+                .any(|pair| pair[0].0 == pair[1].0 && pair[0].1 != pair[1].1)
+            {
+                return Err(Box::new(ConnectError::internal(
+                    "conflicting QMDB operations at one location",
+                )));
+            }
+            matched.dedup();
             self.pending.push_back(PendingBatch {
                 latest,
                 sequence_number: frame.sequence_number,
@@ -915,12 +913,7 @@ impl<F, H, K, V, const N: usize, E> KeyLookupService for UnorderedConnect<F, H, 
 where
     F: Graftable,
     H: Hasher + Send + Sync + 'static,
-    K: commonware_utils::Array
-        + commonware_storage::qmdb::operation::Key
-        + commonware_codec::Codec
-        + Send
-        + Sync
-        + 'static,
+    K: commonware_storage::qmdb::operation::Key + commonware_codec::Codec + Send + Sync + 'static,
     V: commonware_codec::Codec + Clone + AsRef<[u8]> + Send + Sync + 'static,
     E: ValueEncoding<Value = V> + Send + Sync + 'static,
     unordered::Operation<F, K, E>: Encode + commonware_codec::Decode,
@@ -931,10 +924,14 @@ where
         request: ServiceRequest<'_, GetRequest>,
     ) -> impl Future<Output = connectrpc::ServiceResult<PreEncoded<GetResponse>>> + Send {
         let client = self.client.clone();
+        let key_cfg = self.key_cfg.clone();
         async move {
+            let key = K::decode_cfg(request.key, &key_cfg).map_err(|error| {
+                ConnectError::invalid_argument(format!("invalid QMDB key: {error}"))
+            })?;
             let tip = Location::new(request.tip);
             let proof = client
-                .key_value_proof_raw_at::<N, _>(tip, request.key)
+                .key_value_proof_raw_at::<N, _>(tip, key.as_ref())
                 .await
                 .map_err(qmdb_error_to_connect)?;
             connectrpc::Response::ok(crate::proto::get_response(&proof))
@@ -947,21 +944,29 @@ where
         request: ServiceRequest<'_, GetManyRequest>,
     ) -> impl Future<Output = connectrpc::ServiceResult<PreEncoded<GetManyResponse>>> + Send {
         let client = self.client.clone();
+        let key_cfg = self.key_cfg.clone();
         async move {
             let tip = Location::new(request.tip);
-            let wire = request.bytes();
-            let keys: Vec<Bytes> = request.keys.iter().map(|key| wire.slice_ref(key)).collect();
+            let keys = request
+                .keys
+                .iter()
+                .map(|key| K::decode_cfg(*key, &key_cfg))
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|error| {
+                    ConnectError::invalid_argument(format!("invalid QMDB key: {error}"))
+                })?;
             let proofs = client
                 .key_lookup_proofs_raw_at::<N, _>(tip, &keys)
                 .await
                 .map_err(qmdb_error_to_connect)?;
             connectrpc::Response::ok(crate::proto::unordered_get_many_response(
                 &proofs,
-                |proof| match &proof.operation {
-                    unordered::Operation::Update(update) => {
-                        Bytes::copy_from_slice(update.0.as_ref())
-                    }
-                    _ => Bytes::new(),
+                |proof| {
+                    let key = proof
+                        .operation
+                        .key()
+                        .expect("get_many proofs are verified updates");
+                    key.encode()
                 },
             ))
         }
@@ -1153,23 +1158,22 @@ where
 pub fn unordered_connect_stack<
     F: Graftable,
     H: Hasher + Send + Sync + 'static,
-    K: commonware_utils::Array
-        + commonware_storage::qmdb::operation::Key
-        + commonware_codec::Codec
-        + Send
-        + Sync
-        + 'static,
+    K: commonware_storage::qmdb::operation::Key + commonware_codec::Codec + Send + Sync + 'static,
     V: commonware_codec::Codec + Clone + AsRef<[u8]> + Send + Sync + 'static,
     const N: usize,
     E: ValueEncoding<Value = V> + Send + Sync + 'static,
 >(
     client: Arc<UnorderedClient<F, H, K, V, E>>,
+    key_cfg: K::Cfg,
 ) -> ConnectRpcService<impl ::connectrpc::Dispatcher>
 where
     unordered::Operation<F, K, E>: Encode + commonware_codec::Decode,
 {
     wrap_stack(Chain(
-        KeyLookupServiceServer::new(UnorderedConnect::<F, H, K, V, N, E>::new(client.clone())),
+        KeyLookupServiceServer::new(UnorderedConnect::<F, H, K, V, N, E>::new(
+            client.clone(),
+            key_cfg,
+        )),
         Chain(
             CurrentOperationServiceServer::new(CurrentOperationConnect::<_, N>::new(
                 client.clone(),
@@ -1177,6 +1181,24 @@ where
             OperationLogServiceServer::new(OperationLogConnect::new(client)),
         ),
     ))
+}
+
+pub fn ordered_operation_log_connect_stack<
+    F: Graftable,
+    H: Hasher + Send + Sync + 'static,
+    K: commonware_storage::qmdb::operation::Key + commonware_codec::Codec + Send + Sync + 'static,
+    V: commonware_codec::Codec + Clone + AsRef<[u8]> + Send + Sync + 'static,
+    const N: usize,
+    E: ValueEncoding<Value = V> + Send + Sync + 'static,
+>(
+    client: Arc<OrderedClient<F, H, K, V, N, E>>,
+) -> ConnectRpcService<impl ::connectrpc::Dispatcher>
+where
+    ordered::Operation<F, K, E>: Encode + commonware_codec::Decode,
+{
+    wrap_stack(OperationLogServiceServer::new(OperationLogConnect::new(
+        client,
+    )))
 }
 
 pub fn unordered_operation_log_connect_stack<
@@ -1199,7 +1221,7 @@ where
 pub fn immutable_operation_log_connect_stack<
     F: Graftable,
     H: Hasher + Send + Sync + 'static,
-    K: commonware_utils::Array + commonware_codec::Codec + Clone + AsRef<[u8]> + Send + Sync + 'static,
+    K: commonware_storage::qmdb::operation::Key + Send + Sync + 'static,
     V: commonware_codec::Codec + Clone + AsRef<[u8]> + Send + Sync + 'static,
     E: ValueEncoding<Value = V> + Send + Sync + 'static,
 >(
@@ -1248,7 +1270,7 @@ mod tests {
     }
 
     #[test]
-    fn subscribe_multi_proof_proto_includes_ops_root_without_witness() {
+    fn test_subscribe_multi_proof_proto_includes_ops_root_without_witness() {
         use buffa::Message as _;
         use commonware_cryptography::{sha256::Digest as Sha256Digest, Sha256};
         use commonware_storage::merkle::{mmr, Proof};
@@ -1278,7 +1300,7 @@ mod tests {
     }
 
     #[test]
-    fn shared_watermark_preserves_per_batch_resume_cursor() {
+    fn test_shared_watermark_preserves_per_batch_resume_cursor() {
         // Three batches (ops at locations 10, 11, 12) authorized by a single
         // watermark at location 12 (published at store seq 15). If they all
         // emitted the same resume cursor, a client that received only the
@@ -1320,7 +1342,7 @@ mod tests {
     }
 
     #[test]
-    fn out_of_order_uploads_preserve_subscription_replay_order() {
+    fn test_out_of_order_uploads_preserve_subscription_replay_order() {
         type F = commonware_storage::merkle::mmr::Family;
         let mut batches = PendingBatches::new();
         batches.push_back(pending(20, 10));
@@ -1339,7 +1361,7 @@ mod tests {
     }
 
     #[test]
-    fn subscription_waits_for_earlier_store_sequence_to_be_published() {
+    fn test_subscription_waits_for_earlier_store_sequence_to_be_published() {
         type F = commonware_storage::merkle::mmr::Family;
         let mut batches = PendingBatches::new();
         batches.push_back(pending(20, 10));
@@ -1363,7 +1385,7 @@ mod tests {
     }
 
     #[test]
-    fn subscription_prunes_watermarks_after_partial_drains() {
+    fn test_subscription_prunes_watermarks_after_partial_drains() {
         type F = commonware_storage::merkle::mmr::Family;
         let mut batches = PendingBatches::new();
         for (sequence, latest) in [5, 20, 5, 30, 10, 10, 40].into_iter().enumerate() {
@@ -1425,5 +1447,196 @@ mod tests {
         batches.drain_ready(&mut watermarks, &mut ready);
         assert_eq!(batches.len(), 1);
         assert!(watermarks.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod authenticated_upload_subscription_tests {
+    use super::*;
+    use commonware_cryptography::sha256::Digest;
+    use commonware_storage::merkle::mmr;
+    use exoware_sdk::{StreamSubscriptionEntry, StreamSubscriptionFrame};
+
+    type F = mmr::Family;
+
+    async fn stream() -> BatchSubscribeStream<Digest, F> {
+        let (_task, url) = exoware_simulator::open_temp().await.expect("simulator");
+        let client = exoware_sdk::PrefixedStoreClient::empty(exoware_sdk::StoreClient::new(&url));
+        let (classifier, filter) = sub::classify_and_filter::<F>();
+        let subscription = client.stream().subscribe(filter, None).await.unwrap();
+        BatchSubscribeStream::new(
+            None,
+            None,
+            classifier,
+            Arc::new(|_, bytes| {
+                Ok(OperationKv {
+                    key: None,
+                    value: Some(bytes.to_vec()),
+                })
+            }),
+            Arc::new(|_, _, _| async { unreachable!("ingestion does not build proofs") }.boxed()),
+            subscription,
+        )
+    }
+
+    fn operation(location: u64, value: &'static [u8]) -> StreamSubscriptionEntry {
+        StreamSubscriptionEntry {
+            key: crate::codec::encode_operation_key(Location::<F>::new(location)),
+            value: Bytes::from_static(value),
+        }
+    }
+
+    fn watermark(location: u64) -> StreamSubscriptionEntry {
+        StreamSubscriptionEntry {
+            key: crate::codec::encode_watermark_key(Location::<F>::new(location)),
+            value: Bytes::new(),
+        }
+    }
+
+    fn presence(location: u64) -> StreamSubscriptionEntry {
+        StreamSubscriptionEntry {
+            key: crate::codec::encode_presence_key(Location::<F>::new(location)),
+            value: Bytes::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_data_only_frames_wait_for_publication_and_keep_store_order() {
+        let mut stream = stream().await;
+        stream
+            .ingest_frame(&StreamSubscriptionFrame {
+                sequence_number: 10,
+                entries: vec![operation(4, b"four"), operation(5, b"five")],
+            })
+            .expect("authenticated data frames must not require a presence row");
+        stream
+            .ingest_frame(&StreamSubscriptionFrame {
+                sequence_number: 11,
+                entries: vec![operation(0, b"zero"), operation(1, b"one")],
+            })
+            .unwrap();
+        assert_eq!(stream.pending.len(), 2);
+        assert!(stream.ready.is_empty());
+
+        stream
+            .ingest_frame(&StreamSubscriptionFrame {
+                sequence_number: 12,
+                entries: vec![watermark(1)],
+            })
+            .unwrap();
+        assert!(
+            stream.ready.is_empty(),
+            "an earlier Store frame must not be skipped"
+        );
+        stream
+            .ingest_frame(&StreamSubscriptionFrame {
+                sequence_number: 13,
+                entries: vec![watermark(5)],
+            })
+            .unwrap();
+        assert_eq!(stream.pending.len(), 0);
+        assert_eq!(stream.ready.len(), 2);
+        assert_eq!(
+            stream
+                .ready
+                .iter()
+                .map(|batch| (
+                    batch.batch_sequence,
+                    *batch.watermark,
+                    batch.read_floor_sequence
+                ))
+                .collect::<Vec<_>>(),
+            [(10, 5, 13), (11, 1, 12)]
+        );
+        assert_eq!(
+            stream.ready[0].matched,
+            [
+                (Location::new(4), b"four".to_vec()),
+                (Location::new(5), b"five".to_vec())
+            ]
+        );
+        assert_eq!(
+            stream.ready[1].matched,
+            [
+                (Location::new(0), b"zero".to_vec()),
+                (Location::new(1), b"one".to_vec())
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_filtered_out_operations_still_determine_the_data_frame_tip() {
+        let mut stream = stream().await;
+        stream.value_matcher =
+            CompiledFilters::compile(&[Filter::Exact(Bytes::from_static(b"keep"))]).unwrap();
+        stream
+            .ingest_frame(&StreamSubscriptionFrame {
+                sequence_number: 10,
+                entries: vec![operation(4, b"keep"), operation(5, b"skip")],
+            })
+            .unwrap();
+        stream
+            .ingest_frame(&StreamSubscriptionFrame {
+                sequence_number: 11,
+                entries: vec![watermark(4)],
+            })
+            .unwrap();
+        assert!(
+            stream.ready.is_empty(),
+            "filtering must not lower the required publication tip"
+        );
+        stream
+            .ingest_frame(&StreamSubscriptionFrame {
+                sequence_number: 12,
+                entries: vec![watermark(5)],
+            })
+            .unwrap();
+        assert_eq!(stream.ready.len(), 1);
+        assert_eq!(
+            stream.ready[0].matched,
+            [(Location::new(4), b"keep".to_vec())]
+        );
+        assert_eq!(stream.ready[0].read_floor_sequence, 12);
+    }
+
+    #[tokio::test]
+    async fn test_overlapping_atomic_ranges_emit_each_operation_once() {
+        let mut stream = stream().await;
+        stream
+            .ingest_frame(&StreamSubscriptionFrame {
+                sequence_number: 10,
+                entries: vec![
+                    operation(0, b"zero"),
+                    operation(1, b"one"),
+                    operation(0, b"zero"),
+                    presence(1),
+                    watermark(1),
+                ],
+            })
+            .unwrap();
+        assert_eq!(stream.ready.len(), 1);
+        assert_eq!(
+            stream.ready[0].matched,
+            [
+                (Location::new(0), b"zero".to_vec()),
+                (Location::new(1), b"one".to_vec())
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_conflicting_operation_rows_in_one_frame_are_rejected() {
+        let mut stream = stream().await;
+        assert!(stream
+            .ingest_frame(&StreamSubscriptionFrame {
+                sequence_number: 10,
+                entries: vec![
+                    operation(0, b"zero"),
+                    operation(0, b"different"),
+                    presence(0),
+                    watermark(0)
+                ],
+            })
+            .is_err());
     }
 }

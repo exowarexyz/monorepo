@@ -2,7 +2,6 @@ use std::marker::PhantomData;
 
 use commonware_codec::{Codec, Decode, Encode, Read as CodecRead};
 use commonware_cryptography::Hasher;
-use commonware_parallel::Strategy;
 use commonware_storage::{
     merkle::{Family, Graftable, Location},
     qmdb::{
@@ -22,7 +21,6 @@ use crate::core::retry_transient_post_ingest_query;
 use crate::error::QmdbError;
 use crate::proof::{OperationRangeCheckpoint, RawBatchMultiProof, VerifiedOperationRange};
 use crate::storage::KvMerkleStorage;
-use crate::WriterState;
 
 pub struct KeylessClient<
     F: Family,
@@ -117,34 +115,6 @@ where
             let session = self.client.create_session();
             async move { read_latest_auth_watermark::<F>(&session).await }
         })
-        .await
-    }
-
-    /// Recover writer state at the latest published watermark.
-    ///
-    /// Returns empty state when no watermark has been published.
-    pub async fn recover_writer_state(&self) -> Result<WriterState<H::Digest, F>, QmdbError> {
-        crate::recover_writer_state::<F, H, _, _>(
-            self.writer_location_watermark().await?,
-            |watermark, start_location, max_locations| {
-                self.operation_range_checkpoint(watermark, start_location, max_locations)
-            },
-        )
-        .await
-    }
-
-    /// Recover writer state using `strategy` for Merkle hashing.
-    pub async fn recover_writer_state_with_strategy<S: Strategy>(
-        &self,
-        strategy: &S,
-    ) -> Result<WriterState<H::Digest, F>, QmdbError> {
-        crate::recover_writer_state_with_strategy::<F, H, S, _, _>(
-            self.writer_location_watermark().await?,
-            |watermark, start_location, max_locations| {
-                self.operation_range_checkpoint(watermark, start_location, max_locations)
-            },
-            strategy,
-        )
         .await
     }
 

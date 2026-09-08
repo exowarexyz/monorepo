@@ -3,7 +3,6 @@ use std::marker::PhantomData;
 
 use commonware_codec::{Codec, Decode, DecodeExt, Encode};
 use commonware_cryptography::Hasher;
-use commonware_parallel::Strategy;
 use commonware_storage::merkle::{Graftable, Location};
 use commonware_storage::qmdb::{
     any::{
@@ -30,7 +29,7 @@ use crate::proof::{
     RawKeyValueProof, VerifiedKeyValue, VerifiedOperationRange,
 };
 use crate::storage::{KvCurrentStorage, KvMerkleStorage, ProofBitmap};
-use crate::{VersionedValue, WriterState};
+use crate::VersionedValue;
 
 #[derive(Clone)]
 pub struct UnorderedClient<
@@ -155,34 +154,6 @@ where
 
     pub async fn writer_location_watermark(&self) -> Result<Option<Location<F>>, QmdbError> {
         self.core().writer_location_watermark().await
-    }
-
-    /// Recover writer state at the latest published watermark.
-    ///
-    /// Returns empty state when no watermark has been published.
-    pub async fn recover_writer_state(&self) -> Result<WriterState<H::Digest, F>, QmdbError> {
-        crate::recover_writer_state::<F, H, _, _>(
-            self.writer_location_watermark().await?,
-            |watermark, start_location, max_locations| {
-                self.operation_range_checkpoint(watermark, start_location, max_locations)
-            },
-        )
-        .await
-    }
-
-    /// Recover writer state using `strategy` for Merkle hashing.
-    pub async fn recover_writer_state_with_strategy<S: Strategy>(
-        &self,
-        strategy: &S,
-    ) -> Result<WriterState<H::Digest, F>, QmdbError> {
-        crate::recover_writer_state_with_strategy::<F, H, S, _, _>(
-            self.writer_location_watermark().await?,
-            |watermark, start_location, max_locations| {
-                self.operation_range_checkpoint(watermark, start_location, max_locations)
-            },
-            strategy,
-        )
-        .await
     }
 
     pub async fn query_many_at<Q: AsRef<[u8]>>(
@@ -339,10 +310,7 @@ where
     ) -> Result<
         CurrentOperationRangeProofResult<H::Digest, unordered::Operation<F, K, E>, N, F>,
         QmdbError,
-    >
-    where
-        K: commonware_utils::Array,
-    {
+    > {
         self.core()
             .require_published_watermark(session, watermark)
             .await?;
@@ -385,10 +353,7 @@ where
     ) -> Result<
         CurrentOperationRangeProofResult<H::Digest, unordered::Operation<F, K, E>, N, F>,
         QmdbError,
-    >
-    where
-        K: commonware_utils::Array,
-    {
+    > {
         let session = self.client.create_session();
         self.current_operation_range_proof_raw_in_session::<N>(
             &session,
@@ -404,10 +369,7 @@ where
         session: &SerializableReadSession,
         watermark: Location<F>,
         key: Q,
-    ) -> Result<RawKeyValueProof<H::Digest, unordered::Operation<F, K, E>, N, F>, QmdbError>
-    where
-        K: commonware_utils::Array,
-    {
+    ) -> Result<RawKeyValueProof<H::Digest, unordered::Operation<F, K, E>, N, F>, QmdbError> {
         self.core()
             .require_published_watermark(session, watermark)
             .await?;
@@ -470,10 +432,7 @@ where
         &self,
         watermark: Location<F>,
         key: Q,
-    ) -> Result<RawKeyValueProof<H::Digest, unordered::Operation<F, K, E>, N, F>, QmdbError>
-    where
-        K: commonware_utils::Array,
-    {
+    ) -> Result<RawKeyValueProof<H::Digest, unordered::Operation<F, K, E>, N, F>, QmdbError> {
         let session = self.client.create_session();
         self.key_value_proof_raw_in_session::<N, _>(&session, watermark, key)
             .await
@@ -484,10 +443,7 @@ where
         &self,
         watermark: Location<F>,
         key: Q,
-    ) -> Result<VerifiedKeyValue<H::Digest, unordered::Operation<F, K, E>, F>, QmdbError>
-    where
-        K: commonware_utils::Array,
-    {
+    ) -> Result<VerifiedKeyValue<H::Digest, unordered::Operation<F, K, E>, F>, QmdbError> {
         let raw = self.key_value_proof_raw_at::<N, _>(watermark, key).await?;
         Ok(VerifiedKeyValue {
             root: raw.root,
@@ -505,8 +461,6 @@ where
         watermark: Location<F>,
         keys: &[Q],
     ) -> Result<Vec<RawKeyValueProof<H::Digest, unordered::Operation<F, K, E>, N, F>>, QmdbError>
-    where
-        K: commonware_utils::Array,
     {
         if keys.is_empty() {
             return Err(QmdbError::EmptyProofRequest);

@@ -12,8 +12,10 @@ use commonware_cryptography::Sha256;
 use commonware_parallel::Sequential;
 use commonware_runtime::tokio as cw_tokio;
 use commonware_runtime::Runner as _;
-use commonware_storage::qmdb::any::ordered::variable::Operation as QmdbOperation;
-use commonware_storage::qmdb::current::{ordered::variable::Db as LocalQmdbDb, VariableConfig};
+use commonware_storage::qmdb::any::ordered::variable::Operation as VariableOperation;
+use commonware_storage::qmdb::current::{
+    ordered::variable::Db as CurrentOrderedVariableDb, VariableConfig,
+};
 use commonware_storage::translator::TwoCap;
 use commonware_storage::{
     journal::contiguous::variable::Config as JournalConfig,
@@ -21,15 +23,27 @@ use commonware_storage::{
 };
 use commonware_utils::{NZUsize, NZU16, NZU64};
 use exoware_qmdb::{
-    ordered_connect_stack, recover_boundary_state, CurrentBoundaryState, OrderedClient,
-    OrderedWriter, MAX_OPERATION_SIZE,
+    ordered_connect_stack, prepare_authenticated_range, recover_boundary_state,
+    stage_authenticated_range, stage_watermark, AuthenticatedOperationRange, CurrentBoundaryState,
+    OrderedClient, MAX_OPERATION_SIZE,
 };
-use exoware_sdk::{StoreBatchUpload, StoreClient, StoreKeyPrefix};
+use exoware_sdk::{PrefixedStoreClient, StoreClient, StoreKeyPrefix, StoreWriteBatch};
 use tower_http::cors::CorsLayer;
 use tracing::info;
 
 const N: usize = 32;
-type DemoFamily = mmb::Family;
+type Family = mmb::Family;
+type Operation = VariableOperation<Family, Vec<u8>, Vec<u8>>;
+type Db = CurrentOrderedVariableDb<
+    Family,
+    cw_tokio::Context,
+    Vec<u8>,
+    Vec<u8>,
+    Sha256,
+    TwoCap,
+    N,
+    Sequential,
+>;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -69,19 +83,54 @@ async fn health() -> &'static str {
     "ok"
 }
 
-async fn commit_ordered_upload(
-    writer: &OrderedWriter<DemoFamily, Sha256, Vec<u8>, Vec<u8>, N>,
-    ops: &[QmdbOperation<DemoFamily, Vec<u8>, Vec<u8>>],
-    boundary: &CurrentBoundaryState<commonware_cryptography::sha256::Digest, N, DemoFamily>,
+async fn publish_source_range(
+    store_client: &PrefixedStoreClient,
+    source_db: &Db,
+    start: Location<Family>,
+    boundary: &CurrentBoundaryState<commonware_cryptography::sha256::Digest, N, Family>,
 ) {
-    let prepared = writer
-        .prepare_upload(ops.to_vec(), boundary.clone())
+    let end = source_db.bounds().end;
+    let (proof, operations) = source_db
+        .ops_historical_proof(
+            end,
+            start,
+            NonZeroU64::new(*end - *start).expect("nonempty range"),
+        )
         .await
-        .expect("prepare");
-    writer.commit_upload(prepared).await.expect("commit upload");
+        .expect("operation proof");
+    let pinned_nodes = source_db
+        .pinned_nodes_at(start)
+        .await
+        .expect("pinned nodes");
+    let encoded_operations = operations
+        .iter()
+        .map(|operation| operation.encode().to_vec())
+        .collect::<Vec<_>>();
+    let range = AuthenticatedOperationRange {
+        start_location: start,
+        proof: &proof,
+        pinned_nodes: &pinned_nodes,
+        encoded_operations: &encoded_operations,
+    };
+    let prepared = prepare_authenticated_range::<Family, Sha256, Operation, Sequential>(
+        &range,
+        &source_db.ops_root(),
+        &op_cfg(),
+        &Sequential,
+    )
+    .expect("prepare authenticated range")
+    .with_current_boundary::<Sha256, N>(boundary)
+    .expect("current boundary");
+    let mut batch = StoreWriteBatch::new();
+    stage_authenticated_range(store_client, prepared, &mut batch).expect("stage range");
+    stage_watermark(store_client, end - 1, &mut batch).expect("stage watermark");
+    batch
+        .commit(store_client.client())
+        .await
+        .expect("commit upload");
 }
 
-fn op_cfg() -> <QmdbOperation<DemoFamily, Vec<u8>, Vec<u8>> as commonware_codec::Read>::Cfg {
+fn op_cfg() -> <Operation as commonware_codec::Read>::Cfg {
     (
         ((0..=MAX_OPERATION_SIZE).into(), ()),
         ((0..=MAX_OPERATION_SIZE).into(), ()),
@@ -92,30 +141,26 @@ fn key_cfg() -> <Vec<u8> as commonware_codec::Read>::Cfg {
     ((0..=MAX_OPERATION_SIZE).into(), ())
 }
 
-async fn boundary_from_local_db(
-    db: &LocalQmdbDb<
-        DemoFamily,
-        cw_tokio::Context,
-        Vec<u8>,
-        Vec<u8>,
-        Sha256,
-        TwoCap,
-        N,
-        Sequential,
-    >,
-    previous_operations: Option<&[QmdbOperation<DemoFamily, Vec<u8>, Vec<u8>>]>,
-    operations: &[QmdbOperation<DemoFamily, Vec<u8>, Vec<u8>>],
-) -> CurrentBoundaryState<commonware_cryptography::sha256::Digest, N, DemoFamily> {
-    let ops_root_witness = db.ops_root_witness().await.expect("ops root witness");
-    recover_boundary_state::<DemoFamily, Sha256, _, N, _, _>(
+async fn boundary_from_source_db(
+    source_db: &Db,
+    previous_operations: Option<&[Operation]>,
+    operations: &[Operation],
+) -> CurrentBoundaryState<commonware_cryptography::sha256::Digest, N, Family> {
+    let ops_root_witness = source_db
+        .ops_root_witness()
+        .await
+        .expect("ops root witness");
+    recover_boundary_state::<Family, Sha256, _, N, _, _>(
         previous_operations,
         operations,
-        db.root(),
+        source_db.root(),
         0,
         ops_root_witness,
         |location| async move {
-            let (proof, mut proof_ops, mut chunks) =
-                db.range_proof(location, NZU64!(1)).await.map_err(|error| {
+            let (proof, mut proof_ops, mut chunks) = source_db
+                .range_proof(location, NZU64!(1))
+                .await
+                .map_err(|error| {
                     exoware_qmdb::QmdbError::CorruptData(format!(
                         "local current range proof at {location}: {error}"
                     ))
@@ -142,16 +187,14 @@ async fn run(
     host: IpAddr,
     port: u16,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let client = Arc::new(
-        OrderedClient::<DemoFamily, Sha256, Vec<u8>, Vec<u8>, N>::new(
-            StoreClient::new(store_url).prefixed(StoreKeyPrefix::identity()),
-            op_cfg(),
-            key_cfg(),
-        ),
-    );
+    let qmdb_client = Arc::new(OrderedClient::<Family, Sha256, Vec<u8>, Vec<u8>, N>::new(
+        StoreClient::new(store_url).prefixed(StoreKeyPrefix::identity()),
+        op_cfg(),
+        key_cfg(),
+    ));
     let app = Router::new()
         .route("/health", get(health))
-        .fallback_service(ordered_connect_stack(client))
+        .fallback_service(ordered_connect_stack(qmdb_client))
         .layer(CorsLayer::very_permissive());
 
     let addr = SocketAddr::from((host, port));
@@ -179,12 +222,7 @@ async fn seed(
         "starting seed"
     );
 
-    let store = StoreClient::new(store_url).prefixed(StoreKeyPrefix::identity());
-    let reader = OrderedClient::<DemoFamily, Sha256, Vec<u8>, Vec<u8>, N>::new(
-        store.clone(),
-        op_cfg(),
-        key_cfg(),
-    );
+    let store_client = StoreClient::new(store_url).prefixed(StoreKeyPrefix::identity());
 
     tokio::task::spawn_blocking(move || {
         let runner_cfg = cw_tokio::Config::new().with_storage_directory(directory);
@@ -194,8 +232,8 @@ async fn seed(
             let page_cache = CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(8));
             let cfg = VariableConfig {
                 merkle_config: MerkleConfig {
-                    journal_partition: "mmb-journal".into(),
-                    metadata_partition: "mmb-metadata".into(),
+                    journal_partition: "current-ordered-variable-mmb-seed-merkle-journal".into(),
+                    metadata_partition: "current-ordered-variable-mmb-seed-merkle-metadata".into(),
                     items_per_blob: NZU64!(8),
                     write_buffer: NZUsize!(1024),
                     replay_buffer: NZUsize!(1024),
@@ -203,7 +241,7 @@ async fn seed(
                     page_cache: page_cache.clone(),
                 },
                 journal_config: JournalConfig {
-                    partition: "mmb-log".into(),
+                    partition: "current-ordered-variable-mmb-seed-log".into(),
                     write_buffer: NZUsize!(1024),
                     replay_buffer: NZUsize!(1024),
                     compression: None,
@@ -214,72 +252,40 @@ async fn seed(
                     items_per_section: NZU64!(8),
                     page_cache,
                 },
-                grafted_metadata_partition: "mmb-grafted-metadata".into(),
+                grafted_metadata_partition: "current-ordered-variable-mmb-seed-grafted-metadata"
+                    .into(),
                 translator: TwoCap,
                 init_cache_size: None,
                 init_buffer: NZUsize!(1 << 21),
                 init_concurrency: (),
             };
-            let mut db = LocalQmdbDb::<
-                DemoFamily,
-                cw_tokio::Context,
-                Vec<u8>,
-                Vec<u8>,
-                Sha256,
-                TwoCap,
-                N,
-                Sequential,
-            >::init(context.child("qmdb_seed"), cfg)
-            .await
-            .expect("init local ordered db");
+            let mut source_db = Db::init(context.child("current_ordered_variable_mmb_seed"), cfg)
+                .await
+                .expect("init local ordered db");
 
-            // `LocalQmdbDb::init` seeds location 0 with a genesis CommitFloor,
-            // so `bounds.end == 1` means no seed batches have run yet.
-            let bounds = db.bounds();
-            let (mut previous_ops, mut counter, writer) = if *bounds.end <= 1 {
-                info!("starting from empty local DB");
-                let writer =
-                    OrderedWriter::<DemoFamily, Sha256, Vec<u8>, Vec<u8>, N>::fresh(store.clone());
-                (
-                    Vec::<QmdbOperation<DemoFamily, Vec<u8>, Vec<u8>>>::new(),
-                    0u64,
-                    writer,
+            let end = source_db.bounds().end;
+            let (_, mut previous_operations) = source_db
+                .ops_historical_proof(
+                    end,
+                    Location::new(0),
+                    NonZeroU64::new(*end).expect("initial commit"),
                 )
-            } else {
-                let latest = bounds.end - 1;
-                let count = NonZeroU64::new(*latest + 1).expect("non-zero op count");
-                let (proof, cumulative) = db
-                    .ops_historical_proof(latest + 1, Location::<DemoFamily>::new(0), count)
-                    .await
-                    .expect(
-                        "resume: failed to load cumulative ops from local DB; \
-                             delete the directory to reset",
-                    );
-                let committed_batches = cumulative
-                    .iter()
-                    .filter(|op| matches!(op, QmdbOperation::CommitFloor(_, _)))
-                    .count()
-                    .saturating_sub(1) as u64; // account for the genesis CommitFloor
-                let counter = committed_batches * 3;
-                let writer_state = exoware_qmdb::WriterState::from_proof::<Sha256, _>(
-                    latest,
-                    Location::<DemoFamily>::new(0),
-                    &proof,
-                    &cumulative,
-                )
-                .expect("resume: reconstruct writer state");
-                info!(
-                    tip = *latest,
-                    batches = committed_batches,
-                    next_key_index = counter,
-                    "resuming from persisted local DB",
-                );
-                let writer = OrderedWriter::<DemoFamily, Sha256, Vec<u8>, Vec<u8>, N>::new(
-                    store.clone(),
-                    writer_state,
-                );
-                (cumulative, counter, writer)
-            };
+                .await
+                .expect("read local operation history");
+            let committed_batches = previous_operations
+                .iter()
+                .filter(|operation| matches!(operation, Operation::CommitFloor(_, _)))
+                .count()
+                .saturating_sub(1) as u64;
+            let mut counter = committed_batches * 3;
+            // Replay the local durable prefix so a restart repairs any interrupted upload
+            let boundary = boundary_from_source_db(&source_db, None, &previous_operations).await;
+            publish_source_range(&store_client, &source_db, Location::new(0), &boundary).await;
+            info!(
+                tip = *end - 1,
+                batches = committed_batches,
+                "local prefix published"
+            );
 
             let mut ticker = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
             ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -295,7 +301,7 @@ async fn seed(
                 }
 
                 let finalized = {
-                    let mut batch = db.new_batch();
+                    let mut batch = source_db.new_batch();
                     for offset in 0..3u64 {
                         let key = format!("k-{:08x}", counter + offset).into_bytes();
                         let value = format!("v-{:08x}", counter + offset).into_bytes();
@@ -312,36 +318,32 @@ async fn seed(
                     }
                     counter += 3;
                     batch
-                        .merkleize(&db, None::<Vec<u8>>)
+                        .merkleize(&source_db, None::<Vec<u8>>)
                         .await
                         .expect("merkleize")
                 };
-                (db, _) = db.apply_batch(finalized).await.expect("apply batch");
-                db = db.sync().await.expect("sync local ordered db");
+                (source_db, _) = source_db.apply_batch(finalized).await.expect("apply batch");
+                source_db = source_db.sync().await.expect("sync local ordered db");
 
-                let latest = db.bounds().end - 1;
+                let latest = source_db.bounds().end - 1;
                 let count = NonZeroU64::new(*latest + 1).expect("non-zero op count");
-                let (_proof, cumulative_ops) = db
-                    .ops_historical_proof(latest + 1, Location::<DemoFamily>::new(0), count)
+                let (_proof, operations) = source_db
+                    .ops_historical_proof(latest + 1, Location::<Family>::new(0), count)
                     .await
                     .expect("historical proof");
-                let previous_slice = if previous_ops.is_empty() {
-                    None
-                } else {
-                    Some(previous_ops.as_slice())
-                };
-                let boundary = boundary_from_local_db(&db, previous_slice, &cumulative_ops).await;
-                let delta = &cumulative_ops[previous_ops.len()..];
+                let boundary =
+                    boundary_from_source_db(&source_db, Some(&previous_operations), &operations)
+                        .await;
+                let start = Location::new(previous_operations.len() as u64);
+                publish_source_range(&store_client, &source_db, start, &boundary).await;
 
-                commit_ordered_upload(&writer, delta, &boundary).await;
-
-                let root = reader.current_root_at(latest).await.expect("current root");
+                let root = boundary.root;
                 println!("tip={} root=0x{}", *latest, hex::encode(root.encode()),);
 
-                previous_ops = cumulative_ops;
+                previous_operations = operations;
             }
 
-            db.sync().await.expect("sync local ordered db");
+            source_db.sync().await.expect("sync local ordered db");
         })
     })
     .await?;
