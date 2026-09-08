@@ -1,5 +1,6 @@
 use std::marker::PhantomData;
 
+use bytes::Bytes;
 use commonware_codec::{DecodeExt, FixedSize};
 use commonware_cryptography::{Digest, Hasher};
 use commonware_macros::boxed;
@@ -51,7 +52,10 @@ impl<F: Family, D: Digest> MerkleStorage<F> for KvMerkleStorage<'_, F, D> {
         positions
             .iter()
             .zip(nodes)
-            .map(|(&position, node)| node.ok_or(merkle::Error::ElementPruned(position)))
+            .map(|(&position, node)| {
+                let bytes = node.ok_or(merkle::Error::ElementPruned(position))?;
+                Self::decode_node(bytes.as_ref())
+            })
             .collect()
     }
 }
@@ -70,7 +74,7 @@ impl<F: Family, D: Digest> KvMerkleStorage<'_, F, D> {
     async fn load_nodes(
         &self,
         positions: &[Position<F>],
-    ) -> Result<Vec<Option<D>>, merkle::Error<F>> {
+    ) -> Result<Vec<Option<Bytes>>, merkle::Error<F>> {
         if positions.is_empty() {
             return Ok(Vec::new());
         }
@@ -87,13 +91,9 @@ impl<F: Family, D: Digest> KvMerkleStorage<'_, F, D> {
             .collect()
             .await
             .map_err(|_| merkle::Error::DataCorrupted("exoware-qmdb node fetch failed"))?;
-        keys.iter()
-            .map(|key| {
-                rows.get(key)
-                    .map(|bytes| Self::decode_node(bytes.as_ref()))
-                    .transpose()
-            })
-            .collect()
+
+        // Decode in request order so a later malformed node cannot mask an earlier missing node.
+        Ok(keys.iter().map(|key| rows.get(key).cloned()).collect())
     }
 }
 
@@ -142,8 +142,13 @@ impl<F: Graftable, H: Hasher, const N: usize> MerkleStorage<F> for KvCurrentStor
                     .map(|&position| self.get_node_inner(position))
             ),
         )?;
-        let mut ops_nodes = ops_nodes.into_iter();
-        let mut current_nodes = current_nodes.into_iter();
+        let mut ops_nodes = ops_nodes.into_iter().map(|bytes| {
+            bytes
+                .map(|bytes| KvMerkleStorage::<F, H::Digest>::decode_node(bytes.as_ref()))
+                .transpose()
+        });
+        let mut current_nodes = current_nodes.into_iter().map(Ok);
+
         // Resolve absent nodes in request order after all independent reads complete
         positions
             .iter()
@@ -153,7 +158,7 @@ impl<F: Graftable, H: Hasher, const N: usize> MerkleStorage<F> for KvCurrentStor
                 } else {
                     current_nodes.next()
                 }
-                .expect("one result per requested position");
+                .expect("one result per requested position")?;
                 node.ok_or(merkle::Error::ElementPruned(position))
             })
             .collect()
@@ -439,3 +444,6 @@ mod tests {
         assert!(load::<mmb::Family>(9, 1, None).is_err());
     }
 }
+
+#[cfg(test)]
+mod node_tests;
