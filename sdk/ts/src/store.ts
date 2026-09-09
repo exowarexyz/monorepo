@@ -711,12 +711,11 @@ export class SerializableReadSession {
         }
     }
 
-    async get(key: Uint8Array, options?: CallOptions): Promise<GetResult | null> {
+    async get(key: Uint8Array): Promise<GetResult | null> {
         return this.runRead(
-            (sequence) =>
-                performGet(this.client, key, sequence, undefined, this.keyPrefix, options),
+            (sequence) => performGet(this.client, key, sequence, undefined, this.keyPrefix),
             (detailObserver) =>
-                performGet(this.client, key, undefined, detailObserver, this.keyPrefix, options),
+                performGet(this.client, key, undefined, detailObserver, this.keyPrefix),
         );
     }
 

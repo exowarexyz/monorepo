@@ -2695,7 +2695,9 @@ impl SerializableReadSession {
         self.state.fixed_sequence()
     }
 
-    /// Highest Store sequence reported by a read in this session.
+    /// Highest positive Store sequence reported by a read in this session.
+    ///
+    /// Returns `None` until a positive sequence is observed, including after reads that report zero.
     pub fn evaluated_sequence(&self) -> Option<u64> {
         self.state.evaluated_sequence()
     }

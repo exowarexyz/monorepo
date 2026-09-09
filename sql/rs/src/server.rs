@@ -63,6 +63,8 @@ const MAX_CONNECTRPC_BODY_BYTES: usize = 256 * 1024 * 1024;
 type SubscribeStream = Pin<Box<dyn Stream<Item = Result<SubscribeResponse, ConnectError>> + Send>>;
 
 /// Build a query context whose Store scans share the supplied minimum sequence.
+///
+/// All Store-backed providers in `ctx` must use the same Store as `store`.
 pub fn query_context_with_min_sequence(
     ctx: &SessionContext,
     store: &PrefixedStoreClient,
@@ -183,7 +185,7 @@ impl SqlServer {
         min_sequence_number: u64,
     ) -> (SessionContext, exoware_sdk::SerializableReadSession) {
         let ctx = query_context_with_min_sequence(&self.ctx, &self.store, min_sequence_number);
-        let read_session = crate::types::request_read_session(ctx.state().config(), &self.store)
+        let read_session = crate::types::request_read_session(&ctx.copied_config(), &self.store)
             .expect("query context must retain its Store read session");
         (ctx, read_session)
     }

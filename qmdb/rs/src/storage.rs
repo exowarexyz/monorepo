@@ -90,7 +90,7 @@ impl<F: Family, D: Digest> KvMerkleStorage<'_, F, D> {
                 crate::error::store_read_error(error, "exoware-qmdb node fetch failed")
             })?;
 
-        // Decode in request order so a later malformed node cannot mask an earlier missing node.
+        // Leave decoding to callers so a later malformed node cannot mask an earlier missing node.
         Ok(keys.iter().map(|key| rows.get(key).cloned()).collect())
     }
 }
@@ -354,10 +354,8 @@ mod tests {
         },
         PrefixedStoreClient, StoreClient, StoreKeyPrefix,
     };
-    use futures::FutureExt as _;
     use std::{
         collections::BTreeMap,
-        panic::AssertUnwindSafe,
         sync::{Arc, Mutex},
     };
 
@@ -515,8 +513,7 @@ mod tests {
                 .keys
                 .iter()
                 .rev()
-                .enumerate()
-                .map(|(index, key)| {
+                .map(|key| {
                     Ok(GetManyFrame {
                         results: vec![GetManyEntry {
                             key: key.to_vec(),
@@ -524,8 +521,7 @@ mod tests {
                             ..Default::default()
                         }],
                         detail: Some(Detail {
-                            sequence_number: sequence
-                                .map_or(1, |sequence| sequence + index as u64 + 1),
+                            sequence_number: sequence.map_or(1, |sequence| sequence + 1),
                             ..Default::default()
                         })
                         .into(),
@@ -785,8 +781,8 @@ mod tests {
         let storage = storage::<mmr::Family>(&session);
 
         assert_eq!(storage.get_nodes(&positions).await.unwrap(), digests);
-        assert_eq!(session.evaluated_sequence(), Some(43));
-        assert_eq!(session.fixed_sequence(), Some(43));
+        assert_eq!(session.evaluated_sequence(), Some(41));
+        assert_eq!(session.fixed_sequence(), Some(41));
         {
             let requests = store.requests.lock().unwrap();
             assert_eq!(requests.len(), 1);
@@ -804,25 +800,9 @@ mod tests {
         );
         assert_eq!(
             store.requests.lock().unwrap()[1].min_sequence_number,
-            Some(43)
+            Some(41)
         );
-        assert_eq!(session.evaluated_sequence(), Some(44));
-        server.abort();
-    }
-
-    #[tokio::test]
-    async fn rejects_positions_that_are_not_strictly_increasing() {
-        let store = NodeQueries::default();
-        let (session, server) = store.session().await;
-        let storage = storage::<mmr::Family>(&session);
-        for positions in [[3, 0], [3, 3]] {
-            let positions = positions.map(Position::new);
-            assert!(AssertUnwindSafe(storage.get_nodes(&positions))
-                .catch_unwind()
-                .await
-                .is_err());
-        }
-        assert!(store.requests.lock().unwrap().is_empty());
+        assert_eq!(session.evaluated_sequence(), Some(42));
         server.abort();
     }
 

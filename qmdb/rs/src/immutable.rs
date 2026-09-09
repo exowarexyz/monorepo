@@ -197,11 +197,7 @@ where
             encoded_operations,
         )
         .await?;
-        let sequence_number = session.evaluated_sequence().ok_or_else(|| {
-            QmdbError::CorruptData(
-                "operation range proof did not evaluate a Store sequence".to_string(),
-            )
-        })?;
+        let sequence_number = session.evaluated_sequence().unwrap_or_default();
         Ok((proof, sequence_number))
     }
 

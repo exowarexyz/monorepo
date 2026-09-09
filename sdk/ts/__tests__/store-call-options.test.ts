@@ -32,23 +32,6 @@ test('StoreClient.get forwards Connect call options', async () => {
     expect(seenOptions?.signal).toBe(controller.signal);
 });
 
-test('SerializableReadSession.get forwards Connect call options', async () => {
-    const client = new Client('http://127.0.0.1:1');
-    const session = client.store().createSessionWithSequence(37n);
-    const key = new Uint8Array([1, 2, 3]);
-    const controller = new AbortController();
-    const callOptions = { signal: controller.signal, timeoutMs: 1_234 };
-    let seenOptions: Parameters<typeof client.query.get>[1];
-
-    client.query.get = async (_request, options) => {
-        seenOptions = options;
-        return create(GetResponseSchema, { value: new Uint8Array([4]) });
-    };
-
-    await session.get(key, callOptions);
-    expect(seenOptions).toBe(callOptions);
-});
-
 test('StoreClient.query forwards Connect call options', async () => {
     const client = new Client('http://127.0.0.1:1');
     const store = client.store();

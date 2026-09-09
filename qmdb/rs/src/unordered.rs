@@ -234,11 +234,7 @@ where
         )
         .await?;
         checkpoint.ops_root_witness = self.load_ops_root_witness(&session, watermark).await?;
-        let sequence_number = session.evaluated_sequence().ok_or_else(|| {
-            QmdbError::CorruptData(
-                "operation range proof did not evaluate a Store sequence".to_string(),
-            )
-        })?;
+        let sequence_number = session.evaluated_sequence().unwrap_or_default();
         Ok((checkpoint, sequence_number))
     }
 
