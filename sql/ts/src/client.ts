@@ -22,9 +22,6 @@ import {
   type SubscribeResponse as SqlSubscribeResponse,
 } from './generated/proto/sql/v1/stream_pb.js';
 export type SqlClientOptions = SdkClientOptions;
-export type SqlQueryOptions = CallOptions & {
-  minSequenceNumber?: bigint;
-};
 
 export interface DecodedQueryResult {
   sequenceNumber: bigint;
@@ -141,15 +138,15 @@ export class SqlClient {
 
   async query(
     sql: string,
-    options: SqlQueryOptions = {},
+    minSequenceNumber?: bigint,
+    options?: CallOptions,
   ): Promise<DecodedQueryResult> {
-    const { minSequenceNumber, ...callOptions } = options;
     const response = await this.rpc.query(
       create(SqlQueryRequestSchema, {
         sql,
         ...(minSequenceNumber !== undefined ? { minSequenceNumber } : {}),
       }),
-      callOptions,
+      options,
     );
     return decodeQuery(response);
   }

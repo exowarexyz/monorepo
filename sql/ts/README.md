@@ -25,8 +25,8 @@ const result = await client.query('SELECT region, COUNT(*) FROM orders GROUP BY 
 console.log(result.sequenceNumber, result.table.schema.fields, result.table.numRows);
 console.log(result.table.getChildAt(0)?.toArray());
 
-const next = await client.query('SELECT * FROM orders', {
-  minSequenceNumber: result.sequenceNumber,
+const next = await client.query('SELECT * FROM orders', result.sequenceNumber, {
+  timeoutMs: 5000,
 });
 console.log(next.sequenceNumber, next.table.numRows);
 

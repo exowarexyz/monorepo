@@ -114,8 +114,7 @@ test('queries forward optional sequence floors and call options', async (t) => {
       });
 
       const client = new SqlClient('http://sql.test', { token: '' });
-      const response = await client.query('SELECT fixture', {
-        minSequenceNumber,
+      const response = await client.query('SELECT fixture', minSequenceNumber, {
         headers: { 'x-query-test': 'forwarded' },
       });
       assert.equal(response.sequenceNumber, sequenceNumber);
