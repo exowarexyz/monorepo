@@ -274,7 +274,8 @@ impl QueryPredicate {
     }
 
     pub(crate) fn in_list_expr_supported(kind: ColumnKind, expr: &Expr) -> bool {
-        extract_literal(expr).is_some_and(|literal| Self::in_list_literal_supported(kind, literal))
+        expr.as_literal()
+            .is_some_and(|literal| Self::in_list_literal_supported(kind, literal))
     }
 
     pub(crate) fn supports_filter(expr: &Expr, model: &TableModel) -> bool {
@@ -283,14 +284,15 @@ impl QueryPredicate {
                 Self::supports_filter(binary.left.as_ref(), model)
                     && Self::supports_filter(binary.right.as_ref(), model)
             }
-            Expr::IsNull(inner) | Expr::IsNotNull(inner) => extract_column_name(inner)
-                .and_then(|name| model.columns_by_name.get(name))
+            Expr::IsNull(inner) | Expr::IsNotNull(inner) => inner
+                .try_as_col()
+                .and_then(|column| model.columns_by_name.get(&column.name))
                 .is_some(),
             Expr::InList(in_list) if !in_list.negated => {
-                let Some(col_name) = extract_column_name(&in_list.expr) else {
+                let Some(column) = in_list.expr.try_as_col() else {
                     return false;
                 };
-                let Some(&col_idx) = model.columns_by_name.get(col_name) else {
+                let Some(&col_idx) = model.columns_by_name.get(&column.name) else {
                     return false;
                 };
                 let kind = model.columns[col_idx].kind;
@@ -306,7 +308,7 @@ impl QueryPredicate {
                 let Some((column, op, literal)) = parse_simple_comparison(expr) else {
                     return false;
                 };
-                let Some(col_idx) = model.columns_by_name.get(&column).copied() else {
+                let Some(col_idx) = model.columns_by_name.get(column).copied() else {
                     return false;
                 };
                 if literal.is_null() {
@@ -323,21 +325,21 @@ impl QueryPredicate {
                     Operator::Eq | Operator::Lt | Operator::LtEq | Operator::Gt | Operator::GtEq
                 );
                 match model.columns[col_idx].kind {
-                    ColumnKind::Utf8 => op == Operator::Eq && scalar_to_string(&literal).is_some(),
-                    ColumnKind::Boolean => op == Operator::Eq && scalar_to_bool(&literal).is_some(),
-                    ColumnKind::Int64 => scalar_to_i64(&literal).is_some() && range_ops,
-                    ColumnKind::Float64 => scalar_to_f64(&literal).is_some() && range_ops,
-                    ColumnKind::Date32 => scalar_to_date32_i64(&literal).is_some() && range_ops,
-                    ColumnKind::Date64 => scalar_to_date64(&literal).is_some() && range_ops,
+                    ColumnKind::Utf8 => op == Operator::Eq && scalar_to_string(literal).is_some(),
+                    ColumnKind::Boolean => op == Operator::Eq && scalar_to_bool(literal).is_some(),
+                    ColumnKind::Int64 => scalar_to_i64(literal).is_some() && range_ops,
+                    ColumnKind::Float64 => scalar_to_f64(literal).is_some() && range_ops,
+                    ColumnKind::Date32 => scalar_to_date32_i64(literal).is_some() && range_ops,
+                    ColumnKind::Date64 => scalar_to_date64(literal).is_some() && range_ops,
                     ColumnKind::Timestamp => {
-                        scalar_to_timestamp_micros(&literal).is_some() && range_ops
+                        scalar_to_timestamp_micros(literal).is_some() && range_ops
                     }
-                    ColumnKind::Decimal128 => scalar_to_i128(&literal).is_some() && range_ops,
-                    ColumnKind::UInt64 => scalar_to_u64(&literal).is_some() && range_ops,
+                    ColumnKind::Decimal128 => scalar_to_i128(literal).is_some() && range_ops,
+                    ColumnKind::UInt64 => scalar_to_u64(literal).is_some() && range_ops,
                     ColumnKind::FixedSizeBinary(_) => {
-                        op == Operator::Eq && scalar_to_fixed_binary(&literal).is_some()
+                        op == Operator::Eq && scalar_to_fixed_binary(literal).is_some()
                     }
-                    ColumnKind::Decimal256 => scalar_to_i256(&literal).is_some() && range_ops,
+                    ColumnKind::Decimal256 => scalar_to_i256(literal).is_some() && range_ops,
                     ColumnKind::Binary | ColumnKind::List(_) => false,
                 }
             }
@@ -354,8 +356,8 @@ impl QueryPredicate {
                 self.apply_expr(binary.right.as_ref(), model);
             }
             Expr::IsNull(inner) => {
-                if let Some(col_name) = extract_column_name(inner) {
-                    if let Some(&col_idx) = model.columns_by_name.get(col_name) {
+                if let Some(column) = inner.try_as_col() {
+                    if let Some(&col_idx) = model.columns_by_name.get(&column.name) {
                         if !model.column(col_idx).nullable {
                             self.contradiction = true;
                         } else {
@@ -375,8 +377,8 @@ impl QueryPredicate {
                 }
             }
             Expr::IsNotNull(inner) => {
-                if let Some(col_name) = extract_column_name(inner) {
-                    if let Some(&col_idx) = model.columns_by_name.get(col_name) {
+                if let Some(column) = inner.try_as_col() {
+                    if let Some(&col_idx) = model.columns_by_name.get(&column.name) {
                         if model.column(col_idx).nullable {
                             match self.constraints.get(&col_idx) {
                                 Some(PredicateConstraint::IsNull) => self.contradiction = true,
@@ -394,8 +396,8 @@ impl QueryPredicate {
                 }
             }
             Expr::InList(in_list) if !in_list.negated => {
-                if let Some(col_name) = extract_column_name(&in_list.expr) {
-                    self.apply_in_list(col_name, &in_list.list, model);
+                if let Some(column) = in_list.expr.try_as_col() {
+                    self.apply_in_list(&column.name, &in_list.list, model);
                 }
             }
             Expr::BinaryExpr(binary) if binary.op == Operator::Or => {
@@ -409,7 +411,7 @@ impl QueryPredicate {
                 let Some((column, op, literal)) = parse_simple_comparison(expr) else {
                     return;
                 };
-                self.apply_comparison(&column, op, &literal, model);
+                self.apply_comparison(column, op, literal, model);
             }
         }
     }
@@ -685,7 +687,7 @@ impl QueryPredicate {
         // `IN ()` and `IN (NULL) match no rows.
         if list
             .iter()
-            .all(|expr| extract_literal(expr).is_some_and(ScalarValue::is_null))
+            .all(|expr| expr.as_literal().is_some_and(ScalarValue::is_null))
         {
             self.contradiction = true;
             return;
@@ -694,7 +696,7 @@ impl QueryPredicate {
             ColumnKind::Utf8 => {
                 let vals: Vec<String> = list
                     .iter()
-                    .filter_map(|e| extract_literal(e).and_then(scalar_to_string))
+                    .filter_map(|e| e.as_literal().and_then(scalar_to_string))
                     .collect();
                 match self.constraints.get(&col_idx) {
                     Some(PredicateConstraint::StringEq(existing)) => {
@@ -719,7 +721,7 @@ impl QueryPredicate {
             ColumnKind::Int64 => {
                 let vals: Vec<i64> = list
                     .iter()
-                    .filter_map(|e| extract_literal(e).and_then(scalar_to_i64))
+                    .filter_map(|e| e.as_literal().and_then(scalar_to_i64))
                     .collect();
                 match self.constraints.get(&col_idx) {
                     Some(PredicateConstraint::IntRange { min, max }) => {
@@ -746,7 +748,7 @@ impl QueryPredicate {
             ColumnKind::UInt64 => {
                 let vals: Vec<u64> = list
                     .iter()
-                    .filter_map(|e| extract_literal(e).and_then(scalar_to_u64))
+                    .filter_map(|e| e.as_literal().and_then(scalar_to_u64))
                     .collect();
                 match self.constraints.get(&col_idx) {
                     Some(PredicateConstraint::UInt64Range { min, max }) => {
@@ -773,7 +775,7 @@ impl QueryPredicate {
             ColumnKind::FixedSizeBinary(_) => {
                 let vals: Vec<Vec<u8>> = list
                     .iter()
-                    .filter_map(|e| extract_literal(e).and_then(scalar_to_fixed_binary))
+                    .filter_map(|e| e.as_literal().and_then(scalar_to_fixed_binary))
                     .collect();
                 match self.constraints.get(&col_idx) {
                     Some(PredicateConstraint::FixedBinaryEq(existing)) => {
@@ -2269,12 +2271,12 @@ pub(crate) fn collect_or_equalities(
             match col_name {
                 Some(existing) if *existing != column => false,
                 Some(_) => {
-                    values.push(literal);
+                    values.push(literal.clone());
                     true
                 }
                 None => {
-                    *col_name = Some(column);
-                    values.push(literal);
+                    *col_name = Some(column.to_owned());
+                    values.push(literal.clone());
                     true
                 }
             }
@@ -2282,7 +2284,7 @@ pub(crate) fn collect_or_equalities(
     }
 }
 
-pub(crate) fn parse_simple_comparison(expr: &Expr) -> Option<(String, Operator, ScalarValue)> {
+pub(crate) fn parse_simple_comparison(expr: &Expr) -> Option<(&str, Operator, &ScalarValue)> {
     let Expr::BinaryExpr(binary) = expr else {
         return None;
     };
@@ -2293,46 +2295,13 @@ pub(crate) fn parse_simple_comparison(expr: &Expr) -> Option<(String, Operator, 
         return None;
     }
 
-    if let (Some(column), Some(literal)) = (
-        extract_column_name(binary.left.as_ref()),
-        extract_literal(binary.right.as_ref()),
-    ) {
-        return Some((column.to_string(), binary.op, literal.clone()));
+    if let (Some(column), Some(literal)) = (binary.left.try_as_col(), binary.right.as_literal()) {
+        return Some((&column.name, binary.op, literal));
     }
-    if let (Some(literal), Some(column)) = (
-        extract_literal(binary.left.as_ref()),
-        extract_column_name(binary.right.as_ref()),
-    ) {
-        return Some((
-            column.to_string(),
-            reverse_operator(binary.op)?,
-            literal.clone(),
-        ));
+    if let (Some(literal), Some(column)) = (binary.left.as_literal(), binary.right.try_as_col()) {
+        return Some((&column.name, binary.op.swap()?, literal));
     }
     None
-}
-
-pub(crate) fn reverse_operator(op: Operator) -> Option<Operator> {
-    matches!(
-        op,
-        Operator::Eq | Operator::Lt | Operator::LtEq | Operator::Gt | Operator::GtEq
-    )
-    .then(|| op.swap())
-    .flatten()
-}
-
-pub(crate) fn extract_column_name(expr: &Expr) -> Option<&str> {
-    match expr {
-        Expr::Column(col) => Some(col.name.as_str()),
-        _ => None,
-    }
-}
-
-pub(crate) fn extract_literal(expr: &Expr) -> Option<&ScalarValue> {
-    match expr {
-        Expr::Literal(value, _) => Some(value),
-        _ => None,
-    }
 }
 
 pub(crate) fn scalar_to_string(value: &ScalarValue) -> Option<String> {

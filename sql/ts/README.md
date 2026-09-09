@@ -23,18 +23,3 @@ for await (const { sequenceNumber, table } of client.subscribe({ table: 'orders'
   console.log(sequenceNumber, table.numRows);
 }
 ```
-
-Use positional columns when a query returns duplicate field names. Arrow's
-JavaScript timestamp getters return milliseconds as `number`; use the timestamp
-vector's `toArray()` and its field type for exact integer values. Date getters
-also use JavaScript numbers. Reinterpret date chunks with native `Data.clone`
-and `Vector` as `Int32` (days) or `Int64` (milliseconds) to read their full range.
-Decimal getters return unscaled integer words and the field type provides the
-scale. No eager row conversion is performed by this client.
-
-Arrow JS 21.2 does not decode ListView, LargeListView, or RunEndEncoded outputs
-from explicit `arrow_cast` expressions. Rust Arrow consumers can read those IPC
-payloads. Native Arrow JS transformations such as `Table.slice()` can rebuild
-duplicate field names incorrectly; access duplicate-name results by position
-without reconstructing their schema. Its Decimal64/256 string helpers also have
-signedness/width limitations. The column buffers preserve the complete integers.
