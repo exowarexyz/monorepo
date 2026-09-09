@@ -11,6 +11,11 @@ Queries return native Apache Arrow `Table` objects. Subscription frames contain
 nulls, nested values, decimal scale, and timestamp units/timezones. The client uses
 binary Connect encoding by default.
 
+*Duplicate column names retain their positional types and values. Arrow JS 21.2
+can reject `Table.slice` and `Table.selectAt` when duplicate names have different
+types ([upstream issue](https://github.com/apache/arrow-js/issues/288)). Use unique
+SQL aliases when applying those transformations.*
+
 ```ts
 import { SqlClient } from '@exowarexyz/sql';
 

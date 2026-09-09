@@ -598,6 +598,67 @@ async fn float_groups_and_worker_filters_match_native_ordering() {
 }
 
 #[tokio::test]
+async fn grouped_float_extrema_match_native() {
+    for inputs in [
+        vec![f64::INFINITY],
+        vec![f64::NEG_INFINITY],
+        vec![1.0, f64::NAN],
+        vec![f64::NAN, 1.0],
+        vec![-0.0, 0.0],
+    ] {
+        let fixture = Fixture::new().await;
+        let len = inputs.len();
+        fixture
+            .install_indexed_table(
+                "extrema",
+                vec![
+                    TableColumnConfig::new("id", DataType::Int64, false),
+                    TableColumnConfig::new("category", DataType::Int64, false),
+                    TableColumnConfig::new("flag", DataType::Int64, false),
+                    TableColumnConfig::new("value", DataType::Float64, false),
+                ],
+                &["id"],
+                vec![],
+                inputs
+                    .iter()
+                    .enumerate()
+                    .map(|(id, value)| KvRow {
+                        values: vec![
+                            CellValue::Int64(id as i64),
+                            CellValue::Int64(7),
+                            CellValue::Int64(1),
+                            CellValue::Float64(*value),
+                        ],
+                    })
+                    .collect(),
+                vec![
+                    Arc::new(Int64Array::from_iter_values(0..len as i64)),
+                    Arc::new(Int64Array::from(vec![7; len])),
+                    Arc::new(Int64Array::from(vec![1; len])),
+                    Arc::new(Float64Array::from(inputs)),
+                ],
+            )
+            .await;
+        for function in ["MIN", "MAX"] {
+            let sql = format!(
+                "SELECT category, {function}(value) FROM extrema WHERE flag = 1 GROUP BY category"
+            );
+            let expected = values(&fixture.native, &sql).await.unwrap();
+            fixture.rows.reductions.lock().unwrap().clear();
+            let actual = values(&fixture.store, &sql).await.unwrap();
+            assert_eq!(actual, expected, "{sql}");
+            assert!(fixture.rows.reductions.lock().unwrap().is_empty());
+        }
+        fixture
+            .check(
+                "SELECT MIN(value), MAX(value) FROM extrema WHERE flag = 1",
+                1,
+            )
+            .await;
+    }
+}
+
+#[tokio::test]
 async fn fixed_binary_value_widths_preserve_native_aggregates() {
     let mut failures = Vec::new();
     for width in [0, 255, 256, 300] {

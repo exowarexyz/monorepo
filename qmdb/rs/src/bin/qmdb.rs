@@ -123,11 +123,31 @@ async fn publish_source_range(
     .expect("current boundary");
     let mut batch = StoreWriteBatch::new();
     stage_authenticated_range(store_client, prepared, &mut batch).expect("stage range");
-    stage_watermark(store_client, end - 1, &mut batch).expect("stage watermark");
-    batch
-        .commit(store_client.client())
+    publish_source_rows(store_client, batch, end - 1)
         .await
         .expect("commit upload");
+}
+
+async fn publish_source_rows(
+    store_client: &PrefixedStoreClient,
+    rows: StoreWriteBatch,
+    tip: Location<Family>,
+) -> Result<(), exoware_qmdb::QmdbError> {
+    // Operation rows are capped at 64 KiB and this seed's boundary rows are smaller;
+    // 1024 rows fit below Store's 256 MiB request limit, including keys and framing.
+    let physical = store_client.client().prefixed(StoreKeyPrefix::identity());
+    let mut batch = StoreWriteBatch::new();
+    for (key, value) in rows.entries() {
+        if batch.len() == 1024 {
+            batch.commit(store_client.client()).await?;
+            batch.clear();
+        }
+        batch.push(&physical, key, value.clone())?;
+    }
+
+    stage_watermark(store_client, tip, &mut batch)?;
+    batch.commit(store_client.client()).await?;
+    Ok(())
 }
 
 fn op_cfg() -> <Operation as commonware_codec::Read>::Cfg {
@@ -381,6 +401,180 @@ async fn main() -> std::process::ExitCode {
         Err(err) => {
             eprintln!("qmdb failed: {err}");
             std::process::ExitCode::FAILURE
+        }
+    }
+}
+
+#[cfg(test)]
+#[allow(refining_impl_trait)]
+mod tests {
+    use super::*;
+    use bytes::Bytes;
+    use connectrpc::{ConnectError, ConnectRpcService, Limits, RequestContext, ServiceRequest};
+    use exoware_sdk::{
+        ingest::{PutRequest, PutResponse, Service, ServiceServer},
+        keys::Key,
+    };
+    use std::{collections::BTreeMap, sync::Mutex};
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum Failure {
+        BeforeData,
+        AfterData,
+        AfterPublication,
+    }
+
+    #[derive(Default)]
+    struct Uploads {
+        rows: BTreeMap<Key, Bytes>,
+        expected: BTreeMap<Key, Bytes>,
+        watermark: Key,
+        sizes: Vec<usize>,
+        publications: usize,
+        failure: Option<Failure>,
+    }
+
+    #[derive(Clone)]
+    struct Ingest(Arc<Mutex<Uploads>>);
+
+    impl Service for Ingest {
+        async fn put(
+            &self,
+            _: RequestContext,
+            request: ServiceRequest<'_, PutRequest>,
+        ) -> connectrpc::ServiceResult<PutResponse> {
+            let mut state = self.0.lock().unwrap();
+            state.sizes.push(request.bytes().len());
+            let publishes = request.kvs.iter().any(|entry| entry.key == state.watermark);
+            let fails = match state.failure {
+                Some(Failure::BeforeData | Failure::AfterData) => state.sizes.len() == 2,
+                Some(Failure::AfterPublication) => publishes,
+                None => false,
+            };
+            if fails && state.failure == Some(Failure::BeforeData) {
+                return Err(ConnectError::unavailable("data write not accepted"));
+            }
+            for entry in request.kvs.iter() {
+                state.rows.insert(
+                    Bytes::copy_from_slice(entry.key),
+                    Bytes::copy_from_slice(entry.value),
+                );
+            }
+            if publishes {
+                state.publications += 1;
+                for (key, value) in &state.expected {
+                    assert_eq!(
+                        state.rows.get(key),
+                        Some(value),
+                        "publication before complete data"
+                    );
+                }
+            }
+            if fails {
+                return Err(ConnectError::unavailable(
+                    "accepted write lost its response",
+                ));
+            }
+            connectrpc::Response::ok(PutResponse {
+                sequence_number: state.sizes.len() as u64,
+                ..Default::default()
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn startup_replay_is_bounded_and_publishes_only_complete_data() {
+        const LIMIT: usize = 256 * 1024;
+        for failure in [
+            None,
+            Some(Failure::BeforeData),
+            Some(Failure::AfterData),
+            Some(Failure::AfterPublication),
+        ] {
+            let state = Arc::new(Mutex::new(Uploads::default()));
+            let service = ConnectRpcService::new(ServiceServer::new(Ingest(state.clone())))
+                .with_limits(
+                    Limits::default()
+                        .with_max_request_body_size(LIMIT)
+                        .with_max_message_size(LIMIT),
+                );
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("http://{}", listener.local_addr().unwrap());
+            let server = tokio::spawn(async move {
+                axum::serve(listener, Router::new().fallback_service(service))
+                    .await
+                    .unwrap();
+            });
+            let client = StoreClient::new(&url).prefixed(StoreKeyPrefix::new(vec![0xaa]).unwrap());
+            let physical = client.client().prefixed(StoreKeyPrefix::identity());
+            let mut data = StoreWriteBatch::new();
+            for index in 0..4097u64 {
+                let mut key = vec![0xf0];
+                key.extend(index.to_be_bytes());
+                data.push(&client, &Bytes::from(key), vec![index as u8; 128])
+                    .unwrap();
+            }
+            assert!(
+                data.entries()
+                    .iter()
+                    .map(|(key, value)| key.len() + value.len())
+                    .sum::<usize>()
+                    > LIMIT
+            );
+            let tip = Location::new(4096);
+            let mut publication = StoreWriteBatch::new();
+            stage_watermark(&client, tip, &mut publication).unwrap();
+            let watermark = publication.entries()[0].0.clone();
+
+            // Normal small writes can build a history too large for one startup request.
+            let existing = if failure.is_none() { data.len() } else { 256 };
+            for (index, rows) in data.entries()[..existing].chunks(256).enumerate() {
+                let mut batch = StoreWriteBatch::new();
+                for (key, value) in rows {
+                    batch.push(&physical, key, value.clone()).unwrap();
+                }
+                publish_source_rows(
+                    &client,
+                    batch,
+                    Location::new(((index * 256 + rows.len()) - 1) as u64),
+                )
+                .await
+                .unwrap();
+            }
+            {
+                let mut state = state.lock().unwrap();
+                state.sizes.clear();
+                state.expected = data.entries().iter().cloned().collect();
+                state.watermark = watermark.clone();
+                state.failure = failure;
+            }
+
+            let result = publish_source_rows(&client, data.clone(), tip).await;
+            if let Some(failure) = failure {
+                assert!(result.is_err(), "{failure:?}");
+                let mut state = state.lock().unwrap();
+                assert_eq!(
+                    state.rows.contains_key(&watermark),
+                    failure == Failure::AfterPublication
+                );
+                assert_eq!(
+                    state.publications,
+                    usize::from(failure == Failure::AfterPublication)
+                );
+                state.failure = None;
+            } else {
+                result.expect(
+                    "restart replays a history accumulated through successful small writes",
+                );
+            }
+            publish_source_rows(&client, data, tip).await.unwrap();
+            let state = state.lock().unwrap();
+            assert!(state.rows.contains_key(&watermark));
+            assert!(state.sizes.iter().all(|size| *size <= LIMIT));
+            for (key, value) in &state.expected {
+                assert_eq!(state.rows.get(key), Some(value));
+            }
+            server.abort();
         }
     }
 }

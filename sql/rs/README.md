@@ -183,10 +183,11 @@ Base rows and their secondary index entries are written in one atomic batch.
 Workers return aggregate states or distinct group keys instead of full input
 rows. Supported built-in aggregates are `COUNT`, `SUM`, `MIN`, `MAX`, and numeric
 `AVG` returning double (a pushed sum and count). Group-only queries and
-`SELECT DISTINCT` use the same grouping path. Queries containing a limit keep
-group-only aggregation in DataFusion so its streaming and DISTINCT limit
+`SELECT DISTINCT` use the same grouping path. A finite limit directly above a
+group-only aggregate keeps it in DataFusion so its streaming and DISTINCT limit
 optimizations remain available. `DISTINCT` inside an aggregate, such as
-`COUNT(DISTINCT x)`, uses DataFusion's normal execution.
+`COUNT(DISTINCT x)`, uses DataFusion's normal execution. Grouped `Float64` `MIN`
+and `MAX` also use native execution to preserve its infinity and NaN semantics.
 
 The adapter resolves column aliases and transparent projection chains. Supported
 inputs include columns, literals, numeric `+`, `-`, `*`, floating division by a

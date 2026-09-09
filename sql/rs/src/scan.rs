@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::sync::Arc;
 
-use datafusion::arrow::array::as_boolean_array;
+use datafusion::arrow::array::{as_boolean_array, Array};
 use datafusion::arrow::datatypes::SchemaRef;
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::catalog::Session;
@@ -11,7 +11,7 @@ use datafusion::common::DFSchema;
 use datafusion::common::{DataFusionError, Result as DataFusionResult};
 use datafusion::execution::context::TaskContext;
 use datafusion::logical_expr::{
-    utils::{conjunction, split_conjunction},
+    utils::{conjunction, iter_conjunction},
     Expr,
 };
 use datafusion::physical_expr::expressions::Column;
@@ -111,10 +111,15 @@ impl ScanFilter {
             .expression
             .evaluate(&batch)?
             .into_array(batch.num_rows())?;
-        Ok(as_boolean_array(&mask)
-            .iter()
-            .zip(valid)
-            .filter_map(|(keep, i)| (keep == Some(true)).then_some(i))
+        let mask = as_boolean_array(&mask);
+        if mask.null_count() == mask.len() {
+            return Ok(Vec::new());
+        }
+        Ok(mask
+            .values()
+            .set_indices()
+            .filter(|&i| mask.is_valid(i))
+            .map(|i| valid[i])
             .collect())
     }
 }
@@ -198,7 +203,7 @@ impl KvScanExec {
             if !access.index_covers_required_non_pk(spec) {
                 let available = filters
                     .iter()
-                    .flat_map(split_conjunction)
+                    .flat_map(iter_conjunction)
                     .filter(|expr| {
                         expr.column_refs().iter().all(|col| {
                             self.model.columns_by_name.get(&col.name).is_some_and(|&i| {

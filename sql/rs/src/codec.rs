@@ -283,10 +283,7 @@ pub(crate) fn decode_cell_from_ordered_key_bytes(
     })
 }
 
-/// Decode one ordered-key cell from a prefix-stripped `payload` slice starting
-/// at `payload_offset`, returning the value and the number of payload bytes it
-/// consumed. Returns `None` on a truncated or malformed payload rather than
-/// panicking.
+/// Validate one ordered-key cell, optionally decode its value, and return the consumed byte count.
 fn decode_key_cell(
     bytes: &[u8],
     kind: ColumnKind,

@@ -38,10 +38,38 @@ function retryBackoffDelay(attempt: number, config: RetryConfig): number {
 function makeRetryInterceptor(config: RetryConfig): Interceptor {
     const maxAttempts = Math.max(config.maxAttempts, 1);
     return (next) => async (req) => {
+        if (req.stream && req.method === QueryService.method.reduce) {
+            // Each retry must serialize the same input after Connect consumes its request iterator.
+            const input = await req.message[Symbol.asyncIterator]().next();
+            req = {
+                ...req,
+                message: {
+                    async *[Symbol.asyncIterator]() {
+                        if (!input.done) yield input.value;
+                    },
+                },
+            };
+        }
         let attempt = 1;
         for (;;) {
+            if (req.signal.aborted) throw ConnectError.from(req.signal.reason, Code.Canceled);
             try {
-                return await next(req);
+                const response = await next(req);
+                if (response.stream && response.method === QueryService.method.reduce) {
+                    // Before any result is exposed, a retry cannot duplicate delivered groups.
+                    const iterator = response.message[Symbol.asyncIterator]();
+                    const first = await iterator.next();
+                    return {
+                        ...response,
+                        message: (async function* () {
+                            if (!first.done) {
+                                yield first.value;
+                                yield* { [Symbol.asyncIterator]: () => iterator };
+                            }
+                        })(),
+                    };
+                }
+                return response;
             } catch (err) {
                 if (
                     attempt < maxAttempts &&

@@ -317,6 +317,43 @@ async fn limit_continues_after_invalid_value_at_namespace_key_capacity() {
 }
 
 #[tokio::test]
+async fn reverse_limit_stops_at_empty_predecessor() {
+    let fixture = Fixture::new(
+        vec![column("id", DataType::Int64, false)],
+        &["id"],
+        vec![],
+        vec![Arc::new(Int64Array::from(vec![1]))],
+    )
+    .await;
+    let key = fixture
+        .prefix
+        .encode_key(&Bytes::from_static(&[0]))
+        .unwrap();
+    fixture
+        .rows
+        .values
+        .lock()
+        .unwrap()
+        .insert(key, Bytes::new());
+
+    let requests = fixture
+        .check("SELECT id FROM orders ORDER BY id DESC LIMIT 2")
+        .await;
+    assert!(
+        matches!(
+            requests.as_slice(),
+            [Request::Range {
+                forward: false,
+                limit: 2,
+                ..
+            }]
+        ),
+        "{requests:?}"
+    );
+    assert_eq!(fixture.rows.returned_rows.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
 async fn native_residuals_preserve_casts_nulls_functions_and_limits() {
     let fixture = Fixture::new(
         vec![
@@ -732,6 +769,63 @@ async fn decimal_scale_and_timestamp_casts_preserve_native_predicates() {
             "SELECT id FROM orders WHERE happened_at IS NULL ORDER BY id",
         ] {
             fixture.check(&format!("{sql} /* indexed={indexed} */")).await;
+        }
+    }
+}
+
+#[tokio::test]
+async fn timestamp_units_use_native_coercion() {
+    for indexed in [false, true] {
+        let fixture = Fixture::new(
+            vec![
+                column("id", DataType::Int64, false),
+                column(
+                    "happened_at",
+                    DataType::Timestamp(TimeUnit::Microsecond, None),
+                    false,
+                ),
+            ],
+            &["id"],
+            if indexed {
+                vec![index("happened_at", &["happened_at"], &[])]
+            } else {
+                vec![]
+            },
+            vec![
+                Arc::new(Int64Array::from_iter_values(0..7)),
+                Arc::new(TimestampMicrosecondArray::from_iter_values(-3..4)),
+            ],
+        )
+        .await;
+        for (unit, value) in [
+            ("Microsecond", -2),
+            ("Microsecond", 2),
+            ("Nanosecond", -2000),
+            ("Nanosecond", -1500),
+            ("Nanosecond", 1500),
+            ("Nanosecond", 2000),
+        ] {
+            let literal = format!("arrow_cast({value}, 'Timestamp({unit}, None)')");
+            for op in ["=", "<", "<=", ">", ">="] {
+                for predicate in [
+                    format!("happened_at {op} {literal}"),
+                    format!("{literal} {op} happened_at"),
+                ] {
+                    let requests = fixture
+                        .check(&format!(
+                            "SELECT id FROM orders WHERE {predicate} ORDER BY id"
+                        ))
+                        .await;
+                    if indexed && unit == "Microsecond" {
+                        assert!(
+                            requests.iter().any(|request| matches!(request,
+                                Request::Range { start, .. } if fixture.index_matches(0, start)
+                            )),
+                            "{predicate}: {requests:?}"
+                        );
+                    }
+                }
+            }
         }
     }
 }

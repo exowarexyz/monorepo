@@ -1035,12 +1035,20 @@ pub(crate) fn try_build_aggregate_pushdown_spec(
             Ok(normalized) => normalized,
             Err(_) => return Ok(None),
         };
+
+        // Store uses total ordering for grouped floats; native SQL has different infinity and NaN semantics.
+        if !group_exprs.is_empty()
+            && data_type == DataType::Float64
+            && matches!(
+                normalized.func,
+                AggregatePushdownFunction::Min | AggregatePushdownFunction::Max
+            )
+        {
+            return Ok(None);
+        }
         has_unfiltered_aggregate |= normalized.filter.is_none();
         let mut filters = scan.filters.clone();
         if let Some(filter) = &normalized.filter {
-            if !QueryPredicate::supports_filter(filter, &table.model) {
-                return Ok(None);
-            }
             filters.push(filter.clone());
         }
         let Some((job, diagnostics, output)) = build_aggregate_reduce_job(
@@ -1122,11 +1130,8 @@ pub(crate) fn build_aggregate_reduce_job(
     let required_projection = reduce_job_required_projection(group_exprs, aggr_expr);
     let projection = Some(required_projection);
     let access_plan = ScanAccessPlan::new(&table.model, &projection, &predicate);
-    let Some((ranges, access_path, constrained_prefix_len)) =
-        choose_aggregate_access_path(table, &predicate, &access_plan)?
-    else {
-        return Ok(None);
-    };
+    let (ranges, access_path, constrained_prefix_len) =
+        choose_aggregate_access_path(table, &predicate, &access_plan)?;
     let Some(group_by) =
         compile_group_exprs(group_exprs, &table.model, &table.index_specs, &access_path)
     else {
@@ -1188,30 +1193,30 @@ pub(crate) fn choose_aggregate_access_path(
     table: &KvTable,
     predicate: &QueryPredicate,
     access_plan: &ScanAccessPlan,
-) -> DataFusionResult<Option<ChosenAggregateAccessPath>> {
+) -> DataFusionResult<ChosenAggregateAccessPath> {
     if let Some(index_plan) =
         predicate.choose_index_plan(&table.model, &table.index_specs, access_plan)?
     {
         if !index_plan.ranges.is_empty()
             && access_plan.index_covers_required_non_pk(&table.index_specs[index_plan.spec_idx])
         {
-            return Ok(Some((
+            return Ok((
                 index_plan.ranges,
                 AggregateAccessPath::SecondaryIndex {
                     spec_idx: index_plan.spec_idx,
                 },
                 Some(index_plan.constrained_prefix_len),
-            )));
+            ));
         }
     }
-    Ok(Some((
+    Ok((
         predicate.primary_key_ranges(
             &table.model,
             table.client.key_prefix().max_logical_key_len(),
         )?,
         AggregateAccessPath::PrimaryKey,
         None,
-    )))
+    ))
 }
 
 pub(crate) fn reduce_job_required_projection(

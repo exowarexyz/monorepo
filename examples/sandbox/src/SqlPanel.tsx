@@ -5,6 +5,7 @@ import {
   DateUnit,
   Int32,
   Int64,
+  List,
   TimeUnit,
   Vector,
   type Table,
@@ -32,50 +33,65 @@ function formatCell(value: unknown): string {
       .map((byte) => byte.toString(16).padStart(2, '0'))
       .join('')}`;
   }
-  if (Array.isArray(value) || value instanceof Vector) {
-    return `[${Array.from(value, formatCell).join(', ')}]`;
+  if (value instanceof Vector) {
+    const format = formatVector(value);
+    return `[${Array.from({ length: value.length }, (_, row) => format(row)).join(', ')}]`;
   }
+  if (Array.isArray(value)) return `[${value.map(formatCell).join(', ')}]`;
   if (typeof value === 'string') return value;
   return String(value);
 }
 
-export function ArrowRows({ table }: { table: Table }) {
-  const columns = table.schema.fields.map((field, index) => {
-    const vector = table.getChildAt(index)!;
-    const type = field.type;
-    // Arrow date getters convert to JavaScript numbers
-    const temporal = DataType.isDate(type)
-      ? new Vector(vector.data.map((data) => data.clone(
-        type.unit === DateUnit.DAY ? new Int32() : new Int64(),
-      ))).toArray()
-      : DataType.isTimestamp(type) ? vector.toArray() : undefined;
-    return {
+function formatVector(vector: Vector): (row: number) => string {
+  const type = vector.type;
+  if (DataType.isMap(type)) {
+    return formatVector(new Vector(vector.data.map((data) => data.clone(new List(type.children[0])))));
+  }
+  if (DataType.isStruct(type)) {
+    const fields = type.children.map((field, index) => ({
       name: field.name,
-      format(row: number): string {
-        if (!vector.isValid(row)) return 'NULL';
-        if (DataType.isTimestamp(type)) {
-          return `${temporal![row]} ${TimeUnit[type.unit].toLowerCase()} since epoch (${type.timezone || 'no timezone'})`;
-        }
-        if (DataType.isDate(type)) {
-          return `${temporal![row]} ${DateUnit[type.unit].toLowerCase()} since epoch`;
-        }
-        const value: unknown = vector.get(row);
-        if (DataType.isDecimal(type)) {
-          const words = value as Uint32Array;
-          const raw = BigInt.asIntN(type.bitWidth,
-            words.reduceRight((number, word) => (number << 32n) | BigInt(word), 0n),
-          ).toString();
-          const sign = raw.startsWith('-') ? '-' : '';
-          const digits = raw.replace(/^-/, '');
-          const scale = type.scale;
-          if (scale <= 0) return sign + digits + '0'.repeat(-scale);
-          const padded = digits.padStart(scale + 1, '0');
-          return `${sign}${padded.slice(0, -scale)}.${padded.slice(-scale)}`;
-        }
-        return formatCell(value);
-      },
-    };
-  });
+      format: formatVector(vector.getChildAt(index)!),
+    }));
+    return (row) => vector.isValid(row)
+      ? `{${fields.map((field) => `${field.name}: ${field.format(row)}`).join(', ')}}`
+      : 'NULL';
+  }
+
+  // Integer views preserve exact temporal values while Arrow owns chunks, slices, and validity.
+  if (DataType.isDate(type) || DataType.isTimestamp(type)) {
+    const integer = DataType.isDate(type) && type.unit === DateUnit.DAY ? new Int32() : new Int64();
+    vector = new Vector(vector.data.map((data) => data.clone(integer)));
+  }
+  return (row) => {
+    const value: unknown = vector.get(row);
+    if (value === null) return 'NULL';
+    if (DataType.isTimestamp(type)) {
+      return `${value} ${TimeUnit[type.unit].toLowerCase()} since epoch (${type.timezone || 'no timezone'})`;
+    }
+    if (DataType.isDate(type)) {
+      return `${value} ${DateUnit[type.unit].toLowerCase()} since epoch`;
+    }
+    if (DataType.isDecimal(type)) {
+      const words = value as Uint32Array;
+      const raw = BigInt.asIntN(type.bitWidth,
+        words.reduceRight((number, word) => (number << 32n) | BigInt(word), 0n),
+      ).toString();
+      const sign = raw.startsWith('-') ? '-' : '';
+      const digits = raw.replace(/^-/, '');
+      const scale = type.scale;
+      if (scale <= 0) return sign + digits + '0'.repeat(-scale);
+      const padded = digits.padStart(scale + 1, '0');
+      return `${sign}${padded.slice(0, -scale)}.${padded.slice(-scale)}`;
+    }
+    return formatCell(value);
+  };
+}
+
+export function ArrowRows({ table }: { table: Table }) {
+  const columns = table.schema.fields.map((field, index) => ({
+    name: field.name,
+    format: formatVector(table.getChildAt(index)!),
+  }));
   return Array.from({ length: table.numRows }, (_, row) => (
     <div key={row} className="result-row-block">
       {columns.map((column, index) => (

@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use datafusion::arrow::datatypes::i256;
 use datafusion::common::{DataFusionError, Result as DataFusionResult, ScalarValue};
-use datafusion::logical_expr::{Expr, Operator};
+use datafusion::logical_expr::{utils::iter_conjunction, Expr, Operator};
 use exoware_sdk::keys::{Key, Prefix};
 use exoware_sdk::kv_codec::interleave_ordered_key_fields;
 
@@ -135,19 +135,6 @@ pub(crate) fn primary_key_range_constraint(
         {
             primary_key_point(CellValue::FixedBinary(value.clone()), expected)
         }
-        (ColumnKind::FixedSizeBinary(expected), PredicateConstraint::FixedBinaryIn(values))
-            if !values.is_empty() && values.iter().all(|value| value.len() == expected) =>
-        {
-            PrimaryKeyRangeConstraint::Terminal(
-                values
-                    .iter()
-                    .map(|value| PrimaryKeyTerminalRange {
-                        lower: CellValue::FixedBinary(value.clone()),
-                        upper: CellValue::FixedBinary(value.clone()),
-                    })
-                    .collect(),
-            )
-        }
         (ColumnKind::Utf8, PredicateConstraint::StringIn(values)) => {
             PrimaryKeyRangeConstraint::Terminal(
                 values
@@ -246,29 +233,15 @@ pub(crate) struct QueryPredicate {
 impl QueryPredicate {
     pub(crate) fn from_filters(filters: &[Expr], model: &TableModel) -> Self {
         let mut out = Self::default();
-        for expr in filters {
-            out.apply_supported_expr(expr, model);
+        for expr in filters.iter().flat_map(iter_conjunction) {
+            if Self::supports_filter(expr, model) {
+                out.apply_expr(expr, model);
+            }
+            if out.contradiction {
+                break;
+            }
         }
         out
-    }
-
-    pub(crate) fn apply_supported_expr(&mut self, expr: &Expr, model: &TableModel) {
-        if self.contradiction {
-            return;
-        }
-        match expr {
-            // DataFusion can pass unsupported conjunctions through `scan`.
-            // Split AND trees and keep only supported sub-predicates for pushdown.
-            Expr::BinaryExpr(binary) if binary.op == Operator::And => {
-                self.apply_supported_expr(binary.left.as_ref(), model);
-                self.apply_supported_expr(binary.right.as_ref(), model);
-            }
-            _ => {
-                if Self::supports_filter(expr, model) {
-                    self.apply_expr(expr, model);
-                }
-            }
-        }
     }
 
     pub(crate) fn in_list_literal_supported(kind: ColumnKind, literal: &ScalarValue) -> bool {
@@ -358,14 +331,7 @@ impl QueryPredicate {
     }
 
     pub(crate) fn apply_expr(&mut self, expr: &Expr, model: &TableModel) {
-        if self.contradiction {
-            return;
-        }
         match expr {
-            Expr::BinaryExpr(binary) if binary.op == Operator::And => {
-                self.apply_expr(binary.left.as_ref(), model);
-                self.apply_expr(binary.right.as_ref(), model);
-            }
             Expr::IsNull(inner) => {
                 if let Some(column) = inner.try_as_col() {
                     if let Some(&col_idx) = model.columns_by_name.get(&column.name) {
@@ -577,7 +543,7 @@ impl QueryPredicate {
                     .insert(col_idx, PredicateConstraint::IntRange { min, max });
             }
             ColumnKind::Timestamp => {
-                let Some(value) = timestamp_scalar_to_micros_for_op(literal, op) else {
+                let Some(value) = scalar_to_timestamp_micros(literal) else {
                     self.contradiction = true;
                     return;
                 };
@@ -689,9 +655,6 @@ impl QueryPredicate {
     }
 
     pub(crate) fn apply_in_list(&mut self, column: &str, list: &[Expr], model: &TableModel) {
-        if self.contradiction {
-            return;
-        }
         let Some(&col_idx) = model.columns_by_name.get(column) else {
             return;
         };
@@ -1016,12 +979,10 @@ impl QueryPredicate {
         }
 
         let mut combos: Vec<HashMap<usize, PredicateConstraint>> = vec![HashMap::new()];
-        let mut expanded_prefix_len = 0;
         for (col_idx, singles) in &col_values {
             if combos.len().saturating_mul(singles.len()) > 4096 {
                 return Err("index range budget exceeded".into());
             }
-            expanded_prefix_len += 1;
             let mut next = Vec::with_capacity(combos.len() * singles.len());
             for combo in &combos {
                 for single in singles {
@@ -1045,9 +1006,9 @@ impl QueryPredicate {
                 contradiction: self.contradiction,
             };
             let start =
-                tmp.encode_index_bound_key(table_prefix, model, spec, expanded_prefix_len, false)?;
+                tmp.encode_index_bound_key(table_prefix, model, spec, col_values.len(), false)?;
             let end =
-                tmp.encode_index_bound_key(table_prefix, model, spec, expanded_prefix_len, true)?;
+                tmp.encode_index_bound_key(table_prefix, model, spec, col_values.len(), true)?;
             if start <= end {
                 ranges.push(KeyRange { start, end });
             }
@@ -2392,31 +2353,7 @@ pub(crate) fn scalar_to_date64(value: &ScalarValue) -> Option<i64> {
 
 pub(crate) fn scalar_to_timestamp_micros(value: &ScalarValue) -> Option<i64> {
     match value {
-        ScalarValue::TimestampSecond(Some(v), _) => v.checked_mul(1_000_000),
-        ScalarValue::TimestampMillisecond(Some(v), _) => v.checked_mul(1_000),
         ScalarValue::TimestampMicrosecond(Some(v), _) => Some(*v),
-        ScalarValue::TimestampNanosecond(Some(v), _) => Some(v.div_euclid(1_000)),
-        _ => None,
-    }
-}
-
-pub(crate) fn timestamp_scalar_to_micros_for_op(value: &ScalarValue, op: Operator) -> Option<i64> {
-    match value {
-        ScalarValue::TimestampSecond(Some(v), _) => v.checked_mul(1_000_000),
-        ScalarValue::TimestampMillisecond(Some(v), _) => v.checked_mul(1_000),
-        ScalarValue::TimestampMicrosecond(Some(v), _) => Some(*v),
-        ScalarValue::TimestampNanosecond(Some(v), _) => {
-            let micros = v.div_euclid(1_000);
-            if v.rem_euclid(1_000) == 0 {
-                return Some(micros);
-            }
-            match op {
-                Operator::Eq => None,
-                Operator::Gt | Operator::LtEq => Some(micros),
-                Operator::GtEq | Operator::Lt => Some(micros + 1),
-                _ => None,
-            }
-        }
         _ => None,
     }
 }

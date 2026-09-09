@@ -3212,106 +3212,6 @@ mod tests {
     }
 
     #[test]
-    fn timestamp_nanos_gt_uses_floor_division() {
-        let micros = timestamp_scalar_to_micros_for_op(
-            &ScalarValue::TimestampNanosecond(Some(-1500), None),
-            Operator::Gt,
-        )
-        .unwrap();
-        assert_eq!(micros, -2, "Gt on -1500ns should floor to -2us");
-
-        let mut min: Option<i64> = None;
-        let mut max: Option<i64> = None;
-        let mut contradiction = false;
-        apply_int_constraint(&mut min, &mut max, Operator::Gt, micros, &mut contradiction);
-        assert_eq!(min, Some(-1), "Gt(-2us) + 1 = min -1us");
-
-        let row_at_minus_1 = CellValue::Timestamp(-1);
-        assert!(matches_constraint(
-            &row_at_minus_1,
-            &PredicateConstraint::IntRange { min, max }
-        ));
-    }
-
-    #[test]
-    fn timestamp_nanos_lteq_uses_floor_division() {
-        let micros = timestamp_scalar_to_micros_for_op(
-            &ScalarValue::TimestampNanosecond(Some(-1500), None),
-            Operator::LtEq,
-        )
-        .unwrap();
-        assert_eq!(micros, -2, "LtEq on -1500ns should floor to -2us");
-
-        let row_at_minus_1 = CellValue::Timestamp(-1);
-        assert!(
-            !matches_constraint(
-                &row_at_minus_1,
-                &PredicateConstraint::IntRange {
-                    min: None,
-                    max: Some(micros)
-                }
-            ),
-            "-1us (-1000ns) > -1500ns, must not satisfy <= -1500ns"
-        );
-    }
-
-    #[test]
-    fn timestamp_nanos_gteq_uses_ceil_division() {
-        let micros = timestamp_scalar_to_micros_for_op(
-            &ScalarValue::TimestampNanosecond(Some(-1500), None),
-            Operator::GtEq,
-        )
-        .unwrap();
-        assert_eq!(micros, -1, "GtEq on -1500ns should ceil to -1us");
-    }
-
-    #[test]
-    fn timestamp_nanos_lt_uses_ceil_division() {
-        let micros = timestamp_scalar_to_micros_for_op(
-            &ScalarValue::TimestampNanosecond(Some(-1500), None),
-            Operator::Lt,
-        )
-        .unwrap();
-        assert_eq!(micros, -1, "Lt on -1500ns should ceil to -1us");
-
-        let mut min: Option<i64> = None;
-        let mut max: Option<i64> = None;
-        let mut contradiction = false;
-        apply_int_constraint(&mut min, &mut max, Operator::Lt, micros, &mut contradiction);
-        assert_eq!(max, Some(-2), "Lt(-1us) - 1 = max -2us");
-    }
-
-    #[test]
-    fn timestamp_nanos_eq_non_aligned_is_contradiction() {
-        let result = timestamp_scalar_to_micros_for_op(
-            &ScalarValue::TimestampNanosecond(Some(-1500), None),
-            Operator::Eq,
-        );
-        assert!(
-            result.is_none(),
-            "non-aligned ns Eq must produce contradiction"
-        );
-    }
-
-    #[test]
-    fn timestamp_nanos_exact_multiple_is_unchanged() {
-        for op in [
-            Operator::Eq,
-            Operator::Gt,
-            Operator::GtEq,
-            Operator::Lt,
-            Operator::LtEq,
-        ] {
-            let micros = timestamp_scalar_to_micros_for_op(
-                &ScalarValue::TimestampNanosecond(Some(-2000), None),
-                op,
-            )
-            .unwrap();
-            assert_eq!(micros, -2, "exact multiple -2000ns = -2us for {op:?}");
-        }
-    }
-
-    #[test]
     fn float64_index_bounds_include_infinity() {
         let config = KvTableConfig::new(
             0,
@@ -5333,20 +5233,22 @@ mod tests {
         let unsupported = col("version").gt(Expr::Literal(ScalarValue::Int64(Some(-1)), None));
         let filter = supported.and(unsupported);
 
-        assert!(
-            !QueryPredicate::supports_filter(&filter, &model),
-            "mixed AND should not be marked fully pushdown-supported"
-        );
+        for filter in [filter.clone(), filter.alias("predicate")] {
+            assert!(
+                !QueryPredicate::supports_filter(&filter, &model),
+                "mixed AND should not be marked fully pushdown-supported"
+            );
 
-        let pred = QueryPredicate::from_filters(&[filter], &model);
-        assert!(!pred.contradiction);
-        assert!(matches!(
-            pred.constraints.get(&0),
-            Some(PredicateConstraint::UInt64Range {
-                min: Some(10),
-                max: None
-            })
-        ));
+            let pred = QueryPredicate::from_filters(&[filter], &model);
+            assert!(!pred.contradiction);
+            assert!(matches!(
+                pred.constraints.get(&0),
+                Some(PredicateConstraint::UInt64Range {
+                    min: Some(10),
+                    max: None
+                })
+            ));
+        }
     }
 
     #[test]
