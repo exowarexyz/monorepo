@@ -571,8 +571,9 @@ async function* performReduce(
         params: prefixReduceParams(params, prefix),
         ...(effective !== undefined ? { minSequenceNumber: effective } : {}),
     });
+    const controller = new AbortController();
     try {
-        for await (const frame of client.query.reduce(req)) {
+        for await (const frame of client.query.reduce(req, { signal: controller.signal })) {
             if (frame.detail) {
                 detailObserver?.(frame.detail);
             }
@@ -580,6 +581,8 @@ async function* performReduce(
         }
     } catch (e) {
         mapConnectToHttpError(e, client.credential);
+    } finally {
+        controller.abort();
     }
 }
 

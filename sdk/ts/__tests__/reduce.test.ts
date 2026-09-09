@@ -1,6 +1,7 @@
-import { create } from '@bufbuild/protobuf';
+import { create, toBinary } from '@bufbuild/protobuf';
 import { Code, ConnectError } from '@connectrpc/connect';
-import type { Client } from '../src/client';
+import { encodeEnvelope } from '@connectrpc/connect/protocol';
+import { Client } from '../src/client';
 import { HttpError } from '../src/error';
 import {
     ReduceParamsSchema,
@@ -26,6 +27,32 @@ function frame(group: bigint, sequenceNumber: bigint = 7n) {
 function clientWithReduce(reduce: Client['query']['reduce']): Client {
     return { query: { reduce }, credential: 'absent' } as unknown as Client;
 }
+
+test.each(['store', 'session'])('returning a %s reduce iterator aborts the native Connect request', async (kind) => {
+    let signal: AbortSignal | null | undefined;
+    let body: ReadableStreamDefaultController<Uint8Array>;
+    const fetch = jest.spyOn(globalThis, 'fetch').mockImplementation(async (_input, init) => {
+        signal = init?.signal;
+        return new Response(new ReadableStream<Uint8Array>({
+            start(controller) {
+                body = controller;
+                controller.enqueue(encodeEnvelope(0, toBinary(ReduceResponseSchema, frame(1n))));
+            },
+        }), { headers: { 'content-type': 'application/connect+proto' } });
+    });
+    try {
+        const client = new Client('http://reduce.test', { token: '', useBinaryFormat: true });
+        const store = kind === 'store' ? new StoreClient(client) : new SerializableReadSession(client);
+        const stream = store.reduce(start, end, params)[Symbol.asyncIterator]();
+        expect((await stream.next()).value).toEqual(frame(1n));
+        expect(signal?.aborted).toBe(false);
+        await stream.return?.();
+        expect(signal?.aborted).toBe(true);
+    } finally {
+        body!.close();
+        fetch.mockRestore();
+    }
+});
 
 test('reduce yields frames on demand and returning cancels the underlying stream', async () => {
     let secondPolled = false;

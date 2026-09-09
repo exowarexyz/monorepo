@@ -8,6 +8,7 @@ import { createServer } from 'vite';
 for (const [name, expected] of [
   ['layouts', [
     '-123.45', '90071992547409.93', 'NULL',
+    '<strong>large_list:</strong> [1, NULL]',
     '9223372036828800000 millisecond since epoch',
     '-9223372036828800000 millisecond since epoch',
   ]],

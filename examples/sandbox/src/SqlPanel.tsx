@@ -32,8 +32,8 @@ function formatCell(value: unknown): string {
       .map((byte) => byte.toString(16).padStart(2, '0'))
       .join('')}`;
   }
-  if (Array.isArray(value)) {
-    return `[${value.map(formatCell).join(', ')}]`;
+  if (Array.isArray(value) || value instanceof Vector) {
+    return `[${Array.from(value, formatCell).join(', ')}]`;
   }
   if (typeof value === 'string') return value;
   return String(value);
