@@ -2,7 +2,6 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 const SQL_PROTO_FILES: &[&str] = &[
-    "sql/v1/common.proto",
     "sql/v1/schema.proto",
     "sql/v1/query.proto",
     "sql/v1/stream.proto",

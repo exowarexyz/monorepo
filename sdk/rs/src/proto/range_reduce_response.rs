@@ -1,36 +1,36 @@
+use super::to_domain_reduced_value_from_view;
 use crate::query;
-use crate::{
-    to_domain_reduced_value_from_proto, RangeReduceGroup, RangeReduceResponse, RangeReduceResult,
-};
+use crate::{RangeReduceGroup, RangeReduceResponse, RangeReduceResult};
 
-/// Converts a wire `ReduceResponse` into the domain reduction model.
+/// Converts a borrowed wire response into the domain reduction model.
 pub fn to_domain_reduce_response(
-    response: query::ReduceResponse,
+    response: &query::ReduceResponseView<'_>,
 ) -> Result<RangeReduceResponse, String> {
     let results = response
         .results
-        .into_iter()
-        .map(|mut result| {
-            let value = match result.value.take() {
-                Some(v) => Some(to_domain_reduced_value_from_proto(v)?),
-                None => None,
-            };
+        .iter()
+        .map(|result| {
+            let value = result
+                .value
+                .as_option()
+                .map(to_domain_reduced_value_from_view)
+                .transpose()?;
             Ok(RangeReduceResult { value })
         })
         .collect::<Result<Vec<_>, String>>()?;
 
     let groups = response
         .groups
-        .into_iter()
+        .iter()
         .map(|group| {
             let mut group_values = Vec::with_capacity(group.group_values_present.len());
-            let mut dense = group.group_values.into_iter();
-            for present in group.group_values_present {
+            let mut dense = group.group_values.iter();
+            for &present in &group.group_values_present {
                 if present {
                     let value = dense.next().ok_or_else(|| {
                         "group_values shorter than group_values_present true count".to_string()
                     })?;
-                    group_values.push(Some(to_domain_reduced_value_from_proto(value)?));
+                    group_values.push(Some(to_domain_reduced_value_from_view(value)?));
                 } else {
                     group_values.push(None);
                 }
@@ -40,12 +40,13 @@ pub fn to_domain_reduce_response(
             }
             let results = group
                 .results
-                .into_iter()
-                .map(|mut result| {
-                    let value = match result.value.take() {
-                        Some(v) => Some(to_domain_reduced_value_from_proto(v)?),
-                        None => None,
-                    };
+                .iter()
+                .map(|result| {
+                    let value = result
+                        .value
+                        .as_option()
+                        .map(to_domain_reduced_value_from_view)
+                        .transpose()?;
                     Ok(RangeReduceResult { value })
                 })
                 .collect::<Result<Vec<_>, String>>()?;
@@ -89,7 +90,8 @@ mod tests {
             groups: proto_groups,
             ..Default::default()
         };
-        let decoded = to_domain_reduce_response(wire).expect("decode");
+        let frame = connectrpc::StreamMessage::from_message(&wire);
+        let decoded = to_domain_reduce_response(frame.view()).expect("decode");
 
         assert_eq!(decoded, original);
         assert_eq!(
@@ -115,7 +117,8 @@ mod tests {
             }],
             ..Default::default()
         };
-        let err = to_domain_reduce_response(bad).unwrap_err();
+        let frame = connectrpc::StreamMessage::from_message(&bad);
+        let err = to_domain_reduce_response(frame.view()).unwrap_err();
         assert!(err.contains("shorter"), "unexpected message: {err}");
     }
 }

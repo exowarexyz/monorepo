@@ -1,11 +1,9 @@
+export { DataType, DateUnit, Int32, Int64, Table, TimeUnit, Vector } from 'apache-arrow';
 export {
   SqlClient,
-  type CellValue,
   type DecodedColumn,
   type DecodedIndex,
   type DecodedIndexLayout,
-  type DecodedQueryResult,
-  type DecodedRow,
   type DecodedSubscribeFrame,
   type DecodedTable,
   type SqlClientOptions,

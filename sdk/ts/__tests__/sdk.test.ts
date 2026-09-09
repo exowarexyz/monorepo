@@ -354,12 +354,17 @@ describe('Exoware TS SDK', () => {
                 ],
             });
 
-            const response = await store.reduce(
+            const frames = [];
+            for await (const frame of store.reduce(
                 encoder.encode(`${prefix}1`),
                 encoder.encode(`${prefix}z`),
                 params,
-            );
-
+            )) {
+                frames.push(frame);
+            }
+            expect(frames).toHaveLength(1);
+            const response = frames[0];
+            expect(response.detail).toBeDefined();
             expect(response.results.length).toBe(1);
             const countValue = response.results[0].value;
             expect(countValue).toBeDefined();
@@ -401,12 +406,17 @@ describe('Exoware TS SDK', () => {
                 ],
             });
 
-            const response = await store.reduce(
+            const frames = [];
+            for await (const frame of store.reduce(
                 encoder.encode(`${prefix}1`),
                 encoder.encode(`${prefix}z`),
                 params,
-            );
-
+            )) {
+                frames.push(frame);
+            }
+            expect(frames).toHaveLength(1);
+            const response = frames[0];
+            expect(response.detail).toBeDefined();
             expect(response.results.length).toBe(1);
             const sumValue = response.results[0].value;
             expect(sumValue).toBeDefined();

@@ -8,11 +8,15 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
+use buffa::Message;
 use bytes::Bytes;
 use connectrpc::{
     Chain, ConnectError, ConnectRpcService, Limits, PreEncoded, RequestContext as Context,
     ServiceRequest,
 };
+use datafusion::arrow::record_batch::RecordBatch;
+use datafusion::execution::context::TaskContext;
+use datafusion::execution::runtime_env::RuntimeEnv;
 use exoware_proto::common::Entry;
 use exoware_proto::google::rpc::{ErrorInfo, RetryInfo};
 use exoware_proto::ingest::{
@@ -39,8 +43,8 @@ use exoware_proto::query::{
 use exoware_proto::stream_filter::{Filter, StreamFilter};
 use exoware_proto::{
     connect_compression_registry, parse_range_traversal_direction,
-    to_domain_reduce_request_from_view, to_proto_optional_reduced_value, to_proto_reduced_value,
-    with_error_info_detail, with_query_detail, with_retry_info_detail, RangeTraversalDirection,
+    to_domain_reduce_request_from_view, with_error_info_detail, with_query_detail,
+    with_retry_info_detail, RangeTraversalDirection,
 };
 use exoware_sdk as exoware_proto;
 use exoware_sdk::common::kv::v1::filter::KindView as ProtoFilterKindView;
@@ -49,7 +53,7 @@ use exoware_sdk::selector::Selector;
 use futures::{stream as stream_util, Stream, StreamExt};
 use tokio::sync::Notify;
 
-use crate::reduce::RangeReducer;
+use crate::reduce::{decode_group, execute_reduce, RangeError, ReduceExecution, REDUCE_BATCH_ROWS};
 use crate::stream::{StreamHub, StreamNotifier};
 use crate::validate::{self, IngestLimits};
 use crate::{
@@ -60,7 +64,7 @@ use crate::{
 // TODO (#57): Make limits configurable.
 const MAX_CONNECTRPC_BODY_BYTES: usize = 256 * 1024 * 1024;
 const RANGE_STREAM_MAX_FRAME_ROWS: usize = 4096;
-const REDUCE_SCAN_BATCH_SIZE: usize = 4096;
+const REDUCE_FRAME_TARGET_BYTES: usize = 16 * 1024 * 1024;
 // Per-subscription bound on concurrent subscribe log reads. Each slot can pin
 // a fully materialized batch (in flight, or completed but held for in-order
 // delivery), so server-wide memory and engine read pressure scale with this
@@ -258,12 +262,14 @@ impl<E> From<AppState<E>> for IngestState<E> {
 pub struct QueryState<Q> {
     /// Backend used for point and range reads.
     pub query: Arc<Q>,
+    context: Arc<TaskContext>,
 }
 
 impl<Q> Clone for QueryState<Q> {
     fn clone(&self) -> Self {
         Self {
             query: self.query.clone(),
+            context: self.context.clone(),
         }
     }
 }
@@ -272,8 +278,22 @@ impl<Q> QueryState<Q>
 where
     Q: Query,
 {
+    /// Creates a query service with DataFusion's shared, unbounded memory pool.
+    ///
+    /// Group state must fit in memory by default. Supply a native runtime with a
+    /// bounded pool through [`Self::with_runtime`] to enable native spilling.
+    /// The pool excludes transient input, backend, transport, and client buffers.
     pub fn new(query: Arc<Q>) -> Self {
-        Self { query }
+        Self {
+            query,
+            context: Arc::default(),
+        }
+    }
+
+    /// Supplies the worker's shared native memory pool and spill configuration.
+    pub fn with_runtime(mut self, runtime: Arc<RuntimeEnv>) -> Self {
+        self.context = Arc::new(TaskContext::default().with_runtime(runtime));
+        self
     }
 }
 
@@ -281,6 +301,7 @@ impl<E> From<AppState<E>> for QueryState<E> {
     fn from(state: AppState<E>) -> Self {
         Self {
             query: state.engine,
+            context: Arc::default(),
         }
     }
 }
@@ -674,86 +695,125 @@ where
         &self,
         _ctx: Context,
         request: ServiceRequest<'_, exoware_proto::store::query::v1::ReduceRequest>,
-    ) -> connectrpc::ServiceResult<ReduceResponse> {
+    ) -> connectrpc::ServiceResult<connectrpc::ServiceStream<ReduceResponse>> {
         validate::validate_reduce_request(request.view())?;
-        let token = self.ensure_min_sequence_number(request.min_sequence_number)?;
+        let sequence_number = self.ensure_min_sequence_number(request.min_sequence_number)?;
         let wire = request.bytes();
         let start_key: Key = wire.slice_ref(request.start);
         let end_key: Key = wire.slice_ref(request.end);
         let domain = to_domain_reduce_request_from_view(&request.params)
             .map_err(validate::reduce_params_error)?;
-
-        let mut rows = self
-            .state
-            .query
-            .range_scan(start_key, end_key, usize::MAX, true)
-            .await
-            .map_err(ConnectError::internal)?;
-
-        let mut reducer = RangeReducer::new(&domain)
-            .map_err(|e: crate::RangeError| ConnectError::internal(e.to_string()))?;
-        let mut latest_extra = None;
-        let final_extra = loop {
-            let batch = rows
-                .next_batch(REDUCE_SCAN_BATCH_SIZE)
-                .await
-                .map_err(ConnectError::internal)?;
-            if batch.rows.is_empty() {
-                break if batch.extra.is_empty() {
-                    latest_extra.unwrap_or_default()
-                } else {
-                    batch.extra
-                };
-            }
-            latest_extra = Some(batch.extra);
-            for (key, value) in batch.rows {
-                reducer
-                    .update(&key, &value)
-                    .map_err(|e: crate::RangeError| ConnectError::internal(e.to_string()))?;
-            }
-        };
-        let response = reducer.finish();
-
-        let detail = query_detail(token, final_extra);
-
-        connectrpc::Response::ok(ReduceResponse {
-            results: response
-                .results
-                .into_iter()
-                .map(|result| exoware_proto::query::RangeReduceResult {
-                    value: result.value.map(to_proto_reduced_value).into(),
-                    ..Default::default()
-                })
-                .collect(),
-            groups: response
-                .groups
-                .into_iter()
-                .map(|group| {
-                    let group_values_present =
-                        group.group_values.iter().map(Option::is_some).collect();
-                    exoware_proto::query::RangeReduceGroup {
-                        group_values: group
-                            .group_values
-                            .into_iter()
-                            .map(to_proto_optional_reduced_value)
-                            .collect(),
-                        group_values_present,
-                        results: group
-                            .results
-                            .into_iter()
-                            .map(|result| exoware_proto::query::RangeReduceResult {
-                                value: result.value.map(to_proto_reduced_value).into(),
-                                ..Default::default()
-                            })
-                            .collect(),
-                        ..Default::default()
-                    }
-                })
-                .collect(),
-            detail: Some(detail).into(),
-            ..Default::default()
-        })
+        let execution = execute_reduce(
+            self.state.query.clone(),
+            start_key,
+            end_key,
+            domain,
+            self.state.context.clone(),
+        )
+        .map_err(|error| match error {
+            RangeError::Reduce(message) => validate::reduce_params_error(message),
+            error => reduce_error(error),
+        })?;
+        Ok(connectrpc::Response::stream(reduce_frames(
+            execution,
+            sequence_number,
+        )))
     }
+}
+
+fn reduce_error(error: RangeError) -> ConnectError {
+    match error {
+        RangeError::Resources(message) => ConnectError::resource_exhausted(message),
+        RangeError::Backend(message) => ConnectError::internal(message),
+        RangeError::Reduce(message) => ConnectError::failed_precondition(message),
+    }
+}
+
+struct ReduceFrameState {
+    execution: ReduceExecution,
+    batch: Option<RecordBatch>,
+    row: usize,
+    emitted: bool,
+}
+
+fn reduce_frames(
+    execution: ReduceExecution,
+    sequence_number: u64,
+) -> impl Stream<Item = Result<ReduceResponse, ConnectError>> + Send {
+    stream_util::unfold(
+        Some(ReduceFrameState {
+            execution,
+            batch: None,
+            row: 0,
+            emitted: false,
+        }),
+        move |state| async move {
+            let mut state = state?;
+            let mut response = ReduceResponse::default();
+            let mut frame_bytes = 0usize;
+            let mut done = false;
+            loop {
+                if state
+                    .batch
+                    .as_ref()
+                    .is_none_or(|batch| state.row == batch.num_rows())
+                {
+                    match state.execution.batches.next().await {
+                        Some(Ok(batch)) => {
+                            state.batch = Some(batch);
+                            state.row = 0;
+                        }
+                        Some(Err(error)) => return Some((Err(reduce_error(error.into())), None)),
+                        None => {
+                            done = true;
+                            break;
+                        }
+                    }
+                }
+                let batch = state.batch.as_ref().unwrap();
+                if batch.num_rows() == 0 {
+                    continue;
+                }
+                let group = match decode_group(
+                    batch,
+                    state.row,
+                    state.execution.group_count,
+                    &state.execution.result_kinds,
+                ) {
+                    Ok(group) => group,
+                    Err(error) => return Some((Err(reduce_error(error.into())), None)),
+                };
+                if state.execution.group_count == 0 {
+                    response.results = group.results.into_iter().map(Into::into).collect();
+                    state.row += 1;
+                    break;
+                }
+                let group: exoware_proto::query::RangeReduceGroup = group.into();
+                let group_bytes = group.encoded_len() as usize + 16;
+                if !response.groups.is_empty()
+                    && frame_bytes.saturating_add(group_bytes) > REDUCE_FRAME_TARGET_BYTES
+                {
+                    break;
+                }
+                frame_bytes = frame_bytes.saturating_add(group_bytes);
+                response.groups.push(group);
+                state.row += 1;
+                if response.groups.len() == REDUCE_BATCH_ROWS {
+                    break;
+                }
+            }
+            if response.results.is_empty() && response.groups.is_empty() && state.emitted && done {
+                return None;
+            }
+            response.detail = Some(query_detail(
+                sequence_number,
+                state.execution.extra.lock().unwrap().clone(),
+            ))
+            .into();
+            state.emitted = true;
+            Some((Ok(response), if done { None } else { Some(state) }))
+        },
+    )
 }
 
 pub struct PruneConnect<P> {
@@ -1425,6 +1485,7 @@ mod tests {
         range_rows: Vec<(Bytes, Bytes)>,
         range_eof_extra: QueryExtra,
         range_next_count: usize,
+        range_batch_limit: Option<usize>,
         query_extra: QueryExtra,
         prune_policy_counts: Vec<usize>,
         put_error: Option<IngestError>,
@@ -1440,10 +1501,17 @@ mod tests {
     struct IteratorRangeScan {
         iter: Box<dyn Iterator<Item = Result<(Bytes, Bytes), String>> + Send + 'static>,
         eof_extra: Option<QueryExtra>,
+        remaining_batches: Option<usize>,
     }
 
     impl RangeScan for IteratorRangeScan {
         async fn next_batch(&mut self, max_items: usize) -> Result<RangeScanBatch, String> {
+            if let Some(remaining) = &mut self.remaining_batches {
+                if *remaining == 0 {
+                    futures::future::pending::<()>().await;
+                }
+                *remaining -= 1;
+            }
             let mut rows = Vec::new();
             for row in self.iter.by_ref().take(max_items) {
                 rows.push(row?);
@@ -1471,6 +1539,7 @@ mod tests {
         IteratorRangeScan {
             iter: Box::new(iter),
             eof_extra: Some(eof_extra),
+            remaining_batches: None,
         }
     }
 
@@ -1600,17 +1669,25 @@ mod tests {
             let result = self
                 .state
                 .lock()
-                .map(|state| (state.range_rows.clone(), state.range_eof_extra.clone()))
+                .map(|state| {
+                    (
+                        state.range_rows.clone(),
+                        state.range_eof_extra.clone(),
+                        state.range_batch_limit,
+                    )
+                })
                 .map_err(|e| e.to_string());
             let state = self.state.clone();
-            let cursor = result.map(|(rows, eof_extra)| {
-                range_scan_from_iter_with_eof_extra(
+            let cursor = result.map(|(rows, eof_extra, remaining_batches)| {
+                let mut cursor = range_scan_from_iter_with_eof_extra(
                     rows.into_iter().map(move |row| {
                         state.lock().expect("lock").range_next_count += 1;
                         Ok(row)
                     }),
                     eof_extra,
-                )
+                );
+                cursor.remaining_batches = remaining_batches;
+                cursor
             });
             cursor
         }
@@ -2373,7 +2450,7 @@ mod tests {
             sequence_number: 9,
             value: Some(Bytes::from_static(b"value")),
         });
-        let connect = QueryConnect::new(QueryState { query });
+        let connect = QueryConnect::new(QueryState::new(query));
         let bytes = exoware_proto::query::GetRequest {
             key: b"k".to_vec(),
             ..Default::default()
@@ -2576,12 +2653,20 @@ mod tests {
         .expect("decode reduce request");
 
         let request = ServiceRequest::from_parts(request.reborrow(), request.bytes());
-        let response = QueryApi::reduce(&connect, Context::default(), request)
+        let mut frames = QueryApi::reduce(&connect, Context::default(), request)
             .await
             .expect("reduce")
             .body;
+        let response = frames
+            .next()
+            .await
+            .expect("scalar frame")
+            .expect("reduce frame");
+        assert!(frames.next().await.is_none());
         let detail = response.detail.as_option().expect("query detail").clone();
-        let response = to_domain_reduce_response(response).expect("decode reduce response");
+        let response =
+            to_domain_reduce_response(connectrpc::StreamMessage::from_message(&response).view())
+                .expect("decode reduce response");
 
         assert_eq!(engine.range_next_count(), 2);
         assert_eq!(response.results.len(), 1);
@@ -2620,10 +2705,16 @@ mod tests {
         .expect("decode reduce request");
 
         let request = ServiceRequest::from_parts(request.reborrow(), request.bytes());
-        let response = QueryApi::reduce(&connect, Context::default(), request)
+        let mut frames = QueryApi::reduce(&connect, Context::default(), request)
             .await
             .expect("reduce")
             .body;
+        let response = frames
+            .next()
+            .await
+            .expect("scalar frame")
+            .expect("reduce frame");
+        assert!(frames.next().await.is_none());
         let detail = response.detail.as_option().expect("query detail");
 
         assert_eq!(detail.sequence_number, 8);
@@ -2631,6 +2722,210 @@ mod tests {
             detail.extra.get("final_rows").and_then(|v| v.as_number()),
             Some(2.0)
         );
+    }
+
+    fn grouped_reduce_fixture(
+        groups: usize,
+        width: usize,
+    ) -> (Arc<FakeEngine>, exoware_proto::RangeReduceRequest) {
+        use commonware_codec::Encode as _;
+        use exoware_sdk::kv_codec::{KvExpr, KvFieldKind, KvFieldRef, StoredRow, StoredValue};
+        let engine = Arc::new(FakeEngine::default());
+        engine.set_current_sequence(9);
+        engine.set_range_rows(
+            (0..groups)
+                .map(|group| {
+                    (
+                        Bytes::copy_from_slice(&group.to_be_bytes()),
+                        StoredRow {
+                            values: vec![Some(StoredValue::Utf8(format!(
+                                "{group:08}-{}",
+                                "x".repeat(width)
+                            )))],
+                        }
+                        .encode(),
+                    )
+                })
+                .collect(),
+        );
+        let request = exoware_proto::RangeReduceRequest {
+            reducers: vec![exoware_proto::RangeReducerSpec {
+                op: exoware_proto::RangeReduceOp::CountAll,
+                expr: None,
+            }],
+            group_by: vec![KvExpr::Field(KvFieldRef::Value {
+                index: 0,
+                kind: KvFieldKind::Utf8,
+                nullable: true,
+            })],
+            filter: None,
+        };
+        (engine, request)
+    }
+
+    #[tokio::test]
+    async fn reduce_frames_bound_rows_and_preserve_final_detail() {
+        let (engine, request) = grouped_reduce_fixture(5000, 0);
+        engine.set_range_eof_extra(numeric_query_extra("final_rows", 5000.0));
+        let state = QueryState::new(engine.clone());
+        let execution = execute_reduce(
+            engine,
+            Bytes::new(),
+            Bytes::new(),
+            request,
+            state.context.clone(),
+        )
+        .unwrap();
+        let mut frames = Box::pin(reduce_frames(execution, 9));
+        let mut seen = std::collections::BTreeSet::new();
+        let mut frame_count = 0;
+        while let Some(frame) = frames.next().await {
+            let frame = frame.unwrap();
+            assert!(frame.groups.len() <= REDUCE_BATCH_ROWS);
+            assert!(frame.encoded_len() as usize <= REDUCE_FRAME_TARGET_BYTES);
+            assert_eq!(frame.detail.as_option().unwrap().sequence_number, 9);
+            assert_eq!(
+                frame.detail.as_option().unwrap().extra["final_rows"].as_number(),
+                Some(5000.0)
+            );
+            for group in
+                to_domain_reduce_response(connectrpc::StreamMessage::from_message(&frame).view())
+                    .unwrap()
+                    .groups
+            {
+                let Some(KvReducedValue::Utf8(key)) =
+                    group.group_values.into_iter().next().unwrap()
+                else {
+                    panic!("group key");
+                };
+                assert!(seen.insert(key));
+                assert_eq!(group.results[0].value, Some(KvReducedValue::UInt64(1)));
+            }
+            frame_count += 1;
+        }
+        assert_eq!(seen.len(), 5000);
+        assert!(frame_count > 1);
+        assert_eq!(state.context.memory_pool().reserved(), 0);
+    }
+
+    #[tokio::test]
+    async fn reduce_splits_wide_evaluated_batches_and_wire_frames() {
+        let (engine, request) = grouped_reduce_fixture(40, 512 * 1024);
+        let state = QueryState::new(engine.clone());
+        let execution = execute_reduce(
+            engine,
+            Bytes::new(),
+            Bytes::new(),
+            request,
+            state.context.clone(),
+        )
+        .unwrap();
+        let mut frames = Box::pin(reduce_frames(execution, 9));
+        let mut count = 0;
+        let mut frame_count = 0;
+        while let Some(frame) = frames.next().await {
+            let frame = frame.unwrap();
+            assert!(frame.encoded_len() as usize <= REDUCE_FRAME_TARGET_BYTES);
+            count += frame.groups.len();
+            frame_count += 1;
+        }
+        assert_eq!(count, 40);
+        assert!(frame_count > 1);
+    }
+
+    #[tokio::test]
+    async fn reduce_allows_one_group_larger_than_the_frame_target() {
+        let (engine, mut request) = grouped_reduce_fixture(1, 9 * 1024 * 1024);
+        request.reducers.push(exoware_proto::RangeReducerSpec {
+            op: exoware_proto::RangeReduceOp::MinField,
+            expr: Some(request.group_by[0].clone()),
+        });
+        let state = QueryState::new(engine.clone());
+        let execution =
+            execute_reduce(engine, Bytes::new(), Bytes::new(), request, state.context).unwrap();
+        let mut frames = Box::pin(reduce_frames(execution, 9));
+        let frame = frames.next().await.unwrap().unwrap();
+        assert!(frame.encoded_len() as usize > REDUCE_FRAME_TARGET_BYTES);
+        assert!((frame.encoded_len() as usize) < MAX_CONNECTRPC_BODY_BYTES);
+        let response =
+            to_domain_reduce_response(connectrpc::StreamMessage::from_message(&frame).view())
+                .unwrap();
+        assert_eq!(response.groups.len(), 1);
+        assert_eq!(
+            response.groups[0].results[0].value,
+            Some(KvReducedValue::UInt64(1))
+        );
+        assert_eq!(
+            response.groups[0].results[1].value,
+            response.groups[0].group_values[0]
+        );
+        assert!(frames.next().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn empty_grouped_reduce_emits_one_detail_frame() {
+        let (engine, request) = grouped_reduce_fixture(0, 0);
+        engine.set_range_eof_extra(numeric_query_extra("final_rows", 0.0));
+        let state = QueryState::new(engine.clone());
+        let execution =
+            execute_reduce(engine, Bytes::new(), Bytes::new(), request, state.context).unwrap();
+        let mut frames = Box::pin(reduce_frames(execution, 9));
+        let frame = frames.next().await.unwrap().unwrap();
+        assert!(frame.results.is_empty());
+        assert!(frame.groups.is_empty());
+        assert_eq!(frame.detail.as_option().unwrap().sequence_number, 9);
+        assert_eq!(
+            frame.detail.as_option().unwrap().extra["final_rows"].as_number(),
+            Some(0.0)
+        );
+        assert!(frames.next().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn concurrent_reduce_cancellation_releases_shared_pool() {
+        use datafusion::execution::memory_pool::FairSpillPool;
+        use datafusion::execution::runtime_env::RuntimeEnvBuilder;
+        let (engine, request) = grouped_reduce_fixture(5000, 0);
+        engine.state.lock().unwrap().range_batch_limit = Some(1);
+        let runtime = RuntimeEnvBuilder::new()
+            .with_memory_pool(Arc::new(FairSpillPool::new(256 * 1024 * 1024)))
+            .build_arc()
+            .unwrap();
+        let state = QueryState::new(engine.clone()).with_runtime(runtime);
+        let cloned = state.clone();
+        assert!(Arc::ptr_eq(&state.context, &cloned.context));
+        let left = execute_reduce(
+            engine.clone(),
+            Bytes::new(),
+            Bytes::new(),
+            request.clone(),
+            state.context.clone(),
+        )
+        .unwrap();
+        let right = execute_reduce(
+            engine.clone(),
+            Bytes::new(),
+            Bytes::new(),
+            request,
+            cloned.context.clone(),
+        )
+        .unwrap();
+        let mut left = Box::pin(reduce_frames(left, 9));
+        let mut right = Box::pin(reduce_frames(right, 9));
+        while engine.range_next_count() < REDUCE_BATCH_ROWS * 2 {
+            assert!(futures::poll!(left.next()).is_pending());
+            assert!(futures::poll!(right.next()).is_pending());
+            tokio::task::yield_now().await;
+        }
+        assert!(state.context.memory_pool().reserved() > 0);
+        drop(left);
+        assert!(state.context.memory_pool().reserved() > 0);
+        drop(right);
+        assert_eq!(state.context.memory_pool().reserved(), 0);
+        let consumed = engine.range_next_count();
+        tokio::task::yield_now().await;
+        assert_eq!(engine.range_next_count(), consumed);
+        assert_eq!(consumed, REDUCE_BATCH_ROWS * 2);
     }
 
     #[tokio::test]

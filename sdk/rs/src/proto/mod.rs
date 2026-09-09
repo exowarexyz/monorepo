@@ -1107,41 +1107,38 @@ pub fn to_domain_reduce_request_from_view(
     })
 }
 
+impl From<RangeReduceResult> for query::RangeReduceResult {
+    fn from(result: RangeReduceResult) -> Self {
+        Self {
+            value: result.value.map(to_proto_reduced_value).into(),
+            ..Default::default()
+        }
+    }
+}
+
+impl From<RangeReduceGroup> for query::RangeReduceGroup {
+    fn from(group: RangeReduceGroup) -> Self {
+        Self {
+            group_values_present: group.group_values.iter().map(Option::is_some).collect(),
+            group_values: group
+                .group_values
+                .into_iter()
+                .flatten()
+                .map(to_proto_reduced_value)
+                .collect(),
+            results: group.results.into_iter().map(Into::into).collect(),
+            ..Default::default()
+        }
+    }
+}
+
 pub fn to_proto_reduce_response(
     response: RangeReduceResponse,
 ) -> (Vec<query::RangeReduceResult>, Vec<query::RangeReduceGroup>) {
-    let results = response
-        .results
-        .into_iter()
-        .map(|result| query::RangeReduceResult {
-            value: result.value.map(to_proto_reduced_value).into(),
-            ..Default::default()
-        })
-        .collect();
-    let groups = response
-        .groups
-        .into_iter()
-        .map(|group| query::RangeReduceGroup {
-            group_values: group
-                .group_values
-                .iter()
-                .filter_map(|value: &Option<KvReducedValue>| {
-                    value.clone().map(to_proto_reduced_value)
-                })
-                .collect(),
-            group_values_present: group.group_values.iter().map(Option::is_some).collect(),
-            results: group
-                .results
-                .into_iter()
-                .map(|result| query::RangeReduceResult {
-                    value: result.value.map(to_proto_reduced_value).into(),
-                    ..Default::default()
-                })
-                .collect(),
-            ..Default::default()
-        })
-        .collect();
-    (results, groups)
+    (
+        response.results.into_iter().map(Into::into).collect(),
+        response.groups.into_iter().map(Into::into).collect(),
+    )
 }
 
 mod range_reduce_response;

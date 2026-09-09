@@ -62,6 +62,7 @@ function makeRetryInterceptor(config: RetryConfig): Interceptor {
 export type ClientOptions = {
     token?: string;
     retry?: RetryConfig;
+    useBinaryFormat?: boolean;
 };
 
 function normalizeClientOptions(tokenOrOptions?: string | ClientOptions): ClientOptions {
@@ -93,6 +94,7 @@ function transportWithCredential(
     return {
         transport: createConnectTransport({
             baseUrl: baseUrl.replace(/\/$/, ''),
+            useBinaryFormat: opts.useBinaryFormat,
             interceptors,
             fetch: fetchWithCookieJar(new CookieJar()),
         }),

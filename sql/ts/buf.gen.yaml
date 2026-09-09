@@ -8,7 +8,6 @@ plugins:
 inputs:
   - directory: ../../proto
     paths:
-      - ../../proto/sql/v1/common.proto
       - ../../proto/sql/v1/schema.proto
       - ../../proto/sql/v1/query.proto
       - ../../proto/sql/v1/stream.proto

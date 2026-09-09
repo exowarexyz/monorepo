@@ -1906,7 +1906,7 @@ mod tests {
             &self,
             _ctx: RequestContext,
             _request: ServiceRequest<'_, ReduceRequest>,
-        ) -> connectrpc::ServiceResult<ReduceResponse> {
+        ) -> connectrpc::ServiceResult<connectrpc::ServiceStream<ReduceResponse>> {
             Err(ConnectError::unimplemented("test harness"))
         }
     }

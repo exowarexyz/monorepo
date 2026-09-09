@@ -7,7 +7,7 @@ use datafusion::arrow::array::{
 };
 use datafusion::arrow::compute::cast;
 use datafusion::arrow::datatypes::{i256, DataType, SchemaRef};
-use datafusion::arrow::record_batch::RecordBatch;
+use datafusion::arrow::record_batch::{RecordBatch, RecordBatchOptions};
 use datafusion::common::{DataFusionError, Result as DataFusionResult};
 use exoware_sdk::kv_codec::{StoredRow, StoredValue};
 
@@ -24,15 +24,9 @@ pub(crate) enum ColumnBuilder {
     Timestamp(TimestampMicrosecondBuilder),
     Decimal128(Decimal128Builder),
     Decimal256(Decimal256Builder),
-    Utf8 {
-        builder: StringBuilder,
-        target_type: DataType,
-    },
+    Utf8(StringBuilder),
     FixedBinary(FixedSizeBinaryBuilder),
-    Binary {
-        builder: BinaryBuilder,
-        target_type: DataType,
-    },
+    Binary(BinaryBuilder),
     ListInt64(ListBuilder<Int64Builder>),
     ListFloat64(ListBuilder<Float64Builder>),
     ListBoolean(ListBuilder<BooleanBuilder>),
@@ -51,81 +45,22 @@ impl ColumnBuilder {
             (Self::Timestamp(b), CellValue::Null) => b.append_null(),
             (Self::Decimal128(b), CellValue::Null) => b.append_null(),
             (Self::Decimal256(b), CellValue::Null) => b.append_null(),
-            (Self::Utf8 { builder, .. }, CellValue::Null) => builder.append_null(),
+            (Self::Utf8(builder), CellValue::Null) => builder.append_null(),
             (Self::FixedBinary(b), CellValue::Null) => b.append_null(),
-            (Self::Binary { builder, .. }, CellValue::Null) => builder.append_null(),
+            (Self::Binary(builder), CellValue::Null) => builder.append_null(),
             (Self::ListInt64(b), CellValue::Null) => b.append_null(),
             (Self::ListFloat64(b), CellValue::Null) => b.append_null(),
             (Self::ListBoolean(b), CellValue::Null) => b.append_null(),
             (Self::ListUtf8(b), CellValue::Null) => b.append_null(),
             (Self::Int64(b), CellValue::Int64(v)) => b.append_value(*v),
             (Self::UInt64(b), CellValue::UInt64(v)) => b.append_value(*v),
-            (Self::Float64(b), CellValue::Float64(v)) => b.append_value(*v),
-            (Self::Boolean(b), CellValue::Boolean(v)) => b.append_value(*v),
-            (Self::Date32(b), CellValue::Date32(v)) => b.append_value(*v),
-            (Self::Date64(b), CellValue::Date64(v)) => b.append_value(*v),
-            (Self::Timestamp(b), CellValue::Timestamp(v)) => b.append_value(*v),
-            (Self::Decimal128(b), CellValue::Decimal128(v)) => b.append_value(*v),
-            (Self::Decimal256(b), CellValue::Decimal256(v)) => b.append_value(*v),
-            (Self::Utf8 { builder, .. }, CellValue::Utf8(v)) => builder.append_value(v),
+            (Self::Utf8(builder), CellValue::Utf8(v)) => builder.append_value(v),
             (Self::FixedBinary(b), CellValue::FixedBinary(v)) => {
                 b.append_value(v).map_err(|e| {
                     DataFusionError::Execution(format!("FixedBinary append error: {e}"))
                 })?
             }
-            (Self::Binary { builder, .. }, CellValue::Binary(v)) => builder.append_value(v),
-            (Self::ListInt64(b), CellValue::List(items)) => {
-                for item in items {
-                    match item {
-                        CellValue::Int64(v) => b.values().append_value(*v),
-                        _ => {
-                            return Err(DataFusionError::Execution(
-                                "list element type mismatch".into(),
-                            ))
-                        }
-                    }
-                }
-                b.append(true);
-            }
-            (Self::ListFloat64(b), CellValue::List(items)) => {
-                for item in items {
-                    match item {
-                        CellValue::Float64(v) => b.values().append_value(*v),
-                        _ => {
-                            return Err(DataFusionError::Execution(
-                                "list element type mismatch".into(),
-                            ))
-                        }
-                    }
-                }
-                b.append(true);
-            }
-            (Self::ListBoolean(b), CellValue::List(items)) => {
-                for item in items {
-                    match item {
-                        CellValue::Boolean(v) => b.values().append_value(*v),
-                        _ => {
-                            return Err(DataFusionError::Execution(
-                                "list element type mismatch".into(),
-                            ))
-                        }
-                    }
-                }
-                b.append(true);
-            }
-            (Self::ListUtf8(b), CellValue::List(items)) => {
-                for item in items {
-                    match item {
-                        CellValue::Utf8(v) => b.values().append_value(v),
-                        _ => {
-                            return Err(DataFusionError::Execution(
-                                "list element type mismatch".into(),
-                            ))
-                        }
-                    }
-                }
-                b.append(true);
-            }
+            (Self::Binary(builder), CellValue::Binary(v)) => builder.append_value(v),
             _ => {
                 return Err(DataFusionError::Execution(
                     "column type mismatch".to_string(),
@@ -135,44 +70,29 @@ impl ColumnBuilder {
         Ok(())
     }
 
-    pub(crate) fn finish(self) -> DataFusionResult<ArrayRef> {
-        match self {
-            Self::Int64(mut b) => Ok(Arc::new(b.finish())),
-            Self::UInt64(mut b) => Ok(Arc::new(b.finish())),
-            Self::Float64(mut b) => Ok(Arc::new(b.finish())),
-            Self::Boolean(mut b) => Ok(Arc::new(b.finish())),
-            Self::Date32(mut b) => Ok(Arc::new(b.finish())),
-            Self::Date64(mut b) => Ok(Arc::new(b.finish())),
-            Self::Timestamp(mut b) => Ok(Arc::new(b.finish())),
-            Self::Decimal128(mut b) => Ok(Arc::new(b.finish())),
-            Self::Decimal256(mut b) => Ok(Arc::new(b.finish())),
-            Self::Utf8 {
-                mut builder,
-                target_type,
-            } => {
-                let array: ArrayRef = Arc::new(builder.finish());
-                if target_type == DataType::Utf8 {
-                    Ok(array)
-                } else {
-                    Ok(cast(&array, &target_type)?)
-                }
-            }
-            Self::FixedBinary(mut b) => Ok(Arc::new(b.finish())),
-            Self::Binary {
-                mut builder,
-                target_type,
-            } => {
-                let array: ArrayRef = Arc::new(builder.finish());
-                if target_type == DataType::Binary {
-                    Ok(array)
-                } else {
-                    Ok(cast(&array, &target_type)?)
-                }
-            }
-            Self::ListInt64(mut b) => Ok(Arc::new(b.finish())),
-            Self::ListFloat64(mut b) => Ok(Arc::new(b.finish())),
-            Self::ListBoolean(mut b) => Ok(Arc::new(b.finish())),
-            Self::ListUtf8(mut b) => Ok(Arc::new(b.finish())),
+    pub(crate) fn finish(self, target_type: &DataType) -> DataFusionResult<ArrayRef> {
+        let array: ArrayRef = match self {
+            Self::Int64(mut b) => Arc::new(b.finish()),
+            Self::UInt64(mut b) => Arc::new(b.finish()),
+            Self::Float64(mut b) => Arc::new(b.finish()),
+            Self::Boolean(mut b) => Arc::new(b.finish()),
+            Self::Date32(mut b) => Arc::new(b.finish()),
+            Self::Date64(mut b) => Arc::new(b.finish()),
+            Self::Timestamp(mut b) => Arc::new(b.finish()),
+            Self::Decimal128(mut b) => Arc::new(b.finish()),
+            Self::Decimal256(mut b) => Arc::new(b.finish()),
+            Self::Utf8(mut b) => Arc::new(b.finish()),
+            Self::FixedBinary(mut b) => Arc::new(b.finish()),
+            Self::Binary(mut b) => Arc::new(b.finish()),
+            Self::ListInt64(mut b) => Arc::new(b.finish()),
+            Self::ListFloat64(mut b) => Arc::new(b.finish()),
+            Self::ListBoolean(mut b) => Arc::new(b.finish()),
+            Self::ListUtf8(mut b) => Arc::new(b.finish()),
+        };
+        if array.data_type() == target_type {
+            Ok(array)
+        } else {
+            Ok(cast(&array, target_type)?)
         }
     }
 }
@@ -196,7 +116,8 @@ pub(crate) fn build_projected_batch(
     }
     let columns: Vec<ArrayRef> = builders
         .into_iter()
-        .map(ColumnBuilder::finish)
+        .zip(projected_schema.fields())
+        .map(|(builder, field)| builder.finish(field.data_type()))
         .collect::<DataFusionResult<Vec<_>>>()?;
     Ok(RecordBatch::try_new(projected_schema.clone(), columns)?)
 }
@@ -232,17 +153,11 @@ pub(crate) fn make_column_builder(model: &TableModel, idx: usize) -> ColumnBuild
             let dt = model.schema.field(idx).data_type().clone();
             ColumnBuilder::Decimal256(Decimal256Builder::new().with_data_type(dt))
         }
-        ColumnKind::Utf8 => ColumnBuilder::Utf8 {
-            builder: StringBuilder::new(),
-            target_type: model.schema.field(idx).data_type().clone(),
-        },
+        ColumnKind::Utf8 => ColumnBuilder::Utf8(StringBuilder::new()),
         ColumnKind::FixedSizeBinary(n) => {
             ColumnBuilder::FixedBinary(FixedSizeBinaryBuilder::new(n as i32))
         }
-        ColumnKind::Binary => ColumnBuilder::Binary {
-            builder: BinaryBuilder::new(),
-            target_type: model.schema.field(idx).data_type().clone(),
-        },
+        ColumnKind::Binary => ColumnBuilder::Binary(BinaryBuilder::new()),
         ColumnKind::List(elem) => match elem {
             ListElementKind::Int64 => {
                 ColumnBuilder::ListInt64(ListBuilder::new(Int64Builder::new()))
@@ -340,13 +255,13 @@ pub(crate) fn append_archived_non_pk_value(
             })?;
             b.append_value(i256::from_le_bytes(arr))
         }
-        (ColumnBuilder::Utf8 { builder, .. }, ColumnKind::Utf8, StoredValue::Utf8(v)) => {
+        (ColumnBuilder::Utf8(builder), ColumnKind::Utf8, StoredValue::Utf8(v)) => {
             builder.append_value(v.as_str())
         }
         (ColumnBuilder::FixedBinary(b), ColumnKind::FixedSizeBinary(_), StoredValue::Bytes(v)) => b
             .append_value(v.as_slice())
             .map_err(|e| DataFusionError::Execution(format!("FixedBinary append error: {e}")))?,
-        (ColumnBuilder::Binary { builder, .. }, ColumnKind::Binary, StoredValue::Bytes(v)) => {
+        (ColumnBuilder::Binary(builder), ColumnKind::Binary, StoredValue::Bytes(v)) => {
             builder.append_value(v.as_slice())
         }
         (
@@ -500,8 +415,13 @@ impl ProjectedBatchBuilder {
         let columns: Vec<ArrayRef> = self
             .builders
             .into_iter()
-            .map(ColumnBuilder::finish)
+            .zip(projected_schema.fields())
+            .map(|(builder, field)| builder.finish(field.data_type()))
             .collect::<DataFusionResult<Vec<_>>>()?;
-        Ok(RecordBatch::try_new(projected_schema.clone(), columns)?)
+        Ok(RecordBatch::try_new_with_options(
+            projected_schema.clone(),
+            columns,
+            &RecordBatchOptions::new().with_row_count(Some(self.row_count)),
+        )?)
     }
 }

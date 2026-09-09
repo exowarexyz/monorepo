@@ -235,6 +235,18 @@ pub fn next_key(key: &Key) -> Option<Key> {
     None
 }
 
+/// Return the greatest valid key strictly less than `key`.
+pub fn previous_key(key: &Key) -> Option<Key> {
+    let mut bytes = key.to_vec();
+    let last = bytes.pop()?;
+    if last == 0 {
+        return Some(Bytes::from(bytes));
+    }
+    bytes.push(last - 1);
+    bytes.resize(MAX_KEY_LEN, u8::MAX);
+    Some(Bytes::from(bytes))
+}
+
 pub(crate) fn read_bits_to_bytes(
     src: &[u8],
     src_bit_offset: usize,
@@ -436,6 +448,24 @@ mod tests {
         let next = next_key(&key).expect("next");
         assert_eq!(next.len(), MAX_KEY_LEN - 1);
         assert_eq!(next[MAX_KEY_LEN - 2], 0x13);
+    }
+
+    #[test]
+    fn previous_key_is_the_immediate_predecessor() {
+        for key in [
+            vec![0],
+            vec![1],
+            vec![1, 0],
+            vec![0xff],
+            vec![0; MAX_KEY_LEN],
+            vec![0xff; MAX_KEY_LEN],
+        ] {
+            let key = Bytes::from(key);
+            let previous = previous_key(&key).expect("nonempty key has a predecessor");
+            assert!(previous < key);
+            assert_eq!(next_key(&previous), Some(key));
+        }
+        assert_eq!(previous_key(&Bytes::new()), None);
     }
 
     #[test]

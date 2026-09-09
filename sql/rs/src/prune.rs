@@ -1,104 +1,95 @@
 use exoware_sdk::kv_codec::Utf8;
 use exoware_sdk::prune_policy::{
-    GroupBy, KeysScope, OrderBy, OrderEncoding, PrunePolicy, RetainPolicy,
+    validate_policy, GroupBy, KeysScope, OrderBy, OrderEncoding, PrunePolicy, RetainPolicy,
 };
 use exoware_sdk::selector::Selector;
 
-use crate::codec::primary_key_prefix;
+use crate::types::ColumnKind;
+use crate::KvSchema;
 
 const VERSION_WIDTH_BYTES: usize = 8;
 const ORDERED_UTF8_REGEX: &str = r"(?:\x01[\x00-\x02]|[^\x00\x01\xFF])*\x00";
 
-fn keep_latest_versions_with_regex(
-    table_prefix: u8,
-    min_entity_bytes: usize,
-    payload_regex: impl Into<Utf8>,
-    count: usize,
-) -> Result<PrunePolicy, String> {
-    let payload_regex = payload_regex.into();
-    if count == 0 {
-        return Err("keep_latest_versions count must be > 0".to_string());
-    }
-    let prefix = primary_key_prefix(table_prefix)?;
-    let required_bytes = min_entity_bytes
-        .checked_add(VERSION_WIDTH_BYTES)
-        .ok_or_else(|| "entity width overflowed when adding version width".to_string())?;
-    if required_bytes > prefix.max_payload_len() {
-        return Err(format!(
-            "entity width {min_entity_bytes} plus version width {VERSION_WIDTH_BYTES} exceeds primary key payload capacity {}",
-            prefix.max_payload_len()
-        ));
-    }
-
-    Ok(PrunePolicy {
-        scope: KeysScope {
-            selector: Selector {
-                prefix: prefix.as_bytes().clone(),
-                payload_regex,
+impl KvSchema {
+    /// Build a policy that keeps the latest `count` versions of each entity in
+    /// an unindexed table with an `(entity, UInt64 version)` primary key.
+    ///
+    /// The table's schema determines its key prefix and entity encoding. Apply
+    /// the policy through the same [`exoware_sdk::PrefixedStoreClient`] used to
+    /// create this schema.
+    ///
+    /// Store pruning does not cascade to secondary indexes. Disable this
+    /// primary-row retention policy before adding indexes to the table.
+    pub fn keep_latest_versions_policy(
+        &self,
+        table_name: &str,
+        count: usize,
+    ) -> Result<PrunePolicy, String> {
+        let table = self
+            .tables()
+            .iter()
+            .find(|(name, _)| name == table_name)
+            .map(|(_, table)| table)
+            .ok_or_else(|| format!("unknown table '{table_name}' for version retention"))?;
+        if !table.index_specs.is_empty() {
+            return Err(format!(
+                "version retention requires an unindexed table; '{table_name}' has secondary indexes"
+            ));
+        }
+        let model = &table.model;
+        let [entity, ColumnKind::UInt64] = model.primary_key_kinds.as_slice() else {
+            return Err(format!(
+                "table '{table_name}' requires an (entity, UInt64 version) primary key for version retention"
+            ));
+        };
+        if model.primary_key_indices[0] == model.primary_key_indices[1] {
+            return Err("entity and version must be distinct primary key columns".to_string());
+        }
+        let entity_regex = match entity.fixed_key_width() {
+            Some(width) => format!(".{{{width}}}"),
+            None => ORDERED_UTF8_REGEX.to_string(),
+        };
+        let policy = PrunePolicy {
+            scope: KeysScope {
+                selector: Selector {
+                    prefix: model.primary_key_prefix.as_bytes().clone(),
+                    payload_regex: format!(
+                        r"(?s-u)^(?P<entity>{entity_regex})(?P<version>.{{{VERSION_WIDTH_BYTES}}})$"
+                    )
+                    .into(),
+                },
+                group_by: GroupBy {
+                    capture_groups: vec![Utf8::from("entity")],
+                },
+                order_by: Some(OrderBy {
+                    capture_group: Utf8::from("version"),
+                    encoding: OrderEncoding::U64Be,
+                }),
             },
-            group_by: GroupBy {
-                capture_groups: vec![Utf8::from("entity")],
-            },
-            order_by: Some(OrderBy {
-                capture_group: Utf8::from("version"),
-                encoding: OrderEncoding::U64Be,
-            }),
-        },
-        retain: RetainPolicy::KeepLatest { count },
-    })
-}
-
-/// Build a prune policy that keeps the latest `count` versions for each entity
-/// in a `exoware-sql` versioned primary-key family with a fixed-width entity key.
-///
-/// The policy assumes the key layout created by `KvSchema::table_versioned`:
-/// `[entity bytes][u64_be version]` under the table's primary-key family.
-pub fn keep_latest_versions(
-    table_prefix: u8,
-    entity_key_width: usize,
-    count: usize,
-) -> Result<PrunePolicy, String> {
-    keep_latest_versions_with_regex(
-        table_prefix,
-        entity_key_width,
-        format!(
-            r"(?s-u)^(?P<entity>.{{{entity_key_width}}})(?P<version>.{{{VERSION_WIDTH_BYTES}}})$"
-        ),
-        count,
-    )
-}
-
-/// Build a prune policy that keeps the latest `count` versions for each entity
-/// in a `exoware-sql` versioned primary-key family whose entity column is `Utf8`.
-///
-/// `table_versioned()` encodes ordered UTF-8 keys as an escape-aware byte stream
-/// terminated by `0x00`, so the entity capture must be length-delimited by that
-/// terminator rather than by a caller-provided fixed width.
-pub fn keep_latest_versions_utf8(table_prefix: u8, count: usize) -> Result<PrunePolicy, String> {
-    keep_latest_versions_with_regex(
-        table_prefix,
-        1,
-        format!(r"(?s-u)^(?P<entity>{ORDERED_UTF8_REGEX})(?P<version>.{{{VERSION_WIDTH_BYTES}}})$"),
-        count,
-    )
+            retain: RetainPolicy::KeepLatest { count },
+        };
+        validate_policy(&policy).map_err(|e| e.to_string())?;
+        Ok(policy)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use std::collections::HashSet;
 
-    use super::{keep_latest_versions, keep_latest_versions_utf8, ORDERED_UTF8_REGEX};
+    use super::ORDERED_UTF8_REGEX;
     use crate::codec::{
         decode_variable_text, encode_primary_key, encode_string_variable, family_byte,
     };
     use crate::types::{
         KvTableConfig, TableColumnConfig, TableModel, PRIMARY_FAMILY_DISCRIMINATOR,
     };
-    use crate::CellValue;
+    use crate::{CellValue, IndexSpec, KvSchema};
     use datafusion::arrow::datatypes::DataType;
     use exoware_sdk::kv_codec::Utf8;
     use exoware_sdk::prune_policy::{validate_policy, OrderEncoding, RetainPolicy};
     use exoware_sdk::selector::compile_payload_regex;
+    use exoware_sdk::{StoreClient, StoreKeyPrefix};
 
     fn keys_scope(policy: &super::PrunePolicy) -> &super::KeysScope {
         &policy.scope
@@ -118,9 +109,41 @@ mod tests {
         TableModel::from_config(&config).expect("model")
     }
 
+    fn versioned_schema(entity_type: DataType) -> KvSchema {
+        let client =
+            StoreClient::new("http://localhost:10000").prefixed(StoreKeyPrefix::identity());
+        let mut schema = KvSchema::new(client);
+        for i in 0..3 {
+            schema = schema
+                .table(
+                    format!("preceding_{i}"),
+                    vec![TableColumnConfig::new("id", DataType::UInt64, false)],
+                    vec!["id".to_string()],
+                    vec![],
+                )
+                .expect("preceding table");
+        }
+        schema
+            .table_versioned(
+                "documents",
+                vec![
+                    TableColumnConfig::new("entity", entity_type, false),
+                    TableColumnConfig::new("version", DataType::UInt64, false),
+                ],
+                "entity",
+                "version",
+                vec![],
+            )
+            .expect("versioned table")
+    }
+
+    fn policy(entity_type: DataType, count: usize) -> Result<super::PrunePolicy, String> {
+        versioned_schema(entity_type).keep_latest_versions_policy("documents", count)
+    }
+
     #[test]
     fn keep_latest_versions_builds_expected_policy_for_fixed_width_entity() {
-        let policy = keep_latest_versions(3, 32, 1).expect("policy");
+        let policy = policy(DataType::FixedSizeBinary(32), 1).expect("policy");
         let scope = keys_scope(&policy);
         assert_eq!(
             &scope.selector.prefix[..],
@@ -145,19 +168,96 @@ mod tests {
 
     #[test]
     fn keep_latest_versions_rejects_zero_count() {
-        let err = keep_latest_versions(3, 32, 0).expect_err("zero count should fail");
+        let err = policy(DataType::FixedSizeBinary(32), 0).expect_err("zero count should fail");
         assert!(err.contains("count must be > 0"));
     }
 
     #[test]
-    fn keep_latest_versions_rejects_oversized_entity_width() {
-        let err = keep_latest_versions(3, 1000, 1).expect_err("oversized entity should fail");
-        assert!(err.contains("exceeds primary key payload capacity"));
+    fn keep_latest_versions_rejects_unknown_table() {
+        let err = versioned_schema(DataType::Utf8)
+            .keep_latest_versions_policy("missing", 1)
+            .expect_err("unknown table should fail");
+        assert!(err.contains("unknown table 'missing'"));
+    }
+
+    #[test]
+    fn keep_latest_versions_rejects_indexed_tables() {
+        let client =
+            StoreClient::new("http://localhost:10000").prefixed(StoreKeyPrefix::identity());
+        let schema = KvSchema::new(client)
+            .table_versioned(
+                "documents",
+                vec![
+                    TableColumnConfig::new("entity", DataType::Utf8, false),
+                    TableColumnConfig::new("version", DataType::UInt64, false),
+                    TableColumnConfig::new("tag", DataType::Int64, false),
+                    TableColumnConfig::new("title", DataType::Utf8, false),
+                ],
+                "entity",
+                "version",
+                vec![IndexSpec::lexicographic("tag_idx", vec!["tag".to_string()])
+                    .expect("index")
+                    .with_cover_columns(vec!["title".to_string()])],
+            )
+            .expect("indexed table");
+        let err = schema
+            .keep_latest_versions_policy("documents", 1)
+            .expect_err("primary-only pruning would leave secondary entries");
+        assert!(err.contains("'documents' has secondary indexes"));
+    }
+
+    #[test]
+    fn keep_latest_versions_rejects_non_versioned_layouts() {
+        for primary_key in [
+            vec!["entity"],
+            vec!["entity", "version", "tag"],
+            vec!["version", "entity"],
+            vec!["version", "version"],
+        ] {
+            let client =
+                StoreClient::new("http://localhost:10000").prefixed(StoreKeyPrefix::identity());
+            let schema = KvSchema::new(client)
+                .table(
+                    "documents",
+                    vec![
+                        TableColumnConfig::new("entity", DataType::Utf8, false),
+                        TableColumnConfig::new("version", DataType::UInt64, false),
+                        TableColumnConfig::new("tag", DataType::UInt64, false),
+                    ],
+                    primary_key.iter().map(|name| name.to_string()).collect(),
+                    vec![],
+                )
+                .expect("valid table");
+            assert!(
+                schema.keep_latest_versions_policy("documents", 1).is_err(),
+                "unsupported primary key {primary_key:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn duplicate_table_names_cannot_select_a_different_retention_layout() {
+        let schema = versioned_schema(DataType::Utf8);
+        assert_eq!(schema.table_count(), 4);
+        let policy = schema
+            .keep_latest_versions_policy("documents", 1)
+            .expect("original table policy");
+        assert_eq!(policy.scope.selector.prefix.as_ref(), &[family_byte(3, 0)]);
+        let err = schema
+            .table(
+                "documents",
+                vec![TableColumnConfig::new("id", DataType::Int64, false)],
+                vec!["id".to_string()],
+                vec![],
+            )
+            .err()
+            .expect("duplicate table name should fail");
+        assert_eq!(err, "duplicate table name 'documents'");
     }
 
     #[test]
     fn keep_latest_versions_utf8_builds_expected_policy() {
-        let policy = keep_latest_versions_utf8(3, 1).expect("policy");
+        let policy = policy(DataType::Utf8, 1).expect("policy");
         let scope = keys_scope(&policy);
         assert_eq!(
             &scope.selector.prefix[..],
@@ -187,7 +287,7 @@ mod tests {
     // equal to the big-endian version.
     #[test]
     fn keep_latest_versions_utf8_matches_variable_length_entity_payloads() {
-        let policy = keep_latest_versions_utf8(3, 1).expect("policy");
+        let policy = policy(DataType::Utf8, 1).expect("policy");
         let scope = keys_scope(&policy);
         let regex = compile_payload_regex(&scope.selector.payload_regex).expect("regex");
         let model = entity_version_model(DataType::Utf8);
@@ -254,7 +354,7 @@ mod tests {
 
     #[test]
     fn keep_latest_versions_matches_fixed_width_entity_payloads() {
-        let policy = keep_latest_versions(3, 8, 1).expect("policy");
+        let policy = policy(DataType::UInt64, 1).expect("policy");
         let scope = keys_scope(&policy);
         let regex = compile_payload_regex(&scope.selector.payload_regex).expect("regex");
         let model = entity_version_model(DataType::UInt64);
@@ -288,7 +388,7 @@ mod tests {
 
     #[test]
     fn keep_latest_versions_utf8_regex_rejects_malformed_payloads() {
-        let policy = keep_latest_versions_utf8(3, 1).expect("policy");
+        let policy = policy(DataType::Utf8, 1).expect("policy");
         let scope = keys_scope(&policy);
         let regex = compile_payload_regex(&scope.selector.payload_regex).expect("regex");
 
