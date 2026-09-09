@@ -530,6 +530,62 @@ async fn covering_index_supplies_reverse_suffix_order_and_limit() {
 }
 
 #[tokio::test]
+async fn sort_pushdown_ignores_constant_key_prefix_columns() {
+    for indexed in [false, true] {
+        let fixture = Fixture::new(
+            vec![
+                column("a", DataType::Int64, false),
+                column("b", DataType::Int64, false),
+            ],
+            if indexed { &["b"] } else { &["a", "b"] },
+            if indexed {
+                vec![index("a", &["a"], &[])]
+            } else {
+                vec![]
+            },
+            vec![
+                Arc::new(Int64Array::from(vec![1, 1, 1, 1, 2])),
+                Arc::new(Int64Array::from(vec![1, 2, 3, 4, 5])),
+            ],
+        )
+        .await;
+        for (columns, ordering, forward) in [
+            ("a, b", "b", true),
+            ("a, b", "a, b", true),
+            ("a, b", "a DESC, b DESC", false),
+            ("a, b", "a ASC, b DESC", false),
+            ("a, b", "b ASC, a DESC", true),
+            ("b, a", "a, b DESC", false),
+            ("a", "a DESC", true),
+        ] {
+            let sql =
+                format!("SELECT {columns} FROM orders WHERE a = 1 ORDER BY {ordering} LIMIT 2");
+            let plan = fixture
+                .store
+                .sql(&sql)
+                .await
+                .unwrap()
+                .create_physical_plan()
+                .await
+                .unwrap();
+            let rendered = datafusion::physical_plan::displayable(plan.as_ref())
+                .indent(true)
+                .to_string();
+            assert!(
+                !rendered.contains("SortExec"),
+                "{sql} (indexed={indexed})\n{rendered}"
+            );
+            let requests = fixture.check(&sql).await;
+            assert!(
+                matches!(requests.as_slice(), [Request::Range { start, limit: 2, forward: actual, .. }]
+                    if *actual == forward && (!indexed || fixture.index_matches(0, start))),
+                "{sql} (indexed={indexed}): {requests:?}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
 async fn covering_index_with_multiple_prefix_values_retains_global_sort() {
     let fixture = Fixture::new(
         vec![

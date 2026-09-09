@@ -172,6 +172,24 @@ impl KvAggregatePushdownRule {
         Self
     }
 
+    fn rewrite_with_limit(
+        &self,
+        plan: LogicalPlan,
+        limited: bool,
+    ) -> DataFusionResult<Transformed<LogicalPlan>> {
+        // DataFusion only stops distinct aggregation early when the limit sits directly above it.
+        let input_limited = matches!(plan, LogicalPlan::Limit(_)) && plan.fetch()?.is_some();
+        plan.map_children(|input| self.rewrite_with_limit(input, input_limited))?
+            .transform_data(|node| {
+                if limited
+                    && matches!(&node, LogicalPlan::Aggregate(aggregate) if aggregate.aggr_expr.is_empty())
+                {
+                    return Ok(Transformed::no(node));
+                }
+                self.try_rewrite_plan(node)
+            })
+    }
+
     pub(crate) fn try_rewrite_plan(
         &self,
         plan: LogicalPlan,
@@ -273,16 +291,7 @@ impl OptimizerRule for KvAggregatePushdownRule {
         plan: LogicalPlan,
         _config: &dyn datafusion::optimizer::optimizer::OptimizerConfig,
     ) -> DataFusionResult<Transformed<LogicalPlan>> {
-        let bounded = plan.exists(|node| Ok(node.fetch()?.is_some()))?;
-        plan.transform_up(|node| {
-            // Native distinct aggregation can stop after enough groups satisfy a limit
-            if bounded
-                && matches!(&node, LogicalPlan::Aggregate(aggregate) if aggregate.aggr_expr.is_empty())
-            {
-                return Ok(Transformed::no(node));
-            }
-            self.try_rewrite_plan(node)
-        })
+        self.rewrite_with_limit(plan, false)
     }
 }
 

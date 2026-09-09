@@ -275,7 +275,7 @@ impl Service for SqlConnect {
                 &table_name,
                 &where_sql,
             )
-            .map_err(|err| ConnectError::invalid_argument(err.to_string()))?;
+            .map_err(datafusion_error_to_connect)?;
 
             let filter = StreamFilter {
                 selectors: vec![stream.selector.clone()],
@@ -553,13 +553,18 @@ fn compile_subscription_predicate(
 }
 
 fn datafusion_error_to_connect(err: DataFusionError) -> ConnectError {
-    match err {
+    // DataFusion wraps planner errors in Diagnostic and Context layers, so classify the root cause.
+    match err.find_root() {
         DataFusionError::Plan(msg)
-        | DataFusionError::SQL(_, Some(msg))
         | DataFusionError::Configuration(msg)
-        | DataFusionError::NotImplemented(msg) => ConnectError::invalid_argument(msg),
-        DataFusionError::SchemaError(err, _) => ConnectError::invalid_argument(err.to_string()),
-        other => ConnectError::internal(other.to_string()),
+        | DataFusionError::NotImplemented(msg) => ConnectError::invalid_argument(msg.clone()),
+        DataFusionError::SQL(parser_error, _) => {
+            ConnectError::invalid_argument(parser_error.to_string())
+        }
+        DataFusionError::SchemaError(schema_error, _) => {
+            ConnectError::invalid_argument(schema_error.to_string())
+        }
+        _ => ConnectError::internal(err.to_string()),
     }
 }
 
@@ -768,6 +773,58 @@ mod tests {
             check_ipc_fixture(name, &response.results);
         }
         task.abort();
+    }
+
+    #[tokio::test]
+    async fn query_parse_errors_map_to_invalid_argument() {
+        let ctx = SessionContext::new();
+        let DataFusionError::SQL(parser_error, _) = ctx.sql("SELECT FROM").await.unwrap_err()
+        else {
+            panic!("malformed SQL did not return a parser error");
+        };
+        let expected_message = parser_error.to_string();
+        for backtrace in [None, Some("backtrace ...".to_string())] {
+            let connect_error =
+                datafusion_error_to_connect(DataFusionError::SQL(parser_error.clone(), backtrace));
+            assert_eq!(connect_error.code, connectrpc::ErrorCode::InvalidArgument);
+            assert_eq!(
+                connect_error.message.as_deref(),
+                Some(expected_message.as_str()),
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn wrapped_planning_errors_map_to_invalid_argument() {
+        let ctx = SessionContext::new();
+        for sql in ["SELECT * FROM nope", "SELECT 1 + 'a'", "SELECT 1 LIMIT 'x'"] {
+            let query_error = match ctx.sql(sql).await {
+                Ok(frame) => frame.create_physical_plan().await.unwrap_err(),
+                Err(err) => err,
+            };
+            assert!(
+                matches!(
+                    query_error,
+                    DataFusionError::Diagnostic(..) | DataFusionError::Context(..)
+                ),
+                "{sql}: {query_error:?}"
+            );
+            let DataFusionError::Plan(expected_message) = query_error.find_root() else {
+                panic!("{sql}: {query_error:?}");
+            };
+            let expected_message = expected_message.clone();
+            let connect_error = datafusion_error_to_connect(query_error);
+            assert_eq!(
+                connect_error.code,
+                connectrpc::ErrorCode::InvalidArgument,
+                "{sql}"
+            );
+            assert_eq!(
+                connect_error.message.as_deref(),
+                Some(expected_message.as_str()),
+                "{sql}"
+            );
+        }
     }
 
     enum ControlledEvent {

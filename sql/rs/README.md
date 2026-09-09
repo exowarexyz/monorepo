@@ -217,9 +217,12 @@ per range.
 
 Integer arithmetic and sums use the wrapping behavior of DataFusion's ordinary
 SQL expressions. AVG converts each integer input to double before accumulation.
-NULLs retain SQL aggregate semantics, and malformed stored rows or expression
-evaluation failures return query errors. Requests use one read session with a
-shared minimum sequence number. That freshness floor does not pin a snapshot.
+NULLs retain SQL aggregate semantics. Reduce returns query errors when required
+payload decoding or expression evaluation fails. Requests without value-dependent
+expressions do not decode payloads. Native base-row scans skip undecodable
+payloads, so queries over corrupt data can behave differently across plans.
+Requests use one read session with a shared minimum sequence number.
+That freshness floor does not pin a snapshot.
 Jobs and ranges retain their execution and merge order.
 
 Unsupported shapes use the normal streaming scan and DataFusion execution.

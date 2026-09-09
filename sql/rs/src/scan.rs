@@ -269,7 +269,7 @@ impl KvScanExec {
         let index_plan =
             self.predicate
                 .choose_index_plan(&self.model, &self.index_specs, &access_plan)?;
-        let key_columns = if let Some(plan) = index_plan {
+        let (key_columns, constant_prefix_len) = if let Some(plan) = index_plan {
             let spec = &self.index_specs[plan.spec_idx];
             if spec.layout != IndexLayout::Lexicographic
                 || !access_plan.index_covers_required_non_pk(spec)
@@ -301,9 +301,9 @@ impl KvScanExec {
             }) {
                 return Ok(None);
             }
-            columns
-                .into_iter()
-                .skip_while(|&i| {
+            let constant_prefix_len = columns
+                .iter()
+                .take_while(|&&i| {
                     self.predicate.constraints.get(&i).is_some_and(|c| {
                         !matches!(
                             c,
@@ -314,43 +314,53 @@ impl KvScanExec {
                         ) && QueryPredicate::constraint_is_point(self.model.column(i).kind, c)
                     })
                 })
-                .collect::<Vec<_>>()
+                .count();
+            (columns, constant_prefix_len)
         } else {
-            self.primary_key_order_columns_after_eq_prefix().to_vec()
+            (
+                self.model.primary_key_indices.clone(),
+                self.primary_key_point_prefix_len(),
+            )
         };
-        if order.len() > key_columns.len() {
-            return Ok(None);
-        }
+        let (constant_columns, ordered_columns) = key_columns.split_at(constant_prefix_len);
+        let mut ordered_columns = ordered_columns.iter();
+        let mut direction = None;
 
-        let first_desc = order[0].options.descending;
-        let direction = if first_desc {
-            RangeMode::Reverse
-        } else {
-            RangeMode::Forward
-        };
-
-        for (sort_expr, &expected_col_idx) in order.iter().zip(key_columns.iter()) {
-            if sort_expr.options.descending != first_desc {
-                return Ok(None);
-            }
+        for sort_expr in order {
             let Some(column) = sort_expr.expr.downcast_ref::<Column>() else {
                 return Ok(None);
             };
-            let actual_col_idx = self
+            let Some(actual_col_idx) = self
                 .projection
                 .as_ref()
                 .map_or(Some(column.index()), |proj| {
                     proj.get(column.index()).copied()
-                });
-            if actual_col_idx != Some(expected_col_idx) {
+                })
+            else {
+                return Ok(None);
+            };
+            if constant_columns.contains(&actual_col_idx) {
+                continue;
+            }
+            let requested_direction = if sort_expr.options.descending {
+                RangeMode::Reverse
+            } else {
+                RangeMode::Forward
+            };
+            if ordered_columns.next() != Some(&actual_col_idx)
+                || direction.is_some_and(|current| current != requested_direction)
+            {
                 return Ok(None);
             }
+            direction = Some(requested_direction);
         }
 
-        Ok(Some(direction))
+        Ok(Some(direction.unwrap_or(self.scan_direction())))
     }
 
-    fn primary_key_order_columns_after_eq_prefix(&self) -> &[usize] {
+    // Leading point-constrained key columns are fixed by the scanned range, so any
+    // requested ordering over them is trivially satisfied.
+    fn primary_key_point_prefix_len(&self) -> usize {
         let mut prefix_encoded_width = 0usize;
 
         for (position, (&col_idx, &kind)) in self
@@ -361,7 +371,7 @@ impl KvScanExec {
             .enumerate()
         {
             let Some(constraint) = self.predicate.constraints.get(&col_idx) else {
-                return &self.model.primary_key_indices[position..];
+                return position;
             };
             match primary_key_range_constraint_for_prefix(
                 self.model.primary_key_prefix.max_payload_len(),
@@ -373,12 +383,12 @@ impl KvScanExec {
                     prefix_encoded_width += point.encoded_width;
                 }
                 PrimaryKeyRangeConstraint::Terminal(_) | PrimaryKeyRangeConstraint::NotEnforced => {
-                    return &self.model.primary_key_indices[position..];
+                    return position;
                 }
             }
         }
 
-        &[]
+        self.model.primary_key_indices.len()
     }
 
     pub(crate) fn plan_diagnostics(&self) -> DataFusionResult<AccessPathDiagnostics> {

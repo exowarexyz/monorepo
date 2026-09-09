@@ -448,6 +448,41 @@ async fn limited_distinct_preserves_native_aggregation_limits() {
 }
 
 #[tokio::test]
+async fn limit_outside_the_aggregate_keeps_group_only_pushdown() {
+    let fixture = Fixture::new().await;
+
+    // Sorting requires all groups before the limit can select its result.
+    for sql in [
+        "SELECT region FROM orders GROUP BY region ORDER BY region LIMIT 10",
+        "SELECT region FROM orders GROUP BY region ORDER BY region DESC LIMIT 1",
+    ] {
+        fixture.check(sql, 1).await;
+    }
+}
+
+#[tokio::test]
+async fn limit_on_an_unrelated_branch_keeps_group_only_pushdown() {
+    let fixture = Fixture::new().await;
+    let sql = "SELECT r.region FROM (SELECT DISTINCT region FROM orders) r \
+               CROSS JOIN (SELECT id FROM orders LIMIT 1) l ORDER BY r.region";
+    let expected = values(&fixture.native, sql).await.unwrap();
+    fixture.rows.paths.lock().unwrap().clear();
+    let actual = values(&fixture.store, sql).await.unwrap();
+    assert_eq!(actual, expected, "{sql}");
+    let paths = fixture.rows.paths.lock().unwrap().clone();
+    assert_eq!(
+        paths.iter().filter(|p| p.ends_with("/Reduce")).count(),
+        1,
+        "{sql}: {paths:?}"
+    );
+    assert_eq!(
+        paths.iter().filter(|p| p.ends_with("/Range")).count(),
+        1,
+        "{sql}: {paths:?}"
+    );
+}
+
+#[tokio::test]
 async fn interleaved_jobs_preserve_output_positions() {
     let fixture = Fixture::new().await;
     fixture.check("SELECT SUM(amount), COUNT(*) FILTER (WHERE status = 'open'), AVG(amount), MIN(amount), MAX(amount) FROM orders", 2).await;
