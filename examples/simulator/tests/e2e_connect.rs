@@ -639,11 +639,14 @@ async fn reduce_grouped_count() {
         filter: None,
     };
     let session = client.create_session();
+    assert_eq!(session.fixed_sequence(), None);
+
     let mut stream = session
         .range_reduce_stream(&ka1, &kb1, &request)
         .await
         .expect("reduce");
-    assert_eq!(session.fixed_sequence(), None);
+    assert_eq!(session.fixed_sequence(), Some(sequence));
+
     let mut groups = 0;
     while let Some(frame) = stream.next().await {
         let frame = frame.expect("reduce frame");
