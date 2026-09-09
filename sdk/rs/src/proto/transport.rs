@@ -8,12 +8,12 @@
 //!
 //! ## Rust client transport
 //!
-//! HTTP and HTTPS transport that prefers zstd response compression for unary and streaming RPCs.
+//! HTTP and HTTPS transport that prefers zstd for the default response codecs.
 //!
 //! [`connectrpc::compression::CompressionRegistry::default`] builds the header value in sorted
-//! order (`gzip, zstd`), so servers negotiate **gzip** first. Replacing `Accept-Encoding` and
-//! `Connect-Accept-Encoding` after connectrpc builds the request lets clients **prefer zstd**
-//! while still advertising gzip.
+//! order (`gzip, zstd`), so servers negotiate **gzip** first. `Accept-Encoding` prefers zstd
+//! over gzip. Streaming calls reorder the native `gzip, zstd` declaration; custom codec lists
+//! retain their configured ordering and capabilities.
 //!
 //! **Request bodies** (client -> server) use a single codec from connectrpc `compress_requests`.
 //!
@@ -268,11 +268,12 @@ impl ClientMetadata {
             http::HeaderValue::from_static("zstd, gzip"),
         );
         let streaming_encoding = Protocol::Connect.accept_encoding_header();
-        if request.headers().contains_key(streaming_encoding) {
-            request.headers_mut().insert(
-                streaming_encoding,
-                http::HeaderValue::from_static("zstd, gzip"),
-            );
+        if let Some(encoding) = request
+            .headers_mut()
+            .get_mut(streaming_encoding)
+            .filter(|encoding| encoding.as_bytes() == b"gzip, zstd")
+        {
+            *encoding = http::HeaderValue::from_static("zstd, gzip");
         }
 
         if let Some(ref authorization) = self.authorization {
@@ -550,7 +551,7 @@ pub fn connect_compression_registry() -> CompressionRegistry {
     CompressionRegistry::default()
 }
 
-/// Wraps [`HttpClient`] so unary and streaming RPC responses prefer zstd (see module docs).
+/// Wraps [`HttpClient`] with zstd first for the default response codecs (see module docs).
 ///
 /// Also persists HTTP cookies: every `Set-Cookie` response header is stored in an RFC6265 jar and
 /// replayed as `Cookie` when it matches a later request URL.

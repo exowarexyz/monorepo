@@ -72,6 +72,52 @@ async fn put_overwrites_value() {
 // -- get_many --
 
 #[tokio::test]
+async fn generated_stream_preserves_compression_capabilities() {
+    use connectrpc::compression::{CompressionRegistry, GzipProvider};
+    use exoware_sdk::query::{GetManyRequest, ServiceClient};
+
+    let (client, url) = spawn_client().await;
+    let key = key(b"compressed");
+    let value = vec![b'x'; 4096];
+    let sequence = client.ingest().put(&[(&key, &value)]).await.unwrap();
+    for (registry, encoding) in [
+        (
+            CompressionRegistry::new().register(GzipProvider::default()),
+            "gzip",
+        ),
+        (connect_compression_registry(), "zstd"),
+    ] {
+        let query = ServiceClient::new(
+            PreferZstdHttpClient::plaintext(),
+            ClientConfig::new(url.parse().unwrap()).with_compression(registry),
+        );
+        let mut stream = query
+            .get_many(GetManyRequest {
+                keys: vec![key.to_vec()],
+                min_sequence_number: Some(sequence),
+                batch_size: 1,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let frame = stream.message().await.unwrap().unwrap();
+        let entries = &frame.view().results;
+        assert_eq!(entries.len(), 1);
+        let entry = entries.first().unwrap();
+        assert_eq!(entry.key, key.as_ref());
+        assert_eq!(entry.value, Some(value.as_slice()));
+        assert_eq!(
+            stream
+                .headers()
+                .get(connectrpc::Protocol::Connect.content_encoding_header())
+                .unwrap(),
+            encoding,
+        );
+        assert!(stream.message().await.unwrap().is_none());
+    }
+}
+
+#[tokio::test]
 async fn get_many_returns_found_and_missing() {
     let (client, _url) = spawn_client().await;
     let ka = key(b"a");

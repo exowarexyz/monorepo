@@ -1,6 +1,6 @@
 //! Native worker aggregation over evaluated Store expressions.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::sync::{Arc, Mutex};
 
@@ -132,6 +132,7 @@ impl ReducePlan {
         }
         let mut result_kinds = Vec::with_capacity(request.reducers.len());
         let mut reducer_columns: Vec<ReduceColumn> = Vec::new();
+        let mut field_columns = HashMap::new();
         let mut arguments: Vec<Arc<dyn PhysicalExpr>> = Vec::with_capacity(request.reducers.len());
         for reducer in &request.reducers {
             let Some(expr) = &reducer.expr else {
@@ -153,11 +154,7 @@ impl ReducePlan {
             };
             result_kinds.push(result_kind);
             let ordered_float = matches!(result_kind, ResultKind::OrderedFloat);
-            let existing = reducer_columns.iter().position(|column| {
-                column.ordered_float == ordered_float
-                    && matches!((&column.expr, expr), (KvExpr::Field(left), KvExpr::Field(right)) if left == right)
-            });
-            let index = existing.unwrap_or_else(|| {
+            let insert_column = || {
                 let index = reducer_columns.len();
                 fields.push(Field::new(format!("value_{index}"), data_type, true));
                 reducer_columns.push(ReduceColumn {
@@ -165,7 +162,13 @@ impl ReducePlan {
                     ordered_float,
                 });
                 index
-            });
+            };
+            let index = match expr {
+                KvExpr::Field(field) => *field_columns
+                    .entry((field, ordered_float))
+                    .or_insert_with(insert_column),
+                _ => insert_column(),
+            };
             arguments.push(Arc::new(Column::new(
                 &format!("value_{index}"),
                 request.group_by.len() + index,
@@ -1152,6 +1155,22 @@ mod tests {
         assert_eq!(response.results.len(), 2);
         assert_eq!(response.results[0].value, result_u64(3));
         assert_eq!(response.results[1].value, result_i64(40));
+    }
+
+    #[test]
+    fn scalar_reducer_handles_all_field_indexes() {
+        let request = scalar_request(
+            (0..=u16::MAX)
+                .map(|index| reducer(RangeReduceOp::CountField, Some(int64_value_field(index))))
+                .collect(),
+        );
+        let response = reduce(&[], &request).unwrap();
+        assert_eq!(response.results.len(), usize::from(u16::MAX) + 1);
+        assert!(response
+            .results
+            .iter()
+            .all(|result| result.value == result_u64(0)));
+        assert!(response.groups.is_empty());
     }
 
     #[test]

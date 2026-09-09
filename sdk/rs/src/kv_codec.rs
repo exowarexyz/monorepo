@@ -82,7 +82,7 @@ impl Read for Utf8 {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum KvFieldKind {
     Int64,
     UInt64,
@@ -97,7 +97,7 @@ pub enum KvFieldKind {
     FixedSizeBinary(u8),
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum KvFieldRef {
     Key {
         byte_offset: u16,

@@ -1,12 +1,14 @@
-import { create, toBinary } from '@bufbuild/protobuf';
-import { Code } from '@connectrpc/connect';
+import { create, toBinary, toJsonString } from '@bufbuild/protobuf';
+import { Code, ConnectError } from '@connectrpc/connect';
 import { encodeEnvelope } from '@connectrpc/connect/protocol';
 import { Client } from '../src/client';
 import { HttpError } from '../src/error';
 import {
     ReduceParamsSchema,
     ReduceResponseSchema,
+    RangeReduceOp,
     type ReduceRequest,
+    type ReduceResponse,
 } from '../src/gen/ts/store/v1/query_pb';
 import { SerializableReadSession, StoreClient } from '../src/store';
 
@@ -28,24 +30,80 @@ function clientWithReduce(reduce: Client['query']['reduce']): Client {
     return { query: { reduce }, credential: 'absent' } as unknown as Client;
 }
 
-function response(groups: bigint[], code?: string): Response {
+function response(frames: ReduceResponse[], code?: string, useBinaryFormat = true): Response {
     return new Response(new ReadableStream<Uint8Array>({
         start(controller) {
-            for (const group of groups) {
-                controller.enqueue(encodeEnvelope(0, toBinary(ReduceResponseSchema, frame(group))));
+            for (const frame of frames) {
+                const bytes = useBinaryFormat
+                    ? toBinary(ReduceResponseSchema, frame)
+                    : new TextEncoder().encode(toJsonString(ReduceResponseSchema, frame));
+                controller.enqueue(encodeEnvelope(0, bytes));
             }
             const terminal = code ? { error: { code, message: 'retryable failure' } } : {};
             controller.enqueue(encodeEnvelope(2, new TextEncoder().encode(JSON.stringify(terminal))));
             controller.close();
         },
-    }), { headers: { 'content-type': 'application/connect+proto' } });
+    }), { headers: { 'content-type': `application/connect+${useBinaryFormat ? 'proto' : 'json'}` } });
 }
+
+describe.each([true, false])('Reduce responses with binary format %s', (useBinaryFormat) => {
+    test.each(['client', 'store', 'session'])('rejects a missing response through %s', async (kind) => {
+        let signal: AbortSignal | null | undefined;
+        const fetch = jest.spyOn(globalThis, 'fetch').mockImplementation(async (_input, init) => {
+            signal = init?.signal;
+            return response([], undefined, useBinaryFormat);
+        });
+        try {
+            const client = new Client('http://reduce.test', {
+                token: '', useBinaryFormat,
+                retry: { maxAttempts: 3, initialBackoffMs: 0, maxBackoffMs: 0 },
+            });
+            const session = new SerializableReadSession(client);
+            const params = create(ReduceParamsSchema, { reducers: [{ op: RangeReduceOp.COUNT_ALL }] });
+            const stream = kind === 'client'
+                ? client.query.reduce({ start, end, params })
+                : (kind === 'store' ? new StoreClient(client) : session).reduce(start, end, params);
+            const next = stream[Symbol.asyncIterator]().next();
+            if (kind === 'client') {
+                await expect(next).rejects.toBeInstanceOf(ConnectError);
+                await expect(next).rejects.toMatchObject({ code: Code.Internal });
+            } else {
+                await expect(next).rejects.toBeInstanceOf(HttpError);
+                await expect(next).rejects.toMatchObject({ status: 500, connectCode: Code.Internal });
+            }
+            expect(fetch).toHaveBeenCalledTimes(1);
+            expect(signal?.aborted).toBe(true);
+            if (kind === 'session') expect(session.fixedSequence()).toBeUndefined();
+        } finally {
+            fetch.mockRestore();
+        }
+    });
+
+    test('accepts a detail-only frame for an empty grouped reduction', async () => {
+        const detail = create(ReduceResponseSchema, { detail: { sequenceNumber: 7n } });
+        const fetch = jest.spyOn(globalThis, 'fetch').mockImplementation(async () =>
+            response([detail], undefined, useBinaryFormat));
+        try {
+            const session = new SerializableReadSession(new Client('http://reduce.test', { token: '', useBinaryFormat }));
+            const params = create(ReduceParamsSchema, {
+                groupBy: [{ expr: { case: 'literal', value: { value: { case: 'uint64Value', value: 1n } } } }],
+            });
+            const stream = session.reduce(start, end, params)[Symbol.asyncIterator]();
+            expect((await stream.next()).value).toEqual(detail);
+            expect(session.fixedSequence()).toBe(7n);
+            expect((await stream.next()).done).toBe(true);
+            expect(fetch).toHaveBeenCalledTimes(1);
+        } finally {
+            fetch.mockRestore();
+        }
+    });
+});
 
 test.each(['aborted', 'unavailable', 'resource_exhausted'])('reduce retries %s before its first frame', async (code) => {
     const requests: Array<BodyInit | null | undefined> = [];
     const fetch = jest.spyOn(globalThis, 'fetch').mockImplementation(async (_input, init) => {
         requests.push(init?.body);
-        return requests.length === 1 ? response([], code) : response([1n]);
+        return requests.length === 1 ? response([], code) : response([frame(1n)]);
     });
     try {
         const client = new Client('http://reduce.test', {
@@ -158,7 +216,7 @@ test('reduce observes metadata on frame consumption and sends the fixed session 
 });
 
 test('reduce returns a midstream error without replaying delivered groups', async () => {
-    const fetch = jest.spyOn(globalThis, 'fetch').mockImplementation(async () => response([1n], 'unavailable'));
+    const fetch = jest.spyOn(globalThis, 'fetch').mockImplementation(async () => response([frame(1n)], 'unavailable'));
     try {
         const client = new Client('http://reduce.test', {
             token: '',

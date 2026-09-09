@@ -237,6 +237,9 @@ pub fn next_key(key: &Key) -> Option<Key> {
 
 /// Return the greatest valid key strictly less than `key`.
 pub fn previous_key(key: &Key) -> Option<Key> {
+    if key.len() > MAX_KEY_LEN {
+        return Some(key.slice(..MAX_KEY_LEN));
+    }
     let mut bytes = key.to_vec();
     let last = bytes.pop()?;
     if last == 0 {
@@ -466,6 +469,23 @@ mod tests {
             assert_eq!(next_key(&previous), Some(key));
         }
         assert_eq!(previous_key(&Bytes::new()), None);
+    }
+
+    #[test]
+    fn previous_key_clamps_oversized_bounds() {
+        for len in [MAX_KEY_LEN + 1, MAX_KEY_LEN + 2, 1024] {
+            for fill in [0, 1, 0xff] {
+                for last in [0, 1, 0xff] {
+                    let mut bytes = vec![fill; len];
+                    bytes[len - 1] = last;
+                    let key = Bytes::from(bytes);
+                    let previous = previous_key(&key).expect("nonempty bound");
+                    assert!(previous < key);
+                    assert_eq!(previous, key.slice(..MAX_KEY_LEN));
+                    assert!(validate_key_size(previous.len()).is_ok());
+                }
+            }
+        }
     }
 
     #[test]

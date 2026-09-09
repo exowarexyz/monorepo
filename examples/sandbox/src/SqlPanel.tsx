@@ -44,6 +44,17 @@ function formatCell(value: unknown): string {
 
 function formatVector(vector: Vector): (row: number) => string {
   const type = vector.type;
+  if (DataType.isDictionary(type)) {
+    const formatted = vector.data.flatMap((data) => {
+      const indices = new Vector([data.clone(type.indices)]);
+      const format = formatVector(data.dictionary!);
+      return Array.from({ length: indices.length }, (_, row) => {
+        const index = indices.get(row);
+        return index === null ? 'NULL' : format(Number(index));
+      });
+    });
+    return (row) => formatted[row];
+  }
   if (DataType.isMap(type)) {
     return formatVector(new Vector(vector.data.map((data) => data.clone(new List(type.children[0])))));
   }

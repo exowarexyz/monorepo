@@ -34,6 +34,40 @@ for (const [name, expected] of [
   });
 }
 
+test('SQL dictionary cells preserve exact values across sliced chunks', async () => {
+  const server = await createServer({ server: { middlewareMode: true } });
+  try {
+    const { ArrowRows } = await server.ssrLoadModule('/src/SqlPanel.tsx');
+    const { Dictionary, Int32, Int64, RecordBatchReader, Table, makeData, makeVector } =
+      await server.ssrLoadModule('../../sql/ts/node_modules/apache-arrow/Arrow.node.mjs');
+    const bytes = await readFile(new URL('../../../sql/ts/tests/fixtures/layouts.arrow', import.meta.url));
+    const source = new Table(RecordBatchReader.from(bytes));
+    for (const [name, first, last] of [
+      ['decimal256', '-123.45', '90071992547409.93'],
+      ['dates', '9223372036828800000 millisecond since epoch', '-9223372036828800000 millisecond since epoch'],
+    ]) {
+      const dictionary = source.getChild(name);
+      for (const indices of [new Int32(), new Int64()]) {
+        const type = new Dictionary(dictionary.type, indices);
+        const keys = indices.bitWidth === 64 ? new BigInt64Array([0n, 0n, 1n, 0n]) : new Int32Array([0, 0, 1, 0]);
+        const leading = makeVector(makeData({
+          type, data: keys, dictionary: dictionary.slice(0, 2), length: 4,
+          nullBitmap: new Uint8Array([0b0111]), nullCount: 1,
+        })).slice(1, 4);
+        const trailing = makeVector(makeData({
+          type, data: keys.subarray(0, 2), dictionary: dictionary.slice(2, 3), length: 2,
+        })).slice(1, 2);
+        const values = leading.concat(trailing);
+        const html = renderToStaticMarkup(createElement(ArrowRows, { table: new Table({ values }) }));
+        const cells = [...html.matchAll(/<strong>values:<\/strong> ([^<]*)<\/p>/g)].map((match) => match[1]);
+        assert.deepEqual(cells, [first, 'NULL', 'NULL', last], `${name}, ${indices}`);
+      }
+    }
+  } finally {
+    await server.close();
+  }
+});
+
 test('SQL temporal lists preserve exact values and nulls in sliced vectors', async () => {
   const server = await createServer({ server: { middlewareMode: true } });
   try {

@@ -45,9 +45,6 @@ pub fn session_state_builder() -> datafusion::execution::session_state::SessionS
 }
 
 #[cfg(test)]
-mod scan_tests;
-
-#[cfg(test)]
 mod tests {
     #![allow(refining_impl_trait)]
 

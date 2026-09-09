@@ -59,13 +59,12 @@ function makeRetryInterceptor(config: RetryConfig): Interceptor {
                     // Before any result is exposed, a retry cannot duplicate delivered groups.
                     const iterator = response.message[Symbol.asyncIterator]();
                     const first = await iterator.next();
+                    if (first.done) throw new ConnectError('reduction stream returned no frames', Code.Internal);
                     return {
                         ...response,
                         message: (async function* () {
-                            if (!first.done) {
-                                yield first.value;
-                                yield* { [Symbol.asyncIterator]: () => iterator };
-                            }
+                            yield first.value;
+                            yield* { [Symbol.asyncIterator]: () => iterator };
                         })(),
                     };
                 }
