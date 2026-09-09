@@ -636,7 +636,7 @@ fn datafusion_error_to_connect(err: DataFusionError) -> ConnectError {
 
 fn client_error_to_connect(err: &exoware_sdk::ClientError) -> ConnectError {
     if let Some(rpc) = err.rpc_error() {
-        ConnectError::new(rpc.code, rpc.message.clone().unwrap_or_default())
+        rpc.clone()
     } else {
         ConnectError::internal(err.to_string())
     }

@@ -438,12 +438,12 @@ impl PrefixedStoreClient {
         Stream { c: self }
     }
 
-    /// Create an unseeded serializable read session over this namespace.
+    /// Create a serializable read session with no initial floor over this namespace.
     pub fn create_session(&self) -> SerializableReadSession {
         self.create_session_with_sequence(0)
     }
 
-    /// Create a serializable read session pinned to at least `sequence`.
+    /// Create a serializable read session whose read floor starts at `sequence`.
     pub fn create_session_with_sequence(&self, sequence: u64) -> SerializableReadSession {
         SerializableReadSession {
             client: self.clone(),
@@ -1719,9 +1719,8 @@ struct SessionState {
 impl SessionState {
     fn fixed_sequence(&self) -> Option<u64> {
         let sequence = self.sequence.load(Ordering::Acquire);
-        (sequence > 0)
-            .then_some(sequence)
-            .or_else(|| (self.minimum_sequence > 0).then_some(self.minimum_sequence))
+        let floor = self.minimum_sequence.max(sequence);
+        (floor > 0).then_some(floor)
     }
 
     fn evaluated_sequence(&self) -> Option<u64> {
@@ -1796,7 +1795,7 @@ impl StoreClient {
     /// Submit a KV batch via Connect `Put`.
     ///
     /// On success returns the **store sequence number** from the response. Use it for immediate
-    /// `get_with_min_sequence_number` / range calls or to seed
+    /// `get_with_min_sequence_number` / range calls or as the initial floor for
     /// [`PrefixedStoreClient::create_session_with_sequence`].
     /// If the request succeeds, the server accepts the full batch (count is `kvs.len()`).
     pub(crate) async fn put_physical(&self, kvs: &[(&Key, &[u8])]) -> Result<u64, ClientError> {

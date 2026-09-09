@@ -7,7 +7,8 @@ It reuses `@exowarexyz/sdk` transport setup and owns its generated `sql.v1`
 protobuf bindings.
 
 Queries return `DecodedQueryResult` objects containing the observed Store
-`sequenceNumber` and a native Apache Arrow `table`. Subscription frames contain
+`sequenceNumber` and a native Apache Arrow `table`. Queries without Store reads
+return the requested floor, or `0n` if none was supplied. Subscription frames contain
 the same fields. Arrow IPC preserves the result schema, field order,
 nulls, nested values, decimal scale, and timestamp units/timezones. The client uses
 binary Connect encoding by default.

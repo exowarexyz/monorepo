@@ -380,6 +380,21 @@ async fn connect_query_enforces_sequence_floor_and_returns_evaluated_sequence() 
             .await
             .expect_err("unavailable sequence floor");
         assert_eq!(error.code, ErrorCode::Aborted, "{sql} returned {error:?}");
+        let details =
+            exoware_sdk::proto::decode_connect_error(&error).expect("Store error details");
+        let info = details.error_info.expect("consistency error info");
+        assert_eq!(info.reason, "CONSISTENCY_NOT_READY");
+        assert_eq!(info.domain, "store.query");
+        assert_eq!(
+            info.metadata["required_sequence_number"],
+            u64::MAX.to_string()
+        );
+        let current = info.metadata["current_sequence_number"]
+            .parse::<u64>()
+            .unwrap();
+        assert!(current >= write_sequence && current < u64::MAX);
+        assert!(details.retry_info.is_some());
+        assert!(details.query_detail.unwrap().sequence_number >= current);
     }
 
     let response = client

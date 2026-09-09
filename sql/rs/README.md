@@ -172,6 +172,7 @@ The request can supply an initial minimum sequence. Each observed response
 advances the floor for subsequent reads, including pagination, index lookups,
 and aggregate reductions. This preserves monotonic freshness across query
 workers behind a load balancer. It does not provide snapshot isolation.
+Queries without Store reads return the requested floor, or zero if none was supplied.
 
 Embedded DataFusion contexts share a request session when created with
 `query_context_with_min_sequence`. Otherwise each scan or aggregate creates
