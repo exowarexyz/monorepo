@@ -19,7 +19,7 @@ use commonware_cryptography::{
 use commonware_math::algebra::Random;
 use commonware_parallel::Sequential;
 use commonware_utils::{non_empty, ordered::Set, N3f1, TestRng};
-use exoware_sdk::{StoreClient, StoreKeyPrefix, StoreWriteBatch};
+use exoware_sdk::{StoreBatchUpload, StoreClient, StoreKeyPrefix, StoreWriteBatch};
 use exoware_simplex::{encode_block_data, keys, Finalized, Notarized, SimplexClient};
 use tracing::info;
 
@@ -235,12 +235,12 @@ async fn upload_certificates(
     )?;
     batch.push(
         store,
-        &keys::notarization_by_view(notarized.proof.view()),
+        &keys::notarization_by_round(notarized.proof.round()),
         notarized_bytes,
     )?;
     batch.push(
         store,
-        &keys::finalization_by_view(finalized.proof.view()),
+        &keys::finalization_by_round(finalized.proof.round()),
         finalized_bytes.clone(),
     )?;
     batch.push(

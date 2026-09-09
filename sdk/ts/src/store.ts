@@ -409,6 +409,7 @@ function prefixExpr(expr: KvExpr, prefixBytes: number): KvExpr {
             } as KvExpr;
         case 'lower':
         case 'dateTruncDay':
+        case 'castFloat64':
             return {
                 ...expr,
                 expr: {
@@ -436,6 +437,7 @@ function prefixReducer(reducer: RangeReducerSpec, prefixBytes: number): RangeRed
     return {
         ...reducer,
         expr: reducer.expr ? prefixExpr(reducer.expr, prefixBytes) : undefined,
+        filter: reducer.filter ? prefixPredicate(reducer.filter, prefixBytes) : undefined,
     } as RangeReducerSpec;
 }
 
@@ -554,7 +556,7 @@ async function performQuery(
     }
 }
 
-async function performReduce(
+async function* performReduce(
     client: Client,
     start: Uint8Array,
     end: Uint8Array,
@@ -562,7 +564,7 @@ async function performReduce(
     minSequenceNumber?: bigint,
     detailObserver?: DetailObserver,
     prefix?: StoreKeyPrefix,
-): Promise<ReduceResponse> {
+): AsyncIterable<ReduceResponse> {
     const effective = normalizeMinSequenceNumber(minSequenceNumber);
     const physicalRange = encodeStoreRange(prefix, start, end);
     const req = create(ReduceRequestSchema, {
@@ -571,14 +573,18 @@ async function performReduce(
         params: prefixReduceParams(params, prefix),
         ...(effective !== undefined ? { minSequenceNumber: effective } : {}),
     });
+    const controller = new AbortController();
     try {
-        const res = await client.query.reduce(req);
-        if (res.detail) {
-            detailObserver?.(res.detail);
+        for await (const frame of client.query.reduce(req, { signal: controller.signal })) {
+            if (frame.detail) {
+                detailObserver?.(frame.detail);
+            }
+            yield frame;
         }
-        return res;
     } catch (e) {
         mapConnectToHttpError(e, client.credential);
+    } finally {
+        controller.abort();
     }
 }
 
@@ -772,26 +778,31 @@ export class SerializableReadSession {
         );
     }
 
-    async reduce(
+    async *reduce(
         start: Uint8Array,
         end: Uint8Array,
         params: ReduceParams,
-    ): Promise<ReduceResponse> {
-        return this.runRead(
-            (sequence) =>
+    ): AsyncIterable<ReduceResponse> {
+        yield* await this.runRead(
+            async (sequence) =>
                 performReduce(this.client, start, end, params, sequence, undefined, this.keyPrefix),
-            (detailObserver) =>
+            async () =>
                 performReduce(
                     this.client,
                     start,
                     end,
                     params,
                     undefined,
-                    detailObserver,
+                    (detail) => {
+                        if (detail.sequenceNumber > this.sequence) {
+                            this.sequence = detail.sequenceNumber;
+                        }
+                    },
                     this.keyPrefix,
                 ),
         );
     }
+
 }
 
 export class StoreClient {
@@ -926,12 +937,12 @@ export class StoreClient {
         }
     }
 
-    async reduce(
+    reduce(
         start: Uint8Array,
         end: Uint8Array,
         params: ReduceParams,
         minSequenceNumber?: bigint,
-    ): Promise<ReduceResponse> {
+    ): AsyncIterable<ReduceResponse> {
         return performReduce(
             this.client,
             start,

@@ -29,7 +29,7 @@ export type GetRequest = Message<"qmdb.v1.GetRequest"> & {
   key: Uint8Array;
 
   /**
-   * Published ordered-QMDB batch-boundary to prove against. The client must
+   * Published QMDB batch-boundary to prove against. The client must
    * already know the trusted current/global root for this tip.
    *
    * @generated from field: uint64 tip = 2;

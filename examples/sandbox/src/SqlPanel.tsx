@@ -1,8 +1,14 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   SqlClient,
-  type CellValue,
-  type DecodedQueryResult,
+  DataType,
+  DateUnit,
+  Int32,
+  Int64,
+  List,
+  TimeUnit,
+  Vector,
+  type Table,
   type DecodedSubscribeFrame,
   type DecodedTable,
 } from '@sql-ts';
@@ -18,7 +24,7 @@ interface NotificationFn {
   (type: 'success' | 'error', title: string, message: string): void;
 }
 
-function formatCell(value: CellValue): string {
+function formatCell(value: unknown): string {
   if (value === null) return 'NULL';
   if (value === undefined) return '(unknown)';
   if (typeof value === 'bigint') return value.toString();
@@ -27,11 +33,85 @@ function formatCell(value: CellValue): string {
       .map((byte) => byte.toString(16).padStart(2, '0'))
       .join('')}`;
   }
-  if (Array.isArray(value)) {
-    return `[${value.map(formatCell).join(', ')}]`;
+  if (value instanceof Vector) {
+    const format = formatVector(value);
+    return `[${Array.from({ length: value.length }, (_, row) => format(row)).join(', ')}]`;
   }
+  if (Array.isArray(value)) return `[${value.map(formatCell).join(', ')}]`;
   if (typeof value === 'string') return value;
   return String(value);
+}
+
+function formatVector(vector: Vector): (row: number) => string {
+  const type = vector.type;
+  if (DataType.isDictionary(type)) {
+    const formatted = vector.data.flatMap((data) => {
+      const indices = new Vector([data.clone(type.indices)]);
+      const format = formatVector(data.dictionary!);
+      return Array.from({ length: indices.length }, (_, row) => {
+        const index = indices.get(row);
+        return index === null ? 'NULL' : format(Number(index));
+      });
+    });
+    return (row) => formatted[row];
+  }
+  if (DataType.isMap(type)) {
+    return formatVector(new Vector(vector.data.map((data) => data.clone(new List(type.children[0])))));
+  }
+  if (DataType.isStruct(type)) {
+    const fields = type.children.map((field, index) => ({
+      name: field.name,
+      format: formatVector(vector.getChildAt(index)!),
+    }));
+    return (row) => vector.isValid(row)
+      ? `{${fields.map((field) => `${field.name}: ${field.format(row)}`).join(', ')}}`
+      : 'NULL';
+  }
+
+  // Integer views preserve exact temporal values while Arrow owns chunks, slices, and validity.
+  if (DataType.isDate(type) || DataType.isTimestamp(type)) {
+    const integer = DataType.isDate(type) && type.unit === DateUnit.DAY ? new Int32() : new Int64();
+    vector = new Vector(vector.data.map((data) => data.clone(integer)));
+  }
+  return (row) => {
+    const value: unknown = vector.get(row);
+    if (value === null) return 'NULL';
+    if (DataType.isTimestamp(type)) {
+      return `${value} ${TimeUnit[type.unit].toLowerCase()} since epoch (${type.timezone || 'no timezone'})`;
+    }
+    if (DataType.isDate(type)) {
+      return `${value} ${DateUnit[type.unit].toLowerCase()} since epoch`;
+    }
+    if (DataType.isDecimal(type)) {
+      const words = value as Uint32Array;
+      const raw = BigInt.asIntN(type.bitWidth,
+        words.reduceRight((number, word) => (number << 32n) | BigInt(word), 0n),
+      ).toString();
+      const sign = raw.startsWith('-') ? '-' : '';
+      const digits = raw.replace(/^-/, '');
+      const scale = type.scale;
+      if (scale <= 0) return sign + digits + '0'.repeat(-scale);
+      const padded = digits.padStart(scale + 1, '0');
+      return `${sign}${padded.slice(0, -scale)}.${padded.slice(-scale)}`;
+    }
+    return formatCell(value);
+  };
+}
+
+export function ArrowRows({ table }: { table: Table }) {
+  const columns = table.schema.fields.map((field, index) => ({
+    name: field.name,
+    format: formatVector(table.getChildAt(index)!),
+  }));
+  return Array.from({ length: table.numRows }, (_, row) => (
+    <div key={row} className="result-row-block">
+      {columns.map((column, index) => (
+        <p key={index}>
+          <strong>{column.name}:</strong> {column.format(row)}
+        </p>
+      ))}
+    </div>
+  ));
 }
 
 export function SqlPanel({
@@ -55,7 +135,7 @@ export function SqlPanel({
   const [tablesError, setTablesError] = useState<string | null>(null);
 
   const [querySql, setQuerySql] = useState(DEFAULT_QUERY);
-  const [queryResult, setQueryResult] = useState<DecodedQueryResult | null>(null);
+  const [queryResult, setQueryResult] = useState<Table | null>(null);
   const [isQuerying, setIsQuerying] = useState(false);
 
   useEffect(() => {
@@ -99,7 +179,7 @@ export function SqlPanel({
     try {
       const result = await client.query(querySql);
       setQueryResult(result);
-      showNotification('success', 'SQL Query', `Returned ${result.rows.length} rows`);
+      showNotification('success', 'SQL Query', `Returned ${result.numRows} rows`);
     } catch (error) {
       showNotification('error', 'SQL Query Failed', String(error));
     } finally {
@@ -165,8 +245,8 @@ export function SqlPanel({
         <h3>Connection</h3>
         <p className="section-note">
           Run `sql run` to serve `sql.v1` and `sql seed` to insert rows
-          into <code>{DEFAULT_TABLE}</code> every few seconds. Subscribe re-runs the
-          SQL WHERE predicate against every ingested batch; matching rows come
+          into <code>{DEFAULT_TABLE}</code> every few seconds. Subscribe evaluates the
+          compiled SQL predicate against every ingested batch; matching rows come
           back per-batch.
         </p>
         <p><strong>Server:</strong> {sqlUrl}</p>
@@ -260,20 +340,12 @@ export function SqlPanel({
         </button>
         {queryResult && (
           <div className="result fade-in">
-            <h4>Rows ({queryResult.rows.length})</h4>
-            {queryResult.rows.length === 0 ? (
+            <h4>Rows ({queryResult.numRows})</h4>
+            {queryResult.numRows === 0 ? (
               <p>No rows returned</p>
             ) : (
               <div className="result-list">
-                {queryResult.rows.map((row, index) => (
-                  <div key={index} className="result-row-block">
-                    {queryResult.columns.map((column) => (
-                      <p key={column}>
-                        <strong>{column}:</strong> {formatCell(row.values[column])}
-                      </p>
-                    ))}
-                  </div>
-                ))}
+                <ArrowRows table={queryResult} />
               </div>
             )}
           </div>
@@ -352,20 +424,9 @@ export function SqlPanel({
                   <p>
                     <strong>Sequence:</strong> {frame.sequenceNumber.toString()}
                     {' · '}
-                    <strong>Rows:</strong> {frame.rows.length}
+                    <strong>Rows:</strong> {frame.table.numRows}
                   </p>
-                  {frame.rows.map((row, index) => (
-                    <div
-                      key={index}
-                      className="result-row-block"
-                    >
-                      {frame.columns.map((column) => (
-                        <p key={column}>
-                          <strong>{column}:</strong> {formatCell(row.values[column])}
-                        </p>
-                      ))}
-                    </div>
-                  ))}
+                  <ArrowRows table={frame.table} />
                 </div>
               ))}
             </div>

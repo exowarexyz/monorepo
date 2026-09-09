@@ -2427,8 +2427,8 @@ pub mod kv_reduced_value {
     pub use super::__buffa::view::oneof::kv_reduced_value::Value as ValueView;
 }
 /// An expression tree evaluated per row during reduction. Leaf nodes are field
-/// references or literal values; interior nodes are arithmetic or transform
-/// operations.
+/// references or literal values; interior nodes use native DataFusion arithmetic,
+/// coercion and transform semantics. Required fields are decoded before evaluation.
 #[derive(Clone, PartialEq, Default)]
 #[derive(::serde::Serialize)]
 #[serde(default)]
@@ -2537,6 +2537,14 @@ impl ::buffa::Message for KvExpr {
                         += 1u64 + ::buffa::encoding::varint_len(inner as u64) as u64
                             + inner as u64;
                 }
+                __buffa::oneof::kv_expr::Expr::CastFloat64(x) => {
+                    let __slot = __cache.reserve();
+                    let inner = x.compute_size(__cache);
+                    __cache.set(__slot, inner);
+                    size
+                        += 1u64 + ::buffa::encoding::varint_len(inner as u64) as u64
+                            + inner as u64;
+                }
             }
         }
         size += self.__buffa_unknown_fields.encoded_len() as u64;
@@ -2610,6 +2618,14 @@ impl ::buffa::Message for KvExpr {
                 __buffa::oneof::kv_expr::Expr::DateTruncDay(x) => {
                     ::buffa::types::put_len_delimited_header(
                         8u32,
+                        u64::from(__cache.consume_next()),
+                        buf,
+                    );
+                    x.write_to(__cache, buf);
+                }
+                __buffa::oneof::kv_expr::Expr::CastFloat64(x) => {
+                    ::buffa::types::put_len_delimited_header(
+                        9u32,
                         u64::from(__cache.consume_next()),
                         buf,
                     );
@@ -2785,6 +2801,26 @@ impl ::buffa::Message for KvExpr {
                     ::buffa::Message::merge_length_delimited(&mut val, buf, ctx)?;
                     self.expr = ::core::option::Option::Some(
                         __buffa::oneof::kv_expr::Expr::DateTruncDay(
+                            ::buffa::alloc::boxed::Box::new(val),
+                        ),
+                    );
+                }
+            }
+            9u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )?;
+                if let ::core::option::Option::Some(
+                    __buffa::oneof::kv_expr::Expr::CastFloat64(ref mut existing),
+                ) = self.expr
+                {
+                    ::buffa::Message::merge_length_delimited(&mut **existing, buf, ctx)?;
+                } else {
+                    let mut val = ::core::default::Default::default();
+                    ::buffa::Message::merge_length_delimited(&mut val, buf, ctx)?;
+                    self.expr = ::core::option::Option::Some(
+                        __buffa::oneof::kv_expr::Expr::CastFloat64(
                             ::buffa::alloc::boxed::Box::new(val),
                         ),
                     );
@@ -3018,6 +3054,30 @@ impl<'de> serde::Deserialize<'de> for KvExpr {
                                 }
                                 __oneof_expr = Some(
                                     __buffa::oneof::kv_expr::Expr::DateTruncDay(
+                                        ::buffa::alloc::boxed::Box::new(v),
+                                    ),
+                                );
+                            }
+                        }
+                        "castFloat64" | "cast_float64" => {
+                            let v: ::core::option::Option<KvExpr> = map
+                                .next_value_seed(
+                                    ::buffa::json_helpers::NullableDeserializeSeed(
+                                        ::buffa::json_helpers::DefaultDeserializeSeed::<
+                                            KvExpr,
+                                        >::new(),
+                                    ),
+                                )?;
+                            if let Some(v) = v {
+                                if __oneof_expr.is_some() {
+                                    return Err(
+                                        serde::de::Error::custom(
+                                            "multiple oneof fields set for 'expr'",
+                                        ),
+                                    );
+                                }
+                                __oneof_expr = Some(
+                                    __buffa::oneof::kv_expr::Expr::CastFloat64(
                                         ::buffa::alloc::boxed::Box::new(v),
                                     ),
                                 );
@@ -6229,6 +6289,15 @@ pub struct RangeReducerSpec {
         skip_serializing_if = "::buffa::json_helpers::skip_if::is_unset_message_field"
     )]
     pub expr: ::buffa::MessageField<KvExpr, ::buffa::Inline<KvExpr>>,
+    /// Native aggregate FILTER. Rows remain available to other reducers and to
+    /// grouping; the native aggregate controls argument and filter evaluation.
+    ///
+    /// Field 3: `filter`
+    #[serde(
+        rename = "filter",
+        skip_serializing_if = "::buffa::json_helpers::skip_if::is_unset_message_field"
+    )]
+    pub filter: ::buffa::MessageField<KvPredicate, ::buffa::Inline<KvPredicate>>,
     #[serde(skip)]
     #[doc(hidden)]
     pub __buffa_unknown_fields: ::buffa::UnknownFields,
@@ -6238,6 +6307,7 @@ impl ::core::fmt::Debug for RangeReducerSpec {
         f.debug_struct("RangeReducerSpec")
             .field("op", &self.op)
             .field("expr", &self.expr)
+            .field("filter", &self.filter)
             .finish()
     }
 }
@@ -6282,6 +6352,14 @@ impl ::buffa::Message for RangeReducerSpec {
                 += 1u64 + ::buffa::encoding::varint_len(inner_size as u64) as u64
                     + inner_size as u64;
         }
+        if self.filter.is_set() {
+            let __slot = __cache.reserve();
+            let inner_size = self.filter.compute_size(__cache);
+            __cache.set(__slot, inner_size);
+            size
+                += 1u64 + ::buffa::encoding::varint_len(inner_size as u64) as u64
+                    + inner_size as u64;
+        }
         size += self.__buffa_unknown_fields.encoded_len() as u64;
         ::buffa::saturate_size(size)
     }
@@ -6305,6 +6383,14 @@ impl ::buffa::Message for RangeReducerSpec {
                 buf,
             );
             self.expr.write_to(__cache, buf);
+        }
+        if self.filter.is_set() {
+            ::buffa::types::put_len_delimited_header(
+                3u32,
+                u64::from(__cache.consume_next()),
+                buf,
+            );
+            self.filter.write_to(__cache, buf);
         }
         self.__buffa_unknown_fields.write_to(buf);
     }
@@ -6337,6 +6423,17 @@ impl ::buffa::Message for RangeReducerSpec {
                     ctx,
                 )?;
             }
+            3u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )?;
+                ::buffa::Message::merge_length_delimited(
+                    self.filter.get_or_insert_default(),
+                    buf,
+                    ctx,
+                )?;
+            }
             _ => {
                 self.__buffa_unknown_fields
                     .push(::buffa::encoding::decode_unknown_field(tag, buf, ctx)?);
@@ -6347,6 +6444,7 @@ impl ::buffa::Message for RangeReducerSpec {
     fn clear(&mut self) {
         self.op = ::buffa::EnumValue::from(0);
         self.expr = ::buffa::MessageField::none();
+        self.filter = ::buffa::MessageField::none();
         self.__buffa_unknown_fields.clear();
     }
 }
@@ -6407,7 +6505,7 @@ pub struct ReduceParams {
         deserialize_with = "::buffa::json_helpers::null_as_default"
     )]
     pub group_by: ::buffa::alloc::vec::Vec<KvExpr>,
-    /// Optional predicate to exclude rows before aggregation.
+    /// Optional predicate to exclude rows before expression evaluation and aggregation.
     ///
     /// Field 3: `filter`
     #[serde(
@@ -6759,8 +6857,8 @@ pub struct RangeReduceGroup {
         deserialize_with = "::buffa::json_helpers::null_as_default"
     )]
     pub group_values: ::buffa::alloc::vec::Vec<KvReducedValue>,
-    /// Parallel to `group_values`; false when the corresponding group value is
-    /// NULL (the proto value is a default zero, but should be treated as absent).
+    /// One flag per group-by expression. False represents NULL. True consumes
+    /// the next value from the dense `group_values` list.
     ///
     /// Field 2: `group_values_present`
     #[serde(
@@ -8549,8 +8647,9 @@ pub const __REDUCE_REQUEST_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::bu
     from_json: ::buffa::type_registry::any_from_json::<ReduceRequest>,
     is_wkt: false,
 };
-/// Response from a Reduce RPC. Exactly one of `results` or `groups` is
-/// populated depending on whether `ReduceParams.group_by` was empty.
+/// A frame from a Reduce RPC. Scalar reductions return exactly one frame.
+/// Grouped reductions emit each final group exactly once across batches.
+/// An empty grouped reduction returns one frame containing only `detail`.
 #[derive(Clone, PartialEq, Default)]
 #[derive(::serde::Serialize, ::serde::Deserialize)]
 #[serde(default)]
@@ -8575,6 +8674,7 @@ pub struct ReduceResponse {
     )]
     pub groups: ::buffa::alloc::vec::Vec<RangeReduceGroup>,
     /// Query sequence and server-defined metadata for this reduction.
+    /// Present on every frame.
     ///
     /// Field 3: `detail`
     #[serde(
@@ -11566,8 +11666,8 @@ pub mod __buffa {
             }
         }
         /// An expression tree evaluated per row during reduction. Leaf nodes are field
-        /// references or literal values; interior nodes are arithmetic or transform
-        /// operations.
+        /// references or literal values; interior nodes use native DataFusion arithmetic,
+        /// coercion and transform semantics. Required fields are decoded before evaluation.
         #[derive(Clone, Debug, Default)]
         pub struct KvExprView<'a> {
             pub expr: ::core::option::Option<
@@ -11855,6 +11955,37 @@ pub mod __buffa {
                             );
                         }
                     }
+                    9u32 => {
+                        ::buffa::encoding::check_wire_type(
+                            tag,
+                            ::buffa::encoding::WireType::LengthDelimited,
+                        )?;
+                        let __sub_ctx = ctx.descend()?;
+                        let sub = ::buffa::types::borrow_bytes(&mut cur)?;
+                        if let Some(
+                            super::super::__buffa::view::oneof::kv_expr::Expr::CastFloat64(
+                                ref mut existing,
+                            ),
+                        ) = view.expr
+                        {
+                            ::buffa::MessageView::merge_into_view(
+                                &mut **existing,
+                                sub,
+                                __sub_ctx,
+                            )?;
+                        } else {
+                            view.expr = Some(
+                                super::super::__buffa::view::oneof::kv_expr::Expr::CastFloat64(
+                                    ::buffa::alloc::boxed::Box::new(
+                                        <super::super::__buffa::view::KvExprView as ::buffa::MessageView>::decode_view_ctx(
+                                            sub,
+                                            __sub_ctx,
+                                        )?,
+                                    ),
+                                ),
+                            );
+                        }
+                    }
                     _ => {
                         ::buffa::encoding::skip_field_depth(tag, &mut cur, ctx.depth())?;
                         let span_len = before_tag.len() - cur.len();
@@ -11954,6 +12085,15 @@ pub mod __buffa {
                                             ),
                                         )
                                     }
+                                    super::super::__buffa::view::oneof::kv_expr::Expr::CastFloat64(
+                                        v,
+                                    ) => {
+                                        super::super::__buffa::oneof::kv_expr::Expr::CastFloat64(
+                                            ::buffa::alloc::boxed::Box::new(
+                                                v.to_owned_from_source(__buffa_src)?,
+                                            ),
+                                        )
+                                    }
                                 },
                             )
                         }
@@ -12034,6 +12174,16 @@ pub mod __buffa {
                                     + inner as u64;
                         }
                         super::super::__buffa::view::oneof::kv_expr::Expr::DateTruncDay(
+                            x,
+                        ) => {
+                            let __slot = __cache.reserve();
+                            let inner = x.compute_size(__cache);
+                            __cache.set(__slot, inner);
+                            size
+                                += 1u64 + ::buffa::encoding::varint_len(inner as u64) as u64
+                                    + inner as u64;
+                        }
+                        super::super::__buffa::view::oneof::kv_expr::Expr::CastFloat64(
                             x,
                         ) => {
                             let __slot = __cache.reserve();
@@ -12126,6 +12276,16 @@ pub mod __buffa {
                             );
                             x.write_to(__cache, buf);
                         }
+                        super::super::__buffa::view::oneof::kv_expr::Expr::CastFloat64(
+                            x,
+                        ) => {
+                            ::buffa::types::put_len_delimited_header(
+                                9u32,
+                                u64::from(__cache.consume_next()),
+                                buf,
+                            );
+                            x.write_to(__cache, buf);
+                        }
                     }
                 }
                 self.__buffa_unknown_fields.write_to(buf);
@@ -12178,6 +12338,11 @@ pub mod __buffa {
                             v,
                         ) => {
                             __map.serialize_entry("dateTruncDay", v)?;
+                        }
+                        super::super::__buffa::view::oneof::kv_expr::Expr::CastFloat64(
+                            v,
+                        ) => {
+                            __map.serialize_entry("castFloat64", v)?;
                         }
                     }
                 }
@@ -17533,6 +17698,13 @@ pub mod __buffa {
             pub expr: ::buffa::MessageFieldView<
                 super::super::__buffa::view::KvExprView<'a>,
             >,
+            /// Native aggregate FILTER. Rows remain available to other reducers and to
+            /// grouping; the native aggregate controls argument and filter evaluation.
+            ///
+            /// Field 3: `filter`
+            pub filter: ::buffa::MessageFieldView<
+                super::super::__buffa::view::KvPredicateView<'a>,
+            >,
             pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
         }
         impl<'a> ::buffa::MessageView<'a> for RangeReducerSpecView<'a> {
@@ -17601,6 +17773,31 @@ pub mod __buffa {
                             }
                         }
                     }
+                    3u32 => {
+                        ::buffa::encoding::check_wire_type(
+                            tag,
+                            ::buffa::encoding::WireType::LengthDelimited,
+                        )?;
+                        let __sub_ctx = ctx.descend()?;
+                        let sub = ::buffa::types::borrow_bytes(&mut cur)?;
+                        match view.filter.as_mut() {
+                            Some(existing) => {
+                                ::buffa::MessageView::merge_into_view(
+                                    existing,
+                                    sub,
+                                    __sub_ctx,
+                                )?
+                            }
+                            None => {
+                                view.filter = ::buffa::MessageFieldView::set(
+                                    <super::super::__buffa::view::KvPredicateView as ::buffa::MessageView>::decode_view_ctx(
+                                        sub,
+                                        __sub_ctx,
+                                    )?,
+                                );
+                            }
+                        }
+                    }
                     _ => {
                         ::buffa::encoding::skip_field_depth(tag, &mut cur, ctx.depth())?;
                         let span_len = before_tag.len() - cur.len();
@@ -17640,6 +17837,15 @@ pub mod __buffa {
                         }
                         None => ::buffa::MessageField::none(),
                     },
+                    filter: match self.filter.as_option() {
+                        Some(v) => {
+                            ::buffa::MessageField::<
+                                super::super::KvPredicate,
+                                ::buffa::Inline<super::super::KvPredicate>,
+                            >::some(v.to_owned_from_source(__buffa_src)?)
+                        }
+                        None => ::buffa::MessageField::none(),
+                    },
                     __buffa_unknown_fields: self
                         .__buffa_unknown_fields
                         .to_owned()?
@@ -17663,6 +17869,14 @@ pub mod __buffa {
                 if self.expr.is_set() {
                     let __slot = __cache.reserve();
                     let inner_size = self.expr.compute_size(__cache);
+                    __cache.set(__slot, inner_size);
+                    size
+                        += 1u64 + ::buffa::encoding::varint_len(inner_size as u64) as u64
+                            + inner_size as u64;
+                }
+                if self.filter.is_set() {
+                    let __slot = __cache.reserve();
+                    let inner_size = self.filter.compute_size(__cache);
                     __cache.set(__slot, inner_size);
                     size
                         += 1u64 + ::buffa::encoding::varint_len(inner_size as u64) as u64
@@ -17693,6 +17907,14 @@ pub mod __buffa {
                     );
                     self.expr.write_to(__cache, buf);
                 }
+                if self.filter.is_set() {
+                    ::buffa::types::put_len_delimited_header(
+                        3u32,
+                        u64::from(__cache.consume_next()),
+                        buf,
+                    );
+                    self.filter.write_to(__cache, buf);
+                }
                 self.__buffa_unknown_fields.write_to(buf);
             }
         }
@@ -17720,6 +17942,11 @@ pub mod __buffa {
                 {
                     if let ::core::option::Option::Some(__v) = self.expr.as_option() {
                         __map.serialize_entry("expr", __v)?;
+                    }
+                }
+                {
+                    if let ::core::option::Option::Some(__v) = self.filter.as_option() {
+                        __map.serialize_entry("filter", __v)?;
                     }
                 }
                 __map.end()
@@ -17836,6 +18063,18 @@ pub mod __buffa {
             > {
                 &self.0.reborrow().expr
             }
+            /// Native aggregate FILTER. Rows remain available to other reducers and to
+            /// grouping; the native aggregate controls argument and filter evaluation.
+            ///
+            /// Field 3: `filter`
+            #[must_use]
+            pub fn filter(
+                &self,
+            ) -> &::buffa::MessageFieldView<
+                super::super::__buffa::view::KvPredicateView<'_>,
+            > {
+                &self.0.reborrow().filter
+            }
         }
         impl ::core::convert::From<::buffa::OwnedView<RangeReducerSpecView<'static>>>
         for RangeReducerSpecOwnedView {
@@ -17888,7 +18127,7 @@ pub mod __buffa {
                 'a,
                 super::super::__buffa::view::KvExprView<'a>,
             >,
-            /// Optional predicate to exclude rows before aggregation.
+            /// Optional predicate to exclude rows before expression evaluation and aggregation.
             ///
             /// Field 3: `filter`
             pub filter: ::buffa::MessageFieldView<
@@ -18266,7 +18505,7 @@ pub mod __buffa {
             > {
                 &self.0.reborrow().group_by
             }
-            /// Optional predicate to exclude rows before aggregation.
+            /// Optional predicate to exclude rows before expression evaluation and aggregation.
             ///
             /// Field 3: `filter`
             #[must_use]
@@ -18626,8 +18865,8 @@ pub mod __buffa {
                 'a,
                 super::super::__buffa::view::KvReducedValueView<'a>,
             >,
-            /// Parallel to `group_values`; false when the corresponding group value is
-            /// NULL (the proto value is a default zero, but should be treated as absent).
+            /// One flag per group-by expression. False represents NULL. True consumes
+            /// the next value from the dense `group_values` list.
             ///
             /// Field 2: `group_values_present`
             pub group_values_present: ::buffa::RepeatedView<'a, bool>,
@@ -18990,8 +19229,8 @@ pub mod __buffa {
             > {
                 &self.0.reborrow().group_values
             }
-            /// Parallel to `group_values`; false when the corresponding group value is
-            /// NULL (the proto value is a default zero, but should be treated as absent).
+            /// One flag per group-by expression. False represents NULL. True consumes
+            /// the next value from the dense `group_values` list.
             ///
             /// Field 2: `group_values_present`
             #[must_use]
@@ -21875,8 +22114,9 @@ pub mod __buffa {
                 ::serde::Serialize::serialize(&self.0, __s)
             }
         }
-        /// Response from a Reduce RPC. Exactly one of `results` or `groups` is
-        /// populated depending on whether `ReduceParams.group_by` was empty.
+        /// A frame from a Reduce RPC. Scalar reductions return exactly one frame.
+        /// Grouped reductions emit each final group exactly once across batches.
+        /// An empty grouped reduction returns one frame containing only `detail`.
         #[derive(Clone, Debug, Default)]
         pub struct ReduceResponseView<'a> {
             /// Scalar reducer results (one per `ReduceParams.reducers` entry). Populated
@@ -21895,6 +22135,7 @@ pub mod __buffa {
                 super::super::__buffa::view::RangeReduceGroupView<'a>,
             >,
             /// Query sequence and server-defined metadata for this reduction.
+            /// Present on every frame.
             ///
             /// Field 3: `detail`
             pub detail: ::buffa::MessageFieldView<
@@ -22273,6 +22514,7 @@ pub mod __buffa {
                 &self.0.reborrow().groups
             }
             /// Query sequence and server-defined metadata for this reduction.
+            /// Present on every frame.
             ///
             /// Field 3: `detail`
             #[must_use]
@@ -22414,6 +22656,11 @@ pub mod __buffa {
                         >,
                     ),
                     DateTruncDay(
+                        ::buffa::alloc::boxed::Box<
+                            super::super::super::super::__buffa::view::KvExprView<'a>,
+                        >,
+                    ),
+                    CastFloat64(
                         ::buffa::alloc::boxed::Box<
                             super::super::super::super::__buffa::view::KvExprView<'a>,
                         >,
@@ -22689,6 +22936,7 @@ pub mod __buffa {
                 ),
                 Lower(::buffa::alloc::boxed::Box<super::super::super::KvExpr>),
                 DateTruncDay(::buffa::alloc::boxed::Box<super::super::super::KvExpr>),
+                CastFloat64(::buffa::alloc::boxed::Box<super::super::super::KvExpr>),
             }
             impl ::buffa::Oneof for Expr {}
             impl From<super::super::super::KvFieldRef> for Expr {
@@ -22743,6 +22991,9 @@ pub mod __buffa {
                         }
                         Self::DateTruncDay(v) => {
                             map.serialize_entry("dateTruncDay", v)?;
+                        }
+                        Self::CastFloat64(v) => {
+                            map.serialize_entry("castFloat64", v)?;
                         }
                     }
                     map.end()
@@ -23266,7 +23517,7 @@ pub const SERVICE_RANGE_SPEC: ::connectrpc::Spec = ::connectrpc::Spec::server(
 /// Static [`Spec`](::connectrpc::Spec) for the `Reduce` RPC, as seen by the server; the generated client passes it with [`origin`](::connectrpc::Spec::origin) `Client` (compare across sides with [`Spec::same_method`](::connectrpc::Spec::same_method)).
 pub const SERVICE_REDUCE_SPEC: ::connectrpc::Spec = ::connectrpc::Spec::server(
         "/store.query.v1.Service/Reduce",
-        ::connectrpc::StreamType::Unary,
+        ::connectrpc::StreamType::ServerStream,
     )
     .with_idempotency_level(::connectrpc::IdempotencyLevel::NoSideEffects);
 /// Server trait for Service.
@@ -23377,20 +23628,20 @@ pub trait Service: Send + Sync + 'static {
     /// Server-side aggregation over a key range with optional grouping and
     /// filtering.
     ///
-    /// `'a` lets the response body borrow from `&self` (e.g. server-resident state).
-    ///
     /// `request` is borrowed from the request body and is valid for the
-    /// duration of the call; message fields are read directly on it
-    /// (zero-copy). The response cannot borrow from `request` — use
-    /// `.to_owned_message()` (or copy the specific fields) for anything
-    /// returned, stored, or moved into `tokio::spawn`.
-    fn reduce<'a>(
-        &'a self,
+    /// duration of the call (until the response stream is returned);
+    /// message fields are read directly on it (zero-copy). Data the
+    /// returned stream needs must be copied out or converted via
+    /// `.to_owned_message()`.
+    fn reduce(
+        &self,
         ctx: ::connectrpc::RequestContext,
         request: ::connectrpc::ServiceRequest<'_, ReduceRequest>,
     ) -> impl ::std::future::Future<
         Output = ::connectrpc::ServiceResult<
-            impl ::connectrpc::Encodable<ReduceResponse> + Send + use<'a, Self>,
+            ::connectrpc::ServiceStream<
+                impl ::connectrpc::Encodable<ReduceResponse> + Send + use<Self>,
+            >,
         >,
     > + Send;
 }
@@ -23500,27 +23751,30 @@ impl<S: Service> ServiceExt for S {
                 }),
             )
             .with_spec(SERVICE_RANGE_SPEC)
-            .route_view_idempotent(
+            .route_view_server_stream::<
+                _,
+                _,
+                ReduceResponse,
+            >(
                 SERVICE_SERVICE_NAME,
                 "Reduce",
-                {
+                ::connectrpc::view_streaming_handler_fn({
                     let svc = ::std::sync::Arc::clone(&self);
-                    ::connectrpc::view_handler_fn(move |
+                    move |
                         ctx,
                         req: ::buffa::view::OwnedView<
                             __buffa::view::ReduceRequestView<'static>,
-                        >,
-                        format|
+                        >|
                     {
                         let svc = ::std::sync::Arc::clone(&svc);
                         async move {
                             let sreq = ::connectrpc::ServiceRequest::<
                                 ReduceRequest,
                             >::from_parts(req.reborrow(), req.bytes());
-                            svc.reduce(ctx, sreq).await?.encode::<ReduceResponse>(format)
+                            svc.reduce(ctx, sreq).await
                         }
-                    })
-                },
+                    }
+                }),
             )
             .with_spec(SERVICE_REDUCE_SPEC)
     }
@@ -23597,7 +23851,7 @@ impl<T: Service> ::connectrpc::Dispatcher for ServiceServer<T> {
             }
             "Reduce" => {
                 Some(
-                    ::connectrpc::dispatcher::codegen::MethodDescriptor::unary(true)
+                    ::connectrpc::dispatcher::codegen::MethodDescriptor::server_streaming()
                         .with_spec(SERVICE_REDUCE_SPEC),
                 )
             }
@@ -23630,22 +23884,6 @@ impl<T: Service> ::connectrpc::Dispatcher for ServiceServer<T> {
                         GetRequest,
                     >::from_parts(&req, &body);
                     svc.get(ctx, req).await?.encode::<GetResponse>(format)
-                })
-            }
-            "Reduce" => {
-                let svc = ::std::sync::Arc::clone(&self.inner);
-                Box::pin(async move {
-                    let body = ::connectrpc::dispatcher::codegen::request_proto_bytes::<
-                        ReduceRequest,
-                    >(request.encoded()?, format)?;
-                    let req: __buffa::view::ReduceRequestView<'_> = ::connectrpc::dispatcher::codegen::decode_borrowed_request_view(
-                        &body,
-                        ctx.decode_options(),
-                    )?;
-                    let req = ::connectrpc::ServiceRequest::<
-                        ReduceRequest,
-                    >::from_parts(&req, &body);
-                    svc.reduce(ctx, req).await?.encode::<ReduceResponse>(format)
                 })
             }
             _ => ::connectrpc::dispatcher::codegen::unimplemented_unary(path),
@@ -23705,6 +23943,30 @@ impl<T: Service> ::connectrpc::Dispatcher for ServiceServer<T> {
                         resp
                             .map_body(|s| ::connectrpc::dispatcher::codegen::encode_response_stream::<
                                 RangeFrame,
+                                _,
+                                _,
+                            >(s, format)),
+                    )
+                })
+            }
+            "Reduce" => {
+                let svc = ::std::sync::Arc::clone(&self.inner);
+                Box::pin(async move {
+                    let body = ::connectrpc::dispatcher::codegen::request_proto_bytes::<
+                        ReduceRequest,
+                    >(request, format)?;
+                    let req: __buffa::view::ReduceRequestView<'_> = ::connectrpc::dispatcher::codegen::decode_borrowed_request_view(
+                        &body,
+                        ctx.decode_options(),
+                    )?;
+                    let req = ::connectrpc::ServiceRequest::<
+                        ReduceRequest,
+                    >::from_parts(&req, &body);
+                    let resp = svc.reduce(ctx, req).await?;
+                    Ok(
+                        resp
+                            .map_body(|s| ::connectrpc::dispatcher::codegen::encode_response_stream::<
+                                ReduceResponse,
                                 _,
                                 _,
                             >(s, format)),
@@ -23932,8 +24194,9 @@ where
         &self,
         request: ReduceRequest,
     ) -> Result<
-        ::connectrpc::client::UnaryResponse<
-            ::buffa::view::OwnedView<__buffa::view::ReduceResponseView<'static>>,
+        ::connectrpc::client::ServerStream<
+            T::ResponseBody,
+            __buffa::view::ReduceResponseView<'static>,
         >,
         ::connectrpc::ConnectError,
     > {
@@ -23946,12 +24209,13 @@ where
         request: ReduceRequest,
         options: ::connectrpc::client::CallOptions,
     ) -> Result<
-        ::connectrpc::client::UnaryResponse<
-            ::buffa::view::OwnedView<__buffa::view::ReduceResponseView<'static>>,
+        ::connectrpc::client::ServerStream<
+            T::ResponseBody,
+            __buffa::view::ReduceResponseView<'static>,
         >,
         ::connectrpc::ConnectError,
     > {
-        ::connectrpc::client::call_unary(
+        ::connectrpc::client::call_server_stream(
                 &self.transport,
                 &self.config,
                 SERVICE_REDUCE_SPEC.with_origin(::connectrpc::SpecOrigin::Client),

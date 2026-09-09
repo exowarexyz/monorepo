@@ -15,7 +15,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file qmdb/v1/operation_log.proto.
  */
 export const file_qmdb_v1_operation_log: GenFile = /*@__PURE__*/
-  fileDesc("ChtxbWRiL3YxL29wZXJhdGlvbl9sb2cucHJvdG8SB3FtZGIudjEivgEKEFN1YnNjcmliZVJlcXVlc3QSNAoLa2V5X2ZpbHRlcnMYASADKAsyFC5jb21tb24ua3YudjEuRmlsdGVyQgm6SAaSAQMQgAgSNgoNdmFsdWVfZmlsdGVycxgCIAMoCzIULmNvbW1vbi5rdi52MS5GaWx0ZXJCCbpIBpIBAxCACBIiChVzaW5jZV9zZXF1ZW5jZV9udW1iZXIYAyABKARIAIgBAUIYChZfc2luY2Vfc2VxdWVuY2VfbnVtYmVyIm4KEVN1YnNjcmliZVJlc3BvbnNlEh4KFnJlc3VtZV9zZXF1ZW5jZV9udW1iZXIYASABKAQSLAoFcHJvb2YYAiABKAsyHS5xbWRiLnYxLkhpc3RvcmljYWxNdWx0aVByb29mEgsKA3RpcBgDIAEoBCJfChhHZXRPcGVyYXRpb25SYW5nZVJlcXVlc3QSCwoDdGlwGAEgASgEEhYKDnN0YXJ0X2xvY2F0aW9uGAIgASgEEh4KDW1heF9sb2NhdGlvbnMYAyABKA1CB7pIBCoCIAAiUgoZR2V0T3BlcmF0aW9uUmFuZ2VSZXNwb25zZRI1CgVwcm9vZhgBIAEoCzImLnFtZGIudjEuSGlzdG9yaWNhbE9wZXJhdGlvblJhbmdlUHJvb2YytwEKE09wZXJhdGlvbkxvZ1NlcnZpY2USWgoRR2V0T3BlcmF0aW9uUmFuZ2USIS5xbWRiLnYxLkdldE9wZXJhdGlvblJhbmdlUmVxdWVzdBoiLnFtZGIudjEuR2V0T3BlcmF0aW9uUmFuZ2VSZXNwb25zZRJECglTdWJzY3JpYmUSGS5xbWRiLnYxLlN1YnNjcmliZVJlcXVlc3QaGi5xbWRiLnYxLlN1YnNjcmliZVJlc3BvbnNlMAFiBnByb3RvMw", [file_buf_validate_validate, file_qmdb_v1_proof, file_common_v1_kv]);
+  fileDesc("ChtxbWRiL3YxL29wZXJhdGlvbl9sb2cucHJvdG8SB3FtZGIudjEivgEKEFN1YnNjcmliZVJlcXVlc3QSNAoLa2V5X2ZpbHRlcnMYASADKAsyFC5jb21tb24ua3YudjEuRmlsdGVyQgm6SAaSAQMQgAgSNgoNdmFsdWVfZmlsdGVycxgCIAMoCzIULmNvbW1vbi5rdi52MS5GaWx0ZXJCCbpIBpIBAxCACBIiChVzaW5jZV9zZXF1ZW5jZV9udW1iZXIYAyABKARIAIgBAUIYChZfc2luY2Vfc2VxdWVuY2VfbnVtYmVyImEKEVN1YnNjcmliZVJlc3BvbnNlEh4KFnJlc3VtZV9zZXF1ZW5jZV9udW1iZXIYASABKAQSLAoFcHJvb2YYAiABKAsyHS5xbWRiLnYxLkhpc3RvcmljYWxNdWx0aVByb29mIl8KGEdldE9wZXJhdGlvblJhbmdlUmVxdWVzdBILCgN0aXAYASABKAQSFgoOc3RhcnRfbG9jYXRpb24YAiABKAQSHgoNbWF4X2xvY2F0aW9ucxgDIAEoDUIHukgEKgIgACJSChlHZXRPcGVyYXRpb25SYW5nZVJlc3BvbnNlEjUKBXByb29mGAEgASgLMiYucW1kYi52MS5IaXN0b3JpY2FsT3BlcmF0aW9uUmFuZ2VQcm9vZjK3AQoTT3BlcmF0aW9uTG9nU2VydmljZRJaChFHZXRPcGVyYXRpb25SYW5nZRIhLnFtZGIudjEuR2V0T3BlcmF0aW9uUmFuZ2VSZXF1ZXN0GiIucW1kYi52MS5HZXRPcGVyYXRpb25SYW5nZVJlc3BvbnNlEkQKCVN1YnNjcmliZRIZLnFtZGIudjEuU3Vic2NyaWJlUmVxdWVzdBoaLnFtZGIudjEuU3Vic2NyaWJlUmVzcG9uc2UwAWIGcHJvdG8z", [file_buf_validate_validate, file_qmdb_v1_proof, file_common_v1_kv]);
 
 /**
  * Subscribe to operations whose logical key and/or value match the given
@@ -63,13 +63,16 @@ export const SubscribeRequestSchema: GenMessage<SubscribeRequest> = /*@__PURE__*
   messageDesc(file_qmdb_v1_operation_log, 0);
 
 /**
- * One emitted proof for a subscribed batch.
+ * One emitted proof for a subscribed batch. Its published QMDB tip is the
+ * embedded Merkle proof's leaf count minus one. Current-boundary endpoints
+ * include an ops-root witness that binds the operation-log root to the trusted
+ * current root for that tip. Operation-log-only endpoints omit the witness.
  *
  * @generated from message qmdb.v1.SubscribeResponse
  */
 export type SubscribeResponse = Message<"qmdb.v1.SubscribeResponse"> & {
   /**
-   * Underlying store stream sequence that made this proof readable end-to-end.
+   * Store sequence of the operation batch. A later watermark may publish it.
    *
    * @generated from field: uint64 resume_sequence_number = 1;
    */
@@ -79,17 +82,6 @@ export type SubscribeResponse = Message<"qmdb.v1.SubscribeResponse"> & {
    * @generated from field: qmdb.v1.HistoricalMultiProof proof = 2;
    */
   proof?: HistoricalMultiProof;
-
-  /**
-   * Published backend tip. Current-boundary-backed endpoints include an
-   * ops-root witness so clients can authenticate the historical operation-log
-   * root from their trusted current/global root for this tip. Operation-log-only
-   * endpoints omit the witness; clients authenticate the embedded ops root
-   * out-of-band for this tip.
-   *
-   * @generated from field: uint64 tip = 3;
-   */
-  tip: bigint;
 };
 
 /**

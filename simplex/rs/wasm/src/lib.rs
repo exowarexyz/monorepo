@@ -1,4 +1,5 @@
 use commonware_codec::{Decode, DecodeExt, Encode, Read};
+use commonware_coding::ReedSolomon;
 use commonware_consensus::{
     simplex::{
         scheme::{
@@ -14,7 +15,7 @@ use commonware_consensus::{
 use commonware_cryptography::{
     blake3,
     bls12381::primitives::variant::{MinPk, MinSig, Variant},
-    ed25519, secp256r1, sha256, transcript, Digest, PublicKey,
+    ed25519, secp256r1, sha256, transcript, Digest, Digestible, PublicKey,
 };
 use commonware_parallel::Sequential;
 use commonware_utils::{
@@ -29,9 +30,24 @@ const MAX_PARTICIPANTS: usize = 10_000;
 const MAX_HEADER_BYTES: usize = 16 * 1024 * 1024;
 type Secp256r1PublicKey = secp256r1::standard::PublicKey;
 
+// Certificate verification treats each commitment digest as 32 opaque bytes
+// These types preserve that wire layout and validate the embedded coding config
+type CodingCommitment = Commitment<CommitmentBlock, ReedSolomon<sha256::Sha256>, sha256::Sha256>;
+
+#[derive(Clone)]
+struct CommitmentBlock(sha256::Digest);
+
+impl Digestible for CommitmentBlock {
+    type Digest = sha256::Digest;
+
+    fn digest(&self) -> Self::Digest {
+        self.0
+    }
+}
+
 #[derive(Serialize)]
 struct VerifiedCertificate {
-    scheme: String,
+    epoch: u64,
     view: u64,
     parent: u64,
     payload: Vec<u8>,
@@ -76,11 +92,7 @@ where
     V::Public::decode(bytes)
 }
 
-fn verify_notarized<S, D>(
-    scheme_name: &str,
-    scheme: S,
-    bytes: &[u8],
-) -> Result<VerifiedCertificate, String>
+fn verify_notarized<S, D>(scheme: S, bytes: &[u8]) -> Result<VerifiedCertificate, String>
 where
     S: commonware_consensus::simplex::scheme::Scheme<D>,
     D: Digest,
@@ -94,7 +106,7 @@ where
     }
     let header = read_header(reader, "notarized artifact")?;
     Ok(VerifiedCertificate {
-        scheme: scheme_name.to_string(),
+        epoch: proof.round().epoch().get(),
         view: proof.view().get(),
         parent: proof.proposal.parent.get(),
         payload: proof.proposal.payload.as_ref().to_vec(),
@@ -103,11 +115,7 @@ where
     })
 }
 
-fn verify_finalized<S, D>(
-    scheme_name: &str,
-    scheme: S,
-    bytes: &[u8],
-) -> Result<VerifiedCertificate, String>
+fn verify_finalized<S, D>(scheme: S, bytes: &[u8]) -> Result<VerifiedCertificate, String>
 where
     S: commonware_consensus::simplex::scheme::Scheme<D>,
     D: Digest,
@@ -121,7 +129,7 @@ where
     }
     let header = read_header(reader, "finalized artifact")?;
     Ok(VerifiedCertificate {
-        scheme: scheme_name.to_string(),
+        epoch: proof.round().epoch().get(),
         view: proof.view().get(),
         parent: proof.proposal.parent.get(),
         payload: proof.proposal.payload.as_ref().to_vec(),
@@ -138,7 +146,6 @@ enum ArtifactKind {
 
 fn verify_artifact<S, D>(
     artifact: ArtifactKind,
-    scheme_name: &str,
     scheme: S,
     bytes: &[u8],
 ) -> Result<VerifiedCertificate, String>
@@ -148,8 +155,8 @@ where
     <S::Certificate as Read>::Cfg: Clone,
 {
     match artifact {
-        ArtifactKind::Notarized => verify_notarized(scheme_name, scheme, bytes),
-        ArtifactKind::Finalized => verify_finalized(scheme_name, scheme, bytes),
+        ArtifactKind::Notarized => verify_notarized(scheme, bytes),
+        ArtifactKind::Finalized => verify_finalized(scheme, bytes),
     }
 }
 
@@ -170,7 +177,6 @@ where
                 .map_err(|err| format!("failed to decode secp256r1 participants: {err}"))?;
             verify_artifact::<_, D>(
                 artifact,
-                scheme_name,
                 simplex_secp256r1::Scheme::<P>::verifier(namespace, participants),
                 bytes,
             )
@@ -181,7 +187,6 @@ where
                     .map_err(|err| format!("failed to decode multisig participants: {err}"))?;
             verify_artifact::<_, D>(
                 artifact,
-                scheme_name,
                 bls12381_multisig::Scheme::<P, MinPk>::verifier(namespace, participants),
                 bytes,
             )
@@ -192,7 +197,6 @@ where
                     .map_err(|err| format!("failed to decode multisig participants: {err}"))?;
             verify_artifact::<_, D>(
                 artifact,
-                scheme_name,
                 bls12381_multisig::Scheme::<P, MinSig>::verifier(namespace, participants),
                 bytes,
             )
@@ -202,7 +206,6 @@ where
                 .map_err(|err| format!("failed to decode threshold identity: {err}"))?;
             verify_artifact::<_, D>(
                 artifact,
-                scheme_name,
                 threshold_standard::Scheme::<P, MinPk>::certificate_verifier(namespace, identity),
                 bytes,
             )
@@ -212,7 +215,6 @@ where
                 .map_err(|err| format!("failed to decode threshold identity: {err}"))?;
             verify_artifact::<_, D>(
                 artifact,
-                scheme_name,
                 threshold_standard::Scheme::<P, MinSig>::certificate_verifier(namespace, identity),
                 bytes,
             )
@@ -222,7 +224,6 @@ where
                 .map_err(|err| format!("failed to decode threshold VRF identity: {err}"))?;
             verify_artifact::<_, D>(
                 artifact,
-                scheme_name,
                 threshold_vrf::Scheme::<P, MinPk>::certificate_verifier(namespace, identity),
                 bytes,
             )
@@ -232,7 +233,6 @@ where
                 .map_err(|err| format!("failed to decode threshold VRF identity: {err}"))?;
             verify_artifact::<_, D>(
                 artifact,
-                scheme_name,
                 threshold_vrf::Scheme::<P, MinSig>::certificate_verifier(namespace, identity),
                 bytes,
             )
@@ -258,7 +258,6 @@ fn verify_for_scheme<D: Digest>(
             .map_err(|err| format!("failed to decode ed25519 participants: {err}"))?;
         return verify_artifact::<_, D>(
             artifact,
-            scheme_name,
             simplex_ed25519::Scheme::verifier(namespace, participants),
             bytes,
         );
@@ -317,7 +316,7 @@ fn verify_for_payload(
             bytes,
             artifact,
         ),
-        "coding-commitment" => verify_for_scheme::<Commitment>(
+        "coding-commitment" => verify_for_scheme::<CodingCommitment>(
             identity_name,
             scheme_name,
             namespace,
@@ -421,12 +420,30 @@ mod tests {
         )
     }
 
-    fn commitment_payload(header: &[u8]) -> Commitment {
+    fn commitment_payload(header: &[u8]) -> CodingCommitment {
         let seed = header.iter().fold(0u64, |acc, byte| {
             acc.wrapping_mul(257).wrapping_add(u64::from(*byte))
         });
         let mut rng = TestRng::new(seed);
-        Commitment::random(&mut rng)
+        CodingCommitment::random(&mut rng)
+    }
+
+    #[test]
+    fn coding_commitment_preserves_wire_layout() {
+        let mut bytes: [u8; 100] = core::array::from_fn(|i| i as u8);
+        bytes[96..].copy_from_slice(&[0, 4, 0, 2]);
+        let commitment = CodingCommitment::decode(bytes.as_slice()).expect("coding commitment");
+        assert_eq!(commitment.block().as_ref(), &bytes[..32]);
+        assert_eq!(commitment.root().as_ref(), &bytes[32..64]);
+        assert_eq!(commitment.context().as_ref(), &bytes[64..96]);
+        assert_eq!(commitment.config().minimum_shards.get(), 4);
+        assert_eq!(commitment.config().extra_shards.get(), 2);
+        assert_eq!(commitment.encode().as_ref(), bytes.as_slice());
+
+        bytes[96..98].fill(0);
+        assert!(CodingCommitment::decode(bytes.as_slice()).is_err());
+        bytes[96..].copy_from_slice(&[0, 4, 0, 0]);
+        assert!(CodingCommitment::decode(bytes.as_slice()).is_err());
     }
 
     fn verify_round_trip<S, D>(
@@ -465,7 +482,6 @@ mod tests {
         )
         .expect("verify notarization");
 
-        assert_eq!(verified.scheme, scheme_name);
         assert_eq!(verified.view, 2);
         assert_eq!(verified.parent, 1);
         assert_eq!(verified.payload, notarized_payload.as_ref());
@@ -495,7 +511,6 @@ mod tests {
         )
         .expect("verify finalization");
 
-        assert_eq!(verified.scheme, scheme_name);
         assert_eq!(verified.view, 2);
         assert_eq!(verified.parent, 1);
         assert_eq!(verified.payload, finalized_payload.as_ref());
@@ -654,7 +669,7 @@ mod tests {
         S: Scheme<sha256::Digest>
             + Scheme<blake3::Digest>
             + Scheme<transcript::Summary>
-            + Scheme<Commitment>,
+            + Scheme<CodingCommitment>,
         <S::Certificate as Read>::Cfg: Clone,
     {
         verify_round_trip(

@@ -4,52 +4,52 @@
 //! - [`Service::query`] unary SQL against that session.
 //! - [`Service::subscribe`] streaming: for every atomic ingest batch that
 //!   touches a registered table's primary-key family, decode its rows
-//!   and re-run the subscriber's SQL `WHERE` predicate against just those
+//!   and evaluate the subscriber's SQL `WHERE` predicate against just those
 //!   rows. Each matching batch produces one [`SubscribeResponse`] carrying
 //!   only the rows that satisfied the predicate.
 //!
-//! The streaming path builds a small transient [`MemTable`] per batch and
-//! runs `SELECT * FROM <table> WHERE <where_sql>` against it, so any SQL
-//! expression DataFusion accepts (referring to the table's columns) works
-//! as the predicate.
+//! Query results and subscription frames preserve their Arrow schema in IPC streams.
+//!
+//! Subscription predicates are scalar boolean expressions over the named table.
+//! DataFusion compiles each predicate once and filters incoming Arrow batches.
+//! Stable functions such as `now()` use the subscription start time. Volatile
+//! functions are evaluated for each batch. Subqueries, aggregates, window
+//! functions, and row-expanding expressions are not subscription predicates.
 
 #![allow(refining_impl_trait)]
 
 use std::collections::HashMap;
 use std::future::Future;
+use std::panic::AssertUnwindSafe;
 use std::pin::Pin;
 use std::sync::Arc;
 
 use crate::proto::sql::v1::{
-    cell::Kind as ProtoCellKind, Cell as ProtoCell, Column as ProtoColumn, Index as ProtoIndex,
-    IndexLayout as ProtoIndexLayout, ListValue as ProtoListValue, Null as ProtoNull, QueryRequest,
-    QueryResponse, Row as ProtoRow, Service, ServiceServer, SubscribeRequest, SubscribeResponse,
+    Column as ProtoColumn, Index as ProtoIndex, IndexLayout as ProtoIndexLayout, QueryRequest,
+    QueryResponse, Service, ServiceServer, SubscribeRequest, SubscribeResponse,
     Table as ProtoTable, TablesRequest, TablesResponse,
 };
 use bytes::Bytes;
 use connectrpc::{ConnectError, ConnectRpcService, RequestContext as Context, ServiceRequest};
-use datafusion::arrow::array::{
-    Array, ArrayRef, BinaryArray, BinaryViewArray, BooleanArray, Date32Array, Date64Array,
-    Decimal128Array, Decimal256Array, FixedSizeBinaryArray, Float32Array, Float64Array, Int32Array,
-    Int64Array, LargeBinaryArray, LargeListArray, LargeStringArray, ListArray, StringArray,
-    StringViewArray, TimestampMicrosecondArray, TimestampMillisecondArray,
-    TimestampNanosecondArray, TimestampSecondArray, UInt32Array, UInt64Array,
-};
-use datafusion::arrow::datatypes::{DataType, SchemaRef, TimeUnit};
+use datafusion::arrow::datatypes::{DataType, SchemaRef};
+use datafusion::arrow::ipc::writer::StreamWriter;
 use datafusion::arrow::record_batch::RecordBatch;
-use datafusion::common::{DataFusionError, Result as DataFusionResult};
-use datafusion::datasource::MemTable;
+use datafusion::common::tree_node::{TreeNode, TreeNodeRecursion};
+use datafusion::common::{DFSchema, DataFusionError, Result as DataFusionResult, TableReference};
+use datafusion::logical_expr::{simplify::SimplifyContext, Expr, ExprSchemable};
+use datafusion::optimizer::simplify_expressions::ExprSimplifier;
+use datafusion::physical_expr::PhysicalExpr;
+use datafusion::physical_plan::filter::batch_filter;
 use datafusion::prelude::SessionContext;
 use exoware_sdk::keys::Key;
 use exoware_sdk::kv_codec::{decode_stored_row, Utf8};
 use exoware_sdk::selector::Selector;
 use exoware_sdk::stream_filter::StreamFilter;
 use exoware_sdk::{PrefixedStoreClient, StreamSubscription, StreamSubscriptionFrame};
-use futures::future::BoxFuture;
 use futures::stream::{self, Stream};
-use futures::FutureExt;
+use futures::{FutureExt, TryStreamExt};
 
-use crate::builder::{projected_column_indices, ProjectedBatchBuilder};
+use crate::builder::ProjectedBatchBuilder;
 use crate::codec::decode_primary_key_selected;
 use crate::filter::ScanAccessPlan;
 use crate::predicate::QueryPredicate;
@@ -71,7 +71,7 @@ struct TableStream {
 }
 
 impl TableStream {
-    fn new(model: Arc<TableModel>, indexes: Vec<ResolvedIndexSpec>) -> Self {
+    fn new(model: Arc<TableModel>, indexes: Arc<Vec<ResolvedIndexSpec>>) -> Self {
         let projection: Option<Vec<usize>> = Some((0..model.columns.len()).collect());
         let access_plan = Arc::new(ScanAccessPlan::new(
             &model,
@@ -87,7 +87,7 @@ impl TableStream {
             access_plan,
             model,
             selector,
-            indexes: Arc::new(indexes),
+            indexes,
         }
     }
 
@@ -133,23 +133,19 @@ pub struct SqlServer {
 impl SqlServer {
     /// Build a server from a [`KvSchema`]. The schema's tables are registered
     /// in a new [`SessionContext`] that drives both unary `Query` and the
-    /// per-batch predicate evaluation on `Subscribe`.
+    /// scalar predicate compilation on `Subscribe`.
     pub fn new(schema: KvSchema) -> DataFusionResult<Self> {
         let store = schema.client().clone();
         let mut streams = HashMap::with_capacity(schema.tables().len());
         let mut table_names = Vec::with_capacity(schema.tables().len());
-        for (name, config) in schema.tables() {
-            let model =
-                Arc::new(TableModel::from_config(config).map_err(|e| {
-                    DataFusionError::Execution(format!("invalid table config: {e}"))
-                })?);
-            let indexes = model
-                .resolve_index_specs(&config.index_specs)
-                .map_err(|e| DataFusionError::Execution(format!("invalid index specs: {e}")))?;
-            streams.insert(name.clone(), TableStream::new(model, indexes));
+        for (name, table) in schema.tables() {
+            streams.insert(
+                name.clone(),
+                TableStream::new(table.model.clone(), table.index_specs.clone()),
+            );
             table_names.push(name.clone());
         }
-        let ctx = SessionContext::new();
+        let ctx = crate::session_context();
         schema.register_all(&ctx)?;
         Ok(Self {
             ctx: Arc::new(ctx),
@@ -274,6 +270,13 @@ impl Service for SqlConnect {
             let where_sql = request.where_sql.trim().to_string();
             let since = request.since_sequence_number.filter(|seq| *seq != 0);
             let stream = server.stream(&table_name)?.clone();
+            let predicate = compile_subscription_predicate(
+                &server.ctx,
+                &stream.schema,
+                &table_name,
+                &where_sql,
+            )
+            .map_err(datafusion_error_to_connect)?;
 
             let filter = StreamFilter {
                 selectors: vec![stream.selector.clone()],
@@ -286,9 +289,7 @@ impl Service for SqlConnect {
                 .await
                 .map_err(client_error_to_connect)?;
 
-            let output = Box::pin(BatchPredicateStream::new(
-                sub, stream, table_name, where_sql,
-            ));
+            let output = Box::pin(BatchPredicateStream::new(sub, stream, predicate));
             Ok(connectrpc::Response::stream(output as SubscribeStream))
         }
     }
@@ -313,47 +314,57 @@ impl Service for SqlConnect {
         request: ServiceRequest<'_, QueryRequest>,
     ) -> impl Future<Output = connectrpc::ServiceResult<QueryResponse>> + Send {
         let server = self.server.clone();
-        async move {
+        AssertUnwindSafe(async move {
             let sql = request.sql.to_string();
             let df = server
                 .ctx
                 .sql(&sql)
                 .await
                 .map_err(datafusion_error_to_connect)?;
-            let schema = df.schema().clone();
-            let batches = df.collect().await.map_err(datafusion_error_to_connect)?;
-            let columns: Vec<String> = schema.fields().iter().map(|f| f.name().clone()).collect();
-            let rows =
-                record_batches_to_proto_rows(&batches).map_err(datafusion_error_to_connect)?;
+            let mut batches = df
+                .execute_stream()
+                .await
+                .map_err(datafusion_error_to_connect)?;
+            let mut writer = StreamWriter::try_new(Vec::new(), &batches.schema())
+                .map_err(|error| datafusion_error_to_connect(error.into()))?;
+            while let Some(batch) = batches
+                .try_next()
+                .await
+                .map_err(datafusion_error_to_connect)?
+            {
+                writer
+                    .write(&batch)
+                    .map_err(|error| datafusion_error_to_connect(error.into()))?;
+            }
+            let results = writer
+                .into_inner()
+                .map_err(|error| datafusion_error_to_connect(error.into()))?
+                .into();
             connectrpc::Response::ok(QueryResponse {
-                column: columns,
-                rows,
+                results,
                 ..Default::default()
             })
-        }
+        })
+        .catch_unwind()
+        .map(|result| {
+            result.unwrap_or_else(|_| Err(ConnectError::internal("SQL query execution panicked")))
+        })
     }
 }
 
-type BatchEvaluation = BoxFuture<'static, Result<Option<SubscribeResponse>, ConnectError>>;
-type BatchEvaluator = Box<dyn FnMut(StreamSubscriptionFrame) -> BatchEvaluation + Send>;
+type BatchEvaluator = Box<
+    dyn FnMut(StreamSubscriptionFrame) -> Result<Option<SubscribeResponse>, ConnectError> + Send,
+>;
 type SubscriptionStream =
     Pin<Box<dyn Stream<Item = Result<StreamSubscriptionFrame, ConnectError>> + Send>>;
+type SubscriptionEvent = Option<Result<StreamSubscriptionFrame, ConnectError>>;
 
-enum StagedSubscriptionEvent {
-    Frame(StreamSubscriptionFrame),
-    Terminal(TerminalSubscriptionEvent),
-}
-
-enum TerminalSubscriptionEvent {
-    End,
-    Error(ConnectError),
-}
+const MAX_FILTERED_FRAMES_PER_POLL: usize = 16;
 
 struct BatchPredicateStream {
     upstream: SubscriptionStream,
     evaluator: BatchEvaluator,
-    building: Option<BatchEvaluation>,
-    staged: Option<StagedSubscriptionEvent>,
+    staged: Option<SubscriptionEvent>,
     done: bool,
 }
 
@@ -361,8 +372,7 @@ impl BatchPredicateStream {
     fn new(
         sub: StreamSubscription,
         state: TableStream,
-        table_name: String,
-        where_sql: String,
+        predicate: Option<Arc<dyn PhysicalExpr>>,
     ) -> Self {
         let upstream = subscription_stream(sub);
         let evaluator = move |frame: StreamSubscriptionFrame| {
@@ -372,55 +382,23 @@ impl BatchPredicateStream {
                 .into_iter()
                 .map(|entry| (entry.key, entry.value))
                 .collect();
-            let state = state.clone();
-            let table_name = table_name.clone();
-            let where_sql = where_sql.clone();
-            async move { evaluate_batch(state, table_name, where_sql, sequence_number, entries).await }
+            evaluate_batch(&state, predicate.as_ref(), sequence_number, entries)
         };
         Self::with_evaluator(upstream, evaluator)
     }
 
-    fn with_evaluator<S, E, F>(upstream: S, mut evaluator: E) -> Self
+    fn with_evaluator<S, E>(upstream: S, evaluator: E) -> Self
     where
         S: Stream<Item = Result<StreamSubscriptionFrame, ConnectError>> + Send + 'static,
-        E: FnMut(StreamSubscriptionFrame) -> F + Send + 'static,
-        F: Future<Output = Result<Option<SubscribeResponse>, ConnectError>> + Send + 'static,
+        E: FnMut(StreamSubscriptionFrame) -> Result<Option<SubscribeResponse>, ConnectError>
+            + Send
+            + 'static,
     {
         Self {
             upstream: Box::pin(upstream),
-            evaluator: Box::new(move |frame| evaluator(frame).boxed()),
-            building: None,
+            evaluator: Box::new(evaluator),
             staged: None,
             done: false,
-        }
-    }
-
-    fn poll_upstream(
-        &mut self,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<StagedSubscriptionEvent> {
-        match self.upstream.as_mut().poll_next(cx) {
-            std::task::Poll::Pending => std::task::Poll::Pending,
-            std::task::Poll::Ready(Some(Ok(frame))) => {
-                std::task::Poll::Ready(StagedSubscriptionEvent::Frame(frame))
-            }
-            std::task::Poll::Ready(Some(Err(err))) => std::task::Poll::Ready(
-                StagedSubscriptionEvent::Terminal(TerminalSubscriptionEvent::Error(err)),
-            ),
-            std::task::Poll::Ready(None) => std::task::Poll::Ready(
-                StagedSubscriptionEvent::Terminal(TerminalSubscriptionEvent::End),
-            ),
-        }
-    }
-
-    fn finish_event(
-        &mut self,
-        event: TerminalSubscriptionEvent,
-    ) -> Option<Result<SubscribeResponse, ConnectError>> {
-        self.done = true;
-        match event {
-            TerminalSubscriptionEvent::End => None,
-            TerminalSubscriptionEvent::Error(err) => Some(Err(err)),
         }
     }
 }
@@ -448,63 +426,49 @@ impl Stream for BatchPredicateStream {
             return std::task::Poll::Ready(None);
         }
 
-        loop {
-            if let Some(fut) = this.building.as_mut() {
-                match fut.as_mut().poll(cx) {
-                    std::task::Poll::Pending => {
-                        if this.staged.is_none() {
-                            if let std::task::Poll::Ready(event) = this.poll_upstream(cx) {
-                                this.staged = Some(event);
-                            }
-                        }
-                        return std::task::Poll::Pending;
-                    }
-                    std::task::Poll::Ready(Ok(Some(resp))) => {
-                        this.building = None;
-                        return std::task::Poll::Ready(Some(Ok(resp)));
-                    }
-                    std::task::Poll::Ready(Ok(None)) => {
-                        this.building = None;
-                    }
-                    std::task::Poll::Ready(Err(err)) => {
-                        this.building = None;
-                        this.staged = None;
-                        this.done = true;
-                        return std::task::Poll::Ready(Some(Err(err)));
-                    }
-                }
-            }
-
+        for _ in 0..MAX_FILTERED_FRAMES_PER_POLL {
             let event = match this.staged.take() {
                 Some(event) => event,
-                None => match this.poll_upstream(cx) {
+                None => match this.upstream.as_mut().poll_next(cx) {
                     std::task::Poll::Pending => return std::task::Poll::Pending,
                     std::task::Poll::Ready(event) => event,
                 },
             };
 
-            match event {
-                StagedSubscriptionEvent::Frame(frame) => {
-                    this.building = Some((this.evaluator)(frame));
-                    // Register upstream demand before the evaluation is first
-                    // polled, so the next frame is fetched during evaluations
-                    // that complete on their first poll.
-                    if let std::task::Poll::Ready(event) = this.poll_upstream(cx) {
-                        this.staged = Some(event);
-                    }
+            let frame = match event {
+                Some(Ok(frame)) => frame,
+                Some(Err(err)) => {
+                    this.done = true;
+                    return std::task::Poll::Ready(Some(Err(err)));
                 }
-                StagedSubscriptionEvent::Terminal(terminal) => {
-                    return std::task::Poll::Ready(this.finish_event(terminal))
+                None => {
+                    this.done = true;
+                    return std::task::Poll::Ready(None);
+                }
+            };
+            // Register demand for one later frame before evaluating this batch
+            if let std::task::Poll::Ready(event) = this.upstream.as_mut().poll_next(cx) {
+                this.staged = Some(event);
+            }
+            match (this.evaluator)(frame) {
+                Ok(Some(response)) => return std::task::Poll::Ready(Some(Ok(response))),
+                Ok(None) => {}
+                Err(err) => {
+                    this.staged = None;
+                    this.done = true;
+                    return std::task::Poll::Ready(Some(Err(err)));
                 }
             }
         }
+        // Yield after a run of rejected frames so cancellation and other tasks can progress
+        cx.waker().wake_by_ref();
+        std::task::Poll::Pending
     }
 }
 
-async fn evaluate_batch(
-    state: TableStream,
-    table_name: String,
-    where_sql: String,
+fn evaluate_batch(
+    state: &TableStream,
+    predicate: Option<&Arc<dyn PhysicalExpr>>,
     sequence_number: u64,
     entries: Vec<(Key, Bytes)>,
 ) -> Result<Option<SubscribeResponse>, ConnectError> {
@@ -515,282 +479,97 @@ async fn evaluate_batch(
         return Ok(None);
     }
 
-    let filtered = if where_sql.is_empty() {
-        batch
-    } else {
-        apply_where(state.schema.clone(), batch, &table_name, &where_sql)
-            .await
-            .map_err(datafusion_error_to_connect)?
+    let filtered = match predicate {
+        Some(predicate) => batch_filter(&batch, predicate).map_err(datafusion_error_to_connect)?,
+        None => batch,
     };
     if filtered.num_rows() == 0 {
         return Ok(None);
     }
 
-    let columns: Vec<String> = filtered
-        .schema()
-        .fields()
-        .iter()
-        .map(|f| f.name().clone())
-        .collect();
-    let rows = record_batches_to_proto_rows(std::slice::from_ref(&filtered))
-        .map_err(datafusion_error_to_connect)?;
+    let mut writer = StreamWriter::try_new(Vec::new(), &filtered.schema())
+        .map_err(|error| datafusion_error_to_connect(error.into()))?;
+    writer
+        .write(&filtered)
+        .map_err(|error| datafusion_error_to_connect(error.into()))?;
+    let results = writer
+        .into_inner()
+        .map_err(|error| datafusion_error_to_connect(error.into()))?
+        .into();
     Ok(Some(SubscribeResponse {
         sequence_number,
-        column: columns,
-        rows,
+        results,
         ..Default::default()
     }))
 }
 
-async fn apply_where(
-    schema: SchemaRef,
-    batch: RecordBatch,
+fn compile_subscription_predicate(
+    ctx: &SessionContext,
+    schema: &SchemaRef,
     table_name: &str,
     where_sql: &str,
-) -> DataFusionResult<RecordBatch> {
-    let ctx = SessionContext::new();
-    let mem = MemTable::try_new(schema.clone(), vec![vec![batch]])?;
-    ctx.register_table(table_name, Arc::new(mem))?;
-    let sql = format!("SELECT * FROM {table_name} WHERE {where_sql}");
-    let df = ctx.sql(&sql).await?;
-    let batches = df.collect().await?;
-    if batches.is_empty() {
-        return Ok(RecordBatch::new_empty(schema));
+) -> DataFusionResult<Option<Arc<dyn PhysicalExpr>>> {
+    if where_sql.trim().is_empty() {
+        return Ok(None);
     }
-    datafusion::arrow::compute::concat_batches(&schema, batches.iter())
-        .map_err(|e| DataFusionError::ArrowError(Box::new(e), None))
-}
-
-fn record_batches_to_proto_rows(batches: &[RecordBatch]) -> DataFusionResult<Vec<ProtoRow>> {
-    let mut out = Vec::with_capacity(batches.iter().map(|b| b.num_rows()).sum());
-    for batch in batches {
-        for row_idx in 0..batch.num_rows() {
-            let mut cells = Vec::with_capacity(batch.num_columns());
-            for col_idx in 0..batch.num_columns() {
-                cells.push(arrow_value_to_cell(batch.column(col_idx), row_idx)?);
-            }
-            out.push(ProtoRow {
-                cells,
-                ..Default::default()
-            });
+    let df_schema = DFSchema::try_from_qualified_schema(TableReference::bare(table_name), schema)?;
+    let expression = ctx.parse_sql_expr(where_sql, &df_schema)?;
+    expression.apply(|expr| {
+        if matches!(
+            expr,
+            Expr::AggregateFunction(_)
+                | Expr::WindowFunction(_)
+                | Expr::Exists(_)
+                | Expr::InSubquery(_)
+                | Expr::SetComparison(_)
+                | Expr::ScalarSubquery(_)
+                | Expr::GroupingSet(_)
+                | Expr::Placeholder(_)
+                | Expr::OuterReferenceColumn(_, _)
+                | Expr::Unnest(_)
+        ) {
+            return Err(DataFusionError::Plan(
+                "subscription predicate must be a scalar boolean expression over the named table"
+                    .to_string(),
+            ));
         }
-    }
-    Ok(out)
-}
-
-fn arrow_value_to_cell(array: &ArrayRef, row: usize) -> DataFusionResult<ProtoCell> {
-    let kind = if array.is_null(row) {
-        ProtoCellKind::NullValue(Box::<ProtoNull>::default())
-    } else {
-        arrow_value_to_kind(array, row)?
+        Ok(TreeNodeRecursion::Continue)
+    })?;
+    let state = ctx.state();
+    let context = SimplifyContext::builder()
+        .with_schema(Arc::new(df_schema.clone()))
+        .with_config_options(state.config_options().clone())
+        .with_query_execution_start_time(state.execution_props().query_execution_start_time)
+        .build();
+    let simplifier = ExprSimplifier::new(context);
+    let expression = simplifier.coerce(expression, &df_schema)?;
+    let expression = match expression.get_type(&df_schema)? {
+        DataType::Boolean => expression,
+        DataType::Null => expression.cast_to(&DataType::Boolean, &df_schema)?,
+        data_type => {
+            return Err(DataFusionError::Plan(format!(
+                "subscription predicate must return Boolean, got {data_type}"
+            )))
+        }
     };
-    Ok(ProtoCell {
-        kind: Some(kind),
-        ..Default::default()
-    })
-}
-
-fn arrow_value_to_kind(array: &ArrayRef, row: usize) -> DataFusionResult<ProtoCellKind> {
-    match array.data_type() {
-        DataType::Int64 => Ok(ProtoCellKind::Int64Value(
-            array
-                .as_any()
-                .downcast_ref::<Int64Array>()
-                .unwrap()
-                .value(row),
-        )),
-        DataType::Int32 => Ok(ProtoCellKind::Int64Value(
-            array
-                .as_any()
-                .downcast_ref::<Int32Array>()
-                .unwrap()
-                .value(row) as i64,
-        )),
-        DataType::UInt64 => Ok(ProtoCellKind::Uint64Value(
-            array
-                .as_any()
-                .downcast_ref::<UInt64Array>()
-                .unwrap()
-                .value(row),
-        )),
-        DataType::UInt32 => Ok(ProtoCellKind::Uint64Value(
-            array
-                .as_any()
-                .downcast_ref::<UInt32Array>()
-                .unwrap()
-                .value(row) as u64,
-        )),
-        DataType::Float64 => Ok(ProtoCellKind::Float64Value(
-            array
-                .as_any()
-                .downcast_ref::<Float64Array>()
-                .unwrap()
-                .value(row),
-        )),
-        DataType::Float32 => Ok(ProtoCellKind::Float64Value(
-            array
-                .as_any()
-                .downcast_ref::<Float32Array>()
-                .unwrap()
-                .value(row) as f64,
-        )),
-        DataType::Boolean => Ok(ProtoCellKind::BooleanValue(
-            array
-                .as_any()
-                .downcast_ref::<BooleanArray>()
-                .unwrap()
-                .value(row),
-        )),
-        DataType::Utf8 => Ok(ProtoCellKind::Utf8Value(
-            array
-                .as_any()
-                .downcast_ref::<StringArray>()
-                .unwrap()
-                .value(row)
-                .to_string(),
-        )),
-        DataType::LargeUtf8 => Ok(ProtoCellKind::Utf8Value(
-            array
-                .as_any()
-                .downcast_ref::<LargeStringArray>()
-                .unwrap()
-                .value(row)
-                .to_string(),
-        )),
-        DataType::Utf8View => Ok(ProtoCellKind::Utf8Value(
-            array
-                .as_any()
-                .downcast_ref::<StringViewArray>()
-                .unwrap()
-                .value(row)
-                .to_string(),
-        )),
-        DataType::FixedSizeBinary(_) => {
-            Ok(ProtoCellKind::FixedSizeBinaryValue(Bytes::copy_from_slice(
-                array
-                    .as_any()
-                    .downcast_ref::<FixedSizeBinaryArray>()
-                    .unwrap()
-                    .value(row),
-            )))
-        }
-        DataType::Binary => Ok(ProtoCellKind::BinaryValue(Bytes::copy_from_slice(
-            array
-                .as_any()
-                .downcast_ref::<BinaryArray>()
-                .unwrap()
-                .value(row),
-        ))),
-        DataType::LargeBinary => Ok(ProtoCellKind::BinaryValue(Bytes::copy_from_slice(
-            array
-                .as_any()
-                .downcast_ref::<LargeBinaryArray>()
-                .unwrap()
-                .value(row),
-        ))),
-        DataType::BinaryView => Ok(ProtoCellKind::BinaryValue(Bytes::copy_from_slice(
-            array
-                .as_any()
-                .downcast_ref::<BinaryViewArray>()
-                .unwrap()
-                .value(row),
-        ))),
-        DataType::Date32 => Ok(ProtoCellKind::Date32Value(
-            array
-                .as_any()
-                .downcast_ref::<Date32Array>()
-                .unwrap()
-                .value(row),
-        )),
-        DataType::Date64 => Ok(ProtoCellKind::Date64Value(
-            array
-                .as_any()
-                .downcast_ref::<Date64Array>()
-                .unwrap()
-                .value(row),
-        )),
-        DataType::Timestamp(unit, _) => {
-            let v = match unit {
-                TimeUnit::Second => array
-                    .as_any()
-                    .downcast_ref::<TimestampSecondArray>()
-                    .unwrap()
-                    .value(row),
-                TimeUnit::Millisecond => array
-                    .as_any()
-                    .downcast_ref::<TimestampMillisecondArray>()
-                    .unwrap()
-                    .value(row),
-                TimeUnit::Microsecond => array
-                    .as_any()
-                    .downcast_ref::<TimestampMicrosecondArray>()
-                    .unwrap()
-                    .value(row),
-                TimeUnit::Nanosecond => array
-                    .as_any()
-                    .downcast_ref::<TimestampNanosecondArray>()
-                    .unwrap()
-                    .value(row),
-            };
-            Ok(ProtoCellKind::TimestampValue(v))
-        }
-        DataType::Decimal128(_, _) => {
-            let v = array
-                .as_any()
-                .downcast_ref::<Decimal128Array>()
-                .unwrap()
-                .value(row);
-            Ok(ProtoCellKind::Decimal128Value(Bytes::copy_from_slice(
-                &v.to_be_bytes(),
-            )))
-        }
-        DataType::Decimal256(_, _) => {
-            let v = array
-                .as_any()
-                .downcast_ref::<Decimal256Array>()
-                .unwrap()
-                .value(row);
-            Ok(ProtoCellKind::Decimal256Value(Bytes::copy_from_slice(
-                &v.to_be_bytes(),
-            )))
-        }
-        DataType::List(_) => {
-            let list = array.as_any().downcast_ref::<ListArray>().unwrap();
-            Ok(ProtoCellKind::ListValue(Box::new(list_array_to_proto(
-                &list.value(row),
-            )?)))
-        }
-        DataType::LargeList(_) => {
-            let list = array.as_any().downcast_ref::<LargeListArray>().unwrap();
-            Ok(ProtoCellKind::ListValue(Box::new(list_array_to_proto(
-                &list.value(row),
-            )?)))
-        }
-        other => Err(DataFusionError::NotImplemented(format!(
-            "cell conversion for arrow type {other:?}"
-        ))),
-    }
-}
-
-fn list_array_to_proto(elements: &ArrayRef) -> DataFusionResult<ProtoListValue> {
-    let mut cells = Vec::with_capacity(elements.len());
-    for idx in 0..elements.len() {
-        cells.push(arrow_value_to_cell(elements, idx)?);
-    }
-    Ok(ProtoListValue {
-        elements: cells,
-        ..Default::default()
-    })
+    state
+        .create_physical_expr(simplifier.simplify(expression)?, &df_schema)
+        .map(Some)
 }
 
 fn datafusion_error_to_connect(err: DataFusionError) -> ConnectError {
-    match err {
+    // DataFusion wraps planner errors in Diagnostic and Context layers, so classify the root cause.
+    match err.find_root() {
         DataFusionError::Plan(msg)
-        | DataFusionError::SQL(_, Some(msg))
         | DataFusionError::Configuration(msg)
-        | DataFusionError::NotImplemented(msg) => ConnectError::invalid_argument(msg),
-        DataFusionError::SchemaError(err, _) => ConnectError::invalid_argument(err.to_string()),
-        other => ConnectError::internal(other.to_string()),
+        | DataFusionError::NotImplemented(msg) => ConnectError::invalid_argument(msg.clone()),
+        DataFusionError::SQL(parser_error, _) => {
+            ConnectError::invalid_argument(parser_error.to_string())
+        }
+        DataFusionError::SchemaError(schema_error, _) => {
+            ConnectError::invalid_argument(schema_error.to_string())
+        }
+        _ => ConnectError::internal(err.to_string()),
     }
 }
 
@@ -802,21 +581,503 @@ fn client_error_to_connect(err: exoware_sdk::ClientError) -> ConnectError {
     }
 }
 
-// Silence unused import when no tests reference them.
-#[allow(dead_code)]
-fn _assert_projected_column_indices_visible() {
-    let _ = projected_column_indices;
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use datafusion::arrow::array::{
+        Array, ArrayRef, BinaryViewArray, Date32Array, Date64Array, Decimal256Array,
+        FixedSizeBinaryBuilder, Int64Array, LargeListArray, StringArray, StringViewArray,
+    };
+    use datafusion::arrow::compute::concat_batches;
+    use datafusion::arrow::datatypes::{i256, Int64Type, Schema};
+    use datafusion::arrow::ipc::reader::StreamReader;
+    use datafusion::arrow::record_batch::RecordBatchOptions;
+    use datafusion::datasource::MemTable;
+    use datafusion::logical_expr::{create_udf, ColumnarValue, Volatility};
     use std::collections::VecDeque;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Mutex;
 
-    use futures::channel::oneshot;
-    use futures::StreamExt;
+    use futures::{FutureExt, StreamExt};
+
+    fn check_ipc_fixture(name: &str, ipc: &[u8]) {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../ts/tests/fixtures")
+            .join(name);
+        if std::env::var_os("UPDATE_SQL_IPC_FIXTURES").is_some() {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, ipc).unwrap();
+        }
+        assert_eq!(std::fs::read(&path).unwrap(), ipc, "{}", path.display());
+    }
+
+    fn ipc_layout_batch() -> RecordBatch {
+        let mut zero = FixedSizeBinaryBuilder::new(0);
+        zero.append_value([]).unwrap();
+        zero.append_null();
+        zero.append_value([]).unwrap();
+        let mut wide = FixedSizeBinaryBuilder::new(300);
+        wide.append_value([7; 300]).unwrap();
+        wide.append_null();
+        wide.append_value([9; 300]).unwrap();
+        let arrays: Vec<(&str, ArrayRef)> = vec![
+            (
+                "dates",
+                Arc::new(Date64Array::from(vec![
+                    Some(9_223_372_036_828_800_000),
+                    None,
+                    Some(-9_223_372_036_828_800_000),
+                ])),
+            ),
+            ("binary0", Arc::new(zero.finish())),
+            ("binary300", Arc::new(wide.finish())),
+            (
+                "text_view",
+                Arc::new(StringViewArray::from(vec![
+                    Some("short"),
+                    Some("this value lives outside the inline view"),
+                    None,
+                ])),
+            ),
+            (
+                "binary_view",
+                Arc::new(BinaryViewArray::from_iter([
+                    Some(b"abc".as_slice()),
+                    Some(b"this binary value also exceeds twelve bytes".as_slice()),
+                    None,
+                ])),
+            ),
+            (
+                "large_list",
+                Arc::new(LargeListArray::from_iter_primitive::<Int64Type, _, _>([
+                    Some(vec![Some(1), None]),
+                    None,
+                    Some(vec![]),
+                ])),
+            ),
+            (
+                "decimal256",
+                Arc::new(
+                    Decimal256Array::from(vec![
+                        Some(i256::from_i128(-12345)),
+                        None,
+                        Some(i256::from_i128(9007199254740993)),
+                    ])
+                    .with_precision_and_scale(50, 2)
+                    .unwrap(),
+                ),
+            ),
+            ("all_null", Arc::new(Date32Array::from(vec![None; 3]))),
+        ];
+        let batch = RecordBatch::try_from_iter(arrays).unwrap();
+        let schema = Schema::new_with_metadata(
+            batch.schema().fields().clone(),
+            HashMap::from([("source".to_string(), "native IPC fixture".to_string())]),
+        );
+        batch.with_schema(Arc::new(schema)).unwrap()
+    }
+
+    #[tokio::test]
+    async fn query_encoding_preserves_computed_result_types() {
+        use crate::proto::sql::v1::ServiceClient;
+        use connectrpc::client::{ClientConfig, HttpClient};
+
+        let schema = KvSchema::new(PrefixedStoreClient::empty(exoware_sdk::StoreClient::new(
+            "http://127.0.0.1:1",
+        )));
+        let server = Arc::new(SqlServer::new(schema).unwrap());
+        let layouts = ipc_layout_batch();
+        server
+            .session()
+            .register_table(
+                "layouts",
+                Arc::new(
+                    MemTable::try_new(
+                        layouts.schema(),
+                        vec![vec![layouts.slice(0, 1), layouts.slice(1, 2)]],
+                    )
+                    .unwrap(),
+                ),
+            )
+            .unwrap();
+        let zero_columns = RecordBatch::try_new_with_options(
+            Arc::new(Schema::empty()),
+            vec![],
+            &RecordBatchOptions::new().with_row_count(Some(3)),
+        )
+        .unwrap();
+        server
+            .session()
+            .register_table(
+                "zero_columns",
+                Arc::new(
+                    MemTable::try_new(zero_columns.schema(), vec![vec![zero_columns]]).unwrap(),
+                ),
+            )
+            .unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let app = axum::Router::new().fallback_service(sql_connect_stack(server.clone()));
+        let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let client = ServiceClient::new(
+            HttpClient::plaintext(),
+            ClientConfig::new(format!("http://{address}").parse().unwrap()),
+        );
+        let computed = r#"SELECT
+            to_timestamp_seconds(1) AS seconds,
+            to_timestamp_millis(1) AS milliseconds,
+            to_timestamp_micros(1) AS microseconds,
+            to_timestamp_nanos(1735689600123456789) AS nanoseconds,
+            arrow_cast(to_timestamp_nanos(1735689600123456789), 'Timestamp(Nanosecond, Some("UTC"))') AS zoned,
+            CAST(1 AS DECIMAL(10, 0)) AS decimal_integer,
+            CAST(0.01 AS DECIMAL(10, 2)) AS decimal_fraction,
+            arrow_cast(-12345, 'Decimal64(12, 2)') AS decimal64_negative,
+            CAST(-7 AS TINYINT) AS tiny,
+            CAST(-300 AS SMALLINT) AS small,
+            named_struct('value', 42, 'missing', CAST(NULL AS TEXT)) AS nested,
+            map(['a', 'b'], [1, NULL]) AS mapping,
+            INTERVAL '1 month 2 days 3 seconds' AS duration,
+            arrow_cast(100000001, 'Date32') AS date32_far,
+            arrow_cast(-100000001, 'Date32') AS date32_negative,
+            arrow_cast(8640000086400000, 'Date64') AS date64_far,
+            arrow_cast(9223372036854775807, 'Timestamp(Second, None)') AS seconds_extreme"#;
+        for (name, sql) in [
+            ("computed.arrow", computed.to_string()),
+            ("layouts.arrow", "SELECT * FROM layouts".to_string()),
+            ("empty.arrow", format!("{computed} WHERE FALSE")),
+            (
+                "zero_columns.arrow",
+                "SELECT * FROM zero_columns".to_string(),
+            ),
+            (
+                "duplicates.arrow",
+                "SELECT a.id, b.id FROM (VALUES (1)) a(id) CROSS JOIN (VALUES ('two')) b(id)"
+                    .to_string(),
+            ),
+        ] {
+            let frame = server.session().sql(&sql).await.unwrap();
+            let stream = frame.execute_stream().await.unwrap();
+            let schema = stream.schema();
+            let expected: Vec<_> = stream.try_collect().await.unwrap();
+            let response = client
+                .query(QueryRequest {
+                    sql,
+                    ..Default::default()
+                })
+                .await
+                .unwrap()
+                .into_owned();
+            let reader = StreamReader::try_new(response.results.as_ref(), None).unwrap();
+            assert_eq!(reader.schema(), schema, "{name}");
+            let actual = reader.collect::<Result<Vec<_>, _>>().unwrap();
+            assert_eq!(
+                concat_batches(&schema, &actual).unwrap(),
+                concat_batches(&schema, &expected).unwrap(),
+                "{name}"
+            );
+            check_ipc_fixture(name, &response.results);
+        }
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn query_rpc_returns_internal_on_count_overflow_and_remains_usable() {
+        use crate::proto::sql::v1::ServiceClient;
+        use crate::TableColumnConfig;
+        use buffa::Message;
+        use connectrpc::client::{ClientConfig, HttpClient};
+        use datafusion::execution::memory_pool::{FairSpillPool, MemoryPool, PeakRecordingPool};
+        use datafusion::execution::runtime_env::RuntimeEnvBuilder;
+        use datafusion::prelude::SessionConfig;
+        use exoware_sdk::kv_codec::KvReducedValue;
+        use exoware_sdk::{RangeReduceGroup, RangeReduceResponse, RangeReduceResult, StoreClient};
+
+        #[derive(Clone, Default)]
+        struct OverflowReduceTransport {
+            requests: Arc<Mutex<Vec<exoware_sdk::query::ReduceRequest>>>,
+        }
+
+        impl connectrpc::client::ClientTransport for OverflowReduceTransport {
+            type ResponseBody = axum::body::Body;
+            type Error = ConnectError;
+
+            fn send(
+                &self,
+                request: axum::http::Request<connectrpc::client::ClientBody>,
+            ) -> connectrpc::client::BoxFuture<
+                'static,
+                Result<axum::http::Response<Self::ResponseBody>, Self::Error>,
+            > {
+                let transport = self.clone();
+                Box::pin(async move {
+                    assert_eq!(request.uri().path(), "/store.query.v1.Service/Reduce");
+                    let body = axum::body::to_bytes(
+                        axum::body::Body::new(request.into_body()),
+                        usize::MAX,
+                    )
+                    .await
+                    .unwrap();
+                    let request = crate::tests::decode_reduce_request(&body);
+                    let first = {
+                        let mut requests = transport.requests.lock().unwrap();
+                        let first = requests.is_empty();
+                        requests.push(request.clone());
+                        first
+                    };
+                    let average = request.params.reducers.iter().any(|reducer| {
+                        reducer.op.as_known() == Some(exoware_sdk::query::RangeReduceOp::SumField)
+                    });
+                    let count = if first {
+                        if average {
+                            u64::MAX
+                        } else {
+                            i64::MAX as u64
+                        }
+                    } else {
+                        1
+                    };
+                    let results = request
+                        .params
+                        .reducers
+                        .iter()
+                        .map(|reducer| {
+                            let value = match reducer.op.as_known().unwrap() {
+                                exoware_sdk::query::RangeReduceOp::CountAll
+                                | exoware_sdk::query::RangeReduceOp::CountField => {
+                                    KvReducedValue::UInt64(count)
+                                }
+                                exoware_sdk::query::RangeReduceOp::SumField => {
+                                    KvReducedValue::Float64(1.0)
+                                }
+                                other => panic!("unexpected reducer {other:?}"),
+                            };
+                            RangeReduceResult { value: Some(value) }
+                        })
+                        .collect();
+                    let response = if request.params.group_by.is_empty() {
+                        RangeReduceResponse {
+                            results,
+                            groups: vec![],
+                        }
+                    } else {
+                        RangeReduceResponse {
+                            results: vec![],
+                            groups: vec![RangeReduceGroup {
+                                group_values: vec![Some(KvReducedValue::Int64(7))],
+                                results,
+                            }],
+                        }
+                    };
+                    let (results, groups) = exoware_sdk::to_proto_reduce_response(response);
+                    let response = exoware_sdk::query::ReduceResponse {
+                        results,
+                        groups,
+                        detail: Some(exoware_sdk::query::Detail {
+                            sequence_number: 7,
+                            ..Default::default()
+                        })
+                        .into(),
+                        ..Default::default()
+                    };
+                    let mut body = connectrpc::envelope::Envelope::data(response.encode_to_bytes())
+                        .encode()
+                        .to_vec();
+                    body.extend_from_slice(
+                        &connectrpc::envelope::Envelope::end_stream(Bytes::from_static(b"{}"))
+                            .encode(),
+                    );
+                    Ok(axum::http::Response::builder()
+                        .header("content-type", "application/connect+proto")
+                        .body(axum::body::Body::from(body))
+                        .unwrap())
+                })
+            }
+        }
+
+        let transport = OverflowReduceTransport::default();
+        let client = StoreClient::builder()
+            .url("http://faulty-store.test")
+            .client_transport(transport.clone())
+            .retry_config(exoware_sdk::RetryConfig::disabled())
+            .build()
+            .unwrap();
+        let schema = KvSchema::new(PrefixedStoreClient::empty(client))
+            .table(
+                "counts",
+                vec![
+                    TableColumnConfig::new("id", DataType::Int64, false),
+                    TableColumnConfig::new("category", DataType::Int64, false),
+                    TableColumnConfig::new("value", DataType::Float64, true),
+                ],
+                vec!["id".to_string()],
+                vec![],
+            )
+            .unwrap();
+        let mut server = SqlServer::new(schema).unwrap();
+        let pool = Arc::new(PeakRecordingPool::new(Arc::new(FairSpillPool::new(
+            8 * 1024 * 1024,
+        ))));
+        let runtime = RuntimeEnvBuilder::new()
+            .with_memory_pool(pool.clone())
+            .build_arc()
+            .unwrap();
+        let ctx = SessionContext::new_with_state(
+            crate::session_state_builder()
+                .with_runtime_env(runtime)
+                .with_config(SessionConfig::new().with_target_partitions(1))
+                .build(),
+        );
+        ctx.register_table(
+            "counts",
+            server.session().table_provider("counts").await.unwrap(),
+        )
+        .unwrap();
+        server.ctx = Arc::new(ctx);
+        let server = Arc::new(server);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let app = axum::Router::new().fallback_service(sql_connect_stack(server));
+        let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let client = ServiceClient::new(
+            HttpClient::plaintext(),
+            ClientConfig::new(format!("http://{address}").parse().unwrap())
+                .with_default_timeout(std::time::Duration::from_secs(5)),
+        );
+        for aggregate in ["COUNT(*)", "AVG(value)"] {
+            for grouped in [true, false] {
+                transport.requests.lock().unwrap().clear();
+                pool.reset_peak();
+                let (key, group_by) = if grouped {
+                    ("category, ", " GROUP BY category")
+                } else {
+                    ("", "")
+                };
+                let sql =
+                    format!("SELECT {key}{aggregate} FROM counts WHERE id IN (1, 3){group_by}");
+                let error = client
+                    .query(QueryRequest {
+                        sql: sql.clone(),
+                        ..Default::default()
+                    })
+                    .await
+                    .unwrap_err();
+                assert_eq!(
+                    error.code,
+                    connectrpc::ErrorCode::Internal,
+                    "{sql}: {error}"
+                );
+                assert_eq!(
+                    error.message.as_deref(),
+                    Some("SQL query execution panicked"),
+                    "{sql}"
+                );
+                assert_eq!(pool.reserved(), 0, "query reservation after panic: {sql}");
+                if grouped {
+                    assert!(
+                        pool.peak_reserved() > 0,
+                        "first partial must reach Final aggregation: {sql}"
+                    );
+                }
+                {
+                    let requests = transport.requests.lock().unwrap();
+                    assert_eq!(requests.len(), 2, "{sql}: {requests:?}");
+                    assert!(
+                        requests[0].end < requests[1].start,
+                        "disjoint ranges: {sql}"
+                    );
+                    assert_eq!(requests[0].params, requests[1].params, "{sql}");
+                    assert_eq!(requests[0].min_sequence_number, None);
+                    assert_eq!(requests[1].min_sequence_number, Some(7));
+                    assert_eq!(requests[0].params.group_by.len(), usize::from(grouped));
+                }
+                let response = client
+                    .query(QueryRequest {
+                        sql: "SELECT 1".into(),
+                        ..Default::default()
+                    })
+                    .await
+                    .unwrap()
+                    .into_owned();
+                let batch = StreamReader::try_new(response.results.as_ref(), None)
+                    .unwrap()
+                    .next()
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(batch.num_rows(), 1);
+                assert_eq!(
+                    batch
+                        .column(0)
+                        .as_any()
+                        .downcast_ref::<Int64Array>()
+                        .unwrap()
+                        .value(0),
+                    1
+                );
+                assert_eq!(transport.requests.lock().unwrap().len(), 2);
+            }
+        }
+        let error = client
+            .query(QueryRequest {
+                sql: "SELECT FROM".into(),
+                ..Default::default()
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, connectrpc::ErrorCode::InvalidArgument);
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn query_parse_errors_map_to_invalid_argument() {
+        let ctx = SessionContext::new();
+        let DataFusionError::SQL(parser_error, _) = ctx.sql("SELECT FROM").await.unwrap_err()
+        else {
+            panic!("malformed SQL did not return a parser error");
+        };
+        let expected_message = parser_error.to_string();
+        for backtrace in [None, Some("backtrace ...".to_string())] {
+            let connect_error =
+                datafusion_error_to_connect(DataFusionError::SQL(parser_error.clone(), backtrace));
+            assert_eq!(connect_error.code, connectrpc::ErrorCode::InvalidArgument);
+            assert_eq!(
+                connect_error.message.as_deref(),
+                Some(expected_message.as_str()),
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn wrapped_planning_errors_map_to_invalid_argument() {
+        let ctx = SessionContext::new();
+        for sql in ["SELECT * FROM nope", "SELECT 1 + 'a'", "SELECT 1 LIMIT 'x'"] {
+            let query_error = match ctx.sql(sql).await {
+                Ok(frame) => frame.create_physical_plan().await.unwrap_err(),
+                Err(err) => err,
+            };
+            assert!(
+                matches!(
+                    query_error,
+                    DataFusionError::Diagnostic(..) | DataFusionError::Context(..)
+                ),
+                "{sql}: {query_error:?}"
+            );
+            let DataFusionError::Plan(expected_message) = query_error.find_root() else {
+                panic!("{sql}: {query_error:?}");
+            };
+            let expected_message = expected_message.clone();
+            let connect_error = datafusion_error_to_connect(query_error);
+            assert_eq!(
+                connect_error.code,
+                connectrpc::ErrorCode::InvalidArgument,
+                "{sql}"
+            );
+            assert_eq!(
+                connect_error.message.as_deref(),
+                Some(expected_message.as_str()),
+                "{sql}"
+            );
+        }
+    }
 
     enum ControlledEvent {
         Frame(u64),
@@ -853,23 +1114,6 @@ mod tests {
         }
     }
 
-    struct ActiveEvaluation(Arc<AtomicUsize>);
-
-    impl Drop for ActiveEvaluation {
-        fn drop(&mut self) {
-            self.0.fetch_sub(1, Ordering::SeqCst);
-        }
-    }
-
-    type EvaluationResult = Result<Option<SubscribeResponse>, ConnectError>;
-
-    struct ControlledEvaluator {
-        evaluator: BatchEvaluator,
-        senders: HashMap<u64, oneshot::Sender<EvaluationResult>>,
-        started: Arc<Mutex<Vec<u64>>>,
-        max_active: Arc<AtomicUsize>,
-    }
-
     fn controlled_input(
         events: impl IntoIterator<Item = ControlledEvent>,
     ) -> (ControlledInput, Arc<AtomicUsize>) {
@@ -881,45 +1125,6 @@ mod tests {
             },
             polls,
         )
-    }
-
-    fn controlled_evaluator(sequence_numbers: &[u64]) -> ControlledEvaluator {
-        let mut senders = HashMap::new();
-        let mut receivers = HashMap::new();
-        for &sequence_number in sequence_numbers {
-            let (sender, receiver) = oneshot::channel();
-            senders.insert(sequence_number, sender);
-            receivers.insert(sequence_number, receiver);
-        }
-
-        let started = Arc::new(Mutex::new(Vec::new()));
-        let evaluator_started = started.clone();
-        let active = Arc::new(AtomicUsize::new(0));
-        let max_active = Arc::new(AtomicUsize::new(0));
-        let evaluator_active = active.clone();
-        let evaluator_max_active = max_active.clone();
-        let evaluator: BatchEvaluator = Box::new(move |frame| {
-            let sequence_number = frame.sequence_number;
-            evaluator_started.lock().unwrap().push(sequence_number);
-            let receiver = receivers
-                .remove(&sequence_number)
-                .expect("evaluation receiver");
-            let active = evaluator_active.clone();
-            let max_active = evaluator_max_active.clone();
-            async move {
-                let active_count = active.fetch_add(1, Ordering::SeqCst) + 1;
-                max_active.fetch_max(active_count, Ordering::SeqCst);
-                let _active = ActiveEvaluation(active);
-                receiver.await.expect("evaluation result")
-            }
-            .boxed()
-        });
-        ControlledEvaluator {
-            evaluator,
-            senders,
-            started,
-            max_active,
-        }
     }
 
     fn response(sequence_number: u64) -> SubscribeResponse {
@@ -939,65 +1144,35 @@ mod tests {
     }
 
     #[test]
-    fn prefetches_upstream_when_evaluation_completes_synchronously() {
-        let (input, polls) =
-            controlled_input([ControlledEvent::Frame(1), ControlledEvent::Frame(2)]);
-        // Mirrors evaluate_batch for the empty-WHERE path and for simple
-        // predicates over a single MemTable batch. Those futures have no
-        // yielding await points, so they are Ready on the first poll.
-        let evaluator = |frame: StreamSubscriptionFrame| {
-            let sequence_number = frame.sequence_number;
-            async move { Ok::<_, ConnectError>(Some(response(sequence_number))) }
-        };
-        let mut stream = BatchPredicateStream::with_evaluator(input, evaluator);
-
-        assert_eq!(next_ready(&mut stream).unwrap().unwrap().sequence_number, 1);
-        assert_eq!(
-            polls.load(Ordering::SeqCst),
-            2,
-            "frame 2 should be pulled from upstream while frame 1 evaluates",
-        );
-    }
-
-    #[test]
-    fn prefetches_one_frame_and_keeps_evaluation_ordered() {
+    fn prefetches_one_frame_before_evaluation_and_preserves_order() {
         let (input, polls) = controlled_input([
             ControlledEvent::Frame(1),
             ControlledEvent::Frame(2),
             ControlledEvent::Frame(3),
+            ControlledEvent::End,
         ]);
-        let mut evaluator = controlled_evaluator(&[1, 2]);
-        let mut stream = BatchPredicateStream::with_evaluator(input, evaluator.evaluator);
-
-        assert!(stream.next().now_or_never().is_none());
-        assert_eq!(polls.load(Ordering::SeqCst), 2);
-        assert_eq!(*evaluator.started.lock().unwrap(), vec![1]);
-
-        assert!(stream.next().now_or_never().is_none());
-        assert_eq!(polls.load(Ordering::SeqCst), 2);
-        assert_eq!(*evaluator.started.lock().unwrap(), vec![1]);
-
-        evaluator
-            .senders
-            .remove(&1)
-            .unwrap()
-            .send(Ok(Some(response(1))))
-            .unwrap();
-        assert_eq!(next_ready(&mut stream).unwrap().unwrap().sequence_number, 1);
-        assert_eq!(polls.load(Ordering::SeqCst), 2);
-
-        assert!(stream.next().now_or_never().is_none());
-        assert_eq!(polls.load(Ordering::SeqCst), 3);
-        assert_eq!(*evaluator.started.lock().unwrap(), vec![1, 2]);
-
-        evaluator
-            .senders
-            .remove(&2)
-            .unwrap()
-            .send(Ok(Some(response(2))))
-            .unwrap();
-        assert_eq!(next_ready(&mut stream).unwrap().unwrap().sequence_number, 2);
-        assert_eq!(evaluator.max_active.load(Ordering::SeqCst), 1);
+        let evaluation_polls = polls.clone();
+        let started = Arc::new(Mutex::new(Vec::new()));
+        let evaluations = started.clone();
+        let mut output = BatchPredicateStream::with_evaluator(input, move |frame| {
+            assert_eq!(
+                evaluation_polls.load(Ordering::SeqCst),
+                frame.sequence_number as usize + 1,
+                "one later frame must be polled before evaluation",
+            );
+            evaluations.lock().unwrap().push(frame.sequence_number);
+            Ok(Some(response(frame.sequence_number)))
+        });
+        for sequence in 1..=3 {
+            assert_eq!(
+                next_ready(&mut output).unwrap().unwrap().sequence_number,
+                sequence
+            );
+            assert_eq!(started.lock().unwrap().len(), sequence as usize);
+        }
+        assert!(next_ready(&mut output).is_none());
+        assert!(next_ready(&mut output).is_none());
+        assert_eq!(polls.load(Ordering::SeqCst), 4);
     }
 
     #[test]
@@ -1007,120 +1182,304 @@ mod tests {
             ControlledEvent::Frame(2),
             ControlledEvent::End,
         ]);
-        let mut evaluator = controlled_evaluator(&[1, 2]);
-        let mut stream = BatchPredicateStream::with_evaluator(input, evaluator.evaluator);
-
-        assert!(stream.next().now_or_never().is_none());
-        evaluator
-            .senders
-            .remove(&1)
-            .unwrap()
-            .send(Ok(None))
-            .unwrap();
-        assert!(stream.next().now_or_never().is_none());
-        assert_eq!(*evaluator.started.lock().unwrap(), vec![1, 2]);
+        let mut output = BatchPredicateStream::with_evaluator(input, |frame| {
+            Ok((frame.sequence_number == 2).then(|| response(frame.sequence_number)))
+        });
+        assert_eq!(next_ready(&mut output).unwrap().unwrap().sequence_number, 2);
+        assert!(next_ready(&mut output).is_none());
         assert_eq!(polls.load(Ordering::SeqCst), 3);
-
-        evaluator
-            .senders
-            .remove(&2)
-            .unwrap()
-            .send(Ok(Some(response(2))))
-            .unwrap();
-        assert_eq!(next_ready(&mut stream).unwrap().unwrap().sequence_number, 2);
-        assert!(next_ready(&mut stream).is_none());
-        assert!(next_ready(&mut stream).is_none());
-        assert_eq!(evaluator.max_active.load(Ordering::SeqCst), 1);
     }
 
     #[test]
-    fn defers_upstream_end_until_pending_evaluation_finishes() {
-        let (input, polls) = controlled_input([ControlledEvent::Frame(1), ControlledEvent::End]);
-        let mut evaluator = controlled_evaluator(&[1]);
-        let mut stream = BatchPredicateStream::with_evaluator(input, evaluator.evaluator);
-
-        assert!(stream.next().now_or_never().is_none());
-        assert_eq!(polls.load(Ordering::SeqCst), 2);
-
-        evaluator
-            .senders
-            .remove(&1)
-            .unwrap()
-            .send(Ok(Some(response(1))))
-            .unwrap();
-        assert_eq!(next_ready(&mut stream).unwrap().unwrap().sequence_number, 1);
-        assert!(next_ready(&mut stream).is_none());
-        assert!(next_ready(&mut stream).is_none());
-    }
-
-    #[test]
-    fn defers_upstream_error_until_pending_evaluation_finishes() {
+    fn upstream_error_follows_the_preceding_frame_and_fuses() {
         let (input, polls) = controlled_input([
             ControlledEvent::Frame(1),
             ControlledEvent::Error,
             ControlledEvent::Frame(2),
         ]);
-        let mut evaluator = controlled_evaluator(&[1]);
-        let mut stream = BatchPredicateStream::with_evaluator(input, evaluator.evaluator);
-
-        assert!(stream.next().now_or_never().is_none());
+        let mut output = BatchPredicateStream::with_evaluator(input, |frame| {
+            Ok(Some(response(frame.sequence_number)))
+        });
+        assert_eq!(next_ready(&mut output).unwrap().unwrap().sequence_number, 1);
+        assert!(next_ready(&mut output).unwrap().is_err());
+        assert!(next_ready(&mut output).is_none());
         assert_eq!(polls.load(Ordering::SeqCst), 2);
-
-        evaluator
-            .senders
-            .remove(&1)
-            .unwrap()
-            .send(Ok(Some(response(1))))
-            .unwrap();
-        assert_eq!(next_ready(&mut stream).unwrap().unwrap().sequence_number, 1);
-        assert!(next_ready(&mut stream).unwrap().is_err());
-        assert!(next_ready(&mut stream).is_none());
-        assert_eq!(polls.load(Ordering::SeqCst), 2);
-        assert_eq!(*evaluator.started.lock().unwrap(), vec![1]);
     }
 
     #[test]
-    fn predicate_error_fuses_and_discards_staged_frame() {
+    fn predicate_error_discards_the_staged_frame_and_fuses() {
         let (input, polls) = controlled_input([
             ControlledEvent::Frame(1),
             ControlledEvent::Frame(2),
             ControlledEvent::Frame(3),
         ]);
-        let mut evaluator = controlled_evaluator(&[1]);
-        let mut stream = BatchPredicateStream::with_evaluator(input, evaluator.evaluator);
-
-        assert!(stream.next().now_or_never().is_none());
-        evaluator
-            .senders
-            .remove(&1)
-            .unwrap()
-            .send(Err(ConnectError::internal("predicate failed")))
-            .unwrap();
-
-        assert!(next_ready(&mut stream).unwrap().is_err());
-        assert!(next_ready(&mut stream).is_none());
+        let mut output = BatchPredicateStream::with_evaluator(input, |frame| {
+            assert_eq!(frame.sequence_number, 1);
+            Err(ConnectError::internal("predicate failed"))
+        });
+        assert!(next_ready(&mut output).unwrap().is_err());
+        assert!(next_ready(&mut output).is_none());
         assert_eq!(polls.load(Ordering::SeqCst), 2);
-        assert_eq!(*evaluator.started.lock().unwrap(), vec![1]);
     }
 
-    /// Result cells for Binary columns can arrive as any of the three arrow
-    /// binary encodings; every one becomes a `binary_value` cell.
     #[test]
-    fn binary_arrays_convert_to_binary_cells() {
-        let body: &[u8] = &[0x00, 0xFF, 0x42];
-        let arrays: Vec<ArrayRef> = vec![
-            Arc::new(BinaryArray::from_iter_values([body])),
-            Arc::new(LargeBinaryArray::from_iter_values([body])),
-            Arc::new(BinaryViewArray::from_iter_values([body])),
-        ];
-        for array in arrays {
-            let body_type = array.data_type().clone();
-            let cell = arrow_value_to_cell(&array, 0).expect("cell conversion");
-            match cell.kind {
-                Some(ProtoCellKind::BinaryValue(bytes)) => {
-                    assert_eq!(bytes.as_ref(), body, "wrong bytes for {body_type:?}")
-                }
-                other => panic!("expected binary_value for {body_type:?}, got {other:?}"),
+    fn rejected_frames_yield_and_cancellation_drops_upstream() {
+        let (input, polls) = controlled_input(
+            (0..MAX_FILTERED_FRAMES_PER_POLL + 2).map(|seq| ControlledEvent::Frame(seq as u64)),
+        );
+        let mut output = BatchPredicateStream::with_evaluator(input, |_| Ok(None));
+        assert!(output.next().now_or_never().is_none());
+        assert_eq!(
+            polls.load(Ordering::SeqCst),
+            MAX_FILTERED_FRAMES_PER_POLL + 1
+        );
+        assert_eq!(Arc::strong_count(&polls), 2);
+        drop(output);
+        assert_eq!(Arc::strong_count(&polls), 1);
+    }
+
+    fn predicate_batch() -> RecordBatch {
+        RecordBatch::try_from_iter(vec![
+            (
+                "id",
+                Arc::new(Int64Array::from(vec![1, 2, 3, 4])) as ArrayRef,
+            ),
+            (
+                "status",
+                Arc::new(StringArray::from(vec![
+                    Some("12"),
+                    Some("bad"),
+                    None,
+                    Some("30"),
+                ])) as ArrayRef,
+            ),
+        ])
+        .unwrap()
+    }
+
+    fn matching_ids(predicate: &Arc<dyn PhysicalExpr>, batch: &RecordBatch) -> Vec<i64> {
+        let filtered = batch_filter(batch, predicate).unwrap();
+        filtered
+            .column(0)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap()
+            .values()
+            .to_vec()
+    }
+
+    #[tokio::test]
+    async fn subscription_scalar_predicates_match_sql_results() {
+        use datafusion::datasource::MemTable;
+
+        let batch = predicate_batch();
+        let ctx = SessionContext::new();
+        ctx.register_table(
+            "orders",
+            Arc::new(MemTable::try_new(batch.schema(), vec![vec![batch.clone()]]).unwrap()),
+        )
+        .unwrap();
+        for sql in [
+            "orders.id >= 2 AND orders.status IS NOT NULL",
+            "TRY_CAST(status AS BIGINT) IS NULL",
+            "CAST(id AS DOUBLE) / 2 > 1",
+            "id IN (1, NULL, 4)",
+            "status = '12' OR status IS NULL",
+            "NULL",
+            "CASE WHEN status IS NULL THEN true ELSE id > 3 END",
+        ] {
+            let predicate = compile_subscription_predicate(&ctx, &batch.schema(), "orders", sql)
+                .unwrap()
+                .unwrap();
+            let native = ctx
+                .sql(&format!("SELECT * FROM orders WHERE {sql}"))
+                .await
+                .unwrap()
+                .collect()
+                .await
+                .unwrap();
+            let expected: Vec<i64> = native
+                .iter()
+                .flat_map(|batch| {
+                    batch
+                        .column(0)
+                        .as_any()
+                        .downcast_ref::<Int64Array>()
+                        .unwrap()
+                        .values()
+                        .to_vec()
+                })
+                .collect();
+            assert_eq!(matching_ids(&predicate, &batch), expected, "{sql}");
+            assert_eq!(matching_ids(&predicate, &batch), expected, "reused {sql}");
+        }
+    }
+
+    #[test]
+    fn subscription_rejects_non_scalar_and_non_boolean_predicates() {
+        let ctx = SessionContext::new();
+        let batch = predicate_batch();
+        for sql in [
+            "id + 1",
+            "SUM(id) > 0",
+            "row_number() OVER () > 0",
+            "id = (SELECT 1)",
+            "id IN (SELECT 1)",
+            "EXISTS (SELECT 1)",
+            "TRUE OR id = (SELECT 1)",
+            "unnest([1, 2]) > 0",
+            "id = $1",
+            "missing.id = 1",
+            "id >",
+        ] {
+            assert!(
+                compile_subscription_predicate(&ctx, &batch.schema(), "orders", sql).is_err(),
+                "accepted {sql}"
+            );
+        }
+        assert!(
+            compile_subscription_predicate(&ctx, &batch.schema(), "orders", "  ")
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn subscription_quoted_table_names_are_resolved_without_sql_interpolation() {
+        let ctx = SessionContext::new();
+        let batch = predicate_batch();
+        let predicate = compile_subscription_predicate(
+            &ctx,
+            &batch.schema(),
+            "Order Events",
+            "\"Order Events\".id = 2",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(matching_ids(&predicate, &batch), vec![2]);
+    }
+
+    #[test]
+    fn subscription_evaluates_decoded_frames_and_preserves_their_sequence() {
+        let ctx = SessionContext::new();
+        let batch = predicate_batch();
+        let schema = KvSchema::new(exoware_sdk::PrefixedStoreClient::empty(
+            exoware_sdk::StoreClient::new("http://127.0.0.1:1"),
+        ))
+        .table(
+            "orders",
+            vec![
+                crate::TableColumnConfig::new("id", DataType::Int64, false),
+                crate::TableColumnConfig::new("status", DataType::Utf8, true),
+            ],
+            vec!["id".to_string()],
+            vec![],
+        )
+        .unwrap();
+        let table = &schema.tables()[0].1;
+        let state = TableStream::new(table.model.clone(), table.index_specs.clone());
+        let entries =
+            crate::writer::encode_insert_entries(&batch, &table.model, &table.index_specs)
+                .unwrap()
+                .into_iter()
+                .map(|(key, value)| (key, Bytes::from(value)))
+                .collect();
+        let predicate = compile_subscription_predicate(
+            &ctx,
+            &batch.schema(),
+            "orders",
+            "TRY_CAST(status AS BIGINT) IS NULL",
+        )
+        .unwrap();
+        let response = evaluate_batch(&state, predicate.as_ref(), 42, entries)
+            .unwrap()
+            .unwrap();
+        assert_eq!(response.sequence_number, 42);
+        let reader = StreamReader::try_new(response.results.as_ref(), None).unwrap();
+        assert_eq!(reader.schema(), state.schema);
+        let batches = reader.collect::<Result<Vec<_>, _>>().unwrap();
+        assert_eq!(batches.len(), 1);
+        let ids = batches[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+        assert_eq!(ids.values().as_ref(), &[2, 3]);
+        check_ipc_fixture("subscription.arrow", &response.results);
+
+        let predicate = compile_subscription_predicate(
+            &ctx,
+            &batch.schema(),
+            "orders",
+            "CAST(status AS BIGINT) > 0",
+        )
+        .unwrap()
+        .unwrap();
+        assert!(batch_filter(&batch, &predicate).is_err());
+    }
+
+    #[test]
+    fn subscription_time_is_bound_once_and_random_remains_volatile() {
+        let ctx = SessionContext::new();
+        let batch = predicate_batch();
+        let predicate = compile_subscription_predicate(
+            &ctx,
+            &batch.schema(),
+            "orders",
+            "id > 0 AND now() = current_timestamp()",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(matching_ids(&predicate, &batch), vec![1, 2, 3, 4]);
+        assert_eq!(matching_ids(&predicate, &batch), vec![1, 2, 3, 4]);
+        assert!(!predicate.to_string().contains("now()"));
+        assert!(!predicate.to_string().contains("current_timestamp()"));
+
+        let random = compile_subscription_predicate(
+            &ctx,
+            &batch.schema(),
+            "orders",
+            "random() >= 0 AND random() < 1",
+        )
+        .unwrap()
+        .unwrap();
+        assert!(random.to_string().contains("random()"));
+        assert_eq!(matching_ids(&random, &batch), vec![1, 2, 3, 4]);
+        assert_eq!(matching_ids(&random, &batch), vec![1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn subscription_compiles_stable_functions_once_and_evaluates_volatile_functions_per_batch() {
+        let batch = predicate_batch();
+        for volatility in [Volatility::Stable, Volatility::Volatile] {
+            let ctx = SessionContext::new();
+            let calls = Arc::new(AtomicUsize::new(0));
+            let evaluations = calls.clone();
+            ctx.register_udf(create_udf(
+                "count_evaluations",
+                vec![],
+                DataType::Boolean,
+                volatility,
+                Arc::new(move |_| {
+                    evaluations.fetch_add(1, Ordering::SeqCst);
+                    Ok(ColumnarValue::Scalar(
+                        datafusion::common::ScalarValue::Boolean(Some(true)),
+                    ))
+                }),
+            ));
+            let predicate = compile_subscription_predicate(
+                &ctx,
+                &batch.schema(),
+                "orders",
+                "count_evaluations() AND id > 0",
+            )
+            .unwrap()
+            .unwrap();
+            let stable = volatility == Volatility::Stable;
+            assert_eq!(calls.load(Ordering::SeqCst), usize::from(stable));
+            for frame in 1..=2 {
+                assert_eq!(matching_ids(&predicate, &batch), vec![1, 2, 3, 4]);
+                assert_eq!(calls.load(Ordering::SeqCst), if stable { 1 } else { frame });
             }
         }
     }

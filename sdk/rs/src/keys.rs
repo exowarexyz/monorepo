@@ -235,6 +235,21 @@ pub fn next_key(key: &Key) -> Option<Key> {
     None
 }
 
+/// Return the greatest valid key strictly less than `key`.
+pub fn previous_key(key: &Key) -> Option<Key> {
+    if key.len() > MAX_KEY_LEN {
+        return Some(key.slice(..MAX_KEY_LEN));
+    }
+    let mut bytes = key.to_vec();
+    let last = bytes.pop()?;
+    if last == 0 {
+        return Some(Bytes::from(bytes));
+    }
+    bytes.push(last - 1);
+    bytes.resize(MAX_KEY_LEN, u8::MAX);
+    Some(Bytes::from(bytes))
+}
+
 pub(crate) fn read_bits_to_bytes(
     src: &[u8],
     src_bit_offset: usize,
@@ -436,6 +451,41 @@ mod tests {
         let next = next_key(&key).expect("next");
         assert_eq!(next.len(), MAX_KEY_LEN - 1);
         assert_eq!(next[MAX_KEY_LEN - 2], 0x13);
+    }
+
+    #[test]
+    fn previous_key_is_the_immediate_predecessor() {
+        for key in [
+            vec![0],
+            vec![1],
+            vec![1, 0],
+            vec![0xff],
+            vec![0; MAX_KEY_LEN],
+            vec![0xff; MAX_KEY_LEN],
+        ] {
+            let key = Bytes::from(key);
+            let previous = previous_key(&key).expect("nonempty key has a predecessor");
+            assert!(previous < key);
+            assert_eq!(next_key(&previous), Some(key));
+        }
+        assert_eq!(previous_key(&Bytes::new()), None);
+    }
+
+    #[test]
+    fn previous_key_clamps_oversized_bounds() {
+        for len in [MAX_KEY_LEN + 1, MAX_KEY_LEN + 2, 1024] {
+            for fill in [0, 1, 0xff] {
+                for last in [0, 1, 0xff] {
+                    let mut bytes = vec![fill; len];
+                    bytes[len - 1] = last;
+                    let key = Bytes::from(bytes);
+                    let previous = previous_key(&key).expect("nonempty bound");
+                    assert!(previous < key);
+                    assert_eq!(previous, key.slice(..MAX_KEY_LEN));
+                    assert!(validate_key_size(previous.len()).is_ok());
+                }
+            }
+        }
     }
 
     #[test]

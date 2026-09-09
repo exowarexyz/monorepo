@@ -24,14 +24,12 @@ message GetRangeRequest {
   uint64 tip = 4;
 }
 
-// Ordered current key-range proof response. Key fields are codec-encoded
-// logical QMDB keys (`K::encode()` bytes). `start_proof`, when present,
+// Ordered current key-range proof response. `start_proof`, when present,
 // authenticates the boundary before the first returned key (or the entire empty
-// range). `end_proof`, when present, authenticates the exclusive end boundary.
+// range). The last entry's authenticated successor closes the range or gives
+// the next start key when it advances within the requested interval. A page
+// with such a continuation must contain exactly the requested limit.
 message GetRangeResponse {
-  repeated CurrentKeyRangeEntry entries = 1;
+  repeated CurrentKeyValueProof entries = 1;
   optional CurrentKeyExclusionProof start_proof = 2;
-  optional CurrentKeyExclusionProof end_proof = 3;
-  bool has_more = 4;
-  bytes next_start_key = 5;
 }

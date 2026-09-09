@@ -22,7 +22,7 @@ message GetRequest {
   // Codec-encoded logical QMDB key (`K::encode()` bytes), not a store row key.
   bytes key = 1;
 
-  // Published ordered-QMDB batch-boundary to prove against. The client must
+  // Published QMDB batch-boundary to prove against. The client must
   // already know the trusted current/global root for this tip.
   uint64 tip = 2;
 }

@@ -10,7 +10,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file qmdb/v1/proof.proto.
  */
 export const file_qmdb_v1_proof: GenFile = /*@__PURE__*/
-  fileDesc("ChNxbWRiL3YxL3Byb29mLnByb3RvEgdxbWRiLnYxIkIKE011bHRpUHJvb2ZPcGVyYXRpb24SEAoIbG9jYXRpb24YASABKAQSGQoRZW5jb2RlZF9vcGVyYXRpb24YAiABKAwigwEKFEhpc3RvcmljYWxNdWx0aVByb29mEg0KBXByb29mGAEgASgMEjAKCm9wZXJhdGlvbnMYAiADKAsyHC5xbWRiLnYxLk11bHRpUHJvb2ZPcGVyYXRpb24SEAoIb3BzX3Jvb3QYAyABKAwSGAoQb3BzX3Jvb3Rfd2l0bmVzcxgEIAEoDCKkAQodSGlzdG9yaWNhbE9wZXJhdGlvblJhbmdlUHJvb2YSDQoFcHJvb2YYASABKAwSFgoOc3RhcnRfbG9jYXRpb24YAiABKAQSGgoSZW5jb2RlZF9vcGVyYXRpb25zGAMgAygMEhAKCG9wc19yb290GAQgASgMEhgKEG9wc19yb290X3dpdG5lc3MYBSABKAwSFAoMcGlubmVkX25vZGVzGAYgAygMIm8KGkN1cnJlbnRPcGVyYXRpb25SYW5nZVByb29mEg0KBXByb29mGAEgASgMEhYKDnN0YXJ0X2xvY2F0aW9uGAIgASgEEhoKEmVuY29kZWRfb3BlcmF0aW9ucxgDIAMoDBIOCgZjaHVua3MYBCADKAwiQAoUQ3VycmVudEtleVZhbHVlUHJvb2YSDQoFcHJvb2YYASABKAwSGQoRZW5jb2RlZF9vcGVyYXRpb24YAiABKAwiKQoYQ3VycmVudEtleUV4Y2x1c2lvblByb29mEg0KBXByb29mGAEgASgMIpABChZDdXJyZW50S2V5TG9va3VwUmVzdWx0EgsKA2tleRgBIAEoDBIsCgNoaXQYAiABKAsyHS5xbWRiLnYxLkN1cnJlbnRLZXlWYWx1ZVByb29mSAASMQoEbWlzcxgDIAEoCzIhLnFtZGIudjEuQ3VycmVudEtleUV4Y2x1c2lvblByb29mSABCCAoGcmVzdWx0IlEKFEN1cnJlbnRLZXlSYW5nZUVudHJ5EgsKA2tleRgBIAEoDBIsCgVwcm9vZhgCIAEoCzIdLnFtZGIudjEuQ3VycmVudEtleVZhbHVlUHJvb2ZiBnByb3RvMw");
+  fileDesc("ChNxbWRiL3YxL3Byb29mLnByb3RvEgdxbWRiLnYxIkIKE011bHRpUHJvb2ZPcGVyYXRpb24SEAoIbG9jYXRpb24YASABKAQSGQoRZW5jb2RlZF9vcGVyYXRpb24YAiABKAwigwEKFEhpc3RvcmljYWxNdWx0aVByb29mEg0KBXByb29mGAEgASgMEjAKCm9wZXJhdGlvbnMYAiADKAsyHC5xbWRiLnYxLk11bHRpUHJvb2ZPcGVyYXRpb24SEAoIb3BzX3Jvb3QYAyABKAwSGAoQb3BzX3Jvb3Rfd2l0bmVzcxgEIAEoDCKkAQodSGlzdG9yaWNhbE9wZXJhdGlvblJhbmdlUHJvb2YSDQoFcHJvb2YYASABKAwSFgoOc3RhcnRfbG9jYXRpb24YAiABKAQSGgoSZW5jb2RlZF9vcGVyYXRpb25zGAMgAygMEhAKCG9wc19yb290GAQgASgMEhgKEG9wc19yb290X3dpdG5lc3MYBSABKAwSFAoMcGlubmVkX25vZGVzGAYgAygMIm8KGkN1cnJlbnRPcGVyYXRpb25SYW5nZVByb29mEg0KBXByb29mGAEgASgMEhYKDnN0YXJ0X2xvY2F0aW9uGAIgASgEEhoKEmVuY29kZWRfb3BlcmF0aW9ucxgDIAMoDBIOCgZjaHVua3MYBCADKAwiQAoUQ3VycmVudEtleVZhbHVlUHJvb2YSDQoFcHJvb2YYASABKAwSGQoRZW5jb2RlZF9vcGVyYXRpb24YAiABKAwiKQoYQ3VycmVudEtleUV4Y2x1c2lvblByb29mEg0KBXByb29mGAEgASgMIoMBChZDdXJyZW50S2V5TG9va3VwUmVzdWx0EiwKA2hpdBgBIAEoCzIdLnFtZGIudjEuQ3VycmVudEtleVZhbHVlUHJvb2ZIABIxCgRtaXNzGAIgASgLMiEucW1kYi52MS5DdXJyZW50S2V5RXhjbHVzaW9uUHJvb2ZIAEIICgZyZXN1bHRiBnByb3RvMw");
 
 /**
  * One historical operation proven by a multi-proof.
@@ -181,10 +181,10 @@ export const CurrentOperationRangeProofSchema: GenMessage<CurrentOperationRangeP
   messageDesc(file_qmdb_v1_proof, 3);
 
 /**
- * Current proof for one active key. `proof` is opaque Commonware proof bytes
- * encoded with `commonware-codec`: ordered endpoints use
- * `current::ordered::db::KeyValueProof`; unordered endpoints use
- * `current::proof::OperationProof`.
+ * Current proof for one active key. `proof` is an opaque Commonware
+ * `current::proof::OperationProof` encoded with `commonware-codec`.
+ * The authenticated update in `encoded_operation` contains the key and value,
+ * plus the successor key for ordered endpoints.
  *
  * @generated from message qmdb.v1.CurrentKeyValueProof
  */
@@ -229,28 +229,24 @@ export const CurrentKeyExclusionProofSchema: GenMessage<CurrentKeyExclusionProof
   messageDesc(file_qmdb_v1_proof, 5);
 
 /**
+ * Ordered results correspond one-for-one to requested keys. Unordered results
+ * contain only hits, whose authenticated operations identify their keys.
+ *
  * @generated from message qmdb.v1.CurrentKeyLookupResult
  */
 export type CurrentKeyLookupResult = Message<"qmdb.v1.CurrentKeyLookupResult"> & {
-  /**
-   * Codec-encoded logical QMDB key (`K::encode()` bytes).
-   *
-   * @generated from field: bytes key = 1;
-   */
-  key: Uint8Array;
-
   /**
    * @generated from oneof qmdb.v1.CurrentKeyLookupResult.result
    */
   result: {
     /**
-     * @generated from field: qmdb.v1.CurrentKeyValueProof hit = 2;
+     * @generated from field: qmdb.v1.CurrentKeyValueProof hit = 1;
      */
     value: CurrentKeyValueProof;
     case: "hit";
   } | {
     /**
-     * @generated from field: qmdb.v1.CurrentKeyExclusionProof miss = 3;
+     * @generated from field: qmdb.v1.CurrentKeyExclusionProof miss = 2;
      */
     value: CurrentKeyExclusionProof;
     case: "miss";
@@ -263,28 +259,4 @@ export type CurrentKeyLookupResult = Message<"qmdb.v1.CurrentKeyLookupResult"> &
  */
 export const CurrentKeyLookupResultSchema: GenMessage<CurrentKeyLookupResult> = /*@__PURE__*/
   messageDesc(file_qmdb_v1_proof, 6);
-
-/**
- * @generated from message qmdb.v1.CurrentKeyRangeEntry
- */
-export type CurrentKeyRangeEntry = Message<"qmdb.v1.CurrentKeyRangeEntry"> & {
-  /**
-   * Codec-encoded logical QMDB key (`K::encode()` bytes).
-   *
-   * @generated from field: bytes key = 1;
-   */
-  key: Uint8Array;
-
-  /**
-   * @generated from field: qmdb.v1.CurrentKeyValueProof proof = 2;
-   */
-  proof?: CurrentKeyValueProof;
-};
-
-/**
- * Describes the message qmdb.v1.CurrentKeyRangeEntry.
- * Use `create(CurrentKeyRangeEntrySchema)` to create a new message.
- */
-export const CurrentKeyRangeEntrySchema: GenMessage<CurrentKeyRangeEntry> = /*@__PURE__*/
-  messageDesc(file_qmdb_v1_proof, 7);
 

@@ -1,3 +1,6 @@
+#[path = "../../qmdb/rs/tests/common/operations.rs"]
+mod qmdb;
+
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -9,11 +12,11 @@ use commonware_storage::qmdb::keyless::variable::Operation as KeylessOperation;
 use connectrpc::client::ClientConfig;
 use datafusion::arrow::array::Int64Array;
 use datafusion::arrow::datatypes::DataType;
-use datafusion::prelude::SessionContext;
+use datafusion::arrow::ipc::reader::StreamReader;
 use exoware_qmdb::proto::qmdb::v1::SubscribeRequest as QmdbSubscribeRequest;
 use exoware_qmdb::{
-    keyless_operation_log_connect_stack, KeylessClient, KeylessWriter, OperationLogClient,
-    OperationLogSubscribeProof, QmdbError, WriterState,
+    keyless_operation_log_connect_stack, stage_authenticated_range, stage_watermark, KeylessClient,
+    OperationLogClient, OperationLogSubscribeProof, QmdbError,
 };
 use exoware_sdk::keys::Key;
 use exoware_sdk::kv_codec::Utf8;
@@ -24,12 +27,11 @@ use exoware_sdk::prune_policy::{
 use exoware_sdk::selector::Selector;
 use exoware_sdk::stream_filter::StreamFilter;
 use exoware_sdk::{
-    PrefixedStoreClient, RetryConfig, StoreBatchPublication, StoreBatchUpload, StoreClient,
-    StoreKeyPrefix, StorePublicationFrontierWriter, StoreWriteBatch, StreamSubscription,
-    StreamSubscriptionFrame,
+    PrefixedStoreClient, RetryConfig, StoreBatchUpload, StoreClient, StoreKeyPrefix,
+    StoreWriteBatch, StreamSubscription, StreamSubscriptionFrame,
 };
 use exoware_sql::proto::sql::v1::{
-    cell, ServiceClient as SqlServiceClient, SubscribeRequest as SqlSubscribeRequest,
+    ServiceClient as SqlServiceClient, SubscribeRequest as SqlSubscribeRequest,
 };
 use exoware_sql::{sql_connect_stack, CellValue, KvSchema, SqlServer, TableColumnConfig};
 use futures::stream::{FuturesUnordered, StreamExt};
@@ -37,10 +39,10 @@ use futures::stream::{FuturesUnordered, StreamExt};
 type Digest = commonware_cryptography::sha256::Digest;
 type QmdbFamily = mmr::Family;
 type QmdbLocation = Location<QmdbFamily>;
-type QmdbOp = KeylessOperation<QmdbFamily, Vec<u8>>;
+type QmdbOperation = KeylessOperation<QmdbFamily, Vec<u8>>;
 type QmdbReader = KeylessClient<QmdbFamily, Sha256, Vec<u8>>;
-type QmdbWriter = KeylessWriter<QmdbFamily, Sha256, Vec<u8>>;
-type QmdbConnectClient = OperationLogClient<PreferZstdHttpClient, QmdbFamily, Sha256, QmdbOp>;
+type QmdbConnectClient =
+    OperationLogClient<PreferZstdHttpClient, QmdbFamily, Sha256, QmdbOperation>;
 
 /// Spawns a local simulator and returns a client for it.
 async fn local_store_client() -> StoreClient {
@@ -149,23 +151,23 @@ fn keyless_reader(client: PrefixedStoreClient) -> QmdbReader {
     QmdbReader::new(client, ((0..=10000).into(), ()))
 }
 
-fn keyless_writer(client: PrefixedStoreClient) -> QmdbWriter {
-    QmdbWriter::new(client, WriterState::empty())
-}
-
 async fn commit_qmdb_upload(
-    writer: &QmdbWriter,
-    ops: &[QmdbOp],
-) -> Result<exoware_qmdb::UploadReceipt<QmdbFamily>, QmdbError> {
-    let prepared = writer.prepare_upload(ops.to_vec()).await?;
-    writer.commit_upload(prepared).await
+    client: &PrefixedStoreClient,
+    operations: &[QmdbOperation],
+) -> Result<u64, QmdbError> {
+    let (_, prepared) = qmdb::prepare_operations(operations, &((0..=10000).into(), ()));
+    let latest = prepared.latest_location();
+    let mut batch = StoreWriteBatch::new();
+    stage_authenticated_range(client, prepared, &mut batch)?;
+    stage_watermark(client, latest, &mut batch)?;
+    Ok(batch.commit(client.client()).await?)
 }
 
-fn qops(label: &str, batch: usize) -> Vec<QmdbOp> {
+fn qmdb_operations(label: &str, batch: usize) -> Vec<QmdbOperation> {
     vec![
-        QmdbOp::Append(format!("{label}-append-{batch}-0").into_bytes()),
-        QmdbOp::Append(format!("{label}-append-{batch}-1").into_bytes()),
-        QmdbOp::Commit(
+        QmdbOperation::Append(format!("{label}-append-{batch}-0").into_bytes()),
+        QmdbOperation::Append(format!("{label}-append-{batch}-1").into_bytes()),
+        QmdbOperation::Commit(
             Some(format!("{label}-commit-{batch}").into_bytes()),
             QmdbLocation::new(0),
         ),
@@ -190,46 +192,63 @@ where
     unreachable!("retry loop always returns or panics")
 }
 
-async fn drive_qmdb_writer(
-    writer: Arc<QmdbWriter>,
-    batches: Vec<Vec<QmdbOp>>,
-) -> (Vec<QmdbOp>, Vec<exoware_qmdb::UploadReceipt<QmdbFamily>>) {
-    let expected: Vec<QmdbOp> = batches.iter().flatten().cloned().collect();
+async fn drive_qmdb_uploads(
+    client: PrefixedStoreClient,
+    batches: Vec<Vec<QmdbOperation>>,
+) -> (Vec<QmdbOperation>, Vec<u64>, u64) {
+    let mut expected = Vec::new();
     let mut in_flight = FuturesUnordered::new();
-    for batch in batches {
-        let writer = writer.clone();
-        in_flight.push(async move { commit_qmdb_upload(&writer, &batch).await });
+    for operations in batches {
+        let start = QmdbLocation::new(expected.len() as u64);
+        expected.extend(operations);
+        let (_, prepared) =
+            qmdb::prepare_operation_range(&expected, start, &((0..=10000).into(), ()));
+
+        let mut data = StoreWriteBatch::new();
+        stage_authenticated_range(&client, prepared, &mut data).expect("stage qmdb data");
+        let client = client.clone();
+        in_flight.push(async move { data.commit(client.client()).await });
     }
-    let mut receipts = Vec::new();
+    let mut sequences = Vec::new();
     while let Some(result) = in_flight.next().await {
-        receipts.push(result.expect("qmdb upload"));
+        sequences.push(result.expect("qmdb data upload"));
     }
-    StorePublicationFrontierWriter::flush_publication(writer.as_ref())
+    assert!(
+        keyless_reader(client.clone())
+            .writer_location_watermark()
+            .await
+            .unwrap()
+            .is_none(),
+        "persisted data must await the caller's publication barrier"
+    );
+    // The caller publishes only after every preceding data upload has persisted
+    let mut publication = StoreWriteBatch::new();
+    stage_watermark(
+        &client,
+        QmdbLocation::new(expected.len() as u64 - 1),
+        &mut publication,
+    )
+    .expect("stage qmdb watermark");
+    let published = publication
+        .commit(client.client())
         .await
-        .expect("qmdb flush");
-    (expected, receipts)
+        .expect("publish qmdb watermark");
+    (expected, sequences, published)
 }
 
-fn qop_sort_key(op: &QmdbOp) -> (u8, Option<&[u8]>, u64) {
+fn qmdb_operation_sort_key(op: &QmdbOperation) -> (u8, Option<&[u8]>, u64) {
     match op {
-        QmdbOp::Append(value) => (0, Some(value.as_slice()), 0),
-        QmdbOp::Commit(value, floor) => (1, value.as_deref(), **floor),
+        QmdbOperation::Append(value) => (0, Some(value.as_slice()), 0),
+        QmdbOperation::Commit(value, floor) => (1, value.as_deref(), **floor),
     }
 }
 
-fn sorted_ops(mut ops: Vec<QmdbOp>) -> Vec<QmdbOp> {
-    ops.sort_by(|left, right| qop_sort_key(left).cmp(&qop_sort_key(right)));
+fn sorted_qmdb_operations(mut ops: Vec<QmdbOperation>) -> Vec<QmdbOperation> {
+    ops.sort_by(|left, right| qmdb_operation_sort_key(left).cmp(&qmdb_operation_sort_key(right)));
     ops
 }
 
-fn row_int64(row: &exoware_sql::proto::sql::v1::Row, index: usize) -> i64 {
-    match row.cells.get(index).and_then(|cell| cell.kind.as_ref()) {
-        Some(cell::Kind::Int64Value(value)) => *value,
-        other => panic!("expected int64 cell at {index}, got {other:?}"),
-    }
-}
-
-fn expected_qmdb_frame(ops: &[QmdbOp]) -> Vec<(QmdbLocation, QmdbOp)> {
+fn expected_qmdb_frame(ops: &[QmdbOperation]) -> Vec<(QmdbLocation, QmdbOperation)> {
     ops.iter()
         .enumerate()
         .map(|(idx, op)| (QmdbLocation::new(idx as u64), op.clone()))
@@ -255,7 +274,7 @@ fn collect_int64_column(
 }
 
 #[tokio::test]
-async fn raw_prefixes_support_atomic_batch_fetch_range_and_stream() {
+async fn test_raw_prefixes_support_atomic_batch_fetch_range_and_stream() {
     let base = local_store_client().await;
     let a = base.prefixed(store_prefix(1));
     let b = base.prefixed(store_prefix(2));
@@ -337,7 +356,7 @@ async fn raw_prefixes_support_atomic_batch_fetch_range_and_stream() {
 }
 
 #[tokio::test]
-async fn sql_schemas_are_isolated_by_store_prefix() {
+async fn test_sql_schemas_are_isolated_by_store_prefix() {
     let base = local_store_client().await;
     let schema_a = make_sql_schema(base.prefixed(store_prefix(0)));
     let schema_b = make_sql_schema(base.prefixed(store_prefix(1)));
@@ -370,7 +389,7 @@ async fn sql_schemas_are_isolated_by_store_prefix() {
 }
 
 #[tokio::test]
-async fn sql_streaming_is_isolated_by_store_prefix() {
+async fn test_sql_streaming_is_isolated_by_store_prefix() {
     let base = local_store_client().await;
     let client_a = base.prefixed(store_prefix(0));
     let client_b = base.prefixed(store_prefix(1));
@@ -415,10 +434,12 @@ async fn sql_streaming_is_isolated_by_store_prefix() {
         .expect("sql b frame")
         .to_owned_message();
     assert_eq!(frame_b.sequence_number, seq_b);
-    assert_eq!(frame_b.column, vec!["id", "amount_cents"]);
-    assert_eq!(frame_b.rows.len(), 1);
-    assert_eq!(row_int64(&frame_b.rows[0], 0), 9);
-    assert_eq!(row_int64(&frame_b.rows[0], 1), 900);
+    let batches_b = StreamReader::try_new(frame_b.results.as_ref(), None)
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(collect_int64_column(&batches_b, 0), vec![9]);
+    assert_eq!(collect_int64_column(&batches_b, 1), vec![900]);
 
     let mut writer_a = make_sql_schema(client_a).batch_writer();
     writer_a
@@ -434,10 +455,12 @@ async fn sql_streaming_is_isolated_by_store_prefix() {
         .expect("sql a frame")
         .to_owned_message();
     assert_eq!(frame_a.sequence_number, seq_a);
-    assert_eq!(frame_a.column, vec!["id", "amount_cents"]);
-    assert_eq!(frame_a.rows.len(), 1);
-    assert_eq!(row_int64(&frame_a.rows[0], 0), 4);
-    assert_eq!(row_int64(&frame_a.rows[0], 1), 400);
+    let batches_a = StreamReader::try_new(frame_a.results.as_ref(), None)
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(collect_int64_column(&batches_a, 0), vec![4]);
+    assert_eq!(collect_int64_column(&batches_a, 1), vec![400]);
 }
 
 fn make_sql_schema(client: PrefixedStoreClient) -> KvSchema {
@@ -455,7 +478,7 @@ fn make_sql_schema(client: PrefixedStoreClient) -> KvSchema {
 }
 
 async fn query_sql_items(client: PrefixedStoreClient) -> (Vec<i64>, Vec<i64>) {
-    let ctx = SessionContext::new();
+    let ctx = exoware_sql::session_context();
     make_sql_schema(client)
         .register_all(&ctx)
         .expect("register schema");
@@ -473,34 +496,24 @@ async fn query_sql_items(client: PrefixedStoreClient) -> (Vec<i64>, Vec<i64>) {
 }
 
 #[tokio::test]
-async fn prefixed_qmdb_writers_handle_concurrent_inflight_batches_per_instance() {
+async fn test_prefixed_qmdb_uploads_handle_concurrent_inflight_batches_per_instance() {
     let base = local_store_client().await;
     let client_a = base.prefixed(store_prefix(4));
     let client_b = base.prefixed(store_prefix(5));
-    let writer_a = Arc::new(keyless_writer(client_a.clone()));
-    let writer_b = Arc::new(keyless_writer(client_b.clone()));
 
-    let batches_a: Vec<Vec<QmdbOp>> = (0..8).map(|idx| qops("a", idx)).collect();
-    let batches_b: Vec<Vec<QmdbOp>> = (0..8).map(|idx| qops("b", idx)).collect();
+    let batches_a: Vec<Vec<QmdbOperation>> = (0..8).map(|idx| qmdb_operations("a", idx)).collect();
+    let batches_b: Vec<Vec<QmdbOperation>> = (0..8).map(|idx| qmdb_operations("b", idx)).collect();
     let total_a: usize = batches_a.iter().map(Vec::len).sum();
     let total_b: usize = batches_b.iter().map(Vec::len).sum();
 
-    let ((expected_a, receipts_a), (expected_b, receipts_b)) = tokio::join!(
-        drive_qmdb_writer(writer_a, batches_a),
-        drive_qmdb_writer(writer_b, batches_b)
+    let ((expected_a, sequences_a, published_a), (expected_b, sequences_b, published_b)) = tokio::join!(
+        drive_qmdb_uploads(client_a.clone(), batches_a),
+        drive_qmdb_uploads(client_b.clone(), batches_b)
     );
-    assert!(
-        receipts_a
-            .iter()
-            .any(|receipt| receipt.writer_location_watermark.is_none()),
-        "writer a should exercise a pipelined upload without an inline watermark"
-    );
-    assert!(
-        receipts_b
-            .iter()
-            .any(|receipt| receipt.writer_location_watermark.is_none()),
-        "writer b should exercise a pipelined upload without an inline watermark"
-    );
+    assert_eq!(sequences_a.len(), 8);
+    assert_eq!(sequences_b.len(), 8);
+    assert!(sequences_a.iter().all(|sequence| *sequence < published_a));
+    assert!(sequences_b.iter().all(|sequence| *sequence < published_b));
 
     let latest_a = QmdbLocation::new((total_a - 1) as u64);
     let latest_b = QmdbLocation::new((total_b - 1) as u64);
@@ -551,13 +564,27 @@ async fn prefixed_qmdb_writers_handle_concurrent_inflight_batches_per_instance()
 
     assert_eq!(proof_a.root, root_a);
     assert_eq!(proof_b.root, root_b);
-    assert_eq!(sorted_ops(proof_a.operations), sorted_ops(expected_a));
-    assert_eq!(sorted_ops(proof_b.operations), sorted_ops(expected_b));
+    assert_eq!(
+        root_a,
+        qmdb::prepare_operations(&expected_a, &((0..=10000).into(), ())).0
+    );
+    assert_eq!(
+        root_b,
+        qmdb::prepare_operations(&expected_b, &((0..=10000).into(), ())).0
+    );
+    assert_eq!(
+        sorted_qmdb_operations(proof_a.operations),
+        sorted_qmdb_operations(expected_a)
+    );
+    assert_eq!(
+        sorted_qmdb_operations(proof_b.operations),
+        sorted_qmdb_operations(expected_b)
+    );
     assert_ne!(root_a, root_b, "instances wrote different operations");
 }
 
 #[tokio::test]
-async fn prepared_sql_and_qmdb_batches_commit_atomically_with_sequence_receipts() {
+async fn test_prepared_sql_and_qmdb_batches_commit_atomically_with_sequence_receipts() {
     let base = local_store_client().await;
     let sql_client = base.prefixed(store_prefix(0));
     let qmdb_client = base.prefixed(store_prefix(4));
@@ -566,31 +593,19 @@ async fn prepared_sql_and_qmdb_batches_commit_atomically_with_sequence_receipts(
         .insert("items", vec![CellValue::Int64(42), CellValue::Int64(4200)])
         .expect("insert atomic sql");
 
-    let qmdb_writer = keyless_writer(qmdb_client.clone());
-    let ops1 = qops("atomic", 0);
-    let ops2 = qops("atomic", 1);
-    let (prepared_qmdb_1, prepared_qmdb_2) = tokio::join!(
-        qmdb_writer.prepare_upload(ops1.clone()),
-        qmdb_writer.prepare_upload(ops2.clone())
+    let ops1 = qmdb_operations("atomic", 0);
+    let ops2 = qmdb_operations("atomic", 1);
+    let expected_qmdb: Vec<QmdbOperation> = ops1.iter().chain(&ops2).cloned().collect();
+    let (_, prepared_qmdb_1) = qmdb::prepare_operations(&ops1, &((0..=10000).into(), ()));
+    let (expected_root, prepared_qmdb_2) = qmdb::prepare_operation_range(
+        &expected_qmdb,
+        QmdbLocation::new(ops1.len() as u64),
+        &((0..=10000).into(), ()),
     );
-    let mut prepared_qmdb_1 = prepared_qmdb_1.expect("prepare qmdb 1");
-    let mut prepared_qmdb_2 = prepared_qmdb_2.expect("prepare qmdb 2");
     let mut prepared_sql = sql_writer
         .prepare_flush()
         .expect("prepare sql")
         .expect("sql rows");
-    assert!(
-        StorePublicationFrontierWriter::prepare_publication(&qmdb_writer)
-            .await
-            .expect("prepare standalone qmdb watermark")
-            .is_none(),
-        "standalone QMDB publication must not publish unpersisted uploads"
-    );
-    let prepared_qmdb_watermark = qmdb_writer
-        .prepare_flush_for_uploads([&prepared_qmdb_1, &prepared_qmdb_2])
-        .await
-        .expect("prepare qmdb watermark")
-        .expect("qmdb tail watermark");
 
     assert_eq!(
         query_sql_items(sql_client.clone()).await,
@@ -608,49 +623,33 @@ async fn prepared_sql_and_qmdb_batches_commit_atomically_with_sequence_receipts(
 
     let mut batch = StoreWriteBatch::new();
     StoreBatchUpload::stage_upload(&sql_writer, &mut prepared_sql, &mut batch).expect("stage sql");
-    StoreBatchUpload::stage_upload(&qmdb_writer, &mut prepared_qmdb_1, &mut batch)
-        .expect("stage qmdb 1");
-    StoreBatchUpload::stage_upload(&qmdb_writer, &mut prepared_qmdb_2, &mut batch)
-        .expect("stage qmdb 2");
-    StoreBatchPublication::stage_publication(&qmdb_writer, &prepared_qmdb_watermark, &mut batch)
-        .expect("stage qmdb watermark");
+    stage_authenticated_range(&qmdb_client, prepared_qmdb_1, &mut batch).expect("stage qmdb 1");
+    stage_authenticated_range(&qmdb_client, prepared_qmdb_2, &mut batch).expect("stage qmdb 2");
+    stage_watermark(&qmdb_client, QmdbLocation::new(5), &mut batch).expect("stage qmdb watermark");
 
     let sequence = batch.commit(&base).await.expect("atomic Store commit");
     let sql_receipt =
         StoreBatchUpload::mark_upload_persisted(&sql_writer, prepared_sql, sequence).await;
-    let receipt_qmdb_1 =
-        StoreBatchUpload::mark_upload_persisted(&qmdb_writer, prepared_qmdb_1, sequence).await;
-    let receipt_qmdb_2 =
-        StoreBatchUpload::mark_upload_persisted(&qmdb_writer, prepared_qmdb_2, sequence).await;
-    let checkpoint = StoreBatchPublication::mark_publication_persisted(
-        &qmdb_writer,
-        prepared_qmdb_watermark,
-        sequence,
-    )
-    .await;
-
     assert_eq!(sql_receipt.writer_request_id, 0);
     assert_eq!(sql_receipt.store_sequence_number, sequence);
-    assert_eq!(receipt_qmdb_1.writer_request_id, 0);
-    assert_eq!(receipt_qmdb_2.writer_request_id, 1);
-    assert_eq!(receipt_qmdb_1.store_sequence_number, sequence);
-    assert_eq!(receipt_qmdb_2.store_sequence_number, sequence);
-    assert_eq!(checkpoint.sequence_number, sequence);
     assert_eq!(
-        receipt_qmdb_1
-            .writer_location_watermark
-            .map(|checkpoint| checkpoint.location),
-        Some(QmdbLocation::new(2))
+        keyless_reader(qmdb_client.clone())
+            .writer_location_watermark()
+            .await
+            .unwrap(),
+        Some(QmdbLocation::new(5))
     );
-    assert!(receipt_qmdb_2.writer_location_watermark.is_none());
-    assert_eq!(checkpoint.location, QmdbLocation::new(5));
-    assert_eq!(
-        StorePublicationFrontierWriter::latest_publication_receipt(&qmdb_writer).await,
-        Some(checkpoint)
+    assert!(
+        qmdb_client
+            .stream()
+            .get(sequence)
+            .await
+            .expect("atomic qmdb stream")
+            .is_some(),
+        "QMDB rows must share the SQL Store sequence"
     );
 
     assert_eq!(query_sql_items(sql_client).await, (vec![42], vec![4200]));
-    let expected_qmdb: Vec<QmdbOp> = ops1.into_iter().chain(ops2.into_iter()).collect();
     let reader = keyless_reader(qmdb_client);
     let proof = retry_qmdb(
         || {
@@ -666,10 +665,11 @@ async fn prepared_sql_and_qmdb_batches_commit_atomically_with_sequence_receipts(
     )
     .await;
     assert_eq!(proof.operations, expected_qmdb);
+    assert_eq!(proof.root, expected_root);
 }
 
 #[tokio::test]
-async fn qmdb_streaming_is_isolated_by_store_prefix() {
+async fn test_qmdb_streaming_is_isolated_by_store_prefix() {
     let base = local_store_client().await;
     let client_a = base.prefixed(store_prefix(4));
     let client_b = base.prefixed(store_prefix(5));
@@ -688,9 +688,8 @@ async fn qmdb_streaming_is_isolated_by_store_prefix() {
         .expect("subscribe qmdb b");
     tokio::time::sleep(Duration::from_millis(50)).await;
 
-    let ops_b = qops("stream-b", 0);
-    let writer_b = keyless_writer(client_b.clone());
-    commit_qmdb_upload(&writer_b, &ops_b)
+    let ops_b = qmdb_operations("stream-b", 0);
+    commit_qmdb_upload(&client_b, &ops_b)
         .await
         .expect("upload b stream");
     let root_b = keyless_reader(client_b.clone())
@@ -711,20 +710,20 @@ async fn qmdb_streaming_is_isolated_by_store_prefix() {
         .is_err(),
         "qmdb prefix A subscriber must not receive prefix B operations"
     );
-    let frame_b: OperationLogSubscribeProof<Digest, QmdbOp, QmdbFamily> = tokio::time::timeout(
-        Duration::from_secs(5),
-        sub_b.message_with_root(|_| Ok(root_b)),
-    )
-    .await
-    .expect("qmdb b timeout")
-    .expect("qmdb b stream")
-    .expect("qmdb b frame");
+    let frame_b: OperationLogSubscribeProof<Digest, QmdbOperation, QmdbFamily> =
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            sub_b.message_with_root(|_| Ok(root_b)),
+        )
+        .await
+        .expect("qmdb b timeout")
+        .expect("qmdb b stream")
+        .expect("qmdb b frame");
     assert!(frame_b.resume_sequence_number > 0);
     assert_eq!(frame_b.operations, expected_qmdb_frame(&ops_b));
 
-    let ops_a = qops("stream-a", 0);
-    let writer_a = keyless_writer(client_a.clone());
-    commit_qmdb_upload(&writer_a, &ops_a)
+    let ops_a = qmdb_operations("stream-a", 0);
+    commit_qmdb_upload(&client_a, &ops_a)
         .await
         .expect("upload a stream");
     let root_a = keyless_reader(client_a.clone())
@@ -732,21 +731,22 @@ async fn qmdb_streaming_is_isolated_by_store_prefix() {
         .await
         .expect("root a");
 
-    let frame_a: OperationLogSubscribeProof<Digest, QmdbOp, QmdbFamily> = tokio::time::timeout(
-        Duration::from_secs(5),
-        sub_a.message_with_root(|_| Ok(root_a)),
-    )
-    .await
-    .expect("qmdb a timeout")
-    .expect("qmdb a stream")
-    .expect("qmdb a frame");
+    let frame_a: OperationLogSubscribeProof<Digest, QmdbOperation, QmdbFamily> =
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            sub_a.message_with_root(|_| Ok(root_a)),
+        )
+        .await
+        .expect("qmdb a timeout")
+        .expect("qmdb a stream")
+        .expect("qmdb a frame");
     assert!(frame_a.resume_sequence_number > 0);
     assert_eq!(frame_a.operations, expected_qmdb_frame(&ops_a));
     assert_ne!(frame_a.root, frame_b.root);
 }
 
 #[tokio::test]
-async fn prefixed_prune_composes_selector_and_prunes_cleanly() {
+async fn test_prefixed_prune_composes_selector_and_prunes_cleanly() {
     // Regression test for prefix composition
 
     // The SDK composes the store prefix

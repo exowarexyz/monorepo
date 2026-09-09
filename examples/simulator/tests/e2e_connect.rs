@@ -17,6 +17,7 @@ use exoware_sdk::{
     connect_compression_registry, PreferZstdHttpClient, PrefixedStoreClient, RangeMode,
     RangeReduceOp, RangeReduceRequest, RangeReducerSpec, RetryConfig, StoreClient,
 };
+use futures::StreamExt;
 
 /// Spawns a local simulator and returns a client for it plus the base URL.
 async fn spawn_client() -> (PrefixedStoreClient, String) {
@@ -69,6 +70,52 @@ async fn put_overwrites_value() {
 }
 
 // -- get_many --
+
+#[tokio::test]
+async fn generated_stream_preserves_compression_capabilities() {
+    use connectrpc::compression::{CompressionRegistry, GzipProvider};
+    use exoware_sdk::query::{GetManyRequest, ServiceClient};
+
+    let (client, url) = spawn_client().await;
+    let key = key(b"compressed");
+    let value = vec![b'x'; 4096];
+    let sequence = client.ingest().put(&[(&key, &value)]).await.unwrap();
+    for (registry, encoding) in [
+        (
+            CompressionRegistry::new().register(GzipProvider::default()),
+            "gzip",
+        ),
+        (connect_compression_registry(), "zstd"),
+    ] {
+        let query = ServiceClient::new(
+            PreferZstdHttpClient::plaintext(),
+            ClientConfig::new(url.parse().unwrap()).with_compression(registry),
+        );
+        let mut stream = query
+            .get_many(GetManyRequest {
+                keys: vec![key.to_vec()],
+                min_sequence_number: Some(sequence),
+                batch_size: 1,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let frame = stream.message().await.unwrap().unwrap();
+        let entries = &frame.view().results;
+        assert_eq!(entries.len(), 1);
+        let entry = entries.first().unwrap();
+        assert_eq!(entry.key, key.as_ref());
+        assert_eq!(entry.value, Some(value.as_slice()));
+        assert_eq!(
+            stream
+                .headers()
+                .get(connectrpc::Protocol::Connect.content_encoding_header())
+                .unwrap(),
+            encoding,
+        );
+        assert!(stream.message().await.unwrap().is_none());
+    }
+}
 
 #[tokio::test]
 async fn get_many_returns_found_and_missing() {
@@ -186,6 +233,7 @@ async fn reduce_count_all() {
 
     let request = RangeReduceRequest {
         reducers: vec![RangeReducerSpec {
+            filter: None,
             op: RangeReduceOp::CountAll,
             expr: None,
         }],
@@ -228,6 +276,7 @@ async fn reduce_sum_int64() {
 
     let request = RangeReduceRequest {
         reducers: vec![RangeReducerSpec {
+            filter: None,
             op: RangeReduceOp::SumField,
             expr: Some(KvExpr::Field(KvFieldRef::Value {
                 index: 0,
@@ -521,14 +570,17 @@ async fn reduce_count_min_max_field() {
     let request = RangeReduceRequest {
         reducers: vec![
             RangeReducerSpec {
+                filter: None,
                 op: RangeReduceOp::CountField,
                 expr: Some(field.clone()),
             },
             RangeReducerSpec {
+                filter: None,
                 op: RangeReduceOp::MinField,
                 expr: Some(field.clone()),
             },
             RangeReducerSpec {
+                filter: None,
                 op: RangeReduceOp::MaxField,
                 expr: Some(field),
             },
@@ -564,7 +616,7 @@ async fn reduce_grouped_count() {
     let ka2 = prefix.encode(b"a\x02").expect("encode");
     let kb1 = prefix.encode(b"b\x01").expect("encode");
 
-    client
+    let sequence = client
         .ingest()
         .put(&[
             (&ka1, encode_row(1).as_slice()),
@@ -576,6 +628,7 @@ async fn reduce_grouped_count() {
 
     let request = RangeReduceRequest {
         reducers: vec![RangeReducerSpec {
+            filter: None,
             op: RangeReduceOp::CountAll,
             expr: None,
         }],
@@ -585,12 +638,25 @@ async fn reduce_grouped_count() {
         })],
         filter: None,
     };
-    let response = client
-        .query()
-        .range_reduce_response(&ka1, &kb1, &request)
+    let session = client.create_session();
+    let mut stream = session
+        .range_reduce_stream(&ka1, &kb1, &request)
         .await
         .expect("reduce");
-    assert_eq!(response.groups.len(), 2);
+    assert_eq!(session.fixed_sequence(), None);
+    let mut groups = 0;
+    while let Some(frame) = stream.next().await {
+        let frame = frame.expect("reduce frame");
+        let frame = frame.view();
+        let detail = frame
+            .detail
+            .as_option()
+            .expect("query detail on every frame");
+        assert_eq!(detail.sequence_number, sequence);
+        assert_eq!(session.fixed_sequence(), Some(sequence));
+        groups += frame.groups.len();
+    }
+    assert_eq!(groups, 2);
 }
 
 // -- prune via StoreClient::prune() --

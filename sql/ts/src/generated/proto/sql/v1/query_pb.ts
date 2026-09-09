@@ -5,15 +5,13 @@
 import type { GenFile, GenMessage } from "@bufbuild/protobuf/codegenv1";
 import { fileDesc, messageDesc } from "@bufbuild/protobuf/codegenv1";
 import { file_buf_validate_validate } from "../../buf/validate/validate_pb.js";
-import type { Row } from "./common_pb.js";
-import { file_sql_v1_common } from "./common_pb.js";
 import type { Message } from "@bufbuild/protobuf";
 
 /**
  * Describes the file sql/v1/query.proto.
  */
 export const file_sql_v1_query: GenFile = /*@__PURE__*/
-  fileDesc("ChJzcWwvdjEvcXVlcnkucHJvdG8SBnNxbC52MSIoCgxRdWVyeVJlcXVlc3QSGAoDc3FsGAEgASgJQgu6SAhyBhABGP//AyI6Cg1RdWVyeVJlc3BvbnNlEg4KBmNvbHVtbhgBIAMoCRIZCgRyb3dzGAIgAygLMgsuc3FsLnYxLlJvd2IGcHJvdG8z", [file_buf_validate_validate, file_sql_v1_common]);
+  fileDesc("ChJzcWwvdjEvcXVlcnkucHJvdG8SBnNxbC52MSIoCgxRdWVyeVJlcXVlc3QSGAoDc3FsGAEgASgJQgu6SAhyBhABGP//AyIgCg1RdWVyeVJlc3BvbnNlEg8KB3Jlc3VsdHMYASABKAxiBnByb3RvMw", [file_buf_validate_validate]);
 
 /**
  * Ad-hoc SQL statement.
@@ -41,14 +39,12 @@ export const QueryRequestSchema: GenMessage<QueryRequest> = /*@__PURE__*/
  */
 export type QueryResponse = Message<"sql.v1.QueryResponse"> & {
   /**
-   * @generated from field: repeated string column = 1;
+   * Complete Arrow IPC stream containing the result schema and record batches.
+   * The schema is present even when the query returns no rows.
+   *
+   * @generated from field: bytes results = 1;
    */
-  column: string[];
-
-  /**
-   * @generated from field: repeated sql.v1.Row rows = 2;
-   */
-  rows: Row[];
+  results: Uint8Array;
 };
 
 /**

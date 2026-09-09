@@ -1,14 +1,13 @@
-use std::any::Any;
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use bytes::Bytes;
 use datafusion::arrow::datatypes::{DataType, SchemaRef};
 use datafusion::catalog::Session;
+use datafusion::common::tree_node::TreeNode;
 use datafusion::common::{DataFusionError, Result as DataFusionResult, SchemaExt};
 use datafusion::datasource::sink::DataSinkExec;
 use datafusion::datasource::TableProvider;
-use datafusion::execution::SessionStateBuilder;
 use datafusion::logical_expr::dml::InsertOp;
 use datafusion::logical_expr::{Expr, TableProviderFilterPushDown, TableType};
 use datafusion::physical_plan::ExecutionPlan;
@@ -16,30 +15,15 @@ use datafusion::prelude::SessionContext;
 use exoware_sdk::kv_codec::decode_stored_row;
 use exoware_sdk::PrefixedStoreClient;
 
-use crate::aggregate::KvAggregatePushdownRule;
 use crate::codec::*;
 use crate::predicate::*;
 use crate::scan::*;
 use crate::types::*;
 use crate::writer::*;
 
-pub(crate) fn register_kv_table(
-    ctx: &SessionContext,
-    table_name: &str,
-    client: PrefixedStoreClient,
-    config: KvTableConfig,
-) -> DataFusionResult<()> {
-    let table = Arc::new(
-        KvTable::new(client, config)
-            .map_err(|e| DataFusionError::Execution(format!("invalid table config: {e}")))?,
-    );
-    let _ = ctx.register_table(table_name, table)?;
-    Ok(())
-}
-
 pub struct KvSchema {
     client: PrefixedStoreClient,
-    tables: Vec<(String, KvTableConfig)>,
+    tables: Vec<(String, Arc<KvTable>)>,
     next_prefix: u8,
 }
 
@@ -62,12 +46,17 @@ impl KvSchema {
         primary_key_columns: Vec<String>,
         index_specs: Vec<IndexSpec>,
     ) -> Result<Self, String> {
+        let name = name.into();
+        if self.tables.iter().any(|(existing, _)| existing == &name) {
+            return Err(format!("duplicate table name '{name}'"));
+        }
         if self.tables.len() >= MAX_TABLES {
             return Err(format!("too many tables for key layout (max {MAX_TABLES})"));
         }
         let prefix = self.next_prefix;
         let config = KvTableConfig::new(prefix, columns, primary_key_columns, index_specs)?;
-        self.tables.push((name.into(), config));
+        let table = Arc::new(KvTable::new(self.client.clone(), config)?);
+        self.tables.push((name, table));
         self.next_prefix = self.next_prefix.wrapping_add(1);
         Ok(self)
     }
@@ -125,14 +114,17 @@ impl KvSchema {
         &self.client
     }
 
-    pub(crate) fn tables(&self) -> &[(String, KvTableConfig)] {
+    pub(crate) fn tables(&self) -> &[(String, Arc<KvTable>)] {
         &self.tables
     }
 
+    /// Registers the tables in an existing DataFusion session.
+    ///
+    /// Create the session with [`crate::session_context`] to enable Store
+    /// aggregate reduction. Other sessions execute aggregates through DataFusion.
     pub fn register_all(self, ctx: &SessionContext) -> DataFusionResult<()> {
-        register_kv_optimizers(ctx);
-        for (name, config) in &self.tables {
-            register_kv_table(ctx, name, self.client.clone(), config.clone())?;
+        for (name, table) in self.tables {
+            ctx.register_table(name, table)?;
         }
         Ok(())
     }
@@ -147,6 +139,9 @@ impl KvSchema {
     /// rows were written. The current schema's index list must be an append-only
     /// extension of that list (same order/layout for existing indexes, with new
     /// indexes only added at the tail).
+    ///
+    /// Disable primary-row retention policies before adding indexes. Store
+    /// pruning does not remove the corresponding secondary index entries.
     ///
     /// Operational ordering requirement: start writing new rows with the new
     /// index specs before backfilling historical rows, or rows written during
@@ -165,7 +160,7 @@ impl KvSchema {
     }
 
     /// Backfill secondary index entries after adding new index specs, with
-    /// configurable row page size for the full-scan read.
+    /// configurable response batch size for the streaming scan.
     pub async fn backfill_added_indexes_with_options(
         &self,
         table_name: &str,
@@ -182,7 +177,7 @@ impl KvSchema {
     }
 
     /// Backfill secondary index entries after adding new index specs, with
-    /// configurable row page size for the full-scan read and an optional
+    /// configurable response batch size for the streaming scan and an optional
     /// progress event channel.
     ///
     /// Progress events are emitted only after buffered ingest writes for the
@@ -201,22 +196,19 @@ impl KvSchema {
             ));
         }
 
-        let config = self
+        let table = self
             .tables
             .iter()
             .find(|(name, _)| name == table_name)
-            .map(|(_, config)| config.clone())
+            .map(|(_, table)| table)
             .ok_or_else(|| {
                 DataFusionError::Execution(format!(
                     "unknown table '{table_name}' for index backfill"
                 ))
             })?;
 
-        let model = TableModel::from_config(&config)
-            .map_err(|e| DataFusionError::Execution(format!("invalid table config: {e}")))?;
-        let current_specs = model
-            .resolve_index_specs(&config.index_specs)
-            .map_err(|e| DataFusionError::Execution(format!("invalid index specs: {e}")))?;
+        let model = &table.model;
+        let current_specs = &table.index_specs;
         let previous_specs = model
             .resolve_index_specs(previous_index_specs)
             .map_err(|e| {
@@ -241,7 +233,7 @@ impl KvSchema {
         }
 
         let full_range = primary_key_prefix_range(model.table_prefix);
-        let mut cursor = options
+        let cursor = options
             .start_from_primary_key
             .unwrap_or_else(|| full_range.start.clone());
         if !model.primary_key_prefix.matches(&cursor) {
@@ -256,7 +248,7 @@ impl KvSchema {
             ));
         }
 
-        let new_specs = current_specs[previous_specs.len()..].to_vec();
+        let new_specs = &current_specs[previous_specs.len()..];
         if new_specs.is_empty() {
             let report = IndexBackfillReport::default();
             send_backfill_event(
@@ -291,128 +283,89 @@ impl KvSchema {
             },
         );
 
-        loop {
-            let mut stream = session
-                .range_stream(
-                    &cursor,
-                    &full_range.end,
-                    options.row_batch_size,
-                    options.row_batch_size,
-                )
-                .await
-                .map_err(|e| DataFusionError::External(Box::new(e)))?;
-            let mut last_key = None;
-            while let Some(chunk) = stream
-                .next_chunk()
-                .await
-                .map_err(|e| DataFusionError::External(Box::new(e)))?
-            {
-                for (base_key, base_value) in &chunk.rows {
-                    last_key = Some(base_key.clone());
-                    let Some(pk_values) = decode_primary_key_selected(
+        let mut stream = session
+            .range_stream(&cursor, &full_range.end, usize::MAX, options.row_batch_size)
+            .await
+            .map_err(|e| DataFusionError::External(Box::new(e)))?;
+        while let Some(chunk) = stream
+            .next_chunk()
+            .await
+            .map_err(|e| DataFusionError::External(Box::new(e)))?
+        {
+            let Some((last_key, _)) = chunk.rows.last() else {
+                continue;
+            };
+            for (base_key, base_value) in &chunk.rows {
+                let Some(pk_values) = decode_primary_key_selected(
+                    model.table_prefix,
+                    base_key,
+                    model,
+                    &decode_pk_mask,
+                ) else {
+                    return Err(DataFusionError::Execution(format!(
+                        "invalid primary key while backfilling index (key={})",
+                        hex::encode(base_key)
+                    )));
+                };
+                let archived = decode_stored_row(base_value).map_err(|e| {
+                    DataFusionError::Execution(format!(
+                        "invalid base row payload while backfilling index (key={}): {e}",
+                        hex::encode(base_key)
+                    ))
+                })?;
+                if archived.values.len() != model.columns.len() {
+                    return Err(DataFusionError::Execution(format!(
+                        "invalid base row payload while backfilling index (key={})",
+                        hex::encode(base_key)
+                    )));
+                }
+                report.scanned_rows += 1;
+
+                for spec in new_specs {
+                    let index_key = encode_secondary_index_key_from_parts(
                         model.table_prefix,
-                        base_key,
-                        &model,
-                        &decode_pk_mask,
-                    ) else {
-                        return Err(DataFusionError::Execution(format!(
-                            "invalid primary key while backfilling index (key={})",
-                            hex::encode(base_key)
-                        )));
-                    };
-                    let archived = decode_stored_row(base_value).map_err(|e| {
-                        DataFusionError::Execution(format!(
-                            "invalid base row payload while backfilling index (key={}): {e}",
-                            hex::encode(base_key)
-                        ))
-                    })?;
-                    if archived.values.len() != model.columns.len() {
-                        return Err(DataFusionError::Execution(format!(
-                            "invalid base row payload while backfilling index (key={})",
-                            hex::encode(base_key)
-                        )));
-                    }
-                    report.scanned_rows += 1;
+                        spec,
+                        model,
+                        &pk_values,
+                        &archived,
+                    )?;
+                    let index_value =
+                        encode_secondary_index_value_from_archived(&archived, model, spec)?;
+                    pending_keys.push(index_key);
+                    pending_values.push(index_value.into());
+                    report.index_entries_written += 1;
+                }
 
-                    for spec in &new_specs {
-                        let index_key = encode_secondary_index_key_from_parts(
-                            model.table_prefix,
-                            spec,
-                            &model,
-                            &pk_values,
-                            &archived,
-                        )?;
-                        let index_value =
-                            encode_secondary_index_value_from_archived(&archived, &model, spec)?;
-                        pending_keys.push(index_key);
-                        pending_values.push(index_value.into());
-                        report.index_entries_written += 1;
-                    }
-
-                    if pending_keys.len() >= INDEX_BACKFILL_FLUSH_ENTRIES {
-                        flush_ingest_batch(&self.client, &mut pending_keys, &mut pending_values)
-                            .await?;
-                    }
+                if pending_keys.len() >= INDEX_BACKFILL_FLUSH_ENTRIES {
+                    flush_ingest_batch(&self.client, &mut pending_keys, &mut pending_values)
+                        .await?;
                 }
             }
-            let Some(last_key) = last_key else {
-                break;
-            };
-
-            let next_cursor = if last_key >= full_range.end {
-                None
-            } else {
-                exoware_sdk::keys::next_key(&last_key)
-            };
-            if !pending_keys.is_empty() {
-                flush_ingest_batch(&self.client, &mut pending_keys, &mut pending_values).await?;
-            }
+            let next_cursor = self
+                .client
+                .key_prefix()
+                .next_key(last_key)
+                .map_err(|e| DataFusionError::External(Box::new(e)))?
+                .filter(|key| key <= &full_range.end);
+            flush_ingest_batch(&self.client, &mut pending_keys, &mut pending_values).await?;
             send_backfill_event(
                 progress_tx,
                 IndexBackfillEvent::Progress {
                     scanned_rows: report.scanned_rows,
                     index_entries_written: report.index_entries_written,
-                    last_scanned_primary_key: last_key,
+                    last_scanned_primary_key: last_key.clone(),
                     next_cursor: next_cursor.clone(),
                 },
             );
 
-            if let Some(next) = next_cursor {
-                cursor = next;
-            } else {
+            if next_cursor.is_none() {
                 break;
             }
         }
 
-        if !pending_keys.is_empty() {
-            flush_ingest_batch(&self.client, &mut pending_keys, &mut pending_values).await?;
-        }
         send_backfill_event(progress_tx, IndexBackfillEvent::Completed { report });
         Ok(report)
     }
-}
-
-fn register_kv_optimizers(ctx: &SessionContext) {
-    let _ = ctx.remove_optimizer_rule("kv_aggregate_pushdown");
-    ctx.add_optimizer_rule(Arc::new(KvAggregatePushdownRule::new()));
-
-    let state_ref = ctx.state_ref();
-    let mut state = state_ref.write();
-    let mut rules = state
-        .physical_optimizers()
-        .iter()
-        .filter(|rule| rule.name() != "kv_topk_sort_pushdown")
-        .cloned()
-        .collect::<Vec<_>>();
-    let insert_at = rules
-        .iter()
-        .position(|rule| rule.name() == "SanityCheckPlan")
-        .unwrap_or(rules.len());
-    rules.insert(insert_at, Arc::new(KvTopKSortPushdownRule::new()));
-    let new_state = SessionStateBuilder::new_from_existing(state.clone())
-        .with_physical_optimizer_rules(rules)
-        .build();
-    *state = new_state;
 }
 
 pub(crate) fn send_backfill_event(
@@ -438,10 +391,6 @@ pub(crate) fn resolved_index_layout_matches(
 
 #[async_trait]
 impl TableProvider for KvTable {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn schema(&self) -> SchemaRef {
         self.model.schema.clone()
     }
@@ -454,21 +403,32 @@ impl TableProvider for KvTable {
         &self,
         filters: &[&Expr],
     ) -> DataFusionResult<Vec<TableProviderFilterPushDown>> {
-        Ok(filters
+        filters
             .iter()
             .map(|expr| {
-                if QueryPredicate::supports_filter(expr, &self.model) {
-                    TableProviderFilterPushDown::Exact
-                } else {
+                let relational = expr.exists(|node| {
+                    Ok(matches!(
+                        node,
+                        Expr::ScalarSubquery(_)
+                            | Expr::InSubquery(_)
+                            | Expr::Exists(_)
+                            | Expr::SetComparison(_)
+                            | Expr::OuterReferenceColumn(..)
+                            | Expr::Unnest(_)
+                    ))
+                })?;
+                Ok(if relational || expr.is_volatile() {
                     TableProviderFilterPushDown::Unsupported
-                }
+                } else {
+                    TableProviderFilterPushDown::Exact
+                })
             })
-            .collect())
+            .collect()
     }
 
     async fn scan(
         &self,
-        _state: &dyn Session,
+        state: &dyn Session,
         projection: Option<&Vec<usize>>,
         filters: &[Expr],
         limit: Option<usize>,
@@ -478,7 +438,7 @@ impl TableProvider for KvTable {
             Some(proj) => Arc::new(self.model.schema.project(proj)?),
             None => self.model.schema.clone(),
         };
-        Ok(Arc::new(KvScanExec::new(
+        let mut scan = KvScanExec::new(
             self.client.clone(),
             self.model.clone(),
             self.index_specs.clone(),
@@ -486,7 +446,9 @@ impl TableProvider for KvTable {
             limit,
             projected_schema,
             projection.cloned(),
-        )))
+        );
+        scan.set_filters(state, filters)?;
+        Ok(Arc::new(scan))
     }
 
     async fn insert_into(

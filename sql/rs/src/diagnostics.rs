@@ -1,6 +1,6 @@
 use datafusion::common::Result as DataFusionResult;
 
-use crate::aggregate::{AggregateAccessPath, AggregatePushdownSpec};
+use crate::aggregate::AggregateAccessPath;
 use crate::codec::*;
 use crate::filter::*;
 use crate::predicate::*;
@@ -24,13 +24,7 @@ pub(crate) struct AggregatePushdownDiagnostics {
     pub(crate) aggregate_jobs: Vec<AccessPathDiagnostics>,
 }
 
-pub(crate) type ChosenAggregateAccessPath =
-    (Vec<KeyRange>, AggregateAccessPath, Option<usize>, bool);
-
-#[derive(Debug)]
-pub(crate) struct KvAggregateTable {
-    pub(crate) spec: AggregatePushdownSpec,
-}
+pub(crate) type ChosenAggregateAccessPath = (Vec<KeyRange>, AggregateAccessPath, Option<usize>);
 
 pub(crate) enum QueryStatsExplainSurface {
     StreamedRangeDetail,
@@ -67,9 +61,11 @@ pub(crate) fn format_access_path_diagnostics(diag: &AccessPathDiagnostics) -> St
 
 pub(crate) fn build_scan_access_path_diagnostics(
     model: &TableModel,
+    max_logical_key_len: usize,
     index_specs: &[ResolvedIndexSpec],
     predicate: &QueryPredicate,
-    projection: &Option<Vec<usize>>,
+    access_plan: &ScanAccessPlan,
+    complete_ranges: bool,
 ) -> DataFusionResult<AccessPathDiagnostics> {
     if predicate.contradiction {
         return Ok(AccessPathDiagnostics {
@@ -83,10 +79,10 @@ pub(crate) fn build_scan_access_path_diagnostics(
         });
     }
 
-    let access_plan = ScanAccessPlan::new(model, projection, predicate);
-    if let Some(index_plan) = predicate.choose_index_plan(model, index_specs)? {
+    if let Some(index_plan) = predicate.choose_index_plan(model, index_specs, access_plan)? {
         let spec = &index_specs[index_plan.spec_idx];
-        let exact = access_plan.predicate_fully_enforced_by_index_key(model, spec);
+        let exact =
+            complete_ranges && access_plan.predicate_fully_enforced_by_index_key(model, spec);
         return Ok(AccessPathDiagnostics {
             mode: format!(
                 "secondary_index({}, {})",
@@ -105,8 +101,8 @@ pub(crate) fn build_scan_access_path_diagnostics(
         });
     }
 
-    let ranges = predicate.primary_key_ranges(model)?;
-    let exact = access_plan.predicate_fully_enforced_by_primary_key(model);
+    let ranges = predicate.primary_key_ranges(model, max_logical_key_len)?;
+    let exact = complete_ranges && access_plan.predicate_fully_enforced_by_primary_key(model);
     Ok(AccessPathDiagnostics {
         mode: "primary_key".to_string(),
         predicate: predicate.describe(model),

@@ -8,11 +8,12 @@
 //!
 //! ## Rust client transport
 //!
-//! HTTP and HTTPS transport that sets `Accept-Encoding: zstd, gzip` on every outbound request.
+//! HTTP and HTTPS transport that prefers zstd for the default response codecs.
 //!
 //! [`connectrpc::compression::CompressionRegistry::default`] builds the header value in sorted
-//! order (`gzip, zstd`), so servers negotiate **gzip** first. Replacing the header after
-//! connectrpc builds the request lets clients **prefer zstd** while still advertising gzip.
+//! order (`gzip, zstd`), so servers negotiate **gzip** first. `Accept-Encoding` prefers zstd
+//! over gzip. Streaming calls reorder the native `gzip, zstd` declaration; custom codec lists
+//! retain their configured ordering and capabilities.
 //!
 //! **Request bodies** (client -> server) use a single codec from connectrpc `compress_requests`.
 //!
@@ -40,7 +41,7 @@ pub use connectrpc::client::{
 };
 use connectrpc::compression::CompressionRegistry;
 pub use connectrpc::rustls::{self, ClientConfig};
-use connectrpc::ConnectError;
+use connectrpc::{ConnectError, Protocol};
 use cookie_store::{Cookie, CookieDomain, CookieStore};
 use http::header::{ACCEPT_ENCODING, AUTHORIZATION, COOKIE, SET_COOKIE};
 pub use http::{Request, Response};
@@ -266,6 +267,14 @@ impl ClientMetadata {
             ACCEPT_ENCODING,
             http::HeaderValue::from_static("zstd, gzip"),
         );
+        let streaming_encoding = Protocol::Connect.accept_encoding_header();
+        if let Some(encoding) = request
+            .headers_mut()
+            .get_mut(streaming_encoding)
+            .filter(|encoding| encoding.as_bytes() == b"gzip, zstd")
+        {
+            *encoding = http::HeaderValue::from_static("zstd, gzip");
+        }
 
         if let Some(ref authorization) = self.authorization {
             apply_authorization(request.headers_mut(), authorization);
@@ -542,7 +551,7 @@ pub fn connect_compression_registry() -> CompressionRegistry {
     CompressionRegistry::default()
 }
 
-/// Wraps [`HttpClient`] so every RPC sends `Accept-Encoding: zstd, gzip` (see module docs).
+/// Wraps [`HttpClient`] with zstd first for the default response codecs (see module docs).
 ///
 /// Also persists HTTP cookies: every `Set-Cookie` response header is stored in an RFC6265 jar and
 /// replayed as `Cookie` when it matches a later request URL.

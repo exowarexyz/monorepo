@@ -1,6 +1,7 @@
 use commonware_codec::DecodeExt;
 use commonware_cryptography::Digest;
 use commonware_storage::merkle::{Family, Location, Position};
+use commonware_utils::bitmap::Prunable;
 use exoware_sdk::keys::{Key, KeyMut, Prefix};
 
 use crate::error::QmdbError;
@@ -10,16 +11,16 @@ use crate::MAX_OPERATION_SIZE;
 // instance or backend it belongs to. The same semantic row therefore uses the
 // same family byte across ALL backend variants (ordered, unordered, immutable,
 // keyless). Instance identity lives solely in the outer Store
-// namespace (the SDK `StoreKeyPrefix`); a single raw Store keyspace must never
+// namespace (the SDK `StoreKeyPrefix`). A single raw Store keyspace must never
 // be shared across multiple QMDB backends or instances, so reusing family bytes
 // across variants is safe.
 pub(crate) const UPDATE_FAMILY: u8 = 0x1;
 pub(crate) const PRESENCE_FAMILY: u8 = 0x2;
 pub(crate) const WATERMARK_FAMILY: u8 = 0x3;
 pub(crate) const OP_FAMILY: u8 = 0x4;
-pub(crate) const NODE_FAMILY: u8 = 0x5;
+pub const NODE_FAMILY: u8 = 0x5;
 pub(crate) const GRAFTED_NODE_FAMILY: u8 = 0x6;
-pub(crate) const CHUNK_FAMILY: u8 = 0x7;
+pub const CHUNK_FAMILY: u8 = 0x7;
 pub(crate) const CURRENT_META_FAMILY: u8 = 0x8;
 pub(crate) const OPS_ROOT_WITNESS_FAMILY: u8 = 0x9;
 
@@ -44,7 +45,7 @@ pub(crate) const CHUNK_PREFIX: Prefix = Prefix::from_static(&[CHUNK_FAMILY]);
 pub(crate) const OPS_ROOT_WITNESS_PREFIX: Prefix = Prefix::from_static(&[OPS_ROOT_WITNESS_FAMILY]);
 
 pub(crate) const fn bitmap_chunk_bits<const N: usize>() -> u64 {
-    (N as u64) * 8
+    Prunable::<N>::CHUNK_SIZE_BITS
 }
 
 pub(crate) fn chunk_index_for_location<F: Family, const N: usize>(location: Location<F>) -> u64 {
@@ -362,8 +363,8 @@ pub(crate) fn encode_chunk_key<F: Family>(chunk_index: u64, watermark: Location<
 
 /// Clear every bitmap bit below `floor` within the chunk at `chunk_index`.
 ///
-/// Bits below the inactivity floor are definitionally 0 at any watermark; the
-/// writer does not republish a chunk every time floor advancement flips one
+/// Bits below the inactivity floor are definitionally 0 at any watermark. The
+/// producer does not republish a chunk every time floor advancement flips one
 /// of its bits, so the stored payload may carry stale 1s. Fold those clears
 /// in deterministically at read time. Mirrors the bit layout used by
 /// `commonware_utils::bitmap::BitMap`: byte offset within the chunk is
@@ -400,10 +401,6 @@ pub(crate) fn decode_operation_location_key<F: Family>(
     decode_prefixed_location(&OPERATION_PREFIX, key, "operation")
 }
 
-pub(crate) fn decode_presence_location<F: Family>(key: &Key) -> Result<Location<F>, QmdbError> {
-    decode_prefixed_location(&PRESENCE_PREFIX, key, "presence")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -412,7 +409,7 @@ mod tests {
     use commonware_storage::merkle::mmr;
 
     #[test]
-    fn current_boundary_metadata_uses_commonware_codec_layout() {
+    fn test_current_boundary_metadata_uses_commonware_codec_layout() {
         let root = Sha256::fill(0xA5);
         let metadata = CurrentBoundaryMetadata {
             root,
@@ -458,7 +455,7 @@ mod tests {
     }
 
     #[test]
-    fn clear_below_floor_matches_bitwise_reference() {
+    fn test_clear_below_floor_matches_bitwise_reference() {
         const N: usize = 4;
         let chunk_bits = bitmap_chunk_bits::<N>();
         for chunk_index in 0..3u64 {

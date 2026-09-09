@@ -5,7 +5,6 @@ mod common;
 use datafusion::arrow::array::Int64Array;
 use datafusion::arrow::datatypes::DataType;
 use datafusion::common::ScalarValue;
-use datafusion::prelude::SessionContext;
 use exoware_sdk::PrefixedStoreClient;
 use exoware_sql::{CellValue, IndexSpec, KvSchema, TableColumnConfig};
 
@@ -72,7 +71,7 @@ async fn sql_full_pipeline_insert_and_query() {
         )
         .expect("schema");
 
-    let ctx = SessionContext::new();
+    let ctx = exoware_sql::session_context();
     read_schema.register_all(&ctx).expect("register tables");
 
     // Full scan (all rows are now visible)

@@ -45,17 +45,14 @@ message SubscribeRequest {
   optional uint64 since_sequence_number = 3;
 }
 
-// One emitted proof for a subscribed batch.
+// One emitted proof for a subscribed batch. Its published QMDB tip is the
+// embedded Merkle proof's leaf count minus one. Current-boundary endpoints
+// include an ops-root witness that binds the operation-log root to the trusted
+// current root for that tip. Operation-log-only endpoints omit the witness.
 message SubscribeResponse {
-  // Underlying store stream sequence that made this proof readable end-to-end.
+  // Store sequence of the operation batch. A later watermark may publish it.
   uint64 resume_sequence_number = 1;
   HistoricalMultiProof proof = 2;
-  // Published backend tip. Current-boundary-backed endpoints include an
-  // ops-root witness so clients can authenticate the historical operation-log
-  // root from their trusted current/global root for this tip. Operation-log-only
-  // endpoints omit the witness; clients authenticate the embedded ops root
-  // out-of-band for this tip.
-  uint64 tip = 3;
 }
 
 // Unary operation-log range proof request. The proof covers

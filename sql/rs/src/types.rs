@@ -46,6 +46,7 @@ pub struct IndexBackfillReport {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IndexBackfillOptions {
+    /// Requested maximum rows per streaming response batch
     pub row_batch_size: usize,
     pub start_from_primary_key: Option<Key>,
 }
@@ -602,6 +603,7 @@ pub(crate) struct KeyRange {
 #[derive(Debug, Clone)]
 pub(crate) struct IndexPlan {
     pub(crate) spec_idx: usize,
+    // Sorted, disjoint inclusive ranges visit each stored entry once
     pub(crate) ranges: Vec<KeyRange>,
     pub(crate) constrained_prefix_len: usize,
     pub(crate) constrained_column_count: usize,

@@ -2,7 +2,7 @@ use std::{sync::Arc, time::Duration};
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use commonware_actor::Feedback;
-use commonware_codec::{Decode, EncodeSize, Error, Read, ReadExt, Write};
+use commonware_codec::{Decode, Encode, EncodeSize, Error, Read, ReadExt, Write};
 use commonware_consensus::{
     marshal::{core::Actor, standard::Standard, Config as MarshalConfig, Start, Update},
     simplex::types::{Finalization, Finalize, Notarization, Notarize, Proposal},
@@ -25,8 +25,12 @@ use commonware_utils::{
     vec::NonEmptyVec,
     Acknowledgement as _, NZUsize, TestRng, NZU16, NZU64,
 };
-use exoware_sdk::{PrefixedStoreClient, RetryConfig, StoreBatchUpload, StoreClient};
-use exoware_simplex::{Finalized, MarshalResolver, Notarized, SimplexClient};
+use exoware_sdk::{
+    PrefixedStoreClient, RetryConfig, StoreBatchUpload, StoreClient, StoreWriteBatch,
+};
+use exoware_simplex::{
+    init_marshal_resolver, keys, Finalized, Notarized, SimplexClient, SimplexError,
+};
 
 const NAMESPACE: &[u8] = b"_EXOWARE_SIMPLEX_TEST";
 
@@ -247,7 +251,10 @@ async fn uploads_and_reads_notarized_and_finalized_blocks() {
     assert_eq!(got_header, block1);
 
     let got_notarized = simplex
-        .get_notarized::<TestBlock, Scheme, Sha256Digest>(View::new(1), &(10, 1024))
+        .get_notarized_by_round::<TestBlock, Scheme, Sha256Digest>(
+            block1.context.round,
+            &(10, 1024),
+        )
         .await
         .expect("get notarized")
         .expect("notarized exists");
@@ -285,10 +292,13 @@ async fn uploads_and_reads_notarized_and_finalized_blocks() {
     assert_eq!(got_finalized, finalized);
 
     let got_finalized = simplex
-        .get_finalized_by_view::<TestBlock, Scheme, Sha256Digest>(View::new(2), &(10, 1024))
+        .get_finalized_by_round::<TestBlock, Scheme, Sha256Digest>(
+            block2.context.round,
+            &(10, 1024),
+        )
         .await
-        .expect("get finalized by view")
-        .expect("finalized by view exists");
+        .expect("get finalized by round")
+        .expect("finalized by round exists");
     assert_eq!(got_finalized, finalized);
 
     let latest = simplex
@@ -461,7 +471,7 @@ async fn marshal_resolver_sinks_finalized_chain_from_simplex_api() {
                         .try_into()
                         .expect("block count with genesis"),
                 );
-                let (resolver_rx, resolver) = MarshalResolver::<Sha256Digest, PublicKey>::init(
+                let (resolver_rx, resolver) = init_marshal_resolver::<_, Sha256Digest, PublicKey>(
                     context.child("resolver"),
                     NZUsize!(100),
                     simplex,
@@ -486,4 +496,103 @@ async fn marshal_resolver_sinks_finalized_chain_from_simplex_api() {
     .expect("runner join");
 
     assert_eq!(delivered, expected_blocks);
+}
+
+#[tokio::test]
+async fn round_indices_retain_same_view_across_epochs() {
+    let simplex = SimplexClient::new(PrefixedStoreClient::empty(local_store_client().await));
+    let schemes = schemes();
+    let mut expected = Vec::new();
+    for epoch in [0, 1, u32::MAX as u64 + 1] {
+        let mut block = TestBlock::new(epoch + 1, b"epoch boundary");
+        block.context.round = Round::new(Epoch::new(epoch), View::new(7));
+        block.digest = block.compute_digest();
+        let notarized = notarized(block.clone(), &schemes);
+        let finalized = finalized(block, &schemes);
+        simplex.upload_notarized(&notarized).await.unwrap();
+        simplex.upload_finalized(&finalized).await.unwrap();
+        expected.push((notarized, finalized));
+    }
+    for (notarized, finalized) in expected {
+        let round = notarized.header.context.round;
+        assert_eq!(
+            simplex
+                .get_notarized_by_round::<TestBlock, Scheme, Sha256Digest>(round, &(10, 1024))
+                .await
+                .unwrap(),
+            Some(notarized)
+        );
+        assert_eq!(
+            simplex
+                .get_finalized_by_round::<TestBlock, Scheme, Sha256Digest>(round, &(10, 1024))
+                .await
+                .unwrap(),
+            Some(finalized)
+        );
+    }
+}
+
+#[tokio::test]
+async fn round_reads_reject_certificates_stored_under_another_round() {
+    let store = local_store_client().await;
+    let client = PrefixedStoreClient::empty(store.clone());
+    let simplex = SimplexClient::new(client.clone());
+    let schemes = schemes();
+    let mut block = TestBlock::new(9, b"round binding");
+    block.context.round = Round::new(Epoch::new(1), View::new(9));
+    block.digest = block.compute_digest();
+    let notarized = notarized(block.clone(), &schemes);
+    let finalized = finalized(block, &schemes);
+
+    for round in [
+        Round::new(Epoch::new(2), View::new(9)),
+        Round::new(Epoch::new(1), View::new(10)),
+    ] {
+        let mut batch = StoreWriteBatch::new();
+        batch
+            .push(
+                &client,
+                &keys::notarization_by_round(round),
+                notarized.encode(),
+            )
+            .unwrap();
+        batch
+            .push(
+                &client,
+                &keys::finalization_by_round(round),
+                finalized.encode(),
+            )
+            .unwrap();
+        batch.commit(&store).await.unwrap();
+
+        assert!(matches!(
+            simplex
+                .get_notarized_by_round::<TestBlock, Scheme, Sha256Digest>(round, &(10, 1024))
+                .await,
+            Err(SimplexError::RecordKeyMismatch)
+        ));
+        assert!(matches!(
+            simplex
+                .get_finalized_by_round::<TestBlock, Scheme, Sha256Digest>(round, &(10, 1024))
+                .await,
+            Err(SimplexError::RecordKeyMismatch)
+        ));
+    }
+
+    // A mis-keyed height row sorts last, so the latest-finalized read must reject it
+    let mut batch = StoreWriteBatch::new();
+    batch
+        .push(
+            &client,
+            &keys::finalized_by_height(Height::new(u64::MAX)),
+            finalized.encode(),
+        )
+        .unwrap();
+    batch.commit(&store).await.unwrap();
+    assert!(matches!(
+        simplex
+            .latest_finalized::<TestBlock, Scheme, Sha256Digest>(&(10, 1024))
+            .await,
+        Err(SimplexError::RecordKeyMismatch)
+    ));
 }

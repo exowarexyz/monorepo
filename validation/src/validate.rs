@@ -1030,6 +1030,7 @@ async fn wait_for_reduce_count_match(
         reducers: vec![RangeReducerSpec {
             op: RangeReduceOp::CountAll,
             expr: None,
+            filter: None,
         }],
         group_by: Vec::new(),
         filter: None,
@@ -1906,7 +1907,7 @@ mod tests {
             &self,
             _ctx: RequestContext,
             _request: ServiceRequest<'_, ReduceRequest>,
-        ) -> connectrpc::ServiceResult<ReduceResponse> {
+        ) -> connectrpc::ServiceResult<connectrpc::ServiceStream<ReduceResponse>> {
             Err(ConnectError::unimplemented("test harness"))
         }
     }

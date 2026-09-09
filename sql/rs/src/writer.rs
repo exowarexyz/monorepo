@@ -1,4 +1,3 @@
-use std::any::Any;
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
@@ -7,13 +6,13 @@ use std::sync::Mutex;
 use async_trait::async_trait;
 use bytes::Bytes;
 use commonware_codec::Encode;
-use datafusion::arrow::array::{
-    ArrayRef, BinaryArray, BinaryViewArray, BooleanArray, Date32Array, Date64Array,
-    Decimal128Array, Decimal256Array, FixedSizeBinaryArray, Float64Array, Int64Array,
-    LargeBinaryArray, LargeStringArray, ListArray, StringArray, StringViewArray,
-    TimestampMicrosecondArray, UInt64Array,
+use datafusion::arrow::array::{ArrayAccessor, ArrayRef, AsArray};
+#[cfg(test)]
+use datafusion::arrow::datatypes::i256;
+use datafusion::arrow::datatypes::{
+    ArrowPrimitiveType, Date32Type, Date64Type, Decimal128Type, Decimal256Type, Float64Type,
+    Int64Type, SchemaRef, TimestampMicrosecondType, UInt64Type,
 };
-use datafusion::arrow::datatypes::{i256, SchemaRef};
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::common::{DataFusionError, Result as DataFusionResult};
 use datafusion::datasource::sink::DataSink;
@@ -101,22 +100,19 @@ pub struct BatchReceipt {
 }
 
 impl BatchWriter {
-    pub(crate) fn new(
-        client: PrefixedStoreClient,
-        table_configs: &[(String, KvTableConfig)],
-    ) -> Self {
-        let mut tables = HashMap::new();
-        for (name, config) in table_configs {
-            let model = Arc::new(
-                TableModel::from_config(config).expect("config already validated by KvSchema"),
-            );
-            let index_specs = Arc::new(
-                model
-                    .resolve_index_specs(&config.index_specs)
-                    .expect("specs already validated by KvSchema"),
-            );
-            tables.insert(name.clone(), TableWriter { model, index_specs });
-        }
+    pub(crate) fn new(client: PrefixedStoreClient, tables: &[(String, Arc<KvTable>)]) -> Self {
+        let tables = tables
+            .iter()
+            .map(|(name, table)| {
+                (
+                    name.clone(),
+                    TableWriter {
+                        model: table.model.clone(),
+                        index_specs: table.index_specs.clone(),
+                    },
+                )
+            })
+            .collect();
         Self {
             client,
             tables,
@@ -314,10 +310,6 @@ impl DisplayAs for KvIngestSink {
 
 #[async_trait]
 impl DataSink for KvIngestSink {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn schema(&self) -> &SchemaRef {
         &self.schema
     }
@@ -379,26 +371,42 @@ pub(crate) fn extract_row_from_batch(
     let mut values = Vec::with_capacity(model.columns.len());
     for col in &model.columns {
         let array = required_column(batch, &col.name)?;
-        if col.nullable && array.is_null(row_idx) {
+        if array.is_null(row_idx) {
+            if !col.nullable {
+                return Err(DataFusionError::Execution(format!(
+                    "column '{}' cannot be NULL for kv table insert",
+                    col.name
+                )));
+            }
             values.push(CellValue::Null);
             continue;
         }
         let value = match col.kind {
-            ColumnKind::Int64 => CellValue::Int64(i64_value_at(array, row_idx, &col.name)?),
-            ColumnKind::UInt64 => CellValue::UInt64(uint64_value_at(array, row_idx, &col.name)?),
-            ColumnKind::Float64 => CellValue::Float64(f64_value_at(array, row_idx, &col.name)?),
+            ColumnKind::Int64 => {
+                CellValue::Int64(primitive_value_at::<Int64Type>(array, row_idx, &col.name)?)
+            }
+            ColumnKind::UInt64 => {
+                CellValue::UInt64(primitive_value_at::<UInt64Type>(array, row_idx, &col.name)?)
+            }
+            ColumnKind::Float64 => CellValue::Float64(primitive_value_at::<Float64Type>(
+                array, row_idx, &col.name,
+            )?),
             ColumnKind::Boolean => CellValue::Boolean(bool_value_at(array, row_idx, &col.name)?),
-            ColumnKind::Date32 => CellValue::Date32(date32_value_at(array, row_idx, &col.name)?),
-            ColumnKind::Date64 => CellValue::Date64(date64_value_at(array, row_idx, &col.name)?),
-            ColumnKind::Timestamp => {
-                CellValue::Timestamp(timestamp_micros_value_at(array, row_idx, &col.name)?)
+            ColumnKind::Date32 => {
+                CellValue::Date32(primitive_value_at::<Date32Type>(array, row_idx, &col.name)?)
             }
-            ColumnKind::Decimal128 => {
-                CellValue::Decimal128(decimal128_value_at(array, row_idx, &col.name)?)
+            ColumnKind::Date64 => {
+                CellValue::Date64(primitive_value_at::<Date64Type>(array, row_idx, &col.name)?)
             }
-            ColumnKind::Decimal256 => {
-                CellValue::Decimal256(decimal256_value_at(array, row_idx, &col.name)?)
-            }
+            ColumnKind::Timestamp => CellValue::Timestamp(primitive_value_at::<
+                TimestampMicrosecondType,
+            >(array, row_idx, &col.name)?),
+            ColumnKind::Decimal128 => CellValue::Decimal128(primitive_value_at::<Decimal128Type>(
+                array, row_idx, &col.name,
+            )?),
+            ColumnKind::Decimal256 => CellValue::Decimal256(primitive_value_at::<Decimal256Type>(
+                array, row_idx, &col.name,
+            )?),
             ColumnKind::Utf8 => CellValue::Utf8(string_value_at(array, row_idx, &col.name)?),
             ColumnKind::FixedSizeBinary(_) => {
                 CellValue::FixedBinary(fixed_binary_value_at(array, row_idx, &col.name)?)
@@ -464,7 +472,7 @@ pub(crate) fn encode_secondary_index_value_from_archived(
                 col.name
             )));
         }
-        values.push(owned_stored_value_from_archived(stored_opt)?);
+        values.push(stored_opt.cloned());
     }
     let stored_row = StoredRow { values };
     Ok(stored_row.encode().to_vec())
@@ -533,34 +541,6 @@ pub(crate) fn encode_non_pk_cell_value(
             col.name, col.kind, value
         ))),
     }
-}
-
-pub(crate) fn owned_stored_value_from_archived(
-    stored_opt: Option<&StoredValue>,
-) -> DataFusionResult<Option<StoredValue>> {
-    let Some(stored) = stored_opt else {
-        return Ok(None);
-    };
-    Ok(Some(match stored {
-        StoredValue::Int64(v) => StoredValue::Int64(*v),
-        StoredValue::UInt64(v) => StoredValue::UInt64(*v),
-        StoredValue::Float64(v) => StoredValue::Float64(*v),
-        StoredValue::Boolean(v) => StoredValue::Boolean(*v),
-        StoredValue::Utf8(v) => StoredValue::Utf8(v.as_str().to_string()),
-        StoredValue::Bytes(v) => StoredValue::Bytes(v.as_slice().to_vec()),
-        StoredValue::List(items) => {
-            let mut out = Vec::with_capacity(items.len());
-            for item in items.iter() {
-                let owned = owned_stored_value_from_archived(Some(item))?.ok_or_else(|| {
-                    DataFusionError::Execution(
-                        "archived list item unexpectedly decoded as NULL".to_string(),
-                    )
-                })?;
-                out.push(owned);
-            }
-            StoredValue::List(out)
-        }
-    }))
 }
 
 #[cfg(test)]
@@ -641,51 +621,39 @@ pub(crate) fn decode_list_element_archived(
     })
 }
 
-pub(crate) fn required_column<'a>(
-    batch: &'a RecordBatch,
-    name: &str,
-) -> DataFusionResult<&'a ArrayRef> {
+fn required_column<'a>(batch: &'a RecordBatch, name: &str) -> DataFusionResult<&'a ArrayRef> {
     batch.column_by_name(name).ok_or_else(|| {
         DataFusionError::Execution(format!("insert batch is missing required column '{name}'"))
     })
 }
 
-pub(crate) fn i64_value_at(
+fn primitive_value_at<T: ArrowPrimitiveType>(
     array: &ArrayRef,
     row_idx: usize,
     column_name: &str,
-) -> DataFusionResult<i64> {
-    if array.is_null(row_idx) {
-        return Err(DataFusionError::Execution(format!(
-            "column '{column_name}' cannot be NULL for kv table insert"
-        )));
-    }
-    let values = array.as_any().downcast_ref::<Int64Array>().ok_or_else(|| {
+) -> DataFusionResult<T::Native> {
+    let values = array.as_primitive_opt::<T>().ok_or_else(|| {
         DataFusionError::Execution(format!(
-            "column '{column_name}' expected Int64, got {:?}",
+            "column '{column_name}' expected {:?}, got {:?}",
+            T::DATA_TYPE,
             array.data_type()
         ))
     })?;
     Ok(values.value(row_idx))
 }
 
-pub(crate) fn string_value_at(
+fn string_value_at(
     array: &ArrayRef,
     row_idx: usize,
     column_name: &str,
 ) -> DataFusionResult<String> {
-    if array.is_null(row_idx) {
-        return Err(DataFusionError::Execution(format!(
-            "column '{column_name}' cannot be NULL for kv table insert"
-        )));
-    }
-    if let Some(values) = array.as_any().downcast_ref::<StringArray>() {
+    if let Some(values) = array.as_string_opt::<i32>() {
         return Ok(values.value(row_idx).to_string());
     }
-    if let Some(values) = array.as_any().downcast_ref::<LargeStringArray>() {
+    if let Some(values) = array.as_string_opt::<i64>() {
         return Ok(values.value(row_idx).to_string());
     }
-    if let Some(values) = array.as_any().downcast_ref::<StringViewArray>() {
+    if let Some(values) = array.as_string_view_opt() {
         return Ok(values.value(row_idx).to_string());
     }
     Err(DataFusionError::Execution(format!(
@@ -694,199 +662,28 @@ pub(crate) fn string_value_at(
     )))
 }
 
-pub(crate) fn f64_value_at(
-    array: &ArrayRef,
-    row_idx: usize,
-    column_name: &str,
-) -> DataFusionResult<f64> {
-    if array.is_null(row_idx) {
-        return Err(DataFusionError::Execution(format!(
-            "column '{column_name}' cannot be NULL for kv table insert"
-        )));
-    }
-    let values = array
-        .as_any()
-        .downcast_ref::<Float64Array>()
-        .ok_or_else(|| {
-            DataFusionError::Execution(format!(
-                "column '{column_name}' expected Float64, got {:?}",
-                array.data_type()
-            ))
-        })?;
+fn bool_value_at(array: &ArrayRef, row_idx: usize, column_name: &str) -> DataFusionResult<bool> {
+    let values = array.as_boolean_opt().ok_or_else(|| {
+        DataFusionError::Execution(format!(
+            "column '{column_name}' expected Boolean, got {:?}",
+            array.data_type()
+        ))
+    })?;
     Ok(values.value(row_idx))
 }
 
-pub(crate) fn bool_value_at(
-    array: &ArrayRef,
-    row_idx: usize,
-    column_name: &str,
-) -> DataFusionResult<bool> {
-    if array.is_null(row_idx) {
-        return Err(DataFusionError::Execution(format!(
-            "column '{column_name}' cannot be NULL for kv table insert"
-        )));
-    }
-    let values = array
-        .as_any()
-        .downcast_ref::<BooleanArray>()
-        .ok_or_else(|| {
-            DataFusionError::Execution(format!(
-                "column '{column_name}' expected Boolean, got {:?}",
-                array.data_type()
-            ))
-        })?;
-    Ok(values.value(row_idx))
-}
-
-pub(crate) fn date32_value_at(
-    array: &ArrayRef,
-    row_idx: usize,
-    column_name: &str,
-) -> DataFusionResult<i32> {
-    if array.is_null(row_idx) {
-        return Err(DataFusionError::Execution(format!(
-            "column '{column_name}' cannot be NULL for kv table insert"
-        )));
-    }
-    let values = array
-        .as_any()
-        .downcast_ref::<Date32Array>()
-        .ok_or_else(|| {
-            DataFusionError::Execution(format!(
-                "column '{column_name}' expected Date32, got {:?}",
-                array.data_type()
-            ))
-        })?;
-    Ok(values.value(row_idx))
-}
-
-pub(crate) fn date64_value_at(
-    array: &ArrayRef,
-    row_idx: usize,
-    column_name: &str,
-) -> DataFusionResult<i64> {
-    if array.is_null(row_idx) {
-        return Err(DataFusionError::Execution(format!(
-            "column '{column_name}' cannot be NULL for kv table insert"
-        )));
-    }
-    let values = array
-        .as_any()
-        .downcast_ref::<Date64Array>()
-        .ok_or_else(|| {
-            DataFusionError::Execution(format!(
-                "column '{column_name}' expected Date64, got {:?}",
-                array.data_type()
-            ))
-        })?;
-    Ok(values.value(row_idx))
-}
-
-pub(crate) fn timestamp_micros_value_at(
-    array: &ArrayRef,
-    row_idx: usize,
-    column_name: &str,
-) -> DataFusionResult<i64> {
-    if array.is_null(row_idx) {
-        return Err(DataFusionError::Execution(format!(
-            "column '{column_name}' cannot be NULL for kv table insert"
-        )));
-    }
-    let values = array
-        .as_any()
-        .downcast_ref::<TimestampMicrosecondArray>()
-        .ok_or_else(|| {
-            DataFusionError::Execution(format!(
-                "column '{column_name}' expected TimestampMicrosecond, got {:?}",
-                array.data_type()
-            ))
-        })?;
-    Ok(values.value(row_idx))
-}
-
-pub(crate) fn decimal128_value_at(
-    array: &ArrayRef,
-    row_idx: usize,
-    column_name: &str,
-) -> DataFusionResult<i128> {
-    if array.is_null(row_idx) {
-        return Err(DataFusionError::Execution(format!(
-            "column '{column_name}' cannot be NULL for kv table insert"
-        )));
-    }
-    let values = array
-        .as_any()
-        .downcast_ref::<Decimal128Array>()
-        .ok_or_else(|| {
-            DataFusionError::Execution(format!(
-                "column '{column_name}' expected Decimal128, got {:?}",
-                array.data_type()
-            ))
-        })?;
-    Ok(values.value(row_idx))
-}
-
-pub(crate) fn uint64_value_at(
-    array: &ArrayRef,
-    row_idx: usize,
-    column_name: &str,
-) -> DataFusionResult<u64> {
-    if array.is_null(row_idx) {
-        return Err(DataFusionError::Execution(format!(
-            "column '{column_name}' cannot be NULL for kv table insert"
-        )));
-    }
-    let values = array
-        .as_any()
-        .downcast_ref::<UInt64Array>()
-        .ok_or_else(|| {
-            DataFusionError::Execution(format!(
-                "column '{column_name}' expected UInt64, got {:?}",
-                array.data_type()
-            ))
-        })?;
-    Ok(values.value(row_idx))
-}
-
-pub(crate) fn decimal256_value_at(
-    array: &ArrayRef,
-    row_idx: usize,
-    column_name: &str,
-) -> DataFusionResult<i256> {
-    if array.is_null(row_idx) {
-        return Err(DataFusionError::Execution(format!(
-            "column '{column_name}' cannot be NULL for kv table insert"
-        )));
-    }
-    let values = array
-        .as_any()
-        .downcast_ref::<Decimal256Array>()
-        .ok_or_else(|| {
-            DataFusionError::Execution(format!(
-                "column '{column_name}' expected Decimal256, got {:?}",
-                array.data_type()
-            ))
-        })?;
-    Ok(values.value(row_idx))
-}
-
-pub(crate) fn binary_value_at(
+fn binary_value_at(
     array: &ArrayRef,
     row_idx: usize,
     column_name: &str,
 ) -> DataFusionResult<Vec<u8>> {
-    if array.is_null(row_idx) {
-        return Err(DataFusionError::Execution(format!(
-            "column '{column_name}' cannot be NULL for kv table insert"
-        )));
-    }
-    if let Some(values) = array.as_any().downcast_ref::<BinaryArray>() {
+    if let Some(values) = array.as_binary_opt::<i32>() {
         return Ok(values.value(row_idx).to_vec());
     }
-    if let Some(values) = array.as_any().downcast_ref::<LargeBinaryArray>() {
+    if let Some(values) = array.as_binary_opt::<i64>() {
         return Ok(values.value(row_idx).to_vec());
     }
-    if let Some(values) = array.as_any().downcast_ref::<BinaryViewArray>() {
+    if let Some(values) = array.as_binary_view_opt() {
         return Ok(values.value(row_idx).to_vec());
     }
     Err(DataFusionError::Execution(format!(
@@ -895,94 +692,92 @@ pub(crate) fn binary_value_at(
     )))
 }
 
-pub(crate) fn fixed_binary_value_at(
+fn fixed_binary_value_at(
     array: &ArrayRef,
     row_idx: usize,
     column_name: &str,
 ) -> DataFusionResult<Vec<u8>> {
-    if array.is_null(row_idx) {
-        return Err(DataFusionError::Execution(format!(
-            "column '{column_name}' cannot be NULL for kv table insert"
-        )));
-    }
-    let values = array
-        .as_any()
-        .downcast_ref::<FixedSizeBinaryArray>()
-        .ok_or_else(|| {
-            DataFusionError::Execution(format!(
-                "column '{column_name}' expected FixedSizeBinary, got {:?}",
-                array.data_type()
-            ))
-        })?;
+    let values = array.as_fixed_size_binary_opt().ok_or_else(|| {
+        DataFusionError::Execution(format!(
+            "column '{column_name}' expected FixedSizeBinary, got {:?}",
+            array.data_type()
+        ))
+    })?;
     Ok(values.value(row_idx).to_vec())
 }
 
-pub(crate) fn list_value_at(
+fn list_value_at(
     array: &ArrayRef,
     row_idx: usize,
     column_name: &str,
     elem: ListElementKind,
 ) -> DataFusionResult<CellValue> {
-    if array.is_null(row_idx) {
-        return Err(DataFusionError::Execution(format!(
-            "column '{column_name}' cannot be NULL for kv table insert"
-        )));
-    }
-    let list_array = array.as_any().downcast_ref::<ListArray>().ok_or_else(|| {
+    let list_array = array.as_list_opt::<i32>().ok_or_else(|| {
         DataFusionError::Execution(format!(
             "column '{column_name}' expected List, got {:?}",
             array.data_type()
         ))
     })?;
-    let child = list_array.value(row_idx);
-    let mut items = Vec::with_capacity(child.len());
-    for i in 0..child.len() {
-        let item = match elem {
-            ListElementKind::Int64 => {
-                let arr = child.as_any().downcast_ref::<Int64Array>().ok_or_else(|| {
-                    DataFusionError::Execution(format!(
-                        "column '{column_name}' list element expected Int64"
-                    ))
-                })?;
-                CellValue::Int64(arr.value(i))
-            }
-            ListElementKind::Float64 => {
-                let arr = child
-                    .as_any()
-                    .downcast_ref::<Float64Array>()
-                    .ok_or_else(|| {
-                        DataFusionError::Execution(format!(
-                            "column '{column_name}' list element expected Float64"
-                        ))
-                    })?;
-                CellValue::Float64(arr.value(i))
-            }
-            ListElementKind::Boolean => {
-                let arr = child
-                    .as_any()
-                    .downcast_ref::<BooleanArray>()
-                    .ok_or_else(|| {
-                        DataFusionError::Execution(format!(
-                            "column '{column_name}' list element expected Boolean"
-                        ))
-                    })?;
-                CellValue::Boolean(arr.value(i))
-            }
-            ListElementKind::Utf8 => {
-                let arr = child
-                    .as_any()
-                    .downcast_ref::<StringArray>()
-                    .ok_or_else(|| {
-                        DataFusionError::Execution(format!(
-                            "column '{column_name}' list element expected Utf8"
-                        ))
-                    })?;
-                CellValue::Utf8(arr.value(i).to_string())
-            }
-        };
-        items.push(item);
+    let offsets = list_array.value_offsets();
+    let range = offsets[row_idx] as usize..offsets[row_idx + 1] as usize;
+    let child = list_array.values();
+    if child
+        .nulls()
+        .is_some_and(|nulls| range.clone().any(|idx| nulls.is_null(idx)))
+    {
+        return Err(DataFusionError::Execution(format!(
+            "column '{column_name}' list elements cannot be NULL"
+        )));
     }
+    let type_error = || {
+        DataFusionError::Execution(format!(
+            "column '{column_name}' list element expected {elem:?}"
+        ))
+    };
+    let items = match elem {
+        ListElementKind::Int64 => collect_list(
+            child
+                .as_primitive_opt::<Int64Type>()
+                .ok_or_else(type_error)?,
+            range,
+            CellValue::Int64,
+        ),
+        ListElementKind::Float64 => collect_list(
+            child
+                .as_primitive_opt::<Float64Type>()
+                .ok_or_else(type_error)?,
+            range,
+            CellValue::Float64,
+        ),
+        ListElementKind::Boolean => collect_list(
+            child.as_boolean_opt().ok_or_else(type_error)?,
+            range,
+            CellValue::Boolean,
+        ),
+        ListElementKind::Utf8 => {
+            let cell = |value: &str| CellValue::Utf8(value.to_owned());
+            if let Some(values) = child.as_string_opt::<i32>() {
+                collect_list(values, range, cell)
+            } else if let Some(values) = child.as_string_opt::<i64>() {
+                collect_list(values, range, cell)
+            } else {
+                collect_list(
+                    child.as_string_view_opt().ok_or_else(type_error)?,
+                    range,
+                    cell,
+                )
+            }
+        }
+    };
     Ok(CellValue::List(items))
+}
+
+fn collect_list<A: ArrayAccessor>(
+    values: A,
+    range: std::ops::Range<usize>,
+    cell: impl Fn(A::Item) -> CellValue,
+) -> Vec<CellValue> {
+    range.map(|idx| cell(values.value(idx))).collect()
 }
 
 pub(crate) async fn flush_ingest_batch(
@@ -1015,7 +810,11 @@ mod tests {
 
     use super::*;
     use crate::builder::{append_archived_non_pk_value, make_column_builder};
-    use datafusion::arrow::array::BinaryArray;
+    use datafusion::arrow::array::builder::Int64Builder;
+    use datafusion::arrow::array::{
+        BinaryArray, BinaryViewArray, Int64Array, LargeBinaryArray, ListBuilder, StringArray,
+        UInt64Array,
+    };
     use datafusion::arrow::datatypes::{DataType, Field, Schema};
     use exoware_sdk::kv_codec::decode_stored_row;
 
@@ -1054,7 +853,9 @@ mod tests {
             )
             .expect("append archived binary");
         }
-        let array = builder.finish().expect("finish binary array");
+        let array = builder
+            .finish(&DataType::Binary)
+            .expect("finish binary array");
         let array = array
             .as_any()
             .downcast_ref::<BinaryArray>()
@@ -1137,6 +938,119 @@ mod tests {
             message.contains("'body'") && message.contains("expected Binary"),
             "unexpected error: {message}"
         );
+    }
+
+    #[test]
+    fn list_extraction_uses_sliced_offsets_and_rejects_only_selected_null_elements() {
+        let mut builder = ListBuilder::new(Int64Builder::new());
+        builder.values().append_null();
+        builder.append(true);
+        builder.values().append_value(7);
+        builder.values().append_value(-3);
+        builder.append(true);
+        builder.append(true);
+        let array: ArrayRef = Arc::new(builder.finish());
+        let error = list_value_at(&array, 0, "items", ListElementKind::Int64).unwrap_err();
+        assert!(error.to_string().contains("list elements cannot be NULL"));
+
+        let sliced = array.slice(1, 2);
+        let CellValue::List(items) =
+            list_value_at(&sliced, 0, "items", ListElementKind::Int64).unwrap()
+        else {
+            panic!("expected list");
+        };
+        assert!(matches!(
+            items.as_slice(),
+            [CellValue::Int64(7), CellValue::Int64(-3)]
+        ));
+        let CellValue::List(items) =
+            list_value_at(&sliced, 1, "items", ListElementKind::Int64).unwrap()
+        else {
+            panic!("expected empty list");
+        };
+        assert!(items.is_empty());
+    }
+
+    #[test]
+    fn row_extraction_checks_column_nullability_before_primitive_access() {
+        for nullable in [false, true] {
+            let config = KvTableConfig::new(
+                0,
+                vec![
+                    TableColumnConfig::new("id", DataType::UInt64, false),
+                    TableColumnConfig::new("value", DataType::Int64, nullable),
+                ],
+                vec!["id".into()],
+                vec![],
+            )
+            .unwrap();
+            let model = TableModel::from_config(&config).unwrap();
+            let batch = RecordBatch::try_from_iter(vec![
+                ("id", Arc::new(UInt64Array::from(vec![1])) as ArrayRef),
+                ("value", Arc::new(Int64Array::from(vec![None])) as ArrayRef),
+            ])
+            .unwrap();
+            let result = extract_row_from_batch(&batch, 0, &model);
+            if nullable {
+                assert!(matches!(result.unwrap().values[1], CellValue::Null));
+            } else {
+                assert!(result
+                    .unwrap_err()
+                    .to_string()
+                    .contains("'value' cannot be NULL"));
+            }
+        }
+    }
+
+    #[test]
+    fn string_list_aliases_preserve_declared_fields_and_round_trip_through_arrow() {
+        for child_type in [DataType::Utf8, DataType::LargeUtf8, DataType::Utf8View] {
+            for large_list in [false, true] {
+                let child = Arc::new(Field::new("element", child_type.clone(), false));
+                let list_type = if large_list {
+                    DataType::LargeList(child)
+                } else {
+                    DataType::List(child)
+                };
+                let config = KvTableConfig::new(
+                    0,
+                    vec![
+                        TableColumnConfig::new("id", DataType::UInt64, false),
+                        TableColumnConfig::new("items", list_type, false),
+                    ],
+                    vec!["id".into()],
+                    vec![],
+                )
+                .unwrap();
+                let model = TableModel::from_config(&config).unwrap();
+                let row = KvRow {
+                    values: vec![
+                        CellValue::UInt64(4),
+                        CellValue::List(vec![
+                            CellValue::Utf8("é".into()),
+                            CellValue::Utf8(String::new()),
+                        ]),
+                    ],
+                };
+                let encoded = encode_base_row_value(&row, &model).unwrap();
+                let stored = decode_stored_row(&encoded).unwrap();
+                let mut builder = make_column_builder(&model, 1);
+                append_archived_non_pk_value(
+                    &mut builder,
+                    &model.columns[1],
+                    stored.values[1].as_ref(),
+                )
+                .unwrap();
+                let array = builder.finish(model.schema.field(1).data_type()).unwrap();
+                let batch = RecordBatch::try_new(
+                    model.schema.clone(),
+                    vec![Arc::new(UInt64Array::from(vec![4])), array],
+                )
+                .unwrap();
+                let recovered = extract_row_from_batch(&batch, 0, &model).unwrap();
+                assert_eq!(encode_base_row_value(&recovered, &model).unwrap(), encoded);
+            }
+        }
     }
 
     #[test]

@@ -171,8 +171,7 @@ export interface VerifiedCurrentKeyRangeEntry {
 
 export interface VerifiedCurrentKeyRangeProof {
   entries: VerifiedCurrentKeyRangeEntry[];
-  hasMore: boolean;
-  nextStartKey: Uint8Array;
+  nextStartKey: Uint8Array | null;
   proofSizeBytes: number;
 }
 
@@ -203,10 +202,6 @@ function toBytes(value: BytesLike): Uint8Array {
   return typeof value === 'string' ? new TextEncoder().encode(value) : value;
 }
 
-function copyBytes(value: BytesLike): Uint8Array {
-  return new Uint8Array(toBytes(value));
-}
-
 function keyId(key: Uint8Array): string {
   return Array.from(key).join(',');
 }
@@ -234,9 +229,24 @@ function assertHashFamily(value: HashFamily, label: string): void {
   }
 }
 
-function assertCurrentChunkSize(value: number, label: string): void {
-  if (!Number.isSafeInteger(value) || value <= 0) {
-    throw new Error(`${label} current chunk size must be a positive integer`);
+function assertU32(value: number, label: string, nonzero = false): void {
+  if (!Number.isInteger(value) || value < (nonzero ? 1 : 0) || value > 0xffff_ffff) {
+    throw new Error(`${label} must fit in ${nonzero ? 'a positive' : 'an unsigned'} 32-bit integer`);
+  }
+}
+
+function assertU64(value: bigint, label: string): void {
+  if (typeof value !== 'bigint' || value < 0n || value > 0xffff_ffff_ffff_ffffn) {
+    throw new Error(`${label} must be an unsigned 64-bit bigint`);
+  }
+}
+
+function assertOperationWindow(request: OperationRangeRequest): void {
+  assertU64(request.tip, 'tip');
+  assertU64(request.startLocation, 'startLocation');
+  assertU32(request.maxLocations, 'maxLocations', true);
+  if (request.startLocation > request.tip) {
+    throw new Error('invalid operation window');
   }
 }
 
@@ -308,6 +318,7 @@ export class QmdbOperationLogClient {
     expectedRoot: BytesLike,
     options?: CallOptions,
   ): Promise<VerifiedRawOperationRangeProof> {
+    assertOperationWindow(request);
     await ensureWasm();
     const proofBytes = await operationRangeProofBytes(
       this.operationLog,
@@ -319,6 +330,9 @@ export class QmdbOperationLogClient {
       toBytes(expectedRoot),
       this.merkleFamily,
       this.hashFamily,
+      request.tip,
+      request.startLocation,
+      request.maxLocations,
     ) as Omit<VerifiedRawOperationRangeProof, 'proofSizeBytes'>;
     return { ...verified, proofSizeBytes: proofBytes.length };
   }
@@ -330,6 +344,8 @@ export class QmdbOperationLogClient {
     expectedValue: BytesLike,
     options?: CallOptions,
   ): Promise<VerifiedFixedKeylessAppendProof> {
+    assertU64(expectedLocation, 'expectedLocation');
+    assertOperationWindow(request);
     await ensureWasm();
     const proofBytes = await operationRangeProofBytes(
       this.operationLog,
@@ -343,6 +359,9 @@ export class QmdbOperationLogClient {
       this.hashFamily,
       expectedLocation,
       toBytes(expectedValue),
+      request.tip,
+      request.startLocation,
+      request.maxLocations,
     ) as Omit<VerifiedFixedKeylessAppendProof, 'proofSizeBytes'>;
     return { ...verified, proofSizeBytes: proofBytes.length };
   }
@@ -355,6 +374,9 @@ export class QmdbOperationLogClient {
     valueSize: number,
     options?: CallOptions,
   ): Promise<VerifiedFixedUnorderedUpdateProof> {
+    assertU64(expectedLocation, 'expectedLocation');
+    assertU32(valueSize, 'valueSize');
+    assertOperationWindow(request);
     await ensureWasm();
     const proofBytes = await operationRangeProofBytes(
       this.operationLog,
@@ -369,6 +391,9 @@ export class QmdbOperationLogClient {
       expectedLocation,
       toBytes(expectedKey),
       valueSize,
+      request.tip,
+      request.startLocation,
+      request.maxLocations,
     ) as Omit<VerifiedFixedUnorderedUpdateProof, 'proofSizeBytes'>;
     return { ...verified, proofSizeBytes: proofBytes.length };
   }
@@ -392,7 +417,7 @@ export class OrderedQmdbClient {
     } = options;
     assertMerkleFamily(merkleFamily, 'qmdb client');
     assertHashFamily(hashFamily, 'qmdb client');
-    assertCurrentChunkSize(currentChunkSize, 'qmdb client');
+    assertU32(currentChunkSize, 'qmdb client current chunk size', true);
     this.merkleFamily = merkleFamily;
     this.hashFamily = hashFamily;
     this.currentChunkSize = currentChunkSize;
@@ -410,7 +435,7 @@ export class OrderedQmdbClient {
     options?: CallOptions,
   ): Promise<VerifiedCurrentKeyValueProof> {
     await ensureWasm();
-    const requestedKey = encode_vec_key(copyBytes(key));
+    const requestedKey = encode_vec_key(toBytes(key));
     const response = await this.lookup.get(
       create(GetRequestSchema, {
         key: requestedKey,
@@ -440,7 +465,7 @@ export class OrderedQmdbClient {
     options?: CallOptions,
   ): Promise<VerifiedCurrentKeyLookupProof> {
     await ensureWasm();
-    const requestedKeys = keys.map((key) => encode_vec_key(copyBytes(key)));
+    const requestedKeys = keys.map((key) => encode_vec_key(toBytes(key)));
     assertDistinctKeys(requestedKeys);
     const response = await this.lookup.getMany(
       create(GetManyRequestSchema, {
@@ -471,12 +496,13 @@ export class OrderedQmdbClient {
     expectedRoot: BytesLike,
     options?: CallOptions,
   ): Promise<VerifiedCurrentKeyRangeProof> {
+    assertU32(request.limit, 'limit', true);
     await ensureWasm();
-    const startKey = encode_vec_key(copyBytes(request.startKey));
+    const startKey = encode_vec_key(toBytes(request.startKey));
     const endKey =
       request.endKey === undefined
         ? undefined
-        : encode_vec_key(copyBytes(request.endKey));
+        : encode_vec_key(toBytes(request.endKey));
     const response = await this.orderedRange.getRange(
       create(GetRangeRequestSchema, {
         startKey,
@@ -496,6 +522,7 @@ export class OrderedQmdbClient {
       startKey,
       endKey ?? new Uint8Array(),
       endKey !== undefined,
+      request.limit,
     ) as Omit<VerifiedCurrentKeyRangeProof, 'proofSizeBytes'>;
     return { ...verified, proofSizeBytes: proofBytes.length };
   }
@@ -524,14 +551,14 @@ export class OrderedQmdbClient {
         throw new Error('qmdb subscribe response missing proof');
       }
       const proofBytes = toBinary(HistoricalMultiProofSchema, frame.proof);
-      const proof = decode_historical_multi_proof_operations(
+      const { tip, ...proof } = decode_historical_multi_proof_operations(
         proofBytes,
         this.merkleFamily,
         this.hashFamily,
-      ) as Omit<DecodedHistoricalMultiProof, 'proofSizeBytes'>;
+      ) as Omit<DecodedHistoricalMultiProof, 'proofSizeBytes'> & { tip: bigint };
       yield {
         resumeSequenceNumber: frame.resumeSequenceNumber,
-        tip: frame.tip,
+        tip,
         proof: { ...proof, proofSizeBytes: proofBytes.length },
       };
     }
@@ -542,6 +569,7 @@ export class OrderedQmdbClient {
     expectedRoot: BytesLike,
     options?: CallOptions,
   ): Promise<VerifiedHistoricalMultiProof> {
+    assertOperationWindow(request);
     await ensureWasm();
     const proofBytes = await operationRangeProofBytes(
       this.operationLog,
@@ -553,6 +581,9 @@ export class OrderedQmdbClient {
       toBytes(expectedRoot),
       this.merkleFamily,
       this.hashFamily,
+      request.tip,
+      request.startLocation,
+      request.maxLocations,
     ) as Omit<VerifiedHistoricalMultiProof, 'proofSizeBytes'>;
     return { ...verified, proofSizeBytes: proofBytes.length };
   }
@@ -566,6 +597,7 @@ export class OrderedQmdbClient {
     expectedRoot: BytesLike,
     options?: CallOptions,
   ): Promise<VerifiedCurrentOperationRangeProof> {
+    assertOperationWindow(request);
     await ensureWasm();
     const response = await this.currentOperation.getCurrentOperationRange(
       create(GetCurrentOperationRangeRequestSchema, request),
@@ -581,6 +613,9 @@ export class OrderedQmdbClient {
       this.merkleFamily,
       this.hashFamily,
       this.currentChunkSize,
+      request.tip,
+      request.startLocation,
+      request.maxLocations,
     ) as Omit<VerifiedCurrentOperationRangeProof, 'proofSizeBytes'>;
     return { ...verified, proofSizeBytes: proofBytes.length };
   }

@@ -21,6 +21,13 @@ Split deployments can instead mount `ingest_service`, `query_stack`,
 component state. The stream service accepts an in-process `StreamNotifier`;
 `StreamHub` is the local default.
 
+Reduce uses native DataFusion aggregation and streams completed groups in bounded
+frames. Groups remain in memory by default. `QueryState::with_runtime` accepts a
+DataFusion `RuntimeEnv` to configure its native memory pool and spill storage.
+The pool accounts for worker aggregate state; backend buffers, transient input
+batches, transport frames, and client results have separate memory ownership.
+Unordered aggregation consumes its input before producing results.
+
 ```rust
 use bytes::Bytes;
 use exoware_sdk::prune_policy::PrunePolicyDocument;

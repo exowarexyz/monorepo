@@ -82,7 +82,7 @@ impl Read for Utf8 {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum KvFieldKind {
     Int64,
     UInt64,
@@ -97,7 +97,7 @@ pub enum KvFieldKind {
     FixedSizeBinary(u8),
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum KvFieldRef {
     Key {
         byte_offset: u16,
@@ -126,6 +126,7 @@ pub enum KvExpr {
     Div(Box<KvExpr>, Box<KvExpr>),
     Lower(Box<KvExpr>),
     DateTruncDay(Box<KvExpr>),
+    CastFloat64(Box<KvExpr>),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -186,145 +187,6 @@ pub enum KvReducedValue {
     Decimal128(i128),
     Decimal256([u8; 32]),
     FixedSizeBinary(Bytes),
-}
-
-impl KvReducedValue {
-    pub fn checked_add_assign(&mut self, rhs: &Self) -> Result<(), String> {
-        match (self, rhs) {
-            (Self::Int64(lhs), Self::Int64(rhs)) => {
-                *lhs = lhs
-                    .checked_add(*rhs)
-                    .ok_or_else(|| "Int64 sum overflow".to_string())?;
-                Ok(())
-            }
-            (Self::UInt64(lhs), Self::UInt64(rhs)) => {
-                *lhs = lhs
-                    .checked_add(*rhs)
-                    .ok_or_else(|| "UInt64 sum overflow".to_string())?;
-                Ok(())
-            }
-            (Self::Float64(lhs), Self::Float64(rhs)) => {
-                *lhs += *rhs;
-                Ok(())
-            }
-            (Self::Decimal128(lhs), Self::Decimal128(rhs)) => {
-                *lhs = lhs
-                    .checked_add(*rhs)
-                    .ok_or_else(|| "Decimal128 sum overflow".to_string())?;
-                Ok(())
-            }
-            (Self::Decimal256(lhs), Self::Decimal256(rhs)) => {
-                let lhs_neg = lhs[31] & 0x80 != 0;
-                let rhs_neg = rhs[31] & 0x80 != 0;
-                let mut carry = 0u16;
-                for i in 0..32 {
-                    let sum = lhs[i] as u16 + rhs[i] as u16 + carry;
-                    lhs[i] = sum as u8;
-                    carry = sum >> 8;
-                }
-                let result_neg = lhs[31] & 0x80 != 0;
-                if lhs_neg == rhs_neg && result_neg != lhs_neg {
-                    return Err("Decimal256 sum overflow".to_string());
-                }
-                Ok(())
-            }
-            _ => Err("sum type mismatch".to_string()),
-        }
-    }
-
-    pub fn partial_cmp_same_kind(&self, rhs: &Self) -> Option<Ordering> {
-        match (self, rhs) {
-            (Self::Int64(lhs), Self::Int64(rhs)) => Some(lhs.cmp(rhs)),
-            (Self::UInt64(lhs), Self::UInt64(rhs)) => Some(lhs.cmp(rhs)),
-            (Self::Float64(lhs), Self::Float64(rhs)) => Some(lhs.total_cmp(rhs)),
-            (Self::Boolean(lhs), Self::Boolean(rhs)) => Some(lhs.cmp(rhs)),
-            (Self::Utf8(lhs), Self::Utf8(rhs)) => Some(lhs.cmp(rhs)),
-            (Self::Date32(lhs), Self::Date32(rhs)) => Some(lhs.cmp(rhs)),
-            (Self::Date64(lhs), Self::Date64(rhs)) => Some(lhs.cmp(rhs)),
-            (Self::Timestamp(lhs), Self::Timestamp(rhs)) => Some(lhs.cmp(rhs)),
-            (Self::Decimal128(lhs), Self::Decimal128(rhs)) => Some(lhs.cmp(rhs)),
-            (Self::Decimal256(lhs), Self::Decimal256(rhs)) => Some(cmp_i256_le_bytes(lhs, rhs)),
-            (Self::FixedSizeBinary(lhs), Self::FixedSizeBinary(rhs)) => Some(lhs.cmp(rhs)),
-            _ => None,
-        }
-    }
-}
-
-fn canonicalize_group_float(value: f64) -> f64 {
-    if value.is_nan() {
-        f64::NAN
-    } else if value == 0.0 {
-        0.0
-    } else {
-        value
-    }
-}
-
-pub fn canonicalize_reduced_group_values(values: &mut [Option<KvReducedValue>]) {
-    for value in values {
-        if let Some(KvReducedValue::Float64(v)) = value {
-            *v = canonicalize_group_float(*v);
-        }
-    }
-}
-
-pub fn encode_reduced_group_key(values: &[Option<KvReducedValue>]) -> Vec<u8> {
-    let mut out = Vec::new();
-    for value in values {
-        match value {
-            None => out.push(0),
-            Some(KvReducedValue::Int64(v)) => {
-                out.push(1);
-                out.extend_from_slice(&v.to_be_bytes());
-            }
-            Some(KvReducedValue::UInt64(v)) => {
-                out.push(2);
-                out.extend_from_slice(&v.to_be_bytes());
-            }
-            Some(KvReducedValue::Float64(v)) => {
-                out.push(3);
-                out.extend_from_slice(&canonicalize_group_float(*v).to_bits().to_be_bytes());
-            }
-            Some(KvReducedValue::Boolean(v)) => {
-                out.push(4);
-                out.push(u8::from(*v));
-            }
-            Some(KvReducedValue::Utf8(v)) => {
-                out.push(5);
-                let len = u32::try_from(v.len()).unwrap_or(u32::MAX);
-                out.extend_from_slice(&len.to_be_bytes());
-                out.extend_from_slice(v.as_bytes());
-            }
-            Some(KvReducedValue::Date32(v)) => {
-                out.push(6);
-                out.extend_from_slice(&v.to_be_bytes());
-            }
-            Some(KvReducedValue::Date64(v)) => {
-                out.push(7);
-                out.extend_from_slice(&v.to_be_bytes());
-            }
-            Some(KvReducedValue::Timestamp(v)) => {
-                out.push(8);
-                out.extend_from_slice(&v.to_be_bytes());
-            }
-            Some(KvReducedValue::Decimal128(v)) => {
-                out.push(9);
-                out.extend_from_slice(&v.to_be_bytes());
-            }
-            Some(KvReducedValue::Decimal256(v)) => {
-                out.push(10);
-                out.extend_from_slice(v);
-            }
-            Some(KvReducedValue::FixedSizeBinary(v)) => {
-                out.push(11);
-                let len = u32::try_from(v.len()).unwrap_or(u32::MAX);
-                out.extend_from_slice(&len.to_be_bytes());
-                out.extend_from_slice(v);
-            }
-        }
-        out.push(0xFF);
-    }
-    out
 }
 
 #[derive(Debug, Clone)]
@@ -440,9 +302,10 @@ pub fn decode_stored_row(value: &[u8]) -> Result<StoredRow, CodecError> {
     StoredRow::read_cfg(&mut &*value, &())
 }
 
+/// Read a typed field. Key fields do not require a decoded stored row.
 pub fn extract_field(
     key: &Key,
-    archived: &StoredRow,
+    archived: Option<&StoredRow>,
     field: &KvFieldRef,
 ) -> Result<Option<KvReducedValue>, String> {
     match field {
@@ -469,223 +332,13 @@ pub fn extract_field(
             index,
             kind,
             nullable,
-        } => extract_stored_field(archived, usize::from(*index), *kind, *nullable),
-    }
-}
-
-pub fn expr_needs_value(expr: &KvExpr) -> bool {
-    match expr {
-        KvExpr::Field(KvFieldRef::Value { .. }) => true,
-        KvExpr::Field(KvFieldRef::Key { .. } | KvFieldRef::ZOrderKey { .. })
-        | KvExpr::Literal(_) => false,
-        KvExpr::Add(left, right)
-        | KvExpr::Sub(left, right)
-        | KvExpr::Mul(left, right)
-        | KvExpr::Div(left, right) => expr_needs_value(left) || expr_needs_value(right),
-        KvExpr::Lower(inner) | KvExpr::DateTruncDay(inner) => expr_needs_value(inner),
-    }
-}
-
-pub fn eval_expr(
-    key: &Key,
-    archived: Option<&StoredRow>,
-    expr: &KvExpr,
-) -> Result<Option<KvReducedValue>, String> {
-    match expr {
-        KvExpr::Field(field) => extract_expr_field(key, archived, field),
-        KvExpr::Literal(value) => Ok(Some(value.clone())),
-        KvExpr::Add(left, right) => {
-            eval_numeric_binary_op(key, archived, left, right, |lhs, rhs| match (lhs, rhs) {
-                (KvReducedValue::Int64(lhs), KvReducedValue::Int64(rhs)) => lhs
-                    .checked_add(rhs)
-                    .map(KvReducedValue::Int64)
-                    .ok_or_else(|| "Int64 add overflow".to_string()),
-                (KvReducedValue::UInt64(lhs), KvReducedValue::UInt64(rhs)) => lhs
-                    .checked_add(rhs)
-                    .map(KvReducedValue::UInt64)
-                    .ok_or_else(|| "UInt64 add overflow".to_string()),
-                (KvReducedValue::Float64(lhs), KvReducedValue::Float64(rhs)) => {
-                    Ok(KvReducedValue::Float64(lhs + rhs))
-                }
-                (KvReducedValue::Float64(lhs), KvReducedValue::Int64(rhs)) => {
-                    Ok(KvReducedValue::Float64(lhs + rhs as f64))
-                }
-                (KvReducedValue::Int64(lhs), KvReducedValue::Float64(rhs)) => {
-                    Ok(KvReducedValue::Float64(lhs as f64 + rhs))
-                }
-                (KvReducedValue::Float64(lhs), KvReducedValue::UInt64(rhs)) => {
-                    Ok(KvReducedValue::Float64(lhs + rhs as f64))
-                }
-                (KvReducedValue::UInt64(lhs), KvReducedValue::Float64(rhs)) => {
-                    Ok(KvReducedValue::Float64(lhs as f64 + rhs))
-                }
-                _ => Err("unsupported add operand types".to_string()),
-            })
-        }
-        KvExpr::Sub(left, right) => {
-            eval_numeric_binary_op(key, archived, left, right, |lhs, rhs| match (lhs, rhs) {
-                (KvReducedValue::Int64(lhs), KvReducedValue::Int64(rhs)) => lhs
-                    .checked_sub(rhs)
-                    .map(KvReducedValue::Int64)
-                    .ok_or_else(|| "Int64 subtract overflow".to_string()),
-                (KvReducedValue::UInt64(lhs), KvReducedValue::UInt64(rhs)) => lhs
-                    .checked_sub(rhs)
-                    .map(KvReducedValue::UInt64)
-                    .ok_or_else(|| "UInt64 subtract overflow".to_string()),
-                (KvReducedValue::Float64(lhs), KvReducedValue::Float64(rhs)) => {
-                    Ok(KvReducedValue::Float64(lhs - rhs))
-                }
-                (KvReducedValue::Float64(lhs), KvReducedValue::Int64(rhs)) => {
-                    Ok(KvReducedValue::Float64(lhs - rhs as f64))
-                }
-                (KvReducedValue::Int64(lhs), KvReducedValue::Float64(rhs)) => {
-                    Ok(KvReducedValue::Float64(lhs as f64 - rhs))
-                }
-                (KvReducedValue::Float64(lhs), KvReducedValue::UInt64(rhs)) => {
-                    Ok(KvReducedValue::Float64(lhs - rhs as f64))
-                }
-                (KvReducedValue::UInt64(lhs), KvReducedValue::Float64(rhs)) => {
-                    Ok(KvReducedValue::Float64(lhs as f64 - rhs))
-                }
-                _ => Err("unsupported subtract operand types".to_string()),
-            })
-        }
-        KvExpr::Mul(left, right) => {
-            eval_numeric_binary_op(key, archived, left, right, |lhs, rhs| match (lhs, rhs) {
-                (KvReducedValue::Int64(lhs), KvReducedValue::Int64(rhs)) => lhs
-                    .checked_mul(rhs)
-                    .map(KvReducedValue::Int64)
-                    .ok_or_else(|| "Int64 multiply overflow".to_string()),
-                (KvReducedValue::UInt64(lhs), KvReducedValue::UInt64(rhs)) => lhs
-                    .checked_mul(rhs)
-                    .map(KvReducedValue::UInt64)
-                    .ok_or_else(|| "UInt64 multiply overflow".to_string()),
-                (KvReducedValue::Float64(lhs), KvReducedValue::Float64(rhs)) => {
-                    Ok(KvReducedValue::Float64(lhs * rhs))
-                }
-                (KvReducedValue::Float64(lhs), KvReducedValue::Int64(rhs)) => {
-                    Ok(KvReducedValue::Float64(lhs * rhs as f64))
-                }
-                (KvReducedValue::Int64(lhs), KvReducedValue::Float64(rhs)) => {
-                    Ok(KvReducedValue::Float64(lhs as f64 * rhs))
-                }
-                (KvReducedValue::Float64(lhs), KvReducedValue::UInt64(rhs)) => {
-                    Ok(KvReducedValue::Float64(lhs * rhs as f64))
-                }
-                (KvReducedValue::UInt64(lhs), KvReducedValue::Float64(rhs)) => {
-                    Ok(KvReducedValue::Float64(lhs as f64 * rhs))
-                }
-                _ => Err("unsupported multiply operand types".to_string()),
-            })
-        }
-        KvExpr::Div(left, right) => {
-            eval_numeric_binary_op(key, archived, left, right, |lhs, rhs| match (lhs, rhs) {
-                (_, KvReducedValue::Int64(0)) | (_, KvReducedValue::UInt64(0)) => {
-                    Err("division by zero".to_string())
-                }
-                (_, KvReducedValue::Float64(0.0)) => Err("division by zero".to_string()),
-                (KvReducedValue::Int64(lhs), KvReducedValue::Int64(rhs)) => {
-                    Ok(KvReducedValue::Float64(lhs as f64 / rhs as f64))
-                }
-                (KvReducedValue::UInt64(lhs), KvReducedValue::UInt64(rhs)) => {
-                    Ok(KvReducedValue::Float64(lhs as f64 / rhs as f64))
-                }
-                (KvReducedValue::Float64(lhs), KvReducedValue::Float64(rhs)) => {
-                    Ok(KvReducedValue::Float64(lhs / rhs))
-                }
-                (KvReducedValue::Float64(lhs), KvReducedValue::Int64(rhs)) => {
-                    Ok(KvReducedValue::Float64(lhs / rhs as f64))
-                }
-                (KvReducedValue::Int64(lhs), KvReducedValue::Float64(rhs)) => {
-                    Ok(KvReducedValue::Float64(lhs as f64 / rhs))
-                }
-                (KvReducedValue::Float64(lhs), KvReducedValue::UInt64(rhs)) => {
-                    Ok(KvReducedValue::Float64(lhs / rhs as f64))
-                }
-                (KvReducedValue::UInt64(lhs), KvReducedValue::Float64(rhs)) => {
-                    Ok(KvReducedValue::Float64(lhs as f64 / rhs))
-                }
-                _ => Err("unsupported divide operand types".to_string()),
-            })
-        }
-        KvExpr::Lower(inner) => {
-            let Some(value) = eval_expr(key, archived, inner)? else {
-                return Ok(None);
-            };
-            match value {
-                KvReducedValue::Utf8(value) => Ok(Some(KvReducedValue::Utf8(value.to_lowercase()))),
-                _ => Err("lower() requires Utf8 input".to_string()),
-            }
-        }
-        KvExpr::DateTruncDay(inner) => {
-            let Some(value) = eval_expr(key, archived, inner)? else {
-                return Ok(None);
-            };
-            const DAY_MILLIS: i64 = 86_400_000;
-            const DAY_MICROS: i64 = 86_400_000_000;
-            match value {
-                KvReducedValue::Date32(days) => Ok(Some(KvReducedValue::Date32(days))),
-                KvReducedValue::Date64(millis) => Ok(Some(KvReducedValue::Date64(
-                    millis.div_euclid(DAY_MILLIS) * DAY_MILLIS,
-                ))),
-                KvReducedValue::Timestamp(micros) => Ok(Some(KvReducedValue::Timestamp(
-                    micros.div_euclid(DAY_MICROS) * DAY_MICROS,
-                ))),
-                _ => {
-                    Err("date_trunc('day', ...) requires Date32/Date64/Timestamp input".to_string())
-                }
-            }
-        }
-    }
-}
-
-fn extract_expr_field(
-    key: &Key,
-    archived: Option<&StoredRow>,
-    field: &KvFieldRef,
-) -> Result<Option<KvReducedValue>, String> {
-    match (field, archived) {
-        (field, Some(archived)) => extract_field(key, archived, field),
-        (KvFieldRef::Key { byte_offset, kind }, None) => {
-            extract_key_field(key, usize::from(*byte_offset), *kind)
-                .map(Some)
-                .ok_or_else(|| "invalid key field".to_string())
-        }
-        (
-            KvFieldRef::ZOrderKey {
-                bit_offset,
-                field_position,
-                field_widths,
-                kind,
-            },
-            None,
-        ) => extract_zorder_key_field(
-            key,
-            usize::from(*bit_offset),
-            usize::from(*field_position),
-            field_widths,
+        } => extract_stored_field(
+            archived.ok_or_else(|| "value field requires stored row".to_string())?,
+            usize::from(*index),
             *kind,
-        )
-        .map(Some)
-        .ok_or_else(|| "invalid z-order key field".to_string()),
-        (KvFieldRef::Value { .. }, None) => Err("value field requires stored row".to_string()),
+            *nullable,
+        ),
     }
-}
-
-fn eval_numeric_binary_op(
-    key: &Key,
-    archived: Option<&StoredRow>,
-    left: &KvExpr,
-    right: &KvExpr,
-    op: impl FnOnce(KvReducedValue, KvReducedValue) -> Result<KvReducedValue, String> + Copy,
-) -> Result<Option<KvReducedValue>, String> {
-    let Some(left) = eval_expr(key, archived, left)? else {
-        return Ok(None);
-    };
-    let Some(right) = eval_expr(key, archived, right)? else {
-        return Ok(None);
-    };
-    op(left, right).map(Some)
 }
 
 pub fn predicate_needs_value(predicate: &KvPredicate) -> bool {
@@ -704,7 +357,7 @@ pub fn eval_predicate(
         return Ok(false);
     }
     for check in &predicate.checks {
-        let value = extract_expr_field(key, archived, &check.field)?;
+        let value = extract_field(key, archived, &check.field)?;
         if !matches_predicate_constraint(value.as_ref(), &check.constraint) {
             return Ok(false);
         }
@@ -990,27 +643,13 @@ fn in_i128_bounds(value: i128, min: Option<i128>, max: Option<i128>) -> bool {
 }
 
 fn in_f64_bounds(value: f64, min: &Option<(f64, bool)>, max: &Option<(f64, bool)>) -> bool {
-    let lower_ok = match min {
-        Some((bound, inclusive)) => {
-            if *inclusive {
-                value >= *bound
-            } else {
-                value > *bound
-            }
-        }
-        None => true,
-    };
-    let upper_ok = match max {
-        Some((bound, inclusive)) => {
-            if *inclusive {
-                value <= *bound
-            } else {
-                value < *bound
-            }
-        }
-        None => true,
-    };
-    lower_ok && upper_ok
+    min.is_none_or(|(bound, inclusive)| {
+        let order = value.total_cmp(&bound);
+        order.is_gt() || (inclusive && order.is_eq())
+    }) && max.is_none_or(|(bound, inclusive)| {
+        let order = value.total_cmp(&bound);
+        order.is_lt() || (inclusive && order.is_eq())
+    })
 }
 
 fn decode_i64_ordered(bytes: [u8; 8]) -> i64 {
@@ -1081,6 +720,30 @@ mod tests {
     use commonware_codec::Encode;
 
     #[test]
+    fn float_bounds_follow_total_order() {
+        for value in [
+            f64::NEG_INFINITY,
+            -0.0,
+            0.0,
+            f64::INFINITY,
+            f64::NAN,
+            -f64::NAN,
+        ] {
+            assert!(in_f64_bounds(value, &None, &None));
+            for bound in [-0.0, 0.0, f64::NAN, -f64::NAN] {
+                assert_eq!(
+                    in_f64_bounds(value, &Some((bound, true)), &None),
+                    value.total_cmp(&bound).is_ge()
+                );
+                assert_eq!(
+                    in_f64_bounds(value, &None, &Some((bound, false))),
+                    value.total_cmp(&bound).is_lt()
+                );
+            }
+        }
+    }
+
+    #[test]
     fn fixed_utf8_key_round_trip() {
         let mut key = vec![0u8; MAX_KEY_LEN];
         key[4..8].copy_from_slice(b"west");
@@ -1120,165 +783,6 @@ mod tests {
         let err = extract_stored_field(&decoded, 0, KvFieldKind::Int64, false)
             .expect_err("missing non-nullable field should fail");
         assert!(err.contains("non-nullable"));
-    }
-
-    #[test]
-    fn reduced_group_key_canonicalizes_signed_zero_and_nan_payloads() {
-        let pos_zero = vec![Some(KvReducedValue::Float64(0.0))];
-        let neg_zero = vec![Some(KvReducedValue::Float64(-0.0))];
-        assert_eq!(
-            encode_reduced_group_key(&pos_zero),
-            encode_reduced_group_key(&neg_zero)
-        );
-
-        let canonical_nan = vec![Some(KvReducedValue::Float64(f64::NAN))];
-        let payload_nan = vec![Some(KvReducedValue::Float64(f64::from_bits(
-            0x7ff8_0000_0000_0001,
-        )))];
-        assert_eq!(
-            encode_reduced_group_key(&canonical_nan),
-            encode_reduced_group_key(&payload_nan)
-        );
-    }
-
-    #[test]
-    fn float_partial_cmp_same_kind_orders_nan_instead_of_returning_none() {
-        let nan = KvReducedValue::Float64(f64::NAN);
-        let finite = KvReducedValue::Float64(1.5);
-
-        let ordering = nan
-            .partial_cmp_same_kind(&finite)
-            .expect("Float64 NaN comparison should stay comparable for MIN/MAX");
-        assert_eq!(ordering, f64::NAN.total_cmp(&1.5));
-    }
-
-    #[test]
-    fn eval_expr_multiplies_int64_fields() {
-        let key = Key::default();
-        let row = StoredRow {
-            values: vec![Some(StoredValue::Int64(6)), Some(StoredValue::Int64(7))],
-        };
-        let bytes = row.encode();
-        let archived = decode_stored_row(&bytes).expect("decoded row");
-        let expr = KvExpr::Mul(
-            Box::new(KvExpr::Field(KvFieldRef::Value {
-                index: 0,
-                kind: KvFieldKind::Int64,
-                nullable: false,
-            })),
-            Box::new(KvExpr::Field(KvFieldRef::Value {
-                index: 1,
-                kind: KvFieldKind::Int64,
-                nullable: false,
-            })),
-        );
-        assert_eq!(
-            eval_expr(&key, Some(&archived), &expr).expect("expr"),
-            Some(KvReducedValue::Int64(42))
-        );
-        assert!(expr_needs_value(&expr));
-    }
-
-    #[test]
-    fn eval_expr_adds_and_subtracts_numeric_fields() {
-        let key = Key::default();
-        let row = StoredRow {
-            values: vec![Some(StoredValue::Int64(9)), Some(StoredValue::Int64(4))],
-        };
-        let bytes = row.encode();
-        let archived = decode_stored_row(&bytes).expect("decoded row");
-
-        let add = KvExpr::Add(
-            Box::new(KvExpr::Field(KvFieldRef::Value {
-                index: 0,
-                kind: KvFieldKind::Int64,
-                nullable: false,
-            })),
-            Box::new(KvExpr::Field(KvFieldRef::Value {
-                index: 1,
-                kind: KvFieldKind::Int64,
-                nullable: false,
-            })),
-        );
-        let sub = KvExpr::Sub(
-            Box::new(KvExpr::Field(KvFieldRef::Value {
-                index: 0,
-                kind: KvFieldKind::Int64,
-                nullable: false,
-            })),
-            Box::new(KvExpr::Field(KvFieldRef::Value {
-                index: 1,
-                kind: KvFieldKind::Int64,
-                nullable: false,
-            })),
-        );
-
-        assert_eq!(
-            eval_expr(&key, Some(&archived), &add).expect("add expr"),
-            Some(KvReducedValue::Int64(13))
-        );
-        assert_eq!(
-            eval_expr(&key, Some(&archived), &sub).expect("sub expr"),
-            Some(KvReducedValue::Int64(5))
-        );
-    }
-
-    #[test]
-    fn eval_expr_divides_int64_by_float_literal() {
-        let key = Key::default();
-        let row = StoredRow {
-            values: vec![Some(StoredValue::Int64(1_500))],
-        };
-        let bytes = row.encode();
-        let archived = decode_stored_row(&bytes).expect("decoded row");
-        let expr = KvExpr::Div(
-            Box::new(KvExpr::Field(KvFieldRef::Value {
-                index: 0,
-                kind: KvFieldKind::Int64,
-                nullable: false,
-            })),
-            Box::new(KvExpr::Literal(KvReducedValue::Float64(1000.0))),
-        );
-        assert_eq!(
-            eval_expr(&key, Some(&archived), &expr).expect("expr"),
-            Some(KvReducedValue::Float64(1.5))
-        );
-    }
-
-    #[test]
-    fn eval_expr_lower_and_date_trunc_day() {
-        let key = Key::default();
-        let ts = 1_706_428_496_123_456i64;
-        let day_micros = 86_400_000_000i64;
-        let expected_ts = ts.div_euclid(day_micros) * day_micros;
-        let row = StoredRow {
-            values: vec![
-                Some(StoredValue::Utf8("MiXeD".to_string())),
-                Some(StoredValue::Int64(ts)),
-            ],
-        };
-        let bytes = row.encode();
-        let archived = decode_stored_row(&bytes).expect("decoded row");
-
-        let lower = KvExpr::Lower(Box::new(KvExpr::Field(KvFieldRef::Value {
-            index: 0,
-            kind: KvFieldKind::Utf8,
-            nullable: false,
-        })));
-        assert_eq!(
-            eval_expr(&key, Some(&archived), &lower).expect("lower expr"),
-            Some(KvReducedValue::Utf8("mixed".to_string()))
-        );
-
-        let trunc = KvExpr::DateTruncDay(Box::new(KvExpr::Field(KvFieldRef::Value {
-            index: 1,
-            kind: KvFieldKind::Timestamp,
-            nullable: false,
-        })));
-        assert_eq!(
-            eval_expr(&key, Some(&archived), &trunc).expect("trunc expr"),
-            Some(KvReducedValue::Timestamp(expected_ts))
-        );
     }
 
     #[test]
@@ -1334,44 +838,5 @@ mod tests {
         };
 
         assert!(eval_predicate(&key, None, &predicate).expect("predicate eval"));
-    }
-
-    #[test]
-    fn eval_expr_div_by_negative_zero_is_error() {
-        let key = Key::default();
-        let expr = KvExpr::Div(
-            Box::new(KvExpr::Literal(KvReducedValue::Float64(1.0))),
-            Box::new(KvExpr::Literal(KvReducedValue::Float64(-0.0))),
-        );
-        assert_eq!(
-            eval_expr(&key, None, &expr),
-            Err("division by zero".to_string())
-        );
-    }
-
-    #[test]
-    fn eval_expr_div_by_positive_zero_is_error() {
-        let key = Key::default();
-        let expr = KvExpr::Div(
-            Box::new(KvExpr::Literal(KvReducedValue::Float64(1.0))),
-            Box::new(KvExpr::Literal(KvReducedValue::Float64(0.0))),
-        );
-        assert_eq!(
-            eval_expr(&key, None, &expr),
-            Err("division by zero".to_string())
-        );
-    }
-
-    #[test]
-    fn eval_expr_div_int_by_zero_is_error() {
-        let key = Key::default();
-        let expr = KvExpr::Div(
-            Box::new(KvExpr::Literal(KvReducedValue::Int64(10))),
-            Box::new(KvExpr::Literal(KvReducedValue::Int64(0))),
-        );
-        assert_eq!(
-            eval_expr(&key, None, &expr),
-            Err("division by zero".to_string())
-        );
     }
 }

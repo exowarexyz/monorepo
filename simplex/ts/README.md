@@ -5,8 +5,8 @@ Store. The package mirrors the Rust `exoware-simplex` key layout:
 
 - header bytes by digest
 - full `{ header, body }` block data by digest
-- notarized `{ proof, header }` bytes by Simplex view
-- finalized `{ proof, header }` bytes by Simplex view
+- notarized `{ proof, header }` bytes by Simplex epoch and view
+- finalized `{ proof, header }` bytes by Simplex epoch and view
 - finalized `{ proof, header }` bytes by block height
 
 The TypeScript client uploads raw encoded bytes. Certificate reads verify bytes
@@ -14,23 +14,31 @@ before returning when the client is constructed with a verifier. Use the `*Raw`
 read methods when you explicitly want unverified bytes.
 
 ```ts
+import { Client, StoreWriteBatch } from '@exowarexyz/sdk';
 import { SimplexClient } from '@exowarexyz/simplex';
 
-const simplex = new SimplexClient('http://localhost:10000');
-await simplex.uploadFinalization({
-  view: 42n,
-  height: 42n,
+const store = new Client('http://localhost:10000').store();
+const simplex = new SimplexClient(store);
+const batch = new StoreWriteBatch();
+simplex.stageUpload(simplex.prepareBlock({
   digest: '0x...',
   header: '0x...',
   body: '0x...',
+}), batch);
+simplex.stageUpload(simplex.prepareFinalization({
+  epoch: 0n,
+  view: 42n,
+  height: 42n,
   finalized: '0x...',
-});
+}), batch);
+await batch.commit(store);
 ```
 
 Use `prepareHeader`, `prepareBlock`, `prepareNotarization`, and
 `prepareFinalization` to stage multiple Simplex rows into one
-`StoreWriteBatch`. Finalizations are stored by view and by height so callers can
-fetch a specific view or the latest finalized height index.
+`StoreWriteBatch`. Raw uploads must provide the encoded certificate's `epoch`
+and `view`. The client does not decode certificate bytes, so a wrong value
+mis-keys the round row.
 
 Use `getHeader` or `subscribeHeaders` when only header bytes are needed. Use
 `getBlock` or `subscribeBlocks` when the caller needs the full
@@ -39,24 +47,20 @@ Use `getHeader` or `subscribeHeaders` when only header bytes are needed. Use
 ## Verification
 
 Pass a `SimplexCertificateVerifier` to verify opaque certificate records before
-`getNotarization`, `getFinalizationByView`, `getFinalizationByHeight`,
+`getNotarizationByRound`, `getFinalizationByRound`, `getFinalizationByHeight`,
 `latestFinalization`, or `subscribeCertificates` returns them:
 
 ```ts
 import { SimplexClient, type SimplexCertificateVerifier } from '@exowarexyz/simplex';
 
 const verifier: SimplexCertificateVerifier = {
-  verifyNotarization: async (bytes, context) => verifyMyNotarization(bytes, context.view),
-  verifyFinalization: async (bytes, context) => verifyMyFinalization(bytes, context.index),
+  verifyNotarization: async (bytes, context) => verifyMyNotarization(bytes, context.epoch, context.view),
+  verifyFinalization: async (bytes, context) => verifyMyFinalization(bytes, context),
 };
 
 const simplex = new SimplexClient('http://localhost:10000', { verifier });
 const latest = await simplex.latestFinalization();
 ```
-
-The generic `createWasmSimplexVerifier` adapter supports caller-owned WASM
-modules that expose `verify_notarized` / `verify_finalized` functions and treat
-certificates as opaque values.
 
 For upstream Commonware Simplex certificate types, build the optional WASM
 module and use `@exowarexyz/simplex/wasm`:
@@ -93,10 +97,10 @@ or a threshold identity depending on the scheme.
 The WASM verifier treats certificates as opaque proof-plus-header records and
 verifies the configured certificate key material. Pass `verifyHeader` to
 validate the application-specific relationship between the certificate payload
-and header. Bodies are not embedded in streamed certificate records; fetch full
+and header. Bodies are not embedded in streamed certificate records. Fetch full
 `{ header, body }` block data separately with `getBlock` or `subscribeBlocks`
 when needed. The client does not hardcode SHA or trust a server body-presence
-flag; the caller-selected verifier defines the required payload/header
+flag. The caller-selected verifier defines the required payload/header
 relationship before the TS client returns a fetched or streamed certificate.
 
 Header and block integrity can also live in caller-owned WASM. Implement the
@@ -131,3 +135,7 @@ const verifier = await createWasmSimplexVerifier({
   verifyHeader: createWasmSimplexHeaderVerifier(myBlockVerifierWasm),
 });
 ```
+
+The built-in verifier returns the signed `epoch` and checks any requested epoch
+and view before application header verification. Custom verifiers receive the
+same context and own those checks, including height/header binding.

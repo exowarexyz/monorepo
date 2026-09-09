@@ -6,22 +6,19 @@ use std::num::NonZeroU64;
 use std::time::Duration;
 
 use axum::{routing::get, Router};
-use commonware_codec::{Codec, Decode, Encode};
-use commonware_cryptography::{Digest, Hasher};
+use commonware_cryptography::Digest;
 use commonware_parallel::Sequential;
 use commonware_runtime::buffer::paged::CacheRef;
-use commonware_storage::qmdb::{
-    any::{ordered, unordered, value::ValueEncoding},
-    operation::Key as QmdbKey,
-};
 use commonware_storage::{
     journal::contiguous::variable::Config as VariableJournalConfig,
-    merkle::{Family, Graftable},
-    mmr::full::Config as MerkleConfig,
-    qmdb::{any, current, immutable, keyless},
+    merkle::{full::Config as MerkleConfig, Family, Graftable},
+    qmdb::{
+        any,
+        current::{self, proof::RangeProof},
+        immutable, keyless,
+    },
     translator::TwoCap,
 };
-use commonware_utils::Array;
 use commonware_utils::{NZUsize, NZU64};
 use connectrpc::client::ClientConfig;
 use connectrpc::{
@@ -31,20 +28,18 @@ use exoware_qmdb::proto::qmdb::v1::{
     GetOperationRangeRequest, GetOperationRangeResponse, OperationLogService,
     OperationLogServiceClient, OperationLogServiceServer, SubscribeRequest, SubscribeResponse,
 };
-use exoware_qmdb::{
-    CurrentBoundaryState, ImmutableWriter, KeylessWriter, OrderedWriter, QmdbError,
-    UnorderedWriter, UploadReceipt,
-};
+use exoware_qmdb::{CurrentBoundaryState, QmdbError};
 use exoware_sdk::proto::PreferZstdHttpClient;
-use exoware_sdk::{StoreBatchUpload, StoreClient};
+use exoware_sdk::StoreClient;
 
 #[allow(dead_code)]
 pub fn merkle_config(prefix: &str, page_cache: CacheRef) -> MerkleConfig<Sequential> {
     MerkleConfig {
-        journal_partition: format!("{prefix}-mmr-journal"),
-        metadata_partition: format!("{prefix}-mmr-metadata"),
+        journal_partition: format!("{prefix}-merkle-journal"),
+        metadata_partition: format!("{prefix}-merkle-metadata"),
         items_per_blob: NZU64!(8),
         write_buffer: NZUsize!(1024),
+        replay_buffer: NZUsize!(1024),
         strategy: Sequential,
         page_cache,
     }
@@ -64,11 +59,12 @@ pub fn variable_journal_config<C>(
         codec_config,
         page_cache,
         write_buffer: NZUsize!(1024),
+        replay_buffer: NZUsize!(1024),
     }
 }
 
 #[allow(dead_code)]
-pub fn keyless_config<C>(
+pub fn keyless_variable_config<C>(
     prefix: &str,
     page_cache: CacheRef,
     codec_config: C,
@@ -103,17 +99,7 @@ pub fn any_variable_config<C>(
 }
 
 #[allow(dead_code)]
-pub fn unordered_variable_config<C>(
-    prefix: &str,
-    page_cache: CacheRef,
-    codec_config: C,
-    items_per_section: NonZeroU64,
-) -> any::VariableConfig<TwoCap, C, Sequential> {
-    any_variable_config(prefix, page_cache, codec_config, items_per_section)
-}
-
-#[allow(dead_code)]
-pub fn ordered_variable_config<C>(
+pub fn current_variable_config<C>(
     prefix: &str,
     page_cache: CacheRef,
     codec_config: C,
@@ -146,7 +132,6 @@ pub fn immutable_variable_config<C>(
         merkle_config: merkle_config(prefix, page_cache.clone()),
         log: variable_journal_config(prefix, page_cache, codec_config, items_per_section),
         translator: TwoCap,
-        init_cache_size: None,
         init_buffer: NZUsize!(1 << 21),
     }
 }
@@ -178,106 +163,67 @@ where
     panic!("{label}: exhausted retries");
 }
 
+mod operations;
+#[allow(unused_imports)]
+pub use operations::prepare_operations;
+
+/// Extract the one operation's bitmap chunk from a native current range proof
 #[allow(dead_code)]
-pub async fn commit_keyless_upload<F, H, V, E, S>(
-    writer: &KeylessWriter<F, H, V, E, S>,
-    ops: &[keyless::Operation<F, E>],
-) -> Result<UploadReceipt<F>, QmdbError>
+pub async fn current_proof_chunk<F, D, Op, E, const N: usize>(
+    proof: impl std::future::Future<Output = Result<(RangeProof<F, D>, Vec<Op>, Vec<[u8; N]>), E>>,
+) -> Result<(RangeProof<F, D>, [u8; N]), QmdbError>
+where
+    F: Graftable,
+    D: Digest,
+    E: std::fmt::Display,
+{
+    let (proof, operations, chunks) = proof
+        .await
+        .map_err(|error| QmdbError::CorruptData(error.to_string()))?;
+    assert_eq!(operations.len(), 1, "one source operation");
+    assert_eq!(chunks.len(), 1, "one source bitmap chunk");
+    Ok((proof, chunks[0]))
+}
+
+#[allow(dead_code)]
+pub async fn commit_operations<F, Op>(
+    client: &exoware_sdk::PrefixedStoreClient,
+    operations: &[Op],
+    cfg: &Op::Cfg,
+) -> Result<(), QmdbError>
 where
     F: Family,
-    H: Hasher + Sync,
-    V: Codec + Clone + Send + Sync,
-    E: ValueEncoding<Value = V> + Sync,
-    S: commonware_parallel::Strategy,
-    keyless::Operation<F, E>: Encode,
+    Op: exoware_qmdb::UploadOperation<F>,
 {
-    let prepared = writer.prepare_upload(ops.to_vec()).await?;
-    writer.commit_upload(prepared).await
+    let (_, prepared) = prepare_operations::<F, Op>(operations, cfg);
+    let mut batch = exoware_sdk::StoreWriteBatch::new();
+    let latest = prepared.latest_location();
+    exoware_qmdb::stage_authenticated_range(client, prepared, &mut batch)?;
+    exoware_qmdb::stage_watermark(client, latest, &mut batch)?;
+    batch.commit(client.client()).await?;
+    Ok(())
 }
 
 #[allow(dead_code)]
-pub async fn commit_unordered_upload<F, H, K, V, E, S>(
-    writer: &UnorderedWriter<F, H, K, V, E, S>,
-    ops: &[unordered::Operation<F, K, E>],
-) -> Result<UploadReceipt<F>, QmdbError>
+pub async fn commit_current_operations<F, Op, const N: usize>(
+    client: &exoware_sdk::PrefixedStoreClient,
+    operations: &[Op],
+    cfg: &Op::Cfg,
+    boundary: &CurrentBoundaryState<commonware_cryptography::sha256::Digest, N, F>,
+) -> Result<(), QmdbError>
 where
     F: Graftable,
-    H: Hasher + Sync,
-    K: QmdbKey + Codec + Sync,
-    V: Codec + Clone + Send + Sync,
-    V::Cfg: Clone,
-    E: ValueEncoding<Value = V> + Sync,
-    S: commonware_parallel::Strategy,
-    unordered::Operation<F, K, E>: Encode,
+    Op: exoware_qmdb::UploadOperation<F>,
 {
-    let prepared = writer.prepare_upload(ops.to_vec()).await?;
-    writer.commit_upload(prepared).await
-}
-
-#[allow(dead_code)]
-pub async fn commit_unordered_current_upload<F, H, K, V, const N: usize, E, S>(
-    writer: &UnorderedWriter<F, H, K, V, E, S>,
-    ops: &[unordered::Operation<F, K, E>],
-    current_boundary: &CurrentBoundaryState<H::Digest, N, F>,
-) -> Result<UploadReceipt<F>, QmdbError>
-where
-    F: Graftable,
-    H: Hasher + Sync,
-    K: QmdbKey + Codec + Sync,
-    V: Codec + Clone + Send + Sync,
-    V::Cfg: Clone,
-    E: ValueEncoding<Value = V> + Sync,
-    S: commonware_parallel::Strategy,
-    unordered::Operation<F, K, E>: Encode,
-    F::PendingChunk<H::Digest>: 'static,
-{
-    let prepared = writer
-        .prepare_current_upload(ops.to_vec(), current_boundary.clone())
-        .await?;
-    writer.commit_upload(prepared).await
-}
-
-#[allow(dead_code)]
-pub async fn commit_ordered_upload<F, H, K, V, const N: usize, E, S>(
-    writer: &OrderedWriter<F, H, K, V, N, E, S>,
-    ops: &[ordered::Operation<F, K, E>],
-    current_boundary: &CurrentBoundaryState<H::Digest, N, F>,
-) -> Result<UploadReceipt<F>, QmdbError>
-where
-    F: Graftable,
-    H: Hasher + Sync,
-    K: QmdbKey + Codec + Sync,
-    V: Codec + Clone + Send + Sync,
-    V::Cfg: Clone,
-    E: ValueEncoding<Value = V> + Sync,
-    S: commonware_parallel::Strategy,
-    ordered::Operation<F, K, E>: Encode + Decode,
-    F::PendingChunk<H::Digest>: 'static,
-{
-    let prepared = writer
-        .prepare_upload(ops.to_vec(), current_boundary.clone())
-        .await?;
-    writer.commit_upload(prepared).await
-}
-
-#[allow(dead_code)]
-pub async fn commit_immutable_upload<F, H, K, V, E, S>(
-    writer: &ImmutableWriter<F, H, K, V, E, S>,
-    ops: &[immutable::Operation<F, K, E>],
-) -> Result<UploadReceipt<F>, QmdbError>
-where
-    F: Family,
-    H: Hasher + Sync,
-    K: Array + Codec + Clone + AsRef<[u8]> + Sync,
-    V: Codec + Clone + Send + Sync,
-    V::Cfg: Clone,
-    K::Cfg: Clone,
-    E: ValueEncoding<Value = V> + Sync,
-    S: commonware_parallel::Strategy,
-    immutable::Operation<F, K, E>: Encode + Decode + Clone,
-{
-    let prepared = writer.prepare_upload(ops.to_vec()).await?;
-    writer.commit_upload(prepared).await
+    let (_, prepared) = prepare_operations::<F, Op>(operations, cfg);
+    let prepared =
+        prepared.with_current_boundary::<commonware_cryptography::Sha256, N>(boundary)?;
+    let latest = prepared.latest_location();
+    let mut batch = exoware_sdk::StoreWriteBatch::new();
+    exoware_qmdb::stage_authenticated_range(client, prepared, &mut batch)?;
+    exoware_qmdb::stage_watermark(client, latest, &mut batch)?;
+    batch.commit(client.client()).await?;
+    Ok(())
 }
 
 #[allow(dead_code)]
@@ -307,7 +253,7 @@ pub async fn wait_for_health(base: &str) {
 /// Bind a QMDB operation-log `ConnectRpcService` stack to a random local port
 /// alongside `/health`, and block until it responds.
 #[allow(dead_code)]
-pub async fn spawn_operation_log_service<D>(
+pub async fn spawn_connect_service<D>(
     dispatcher: ConnectRpcService<D>,
 ) -> (tokio::task::JoinHandle<()>, String)
 where
@@ -412,7 +358,7 @@ impl OperationLogService for StaticOperationRangeService {
 pub async fn spawn_static_operation_log_service(
     service: StaticOperationLogService,
 ) -> (tokio::task::JoinHandle<()>, String) {
-    spawn_operation_log_service(
+    spawn_connect_service(
         ConnectRpcService::new(OperationLogServiceServer::new(service))
             .with_compression(exoware_sdk::connect_compression_registry()),
     )
@@ -423,7 +369,7 @@ pub async fn spawn_static_operation_log_service(
 pub async fn spawn_static_operation_range_service(
     service: StaticOperationRangeService,
 ) -> (tokio::task::JoinHandle<()>, String) {
-    spawn_operation_log_service(
+    spawn_connect_service(
         ConnectRpcService::new(OperationLogServiceServer::new(service))
             .with_compression(exoware_sdk::connect_compression_registry()),
     )

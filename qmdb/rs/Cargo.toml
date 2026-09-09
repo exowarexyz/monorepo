@@ -3,7 +3,7 @@ name = "exoware-qmdb"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "QMDB instance backed by the Exoware API."
+description = "Authenticated Commonware QMDB uploads and proof queries through Exoware."
 readme = "README.md"
 homepage.workspace = true
 repository = "https://github.com/exowarexyz/monorepo/tree/main/qmdb/rs"
@@ -18,6 +18,7 @@ bytes = { workspace = true }
 buffa = { workspace = true }
 clap = { workspace = true, features = ["derive"] }
 commonware-codec = { workspace = true }
+commonware-macros = { workspace = true }
 commonware-parallel = { workspace = true }
 commonware-runtime = { workspace = true }
 futures = { workspace = true }
@@ -55,5 +56,5 @@ tempfile = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
 
 [[bench]]
-name = "writer_merkle"
+name = "authenticated_range"
 harness = false

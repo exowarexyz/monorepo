@@ -139,28 +139,38 @@ pub(crate) fn encode_string_variable(value: &str) -> Result<Vec<u8>, String> {
 }
 
 pub(crate) fn decode_variable_text(bytes: &[u8]) -> Option<String> {
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut idx = 0usize;
-    while idx < bytes.len() {
-        match bytes[idx] {
-            STRING_KEY_TERMINATOR => return String::from_utf8(out).ok(),
-            STRING_KEY_ESCAPE_PREFIX => {
-                let escaped = *bytes.get(idx + 1)?;
-                match escaped {
-                    STRING_KEY_TERMINATOR => out.push(STRING_KEY_TERMINATOR),
-                    STRING_KEY_ESCAPE_PREFIX => out.push(STRING_KEY_ESCAPE_PREFIX),
-                    STRING_KEY_ESCAPE_FF => out.push(0xFF),
-                    _ => return None,
-                }
-                idx += 2;
-            }
-            byte => {
-                out.push(byte);
-                idx += 1;
-            }
+    decode_key_text(bytes, true)?.0
+}
+
+fn decode_key_text(bytes: &[u8], selected: bool) -> Option<(Option<String>, usize)> {
+    let mut text = selected.then(|| String::with_capacity(bytes.len()));
+    let mut segment = 0;
+    let mut offset = 0;
+    loop {
+        let byte = *bytes.get(offset)?;
+        if byte != STRING_KEY_TERMINATOR && byte != STRING_KEY_ESCAPE_PREFIX {
+            offset += 1;
+            continue;
         }
+        let plain = std::str::from_utf8(&bytes[segment..offset]).ok()?;
+        if let Some(text) = &mut text {
+            text.push_str(plain);
+        }
+        offset += 1;
+        if byte == STRING_KEY_TERMINATOR {
+            return Some((text, offset));
+        }
+        let escaped = *bytes.get(offset)?;
+        // Escaped 0xFF cannot occur in a UTF-8 string
+        if !matches!(escaped, STRING_KEY_TERMINATOR | STRING_KEY_ESCAPE_PREFIX) {
+            return None;
+        }
+        if let Some(text) = &mut text {
+            text.push(char::from(escaped));
+        }
+        offset += 1;
+        segment = offset;
     }
-    None
 }
 
 pub(crate) fn encode_cell_into_ordered_key_bytes(
@@ -273,43 +283,27 @@ pub(crate) fn decode_cell_from_ordered_key_bytes(
     })
 }
 
-/// Decode one ordered-key cell from a prefix-stripped `payload` slice starting
-/// at `payload_offset`, returning the value and the number of payload bytes it
-/// consumed. Returns `None` on a truncated or malformed payload rather than
-/// panicking.
-pub(crate) fn decode_cell_from_payload_with_len(
-    payload: &[u8],
-    payload_offset: usize,
+/// Validate one ordered-key cell, optionally decode its value, and return the consumed byte count.
+fn decode_key_cell(
+    bytes: &[u8],
     kind: ColumnKind,
-) -> Option<(CellValue, usize)> {
-    match kind {
-        ColumnKind::Utf8 => {
-            let slice = payload.get(payload_offset..)?;
-            let mut idx = 0usize;
-            let mut escaped = false;
-            loop {
-                let byte = *slice.get(idx)?;
-                idx += 1;
-                if escaped {
-                    escaped = false;
-                    continue;
-                }
-                if byte == STRING_KEY_ESCAPE_PREFIX {
-                    escaped = true;
-                    continue;
-                }
-                if byte == STRING_KEY_TERMINATOR {
-                    break;
-                }
-            }
-            decode_cell_from_ordered_key_bytes(&slice[..idx], kind).map(|cell| (cell, idx))
-        }
-        _ => {
-            let width = kind.key_width();
-            let bytes = payload.get(payload_offset..payload_offset.checked_add(width)?)?;
-            decode_cell_from_ordered_key_bytes(bytes, kind).map(|cell| (cell, width))
-        }
+    selected: bool,
+) -> Option<(Option<CellValue>, usize)> {
+    if kind == ColumnKind::Utf8 {
+        let (text, len) = decode_key_text(bytes, selected)?;
+        return Some((text.map(CellValue::Utf8), len));
     }
+    let width = kind.fixed_key_width()?;
+    let field = bytes.get(..width)?;
+    if kind == ColumnKind::Boolean && !matches!(field.first(), Some(0 | 1)) {
+        return None;
+    }
+    let value = if selected {
+        Some(decode_cell_from_ordered_key_bytes(field, kind)?)
+    } else {
+        None
+    };
+    Some((value, width))
 }
 
 pub(crate) fn encode_primary_key(
@@ -376,17 +370,11 @@ pub(crate) fn decode_primary_key(
     if table_prefix != model.table_prefix {
         return None;
     }
-    let payload = model.primary_key_prefix.strip(key).ok()?;
-    let mut values = Vec::with_capacity(model.primary_key_kinds.len());
-    let mut payload_offset = 0usize;
-    for kind in &model.primary_key_kinds {
-        let (val, consumed) = decode_cell_from_payload_with_len(&payload, payload_offset, *kind)?;
-        payload_offset += consumed;
-        values.push(val);
-    }
-    Some(values)
+    decode_primary_key_payload(model.primary_key_prefix.strip_slice(key)?, model, None)
 }
 
+/// Validate a complete canonical key and decode only the selected primary-key fields.
+/// An empty mask validates the key without materializing any values.
 pub(crate) fn decode_primary_key_selected(
     table_prefix: u8,
     key: &Key,
@@ -396,23 +384,39 @@ pub(crate) fn decode_primary_key_selected(
     if table_prefix != model.table_prefix {
         return None;
     }
-    let payload = model.primary_key_prefix.strip(key).ok()?;
-    if !required_pk_mask.iter().any(|required| *required) {
-        return Some(Vec::new());
-    }
-    if required_pk_mask.len() != model.primary_key_kinds.len() {
+    decode_primary_key_payload(
+        model.primary_key_prefix.strip_slice(key)?,
+        model,
+        Some(required_pk_mask),
+    )
+}
+
+fn decode_primary_key_payload(
+    payload: &[u8],
+    model: &TableModel,
+    mask: Option<&[bool]>,
+) -> Option<Vec<CellValue>> {
+    if payload.len() > model.primary_key_prefix.max_payload_len() {
         return None;
     }
-    let mut values = vec![CellValue::Null; model.primary_key_kinds.len()];
-    let mut payload_offset = 0usize;
-    for (pk_pos, kind) in model.primary_key_kinds.iter().enumerate() {
-        let (cell, consumed) = decode_cell_from_payload_with_len(&payload, payload_offset, *kind)?;
-        if required_pk_mask[pk_pos] {
-            values[pk_pos] = cell;
-        }
-        payload_offset += consumed;
+    if mask.is_some_and(|mask| !mask.is_empty() && mask.len() != model.primary_key_kinds.len()) {
+        return None;
     }
-    Some(values)
+    let mut values = if mask.is_none_or(|mask| mask.iter().any(|selected| *selected)) {
+        vec![CellValue::Null; model.primary_key_kinds.len()]
+    } else {
+        Vec::new()
+    };
+    let mut offset = 0;
+    for (idx, kind) in model.primary_key_kinds.iter().enumerate() {
+        let selected = mask.is_none_or(|mask| mask.get(idx).copied().unwrap_or(false));
+        let (value, len) = decode_key_cell(payload.get(offset..)?, *kind, selected)?;
+        if let Some(value) = value {
+            values[idx] = value;
+        }
+        offset += len;
+    }
+    (offset == payload.len()).then_some(values)
 }
 
 pub(crate) fn encode_secondary_index_key(
@@ -634,91 +638,172 @@ pub(crate) fn decode_secondary_index_key_with_masks(
     if table_prefix != model.table_prefix {
         return None;
     }
-    let payload = spec.prefix.strip(key).ok()?;
+    let payload = spec.prefix.strip_slice(key)?;
+    if payload.len() > spec.prefix.max_payload_len() {
+        return None;
+    }
     let mut decoded = DecodedIndexEntry::default();
-    let zorder_fields = if spec.layout == IndexLayout::ZOrder {
-        let index_key_bytes = payload.get(0..spec.key_columns_width)?;
-        Some(exoware_sdk::kv_codec::deinterleave_ordered_key_fields(
-            index_key_bytes,
-            &spec
-                .key_columns
-                .iter()
-                .map(|col_idx| u8::try_from(model.column(*col_idx).kind.key_width()).ok())
-                .collect::<Option<Vec<_>>>()?,
-        )?)
+    let selected = |idx: usize| {
+        required_index_columns.is_none_or(|mask| mask.get(idx).copied().unwrap_or(false))
+    };
+    let mut offset = 0;
+    if spec.layout == IndexLayout::ZOrder {
+        let key_fields = payload.get(..spec.key_columns_width)?;
+        if spec
+            .key_columns
+            .iter()
+            .any(|&idx| selected(idx) || model.column(idx).kind == ColumnKind::Boolean)
+        {
+            let fields = exoware_sdk::kv_codec::deinterleave_ordered_key_fields(
+                key_fields,
+                &spec
+                    .key_columns
+                    .iter()
+                    .map(|&idx| u8::try_from(model.column(idx).kind.key_width()).ok())
+                    .collect::<Option<Vec<_>>>()?,
+            )?;
+            for (&idx, field) in spec.key_columns.iter().zip(&fields) {
+                if let (Some(value), _) =
+                    decode_key_cell(field, model.column(idx).kind, selected(idx))?
+                {
+                    decoded.values.insert(idx, value);
+                }
+            }
+        }
+        offset = spec.key_columns_width;
     } else {
-        None
-    };
-    let mut payload_offset = 0usize;
-    for (key_pos, col_idx) in spec.key_columns.iter().enumerate() {
-        let col = model.column(*col_idx);
-        let should_decode = required_index_columns
-            .and_then(|cols| cols.get(*col_idx))
-            .copied()
-            .unwrap_or(true);
-        if should_decode {
-            let cell = if let Some(fields) = &zorder_fields {
-                decode_cell_from_ordered_key_bytes(fields.get(key_pos)?, col.kind)?
-            } else {
-                decode_cell_from_payload_with_len(&payload, payload_offset, col.kind)?.0
-            };
-            decoded.values.insert(*col_idx, cell);
-        }
-        if spec.layout == IndexLayout::Lexicographic {
-            let consumed = decode_cell_from_payload_with_len(&payload, payload_offset, col.kind)?.1;
-            payload_offset += consumed;
+        for &idx in &spec.key_columns {
+            let (value, len) = decode_key_cell(
+                payload.get(offset..)?,
+                model.column(idx).kind,
+                selected(idx),
+            )?;
+            if let Some(value) = value {
+                decoded.values.insert(idx, value);
+            }
+            offset += len;
         }
     }
-    if let Some(fields) = &zorder_fields {
-        payload_offset = fields.iter().map(Vec::len).sum();
-    }
-    debug_assert!(payload_offset <= spec.prefix.max_payload_len());
-    let decode_all_pk = required_pk_mask.is_none();
-    let decode_some_pk = required_pk_mask
-        .map(|mask: &[bool]| mask.iter().any(|required| *required))
-        .unwrap_or(true);
-    if decode_all_pk || decode_some_pk {
-        decoded.primary_key_values = vec![CellValue::Null; model.primary_key_kinds.len()];
-    }
-    let mut all_pk_values = Vec::with_capacity(model.primary_key_kinds.len());
-    for (pk_pos, kind) in model.primary_key_kinds.iter().enumerate() {
-        let should_decode = if decode_all_pk {
-            true
-        } else {
-            required_pk_mask
-                .and_then(|mask| mask.get(pk_pos))
-                .copied()
-                .unwrap_or(false)
-        };
-        let (val, consumed) = decode_cell_from_payload_with_len(&payload, payload_offset, *kind)?;
-        if should_decode {
-            decoded.primary_key_values[pk_pos] = val.clone();
-        }
-        all_pk_values.push(
-            decoded
-                .primary_key_values
-                .get(pk_pos)
-                .cloned()
-                .unwrap_or(val),
-        );
-        payload_offset += consumed;
-    }
-    let pk_refs = all_pk_values.iter().collect::<Vec<_>>();
-    decoded.primary_key = match encode_primary_key(table_prefix, &pk_refs, model) {
-        Ok(key) => key,
-        Err(_) => {
-            return None;
-        }
-    };
+    let suffix = payload.get(offset..)?;
+    decoded.primary_key_values = decode_primary_key_payload(suffix, model, required_pk_mask)?;
+    decoded.primary_key = model.primary_key_prefix.encode(suffix).ok()?;
     Some(decoded)
 }
 
+#[cfg(test)]
 pub(crate) fn decode_secondary_index_primary_key(
     table_prefix: u8,
     spec: &ResolvedIndexSpec,
     model: &TableModel,
     key: &Key,
 ) -> Option<Key> {
-    decode_secondary_index_key_with_masks(table_prefix, spec, model, key, Some(&[]), None)
+    decode_secondary_index_key_with_masks(table_prefix, spec, model, key, Some(&[]), Some(&[]))
         .map(|decoded| decoded.primary_key)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use datafusion::arrow::datatypes::DataType;
+
+    fn model() -> TableModel {
+        TableModel::from_config(
+            &KvTableConfig::new(
+                0,
+                vec![
+                    TableColumnConfig::new("entity", DataType::Utf8, false),
+                    TableColumnConfig::new("version", DataType::UInt64, false),
+                    TableColumnConfig::new("active", DataType::Boolean, false),
+                ],
+                vec!["entity".into(), "version".into()],
+                vec![],
+            )
+            .unwrap(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn selected_primary_key_decoder_validates_unselected_fields_and_exact_length() {
+        let model = model();
+        let entity = CellValue::Utf8("a\0é\u{1}z".into());
+        let version = CellValue::UInt64(9);
+        let key = encode_primary_key(0, &[&entity, &version], &model).unwrap();
+        let selected = decode_primary_key_selected(0, &key, &model, &[false, true]).unwrap();
+        assert!(matches!(
+            selected.as_slice(),
+            [CellValue::Null, CellValue::UInt64(9)]
+        ));
+        assert!(decode_primary_key_selected(0, &key, &model, &[])
+            .unwrap()
+            .is_empty());
+        let payload = model.primary_key_prefix.strip(&key).unwrap();
+        let malformed = [
+            payload[..payload.len() - 1].to_vec(),
+            [payload.as_ref(), &[0]].concat(),
+            [b"no terminator".as_slice(), &[0xff; 8]].concat(),
+            [&[0xff, 0], &9u64.to_be_bytes()[..]].concat(),
+            [&[1, 2, 0], &9u64.to_be_bytes()[..]].concat(),
+            [&[1, 3, 0], &9u64.to_be_bytes()[..]].concat(),
+        ];
+        for payload in malformed {
+            let key = model.primary_key_prefix.encode(&payload).unwrap();
+            for mask in [&[][..], &[false, false], &[false, true], &[true, true]] {
+                assert!(
+                    decode_primary_key_selected(0, &key, &model, mask).is_none(),
+                    "accepted malformed key {key:?} with mask {mask:?}"
+                );
+            }
+        }
+        let oversized = bytes::Bytes::from(
+            [
+                model.primary_key_prefix.as_bytes().as_ref(),
+                &vec![b'a'; exoware_sdk::keys::MAX_KEY_LEN],
+                &[0],
+                &9u64.to_be_bytes(),
+            ]
+            .concat(),
+        );
+        assert!(decode_primary_key_selected(0, &oversized, &model, &[]).is_none());
+    }
+
+    #[test]
+    fn index_decoder_preserves_canonical_suffix_without_materializing_it() {
+        let model = model();
+        let row = KvRow {
+            values: vec![
+                CellValue::Utf8("é\0\u{1}".into()),
+                CellValue::UInt64(u64::MAX),
+                CellValue::Boolean(true),
+            ],
+        };
+        let expected = encode_primary_key_from_row(0, &row, &model).unwrap();
+        for layout in [IndexLayout::Lexicographic, IndexLayout::ZOrder] {
+            let specs = model
+                .resolve_index_specs(&[IndexSpec::lexicographic("active", vec!["active".into()])
+                    .unwrap()
+                    .with_layout(layout)])
+                .unwrap();
+            let spec = &specs[0];
+            let key = encode_secondary_index_key(0, spec, &model, &row).unwrap();
+            let decoded =
+                decode_secondary_index_key_with_masks(0, spec, &model, &key, Some(&[]), Some(&[]))
+                    .unwrap();
+            assert_eq!(decoded.primary_key, expected);
+            assert!(decoded.values.is_empty());
+            assert!(decoded.primary_key_values.is_empty());
+
+            let payload = spec.prefix.strip(&key).unwrap();
+            let mut malformed_bool = payload.to_vec();
+            malformed_bool[0] = 2;
+            for payload in [
+                malformed_bool,
+                [payload.as_ref(), &[0]].concat(),
+                payload[..payload.len() - 1].to_vec(),
+            ] {
+                let key = spec.prefix.encode(&payload).unwrap();
+                assert!(decode_secondary_index_primary_key(0, spec, &model, &key).is_none());
+            }
+        }
+    }
 }

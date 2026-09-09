@@ -11,9 +11,10 @@ axum = { workspace = true }
 buffa = { workspace = true }
 bytes = { workspace = true }
 commonware-cryptography = { workspace = true }
+commonware-parallel = { workspace = true }
 commonware-storage = { workspace = true }
 connectrpc = { workspace = true }
-datafusion = "52.2.0"
+datafusion = "55.0.0"
 exoware-qmdb = { workspace = true }
 exoware-sdk = { workspace = true }
 exoware-simulator = { path = "../examples/simulator" }

@@ -38,16 +38,23 @@ impl std::fmt::Display for ProofKind {
     }
 }
 
+impl From<crate::request::InvalidWindow> for QmdbError {
+    fn from(err: crate::request::InvalidWindow) -> Self {
+        use crate::request::InvalidWindow;
+        match err {
+            InvalidWindow::TipOverflow => Self::CorruptData(err.to_string()),
+            InvalidWindow::StartOutOfBounds { start, count } => {
+                Self::RangeStartOutOfBounds { start, count }
+            }
+            InvalidWindow::ZeroMaximum => Self::InvalidRangeLength,
+        }
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum QmdbError {
     #[error(transparent)]
     Client(#[from] ClientError),
-    #[error("uploaded location range [{start_location}, {latest_location}] is invalid for {count} operations")]
-    InvalidLocationRange {
-        start_location: u64,
-        latest_location: u64,
-        count: usize,
-    },
     #[error("batch must contain at least one operation")]
     EmptyBatch,
     #[error("proof request must contain at least one key")]
@@ -61,7 +68,7 @@ pub enum QmdbError {
     },
     #[error("duplicate key in proof request: {key:?}")]
     DuplicateRequestedKey { key: Vec<u8> },
-    #[error("requested location {requested} is above published writer watermark {available}")]
+    #[error("requested location {requested} is above published watermark {available}")]
     WatermarkTooLow { requested: u64, available: u64 },
     #[error("proof key not found at watermark {watermark}: {key:?}")]
     ProofKeyNotFound { watermark: u64, key: Vec<u8> },
@@ -85,14 +92,12 @@ pub enum QmdbError {
     },
     #[error("{kind} proof failed verification")]
     ProofVerification { kind: ProofKind },
+    #[error("range proof does not satisfy the request: {0}")]
+    RangeMismatch(&'static str),
     #[error("corrupt qmdb data: {0}")]
     CorruptData(String),
     #[error("commonware merkle error: {0}")]
     CommonwareMerkle(String),
     #[error("qmdb stream transport error: {0}")]
     Stream(String),
-    #[error("sync operation fetch was cancelled")]
-    SyncFetchCancelled,
-    #[error("writer is poisoned after an earlier upload failure: {0}")]
-    WriterPoisoned(String),
 }

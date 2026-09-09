@@ -13,7 +13,7 @@ use commonware_glue::stateful::db::{StateSyncDb, SyncEngineConfig};
 use commonware_runtime::{deterministic, tokio as cw_tokio, Runner as _};
 use commonware_storage::merkle::{mmr, Location};
 use commonware_storage::qmdb::keyless::variable::{Db as Keyless, Operation as KeylessOperation};
-use commonware_storage::qmdb::sync::{Request, Response, Source as _};
+use commonware_storage::qmdb::sync::{Request, Response, Source as _, Target};
 use commonware_utils::channel::mpsc;
 use commonware_utils::{NZUsize, NZU16, NZU64};
 use exoware_qmdb::proto::qmdb::v1::{
@@ -21,15 +21,15 @@ use exoware_qmdb::proto::qmdb::v1::{
     SubscribeRequest as ProtoSubscribeRequest,
 };
 use exoware_qmdb::{
-    keyless_operation_log_connect_stack, KeylessClient, KeylessWriter, OperationLogClient,
-    OperationLogSubscribeProof, OperationLogSyncResolver, QmdbError,
+    keyless_operation_log_connect_stack, KeylessClient, OperationLogClient,
+    OperationLogSubscribeProof, QmdbError,
 };
 use exoware_sdk::common::kv::v1::{filter as proto_filter, Filter as ProtoFilter};
 use exoware_sdk::proto::PreferZstdHttpClient;
 use exoware_sdk::{PrefixedStoreClient, StoreClient};
 
 type Digest = commonware_cryptography::sha256::Digest;
-type LocalDb = Keyless<
+type Db = Keyless<
     mmr::Family,
     deterministic::Context,
     Vec<u8>,
@@ -47,12 +47,12 @@ type TestKeylessClient = KeylessClient<mmr::Family, commonware_cryptography::Sha
 type BatchOperation = KeylessOperation<mmr::Family, Vec<u8>>;
 
 async fn spawn_qmdb_server(
-    client: Arc<TestKeylessClient>,
+    qmdb_client: Arc<TestKeylessClient>,
 ) -> (tokio::task::JoinHandle<()>, String) {
-    common::spawn_operation_log_service(keyless_operation_log_connect_stack(client)).await
+    common::spawn_connect_service(keyless_operation_log_connect_stack(qmdb_client)).await
 }
 
-fn validated_client(
+fn operation_log_client(
     base: &str,
 ) -> OperationLogClient<
     PreferZstdHttpClient,
@@ -63,20 +63,83 @@ fn validated_client(
     OperationLogClient::plaintext(base, ((0..=10000).into(), ()))
 }
 
-struct LocalBatch {
+#[tokio::test]
+async fn test_overlapping_atomic_uploads_emit_each_operation_once() {
+    use exoware_qmdb::{stage_authenticated_range, stage_watermark};
+    use exoware_sdk::StoreWriteBatch;
+
+    let store_client = common::local_store_client().await;
+    let upload_client = PrefixedStoreClient::empty(store_client.clone());
+    let operations = vec![
+        KeylessOperation::Append(b"first".to_vec()),
+        KeylessOperation::Commit(None, Location::new(0)),
+        KeylessOperation::Append(b"second".to_vec()),
+        KeylessOperation::Commit(None, Location::new(0)),
+    ];
+    let config = ((0..=10000).into(), ());
+    let (_, first) =
+        common::prepare_operations::<mmr::Family, BatchOperation>(&operations[..2], &config);
+    let (root, second) =
+        common::prepare_operations::<mmr::Family, BatchOperation>(&operations, &config);
+    let mut batch = StoreWriteBatch::new();
+    // An atomic batch may stage overlapping upload ranges in either order
+    stage_authenticated_range(&upload_client, second, &mut batch).unwrap();
+    stage_authenticated_range(&upload_client, first, &mut batch).unwrap();
+    stage_watermark::<mmr::Family>(&upload_client, Location::new(3), &mut batch).unwrap();
+    let sequence = batch.commit(&store_client).await.unwrap();
+
+    let qmdb_client = Arc::new(TestKeylessClient::new(
+        PrefixedStoreClient::empty(store_client),
+        ((0..=10000).into(), ()),
+    ));
+    let (server, url) = spawn_qmdb_server(qmdb_client).await;
+    let mut stream = operation_log_client(&url)
+        .subscribe(ProtoSubscribeRequest {
+            since_sequence_number: Some(sequence),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let frame = stream
+        .message_with_root(common::trusted_root(root))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(frame.resume_sequence_number, sequence);
+    assert_eq!(
+        frame.operations,
+        operations
+            .into_iter()
+            .enumerate()
+            .map(|(index, operation)| (Location::new(index as u64), operation))
+            .collect::<Vec<_>>()
+    );
+    server.abort();
+}
+
+struct SourceBatch {
     operations: Vec<BatchOperation>,
     root: Digest,
     inactivity_floor: Location<mmr::Family>,
 }
 
-async fn build_local_batch() -> LocalBatch {
+async fn build_source_batch() -> SourceBatch {
     tokio::task::spawn_blocking(|| {
         deterministic::Runner::default().start(|context| async move {
             use commonware_runtime::{buffer::paged::CacheRef, Supervisor as _};
             let page_cache = CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(8));
-            let cfg =
-                common::keyless_config("keyless", page_cache, ((0..=10000).into(), ()), NZU64!(7));
-            let mut db: LocalDb = LocalDb::init(context.child("db"), cfg).await.expect("init");
+            let cfg = common::keyless_variable_config(
+                "keyless_variable_full_mmr_connect_source",
+                page_cache,
+                ((0..=10000).into(), ()),
+                NZU64!(7),
+            );
+            let mut db: Db = Db::init(
+                context.child("keyless_variable_full_mmr_connect_source"),
+                cfg,
+            )
+            .await
+            .expect("init");
 
             let finalized = {
                 let batch = db
@@ -106,7 +169,7 @@ async fn build_local_batch() -> LocalBatch {
             let root = db.root();
             db.destroy().await.expect("destroy");
 
-            LocalBatch {
+            SourceBatch {
                 operations: ops,
                 root,
                 inactivity_floor,
@@ -124,20 +187,22 @@ fn latest_inactivity_floor(ops: &[BatchOperation]) -> Location<mmr::Family> {
     }
 }
 
-async fn commit_upload(client: &StoreClient, batch: &LocalBatch) {
-    let writer: KeylessWriter<mmr::Family, commonware_cryptography::Sha256, Vec<u8>> =
-        KeylessWriter::fresh(PrefixedStoreClient::empty(client.clone()));
-    common::commit_keyless_upload(&writer, &batch.operations)
-        .await
-        .expect("commit upload");
+async fn commit_upload(store_client: &StoreClient, batch: &SourceBatch) {
+    common::commit_operations::<mmr::Family, BatchOperation>(
+        &PrefixedStoreClient::empty(store_client.clone()),
+        &batch.operations,
+        &((0..=10000).into(), ()),
+    )
+    .await
+    .expect("commit upload");
 }
 
 #[tokio::test]
-async fn keyless_connect_subscribe_emits_verifiable_multi_proof() {
+async fn test_keyless_connect_subscribe_emits_verifiable_multi_proof() {
     let store_client = common::local_store_client().await;
-    let local = build_local_batch().await;
+    let source = build_source_batch().await;
     assert!(
-        *local.inactivity_floor > 0,
+        *source.inactivity_floor > 0,
         "test must not rely on inactivity_floor = 0"
     );
     let keyless_client = Arc::new(TestKeylessClient::new(
@@ -145,20 +210,20 @@ async fn keyless_connect_subscribe_emits_verifiable_multi_proof() {
         ((0..=10000).into(), ()),
     ));
     let (_qmdb_server, qmdb_url) = spawn_qmdb_server(keyless_client).await;
-    let client = validated_client(&qmdb_url);
+    let connect_client = operation_log_client(&qmdb_url);
 
-    let mut stream = client
+    let mut stream = connect_client
         .subscribe(ProtoSubscribeRequest::default())
         .await
         .expect("subscribe");
 
     tokio::time::sleep(Duration::from_millis(50)).await;
-    commit_upload(&store_client, &local).await;
+    commit_upload(&store_client, &source).await;
 
     let frame: OperationLogSubscribeProof<Digest, BatchOperation, mmr::Family> =
         tokio::time::timeout(
             Duration::from_secs(5),
-            stream.message_with_root(common::trusted_root(local.root)),
+            stream.message_with_root(common::trusted_root(source.root)),
         )
         .await
         .expect("timeout")
@@ -166,8 +231,8 @@ async fn keyless_connect_subscribe_emits_verifiable_multi_proof() {
         .expect("stream frame");
 
     assert!(frame.resume_sequence_number > 0);
-    assert_eq!(frame.root, local.root);
-    let expected: Vec<(Location<mmr::Family>, BatchOperation)> = local
+    assert_eq!(frame.root, source.root);
+    let expected: Vec<(Location<mmr::Family>, BatchOperation)> = source
         .operations
         .iter()
         .enumerate()
@@ -177,63 +242,58 @@ async fn keyless_connect_subscribe_emits_verifiable_multi_proof() {
 }
 
 #[tokio::test]
-async fn keyless_connect_get_operation_range_returns_verifiable_proof() {
+async fn test_keyless_connect_get_operation_range_returns_verifiable_proof() {
     let store_client = common::local_store_client().await;
-    let local = build_local_batch().await;
+    let source = build_source_batch().await;
     assert!(
-        *local.inactivity_floor > 0,
+        *source.inactivity_floor > 0,
         "test must not rely on inactivity_floor = 0"
     );
-    commit_upload(&store_client, &local).await;
+    commit_upload(&store_client, &source).await;
 
     let keyless_client = Arc::new(TestKeylessClient::new(
         PrefixedStoreClient::empty(store_client.clone()),
         ((0..=10000).into(), ()),
     ));
     let (_qmdb_server, qmdb_url) = spawn_qmdb_server(keyless_client).await;
-    let client = validated_client(&qmdb_url);
+    let connect_client = operation_log_client(&qmdb_url);
 
-    let proof = client
+    let proof = connect_client
         .get_operation_range(
             ProtoGetOperationRangeRequest {
-                tip: u64::try_from(local.operations.len() - 1).expect("tip fits"),
+                tip: u64::try_from(source.operations.len() - 1).expect("tip fits"),
                 start_location: 1,
                 max_locations: 1,
                 ..Default::default()
             },
-            &local.root,
+            &source.root,
         )
         .await
         .expect("get operation range");
 
-    assert_eq!(proof.root, local.root);
+    assert_eq!(proof.root, source.root);
     assert_eq!(proof.start_location, Location::new(1));
-    assert_eq!(
-        proof.operations,
-        vec![(Location::new(1), local.operations[1].clone())]
-    );
+    assert_eq!(proof.operations, vec![source.operations[1].clone()]);
 }
 
 #[tokio::test]
-async fn keyless_operation_log_sync_resolver_fetches_api_batches() {
+async fn test_keyless_operation_log_source_fetches_api_batches() {
     let store_client = common::local_store_client().await;
-    let local = build_local_batch().await;
-    commit_upload(&store_client, &local).await;
+    let source = build_source_batch().await;
+    commit_upload(&store_client, &source).await;
 
     let keyless_client = Arc::new(TestKeylessClient::new(
         PrefixedStoreClient::empty(store_client.clone()),
         ((0..=10000).into(), ()),
     ));
     let (_qmdb_server, qmdb_url) = spawn_qmdb_server(keyless_client).await;
-    let resolver = OperationLogSyncResolver::<
+    let resolver = OperationLogClient::<
         _,
         mmr::Family,
         commonware_cryptography::Sha256,
         BatchOperation,
     >::plaintext(&qmdb_url, ((0..=10000).into(), ()));
-    let op_count = Location::new(local.operations.len() as u64);
-    let target = resolver.target(op_count).await.expect("sync target");
-    assert_eq!(target.root, local.root);
+    let op_count = Location::new(source.operations.len() as u64);
 
     let (response, callback) = resolver
         .serve(Request::Operations {
@@ -246,53 +306,63 @@ async fn keyless_operation_log_sync_resolver_fetches_api_batches() {
     let Response::Operations { proof, operations } = response else {
         panic!("operation request returned boundary response");
     };
-    assert_eq!(operations.as_slice(), &local.operations[..2]);
+    assert_eq!(operations.as_slice(), &source.operations[..2]);
 
     let hasher = commonware_storage::qmdb::hasher::<commonware_cryptography::Sha256>();
     let elements = operations
         .iter()
         .map(|operation| operation.encode())
         .collect::<Vec<_>>();
-    assert!(proof.verify_range_inclusion(&hasher, &elements, Location::new(0), &target.root));
+    assert!(proof.verify_range_inclusion(&hasher, &elements, Location::new(0), &source.root));
     assert!(
         callback.is_none(),
-        "direct sync resolver fetches do not allocate an unused validation callback"
+        "direct sync source fetches do not allocate an unused validation callback"
     );
+
+    let (response, _) = resolver
+        .serve(Request::Operations {
+            size: op_count,
+            start: Location::new(0),
+            max_ops: std::num::NonZeroU64::MAX,
+        })
+        .await
+        .expect("a large maximum permits a smaller API batch");
+    let Response::Operations { operations, .. } = response else {
+        panic!("operation request returned boundary response");
+    };
+    assert_eq!(operations, source.operations);
 }
 
 #[tokio::test]
-async fn keyless_commonware_glue_state_sync_uses_operation_log_resolver() {
+async fn test_keyless_commonware_glue_state_sync_uses_operation_log_client() {
     let store_client = common::local_store_client().await;
-    let local = build_local_batch().await;
+    let source = build_source_batch().await;
     assert!(
-        *local.inactivity_floor > 0,
+        *source.inactivity_floor > 0,
         "glue state-sync test must exercise a nonzero replay floor"
     );
-    commit_upload(&store_client, &local).await;
+    commit_upload(&store_client, &source).await;
 
     let keyless_client = Arc::new(TestKeylessClient::new(
         PrefixedStoreClient::empty(store_client.clone()),
         ((0..=10000).into(), ()),
     ));
     let (_qmdb_server, qmdb_url) = spawn_qmdb_server(keyless_client).await;
-    let resolver = OperationLogSyncResolver::<
+    let resolver = OperationLogClient::<
         _,
         mmr::Family,
         commonware_cryptography::Sha256,
         BatchOperation,
     >::plaintext(&qmdb_url, ((0..=10000).into(), ()));
-    let op_count = Location::new(local.operations.len() as u64);
-    let target = resolver
-        .target_range(local.inactivity_floor, op_count)
-        .await
-        .expect("limited sync target");
-    assert_eq!(target.root, local.root);
-    assert_eq!(target.range.start(), local.inactivity_floor);
-    assert_eq!(target.range.end(), op_count);
+    let op_count = Location::new(source.operations.len() as u64);
+    let target = Target::new(
+        source.root,
+        commonware_utils::non_empty_range!(source.inactivity_floor, op_count),
+    );
 
-    let start = local.inactivity_floor;
+    let start = source.inactivity_floor;
     let start_index = usize::try_from(*start).expect("start fits usize");
-    let expected_values = local
+    let expected_values = source
         .operations
         .iter()
         .enumerate()
@@ -315,15 +385,15 @@ async fn keyless_commonware_glue_state_sync_uses_operation_log_resolver() {
             use commonware_runtime::{buffer::paged::CacheRef, Supervisor as _};
 
             let page_cache = CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(8));
-            let cfg = common::keyless_config(
-                "keyless-glue-state-sync",
+            let cfg = common::keyless_variable_config(
+                "keyless_variable_full_mmr_sync_target",
                 page_cache,
                 ((0..=10000).into(), ()),
                 NZU64!(7),
             );
             let (_update_tx, update_rx) = mpsc::channel(1);
             let synced: SyncDb = <SyncDb as StateSyncDb<_, _>>::sync_db(
-                context.child("glue_sync"),
+                context.child("keyless_variable_full_mmr_sync_target"),
                 cfg,
                 resolver,
                 target,
@@ -341,7 +411,7 @@ async fn keyless_commonware_glue_state_sync_uses_operation_log_resolver() {
             .await
             .expect("commonware glue state sync");
 
-            assert_eq!(synced.root(), local.root);
+            assert_eq!(synced.root(), source.root);
             let bounds = synced.bounds();
             assert_eq!(bounds.start, start);
             assert_eq!(bounds.end, op_count);
@@ -359,14 +429,14 @@ async fn keyless_commonware_glue_state_sync_uses_operation_log_resolver() {
 }
 
 #[tokio::test]
-async fn keyless_connect_client_rejects_invalid_streamed_proof() {
+async fn test_keyless_connect_client_rejects_invalid_streamed_proof() {
     let store_client = common::local_store_client().await;
-    let local = build_local_batch().await;
+    let source = build_source_batch().await;
     assert!(
-        *local.inactivity_floor > 0,
+        *source.inactivity_floor > 0,
         "test must not rely on inactivity_floor = 0"
     );
-    commit_upload(&store_client, &local).await;
+    commit_upload(&store_client, &source).await;
 
     let keyless_client = Arc::new(TestKeylessClient::new(
         PrefixedStoreClient::empty(store_client.clone()),
@@ -393,14 +463,14 @@ async fn keyless_connect_client_rejects_invalid_streamed_proof() {
             subscribe_response: common::tamper_subscribe_response(raw_response),
         })
         .await;
-    let client = validated_client(&static_url);
-    let mut stream = client
+    let connect_client = operation_log_client(&static_url);
+    let mut stream = connect_client
         .subscribe(ProtoSubscribeRequest::default())
         .await
         .expect("subscribe");
 
     let err = stream
-        .message_with_root(common::trusted_root(local.root))
+        .message_with_root(common::trusted_root(source.root))
         .await
         .expect_err("tampered streamed proof should fail");
     assert!(matches!(
@@ -426,11 +496,11 @@ fn match_regex(regex: &str) -> ProtoFilter {
 }
 
 #[tokio::test]
-async fn keyless_connect_subscribe_filters_by_value_regex() {
+async fn test_keyless_connect_subscribe_filters_by_value_regex() {
     let store_client = common::local_store_client().await;
-    let local = build_local_batch().await;
+    let source = build_source_batch().await;
     assert!(
-        *local.inactivity_floor > 0,
+        *source.inactivity_floor > 0,
         "test must not rely on inactivity_floor = 0"
     );
     let keyless_client = Arc::new(TestKeylessClient::new(
@@ -438,10 +508,10 @@ async fn keyless_connect_subscribe_filters_by_value_regex() {
         ((0..=10000).into(), ()),
     ));
     let (_qmdb_server, qmdb_url) = spawn_qmdb_server(keyless_client).await;
-    let client = validated_client(&qmdb_url);
+    let connect_client = operation_log_client(&qmdb_url);
 
     // Only include ops whose value begins with "second".
-    let mut stream = client
+    let mut stream = connect_client
         .subscribe(ProtoSubscribeRequest {
             value_filters: vec![match_regex("^second.*$")],
             ..Default::default()
@@ -450,20 +520,20 @@ async fn keyless_connect_subscribe_filters_by_value_regex() {
         .expect("subscribe");
 
     tokio::time::sleep(Duration::from_millis(50)).await;
-    commit_upload(&store_client, &local).await;
+    commit_upload(&store_client, &source).await;
 
     let frame: OperationLogSubscribeProof<Digest, BatchOperation, mmr::Family> =
         tokio::time::timeout(
             Duration::from_secs(5),
-            stream.message_with_root(common::trusted_root(local.root)),
+            stream.message_with_root(common::trusted_root(source.root)),
         )
         .await
         .expect("timeout")
         .expect("stream result")
         .expect("stream frame");
 
-    assert_eq!(frame.root, local.root);
-    let expected: Vec<(Location<mmr::Family>, BatchOperation)> = local
+    assert_eq!(frame.root, source.root);
+    let expected: Vec<(Location<mmr::Family>, BatchOperation)> = source
         .operations
         .iter()
         .enumerate()
@@ -479,11 +549,11 @@ async fn keyless_connect_subscribe_filters_by_value_regex() {
 }
 
 #[tokio::test]
-async fn keyless_connect_subscribe_rejects_key_filters() {
+async fn test_keyless_connect_subscribe_rejects_key_filters() {
     let store_client = common::local_store_client().await;
-    let local = build_local_batch().await;
+    let source = build_source_batch().await;
     assert!(
-        *local.inactivity_floor > 0,
+        *source.inactivity_floor > 0,
         "test must not rely on inactivity_floor = 0"
     );
     let keyless_client = Arc::new(TestKeylessClient::new(
@@ -502,9 +572,9 @@ async fn keyless_connect_subscribe_rejects_key_filters() {
         .expect("subscribe opens");
 
     // Even if we upload a batch that would otherwise match, the stream must
-    // not emit a proof — keyless rejects key_filters server-side before it
+    // not emit a proof because keyless rejects key_filters server-side before it
     // opens the store subscription.
-    commit_upload(&store_client, &local).await;
+    commit_upload(&store_client, &source).await;
 
     match tokio::time::timeout(Duration::from_millis(500), stream.message()).await {
         Ok(Ok(Some(_))) => {
@@ -517,4 +587,108 @@ async fn keyless_connect_subscribe_rejects_key_filters() {
         }
         Err(_) => panic!("stream hung instead of rejecting key_filters"),
     }
+}
+
+#[tokio::test]
+async fn test_keyless_data_only_frames_replay_in_store_order_after_delayed_publication() {
+    use exoware_qmdb::{stage_authenticated_range, stage_watermark, NODE_FAMILY};
+    use exoware_sdk::StoreWriteBatch;
+
+    let store_client = common::local_store_client().await;
+    let upload_client = PrefixedStoreClient::empty(store_client.clone());
+    let operations: Vec<BatchOperation> = vec![
+        KeylessOperation::Append(b"first".to_vec()),
+        KeylessOperation::Append(b"second".to_vec()),
+        KeylessOperation::Commit(None, Location::new(0)),
+        KeylessOperation::Append(b"third".to_vec()),
+        KeylessOperation::Append(b"fourth".to_vec()),
+        KeylessOperation::Commit(None, Location::new(0)),
+    ];
+    let (root, prepared) = common::prepare_operations::<mmr::Family, BatchOperation>(
+        &operations,
+        &((0..=10000).into(), ()),
+    );
+    let mut data = StoreWriteBatch::new();
+    stage_authenticated_range(&upload_client, prepared, &mut data).unwrap();
+    let mut earlier = StoreWriteBatch::new();
+    let mut later = StoreWriteBatch::new();
+    for (key, value) in data.entries() {
+        // Store chunks may carry operations separately from their source boundary marker
+        if value.is_empty() {
+            continue;
+        }
+        let is_earlier_operation =
+            key[0] != NODE_FAMILY && u64::from_be_bytes(key[1..].try_into().unwrap()) < 3;
+        let target = if is_earlier_operation {
+            &mut earlier
+        } else {
+            &mut later
+        };
+        target.push(&upload_client, key, value.clone()).unwrap();
+    }
+    let later_sequence = later.commit(&store_client).await.unwrap();
+    let qmdb_client = Arc::new(TestKeylessClient::new(
+        upload_client.clone(),
+        ((0..=10000).into(), ()),
+    ));
+    assert_eq!(qmdb_client.writer_location_watermark().await.unwrap(), None);
+    let earlier_sequence = earlier.commit(&store_client).await.unwrap();
+    assert_eq!(qmdb_client.writer_location_watermark().await.unwrap(), None);
+    let mut publication = StoreWriteBatch::new();
+    stage_watermark(
+        &upload_client,
+        Location::<mmr::Family>::new(5),
+        &mut publication,
+    )
+    .unwrap();
+    let publication_sequence = publication.commit(&store_client).await.unwrap();
+    assert!(later_sequence < earlier_sequence && earlier_sequence < publication_sequence);
+
+    let (server, url) = spawn_qmdb_server(qmdb_client).await;
+    let mut stream = operation_log_client(&url)
+        .subscribe(ProtoSubscribeRequest {
+            since_sequence_number: Some(later_sequence),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let first = stream
+        .message_with_root(common::trusted_root(root))
+        .await
+        .expect("data-only frames must wait for publication without requiring presence")
+        .unwrap();
+    let second = stream
+        .message_with_root(common::trusted_root(root))
+        .await
+        .unwrap()
+        .unwrap();
+    let expected = operations
+        .iter()
+        .cloned()
+        .enumerate()
+        .map(|(index, operation)| (Location::new(index as u64), operation))
+        .collect::<Vec<_>>();
+    assert_eq!(first.resume_sequence_number, later_sequence);
+    assert_eq!(first.operations, expected[3..]);
+    assert_eq!(second.resume_sequence_number, earlier_sequence);
+    assert_eq!(second.operations, expected[..3]);
+
+    let mut resumed = operation_log_client(&url)
+        .subscribe(ProtoSubscribeRequest {
+            since_sequence_number: Some(first.resume_sequence_number + 1),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let replayed = resumed
+        .message_with_root(common::trusted_root(root))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        replayed.resume_sequence_number,
+        second.resume_sequence_number
+    );
+    assert_eq!(replayed.operations, second.operations);
+    server.abort();
 }

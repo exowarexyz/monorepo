@@ -1,3 +1,4 @@
+use crate::request::{validate_key_range, OperationWindow};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Display;
 use std::marker::PhantomData;
@@ -23,10 +24,9 @@ use commonware_storage::{
             ordered, unordered,
             value::{ValueEncoding, VariableEncoding},
         },
-        current::ordered::{db::KeyValueProof, ExclusionProof},
-        current::proof::{OpsRootWitness, RangeProof},
-        current::unordered::db::KeyValueProof as UnorderedKeyValueProof,
-        operation::Key as QmdbKey,
+        current::ordered::ExclusionProof,
+        current::proof::{OperationProof, OpsRootWitness, RangeProof},
+        operation::{Key as QmdbKey, Operation},
         sync::{
             FeedbackTx, Request as SyncRequest, Response as SyncResponse, Source,
             Target as SyncTarget,
@@ -43,8 +43,7 @@ use http_body::Body;
 
 use crate::codec::decode_digest;
 use crate::proof::{
-    verify_ordered_exclusion_proof, verify_ordered_key_value_proof, VerifiedKeyLookup,
-    VerifiedKeyRange, VerifiedKeyValue, VerifiedUnorderedKeyValue,
+    verify_ordered_exclusion_proof, VerifiedKeyLookup, VerifiedKeyRange, VerifiedKeyValue,
 };
 use crate::QmdbError;
 
@@ -78,9 +77,6 @@ where
     K: QmdbKey + commonware_codec::Codec,
     V: commonware_codec::Codec + Clone + Send + Sync,
     E: ValueEncoding<Value = V>,
-    K::Cfg: Clone,
-    <ordered::Update<K, E> as Read>::Cfg: Clone,
-    V::Cfg: Clone,
     ordered::Operation<F, K, E>: Decode + Encode + Read,
     ordered::Update<K, E>: Read,
     ExclusionProof<F, K, E, H::Digest, N>:
@@ -115,9 +111,6 @@ where
     K: QmdbKey + commonware_codec::Codec,
     V: commonware_codec::Codec + Clone + Send + Sync,
     E: ValueEncoding<Value = V>,
-    K::Cfg: Clone,
-    <ordered::Update<K, E> as Read>::Cfg: Clone,
-    V::Cfg: Clone,
     ordered::Operation<F, K, E>: Decode + Encode + Read,
     ordered::Update<K, E>: Read,
     ExclusionProof<F, K, E, H::Digest, N>:
@@ -164,7 +157,7 @@ where
         &self,
         request: GetRequest,
         expected_root: &H::Digest,
-    ) -> Result<VerifiedKeyValue<H::Digest, K, V, F, E>, QmdbError> {
+    ) -> Result<VerifiedKeyValue<H::Digest, ordered::Operation<F, K, E>, F>, QmdbError> {
         let requested_key = request.key.clone();
         let decoded_requested_key = K::decode_cfg(requested_key.as_slice(), self.key_cfg.as_ref())
             .map_err(|err| {
@@ -181,11 +174,10 @@ where
             .proof
             .as_option()
             .ok_or_else(|| QmdbError::CorruptData("qmdb get response missing proof".to_string()))?;
-        let verified = verify_key_value_from_proto::<F, H, K, V, N, E>(
+        let verified = verify_key_value_from_proto::<F, H, ordered::Operation<F, K, E>, N>(
             proof,
             expected_root,
             self.op_cfg.as_ref(),
-            self.key_cfg.as_ref(),
         )?;
         let ordered::Operation::Update(update) = &verified.operation else {
             return Err(QmdbError::CorruptData(
@@ -229,11 +221,6 @@ where
             .iter()
             .zip(requested_keys.iter())
             .map(|(result, requested_key)| {
-                if result.key.as_slice() != requested_key.as_slice() {
-                    return Err(QmdbError::ProofVerification {
-                        kind: crate::ProofKind::CurrentKeyValue,
-                    });
-                }
                 let decoded_requested_key = K::decode_cfg(
                     requested_key.as_slice(),
                     self.key_cfg.as_ref(),
@@ -243,12 +230,12 @@ where
                 })?;
                 match result.result.as_ref() {
                     Some(current_key_lookup_result::Result::Hit(proof)) => {
-                        let verified = verify_key_value_from_proto::<F, H, K, V, N, E>(
-                            proof,
-                            expected_root,
-                            self.op_cfg.as_ref(),
-                            self.key_cfg.as_ref(),
-                        )?;
+                        let verified =
+                            verify_key_value_from_proto::<F, H, ordered::Operation<F, K, E>, N>(
+                                proof,
+                                expected_root,
+                                self.op_cfg.as_ref(),
+                            )?;
                         let ordered::Operation::Update(update) = &verified.operation else {
                             return Err(QmdbError::CorruptData(
                                 "qmdb get_many hit proof did not verify an update".to_string(),
@@ -289,6 +276,7 @@ where
     ) -> Result<VerifiedKeyRange<H::Digest, K, V, F, E>, QmdbError> {
         let start_key = request.start_key.clone();
         let end_key = request.end_key.clone();
+        let limit = request.limit;
         let response = self
             .range_rpc
             .get_range(request)
@@ -301,6 +289,7 @@ where
             expected_root,
             start_key.as_ref(),
             end_key.as_deref(),
+            limit,
             self.op_cfg.as_ref(),
             self.update_cfg.as_ref(),
             self.key_cfg.as_ref(),
@@ -314,7 +303,7 @@ pub struct UnorderedConnectClient<
     T,
     F: Graftable,
     H: Hasher,
-    K: commonware_utils::Array + QmdbKey + commonware_codec::Codec,
+    K: QmdbKey + commonware_codec::Codec,
     V: commonware_codec::Codec + Clone + Send + Sync,
     const N: usize,
     E: ValueEncoding<Value = V> = VariableEncoding<V>,
@@ -331,7 +320,7 @@ where
     F: Graftable,
     H: Hasher,
     H::Digest: DecodeExt<()>,
-    K: commonware_utils::Array + QmdbKey + commonware_codec::Codec,
+    K: QmdbKey + commonware_codec::Codec,
     V: commonware_codec::Codec + Clone + Send + Sync,
     E: ValueEncoding<Value = V>,
     unordered::Operation<F, K, E>: Decode + Encode + Read,
@@ -353,7 +342,7 @@ where
     F: Graftable,
     H: Hasher,
     H::Digest: DecodeExt<()>,
-    K: commonware_utils::Array + QmdbKey + commonware_codec::Codec,
+    K: QmdbKey + commonware_codec::Codec,
     V: commonware_codec::Codec + Clone + Send + Sync,
     E: ValueEncoding<Value = V>,
     unordered::Operation<F, K, E>: Decode + Encode + Read,
@@ -381,7 +370,7 @@ where
         &self,
         request: GetRequest,
         expected_root: &H::Digest,
-    ) -> Result<VerifiedUnorderedKeyValue<H::Digest, K, V, F, E>, QmdbError> {
+    ) -> Result<VerifiedKeyValue<H::Digest, unordered::Operation<F, K, E>, F>, QmdbError> {
         let requested_key = request.key.clone();
         let response = self
             .rpc
@@ -406,7 +395,7 @@ where
         &self,
         request: GetManyRequest,
         expected_root: &H::Digest,
-    ) -> Result<Vec<VerifiedUnorderedKeyValue<H::Digest, K, V, F, E>>, QmdbError> {
+    ) -> Result<Vec<VerifiedKeyValue<H::Digest, unordered::Operation<F, K, E>, F>>, QmdbError> {
         let requested_keys = request.keys.clone();
         let response = self
             .rpc
@@ -421,46 +410,48 @@ where
                 return Err(QmdbError::DuplicateRequestedKey { key: key.clone() });
             }
         }
-        let mut returned = BTreeSet::<&[u8]>::new();
         let mut last_index = None;
         response
             .results
             .iter()
             .map(|result| {
-                let Some(&request_index) = requested.get(result.key.as_slice()) else {
+                let verified = match result.result.as_ref() {
+                    Some(current_key_lookup_result::Result::Hit(proof)) => {
+                        verify_key_value_from_proto::<F, H, unordered::Operation<F, K, E>, N>(
+                            proof,
+                            expected_root,
+                            self.op_cfg.as_ref(),
+                        )?
+                    }
+                    Some(current_key_lookup_result::Result::Miss(_)) => {
+                        return Err(QmdbError::CorruptData(
+                            "unordered get_many response must not include miss proofs".to_string(),
+                        ));
+                    }
+                    None => {
+                        return Err(QmdbError::CorruptData(
+                            "qmdb get_many result missing hit proof".to_string(),
+                        ));
+                    }
+                };
+                let unordered::Operation::Update(update) = &verified.operation else {
                     return Err(QmdbError::ProofVerification {
                         kind: crate::ProofKind::CurrentKeyValue,
                     });
                 };
-                if !returned.insert(result.key.as_slice()) {
+                let key = update.0.encode();
+                let Some(&request_index) = requested.get(key.as_ref()) else {
                     return Err(QmdbError::ProofVerification {
                         kind: crate::ProofKind::CurrentKeyValue,
                     });
-                }
+                };
                 if last_index.is_some_and(|last| request_index <= last) {
                     return Err(QmdbError::ProofVerification {
                         kind: crate::ProofKind::CurrentKeyValue,
                     });
                 }
                 last_index = Some(request_index);
-                match result.result.as_ref() {
-                    Some(current_key_lookup_result::Result::Hit(proof)) => {
-                        verify_unordered_key_value_from_proto::<F, H, K, V, N, E>(
-                            proof,
-                            result.key.as_slice(),
-                            expected_root,
-                            self.op_cfg.as_ref(),
-                        )
-                    }
-                    Some(current_key_lookup_result::Result::Miss(_)) => {
-                        Err(QmdbError::CorruptData(
-                            "unordered get_many response must not include miss proofs".to_string(),
-                        ))
-                    }
-                    None => Err(QmdbError::CorruptData(
-                        "qmdb get_many result missing hit proof".to_string(),
-                    )),
-                }
+                Ok(verified)
             })
             .collect()
     }
@@ -479,7 +470,7 @@ pub struct OperationLogRangeProof<D: Digest, Op, F: Family> {
     pub tip: Location<F>,
     pub root: D,
     pub start_location: Location<F>,
-    pub operations: Vec<(Location<F>, Op)>,
+    pub operations: Vec<Op>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -487,166 +478,11 @@ pub struct CurrentOperationRangeProof<D: Digest, Op, const N: usize, F: Graftabl
     pub tip: Location<F>,
     pub root: D,
     pub start_location: Location<F>,
-    pub operations: Vec<(Location<F>, Op)>,
+    pub operations: Vec<Op>,
     pub chunks: Vec<[u8; N]>,
 }
 
-/// Store-backed resolver for Commonware QMDB sync over Exoware QMDB's
-/// operation-log API.
-///
-/// This resolver covers the operation-log portion shared by ordered,
-/// unordered, immutable, and keyless QMDBs.
-pub struct OperationLogSyncResolver<T, F: Graftable, H: Hasher, Op: Encode + Read> {
-    client: OperationLogClient<T, F, H, Op>,
-}
-
-impl<T, F, H, Op> Clone for OperationLogSyncResolver<T, F, H, Op>
-where
-    F: Graftable,
-    H: Hasher,
-    Op: Encode + Read,
-    OperationLogClient<T, F, H, Op>: Clone,
-{
-    fn clone(&self) -> Self {
-        Self {
-            client: self.client.clone(),
-        }
-    }
-}
-
-impl<F, H, Op> OperationLogSyncResolver<PreferZstdHttpClient, F, H, Op>
-where
-    F: Graftable + Send + Sync + 'static,
-    H: Hasher + Send + Sync + 'static,
-    H::Digest: DecodeExt<()>,
-    Op: Decode + Encode + Read + Send + Sync + 'static,
-{
-    pub fn plaintext(base: &str, op_cfg: Op::Cfg) -> Self {
-        Self::new(
-            PreferZstdHttpClient::plaintext(),
-            ClientConfig::new(base.parse().expect("qmdb uri")),
-            op_cfg,
-        )
-    }
-}
-
-impl<T, F, H, Op> OperationLogSyncResolver<T, F, H, Op>
-where
-    T: ClientTransport + Clone + Send + Sync + 'static,
-    T::ResponseBody: Body<Data = Bytes> + Unpin,
-    <T::ResponseBody as Body>::Error: Display,
-    F: Graftable + Send + Sync + 'static,
-    H: Hasher + Send + Sync + 'static,
-    H::Digest: DecodeExt<()>,
-    Op: Decode + Encode + Read + Send + Sync + 'static,
-{
-    pub fn new(transport: T, config: ClientConfig, op_cfg: Op::Cfg) -> Self {
-        Self::from_service_client(OperationLogServiceClient::new(transport, config), op_cfg)
-    }
-
-    pub fn from_service_client(rpc: OperationLogServiceClient<T>, op_cfg: Op::Cfg) -> Self {
-        Self {
-            client: OperationLogClient::from_service_client(rpc, op_cfg),
-        }
-    }
-
-    pub async fn target(
-        &self,
-        op_count: Location<F>,
-    ) -> Result<SyncTarget<F, H::Digest>, QmdbError> {
-        self.target_range(Location::new(0), op_count).await
-    }
-
-    pub async fn target_range(
-        &self,
-        start_loc: Location<F>,
-        op_count: Location<F>,
-    ) -> Result<SyncTarget<F, H::Digest>, QmdbError> {
-        let range = sync_range(start_loc, op_count)?;
-        let proto = self
-            .operation_range_proto(op_count, start_loc, NonZeroU64::MIN)
-            .await?;
-        let root = decode_digest::<H::Digest>(proto.ops_root.as_ref(), "operation sync root")?;
-        Ok(SyncTarget::new(root, range))
-    }
-
-    async fn operation_range_proto(
-        &self,
-        op_count: Location<F>,
-        start_loc: Location<F>,
-        max_ops: NonZeroU64,
-    ) -> Result<HistoricalOperationRangeProof, QmdbError> {
-        let count = op_count.as_u64();
-        let Some(tip) = count.checked_sub(1) else {
-            return Err(QmdbError::CorruptData(
-                "cannot fetch sync operations for an empty target".to_string(),
-            ));
-        };
-        let max_locations = u32::try_from(max_ops.get()).map_err(|err| {
-            QmdbError::CorruptData(format!("sync fetch batch size exceeds API limit: {err}"))
-        })?;
-        fetch_operation_range_proof(
-            &self.client.rpc,
-            GetOperationRangeRequest {
-                tip,
-                start_location: start_loc.as_u64(),
-                max_locations,
-                ..Default::default()
-            },
-            "sync operation range response missing proof",
-        )
-        .await
-    }
-
-    fn decode_sync_response(
-        &self,
-        proto: HistoricalOperationRangeProof,
-        request: SyncRequest<F>,
-    ) -> Result<SyncResponse<F, Op, H::Digest>, QmdbError> {
-        let max_digests = proof_digest_cap::<H::Digest>(&proto.proof);
-        let proof = Proof::<F, H::Digest>::decode_cfg(proto.proof.as_ref(), &max_digests).map_err(
-            |err| {
-                QmdbError::CorruptData(format!(
-                    "failed to decode sync operation range proof: {err}"
-                ))
-            },
-        )?;
-        let operations = proto
-            .encoded_operations
-            .iter()
-            .map(|bytes| {
-                Op::decode_cfg(bytes.as_ref(), self.client.op_cfg.as_ref()).map_err(|err| {
-                    QmdbError::CorruptData(format!("failed to decode sync operation: {err}"))
-                })
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        match request {
-            SyncRequest::Operations { .. } => Ok(SyncResponse::Operations { proof, operations }),
-            SyncRequest::Boundary { .. } => {
-                let [op] = operations.try_into().map_err(|operations: Vec<Op>| {
-                    QmdbError::CorruptData(format!(
-                        "sync boundary response contained {} operations instead of one",
-                        operations.len()
-                    ))
-                })?;
-                let pinned_nodes = proto
-                    .pinned_nodes
-                    .iter()
-                    .map(|bytes| {
-                        decode_digest::<H::Digest>(bytes.as_ref(), "operation sync pinned node")
-                    })
-                    .collect::<Result<Vec<_>, _>>()?;
-                Ok(SyncResponse::Boundary {
-                    proof,
-                    op,
-                    pinned_nodes,
-                })
-            }
-        }
-    }
-}
-
-impl<T, F, H, Op> Source for OperationLogSyncResolver<T, F, H, Op>
+impl<T, F, H, Op> Source for OperationLogClient<T, F, H, Op>
 where
     T: ClientTransport + Clone + Send + Sync + 'static,
     T::ResponseBody: Body<Data = Bytes> + Unpin,
@@ -675,141 +511,6 @@ where
             .operation_range_proto(request.size(), request.start(), request.max_ops())
             .await?;
         Ok((self.decode_sync_response(proto, request)?, None))
-    }
-}
-
-/// Store-backed resolver for Commonware `current::sync` over Exoware QMDB's
-/// operation-log API.
-///
-/// The resolver fetches operation-log batches using [`OperationLogSyncResolver`]
-/// and builds `current::sync` targets by authenticating the operation root with
-/// the current-root witness returned by Exoware's current operation-log API.
-pub struct CurrentSyncResolver<T, F: Graftable, H: Hasher, Op: Encode + Read> {
-    operation_log: OperationLogSyncResolver<T, F, H, Op>,
-    current_root: H::Digest,
-}
-
-impl<T, F, H, Op> Clone for CurrentSyncResolver<T, F, H, Op>
-where
-    F: Graftable,
-    H: Hasher,
-    H::Digest: Clone,
-    Op: Encode + Read,
-    OperationLogSyncResolver<T, F, H, Op>: Clone,
-{
-    fn clone(&self) -> Self {
-        Self {
-            operation_log: self.operation_log.clone(),
-            current_root: self.current_root,
-        }
-    }
-}
-
-impl<F, H, Op> CurrentSyncResolver<PreferZstdHttpClient, F, H, Op>
-where
-    F: Graftable + Send + Sync + 'static,
-    H: Hasher + Send + Sync + 'static,
-    H::Digest: DecodeExt<()>,
-    Op: Decode + Encode + Read + Send + Sync + 'static,
-{
-    pub fn plaintext(base: &str, current_root: H::Digest, op_cfg: Op::Cfg) -> Self {
-        Self::new(
-            PreferZstdHttpClient::plaintext(),
-            ClientConfig::new(base.parse().expect("qmdb uri")),
-            current_root,
-            op_cfg,
-        )
-    }
-}
-
-impl<T, F, H, Op> CurrentSyncResolver<T, F, H, Op>
-where
-    T: ClientTransport + Clone + Send + Sync + 'static,
-    T::ResponseBody: Body<Data = Bytes> + Unpin,
-    <T::ResponseBody as Body>::Error: Display,
-    F: Graftable + Send + Sync + 'static,
-    H: Hasher + Send + Sync + 'static,
-    H::Digest: DecodeExt<()>,
-    Op: Decode + Encode + Read + Send + Sync + 'static,
-{
-    pub fn new(
-        transport: T,
-        config: ClientConfig,
-        current_root: H::Digest,
-        op_cfg: Op::Cfg,
-    ) -> Self {
-        Self {
-            operation_log: OperationLogSyncResolver::new(transport, config, op_cfg),
-            current_root,
-        }
-    }
-
-    pub fn from_operation_log(
-        operation_log: OperationLogSyncResolver<T, F, H, Op>,
-        current_root: H::Digest,
-    ) -> Self {
-        Self {
-            operation_log,
-            current_root,
-        }
-    }
-
-    pub fn operation_log(&self) -> &OperationLogSyncResolver<T, F, H, Op> {
-        &self.operation_log
-    }
-
-    pub async fn target(
-        &self,
-        op_count: Location<F>,
-    ) -> Result<SyncTarget<F, H::Digest>, QmdbError> {
-        self.target_range(Location::new(0), op_count).await
-    }
-
-    pub async fn target_range(
-        &self,
-        start_loc: Location<F>,
-        op_count: Location<F>,
-    ) -> Result<SyncTarget<F, H::Digest>, QmdbError> {
-        let range = sync_range(start_loc, op_count)?;
-        let proto = self
-            .operation_log
-            .operation_range_proto(op_count, start_loc, NonZeroU64::MIN)
-            .await?;
-        current_sync_target_from_witness::<F, H>(
-            proto.ops_root.as_ref(),
-            proto.ops_root_witness.as_ref(),
-            &self.current_root,
-            range,
-        )
-    }
-}
-
-impl<T, F, H, Op> Source for CurrentSyncResolver<T, F, H, Op>
-where
-    T: ClientTransport + Clone + Send + Sync + 'static,
-    T::ResponseBody: Body<Data = Bytes> + Unpin,
-    <T::ResponseBody as Body>::Error: Display,
-    F: Graftable + Send + Sync + 'static,
-    H: Hasher + Send + Sync + 'static,
-    H::Digest: DecodeExt<()>,
-    Op: Decode + Encode + Read + Send + Sync + 'static,
-{
-    type Family = F;
-    type Digest = H::Digest;
-    type Op = Op;
-    type Error = QmdbError;
-
-    async fn serve(
-        &self,
-        request: SyncRequest<Self::Family>,
-    ) -> Result<
-        (
-            SyncResponse<Self::Family, Self::Op, Self::Digest>,
-            FeedbackTx,
-        ),
-        Self::Error,
-    > {
-        self.operation_log.serve(request).await
     }
 }
 
@@ -842,12 +543,19 @@ where
         let proof = frame.proof.as_option().ok_or_else(|| {
             QmdbError::CorruptData("qmdb subscribe response missing proof".to_string())
         })?;
-        let tip = Location::<F>::new(frame.tip);
+        let max_digests = proof_digest_cap::<H::Digest>(&proof.proof);
+        let merkle_proof = Proof::<F, H::Digest>::decode_cfg(proof.proof.as_ref(), &max_digests)
+            .map_err(|err| {
+                QmdbError::CorruptData(format!("failed to decode historical multi proof: {err}"))
+            })?;
+        let tip = merkle_proof.leaves.checked_sub(1).ok_or_else(|| {
+            QmdbError::CorruptData("subscription proof has no leaves".to_string())
+        })?;
         let expected_root = root_for_tip(tip)?;
         let (root, operations) = verify_multi_from_proto::<F, H, Op>(
             proof,
+            &merkle_proof,
             self.op_cfg.as_ref(),
-            crate::ProofKind::BatchMulti,
             &expected_root,
         )?;
         Ok(Some(OperationLogSubscribeProof {
@@ -915,6 +623,8 @@ where
         expected_root: &H::Digest,
     ) -> Result<CurrentOperationRangeProof<H::Digest, Op, N, F>, QmdbError> {
         let tip = Location::<F>::new(request.tip);
+        let window =
+            OperationWindow::new(request.tip, request.start_location, request.max_locations)?;
         let response = self
             .rpc
             .get_current_operation_range(request)
@@ -931,6 +641,7 @@ where
             proof,
             self.op_cfg.as_ref(),
             expected_root,
+            window,
         )?;
         Ok(CurrentOperationRangeProof {
             tip,
@@ -943,7 +654,8 @@ where
 }
 
 /// Client for `qmdb.v1.OperationLogService`, parameterized on the Merkle
-/// family and backend operation type.
+/// family and backend operation type. Implements Commonware QMDB sync [`Source`].
+/// Callers supply a target with an independently trusted operation-log root.
 pub struct OperationLogClient<T, F: Graftable, H: Hasher, Op: Encode + Read> {
     rpc: OperationLogServiceClient<T>,
     op_cfg: Arc<Op::Cfg>,
@@ -1010,6 +722,8 @@ where
         expected_root: &H::Digest,
     ) -> Result<OperationLogRangeProof<H::Digest, Op, F>, QmdbError> {
         let tip = Location::<F>::new(request.tip);
+        let window =
+            OperationWindow::new(request.tip, request.start_location, request.max_locations)?;
         let proof = fetch_operation_range_proof(
             &self.rpc,
             request,
@@ -1020,6 +734,7 @@ where
             &proof,
             self.op_cfg.as_ref(),
             expected_root,
+            window,
         )?;
         Ok(OperationLogRangeProof {
             tip,
@@ -1043,6 +758,97 @@ where
             op_cfg: Arc::clone(&self.op_cfg),
             _marker: PhantomData,
         })
+    }
+
+    /// Derive a sync target by authenticating its operation root against a trusted current root
+    pub async fn current_sync_target(
+        &self,
+        range: NonEmptyRange<Location<F>>,
+        expected_current_root: &H::Digest,
+    ) -> Result<SyncTarget<F, H::Digest>, QmdbError> {
+        let proto = self
+            .operation_range_proto(range.end(), range.start(), NonZeroU64::MIN)
+            .await?;
+        current_sync_target_from_witness::<F, H>(
+            proto.ops_root.as_ref(),
+            proto.ops_root_witness.as_ref(),
+            expected_current_root,
+            range,
+        )
+    }
+
+    async fn operation_range_proto(
+        &self,
+        op_count: Location<F>,
+        start_loc: Location<F>,
+        max_ops: NonZeroU64,
+    ) -> Result<HistoricalOperationRangeProof, QmdbError> {
+        let count = op_count.as_u64();
+        let Some(tip) = count.checked_sub(1) else {
+            return Err(QmdbError::CorruptData(
+                "cannot fetch sync operations for an empty target".to_string(),
+            ));
+        };
+        // The upstream maximum permits a smaller transport batch
+        let max_locations = u32::try_from(max_ops.get()).unwrap_or(u32::MAX);
+        fetch_operation_range_proof(
+            &self.rpc,
+            GetOperationRangeRequest {
+                tip,
+                start_location: start_loc.as_u64(),
+                max_locations,
+                ..Default::default()
+            },
+            "sync operation range response missing proof",
+        )
+        .await
+    }
+
+    fn decode_sync_response(
+        &self,
+        proto: HistoricalOperationRangeProof,
+        request: SyncRequest<F>,
+    ) -> Result<SyncResponse<F, Op, H::Digest>, QmdbError> {
+        let max_digests = proof_digest_cap::<H::Digest>(&proto.proof);
+        let proof = Proof::<F, H::Digest>::decode_cfg(proto.proof.as_ref(), &max_digests).map_err(
+            |err| {
+                QmdbError::CorruptData(format!(
+                    "failed to decode sync operation range proof: {err}"
+                ))
+            },
+        )?;
+        let operations = proto
+            .encoded_operations
+            .iter()
+            .map(|bytes| {
+                Op::decode_cfg(bytes.as_ref(), self.op_cfg.as_ref()).map_err(|err| {
+                    QmdbError::CorruptData(format!("failed to decode sync operation: {err}"))
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        match request {
+            SyncRequest::Operations { .. } => Ok(SyncResponse::Operations { proof, operations }),
+            SyncRequest::Boundary { .. } => {
+                let [op] = operations.try_into().map_err(|operations: Vec<Op>| {
+                    QmdbError::CorruptData(format!(
+                        "sync boundary response contained {} operations instead of one",
+                        operations.len()
+                    ))
+                })?;
+                let pinned_nodes = proto
+                    .pinned_nodes
+                    .iter()
+                    .map(|bytes| {
+                        decode_digest::<H::Digest>(bytes.as_ref(), "operation sync pinned node")
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(SyncResponse::Boundary {
+                    proof,
+                    op,
+                    pinned_nodes,
+                })
+            }
+        }
     }
 }
 
@@ -1073,18 +879,6 @@ where
         .ok_or_else(|| QmdbError::CorruptData(missing_proof_message.to_string()))
 }
 
-fn sync_range<F: Family>(
-    start_loc: Location<F>,
-    op_count: Location<F>,
-) -> Result<NonEmptyRange<Location<F>>, QmdbError> {
-    if start_loc >= op_count {
-        return Err(QmdbError::CorruptData(
-            "sync target range must be non-empty".to_string(),
-        ));
-    }
-    Ok(commonware_utils::non_empty_range!(start_loc, op_count))
-}
-
 fn proof_digest_cap<D: Digest>(encoded_proof: &[u8]) -> usize {
     encoded_proof.len() / D::SIZE + 1
 }
@@ -1113,9 +907,9 @@ where
         ))
     })?;
     if !witness.verify::<H>(&ops_root, current_root) {
-        return Err(QmdbError::CorruptData(
-            "current sync ops-root witness failed verification".to_string(),
-        ));
+        return Err(QmdbError::ProofVerification {
+            kind: crate::ProofKind::RangeCheckpoint,
+        });
     }
     Ok(SyncTarget::new(ops_root, range))
 }
@@ -1130,47 +924,37 @@ where
     H::Digest: DecodeExt<()>,
     H: Hasher,
 {
-    match (ops_root.is_empty(), ops_root_witness.is_empty()) {
-        (true, true) => Ok(*expected_root),
-        (false, true) => {
-            let ops_root = decode_digest::<H::Digest>(ops_root, "historical ops root")?;
-            if ops_root != *expected_root {
-                return Err(QmdbError::ProofVerification {
-                    kind: crate::ProofKind::BatchMulti,
-                });
-            }
-            Ok(ops_root)
-        }
-        (false, false) => {
-            let ops_root = decode_digest::<H::Digest>(ops_root, "historical ops root")?;
-            let witness =
-                OpsRootWitness::<F, H::Digest>::decode(ops_root_witness).map_err(|err| {
-                    QmdbError::CorruptData(format!(
-                        "failed to decode historical ops-root witness: {err}"
-                    ))
-                })?;
-            if !witness.verify::<H>(&ops_root, expected_root) {
-                return Err(QmdbError::ProofVerification {
-                    kind: crate::ProofKind::BatchMulti,
-                });
-            }
-            Ok(ops_root)
-        }
-        _ => Err(QmdbError::CorruptData(
-            "historical proof missing ops_root for ops_root_witness".to_string(),
-        )),
+    if ops_root.is_empty() {
+        return Err(QmdbError::CorruptData(
+            "historical proof missing ops_root".to_string(),
+        ));
     }
-}
-
-enum ExclusionBoundary<K> {
-    Span { start: K, end: K },
-    Empty,
+    let ops_root = decode_digest::<H::Digest>(ops_root, "historical ops root")?;
+    if ops_root_witness.is_empty() {
+        if ops_root != *expected_root {
+            return Err(QmdbError::ProofVerification {
+                kind: crate::ProofKind::BatchMulti,
+            });
+        }
+        return Ok(ops_root);
+    }
+    let witness = OpsRootWitness::<F, H::Digest>::decode(ops_root_witness).map_err(|err| {
+        QmdbError::CorruptData(format!(
+            "failed to decode historical ops-root witness: {err}"
+        ))
+    })?;
+    if !witness.verify::<H>(&ops_root, expected_root) {
+        return Err(QmdbError::ProofVerification {
+            kind: crate::ProofKind::BatchMulti,
+        });
+    }
+    Ok(ops_root)
 }
 
 fn verify_multi_from_proto<F, H, Op>(
     proto: &HistoricalMultiProof,
+    proof: &Proof<F, H::Digest>,
     op_cfg: &Op::Cfg,
-    kind: crate::ProofKind,
     root: &H::Digest,
 ) -> Result<(H::Digest, Vec<(Location<F>, Op)>), QmdbError>
 where
@@ -1194,13 +978,10 @@ where
         .collect::<Result<Vec<_>, QmdbError>>()?;
     let target_root =
         historical_target_root::<F, H>(&proto.ops_root, &proto.ops_root_witness, root)?;
-    let max_digests = proof_digest_cap::<H::Digest>(&proto.proof);
-    let proof =
-        Proof::<F, H::Digest>::decode_cfg(proto.proof.as_ref(), &max_digests).map_err(|err| {
-            QmdbError::CorruptData(format!("failed to decode historical multi proof: {err}"))
-        })?;
-    if !verify_multi_proof::<H, _, _>(&proof, &operations, &target_root) {
-        return Err(QmdbError::ProofVerification { kind });
+    if !verify_multi_proof::<H, _, _>(proof, &operations, &target_root) {
+        return Err(QmdbError::ProofVerification {
+            kind: crate::ProofKind::BatchMulti,
+        });
     }
     Ok((*root, operations))
 }
@@ -1209,7 +990,8 @@ fn verify_operation_range_from_proto<F, H, Op>(
     proto: &HistoricalOperationRangeProof,
     op_cfg: &Op::Cfg,
     root: &H::Digest,
-) -> Result<(H::Digest, Vec<(Location<F>, Op)>), QmdbError>
+    window: OperationWindow,
+) -> Result<(H::Digest, Vec<Op>), QmdbError>
 where
     F: Graftable,
     H: Hasher,
@@ -1230,6 +1012,13 @@ where
                 "failed to decode historical operation range proof: {err}"
             ))
         })?;
+    window
+        .validate(
+            proto.start_location,
+            proto.encoded_operations.len(),
+            proof.leaves.as_u64(),
+        )
+        .map_err(QmdbError::RangeMismatch)?;
     let start = Location::<F>::new(proto.start_location);
     let decoded_operations = proto
         .encoded_operations
@@ -1259,27 +1048,15 @@ where
             kind: crate::ProofKind::RangeCheckpoint,
         });
     }
-    let operations = decoded_operations
-        .into_iter()
-        .enumerate()
-        .map(|(offset, operation)| {
-            let offset = u64::try_from(offset).map_err(|err| {
-                QmdbError::CorruptData(format!("operation range offset overflow: {err}"))
-            })?;
-            let location = start.checked_add(offset).ok_or_else(|| {
-                QmdbError::CorruptData("operation range location overflow".to_string())
-            })?;
-            Ok((location, operation))
-        })
-        .collect::<Result<Vec<_>, QmdbError>>()?;
-    Ok((*root, operations))
+    Ok((*root, decoded_operations))
 }
 
 fn verify_current_operation_range_from_proto<F, H, Op, const N: usize>(
     proto: &ProtoCurrentOperationRangeProof,
     op_cfg: &Op::Cfg,
     root: &H::Digest,
-) -> Result<(H::Digest, Vec<(Location<F>, Op)>, Vec<[u8; N]>), QmdbError>
+    window: OperationWindow,
+) -> Result<(H::Digest, Vec<Op>, Vec<[u8; N]>), QmdbError>
 where
     F: Graftable,
     H: Hasher,
@@ -1298,6 +1075,13 @@ where
                 "failed to decode current operation range proof: {err}"
             ))
         })?;
+    window
+        .validate(
+            proto.start_location,
+            proto.encoded_operations.len(),
+            proof.proof.leaves.as_u64(),
+        )
+        .map_err(QmdbError::RangeMismatch)?;
     let start = Location::<F>::new(proto.start_location);
     let decoded_operations = proto
         .encoded_operations
@@ -1328,76 +1112,43 @@ where
             kind: crate::ProofKind::CurrentRange,
         });
     }
-    let operations = decoded_operations
-        .into_iter()
-        .enumerate()
-        .map(|(offset, operation)| {
-            let offset = u64::try_from(offset).map_err(|err| {
-                QmdbError::CorruptData(format!("current operation range offset overflow: {err}"))
-            })?;
-            let location = start.checked_add(offset).ok_or_else(|| {
-                QmdbError::CorruptData("current operation range location overflow".to_string())
-            })?;
-            Ok((location, operation))
-        })
-        .collect::<Result<Vec<_>, QmdbError>>()?;
-    Ok((*root, operations, chunks))
+    Ok((*root, decoded_operations, chunks))
 }
 
-fn verify_key_value_from_proto<F, H, K, V, const N: usize, E>(
+fn verify_key_value_from_proto<F, H, Op, const N: usize>(
     proto: &ProtoCurrentKeyValueProof,
     root: &H::Digest,
-    op_cfg: &<ordered::Operation<F, K, E> as Read>::Cfg,
-    key_cfg: &K::Cfg,
-) -> Result<VerifiedKeyValue<H::Digest, K, V, F, E>, QmdbError>
+    op_cfg: &Op::Cfg,
+) -> Result<VerifiedKeyValue<H::Digest, Op, F>, QmdbError>
 where
     F: Graftable,
     H: Hasher,
     H::Digest: DecodeExt<()>,
-    K: QmdbKey + commonware_codec::Codec,
-    V: commonware_codec::Codec + Clone + Send + Sync,
-    E: ValueEncoding<Value = V>,
-    K::Cfg: Clone,
-    ordered::Operation<F, K, E>: Decode + Encode + Read,
+    Op: commonware_codec::Codec + Clone + Operation<F>,
 {
-    let operation =
-        ordered::Operation::<F, K, E>::decode_cfg(proto.encoded_operation.as_ref(), op_cfg)
-            .map_err(|err| {
-                QmdbError::CorruptData(format!(
-                    "failed to decode current key-value operation: {err}",
-                ))
-            })?;
-    let ordered::Operation::Update(update) = &operation else {
+    let operation = Op::decode_cfg(proto.encoded_operation.as_ref(), op_cfg).map_err(|err| {
+        QmdbError::CorruptData(format!(
+            "failed to decode current key-value operation: {err}",
+        ))
+    })?;
+    if !operation.is_update() {
         return Err(QmdbError::CorruptData(
             "current key-value proof operation must be an update".to_string(),
         ));
-    };
+    }
     let max_digests = proof_digest_cap::<H::Digest>(&proto.proof);
-    let proof = KeyValueProof::<F, K, H::Digest, N>::decode_cfg(
-        proto.proof.as_ref(),
-        &(max_digests, key_cfg.clone()),
-    )
-    .map_err(|err| {
+    let proof = OperationProof::<F, H::Digest, N>::decode_cfg(proto.proof.as_ref(), &max_digests)
+        .map_err(|err| {
         QmdbError::CorruptData(format!("failed to decode current key-value proof: {err}"))
     })?;
-    if proof.next_key != update.next_key {
-        return Err(QmdbError::ProofVerification {
-            kind: crate::ProofKind::CurrentKeyValue,
-        });
-    }
-    if !verify_ordered_key_value_proof::<F, H, K, E, N>(
-        update.key.clone(),
-        update.value.clone(),
-        &proof,
-        root,
-    ) {
+    if !proof.verify::<H, _>(operation.clone(), root) {
         return Err(QmdbError::ProofVerification {
             kind: crate::ProofKind::CurrentKeyValue,
         });
     }
     Ok(VerifiedKeyValue {
         root: *root,
-        location: proof.proof.loc,
+        location: proof.loc,
         operation,
     })
 }
@@ -1407,59 +1158,7 @@ fn verify_unordered_key_value_from_proto<F, H, K, V, const N: usize, E>(
     requested_key: &[u8],
     root: &H::Digest,
     op_cfg: &<unordered::Operation<F, K, E> as Read>::Cfg,
-) -> Result<VerifiedUnorderedKeyValue<H::Digest, K, V, F, E>, QmdbError>
-where
-    F: Graftable,
-    H: Hasher,
-    H::Digest: DecodeExt<()>,
-    K: commonware_utils::Array + QmdbKey + commonware_codec::Codec,
-    V: commonware_codec::Codec + Clone + Send + Sync,
-    E: ValueEncoding<Value = V>,
-    unordered::Operation<F, K, E>: Decode + Encode + Read,
-{
-    let operation =
-        unordered::Operation::<F, K, E>::decode_cfg(proto.encoded_operation.as_ref(), op_cfg)
-            .map_err(|err| {
-                QmdbError::CorruptData(format!(
-                    "failed to decode unordered current key-value operation: {err}",
-                ))
-            })?;
-    let unordered::Operation::Update(update) = &operation else {
-        return Err(QmdbError::CorruptData(
-            "unordered current key-value proof operation must be an update".to_string(),
-        ));
-    };
-    if update.0.as_ref() != requested_key {
-        return Err(QmdbError::ProofVerification {
-            kind: crate::ProofKind::CurrentKeyValue,
-        });
-    }
-    let max_digests = proof_digest_cap::<H::Digest>(&proto.proof);
-    let proof =
-        UnorderedKeyValueProof::<F, H::Digest, N>::decode_cfg(proto.proof.as_ref(), &max_digests)
-            .map_err(|err| {
-            QmdbError::CorruptData(format!("failed to decode unordered current proof: {err}"))
-        })?;
-    if !proof.verify::<H, _>(operation.clone(), root) {
-        return Err(QmdbError::ProofVerification {
-            kind: crate::ProofKind::CurrentKeyValue,
-        });
-    }
-    Ok(VerifiedUnorderedKeyValue {
-        root: *root,
-        location: proof.loc,
-        operation,
-    })
-}
-
-fn verify_key_exclusion_from_proto<F, H, K, V, const N: usize, E>(
-    proto: &ProtoCurrentKeyExclusionProof,
-    requested_key: &[u8],
-    root: &H::Digest,
-    update_cfg: &<ordered::Update<K, E> as Read>::Cfg,
-    key_cfg: &K::Cfg,
-    value_cfg: &V::Cfg,
-) -> Result<ExclusionBoundary<K>, QmdbError>
+) -> Result<VerifiedKeyValue<H::Digest, unordered::Operation<F, K, E>, F>, QmdbError>
 where
     F: Graftable,
     H: Hasher,
@@ -1467,8 +1166,36 @@ where
     K: QmdbKey + commonware_codec::Codec,
     V: commonware_codec::Codec + Clone + Send + Sync,
     E: ValueEncoding<Value = V>,
-    <ordered::Update<K, E> as Read>::Cfg: Clone,
-    V::Cfg: Clone,
+    unordered::Operation<F, K, E>: Decode + Encode + Read,
+{
+    let verified =
+        verify_key_value_from_proto::<F, H, unordered::Operation<F, K, E>, N>(proto, root, op_cfg)?;
+    if !matches!(&verified.operation, unordered::Operation::Update(update) if update.0.encode().as_ref() == requested_key)
+    {
+        return Err(QmdbError::ProofVerification {
+            kind: crate::ProofKind::CurrentKeyValue,
+        });
+    }
+    Ok(verified)
+}
+
+/// Verify an exclusion proof and return the authenticated successor of the requested key
+/// (`None` when the proof shows an empty database)
+fn verify_key_exclusion_from_proto<F, H, K, V, const N: usize, E>(
+    proto: &ProtoCurrentKeyExclusionProof,
+    requested_key: &[u8],
+    root: &H::Digest,
+    update_cfg: &<ordered::Update<K, E> as Read>::Cfg,
+    key_cfg: &K::Cfg,
+    value_cfg: &V::Cfg,
+) -> Result<Option<K>, QmdbError>
+where
+    F: Graftable,
+    H: Hasher,
+    H::Digest: DecodeExt<()>,
+    K: QmdbKey + commonware_codec::Codec,
+    V: commonware_codec::Codec + Clone + Send + Sync,
+    E: ValueEncoding<Value = V>,
     ordered::Operation<F, K, E>: Decode + Encode + Read,
     ordered::Update<K, E>: Read,
     ExclusionProof<F, K, E, H::Digest, N>:
@@ -1492,22 +1219,10 @@ where
             kind: crate::ProofKind::CurrentKeyExclusion,
         });
     }
-    let boundary = match proof {
-        ExclusionProof::KeyValue(_, update) => ExclusionBoundary::Span {
-            start: update.key,
-            end: update.next_key,
-        },
-        ExclusionProof::Commit(_, _) => ExclusionBoundary::Empty,
-    };
-    Ok(boundary)
-}
-
-fn span_contains_key<K: Ord>(span_start: &K, span_end: &K, key: &K) -> bool {
-    if span_start >= span_end {
-        key >= span_start || key < span_end
-    } else {
-        key >= span_start && key < span_end
-    }
+    Ok(match proof {
+        ExclusionProof::KeyValue(_, update) => Some(update.next_key),
+        ExclusionProof::Commit(_, _) => None,
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1516,6 +1231,7 @@ fn verify_get_range_from_proto<F, H, K, V, const N: usize, E>(
     root: &H::Digest,
     start_key: &[u8],
     end_key: Option<&[u8]>,
+    limit: u32,
     op_cfg: &<ordered::Operation<F, K, E> as Read>::Cfg,
     update_cfg: &<ordered::Update<K, E> as Read>::Cfg,
     key_cfg: &K::Cfg,
@@ -1528,9 +1244,6 @@ where
     K: QmdbKey + commonware_codec::Codec,
     V: commonware_codec::Codec + Clone + Send + Sync,
     E: ValueEncoding<Value = V>,
-    K::Cfg: Clone,
-    <ordered::Update<K, E> as Read>::Cfg: Clone,
-    V::Cfg: Clone,
     ordered::Operation<F, K, E>: Decode + Encode + Read,
     ordered::Update<K, E>: Read,
     ExclusionProof<F, K, E, H::Digest, N>:
@@ -1549,143 +1262,49 @@ where
         })
         .transpose()?;
     let mut entries = Vec::with_capacity(response.entries.len());
-    for entry in &response.entries {
-        let proof = entry.proof.as_option().ok_or_else(|| {
-            QmdbError::CorruptData("qmdb get_range entry missing proof".to_string())
-        })?;
-        let verified =
-            verify_key_value_from_proto::<F, H, K, V, N, E>(proof, root, op_cfg, key_cfg)?;
-        let ordered::Operation::Update(update) = &verified.operation else {
-            return Err(QmdbError::CorruptData(
-                "qmdb get_range entry proof did not verify an update".to_string(),
-            ));
-        };
-        let entry_key = K::decode_cfg(entry.key.as_slice(), key_cfg).map_err(|err| {
-            QmdbError::CorruptData(format!("failed to decode range entry key: {err}"))
-        })?;
-        if update.key != entry_key {
-            return Err(QmdbError::ProofVerification {
-                kind: crate::ProofKind::CurrentKeyValue,
-            });
-        }
-        entries.push(verified);
+    for proof in &response.entries {
+        entries.push(verify_key_value_from_proto::<
+            F,
+            H,
+            ordered::Operation<F, K, E>,
+            N,
+        >(proof, root, op_cfg)?);
     }
 
-    if let Some(first) = entries.first() {
-        let ordered::Operation::Update(first_update) = &first.operation else {
-            unreachable!("range entries were checked as updates");
-        };
-        if first_update.key != start_key {
-            let start_proof = response.start_proof.as_option().ok_or_else(|| {
-                QmdbError::CorruptData(
-                    "qmdb get_range response missing start boundary proof".to_string(),
-                )
-            })?;
-            match verify_key_exclusion_from_proto::<F, H, K, V, N, E>(
-                start_proof,
-                encoded_start_key,
-                root,
-                update_cfg,
-                key_cfg,
-                value_cfg,
-            )? {
-                ExclusionBoundary::Span { end, .. } if end == first_update.key => {}
-                ExclusionBoundary::Span { .. } | ExclusionBoundary::Empty => {
-                    return Err(QmdbError::ProofVerification {
-                        kind: crate::ProofKind::CurrentKeyExclusion,
-                    })
-                }
-            }
-        }
-    } else {
-        let start_proof = response.start_proof.as_option().ok_or_else(|| {
-            QmdbError::CorruptData(
-                "empty qmdb get_range response missing start boundary proof".to_string(),
-            )
+    let keys = entries
+        .iter()
+        .map(|entry| match &entry.operation {
+            ordered::Operation::Update(update) => (&update.key, &update.next_key),
+            _ => unreachable!("range entries were checked as updates"),
+        })
+        .collect::<Vec<_>>();
+    let start_successor = if keys.first().is_none_or(|(key, _)| **key != start_key) {
+        let proof = response.start_proof.as_option().ok_or_else(|| {
+            QmdbError::CorruptData("key range missing start boundary proof".into())
         })?;
-        let boundary = verify_key_exclusion_from_proto::<F, H, K, V, N, E>(
-            start_proof,
+        verify_key_exclusion_from_proto::<F, H, K, V, N, E>(
+            proof,
             encoded_start_key,
             root,
             update_cfg,
             key_cfg,
             value_cfg,
-        )?;
-        match (end_key.as_ref(), boundary) {
-            (Some(end_key), ExclusionBoundary::Span { start, end })
-                if !span_contains_key(&start, &end, end_key) && end != *end_key =>
-            {
-                return Err(QmdbError::ProofVerification {
-                    kind: crate::ProofKind::CurrentKeyExclusion,
-                });
-            }
-            (None, ExclusionBoundary::Span { end, .. }) if end > start_key => {
-                return Err(QmdbError::ProofVerification {
-                    kind: crate::ProofKind::CurrentKeyExclusion,
-                });
-            }
-            _ => {}
-        }
-    }
-
-    for pair in entries.windows(2) {
-        let ordered::Operation::Update(left) = &pair[0].operation else {
-            unreachable!("range entries were checked as updates");
-        };
-        let ordered::Operation::Update(right) = &pair[1].operation else {
-            unreachable!("range entries were checked as updates");
-        };
-        if left.next_key != right.key {
-            return Err(QmdbError::ProofVerification {
-                kind: crate::ProofKind::CurrentKeyValue,
-            });
-        }
-    }
-
-    if response.has_more {
-        let Some(last) = entries.last() else {
-            return Err(QmdbError::CorruptData(
-                "truncated qmdb get_range response has no final entry".to_string(),
-            ));
-        };
-        let ordered::Operation::Update(last_update) = &last.operation else {
-            unreachable!("range entries were checked as updates");
-        };
-        let next_start_key =
-            K::decode_cfg(response.next_start_key.as_slice(), key_cfg).map_err(|err| {
-                QmdbError::CorruptData(format!("failed to decode range next_start_key: {err}"))
-            })?;
-        if next_start_key != last_update.next_key {
-            return Err(QmdbError::ProofVerification {
-                kind: crate::ProofKind::CurrentKeyValue,
-            });
-        }
-    } else if let Some(first) = entries.first() {
-        let last = entries.last().expect("first exists");
-        let ordered::Operation::Update(first_update) = &first.operation else {
-            unreachable!("range entries were checked as updates");
-        };
-        let ordered::Operation::Update(last_update) = &last.operation else {
-            unreachable!("range entries were checked as updates");
-        };
-        if let Some(end_key) = end_key.as_ref() {
-            if last_update.next_key != *end_key
-                && !span_contains_key(&last_update.key, &last_update.next_key, end_key)
-            {
-                return Err(QmdbError::ProofVerification {
-                    kind: crate::ProofKind::CurrentKeyValue,
-                });
-            }
-        } else if last_update.next_key > first_update.key {
-            return Err(QmdbError::ProofVerification {
-                kind: crate::ProofKind::CurrentKeyValue,
-            });
-        }
-    }
+        )?
+    } else {
+        None
+    };
+    let next_start_key = validate_key_range(
+        &start_key,
+        end_key.as_ref(),
+        limit,
+        &keys,
+        start_successor.as_ref(),
+    )
+    .map_err(QmdbError::RangeMismatch)?
+    .map(Encode::encode);
 
     Ok(VerifiedKeyRange {
         entries,
-        has_more: response.has_more,
-        next_start_key: Bytes::from(response.next_start_key.clone()),
+        next_start_key,
     })
 }

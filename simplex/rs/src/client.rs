@@ -1,6 +1,6 @@
 use bytes::Bytes;
 use commonware_codec::{Decode, Encode};
-use commonware_consensus::{Block, Viewable};
+use commonware_consensus::Block;
 use commonware_cryptography::{certificate, Digest};
 use exoware_sdk::keys::Key;
 use exoware_sdk::{ClientError, PrefixedStoreClient, RangeMode, StoreBatchUpload, StoreWriteBatch};
@@ -62,12 +62,12 @@ impl PreparedUpload {
 
 /// Store-backed writer for Commonware Simplex blocks and certificates.
 ///
-/// The writer stores five logical indexes:
+/// The writer stores header, block, and certificate indexes:
 ///
 /// - header bytes by header digest
 /// - full `{ header, body }` bytes by header digest
-/// - notarized `{ proof, header }` bytes by Simplex view
-/// - finalized `{ proof, header }` bytes by Simplex view
+/// - notarized `{ proof, header }` bytes by Simplex round
+/// - finalized `{ proof, header }` bytes by Simplex round
 /// - finalized `{ proof, header }` bytes by header height
 #[derive(Clone, Debug)]
 pub struct SimplexClient {
@@ -78,10 +78,6 @@ impl SimplexClient {
     /// Build a client over `client`'s namespace prefix.
     pub fn new(client: PrefixedStoreClient) -> Self {
         Self { client }
-    }
-
-    pub fn store_client(&self) -> &PrefixedStoreClient {
-        &self.client
     }
 
     pub fn into_store_client(self) -> PrefixedStoreClient {
@@ -133,10 +129,11 @@ impl SimplexClient {
         }
 
         let mut prepared = self.prepare_header(&notarized.header);
+        let encoded = notarized.encode();
         prepared.summary.notarizations = 1;
         prepared.push(
-            keys::notarization_by_view(notarized.proof.view()),
-            notarized.encode(),
+            keys::notarization_by_round(notarized.proof.round()),
+            encoded,
         );
         Ok(prepared)
     }
@@ -159,7 +156,7 @@ impl SimplexClient {
         prepared.summary.finalizations = 1;
         prepared.summary.finalized_height_indexes = 1;
         prepared.push(
-            keys::finalization_by_view(finalized.proof.view()),
+            keys::finalization_by_round(finalized.proof.round()),
             encoded.clone(),
         );
         prepared.push(
@@ -168,33 +165,6 @@ impl SimplexClient {
         );
         Ok(prepared)
     }
-
-    pub fn stage_upload(
-        &self,
-        prepared: &PreparedUpload,
-        batch: &mut StoreWriteBatch,
-    ) -> Result<(), SimplexError> {
-        if prepared.is_empty() {
-            return Err(SimplexError::EmptyUpload);
-        }
-        for entry in prepared.entries() {
-            batch.push(&self.client, &entry.key, entry.value.clone())?;
-        }
-        Ok(())
-    }
-
-    pub async fn mark_upload_persisted(
-        &self,
-        prepared: PreparedUpload,
-        sequence_number: u64,
-    ) -> UploadReceipt {
-        UploadReceipt {
-            store_sequence_number: sequence_number,
-            summary: prepared.summary,
-        }
-    }
-
-    pub async fn mark_upload_failed(&self, _prepared: PreparedUpload, _err: impl ToString) {}
 
     pub async fn upload_header<B>(&self, header: &B) -> Result<UploadReceipt, SimplexError>
     where
@@ -256,18 +226,18 @@ impl SimplexClient {
         self.get_raw(keys::block_by_digest(digest)).await
     }
 
-    pub async fn get_notarized_raw(
+    pub async fn get_notarized_by_round_raw(
         &self,
-        view: commonware_consensus::types::View,
+        round: commonware_consensus::types::Round,
     ) -> Result<Option<Bytes>, SimplexError> {
-        self.get_raw(keys::notarization_by_view(view)).await
+        self.get_raw(keys::notarization_by_round(round)).await
     }
 
-    pub async fn get_finalized_by_view_raw(
+    pub async fn get_finalized_by_round_raw(
         &self,
-        view: commonware_consensus::types::View,
+        round: commonware_consensus::types::Round,
     ) -> Result<Option<Bytes>, SimplexError> {
-        self.get_raw(keys::finalization_by_view(view)).await
+        self.get_raw(keys::finalization_by_round(round)).await
     }
 
     pub async fn get_finalized_by_height_raw(
@@ -278,7 +248,7 @@ impl SimplexClient {
     }
 
     pub async fn latest_finalized_raw(&self) -> Result<Option<Bytes>, SimplexError> {
-        self.latest_raw(RecordKind::FinalizedByHeight).await
+        Ok(self.latest_finalized_row().await?.map(|(_, value)| value))
     }
 
     pub async fn get_header<B, D>(
@@ -290,7 +260,9 @@ impl SimplexClient {
         B: Block<Digest = D>,
         D: Digest,
     {
-        self.decode_optional(self.get_header_raw(digest).await?, cfg)
+        self.decode_indexed(self.get_header_raw(digest).await?, cfg, |value: &B| {
+            value.digest() == *digest
+        })
     }
 
     pub async fn get_block<B, D>(
@@ -302,12 +274,16 @@ impl SimplexClient {
         B: Block<Digest = D>,
         D: Digest,
     {
-        self.decode_optional(self.get_block_raw(digest).await?, cfg)
+        self.decode_indexed(
+            self.get_block_raw(digest).await?,
+            cfg,
+            |value: &BlockData<B>| value.header.digest() == *digest,
+        )
     }
 
-    pub async fn get_notarized<B, S, D>(
+    pub async fn get_notarized_by_round<B, S, D>(
         &self,
-        view: commonware_consensus::types::View,
+        round: commonware_consensus::types::Round,
         cfg: &<Notarized<B, S, D> as commonware_codec::Read>::Cfg,
     ) -> Result<Option<Notarized<B, S, D>>, SimplexError>
     where
@@ -316,7 +292,11 @@ impl SimplexClient {
         D: Digest,
         <S::Certificate as commonware_codec::Read>::Cfg: Clone,
     {
-        self.decode_optional(self.get_notarized_raw(view).await?, cfg)
+        self.decode_indexed(
+            self.get_notarized_by_round_raw(round).await?,
+            cfg,
+            |value: &Notarized<B, S, D>| value.proof.round() == round,
+        )
     }
 
     pub async fn get_finalized_by_height<B, S, D>(
@@ -330,12 +310,16 @@ impl SimplexClient {
         D: Digest,
         <S::Certificate as commonware_codec::Read>::Cfg: Clone,
     {
-        self.decode_optional(self.get_finalized_by_height_raw(height).await?, cfg)
+        self.decode_indexed(
+            self.get_finalized_by_height_raw(height).await?,
+            cfg,
+            |value: &Finalized<B, S, D>| value.header.height() == height,
+        )
     }
 
-    pub async fn get_finalized_by_view<B, S, D>(
+    pub async fn get_finalized_by_round<B, S, D>(
         &self,
-        view: commonware_consensus::types::View,
+        round: commonware_consensus::types::Round,
         cfg: &<Finalized<B, S, D> as commonware_codec::Read>::Cfg,
     ) -> Result<Option<Finalized<B, S, D>>, SimplexError>
     where
@@ -344,7 +328,11 @@ impl SimplexClient {
         D: Digest,
         <S::Certificate as commonware_codec::Read>::Cfg: Clone,
     {
-        self.decode_optional(self.get_finalized_by_view_raw(view).await?, cfg)
+        self.decode_indexed(
+            self.get_finalized_by_round_raw(round).await?,
+            cfg,
+            |value: &Finalized<B, S, D>| value.proof.round() == round,
+        )
     }
 
     pub async fn latest_finalized<B, S, D>(
@@ -357,31 +345,44 @@ impl SimplexClient {
         D: Digest,
         <S::Certificate as commonware_codec::Read>::Cfg: Clone,
     {
-        self.decode_optional(self.latest_finalized_raw().await?, cfg)
+        let Some((key, value)) = self.latest_finalized_row().await? else {
+            return Ok(None);
+        };
+        let height =
+            keys::finalized_height_from_key(&key).ok_or(SimplexError::RecordKeyMismatch)?;
+        self.decode_indexed(Some(value), cfg, |value: &Finalized<B, S, D>| {
+            value.header.height() == height
+        })
     }
 
     async fn get_raw(&self, key: Key) -> Result<Option<Bytes>, SimplexError> {
         Ok(self.client.query().get(&key).await?)
     }
 
-    async fn latest_raw(&self, kind: RecordKind) -> Result<Option<Bytes>, SimplexError> {
-        let (start, end) = keys::range_for_kind(kind);
+    async fn latest_finalized_row(&self) -> Result<Option<(Key, Bytes)>, SimplexError> {
+        let (start, end) = keys::range_for_kind(RecordKind::FinalizedByHeight);
         let rows = self
             .client
             .query()
             .range_with_mode(&start, &end, 1, RangeMode::Reverse)
             .await?;
-        Ok(rows.into_iter().next().map(|(_, value)| value))
+        Ok(rows.into_iter().next())
     }
 
-    fn decode_optional<T: Decode>(
+    fn decode_indexed<T: Decode>(
         &self,
         value: Option<Bytes>,
         cfg: &T::Cfg,
+        matches: impl FnOnce(&T) -> bool,
     ) -> Result<Option<T>, SimplexError> {
-        value
-            .map(|bytes| T::decode_cfg(bytes, cfg).map_err(SimplexError::from))
-            .transpose()
+        let Some(bytes) = value else {
+            return Ok(None);
+        };
+        let decoded = T::decode_cfg(bytes, cfg)?;
+        if !matches(&decoded) {
+            return Err(SimplexError::RecordKeyMismatch);
+        }
+        Ok(Some(decoded))
     }
 }
 
@@ -399,7 +400,13 @@ impl StoreBatchUpload for SimplexClient {
         prepared: &mut Self::Prepared,
         batch: &mut StoreWriteBatch,
     ) -> Result<(), Self::Error> {
-        SimplexClient::stage_upload(self, prepared, batch)
+        if prepared.is_empty() {
+            return Err(SimplexError::EmptyUpload);
+        }
+        for entry in prepared.entries() {
+            batch.push(&self.client, &entry.key, entry.value.clone())?;
+        }
+        Ok(())
     }
 
     fn commit_error(&self, error: ClientError) -> Self::Error {
@@ -416,21 +423,22 @@ impl StoreBatchUpload for SimplexClient {
         Self::Prepared: 'a,
     {
         Box::pin(async move {
-            SimplexClient::mark_upload_persisted(self, prepared, sequence_number).await
+            UploadReceipt {
+                store_sequence_number: sequence_number,
+                summary: prepared.summary(),
+            }
         })
     }
 
     fn mark_upload_failed<'a>(
         &'a self,
-        prepared: Self::Prepared,
-        error: String,
+        _prepared: Self::Prepared,
+        _error: String,
     ) -> BoxFuture<'a, ()>
     where
         Self: Sync + 'a,
         Self::Prepared: 'a,
     {
-        Box::pin(async move {
-            SimplexClient::mark_upload_failed(self, prepared, error).await;
-        })
+        Box::pin(async {})
     }
 }

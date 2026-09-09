@@ -46,6 +46,7 @@ use exoware_proto::{
     PreferZstdHttpClient as ProtoPreferZstdHttpClient,
 };
 use futures::future::BoxFuture;
+use futures::{stream::BoxStream, StreamExt};
 use keys::is_valid_key_size;
 use kv_codec::{KvExpr, KvFieldRef, KvReducedValue};
 use rustls_platform_verifier::ConfigVerifierExt;
@@ -276,6 +277,13 @@ impl StoreKeyPrefix {
         self.inner
             .strip(key)
             .map_err(|_| StoreKeyPrefixError::PrefixMismatch)
+    }
+
+    /// Return the smallest valid logical key strictly greater than `key`, or
+    /// `None` when no later key remains under this prefix.
+    pub fn next_key(&self, key: &Key) -> Result<Option<Key>, StoreKeyPrefixError> {
+        let physical = self.encode_key(key)?;
+        Ok(crate::keys::next_key(&physical).and_then(|next| self.decode_key(&next).ok()))
     }
 
     /// Encode an inclusive logical range into the physical Store keyspace.
@@ -607,7 +615,7 @@ impl PrefixedStoreClient {
             limit,
             limit.max(1),
             mode,
-            RangeStreamReadOptions {
+            QueryStreamReadOptions {
                 min_sequence_number,
                 observed_sequence: None,
             },
@@ -630,7 +638,7 @@ impl PrefixedStoreClient {
             limit,
             batch_size,
             RangeMode::Forward,
-            RangeStreamReadOptions::default(),
+            QueryStreamReadOptions::default(),
         )
         .await
     }
@@ -661,7 +669,7 @@ impl PrefixedStoreClient {
             limit,
             batch_size,
             RangeMode::Forward,
-            RangeStreamReadOptions {
+            QueryStreamReadOptions {
                 min_sequence_number: Some(min_sequence_number),
                 observed_sequence: None,
             },
@@ -684,7 +692,7 @@ impl PrefixedStoreClient {
             limit,
             batch_size,
             mode,
-            RangeStreamReadOptions {
+            QueryStreamReadOptions {
                 min_sequence_number: Some(min_sequence_number),
                 observed_sequence: None,
             },
@@ -699,7 +707,7 @@ impl PrefixedStoreClient {
         limit: usize,
         batch_size: usize,
         mode: RangeMode,
-        options: RangeStreamReadOptions,
+        options: QueryStreamReadOptions,
     ) -> Result<RangeStream, ClientError> {
         let (start, end) = self.encode_store_range(start, end)?;
         let mut stream = self
@@ -710,73 +718,17 @@ impl PrefixedStoreClient {
         Ok(stream)
     }
 
-    pub(crate) async fn range_reduce(
+    pub(crate) async fn range_reduce_stream_internal(
         &self,
         start: &Key,
         end: &Key,
         request: &DomainRangeReduceRequest,
-    ) -> Result<Vec<Option<KvReducedValue>>, ClientError> {
-        let (response, _) = self
-            .range_reduce_response_internal(start, end, request, None)
-            .await?;
-        scalar_reduce_results(response)
-    }
-
-    pub(crate) async fn range_reduce_with_min_sequence_number(
-        &self,
-        start: &Key,
-        end: &Key,
-        request: &DomainRangeReduceRequest,
-        min_sequence_number: u64,
-    ) -> Result<Vec<Option<KvReducedValue>>, ClientError> {
-        let (response, _) = self
-            .range_reduce_response_internal(start, end, request, Some(min_sequence_number))
-            .await?;
-        scalar_reduce_results(response)
-    }
-
-    pub(crate) async fn range_reduce_response(
-        &self,
-        start: &Key,
-        end: &Key,
-        request: &DomainRangeReduceRequest,
-    ) -> Result<exoware_proto::query::ReduceResponse, ClientError> {
-        let (body, _) = self
-            .range_reduce_response_internal(start, end, request, None)
-            .await?;
-        Ok(body)
-    }
-
-    pub(crate) async fn range_reduce_response_with_min_sequence_number(
-        &self,
-        start: &Key,
-        end: &Key,
-        request: &DomainRangeReduceRequest,
-        min_sequence_number: u64,
-    ) -> Result<exoware_proto::query::ReduceResponse, ClientError> {
-        let (body, _) = self
-            .range_reduce_response_internal(start, end, request, Some(min_sequence_number))
-            .await?;
-        Ok(body)
-    }
-
-    pub(crate) async fn range_reduce_response_internal(
-        &self,
-        start: &Key,
-        end: &Key,
-        request: &DomainRangeReduceRequest,
-        min_sequence_number: Option<u64>,
-    ) -> Result<
-        (
-            exoware_proto::query::ReduceResponse,
-            Option<proto_query::Detail>,
-        ),
-        ClientError,
-    > {
+        options: QueryStreamReadOptions,
+    ) -> Result<ReduceStream, ClientError> {
         let (start, end) = self.encode_store_range(start, end)?;
         let request = self.prefix_reduce_request(request)?;
         self.client
-            .range_reduce_response_internal(&start, &end, &request, min_sequence_number)
+            .range_reduce_stream_internal(&start, &end, &request, options)
             .await
     }
 
@@ -833,20 +785,44 @@ impl PrefixedStoreClient {
     }
 }
 
-/// Extract scalar (ungrouped) reduce results from a wire response.
-fn scalar_reduce_results(
-    response: exoware_proto::query::ReduceResponse,
-) -> Result<Vec<Option<KvReducedValue>>, ClientError> {
-    let decoded = proto_to_domain_reduce_response(response).map_err(ClientError::WireFormat)?;
-    if !decoded.groups.is_empty() {
+/// Returns the sole scalar frame after validating its shape and consuming the final status.
+pub async fn scalar_reduce_response(
+    mut stream: ReduceStream,
+    request: &DomainRangeReduceRequest,
+) -> Result<connectrpc::StreamMessage<proto_query::ReduceResponse>, ClientError> {
+    if !request.group_by.is_empty() {
         return Err(ClientError::WireFormat(
-            "grouped range reduction response returned for scalar request".to_string(),
+            "grouped reductions require range_reduce_stream".to_string(),
         ));
     }
+    let response = stream.next().await.transpose()?.ok_or_else(|| {
+        ClientError::WireFormat("scalar reduction stream returned no results".to_string())
+    })?;
+    let view = response.view();
+    if !view.groups.is_empty() || view.results.len() != request.reducers.len() {
+        return Err(ClientError::WireFormat(
+            "scalar reduction returned an invalid result shape".to_string(),
+        ));
+    }
+    if stream.next().await.transpose()?.is_some() {
+        return Err(ClientError::WireFormat(
+            "scalar reduction returned more than one frame".to_string(),
+        ));
+    }
+    Ok(response)
+}
+
+async fn scalar_reduce_results(
+    stream: ReduceStream,
+    request: &DomainRangeReduceRequest,
+) -> Result<Vec<Option<KvReducedValue>>, ClientError> {
+    let response = scalar_reduce_response(stream, request).await?;
+    let decoded =
+        proto_to_domain_reduce_response(response.view()).map_err(ClientError::WireFormat)?;
     Ok(decoded
         .results
-        .iter()
-        .map(|result| result.value.clone())
+        .into_iter()
+        .map(|result| result.value)
         .collect())
 }
 
@@ -982,122 +958,6 @@ pub trait StoreBatchUpload {
                 }
             }
         })
-    }
-}
-
-/// A writer that can stage an already-prepared publication record into a
-/// shared Store write batch and then be notified of the batch outcome.
-///
-/// This is the companion to [`StoreBatchUpload`] for metadata that publishes
-/// already-staged data, such as QMDB watermarks. Implementations should keep
-/// `prepare_*` methods as inherent APIs because each publisher decides when a
-/// publication is needed.
-pub trait StoreBatchPublication {
-    type PreparedPublication: Send;
-    type PublicationReceipt: Send;
-    type Error: std::fmt::Display + Send;
-
-    /// The namespaced client this writer stages and commits through. See
-    /// [`StoreBatchUpload::store_client`].
-    fn store_client(&self) -> &PrefixedStoreClient;
-
-    fn stage_publication(
-        &self,
-        prepared: &Self::PreparedPublication,
-        batch: &mut StoreWriteBatch,
-    ) -> Result<(), Self::Error>;
-
-    fn publication_commit_error(&self, error: ClientError) -> Self::Error;
-
-    fn mark_publication_persisted<'a>(
-        &'a self,
-        prepared: Self::PreparedPublication,
-        sequence_number: u64,
-    ) -> BoxFuture<'a, Self::PublicationReceipt>
-    where
-        Self: Sync + 'a,
-        Self::PreparedPublication: 'a;
-
-    fn mark_publication_failed<'a>(
-        &'a self,
-        _prepared: Self::PreparedPublication,
-        _error: String,
-    ) -> BoxFuture<'a, ()>
-    where
-        Self: Sync + 'a,
-        Self::PreparedPublication: 'a,
-    {
-        Box::pin(async {})
-    }
-
-    fn commit_publication<'a>(
-        &'a self,
-        prepared: Self::PreparedPublication,
-    ) -> BoxFuture<'a, Result<Self::PublicationReceipt, Self::Error>>
-    where
-        Self: Sync + Sized + 'a,
-        Self::PreparedPublication: 'a,
-        Self::PublicationReceipt: 'a,
-        Self::Error: 'a,
-    {
-        Box::pin(async move {
-            let mut batch = StoreWriteBatch::new();
-            if let Err(err) = self.stage_publication(&prepared, &mut batch) {
-                let message = err.to_string();
-                self.mark_publication_failed(prepared, message).await;
-                return Err(err);
-            }
-            match batch.commit(self.store_client().client()).await {
-                Ok(sequence_number) => Ok(self
-                    .mark_publication_persisted(prepared, sequence_number)
-                    .await),
-                Err(err) => {
-                    let message = err.to_string();
-                    self.mark_publication_failed(prepared, message).await;
-                    Err(self.publication_commit_error(err))
-                }
-            }
-        })
-    }
-}
-
-/// A stateful writer that owns a durable publication frontier.
-///
-/// This extends [`StoreBatchPublication`] with the pieces needed by writers
-/// that can prepare a catch-up publication after pending uploads drain. The
-/// associated prepared publication, receipt, and error types come from
-/// [`StoreBatchPublication`], so databases can use this for watermarks,
-/// checkpoints, catalog versions, or any similar publication record without
-/// sharing QMDB-specific concepts.
-pub trait StorePublicationFrontierWriter: StoreBatchPublication {
-    fn latest_publication_receipt<'a>(&'a self) -> BoxFuture<'a, Option<Self::PublicationReceipt>>
-    where
-        Self: Sync + 'a,
-        Self::PublicationReceipt: 'a;
-
-    fn prepare_publication<'a>(
-        &'a self,
-    ) -> BoxFuture<'a, Result<Option<Self::PreparedPublication>, Self::Error>>
-    where
-        Self: Sync + 'a,
-        Self::PreparedPublication: 'a,
-        Self::Error: 'a;
-
-    fn flush_publication_with_receipt<'a>(
-        &'a self,
-    ) -> BoxFuture<'a, Result<Option<Self::PublicationReceipt>, Self::Error>>
-    where
-        Self: Sync + 'a,
-        Self::PublicationReceipt: 'a,
-        Self::Error: 'a;
-
-    fn flush_publication<'a>(&'a self) -> BoxFuture<'a, Result<(), Self::Error>>
-    where
-        Self: Sync + 'a,
-        Self::PublicationReceipt: 'a,
-        Self::Error: 'a,
-    {
-        Box::pin(async move { self.flush_publication_with_receipt().await.map(|_| ()) })
     }
 }
 
@@ -1243,6 +1103,14 @@ impl RangeStream {
         Ok(entries)
     }
 }
+
+/// Final reduction results, delivered in bounded frames without collecting all groups.
+///
+/// Each item retains its wire buffer and exposes a borrowed response through `view()`.
+/// Dropping the stream cancels the request. Only opening the stream and receiving
+/// its first frame may be retried. Errors after that frame are returned to the caller.
+pub type ReduceStream =
+    BoxStream<'static, Result<connectrpc::StreamMessage<proto_query::ReduceResponse>, ClientError>>;
 
 pub struct GetManyStream {
     stream: ConnectServerStream<
@@ -1563,9 +1431,13 @@ pub enum ClientBuildError {
     InvalidEndpointUrl { url: String },
     #[error("StoreClientBuilder: failed to configure platform TLS verifier: {0}")]
     TlsConfig(#[source] connectrpc::rustls::Error),
-    #[error("StoreClientBuilder: API key is not valid in an HTTP header (check for control or non-ASCII characters)")]
+    #[error(
+        "StoreClientBuilder: API key is not valid in an HTTP header (check for control or non-ASCII characters)"
+    )]
     InvalidApiKey,
-    #[error("{API_KEY_ENV} is set to a value that cannot be an HTTP header. Remove any control or non-ASCII characters from it")]
+    #[error(
+        "{API_KEY_ENV} is set to a value that cannot be an HTTP header. Remove any control or non-ASCII characters from it"
+    )]
     InvalidApiKeyEnv,
 }
 
@@ -1817,7 +1689,7 @@ pub struct StoreClient {
 /// and every later read passes that fixed floor so the server guarantees all
 /// responses reflect at least that point in the write log.
 ///
-/// Streamed query reads (`get_many`, `range_stream`) expose their sequence in
+/// Streamed query reads (`get_many`, `range_stream`, `range_reduce_stream`) expose their sequence in
 /// each returned chunk's detail, so if one of those is the first successful
 /// read, the session is pinned once the first detail-bearing chunk is consumed.
 #[derive(Clone, Debug)]
@@ -1840,7 +1712,7 @@ impl SessionState {
 }
 
 #[derive(Default)]
-struct RangeStreamReadOptions {
+struct QueryStreamReadOptions {
     min_sequence_number: Option<u64>,
     observed_sequence: Option<Arc<AtomicU64>>,
 }
@@ -2245,7 +2117,7 @@ impl StoreClient {
         limit: usize,
         batch_size: usize,
         mode: RangeMode,
-        options: RangeStreamReadOptions,
+        options: QueryStreamReadOptions,
     ) -> Result<RangeStream, ClientError> {
         if !is_valid_key_size(start.len()) || !is_valid_key_size(end.len()) {
             return Err(ClientError::WireFormat(
@@ -2274,7 +2146,8 @@ impl StoreClient {
                         .range(ProtoRangeRequest {
                             start: start.clone().into(),
                             end: end.clone().into(),
-                            limit: Some(u32::try_from(limit).unwrap_or(u32::MAX)),
+                            limit: (limit != usize::MAX)
+                                .then(|| u32::try_from(limit).unwrap_or(u32::MAX)),
                             batch_size: u32::try_from(batch_size).unwrap_or(u32::MAX),
                             mode: mode.to_proto().into(),
                             min_sequence_number,
@@ -2313,39 +2186,70 @@ impl StoreClient {
         }
     }
 
-    async fn range_reduce_response_internal(
+    async fn range_reduce_stream_internal(
         &self,
         start: &Key,
         end: &Key,
         request: &DomainRangeReduceRequest,
-        min_sequence_number: Option<u64>,
-    ) -> Result<
-        (
-            exoware_proto::query::ReduceResponse,
-            Option<proto_query::Detail>,
-        ),
-        ClientError,
-    > {
-        let config = self.unary_client_config(self.query_uri.clone());
+        options: QueryStreamReadOptions,
+    ) -> Result<ReduceStream, ClientError> {
+        let config = self.streaming_client_config(self.query_uri.clone());
         let client = QueryServiceClient::new(self.connect_http.clone(), config);
         let proto_params = proto_to_proto_reduce_params(request.clone());
-        let min_sequence_number = self.normalize_min_sequence_number(min_sequence_number);
-        let response = self
-            .send_with_retry(|| async {
-                client
-                    .reduce(ProtoWireReduceRequest {
-                        start: start.clone().into(),
-                        end: end.clone().into(),
-                        params: Some(proto_params.clone()).into(),
-                        min_sequence_number,
-                        ..Default::default()
-                    })
-                    .await
+        let min_sequence_number = self.normalize_min_sequence_number(options.min_sequence_number);
+        let (stream, first) = self
+            .send_with_retry(|| {
+                self.with_streaming_timeout(async {
+                    let mut stream = client
+                        .reduce(ProtoWireReduceRequest {
+                            start: start.clone().into(),
+                            end: end.clone().into(),
+                            params: Some(proto_params.clone()).into(),
+                            min_sequence_number,
+                            ..Default::default()
+                        })
+                        .await?;
+                    let first = stream
+                        .message::<proto_query::ReduceResponse>()
+                        .await?
+                        .ok_or_else(|| {
+                            ConnectError::new(
+                                ErrorCode::Internal,
+                                "reduction stream returned no frames",
+                            )
+                        })?;
+                    Ok((stream, Some(first)))
+                })
             })
             .await?;
-        let owned = response.into_owned();
-        let detail = owned.detail.as_option().cloned();
-        Ok((owned, detail))
+        let observed_sequence = options.observed_sequence;
+        let credential = self.credential;
+        Ok(
+            futures::stream::try_unfold((stream, first), move |(mut stream, first)| {
+                let observed_sequence = observed_sequence.clone();
+                async move {
+                    let frame = if let Some(frame) = first {
+                        frame
+                    } else {
+                        match stream
+                            .message()
+                            .await
+                            .map_err(|err| client_error_from_connect(err, credential))?
+                        {
+                            Some(frame) => frame,
+                            None => return Ok(None),
+                        }
+                    };
+                    if let (Some(sequence), Some(detail)) =
+                        (&observed_sequence, frame.view().detail.as_option())
+                    {
+                        sequence.fetch_max(detail.sequence_number, Ordering::SeqCst);
+                    }
+                    Ok(Some((frame, (stream, None))))
+                }
+            })
+            .boxed(),
+        )
     }
 
     async fn send_with_retry<F, Fut, T>(&self, mut make_request: F) -> Result<T, ClientError>
@@ -2399,7 +2303,12 @@ fn shift_reduce_request_key_offsets(
     for expr in &mut request.group_by {
         shift_expr_key_offsets(shift_bytes, shift_bits, expr)?;
     }
-    if let Some(filter) = &mut request.filter {
+    for filter in request.filter.iter_mut().chain(
+        request
+            .reducers
+            .iter_mut()
+            .filter_map(|reducer| reducer.filter.as_mut()),
+    ) {
         for check in &mut filter.checks {
             shift_field_ref_key_offset(shift_bytes, shift_bits, &mut check.field)?;
         }
@@ -2422,7 +2331,7 @@ fn shift_expr_key_offsets(
             shift_expr_key_offsets(shift_bytes, shift_bits, left)?;
             shift_expr_key_offsets(shift_bytes, shift_bits, right)
         }
-        KvExpr::Lower(inner) | KvExpr::DateTruncDay(inner) => {
+        KvExpr::Lower(inner) | KvExpr::DateTruncDay(inner) | KvExpr::CastFloat64(inner) => {
             shift_expr_key_offsets(shift_bytes, shift_bits, inner)
         }
     }
@@ -2643,7 +2552,11 @@ impl<'a> Query<'a> {
         end: &Key,
         request: &DomainRangeReduceRequest,
     ) -> Result<Vec<Option<KvReducedValue>>, ClientError> {
-        self.c.range_reduce(start, end, request).await
+        scalar_reduce_results(
+            self.range_reduce_stream(start, end, request).await?,
+            request,
+        )
+        .await
     }
 
     pub async fn range_reduce_with_min_sequence_number(
@@ -2653,33 +2566,46 @@ impl<'a> Query<'a> {
         request: &DomainRangeReduceRequest,
         min_sequence_number: u64,
     ) -> Result<Vec<Option<KvReducedValue>>, ClientError> {
-        self.c
-            .range_reduce_with_min_sequence_number(start, end, request, min_sequence_number)
-            .await
+        scalar_reduce_results(
+            self.range_reduce_stream_with_min_sequence_number(
+                start,
+                end,
+                request,
+                min_sequence_number,
+            )
+            .await?,
+            request,
+        )
+        .await
     }
 
-    pub async fn range_reduce_response(
+    pub async fn range_reduce_stream(
         &self,
         start: &Key,
         end: &Key,
         request: &DomainRangeReduceRequest,
-    ) -> Result<exoware_proto::query::ReduceResponse, ClientError> {
-        self.c.range_reduce_response(start, end, request).await
+    ) -> Result<ReduceStream, ClientError> {
+        self.c
+            .range_reduce_stream_internal(start, end, request, QueryStreamReadOptions::default())
+            .await
     }
 
-    pub async fn range_reduce_response_with_min_sequence_number(
+    pub async fn range_reduce_stream_with_min_sequence_number(
         &self,
         start: &Key,
         end: &Key,
         request: &DomainRangeReduceRequest,
         min_sequence_number: u64,
-    ) -> Result<exoware_proto::query::ReduceResponse, ClientError> {
+    ) -> Result<ReduceStream, ClientError> {
         self.c
-            .range_reduce_response_with_min_sequence_number(
+            .range_reduce_stream_internal(
                 start,
                 end,
                 request,
-                min_sequence_number,
+                QueryStreamReadOptions {
+                    min_sequence_number: Some(min_sequence_number),
+                    observed_sequence: None,
+                },
             )
             .await
     }
@@ -2842,7 +2768,7 @@ impl SerializableReadSession {
                             limit,
                             limit.max(1),
                             mode,
-                            RangeStreamReadOptions {
+                            QueryStreamReadOptions {
                                 min_sequence_number: None,
                                 observed_sequence: Some(observed_sequence),
                             },
@@ -2897,7 +2823,7 @@ impl SerializableReadSession {
                             limit,
                             batch_size,
                             mode,
-                            RangeStreamReadOptions {
+                            QueryStreamReadOptions {
                                 min_sequence_number: None,
                                 observed_sequence: Some(observed_sequence),
                             },
@@ -2915,83 +2841,41 @@ impl SerializableReadSession {
         end: &Key,
         request: &DomainRangeReduceRequest,
     ) -> Result<Vec<Option<KvReducedValue>>, ClientError> {
-        let seeded_client = self.client.clone();
-        let unseeded_client = self.client.clone();
-        let request_seeded = request.clone();
-        let request_unseeded = request.clone();
-        self.run_read(
-            move |sequence| {
-                let client = seeded_client.clone();
-                let request = request_seeded.clone();
-                async move {
-                    client
-                        .range_reduce_with_min_sequence_number(start, end, &request, sequence)
-                        .await
-                }
-            },
-            move |observed_sequence| {
-                let client = unseeded_client.clone();
-                let request = request_unseeded.clone();
-                async move {
-                    let (response, detail) = client
-                        .range_reduce_response_internal(start, end, &request, None)
-                        .await?;
-                    if let Some(detail) = detail {
-                        observed_sequence.fetch_max(detail.sequence_number, Ordering::SeqCst);
-                    }
-                    let decoded = proto_to_domain_reduce_response(response)
-                        .map_err(ClientError::WireFormat)?;
-                    if !decoded.groups.is_empty() {
-                        return Err(ClientError::WireFormat(
-                            "grouped range reduction response returned for scalar request"
-                                .to_string(),
-                        ));
-                    }
-                    Ok(decoded
-                        .results
-                        .iter()
-                        .map(|result| result.value.clone())
-                        .collect())
-                }
-            },
+        scalar_reduce_results(
+            self.range_reduce_stream(start, end, request).await?,
+            request,
         )
         .await
     }
 
-    pub async fn range_reduce_response(
+    pub async fn range_reduce_stream(
         &self,
         start: &Key,
         end: &Key,
         request: &DomainRangeReduceRequest,
-    ) -> Result<exoware_proto::query::ReduceResponse, ClientError> {
-        let seeded_client = self.client.clone();
-        let unseeded_client = self.client.clone();
-        let request_seeded = request.clone();
-        let request_unseeded = request.clone();
+    ) -> Result<ReduceStream, ClientError> {
         self.run_read(
-            move |sequence| {
-                let client = seeded_client.clone();
-                let request = request_seeded.clone();
-                async move {
-                    client
-                        .range_reduce_response_with_min_sequence_number(
-                            start, end, &request, sequence,
-                        )
-                        .await
-                }
+            |sequence| {
+                self.client.range_reduce_stream_internal(
+                    start,
+                    end,
+                    request,
+                    QueryStreamReadOptions {
+                        min_sequence_number: Some(sequence),
+                        observed_sequence: None,
+                    },
+                )
             },
-            move |observed_sequence| {
-                let client = unseeded_client.clone();
-                let request = request_unseeded.clone();
-                async move {
-                    let (response, detail) = client
-                        .range_reduce_response_internal(start, end, &request, None)
-                        .await?;
-                    if let Some(detail) = detail {
-                        observed_sequence.fetch_max(detail.sequence_number, Ordering::SeqCst);
-                    }
-                    Ok(response)
-                }
+            |observed_sequence| {
+                self.client.range_reduce_stream_internal(
+                    start,
+                    end,
+                    request,
+                    QueryStreamReadOptions {
+                        min_sequence_number: None,
+                        observed_sequence: Some(observed_sequence),
+                    },
+                )
             },
         )
         .await
@@ -3134,6 +3018,316 @@ mod tests {
         }
     }
 
+    #[derive(Clone)]
+    struct ReduceTransport {
+        bodies: Arc<std::sync::Mutex<std::collections::VecDeque<Bytes>>>,
+        requests: Arc<std::sync::Mutex<Vec<proto_query::ReduceRequest>>>,
+    }
+
+    impl ReduceTransport {
+        fn new(bodies: impl IntoIterator<Item = Bytes>) -> Self {
+            Self {
+                bodies: Arc::new(std::sync::Mutex::new(bodies.into_iter().collect())),
+                requests: Arc::default(),
+            }
+        }
+    }
+
+    impl connectrpc::client::ClientTransport for ReduceTransport {
+        type ResponseBody = http_body_util::Full<Bytes>;
+        type Error = ConnectError;
+
+        fn send(
+            &self,
+            request: http::Request<connectrpc::client::ClientBody>,
+        ) -> connectrpc::client::BoxFuture<
+            'static,
+            Result<http::Response<Self::ResponseBody>, Self::Error>,
+        > {
+            use buffa::Message;
+            use http_body_util::BodyExt;
+
+            let transport = self.clone();
+            Box::pin(async move {
+                assert_eq!(request.uri().path(), "/store.query.v1.Service/Reduce");
+                let body = request.into_body().collect().await.unwrap().to_bytes();
+                let mut body = bytes::BytesMut::from(body.as_ref());
+                let envelope = connectrpc::envelope::Envelope::decode(&mut body)
+                    .unwrap()
+                    .unwrap();
+                assert!(!envelope.is_compressed());
+                assert!(body.is_empty());
+                let request =
+                    proto_query::ReduceRequest::decode_from_slice(&envelope.data).unwrap();
+                transport.requests.lock().unwrap().push(request);
+                let body = transport
+                    .bodies
+                    .lock()
+                    .unwrap()
+                    .pop_front()
+                    .expect("unexpected retry");
+                Ok(http::Response::builder()
+                    .header("content-type", "application/connect+proto")
+                    .body(http_body_util::Full::new(body))
+                    .unwrap())
+            })
+        }
+    }
+
+    type ReduceBodyReceiver = futures::channel::mpsc::UnboundedReceiver<
+        Result<http_body::Frame<Bytes>, std::convert::Infallible>,
+    >;
+
+    #[derive(Clone)]
+    struct PendingReduceTransport {
+        receiver: Arc<std::sync::Mutex<Option<ReduceBodyReceiver>>>,
+    }
+
+    impl connectrpc::client::ClientTransport for PendingReduceTransport {
+        type ResponseBody =
+            http_body_util::combinators::UnsyncBoxBody<Bytes, std::convert::Infallible>;
+        type Error = ConnectError;
+
+        fn send(
+            &self,
+            _request: http::Request<connectrpc::client::ClientBody>,
+        ) -> connectrpc::client::BoxFuture<
+            'static,
+            Result<http::Response<Self::ResponseBody>, Self::Error>,
+        > {
+            use http_body_util::BodyExt;
+
+            let receiver = self.receiver.lock().unwrap().take().unwrap();
+            Box::pin(async move {
+                Ok(http::Response::builder()
+                    .header("content-type", "application/connect+proto")
+                    .body(http_body_util::StreamBody::new(receiver).boxed_unsync())
+                    .unwrap())
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn reduce_delivers_a_frame_before_eof_and_drop_cancels_the_body() {
+        let (sender, receiver) = futures::channel::mpsc::unbounded();
+        let transport = PendingReduceTransport {
+            receiver: Arc::new(std::sync::Mutex::new(Some(receiver))),
+        };
+        let client = StoreClient::builder()
+            .url("http://query.internal")
+            .retry_config(RetryConfig::disabled())
+            .client_transport(transport)
+            .build()
+            .unwrap()
+            .prefixed(StoreKeyPrefix::new("tenant/").unwrap());
+        use buffa::Message;
+        let first =
+            connectrpc::envelope::Envelope::data(count_frame(None).encode_to_bytes()).encode();
+        sender
+            .unbounded_send(Ok(http_body::Frame::data(first)))
+            .unwrap();
+        let mut stream = client
+            .query()
+            .range_reduce_stream(
+                &Bytes::from_static(b"a"),
+                &Bytes::from_static(b"z"),
+                &count_request(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            stream.next().await.unwrap().unwrap().view().results.len(),
+            1
+        );
+        assert!(!sender.is_closed());
+        drop(stream);
+        assert!(sender.is_closed());
+    }
+
+    fn reduce_body(frames: &[proto_query::ReduceResponse], final_status: &[u8]) -> Bytes {
+        use buffa::Message;
+
+        let mut body = Vec::new();
+        for frame in frames {
+            body.extend_from_slice(
+                &connectrpc::envelope::Envelope::data(frame.encode_to_bytes()).encode(),
+            );
+        }
+        body.extend_from_slice(
+            &connectrpc::envelope::Envelope::end_stream(Bytes::copy_from_slice(final_status))
+                .encode(),
+        );
+        body.into()
+    }
+
+    fn count_request() -> DomainRangeReduceRequest {
+        DomainRangeReduceRequest {
+            reducers: vec![RangeReducerSpec {
+                filter: None,
+                op: RangeReduceOp::CountAll,
+                expr: None,
+            }],
+            group_by: Vec::new(),
+            filter: None,
+        }
+    }
+
+    fn count_frame(sequence: Option<u64>) -> proto_query::ReduceResponse {
+        proto_query::ReduceResponse {
+            results: vec![proto_query::RangeReduceResult {
+                value: Some(to_proto_reduced_value(KvReducedValue::UInt64(3))).into(),
+                ..Default::default()
+            }],
+            detail: sequence
+                .map(|sequence_number| proto_query::Detail {
+                    sequence_number,
+                    ..Default::default()
+                })
+                .into(),
+            ..Default::default()
+        }
+    }
+
+    fn reduce_test_client(transport: ReduceTransport) -> PrefixedStoreClient {
+        StoreClient::builder()
+            .url("http://query.internal")
+            .retry_config(RetryConfig {
+                max_attempts: 2,
+                initial_backoff: Duration::ZERO,
+                max_backoff: Duration::ZERO,
+            })
+            .client_transport(transport)
+            .build()
+            .unwrap()
+            .prefixed(StoreKeyPrefix::new("tenant/").unwrap())
+    }
+
+    #[tokio::test]
+    async fn reduce_retries_before_first_frame_and_observes_consumed_details() {
+        let transport = ReduceTransport::new([
+            reduce_body(
+                &[],
+                br#"{"error":{"code":"unavailable","message":"retry open"}}"#,
+            ),
+            reduce_body(&[count_frame(None), count_frame(Some(47))], b"{}"),
+            reduce_body(&[count_frame(Some(50))], b"{}"),
+        ]);
+        let session = reduce_test_client(transport.clone()).create_session();
+        let start = Bytes::from_static(b"a");
+        let end = Bytes::from_static(b"z");
+        let request = count_request();
+        let mut stream = session
+            .range_reduce_stream(&start, &end, &request)
+            .await
+            .unwrap();
+        assert_eq!(transport.requests.lock().unwrap().len(), 2);
+        assert_eq!(session.fixed_sequence(), None);
+        assert!(stream
+            .next()
+            .await
+            .unwrap()
+            .unwrap()
+            .view()
+            .detail
+            .as_option()
+            .is_none());
+        assert_eq!(session.fixed_sequence(), None);
+        assert_eq!(
+            stream
+                .next()
+                .await
+                .unwrap()
+                .unwrap()
+                .view()
+                .detail
+                .sequence_number,
+            47
+        );
+        assert_eq!(session.fixed_sequence(), Some(47));
+        assert!(stream.next().await.is_none());
+        assert_eq!(
+            session.range_reduce(&start, &end, &request).await.unwrap(),
+            vec![Some(KvReducedValue::UInt64(3))]
+        );
+        assert_eq!(session.fixed_sequence(), Some(47));
+        let requests = transport.requests.lock().unwrap();
+        assert_eq!(requests.len(), 3);
+        assert_eq!(requests[0].min_sequence_number, None);
+        assert_eq!(requests[1].min_sequence_number, None);
+        assert_eq!(requests[2].min_sequence_number, Some(47));
+        assert_eq!(requests[2].start.as_slice(), b"tenant/a");
+        assert_eq!(requests[2].end.as_slice(), b"tenant/z");
+    }
+
+    #[tokio::test]
+    async fn reduce_never_retries_after_a_result_frame() {
+        let transport = ReduceTransport::new([reduce_body(
+            &[count_frame(None)],
+            br#"{"error":{"code":"unavailable","message":"failed after results"}}"#,
+        )]);
+        let client = reduce_test_client(transport.clone());
+        let mut stream = client
+            .query()
+            .range_reduce_stream(
+                &Bytes::from_static(b"a"),
+                &Bytes::from_static(b"z"),
+                &count_request(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            stream.next().await.unwrap().unwrap().view().results.len(),
+            1
+        );
+        assert_eq!(
+            stream.next().await.unwrap().unwrap_err().rpc_code(),
+            Some(ErrorCode::Unavailable)
+        );
+        assert!(stream.next().await.is_none());
+        assert_eq!(transport.requests.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn scalar_reduce_validates_frame_count_shape_and_final_status() {
+        let request = count_request();
+        for frames in [
+            vec![],
+            vec![proto_query::ReduceResponse::default()],
+            vec![count_frame(Some(1)), count_frame(Some(1))],
+            vec![proto_query::ReduceResponse {
+                groups: vec![proto_query::RangeReduceGroup::default()],
+                ..count_frame(Some(1))
+            }],
+        ] {
+            let stream = futures::stream::iter(
+                frames
+                    .into_iter()
+                    .map(|frame| Ok(connectrpc::StreamMessage::from_message(&frame))),
+            )
+            .boxed();
+            assert!(matches!(
+                scalar_reduce_results(stream, &request).await,
+                Err(ClientError::WireFormat(_))
+            ));
+        }
+        let stream = futures::stream::iter([
+            Ok(connectrpc::StreamMessage::from_message(&count_frame(Some(
+                1,
+            )))),
+            Err(ClientError::Rpc(Box::new(ConnectError::unavailable(
+                "final status",
+            )))),
+        ])
+        .boxed();
+        assert_eq!(
+            scalar_reduce_results(stream, &request)
+                .await
+                .unwrap_err()
+                .rpc_code(),
+            Some(ErrorCode::Unavailable)
+        );
+    }
+
     async fn assert_streaming_deadline<T>(
         future: impl std::future::Future<Output = Result<T, ClientError>>,
     ) {
@@ -3255,6 +3449,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn generated_reduce_stream_prefers_zstd() {
+        let transport = RecordingTransport::default();
+        let client = StoreClient::builder()
+            .url("http://query.internal")
+            .retry_config(RetryConfig::disabled())
+            .client_transport(transport.clone())
+            .build()
+            .unwrap()
+            .prefixed(StoreKeyPrefix::identity());
+
+        let _ = client
+            .query()
+            .range_reduce_stream(
+                &Bytes::from_static(b"a"),
+                &Bytes::from_static(b"z"),
+                &count_request(),
+            )
+            .await;
+
+        let requests = transport.requests();
+        assert_eq!(requests.len(), 1);
+        let (uri, headers) = &requests[0];
+        assert_eq!(uri.path(), "/store.query.v1.Service/Reduce");
+        assert_eq!(
+            headers.get("content-type").unwrap(),
+            "application/connect+proto"
+        );
+        assert_eq!(headers.get(ACCEPT_ENCODING).unwrap(), "zstd, gzip");
+        let stream_encoding = connectrpc::Protocol::Connect.accept_encoding_header();
+        assert_eq!(headers.get(stream_encoding).unwrap(), "zstd, gzip");
+        assert_eq!(headers.get_all(stream_encoding).iter().count(), 1);
+    }
+
+    #[tokio::test]
     async fn streaming_timeout_includes_first_frame_prefetch() {
         let mut client = StoreClient::builder()
             .url("http://query.internal")
@@ -3270,6 +3498,12 @@ mod tests {
 
         assert_streaming_deadline(client.get_many(&[&key], 1)).await;
         assert_streaming_deadline(client.range_stream(&start, &end, 1, 1)).await;
+        assert_streaming_deadline(client.query().range_reduce_stream(
+            &start,
+            &end,
+            &count_request(),
+        ))
+        .await;
     }
 
     #[test]
@@ -3516,6 +3750,36 @@ mod tests {
     }
 
     #[test]
+    fn store_key_prefix_next_key_respects_namespace_capacity() {
+        for prefix in [
+            StoreKeyPrefix::identity(),
+            StoreKeyPrefix::new(Bytes::from_static(b"tenant/")).unwrap(),
+        ] {
+            assert_eq!(
+                prefix.next_key(&Bytes::from_static(b"row")).unwrap(),
+                Some(Bytes::from_static(b"row\0")),
+            );
+            let capacity = prefix.max_logical_key_len();
+            let mut key = vec![0; capacity];
+            key[capacity - 2] = 0x12;
+            key[capacity - 1] = 0xFF;
+            let next = prefix.next_key(&Bytes::from(key)).unwrap().unwrap();
+            assert_eq!(next.len(), capacity - 1);
+            assert_eq!(next[capacity - 2], 0x13);
+            assert!(prefix.encode_key(&next).is_ok());
+            assert_eq!(
+                prefix.next_key(&Bytes::from(vec![0xFF; capacity])).unwrap(),
+                None,
+            );
+            assert!(prefix
+                .next_key(&Bytes::from(vec![0; capacity + 1]))
+                .is_err());
+        }
+        let prefix = StoreKeyPrefix::new(vec![0; MAX_KEY_LEN]).unwrap();
+        assert_eq!(prefix.next_key(&Bytes::new()).unwrap(), None);
+    }
+
+    #[test]
     fn identity_prefix_encode_decode_are_zero_copy() {
         let prefix = StoreKeyPrefix::identity();
         let logical = Bytes::from_static(b"passthrough-key");
@@ -3681,6 +3945,49 @@ mod tests {
     }
 
     #[test]
+    fn prefixed_reduce_request_shifts_nested_cast_fields() {
+        let client = StoreClient::builder()
+            .url("http://localhost:10000")
+            .build()
+            .unwrap()
+            .prefixed(StoreKeyPrefix::new(vec![1, 2, 3]).unwrap());
+        let request_at = |byte_offset, bit_offset| DomainRangeReduceRequest {
+            reducers: vec![crate::RangeReducerSpec {
+                op: crate::RangeReduceOp::SumField,
+                expr: Some(KvExpr::CastFloat64(Box::new(KvExpr::Add(
+                    Box::new(KvExpr::Field(KvFieldRef::Key {
+                        byte_offset,
+                        kind: KvFieldKind::Int64,
+                    })),
+                    Box::new(KvExpr::CastFloat64(Box::new(KvExpr::Field(
+                        KvFieldRef::Value {
+                            index: 2,
+                            kind: KvFieldKind::UInt64,
+                            nullable: true,
+                        },
+                    )))),
+                )))),
+                filter: None,
+            }],
+            group_by: vec![KvExpr::CastFloat64(Box::new(KvExpr::Field(
+                KvFieldRef::ZOrderKey {
+                    bit_offset,
+                    field_position: 0,
+                    field_widths: vec![8],
+                    kind: KvFieldKind::UInt64,
+                },
+            )))],
+            filter: None,
+        };
+        let request = request_at(9, 12);
+        assert_eq!(
+            client.prefix_reduce_request(&request).unwrap(),
+            request_at(12, 36)
+        );
+        assert_eq!(request, request_at(9, 12));
+    }
+
+    #[test]
     fn prefixed_reduce_request_shifts_key_field_offsets() {
         let client = StoreClient::builder()
             .url("http://localhost:10000")
@@ -3689,6 +3996,35 @@ mod tests {
             .prefixed(StoreKeyPrefix::new(vec![0x01, 0x02, 0x03]).unwrap());
         let request = DomainRangeReduceRequest {
             reducers: vec![crate::RangeReducerSpec {
+                filter: Some(KvPredicate {
+                    checks: vec![
+                        KvPredicateCheck {
+                            field: KvFieldRef::Key {
+                                byte_offset: 9,
+                                kind: KvFieldKind::UInt64,
+                            },
+                            constraint: KvPredicateConstraint::IsNotNull,
+                        },
+                        KvPredicateCheck {
+                            field: KvFieldRef::ZOrderKey {
+                                bit_offset: 12,
+                                field_position: 0,
+                                field_widths: vec![8],
+                                kind: KvFieldKind::UInt64,
+                            },
+                            constraint: KvPredicateConstraint::IsNotNull,
+                        },
+                        KvPredicateCheck {
+                            field: KvFieldRef::Value {
+                                index: 2,
+                                kind: KvFieldKind::UInt64,
+                                nullable: true,
+                            },
+                            constraint: KvPredicateConstraint::IsNotNull,
+                        },
+                    ],
+                    contradiction: false,
+                }),
                 op: crate::RangeReduceOp::SumField,
                 expr: Some(KvExpr::Field(KvFieldRef::Key {
                     byte_offset: 9,
@@ -3732,6 +4068,33 @@ mod tests {
         // Z-order offsets stay bit-granular: a 3-byte prefix shifts by 3*8 = 24
         // bits, so 12 -> 36.
         assert_eq!(*bit_offset, 36);
+        let checks = &shifted.reducers[0].filter.as_ref().unwrap().checks;
+        assert_eq!(
+            checks[0].field,
+            KvFieldRef::Key {
+                byte_offset: 12,
+                kind: KvFieldKind::UInt64,
+            }
+        );
+        assert_eq!(
+            checks[1].field,
+            KvFieldRef::ZOrderKey {
+                bit_offset: 36,
+                field_position: 0,
+                field_widths: vec![8],
+                kind: KvFieldKind::UInt64,
+            }
+        );
+        let original_checks = &request.reducers[0].filter.as_ref().unwrap().checks;
+        assert_eq!(checks[2], original_checks[2]);
+        assert_eq!(shifted.filter, request.filter);
+        assert_eq!(
+            original_checks[0].field,
+            KvFieldRef::Key {
+                byte_offset: 9,
+                kind: KvFieldKind::UInt64,
+            }
+        );
     }
 
     #[test]

@@ -20,13 +20,12 @@ give each instance a distinct SDK `StoreKeyPrefix` and pass that prefixed
 `StoreClient` to `KvSchema`.
 
 ```rust
-use exoware_sdk::StoreClient;
-use exoware_sql::{IndexSpec, KvSchema, TableColumnConfig};
+use exoware_sdk::{StoreClient, StoreKeyPrefix};
+use exoware_sql::{session_context, IndexSpec, KvSchema, TableColumnConfig};
 use datafusion::arrow::datatypes::DataType;
-use datafusion::prelude::SessionContext;
 
-let ctx = SessionContext::new();
-let client = StoreClient::new("http://localhost:10000");
+let ctx = session_context();
+let client = StoreClient::new("http://localhost:10000").prefixed(StoreKeyPrefix::identity());
 
 KvSchema::new(client)
     .table("customers", vec![
@@ -50,12 +49,25 @@ KvSchema::new(client)
 A convenience method `.orders_table(name, index_specs)` registers the
 pre-defined orders schema (region, customer_id, order_id, amount_cents, status).
 
+## SQL service results
+
+`SqlServer` returns Query results and matching Subscribe batches as native Arrow
+IPC streams. Each payload includes its result schema, including computed column
+types, decimal scales and timestamp units. Query serializes DataFusion batches as
+they arrive. Each subscription frame contains an independent IPC stream and the
+underlying atomic ingest sequence number.
+
+Rust consumers can decode the payload with Arrow `StreamReader`. The TypeScript
+SQL client returns native Arrow `Table` objects. Schema-only empty results and
+zero-column row counts are preserved. The Tables RPC separately describes the
+Store-specific primary keys and indexes.
+
 ## Versioned tables (composite primary keys)
 
 Tables can have composite primary keys for versioned entity patterns.
 `table_versioned()` is a convenience for `(entity, version)` primary keys where:
 
-- the entity column may be `Utf8` or `FixedSizeBinary`
+- the entity column may be `Utf8`, `FixedSizeBinary`, `Int64`, or `UInt64`
 - the version column is `UInt64`
 
 The encoded primary-key payload is still ordered as `[entity bytes][version_be]`,
@@ -63,7 +75,7 @@ so the version lives in the trailing 8 bytes of the logical primary key even
 when the entity value is variable-length:
 
 ```rust
-KvSchema::new(client).table_versioned(
+let schema = KvSchema::new(client).table_versioned(
     "documents",
     vec![
         TableColumnConfig::new("doc_id", DataType::FixedSizeBinary(16), false),
@@ -71,7 +83,7 @@ KvSchema::new(client).table_versioned(
         TableColumnConfig::new("title", DataType::Utf8, false),
         TableColumnConfig::new("body", DataType::Utf8, true),
     ],
-    "doc_id",   // entity column (Utf8 or FixedSizeBinary)
+    "doc_id",   // entity column
     "version",  // version column (UInt64)
     vec![],
 )?;
@@ -86,20 +98,19 @@ WHERE doc_id = X'AA..AA' AND version <= 42
 ORDER BY version DESC LIMIT 1
 ```
 
-For compaction pruning, callers do not need to hand-build the generic
-`PrunePolicy` regex for versioned primary keys. Use the helper that matches the
-entity encoding:
+For compaction pruning of an unindexed versioned table, the schema builds the
+policy from the table's assigned prefix and entity encoding:
 
 ```rust
-// Fixed-width entity keys (for example FixedSizeBinary(16))
-let fixed_width = exoware_sql::prune::keep_latest_versions(3, 16, 1)?;
-
-// Variable-width Utf8 entity keys
-let utf8 = exoware_sql::prune::keep_latest_versions_utf8(3, 1)?;
+let policy = schema.keep_latest_versions_policy("documents", 1)?;
 ```
 
-This emits the shared `exoware_sdk::prune_policy::PrunePolicy` shape expected by
-the ingest admin prune-policy control plane.
+The constructor requires exactly two primary key columns, `(entity, UInt64
+version)`, and rejects tables with secondary indexes. Apply the returned SDK
+`PrunePolicy` through the same `PrefixedStoreClient` used to create the schema.
+Store pruning does not cascade to secondary indexes, so disable primary-row
+retention before adding indexes. The constructor cannot validate policies
+created directly through the SDK or later schema changes.
 
 Any composite PK (not just versioned) can be created via `table()` with
 multiple column names:
@@ -157,65 +168,88 @@ cargo run -p exoware-sql --example versioned_kv    # versioned composite PK demo
 ## Scan consistency
 
 All reads within a single DataFusion scan use a `SerializableReadSession`.
-The first read seeds a sequence number; all subsequent reads (pagination,
-index lookups) use that same value. This guarantees batch serializability
-across query workers behind a load balancer.
+The first response establishes a minimum sequence number for subsequent reads,
+including index lookups. Later reads may observe newer inserts. This is a
+sequence floor, not an MVCC snapshot.
+
+Primary keys identify immutable rows. Inserting the same primary key more than
+once has undefined behavior. The write path does not enforce uniqueness. Use a
+version column in the primary key to represent changes to a logical entity.
+Base rows and their secondary index entries are written in one atomic batch.
 
 ## Aggregate pushdown
 
-`exoware-sql` can rewrite some single-table aggregates to the worker-side range
-reduction API instead of fetching full row streams back into DataFusion.
+`exoware-sql` sends supported single-table aggregates to Store's `Reduce` RPC.
+Workers return aggregate states or distinct group keys instead of full input
+rows. Supported built-in aggregates are `COUNT`, `SUM`, `MIN`, `MAX`, and numeric
+`AVG` returning double (a pushed sum and count). Group-only queries and
+`SELECT DISTINCT` use the same grouping path. A finite limit directly above a
+group-only aggregate keeps it in DataFusion so its streaming and DISTINCT limit
+optimizations remain available. `DISTINCT` inside an aggregate, such as
+`COUNT(DISTINCT x)`, uses DataFusion's normal execution. Grouped `Float64` `MIN`
+and `MAX` use Reduce, with native DataFusion aggregation at both the worker and
+the SQL coordinator.
 
-Current pushdown scope:
+The adapter resolves column aliases and transparent projection chains. Supported
+inputs include columns, literals, numeric `+`, `-`, `*`, `/`, `lower`, and
+`date_trunc('day', ...)` for timestamps without timezone metadata. Tagged
+timestamps retain DataFusion's checked calendar path. Casts retain their
+semantics: identity casts, compatible string representations,
+decimal precision widening without rescaling, and integer-to-double conversion
+can be pushed. Integer-to-double `CAST` and `TRY_CAST` execute as native Store
+casts. Narrowing casts, unsupported functions, and intervening row limits
+stay in DataFusion.
 
-- supported:
-  - `COUNT(*)`
-  - `COUNT(1)` / `COUNT(non_null_literal)`
-  - `COUNT(col)`
-  - `SUM(col)`
-  - `MIN(col)`
-  - `MAX(col)`
-  - `AVG(col)` (implemented as pushed `SUM + COUNT`)
-  - aggregate `FILTER (WHERE ...)`
-  - common conditional-aggregate `CASE` forms that are equivalent to `FILTER`,
-    such as:
-    - `SUM(CASE WHEN ... THEN amount END)`
-    - `COUNT(CASE WHEN ... THEN 1 END)`
-    - `AVG(CASE WHEN ... THEN amount END)`
-  - computed aggregate inputs over a narrow expression subset:
-    - arithmetic: `*`, `/` (division currently requires a non-zero literal divisor)
-    - scalar functions: `lower(...)`, `date_trunc('day', ...)`
-    - examples:
-      - `SUM(price * qty)`
-      - `AVG(duration_ms / 1e3)`
-      - `SUM(CASE WHEN ... THEN price * qty END)`
-  - computed `GROUP BY` keys over the same narrow subset, including:
-    - `GROUP BY lower(country)`
-    - `GROUP BY date_trunc('day', occurred_at)`
-- required query shape:
-  - single table
-  - no `DISTINCT`
-  - aggregate arguments and `GROUP BY` expressions must reduce to direct columns
-    after stripping aliases/casts, or to the supported computed-expression /
-    `CASE` forms above
-  - supports grouped aggregates when the grouping columns are available from the
-    chosen pushdown access path
+Aggregate `FILTER` and equivalent `CASE` expressions can be pushed when every
+original filter is exactly representable by the Store predicate compiler.
+Grouped aggregates pass explicit `FILTER` predicates to native DataFusion
+aggregates at the worker. Scalar aggregates filter before evaluating their
+arguments, so their predicates also narrow the Store access path. `CASE` guards
+filter input rows before evaluating their guarded expressions. Precomputed
+arguments beneath scalar `FILTER` or `CASE` stay in DataFusion to preserve their
+position before the guard. Grouped `FILTER` keeps computed projections eligible
+for Reduce because native grouped aggregation evaluates arguments first. Every request applies its complete row predicate at
+the worker, because raw range bounds can include rows that scan-time key checks
+would exclude. A covering index reduces the scanned range when available. Primary-key ranges can
+also use worker-side filtering on stored values, so unindexed predicates do not
+require returning full rows. All filter, group, and aggregate inputs must be
+available from the selected access path. Store key-field expressions use fixed
+byte offsets. Variable-width SQL key fields and fields following them therefore
+use stored index values when available, or fall back to native decoding.
 
-Unsupported shapes automatically fall back to the normal streaming scan path.
-That scan path now consumes streamed `/v1/range` responses from the store client,
-so `KvScanExec` can start decoding rows and flushing `RecordBatch` output
-before the full upstream range read completes. When the chosen scan path is
-exact, exoware-sql still pushes the SQL `LIMIT` upstream as the raw range-read
-limit. When residual filtering means the path is not exact, exoware-sql keeps the
-upstream stream unbounded for correctness and relies on downstream cancellation
-once the SQL limit is satisfied.
+Aggregates sharing ranges, grouping expressions, and a row filter share one
+Reduce request, including grouped aggregates with different native filters.
+Output columns retain their original order. Native filters retain every group,
+even when none of its rows contribute to an aggregate. If every aggregate has a
+`CASE` guard, a group-only request preserves groups outside those guards. A
+group-only query itself uses one request per range.
 
-For non-PK filtered aggregates, pushdown is strongest when the chosen index
-fully covers both:
+Workers evaluate expressions with native DataFusion and Arrow. Integer addition,
+subtraction, multiplication, and sums use the wrapping behavior of ordinary SQL
+expressions. Integer division truncates and reports zero or overflow errors;
+floating division follows IEEE behavior, including zero divisors. AVG converts
+each integer input to double before accumulation.
+NULLs retain SQL aggregate semantics. Floating-point results, including NaN
+extrema, follow native partial/final execution and can depend on range partitioning
+and merge order. Reduce returns query errors when required
+payload decoding or expression evaluation fails. Requests without value-dependent
+expressions do not decode payloads. Native base-row scans skip undecodable
+payloads, so queries over corrupt data can behave differently across plans.
+Requests use one read session with a shared minimum sequence number.
+That freshness floor does not pin a snapshot.
+Jobs execute in order, and range results merge in order. Once the first range has
+established the read floor, later range requests can overlap up to the query's
+DataFusion `target_partitions` setting.
 
-- the aggregate input column(s), and
-- any pushed predicate columns needed either to make the range exact, or to let
-  the worker apply residual filtering before reduction.
+Unsupported shapes use the normal streaming scan and DataFusion execution.
+Reduce avoids transferring full input rows. Workers aggregate with DataFusion
+and stream completed groups in batches. The SQL coordinator feeds those states
+into DataFusion's final aggregate using the query's memory pool and spill
+configuration. Both stages keep groups in memory by default. Workers configure
+their native memory pool and spilling through `QueryState::with_runtime`.
+Transport buffers and materialized query results have separate memory ownership.
+A covering index is most useful when it contains the aggregate inputs and all
+filter/group columns.
 
 ## Z-Order secondary indexes
 
@@ -322,7 +356,7 @@ FROM orders;
 Representative physical-plan output:
 
 ```text
- KvScanExec: limit=None, mode=primary_key, predicate=<none>, exact=true, row_recheck=false, ranges=1, full_scan_like=true, query_stats=streamed_range(detail.extra: server-defined metadata)
+ KvScanExec: fetch=None, direction=None, mode=primary_key, predicate=<none>, exact=true, row_recheck=false, ranges=1, full_scan_like=true, query_stats=streamed_range(detail.extra: server-defined metadata)
 ```
 
 Interpretation:
@@ -344,7 +378,7 @@ WHERE status = 'open' AND amount_cents >= 5;
 Representative physical-plan output:
 
 ```text
- KvScanExec: limit=None, mode=secondary_index(status_idx, lexicographic), predicate=status = 'open' AND amount_cents >= 5, exact=false, row_recheck=true, ranges=1, full_scan_like=false, constrained_prefix=1, query_stats=streamed_range(detail.extra: server-defined metadata)
+ KvScanExec: fetch=None, direction=None, mode=secondary_index(status_idx, lexicographic), predicate=status = 'open' AND amount_cents >= 5, exact=false, row_recheck=true, ranges=1, full_scan_like=false, constrained_prefix=1, query_stats=streamed_range(detail.extra: server-defined metadata)
 ```
 
 Interpretation:
@@ -355,7 +389,7 @@ Interpretation:
 - `amount_cents >= 5` still requires candidate-row rechecking
 - `exact=false` plus `row_recheck=true` means pushdown helped, but not all filtering happened at the key/index level
 
-### Example: exact indexed aggregate pushdown
+### Example: indexed aggregate pushdown
 
 ```sql
 EXPLAIN
@@ -365,18 +399,19 @@ WHERE status = 'open'
 GROUP BY status;
 ```
 
-Representative physical-plan output:
+The Reduce source beneath DataFusion's final aggregate:
 
 ```text
- KvAggregateExec: grouped=true, seed_job=none, aggregate_jobs=[job0{mode=secondary_index(status_idx, lexicographic), predicate=status = 'open', exact=true, row_recheck=false, ranges=1, full_scan_like=false, constrained_prefix=1}], query_stats=range_reduce(detail.extra: server-defined metadata)
+ KvAggregateExec: grouped=true, seed_job=none, aggregate_jobs=[job0{mode=secondary_index(status_idx, lexicographic), predicate=status = 'open', exact=false, row_recheck=true, ranges=1, full_scan_like=false, constrained_prefix=1}], query_stats=range_reduce(detail.extra: server-defined metadata)
 ```
 
 Interpretation:
 
 - the aggregate stayed on the pushed reduction path (`KvAggregateExec`)
+- DataFusion's final aggregate merges the returned states across ranges
 - the worker-side reduction job is using `status_idx`
-- the filter is exactly enforced by the chosen index path
-- no residual row recheck is required
+- the index narrows the scanned range
+- the worker checks the complete predicate before updating aggregate states
 - this is the kind of plan you usually want for selective grouped aggregates
 
 ### Example: what to do with the output
@@ -392,7 +427,6 @@ As a rough rule of thumb:
   - `mode=primary_key` with `predicate=<none>`
   - `full_scan_like=true`
   - unexpectedly large `ranges=<N>`
-  - `row_recheck=true` on a query you expected to be fully covered by an index
 
 If you see a warning-sign plan, consider:
 
@@ -409,7 +443,7 @@ If you see a warning-sign plan, consider:
 | `UInt64` | yes | yes | yes | 8 bytes |
 | `Float64` | -- | yes | yes | 8 bytes |
 | `Boolean` | -- | yes | yes | 1 byte |
-| `Utf8` / `LargeUtf8` / `Utf8View` | yes | yes | yes | 16-byte inline slot (current implementation) |
+| `Utf8` / `LargeUtf8` / `Utf8View` | yes | yes | yes | escaped variable-width UTF-8 |
 | `Date32` | -- | yes | yes | 4 bytes |
 | `Date64` | -- | yes | yes | 8 bytes |
 | `Timestamp` | -- | yes | yes | 8 bytes |
@@ -420,15 +454,17 @@ If you see a warning-sign plan, consider:
 | `List<T>` / `LargeList<T>` | -- | -- | yes | -- |
 
 PK-eligible types: `Int64`, `UInt64`, `Utf8`, `FixedSizeBinary`.
-Composite PKs may combine any PK-eligible types. For the current
-implementation, `Utf8` key columns still use a fixed 16-byte inline slot
-inside the SQL wrapper even though the underlying Exoware store storage key model
-is now variable-length across the broader system.
+Composite PKs may combine any PK-eligible types. Text keys use escaped UTF-8
+with a terminator, including embedded NUL characters. The complete encoded key
+must fit the Store key-length limit. SQL keys must use this canonical encoding.
 
 ## Filter pushdown
 
-Predicates in `WHERE` clauses are pushed down to avoid full table scans.
-The table below shows what filter patterns are pushed down per column type:
+DataFusion compiles and evaluates scalar predicates, including casts, functions,
+and null handling. The adapter extracts supported constraints to prune Store key
+ranges. The table below describes this range-pruning subset. Other predicates
+still execute through DataFusion. Residuals are evaluated in batches before
+projected payload columns are materialized.
 
 | Column type | `=` | `<` `<=` `>` `>=` | `IN (...)` | `IS NULL` / `IS NOT NULL` |
 |---|---|---|---|---|
@@ -511,16 +547,15 @@ IndexSpec::lexicographic("status_idx", vec!["status".to_string()])?
 
 ### Planner behavior
 
-For index scans, planner selection is:
+Complete primary-key point sets use bounded GetMany requests, with results
+restored to key order. Other candidates are ranked by constrained key columns,
+coverage of all projected and predicate columns, layout, and range count.
 
-1. choose best candidate index by constrained key prefix (existing behavior),
-2. verify all required non-PK columns (from projection + pushed predicates) are covered by:
-   - index key columns, or
-   - `cover_columns`,
-3. if fully covered -> execute index scan directly from index entries,
-4. if not fully covered -> fall back to primary-key scan.
-
-No point-lookup fanout fallback is performed from index scan.
+A covering index returns rows without base lookups. A noncovering index first
+checks available predicates and then fetches surviving primary keys in bounded
+batches. The complete predicate is checked against each base row. Compatible
+lexicographic covering indexes support native DataFusion sort and LIMIT pushdown,
+including reverse traversal after a fixed equality prefix.
 
 ### No-fallback invariant
 
@@ -535,7 +570,7 @@ No point-lookup fanout fallback is performed from index scan.
   - larger index values (more storage, write bandwidth, and compaction I/O).
 - Fewer covered columns:
   - leaner writes and index footprint,
-  - more queries may be forced to primary-key scan.
+  - more queries require base-row lookups.
 
 Tune `cover_columns` per index to match hot query shapes, not full table width.
 
@@ -620,7 +655,7 @@ Behavior:
   backfill. Otherwise, rows written during the backfill window can be missed by
   the new index.
 - Backfill performs a full primary-key scan for the table and writes only the newly added index entries.
-- Default row page size is 1000 (`backfill_added_indexes` wrapper).
+- Default response batch size is 1000 (`backfill_added_indexes` wrapper).
 - `backfill_added_indexes_with_options_and_progress(...)` emits `Started`,
   `Progress`, and `Completed` events to a caller-provided channel.
 - To resume later, persist `Progress.next_cursor` and pass it back as
@@ -713,8 +748,8 @@ older rows still require backfill.
 - oversized single-statement inserts rely on ingest API request-size enforcement
   and surface the upstream client error (for example HTTP 413)
 - query model:
-  - best index picked by longest constrained key prefix
-  - index scan is used only when required columns are covered by index key + cover columns
-  - otherwise planner falls back to primary-key scan (no index lookup fanout fallback)
+  - bounded primary-key point lookups or selective range/index scans
+  - covering index reads avoid base-row lookups
+  - noncovering indexes batch lookups after available predicate checks
 - value serialization uses `commonware_codec`; `decode_base_row` uses
   `exoware_sdk::kv_codec::decode_stored_row`

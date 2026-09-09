@@ -17,22 +17,22 @@ use commonware_storage::qmdb::immutable::variable::{
 };
 use commonware_storage::translator::TwoCap;
 use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16, NZU64};
-use exoware_qmdb::{ImmutableClient, ImmutableWriter};
+use exoware_qmdb::ImmutableClient;
 use exoware_sdk::{PrefixedStoreClient, StoreClient};
 
 use common::retry;
 
 type Digest = commonware_cryptography::sha256::Digest;
-type LocalDb = Immutable<
+type VariableDb = Immutable<
     mmr::Family,
     deterministic::Context,
-    FixedBytes<32>,
+    Vec<u8>,
     Vec<u8>,
     commonware_cryptography::Sha256,
     TwoCap,
     commonware_parallel::Sequential,
 >;
-type FixedLocalDb = FixedImmutable<
+type FixedDb = FixedImmutable<
     mmr::Family,
     deterministic::Context,
     FixedBytes<32>,
@@ -42,9 +42,9 @@ type FixedLocalDb = FixedImmutable<
     commonware_parallel::Sequential,
 >;
 
-type TestImmutableClient =
-    ImmutableClient<mmr::Family, commonware_cryptography::Sha256, FixedBytes<32>, Vec<u8>>;
-type FixedTestImmutableClient = ImmutableClient<
+type VariableClient =
+    ImmutableClient<mmr::Family, commonware_cryptography::Sha256, Vec<u8>, Vec<u8>>;
+type FixedClient = ImmutableClient<
     mmr::Family,
     commonware_cryptography::Sha256,
     FixedBytes<32>,
@@ -52,44 +52,26 @@ type FixedTestImmutableClient = ImmutableClient<
     FixedEncoding<Digest>,
 >;
 
-fn fresh_immutable(c: StoreClient) -> TestImmutableClient {
-    TestImmutableClient::new(
-        PrefixedStoreClient::empty(c),
-        ((), ((0..=10000).into(), ())),
+fn variable_client(store_client: StoreClient) -> VariableClient {
+    VariableClient::new(
+        PrefixedStoreClient::empty(store_client),
+        (((0..=10000).into(), ()), ((0..=10000).into(), ())),
     )
 }
 
-fn fresh_fixed_immutable(c: StoreClient) -> FixedTestImmutableClient {
-    FixedTestImmutableClient::new(PrefixedStoreClient::empty(c), ())
+fn fixed_client(store_client: StoreClient) -> FixedClient {
+    FixedClient::new(PrefixedStoreClient::empty(store_client), ())
 }
 
-type TestImmutableWriter =
-    ImmutableWriter<mmr::Family, commonware_cryptography::Sha256, FixedBytes<32>, Vec<u8>>;
-type FixedTestImmutableWriter = ImmutableWriter<
-    mmr::Family,
-    commonware_cryptography::Sha256,
-    FixedBytes<32>,
-    Digest,
-    FixedEncoding<Digest>,
->;
-
-fn fresh_writer(c: StoreClient) -> TestImmutableWriter {
-    TestImmutableWriter::fresh(PrefixedStoreClient::empty(c))
-}
-
-fn fresh_fixed_writer(c: StoreClient) -> FixedTestImmutableWriter {
-    FixedTestImmutableWriter::fresh(PrefixedStoreClient::empty(c))
-}
-
-struct LocalReference {
+struct VariableSource {
     latest_location: Location<mmr::Family>,
     root: Digest,
-    operations: Vec<ImmutableOperation<mmr::Family, FixedBytes<32>, Vec<u8>>>,
-    queried_key: FixedBytes<32>,
+    operations: Vec<ImmutableOperation<mmr::Family, Vec<u8>, Vec<u8>>>,
+    queried_key: Vec<u8>,
     queried_value: Vec<u8>,
 }
 
-struct FixedLocalReference {
+struct FixedSource {
     latest_location: Location<mmr::Family>,
     root: Digest,
     operations: Vec<FixedImmutableOperation<mmr::Family, FixedBytes<32>, Digest>>,
@@ -97,21 +79,24 @@ struct FixedLocalReference {
     queried_value: Digest,
 }
 
-async fn build_local_db() -> LocalReference {
+async fn build_variable_source() -> VariableSource {
     tokio::task::spawn_blocking(|| {
         deterministic::Runner::default().start(|context| async move {
             use commonware_runtime::{buffer::paged::CacheRef, Supervisor as _};
             let page_cache = CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(8));
             let cfg = common::immutable_variable_config(
-                "immutable",
+                "immutable_variable_full_mmr_source",
                 page_cache,
-                ((), ((0..=10000).into(), ())),
+                (((0..=10000).into(), ()), ((0..=10000).into(), ())),
                 NZU64!(5),
             );
-            let mut db: LocalDb = LocalDb::init(context.child("db"), cfg).await.expect("init");
+            let mut db: VariableDb =
+                VariableDb::init(context.child("immutable_variable_full_mmr_source"), cfg)
+                    .await
+                    .expect("init");
 
-            let key_a = FixedBytes::new([0x11; 32]);
-            let key_b = FixedBytes::new([0x22; 32]);
+            let key_a = b"a".to_vec();
+            let key_b = b"a\0".to_vec();
             let val_a = b"alpha".to_vec();
             let val_b = b"beta".to_vec();
 
@@ -135,7 +120,7 @@ async fn build_local_db() -> LocalReference {
             let root = db.root();
             db.destroy().await.expect("destroy");
 
-            LocalReference {
+            VariableSource {
                 latest_location: latest,
                 root,
                 operations: ops,
@@ -148,26 +133,30 @@ async fn build_local_db() -> LocalReference {
     .expect("join")
 }
 
-async fn build_fixed_local_db() -> FixedLocalReference {
+async fn build_fixed_source() -> FixedSource {
     tokio::task::spawn_blocking(|| {
         deterministic::Runner::default().start(|context| async move {
             use commonware_runtime::{buffer::paged::CacheRef, Supervisor as _};
             let page_cache = CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(8));
             let cfg = commonware_storage::qmdb::immutable::Config {
-                merkle_config: common::merkle_config("immutable_fixed", page_cache.clone()),
+                merkle_config: common::merkle_config(
+                    "immutable_fixed_full_mmr_source",
+                    page_cache.clone(),
+                ),
                 log: FixedJournalConfig {
-                    partition: "immutable_fixed_log".to_string(),
+                    partition: "immutable_fixed_full_mmr_source-log".to_string(),
                     items_per_blob: NZU64!(5),
                     page_cache,
                     write_buffer: NZUsize!(1024),
+                    replay_buffer: NZUsize!(1024),
                 },
                 translator: TwoCap,
-                init_cache_size: None,
                 init_buffer: NZUsize!(1 << 21),
             };
-            let mut db: FixedLocalDb = FixedLocalDb::init(context.child("immutable_fixed"), cfg)
-                .await
-                .expect("init fixed");
+            let mut db: FixedDb =
+                FixedDb::init(context.child("immutable_fixed_full_mmr_source"), cfg)
+                    .await
+                    .expect("init fixed");
 
             let key_a = FixedBytes::new([0x11; 32]);
             let key_b = FixedBytes::new([0x22; 32]);
@@ -191,7 +180,7 @@ async fn build_fixed_local_db() -> FixedLocalReference {
             let root = db.root();
             db.destroy().await.expect("destroy fixed");
 
-            FixedLocalReference {
+            FixedSource {
                 latest_location: latest,
                 root,
                 operations: ops,
@@ -205,88 +194,106 @@ async fn build_fixed_local_db() -> FixedLocalReference {
 }
 
 #[tokio::test]
-async fn immutable_round_trip() {
-    let client = common::local_store_client().await;
-    let local = build_local_db().await;
+async fn test_immutable_round_trip() {
+    let store_client = common::local_store_client().await;
+    let source = build_variable_source().await;
 
-    let writer = fresh_writer(client.clone());
-    common::commit_immutable_upload(&writer, &local.operations)
-        .await
-        .expect("commit upload");
+    let upload_client = PrefixedStoreClient::empty(store_client.clone());
+    common::commit_operations::<mmr::Family, _>(
+        &upload_client,
+        &source.operations,
+        &(((0..=10000).into(), ()), ((0..=10000).into(), ())),
+    )
+    .await
+    .expect("commit upload");
 
     let root = retry(
         || {
-            let c = fresh_immutable(client.clone());
-            let loc = local.latest_location;
-            async move { c.root_at(loc).await }
+            let qmdb_client = variable_client(store_client.clone());
+            let loc = source.latest_location;
+            async move { qmdb_client.root_at(loc).await }
         },
         "root_at",
     )
     .await;
-    assert_eq!(root, local.root, "remote root must match local DB root");
+    assert_eq!(root, source.root, "remote root must match local DB root");
 
-    let c = fresh_immutable(client.clone());
-    let got = c
-        .get_at(&local.queried_key, local.latest_location)
+    let qmdb_client = variable_client(store_client.clone());
+    let got = qmdb_client
+        .get_at(&source.queried_key, source.latest_location)
         .await
         .expect("get_at")
         .expect("present");
-    assert_eq!(got.key, local.queried_key);
-    assert_eq!(got.value, Some(local.queried_value.clone()));
+    assert_eq!(got.key, source.queried_key);
+    assert_eq!(got.value, Some(source.queried_value.clone()));
+    assert_eq!(
+        qmdb_client
+            .get_at(&b"a".to_vec(), source.latest_location)
+            .await
+            .expect("prefix key")
+            .expect("present")
+            .value,
+        Some(b"alpha".to_vec()),
+    );
+    assert!(qmdb_client
+        .get_at(&b"a\0\0".to_vec(), source.latest_location)
+        .await
+        .expect("missing key")
+        .is_none());
 
-    let proof = c
+    let proof = qmdb_client
         .operation_range_proof(
-            local.latest_location,
+            source.latest_location,
             Location::<mmr::Family>::new(0),
-            local.operations.len() as u32,
+            source.operations.len() as u32,
         )
         .await
         .expect("proof");
-    assert_eq!(proof.root, local.root);
-    assert_eq!(proof.operations, local.operations);
+    assert_eq!(proof.root, source.root);
+    assert_eq!(proof.operations, source.operations);
 }
 
 #[tokio::test]
-async fn immutable_fixed_round_trip() {
-    let client = common::local_store_client().await;
-    let local = build_fixed_local_db().await;
+async fn test_immutable_fixed_round_trip() {
+    let store_client = common::local_store_client().await;
+    let source = build_fixed_source().await;
 
-    let writer = fresh_fixed_writer(client.clone());
-    common::commit_immutable_upload(&writer, &local.operations)
+    let upload_client = PrefixedStoreClient::empty(store_client.clone());
+    common::commit_operations::<mmr::Family, _>(&upload_client, &source.operations, &())
         .await
         .expect("commit fixed upload");
 
     let root = retry(
         || {
-            let c = fresh_fixed_immutable(client.clone());
-            let loc = local.latest_location;
-            async move { c.root_at(loc).await }
+            let qmdb_client = fixed_client(store_client.clone());
+            let loc = source.latest_location;
+            async move { qmdb_client.root_at(loc).await }
         },
         "fixed root_at",
     )
     .await;
     assert_eq!(
-        root, local.root,
+        root, source.root,
         "remote root must match local fixed DB root"
     );
 
-    let c = fresh_fixed_immutable(client.clone());
-    let got = c
-        .get_at(&local.queried_key, local.latest_location)
+    let qmdb_client = fixed_client(store_client.clone());
+    let got = qmdb_client
+        .get_at(&source.queried_key, source.latest_location)
         .await
         .expect("fixed get_at")
         .expect("present");
-    assert_eq!(got.key, local.queried_key);
-    assert_eq!(got.value, Some(local.queried_value));
+    assert_eq!(got.key, source.queried_key);
+    assert_eq!(got.value, Some(source.queried_value));
 
-    let proof = c
+    let proof = qmdb_client
         .operation_range_proof(
-            local.latest_location,
+            source.latest_location,
             Location::<mmr::Family>::new(0),
-            local.operations.len() as u32,
+            source.operations.len() as u32,
         )
         .await
         .expect("fixed proof");
-    assert_eq!(proof.root, local.root);
-    assert_eq!(proof.operations, local.operations);
+    assert_eq!(proof.root, source.root);
+    assert_eq!(proof.operations, source.operations);
 }

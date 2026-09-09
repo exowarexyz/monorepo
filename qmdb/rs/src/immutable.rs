@@ -2,7 +2,6 @@ use std::marker::PhantomData;
 
 use commonware_codec::{Codec, Decode, Encode, Read as CodecRead};
 use commonware_cryptography::Hasher;
-use commonware_parallel::Strategy;
 use commonware_storage::{
     merkle::{Family, Graftable, Location},
     qmdb::{
@@ -11,7 +10,6 @@ use commonware_storage::{
         operation::Key as QmdbKey,
     },
 };
-use commonware_utils::Array;
 use exoware_sdk::{PrefixedStoreClient, SerializableReadSession};
 
 use crate::auth::{
@@ -25,13 +23,13 @@ use crate::core::retry_transient_post_ingest_query;
 use crate::error::QmdbError;
 use crate::proof::{OperationRangeCheckpoint, RawBatchMultiProof, VerifiedOperationRange};
 use crate::storage::KvMerkleStorage;
-use crate::{VersionedValue, WriterState};
+use crate::VersionedValue;
 
 #[derive(Clone)]
 pub struct ImmutableClient<
     F: Family,
     H: Hasher,
-    K: QmdbKey + AsRef<[u8]>,
+    K: QmdbKey,
     V: Codec + Send + Sync,
     E: ValueEncoding<Value = V> = VariableEncoding<V>,
 > where
@@ -46,7 +44,7 @@ impl<F, H, K, V, E> std::fmt::Debug for ImmutableClient<F, H, K, V, E>
 where
     F: Family,
     H: Hasher,
-    K: QmdbKey + AsRef<[u8]>,
+    K: QmdbKey,
     V: Codec + Send + Sync,
     E: ValueEncoding<Value = V>,
     immutable::Operation<F, K, E>: CodecRead,
@@ -60,7 +58,7 @@ impl<F, H, K, V, E> ImmutableClient<F, H, K, V, E>
 where
     F: Graftable,
     H: Hasher,
-    K: Array + Codec + Clone + AsRef<[u8]>,
+    K: QmdbKey,
     V: Codec + Clone + Send + Sync,
     E: ValueEncoding<Value = V>,
     immutable::Operation<F, K, E>: Encode + Decode + Clone,
@@ -110,34 +108,6 @@ where
             let session = self.client.create_session();
             async move { read_latest_auth_watermark::<F>(&session).await }
         })
-        .await
-    }
-
-    /// Recover writer state at the latest published watermark.
-    ///
-    /// Returns empty state when no watermark has been published.
-    pub async fn recover_writer_state(&self) -> Result<WriterState<H::Digest, F>, QmdbError> {
-        crate::recover_writer_state::<F, H, _, _>(
-            self.writer_location_watermark().await?,
-            |watermark, start_location, max_locations| {
-                self.operation_range_checkpoint(watermark, start_location, max_locations)
-            },
-        )
-        .await
-    }
-
-    /// Recover writer state using `strategy` for Merkle hashing.
-    pub async fn recover_writer_state_with_strategy<S: Strategy>(
-        &self,
-        strategy: &S,
-    ) -> Result<WriterState<H::Digest, F>, QmdbError> {
-        crate::recover_writer_state_with_strategy::<F, H, S, _, _>(
-            self.writer_location_watermark().await?,
-            |watermark, start_location, max_locations| {
-                self.operation_range_checkpoint(watermark, start_location, max_locations)
-            },
-            strategy,
-        )
         .await
     }
 

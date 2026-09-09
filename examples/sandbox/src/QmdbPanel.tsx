@@ -504,8 +504,8 @@ export function QmdbPanel({
           <div className="result fade-in">
             <h4>Verified Ordered Range</h4>
             <p><strong>Proof Size:</strong> {formatProofSize(rangeProof.proofSizeBytes)}</p>
-            <p><strong>Has More:</strong> {rangeProof.hasMore ? 'yes' : 'no'}</p>
-            {rangeProof.nextStartKey.length > 0 && (
+            <p><strong>Has More:</strong> {rangeProof.nextStartKey !== null ? 'yes' : 'no'}</p>
+            {rangeProof.nextStartKey !== null && (
               <p><strong>Next Start Key:</strong> {formatBytes(rangeProof.nextStartKey)}</p>
             )}
             <div className="result-list">

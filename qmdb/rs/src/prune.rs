@@ -66,7 +66,7 @@ mod tests {
     }
 
     #[test]
-    fn keep_latest_updates_matches_update_key_layout() {
+    fn test_keep_latest_updates_matches_update_key_layout() {
         let policy = keep_latest_updates(3);
         let scope = &policy.scope;
         assert_eq!(scope.selector.prefix.as_ref(), &[UPDATE_FAMILY]);
@@ -87,7 +87,7 @@ mod tests {
     // grouping capture equal to the escaped key and the order capture equal to
     // the big-endian location.
     #[test]
-    fn update_regex_matches_encode_update_key_payloads() {
+    fn test_update_regex_matches_encode_update_key_payloads() {
         let regex = compiled_update_regex();
 
         // Raw keys exercising the escape grammar: empty, embedded zeros at
@@ -147,7 +147,7 @@ mod tests {
     }
 
     #[test]
-    fn update_regex_rejects_malformed_payloads() {
+    fn test_update_regex_rejects_malformed_payloads() {
         let regex = compiled_update_regex();
 
         // Shorter than a terminator plus a version.
@@ -165,7 +165,7 @@ mod tests {
     }
 
     #[test]
-    fn keep_positions_gte_uses_threshold_retention() {
+    fn test_keep_positions_gte_uses_threshold_retention() {
         let policy = keep_positions_gte(42);
         let scope = &policy.scope;
         assert_eq!(

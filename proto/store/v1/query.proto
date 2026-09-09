@@ -117,8 +117,8 @@ message KvReducedValue {
 }
 
 // An expression tree evaluated per row during reduction. Leaf nodes are field
-// references or literal values; interior nodes are arithmetic or transform
-// operations.
+// references or literal values; interior nodes use native DataFusion arithmetic,
+// coercion and transform semantics. Required fields are decoded before evaluation.
 message KvExpr {
   // Binary arithmetic operation on two sub-expressions.
   message BinaryExpr {
@@ -131,18 +131,20 @@ message KvExpr {
     KvFieldRef field = 1;
     // A constant scalar value.
     KvReducedValue literal = 2;
-    // Addition (both operands must be the same numeric kind).
+    // Addition with native numeric type coercion.
     BinaryExpr add = 3;
     // Subtraction.
     BinaryExpr sub = 4;
     // Multiplication.
     BinaryExpr mul = 5;
-    // Division.
+    // Division. Integer operands retain integer division; floating division follows IEEE 754.
     BinaryExpr div = 6;
     // Convert a UTF-8 string to lowercase.
     KvExpr lower = 7;
-    // Truncate a DATE32/DATE64/TIMESTAMP to the start of its day.
+    // Native date_trunc('day', input). Date inputs are coerced to timestamps.
     KvExpr date_trunc_day = 8;
+    // Ordinary native CAST to Float64; invalid conversions return an error.
+    KvExpr cast_float64 = 9;
   }
 }
 
@@ -277,6 +279,9 @@ message RangeReducerSpec {
   // Expression to evaluate per row. Required for all ops except
   // `COUNT_ALL` (where it must be absent).
   optional KvExpr expr = 2;
+  // Native aggregate FILTER. Rows remain available to other reducers and to
+  // grouping; the native aggregate controls argument and filter evaluation.
+  optional KvPredicate filter = 3;
 }
 
 // Parameters for a Reduce RPC: what to aggregate, how to group, and an
@@ -289,7 +294,7 @@ message ReduceParams {
   // results are returned per-group in `ReduceResponse.groups` instead of as
   // flat scalar results.
   repeated KvExpr group_by = 2;
-  // Optional predicate to exclude rows before aggregation.
+  // Optional predicate to exclude rows before expression evaluation and aggregation.
   optional KvPredicate filter = 3;
 }
 
@@ -304,8 +309,8 @@ message RangeReduceGroup {
   // The evaluated group-by expression values for this group, in the same
   // order as `ReduceParams.group_by`.
   repeated KvReducedValue group_values = 1;
-  // Parallel to `group_values`; false when the corresponding group value is
-  // NULL (the proto value is a default zero, but should be treated as absent).
+  // One flag per group-by expression. False represents NULL. True consumes
+  // the next value from the dense `group_values` list.
   repeated bool group_values_present = 2;
   // Reducer results for this group, in the same order as
   // `ReduceParams.reducers`.
@@ -336,7 +341,7 @@ service Service {
   }
   // Server-side aggregation over a key range with optional grouping and
   // filtering.
-  rpc Reduce(ReduceRequest) returns (ReduceResponse) {
+  rpc Reduce(ReduceRequest) returns (stream ReduceResponse) {
     option idempotency_level = NO_SIDE_EFFECTS;
   }
 }
@@ -421,8 +426,9 @@ message ReduceRequest {
   optional uint64 min_sequence_number = 4;
 }
 
-// Response from a Reduce RPC. Exactly one of `results` or `groups` is
-// populated depending on whether `ReduceParams.group_by` was empty.
+// A frame from a Reduce RPC. Scalar reductions return exactly one frame.
+// Grouped reductions emit each final group exactly once across batches.
+// An empty grouped reduction returns one frame containing only `detail`.
 message ReduceResponse {
   // Scalar reducer results (one per `ReduceParams.reducers` entry). Populated
   // only when `group_by` is empty.
@@ -430,5 +436,6 @@ message ReduceResponse {
   // Per-group reducer results. Populated only when `group_by` is non-empty.
   repeated RangeReduceGroup groups = 2;
   // Query sequence and server-defined metadata for this reduction.
+  // Present on every frame.
   Detail detail = 3;
 }

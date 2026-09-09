@@ -1,5 +1,5 @@
 pub mod proto;
-pub mod prune;
+mod prune;
 pub mod server;
 
 mod aggregate;
@@ -13,6 +13,7 @@ mod schema;
 mod types;
 mod writer;
 
+pub use aggregate::KvAggregateExtensionPlanner;
 pub use schema::KvSchema;
 pub use server::{sql_connect_stack, SqlConnect, SqlServer};
 pub use types::default_orders_index_specs;
@@ -21,6 +22,27 @@ pub use types::{
     IndexSpec, TableColumnConfig,
 };
 pub use writer::{BatchReceipt, BatchWriter, PreparedBatch, TableWriter};
+
+/// Creates a DataFusion session with Store aggregate reduction enabled.
+pub fn session_context() -> datafusion::prelude::SessionContext {
+    datafusion::prelude::SessionContext::new_with_state(session_state_builder().build())
+}
+
+/// Creates a DataFusion session builder with Store aggregate reduction enabled.
+///
+/// Configure the returned builder before passing its state to
+/// [`datafusion::prelude::SessionContext::new_with_state`], then register tables with
+/// [`KvSchema::register_all`].
+///
+/// A custom query planner must include [`KvAggregateExtensionPlanner`] in its
+/// [`datafusion::physical_planner::DefaultPhysicalPlanner`] to plan Store aggregates.
+pub fn session_state_builder() -> datafusion::execution::session_state::SessionStateBuilder {
+    datafusion::execution::session_state::SessionStateBuilder::new_with_default_features()
+        .with_optimizer_rule(std::sync::Arc::new(
+            aggregate::KvAggregatePushdownRule::new(),
+        ))
+        .with_query_planner(std::sync::Arc::new(aggregate::KvQueryPlanner))
+}
 
 #[cfg(test)]
 mod tests {
@@ -51,13 +73,8 @@ mod tests {
     use datafusion::physical_plan::ExecutionPlan;
     use datafusion::prelude::SessionContext;
     use exoware_sdk::keys::{Key, Prefix};
-    use exoware_sdk::kv_codec::{
-        canonicalize_reduced_group_values, decode_stored_row, encode_reduced_group_key,
-        eval_predicate, KvReducedValue, StoredRow,
-    };
-    use exoware_sdk::{
-        PrefixedStoreClient, RangeReduceOp, RangeReduceRequest, StoreBatchUpload, StoreClient,
-    };
+    use exoware_sdk::kv_codec::{decode_stored_row, KvReducedValue, StoredRow};
+    use exoware_sdk::{PrefixedStoreClient, StoreBatchUpload, StoreClient};
     use std::collections::{BTreeMap, HashSet};
     use std::ops::Bound::{Included, Unbounded};
     use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering as AtomicOrdering};
@@ -66,30 +83,23 @@ mod tests {
 
     use axum::Router;
     use bytes::Bytes;
-    use connectrpc::{
-        Chain, ConnectError, ConnectRpcService, RequestContext as Context, ServiceRequest,
-    };
+    use connectrpc::{ConnectError, ConnectRpcService, RequestContext as Context, ServiceRequest};
     use exoware_sdk::common::kv::v1::Entry as ProtoEntry;
     use exoware_sdk::connect_compression_registry;
-    use exoware_sdk::kv_codec::{eval_expr, expr_needs_value};
     use exoware_sdk::log::ingest::v1::{
         PutRequest as ProtoPutRequest, PutResponse as ProtoPutResponse, Service as IngestService,
         ServiceServer as IngestServiceServer,
     };
     use exoware_sdk::store::query::v1::{
-        GetManyEntry as ProtoGetManyEntry, GetManyFrame as ProtoGetManyFrame,
-        GetManyRequest as ProtoGetManyRequest, GetRequest as ProtoGetRequest,
-        GetResponse as ProtoGetResponse, RangeFrame as ProtoRangeFrame,
-        RangeRequest as ProtoRangeRequest, ReduceRequest as ProtoReduceRequest,
-        ReduceResponse as ProtoReduceResponse, Service as QueryService,
-        ServiceServer as QueryServiceServer,
+        GetManyFrame as ProtoGetManyFrame, GetManyRequest as ProtoGetManyRequest,
+        GetRequest as ProtoGetRequest, GetResponse as ProtoGetResponse,
+        RangeFrame as ProtoRangeFrame, RangeRequest as ProtoRangeRequest,
+        ReduceRequest as ProtoReduceRequest, ReduceResponse as ProtoReduceResponse,
+        Service as QueryService, ServiceServer as QueryServiceServer,
     };
     use exoware_sdk::RangeMode;
-    use exoware_sdk::{
-        parse_range_traversal_direction, to_domain_reduce_request, to_proto_optional_reduced_value,
-        to_proto_reduced_value, RangeTraversalDirection, RangeTraversalModeError,
-    };
-    use exoware_sdk::{RangeReduceGroup, RangeReduceResponse, RangeReduceResult};
+    use exoware_sdk::{parse_range_traversal_direction, RangeTraversalDirection};
+    use exoware_server::{Query, QueryExtra, QueryState, RangeScan, RangeScanBatch, Sequence};
     use futures::{stream, TryStreamExt};
     use tokio::sync::{mpsc, oneshot, Notify};
 
@@ -200,6 +210,16 @@ mod tests {
         (model, specs)
     }
 
+    pub(super) fn decode_reduce_request(body: &[u8]) -> exoware_sdk::query::ReduceRequest {
+        use buffa::Message;
+
+        let envelope = connectrpc::envelope::Envelope::decode(&mut bytes::BytesMut::from(body))
+            .unwrap()
+            .unwrap();
+        assert!(!envelope.is_compressed());
+        exoware_sdk::query::ReduceRequest::decode_from_slice(&envelope.data).unwrap()
+    }
+
     #[derive(Clone)]
     struct MockState {
         kv: Arc<Mutex<BTreeMap<Key, Bytes>>>,
@@ -208,78 +228,79 @@ mod tests {
         sequence_number: Arc<AtomicU64>,
     }
 
-    #[derive(Debug)]
-    struct MockGroupedReduceState {
-        group_values: Vec<Option<KvReducedValue>>,
-        states: Vec<PartialAggregateState>,
+    impl Sequence for MockState {
+        fn current_sequence(&self) -> u64 {
+            self.sequence_number.load(AtomicOrdering::Relaxed)
+        }
     }
 
-    type MockReduceRow = (Vec<Option<KvReducedValue>>, Vec<Option<KvReducedValue>>);
+    struct MockRangeScan(std::vec::IntoIter<(Bytes, Bytes)>);
 
-    fn extract_mock_reduce_row(
-        key: &Key,
-        value: &Bytes,
-        request: &RangeReduceRequest,
-    ) -> Option<MockReduceRow> {
-        let needs_value = request
-            .group_by
-            .iter()
-            .chain(
-                request
-                    .reducers
-                    .iter()
-                    .filter_map(|reducer| reducer.expr.as_ref()),
-            )
-            .any(expr_needs_value)
-            || request
-                .filter
-                .as_ref()
-                .is_some_and(exoware_sdk::kv_codec::predicate_needs_value);
-        let archived = if needs_value {
-            decode_stored_row(value.as_ref()).ok()
-        } else {
-            None
-        };
+    impl RangeScan for MockRangeScan {
+        async fn next_batch(&mut self, max_items: usize) -> Result<RangeScanBatch, String> {
+            Ok(RangeScanBatch {
+                rows: self.0.by_ref().take(max_items).collect(),
+                extra: QueryExtra::new(),
+            })
+        }
+    }
 
-        if let Some(filter) = &request.filter {
-            if !eval_predicate(key, archived.as_ref(), filter).ok()? {
-                return None;
-            }
+    impl Query for MockState {
+        type RangeScan = MockRangeScan;
+
+        async fn get(&self, key: Bytes) -> Result<(Option<Bytes>, QueryExtra), String> {
+            Ok((
+                self.kv.lock().unwrap().get(&key).cloned(),
+                QueryExtra::new(),
+            ))
         }
 
-        let mut group_values = Vec::with_capacity(request.group_by.len());
-        for expr in &request.group_by {
-            let extracted_value = eval_expr(key, archived.as_ref(), expr).ok()?;
-            group_values.push(extracted_value);
+        async fn get_many(
+            &self,
+            keys: Vec<Bytes>,
+        ) -> Result<(Vec<(Bytes, Option<Bytes>)>, QueryExtra), String> {
+            let values = self.kv.lock().unwrap();
+            Ok((
+                keys.into_iter()
+                    .map(|key| {
+                        let value = values.get(&key).cloned();
+                        (key, value)
+                    })
+                    .collect(),
+                QueryExtra::new(),
+            ))
         }
-        canonicalize_reduced_group_values(&mut group_values);
 
-        let mut reducer_values = Vec::with_capacity(request.reducers.len());
-        for reducer in &request.reducers {
-            let extracted_value = match (&reducer.expr, archived.as_ref()) {
-                (None, _) => None,
-                (Some(expr), _) => eval_expr(key, archived.as_ref(), expr).ok()?,
+        async fn range_scan(
+            &self,
+            start: Bytes,
+            end: Bytes,
+            limit: usize,
+            forward: bool,
+        ) -> Result<MockRangeScan, String> {
+            let values = self.kv.lock().unwrap();
+            let range = values.range((
+                Included(start),
+                if end.is_empty() {
+                    Unbounded
+                } else {
+                    Included(end)
+                },
+            ));
+            let rows = if forward {
+                range
+                    .take(limit)
+                    .map(|(key, value)| (key.clone(), value.clone()))
+                    .collect::<Vec<_>>()
+            } else {
+                range
+                    .rev()
+                    .take(limit)
+                    .map(|(key, value)| (key.clone(), value.clone()))
+                    .collect()
             };
-            reducer_values.push(extracted_value);
+            Ok(MockRangeScan(rows.into_iter()))
         }
-
-        Some((group_values, reducer_values))
-    }
-
-    #[allow(clippy::result_large_err)]
-    fn ensure_min_sequence_number(
-        token: &Arc<AtomicU64>,
-        required: Option<u64>,
-    ) -> Result<(), ConnectError> {
-        let current = token.load(AtomicOrdering::Relaxed);
-        if let Some(required) = required {
-            if current < required {
-                return Err(ConnectError::aborted(format!(
-                    "consistency_not_ready: required={required}, current={current}"
-                )));
-            }
-        }
-        Ok(())
     }
 
     fn proto_range_entries_frame(results: Vec<(Key, Vec<u8>)>) -> ProtoRangeFrame {
@@ -301,20 +322,6 @@ mod tests {
         exoware_sdk::store::query::v1::Detail {
             sequence_number,
             extra: Default::default(),
-            ..Default::default()
-        }
-    }
-
-    fn final_range_detail_frame(sequence_number: u64) -> ProtoRangeFrame {
-        ProtoRangeFrame {
-            detail: Some(query_detail(sequence_number)).into(),
-            ..Default::default()
-        }
-    }
-
-    fn final_get_many_detail_frame(sequence_number: u64) -> ProtoGetManyFrame {
-        ProtoGetManyFrame {
-            detail: Some(query_detail(sequence_number)).into(),
             ..Default::default()
         }
     }
@@ -351,338 +358,40 @@ mod tests {
         }
     }
 
-    #[derive(Clone)]
-    struct MockQueryConnect {
-        state: MockState,
-    }
-
-    impl QueryService for MockQueryConnect {
-        async fn get(
-            &self,
-            _ctx: Context,
-            request: ServiceRequest<'_, ProtoGetRequest>,
-        ) -> connectrpc::ServiceResult<ProtoGetResponse> {
-            ensure_min_sequence_number(&self.state.sequence_number, request.min_sequence_number)?;
-            let key: Key = request.bytes().slice_ref(request.key);
-            let guard = self.state.kv.lock().expect("kv mutex poisoned");
-            let value = guard.get(&key).cloned();
-            let token = self.state.sequence_number.load(AtomicOrdering::Relaxed);
-            connectrpc::Response::ok(ProtoGetResponse {
-                value,
-                detail: Some(query_detail(token)).into(),
-                ..Default::default()
-            })
+    async fn track_query_calls(
+        axum::extract::State(state): axum::extract::State<MockState>,
+        request: axum::extract::Request,
+        next: axum::middleware::Next,
+    ) -> axum::response::Response {
+        match request.uri().path().rsplit('/').next() {
+            Some("Range") => {
+                state.range_calls.fetch_add(1, AtomicOrdering::SeqCst);
+            }
+            Some("Reduce") => {
+                state
+                    .range_reduce_calls
+                    .fetch_add(1, AtomicOrdering::SeqCst);
+            }
+            _ => {}
         }
-
-        async fn range(
-            &self,
-            _ctx: Context,
-            request: ServiceRequest<'_, ProtoRangeRequest>,
-        ) -> connectrpc::ServiceResult<connectrpc::ServiceStream<ProtoRangeFrame>> {
-            ensure_min_sequence_number(&self.state.sequence_number, request.min_sequence_number)?;
-            self.state.range_calls.fetch_add(1, AtomicOrdering::SeqCst);
-
-            let wire = request.bytes();
-            let start_key: Key = wire.slice_ref(request.start);
-            let end_key: Key = wire.slice_ref(request.end);
-            let limit = request.limit.map(|v| v as usize).unwrap_or(usize::MAX);
-            let batch_size = usize::try_from(request.batch_size).unwrap_or(usize::MAX);
-            if batch_size == 0 {
-                return Err(ConnectError::invalid_argument(
-                    "invalid batch_size: expected positive integer",
-                ));
-            }
-
-            let mode = match parse_range_traversal_direction(request.mode) {
-                Ok(RangeTraversalDirection::Forward) => RangeMode::Forward,
-                Ok(RangeTraversalDirection::Reverse) => RangeMode::Reverse,
-                Err(RangeTraversalModeError::UnknownWireValue(v)) => {
-                    return Err(ConnectError::invalid_argument(format!(
-                        "unknown TraversalMode enum value {v}"
-                    )));
-                }
-            };
-
-            let state = self.state.clone();
-            let guard = state.kv.lock().expect("kv mutex poisoned");
-            // Match `StoreEngine::range_scan`: inclusive [start, end]; empty end = unbounded.
-            let range: (std::ops::Bound<&Key>, std::ops::Bound<&Key>) = (
-                Included(&start_key),
-                if end_key.is_empty() {
-                    Unbounded
-                } else {
-                    Included(&end_key)
-                },
-            );
-            let range_iter = guard.range::<Key, _>(range);
-            let iter: Box<dyn Iterator<Item = (&Key, &Bytes)> + Send> = match mode {
-                RangeMode::Forward => Box::new(range_iter),
-                RangeMode::Reverse => Box::new(range_iter.rev()),
-            };
-            let mut results: Vec<ProtoEntry> = Vec::new();
-            for (key, value) in iter.take(limit) {
-                results.push(ProtoEntry {
-                    key: key.to_vec(),
-                    value: value.clone(),
-                    ..Default::default()
-                });
-            }
-            drop(guard);
-            let token = state.sequence_number.load(AtomicOrdering::Relaxed);
-            let batch = batch_size.max(1);
-            let mut frames: Vec<Result<ProtoRangeFrame, ConnectError>> = Vec::new();
-            let mut emitted_frame = false;
-            for chunk in results.chunks(batch) {
-                frames.push(Ok(ProtoRangeFrame {
-                    results: chunk.to_vec(),
-                    detail: Some(query_detail(token)).into(),
-                    ..Default::default()
-                }));
-                emitted_frame = true;
-            }
-            if !emitted_frame {
-                frames.push(Ok(final_range_detail_frame(token)));
-            }
-            Ok(connectrpc::Response::stream(stream::iter(frames)))
-        }
-
-        async fn get_many(
-            &self,
-            _ctx: Context,
-            request: ServiceRequest<'_, ProtoGetManyRequest>,
-        ) -> connectrpc::ServiceResult<connectrpc::ServiceStream<ProtoGetManyFrame>> {
-            ensure_min_sequence_number(&self.state.sequence_number, request.min_sequence_number)?;
-            let batch_size = usize::try_from(request.batch_size)
-                .unwrap_or(usize::MAX)
-                .max(1);
-            let guard = self.state.kv.lock().expect("kv mutex poisoned");
-            let mut entries: Vec<ProtoGetManyEntry> = Vec::new();
-            let wire = request.bytes();
-            for key_bytes in request.keys.iter() {
-                let key: Key = wire.slice_ref(key_bytes);
-                let value = guard.get(&key).cloned();
-                entries.push(ProtoGetManyEntry {
-                    key: key.to_vec(),
-                    value,
-                    ..Default::default()
-                });
-            }
-            drop(guard);
-            let token = self.state.sequence_number.load(AtomicOrdering::Relaxed);
-            let mut frames: Vec<Result<ProtoGetManyFrame, ConnectError>> = Vec::new();
-            let mut emitted_frame = false;
-            for chunk in entries.chunks(batch_size) {
-                frames.push(Ok(ProtoGetManyFrame {
-                    results: chunk.to_vec(),
-                    detail: Some(query_detail(token)).into(),
-                    ..Default::default()
-                }));
-                emitted_frame = true;
-            }
-            if !emitted_frame {
-                frames.push(Ok(final_get_many_detail_frame(token)));
-            }
-            Ok(connectrpc::Response::stream(stream::iter(frames)))
-        }
-
-        async fn reduce(
-            &self,
-            _ctx: Context,
-            request: ServiceRequest<'_, ProtoReduceRequest>,
-        ) -> connectrpc::ServiceResult<ProtoReduceResponse> {
-            ensure_min_sequence_number(&self.state.sequence_number, request.min_sequence_number)?;
-            self.state
-                .range_reduce_calls
-                .fetch_add(1, AtomicOrdering::SeqCst);
-            let owned = request.to_owned_message();
-            let start_key: Key = owned.start.clone().into();
-            let end_key: Key = owned.end.clone().into();
-            let reduce_req = owned
-                .params
-                .as_option()
-                .ok_or_else(|| ConnectError::invalid_argument("missing range reduce params"))?;
-            let domain_request =
-                to_domain_reduce_request(reduce_req).map_err(ConnectError::invalid_argument)?;
-
-            let state = self.state.clone();
-            let guard = state.kv.lock().expect("kv mutex poisoned");
-            let mut states = domain_request.group_by.is_empty().then(|| {
-                domain_request
-                    .reducers
-                    .iter()
-                    .map(|reducer| PartialAggregateState::from_op(reducer.op))
-                    .collect::<Vec<_>>()
-            });
-            let mut grouped = BTreeMap::<Vec<u8>, MockGroupedReduceState>::new();
-
-            let range: (std::ops::Bound<&Key>, std::ops::Bound<&Key>) = (
-                Included(&start_key),
-                if end_key.is_empty() {
-                    Unbounded
-                } else {
-                    Included(&end_key)
-                },
-            );
-            for (key, value) in guard.range::<Key, _>(range) {
-                let Some((group_values, reducer_values)) =
-                    extract_mock_reduce_row(key, value, &domain_request)
-                else {
-                    continue;
-                };
-                if domain_request.group_by.is_empty() {
-                    let states = states.as_mut().expect("scalar states");
-                    for ((state, reducer), value) in states
-                        .iter_mut()
-                        .zip(domain_request.reducers.iter())
-                        .zip(reducer_values)
-                    {
-                        match reducer.op {
-                            RangeReduceOp::CountAll => state
-                                .merge_partial(reducer.op, Some(&KvReducedValue::UInt64(1)))
-                                .map_err(|e| ConnectError::internal(e.to_string()))?,
-                            RangeReduceOp::CountField => {
-                                let partial =
-                                    KvReducedValue::UInt64(if value.is_some() { 1 } else { 0 });
-                                state
-                                    .merge_partial(reducer.op, Some(&partial))
-                                    .map_err(|e| ConnectError::internal(e.to_string()))?
-                            }
-                            _ => state
-                                .merge_partial(reducer.op, value.as_ref())
-                                .map_err(|e| ConnectError::internal(e.to_string()))?,
-                        }
-                    }
-                } else {
-                    let group_key = encode_reduced_group_key(&group_values);
-                    let group =
-                        grouped
-                            .entry(group_key)
-                            .or_insert_with(|| MockGroupedReduceState {
-                                group_values: group_values.clone(),
-                                states: domain_request
-                                    .reducers
-                                    .iter()
-                                    .map(|reducer| PartialAggregateState::from_op(reducer.op))
-                                    .collect(),
-                            });
-                    for ((state, reducer), value) in group
-                        .states
-                        .iter_mut()
-                        .zip(domain_request.reducers.iter())
-                        .zip(reducer_values)
-                    {
-                        match reducer.op {
-                            RangeReduceOp::CountAll => state
-                                .merge_partial(reducer.op, Some(&KvReducedValue::UInt64(1)))
-                                .map_err(|e| ConnectError::internal(e.to_string()))?,
-                            RangeReduceOp::CountField => {
-                                let partial =
-                                    KvReducedValue::UInt64(if value.is_some() { 1 } else { 0 });
-                                state
-                                    .merge_partial(reducer.op, Some(&partial))
-                                    .map_err(|e| ConnectError::internal(e.to_string()))?
-                            }
-                            _ => state
-                                .merge_partial(reducer.op, value.as_ref())
-                                .map_err(|e| ConnectError::internal(e.to_string()))?,
-                        }
-                    }
-                }
-            }
-
-            let response = if let Some(states) = states {
-                RangeReduceResponse {
-                    results: states
-                        .iter()
-                        .map(|state| RangeReduceResult {
-                            value: match state {
-                                PartialAggregateState::Count(count) => {
-                                    Some(KvReducedValue::UInt64(*count))
-                                }
-                                PartialAggregateState::Sum(value)
-                                | PartialAggregateState::Min(value)
-                                | PartialAggregateState::Max(value) => value.clone(),
-                            },
-                        })
-                        .collect(),
-                    groups: Vec::new(),
-                }
-            } else {
-                RangeReduceResponse {
-                    results: Vec::new(),
-                    groups: grouped
-                        .into_values()
-                        .map(|group| RangeReduceGroup {
-                            group_values: group.group_values,
-                            results: group
-                                .states
-                                .into_iter()
-                                .map(|state| RangeReduceResult {
-                                    value: match state {
-                                        PartialAggregateState::Count(count) => {
-                                            Some(KvReducedValue::UInt64(count))
-                                        }
-                                        PartialAggregateState::Sum(value)
-                                        | PartialAggregateState::Min(value)
-                                        | PartialAggregateState::Max(value) => value,
-                                    },
-                                })
-                                .collect(),
-                        })
-                        .collect(),
-                }
-            };
-            drop(guard);
-            let token = state.sequence_number.load(AtomicOrdering::Relaxed);
-            connectrpc::Response::ok(ProtoReduceResponse {
-                results: response
-                    .results
-                    .into_iter()
-                    .map(|result| exoware_sdk::store::query::v1::RangeReduceResult {
-                        value: result.value.map(to_proto_reduced_value).into(),
-                        ..Default::default()
-                    })
-                    .collect(),
-                groups: response
-                    .groups
-                    .into_iter()
-                    .map(|group| {
-                        let group_values_present: Vec<bool> =
-                            group.group_values.iter().map(|v| v.is_some()).collect();
-                        exoware_sdk::store::query::v1::RangeReduceGroup {
-                            group_values: group
-                                .group_values
-                                .into_iter()
-                                .map(to_proto_optional_reduced_value)
-                                .collect(),
-                            group_values_present,
-                            results: group
-                                .results
-                                .into_iter()
-                                .map(|result| exoware_sdk::store::query::v1::RangeReduceResult {
-                                    value: result.value.map(to_proto_reduced_value).into(),
-                                    ..Default::default()
-                                })
-                                .collect(),
-                            ..Default::default()
-                        }
-                    })
-                    .collect(),
-                detail: Some(query_detail(token)).into(),
-                ..Default::default()
-            })
-        }
+        next.run(request).await
     }
 
     async fn spawn_mock_server(state: MockState) -> (String, oneshot::Sender<()>) {
-        let connect = ConnectRpcService::new(Chain(
-            IngestServiceServer::new(MockIngestConnect {
-                state: state.clone(),
-            }),
-            QueryServiceServer::new(MockQueryConnect { state }),
-        ))
+        let connect = ConnectRpcService::new(IngestServiceServer::new(MockIngestConnect {
+            state: state.clone(),
+        }))
         .with_compression(connect_compression_registry());
-        let app = Router::new().fallback_service(connect);
+        let app = Router::new()
+            .route_service(
+                "/store.query.v1.Service/{method}",
+                exoware_server::query_service(QueryState::new(Arc::new(state.clone()))),
+            )
+            .fallback_service(connect)
+            .layer(axum::middleware::from_fn_with_state(
+                state,
+                track_query_calls,
+            ));
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
@@ -783,7 +492,7 @@ mod tests {
                     .with_cover_columns(vec!["amount_cents".to_string()])],
             )
             .expect("schema");
-        let ctx = SessionContext::new();
+        let ctx = session_context();
         schema.register_all(&ctx).expect("register");
 
         let explain =
@@ -826,7 +535,7 @@ mod tests {
                     .with_cover_columns(vec!["amount_cents".to_string()])],
             )
             .expect("schema");
-        let ctx = SessionContext::new();
+        let ctx = session_context();
         schema.register_all(&ctx).expect("register");
 
         let explain = physical_plan_text(
@@ -879,7 +588,7 @@ mod tests {
                 ],
             )
             .expect("schema");
-        let ctx = SessionContext::new();
+        let ctx = session_context();
         schema.register_all(&ctx).expect("register");
 
         let explain = physical_plan_text(
@@ -923,7 +632,7 @@ mod tests {
                     .with_cover_columns(vec!["amount_cents".to_string()])],
             )
             .expect("schema");
-        let ctx = SessionContext::new();
+        let ctx = session_context();
         schema.register_all(&ctx).expect("register");
 
         let explain = physical_plan_text(
@@ -938,8 +647,8 @@ mod tests {
         assert!(explain.contains("grouped=true"));
         assert!(explain.contains("job0{mode=secondary_index(status_idx, lexicographic)"));
         assert!(explain.contains("predicate=status = 'open'"));
-        assert!(explain.contains("exact=true"));
-        assert!(explain.contains("row_recheck=false"));
+        assert!(explain.contains("exact=false"));
+        assert!(explain.contains("row_recheck=true"));
         assert_explain_includes_query_stats_surface(
             &explain,
             QueryStatsExplainSurface::RangeReduceDetail,
@@ -976,7 +685,7 @@ mod tests {
     }
 
     #[test]
-    fn normalize_sum_case_then_one_uses_countall_optimization() {
+    fn normalize_sum_case_then_one_preserves_sum_semantics() {
         let (model, _) = test_model();
         let argument = normalize_case_then_expr(
             AggregatePushdownFunction::Sum,
@@ -984,7 +693,10 @@ mod tests {
             &model,
         )
         .expect("normalize");
-        assert_eq!(argument, AggregatePushdownArgument::CountAll);
+        assert_eq!(
+            argument,
+            AggregatePushdownArgument::Expr(PushdownValueExpr::Literal(KvReducedValue::Int64(1)))
+        );
     }
 
     #[test]
@@ -1087,8 +799,9 @@ mod tests {
                 max: Some(20),
             },
         );
+        let access_plan = ScanAccessPlan::new(&model, &Some(vec![]), &predicate);
         let plan = predicate
-            .choose_index_plan(&model, &specs)
+            .choose_index_plan(&model, &specs, &access_plan)
             .expect("plan")
             .expect("exists");
         assert_eq!(plan.spec_idx, 0);
@@ -1132,8 +845,9 @@ mod tests {
             },
         );
 
+        let access_plan = ScanAccessPlan::new(&model, &Some(vec![]), &predicate);
         let plan = predicate
-            .choose_index_plan(&model, &specs)
+            .choose_index_plan(&model, &specs, &access_plan)
             .expect("plan")
             .expect("exists");
         assert_eq!(specs[plan.spec_idx].name, "status_covering");
@@ -1160,8 +874,9 @@ mod tests {
             },
         );
 
+        let access_plan = ScanAccessPlan::new(&model, &Some(vec![]), &predicate);
         let plan = predicate
-            .choose_index_plan(&model, &specs)
+            .choose_index_plan(&model, &specs, &access_plan)
             .expect("plan")
             .expect("exists");
         assert_eq!(specs[plan.spec_idx].name, "xy_z");
@@ -1683,26 +1398,15 @@ mod tests {
     }
 
     #[test]
-    fn float_range_rejects_nan_row_value() {
-        let constraint = PredicateConstraint::FloatRange {
-            min: Some((0.0, true)),
-            max: Some((10.0, true)),
-        };
-        assert!(!matches_constraint(
-            &CellValue::Float64(f64::NAN),
-            &constraint
-        ));
-    }
-
-    #[test]
     fn index_plan_with_boolean_prefix() {
         let (model, specs) = mixed_model();
         let active_idx = *model.columns_by_name.get("active").unwrap();
         let mut pred = QueryPredicate::default();
         pred.constraints
             .insert(active_idx, PredicateConstraint::BoolEq(true));
+        let access_plan = ScanAccessPlan::new(&model, &Some(vec![]), &pred);
         let plan = pred
-            .choose_index_plan(&model, &specs)
+            .choose_index_plan(&model, &specs, &access_plan)
             .expect("plan")
             .expect("should find index");
         assert_eq!(plan.spec_idx, 0);
@@ -1729,31 +1433,6 @@ mod tests {
         assert!(!contradiction);
         apply_float_constraint(&mut lo, &mut hi, Operator::Gt, 5.0, &mut contradiction);
         assert!(contradiction);
-    }
-
-    #[test]
-    fn float_nan_literal_comparison_marks_contradiction() {
-        let config = KvTableConfig::new(
-            0,
-            vec![
-                TableColumnConfig::new("id", DataType::Int64, false),
-                TableColumnConfig::new("score", DataType::Float64, false),
-            ],
-            vec!["id".to_string()],
-            vec![],
-        )
-        .unwrap();
-        let model = TableModel::from_config(&config).unwrap();
-
-        use datafusion::logical_expr::col;
-        let filter = col("score").gt(Expr::Literal(ScalarValue::Float64(Some(f64::NAN)), None));
-        assert!(QueryPredicate::supports_filter(&filter, &model));
-
-        let pred = QueryPredicate::from_filters(&[filter], &model);
-        assert!(
-            pred.contradiction,
-            "comparison with NaN literal must produce contradiction"
-        );
     }
 
     #[test]
@@ -2356,49 +2035,15 @@ mod tests {
         let mut min: Option<i128> = None;
         let mut max: Option<i128> = None;
         let mut contradiction = false;
-        apply_decimal128_constraint(&mut min, &mut max, Operator::GtEq, 100, &mut contradiction);
+        apply_integral_constraint(&mut min, &mut max, Operator::GtEq, 100, &mut contradiction);
         assert!(!contradiction);
-        apply_decimal128_constraint(&mut min, &mut max, Operator::LtEq, 200, &mut contradiction);
+        apply_integral_constraint(&mut min, &mut max, Operator::LtEq, 200, &mut contradiction);
         assert!(!contradiction);
         assert_eq!(min, Some(100));
         assert_eq!(max, Some(200));
         assert!(in_i128_bounds(150, min, max));
         assert!(!in_i128_bounds(99, min, max));
         assert!(!in_i128_bounds(201, min, max));
-    }
-
-    #[test]
-    fn decimal256_gt_max_is_contradiction() {
-        let mut min: Option<i256> = None;
-        let mut max: Option<i256> = None;
-        let mut contradiction = false;
-        apply_i256_constraint(
-            &mut min,
-            &mut max,
-            Operator::Gt,
-            i256::MAX,
-            &mut contradiction,
-        );
-        assert!(contradiction);
-        assert_eq!(min, None);
-        assert_eq!(max, None);
-    }
-
-    #[test]
-    fn decimal256_lt_min_is_contradiction() {
-        let mut min: Option<i256> = None;
-        let mut max: Option<i256> = None;
-        let mut contradiction = false;
-        apply_i256_constraint(
-            &mut min,
-            &mut max,
-            Operator::Lt,
-            i256::MIN,
-            &mut contradiction,
-        );
-        assert!(contradiction);
-        assert_eq!(min, None);
-        assert_eq!(max, None);
     }
 
     #[test]
@@ -2925,7 +2570,9 @@ mod tests {
             let mut pred = QueryPredicate::default();
             pred.constraints
                 .insert(name_idx, PredicateConstraint::StringEq(name.to_string()));
-            let ranges = pred.primary_key_ranges(&model).unwrap();
+            let ranges = pred
+                .primary_key_ranges(&model, exoware_sdk::keys::MAX_KEY_LEN)
+                .unwrap();
             assert_eq!(
                 ranges.len(),
                 1,
@@ -2949,7 +2596,9 @@ mod tests {
         let mut pred = QueryPredicate::default();
         pred.constraints
             .insert(name_idx, PredicateConstraint::StringEq("al".to_string()));
-        let ranges = pred.primary_key_ranges(&model).unwrap();
+        let ranges = pred
+            .primary_key_ranges(&model, exoware_sdk::keys::MAX_KEY_LEN)
+            .unwrap();
         let alice = CellValue::Utf8("alice".to_string());
         let alice_key = encode_primary_key(0, &[&alice], &model).expect("stored key encodes");
         assert!(
@@ -2979,7 +2628,9 @@ mod tests {
         let mut pred = QueryPredicate::default();
         pred.constraints
             .insert(name_idx, PredicateConstraint::StringEq("al".to_string()));
-        let ranges = pred.primary_key_ranges(&model).unwrap();
+        let ranges = pred
+            .primary_key_ranges(&model, exoware_sdk::keys::MAX_KEY_LEN)
+            .unwrap();
         assert_eq!(ranges.len(), 1);
 
         for id in [i64::MIN, 0, 42, i64::MAX] {
@@ -3093,7 +2744,7 @@ mod tests {
         }
         writer.flush().await.expect("flush");
 
-        let ctx = SessionContext::new();
+        let ctx = session_context();
         schema.register_all(&ctx).expect("register");
 
         for (name, expected_age) in [("alice", 30i64), ("bob", 25), ("", 99)] {
@@ -3196,7 +2847,7 @@ mod tests {
         }
         writer.flush().await.expect("flush");
 
-        let ctx = SessionContext::new();
+        let ctx = session_context();
         schema.register_all(&ctx).expect("register");
 
         for table in ["orders_nc", "orders_cov"] {
@@ -3224,106 +2875,6 @@ mod tests {
         }
 
         let _ = shutdown_tx.send(());
-    }
-
-    #[test]
-    fn timestamp_nanos_gt_uses_floor_division() {
-        let micros = timestamp_scalar_to_micros_for_op(
-            &ScalarValue::TimestampNanosecond(Some(-1500), None),
-            Operator::Gt,
-        )
-        .unwrap();
-        assert_eq!(micros, -2, "Gt on -1500ns should floor to -2us");
-
-        let mut min: Option<i64> = None;
-        let mut max: Option<i64> = None;
-        let mut contradiction = false;
-        apply_int_constraint(&mut min, &mut max, Operator::Gt, micros, &mut contradiction);
-        assert_eq!(min, Some(-1), "Gt(-2us) + 1 = min -1us");
-
-        let row_at_minus_1 = CellValue::Timestamp(-1);
-        assert!(matches_constraint(
-            &row_at_minus_1,
-            &PredicateConstraint::IntRange { min, max }
-        ));
-    }
-
-    #[test]
-    fn timestamp_nanos_lteq_uses_floor_division() {
-        let micros = timestamp_scalar_to_micros_for_op(
-            &ScalarValue::TimestampNanosecond(Some(-1500), None),
-            Operator::LtEq,
-        )
-        .unwrap();
-        assert_eq!(micros, -2, "LtEq on -1500ns should floor to -2us");
-
-        let row_at_minus_1 = CellValue::Timestamp(-1);
-        assert!(
-            !matches_constraint(
-                &row_at_minus_1,
-                &PredicateConstraint::IntRange {
-                    min: None,
-                    max: Some(micros)
-                }
-            ),
-            "-1us (-1000ns) > -1500ns, must not satisfy <= -1500ns"
-        );
-    }
-
-    #[test]
-    fn timestamp_nanos_gteq_uses_ceil_division() {
-        let micros = timestamp_scalar_to_micros_for_op(
-            &ScalarValue::TimestampNanosecond(Some(-1500), None),
-            Operator::GtEq,
-        )
-        .unwrap();
-        assert_eq!(micros, -1, "GtEq on -1500ns should ceil to -1us");
-    }
-
-    #[test]
-    fn timestamp_nanos_lt_uses_ceil_division() {
-        let micros = timestamp_scalar_to_micros_for_op(
-            &ScalarValue::TimestampNanosecond(Some(-1500), None),
-            Operator::Lt,
-        )
-        .unwrap();
-        assert_eq!(micros, -1, "Lt on -1500ns should ceil to -1us");
-
-        let mut min: Option<i64> = None;
-        let mut max: Option<i64> = None;
-        let mut contradiction = false;
-        apply_int_constraint(&mut min, &mut max, Operator::Lt, micros, &mut contradiction);
-        assert_eq!(max, Some(-2), "Lt(-1us) - 1 = max -2us");
-    }
-
-    #[test]
-    fn timestamp_nanos_eq_non_aligned_is_contradiction() {
-        let result = timestamp_scalar_to_micros_for_op(
-            &ScalarValue::TimestampNanosecond(Some(-1500), None),
-            Operator::Eq,
-        );
-        assert!(
-            result.is_none(),
-            "non-aligned ns Eq must produce contradiction"
-        );
-    }
-
-    #[test]
-    fn timestamp_nanos_exact_multiple_is_unchanged() {
-        for op in [
-            Operator::Eq,
-            Operator::Gt,
-            Operator::GtEq,
-            Operator::Lt,
-            Operator::LtEq,
-        ] {
-            let micros = timestamp_scalar_to_micros_for_op(
-                &ScalarValue::TimestampNanosecond(Some(-2000), None),
-                op,
-            )
-            .unwrap();
-            assert_eq!(micros, -2, "exact multiple -2000ns = -2us for {op:?}");
-        }
     }
 
     #[test]
@@ -3713,7 +3264,7 @@ mod tests {
 
     #[tokio::test]
     async fn kv_schema_three_way_join() {
-        let ctx = SessionContext::new();
+        let ctx = session_context();
         let client = StoreClient::new("http://localhost:10000");
 
         KvSchema::new(PrefixedStoreClient::empty(client))
@@ -3924,8 +3475,9 @@ mod tests {
             region_idx,
             PredicateConstraint::StringIn(vec!["us-east".to_string(), "us-west".to_string()]),
         );
+        let access_plan = ScanAccessPlan::new(&model, &Some(vec![]), &pred);
         let plan = pred
-            .choose_index_plan(&model, &specs)
+            .choose_index_plan(&model, &specs, &access_plan)
             .expect("plan")
             .expect("should find index");
         assert_eq!(plan.ranges.len(), 2);
@@ -3939,7 +3491,9 @@ mod tests {
             model.primary_key_indices[0],
             PredicateConstraint::IntIn(vec![200, 100, 300]),
         );
-        let ranges = pred.primary_key_ranges(&model).unwrap();
+        let ranges = pred
+            .primary_key_ranges(&model, exoware_sdk::keys::MAX_KEY_LEN)
+            .unwrap();
         assert_eq!(ranges.len(), 3);
         let expected_starts = [100, 200, 300]
             .into_iter()
@@ -3975,7 +3529,9 @@ mod tests {
             negated: false,
         });
         let pred = QueryPredicate::from_filters(&[filter], &model);
-        let ranges = pred.primary_key_ranges(&model).unwrap();
+        let ranges = pred
+            .primary_key_ranges(&model, exoware_sdk::keys::MAX_KEY_LEN)
+            .unwrap();
         assert_eq!(
             ranges.len(),
             2,
@@ -4008,7 +3564,9 @@ mod tests {
             negated: false,
         });
         let pred = QueryPredicate::from_filters(&[filter], &model);
-        let ranges = pred.primary_key_ranges(&model).unwrap();
+        let ranges = pred
+            .primary_key_ranges(&model, exoware_sdk::keys::MAX_KEY_LEN)
+            .unwrap();
         assert_eq!(
             ranges.len(),
             2,
@@ -4046,7 +3604,9 @@ mod tests {
             negated: false,
         });
         let pred = QueryPredicate::from_filters(&[filter], &model);
-        let ranges = pred.primary_key_ranges(&model).unwrap();
+        let ranges = pred
+            .primary_key_ranges(&model, exoware_sdk::keys::MAX_KEY_LEN)
+            .unwrap();
         assert_eq!(
             ranges.len(),
             2,
@@ -4082,7 +3642,9 @@ mod tests {
         pred.constraints.insert(0, PredicateConstraint::StringEq(a));
         pred.constraints.insert(1, PredicateConstraint::StringEq(b));
 
-        let ranges = pred.primary_key_ranges(&model).unwrap();
+        let ranges = pred
+            .primary_key_ranges(&model, exoware_sdk::keys::MAX_KEY_LEN)
+            .unwrap();
         assert!(
             ranges.is_empty(),
             "overflowing composite UTF-8 PK equality can never match"
@@ -5081,7 +4643,9 @@ mod tests {
             },
         );
 
-        let ranges = pred.primary_key_ranges(&model).unwrap();
+        let ranges = pred
+            .primary_key_ranges(&model, exoware_sdk::keys::MAX_KEY_LEN)
+            .unwrap();
         assert_eq!(ranges.len(), 1, "should produce exactly one range");
 
         let range = &ranges[0];
@@ -5159,7 +4723,9 @@ mod tests {
         pred.constraints
             .insert(0, PredicateConstraint::FixedBinaryEq(vec![0xDD; 16]));
 
-        let ranges = pred.primary_key_ranges(&model).unwrap();
+        let ranges = pred
+            .primary_key_ranges(&model, exoware_sdk::keys::MAX_KEY_LEN)
+            .unwrap();
         assert_eq!(ranges.len(), 1);
 
         let range = &ranges[0];
@@ -5333,20 +4899,22 @@ mod tests {
         let unsupported = col("version").gt(Expr::Literal(ScalarValue::Int64(Some(-1)), None));
         let filter = supported.and(unsupported);
 
-        assert!(
-            !QueryPredicate::supports_filter(&filter, &model),
-            "mixed AND should not be marked fully pushdown-supported"
-        );
+        for filter in [filter.clone(), filter.alias("predicate")] {
+            assert!(
+                !QueryPredicate::supports_filter(&filter, &model),
+                "mixed AND should not be marked fully pushdown-supported"
+            );
 
-        let pred = QueryPredicate::from_filters(&[filter], &model);
-        assert!(!pred.contradiction);
-        assert!(matches!(
-            pred.constraints.get(&0),
-            Some(PredicateConstraint::UInt64Range {
-                min: Some(10),
-                max: None
-            })
-        ));
+            let pred = QueryPredicate::from_filters(&[filter], &model);
+            assert!(!pred.contradiction);
+            assert!(matches!(
+                pred.constraints.get(&0),
+                Some(PredicateConstraint::UInt64Range {
+                    min: Some(10),
+                    max: None
+                })
+            ));
+        }
     }
 
     #[test]
@@ -5450,7 +5018,9 @@ mod tests {
         );
 
         // Verify range generation produces 2 ranges (one per entity)
-        let ranges = pred.primary_key_ranges(&model).unwrap();
+        let ranges = pred
+            .primary_key_ranges(&model, exoware_sdk::keys::MAX_KEY_LEN)
+            .unwrap();
         assert_eq!(ranges.len(), 2, "should produce one range per entity");
     }
 
@@ -5536,7 +5106,9 @@ mod tests {
             },
         );
 
-        let ranges = pred.primary_key_ranges(&model).unwrap();
+        let ranges = pred
+            .primary_key_ranges(&model, exoware_sdk::keys::MAX_KEY_LEN)
+            .unwrap();
         assert!(ranges.is_empty());
     }
 
@@ -5818,8 +5390,9 @@ mod tests {
             None,
         ));
         let pred = QueryPredicate::from_filters(&[filter], &model);
+        let access_plan = ScanAccessPlan::new(&model, &Some(vec![]), &pred);
         let plan = pred
-            .choose_index_plan(&model, &specs)
+            .choose_index_plan(&model, &specs, &access_plan)
             .unwrap()
             .expect("fixed-binary equality should choose an index");
 
@@ -5854,8 +5427,9 @@ mod tests {
             None,
         ));
         let pred = QueryPredicate::from_filters(&[filter], &model);
+        let access_plan = ScanAccessPlan::new(&model, &Some(vec![]), &pred);
         let plan = pred
-            .choose_index_plan(&model, &specs)
+            .choose_index_plan(&model, &specs, &access_plan)
             .unwrap()
             .expect("decimal256 range should choose an index");
 
@@ -6228,6 +5802,7 @@ mod tests {
             )
             .await
             .expect("backfill should succeed");
+        assert_eq!(state.range_calls.load(AtomicOrdering::SeqCst), 1);
         drop(progress_tx);
 
         let mut saw_started = false;
@@ -6267,6 +5842,92 @@ mod tests {
         assert!(saw_completed);
         assert!(progress_events >= 1);
 
+        let _ = shutdown_tx.send(());
+    }
+
+    #[tokio::test]
+    async fn backfill_resume_cursor_respects_namespace_capacity() {
+        let state = MockState {
+            kv: Arc::new(Mutex::new(BTreeMap::new())),
+            range_calls: Arc::new(AtomicUsize::new(0)),
+            range_reduce_calls: Arc::new(AtomicUsize::new(0)),
+            sequence_number: Arc::new(AtomicU64::new(0)),
+        };
+        let (base_url, shutdown_tx) = spawn_mock_server(state.clone()).await;
+        let prefix = exoware_sdk::StoreKeyPrefix::new(vec![42; 245]).unwrap();
+        let client = StoreClient::new(&base_url).prefixed(prefix.clone());
+        let columns = vec![
+            TableColumnConfig::new("id", DataType::Int64, false),
+            TableColumnConfig::new("tag", DataType::FixedSizeBinary(0), false),
+        ];
+        let seed = KvSchema::new(client.clone())
+            .table("rows", columns.clone(), vec!["id".into()], vec![])
+            .unwrap();
+        let mut writer = seed.batch_writer();
+        for id in [0, 1, i64::MAX] {
+            writer
+                .insert(
+                    "rows",
+                    vec![CellValue::Int64(id), CellValue::FixedBinary(vec![])],
+                )
+                .unwrap();
+        }
+        writer.flush().await.unwrap();
+        let schema = KvSchema::new(client)
+            .table(
+                "rows",
+                columns,
+                vec!["id".into()],
+                vec![IndexSpec::new("tag_idx", vec!["tag".into()]).unwrap()],
+            )
+            .unwrap();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let report = schema
+            .backfill_added_indexes_with_options_and_progress(
+                "rows",
+                &[],
+                IndexBackfillOptions {
+                    row_batch_size: 1,
+                    start_from_primary_key: None,
+                },
+                Some(&tx),
+            )
+            .await
+            .unwrap();
+        assert_eq!(report.scanned_rows, 3);
+        drop(tx);
+        let mut cursors = Vec::new();
+        while let Some(event) = rx.recv().await {
+            if let IndexBackfillEvent::Progress { next_cursor, .. } = event {
+                cursors.push(next_cursor);
+            }
+        }
+        assert_eq!(cursors.len(), 3);
+        let cursor = cursors[0].clone().expect("another primary key fits");
+        prefix
+            .encode_key(&cursor)
+            .expect("persisted cursor must fit");
+        assert_eq!(
+            cursors[2], None,
+            "last primary key has no successor in its family"
+        );
+        let resumed = schema
+            .backfill_added_indexes_with_options(
+                "rows",
+                &[],
+                IndexBackfillOptions {
+                    row_batch_size: 1,
+                    start_from_primary_key: Some(cursor),
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(resumed.scanned_rows, 2);
+        {
+            let rows = state.kv.lock().unwrap();
+            assert_eq!(rows.len(), 6);
+            assert!(rows.keys().all(|key| key.len() == 254));
+        }
         let _ = shutdown_tx.send(());
     }
 
@@ -6434,7 +6095,7 @@ mod tests {
             guard.insert(key, Bytes::new());
         }
 
-        let ctx = SessionContext::new();
+        let ctx = session_context();
         schema.register_all(&ctx).expect("register");
         let df = ctx
             .sql("SELECT amount_cents FROM orders WHERE status = 'open'")
@@ -6501,7 +6162,7 @@ mod tests {
             guard.insert(key, Bytes::from_static(b"not-codec"));
         }
 
-        let ctx = SessionContext::new();
+        let ctx = session_context();
         schema.register_all(&ctx).expect("register");
         let df = ctx
             .sql("SELECT amount_cents FROM orders WHERE status = 'open'")
@@ -6576,7 +6237,7 @@ mod tests {
             .expect("row");
         writer.flush().await.expect("flush");
 
-        let ctx = SessionContext::new();
+        let ctx = session_context();
         schema.register_all(&ctx).expect("register");
 
         let df = ctx
@@ -6922,13 +6583,14 @@ mod tests {
             &self,
             _ctx: Context,
             _request: ServiceRequest<'_, ProtoReduceRequest>,
-        ) -> connectrpc::ServiceResult<ProtoReduceResponse> {
+        ) -> connectrpc::ServiceResult<connectrpc::ServiceStream<ProtoReduceResponse>> {
             Err(ConnectError::unimplemented("test harness"))
         }
     }
 
     #[derive(Clone)]
     struct ObservedLimitRangeHarness {
+        request_received: Arc<Notify>,
         release_second_chunk: Arc<Notify>,
         observed_limit: Arc<AtomicUsize>,
         observed_mode: Arc<AtomicUsize>,
@@ -6966,9 +6628,12 @@ mod tests {
                 Err(_) => usize::MAX,
             };
             self.observed_mode.store(mode, AtomicOrdering::SeqCst);
+            self.request_received.notify_one();
             let release_second_chunk = self.release_second_chunk.clone();
             let first_frame = self.first_frame.clone();
             let second_frame = self.second_frame.clone();
+
+            // Keep the response open after the first frame even when it satisfies the limit
             let stream = stream::try_unfold(0u8, move |state| {
                 let release_second_chunk = release_second_chunk.clone();
                 let first_frame = first_frame.clone();
@@ -6977,8 +6642,8 @@ mod tests {
                     match state {
                         0 => Ok(Some((first_frame, 1))),
                         1 => {
+                            release_second_chunk.notified().await;
                             if limit > 1 {
-                                release_second_chunk.notified().await;
                                 Ok(Some((second_frame, 2)))
                             } else {
                                 Ok(None)
@@ -6995,61 +6660,7 @@ mod tests {
             &self,
             _ctx: Context,
             _request: ServiceRequest<'_, ProtoReduceRequest>,
-        ) -> connectrpc::ServiceResult<ProtoReduceResponse> {
-            Err(ConnectError::unimplemented("test harness"))
-        }
-    }
-
-    #[derive(Clone)]
-    struct ObservedLimitIndexRangeHarness {
-        observed_limit: Arc<AtomicUsize>,
-        entries_frame: ProtoRangeFrame,
-    }
-
-    impl QueryService for ObservedLimitIndexRangeHarness {
-        async fn get(
-            &self,
-            _ctx: Context,
-            _request: ServiceRequest<'_, ProtoGetRequest>,
-        ) -> connectrpc::ServiceResult<ProtoGetResponse> {
-            Err(ConnectError::unimplemented("test harness"))
-        }
-
-        async fn get_many(
-            &self,
-            _ctx: Context,
-            _request: ServiceRequest<'_, ProtoGetManyRequest>,
-        ) -> connectrpc::ServiceResult<connectrpc::ServiceStream<ProtoGetManyFrame>> {
-            Err(ConnectError::unimplemented("test harness"))
-        }
-
-        async fn range(
-            &self,
-            _ctx: Context,
-            request: ServiceRequest<'_, ProtoRangeRequest>,
-        ) -> connectrpc::ServiceResult<connectrpc::ServiceStream<ProtoRangeFrame>> {
-            let limit = request
-                .limit
-                .map(|v| {
-                    if v == u32::MAX {
-                        usize::MAX
-                    } else {
-                        v as usize
-                    }
-                })
-                .unwrap_or(usize::MAX);
-            self.observed_limit.store(limit, AtomicOrdering::SeqCst);
-            let entries_frame = self.entries_frame.clone();
-            Ok(connectrpc::Response::stream(stream::iter(vec![Ok(
-                entries_frame,
-            )])))
-        }
-
-        async fn reduce(
-            &self,
-            _ctx: Context,
-            _request: ServiceRequest<'_, ProtoReduceRequest>,
-        ) -> connectrpc::ServiceResult<ProtoReduceResponse> {
+        ) -> connectrpc::ServiceResult<connectrpc::ServiceStream<ProtoReduceResponse>> {
             Err(ConnectError::unimplemented("test harness"))
         }
     }
@@ -7149,6 +6760,7 @@ mod tests {
 
     #[tokio::test]
     async fn kv_scan_sql_limit_is_pushed_upstream_on_exact_streaming_scan() {
+        let request_received = Arc::new(Notify::new());
         let release_second_chunk = Arc::new(Notify::new());
         let observed_limit = Arc::new(AtomicUsize::new(0));
         let observed_mode = Arc::new(AtomicUsize::new(usize::MAX));
@@ -7165,6 +6777,7 @@ mod tests {
         let second_frame = proto_range_entries_frame(vec![(second_key, encoded_row)]);
 
         let harness = ObservedLimitRangeHarness {
+            request_received: request_received.clone(),
             release_second_chunk: release_second_chunk.clone(),
             observed_limit: observed_limit.clone(),
             observed_mode,
@@ -7192,15 +6805,27 @@ mod tests {
                 vec![],
             )
             .expect("schema");
-        let ctx = SessionContext::new();
+        let ctx = session_context();
         schema.register_all(&ctx).expect("register");
-        let batches = tokio::time::timeout(Duration::from_millis(200), async {
-            ctx.sql("SELECT id FROM items LIMIT 1")
-                .await
-                .expect("query")
-                .collect()
-                .await
-                .expect("collect")
+        let (batches, ()) = tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::join!(
+                async {
+                    ctx.sql("SELECT id FROM items LIMIT 1")
+                        .await
+                        .expect("query")
+                        .collect()
+                        .await
+                        .expect("collect")
+                },
+                async {
+                    request_received.notified().await;
+                    assert_eq!(
+                        observed_limit.load(AtomicOrdering::SeqCst),
+                        1,
+                        "exact streaming scan should push SQL LIMIT upstream"
+                    );
+                }
+            )
         })
         .await
         .expect("query with LIMIT 1 should finish without waiting for a delayed second chunk");
@@ -7208,11 +6833,6 @@ mod tests {
         assert_eq!(
             batches.iter().map(|batch| batch.num_rows()).sum::<usize>(),
             1
-        );
-        assert_eq!(
-            observed_limit.load(AtomicOrdering::SeqCst),
-            1,
-            "exact streaming scan should push SQL LIMIT upstream"
         );
         release_second_chunk.notify_one();
     }
@@ -7236,14 +6856,208 @@ mod tests {
             .expect("limit pushdown");
 
         let scan = optimized
-            .as_any()
             .downcast_ref::<KvScanExec>()
             .expect("physical limit should be converted to a scan fetch");
         assert_eq!(scan.fetch(), Some(1));
     }
 
+    #[test]
+    fn kv_scan_sort_pushdown_preserves_limit() {
+        use datafusion::arrow::compute::SortOptions;
+        use datafusion::physical_expr::expressions::Column;
+        use datafusion::physical_expr::{LexOrdering, PhysicalSortExpr};
+        use datafusion::physical_optimizer::pushdown_sort::PushdownSort;
+        use datafusion::physical_plan::sorts::sort::SortExec;
+
+        let model = Arc::new(simple_int64_model(0));
+        let scan = Arc::new(KvScanExec::new(
+            PrefixedStoreClient::empty(StoreClient::new("http://127.0.0.1:0")),
+            model.clone(),
+            Arc::new(Vec::new()),
+            QueryPredicate::default(),
+            None,
+            model.schema.clone(),
+            None,
+        ));
+        let ordering = LexOrdering::new([PhysicalSortExpr {
+            expr: Arc::new(Column::new("id", 0)),
+            options: SortOptions {
+                descending: true,
+                nulls_first: false,
+            },
+        }])
+        .expect("ordering");
+        let sorted = Arc::new(SortExec::new(ordering, scan).with_fetch(Some(1)));
+
+        let optimized = PushdownSort::new()
+            .optimize(sorted, &ConfigOptions::new())
+            .expect("sort pushdown");
+        let scan = optimized
+            .downcast_ref::<KvScanExec>()
+            .expect("sort pushdown should eliminate the sort");
+        assert_eq!(scan.fetch(), Some(1));
+        assert_eq!(scan.scan_direction(), RangeMode::Reverse);
+    }
+
+    #[test]
+    fn kv_scan_sort_pushdown_respects_ordering_strength() {
+        use datafusion::arrow::compute::SortOptions;
+        use datafusion::physical_expr::expressions::Column;
+        use datafusion::physical_expr::{LexOrdering, PhysicalSortExpr};
+        use datafusion::physical_plan::SortOrderPushdownResult;
+
+        let config = KvTableConfig::new(
+            0,
+            vec![
+                TableColumnConfig::new("account", DataType::Int64, false),
+                TableColumnConfig::new("height", DataType::Int64, false),
+            ],
+            vec!["account".to_string(), "height".to_string()],
+            vec![],
+        )
+        .expect("config");
+        let model = Arc::new(TableModel::from_config(&config).expect("model"));
+        let scan = KvScanExec::new(
+            PrefixedStoreClient::empty(StoreClient::new("http://127.0.0.1:0")),
+            model.clone(),
+            Arc::new(Vec::new()),
+            QueryPredicate::default(),
+            Some(2),
+            model.schema.clone(),
+            None,
+        );
+        let ordering = LexOrdering::new([
+            PhysicalSortExpr {
+                expr: Arc::new(Column::new("account", 0)),
+                options: SortOptions::default(),
+            },
+            PhysicalSortExpr {
+                expr: Arc::new(Column::new("height", 1)),
+                options: SortOptions::default(),
+            },
+        ])
+        .expect("ordering");
+
+        let SortOrderPushdownResult::Exact { inner } = scan
+            .try_pushdown_sort(&ordering)
+            .expect("initial sort pushdown")
+        else {
+            panic!("primary-key ordering should be exact");
+        };
+        let ordered_scan = inner.downcast_ref::<KvScanExec>().expect("ordered scan");
+        let prefix = [ordering.first().clone()];
+        let SortOrderPushdownResult::Exact { inner } = ordered_scan
+            .try_pushdown_sort(&prefix)
+            .expect("redundant sort pushdown")
+        else {
+            panic!("stronger ordering should exactly satisfy its prefix");
+        };
+        let prefix_scan = inner.downcast_ref::<KvScanExec>().expect("ordered scan");
+
+        assert!(Arc::ptr_eq(
+            &ordered_scan.properties,
+            &prefix_scan.properties
+        ));
+        assert_eq!(
+            prefix_scan
+                .properties
+                .output_ordering()
+                .expect("output ordering")
+                .len(),
+            2
+        );
+
+        let SortOrderPushdownResult::Exact { inner } = scan
+            .try_pushdown_sort(&prefix)
+            .expect("prefix sort pushdown")
+        else {
+            panic!("primary-key prefix ordering should be exact");
+        };
+        let prefix_scan = inner.downcast_ref::<KvScanExec>().expect("ordered scan");
+        let SortOrderPushdownResult::Exact { inner } = prefix_scan
+            .try_pushdown_sort(&ordering)
+            .expect("stronger sort pushdown")
+        else {
+            panic!("full primary-key ordering should be exact");
+        };
+        let stronger_scan = inner.downcast_ref::<KvScanExec>().expect("ordered scan");
+
+        assert!(!Arc::ptr_eq(
+            &prefix_scan.properties,
+            &stronger_scan.properties
+        ));
+        assert_eq!(
+            stronger_scan
+                .properties
+                .output_ordering()
+                .expect("output ordering")
+                .len(),
+            2
+        );
+        assert_eq!(stronger_scan.fetch(), Some(2));
+        assert_eq!(stronger_scan.scan_direction(), RangeMode::Forward);
+    }
+
+    #[tokio::test]
+    async fn kv_scan_reverse_sort_pushdown_survives_limit_pushdown_first() {
+        use datafusion::physical_optimizer::pushdown_sort::PushdownSort;
+        use datafusion::physical_plan::sorts::sort::SortExec;
+
+        // Control the pass order that exposed the lost reverse pushdown.
+        let state = session_state_builder()
+            .with_physical_optimizer_rules(vec![])
+            .build();
+        let ctx = SessionContext::new_with_state(state);
+        let schema = KvSchema::new(PrefixedStoreClient::empty(StoreClient::new(
+            "http://127.0.0.1:0",
+        )))
+        .table(
+            "events",
+            vec![TableColumnConfig::new("id", DataType::Int64, false)],
+            vec!["id".to_string()],
+            vec![],
+        )
+        .expect("schema");
+        schema.register_all(&ctx).expect("register");
+
+        let plan = ctx
+            .sql(
+                "SELECT id FROM (SELECT id FROM events LIMIT 2) AS limited \
+                 ORDER BY id DESC",
+            )
+            .await
+            .expect("query")
+            .create_physical_plan()
+            .await
+            .expect("physical plan");
+        let plan = LimitPushdown::new()
+            .optimize(plan, &ConfigOptions::new())
+            .expect("limit pushdown");
+        let sort = plan
+            .downcast_ref::<SortExec>()
+            .expect("sort should remain after limit pushdown");
+        let scan = sort
+            .input()
+            .downcast_ref::<KvScanExec>()
+            .expect("inner limit should be pushed into the scan");
+        assert_eq!(scan.fetch(), Some(2));
+        assert_eq!(scan.scan_direction(), RangeMode::Forward);
+        assert!(scan.properties.output_ordering().is_none());
+
+        let plan = PushdownSort::new()
+            .optimize(plan, &ConfigOptions::new())
+            .expect("sort pushdown");
+        let scan = plan
+            .downcast_ref::<KvScanExec>()
+            .expect("unordered fetch must not prevent exact sort pushdown");
+        assert_eq!(scan.fetch(), Some(2));
+        assert_eq!(scan.scan_direction(), RangeMode::Reverse);
+        assert!(scan.properties.output_ordering().is_some());
+    }
+
     #[tokio::test]
     async fn kv_scan_activity_desc_order_pushes_reverse_range_limit() {
+        let request_received = Arc::new(Notify::new());
         let release_second_chunk = Arc::new(Notify::new());
         let observed_limit = Arc::new(AtomicUsize::new(0));
         let observed_mode = Arc::new(AtomicUsize::new(usize::MAX));
@@ -7298,6 +7112,7 @@ mod tests {
         let second_frame = proto_range_entries_frame(vec![(sender_key, encoded_row)]);
 
         let harness = ObservedLimitRangeHarness {
+            request_received: request_received.clone(),
             release_second_chunk: release_second_chunk.clone(),
             observed_limit: observed_limit.clone(),
             observed_mode: observed_mode.clone(),
@@ -7335,22 +7150,39 @@ mod tests {
                 vec![],
             )
             .expect("schema");
-        let ctx = SessionContext::new();
+        let ctx = session_context();
         schema.register_all(&ctx).expect("register");
 
-        let batches = tokio::time::timeout(Duration::from_millis(200), async {
-            ctx.sql(
-                "SELECT height, index, role \
-                 FROM tx_activity \
-                 WHERE account = 7 \
-                 ORDER BY height DESC, index DESC, role DESC \
-                 LIMIT 1",
+        let (batches, ()) = tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::join!(
+                async {
+                    ctx.sql(
+                        "SELECT height, index, role \
+                         FROM tx_activity \
+                         WHERE account = 7 \
+                         ORDER BY height DESC, index DESC, role DESC \
+                         LIMIT 1",
+                    )
+                    .await
+                    .expect("query")
+                    .collect()
+                    .await
+                    .expect("collect")
+                },
+                async {
+                    request_received.notified().await;
+                    assert_eq!(
+                        observed_mode.load(AtomicOrdering::SeqCst),
+                        1,
+                        "activity DESC primary-key order should use reverse range traversal"
+                    );
+                    assert_eq!(
+                        observed_limit.load(AtomicOrdering::SeqCst),
+                        1,
+                        "activity DESC LIMIT should push the top-K limit to the range request"
+                    );
+                }
             )
-            .await
-            .expect("query")
-            .collect()
-            .await
-            .expect("collect")
         })
         .await
         .expect("activity DESC LIMIT query should not wait for a delayed second chunk");
@@ -7358,16 +7190,6 @@ mod tests {
         assert_eq!(
             batches.iter().map(|batch| batch.num_rows()).sum::<usize>(),
             1
-        );
-        assert_eq!(
-            observed_mode.load(AtomicOrdering::SeqCst),
-            1,
-            "activity DESC primary-key order should use reverse range traversal"
-        );
-        assert_eq!(
-            observed_limit.load(AtomicOrdering::SeqCst),
-            1,
-            "activity DESC LIMIT should push the top-K limit to the range request"
         );
         release_second_chunk.notify_one();
     }
@@ -7401,7 +7223,7 @@ mod tests {
                 vec![],
             )
             .expect("schema");
-        let ctx = SessionContext::new();
+        let ctx = session_context();
         schema.register_all(&ctx).expect("register");
 
         let explain = physical_plan_text(
@@ -7417,11 +7239,11 @@ mod tests {
         );
         assert!(explain.contains("KvScanExec:"));
         assert!(
-            explain.contains("KvScanExec: limit=None"),
+            explain.contains("KvScanExec: fetch=None"),
             "mixed direction order cannot be a bounded key-order scan:\n{explain}"
         );
         assert!(
-            !explain.contains("KvScanExec: limit=Some(1)"),
+            !explain.contains("KvScanExec: fetch=Some(1)"),
             "mixed direction order incorrectly pushed top-K into the scan:\n{explain}"
         );
 
@@ -7429,7 +7251,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn kv_topk_sort_pushdown_stops_at_filter_exec() {
+    async fn kv_topk_sort_pushdown_with_scan_predicate() {
         let state = MockState {
             kv: Arc::new(Mutex::new(BTreeMap::new())),
             range_calls: Arc::new(AtomicUsize::new(0)),
@@ -7457,7 +7279,7 @@ mod tests {
                 vec![],
             )
             .expect("schema");
-        let ctx = SessionContext::new();
+        let ctx = session_context();
         schema.register_all(&ctx).expect("register");
 
         let explain = physical_plan_text(
@@ -7472,17 +7294,14 @@ mod tests {
             .await,
         );
         assert!(
-            explain.contains("FilterExec"),
-            "unsupported filter should remain above scan:\n{explain}"
+            explain.contains("KvScanExec: fetch=Some(1), direction=Some(Reverse)"),
+            "{explain}"
         );
         assert!(
-            explain.contains("KvScanExec: limit=None"),
-            "top-K fetch must not cross a row-dropping filter:\n{explain}"
+            explain.contains("exact=false, row_recheck=true"),
+            "{explain}"
         );
-        assert!(
-            !explain.contains("KvScanExec: limit=Some(1)"),
-            "top-K fetch crossed a filter into the scan:\n{explain}"
-        );
+        assert!(!explain.contains("FilterExec"), "{explain}");
 
         let _ = shutdown_tx.send(());
     }
@@ -7541,7 +7360,7 @@ mod tests {
             .expect("matching lower key");
         writer.flush().await.expect("seed rows");
 
-        let ctx = SessionContext::new();
+        let ctx = session_context();
         schema.register_all(&ctx).expect("register");
         let sql = "SELECT account, height \
                    FROM tx_activity \
@@ -7550,7 +7369,7 @@ mod tests {
                    LIMIT 1";
         let explain = physical_plan_text(&explain_plan_rows(&ctx, sql).await);
         assert!(
-            explain.contains("KvScanExec: limit=Some(1), direction=Reverse"),
+            explain.contains("KvScanExec: fetch=Some(1), direction=Some(Reverse)"),
             "test must exercise reverse top-K scan pushdown:\n{explain}"
         );
 
@@ -7608,7 +7427,7 @@ mod tests {
         }
         writer.flush().await.expect("seed rows");
 
-        let ctx = SessionContext::new();
+        let ctx = session_context();
         schema.register_all(&ctx).expect("register");
         let sql = "SELECT id \
                    FROM events \
@@ -7617,7 +7436,7 @@ mod tests {
                    LIMIT 3";
         let explain = physical_plan_text(&explain_plan_rows(&ctx, sql).await);
         assert!(
-            explain.contains("KvScanExec: limit=Some(3), direction=Reverse"),
+            explain.contains("KvScanExec: fetch=Some(3), direction=Some(Reverse)"),
             "test must exercise reverse top-K scan pushdown over IN ranges:\n{explain}"
         );
 
@@ -7632,8 +7451,8 @@ mod tests {
         assert_eq!(collect_i64_column(&batches, 0), vec![20, 10, 3]);
         assert_eq!(
             state.range_calls.load(AtomicOrdering::SeqCst),
-            3,
-            "reverse scan should stop after the three highest IN ranges"
+            0,
+            "point sets use GetMany"
         );
 
         let _ = shutdown_tx.send(());
@@ -7666,7 +7485,7 @@ mod tests {
         }
         writer.flush().await.expect("seed rows");
 
-        let ctx = SessionContext::new();
+        let ctx = session_context();
         schema.register_all(&ctx).expect("register");
         let sql = "SELECT id \
                    FROM events \
@@ -7675,7 +7494,7 @@ mod tests {
                    LIMIT 2 OFFSET 1";
         let explain = physical_plan_text(&explain_plan_rows(&ctx, sql).await);
         assert!(
-            explain.contains("KvScanExec: limit=Some(3), direction=Reverse"),
+            explain.contains("KvScanExec: fetch=Some(3), direction=Some(Reverse)"),
             "OFFSET requires fetching offset + limit rows from the reverse scan:\n{explain}"
         );
 
@@ -7690,9 +7509,101 @@ mod tests {
         assert_eq!(collect_i64_column(&batches, 0), vec![10, 3]);
         assert_eq!(
             state.range_calls.load(AtomicOrdering::SeqCst),
-            3,
-            "reverse OFFSET scan should fetch only offset + limit IN ranges"
+            0,
+            "point sets use GetMany"
         );
+
+        let _ = shutdown_tx.send(());
+    }
+
+    #[tokio::test]
+    async fn kv_scan_sort_pushdown_preserves_nested_limits() {
+        use datafusion::physical_optimizer::pushdown_sort::PushdownSort;
+
+        let state = MockState {
+            kv: Arc::new(Mutex::new(BTreeMap::new())),
+            range_calls: Arc::new(AtomicUsize::new(0)),
+            range_reduce_calls: Arc::new(AtomicUsize::new(0)),
+            sequence_number: Arc::new(AtomicU64::new(0)),
+        };
+        let (base_url, shutdown_tx) = spawn_mock_server(state).await;
+        let client = StoreClient::new(&base_url);
+        let schema = KvSchema::new(PrefixedStoreClient::empty(client))
+            .table(
+                "events",
+                vec![TableColumnConfig::new("id", DataType::Int64, false)],
+                vec!["id".to_string()],
+                vec![],
+            )
+            .expect("schema");
+        let mut writer = schema.batch_writer();
+        for id in [1, 2, 3, 4] {
+            writer
+                .insert("events", vec![CellValue::Int64(id)])
+                .expect("row");
+        }
+        writer.flush().await.expect("seed rows");
+
+        let ctx = session_context();
+        schema.register_all(&ctx).expect("register");
+
+        // Without an inner ORDER BY, LIMIT constrains the row count but not the selected rows.
+        for (outer, limit, expected_len) in [("DESC", 1, 1), ("ASC", 1, 1), ("ASC", 5, 2)] {
+            let sql = format!(
+                "SELECT id FROM (SELECT id FROM events LIMIT 2) AS limited \
+                 ORDER BY id {outer} LIMIT {limit}"
+            );
+            let batches = ctx
+                .sql(&sql)
+                .await
+                .expect("query")
+                .collect()
+                .await
+                .expect("collect");
+            let values = collect_i64_column(&batches, 0);
+            assert_eq!(values.len(), expected_len, "{sql}");
+            assert!(
+                values.iter().all(|id| (1..=4).contains(id)),
+                "query returned a row outside the source: {sql}: {values:?}"
+            );
+            assert!(
+                values.windows(2).all(|pair| match outer {
+                    "ASC" => pair[0] <= pair[1],
+                    "DESC" => pair[0] >= pair[1],
+                    _ => unreachable!("test only supplies supported ordering"),
+                }),
+                "query did not respect its outer ordering: {sql}: {values:?}"
+            );
+        }
+
+        for (inner, outer, limit, expected) in [
+            ("ASC", "DESC", 1, vec![2]),
+            ("DESC", "ASC", 1, vec![3]),
+            ("ASC", "ASC", 5, vec![1, 2]),
+            ("DESC", "DESC", 5, vec![4, 3]),
+        ] {
+            let sql = format!(
+                "SELECT id FROM \
+                 (SELECT id FROM events ORDER BY id {inner} LIMIT 2) AS limited \
+                 ORDER BY id {outer} LIMIT {limit}"
+            );
+            let plan = ctx
+                .sql(&sql)
+                .await
+                .expect("query")
+                .create_physical_plan()
+                .await
+                .expect("physical plan");
+
+            // Reapplying sort pushdown must preserve the rows selected by the inner limit.
+            let plan = PushdownSort::new()
+                .optimize(plan, &ConfigOptions::new())
+                .expect("sort pushdown");
+            let batches = datafusion::physical_plan::collect(plan, ctx.task_ctx())
+                .await
+                .expect("collect");
+            assert_eq!(collect_i64_column(&batches, 0), expected, "{sql}");
+        }
 
         let _ = shutdown_tx.send(());
     }
@@ -7722,7 +7633,7 @@ mod tests {
             .expect("row");
         writer.flush().await.expect("seed rows");
 
-        let ctx = SessionContext::new();
+        let ctx = session_context();
         schema.register_all(&ctx).expect("register");
 
         let oversized = "a".repeat(
@@ -7755,86 +7666,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn kv_scan_index_limit_does_not_push_upstream_when_seen_dedup_can_drop_entries() {
-        let observed_limit = Arc::new(AtomicUsize::new(0));
-        let config = KvTableConfig::new(
-            0,
-            vec![
-                TableColumnConfig::new("id", DataType::Int64, false),
-                TableColumnConfig::new("status", DataType::Utf8, false),
-                TableColumnConfig::new("amount_cents", DataType::Int64, false),
-            ],
-            vec!["id".to_string()],
-            vec![IndexSpec::new("status_idx", vec!["status".to_string()])
-                .expect("valid")
-                .with_cover_columns(vec!["status".to_string(), "amount_cents".to_string()])],
-        )
-        .expect("config");
-        let model = TableModel::from_config(&config).expect("model");
-        let spec = model
-            .resolve_index_specs(&config.index_specs)
-            .expect("specs")
-            .into_iter()
-            .next()
-            .expect("status index spec");
-        let stale_row = KvRow {
-            values: vec![
-                CellValue::Int64(7),
-                CellValue::Utf8("closed".to_string()),
-                CellValue::Int64(10),
-            ],
+    async fn kv_scan_index_lookup_limit_counts_rows_after_residual_filtering() {
+        let state = MockState {
+            kv: Arc::new(Mutex::new(BTreeMap::new())),
+            range_calls: Arc::new(AtomicUsize::new(0)),
+            range_reduce_calls: Arc::new(AtomicUsize::new(0)),
+            sequence_number: Arc::new(AtomicU64::new(0)),
         };
-        let current_row = KvRow {
-            values: vec![
-                CellValue::Int64(7),
-                CellValue::Utf8("open".to_string()),
-                CellValue::Int64(10),
-            ],
-        };
-        let unique_row = KvRow {
-            values: vec![
-                CellValue::Int64(8),
-                CellValue::Utf8("open".to_string()),
-                CellValue::Int64(20),
-            ],
-        };
-        let stale_key = encode_secondary_index_key(model.table_prefix, &spec, &model, &stale_row)
-            .expect("stale index key");
-        let current_key =
-            encode_secondary_index_key(model.table_prefix, &spec, &model, &current_row)
-                .expect("current index key");
-        let unique_key = encode_secondary_index_key(model.table_prefix, &spec, &model, &unique_row)
-            .expect("unique index key");
-        let stale_payload =
-            encode_secondary_index_value(&stale_row, &model, &spec).expect("stale payload");
-        let current_payload =
-            encode_secondary_index_value(&current_row, &model, &spec).expect("current payload");
-        let unique_payload =
-            encode_secondary_index_value(&unique_row, &model, &spec).expect("unique payload");
-
-        let entries_frame = proto_range_entries_frame(vec![
-            (stale_key, stale_payload),
-            (current_key, current_payload),
-            (unique_key, unique_payload),
-        ]);
-        let harness = ObservedLimitIndexRangeHarness {
-            observed_limit: observed_limit.clone(),
-            entries_frame,
-        };
-        let connect = ConnectRpcService::new(QueryServiceServer::new(harness))
-            .with_compression(connect_compression_registry());
-        let app = Router::new().fallback_service(connect);
-
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind test listener");
-        let url = format!("http://{}", listener.local_addr().expect("listener addr"));
-        tokio::spawn(async move {
-            axum::serve(listener, app).await.expect("serve test app");
-        });
-
-        let client = StoreClient::new(&url);
-        let schema = KvSchema::new(PrefixedStoreClient::empty(client))
+        let (base_url, shutdown_tx) = spawn_mock_server(state).await;
+        let schema = KvSchema::new(PrefixedStoreClient::empty(StoreClient::new(&base_url)))
             .table(
                 "orders",
                 vec![
@@ -7843,36 +7683,58 @@ mod tests {
                     TableColumnConfig::new("amount_cents", DataType::Int64, false),
                 ],
                 vec!["id".to_string()],
-                vec![IndexSpec::new("status_idx", vec!["status".to_string()])
-                    .expect("valid")
-                    .with_cover_columns(vec!["status".to_string(), "amount_cents".to_string()])],
+                vec![IndexSpec::new("status_idx", vec!["status".to_string()]).expect("index")],
             )
             .expect("schema");
-        let ctx = SessionContext::new();
+        let mut writer = schema.batch_writer();
+        for (id, amount) in [(1, 20), (2, 0), (3, 10), (4, 20)] {
+            writer
+                .insert(
+                    "orders",
+                    vec![
+                        CellValue::Int64(id),
+                        CellValue::Utf8("open".to_string()),
+                        CellValue::Int64(amount),
+                    ],
+                )
+                .expect("row");
+        }
+        writer.flush().await.expect("seed rows");
+
+        let ctx = session_context();
         schema.register_all(&ctx).expect("register");
-
-        let batches = ctx
-            .sql(
-                "SELECT id, amount_cents \
-                 FROM orders \
-                 WHERE status IN ('open', 'closed') \
-                 LIMIT 2",
-            )
-            .await
-            .expect("query")
-            .collect()
-            .await
-            .expect("collect");
-
-        assert_eq!(
-            batches.iter().map(|batch| batch.num_rows()).sum::<usize>(),
-            2
-        );
-        assert_eq!(
-            observed_limit.load(AtomicOrdering::SeqCst),
-            usize::MAX,
-            "index streaming scans should not push SQL LIMIT upstream while seen-dedup can drop duplicate primary keys"
-        );
+        // The two-row index frames contain one matching row followed by a rejection,
+        // then a row whose residual predicate can either fail or satisfy the limit
+        for minimum in [20, 10] {
+            let mut plan = ctx
+                .sql(&format!(
+                    "SELECT id FROM orders WHERE status = 'open' AND amount_cents >= {minimum} LIMIT 2"
+                ))
+                .await
+                .expect("query")
+                .create_physical_plan()
+                .await
+                .expect("physical plan");
+            // Read the scan directly so an outer limit cannot hide excess output
+            while let Some(child) = plan.children().first() {
+                plan = (*child).clone();
+            }
+            assert!(plan.downcast_ref::<KvScanExec>().is_some());
+            assert_eq!(plan.fetch(), Some(2));
+            let batches = datafusion::physical_plan::collect(plan, ctx.task_ctx())
+                .await
+                .expect("collect scan");
+            let mut ids = collect_i64_column(&batches, 0);
+            ids.sort_unstable();
+            assert_eq!(ids.len(), 2, "minimum {minimum}: {ids:?}");
+            if minimum == 20 {
+                assert_eq!(ids, vec![1, 4]);
+            } else {
+                assert!(ids.iter().all(|id| [1, 3, 4].contains(id)));
+                assert_ne!(ids[0], ids[1]);
+            }
+        }
+        let _ = shutdown_tx.send(());
     }
 
     #[tokio::test]
@@ -7927,7 +7789,7 @@ mod tests {
         }
         writer.flush().await.expect("flush");
 
-        let ctx = SessionContext::new();
+        let ctx = session_context();
         schema.register_all(&ctx).expect("register");
 
         let batches = ctx
@@ -8009,7 +7871,7 @@ mod tests {
         }
         writer.flush().await.expect("flush");
 
-        let ctx = SessionContext::new();
+        let ctx = session_context();
         schema.register_all(&ctx).expect("register");
 
         state.range_calls.store(0, AtomicOrdering::SeqCst);
@@ -8090,7 +7952,7 @@ mod tests {
         }
         writer.flush().await.expect("flush");
 
-        let ctx = SessionContext::new();
+        let ctx = session_context();
         schema.register_all(&ctx).expect("register");
 
         state.range_calls.store(0, AtomicOrdering::SeqCst);
@@ -8187,7 +8049,7 @@ mod tests {
         }
         writer.flush().await.expect("flush");
 
-        let ctx = SessionContext::new();
+        let ctx = session_context();
         schema.register_all(&ctx).expect("register");
 
         state.range_calls.store(0, AtomicOrdering::SeqCst);
@@ -8307,7 +8169,7 @@ mod tests {
         }
         writer.flush().await.expect("flush");
 
-        let ctx = SessionContext::new();
+        let ctx = session_context();
         schema.register_all(&ctx).expect("register");
 
         state.range_calls.store(0, AtomicOrdering::SeqCst);
@@ -8394,7 +8256,7 @@ mod tests {
         }
         writer.flush().await.expect("flush");
 
-        let ctx = SessionContext::new();
+        let ctx = session_context();
         schema.register_all(&ctx).expect("register");
 
         state.range_calls.store(0, AtomicOrdering::SeqCst);
@@ -8481,7 +8343,7 @@ mod tests {
         }
         writer.flush().await.expect("flush");
 
-        let ctx = SessionContext::new();
+        let ctx = session_context();
         schema.register_all(&ctx).expect("register");
 
         state.range_calls.store(0, AtomicOrdering::SeqCst);
@@ -8511,9 +8373,10 @@ mod tests {
             .value(0);
         assert_eq!(closed_avg, 27.5);
         assert_eq!(state.range_calls.load(AtomicOrdering::SeqCst), 0);
-        assert!(
-            state.range_reduce_calls.load(AtomicOrdering::SeqCst) >= 3,
-            "filtered aggregate pushdown should use dedicated reduction jobs"
+        assert_eq!(
+            state.range_reduce_calls.load(AtomicOrdering::SeqCst),
+            2,
+            "aggregates with matching filters should share reduction jobs"
         );
 
         let _ = shutdown_tx.send(());
@@ -8565,7 +8428,7 @@ mod tests {
         }
         writer.flush().await.expect("flush");
 
-        let ctx = SessionContext::new();
+        let ctx = session_context();
         schema.register_all(&ctx).expect("register");
 
         state.range_calls.store(0, AtomicOrdering::SeqCst);
@@ -8598,9 +8461,10 @@ mod tests {
             .value(0);
         assert_eq!(closed_avg, 27.5);
         assert_eq!(state.range_calls.load(AtomicOrdering::SeqCst), 0);
-        assert!(
-            state.range_reduce_calls.load(AtomicOrdering::SeqCst) >= 3,
-            "case-based conditional aggregates should use reduction jobs"
+        assert_eq!(
+            state.range_reduce_calls.load(AtomicOrdering::SeqCst),
+            2,
+            "matching CASE filters should share reduction jobs"
         );
 
         let _ = shutdown_tx.send(());
@@ -8652,7 +8516,7 @@ mod tests {
         }
         writer.flush().await.expect("flush");
 
-        let ctx = SessionContext::new();
+        let ctx = session_context();
         schema.register_all(&ctx).expect("register");
 
         state.range_calls.store(0, AtomicOrdering::SeqCst);
@@ -8740,7 +8604,7 @@ mod tests {
         }
         writer.flush().await.expect("flush");
 
-        let ctx = SessionContext::new();
+        let ctx = session_context();
         schema.register_all(&ctx).expect("register");
 
         state.range_calls.store(0, AtomicOrdering::SeqCst);
@@ -8772,9 +8636,10 @@ mod tests {
             .value(0);
         assert!((avg_seconds - (4.0 / 3.0)).abs() < 1e-12);
         assert_eq!(state.range_calls.load(AtomicOrdering::SeqCst), 0);
-        assert!(
-            state.range_reduce_calls.load(AtomicOrdering::SeqCst) >= 2,
-            "computed aggregate inputs should use reduction jobs"
+        assert_eq!(
+            state.range_reduce_calls.load(AtomicOrdering::SeqCst),
+            1,
+            "computed aggregate inputs should share one reduction job"
         );
 
         let _ = shutdown_tx.send(());
@@ -8821,7 +8686,7 @@ mod tests {
         }
         writer.flush().await.expect("flush");
 
-        let ctx = SessionContext::new();
+        let ctx = session_context();
         schema.register_all(&ctx).expect("register");
 
         state.range_calls.store(0, AtomicOrdering::SeqCst);
@@ -8850,9 +8715,10 @@ mod tests {
             ScalarValue::Int64(Some(25))
         );
         assert_eq!(state.range_calls.load(AtomicOrdering::SeqCst), 0);
-        assert!(
-            state.range_reduce_calls.load(AtomicOrdering::SeqCst) >= 2,
-            "add/sub aggregate inputs should use reduction jobs"
+        assert_eq!(
+            state.range_reduce_calls.load(AtomicOrdering::SeqCst),
+            1,
+            "add/sub aggregate inputs should share one reduction job"
         );
 
         let _ = shutdown_tx.send(());
@@ -8906,7 +8772,7 @@ mod tests {
         }
         writer.flush().await.expect("flush");
 
-        let ctx = SessionContext::new();
+        let ctx = session_context();
         schema.register_all(&ctx).expect("register");
 
         state.range_calls.store(0, AtomicOrdering::SeqCst);
@@ -8986,7 +8852,7 @@ mod tests {
         }
         writer.flush().await.expect("flush");
 
-        let ctx = SessionContext::new();
+        let ctx = session_context();
         schema.register_all(&ctx).expect("register");
 
         state.range_calls.store(0, AtomicOrdering::SeqCst);
@@ -9087,7 +8953,7 @@ mod tests {
         }
         writer.flush().await.expect("flush");
 
-        let ctx = SessionContext::new();
+        let ctx = session_context();
         schema.register_all(&ctx).expect("register");
 
         state.range_calls.store(0, AtomicOrdering::SeqCst);
@@ -9195,7 +9061,7 @@ mod tests {
         }
         writer.flush().await.expect("flush");
 
-        let ctx = SessionContext::new();
+        let ctx = session_context();
         schema.register_all(&ctx).expect("register");
 
         state.range_calls.store(0, AtomicOrdering::SeqCst);
@@ -9233,9 +9099,406 @@ mod tests {
             ScalarValue::Int64(Some(40))
         );
         assert_eq!(state.range_calls.load(AtomicOrdering::SeqCst), 0);
+        assert_eq!(
+            state.range_reduce_calls.load(AtomicOrdering::SeqCst),
+            1,
+            "grouped aggregates should share one reduction job"
+        );
+
+        let _ = shutdown_tx.send(());
+    }
+
+    async fn aggregate_test_context() -> (SessionContext, MockState, oneshot::Sender<()>) {
+        let state = MockState {
+            kv: Arc::new(Mutex::new(BTreeMap::new())),
+            range_calls: Arc::new(AtomicUsize::new(0)),
+            range_reduce_calls: Arc::new(AtomicUsize::new(0)),
+            sequence_number: Arc::new(AtomicU64::new(0)),
+        };
+        let (base_url, shutdown_tx) = spawn_mock_server(state.clone()).await;
+        let schema = KvSchema::new(PrefixedStoreClient::empty(StoreClient::new(&base_url)))
+            .table(
+                "orders",
+                vec![
+                    TableColumnConfig::new("id", DataType::Int64, false),
+                    TableColumnConfig::new("status", DataType::Utf8, false),
+                    TableColumnConfig::new("amount_cents", DataType::Int64, false),
+                ],
+                vec!["id".to_string()],
+                vec![],
+            )
+            .expect("schema");
+        let mut writer = schema.batch_writer();
+        for (id, status, amount) in [
+            (1, "open", 10),
+            (2, "open", 30),
+            (3, "closed", 15),
+            (4, "closed", 40),
+        ] {
+            writer
+                .insert(
+                    "orders",
+                    vec![
+                        CellValue::Int64(id),
+                        CellValue::Utf8(status.to_string()),
+                        CellValue::Int64(amount),
+                    ],
+                )
+                .expect("row");
+        }
+        writer.flush().await.expect("flush");
+        let ctx = SessionContext::new_with_state(
+            session_state_builder()
+                .with_config(datafusion::prelude::SessionConfig::new().with_batch_size(2))
+                .build(),
+        );
+        schema.register_all(&ctx).expect("register");
+        (ctx, state, shutdown_tx)
+    }
+
+    #[tokio::test]
+    async fn aggregate_pushdown_preserves_unaliased_output_schema() {
+        let (ctx, state, shutdown_tx) = aggregate_test_context().await;
+        for (sql, expected) in [
+            ("SELECT SUM(amount_cents) FROM orders", vec![95]),
+            (
+                "SELECT status, SUM(amount_cents) FROM orders GROUP BY status ORDER BY status",
+                vec![55, 40],
+            ),
+        ] {
+            let df = ctx.sql(sql).await.expect("query");
+            let original_schema = df.schema().as_arrow().clone();
+            state.range_calls.store(0, AtomicOrdering::SeqCst);
+            state.range_reduce_calls.store(0, AtomicOrdering::SeqCst);
+            let batches = df.collect().await.expect("collect");
+            let mut sums = Vec::new();
+            for batch in batches {
+                assert_eq!(batch.schema().as_ref(), &original_schema);
+                for row in 0..batch.num_rows() {
+                    sums.push(
+                        ScalarValue::try_from_array(batch.column(batch.num_columns() - 1), row)
+                            .expect("sum"),
+                    );
+                }
+            }
+            assert_eq!(
+                sums,
+                expected
+                    .into_iter()
+                    .map(|value| ScalarValue::Int64(Some(value)))
+                    .collect::<Vec<_>>()
+            );
+            assert_eq!(state.range_calls.load(AtomicOrdering::SeqCst), 0);
+            assert!(state.range_reduce_calls.load(AtomicOrdering::SeqCst) > 0);
+        }
+        let _ = shutdown_tx.send(());
+    }
+
+    #[tokio::test]
+    async fn aggregate_pushdown_preserves_dotted_aliases() {
+        use datafusion::functions_aggregate::expr_fn::sum;
+        use datafusion::prelude::col;
+
+        let (ctx, state, shutdown_tx) = aggregate_test_context().await;
+        let rows = ctx
+            .sql("SELECT * FROM orders")
+            .await
+            .expect("rows")
+            .collect()
+            .await
+            .expect("collect rows");
+        let native = SessionContext::new();
+        native
+            .register_table(
+                "orders",
+                Arc::new(
+                    datafusion::datasource::MemTable::try_new(rows[0].schema(), vec![rows])
+                        .expect("native table"),
+                ),
+            )
+            .expect("register native table");
+
+        let mut failures = Vec::new();
+        for aggregate in [
+            sum(col("amount_cents")).alias("orders.status"),
+            sum(col("amount_cents")).alias_qualified(Some("totals"), "status"),
+        ] {
+            let mut expected_rows = Vec::new();
+            for (session, pushed) in [(&native, false), (&ctx, true)] {
+                let df = session
+                    .table("orders")
+                    .await
+                    .expect("table")
+                    .aggregate(vec![col("orders.status")], vec![aggregate.clone()])
+                    .expect("valid aggregate");
+                let original_schema = df.schema().clone();
+                state.range_calls.store(0, AtomicOrdering::SeqCst);
+                state.range_reduce_calls.store(0, AtomicOrdering::SeqCst);
+                let plan = match df.clone().into_optimized_plan() {
+                    Ok(plan) => plan,
+                    Err(error) => {
+                        failures.push(format!("{aggregate}: {error}"));
+                        continue;
+                    }
+                };
+                assert_eq!(
+                    plan.schema().iter().collect::<Vec<_>>(),
+                    original_schema.iter().collect::<Vec<_>>()
+                );
+                let batches = df.collect().await.expect("collect aggregate");
+                let mut rows = Vec::new();
+                for batch in batches {
+                    assert_eq!(batch.schema().as_ref(), original_schema.as_arrow());
+                    for row in 0..batch.num_rows() {
+                        rows.push((
+                            scalar_to_string(
+                                &ScalarValue::try_from_array(batch.column(0), row).expect("status"),
+                            )
+                            .expect("status string"),
+                            ScalarValue::try_from_array(batch.column(1), row).expect("sum"),
+                        ));
+                    }
+                }
+                rows.sort_by(|left, right| left.0.cmp(&right.0));
+                let filtered = session
+                    .execute_logical_plan(plan.clone())
+                    .await
+                    .expect("optimized aggregate")
+                    .filter(
+                        Expr::Column(datafusion::common::Column::from(
+                            original_schema.qualified_field(0),
+                        ))
+                        .eq(datafusion::prelude::lit("open")),
+                    )
+                    .expect("filter group output")
+                    .collect()
+                    .await
+                    .expect("collect filtered aggregate");
+                let filtered_sums = filtered
+                    .iter()
+                    .flat_map(|batch| {
+                        (0..batch.num_rows()).map(|row| {
+                            ScalarValue::try_from_array(batch.column(1), row).expect("filtered sum")
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                assert_eq!(filtered_sums, vec![ScalarValue::Int64(Some(40))]);
+                if pushed {
+                    assert_eq!(rows, expected_rows);
+                    assert_eq!(state.range_calls.load(AtomicOrdering::SeqCst), 0);
+                    assert!(state.range_reduce_calls.load(AtomicOrdering::SeqCst) > 0);
+
+                    let projected = ctx
+                        .execute_logical_plan(plan)
+                        .await
+                        .expect("optimized aggregate")
+                        .select([Expr::Column(datafusion::common::Column::from(
+                            original_schema.qualified_field(1),
+                        ))])
+                        .expect("project aggregate output")
+                        .collect()
+                        .await
+                        .expect("collect projected aggregate");
+                    let mut sums = projected
+                        .iter()
+                        .flat_map(|batch| {
+                            (0..batch.num_rows()).map(|row| {
+                                ScalarValue::try_from_array(batch.column(0), row).expect("sum")
+                            })
+                        })
+                        .collect::<Vec<_>>();
+                    sums.sort_by(|left, right| left.partial_cmp(right).expect("comparable sums"));
+                    assert_eq!(
+                        sums,
+                        vec![ScalarValue::Int64(Some(40)), ScalarValue::Int64(Some(55))]
+                    );
+                    assert_eq!(state.range_calls.load(AtomicOrdering::SeqCst), 0);
+                } else {
+                    expected_rows = rows;
+                }
+            }
+        }
+        let _ = shutdown_tx.send(());
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
+    #[tokio::test]
+    async fn kv_scan_preserves_row_counts_without_projected_columns() {
+        let (ctx, state, shutdown_tx) = aggregate_test_context().await;
+        let native = SessionContext::new();
+        let table = ctx.table_provider("orders").await.expect("table");
+        native
+            .register_table("orders", table)
+            .expect("register native fallback");
+        for (sql, count) in [
+            ("SELECT COUNT(*) FROM orders AS o", 4),
+            ("SELECT COUNT(*) AS total FROM orders AS o", 4),
+            ("SELECT COUNT(1) FROM orders AS o", 4),
+            (
+                "SELECT COUNT(*) FROM (SELECT id FROM orders LIMIT 3) AS limited",
+                3,
+            ),
+            ("SELECT COUNT(*) FROM orders AS o WHERE id < 0", 0),
+        ] {
+            let batches = native
+                .sql(sql)
+                .await
+                .expect("count query")
+                .collect()
+                .await
+                .expect("collect count");
+            assert_eq!(
+                batches.iter().map(|batch| batch.num_rows()).sum::<usize>(),
+                1
+            );
+            assert_count_scalar(&batches[0], 0, 0, count);
+        }
+        assert!(state.range_calls.load(AtomicOrdering::SeqCst) > 0);
+        assert_eq!(state.range_reduce_calls.load(AtomicOrdering::SeqCst), 0);
+        let _ = shutdown_tx.send(());
+    }
+
+    #[tokio::test]
+    async fn aggregate_pushdown_preserves_row_counts_without_projected_columns() {
+        let (ctx, state, shutdown_tx) = aggregate_test_context().await;
+        for (sql, count) in [
+            ("SELECT SUM(amount_cents) AS total FROM orders", 1),
+            (
+                "SELECT status, SUM(amount_cents) AS total FROM orders GROUP BY status",
+                2,
+            ),
+        ] {
+            let plan = ctx
+                .sql(sql)
+                .await
+                .expect("aggregate query")
+                .into_optimized_plan()
+                .expect("optimize aggregate");
+            state.range_calls.store(0, AtomicOrdering::SeqCst);
+            state.range_reduce_calls.store(0, AtomicOrdering::SeqCst);
+            let batches = ctx
+                .execute_logical_plan(plan)
+                .await
+                .expect("optimized query")
+                .select(Vec::<Expr>::new())
+                .expect("empty projection")
+                .collect()
+                .await
+                .expect("collect empty projection");
+            assert!(batches.iter().all(|batch| batch.num_columns() == 0));
+            assert_eq!(
+                batches.iter().map(|batch| batch.num_rows()).sum::<usize>(),
+                count
+            );
+            assert_eq!(state.range_calls.load(AtomicOrdering::SeqCst), 0);
+            assert!(state.range_reduce_calls.load(AtomicOrdering::SeqCst) > 0);
+        }
+        let _ = shutdown_tx.send(());
+    }
+
+    #[tokio::test]
+    async fn aggregate_pushdown_supports_unaliased_aggregate_columns() {
+        let state = MockState {
+            kv: Arc::new(Mutex::new(BTreeMap::new())),
+            range_calls: Arc::new(AtomicUsize::new(0)),
+            range_reduce_calls: Arc::new(AtomicUsize::new(0)),
+            sequence_number: Arc::new(AtomicU64::new(0)),
+        };
+        let (base_url, shutdown_tx) = spawn_mock_server(state.clone()).await;
+        let client = StoreClient::new(&base_url);
+
+        let schema = KvSchema::new(PrefixedStoreClient::empty(client))
+            .table(
+                "orders",
+                vec![
+                    TableColumnConfig::new("id", DataType::Int64, false),
+                    TableColumnConfig::new("status", DataType::Utf8, false),
+                    TableColumnConfig::new("amount_cents", DataType::Int64, false),
+                ],
+                vec!["id".to_string()],
+                vec![IndexSpec::new("status_idx", vec!["status".to_string()])
+                    .expect("valid")
+                    .with_cover_columns(vec!["amount_cents".to_string()])],
+            )
+            .expect("schema");
+
+        let mut writer = schema.batch_writer();
+        for (id, status, amount) in [(1, "open", 10), (2, "open", 30), (3, "closed", 15)] {
+            writer
+                .insert(
+                    "orders",
+                    vec![
+                        CellValue::Int64(id),
+                        CellValue::Utf8(status.to_string()),
+                        CellValue::Int64(amount),
+                    ],
+                )
+                .expect("row");
+        }
+        writer.flush().await.expect("flush");
+
+        let ctx = session_context();
+        schema.register_all(&ctx).expect("register");
+
+        // Without an alias the optimizer drops the identity projection above the
+        // aggregate, so the pushdown rewrite becomes the plan root and must
+        // reproduce the aggregate's output qualifiers exactly to plan at all.
+        let grouped_sql =
+            "SELECT status, SUM(amount_cents) FROM orders GROUP BY status ORDER BY status";
+        let explain = physical_plan_text(&explain_plan_rows(&ctx, grouped_sql).await);
+        assert!(explain.contains("KvAggregateExec:"), "{explain}");
+
+        state.range_calls.store(0, AtomicOrdering::SeqCst);
+        state.range_reduce_calls.store(0, AtomicOrdering::SeqCst);
+
+        let batches = ctx
+            .sql(grouped_sql)
+            .await
+            .expect("query")
+            .collect()
+            .await
+            .expect("collect");
+
+        assert_eq!(batches.iter().map(|b| b.num_rows()).sum::<usize>(), 2);
+        let batch = &batches[0];
+        assert_eq!(
+            ScalarValue::try_from_array(batch.column(0), 0).expect("status scalar"),
+            ScalarValue::Utf8(Some("closed".to_string()))
+        );
+        assert_eq!(
+            ScalarValue::try_from_array(batch.column(1), 0).expect("sum scalar"),
+            ScalarValue::Int64(Some(15))
+        );
+        assert_eq!(
+            ScalarValue::try_from_array(batch.column(0), 1).expect("status scalar"),
+            ScalarValue::Utf8(Some("open".to_string()))
+        );
+        assert_eq!(
+            ScalarValue::try_from_array(batch.column(1), 1).expect("sum scalar"),
+            ScalarValue::Int64(Some(40))
+        );
+        assert_eq!(state.range_calls.load(AtomicOrdering::SeqCst), 0);
         assert!(
-            state.range_reduce_calls.load(AtomicOrdering::SeqCst) >= 2,
-            "group-by aggregate should use grouped range reduction path"
+            state.range_reduce_calls.load(AtomicOrdering::SeqCst) >= 1,
+            "unaliased group-by aggregate should use grouped range reduction path"
+        );
+
+        let total_sql = "SELECT SUM(amount_cents) FROM orders";
+        let explain = physical_plan_text(&explain_plan_rows(&ctx, total_sql).await);
+        assert!(explain.contains("KvAggregateExec:"), "{explain}");
+
+        let batches = ctx
+            .sql(total_sql)
+            .await
+            .expect("query")
+            .collect()
+            .await
+            .expect("collect");
+
+        assert_eq!(batches.iter().map(|b| b.num_rows()).sum::<usize>(), 1);
+        assert_eq!(
+            ScalarValue::try_from_array(batches[0].column(0), 0).expect("sum scalar"),
+            ScalarValue::Int64(Some(55))
         );
 
         let _ = shutdown_tx.send(());
@@ -9275,7 +9538,7 @@ mod tests {
         }
         writer.flush().await.expect("flush");
 
-        let ctx = SessionContext::new();
+        let ctx = session_context();
         schema.register_all(&ctx).expect("register");
 
         state.range_calls.store(0, AtomicOrdering::SeqCst);
@@ -9359,7 +9622,7 @@ mod tests {
         }
         writer.flush().await.expect("flush");
 
-        let ctx = SessionContext::new();
+        let ctx = session_context();
         schema.register_all(&ctx).expect("register");
 
         state.range_calls.store(0, AtomicOrdering::SeqCst);
@@ -9414,9 +9677,10 @@ mod tests {
         );
 
         assert_eq!(state.range_calls.load(AtomicOrdering::SeqCst), 0);
-        assert!(
-            state.range_reduce_calls.load(AtomicOrdering::SeqCst) >= 3,
-            "filtered group-by aggregate should use grouped reduction plus seed job"
+        assert_eq!(
+            state.range_reduce_calls.load(AtomicOrdering::SeqCst),
+            1,
+            "aggregate filters should share one grouped reduction"
         );
 
         let _ = shutdown_tx.send(());
@@ -9424,7 +9688,6 @@ mod tests {
 
     mod e2e {
         use super::*;
-        use datafusion::prelude::SessionContext;
         use exoware_sdk::StoreClient;
 
         struct TestServers {
@@ -9497,7 +9760,7 @@ mod tests {
             }
             writer.flush().await.expect("flush batch");
 
-            let ctx = SessionContext::new();
+            let ctx = session_context();
             schema.register_all(&ctx).expect("register tables");
 
             let batches = ctx
