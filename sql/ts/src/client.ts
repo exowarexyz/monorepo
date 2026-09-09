@@ -7,6 +7,7 @@ import {
 } from '@exowarexyz/sdk';
 import {
   QueryRequestSchema as SqlQueryRequestSchema,
+  type QueryResponse as SqlQueryResponse,
 } from './generated/proto/sql/v1/query_pb.js';
 import {
   IndexLayout as SqlIndexLayout,
@@ -21,6 +22,11 @@ import {
   type SubscribeResponse as SqlSubscribeResponse,
 } from './generated/proto/sql/v1/stream_pb.js';
 export type SqlClientOptions = SdkClientOptions;
+
+export interface DecodedQueryResult {
+  sequenceNumber: bigint;
+  table: Table;
+}
 
 export interface DecodedSubscribeFrame {
   sequenceNumber: bigint;
@@ -58,13 +64,14 @@ function decodeTableStream(bytes: Uint8Array): Table {
   if (!reader.schema) {
     throw new Error('SQL response is missing its Arrow schema');
   }
-  const schema = reader.schema;
+
   // Arrow 21.2 merges duplicate field names when rebuilding batch schemas
+  const schema = reader.schema;
   const batches = reader.readAll().map((batch) => Object.assign(batch, { schema }));
   return new Table(schema, batches);
 }
 
-function decodeSubscribe(response: SqlSubscribeResponse): DecodedSubscribeFrame {
+function decodeResult(response: SqlQueryResponse | SqlSubscribeResponse): DecodedQueryResult {
   return {
     sequenceNumber: response.sequenceNumber,
     table: decodeTableStream(response.results),
@@ -111,7 +118,8 @@ function decodeTable(table: SqlTable): DecodedTable {
  * `subscribe` evaluates a compiled scalar predicate on every ingest batch
  * that touches the named table and yields one frame per batch of matching rows.
  * `query` runs an arbitrary SQL statement against the server's session and
- * returns a native Arrow Table with its result schema and column buffers.
+ * returns the observed Store sequence and a native Arrow Table with its result
+ * schema and column buffers.
  */
 export class SqlClient {
   private readonly rpc: ConnectClient<typeof SqlService>;
@@ -121,12 +129,19 @@ export class SqlClient {
     this.rpc = createClient(SqlService, transport);
   }
 
-  async query(sql: string, options?: CallOptions): Promise<Table> {
+  async query(
+    sql: string,
+    minSequenceNumber?: bigint,
+    options?: CallOptions,
+  ): Promise<DecodedQueryResult> {
     const response = await this.rpc.query(
-      create(SqlQueryRequestSchema, { sql }),
+      create(SqlQueryRequestSchema, {
+        sql,
+        ...(minSequenceNumber !== undefined ? { minSequenceNumber } : {}),
+      }),
       options,
     );
-    return decodeTableStream(response.results);
+    return decodeResult(response);
   }
 
   async tables(options?: CallOptions): Promise<DecodedTable[]> {
@@ -162,7 +177,7 @@ export class SqlClient {
       options,
     );
     for await (const frame of stream) {
-      yield decodeSubscribe(frame);
+      yield decodeResult(frame);
     }
   }
 }

@@ -552,7 +552,8 @@ impl ExecutionPlan for KvAggregateExec {
             )));
         }
 
-        let session = self.spec.client.create_session();
+        let session = request_read_session(context.session_config(), &self.spec.client)
+            .unwrap_or_else(|| self.spec.client.create_session());
         let source = Arc::new(self.clone());
         let concurrency = context.session_config().target_partitions().max(1);
         let jobs = self

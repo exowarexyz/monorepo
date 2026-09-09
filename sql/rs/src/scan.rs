@@ -471,7 +471,7 @@ impl ExecutionPlan for KvScanExec {
     fn execute(
         &self,
         partition: usize,
-        _context: Arc<TaskContext>,
+        context: Arc<TaskContext>,
     ) -> DataFusionResult<SendableRecordBatchStream> {
         if partition != 0 {
             return Err(DataFusionError::Internal(format!(
@@ -481,7 +481,8 @@ impl ExecutionPlan for KvScanExec {
 
         let mut builder = RecordBatchReceiverStreamBuilder::new(self.schema(), 2);
         let tx = builder.tx();
-        let session = self.client.create_session();
+        let session = request_read_session(context.session_config(), &self.client)
+            .unwrap_or_else(|| self.client.create_session());
         let key_prefix = self.client.key_prefix().clone();
         let model = self.model.clone();
         let index_specs = self.index_specs.clone();

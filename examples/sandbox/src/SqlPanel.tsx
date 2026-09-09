@@ -177,7 +177,7 @@ export function SqlPanel({
     setIsQuerying(true);
     setQueryResult(null);
     try {
-      const result = await client.query(querySql);
+      const { table: result } = await client.query(querySql);
       setQueryResult(result);
       showNotification('success', 'SQL Query', `Returned ${result.numRows} rows`);
     } catch (error) {

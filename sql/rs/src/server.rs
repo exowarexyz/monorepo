@@ -36,7 +36,9 @@ use datafusion::arrow::ipc::writer::StreamWriter;
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::common::tree_node::{TreeNode, TreeNodeRecursion};
 use datafusion::common::{DFSchema, DataFusionError, Result as DataFusionResult, TableReference};
-use datafusion::logical_expr::{simplify::SimplifyContext, Expr, ExprSchemable};
+use datafusion::logical_expr::{
+    simplify::SimplifyContext, DdlStatement, Expr, ExprSchemable, LogicalPlan, Statement,
+};
 use datafusion::optimizer::simplify_expressions::ExprSimplifier;
 use datafusion::physical_expr::PhysicalExpr;
 use datafusion::physical_plan::filter::batch_filter;
@@ -59,6 +61,21 @@ use crate::types::{IndexLayout, ResolvedIndexSpec, TableModel};
 const MAX_CONNECTRPC_BODY_BYTES: usize = 256 * 1024 * 1024;
 
 type SubscribeStream = Pin<Box<dyn Stream<Item = Result<SubscribeResponse, ConnectError>> + Send>>;
+
+/// Build a query context whose Store scans share the supplied minimum sequence.
+///
+/// All Store-backed providers in `ctx` must use the same Store as `store`.
+pub fn query_context_with_min_sequence(
+    ctx: &SessionContext,
+    store: &PrefixedStoreClient,
+    min_sequence_number: u64,
+) -> SessionContext {
+    let read_session = store.create_session_with_sequence(min_sequence_number);
+
+    let mut state = ctx.state();
+    state.config_mut().set_extension(Arc::new(read_session));
+    SessionContext::new_with_state(state)
+}
 
 /// One registered table's streaming-decode state.
 #[derive(Clone)]
@@ -159,6 +176,16 @@ impl SqlServer {
     /// without going through the connect API.
     pub fn session(&self) -> &SessionContext {
         &self.ctx
+    }
+
+    fn query_session(
+        &self,
+        min_sequence_number: u64,
+    ) -> (SessionContext, exoware_sdk::SerializableReadSession) {
+        let ctx = query_context_with_min_sequence(&self.ctx, &self.store, min_sequence_number);
+        let read_session = crate::types::request_read_session(&ctx.copied_config(), &self.store)
+            .expect("query context must retain its Store read session");
+        (ctx, read_session)
     }
 
     #[allow(clippy::result_large_err)]
@@ -287,7 +314,7 @@ impl Service for SqlConnect {
                 .stream()
                 .subscribe(filter, since)
                 .await
-                .map_err(client_error_to_connect)?;
+                .map_err(|err| client_error_to_connect(&err))?;
 
             let output = Box::pin(BatchPredicateStream::new(sub, stream, predicate));
             Ok(connectrpc::Response::stream(output as SubscribeStream))
@@ -316,9 +343,29 @@ impl Service for SqlConnect {
         let server = self.server.clone();
         AssertUnwindSafe(async move {
             let sql = request.sql.to_string();
-            let df = server
-                .ctx
-                .sql(&sql)
+            let min_sequence_number = request.min_sequence_number.unwrap_or_default();
+            let (ctx, read_session) = server.query_session(min_sequence_number);
+            let plan = ctx
+                .state()
+                .create_logical_plan(&sql)
+                .await
+                .map_err(datafusion_error_to_connect)?;
+
+            // Session commands must outlive the request. Data reads keep the request's floor.
+            let execution_ctx = match &plan {
+                LogicalPlan::Statement(
+                    Statement::SetVariable(_)
+                    | Statement::ResetVariable(_)
+                    | Statement::Prepare(_)
+                    | Statement::Deallocate(_),
+                )
+                | LogicalPlan::Ddl(
+                    DdlStatement::CreateFunction(_) | DdlStatement::DropFunction(_),
+                ) => server.ctx.as_ref(),
+                _ => &ctx,
+            };
+            let df = execution_ctx
+                .execute_logical_plan(plan)
                 .await
                 .map_err(datafusion_error_to_connect)?;
             let mut batches = df
@@ -340,8 +387,14 @@ impl Service for SqlConnect {
                 .into_inner()
                 .map_err(|error| datafusion_error_to_connect(error.into()))?
                 .into();
+
+            // Queries that skip Store reads preserve the requested floor.
+            let sequence_number = read_session
+                .evaluated_sequence()
+                .unwrap_or(min_sequence_number);
             connectrpc::Response::ok(QueryResponse {
                 results,
+                sequence_number,
                 ..Default::default()
             })
         })
@@ -409,7 +462,7 @@ fn subscription_stream(sub: StreamSubscription) -> SubscriptionStream {
         match sub.next().await {
             Ok(Some(frame)) => Some((Ok(frame), Some(sub))),
             Ok(None) => None,
-            Err(err) => Some((Err(client_error_to_connect(err)), None)),
+            Err(err) => Some((Err(client_error_to_connect(&err)), None)),
         }
     }))
 }
@@ -569,13 +622,19 @@ fn datafusion_error_to_connect(err: DataFusionError) -> ConnectError {
         DataFusionError::SchemaError(schema_error, _) => {
             ConnectError::invalid_argument(schema_error.to_string())
         }
+        DataFusionError::External(external) => {
+            match external.downcast_ref::<exoware_sdk::ClientError>() {
+                Some(client_error) => client_error_to_connect(client_error),
+                None => ConnectError::internal(err.to_string()),
+            }
+        }
         _ => ConnectError::internal(err.to_string()),
     }
 }
 
-fn client_error_to_connect(err: exoware_sdk::ClientError) -> ConnectError {
+fn client_error_to_connect(err: &exoware_sdk::ClientError) -> ConnectError {
     if let Some(rpc) = err.rpc_error() {
-        ConnectError::new(rpc.code, rpc.message.clone().unwrap_or_default())
+        rpc.clone()
     } else {
         ConnectError::internal(err.to_string())
     }
@@ -594,6 +653,7 @@ mod tests {
     use datafusion::arrow::record_batch::RecordBatchOptions;
     use datafusion::datasource::MemTable;
     use datafusion::logical_expr::{create_udf, ColumnarValue, Volatility};
+    use exoware_sdk::StoreClient;
     use std::collections::VecDeque;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Mutex;
@@ -1077,6 +1137,20 @@ mod tests {
                 "{sql}"
             );
         }
+    }
+
+    #[test]
+    fn query_context_installs_the_supplied_store_sequence_floor() {
+        let ctx = SessionContext::new();
+        let store = PrefixedStoreClient::empty(StoreClient::new("http://localhost:10000"));
+        let query_ctx = query_context_with_min_sequence(&ctx, &store, 41);
+        let first = crate::types::request_read_session(query_ctx.state().config(), &store).unwrap();
+        let second =
+            crate::types::request_read_session(query_ctx.state().config(), &store).unwrap();
+
+        assert_eq!(first.fixed_sequence(), Some(41));
+        assert_eq!(second.fixed_sequence(), Some(41));
+        assert!(crate::types::request_read_session(ctx.state().config(), &store).is_none());
     }
 
     enum ControlledEvent {

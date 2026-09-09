@@ -6,8 +6,10 @@ This package exposes a TypeScript client for `sql.v1.Service` over Connect-Web.
 It reuses `@exowarexyz/sdk` transport setup and owns its generated `sql.v1`
 protobuf bindings.
 
-Queries return native Apache Arrow `Table` objects. Subscription frames contain
-`sequenceNumber` and `table`. Arrow IPC preserves the result schema, field order,
+Queries return `DecodedQueryResult` objects containing the observed Store
+`sequenceNumber` and a native Apache Arrow `table`. Queries without Store reads
+return the requested floor, or `0n` if none was supplied. Subscription frames contain
+the same fields. Arrow IPC preserves the result schema, field order,
 nulls, nested values, decimal scale, and timestamp units/timezones. The client uses
 binary Connect encoding by default.
 
@@ -21,8 +23,13 @@ import { SqlClient } from '@exowarexyz/sql';
 
 const client = new SqlClient('http://localhost:8080');
 const result = await client.query('SELECT region, COUNT(*) FROM orders GROUP BY region');
-console.log(result.schema.fields, result.numRows);
-console.log(result.getChildAt(0)?.toArray());
+console.log(result.sequenceNumber, result.table.schema.fields, result.table.numRows);
+console.log(result.table.getChildAt(0)?.toArray());
+
+const next = await client.query('SELECT * FROM orders', result.sequenceNumber, {
+  timeoutMs: 5000,
+});
+console.log(next.sequenceNumber, next.table.numRows);
 
 for await (const { sequenceNumber, table } of client.subscribe({ table: 'orders' })) {
   console.log(sequenceNumber, table.numRows);

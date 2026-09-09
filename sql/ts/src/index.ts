@@ -4,6 +4,7 @@ export {
   type DecodedColumn,
   type DecodedIndex,
   type DecodedIndexLayout,
+  type DecodedQueryResult,
   type DecodedSubscribeFrame,
   type DecodedTable,
   type SqlClientOptions,

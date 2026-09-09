@@ -112,14 +112,27 @@ describe('Exoware TS SDK', () => {
                 { key: encoder.encode(`${prefix}c`), value: Buffer.from('c') },
             ];
 
+            let sequenceNumber = 0n;
             for (const pair of pairs) {
-                await store.set(pair.key, pair.value);
+                sequenceNumber = await store.set(pair.key, pair.value);
             }
 
             const result = await store.query(encoder.encode(`${prefix}a`), encoder.encode(`${prefix}z`));
+            expect(result.sequenceNumber).toBeGreaterThan(0n);
             expect(result.results.length).toBe(3);
             expect(result.results.map(r => Buffer.from(r.value))).toEqual(pairs.map(p => p.value));
             expect(result.results.map(r => r.key).sort()).toEqual(pairs.map(p => p.key).sort());
+
+            const emptyResult = await store.query(
+                encoder.encode(`${prefix}missing`),
+                encoder.encode(`${prefix}missing`),
+                undefined,
+                4096,
+                TraversalMode.FORWARD,
+                sequenceNumber,
+            );
+            expect(emptyResult.results).toHaveLength(0);
+            expect(emptyResult.sequenceNumber).toBeGreaterThanOrEqual(sequenceNumber);
         });
 
         it('should setMany with multiple KVs', async () => {

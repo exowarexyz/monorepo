@@ -2,10 +2,22 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use datafusion::arrow::datatypes::{i256, DataType, Field, Schema, SchemaRef, TimeUnit};
+use datafusion::prelude::SessionConfig;
 use exoware_sdk::keys::{Key, Prefix};
 use exoware_sdk::PrefixedStoreClient;
+use exoware_sdk::SerializableReadSession;
 
 use crate::codec::{primary_key_prefix, secondary_index_prefix};
+
+// Share freshness state across the query while each provider keeps its own client and namespace.
+pub(crate) fn request_read_session(
+    config: &SessionConfig,
+    client: &PrefixedStoreClient,
+) -> Option<SerializableReadSession> {
+    config
+        .get_extension::<SerializableReadSession>()
+        .map(|request| request.with_client(client.clone()))
+}
 
 /// Every table/index family is named by a single packed byte
 /// `(table_prefix << 4) | discriminator`: the high nibble is the table prefix

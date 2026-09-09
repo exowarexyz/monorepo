@@ -189,14 +189,53 @@ where
         start_location: Location<F>,
         max_locations: u32,
     ) -> Result<OperationRangeCheckpoint<H::Digest, F>, QmdbError> {
-        let session = self.client.create_session();
-        self.operation_range_checkpoint_in_session(
-            &session,
+        let (proof, _) = self
+            .operation_range_checkpoint_with_read_floor(0, watermark, start_location, max_locations)
+            .await?;
+        Ok(proof)
+    }
+
+    pub(crate) async fn operation_range_checkpoint_with_read_floor(
+        &self,
+        read_floor_sequence: u64,
+        watermark: Location<F>,
+        start_location: Location<F>,
+        max_locations: u32,
+    ) -> Result<(OperationRangeCheckpoint<H::Digest, F>, u64), QmdbError> {
+        let session = self
+            .client
+            .create_session_with_sequence(read_floor_sequence);
+        self.core()
+            .require_published_watermark(&session, watermark)
+            .await?;
+        let end = crate::proof::resolve_range_bounds(watermark, start_location, max_locations)?;
+        let storage = KvMerkleStorage::<F, H::Digest> {
+            session: &session,
+            size: merkle_size_for_watermark(watermark)?,
+            _marker: PhantomData,
+        };
+        let inactive_peaks = self.ops_inactive_peaks_at(&session, watermark).await?;
+        let root = self
+            .core()
+            .compute_ops_root_with_inactive_peaks::<H>(&session, watermark, inactive_peaks)
+            .await?;
+        let encoded_operations = self
+            .core()
+            .load_operation_bytes_range(&session, start_location, end)
+            .await?;
+        let mut checkpoint = crate::proof::build_operation_range_checkpoint::<F, H, _>(
+            &storage,
             watermark,
             start_location,
-            max_locations,
+            end,
+            root,
+            inactive_peaks,
+            encoded_operations,
         )
-        .await
+        .await?;
+        checkpoint.ops_root_witness = self.load_ops_root_witness(&session, watermark).await?;
+        let sequence_number = session.evaluated_sequence().unwrap_or_default();
+        Ok((checkpoint, sequence_number))
     }
 
     pub(crate) async fn batch_multi_proof_with_read_floor(
@@ -231,45 +270,6 @@ where
         .await?;
         proof.ops_root_witness = self.load_ops_root_witness(&session, watermark).await?;
         Ok(proof)
-    }
-
-    async fn operation_range_checkpoint_in_session(
-        &self,
-        session: &SerializableReadSession,
-        watermark: Location<F>,
-        start_location: Location<F>,
-        max_locations: u32,
-    ) -> Result<OperationRangeCheckpoint<H::Digest, F>, QmdbError> {
-        self.core()
-            .require_published_watermark(session, watermark)
-            .await?;
-        let end = crate::proof::resolve_range_bounds(watermark, start_location, max_locations)?;
-        let storage = KvMerkleStorage::<F, H::Digest> {
-            session,
-            size: merkle_size_for_watermark(watermark)?,
-            _marker: PhantomData,
-        };
-        let inactive_peaks = self.ops_inactive_peaks_at(session, watermark).await?;
-        let root = self
-            .core()
-            .compute_ops_root_with_inactive_peaks::<H>(session, watermark, inactive_peaks)
-            .await?;
-        let encoded_operations = self
-            .core()
-            .load_operation_bytes_range(session, start_location, end)
-            .await?;
-        let mut checkpoint = crate::proof::build_operation_range_checkpoint::<F, H, _>(
-            &storage,
-            watermark,
-            start_location,
-            end,
-            root,
-            inactive_peaks,
-            encoded_operations,
-        )
-        .await?;
-        checkpoint.ops_root_witness = self.load_ops_root_witness(session, watermark).await?;
-        Ok(checkpoint)
     }
 
     /// Verified contiguous range of operations.
@@ -579,7 +579,7 @@ where
             self.compute_ops_root(session, watermark).await?,
         )
         .await
-        .map_err(|e| QmdbError::CommonwareMerkle(e.to_string()))
+        .map_err(crate::error::current_proof_error)
     }
 
     async fn build_current_range_proof<const N: usize>(
@@ -608,7 +608,7 @@ where
             self.compute_ops_root(session, watermark).await?,
         )
         .await
-        .map_err(|e| QmdbError::CommonwareMerkle(e.to_string()))
+        .map_err(crate::error::current_proof_error)
     }
 
     async fn load_inactivity_floor_at(

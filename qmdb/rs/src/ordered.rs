@@ -384,7 +384,22 @@ where
         start_location: Location<F>,
         max_locations: u32,
     ) -> Result<OperationRangeCheckpoint<H::Digest, F>, QmdbError> {
-        let session = self.client.create_session();
+        let (proof, _) = self
+            .operation_range_checkpoint_with_read_floor(0, watermark, start_location, max_locations)
+            .await?;
+        Ok(proof)
+    }
+
+    pub(crate) async fn operation_range_checkpoint_with_read_floor(
+        &self,
+        read_floor_sequence: u64,
+        watermark: Location<F>,
+        start_location: Location<F>,
+        max_locations: u32,
+    ) -> Result<(OperationRangeCheckpoint<H::Digest, F>, u64), QmdbError> {
+        let session = self
+            .client
+            .create_session_with_sequence(read_floor_sequence);
         self.core()
             .require_published_watermark(&session, watermark)
             .await?;
@@ -414,7 +429,8 @@ where
         )
         .await?;
         checkpoint.ops_root_witness = self.load_ops_root_witness(&session, watermark).await?;
-        Ok(checkpoint)
+        let sequence_number = session.evaluated_sequence().unwrap_or_default();
+        Ok((checkpoint, sequence_number))
     }
 
     /// Verified raw current-state proof for a contiguous operation range.
@@ -934,7 +950,7 @@ where
             self.compute_ops_root(session, watermark).await?,
         )
         .await
-        .map_err(|e| QmdbError::CommonwareMerkle(e.to_string()))
+        .map_err(crate::error::current_proof_error)
     }
 
     async fn build_current_operation_proof(
@@ -968,7 +984,7 @@ where
             self.compute_ops_root(session, watermark).await?,
         )
         .await
-        .map_err(|e| QmdbError::CommonwareMerkle(e.to_string()))
+        .map_err(crate::error::current_proof_error)
     }
 
     async fn load_inactivity_floor_at(

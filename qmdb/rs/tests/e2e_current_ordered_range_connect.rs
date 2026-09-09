@@ -733,6 +733,7 @@ async fn test_ordered_mmb_operation_range_client_rejects_missing_nonzero_pinned_
         tip: (source.operations.len() - 1) as u64,
         start_location: start.as_u64(),
         max_locations: 1,
+        min_sequence_number: Some(1),
         ..Default::default()
     };
     let mut response = common::operation_log_rpc_client(&qmdb_url)
@@ -745,11 +746,22 @@ async fn test_ordered_mmb_operation_range_client_rejects_missing_nonzero_pinned_
         .get_operation_range(request.clone(), &source.current_boundary.root)
         .await
         .expect("nonzero operation range verifies with pinned nodes");
+    assert!(proof.sequence_number >= 1);
+    assert_eq!(response.sequence_number, proof.sequence_number);
     assert_eq!(proof.start_location, start);
     assert_eq!(
         proof.operations,
         vec![source.operations[usize::try_from(*start).expect("start fits usize")].clone()]
     );
+    let error = common::operation_log_rpc_client(&qmdb_url)
+        .get_operation_range(ProtoGetOperationRangeRequest {
+            min_sequence_number: Some(u64::MAX),
+            ..request.clone()
+        })
+        .await
+        .expect_err("unavailable sequence floor");
+    assert_eq!(error.code, connectrpc::ErrorCode::Aborted);
+
     let mut proof = response
         .proof
         .as_option()

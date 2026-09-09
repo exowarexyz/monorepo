@@ -4,7 +4,7 @@
 mod common;
 
 use std::num::NonZeroU64;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -16,6 +16,7 @@ use commonware_storage::qmdb::keyless::variable::{Db as Keyless, Operation as Ke
 use commonware_storage::qmdb::sync::{Request, Response, Source as _, Target};
 use commonware_utils::channel::mpsc;
 use commonware_utils::{NZUsize, NZU16, NZU64};
+use connectrpc::client::{BoxFuture, ClientBody, ClientTransport};
 use exoware_qmdb::proto::qmdb::v1::{
     GetOperationRangeRequest as ProtoGetOperationRangeRequest,
     SubscribeRequest as ProtoSubscribeRequest,
@@ -26,7 +27,7 @@ use exoware_qmdb::{
 };
 use exoware_sdk::common::kv::v1::{filter as proto_filter, Filter as ProtoFilter};
 use exoware_sdk::proto::PreferZstdHttpClient;
-use exoware_sdk::{PrefixedStoreClient, StoreClient};
+use exoware_sdk::{PrefixedStoreClient, RetryConfig, StoreClient};
 
 type Digest = commonware_cryptography::sha256::Digest;
 type Db = Keyless<
@@ -258,22 +259,170 @@ async fn test_keyless_connect_get_operation_range_returns_verifiable_proof() {
     let (_qmdb_server, qmdb_url) = spawn_qmdb_server(keyless_client).await;
     let connect_client = operation_log_client(&qmdb_url);
 
-    let proof = connect_client
+    for min_sequence_number in [None, Some(1)] {
+        let proof = connect_client
+            .get_operation_range(
+                ProtoGetOperationRangeRequest {
+                    tip: u64::try_from(source.operations.len() - 1).expect("tip fits"),
+                    start_location: 1,
+                    max_locations: 1,
+                    min_sequence_number,
+                    ..Default::default()
+                },
+                &source.root,
+            )
+            .await
+            .expect("get operation range");
+
+        assert!(proof.sequence_number >= 1);
+        assert_eq!(proof.root, source.root);
+        assert_eq!(proof.start_location, Location::new(1));
+        assert_eq!(proof.operations, vec![source.operations[1].clone()]);
+    }
+
+    let error = common::operation_log_rpc_client(&qmdb_url)
+        .get_operation_range(ProtoGetOperationRangeRequest {
+            tip: u64::try_from(source.operations.len() - 1).expect("tip fits"),
+            start_location: 1,
+            max_locations: 1,
+            min_sequence_number: Some(u64::MAX),
+            ..Default::default()
+        })
+        .await
+        .expect_err("unavailable sequence floor");
+    assert_eq!(error.code, connectrpc::ErrorCode::Aborted);
+}
+
+#[tokio::test]
+async fn test_operation_range_preserves_late_consistency_errors() {
+    #[derive(Clone)]
+    struct ReplicaTransport {
+        origins: Vec<axum::http::Uri>,
+        calls: Arc<Mutex<Vec<String>>>,
+        inner: PreferZstdHttpClient,
+    }
+
+    impl ClientTransport for ReplicaTransport {
+        type ResponseBody = <PreferZstdHttpClient as ClientTransport>::ResponseBody;
+        type Error = <PreferZstdHttpClient as ClientTransport>::Error;
+
+        fn send(
+            &self,
+            mut request: axum::http::Request<ClientBody>,
+        ) -> BoxFuture<'static, Result<axum::http::Response<Self::ResponseBody>, Self::Error>>
+        {
+            let index = {
+                let mut calls = self.calls.lock().unwrap();
+                let index = calls.len();
+                calls.push(request.uri().path().to_string());
+                index
+            };
+            let replica = if index < 4 {
+                0
+            } else if index == 4 {
+                1
+            } else {
+                2
+            };
+            let mut parts = request.uri().clone().into_parts();
+            parts.scheme = self.origins[replica].scheme().cloned();
+            parts.authority = self.origins[replica].authority().cloned();
+            *request.uri_mut() = axum::http::Uri::from_parts(parts).unwrap();
+            self.inner.send(request)
+        }
+    }
+
+    let operations = vec![
+        KeylessOperation::Append(b"first".to_vec()),
+        KeylessOperation::Commit(None, Location::new(0)),
+        KeylessOperation::Append(b"second".to_vec()),
+        KeylessOperation::Commit(None, Location::new(0)),
+    ];
+    let config = ((0..=10000).into(), ());
+    let mut origins = Vec::new();
+    let mut handles = Vec::new();
+    let mut replicas = Vec::new();
+    for frontier in [100, 200, 150] {
+        let (handle, url) = exoware_simulator::open_temp().await.unwrap();
+        let store = PrefixedStoreClient::empty(StoreClient::new(&url));
+        common::commit_operations::<mmr::Family, BatchOperation>(&store, &operations, &config)
+            .await
+            .unwrap();
+        for sequence in 2u64..=frontier {
+            let key = Bytes::from(format!("unrelated/{sequence}"));
+            assert_eq!(
+                store.ingest().put(&[(&key, b"value")]).await.unwrap(),
+                sequence
+            );
+        }
+        origins.push(url.parse().unwrap());
+        handles.push(handle);
+        replicas.push(store);
+    }
+
+    // All proof rows precede these frontiers. A later read raises the floor above the last replica.
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let client = StoreClient::builder()
+        .url("http://replicas.test")
+        .client_transport(ReplicaTransport {
+            origins,
+            calls: calls.clone(),
+            inner: PreferZstdHttpClient::plaintext(),
+        })
+        .retry_config(RetryConfig::disabled())
+        .build()
+        .unwrap();
+    let (root, _) = common::prepare_operations::<mmr::Family, BatchOperation>(&operations, &config);
+    let keyless = Arc::new(TestKeylessClient::new(
+        PrefixedStoreClient::empty(client),
+        config,
+    ));
+    let (qmdb_handle, url) = spawn_qmdb_server(keyless).await;
+    let error = common::operation_log_rpc_client(&url)
+        .get_operation_range(ProtoGetOperationRangeRequest {
+            tip: 3,
+            start_location: 1,
+            max_locations: 1,
+            ..Default::default()
+        })
+        .await
+        .expect_err("last replica cannot satisfy the advanced floor");
+    assert_eq!(
+        calls
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|path| path.rsplit('/').next().unwrap())
+            .collect::<Vec<_>>(),
+        ["Range", "Get", "Get", "GetMany", "Range", "GetMany"]
+    );
+    assert_eq!(error.code, connectrpc::ErrorCode::Aborted);
+
+    for sequence in 151u64..=200 {
+        let key = Bytes::from(format!("unrelated/{sequence}"));
+        assert_eq!(
+            replicas[2].ingest().put(&[(&key, b"value")]).await.unwrap(),
+            sequence
+        );
+    }
+    let proof = operation_log_client(&url)
         .get_operation_range(
             ProtoGetOperationRangeRequest {
-                tip: u64::try_from(source.operations.len() - 1).expect("tip fits"),
+                tip: 3,
                 start_location: 1,
                 max_locations: 1,
+                min_sequence_number: Some(200),
                 ..Default::default()
             },
-            &source.root,
+            &root,
         )
         .await
-        .expect("get operation range");
-
-    assert_eq!(proof.root, source.root);
-    assert_eq!(proof.start_location, Location::new(1));
-    assert_eq!(proof.operations, vec![source.operations[1].clone()]);
+        .expect("caught-up replica supplies a valid proof");
+    assert_eq!(proof.sequence_number, 200);
+    qmdb_handle.abort();
+    for handle in handles {
+        handle.abort();
+    }
 }
 
 #[tokio::test]
