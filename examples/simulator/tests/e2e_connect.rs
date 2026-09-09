@@ -233,6 +233,7 @@ async fn reduce_count_all() {
 
     let request = RangeReduceRequest {
         reducers: vec![RangeReducerSpec {
+            filter: None,
             op: RangeReduceOp::CountAll,
             expr: None,
         }],
@@ -275,6 +276,7 @@ async fn reduce_sum_int64() {
 
     let request = RangeReduceRequest {
         reducers: vec![RangeReducerSpec {
+            filter: None,
             op: RangeReduceOp::SumField,
             expr: Some(KvExpr::Field(KvFieldRef::Value {
                 index: 0,
@@ -568,14 +570,17 @@ async fn reduce_count_min_max_field() {
     let request = RangeReduceRequest {
         reducers: vec![
             RangeReducerSpec {
+                filter: None,
                 op: RangeReduceOp::CountField,
                 expr: Some(field.clone()),
             },
             RangeReducerSpec {
+                filter: None,
                 op: RangeReduceOp::MinField,
                 expr: Some(field.clone()),
             },
             RangeReducerSpec {
+                filter: None,
                 op: RangeReduceOp::MaxField,
                 expr: Some(field),
             },
@@ -623,6 +628,7 @@ async fn reduce_grouped_count() {
 
     let request = RangeReduceRequest {
         reducers: vec![RangeReducerSpec {
+            filter: None,
             op: RangeReduceOp::CountAll,
             expr: None,
         }],

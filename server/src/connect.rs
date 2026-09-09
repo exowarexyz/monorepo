@@ -784,11 +784,10 @@ fn reduce_frames(
                     Err(error) => return Some((Err(reduce_error(error.into())), None)),
                 };
                 if state.execution.group_count == 0 {
-                    response.results = group.results.into_iter().map(Into::into).collect();
+                    response.results = group.results;
                     state.row += 1;
                     break;
                 }
-                let group: exoware_proto::query::RangeReduceGroup = group.into();
                 let group_bytes = group.encoded_len() as usize + 16;
                 if !response.groups.is_empty()
                     && frame_bytes.saturating_add(group_bytes) > REDUCE_FRAME_TARGET_BYTES
@@ -2752,6 +2751,7 @@ mod tests {
             reducers: vec![exoware_proto::RangeReducerSpec {
                 op: exoware_proto::RangeReduceOp::CountAll,
                 expr: None,
+                filter: None,
             }],
             group_by: vec![KvExpr::Field(KvFieldRef::Value {
                 index: 0,
@@ -2839,6 +2839,7 @@ mod tests {
         request.reducers.push(exoware_proto::RangeReducerSpec {
             op: exoware_proto::RangeReduceOp::MinField,
             expr: Some(request.group_by[0].clone()),
+            filter: None,
         });
         let state = QueryState::new(engine.clone());
         let execution =

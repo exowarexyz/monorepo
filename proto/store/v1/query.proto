@@ -117,8 +117,8 @@ message KvReducedValue {
 }
 
 // An expression tree evaluated per row during reduction. Leaf nodes are field
-// references or literal values; interior nodes are arithmetic or transform
-// operations.
+// references or literal values; interior nodes use native DataFusion arithmetic,
+// coercion and transform semantics. Required fields are decoded before evaluation.
 message KvExpr {
   // Binary arithmetic operation on two sub-expressions.
   message BinaryExpr {
@@ -131,18 +131,20 @@ message KvExpr {
     KvFieldRef field = 1;
     // A constant scalar value.
     KvReducedValue literal = 2;
-    // Addition (both operands must be the same numeric kind).
+    // Addition with native numeric type coercion.
     BinaryExpr add = 3;
     // Subtraction.
     BinaryExpr sub = 4;
     // Multiplication.
     BinaryExpr mul = 5;
-    // Division.
+    // Division. Integer operands retain integer division; floating division follows IEEE 754.
     BinaryExpr div = 6;
     // Convert a UTF-8 string to lowercase.
     KvExpr lower = 7;
-    // Truncate a DATE32/DATE64/TIMESTAMP to the start of its day.
+    // Native date_trunc('day', input). Date inputs are coerced to timestamps.
     KvExpr date_trunc_day = 8;
+    // Ordinary native CAST to Float64; invalid conversions return an error.
+    KvExpr cast_float64 = 9;
   }
 }
 
@@ -277,6 +279,9 @@ message RangeReducerSpec {
   // Expression to evaluate per row. Required for all ops except
   // `COUNT_ALL` (where it must be absent).
   optional KvExpr expr = 2;
+  // Native aggregate FILTER. Rows remain available to other reducers and to
+  // grouping; the native aggregate controls argument and filter evaluation.
+  optional KvPredicate filter = 3;
 }
 
 // Parameters for a Reduce RPC: what to aggregate, how to group, and an
@@ -289,7 +294,7 @@ message ReduceParams {
   // results are returned per-group in `ReduceResponse.groups` instead of as
   // flat scalar results.
   repeated KvExpr group_by = 2;
-  // Optional predicate to exclude rows before aggregation.
+  // Optional predicate to exclude rows before expression evaluation and aggregation.
   optional KvPredicate filter = 3;
 }
 

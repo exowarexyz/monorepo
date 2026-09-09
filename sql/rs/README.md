@@ -187,22 +187,30 @@ rows. Supported built-in aggregates are `COUNT`, `SUM`, `MIN`, `MAX`, and numeri
 group-only aggregate keeps it in DataFusion so its streaming and DISTINCT limit
 optimizations remain available. `DISTINCT` inside an aggregate, such as
 `COUNT(DISTINCT x)`, uses DataFusion's normal execution. Grouped `Float64` `MIN`
-and `MAX` also use native execution to preserve its infinity and NaN semantics.
+and `MAX` use Reduce, with native DataFusion aggregation at both the worker and
+the SQL coordinator.
 
 The adapter resolves column aliases and transparent projection chains. Supported
-inputs include columns, literals, numeric `+`, `-`, `*`, floating division by a
-nonzero literal, `lower`, and `date_trunc('day', ...)` for timestamps without
-timezone metadata. Tagged timestamps retain DataFusion's checked calendar path. Casts
-retain their semantics: identity casts, compatible string representations,
+inputs include columns, literals, numeric `+`, `-`, `*`, `/`, `lower`, and
+`date_trunc('day', ...)` for timestamps without timezone metadata. Tagged
+timestamps retain DataFusion's checked calendar path. Casts retain their
+semantics: identity casts, compatible string representations,
 decimal precision widening without rescaling, and integer-to-double conversion
-can be pushed. Narrowing casts, integer division, unsupported functions, and
-intervening row limits stay in DataFusion.
+can be pushed. Integer-to-double `CAST` and `TRY_CAST` execute as native Store
+casts. Narrowing casts, unsupported functions, and intervening row limits
+stay in DataFusion.
 
 Aggregate `FILTER` and equivalent `CASE` expressions can be pushed when every
-original filter is exactly representable by the Store predicate compiler. Every
-filtered Reduce job applies that complete predicate at the worker, because raw
-range bounds can include rows that scan-time key checks would exclude. A
-covering index reduces the scanned range when available. Primary-key ranges can
+original filter is exactly representable by the Store predicate compiler.
+Grouped aggregates pass explicit `FILTER` predicates to native DataFusion
+aggregates at the worker. Scalar aggregates filter before evaluating their
+arguments, so their predicates also narrow the Store access path. `CASE` guards
+filter input rows before evaluating their guarded expressions. Precomputed
+arguments beneath scalar `FILTER` or `CASE` stay in DataFusion to preserve their
+position before the guard. Grouped `FILTER` keeps computed projections eligible
+for Reduce because native grouped aggregation evaluates arguments first. Every request applies its complete row predicate at
+the worker, because raw range bounds can include rows that scan-time key checks
+would exclude. A covering index reduces the scanned range when available. Primary-key ranges can
 also use worker-side filtering on stored values, so unindexed predicates do not
 require returning full rows. All filter, group, and aggregate inputs must be
 available from the selected access path. Store key-field expressions use fixed
@@ -210,29 +218,38 @@ byte offsets. Variable-width SQL key fields and fields following them therefore
 use stored index values when available, or fall back to native decoding.
 
 Aggregates sharing ranges, grouping expressions, and a row filter share one
-Reduce request. Output columns retain their original order. Grouped queries use
-an unfiltered aggregate to enumerate groups when one is available. If every
-aggregate has its own filter, a group-only request preserves groups whose rows
-contribute to none of the aggregates. A group-only query itself uses one request
-per range.
+Reduce request, including grouped aggregates with different native filters.
+Output columns retain their original order. Native filters retain every group,
+even when none of its rows contribute to an aggregate. If every aggregate has a
+`CASE` guard, a group-only request preserves groups outside those guards. A
+group-only query itself uses one request per range.
 
-Integer arithmetic and sums use the wrapping behavior of DataFusion's ordinary
-SQL expressions. AVG converts each integer input to double before accumulation.
-NULLs retain SQL aggregate semantics. Reduce returns query errors when required
+Workers evaluate expressions with native DataFusion and Arrow. Integer addition,
+subtraction, multiplication, and sums use the wrapping behavior of ordinary SQL
+expressions. Integer division truncates and reports zero or overflow errors;
+floating division follows IEEE behavior, including zero divisors. AVG converts
+each integer input to double before accumulation.
+NULLs retain SQL aggregate semantics. Floating-point results, including NaN
+extrema, follow native partial/final execution and can depend on range partitioning
+and merge order. Reduce returns query errors when required
 payload decoding or expression evaluation fails. Requests without value-dependent
 expressions do not decode payloads. Native base-row scans skip undecodable
 payloads, so queries over corrupt data can behave differently across plans.
 Requests use one read session with a shared minimum sequence number.
 That freshness floor does not pin a snapshot.
-Jobs and ranges retain their execution and merge order.
+Jobs execute in order, and range results merge in order. Once the first range has
+established the read floor, later range requests can overlap up to the query's
+DataFusion `target_partitions` setting.
 
 Unsupported shapes use the normal streaming scan and DataFusion execution.
 Reduce avoids transferring full input rows. Workers aggregate with DataFusion
-and stream completed groups in batches. Groups remain in memory by default.
-Workers can configure DataFusion's native memory pool and spilling through
-`QueryState::with_runtime`. The SQL coordinator retains merged groups and the
-final query result. A covering index is most useful when it contains the aggregate
-inputs and all filter/group columns.
+and stream completed groups in batches. The SQL coordinator feeds those states
+into DataFusion's final aggregate using the query's memory pool and spill
+configuration. Both stages keep groups in memory by default. Workers configure
+their native memory pool and spilling through `QueryState::with_runtime`.
+Transport buffers and materialized query results have separate memory ownership.
+A covering index is most useful when it contains the aggregate inputs and all
+filter/group columns.
 
 ## Z-Order secondary indexes
 
@@ -382,7 +399,7 @@ WHERE status = 'open'
 GROUP BY status;
 ```
 
-Representative physical-plan output:
+The Reduce source beneath DataFusion's final aggregate:
 
 ```text
  KvAggregateExec: grouped=true, seed_job=none, aggregate_jobs=[job0{mode=secondary_index(status_idx, lexicographic), predicate=status = 'open', exact=false, row_recheck=true, ranges=1, full_scan_like=false, constrained_prefix=1}], query_stats=range_reduce(detail.extra: server-defined metadata)
@@ -391,6 +408,7 @@ Representative physical-plan output:
 Interpretation:
 
 - the aggregate stayed on the pushed reduction path (`KvAggregateExec`)
+- DataFusion's final aggregate merges the returned states across ranges
 - the worker-side reduction job is using `status_idx`
 - the index narrows the scanned range
 - the worker checks the complete predicate before updating aggregate states

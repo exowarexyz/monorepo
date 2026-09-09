@@ -1,14 +1,15 @@
 use std::cmp::Ordering;
-use std::collections::BTreeMap;
 use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use datafusion::arrow::array::new_empty_array;
-use datafusion::arrow::datatypes::{i256, DataType, SchemaRef, TimeUnit};
+use datafusion::arrow::array::{ArrayRef, UInt64Array};
+use datafusion::arrow::compute::cast_with_options;
+use datafusion::arrow::datatypes::{i256, DataType, Schema, SchemaRef, TimeUnit};
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::catalog::Session;
+use datafusion::common::format::DEFAULT_CAST_OPTIONS;
 use datafusion::common::tree_node::{Transformed, TreeNode, TreeNodeRecursion};
 use datafusion::common::{DFSchemaRef, DataFusionError, Result as DataFusionResult, ScalarValue};
 use datafusion::datasource::source_as_provider;
@@ -26,25 +27,26 @@ use datafusion::logical_expr::{
     UserDefinedLogicalNodeCore,
 };
 use datafusion::optimizer::optimizer::OptimizerRule;
+use datafusion::physical_expr::aggregate::LoweredAggregateBuilder;
+use datafusion::physical_expr::expressions::Column;
 use datafusion::physical_expr::{EquivalenceProperties, Partitioning, PhysicalExpr};
+use datafusion::physical_plan::aggregates::{AggregateExec, AggregateMode, PhysicalGroupBy};
 use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
 use datafusion::physical_plan::{
     stream::RecordBatchStreamAdapter, DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties,
     SendableRecordBatchStream,
 };
 use datafusion::physical_planner::{DefaultPhysicalPlanner, ExtensionPlanner, PhysicalPlanner};
-use exoware_proto::to_domain_reduce_response;
 use exoware_proto::{
-    RangeReduceGroup, RangeReduceOp, RangeReduceRequest, RangeReduceResponse, RangeReduceResult,
-    RangeReducerSpec,
+    query, to_domain_reduced_value_from_view, RangeReduceOp, RangeReduceRequest, RangeReducerSpec,
 };
 use exoware_sdk as exoware_proto;
 use exoware_sdk::kv_codec::{
-    canonicalize_reduced_group_values, encode_reduced_group_key, KvExpr, KvFieldKind, KvFieldRef,
-    KvPredicate, KvPredicateCheck, KvPredicateConstraint, KvReducedValue,
+    KvExpr, KvFieldKind, KvFieldRef, KvPredicate, KvPredicateCheck, KvPredicateConstraint,
+    KvReducedValue,
 };
 use exoware_sdk::{PrefixedStoreClient, SerializableReadSession};
-use futures::TryStreamExt;
+use futures::{stream::BoxStream, StreamExt, TryStreamExt};
 
 use crate::diagnostics::*;
 use crate::filter::*;
@@ -62,15 +64,8 @@ pub(crate) enum AggregateAccessPath {
 
 #[derive(Debug, Clone)]
 pub(crate) enum AggregateOutputPlan {
-    Direct {
-        reducer_idx: usize,
-        data_type: DataType,
-    },
-    Avg {
-        sum_idx: usize,
-        count_idx: usize,
-        data_type: DataType,
-    },
+    Direct { reducer_idx: usize },
+    Avg { sum_idx: usize, count_idx: usize },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -90,6 +85,7 @@ pub(crate) enum PushdownValueExpr {
     Sub(Box<PushdownValueExpr>, Box<PushdownValueExpr>),
     Mul(Box<PushdownValueExpr>, Box<PushdownValueExpr>),
     Div(Box<PushdownValueExpr>, Box<PushdownValueExpr>),
+    CastFloat64(Box<PushdownValueExpr>),
     Lower(Box<PushdownValueExpr>),
     DateTruncDay(Box<PushdownValueExpr>),
 }
@@ -106,7 +102,9 @@ impl PushdownValueExpr {
                 left.collect_columns(out);
                 right.collect_columns(out);
             }
-            Self::Lower(inner) | Self::DateTruncDay(inner) => inner.collect_columns(out),
+            Self::CastFloat64(inner) | Self::Lower(inner) | Self::DateTruncDay(inner) => {
+                inner.collect_columns(out)
+            }
         }
     }
 }
@@ -122,6 +120,7 @@ pub(crate) struct NormalizedAggregateExpr {
     pub(crate) func: AggregatePushdownFunction,
     pub(crate) argument: AggregatePushdownArgument,
     pub(crate) filter: Option<Expr>,
+    pub(crate) guard: Option<Expr>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -143,24 +142,21 @@ pub(crate) struct CombinedAggregateJob {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct AggregateGroupPlan {
-    pub(crate) data_type: DataType,
-}
-
-#[derive(Debug, Clone)]
 pub(crate) struct AggregatePushdownSpec {
     pub(crate) client: PrefixedStoreClient,
-    pub(crate) group_plans: Vec<AggregateGroupPlan>,
+    pub(crate) group_count: usize,
     pub(crate) seed_job: Option<AggregateReduceJob>,
     pub(crate) aggregate_jobs: Vec<CombinedAggregateJob>,
     pub(crate) diagnostics: AggregatePushdownDiagnostics,
     pub(crate) schema: SchemaRef,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct KvAggregateExec {
-    pub(crate) spec: AggregatePushdownSpec,
+    pub(crate) spec: Arc<AggregatePushdownSpec>,
     pub(crate) properties: Arc<PlanProperties>,
+    state_offsets: Vec<usize>,
+    empty_states: Vec<ScalarValue>,
 }
 
 impl KvAggregatePushdownRule {
@@ -200,8 +196,11 @@ impl KvAggregatePushdownRule {
             .chain(&aggregate.aggr_expr)
             .cloned()
             .collect();
-        let Ok(Some((scan, expressions))) = aggregate_scan_input(&aggregate.input, expressions)
-        else {
+        let Ok(Some((scan, expressions))) = aggregate_scan_input(
+            &aggregate.input,
+            expressions,
+            !aggregate.group_expr.is_empty(),
+        ) else {
             return Ok(Transformed::no(LogicalPlan::Aggregate(aggregate)));
         };
         let (group_exprs, aggr_exprs) = expressions.split_at(aggregate.group_expr.len());
@@ -223,7 +222,10 @@ impl KvAggregatePushdownRule {
         };
 
         let plan = LogicalPlan::Extension(Extension {
-            node: Arc::new(KvAggregateNode { aggregate, spec }),
+            node: Arc::new(KvAggregateNode {
+                aggregate,
+                spec: Arc::new(spec),
+            }),
         });
         Ok(Transformed::yes(plan))
     }
@@ -232,6 +234,7 @@ impl KvAggregatePushdownRule {
 fn aggregate_scan_input(
     mut input: &LogicalPlan,
     mut expressions: Vec<Expr>,
+    grouped: bool,
 ) -> DataFusionResult<Option<(&datafusion::logical_expr::TableScan, Vec<Expr>)>> {
     loop {
         let (schema, replacements, next) = match input {
@@ -260,6 +263,31 @@ fn aggregate_scan_input(
             ),
             _ => return Ok(None),
         };
+
+        // Input projections execute before scalar FILTER and CASE. Inlining their
+        // arguments behind those guards would suppress prior evaluation.
+        for expr in &expressions {
+            let Expr::AggregateFunction(aggregate) = strip_alias_expr(expr) else {
+                continue;
+            };
+            for argument in &aggregate.params.args {
+                let guarded = (!grouped && aggregate.params.filter.is_some())
+                    || argument.exists(|expr| Ok(matches!(expr, Expr::Case(_))))?;
+                if guarded
+                    && argument.exists(|expr| {
+                        let Expr::Column(column) = expr else {
+                            return Ok(false);
+                        };
+                        Ok(!matches!(
+                            strip_alias_expr(&replacements[schema.index_of_column(column)?]),
+                            Expr::Column(_) | Expr::Literal(..)
+                        ))
+                    })?
+                {
+                    return Ok(None);
+                }
+            }
+        }
         expressions = expressions
             .into_iter()
             .map(|expr| {
@@ -295,7 +323,7 @@ impl OptimizerRule for KvAggregatePushdownRule {
 struct KvAggregateNode {
     // The original aggregate owns the output schema and logical identity of the compiled Store job
     aggregate: Aggregate,
-    spec: AggregatePushdownSpec,
+    spec: Arc<AggregatePushdownSpec>,
 }
 
 impl PartialEq for KvAggregateNode {
@@ -365,13 +393,78 @@ impl ExtensionPlanner for KvAggregateExtensionPlanner {
         node: &dyn UserDefinedLogicalNode,
         _logical_inputs: &[&LogicalPlan],
         _physical_inputs: &[Arc<dyn ExecutionPlan>],
-        _session: &dyn Session,
-        _planning_ctx: &PhysicalPlanningContext,
+        session: &dyn Session,
+        planning_ctx: &PhysicalPlanningContext,
     ) -> DataFusionResult<Option<Arc<dyn ExecutionPlan>>> {
         let Some(node) = node.as_any().downcast_ref::<KvAggregateNode>() else {
             return Ok(None);
         };
-        Ok(Some(Arc::new(KvAggregateExec::new(node.spec.clone()))))
+        let input_schema = node.aggregate.input.schema();
+        let group_count = node.spec.group_count;
+        let aggregates = node
+            .aggregate
+            .aggr_expr
+            .iter()
+            .enumerate()
+            .map(|(idx, expr)| {
+                Ok(LoweredAggregateBuilder::new(
+                    expr,
+                    input_schema,
+                    input_schema.as_arrow(),
+                    session.execution_props(),
+                    planning_ctx,
+                )
+                .with_name(node.spec.schema.field(group_count + idx).name())
+                .build()?
+                .aggregate)
+            })
+            .collect::<DataFusionResult<Vec<_>>>()?;
+        let mut fields = node.spec.schema.fields()[..group_count].to_vec();
+        let mut state_offsets = Vec::with_capacity(aggregates.len());
+        let mut empty_states = Vec::new();
+        for aggregate in &aggregates {
+            state_offsets.push(fields.len());
+            for field in aggregate.state_fields()? {
+                empty_states.push(if field.is_nullable() {
+                    ScalarValue::try_new_null(field.data_type())?
+                } else {
+                    ScalarValue::new_zero(field.data_type())?
+                });
+                fields.push(field);
+            }
+        }
+        let state_schema = Arc::new(Schema::new(fields));
+        let group_by = PhysicalGroupBy::new_single(
+            node.spec.schema.fields()[..group_count]
+                .iter()
+                .enumerate()
+                .map(|(idx, field)| {
+                    (
+                        Arc::new(Column::new(field.name(), idx)) as Arc<dyn PhysicalExpr>,
+                        field.name().clone(),
+                    )
+                })
+                .collect(),
+        );
+        let source = Arc::new(KvAggregateExec {
+            spec: node.spec.clone(),
+            properties: Arc::new(PlanProperties::new(
+                EquivalenceProperties::new(state_schema),
+                Partitioning::UnknownPartitioning(1),
+                EmissionType::Incremental,
+                Boundedness::Bounded,
+            )),
+            state_offsets,
+            empty_states,
+        });
+        Ok(Some(Arc::new(AggregateExec::try_new(
+            AggregateMode::Final,
+            group_by,
+            aggregates,
+            vec![None; node.aggregate.aggr_expr.len()],
+            source,
+            Arc::new(input_schema.as_arrow().clone()),
+        )?)))
     }
 }
 
@@ -388,18 +481,6 @@ impl QueryPlanner for KvQueryPlanner {
         DefaultPhysicalPlanner::with_extension_planners(vec![Arc::new(KvAggregateExtensionPlanner)])
             .create_physical_plan(plan, session)
             .await
-    }
-}
-
-impl KvAggregateExec {
-    pub(crate) fn new(spec: AggregatePushdownSpec) -> Self {
-        let properties = Arc::new(PlanProperties::new(
-            EquivalenceProperties::new(spec.schema.clone()),
-            Partitioning::UnknownPartitioning(1),
-            EmissionType::Incremental,
-            Boundedness::Bounded,
-        ));
-        Self { spec, properties }
     }
 }
 
@@ -463,7 +544,7 @@ impl ExecutionPlan for KvAggregateExec {
     fn execute(
         &self,
         partition: usize,
-        _context: Arc<TaskContext>,
+        context: Arc<TaskContext>,
     ) -> DataFusionResult<SendableRecordBatchStream> {
         if partition != 0 {
             return Err(DataFusionError::Internal(format!(
@@ -471,97 +552,29 @@ impl ExecutionPlan for KvAggregateExec {
             )));
         }
 
+        let session = self.spec.client.create_session();
+        let source = Arc::new(self.clone());
+        let concurrency = context.session_config().target_partitions().max(1);
+        let jobs = self
+            .spec
+            .seed_job
+            .clone()
+            .into_iter()
+            .map(|job| CombinedAggregateJob {
+                job,
+                expr_plans: Vec::new(),
+            })
+            .chain(self.spec.aggregate_jobs.clone());
+        let batches = futures::stream::iter(jobs)
+            .map(move |job| {
+                execute_reduce_job(session.clone(), Arc::new(job), source.clone(), concurrency)
+            })
+            .flatten();
         Ok(Box::pin(RecordBatchStreamAdapter::new(
             self.schema(),
-            futures::stream::once(execute_aggregate_pushdown(self.spec.clone())),
+            batches,
         )))
     }
-}
-
-#[derive(Debug, Clone)]
-pub(crate) enum PartialAggregateState {
-    Count(u64),
-    Sum(Option<KvReducedValue>),
-    Min(Option<KvReducedValue>),
-    Max(Option<KvReducedValue>),
-}
-
-impl PartialAggregateState {
-    pub(crate) fn from_op(op: RangeReduceOp) -> Self {
-        match op {
-            RangeReduceOp::CountAll | RangeReduceOp::CountField => Self::Count(0),
-            RangeReduceOp::SumField => Self::Sum(None),
-            RangeReduceOp::MinField => Self::Min(None),
-            RangeReduceOp::MaxField => Self::Max(None),
-        }
-    }
-
-    pub(crate) fn merge_partial(
-        &mut self,
-        op: RangeReduceOp,
-        value: Option<&KvReducedValue>,
-    ) -> DataFusionResult<()> {
-        match (self, op) {
-            (Self::Count(total), RangeReduceOp::CountAll | RangeReduceOp::CountField) => {
-                let Some(v) = value else {
-                    return Err(DataFusionError::Execution(
-                        "count reducer returned non-UInt64 partial".to_string(),
-                    ));
-                };
-                let KvReducedValue::UInt64(partial) = v else {
-                    return Err(DataFusionError::Execution(
-                        "count reducer returned non-UInt64 partial".to_string(),
-                    ));
-                };
-                *total = total.saturating_add(*partial);
-                Ok(())
-            }
-            (Self::Sum(total), RangeReduceOp::SumField) => {
-                let Some(value) = value else {
-                    return Ok(());
-                };
-                match total {
-                    Some(existing) => existing
-                        .wrapping_add_assign(value)
-                        .map_err(DataFusionError::Execution),
-                    None => {
-                        *total = Some(value.clone());
-                        Ok(())
-                    }
-                }
-            }
-            (Self::Min(current), RangeReduceOp::MinField) => merge_extreme(current, value, true),
-            (Self::Max(current), RangeReduceOp::MaxField) => merge_extreme(current, value, false),
-            _ => Err(DataFusionError::Execution(
-                "aggregate reducer state/op mismatch".to_string(),
-            )),
-        }
-    }
-}
-
-pub(crate) fn merge_extreme(
-    current: &mut Option<KvReducedValue>,
-    value: Option<&KvReducedValue>,
-    is_min: bool,
-) -> DataFusionResult<()> {
-    let Some(value) = value else {
-        return Ok(());
-    };
-    match current {
-        Some(existing) => {
-            let ordering = value.partial_cmp_same_kind(existing).ok_or_else(|| {
-                DataFusionError::Execution("aggregate extreme type mismatch".to_string())
-            })?;
-            if (is_min && ordering == Ordering::Less) || (!is_min && ordering == Ordering::Greater)
-            {
-                *current = Some(value.clone());
-            }
-        }
-        None => {
-            *current = Some(value.clone());
-        }
-    }
-    Ok(())
 }
 
 pub(crate) fn reduced_value_to_scalar(
@@ -636,311 +649,238 @@ pub(crate) fn cast_scalar_value(
     value.cast_to(data_type)
 }
 
-#[derive(Debug, Clone)]
-pub(crate) struct MergedGroupResponseState {
-    pub(crate) group_values: Vec<Option<KvReducedValue>>,
-    pub(crate) states: Vec<PartialAggregateState>,
+fn execute_reduce_job(
+    session: SerializableReadSession,
+    job: Arc<CombinedAggregateJob>,
+    source: Arc<KvAggregateExec>,
+    concurrency: usize,
+) -> impl futures::Stream<Item = DataFusionResult<RecordBatch>> {
+    let mut ranges = job.job.ranges.clone().into_iter();
+    let first_range = if session.fixed_sequence().is_none() {
+        ranges.next()
+    } else {
+        None
+    };
+    let first_session = session.clone();
+    let first_job = job.clone();
+    let first_source = source.clone();
+    let first = futures::stream::iter(first_range)
+        .then(move |range| {
+            execute_reduce_range(
+                first_session.clone(),
+                first_job.clone(),
+                first_source.clone(),
+                range,
+            )
+        })
+        .try_flatten();
+
+    // Every frame of an unseeded read can advance its floor. Drain that range
+    // before opening concurrent reads, and keep a zero-floor session sequential.
+    let remaining_count = ranges.len();
+    let remaining = futures::stream::once(async move {
+        let concurrency = if session.fixed_sequence().is_some() {
+            concurrency
+        } else {
+            1
+        };
+        Ok::<_, DataFusionError>(
+            futures::stream::iter(ranges)
+                .map(move |range| {
+                    execute_reduce_range(session.clone(), job.clone(), source.clone(), range)
+                })
+                .buffered(concurrency)
+                .try_flatten(),
+        )
+    })
+    .take(remaining_count)
+    .try_flatten();
+    first.chain(remaining)
 }
 
-#[derive(Debug, Clone)]
-pub(crate) struct AggregateGroupOutput {
-    pub(crate) group_values: Vec<Option<KvReducedValue>>,
-    pub(crate) outputs: Vec<ScalarValue>,
+async fn execute_reduce_range(
+    session: SerializableReadSession,
+    job: Arc<CombinedAggregateJob>,
+    source: Arc<KvAggregateExec>,
+    range: KeyRange,
+) -> DataFusionResult<BoxStream<'static, DataFusionResult<RecordBatch>>> {
+    let responses = session
+        .range_reduce_stream(&range.start, &range.end, &job.job.request)
+        .await
+        .map_err(|error| DataFusionError::External(Box::new(error)))?;
+    if job.job.request.group_by.is_empty() {
+        let response = exoware_sdk::scalar_reduce_response(responses, &job.job.request)
+            .await
+            .map_err(|error| DataFusionError::External(Box::new(error)))?;
+        let batch = source.decode_reduce_batch(&job, response.view())?;
+        return Ok(futures::stream::once(futures::future::ready(Ok(batch))).boxed());
+    }
+    Ok(responses
+        .map(move |response| {
+            let response = response.map_err(|error| DataFusionError::External(Box::new(error)))?;
+            source.decode_reduce_batch(&job, response.view())
+        })
+        .boxed())
 }
 
-impl AggregateGroupOutput {
-    pub(crate) fn new(group_values: Vec<Option<KvReducedValue>>, defaults: &[ScalarValue]) -> Self {
-        Self {
-            group_values,
-            outputs: defaults.to_vec(),
-        }
+fn decode_reduced_value(
+    value: Option<&query::KvReducedValueView<'_>>,
+) -> DataFusionResult<Option<KvReducedValue>> {
+    value
+        .map(to_domain_reduced_value_from_view)
+        .transpose()
+        .map_err(|error| {
+            DataFusionError::Execution(format!("range reduction response decode: {error}"))
+        })
+}
+
+fn reduced_count(value: Option<&query::KvReducedValueView<'_>>) -> DataFusionResult<u64> {
+    match decode_reduced_value(value)? {
+        Some(KvReducedValue::UInt64(count)) => Ok(count),
+        _ => Err(DataFusionError::Execution(
+            "count reducer returned non-UInt64 partial".to_string(),
+        )),
     }
 }
 
-pub(crate) async fn execute_aggregate_pushdown(
-    spec: AggregatePushdownSpec,
-) -> DataFusionResult<RecordBatch> {
-    let session = spec.client.create_session();
-    let mut defaults = vec![
-        ScalarValue::Null;
-        spec.aggregate_jobs
-            .iter()
-            .map(|job| job.expr_plans.len())
-            .sum()
-    ];
-    for combined_job in &spec.aggregate_jobs {
-        for (output_idx, expr_plan) in &combined_job.expr_plans {
-            defaults[*output_idx] =
-                finalize_aggregate_output(expr_plan, None, &combined_job.job.request.reducers)?;
-        }
-    }
-    let mut groups = BTreeMap::<Vec<u8>, AggregateGroupOutput>::new();
-    if spec.group_plans.is_empty() {
-        groups.insert(Vec::new(), AggregateGroupOutput::new(Vec::new(), &defaults));
-    }
-
-    if let Some(seed_job) = &spec.seed_job {
-        let response = execute_reduce_job(&session, seed_job).await?;
-        if !response.results.is_empty() {
-            return Err(DataFusionError::Execution(
-                "group seed job returned scalar reductions".to_string(),
-            ));
-        }
-        for group in response.groups {
-            let key = encode_reduced_group_key(&group.group_values);
-            groups
-                .entry(key)
-                .or_insert_with(|| AggregateGroupOutput::new(group.group_values, &defaults));
-        }
-    }
-
-    for combined_job in &spec.aggregate_jobs {
-        let response = execute_reduce_job(&session, &combined_job.job).await?;
-        if spec.group_plans.is_empty() {
-            if !response.groups.is_empty() {
+impl KvAggregateExec {
+    fn decode_reduce_batch(
+        &self,
+        job: &CombinedAggregateJob,
+        response: &query::ReduceResponseView<'_>,
+    ) -> DataFusionResult<RecordBatch> {
+        let row_count = if self.spec.group_count == 0 {
+            if !response.groups.is_empty()
+                || response.results.len() != job.job.request.reducers.len()
+            {
                 return Err(DataFusionError::Execution(
-                    "scalar aggregate job returned grouped reductions".to_string(),
+                    "scalar aggregate response shape mismatch".to_string(),
                 ));
             }
-            let group = groups.get_mut(&Vec::new()).ok_or_else(|| {
-                DataFusionError::Execution("missing scalar aggregate output".to_string())
-            })?;
-            for (output_idx, expr_plan) in &combined_job.expr_plans {
-                group.outputs[*output_idx] = finalize_aggregate_output(
-                    expr_plan,
-                    Some(&response.results),
-                    &combined_job.job.request.reducers,
-                )?;
-            }
+            1
         } else {
             if !response.results.is_empty() {
                 return Err(DataFusionError::Execution(
                     "grouped aggregate job returned scalar reductions".to_string(),
                 ));
             }
-            for group_response in &response.groups {
-                let key = encode_reduced_group_key(&group_response.group_values);
-                let group = groups.entry(key).or_insert_with(|| {
-                    AggregateGroupOutput::new(group_response.group_values.clone(), &defaults)
-                });
-                for (output_idx, expr_plan) in &combined_job.expr_plans {
-                    group.outputs[*output_idx] = finalize_aggregate_output(
-                        expr_plan,
-                        Some(&group_response.results),
-                        &combined_job.job.request.reducers,
-                    )?;
-                }
-            }
+            response.groups.len()
+        };
+        let schema = self.schema();
+        if row_count == 0 {
+            return Ok(RecordBatch::new_empty(schema));
         }
-    }
-
-    let mut rows = Vec::new();
-    for group in groups.into_values() {
-        let mut row = Vec::with_capacity(spec.group_plans.len() + defaults.len());
-        for (idx, group_plan) in spec.group_plans.iter().enumerate() {
-            let value = group.group_values.get(idx).cloned().unwrap_or(None);
-            row.push(reduced_value_to_scalar(value, &group_plan.data_type)?);
-        }
-        row.extend(group.outputs);
-        rows.push(row);
-    }
-
-    build_aggregate_record_batch(rows, spec.schema)
-}
-
-pub(crate) async fn execute_reduce_job(
-    session: &SerializableReadSession,
-    job: &AggregateReduceJob,
-) -> DataFusionResult<RangeReduceResponse> {
-    if job.request.group_by.is_empty() {
-        let mut states = job
-            .request
-            .reducers
-            .iter()
-            .map(|reducer| PartialAggregateState::from_op(reducer.op))
-            .collect::<Vec<_>>();
-        for range in &job.ranges {
-            let values = session
-                .range_reduce(&range.start, &range.end, &job.request)
-                .await
-                .map_err(|e| DataFusionError::External(Box::new(e)))?;
-            if values.len() != states.len() {
+        for group in &response.groups {
+            if group.group_values_present.len() != self.spec.group_count
+                || group.results.len() != job.job.request.reducers.len()
+                || group.group_values.len()
+                    != group
+                        .group_values_present
+                        .iter()
+                        .filter(|present| **present)
+                        .count()
+            {
                 return Err(DataFusionError::Execution(
                     "range reduction response length mismatch".to_string(),
                 ));
             }
-            for ((state, reducer), partial) in states
-                .iter_mut()
-                .zip(job.request.reducers.iter())
-                .zip(values.iter())
-            {
-                state.merge_partial(reducer.op, partial.as_ref())?;
-            }
         }
-        return Ok(RangeReduceResponse {
-            results: states
-                .into_iter()
-                .map(|state| RangeReduceResult {
-                    value: match state {
-                        PartialAggregateState::Count(count) => Some(KvReducedValue::UInt64(count)),
-                        PartialAggregateState::Sum(value)
-                        | PartialAggregateState::Min(value)
-                        | PartialAggregateState::Max(value) => value,
-                    },
-                })
-                .collect(),
-            groups: Vec::new(),
-        });
-    }
+        let mut columns = Vec::with_capacity(schema.fields().len());
 
-    let mut groups = BTreeMap::<Vec<u8>, MergedGroupResponseState>::new();
-    for range in &job.ranges {
-        let mut responses = session
-            .range_reduce_stream(&range.start, &range.end, &job.request)
-            .await
-            .map_err(|e| DataFusionError::External(Box::new(e)))?;
-        while let Some(response) = responses
-            .try_next()
-            .await
-            .map_err(|e| DataFusionError::External(Box::new(e)))?
-        {
-            let archived = to_domain_reduce_response(response.view()).map_err(|e| {
-                DataFusionError::Execution(format!("range reduction response decode: {e}"))
-            })?;
-            if !archived.results.is_empty() {
-                return Err(DataFusionError::Execution(
-                    "grouped reduction job returned scalar results".to_string(),
-                ));
-            }
-            for group in archived.groups {
-                merge_domain_group_reduce_response(&mut groups, &job.request.reducers, group)?;
-            }
-        }
-    }
-    Ok(RangeReduceResponse {
-        results: Vec::new(),
-        groups: groups
-            .into_values()
-            .map(|group| RangeReduceGroup {
-                group_values: group.group_values,
-                results: group
-                    .states
-                    .into_iter()
-                    .map(|state| RangeReduceResult {
-                        value: match state {
-                            PartialAggregateState::Count(count) => {
-                                Some(KvReducedValue::UInt64(count))
-                            }
-                            PartialAggregateState::Sum(value)
-                            | PartialAggregateState::Min(value)
-                            | PartialAggregateState::Max(value) => value,
-                        },
-                    })
-                    .collect(),
-            })
-            .collect(),
-    })
-}
-
-pub(crate) fn merge_domain_group_reduce_response(
-    groups: &mut BTreeMap<Vec<u8>, MergedGroupResponseState>,
-    reducers: &[RangeReducerSpec],
-    mut group: RangeReduceGroup,
-) -> DataFusionResult<()> {
-    if group.results.len() != reducers.len() {
-        return Err(DataFusionError::Execution(
-            "grouped range reduction response length mismatch".to_string(),
-        ));
-    }
-    canonicalize_reduced_group_values(&mut group.group_values);
-    let key = encode_reduced_group_key(&group.group_values);
-    let entry = groups
-        .entry(key)
-        .or_insert_with(|| MergedGroupResponseState {
-            group_values: group.group_values.clone(),
-            states: reducers
+        // Dense key iterators advance with each group's validity flags as columns
+        // are built directly from the borrowed response.
+        let mut group_values = response
+            .groups
+            .iter()
+            .map(|group| group.group_values.iter())
+            .collect::<Vec<_>>();
+        for (idx, field) in schema.fields()[..self.spec.group_count].iter().enumerate() {
+            let values = response
+                .groups
                 .iter()
-                .map(|reducer| PartialAggregateState::from_op(reducer.op))
-                .collect(),
-        });
-    for ((state, reducer), partial) in entry
-        .states
-        .iter_mut()
-        .zip(reducers.iter())
-        .zip(group.results.iter())
-    {
-        state.merge_partial(reducer.op, partial.value.as_ref())?;
-    }
-    Ok(())
-}
-
-pub(crate) fn finalize_aggregate_output(
-    output: &AggregateOutputPlan,
-    results: Option<&[RangeReduceResult]>,
-    reducers: &[RangeReducerSpec],
-) -> DataFusionResult<ScalarValue> {
-    match output {
-        AggregateOutputPlan::Direct {
-            reducer_idx,
-            data_type,
-        } => match results {
-            Some(results) => {
-                reduced_value_to_scalar(results[*reducer_idx].value.clone(), data_type)
-            }
-            None if matches!(
-                reducers[*reducer_idx].op,
-                RangeReduceOp::CountAll | RangeReduceOp::CountField
-            ) =>
-            {
-                ScalarValue::new_zero(data_type)
-            }
-            None => ScalarValue::try_new_null(data_type),
-        },
-        AggregateOutputPlan::Avg {
-            sum_idx,
-            count_idx,
-            data_type,
-        } => {
-            let Some(results) = results else {
-                return ScalarValue::try_new_null(data_type);
+                .zip(&mut group_values)
+                .map(|(group, values)| {
+                    let value = if group.group_values_present[idx] {
+                        values.next()
+                    } else {
+                        None
+                    };
+                    reduced_value_to_scalar(decode_reduced_value(value)?, field.data_type())
+                })
+                .collect::<DataFusionResult<Vec<_>>>()?;
+            columns.push(ScalarValue::iter_to_array(values)?);
+        }
+        let result_value = |row: usize, reducer: usize| {
+            let results = if self.spec.group_count == 0 {
+                &response.results
+            } else {
+                &response.groups[row].results
             };
-            let Some(KvReducedValue::UInt64(count)) = &results[*count_idx].value else {
-                return Err(DataFusionError::Execution(
-                    "avg count reducer returned non-UInt64 value".to_string(),
-                ));
-            };
-            if *count == 0 {
-                return ScalarValue::try_new_null(data_type);
-            }
-            let sum = match &results[*sum_idx].value {
-                Some(KvReducedValue::Int64(value)) => *value as f64,
-                Some(KvReducedValue::UInt64(value)) => *value as f64,
-                Some(KvReducedValue::Float64(value)) => *value,
-                _ => {
-                    return Err(DataFusionError::Execution(
-                        "unsupported avg input type for pushdown".to_string(),
-                    ))
+            results[reducer].value.as_option()
+        };
+        let mut state_columns: Vec<Option<ArrayRef>> = vec![None; self.empty_states.len()];
+        for (output_idx, output) in &job.expr_plans {
+            let offset = self.state_offsets[*output_idx];
+            let state_idx = offset - self.spec.group_count;
+            match output {
+                AggregateOutputPlan::Direct { reducer_idx } => {
+                    let reducer = &job.job.request.reducers[*reducer_idx];
+                    let data_type = schema.field(offset).data_type();
+                    let values = if matches!(
+                        reducer.op,
+                        RangeReduceOp::CountAll | RangeReduceOp::CountField
+                    ) {
+                        let counts = (0..row_count)
+                            .map(|row| reduced_count(result_value(row, *reducer_idx)))
+                            .collect::<DataFusionResult<Vec<_>>>()?;
+                        cast_with_options(
+                            &UInt64Array::from(counts),
+                            data_type,
+                            &DEFAULT_CAST_OPTIONS,
+                        )?
+                    } else {
+                        let values = (0..row_count)
+                            .map(|row| {
+                                reduced_value_to_scalar(
+                                    decode_reduced_value(result_value(row, *reducer_idx))?,
+                                    data_type,
+                                )
+                            })
+                            .collect::<DataFusionResult<Vec<_>>>()?;
+                        ScalarValue::iter_to_array(values)?
+                    };
+                    state_columns[state_idx] = Some(values);
                 }
-            };
-            cast_scalar_value(ScalarValue::Float64(Some(sum / *count as f64)), data_type)
-        }
-    }
-}
+                AggregateOutputPlan::Avg { sum_idx, count_idx } => {
+                    let mut counts = Vec::with_capacity(row_count);
+                    let mut sums = Vec::with_capacity(row_count);
+                    for row in 0..row_count {
+                        let count = reduced_count(result_value(row, *count_idx))?;
+                        let sum = reduced_value_to_scalar(
+                            decode_reduced_value(result_value(row, *sum_idx))?,
+                            schema.field(offset + 1).data_type(),
+                        )?;
 
-pub(crate) fn build_aggregate_record_batch(
-    rows: Vec<Vec<ScalarValue>>,
-    schema: SchemaRef,
-) -> DataFusionResult<RecordBatch> {
-    let mut arrays = Vec::with_capacity(schema.fields().len());
-    for (idx, field) in schema.fields().iter().enumerate() {
-        if rows.is_empty() {
-            arrays.push(new_empty_array(field.data_type()));
-        } else {
-            let values = rows.iter().map(|row| row[idx].clone());
-            arrays.push(ScalarValue::iter_to_array(values)?);
+                        // Native grouped AVG shares count/sum validity; a valid zero count
+                        // would turn an empty group's null result into division by zero.
+                        counts.push((!sum.is_null()).then_some(count));
+                        sums.push(sum);
+                    }
+                    state_columns[state_idx] = Some(Arc::new(UInt64Array::from(counts)));
+                    state_columns[state_idx + 1] = Some(ScalarValue::iter_to_array(sums)?);
+                }
+            }
         }
+
+        // Jobs contribute to separate state slots; neutral states preserve seed-only groups.
+        for (state, empty) in state_columns.into_iter().zip(&self.empty_states) {
+            columns.push(match state {
+                Some(state) => state,
+                None => empty.to_array_of_size(row_count)?,
+            });
+        }
+        RecordBatch::try_new(schema, columns).map_err(Into::into)
     }
-    RecordBatch::try_new(schema, arrays).map_err(Into::into)
 }
 
 pub(crate) fn rebase_output_plan(
@@ -948,21 +888,12 @@ pub(crate) fn rebase_output_plan(
     offset: usize,
 ) -> AggregateOutputPlan {
     match output {
-        AggregateOutputPlan::Direct {
-            reducer_idx,
-            data_type,
-        } => AggregateOutputPlan::Direct {
+        AggregateOutputPlan::Direct { reducer_idx } => AggregateOutputPlan::Direct {
             reducer_idx: reducer_idx + offset,
-            data_type,
         },
-        AggregateOutputPlan::Avg {
-            sum_idx,
-            count_idx,
-            data_type,
-        } => AggregateOutputPlan::Avg {
+        AggregateOutputPlan::Avg { sum_idx, count_idx } => AggregateOutputPlan::Avg {
             sum_idx: sum_idx + offset,
             count_idx: count_idx + offset,
-            data_type,
         },
     }
 }
@@ -993,12 +924,6 @@ pub(crate) fn combine_aggregate_jobs(exprs: Vec<AggregateExprPlan>) -> Vec<Combi
     combined
 }
 
-#[derive(Debug, Clone)]
-pub(crate) struct CompiledGroupExpr {
-    pub(crate) expr: PushdownValueExpr,
-    pub(crate) data_type: DataType,
-}
-
 pub(crate) fn try_build_aggregate_pushdown_spec(
     table: &KvTable,
     scan: &datafusion::logical_expr::logical_plan::TableScan,
@@ -1007,44 +932,37 @@ pub(crate) fn try_build_aggregate_pushdown_spec(
     schema: &datafusion::common::DFSchemaRef,
 ) -> DataFusionResult<Option<AggregatePushdownSpec>> {
     let mut compiled_group_exprs = Vec::with_capacity(group_exprs.len());
-    for (idx, expr) in group_exprs.iter().enumerate() {
-        let data_type = schema.field(idx).data_type().clone();
+    for expr in group_exprs {
         let compiled_expr = match compile_pushdown_value_expr(expr, &table.model) {
             Ok((compiled_expr, _)) => compiled_expr,
             Err(_) => return Ok(None),
         };
-        compiled_group_exprs.push(CompiledGroupExpr {
-            expr: compiled_expr,
-            data_type,
-        });
+        compiled_group_exprs.push(compiled_expr);
     }
 
     let mut aggregate_exprs = Vec::new();
     let mut aggregate_diagnostics = Vec::new();
-    let mut has_unfiltered_aggregate = false;
+    let mut has_unguarded_aggregate = false;
     for (expr_idx, expr) in aggr_exprs.iter().enumerate() {
         let data_type = schema
             .field(group_exprs.len() + expr_idx)
             .data_type()
             .clone();
-        let normalized = match normalize_aggregate_expr(expr, &table.model) {
+        let mut normalized = match normalize_aggregate_expr(expr, &table.model) {
             Ok(normalized) => normalized,
             Err(_) => return Ok(None),
         };
 
-        // Store uses total ordering for grouped floats; native SQL has different infinity and NaN semantics.
-        if !group_exprs.is_empty()
-            && data_type == DataType::Float64
-            && matches!(
-                normalized.func,
-                AggregatePushdownFunction::Min | AggregatePushdownFunction::Max
-            )
-        {
-            return Ok(None);
+        // Native scalar aggregates filter rows before evaluating arguments, allowing
+        // the same predicate to narrow the Store access path.
+        if compiled_group_exprs.is_empty() {
+            normalized.guard =
+                conjunction(normalized.guard.into_iter().chain(normalized.filter.take()));
         }
-        has_unfiltered_aggregate |= normalized.filter.is_none();
+
+        has_unguarded_aggregate |= normalized.guard.is_none();
         let mut filters = scan.filters.clone();
-        if let Some(filter) = &normalized.filter {
+        if let Some(filter) = &normalized.guard {
             filters.push(filter.clone());
         }
         let Some((job, diagnostics, output)) = build_aggregate_reduce_job(
@@ -1068,7 +986,7 @@ pub(crate) fn try_build_aggregate_pushdown_spec(
         return Ok(None);
     }
 
-    let seed_job = if !compiled_group_exprs.is_empty() && !has_unfiltered_aggregate {
+    let seed_job = if !compiled_group_exprs.is_empty() && !has_unguarded_aggregate {
         let Some((job, diagnostics, _)) =
             build_aggregate_reduce_job(table, &scan.filters, &compiled_group_exprs, None, None)?
         else {
@@ -1086,12 +1004,7 @@ pub(crate) fn try_build_aggregate_pushdown_spec(
         .collect();
     Ok(Some(AggregatePushdownSpec {
         client: table.client.clone(),
-        group_plans: compiled_group_exprs
-            .iter()
-            .map(|group| AggregateGroupPlan {
-                data_type: group.data_type.clone(),
-            })
-            .collect(),
+        group_count: compiled_group_exprs.len(),
         seed_job: seed_job.as_ref().map(|(job, _)| job.clone()),
         aggregate_jobs,
         diagnostics: AggregatePushdownDiagnostics {
@@ -1106,7 +1019,7 @@ pub(crate) fn try_build_aggregate_pushdown_spec(
 pub(crate) fn build_aggregate_reduce_job(
     table: &KvTable,
     filters: &[Expr],
-    group_exprs: &[CompiledGroupExpr],
+    group_exprs: &[PushdownValueExpr],
     aggr_expr: Option<&NormalizedAggregateExpr>,
     data_type: Option<DataType>,
 ) -> DataFusionResult<
@@ -1123,7 +1036,19 @@ pub(crate) fn build_aggregate_reduce_job(
         return Ok(None);
     }
     let predicate = QueryPredicate::from_filters(filters, &table.model);
-    let required_projection = reduce_job_required_projection(group_exprs, aggr_expr);
+    let reducer_predicate = if let Some(filter) = aggr_expr.and_then(|expr| expr.filter.as_ref()) {
+        if !QueryPredicate::supports_filter(filter, &table.model) {
+            return Ok(None);
+        }
+        Some(QueryPredicate::from_filters(
+            std::slice::from_ref(filter),
+            &table.model,
+        ))
+    } else {
+        None
+    };
+    let required_projection =
+        reduce_job_required_projection(group_exprs, aggr_expr, reducer_predicate.as_ref());
     let projection = Some(required_projection);
     let access_plan = ScanAccessPlan::new(&table.model, &projection, &predicate);
     let (ranges, access_path, constrained_prefix_len) =
@@ -1133,6 +1058,16 @@ pub(crate) fn build_aggregate_reduce_job(
     else {
         return Ok(None);
     };
+    let reducer_filter = if let Some(predicate) = &reducer_predicate {
+        let Some(filter) =
+            compile_reduce_filter(predicate, &table.model, &table.index_specs, &access_path)
+        else {
+            return Ok(None);
+        };
+        Some(filter)
+    } else {
+        None
+    };
     let (reducers, output) = match (aggr_expr, data_type) {
         (Some(expr), Some(data_type)) => match compile_aggregate_expr(
             expr,
@@ -1141,6 +1076,7 @@ pub(crate) fn build_aggregate_reduce_job(
             &access_path,
             0,
             data_type,
+            reducer_filter,
         ) {
             Ok((reducers, output)) => (reducers, Some(output)),
             Err(_) => return Ok(None),
@@ -1216,14 +1152,15 @@ pub(crate) fn choose_aggregate_access_path(
 }
 
 pub(crate) fn reduce_job_required_projection(
-    group_exprs: &[CompiledGroupExpr],
+    group_exprs: &[PushdownValueExpr],
     aggr_expr: Option<&NormalizedAggregateExpr>,
+    filter: Option<&QueryPredicate>,
 ) -> Vec<usize> {
     let mut cols = group_exprs
         .iter()
         .flat_map(|group| {
             let mut cols = Vec::new();
-            group.expr.collect_columns(&mut cols);
+            group.collect_columns(&mut cols);
             cols
         })
         .collect::<Vec<_>>();
@@ -1232,20 +1169,23 @@ pub(crate) fn reduce_job_required_projection(
             argument.collect_columns(&mut cols);
         }
     }
+    if let Some(filter) = filter {
+        cols.extend(filter.constraints.keys().copied());
+    }
     cols.sort_unstable();
     cols.dedup();
     cols
 }
 
 pub(crate) fn compile_group_exprs(
-    group_exprs: &[CompiledGroupExpr],
+    group_exprs: &[PushdownValueExpr],
     model: &TableModel,
     index_specs: &[ResolvedIndexSpec],
     access_path: &AggregateAccessPath,
 ) -> Option<Vec<KvExpr>> {
     group_exprs
         .iter()
-        .map(|group| compile_reduce_expr(&group.expr, model, index_specs, access_path))
+        .map(|group| compile_reduce_expr(group, model, index_specs, access_path))
         .collect()
 }
 
@@ -1256,6 +1196,7 @@ pub(crate) fn compile_aggregate_expr(
     access_path: &AggregateAccessPath,
     next_reducer_idx: usize,
     data_type: DataType,
+    filter: Option<KvPredicate>,
 ) -> DataFusionResult<(Vec<RangeReducerSpec>, AggregateOutputPlan)> {
     let expr = match &normalized.argument {
         AggregatePushdownArgument::CountAll => None,
@@ -1278,16 +1219,17 @@ pub(crate) fn compile_aggregate_expr(
                 RangeReducerSpec {
                     op: RangeReduceOp::SumField,
                     expr: expr.clone(),
+                    filter: filter.clone(),
                 },
                 RangeReducerSpec {
                     op: RangeReduceOp::CountField,
                     expr,
+                    filter,
                 },
             ],
             AggregateOutputPlan::Avg {
                 sum_idx: next_reducer_idx,
                 count_idx: next_reducer_idx + 1,
-                data_type,
             },
         ));
     }
@@ -1300,10 +1242,9 @@ pub(crate) fn compile_aggregate_expr(
         AggregatePushdownFunction::Avg => unreachable!(),
     };
     Ok((
-        vec![RangeReducerSpec { op, expr }],
+        vec![RangeReducerSpec { op, expr, filter }],
         AggregateOutputPlan::Direct {
             reducer_idx: next_reducer_idx,
-            data_type,
         },
     ))
 }
@@ -1420,42 +1361,38 @@ pub(crate) fn compile_pushdown_value_expr(
                 DataFusionError::Execution("unsupported pushdown expression literal".to_string())
             })
             .map(|(value, kind)| (PushdownValueExpr::Literal(value), kind)),
-        Expr::BinaryExpr(binary) if binary.op == Operator::Plus => {
+        Expr::BinaryExpr(binary)
+            if matches!(
+                binary.op,
+                Operator::Plus | Operator::Minus | Operator::Multiply | Operator::Divide
+            ) =>
+        {
             let (left, left_kind) = compile_pushdown_value_expr(binary.left.as_ref(), model)?;
             let (right, right_kind) = compile_pushdown_value_expr(binary.right.as_ref(), model)?;
-            let kind = infer_pushdown_add_sub_kind(left_kind, right_kind, "addition")?;
-            Ok((
-                PushdownValueExpr::Add(Box::new(left), Box::new(right)),
-                kind,
-            ))
-        }
-        Expr::BinaryExpr(binary) if binary.op == Operator::Minus => {
-            let (left, left_kind) = compile_pushdown_value_expr(binary.left.as_ref(), model)?;
-            let (right, right_kind) = compile_pushdown_value_expr(binary.right.as_ref(), model)?;
-            let kind = infer_pushdown_add_sub_kind(left_kind, right_kind, "subtraction")?;
-            Ok((
-                PushdownValueExpr::Sub(Box::new(left), Box::new(right)),
-                kind,
-            ))
-        }
-        Expr::BinaryExpr(binary) if binary.op == Operator::Multiply => {
-            let (left, left_kind) = compile_pushdown_value_expr(binary.left.as_ref(), model)?;
-            let (right, right_kind) = compile_pushdown_value_expr(binary.right.as_ref(), model)?;
-            let kind = infer_pushdown_mul_kind(left_kind, right_kind)?;
-            Ok((
-                PushdownValueExpr::Mul(Box::new(left), Box::new(right)),
-                kind,
-            ))
-        }
-        Expr::BinaryExpr(binary) if binary.op == Operator::Divide => {
-            let (left, left_kind) = compile_pushdown_value_expr(binary.left.as_ref(), model)?;
-            let (right, right_kind) = compile_pushdown_value_expr(binary.right.as_ref(), model)?;
-            ensure_pushdown_divisor_supported(&right)?;
-            let kind = infer_pushdown_div_kind(left_kind, right_kind)?;
-            Ok((
-                PushdownValueExpr::Div(Box::new(left), Box::new(right)),
-                kind,
-            ))
+            let kind = match (left_kind, right_kind) {
+                (KvFieldKind::Int64, KvFieldKind::Int64) => KvFieldKind::Int64,
+                (KvFieldKind::UInt64, KvFieldKind::UInt64) => KvFieldKind::UInt64,
+                (KvFieldKind::Float64, KvFieldKind::Float64)
+                | (KvFieldKind::Float64, KvFieldKind::Int64)
+                | (KvFieldKind::Int64, KvFieldKind::Float64)
+                | (KvFieldKind::Float64, KvFieldKind::UInt64)
+                | (KvFieldKind::UInt64, KvFieldKind::Float64) => KvFieldKind::Float64,
+                _ => {
+                    return Err(DataFusionError::Execution(format!(
+                        "unsupported pushdown operand types for {}",
+                        binary.op
+                    )))
+                }
+            };
+            let (left, right) = (Box::new(left), Box::new(right));
+            let expr = match binary.op {
+                Operator::Plus => PushdownValueExpr::Add(left, right),
+                Operator::Minus => PushdownValueExpr::Sub(left, right),
+                Operator::Multiply => PushdownValueExpr::Mul(left, right),
+                Operator::Divide => PushdownValueExpr::Div(left, right),
+                _ => unreachable!(),
+            };
+            Ok((expr, kind))
         }
         Expr::Cast(cast) => compile_pushdown_cast(&cast.expr, cast.field.data_type(), model),
         Expr::TryCast(cast) => compile_pushdown_cast(&cast.expr, cast.field.data_type(), model),
@@ -1517,10 +1454,7 @@ fn compile_pushdown_cast(
     }
     if *data_type == DataType::Float64 && matches!(kind, KvFieldKind::Int64 | KvFieldKind::UInt64) {
         return Ok((
-            PushdownValueExpr::Mul(
-                Box::new(inner),
-                Box::new(PushdownValueExpr::Literal(KvReducedValue::Float64(1.0))),
-            ),
+            PushdownValueExpr::CastFloat64(Box::new(inner)),
             KvFieldKind::Float64,
         ));
     }
@@ -1603,73 +1537,6 @@ pub(crate) fn compile_pushdown_scalar_function(
     }
 }
 
-pub(crate) fn infer_pushdown_mul_kind(
-    left: KvFieldKind,
-    right: KvFieldKind,
-) -> DataFusionResult<KvFieldKind> {
-    match (left, right) {
-        (KvFieldKind::Int64, KvFieldKind::Int64) => Ok(KvFieldKind::Int64),
-        (KvFieldKind::UInt64, KvFieldKind::UInt64) => Ok(KvFieldKind::UInt64),
-        (KvFieldKind::Float64, KvFieldKind::Float64)
-        | (KvFieldKind::Float64, KvFieldKind::Int64)
-        | (KvFieldKind::Int64, KvFieldKind::Float64)
-        | (KvFieldKind::Float64, KvFieldKind::UInt64)
-        | (KvFieldKind::UInt64, KvFieldKind::Float64) => Ok(KvFieldKind::Float64),
-        _ => Err(DataFusionError::Execution(
-            "pushdown multiplication only supports Int64, UInt64, and Float64".to_string(),
-        )),
-    }
-}
-
-pub(crate) fn infer_pushdown_add_sub_kind(
-    left: KvFieldKind,
-    right: KvFieldKind,
-    op_name: &str,
-) -> DataFusionResult<KvFieldKind> {
-    match (left, right) {
-        (KvFieldKind::Int64, KvFieldKind::Int64) => Ok(KvFieldKind::Int64),
-        (KvFieldKind::UInt64, KvFieldKind::UInt64) => Ok(KvFieldKind::UInt64),
-        (KvFieldKind::Float64, KvFieldKind::Float64)
-        | (KvFieldKind::Float64, KvFieldKind::Int64)
-        | (KvFieldKind::Int64, KvFieldKind::Float64)
-        | (KvFieldKind::Float64, KvFieldKind::UInt64)
-        | (KvFieldKind::UInt64, KvFieldKind::Float64) => Ok(KvFieldKind::Float64),
-        _ => Err(DataFusionError::Execution(format!(
-            "pushdown {op_name} only supports Int64, UInt64, and Float64"
-        ))),
-    }
-}
-
-pub(crate) fn infer_pushdown_div_kind(
-    left: KvFieldKind,
-    right: KvFieldKind,
-) -> DataFusionResult<KvFieldKind> {
-    match (left, right) {
-        (KvFieldKind::Float64, KvFieldKind::Float64)
-        | (KvFieldKind::Float64, KvFieldKind::Int64)
-        | (KvFieldKind::Int64, KvFieldKind::Float64)
-        | (KvFieldKind::Float64, KvFieldKind::UInt64)
-        | (KvFieldKind::UInt64, KvFieldKind::Float64) => Ok(KvFieldKind::Float64),
-        _ => Err(DataFusionError::Execution(
-            "pushdown division only supports Int64, UInt64, and Float64".to_string(),
-        )),
-    }
-}
-
-pub(crate) fn ensure_pushdown_divisor_supported(expr: &PushdownValueExpr) -> DataFusionResult<()> {
-    match expr {
-        PushdownValueExpr::Literal(KvReducedValue::Int64(v)) if *v != 0 => Ok(()),
-        PushdownValueExpr::Literal(KvReducedValue::UInt64(v)) if *v != 0 => Ok(()),
-        PushdownValueExpr::Literal(KvReducedValue::Float64(v)) if *v != 0.0 => Ok(()),
-        PushdownValueExpr::Literal(_) => Err(DataFusionError::Execution(
-            "pushdown division does not support a zero literal divisor".to_string(),
-        )),
-        _ => Err(DataFusionError::Execution(
-            "pushdown division requires a non-zero literal divisor".to_string(),
-        )),
-    }
-}
-
 pub(crate) fn scalar_to_reduced_literal(
     value: &ScalarValue,
 ) -> Option<(KvReducedValue, KvFieldKind)> {
@@ -1723,6 +1590,7 @@ pub(crate) fn normalize_aggregate_expr(
         .filter
         .as_ref()
         .map(|filter| strip_alias_expr(filter.as_ref()).clone());
+
     let function = agg.func.inner();
     let func = if function.downcast_ref::<Count>().is_some() {
         AggregatePushdownFunction::Count
@@ -1749,7 +1617,8 @@ pub(crate) fn normalize_aggregate_expr(
     Ok(NormalizedAggregateExpr {
         func,
         argument,
-        filter: conjunction(explicit_filter.into_iter().chain(case_filter)),
+        filter: explicit_filter,
+        guard: case_filter,
     })
 }
 
@@ -1972,6 +1841,9 @@ pub(crate) fn compile_reduce_expr(
             Box::new(compile_reduce_expr(left, model, index_specs, access_path)?),
             Box::new(compile_reduce_expr(right, model, index_specs, access_path)?),
         )),
+        PushdownValueExpr::CastFloat64(inner) => Some(KvExpr::CastFloat64(Box::new(
+            compile_reduce_expr(inner, model, index_specs, access_path)?,
+        ))),
         PushdownValueExpr::Lower(inner) => Some(KvExpr::Lower(Box::new(compile_reduce_expr(
             inner,
             model,
@@ -2121,6 +1993,7 @@ pub(crate) fn kv_field_kind(kind: ColumnKind) -> Option<KvFieldKind> {
 mod tests {
     use super::*;
     use buffa::Message;
+    use std::collections::BTreeMap;
     use std::sync::{
         atomic::{AtomicUsize, Ordering as AtomicOrdering},
         Mutex,
@@ -2134,7 +2007,7 @@ mod tests {
     };
     use datafusion::datasource::MemTable;
     use datafusion::prelude::SessionContext;
-    use exoware_sdk::StoreClient;
+    use exoware_sdk::{RangeReduceGroup, RangeReduceResponse, RangeReduceResult, StoreClient};
     use exoware_server::{Query, QueryExtra, QueryState, RangeScan, RangeScanBatch, Sequence};
 
     #[derive(Default)]
@@ -2213,6 +2086,8 @@ mod tests {
         }
     }
 
+    type FloatRangeRow = (i64, i64, Option<i64>, i64, Option<f64>);
+
     struct Fixture {
         store: SessionContext,
         native: SessionContext,
@@ -2248,18 +2123,11 @@ mod tests {
                             let request = if request.uri().path().ends_with("/Reduce") {
                                 let (parts, body) = request.into_parts();
                                 let body = axum::body::to_bytes(body, usize::MAX).await.unwrap();
-                                let envelope = connectrpc::envelope::Envelope::decode(
-                                    &mut bytes::BytesMut::from(body.as_ref()),
-                                )
-                                .unwrap()
-                                .unwrap();
-                                assert!(!envelope.is_compressed());
-                                observed.reductions.lock().unwrap().push(
-                                    exoware_sdk::query::ReduceRequest::decode_from_slice(
-                                        &envelope.data,
-                                    )
-                                    .unwrap(),
-                                );
+                                observed
+                                    .reductions
+                                    .lock()
+                                    .unwrap()
+                                    .push(crate::tests::decode_reduce_request(&body));
                                 Request::from_parts(parts, axum::body::Body::from(body))
                             } else {
                                 request
@@ -2435,13 +2303,85 @@ mod tests {
                 .unwrap();
         }
 
+        async fn install_float_ranges(&self, rows: &[FloatRangeRow]) -> RecordBatch {
+            let arrays: Vec<ArrayRef> = vec![
+                Arc::new(Int64Array::from_iter_values(rows.iter().map(|row| row.0))),
+                Arc::new(Int64Array::from_iter_values(rows.iter().map(|row| row.1))),
+                Arc::new(Int64Array::from_iter(rows.iter().map(|row| row.2))),
+                Arc::new(Int64Array::from_iter_values(rows.iter().map(|row| row.3))),
+                Arc::new(Float64Array::from_iter(rows.iter().map(|row| row.4))),
+            ];
+            self.install_indexed_table(
+                "float_ranges",
+                vec![
+                    TableColumnConfig::new("bucket", DataType::Int64, false),
+                    TableColumnConfig::new("id", DataType::Int64, false),
+                    TableColumnConfig::new("category", DataType::Int64, true),
+                    TableColumnConfig::new("flag", DataType::Int64, false),
+                    TableColumnConfig::new("value", DataType::Float64, true),
+                ],
+                &["bucket", "id"],
+                vec![],
+                rows.iter()
+                    .map(|&(bucket, id, category, flag, value)| KvRow {
+                        values: vec![
+                            CellValue::Int64(bucket),
+                            CellValue::Int64(id),
+                            category.map(CellValue::Int64).unwrap_or(CellValue::Null),
+                            CellValue::Int64(flag),
+                            value.map(CellValue::Float64).unwrap_or(CellValue::Null),
+                        ],
+                    })
+                    .collect(),
+                arrays.clone(),
+            )
+            .await;
+            let schema = self
+                .native
+                .table_provider("float_ranges")
+                .await
+                .unwrap()
+                .schema();
+            RecordBatch::try_new(schema, arrays).unwrap()
+        }
+
+        fn assert_range_jobs(&self, range_count: usize, jobs: usize, scanned_rows: usize) {
+            let requests = self.rows.reductions.lock().unwrap();
+            let mut ranges = BTreeMap::new();
+            for request in requests.iter() {
+                *ranges
+                    .entry((request.start.clone(), request.end.clone()))
+                    .or_insert(0) += 1;
+            }
+            assert_eq!(ranges.len(), range_count, "{requests:?}");
+            assert!(ranges.values().all(|count| *count == jobs), "{requests:?}");
+            let bounds = ranges.keys().collect::<Vec<_>>();
+            assert!(
+                bounds.windows(2).all(|pair| pair[0].1 < pair[1].0),
+                "{requests:?}"
+            );
+            assert_eq!(
+                self.rows.scanned_rows.load(AtomicOrdering::Relaxed),
+                scanned_rows
+            );
+        }
+
         async fn check(&self, sql: &str, reductions: usize) {
             let expected = values(&self.native, sql).await.unwrap();
+            self.check_expected(sql, reductions, &expected).await;
+        }
+
+        async fn check_expected(
+            &self,
+            sql: &str,
+            reductions: usize,
+            expected: &[Vec<ScalarValue>],
+        ) {
             self.rows.paths.lock().unwrap().clear();
             self.rows.reductions.lock().unwrap().clear();
             self.rows.scanned_rows.store(0, AtomicOrdering::Relaxed);
             let actual = values(&self.store, sql).await.unwrap();
-            assert_eq!(actual, expected, "{sql}");
+            assert_eq!(actual.as_slice(), expected, "{sql}");
             let requests = self.rows.reductions.lock().unwrap();
             for (idx, request) in requests.iter().enumerate() {
                 assert_eq!(
@@ -2457,9 +2397,9 @@ mod tests {
                 "{sql}: {paths:?}"
             );
             assert!(
-                !paths
-                    .iter()
-                    .any(|p| p.ends_with("/Range") || p.ends_with("/GetMany")),
+                !paths.iter().any(|p| p.ends_with("/Range")
+                    || p.ends_with("/GetMany")
+                    || p.ends_with("/Get")),
                 "{sql}: {paths:?}"
             );
         }
@@ -2467,6 +2407,10 @@ mod tests {
 
     async fn values(ctx: &SessionContext, sql: &str) -> DataFusionResult<Vec<Vec<ScalarValue>>> {
         let batches = ctx.sql(sql).await?.collect().await?;
+        batch_values(&batches)
+    }
+
+    fn batch_values(batches: &[RecordBatch]) -> DataFusionResult<Vec<Vec<ScalarValue>>> {
         batches
             .iter()
             .flat_map(|batch| {
@@ -2494,7 +2438,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn limited_distinct_preserves_native_aggregation_limits() {
+    async fn limited_distinct_preserves_aggregation_limits() {
         use datafusion::physical_plan::aggregates::AggregateExec;
 
         let fixture = Fixture::new().await;
@@ -2608,18 +2552,99 @@ mod tests {
     async fn interleaved_jobs_preserve_output_positions() {
         let fixture = Fixture::new().await;
         fixture.check("SELECT SUM(amount), COUNT(*) FILTER (WHERE status = 'open'), AVG(amount), MIN(amount), MAX(amount) FROM orders", 2).await;
-        fixture.check("SELECT region, SUM(amount), COUNT(*) FILTER (WHERE status = 'open'), AVG(amount), MIN(amount), MAX(amount) FROM orders GROUP BY region ORDER BY region", 2).await;
+        fixture.check("SELECT region, SUM(amount), COUNT(*) FILTER (WHERE status = 'open'), AVG(amount), MIN(amount), MAX(amount) FROM orders GROUP BY region ORDER BY region", 1).await;
     }
 
     #[tokio::test]
-    async fn filtered_groups_keep_empty_aggregates_and_avoid_duplicate_seed() {
+    async fn filters_keep_empty_groups_and_share_one_request() {
         let fixture = Fixture::new().await;
-        fixture.check("SELECT region, COUNT(*), COUNT(*) FILTER (WHERE status = 'open') FROM orders GROUP BY region ORDER BY region", 2).await;
-        fixture.check("SELECT region, SUM(amount) FILTER (WHERE status = 'open'), COUNT(*) FILTER (WHERE status = 'open') FROM orders GROUP BY region ORDER BY region", 2).await;
+        fixture.check("SELECT region, COUNT(*), COUNT(*) FILTER (WHERE status = 'open') FROM orders GROUP BY region ORDER BY region", 1).await;
+        fixture.check("SELECT region, SUM(amount) FILTER (WHERE status = 'open'), COUNT(*) FILTER (WHERE status = 'open') FROM orders GROUP BY region ORDER BY region", 1).await;
+        fixture.check("SELECT region, SUM(amount) FILTER (WHERE status = 'open'), COUNT(*) FILTER (WHERE status = 'closed'), AVG(amount) FILTER (WHERE id > 99) FROM orders GROUP BY region ORDER BY region", 1).await;
+        {
+            let requests = fixture.rows.reductions.lock().unwrap();
+            assert!(requests[0].params.filter.as_option().is_none());
+            assert!(requests[0]
+                .params
+                .reducers
+                .iter()
+                .all(|reducer| reducer.filter.as_option().is_some()));
+        }
+        assert_eq!(fixture.rows.scanned_rows.load(AtomicOrdering::Relaxed), 4);
+        fixture.check("SELECT region, SUM(CASE WHEN id > 1 THEN amount END) FILTER (WHERE status = 'open'), COUNT(*) FILTER (WHERE status = 'closed') FROM orders GROUP BY region ORDER BY region", 2).await;
     }
 
     #[tokio::test]
-    async fn integer_arithmetic_matches_native_in_both_ansi_modes() {
+    async fn grouped_filter_keeps_computed_projections_in_reduce() {
+        let fixture = Fixture::new().await;
+        for sql in [
+            "SELECT region, SUM(amount + 1) FILTER (WHERE status = 'open'), \
+             MIN(amount + 1) FILTER (WHERE status = 'open') \
+             FROM orders GROUP BY region ORDER BY region",
+            "SELECT region, SUM(value) FILTER (WHERE status = 'open') FROM \
+             (SELECT region, status, amount + 1 AS value FROM orders) q \
+             GROUP BY region ORDER BY region",
+        ] {
+            fixture.check(sql, 1).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn filter_columns_participate_in_covering_access_selection() {
+        for cover_filter in [false, true] {
+            let fixture = Fixture::new().await;
+            let mut cover = vec!["amount".to_string()];
+            if cover_filter {
+                cover.push("flag".to_string());
+            }
+            fixture
+                .install_indexed_table(
+                    "filtered_index",
+                    vec![
+                        TableColumnConfig::new("id", DataType::Int64, false),
+                        TableColumnConfig::new("category", DataType::Int64, false),
+                        TableColumnConfig::new("amount", DataType::Int64, false),
+                        TableColumnConfig::new("flag", DataType::Int64, false),
+                    ],
+                    &["id"],
+                    vec![IndexSpec::new("category_idx", vec!["category".to_string()])
+                        .unwrap()
+                        .with_cover_columns(cover)],
+                    (0..4)
+                        .map(|id| KvRow {
+                            values: vec![
+                                CellValue::Int64(id),
+                                CellValue::Int64(id / 2),
+                                CellValue::Int64(id * 10),
+                                CellValue::Int64(id % 2),
+                            ],
+                        })
+                        .collect(),
+                    vec![
+                        Arc::new(Int64Array::from(vec![0, 1, 2, 3])),
+                        Arc::new(Int64Array::from(vec![0, 0, 1, 1])),
+                        Arc::new(Int64Array::from(vec![0, 10, 20, 30])),
+                        Arc::new(Int64Array::from(vec![0, 1, 0, 1])),
+                    ],
+                )
+                .await;
+            fixture.check("SELECT category, SUM(amount) FILTER (WHERE flag = 1) FROM filtered_index WHERE category = 1 GROUP BY category", 1).await;
+            assert_eq!(
+                fixture.rows.scanned_rows.load(AtomicOrdering::Relaxed),
+                if cover_filter { 2 } else { 4 }
+            );
+            fixture
+                .check(
+                    "SELECT SUM(amount) FILTER (WHERE category = 1) FROM filtered_index",
+                    1,
+                )
+                .await;
+            assert_eq!(fixture.rows.scanned_rows.load(AtomicOrdering::Relaxed), 2);
+        }
+    }
+
+    #[tokio::test]
+    async fn integer_arithmetic_wraps_in_both_ansi_modes() {
         let fixture = Fixture::new().await;
         let sql = "SELECT COUNT(*), SUM(amount + 9223372036854775807) FROM orders";
         fixture.check(sql, 1).await;
@@ -2643,10 +2668,347 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unsupported_casts_division_and_filters_keep_native_semantics() {
+    async fn integer_division_preserves_quotients_and_nulls_in_reduce() {
+        let fixture = Fixture::with_amounts([Some(257), Some(-30), None, Some(20)]).await;
+        fixture
+            .check("SELECT SUM(amount / 2), COUNT(*) FROM orders", 1)
+            .await;
+        fixture
+            .check(
+                "SELECT region, SUM(amount / id), AVG(amount / id), COUNT(*), \
+                 SUM(amount / 2) FILTER (WHERE status = 'open') \
+                 FROM orders GROUP BY region ORDER BY region",
+                1,
+            )
+            .await;
+
+        fixture
+            .replace_value_column(
+                DataType::UInt64,
+                vec![
+                    CellValue::UInt64(u64::MAX),
+                    CellValue::UInt64(31),
+                    CellValue::Null,
+                    CellValue::UInt64(1),
+                ],
+                Arc::new(UInt64Array::from(vec![
+                    Some(u64::MAX),
+                    Some(31),
+                    None,
+                    Some(1),
+                ])),
+            )
+            .await;
+        fixture
+            .check(
+                "SELECT SUM(value / arrow_cast(2, 'UInt64')), SUM(value / value), \
+                 AVG(value / arrow_cast(2, 'UInt64')) FROM numbers",
+                1,
+            )
+            .await;
+    }
+
+    #[tokio::test]
+    async fn integer_float_casts_use_explicit_wire_casts() {
+        let signed = vec![
+            Some(i64::MIN),
+            Some((1_i64 << 53) - 1),
+            Some((1_i64 << 53) + 1),
+            Some(i64::MAX),
+            None,
+        ];
+        let unsigned = vec![
+            Some(0),
+            Some((1_u64 << 53) - 1),
+            Some((1_u64 << 53) + 1),
+            Some(u64::MAX),
+            None,
+        ];
+        for (data_type, cells, array) in [
+            (
+                DataType::Int64,
+                signed
+                    .iter()
+                    .map(|v| v.map(CellValue::Int64).unwrap_or(CellValue::Null))
+                    .collect(),
+                Arc::new(Int64Array::from(signed)) as ArrayRef,
+            ),
+            (
+                DataType::UInt64,
+                unsigned
+                    .iter()
+                    .map(|v| v.map(CellValue::UInt64).unwrap_or(CellValue::Null))
+                    .collect(),
+                Arc::new(UInt64Array::from(unsigned)) as ArrayRef,
+            ),
+        ] {
+            let fixture = Fixture::new().await;
+            fixture.replace_value_column(data_type, cells, array).await;
+            for cast in ["CAST", "TRY_CAST"] {
+                let expr = format!("{cast}(value AS DOUBLE)");
+                for (sql, requests, grouped) in [
+                    (format!("SELECT SUM({expr}) FROM numbers"), 1, false),
+                    (format!("SELECT {expr}, SUM({expr}), COUNT(*) FROM numbers GROUP BY {expr} ORDER BY 1"), 1, true),
+                    (format!("SELECT MIN({expr}), MAX({expr}) FROM numbers WHERE id IN (0, 2, 4)"), 3, false),
+                ] {
+                    fixture.check(&sql, requests).await;
+                    for request in fixture.rows.reductions.lock().unwrap().iter() {
+                        let request = exoware_sdk::to_domain_reduce_request(&request.params).unwrap();
+                        if grouped {
+                            assert!(matches!(request.group_by[0], KvExpr::CastFloat64(_)), "{sql}: {request:?}");
+                        }
+                        assert!(matches!(request.reducers[0].expr, Some(KvExpr::CastFloat64(_))), "{sql}: {request:?}");
+                    }
+                }
+            }
+            fixture
+                .check("SELECT SUM(value * 2.0) FROM numbers", 1)
+                .await;
+            let requests = fixture.rows.reductions.lock().unwrap();
+            let request = exoware_sdk::to_domain_reduce_request(&requests[0].params).unwrap();
+            assert!(
+                matches!(request.reducers[0].expr, Some(KvExpr::Mul(_, _))),
+                "{request:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn floating_division_preserves_zero_divisors_and_nulls_in_reduce() {
+        let fixture = Fixture::new().await;
+        fixture
+            .replace_value_column(
+                DataType::Float64,
+                vec![
+                    CellValue::Float64(1.0),
+                    CellValue::Float64(2.0),
+                    CellValue::Null,
+                    CellValue::Float64(4.0),
+                ],
+                Arc::new(Float64Array::from(vec![
+                    Some(1.0),
+                    Some(2.0),
+                    None,
+                    Some(4.0),
+                ])),
+            )
+            .await;
+        for sql in [
+            "SELECT SUM(value / 0.0), AVG(value / 0.0), COUNT(value / 0.0) FROM numbers",
+            "SELECT SUM(value / -0.0), AVG(value / -0.0) FROM numbers",
+            "SELECT SUM(value / (value - 1.0)), AVG(value / value), COUNT(*) FROM numbers",
+            "SELECT SUM(value / (value - 1.0)) FROM numbers WHERE id > 0",
+            "SELECT COUNT((value - value) / (value - value)) FROM numbers",
+        ] {
+            fixture.check(sql, 1).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn integer_division_errors_come_from_reduce() {
+        let fixture = Fixture::with_amounts([None, Some(i64::MIN), Some(0), Some(20)]).await;
+        for (sql, error_fragment) in [
+            ("SELECT SUM(amount / 0) FROM orders", "Divide by zero"),
+            (
+                "SELECT SUM(CAST(amount / 0 AS DOUBLE)) FROM orders",
+                "Divide by zero",
+            ),
+            (
+                "SELECT SUM(TRY_CAST(amount / 0 AS DOUBLE)) FROM orders",
+                "Divide by zero",
+            ),
+            ("SELECT SUM(id / amount) FROM orders", "Divide by zero"),
+            ("SELECT SUM(amount / -1) FROM orders", "overflow"),
+            (
+                "SELECT region, COUNT(*), SUM(id / (id - 1)) FILTER (WHERE id > 1) \
+                 FROM orders GROUP BY region",
+                "Divide by zero",
+            ),
+            (
+                "SELECT SUM(amount + id / (id - 1)) FROM orders",
+                "Divide by zero",
+            ),
+        ] {
+            let native_error = values(&fixture.native, sql).await.unwrap_err();
+            assert!(
+                native_error
+                    .to_string()
+                    .to_lowercase()
+                    .contains(&error_fragment.to_lowercase()),
+                "{sql}: {native_error}"
+            );
+            fixture.rows.paths.lock().unwrap().clear();
+            fixture.rows.reductions.lock().unwrap().clear();
+            let store_error = values(&fixture.store, sql).await.unwrap_err();
+            assert!(
+                store_error
+                    .to_string()
+                    .to_lowercase()
+                    .contains(&error_fragment.to_lowercase()),
+                "{sql}: {store_error}"
+            );
+            let paths = fixture.rows.paths.lock().unwrap();
+            assert_eq!(paths.len(), 1, "{sql}: {paths:?}");
+            assert!(paths[0].ends_with("/Reduce"), "{sql}: {paths:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn integer_division_preserves_filter_and_case_evaluation_order() {
+        let fixture = Fixture::new().await;
+        for sql in [
+            "SELECT COUNT(*), SUM(id / (id - 1)) FILTER (WHERE id > 1) FROM orders",
+            "SELECT COUNT(*), SUM(v / (v - 1)) FILTER (WHERE v > 1) FROM (SELECT id AS v FROM orders) q",
+        ] {
+            fixture.check(sql, 2).await;
+        }
+        fixture.rows.reductions.lock().unwrap().clear();
+        for sql in [
+            "SELECT SUM(id / (id - 1)) FILTER (WHERE id > 1), MIN(id / (id - 1)) FILTER (WHERE id > 1) FROM orders",
+            "SELECT SUM(v) FILTER (WHERE id > 1) FROM (SELECT id, id / (id - 1) AS v FROM orders) q",
+            "SELECT SUM(CASE WHEN id > 1 THEN v END) FROM (SELECT id, id / (id - 1) AS v FROM orders) q",
+        ] {
+            for context in [&fixture.native, &fixture.store] {
+                let error = values(context, sql).await.unwrap_err();
+                assert!(
+                    error.to_string().contains("Divide by zero"),
+                    "{sql}: {error}"
+                );
+            }
+            assert!(fixture.rows.reductions.lock().unwrap().is_empty(), "{sql}");
+        }
+        fixture
+            .check(
+                "SELECT COUNT(*), SUM(CASE WHEN id > 1 THEN id / (id - 1) END) FROM orders",
+                2,
+            )
+            .await;
+        fixture
+            .check(
+                "SELECT region, COUNT(*), SUM(CASE WHEN id > 1 THEN id / (id - 1) END) \
+                 FROM orders GROUP BY region ORDER BY region",
+                2,
+            )
+            .await;
+
+        let fixture = Fixture::with_amounts([None; 4]).await;
+        fixture
+            .check("SELECT SUM(amount / 0), COUNT(amount / 0) FROM orders", 1)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn lower_preserves_unicode_and_nulls_in_reduce() {
+        let fixture = Fixture::new().await;
+        let strings = vec![Some("İΣ"), Some("ΟΣ"), Some("Straße"), Some(""), None];
+        fixture
+            .replace_value_column(
+                DataType::Utf8,
+                strings
+                    .iter()
+                    .map(|value| {
+                        value
+                            .map(|value| CellValue::Utf8(value.to_owned()))
+                            .unwrap_or(CellValue::Null)
+                    })
+                    .collect(),
+                Arc::new(StringArray::from(strings)),
+            )
+            .await;
+        fixture
+            .check(
+                "SELECT lower(value), COUNT(*), MIN(lower(value)), MAX(lower(value)) \
+                 FROM numbers GROUP BY lower(value) ORDER BY lower(value)",
+                1,
+            )
+            .await;
+    }
+
+    #[tokio::test]
+    async fn date_trunc_preserves_day_boundaries_in_reduce() {
+        use datafusion::arrow::array::TimestampMicrosecondArray;
+
+        let fixture = Fixture::new().await;
+        let day = 86_400_000_000;
+        let timestamps = vec![
+            Some(-day - 1),
+            Some(-1),
+            Some(0),
+            Some(day - 1),
+            Some(day),
+            None,
+        ];
+        fixture
+            .replace_value_column(
+                DataType::Timestamp(TimeUnit::Microsecond, None),
+                timestamps
+                    .iter()
+                    .map(|value| value.map(CellValue::Timestamp).unwrap_or(CellValue::Null))
+                    .collect(),
+                Arc::new(TimestampMicrosecondArray::from(timestamps)),
+            )
+            .await;
+        fixture
+            .check(
+                "SELECT date_trunc('day', value), COUNT(*), MIN(date_trunc('day', value)), \
+                 MAX(date_trunc('day', value)) FROM numbers \
+                 GROUP BY date_trunc('day', value) ORDER BY date_trunc('day', value)",
+                1,
+            )
+            .await;
+    }
+
+    #[tokio::test]
+    async fn date_trunc_date_casts_preserve_units_and_fallback() {
+        use datafusion::arrow::array::{Date32Array, Date64Array};
+
+        for (data_type, rows, array) in [
+            (
+                DataType::Date32,
+                vec![
+                    CellValue::Date32(-1),
+                    CellValue::Date32(0),
+                    CellValue::Date32(1),
+                    CellValue::Null,
+                ],
+                Arc::new(Date32Array::from(vec![Some(-1), Some(0), Some(1), None])) as ArrayRef,
+            ),
+            (
+                DataType::Date64,
+                vec![
+                    CellValue::Date64(-86_400_000),
+                    CellValue::Date64(0),
+                    CellValue::Date64(86_400_000),
+                    CellValue::Null,
+                ],
+                Arc::new(Date64Array::from(vec![
+                    Some(-86_400_000),
+                    Some(0),
+                    Some(86_400_000),
+                    None,
+                ])) as ArrayRef,
+            ),
+        ] {
+            let fixture = Fixture::new().await;
+            fixture.replace_value_column(data_type, rows, array).await;
+            for expr in [
+                "date_trunc('day', value)",
+                "date_trunc('day', arrow_cast(value, 'Timestamp(Microsecond, None)'))",
+            ] {
+                let sql =
+                    format!("SELECT {expr}, COUNT(*) FROM numbers GROUP BY {expr} ORDER BY 1");
+                let expected = values(&fixture.native, &sql).await.unwrap();
+                let actual = values(&fixture.store, &sql).await.unwrap();
+                assert_eq!(actual, expected, "{sql}");
+                assert!(fixture.rows.reductions.lock().unwrap().is_empty(), "{sql}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn unsupported_casts_and_filters_preserve_results_and_errors() {
         let fixture = Fixture::with_amounts([Some(257), Some(30), None, Some(20)]).await;
         for sql in [
-            "SELECT SUM(amount / 2), COUNT(*) FROM orders",
             "SELECT SUM(TRY_CAST(amount AS TINYINT)) FROM orders",
             "SELECT COUNT(*) FROM orders WHERE TRY_CAST(status AS BIGINT) IS NULL",
             "SELECT SUM(amount) FROM orders WHERE status = 'open' AND amount % 3 = 1",
@@ -2686,7 +3048,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn float_groups_and_worker_filters_match_native_ordering() {
+    async fn float_groups_and_worker_filters_preserve_total_ordering() {
         let fixture = Fixture::new().await;
         let values = vec![
             Some(-0.0),
@@ -2719,8 +3081,296 @@ mod tests {
         }
     }
 
+    // Every input batch is one Store range, in request order. Partial states
+    // come from raw Arrow rows so the oracle is independent of the Store wire decoder.
+    async fn reference_extrema_ranges(
+        batches: Vec<RecordBatch>,
+        partial_final: bool,
+    ) -> Vec<Vec<ScalarValue>> {
+        use datafusion::datasource::memory::MemorySourceConfig;
+        use datafusion::execution::context::SessionConfig;
+        use datafusion::functions_aggregate::{
+            count::count_udaf,
+            min_max::{max_udaf, min_udaf},
+        };
+        use datafusion::physical_expr::aggregate::AggregateExprBuilder;
+        use datafusion::physical_expr::expressions::Column;
+        use datafusion::physical_expr::PhysicalExpr;
+        use datafusion::physical_plan::aggregates::{
+            AggregateExec, AggregateMode, PhysicalGroupBy,
+        };
+        use datafusion::physical_plan::{collect, ExecutionPlan};
+
+        let schema = batches[0].schema();
+        let groups = PhysicalGroupBy::new_single(vec![(
+            Arc::new(Column::new("category", 2)) as Arc<dyn PhysicalExpr>,
+            "category".to_string(),
+        )]);
+        let aggregates = [min_udaf(), max_udaf(), count_udaf()]
+            .into_iter()
+            .enumerate()
+            .map(|(index, function)| {
+                Arc::new(
+                    AggregateExprBuilder::new(function, vec![Arc::new(Column::new("value", 4))])
+                        .schema(schema.clone())
+                        .alias(format!("result_{index}"))
+                        .build()
+                        .unwrap(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let mut config = SessionConfig::new();
+        config
+            .options_mut()
+            .execution
+            .skip_partial_aggregation_probe_rows_threshold = usize::MAX;
+        let context = SessionContext::new_with_config(config).task_ctx();
+        let (mode, source, groups) = if partial_final {
+            let mut states = Vec::new();
+            let mut state_schema = None;
+            for batch in batches {
+                let source =
+                    MemorySourceConfig::try_new_exec(&[vec![batch]], schema.clone(), None).unwrap();
+                let partial = AggregateExec::try_new(
+                    AggregateMode::Partial,
+                    groups.clone(),
+                    aggregates.clone(),
+                    vec![None; aggregates.len()],
+                    source,
+                    schema.clone(),
+                )
+                .unwrap();
+                state_schema.get_or_insert_with(|| partial.schema());
+                states.extend(collect(Arc::new(partial), context.clone()).await.unwrap());
+            }
+            (
+                AggregateMode::Final,
+                MemorySourceConfig::try_new_exec(&[states], state_schema.unwrap(), None).unwrap(),
+                groups.as_final(),
+            )
+        } else {
+            (
+                AggregateMode::Single,
+                MemorySourceConfig::try_new_exec(&[batches], schema.clone(), None).unwrap(),
+                groups,
+            )
+        };
+        let aggregate =
+            AggregateExec::try_new(mode, groups, aggregates, vec![None; 3], source, schema)
+                .unwrap();
+        let batches = collect(Arc::new(aggregate), context).await.unwrap();
+        let mut rows = batch_values(&batches).unwrap();
+        rows.sort_by_key(|row| match &row[0] {
+            ScalarValue::Int64(value) => *value,
+            other => panic!("unexpected group key {other:?}"),
+        });
+        rows
+    }
+
     #[tokio::test]
-    async fn grouped_float_extrema_match_native() {
+    async fn grouped_float_aggregates_use_reduce_across_ranges() {
+        let fixture = Fixture::new().await;
+        fixture
+            .install_float_ranges(&[
+                (1, 1, Some(1), 1, Some(2.0)),
+                (1, 2, Some(1), 1, Some(4.0)),
+                (1, 3, Some(2), 0, Some(50.0)),
+                (1, 4, Some(3), 1, None),
+                (1, 5, None, 1, Some(8.0)),
+                (3, 1, Some(1), 1, Some(12.0)),
+                (3, 2, Some(2), 0, Some(70.0)),
+                (3, 3, Some(3), 1, None),
+                (3, 4, None, 0, Some(16.0)),
+                (5, 1, Some(1), 0, None),
+                (5, 2, Some(4), 1, Some(24.0)),
+                (9, 1, Some(99), 1, Some(999.0)),
+            ])
+            .await;
+
+        let aggregates = [
+            "COUNT(*)",
+            "MIN(value)",
+            "AVG(value)",
+            "COUNT(value)",
+            "MAX(value)",
+            "SUM(value)",
+        ];
+        let filtered = |flag| {
+            aggregates
+                .iter()
+                .map(|aggregate| format!("{aggregate} FILTER (WHERE flag = {flag})"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        for (name, select) in [
+            ("fused", aggregates.join(", ")),
+            ("filtered", filtered(1)),
+            ("empty_filter", filtered(99)),
+            ("interleaved", "MIN(value) FILTER (WHERE flag = 1), COUNT(*), AVG(value) FILTER (WHERE flag = 1), SUM(value), COUNT(value) FILTER (WHERE flag = 1), MAX(value)".to_string()),
+        ] {
+            let sql = format!("SELECT category, {select} FROM float_ranges WHERE bucket IN (1, 3, 5, 7) GROUP BY category ORDER BY category NULLS FIRST");
+            let expected = values(&fixture.native, &sql).await.unwrap();
+            assert_eq!(expected.len(), 5, "{name}");
+            assert!(expected.iter().all(|row| row.len() == 7), "{name}");
+            assert_eq!(expected[0][0], ScalarValue::Int64(None), "{name}");
+            assert_eq!(expected[3][0], ScalarValue::Int64(Some(3)), "{name}");
+            assert_eq!(expected[3][3], ScalarValue::Float64(None), "null-only AVG: {name}");
+            if name == "empty_filter" {
+                for row in &expected {
+                    assert_eq!(row[1], ScalarValue::Int64(Some(0)));
+                    assert_eq!(row[4], ScalarValue::Int64(Some(0)));
+                    for index in [2, 3, 5, 6] {
+                        assert_eq!(row[index], ScalarValue::Float64(None), "{name}");
+                    }
+                }
+            } else {
+                assert_eq!(expected[1][0], ScalarValue::Int64(Some(1)), "{name}");
+                assert_eq!(expected[1][3], ScalarValue::Float64(Some(6.0)), "weighted AVG: {name}");
+            }
+            if name == "filtered" {
+                assert_eq!(expected[2][0], ScalarValue::Int64(Some(2)));
+                assert_eq!(expected[2][1], ScalarValue::Int64(Some(0)));
+                assert_eq!(expected[2][3], ScalarValue::Float64(None), "filtered empty AVG");
+            }
+            fixture.check_expected(&sql, 4, &expected).await;
+            fixture.assert_range_jobs(4, 1, 11);
+            if name == "fused" {
+                assert!(fixture.rows.reductions.lock().unwrap().iter()
+                    .all(|request| request.params.reducers.len() == 7));
+            }
+        }
+
+        for grouped in [false, true] {
+            let (key, group_by) = if grouped {
+                (
+                    "category, ",
+                    " GROUP BY category ORDER BY category NULLS FIRST",
+                )
+            } else {
+                ("", "")
+            };
+            let sql = format!("SELECT {key}COUNT(*), COUNT(value), SUM(value), AVG(value), MIN(value), MAX(value) FROM float_ranges WHERE bucket IN (11, 13){group_by}");
+            let expected = values(&fixture.native, &sql).await.unwrap();
+            if grouped {
+                assert!(expected.is_empty());
+            } else {
+                assert_eq!(
+                    expected,
+                    vec![vec![
+                        ScalarValue::Int64(Some(0)),
+                        ScalarValue::Int64(Some(0)),
+                        ScalarValue::Float64(None),
+                        ScalarValue::Float64(None),
+                        ScalarValue::Float64(None),
+                        ScalarValue::Float64(None),
+                    ]]
+                );
+            }
+            fixture.check_expected(&sql, 2, &expected).await;
+            fixture.assert_range_jobs(2, 1, 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn grouped_float_extrema_preserve_partial_final_range_order() {
+        let nan_a = f64::from_bits(0x7ff8_0000_0000_0001);
+        let nan_b = f64::from_bits(0x7ff8_0000_0000_0002);
+        let negative_nan = f64::from_bits(0xfff8_0000_0000_0001);
+        let cases = [
+            ("positive_infinity", vec![Some(f64::INFINITY)], 1),
+            ("negative_infinity", vec![Some(f64::NEG_INFINITY)], 1),
+            ("negative_zero_first", vec![Some(-0.0), Some(0.0)], 1),
+            ("positive_zero_first", vec![Some(0.0), Some(-0.0)], 1),
+            ("positive_nan_first", vec![Some(nan_a), Some(1.0)], 1),
+            ("positive_nan_last", vec![Some(1.0), Some(nan_a)], 1),
+            ("negative_nan_first", vec![Some(negative_nan), Some(1.0)], 1),
+            ("negative_nan_last", vec![Some(1.0), Some(negative_nan)], 1),
+            ("payloads_forward", vec![Some(nan_a), Some(nan_b)], 1),
+            ("payloads_reverse", vec![Some(nan_b), Some(nan_a)], 1),
+            ("signs_forward", vec![Some(negative_nan), Some(nan_a)], 1),
+            ("signs_reverse", vec![Some(nan_a), Some(negative_nan)], 1),
+            (
+                "non_associative_min",
+                vec![Some(1.0), Some(nan_a), Some(2.0)],
+                1,
+            ),
+            (
+                "non_associative_max",
+                vec![Some(2.0), Some(nan_b), Some(1.0)],
+                1,
+            ),
+            ("null_only", vec![None, None], 1),
+            ("late_group", vec![Some(3.0)], 0),
+            ("null_then_finite", vec![None, Some(4.0)], 1),
+            ("finite_then_null", vec![Some(4.0), None], 1),
+        ];
+        let mut rows = Vec::new();
+        for (category, (_, values, split)) in cases.iter().enumerate() {
+            for (index, value) in values.iter().enumerate() {
+                rows.push((
+                    if index < *split { 1 } else { 3 },
+                    (category * 10 + index) as i64,
+                    Some(category as i64),
+                    1,
+                    *value,
+                ));
+            }
+        }
+        rows.sort_by_key(|row| (row.0, row.1));
+        let first_range_len = rows.iter().take_while(|row| row.0 == 1).count();
+        let fixture = Fixture::new().await;
+        let raw = fixture.install_float_ranges(&rows).await;
+        let ranges = vec![
+            raw.slice(0, 0),
+            raw.slice(0, first_range_len),
+            raw.slice(first_range_len, raw.num_rows() - first_range_len),
+            raw.slice(0, 0),
+        ];
+        let single = reference_extrema_ranges(ranges.clone(), false).await;
+        let partial_final = reference_extrema_ranges(ranges, true).await;
+        assert_eq!(partial_final.len(), cases.len());
+        for (case, column, single_value, final_value) in [
+            ("non_associative_min", 1, 2.0, 1.0),
+            ("non_associative_max", 2, 1.0, 2.0),
+        ] {
+            let index = cases.iter().position(|(name, _, _)| *name == case).unwrap();
+            assert_eq!(
+                single[index][column],
+                ScalarValue::Float64(Some(single_value)),
+                "{case}"
+            );
+            assert_eq!(
+                partial_final[index][column],
+                ScalarValue::Float64(Some(final_value)),
+                "{case}"
+            );
+        }
+
+        // Partial/Final defines the result for this range order. ScalarValue
+        // equality checks NaN payload/sign bits and signed-zero representatives.
+        fixture.check_expected(
+            "SELECT category, MIN(value), MAX(value), COUNT(value) FROM float_ranges WHERE bucket IN (0, 1, 3, 7) GROUP BY category ORDER BY category NULLS FIRST",
+            4,
+            &partial_final,
+        ).await;
+        fixture.assert_range_jobs(4, 1, rows.len());
+
+        for (index, (name, inputs, _)) in cases.iter().enumerate() {
+            assert_eq!(
+                partial_final[index][0],
+                ScalarValue::Int64(Some(index as i64)),
+                "{name}"
+            );
+            assert_eq!(
+                partial_final[index][3],
+                ScalarValue::Int64(Some(inputs.iter().flatten().count() as i64)),
+                "{name}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn grouped_float_extrema_preserve_nan_and_signed_zero_results() {
         for inputs in [
             vec![f64::INFINITY],
             vec![f64::NEG_INFINITY],
@@ -2765,11 +3415,7 @@ mod tests {
                 let sql = format!(
                 "SELECT category, {function}(value) FROM extrema WHERE flag = 1 GROUP BY category"
             );
-                let expected = values(&fixture.native, &sql).await.unwrap();
-                fixture.rows.reductions.lock().unwrap().clear();
-                let actual = values(&fixture.store, &sql).await.unwrap();
-                assert_eq!(actual, expected, "{sql}");
-                assert!(fixture.rows.reductions.lock().unwrap().is_empty());
+                fixture.check(&sql, 1).await;
             }
             fixture
                 .check(
@@ -2781,7 +3427,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fixed_binary_value_widths_preserve_native_aggregates() {
+    async fn fixed_binary_value_widths_preserve_aggregate_results() {
         let mut failures = Vec::new();
         for width in [0, 255, 256, 300] {
             let fixture = Fixture::new().await;
@@ -2809,7 +3455,7 @@ mod tests {
                 "SELECT value, COUNT(*) FROM numbers GROUP BY value ORDER BY value",
                 "SELECT COUNT(*) FROM numbers WHERE value IS NOT NULL",
             ] {
-                // Native grouping cannot materialize zero-width binary output arrays
+                // DataFusion grouping cannot materialize zero-width binary output arrays
                 if width == 0 && sql.contains("GROUP BY") {
                     continue;
                 }
@@ -2840,36 +3486,105 @@ mod tests {
         assert!(failures.is_empty(), "{}", failures.join("\n"));
     }
 
-    #[test]
-    fn count_output_uses_native_checked_conversion() {
-        let output = AggregateOutputPlan::Direct {
-            reducer_idx: 0,
-            data_type: DataType::Int64,
-        };
-        let reducers = [RangeReducerSpec {
-            op: RangeReduceOp::CountAll,
-            expr: None,
-        }];
-        for count in [0, i64::MAX as u64, i64::MAX as u64 + 1, u64::MAX] {
-            let native = ScalarValue::UInt64(Some(count)).cast_to(&DataType::Int64);
-            let actual = finalize_aggregate_output(
-                &output,
-                Some(&[RangeReduceResult {
-                    value: Some(KvReducedValue::UInt64(count)),
-                }]),
-                &reducers,
-            );
-            if count <= i64::MAX as u64 {
-                assert_eq!(actual.unwrap(), native.unwrap());
-            } else {
-                assert!(native.is_err());
-                assert!(actual.is_err());
+    #[tokio::test]
+    async fn count_output_rejects_out_of_range_values() {
+        let fixture = Fixture::new().await;
+        let plan = fixture
+            .store
+            .sql("SELECT region, COUNT(*) FROM orders GROUP BY region")
+            .await
+            .unwrap()
+            .create_physical_plan()
+            .await
+            .unwrap();
+        let mut source = None;
+        plan.apply(|node| {
+            if let Some(exec) = node.downcast_ref::<KvAggregateExec>() {
+                source = Some(exec.clone());
+            }
+            Ok(TreeNodeRecursion::Continue)
+        })
+        .unwrap();
+        let source = source.unwrap();
+        let job = &source.spec.aggregate_jobs[0];
+        for value in [
+            Some(KvReducedValue::UInt64(0)),
+            Some(KvReducedValue::UInt64(i64::MAX as u64)),
+            Some(KvReducedValue::UInt64(i64::MAX as u64 + 1)),
+            Some(KvReducedValue::UInt64(u64::MAX)),
+            None,
+            Some(KvReducedValue::Int64(1)),
+            Some(KvReducedValue::Float64(1.0)),
+        ] {
+            let response = RangeReduceResponse {
+                results: Vec::new(),
+                groups: [Some(KvReducedValue::UInt64(0)), value.clone()]
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, value)| RangeReduceGroup {
+                        group_values: vec![Some(KvReducedValue::Utf8(index.to_string()))],
+                        results: vec![RangeReduceResult { value }],
+                    })
+                    .collect(),
+            };
+            let (results, groups) = exoware_sdk::to_proto_reduce_response(response);
+            let frame = connectrpc::StreamMessage::from_message(&query::ReduceResponse {
+                results,
+                groups,
+                ..Default::default()
+            });
+            let actual = source.decode_reduce_batch(job, frame.view());
+            match value {
+                Some(KvReducedValue::UInt64(count)) => {
+                    let native = ScalarValue::UInt64(Some(count)).cast_to(&DataType::Int64);
+                    if let Ok(expected) = native {
+                        let batch = actual.unwrap();
+                        assert_eq!(batch.num_rows(), 2);
+                        assert_eq!(batch.column(1).null_count(), 0);
+                        assert_eq!(
+                            ScalarValue::try_from_array(batch.column(1), 1).unwrap(),
+                            expected
+                        );
+                    } else {
+                        assert!(
+                            actual.is_err(),
+                            "overflowing second count must fail the batch"
+                        );
+                    }
+                }
+                _ => assert!(actual.is_err(), "count must be a present UInt64"),
             }
         }
+        for malformed in ["flags", "missing_key", "extra_key", "results", "value"] {
+            let mut group: query::RangeReduceGroup = RangeReduceGroup {
+                group_values: vec![Some(KvReducedValue::Utf8("east".to_string()))],
+                results: vec![RangeReduceResult {
+                    value: Some(KvReducedValue::UInt64(1)),
+                }],
+            }
+            .into();
+            match malformed {
+                "flags" => group.group_values_present.clear(),
+                "missing_key" => group.group_values.clear(),
+                "extra_key" => group.group_values_present[0] = false,
+                "results" => group.results.clear(),
+                "value" => group.group_values[0] = Default::default(),
+                _ => unreachable!(),
+            }
+            let frame = connectrpc::StreamMessage::from_message(&query::ReduceResponse {
+                groups: vec![group],
+                ..Default::default()
+            });
+            assert!(
+                source.decode_reduce_batch(job, frame.view()).is_err(),
+                "{malformed}"
+            );
+        }
+        fixture.check("SELECT region, amount, status, COUNT(*) FROM orders GROUP BY region, amount, status ORDER BY region, amount, status", 1).await;
     }
 
     #[tokio::test]
-    async fn unsigned_and_decimal_accumulation_match_native() {
+    async fn unsigned_and_decimal_accumulation_preserves_overflow_and_empty_results() {
         let fixture = Fixture::new().await;
         fixture
             .replace_value_column(
@@ -2942,7 +3657,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn variable_text_keys_use_stored_fields_or_native_decoding() {
+    async fn variable_text_keys_support_stored_fields_and_row_decoding() {
         let fixture = Fixture::new().await;
         let provider = fixture.store.table_provider("orders").await.unwrap();
         let client = provider.downcast_ref::<KvTable>().unwrap().client.clone();
@@ -3043,8 +3758,8 @@ mod tests {
             )
             .await;
         assert_eq!(fixture.rows.scanned_rows.load(AtomicOrdering::Relaxed), 4);
-        fixture.check("SELECT region, COUNT(*), COUNT(*) FILTER (WHERE status = 'open') FROM orders GROUP BY region ORDER BY region", 2).await;
-        assert_eq!(fixture.rows.scanned_rows.load(AtomicOrdering::Relaxed), 8);
+        fixture.check("SELECT region, COUNT(*), COUNT(*) FILTER (WHERE status = 'open') FROM orders GROUP BY region ORDER BY region", 1).await;
+        assert_eq!(fixture.rows.scanned_rows.load(AtomicOrdering::Relaxed), 4);
         fixture
             .check(
                 "SELECT SUM(amount), MIN(amount), MAX(amount) FROM orders WHERE id IN (1, 4)",
@@ -3052,6 +3767,406 @@ mod tests {
             )
             .await;
         assert_eq!(fixture.rows.scanned_rows.load(AtomicOrdering::Relaxed), 2);
+    }
+
+    fn final_reduce_plan(plan: Arc<dyn ExecutionPlan>) -> Arc<dyn ExecutionPlan> {
+        let mut found = None;
+        plan.apply(|node| {
+            if let Some(aggregate) = node.downcast_ref::<AggregateExec>() {
+                if matches!(
+                    aggregate.mode(),
+                    AggregateMode::Final | AggregateMode::FinalPartitioned
+                ) && aggregate
+                    .input()
+                    .exists(|input| Ok(input.downcast_ref::<KvAggregateExec>().is_some()))?
+                {
+                    assert!(
+                        found.is_none(),
+                        "expected one Final aggregation over REDUCE"
+                    );
+                    found = Some(node.clone());
+                }
+            }
+            Ok(TreeNodeRecursion::Continue)
+        })
+        .unwrap();
+        found.expect("Final aggregation must consume the Store REDUCE source")
+    }
+
+    fn aggregate_session_with_pool(
+        fixture: &Fixture,
+        limit: usize,
+        target_partitions: usize,
+    ) -> (
+        SessionContext,
+        Arc<datafusion::execution::memory_pool::PeakRecordingPool>,
+    ) {
+        use datafusion::execution::memory_pool::{FairSpillPool, PeakRecordingPool};
+        use datafusion::execution::runtime_env::RuntimeEnvBuilder;
+        use datafusion::execution::session_state::SessionStateBuilder;
+
+        let pool = Arc::new(PeakRecordingPool::new(Arc::new(FairSpillPool::new(limit))));
+        let runtime = RuntimeEnvBuilder::new()
+            .with_memory_pool(pool.clone())
+            .build_arc()
+            .unwrap();
+        let mut state = fixture.store.state();
+        *state.config_mut() = state
+            .config()
+            .clone()
+            .with_batch_size(128)
+            .with_target_partitions(target_partitions);
+        let state = SessionStateBuilder::new_from_existing(state)
+            .with_runtime_env(runtime)
+            .build();
+        (SessionContext::new_with_state(state), pool)
+    }
+
+    #[tokio::test]
+    async fn sql_final_spills_repeated_reduce_groups_in_query_pool() {
+        use datafusion::execution::memory_pool::MemoryPool;
+
+        let fixture = Fixture::new().await;
+        let group_count = 8192usize;
+        let rows = (0..2)
+            .flat_map(|pass| {
+                (0..group_count).map(move |group| {
+                    (
+                        (pass * 32 + (group / 512) * 2 + 1) as i64,
+                        group as i64,
+                        (group != 0).then(|| format!("{group:05}-{}", "x".repeat(512))),
+                        (group != 0).then_some(if pass == 0 { 2.0 } else { 4.0 }),
+                    )
+                })
+            })
+            .collect::<Vec<_>>();
+        fixture
+            .install_indexed_table(
+                "spill_ranges",
+                vec![
+                    TableColumnConfig::new("bucket", DataType::Int64, false),
+                    TableColumnConfig::new("id", DataType::Int64, false),
+                    TableColumnConfig::new("category", DataType::Utf8, true),
+                    TableColumnConfig::new("value", DataType::Float64, true),
+                ],
+                &["bucket", "id"],
+                vec![],
+                rows.iter()
+                    .map(|(bucket, id, category, value)| KvRow {
+                        values: vec![
+                            CellValue::Int64(*bucket),
+                            CellValue::Int64(*id),
+                            category
+                                .clone()
+                                .map(CellValue::Utf8)
+                                .unwrap_or(CellValue::Null),
+                            value.map(CellValue::Float64).unwrap_or(CellValue::Null),
+                        ],
+                    })
+                    .collect(),
+                vec![
+                    Arc::new(Int64Array::from_iter_values(rows.iter().map(|row| row.0))),
+                    Arc::new(Int64Array::from_iter_values(rows.iter().map(|row| row.1))),
+                    Arc::new(StringArray::from_iter(
+                        rows.iter().map(|row| row.2.as_deref()),
+                    )),
+                    Arc::new(Float64Array::from_iter(rows.iter().map(|row| row.3))),
+                ],
+            )
+            .await;
+        let buckets = (1..64)
+            .step_by(2)
+            .map(|bucket| bucket.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!("SELECT category, COUNT(*), SUM(value), AVG(value), MIN(value), MAX(value) FROM spill_ranges WHERE bucket IN ({buckets}) GROUP BY category");
+        let expected = values(
+            &fixture.native,
+            &format!("{sql} ORDER BY category NULLS FIRST"),
+        )
+        .await
+        .unwrap();
+        let (context, pool) = aggregate_session_with_pool(&fixture, 2 * 1024 * 1024, 2);
+        let plan = context
+            .sql(&sql)
+            .await
+            .unwrap()
+            .create_physical_plan()
+            .await
+            .unwrap();
+        let final_plan = final_reduce_plan(plan.clone());
+        let mut output = plan.execute(0, context.task_ctx()).unwrap();
+        let mut actual = Vec::new();
+        while let Some(batch) = output.next().await {
+            let batch = batch.unwrap();
+            assert!(batch.num_rows() <= 128);
+            actual.extend(batch_values(&[batch]).unwrap());
+        }
+        drop(output);
+        assert!(final_plan.metrics().unwrap().spill_count().unwrap_or(0) > 0);
+        assert!(
+            pool.peak_reserved() > 0,
+            "the SQL query pool must own Final state"
+        );
+        assert_eq!(pool.reserved(), 0);
+        actual.sort_by(|left, right| left[0].partial_cmp(&right[0]).unwrap());
+        assert_eq!(actual.len(), group_count);
+        assert_eq!(expected.len(), group_count);
+        for (actual, expected) in actual.iter().zip(&expected) {
+            assert_eq!(actual, expected);
+        }
+        fixture.assert_range_jobs(32, 1, rows.len());
+        let paths = fixture.rows.paths.lock().unwrap();
+        assert_eq!(paths.len(), 32, "{paths:?}");
+        assert!(
+            paths.iter().all(|path| path.ends_with("/Reduce")),
+            "{paths:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn sql_final_cancellation_drops_current_and_prefetched_reduce_bodies() {
+        use datafusion::execution::memory_pool::MemoryPool;
+
+        type BodyReceiver =
+            futures::channel::mpsc::UnboundedReceiver<Result<Bytes, std::convert::Infallible>>;
+
+        #[derive(Clone)]
+        struct ControlledReduceTransport {
+            bodies: Arc<Mutex<BTreeMap<Vec<u8>, BodyReceiver>>>,
+            requests: Arc<Mutex<Vec<exoware_sdk::query::ReduceRequest>>>,
+        }
+
+        impl connectrpc::client::ClientTransport for ControlledReduceTransport {
+            type ResponseBody = axum::body::Body;
+            type Error = connectrpc::ConnectError;
+
+            fn send(
+                &self,
+                request: axum::http::Request<connectrpc::client::ClientBody>,
+            ) -> connectrpc::client::BoxFuture<
+                'static,
+                Result<axum::http::Response<Self::ResponseBody>, Self::Error>,
+            > {
+                let transport = self.clone();
+                Box::pin(async move {
+                    assert_eq!(request.uri().path(), "/store.query.v1.Service/Reduce");
+                    let bytes = axum::body::to_bytes(
+                        axum::body::Body::new(request.into_body()),
+                        usize::MAX,
+                    )
+                    .await
+                    .unwrap();
+                    let request = crate::tests::decode_reduce_request(&bytes);
+                    let receiver = transport
+                        .bodies
+                        .lock()
+                        .unwrap()
+                        .remove(&request.start)
+                        .expect("unexpected range or retry");
+                    transport.requests.lock().unwrap().push(request);
+                    Ok(axum::http::Response::builder()
+                        .header("content-type", "application/connect+proto")
+                        .body(axum::body::Body::from_stream(receiver))
+                        .unwrap())
+                })
+            }
+        }
+
+        let transport = ControlledReduceTransport {
+            bodies: Arc::new(Mutex::new(BTreeMap::new())),
+            requests: Arc::new(Mutex::new(Vec::new())),
+        };
+        let client = StoreClient::builder()
+            .url("http://query.test")
+            .retry_config(exoware_sdk::RetryConfig::disabled())
+            .client_transport(transport.clone())
+            .build()
+            .unwrap();
+        let fixture = Fixture::new().await;
+        crate::KvSchema::new(PrefixedStoreClient::empty(client))
+            .table(
+                "pending_ranges",
+                vec![
+                    TableColumnConfig::new("bucket", DataType::Int64, false),
+                    TableColumnConfig::new("id", DataType::Int64, false),
+                    TableColumnConfig::new("category", DataType::Int64, false),
+                ],
+                vec!["bucket".to_string(), "id".to_string()],
+                vec![],
+            )
+            .unwrap()
+            .register_all(&fixture.store)
+            .unwrap();
+        let provider = fixture
+            .store
+            .table_provider("pending_ranges")
+            .await
+            .unwrap();
+        let model = &provider.downcast_ref::<KvTable>().unwrap().model;
+        let mut senders = Vec::new();
+        for bucket in [1, 3, 5] {
+            let start = crate::codec::encode_primary_key_bound(
+                model.table_prefix,
+                &[&CellValue::Int64(bucket)],
+                model,
+                false,
+            )
+            .unwrap();
+            let (sender, receiver) = futures::channel::mpsc::unbounded();
+            transport
+                .bodies
+                .lock()
+                .unwrap()
+                .insert(start.to_vec(), receiver);
+            senders.push(sender);
+        }
+        let frame = |keys: std::ops::Range<i64>| {
+            let (results, groups) = exoware_sdk::to_proto_reduce_response(RangeReduceResponse {
+                results: vec![],
+                groups: keys
+                    .map(|key| RangeReduceGroup {
+                        group_values: vec![Some(KvReducedValue::Int64(key))],
+                        results: vec![RangeReduceResult {
+                            value: Some(KvReducedValue::UInt64(1)),
+                        }],
+                    })
+                    .collect(),
+            });
+            let response = exoware_sdk::query::ReduceResponse {
+                results,
+                groups,
+                detail: Some(exoware_sdk::query::Detail {
+                    sequence_number: 7,
+                    ..Default::default()
+                })
+                .into(),
+                ..Default::default()
+            };
+            connectrpc::envelope::Envelope::data(response.encode_to_bytes()).encode()
+        };
+        senders[0].unbounded_send(Ok(frame(0..1))).unwrap();
+        senders[0]
+            .unbounded_send(Ok(connectrpc::envelope::Envelope::end_stream(
+                Bytes::from_static(b"{}"),
+            )
+            .encode()))
+            .unwrap();
+        let sql = "SELECT category, COUNT(*) FROM pending_ranges WHERE bucket IN (1, 3, 5, 7) GROUP BY category";
+        let (context, pool) = aggregate_session_with_pool(&fixture, 4 * 1024 * 1024, 2);
+        let plan = context
+            .sql(sql)
+            .await
+            .unwrap()
+            .create_physical_plan()
+            .await
+            .unwrap();
+        final_reduce_plan(plan.clone());
+        let mut output = plan.execute(0, context.task_ctx()).unwrap();
+
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                assert!(futures::poll!(output.next()).is_pending());
+                if transport.requests.lock().unwrap().len() == 3 {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let first_peak = pool.peak_reserved();
+        assert!(
+            first_peak > 0,
+            "the seed range must reach Final aggregation before prefetch"
+        );
+        senders[1].unbounded_send(Ok(frame(1..1025))).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                assert!(futures::poll!(output.next()).is_pending());
+                if pool.peak_reserved() > first_peak {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(!senders[1].is_closed());
+        assert!(!senders[2].is_closed());
+        drop(output);
+        assert!(senders[1].is_closed(), "current range body must be dropped");
+        assert!(
+            senders[2].is_closed(),
+            "prefetched range body must be dropped"
+        );
+        assert_eq!(pool.reserved(), 0);
+        let requests = transport.requests.lock().unwrap();
+        assert_eq!(requests.len(), 3, "the fourth range must not open");
+        assert_eq!(requests[0].min_sequence_number, None);
+        assert!(requests[1..]
+            .iter()
+            .all(|request| request.min_sequence_number == Some(7)));
+    }
+
+    #[tokio::test]
+    async fn sql_final_discards_state_after_a_later_reduce_range_fails() {
+        use datafusion::execution::memory_pool::MemoryPool;
+
+        let fixture = Fixture::new().await;
+        fixture
+            .install_float_ranges(&[
+                (1, 1, Some(7), 1, Some(2.0)),
+                (3, 1, Some(7), 1, Some(4.0)),
+                (5, 1, Some(7), 1, Some(8.0)),
+            ])
+            .await;
+        *fixture
+            .rows
+            .values
+            .lock()
+            .unwrap()
+            .values_mut()
+            .nth(1)
+            .unwrap() = Bytes::from_static(b"invalid row");
+        let sql = "SELECT category, COUNT(*), SUM(value), AVG(value) FROM float_ranges WHERE bucket IN (1, 3, 5) GROUP BY category";
+        let (context, pool) = aggregate_session_with_pool(&fixture, 1024 * 1024, 1);
+        let plan = context
+            .sql(sql)
+            .await
+            .unwrap()
+            .create_physical_plan()
+            .await
+            .unwrap();
+        final_reduce_plan(plan.clone());
+        let mut output = plan.execute(0, context.task_ctx()).unwrap();
+        let error = output
+            .next()
+            .await
+            .expect("query must report the later range failure")
+            .expect_err("partial range state must not become a successful SQL result");
+        let DataFusionError::External(error) = error.find_root() else {
+            panic!("expected Store transport error, got {error}");
+        };
+        let error = error.downcast_ref::<exoware_sdk::ClientError>().unwrap();
+        assert_eq!(
+            error.rpc_code(),
+            Some(connectrpc::ErrorCode::FailedPrecondition)
+        );
+        assert!(
+            pool.peak_reserved() > 0,
+            "the first range must have reached Final aggregation"
+        );
+        assert_eq!(pool.reserved(), 0, "query state must be released on error");
+        assert!(output.next().await.is_none());
+        drop(output);
+        fixture.assert_range_jobs(2, 1, 2);
+        let paths = fixture.rows.paths.lock().unwrap();
+        assert_eq!(paths.len(), 2, "the third range must not open: {paths:?}");
+        assert!(
+            paths.iter().all(|path| path.ends_with("/Reduce")),
+            "{paths:?}"
+        );
     }
 
     #[tokio::test]
@@ -3069,6 +4184,7 @@ mod tests {
             reducers: vec![RangeReducerSpec {
                 op: RangeReduceOp::CountAll,
                 expr: Some(KvExpr::Literal(KvReducedValue::Int64(1))),
+                filter: None,
             }],
             group_by: vec![],
             filter: None,
@@ -3100,6 +4216,7 @@ mod tests {
                     kind: KvFieldKind::Int64,
                     nullable: true,
                 })),
+                filter: None,
             }],
             group_by: vec![],
             filter: None,
@@ -3192,7 +4309,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn timestamp_casts_preserve_native_values_and_reduce_identity_casts() {
+    async fn timestamp_casts_preserve_values_and_reduce_identity_casts() {
         use datafusion::arrow::array::TimestampMicrosecondArray;
 
         for source_timezone in [None, Some(Arc::<str>::from("+02:00"))] {
@@ -3230,7 +4347,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn naive_timestamp_casts_preserve_native_errors_and_nulls() {
+    async fn naive_timestamp_casts_preserve_errors_and_nulls() {
         use datafusion::arrow::array::TimestampMicrosecondArray;
         use datafusion::functions_aggregate::expr_fn::min;
         use datafusion::logical_expr::{Cast, TryCast};
@@ -3280,7 +4397,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tagged_date_trunc_preserves_native_timestamp_overflow_errors() {
+    async fn tagged_date_trunc_preserves_timestamp_overflow_errors() {
         use datafusion::arrow::array::TimestampMicrosecondArray;
         for timezone in [
             Some(Arc::<str>::from("UTC")),

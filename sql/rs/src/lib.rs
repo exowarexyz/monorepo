@@ -73,13 +73,8 @@ mod tests {
     use datafusion::physical_plan::ExecutionPlan;
     use datafusion::prelude::SessionContext;
     use exoware_sdk::keys::{Key, Prefix};
-    use exoware_sdk::kv_codec::{
-        canonicalize_reduced_group_values, decode_stored_row, encode_reduced_group_key,
-        eval_predicate, KvReducedValue, StoredRow,
-    };
-    use exoware_sdk::{
-        PrefixedStoreClient, RangeReduceOp, RangeReduceRequest, StoreBatchUpload, StoreClient,
-    };
+    use exoware_sdk::kv_codec::{decode_stored_row, KvReducedValue, StoredRow};
+    use exoware_sdk::{PrefixedStoreClient, StoreBatchUpload, StoreClient};
     use std::collections::{BTreeMap, HashSet};
     use std::ops::Bound::{Included, Unbounded};
     use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering as AtomicOrdering};
@@ -88,30 +83,23 @@ mod tests {
 
     use axum::Router;
     use bytes::Bytes;
-    use connectrpc::{
-        Chain, ConnectError, ConnectRpcService, RequestContext as Context, ServiceRequest,
-    };
+    use connectrpc::{ConnectError, ConnectRpcService, RequestContext as Context, ServiceRequest};
     use exoware_sdk::common::kv::v1::Entry as ProtoEntry;
     use exoware_sdk::connect_compression_registry;
-    use exoware_sdk::kv_codec::{eval_expr, expr_needs_value};
     use exoware_sdk::log::ingest::v1::{
         PutRequest as ProtoPutRequest, PutResponse as ProtoPutResponse, Service as IngestService,
         ServiceServer as IngestServiceServer,
     };
     use exoware_sdk::store::query::v1::{
-        GetManyEntry as ProtoGetManyEntry, GetManyFrame as ProtoGetManyFrame,
-        GetManyRequest as ProtoGetManyRequest, GetRequest as ProtoGetRequest,
-        GetResponse as ProtoGetResponse, RangeFrame as ProtoRangeFrame,
-        RangeRequest as ProtoRangeRequest, ReduceRequest as ProtoReduceRequest,
-        ReduceResponse as ProtoReduceResponse, Service as QueryService,
-        ServiceServer as QueryServiceServer,
+        GetManyFrame as ProtoGetManyFrame, GetManyRequest as ProtoGetManyRequest,
+        GetRequest as ProtoGetRequest, GetResponse as ProtoGetResponse,
+        RangeFrame as ProtoRangeFrame, RangeRequest as ProtoRangeRequest,
+        ReduceRequest as ProtoReduceRequest, ReduceResponse as ProtoReduceResponse,
+        Service as QueryService, ServiceServer as QueryServiceServer,
     };
     use exoware_sdk::RangeMode;
-    use exoware_sdk::{
-        parse_range_traversal_direction, to_domain_reduce_request, to_proto_reduce_response,
-        RangeTraversalDirection, RangeTraversalModeError,
-    };
-    use exoware_sdk::{RangeReduceGroup, RangeReduceResponse, RangeReduceResult};
+    use exoware_sdk::{parse_range_traversal_direction, RangeTraversalDirection};
+    use exoware_server::{Query, QueryExtra, QueryState, RangeScan, RangeScanBatch, Sequence};
     use futures::{stream, TryStreamExt};
     use tokio::sync::{mpsc, oneshot, Notify};
 
@@ -222,6 +210,16 @@ mod tests {
         (model, specs)
     }
 
+    pub(super) fn decode_reduce_request(body: &[u8]) -> exoware_sdk::query::ReduceRequest {
+        use buffa::Message;
+
+        let envelope = connectrpc::envelope::Envelope::decode(&mut bytes::BytesMut::from(body))
+            .unwrap()
+            .unwrap();
+        assert!(!envelope.is_compressed());
+        exoware_sdk::query::ReduceRequest::decode_from_slice(&envelope.data).unwrap()
+    }
+
     #[derive(Clone)]
     struct MockState {
         kv: Arc<Mutex<BTreeMap<Key, Bytes>>>,
@@ -230,78 +228,79 @@ mod tests {
         sequence_number: Arc<AtomicU64>,
     }
 
-    #[derive(Debug)]
-    struct MockGroupedReduceState {
-        group_values: Vec<Option<KvReducedValue>>,
-        states: Vec<PartialAggregateState>,
+    impl Sequence for MockState {
+        fn current_sequence(&self) -> u64 {
+            self.sequence_number.load(AtomicOrdering::Relaxed)
+        }
     }
 
-    type MockReduceRow = (Vec<Option<KvReducedValue>>, Vec<Option<KvReducedValue>>);
+    struct MockRangeScan(std::vec::IntoIter<(Bytes, Bytes)>);
 
-    fn extract_mock_reduce_row(
-        key: &Key,
-        value: &Bytes,
-        request: &RangeReduceRequest,
-    ) -> Option<MockReduceRow> {
-        let needs_value = request
-            .group_by
-            .iter()
-            .chain(
-                request
-                    .reducers
-                    .iter()
-                    .filter_map(|reducer| reducer.expr.as_ref()),
-            )
-            .any(expr_needs_value)
-            || request
-                .filter
-                .as_ref()
-                .is_some_and(exoware_sdk::kv_codec::predicate_needs_value);
-        let archived = if needs_value {
-            decode_stored_row(value.as_ref()).ok()
-        } else {
-            None
-        };
+    impl RangeScan for MockRangeScan {
+        async fn next_batch(&mut self, max_items: usize) -> Result<RangeScanBatch, String> {
+            Ok(RangeScanBatch {
+                rows: self.0.by_ref().take(max_items).collect(),
+                extra: QueryExtra::new(),
+            })
+        }
+    }
 
-        if let Some(filter) = &request.filter {
-            if !eval_predicate(key, archived.as_ref(), filter).ok()? {
-                return None;
-            }
+    impl Query for MockState {
+        type RangeScan = MockRangeScan;
+
+        async fn get(&self, key: Bytes) -> Result<(Option<Bytes>, QueryExtra), String> {
+            Ok((
+                self.kv.lock().unwrap().get(&key).cloned(),
+                QueryExtra::new(),
+            ))
         }
 
-        let mut group_values = Vec::with_capacity(request.group_by.len());
-        for expr in &request.group_by {
-            let extracted_value = eval_expr(key, archived.as_ref(), expr).ok()?;
-            group_values.push(extracted_value);
+        async fn get_many(
+            &self,
+            keys: Vec<Bytes>,
+        ) -> Result<(Vec<(Bytes, Option<Bytes>)>, QueryExtra), String> {
+            let values = self.kv.lock().unwrap();
+            Ok((
+                keys.into_iter()
+                    .map(|key| {
+                        let value = values.get(&key).cloned();
+                        (key, value)
+                    })
+                    .collect(),
+                QueryExtra::new(),
+            ))
         }
-        canonicalize_reduced_group_values(&mut group_values);
 
-        let mut reducer_values = Vec::with_capacity(request.reducers.len());
-        for reducer in &request.reducers {
-            let extracted_value = match (&reducer.expr, archived.as_ref()) {
-                (None, _) => None,
-                (Some(expr), _) => eval_expr(key, archived.as_ref(), expr).ok()?,
+        async fn range_scan(
+            &self,
+            start: Bytes,
+            end: Bytes,
+            limit: usize,
+            forward: bool,
+        ) -> Result<MockRangeScan, String> {
+            let values = self.kv.lock().unwrap();
+            let range = values.range((
+                Included(start),
+                if end.is_empty() {
+                    Unbounded
+                } else {
+                    Included(end)
+                },
+            ));
+            let rows = if forward {
+                range
+                    .take(limit)
+                    .map(|(key, value)| (key.clone(), value.clone()))
+                    .collect::<Vec<_>>()
+            } else {
+                range
+                    .rev()
+                    .take(limit)
+                    .map(|(key, value)| (key.clone(), value.clone()))
+                    .collect()
             };
-            reducer_values.push(extracted_value);
+            Ok(MockRangeScan(rows.into_iter()))
         }
-
-        Some((group_values, reducer_values))
-    }
-
-    #[allow(clippy::result_large_err)]
-    fn ensure_min_sequence_number(
-        token: &Arc<AtomicU64>,
-        required: Option<u64>,
-    ) -> Result<(), ConnectError> {
-        let current = token.load(AtomicOrdering::Relaxed);
-        if let Some(required) = required {
-            if current < required {
-                return Err(ConnectError::aborted(format!(
-                    "consistency_not_ready: required={required}, current={current}"
-                )));
-            }
-        }
-        Ok(())
     }
 
     fn proto_range_entries_frame(results: Vec<(Key, Vec<u8>)>) -> ProtoRangeFrame {
@@ -323,20 +322,6 @@ mod tests {
         exoware_sdk::store::query::v1::Detail {
             sequence_number,
             extra: Default::default(),
-            ..Default::default()
-        }
-    }
-
-    fn final_range_detail_frame(sequence_number: u64) -> ProtoRangeFrame {
-        ProtoRangeFrame {
-            detail: Some(query_detail(sequence_number)).into(),
-            ..Default::default()
-        }
-    }
-
-    fn final_get_many_detail_frame(sequence_number: u64) -> ProtoGetManyFrame {
-        ProtoGetManyFrame {
-            detail: Some(query_detail(sequence_number)).into(),
             ..Default::default()
         }
     }
@@ -373,322 +358,40 @@ mod tests {
         }
     }
 
-    #[derive(Clone)]
-    struct MockQueryConnect {
-        state: MockState,
-    }
-
-    impl QueryService for MockQueryConnect {
-        async fn get(
-            &self,
-            _ctx: Context,
-            request: ServiceRequest<'_, ProtoGetRequest>,
-        ) -> connectrpc::ServiceResult<ProtoGetResponse> {
-            ensure_min_sequence_number(&self.state.sequence_number, request.min_sequence_number)?;
-            let key: Key = request.bytes().slice_ref(request.key);
-            let guard = self.state.kv.lock().expect("kv mutex poisoned");
-            let value = guard.get(&key).cloned();
-            let token = self.state.sequence_number.load(AtomicOrdering::Relaxed);
-            connectrpc::Response::ok(ProtoGetResponse {
-                value,
-                detail: Some(query_detail(token)).into(),
-                ..Default::default()
-            })
+    async fn track_query_calls(
+        axum::extract::State(state): axum::extract::State<MockState>,
+        request: axum::extract::Request,
+        next: axum::middleware::Next,
+    ) -> axum::response::Response {
+        match request.uri().path().rsplit('/').next() {
+            Some("Range") => {
+                state.range_calls.fetch_add(1, AtomicOrdering::SeqCst);
+            }
+            Some("Reduce") => {
+                state
+                    .range_reduce_calls
+                    .fetch_add(1, AtomicOrdering::SeqCst);
+            }
+            _ => {}
         }
-
-        async fn range(
-            &self,
-            _ctx: Context,
-            request: ServiceRequest<'_, ProtoRangeRequest>,
-        ) -> connectrpc::ServiceResult<connectrpc::ServiceStream<ProtoRangeFrame>> {
-            ensure_min_sequence_number(&self.state.sequence_number, request.min_sequence_number)?;
-            self.state.range_calls.fetch_add(1, AtomicOrdering::SeqCst);
-
-            let wire = request.bytes();
-            let start_key: Key = wire.slice_ref(request.start);
-            let end_key: Key = wire.slice_ref(request.end);
-            let limit = request.limit.map(|v| v as usize).unwrap_or(usize::MAX);
-            let batch_size = usize::try_from(request.batch_size).unwrap_or(usize::MAX);
-            if batch_size == 0 {
-                return Err(ConnectError::invalid_argument(
-                    "invalid batch_size: expected positive integer",
-                ));
-            }
-
-            let mode = match parse_range_traversal_direction(request.mode) {
-                Ok(RangeTraversalDirection::Forward) => RangeMode::Forward,
-                Ok(RangeTraversalDirection::Reverse) => RangeMode::Reverse,
-                Err(RangeTraversalModeError::UnknownWireValue(v)) => {
-                    return Err(ConnectError::invalid_argument(format!(
-                        "unknown TraversalMode enum value {v}"
-                    )));
-                }
-            };
-
-            let state = self.state.clone();
-            let guard = state.kv.lock().expect("kv mutex poisoned");
-            // Match `StoreEngine::range_scan`: inclusive [start, end]; empty end = unbounded.
-            let range: (std::ops::Bound<&Key>, std::ops::Bound<&Key>) = (
-                Included(&start_key),
-                if end_key.is_empty() {
-                    Unbounded
-                } else {
-                    Included(&end_key)
-                },
-            );
-            let range_iter = guard.range::<Key, _>(range);
-            let iter: Box<dyn Iterator<Item = (&Key, &Bytes)> + Send> = match mode {
-                RangeMode::Forward => Box::new(range_iter),
-                RangeMode::Reverse => Box::new(range_iter.rev()),
-            };
-            let mut results: Vec<ProtoEntry> = Vec::new();
-            for (key, value) in iter.take(limit) {
-                results.push(ProtoEntry {
-                    key: key.to_vec(),
-                    value: value.clone(),
-                    ..Default::default()
-                });
-            }
-            drop(guard);
-            let token = state.sequence_number.load(AtomicOrdering::Relaxed);
-            let batch = batch_size.max(1);
-            let mut frames: Vec<Result<ProtoRangeFrame, ConnectError>> = Vec::new();
-            let mut emitted_frame = false;
-            for chunk in results.chunks(batch) {
-                frames.push(Ok(ProtoRangeFrame {
-                    results: chunk.to_vec(),
-                    detail: Some(query_detail(token)).into(),
-                    ..Default::default()
-                }));
-                emitted_frame = true;
-            }
-            if !emitted_frame {
-                frames.push(Ok(final_range_detail_frame(token)));
-            }
-            Ok(connectrpc::Response::stream(stream::iter(frames)))
-        }
-
-        async fn get_many(
-            &self,
-            _ctx: Context,
-            request: ServiceRequest<'_, ProtoGetManyRequest>,
-        ) -> connectrpc::ServiceResult<connectrpc::ServiceStream<ProtoGetManyFrame>> {
-            ensure_min_sequence_number(&self.state.sequence_number, request.min_sequence_number)?;
-            let batch_size = usize::try_from(request.batch_size)
-                .unwrap_or(usize::MAX)
-                .max(1);
-            let guard = self.state.kv.lock().expect("kv mutex poisoned");
-            let mut entries: Vec<ProtoGetManyEntry> = Vec::new();
-            let wire = request.bytes();
-            for key_bytes in request.keys.iter() {
-                let key: Key = wire.slice_ref(key_bytes);
-                let value = guard.get(&key).cloned();
-                entries.push(ProtoGetManyEntry {
-                    key: key.to_vec(),
-                    value,
-                    ..Default::default()
-                });
-            }
-            drop(guard);
-            let token = self.state.sequence_number.load(AtomicOrdering::Relaxed);
-            let mut frames: Vec<Result<ProtoGetManyFrame, ConnectError>> = Vec::new();
-            let mut emitted_frame = false;
-            for chunk in entries.chunks(batch_size) {
-                frames.push(Ok(ProtoGetManyFrame {
-                    results: chunk.to_vec(),
-                    detail: Some(query_detail(token)).into(),
-                    ..Default::default()
-                }));
-                emitted_frame = true;
-            }
-            if !emitted_frame {
-                frames.push(Ok(final_get_many_detail_frame(token)));
-            }
-            Ok(connectrpc::Response::stream(stream::iter(frames)))
-        }
-
-        async fn reduce(
-            &self,
-            _ctx: Context,
-            request: ServiceRequest<'_, ProtoReduceRequest>,
-        ) -> connectrpc::ServiceResult<connectrpc::ServiceStream<ProtoReduceResponse>> {
-            ensure_min_sequence_number(&self.state.sequence_number, request.min_sequence_number)?;
-            self.state
-                .range_reduce_calls
-                .fetch_add(1, AtomicOrdering::SeqCst);
-            let owned = request.to_owned_message();
-            let start_key: Key = owned.start.clone().into();
-            let end_key: Key = owned.end.clone().into();
-            let reduce_req = owned
-                .params
-                .as_option()
-                .ok_or_else(|| ConnectError::invalid_argument("missing range reduce params"))?;
-            let domain_request =
-                to_domain_reduce_request(reduce_req).map_err(ConnectError::invalid_argument)?;
-
-            let state = self.state.clone();
-            let guard = state.kv.lock().expect("kv mutex poisoned");
-            let mut states = domain_request.group_by.is_empty().then(|| {
-                domain_request
-                    .reducers
-                    .iter()
-                    .map(|reducer| PartialAggregateState::from_op(reducer.op))
-                    .collect::<Vec<_>>()
-            });
-            let mut grouped = BTreeMap::<Vec<u8>, MockGroupedReduceState>::new();
-
-            let range: (std::ops::Bound<&Key>, std::ops::Bound<&Key>) = (
-                Included(&start_key),
-                if end_key.is_empty() {
-                    Unbounded
-                } else {
-                    Included(&end_key)
-                },
-            );
-            for (key, value) in guard.range::<Key, _>(range) {
-                let Some((group_values, reducer_values)) =
-                    extract_mock_reduce_row(key, value, &domain_request)
-                else {
-                    continue;
-                };
-                if domain_request.group_by.is_empty() {
-                    let states = states.as_mut().expect("scalar states");
-                    for ((state, reducer), value) in states
-                        .iter_mut()
-                        .zip(domain_request.reducers.iter())
-                        .zip(reducer_values)
-                    {
-                        match reducer.op {
-                            RangeReduceOp::CountAll => state
-                                .merge_partial(reducer.op, Some(&KvReducedValue::UInt64(1)))
-                                .map_err(|e| ConnectError::internal(e.to_string()))?,
-                            RangeReduceOp::CountField => {
-                                let partial =
-                                    KvReducedValue::UInt64(if value.is_some() { 1 } else { 0 });
-                                state
-                                    .merge_partial(reducer.op, Some(&partial))
-                                    .map_err(|e| ConnectError::internal(e.to_string()))?
-                            }
-                            _ => state
-                                .merge_partial(reducer.op, value.as_ref())
-                                .map_err(|e| ConnectError::internal(e.to_string()))?,
-                        }
-                    }
-                } else {
-                    let group_key = encode_reduced_group_key(&group_values);
-                    let group =
-                        grouped
-                            .entry(group_key)
-                            .or_insert_with(|| MockGroupedReduceState {
-                                group_values: group_values.clone(),
-                                states: domain_request
-                                    .reducers
-                                    .iter()
-                                    .map(|reducer| PartialAggregateState::from_op(reducer.op))
-                                    .collect(),
-                            });
-                    for ((state, reducer), value) in group
-                        .states
-                        .iter_mut()
-                        .zip(domain_request.reducers.iter())
-                        .zip(reducer_values)
-                    {
-                        match reducer.op {
-                            RangeReduceOp::CountAll => state
-                                .merge_partial(reducer.op, Some(&KvReducedValue::UInt64(1)))
-                                .map_err(|e| ConnectError::internal(e.to_string()))?,
-                            RangeReduceOp::CountField => {
-                                let partial =
-                                    KvReducedValue::UInt64(if value.is_some() { 1 } else { 0 });
-                                state
-                                    .merge_partial(reducer.op, Some(&partial))
-                                    .map_err(|e| ConnectError::internal(e.to_string()))?
-                            }
-                            _ => state
-                                .merge_partial(reducer.op, value.as_ref())
-                                .map_err(|e| ConnectError::internal(e.to_string()))?,
-                        }
-                    }
-                }
-            }
-
-            let response = if let Some(states) = states {
-                RangeReduceResponse {
-                    results: states
-                        .iter()
-                        .map(|state| RangeReduceResult {
-                            value: match state {
-                                PartialAggregateState::Count(count) => {
-                                    Some(KvReducedValue::UInt64(*count))
-                                }
-                                PartialAggregateState::Sum(value)
-                                | PartialAggregateState::Min(value)
-                                | PartialAggregateState::Max(value) => value.clone(),
-                            },
-                        })
-                        .collect(),
-                    groups: Vec::new(),
-                }
-            } else {
-                RangeReduceResponse {
-                    results: Vec::new(),
-                    groups: grouped
-                        .into_values()
-                        .map(|group| RangeReduceGroup {
-                            group_values: group.group_values,
-                            results: group
-                                .states
-                                .into_iter()
-                                .map(|state| RangeReduceResult {
-                                    value: match state {
-                                        PartialAggregateState::Count(count) => {
-                                            Some(KvReducedValue::UInt64(count))
-                                        }
-                                        PartialAggregateState::Sum(value)
-                                        | PartialAggregateState::Min(value)
-                                        | PartialAggregateState::Max(value) => value,
-                                    },
-                                })
-                                .collect(),
-                        })
-                        .collect(),
-                }
-            };
-            drop(guard);
-            let token = state.sequence_number.load(AtomicOrdering::Relaxed);
-            let (results, groups) = to_proto_reduce_response(response);
-            let frames = if groups.is_empty() {
-                vec![Ok(ProtoReduceResponse {
-                    results,
-                    detail: Some(query_detail(token)).into(),
-                    ..Default::default()
-                })]
-            } else {
-                // Small frames exercise cross-frame grouping in the existing aggregate fixtures
-                groups
-                    .chunks(2)
-                    .map(|groups| {
-                        Ok(ProtoReduceResponse {
-                            groups: groups.to_vec(),
-                            detail: Some(query_detail(token)).into(),
-                            ..Default::default()
-                        })
-                    })
-                    .collect()
-            };
-            Ok(connectrpc::Response::stream(stream::iter(frames)))
-        }
+        next.run(request).await
     }
 
     async fn spawn_mock_server(state: MockState) -> (String, oneshot::Sender<()>) {
-        let connect = ConnectRpcService::new(Chain(
-            IngestServiceServer::new(MockIngestConnect {
-                state: state.clone(),
-            }),
-            QueryServiceServer::new(MockQueryConnect { state }),
-        ))
+        let connect = ConnectRpcService::new(IngestServiceServer::new(MockIngestConnect {
+            state: state.clone(),
+        }))
         .with_compression(connect_compression_registry());
-        let app = Router::new().fallback_service(connect);
+        let app = Router::new()
+            .route_service(
+                "/store.query.v1.Service/{method}",
+                exoware_server::query_service(QueryState::new(Arc::new(state.clone()))),
+            )
+            .fallback_service(connect)
+            .layer(axum::middleware::from_fn_with_state(
+                state,
+                track_query_calls,
+            ));
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
@@ -2332,49 +2035,15 @@ mod tests {
         let mut min: Option<i128> = None;
         let mut max: Option<i128> = None;
         let mut contradiction = false;
-        apply_decimal128_constraint(&mut min, &mut max, Operator::GtEq, 100, &mut contradiction);
+        apply_integral_constraint(&mut min, &mut max, Operator::GtEq, 100, &mut contradiction);
         assert!(!contradiction);
-        apply_decimal128_constraint(&mut min, &mut max, Operator::LtEq, 200, &mut contradiction);
+        apply_integral_constraint(&mut min, &mut max, Operator::LtEq, 200, &mut contradiction);
         assert!(!contradiction);
         assert_eq!(min, Some(100));
         assert_eq!(max, Some(200));
         assert!(in_i128_bounds(150, min, max));
         assert!(!in_i128_bounds(99, min, max));
         assert!(!in_i128_bounds(201, min, max));
-    }
-
-    #[test]
-    fn decimal256_gt_max_is_contradiction() {
-        let mut min: Option<i256> = None;
-        let mut max: Option<i256> = None;
-        let mut contradiction = false;
-        apply_i256_constraint(
-            &mut min,
-            &mut max,
-            Operator::Gt,
-            i256::MAX,
-            &mut contradiction,
-        );
-        assert!(contradiction);
-        assert_eq!(min, None);
-        assert_eq!(max, None);
-    }
-
-    #[test]
-    fn decimal256_lt_min_is_contradiction() {
-        let mut min: Option<i256> = None;
-        let mut max: Option<i256> = None;
-        let mut contradiction = false;
-        apply_i256_constraint(
-            &mut min,
-            &mut max,
-            Operator::Lt,
-            i256::MIN,
-            &mut contradiction,
-        );
-        assert!(contradiction);
-        assert_eq!(min, None);
-        assert_eq!(max, None);
     }
 
     #[test]
@@ -7193,7 +6862,7 @@ mod tests {
     }
 
     #[test]
-    fn kv_scan_native_sort_pushdown_preserves_limit() {
+    fn kv_scan_sort_pushdown_preserves_limit() {
         use datafusion::arrow::compute::SortOptions;
         use datafusion::physical_expr::expressions::Column;
         use datafusion::physical_expr::{LexOrdering, PhysicalSortExpr};
@@ -7222,10 +6891,10 @@ mod tests {
 
         let optimized = PushdownSort::new()
             .optimize(sorted, &ConfigOptions::new())
-            .expect("native sort pushdown");
+            .expect("sort pushdown");
         let scan = optimized
             .downcast_ref::<KvScanExec>()
-            .expect("native sort pushdown should eliminate the sort");
+            .expect("sort pushdown should eliminate the sort");
         assert_eq!(scan.fetch(), Some(1));
         assert_eq!(scan.scan_direction(), RangeMode::Reverse);
     }
@@ -7582,7 +7251,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn kv_topk_sort_pushdown_with_native_scan_predicate() {
+    async fn kv_topk_sort_pushdown_with_scan_predicate() {
         let state = MockState {
             kv: Arc::new(Mutex::new(BTreeMap::new())),
             range_calls: Arc::new(AtomicUsize::new(0)),
@@ -7848,7 +7517,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn kv_scan_native_sort_pushdown_preserves_nested_limits() {
+    async fn kv_scan_sort_pushdown_preserves_nested_limits() {
         use datafusion::physical_optimizer::pushdown_sort::PushdownSort;
 
         let state = MockState {
@@ -7929,7 +7598,7 @@ mod tests {
             // Reapplying sort pushdown must preserve the rows selected by the inner limit.
             let plan = PushdownSort::new()
                 .optimize(plan, &ConfigOptions::new())
-                .expect("native sort pushdown");
+                .expect("sort pushdown");
             let batches = datafusion::physical_plan::collect(plan, ctx.task_ctx())
                 .await
                 .expect("collect");
@@ -10008,9 +9677,10 @@ mod tests {
         );
 
         assert_eq!(state.range_calls.load(AtomicOrdering::SeqCst), 0);
-        assert!(
-            state.range_reduce_calls.load(AtomicOrdering::SeqCst) >= 3,
-            "filtered group-by aggregate should use grouped reduction plus seed job"
+        assert_eq!(
+            state.range_reduce_calls.load(AtomicOrdering::SeqCst),
+            1,
+            "aggregate filters should share one grouped reduction"
         );
 
         let _ = shutdown_tx.send(());

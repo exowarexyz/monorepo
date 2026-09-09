@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use datafusion::arrow::array::ArrowNativeTypeOp;
 use datafusion::arrow::datatypes::i256;
 use datafusion::common::{DataFusionError, Result as DataFusionResult, ScalarValue};
 use datafusion::logical_expr::{utils::iter_conjunction, Expr, Operator};
@@ -485,7 +486,7 @@ impl QueryPredicate {
                         return;
                     }
                 };
-                apply_int_constraint(&mut min, &mut max, op, value, &mut self.contradiction);
+                apply_integral_constraint(&mut min, &mut max, op, value, &mut self.contradiction);
                 self.constraints
                     .insert(col_idx, PredicateConstraint::IntRange { min, max });
             }
@@ -521,7 +522,7 @@ impl QueryPredicate {
                         return;
                     }
                 };
-                apply_int_constraint(&mut min, &mut max, op, value, &mut self.contradiction);
+                apply_integral_constraint(&mut min, &mut max, op, value, &mut self.contradiction);
                 self.constraints
                     .insert(col_idx, PredicateConstraint::IntRange { min, max });
             }
@@ -538,7 +539,7 @@ impl QueryPredicate {
                         return;
                     }
                 };
-                apply_int_constraint(&mut min, &mut max, op, value, &mut self.contradiction);
+                apply_integral_constraint(&mut min, &mut max, op, value, &mut self.contradiction);
                 self.constraints
                     .insert(col_idx, PredicateConstraint::IntRange { min, max });
             }
@@ -555,7 +556,7 @@ impl QueryPredicate {
                         return;
                     }
                 };
-                apply_int_constraint(&mut min, &mut max, op, value, &mut self.contradiction);
+                apply_integral_constraint(&mut min, &mut max, op, value, &mut self.contradiction);
                 self.constraints
                     .insert(col_idx, PredicateConstraint::IntRange { min, max });
             }
@@ -572,7 +573,7 @@ impl QueryPredicate {
                         return;
                     }
                 };
-                apply_decimal128_constraint(&mut min, &mut max, op, value, &mut self.contradiction);
+                apply_integral_constraint(&mut min, &mut max, op, value, &mut self.contradiction);
                 self.constraints
                     .insert(col_idx, PredicateConstraint::Decimal128Range { min, max });
             }
@@ -598,7 +599,7 @@ impl QueryPredicate {
                         return;
                     }
                 };
-                apply_u64_constraint(&mut min, &mut max, op, value, &mut self.contradiction);
+                apply_integral_constraint(&mut min, &mut max, op, value, &mut self.contradiction);
                 self.constraints
                     .insert(col_idx, PredicateConstraint::UInt64Range { min, max });
             }
@@ -646,7 +647,7 @@ impl QueryPredicate {
                         return;
                     }
                 };
-                apply_i256_constraint(&mut min, &mut max, op, value, &mut self.contradiction);
+                apply_integral_constraint(&mut min, &mut max, op, value, &mut self.contradiction);
                 self.constraints
                     .insert(col_idx, PredicateConstraint::Decimal256Range { min, max });
             }
@@ -1961,60 +1962,18 @@ fn ord_satisfies_op<T: Ord>(value: T, op: Operator, literal: T) -> bool {
     }
 }
 
-pub(crate) fn apply_int_constraint(
-    min: &mut Option<i64>,
-    max: &mut Option<i64>,
+pub(crate) fn apply_integral_constraint<T: ArrowNativeTypeOp + Ord>(
+    min: &mut Option<T>,
+    max: &mut Option<T>,
     op: Operator,
-    value: i64,
+    value: T,
     contradiction: &mut bool,
 ) {
     let (new_min, new_max) = match op {
         Operator::Eq => (Some(value), Some(value)),
-        Operator::Gt => (value.checked_add(1), None),
+        Operator::Gt => (value.add_checked(T::ONE).ok(), None),
         Operator::GtEq => (Some(value), None),
-        Operator::Lt => (None, value.checked_sub(1)),
-        Operator::LtEq => (None, Some(value)),
-        _ => return,
-    };
-
-    if (matches!(op, Operator::Gt) && new_min.is_none())
-        || (matches!(op, Operator::Lt) && new_max.is_none())
-    {
-        *contradiction = true;
-        return;
-    }
-
-    if let Some(new_min) = new_min {
-        *min = Some(match *min {
-            Some(existing) => existing.max(new_min),
-            None => new_min,
-        });
-    }
-    if let Some(new_max) = new_max {
-        *max = Some(match *max {
-            Some(existing) => existing.min(new_max),
-            None => new_max,
-        });
-    }
-    if let (Some(min), Some(max)) = (*min, *max) {
-        if min > max {
-            *contradiction = true;
-        }
-    }
-}
-
-pub(crate) fn apply_u64_constraint(
-    min: &mut Option<u64>,
-    max: &mut Option<u64>,
-    op: Operator,
-    value: u64,
-    contradiction: &mut bool,
-) {
-    let (new_min, new_max) = match op {
-        Operator::Eq => (Some(value), Some(value)),
-        Operator::Gt => (value.checked_add(1), None),
-        Operator::GtEq => (Some(value), None),
-        Operator::Lt => (None, value.checked_sub(1)),
+        Operator::Lt => (None, value.sub_checked(T::ONE).ok()),
         Operator::LtEq => (None, Some(value)),
         _ => return,
     };
@@ -2116,96 +2075,6 @@ pub(crate) fn in_i128_bounds(value: i128, min: Option<i128>, max: Option<i128>) 
         }
     }
     true
-}
-
-pub(crate) fn apply_decimal128_constraint(
-    min: &mut Option<i128>,
-    max: &mut Option<i128>,
-    op: Operator,
-    value: i128,
-    contradiction: &mut bool,
-) {
-    let (new_min, new_max) = match op {
-        Operator::Eq => (Some(value), Some(value)),
-        Operator::Gt => (value.checked_add(1), None),
-        Operator::GtEq => (Some(value), None),
-        Operator::Lt => (None, value.checked_sub(1)),
-        Operator::LtEq => (None, Some(value)),
-        _ => return,
-    };
-
-    if (matches!(op, Operator::Gt) && new_min.is_none())
-        || (matches!(op, Operator::Lt) && new_max.is_none())
-    {
-        *contradiction = true;
-        return;
-    }
-
-    if let Some(new_min) = new_min {
-        *min = Some(match *min {
-            Some(existing) => existing.max(new_min),
-            None => new_min,
-        });
-    }
-    if let Some(new_max) = new_max {
-        *max = Some(match *max {
-            Some(existing) => existing.min(new_max),
-            None => new_max,
-        });
-    }
-    if let (Some(min), Some(max)) = (*min, *max) {
-        if min > max {
-            *contradiction = true;
-        }
-    }
-}
-
-pub(crate) fn apply_i256_constraint(
-    min: &mut Option<i256>,
-    max: &mut Option<i256>,
-    op: Operator,
-    value: i256,
-    contradiction: &mut bool,
-) {
-    let one = i256::from(1i64);
-    let (new_min, new_max) = match op {
-        Operator::Eq => (Some(value), Some(value)),
-        Operator::Gt => {
-            if value == i256::MAX {
-                *contradiction = true;
-                return;
-            }
-            (Some(value + one), None)
-        }
-        Operator::GtEq => (Some(value), None),
-        Operator::Lt => {
-            if value == i256::MIN {
-                *contradiction = true;
-                return;
-            }
-            (None, Some(value - one))
-        }
-        Operator::LtEq => (None, Some(value)),
-        _ => return,
-    };
-
-    if let Some(new_min) = new_min {
-        *min = Some(match *min {
-            Some(existing) if existing > new_min => existing,
-            _ => new_min,
-        });
-    }
-    if let Some(new_max) = new_max {
-        *max = Some(match *max {
-            Some(existing) if existing < new_max => existing,
-            _ => new_max,
-        });
-    }
-    if let (Some(mn), Some(mx)) = (*min, *max) {
-        if mn > mx {
-            *contradiction = true;
-        }
-    }
 }
 
 pub(crate) fn extract_or_in_column(
@@ -2378,5 +2247,57 @@ pub(crate) fn scalar_to_i256(value: &ScalarValue) -> Option<i256> {
     match value {
         ScalarValue::Decimal256(Some(v), _, _) => Some(*v),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn integral_constraints_preserve_extreme_values() {
+        fn check<T: ArrowNativeTypeOp + Ord>(lowest: T, highest: T) {
+            for (op, value, expected_min, expected_max, empty) in [
+                (Operator::Gt, highest, None, None, true),
+                (Operator::Lt, lowest, None, None, true),
+                (Operator::Eq, lowest, Some(lowest), Some(lowest), false),
+                (Operator::Eq, highest, Some(highest), Some(highest), false),
+                (Operator::GtEq, highest, Some(highest), None, false),
+                (Operator::LtEq, lowest, None, Some(lowest), false),
+            ] {
+                let (mut min, mut max, mut contradiction) = (None, None, false);
+                apply_integral_constraint(&mut min, &mut max, op, value, &mut contradiction);
+                assert_eq!(
+                    (min, max, contradiction),
+                    (expected_min, expected_max, empty)
+                );
+            }
+
+            let (mut min, mut max, mut contradiction) = (Some(lowest), Some(highest), false);
+            apply_integral_constraint(
+                &mut min,
+                &mut max,
+                Operator::GtEq,
+                highest,
+                &mut contradiction,
+            );
+            assert_eq!(
+                (min, max, contradiction),
+                (Some(highest), Some(highest), false)
+            );
+            apply_integral_constraint(
+                &mut min,
+                &mut max,
+                Operator::LtEq,
+                lowest,
+                &mut contradiction,
+            );
+            assert!(contradiction);
+        }
+
+        check(i64::MIN, i64::MAX);
+        check(u64::MIN, u64::MAX);
+        check(i128::MIN, i128::MAX);
+        check(i256::MIN, i256::MAX);
     }
 }

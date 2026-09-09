@@ -785,11 +785,11 @@ impl PrefixedStoreClient {
     }
 }
 
-/// Extract exactly one scalar response and consume the stream's final status.
-async fn scalar_reduce_results(
+/// Returns the sole scalar frame after validating its shape and consuming the final status.
+pub async fn scalar_reduce_response(
     mut stream: ReduceStream,
     request: &DomainRangeReduceRequest,
-) -> Result<Vec<Option<KvReducedValue>>, ClientError> {
+) -> Result<connectrpc::StreamMessage<proto_query::ReduceResponse>, ClientError> {
     if !request.group_by.is_empty() {
         return Err(ClientError::WireFormat(
             "grouped reductions require range_reduce_stream".to_string(),
@@ -809,7 +809,16 @@ async fn scalar_reduce_results(
             "scalar reduction returned more than one frame".to_string(),
         ));
     }
-    let decoded = proto_to_domain_reduce_response(view).map_err(ClientError::WireFormat)?;
+    Ok(response)
+}
+
+async fn scalar_reduce_results(
+    stream: ReduceStream,
+    request: &DomainRangeReduceRequest,
+) -> Result<Vec<Option<KvReducedValue>>, ClientError> {
+    let response = scalar_reduce_response(stream, request).await?;
+    let decoded =
+        proto_to_domain_reduce_response(response.view()).map_err(ClientError::WireFormat)?;
     Ok(decoded
         .results
         .into_iter()
@@ -2294,7 +2303,12 @@ fn shift_reduce_request_key_offsets(
     for expr in &mut request.group_by {
         shift_expr_key_offsets(shift_bytes, shift_bits, expr)?;
     }
-    if let Some(filter) = &mut request.filter {
+    for filter in request.filter.iter_mut().chain(
+        request
+            .reducers
+            .iter_mut()
+            .filter_map(|reducer| reducer.filter.as_mut()),
+    ) {
         for check in &mut filter.checks {
             shift_field_ref_key_offset(shift_bytes, shift_bits, &mut check.field)?;
         }
@@ -2317,7 +2331,7 @@ fn shift_expr_key_offsets(
             shift_expr_key_offsets(shift_bytes, shift_bits, left)?;
             shift_expr_key_offsets(shift_bytes, shift_bits, right)
         }
-        KvExpr::Lower(inner) | KvExpr::DateTruncDay(inner) => {
+        KvExpr::Lower(inner) | KvExpr::DateTruncDay(inner) | KvExpr::CastFloat64(inner) => {
             shift_expr_key_offsets(shift_bytes, shift_bits, inner)
         }
     }
@@ -3149,6 +3163,7 @@ mod tests {
     fn count_request() -> DomainRangeReduceRequest {
         DomainRangeReduceRequest {
             reducers: vec![RangeReducerSpec {
+                filter: None,
                 op: RangeReduceOp::CountAll,
                 expr: None,
             }],
@@ -3930,6 +3945,49 @@ mod tests {
     }
 
     #[test]
+    fn prefixed_reduce_request_shifts_nested_cast_fields() {
+        let client = StoreClient::builder()
+            .url("http://localhost:10000")
+            .build()
+            .unwrap()
+            .prefixed(StoreKeyPrefix::new(vec![1, 2, 3]).unwrap());
+        let request_at = |byte_offset, bit_offset| DomainRangeReduceRequest {
+            reducers: vec![crate::RangeReducerSpec {
+                op: crate::RangeReduceOp::SumField,
+                expr: Some(KvExpr::CastFloat64(Box::new(KvExpr::Add(
+                    Box::new(KvExpr::Field(KvFieldRef::Key {
+                        byte_offset,
+                        kind: KvFieldKind::Int64,
+                    })),
+                    Box::new(KvExpr::CastFloat64(Box::new(KvExpr::Field(
+                        KvFieldRef::Value {
+                            index: 2,
+                            kind: KvFieldKind::UInt64,
+                            nullable: true,
+                        },
+                    )))),
+                )))),
+                filter: None,
+            }],
+            group_by: vec![KvExpr::CastFloat64(Box::new(KvExpr::Field(
+                KvFieldRef::ZOrderKey {
+                    bit_offset,
+                    field_position: 0,
+                    field_widths: vec![8],
+                    kind: KvFieldKind::UInt64,
+                },
+            )))],
+            filter: None,
+        };
+        let request = request_at(9, 12);
+        assert_eq!(
+            client.prefix_reduce_request(&request).unwrap(),
+            request_at(12, 36)
+        );
+        assert_eq!(request, request_at(9, 12));
+    }
+
+    #[test]
     fn prefixed_reduce_request_shifts_key_field_offsets() {
         let client = StoreClient::builder()
             .url("http://localhost:10000")
@@ -3938,6 +3996,35 @@ mod tests {
             .prefixed(StoreKeyPrefix::new(vec![0x01, 0x02, 0x03]).unwrap());
         let request = DomainRangeReduceRequest {
             reducers: vec![crate::RangeReducerSpec {
+                filter: Some(KvPredicate {
+                    checks: vec![
+                        KvPredicateCheck {
+                            field: KvFieldRef::Key {
+                                byte_offset: 9,
+                                kind: KvFieldKind::UInt64,
+                            },
+                            constraint: KvPredicateConstraint::IsNotNull,
+                        },
+                        KvPredicateCheck {
+                            field: KvFieldRef::ZOrderKey {
+                                bit_offset: 12,
+                                field_position: 0,
+                                field_widths: vec![8],
+                                kind: KvFieldKind::UInt64,
+                            },
+                            constraint: KvPredicateConstraint::IsNotNull,
+                        },
+                        KvPredicateCheck {
+                            field: KvFieldRef::Value {
+                                index: 2,
+                                kind: KvFieldKind::UInt64,
+                                nullable: true,
+                            },
+                            constraint: KvPredicateConstraint::IsNotNull,
+                        },
+                    ],
+                    contradiction: false,
+                }),
                 op: crate::RangeReduceOp::SumField,
                 expr: Some(KvExpr::Field(KvFieldRef::Key {
                     byte_offset: 9,
@@ -3981,6 +4068,33 @@ mod tests {
         // Z-order offsets stay bit-granular: a 3-byte prefix shifts by 3*8 = 24
         // bits, so 12 -> 36.
         assert_eq!(*bit_offset, 36);
+        let checks = &shifted.reducers[0].filter.as_ref().unwrap().checks;
+        assert_eq!(
+            checks[0].field,
+            KvFieldRef::Key {
+                byte_offset: 12,
+                kind: KvFieldKind::UInt64,
+            }
+        );
+        assert_eq!(
+            checks[1].field,
+            KvFieldRef::ZOrderKey {
+                bit_offset: 36,
+                field_position: 0,
+                field_widths: vec![8],
+                kind: KvFieldKind::UInt64,
+            }
+        );
+        let original_checks = &request.reducers[0].filter.as_ref().unwrap().checks;
+        assert_eq!(checks[2], original_checks[2]);
+        assert_eq!(shifted.filter, request.filter);
+        assert_eq!(
+            original_checks[0].field,
+            KvFieldRef::Key {
+                byte_offset: 9,
+                kind: KvFieldKind::UInt64,
+            }
+        );
     }
 
     #[test]

@@ -138,6 +138,7 @@ pub enum RangeReduceOp {
 pub struct RangeReducerSpec {
     pub op: RangeReduceOp,
     pub expr: Option<KvExpr>,
+    pub filter: Option<KvPredicate>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -348,6 +349,9 @@ fn to_proto_expr(expr: KvExpr) -> query::KvExpr {
         KvExpr::DateTruncDay(inner) => {
             query::kv_expr::Expr::DateTruncDay(Box::new(to_proto_expr(*inner)))
         }
+        KvExpr::CastFloat64(inner) => {
+            query::kv_expr::Expr::CastFloat64(Box::new(to_proto_expr(*inner)))
+        }
     };
     query::KvExpr {
         expr: Some(expr),
@@ -398,6 +402,9 @@ fn to_domain_expr(expr: &query::KvExpr) -> Result<KvExpr, String> {
         }
         Some(query::kv_expr::Expr::DateTruncDay(inner)) => {
             Ok(KvExpr::DateTruncDay(Box::new(to_domain_expr(inner)?)))
+        }
+        Some(query::kv_expr::Expr::CastFloat64(inner)) => {
+            Ok(KvExpr::CastFloat64(Box::new(to_domain_expr(inner)?)))
         }
         None => Err("missing expr".to_string()),
     }
@@ -698,6 +705,22 @@ fn to_domain_predicate_constraint(
     }
 }
 
+fn to_proto_predicate(predicate: KvPredicate) -> query::KvPredicate {
+    query::KvPredicate {
+        checks: predicate
+            .checks
+            .into_iter()
+            .map(|check| query::KvPredicateCheck {
+                field: Some(to_proto_field_ref(check.field)).into(),
+                constraint: Some(to_proto_predicate_constraint(check.constraint)).into(),
+                ..Default::default()
+            })
+            .collect(),
+        contradiction: predicate.contradiction,
+        ..Default::default()
+    }
+}
+
 pub fn to_proto_reduce_params(request: RangeReduceRequest) -> query::ReduceParams {
     query::ReduceParams {
         reducers: request
@@ -713,28 +736,37 @@ pub fn to_proto_reduce_params(request: RangeReduceRequest) -> query::ReduceParam
                 }
                 .into(),
                 expr: reducer.expr.map(to_proto_expr).into(),
+                filter: reducer.filter.map(to_proto_predicate).into(),
                 ..Default::default()
             })
             .collect(),
         group_by: request.group_by.into_iter().map(to_proto_expr).collect(),
-        filter: request
-            .filter
-            .map(|predicate| query::KvPredicate {
-                checks: predicate
-                    .checks
-                    .into_iter()
-                    .map(|check| query::KvPredicateCheck {
-                        field: Some(to_proto_field_ref(check.field)).into(),
-                        constraint: Some(to_proto_predicate_constraint(check.constraint)).into(),
-                        ..Default::default()
-                    })
-                    .collect(),
-                contradiction: predicate.contradiction,
-                ..Default::default()
-            })
-            .into(),
+        filter: request.filter.map(to_proto_predicate).into(),
         ..Default::default()
     }
+}
+
+fn to_domain_predicate(predicate: &query::KvPredicate) -> Result<KvPredicate, String> {
+    Ok(KvPredicate {
+        checks: predicate
+            .checks
+            .iter()
+            .map(|check| {
+                Ok(KvPredicateCheck {
+                    field: to_domain_field_ref(
+                        check.field.as_option().ok_or("missing predicate field")?,
+                    )?,
+                    constraint: to_domain_predicate_constraint(
+                        check
+                            .constraint
+                            .as_option()
+                            .ok_or("missing predicate constraint")?,
+                    )?,
+                })
+            })
+            .collect::<Result<Vec<_>, String>>()?,
+        contradiction: predicate.contradiction,
+    })
 }
 
 pub fn to_domain_reduce_request(
@@ -766,6 +798,11 @@ pub fn to_domain_reduce_request(
                 Ok(RangeReducerSpec {
                     op,
                     expr: reducer.expr.as_option().map(to_domain_expr).transpose()?,
+                    filter: reducer
+                        .filter
+                        .as_option()
+                        .map(to_domain_predicate)
+                        .transpose()?,
                 })
             })
             .collect::<Result<Vec<_>, String>>()?,
@@ -777,33 +814,13 @@ pub fn to_domain_reduce_request(
         filter: request
             .filter
             .as_option()
-            .map(|predicate| {
-                Ok::<KvPredicate, String>(KvPredicate {
-                    checks: predicate
-                        .checks
-                        .iter()
-                        .map(|check| {
-                            Ok(KvPredicateCheck {
-                                field: to_domain_field_ref(
-                                    check.field.as_option().ok_or("missing predicate field")?,
-                                )?,
-                                constraint: to_domain_predicate_constraint(
-                                    check
-                                        .constraint
-                                        .as_option()
-                                        .ok_or("missing predicate constraint")?,
-                                )?,
-                            })
-                        })
-                        .collect::<Result<Vec<_>, String>>()?,
-                    contradiction: predicate.contradiction,
-                })
-            })
+            .map(to_domain_predicate)
             .transpose()?,
     })
 }
 
-fn to_domain_reduced_value_from_view(
+/// Decodes a borrowed wire scalar, rejecting missing values and malformed decimal widths.
+pub fn to_domain_reduced_value_from_view(
     value: &query::KvReducedValueView<'_>,
 ) -> Result<KvReducedValue, String> {
     match value.value.as_ref() {
@@ -886,6 +903,9 @@ fn to_domain_expr_from_view(expr: &query::KvExprView<'_>) -> Result<KvExpr, Stri
             to_domain_expr_from_view(inner.as_ref())?,
         ))),
         Some(query::kv_expr::ExprView::DateTruncDay(inner)) => Ok(KvExpr::DateTruncDay(Box::new(
+            to_domain_expr_from_view(inner.as_ref())?,
+        ))),
+        Some(query::kv_expr::ExprView::CastFloat64(inner)) => Ok(KvExpr::CastFloat64(Box::new(
             to_domain_expr_from_view(inner.as_ref())?,
         ))),
         None => Err("missing expr".to_string()),
@@ -1091,6 +1111,11 @@ pub fn to_domain_reduce_request_from_view(
                         .as_option()
                         .map(to_domain_expr_from_view)
                         .transpose()?,
+                    filter: reducer
+                        .filter
+                        .as_option()
+                        .map(to_domain_predicate_from_view)
+                        .transpose()?,
                 })
             })
             .collect::<Result<Vec<_>, String>>()?,
@@ -1169,6 +1194,104 @@ mod reduce_params_view_tests {
     use buffa::MessageView as _;
 
     use super::*;
+
+    #[test]
+    fn cast_float64_round_trips_through_owned_and_borrowed_expressions() {
+        let expr = KvExpr::CastFloat64(Box::new(KvExpr::Add(
+            Box::new(KvExpr::Field(KvFieldRef::Value {
+                index: 2,
+                kind: KvFieldKind::Int64,
+                nullable: true,
+            })),
+            Box::new(KvExpr::CastFloat64(Box::new(KvExpr::Literal(
+                KvReducedValue::UInt64(7),
+            )))),
+        )));
+        let proto = to_proto_expr(expr.clone());
+        assert_eq!(to_domain_expr(&proto).unwrap(), expr);
+        let encoded = proto.encode_to_vec();
+        let view = query::KvExprView::decode_view(&encoded).unwrap();
+        assert_eq!(to_domain_expr_from_view(&view).unwrap(), expr);
+    }
+
+    #[test]
+    fn cast_float64_rejects_missing_child_expression() {
+        let proto = query::KvExpr {
+            expr: Some(query::kv_expr::Expr::CastFloat64(Box::default())),
+            ..Default::default()
+        };
+        assert_eq!(to_domain_expr(&proto).unwrap_err(), "missing expr");
+        let encoded = proto.encode_to_vec();
+        assert_eq!(encoded, [0x4a, 0x00]);
+        let view = query::KvExprView::decode_view(&encoded).unwrap();
+        assert_eq!(to_domain_expr_from_view(&view).unwrap_err(), "missing expr");
+    }
+
+    #[test]
+    fn reducer_filters_round_trip_through_owned_and_borrowed_requests() {
+        let predicate = KvPredicate {
+            checks: vec![KvPredicateCheck {
+                field: KvFieldRef::Key {
+                    byte_offset: 5,
+                    kind: KvFieldKind::Int64,
+                },
+                constraint: KvPredicateConstraint::IntRange {
+                    min: Some(-7),
+                    max: Some(12),
+                },
+            }],
+            contradiction: false,
+        };
+        let request = RangeReduceRequest {
+            reducers: vec![
+                RangeReducerSpec {
+                    op: RangeReduceOp::CountAll,
+                    expr: None,
+                    filter: Some(predicate),
+                },
+                RangeReducerSpec {
+                    op: RangeReduceOp::CountAll,
+                    expr: None,
+                    filter: None,
+                },
+            ],
+            group_by: Vec::new(),
+            filter: Some(KvPredicate {
+                checks: Vec::new(),
+                contradiction: true,
+            }),
+        };
+        let proto = to_proto_reduce_params(request.clone());
+        assert_eq!(to_domain_reduce_request(&proto).unwrap(), request);
+        let encoded = proto.encode_to_vec();
+        let view = query::ReduceParamsView::decode_view(&encoded).unwrap();
+        assert_eq!(to_domain_reduce_request_from_view(&view).unwrap(), request);
+    }
+
+    #[test]
+    fn reducer_filters_reject_missing_predicate_fields() {
+        let proto = query::ReduceParams {
+            reducers: vec![query::RangeReducerSpec {
+                filter: Some(query::KvPredicate {
+                    checks: vec![query::KvPredicateCheck::default()],
+                    ..Default::default()
+                })
+                .into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        assert_eq!(
+            to_domain_reduce_request(&proto).unwrap_err(),
+            "missing predicate field"
+        );
+        let encoded = proto.encode_to_vec();
+        let view = query::ReduceParamsView::decode_view(&encoded).unwrap();
+        assert_eq!(
+            to_domain_reduce_request_from_view(&view).unwrap_err(),
+            "missing predicate field"
+        );
+    }
 
     #[test]
     fn to_domain_reduce_request_from_view_matches_owned() {

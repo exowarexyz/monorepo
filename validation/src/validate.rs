@@ -1030,6 +1030,7 @@ async fn wait_for_reduce_count_match(
         reducers: vec![RangeReducerSpec {
             op: RangeReduceOp::CountAll,
             expr: None,
+            filter: None,
         }],
         group_by: Vec::new(),
         filter: None,

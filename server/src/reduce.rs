@@ -2,16 +2,17 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
+use std::panic::AssertUnwindSafe;
 use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
 use datafusion::arrow::array::{
-    ArrayRef, BinaryArray, BooleanArray, Date32Array, Date64Array, Decimal128Array,
+    ArrayRef, BinaryArray, BooleanArray, BooleanBuilder, Date32Array, Date64Array, Decimal128Array,
     Decimal256Array, Float64Array, Int64Array, StringArray, TimestampMicrosecondArray, UInt64Array,
 };
 use datafusion::arrow::datatypes::{i256, DataType, Field, Schema, SchemaRef, TimeUnit};
 use datafusion::arrow::record_batch::{RecordBatch, RecordBatchOptions};
-use datafusion::common::{DataFusionError, Result as DfResult, ScalarValue};
+use datafusion::common::{DFSchema, DataFusionError, Result as DfResult, ScalarValue};
 use datafusion::execution::context::TaskContext;
 use datafusion::execution::memory_pool::MemoryLimit;
 use datafusion::functions_aggregate::{
@@ -19,20 +20,27 @@ use datafusion::functions_aggregate::{
     min_max::{max_udaf, min_udaf},
     sum::sum_udaf,
 };
-use datafusion::logical_expr::AggregateUDF;
+use datafusion::logical_expr::binary::binary_numeric_coercion;
+use datafusion::logical_expr::execution_props::ExecutionProps;
+use datafusion::logical_expr::expr::Cast;
+use datafusion::logical_expr::physical_planning_context::PhysicalPlanningContext;
+use datafusion::logical_expr::{col, lit, AggregateUDF, Expr};
+use datafusion::optimizer::simplify_expressions::{ExprSimplifier, SimplifyContext};
 use datafusion::physical_expr::aggregate::{AggregateExprBuilder, AggregateFunctionExpr};
-use datafusion::physical_expr::expressions::{Column, Literal};
-use datafusion::physical_expr::PhysicalExpr;
+use datafusion::physical_expr::expressions::{BinaryExpr, CastExpr, Column, Literal};
+use datafusion::physical_expr::{create_physical_expr, PhysicalExpr};
 use datafusion::physical_plan::aggregates::{AggregateExec, AggregateMode, PhysicalGroupBy};
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use datafusion::physical_plan::streaming::{PartitionStream, StreamingTableExec};
 use datafusion::physical_plan::{ExecutionPlan, SendableRecordBatchStream};
 use exoware_sdk::keys::Key;
 use exoware_sdk::kv_codec::{
-    canonicalize_reduced_group_values, decode_stored_row, eval_expr, eval_predicate,
-    expr_needs_value, predicate_needs_value, KvExpr, KvFieldKind, KvFieldRef, KvReducedValue,
+    decode_stored_row, eval_predicate, extract_field, predicate_needs_value, KvExpr, KvFieldKind,
+    KvFieldRef, KvPredicate, KvReducedValue,
 };
-use exoware_sdk::{RangeReduceGroup, RangeReduceOp, RangeReduceRequest, RangeReduceResult};
+use exoware_sdk::proto::to_proto_reduced_value;
+use exoware_sdk::{RangeReduceOp, RangeReduceRequest};
+use futures::StreamExt;
 
 use crate::{Query, QueryExtra, RangeScan};
 
@@ -79,115 +87,192 @@ fn execution_error(error: impl ToString) -> DataFusionError {
     DataFusionError::Execution(error.to_string())
 }
 
-#[derive(Debug)]
 struct ExtractedReductionRow {
-    group_values: Vec<Option<KvReducedValue>>,
-    reducer_values: Vec<Option<KvReducedValue>>,
+    values: Vec<Option<KvReducedValue>>,
+    masks: Vec<bool>,
 }
 
 #[derive(Debug)]
 struct ReducePlan {
     request: Arc<RangeReduceRequest>,
     needs_value: bool,
-    reducer_columns: Vec<ReduceColumn>,
+    fields: Vec<KvFieldRef>,
+    field_copies: Vec<usize>,
+    literal_bytes: usize,
+    groups: PhysicalGroupBy,
+    filter_predicates: Vec<KvPredicate>,
+    filters: Vec<Option<Arc<dyn PhysicalExpr>>>,
     schema: SchemaRef,
     aggregates: Vec<Arc<AggregateFunctionExpr>>,
     result_kinds: Vec<ResultKind>,
-}
-
-#[derive(Debug)]
-struct ReduceColumn {
-    expr: KvExpr,
-    ordered_float: bool,
 }
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum ResultKind {
     Value,
     Count,
-    OrderedFloat,
 }
 
 impl ReducePlan {
-    fn new(request: Arc<RangeReduceRequest>) -> Result<Self, RangeError> {
+    fn new(request: Arc<RangeReduceRequest>, context: &TaskContext) -> Result<Self, RangeError> {
         validate_reduce_request(&request)?;
-        let needs_value = request
+        let mut fields = Vec::new();
+        let mut columns = HashMap::new();
+        let group_exprs = request
+            .group_by
+            .iter()
+            .map(|expr| lower_expr(expr, &mut fields, &mut columns))
+            .collect::<Vec<_>>();
+        let count_all_expr = KvExpr::Literal(KvReducedValue::Boolean(true));
+        let arguments = request
+            .reducers
+            .iter()
+            .map(|reducer| {
+                lower_expr(
+                    reducer.expr.as_ref().unwrap_or(&count_all_expr),
+                    &mut fields,
+                    &mut columns,
+                )
+            })
+            .collect::<Vec<_>>();
+        // Native columns share the input array; only computed expressions
+        // need an additional materialization allowance.
+        let mut field_copies = vec![0; fields.len()];
+        let literal_bytes = request
             .group_by
             .iter()
             .chain(
                 request
                     .reducers
                     .iter()
-                    .filter_map(|reducer| reducer.expr.as_ref()),
+                    .map(|reducer| reducer.expr.as_ref().unwrap_or(&count_all_expr)),
             )
-            .any(expr_needs_value)
-            || request.filter.as_ref().is_some_and(predicate_needs_value);
-        let mut fields = Vec::with_capacity(request.group_by.len() + request.reducers.len());
-        for (i, expr) in request.group_by.iter().enumerate() {
-            fields.push(Field::new(
-                format!("group_{i}"),
-                expression_type(expr)?,
-                true,
-            ));
-        }
-        let mut result_kinds = Vec::with_capacity(request.reducers.len());
-        let mut reducer_columns: Vec<ReduceColumn> = Vec::new();
-        let mut field_columns = HashMap::new();
-        let mut arguments: Vec<Arc<dyn PhysicalExpr>> = Vec::with_capacity(request.reducers.len());
-        for reducer in &request.reducers {
-            let Some(expr) = &reducer.expr else {
-                result_kinds.push(ResultKind::Count);
-                arguments.push(Arc::new(Literal::new(ScalarValue::Boolean(Some(true)))));
-                continue;
-            };
-            let mut data_type = expression_type(expr)?;
-            let result_kind = match reducer.op {
-                RangeReduceOp::CountAll | RangeReduceOp::CountField => ResultKind::Count,
-                RangeReduceOp::MinField | RangeReduceOp::MaxField
-                    if data_type == DataType::Float64 && !request.group_by.is_empty() =>
-                {
-                    // Native grouped float extrema do not implement total ordering
-                    data_type = DataType::Int64;
-                    ResultKind::OrderedFloat
+            .filter(|expr| !matches!(expr, KvExpr::Field(_)))
+            .map(|expr| materialization_bytes(expr, &columns, &mut field_copies, 1))
+            .fold(0usize, usize::saturating_add);
+        let needs_value = fields
+            .iter()
+            .any(|field| matches!(field, KvFieldRef::Value { .. }))
+            || request.filter.as_ref().is_some_and(predicate_needs_value)
+            || request
+                .reducers
+                .iter()
+                .any(|reducer| reducer.filter.as_ref().is_some_and(predicate_needs_value));
+        let mut input_fields = fields
+            .iter()
+            .enumerate()
+            .map(|(index, field)| {
+                let (kind, nullable) = match field {
+                    KvFieldRef::Key { kind, .. } | KvFieldRef::ZOrderKey { kind, .. } => {
+                        (*kind, false)
+                    }
+                    KvFieldRef::Value { kind, nullable, .. } => (*kind, *nullable),
+                };
+                Field::new(format!("field_{index}"), field_type(kind), nullable)
+            })
+            .collect::<Vec<_>>();
+        let mut filter_predicates = Vec::new();
+        let filters = request
+            .reducers
+            .iter()
+            .map(|reducer| {
+                reducer.filter.as_ref().map(|predicate| {
+                    let index = input_fields.len();
+                    let name = format!("filter_{index}");
+                    input_fields.push(Field::new(&name, DataType::Boolean, false));
+                    filter_predicates.push(predicate.clone());
+                    Arc::new(Column::new(&name, index)) as Arc<dyn PhysicalExpr>
+                })
+            })
+            .collect();
+        let schema = Arc::new(Schema::new(input_fields));
+        let mut native_context = None;
+        let mut compiled = HashMap::<Expr, Arc<dyn PhysicalExpr>>::new();
+        let mut compile =
+            |expr: Expr, original: Option<&KvExpr>| -> DfResult<Arc<dyn PhysicalExpr>> {
+                // Requests can name all 65,536 stored fields. Use their assigned indexes
+                // because native logical name lookup scans the schema.
+                if let Some(KvExpr::Field(field)) = original {
+                    let index = columns[field];
+                    return Ok(Arc::new(Column::new(schema.field(index).name(), index)));
                 }
-                _ => ResultKind::Value,
+                if let Some(physical) = compiled.get(&expr) {
+                    return Ok(physical.clone());
+                }
+                let physical = match compile_numeric_expr(&expr, &schema)? {
+                    Some((physical, data_type)) if matches!(&expr, Expr::BinaryExpr(_)) => {
+                        // The native numeric type is fixed for this input schema.
+                        // Retain its field for aggregate schema queries; native casts
+                        // share arrays whose type already matches the target field.
+                        let field =
+                            Arc::new(Field::new("value", data_type, physical.nullable(&schema)?));
+                        Arc::new(CastExpr::new_with_target_field(physical, field, None))
+                            as Arc<dyn PhysicalExpr>
+                    }
+                    Some((physical, _)) => physical,
+                    None => {
+                        if native_context.is_none() {
+                            let df_schema = Arc::new(DFSchema::try_from(schema.as_ref().clone())?);
+                            let options = context.session_config().options().clone();
+                            let simplifier = ExprSimplifier::new(
+                                SimplifyContext::builder()
+                                    .with_schema(df_schema.clone())
+                                    .with_config_options(options.clone())
+                                    .build(),
+                            );
+                            let mut props = ExecutionProps::new();
+                            props.mark_start_execution(options);
+                            native_context = Some((df_schema, simplifier, props));
+                        }
+                        let (df_schema, simplifier, props) = native_context.as_ref().unwrap();
+                        let coerced = simplifier.coerce(expr.clone(), df_schema)?;
+                        create_physical_expr(
+                            &coerced,
+                            df_schema,
+                            props,
+                            &PhysicalPlanningContext::default(),
+                        )?
+                    }
+                };
+                compiled.insert(expr, physical.clone());
+                Ok(physical)
             };
-            result_kinds.push(result_kind);
-            let ordered_float = matches!(result_kind, ResultKind::OrderedFloat);
-            let insert_column = || {
-                let index = reducer_columns.len();
-                fields.push(Field::new(format!("value_{index}"), data_type, true));
-                reducer_columns.push(ReduceColumn {
-                    expr: expr.clone(),
-                    ordered_float,
-                });
-                index
-            };
-            let index = match expr {
-                KvExpr::Field(field) => *field_columns
-                    .entry((field, ordered_float))
-                    .or_insert_with(insert_column),
-                _ => insert_column(),
-            };
-            arguments.push(Arc::new(Column::new(
-                &format!("value_{index}"),
-                request.group_by.len() + index,
-            )));
-        }
-        let schema = Arc::new(Schema::new(fields));
+        let groups = PhysicalGroupBy::new_single(
+            group_exprs
+                .into_iter()
+                .zip(&request.group_by)
+                .enumerate()
+                .map(|(index, (expr, original))| {
+                    Ok((compile(expr, Some(original))?, format!("group_{index}")))
+                })
+                .collect::<DfResult<Vec<_>>>()?,
+        );
+        let mut result_kinds = Vec::with_capacity(request.reducers.len());
         let mut aggregates = Vec::with_capacity(request.reducers.len());
-        for (i, (reducer, expr)) in request.reducers.iter().zip(arguments).enumerate() {
+        for (index, (reducer, expr)) in request.reducers.iter().zip(arguments).enumerate() {
+            result_kinds.push(match reducer.op {
+                RangeReduceOp::CountAll | RangeReduceOp::CountField => ResultKind::Count,
+                _ => ResultKind::Value,
+            });
             aggregates.push(Arc::new(
-                AggregateExprBuilder::new(match_function(reducer.op), vec![expr])
-                    .schema(schema.clone())
-                    .alias(format!("result_{i}"))
-                    .build()?,
+                AggregateExprBuilder::new(
+                    match_function(reducer.op),
+                    vec![compile(expr, reducer.expr.as_ref())?],
+                )
+                .schema(schema.clone())
+                .alias(format!("result_{index}"))
+                .build()?,
             ));
         }
         Ok(Self {
             request,
             needs_value,
-            reducer_columns,
+            fields,
+            field_copies,
+            literal_bytes,
+            groups,
+            filter_predicates,
+            filters,
             schema,
             aggregates,
             result_kinds,
@@ -195,21 +280,11 @@ impl ReducePlan {
     }
 
     fn physical_plan(&self, source: Arc<dyn ExecutionPlan>) -> DfResult<AggregateExec> {
-        let groups = PhysicalGroupBy::new_single(
-            (0..self.request.group_by.len())
-                .map(|i| {
-                    (
-                        Arc::new(Column::new(&format!("group_{i}"), i)) as Arc<dyn PhysicalExpr>,
-                        format!("group_{i}"),
-                    )
-                })
-                .collect(),
-        );
         AggregateExec::try_new(
             AggregateMode::Single,
-            groups,
+            self.groups.clone(),
             self.aggregates.clone(),
-            vec![None; self.aggregates.len()],
+            self.filters.clone(),
             source,
             self.schema.clone(),
         )
@@ -220,27 +295,49 @@ impl ReducePlan {
         source: Arc<dyn ExecutionPlan>,
         context: Arc<TaskContext>,
     ) -> DfResult<SendableRecordBatchStream> {
-        self.physical_plan(source)?.execute(0, context)
+        let stream = self.physical_plan(source)?.execute(0, context)?;
+        let schema = stream.schema();
+
+        // Native temporal kernels can panic on extreme timestamps. Terminate the
+        // request after a panic so operator state is never polled again.
+        let stream = AssertUnwindSafe(stream).catch_unwind().map(|result| {
+            result.unwrap_or_else(|_| {
+                Err(DataFusionError::Internal(
+                    "native Reduce execution panicked".into(),
+                ))
+            })
+        });
+        Ok(Box::pin(RecordBatchStreamAdapter::new(schema, stream)))
     }
 
     fn extracted_batch(&self, rows: Vec<ExtractedReductionRow>) -> DfResult<RecordBatch> {
         let row_count = rows.len();
-        let mut columns = (0..self.schema.fields().len())
-            .map(|_| Vec::with_capacity(rows.len()))
+        let mut columns = (0..self.fields.len())
+            .map(|_| Vec::with_capacity(row_count))
+            .collect::<Vec<_>>();
+        let mut masks = self
+            .filter_predicates
+            .iter()
+            .map(|_| BooleanBuilder::with_capacity(row_count))
             .collect::<Vec<_>>();
         for row in rows {
-            for (column, value) in columns
-                .iter_mut()
-                .zip(row.group_values.into_iter().chain(row.reducer_values))
-            {
+            for (column, value) in columns.iter_mut().zip(row.values) {
                 column.push(value);
             }
+            for (mask, value) in masks.iter_mut().zip(row.masks) {
+                mask.append_value(value);
+            }
         }
-        let arrays = columns
+        let mut arrays = columns
             .into_iter()
             .zip(self.schema.fields())
             .map(|(values, field)| values_to_array(values, field.data_type()))
             .collect::<DfResult<Vec<_>>>()?;
+        arrays.extend(
+            masks
+                .into_iter()
+                .map(|mut mask| Arc::new(mask.finish()) as ArrayRef),
+        );
         RecordBatch::try_new_with_options(
             self.schema.clone(),
             arrays,
@@ -288,7 +385,7 @@ pub(crate) fn execute_reduce<Q: Query>(
     request: RangeReduceRequest,
     context: Arc<TaskContext>,
 ) -> Result<ReduceExecution, RangeError> {
-    let plan = Arc::new(ReducePlan::new(Arc::new(request))?);
+    let plan = Arc::new(ReducePlan::new(Arc::new(request), &context)?);
     let extra = Arc::new(Mutex::new(QueryExtra::new()));
     let partition = ReducePartition {
         query,
@@ -405,11 +502,14 @@ impl<Q: Query> PartitionStream for ReducePartition<Q> {
                     row
                 };
                 let row_bytes = row
-                    .group_values
+                    .values
                     .iter()
-                    .chain(&row.reducer_values)
-                    .map(|value| reduced_size(value.as_ref()))
-                    .sum::<usize>();
+                    .zip(&state.plan.field_copies)
+                    .map(|(value, copies)| {
+                        reduced_size(value.as_ref()).saturating_mul(copies.saturating_add(1))
+                    })
+                    .fold(state.plan.literal_bytes, usize::saturating_add)
+                    .saturating_add(row.masks.len());
                 if !rows.is_empty() && bytes.saturating_add(row_bytes) > state.batch_bytes {
                     state.extracted = Some(row);
                     break;
@@ -435,15 +535,20 @@ pub(crate) fn decode_group(
     row: usize,
     group_count: usize,
     result_kinds: &[ResultKind],
-) -> DfResult<RangeReduceGroup> {
+) -> DfResult<exoware_sdk::query::RangeReduceGroup> {
     let mut values = batch
         .columns()
         .iter()
         .map(|array| ScalarValue::try_from_array(array, row).and_then(scalar_to_reduced));
-    let group_values = values
-        .by_ref()
-        .take(group_count)
-        .collect::<DfResult<Vec<_>>>()?;
+    let mut group_values = Vec::with_capacity(group_count);
+    let mut group_values_present = Vec::with_capacity(group_count);
+    for value in values.by_ref().take(group_count) {
+        let value = value?;
+        group_values_present.push(value.is_some());
+        if let Some(value) = value {
+            group_values.push(to_proto_reduced_value(value));
+        }
+    }
     let results = values
         .zip(result_kinds)
         .map(|(value, kind)| {
@@ -453,86 +558,172 @@ pub(crate) fn decode_group(
                         |_| DataFusionError::Internal("native Reduce count is negative".into()),
                     )?))
                 }
-                (Some(KvReducedValue::Int64(bits)), ResultKind::OrderedFloat) => Some(
-                    KvReducedValue::Float64(f64::from_bits(float_order_bits(bits) as u64)),
-                ),
                 (value, _) => value,
             };
-            Ok(RangeReduceResult { value })
+            Ok(exoware_sdk::query::RangeReduceResult {
+                value: value.map(to_proto_reduced_value).into(),
+                ..Default::default()
+            })
         })
         .collect::<DfResult<Vec<_>>>()?;
-    Ok(RangeReduceGroup {
+    Ok(exoware_sdk::query::RangeReduceGroup {
         group_values,
+        group_values_present,
         results,
+        ..Default::default()
     })
 }
 
-// This involution maps float bits to signed integers ordered by f64::total_cmp
-fn float_order_bits(bits: i64) -> i64 {
-    bits ^ ((bits >> 63) & i64::MAX)
-}
-
-fn expression_type(expr: &KvExpr) -> Result<DataType, RangeError> {
-    let invalid = || RangeError::Reduce("unsupported Reduce expression types".into());
-    match expr {
-        KvExpr::Field(field) => Ok(match field {
-            KvFieldRef::Key { kind, .. }
-            | KvFieldRef::ZOrderKey { kind, .. }
-            | KvFieldRef::Value { kind, .. } => field_type(*kind),
-        }),
-        KvExpr::Literal(value) => Ok(match value {
-            KvReducedValue::Int64(_) => DataType::Int64,
-            KvReducedValue::UInt64(_) => DataType::UInt64,
-            KvReducedValue::Float64(_) => DataType::Float64,
-            KvReducedValue::Boolean(_) => DataType::Boolean,
-            KvReducedValue::Utf8(_) => DataType::Utf8,
-            KvReducedValue::Date32(_) => DataType::Date32,
-            KvReducedValue::Date64(_) => DataType::Date64,
-            KvReducedValue::Timestamp(_) => DataType::Timestamp(TimeUnit::Microsecond, None),
-            KvReducedValue::Decimal128(_) => DataType::Decimal128(38, 0),
-            KvReducedValue::Decimal256(_) => DataType::Decimal256(76, 0),
-            KvReducedValue::FixedSizeBinary(_) => DataType::Binary,
-        }),
-        KvExpr::Add(a, b) | KvExpr::Sub(a, b) | KvExpr::Mul(a, b) | KvExpr::Div(a, b) => {
-            let a = expression_type(a)?;
-            let b = expression_type(b)?;
-            let numeric = matches!(
-                (&a, &b),
-                (DataType::Int64, DataType::Int64)
-                    | (DataType::UInt64, DataType::UInt64)
-                    | (
-                        DataType::Float64,
-                        DataType::Int64 | DataType::UInt64 | DataType::Float64
-                    )
-                    | (DataType::Int64 | DataType::UInt64, DataType::Float64)
-            );
-            if !numeric {
-                return Err(invalid());
-            }
-            Ok(
-                if matches!(expr, KvExpr::Div(..))
-                    || a == DataType::Float64
-                    || b == DataType::Float64
-                {
-                    DataType::Float64
-                } else {
-                    a
-                },
+// Primitive arithmetic has a uniform native numeric type. Carry it through the
+// compilation traversal because BinaryExpr::data_type probes Arrow kernels with
+// allocated empty arrays. Decimal and temporal rewrites use the full analyzer.
+fn compile_numeric_expr(
+    expr: &Expr,
+    schema: &Schema,
+) -> DfResult<Option<(Arc<dyn PhysicalExpr>, DataType)>> {
+    let (physical, data_type): (Arc<dyn PhysicalExpr>, DataType) = match expr {
+        Expr::Column(column) => {
+            // Store lowering generates unique, unqualified field names.
+            let index = schema.index_of(&column.name)?;
+            (
+                Arc::new(Column::new(&column.name, index)),
+                schema.field(index).data_type().clone(),
             )
         }
-        KvExpr::Lower(expr) => {
-            if expression_type(expr)? == DataType::Utf8 {
-                Ok(DataType::Utf8)
-            } else {
-                Err(invalid())
+        Expr::Literal(value, metadata) => (
+            Arc::new(Literal::new_with_metadata(value.clone(), metadata.clone())),
+            value.data_type(),
+        ),
+        Expr::Cast(cast) if cast.field.data_type() == &DataType::Float64 => {
+            let Some((child, data_type)) = compile_numeric_expr(&cast.expr, schema)? else {
+                return Ok(None);
+            };
+            if !matches!(
+                data_type,
+                DataType::Int64 | DataType::UInt64 | DataType::Float64
+            ) {
+                return Ok(None);
             }
+            (
+                Arc::new(CastExpr::new_with_target_field(
+                    child,
+                    cast.field.clone(),
+                    None,
+                )),
+                DataType::Float64,
+            )
         }
-        KvExpr::DateTruncDay(expr) => match expression_type(expr)? {
-            t @ (DataType::Date32
-            | DataType::Date64
-            | DataType::Timestamp(TimeUnit::Microsecond, _)) => Ok(t),
-            _ => Err(invalid()),
-        },
+        Expr::BinaryExpr(binary) => {
+            let Some((mut left, left_type)) = compile_numeric_expr(&binary.left, schema)? else {
+                return Ok(None);
+            };
+            let Some((mut right, right_type)) = compile_numeric_expr(&binary.right, schema)? else {
+                return Ok(None);
+            };
+            if !matches!(
+                left_type,
+                DataType::Int64 | DataType::UInt64 | DataType::Float64
+            ) || !matches!(
+                right_type,
+                DataType::Int64 | DataType::UInt64 | DataType::Float64
+            ) {
+                return Ok(None);
+            }
+            let Some(data_type) = binary_numeric_coercion(&left_type, &right_type) else {
+                return Ok(None);
+            };
+            if !matches!(
+                data_type,
+                DataType::Int64 | DataType::UInt64 | DataType::Float64
+            ) {
+                return Ok(None);
+            }
+            if left_type != data_type {
+                left = Arc::new(CastExpr::new(left, data_type.clone(), None));
+            }
+            if right_type != data_type {
+                right = Arc::new(CastExpr::new(right, data_type.clone(), None));
+            }
+            (Arc::new(BinaryExpr::new(left, binary.op, right)), data_type)
+        }
+        _ => return Ok(None),
+    };
+    Ok(Some((physical, data_type)))
+}
+
+// Aggregate arguments may broadcast literals or allocate one output per expression.
+// Charge each occurrence even when its compiled physical expression is shared.
+fn materialization_bytes(
+    expr: &KvExpr,
+    columns: &HashMap<KvFieldRef, usize>,
+    field_copies: &mut [usize],
+    copies: usize,
+) -> usize {
+    match expr {
+        KvExpr::Field(field) => {
+            let count = &mut field_copies[columns[field]];
+            *count = count.saturating_add(copies);
+            0
+        }
+        KvExpr::Literal(value) => reduced_size(Some(value)).saturating_mul(copies),
+        KvExpr::Add(left, right)
+        | KvExpr::Sub(left, right)
+        | KvExpr::Mul(left, right)
+        | KvExpr::Div(left, right) => materialization_bytes(left, columns, field_copies, copies)
+            .saturating_add(materialization_bytes(right, columns, field_copies, copies)),
+        // A lowercase mapping contains at most three Unicode scalars, each at most
+        // four UTF-8 bytes. This bounds expansion without evaluating guarded inputs.
+        KvExpr::Lower(inner) => {
+            materialization_bytes(inner, columns, field_copies, copies.saturating_mul(12))
+        }
+        KvExpr::DateTruncDay(inner) | KvExpr::CastFloat64(inner) => {
+            materialization_bytes(inner, columns, field_copies, copies)
+        }
+    }
+}
+
+fn lower_expr(
+    expr: &KvExpr,
+    fields: &mut Vec<KvFieldRef>,
+    columns: &mut HashMap<KvFieldRef, usize>,
+) -> Expr {
+    match expr {
+        KvExpr::Field(field) => {
+            let index = *columns.entry(field.clone()).or_insert_with(|| {
+                let index = fields.len();
+                fields.push(field.clone());
+                index
+            });
+            col(format!("field_{index}"))
+        }
+        KvExpr::Literal(value) => lit(match value {
+            KvReducedValue::Int64(v) => ScalarValue::Int64(Some(*v)),
+            KvReducedValue::UInt64(v) => ScalarValue::UInt64(Some(*v)),
+            KvReducedValue::Float64(v) => ScalarValue::Float64(Some(*v)),
+            KvReducedValue::Boolean(v) => ScalarValue::Boolean(Some(*v)),
+            KvReducedValue::Utf8(v) => ScalarValue::Utf8(Some(v.clone())),
+            KvReducedValue::Date32(v) => ScalarValue::Date32(Some(*v)),
+            KvReducedValue::Date64(v) => ScalarValue::Date64(Some(*v)),
+            KvReducedValue::Timestamp(v) => ScalarValue::TimestampMicrosecond(Some(*v), None),
+            KvReducedValue::Decimal128(v) => ScalarValue::Decimal128(Some(*v), 38, 0),
+            KvReducedValue::Decimal256(v) => {
+                ScalarValue::Decimal256(Some(i256::from_le_bytes(*v)), 76, 0)
+            }
+            KvReducedValue::FixedSizeBinary(v) => ScalarValue::Binary(Some(v.to_vec())),
+        }),
+        KvExpr::Add(a, b) => lower_expr(a, fields, columns) + lower_expr(b, fields, columns),
+        KvExpr::Sub(a, b) => lower_expr(a, fields, columns) - lower_expr(b, fields, columns),
+        KvExpr::Mul(a, b) => lower_expr(a, fields, columns) * lower_expr(b, fields, columns),
+        KvExpr::Div(a, b) => lower_expr(a, fields, columns) / lower_expr(b, fields, columns),
+        KvExpr::CastFloat64(expr) => Expr::Cast(Cast::new(
+            Box::new(lower_expr(expr, fields, columns)),
+            DataType::Float64,
+        )),
+        KvExpr::Lower(expr) => {
+            datafusion::functions::string::lower().call(vec![lower_expr(expr, fields, columns)])
+        }
+        KvExpr::DateTruncDay(expr) => datafusion::functions::datetime::date_trunc()
+            .call(vec![lit("day"), lower_expr(expr, fields, columns)]),
     }
 }
 
@@ -652,6 +843,13 @@ fn scalar_to_reduced(value: ScalarValue) -> DfResult<Option<KvReducedValue>> {
         ScalarValue::Date32(Some(v)) => KvReducedValue::Date32(v),
         ScalarValue::Date64(Some(v)) => KvReducedValue::Date64(v),
         ScalarValue::TimestampMicrosecond(Some(v), _) => KvReducedValue::Timestamp(v),
+        value @ (ScalarValue::TimestampSecond(..)
+        | ScalarValue::TimestampMillisecond(..)
+        | ScalarValue::TimestampNanosecond(..)) => {
+            return scalar_to_reduced(
+                value.cast_to(&DataType::Timestamp(TimeUnit::Microsecond, None))?,
+            );
+        }
         ScalarValue::Decimal128(Some(v), _, _) => KvReducedValue::Decimal128(v),
         ScalarValue::Decimal256(Some(v), _, _) => KvReducedValue::Decimal256(v.to_le_bytes()),
         ScalarValue::Binary(Some(v))
@@ -714,45 +912,36 @@ fn extract_reduce_row(
         }
     }
 
-    let mut group_values = Vec::with_capacity(request.group_by.len());
-    for expr in &request.group_by {
-        let extracted_value = eval_expr(key, archived, expr).map_err(RangeError::Reduce)?;
-        group_values.push(extracted_value);
-    }
-    canonicalize_reduced_group_values(&mut group_values);
-
-    let mut reducer_values = Vec::with_capacity(plan.reducer_columns.len());
-    for column in &plan.reducer_columns {
-        let extracted_value = eval_expr(key, archived, &column.expr).map_err(RangeError::Reduce)?;
-        let extracted_value = match (extracted_value, column.ordered_float) {
-            (Some(KvReducedValue::Float64(number)), true) => Some(KvReducedValue::Int64(
-                float_order_bits(number.to_bits() as i64),
-            )),
-            (value, _) => value,
-        };
-        reducer_values.push(extracted_value);
-    }
-
-    Ok(Some(ExtractedReductionRow {
-        group_values,
-        reducer_values,
-    }))
+    let values = plan
+        .fields
+        .iter()
+        .map(|field| extract_field(key, archived, field).map_err(RangeError::Reduce))
+        .collect::<Result<Vec<_>, _>>()?;
+    let masks = plan
+        .filter_predicates
+        .iter()
+        .map(|predicate| eval_predicate(key, archived, predicate).map_err(RangeError::Reduce))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(Some(ExtractedReductionRow { values, masks }))
 }
 
 #[cfg(test)]
 mod tests {
     use bytes::Bytes;
     use commonware_codec::Encode as _;
+    use datafusion::arrow::compute::{
+        concat_batches, lexsort_to_indices, take_record_batch, SortColumn,
+    };
     use exoware_sdk::keys::Key;
     use exoware_sdk::kv_codec::{
         KvExpr, KvFieldKind, KvFieldRef, KvPredicate, KvPredicateCheck, KvPredicateConstraint,
         KvReducedValue, StoredRow, StoredValue,
     };
-    use exoware_sdk::{RangeReduceOp, RangeReduceRequest, RangeReducerSpec};
+    use exoware_sdk::{RangeReduceGroup, RangeReduceOp, RangeReduceRequest, RangeReducerSpec};
 
     use super::*;
     use exoware_sdk::RangeReduceResponse;
-    use futures::StreamExt;
+    use futures::{StreamExt, TryStreamExt};
 
     #[derive(Debug)]
     struct FixturePartition {
@@ -778,7 +967,11 @@ mod tests {
     }
 
     fn reducer(op: RangeReduceOp, expr: Option<KvExpr>) -> RangeReducerSpec {
-        RangeReducerSpec { op, expr }
+        RangeReducerSpec {
+            op,
+            expr,
+            filter: None,
+        }
     }
 
     fn int64_value_field(index: u16) -> KvExpr {
@@ -825,12 +1018,28 @@ mod tests {
         Some(KvReducedValue::Float64(v))
     }
 
+    fn decode_group(
+        batch: &RecordBatch,
+        row: usize,
+        group_count: usize,
+        result_kinds: &[ResultKind],
+    ) -> DfResult<RangeReduceGroup> {
+        let response = exoware_sdk::query::ReduceResponse {
+            groups: vec![super::decode_group(batch, row, group_count, result_kinds)?],
+            ..Default::default()
+        };
+        let message = connectrpc::StreamMessage::from_message(&response);
+        let mut response =
+            exoware_sdk::to_domain_reduce_response(message.view()).map_err(execution_error)?;
+        Ok(response.groups.remove(0))
+    }
+
     fn reduce(
         rows: &[(Key, Bytes)],
         request: &RangeReduceRequest,
     ) -> Result<RangeReduceResponse, RangeError> {
         futures::executor::block_on(async {
-            let plan = ReducePlan::new(Arc::new(request.clone()))?;
+            let plan = ReducePlan::new(Arc::new(request.clone()), &TaskContext::default())?;
             let batches = rows
                 .chunks(REDUCE_BATCH_ROWS)
                 .map(|rows| plan.batch(rows))
@@ -847,26 +1056,33 @@ mod tests {
                 false,
                 None,
             )?;
-            let mut stream = plan.execute(Arc::new(source), Arc::new(TaskContext::default()))?;
+            let stream = plan.execute(Arc::new(source), Arc::new(TaskContext::default()))?;
+            let schema = stream.schema();
+            let batches = stream.try_collect::<Vec<_>>().await?;
+            let mut batch = concat_batches(&schema, &batches).map_err(DataFusionError::from)?;
+            if !request.group_by.is_empty() {
+                let columns = batch.columns()[..request.group_by.len()]
+                    .iter()
+                    .map(|values| SortColumn {
+                        values: values.clone(),
+                        options: None,
+                    })
+                    .collect::<Vec<_>>();
+                let indices = lexsort_to_indices(&columns, None).map_err(DataFusionError::from)?;
+                batch = take_record_batch(&batch, &indices).map_err(DataFusionError::from)?;
+            }
             let mut response = RangeReduceResponse {
                 results: Vec::new(),
                 groups: Vec::new(),
             };
-            while let Some(batch) = stream.next().await {
-                let batch = batch?;
-                for row in 0..batch.num_rows() {
-                    let group =
-                        decode_group(&batch, row, request.group_by.len(), &plan.result_kinds)?;
-                    if request.group_by.is_empty() {
-                        response.results = group.results;
-                    } else {
-                        response.groups.push(group);
-                    }
+            for row in 0..batch.num_rows() {
+                let group = decode_group(&batch, row, request.group_by.len(), &plan.result_kinds)?;
+                if request.group_by.is_empty() {
+                    response.results = group.results;
+                } else {
+                    response.groups.push(group);
                 }
             }
-            response.groups.sort_by_key(|group| {
-                exoware_sdk::kv_codec::encode_reduced_group_key(&group.group_values)
-            });
             Ok(response)
         })
     }
@@ -926,6 +1142,738 @@ mod tests {
         assert_eq!(response.results[0].value, result_u64(2));
         assert_eq!(response.results[1].value, result_i64(i64::MIN + 1));
         assert_eq!(response.results[2].value, result_i64(i64::MIN + 3));
+    }
+
+    #[test]
+    fn expressions_preserve_types_and_values() {
+        use datafusion::prelude::SessionContext;
+
+        let field = |index, kind| {
+            KvExpr::Field(KvFieldRef::Value {
+                index,
+                kind,
+                nullable: true,
+            })
+        };
+        let i = field(0, KvFieldKind::Int64);
+        let u = field(1, KvFieldKind::UInt64);
+        let f = field(2, KvFieldKind::Float64);
+        let text = field(3, KvFieldKind::Utf8);
+        let timestamp = field(4, KvFieldKind::Timestamp);
+        let date32 = field(5, KvFieldKind::Date32);
+        let date64 = field(6, KvFieldKind::Date64);
+        let cases = [
+            (
+                KvExpr::Add(
+                    Box::new(i.clone()),
+                    Box::new(KvExpr::Literal(KvReducedValue::Int64(2))),
+                ),
+                col("i") + lit(2_i64),
+            ),
+            (
+                KvExpr::Sub(
+                    Box::new(u.clone()),
+                    Box::new(KvExpr::Literal(KvReducedValue::UInt64(9))),
+                ),
+                col("u") - lit(9_u64),
+            ),
+            (
+                KvExpr::Mul(Box::new(i.clone()), Box::new(i.clone())),
+                col("i") * col("i"),
+            ),
+            (
+                KvExpr::Div(
+                    Box::new(i.clone()),
+                    Box::new(KvExpr::Literal(KvReducedValue::Int64(2))),
+                ),
+                col("i") / lit(2_i64),
+            ),
+            (
+                KvExpr::Div(
+                    Box::new(u.clone()),
+                    Box::new(KvExpr::Literal(KvReducedValue::UInt64(2))),
+                ),
+                col("u") / lit(2_u64),
+            ),
+            (
+                KvExpr::Div(Box::new(i.clone()), Box::new(f.clone())),
+                col("i") / col("f"),
+            ),
+            (
+                KvExpr::Lower(Box::new(text)),
+                datafusion::functions::string::lower().call(vec![col("text")]),
+            ),
+            (
+                KvExpr::DateTruncDay(Box::new(timestamp)),
+                datafusion::functions::datetime::date_trunc()
+                    .call(vec![lit("day"), col("timestamp")]),
+            ),
+            (
+                KvExpr::DateTruncDay(Box::new(date32)),
+                datafusion::functions::datetime::date_trunc().call(vec![lit("day"), col("date32")]),
+            ),
+            (
+                KvExpr::DateTruncDay(Box::new(date64)),
+                datafusion::functions::datetime::date_trunc().call(vec![lit("day"), col("date64")]),
+            ),
+            (
+                KvExpr::Add(Box::new(i.clone()), Box::new(u.clone())),
+                col("i") + col("u"),
+            ),
+            (
+                KvExpr::Div(Box::new(u.clone()), Box::new(i.clone())),
+                col("u") / col("i"),
+            ),
+            (
+                KvExpr::Mul(Box::new(u.clone()), Box::new(f.clone())),
+                col("u") * col("f"),
+            ),
+            (
+                KvExpr::CastFloat64(Box::new(i.clone())),
+                Expr::Cast(Cast::new(Box::new(col("i")), DataType::Float64)),
+            ),
+            (
+                KvExpr::CastFloat64(Box::new(u.clone())),
+                Expr::Cast(Cast::new(Box::new(col("u")), DataType::Float64)),
+            ),
+            (
+                KvExpr::CastFloat64(Box::new(f.clone())),
+                Expr::Cast(Cast::new(Box::new(col("f")), DataType::Float64)),
+            ),
+            (
+                KvExpr::Sub(
+                    Box::new(KvExpr::Mul(
+                        Box::new(KvExpr::Add(
+                            Box::new(i),
+                            Box::new(KvExpr::Literal(KvReducedValue::Int64(10))),
+                        )),
+                        Box::new(KvExpr::Literal(KvReducedValue::Int64(2))),
+                    )),
+                    Box::new(KvExpr::Literal(KvReducedValue::Int64(5))),
+                ),
+                (col("i") + lit(10_i64)) * lit(2_i64) - lit(5_i64),
+            ),
+        ];
+        let rows = [
+            make_row(
+                b"a",
+                vec![
+                    Some(StoredValue::Int64(7)),
+                    Some(StoredValue::UInt64(7)),
+                    Some(StoredValue::Float64(2.0)),
+                    Some(StoredValue::Utf8("ΟΣ İ MIXED".into())),
+                    Some(StoredValue::Int64(-1)),
+                    Some(StoredValue::Int64(-1)),
+                    Some(StoredValue::Int64(-1)),
+                ],
+            ),
+            make_row(b"b", vec![None; 7]),
+        ];
+        let input = RecordBatch::try_from_iter([
+            (
+                "i",
+                Arc::new(Int64Array::from(vec![Some(7), None])) as ArrayRef,
+            ),
+            (
+                "u",
+                Arc::new(UInt64Array::from(vec![Some(7), None])) as ArrayRef,
+            ),
+            (
+                "f",
+                Arc::new(Float64Array::from(vec![Some(2.0), None])) as ArrayRef,
+            ),
+            (
+                "text",
+                Arc::new(StringArray::from(vec![Some("ΟΣ İ MIXED"), None])) as ArrayRef,
+            ),
+            (
+                "timestamp",
+                Arc::new(TimestampMicrosecondArray::from(vec![Some(-1), None])) as ArrayRef,
+            ),
+            (
+                "date32",
+                Arc::new(Date32Array::from(vec![Some(-1), None])) as ArrayRef,
+            ),
+            (
+                "date64",
+                Arc::new(Date64Array::from(vec![Some(-1), None])) as ArrayRef,
+            ),
+        ])
+        .unwrap();
+        let request = scalar_request(
+            cases
+                .iter()
+                .map(|(expr, _)| reducer(RangeReduceOp::MinField, Some(expr.clone())))
+                .collect(),
+        );
+        let plan = ReducePlan::new(Arc::new(request.clone()), &TaskContext::default()).unwrap();
+        assert_eq!(plan.fields.len(), 7);
+        let response = reduce(&rows, &request).unwrap();
+        let context = SessionContext::new();
+        let schema = DFSchema::try_from(input.schema().as_ref().clone()).unwrap();
+        for (index, (_, expr)) in cases.into_iter().enumerate() {
+            let native = context.create_physical_expr(expr, &schema).unwrap();
+            let actual_field = plan.aggregates[index].expressions()[0]
+                .return_field(&plan.schema)
+                .unwrap();
+            let native_field = native.return_field(input.schema().as_ref()).unwrap();
+            assert_eq!(actual_field.data_type(), native_field.data_type());
+            assert_eq!(actual_field.is_nullable(), native_field.is_nullable());
+            let values = native
+                .evaluate(&input)
+                .unwrap()
+                .into_array(input.num_rows())
+                .unwrap();
+            assert_eq!(
+                plan.aggregates[index].field().data_type(),
+                &native.data_type(input.schema().as_ref()).unwrap()
+            );
+            let expected =
+                scalar_to_reduced(ScalarValue::try_from_array(&values, 0).unwrap()).unwrap();
+            assert_eq!(response.results[index].value, expected);
+            assert!(values.is_null(1));
+        }
+        for result in &response.results[7..10] {
+            assert_eq!(
+                result.value,
+                Some(KvReducedValue::Timestamp(-86_400_000_000))
+            );
+        }
+        assert_eq!(response.results[3].value, result_i64(3));
+        assert_eq!(response.results[4].value, result_u64(3));
+    }
+
+    #[test]
+    fn literal_integer_arithmetic_wraps_on_overflow() {
+        let cases = [
+            (
+                KvExpr::Add(
+                    Box::new(KvExpr::Literal(KvReducedValue::Int64(i64::MAX))),
+                    Box::new(KvExpr::Literal(KvReducedValue::Int64(1))),
+                ),
+                result_i64(i64::MIN),
+            ),
+            (
+                KvExpr::Sub(
+                    Box::new(KvExpr::Literal(KvReducedValue::UInt64(0))),
+                    Box::new(KvExpr::Literal(KvReducedValue::UInt64(1))),
+                ),
+                result_u64(u64::MAX),
+            ),
+            (
+                KvExpr::Mul(
+                    Box::new(KvExpr::Literal(KvReducedValue::Int64(i64::MAX))),
+                    Box::new(KvExpr::Literal(KvReducedValue::Int64(2))),
+                ),
+                result_i64(-2),
+            ),
+        ];
+        for (expr, expected) in cases {
+            let response = reduce(
+                &[(Key::default(), Bytes::from_static(b"invalid row"))],
+                &scalar_request(vec![reducer(RangeReduceOp::MinField, Some(expr))]),
+            )
+            .unwrap();
+            assert_eq!(response.results[0].value, expected);
+        }
+    }
+
+    #[test]
+    fn float_division_accepts_signed_zero_and_nan() {
+        for denominator in [-0.0_f64, 0.0] {
+            for numerator in [0.0, 1.0] {
+                let rows = [make_row(
+                    b"a",
+                    vec![
+                        Some(StoredValue::Float64(numerator)),
+                        Some(StoredValue::Float64(denominator)),
+                    ],
+                )];
+                let expr = KvExpr::Div(
+                    Box::new(float64_value_field(0)),
+                    Box::new(float64_value_field(1)),
+                );
+                let response = reduce(
+                    &rows,
+                    &scalar_request(vec![reducer(RangeReduceOp::SumField, Some(expr))]),
+                )
+                .unwrap();
+                let Some(KvReducedValue::Float64(actual)) = response.results[0].value else {
+                    panic!("float result")
+                };
+                let expected = numerator / denominator;
+                if expected.is_nan() {
+                    assert!(actual.is_nan());
+                } else {
+                    assert_eq!(actual.to_bits(), expected.to_bits());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn arithmetic_evaluates_required_fields_and_nested_operands() {
+        let expr = KvExpr::Add(
+            Box::new(int64_value_field(0)),
+            Box::new(KvExpr::Div(
+                Box::new(int64_value_field(1)),
+                Box::new(int64_value_field(2)),
+            )),
+        );
+        let request = scalar_request(vec![reducer(RangeReduceOp::SumField, Some(expr))]);
+        for values in [
+            vec![None],
+            vec![
+                None,
+                Some(StoredValue::Int64(1)),
+                Some(StoredValue::Int64(0)),
+            ],
+        ] {
+            assert!(reduce(&[make_row(b"a", values)], &request).is_err());
+        }
+    }
+
+    #[test]
+    fn key_only_expressions_share_fields_and_skip_payload_decoding() {
+        let field = KvExpr::Field(KvFieldRef::Key {
+            byte_offset: 0,
+            kind: KvFieldKind::Int64,
+        });
+        let expr = KvExpr::Add(Box::new(field.clone()), Box::new(field));
+        let request = RangeReduceRequest {
+            group_by: vec![expr.clone()],
+            reducers: vec![
+                reducer(RangeReduceOp::SumField, Some(expr.clone())),
+                reducer(RangeReduceOp::CountAll, None),
+                reducer(
+                    RangeReduceOp::SumField,
+                    Some(KvExpr::CastFloat64(Box::new(expr))),
+                ),
+            ],
+            filter: None,
+        };
+        let plan = ReducePlan::new(Arc::new(request.clone()), &TaskContext::default()).unwrap();
+        assert_eq!(plan.fields.len(), 1);
+        assert!(!plan.needs_value);
+        let key = ((3_i64 as u64) ^ (1 << 63)).to_be_bytes().to_vec();
+        let response = reduce(
+            &[(Key::from(key), Bytes::from_static(b"not a stored row"))],
+            &request,
+        )
+        .unwrap();
+        assert_eq!(response.groups[0].group_values, vec![result_i64(6)]);
+        assert_eq!(response.groups[0].results[0].value, result_i64(6));
+        assert_eq!(response.groups[0].results[1].value, result_u64(1));
+        assert_eq!(response.groups[0].results[2].value, result_f64(6.0));
+    }
+
+    #[tokio::test]
+    async fn extreme_date_failure_terminates_only_its_stream() {
+        use datafusion::prelude::SessionContext;
+
+        let input = RecordBatch::try_from_iter([(
+            "timestamp",
+            Arc::new(TimestampMicrosecondArray::from(vec![i64::MIN])) as ArrayRef,
+        )])
+        .unwrap();
+        let schema = DFSchema::try_from(input.schema().as_ref().clone()).unwrap();
+        let native = SessionContext::new()
+            .create_physical_expr(
+                datafusion::functions::datetime::date_trunc()
+                    .call(vec![lit("day"), col("timestamp")]),
+                &schema,
+            )
+            .unwrap();
+        let expected = std::panic::catch_unwind(AssertUnwindSafe(|| native.evaluate(&input)));
+        let request = scalar_request(vec![reducer(
+            RangeReduceOp::MinField,
+            Some(KvExpr::DateTruncDay(Box::new(KvExpr::Field(
+                KvFieldRef::Value {
+                    index: 0,
+                    kind: KvFieldKind::Timestamp,
+                    nullable: true,
+                },
+            )))),
+        )]);
+        let context = Arc::new(TaskContext::default());
+        let plan = ReducePlan::new(Arc::new(request), &context).unwrap();
+        let batch = plan
+            .batch(&[make_row(b"a", vec![Some(StoredValue::Int64(i64::MIN))])])
+            .unwrap();
+        let source = StreamingTableExec::try_new(
+            plan.schema.clone(),
+            vec![Arc::new(FixturePartition {
+                schema: plan.schema.clone(),
+                batches: vec![batch],
+            })],
+            None,
+            [],
+            false,
+            None,
+        )
+        .unwrap();
+        let mut stream = plan.execute(Arc::new(source), context).unwrap();
+        let actual = stream.next().await.unwrap();
+        match expected {
+            Err(_) => assert!(
+                matches!(actual, Err(DataFusionError::Internal(message)) if message == "native Reduce execution panicked")
+            ),
+            Ok(Err(_)) => assert!(actual.is_err()),
+            Ok(Ok(value)) => {
+                let values = value.into_array(1).unwrap();
+                let expected =
+                    scalar_to_reduced(ScalarValue::try_from_array(&values, 0).unwrap()).unwrap();
+                assert_eq!(
+                    decode_group(&actual.unwrap(), 0, 0, &plan.result_kinds)
+                        .unwrap()
+                        .results[0]
+                        .value,
+                    expected
+                );
+            }
+        }
+        assert!(stream.next().await.is_none());
+        let good = scalar_request(vec![reducer(RangeReduceOp::CountAll, None)]);
+        assert_eq!(
+            reduce(&[make_row(b"b", vec![])], &good).unwrap().results[0].value,
+            result_u64(1)
+        );
+    }
+
+    #[test]
+    fn float64_cast_rounds_integers_and_preserves_nulls() {
+        use datafusion::prelude::SessionContext;
+
+        let signed = [
+            None,
+            Some(i64::MIN),
+            Some(-(1_i64 << 53) - 1),
+            Some(0),
+            Some((1_i64 << 53) + 1),
+            Some(i64::MAX),
+        ];
+        let unsigned = [
+            None,
+            Some(0),
+            Some((1_u64 << 53) - 1),
+            Some(1_u64 << 53),
+            Some((1_u64 << 53) + 1),
+            Some(u64::MAX),
+        ];
+        let cases = [
+            (
+                KvFieldKind::Int64,
+                signed.map(|value| value.map(StoredValue::Int64)).to_vec(),
+                Arc::new(Int64Array::from(signed.to_vec())) as ArrayRef,
+            ),
+            (
+                KvFieldKind::UInt64,
+                unsigned
+                    .map(|value| value.map(StoredValue::UInt64))
+                    .to_vec(),
+                Arc::new(UInt64Array::from(unsigned.to_vec())) as ArrayRef,
+            ),
+            (
+                KvFieldKind::Boolean,
+                vec![
+                    None,
+                    Some(StoredValue::Boolean(false)),
+                    Some(StoredValue::Boolean(true)),
+                ],
+                Arc::new(BooleanArray::from(vec![None, Some(false), Some(true)])) as ArrayRef,
+            ),
+            (
+                KvFieldKind::Utf8,
+                vec![
+                    None,
+                    Some(StoredValue::Utf8("3.25".into())),
+                    Some(StoredValue::Utf8("-0.5".into())),
+                ],
+                Arc::new(StringArray::from(vec![None, Some("3.25"), Some("-0.5")])) as ArrayRef,
+            ),
+        ];
+        let context = SessionContext::new();
+        for (kind, values, array) in cases {
+            let input = RecordBatch::try_from_iter([("value", array)]).unwrap();
+            let schema = DFSchema::try_from(input.schema().as_ref().clone()).unwrap();
+            let native = context
+                .create_physical_expr(
+                    Expr::Cast(Cast::new(Box::new(col("value")), DataType::Float64)),
+                    &schema,
+                )
+                .unwrap()
+                .evaluate(&input)
+                .unwrap()
+                .into_array(input.num_rows())
+                .unwrap();
+            let request = scalar_request(vec![reducer(
+                RangeReduceOp::MinField,
+                Some(KvExpr::CastFloat64(Box::new(KvExpr::Field(
+                    KvFieldRef::Value {
+                        index: 0,
+                        kind,
+                        nullable: true,
+                    },
+                )))),
+            )]);
+            for (index, value) in values.into_iter().enumerate() {
+                let expected =
+                    scalar_to_reduced(ScalarValue::try_from_array(&native, index).unwrap())
+                        .unwrap();
+                let response = reduce(&[make_row(b"a", vec![value])], &request).unwrap();
+                assert_eq!(response.results[0].value, expected, "{kind:?} row {index}");
+            }
+        }
+    }
+
+    #[test]
+    fn reducer_filters_preserve_scalar_and_grouped_evaluation_order() {
+        let filter = KvPredicate {
+            checks: vec![KvPredicateCheck {
+                field: KvFieldRef::Value {
+                    index: 0,
+                    kind: KvFieldKind::Int64,
+                    nullable: true,
+                },
+                constraint: KvPredicateConstraint::IntRange {
+                    min: Some(2),
+                    max: None,
+                },
+            }],
+            contradiction: false,
+        };
+        let rows = (1..=4)
+            .map(|id| make_row(&[id], vec![Some(StoredValue::Int64(i64::from(id)))]))
+            .collect::<Vec<_>>();
+        let division = KvExpr::Div(
+            Box::new(int64_value_field(0)),
+            Box::new(KvExpr::Sub(
+                Box::new(int64_value_field(0)),
+                Box::new(KvExpr::Literal(KvReducedValue::Int64(1))),
+            )),
+        );
+        for (expr, expected) in [
+            (division.clone(), result_i64(4)),
+            (KvExpr::CastFloat64(Box::new(division)), result_f64(4.0)),
+        ] {
+            let mut sum = reducer(RangeReduceOp::SumField, Some(expr));
+            sum.filter = Some(filter.clone());
+            let mut request = scalar_request(vec![reducer(RangeReduceOp::CountAll, None), sum]);
+            let response = reduce(&rows, &request).unwrap();
+            assert_eq!(response.results[0].value, result_u64(4));
+            assert_eq!(response.results[1].value, expected);
+
+            request.group_by = vec![KvExpr::Literal(KvReducedValue::Int64(0))];
+            let error = reduce(&rows, &request).unwrap_err();
+            assert!(error.to_string().contains("Divide by zero"), "{error}");
+
+            request.filter = Some(filter.clone());
+            let response = reduce(&rows, &request).unwrap();
+            assert_eq!(response.groups[0].results[0].value, result_u64(3));
+            assert_eq!(response.groups[0].results[1].value, expected);
+        }
+    }
+
+    #[test]
+    fn reducer_masks_retain_groups_and_decode_filter_only_values() {
+        let mut filtered_count = reducer(RangeReduceOp::CountAll, None);
+        filtered_count.filter = Some(KvPredicate {
+            checks: vec![KvPredicateCheck {
+                field: KvFieldRef::Value {
+                    index: 0,
+                    kind: KvFieldKind::Int64,
+                    nullable: true,
+                },
+                constraint: KvPredicateConstraint::IntRange {
+                    min: Some(2),
+                    max: None,
+                },
+            }],
+            contradiction: false,
+        });
+        let mut request =
+            scalar_request(vec![filtered_count, reducer(RangeReduceOp::CountAll, None)]);
+        let rows = [
+            make_row(b"a", vec![Some(StoredValue::Int64(1))]),
+            make_row(b"b", vec![None]),
+            make_row(b"c", vec![Some(StoredValue::Int64(3))]),
+        ];
+        let plan = ReducePlan::new(Arc::new(request.clone()), &TaskContext::default()).unwrap();
+        assert!(plan.needs_value);
+        assert!(plan.fields.is_empty());
+        let batch = plan.batch(&rows).unwrap();
+        assert_eq!(batch.num_rows(), 3);
+        assert_eq!(batch.num_columns(), 1);
+        assert_eq!(
+            batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<BooleanArray>()
+                .unwrap(),
+            &BooleanArray::from(vec![false, false, true])
+        );
+        let response = reduce(&rows, &request).unwrap();
+        assert_eq!(response.results[0].value, result_u64(1));
+        assert_eq!(response.results[1].value, result_u64(3));
+        assert!(reduce(
+            &[(Key::default(), Bytes::from_static(b"bad row"))],
+            &request
+        )
+        .is_err());
+
+        request.group_by = vec![int64_value_field(0)];
+        let response = reduce(&rows, &request).unwrap();
+        assert_eq!(response.groups.len(), 3);
+        for group in response.groups {
+            let accepted = group.group_values[0] == result_i64(3);
+            assert_eq!(group.results[0].value, result_u64(u64::from(accepted)));
+            assert_eq!(group.results[1].value, result_u64(1));
+        }
+    }
+
+    #[test]
+    fn reducer_key_masks_do_not_require_payloads() {
+        let key_field = KvFieldRef::Key {
+            byte_offset: 0,
+            kind: KvFieldKind::Int64,
+        };
+        let mut filtered = reducer(RangeReduceOp::CountAll, None);
+        filtered.filter = Some(KvPredicate {
+            checks: vec![KvPredicateCheck {
+                field: key_field,
+                constraint: KvPredicateConstraint::IntRange {
+                    min: Some(2),
+                    max: None,
+                },
+            }],
+            contradiction: false,
+        });
+        let request = scalar_request(vec![filtered, reducer(RangeReduceOp::CountAll, None)]);
+        let plan = ReducePlan::new(Arc::new(request.clone()), &TaskContext::default()).unwrap();
+        assert!(!plan.needs_value);
+        let rows = [1_i64, 2]
+            .into_iter()
+            .map(|value| {
+                (
+                    Key::from(((value as u64) ^ (1 << 63)).to_be_bytes().to_vec()),
+                    Bytes::from_static(b"bad row"),
+                )
+            })
+            .collect::<Vec<_>>();
+        let response = reduce(&rows, &request).unwrap();
+        assert_eq!(response.results[0].value, result_u64(1));
+        assert_eq!(response.results[1].value, result_u64(2));
+    }
+
+    #[tokio::test]
+    async fn expression_materialization_respects_input_byte_budget() {
+        use datafusion::execution::memory_pool::FairSpillPool;
+        use datafusion::execution::runtime_env::RuntimeEnvBuilder;
+
+        #[derive(Clone)]
+        struct Rows(Vec<(Bytes, Bytes)>);
+        impl crate::Sequence for Rows {
+            fn current_sequence(&self) -> u64 {
+                1
+            }
+        }
+        impl RangeScan for Rows {
+            async fn next_batch(
+                &mut self,
+                max_items: usize,
+            ) -> Result<crate::RangeScanBatch, String> {
+                Ok(crate::RangeScanBatch {
+                    rows: self.0.drain(..max_items.min(self.0.len())).collect(),
+                    extra: QueryExtra::new(),
+                })
+            }
+        }
+        impl Query for Rows {
+            type RangeScan = Rows;
+            async fn range_scan(&self, _: Key, _: Key, _: usize, _: bool) -> Result<Rows, String> {
+                Ok(self.clone())
+            }
+            async fn get(&self, _: Bytes) -> Result<(Option<Bytes>, QueryExtra), String> {
+                unreachable!()
+            }
+            async fn get_many(
+                &self,
+                _: Vec<Bytes>,
+            ) -> Result<(Vec<(Bytes, Option<Bytes>)>, QueryExtra), String> {
+                unreachable!()
+            }
+        }
+        let literal_bytes = 256 * 1024;
+        let literal = KvExpr::Literal(KvReducedValue::Utf8("X".repeat(literal_bytes)));
+        let context = Arc::new(TaskContext::default());
+        let mut cases = Vec::new();
+        for expressions in [
+            vec![literal.clone()],
+            vec![KvExpr::Lower(Box::new(literal.clone())); 4],
+            vec![
+                KvExpr::CastFloat64(Box::new(KvExpr::Literal(KvReducedValue::Utf8(
+                    "0".repeat(literal_bytes),
+                ))));
+                4
+            ],
+        ] {
+            let outputs = expressions.len();
+            let request = scalar_request(
+                expressions
+                    .into_iter()
+                    .map(|expr| reducer(RangeReduceOp::MinField, Some(expr)))
+                    .collect(),
+            );
+            cases.push((
+                request,
+                literal_bytes * outputs,
+                REDUCE_BATCH_BYTES,
+                context.clone(),
+            ));
+        }
+        let budget = 8 * 1024;
+        let context = Arc::new(
+            TaskContext::default().with_runtime(
+                RuntimeEnvBuilder::new()
+                    .with_memory_pool(Arc::new(FairSpillPool::new(budget * 8)))
+                    .build_arc()
+                    .unwrap(),
+            ),
+        );
+        for (group_by, count) in [
+            (vec![KvExpr::Literal(KvReducedValue::Int64(0))], 1024),
+            (Vec::new(), 32),
+        ] {
+            let request = RangeReduceRequest {
+                reducers: vec![reducer(RangeReduceOp::CountAll, None); count],
+                group_by,
+                filter: None,
+            };
+            cases.push((request, count / 8, budget, context.clone()));
+        }
+        for (request, bytes_per_row, budget, context) in cases {
+            let plan = Arc::new(ReducePlan::new(Arc::new(request), &context).unwrap());
+            let partition = ReducePartition {
+                query: Arc::new(Rows(vec![(Bytes::new(), Bytes::new()); REDUCE_BATCH_ROWS])),
+                start: Bytes::new(),
+                end: Bytes::new(),
+                plan,
+                extra: Arc::new(Mutex::new(QueryExtra::new())),
+            };
+            let mut stream = partition.execute(context.clone());
+            let mut total_rows = 0;
+            while let Some(batch) = stream.next().await {
+                let batch = batch.unwrap();
+                assert!(
+                    batch.num_rows() * bytes_per_row <= budget,
+                    "{} rows broadcast {} bytes per row",
+                    batch.num_rows(),
+                    bytes_per_row
+                );
+                total_rows += batch.num_rows();
+            }
+            assert_eq!(total_rows, REDUCE_BATCH_ROWS);
+        }
     }
 
     #[test]
@@ -1275,7 +2223,7 @@ mod tests {
         assert!(reduce(&rows, &request).is_err());
     }
     #[test]
-    fn native_grouping_preserves_null_nan_payloads_and_signed_zero() {
+    fn grouping_preserves_null_nan_payloads_and_signed_zero() {
         let nan_a = f64::from_bits(0x7ff8_0000_0000_0001);
         let nan_b = f64::from_bits(0x7ff8_0000_0000_0002);
         let values = [
@@ -1302,10 +2250,12 @@ mod tests {
             .groups
             .iter()
             .map(|group| {
-                (
-                    exoware_sdk::kv_codec::encode_reduced_group_key(&group.group_values),
-                    group.results[0].value.clone(),
-                )
+                let key = match group.group_values.as_slice() {
+                    [None] => None,
+                    [Some(KvReducedValue::Float64(value))] => Some(value.to_bits()),
+                    other => panic!("unexpected float group key {other:?}"),
+                };
+                (key, group.results[0].value.clone())
             })
             .collect::<std::collections::BTreeMap<_, _>>();
         for (value, count) in [
@@ -1314,45 +2264,98 @@ mod tests {
             (Some(nan_a), 2),
             (Some(nan_b), 1),
         ] {
-            assert_eq!(
-                groups[&exoware_sdk::kv_codec::encode_reduced_group_key(&[
-                    value.map(KvReducedValue::Float64)
-                ])],
-                result_u64(count)
-            );
+            assert_eq!(groups[&value.map(f64::to_bits)], result_u64(count));
         }
     }
 
-    #[test]
-    fn native_float_extrema_preserve_total_order() {
+    #[tokio::test]
+    async fn float_extrema_preserve_nan_and_signed_zero_results() {
         let positive_nan = f64::from_bits(0x7ff8_0000_0000_0001);
         let negative_nan = f64::from_bits(0xfff8_0000_0000_0001);
         for values in [
-            vec![f64::INFINITY],
-            vec![f64::NEG_INFINITY],
-            vec![positive_nan, 0.0],
-            vec![negative_nan, f64::NEG_INFINITY],
-            vec![0.0, -0.0],
-            vec![-0.0, 0.0],
+            vec![],
+            vec![None],
+            vec![Some(f64::INFINITY)],
+            vec![Some(f64::NEG_INFINITY)],
+            vec![Some(positive_nan), Some(0.0)],
+            vec![Some(0.0), Some(positive_nan)],
+            vec![Some(negative_nan), Some(f64::NEG_INFINITY)],
+            vec![Some(f64::NEG_INFINITY), Some(negative_nan)],
+            vec![Some(positive_nan), Some(negative_nan)],
+            vec![Some(negative_nan), Some(positive_nan)],
+            vec![Some(0.0), Some(-0.0)],
+            vec![Some(-0.0), Some(0.0)],
+            vec![None, Some(1.0), Some(positive_nan), Some(2.0), None],
         ] {
             let rows = values
                 .iter()
                 .enumerate()
-                .map(|(i, value)| {
-                    make_row(&i.to_be_bytes(), vec![Some(StoredValue::Float64(*value))])
+                .map(|(i, value)| make_row(&i.to_be_bytes(), vec![value.map(StoredValue::Float64)]))
+                .collect::<Vec<_>>();
+            let batch = RecordBatch::try_from_iter([
+                (
+                    "category",
+                    Arc::new(Int64Array::from(vec![0; values.len()])) as ArrayRef,
+                ),
+                (
+                    "value",
+                    Arc::new(Float64Array::from(values.clone())) as ArrayRef,
+                ),
+            ])
+            .unwrap();
+            let schema = batch.schema();
+            let source = Arc::new(
+                StreamingTableExec::try_new(
+                    schema.clone(),
+                    vec![Arc::new(FixturePartition {
+                        schema: schema.clone(),
+                        batches: vec![batch],
+                    })],
+                    None,
+                    [],
+                    false,
+                    None,
+                )
+                .unwrap(),
+            );
+            let aggregates = [min_udaf(), max_udaf(), count_udaf()]
+                .into_iter()
+                .enumerate()
+                .map(|(index, function)| {
+                    Arc::new(
+                        AggregateExprBuilder::new(
+                            function,
+                            vec![Arc::new(Column::new("value", 1))],
+                        )
+                        .schema(schema.clone())
+                        .alias(format!("result_{index}"))
+                        .build()
+                        .unwrap(),
+                    )
                 })
                 .collect::<Vec<_>>();
-            let expected = [
-                *values
-                    .iter()
-                    .min_by(|left, right| left.total_cmp(right))
-                    .unwrap(),
-                *values
-                    .iter()
-                    .max_by(|left, right| left.total_cmp(right))
-                    .unwrap(),
-            ];
+
+            // Each Store range uses Single aggregation; NaN results depend on this phase.
             for grouped in [false, true] {
+                let native = AggregateExec::try_new(
+                    AggregateMode::Single,
+                    PhysicalGroupBy::new_single(if grouped {
+                        vec![(Arc::new(Column::new("category", 0)), "category".into())]
+                    } else {
+                        Vec::new()
+                    }),
+                    aggregates.clone(),
+                    vec![None; aggregates.len()],
+                    source.clone(),
+                    schema.clone(),
+                )
+                .unwrap();
+                let expected = datafusion::physical_plan::collect(
+                    Arc::new(native),
+                    Arc::new(TaskContext::default()),
+                )
+                .await
+                .unwrap();
                 let request = RangeReduceRequest {
                     reducers: vec![
                         reducer(RangeReduceOp::MinField, Some(float64_value_field(0))),
@@ -1367,19 +2370,36 @@ mod tests {
                     filter: None,
                 };
                 let response = reduce(&rows, &request).unwrap();
+                let Some(expected) = expected.iter().find(|batch| batch.num_rows() != 0) else {
+                    assert!(response.groups.is_empty());
+                    continue;
+                };
                 let results = if grouped {
+                    assert_eq!(response.groups.len(), 1);
                     &response.groups[0].results
                 } else {
                     &response.results
                 };
-                assert_eq!(results[2].value, result_u64(values.len() as u64));
-                for (result, expected) in results.iter().zip(expected) {
-                    let Some(KvReducedValue::Float64(actual)) = result.value else {
-                        panic!("float result");
+                assert_eq!(
+                    results[2].value,
+                    result_u64(values.iter().flatten().count() as u64)
+                );
+                for (index, result) in results.iter().take(2).enumerate() {
+                    let actual = match result.value {
+                        Some(KvReducedValue::Float64(value)) => Some(value.to_bits()),
+                        None => None,
+                        _ => panic!("float result"),
+                    };
+                    let ScalarValue::Float64(expected) = ScalarValue::try_from_array(
+                        expected.column(usize::from(grouped) + index),
+                        0,
+                    )
+                    .unwrap() else {
+                        panic!("expected Float64 result");
                     };
                     assert_eq!(
-                        actual.to_bits(),
-                        expected.to_bits(),
+                        actual,
+                        expected.map(f64::to_bits),
                         "grouped={grouped}, inputs={values:?}",
                     );
                 }
@@ -1388,7 +2408,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn native_spill_preserves_full_width_decimal_states_and_repeated_groups() {
+    async fn spill_preserves_full_width_decimal_states_and_repeated_groups() {
         use datafusion::execution::context::SessionConfig;
         use datafusion::execution::memory_pool::FairSpillPool;
         use datafusion::execution::runtime_env::RuntimeEnvBuilder;
@@ -1440,18 +2460,14 @@ mod tests {
                                 )
                             }),
                             (group != 0).then(|| {
-                                StoredValue::Float64(if pass == 0 {
-                                    f64::from_bits(0x7ff8_0000_0000_0001)
-                                } else {
-                                    0.0
-                                })
+                                StoredValue::Float64(if pass == 0 { -100.0 } else { 100.0 })
                             }),
                         ],
                     )
                 })
             })
             .collect::<Vec<_>>();
-        let plan = ReducePlan::new(Arc::new(request)).unwrap();
+        let plan = ReducePlan::new(Arc::new(request), &TaskContext::default()).unwrap();
         let batches = rows
             .chunks(128)
             .map(|rows| plan.batch(rows).unwrap())
@@ -1508,7 +2524,7 @@ mod tests {
                     );
                     for (result, expected) in group.results[5..]
                         .iter()
-                        .zip([0.0_f64.to_bits(), 0x7ff8_0000_0000_0001])
+                        .zip([(-100.0_f64).to_bits(), 100.0_f64.to_bits()])
                     {
                         let Some(KvReducedValue::Float64(value)) = result.value else {
                             panic!("float result");

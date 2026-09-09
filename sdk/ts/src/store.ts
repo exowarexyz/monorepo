@@ -409,6 +409,7 @@ function prefixExpr(expr: KvExpr, prefixBytes: number): KvExpr {
             } as KvExpr;
         case 'lower':
         case 'dateTruncDay':
+        case 'castFloat64':
             return {
                 ...expr,
                 expr: {
@@ -436,6 +437,7 @@ function prefixReducer(reducer: RangeReducerSpec, prefixBytes: number): RangeRed
     return {
         ...reducer,
         expr: reducer.expr ? prefixExpr(reducer.expr, prefixBytes) : undefined,
+        filter: reducer.filter ? prefixPredicate(reducer.filter, prefixBytes) : undefined,
     } as RangeReducerSpec;
 }
 

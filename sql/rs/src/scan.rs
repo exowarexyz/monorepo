@@ -1402,7 +1402,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn native_residuals_preserve_casts_nulls_functions_and_limits() {
+    async fn residuals_preserve_casts_nulls_functions_and_limits() {
         let fixture = Fixture::new(
             vec![
                 column("id", DataType::Int64, false),
@@ -1766,7 +1766,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn decimal_scale_and_timestamp_casts_preserve_native_predicates() {
+    async fn decimal_scale_and_timestamp_casts_preserve_predicate_results() {
         for indexed in [false, true] {
             let fixture = Fixture::new(
                 vec![
@@ -1828,7 +1828,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn timestamp_units_use_native_coercion() {
+    async fn timestamp_units_coerce_comparisons() {
         for indexed in [false, true] {
             let fixture = Fixture::new(
                 vec![
@@ -1944,7 +1944,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn float_predicates_match_native_total_order_with_and_without_indexes() {
+    async fn float_predicates_preserve_total_order_with_and_without_indexes() {
         for indexed in [false, true] {
             let fixture = Fixture::new(
                 vec![

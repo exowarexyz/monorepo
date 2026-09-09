@@ -20,6 +20,7 @@
 
 use std::collections::HashMap;
 use std::future::Future;
+use std::panic::AssertUnwindSafe;
 use std::pin::Pin;
 use std::sync::Arc;
 
@@ -46,7 +47,7 @@ use exoware_sdk::selector::Selector;
 use exoware_sdk::stream_filter::StreamFilter;
 use exoware_sdk::{PrefixedStoreClient, StreamSubscription, StreamSubscriptionFrame};
 use futures::stream::{self, Stream};
-use futures::TryStreamExt;
+use futures::{FutureExt, TryStreamExt};
 
 use crate::builder::ProjectedBatchBuilder;
 use crate::codec::decode_primary_key_selected;
@@ -313,7 +314,7 @@ impl Service for SqlConnect {
         request: ServiceRequest<'_, QueryRequest>,
     ) -> impl Future<Output = connectrpc::ServiceResult<QueryResponse>> + Send {
         let server = self.server.clone();
-        async move {
+        AssertUnwindSafe(async move {
             let sql = request.sql.to_string();
             let df = server
                 .ctx
@@ -343,7 +344,11 @@ impl Service for SqlConnect {
                 results,
                 ..Default::default()
             })
-        }
+        })
+        .catch_unwind()
+        .map(|result| {
+            result.unwrap_or_else(|_| Err(ConnectError::internal("SQL query execution panicked")))
+        })
     }
 }
 
@@ -776,6 +781,253 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn query_rpc_returns_internal_on_count_overflow_and_remains_usable() {
+        use crate::proto::sql::v1::ServiceClient;
+        use crate::TableColumnConfig;
+        use buffa::Message;
+        use connectrpc::client::{ClientConfig, HttpClient};
+        use datafusion::execution::memory_pool::{FairSpillPool, MemoryPool, PeakRecordingPool};
+        use datafusion::execution::runtime_env::RuntimeEnvBuilder;
+        use datafusion::prelude::SessionConfig;
+        use exoware_sdk::kv_codec::KvReducedValue;
+        use exoware_sdk::{RangeReduceGroup, RangeReduceResponse, RangeReduceResult, StoreClient};
+
+        #[derive(Clone, Default)]
+        struct OverflowReduceTransport {
+            requests: Arc<Mutex<Vec<exoware_sdk::query::ReduceRequest>>>,
+        }
+
+        impl connectrpc::client::ClientTransport for OverflowReduceTransport {
+            type ResponseBody = axum::body::Body;
+            type Error = ConnectError;
+
+            fn send(
+                &self,
+                request: axum::http::Request<connectrpc::client::ClientBody>,
+            ) -> connectrpc::client::BoxFuture<
+                'static,
+                Result<axum::http::Response<Self::ResponseBody>, Self::Error>,
+            > {
+                let transport = self.clone();
+                Box::pin(async move {
+                    assert_eq!(request.uri().path(), "/store.query.v1.Service/Reduce");
+                    let body = axum::body::to_bytes(
+                        axum::body::Body::new(request.into_body()),
+                        usize::MAX,
+                    )
+                    .await
+                    .unwrap();
+                    let request = crate::tests::decode_reduce_request(&body);
+                    let first = {
+                        let mut requests = transport.requests.lock().unwrap();
+                        let first = requests.is_empty();
+                        requests.push(request.clone());
+                        first
+                    };
+                    let average = request.params.reducers.iter().any(|reducer| {
+                        reducer.op.as_known() == Some(exoware_sdk::query::RangeReduceOp::SumField)
+                    });
+                    let count = if first {
+                        if average {
+                            u64::MAX
+                        } else {
+                            i64::MAX as u64
+                        }
+                    } else {
+                        1
+                    };
+                    let results = request
+                        .params
+                        .reducers
+                        .iter()
+                        .map(|reducer| {
+                            let value = match reducer.op.as_known().unwrap() {
+                                exoware_sdk::query::RangeReduceOp::CountAll
+                                | exoware_sdk::query::RangeReduceOp::CountField => {
+                                    KvReducedValue::UInt64(count)
+                                }
+                                exoware_sdk::query::RangeReduceOp::SumField => {
+                                    KvReducedValue::Float64(1.0)
+                                }
+                                other => panic!("unexpected reducer {other:?}"),
+                            };
+                            RangeReduceResult { value: Some(value) }
+                        })
+                        .collect();
+                    let response = if request.params.group_by.is_empty() {
+                        RangeReduceResponse {
+                            results,
+                            groups: vec![],
+                        }
+                    } else {
+                        RangeReduceResponse {
+                            results: vec![],
+                            groups: vec![RangeReduceGroup {
+                                group_values: vec![Some(KvReducedValue::Int64(7))],
+                                results,
+                            }],
+                        }
+                    };
+                    let (results, groups) = exoware_sdk::to_proto_reduce_response(response);
+                    let response = exoware_sdk::query::ReduceResponse {
+                        results,
+                        groups,
+                        detail: Some(exoware_sdk::query::Detail {
+                            sequence_number: 7,
+                            ..Default::default()
+                        })
+                        .into(),
+                        ..Default::default()
+                    };
+                    let mut body = connectrpc::envelope::Envelope::data(response.encode_to_bytes())
+                        .encode()
+                        .to_vec();
+                    body.extend_from_slice(
+                        &connectrpc::envelope::Envelope::end_stream(Bytes::from_static(b"{}"))
+                            .encode(),
+                    );
+                    Ok(axum::http::Response::builder()
+                        .header("content-type", "application/connect+proto")
+                        .body(axum::body::Body::from(body))
+                        .unwrap())
+                })
+            }
+        }
+
+        let transport = OverflowReduceTransport::default();
+        let client = StoreClient::builder()
+            .url("http://faulty-store.test")
+            .client_transport(transport.clone())
+            .retry_config(exoware_sdk::RetryConfig::disabled())
+            .build()
+            .unwrap();
+        let schema = KvSchema::new(PrefixedStoreClient::empty(client))
+            .table(
+                "counts",
+                vec![
+                    TableColumnConfig::new("id", DataType::Int64, false),
+                    TableColumnConfig::new("category", DataType::Int64, false),
+                    TableColumnConfig::new("value", DataType::Float64, true),
+                ],
+                vec!["id".to_string()],
+                vec![],
+            )
+            .unwrap();
+        let mut server = SqlServer::new(schema).unwrap();
+        let pool = Arc::new(PeakRecordingPool::new(Arc::new(FairSpillPool::new(
+            8 * 1024 * 1024,
+        ))));
+        let runtime = RuntimeEnvBuilder::new()
+            .with_memory_pool(pool.clone())
+            .build_arc()
+            .unwrap();
+        let ctx = SessionContext::new_with_state(
+            crate::session_state_builder()
+                .with_runtime_env(runtime)
+                .with_config(SessionConfig::new().with_target_partitions(1))
+                .build(),
+        );
+        ctx.register_table(
+            "counts",
+            server.session().table_provider("counts").await.unwrap(),
+        )
+        .unwrap();
+        server.ctx = Arc::new(ctx);
+        let server = Arc::new(server);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let app = axum::Router::new().fallback_service(sql_connect_stack(server));
+        let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let client = ServiceClient::new(
+            HttpClient::plaintext(),
+            ClientConfig::new(format!("http://{address}").parse().unwrap())
+                .with_default_timeout(std::time::Duration::from_secs(5)),
+        );
+        for aggregate in ["COUNT(*)", "AVG(value)"] {
+            for grouped in [true, false] {
+                transport.requests.lock().unwrap().clear();
+                pool.reset_peak();
+                let (key, group_by) = if grouped {
+                    ("category, ", " GROUP BY category")
+                } else {
+                    ("", "")
+                };
+                let sql =
+                    format!("SELECT {key}{aggregate} FROM counts WHERE id IN (1, 3){group_by}");
+                let error = client
+                    .query(QueryRequest {
+                        sql: sql.clone(),
+                        ..Default::default()
+                    })
+                    .await
+                    .unwrap_err();
+                assert_eq!(
+                    error.code,
+                    connectrpc::ErrorCode::Internal,
+                    "{sql}: {error}"
+                );
+                assert_eq!(
+                    error.message.as_deref(),
+                    Some("SQL query execution panicked"),
+                    "{sql}"
+                );
+                assert_eq!(pool.reserved(), 0, "query reservation after panic: {sql}");
+                if grouped {
+                    assert!(
+                        pool.peak_reserved() > 0,
+                        "first partial must reach Final aggregation: {sql}"
+                    );
+                }
+                {
+                    let requests = transport.requests.lock().unwrap();
+                    assert_eq!(requests.len(), 2, "{sql}: {requests:?}");
+                    assert!(
+                        requests[0].end < requests[1].start,
+                        "disjoint ranges: {sql}"
+                    );
+                    assert_eq!(requests[0].params, requests[1].params, "{sql}");
+                    assert_eq!(requests[0].min_sequence_number, None);
+                    assert_eq!(requests[1].min_sequence_number, Some(7));
+                    assert_eq!(requests[0].params.group_by.len(), usize::from(grouped));
+                }
+                let response = client
+                    .query(QueryRequest {
+                        sql: "SELECT 1".into(),
+                        ..Default::default()
+                    })
+                    .await
+                    .unwrap()
+                    .into_owned();
+                let batch = StreamReader::try_new(response.results.as_ref(), None)
+                    .unwrap()
+                    .next()
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(batch.num_rows(), 1);
+                assert_eq!(
+                    batch
+                        .column(0)
+                        .as_any()
+                        .downcast_ref::<Int64Array>()
+                        .unwrap()
+                        .value(0),
+                    1
+                );
+                assert_eq!(transport.requests.lock().unwrap().len(), 2);
+            }
+        }
+        let error = client
+            .query(QueryRequest {
+                sql: "SELECT FROM".into(),
+                ..Default::default()
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, connectrpc::ErrorCode::InvalidArgument);
+        task.abort();
+    }
+
+    #[tokio::test]
     async fn query_parse_errors_map_to_invalid_argument() {
         let ctx = SessionContext::new();
         let DataFusionError::SQL(parser_error, _) = ctx.sql("SELECT FROM").await.unwrap_err()
@@ -1017,7 +1269,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn subscription_scalar_predicates_match_native_sql() {
+    async fn subscription_scalar_predicates_match_sql_results() {
         use datafusion::datasource::MemTable;
 
         let batch = predicate_batch();

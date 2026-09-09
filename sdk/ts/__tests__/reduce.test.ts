@@ -1,16 +1,17 @@
-import { create, toBinary, toJsonString } from '@bufbuild/protobuf';
+import { create, fromBinary, toBinary, toJsonString } from '@bufbuild/protobuf';
 import { Code, ConnectError } from '@connectrpc/connect';
 import { encodeEnvelope } from '@connectrpc/connect/protocol';
 import { Client } from '../src/client';
 import { HttpError } from '../src/error';
 import {
     ReduceParamsSchema,
+    ReduceRequestSchema,
     ReduceResponseSchema,
     RangeReduceOp,
     type ReduceRequest,
     type ReduceResponse,
 } from '../src/gen/ts/store/v1/query_pb';
-import { SerializableReadSession, StoreClient } from '../src/store';
+import { SerializableReadSession, StoreClient, StoreKeyPrefix } from '../src/store';
 
 const start = new Uint8Array([1]);
 const end = new Uint8Array([2]);
@@ -29,6 +30,99 @@ function frame(group: bigint, sequenceNumber: bigint = 7n) {
 function clientWithReduce(reduce: Client['query']['reduce']): Client {
     return { query: { reduce }, credential: 'absent' } as unknown as Client;
 }
+
+test.each(['store', 'session'])('reduce round trips and prefixes nested casts through %s', async (kind) => {
+    const paramsAt = (byteOffset: number, bitOffset: number) => create(ReduceParamsSchema, {
+        reducers: [{
+            op: RangeReduceOp.SUM_FIELD,
+            expr: { expr: { case: 'castFloat64', value: { expr: { case: 'add', value: {
+                left: { expr: { case: 'field', value: { field: { case: 'key', value: { byteOffset } } } } },
+                right: { expr: { case: 'castFloat64', value: { expr: {
+                    case: 'field', value: { field: { case: 'value', value: { index: 2, nullable: true } } },
+                } } } },
+            } } } } },
+        }],
+        groupBy: [{ expr: { case: 'castFloat64', value: { expr: {
+            case: 'field', value: { field: { case: 'zOrderKey', value: { bitOffset, fieldPosition: 0, fieldWidths: [8] } } },
+        } } } }],
+    });
+    const params = paramsAt(9, 12);
+    let received: ReduceRequest | undefined;
+    const client = clientWithReduce(async function* (request) {
+        received = fromBinary(ReduceRequestSchema, toBinary(ReduceRequestSchema, request as ReduceRequest));
+        yield frame(1n);
+    });
+    const prefix = new StoreKeyPrefix(new Uint8Array([1, 2, 3]));
+    const store = kind === 'store'
+        ? new StoreClient(client, prefix)
+        : new SerializableReadSession(client, prefix);
+    for await (const result of store.reduce(start, end, params)) {
+        expect(result).toEqual(frame(1n));
+    }
+    expect(received!.params).toEqual(paramsAt(12, 36));
+    expect(params).toEqual(paramsAt(9, 12));
+});
+
+test('reduce preserves a missing cast child expression for server validation', async () => {
+    const params = create(ReduceParamsSchema, {
+        reducers: [{ expr: { expr: { case: 'castFloat64', value: {} } } }],
+    });
+    let received: ReduceRequest | undefined;
+    const client = clientWithReduce(async function* (request) {
+        received = fromBinary(ReduceRequestSchema, toBinary(ReduceRequestSchema, request as ReduceRequest));
+        yield frame(1n);
+    });
+    const store = new StoreClient(client, new StoreKeyPrefix(new Uint8Array([1])));
+    for await (const result of store.reduce(start, end, params)) {
+        expect(result).toEqual(frame(1n));
+    }
+    expect(received!.params).toEqual(params);
+});
+
+test.each(['store', 'session'])('reduce prefixes reducer filters through %s', async (kind) => {
+    const params = create(ReduceParamsSchema, {
+        reducers: [{
+            op: RangeReduceOp.COUNT_ALL,
+            filter: {
+                checks: [
+                    {
+                        field: { field: { case: 'key', value: { byteOffset: 9 } } },
+                        constraint: { constraint: { case: 'isNotNull', value: true } },
+                    },
+                    {
+                        field: { field: { case: 'zOrderKey', value: { bitOffset: 12, fieldPosition: 0, fieldWidths: [8] } } },
+                        constraint: { constraint: { case: 'isNotNull', value: true } },
+                    },
+                    {
+                        field: { field: { case: 'value', value: { index: 2, nullable: true } } },
+                        constraint: { constraint: { case: 'isNull', value: true } },
+                    },
+                ],
+            },
+        }, { op: RangeReduceOp.COUNT_ALL }],
+        filter: { contradiction: true },
+    });
+    const original = toBinary(ReduceParamsSchema, params);
+    let received: ReduceRequest | undefined;
+    const client = clientWithReduce(async function* (request) {
+        received = fromBinary(ReduceRequestSchema, toBinary(ReduceRequestSchema, request as ReduceRequest));
+        yield frame(1n);
+    });
+    const prefix = new StoreKeyPrefix(new Uint8Array([1, 2, 3]));
+    const store = kind === 'store'
+        ? new StoreClient(client, prefix)
+        : new SerializableReadSession(client, prefix);
+    for await (const result of store.reduce(start, end, params)) {
+        expect(result).toEqual(frame(1n));
+    }
+    const checks = received!.params!.reducers[0].filter!.checks;
+    expect(checks[0].field!.field).toMatchObject({ case: 'key', value: { byteOffset: 12 } });
+    expect(checks[1].field!.field).toMatchObject({ case: 'zOrderKey', value: { bitOffset: 36 } });
+    expect(checks[2]).toEqual(params.reducers[0].filter!.checks[2]);
+    expect(received!.params!.reducers[1].filter).toBeUndefined();
+    expect(received!.params!.filter).toEqual(params.filter);
+    expect(toBinary(ReduceParamsSchema, params)).toEqual(original);
+});
 
 function response(frames: ReduceResponse[], code?: string, useBinaryFormat = true): Response {
     return new Response(new ReadableStream<Uint8Array>({
