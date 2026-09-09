@@ -56,7 +56,7 @@ use crate::codec::decode_primary_key_selected;
 use crate::filter::ScanAccessPlan;
 use crate::predicate::QueryPredicate;
 use crate::schema::KvSchema;
-use crate::types::{IndexLayout, RequestReadSession, ResolvedIndexSpec, TableModel};
+use crate::types::{IndexLayout, ResolvedIndexSpec, TableModel};
 
 const MAX_CONNECTRPC_BODY_BYTES: usize = 256 * 1024 * 1024;
 
@@ -73,9 +73,7 @@ pub fn query_context_with_min_sequence(
     let read_session = store.create_session_with_sequence(min_sequence_number);
 
     let mut state = ctx.state();
-    state
-        .config_mut()
-        .set_extension(Arc::new(RequestReadSession(read_session)));
+    state.config_mut().set_extension(Arc::new(read_session));
     SessionContext::new_with_state(state)
 }
 

@@ -10,16 +10,13 @@ use exoware_sdk::SerializableReadSession;
 use crate::codec::{primary_key_prefix, secondary_index_prefix};
 
 // Share freshness state across the query while each provider keeps its own client and namespace.
-#[derive(Debug)]
-pub(crate) struct RequestReadSession(pub(crate) SerializableReadSession);
-
 pub(crate) fn request_read_session(
     config: &SessionConfig,
     client: &PrefixedStoreClient,
 ) -> Option<SerializableReadSession> {
     config
-        .get_extension::<RequestReadSession>()
-        .map(|request| request.0.with_client(client.clone()))
+        .get_extension::<SerializableReadSession>()
+        .map(|request| request.with_client(client.clone()))
 }
 
 /// Every table/index family is named by a single packed byte

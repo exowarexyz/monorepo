@@ -71,14 +71,7 @@ function decodeTableStream(bytes: Uint8Array): Table {
   return new Table(schema, batches);
 }
 
-function decodeQuery(response: SqlQueryResponse): DecodedQueryResult {
-  return {
-    sequenceNumber: response.sequenceNumber,
-    table: decodeTableStream(response.results),
-  };
-}
-
-function decodeSubscribe(response: SqlSubscribeResponse): DecodedSubscribeFrame {
+function decodeResult(response: SqlQueryResponse | SqlSubscribeResponse): DecodedQueryResult {
   return {
     sequenceNumber: response.sequenceNumber,
     table: decodeTableStream(response.results),
@@ -148,7 +141,7 @@ export class SqlClient {
       }),
       options,
     );
-    return decodeQuery(response);
+    return decodeResult(response);
   }
 
   async tables(options?: CallOptions): Promise<DecodedTable[]> {
@@ -184,7 +177,7 @@ export class SqlClient {
       options,
     );
     for await (const frame of stream) {
-      yield decodeSubscribe(frame);
+      yield decodeResult(frame);
     }
   }
 }

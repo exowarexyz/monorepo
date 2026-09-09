@@ -175,8 +175,8 @@ workers behind a load balancer. It does not provide snapshot isolation.
 Queries without Store reads return the requested floor, or zero if none was supplied.
 
 Embedded DataFusion contexts share a request session when created with
-`query_context_with_min_sequence`. Otherwise each scan or aggregate creates
-its own session.
+`query_context_with_min_sequence`. Without a shared session in the context,
+each scan or aggregate creates its own session.
 
 Primary keys identify immutable rows. Inserting the same primary key more than
 once has undefined behavior. The write path does not enforce uniqueness. Use a
