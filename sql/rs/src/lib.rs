@@ -111,8 +111,8 @@ mod tests {
     };
     use exoware_sdk::RangeMode;
     use exoware_sdk::{
-        parse_range_traversal_direction, to_domain_reduce_request, to_proto_optional_reduced_value,
-        to_proto_reduced_value, RangeTraversalDirection, RangeTraversalModeError,
+        parse_range_traversal_direction, to_domain_reduce_request, to_proto_reduce_response,
+        RangeTraversalDirection, RangeTraversalModeError,
     };
     use exoware_sdk::{RangeReduceGroup, RangeReduceResponse, RangeReduceResult};
     use futures::{stream, TryStreamExt};
@@ -514,7 +514,7 @@ mod tests {
             &self,
             _ctx: Context,
             request: ServiceRequest<'_, ProtoReduceRequest>,
-        ) -> connectrpc::ServiceResult<ProtoReduceResponse> {
+        ) -> connectrpc::ServiceResult<connectrpc::ServiceStream<ProtoReduceResponse>> {
             ensure_min_sequence_number(&self.state.sequence_number, request.min_sequence_number)?;
             self.state
                 .range_reduce_calls
@@ -659,43 +659,27 @@ mod tests {
             };
             drop(guard);
             let token = state.sequence_number.load(AtomicOrdering::Relaxed);
-            connectrpc::Response::ok(ProtoReduceResponse {
-                results: response
-                    .results
-                    .into_iter()
-                    .map(|result| exoware_sdk::store::query::v1::RangeReduceResult {
-                        value: result.value.map(to_proto_reduced_value).into(),
-                        ..Default::default()
-                    })
-                    .collect(),
-                groups: response
-                    .groups
-                    .into_iter()
-                    .map(|group| {
-                        let group_values_present: Vec<bool> =
-                            group.group_values.iter().map(|v| v.is_some()).collect();
-                        exoware_sdk::store::query::v1::RangeReduceGroup {
-                            group_values: group
-                                .group_values
-                                .into_iter()
-                                .map(to_proto_optional_reduced_value)
-                                .collect(),
-                            group_values_present,
-                            results: group
-                                .results
-                                .into_iter()
-                                .map(|result| exoware_sdk::store::query::v1::RangeReduceResult {
-                                    value: result.value.map(to_proto_reduced_value).into(),
-                                    ..Default::default()
-                                })
-                                .collect(),
+            let (results, groups) = to_proto_reduce_response(response);
+            let frames = if groups.is_empty() {
+                vec![Ok(ProtoReduceResponse {
+                    results,
+                    detail: Some(query_detail(token)).into(),
+                    ..Default::default()
+                })]
+            } else {
+                // Small frames exercise cross-frame grouping in the existing aggregate fixtures
+                groups
+                    .chunks(2)
+                    .map(|groups| {
+                        Ok(ProtoReduceResponse {
+                            groups: groups.to_vec(),
+                            detail: Some(query_detail(token)).into(),
                             ..Default::default()
-                        }
+                        })
                     })
-                    .collect(),
-                detail: Some(query_detail(token)).into(),
-                ..Default::default()
-            })
+                    .collect()
+            };
+            Ok(connectrpc::Response::stream(stream::iter(frames)))
         }
     }
 
@@ -2920,7 +2904,9 @@ mod tests {
             let mut pred = QueryPredicate::default();
             pred.constraints
                 .insert(name_idx, PredicateConstraint::StringEq(name.to_string()));
-            let ranges = pred.primary_key_ranges(&model).unwrap();
+            let ranges = pred
+                .primary_key_ranges(&model, exoware_sdk::keys::MAX_KEY_LEN)
+                .unwrap();
             assert_eq!(
                 ranges.len(),
                 1,
@@ -2944,7 +2930,9 @@ mod tests {
         let mut pred = QueryPredicate::default();
         pred.constraints
             .insert(name_idx, PredicateConstraint::StringEq("al".to_string()));
-        let ranges = pred.primary_key_ranges(&model).unwrap();
+        let ranges = pred
+            .primary_key_ranges(&model, exoware_sdk::keys::MAX_KEY_LEN)
+            .unwrap();
         let alice = CellValue::Utf8("alice".to_string());
         let alice_key = encode_primary_key(0, &[&alice], &model).expect("stored key encodes");
         assert!(
@@ -2974,7 +2962,9 @@ mod tests {
         let mut pred = QueryPredicate::default();
         pred.constraints
             .insert(name_idx, PredicateConstraint::StringEq("al".to_string()));
-        let ranges = pred.primary_key_ranges(&model).unwrap();
+        let ranges = pred
+            .primary_key_ranges(&model, exoware_sdk::keys::MAX_KEY_LEN)
+            .unwrap();
         assert_eq!(ranges.len(), 1);
 
         for id in [i64::MIN, 0, 42, i64::MAX] {
@@ -3935,7 +3925,9 @@ mod tests {
             model.primary_key_indices[0],
             PredicateConstraint::IntIn(vec![200, 100, 300]),
         );
-        let ranges = pred.primary_key_ranges(&model).unwrap();
+        let ranges = pred
+            .primary_key_ranges(&model, exoware_sdk::keys::MAX_KEY_LEN)
+            .unwrap();
         assert_eq!(ranges.len(), 3);
         let expected_starts = [100, 200, 300]
             .into_iter()
@@ -3971,7 +3963,9 @@ mod tests {
             negated: false,
         });
         let pred = QueryPredicate::from_filters(&[filter], &model);
-        let ranges = pred.primary_key_ranges(&model).unwrap();
+        let ranges = pred
+            .primary_key_ranges(&model, exoware_sdk::keys::MAX_KEY_LEN)
+            .unwrap();
         assert_eq!(
             ranges.len(),
             2,
@@ -4004,7 +3998,9 @@ mod tests {
             negated: false,
         });
         let pred = QueryPredicate::from_filters(&[filter], &model);
-        let ranges = pred.primary_key_ranges(&model).unwrap();
+        let ranges = pred
+            .primary_key_ranges(&model, exoware_sdk::keys::MAX_KEY_LEN)
+            .unwrap();
         assert_eq!(
             ranges.len(),
             2,
@@ -4042,7 +4038,9 @@ mod tests {
             negated: false,
         });
         let pred = QueryPredicate::from_filters(&[filter], &model);
-        let ranges = pred.primary_key_ranges(&model).unwrap();
+        let ranges = pred
+            .primary_key_ranges(&model, exoware_sdk::keys::MAX_KEY_LEN)
+            .unwrap();
         assert_eq!(
             ranges.len(),
             2,
@@ -4078,7 +4076,9 @@ mod tests {
         pred.constraints.insert(0, PredicateConstraint::StringEq(a));
         pred.constraints.insert(1, PredicateConstraint::StringEq(b));
 
-        let ranges = pred.primary_key_ranges(&model).unwrap();
+        let ranges = pred
+            .primary_key_ranges(&model, exoware_sdk::keys::MAX_KEY_LEN)
+            .unwrap();
         assert!(
             ranges.is_empty(),
             "overflowing composite UTF-8 PK equality can never match"
@@ -5077,7 +5077,9 @@ mod tests {
             },
         );
 
-        let ranges = pred.primary_key_ranges(&model).unwrap();
+        let ranges = pred
+            .primary_key_ranges(&model, exoware_sdk::keys::MAX_KEY_LEN)
+            .unwrap();
         assert_eq!(ranges.len(), 1, "should produce exactly one range");
 
         let range = &ranges[0];
@@ -5155,7 +5157,9 @@ mod tests {
         pred.constraints
             .insert(0, PredicateConstraint::FixedBinaryEq(vec![0xDD; 16]));
 
-        let ranges = pred.primary_key_ranges(&model).unwrap();
+        let ranges = pred
+            .primary_key_ranges(&model, exoware_sdk::keys::MAX_KEY_LEN)
+            .unwrap();
         assert_eq!(ranges.len(), 1);
 
         let range = &ranges[0];
@@ -5446,7 +5450,9 @@ mod tests {
         );
 
         // Verify range generation produces 2 ranges (one per entity)
-        let ranges = pred.primary_key_ranges(&model).unwrap();
+        let ranges = pred
+            .primary_key_ranges(&model, exoware_sdk::keys::MAX_KEY_LEN)
+            .unwrap();
         assert_eq!(ranges.len(), 2, "should produce one range per entity");
     }
 
@@ -5532,7 +5538,9 @@ mod tests {
             },
         );
 
-        let ranges = pred.primary_key_ranges(&model).unwrap();
+        let ranges = pred
+            .primary_key_ranges(&model, exoware_sdk::keys::MAX_KEY_LEN)
+            .unwrap();
         assert!(ranges.is_empty());
     }
 
@@ -7007,7 +7015,7 @@ mod tests {
             &self,
             _ctx: Context,
             _request: ServiceRequest<'_, ProtoReduceRequest>,
-        ) -> connectrpc::ServiceResult<ProtoReduceResponse> {
+        ) -> connectrpc::ServiceResult<connectrpc::ServiceStream<ProtoReduceResponse>> {
             Err(ConnectError::unimplemented("test harness"))
         }
     }
@@ -7084,7 +7092,7 @@ mod tests {
             &self,
             _ctx: Context,
             _request: ServiceRequest<'_, ProtoReduceRequest>,
-        ) -> connectrpc::ServiceResult<ProtoReduceResponse> {
+        ) -> connectrpc::ServiceResult<connectrpc::ServiceStream<ProtoReduceResponse>> {
             Err(ConnectError::unimplemented("test harness"))
         }
     }

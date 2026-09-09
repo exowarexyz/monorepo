@@ -330,7 +330,7 @@ impl ScanAccessPlan {
             };
 
             match primary_key_range_constraint_for_prefix(
-                model,
+                model.primary_key_prefix.max_payload_len(),
                 prefix_encoded_width,
                 kind,
                 constraint,

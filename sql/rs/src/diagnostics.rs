@@ -61,6 +61,7 @@ pub(crate) fn format_access_path_diagnostics(diag: &AccessPathDiagnostics) -> St
 
 pub(crate) fn build_scan_access_path_diagnostics(
     model: &TableModel,
+    max_logical_key_len: usize,
     index_specs: &[ResolvedIndexSpec],
     predicate: &QueryPredicate,
     access_plan: &ScanAccessPlan,
@@ -100,7 +101,7 @@ pub(crate) fn build_scan_access_path_diagnostics(
         });
     }
 
-    let ranges = predicate.primary_key_ranges(model)?;
+    let ranges = predicate.primary_key_ranges(model, max_logical_key_len)?;
     let exact = complete_ranges && access_plan.predicate_fully_enforced_by_primary_key(model);
     Ok(AccessPathDiagnostics {
         mode: "primary_key".to_string(),

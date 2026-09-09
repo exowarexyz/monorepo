@@ -514,6 +514,10 @@ fn read_path_perf(c: &mut Criterion) {
         ("residual_lookup_limit1", "SELECT payload FROM orders WHERE status = 'open' AND amount_cents % 100 = 0 LIMIT 1".to_string(), 1),
         ("distinct_limit1", "SELECT DISTINCT id FROM orders LIMIT 1".to_string(), 1),
         ("aggregate_fused", "SELECT COUNT(*), SUM(amount_cents), AVG(amount_cents), MIN(amount_cents), MAX(amount_cents) FROM orders WHERE status = 'open'".to_string(), 1),
+        ("aggregate_scalar", "SELECT SUM(amount_cents) FROM orders WHERE id = 42".to_string(), 1),
+        ("aggregate_grouped", "SELECT id, COUNT(*), SUM(amount_cents), AVG(amount_cents), MIN(amount_cents), MAX(amount_cents) FROM orders GROUP BY id".to_string(), 6000),
+        ("aggregate_grouped_ranges", "SELECT status, SUM(amount_cents), AVG(amount_cents) FROM orders WHERE id IN (0, 100, 200, 300, 400, 500, 600, 700) GROUP BY status".to_string(), 1),
+        ("aggregate_sparse", format!("SELECT id, {} FROM orders GROUP BY id", (0..8).map(|i| format!("SUM(amount_cents) FILTER (WHERE amount_cents >= {})", i * 1000)).collect::<Vec<_>>().join(", ")), 6000),
     ];
     // Profiles include client and in-process server allocations on one runtime thread
     for (name, sql, expected_rows) in &cases {

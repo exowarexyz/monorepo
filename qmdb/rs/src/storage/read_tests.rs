@@ -115,7 +115,7 @@ impl Service for NodeQueries {
         &self,
         _: RequestContext,
         _: ServiceRequest<'_, ReduceRequest>,
-    ) -> connectrpc::ServiceResult<ReduceResponse> {
+    ) -> connectrpc::ServiceResult<connectrpc::ServiceStream<ReduceResponse>> {
         Err(ConnectError::unimplemented("node read test"))
     }
 }

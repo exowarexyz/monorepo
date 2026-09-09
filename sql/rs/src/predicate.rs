@@ -181,24 +181,28 @@ fn primary_key_value_encoded_width(value: &CellValue, kind: ColumnKind) -> Optio
 }
 
 fn primary_key_prefix_width_fits(
-    model: &TableModel,
+    max_payload_len: usize,
     prefix_encoded_width: usize,
     value_encoded_width: usize,
 ) -> bool {
     prefix_encoded_width
         .checked_add(value_encoded_width)
-        .is_some_and(|width| width <= model.primary_key_prefix.max_payload_len())
+        .is_some_and(|width| width <= max_payload_len)
 }
 
 pub(crate) fn primary_key_range_constraint_for_prefix(
-    model: &TableModel,
+    max_payload_len: usize,
     prefix_encoded_width: usize,
     kind: ColumnKind,
     constraint: &PredicateConstraint,
 ) -> PrimaryKeyRangeConstraint {
     match primary_key_range_constraint(kind, constraint) {
         PrimaryKeyRangeConstraint::Point(point) => {
-            if primary_key_prefix_width_fits(model, prefix_encoded_width, point.encoded_width) {
+            if primary_key_prefix_width_fits(
+                max_payload_len,
+                prefix_encoded_width,
+                point.encoded_width,
+            ) {
                 PrimaryKeyRangeConstraint::Point(point)
             } else {
                 PrimaryKeyRangeConstraint::Terminal(Vec::new())
@@ -216,8 +220,15 @@ pub(crate) fn primary_key_range_constraint_for_prefix(
                     else {
                         return false;
                     };
-                    primary_key_prefix_width_fits(model, prefix_encoded_width, lower_width)
-                        && primary_key_prefix_width_fits(model, prefix_encoded_width, upper_width)
+                    primary_key_prefix_width_fits(
+                        max_payload_len,
+                        prefix_encoded_width,
+                        lower_width,
+                    ) && primary_key_prefix_width_fits(
+                        max_payload_len,
+                        prefix_encoded_width,
+                        upper_width,
+                    )
                 })
                 .collect();
             PrimaryKeyRangeConstraint::Terminal(fitting_spans)
@@ -1659,10 +1670,19 @@ impl QueryPredicate {
         Ok(Some(keys))
     }
 
-    pub(crate) fn primary_key_ranges(&self, model: &TableModel) -> DataFusionResult<Vec<KeyRange>> {
+    pub(crate) fn primary_key_ranges(
+        &self,
+        model: &TableModel,
+        max_logical_key_len: usize,
+    ) -> DataFusionResult<Vec<KeyRange>> {
         if self.contradiction {
             return Ok(Vec::new());
         }
+        let Some(max_payload_len) =
+            max_logical_key_len.checked_sub(model.primary_key_prefix.as_bytes().len())
+        else {
+            return Ok(Vec::new());
+        };
 
         let mut prefix_values: Vec<CellValue> = Vec::new();
         let mut prefix_encoded_width = 0usize;
@@ -1676,7 +1696,7 @@ impl QueryPredicate {
                 break;
             };
             match primary_key_range_constraint_for_prefix(
-                model,
+                max_payload_len,
                 prefix_encoded_width,
                 pk_kind,
                 constraint,

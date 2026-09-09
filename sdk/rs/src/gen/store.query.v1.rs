@@ -8549,8 +8549,9 @@ pub const __REDUCE_REQUEST_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::bu
     from_json: ::buffa::type_registry::any_from_json::<ReduceRequest>,
     is_wkt: false,
 };
-/// Response from a Reduce RPC. Exactly one of `results` or `groups` is
-/// populated depending on whether `ReduceParams.group_by` was empty.
+/// A frame from a Reduce RPC. Scalar reductions return exactly one frame.
+/// Grouped reductions emit each final group exactly once across batches.
+/// An empty grouped reduction returns one frame containing only `detail`.
 #[derive(Clone, PartialEq, Default)]
 #[derive(::serde::Serialize, ::serde::Deserialize)]
 #[serde(default)]
@@ -8575,6 +8576,7 @@ pub struct ReduceResponse {
     )]
     pub groups: ::buffa::alloc::vec::Vec<RangeReduceGroup>,
     /// Query sequence and server-defined metadata for this reduction.
+    /// Present on every frame.
     ///
     /// Field 3: `detail`
     #[serde(
@@ -21875,8 +21877,9 @@ pub mod __buffa {
                 ::serde::Serialize::serialize(&self.0, __s)
             }
         }
-        /// Response from a Reduce RPC. Exactly one of `results` or `groups` is
-        /// populated depending on whether `ReduceParams.group_by` was empty.
+        /// A frame from a Reduce RPC. Scalar reductions return exactly one frame.
+        /// Grouped reductions emit each final group exactly once across batches.
+        /// An empty grouped reduction returns one frame containing only `detail`.
         #[derive(Clone, Debug, Default)]
         pub struct ReduceResponseView<'a> {
             /// Scalar reducer results (one per `ReduceParams.reducers` entry). Populated
@@ -21895,6 +21898,7 @@ pub mod __buffa {
                 super::super::__buffa::view::RangeReduceGroupView<'a>,
             >,
             /// Query sequence and server-defined metadata for this reduction.
+            /// Present on every frame.
             ///
             /// Field 3: `detail`
             pub detail: ::buffa::MessageFieldView<
@@ -22273,6 +22277,7 @@ pub mod __buffa {
                 &self.0.reborrow().groups
             }
             /// Query sequence and server-defined metadata for this reduction.
+            /// Present on every frame.
             ///
             /// Field 3: `detail`
             #[must_use]
@@ -23266,7 +23271,7 @@ pub const SERVICE_RANGE_SPEC: ::connectrpc::Spec = ::connectrpc::Spec::server(
 /// Static [`Spec`](::connectrpc::Spec) for the `Reduce` RPC, as seen by the server; the generated client passes it with [`origin`](::connectrpc::Spec::origin) `Client` (compare across sides with [`Spec::same_method`](::connectrpc::Spec::same_method)).
 pub const SERVICE_REDUCE_SPEC: ::connectrpc::Spec = ::connectrpc::Spec::server(
         "/store.query.v1.Service/Reduce",
-        ::connectrpc::StreamType::Unary,
+        ::connectrpc::StreamType::ServerStream,
     )
     .with_idempotency_level(::connectrpc::IdempotencyLevel::NoSideEffects);
 /// Server trait for Service.
@@ -23377,20 +23382,20 @@ pub trait Service: Send + Sync + 'static {
     /// Server-side aggregation over a key range with optional grouping and
     /// filtering.
     ///
-    /// `'a` lets the response body borrow from `&self` (e.g. server-resident state).
-    ///
     /// `request` is borrowed from the request body and is valid for the
-    /// duration of the call; message fields are read directly on it
-    /// (zero-copy). The response cannot borrow from `request` — use
-    /// `.to_owned_message()` (or copy the specific fields) for anything
-    /// returned, stored, or moved into `tokio::spawn`.
-    fn reduce<'a>(
-        &'a self,
+    /// duration of the call (until the response stream is returned);
+    /// message fields are read directly on it (zero-copy). Data the
+    /// returned stream needs must be copied out or converted via
+    /// `.to_owned_message()`.
+    fn reduce(
+        &self,
         ctx: ::connectrpc::RequestContext,
         request: ::connectrpc::ServiceRequest<'_, ReduceRequest>,
     ) -> impl ::std::future::Future<
         Output = ::connectrpc::ServiceResult<
-            impl ::connectrpc::Encodable<ReduceResponse> + Send + use<'a, Self>,
+            ::connectrpc::ServiceStream<
+                impl ::connectrpc::Encodable<ReduceResponse> + Send + use<Self>,
+            >,
         >,
     > + Send;
 }
@@ -23500,27 +23505,30 @@ impl<S: Service> ServiceExt for S {
                 }),
             )
             .with_spec(SERVICE_RANGE_SPEC)
-            .route_view_idempotent(
+            .route_view_server_stream::<
+                _,
+                _,
+                ReduceResponse,
+            >(
                 SERVICE_SERVICE_NAME,
                 "Reduce",
-                {
+                ::connectrpc::view_streaming_handler_fn({
                     let svc = ::std::sync::Arc::clone(&self);
-                    ::connectrpc::view_handler_fn(move |
+                    move |
                         ctx,
                         req: ::buffa::view::OwnedView<
                             __buffa::view::ReduceRequestView<'static>,
-                        >,
-                        format|
+                        >|
                     {
                         let svc = ::std::sync::Arc::clone(&svc);
                         async move {
                             let sreq = ::connectrpc::ServiceRequest::<
                                 ReduceRequest,
                             >::from_parts(req.reborrow(), req.bytes());
-                            svc.reduce(ctx, sreq).await?.encode::<ReduceResponse>(format)
+                            svc.reduce(ctx, sreq).await
                         }
-                    })
-                },
+                    }
+                }),
             )
             .with_spec(SERVICE_REDUCE_SPEC)
     }
@@ -23597,7 +23605,7 @@ impl<T: Service> ::connectrpc::Dispatcher for ServiceServer<T> {
             }
             "Reduce" => {
                 Some(
-                    ::connectrpc::dispatcher::codegen::MethodDescriptor::unary(true)
+                    ::connectrpc::dispatcher::codegen::MethodDescriptor::server_streaming()
                         .with_spec(SERVICE_REDUCE_SPEC),
                 )
             }
@@ -23630,22 +23638,6 @@ impl<T: Service> ::connectrpc::Dispatcher for ServiceServer<T> {
                         GetRequest,
                     >::from_parts(&req, &body);
                     svc.get(ctx, req).await?.encode::<GetResponse>(format)
-                })
-            }
-            "Reduce" => {
-                let svc = ::std::sync::Arc::clone(&self.inner);
-                Box::pin(async move {
-                    let body = ::connectrpc::dispatcher::codegen::request_proto_bytes::<
-                        ReduceRequest,
-                    >(request.encoded()?, format)?;
-                    let req: __buffa::view::ReduceRequestView<'_> = ::connectrpc::dispatcher::codegen::decode_borrowed_request_view(
-                        &body,
-                        ctx.decode_options(),
-                    )?;
-                    let req = ::connectrpc::ServiceRequest::<
-                        ReduceRequest,
-                    >::from_parts(&req, &body);
-                    svc.reduce(ctx, req).await?.encode::<ReduceResponse>(format)
                 })
             }
             _ => ::connectrpc::dispatcher::codegen::unimplemented_unary(path),
@@ -23705,6 +23697,30 @@ impl<T: Service> ::connectrpc::Dispatcher for ServiceServer<T> {
                         resp
                             .map_body(|s| ::connectrpc::dispatcher::codegen::encode_response_stream::<
                                 RangeFrame,
+                                _,
+                                _,
+                            >(s, format)),
+                    )
+                })
+            }
+            "Reduce" => {
+                let svc = ::std::sync::Arc::clone(&self.inner);
+                Box::pin(async move {
+                    let body = ::connectrpc::dispatcher::codegen::request_proto_bytes::<
+                        ReduceRequest,
+                    >(request, format)?;
+                    let req: __buffa::view::ReduceRequestView<'_> = ::connectrpc::dispatcher::codegen::decode_borrowed_request_view(
+                        &body,
+                        ctx.decode_options(),
+                    )?;
+                    let req = ::connectrpc::ServiceRequest::<
+                        ReduceRequest,
+                    >::from_parts(&req, &body);
+                    let resp = svc.reduce(ctx, req).await?;
+                    Ok(
+                        resp
+                            .map_body(|s| ::connectrpc::dispatcher::codegen::encode_response_stream::<
+                                ReduceResponse,
                                 _,
                                 _,
                             >(s, format)),
@@ -23932,8 +23948,9 @@ where
         &self,
         request: ReduceRequest,
     ) -> Result<
-        ::connectrpc::client::UnaryResponse<
-            ::buffa::view::OwnedView<__buffa::view::ReduceResponseView<'static>>,
+        ::connectrpc::client::ServerStream<
+            T::ResponseBody,
+            __buffa::view::ReduceResponseView<'static>,
         >,
         ::connectrpc::ConnectError,
     > {
@@ -23946,12 +23963,13 @@ where
         request: ReduceRequest,
         options: ::connectrpc::client::CallOptions,
     ) -> Result<
-        ::connectrpc::client::UnaryResponse<
-            ::buffa::view::OwnedView<__buffa::view::ReduceResponseView<'static>>,
+        ::connectrpc::client::ServerStream<
+            T::ResponseBody,
+            __buffa::view::ReduceResponseView<'static>,
         >,
         ::connectrpc::ConnectError,
     > {
-        ::connectrpc::client::call_unary(
+        ::connectrpc::client::call_server_stream(
                 &self.transport,
                 &self.config,
                 SERVICE_REDUCE_SPEC.with_origin(::connectrpc::SpecOrigin::Client),

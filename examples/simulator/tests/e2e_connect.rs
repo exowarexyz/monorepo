@@ -17,6 +17,7 @@ use exoware_sdk::{
     connect_compression_registry, PreferZstdHttpClient, PrefixedStoreClient, RangeMode,
     RangeReduceOp, RangeReduceRequest, RangeReducerSpec, RetryConfig, StoreClient,
 };
+use futures::StreamExt;
 
 /// Spawns a local simulator and returns a client for it plus the base URL.
 async fn spawn_client() -> (PrefixedStoreClient, String) {
@@ -564,7 +565,7 @@ async fn reduce_grouped_count() {
     let ka2 = prefix.encode(b"a\x02").expect("encode");
     let kb1 = prefix.encode(b"b\x01").expect("encode");
 
-    client
+    let sequence = client
         .ingest()
         .put(&[
             (&ka1, encode_row(1).as_slice()),
@@ -585,12 +586,25 @@ async fn reduce_grouped_count() {
         })],
         filter: None,
     };
-    let response = client
-        .query()
-        .range_reduce_response(&ka1, &kb1, &request)
+    let session = client.create_session();
+    let mut stream = session
+        .range_reduce_stream(&ka1, &kb1, &request)
         .await
         .expect("reduce");
-    assert_eq!(response.groups.len(), 2);
+    assert_eq!(session.fixed_sequence(), None);
+    let mut groups = 0;
+    while let Some(frame) = stream.next().await {
+        let frame = frame.expect("reduce frame");
+        let frame = frame.view();
+        let detail = frame
+            .detail
+            .as_option()
+            .expect("query detail on every frame");
+        assert_eq!(detail.sequence_number, sequence);
+        assert_eq!(session.fixed_sequence(), Some(sequence));
+        groups += frame.groups.len();
+    }
+    assert_eq!(groups, 2);
 }
 
 // -- prune via StoreClient::prune() --

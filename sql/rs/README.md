@@ -223,10 +223,12 @@ shared minimum sequence number. That freshness floor does not pin a snapshot.
 Jobs and ranges retain their execution and merge order.
 
 Unsupported shapes use the normal streaming scan and DataFusion execution.
-Reduce avoids transferring full input rows and constructing input Arrow batches,
-but high-cardinality grouping still requires worker memory and a unary response
-containing every group. A covering index is most useful when it contains the
-aggregate inputs and all filter/group columns.
+Reduce avoids transferring full input rows. Workers aggregate with DataFusion
+and stream completed groups in batches. Groups remain in memory by default.
+Workers can configure DataFusion's native memory pool and spilling through
+`QueryState::with_runtime`. The SQL coordinator retains merged groups and the
+final query result. A covering index is most useful when it contains the aggregate
+inputs and all filter/group columns.
 
 ## Z-Order secondary indexes
 

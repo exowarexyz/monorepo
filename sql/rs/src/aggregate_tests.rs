@@ -127,9 +127,17 @@ impl Fixture {
                         let request = if request.uri().path().ends_with("/Reduce") {
                             let (parts, body) = request.into_parts();
                             let body = axum::body::to_bytes(body, usize::MAX).await.unwrap();
+                            let envelope = connectrpc::envelope::Envelope::decode(
+                                &mut bytes::BytesMut::from(body.as_ref()),
+                            )
+                            .unwrap()
+                            .unwrap();
+                            assert!(!envelope.is_compressed());
                             observed.reductions.lock().unwrap().push(
-                                exoware_sdk::query::ReduceRequest::decode_from_slice(&body)
-                                    .unwrap(),
+                                exoware_sdk::query::ReduceRequest::decode_from_slice(
+                                    &envelope.data,
+                                )
+                                .unwrap(),
                             );
                             Request::from_parts(parts, axum::body::Body::from(body))
                         } else {
@@ -848,7 +856,7 @@ async fn deterministic_reduce_errors_are_not_retried_by_the_sdk() {
         filter: None,
     };
     let error = session
-        .range_reduce_response(&start, &end, &invalid)
+        .range_reduce(&start, &end, &invalid)
         .await
         .unwrap_err();
     assert_eq!(
@@ -879,7 +887,7 @@ async fn deterministic_reduce_errors_are_not_retried_by_the_sdk() {
         filter: None,
     };
     let error = session
-        .range_reduce_response(&start, &end, &request)
+        .range_reduce(&start, &end, &request)
         .await
         .unwrap_err();
     assert_eq!(

@@ -786,3 +786,44 @@ async fn float_predicates_match_native_total_order_with_and_without_indexes() {
         }
     }
 }
+
+#[tokio::test]
+async fn partial_primary_key_ranges_respect_namespace_capacity() {
+    let near_limit = "n".repeat(233);
+    let fixture = Fixture::new(
+        vec![
+            column("tenant", DataType::Utf8, false),
+            column("version", DataType::Int64, false),
+        ],
+        &["tenant", "version"],
+        vec![],
+        vec![
+            Arc::new(StringArray::from(vec!["a", "b", near_limit.as_str()])),
+            Arc::new(Int64Array::from(vec![1, 1, 1])),
+        ],
+    )
+    .await;
+    let too_long = "x".repeat(fixture.prefix.max_logical_key_len());
+    let escaped_too_long = "\u{1}".repeat(122);
+    for predicate in [
+        format!("tenant IN ('a', '{too_long}')"),
+        format!("tenant IN ('a', '{escaped_too_long}')"),
+        format!("tenant IN ('{too_long}', '{too_long}y')"),
+        format!("tenant = '{too_long}'"),
+        format!("tenant IN ('a', '{near_limit}', '{too_long}')"),
+        format!("tenant = '{near_limit}'"),
+    ] {
+        for projection in ["tenant, version", "COUNT(*)"] {
+            fixture
+                .check(&format!(
+                    "SELECT {projection} FROM orders WHERE {predicate} ORDER BY 1"
+                ))
+                .await;
+        }
+        fixture
+            .check(&format!(
+                "SELECT tenant, COUNT(*) FROM orders WHERE {predicate} GROUP BY tenant ORDER BY tenant"
+            ))
+            .await;
+    }
+}

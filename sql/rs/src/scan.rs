@@ -364,7 +364,7 @@ impl KvScanExec {
                 return &self.model.primary_key_indices[position..];
             };
             match primary_key_range_constraint_for_prefix(
-                &self.model,
+                self.model.primary_key_prefix.max_payload_len(),
                 prefix_encoded_width,
                 kind,
                 constraint,
@@ -384,6 +384,7 @@ impl KvScanExec {
     pub(crate) fn plan_diagnostics(&self) -> DataFusionResult<AccessPathDiagnostics> {
         build_scan_access_path_diagnostics(
             &self.model,
+            self.client.key_prefix().max_logical_key_len(),
             &self.index_specs,
             &self.predicate,
             &self.access_plan(),
@@ -695,7 +696,9 @@ pub(crate) async fn stream_kv_scan(
             .await;
     }
 
-    let ranges = ctx.predicate.primary_key_ranges(ctx.model)?;
+    let ranges = ctx
+        .predicate
+        .primary_key_ranges(ctx.model, ctx.key_prefix.max_logical_key_len())?;
     stream_range_scan(
         tx,
         ctx,

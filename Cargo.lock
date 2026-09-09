@@ -2780,6 +2780,7 @@ dependencies = [
  "bytes",
  "commonware-codec",
  "connectrpc",
+ "datafusion",
  "exoware-sdk",
  "futures",
  "http",

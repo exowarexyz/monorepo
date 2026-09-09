@@ -1,46 +1,82 @@
-//! Range aggregation over decoded KV rows (same semantics as the public `Reduce` RPC).
+//! Native worker aggregation over evaluated Store expressions.
 
-use std::cmp::Ordering;
-use std::collections::BTreeMap;
+use std::collections::VecDeque;
+use std::fmt;
+use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
-use exoware_proto::{
-    RangeReduceGroup, RangeReduceOp, RangeReduceRequest, RangeReduceResponse, RangeReduceResult,
+use datafusion::arrow::array::{
+    ArrayRef, BinaryArray, BooleanArray, Date32Array, Date64Array, Decimal128Array,
+    Decimal256Array, Float64Array, Int64Array, StringArray, TimestampMicrosecondArray, UInt64Array,
 };
-use exoware_sdk as exoware_proto;
+use datafusion::arrow::datatypes::{i256, DataType, Field, Schema, SchemaRef, TimeUnit};
+use datafusion::arrow::record_batch::{RecordBatch, RecordBatchOptions};
+use datafusion::common::{DataFusionError, Result as DfResult, ScalarValue};
+use datafusion::execution::context::TaskContext;
+use datafusion::execution::memory_pool::MemoryLimit;
+use datafusion::functions_aggregate::{
+    count::count_udaf,
+    min_max::{max_udaf, min_udaf},
+    sum::sum_udaf,
+};
+use datafusion::logical_expr::AggregateUDF;
+use datafusion::physical_expr::aggregate::{AggregateExprBuilder, AggregateFunctionExpr};
+use datafusion::physical_expr::expressions::{Column, Literal};
+use datafusion::physical_expr::PhysicalExpr;
+use datafusion::physical_plan::aggregates::{AggregateExec, AggregateMode, PhysicalGroupBy};
+use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
+use datafusion::physical_plan::streaming::{PartitionStream, StreamingTableExec};
+use datafusion::physical_plan::{ExecutionPlan, SendableRecordBatchStream};
 use exoware_sdk::keys::Key;
 use exoware_sdk::kv_codec::{
-    canonicalize_reduced_group_values, decode_stored_row, encode_reduced_group_key, eval_expr,
-    eval_predicate, expr_needs_value, predicate_needs_value, KvReducedValue,
+    canonicalize_reduced_group_values, decode_stored_row, eval_expr, eval_predicate,
+    expr_needs_value, predicate_needs_value, KvExpr, KvFieldKind, KvFieldRef, KvReducedValue,
 };
+use exoware_sdk::{RangeReduceGroup, RangeReduceOp, RangeReduceRequest, RangeReduceResult};
+
+use crate::{Query, QueryExtra, RangeScan};
+
+pub(crate) const REDUCE_BATCH_ROWS: usize = 4096;
+const REDUCE_BATCH_BYTES: usize = 16 * 1024 * 1024;
 
 #[derive(Debug)]
 pub enum RangeError {
     Reduce(String),
+    Backend(String),
+    Resources(String),
 }
 
-impl std::fmt::Display for RangeError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Display for RangeError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            RangeError::Reduce(s) => write!(f, "{s}"),
+            Self::Reduce(s) | Self::Backend(s) | Self::Resources(s) => write!(f, "{s}"),
         }
     }
 }
 
 impl std::error::Error for RangeError {}
 
-#[derive(Debug)]
-enum ReductionState {
-    Count(u64),
-    Sum(Option<KvReducedValue>),
-    Min(Option<KvReducedValue>),
-    Max(Option<KvReducedValue>),
+impl From<DataFusionError> for RangeError {
+    fn from(error: DataFusionError) -> Self {
+        match error.find_root() {
+            DataFusionError::ResourcesExhausted(_) => Self::Resources(error.to_string()),
+            DataFusionError::External(source) if source.downcast_ref::<RangeError>().is_some() => {
+                match source.downcast_ref::<RangeError>().unwrap() {
+                    Self::Backend(s) => Self::Backend(s.clone()),
+                    Self::Resources(s) => Self::Resources(s.clone()),
+                    Self::Reduce(s) => Self::Reduce(s.clone()),
+                }
+            }
+            DataFusionError::IoError(_) | DataFusionError::Internal(_) => {
+                Self::Backend(error.to_string())
+            }
+            _ => Self::Reduce(error.to_string()),
+        }
+    }
 }
 
-#[derive(Debug)]
-struct GroupedReductionState {
-    group_values: Vec<Option<KvReducedValue>>,
-    states: Vec<ReductionState>,
+fn execution_error(error: impl ToString) -> DataFusionError {
+    DataFusionError::Execution(error.to_string())
 }
 
 #[derive(Debug)]
@@ -49,130 +85,578 @@ struct ExtractedReductionRow {
     reducer_values: Vec<Option<KvReducedValue>>,
 }
 
-impl ReductionState {
-    fn from_op(op: RangeReduceOp) -> Self {
-        match op {
-            RangeReduceOp::CountAll | RangeReduceOp::CountField => Self::Count(0),
-            RangeReduceOp::SumField => Self::Sum(None),
-            RangeReduceOp::MinField => Self::Min(None),
-            RangeReduceOp::MaxField => Self::Max(None),
-        }
-    }
-
-    fn update(
-        &mut self,
-        op: RangeReduceOp,
-        value: Option<KvReducedValue>,
-    ) -> Result<(), RangeError> {
-        match (self, op) {
-            (Self::Count(count), RangeReduceOp::CountAll) => {
-                *count = count.saturating_add(1);
-                Ok(())
-            }
-            (Self::Count(count), RangeReduceOp::CountField) => {
-                if value.is_some() {
-                    *count = count.saturating_add(1);
-                }
-                Ok(())
-            }
-            (Self::Sum(sum), RangeReduceOp::SumField) => {
-                let Some(value) = value else {
-                    return Ok(());
-                };
-                match sum {
-                    Some(existing) => existing
-                        .wrapping_add_assign(&value)
-                        .map_err(RangeError::Reduce),
-                    None => {
-                        *sum = Some(value);
-                        Ok(())
-                    }
-                }
-            }
-            (Self::Min(current), RangeReduceOp::MinField) => {
-                update_extreme(current, value, Ordering::Less)
-            }
-            (Self::Max(current), RangeReduceOp::MaxField) => {
-                update_extreme(current, value, Ordering::Greater)
-            }
-            _ => Err(RangeError::Reduce(
-                "reduction state/op mismatch".to_string(),
-            )),
-        }
-    }
-
-    fn finish(self) -> Option<KvReducedValue> {
-        match self {
-            Self::Count(count) => Some(KvReducedValue::UInt64(count)),
-            Self::Sum(value) | Self::Min(value) | Self::Max(value) => value,
-        }
-    }
+#[derive(Debug)]
+struct ReducePlan {
+    request: Arc<RangeReduceRequest>,
+    needs_value: bool,
+    reducer_columns: Vec<ReduceColumn>,
+    schema: SchemaRef,
+    aggregates: Vec<Arc<AggregateFunctionExpr>>,
+    result_kinds: Vec<ResultKind>,
 }
 
-impl GroupedReductionState {
-    fn new(group_values: Vec<Option<KvReducedValue>>, request: &RangeReduceRequest) -> Self {
-        Self {
-            group_values,
-            states: request
-                .reducers
-                .iter()
-                .map(|reducer| ReductionState::from_op(reducer.op))
-                .collect(),
+#[derive(Debug)]
+struct ReduceColumn {
+    expr: KvExpr,
+    ordered_float: bool,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum ResultKind {
+    Value,
+    Count,
+    OrderedFloat,
+}
+
+impl ReducePlan {
+    fn new(request: Arc<RangeReduceRequest>) -> Result<Self, RangeError> {
+        validate_reduce_request(&request)?;
+        let needs_value = request
+            .group_by
+            .iter()
+            .chain(
+                request
+                    .reducers
+                    .iter()
+                    .filter_map(|reducer| reducer.expr.as_ref()),
+            )
+            .any(expr_needs_value)
+            || request.filter.as_ref().is_some_and(predicate_needs_value);
+        let mut fields = Vec::with_capacity(request.group_by.len() + request.reducers.len());
+        for (i, expr) in request.group_by.iter().enumerate() {
+            fields.push(Field::new(
+                format!("group_{i}"),
+                expression_type(expr)?,
+                true,
+            ));
         }
+        let mut result_kinds = Vec::with_capacity(request.reducers.len());
+        let mut reducer_columns: Vec<ReduceColumn> = Vec::new();
+        let mut arguments: Vec<Arc<dyn PhysicalExpr>> = Vec::with_capacity(request.reducers.len());
+        for reducer in &request.reducers {
+            let Some(expr) = &reducer.expr else {
+                result_kinds.push(ResultKind::Count);
+                arguments.push(Arc::new(Literal::new(ScalarValue::Boolean(Some(true)))));
+                continue;
+            };
+            let mut data_type = expression_type(expr)?;
+            let result_kind = match reducer.op {
+                RangeReduceOp::CountAll | RangeReduceOp::CountField => ResultKind::Count,
+                RangeReduceOp::MinField | RangeReduceOp::MaxField
+                    if data_type == DataType::Float64 && !request.group_by.is_empty() =>
+                {
+                    // Native grouped float extrema do not implement total ordering
+                    data_type = DataType::Int64;
+                    ResultKind::OrderedFloat
+                }
+                _ => ResultKind::Value,
+            };
+            result_kinds.push(result_kind);
+            let ordered_float = matches!(result_kind, ResultKind::OrderedFloat);
+            let existing = reducer_columns.iter().position(|column| {
+                column.ordered_float == ordered_float
+                    && matches!((&column.expr, expr), (KvExpr::Field(left), KvExpr::Field(right)) if left == right)
+            });
+            let index = existing.unwrap_or_else(|| {
+                let index = reducer_columns.len();
+                fields.push(Field::new(format!("value_{index}"), data_type, true));
+                reducer_columns.push(ReduceColumn {
+                    expr: expr.clone(),
+                    ordered_float,
+                });
+                index
+            });
+            arguments.push(Arc::new(Column::new(
+                &format!("value_{index}"),
+                request.group_by.len() + index,
+            )));
+        }
+        let schema = Arc::new(Schema::new(fields));
+        let mut aggregates = Vec::with_capacity(request.reducers.len());
+        for (i, (reducer, expr)) in request.reducers.iter().zip(arguments).enumerate() {
+            aggregates.push(Arc::new(
+                AggregateExprBuilder::new(match_function(reducer.op), vec![expr])
+                    .schema(schema.clone())
+                    .alias(format!("result_{i}"))
+                    .build()?,
+            ));
+        }
+        Ok(Self {
+            request,
+            needs_value,
+            reducer_columns,
+            schema,
+            aggregates,
+            result_kinds,
+        })
     }
 
-    fn update(
-        &mut self,
-        request: &RangeReduceRequest,
-        reducer_values: Vec<Option<KvReducedValue>>,
-    ) -> Result<(), RangeError> {
-        for ((state, reducer), value) in self
-            .states
-            .iter_mut()
-            .zip(request.reducers.iter())
-            .zip(reducer_values)
-        {
-            state.update(reducer.op, value)?;
-        }
-        Ok(())
-    }
-
-    fn finish(self) -> RangeReduceGroup {
-        RangeReduceGroup {
-            group_values: self.group_values,
-            results: self
-                .states
-                .into_iter()
-                .map(|state| RangeReduceResult {
-                    value: state.finish(),
+    fn physical_plan(&self, source: Arc<dyn ExecutionPlan>) -> DfResult<AggregateExec> {
+        let groups = PhysicalGroupBy::new_single(
+            (0..self.request.group_by.len())
+                .map(|i| {
+                    (
+                        Arc::new(Column::new(&format!("group_{i}"), i)) as Arc<dyn PhysicalExpr>,
+                        format!("group_{i}"),
+                    )
                 })
                 .collect(),
+        );
+        AggregateExec::try_new(
+            AggregateMode::Single,
+            groups,
+            self.aggregates.clone(),
+            vec![None; self.aggregates.len()],
+            source,
+            self.schema.clone(),
+        )
+    }
+
+    fn execute(
+        &self,
+        source: Arc<dyn ExecutionPlan>,
+        context: Arc<TaskContext>,
+    ) -> DfResult<SendableRecordBatchStream> {
+        self.physical_plan(source)?.execute(0, context)
+    }
+
+    fn extracted_batch(&self, rows: Vec<ExtractedReductionRow>) -> DfResult<RecordBatch> {
+        let row_count = rows.len();
+        let mut columns = (0..self.schema.fields().len())
+            .map(|_| Vec::with_capacity(rows.len()))
+            .collect::<Vec<_>>();
+        for row in rows {
+            for (column, value) in columns
+                .iter_mut()
+                .zip(row.group_values.into_iter().chain(row.reducer_values))
+            {
+                column.push(value);
+            }
         }
+        let arrays = columns
+            .into_iter()
+            .zip(self.schema.fields())
+            .map(|(values, field)| values_to_array(values, field.data_type()))
+            .collect::<DfResult<Vec<_>>>()?;
+        RecordBatch::try_new_with_options(
+            self.schema.clone(),
+            arrays,
+            &RecordBatchOptions::new().with_row_count(Some(row_count)),
+        )
+        .map_err(Into::into)
+    }
+
+    #[cfg(test)]
+    fn batch(&self, rows: &[(Key, Bytes)]) -> DfResult<RecordBatch> {
+        let rows = rows
+            .iter()
+            .map(|(key, value)| {
+                extract_reduce_row(key, value, self)
+                    .map_err(|error| DataFusionError::External(Box::new(error)))
+            })
+            .collect::<DfResult<Vec<_>>>()?
+            .into_iter()
+            .flatten()
+            .collect();
+        self.extracted_batch(rows)
     }
 }
 
-fn update_extreme(
-    current: &mut Option<KvReducedValue>,
-    candidate: Option<KvReducedValue>,
-    replace_when: Ordering,
-) -> Result<(), RangeError> {
-    let Some(candidate) = candidate else {
-        return Ok(());
+fn match_function(op: RangeReduceOp) -> Arc<AggregateUDF> {
+    match op {
+        RangeReduceOp::CountAll | RangeReduceOp::CountField => count_udaf(),
+        RangeReduceOp::SumField => sum_udaf(),
+        RangeReduceOp::MinField => min_udaf(),
+        RangeReduceOp::MaxField => max_udaf(),
+    }
+}
+
+pub(crate) struct ReduceExecution {
+    pub(crate) batches: SendableRecordBatchStream,
+    pub(crate) extra: Arc<Mutex<QueryExtra>>,
+    pub(crate) group_count: usize,
+    pub(crate) result_kinds: Vec<ResultKind>,
+}
+
+pub(crate) fn execute_reduce<Q: Query>(
+    query: Arc<Q>,
+    start: Key,
+    end: Key,
+    request: RangeReduceRequest,
+    context: Arc<TaskContext>,
+) -> Result<ReduceExecution, RangeError> {
+    let plan = Arc::new(ReducePlan::new(Arc::new(request))?);
+    let extra = Arc::new(Mutex::new(QueryExtra::new()));
+    let partition = ReducePartition {
+        query,
+        start,
+        end,
+        plan: plan.clone(),
+        extra: extra.clone(),
     };
-    match current {
-        Some(existing) => {
-            let ordering = candidate
-                .partial_cmp_same_kind(existing)
-                .ok_or_else(|| RangeError::Reduce("min/max type mismatch".to_string()))?;
-            if ordering == replace_when {
-                *current = Some(candidate);
+    let source = StreamingTableExec::try_new(
+        plan.schema.clone(),
+        vec![Arc::new(partition)],
+        None,
+        [],
+        false,
+        None,
+    )?;
+    let batches = plan.execute(Arc::new(source), context)?;
+    Ok(ReduceExecution {
+        batches,
+        extra,
+        group_count: plan.request.group_by.len(),
+        result_kinds: plan.result_kinds.clone(),
+    })
+}
+
+struct ReducePartition<Q: Query> {
+    query: Arc<Q>,
+    start: Key,
+    end: Key,
+    plan: Arc<ReducePlan>,
+    extra: Arc<Mutex<QueryExtra>>,
+}
+
+impl<Q: Query> fmt::Debug for ReducePartition<Q> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ReducePartition").finish_non_exhaustive()
+    }
+}
+
+struct InputState<Q: Query> {
+    query: Arc<Q>,
+    start: Key,
+    end: Key,
+    plan: Arc<ReducePlan>,
+    extra: Arc<Mutex<QueryExtra>>,
+    scan: Option<Q::RangeScan>,
+    pending: VecDeque<(Key, Bytes)>,
+    extracted: Option<ExtractedReductionRow>,
+    batch_bytes: usize,
+}
+
+impl<Q: Query> PartitionStream for ReducePartition<Q> {
+    fn schema(&self) -> &SchemaRef {
+        &self.plan.schema
+    }
+
+    fn execute(&self, context: Arc<TaskContext>) -> SendableRecordBatchStream {
+        let state = InputState {
+            query: self.query.clone(),
+            start: self.start.clone(),
+            end: self.end.clone(),
+            plan: self.plan.clone(),
+            extra: self.extra.clone(),
+            scan: None,
+            pending: VecDeque::new(),
+            extracted: None,
+            batch_bytes: match context.memory_pool().memory_limit() {
+                MemoryLimit::Finite(limit) => (limit / 8).clamp(1, REDUCE_BATCH_BYTES),
+                MemoryLimit::Infinite => REDUCE_BATCH_BYTES,
+                _ => REDUCE_BATCH_BYTES,
+            },
+        };
+        let stream = futures::stream::try_unfold(state, |mut state| async move {
+            if state.scan.is_none() {
+                state.scan = Some(
+                    state
+                        .query
+                        .range_scan(state.start.clone(), state.end.clone(), usize::MAX, true)
+                        .await
+                        .map_err(|e| DataFusionError::External(Box::new(RangeError::Backend(e))))?,
+                );
+            }
+            if state.pending.is_empty() && state.extracted.is_none() {
+                let batch = state
+                    .scan
+                    .as_mut()
+                    .unwrap()
+                    .next_batch(REDUCE_BATCH_ROWS)
+                    .await
+                    .map_err(|e| DataFusionError::External(Box::new(RangeError::Backend(e))))?;
+                if !batch.extra.is_empty() || !batch.rows.is_empty() {
+                    *state.extra.lock().unwrap() = batch.extra;
+                }
+                if batch.rows.is_empty() {
+                    return Ok(None);
+                }
+                state.pending.extend(batch.rows);
+            }
+            // Input batches remain transient so their reservation cannot prevent the aggregate from spilling
+            let mut rows = Vec::new();
+            let mut bytes = 0usize;
+            loop {
+                let row = if let Some(row) = state.extracted.take() {
+                    row
+                } else {
+                    let Some((key, value)) = state.pending.pop_front() else {
+                        break;
+                    };
+                    let Some(row) = extract_reduce_row(&key, &value, &state.plan)
+                        .map_err(|error| DataFusionError::External(Box::new(error)))?
+                    else {
+                        continue;
+                    };
+                    row
+                };
+                let row_bytes = row
+                    .group_values
+                    .iter()
+                    .chain(&row.reducer_values)
+                    .map(|value| reduced_size(value.as_ref()))
+                    .sum::<usize>();
+                if !rows.is_empty() && bytes.saturating_add(row_bytes) > state.batch_bytes {
+                    state.extracted = Some(row);
+                    break;
+                }
+                bytes = bytes.saturating_add(row_bytes);
+                rows.push(row);
+                if rows.len() == REDUCE_BATCH_ROWS {
+                    break;
+                }
+            }
+            let batch = state.plan.extracted_batch(rows)?;
+            Ok(Some((batch, state)))
+        });
+        Box::pin(RecordBatchStreamAdapter::new(
+            self.plan.schema.clone(),
+            stream,
+        ))
+    }
+}
+
+pub(crate) fn decode_group(
+    batch: &RecordBatch,
+    row: usize,
+    group_count: usize,
+    result_kinds: &[ResultKind],
+) -> DfResult<RangeReduceGroup> {
+    let mut values = batch
+        .columns()
+        .iter()
+        .map(|array| ScalarValue::try_from_array(array, row).and_then(scalar_to_reduced));
+    let group_values = values
+        .by_ref()
+        .take(group_count)
+        .collect::<DfResult<Vec<_>>>()?;
+    let results = values
+        .zip(result_kinds)
+        .map(|(value, kind)| {
+            let value = match (value?, kind) {
+                (Some(KvReducedValue::Int64(count)), ResultKind::Count) => {
+                    Some(KvReducedValue::UInt64(u64::try_from(count).map_err(
+                        |_| DataFusionError::Internal("native Reduce count is negative".into()),
+                    )?))
+                }
+                (Some(KvReducedValue::Int64(bits)), ResultKind::OrderedFloat) => Some(
+                    KvReducedValue::Float64(f64::from_bits(float_order_bits(bits) as u64)),
+                ),
+                (value, _) => value,
+            };
+            Ok(RangeReduceResult { value })
+        })
+        .collect::<DfResult<Vec<_>>>()?;
+    Ok(RangeReduceGroup {
+        group_values,
+        results,
+    })
+}
+
+// This involution maps float bits to signed integers ordered by f64::total_cmp
+fn float_order_bits(bits: i64) -> i64 {
+    bits ^ ((bits >> 63) & i64::MAX)
+}
+
+fn expression_type(expr: &KvExpr) -> Result<DataType, RangeError> {
+    let invalid = || RangeError::Reduce("unsupported Reduce expression types".into());
+    match expr {
+        KvExpr::Field(field) => Ok(match field {
+            KvFieldRef::Key { kind, .. }
+            | KvFieldRef::ZOrderKey { kind, .. }
+            | KvFieldRef::Value { kind, .. } => field_type(*kind),
+        }),
+        KvExpr::Literal(value) => Ok(match value {
+            KvReducedValue::Int64(_) => DataType::Int64,
+            KvReducedValue::UInt64(_) => DataType::UInt64,
+            KvReducedValue::Float64(_) => DataType::Float64,
+            KvReducedValue::Boolean(_) => DataType::Boolean,
+            KvReducedValue::Utf8(_) => DataType::Utf8,
+            KvReducedValue::Date32(_) => DataType::Date32,
+            KvReducedValue::Date64(_) => DataType::Date64,
+            KvReducedValue::Timestamp(_) => DataType::Timestamp(TimeUnit::Microsecond, None),
+            KvReducedValue::Decimal128(_) => DataType::Decimal128(38, 0),
+            KvReducedValue::Decimal256(_) => DataType::Decimal256(76, 0),
+            KvReducedValue::FixedSizeBinary(_) => DataType::Binary,
+        }),
+        KvExpr::Add(a, b) | KvExpr::Sub(a, b) | KvExpr::Mul(a, b) | KvExpr::Div(a, b) => {
+            let a = expression_type(a)?;
+            let b = expression_type(b)?;
+            let numeric = matches!(
+                (&a, &b),
+                (DataType::Int64, DataType::Int64)
+                    | (DataType::UInt64, DataType::UInt64)
+                    | (
+                        DataType::Float64,
+                        DataType::Int64 | DataType::UInt64 | DataType::Float64
+                    )
+                    | (DataType::Int64 | DataType::UInt64, DataType::Float64)
+            );
+            if !numeric {
+                return Err(invalid());
+            }
+            Ok(
+                if matches!(expr, KvExpr::Div(..))
+                    || a == DataType::Float64
+                    || b == DataType::Float64
+                {
+                    DataType::Float64
+                } else {
+                    a
+                },
+            )
+        }
+        KvExpr::Lower(expr) => {
+            if expression_type(expr)? == DataType::Utf8 {
+                Ok(DataType::Utf8)
+            } else {
+                Err(invalid())
             }
         }
-        None => {
-            *current = Some(candidate);
-        }
+        KvExpr::DateTruncDay(expr) => match expression_type(expr)? {
+            t @ (DataType::Date32
+            | DataType::Date64
+            | DataType::Timestamp(TimeUnit::Microsecond, _)) => Ok(t),
+            _ => Err(invalid()),
+        },
     }
-    Ok(())
+}
+
+fn field_type(kind: KvFieldKind) -> DataType {
+    match kind {
+        KvFieldKind::Int64 => DataType::Int64,
+        KvFieldKind::UInt64 => DataType::UInt64,
+        KvFieldKind::Float64 => DataType::Float64,
+        KvFieldKind::Boolean => DataType::Boolean,
+        KvFieldKind::Utf8 => DataType::Utf8,
+        KvFieldKind::Date32 => DataType::Date32,
+        KvFieldKind::Date64 => DataType::Date64,
+        KvFieldKind::Timestamp => DataType::Timestamp(TimeUnit::Microsecond, None),
+        // Store decimals carry raw words, so internal aggregation keeps an unscaled representation
+        KvFieldKind::Decimal128 => DataType::Decimal128(38, 0),
+        KvFieldKind::Decimal256 => DataType::Decimal256(76, 0),
+        KvFieldKind::FixedSizeBinary(_) => DataType::Binary,
+    }
+}
+
+fn reduced_size(value: Option<&KvReducedValue>) -> usize {
+    std::mem::size_of::<Option<KvReducedValue>>()
+        + match value {
+            Some(KvReducedValue::Utf8(s)) => s.len(),
+            Some(KvReducedValue::FixedSizeBinary(b)) => b.len(),
+            _ => 0,
+        }
+}
+
+fn values_to_array(
+    values: Vec<Option<KvReducedValue>>,
+    data_type: &DataType,
+) -> DfResult<ArrayRef> {
+    macro_rules! primitive {
+        ($variant:ident, $array:ty) => {{
+            let values = values
+                .into_iter()
+                .map(|v| match v {
+                    Some(KvReducedValue::$variant(v)) => Ok(Some(v)),
+                    None => Ok(None),
+                    _ => Err(execution_error("Reduce expression type mismatch")),
+                })
+                .collect::<DfResult<Vec<_>>>()?;
+            Arc::new(<$array>::from(values)) as ArrayRef
+        }};
+    }
+    Ok(match data_type {
+        DataType::Int64 => primitive!(Int64, Int64Array),
+        DataType::UInt64 => primitive!(UInt64, UInt64Array),
+        DataType::Float64 => primitive!(Float64, Float64Array),
+        DataType::Boolean => primitive!(Boolean, BooleanArray),
+        DataType::Date32 => primitive!(Date32, Date32Array),
+        DataType::Date64 => primitive!(Date64, Date64Array),
+        DataType::Timestamp(TimeUnit::Microsecond, _) => {
+            primitive!(Timestamp, TimestampMicrosecondArray)
+        }
+        DataType::Utf8 => {
+            let strings = values
+                .into_iter()
+                .map(|v| match v {
+                    Some(KvReducedValue::Utf8(v)) => Ok(Some(v)),
+                    None => Ok(None),
+                    _ => Err(execution_error("Reduce expression type mismatch")),
+                })
+                .collect::<DfResult<Vec<_>>>()?;
+            Arc::new(StringArray::from_iter(strings.iter().map(|v| v.as_deref())))
+        }
+        DataType::Binary => {
+            let bytes = values
+                .into_iter()
+                .map(|v| match v {
+                    Some(KvReducedValue::FixedSizeBinary(v)) => Ok(Some(v)),
+                    None => Ok(None),
+                    _ => Err(execution_error("Reduce expression type mismatch")),
+                })
+                .collect::<DfResult<Vec<_>>>()?;
+            Arc::new(BinaryArray::from_iter(bytes.iter().map(|v| v.as_deref())))
+        }
+        DataType::Decimal128(..) => {
+            let values = values
+                .into_iter()
+                .map(|v| match v {
+                    Some(KvReducedValue::Decimal128(v)) => Ok(Some(v)),
+                    None => Ok(None),
+                    _ => Err(execution_error("Reduce expression type mismatch")),
+                })
+                .collect::<DfResult<Vec<_>>>()?;
+            Arc::new(Decimal128Array::from(values).with_data_type(data_type.clone()))
+        }
+        DataType::Decimal256(..) => {
+            let values = values
+                .into_iter()
+                .map(|v| match v {
+                    Some(KvReducedValue::Decimal256(v)) => Ok(Some(i256::from_le_bytes(v))),
+                    None => Ok(None),
+                    _ => Err(execution_error("Reduce expression type mismatch")),
+                })
+                .collect::<DfResult<Vec<_>>>()?;
+            Arc::new(Decimal256Array::from(values).with_data_type(data_type.clone()))
+        }
+        _ => return Err(execution_error("unsupported Reduce array type")),
+    })
+}
+
+fn scalar_to_reduced(value: ScalarValue) -> DfResult<Option<KvReducedValue>> {
+    if value.is_null() {
+        return Ok(None);
+    }
+    Ok(Some(match value {
+        ScalarValue::Int64(Some(v)) => KvReducedValue::Int64(v),
+        ScalarValue::UInt64(Some(v)) => KvReducedValue::UInt64(v),
+        ScalarValue::Float64(Some(v)) => KvReducedValue::Float64(v),
+        ScalarValue::Boolean(Some(v)) => KvReducedValue::Boolean(v),
+        ScalarValue::Utf8(Some(v))
+        | ScalarValue::LargeUtf8(Some(v))
+        | ScalarValue::Utf8View(Some(v)) => KvReducedValue::Utf8(v),
+        ScalarValue::Date32(Some(v)) => KvReducedValue::Date32(v),
+        ScalarValue::Date64(Some(v)) => KvReducedValue::Date64(v),
+        ScalarValue::TimestampMicrosecond(Some(v), _) => KvReducedValue::Timestamp(v),
+        ScalarValue::Decimal128(Some(v), _, _) => KvReducedValue::Decimal128(v),
+        ScalarValue::Decimal256(Some(v), _, _) => KvReducedValue::Decimal256(v.to_le_bytes()),
+        ScalarValue::Binary(Some(v))
+        | ScalarValue::BinaryView(Some(v))
+        | ScalarValue::LargeBinary(Some(v))
+        | ScalarValue::FixedSizeBinary(_, Some(v)) => KvReducedValue::FixedSizeBinary(v.into()),
+        _ => return Err(execution_error("unsupported native Reduce result type")),
+    }))
 }
 
 fn validate_reduce_request(request: &RangeReduceRequest) -> Result<(), RangeError> {
@@ -205,58 +689,13 @@ fn validate_reduce_request(request: &RangeReduceRequest) -> Result<(), RangeErro
     Ok(())
 }
 
-fn reduce_row_into_response(
-    key: &Key,
-    value: &Bytes,
-    request: &RangeReduceRequest,
-    scalar_states: Option<&mut [ReductionState]>,
-    grouped_states: &mut BTreeMap<Vec<u8>, GroupedReductionState>,
-) -> Result<(), RangeError> {
-    let Some(extracted) = extract_reduce_row(key, value, request)? else {
-        return Ok(());
-    };
-
-    if request.group_by.is_empty() {
-        let Some(states) = scalar_states else {
-            return Err(RangeError::Reduce(
-                "missing scalar reduction state for non-grouped request".to_string(),
-            ));
-        };
-        for ((state, reducer), value) in states
-            .iter_mut()
-            .zip(request.reducers.iter())
-            .zip(extracted.reducer_values)
-        {
-            state.update(reducer.op, value)?;
-        }
-        return Ok(());
-    }
-
-    let group_key = encode_reduced_group_key(&extracted.group_values);
-    let group = grouped_states
-        .entry(group_key)
-        .or_insert_with(|| GroupedReductionState::new(extracted.group_values.clone(), request));
-    group.update(request, extracted.reducer_values)?;
-    Ok(())
-}
-
 fn extract_reduce_row(
     key: &Key,
     value: &Bytes,
-    request: &RangeReduceRequest,
+    plan: &ReducePlan,
 ) -> Result<Option<ExtractedReductionRow>, RangeError> {
-    let needs_value = request
-        .group_by
-        .iter()
-        .chain(
-            request
-                .reducers
-                .iter()
-                .filter_map(|reducer| reducer.expr.as_ref()),
-        )
-        .any(expr_needs_value)
-        || request.filter.as_ref().is_some_and(predicate_needs_value);
-    let decoded = if needs_value {
+    let request = &plan.request;
+    let decoded = if plan.needs_value {
         Some(
             decode_stored_row(value.as_ref())
                 .map_err(|error| RangeError::Reduce(error.to_string()))?,
@@ -279,11 +718,14 @@ fn extract_reduce_row(
     }
     canonicalize_reduced_group_values(&mut group_values);
 
-    let mut reducer_values = Vec::with_capacity(request.reducers.len());
-    for reducer in &request.reducers {
-        let extracted_value = match (&reducer.expr, archived) {
-            (None, _) => None,
-            (Some(expr), _) => eval_expr(key, archived, expr).map_err(RangeError::Reduce)?,
+    let mut reducer_values = Vec::with_capacity(plan.reducer_columns.len());
+    for column in &plan.reducer_columns {
+        let extracted_value = eval_expr(key, archived, &column.expr).map_err(RangeError::Reduce)?;
+        let extracted_value = match (extracted_value, column.ordered_float) {
+            (Some(KvReducedValue::Float64(number)), true) => Some(KvReducedValue::Int64(
+                float_order_bits(number.to_bits() as i64),
+            )),
+            (value, _) => value,
         };
         reducer_values.push(extracted_value);
     }
@@ -292,67 +734,6 @@ fn extract_reduce_row(
         group_values,
         reducer_values,
     }))
-}
-
-fn finalize_reduce_response(
-    scalar_states: Option<Vec<ReductionState>>,
-    grouped_states: BTreeMap<Vec<u8>, GroupedReductionState>,
-) -> RangeReduceResponse {
-    match scalar_states {
-        Some(states) => RangeReduceResponse {
-            results: states
-                .into_iter()
-                .map(|state| RangeReduceResult {
-                    value: state.finish(),
-                })
-                .collect(),
-            groups: Vec::new(),
-        },
-        None => RangeReduceResponse {
-            results: Vec::new(),
-            groups: grouped_states
-                .into_values()
-                .map(GroupedReductionState::finish)
-                .collect(),
-        },
-    }
-}
-
-pub(crate) struct RangeReducer<'a> {
-    request: &'a RangeReduceRequest,
-    scalar_states: Option<Vec<ReductionState>>,
-    grouped_states: BTreeMap<Vec<u8>, GroupedReductionState>,
-}
-
-impl<'a> RangeReducer<'a> {
-    pub(crate) fn new(request: &'a RangeReduceRequest) -> Result<Self, RangeError> {
-        validate_reduce_request(request)?;
-        Ok(Self {
-            request,
-            scalar_states: request.group_by.is_empty().then(|| {
-                request
-                    .reducers
-                    .iter()
-                    .map(|reducer| ReductionState::from_op(reducer.op))
-                    .collect::<Vec<_>>()
-            }),
-            grouped_states: BTreeMap::new(),
-        })
-    }
-
-    pub(crate) fn update(&mut self, key: &Key, value: &Bytes) -> Result<(), RangeError> {
-        reduce_row_into_response(
-            key,
-            value,
-            self.request,
-            self.scalar_states.as_deref_mut(),
-            &mut self.grouped_states,
-        )
-    }
-
-    pub(crate) fn finish(self) -> RangeReduceResponse {
-        finalize_reduce_response(self.scalar_states, self.grouped_states)
-    }
 }
 
 #[cfg(test)]
@@ -366,7 +747,27 @@ mod tests {
     };
     use exoware_sdk::{RangeReduceOp, RangeReduceRequest, RangeReducerSpec};
 
-    use super::RangeReducer;
+    use super::*;
+    use exoware_sdk::RangeReduceResponse;
+    use futures::StreamExt;
+
+    #[derive(Debug)]
+    struct FixturePartition {
+        schema: SchemaRef,
+        batches: Vec<RecordBatch>,
+    }
+
+    impl PartitionStream for FixturePartition {
+        fn schema(&self) -> &SchemaRef {
+            &self.schema
+        }
+        fn execute(&self, _: Arc<TaskContext>) -> SendableRecordBatchStream {
+            Box::pin(RecordBatchStreamAdapter::new(
+                self.schema.clone(),
+                futures::stream::iter(self.batches.clone().into_iter().map(Ok)),
+            ))
+        }
+    }
 
     fn make_row(key: &[u8], values: Vec<Option<StoredValue>>) -> (Key, Bytes) {
         let encoded = StoredRow { values }.encode();
@@ -424,12 +825,47 @@ mod tests {
     fn reduce(
         rows: &[(Key, Bytes)],
         request: &RangeReduceRequest,
-    ) -> Result<super::RangeReduceResponse, super::RangeError> {
-        let mut reducer = RangeReducer::new(request)?;
-        for (key, value) in rows {
-            reducer.update(key, value)?;
-        }
-        Ok(reducer.finish())
+    ) -> Result<RangeReduceResponse, RangeError> {
+        futures::executor::block_on(async {
+            let plan = ReducePlan::new(Arc::new(request.clone()))?;
+            let batches = rows
+                .chunks(REDUCE_BATCH_ROWS)
+                .map(|rows| plan.batch(rows))
+                .collect::<DfResult<Vec<_>>>()?;
+            let partition = FixturePartition {
+                schema: plan.schema.clone(),
+                batches,
+            };
+            let source = StreamingTableExec::try_new(
+                plan.schema.clone(),
+                vec![Arc::new(partition)],
+                None,
+                [],
+                false,
+                None,
+            )?;
+            let mut stream = plan.execute(Arc::new(source), Arc::new(TaskContext::default()))?;
+            let mut response = RangeReduceResponse {
+                results: Vec::new(),
+                groups: Vec::new(),
+            };
+            while let Some(batch) = stream.next().await {
+                let batch = batch?;
+                for row in 0..batch.num_rows() {
+                    let group =
+                        decode_group(&batch, row, request.group_by.len(), &plan.result_kinds)?;
+                    if request.group_by.is_empty() {
+                        response.results = group.results;
+                    } else {
+                        response.groups.push(group);
+                    }
+                }
+            }
+            response.groups.sort_by_key(|group| {
+                exoware_sdk::kv_codec::encode_reduced_group_key(&group.group_values)
+            });
+            Ok(response)
+        })
     }
 
     #[test]
@@ -809,17 +1245,263 @@ mod tests {
 
     #[test]
     fn mixed_type_min_max_returns_error() {
-        use super::ReductionState;
-
-        let mut state = ReductionState::Min(Some(KvReducedValue::Int64(10)));
-        let result = state.update(
+        let request = scalar_request(vec![reducer(
             RangeReduceOp::MinField,
-            Some(KvReducedValue::Utf8("hello".into())),
+            Some(int64_value_field(0)),
+        )]);
+        let rows = [make_row(
+            b"a",
+            vec![Some(StoredValue::Utf8("hello".into()))],
+        )];
+        assert!(reduce(&rows, &request).is_err());
+    }
+    #[test]
+    fn native_grouping_preserves_null_nan_payloads_and_signed_zero() {
+        let nan_a = f64::from_bits(0x7ff8_0000_0000_0001);
+        let nan_b = f64::from_bits(0x7ff8_0000_0000_0002);
+        let values = [
+            None,
+            Some(-0.0),
+            Some(0.0),
+            Some(nan_a),
+            Some(nan_a),
+            Some(nan_b),
+        ];
+        let rows = values
+            .into_iter()
+            .enumerate()
+            .map(|(i, value)| make_row(&i.to_be_bytes(), vec![value.map(StoredValue::Float64)]))
+            .collect::<Vec<_>>();
+        let request = RangeReduceRequest {
+            reducers: vec![reducer(RangeReduceOp::CountAll, None)],
+            group_by: vec![float64_value_field(0)],
+            filter: None,
+        };
+        let response = reduce(&rows, &request).unwrap();
+        assert_eq!(response.groups.len(), 4);
+        let groups = response
+            .groups
+            .iter()
+            .map(|group| {
+                (
+                    exoware_sdk::kv_codec::encode_reduced_group_key(&group.group_values),
+                    group.results[0].value.clone(),
+                )
+            })
+            .collect::<std::collections::BTreeMap<_, _>>();
+        for (value, count) in [
+            (None, 1),
+            (Some(0.0), 2),
+            (Some(nan_a), 2),
+            (Some(nan_b), 1),
+        ] {
+            assert_eq!(
+                groups[&exoware_sdk::kv_codec::encode_reduced_group_key(&[
+                    value.map(KvReducedValue::Float64)
+                ])],
+                result_u64(count)
+            );
+        }
+    }
+
+    #[test]
+    fn native_float_extrema_preserve_total_order() {
+        let positive_nan = f64::from_bits(0x7ff8_0000_0000_0001);
+        let negative_nan = f64::from_bits(0xfff8_0000_0000_0001);
+        for values in [
+            vec![f64::INFINITY],
+            vec![f64::NEG_INFINITY],
+            vec![positive_nan, 0.0],
+            vec![negative_nan, f64::NEG_INFINITY],
+            vec![0.0, -0.0],
+            vec![-0.0, 0.0],
+        ] {
+            let rows = values
+                .iter()
+                .enumerate()
+                .map(|(i, value)| {
+                    make_row(&i.to_be_bytes(), vec![Some(StoredValue::Float64(*value))])
+                })
+                .collect::<Vec<_>>();
+            let expected = [
+                *values
+                    .iter()
+                    .min_by(|left, right| left.total_cmp(right))
+                    .unwrap(),
+                *values
+                    .iter()
+                    .max_by(|left, right| left.total_cmp(right))
+                    .unwrap(),
+            ];
+            for grouped in [false, true] {
+                let request = RangeReduceRequest {
+                    reducers: vec![
+                        reducer(RangeReduceOp::MinField, Some(float64_value_field(0))),
+                        reducer(RangeReduceOp::MaxField, Some(float64_value_field(0))),
+                        reducer(RangeReduceOp::CountField, Some(float64_value_field(0))),
+                    ],
+                    group_by: if grouped {
+                        vec![KvExpr::Literal(KvReducedValue::Int64(0))]
+                    } else {
+                        Vec::new()
+                    },
+                    filter: None,
+                };
+                let response = reduce(&rows, &request).unwrap();
+                let results = if grouped {
+                    &response.groups[0].results
+                } else {
+                    &response.results
+                };
+                assert_eq!(results[2].value, result_u64(values.len() as u64));
+                for (result, expected) in results.iter().zip(expected) {
+                    let Some(KvReducedValue::Float64(actual)) = result.value else {
+                        panic!("float result");
+                    };
+                    assert_eq!(
+                        actual.to_bits(),
+                        expected.to_bits(),
+                        "grouped={grouped}, inputs={values:?}",
+                    );
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn native_spill_preserves_full_width_decimal_states_and_repeated_groups() {
+        use datafusion::execution::context::SessionConfig;
+        use datafusion::execution::memory_pool::FairSpillPool;
+        use datafusion::execution::runtime_env::RuntimeEnvBuilder;
+        let groups = 4096usize;
+        let field = |index, kind| {
+            KvExpr::Field(KvFieldRef::Value {
+                index,
+                kind,
+                nullable: true,
+            })
+        };
+        let decimal128 = field(1, KvFieldKind::Decimal128);
+        let decimal256 = field(2, KvFieldKind::Decimal256);
+        let float = float64_value_field(3);
+        let request = RangeReduceRequest {
+            reducers: vec![
+                reducer(RangeReduceOp::CountAll, None),
+                reducer(RangeReduceOp::SumField, Some(decimal128.clone())),
+                reducer(RangeReduceOp::SumField, Some(decimal256.clone())),
+                reducer(RangeReduceOp::MinField, Some(decimal128)),
+                reducer(RangeReduceOp::MaxField, Some(decimal256)),
+                reducer(RangeReduceOp::MinField, Some(float.clone())),
+                reducer(RangeReduceOp::MaxField, Some(float)),
+            ],
+            group_by: vec![utf8_value_field(0)],
+            filter: None,
+        };
+        let mut maximum256 = [255; 32];
+        maximum256[31] = 127;
+        let mut one256 = [0; 32];
+        one256[0] = 1;
+        let mut minimum256 = [0; 32];
+        minimum256[31] = 128;
+        let rows = (0..2)
+            .flat_map(|pass| {
+                (0..groups).map(move |group| {
+                    make_row(
+                        &(pass * groups + group).to_be_bytes(),
+                        vec![
+                            Some(StoredValue::Utf8(format!("{group:08}-{}", "x".repeat(512)))),
+                            (group != 0).then(|| {
+                                StoredValue::Bytes(
+                                    if pass == 0 { i128::MAX } else { 1 }.to_le_bytes().to_vec(),
+                                )
+                            }),
+                            (group != 0).then(|| {
+                                StoredValue::Bytes(
+                                    if pass == 0 { maximum256 } else { one256 }.to_vec(),
+                                )
+                            }),
+                            (group != 0).then(|| {
+                                StoredValue::Float64(if pass == 0 {
+                                    f64::from_bits(0x7ff8_0000_0000_0001)
+                                } else {
+                                    0.0
+                                })
+                            }),
+                        ],
+                    )
+                })
+            })
+            .collect::<Vec<_>>();
+        let plan = ReducePlan::new(Arc::new(request)).unwrap();
+        let batches = rows
+            .chunks(128)
+            .map(|rows| plan.batch(rows).unwrap())
+            .collect();
+        let source = StreamingTableExec::try_new(
+            plan.schema.clone(),
+            vec![Arc::new(FixturePartition {
+                schema: plan.schema.clone(),
+                batches,
+            })],
+            None,
+            [],
+            false,
+            None,
+        )
+        .unwrap();
+        let runtime = RuntimeEnvBuilder::new()
+            .with_memory_pool(Arc::new(FairSpillPool::new(512 * 1024)))
+            .build_arc()
+            .unwrap();
+        let context = Arc::new(
+            TaskContext::default()
+                .with_runtime(runtime.clone())
+                .with_session_config(SessionConfig::new().with_batch_size(128)),
         );
-        assert!(result.is_err());
-        assert!(
-            result.unwrap_err().to_string().contains("type mismatch"),
-            "expected type mismatch error"
-        );
+        let aggregate = plan.physical_plan(Arc::new(source)).unwrap();
+        let mut output = aggregate.execute(0, context).unwrap();
+        let mut seen = std::collections::BTreeSet::new();
+        while let Some(batch) = output.next().await {
+            let batch = batch.unwrap();
+            assert!(batch.num_rows() <= 128);
+            for row in 0..batch.num_rows() {
+                let group = decode_group(&batch, row, 1, &plan.result_kinds).unwrap();
+                let Some(KvReducedValue::Utf8(key)) = &group.group_values[0] else {
+                    panic!("missing group key");
+                };
+                assert!(seen.insert(key.clone()), "each group must be emitted once");
+                assert_eq!(group.results[0].value, result_u64(2));
+                if key.starts_with("00000000-") {
+                    assert!(group.results[1..].iter().all(|value| value.value.is_none()));
+                } else {
+                    assert_eq!(
+                        group.results[1].value,
+                        Some(KvReducedValue::Decimal128(i128::MIN))
+                    );
+                    assert_eq!(
+                        group.results[2].value,
+                        Some(KvReducedValue::Decimal256(minimum256))
+                    );
+                    assert_eq!(group.results[3].value, Some(KvReducedValue::Decimal128(1)));
+                    assert_eq!(
+                        group.results[4].value,
+                        Some(KvReducedValue::Decimal256(maximum256))
+                    );
+                    for (result, expected) in group.results[5..]
+                        .iter()
+                        .zip([0.0_f64.to_bits(), 0x7ff8_0000_0000_0001])
+                    {
+                        let Some(KvReducedValue::Float64(value)) = result.value else {
+                            panic!("float result");
+                        };
+                        assert_eq!(value.to_bits(), expected);
+                    }
+                }
+            }
+        }
+        assert_eq!(seen.len(), groups);
+        assert!(aggregate.metrics().unwrap().spill_count().unwrap_or(0) > 0);
+        drop(output);
+        assert_eq!(runtime.memory_pool.reserved(), 0);
     }
 }

@@ -336,7 +336,7 @@ service Service {
   }
   // Server-side aggregation over a key range with optional grouping and
   // filtering.
-  rpc Reduce(ReduceRequest) returns (ReduceResponse) {
+  rpc Reduce(ReduceRequest) returns (stream ReduceResponse) {
     option idempotency_level = NO_SIDE_EFFECTS;
   }
 }
@@ -421,8 +421,9 @@ message ReduceRequest {
   optional uint64 min_sequence_number = 4;
 }
 
-// Response from a Reduce RPC. Exactly one of `results` or `groups` is
-// populated depending on whether `ReduceParams.group_by` was empty.
+// A frame from a Reduce RPC. Scalar reductions return exactly one frame.
+// Grouped reductions emit each final group exactly once across batches.
+// An empty grouped reduction returns one frame containing only `detail`.
 message ReduceResponse {
   // Scalar reducer results (one per `ReduceParams.reducers` entry). Populated
   // only when `group_by` is empty.
@@ -430,5 +431,6 @@ message ReduceResponse {
   // Per-group reducer results. Populated only when `group_by` is non-empty.
   repeated RangeReduceGroup groups = 2;
   // Query sequence and server-defined metadata for this reduction.
+  // Present on every frame.
   Detail detail = 3;
 }

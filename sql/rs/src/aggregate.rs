@@ -44,6 +44,7 @@ use exoware_sdk::kv_codec::{
     KvPredicate, KvPredicateCheck, KvPredicateConstraint, KvReducedValue,
 };
 use exoware_sdk::{PrefixedStoreClient, SerializableReadSession};
+use futures::TryStreamExt;
 
 use crate::diagnostics::*;
 use crate::filter::*;
@@ -754,19 +755,11 @@ pub(crate) async fn execute_reduce_job(
             .map(|reducer| PartialAggregateState::from_op(reducer.op))
             .collect::<Vec<_>>();
         for range in &job.ranges {
-            let response = session
-                .range_reduce_response(&range.start, &range.end, &job.request)
+            let values = session
+                .range_reduce(&range.start, &range.end, &job.request)
                 .await
                 .map_err(|e| DataFusionError::External(Box::new(e)))?;
-            let archived = to_domain_reduce_response(response).map_err(|e| {
-                DataFusionError::Execution(format!("range reduction response decode: {e}"))
-            })?;
-            if !archived.groups.is_empty() {
-                return Err(DataFusionError::Execution(
-                    "scalar reduction job returned grouped results".to_string(),
-                ));
-            }
-            if archived.results.len() != states.len() {
+            if values.len() != states.len() {
                 return Err(DataFusionError::Execution(
                     "range reduction response length mismatch".to_string(),
                 ));
@@ -774,9 +767,9 @@ pub(crate) async fn execute_reduce_job(
             for ((state, reducer), partial) in states
                 .iter_mut()
                 .zip(job.request.reducers.iter())
-                .zip(archived.results.iter())
+                .zip(values.iter())
             {
-                state.merge_partial(reducer.op, partial.value.as_ref())?;
+                state.merge_partial(reducer.op, partial.as_ref())?;
             }
         }
         return Ok(RangeReduceResponse {
@@ -797,20 +790,26 @@ pub(crate) async fn execute_reduce_job(
 
     let mut groups = BTreeMap::<Vec<u8>, MergedGroupResponseState>::new();
     for range in &job.ranges {
-        let response = session
-            .range_reduce_response(&range.start, &range.end, &job.request)
+        let mut responses = session
+            .range_reduce_stream(&range.start, &range.end, &job.request)
             .await
             .map_err(|e| DataFusionError::External(Box::new(e)))?;
-        let archived = to_domain_reduce_response(response).map_err(|e| {
-            DataFusionError::Execution(format!("range reduction response decode: {e}"))
-        })?;
-        if !archived.results.is_empty() {
-            return Err(DataFusionError::Execution(
-                "grouped reduction job returned scalar results".to_string(),
-            ));
-        }
-        for group in archived.groups {
-            merge_domain_group_reduce_response(&mut groups, &job.request.reducers, group)?;
+        while let Some(response) = responses
+            .try_next()
+            .await
+            .map_err(|e| DataFusionError::External(Box::new(e)))?
+        {
+            let archived = to_domain_reduce_response(response.view()).map_err(|e| {
+                DataFusionError::Execution(format!("range reduction response decode: {e}"))
+            })?;
+            if !archived.results.is_empty() {
+                return Err(DataFusionError::Execution(
+                    "grouped reduction job returned scalar results".to_string(),
+                ));
+            }
+            for group in archived.groups {
+                merge_domain_group_reduce_response(&mut groups, &job.request.reducers, group)?;
+            }
         }
     }
     Ok(RangeReduceResponse {
@@ -1197,7 +1196,10 @@ pub(crate) fn choose_aggregate_access_path(
         }
     }
     Ok(Some((
-        predicate.primary_key_ranges(&table.model)?,
+        predicate.primary_key_ranges(
+            &table.model,
+            table.client.key_prefix().max_logical_key_len(),
+        )?,
         AggregateAccessPath::PrimaryKey,
         None,
     )))
