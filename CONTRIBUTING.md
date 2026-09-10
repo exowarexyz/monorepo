@@ -28,7 +28,9 @@ $ cargo +nightly fmt --all
 
 # Releases
 
-Releases are automatically published to `cargo` by [GitHub Actions](.github/workflows/publish.yml) whenever a version update is merged into the `main` branch.
+Releases are automatically published to crates.io and npm by [GitHub Actions](.github/workflows/publish.yml) whenever a version update is merged into the `main` branch.
+
+The npm packages `@exowarexyz/sdk`, `@exowarexyz/qmdb`, `@exowarexyz/simplex`, and `@exowarexyz/sql` use [trusted publishing](https://docs.npmjs.com/trusted-publishers/). Each package's npm settings must configure GitHub Actions as a trusted publisher for `exowarexyz/monorepo`, with workflow filename `publish.yml`, no environment, and permission to run `npm publish`.
 
 # Licensing and Copyright
 
