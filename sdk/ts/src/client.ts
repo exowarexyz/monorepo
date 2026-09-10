@@ -38,6 +38,10 @@ function retryBackoffDelay(attempt: number, config: RetryConfig): number {
 function makeRetryInterceptor(config: RetryConfig): Interceptor {
     const maxAttempts = Math.max(config.maxAttempts, 1);
     return (next) => async (req) => {
+        // These mutations have no idempotency key and must not be replayed after a lost response.
+        const allowsRetry = req.method !== IngestService.method.put &&
+            req.method !== PruneService.method.prune &&
+            req.method !== RetentionService.method.setRetention;
         if (req.stream && req.method === QueryService.method.reduce) {
             // Each retry must serialize the same input after Connect consumes its request iterator.
             const input = await req.message[Symbol.asyncIterator]().next();
@@ -71,6 +75,7 @@ function makeRetryInterceptor(config: RetryConfig): Interceptor {
                 return response;
             } catch (err) {
                 if (
+                    allowsRetry &&
                     attempt < maxAttempts &&
                     err instanceof ConnectError &&
                     RETRYABLE_CODES.has(err.code)
