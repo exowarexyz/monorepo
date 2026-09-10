@@ -28,7 +28,7 @@ $ cargo +nightly fmt --all
 
 # Releases
 
-Releases are automatically published to `cargo` by [GitHub Actions](.github/workflows/publish.yml) whenever a version update is merged into the `main` branch.
+Releases are automatically published to crates.io and npm by [GitHub Actions](.github/workflows/publish.yml) whenever a version update is merged into the `main` branch.
 
 # Licensing and Copyright
 

@@ -6,6 +6,7 @@ on:
 
 permissions:
   contents: read
+  id-token: write
 
 jobs:
   All:
@@ -70,8 +71,6 @@ jobs:
         npm run build
         npm publish --access public --ignore-scripts
       continue-on-error: true
-      env:
-        NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
     - name: Publish @exowarexyz/qmdb
       run: |
         cd qmdb/ts
@@ -82,8 +81,6 @@ jobs:
         cd qmdb/ts
         npm publish --access public --ignore-scripts
       continue-on-error: true
-      env:
-        NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
     - name: Publish @exowarexyz/simplex
       run: |
         cd simplex/ts
@@ -94,8 +91,6 @@ jobs:
         cd simplex/ts
         npm publish --access public --ignore-scripts
       continue-on-error: true
-      env:
-        NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
     - name: Publish @exowarexyz/sql
       run: |
         cd sql/ts
@@ -106,5 +101,3 @@ jobs:
         cd sql/ts
         npm publish --access public --ignore-scripts
       continue-on-error: true
-      env:
-        NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
