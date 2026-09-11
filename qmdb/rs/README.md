@@ -104,6 +104,28 @@ publication.commit(client.client()).await?;
 The expected root is a trust input, not a root accepted merely because it was
 included in the proof response.
 
+`stage_authenticated_range` always includes the supplied prefix pins. To avoid
+rewriting selected pins, use `stage_authenticated_range_with_existing_nodes`
+with a `&BTreeSet<Position<F>>` of exact positions. Only supplied pins at those
+positions are omitted. Reconstructed nodes, including delayed MMB parents, are
+always staged. Operation and index rows, presence markers, and attached current
+boundary rows are also always staged. Preparation still authenticates every
+supplied pin.
+
+The caller must guarantee that omitted nodes have the authenticated digest in
+the same namespace and operation history, become durable before a watermark
+covering the range is published, and remain retained for serving proofs. The
+set can describe already durable nodes or nodes promised by pending predecessor
+uploads. For pending uploads, publication must wait for every required data
+write in the contiguous prefix, even when uploads finish out of order. Tracking
+these dependencies through failures, retries, and restarts belongs to the
+caller. The library does not infer them from operation bounds or inspect Store.
+
+Use the default staging function for the first nonzero bootstrap or restart
+packet when prior pins are not guaranteed to be available. Later packets can
+omit exactly the pins covered by the caller's retention and publication
+guarantees. An empty set preserves the default behavior.
+
 ## Durable queue and publication
 
 The application's durable queue owns packet retention, upload scheduling,

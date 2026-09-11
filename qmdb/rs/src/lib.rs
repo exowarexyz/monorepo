@@ -38,9 +38,12 @@ mod connect;
 mod connect_client;
 mod core;
 pub mod error;
+mod operation_range;
+mod prefetch;
 pub mod proof;
 pub mod proto;
 pub mod prune;
+mod read_cache;
 mod request;
 pub(crate) mod storage;
 
@@ -52,8 +55,9 @@ mod subscription;
 mod unordered;
 
 pub use authenticated_range::{
-    prepare_authenticated_range, stage_authenticated_range, stage_watermark,
-    AuthenticatedOperationRange, PreparedAuthenticatedRange, UploadOperation,
+    prepare_authenticated_range, stage_authenticated_range,
+    stage_authenticated_range_with_existing_nodes, stage_watermark, AuthenticatedOperationRange,
+    PreparedAuthenticatedRange, UploadOperation,
 };
 pub use error::{ProofKind, QmdbError};
 pub use immutable::ImmutableClient;

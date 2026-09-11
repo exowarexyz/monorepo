@@ -1,4 +1,5 @@
 use std::marker::PhantomData;
+use std::sync::Arc;
 
 use commonware_codec::{Codec, Decode, Encode, Read as CodecRead};
 use commonware_cryptography::Hasher;
@@ -12,14 +13,16 @@ use commonware_storage::{
 use exoware_sdk::{PrefixedStoreClient, SerializableReadSession};
 
 use crate::auth::{
-    auth_inactive_peaks, compute_auth_root, load_auth_operation_at,
-    load_auth_operation_bytes_range, read_latest_auth_watermark, require_published_auth_watermark,
+    auth_inactive_peaks, compute_auth_root, load_auth_operation_at, read_latest_auth_watermark,
+    require_published_auth_watermark,
 };
 use crate::codec::merkle_size_for_watermark;
 use crate::connect::OperationKv;
 use crate::core::retry_transient_post_ingest_query;
 use crate::error::QmdbError;
+use crate::operation_range::RangeRead;
 use crate::proof::{OperationRangeCheckpoint, RawBatchMultiProof, VerifiedOperationRange};
+use crate::read_cache::ReadCache;
 use crate::storage::KvMerkleStorage;
 
 pub struct KeylessClient<
@@ -32,6 +35,7 @@ pub struct KeylessClient<
 {
     client: PrefixedStoreClient,
     op_cfg: <keyless::Operation<F, E> as CodecRead>::Cfg,
+    read_cache: Arc<ReadCache<F, H::Digest>>,
     _marker: PhantomData<(F, H, E)>,
 }
 
@@ -47,6 +51,7 @@ where
         Self {
             client: self.client.clone(),
             op_cfg: self.op_cfg.clone(),
+            read_cache: self.read_cache.clone(),
             _marker: PhantomData,
         }
     }
@@ -81,6 +86,7 @@ where
         Self {
             client,
             op_cfg,
+            read_cache: Arc::new(ReadCache::new()),
             _marker: PhantomData,
         }
     }
@@ -171,25 +177,30 @@ where
             .create_session_with_sequence(read_floor_sequence);
         require_published_auth_watermark(&session, watermark).await?;
         let end = crate::proof::resolve_range_bounds(watermark, start_location, max_locations)?;
-        let storage = KvMerkleStorage::<F, H::Digest> {
-            session: &session,
-            size: merkle_size_for_watermark(watermark)?,
-            _marker: PhantomData::<H::Digest>,
-        };
-        let inactive_peaks = self.inactive_peaks_at(&session, watermark).await?;
-        let root = compute_auth_root::<F, H>(&session, watermark, inactive_peaks).await?;
-        let encoded_operations =
-            load_auth_operation_bytes_range(&session, start_location, end).await?;
-        let proof = crate::proof::build_operation_range_checkpoint::<F, H, _>(
-            &storage,
+        let read = RangeRead::load::<H, _>(
+            &session,
+            &self.read_cache,
             watermark,
             start_location,
             end,
-            root,
-            inactive_peaks,
-            encoded_operations,
+            false,
+            |bytes| async move {
+                let operation = keyless::Operation::<F, E>::decode_cfg(bytes, &self.op_cfg)
+                    .map_err(|error| {
+                        QmdbError::CorruptData(format!(
+                            "operation at {watermark} decode error: {error}"
+                        ))
+                    })?;
+                let keyless::Operation::Commit(_, floor) = operation else {
+                    return Err(QmdbError::CorruptData(format!(
+                        "keyless watermark {watermark} does not point at a Commit operation"
+                    )));
+                };
+                auth_inactive_peaks(watermark, floor)
+            },
         )
         .await?;
+        let proof = read.checkpoint::<H>().await?;
         let sequence_number = session.evaluated_sequence().unwrap_or_default();
         Ok((proof, sequence_number))
     }
