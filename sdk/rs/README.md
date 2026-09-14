@@ -12,6 +12,22 @@ platform trust configuration.
 
 `exoware-sdk` is **ALPHA** software and is not yet recommended for production use. Developers should expect breaking changes and occasional instability.
 
+## Put limits and batching
+
+The published limits are available under `exoware_sdk::limits`. See the
+[language-independent protocol contract](../../proto/README.md) for the
+application limits, transport byte limits, and size errors. The [server documentation](../../server/README.md#protocol-limits)
+describes transport and response decode budgets.
+
+`StoreWriteBatch::encoded_len` reports the exact uncompressed protobuf size of
+the staged `PutRequest`. `StoreWriteBatch::split` creates ordered batches that
+fit positive row and byte limits without copying or re-prefixing staged rows.
+An empty batch produces no chunks. An entry that cannot fit alone returns an
+error. Each chunk is atomic as one write, but splitting creates several writes.
+Concurrent commits may be sequenced in a different order from the returned batches.
+Exoware data is immutable. Applications own retry and publication coordination
+across chunks.
+
 ## Store Key Prefixes
 
 Use `StoreKeyPrefix` when multiple logical QMDB, SQL, or raw KV instances share one Store database. The prefix is applied by the SDK, so higher-level clients keep using their normal logical keys:
