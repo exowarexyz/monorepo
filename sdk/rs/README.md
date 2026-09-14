@@ -28,6 +28,24 @@ Concurrent commits may be sequenced in a different order from the returned batch
 Exoware data is immutable. Applications own retry and publication coordination
 across chunks.
 
+## Request compression
+
+Request compression is disabled by default. Select zstd and its compression level
+on the client builder:
+
+```rust
+use exoware_sdk::{ConnectRequestCompression, StoreClient};
+
+let client = StoreClient::builder()
+    .url("http://localhost:10000")
+    .connect_request_compression(ConnectRequestCompression::Zstd { level: -1 })
+    .build()?;
+```
+
+Zero selects zstd's default level. Negative levels favor speed. Zstd clamps levels
+outside its supported range. Changing the level preserves decompressed content,
+but compressed bytes and sizes can differ.
+
 ## Store Key Prefixes
 
 Use `StoreKeyPrefix` when multiple logical QMDB, SQL, or raw KV instances share one Store database. The prefix is applied by the SDK, so higher-level clients keep using their normal logical keys:
