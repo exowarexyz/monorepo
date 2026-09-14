@@ -49,6 +49,10 @@ the range and pins, checks canonical operation encodings and commit floors, and
 prepares operation, keyed-index, and Merkle node rows, including a presence
 marker for the final location. Preparation is a pure function of those inputs.
 
+Preparation reconstructs the operation-log root from the pins and encoded operations
+before decoding operations. It uses the proof's leaf count and inactive-peak count.
+The proof digests are neither used nor validated.
+
 The packet must contain every operation in its declared interval and end at the
 proof's leaf count. Its final operation must be a commit whose inactivity floor
 matches the proof's canonical inactive-peak count. Earlier commits are allowed,
