@@ -92,7 +92,8 @@ async fn check_mirror<F, K, V, E>(
             .collect::<Vec<_>>();
         let authenticated = AuthenticatedOperationRange {
             start_location: snapshot.start,
-            proof: &snapshot.proof,
+            end_location: snapshot.proof.leaves,
+            inactive_peaks: snapshot.proof.inactive_peaks,
             pinned_nodes: &snapshot.pinned_nodes,
             encoded_operations: &encoded_operations,
         };
@@ -106,13 +107,6 @@ async fn check_mirror<F, K, V, E>(
             .is_err()
         );
 
-        // Preparation authenticates the complete suffix and pins independently of proof digests.
-        let mut proof = snapshot.proof.clone();
-        proof.digests.push(wrong_root);
-        let authenticated = AuthenticatedOperationRange {
-            proof: &proof,
-            ..authenticated
-        };
         let mut prepared = prepare_authenticated_range::<
             F,
             Sha256,

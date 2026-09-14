@@ -36,9 +36,9 @@ QMDB instances or Merkle families.
 ## Authenticated upload contract
 
 `AuthenticatedOperationRange` describes the half-open interval
-`[start_location, proof.leaves)` using:
+`[start_location, end_location)` using:
 
-- a Commonware operation range proof
+- the exclusive end location and canonical inactive peak count
 - pinned prefix nodes in `Family::nodes_to_pin(start_location)` order
 - the exact canonical encoded operations in location order
 
@@ -50,12 +50,11 @@ prepares operation, keyed-index, and Merkle node rows, including a presence
 marker for the final location. Preparation is a pure function of those inputs.
 
 Preparation reconstructs the operation-log root from the pins and encoded operations
-before decoding operations. It uses the proof's leaf count and inactive-peak count.
-The proof digests are neither used nor validated.
+before decoding operations.
 
-The packet must contain every operation in its declared interval and end at the
-proof's leaf count. Its final operation must be a commit whose inactivity floor
-matches the proof's canonical inactive-peak count. Earlier commits are allowed,
+The packet must contain every operation in its declared interval. Its final
+operation must be a commit whose inactivity floor determines the canonical
+inactive-peak count. Earlier commits are allowed,
 so the same API accepts bootstrap packets, complete prefixes, incremental
 suffixes, and overlapping ranges. A packet beginning at zero has no pinned
 prefix nodes.
@@ -83,7 +82,8 @@ let client = PrefixedStoreClient::empty(StoreClient::new(store_url));
 
 let range = AuthenticatedOperationRange {
     start_location,
-    proof: &proof,
+    end_location,
+    inactive_peaks,
     pinned_nodes: &pinned_nodes,
     encoded_operations: &encoded_operations,
 };

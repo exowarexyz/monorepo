@@ -10,7 +10,7 @@ use commonware_codec::{Codec, Encode};
 use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::Strategy;
 use commonware_storage::{
-    merkle::{Family, Graftable, Location, Position, Proof},
+    merkle::{Family, Graftable, Location, Position},
     qmdb::{
         any::{
             operation::{Operation as AnyOperation, Update},
@@ -34,15 +34,16 @@ use crate::{
     CurrentBoundaryState, ProofKind, QmdbError,
 };
 
-/// An operation range ending at the leaf count committed by its proof.
+/// An operation range and prefix frontier for authentication against a trusted root.
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[must_use]
 pub struct AuthenticatedOperationRange<'a, D: Digest, F: Family> {
     /// Inclusive operation location where the range starts.
     pub start_location: Location<F>,
-    /// Range metadata supplying the exclusive end and inactive peak count.
-    /// Proof digests are not used or validated during preparation.
-    pub proof: &'a Proof<F, D>,
+    /// Exclusive operation location committed by the expected root.
+    pub end_location: Location<F>,
+    /// Canonical inactive peak count determined by the final commit floor.
+    pub inactive_peaks: usize,
     /// Prefix frontier in [`Family::nodes_to_pin`] order.
     pub pinned_nodes: &'a [D],
     /// Canonical operation encodings in location order.
@@ -165,12 +166,11 @@ impl<D: Digest, F: Graftable> PreparedAuthenticatedRange<D, F> {
 
 /// Verify an operation range and prepare its operation, index, and Merkle node rows.
 ///
-/// `expected_root` must be trusted independently of the supplied proof and operations. The range
-/// must end at a commit whose floor determines the proof's canonical inactive peak count. Earlier
+/// `expected_root` must be trusted independently of the supplied range and pins. The range
+/// must end at a commit whose floor determines the canonical inactive peak count. Earlier
 /// commits are accepted, allowing bootstrap, prefixes, and overlapping uploads to use this API.
 /// The operation codec configuration must match the originating QMDB variant.
-/// Reconstruction authenticates the range and pins before operation decoding. Proof digests
-/// are not used or validated.
+/// Reconstruction authenticates the range and pins before operation decoding.
 pub fn prepare_authenticated_range<F, H, Op, S>(
     authenticated: &AuthenticatedOperationRange<'_, H::Digest, F>,
     expected_root: &H::Digest,
@@ -184,7 +184,7 @@ where
     S: Strategy,
 {
     let start = authenticated.start_location;
-    let end = authenticated.proof.leaves;
+    let end = authenticated.end_location;
     if !start.is_valid_index() || !end.is_valid() || start >= end {
         return Err(QmdbError::CorruptData(format!(
             "invalid authenticated operation range [{start}, {end})"
@@ -217,7 +217,7 @@ where
         authenticated.pinned_nodes.to_vec(),
         start,
         authenticated.encoded_operations.iter().map(Vec::as_slice),
-        authenticated.proof.inactive_peaks,
+        authenticated.inactive_peaks,
         strategy,
     )?;
     let expected_size = Position::try_from(end).map_err(|error| {
@@ -267,12 +267,9 @@ where
     }
     let floor = final_floor
         .ok_or_else(|| QmdbError::CorruptData("authenticated range must end at a commit".into()))?;
-    if !authenticated
-        .proof
-        .matches_canonical_inactive_peaks(end, floor)
-    {
+    if authenticated.inactive_peaks != F::inactive_peaks(end, floor) {
         return Err(QmdbError::CorruptData(
-            "authenticated proof has a noncanonical inactive peak count".into(),
+            "authenticated range has a noncanonical inactive peak count".into(),
         ));
     }
 
@@ -364,7 +361,7 @@ mod tests {
     use commonware_cryptography::{sha256::Digest as Sha256Digest, Sha256};
     use commonware_parallel::{Rayon, Sequential};
     use commonware_storage::{
-        merkle::{mem::Mem, mmb, mmr},
+        merkle::{mem::Mem, mmb, mmr, Proof},
         qmdb::{
             any::{
                 ordered, unordered,
@@ -401,7 +398,8 @@ mod tests {
         fn view(&self) -> AuthenticatedOperationRange<'_, Sha256Digest, F> {
             AuthenticatedOperationRange {
                 start_location: self.start_location,
-                proof: &self.proof,
+                end_location: self.proof.leaves,
+                inactive_peaks: self.proof.inactive_peaks,
                 pinned_nodes: &self.pinned_nodes,
                 encoded_operations: &self.encoded_operations,
             }
@@ -537,7 +535,16 @@ mod tests {
         let mut changed = original.clone();
         changed.start_location += 1;
         changed.proof.leaves += 1;
-        assert!(changed.prepare().is_err());
+
+        // Keep the pin count valid so relocation reaches root authentication.
+        changed.pinned_nodes.resize(
+            F::nodes_to_pin(changed.start_location).count(),
+            changed_digest,
+        );
+        assert!(matches!(
+            changed.prepare(),
+            Err(QmdbError::ProofVerification { .. })
+        ));
 
         let mut changed = original.clone();
         changed.encoded_operations.swap(0, 1);
@@ -548,7 +555,10 @@ mod tests {
 
         let mut changed = original.clone();
         changed.proof.inactive_peaks = usize::MAX;
-        assert!(changed.prepare().is_err());
+        assert!(matches!(
+            changed.prepare(),
+            Err(QmdbError::CommonwareMerkle(_))
+        ));
 
         let mut changed = original.clone();
         changed.pinned_nodes.push(changed_digest);
@@ -609,31 +619,6 @@ mod tests {
     fn test_authenticates_pins_across_folded_and_delayed_merges() {
         authenticate_frontier_pins::<mmr::Family>();
         authenticate_frontier_pins::<mmb::Family>();
-    }
-
-    fn ignore_proof_digests<F: Family + PartialEq>() {
-        let operations = committed_encoded_operations::<F>();
-        let mut authenticated = authenticated_range_fixture::<F>(&operations, 3, 0);
-        let expected = authenticated.prepare().expect("valid range");
-        assert!(!authenticated.proof.digests.is_empty());
-        authenticated
-            .proof
-            .digests
-            .fill(Sha256::hash(&[b"unused digest"]));
-        assert_eq!(authenticated.prepare().unwrap(), expected);
-        authenticated.proof.digests.clear();
-        assert_eq!(authenticated.prepare().unwrap(), expected);
-        authenticated
-            .proof
-            .digests
-            .push(Sha256::hash(&[b"extra digest"]));
-        assert_eq!(authenticated.prepare().unwrap(), expected);
-    }
-
-    #[test]
-    fn test_proof_digests_do_not_affect_prepared_rows() {
-        ignore_proof_digests::<mmr::Family>();
-        ignore_proof_digests::<mmb::Family>();
     }
 
     // This decoder deliberately accepts aliases so canonical encoding validation is exercised
