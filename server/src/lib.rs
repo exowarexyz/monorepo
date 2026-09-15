@@ -11,8 +11,10 @@ mod stream;
 mod validate;
 
 pub use connect::{
-    connect_stack, ingest_service, prune_service, query_service, query_stack, retention_service,
-    stream_service, AppState, IngestState, PruneState, QueryState, RetentionState, StreamState,
+    connect_limits, connect_stack, consistency_not_ready_error, ingest_service, prune_service,
+    query_service, query_stack, retention_service, stream_service, AppState, IngestState,
+    PruneState, QueryState, RetentionState, StreamState, MAX_CONNECTRPC_BODY_BYTES,
+    MAX_CONNECTRPC_ELEMENT_MEMORY_BYTES, MAX_CONNECTRPC_MESSAGE_BYTES,
 };
 pub use engine::{
     FilteredBatch, Ingest, IngestError, Log, LogBatch, Prune, Query, QueryExtra, RangeScan,
@@ -23,7 +25,7 @@ pub use stream::{
     CompiledMatchers, CompiledSelector, InvalidFilter, StreamHub, StreamNotification,
     StreamNotifier,
 };
-pub use validate::{IngestLimits, DEFAULT_MAX_VALUE_LEN};
+pub use validate::{validate_get_many_request, IngestLimits};
 
 /// Types used by filtered-batch and matcher APIs, re-exported so backends can
 /// use the server API without a version-matched direct SDK dependency.

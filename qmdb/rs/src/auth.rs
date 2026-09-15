@@ -44,22 +44,23 @@ pub(crate) async fn require_published_auth_watermark<F: Family>(
     session: &SerializableReadSession,
     watermark: Location<F>,
 ) -> Result<(), QmdbError> {
-    let available = read_latest_auth_watermark::<F>(session)
-        .await?
-        .unwrap_or(Location::new(0));
-    let watermark_exists = session
+    if session
         .get(&encode_watermark_key(watermark))
         .await?
-        .is_some();
-    if available < watermark
-        || (!watermark_exists && available == Location::new(0) && watermark == Location::new(0))
+        .is_some()
     {
-        return Err(QmdbError::WatermarkTooLow {
-            requested: watermark.as_u64(),
-            available: available.as_u64(),
-        });
+        return Ok(());
     }
-    Ok(())
+
+    // Publication can cover historical tips that have no marker of their own.
+    let available = read_latest_auth_watermark::<F>(session).await?;
+    if available.is_some_and(|available| available >= watermark) {
+        return Ok(());
+    }
+    Err(QmdbError::WatermarkTooLow {
+        requested: watermark.as_u64(),
+        available: available.unwrap_or(Location::new(0)).as_u64(),
+    })
 }
 
 pub(crate) fn auth_inactive_peaks<F: Family>(

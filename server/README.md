@@ -21,6 +21,31 @@ Split deployments can instead mount `ingest_service`, `query_stack`,
 component state. The stream service accepts an in-process `StreamNotifier`;
 `StreamHub` is the local default.
 
+Custom GetMany handlers can call `validate_get_many_request(request.view())` before
+checking `min_sequence_number`. If the observed sequence is below that floor,
+return `consistency_not_ready_error(required, current)` to preserve the standard
+error details and one-second retry hint. Both helpers are exported from the crate root.
+
+## Protocol limits
+
+See the [language-independent protocol contract](../proto/README.md) for the
+portable Put limits and size error details. Default ingest validation uses the
+published limits. A deployment can explicitly configure larger limits, but
+requests above the published baseline are not portable.
+
+Transport admission has separate backstops. Request bodies and decompressed
+messages are capped at 256 MiB. Decoder element memory is capped at 192 MiB.
+Stored stream responses and the Rust SDK response decoder allow 512 MiB messages
+and 256 MiB of element memory. The response byte budget leaves room for metadata
+and compression overhead when reading a full-size request back.
+Element memory is counted across a message's decoded
+elements. These limits do not describe total process memory or concurrent
+request capacity.
+
+The 2,000,000 entry baseline is an Exoware ingest contract. Any sequence-row
+cap is not imposed by the Exoware server. A cap imposed downstream by a store
+backend remains that backend's responsibility.
+
 Reduce uses native DataFusion aggregation and streams completed groups in bounded
 frames. Groups remain in memory by default. `QueryState::with_runtime` accepts a
 DataFusion `RuntimeEnv` to configure its native memory pool and spill storage.

@@ -12,18 +12,15 @@ use exoware_proto::{
 };
 use exoware_sdk as exoware_proto;
 use exoware_sdk::keys::{validate_key_size, MAX_KEY_LEN};
-
-/// Default maximum value size accepted by ingest validation.
-pub const DEFAULT_MAX_VALUE_LEN: usize = 10 * 1024 * 1024;
-
-/// `ErrorInfo.domain` used for all ingest-service errors. The
-/// `put_rejects_oversized_key` test pins this wire string independently so a
-/// silent drift is caught.
-pub const INGEST_ERROR_DOMAIN: &str = "log.ingest";
+use exoware_sdk::limits::{
+    PutTooLarge, INGEST_ERROR_DOMAIN, MAX_PUT_ENTRIES, MAX_VALUE_LEN, PUT_TOO_LARGE_REASON,
+};
 
 /// Limits enforced before ingest requests reach the backend.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct IngestLimits {
+    /// Maximum number of entries in one atomic Put.
+    pub max_entries: usize,
     /// Maximum accepted size, in bytes, for each value field.
     pub max_value_len: usize,
 }
@@ -31,7 +28,8 @@ pub struct IngestLimits {
 impl Default for IngestLimits {
     fn default() -> Self {
         Self {
-            max_value_len: DEFAULT_MAX_VALUE_LEN,
+            max_entries: MAX_PUT_ENTRIES,
+            max_value_len: MAX_VALUE_LEN,
         }
     }
 }
@@ -70,11 +68,30 @@ fn field_error(
     )
 }
 
-fn validate_key_field(domain: &str, field: &str, key: &[u8]) -> Result<(), ConnectError> {
+pub(crate) fn put_too_large_error(error: PutTooLarge) -> ConnectError {
+    field_error(
+        INGEST_ERROR_DOMAIN,
+        "kvs",
+        error.to_string(),
+        PUT_TOO_LARGE_REASON,
+        "put request exceeds size limits",
+        [
+            ("entries".to_string(), error.entries.to_string()),
+            ("max_entries".to_string(), error.max_entries.to_string()),
+        ],
+    )
+}
+
+fn validate_key_field(
+    domain: &str,
+    field: impl FnOnce() -> String,
+    key: &[u8],
+) -> Result<(), ConnectError> {
     validate_key_size(key.len()).map_err(|e| {
+        let field = field();
         field_error(
             domain,
-            field,
+            &field,
             e.to_string(),
             "INVALID_KEY_LENGTH",
             format!("{field} key length is outside store limits"),
@@ -85,14 +102,15 @@ fn validate_key_field(domain: &str, field: &str, key: &[u8]) -> Result<(), Conne
 
 fn validate_value_field(
     domain: &str,
-    field: &str,
+    field: impl FnOnce() -> String,
     value: &[u8],
     limits: IngestLimits,
 ) -> Result<(), ConnectError> {
     if value.len() > limits.max_value_len {
+        let field = field();
         return Err(field_error(
             domain,
-            field,
+            &field,
             format!(
                 "value length {} exceeds maximum {}",
                 value.len(),
@@ -115,6 +133,13 @@ pub fn validate_put_request(
     request: &exoware_proto::log::ingest::v1::PutRequestView<'_>,
     limits: IngestLimits,
 ) -> Result<(), ConnectError> {
+    if request.kvs.len() > limits.max_entries {
+        return Err(put_too_large_error(PutTooLarge {
+            entries: request.kvs.len(),
+            max_entries: limits.max_entries,
+        }));
+    }
+
     // buf.validate: repeated.min_items = 1
     if request.kvs.is_empty() {
         return Err(field_error(
@@ -128,10 +153,10 @@ pub fn validate_put_request(
     }
     // buf.validate: Entry.key bytes.max_len = 254
     for (index, kv) in request.kvs.iter().enumerate() {
-        validate_key_field(INGEST_ERROR_DOMAIN, &format!("kvs[{index}].key"), kv.key)?;
+        validate_key_field(INGEST_ERROR_DOMAIN, || format!("kvs[{index}].key"), kv.key)?;
         validate_value_field(
             INGEST_ERROR_DOMAIN,
-            &format!("kvs[{index}].value"),
+            || format!("kvs[{index}].value"),
             kv.value,
             limits,
         )?;
@@ -145,15 +170,15 @@ pub fn validate_get_request(
     request: &exoware_proto::store::query::v1::GetRequestView<'_>,
 ) -> Result<(), ConnectError> {
     // buf.validate: bytes.max_len = 254
-    validate_key_field("store.query", "key", request.key)
+    validate_key_field("store.query", || "key".to_string(), request.key)
 }
 
 pub fn validate_range_request(
     request: &exoware_proto::store::query::v1::RangeRequestView<'_>,
 ) -> Result<(), ConnectError> {
     // buf.validate: bytes.max_len = 254
-    validate_key_field("store.query", "start", request.start)?;
-    validate_key_field("store.query", "end", request.end)?;
+    validate_key_field("store.query", || "start".to_string(), request.start)?;
+    validate_key_field("store.query", || "end".to_string(), request.end)?;
     // buf.validate: uint32.gt = 0
     if request.batch_size == 0 {
         return Err(field_error(
@@ -181,6 +206,7 @@ pub fn validate_range_request(
     Ok(())
 }
 
+/// Validate GetMany keys and batch size before checking the requested consistency floor.
 pub fn validate_get_many_request(
     request: &exoware_proto::store::query::v1::GetManyRequestView<'_>,
 ) -> Result<(), ConnectError> {
@@ -195,7 +221,7 @@ pub fn validate_get_many_request(
         ));
     }
     for (index, key) in request.keys.iter().enumerate() {
-        validate_key_field("store.query", &format!("keys[{index}]"), key)?;
+        validate_key_field("store.query", || format!("keys[{index}]"), key)?;
     }
     if request.batch_size == 0 {
         return Err(field_error(
@@ -214,8 +240,8 @@ pub fn validate_reduce_request(
     request: &exoware_proto::store::query::v1::ReduceRequestView<'_>,
 ) -> Result<(), ConnectError> {
     // buf.validate: bytes.max_len = 254
-    validate_key_field("store.query", "start", request.start)?;
-    validate_key_field("store.query", "end", request.end)?;
+    validate_key_field("store.query", || "start".to_string(), request.start)?;
+    validate_key_field("store.query", || "end".to_string(), request.end)?;
     if request.params.reducers.is_empty() && request.params.group_by.is_empty() {
         return Err(field_error(
             "store.query",
@@ -286,7 +312,7 @@ mod tests {
         let req = exoware_proto::ingest::PutRequest {
             kvs: vec![exoware_proto::common::Entry {
                 key: vec![0u8; 10],
-                value: Bytes::from(vec![1u8; DEFAULT_MAX_VALUE_LEN + 1]),
+                value: Bytes::from(vec![1u8; MAX_VALUE_LEN + 1]),
                 ..Default::default()
             }],
             ..Default::default()
@@ -348,7 +374,10 @@ mod tests {
         let bytes = valid_put_request_with_value_len(5);
         let view =
             exoware_proto::log::ingest::v1::PutRequestView::decode_view(&bytes).expect("parse");
-        let limits = IngestLimits { max_value_len: 4 };
+        let limits = IngestLimits {
+            max_value_len: 4,
+            ..IngestLimits::default()
+        };
         let err = validate_put_request(&view, limits).unwrap_err();
 
         assert_eq!(err.code, connectrpc::ErrorCode::InvalidArgument);

@@ -33,6 +33,7 @@ use connectrpc::{
 };
 use exoware_sdk::common::kv::v1::filter::KindView as ProtoFilterKindView;
 use exoware_sdk::stream_filter::{CompiledFilters, Filter};
+use exoware_sdk::ClientError;
 use futures::future::BoxFuture;
 use futures::{FutureExt, Stream};
 
@@ -59,13 +60,14 @@ fn connect_limits() -> Limits {
 
 fn qmdb_error_to_connect(err: QmdbError) -> ConnectError {
     match err {
-        QmdbError::Client(client_err) => {
-            if let Some(rpc) = client_err.rpc_error() {
-                ConnectError::new(rpc.code, rpc.message.clone().unwrap_or_default())
-            } else {
-                ConnectError::internal(client_err.to_string())
-            }
+        QmdbError::Client(ClientError::Rpc(rpc)) => {
+            // Preserve RPC details without relaying the Store's transport metadata.
+            let mut rpc = *rpc;
+            rpc.set_response_headers(Default::default());
+            rpc.set_trailers(Default::default());
+            rpc
         }
+        QmdbError::Client(client_err) => ConnectError::internal(client_err.to_string()),
         QmdbError::EmptyBatch
         | QmdbError::EmptyProofRequest
         | QmdbError::InvalidRangeLength
@@ -1279,6 +1281,12 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use buffa::Message as _;
+    use exoware_sdk::proto::google::rpc::{ErrorInfo, RetryInfo};
+    use exoware_sdk::proto::query::Detail;
+    use exoware_sdk::proto::{
+        decode_connect_error, with_error_info_detail, with_query_detail, with_retry_info_detail,
+    };
 
     fn pending(
         latest: u64,
@@ -1296,7 +1304,6 @@ mod tests {
 
     #[test]
     fn test_subscribe_multi_proof_proto_includes_ops_root_without_witness() {
-        use buffa::Message as _;
         use commonware_cryptography::{sha256::Digest as Sha256Digest, Sha256};
         use commonware_storage::merkle::{mmr, Proof};
         use connectrpc::Encodable as _;
@@ -1322,6 +1329,74 @@ mod tests {
 
         assert_eq!(proof.ops_root, root.encode());
         assert!(proof.ops_root_witness.is_empty());
+    }
+
+    #[test]
+    fn test_client_rpc_error_preserves_code_message_and_details() {
+        let raw_detail = connectrpc::error::ErrorDetail {
+            type_url: "type.googleapis.com/example.RawDetail".to_string(),
+            value: Some("AQID".to_string()),
+            debug: None,
+        };
+        let mut rpc_error = with_query_detail(
+            with_retry_info_detail(
+                with_error_info_detail(
+                    ConnectError::new(ErrorCode::Unavailable, "retry me"),
+                    ErrorInfo {
+                        reason: "TEST_REASON".to_string(),
+                        domain: "qmdb".to_string(),
+                        ..Default::default()
+                    },
+                ),
+                RetryInfo::decode_from_slice(&[0x0a, 0x04, 0x08, 0x01, 0x10, 0x02])
+                    .expect("decode retry detail fixture"),
+            ),
+            Detail {
+                sequence_number: 42,
+                ..Default::default()
+            },
+        )
+        .with_detail(raw_detail.clone());
+        rpc_error.response_headers_mut().insert(
+            "set-cookie",
+            "store-affinity=worker-1; Path=/".parse().unwrap(),
+        );
+        rpc_error
+            .trailers_mut()
+            .insert("x-store-trailer", "private".parse().unwrap());
+
+        let converted =
+            qmdb_error_to_connect(QmdbError::Client(ClientError::Rpc(Box::new(rpc_error))));
+
+        assert_eq!(converted.code, ErrorCode::Unavailable);
+        assert_eq!(converted.message.as_deref(), Some("retry me"));
+        assert!(converted.response_headers().is_empty());
+        assert!(converted.trailers().is_empty());
+        assert_eq!(
+            converted.details.last().unwrap().type_url,
+            raw_detail.type_url
+        );
+        assert_eq!(converted.details.last().unwrap().value, raw_detail.value);
+
+        let decoded = decode_connect_error(&converted).expect("decode preserved details");
+        assert_eq!(decoded.error_info.unwrap().reason, "TEST_REASON");
+        assert_eq!(
+            decoded
+                .retry_info
+                .unwrap()
+                .retry_delay
+                .as_option()
+                .unwrap()
+                .seconds,
+            1
+        );
+        assert_eq!(decoded.query_detail.unwrap().sequence_number, 42);
+        assert_eq!(decoded.other_details.len(), 1);
+        assert_eq!(
+            decoded.other_details[0].type_url,
+            "type.googleapis.com/example.RawDetail"
+        );
+        assert_eq!(decoded.other_details[0].value.as_ref(), &[1, 2, 3]);
     }
 
     #[test]

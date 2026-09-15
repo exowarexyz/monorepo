@@ -13,8 +13,7 @@ use exoware_sdk::{ClientError, PrefixedStoreClient, RangeMode, SerializableReadS
 use crate::codec::{
     decode_digest, decode_operation_location_key, decode_update_location,
     decode_watermark_location, encode_node_key, encode_operation_key, encode_presence_key,
-    encode_update_key, encode_watermark_key, ensure_encoded_value_size, merkle_size_for_watermark,
-    WATERMARK_PREFIX,
+    encode_update_key, ensure_encoded_value_size, merkle_size_for_watermark, WATERMARK_PREFIX,
 };
 use crate::error::QmdbError;
 use crate::VersionedValue;
@@ -116,23 +115,7 @@ impl<'a, F: Family, D: Digest, K: Codec, V: Codec> HistoricalOpsClientCore<'a, F
         session: &SerializableReadSession,
         watermark: Location<F>,
     ) -> Result<(), QmdbError> {
-        let available = self
-            .read_latest_watermark(session)
-            .await?
-            .unwrap_or(Location::new(0));
-        let watermark_exists = session
-            .get(&encode_watermark_key(watermark))
-            .await?
-            .is_some();
-        if available < watermark
-            || (!watermark_exists && available == Location::new(0) && watermark == Location::new(0))
-        {
-            return Err(QmdbError::WatermarkTooLow {
-                requested: watermark.as_u64(),
-                available: available.as_u64(),
-            });
-        }
-        Ok(())
+        crate::auth::require_published_auth_watermark(session, watermark).await
     }
 
     pub(crate) async fn require_batch_boundary(
