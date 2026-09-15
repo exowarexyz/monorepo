@@ -445,6 +445,34 @@ fn with_retry_hint(err: ConnectError, retry_delay: std::time::Duration) -> Conne
     )
 }
 
+/// Build a consistency rejection with the observed frontier and a one-second retry hint.
+pub fn consistency_not_ready_error(required: u64, current: u64) -> ConnectError {
+    let err = with_retry_hint(
+        ConnectError::aborted("minimum consistency token is not yet visible"),
+        RETRY_HINT_DELAY,
+    );
+    with_query_detail(
+        with_error_info_detail(
+            err,
+            ErrorInfo {
+                reason: "CONSISTENCY_NOT_READY".to_string(),
+                domain: "store.query".to_string(),
+                metadata: [
+                    ("required_sequence_number".to_string(), required.to_string()),
+                    ("current_sequence_number".to_string(), current.to_string()),
+                ]
+                .into_iter()
+                .collect(),
+                ..Default::default()
+            },
+        ),
+        Detail {
+            sequence_number: current,
+            ..Default::default()
+        },
+    )
+}
+
 fn ingest_error_to_connect(err: IngestError) -> ConnectError {
     match err {
         IngestError::PutTooLarge(error) => validate::put_too_large_error(error),
@@ -542,42 +570,11 @@ where
         self.state.query.current_sequence()
     }
 
-    fn error_detail(&self) -> Detail {
-        Detail {
-            sequence_number: self.current_sequence_number(),
-            ..Default::default()
-        }
-    }
-
-    fn consistency_not_ready_error(&self, required: u64, current: u64) -> ConnectError {
-        let err = with_retry_hint(
-            ConnectError::aborted("minimum consistency token is not yet visible"),
-            RETRY_HINT_DELAY,
-        );
-        with_query_detail(
-            with_error_info_detail(
-                err,
-                ErrorInfo {
-                    reason: "CONSISTENCY_NOT_READY".to_string(),
-                    domain: "store.query".to_string(),
-                    metadata: [
-                        ("required_sequence_number".to_string(), required.to_string()),
-                        ("current_sequence_number".to_string(), current.to_string()),
-                    ]
-                    .into_iter()
-                    .collect(),
-                    ..Default::default()
-                },
-            ),
-            self.error_detail(),
-        )
-    }
-
     fn ensure_min_sequence_number(&self, required: Option<u64>) -> Result<u64, ConnectError> {
         let current = self.current_sequence_number();
         if let Some(required) = required {
             if current < required {
-                return Err(self.consistency_not_ready_error(required, current));
+                return Err(consistency_not_ready_error(required, current));
             }
         }
         Ok(current)
@@ -3173,6 +3170,28 @@ mod tests {
         tokio::task::yield_now().await;
         assert_eq!(engine.range_next_count(), consumed);
         assert_eq!(consumed, REDUCE_BATCH_ROWS * 2);
+    }
+
+    #[test]
+    fn consistency_rejection_preserves_frontier_and_retry_details() {
+        let engine = Arc::new(FakeEngine::default());
+        engine.set_current_sequence(7);
+        let connect = QueryConnect::new(QueryState::new(engine));
+        let error = connect.ensure_min_sequence_number(Some(9)).unwrap_err();
+        assert_eq!(error.code, connectrpc::ErrorCode::Aborted);
+        let decoded = decode_connect_error(&error).expect("decode consistency error");
+        let info = decoded.error_info.expect("error info");
+        assert_eq!(info.domain, "store.query");
+        assert_eq!(info.reason, "CONSISTENCY_NOT_READY");
+        assert_eq!(info.metadata["required_sequence_number"], "9");
+        assert_eq!(info.metadata["current_sequence_number"], "7");
+        assert_eq!(
+            decoded.query_detail.expect("query detail").sequence_number,
+            7
+        );
+        let retry = decoded.retry_info.expect("retry info").retry_delay;
+        let retry = retry.as_option().expect("retry delay");
+        assert_eq!((retry.seconds, retry.nanos), (1, 0));
     }
 
     #[tokio::test]

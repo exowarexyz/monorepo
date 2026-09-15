@@ -206,6 +206,7 @@ pub fn validate_range_request(
     Ok(())
 }
 
+/// Validate GetMany keys and batch size before checking the requested consistency floor.
 pub fn validate_get_many_request(
     request: &exoware_proto::store::query::v1::GetManyRequestView<'_>,
 ) -> Result<(), ConnectError> {
