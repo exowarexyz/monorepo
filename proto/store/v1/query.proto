@@ -319,12 +319,17 @@ message RangeReduceGroup {
 
 // --- Service ---
 //
+// Each query reads a consistent Store state that reflects all writes through
+// its reported sequence number and none after it. This applies to missing keys,
+// empty results, and every frame of a streamed response. Separate queries may
+// read different states.
+//
 // All query RPCs accept an optional `min_sequence_number` freshness gate.
-// If set, the server rejects the query with ABORTED unless its current
-// sequence number is >= the requested value. This ensures the response
-// reflects at least all writes up through that batch but does not filter
-// the data returned. Clients typically set this to the sequence number
-// from a prior Put response to get read-after-write consistency.
+// If set, the server rejects the query with ABORTED unless the query's sequence
+// number is >= the requested value. This ensures the response reflects at least
+// all writes up through that batch but does not filter the data returned or
+// select a historical state. Clients typically set this to the sequence number
+// from a prior Put or query response to get read-after-write/session consistency.
 
 service Service {
   // Point lookup of a single key.
@@ -382,9 +387,9 @@ message GetManyEntry {
 // A batch of GetMany lookup results.
 message GetManyFrame {
   repeated GetManyEntry results = 1;
-  // Running query detail after the entries in this frame have been read. For a
-  // successful stream, the last detail observed by the client is the final
-  // sequence/metadata summary.
+  // The sequence number is the same in every frame. The metadata reflects the
+  // query after this frame's entries have been read. For a successful stream,
+  // the last detail observed by the client contains the final metadata summary.
   Detail detail = 2;
 }
 
@@ -410,9 +415,9 @@ message RangeRequest {
 // single frame with empty `results` and populated `detail`.
 message RangeFrame {
   repeated common.kv.v1.Entry results = 1;
-  // Running query detail after the rows in this frame have been read. For a
-  // successful stream, the last detail observed by the client is the final
-  // sequence/metadata summary.
+  // The sequence number is the same in every frame. The metadata reflects the
+  // query after this frame's rows have been read. For a successful stream,
+  // the last detail observed by the client contains the final metadata summary.
   Detail detail = 2;
 }
 
@@ -436,6 +441,6 @@ message ReduceResponse {
   // Per-group reducer results. Populated only when `group_by` is non-empty.
   repeated RangeReduceGroup groups = 2;
   // Query sequence and server-defined metadata for this reduction.
-  // Present on every frame.
+  // Present on every frame, including reductions over empty input.
   Detail detail = 3;
 }

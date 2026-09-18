@@ -42,7 +42,7 @@ use exoware_sdk::proto::to_proto_reduced_value;
 use exoware_sdk::{RangeReduceOp, RangeReduceRequest};
 use futures::StreamExt;
 
-use crate::{Query, QueryExtra, RangeScan};
+use crate::{Query, QueryError, QueryExtra, RangeScan, ReadOptions};
 
 pub(crate) const REDUCE_BATCH_ROWS: usize = 4096;
 const REDUCE_BATCH_BYTES: usize = 16 * 1024 * 1024;
@@ -374,23 +374,41 @@ fn match_function(op: RangeReduceOp) -> Arc<AggregateUDF> {
 pub(crate) struct ReduceExecution {
     pub(crate) batches: SendableRecordBatchStream,
     pub(crate) extra: Arc<Mutex<QueryExtra>>,
+    pub(crate) sequence_number: u64,
     pub(crate) group_count: usize,
     pub(crate) result_kinds: Vec<ResultKind>,
 }
 
-pub(crate) fn execute_reduce<Q: Query>(
+#[derive(Debug)]
+pub(crate) enum ExecuteReduceError {
+    Range(RangeError),
+    Query(QueryError),
+}
+
+impl From<RangeError> for ExecuteReduceError {
+    fn from(error: RangeError) -> Self {
+        Self::Range(error)
+    }
+}
+
+pub(crate) async fn execute_reduce<Q: Query>(
     query: Arc<Q>,
     start: Key,
     end: Key,
     request: RangeReduceRequest,
     context: Arc<TaskContext>,
-) -> Result<ReduceExecution, RangeError> {
-    let plan = Arc::new(ReducePlan::new(Arc::new(request), &context)?);
+    options: ReadOptions,
+) -> Result<ReduceExecution, ExecuteReduceError> {
+    let plan =
+        Arc::new(ReducePlan::new(Arc::new(request), &context).map_err(ExecuteReduceError::Range)?);
+    let scan = query
+        .range_scan(start, end, usize::MAX, true, options)
+        .await
+        .map_err(ExecuteReduceError::Query)?;
+    let sequence_number = scan.sequence_number();
     let extra = Arc::new(Mutex::new(QueryExtra::new()));
     let partition = ReducePartition {
-        query,
-        start,
-        end,
+        scan: Mutex::new(Some(scan)),
         plan: plan.clone(),
         extra: extra.clone(),
     };
@@ -401,55 +419,56 @@ pub(crate) fn execute_reduce<Q: Query>(
         [],
         false,
         None,
-    )?;
-    let batches = plan.execute(Arc::new(source), context)?;
+    )
+    .map_err(|error| ExecuteReduceError::Range(error.into()))?;
+    let batches = plan
+        .execute(Arc::new(source), context)
+        .map_err(|error| ExecuteReduceError::Range(error.into()))?;
     Ok(ReduceExecution {
         batches,
         extra,
+        sequence_number,
         group_count: plan.request.group_by.len(),
         result_kinds: plan.result_kinds.clone(),
     })
 }
 
-struct ReducePartition<Q: Query> {
-    query: Arc<Q>,
-    start: Key,
-    end: Key,
+struct ReducePartition<S: RangeScan> {
+    scan: Mutex<Option<S>>,
     plan: Arc<ReducePlan>,
     extra: Arc<Mutex<QueryExtra>>,
 }
 
-impl<Q: Query> fmt::Debug for ReducePartition<Q> {
+impl<S: RangeScan> fmt::Debug for ReducePartition<S> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ReducePartition").finish_non_exhaustive()
     }
 }
 
-struct InputState<Q: Query> {
-    query: Arc<Q>,
-    start: Key,
-    end: Key,
+struct InputState<S: RangeScan> {
     plan: Arc<ReducePlan>,
     extra: Arc<Mutex<QueryExtra>>,
-    scan: Option<Q::RangeScan>,
+    scan: S,
     pending: VecDeque<(Key, Bytes)>,
     extracted: Option<ExtractedReductionRow>,
     batch_bytes: usize,
 }
 
-impl<Q: Query> PartitionStream for ReducePartition<Q> {
+impl<S: RangeScan + 'static> PartitionStream for ReducePartition<S> {
     fn schema(&self) -> &SchemaRef {
         &self.plan.schema
     }
 
     fn execute(&self, context: Arc<TaskContext>) -> SendableRecordBatchStream {
         let state = InputState {
-            query: self.query.clone(),
-            start: self.start.clone(),
-            end: self.end.clone(),
             plan: self.plan.clone(),
             extra: self.extra.clone(),
-            scan: None,
+            scan: self
+                .scan
+                .lock()
+                .unwrap()
+                .take()
+                .expect("partition executes once"),
             pending: VecDeque::new(),
             extracted: None,
             batch_bytes: match context.memory_pool().memory_limit() {
@@ -459,20 +478,9 @@ impl<Q: Query> PartitionStream for ReducePartition<Q> {
             },
         };
         let stream = futures::stream::try_unfold(state, |mut state| async move {
-            if state.scan.is_none() {
-                state.scan = Some(
-                    state
-                        .query
-                        .range_scan(state.start.clone(), state.end.clone(), usize::MAX, true)
-                        .await
-                        .map_err(|e| DataFusionError::External(Box::new(RangeError::Backend(e))))?,
-                );
-            }
             if state.pending.is_empty() && state.extracted.is_none() {
                 let batch = state
                     .scan
-                    .as_mut()
-                    .unwrap()
                     .next_batch(REDUCE_BATCH_ROWS)
                     .await
                     .map_err(|e| DataFusionError::External(Box::new(RangeError::Backend(e))))?;
@@ -1772,12 +1780,11 @@ mod tests {
 
         #[derive(Clone)]
         struct Rows(Vec<(Bytes, Bytes)>);
-        impl crate::Sequence for Rows {
-            fn current_sequence(&self) -> u64 {
+        impl RangeScan for Rows {
+            fn sequence_number(&self) -> u64 {
                 1
             }
-        }
-        impl RangeScan for Rows {
+
             async fn next_batch(
                 &mut self,
                 max_items: usize,
@@ -1786,21 +1793,6 @@ mod tests {
                     rows: self.0.drain(..max_items.min(self.0.len())).collect(),
                     extra: QueryExtra::new(),
                 })
-            }
-        }
-        impl Query for Rows {
-            type RangeScan = Rows;
-            async fn range_scan(&self, _: Key, _: Key, _: usize, _: bool) -> Result<Rows, String> {
-                Ok(self.clone())
-            }
-            async fn get(&self, _: Bytes) -> Result<(Option<Bytes>, QueryExtra), String> {
-                unreachable!()
-            }
-            async fn get_many(
-                &self,
-                _: Vec<Bytes>,
-            ) -> Result<(Vec<(Bytes, Option<Bytes>)>, QueryExtra), String> {
-                unreachable!()
             }
         }
         let literal_bytes = 256 * 1024;
@@ -1854,9 +1846,10 @@ mod tests {
         for (request, bytes_per_row, budget, context) in cases {
             let plan = Arc::new(ReducePlan::new(Arc::new(request), &context).unwrap());
             let partition = ReducePartition {
-                query: Arc::new(Rows(vec![(Bytes::new(), Bytes::new()); REDUCE_BATCH_ROWS])),
-                start: Bytes::new(),
-                end: Bytes::new(),
+                scan: Mutex::new(Some(Rows(vec![
+                    (Bytes::new(), Bytes::new());
+                    REDUCE_BATCH_ROWS
+                ]))),
                 plan,
                 extra: Arc::new(Mutex::new(QueryExtra::new())),
             };

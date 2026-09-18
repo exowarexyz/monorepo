@@ -7801,9 +7801,9 @@ pub struct GetManyFrame {
         deserialize_with = "::buffa::json_helpers::null_as_default"
     )]
     pub results: ::buffa::alloc::vec::Vec<GetManyEntry>,
-    /// Running query detail after the entries in this frame have been read. For a
-    /// successful stream, the last detail observed by the client is the final
-    /// sequence/metadata summary.
+    /// The sequence number is the same in every frame. The metadata reflects the
+    /// query after this frame's entries have been read. For a successful stream,
+    /// the last detail observed by the client contains the final metadata summary.
     ///
     /// Field 2: `detail`
     #[serde(
@@ -8257,9 +8257,9 @@ pub struct RangeFrame {
         deserialize_with = "::buffa::json_helpers::null_as_default"
     )]
     pub results: ::buffa::alloc::vec::Vec<super::super::super::common::kv::v1::Entry>,
-    /// Running query detail after the rows in this frame have been read. For a
-    /// successful stream, the last detail observed by the client is the final
-    /// sequence/metadata summary.
+    /// The sequence number is the same in every frame. The metadata reflects the
+    /// query after this frame's rows have been read. For a successful stream,
+    /// the last detail observed by the client contains the final metadata summary.
     ///
     /// Field 2: `detail`
     #[serde(
@@ -8674,7 +8674,7 @@ pub struct ReduceResponse {
     )]
     pub groups: ::buffa::alloc::vec::Vec<RangeReduceGroup>,
     /// Query sequence and server-defined metadata for this reduction.
-    /// Present on every frame.
+    /// Present on every frame, including reductions over empty input.
     ///
     /// Field 3: `detail`
     #[serde(
@@ -20561,9 +20561,9 @@ pub mod __buffa {
                 'a,
                 super::super::__buffa::view::GetManyEntryView<'a>,
             >,
-            /// Running query detail after the entries in this frame have been read. For a
-            /// successful stream, the last detail observed by the client is the final
-            /// sequence/metadata summary.
+            /// The sequence number is the same in every frame. The metadata reflects the
+            /// query after this frame's entries have been read. For a successful stream,
+            /// the last detail observed by the client contains the final metadata summary.
             ///
             /// Field 2: `detail`
             pub detail: ::buffa::MessageFieldView<
@@ -20880,9 +20880,9 @@ pub mod __buffa {
             > {
                 &self.0.reborrow().results
             }
-            /// Running query detail after the entries in this frame have been read. For a
-            /// successful stream, the last detail observed by the client is the final
-            /// sequence/metadata summary.
+            /// The sequence number is the same in every frame. The metadata reflects the
+            /// query after this frame's entries have been read. For a successful stream,
+            /// the last detail observed by the client contains the final metadata summary.
             ///
             /// Field 2: `detail`
             #[must_use]
@@ -21358,9 +21358,9 @@ pub mod __buffa {
                     'a,
                 >,
             >,
-            /// Running query detail after the rows in this frame have been read. For a
-            /// successful stream, the last detail observed by the client is the final
-            /// sequence/metadata summary.
+            /// The sequence number is the same in every frame. The metadata reflects the
+            /// query after this frame's rows have been read. For a successful stream,
+            /// the last detail observed by the client contains the final metadata summary.
             ///
             /// Field 2: `detail`
             pub detail: ::buffa::MessageFieldView<
@@ -21673,9 +21673,9 @@ pub mod __buffa {
             > {
                 &self.0.reborrow().results
             }
-            /// Running query detail after the rows in this frame have been read. For a
-            /// successful stream, the last detail observed by the client is the final
-            /// sequence/metadata summary.
+            /// The sequence number is the same in every frame. The metadata reflects the
+            /// query after this frame's rows have been read. For a successful stream,
+            /// the last detail observed by the client contains the final metadata summary.
             ///
             /// Field 2: `detail`
             #[must_use]
@@ -22135,7 +22135,7 @@ pub mod __buffa {
                 super::super::__buffa::view::RangeReduceGroupView<'a>,
             >,
             /// Query sequence and server-defined metadata for this reduction.
-            /// Present on every frame.
+            /// Present on every frame, including reductions over empty input.
             ///
             /// Field 3: `detail`
             pub detail: ::buffa::MessageFieldView<
@@ -22514,7 +22514,7 @@ pub mod __buffa {
                 &self.0.reborrow().groups
             }
             /// Query sequence and server-defined metadata for this reduction.
-            /// Present on every frame.
+            /// Present on every frame, including reductions over empty input.
             ///
             /// Field 3: `detail`
             #[must_use]

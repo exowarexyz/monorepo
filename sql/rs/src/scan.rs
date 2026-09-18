@@ -1060,7 +1060,10 @@ mod tests {
     use datafusion::datasource::MemTable;
     use datafusion::prelude::SessionContext;
     use exoware_sdk::{StoreClient, StoreKeyPrefix};
-    use exoware_server::{Query, QueryExtra, QueryState, RangeScan, RangeScanBatch, Sequence};
+    use exoware_server::{
+        Query, QueryExtra, QueryResult, QueryState, RangeScan, RangeScanBatch, ReadOptions,
+        Sequence,
+    };
 
     use crate::types::KvTable;
     use crate::{IndexSpec, KvSchema, TableColumnConfig};
@@ -1095,9 +1098,13 @@ mod tests {
         rows: std::vec::IntoIter<(Bytes, Bytes)>,
         returned_rows: Arc<AtomicUsize>,
         returned_bytes: Arc<AtomicUsize>,
+        sequence_number: u64,
     }
 
     impl RangeScan for Cursor {
+        fn sequence_number(&self) -> u64 {
+            self.sequence_number
+        }
         async fn next_batch(&mut self, max_items: usize) -> Result<RangeScanBatch, String> {
             let rows: Vec<_> = self.rows.by_ref().take(max_items).collect();
             self.returned_rows.fetch_add(rows.len(), Ordering::SeqCst);
@@ -1117,21 +1124,31 @@ mod tests {
     impl Query for Rows {
         type RangeScan = Cursor;
 
-        async fn get(&self, key: Bytes) -> Result<(Option<Bytes>, QueryExtra), String> {
+        async fn get(
+            &self,
+            key: Bytes,
+            options: ReadOptions,
+        ) -> Result<QueryResult<Option<Bytes>>, exoware_server::QueryError> {
+            let sequence_number = self.current_sequence();
+            options.check_sequence(sequence_number)?;
             self.requests
                 .lock()
                 .unwrap()
                 .push(Request::Get(key.clone()));
-            Ok((
-                self.values.lock().unwrap().get(&key).cloned(),
-                QueryExtra::new(),
-            ))
+            Ok(QueryResult {
+                value: self.values.lock().unwrap().get(&key).cloned(),
+                sequence_number,
+                extra: QueryExtra::new(),
+            })
         }
 
         async fn get_many(
             &self,
             keys: Vec<Bytes>,
-        ) -> Result<(Vec<(Bytes, Option<Bytes>)>, QueryExtra), String> {
+            options: ReadOptions,
+        ) -> Result<QueryResult<Vec<(Bytes, Option<Bytes>)>>, exoware_server::QueryError> {
+            let sequence_number = self.current_sequence();
+            options.check_sequence(sequence_number)?;
             self.requests
                 .lock()
                 .unwrap()
@@ -1152,7 +1169,11 @@ mod tests {
                     .sum(),
                 Ordering::SeqCst,
             );
-            Ok((rows, QueryExtra::new()))
+            Ok(QueryResult {
+                value: rows,
+                sequence_number,
+                extra: QueryExtra::new(),
+            })
         }
 
         async fn range_scan(
@@ -1161,7 +1182,10 @@ mod tests {
             end: Bytes,
             limit: usize,
             forward: bool,
-        ) -> Result<Cursor, String> {
+            options: ReadOptions,
+        ) -> Result<Cursor, exoware_server::QueryError> {
+            let sequence_number = self.current_sequence();
+            options.check_sequence(sequence_number)?;
             self.requests.lock().unwrap().push(Request::Range {
                 start: start.clone(),
                 end: end.clone(),
@@ -1184,6 +1208,7 @@ mod tests {
                 rows: rows.into_iter(),
                 returned_rows: self.returned_rows.clone(),
                 returned_bytes: self.returned_bytes.clone(),
+                sequence_number,
             })
         }
     }
