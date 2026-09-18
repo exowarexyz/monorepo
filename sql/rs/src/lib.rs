@@ -100,8 +100,7 @@ mod tests {
     use exoware_sdk::RangeMode;
     use exoware_sdk::{parse_range_traversal_direction, RangeTraversalDirection};
     use exoware_server::{
-        Query, QueryExtra, QueryResult, QueryState, RangeScan, RangeScanBatch, ReadOptions,
-        Sequence,
+        Query, QueryExtra, QueryResult, QueryState, RangeScan, RangeScanBatch, Sequence,
     };
     use futures::{stream, TryStreamExt};
     use tokio::sync::{mpsc, oneshot, Notify};
@@ -258,14 +257,9 @@ mod tests {
     impl Query for MockState {
         type RangeScan = MockRangeScan;
 
-        async fn get(
-            &self,
-            key: Bytes,
-            options: ReadOptions,
-        ) -> Result<QueryResult<Option<Bytes>>, exoware_server::QueryError> {
+        async fn get(&self, key: Bytes) -> Result<QueryResult<Option<Bytes>>, String> {
             let values = self.kv.lock().unwrap();
             let sequence_number = self.current_sequence();
-            options.check_sequence(sequence_number)?;
             Ok(QueryResult {
                 value: values.get(&key).cloned(),
                 sequence_number,
@@ -276,11 +270,9 @@ mod tests {
         async fn get_many(
             &self,
             keys: Vec<Bytes>,
-            options: ReadOptions,
-        ) -> Result<QueryResult<Vec<(Bytes, Option<Bytes>)>>, exoware_server::QueryError> {
+        ) -> Result<QueryResult<Vec<(Bytes, Option<Bytes>)>>, String> {
             let values = self.kv.lock().unwrap();
             let sequence_number = self.current_sequence();
-            options.check_sequence(sequence_number)?;
             Ok(QueryResult {
                 value: keys
                     .into_iter()
@@ -300,11 +292,9 @@ mod tests {
             end: Bytes,
             limit: usize,
             forward: bool,
-            options: ReadOptions,
-        ) -> Result<MockRangeScan, exoware_server::QueryError> {
+        ) -> Result<MockRangeScan, String> {
             let values = self.kv.lock().unwrap();
             let sequence_number = self.current_sequence();
-            options.check_sequence(sequence_number)?;
             let range = values.range((
                 Included(start),
                 if end.is_empty() {

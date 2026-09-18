@@ -46,8 +46,8 @@ use exoware_sdk::prune_policy::{KeysScope, OrderEncoding, PrunePolicyDocument, R
 use exoware_sdk::retention::{validate_retention_policy, RetentionPolicy};
 use exoware_sdk::selector::compile_payload_regex;
 use exoware_server::{
-    Ingest, IngestError, Log, LogBatch, Prune, Query, QueryError, QueryExtra, QueryResult,
-    RangeScan, RangeScanBatch, ReadOptions, Retention, Sequence,
+    Ingest, IngestError, Log, LogBatch, Prune, Query, QueryExtra, QueryResult, RangeScan,
+    RangeScanBatch, Retention, Sequence,
 };
 use parking_lot::Mutex;
 use regex::bytes::Regex;
@@ -1394,13 +1394,8 @@ impl Ingest for RocksStore {
 impl Query for RocksStore {
     type RangeScan = RocksRangeScanCursor;
 
-    async fn get(
-        &self,
-        key: Bytes,
-        options: ReadOptions,
-    ) -> Result<QueryResult<Option<Bytes>>, QueryError> {
+    async fn get(&self, key: Bytes) -> Result<QueryResult<Option<Bytes>>, String> {
         let snapshot = OwnedRocksSnapshot::capture(self.db.clone(), &self.frontiers);
-        options.check_sequence(snapshot.sequence_number)?;
         let value = snapshot
             .snapshot
             .get(key)
@@ -1419,10 +1414,8 @@ impl Query for RocksStore {
         end: Bytes,
         limit: usize,
         forward: bool,
-        options: ReadOptions,
-    ) -> Result<Self::RangeScan, QueryError> {
+    ) -> Result<Self::RangeScan, String> {
         let snapshot = OwnedRocksSnapshot::capture(self.db.clone(), &self.frontiers);
-        options.check_sequence(snapshot.sequence_number)?;
         Ok(RocksRangeScanCursor::new(
             snapshot, start, end, limit, forward,
         ))
@@ -1431,10 +1424,8 @@ impl Query for RocksStore {
     async fn get_many(
         &self,
         keys: Vec<Bytes>,
-        options: ReadOptions,
-    ) -> Result<QueryResult<Vec<(Bytes, Option<Bytes>)>>, QueryError> {
+    ) -> Result<QueryResult<Vec<(Bytes, Option<Bytes>)>>, String> {
         let snapshot = OwnedRocksSnapshot::capture(self.db.clone(), &self.frontiers);
-        options.check_sequence(snapshot.sequence_number)?;
         let results = snapshot
             .snapshot
             .multi_get(keys.iter().map(|key| key.as_ref()));

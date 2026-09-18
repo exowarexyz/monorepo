@@ -42,7 +42,7 @@ use exoware_sdk::proto::to_proto_reduced_value;
 use exoware_sdk::{RangeReduceOp, RangeReduceRequest};
 use futures::StreamExt;
 
-use crate::{Query, QueryError, QueryExtra, RangeScan, ReadOptions};
+use crate::{Query, QueryExtra, RangeScan};
 
 pub(crate) const REDUCE_BATCH_ROWS: usize = 4096;
 const REDUCE_BATCH_BYTES: usize = 16 * 1024 * 1024;
@@ -379,32 +379,18 @@ pub(crate) struct ReduceExecution {
     pub(crate) result_kinds: Vec<ResultKind>,
 }
 
-#[derive(Debug)]
-pub(crate) enum ExecuteReduceError {
-    Range(RangeError),
-    Query(QueryError),
-}
-
-impl From<RangeError> for ExecuteReduceError {
-    fn from(error: RangeError) -> Self {
-        Self::Range(error)
-    }
-}
-
 pub(crate) async fn execute_reduce<Q: Query>(
     query: Arc<Q>,
     start: Key,
     end: Key,
     request: RangeReduceRequest,
     context: Arc<TaskContext>,
-    options: ReadOptions,
-) -> Result<ReduceExecution, ExecuteReduceError> {
-    let plan =
-        Arc::new(ReducePlan::new(Arc::new(request), &context).map_err(ExecuteReduceError::Range)?);
+) -> Result<ReduceExecution, RangeError> {
+    let plan = Arc::new(ReducePlan::new(Arc::new(request), &context)?);
     let scan = query
-        .range_scan(start, end, usize::MAX, true, options)
+        .range_scan(start, end, usize::MAX, true)
         .await
-        .map_err(ExecuteReduceError::Query)?;
+        .map_err(RangeError::Backend)?;
     let sequence_number = scan.sequence_number();
     let extra = Arc::new(Mutex::new(QueryExtra::new()));
     let partition = ReducePartition {
@@ -419,11 +405,8 @@ pub(crate) async fn execute_reduce<Q: Query>(
         [],
         false,
         None,
-    )
-    .map_err(|error| ExecuteReduceError::Range(error.into()))?;
-    let batches = plan
-        .execute(Arc::new(source), context)
-        .map_err(|error| ExecuteReduceError::Range(error.into()))?;
+    )?;
+    let batches = plan.execute(Arc::new(source), context)?;
     Ok(ReduceExecution {
         batches,
         extra,

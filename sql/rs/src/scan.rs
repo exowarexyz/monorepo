@@ -1061,8 +1061,7 @@ mod tests {
     use datafusion::prelude::SessionContext;
     use exoware_sdk::{StoreClient, StoreKeyPrefix};
     use exoware_server::{
-        Query, QueryExtra, QueryResult, QueryState, RangeScan, RangeScanBatch, ReadOptions,
-        Sequence,
+        Query, QueryExtra, QueryResult, QueryState, RangeScan, RangeScanBatch, Sequence,
     };
 
     use crate::types::KvTable;
@@ -1124,13 +1123,8 @@ mod tests {
     impl Query for Rows {
         type RangeScan = Cursor;
 
-        async fn get(
-            &self,
-            key: Bytes,
-            options: ReadOptions,
-        ) -> Result<QueryResult<Option<Bytes>>, exoware_server::QueryError> {
+        async fn get(&self, key: Bytes) -> Result<QueryResult<Option<Bytes>>, String> {
             let sequence_number = self.current_sequence();
-            options.check_sequence(sequence_number)?;
             self.requests
                 .lock()
                 .unwrap()
@@ -1145,10 +1139,8 @@ mod tests {
         async fn get_many(
             &self,
             keys: Vec<Bytes>,
-            options: ReadOptions,
-        ) -> Result<QueryResult<Vec<(Bytes, Option<Bytes>)>>, exoware_server::QueryError> {
+        ) -> Result<QueryResult<Vec<(Bytes, Option<Bytes>)>>, String> {
             let sequence_number = self.current_sequence();
-            options.check_sequence(sequence_number)?;
             self.requests
                 .lock()
                 .unwrap()
@@ -1182,10 +1174,8 @@ mod tests {
             end: Bytes,
             limit: usize,
             forward: bool,
-            options: ReadOptions,
-        ) -> Result<Cursor, exoware_server::QueryError> {
+        ) -> Result<Cursor, String> {
             let sequence_number = self.current_sequence();
-            options.check_sequence(sequence_number)?;
             self.requests.lock().unwrap().push(Request::Range {
                 start: start.clone(),
                 end: end.clone(),

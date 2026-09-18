@@ -53,15 +53,12 @@ use exoware_sdk::selector::Selector;
 use futures::{stream as stream_util, Stream, StreamExt};
 use tokio::sync::Notify;
 
-use crate::reduce::{
-    decode_group, execute_reduce, ExecuteReduceError, RangeError, ReduceExecution,
-    REDUCE_BATCH_ROWS,
-};
+use crate::reduce::{decode_group, execute_reduce, RangeError, ReduceExecution, REDUCE_BATCH_ROWS};
 use crate::stream::{StreamHub, StreamNotifier};
 use crate::validate::{self, IngestLimits};
 use crate::{
-    FilteredBatch, Ingest, IngestError, Log, Prune, Query, QueryError, QueryExtra, RangeScan,
-    ReadOptions, Retention, StoreEngine,
+    FilteredBatch, Ingest, IngestError, Log, Prune, Query, QueryExtra, RangeScan, Retention,
+    StoreEngine,
 };
 
 // TODO (#57): Make limits configurable.
@@ -110,13 +107,16 @@ fn consistency_not_ready_error(required: u64, current: u64) -> ConnectError {
     )
 }
 
-fn query_error_to_connect(error: QueryError) -> ConnectError {
-    match error {
-        QueryError::NotReady { required, current } => {
-            consistency_not_ready_error(required, current)
+fn ensure_min_sequence_number(
+    required: Option<u64>,
+    sequence_number: u64,
+) -> Result<(), ConnectError> {
+    if let Some(required) = required {
+        if sequence_number < required {
+            return Err(consistency_not_ready_error(required, sequence_number));
         }
-        QueryError::Backend(message) => ConnectError::internal(message),
     }
+    Ok(())
 }
 
 fn range_stream<S>(
@@ -553,10 +553,6 @@ where
             state: state.into(),
         }
     }
-
-    fn query_error(error: QueryError) -> ConnectError {
-        query_error_to_connect(error)
-    }
 }
 
 impl<Q> QueryApi for QueryConnect<Q>
@@ -569,17 +565,19 @@ where
         request: ServiceRequest<'_, exoware_proto::store::query::v1::GetRequest>,
     ) -> connectrpc::ServiceResult<GetResponse> {
         validate::validate_get_request(request.view())?;
-        let options = ReadOptions {
-            min_sequence_number: request.min_sequence_number,
-        };
+        ensure_min_sequence_number(
+            request.min_sequence_number,
+            self.state.query.current_sequence(),
+        )?;
         let wire = request.bytes();
         let key: Key = wire.slice_ref(request.key);
         let result = self
             .state
             .query
-            .get(key, options)
+            .get(key)
             .await
-            .map_err(Self::query_error)?;
+            .map_err(ConnectError::internal)?;
+        ensure_min_sequence_number(request.min_sequence_number, result.sequence_number)?;
         let detail = query_detail(result.sequence_number, result.extra);
         connectrpc::Response::ok(GetResponse {
             value: result.value,
@@ -594,18 +592,20 @@ where
         request: ServiceRequest<'_, exoware_proto::store::query::v1::GetManyRequest>,
     ) -> connectrpc::ServiceResult<connectrpc::ServiceStream<GetManyFrame>> {
         validate::validate_get_many_request(request.view())?;
-        let options = ReadOptions {
-            min_sequence_number: request.min_sequence_number,
-        };
+        ensure_min_sequence_number(
+            request.min_sequence_number,
+            self.state.query.current_sequence(),
+        )?;
 
         let wire = request.bytes();
         let keys: Vec<Key> = request.keys.iter().map(|key| wire.slice_ref(key)).collect();
         let result = self
             .state
             .query
-            .get_many(keys, options)
+            .get_many(keys)
             .await
-            .map_err(Self::query_error)?;
+            .map_err(ConnectError::internal)?;
+        ensure_min_sequence_number(request.min_sequence_number, result.sequence_number)?;
         let detail = query_detail(result.sequence_number, result.extra);
         let batch_size = (request.batch_size as usize).min(RANGE_STREAM_MAX_FRAME_ROWS);
         let mut frames = Vec::new();
@@ -646,9 +646,10 @@ where
         request: ServiceRequest<'_, exoware_proto::store::query::v1::RangeRequest>,
     ) -> connectrpc::ServiceResult<connectrpc::ServiceStream<RangeFrame>> {
         validate::validate_range_request(request.view())?;
-        let options = ReadOptions {
-            min_sequence_number: request.min_sequence_number,
-        };
+        ensure_min_sequence_number(
+            request.min_sequence_number,
+            self.state.query.current_sequence(),
+        )?;
         let wire = request.bytes();
         let start_key: Key = wire.slice_ref(request.start);
         let end_key: Key = wire.slice_ref(request.end);
@@ -662,9 +663,10 @@ where
         let entries = self
             .state
             .query
-            .range_scan(start_key.clone(), end_key.clone(), limit, forward, options)
+            .range_scan(start_key.clone(), end_key.clone(), limit, forward)
             .await
-            .map_err(Self::query_error)?;
+            .map_err(ConnectError::internal)?;
+        ensure_min_sequence_number(request.min_sequence_number, entries.sequence_number())?;
         Ok(connectrpc::Response::stream(range_stream(
             entries, batch_size,
         )))
@@ -676,9 +678,10 @@ where
         request: ServiceRequest<'_, exoware_proto::store::query::v1::ReduceRequest>,
     ) -> connectrpc::ServiceResult<connectrpc::ServiceStream<ReduceResponse>> {
         validate::validate_reduce_request(request.view())?;
-        let options = ReadOptions {
-            min_sequence_number: request.min_sequence_number,
-        };
+        ensure_min_sequence_number(
+            request.min_sequence_number,
+            self.state.query.current_sequence(),
+        )?;
         let wire = request.bytes();
         let start_key: Key = wire.slice_ref(request.start);
         let end_key: Key = wire.slice_ref(request.end);
@@ -690,16 +693,13 @@ where
             end_key,
             domain,
             self.state.context.clone(),
-            options,
         )
         .await
         .map_err(|error| match error {
-            ExecuteReduceError::Query(error) => Self::query_error(error),
-            ExecuteReduceError::Range(RangeError::Reduce(message)) => {
-                validate::reduce_params_error(message)
-            }
-            ExecuteReduceError::Range(error) => reduce_error(error),
+            RangeError::Reduce(message) => validate::reduce_params_error(message),
+            error => reduce_error(error),
         })?;
+        ensure_min_sequence_number(request.min_sequence_number, execution.sequence_number)?;
         Ok(connectrpc::Response::stream(reduce_frames(execution)))
     }
 }
@@ -1445,9 +1445,8 @@ mod tests {
     use futures::StreamExt;
 
     use crate::{
-        Ingest, IngestError, Log, LogBatch, Prune, Query, QueryError, QueryExtra, QueryResult,
-        RangeScan, RangeScanBatch, ReadOptions, Retention, Sequence, StreamNotification,
-        StreamNotifier,
+        Ingest, IngestError, Log, LogBatch, Prune, Query, QueryExtra, QueryResult, RangeScan,
+        RangeScanBatch, Retention, Sequence, StreamNotification, StreamNotifier,
     };
 
     const TEST_PREFIX: u8 = 1;
@@ -1463,6 +1462,7 @@ mod tests {
     struct FakeEngineState {
         current_sequence: u64,
         query_sequence: Option<u64>,
+        query_calls: [usize; 3],
         batches: BTreeMap<u64, Option<Vec<(Bytes, Bytes)>>>,
         oldest_retained: Option<u64>,
         publish_on_get_batch: Option<PublishDuringReplay>,
@@ -1633,17 +1633,10 @@ mod tests {
     impl Query for FakeEngine {
         type RangeScan = IteratorRangeScan;
 
-        async fn get(
-            &self,
-            _key: Bytes,
-            options: ReadOptions,
-        ) -> Result<QueryResult<Option<Bytes>>, QueryError> {
-            let state = self
-                .state
-                .lock()
-                .map_err(|e| QueryError::Backend(e.to_string()))?;
+        async fn get(&self, _key: Bytes) -> Result<QueryResult<Option<Bytes>>, String> {
+            let mut state = self.state.lock().map_err(|e| e.to_string())?;
+            state.query_calls[0] += 1;
             let sequence_number = state.query_sequence.unwrap_or(state.current_sequence);
-            options.check_sequence(sequence_number)?;
             Ok(QueryResult {
                 value: None,
                 sequence_number,
@@ -1654,14 +1647,10 @@ mod tests {
         async fn get_many(
             &self,
             keys: Vec<Bytes>,
-            options: ReadOptions,
-        ) -> Result<QueryResult<Vec<(Bytes, Option<Bytes>)>>, QueryError> {
-            let state = self
-                .state
-                .lock()
-                .map_err(|e| QueryError::Backend(e.to_string()))?;
+        ) -> Result<QueryResult<Vec<(Bytes, Option<Bytes>)>>, String> {
+            let mut state = self.state.lock().map_err(|e| e.to_string())?;
+            state.query_calls[1] += 1;
             let sequence_number = state.query_sequence.unwrap_or(state.current_sequence);
-            options.check_sequence(sequence_number)?;
             Ok(QueryResult {
                 value: keys.into_iter().map(|key| (key, None)).collect(),
                 sequence_number,
@@ -1675,12 +1664,12 @@ mod tests {
             _end: Bytes,
             _limit: usize,
             _forward: bool,
-            options: ReadOptions,
-        ) -> Result<Self::RangeScan, QueryError> {
+        ) -> Result<Self::RangeScan, String> {
             let result = self
                 .state
                 .lock()
-                .map(|state| {
+                .map(|mut state| {
+                    state.query_calls[2] += 1;
                     (
                         state.range_rows.clone(),
                         state.range_eof_extra.clone(),
@@ -1688,22 +1677,20 @@ mod tests {
                         state.query_sequence.unwrap_or(state.current_sequence),
                     )
                 })
-                .map_err(|e| QueryError::Backend(e.to_string()));
+                .map_err(|e| e.to_string());
             let state = self.state.clone();
-            let cursor =
-                result.and_then(|(rows, eof_extra, remaining_batches, sequence_number)| {
-                    options.check_sequence(sequence_number)?;
-                    let mut cursor = range_scan_from_iter_with_eof_extra(
-                        rows.into_iter().map(move |row| {
-                            state.lock().expect("lock").range_next_count += 1;
-                            Ok(row)
-                        }),
-                        eof_extra,
-                    );
-                    cursor.sequence_number = sequence_number;
-                    cursor.remaining_batches = remaining_batches;
-                    Ok(cursor)
-                });
+            let cursor = result.map(|(rows, eof_extra, remaining_batches, sequence_number)| {
+                let mut cursor = range_scan_from_iter_with_eof_extra(
+                    rows.into_iter().map(move |row| {
+                        state.lock().expect("lock").range_next_count += 1;
+                        Ok(row)
+                    }),
+                    eof_extra,
+                );
+                cursor.sequence_number = sequence_number;
+                cursor.remaining_batches = remaining_batches;
+                cursor
+            });
             cursor
         }
     }
@@ -2105,12 +2092,7 @@ mod tests {
     impl Query for QueryOnlyEngine {
         type RangeScan = IteratorRangeScan;
 
-        async fn get(
-            &self,
-            _key: Bytes,
-            options: ReadOptions,
-        ) -> Result<QueryResult<Option<Bytes>>, QueryError> {
-            options.check_sequence(self.sequence_number)?;
+        async fn get(&self, _key: Bytes) -> Result<QueryResult<Option<Bytes>>, String> {
             Ok(QueryResult {
                 value: self.value.clone(),
                 sequence_number: self.sequence_number,
@@ -2124,9 +2106,7 @@ mod tests {
             _end: Bytes,
             _limit: usize,
             _forward: bool,
-            options: ReadOptions,
-        ) -> Result<Self::RangeScan, QueryError> {
-            options.check_sequence(self.sequence_number)?;
+        ) -> Result<Self::RangeScan, String> {
             let mut scan = range_scan_from_iter(std::iter::empty());
             scan.sequence_number = self.sequence_number;
             Ok(scan)
@@ -2135,9 +2115,7 @@ mod tests {
         async fn get_many(
             &self,
             keys: Vec<Bytes>,
-            options: ReadOptions,
-        ) -> Result<QueryResult<Vec<(Bytes, Option<Bytes>)>>, QueryError> {
-            options.check_sequence(self.sequence_number)?;
+        ) -> Result<QueryResult<Vec<(Bytes, Option<Bytes>)>>, String> {
             Ok(QueryResult {
                 value: keys.into_iter().map(|key| (key, None)).collect(),
                 sequence_number: self.sequence_number,
@@ -2661,16 +2639,14 @@ mod tests {
         let connect = QueryConnect::new(AppState::new(engine.clone()));
         assert_eq!(query_rpc_sequences(&connect, None).await, [7; 4]);
 
-        engine.set_current_sequence(1);
         assert_eq!(query_rpc_sequences(&connect, Some(5)).await, [7; 4]);
+        assert_eq!(query_rpc_sequences(&connect, Some(7)).await, [7; 4]);
     }
 
-    #[tokio::test]
-    async fn backend_not_ready_maps_to_aborted_with_retry_metadata() {
-        let engine = Arc::new(FakeEngine::default());
-        engine.set_current_sequence(100);
-        engine.set_query_sequence(7);
-        let connect = QueryConnect::new(AppState::new(engine));
+    async fn query_rpc_errors(
+        connect: &QueryConnect<FakeEngine>,
+        empty: bool,
+    ) -> [ConnectError; 4] {
         let bytes = exoware_proto::query::GetRequest {
             key: b"k".to_vec(),
             min_sequence_number: Some(8),
@@ -2682,10 +2658,70 @@ mod tests {
         >::decode(bytes.into())
         .unwrap();
         let request = ServiceRequest::from_parts(request.reborrow(), request.bytes());
-        let error = QueryApi::get(&connect, Context::default(), request)
+        let get = QueryApi::get(connect, Context::default(), request)
             .await
-            .expect_err("snapshot is below the requested minimum");
+            .expect_err("reject before returning the value");
 
+        let bytes = exoware_proto::query::GetManyRequest {
+            keys: vec![b"k".to_vec()],
+            min_sequence_number: Some(8),
+            batch_size: 1,
+            ..Default::default()
+        }
+        .encode_to_vec();
+        let request = buffa::view::OwnedView::<
+            exoware_proto::store::query::v1::GetManyRequestView<'static>,
+        >::decode(bytes.into())
+        .unwrap();
+        let request = ServiceRequest::from_parts(request.reborrow(), request.bytes());
+        let get_many = QueryApi::get_many(connect, Context::default(), request)
+            .await
+            .err()
+            .expect("reject before returning the stream");
+
+        let bytes = exoware_proto::query::RangeRequest {
+            limit: empty.then_some(0),
+            min_sequence_number: Some(8),
+            batch_size: 1,
+            ..Default::default()
+        }
+        .encode_to_vec();
+        let request = buffa::view::OwnedView::<
+            exoware_proto::store::query::v1::RangeRequestView<'static>,
+        >::decode(bytes.into())
+        .unwrap();
+        let request = ServiceRequest::from_parts(request.reborrow(), request.bytes());
+        let range = QueryApi::range(connect, Context::default(), request)
+            .await
+            .err()
+            .expect("reject before returning the stream");
+
+        let bytes = exoware_proto::query::ReduceRequest {
+            params: Some(exoware_proto::query::ReduceParams {
+                reducers: vec![exoware_proto::query::RangeReducerSpec {
+                    op: exoware_proto::query::RangeReduceOp::RANGE_REDUCE_OP_COUNT_ALL.into(),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            })
+            .into(),
+            min_sequence_number: Some(8),
+            ..Default::default()
+        }
+        .encode_to_vec();
+        let request = buffa::view::OwnedView::<
+            exoware_proto::store::query::v1::ReduceRequestView<'static>,
+        >::decode(bytes.into())
+        .unwrap();
+        let request = ServiceRequest::from_parts(request.reborrow(), request.bytes());
+        let reduce = QueryApi::reduce(connect, Context::default(), request)
+            .await
+            .err()
+            .expect("reject before returning the stream");
+        [get, get_many, range, reduce]
+    }
+
+    fn assert_consistency_not_ready(error: ConnectError) {
         assert_eq!(error.code, connectrpc::ErrorCode::Aborted);
         let details = decode_connect_error(&error).unwrap();
         let info = details.error_info.unwrap();
@@ -2694,6 +2730,36 @@ mod tests {
         assert_eq!(info.metadata["current_sequence_number"], "7");
         assert!(details.retry_info.is_some());
         assert_eq!(details.query_detail.unwrap().sequence_number, 7);
+    }
+
+    #[tokio::test]
+    async fn query_rpcs_reject_before_reading_when_frontier_is_below_minimum() {
+        let engine = Arc::new(FakeEngine::default());
+        engine.set_current_sequence(7);
+        engine.set_query_sequence(100);
+        let connect = QueryConnect::new(QueryState::new(engine.clone()));
+        for error in query_rpc_errors(&connect, false).await {
+            assert_consistency_not_ready(error);
+        }
+        assert_eq!(engine.state.lock().unwrap().query_calls, [0; 3]);
+    }
+
+    #[tokio::test]
+    async fn query_rpcs_reject_read_sequence_below_minimum_before_returning_data() {
+        for empty in [false, true] {
+            let engine = Arc::new(FakeEngine::default());
+            engine.set_current_sequence(100);
+            engine.set_query_sequence(7);
+            if !empty {
+                engine.set_range_rows(vec![(Bytes::from_static(b"k"), Bytes::new())]);
+            }
+            let connect = QueryConnect::new(QueryState::new(engine.clone()));
+            for error in query_rpc_errors(&connect, empty).await {
+                assert_consistency_not_ready(error);
+            }
+            assert_eq!(engine.state.lock().unwrap().query_calls, [1, 1, 2]);
+            assert_eq!(engine.range_next_count(), 0);
+        }
     }
 
     #[tokio::test]
@@ -3026,7 +3092,6 @@ mod tests {
             Bytes::new(),
             request,
             state.context.clone(),
-            ReadOptions::default(),
         )
         .await
         .unwrap();
@@ -3072,7 +3137,6 @@ mod tests {
             Bytes::new(),
             request,
             state.context.clone(),
-            ReadOptions::default(),
         )
         .await
         .unwrap();
@@ -3098,16 +3162,9 @@ mod tests {
             filter: None,
         });
         let state = QueryState::new(engine.clone());
-        let execution = execute_reduce(
-            engine,
-            Bytes::new(),
-            Bytes::new(),
-            request,
-            state.context,
-            ReadOptions::default(),
-        )
-        .await
-        .unwrap();
+        let execution = execute_reduce(engine, Bytes::new(), Bytes::new(), request, state.context)
+            .await
+            .unwrap();
         let mut frames = Box::pin(reduce_frames(execution));
         let frame = frames.next().await.unwrap().unwrap();
         assert!(frame.encoded_len() as usize > REDUCE_FRAME_TARGET_BYTES);
@@ -3132,16 +3189,9 @@ mod tests {
         let (engine, request) = grouped_reduce_fixture(0, 0);
         engine.set_range_eof_extra(numeric_query_extra("final_rows", 0.0));
         let state = QueryState::new(engine.clone());
-        let execution = execute_reduce(
-            engine,
-            Bytes::new(),
-            Bytes::new(),
-            request,
-            state.context,
-            ReadOptions::default(),
-        )
-        .await
-        .unwrap();
+        let execution = execute_reduce(engine, Bytes::new(), Bytes::new(), request, state.context)
+            .await
+            .unwrap();
         let mut frames = Box::pin(reduce_frames(execution));
         let frame = frames.next().await.unwrap().unwrap();
         assert!(frame.results.is_empty());
@@ -3173,7 +3223,6 @@ mod tests {
             Bytes::new(),
             request.clone(),
             state.context.clone(),
-            ReadOptions::default(),
         )
         .await
         .unwrap();
@@ -3183,7 +3232,6 @@ mod tests {
             Bytes::new(),
             request,
             cloned.context.clone(),
-            ReadOptions::default(),
         )
         .await
         .unwrap();

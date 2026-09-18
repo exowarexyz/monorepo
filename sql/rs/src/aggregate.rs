@@ -2010,8 +2010,7 @@ mod tests {
     use datafusion::prelude::SessionContext;
     use exoware_sdk::{RangeReduceGroup, RangeReduceResponse, RangeReduceResult, StoreClient};
     use exoware_server::{
-        Query, QueryExtra, QueryResult, QueryState, RangeScan, RangeScanBatch, ReadOptions,
-        Sequence,
+        Query, QueryExtra, QueryResult, QueryState, RangeScan, RangeScanBatch, Sequence,
     };
 
     #[derive(Default)]
@@ -2048,13 +2047,8 @@ mod tests {
     impl Query for Rows {
         type RangeScan = Cursor;
 
-        async fn get(
-            &self,
-            key: Bytes,
-            options: ReadOptions,
-        ) -> Result<QueryResult<Option<Bytes>>, exoware_server::QueryError> {
+        async fn get(&self, key: Bytes) -> Result<QueryResult<Option<Bytes>>, String> {
             let sequence_number = self.current_sequence();
-            options.check_sequence(sequence_number)?;
             Ok(QueryResult {
                 value: self.values.lock().unwrap().get(&key).cloned(),
                 sequence_number,
@@ -2065,10 +2059,8 @@ mod tests {
         async fn get_many(
             &self,
             keys: Vec<Bytes>,
-            options: ReadOptions,
-        ) -> Result<QueryResult<Vec<(Bytes, Option<Bytes>)>>, exoware_server::QueryError> {
+        ) -> Result<QueryResult<Vec<(Bytes, Option<Bytes>)>>, String> {
             let sequence_number = self.current_sequence();
-            options.check_sequence(sequence_number)?;
             let values = self.values.lock().unwrap();
             Ok(QueryResult {
                 value: keys
@@ -2089,10 +2081,8 @@ mod tests {
             end: Bytes,
             limit: usize,
             forward: bool,
-            options: ReadOptions,
-        ) -> Result<Cursor, exoware_server::QueryError> {
+        ) -> Result<Cursor, String> {
             let sequence_number = self.current_sequence();
-            options.check_sequence(sequence_number)?;
             let mut rows = self
                 .values
                 .lock()

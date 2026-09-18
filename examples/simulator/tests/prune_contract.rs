@@ -12,7 +12,7 @@ use exoware_sdk::prune_policy::{
 };
 use exoware_sdk::retention::RetentionPolicy;
 use exoware_sdk::selector::Selector;
-use exoware_server::{Ingest, Log, Prune, Query, ReadOptions, Retention, Sequence};
+use exoware_server::{Ingest, Log, Prune, Query, Retention, Sequence};
 use exoware_simulator::RocksStore;
 use tempfile::tempdir;
 
@@ -50,9 +50,7 @@ fn put_one(store: &RocksStore, key: &'static [u8], value: &'static [u8]) -> u64 
 }
 
 fn get_value(store: &RocksStore, key: &Bytes) -> Option<Bytes> {
-    block_on(store.get(key.clone(), ReadOptions::default()))
-        .expect("get")
-        .value
+    block_on(store.get(key.clone())).expect("get").value
 }
 
 /// True when the log still serves a batch at `sequence`.

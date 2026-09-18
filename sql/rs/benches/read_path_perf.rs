@@ -29,7 +29,7 @@ use datafusion::prelude::SessionContext;
 use exoware_sdk::{StoreClient, StoreKeyPrefix};
 use exoware_server::{
     Ingest, IngestError, IngestState, Query, QueryExtra, QueryResult, QueryState, RangeScan,
-    RangeScanBatch, ReadOptions, Sequence,
+    RangeScanBatch, Sequence,
 };
 use exoware_sql::proto::sql::v1::{QueryRequest, ServiceClient};
 use exoware_sql::{CellValue, IndexSpec, KvSchema, TableColumnConfig};
@@ -255,15 +255,10 @@ impl RangeScan for Cursor {
 
 impl Query for Backend {
     type RangeScan = Cursor;
-    async fn get(
-        &self,
-        key: Bytes,
-        options: ReadOptions,
-    ) -> Result<QueryResult<Option<Bytes>>, exoware_server::QueryError> {
+    async fn get(&self, key: Bytes) -> Result<QueryResult<Option<Bytes>>, String> {
         self.traffic.lookup_keys.fetch_add(1, Ordering::Relaxed);
         let kv = self.kv.lock().unwrap();
         let sequence_number = self.current_sequence();
-        options.check_sequence(sequence_number)?;
         let value = kv.get(&key).cloned();
         if let Some(value) = &value {
             self.traffic.returned(&key, value);
@@ -277,14 +272,12 @@ impl Query for Backend {
     async fn get_many(
         &self,
         keys: Vec<Bytes>,
-        options: ReadOptions,
-    ) -> Result<QueryResult<Vec<(Bytes, Option<Bytes>)>>, exoware_server::QueryError> {
+    ) -> Result<QueryResult<Vec<(Bytes, Option<Bytes>)>>, String> {
         self.traffic
             .lookup_keys
             .fetch_add(keys.len() as u64, Ordering::Relaxed);
         let kv = self.kv.lock().unwrap();
         let sequence_number = self.current_sequence();
-        options.check_sequence(sequence_number)?;
         let rows = keys
             .into_iter()
             .map(|key| {
@@ -307,11 +300,9 @@ impl Query for Backend {
         end: Bytes,
         limit: usize,
         forward: bool,
-        options: ReadOptions,
-    ) -> Result<Cursor, exoware_server::QueryError> {
+    ) -> Result<Cursor, String> {
         let kv = self.kv.lock().unwrap();
         let sequence_number = self.current_sequence();
-        options.check_sequence(sequence_number)?;
         let bounds = (
             Included(&start),
             if end.is_empty() {

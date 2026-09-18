@@ -20,9 +20,7 @@ use commonware_storage::translator::TwoCap;
 use commonware_utils::{NZUsize, NZU16, NZU64};
 use exoware_qmdb::{ImmutableClient, QmdbError};
 use exoware_sdk::{PrefixedStoreClient, RetryConfig, StoreClient, StoreWriteBatch};
-use exoware_server::{
-    Query, QueryError, QueryExtra, QueryResult, RangeScan, RangeScanBatch, ReadOptions, Sequence,
-};
+use exoware_server::{Query, QueryExtra, QueryResult, RangeScan, RangeScanBatch, Sequence};
 
 type Family = mmr::Family;
 type Operation = ImmutableOperation<Family, Vec<u8>, Vec<u8>>;
@@ -136,7 +134,7 @@ impl RangeScan for MapCursor {
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct RoutedRead {
     replica: &'static str,
-    minimum: Option<u64>,
+    sequence: u64,
 }
 
 struct LoadBalancedQuery {
@@ -147,7 +145,7 @@ struct LoadBalancedQuery {
 }
 
 impl LoadBalancedQuery {
-    fn route(&self, options: ReadOptions) -> Result<&MapSnapshot, QueryError> {
+    fn route(&self) -> &MapSnapshot {
         let first = self.calls.fetch_add(1, Ordering::SeqCst) == 0;
         let (replica, snapshot) = if first {
             ("new", &self.new)
@@ -156,29 +154,23 @@ impl LoadBalancedQuery {
         };
         self.reads.lock().unwrap().push(RoutedRead {
             replica,
-            minimum: options.min_sequence_number,
+            sequence: snapshot.sequence,
         });
-        options.check_sequence(snapshot.sequence)?;
-        Ok(snapshot)
+        snapshot
     }
 }
 
 impl Sequence for LoadBalancedQuery {
     fn current_sequence(&self) -> u64 {
-        // Deliberately stale: the first read is evaluated at sequence 101.
-        100
+        101
     }
 }
 
 impl Query for LoadBalancedQuery {
     type RangeScan = MapCursor;
 
-    async fn get(
-        &self,
-        key: Bytes,
-        options: ReadOptions,
-    ) -> Result<QueryResult<Option<Bytes>>, QueryError> {
-        let snapshot = self.route(options)?;
+    async fn get(&self, key: Bytes) -> Result<QueryResult<Option<Bytes>>, String> {
+        let snapshot = self.route();
         Ok(QueryResult {
             value: snapshot.rows.get(&key).cloned(),
             sequence_number: snapshot.sequence,
@@ -192,9 +184,8 @@ impl Query for LoadBalancedQuery {
         end: Bytes,
         limit: usize,
         forward: bool,
-        options: ReadOptions,
-    ) -> Result<Self::RangeScan, QueryError> {
-        let snapshot = self.route(options)?;
+    ) -> Result<Self::RangeScan, String> {
+        let snapshot = self.route();
         let mut rows = snapshot
             .rows
             .range(start.clone()..)
@@ -214,9 +205,8 @@ impl Query for LoadBalancedQuery {
     async fn get_many(
         &self,
         keys: Vec<Bytes>,
-        options: ReadOptions,
-    ) -> Result<QueryResult<Vec<(Bytes, Option<Bytes>)>>, QueryError> {
-        let snapshot = self.route(options)?;
+    ) -> Result<QueryResult<Vec<(Bytes, Option<Bytes>)>>, String> {
+        let snapshot = self.route();
         Ok(QueryResult {
             value: keys
                 .into_iter()
@@ -263,7 +253,7 @@ async fn backend_snapshot_sequence_fences_following_qmdb_reads() {
     let error = qmdb
         .get_at(&b"key".to_vec(), watermark)
         .await
-        .expect_err("snapshot 100 must not serve a session that observed snapshot 101");
+        .expect_err("returned sequence 100 must not serve a session that observed sequence 101");
     assert!(
         matches!(error, QmdbError::Client(ref error) if error.rpc_code() == Some(connectrpc::ErrorCode::Aborted)),
         "expected ABORTED from the stale replica, got {error:?}"
@@ -273,11 +263,11 @@ async fn backend_snapshot_sequence_fences_following_qmdb_reads() {
         [
             RoutedRead {
                 replica: "new",
-                minimum: None,
+                sequence: 101,
             },
             RoutedRead {
                 replica: "old",
-                minimum: Some(101),
+                sequence: 100,
             },
         ]
     );

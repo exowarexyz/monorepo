@@ -3,7 +3,7 @@
 use std::future::Future;
 
 use bytes::Bytes;
-use exoware_server::{Ingest, Query, RangeScan, ReadOptions, Sequence};
+use exoware_server::{Ingest, Query, RangeScan, Sequence};
 use exoware_simulator::RocksStore;
 use tempfile::tempdir;
 
@@ -46,7 +46,6 @@ fn scan(
         Bytes::copy_from_slice(end),
         limit,
         forward,
-        ReadOptions::default(),
     ))
     .expect("open scan");
     let mut rows = Vec::new();
@@ -61,16 +60,14 @@ fn scan(
 }
 
 fn get_value(store: &RocksStore, key: &[u8]) -> Option<Bytes> {
-    block_on(store.get(Bytes::copy_from_slice(key), ReadOptions::default()))
+    block_on(store.get(Bytes::copy_from_slice(key)))
         .expect("get")
         .value
 }
 
 fn get_many_values(store: &RocksStore, keys: &[&[u8]]) -> Vec<(Bytes, Option<Bytes>)> {
     let keys = keys.iter().map(|key| Bytes::copy_from_slice(key)).collect();
-    block_on(store.get_many(keys, ReadOptions::default()))
-        .expect("get_many")
-        .value
+    block_on(store.get_many(keys)).expect("get_many").value
 }
 
 // -- get --
@@ -263,14 +260,9 @@ fn snapshot_sequence_and_rows_survive_writes_between_pages() {
         let store = RocksStore::open(dir.path(), None).expect("open db");
         seed_abc(&store);
         let before = store.current_sequence();
-        let mut cursor = block_on(store.range_scan(
-            Bytes::new(),
-            Bytes::new(),
-            usize::MAX,
-            forward,
-            ReadOptions::default(),
-        ))
-        .expect("scan");
+        let mut cursor =
+            block_on(store.range_scan(Bytes::new(), Bytes::new(), usize::MAX, forward))
+                .expect("scan");
         let first = block_on(cursor.next_batch(1)).expect("first page");
         let later = put_batch(
             &store,
@@ -300,40 +292,23 @@ fn snapshot_sequence_and_rows_survive_writes_between_pages() {
 }
 
 #[test]
-fn empty_queries_report_snapshot_sequence_and_enforce_floor() {
-    use exoware_server::QueryError;
+fn empty_queries_report_snapshot_sequence() {
     let dir = tempdir().expect("tempdir");
     let store = RocksStore::open(dir.path(), None).expect("open db");
     for expected in [0, 1] {
         if expected == 1 {
             seed_abc(&store);
         }
-        let options = ReadOptions {
-            min_sequence_number: Some(expected),
-        };
-        let missing =
-            block_on(store.get(Bytes::from_static(b"missing"), options)).expect("missing");
+        let missing = block_on(store.get(Bytes::from_static(b"missing"))).expect("missing");
         assert!(missing.value.is_none());
         assert_eq!(missing.sequence_number, expected);
-        let empty = block_on(store.get_many(Vec::new(), options)).expect("empty get_many");
+        let empty = block_on(store.get_many(Vec::new())).expect("empty get_many");
         assert!(empty.value.is_empty());
         assert_eq!(empty.sequence_number, expected);
-        let mut scan = block_on(store.range_scan(Bytes::new(), Bytes::new(), 0, true, options))
-            .expect("empty scan");
+        let mut scan =
+            block_on(store.range_scan(Bytes::new(), Bytes::new(), 0, true)).expect("empty scan");
         assert_eq!(scan.sequence_number(), expected);
         assert!(block_on(scan.next_batch(1)).expect("page").rows.is_empty());
-        let ahead = ReadOptions {
-            min_sequence_number: Some(expected + 1),
-        };
-        assert!(
-            matches!(block_on(store.get(Bytes::new(), ahead)), Err(QueryError::NotReady {required, current}) if required == expected + 1 && current == expected)
-        );
-        assert!(
-            matches!(block_on(store.get_many(Vec::new(), ahead)), Err(QueryError::NotReady {required, current}) if required == expected + 1 && current == expected)
-        );
-        assert!(
-            matches!(block_on(store.range_scan(Bytes::new(), Bytes::new(), 0, true, ahead)), Err(QueryError::NotReady {required, current}) if required == expected + 1 && current == expected)
-        );
     }
 }
 
@@ -358,11 +333,9 @@ fn get_many_values_match_their_batch_sequence_during_commits() {
         }
     });
     for _ in 0..200 {
-        let result = block_on(store.get_many(
-            vec![Bytes::from_static(b"a"), Bytes::from_static(b"b")],
-            ReadOptions::default(),
-        ))
-        .expect("get_many");
+        let result =
+            block_on(store.get_many(vec![Bytes::from_static(b"a"), Bytes::from_static(b"b")]))
+                .expect("get_many");
         let expected = (result.sequence_number != 0)
             .then(|| Bytes::copy_from_slice(&result.sequence_number.to_be_bytes()));
         assert_eq!(result.value[0].1, expected);

@@ -21,47 +21,12 @@ use crate::stream::{apply_filter, CompiledMatchers};
 /// Keep this lightweight: streaming query RPCs may emit detail on every frame.
 pub type QueryExtra = HashMap<String, buffa_types::google::protobuf::Value>;
 
-/// Consistency requirements for a query.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct ReadOptions {
-    pub min_sequence_number: Option<u64>,
-}
-
-impl ReadOptions {
-    /// Reject a query sequence below the requested minimum.
-    pub fn check_sequence(self, sequence_number: u64) -> Result<(), QueryError> {
-        if let Some(required) = self.min_sequence_number {
-            if sequence_number < required {
-                return Err(QueryError::NotReady {
-                    required,
-                    current: sequence_number,
-                });
-            }
-        }
-        Ok(())
-    }
-}
-
 /// A query value, its evaluation sequence, and backend-specific metadata.
 #[derive(Clone, Debug)]
 pub struct QueryResult<T> {
     pub value: T,
     pub sequence_number: u64,
     pub extra: QueryExtra,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
-pub enum QueryError {
-    #[error("minimum sequence number {required} is not ready; current snapshot is {current}")]
-    NotReady { required: u64, current: u64 },
-    #[error("{0}")]
-    Backend(String),
-}
-
-impl From<String> for QueryError {
-    fn from(value: String) -> Self {
-        Self::Backend(value)
-    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -124,8 +89,7 @@ pub trait Ingest: Send + Sync + 'static {
 /// Query read capability.
 ///
 /// Each query must read a consistent Store state that reflects all writes through
-/// its reported sequence number and none after it. The sequence must satisfy
-/// [`ReadOptions::min_sequence_number`] or the query must return [`QueryError::NotReady`].
+/// its reported sequence number and none after it.
 pub trait Query: Sequence {
     type RangeScan: RangeScan + 'static;
 
@@ -134,8 +98,7 @@ pub trait Query: Sequence {
     fn get(
         &self,
         key: Bytes,
-        options: ReadOptions,
-    ) -> impl Future<Output = Result<QueryResult<Option<Bytes>>, QueryError>> + Send;
+    ) -> impl Future<Output = Result<QueryResult<Option<Bytes>>, String>> + Send;
 
     /// Cursor over keys in `[start, end]` (inclusive) when `end` is non-empty;
     /// empty `end` means unbounded above. Matches `store.query.v1.RangeRequest`
@@ -146,16 +109,14 @@ pub trait Query: Sequence {
         end: Bytes,
         limit: usize,
         forward: bool,
-        options: ReadOptions,
-    ) -> impl Future<Output = Result<Self::RangeScan, QueryError>> + Send;
+    ) -> impl Future<Output = Result<Self::RangeScan, String>> + Send;
 
     /// Batch-get plus backend-specific query metadata. Returns `(key, Option<value>)`
     /// for each input key, preserving order.
     fn get_many(
         &self,
         keys: Vec<Bytes>,
-        options: ReadOptions,
-    ) -> impl Future<Output = Result<QueryResult<Vec<(Bytes, Option<Bytes>)>>, QueryError>> + Send;
+    ) -> impl Future<Output = Result<QueryResult<Vec<(Bytes, Option<Bytes>)>>, String>> + Send;
 }
 
 /// Prune mutation capability.
