@@ -504,9 +504,14 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push(request.to_owned_message());
-            let sequence = self
-                .sequence
-                .map(|sequence| sequence.max(request.min_sequence_number.unwrap_or_default()));
+            let sequence = self.sequence.unwrap_or(1);
+            if let Some(required) = request.min_sequence_number {
+                if sequence < required {
+                    return Err(ConnectError::aborted(format!(
+                        "snapshot sequence {sequence} is below requested {required}"
+                    )));
+                }
+            }
 
             // Legal out-of-order frames require the adapter to recover requested slot order
             let mut frames = request
@@ -521,7 +526,7 @@ mod tests {
                             ..Default::default()
                         }],
                         detail: Some(Detail {
-                            sequence_number: sequence.map_or(1, |sequence| sequence + 1),
+                            sequence_number: sequence,
                             ..Default::default()
                         })
                         .into(),
@@ -760,7 +765,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn batches_nodes_in_order_and_tracks_the_observed_sequence() {
+    async fn reported_snapshot_sequence_gates_following_reads() {
         let positions = [0, 3, 8].map(Position::<mmr::Family>::new);
         let digests = [1, 2, 3].map(|byte| Digest::decode(&[byte; 32][..]).unwrap());
         let store = NodeQueries {
@@ -781,8 +786,8 @@ mod tests {
         let storage = storage::<mmr::Family>(&session);
 
         assert_eq!(storage.get_nodes(&positions).await.unwrap(), digests);
-        assert_eq!(session.evaluated_sequence(), Some(41));
-        assert_eq!(session.fixed_sequence(), Some(41));
+        assert_eq!(session.evaluated_sequence(), Some(40));
+        assert_eq!(session.fixed_sequence(), Some(40));
         {
             let requests = store.requests.lock().unwrap();
             assert_eq!(requests.len(), 1);
@@ -800,9 +805,9 @@ mod tests {
         );
         assert_eq!(
             store.requests.lock().unwrap()[1].min_sequence_number,
-            Some(41)
+            Some(40)
         );
-        assert_eq!(session.evaluated_sequence(), Some(42));
+        assert_eq!(session.evaluated_sequence(), Some(40));
         server.abort();
     }
 
@@ -811,6 +816,7 @@ mod tests {
         let positions = [0, 3, 8].map(Position::<mmr::Family>::new);
         for malformed in [None, Some(0), Some(3)] {
             let store = NodeQueries {
+                sequence: Some(17),
                 rows: malformed
                     .map(|position| {
                         (
@@ -845,6 +851,7 @@ mod tests {
     #[tokio::test]
     async fn preserves_fetch_errors_after_streamed_results() {
         let store = NodeQueries {
+            sequence: Some(17),
             fail_stream: true,
             ..Default::default()
         };

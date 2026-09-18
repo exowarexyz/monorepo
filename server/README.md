@@ -32,8 +32,8 @@ Unordered aggregation consumes its input before producing results.
 use bytes::Bytes;
 use exoware_sdk::prune_policy::PrunePolicyDocument;
 use exoware_server::{
-    AppState, Log, Ingest, Prune, Query, QueryExtra, RangeScan, RangeScanBatch, Retention,
-    Sequence, StoreEngine, connect_stack,
+    AppState, Log, Ingest, IngestError, Prune, Query, QueryResult,
+    RangeScan, RangeScanBatch, RangeScanResult, Retention, Sequence, StoreEngine, connect_stack,
 };
 use std::future::Future;
 
@@ -42,13 +42,16 @@ use std::future::Future;
 //   fn current_sequence(&self) -> u64;
 //
 //   Ingest:
-//   fn put_batch(&self, kvs: Vec<(Bytes, Bytes)>) -> impl Future<Output = Result<u64, String>> + Send + '_;
+//   fn put_batch(&self, kvs: Vec<(Bytes, Bytes)>) -> impl Future<Output = Result<u64, IngestError>> + Send + '_;
 //
 //   Query:
 //   type RangeScan: RangeScan;
-//   fn get(&self, key: Bytes) -> impl Future<Output = Result<(Option<Vec<u8>>, QueryExtra), String>> + Send + '_;
-//   fn range_scan(&self, start: Bytes, end: Bytes, limit: usize, forward: bool) -> impl Future<Output = Result<Self::RangeScan, String>> + Send + '_;
-//   fn get_many(&self, keys: Vec<Bytes>) -> impl Future<Output = Result<(Vec<(Vec<u8>, Option<Vec<u8>>)>, QueryExtra), String>> + Send + '_;
+//   fn get(&self, key: Bytes) -> impl Future<Output = Result<QueryResult<Option<Bytes>>, String>> + Send + '_;
+//   fn range_scan(&self, start: Bytes, end: Bytes, limit: usize, forward: bool) -> impl Future<Output = Result<RangeScanResult<Self::RangeScan>, String>> + Send + '_;
+//   fn get_many(&self, keys: Vec<Bytes>) -> impl Future<Output = Result<QueryResult<Vec<(Bytes, Option<Bytes>)>>, String>> + Send + '_;
+//
+//   RangeScan:
+//   fn next_batch(&mut self, max_items: usize) -> impl Future<Output = Result<RangeScanBatch, String>> + Send;
 //
 //   Prune:
 //   fn apply_prune_policies(&self, document: PrunePolicyDocument) -> impl Future<Output = Result<(), String>> + Send + '_;

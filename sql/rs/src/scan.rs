@@ -1060,7 +1060,10 @@ mod tests {
     use datafusion::datasource::MemTable;
     use datafusion::prelude::SessionContext;
     use exoware_sdk::{StoreClient, StoreKeyPrefix};
-    use exoware_server::{Query, QueryExtra, QueryState, RangeScan, RangeScanBatch, Sequence};
+    use exoware_server::{
+        Query, QueryExtra, QueryResult, QueryState, RangeScan, RangeScanBatch, RangeScanResult,
+        Sequence,
+    };
 
     use crate::types::KvTable;
     use crate::{IndexSpec, KvSchema, TableColumnConfig};
@@ -1117,21 +1120,24 @@ mod tests {
     impl Query for Rows {
         type RangeScan = Cursor;
 
-        async fn get(&self, key: Bytes) -> Result<(Option<Bytes>, QueryExtra), String> {
+        async fn get(&self, key: Bytes) -> Result<QueryResult<Option<Bytes>>, String> {
+            let sequence_number = self.current_sequence();
             self.requests
                 .lock()
                 .unwrap()
                 .push(Request::Get(key.clone()));
-            Ok((
-                self.values.lock().unwrap().get(&key).cloned(),
-                QueryExtra::new(),
-            ))
+            Ok(QueryResult {
+                value: self.values.lock().unwrap().get(&key).cloned(),
+                sequence_number,
+                extra: QueryExtra::new(),
+            })
         }
 
         async fn get_many(
             &self,
             keys: Vec<Bytes>,
-        ) -> Result<(Vec<(Bytes, Option<Bytes>)>, QueryExtra), String> {
+        ) -> Result<QueryResult<Vec<(Bytes, Option<Bytes>)>>, String> {
+            let sequence_number = self.current_sequence();
             self.requests
                 .lock()
                 .unwrap()
@@ -1152,7 +1158,11 @@ mod tests {
                     .sum(),
                 Ordering::SeqCst,
             );
-            Ok((rows, QueryExtra::new()))
+            Ok(QueryResult {
+                value: rows,
+                sequence_number,
+                extra: QueryExtra::new(),
+            })
         }
 
         async fn range_scan(
@@ -1161,7 +1171,8 @@ mod tests {
             end: Bytes,
             limit: usize,
             forward: bool,
-        ) -> Result<Cursor, String> {
+        ) -> Result<RangeScanResult<Cursor>, String> {
+            let sequence_number = self.current_sequence();
             self.requests.lock().unwrap().push(Request::Range {
                 start: start.clone(),
                 end: end.clone(),
@@ -1180,10 +1191,13 @@ mod tests {
                 rows.reverse();
             }
             rows.truncate(limit);
-            Ok(Cursor {
-                rows: rows.into_iter(),
-                returned_rows: self.returned_rows.clone(),
-                returned_bytes: self.returned_bytes.clone(),
+            Ok(RangeScanResult {
+                scan: Cursor {
+                    rows: rows.into_iter(),
+                    returned_rows: self.returned_rows.clone(),
+                    returned_bytes: self.returned_bytes.clone(),
+                },
+                sequence_number,
             })
         }
     }

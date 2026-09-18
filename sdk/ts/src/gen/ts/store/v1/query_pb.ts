@@ -1092,9 +1092,9 @@ export type GetManyFrame = Message<"store.query.v1.GetManyFrame"> & {
   results: GetManyEntry[];
 
   /**
-   * Running query detail after the entries in this frame have been read. For a
-   * successful stream, the last detail observed by the client is the final
-   * sequence/metadata summary.
+   * The sequence number is the same in every frame. The metadata reflects the
+   * query after this frame's entries have been read. For a successful stream,
+   * the last detail observed by the client contains the final metadata summary.
    *
    * @generated from field: store.query.v1.Detail detail = 2;
    */
@@ -1174,9 +1174,9 @@ export type RangeFrame = Message<"store.query.v1.RangeFrame"> & {
   results: Entry[];
 
   /**
-   * Running query detail after the rows in this frame have been read. For a
-   * successful stream, the last detail observed by the client is the final
-   * sequence/metadata summary.
+   * The sequence number is the same in every frame. The metadata reflects the
+   * query after this frame's rows have been read. For a successful stream,
+   * the last detail observed by the client contains the final metadata summary.
    *
    * @generated from field: store.query.v1.Detail detail = 2;
    */
@@ -1252,7 +1252,7 @@ export type ReduceResponse = Message<"store.query.v1.ReduceResponse"> & {
 
   /**
    * Query sequence and server-defined metadata for this reduction.
-   * Present on every frame.
+   * Present on every frame, including reductions over empty input.
    *
    * @generated from field: store.query.v1.Detail detail = 3;
    */

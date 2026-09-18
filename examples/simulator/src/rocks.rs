@@ -46,14 +46,15 @@ use exoware_sdk::prune_policy::{KeysScope, OrderEncoding, PrunePolicyDocument, R
 use exoware_sdk::retention::{validate_retention_policy, RetentionPolicy};
 use exoware_sdk::selector::compile_payload_regex;
 use exoware_server::{
-    Ingest, IngestError, Log, LogBatch, Prune, Query, QueryExtra, RangeScan, RangeScanBatch,
-    Retention, Sequence,
+    Ingest, IngestError, Log, LogBatch, Prune, Query, QueryExtra, QueryResult, RangeScan,
+    RangeScanBatch, RangeScanResult, Retention, Sequence,
 };
 use parking_lot::Mutex;
 use regex::bytes::Regex;
 use rocksdb::{
     ColumnFamily, ColumnFamilyDescriptor, DBCompactionStyle, DBCompressionType, DBIterator,
-    Direction, IngestExternalFileOptions, IteratorMode, Options, SstFileWriter, WriteOptions, DB,
+    Direction, IngestExternalFileOptions, IteratorMode, Options, Snapshot, SstFileWriter,
+    WriteOptions, DB,
 };
 use tokio::sync::oneshot;
 use tracing::debug;
@@ -99,24 +100,42 @@ impl std::ops::Deref for Database {
     }
 }
 
-/// Owns the DB handle for a RocksDB iterator that is moved through blocking tasks.
-struct OwnedRocksIterator {
-    iter: DBIterator<'static>,
+/// A snapshot and its published sequence, captured under the publication lock.
+struct OwnedRocksSnapshot {
+    snapshot: Snapshot<'static>,
+    sequence_number: u64,
     _db: Arc<Database>,
 }
 
-impl OwnedRocksIterator {
-    /// Creates a RocksDB iterator whose borrowed DB handle is kept alive by the wrapper.
-    fn new(db: Arc<Database>, mode: IteratorMode<'_>) -> Self {
-        // SAFETY: `iter` is dropped before `db` because fields are dropped in
-        // declaration order. The RocksDB iterator therefore cannot outlive the
-        // Arc-owned DB it borrows.
+impl OwnedRocksSnapshot {
+    fn capture(db: Arc<Database>, frontiers: &Frontiers) -> Self {
+        let _guard = frontiers.persist.lock();
+        // SAFETY: `_db` keeps `db_ref` alive, and fields drop in declaration order,
+        // so `snapshot` is released before its database.
         let db_ref: &'static DB = unsafe { &(*Arc::as_ptr(&db)).db };
-        let iter = db_ref.iterator(mode);
-        Self { iter, _db: db }
+        Self {
+            snapshot: db_ref.snapshot(),
+            sequence_number: frontiers.published.load(Ordering::Acquire),
+            _db: db,
+        }
+    }
+}
+
+/// The iterator drops before its snapshot, which drops before the database.
+struct OwnedRocksIterator {
+    iter: DBIterator<'static>,
+    _snapshot: OwnedRocksSnapshot,
+}
+
+impl OwnedRocksIterator {
+    fn new(snapshot: OwnedRocksSnapshot, mode: IteratorMode<'_>) -> Self {
+        let iter = snapshot.snapshot.iterator(mode);
+        Self {
+            iter,
+            _snapshot: snapshot,
+        }
     }
 
-    /// Advances the wrapped RocksDB iterator without exposing its borrowed lifetime.
     fn next(&mut self) -> Option<RocksIterItem> {
         self.iter.next()
     }
@@ -134,7 +153,13 @@ struct RocksRangeScanState {
 
 impl RocksRangeScanState {
     /// Creates an iterator positioned at the first row that may belong to the requested range.
-    fn new(db: Arc<Database>, start: Bytes, end: Bytes, limit: usize, forward: bool) -> Self {
+    fn new(
+        snapshot: OwnedRocksSnapshot,
+        start: Bytes,
+        end: Bytes,
+        limit: usize,
+        forward: bool,
+    ) -> Self {
         let mode = if forward {
             IteratorMode::From(start.as_ref(), Direction::Forward)
         } else if end.is_empty() {
@@ -143,7 +168,7 @@ impl RocksRangeScanState {
             IteratorMode::From(end.as_ref(), Direction::Reverse)
         };
         Self {
-            iterator: OwnedRocksIterator::new(db, mode),
+            iterator: OwnedRocksIterator::new(snapshot, mode),
             start,
             end,
             limit,
@@ -202,9 +227,17 @@ pub struct RocksRangeScanCursor {
 
 impl RocksRangeScanCursor {
     /// Stores scan state in an `Option` so it can be moved into `spawn_blocking` per page.
-    fn new(db: Arc<Database>, start: Bytes, end: Bytes, limit: usize, forward: bool) -> Self {
+    fn new(
+        snapshot: OwnedRocksSnapshot,
+        start: Bytes,
+        end: Bytes,
+        limit: usize,
+        forward: bool,
+    ) -> Self {
         Self {
-            state: Some(RocksRangeScanState::new(db, start, end, limit, forward)),
+            state: Some(RocksRangeScanState::new(
+                snapshot, start, end, limit, forward,
+            )),
         }
     }
 }
@@ -339,19 +372,10 @@ fn keys_to_delete(
 
 /// Sequence frontier shared by the store and its writer stages.
 struct Frontiers {
-    /// Highest sequence whose log row and state rows are both committed; gates every
-    /// sequence-addressed read (`current_sequence`, `get_batch`, `oldest_retained_batch`).
-    /// Point reads of current state are deliberately ungated: state may lead this frontier by
-    /// the one group being published, but never lags it. The durable frontier (highest sequence
-    /// whose log row is durable) is not tracked in-process: it only runs ahead of `published`
-    /// while a group's state ingestion is in flight, and is re-derived at open from the
-    /// retained log rows and the state-floor meta row.
+    /// Highest sequence whose log and state rows are durably committed.
     published: AtomicU64,
-    /// Serializes floor persists (so the persisted state floor never moves backward even
-    /// though whole prunes run concurrently) and orders state visibility against floor reads:
-    /// `commit` ingests and publishes each group's state under this lock, so a prune that
-    /// loads `published` under it sees a frontier covering every row its scan could have
-    /// observed.
+    /// Serializes state ingestion, publication, snapshot capture, and key deletion.
+    /// Also serializes floor persists so the durable floor cannot regress.
     persist: Mutex<()>,
     /// Highest `cutoff_exclusive` already applied by `prune_log` in this process. Lets the
     /// per-append retention hook skip the write entirely when the floor has not advanced
@@ -760,6 +784,7 @@ fn ingest_staged_file(db: &DB, cf: &str, path: &Path) {
     let handle = db.cf_handle(cf).expect("CFs exist (created on open)");
     let mut ingest_options = IngestExternalFileOptions::default();
     ingest_options.set_move_files(true);
+    ingest_options.set_snapshot_consistency(true);
     db.ingest_external_file_cf_opts(handle, &ingest_options, vec![path])
         .unwrap_or_else(|error| {
             panic!(
@@ -1091,6 +1116,7 @@ impl RocksStore {
     }
 
     /// Reads the current value for one default-column-family key.
+    #[cfg(test)]
     fn get_raw(&self, key: &[u8]) -> Result<Option<Vec<u8>>, rocksdb::Error> {
         self.db.get(key)
     }
@@ -1115,13 +1141,10 @@ impl RocksStore {
         self.db.write(batch).map_err(|e| e.to_string())
     }
 
-    /// Deletes current rows in bounded chunks, entirely off the publish lock: keys are
-    /// write-once, so a concurrent commit only ever adds new keys, never a row this delete
-    /// targets. Chunking keeps any single batch from monopolizing the RocksDB write path
-    /// that `commit`'s ingestions briefly pause and wait behind. The final chunk is synced,
-    /// which flushes the whole run; a crash between chunks loses whole batches atomically,
-    /// leaving rows the next prune pass re-deletes.
+    /// Deletes bounded chunks under the publication lock until the final synced write
+    /// makes every deletion durable. New snapshots wait for this attempt to finish.
     fn delete_keys(&self, keys: &[Bytes]) -> Result<(), String> {
+        let _guard = self.frontiers.persist.lock();
         let mut chunks = keys.chunks(PRUNE_DELETE_CHUNK_KEYS).peekable();
         while let Some(chunk) = chunks.next() {
             let mut batch = rocksdb::WriteBatch::default();
@@ -1202,7 +1225,13 @@ impl RocksStore {
             .map_err(|e| format!("policy: {e}"))?;
 
         let (start, end) = prefix.bounds();
-        let mut rows = RocksRangeScanState::new(self.db.clone(), start, end, usize::MAX, true);
+        let mut rows = RocksRangeScanState::new(
+            OwnedRocksSnapshot::capture(self.db.clone(), &self.frontiers),
+            start,
+            end,
+            usize::MAX,
+            true,
+        );
         let mut groups: BTreeMap<Vec<u8>, Vec<KeyEntry>> = BTreeMap::new();
 
         loop {
@@ -1359,12 +1388,18 @@ impl Ingest for RocksStore {
 impl Query for RocksStore {
     type RangeScan = RocksRangeScanCursor;
 
-    async fn get(&self, key: Bytes) -> Result<(Option<Bytes>, QueryExtra), String> {
-        let store = self.clone();
-        store
-            .get_raw(&key)
-            .map(|value| (value.map(Bytes::from), QueryExtra::default()))
-            .map_err(|e| e.to_string())
+    async fn get(&self, key: Bytes) -> Result<QueryResult<Option<Bytes>>, String> {
+        let snapshot = OwnedRocksSnapshot::capture(self.db.clone(), &self.frontiers);
+        let value = snapshot
+            .snapshot
+            .get(key)
+            .map_err(|e| e.to_string())?
+            .map(Bytes::from);
+        Ok(QueryResult {
+            value,
+            sequence_number: snapshot.sequence_number,
+            extra: QueryExtra::default(),
+        })
     }
 
     async fn range_scan(
@@ -1373,22 +1408,23 @@ impl Query for RocksStore {
         end: Bytes,
         limit: usize,
         forward: bool,
-    ) -> Result<Self::RangeScan, String> {
-        Ok(RocksRangeScanCursor::new(
-            self.db.clone(),
-            start,
-            end,
-            limit,
-            forward,
-        ))
+    ) -> Result<RangeScanResult<Self::RangeScan>, String> {
+        let snapshot = OwnedRocksSnapshot::capture(self.db.clone(), &self.frontiers);
+        let sequence_number = snapshot.sequence_number;
+        Ok(RangeScanResult {
+            scan: RocksRangeScanCursor::new(snapshot, start, end, limit, forward),
+            sequence_number,
+        })
     }
 
     async fn get_many(
         &self,
         keys: Vec<Bytes>,
-    ) -> Result<(Vec<(Bytes, Option<Bytes>)>, QueryExtra), String> {
-        let store = self.clone();
-        let results = store.db.multi_get(keys.iter().map(|key| key.as_ref()));
+    ) -> Result<QueryResult<Vec<(Bytes, Option<Bytes>)>>, String> {
+        let snapshot = OwnedRocksSnapshot::capture(self.db.clone(), &self.frontiers);
+        let results = snapshot
+            .snapshot
+            .multi_get(keys.iter().map(|key| key.as_ref()));
         let entries = keys
             .into_iter()
             .zip(results)
@@ -1397,7 +1433,11 @@ impl Query for RocksStore {
                 Ok((k, value.map(Bytes::from)))
             })
             .collect::<Result<Vec<_>, String>>()?;
-        Ok((entries, QueryExtra::default()))
+        Ok(QueryResult {
+            value: entries,
+            sequence_number: snapshot.sequence_number,
+            extra: QueryExtra::default(),
+        })
     }
 }
 
@@ -1544,6 +1584,89 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_capture_waits_for_state_publication() {
+        let dir = tempdir().expect("tempdir");
+        let store = RocksStore::open(dir.path(), None).expect("open db");
+        let group = prepared_write(
+            &store,
+            0,
+            vec![(Bytes::from_static(b"a"), Bytes::from_static(b"value"))],
+        );
+        ingest_staged_file(&store.db, LOG_CF, &group.log);
+        let guard = store.frontiers.persist.lock();
+        ingest_staged_file(&store.db, STATE_CF, &group.state);
+        assert_eq!(store.current_sequence(), 0);
+        assert_eq!(
+            store.db.get(b"a").expect("visible state"),
+            Some(b"value".to_vec())
+        );
+        let reader = store.clone();
+        let (started_tx, started_rx) = mpsc::channel();
+        let (result_tx, result_rx) = mpsc::channel();
+        let task = thread::spawn(move || {
+            started_tx.send(()).expect("started");
+            let snapshot = OwnedRocksSnapshot::capture(reader.db.clone(), &reader.frontiers);
+            result_tx
+                .send((
+                    snapshot.sequence_number,
+                    snapshot.snapshot.get(b"a").expect("snapshot get"),
+                ))
+                .expect("result");
+        });
+        started_rx.recv().expect("reader started");
+        assert!(matches!(
+            result_rx.recv_timeout(std::time::Duration::from_millis(100)),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        ));
+        store.frontiers.published.store(1, Ordering::Release);
+        drop(guard);
+        assert_eq!(
+            result_rx.recv().expect("published snapshot"),
+            (1, Some(b"value".to_vec()))
+        );
+        task.join().expect("reader");
+    }
+
+    #[test]
+    fn snapshot_multi_get_survives_commit_and_prune() {
+        let dir = tempdir().expect("tempdir");
+        let store = RocksStore::open(dir.path(), None).expect("open db");
+        let rows = vec![
+            (Bytes::from_static(b"a"), Bytes::from_static(b"old")),
+            (Bytes::from_static(b"b"), Bytes::from_static(b"old")),
+        ];
+        commit_and_apply(&store, prepared_write(&store, 0, rows));
+        let snapshot = OwnedRocksSnapshot::capture(store.db.clone(), &store.frontiers);
+        commit_and_apply(
+            &store,
+            prepared_write(
+                &store,
+                1,
+                vec![
+                    (Bytes::from_static(b"a"), Bytes::from_static(b"new")),
+                    (Bytes::from_static(b"b"), Bytes::from_static(b"new")),
+                ],
+            ),
+        );
+        store.raise_state_floor().expect("floor");
+        store
+            .delete_keys(&[Bytes::from_static(b"b")])
+            .expect("prune");
+        let values = snapshot.snapshot.multi_get([b"a", b"b"]);
+        assert_eq!(snapshot.sequence_number, 1);
+        for value in values {
+            assert_eq!(value.expect("snapshot value"), Some(b"old".to_vec()));
+        }
+        let latest = OwnedRocksSnapshot::capture(store.db.clone(), &store.frontiers);
+        assert_eq!(latest.sequence_number, 2);
+        assert_eq!(
+            latest.snapshot.get(b"a").expect("new value"),
+            Some(b"new".to_vec())
+        );
+        assert_eq!(latest.snapshot.get(b"b").expect("deleted"), None);
+    }
+
+    #[test]
     fn owned_directory_outlives_every_database_holder() {
         let dir = tempdir().expect("tempdir");
         let path = dir.path().to_path_buf();
@@ -1552,7 +1675,7 @@ mod tests {
         // A cursor keeps the database, and therefore the owned directory, alive after every
         // store handle is gone.
         let cursor = RocksRangeScanCursor::new(
-            store.db.clone(),
+            OwnedRocksSnapshot::capture(store.db.clone(), &store.frontiers),
             Bytes::new(),
             Bytes::new(),
             usize::MAX,
