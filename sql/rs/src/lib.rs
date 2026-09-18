@@ -100,7 +100,8 @@ mod tests {
     use exoware_sdk::RangeMode;
     use exoware_sdk::{parse_range_traversal_direction, RangeTraversalDirection};
     use exoware_server::{
-        Query, QueryExtra, QueryResult, QueryState, RangeScan, RangeScanBatch, Sequence,
+        Query, QueryExtra, QueryResult, QueryState, RangeScan, RangeScanBatch, RangeScanResult,
+        Sequence,
     };
     use futures::{stream, TryStreamExt};
     use tokio::sync::{mpsc, oneshot, Notify};
@@ -238,14 +239,9 @@ mod tests {
 
     struct MockRangeScan {
         rows: std::vec::IntoIter<(Bytes, Bytes)>,
-        sequence_number: u64,
     }
 
     impl RangeScan for MockRangeScan {
-        fn sequence_number(&self) -> u64 {
-            self.sequence_number
-        }
-
         async fn next_batch(&mut self, max_items: usize) -> Result<RangeScanBatch, String> {
             Ok(RangeScanBatch {
                 rows: self.rows.by_ref().take(max_items).collect(),
@@ -292,7 +288,7 @@ mod tests {
             end: Bytes,
             limit: usize,
             forward: bool,
-        ) -> Result<MockRangeScan, String> {
+        ) -> Result<RangeScanResult<MockRangeScan>, String> {
             let values = self.kv.lock().unwrap();
             let sequence_number = self.current_sequence();
             let range = values.range((
@@ -315,8 +311,10 @@ mod tests {
                     .map(|(key, value)| (key.clone(), value.clone()))
                     .collect()
             };
-            Ok(MockRangeScan {
-                rows: rows.into_iter(),
+            Ok(RangeScanResult {
+                scan: MockRangeScan {
+                    rows: rows.into_iter(),
+                },
                 sequence_number,
             })
         }

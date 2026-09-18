@@ -1032,7 +1032,7 @@ impl exoware_server::Query for CountingQuery {
         end: bytes::Bytes,
         limit: usize,
         forward: bool,
-    ) -> Result<Self::RangeScan, String> {
+    ) -> Result<exoware_server::RangeScanResult<Self::RangeScan>, String> {
         // A chunk row key is the chunk family byte, the u64 chunk index, then the u64 boundary location
         if start.first() == Some(&exoware_qmdb::CHUNK_FAMILY) && start.len() == 17 {
             self.bitmap_chunks

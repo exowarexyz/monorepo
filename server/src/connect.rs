@@ -57,8 +57,8 @@ use crate::reduce::{decode_group, execute_reduce, RangeError, ReduceExecution, R
 use crate::stream::{StreamHub, StreamNotifier};
 use crate::validate::{self, IngestLimits};
 use crate::{
-    FilteredBatch, Ingest, IngestError, Log, Prune, Query, QueryExtra, RangeScan, Retention,
-    StoreEngine,
+    FilteredBatch, Ingest, IngestError, Log, Prune, Query, QueryExtra, RangeScan, RangeScanResult,
+    Retention, StoreEngine,
 };
 
 // TODO (#57): Make limits configurable.
@@ -120,13 +120,16 @@ fn ensure_min_sequence_number(
 }
 
 fn range_stream<S>(
-    entries: S,
+    result: RangeScanResult<S>,
     batch_size: usize,
 ) -> Pin<Box<dyn Stream<Item = Result<RangeFrame, ConnectError>> + Send>>
 where
     S: RangeScan + 'static,
 {
-    let sequence_number = entries.sequence_number();
+    let RangeScanResult {
+        scan: entries,
+        sequence_number,
+    } = result;
 
     Box::pin(stream_util::unfold(
         Some((entries, false)),
@@ -660,15 +663,15 @@ where
             Ok(RangeTraversalDirection::Reverse) => false,
             Err(e) => return Err(ConnectError::internal(format!("traversal mode: {e:?}"))),
         };
-        let entries = self
+        let result = self
             .state
             .query
             .range_scan(start_key.clone(), end_key.clone(), limit, forward)
             .await
             .map_err(ConnectError::internal)?;
-        ensure_min_sequence_number(request.min_sequence_number, entries.sequence_number())?;
+        ensure_min_sequence_number(request.min_sequence_number, result.sequence_number)?;
         Ok(connectrpc::Response::stream(range_stream(
-            entries, batch_size,
+            result, batch_size,
         )))
     }
 
@@ -1483,17 +1486,12 @@ mod tests {
     }
 
     struct IteratorRangeScan {
-        sequence_number: u64,
         iter: Box<dyn Iterator<Item = Result<(Bytes, Bytes), String>> + Send + 'static>,
         eof_extra: Option<QueryExtra>,
         remaining_batches: Option<usize>,
     }
 
     impl RangeScan for IteratorRangeScan {
-        fn sequence_number(&self) -> u64 {
-            self.sequence_number
-        }
-
         async fn next_batch(&mut self, max_items: usize) -> Result<RangeScanBatch, String> {
             if let Some(remaining) = &mut self.remaining_batches {
                 if *remaining == 0 {
@@ -1526,7 +1524,6 @@ mod tests {
         I: Iterator<Item = Result<(Bytes, Bytes), String>> + Send + 'static,
     {
         IteratorRangeScan {
-            sequence_number: 0,
             iter: Box::new(iter),
             eof_extra: Some(eof_extra),
             remaining_batches: None,
@@ -1664,7 +1661,7 @@ mod tests {
             _end: Bytes,
             _limit: usize,
             _forward: bool,
-        ) -> Result<Self::RangeScan, String> {
+        ) -> Result<RangeScanResult<Self::RangeScan>, String> {
             let result = self
                 .state
                 .lock()
@@ -1687,9 +1684,11 @@ mod tests {
                     }),
                     eof_extra,
                 );
-                cursor.sequence_number = sequence_number;
                 cursor.remaining_batches = remaining_batches;
-                cursor
+                RangeScanResult {
+                    scan: cursor,
+                    sequence_number,
+                }
             });
             cursor
         }
@@ -2106,10 +2105,11 @@ mod tests {
             _end: Bytes,
             _limit: usize,
             _forward: bool,
-        ) -> Result<Self::RangeScan, String> {
-            let mut scan = range_scan_from_iter(std::iter::empty());
-            scan.sequence_number = self.sequence_number;
-            Ok(scan)
+        ) -> Result<RangeScanResult<Self::RangeScan>, String> {
+            Ok(RangeScanResult {
+                scan: range_scan_from_iter(std::iter::empty()),
+                sequence_number: self.sequence_number,
+            })
         }
 
         async fn get_many(

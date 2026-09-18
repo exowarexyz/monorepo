@@ -47,7 +47,8 @@ fn scan(
         limit,
         forward,
     ))
-    .expect("open scan");
+    .expect("open scan")
+    .scan;
     let mut rows = Vec::new();
     loop {
         let batch = block_on(cursor.next_batch(usize::MAX)).expect("scan");
@@ -260,9 +261,10 @@ fn snapshot_sequence_and_rows_survive_writes_between_pages() {
         let store = RocksStore::open(dir.path(), None).expect("open db");
         seed_abc(&store);
         let before = store.current_sequence();
-        let mut cursor =
-            block_on(store.range_scan(Bytes::new(), Bytes::new(), usize::MAX, forward))
-                .expect("scan");
+        let result = block_on(store.range_scan(Bytes::new(), Bytes::new(), usize::MAX, forward))
+            .expect("scan");
+        assert_eq!(result.sequence_number, before);
+        let mut cursor = result.scan;
         let first = block_on(cursor.next_batch(1)).expect("first page");
         let later = put_batch(
             &store,
@@ -272,7 +274,6 @@ fn snapshot_sequence_and_rows_survive_writes_between_pages() {
             ],
         );
         assert!(later > before);
-        assert_eq!(cursor.sequence_number(), before);
         let rest = block_on(cursor.next_batch(10)).expect("remaining page");
         let mut all = first.rows;
         all.extend(rest.rows);
@@ -287,7 +288,6 @@ fn snapshot_sequence_and_rows_survive_writes_between_pages() {
             .expect("end")
             .rows
             .is_empty());
-        assert_eq!(cursor.sequence_number(), before);
     }
 }
 
@@ -305,9 +305,10 @@ fn empty_queries_report_snapshot_sequence() {
         let empty = block_on(store.get_many(Vec::new())).expect("empty get_many");
         assert!(empty.value.is_empty());
         assert_eq!(empty.sequence_number, expected);
-        let mut scan =
+        let result =
             block_on(store.range_scan(Bytes::new(), Bytes::new(), 0, true)).expect("empty scan");
-        assert_eq!(scan.sequence_number(), expected);
+        assert_eq!(result.sequence_number, expected);
+        let mut scan = result.scan;
         assert!(block_on(scan.next_batch(1)).expect("page").rows.is_empty());
     }
 }

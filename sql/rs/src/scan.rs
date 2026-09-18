@@ -1061,7 +1061,8 @@ mod tests {
     use datafusion::prelude::SessionContext;
     use exoware_sdk::{StoreClient, StoreKeyPrefix};
     use exoware_server::{
-        Query, QueryExtra, QueryResult, QueryState, RangeScan, RangeScanBatch, Sequence,
+        Query, QueryExtra, QueryResult, QueryState, RangeScan, RangeScanBatch, RangeScanResult,
+        Sequence,
     };
 
     use crate::types::KvTable;
@@ -1097,13 +1098,9 @@ mod tests {
         rows: std::vec::IntoIter<(Bytes, Bytes)>,
         returned_rows: Arc<AtomicUsize>,
         returned_bytes: Arc<AtomicUsize>,
-        sequence_number: u64,
     }
 
     impl RangeScan for Cursor {
-        fn sequence_number(&self) -> u64 {
-            self.sequence_number
-        }
         async fn next_batch(&mut self, max_items: usize) -> Result<RangeScanBatch, String> {
             let rows: Vec<_> = self.rows.by_ref().take(max_items).collect();
             self.returned_rows.fetch_add(rows.len(), Ordering::SeqCst);
@@ -1174,7 +1171,7 @@ mod tests {
             end: Bytes,
             limit: usize,
             forward: bool,
-        ) -> Result<Cursor, String> {
+        ) -> Result<RangeScanResult<Cursor>, String> {
             let sequence_number = self.current_sequence();
             self.requests.lock().unwrap().push(Request::Range {
                 start: start.clone(),
@@ -1194,10 +1191,12 @@ mod tests {
                 rows.reverse();
             }
             rows.truncate(limit);
-            Ok(Cursor {
-                rows: rows.into_iter(),
-                returned_rows: self.returned_rows.clone(),
-                returned_bytes: self.returned_bytes.clone(),
+            Ok(RangeScanResult {
+                scan: Cursor {
+                    rows: rows.into_iter(),
+                    returned_rows: self.returned_rows.clone(),
+                    returned_bytes: self.returned_bytes.clone(),
+                },
                 sequence_number,
             })
         }

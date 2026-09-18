@@ -29,6 +29,15 @@ pub struct QueryResult<T> {
     pub extra: QueryExtra,
 }
 
+/// A range cursor and its evaluation sequence.
+#[derive(Debug)]
+pub struct RangeScanResult<S> {
+    pub scan: S,
+    /// Store sequence at which this scan is evaluated. It must remain fixed
+    /// for the cursor's lifetime and apply to every batch, including empty batches.
+    pub sequence_number: u64,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct RangeScanBatch {
     /// Rows read by this cursor pull.
@@ -42,10 +51,6 @@ pub struct RangeScanBatch {
 /// Implementations own any state needed to produce batches, allowing query
 /// handlers to pull rows lazily without borrowing the engine.
 pub trait RangeScan: Send {
-    /// Store sequence at which this scan is evaluated. It must remain fixed
-    /// for the cursor's lifetime and apply to every batch, including empty batches.
-    fn sequence_number(&self) -> u64;
-
     /// Pull up to `max_items` rows. Returning an empty `rows` batch marks EOF.
     /// EOF may carry non-empty `extra` with final query metadata.
     /// `extra` is emitted with the response frame built from the same batch.
@@ -109,7 +114,7 @@ pub trait Query: Sequence {
         end: Bytes,
         limit: usize,
         forward: bool,
-    ) -> impl Future<Output = Result<Self::RangeScan, String>> + Send;
+    ) -> impl Future<Output = Result<RangeScanResult<Self::RangeScan>, String>> + Send;
 
     /// Batch-get plus backend-specific query metadata. Returns `(key, Option<value>)`
     /// for each input key, preserving order.

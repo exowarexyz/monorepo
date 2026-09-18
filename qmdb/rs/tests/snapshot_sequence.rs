@@ -20,7 +20,9 @@ use commonware_storage::translator::TwoCap;
 use commonware_utils::{NZUsize, NZU16, NZU64};
 use exoware_qmdb::{ImmutableClient, QmdbError};
 use exoware_sdk::{PrefixedStoreClient, RetryConfig, StoreClient, StoreWriteBatch};
-use exoware_server::{Query, QueryExtra, QueryResult, RangeScan, RangeScanBatch, Sequence};
+use exoware_server::{
+    Query, QueryExtra, QueryResult, RangeScan, RangeScanBatch, RangeScanResult, Sequence,
+};
 
 type Family = mmr::Family;
 type Operation = ImmutableOperation<Family, Vec<u8>, Vec<u8>>;
@@ -112,15 +114,10 @@ struct MapSnapshot {
 }
 
 struct MapCursor {
-    sequence: u64,
     rows: VecDeque<(Bytes, Bytes)>,
 }
 
 impl RangeScan for MapCursor {
-    fn sequence_number(&self) -> u64 {
-        self.sequence
-    }
-
     async fn next_batch(&mut self, max_items: usize) -> Result<RangeScanBatch, String> {
         Ok(RangeScanBatch {
             rows: (0..max_items)
@@ -184,7 +181,7 @@ impl Query for LoadBalancedQuery {
         end: Bytes,
         limit: usize,
         forward: bool,
-    ) -> Result<Self::RangeScan, String> {
+    ) -> Result<RangeScanResult<Self::RangeScan>, String> {
         let snapshot = self.route();
         let mut rows = snapshot
             .rows
@@ -196,9 +193,9 @@ impl Query for LoadBalancedQuery {
             rows.reverse();
         }
         rows.truncate(limit);
-        Ok(MapCursor {
-            sequence: snapshot.sequence,
-            rows: rows.into(),
+        Ok(RangeScanResult {
+            scan: MapCursor { rows: rows.into() },
+            sequence_number: snapshot.sequence,
         })
     }
 

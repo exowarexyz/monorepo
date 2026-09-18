@@ -29,7 +29,7 @@ use datafusion::prelude::SessionContext;
 use exoware_sdk::{StoreClient, StoreKeyPrefix};
 use exoware_server::{
     Ingest, IngestError, IngestState, Query, QueryExtra, QueryResult, QueryState, RangeScan,
-    RangeScanBatch, Sequence,
+    RangeScanBatch, RangeScanResult, Sequence,
 };
 use exoware_sql::proto::sql::v1::{QueryRequest, ServiceClient};
 use exoware_sql::{CellValue, IndexSpec, KvSchema, TableColumnConfig};
@@ -228,14 +228,9 @@ impl Ingest for Backend {
 struct Cursor {
     rows: std::vec::IntoIter<(Bytes, Bytes)>,
     traffic: Arc<Traffic>,
-    sequence_number: u64,
 }
 
 impl RangeScan for Cursor {
-    fn sequence_number(&self) -> u64 {
-        self.sequence_number
-    }
-
     async fn next_batch(&mut self, max_items: usize) -> Result<RangeScanBatch, String> {
         let rows = self
             .rows
@@ -300,7 +295,7 @@ impl Query for Backend {
         end: Bytes,
         limit: usize,
         forward: bool,
-    ) -> Result<Cursor, String> {
+    ) -> Result<RangeScanResult<Cursor>, String> {
         let kv = self.kv.lock().unwrap();
         let sequence_number = self.current_sequence();
         let bounds = (
@@ -323,9 +318,11 @@ impl Query for Backend {
                 .map(|(key, value)| (key.clone(), value.clone()))
                 .collect()
         };
-        Ok(Cursor {
-            rows: rows.into_iter(),
-            traffic: self.traffic.clone(),
+        Ok(RangeScanResult {
+            scan: Cursor {
+                rows: rows.into_iter(),
+                traffic: self.traffic.clone(),
+            },
             sequence_number,
         })
     }

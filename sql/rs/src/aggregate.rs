@@ -2010,7 +2010,8 @@ mod tests {
     use datafusion::prelude::SessionContext;
     use exoware_sdk::{RangeReduceGroup, RangeReduceResponse, RangeReduceResult, StoreClient};
     use exoware_server::{
-        Query, QueryExtra, QueryResult, QueryState, RangeScan, RangeScanBatch, Sequence,
+        Query, QueryExtra, QueryResult, QueryState, RangeScan, RangeScanBatch, RangeScanResult,
+        Sequence,
     };
 
     #[derive(Default)]
@@ -2029,13 +2030,9 @@ mod tests {
 
     struct Cursor {
         rows: std::vec::IntoIter<(Bytes, Bytes)>,
-        sequence_number: u64,
     }
 
     impl RangeScan for Cursor {
-        fn sequence_number(&self) -> u64 {
-            self.sequence_number
-        }
         async fn next_batch(&mut self, max_items: usize) -> Result<RangeScanBatch, String> {
             Ok(RangeScanBatch {
                 rows: self.rows.by_ref().take(max_items).collect(),
@@ -2081,7 +2078,7 @@ mod tests {
             end: Bytes,
             limit: usize,
             forward: bool,
-        ) -> Result<Cursor, String> {
+        ) -> Result<RangeScanResult<Cursor>, String> {
             let sequence_number = self.current_sequence();
             let mut rows = self
                 .values
@@ -2097,8 +2094,10 @@ mod tests {
             rows.truncate(limit);
             self.scanned_rows
                 .fetch_add(rows.len(), AtomicOrdering::Relaxed);
-            Ok(Cursor {
-                rows: rows.into_iter(),
+            Ok(RangeScanResult {
+                scan: Cursor {
+                    rows: rows.into_iter(),
+                },
                 sequence_number,
             })
         }

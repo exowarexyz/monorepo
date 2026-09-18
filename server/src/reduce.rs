@@ -42,7 +42,7 @@ use exoware_sdk::proto::to_proto_reduced_value;
 use exoware_sdk::{RangeReduceOp, RangeReduceRequest};
 use futures::StreamExt;
 
-use crate::{Query, QueryExtra, RangeScan};
+use crate::{Query, QueryExtra, RangeScan, RangeScanResult};
 
 pub(crate) const REDUCE_BATCH_ROWS: usize = 4096;
 const REDUCE_BATCH_BYTES: usize = 16 * 1024 * 1024;
@@ -387,11 +387,13 @@ pub(crate) async fn execute_reduce<Q: Query>(
     context: Arc<TaskContext>,
 ) -> Result<ReduceExecution, RangeError> {
     let plan = Arc::new(ReducePlan::new(Arc::new(request), &context)?);
-    let scan = query
+    let RangeScanResult {
+        scan,
+        sequence_number,
+    } = query
         .range_scan(start, end, usize::MAX, true)
         .await
         .map_err(RangeError::Backend)?;
-    let sequence_number = scan.sequence_number();
     let extra = Arc::new(Mutex::new(QueryExtra::new()));
     let partition = ReducePartition {
         scan: Mutex::new(Some(scan)),
@@ -1764,10 +1766,6 @@ mod tests {
         #[derive(Clone)]
         struct Rows(Vec<(Bytes, Bytes)>);
         impl RangeScan for Rows {
-            fn sequence_number(&self) -> u64 {
-                1
-            }
-
             async fn next_batch(
                 &mut self,
                 max_items: usize,

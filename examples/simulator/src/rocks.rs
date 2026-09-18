@@ -47,7 +47,7 @@ use exoware_sdk::retention::{validate_retention_policy, RetentionPolicy};
 use exoware_sdk::selector::compile_payload_regex;
 use exoware_server::{
     Ingest, IngestError, Log, LogBatch, Prune, Query, QueryExtra, QueryResult, RangeScan,
-    RangeScanBatch, Retention, Sequence,
+    RangeScanBatch, RangeScanResult, Retention, Sequence,
 };
 use parking_lot::Mutex;
 use regex::bytes::Regex;
@@ -222,7 +222,6 @@ impl RocksRangeScanState {
 }
 
 pub struct RocksRangeScanCursor {
-    sequence_number: u64,
     state: Option<RocksRangeScanState>,
 }
 
@@ -236,7 +235,6 @@ impl RocksRangeScanCursor {
         forward: bool,
     ) -> Self {
         Self {
-            sequence_number: snapshot.sequence_number,
             state: Some(RocksRangeScanState::new(
                 snapshot, start, end, limit, forward,
             )),
@@ -245,10 +243,6 @@ impl RocksRangeScanCursor {
 }
 
 impl RangeScan for RocksRangeScanCursor {
-    fn sequence_number(&self) -> u64 {
-        self.sequence_number
-    }
-
     async fn next_batch(&mut self, max_items: usize) -> Result<RangeScanBatch, String> {
         let Some(mut state) = self.state.take() else {
             return Ok(RangeScanBatch::default());
@@ -1414,11 +1408,13 @@ impl Query for RocksStore {
         end: Bytes,
         limit: usize,
         forward: bool,
-    ) -> Result<Self::RangeScan, String> {
+    ) -> Result<RangeScanResult<Self::RangeScan>, String> {
         let snapshot = OwnedRocksSnapshot::capture(self.db.clone(), &self.frontiers);
-        Ok(RocksRangeScanCursor::new(
-            snapshot, start, end, limit, forward,
-        ))
+        let sequence_number = snapshot.sequence_number;
+        Ok(RangeScanResult {
+            scan: RocksRangeScanCursor::new(snapshot, start, end, limit, forward),
+            sequence_number,
+        })
     }
 
     async fn get_many(
