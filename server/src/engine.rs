@@ -91,8 +91,30 @@ pub enum IngestError {
     Internal { message: String },
 }
 
+/// Identifies the decoding costs a backend must account for during admission.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PutCodec {
+    Proto,
+    Json,
+}
+
+/// Lets a backend reserve capacity before the server materializes entries.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PutPlan {
+    pub entries: usize,
+    /// Encoded payload length after transport decompression.
+    pub message_bytes: usize,
+    pub codec: PutCodec,
+}
+
 /// Ingest write capability.
 pub trait Ingest: Send + Sync + 'static {
+    /// Admit a counted request before the server allocates decoded entries.
+    /// Backends retain any reservation for as long as processing owns the request data.
+    fn prepare(&self, _plan: &PutPlan) -> Result<(), IngestError> {
+        Ok(())
+    }
+
     /// Persist key-value pairs atomically and return the global sequence number that includes this
     /// write. Backends may coalesce concurrent writes and return the same sequence number to each
     /// coalesced caller.

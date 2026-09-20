@@ -129,19 +129,21 @@ fn validate_value_field(
 
 // -- ingest --
 
-pub fn validate_put_request(
+/// Generated-path oracle for differential tests. Keep request handling on the fused parser.
+#[cfg(test)]
+pub(crate) fn validate_put_request(
     request: &exoware_proto::log::ingest::v1::PutRequestView<'_>,
     limits: IngestLimits,
 ) -> Result<(), ConnectError> {
-    if request.kvs.len() > limits.max_entries {
-        return Err(put_too_large_error(PutTooLarge {
-            entries: request.kvs.len(),
-            max_entries: limits.max_entries,
-        }));
+    validate_put_count(request.kvs.len(), limits)?;
+    for (index, kv) in request.kvs.iter().enumerate() {
+        validate_put_entry(index, kv.key, kv.value, limits)?;
     }
+    Ok(())
+}
 
-    // buf.validate: repeated.min_items = 1
-    if request.kvs.is_empty() {
+pub(crate) fn validate_put_count(count: usize, limits: IngestLimits) -> Result<(), ConnectError> {
+    if count == 0 {
         return Err(field_error(
             INGEST_ERROR_DOMAIN,
             "kvs",
@@ -151,17 +153,28 @@ pub fn validate_put_request(
             [],
         ));
     }
-    // buf.validate: Entry.key bytes.max_len = 254
-    for (index, kv) in request.kvs.iter().enumerate() {
-        validate_key_field(INGEST_ERROR_DOMAIN, || format!("kvs[{index}].key"), kv.key)?;
-        validate_value_field(
-            INGEST_ERROR_DOMAIN,
-            || format!("kvs[{index}].value"),
-            kv.value,
-            limits,
-        )?;
+    if count > limits.max_entries {
+        return Err(put_too_large_error(PutTooLarge {
+            entries: count,
+            max_entries: limits.max_entries,
+        }));
     }
     Ok(())
+}
+
+pub(crate) fn validate_put_entry(
+    index: usize,
+    key: &[u8],
+    value: &[u8],
+    limits: IngestLimits,
+) -> Result<(), ConnectError> {
+    validate_key_field(INGEST_ERROR_DOMAIN, || format!("kvs[{index}].key"), key)?;
+    validate_value_field(
+        INGEST_ERROR_DOMAIN,
+        || format!("kvs[{index}].value"),
+        value,
+        limits,
+    )
 }
 
 // -- query --
