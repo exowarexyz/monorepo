@@ -2,7 +2,6 @@ use buffa::encoding::{check_wire_type, skip_field_depth, Tag, WireType};
 use buffa::DecodeError;
 use bytes::Bytes;
 use connectrpc::ConnectError;
-use exoware_sdk::ingest::PutRequest;
 use serde::de::{IgnoredAny, SeqAccess, Visitor};
 use serde::Deserialize;
 
@@ -206,12 +205,10 @@ pub(crate) fn parse_put_entries(
 }
 
 pub(crate) fn count_put_entries_json(wire: &[u8]) -> Result<usize, ConnectError> {
+    // Error reporting must not materialize entries before admission either.
     serde_json::from_slice::<RequestShape>(wire)
         .map(|shape| shape.kvs.0)
-        .or_else(|_| {
-            // Preserve the generated decoder's diagnostics without taxing valid requests.
-            connectrpc::codec::decode_json::<PutRequest>(wire).map(|request| request.kvs.len())
-        })
+        .map_err(|error| ConnectError::invalid_argument(format!("failed to decode JSON: {error}")))
 }
 
 // Matching the generated struct derive preserves map and sequence JSON forms.
@@ -269,7 +266,7 @@ impl<'de> Visitor<'de> for CountVisitor {
 mod tests {
     use super::*;
     use buffa::MessageView as _;
-    use exoware_sdk::log::ingest::v1::PutRequestView;
+    use exoware_sdk::log::ingest::v1::{PutRequest, PutRequestView};
 
     fn bytes_field(number: u32, payload: &[u8]) -> Vec<u8> {
         let mut wire = Vec::new();
@@ -627,10 +624,10 @@ mod tests {
             let expected = connectrpc::codec::decode_json::<PutRequest>(wire).unwrap_err();
             let error = count_put_entries_json(wire).unwrap_err();
             assert_eq!(error.code, expected.code);
-            assert_eq!(
-                exoware_sdk::decode_connect_error(&error).unwrap(),
-                exoware_sdk::decode_connect_error(&expected).unwrap(),
-            );
+            assert!(error
+                .message
+                .unwrap()
+                .starts_with("failed to decode JSON: "));
         }
     }
 }
