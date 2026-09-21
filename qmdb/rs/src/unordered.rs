@@ -190,21 +190,27 @@ where
         max_locations: u32,
     ) -> Result<OperationRangeCheckpoint<H::Digest, F>, QmdbError> {
         let (proof, _) = self
-            .operation_range_checkpoint_with_read_floor(0, watermark, start_location, max_locations)
+            .operation_range_checkpoint_with_read_floor(
+                None,
+                watermark,
+                start_location,
+                max_locations,
+            )
             .await?;
         Ok(proof)
     }
 
     pub(crate) async fn operation_range_checkpoint_with_read_floor(
         &self,
-        read_floor_sequence: u64,
+        read_floor_sequence: Option<u64>,
         watermark: Location<F>,
         start_location: Location<F>,
         max_locations: u32,
     ) -> Result<(OperationRangeCheckpoint<H::Digest, F>, u64), QmdbError> {
-        let session = self
-            .client
-            .create_session_with_sequence(read_floor_sequence);
+        let session = match read_floor_sequence {
+            Some(sequence) => self.client.create_session_with_sequence(sequence),
+            None => self.client.create_session(),
+        };
         self.core()
             .require_published_watermark(&session, watermark)
             .await?;
@@ -240,13 +246,14 @@ where
 
     pub(crate) async fn batch_multi_proof_with_read_floor(
         &self,
-        read_floor_sequence: u64,
+        read_floor_sequence: Option<u64>,
         watermark: Location<F>,
         operations: Vec<(Location<F>, Vec<u8>)>,
     ) -> Result<RawBatchMultiProof<H::Digest, F>, QmdbError> {
-        let session = self
-            .client
-            .create_session_with_sequence(read_floor_sequence);
+        let session = match read_floor_sequence {
+            Some(sequence) => self.client.create_session_with_sequence(sequence),
+            None => self.client.create_session(),
+        };
         self.core()
             .require_published_watermark(&session, watermark)
             .await?;

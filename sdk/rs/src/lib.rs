@@ -52,7 +52,7 @@ use kv_codec::{KvExpr, KvFieldRef, KvReducedValue};
 use rustls_platform_verifier::ConfigVerifierExt;
 use std::collections::HashMap;
 use std::sync::{
-    atomic::{AtomicU64, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
     Arc,
 };
 use std::time::Duration;
@@ -440,12 +440,12 @@ impl PrefixedStoreClient {
 
     /// Create a monotonic read session with no initial floor over this namespace.
     pub fn create_session(&self) -> ReadSession {
-        self.create_session_with_sequence(0)
+        ReadSession::monotonic(self.clone(), None)
     }
 
     /// Create a monotonic read session whose read floor starts at `sequence`.
     pub fn create_session_with_sequence(&self, sequence: u64) -> ReadSession {
-        ReadSession::monotonic(self.clone(), sequence)
+        ReadSession::monotonic(self.clone(), Some(sequence))
     }
 
     // --- writes --------------------------------------------------------------
@@ -518,7 +518,7 @@ impl PrefixedStoreClient {
         keys: &[&Key],
         batch_size: u32,
         min_sequence_number: Option<u64>,
-        observed_sequence: Option<Arc<AtomicU64>>,
+        observed_sequence: Option<Arc<ObservedSequence>>,
     ) -> Result<GetManyStream, ClientError> {
         let mut proto_keys: Vec<Vec<u8>> = Vec::with_capacity(keys.len());
         for key in keys {
@@ -986,7 +986,7 @@ pub struct RangeStream {
     rows_seen: usize,
     final_count: Option<usize>,
     finished: bool,
-    observed_sequence: Option<Arc<AtomicU64>>,
+    observed_sequence: Option<Arc<ObservedSequence>>,
     key_prefix: Option<StoreKeyPrefix>,
     credential: Credential,
 }
@@ -997,7 +997,7 @@ impl RangeStream {
             ProtoErasedResponseBody,
             exoware_proto::query::RangeFrameView<'static>,
         >,
-        observed_sequence: Option<Arc<AtomicU64>>,
+        observed_sequence: Option<Arc<ObservedSequence>>,
         key_prefix: Option<StoreKeyPrefix>,
         credential: Credential,
     ) -> Self {
@@ -1027,7 +1027,7 @@ impl RangeStream {
                 if let (Some(sequence_store), Some(detail)) =
                     (&self.observed_sequence, frame.detail.as_option())
                 {
-                    sequence_store.fetch_max(detail.sequence_number, Ordering::SeqCst);
+                    sequence_store.observe(detail.sequence_number);
                 }
                 self.pending_frame = Some(frame);
                 Ok(())
@@ -1070,7 +1070,7 @@ impl RangeStream {
                 if let (Some(sequence_store), Some(detail)) =
                     (&self.observed_sequence, frame.detail.as_option())
                 {
-                    sequence_store.fetch_max(detail.sequence_number, Ordering::SeqCst);
+                    sequence_store.observe(detail.sequence_number);
                 }
                 frame
             };
@@ -1121,7 +1121,7 @@ pub struct GetManyStream {
     >,
     pending_frame: Option<exoware_proto::query::GetManyFrame>,
     finished: bool,
-    observed_sequence: Option<Arc<AtomicU64>>,
+    observed_sequence: Option<Arc<ObservedSequence>>,
     key_prefix: Option<StoreKeyPrefix>,
     credential: Credential,
 }
@@ -1132,7 +1132,7 @@ impl GetManyStream {
             ProtoErasedResponseBody,
             exoware_proto::query::GetManyFrameView<'static>,
         >,
-        observed_sequence: Option<Arc<AtomicU64>>,
+        observed_sequence: Option<Arc<ObservedSequence>>,
         key_prefix: Option<StoreKeyPrefix>,
         credential: Credential,
     ) -> Self {
@@ -1156,7 +1156,7 @@ impl GetManyStream {
                 if let (Some(sequence_store), Some(detail)) =
                     (&self.observed_sequence, frame.detail.as_option())
                 {
-                    sequence_store.fetch_max(detail.sequence_number, Ordering::SeqCst);
+                    sequence_store.observe(detail.sequence_number);
                 }
                 self.pending_frame = Some(frame);
                 Ok(())
@@ -1196,7 +1196,7 @@ impl GetManyStream {
                 if let (Some(sequence_store), Some(detail)) =
                     (&self.observed_sequence, frame.detail.as_option())
                 {
-                    sequence_store.fetch_max(detail.sequence_number, Ordering::SeqCst);
+                    sequence_store.observe(detail.sequence_number);
                 }
                 frame
             };
@@ -1701,7 +1701,7 @@ pub struct StoreClient {
 pub struct ReadSession {
     client: PrefixedStoreClient,
     policy: ReadPolicy,
-    configured_floor: u64,
+    configured_floor: Option<u64>,
     state: Arc<SessionState>,
 }
 
@@ -1713,21 +1713,40 @@ enum ReadPolicy {
 
 #[derive(Debug)]
 struct SessionState {
-    sequence: Arc<AtomicU64>,
+    sequence: Arc<ObservedSequence>,
     init_gate: tokio::sync::Mutex<()>,
 }
 
 impl SessionState {
     fn evaluated_sequence(&self) -> Option<u64> {
-        let sequence = self.sequence.load(Ordering::Acquire);
-        (sequence > 0).then_some(sequence)
+        self.sequence.get()
+    }
+}
+
+#[derive(Debug, Default)]
+struct ObservedSequence {
+    value: AtomicU64,
+    present: AtomicBool,
+}
+
+impl ObservedSequence {
+    fn get(&self) -> Option<u64> {
+        self.present
+            .load(Ordering::Acquire)
+            .then(|| self.value.load(Ordering::SeqCst))
+    }
+
+    fn observe(&self, sequence: u64) {
+        self.value.fetch_max(sequence, Ordering::SeqCst);
+        // Publish presence after the value so zero remains distinct from absence.
+        self.present.store(true, Ordering::Release);
     }
 }
 
 #[derive(Default)]
 struct QueryStreamReadOptions {
     min_sequence_number: Option<u64>,
-    observed_sequence: Option<Arc<AtomicU64>>,
+    observed_sequence: Option<Arc<ObservedSequence>>,
 }
 
 impl StoreClient {
@@ -1863,9 +1882,7 @@ impl StoreClient {
         key: &Key,
         min_sequence_number: Option<u64>,
     ) -> Result<Option<Bytes>, ClientError> {
-        let (response, _detail) = self
-            .send_get(key, self.normalize_min_sequence_number(min_sequence_number))
-            .await?;
+        let (response, _detail) = self.send_get(key, min_sequence_number).await?;
         Ok(response.value)
     }
 
@@ -1877,11 +1894,10 @@ impl StoreClient {
         proto_keys: Vec<Vec<u8>>,
         batch_size: u32,
         min_sequence_number: Option<u64>,
-        observed_sequence: Option<Arc<AtomicU64>>,
+        observed_sequence: Option<Arc<ObservedSequence>>,
     ) -> Result<GetManyStream, ClientError> {
         let config = self.streaming_client_config(self.query_uri.clone());
         let client = QueryServiceClient::new(self.connect_http.clone(), config);
-        let effective_min = self.normalize_min_sequence_number(min_sequence_number);
         let max_attempts = self.retry_config.max_attempts.max(1);
         let mut attempt = 1usize;
         loop {
@@ -1890,7 +1906,7 @@ impl StoreClient {
                     let response = client
                         .get_many(ProtoGetManyRequest {
                             keys: proto_keys.clone(),
-                            min_sequence_number: effective_min,
+                            min_sequence_number,
                             batch_size,
                             ..Default::default()
                         })
@@ -2066,10 +2082,6 @@ impl StoreClient {
         Ok(resp.status().is_success())
     }
 
-    fn normalize_min_sequence_number(&self, requested_sequence: Option<u64>) -> Option<u64> {
-        requested_sequence.filter(|sequence| *sequence > 0)
-    }
-
     async fn send_get(
         &self,
         key: &Key,
@@ -2145,7 +2157,7 @@ impl StoreClient {
 
         let config = self.streaming_client_config(self.query_uri.clone());
         let client = QueryServiceClient::new(self.connect_http.clone(), config);
-        let min_sequence_number = self.normalize_min_sequence_number(options.min_sequence_number);
+        let min_sequence_number = options.min_sequence_number;
         let max_attempts = self.retry_config.max_attempts.max(1);
         let mut attempt = 1usize;
         loop {
@@ -2209,7 +2221,7 @@ impl StoreClient {
         let config = self.streaming_client_config(self.query_uri.clone());
         let client = QueryServiceClient::new(self.connect_http.clone(), config);
         let proto_params = proto_to_proto_reduce_params(request.clone());
-        let min_sequence_number = self.normalize_min_sequence_number(options.min_sequence_number);
+        let min_sequence_number = options.min_sequence_number;
         let (stream, first) = self
             .send_with_retry(|| {
                 self.with_streaming_timeout(async {
@@ -2239,7 +2251,7 @@ impl StoreClient {
         if let (Some(sequence), Some(detail)) =
             (&observed_sequence, first.view().detail.as_option())
         {
-            sequence.fetch_max(detail.sequence_number, Ordering::SeqCst);
+            sequence.observe(detail.sequence_number);
         }
         let credential = self.credential;
         Ok(
@@ -2258,7 +2270,7 @@ impl StoreClient {
                                 if let (Some(sequence), Some(detail)) =
                                     (&observed_sequence, frame.view().detail.as_option())
                                 {
-                                    sequence.fetch_max(detail.sequence_number, Ordering::SeqCst);
+                                    sequence.observe(detail.sequence_number);
                                 }
                                 frame
                             }
@@ -2682,22 +2694,24 @@ impl<'a> Retention<'a> {
 
 impl ReadSession {
     /// Create a session whose floor advances to the highest observed read sequence.
-    pub fn monotonic(client: PrefixedStoreClient, initial_floor: u64) -> Self {
+    /// `None` starts without a floor; `Some(0)` requires sequence zero.
+    pub fn monotonic(client: PrefixedStoreClient, initial_floor: Option<u64>) -> Self {
         Self::new(client, initial_floor, ReadPolicy::Monotonic)
     }
 
     /// Create a session whose read floor stays fixed as responses are observed.
-    pub fn fixed(client: PrefixedStoreClient, floor: u64) -> Self {
+    /// `None` sends no floor; `Some(0)` requires sequence zero.
+    pub fn fixed(client: PrefixedStoreClient, floor: Option<u64>) -> Self {
         Self::new(client, floor, ReadPolicy::Fixed)
     }
 
-    fn new(client: PrefixedStoreClient, configured_floor: u64, policy: ReadPolicy) -> Self {
+    fn new(client: PrefixedStoreClient, configured_floor: Option<u64>, policy: ReadPolicy) -> Self {
         Self {
             client,
             policy,
             configured_floor,
             state: Arc::new(SessionState {
-                sequence: Arc::new(AtomicU64::new(0)),
+                sequence: Arc::new(ObservedSequence::default()),
                 init_gate: tokio::sync::Mutex::new(()),
             }),
         }
@@ -2705,15 +2719,12 @@ impl ReadSession {
 
     /// Minimum Store sequence requested by subsequent reads.
     ///
-    /// Returns `None` when no positive sequence is required.
+    /// Returns `None` when no sequence is required.
     pub fn min_sequence_number(&self) -> Option<u64> {
-        let floor = match self.policy {
+        match self.policy {
             ReadPolicy::Fixed => self.configured_floor,
-            ReadPolicy::Monotonic => self
-                .configured_floor
-                .max(self.state.sequence.load(Ordering::Acquire)),
-        };
-        (floor > 0).then_some(floor)
+            ReadPolicy::Monotonic => self.configured_floor.max(self.state.evaluated_sequence()),
+        }
     }
 
     /// Derive a reader with at least the requested minimum sequence.
@@ -2723,15 +2734,15 @@ impl ReadSession {
     /// supplied requirement is not itself an observation.
     pub fn with_min_sequence_number(&self, sequence: u64) -> Self {
         let mut session = self.clone();
-        if sequence > self.min_sequence_number().unwrap_or_default() {
-            session.configured_floor = sequence;
+        if Some(sequence) > self.min_sequence_number() {
+            session.configured_floor = Some(sequence);
         }
         session
     }
 
-    /// Highest positive Store sequence reported by a read in this session.
+    /// Highest Store sequence reported by a read in this session.
     ///
-    /// Returns `None` until a positive sequence is observed, including after reads that report zero.
+    /// Returns `None` until a response reports a sequence.
     pub fn evaluated_sequence(&self) -> Option<u64> {
         self.state.evaluated_sequence()
     }
@@ -2748,7 +2759,7 @@ impl ReadSession {
         self.run_read(|sequence, observed_sequence| async move {
             let (response, detail) = self.client.send_get(key, sequence).await?;
             if let Some(detail) = detail {
-                observed_sequence.fetch_max(detail.sequence_number, Ordering::SeqCst);
+                observed_sequence.observe(detail.sequence_number);
             }
             Ok(response.value)
         })
@@ -2874,7 +2885,7 @@ impl ReadSession {
 
     async fn run_read<T, Call, Fut>(&self, call: Call) -> Result<T, ClientError>
     where
-        Call: FnOnce(Option<u64>, Arc<AtomicU64>) -> Fut,
+        Call: FnOnce(Option<u64>, Arc<ObservedSequence>) -> Fut,
         Fut: std::future::Future<Output = Result<T, ClientError>>,
     {
         if let ReadPolicy::Fixed = self.policy {
@@ -3321,6 +3332,18 @@ mod tests {
     #[derive(Clone, Debug, Default)]
     struct SessionSequenceTransport {
         requested_floors: Arc<std::sync::Mutex<Vec<Option<u64>>>>,
+        response_sequences: Arc<std::sync::Mutex<std::collections::VecDeque<Option<u64>>>>,
+    }
+
+    impl SessionSequenceTransport {
+        fn with_response_sequences(sequences: impl IntoIterator<Item = Option<u64>>) -> Self {
+            Self {
+                response_sequences: Arc::new(std::sync::Mutex::new(
+                    sequences.into_iter().collect(),
+                )),
+                ..Self::default()
+            }
+        }
     }
 
     impl connectrpc::client::ClientTransport for SessionSequenceTransport {
@@ -3336,6 +3359,7 @@ mod tests {
             Result<http::Response<Self::ResponseBody>, Self::Error>,
         > {
             let requested_floors = self.requested_floors.clone();
+            let response_sequences = self.response_sequences.clone();
             Box::pin(async move {
                 let (parts, body) = request.into_parts();
                 let body = http_body_util::BodyExt::collect(body)
@@ -3374,33 +3398,38 @@ mod tests {
                         )));
                     }
                 };
-                let sequence_number = {
+                let request_number = {
                     let mut floors = requested_floors.lock().unwrap();
                     floors.push(requested_floor);
-                    40 + u64::try_from(floors.len()).unwrap()
+                    u64::try_from(floors.len()).unwrap()
                 };
-                let detail = proto_query::Detail {
+                let response_sequence = response_sequences
+                    .lock()
+                    .unwrap()
+                    .pop_front()
+                    .unwrap_or(Some(40 + request_number));
+                let detail = response_sequence.map(|sequence_number| proto_query::Detail {
                     sequence_number,
                     ..Default::default()
-                };
+                });
                 let payload = match path {
                     "/store.query.v1.Service/Get" => proto_query::GetResponse {
-                        detail: detail.into(),
+                        detail: detail.clone().into(),
                         ..Default::default()
                     }
                     .encode_to_bytes(),
                     "/store.query.v1.Service/GetMany" => proto_query::GetManyFrame {
-                        detail: detail.into(),
+                        detail: detail.clone().into(),
                         ..Default::default()
                     }
                     .encode_to_bytes(),
                     "/store.query.v1.Service/Range" => proto_query::RangeFrame {
-                        detail: detail.into(),
+                        detail: detail.clone().into(),
                         ..Default::default()
                     }
                     .encode_to_bytes(),
                     "/store.query.v1.Service/Reduce" => {
-                        count_frame(Some(sequence_number)).encode_to_bytes()
+                        count_frame(response_sequence).encode_to_bytes()
                     }
                     _ => unreachable!(),
                 };
@@ -3638,8 +3667,173 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ordinary_read_methods_preserve_explicit_zero_floors() {
+        let transport = SessionSequenceTransport::default();
+        let client = StoreClient::builder()
+            .url("http://query.internal")
+            .retry_config(RetryConfig::disabled())
+            .client_transport(transport.clone())
+            .build()
+            .unwrap()
+            .prefixed(StoreKeyPrefix::identity());
+        let key = Key::from(b"key".to_vec());
+        let start = Key::from(b"a".to_vec());
+        let end = Key::from(b"z".to_vec());
+        let reduction = count_request();
+
+        client.query().get(&key).await.unwrap();
+        client
+            .query()
+            .get_with_min_sequence_number(&key, 0)
+            .await
+            .unwrap();
+        client.query().get_many(&[&key], 1).await.unwrap();
+        client
+            .query()
+            .get_many_with_min_sequence_number(&[&key], 1, 0)
+            .await
+            .unwrap();
+        client.query().range(&start, &end, 1).await.unwrap();
+        client
+            .query()
+            .range_with_min_sequence_number(&start, &end, 1, 0)
+            .await
+            .unwrap();
+        client
+            .query()
+            .range_stream(&start, &end, 1, 1)
+            .await
+            .unwrap();
+        client
+            .query()
+            .range_stream_with_min_sequence_number(&start, &end, 1, 1, 0)
+            .await
+            .unwrap();
+        client
+            .query()
+            .range_reduce(&start, &end, &reduction)
+            .await
+            .unwrap();
+        client
+            .query()
+            .range_reduce_with_min_sequence_number(&start, &end, &reduction, 0)
+            .await
+            .unwrap();
+        let _stream = client
+            .query()
+            .range_reduce_stream(&start, &end, &reduction)
+            .await
+            .unwrap();
+        let _stream = client
+            .query()
+            .range_reduce_stream_with_min_sequence_number(&start, &end, &reduction, 0)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            *transport.requested_floors.lock().unwrap(),
+            vec![
+                None,
+                Some(0),
+                None,
+                Some(0),
+                None,
+                Some(0),
+                None,
+                Some(0),
+                None,
+                Some(0),
+                None,
+                Some(0)
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn sessions_distinguish_missing_details_from_present_zero() {
+        let transport = SessionSequenceTransport::with_response_sequences([
+            None,
+            Some(0),
+            None,
+            Some(0),
+            None,
+            Some(0),
+            None,
+            Some(0),
+        ]);
+        let client = StoreClient::builder()
+            .url("http://query.internal")
+            .retry_config(RetryConfig::disabled())
+            .client_transport(transport)
+            .build()
+            .unwrap()
+            .prefixed(StoreKeyPrefix::identity());
+        let key = Key::from(b"key".to_vec());
+        let start = Key::from(b"a".to_vec());
+        let end = Key::from(b"z".to_vec());
+        let reduction = count_request();
+
+        let point = client.create_session();
+        point.get(&key).await.unwrap();
+        assert_eq!(point.evaluated_sequence(), None);
+        point.get(&key).await.unwrap();
+        assert_eq!(point.evaluated_sequence(), Some(0));
+
+        let get_many = client.create_session();
+        get_many.get_many(&[&key], 1).await.unwrap();
+        assert_eq!(get_many.evaluated_sequence(), None);
+        get_many.get_many(&[&key], 1).await.unwrap();
+        assert_eq!(get_many.evaluated_sequence(), Some(0));
+
+        let range = client.create_session();
+        range.range(&start, &end, 1).await.unwrap();
+        assert_eq!(range.evaluated_sequence(), None);
+        range.range(&start, &end, 1).await.unwrap();
+        assert_eq!(range.evaluated_sequence(), Some(0));
+
+        let reduce = client.create_session();
+        reduce.range_reduce(&start, &end, &reduction).await.unwrap();
+        assert_eq!(reduce.evaluated_sequence(), None);
+        reduce.range_reduce(&start, &end, &reduction).await.unwrap();
+        assert_eq!(reduce.evaluated_sequence(), Some(0));
+    }
+
+    #[tokio::test]
+    async fn zero_observation_initializes_clones_without_reinitializing() {
+        let transport = SessionSequenceTransport::with_response_sequences([Some(0), Some(5)]);
+        let client = StoreClient::builder()
+            .url("http://query.internal")
+            .retry_config(RetryConfig::disabled())
+            .client_transport(transport.clone())
+            .build()
+            .unwrap()
+            .prefixed(StoreKeyPrefix::identity());
+        let session = client.create_session();
+        let clone = session.clone();
+        let key = Key::from(b"key".to_vec());
+
+        clone.get(&key).await.unwrap();
+        assert_eq!(session.evaluated_sequence(), Some(0));
+        assert_eq!(session.min_sequence_number(), Some(0));
+        session.get(&key).await.unwrap();
+
+        assert_eq!(clone.evaluated_sequence(), Some(5));
+        assert_eq!(
+            *transport.requested_floors.lock().unwrap(),
+            vec![None, Some(0)]
+        );
+    }
+
+    #[tokio::test]
     async fn session_policies_apply_to_all_read_methods() {
-        for (monotonic, initial_sequence) in [(true, 0), (true, 27), (false, 0), (false, 27)] {
+        for (monotonic, initial_floor) in [
+            (true, None),
+            (true, Some(0)),
+            (true, Some(27)),
+            (false, None),
+            (false, Some(0)),
+            (false, Some(27)),
+        ] {
             let transport = SessionSequenceTransport::default();
             let client = StoreClient::builder()
                 .url("http://query.internal")
@@ -3649,9 +3843,9 @@ mod tests {
                 .unwrap()
                 .prefixed(StoreKeyPrefix::new("session/").unwrap());
             let session = if monotonic {
-                ReadSession::monotonic(client, initial_sequence)
+                ReadSession::monotonic(client, initial_floor)
             } else {
-                ReadSession::fixed(client, initial_sequence)
+                ReadSession::fixed(client, initial_floor)
             };
             let shared_session = session.clone();
             let key = Key::from(b"key".to_vec());
@@ -3678,7 +3872,6 @@ mod tests {
                 .await
                 .unwrap();
 
-            let initial_floor = (initial_sequence > 0).then_some(initial_sequence);
             assert_eq!(
                 session.min_sequence_number(),
                 if monotonic { Some(46) } else { initial_floor }
@@ -3711,7 +3904,7 @@ mod tests {
             .build()
             .unwrap()
             .prefixed(StoreKeyPrefix::new("parent/").unwrap());
-        let session = ReadSession::fixed(client.clone(), 27);
+        let session = ReadSession::fixed(client.clone(), Some(27));
         let key = Bytes::from_static(b"key");
         session.get(&key).await.unwrap();
 
@@ -3749,7 +3942,7 @@ mod tests {
             .build()
             .unwrap()
             .prefixed(StoreKeyPrefix::identity());
-        let session = ReadSession::monotonic(client.clone(), 27);
+        let session = ReadSession::monotonic(client.clone(), Some(27));
         let derived = session.with_min_sequence_number(40);
         assert_eq!(derived.min_sequence_number(), Some(40));
         assert_eq!(session.min_sequence_number(), Some(27));
@@ -3786,9 +3979,9 @@ mod tests {
             ]);
             let client = reduce_test_client(transport.clone());
             let session = if monotonic {
-                ReadSession::monotonic(client, 27)
+                ReadSession::monotonic(client, Some(27))
             } else {
-                ReadSession::fixed(client, 27)
+                ReadSession::fixed(client, Some(27))
             };
             let clone = session.clone();
             let start = Bytes::from_static(b"a");
@@ -4005,6 +4198,48 @@ mod tests {
     }
 
     #[test]
+    fn deriving_zero_strengthens_absence_without_lowering_or_mutating_the_parent() {
+        let client = PrefixedStoreClient::empty(StoreClient::new("http://localhost:10000/"));
+        for parent in [
+            ReadSession::monotonic(client.clone(), None),
+            ReadSession::fixed(client.clone(), None),
+        ] {
+            let zero = parent.with_min_sequence_number(0);
+            let stronger = zero.with_min_sequence_number(7);
+
+            assert_eq!(parent.min_sequence_number(), None);
+            assert_eq!(zero.min_sequence_number(), Some(0));
+            assert_eq!(stronger.min_sequence_number(), Some(7));
+            assert_eq!(
+                stronger.with_min_sequence_number(0).min_sequence_number(),
+                Some(7)
+            );
+        }
+    }
+
+    #[test]
+    fn concurrent_observations_preserve_presence_and_maximum() {
+        let observed = Arc::new(ObservedSequence::default());
+        let sequences = [0, 1, 5, 3, u64::MAX, 89, 55, 2];
+        let barrier = Arc::new(std::sync::Barrier::new(sequences.len() + 1));
+        let threads = sequences.map(|sequence| {
+            let observed = observed.clone();
+            let barrier = barrier.clone();
+            std::thread::spawn(move || {
+                barrier.wait();
+                observed.observe(sequence);
+            })
+        });
+
+        assert_eq!(observed.get(), None);
+        barrier.wait();
+        for thread in threads {
+            thread.join().unwrap();
+        }
+        assert_eq!(observed.get(), Some(u64::MAX));
+    }
+
+    #[test]
     fn range_mode_maps_to_proto_traversal() {
         assert_eq!(
             RangeMode::Forward.to_proto(),
@@ -4061,11 +4296,13 @@ mod tests {
     }
 
     #[test]
-    fn create_session_with_sequence_pins_explicit_floor() {
+    fn create_session_with_sequence_preserves_the_full_u64_floor_domain() {
         let client = PrefixedStoreClient::empty(StoreClient::new("http://localhost:10000/"));
-        let session = client.create_session_with_sequence(27);
-        assert_eq!(session.min_sequence_number(), Some(27));
-        assert_eq!(session.evaluated_sequence(), None);
+        for sequence in [0, 27, u64::MAX] {
+            let session = client.create_session_with_sequence(sequence);
+            assert_eq!(session.min_sequence_number(), Some(sequence));
+            assert_eq!(session.evaluated_sequence(), None);
+        }
     }
 
     #[test]
