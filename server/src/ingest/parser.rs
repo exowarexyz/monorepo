@@ -4,7 +4,7 @@ use connectrpc::ConnectError;
 
 /// Distinguishes input that can be resumed from invalid Put data.
 #[derive(Debug, thiserror::Error)]
-pub(super) enum PutParseError {
+pub enum PutParseError {
     /// More input may complete the current top-level field.
     #[error("failed to decode proto request: unexpected end of buffer")]
     Incomplete,
@@ -31,7 +31,7 @@ impl From<PutParseError> for ConnectError {
 }
 
 /// Share one budget across top-level fields and decoded entries in a Put request.
-pub(super) struct UnknownBudget {
+pub struct UnknownBudget {
     remaining: usize,
 }
 
@@ -90,7 +90,7 @@ fn skip_unknown(
 
 /// A complete top-level Put field returned without copying its payload.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum Field<'a> {
+pub enum Field<'a> {
     /// Entry payload without its enclosing tag and length.
     Entry(&'a [u8]),
     /// An unknown field that has been skipped and charged to the shared budget.
@@ -101,7 +101,7 @@ pub(super) enum Field<'a> {
 /// After consuming complete fields at body EOF, reject a non-empty [`Self::remaining`] or
 /// final [`PutParseError::Incomplete`] with `ConnectError::from(PutParseError::Incomplete)`
 /// to preserve the legacy unexpected end of buffer error.
-pub(super) struct PutEntryCursor<'a> {
+pub struct PutEntryCursor<'a> {
     remaining: &'a [u8],
     original_len: usize,
 }
@@ -163,7 +163,7 @@ impl<'a> PutEntryCursor<'a> {
 
 /// Decode a complete entry while charging unknown fields to its request's shared budget.
 /// Fields that overrun the declared entry boundary are malformed, not incomplete.
-pub(super) fn decode_entry_with_budget<'a>(
+pub fn decode_entry_with_budget<'a>(
     mut remaining: &'a [u8],
     budget: &mut UnknownBudget,
 ) -> Result<(&'a [u8], &'a [u8]), PutParseError> {
