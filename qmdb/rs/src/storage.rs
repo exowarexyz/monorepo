@@ -9,12 +9,12 @@ use commonware_storage::merkle::{
     Position,
 };
 use commonware_storage::qmdb::current::grafting;
-use exoware_sdk::{RangeMode, SerializableReadSession};
+use exoware_sdk::{RangeMode, ReadSession};
 
 use crate::codec::{chunk_index_for_location, encode_grafted_node_key, encode_node_key};
 
 pub(crate) struct KvMerkleStorage<'a, F: Family, D: Digest> {
-    pub(crate) session: &'a SerializableReadSession,
+    pub(crate) session: &'a ReadSession,
     pub(crate) size: Position<F>,
     pub(crate) _marker: PhantomData<D>,
 }
@@ -96,7 +96,7 @@ impl<F: Family, D: Digest> KvMerkleStorage<'_, F, D> {
 }
 
 pub(crate) struct KvCurrentStorage<'a, F: Graftable, H: Hasher, const N: usize> {
-    pub(crate) session: &'a SerializableReadSession,
+    pub(crate) session: &'a ReadSession,
     pub(crate) watermark: Location<F>,
     pub(crate) pruned_chunks: u64,
     pub(crate) size: Position<F>,
@@ -744,7 +744,7 @@ mod tests {
                 .unwrap()
         }
 
-        async fn session(&self) -> (SerializableReadSession, tokio::task::JoinHandle<()>) {
+        async fn session(&self) -> (ReadSession, tokio::task::JoinHandle<()>) {
             let (client, task) = serve(self.clone()).await;
             (
                 client
@@ -756,7 +756,7 @@ mod tests {
         }
     }
 
-    fn storage<F: Family>(session: &SerializableReadSession) -> KvMerkleStorage<'_, F, Digest> {
+    fn storage<F: Family>(session: &ReadSession) -> KvMerkleStorage<'_, F, Digest> {
         KvMerkleStorage {
             session,
             size: Position::new(100),

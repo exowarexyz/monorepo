@@ -45,7 +45,7 @@ use exoware_sdk::kv_codec::{
     KvExpr, KvFieldKind, KvFieldRef, KvPredicate, KvPredicateCheck, KvPredicateConstraint,
     KvReducedValue,
 };
-use exoware_sdk::{PrefixedStoreClient, SerializableReadSession};
+use exoware_sdk::{PrefixedStoreClient, ReadSession};
 use futures::{stream::BoxStream, StreamExt, TryStreamExt};
 
 use crate::diagnostics::*;
@@ -651,7 +651,7 @@ pub(crate) fn cast_scalar_value(
 }
 
 fn execute_reduce_job(
-    session: SerializableReadSession,
+    session: ReadSession,
     job: Arc<CombinedAggregateJob>,
     source: Arc<KvAggregateExec>,
     concurrency: usize,
@@ -700,7 +700,7 @@ fn execute_reduce_job(
 }
 
 async fn execute_reduce_range(
-    session: SerializableReadSession,
+    session: ReadSession,
     job: Arc<CombinedAggregateJob>,
     source: Arc<KvAggregateExec>,
     range: KeyRange,

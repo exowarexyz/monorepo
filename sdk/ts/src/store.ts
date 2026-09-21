@@ -648,7 +648,7 @@ async function* performSubscribe(
     }
 }
 
-export class SerializableReadSession {
+export class ReadSession {
     private sequence: bigint;
     private initGate = Promise.resolve();
     private gateLocked = false;
@@ -832,12 +832,12 @@ export class StoreClient {
         return decodeStoreKey(this.keyPrefix, key);
     }
 
-    createSession(): SerializableReadSession {
-        return new SerializableReadSession(this.client, this.keyPrefix);
+    createSession(): ReadSession {
+        return new ReadSession(this.client, this.keyPrefix);
     }
 
-    createSessionWithSequence(sequence: bigint): SerializableReadSession {
-        return new SerializableReadSession(this.client, this.keyPrefix, sequence);
+    createSessionWithSequence(sequence: bigint): ReadSession {
+        return new ReadSession(this.client, this.keyPrefix, sequence);
     }
 
     async set(key: Uint8Array, value: Uint8Array | Buffer): Promise<bigint> {

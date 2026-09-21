@@ -5,7 +5,7 @@ use datafusion::arrow::datatypes::{i256, DataType, Field, Schema, SchemaRef, Tim
 use datafusion::prelude::SessionConfig;
 use exoware_sdk::keys::{Key, Prefix};
 use exoware_sdk::PrefixedStoreClient;
-use exoware_sdk::SerializableReadSession;
+use exoware_sdk::ReadSession;
 
 use crate::codec::{primary_key_prefix, secondary_index_prefix};
 
@@ -13,9 +13,9 @@ use crate::codec::{primary_key_prefix, secondary_index_prefix};
 pub(crate) fn request_read_session(
     config: &SessionConfig,
     client: &PrefixedStoreClient,
-) -> Option<SerializableReadSession> {
+) -> Option<ReadSession> {
     config
-        .get_extension::<SerializableReadSession>()
+        .get_extension::<ReadSession>()
         .map(|request| request.with_client(client.clone()))
 }
 

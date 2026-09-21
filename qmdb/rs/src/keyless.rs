@@ -9,7 +9,7 @@ use commonware_storage::{
         keyless,
     },
 };
-use exoware_sdk::{PrefixedStoreClient, SerializableReadSession};
+use exoware_sdk::{PrefixedStoreClient, ReadSession};
 
 use crate::auth::{
     auth_inactive_peaks, compute_auth_root, load_auth_operation_at,
@@ -223,7 +223,7 @@ where
 
     async fn inactive_peaks_at(
         &self,
-        session: &SerializableReadSession,
+        session: &ReadSession,
         watermark: Location<F>,
     ) -> Result<usize, QmdbError> {
         let operation =

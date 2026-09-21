@@ -2,7 +2,7 @@ export { Client, createTransport, type ClientOptions, type RetryConfig } from '.
 export { API_KEY_ENV, InvalidApiKeyError, type Credential } from './credential.js';
 export { CookieJar, fetchWithCookieJar } from './cookies.js';
 export {
-    SerializableReadSession,
+    ReadSession,
     StoreClient,
     StoreKeyPrefix,
     StoreWriteBatch,
