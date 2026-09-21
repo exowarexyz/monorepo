@@ -437,7 +437,7 @@ describe('Exoware TS SDK', () => {
             expect(sumValue!.value.value).toBe(60n);
         });
 
-        it('should seed a serializable session from the first successful read', async () => {
+        it('should advance a monotonic session after each successful read', async () => {
             const store = client.store();
             const encoder = new TextEncoder();
             const firstKey = encoder.encode('serializable-session-1');
@@ -445,12 +445,12 @@ describe('Exoware TS SDK', () => {
 
             const sn1 = await store.set(firstKey, Buffer.from('v1'));
             const session = store.createSession();
-            expect(session.fixedSequence()).toBeUndefined();
+            expect(session.minSequenceNumber()).toBeUndefined();
 
             const first = await session.get(firstKey);
             expect(first).not.toBeNull();
             expect(Buffer.from(first!.value)).toEqual(Buffer.from('v1'));
-            expect(session.fixedSequence()).toBe(sn1);
+            expect(session.minSequenceNumber()).toBe(sn1);
 
             const sn2 = await store.set(secondKey, Buffer.from('v2'));
             expect(sn2).toBeGreaterThan(sn1);
@@ -458,21 +458,21 @@ describe('Exoware TS SDK', () => {
             const second = await session.get(secondKey);
             expect(second).not.toBeNull();
             expect(Buffer.from(second!.value)).toEqual(Buffer.from('v2'));
-            expect(session.fixedSequence()).toBe(sn1);
+            expect(session.minSequenceNumber()).toBe(sn2);
         });
 
-        it('should honor an explicit serializable session floor', async () => {
+        it('should honor an explicit monotonic session floor', async () => {
             const store = client.store();
             const session = store.createSessionWithSequence(10_000_000n);
 
-            expect(session.fixedSequence()).toBe(10_000_000n);
+            expect(session.minSequenceNumber()).toBe(10_000_000n);
             await expect(
                 session.get(new TextEncoder().encode('serializable-floor-test')),
             ).rejects.toMatchObject({
                 name: 'HttpError',
                 status: 409,
             });
-            expect(session.fixedSequence()).toBe(10_000_000n);
+            expect(session.minSequenceNumber()).toBe(10_000_000n);
         });
 
         describe('retry config', () => {

@@ -35,6 +35,27 @@ batch.push(&accounts, &account_key, account_value)?;
 let sequence = batch.commit(&base).await?;
 ```
 
+## Read Sessions
+
+`ReadSession::monotonic(client, floor)` advances its minimum sequence as reads
+observe newer responses. `ReadSession::fixed(client, floor)` keeps that minimum
+unchanged. Query responses will still be at the server's current sequence; neither session mode pins a historical snapshot.
+
+```rust
+use exoware_sdk::ReadSession;
+
+let session = ReadSession::monotonic(orders.clone(), 0);
+let reader = ReadSession::fixed(orders.clone(), publication_sequence);
+```
+
+`min_sequence_number()` reports the effective read floor, and `evaluated_sequence()`
+reports the highest observed sequence. Clones share observations.
+`with_min_sequence_number(sequence)` derives a reader with a stronger floor when
+needed, for either policy. It leaves the parent's configured floor unchanged and
+does not count the requirement as an observation.
+
+`create_session()` and `create_session_with_sequence(...)` create monotonic sessions.
+
 ## Examples
 
 `remote` writes a batch to a deployed endpoint and reads it back, pinning each read to the sequence it just committed:

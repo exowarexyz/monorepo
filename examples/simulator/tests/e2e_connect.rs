@@ -639,13 +639,13 @@ async fn reduce_grouped_count() {
         filter: None,
     };
     let session = client.create_session();
-    assert_eq!(session.fixed_sequence(), None);
+    assert_eq!(session.min_sequence_number(), None);
 
     let mut stream = session
         .range_reduce_stream(&ka1, &kb1, &request)
         .await
         .expect("reduce");
-    assert_eq!(session.fixed_sequence(), Some(sequence));
+    assert_eq!(session.min_sequence_number(), Some(sequence));
 
     let mut groups = 0;
     while let Some(frame) = stream.next().await {
@@ -656,7 +656,7 @@ async fn reduce_grouped_count() {
             .as_option()
             .expect("query detail on every frame");
         assert_eq!(detail.sequence_number, sequence);
-        assert_eq!(session.fixed_sequence(), Some(sequence));
+        assert_eq!(session.min_sequence_number(), Some(sequence));
         groups += frame.groups.len();
     }
     assert_eq!(groups, 2);

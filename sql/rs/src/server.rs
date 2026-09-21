@@ -1148,8 +1148,8 @@ mod tests {
         let second =
             crate::types::request_read_session(query_ctx.state().config(), &store).unwrap();
 
-        assert_eq!(first.fixed_sequence(), Some(41));
-        assert_eq!(second.fixed_sequence(), Some(41));
+        assert_eq!(first.min_sequence_number(), Some(41));
+        assert_eq!(second.min_sequence_number(), Some(41));
         assert!(crate::types::request_read_session(ctx.state().config(), &store).is_none());
     }
 

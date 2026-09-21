@@ -657,7 +657,7 @@ fn execute_reduce_job(
     concurrency: usize,
 ) -> impl futures::Stream<Item = DataFusionResult<RecordBatch>> {
     let mut ranges = job.job.ranges.clone().into_iter();
-    let first_range = if session.fixed_sequence().is_none() {
+    let first_range = if session.min_sequence_number().is_none() {
         ranges.next()
     } else {
         None
@@ -680,7 +680,7 @@ fn execute_reduce_job(
     // before opening concurrent reads, and keep a zero-floor session sequential.
     let remaining_count = ranges.len();
     let remaining = futures::stream::once(async move {
-        let concurrency = if session.fixed_sequence().is_some() {
+        let concurrency = if session.min_sequence_number().is_some() {
             concurrency
         } else {
             1

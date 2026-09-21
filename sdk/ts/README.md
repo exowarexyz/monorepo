@@ -36,6 +36,27 @@ const batch = new StoreWriteBatch()
 const sequence = await batch.commit(base);
 ```
 
+## Read Sessions
+
+`ReadSession.monotonic(store, floor)` advances its minimum sequence as reads
+observe newer responses. `ReadSession.fixed(store, floor)` keeps that minimum
+unchanged. Both track the highest observed sequence; neither pins an exact snapshot.
+
+```ts
+import { ReadSession } from '@exowarexyz/sdk';
+
+const session = ReadSession.monotonic(orders, 0n);
+const reader = ReadSession.fixed(orders, publicationSequence);
+```
+
+`minSequenceNumber()` reports the effective read floor, and `evaluatedSequence()`
+reports the highest observed sequence. `clone()` shares observations.
+`withMinSequenceNumber(sequence)` derives a reader with a stronger floor when
+needed, for either policy. It leaves the parent's configured floor unchanged and
+does not count the requirement as an observation.
+
+`createSession()` and `createSessionWithSequence(...)` create monotonic sessions.
+
 ## Generated TypeScript (`gen/ts`)
 
 Protobuf-ES output lives under **`src/gen/ts/`** (mirrors the repo [`proto/`](../../proto/) tree, e.g. `proto/store/v1/query.proto` → `src/gen/ts/store/v1/query_pb.ts`). To regenerate after proto changes, run `../../gen.sh` from the repo root.
