@@ -167,7 +167,7 @@ describe.each([true, false])('Reduce responses with binary format %s', (useBinar
             }
             expect(fetch).toHaveBeenCalledTimes(1);
             expect(signal?.aborted).toBe(true);
-            if (kind === 'session') expect(session.fixedSequence()).toBeUndefined();
+            if (kind === 'session') expect(session.minSequenceNumber()).toBeUndefined();
         } finally {
             fetch.mockRestore();
         }
@@ -184,7 +184,7 @@ describe.each([true, false])('Reduce responses with binary format %s', (useBinar
             });
             const stream = session.reduce(start, end, params)[Symbol.asyncIterator]();
             expect((await stream.next()).value).toEqual(detail);
-            expect(session.fixedSequence()).toBe(7n);
+            expect(session.minSequenceNumber()).toBe(7n);
             expect((await stream.next()).done).toBe(true);
             expect(fetch).toHaveBeenCalledTimes(1);
         } finally {
@@ -288,7 +288,7 @@ test('reduce yields frames on demand and returning cancels the underlying stream
     expect(secondPolled).toBe(false);
 });
 
-test('reduce observes metadata on frame consumption and sends the fixed session floor', async () => {
+test('reduce observes metadata on frame consumption and sends the monotonic session floor', async () => {
     const floors: Array<bigint | undefined> = [];
     const client = clientWithReduce(async function* (request) {
         floors.push((request as ReduceRequest).minSequenceNumber);
@@ -297,11 +297,11 @@ test('reduce observes metadata on frame consumption and sends the fixed session 
     });
     const session = new ReadSession(client);
     const stream = session.reduce(start, end, params)[Symbol.asyncIterator]();
-    expect(session.fixedSequence()).toBeUndefined();
+    expect(session.minSequenceNumber()).toBeUndefined();
     await stream.next();
-    expect(session.fixedSequence()).toBe(7n);
+    expect(session.minSequenceNumber()).toBe(7n);
     await stream.next();
-    expect(session.fixedSequence()).toBe(7n);
+    expect(session.minSequenceNumber()).toBe(7n);
     expect((await stream.next()).done).toBe(true);
     const second = session.reduce(start, end, params)[Symbol.asyncIterator]();
     await second.next();

@@ -787,7 +787,7 @@ mod tests {
 
         assert_eq!(storage.get_nodes(&positions).await.unwrap(), digests);
         assert_eq!(session.evaluated_sequence(), Some(40));
-        assert_eq!(session.fixed_sequence(), Some(40));
+        assert_eq!(session.min_sequence_number(), Some(40));
         {
             let requests = store.requests.lock().unwrap();
             assert_eq!(requests.len(), 1);

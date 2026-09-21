@@ -438,21 +438,14 @@ impl PrefixedStoreClient {
         Stream { c: self }
     }
 
-    /// Create a read session with no initial floor over this namespace.
+    /// Create a monotonic read session with no initial floor over this namespace.
     pub fn create_session(&self) -> ReadSession {
         self.create_session_with_sequence(0)
     }
 
-    /// Create a read session whose read floor starts at `sequence`.
+    /// Create a monotonic read session whose read floor starts at `sequence`.
     pub fn create_session_with_sequence(&self, sequence: u64) -> ReadSession {
-        ReadSession {
-            client: self.clone(),
-            state: Arc::new(SessionState {
-                minimum_sequence: sequence,
-                sequence: Arc::new(AtomicU64::new(0)),
-                init_gate: tokio::sync::Mutex::new(()),
-            }),
-        }
+        ReadSession::monotonic(self.clone(), sequence)
     }
 
     // --- writes --------------------------------------------------------------
@@ -1695,34 +1688,36 @@ pub struct StoreClient {
     credential: Credential,
 }
 
-/// A session whose read floor advances to the highest Store sequence observed.
+/// A read session with a fixed or monotonic minimum Store sequence.
 ///
-/// An explicit initial floor constrains reads without claiming that any read has
-/// evaluated at that sequence. Reads started after a response is observed use
-/// at least its sequence. Clones share the floor, including updates from streams.
+/// A fixed session keeps its configured floor. A monotonic session raises the
+/// floor for reads started after each observation. Neither policy pins reads to
+/// an exact snapshot. Clones share observations, including stream frames.
+/// An initial floor does not count as an observed sequence.
 ///
 /// Streamed reads record response sequences as frames arrive, including the
 /// first frame fetched before the stream is returned to the caller.
 #[derive(Clone, Debug)]
 pub struct ReadSession {
     client: PrefixedStoreClient,
+    policy: ReadPolicy,
+    configured_floor: u64,
     state: Arc<SessionState>,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum ReadPolicy {
+    Fixed,
+    Monotonic,
 }
 
 #[derive(Debug)]
 struct SessionState {
-    minimum_sequence: u64,
     sequence: Arc<AtomicU64>,
     init_gate: tokio::sync::Mutex<()>,
 }
 
 impl SessionState {
-    fn fixed_sequence(&self) -> Option<u64> {
-        let sequence = self.sequence.load(Ordering::Acquire);
-        let floor = self.minimum_sequence.max(sequence);
-        (floor > 0).then_some(floor)
-    }
-
     fn evaluated_sequence(&self) -> Option<u64> {
         let sequence = self.sequence.load(Ordering::Acquire);
         (sequence > 0).then_some(sequence)
@@ -2686,12 +2681,52 @@ impl<'a> Retention<'a> {
 }
 
 impl ReadSession {
+    /// Create a session whose floor advances to the highest observed read sequence.
+    pub fn monotonic(client: PrefixedStoreClient, initial_floor: u64) -> Self {
+        Self::new(client, initial_floor, ReadPolicy::Monotonic)
+    }
+
+    /// Create a session whose read floor stays fixed as responses are observed.
+    pub fn fixed(client: PrefixedStoreClient, floor: u64) -> Self {
+        Self::new(client, floor, ReadPolicy::Fixed)
+    }
+
+    fn new(client: PrefixedStoreClient, configured_floor: u64, policy: ReadPolicy) -> Self {
+        Self {
+            client,
+            policy,
+            configured_floor,
+            state: Arc::new(SessionState {
+                sequence: Arc::new(AtomicU64::new(0)),
+                init_gate: tokio::sync::Mutex::new(()),
+            }),
+        }
+    }
+
     /// Minimum Store sequence requested by subsequent reads.
     ///
-    /// Before any response, this is the explicitly configured floor, if present.
-    /// It advances as reads observe newer Store sequences.
-    pub fn fixed_sequence(&self) -> Option<u64> {
-        self.state.fixed_sequence()
+    /// Returns `None` when no positive sequence is required.
+    pub fn min_sequence_number(&self) -> Option<u64> {
+        let floor = match self.policy {
+            ReadPolicy::Fixed => self.configured_floor,
+            ReadPolicy::Monotonic => self
+                .configured_floor
+                .max(self.state.sequence.load(Ordering::Acquire)),
+        };
+        (floor > 0).then_some(floor)
+    }
+
+    /// Derive a reader with at least the requested minimum sequence.
+    ///
+    /// Raises the derived handle's floor if needed, leaving the original handle's
+    /// configured floor unchanged. Both handles share observations, but the
+    /// supplied requirement is not itself an observation.
+    pub fn with_min_sequence_number(&self, sequence: u64) -> Self {
+        let mut session = self.clone();
+        if sequence > self.min_sequence_number().unwrap_or_default() {
+            session.configured_floor = sequence;
+        }
+        session
     }
 
     /// Highest positive Store sequence reported by a read in this session.
@@ -2705,7 +2740,7 @@ impl ReadSession {
     pub fn with_client(&self, client: PrefixedStoreClient) -> Self {
         Self {
             client,
-            state: self.state.clone(),
+            ..self.clone()
         }
     }
 
@@ -2842,13 +2877,17 @@ impl ReadSession {
         Call: FnOnce(Option<u64>, Arc<AtomicU64>) -> Fut,
         Fut: std::future::Future<Output = Result<T, ClientError>>,
     {
-        if let Some(sequence) = self.fixed_sequence() {
+        if let ReadPolicy::Fixed = self.policy {
+            return call(self.min_sequence_number(), self.state.sequence.clone()).await;
+        }
+
+        if let Some(sequence) = self.min_sequence_number() {
             return call(Some(sequence), self.state.sequence.clone()).await;
         }
 
         let gate = self.state.init_gate.lock().await;
 
-        if let Some(sequence) = self.fixed_sequence() {
+        if let Some(sequence) = self.min_sequence_number() {
             drop(gate);
             return call(Some(sequence), self.state.sequence.clone()).await;
         }
@@ -3172,7 +3211,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(transport.requests.lock().unwrap().len(), 2);
-        assert_eq!(session.fixed_sequence(), None);
+        assert_eq!(session.min_sequence_number(), None);
         assert!(stream
             .next()
             .await
@@ -3182,7 +3221,7 @@ mod tests {
             .detail
             .as_option()
             .is_none());
-        assert_eq!(session.fixed_sequence(), None);
+        assert_eq!(session.min_sequence_number(), None);
         assert_eq!(
             stream
                 .next()
@@ -3194,13 +3233,13 @@ mod tests {
                 .sequence_number,
             47
         );
-        assert_eq!(session.fixed_sequence(), Some(47));
+        assert_eq!(session.min_sequence_number(), Some(47));
         assert!(stream.next().await.is_none());
         assert_eq!(
             session.range_reduce(&start, &end, &request).await.unwrap(),
             vec![Some(KvReducedValue::UInt64(3))]
         );
-        assert_eq!(session.fixed_sequence(), Some(50));
+        assert_eq!(session.min_sequence_number(), Some(50));
         let requests = transport.requests.lock().unwrap();
         assert_eq!(requests.len(), 3);
         assert_eq!(requests[0].min_sequence_number, None);
@@ -3578,7 +3617,7 @@ mod tests {
 
         let get_many_session = client.create_session();
         let _stream = get_many_session.get_many(&[&key], 1).await.unwrap();
-        assert_eq!(get_many_session.fixed_sequence(), Some(41));
+        assert_eq!(get_many_session.min_sequence_number(), Some(41));
         assert_eq!(get_many_session.evaluated_sequence(), Some(41));
 
         let range_session = client.create_session();
@@ -3586,7 +3625,7 @@ mod tests {
             .range_stream(&start, &end, 1, 1)
             .await
             .unwrap();
-        assert_eq!(range_session.fixed_sequence(), Some(42));
+        assert_eq!(range_session.min_sequence_number(), Some(42));
         assert_eq!(range_session.evaluated_sequence(), Some(42));
 
         let reduce_session = client.create_session();
@@ -3594,13 +3633,13 @@ mod tests {
             .range_reduce_stream(&start, &end, &count_request())
             .await
             .unwrap();
-        assert_eq!(reduce_session.fixed_sequence(), Some(43));
+        assert_eq!(reduce_session.min_sequence_number(), Some(43));
         assert_eq!(reduce_session.evaluated_sequence(), Some(43));
     }
 
     #[tokio::test]
-    async fn session_reads_advance_the_floor_across_all_read_methods() {
-        for initial_sequence in [0, 27] {
+    async fn session_policies_apply_to_all_read_methods() {
+        for (monotonic, initial_sequence) in [(true, 0), (true, 27), (false, 0), (false, 27)] {
             let transport = SessionSequenceTransport::default();
             let client = StoreClient::builder()
                 .url("http://query.internal")
@@ -3609,7 +3648,11 @@ mod tests {
                 .build()
                 .unwrap()
                 .prefixed(StoreKeyPrefix::new("session/").unwrap());
-            let session = client.create_session_with_sequence(initial_sequence);
+            let session = if monotonic {
+                ReadSession::monotonic(client, initial_sequence)
+            } else {
+                ReadSession::fixed(client, initial_sequence)
+            };
             let shared_session = session.clone();
             let key = Key::from(b"key".to_vec());
             let start = Key::from(b"a".to_vec());
@@ -3635,18 +3678,156 @@ mod tests {
                 .await
                 .unwrap();
 
-            assert_eq!(session.fixed_sequence(), Some(46));
+            let initial_floor = (initial_sequence > 0).then_some(initial_sequence);
+            assert_eq!(
+                session.min_sequence_number(),
+                if monotonic { Some(46) } else { initial_floor }
+            );
             assert_eq!(shared_session.evaluated_sequence(), Some(46));
             assert_eq!(
                 *transport.requested_floors.lock().unwrap(),
-                vec![
-                    (initial_sequence > 0).then_some(initial_sequence),
-                    Some(41),
-                    Some(42),
-                    Some(43),
-                    Some(44),
-                    Some(45),
-                ]
+                if monotonic {
+                    vec![
+                        initial_floor,
+                        Some(41),
+                        Some(42),
+                        Some(43),
+                        Some(44),
+                        Some(45),
+                    ]
+                } else {
+                    vec![initial_floor; 6]
+                }
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn fixed_dependency_readers_share_observations_without_sharing_floors() {
+        let transport = SessionSequenceTransport::default();
+        let client = StoreClient::builder()
+            .url("http://query.internal")
+            .client_transport(transport.clone())
+            .build()
+            .unwrap()
+            .prefixed(StoreKeyPrefix::new("parent/").unwrap());
+        let session = ReadSession::fixed(client.clone(), 27);
+        let key = Bytes::from_static(b"key");
+        session.get(&key).await.unwrap();
+
+        let dependent = session.with_min_sequence_number(41);
+        assert_eq!(dependent.evaluated_sequence(), Some(41));
+        let stronger = dependent.with_min_sequence_number(42);
+        assert_eq!(stronger.evaluated_sequence(), Some(41));
+        assert_eq!(stronger.min_sequence_number(), Some(42));
+        let rebound = dependent.with_min_sequence_number(10).with_client(
+            client
+                .client()
+                .prefixed(StoreKeyPrefix::new("other/").unwrap()),
+        );
+        rebound.get(&key).await.unwrap();
+        assert_eq!(session.evaluated_sequence(), Some(42));
+        assert_eq!(dependent.evaluated_sequence(), Some(42));
+        assert_eq!(dependent.min_sequence_number(), Some(41));
+        session.clone().get(&key).await.unwrap();
+        stronger.get(&key).await.unwrap();
+
+        assert_eq!(session.min_sequence_number(), Some(27));
+        assert_eq!(rebound.evaluated_sequence(), Some(44));
+        assert_eq!(
+            *transport.requested_floors.lock().unwrap(),
+            vec![Some(27), Some(41), Some(27), Some(42)]
+        );
+    }
+
+    #[tokio::test]
+    async fn monotonic_dependency_readers_strengthen_floors_and_share_observations() {
+        let transport = SessionSequenceTransport::default();
+        let client = StoreClient::builder()
+            .url("http://query.internal")
+            .client_transport(transport.clone())
+            .build()
+            .unwrap()
+            .prefixed(StoreKeyPrefix::identity());
+        let session = ReadSession::monotonic(client.clone(), 27);
+        let derived = session.with_min_sequence_number(40);
+        assert_eq!(derived.min_sequence_number(), Some(40));
+        assert_eq!(session.min_sequence_number(), Some(27));
+        assert_eq!(derived.evaluated_sequence(), None);
+        let rebound = derived.with_client(client);
+        let key = Bytes::from_static(b"key");
+
+        rebound.get(&key).await.unwrap();
+        let stronger = session.with_min_sequence_number(42);
+        assert_eq!(stronger.min_sequence_number(), Some(42));
+        assert_eq!(stronger.evaluated_sequence(), Some(41));
+        assert_eq!(session.min_sequence_number(), Some(41));
+        stronger.get(&key).await.unwrap();
+        derived.get(&key).await.unwrap();
+        assert_eq!(session.min_sequence_number(), Some(43));
+        assert_eq!(rebound.evaluated_sequence(), Some(43));
+        assert_eq!(
+            session.with_min_sequence_number(10).min_sequence_number(),
+            Some(43)
+        );
+        assert_eq!(
+            *transport.requested_floors.lock().unwrap(),
+            vec![Some(40), Some(42), Some(42)]
+        );
+    }
+
+    #[tokio::test]
+    async fn session_policies_observe_stream_frames_without_changing_in_flight_floors() {
+        for monotonic in [false, true] {
+            let transport = ReduceTransport::new([
+                reduce_body(&[count_frame(Some(47)), count_frame(Some(50))], b"{}"),
+                reduce_body(&[count_frame(Some(48))], b"{}"),
+                reduce_body(&[count_frame(Some(51))], b"{}"),
+            ]);
+            let client = reduce_test_client(transport.clone());
+            let session = if monotonic {
+                ReadSession::monotonic(client, 27)
+            } else {
+                ReadSession::fixed(client, 27)
+            };
+            let clone = session.clone();
+            let start = Bytes::from_static(b"a");
+            let end = Bytes::from_static(b"z");
+            let request = count_request();
+            let mut first = session
+                .range_reduce_stream(&start, &end, &request)
+                .await
+                .unwrap();
+            assert_eq!(clone.evaluated_sequence(), Some(47));
+            let mut second = clone
+                .range_reduce_stream(&start, &end, &request)
+                .await
+                .unwrap();
+            assert_eq!(session.evaluated_sequence(), Some(48));
+            first.next().await.unwrap().unwrap();
+            first.next().await.unwrap().unwrap();
+            assert_eq!(clone.evaluated_sequence(), Some(50));
+            second.next().await.unwrap().unwrap();
+            assert_eq!(session.evaluated_sequence(), Some(50));
+            session.range_reduce(&start, &end, &request).await.unwrap();
+            assert_eq!(session.evaluated_sequence(), Some(51));
+            assert_eq!(
+                session.min_sequence_number(),
+                Some(if monotonic { 51 } else { 27 })
+            );
+            assert_eq!(
+                transport
+                    .requests
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .map(|r| r.min_sequence_number)
+                    .collect::<Vec<_>>(),
+                if monotonic {
+                    vec![Some(27), Some(47), Some(50)]
+                } else {
+                    vec![Some(27); 3]
+                }
             );
         }
     }
@@ -3819,7 +4000,7 @@ mod tests {
     fn create_session_starts_unseeded() {
         let client = PrefixedStoreClient::empty(StoreClient::new("http://localhost:10000/"));
         let session = client.create_session();
-        assert_eq!(session.fixed_sequence(), None);
+        assert_eq!(session.min_sequence_number(), None);
         assert_eq!(session.evaluated_sequence(), None);
     }
 
@@ -3883,7 +4064,7 @@ mod tests {
     fn create_session_with_sequence_pins_explicit_floor() {
         let client = PrefixedStoreClient::empty(StoreClient::new("http://localhost:10000/"));
         let session = client.create_session_with_sequence(27);
-        assert_eq!(session.fixed_sequence(), Some(27));
+        assert_eq!(session.min_sequence_number(), Some(27));
         assert_eq!(session.evaluated_sequence(), None);
     }
 
