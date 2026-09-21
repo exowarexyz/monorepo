@@ -62,15 +62,18 @@ const MAX_CONNECTRPC_BODY_BYTES: usize = 256 * 1024 * 1024;
 
 type SubscribeStream = Pin<Box<dyn Stream<Item = Result<SubscribeResponse, ConnectError>> + Send>>;
 
-/// Build a query context whose Store scans share the supplied minimum sequence.
+/// Build a query context whose Store scans share an optional minimum sequence.
 ///
 /// All Store-backed providers in `ctx` must use the same Store as `store`.
 pub fn query_context_with_min_sequence(
     ctx: &SessionContext,
     store: &PrefixedStoreClient,
-    min_sequence_number: u64,
+    min_sequence_number: Option<u64>,
 ) -> SessionContext {
-    let read_session = store.create_session_with_sequence(min_sequence_number);
+    let read_session = match min_sequence_number {
+        Some(sequence) => store.create_session_with_sequence(sequence),
+        None => store.create_session(),
+    };
 
     let mut state = ctx.state();
     state.config_mut().set_extension(Arc::new(read_session));
@@ -180,7 +183,7 @@ impl SqlServer {
 
     fn query_session(
         &self,
-        min_sequence_number: u64,
+        min_sequence_number: Option<u64>,
     ) -> (SessionContext, exoware_sdk::ReadSession) {
         let ctx = query_context_with_min_sequence(&self.ctx, &self.store, min_sequence_number);
         let read_session = crate::types::request_read_session(&ctx.copied_config(), &self.store)
@@ -343,7 +346,7 @@ impl Service for SqlConnect {
         let server = self.server.clone();
         AssertUnwindSafe(async move {
             let sql = request.sql.to_string();
-            let min_sequence_number = request.min_sequence_number.unwrap_or_default();
+            let min_sequence_number = request.min_sequence_number;
             let (ctx, read_session) = server.query_session(min_sequence_number);
             let plan = ctx
                 .state()
@@ -391,7 +394,8 @@ impl Service for SqlConnect {
             // Queries that skip Store reads preserve the requested floor.
             let sequence_number = read_session
                 .evaluated_sequence()
-                .unwrap_or(min_sequence_number);
+                .or(min_sequence_number)
+                .unwrap_or_default();
             connectrpc::Response::ok(QueryResponse {
                 results,
                 sequence_number,
@@ -1140,16 +1144,19 @@ mod tests {
     }
 
     #[test]
-    fn query_context_installs_the_supplied_store_sequence_floor() {
+    fn query_context_preserves_optional_store_sequence_floor() {
         let ctx = SessionContext::new();
         let store = PrefixedStoreClient::empty(StoreClient::new("http://localhost:10000"));
-        let query_ctx = query_context_with_min_sequence(&ctx, &store, 41);
-        let first = crate::types::request_read_session(query_ctx.state().config(), &store).unwrap();
-        let second =
-            crate::types::request_read_session(query_ctx.state().config(), &store).unwrap();
+        for floor in [None, Some(0), Some(41)] {
+            let query_ctx = query_context_with_min_sequence(&ctx, &store, floor);
+            let first =
+                crate::types::request_read_session(query_ctx.state().config(), &store).unwrap();
+            let second =
+                crate::types::request_read_session(query_ctx.state().config(), &store).unwrap();
 
-        assert_eq!(first.min_sequence_number(), Some(41));
-        assert_eq!(second.min_sequence_number(), Some(41));
+            assert_eq!(first.min_sequence_number(), floor);
+            assert_eq!(second.min_sequence_number(), floor);
+        }
         assert!(crate::types::request_read_session(ctx.state().config(), &store).is_none());
     }
 

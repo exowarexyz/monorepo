@@ -221,7 +221,16 @@ export class StoreWriteBatch {
 }
 
 function normalizeMinSequenceNumber(value?: bigint): bigint | undefined {
-    return value !== undefined && value > 0n ? value : undefined;
+    return value !== undefined && value >= 0n ? value : undefined;
+}
+
+function maxSequenceNumber(
+    left: bigint | undefined,
+    right: bigint | undefined,
+): bigint | undefined {
+    if (left === undefined) return right;
+    if (right === undefined) return left;
+    return left > right ? left : right;
 }
 
 /**
@@ -666,7 +675,7 @@ async function* performSubscribe(
 type ReadPolicy = 'fixed' | 'monotonic';
 
 interface ReadSessionState {
-    sequence: bigint;
+    sequence: bigint | undefined;
     initGate: Promise<void>;
     gateLocked: boolean;
 }
@@ -682,13 +691,14 @@ const storeClientBindings = new WeakMap<StoreClient, StoreClientBinding>();
  * A read session with a fixed or monotonic minimum Store sequence.
  *
  * Fixed sessions keep their configured floor. Monotonic sessions raise their floor to the highest
- * sequence observed by any clone. An initial floor is a requirement, not an observation.
+ * sequence observed by any clone. An absent floor sends no requirement; zero is an explicit floor.
+ * An initial floor is a requirement, not an observation.
  */
 export class ReadSession {
     private policy: ReadPolicy = 'monotonic';
-    private configuredFloor: bigint;
+    private configuredFloor: bigint | undefined;
     private state: ReadSessionState = {
-        sequence: 0n,
+        sequence: undefined,
         initGate: Promise.resolve(),
         gateLocked: false,
     };
@@ -697,24 +707,24 @@ export class ReadSession {
     constructor(
         private client: Client,
         private keyPrefix?: StoreKeyPrefix,
-        initialSequence: bigint = 0n,
+        initialSequence?: bigint,
     ) {
-        this.configuredFloor = initialSequence;
+        this.configuredFloor = normalizeMinSequenceNumber(initialSequence);
     }
 
     /** Create a session whose floor advances to the highest observed read sequence. */
-    static monotonic(client: StoreClient, initialFloor: bigint): ReadSession {
+    static monotonic(client: StoreClient, initialFloor?: bigint): ReadSession {
         return ReadSession.fromStoreClient(client, initialFloor, 'monotonic');
     }
 
     /** Create a session whose read floor stays fixed as responses are observed. */
-    static fixed(client: StoreClient, floor: bigint): ReadSession {
+    static fixed(client: StoreClient, floor?: bigint): ReadSession {
         return ReadSession.fromStoreClient(client, floor, 'fixed');
     }
 
     private static fromStoreClient(
         storeClient: StoreClient,
-        configuredFloor: bigint,
+        configuredFloor: bigint | undefined,
         policy: ReadPolicy,
     ): ReadSession {
         const binding = storeClientBindings.get(storeClient);
@@ -728,17 +738,14 @@ export class ReadSession {
 
     /** Minimum Store sequence requested by subsequent reads. */
     minSequenceNumber(): bigint | undefined {
-        const floor = this.policy === 'fixed'
+        return this.policy === 'fixed'
             ? this.configuredFloor
-            : this.configuredFloor > this.state.sequence
-                ? this.configuredFloor
-                : this.state.sequence;
-        return normalizeMinSequenceNumber(floor);
+            : maxSequenceNumber(this.configuredFloor, this.state.sequence);
     }
 
-    /** Highest positive Store sequence reported by a read in this session. */
+    /** Highest Store sequence reported by a read in this session. */
     evaluatedSequence(): bigint | undefined {
-        return normalizeMinSequenceNumber(this.state.sequence);
+        return this.state.sequence;
     }
 
     /** Return a handle that shares observations and retains this handle's policy and floor. */
@@ -757,8 +764,13 @@ export class ReadSession {
      */
     withMinSequenceNumber(sequence: bigint): ReadSession {
         const session = this.clone();
-        if (sequence > (this.minSequenceNumber() ?? 0n)) {
-            session.configuredFloor = sequence;
+        const requested = normalizeMinSequenceNumber(sequence);
+        if (requested === undefined) {
+            return session;
+        }
+        const current = this.minSequenceNumber();
+        if (current === undefined || requested > current) {
+            session.configuredFloor = requested;
         }
         return session;
     }
@@ -776,7 +788,7 @@ export class ReadSession {
     }
 
     private observe(detail: Detail): void {
-        if (detail.sequenceNumber > this.state.sequence) {
+        if (this.state.sequence === undefined || detail.sequenceNumber > this.state.sequence) {
             this.state.sequence = detail.sequenceNumber;
         }
     }
@@ -911,7 +923,7 @@ export class StoreClient {
     }
 
     createSession(): ReadSession {
-        return ReadSession.monotonic(this, 0n);
+        return ReadSession.monotonic(this);
     }
 
     createSessionWithSequence(sequence: bigint): ReadSession {

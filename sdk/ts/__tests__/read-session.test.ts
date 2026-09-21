@@ -7,7 +7,9 @@ import {
     ReduceParamsSchema,
     ReduceResponseSchema,
     type GetRequest,
+    type GetManyRequest,
     type RangeRequest,
+    type ReduceRequest,
 } from '../src/gen/ts/store/v1/query_pb';
 import { ReadSession, StoreClient, StoreKeyPrefix } from '../src/store';
 
@@ -104,20 +106,160 @@ test('monotonic derivation strengthens only the derived handle and legacy factor
     expect(floors).toEqual([2n, 10n]);
 });
 
-test('zero observations do not become request floors', async () => {
+test('constructors distinguish an absent floor from an explicit zero floor', () => {
+    const client = mockClient({});
+    const store = new StoreClient(client);
+
+    expect(new ReadSession(client).minSequenceNumber()).toBeUndefined();
+    expect(ReadSession.monotonic(store).minSequenceNumber()).toBeUndefined();
+    expect(ReadSession.monotonic(store, 0n).minSequenceNumber()).toBe(0n);
+    expect(ReadSession.fixed(store).minSequenceNumber()).toBeUndefined();
+    expect(ReadSession.fixed(store, 0n).clone().minSequenceNumber()).toBe(0n);
+    expect(store.createSession().minSequenceNumber()).toBeUndefined();
+    expect(store.createSessionWithSequence(0n).minSequenceNumber()).toBe(0n);
+});
+
+test('direct read methods preserve omitted and explicit zero floors', async () => {
+    const floors = {
+        get: [] as Array<bigint | undefined>,
+        getMany: [] as Array<bigint | undefined>,
+        range: [] as Array<bigint | undefined>,
+        reduce: [] as Array<bigint | undefined>,
+    };
+    const client = mockClient({
+        get: async (request) => {
+            floors.get.push((request as GetRequest).minSequenceNumber);
+            return create(GetResponseSchema);
+        },
+        getMany: async function* (request) {
+            floors.getMany.push((request as GetManyRequest).minSequenceNumber);
+            yield create(GetManyFrameSchema);
+        },
+        range: async function* (request) {
+            floors.range.push((request as RangeRequest).minSequenceNumber);
+            yield create(RangeFrameSchema);
+        },
+        reduce: async function* (request) {
+            floors.reduce.push((request as ReduceRequest).minSequenceNumber);
+            yield create(ReduceResponseSchema);
+        },
+    });
+    const store = new StoreClient(client);
+    const params = create(ReduceParamsSchema);
+
+    for (const floor of [undefined, 0n]) {
+        await store.get(key, floor);
+        await store.getMany([key], undefined, undefined, floor);
+        await store.query(undefined, undefined, undefined, undefined, undefined, floor);
+        for await (const _frame of store.reduce(key, key, params, floor)) {}
+    }
+
+    expect(floors.get).toEqual([undefined, 0n]);
+    expect(floors.getMany).toEqual([undefined, 0n]);
+    expect(floors.range).toEqual([undefined, 0n]);
+    expect(floors.reduce).toEqual([undefined, 0n]);
+});
+
+describe.each(['monotonic', 'fixed'] as const)('%s sessions observe zero details', (policy) => {
+    test.each(['get', 'getMany', 'query', 'reduce'] as const)('%s', async (method) => {
+        const client = mockClient({
+            get: async () => create(GetResponseSchema, { detail: { sequenceNumber: 0n } }),
+            getMany: async function* () {
+                yield create(GetManyFrameSchema, { detail: { sequenceNumber: 0n } });
+            },
+            range: async function* () {
+                yield create(RangeFrameSchema, { detail: { sequenceNumber: 0n } });
+            },
+            reduce: async function* () {
+                yield create(ReduceResponseSchema, { detail: { sequenceNumber: 0n } });
+            },
+        });
+        const store = new StoreClient(client);
+        const session = policy === 'monotonic'
+            ? ReadSession.monotonic(store)
+            : ReadSession.fixed(store);
+        const clone = session.clone();
+
+        expect(session.minSequenceNumber()).toBeUndefined();
+        expect(session.evaluatedSequence()).toBeUndefined();
+
+        switch (method) {
+            case 'get':
+                await session.get(key);
+                break;
+            case 'getMany':
+                await session.getMany([key]);
+                break;
+            case 'query':
+                await session.query();
+                break;
+            case 'reduce': {
+                const stream = session.reduce(key, key, create(ReduceParamsSchema))[
+                    Symbol.asyncIterator
+                ]();
+                const first = await stream.next();
+                expect(first.done).toBe(false);
+                expect(session.evaluatedSequence()).toBe(0n);
+                expect(clone.evaluatedSequence()).toBe(0n);
+                expect(first.value?.detail?.sequenceNumber).toBe(0n);
+                await stream.return?.();
+                break;
+            }
+        }
+
+        expect(session.evaluatedSequence()).toBe(0n);
+        expect(clone.evaluatedSequence()).toBe(0n);
+        const expectedFloor = policy === 'monotonic' ? 0n : undefined;
+        expect(session.minSequenceNumber()).toBe(expectedFloor);
+        expect(clone.minSequenceNumber()).toBe(expectedFloor);
+    });
+});
+
+test('a present zero detail is observed and prevents reinitialization across clones', async () => {
+    const floors: Array<bigint | undefined> = [];
+    let response = 0;
+    const client = mockClient({
+        get: async (request) => {
+            floors.push((request as GetRequest).minSequenceNumber);
+            response += 1;
+            return response === 1
+                ? create(GetResponseSchema)
+                : create(GetResponseSchema, { detail: { sequenceNumber: 0n } });
+        },
+    });
+    const session = ReadSession.monotonic(new StoreClient(client));
+    const clone = session.clone();
+
+    await session.get(key);
+    expect(session.evaluatedSequence()).toBeUndefined();
+    expect(session.minSequenceNumber()).toBeUndefined();
+
+    await clone.get(key);
+    expect(session.evaluatedSequence()).toBe(0n);
+    expect(clone.evaluatedSequence()).toBe(0n);
+    expect(session.minSequenceNumber()).toBe(0n);
+
+    await session.get(key);
+    expect(floors).toEqual([undefined, undefined, 0n]);
+});
+
+test('deriving zero from an absent floor strengthens only the derived handle', async () => {
     const floors: Array<bigint | undefined> = [];
     const client = mockClient({
         get: async (request) => {
             floors.push((request as GetRequest).minSequenceNumber);
-            return create(GetResponseSchema, { detail: { sequenceNumber: 0n } });
+            return create(GetResponseSchema);
         },
     });
-    const session = ReadSession.monotonic(new StoreClient(client), 0n);
+    const session = ReadSession.monotonic(new StoreClient(client));
+    const derived = session.withMinSequenceNumber(0n);
 
-    await session.get(key);
-    await session.get(key);
-    expect(floors).toEqual([undefined, undefined]);
+    expect(session.minSequenceNumber()).toBeUndefined();
+    expect(derived.minSequenceNumber()).toBe(0n);
     expect(session.evaluatedSequence()).toBeUndefined();
+    expect(derived.evaluatedSequence()).toBeUndefined();
+    await derived.get(key);
+    expect(floors).toEqual([0n]);
     expect(session.minSequenceNumber()).toBeUndefined();
 });
 
@@ -136,7 +278,7 @@ test('getMany observes empty frames and publishes detail before onChunk', async 
             return create(GetResponseSchema, { detail: { sequenceNumber: 8n }, value: key });
         },
     });
-    const session = ReadSession.monotonic(new StoreClient(client), 0n);
+    const session = ReadSession.monotonic(new StoreClient(client));
     let dependent: Promise<unknown> | undefined;
 
     await session.getMany([key], undefined, () => {
@@ -166,7 +308,7 @@ test('the initialization gate waits for the first reduce frame without buffering
             return create(GetResponseSchema, { detail: { sequenceNumber: 12n }, value: key });
         },
     });
-    const session = ReadSession.monotonic(new StoreClient(client), 0n);
+    const session = ReadSession.monotonic(new StoreClient(client));
     const clone = session.clone();
     const stream = session.reduce(key, key, create(ReduceParamsSchema))[Symbol.asyncIterator]();
     const first = stream.next();

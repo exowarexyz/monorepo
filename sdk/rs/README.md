@@ -44,12 +44,13 @@ unchanged. Query responses will still be at the server's current sequence; neith
 ```rust
 use exoware_sdk::ReadSession;
 
-let session = ReadSession::monotonic(orders.clone(), 0);
-let reader = ReadSession::fixed(orders.clone(), publication_sequence);
+let session = ReadSession::monotonic(orders.clone(), None);
+let reader = ReadSession::fixed(orders.clone(), Some(publication_sequence));
 ```
 
 `min_sequence_number()` reports the effective read floor, and `evaluated_sequence()`
 reports the highest observed sequence. Clones share observations.
+`None` means no requirement or observation; `Some(0)` is an explicit sequence zero.
 `with_min_sequence_number(sequence)` derives a reader with a stronger floor when
 needed, for either policy. It leaves the parent's configured floor unchanged and
 does not count the requirement as an observation.

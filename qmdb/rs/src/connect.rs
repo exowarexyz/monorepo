@@ -168,13 +168,13 @@ trait OperationLogBackend: Clone + Send + Sync + 'static {
     ) -> Result<OperationKv, QmdbError>;
     fn batch_multi_proof_with_read_floor(
         &self,
-        read_floor_sequence: u64,
+        read_floor_sequence: Option<u64>,
         watermark: Location<Self::Family>,
         operations: Vec<(Location<Self::Family>, Vec<u8>)>,
     ) -> impl Future<Output = Result<RawBatchMultiProof<Self::Digest, Self::Family>, QmdbError>> + Send;
     fn operation_range_checkpoint(
         &self,
-        read_floor_sequence: u64,
+        read_floor_sequence: Option<u64>,
         watermark: Location<Self::Family>,
         start_location: Location<Self::Family>,
         max_locations: u32,
@@ -257,7 +257,7 @@ where
 
     fn batch_multi_proof_with_read_floor(
         &self,
-        read_floor_sequence: u64,
+        read_floor_sequence: Option<u64>,
         watermark: Location<F>,
         operations: Vec<(Location<F>, Vec<u8>)>,
     ) -> impl Future<Output = Result<RawBatchMultiProof<Self::Digest, F>, QmdbError>> + Send {
@@ -271,7 +271,7 @@ where
 
     fn operation_range_checkpoint(
         &self,
-        read_floor_sequence: u64,
+        read_floor_sequence: Option<u64>,
         watermark: Location<F>,
         start_location: Location<F>,
         max_locations: u32,
@@ -313,7 +313,7 @@ where
 
     fn batch_multi_proof_with_read_floor(
         &self,
-        read_floor_sequence: u64,
+        read_floor_sequence: Option<u64>,
         watermark: Location<F>,
         operations: Vec<(Location<F>, Vec<u8>)>,
     ) -> impl Future<Output = Result<RawBatchMultiProof<Self::Digest, F>, QmdbError>> + Send {
@@ -327,7 +327,7 @@ where
 
     fn operation_range_checkpoint(
         &self,
-        read_floor_sequence: u64,
+        read_floor_sequence: Option<u64>,
         watermark: Location<F>,
         start_location: Location<F>,
         max_locations: u32,
@@ -369,7 +369,7 @@ where
 
     fn batch_multi_proof_with_read_floor(
         &self,
-        read_floor_sequence: u64,
+        read_floor_sequence: Option<u64>,
         watermark: Location<F>,
         operations: Vec<(Location<F>, Vec<u8>)>,
     ) -> impl Future<Output = Result<RawBatchMultiProof<Self::Digest, F>, QmdbError>> + Send {
@@ -383,7 +383,7 @@ where
 
     fn operation_range_checkpoint(
         &self,
-        read_floor_sequence: u64,
+        read_floor_sequence: Option<u64>,
         watermark: Location<F>,
         start_location: Location<F>,
         max_locations: u32,
@@ -425,7 +425,7 @@ where
 
     fn batch_multi_proof_with_read_floor(
         &self,
-        read_floor_sequence: u64,
+        read_floor_sequence: Option<u64>,
         watermark: Location<F>,
         operations: Vec<(Location<F>, Vec<u8>)>,
     ) -> impl Future<Output = Result<RawBatchMultiProof<Self::Digest, F>, QmdbError>> + Send {
@@ -439,7 +439,7 @@ where
 
     fn operation_range_checkpoint(
         &self,
-        read_floor_sequence: u64,
+        read_floor_sequence: Option<u64>,
         watermark: Location<F>,
         start_location: Location<F>,
         max_locations: u32,
@@ -1040,7 +1040,7 @@ impl<B: OperationLogBackend> OperationLogService for OperationLogConnect<B> {
         async move {
             let (proof, sequence_number) = backend
                 .operation_range_checkpoint(
-                    request.min_sequence_number.unwrap_or_default(),
+                    request.min_sequence_number,
                     Location::new(request.tip),
                     Location::new(request.start_location),
                     request.max_locations,
@@ -1094,7 +1094,7 @@ impl<B: OperationLogBackend> OperationLogService for OperationLogConnect<B> {
                     let backend = backend.clone();
                     async move {
                         backend
-                            .batch_multi_proof_with_read_floor(seq, watermark, matched)
+                            .batch_multi_proof_with_read_floor(Some(seq), watermark, matched)
                             .await
                     }
                     .boxed()
