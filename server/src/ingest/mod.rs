@@ -3,7 +3,7 @@ mod buffer;
 mod decode;
 mod input;
 mod observe;
-mod parser;
+pub mod parser;
 mod reception;
 pub mod service;
 pub mod transport;

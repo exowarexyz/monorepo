@@ -36,6 +36,10 @@ Put rejects gzip request compression even though other services accept it.
 Encoding rejections advertise zstd through `Accept-Encoding`.
 Other services continue through the ordinary ConnectRPC dispatcher.
 
+Custom ingest handlers can reuse `PutEntryCursor`, `UnknownBudget`,
+`decode_entry_with_budget`, and the validation and error helpers exported from
+the crate root.
+
 Call `message_bound().await` before sizing preparation memory. Identity requests
 use their enforced wire and message limits. Zstd requests use the validated size
 pledge. Inspection runs through the configured CPU executor and retains any

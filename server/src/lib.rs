@@ -27,7 +27,10 @@ pub use stream::{
     CompiledMatchers, CompiledSelector, InvalidFilter, StreamHub, StreamNotification,
     StreamNotifier,
 };
-pub use validate::{validate_get_many_request, IngestLimits};
+pub use validate::{
+    put_too_large_error, validate_get_many_request, validate_put_count, validate_put_entry,
+    IngestLimits,
+};
 
 /// Types used by filtered-batch and matcher APIs, re-exported so backends can
 /// use the server API without a version-matched direct SDK dependency.
@@ -38,5 +41,8 @@ pub use exoware_sdk::{
     stream_filter::{Filter, StreamFilter},
 };
 
+pub use ingest::parser::{
+    decode_entry_with_budget, Field, PutEntryCursor, PutParseError, UnknownBudget,
+};
 pub use ingest::service::{PutConfig, PutMiddleware, PutService};
 pub use ingest::{PutError, PutInput};
