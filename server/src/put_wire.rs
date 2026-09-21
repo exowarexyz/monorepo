@@ -7,11 +7,36 @@ use serde::Deserialize;
 
 use crate::validate::{validate_put_entry, IngestLimits};
 
-fn proto_error(error: DecodeError) -> ConnectError {
-    ConnectError::invalid_argument(format!("failed to decode proto request: {error}"))
+/// Distinguishes input that can be resumed from invalid Put data.
+#[derive(Debug, thiserror::Error)]
+pub enum PutParseError {
+    /// More input may complete the current top-level field.
+    #[error("failed to decode proto request: unexpected end of buffer")]
+    Incomplete,
+    /// Additional input cannot repair the wire structure.
+    #[error("{0}")]
+    Malformed(String),
 }
 
-struct UnknownBudget {
+impl From<DecodeError> for PutParseError {
+    fn from(error: DecodeError) -> Self {
+        Self::Malformed(format!("failed to decode proto request: {error}"))
+    }
+}
+
+impl From<PutParseError> for ConnectError {
+    fn from(error: PutParseError) -> Self {
+        match error {
+            PutParseError::Incomplete => {
+                Self::invalid_argument("failed to decode proto request: unexpected end of buffer")
+            }
+            PutParseError::Malformed(message) => Self::invalid_argument(message),
+        }
+    }
+}
+
+/// Share one budget across top-level fields and decoded entries in a Put request.
+pub struct UnknownBudget {
     remaining: usize,
 }
 
@@ -24,6 +49,10 @@ impl Default for UnknownBudget {
 }
 
 impl UnknownBudget {
+    pub fn remaining(&self) -> usize {
+        self.remaining
+    }
+
     fn charge(&mut self) -> Result<(), DecodeError> {
         self.remaining = self
             .remaining
@@ -56,44 +85,84 @@ fn skip_unknown(
     Ok(())
 }
 
-enum Field<'a> {
+/// A complete top-level Put field returned without copying its payload.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Field<'a> {
+    /// Entry payload without its enclosing tag and length.
     Entry(&'a [u8]),
+    /// An unknown field that has been skipped and charged to the shared budget.
     Unknown,
 }
 
-struct Cursor<'a> {
+/// Borrows buffered Put bytes while retaining incomplete fields for the next input buffer.
+/// After consuming complete fields at body EOF, reject a non-empty [`Self::remaining`] or
+/// final [`PutParseError::Incomplete`] with `ConnectError::from(PutParseError::Incomplete)`
+/// to preserve the legacy unexpected end of buffer error.
+pub struct PutEntryCursor<'a> {
     remaining: &'a [u8],
+    original_len: usize,
 }
 
-impl<'a> Cursor<'a> {
-    fn next(&mut self, budget: &mut UnknownBudget) -> Result<Option<Field<'a>>, DecodeError> {
+impl<'a> PutEntryCursor<'a> {
+    pub fn new(wire: &'a [u8]) -> Self {
+        Self {
+            remaining: wire,
+            original_len: wire.len(),
+        }
+    }
+
+    /// Bytes consumed since [`Self::new`]. Subtract an entry's length for its payload offset.
+    pub fn consumed(&self) -> usize {
+        self.original_len - self.remaining.len()
+    }
+
+    /// Preserve this unconsumed suffix when constructing a cursor over more input.
+    pub fn remaining(&self) -> &'a [u8] {
+        self.remaining
+    }
+
+    /// Leaves both input and budget untouched on error so incomplete fields can be retried.
+    /// `Ok(None)` means the current buffer is exhausted, not that the request has ended.
+    pub fn next(&mut self, budget: &mut UnknownBudget) -> Result<Option<Field<'a>>, PutParseError> {
         if self.remaining.is_empty() {
             return Ok(None);
         }
 
-        let before_tag = self.remaining;
-        let tag = Tag::decode(&mut self.remaining)?;
-        if tag.field_number() == 1 {
-            check_wire_type(tag, WireType::LengthDelimited)?;
-            return buffa::types::borrow_bytes(&mut self.remaining)
-                .map(|entry| Some(Field::Entry(entry)));
-        }
-        skip_unknown(
-            tag,
-            before_tag,
-            &mut self.remaining,
-            buffa::RECURSION_LIMIT,
-            budget,
-        )?;
-        Ok(Some(Field::Unknown))
+        // Commit only complete fields so a later caller can retry the same cursor.
+        let mut remaining = self.remaining;
+        let mut next_budget = UnknownBudget {
+            remaining: budget.remaining,
+        };
+        let decoded = (|| {
+            let tag = Tag::decode(&mut remaining)?;
+            if tag.field_number() == 1 {
+                check_wire_type(tag, WireType::LengthDelimited)?;
+                return buffa::types::borrow_bytes(&mut remaining).map(Field::Entry);
+            }
+            skip_unknown(
+                tag,
+                self.remaining,
+                &mut remaining,
+                buffa::RECURSION_LIMIT,
+                &mut next_budget,
+            )?;
+            Ok(Field::Unknown)
+        })();
+        let field = decoded.map_err(|error| match error {
+            DecodeError::UnexpectedEof => PutParseError::Incomplete,
+            error => error.into(),
+        })?;
+        self.remaining = remaining;
+        *budget = next_budget;
+        Ok(Some(field))
     }
 }
 
 pub(crate) fn count_put_entries(wire: &[u8]) -> Result<usize, ConnectError> {
-    let mut cursor = Cursor { remaining: wire };
+    let mut cursor = PutEntryCursor::new(wire);
     let mut budget = UnknownBudget::default();
     let mut count = 0;
-    while let Some(field) = cursor.next(&mut budget).map_err(proto_error)? {
+    while let Some(field) = cursor.next(&mut budget)? {
         if matches!(field, Field::Entry(_)) {
             count += 1;
         }
@@ -101,10 +170,12 @@ pub(crate) fn count_put_entries(wire: &[u8]) -> Result<usize, ConnectError> {
     Ok(count)
 }
 
-fn parse_entry<'a>(
+/// Decode a complete entry while charging unknown fields to its request's shared budget.
+/// Fields that overrun the declared entry boundary are malformed, not incomplete.
+pub fn decode_entry_with_budget<'a>(
     mut remaining: &'a [u8],
     budget: &mut UnknownBudget,
-) -> Result<(&'a [u8], &'a [u8]), DecodeError> {
+) -> Result<(&'a [u8], &'a [u8]), PutParseError> {
     let mut key = &remaining[..0];
     let mut value = key;
     while !remaining.is_empty() {
@@ -139,16 +210,16 @@ pub(crate) fn parse_put_entries(
     // The dispatcher validates this count against the same immutable buffer before admission.
     let mut entries = Vec::with_capacity(validated_count);
     let mut validation = None;
-    let mut cursor = Cursor { remaining: wire };
+    let mut cursor = PutEntryCursor::new(wire);
     let mut budget = UnknownBudget::default();
     let mut count = 0;
-    while let Some(field) = cursor.next(&mut budget).map_err(proto_error)? {
+    while let Some(field) = cursor.next(&mut budget)? {
         let Field::Entry(entry) = field else {
             continue;
         };
         let index = count;
         count += 1;
-        let (key, value) = parse_entry(entry, &mut budget).map_err(proto_error)?;
+        let (key, value) = decode_entry_with_budget(entry, &mut budget)?;
 
         // Finish decoding after validation fails so malformed wire retains precedence.
         if validation.is_none() {
@@ -459,7 +530,7 @@ mod tests {
         let wire =
             Bytes::from([bytes_field(3, &vec![0xff; 1_000_001]), entry(b"a", b"b")].concat());
         let mut budget = UnknownBudget { remaining: 1 };
-        let mut cursor = Cursor { remaining: &wire };
+        let mut cursor = PutEntryCursor::new(&wire);
         assert!(matches!(cursor.next(&mut budget), Ok(Some(Field::Unknown))));
         assert_eq!(budget.remaining, 0);
         assert!(matches!(
