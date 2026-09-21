@@ -28,7 +28,7 @@ use datafusion::physical_plan::{
 use exoware_sdk::keys::Key;
 use exoware_sdk::kv_codec::{decode_stored_row, StoredRow};
 use exoware_sdk::PrefixedStoreClient;
-use exoware_sdk::{RangeMode, RangeStream, SerializableReadSession, StoreKeyPrefix};
+use exoware_sdk::{RangeMode, RangeStream, ReadSession, StoreKeyPrefix};
 
 use crate::builder::*;
 use crate::codec::*;
@@ -564,7 +564,7 @@ impl ExecutionPlan for KvScanExec {
 }
 
 pub(crate) struct ScanCtx<'a> {
-    pub(crate) session: &'a SerializableReadSession,
+    pub(crate) session: &'a ReadSession,
     key_prefix: &'a StoreKeyPrefix,
     pub(crate) model: &'a TableModel,
     pub(crate) predicate: &'a QueryPredicate,
@@ -1030,7 +1030,7 @@ fn ordered_ranges<'a>(
 }
 
 async fn range_stream_with_direction(
-    session: &SerializableReadSession,
+    session: &ReadSession,
     range: &KeyRange,
     limit: usize,
     batch_size: usize,

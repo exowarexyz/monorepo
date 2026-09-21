@@ -438,14 +438,14 @@ impl PrefixedStoreClient {
         Stream { c: self }
     }
 
-    /// Create a serializable read session with no initial floor over this namespace.
-    pub fn create_session(&self) -> SerializableReadSession {
+    /// Create a read session with no initial floor over this namespace.
+    pub fn create_session(&self) -> ReadSession {
         self.create_session_with_sequence(0)
     }
 
-    /// Create a serializable read session whose read floor starts at `sequence`.
-    pub fn create_session_with_sequence(&self, sequence: u64) -> SerializableReadSession {
-        SerializableReadSession {
+    /// Create a read session whose read floor starts at `sequence`.
+    pub fn create_session_with_sequence(&self, sequence: u64) -> ReadSession {
+        ReadSession {
             client: self.clone(),
             state: Arc::new(SessionState {
                 minimum_sequence: sequence,
@@ -1704,7 +1704,7 @@ pub struct StoreClient {
 /// Streamed reads record response sequences as frames arrive, including the
 /// first frame fetched before the stream is returned to the caller.
 #[derive(Clone, Debug)]
-pub struct SerializableReadSession {
+pub struct ReadSession {
     client: PrefixedStoreClient,
     state: Arc<SessionState>,
 }
@@ -2685,7 +2685,7 @@ impl<'a> Retention<'a> {
     }
 }
 
-impl SerializableReadSession {
+impl ReadSession {
     /// Minimum Store sequence requested by subsequent reads.
     ///
     /// Before any response, this is the explicitly configured floor, if present.

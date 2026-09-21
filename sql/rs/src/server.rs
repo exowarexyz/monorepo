@@ -181,7 +181,7 @@ impl SqlServer {
     fn query_session(
         &self,
         min_sequence_number: u64,
-    ) -> (SessionContext, exoware_sdk::SerializableReadSession) {
+    ) -> (SessionContext, exoware_sdk::ReadSession) {
         let ctx = query_context_with_min_sequence(&self.ctx, &self.store, min_sequence_number);
         let read_session = crate::types::request_read_session(&ctx.copied_config(), &self.store)
             .expect("query context must retain its Store read session");
