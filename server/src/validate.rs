@@ -68,7 +68,8 @@ fn field_error(
     )
 }
 
-pub(crate) fn put_too_large_error(error: PutTooLarge) -> ConnectError {
+/// Preserve the Put size rejection contract for backend admission failures.
+pub fn put_too_large_error(error: PutTooLarge) -> ConnectError {
     field_error(
         INGEST_ERROR_DOMAIN,
         "kvs",
@@ -142,7 +143,8 @@ pub(crate) fn validate_put_request(
     Ok(())
 }
 
-pub(crate) fn validate_put_count(count: usize, limits: IngestLimits) -> Result<(), ConnectError> {
+/// Preserve the Put validation details for empty or oversized batches.
+pub fn validate_put_count(count: usize, limits: IngestLimits) -> Result<(), ConnectError> {
     if count == 0 {
         return Err(field_error(
             INGEST_ERROR_DOMAIN,
@@ -162,7 +164,8 @@ pub(crate) fn validate_put_count(count: usize, limits: IngestLimits) -> Result<(
     Ok(())
 }
 
-pub(crate) fn validate_put_entry(
+/// Enforce entry limits with key failures taking precedence over value failures.
+pub fn validate_put_entry(
     index: usize,
     key: &[u8],
     value: &[u8],

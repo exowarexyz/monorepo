@@ -472,7 +472,8 @@ fn with_retry_hint(err: ConnectError, retry_delay: std::time::Duration) -> Conne
     )
 }
 
-fn ingest_error_to_connect(err: IngestError) -> ConnectError {
+/// Preserve ingest rejection details and retry hints across backend adapters.
+pub fn ingest_error_to_connect(err: IngestError) -> ConnectError {
     match err {
         IngestError::PutTooLarge(error) => validate::put_too_large_error(error),
         IngestError::ResourceExhausted { message } => ConnectError::resource_exhausted(message),
@@ -489,6 +490,21 @@ fn ingest_error_to_connect(err: IngestError) -> ConnectError {
         ),
         IngestError::Internal { message } => ConnectError::internal(message),
     }
+}
+
+/// Distinguish readiness rejection from backend outages and advertise a retry delay.
+pub fn worker_not_ready_error() -> ConnectError {
+    with_retry_hint(
+        with_error_info_detail(
+            ConnectError::unavailable("ingest is not ready"),
+            ErrorInfo {
+                reason: REASON_WORKER_NOT_READY.to_string(),
+                domain: INGEST_ERROR_DOMAIN.to_string(),
+                ..Default::default()
+            },
+        ),
+        RETRY_HINT_DELAY,
+    )
 }
 
 impl<I> Dispatcher for PutDispatcher<I>
@@ -515,17 +531,7 @@ where
         Box::pin(async move {
             // Readiness takes precedence over malformed input to avoid decoding rejected work.
             if !state.ready.load(Ordering::SeqCst) {
-                return Err(with_retry_hint(
-                    with_error_info_detail(
-                        ConnectError::unavailable("ingest is not ready"),
-                        ErrorInfo {
-                            reason: REASON_WORKER_NOT_READY.to_string(),
-                            domain: INGEST_ERROR_DOMAIN.to_string(),
-                            ..Default::default()
-                        },
-                    ),
-                    RETRY_HINT_DELAY,
-                ));
+                return Err(worker_not_ready_error());
             }
 
             let wire = request.encoded()?;
