@@ -242,12 +242,16 @@ function assertU64(value: bigint, label: string): void {
   }
 }
 
+function assertOptionalMinSequenceNumber(minSequenceNumber?: bigint): void {
+  if (minSequenceNumber !== undefined) {
+    assertU64(minSequenceNumber, 'minSequenceNumber');
+  }
+}
+
 function assertOperationWindow(request: OperationRangeRequest): void {
   assertU64(request.tip, 'tip');
   assertU64(request.startLocation, 'startLocation');
-  if (request.minSequenceNumber !== undefined) {
-    assertU64(request.minSequenceNumber, 'minSequenceNumber');
-  }
+  assertOptionalMinSequenceNumber(request.minSequenceNumber);
   assertU32(request.maxLocations, 'maxLocations', true);
   if (request.startLocation > request.tip) {
     throw new Error('invalid operation window');
@@ -436,14 +440,17 @@ export class OrderedQmdbClient {
     key: BytesLike,
     tip: bigint,
     expectedRoot: BytesLike,
+    minSequenceNumber?: bigint,
     options?: CallOptions,
   ): Promise<VerifiedCurrentKeyValueProof> {
+    assertOptionalMinSequenceNumber(minSequenceNumber);
     await ensureWasm();
     const requestedKey = encode_vec_key(toBytes(key));
     const response = await this.lookup.get(
       create(GetRequestSchema, {
         key: requestedKey,
         tip,
+        ...(minSequenceNumber !== undefined ? { minSequenceNumber } : {}),
       }),
       options,
     );
@@ -466,8 +473,10 @@ export class OrderedQmdbClient {
     keys: BytesLike[],
     tip: bigint,
     expectedRoot: BytesLike,
+    minSequenceNumber?: bigint,
     options?: CallOptions,
   ): Promise<VerifiedCurrentKeyLookupProof> {
+    assertOptionalMinSequenceNumber(minSequenceNumber);
     await ensureWasm();
     const requestedKeys = keys.map((key) => encode_vec_key(toBytes(key)));
     assertDistinctKeys(requestedKeys);
@@ -475,6 +484,7 @@ export class OrderedQmdbClient {
       create(GetManyRequestSchema, {
         keys: requestedKeys,
         tip,
+        ...(minSequenceNumber !== undefined ? { minSequenceNumber } : {}),
       }),
       options,
     );
@@ -496,11 +506,13 @@ export class OrderedQmdbClient {
       endKey?: BytesLike;
       limit: number;
       tip: bigint;
+      minSequenceNumber?: bigint;
     },
     expectedRoot: BytesLike,
     options?: CallOptions,
   ): Promise<VerifiedCurrentKeyRangeProof> {
     assertU32(request.limit, 'limit', true);
+    assertOptionalMinSequenceNumber(request.minSequenceNumber);
     await ensureWasm();
     const startKey = encode_vec_key(toBytes(request.startKey));
     const endKey =
@@ -513,6 +525,9 @@ export class OrderedQmdbClient {
         ...(endKey === undefined ? {} : { endKey }),
         limit: request.limit,
         tip: request.tip,
+        ...(request.minSequenceNumber !== undefined
+          ? { minSequenceNumber: request.minSequenceNumber }
+          : {}),
       }),
       options,
     );
@@ -593,11 +608,7 @@ export class OrderedQmdbClient {
   }
 
   async getCurrentOperationRange(
-    request: {
-      tip: bigint;
-      startLocation: bigint;
-      maxLocations: number;
-    },
+    request: OperationRangeRequest,
     expectedRoot: BytesLike,
     options?: CallOptions,
   ): Promise<VerifiedCurrentOperationRangeProof> {

@@ -263,6 +263,7 @@ trait CurrentOperationRangeReader<const N: usize>: Send + Sync + 'static {
         watermark: Location<Self::Family>,
         start_location: Location<Self::Family>,
         max_locations: u32,
+        min_sequence_number: Option<u64>,
     ) -> impl Future<
         Output = Result<
             CurrentOperationRangeProofResult<Self::Digest, Self::Operation, N, Self::Family>,
@@ -515,6 +516,7 @@ where
         watermark: Location<F>,
         start_location: Location<F>,
         max_locations: u32,
+        min_sequence_number: Option<u64>,
     ) -> impl Future<
         Output = Result<
             CurrentOperationRangeProofResult<Self::Digest, Self::Operation, N, F>,
@@ -526,6 +528,7 @@ where
             watermark,
             start_location,
             max_locations,
+            min_sequence_number,
         )
     }
 }
@@ -549,6 +552,7 @@ where
         watermark: Location<F>,
         start_location: Location<F>,
         max_locations: u32,
+        min_sequence_number: Option<u64>,
     ) -> impl Future<
         Output = Result<
             CurrentOperationRangeProofResult<Self::Digest, Self::Operation, N, F>,
@@ -560,6 +564,7 @@ where
             watermark,
             start_location,
             max_locations,
+            min_sequence_number,
         )
     }
 }
@@ -942,7 +947,7 @@ where
             })?;
             let tip = Location::new(request.tip);
             let proof = client
-                .key_value_proof_raw_at(tip, key.as_ref())
+                .key_value_proof_raw_at(tip, key.as_ref(), request.min_sequence_number)
                 .await
                 .map_err(qmdb_error_to_connect)?;
             connectrpc::Response::ok(crate::proto::get_response(&proof))
@@ -966,7 +971,7 @@ where
                     ConnectError::invalid_argument(format!("invalid QMDB key: {error}"))
                 })?;
             let proofs = client
-                .key_lookup_proofs_raw_at(tip, &decoded_keys)
+                .key_lookup_proofs_raw_at(tip, &decoded_keys, request.min_sequence_number)
                 .await
                 .map_err(qmdb_error_to_connect)?;
             connectrpc::Response::ok(crate::proto::ordered_get_many_response(&proofs))
@@ -996,7 +1001,7 @@ where
             })?;
             let tip = Location::new(request.tip);
             let proof = client
-                .key_value_proof_raw_at::<N, _>(tip, key.as_ref())
+                .key_value_proof_raw_at::<N, _>(tip, key.as_ref(), request.min_sequence_number)
                 .await
                 .map_err(qmdb_error_to_connect)?;
             connectrpc::Response::ok(crate::proto::get_response(&proof))
@@ -1021,7 +1026,7 @@ where
                     ConnectError::invalid_argument(format!("invalid QMDB key: {error}"))
                 })?;
             let proofs = client
-                .key_lookup_proofs_raw_at::<N, _>(tip, &keys)
+                .key_lookup_proofs_raw_at::<N, _>(tip, &keys, request.min_sequence_number)
                 .await
                 .map_err(qmdb_error_to_connect)?;
             connectrpc::Response::ok(crate::proto::unordered_get_many_response(&proofs))
@@ -1058,7 +1063,13 @@ where
                     ConnectError::invalid_argument(format!("invalid QMDB key: {error}"))
                 })?;
             let proof = client
-                .key_range_proof_raw_at(tip, start_key, end_key, request.limit)
+                .key_range_proof_raw_at(
+                    tip,
+                    start_key,
+                    end_key,
+                    request.limit,
+                    request.min_sequence_number,
+                )
                 .await
                 .map_err(qmdb_error_to_connect)?;
             connectrpc::Response::ok(crate::proto::get_range_response(&proof))
@@ -1163,6 +1174,7 @@ where
                     Location::new(request.tip),
                     Location::new(request.start_location),
                     request.max_locations,
+                    request.min_sequence_number,
                 )
                 .await
                 .map_err(qmdb_error_to_connect)?;

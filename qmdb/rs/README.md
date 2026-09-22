@@ -220,8 +220,9 @@ key-exclusion semantics. Immutable and keyless logical reads are Rust helpers.
 Their Connect stacks expose the operation log.
 
 Connect stacks take a `PrefixedStoreClient` and codec configuration. The services
-in each stack share one native client. Response sequence metadata comes only
-from reads performed by that request.
+in each stack share one native client. All unary proof requests accept an optional
+`min_sequence_number`: the minimum Store sequence for checking publication of
+the requested watermark.
 
 `OperationLogClient` verifies historical ranges against a caller-supplied root.
 Without a current-root witness this is the operation-log root. When a response

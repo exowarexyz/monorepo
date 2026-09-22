@@ -631,7 +631,7 @@ async fn verify_snapshots<F, K, V, E>(
                 .await
                 .is_err());
             let native_current = native
-                .current_operation_range_proof(tip, Location::new(0), count as u32)
+                .current_operation_range_proof(tip, Location::new(0), count as u32, None)
                 .await
                 .expect("native current range");
             assert_eq!(native_current.root, snapshot.root);
@@ -662,7 +662,7 @@ async fn verify_snapshots<F, K, V, E>(
             assert!(lookup.get_many(request, &wrong_root).await.is_err());
             assert_eq!(lookups.len(), all_keys.len());
             let raw_lookups = native
-                .key_lookup_proofs_raw_at(tip, &all_keys)
+                .key_lookup_proofs_raw_at(tip, &all_keys, None)
                 .await
                 .expect("native hits and misses");
             assert_eq!(raw_lookups.len(), all_keys.len());
@@ -765,7 +765,13 @@ async fn verify_snapshots<F, K, V, E>(
                 assert_update(&entry.operation, key, value);
             }
             let raw = native
-                .key_range_proof_raw_at(tip, all_keys[1].clone(), Some(all_keys[5].clone()), 20)
+                .key_range_proof_raw_at(
+                    tip,
+                    all_keys[1].clone(),
+                    Some(all_keys[5].clone()),
+                    20,
+                    None,
+                )
                 .await
                 .expect("native bounded range");
             assert_eq!(raw.entries.len(), bounded.entries.len());

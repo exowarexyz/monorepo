@@ -471,13 +471,14 @@ async fn test_ordered_mmb_round_trip() {
             source.latest_location,
             Location::<mmb::Family>::new(0),
             source.operations.len() as u32,
+            None,
         )
         .await
         .expect("current operation range proof");
     assert_eq!(current.operations, source.operations);
 
     let key_proof = qmdb_client
-        .key_value_proof_at(source.latest_location, b"alpha".as_slice())
+        .key_value_proof_at(source.latest_location, b"alpha".as_slice(), None)
         .await
         .expect("key_value_proof_at");
     match &key_proof.operation {
@@ -522,6 +523,7 @@ async fn test_ordered_mmb_multi_peak_grafted_chunk_round_trip() {
             source.latest_location,
             Location::<mmb::Family>::new(0),
             source.operations.len() as u32,
+            None,
         )
         .await
         .expect("current operation range proof");
@@ -529,7 +531,7 @@ async fn test_ordered_mmb_multi_peak_grafted_chunk_round_trip() {
 
     let key = b"k-00000007".to_vec();
     let key_proof = qmdb_client
-        .key_value_proof_at(source.latest_location, key.as_slice())
+        .key_value_proof_at(source.latest_location, key.as_slice(), None)
         .await
         .expect("key_value_proof_at");
     assert_eq!(key_proof.root, source.current_boundary.root);
@@ -648,7 +650,7 @@ async fn assert_incremental_seed_batches_keep_current_proofs_verifiable<F>(
         key_cfg(),
     );
     let key_proof = qmdb_client
-        .key_value_proof_at(latest_location, latest_key.as_slice())
+        .key_value_proof_at(latest_location, latest_key.as_slice(), None)
         .await
         .expect("latest key proof");
     assert_eq!(key_proof.root, expected_root);
@@ -667,7 +669,7 @@ async fn assert_incremental_seed_batches_keep_current_proofs_verifiable<F>(
             .get(&key)
             .expect("sample key must be active");
         let proof = qmdb_client
-            .key_value_proof_at(latest_location, key.as_slice())
+            .key_value_proof_at(latest_location, key.as_slice(), None)
             .await
             .unwrap_or_else(|error| panic!("active key proof for {key:?}: {error:?}"));
         assert_eq!(proof.root, expected_root);
@@ -686,6 +688,7 @@ async fn assert_incremental_seed_batches_keep_current_proofs_verifiable<F>(
             b"k-00000000".to_vec(),
             Some(b"k-00000020".to_vec()),
             10,
+            None,
         )
         .await
         .expect("old-key range proof");
@@ -824,7 +827,7 @@ async fn test_ordered_mmb_persistent_interleaved_seed_batches_keep_current_proof
         expected_ops_root
     );
     let proof = qmdb_client
-        .key_value_proof_at(latest_location, b"k-00000005".as_slice())
+        .key_value_proof_at(latest_location, b"k-00000005".as_slice(), None)
         .await
         .expect("key proof");
     assert_eq!(proof.root, expected_root);
@@ -888,6 +891,7 @@ async fn test_ordered_fixed_round_trip() {
             source.latest_location,
             Location::<mmr::Family>::new(0),
             source.operations.len() as u32,
+            None,
         )
         .await
         .expect("fixed current operation range proof");
@@ -896,7 +900,7 @@ async fn test_ordered_fixed_round_trip() {
     let alpha = Sha256::fill(0xA1);
     let one = Sha256::fill(0x01);
     let key_proof = qmdb_client
-        .key_value_proof_at(source.latest_location, alpha.as_ref())
+        .key_value_proof_at(source.latest_location, alpha.as_ref(), None)
         .await
         .expect("fixed key_value_proof_at");
     match &key_proof.operation {
@@ -944,6 +948,7 @@ async fn test_current_operation_range_proof() {
             source.latest_location,
             Location::<mmr::Family>::new(0),
             source.operations.len() as u32,
+            None,
         )
         .await
         .expect("current_operation_range_proof");
@@ -963,7 +968,7 @@ async fn test_key_value_proof() {
         key_cfg(),
     );
     let result = qmdb_client
-        .key_value_proof_at(source.latest_location, b"alpha".as_slice())
+        .key_value_proof_at(source.latest_location, b"alpha".as_slice(), None)
         .await
         .expect("key_value_proof_at");
     match &result.operation {
@@ -1087,7 +1092,7 @@ async fn assert_point_proof_reads_bounded_bitmap_chunks<F: Graftable>() {
     );
     query.bitmap_chunks.lock().unwrap().clear();
     let proof = qmdb_client
-        .key_value_proof_raw_at(source.latest_location, b"k-00000007")
+        .key_value_proof_raw_at(source.latest_location, b"k-00000007", None)
         .await
         .unwrap();
     assert_eq!(proof.root, source.current_boundary.root);
@@ -1278,7 +1283,7 @@ where
             });
         assert_eq!(root, expected_root);
         let proof = qmdb_client
-            .key_value_proof_raw_at(boundary, b"alpha".as_slice())
+            .key_value_proof_raw_at(boundary, b"alpha".as_slice(), None)
             .await
             .unwrap_or_else(|error| {
                 panic!("current proof at uploaded boundary {boundary}: {error}")

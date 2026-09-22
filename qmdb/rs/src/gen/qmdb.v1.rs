@@ -1442,6 +1442,16 @@ pub struct GetRequest {
         skip_serializing_if = "::buffa::json_helpers::skip_if::is_zero_u64"
     )]
     pub tip: u64,
+    /// Minimum Store sequence required by reads used to build this proof.
+    ///
+    /// Field 3: `min_sequence_number`
+    #[serde(
+        rename = "minSequenceNumber",
+        alias = "min_sequence_number",
+        with = "::buffa::json_helpers::opt_uint64",
+        skip_serializing_if = "::core::option::Option::is_none"
+    )]
+    pub min_sequence_number: ::core::option::Option<u64>,
     #[serde(skip)]
     #[doc(hidden)]
     pub __buffa_unknown_fields: ::buffa::UnknownFields,
@@ -1451,6 +1461,7 @@ impl ::core::fmt::Debug for GetRequest {
         f.debug_struct("GetRequest")
             .field("key", &self.key)
             .field("tip", &self.tip)
+            .field("min_sequence_number", &self.min_sequence_number)
             .finish()
     }
 }
@@ -1460,6 +1471,15 @@ impl GetRequest {
     ///
     /// Format: `type.googleapis.com/<fully.qualified.TypeName>`
     pub const TYPE_URL: &'static str = "type.googleapis.com/qmdb.v1.GetRequest";
+}
+impl GetRequest {
+    #[must_use = "with_* setters return `self` by value; assign or chain the result"]
+    #[inline]
+    ///Sets [`Self::min_sequence_number`] to `Some(value)`, consuming and returning `self`.
+    pub fn with_min_sequence_number(mut self, value: u64) -> Self {
+        self.min_sequence_number = Some(value);
+        self
+    }
 }
 ::buffa::impl_default_instance!(GetRequest);
 impl ::buffa::MessageName for GetRequest {
@@ -1487,6 +1507,9 @@ impl ::buffa::Message for GetRequest {
         if self.tip != 0u64 {
             size += 1u64 + ::buffa::types::uint64_encoded_len(self.tip) as u64;
         }
+        if let Some(v) = self.min_sequence_number {
+            size += 1u64 + ::buffa::types::uint64_encoded_len(v) as u64;
+        }
         size += self.__buffa_unknown_fields.encoded_len() as u64;
         ::buffa::saturate_size(size)
     }
@@ -1502,6 +1525,9 @@ impl ::buffa::Message for GetRequest {
         }
         if self.tip != 0u64 {
             ::buffa::types::put_uint64_field(2u32, self.tip, buf);
+        }
+        if let Some(v) = self.min_sequence_number {
+            ::buffa::types::put_uint64_field(3u32, v, buf);
         }
         self.__buffa_unknown_fields.write_to(buf);
     }
@@ -1530,6 +1556,15 @@ impl ::buffa::Message for GetRequest {
                 )?;
                 self.tip = ::buffa::types::decode_uint64(buf)?;
             }
+            3u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::Varint,
+                )?;
+                self.min_sequence_number = ::core::option::Option::Some(
+                    ::buffa::types::decode_uint64(buf)?,
+                );
+            }
             _ => {
                 self.__buffa_unknown_fields
                     .push(::buffa::encoding::decode_unknown_field(tag, buf, ctx)?);
@@ -1540,6 +1575,7 @@ impl ::buffa::Message for GetRequest {
     fn clear(&mut self) {
         self.key.clear();
         self.tip = 0u64;
+        self.min_sequence_number = ::core::option::Option::None;
         self.__buffa_unknown_fields.clear();
     }
 }
@@ -1596,6 +1632,16 @@ pub struct GetManyRequest {
         skip_serializing_if = "::buffa::json_helpers::skip_if::is_zero_u64"
     )]
     pub tip: u64,
+    /// Minimum Store sequence required by reads used to build these proofs.
+    ///
+    /// Field 3: `min_sequence_number`
+    #[serde(
+        rename = "minSequenceNumber",
+        alias = "min_sequence_number",
+        with = "::buffa::json_helpers::opt_uint64",
+        skip_serializing_if = "::core::option::Option::is_none"
+    )]
+    pub min_sequence_number: ::core::option::Option<u64>,
     #[serde(skip)]
     #[doc(hidden)]
     pub __buffa_unknown_fields: ::buffa::UnknownFields,
@@ -1605,6 +1651,7 @@ impl ::core::fmt::Debug for GetManyRequest {
         f.debug_struct("GetManyRequest")
             .field("keys", &self.keys)
             .field("tip", &self.tip)
+            .field("min_sequence_number", &self.min_sequence_number)
             .finish()
     }
 }
@@ -1614,6 +1661,15 @@ impl GetManyRequest {
     ///
     /// Format: `type.googleapis.com/<fully.qualified.TypeName>`
     pub const TYPE_URL: &'static str = "type.googleapis.com/qmdb.v1.GetManyRequest";
+}
+impl GetManyRequest {
+    #[must_use = "with_* setters return `self` by value; assign or chain the result"]
+    #[inline]
+    ///Sets [`Self::min_sequence_number`] to `Some(value)`, consuming and returning `self`.
+    pub fn with_min_sequence_number(mut self, value: u64) -> Self {
+        self.min_sequence_number = Some(value);
+        self
+    }
 }
 ::buffa::impl_default_instance!(GetManyRequest);
 impl ::buffa::MessageName for GetManyRequest {
@@ -1641,6 +1697,9 @@ impl ::buffa::Message for GetManyRequest {
         if self.tip != 0u64 {
             size += 1u64 + ::buffa::types::uint64_encoded_len(self.tip) as u64;
         }
+        if let Some(v) = self.min_sequence_number {
+            size += 1u64 + ::buffa::types::uint64_encoded_len(v) as u64;
+        }
         size += self.__buffa_unknown_fields.encoded_len() as u64;
         ::buffa::saturate_size(size)
     }
@@ -1656,6 +1715,9 @@ impl ::buffa::Message for GetManyRequest {
         }
         if self.tip != 0u64 {
             ::buffa::types::put_uint64_field(2u32, self.tip, buf);
+        }
+        if let Some(v) = self.min_sequence_number {
+            ::buffa::types::put_uint64_field(3u32, v, buf);
         }
         self.__buffa_unknown_fields.write_to(buf);
     }
@@ -1688,6 +1750,15 @@ impl ::buffa::Message for GetManyRequest {
                 )?;
                 self.tip = ::buffa::types::decode_uint64(buf)?;
             }
+            3u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::Varint,
+                )?;
+                self.min_sequence_number = ::core::option::Option::Some(
+                    ::buffa::types::decode_uint64(buf)?,
+                );
+            }
             _ => {
                 self.__buffa_unknown_fields
                     .push(::buffa::encoding::decode_unknown_field(tag, buf, ctx)?);
@@ -1698,6 +1769,7 @@ impl ::buffa::Message for GetManyRequest {
     fn clear(&mut self) {
         self.keys.clear();
         self.tip = 0u64;
+        self.min_sequence_number = ::core::option::Option::None;
         self.__buffa_unknown_fields.clear();
     }
 }
@@ -2050,6 +2122,16 @@ pub struct GetRangeRequest {
         skip_serializing_if = "::buffa::json_helpers::skip_if::is_zero_u64"
     )]
     pub tip: u64,
+    /// Minimum Store sequence required by reads used to build this proof.
+    ///
+    /// Field 5: `min_sequence_number`
+    #[serde(
+        rename = "minSequenceNumber",
+        alias = "min_sequence_number",
+        with = "::buffa::json_helpers::opt_uint64",
+        skip_serializing_if = "::core::option::Option::is_none"
+    )]
+    pub min_sequence_number: ::core::option::Option<u64>,
     #[serde(skip)]
     #[doc(hidden)]
     pub __buffa_unknown_fields: ::buffa::UnknownFields,
@@ -2061,6 +2143,7 @@ impl ::core::fmt::Debug for GetRangeRequest {
             .field("end_key", &self.end_key)
             .field("limit", &self.limit)
             .field("tip", &self.tip)
+            .field("min_sequence_number", &self.min_sequence_number)
             .finish()
     }
 }
@@ -2080,6 +2163,13 @@ impl GetRangeRequest {
         value: impl Into<::buffa::alloc::vec::Vec<u8>>,
     ) -> Self {
         self.end_key = Some(value.into());
+        self
+    }
+    #[must_use = "with_* setters return `self` by value; assign or chain the result"]
+    #[inline]
+    ///Sets [`Self::min_sequence_number`] to `Some(value)`, consuming and returning `self`.
+    pub fn with_min_sequence_number(mut self, value: u64) -> Self {
+        self.min_sequence_number = Some(value);
         self
     }
 }
@@ -2115,6 +2205,9 @@ impl ::buffa::Message for GetRangeRequest {
         if self.tip != 0u64 {
             size += 1u64 + ::buffa::types::uint64_encoded_len(self.tip) as u64;
         }
+        if let Some(v) = self.min_sequence_number {
+            size += 1u64 + ::buffa::types::uint64_encoded_len(v) as u64;
+        }
         size += self.__buffa_unknown_fields.encoded_len() as u64;
         ::buffa::saturate_size(size)
     }
@@ -2136,6 +2229,9 @@ impl ::buffa::Message for GetRangeRequest {
         }
         if self.tip != 0u64 {
             ::buffa::types::put_uint64_field(4u32, self.tip, buf);
+        }
+        if let Some(v) = self.min_sequence_number {
+            ::buffa::types::put_uint64_field(5u32, v, buf);
         }
         self.__buffa_unknown_fields.write_to(buf);
     }
@@ -2181,6 +2277,15 @@ impl ::buffa::Message for GetRangeRequest {
                 )?;
                 self.tip = ::buffa::types::decode_uint64(buf)?;
             }
+            5u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::Varint,
+                )?;
+                self.min_sequence_number = ::core::option::Option::Some(
+                    ::buffa::types::decode_uint64(buf)?,
+                );
+            }
             _ => {
                 self.__buffa_unknown_fields
                     .push(::buffa::encoding::decode_unknown_field(tag, buf, ctx)?);
@@ -2193,6 +2298,7 @@ impl ::buffa::Message for GetRangeRequest {
         self.end_key = ::core::option::Option::None;
         self.limit = 0u32;
         self.tip = 0u64;
+        self.min_sequence_number = ::core::option::Option::None;
         self.__buffa_unknown_fields.clear();
     }
 }
@@ -3196,6 +3302,16 @@ pub struct GetCurrentOperationRangeRequest {
         skip_serializing_if = "::buffa::json_helpers::skip_if::is_zero_u32"
     )]
     pub max_locations: u32,
+    /// Minimum Store sequence required by reads used to build this proof.
+    ///
+    /// Field 4: `min_sequence_number`
+    #[serde(
+        rename = "minSequenceNumber",
+        alias = "min_sequence_number",
+        with = "::buffa::json_helpers::opt_uint64",
+        skip_serializing_if = "::core::option::Option::is_none"
+    )]
+    pub min_sequence_number: ::core::option::Option<u64>,
     #[serde(skip)]
     #[doc(hidden)]
     pub __buffa_unknown_fields: ::buffa::UnknownFields,
@@ -3206,6 +3322,7 @@ impl ::core::fmt::Debug for GetCurrentOperationRangeRequest {
             .field("tip", &self.tip)
             .field("start_location", &self.start_location)
             .field("max_locations", &self.max_locations)
+            .field("min_sequence_number", &self.min_sequence_number)
             .finish()
     }
 }
@@ -3215,6 +3332,15 @@ impl GetCurrentOperationRangeRequest {
     ///
     /// Format: `type.googleapis.com/<fully.qualified.TypeName>`
     pub const TYPE_URL: &'static str = "type.googleapis.com/qmdb.v1.GetCurrentOperationRangeRequest";
+}
+impl GetCurrentOperationRangeRequest {
+    #[must_use = "with_* setters return `self` by value; assign or chain the result"]
+    #[inline]
+    ///Sets [`Self::min_sequence_number`] to `Some(value)`, consuming and returning `self`.
+    pub fn with_min_sequence_number(mut self, value: u64) -> Self {
+        self.min_sequence_number = Some(value);
+        self
+    }
 }
 ::buffa::impl_default_instance!(GetCurrentOperationRangeRequest);
 impl ::buffa::MessageName for GetCurrentOperationRangeRequest {
@@ -3246,6 +3372,9 @@ impl ::buffa::Message for GetCurrentOperationRangeRequest {
         if self.max_locations != 0u32 {
             size += 1u64 + ::buffa::types::uint32_encoded_len(self.max_locations) as u64;
         }
+        if let Some(v) = self.min_sequence_number {
+            size += 1u64 + ::buffa::types::uint64_encoded_len(v) as u64;
+        }
         size += self.__buffa_unknown_fields.encoded_len() as u64;
         ::buffa::saturate_size(size)
     }
@@ -3264,6 +3393,9 @@ impl ::buffa::Message for GetCurrentOperationRangeRequest {
         }
         if self.max_locations != 0u32 {
             ::buffa::types::put_uint32_field(3u32, self.max_locations, buf);
+        }
+        if let Some(v) = self.min_sequence_number {
+            ::buffa::types::put_uint64_field(4u32, v, buf);
         }
         self.__buffa_unknown_fields.write_to(buf);
     }
@@ -3299,6 +3431,15 @@ impl ::buffa::Message for GetCurrentOperationRangeRequest {
                 )?;
                 self.max_locations = ::buffa::types::decode_uint32(buf)?;
             }
+            4u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::Varint,
+                )?;
+                self.min_sequence_number = ::core::option::Option::Some(
+                    ::buffa::types::decode_uint64(buf)?,
+                );
+            }
             _ => {
                 self.__buffa_unknown_fields
                     .push(::buffa::encoding::decode_unknown_field(tag, buf, ctx)?);
@@ -3310,6 +3451,7 @@ impl ::buffa::Message for GetCurrentOperationRangeRequest {
         self.tip = 0u64;
         self.start_location = 0u64;
         self.max_locations = 0u32;
+        self.min_sequence_number = ::core::option::Option::None;
         self.__buffa_unknown_fields.clear();
     }
 }
@@ -6119,6 +6261,10 @@ pub mod __buffa {
             ///
             /// Field 2: `tip`
             pub tip: u64,
+            /// Minimum Store sequence required by reads used to build this proof.
+            ///
+            /// Field 3: `min_sequence_number`
+            pub min_sequence_number: ::core::option::Option<u64>,
             pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
         }
         impl<'a> ::buffa::MessageView<'a> for GetRequestView<'a> {
@@ -6167,6 +6313,15 @@ pub mod __buffa {
                         )?;
                         view.tip = ::buffa::types::decode_uint64(&mut cur)?;
                     }
+                    3u32 => {
+                        ::buffa::encoding::check_wire_type(
+                            tag,
+                            ::buffa::encoding::WireType::Varint,
+                        )?;
+                        view.min_sequence_number = Some(
+                            ::buffa::types::decode_uint64(&mut cur)?,
+                        );
+                    }
                     _ => {
                         ::buffa::encoding::skip_field_depth(tag, &mut cur, ctx.depth())?;
                         let span_len = before_tag.len() - cur.len();
@@ -6192,6 +6347,7 @@ pub mod __buffa {
                 ::core::result::Result::Ok(super::super::GetRequest {
                     key: (self.key).to_vec(),
                     tip: self.tip,
+                    min_sequence_number: self.min_sequence_number,
                     __buffa_unknown_fields: self
                         .__buffa_unknown_fields
                         .to_owned()?
@@ -6212,6 +6368,9 @@ pub mod __buffa {
                 if self.tip != 0u64 {
                     size += 1u64 + ::buffa::types::uint64_encoded_len(self.tip) as u64;
                 }
+                if let Some(v) = self.min_sequence_number {
+                    size += 1u64 + ::buffa::types::uint64_encoded_len(v) as u64;
+                }
                 size += self.__buffa_unknown_fields.encoded_len() as u64;
                 ::buffa::saturate_size(size)
             }
@@ -6228,6 +6387,9 @@ pub mod __buffa {
                 }
                 if self.tip != 0u64 {
                     ::buffa::types::put_uint64_field(2u32, self.tip, buf);
+                }
+                if let Some(v) = self.min_sequence_number {
+                    ::buffa::types::put_uint64_field(3u32, v, buf);
                 }
                 self.__buffa_unknown_fields.write_to(buf);
             }
@@ -6262,6 +6424,13 @@ pub mod __buffa {
                         .serialize_entry(
                             "tip",
                             &::buffa::json_helpers::ProtoJson(&self.tip),
+                        )?;
+                }
+                if let ::core::option::Option::Some(__v) = self.min_sequence_number {
+                    __map
+                        .serialize_entry(
+                            "minSequenceNumber",
+                            &::buffa::json_helpers::ProtoJson(&__v),
                         )?;
                 }
                 __map.end()
@@ -6372,6 +6541,13 @@ pub mod __buffa {
             pub fn tip(&self) -> u64 {
                 self.0.reborrow().tip
             }
+            /// Minimum Store sequence required by reads used to build this proof.
+            ///
+            /// Field 3: `min_sequence_number`
+            #[must_use]
+            pub fn min_sequence_number(&self) -> ::core::option::Option<u64> {
+                self.0.reborrow().min_sequence_number
+            }
         }
         impl ::core::convert::From<::buffa::OwnedView<GetRequestView<'static>>>
         for GetRequestOwnedView {
@@ -6415,6 +6591,10 @@ pub mod __buffa {
             ///
             /// Field 2: `tip`
             pub tip: u64,
+            /// Minimum Store sequence required by reads used to build these proofs.
+            ///
+            /// Field 3: `min_sequence_number`
+            pub min_sequence_number: ::core::option::Option<u64>,
             pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
         }
         impl<'a> ::buffa::MessageView<'a> for GetManyRequestView<'a> {
@@ -6455,6 +6635,15 @@ pub mod __buffa {
                             ::buffa::encoding::WireType::Varint,
                         )?;
                         view.tip = ::buffa::types::decode_uint64(&mut cur)?;
+                    }
+                    3u32 => {
+                        ::buffa::encoding::check_wire_type(
+                            tag,
+                            ::buffa::encoding::WireType::Varint,
+                        )?;
+                        view.min_sequence_number = Some(
+                            ::buffa::types::decode_uint64(&mut cur)?,
+                        );
                     }
                     1u32 => {
                         ::buffa::encoding::check_wire_type(
@@ -6498,6 +6687,7 @@ pub mod __buffa {
                 ::core::result::Result::Ok(super::super::GetManyRequest {
                     keys: self.keys.iter().map(|b| (b).to_vec()).collect(),
                     tip: self.tip,
+                    min_sequence_number: self.min_sequence_number,
                     __buffa_unknown_fields: self
                         .__buffa_unknown_fields
                         .to_owned()?
@@ -6518,6 +6708,9 @@ pub mod __buffa {
                 if self.tip != 0u64 {
                     size += 1u64 + ::buffa::types::uint64_encoded_len(self.tip) as u64;
                 }
+                if let Some(v) = self.min_sequence_number {
+                    size += 1u64 + ::buffa::types::uint64_encoded_len(v) as u64;
+                }
                 size += self.__buffa_unknown_fields.encoded_len() as u64;
                 ::buffa::saturate_size(size)
             }
@@ -6534,6 +6727,9 @@ pub mod __buffa {
                 }
                 if self.tip != 0u64 {
                     ::buffa::types::put_uint64_field(2u32, self.tip, buf);
+                }
+                if let Some(v) = self.min_sequence_number {
+                    ::buffa::types::put_uint64_field(3u32, v, buf);
                 }
                 self.__buffa_unknown_fields.write_to(buf);
             }
@@ -6568,6 +6764,13 @@ pub mod __buffa {
                         .serialize_entry(
                             "tip",
                             &::buffa::json_helpers::ProtoJson(&self.tip),
+                        )?;
+                }
+                if let ::core::option::Option::Some(__v) = self.min_sequence_number {
+                    __map
+                        .serialize_entry(
+                            "minSequenceNumber",
+                            &::buffa::json_helpers::ProtoJson(&__v),
                         )?;
                 }
                 __map.end()
@@ -6679,6 +6882,13 @@ pub mod __buffa {
             #[must_use]
             pub fn tip(&self) -> u64 {
                 self.0.reborrow().tip
+            }
+            /// Minimum Store sequence required by reads used to build these proofs.
+            ///
+            /// Field 3: `min_sequence_number`
+            #[must_use]
+            pub fn min_sequence_number(&self) -> ::core::option::Option<u64> {
+                self.0.reborrow().min_sequence_number
             }
         }
         impl ::core::convert::From<::buffa::OwnedView<GetManyRequestView<'static>>>
@@ -7327,6 +7537,10 @@ pub mod __buffa {
             pub limit: u32,
             /// Field 4: `tip`
             pub tip: u64,
+            /// Minimum Store sequence required by reads used to build this proof.
+            ///
+            /// Field 5: `min_sequence_number`
+            pub min_sequence_number: ::core::option::Option<u64>,
             pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
         }
         impl<'a> ::buffa::MessageView<'a> for GetRangeRequestView<'a> {
@@ -7389,6 +7603,15 @@ pub mod __buffa {
                         )?;
                         view.tip = ::buffa::types::decode_uint64(&mut cur)?;
                     }
+                    5u32 => {
+                        ::buffa::encoding::check_wire_type(
+                            tag,
+                            ::buffa::encoding::WireType::Varint,
+                        )?;
+                        view.min_sequence_number = Some(
+                            ::buffa::types::decode_uint64(&mut cur)?,
+                        );
+                    }
                     _ => {
                         ::buffa::encoding::skip_field_depth(tag, &mut cur, ctx.depth())?;
                         let span_len = before_tag.len() - cur.len();
@@ -7422,6 +7645,7 @@ pub mod __buffa {
                     end_key: self.end_key.map(|b| (b).to_vec()),
                     limit: self.limit,
                     tip: self.tip,
+                    min_sequence_number: self.min_sequence_number,
                     __buffa_unknown_fields: self
                         .__buffa_unknown_fields
                         .to_owned()?
@@ -7450,6 +7674,9 @@ pub mod __buffa {
                 if self.tip != 0u64 {
                     size += 1u64 + ::buffa::types::uint64_encoded_len(self.tip) as u64;
                 }
+                if let Some(v) = self.min_sequence_number {
+                    size += 1u64 + ::buffa::types::uint64_encoded_len(v) as u64;
+                }
                 size += self.__buffa_unknown_fields.encoded_len() as u64;
                 ::buffa::saturate_size(size)
             }
@@ -7472,6 +7699,9 @@ pub mod __buffa {
                 }
                 if self.tip != 0u64 {
                     ::buffa::types::put_uint64_field(4u32, self.tip, buf);
+                }
+                if let Some(v) = self.min_sequence_number {
+                    ::buffa::types::put_uint64_field(5u32, v, buf);
                 }
                 self.__buffa_unknown_fields.write_to(buf);
             }
@@ -7520,6 +7750,13 @@ pub mod __buffa {
                         .serialize_entry(
                             "tip",
                             &::buffa::json_helpers::ProtoJson(&self.tip),
+                        )?;
+                }
+                if let ::core::option::Option::Some(__v) = self.min_sequence_number {
+                    __map
+                        .serialize_entry(
+                            "minSequenceNumber",
+                            &::buffa::json_helpers::ProtoJson(&__v),
                         )?;
                 }
                 __map.end()
@@ -7636,6 +7873,13 @@ pub mod __buffa {
             #[must_use]
             pub fn tip(&self) -> u64 {
                 self.0.reborrow().tip
+            }
+            /// Minimum Store sequence required by reads used to build this proof.
+            ///
+            /// Field 5: `min_sequence_number`
+            #[must_use]
+            pub fn min_sequence_number(&self) -> ::core::option::Option<u64> {
+                self.0.reborrow().min_sequence_number
             }
         }
         impl ::core::convert::From<::buffa::OwnedView<GetRangeRequestView<'static>>>
@@ -9503,6 +9747,10 @@ pub mod __buffa {
             pub start_location: u64,
             /// Field 3: `max_locations`
             pub max_locations: u32,
+            /// Minimum Store sequence required by reads used to build this proof.
+            ///
+            /// Field 4: `min_sequence_number`
+            pub min_sequence_number: ::core::option::Option<u64>,
             pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
         }
         impl<'a> ::buffa::MessageView<'a> for GetCurrentOperationRangeRequestView<'a> {
@@ -9558,6 +9806,15 @@ pub mod __buffa {
                         )?;
                         view.max_locations = ::buffa::types::decode_uint32(&mut cur)?;
                     }
+                    4u32 => {
+                        ::buffa::encoding::check_wire_type(
+                            tag,
+                            ::buffa::encoding::WireType::Varint,
+                        )?;
+                        view.min_sequence_number = Some(
+                            ::buffa::types::decode_uint64(&mut cur)?,
+                        );
+                    }
                     _ => {
                         ::buffa::encoding::skip_field_depth(tag, &mut cur, ctx.depth())?;
                         let span_len = before_tag.len() - cur.len();
@@ -9590,6 +9847,7 @@ pub mod __buffa {
                     tip: self.tip,
                     start_location: self.start_location,
                     max_locations: self.max_locations,
+                    min_sequence_number: self.min_sequence_number,
                     __buffa_unknown_fields: self
                         .__buffa_unknown_fields
                         .to_owned()?
@@ -9619,6 +9877,9 @@ pub mod __buffa {
                             + ::buffa::types::uint32_encoded_len(self.max_locations)
                                 as u64;
                 }
+                if let Some(v) = self.min_sequence_number {
+                    size += 1u64 + ::buffa::types::uint64_encoded_len(v) as u64;
+                }
                 size += self.__buffa_unknown_fields.encoded_len() as u64;
                 ::buffa::saturate_size(size)
             }
@@ -9638,6 +9899,9 @@ pub mod __buffa {
                 }
                 if self.max_locations != 0u32 {
                     ::buffa::types::put_uint32_field(3u32, self.max_locations, buf);
+                }
+                if let Some(v) = self.min_sequence_number {
+                    ::buffa::types::put_uint64_field(4u32, v, buf);
                 }
                 self.__buffa_unknown_fields.write_to(buf);
             }
@@ -9679,6 +9943,13 @@ pub mod __buffa {
                         .serialize_entry(
                             "maxLocations",
                             &::buffa::json_helpers::ProtoJson(&self.max_locations),
+                        )?;
+                }
+                if let ::core::option::Option::Some(__v) = self.min_sequence_number {
+                    __map
+                        .serialize_entry(
+                            "minSequenceNumber",
+                            &::buffa::json_helpers::ProtoJson(&__v),
                         )?;
                 }
                 __map.end()
@@ -9796,6 +10067,13 @@ pub mod __buffa {
             #[must_use]
             pub fn max_locations(&self) -> u32 {
                 self.0.reborrow().max_locations
+            }
+            /// Minimum Store sequence required by reads used to build this proof.
+            ///
+            /// Field 4: `min_sequence_number`
+            #[must_use]
+            pub fn min_sequence_number(&self) -> ::core::option::Option<u64> {
+                self.0.reborrow().min_sequence_number
             }
         }
         impl ::core::convert::From<

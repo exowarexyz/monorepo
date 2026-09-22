@@ -450,14 +450,20 @@ where
         watermark: Location<F>,
         start_location: Location<F>,
         max_locations: u32,
+        min_sequence_number: Option<u64>,
     ) -> Result<
         CurrentOperationRangeProofResult<H::Digest, ordered::Operation<F, K, E>, N, F>,
         QmdbError,
     > {
-        let watermark = self.resolve_watermark(watermark, None).await?;
+        let watermark = self
+            .resolve_watermark(watermark, min_sequence_number)
+            .await?;
         let end =
             crate::proof::resolve_range_bounds(watermark.location, start_location, max_locations)?;
-        let session = ReadSession::fixed(self.store.clone(), Some(watermark.sequence_number));
+        let session = ReadSession::fixed(
+            self.store.clone(),
+            Some(watermark.sequence_number).max(min_sequence_number),
+        );
         core::require_batch_boundary(&session, watermark.location).await?;
         let proof = Self::build_current_range_proof(
             &session,
@@ -500,9 +506,15 @@ where
         watermark: Location<F>,
         start_location: Location<F>,
         max_locations: u32,
+        min_sequence_number: Option<u64>,
     ) -> Result<VerifiedCurrentRange<H::Digest, K, V, N, F, E>, QmdbError> {
         let raw = self
-            .current_operation_range_proof_raw_at(watermark, start_location, max_locations)
+            .current_operation_range_proof_raw_at(
+                watermark,
+                start_location,
+                max_locations,
+                min_sequence_number,
+            )
             .await?;
         Ok(VerifiedCurrentRange {
             root: raw.root,
@@ -570,8 +582,12 @@ where
         &self,
         watermark: PublishedWatermark<F>,
         key: Q,
+        min_sequence_number: Option<u64>,
     ) -> Result<RawKeyValueProof<H::Digest, ordered::Operation<F, K, E>, N, F>, QmdbError> {
-        let session = ReadSession::fixed(self.store.clone(), Some(watermark.sequence_number));
+        let session = ReadSession::fixed(
+            self.store.clone(),
+            Some(watermark.sequence_number).max(min_sequence_number),
+        );
         Self::key_value_proof_raw(&session, &self.op_cfg, watermark.location, key).await
     }
 
@@ -580,9 +596,13 @@ where
         &self,
         watermark: Location<F>,
         key: Q,
+        min_sequence_number: Option<u64>,
     ) -> Result<RawKeyValueProof<H::Digest, ordered::Operation<F, K, E>, N, F>, QmdbError> {
-        let watermark = self.resolve_watermark(watermark, None).await?;
-        self.key_value_proof_raw_at_watermark(watermark, key).await
+        let watermark = self
+            .resolve_watermark(watermark, min_sequence_number)
+            .await?;
+        self.key_value_proof_raw_at_watermark(watermark, key, min_sequence_number)
+            .await
     }
 
     /// Verified current-state proof for a single key. The returned
@@ -592,8 +612,11 @@ where
         &self,
         watermark: Location<F>,
         key: Q,
+        min_sequence_number: Option<u64>,
     ) -> Result<VerifiedKeyValue<H::Digest, ordered::Operation<F, K, E>, F>, QmdbError> {
-        let raw = self.key_value_proof_raw_at(watermark, key).await?;
+        let raw = self
+            .key_value_proof_raw_at(watermark, key, min_sequence_number)
+            .await?;
         Ok(VerifiedKeyValue {
             root: raw.root,
             location: raw.proof.loc,
@@ -684,8 +707,12 @@ where
     async fn active_ordered_updates_at_watermark(
         &self,
         watermark: PublishedWatermark<F>,
+        min_sequence_number: Option<u64>,
     ) -> Result<Vec<(Location<F>, ordered::Update<K, E>)>, QmdbError> {
-        let session = ReadSession::fixed(self.store.clone(), Some(watermark.sequence_number));
+        let session = ReadSession::fixed(
+            self.store.clone(),
+            Some(watermark.sequence_number).max(min_sequence_number),
+        );
         Self::active_ordered_updates(&session, &self.op_cfg, watermark.location).await
     }
 
@@ -755,8 +782,12 @@ where
         &self,
         watermark: PublishedWatermark<F>,
         key: &K,
+        min_sequence_number: Option<u64>,
     ) -> Result<RawKeyExclusionProof<H::Digest, K, V, N, F, E>, QmdbError> {
-        let session = ReadSession::fixed(self.store.clone(), Some(watermark.sequence_number));
+        let session = ReadSession::fixed(
+            self.store.clone(),
+            Some(watermark.sequence_number).max(min_sequence_number),
+        );
         Self::key_exclusion_proof(&session, &self.op_cfg, watermark.location, key).await
     }
 
@@ -765,12 +796,15 @@ where
         &self,
         watermark: Location<F>,
         keys: &[K],
+        min_sequence_number: Option<u64>,
     ) -> Result<Vec<RawKeyLookupProof<H::Digest, K, V, N, F, E>>, QmdbError> {
         if keys.is_empty() {
             return Err(QmdbError::EmptyProofRequest);
         }
 
-        let watermark = self.resolve_watermark(watermark, None).await?;
+        let watermark = self
+            .resolve_watermark(watermark, min_sequence_number)
+            .await?;
         let mut seen = BTreeSet::<Vec<u8>>::new();
         let mut proofs = Vec::with_capacity(keys.len());
         for key in keys {
@@ -779,13 +813,13 @@ where
                 return Err(QmdbError::DuplicateRequestedKey { key: key_bytes });
             }
             match self
-                .key_value_proof_raw_at_watermark(watermark, key.as_ref())
+                .key_value_proof_raw_at_watermark(watermark, key.as_ref(), min_sequence_number)
                 .await
             {
                 Ok(proof) => proofs.push(RawKeyLookupProof::Hit(proof)),
                 Err(QmdbError::ProofKeyNotFound { .. } | QmdbError::KeyNotActive { .. }) => {
                     let proof = self
-                        .key_exclusion_proof_at_watermark(watermark, key)
+                        .key_exclusion_proof_at_watermark(watermark, key, min_sequence_number)
                         .await?;
                     proofs.push(RawKeyLookupProof::Miss(proof));
                 }
@@ -802,6 +836,7 @@ where
         start_key: K,
         end_key: Option<K>,
         limit: u32,
+        min_sequence_number: Option<u64>,
     ) -> Result<RawKeyRangeProof<H::Digest, K, V, N, F, E>, QmdbError> {
         if limit == 0 {
             return Err(QmdbError::InvalidRangeLength);
@@ -815,9 +850,13 @@ where
             }
         }
 
-        let watermark = self.resolve_watermark(watermark, None).await?;
+        let watermark = self
+            .resolve_watermark(watermark, min_sequence_number)
+            .await?;
 
-        let active = self.active_ordered_updates_at_watermark(watermark).await?;
+        let active = self
+            .active_ordered_updates_at_watermark(watermark, min_sequence_number)
+            .await?;
         let selected = active
             .into_iter()
             .filter(|(_, update)| {
@@ -829,7 +868,11 @@ where
         let mut entries = Vec::with_capacity(selected.len());
         for (_, update) in &selected {
             let proof = self
-                .key_value_proof_raw_at_watermark(watermark, update.key.as_ref())
+                .key_value_proof_raw_at_watermark(
+                    watermark,
+                    update.key.as_ref(),
+                    min_sequence_number,
+                )
                 .await?;
             entries.push(proof);
         }
@@ -841,7 +884,7 @@ where
             None
         } else {
             Some(
-                self.key_exclusion_proof_at_watermark(watermark, &start_key)
+                self.key_exclusion_proof_at_watermark(watermark, &start_key, min_sequence_number)
                     .await?,
             )
         };

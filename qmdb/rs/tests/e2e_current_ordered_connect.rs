@@ -4,8 +4,11 @@
 
 mod common;
 
+use std::collections::{BTreeMap, VecDeque};
 use std::num::NonZeroU64;
+use std::sync::{Arc, Mutex};
 
+use bytes::Bytes;
 use commonware_codec::Encode;
 use commonware_cryptography::Sha256;
 use commonware_runtime::tokio as cw_tokio;
@@ -22,19 +25,23 @@ use commonware_utils::{NZUsize, NZU16, NZU64};
 use connectrpc::client::ClientConfig;
 use connectrpc::{Chain, ConnectRpcService, RequestContext as Context, ServiceRequest};
 use exoware_qmdb::proto::qmdb::v1::{
-    current_key_lookup_result, GetManyRequest as ProtoGetManyRequest,
-    GetManyResponse as ProtoGetManyResponse, GetRangeRequest as ProtoGetRangeRequest,
-    GetRangeResponse as ProtoGetRangeResponse, GetRequest as ProtoGetRequest,
-    GetResponse as ProtoGetResponse, KeyLookupService, KeyLookupServiceClient,
-    KeyLookupServiceServer, OrderedKeyRangeService, OrderedKeyRangeServiceClient,
-    OrderedKeyRangeServiceServer,
+    current_key_lookup_result, CurrentOperationServiceClient,
+    GetCurrentOperationRangeRequest as ProtoGetCurrentOperationRangeRequest,
+    GetManyRequest as ProtoGetManyRequest, GetManyResponse as ProtoGetManyResponse,
+    GetRangeRequest as ProtoGetRangeRequest, GetRangeResponse as ProtoGetRangeResponse,
+    GetRequest as ProtoGetRequest, GetResponse as ProtoGetResponse, KeyLookupService,
+    KeyLookupServiceClient, KeyLookupServiceServer, OrderedKeyRangeService,
+    OrderedKeyRangeServiceClient, OrderedKeyRangeServiceServer,
 };
 use exoware_qmdb::{
     ordered_connect_stack, recover_boundary_state, CurrentBoundaryState, OrderedClient,
     OrderedConnectClient, QmdbError, VerifiedKeyLookup, MAX_OPERATION_SIZE,
 };
 use exoware_sdk::proto::PreferZstdHttpClient;
-use exoware_sdk::{PrefixedStoreClient, StoreClient};
+use exoware_sdk::{PrefixedStoreClient, RetryConfig, StoreClient, StoreWriteBatch};
+use exoware_server::{
+    Query, QueryExtra, QueryResult, RangeScan, RangeScanBatch, RangeScanResult, Sequence,
+};
 
 const N: usize = 32;
 type Digest = commonware_cryptography::sha256::Digest;
@@ -79,6 +86,13 @@ fn rpc_client(base: &str) -> KeyLookupServiceClient<PreferZstdHttpClient> {
 
 fn range_rpc_client(base: &str) -> OrderedKeyRangeServiceClient<PreferZstdHttpClient> {
     OrderedKeyRangeServiceClient::new(
+        PreferZstdHttpClient::plaintext(),
+        ClientConfig::new(base.parse().expect("qmdb uri")),
+    )
+}
+
+fn current_operation_rpc_client(base: &str) -> CurrentOperationServiceClient<PreferZstdHttpClient> {
+    CurrentOperationServiceClient::new(
         PreferZstdHttpClient::plaintext(),
         ClientConfig::new(base.parse().expect("qmdb uri")),
     )
@@ -220,6 +234,138 @@ async fn commit_upload(store_client: &StoreClient, batch: &SourceBatch) {
     )
     .await
     .expect("commit upload");
+}
+
+fn current_snapshot_rows(source: &SourceBatch) -> BTreeMap<Bytes, Bytes> {
+    let staging = PrefixedStoreClient::empty(StoreClient::new("http://127.0.0.1:1"));
+    let (_, prepared) =
+        common::prepare_operations::<mmr::Family, BatchOperation>(&source.operations, &op_cfg());
+    let prepared = prepared
+        .with_current_boundary::<Sha256, N>(&source.current_boundary)
+        .expect("attach current boundary");
+    let mut batch = StoreWriteBatch::new();
+    exoware_qmdb::stage_authenticated_range(&staging, prepared, &mut batch)
+        .expect("stage authenticated range");
+    exoware_qmdb::stage_watermark(&staging, source.latest_location, &mut batch)
+        .expect("stage watermark");
+    batch.entries().iter().cloned().collect()
+}
+
+fn publication_key() -> Bytes {
+    let staging = PrefixedStoreClient::empty(StoreClient::new("http://127.0.0.1:1"));
+    let mut batch = StoreWriteBatch::new();
+    exoware_qmdb::stage_watermark(&staging, Location::<mmr::Family>::new(0), &mut batch)
+        .expect("stage watermark key");
+    batch.entries()[0].0.clone()
+}
+
+struct RoutedCursor {
+    rows: VecDeque<(Bytes, Bytes)>,
+}
+
+impl RangeScan for RoutedCursor {
+    async fn next_batch(&mut self, max_items: usize) -> Result<RangeScanBatch, String> {
+        Ok(RangeScanBatch {
+            rows: (0..max_items)
+                .map_while(|_| self.rows.pop_front())
+                .collect(),
+            extra: QueryExtra::default(),
+        })
+    }
+}
+
+struct RoutedCurrentQuery {
+    rows: BTreeMap<Bytes, Bytes>,
+    publication_key: Bytes,
+    routes: Mutex<VecDeque<bool>>,
+    reads: Mutex<Vec<u64>>,
+    publication_reads: Mutex<usize>,
+}
+
+impl RoutedCurrentQuery {
+    fn use_new_replica_for(&self, reads: usize) {
+        let mut routes = self.routes.lock().unwrap();
+        routes.clear();
+        routes.extend(std::iter::repeat_n(true, reads));
+    }
+
+    fn route(&self) -> u64 {
+        let sequence = if self.routes.lock().unwrap().pop_front().unwrap_or(false) {
+            101
+        } else {
+            100
+        };
+        self.reads.lock().unwrap().push(sequence);
+        sequence
+    }
+
+    fn read_count(&self) -> usize {
+        self.reads.lock().unwrap().len()
+    }
+}
+
+impl Sequence for RoutedCurrentQuery {
+    fn current_sequence(&self) -> u64 {
+        101
+    }
+}
+
+impl Query for RoutedCurrentQuery {
+    type RangeScan = RoutedCursor;
+
+    async fn get(&self, key: Bytes) -> Result<QueryResult<Option<Bytes>>, String> {
+        let sequence_number = self.route();
+        Ok(QueryResult {
+            value: self.rows.get(&key).cloned(),
+            sequence_number,
+            extra: QueryExtra::default(),
+        })
+    }
+
+    async fn range_scan(
+        &self,
+        start: Bytes,
+        end: Bytes,
+        limit: usize,
+        forward: bool,
+    ) -> Result<RangeScanResult<Self::RangeScan>, String> {
+        if start <= self.publication_key && self.publication_key <= end {
+            *self.publication_reads.lock().unwrap() += 1;
+        }
+        let sequence_number = self.route();
+        let mut rows = self
+            .rows
+            .range(start..)
+            .take_while(|(key, _)| end.is_empty() || *key <= &end)
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect::<Vec<_>>();
+        if !forward {
+            rows.reverse();
+        }
+        rows.truncate(limit);
+        Ok(RangeScanResult {
+            scan: RoutedCursor { rows: rows.into() },
+            sequence_number,
+        })
+    }
+
+    async fn get_many(
+        &self,
+        keys: Vec<Bytes>,
+    ) -> Result<QueryResult<Vec<(Bytes, Option<Bytes>)>>, String> {
+        let sequence_number = self.route();
+        Ok(QueryResult {
+            value: keys
+                .into_iter()
+                .map(|key| {
+                    let value = self.rows.get(&key).cloned();
+                    (key, value)
+                })
+                .collect(),
+            sequence_number,
+            extra: QueryExtra::default(),
+        })
+    }
 }
 
 fn latest_operation_for_key(
@@ -421,7 +567,7 @@ async fn test_ordered_get_after_grafted_boundary_returns_current_key_value_proof
 
     let key = b"k-00000400".to_vec();
     let proof = ordered_client
-        .key_value_proof_at(source.latest_location, key.as_slice())
+        .key_value_proof_at(source.latest_location, key.as_slice(), None)
         .await
         .expect("get after grafted boundary");
     let expected = latest_operation_for_key(&source.operations, &key);
@@ -578,6 +724,282 @@ async fn test_ordered_connect_get_range_verifies_complete_empty_and_partial_page
         .expect("empty get_range");
     assert!(empty.next_start_key.is_none());
     assert!(empty.entries.is_empty());
+}
+
+#[tokio::test]
+async fn test_current_endpoints_enforce_optional_sequence_minimum_after_cache_hit() {
+    let store_client = common::local_store_client().await;
+    let source = build_source_batch().await;
+    commit_upload(&store_client, &source).await;
+    let (_qmdb_server, qmdb_url) =
+        spawn_qmdb_server(PrefixedStoreClient::empty(store_client.clone())).await;
+    let lookup = rpc_client(&qmdb_url);
+    let ranges = range_rpc_client(&qmdb_url);
+    let current_operations = current_operation_rpc_client(&qmdb_url);
+
+    let cold_errors = [
+        lookup
+            .get(ProtoGetRequest {
+                key: encoded_key(b"alpha"),
+                tip: source.latest_location.as_u64() + 1,
+                min_sequence_number: Some(u64::MAX),
+                ..Default::default()
+            })
+            .await
+            .expect_err("cold get publication lookup must enforce the sequence minimum")
+            .code,
+        lookup
+            .get_many(ProtoGetManyRequest {
+                keys: vec![encoded_key(b"alpha"), encoded_key(b"aardvark")],
+                tip: source.latest_location.as_u64() + 1,
+                min_sequence_number: Some(u64::MAX),
+                ..Default::default()
+            })
+            .await
+            .expect_err("cold get_many publication lookup must enforce the sequence minimum")
+            .code,
+        ranges
+            .get_range(ProtoGetRangeRequest {
+                start_key: encoded_key(b"aardvark"),
+                end_key: Some(encoded_key(b"c")),
+                limit: 10,
+                tip: source.latest_location.as_u64() + 1,
+                min_sequence_number: Some(u64::MAX),
+                ..Default::default()
+            })
+            .await
+            .expect_err("cold get_range publication lookup must enforce the sequence minimum")
+            .code,
+        current_operations
+            .get_current_operation_range(ProtoGetCurrentOperationRangeRequest {
+                tip: source.latest_location.as_u64() + 1,
+                start_location: 0,
+                max_locations: source.operations.len() as u32,
+                min_sequence_number: Some(u64::MAX),
+                ..Default::default()
+            })
+            .await
+            .expect_err(
+                "cold current operation publication lookup must enforce the sequence minimum",
+            )
+            .code,
+    ];
+    assert_eq!(cold_errors, [connectrpc::ErrorCode::Aborted; 4]);
+
+    for min_sequence_number in [None, Some(0)] {
+        lookup
+            .get(ProtoGetRequest {
+                key: encoded_key(b"alpha"),
+                tip: source.latest_location.as_u64(),
+                min_sequence_number,
+                ..Default::default()
+            })
+            .await
+            .expect("get at available sequence");
+        lookup
+            .get_many(ProtoGetManyRequest {
+                keys: vec![encoded_key(b"alpha"), encoded_key(b"aardvark")],
+                tip: source.latest_location.as_u64(),
+                min_sequence_number,
+                ..Default::default()
+            })
+            .await
+            .expect("get_many at available sequence");
+        ranges
+            .get_range(ProtoGetRangeRequest {
+                start_key: encoded_key(b"aardvark"),
+                end_key: Some(encoded_key(b"c")),
+                limit: 10,
+                tip: source.latest_location.as_u64(),
+                min_sequence_number,
+                ..Default::default()
+            })
+            .await
+            .expect("get_range at available sequence");
+        current_operations
+            .get_current_operation_range(ProtoGetCurrentOperationRangeRequest {
+                tip: source.latest_location.as_u64(),
+                start_location: 0,
+                max_locations: source.operations.len() as u32,
+                min_sequence_number,
+                ..Default::default()
+            })
+            .await
+            .expect("get_current_operation_range at available sequence");
+    }
+
+    let get_error = lookup
+        .get(ProtoGetRequest {
+            key: encoded_key(b"alpha"),
+            tip: source.latest_location.as_u64(),
+            min_sequence_number: Some(u64::MAX),
+            ..Default::default()
+        })
+        .await
+        .expect_err("get must enforce an unavailable sequence minimum");
+    let get_many_error = lookup
+        .get_many(ProtoGetManyRequest {
+            keys: vec![encoded_key(b"alpha"), encoded_key(b"aardvark")],
+            tip: source.latest_location.as_u64(),
+            min_sequence_number: Some(u64::MAX),
+            ..Default::default()
+        })
+        .await
+        .expect_err("get_many must enforce an unavailable sequence minimum");
+    let range_error = ranges
+        .get_range(ProtoGetRangeRequest {
+            start_key: encoded_key(b"aardvark"),
+            end_key: Some(encoded_key(b"c")),
+            limit: 10,
+            tip: source.latest_location.as_u64(),
+            min_sequence_number: Some(u64::MAX),
+            ..Default::default()
+        })
+        .await
+        .expect_err("get_range must enforce an unavailable sequence minimum");
+    let current_error = current_operations
+        .get_current_operation_range(ProtoGetCurrentOperationRangeRequest {
+            tip: source.latest_location.as_u64(),
+            start_location: 0,
+            max_locations: source.operations.len() as u32,
+            min_sequence_number: Some(u64::MAX),
+            ..Default::default()
+        })
+        .await
+        .expect_err("get_current_operation_range must enforce an unavailable sequence minimum");
+
+    assert_eq!(get_error.code, connectrpc::ErrorCode::Aborted);
+    assert_eq!(get_many_error.code, connectrpc::ErrorCode::Aborted);
+    assert_eq!(range_error.code, connectrpc::ErrorCode::Aborted);
+    assert_eq!(current_error.code, connectrpc::ErrorCode::Aborted);
+}
+
+#[tokio::test]
+async fn test_current_endpoints_keep_floor_for_every_dependent_read() {
+    let source = build_source_batch().await;
+    let query = Arc::new(RoutedCurrentQuery {
+        rows: current_snapshot_rows(&source),
+        publication_key: publication_key(),
+        routes: Mutex::new(VecDeque::new()),
+        reads: Mutex::new(Vec::new()),
+        publication_reads: Mutex::new(0),
+    });
+    let (store_server, query_url) = common::spawn_connect_service(exoware_server::query_service(
+        exoware_server::QueryState::new(query.clone()),
+    ))
+    .await;
+    let store = StoreClient::builder()
+        .url(&query_url)
+        .query_url(&query_url)
+        .retry_config(RetryConfig::disabled())
+        .build()
+        .expect("routed Store client");
+    let (qmdb_server, qmdb_url) = spawn_qmdb_server(PrefixedStoreClient::empty(store)).await;
+    let lookup = rpc_client(&qmdb_url);
+    let ranges = range_rpc_client(&qmdb_url);
+    let current_operations = current_operation_rpc_client(&qmdb_url);
+
+    lookup
+        .get(ProtoGetRequest {
+            key: encoded_key(b"alpha"),
+            tip: source.latest_location.as_u64(),
+            ..Default::default()
+        })
+        .await
+        .expect("warm publication cache at sequence 100");
+    assert_eq!(*query.publication_reads.lock().unwrap(), 1);
+
+    let get = ProtoGetRequest {
+        key: encoded_key(b"alpha"),
+        tip: source.latest_location.as_u64(),
+        min_sequence_number: Some(101),
+        ..Default::default()
+    };
+    query.use_new_replica_for(128);
+    let before = query.read_count();
+    lookup.get(get.clone()).await.expect("fresh get");
+    let get_reads = query.read_count() - before;
+    assert!(get_reads > 1);
+    query.use_new_replica_for(get_reads - 1);
+    let error = lookup
+        .get(get)
+        .await
+        .expect_err("late stale get read must retain the caller floor");
+    assert_eq!(error.code, connectrpc::ErrorCode::Aborted);
+
+    let get_many = ProtoGetManyRequest {
+        keys: vec![encoded_key(b"alpha"), encoded_key(b"aardvark")],
+        tip: source.latest_location.as_u64(),
+        min_sequence_number: Some(101),
+        ..Default::default()
+    };
+    query.use_new_replica_for(128);
+    let before = query.read_count();
+    lookup
+        .get_many(get_many.clone())
+        .await
+        .expect("fresh get_many with exclusion proof");
+    let get_many_reads = query.read_count() - before;
+    assert!(get_many_reads > 1);
+    query.use_new_replica_for(get_many_reads - 1);
+    let error = lookup
+        .get_many(get_many)
+        .await
+        .expect_err("late stale get_many read must retain the caller floor");
+    assert_eq!(error.code, connectrpc::ErrorCode::Aborted);
+
+    let range = ProtoGetRangeRequest {
+        start_key: encoded_key(b"aardvark"),
+        end_key: Some(encoded_key(b"c")),
+        limit: 10,
+        tip: source.latest_location.as_u64(),
+        min_sequence_number: Some(101),
+        ..Default::default()
+    };
+    query.use_new_replica_for(128);
+    let before = query.read_count();
+    ranges
+        .get_range(range.clone())
+        .await
+        .expect("fresh range with entries and start exclusion");
+    let range_reads = query.read_count() - before;
+    assert!(range_reads > 1);
+    query.use_new_replica_for(range_reads - 1);
+    let error = ranges
+        .get_range(range)
+        .await
+        .expect_err("late stale range read must retain the caller floor");
+    assert_eq!(error.code, connectrpc::ErrorCode::Aborted);
+
+    let current = ProtoGetCurrentOperationRangeRequest {
+        tip: source.latest_location.as_u64(),
+        start_location: 0,
+        max_locations: source.operations.len() as u32,
+        min_sequence_number: Some(101),
+        ..Default::default()
+    };
+    query.use_new_replica_for(128);
+    let before = query.read_count();
+    current_operations
+        .get_current_operation_range(current.clone())
+        .await
+        .expect("fresh current operation range");
+    let current_reads = query.read_count() - before;
+    assert!(current_reads > 1);
+    query.use_new_replica_for(current_reads - 1);
+    let error = current_operations
+        .get_current_operation_range(current)
+        .await
+        .expect_err("late stale current operation read must retain the caller floor");
+    assert_eq!(error.code, connectrpc::ErrorCode::Aborted);
+
+    assert_eq!(
+        *query.publication_reads.lock().unwrap(),
+        1,
+        "caller floors must not alter or bypass cached publication evidence"
+    );
+    qmdb_server.abort();
+    store_server.abort();
 }
 
 #[tokio::test]

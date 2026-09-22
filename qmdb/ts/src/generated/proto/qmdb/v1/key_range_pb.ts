@@ -13,7 +13,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file qmdb/v1/key_range.proto.
  */
 export const file_qmdb_v1_key_range: GenFile = /*@__PURE__*/
-  fileDesc("ChdxbWRiL3YxL2tleV9yYW5nZS5wcm90bxIHcW1kYi52MSJrCg9HZXRSYW5nZVJlcXVlc3QSEQoJc3RhcnRfa2V5GAEgASgMEhQKB2VuZF9rZXkYAiABKAxIAIgBARIWCgVsaW1pdBgDIAEoDUIHukgEKgIgABILCgN0aXAYBCABKARCCgoIX2VuZF9rZXkijwEKEEdldFJhbmdlUmVzcG9uc2USLgoHZW50cmllcxgBIAMoCzIdLnFtZGIudjEuQ3VycmVudEtleVZhbHVlUHJvb2YSOwoLc3RhcnRfcHJvb2YYAiABKAsyIS5xbWRiLnYxLkN1cnJlbnRLZXlFeGNsdXNpb25Qcm9vZkgAiAEBQg4KDF9zdGFydF9wcm9vZjJZChZPcmRlcmVkS2V5UmFuZ2VTZXJ2aWNlEj8KCEdldFJhbmdlEhgucW1kYi52MS5HZXRSYW5nZVJlcXVlc3QaGS5xbWRiLnYxLkdldFJhbmdlUmVzcG9uc2ViBnByb3RvMw", [file_buf_validate_validate, file_qmdb_v1_proof]);
+  fileDesc("ChdxbWRiL3YxL2tleV9yYW5nZS5wcm90bxIHcW1kYi52MSKlAQoPR2V0UmFuZ2VSZXF1ZXN0EhEKCXN0YXJ0X2tleRgBIAEoDBIUCgdlbmRfa2V5GAIgASgMSACIAQESFgoFbGltaXQYAyABKA1CB7pIBCoCIAASCwoDdGlwGAQgASgEEiAKE21pbl9zZXF1ZW5jZV9udW1iZXIYBSABKARIAYgBAUIKCghfZW5kX2tleUIWChRfbWluX3NlcXVlbmNlX251bWJlciKPAQoQR2V0UmFuZ2VSZXNwb25zZRIuCgdlbnRyaWVzGAEgAygLMh0ucW1kYi52MS5DdXJyZW50S2V5VmFsdWVQcm9vZhI7CgtzdGFydF9wcm9vZhgCIAEoCzIhLnFtZGIudjEuQ3VycmVudEtleUV4Y2x1c2lvblByb29mSACIAQFCDgoMX3N0YXJ0X3Byb29mMlkKFk9yZGVyZWRLZXlSYW5nZVNlcnZpY2USPwoIR2V0UmFuZ2USGC5xbWRiLnYxLkdldFJhbmdlUmVxdWVzdBoZLnFtZGIudjEuR2V0UmFuZ2VSZXNwb25zZWIGcHJvdG8z", [file_buf_validate_validate, file_qmdb_v1_proof]);
 
 /**
  * Current ordered key range proof request. Key fields are codec-encoded logical
@@ -44,6 +44,13 @@ export type GetRangeRequest = Message<"qmdb.v1.GetRangeRequest"> & {
    * @generated from field: uint64 tip = 4;
    */
   tip: bigint;
+
+  /**
+   * Minimum Store sequence required by reads used to build this proof.
+   *
+   * @generated from field: optional uint64 min_sequence_number = 5;
+   */
+  minSequenceNumber?: bigint;
 };
 
 /**

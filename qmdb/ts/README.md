@@ -23,6 +23,9 @@ Key ranges enforce linear ordering, bounds, and pagination. Absolute positions
 use `bigint`. Batch limits and WASM byte-size arguments must fit their unsigned
 32-bit representation.
 
+All unary proof requests accept an optional `minSequenceNumber`. The server
+enforces it on publication lookups and proof reads.
+
 Subscription decoding checks internal proof consistency. Compare the returned
 root with an independently trusted root for the frame tip before using its
 operations. A server-provided root is not a trust anchor. `sha256` and `blake3`

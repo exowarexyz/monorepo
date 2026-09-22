@@ -25,6 +25,9 @@ message GetRequest {
   // Published QMDB batch-boundary to prove against. The client must
   // already know the trusted current/global root for this tip.
   uint64 tip = 2;
+
+  // Minimum Store sequence required by reads used to build this proof.
+  optional uint64 min_sequence_number = 3;
 }
 
 // Current key proof request for one or more logical keys.
@@ -38,6 +41,9 @@ message GetManyRequest {
   // Published QMDB batch-boundary to prove against. The client must already
   // know the trusted current/global root for this tip.
   uint64 tip = 2;
+
+  // Minimum Store sequence required by reads used to build these proofs.
+  optional uint64 min_sequence_number = 3;
 }
 
 // Unary current key proof response.
