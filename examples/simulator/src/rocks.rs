@@ -374,7 +374,7 @@ fn keys_to_delete(
 struct Frontiers {
     /// Highest sequence whose log and state rows are durably committed.
     published: AtomicU64,
-    /// Serializes state ingestion, publication, snapshot capture, and key deletion.
+    /// Serializes state ingestion, publication, and snapshot capture.
     /// Also serializes floor persists so the durable floor cannot regress.
     persist: Mutex<()>,
     /// Highest `cutoff_exclusive` already applied by `prune_log` in this process. Lets the
@@ -1141,10 +1141,8 @@ impl RocksStore {
         self.db.write(batch).map_err(|e| e.to_string())
     }
 
-    /// Deletes bounded chunks under the publication lock until the final synced write
-    /// makes every deletion durable. New snapshots wait for this attempt to finish.
+    /// Deletes keys in bounded chunks. The final synced write makes every deletion durable.
     fn delete_keys(&self, keys: &[Bytes]) -> Result<(), String> {
-        let _guard = self.frontiers.persist.lock();
         let mut chunks = keys.chunks(PRUNE_DELETE_CHUNK_KEYS).peekable();
         while let Some(chunk) = chunks.next() {
             let mut batch = rocksdb::WriteBatch::default();
