@@ -390,7 +390,7 @@ where
     .expect("continued upload");
     assert_eq!(
         qmdb_client
-            .writer_location_watermark()
+            .latest_published_watermark()
             .await
             .expect("continued watermark"),
         Some(source.continued_latest_location),

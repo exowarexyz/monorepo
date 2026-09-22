@@ -33,6 +33,13 @@ one family, hasher, and codec configuration. Use the SDK `StoreKeyPrefix` or a
 separate Store to isolate instances. The row-family prefixes do not identify
 QMDB instances or Merkle families.
 
+Reader constructors take a `PrefixedStoreClient` over the QMDB namespace. Each
+client caches the greatest published watermark together with the Store response
+sequence that established it. A request covered by the cache skips the watermark
+lookup. Data and proof reads require at least the cached sequence. Calling
+`latest_published_watermark` refreshes the cache. Observations of unrelated data
+do not advance it.
+
 ## Authenticated upload contract
 
 `AuthenticatedOperationRange` describes the half-open interval
@@ -214,6 +221,13 @@ Full ordered and unordered stacks require uploaded current-boundary material.
 Unordered QMDB omits missing keys from `GetMany` because it has no authenticated
 key-exclusion semantics. Immutable and keyless logical reads are Rust helpers.
 Their Connect stacks expose the operation log.
+
+Connect stacks take a `PrefixedStoreClient` and codec configuration. The services
+in each stack share one native client, which caches the greatest published
+watermark it has observed and the Store sequence returned by that lookup. Later
+RPCs at that watermark or an earlier one reuse the cached sequence as their
+minimum, without another watermark lookup. Response sequence metadata comes only
+from reads performed by that request.
 
 `OperationLogClient` verifies historical ranges against a caller-supplied root.
 Without a current-root witness this is the operation-log root. When a response

@@ -3,7 +3,6 @@
 use std::net::{IpAddr, SocketAddr};
 use std::num::NonZeroU64;
 use std::path::PathBuf;
-use std::sync::Arc;
 
 use axum::{routing::get, Router};
 use clap::{Parser, Subcommand};
@@ -13,6 +12,7 @@ use commonware_parallel::Sequential;
 use commonware_runtime::tokio as cw_tokio;
 use commonware_runtime::Runner as _;
 use commonware_storage::qmdb::any::ordered::variable::Operation as VariableOperation;
+use commonware_storage::qmdb::any::value::VariableEncoding;
 use commonware_storage::qmdb::current::{
     ordered::variable::Db as CurrentOrderedVariableDb, VariableConfig,
 };
@@ -25,7 +25,7 @@ use commonware_utils::{NZUsize, NZU16, NZU64};
 use exoware_qmdb::{
     ordered_connect_stack, prepare_authenticated_range, recover_boundary_state,
     stage_authenticated_range, stage_watermark, AuthenticatedOperationRange, CurrentBoundaryState,
-    OrderedClient, MAX_OPERATION_SIZE,
+    MAX_OPERATION_SIZE,
 };
 use exoware_sdk::{PrefixedStoreClient, StoreClient, StoreKeyPrefix, StoreWriteBatch};
 use tower_http::cors::CorsLayer;
@@ -207,14 +207,17 @@ async fn run(
     host: IpAddr,
     port: u16,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let qmdb_client = Arc::new(OrderedClient::<Family, Sha256, Vec<u8>, Vec<u8>, N>::new(
-        StoreClient::new(store_url).prefixed(StoreKeyPrefix::identity()),
-        op_cfg(),
-        key_cfg(),
-    ));
+    let store = StoreClient::new(store_url).prefixed(StoreKeyPrefix::identity());
     let app = Router::new()
         .route("/health", get(health))
-        .fallback_service(ordered_connect_stack(qmdb_client))
+        .fallback_service(ordered_connect_stack::<
+            Family,
+            Sha256,
+            Vec<u8>,
+            Vec<u8>,
+            N,
+            VariableEncoding<Vec<u8>>,
+        >(store, op_cfg(), key_cfg()))
         .layer(CorsLayer::very_permissive());
 
     let addr = SocketAddr::from((host, port));
@@ -415,7 +418,10 @@ mod tests {
         ingest::{PutRequest, PutResponse, Service, ServiceServer},
         keys::Key,
     };
-    use std::{collections::BTreeMap, sync::Mutex};
+    use std::{
+        collections::BTreeMap,
+        sync::{Arc, Mutex},
+    };
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     enum Failure {

@@ -65,12 +65,17 @@ async fn check_mirror<F, K, V, E>(
     ));
     let (server, url) = if snapshots[0].current.is_some() {
         common::spawn_connect_service(unordered_connect_stack::<F, Sha256, K, V, N, E>(
-            local.clone(),
+            prefixed.clone(),
+            op_cfg.clone(),
             key_cfg,
         ))
         .await
     } else {
-        common::spawn_connect_service(unordered_operation_log_connect_stack(local.clone())).await
+        common::spawn_connect_service(unordered_operation_log_connect_stack::<F, Sha256, K, V, E>(
+            prefixed.clone(),
+            op_cfg.clone(),
+        ))
+        .await
     };
     let remote = OperationLogClient::<_, F, Sha256, unordered::Operation<F, K, E>>::plaintext(
         &url,

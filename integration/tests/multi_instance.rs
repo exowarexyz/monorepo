@@ -8,6 +8,7 @@ use axum::{routing::get, Router};
 use bytes::Bytes;
 use commonware_cryptography::Sha256;
 use commonware_storage::merkle::{mmr, Location};
+use commonware_storage::qmdb::any::value::VariableEncoding;
 use commonware_storage::qmdb::keyless::variable::Operation as KeylessOperation;
 use connectrpc::client::ClientConfig;
 use datafusion::arrow::array::Int64Array;
@@ -96,10 +97,14 @@ async fn spawn_sql_service(schema: KvSchema) -> (tokio::task::JoinHandle<()>, St
 }
 
 async fn spawn_qmdb_service(client: PrefixedStoreClient) -> (tokio::task::JoinHandle<()>, String) {
-    let reader = Arc::new(keyless_reader(client));
     let app = Router::new()
         .route("/health", get(health))
-        .fallback_service(keyless_operation_log_connect_stack(reader));
+        .fallback_service(keyless_operation_log_connect_stack::<
+            QmdbFamily,
+            Sha256,
+            Vec<u8>,
+            VariableEncoding<Vec<u8>>,
+        >(client, ((0..=10000).into(), ())));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind qmdb service");
@@ -215,7 +220,7 @@ async fn drive_qmdb_uploads(
     }
     assert!(
         keyless_reader(client.clone())
-            .writer_location_watermark()
+            .latest_published_watermark()
             .await
             .unwrap()
             .is_none(),
@@ -614,7 +619,7 @@ async fn test_prepared_sql_and_qmdb_batches_commit_atomically_with_sequence_rece
     );
     assert!(
         keyless_reader(qmdb_client.clone())
-            .writer_location_watermark()
+            .latest_published_watermark()
             .await
             .expect("pre-commit watermark")
             .is_none(),
@@ -634,7 +639,7 @@ async fn test_prepared_sql_and_qmdb_batches_commit_atomically_with_sequence_rece
     assert_eq!(sql_receipt.store_sequence_number, sequence);
     assert_eq!(
         keyless_reader(qmdb_client.clone())
-            .writer_location_watermark()
+            .latest_published_watermark()
             .await
             .unwrap(),
         Some(QmdbLocation::new(5))
