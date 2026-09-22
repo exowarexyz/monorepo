@@ -78,8 +78,6 @@ export interface LocatedOrderedOperation {
 }
 
 export interface VerifiedHistoricalMultiProof {
-  /** Store freshness metadata. Not authenticated by the proof. */
-  sequenceNumber: bigint;
   /**
    * The trusted root supplied to verification. For current-boundary-backed
    * proofs this is the current/global root; for operation-log-only proofs this
@@ -103,16 +101,12 @@ export interface LocatedRawOperation {
 }
 
 export interface VerifiedRawOperationRangeProof {
-  /** Store freshness metadata. Not authenticated by the proof. */
-  sequenceNumber: bigint;
   root: Uint8Array;
   operations: LocatedRawOperation[];
   proofSizeBytes: number;
 }
 
 export interface VerifiedFixedKeylessAppendProof {
-  /** Store freshness metadata. Not authenticated by the proof. */
-  sequenceNumber: bigint;
   location: bigint;
   value: Uint8Array;
   root: Uint8Array;
@@ -121,8 +115,6 @@ export interface VerifiedFixedKeylessAppendProof {
 }
 
 export interface VerifiedFixedUnorderedUpdateProof {
-  /** Store freshness metadata. Not authenticated by the proof. */
-  sequenceNumber: bigint;
   location: bigint;
   key: Uint8Array;
   value: Uint8Array;
@@ -293,7 +285,7 @@ async function operationRangeProofBytes(
   operationLog: ConnectClient<typeof OperationLogService>,
   request: OperationRangeRequest,
   options?: CallOptions,
-): Promise<{ proofBytes: Uint8Array; sequenceNumber: bigint }> {
+): Promise<Uint8Array> {
   const response = await operationLog.getOperationRange(
     create(GetOperationRangeRequestSchema, request),
     options,
@@ -301,10 +293,7 @@ async function operationRangeProofBytes(
   if (!response.proof) {
     throw new Error('qmdb getOperationRange response missing proof');
   }
-  return {
-    proofBytes: toBinary(HistoricalOperationRangeProofSchema, response.proof),
-    sequenceNumber: response.sequenceNumber,
-  };
+  return toBinary(HistoricalOperationRangeProofSchema, response.proof);
 }
 
 export class QmdbOperationLogClient {
@@ -335,7 +324,7 @@ export class QmdbOperationLogClient {
   ): Promise<VerifiedRawOperationRangeProof> {
     assertOperationWindow(request);
     await ensureWasm();
-    const { proofBytes, sequenceNumber } = await operationRangeProofBytes(
+    const proofBytes = await operationRangeProofBytes(
       this.operationLog,
       request,
       options,
@@ -348,8 +337,8 @@ export class QmdbOperationLogClient {
       request.tip,
       request.startLocation,
       request.maxLocations,
-    ) as Omit<VerifiedRawOperationRangeProof, 'proofSizeBytes' | 'sequenceNumber'>;
-    return { ...verified, sequenceNumber, proofSizeBytes: proofBytes.length };
+    ) as Omit<VerifiedRawOperationRangeProof, 'proofSizeBytes'>;
+    return { ...verified, proofSizeBytes: proofBytes.length };
   }
 
   async getFixedKeylessAppend(
@@ -362,7 +351,7 @@ export class QmdbOperationLogClient {
     assertU64(expectedLocation, 'expectedLocation');
     assertOperationWindow(request);
     await ensureWasm();
-    const { proofBytes, sequenceNumber } = await operationRangeProofBytes(
+    const proofBytes = await operationRangeProofBytes(
       this.operationLog,
       request,
       options,
@@ -377,8 +366,8 @@ export class QmdbOperationLogClient {
       request.tip,
       request.startLocation,
       request.maxLocations,
-    ) as Omit<VerifiedFixedKeylessAppendProof, 'proofSizeBytes' | 'sequenceNumber'>;
-    return { ...verified, sequenceNumber, proofSizeBytes: proofBytes.length };
+    ) as Omit<VerifiedFixedKeylessAppendProof, 'proofSizeBytes'>;
+    return { ...verified, proofSizeBytes: proofBytes.length };
   }
 
   async getFixedUnorderedUpdate(
@@ -393,7 +382,7 @@ export class QmdbOperationLogClient {
     assertU32(valueSize, 'valueSize');
     assertOperationWindow(request);
     await ensureWasm();
-    const { proofBytes, sequenceNumber } = await operationRangeProofBytes(
+    const proofBytes = await operationRangeProofBytes(
       this.operationLog,
       request,
       options,
@@ -409,8 +398,8 @@ export class QmdbOperationLogClient {
       request.tip,
       request.startLocation,
       request.maxLocations,
-    ) as Omit<VerifiedFixedUnorderedUpdateProof, 'proofSizeBytes' | 'sequenceNumber'>;
-    return { ...verified, sequenceNumber, proofSizeBytes: proofBytes.length };
+    ) as Omit<VerifiedFixedUnorderedUpdateProof, 'proofSizeBytes'>;
+    return { ...verified, proofSizeBytes: proofBytes.length };
   }
 }
 
@@ -586,7 +575,7 @@ export class OrderedQmdbClient {
   ): Promise<VerifiedHistoricalMultiProof> {
     assertOperationWindow(request);
     await ensureWasm();
-    const { proofBytes, sequenceNumber } = await operationRangeProofBytes(
+    const proofBytes = await operationRangeProofBytes(
       this.operationLog,
       request,
       options,
@@ -599,8 +588,8 @@ export class OrderedQmdbClient {
       request.tip,
       request.startLocation,
       request.maxLocations,
-    ) as Omit<VerifiedHistoricalMultiProof, 'proofSizeBytes' | 'sequenceNumber'>;
-    return { ...verified, sequenceNumber, proofSizeBytes: proofBytes.length };
+    ) as Omit<VerifiedHistoricalMultiProof, 'proofSizeBytes'>;
+    return { ...verified, proofSizeBytes: proofBytes.length };
   }
 
   async getCurrentOperationRange(

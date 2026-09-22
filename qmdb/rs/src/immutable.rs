@@ -11,7 +11,7 @@ use commonware_storage::{
         operation::Key as QmdbKey,
     },
 };
-use exoware_sdk::{PrefixedStoreClient, ReadResult, ReadSession};
+use exoware_sdk::{PrefixedStoreClient, ReadSession};
 
 use crate::codec::{decode_update_location, merkle_size_for_watermark};
 use crate::connect::OperationKv;
@@ -125,17 +125,13 @@ where
         &self,
         watermark: Location<F>,
         min_sequence_number: Option<u64>,
-    ) -> Result<ReadResult<PublishedWatermark<F>>, QmdbError> {
+    ) -> Result<PublishedWatermark<F>, QmdbError> {
         let session = ReadSession::fixed(self.store.clone(), min_sequence_number);
-        let value = self.publication.require(&session, watermark).await?;
-        Ok(ReadResult {
-            value,
-            sequence_number: session.evaluated_sequence(),
-        })
+        self.publication.require(&session, watermark).await
     }
 
     pub async fn root_at(&self, watermark: Location<F>) -> Result<H::Digest, QmdbError> {
-        let watermark = self.resolve_watermark(watermark, None).await?.value;
+        let watermark = self.resolve_watermark(watermark, None).await?;
         let session = ReadSession::fixed(self.store.clone(), Some(watermark.sequence_number));
         let inactive_peaks =
             inactive_peaks_at::<F, K, V, E>(&session, watermark.location, &self.operation_cfg)
@@ -148,7 +144,7 @@ where
         key: &K,
         watermark: Location<F>,
     ) -> Result<Option<VersionedValue<K, V, F>>, QmdbError> {
-        let watermark = self.resolve_watermark(watermark, None).await?.value;
+        let watermark = self.resolve_watermark(watermark, None).await?;
         let session = ReadSession::fixed(self.store.clone(), Some(watermark.sequence_number));
         let Some((row_key, _row_value)) =
             core::load_latest_update_row(&session, watermark.location, key.as_ref()).await?
@@ -185,11 +181,9 @@ where
         start_location: Location<F>,
         max_locations: u32,
     ) -> Result<OperationRangeCheckpoint<H::Digest, F>, QmdbError> {
-        let watermark = self.resolve_watermark(watermark, None).await?.value;
-        Ok(self
-            .operation_range_checkpoint_at(watermark, start_location, max_locations)
-            .await?
-            .value)
+        let watermark = self.resolve_watermark(watermark, None).await?;
+        self.operation_range_checkpoint_at(watermark, start_location, max_locations)
+            .await
     }
 
     pub(crate) async fn operation_range_checkpoint_at(
@@ -197,7 +191,7 @@ where
         watermark: PublishedWatermark<F>,
         start_location: Location<F>,
         max_locations: u32,
-    ) -> Result<ReadResult<OperationRangeCheckpoint<H::Digest, F>>, QmdbError> {
+    ) -> Result<OperationRangeCheckpoint<H::Digest, F>, QmdbError> {
         let session = ReadSession::fixed(self.store.clone(), Some(watermark.sequence_number));
         let end =
             crate::proof::resolve_range_bounds(watermark.location, start_location, max_locations)?;
@@ -223,10 +217,7 @@ where
             encoded_operations,
         )
         .await?;
-        Ok(ReadResult {
-            value: proof,
-            sequence_number: session.evaluated_sequence(),
-        })
+        Ok(proof)
     }
 
     pub(crate) async fn batch_multi_proof(

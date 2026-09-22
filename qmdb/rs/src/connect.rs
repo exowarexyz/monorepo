@@ -33,7 +33,7 @@ use connectrpc::{
 };
 use exoware_sdk::common::kv::v1::filter::KindView as ProtoFilterKindView;
 use exoware_sdk::stream_filter::{CompiledFilters, Filter};
-use exoware_sdk::{PrefixedStoreClient, ReadResult};
+use exoware_sdk::PrefixedStoreClient;
 use futures::future::BoxFuture;
 use futures::{FutureExt, Stream};
 
@@ -216,7 +216,7 @@ trait OperationLogReader: Send + Sync + 'static {
         &self,
         watermark: Location<Self::Family>,
         min_sequence_number: Option<u64>,
-    ) -> impl Future<Output = Result<ReadResult<PublishedWatermark<Self::Family>>, QmdbError>> + Send;
+    ) -> impl Future<Output = Result<PublishedWatermark<Self::Family>, QmdbError>> + Send;
     fn batch_multi_proof(
         &self,
         watermark: PublishedWatermark<Self::Family>,
@@ -227,12 +227,8 @@ trait OperationLogReader: Send + Sync + 'static {
         watermark: PublishedWatermark<Self::Family>,
         start_location: Location<Self::Family>,
         max_locations: u32,
-    ) -> impl Future<
-        Output = Result<
-            ReadResult<OperationRangeCheckpoint<Self::Digest, Self::Family>>,
-            QmdbError,
-        >,
-    > + Send;
+    ) -> impl Future<Output = Result<OperationRangeCheckpoint<Self::Digest, Self::Family>, QmdbError>>
+           + Send;
 }
 
 /// Wrapper that bridges any `OperationLogReader` into a concrete
@@ -326,7 +322,7 @@ where
         &self,
         watermark: Location<F>,
         min_sequence_number: Option<u64>,
-    ) -> impl Future<Output = Result<ReadResult<PublishedWatermark<F>>, QmdbError>> + Send {
+    ) -> impl Future<Output = Result<PublishedWatermark<F>, QmdbError>> + Send {
         OrderedClient::resolve_watermark(self, watermark, min_sequence_number)
     }
 
@@ -343,8 +339,8 @@ where
         watermark: PublishedWatermark<F>,
         start_location: Location<F>,
         max_locations: u32,
-    ) -> impl Future<Output = Result<ReadResult<OperationRangeCheckpoint<Self::Digest, F>>, QmdbError>>
-           + Send {
+    ) -> impl Future<Output = Result<OperationRangeCheckpoint<Self::Digest, F>, QmdbError>> + Send
+    {
         OrderedClient::operation_range_checkpoint_at(self, watermark, start_location, max_locations)
     }
 }
@@ -373,7 +369,7 @@ where
         &self,
         watermark: Location<F>,
         min_sequence_number: Option<u64>,
-    ) -> impl Future<Output = Result<ReadResult<PublishedWatermark<F>>, QmdbError>> + Send {
+    ) -> impl Future<Output = Result<PublishedWatermark<F>, QmdbError>> + Send {
         UnorderedClient::resolve_watermark(self, watermark, min_sequence_number)
     }
 
@@ -390,8 +386,8 @@ where
         watermark: PublishedWatermark<F>,
         start_location: Location<F>,
         max_locations: u32,
-    ) -> impl Future<Output = Result<ReadResult<OperationRangeCheckpoint<Self::Digest, F>>, QmdbError>>
-           + Send {
+    ) -> impl Future<Output = Result<OperationRangeCheckpoint<Self::Digest, F>, QmdbError>> + Send
+    {
         UnorderedClient::operation_range_checkpoint_at(
             self,
             watermark,
@@ -425,7 +421,7 @@ where
         &self,
         watermark: Location<F>,
         min_sequence_number: Option<u64>,
-    ) -> impl Future<Output = Result<ReadResult<PublishedWatermark<F>>, QmdbError>> + Send {
+    ) -> impl Future<Output = Result<PublishedWatermark<F>, QmdbError>> + Send {
         ImmutableClient::resolve_watermark(self, watermark, min_sequence_number)
     }
 
@@ -442,8 +438,8 @@ where
         watermark: PublishedWatermark<F>,
         start_location: Location<F>,
         max_locations: u32,
-    ) -> impl Future<Output = Result<ReadResult<OperationRangeCheckpoint<Self::Digest, F>>, QmdbError>>
-           + Send {
+    ) -> impl Future<Output = Result<OperationRangeCheckpoint<Self::Digest, F>, QmdbError>> + Send
+    {
         ImmutableClient::operation_range_checkpoint_at(
             self,
             watermark,
@@ -477,7 +473,7 @@ where
         &self,
         watermark: Location<F>,
         min_sequence_number: Option<u64>,
-    ) -> impl Future<Output = Result<ReadResult<PublishedWatermark<F>>, QmdbError>> + Send {
+    ) -> impl Future<Output = Result<PublishedWatermark<F>, QmdbError>> + Send {
         KeylessClient::resolve_watermark(self, watermark, min_sequence_number)
     }
 
@@ -494,8 +490,8 @@ where
         watermark: PublishedWatermark<F>,
         start_location: Location<F>,
         max_locations: u32,
-    ) -> impl Future<Output = Result<ReadResult<OperationRangeCheckpoint<Self::Digest, F>>, QmdbError>>
-           + Send {
+    ) -> impl Future<Output = Result<OperationRangeCheckpoint<Self::Digest, F>, QmdbError>> + Send
+    {
         KeylessClient::operation_range_checkpoint_at(self, watermark, start_location, max_locations)
     }
 }
@@ -1085,20 +1081,13 @@ impl<C: OperationLogReader> OperationLogService for OperationLogConnect<C> {
                 .map_err(qmdb_error_to_connect)?;
             let proof = client
                 .operation_range_checkpoint_at(
-                    watermark.value,
+                    watermark,
                     Location::new(request.start_location),
                     request.max_locations,
                 )
                 .await
                 .map_err(qmdb_error_to_connect)?;
-            let sequence_number = watermark
-                .sequence_number
-                .max(proof.sequence_number)
-                .unwrap_or_default();
-            connectrpc::Response::ok(crate::proto::get_operation_range_response(
-                &proof.value,
-                sequence_number,
-            ))
+            connectrpc::Response::ok(crate::proto::get_operation_range_response(&proof))
         }
     }
 

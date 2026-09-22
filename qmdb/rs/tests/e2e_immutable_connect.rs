@@ -267,7 +267,6 @@ async fn test_immutable_connect_get_operation_range_returns_verifiable_proof() {
             .await
             .expect("get operation range");
 
-        assert!(proof.sequence_number >= 1);
         assert_eq!(proof.root, source.root);
         assert_eq!(proof.start_location, Location::new(1));
         assert_eq!(proof.operations, vec![source.operations[1].clone()]);
@@ -278,7 +277,7 @@ async fn test_immutable_connect_get_operation_range_returns_verifiable_proof() {
         .await
         .expect("cached publication evidence fixes the downstream read floor")
         .into_owned();
-    assert!(response.sequence_number < u64::MAX);
+    assert!(response.proof.as_option().is_some());
 }
 
 #[tokio::test]
