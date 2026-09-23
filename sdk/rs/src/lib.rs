@@ -936,25 +936,35 @@ impl StoreWriteBatch {
         }
 
         let mut batches = Vec::new();
-        let mut batch = Self::new();
-        for (index, (key, value)) in self.entries.into_iter().enumerate() {
-            let encoded_len = put_entry_encoded_len(&key, &value);
-            if encoded_len > max_encoded_bytes {
-                return Err(SplitError::EntryTooLarge {
-                    index,
-                    encoded_bytes: encoded_len,
-                    max_encoded_bytes,
-                });
+        let mut entries = self.entries.into_iter();
+        let mut offset = 0;
+        while !entries.as_slice().is_empty() {
+            // Byte limits can make chunks much smaller than max_rows.
+            let mut rows = 0;
+            let mut encoded_len = 0;
+            for (key, value) in entries.as_slice().iter().take(max_rows) {
+                let entry_encoded_len = put_entry_encoded_len(key, value);
+                if entry_encoded_len > max_encoded_bytes {
+                    return Err(SplitError::EntryTooLarge {
+                        index: offset + rows,
+                        encoded_bytes: entry_encoded_len,
+                        max_encoded_bytes,
+                    });
+                }
+                if entry_encoded_len > max_encoded_bytes - encoded_len {
+                    break;
+                }
+                rows += 1;
+                encoded_len += entry_encoded_len;
             }
-            if batch.len() == max_rows || encoded_len > max_encoded_bytes - batch.encoded_len {
-                batches.push(batch);
-                batch = Self::new();
-            }
-            batch.encoded_len += encoded_len;
-            batch.entries.push((key, value));
-        }
-        if !batch.is_empty() {
-            batches.push(batch);
+
+            let mut batch_entries = Vec::with_capacity(rows);
+            batch_entries.extend(entries.by_ref().take(rows));
+            batches.push(Self {
+                entries: batch_entries,
+                encoded_len,
+            });
+            offset += rows;
         }
         Ok(batches)
     }
