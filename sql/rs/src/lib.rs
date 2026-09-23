@@ -10,12 +10,14 @@ mod filter;
 mod predicate;
 mod scan;
 mod schema;
+mod session;
 mod types;
 mod writer;
 
 pub use aggregate::KvAggregateExtensionPlanner;
 pub use schema::KvSchema;
 pub use server::{query_context_with_min_sequence, sql_connect_stack, SqlConnect, SqlServer};
+pub use session::query_context_with_session;
 pub use types::default_orders_index_specs;
 pub use types::{
     CellValue, IndexBackfillEvent, IndexBackfillOptions, IndexBackfillReport, IndexLayout,
