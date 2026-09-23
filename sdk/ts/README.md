@@ -8,6 +8,14 @@ Interact with the Exoware API in TypeScript.
 
 `@exowarexyz/sdk` is **ALPHA** software and is not yet recommended for production use. Developers should expect breaking changes and occasional instability.
 
+## Put limits
+
+The SDK exports the application and transport limits as `MAX_PUT_ENTRIES`,
+`MAX_REQUEST_MESSAGE_BYTES`, `MAX_VALUE_LEN`, and `MAX_KEY_LEN`. The TypeScript SDK
+does not provide a batch-splitting helper. See the
+[language-independent protocol contract](../../proto/README.md) for request
+size measurement, errors, and backend portability.
+
 ## Credentials
 
 An auth token can be provided when constructing the client:

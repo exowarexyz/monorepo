@@ -34,11 +34,15 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{mpsc, Arc};
 use std::thread;
 
-use buffa::{Message, MessageView};
+use buffa::{DecodeOptions, Message};
 use bytes::Bytes;
 use commonware_codec::{DecodeExt, Encode};
 use exoware_sdk::common::kv::v1::Entry;
 use exoware_sdk::keys::Prefix;
+use exoware_sdk::limits::{
+    put_entry_encoded_len, PutTooLarge, MAX_PUT_ENTRIES, MAX_REQUEST_MESSAGE_BYTES,
+    MAX_RESPONSE_ELEMENT_MEMORY_BYTES, MAX_RESPONSE_MESSAGE_BYTES,
+};
 use exoware_sdk::log::stream::v1::{
     GetResponse as StreamGetResponse, GetResponseView as StreamGetResponseView,
 };
@@ -68,6 +72,7 @@ const RETENTION_META_KEY: &[u8] = b"retention";
 const PRUNE_SCAN_BATCH_SIZE: usize = 4096;
 const PRUNE_DELETE_CHUNK_KEYS: usize = 4096;
 const DEFAULT_COMMIT_COALESCE_MAX_BATCH_BYTES: usize = 16 * 1024 * 1024;
+const MAX_SEQUENCE_ENTRIES: usize = MAX_PUT_ENTRIES;
 const LOG_INGEST_DIR: &str = "ingest";
 const LOG_CF: &str = "log";
 const LOG_BATCH_KEY_LEN: usize = 8;
@@ -502,6 +507,21 @@ impl Writer {
                 message: "cannot ingest an empty batch".to_string(),
             });
         }
+
+        // Direct backend callers must also leave every committed sequence decodable.
+        if kvs.len() > MAX_SEQUENCE_ENTRIES {
+            return Err(PutTooLarge {
+                entries: kvs.len(),
+                max_entries: MAX_SEQUENCE_ENTRIES,
+            }
+            .into());
+        }
+        if put_encoded_len(&kvs) > MAX_REQUEST_MESSAGE_BYTES {
+            return Err(IngestError::ResourceExhausted {
+                message: "put exceeds the request message size limit".to_string(),
+            });
+        }
+
         let (response, result) = oneshot::channel();
 
         // The sender is `None` only inside `Writer::drop`, which cannot overlap a live call:
@@ -541,16 +561,13 @@ fn run_prepare(
     waves: mpsc::SyncSender<QueuedWave>,
     max_commit_batch_bytes: usize,
 ) {
-    while let Ok(first) = receiver.recv() {
-        let (wave, disconnected) =
-            coalesce_queued_write(&receiver, first, next, max_commit_batch_bytes);
+    let mut pending = None;
+    while let Some(first) = pending.take().or_else(|| receiver.recv().ok()) {
+        let (wave, carried) = coalesce_queued_write(&receiver, first, next, max_commit_batch_bytes);
+        pending = carried;
         next = wave.sequence;
         if waves.send(wave).is_err() {
             panic!("rocks stage workers died");
-        }
-
-        if disconnected {
-            break;
         }
     }
 }
@@ -603,24 +620,36 @@ fn run_commit(
 
 /// Coalesces one wave from requests already queued behind `first` without waiting for new
 /// arrivals, stopping once the accumulated payload reaches the soft byte cap. The request that
-/// crosses the cap stays in the wave so a single large request can still make progress. The
-/// whole wave shares one sequence number: its rows, in arrival order, form one log batch.
+/// crosses the cap stays in the wave so a single large request can still make progress.
+/// Hard response limits carry an overflowing request intact into the next wave. Each wave
+/// shares one sequence number and preserves arrival order.
 fn coalesce_queued_write(
     receiver: &mpsc::Receiver<WriteRequest>,
     first: WriteRequest,
     from: u64,
     max_batch_bytes: usize,
-) -> (QueuedWave, bool) {
+) -> (QueuedWave, Option<WriteRequest>) {
     let sequence = from
         .checked_add(1)
         .expect("rocks sequence number overflowed");
     let mut requests = Vec::with_capacity(64);
     let mut rows: Vec<(Bytes, Bytes)> = Vec::with_capacity(first.kvs.len());
     let mut staged_bytes = 0usize;
+    let mut encoded_bytes = 0;
     let mut request = first;
-    let mut disconnected = false;
+    let mut carried = None;
 
     loop {
+        let request_bytes = put_encoded_len(&request.kvs);
+        if !rows.is_empty()
+            && (request.kvs.len() > MAX_SEQUENCE_ENTRIES.saturating_sub(rows.len())
+                || request_bytes > MAX_REQUEST_MESSAGE_BYTES.saturating_sub(encoded_bytes))
+        {
+            carried = Some(request);
+            break;
+        }
+
+        encoded_bytes += request_bytes;
         // Payload counted twice: once as state rows and once inside the encoded log batch.
         staged_bytes += 2 * request
             .kvs
@@ -635,11 +664,7 @@ fn coalesce_queued_write(
 
         match receiver.try_recv() {
             Ok(next_request) => request = next_request,
-            Err(mpsc::TryRecvError::Empty) => break,
-            Err(mpsc::TryRecvError::Disconnected) => {
-                disconnected = true;
-                break;
-            }
+            Err(_) => break,
         }
     }
 
@@ -649,8 +674,14 @@ fn coalesce_queued_write(
             requests,
             rows,
         },
-        disconnected,
+        carried,
     )
+}
+
+fn put_encoded_len(kvs: &[(Bytes, Bytes)]) -> usize {
+    kvs.iter()
+        .map(|(key, value)| put_entry_encoded_len(key, value))
+        .sum()
 }
 
 /// Stages one wave's two SST files in parallel: the single-row log SST on this thread, the
@@ -915,7 +946,10 @@ fn replay_newest_log_row(db: &DB, floor: u64) -> Result<u64, String> {
     if sequence <= floor {
         return Ok(sequence);
     }
-    let response = StreamGetResponseView::decode_view(value.as_ref())
+    let response: StreamGetResponseView<'_> = DecodeOptions::new()
+        .with_max_message_size(MAX_RESPONSE_MESSAGE_BYTES)
+        .with_element_memory_limit(MAX_RESPONSE_ELEMENT_MEMORY_BYTES)
+        .decode_view(value.as_ref())
         .map_err(|e| format!("corrupt log row for sequence {sequence}: {e}"))?;
     let mut batch = rocksdb::WriteBatch::default();
     for entry in response.entries.iter() {
@@ -1517,6 +1551,10 @@ mod tests {
     use super::*;
     use std::collections::BTreeSet;
 
+    use buffa::encoding::varint_len;
+    use exoware_sdk::common::kv::v1::EntryView;
+    use exoware_sdk::limits::MAX_VALUE_LEN;
+    use exoware_sdk::log::ingest::v1::PutRequest;
     use exoware_server::{Ingest, Log, Sequence};
     use tempfile::tempdir;
 
@@ -1743,11 +1781,15 @@ mod tests {
         drop(sender);
 
         let first = receiver.recv().expect("first request");
-        let (wave, disconnected) =
+        let (wave, carried) =
             coalesce_queued_write(&receiver, first, 0, DEFAULT_COMMIT_COALESCE_MAX_BATCH_BYTES);
         assert_eq!(wave.sequence, 1);
         assert_eq!(wave.requests.len(), 3);
-        assert!(disconnected);
+        assert!(carried.is_none());
+        assert!(matches!(
+            receiver.try_recv(),
+            Err(mpsc::TryRecvError::Disconnected)
+        ));
         let group = stage_wave(dir.path(), wave);
         assert_eq!(group.sequence, 1);
         assert_eq!(group.requests.len(), 3);
@@ -1765,11 +1807,11 @@ mod tests {
         drop(sender);
 
         let first = receiver.recv().expect("first request");
-        let (wave, disconnected) = coalesce_queued_write(&receiver, first, 0, 1);
+        let (wave, carried) = coalesce_queued_write(&receiver, first, 0, 1);
 
         assert_eq!(wave.requests.len(), 1);
         assert_eq!(wave.requests[0].kvs[0].0.as_ref(), b"a");
-        assert!(!disconnected);
+        assert!(carried.is_none());
         assert_eq!(
             receiver
                 .try_recv()
@@ -1778,6 +1820,219 @@ mod tests {
                 .0
                 .as_ref(),
             b"b"
+        );
+    }
+
+    #[test]
+    fn coalescing_makes_progress_with_an_oversized_first_request() {
+        for oversized_rows in [true, false] {
+            let mut first = write_request(b"first");
+            first.kvs = if oversized_rows {
+                vec![(Bytes::from_static(b"a"), Bytes::new()); MAX_SEQUENCE_ENTRIES + 1]
+            } else {
+                vec![
+                    (
+                        Bytes::from_static(b"a"),
+                        Bytes::from(vec![1; MAX_VALUE_LEN])
+                    );
+                    8
+                ]
+            };
+            let first_len = first.kvs.len();
+            let (sender, receiver) = mpsc::channel();
+            sender.send(write_request(b"next")).unwrap();
+            drop(sender);
+
+            let (wave, carried) = coalesce_queued_write(&receiver, first, 0, usize::MAX);
+            assert_eq!(wave.sequence, 1);
+            assert_eq!(wave.rows.len(), first_len);
+            assert_eq!(wave.requests.len(), 1);
+            let next = carried.unwrap();
+            assert_eq!(next.kvs[0].0.as_ref(), b"next");
+
+            let (wave, carried) = coalesce_queued_write(&receiver, next, wave.sequence, usize::MAX);
+            assert_eq!(wave.sequence, 2);
+            assert_eq!(wave.rows.len(), 1);
+            assert_eq!(wave.requests.len(), 1);
+            assert!(carried.is_none());
+            assert!(matches!(
+                receiver.try_recv(),
+                Err(mpsc::TryRecvError::Disconnected)
+            ));
+        }
+    }
+
+    #[test]
+    fn coalescing_preserves_whole_puts_at_and_across_entry_cap() {
+        for second_len in [1, 2] {
+            let (sender, receiver) = mpsc::channel();
+            let mut first = write_request(b"a");
+            first.kvs = vec![(Bytes::from_static(b"a"), Bytes::new()); MAX_SEQUENCE_ENTRIES - 1];
+            let mut second = write_request(b"b");
+            second.kvs.resize(second_len, second.kvs[0].clone());
+            sender.send(first).expect("send first");
+            sender.send(second).expect("send second");
+            sender.send(write_request(b"c")).expect("send third");
+            drop(sender);
+
+            let (waves, prepared) = mpsc::sync_channel(3);
+            run_prepare(0, receiver, waves, DEFAULT_COMMIT_COALESCE_MAX_BATCH_BYTES);
+            let first = prepared.recv().expect("first wave");
+            let second = prepared.recv().expect("second wave");
+            assert_eq!((first.sequence, second.sequence), (1, 2));
+            assert_eq!(
+                first.rows.len(),
+                MAX_SEQUENCE_ENTRIES - usize::from(second_len == 2)
+            );
+            assert_eq!(second.rows.len(), if second_len == 1 { 1 } else { 3 });
+            assert_eq!(first.rows[0].0.as_ref(), b"a");
+            assert_eq!(second.rows.last().expect("last row").0.as_ref(), b"c");
+            let request_keys: Vec<_> = first
+                .requests
+                .iter()
+                .chain(&second.requests)
+                .map(|request| request.kvs[0].0.as_ref())
+                .collect();
+            assert_eq!(request_keys, [b"a", b"b", b"c"]);
+            assert!(prepared.recv().is_err());
+        }
+    }
+
+    #[test]
+    fn coalescing_bounds_encoded_responses_above_soft_byte_cap() {
+        let value = Bytes::from(vec![0; MAX_VALUE_LEN]);
+        let (sender, receiver) = mpsc::channel();
+        for key in [b"a", b"b", b"c"] {
+            let mut request = write_request(key);
+            request.kvs = vec![(Bytes::from_static(key), value.clone()); 3];
+            sender.send(request).expect("send request");
+        }
+        drop(sender);
+
+        let (waves, prepared) = mpsc::sync_channel(3);
+        run_prepare(0, receiver, waves, usize::MAX);
+        let first = prepared.recv().expect("first wave");
+        let second = prepared.recv().expect("second wave");
+        assert_eq!((first.sequence, second.sequence), (1, 2));
+        assert_eq!((first.requests.len(), second.requests.len()), (2, 1));
+        assert!(put_encoded_len(&first.rows) <= MAX_REQUEST_MESSAGE_BYTES);
+        assert_eq!(second.rows[0].0.as_ref(), b"c");
+        assert!(prepared.recv().is_err());
+    }
+
+    #[test]
+    fn coalescing_accepts_full_request_before_carrying_next() {
+        let value = Bytes::from(vec![1; MAX_VALUE_LEN]);
+        let overhead = 8 * put_entry_encoded_len(&[0], &value) - MAX_REQUEST_MESSAGE_BYTES;
+        let mut first = write_request(b"full");
+        first.kvs = (0..8)
+            .map(|index| {
+                let value = if index == 7 {
+                    value.slice(..MAX_VALUE_LEN - overhead)
+                } else {
+                    value.clone()
+                };
+                (Bytes::from(vec![index]), value)
+            })
+            .collect();
+        assert_eq!(put_encoded_len(&first.kvs), MAX_REQUEST_MESSAGE_BYTES);
+        let (sender, receiver) = mpsc::channel();
+        sender.send(first).unwrap();
+        sender.send(write_request(b"next")).unwrap();
+        drop(sender);
+        let (waves, prepared) = mpsc::sync_channel(3);
+        run_prepare(u64::MAX - 2, receiver, waves, usize::MAX);
+        let first = prepared.recv().unwrap();
+        let second = prepared.recv().unwrap();
+        assert_eq!((first.sequence, second.sequence), (u64::MAX - 1, u64::MAX));
+        assert_eq!((first.rows.len(), second.rows.len()), (8, 1));
+        assert_eq!((first.requests.len(), second.requests.len()), (1, 1));
+        assert!(
+            put_encoded_len(&first.rows) + 1 + varint_len(first.sequence)
+                <= MAX_RESPONSE_MESSAGE_BYTES
+        );
+        assert_eq!(second.rows[0].0.as_ref(), b"next");
+        assert!(prepared.recv().is_err());
+    }
+
+    #[test]
+    fn put_size_matches_protobuf_framing() {
+        let kvs: Vec<_> = [0, 1, 127, 128, 16_383, 16_384]
+            .into_iter()
+            .map(|len| (Bytes::from(vec![1; len]), Bytes::from(vec![2; len])))
+            .collect();
+        let request = PutRequest {
+            kvs: kvs
+                .iter()
+                .map(|(key, value)| Entry {
+                    key: key.to_vec(),
+                    value: value.clone(),
+                    ..Default::default()
+                })
+                .collect(),
+            ..Default::default()
+        };
+        assert_eq!(put_encoded_len(&kvs), request.encode_to_vec().len());
+        assert_eq!(
+            put_encoded_len(&kvs) + 1 + varint_len(128),
+            encode_log_value(128, &kvs).len()
+        );
+    }
+
+    #[tokio::test]
+    async fn direct_oversized_puts_are_rejected_before_publication() {
+        let dir = tempdir().expect("tempdir");
+        let store = RocksStore::open(dir.path(), None).expect("open db");
+        let entries = MAX_SEQUENCE_ENTRIES + 1;
+        let error = store
+            .put_batch(vec![(Bytes::new(), Bytes::new()); entries])
+            .await
+            .expect_err("reject oversized entry count");
+        assert_eq!(
+            error,
+            IngestError::PutTooLarge(PutTooLarge {
+                entries,
+                max_entries: MAX_SEQUENCE_ENTRIES,
+            })
+        );
+
+        let value = Bytes::from(vec![0; MAX_VALUE_LEN]);
+        let kvs = vec![(Bytes::new(), value); 8];
+        let error = store
+            .put_batch(kvs)
+            .await
+            .expect_err("reject oversized encoded bytes");
+        assert!(matches!(error, IngestError::ResourceExhausted { .. }));
+        assert_eq!(store.current_sequence(), 0);
+        assert_eq!(
+            store
+                .put_batch(vec![(Bytes::from_static(b"k"), Bytes::new())])
+                .await
+                .unwrap(),
+            1
+        );
+    }
+
+    #[test]
+    fn reopen_decodes_sequence_above_default_element_budget() {
+        let dir = tempdir().expect("tempdir");
+        let entries = 32 * 1024 * 1024 / std::mem::size_of::<EntryView<'_>>() + 1;
+        let kvs = vec![(Bytes::from_static(b"a"), Bytes::from_static(b"value")); entries];
+        let payload = encode_log_value(1, &kvs);
+        drop(kvs);
+        assert!(DecodeOptions::new()
+            .decode_view::<StreamGetResponseView<'_>>(&payload)
+            .is_err());
+        {
+            let store = RocksStore::open(dir.path(), None).expect("open db");
+            seed_log_row(&store, 1, &payload);
+        }
+
+        let store = RocksStore::open(dir.path(), None).expect("reopen large log row");
+        assert_eq!(store.current_sequence(), 1);
+        assert_eq!(
+            store.get_raw(b"a").expect("get replayed value"),
+            Some(b"value".to_vec())
         );
     }
 

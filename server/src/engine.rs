@@ -9,7 +9,11 @@ use std::future::Future;
 
 use buffa::Message;
 use bytes::Bytes;
+use connectrpc::{CodecFormat, ConnectError, Encodable};
 use exoware_sdk::common::kv::v1::Entry;
+use exoware_sdk::limits::{
+    PutTooLarge, MAX_RESPONSE_ELEMENT_MEMORY_BYTES, MAX_RESPONSE_MESSAGE_BYTES,
+};
 use exoware_sdk::log::stream::v1::GetResponse as StreamGetResponse;
 use exoware_sdk::prune_policy::PrunePolicyDocument;
 use exoware_sdk::retention::RetentionPolicy;
@@ -71,6 +75,13 @@ pub trait Sequence: Send + Sync + 'static {
 /// Backends choose the variant; the Connect layer maps it to the wire code and retry details.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum IngestError {
+    /// The request exceeds a backend's accepted batch size.
+    #[error(transparent)]
+    PutTooLarge(#[from] PutTooLarge),
+
+    #[error("resource exhausted: {message}")]
+    ResourceExhausted { message: String },
+
     /// The write cannot currently be accepted; clients may retry with backoff.
     #[error("unavailable: {message}")]
     Unavailable { message: String },
@@ -185,8 +196,23 @@ impl LogBatch {
 
     /// Decode the stored response for paths that need to inspect entries.
     pub fn decode_response(&self) -> Result<StreamGetResponse, String> {
-        StreamGetResponse::decode_from_slice(&self.response_bytes)
+        buffa::DecodeOptions::new()
+            .with_max_message_size(MAX_RESPONSE_MESSAGE_BYTES)
+            .with_element_memory_limit(MAX_RESPONSE_ELEMENT_MEMORY_BYTES)
+            .decode_from_slice(&self.response_bytes)
             .map_err(|err| format!("failed to decode sequence log value: {err}"))
+    }
+}
+
+impl Encodable<StreamGetResponse> for LogBatch {
+    fn encode(&self, codec: CodecFormat) -> Result<Bytes, ConnectError> {
+        match codec {
+            CodecFormat::Proto => Ok(self.response_bytes.clone()),
+            _ => {
+                let response = self.decode_response().map_err(ConnectError::internal)?;
+                Encodable::encode(&response, codec)
+            }
+        }
     }
 }
 
@@ -307,6 +333,14 @@ mod tests {
     use exoware_sdk::kv_codec::Utf8;
     use exoware_sdk::selector::Selector;
     use exoware_sdk::stream_filter::StreamFilter;
+
+    #[test]
+    fn log_response_preserves_binary_buffer() {
+        let batch = LogBatch::from_entries(1, vec![(Bytes::from_static(b"key"), Bytes::new())]);
+        let encoded = batch.encode(CodecFormat::Proto).unwrap();
+        assert_eq!(encoded, batch.response_bytes);
+        assert_eq!(encoded.as_ptr(), batch.response_bytes.as_ptr());
+    }
 
     #[derive(Clone)]
     struct TestLog {

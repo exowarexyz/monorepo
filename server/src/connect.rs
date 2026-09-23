@@ -11,8 +11,7 @@ use std::sync::Arc;
 use buffa::Message;
 use bytes::Bytes;
 use connectrpc::{
-    Chain, ConnectError, ConnectRpcService, Limits, PreEncoded, RequestContext as Context,
-    ServiceRequest,
+    Chain, ConnectError, ConnectRpcService, Limits, RequestContext as Context, ServiceRequest,
 };
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::execution::context::TaskContext;
@@ -30,8 +29,8 @@ use exoware_proto::log::retention::v1::{
 #[cfg(test)]
 use exoware_proto::log::stream::v1::GetRequestView;
 use exoware_proto::log::stream::v1::{
-    GetResponse as StreamGetResponse, Service as StreamApi, ServiceServer as StreamServiceServer,
-    SubscribeRequestView, SubscribeResponse,
+    Service as StreamApi, ServiceServer as StreamServiceServer, SubscribeRequestView,
+    SubscribeResponse,
 };
 use exoware_proto::prune::{
     PruneResponse, Service as PruneApi, ServiceServer as PruneServiceServer,
@@ -49,6 +48,7 @@ use exoware_proto::{
 use exoware_sdk as exoware_proto;
 use exoware_sdk::common::kv::v1::filter::KindView as ProtoFilterKindView;
 use exoware_sdk::keys::Key;
+use exoware_sdk::limits::{INGEST_ERROR_DOMAIN, MAX_REQUEST_MESSAGE_BYTES};
 use exoware_sdk::selector::Selector;
 use futures::{stream as stream_util, Stream, StreamExt};
 use tokio::sync::Notify;
@@ -57,12 +57,13 @@ use crate::reduce::{decode_group, execute_reduce, RangeError, ReduceExecution, R
 use crate::stream::{StreamHub, StreamNotifier};
 use crate::validate::{self, IngestLimits};
 use crate::{
-    FilteredBatch, Ingest, IngestError, Log, Prune, Query, QueryExtra, RangeScan, RangeScanResult,
-    Retention, StoreEngine,
+    FilteredBatch, Ingest, IngestError, Log, LogBatch, Prune, Query, QueryExtra, RangeScan,
+    RangeScanResult, Retention, StoreEngine,
 };
 
-// TODO (#57): Make limits configurable.
-const MAX_CONNECTRPC_BODY_BYTES: usize = 256 * 1024 * 1024;
+pub const MAX_CONNECTRPC_BODY_BYTES: usize = MAX_REQUEST_MESSAGE_BYTES;
+pub const MAX_CONNECTRPC_MESSAGE_BYTES: usize = MAX_REQUEST_MESSAGE_BYTES;
+pub const MAX_CONNECTRPC_ELEMENT_MEMORY_BYTES: usize = 192 * 1024 * 1024;
 const RANGE_STREAM_MAX_FRAME_ROWS: usize = 4096;
 const REDUCE_FRAME_TARGET_BYTES: usize = 16 * 1024 * 1024;
 // Per-subscription bound on concurrent subscribe log reads. Each slot can pin
@@ -468,12 +469,14 @@ fn with_retry_hint(err: ConnectError, retry_delay: std::time::Duration) -> Conne
 
 fn ingest_error_to_connect(err: IngestError) -> ConnectError {
     match err {
+        IngestError::PutTooLarge(error) => validate::put_too_large_error(error),
+        IngestError::ResourceExhausted { message } => ConnectError::resource_exhausted(message),
         IngestError::Unavailable { message } => with_retry_hint(
             with_error_info_detail(
                 ConnectError::unavailable(message),
                 ErrorInfo {
                     reason: REASON_INGEST_UNAVAILABLE.to_string(),
-                    domain: crate::validate::INGEST_ERROR_DOMAIN.to_string(),
+                    domain: INGEST_ERROR_DOMAIN.to_string(),
                     ..Default::default()
                 },
             ),
@@ -498,7 +501,7 @@ where
                     ConnectError::unavailable("ingest is not ready"),
                     ErrorInfo {
                         reason: REASON_WORKER_NOT_READY.to_string(),
-                        domain: crate::validate::INGEST_ERROR_DOMAIN.to_string(),
+                        domain: INGEST_ERROR_DOMAIN.to_string(),
                         ..Default::default()
                     },
                 ),
@@ -1188,7 +1191,7 @@ where
         &self,
         _ctx: Context,
         request: ServiceRequest<'_, exoware_proto::log::stream::v1::GetRequest>,
-    ) -> connectrpc::ServiceResult<PreEncoded<StreamGetResponse>> {
+    ) -> connectrpc::ServiceResult<LogBatch> {
         let seq = request.sequence_number;
         match self
             .state
@@ -1197,9 +1200,7 @@ where
             .await
             .map_err(ConnectError::internal)?
         {
-            Some(batch) => connectrpc::Response::ok(PreEncoded::from_bytes_unchecked(
-                batch.into_response_bytes(),
-            )),
+            Some(batch) => connectrpc::Response::ok(batch),
             None => {
                 let current = self.state.log.current_sequence();
                 // Distinguish "never existed" (seq > current) vs "evicted".
@@ -1274,10 +1275,15 @@ where
     }
 }
 
-fn connect_limits() -> Limits {
+/// Transport backstops for services carrying Store payloads.
+///
+/// Element budgets exclude payload buffers and may reserve extra vector capacity.
+/// Deployments must bound concurrent requests separately.
+pub fn connect_limits() -> Limits {
     Limits::default()
         .with_max_request_body_size(MAX_CONNECTRPC_BODY_BYTES)
-        .with_max_message_size(MAX_CONNECTRPC_BODY_BYTES)
+        .with_max_message_size(MAX_CONNECTRPC_MESSAGE_BYTES)
+        .with_element_memory_limit(MAX_CONNECTRPC_ELEMENT_MEMORY_BYTES)
 }
 
 pub(crate) type IngestService<I> = ConnectRpcService<IngestServiceServer<IngestConnect<I>>>;
@@ -1442,9 +1448,17 @@ mod tests {
     };
     use exoware_sdk::keys::Prefix;
     use exoware_sdk::kv_codec::KvReducedValue;
+    use exoware_sdk::limits::{
+        put_entry_encoded_len, PutTooLarge, MAX_PUT_ENTRIES, MAX_RESPONSE_ELEMENT_MEMORY_BYTES,
+        MAX_RESPONSE_MESSAGE_BYTES, MAX_VALUE_LEN,
+    };
     use exoware_sdk::prune_policy::{PrunePolicyDocument, PRUNE_POLICY_DOCUMENT_VERSION};
     use exoware_sdk::retention::RetentionPolicy;
-    use exoware_sdk::{decode_connect_error, to_domain_reduce_response};
+    use exoware_sdk::transport::ServiceTransport;
+    use exoware_sdk::{
+        decode_connect_error, to_domain_reduce_response, PrefixedStoreClient, StoreClient,
+        StoreWriteBatch,
+    };
     use futures::StreamExt;
 
     use crate::{
@@ -2841,7 +2855,10 @@ mod tests {
     #[tokio::test]
     async fn ingest_uses_configured_value_limit() {
         let engine = Arc::new(FakeEngine::default());
-        let state = IngestState::new(engine).with_limits(IngestLimits { max_value_len: 4 });
+        let state = IngestState::new(engine).with_limits(IngestLimits {
+            max_value_len: 4,
+            ..IngestLimits::default()
+        });
         let connect = IngestConnect::new(state);
 
         let request = put_request(5);
@@ -2851,6 +2868,235 @@ mod tests {
             .expect_err("put should reject oversized value");
 
         assert_eq!(err.code, connectrpc::ErrorCode::InvalidArgument);
+    }
+
+    #[test]
+    fn transport_admits_portable_puts() {
+        let limits = connect_limits();
+        assert_eq!(limits.max_request_body_size(), MAX_REQUEST_MESSAGE_BYTES);
+        assert_eq!(limits.max_message_size(), MAX_REQUEST_MESSAGE_BYTES);
+        assert!(limits.element_memory_limit() >= MAX_PUT_ENTRIES * std::mem::size_of::<Entry>());
+    }
+
+    #[tokio::test]
+    async fn put_limits_round_trip_through_sdk() {
+        let engine = Arc::new(FakeEngine::default());
+        let state = AppState::new(engine.clone()).with_ingest_limits(IngestLimits {
+            max_entries: 2,
+            ..IngestLimits::default()
+        });
+        let client = StoreClient::builder()
+            .url("http://store.test")
+            .client_transport(ServiceTransport::new(connect_stack(state)))
+            .build()
+            .unwrap();
+        let client = PrefixedStoreClient::empty(client);
+        let mut batch = StoreWriteBatch::new();
+        batch
+            .push(&client, &Bytes::from_static(b"a"), b"ab")
+            .unwrap();
+        batch
+            .push(&client, &Bytes::from_static(b"b"), b"cd")
+            .unwrap();
+        assert_eq!(batch.commit(client.client()).await.unwrap(), 1);
+
+        batch.push(&client, &Bytes::from_static(b"c"), b"").unwrap();
+        let error = batch.commit(client.client()).await.unwrap_err();
+        assert_eq!(
+            error.rpc_code(),
+            Some(connectrpc::ErrorCode::InvalidArgument)
+        );
+        let decoded = error.decoded_rpc_error().unwrap().unwrap();
+        assert_eq!(
+            decoded.bad_request.unwrap().field_violations[0].field,
+            "kvs"
+        );
+        assert_eq!(decoded.error_info.as_ref().unwrap().domain, "log.ingest");
+        assert_eq!(decoded.error_info.as_ref().unwrap().reason, "PUT_TOO_LARGE");
+        assert_eq!(engine.current_sequence(), 1);
+        assert_eq!(
+            error.put_too_large(),
+            Some(PutTooLarge {
+                entries: 3,
+                max_entries: 2,
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn maximum_entry_count_reads_back() {
+        let engine = Arc::new(FakeEngine::default());
+        let client = StoreClient::builder()
+            .url("http://store.test")
+            .client_transport(ServiceTransport::new(connect_stack(AppState::new(
+                engine.clone(),
+            ))))
+            .build()
+            .unwrap();
+        let client = PrefixedStoreClient::empty(client);
+        let keys = [Bytes::from_static(b"a"), Bytes::from_static(b"b")];
+        let mut batch = StoreWriteBatch::new();
+        batch.reserve(MAX_PUT_ENTRIES);
+        for index in 0..MAX_PUT_ENTRIES {
+            let value: &[u8] = if index % 2 == 0 { b"a" } else { b"b" };
+            batch.push(&client, &keys[index % 2], value).unwrap();
+        }
+        let sequence = batch.commit(client.client()).await.unwrap();
+        batch
+            .push(&client, &Bytes::from_static(b"extra"), b"extra")
+            .unwrap();
+        let error = batch.commit(client.client()).await.unwrap_err();
+        assert_eq!(error.put_too_large().unwrap().entries, MAX_PUT_ENTRIES + 1);
+        drop(batch);
+        let entries = client.stream().get(sequence).await.unwrap().unwrap();
+        assert_eq!(entries.len(), MAX_PUT_ENTRIES);
+        for (index, (actual_key, value)) in entries.iter().enumerate() {
+            assert_eq!(actual_key, &keys[index % 2]);
+            assert_eq!(value.as_ref(), if index % 2 == 0 { b"a" } else { b"b" });
+        }
+        drop(entries);
+        let json_client = exoware_proto::log::stream::v1::ServiceClient::new(
+            ServiceTransport::new(connect_stack(AppState::new(engine))),
+            connectrpc::client::ClientConfig::new("http://store.test".parse().unwrap())
+                .json()
+                .with_default_max_message_size(MAX_RESPONSE_MESSAGE_BYTES)
+                .with_default_element_memory_limit(MAX_RESPONSE_ELEMENT_MEMORY_BYTES),
+        );
+        let response = json_client
+            .get(StreamGetRequest {
+                sequence_number: sequence,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let response = response.view();
+        assert_eq!(response.sequence_number, sequence);
+        assert_eq!(response.entries.len(), MAX_PUT_ENTRIES);
+        for (index, entry) in response.entries.iter().enumerate() {
+            assert_eq!(entry.key, keys[index % 2]);
+            assert_eq!(entry.value, if index % 2 == 0 { b"a" } else { b"b" });
+        }
+        let filter = StreamFilter {
+            selectors: vec![Selector {
+                prefix: Bytes::new(),
+                payload_regex: ".*".into(),
+            }],
+            value_filters: vec![],
+        };
+        let mut stream = client
+            .stream()
+            .subscribe(filter, Some(sequence))
+            .await
+            .unwrap();
+        let frame = stream.next().await.unwrap().unwrap();
+        assert_eq!(frame.sequence_number, sequence);
+        assert_eq!(frame.entries.len(), MAX_PUT_ENTRIES);
+        for (index, entry) in frame.entries.iter().enumerate() {
+            assert_eq!(entry.key, keys[index % 2]);
+            assert_eq!(
+                entry.value.as_ref(),
+                if index % 2 == 0 { b"a" } else { b"b" }
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn maximum_request_bytes_read_back() {
+        let engine = Arc::new(FakeEngine::default());
+        let client = StoreClient::builder()
+            .url("http://store.test")
+            .client_transport(ServiceTransport::new(connect_stack(AppState::new(
+                engine.clone(),
+            ))))
+            .build()
+            .unwrap();
+        let client = PrefixedStoreClient::empty(client);
+        let value = Bytes::from(vec![1; MAX_VALUE_LEN]);
+        let overhead = 8 * put_entry_encoded_len(&[0], &value) - MAX_REQUEST_MESSAGE_BYTES;
+        let mut batch = StoreWriteBatch::new();
+        for extra in [1, 0] {
+            batch.clear();
+            for index in 0..8 {
+                let value = if index == 7 {
+                    value.slice(..MAX_VALUE_LEN - overhead + extra)
+                } else {
+                    value.clone()
+                };
+                batch
+                    .push(&client, &Bytes::from(vec![index]), value)
+                    .unwrap();
+            }
+            assert_eq!(batch.encoded_len(), MAX_REQUEST_MESSAGE_BYTES + extra);
+            if extra == 1 {
+                let error = batch.commit(client.client()).await.unwrap_err();
+                assert_eq!(
+                    error.rpc_code(),
+                    Some(connectrpc::ErrorCode::ResourceExhausted)
+                );
+                assert!(error.put_too_large().is_none());
+                assert_eq!(engine.current_sequence(), 0);
+            }
+        }
+        let sequence = batch.commit(client.client()).await.unwrap();
+        let entries = client.stream().get(sequence).await.unwrap().unwrap();
+        assert_eq!(entries.as_slice(), batch.entries());
+        drop(entries);
+        let filter = StreamFilter {
+            selectors: vec![Selector {
+                prefix: Bytes::new(),
+                payload_regex: ".*".into(),
+            }],
+            value_filters: vec![],
+        };
+        let mut stream = client
+            .stream()
+            .subscribe(filter, Some(sequence))
+            .await
+            .unwrap();
+        let frame = stream.next().await.unwrap().unwrap();
+        assert_eq!(frame.sequence_number, sequence);
+        assert_eq!(frame.entries.len(), batch.len());
+        for (actual, (key, value)) in frame.entries.iter().zip(batch.entries()) {
+            assert_eq!(actual.key, key.as_ref());
+            assert_eq!(&actual.value, value);
+        }
+    }
+
+    #[tokio::test]
+    async fn backend_byte_rejection_uses_generic_resource_exhausted() {
+        let engine = Arc::new(FakeEngine::default());
+        engine.set_put_error(IngestError::ResourceExhausted {
+            message: "backend capacity exceeded".to_string(),
+        });
+        let connect = IngestConnect::new(IngestState::new(engine));
+        let request = put_request(1);
+        let request = ServiceRequest::from_parts(request.reborrow(), request.bytes());
+        let error = IngestApi::put(&connect, Context::default(), request)
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, connectrpc::ErrorCode::ResourceExhausted);
+        assert!(error.details.is_empty());
+    }
+
+    #[tokio::test]
+    async fn backend_size_rejection_uses_validation_contract() {
+        let engine = Arc::new(FakeEngine::default());
+        let error = PutTooLarge {
+            entries: 3,
+            max_entries: 2,
+        };
+        engine.set_put_error(error.into());
+        let connect = IngestConnect::new(IngestState::new(engine));
+        let request = put_request(1);
+        let request = ServiceRequest::from_parts(request.reborrow(), request.bytes());
+        let actual = IngestApi::put(&connect, Context::default(), request)
+            .await
+            .unwrap_err();
+        let expected = validate::put_too_large_error(error);
+        assert_eq!(
+            decode_connect_error(&actual).unwrap(),
+            decode_connect_error(&expected).unwrap()
+        );
     }
 
     #[tokio::test]

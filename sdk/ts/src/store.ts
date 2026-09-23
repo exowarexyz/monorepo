@@ -14,6 +14,7 @@ import {
 import type { Selector } from './gen/ts/common/v1/kv_pb.js';
 import { ErrorInfoSchema } from './gen/ts/google/rpc/error_details_pb.js';
 import { PutRequestSchema } from './gen/ts/log/v1/ingest_pb.js';
+import { MAX_KEY_LEN } from './limits.js';
 import {
     GetManyRequestSchema,
     GetRequestSchema as QueryGetRequestSchema,
@@ -69,8 +70,6 @@ export interface StoreBatch {
     sequenceNumber: bigint;
     entries: StoreBatchEntry[];
 }
-
-const MAX_KEY_LEN = 254;
 
 export class StoreKeyPrefix {
     public readonly prefix: Uint8Array;
