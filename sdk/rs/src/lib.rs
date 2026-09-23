@@ -3047,6 +3047,7 @@ mod tests {
     use super::*;
     use crate::kv_codec::{KvFieldKind, KvPredicate, KvPredicateCheck, KvPredicateConstraint};
     use buffa::Message as _;
+    use buffa_types::google::protobuf::Duration as ProtoDuration;
     use connectrpc::compression::{CompressionProvider, GzipProvider};
     use connectrpc::error::ErrorDetail;
     use exoware_proto::query::TraversalMode as ProtoTraversalMode;
@@ -4525,6 +4526,59 @@ mod tests {
         assert_eq!(retry_backoff_delay(2, config), Duration::from_millis(200));
         assert_eq!(retry_backoff_delay(3, config), Duration::from_millis(250));
         assert_eq!(retry_backoff_delay(4, config), Duration::from_millis(250));
+    }
+
+    #[test]
+    fn retry_delay_caps_retry_info_hint_at_configured_maximum() {
+        let error = proto::with_retry_info_detail(
+            ConnectError::unavailable("retry"),
+            proto::google::rpc::RetryInfo {
+                retry_delay: Some(ProtoDuration {
+                    seconds: 1,
+                    ..Default::default()
+                })
+                .into(),
+                ..Default::default()
+            },
+        );
+        let config = RetryConfig::standard().with_max_backoff(Duration::from_millis(100));
+
+        assert_eq!(
+            retry_delay_for_error(&error, 1, config),
+            Duration::from_millis(100)
+        );
+    }
+
+    #[test]
+    fn retry_delay_honors_retry_info_hint_below_configured_maximum() {
+        let error = proto::with_retry_info_detail(
+            ConnectError::unavailable("retry"),
+            proto::google::rpc::RetryInfo {
+                retry_delay: Some(ProtoDuration {
+                    nanos: 50_000_000,
+                    ..Default::default()
+                })
+                .into(),
+                ..Default::default()
+            },
+        );
+        let config = RetryConfig::standard().with_max_backoff(Duration::from_millis(100));
+
+        assert_eq!(
+            retry_delay_for_error(&error, 1, config),
+            Duration::from_millis(50)
+        );
+    }
+
+    #[test]
+    fn retry_delay_falls_back_to_exponential_backoff_without_retry_info() {
+        let error = ConnectError::unavailable("retry");
+        let config = RetryConfig::standard();
+
+        assert_eq!(
+            retry_delay_for_error(&error, 2, config),
+            Duration::from_millis(200)
+        );
     }
 
     #[test]
