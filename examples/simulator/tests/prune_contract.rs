@@ -50,7 +50,7 @@ fn put_one(store: &RocksStore, key: &'static [u8], value: &'static [u8]) -> u64 
 }
 
 fn get_value(store: &RocksStore, key: &Bytes) -> Option<Bytes> {
-    block_on(store.get(key.clone())).expect("get").0
+    block_on(store.get(key.clone())).expect("get").value
 }
 
 /// True when the log still serves a batch at `sequence`.

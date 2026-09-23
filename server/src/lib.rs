@@ -15,8 +15,8 @@ pub use connect::{
     stream_service, AppState, IngestState, PruneState, QueryState, RetentionState, StreamState,
 };
 pub use engine::{
-    FilteredBatch, Ingest, IngestError, Log, LogBatch, Prune, Query, QueryExtra, RangeScan,
-    RangeScanBatch, Retention, Sequence, StoreEngine,
+    FilteredBatch, Ingest, IngestError, Log, LogBatch, Prune, Query, QueryExtra, QueryResult,
+    RangeScan, RangeScanBatch, RangeScanResult, Retention, Sequence, StoreEngine,
 };
 pub use reduce::RangeError;
 pub use stream::{

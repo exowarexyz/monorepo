@@ -21,6 +21,23 @@ use crate::stream::{apply_filter, CompiledMatchers};
 /// Keep this lightweight: streaming query RPCs may emit detail on every frame.
 pub type QueryExtra = HashMap<String, buffa_types::google::protobuf::Value>;
 
+/// A query value, its evaluation sequence, and backend-specific metadata.
+#[derive(Clone, Debug)]
+pub struct QueryResult<T> {
+    pub value: T,
+    pub sequence_number: u64,
+    pub extra: QueryExtra,
+}
+
+/// A range cursor and its evaluation sequence.
+#[derive(Debug)]
+pub struct RangeScanResult<S> {
+    pub scan: S,
+    /// Store sequence at which this scan is evaluated. It must remain fixed
+    /// for the cursor's lifetime and apply to every batch, including empty batches.
+    pub sequence_number: u64,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct RangeScanBatch {
     /// Rows read by this cursor pull.
@@ -75,6 +92,9 @@ pub trait Ingest: Send + Sync + 'static {
 }
 
 /// Query read capability.
+///
+/// Each query must read a consistent Store state that reflects all writes through
+/// its reported sequence number and none after it.
 pub trait Query: Sequence {
     type RangeScan: RangeScan + 'static;
 
@@ -83,7 +103,7 @@ pub trait Query: Sequence {
     fn get(
         &self,
         key: Bytes,
-    ) -> impl Future<Output = Result<(Option<Bytes>, QueryExtra), String>> + Send;
+    ) -> impl Future<Output = Result<QueryResult<Option<Bytes>>, String>> + Send;
 
     /// Cursor over keys in `[start, end]` (inclusive) when `end` is non-empty;
     /// empty `end` means unbounded above. Matches `store.query.v1.RangeRequest`
@@ -94,14 +114,14 @@ pub trait Query: Sequence {
         end: Bytes,
         limit: usize,
         forward: bool,
-    ) -> impl Future<Output = Result<Self::RangeScan, String>> + Send;
+    ) -> impl Future<Output = Result<RangeScanResult<Self::RangeScan>, String>> + Send;
 
     /// Batch-get plus backend-specific query metadata. Returns `(key, Option<value>)`
     /// for each input key, preserving order.
     fn get_many(
         &self,
         keys: Vec<Bytes>,
-    ) -> impl Future<Output = Result<(Vec<(Bytes, Option<Bytes>)>, QueryExtra), String>> + Send;
+    ) -> impl Future<Output = Result<QueryResult<Vec<(Bytes, Option<Bytes>)>>, String>> + Send;
 }
 
 /// Prune mutation capability.

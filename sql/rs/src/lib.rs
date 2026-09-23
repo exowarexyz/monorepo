@@ -99,7 +99,10 @@ mod tests {
     };
     use exoware_sdk::RangeMode;
     use exoware_sdk::{parse_range_traversal_direction, RangeTraversalDirection};
-    use exoware_server::{Query, QueryExtra, QueryState, RangeScan, RangeScanBatch, Sequence};
+    use exoware_server::{
+        Query, QueryExtra, QueryResult, QueryState, RangeScan, RangeScanBatch, RangeScanResult,
+        Sequence,
+    };
     use futures::{stream, TryStreamExt};
     use tokio::sync::{mpsc, oneshot, Notify};
 
@@ -234,12 +237,14 @@ mod tests {
         }
     }
 
-    struct MockRangeScan(std::vec::IntoIter<(Bytes, Bytes)>);
+    struct MockRangeScan {
+        rows: std::vec::IntoIter<(Bytes, Bytes)>,
+    }
 
     impl RangeScan for MockRangeScan {
         async fn next_batch(&mut self, max_items: usize) -> Result<RangeScanBatch, String> {
             Ok(RangeScanBatch {
-                rows: self.0.by_ref().take(max_items).collect(),
+                rows: self.rows.by_ref().take(max_items).collect(),
                 extra: QueryExtra::new(),
             })
         }
@@ -248,27 +253,33 @@ mod tests {
     impl Query for MockState {
         type RangeScan = MockRangeScan;
 
-        async fn get(&self, key: Bytes) -> Result<(Option<Bytes>, QueryExtra), String> {
-            Ok((
-                self.kv.lock().unwrap().get(&key).cloned(),
-                QueryExtra::new(),
-            ))
+        async fn get(&self, key: Bytes) -> Result<QueryResult<Option<Bytes>>, String> {
+            let values = self.kv.lock().unwrap();
+            let sequence_number = self.current_sequence();
+            Ok(QueryResult {
+                value: values.get(&key).cloned(),
+                sequence_number,
+                extra: QueryExtra::new(),
+            })
         }
 
         async fn get_many(
             &self,
             keys: Vec<Bytes>,
-        ) -> Result<(Vec<(Bytes, Option<Bytes>)>, QueryExtra), String> {
+        ) -> Result<QueryResult<Vec<(Bytes, Option<Bytes>)>>, String> {
             let values = self.kv.lock().unwrap();
-            Ok((
-                keys.into_iter()
+            let sequence_number = self.current_sequence();
+            Ok(QueryResult {
+                value: keys
+                    .into_iter()
                     .map(|key| {
                         let value = values.get(&key).cloned();
                         (key, value)
                     })
                     .collect(),
-                QueryExtra::new(),
-            ))
+                sequence_number,
+                extra: QueryExtra::new(),
+            })
         }
 
         async fn range_scan(
@@ -277,8 +288,9 @@ mod tests {
             end: Bytes,
             limit: usize,
             forward: bool,
-        ) -> Result<MockRangeScan, String> {
+        ) -> Result<RangeScanResult<MockRangeScan>, String> {
             let values = self.kv.lock().unwrap();
+            let sequence_number = self.current_sequence();
             let range = values.range((
                 Included(start),
                 if end.is_empty() {
@@ -299,7 +311,12 @@ mod tests {
                     .map(|(key, value)| (key.clone(), value.clone()))
                     .collect()
             };
-            Ok(MockRangeScan(rows.into_iter()))
+            Ok(RangeScanResult {
+                scan: MockRangeScan {
+                    rows: rows.into_iter(),
+                },
+                sequence_number,
+            })
         }
     }
 

@@ -7,7 +7,7 @@
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::collections::BTreeMap;
-use std::ops::Bound::{Excluded, Included, Unbounded};
+use std::ops::Bound::{Included, Unbounded};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -28,8 +28,8 @@ use datafusion::physical_plan::{collect, ExecutionPlan};
 use datafusion::prelude::SessionContext;
 use exoware_sdk::{StoreClient, StoreKeyPrefix};
 use exoware_server::{
-    Ingest, IngestError, IngestState, Query, QueryExtra, QueryState, RangeScan, RangeScanBatch,
-    Sequence,
+    Ingest, IngestError, IngestState, Query, QueryExtra, QueryResult, QueryState, RangeScan,
+    RangeScanBatch, RangeScanResult, Sequence,
 };
 use exoware_sql::proto::sql::v1::{QueryRequest, ServiceClient};
 use exoware_sql::{CellValue, IndexSpec, KvSchema, TableColumnConfig};
@@ -219,54 +219,28 @@ impl Sequence for Backend {
 
 impl Ingest for Backend {
     async fn put_batch(&self, kvs: Vec<(Bytes, Bytes)>) -> Result<u64, IngestError> {
-        self.kv.lock().unwrap().extend(kvs);
+        let mut kv = self.kv.lock().unwrap();
+        kv.extend(kvs);
         Ok(self.sequence.fetch_add(1, Ordering::Relaxed) + 1)
     }
 }
 
 struct Cursor {
-    kv: Arc<Mutex<BTreeMap<Bytes, Bytes>>>,
+    rows: std::vec::IntoIter<(Bytes, Bytes)>,
     traffic: Arc<Traffic>,
-    start: Bytes,
-    end: Bytes,
-    after: Option<Bytes>,
-    remaining: usize,
-    forward: bool,
 }
 
 impl RangeScan for Cursor {
     async fn next_batch(&mut self, max_items: usize) -> Result<RangeScanBatch, String> {
-        let low = if self.forward {
-            self.after
-                .as_ref()
-                .map(Excluded)
-                .unwrap_or(Included(&self.start))
-        } else {
-            Included(&self.start)
-        };
-        let high = match (self.forward, self.after.as_ref()) {
-            (false, Some(after)) => Excluded(after),
-            _ if self.end.is_empty() => Unbounded,
-            _ => Included(&self.end),
-        };
-        let kv = self.kv.lock().unwrap();
-        let range = kv.range::<Bytes, _>((low, high));
-        let iter: Box<dyn Iterator<Item = (&Bytes, &Bytes)> + Send> = if self.forward {
-            Box::new(range)
-        } else {
-            Box::new(range.rev())
-        };
-        let rows = iter
-            .take(max_items.min(self.remaining))
+        let rows = self
+            .rows
+            .by_ref()
+            .take(max_items)
             .map(|(key, value)| {
-                self.traffic.returned(key, value);
-                (key.clone(), value.clone())
+                self.traffic.returned(&key, &value);
+                (key, value)
             })
             .collect::<Vec<_>>();
-        self.remaining -= rows.len();
-        if let Some((key, _)) = rows.last() {
-            self.after = Some(key.clone());
-        }
         Ok(RangeScanBatch {
             rows,
             extra: QueryExtra::new(),
@@ -276,22 +250,29 @@ impl RangeScan for Cursor {
 
 impl Query for Backend {
     type RangeScan = Cursor;
-    async fn get(&self, key: Bytes) -> Result<(Option<Bytes>, QueryExtra), String> {
+    async fn get(&self, key: Bytes) -> Result<QueryResult<Option<Bytes>>, String> {
         self.traffic.lookup_keys.fetch_add(1, Ordering::Relaxed);
-        let value = self.kv.lock().unwrap().get(&key).cloned();
+        let kv = self.kv.lock().unwrap();
+        let sequence_number = self.current_sequence();
+        let value = kv.get(&key).cloned();
         if let Some(value) = &value {
             self.traffic.returned(&key, value);
         }
-        Ok((value, QueryExtra::new()))
+        Ok(QueryResult {
+            value,
+            sequence_number,
+            extra: QueryExtra::new(),
+        })
     }
     async fn get_many(
         &self,
         keys: Vec<Bytes>,
-    ) -> Result<(Vec<(Bytes, Option<Bytes>)>, QueryExtra), String> {
+    ) -> Result<QueryResult<Vec<(Bytes, Option<Bytes>)>>, String> {
         self.traffic
             .lookup_keys
             .fetch_add(keys.len() as u64, Ordering::Relaxed);
         let kv = self.kv.lock().unwrap();
+        let sequence_number = self.current_sequence();
         let rows = keys
             .into_iter()
             .map(|key| {
@@ -302,7 +283,11 @@ impl Query for Backend {
                 (key, value)
             })
             .collect();
-        Ok((rows, QueryExtra::new()))
+        Ok(QueryResult {
+            value: rows,
+            sequence_number,
+            extra: QueryExtra::new(),
+        })
     }
     async fn range_scan(
         &self,
@@ -310,15 +295,35 @@ impl Query for Backend {
         end: Bytes,
         limit: usize,
         forward: bool,
-    ) -> Result<Cursor, String> {
-        Ok(Cursor {
-            kv: self.kv.clone(),
-            traffic: self.traffic.clone(),
-            start,
-            end,
-            after: None,
-            remaining: limit,
-            forward,
+    ) -> Result<RangeScanResult<Cursor>, String> {
+        let kv = self.kv.lock().unwrap();
+        let sequence_number = self.current_sequence();
+        let bounds = (
+            Included(&start),
+            if end.is_empty() {
+                Unbounded
+            } else {
+                Included(&end)
+            },
+        );
+        let rows: Vec<_> = if forward {
+            kv.range::<Bytes, _>(bounds)
+                .take(limit)
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect()
+        } else {
+            kv.range::<Bytes, _>(bounds)
+                .rev()
+                .take(limit)
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect()
+        };
+        Ok(RangeScanResult {
+            scan: Cursor {
+                rows: rows.into_iter(),
+                traffic: self.traffic.clone(),
+            },
+            sequence_number,
         })
     }
 }

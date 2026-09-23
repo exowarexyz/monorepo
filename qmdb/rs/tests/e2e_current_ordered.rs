@@ -1014,20 +1014,15 @@ impl exoware_server::Query for CountingQuery {
     async fn get(
         &self,
         key: bytes::Bytes,
-    ) -> Result<(Option<bytes::Bytes>, exoware_server::QueryExtra), String> {
+    ) -> Result<exoware_server::QueryResult<Option<bytes::Bytes>>, String> {
         exoware_server::Query::get(self.store.as_ref(), key).await
     }
 
     async fn get_many(
         &self,
         keys: Vec<bytes::Bytes>,
-    ) -> Result<
-        (
-            Vec<(bytes::Bytes, Option<bytes::Bytes>)>,
-            exoware_server::QueryExtra,
-        ),
-        String,
-    > {
+    ) -> Result<exoware_server::QueryResult<Vec<(bytes::Bytes, Option<bytes::Bytes>)>>, String>
+    {
         exoware_server::Query::get_many(self.store.as_ref(), keys).await
     }
 
@@ -1037,7 +1032,7 @@ impl exoware_server::Query for CountingQuery {
         end: bytes::Bytes,
         limit: usize,
         forward: bool,
-    ) -> Result<Self::RangeScan, String> {
+    ) -> Result<exoware_server::RangeScanResult<Self::RangeScan>, String> {
         // A chunk row key is the chunk family byte, the u64 chunk index, then the u64 boundary location
         if start.first() == Some(&exoware_qmdb::CHUNK_FAMILY) && start.len() == 17 {
             self.bitmap_chunks
