@@ -1,9 +1,11 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { Client, StoreWriteBatch } from '@exowarexyz/sdk';
+import { Client, ReadSession, StoreWriteBatch } from '@exowarexyz/sdk';
 import {
-  SimplexClient,
+  SimplexReader,
   SimplexRecordKind,
+  SimplexSubscriptions,
+  SimplexWriter,
   headerByDigestKey,
   createSimplexVerifier,
   createWasmSimplexBlockVerifier,
@@ -47,7 +49,7 @@ test('u64 helper rejects unsafe JavaScript numbers', () => {
 
 test('stages block and finalization rows into one StoreWriteBatch', () => {
   const store = new Client('http://127.0.0.1:1').store();
-  const simplex = new SimplexClient(store);
+  const simplex = new SimplexWriter(store);
   assert.deepEqual(simplex.prepareHeader({ digest: 'c0', header: 'a0' }), {
     entries: [{ key: headerByDigestKey('c0'), value: new Uint8Array([0xa0]) }],
     summary: {
@@ -107,7 +109,7 @@ test('streams header and full block data separately', async () => {
     };
   };
 
-  const simplex = new SimplexClient(store);
+  const simplex = new SimplexSubscriptions(store);
   const headerBatches = [];
   for await (const batch of simplex.subscribeHeaders()) {
     headerBatches.push(batch);
@@ -139,19 +141,23 @@ test('streams header and full block data separately', async () => {
 
 test('certificate getters require and apply a verifier', async () => {
   const store = new Client('http://127.0.0.1:1').store();
+  const session = ReadSession.fixed(store);
+  let reads = 0;
   const rows = new Map<string, Uint8Array>([
     [bytesToHex(notarizationByRoundKey(0, 3)), new Uint8Array([0xa3])],
     [bytesToHex(finalizationByRoundKey(0, 4)), new Uint8Array([0xf4])],
   ]);
-  store.get = async (key: Uint8Array) => {
+  session.get = async (key: Uint8Array) => {
+    reads++;
     const value = rows.get(bytesToHex(key));
     return value ? { value } : null;
   };
 
   await assert.rejects(
-    () => new SimplexClient(store).getNotarizationByRound(0, 3),
+    () => SimplexReader.withSession(session).getNotarizationByRound(0, 3),
     /requires a configured verifier/,
   );
+  assert.equal(reads, 0);
 
   const verifier: SimplexCertificateVerifier<{ view: bigint }, { index: string }> = {
     verifyNotarization: (bytes, context) =>
@@ -159,15 +165,47 @@ test('certificate getters require and apply a verifier', async () => {
     verifyFinalization: (bytes, context) =>
       bytes[0] === 0xf4 ? { index: context.index } : null,
   };
-  const simplex = new SimplexClient(store, { verifier });
+  const simplex = SimplexReader.withSession(session, { verifier });
 
   assert.deepEqual(await simplex.getNotarizationByRound(0, 3), { view: 3n });
   assert.deepEqual(await simplex.getFinalizationByRound(0, 4), { index: 'round' });
   assert.deepEqual(await simplex.getNotarizationByRoundRaw(0, 3), new Uint8Array([0xa3]));
 });
 
-test('unary point reads forward minimum sequence numbers', async () => {
-  const store = new Client('http://127.0.0.1:1').store();
+test('reader captures its verifier option', async () => {
+  const session = ReadSession.fixed(new Client('http://127.0.0.1:1').store());
+  session.get = async () => ({ value: new Uint8Array([0xa3]) });
+  const verifier: SimplexCertificateVerifier<string, string> = {
+    verifyNotarization: () => 'verified',
+    verifyFinalization: () => 'verified',
+  };
+  const options: { verifier?: SimplexCertificateVerifier<string, string> } = { verifier };
+  const reader = SimplexReader.withSession(session, options);
+  options.verifier = undefined;
+
+  assert.equal(await reader.getNotarizationByRound(0, 3), 'verified');
+});
+
+test('readers preserve absent and explicit-zero session floors', async () => {
+  const client = new Client('http://127.0.0.1:1');
+  const store = client.store();
+  const requested: Array<bigint | undefined> = [];
+  const connectGet = client.query.get;
+  type QueryGetResponse = Awaited<ReturnType<typeof connectGet>>;
+  client.query.get = async (request) => {
+    requested.push(request.minSequenceNumber);
+    return { value: new Uint8Array([0xaa]) } as QueryGetResponse;
+  };
+
+  await SimplexReader.withSession(ReadSession.fixed(store)).getHeaderRaw('01');
+  await SimplexReader.withSession(ReadSession.fixed(store, 0n)).getHeaderRaw('01');
+
+  assert.deepEqual(requested, [undefined, 0n]);
+});
+
+test('unary point reads use the session floor and forward call options', async () => {
+  const client = new Client('http://127.0.0.1:1');
+  const store = client.store();
   const minSequenceNumber = 23n;
   const rows = new Map<string, Uint8Array>([
     [bytesToHex(headerByDigestKey('01')), new Uint8Array([0xa1])],
@@ -176,41 +214,45 @@ test('unary point reads forward minimum sequence numbers', async () => {
     [bytesToHex(finalizationByRoundKey(2, 4)), new Uint8Array([0xa4])],
     [bytesToHex(finalizedByHeightKey(5)), new Uint8Array([0xa5])],
   ]);
-  const calls: Array<[string, bigint | undefined]> = [];
-  store.get = async (key: Uint8Array, minimum?: bigint) => {
-    calls.push([bytesToHex(key), minimum]);
-    const value = rows.get(bytesToHex(key));
-    return value ? { value } : null;
+  const callOptions = { timeoutMs: 1_234 };
+  const calls: Array<[string, bigint | undefined, unknown]> = [];
+  const connectGet = client.query.get;
+  type QueryGetResponse = Awaited<ReturnType<typeof connectGet>>;
+  client.query.get = async (request, options) => {
+    assert.ok(request.key);
+    calls.push([bytesToHex(request.key), request.minSequenceNumber, options]);
+    const value = rows.get(bytesToHex(request.key));
+    return { value } as QueryGetResponse;
   };
 
   const verifier: SimplexCertificateVerifier<Uint8Array, Uint8Array> = {
     verifyNotarization: (bytes) => bytes,
     verifyFinalization: (bytes) => bytes,
   };
-  const simplex = new SimplexClient(store, { verifier });
+  const simplex = SimplexReader.withSession(ReadSession.fixed(store, minSequenceNumber), { verifier });
 
-  await simplex.getHeader('01', minSequenceNumber);
-  await simplex.getHeaderRaw('01', minSequenceNumber);
-  await simplex.getBlock('02', minSequenceNumber);
-  await simplex.getBlockRaw('02', minSequenceNumber);
-  await simplex.getNotarizationByRound(2, 3, minSequenceNumber);
-  await simplex.getNotarizationByRoundRaw(2, 3, minSequenceNumber);
-  await simplex.getFinalizationByRound(2, 4, minSequenceNumber);
-  await simplex.getFinalizationByRoundRaw(2, 4, minSequenceNumber);
-  await simplex.getFinalizationByHeight(5, minSequenceNumber);
-  await simplex.getFinalizationByHeightRaw(5, minSequenceNumber);
+  await simplex.getHeader('01', callOptions);
+  await simplex.getHeaderRaw('01', callOptions);
+  await simplex.getBlock('02', callOptions);
+  await simplex.getBlockRaw('02', callOptions);
+  await simplex.getNotarizationByRound(2, 3, callOptions);
+  await simplex.getNotarizationByRoundRaw(2, 3, callOptions);
+  await simplex.getFinalizationByRound(2, 4, callOptions);
+  await simplex.getFinalizationByRoundRaw(2, 4, callOptions);
+  await simplex.getFinalizationByHeight(5, callOptions);
+  await simplex.getFinalizationByHeightRaw(5, callOptions);
 
   assert.deepEqual(calls, [
-    [bytesToHex(headerByDigestKey('01')), minSequenceNumber],
-    [bytesToHex(headerByDigestKey('01')), minSequenceNumber],
-    [bytesToHex(blockByDigestKey('02')), minSequenceNumber],
-    [bytesToHex(blockByDigestKey('02')), minSequenceNumber],
-    [bytesToHex(notarizationByRoundKey(2, 3)), minSequenceNumber],
-    [bytesToHex(notarizationByRoundKey(2, 3)), minSequenceNumber],
-    [bytesToHex(finalizationByRoundKey(2, 4)), minSequenceNumber],
-    [bytesToHex(finalizationByRoundKey(2, 4)), minSequenceNumber],
-    [bytesToHex(finalizedByHeightKey(5)), minSequenceNumber],
-    [bytesToHex(finalizedByHeightKey(5)), minSequenceNumber],
+    [bytesToHex(headerByDigestKey('01')), minSequenceNumber, callOptions],
+    [bytesToHex(headerByDigestKey('01')), minSequenceNumber, callOptions],
+    [bytesToHex(blockByDigestKey('02')), minSequenceNumber, callOptions],
+    [bytesToHex(blockByDigestKey('02')), minSequenceNumber, callOptions],
+    [bytesToHex(notarizationByRoundKey(2, 3)), minSequenceNumber, callOptions],
+    [bytesToHex(notarizationByRoundKey(2, 3)), minSequenceNumber, callOptions],
+    [bytesToHex(finalizationByRoundKey(2, 4)), minSequenceNumber, callOptions],
+    [bytesToHex(finalizationByRoundKey(2, 4)), minSequenceNumber, callOptions],
+    [bytesToHex(finalizedByHeightKey(5)), minSequenceNumber, callOptions],
+    [bytesToHex(finalizedByHeightKey(5)), minSequenceNumber, callOptions],
   ]);
 });
 
@@ -243,14 +285,14 @@ test('exact-height reads forward Connect call options', async () => {
     verifyNotarization: (bytes) => bytes,
     verifyFinalization: (bytes) => bytes,
   };
-  const simplex = new SimplexClient(store, { verifier });
+  const simplex = SimplexReader.withSession(ReadSession.fixed(store, minSequenceNumber), { verifier });
 
   assert.deepEqual(
-    await simplex.getFinalizationByHeight(5, minSequenceNumber, callOptions),
+    await simplex.getFinalizationByHeight(5, callOptions),
     value,
   );
   assert.deepEqual(
-    await simplex.getFinalizationByHeightRaw(5, minSequenceNumber, callOptions),
+    await simplex.getFinalizationByHeightRaw(5, callOptions),
     value,
   );
   assert.deepEqual(
@@ -266,29 +308,88 @@ test('exact-height reads forward Connect call options', async () => {
   assert.equal(calls[1].options?.signal, controller.signal);
 });
 
+test('default readers advance monotonically and share observations only with clones', async () => {
+  const client = new Client('http://127.0.0.1:1');
+  const store = client.store();
+  const requested: Array<bigint | undefined> = [];
+  type QueryGetResponse = Awaited<ReturnType<typeof client.query.get>>;
+  client.query.get = async (request) => {
+    requested.push(request.minSequenceNumber);
+    return { detail: { sequenceNumber: 11n } } as QueryGetResponse;
+  };
+  const reader = new SimplexReader(store);
+  const clone = reader.clone();
+  const independent = new SimplexReader(store);
+
+  assert.equal(reader.minSequenceNumber(), undefined);
+  await reader.getHeaderRaw('01');
+  assert.equal(clone.minSequenceNumber(), 11n);
+  assert.equal(independent.evaluatedSequence(), undefined);
+  assert.equal(independent.minSequenceNumber(), undefined);
+  await clone.getHeaderRaw('01');
+  await independent.getHeaderRaw('01');
+  assert.deepEqual(requested, [undefined, 11n, undefined]);
+});
+
+test('derived readers strengthen only their handle and share observations', async () => {
+  const client = new Client('http://127.0.0.1:1');
+  const store = client.store();
+  const requested: Array<bigint | undefined> = [];
+  const connectGet = client.query.get;
+  type QueryGetResponse = Awaited<ReturnType<typeof connectGet>>;
+  client.query.get = async (request) => {
+    requested.push(request.minSequenceNumber);
+    return {
+      value: new Uint8Array([0xaa]),
+      detail: { sequenceNumber: 11n },
+    } as QueryGetResponse;
+  };
+  const parent = SimplexReader.withSession(ReadSession.fixed(store, 4n));
+  const derived = parent.withMinSequenceNumber(8n);
+  const clone = derived.clone();
+
+  assert.equal(parent.minSequenceNumber(), 4n);
+  assert.equal(derived.minSequenceNumber(), 8n);
+  assert.equal(clone.minSequenceNumber(), 8n);
+  assert.equal(parent.evaluatedSequence(), undefined);
+
+  await parent.getHeaderRaw('01');
+  assert.equal(derived.evaluatedSequence(), 11n);
+  await derived.getHeaderRaw('01');
+
+  assert.deepEqual(requested, [4n, 8n]);
+  assert.equal(parent.minSequenceNumber(), 4n);
+  assert.equal(derived.minSequenceNumber(), 8n);
+  assert.equal(clone.evaluatedSequence(), 11n);
+});
+
 test('latest finalization reads forward minimum sequence numbers', async () => {
-  const store = new Client('http://127.0.0.1:1').store();
+  const client = new Client('http://127.0.0.1:1');
+  const store = client.store();
   const minSequenceNumber = 29n;
   const key = finalizedByHeightKey(7);
   const value = new Uint8Array([0xa7]);
-  const calls: Parameters<typeof store.query>[] = [];
-  store.query = async (...args: Parameters<typeof store.query>) => {
-    calls.push(args);
-    return {
-      results: [{ key, value }],
-      sequenceNumber: minSequenceNumber,
-    };
+  const callOptions = { timeoutMs: 4_321 };
+  const calls: Array<{ minimum: bigint | undefined; options: unknown }> = [];
+  client.query.range = (request, options) => {
+    calls.push({ minimum: request.minSequenceNumber, options });
+    return (async function* () {
+      yield { results: [{ key, value }] } as never;
+    })();
   };
 
   const verifier: SimplexCertificateVerifier<Uint8Array, Uint8Array> = {
     verifyNotarization: (bytes) => bytes,
     verifyFinalization: (bytes) => bytes,
   };
-  const simplex = new SimplexClient(store, { verifier });
+  const simplex = SimplexReader.withSession(ReadSession.fixed(store, minSequenceNumber), { verifier });
 
-  assert.deepEqual(await simplex.latestFinalization(minSequenceNumber), value);
-  assert.deepEqual(await simplex.latestFinalizationRaw(minSequenceNumber), value);
-  assert.deepEqual(calls.map((call) => call[5]), [minSequenceNumber, minSequenceNumber]);
+  assert.deepEqual(await simplex.latestFinalization(callOptions), value);
+  assert.deepEqual(await simplex.latestFinalizationRaw(callOptions), value);
+  assert.deepEqual(calls, [
+    { minimum: minSequenceNumber, options: callOptions },
+    { minimum: minSequenceNumber, options: callOptions },
+  ]);
 });
 
 test('WASM header verifier adapter passes payload and header', () => {
@@ -686,7 +787,7 @@ test('streams and verifies certificate entries', async () => {
       bytes[0] === 0x70 ? { view: context.view } : null,
     verifyFinalization: (bytes) => ({ marker: bytes[0] }),
   };
-  const simplex = new SimplexClient(store, { verifier });
+  const simplex = new SimplexSubscriptions(store, { verifier });
 
   const batches = [];
   for await (const batch of simplex.subscribeCertificates({
@@ -713,13 +814,14 @@ test('streams and verifies certificate entries', async () => {
 
 test('round getters and streams distinguish epochs at the same view', async () => {
   const store = new Client('http://127.0.0.1:1').store();
+  const session = ReadSession.fixed(store);
   const entries = [2, 3].flatMap((epoch) => [
     { key: notarizationByRoundKey(epoch, 7), value: new Uint8Array([epoch]) },
     { key: finalizationByRoundKey(epoch, 7), value: new Uint8Array([epoch]) },
   ]);
   const rows = new Map(entries.map(({ key, value }) => [bytesToHex(key), value]));
   const requestedKeys: string[] = [];
-  store.get = async (key) => {
+  session.get = async (key) => {
     requestedKeys.push(bytesToHex(key));
     const value = rows.get(bytesToHex(key));
     return value ? { value } : null;
@@ -732,17 +834,17 @@ test('round getters and streams distinguish epochs at the same view', async () =
     verify_notarized_payload: (_payload, _identity, _scheme, _namespace, _material, bytes) => certificate(bytes),
     verify_finalized_payload: (_payload, _identity, _scheme, _namespace, _material, bytes) => certificate(bytes),
   }, { scheme: 'ed25519', payload: 'sha256', identity: 'ed25519', namespace: '', verificationMaterial: '' });
-  const simplex = new SimplexClient(store, { verifier });
+  const reader = SimplexReader.withSession(session, { verifier });
   for (const epoch of [2, 3]) {
-    assert.equal((await simplex.getNotarizationByRound(epoch, 7))?.epoch, BigInt(epoch));
-    assert.equal((await simplex.getFinalizationByRound(epoch, 7))?.epoch, BigInt(epoch));
-    assert.deepEqual(await simplex.getNotarizationByRoundRaw(epoch, 7), new Uint8Array([epoch]));
-    assert.deepEqual(await simplex.getFinalizationByRoundRaw(epoch, 7), new Uint8Array([epoch]));
+    assert.equal((await reader.getNotarizationByRound(epoch, 7))?.epoch, BigInt(epoch));
+    assert.equal((await reader.getFinalizationByRound(epoch, 7))?.epoch, BigInt(epoch));
+    assert.deepEqual(await reader.getNotarizationByRoundRaw(epoch, 7), new Uint8Array([epoch]));
+    assert.deepEqual(await reader.getFinalizationByRoundRaw(epoch, 7), new Uint8Array([epoch]));
   }
 
   requestedKeys.length = 0;
-  assert.equal(await simplex.getNotarizationByRound(4, 7), null);
-  assert.equal(await simplex.getFinalizationByRound(4, 7), null);
+  assert.equal(await reader.getNotarizationByRound(4, 7), null);
+  assert.equal(await reader.getFinalizationByRound(4, 7), null);
   assert.deepEqual(requestedKeys, [
     bytesToHex(notarizationByRoundKey(4, 7)),
     bytesToHex(finalizationByRoundKey(4, 7)),
@@ -751,8 +853,9 @@ test('round getters and streams distinguish epochs at the same view', async () =
   store.subscribe = async function* () {
     yield { sequenceNumber: 12n, entries };
   };
+  const subscriptions = new SimplexSubscriptions(store, { verifier });
   const rounds = [];
-  for await (const batch of simplex.subscribeCertificates()) {
+  for await (const batch of subscriptions.subscribeCertificates()) {
     for (const entry of batch.entries) {
       assert.ok('epoch' in entry);
       assert.equal(entry.certificate.epoch, entry.epoch);
@@ -785,7 +888,8 @@ test('built-in certificate verification binds epoch and view to the request', as
 
 test('latest finalization passes the indexed height to the verifier', async () => {
   const store = new Client('http://127.0.0.1:1').store();
-  store.query = async () => ({
+  const session = ReadSession.fixed(store);
+  session.query = async () => ({
     results: [{ key: finalizedByHeightKey(11), value: new Uint8Array([0xb0]) }],
     sequenceNumber: 1n,
   });
@@ -798,7 +902,7 @@ test('latest finalization passes the indexed height to the verifier', async () =
       return context.index === 'latest' ? { height: context.height } : null;
     },
   };
-  const simplex = new SimplexClient(store, { verifier });
+  const simplex = SimplexReader.withSession(session, { verifier });
   assert.deepEqual(await simplex.latestFinalization(), { height: 11n });
   assert.deepEqual(await simplex.latestFinalizationRaw(), new Uint8Array([0xb0]));
 });
@@ -815,7 +919,7 @@ test('certificate streams reject round keys of the wrong width', async () => {
     verifyNotarization: () => null,
     verifyFinalization: () => null,
   };
-  const simplex = new SimplexClient(store, { verifier });
+  const simplex = new SimplexSubscriptions(store, { verifier });
   await assert.rejects(async () => {
     for await (const batch of simplex.subscribeCertificates()) {
       assert.fail(`decoded a malformed key: ${batch.entries.length}`);

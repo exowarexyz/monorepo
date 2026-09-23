@@ -220,8 +220,17 @@ export class StoreWriteBatch {
     }
 }
 
+const MAX_U64 = (1n << 64n) - 1n;
+
 function normalizeMinSequenceNumber(value?: bigint): bigint | undefined {
-    return value !== undefined && value >= 0n ? value : undefined;
+    if (value === undefined) return undefined;
+    if (typeof value !== 'bigint') {
+        throw new TypeError('minimum sequence number must be a bigint');
+    }
+    if (value < 0n || value > MAX_U64) {
+        throw new RangeError('minimum sequence number must fit in u64');
+    }
+    return value;
 }
 
 function maxSequenceNumber(
@@ -829,9 +838,9 @@ export class ReadSession {
         }
     }
 
-    async get(key: Uint8Array): Promise<GetResult | null> {
+    async get(key: Uint8Array, options?: CallOptions): Promise<GetResult | null> {
         return this.runRead((sequence, detailObserver) =>
-            performGet(this.client, key, sequence, detailObserver, this.keyPrefix),
+            performGet(this.client, key, sequence, detailObserver, this.keyPrefix, options),
         );
     }
 
@@ -859,6 +868,7 @@ export class ReadSession {
         limit?: number,
         batchSize: number = 4096,
         mode: TraversalMode = TraversalMode.FORWARD,
+        options?: CallOptions,
     ): Promise<QueryResult> {
         return this.runRead((sequence, detailObserver) =>
             performQuery(
@@ -871,6 +881,7 @@ export class ReadSession {
                 sequence,
                 detailObserver,
                 this.keyPrefix,
+                options,
             ),
         );
     }
