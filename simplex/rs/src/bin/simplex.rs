@@ -20,7 +20,7 @@ use commonware_math::algebra::Random;
 use commonware_parallel::Sequential;
 use commonware_utils::{non_empty, ordered::Set, N3f1, TestRng};
 use exoware_sdk::{StoreBatchUpload, StoreClient, StoreKeyPrefix, StoreWriteBatch};
-use exoware_simplex::{encode_block_data, keys, Finalized, Notarized, SimplexClient};
+use exoware_simplex::{encode_block_data, keys, Finalized, Notarized, SimplexWriter};
 use tracing::info;
 
 const DEMO_NAMESPACE: &[u8] = b"_EXOWARE_SIMPLEX_DEMO";
@@ -212,7 +212,7 @@ fn finalized(block: DemoBlock, schemes: &[Scheme]) -> Finalized<DemoBlock, Schem
 }
 
 async fn upload_certificates(
-    client: &SimplexClient,
+    client: &SimplexWriter,
     notarized: &Notarized<DemoBlock, Scheme, Sha256Digest>,
     finalized: &Finalized<DemoBlock, Scheme, Sha256Digest>,
     body: &[u8],
@@ -259,7 +259,7 @@ async fn seed(
     info!(store_url, interval_secs, "starting simplex seed");
 
     let client =
-        SimplexClient::new(StoreClient::new(store_url).prefixed(StoreKeyPrefix::identity()));
+        SimplexWriter::new(StoreClient::new(store_url).prefixed(StoreKeyPrefix::identity()));
     let schemes = demo_schemes();
     let verification_material = schemes[0].identity().encode().to_vec();
     let leader = schemes

@@ -7,6 +7,7 @@ jest.mock('../src/credential', () => ({
 
 import { Client } from '../src/client';
 import { GetResponseSchema } from '../src/gen/ts/store/v1/query_pb';
+import { ReadSession } from '../src/store';
 
 test('StoreClient.get forwards Connect call options', async () => {
     const client = new Client('http://127.0.0.1:1');
@@ -46,4 +47,44 @@ test('StoreClient.query forwards Connect call options', async () => {
 
     await store.query(undefined, undefined, 1, 1, undefined, undefined, callOptions);
     expect(seenOptions).toBe(callOptions);
+});
+
+test('ReadSession.get forwards Connect call options with its captured floor', async () => {
+    const client = new Client('http://127.0.0.1:1');
+    const session = ReadSession.fixed(client.store(), 37n);
+    const controller = new AbortController();
+    const callOptions = { signal: controller.signal, timeoutMs: 1_234 };
+    let seenRequest: Parameters<typeof client.query.get>[0] | undefined;
+    let seenOptions: Parameters<typeof client.query.get>[1];
+
+    client.query.get = async (request, options) => {
+        seenRequest = request;
+        seenOptions = options;
+        return create(GetResponseSchema);
+    };
+
+    await expect(session.get(new Uint8Array([1]), callOptions)).resolves.toBeNull();
+    expect(seenRequest?.minSequenceNumber).toBe(37n);
+    expect(seenOptions).toBe(callOptions);
+    expect(seenOptions?.signal).toBe(controller.signal);
+});
+
+test('ReadSession.query forwards Connect call options with its captured floor', async () => {
+    const client = new Client('http://127.0.0.1:1');
+    const session = ReadSession.monotonic(client.store(), 41n);
+    const controller = new AbortController();
+    const callOptions = { signal: controller.signal, timeoutMs: 1_234 };
+    let seenFloor: bigint | undefined;
+    let seenOptions: Parameters<typeof client.query.range>[1];
+
+    client.query.range = ((request, options) => {
+        seenFloor = request.minSequenceNumber;
+        seenOptions = options;
+        return (async function* () {})();
+    }) as typeof client.query.range;
+
+    await session.query(undefined, undefined, 1, 1, undefined, callOptions);
+    expect(seenFloor).toBe(41n);
+    expect(seenOptions).toBe(callOptions);
+    expect(seenOptions?.signal).toBe(controller.signal);
 });

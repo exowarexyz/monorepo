@@ -4,7 +4,7 @@ import {
   type VerifiedSimplexCertificate,
   type SimplexVerifierOptions,
   type SimplexCertificateVerifier,
-} from './client.js';
+} from './verification.js';
 
 let wasmReady: Promise<unknown> | undefined;
 type InitWasmInput = Parameters<typeof initWasm>[0];

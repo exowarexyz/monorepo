@@ -26,10 +26,10 @@ use commonware_utils::{
     Acknowledgement as _, NZUsize, TestRng, NZU16, NZU64,
 };
 use exoware_sdk::{
-    PrefixedStoreClient, RetryConfig, StoreBatchUpload, StoreClient, StoreWriteBatch,
+    PrefixedStoreClient, ReadSession, RetryConfig, StoreBatchUpload, StoreClient, StoreWriteBatch,
 };
 use exoware_simplex::{
-    init_marshal_resolver, keys, Finalized, Notarized, SimplexClient, SimplexError,
+    init_marshal_resolver, keys, Finalized, Notarized, SimplexError, SimplexReader, SimplexWriter,
 };
 
 const NAMESPACE: &[u8] = b"_EXOWARE_SIMPLEX_TEST";
@@ -194,6 +194,12 @@ async fn local_store_client() -> StoreClient {
         .expect("store client")
 }
 
+fn simplex_handles(client: PrefixedStoreClient) -> (SimplexReader, SimplexWriter) {
+    let reader = SimplexReader::with_session(ReadSession::fixed(client.clone(), None));
+    let writer = SimplexWriter::new(client);
+    (reader, writer)
+}
+
 fn schemes() -> Vec<Scheme> {
     let mut rng = TestRng::new(7);
     let Fixture { schemes, .. } =
@@ -230,12 +236,12 @@ fn finalized(block: TestBlock, schemes: &[Scheme]) -> Finalized<TestBlock, Schem
 #[tokio::test]
 async fn uploads_and_reads_notarized_and_finalized_blocks() {
     let store = local_store_client().await;
-    let simplex = SimplexClient::new(PrefixedStoreClient::empty(store));
+    let (reader, writer) = simplex_handles(PrefixedStoreClient::empty(store));
     let schemes = schemes();
 
     let block1 = TestBlock::new(1, b"notarized");
     let notarized = notarized(block1.clone(), &schemes);
-    let receipt = simplex
+    let receipt = writer
         .upload_notarized(&notarized)
         .await
         .expect("upload notarized");
@@ -243,14 +249,14 @@ async fn uploads_and_reads_notarized_and_finalized_blocks() {
     assert_eq!(receipt.summary.blocks, 0);
     assert_eq!(receipt.summary.notarizations, 1);
 
-    let got_header = simplex
+    let got_header = reader
         .get_header::<TestBlock, Sha256Digest>(&block1.digest(), &1024)
         .await
         .expect("get header")
         .expect("header exists");
     assert_eq!(got_header, block1);
 
-    let got_notarized = simplex
+    let got_notarized = reader
         .get_notarized_by_round::<TestBlock, Scheme, Sha256Digest>(
             block1.context.round,
             &(10, 1024),
@@ -262,12 +268,12 @@ async fn uploads_and_reads_notarized_and_finalized_blocks() {
 
     let block2 = TestBlock::new(2, b"finalized");
     let body = Bytes::from_static(b"finalized transaction body");
-    simplex
+    writer
         .upload_block(&block2, body.clone())
         .await
         .expect("upload block");
     let finalized = finalized(block2.clone(), &schemes);
-    let receipt = simplex
+    let receipt = writer
         .upload_finalized(&finalized)
         .await
         .expect("upload finalized");
@@ -276,7 +282,7 @@ async fn uploads_and_reads_notarized_and_finalized_blocks() {
     assert_eq!(receipt.summary.finalizations, 1);
     assert_eq!(receipt.summary.finalized_height_indexes, 1);
 
-    let got_block = simplex
+    let got_block = reader
         .get_block::<TestBlock, Sha256Digest>(&block2.digest(), &1024)
         .await
         .expect("get full block")
@@ -284,14 +290,14 @@ async fn uploads_and_reads_notarized_and_finalized_blocks() {
     assert_eq!(got_block.header, block2);
     assert_eq!(got_block.body, body);
 
-    let got_finalized = simplex
+    let got_finalized = reader
         .get_finalized_by_height::<TestBlock, Scheme, Sha256Digest>(Height::new(2), &(10, 1024))
         .await
         .expect("get finalized")
         .expect("finalized exists");
     assert_eq!(got_finalized, finalized);
 
-    let got_finalized = simplex
+    let got_finalized = reader
         .get_finalized_by_round::<TestBlock, Scheme, Sha256Digest>(
             block2.context.round,
             &(10, 1024),
@@ -301,7 +307,7 @@ async fn uploads_and_reads_notarized_and_finalized_blocks() {
         .expect("finalized by round exists");
     assert_eq!(got_finalized, finalized);
 
-    let latest = simplex
+    let latest = reader
         .latest_finalized::<TestBlock, Scheme, Sha256Digest>(&(10, 1024))
         .await
         .expect("latest finalized")
@@ -312,16 +318,16 @@ async fn uploads_and_reads_notarized_and_finalized_blocks() {
 #[tokio::test]
 async fn prepared_uploads_can_share_one_store_batch() {
     let store = local_store_client().await;
-    let simplex = SimplexClient::new(PrefixedStoreClient::empty(store.clone()));
+    let (reader, writer) = simplex_handles(PrefixedStoreClient::empty(store.clone()));
     let schemes = schemes();
 
     let first = finalized(TestBlock::new(10, b"first"), &schemes);
     let second = finalized(TestBlock::new(11, b"second"), &schemes);
 
-    let mut prepared = simplex.prepare_finalized(&first).expect("first");
-    prepared.extend(simplex.prepare_finalized(&second).expect("second"));
+    let mut prepared = writer.prepare_finalized(&first).expect("first");
+    prepared.extend(writer.prepare_finalized(&second).expect("second"));
 
-    let receipt = simplex
+    let receipt = writer
         .commit_upload(prepared)
         .await
         .expect("commit combined");
@@ -329,7 +335,7 @@ async fn prepared_uploads_can_share_one_store_batch() {
     assert_eq!(receipt.summary.blocks, 0);
     assert_eq!(receipt.summary.finalizations, 2);
 
-    let latest = simplex
+    let latest = reader
         .latest_finalized_raw()
         .await
         .expect("latest finalized")
@@ -340,11 +346,105 @@ async fn prepared_uploads_can_share_one_store_batch() {
 }
 
 #[tokio::test]
+async fn readers_propagate_session_floors_without_changing_parent_policy() {
+    let store = local_store_client().await;
+    let client = PrefixedStoreClient::empty(store);
+    let writer = SimplexWriter::new(client.clone());
+    let block = TestBlock::new(12, b"session floor");
+    let receipt = writer.upload_header(&block).await.expect("upload header");
+
+    let fixed = SimplexReader::with_session(ReadSession::fixed(client.clone(), None));
+    assert_eq!(fixed.min_sequence_number(), None);
+    assert_eq!(
+        fixed
+            .get_header::<TestBlock, Sha256Digest>(&block.digest(), &1024)
+            .await
+            .expect("fixed read"),
+        Some(block.clone())
+    );
+    assert_eq!(
+        fixed.evaluated_sequence(),
+        Some(receipt.store_sequence_number)
+    );
+    assert_eq!(fixed.min_sequence_number(), None);
+
+    let missing = SimplexReader::with_session(ReadSession::fixed(client.clone(), None));
+    let absent = TestBlock::new(13, b"absent");
+    assert_eq!(
+        missing
+            .get_header_raw(&absent.digest())
+            .await
+            .expect("missing point read"),
+        None
+    );
+    assert_eq!(
+        missing.evaluated_sequence(),
+        Some(receipt.store_sequence_number)
+    );
+
+    let empty_latest = SimplexReader::with_session(ReadSession::fixed(client.clone(), None));
+    assert_eq!(
+        empty_latest
+            .latest_finalized_raw()
+            .await
+            .expect("empty latest read"),
+        None
+    );
+    assert_eq!(
+        empty_latest.evaluated_sequence(),
+        Some(receipt.store_sequence_number)
+    );
+
+    let unavailable_floor = receipt.store_sequence_number + 1;
+    let derived = fixed.with_min_sequence_number(unavailable_floor);
+    assert_eq!(derived.min_sequence_number(), Some(unavailable_floor));
+    assert_eq!(fixed.min_sequence_number(), None);
+    derived
+        .get_header_raw(&block.digest())
+        .await
+        .expect_err("derived floor must reach Store");
+    derived
+        .latest_finalized_raw()
+        .await
+        .expect_err("derived floor must reach Store range reads");
+    fixed
+        .get_header_raw(&block.digest())
+        .await
+        .expect("parent remains unbounded");
+    assert_eq!(
+        fixed
+            .latest_finalized_raw()
+            .await
+            .expect("parent range remains unbounded"),
+        None
+    );
+
+    let independent = SimplexReader::new(client.clone());
+    let monotonic = SimplexReader::new(client);
+    let shared = monotonic.clone();
+    assert_eq!(monotonic.min_sequence_number(), None);
+    monotonic
+        .get_header_raw(&block.digest())
+        .await
+        .expect("monotonic read");
+    assert_eq!(
+        monotonic.min_sequence_number(),
+        Some(receipt.store_sequence_number)
+    );
+    assert_eq!(
+        shared.min_sequence_number(),
+        monotonic.min_sequence_number()
+    );
+    assert_eq!(independent.min_sequence_number(), None);
+    assert_eq!(independent.evaluated_sequence(), None);
+}
+
+#[tokio::test]
 async fn marshal_resolver_sinks_finalized_chain_from_simplex_api() {
     const BLOCKS_TO_PROCESS: u64 = 5;
 
     let store = local_store_client().await;
-    let simplex = SimplexClient::new(PrefixedStoreClient::empty(store));
+    let (reader, writer) = simplex_handles(PrefixedStoreClient::empty(store));
     let schemes = schemes();
 
     let genesis = TestBlock::new(0, b"genesis");
@@ -356,7 +456,7 @@ async fn marshal_resolver_sinks_finalized_chain_from_simplex_api() {
             TestBlock::with_parent(height, parent, format!("from-simplex-{height}").as_bytes());
         parent = block.digest();
         let finalized = finalized(block.clone(), &schemes);
-        simplex
+        writer
             .upload_finalized(&finalized)
             .await
             .expect("upload finalized");
@@ -364,7 +464,7 @@ async fn marshal_resolver_sinks_finalized_chain_from_simplex_api() {
     }
 
     let delivered = tokio::task::spawn_blocking({
-        let simplex = simplex.clone();
+        let reader = reader.clone();
         let genesis = genesis.clone();
         move || {
             cw_tokio::Runner::default().start(|context| async move {
@@ -474,7 +574,7 @@ async fn marshal_resolver_sinks_finalized_chain_from_simplex_api() {
                 let (resolver_rx, resolver) = init_marshal_resolver::<_, Sha256Digest, PublicKey>(
                     context.child("resolver"),
                     NZUsize!(100),
-                    simplex,
+                    reader,
                 );
                 let actor_handle = actor.start_unbuffered(application, (resolver_rx, resolver));
 
@@ -500,7 +600,7 @@ async fn marshal_resolver_sinks_finalized_chain_from_simplex_api() {
 
 #[tokio::test]
 async fn round_indices_retain_same_view_across_epochs() {
-    let simplex = SimplexClient::new(PrefixedStoreClient::empty(local_store_client().await));
+    let (reader, writer) = simplex_handles(PrefixedStoreClient::empty(local_store_client().await));
     let schemes = schemes();
     let mut expected = Vec::new();
     for epoch in [0, 1, u32::MAX as u64 + 1] {
@@ -509,21 +609,21 @@ async fn round_indices_retain_same_view_across_epochs() {
         block.digest = block.compute_digest();
         let notarized = notarized(block.clone(), &schemes);
         let finalized = finalized(block, &schemes);
-        simplex.upload_notarized(&notarized).await.unwrap();
-        simplex.upload_finalized(&finalized).await.unwrap();
+        writer.upload_notarized(&notarized).await.unwrap();
+        writer.upload_finalized(&finalized).await.unwrap();
         expected.push((notarized, finalized));
     }
     for (notarized, finalized) in expected {
         let round = notarized.header.context.round;
         assert_eq!(
-            simplex
+            reader
                 .get_notarized_by_round::<TestBlock, Scheme, Sha256Digest>(round, &(10, 1024))
                 .await
                 .unwrap(),
             Some(notarized)
         );
         assert_eq!(
-            simplex
+            reader
                 .get_finalized_by_round::<TestBlock, Scheme, Sha256Digest>(round, &(10, 1024))
                 .await
                 .unwrap(),
@@ -536,7 +636,7 @@ async fn round_indices_retain_same_view_across_epochs() {
 async fn round_reads_reject_certificates_stored_under_another_round() {
     let store = local_store_client().await;
     let client = PrefixedStoreClient::empty(store.clone());
-    let simplex = SimplexClient::new(client.clone());
+    let reader = SimplexReader::with_session(ReadSession::fixed(client.clone(), None));
     let schemes = schemes();
     let mut block = TestBlock::new(9, b"round binding");
     block.context.round = Round::new(Epoch::new(1), View::new(9));
@@ -566,13 +666,13 @@ async fn round_reads_reject_certificates_stored_under_another_round() {
         batch.commit(&store).await.unwrap();
 
         assert!(matches!(
-            simplex
+            reader
                 .get_notarized_by_round::<TestBlock, Scheme, Sha256Digest>(round, &(10, 1024))
                 .await,
             Err(SimplexError::RecordKeyMismatch)
         ));
         assert!(matches!(
-            simplex
+            reader
                 .get_finalized_by_round::<TestBlock, Scheme, Sha256Digest>(round, &(10, 1024))
                 .await,
             Err(SimplexError::RecordKeyMismatch)
@@ -590,7 +690,7 @@ async fn round_reads_reject_certificates_stored_under_another_round() {
         .unwrap();
     batch.commit(&store).await.unwrap();
     assert!(matches!(
-        simplex
+        reader
             .latest_finalized::<TestBlock, Scheme, Sha256Digest>(&(10, 1024))
             .await,
         Err(SimplexError::RecordKeyMismatch)
