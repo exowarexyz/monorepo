@@ -29,11 +29,13 @@ use crate::codec::{
 use crate::connect::OperationKv;
 use crate::core::{self, PublishedWatermark};
 use crate::error::{error_key, QmdbError};
+use crate::operation_range::load_operation_range_checkpoint;
 use crate::proof::{
     CurrentOperationRangeProofResult, OperationRangeCheckpoint, RawBatchMultiProof,
     RawKeyExclusionProof, RawKeyLookupProof, RawKeyRangeProof, RawKeyValueProof, RawMultiProof,
     VerifiedCurrentRange, VerifiedKeyValue, VerifiedMultiOperations, VerifiedOperationRange,
 };
+use crate::read_cache::ReadCache;
 use crate::request::span_contains;
 use crate::storage::{KvCurrentStorage, KvMerkleStorage, ProofBitmap};
 use crate::VersionedValue;
@@ -54,6 +56,7 @@ pub struct OrderedClient<
     publication: Arc<core::PublicationCache<F>>,
     op_cfg: <ordered::Operation<F, K, E> as commonware_codec::Read>::Cfg,
     key_cfg: K::Cfg,
+    read_cache: Arc<ReadCache<F, H::Digest>>,
     _marker: PhantomData<(F, H, K, E)>,
 }
 
@@ -74,6 +77,7 @@ where
             publication: self.publication.clone(),
             op_cfg: self.op_cfg.clone(),
             key_cfg: self.key_cfg.clone(),
+            read_cache: self.read_cache.clone(),
             _marker: PhantomData,
         }
     }
@@ -153,6 +157,7 @@ where
             publication: Arc::new(core::PublicationCache::default()),
             op_cfg,
             key_cfg,
+            read_cache: Arc::new(ReadCache::new()),
             _marker: PhantomData,
         }
     }
@@ -416,31 +421,39 @@ where
         max_locations: u32,
     ) -> Result<OperationRangeCheckpoint<H::Digest, F>, QmdbError> {
         let session = ReadSession::fixed(self.store.clone(), Some(watermark.sequence_number));
-        let end =
-            crate::proof::resolve_range_bounds(watermark.location, start_location, max_locations)?;
-        let storage = KvMerkleStorage::<F, H::Digest> {
-            session: &session,
-            size: merkle_size_for_watermark(watermark.location)?,
-            _marker: PhantomData,
-        };
-        let inactive_peaks =
-            Self::ops_inactive_peaks_at(&session, &self.op_cfg, watermark.location).await?;
-        let root =
-            core::compute_ops_root::<F, H>(&session, watermark.location, inactive_peaks).await?;
-        let encoded_operations =
-            core::load_operation_bytes_range(&session, start_location, end).await?;
-        let mut checkpoint = crate::proof::build_operation_range_checkpoint::<F, H, _>(
-            &storage,
-            watermark.location,
+        let watermark = watermark.location;
+        let end = crate::proof::resolve_range_bounds(watermark, start_location, max_locations)?;
+        let checkpoint = load_operation_range_checkpoint::<F, H, _>(
+            &session,
+            &self.read_cache,
+            watermark,
             start_location,
             end,
-            root,
-            inactive_peaks,
-            encoded_operations,
+            true,
+            |bytes| async {
+                let mut location = watermark;
+                let mut operation = ordered::Operation::<F, K, E>::decode_cfg(bytes, &self.op_cfg)
+                    .map_err(|error| {
+                        QmdbError::CorruptData(format!(
+                            "operation at {watermark} decode error: {error}"
+                        ))
+                    })?;
+                let floor = loop {
+                    if let ordered::Operation::CommitFloor(_, floor) = operation {
+                        break floor;
+                    }
+                    if *location == 0 {
+                        return Err(QmdbError::CorruptData(format!(
+                            "no CommitFloor found at or before watermark {watermark}"
+                        )));
+                    }
+                    location -= 1;
+                    operation = Self::load_operation_at(&session, &self.op_cfg, location).await?;
+                };
+                core::inactive_peaks(watermark, floor)
+            },
         )
         .await?;
-        checkpoint.ops_root_witness =
-            Self::load_ops_root_witness(&session, watermark.location).await?;
         Ok(checkpoint)
     }
 
