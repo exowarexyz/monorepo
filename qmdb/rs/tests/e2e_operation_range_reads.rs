@@ -11,14 +11,19 @@ use bytes::Bytes;
 use commonware_codec::Encode;
 use commonware_cryptography::{sha256::Digest, Sha256};
 use commonware_storage::merkle::{hasher::Hasher as _, mem::Mem, mmr, Family, Location, Position};
+use commonware_storage::qmdb::any::ordered::{
+    variable::Operation as OrderedOperation, Update as OrderedUpdate,
+};
 use commonware_storage::qmdb::any::unordered::variable::Operation as UnorderedOperation;
+use commonware_storage::qmdb::immutable::variable::Operation as ImmutableOperation;
 use commonware_storage::qmdb::keyless::variable::Operation as KeylessOperation;
 use connectrpc::{ConnectError, ConnectRpcService, ErrorCode, RequestContext, ServiceRequest};
 use exoware_qmdb::proto::qmdb::v1::GetOperationRangeRequest;
 use exoware_qmdb::{
-    keyless_operation_log_connect_stack, stage_authenticated_range, stage_watermark,
-    unordered_operation_log_connect_stack, KeylessClient, OperationLogClient, UnorderedClient,
-    UploadOperation, NODE_FAMILY,
+    immutable_operation_log_connect_stack, keyless_operation_log_connect_stack,
+    ordered_operation_log_connect_stack, stage_authenticated_range, stage_watermark,
+    unordered_operation_log_connect_stack, ImmutableClient, KeylessClient, OperationLogClient,
+    OrderedClient, UnorderedClient, UploadOperation, NODE_FAMILY,
 };
 use exoware_sdk::common::kv::v1::Entry;
 use exoware_sdk::google::rpc::{ErrorInfo, RetryInfo};
@@ -35,9 +40,13 @@ use tokio::sync::{Notify, Semaphore};
 use tokio::task::JoinHandle;
 
 type Operation = KeylessOperation<mmr::Family, Vec<u8>>;
+type OrderedOp = OrderedOperation<mmr::Family, Vec<u8>, Vec<u8>>;
 type UnorderedOp = UnorderedOperation<mmr::Family, Vec<u8>, Vec<u8>>;
+type ImmutableOp = ImmutableOperation<mmr::Family, Vec<u8>, Vec<u8>>;
 type Keyless = KeylessClient<mmr::Family, Sha256, Vec<u8>>;
+type Ordered = OrderedClient<mmr::Family, Sha256, Vec<u8>, Vec<u8>, 32>;
 type Unordered = UnorderedClient<mmr::Family, Sha256, Vec<u8>, Vec<u8>>;
+type Immutable = ImmutableClient<mmr::Family, Sha256, Vec<u8>, Vec<u8>>;
 type ProofClient = OperationLogClient<PreferZstdHttpClient, mmr::Family, Sha256, Operation>;
 
 #[derive(Clone, Debug)]
@@ -361,6 +370,20 @@ impl Fixture {
         self.servers.push(server);
         url
     }
+
+    async fn ordered(&mut self, client: Arc<Ordered>) -> String {
+        let (server, url) =
+            common::spawn_connect_service(ordered_operation_log_connect_stack(client)).await;
+        self.servers.push(server);
+        url
+    }
+
+    async fn immutable(&mut self, client: Arc<Immutable>) -> String {
+        let (server, url) =
+            common::spawn_connect_service(immutable_operation_log_connect_stack(client)).await;
+        self.servers.push(server);
+        url
+    }
 }
 
 impl Drop for Fixture {
@@ -387,6 +410,139 @@ fn boundary_batch(calls: &[Call], tip: u64) -> &GetManyRequest {
         "batch keys must be deduplicated"
     );
     batch
+}
+
+#[derive(Clone, Copy, Debug)]
+enum HistoricalVariant {
+    Ordered,
+    Immutable,
+}
+
+fn ordered_cfg() -> <OrderedOp as commonware_codec::Read>::Cfg {
+    (((0..=10000).into(), ()), ((0..=10000).into(), ()))
+}
+
+fn immutable_cfg() -> <ImmutableOp as commonware_codec::Read>::Cfg {
+    (((0..=10000).into(), ()), ((0..=10000).into(), ()))
+}
+
+fn key_cfg() -> <Vec<u8> as commonware_codec::Read>::Cfg {
+    ((0..=10000).into(), ())
+}
+
+fn ordered_operations() -> Vec<OrderedOp> {
+    (0..15)
+        .map(|index| match index {
+            0 => OrderedOp::CommitFloor(None, Location::new(0)),
+            14 => OrderedOp::CommitFloor(None, Location::new(4)),
+            _ => OrderedOp::Update(OrderedUpdate {
+                key: vec![index],
+                value: vec![index + 32],
+                next_key: vec![index + 1],
+            }),
+        })
+        .collect()
+}
+
+fn immutable_operations() -> Vec<ImmutableOp> {
+    (0..15)
+        .map(|index| {
+            if index == 14 {
+                ImmutableOp::Commit(None, Location::new(4))
+            } else {
+                ImmutableOp::Set(vec![index], vec![index + 32])
+            }
+        })
+        .collect()
+}
+
+fn stage_variant(
+    fixture: &Fixture,
+    store: &PrefixedStoreClient,
+    variant: HistoricalVariant,
+) -> Digest {
+    match variant {
+        HistoricalVariant::Ordered => fixture.stage(store, &ordered_operations(), &ordered_cfg()),
+        HistoricalVariant::Immutable => {
+            fixture.stage(store, &immutable_operations(), &immutable_cfg())
+        }
+    }
+}
+
+async fn serve_variant(
+    fixture: &mut Fixture,
+    store: PrefixedStoreClient,
+    variant: HistoricalVariant,
+) -> String {
+    match variant {
+        HistoricalVariant::Ordered => {
+            fixture
+                .ordered(Arc::new(Ordered::new(store, ordered_cfg(), key_cfg())))
+                .await
+        }
+        HistoricalVariant::Immutable => {
+            fixture
+                .immutable(Arc::new(Immutable::new(store, immutable_cfg())))
+                .await
+        }
+    }
+}
+
+async fn serve_variant_clones(
+    fixture: &mut Fixture,
+    store: PrefixedStoreClient,
+    variant: HistoricalVariant,
+) -> [String; 2] {
+    match variant {
+        HistoricalVariant::Ordered => {
+            let client = Ordered::new(store, ordered_cfg(), key_cfg());
+            [
+                fixture.ordered(Arc::new(client.clone())).await,
+                fixture.ordered(Arc::new(client)).await,
+            ]
+        }
+        HistoricalVariant::Immutable => {
+            let client = Immutable::new(store, immutable_cfg());
+            [
+                fixture.immutable(Arc::new(client.clone())).await,
+                fixture.immutable(Arc::new(client)).await,
+            ]
+        }
+    }
+}
+
+async fn verify_variant_range(
+    variant: HistoricalVariant,
+    url: &str,
+    query: GetOperationRangeRequest,
+    root: &Digest,
+) -> u64 {
+    let start = query.start_location as usize;
+    let end = (start + query.max_locations as usize).min(query.tip as usize + 1);
+    match variant {
+        HistoricalVariant::Ordered => {
+            let proof = OperationLogClient::<_, mmr::Family, Sha256, OrderedOp>::plaintext(
+                url,
+                ordered_cfg(),
+            )
+            .get_operation_range(query, root)
+            .await
+            .unwrap();
+            assert_eq!(proof.operations, ordered_operations()[start..end]);
+            proof.sequence_number
+        }
+        HistoricalVariant::Immutable => {
+            let proof = OperationLogClient::<_, mmr::Family, Sha256, ImmutableOp>::plaintext(
+                url,
+                immutable_cfg(),
+            )
+            .get_operation_range(query, root)
+            .await
+            .unwrap();
+            assert_eq!(proof.operations, immutable_operations()[start..end]);
+            proof.sequence_number
+        }
+    }
 }
 
 #[tokio::test]
@@ -762,6 +918,174 @@ async fn eleven_concurrent_singletons_fetch_each_node_once() {
 }
 
 #[tokio::test]
+async fn ordered_and_immutable_overlap_wire_reads_and_verify_typed_proofs() {
+    for variant in [HistoricalVariant::Ordered, HistoricalVariant::Immutable] {
+        let mut fixture = Fixture::new().await;
+        let store = fixture.prefixed(&[]);
+        let root = stage_variant(&fixture, &store, variant);
+        let batch_gate = Gate::new();
+        let range_gate = Gate::new();
+        {
+            let mut state = fixture.store.state.lock().unwrap();
+            state.get_sequence = 23;
+            state.batch_sequences = vec![31, 47];
+            state.range_sequence = 41;
+            state.batch_gate = Some(batch_gate.clone());
+            state.range_gate = Some(range_gate.clone());
+        }
+        let url = serve_variant(&mut fixture, store, variant).await;
+        let mut query = request(14, 2, 9);
+        query.min_sequence_number = Some(17);
+        let task =
+            tokio::spawn(async move { verify_variant_range(variant, &url, query, &root).await });
+        batch_gate.wait().await;
+        range_gate.wait().await;
+        assert!(!task.is_finished());
+        batch_gate.open();
+        range_gate.open();
+        assert_eq!(task.await.unwrap(), 47);
+
+        let calls = fixture.store.calls();
+        assert_eq!(calls.len(), 3, "unexpected calls for {variant:?}");
+        let Call::Get(publication) = &calls[0] else {
+            panic!("publication must be first")
+        };
+        assert_eq!(publication.key.as_ref(), key(3, 14));
+        assert_eq!(publication.min_sequence_number, Some(17));
+        let batch = calls
+            .iter()
+            .find_map(|call| match call {
+                Call::GetMany(batch) => Some(batch),
+                _ => None,
+            })
+            .unwrap();
+        let range = calls
+            .iter()
+            .find_map(|call| match call {
+                Call::Range(range) => Some(range),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(batch.min_sequence_number, Some(23));
+        assert_eq!(range.min_sequence_number, Some(23));
+        assert_eq!(range.start.as_ref(), key(4, 2));
+        assert_eq!(range.end.as_ref(), key(4, 10));
+        assert_eq!(
+            batch.keys.contains(&key(9, 14)),
+            matches!(variant, HistoricalVariant::Ordered)
+        );
+        assert!(batch.keys.iter().any(|key| key[0] == NODE_FAMILY));
+        assert_eq!(
+            batch.keys.len(),
+            batch.keys.iter().collect::<BTreeSet<_>>().len()
+        );
+    }
+}
+
+#[tokio::test]
+async fn ordered_and_immutable_clones_reuse_cache_and_recheck_publication() {
+    for variant in [HistoricalVariant::Ordered, HistoricalVariant::Immutable] {
+        let mut fixture = Fixture::new().await;
+        let store = fixture.prefixed(&[]);
+        let root = stage_variant(&fixture, &store, variant);
+        {
+            let mut state = fixture.store.state.lock().unwrap();
+            state.get_sequence = 23;
+            state.batch_sequences = vec![31];
+        }
+        let [first_url, second_url] = serve_variant_clones(&mut fixture, store, variant).await;
+        assert_eq!(
+            verify_variant_range(variant, &first_url, request(14, 1, 1), &root).await,
+            31
+        );
+        fixture.store.state.lock().unwrap().calls.clear();
+        assert_eq!(
+            verify_variant_range(variant, &second_url, request(14, 1, 1), &root).await,
+            31
+        );
+        let calls = fixture.store.calls();
+        let batch = boundary_batch(&calls, 14);
+        assert!(batch.keys.contains(&key(4, 1)));
+        assert_eq!(
+            batch.keys.contains(&key(9, 14)),
+            matches!(variant, HistoricalVariant::Ordered)
+        );
+        assert!(batch.keys.iter().all(|key| key[0] != NODE_FAMILY));
+        assert_eq!(batch.min_sequence_number, Some(23));
+
+        {
+            let mut state = fixture.store.state.lock().unwrap();
+            state.get_sequence = 31;
+            state.range_sequence = 31;
+            state.rows.remove(&key(3, 14));
+        }
+        let error = common::operation_log_rpc_client(&second_url)
+            .get_operation_range(request(14, 1, 1))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, ErrorCode::OutOfRange);
+        assert_eq!(
+            fixture
+                .store
+                .calls()
+                .iter()
+                .filter(|call| matches!(call, Call::Get(_)))
+                .count(),
+            2
+        );
+    }
+}
+
+#[tokio::test]
+async fn ordered_and_immutable_concurrent_singletons_share_in_flight_nodes() {
+    for variant in [HistoricalVariant::Ordered, HistoricalVariant::Immutable] {
+        let mut fixture = Fixture::new().await;
+        let store = fixture.prefixed(&[]);
+        let root = stage_variant(&fixture, &store, variant);
+        let gate = Gate::new();
+        fixture.store.state.lock().unwrap().batch_gate = Some(gate.clone());
+        let url = serve_variant(&mut fixture, store, variant).await;
+        let mut tasks = Vec::new();
+        let first_url = url.clone();
+        tasks.push(tokio::spawn(async move {
+            verify_variant_range(variant, &first_url, request(14, 0, 1), &root).await
+        }));
+        gate.wait().await;
+        for location in 1..4 {
+            let url = url.clone();
+            tasks.push(tokio::spawn(async move {
+                verify_variant_range(variant, &url, request(14, location, 1), &root).await
+            }));
+        }
+        fixture
+            .store
+            .wait_for_calls(4, |call| matches!(call, Call::GetMany(_)))
+            .await;
+        assert!(tasks.iter().all(|task| !task.is_finished()));
+        gate.open();
+        for task in tasks {
+            task.await.unwrap();
+        }
+
+        let calls = fixture.store.calls();
+        assert_eq!(calls.len(), 8, "unexpected calls for {variant:?}");
+        let mut node_fetches = BTreeMap::new();
+        for call in &calls {
+            if let Call::GetMany(batch) = call {
+                for key in &batch.keys {
+                    if key[0] == NODE_FAMILY {
+                        *node_fetches.entry(key.clone()).or_insert(0) += 1;
+                    }
+                }
+            }
+        }
+        assert!(!node_fetches.is_empty());
+        assert!(node_fetches.values().all(|count| *count == 1));
+        assert!(calls.iter().all(|call| !matches!(call, Call::Range(_))));
+    }
+}
+
+#[tokio::test]
 async fn separate_namespaces_do_not_share_cached_nodes_or_roots() {
     let mut fixture = Fixture::new().await;
     let mut roots = Vec::new();
@@ -840,9 +1164,13 @@ async fn unordered_noncommit_tip_shares_floor_without_waiting_for_operation_scan
     let root = prefix_root(&operations[..7], 4);
     let range_gate = Gate::new();
     fixture.store.state.lock().unwrap().range_gate = Some(range_gate.clone());
-    let url = fixture.unordered(Unordered::new(store, cfg)).await;
-    let client = OperationLogClient::<_, mmr::Family, Sha256, UnorderedOp>::plaintext(&url, cfg);
-    let range_client = client.clone();
+    let backend = Unordered::new(store, cfg);
+    let range_url = fixture.unordered(backend.clone()).await;
+    let singleton_url = fixture.unordered(backend).await;
+    let range_client =
+        OperationLogClient::<_, mmr::Family, Sha256, UnorderedOp>::plaintext(&range_url, cfg);
+    let client =
+        OperationLogClient::<_, mmr::Family, Sha256, UnorderedOp>::plaintext(&singleton_url, cfg);
     let range = tokio::spawn(async move {
         range_client
             .get_operation_range(request(6, 0, 2), &root)
