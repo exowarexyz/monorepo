@@ -45,7 +45,7 @@ use exoware_sdk::kv_codec::{
     KvExpr, KvFieldKind, KvFieldRef, KvPredicate, KvPredicateCheck, KvPredicateConstraint,
     KvReducedValue,
 };
-use exoware_sdk::{PrefixedStoreClient, SerializableReadSession};
+use exoware_sdk::{PrefixedStoreClient, ReadSession};
 use futures::{stream::BoxStream, StreamExt, TryStreamExt};
 
 use crate::diagnostics::*;
@@ -651,13 +651,13 @@ pub(crate) fn cast_scalar_value(
 }
 
 fn execute_reduce_job(
-    session: SerializableReadSession,
+    session: ReadSession,
     job: Arc<CombinedAggregateJob>,
     source: Arc<KvAggregateExec>,
     concurrency: usize,
 ) -> impl futures::Stream<Item = DataFusionResult<RecordBatch>> {
     let mut ranges = job.job.ranges.clone().into_iter();
-    let first_range = if session.fixed_sequence().is_none() {
+    let first_range = if session.min_sequence_number().is_none() {
         ranges.next()
     } else {
         None
@@ -676,11 +676,11 @@ fn execute_reduce_job(
         })
         .try_flatten();
 
-    // Every frame of an unseeded read can advance its floor. Drain that range
-    // before opening concurrent reads, and keep a zero-floor session sequential.
+    // Drain an unseeded range so concurrent reads inherit all its observations.
+    // A present minimum, including zero, needs no bootstrap read.
     let remaining_count = ranges.len();
     let remaining = futures::stream::once(async move {
-        let concurrency = if session.fixed_sequence().is_some() {
+        let concurrency = if session.min_sequence_number().is_some() {
             concurrency
         } else {
             1
@@ -700,7 +700,7 @@ fn execute_reduce_job(
 }
 
 async fn execute_reduce_range(
-    session: SerializableReadSession,
+    session: ReadSession,
     job: Arc<CombinedAggregateJob>,
     source: Arc<KvAggregateExec>,
     range: KeyRange,

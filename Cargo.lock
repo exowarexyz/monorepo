@@ -2752,6 +2752,7 @@ dependencies = [
  "connectrpc",
  "connectrpc-build",
  "cookie_store",
+ "crossbeam-utils",
  "futures",
  "hex",
  "http",

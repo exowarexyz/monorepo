@@ -221,7 +221,16 @@ export class StoreWriteBatch {
 }
 
 function normalizeMinSequenceNumber(value?: bigint): bigint | undefined {
-    return value !== undefined && value > 0n ? value : undefined;
+    return value !== undefined && value >= 0n ? value : undefined;
+}
+
+function maxSequenceNumber(
+    left: bigint | undefined,
+    right: bigint | undefined,
+): bigint | undefined {
+    if (left === undefined) return right;
+    if (right === undefined) return left;
+    return left > right ? left : right;
 }
 
 /**
@@ -499,6 +508,9 @@ async function performGetMany(
     try {
         const stream = client.query.getMany(req);
         for await (const frame of stream) {
+            if (frame.detail) {
+                detailObserver?.(frame.detail);
+            }
             const chunk: GetManyResultItem[] = [];
             for (const entry of frame.results) {
                 chunk.push({
@@ -510,9 +522,6 @@ async function performGetMany(
                 onChunk(chunk);
             }
             results.push(...chunk);
-            if (frame.detail) {
-                detailObserver?.(frame.detail);
-            }
         }
         return results;
     } catch (e) {
@@ -593,6 +602,21 @@ async function* performReduce(
     }
 }
 
+async function prefetchFirst<T>(iterable: AsyncIterable<T>): Promise<AsyncIterable<T>> {
+    const iterator = iterable[Symbol.asyncIterator]();
+    const first = await iterator.next();
+    return (async function* () {
+        try {
+            if (!first.done) {
+                yield first.value;
+                yield* { [Symbol.asyncIterator]: () => iterator };
+            }
+        } finally {
+            await iterator.return?.();
+        }
+    })();
+}
+
 async function performGetBatch(
     client: Client,
     sequenceNumber: bigint,
@@ -648,74 +672,166 @@ async function* performSubscribe(
     }
 }
 
-export class SerializableReadSession {
-    private sequence: bigint;
-    private initGate = Promise.resolve();
-    private gateLocked = false;
+type ReadPolicy = 'fixed' | 'monotonic';
 
+interface ReadSessionState {
+    sequence: bigint | undefined;
+    initGate: Promise<void>;
+    gateLocked: boolean;
+}
+
+interface StoreClientBinding {
+    client: Client;
+    keyPrefix?: StoreKeyPrefix;
+}
+
+const storeClientBindings = new WeakMap<StoreClient, StoreClientBinding>();
+
+/**
+ * A read session with a fixed or monotonic minimum Store sequence.
+ *
+ * Fixed sessions keep their configured floor. Monotonic sessions raise their floor to the highest
+ * sequence observed by any clone. An absent floor sends no requirement; zero is an explicit floor.
+ * An initial floor is a requirement, not an observation.
+ */
+export class ReadSession {
+    private policy: ReadPolicy = 'monotonic';
+    private configuredFloor: bigint | undefined;
+    private state: ReadSessionState = {
+        sequence: undefined,
+        initGate: Promise.resolve(),
+        gateLocked: false,
+    };
+
+    /** Create a monotonic session from the low-level client. */
     constructor(
-        private readonly client: Client,
-        private readonly keyPrefix?: StoreKeyPrefix,
-        initialSequence: bigint = 0n,
+        private client: Client,
+        private keyPrefix?: StoreKeyPrefix,
+        initialSequence?: bigint,
     ) {
-        this.sequence = normalizeMinSequenceNumber(initialSequence) ?? 0n;
+        this.configuredFloor = normalizeMinSequenceNumber(initialSequence);
     }
 
-    fixedSequence(): bigint | undefined {
-        return normalizeMinSequenceNumber(this.sequence);
+    /** Create a session whose floor advances to the highest observed read sequence. */
+    static monotonic(client: StoreClient, initialFloor?: bigint): ReadSession {
+        return ReadSession.fromStoreClient(client, initialFloor, 'monotonic');
+    }
+
+    /** Create a session whose read floor stays fixed as responses are observed. */
+    static fixed(client: StoreClient, floor?: bigint): ReadSession {
+        return ReadSession.fromStoreClient(client, floor, 'fixed');
+    }
+
+    private static fromStoreClient(
+        storeClient: StoreClient,
+        configuredFloor: bigint | undefined,
+        policy: ReadPolicy,
+    ): ReadSession {
+        const binding = storeClientBindings.get(storeClient);
+        if (!binding) {
+            throw new TypeError('invalid StoreClient');
+        }
+        const session = new ReadSession(binding.client, binding.keyPrefix, configuredFloor);
+        session.policy = policy;
+        return session;
+    }
+
+    /** Minimum Store sequence requested by subsequent reads. */
+    minSequenceNumber(): bigint | undefined {
+        return this.policy === 'fixed'
+            ? this.configuredFloor
+            : maxSequenceNumber(this.configuredFloor, this.state.sequence);
+    }
+
+    /** Highest Store sequence reported by a read in this session. */
+    evaluatedSequence(): bigint | undefined {
+        return this.state.sequence;
+    }
+
+    /** Return a handle that shares observations and retains this handle's policy and floor. */
+    clone(): ReadSession {
+        const session = new ReadSession(this.client, this.keyPrefix, this.configuredFloor);
+        session.policy = this.policy;
+        session.state = this.state;
+        return session;
+    }
+
+    /**
+     * Derive a reader with at least the requested minimum sequence.
+     *
+     * The derived handle's floor is at least `sequence`. The parent floor is unchanged, and the
+     * requirement does not count as an observation.
+     */
+    withMinSequenceNumber(sequence: bigint): ReadSession {
+        const session = this.clone();
+        const requested = normalizeMinSequenceNumber(sequence);
+        if (requested === undefined) {
+            return session;
+        }
+        const current = this.minSequenceNumber();
+        if (current === undefined || requested > current) {
+            session.configuredFloor = requested;
+        }
+        return session;
+    }
+
+    /** Share this session's observations with another logical client for the same Store. */
+    withClient(client: StoreClient): ReadSession {
+        const binding = storeClientBindings.get(client);
+        if (!binding) {
+            throw new TypeError('invalid StoreClient');
+        }
+        const session = this.clone();
+        session.client = binding.client;
+        session.keyPrefix = binding.keyPrefix;
+        return session;
+    }
+
+    private observe(detail: Detail): void {
+        if (this.state.sequence === undefined || detail.sequenceNumber > this.state.sequence) {
+            this.state.sequence = detail.sequenceNumber;
+        }
     }
 
     private async acquireInitGate(): Promise<() => void> {
-        while (this.gateLocked) {
-            await this.initGate;
+        while (this.state.gateLocked) {
+            await this.state.initGate;
         }
-        this.gateLocked = true;
+        this.state.gateLocked = true;
         let release!: () => void;
-        this.initGate = new Promise<void>((resolve) => {
+        this.state.initGate = new Promise<void>((resolve) => {
             release = resolve;
         });
         return () => {
-            this.gateLocked = false;
+            this.state.gateLocked = false;
             release();
         };
     }
 
     private async runRead<T>(
-        seededCall: (sequence: bigint) => Promise<T>,
-        unseededCall: (detailObserver: DetailObserver) => Promise<T>,
+        call: (sequence: bigint | undefined, detailObserver: DetailObserver) => Promise<T>,
     ): Promise<T> {
-        const fixed = this.fixedSequence();
-        if (fixed !== undefined) {
-            return seededCall(fixed);
+        const observer = (detail: Detail) => this.observe(detail);
+        const minimum = this.minSequenceNumber();
+        if (this.policy === 'fixed' || minimum !== undefined) {
+            return call(minimum, observer);
         }
 
         const release = await this.acquireInitGate();
         try {
-            const rechecked = this.fixedSequence();
+            const rechecked = this.minSequenceNumber();
             if (rechecked !== undefined) {
-                return await seededCall(rechecked);
+                return await call(rechecked, observer);
             }
-
-            let observed = this.sequence;
-            const result = await unseededCall((detail) => {
-                if (detail.sequenceNumber > observed) {
-                    observed = detail.sequenceNumber;
-                }
-            });
-            if (observed > this.sequence) {
-                this.sequence = observed;
-            }
-            return result;
+            return await call(undefined, observer);
         } finally {
             release();
         }
     }
 
     async get(key: Uint8Array): Promise<GetResult | null> {
-        return this.runRead(
-            (sequence) => performGet(this.client, key, sequence, undefined, this.keyPrefix),
-            (detailObserver) =>
-                performGet(this.client, key, undefined, detailObserver, this.keyPrefix),
+        return this.runRead((sequence, detailObserver) =>
+            performGet(this.client, key, sequence, detailObserver, this.keyPrefix),
         );
     }
 
@@ -724,27 +840,16 @@ export class SerializableReadSession {
         batchSize?: number,
         onChunk?: (entries: GetManyResultItem[]) => void,
     ): Promise<GetManyResultItem[]> {
-        return this.runRead(
-            (sequence) =>
-                performGetMany(
-                    this.client,
-                    keys,
-                    batchSize,
-                    onChunk,
-                    sequence,
-                    undefined,
-                    this.keyPrefix,
-                ),
-            (detailObserver) =>
-                performGetMany(
-                    this.client,
-                    keys,
-                    batchSize,
-                    onChunk,
-                    undefined,
-                    detailObserver,
-                    this.keyPrefix,
-                ),
+        return this.runRead((sequence, detailObserver) =>
+            performGetMany(
+                this.client,
+                keys,
+                batchSize,
+                onChunk,
+                sequence,
+                detailObserver,
+                this.keyPrefix,
+            ),
         );
     }
 
@@ -755,31 +860,18 @@ export class SerializableReadSession {
         batchSize: number = 4096,
         mode: TraversalMode = TraversalMode.FORWARD,
     ): Promise<QueryResult> {
-        return this.runRead(
-            (sequence) =>
-                performQuery(
-                    this.client,
-                    start,
-                    end,
-                    limit,
-                    batchSize,
-                    mode,
-                    sequence,
-                    undefined,
-                    this.keyPrefix,
-                ),
-            (detailObserver) =>
-                performQuery(
-                    this.client,
-                    start,
-                    end,
-                    limit,
-                    batchSize,
-                    mode,
-                    undefined,
-                    detailObserver,
-                    this.keyPrefix,
-                ),
+        return this.runRead((sequence, detailObserver) =>
+            performQuery(
+                this.client,
+                start,
+                end,
+                limit,
+                batchSize,
+                mode,
+                sequence,
+                detailObserver,
+                this.keyPrefix,
+            ),
         );
     }
 
@@ -788,24 +880,20 @@ export class SerializableReadSession {
         end: Uint8Array,
         params: ReduceParams,
     ): AsyncIterable<ReduceResponse> {
-        yield* await this.runRead(
-            async (sequence) =>
-                performReduce(this.client, start, end, params, sequence, undefined, this.keyPrefix),
-            async () =>
-                performReduce(
-                    this.client,
-                    start,
-                    end,
-                    params,
-                    undefined,
-                    (detail) => {
-                        if (detail.sequenceNumber > this.sequence) {
-                            this.sequence = detail.sequenceNumber;
-                        }
-                    },
-                    this.keyPrefix,
-                ),
-        );
+        yield* await this.runRead(async (sequence, detailObserver) => {
+            const stream = performReduce(
+                this.client,
+                start,
+                end,
+                params,
+                sequence,
+                detailObserver,
+                this.keyPrefix,
+            );
+            return sequence === undefined && this.policy === 'monotonic'
+                ? prefetchFirst(stream)
+                : stream;
+        });
     }
 
 }
@@ -814,7 +902,9 @@ export class StoreClient {
     constructor(
         private readonly client: Client,
         private readonly keyPrefix?: StoreKeyPrefix,
-    ) {}
+    ) {
+        storeClientBindings.set(this, { client, keyPrefix });
+    }
 
     withKeyPrefix(prefix: StoreKeyPrefix): StoreClient {
         return new StoreClient(this.client, prefix);
@@ -832,12 +922,12 @@ export class StoreClient {
         return decodeStoreKey(this.keyPrefix, key);
     }
 
-    createSession(): SerializableReadSession {
-        return new SerializableReadSession(this.client, this.keyPrefix);
+    createSession(): ReadSession {
+        return ReadSession.monotonic(this);
     }
 
-    createSessionWithSequence(sequence: bigint): SerializableReadSession {
-        return new SerializableReadSession(this.client, this.keyPrefix, sequence);
+    createSessionWithSequence(sequence: bigint): ReadSession {
+        return ReadSession.monotonic(this, sequence);
     }
 
     async set(key: Uint8Array, value: Uint8Array | Buffer): Promise<bigint> {

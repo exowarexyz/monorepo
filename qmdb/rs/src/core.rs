@@ -8,7 +8,7 @@ use commonware_storage::merkle::{
     hasher::Hasher as MerkleHasher, mem::Mem, Family, Location, Position,
 };
 use exoware_sdk::keys::Key;
-use exoware_sdk::{ClientError, PrefixedStoreClient, RangeMode, SerializableReadSession};
+use exoware_sdk::{ClientError, PrefixedStoreClient, RangeMode, ReadSession};
 
 use crate::codec::{
     decode_digest, decode_operation_location_key, decode_update_location,
@@ -82,7 +82,7 @@ pub(crate) struct HistoricalOpsClientCore<'a, F: Family, D: Digest, K: Codec, V:
 pub(crate) trait LatestValueResolver<F: Family, K: Codec, V: Codec> {
     fn resolve_latest_value(
         &self,
-        session: &SerializableReadSession,
+        session: &ReadSession,
         location: Location<F>,
         requested_key: &[u8],
     ) -> impl std::future::Future<Output = Result<VersionedValue<K, V, F>, QmdbError>>;
@@ -99,7 +99,7 @@ impl<'a, F: Family, D: Digest, K: Codec, V: Codec> HistoricalOpsClientCore<'a, F
 
     pub(crate) async fn read_latest_watermark(
         &self,
-        session: &SerializableReadSession,
+        session: &ReadSession,
     ) -> Result<Option<Location<F>>, QmdbError> {
         let (start, end) = WATERMARK_PREFIX.bounds();
         let rows = session
@@ -113,7 +113,7 @@ impl<'a, F: Family, D: Digest, K: Codec, V: Codec> HistoricalOpsClientCore<'a, F
 
     pub(crate) async fn require_published_watermark(
         &self,
-        session: &SerializableReadSession,
+        session: &ReadSession,
         watermark: Location<F>,
     ) -> Result<(), QmdbError> {
         let available = self
@@ -137,7 +137,7 @@ impl<'a, F: Family, D: Digest, K: Codec, V: Codec> HistoricalOpsClientCore<'a, F
 
     pub(crate) async fn require_batch_boundary(
         &self,
-        session: &SerializableReadSession,
+        session: &ReadSession,
         location: Location<F>,
     ) -> Result<(), QmdbError> {
         if session.get(&encode_presence_key(location)).await?.is_some() {
@@ -151,7 +151,7 @@ impl<'a, F: Family, D: Digest, K: Codec, V: Codec> HistoricalOpsClientCore<'a, F
 
     pub(crate) async fn load_latest_update_row(
         &self,
-        session: &SerializableReadSession,
+        session: &ReadSession,
         watermark: Location<F>,
         key: &[u8],
     ) -> Result<Option<(Key, Vec<u8>)>, QmdbError> {
@@ -207,7 +207,7 @@ impl<'a, F: Family, D: Digest, K: Codec, V: Codec> HistoricalOpsClientCore<'a, F
 
     pub(crate) async fn compute_ops_root_with_inactive_peaks<H: Hasher<Digest = D>>(
         &self,
-        session: &SerializableReadSession,
+        session: &ReadSession,
         watermark: Location<F>,
         inactive_peaks: usize,
     ) -> Result<D, QmdbError> {
@@ -250,7 +250,7 @@ impl<'a, F: Family, D: Digest, K: Codec, V: Codec> HistoricalOpsClientCore<'a, F
 
     pub(crate) async fn load_operation_bytes_at(
         &self,
-        session: &SerializableReadSession,
+        session: &ReadSession,
         location: Location<F>,
     ) -> Result<Vec<u8>, QmdbError> {
         let Some(bytes) = session.get(&encode_operation_key(location)).await? else {
@@ -263,7 +263,7 @@ impl<'a, F: Family, D: Digest, K: Codec, V: Codec> HistoricalOpsClientCore<'a, F
 
     pub(crate) async fn load_operation_bytes_range(
         &self,
-        session: &SerializableReadSession,
+        session: &ReadSession,
         start_location: Location<F>,
         end_location_exclusive: Location<F>,
     ) -> Result<Vec<Vec<u8>>, QmdbError> {

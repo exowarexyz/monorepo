@@ -2,7 +2,7 @@ use commonware_codec::Decode;
 use commonware_cryptography::Hasher;
 use commonware_storage::merkle::{hasher::Hasher as MerkleHasher, Family, Location, Position};
 use exoware_sdk::keys::Key;
-use exoware_sdk::{RangeMode, SerializableReadSession};
+use exoware_sdk::{RangeMode, ReadSession};
 
 use crate::codec::{
     decode_digest, decode_operation_location_key, decode_watermark_location, encode_node_key,
@@ -12,7 +12,7 @@ use crate::codec::{
 use crate::error::QmdbError;
 
 pub(crate) async fn load_latest_auth_immutable_update_row<F: Family>(
-    session: &SerializableReadSession,
+    session: &ReadSession,
     watermark: Location<F>,
     key: &[u8],
 ) -> Result<Option<(Key, Vec<u8>)>, QmdbError> {
@@ -28,7 +28,7 @@ pub(crate) async fn load_latest_auth_immutable_update_row<F: Family>(
 }
 
 pub(crate) async fn read_latest_auth_watermark<F: Family>(
-    session: &SerializableReadSession,
+    session: &ReadSession,
 ) -> Result<Option<Location<F>>, QmdbError> {
     let (start, end) = WATERMARK_PREFIX.bounds();
     let rows = session
@@ -41,7 +41,7 @@ pub(crate) async fn read_latest_auth_watermark<F: Family>(
 }
 
 pub(crate) async fn require_published_auth_watermark<F: Family>(
-    session: &SerializableReadSession,
+    session: &ReadSession,
     watermark: Location<F>,
 ) -> Result<(), QmdbError> {
     let available = read_latest_auth_watermark::<F>(session)
@@ -73,7 +73,7 @@ pub(crate) fn auth_inactive_peaks<F: Family>(
 }
 
 pub(crate) async fn compute_auth_root<F: Family, H: Hasher>(
-    session: &SerializableReadSession,
+    session: &ReadSession,
     watermark: Location<F>,
     inactive_peaks: usize,
 ) -> Result<H::Digest, QmdbError> {
@@ -114,7 +114,7 @@ pub(crate) async fn compute_auth_root<F: Family, H: Hasher>(
 }
 
 pub(crate) async fn load_auth_operation_at<F: Family, Op>(
-    session: &SerializableReadSession,
+    session: &ReadSession,
     location: Location<F>,
     cfg: &Op::Cfg,
 ) -> Result<Op, QmdbError>
@@ -134,7 +134,7 @@ where
 }
 
 pub(crate) async fn load_auth_operation_bytes_range<F: Family>(
-    session: &SerializableReadSession,
+    session: &ReadSession,
     start_location: Location<F>,
     end_location_exclusive: Location<F>,
 ) -> Result<Vec<Vec<u8>>, QmdbError> {

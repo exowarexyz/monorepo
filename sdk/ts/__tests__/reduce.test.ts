@@ -11,7 +11,7 @@ import {
     type ReduceRequest,
     type ReduceResponse,
 } from '../src/gen/ts/store/v1/query_pb';
-import { SerializableReadSession, StoreClient, StoreKeyPrefix } from '../src/store';
+import { ReadSession, StoreClient, StoreKeyPrefix } from '../src/store';
 
 const start = new Uint8Array([1]);
 const end = new Uint8Array([2]);
@@ -55,7 +55,7 @@ test.each(['store', 'session'])('reduce round trips and prefixes nested casts th
     const prefix = new StoreKeyPrefix(new Uint8Array([1, 2, 3]));
     const store = kind === 'store'
         ? new StoreClient(client, prefix)
-        : new SerializableReadSession(client, prefix);
+        : new ReadSession(client, prefix);
     for await (const result of store.reduce(start, end, params)) {
         expect(result).toEqual(frame(1n));
     }
@@ -111,7 +111,7 @@ test.each(['store', 'session'])('reduce prefixes reducer filters through %s', as
     const prefix = new StoreKeyPrefix(new Uint8Array([1, 2, 3]));
     const store = kind === 'store'
         ? new StoreClient(client, prefix)
-        : new SerializableReadSession(client, prefix);
+        : new ReadSession(client, prefix);
     for await (const result of store.reduce(start, end, params)) {
         expect(result).toEqual(frame(1n));
     }
@@ -152,7 +152,7 @@ describe.each([true, false])('Reduce responses with binary format %s', (useBinar
                 token: '', useBinaryFormat,
                 retry: { maxAttempts: 3, initialBackoffMs: 0, maxBackoffMs: 0 },
             });
-            const session = new SerializableReadSession(client);
+            const session = new ReadSession(client);
             const params = create(ReduceParamsSchema, { reducers: [{ op: RangeReduceOp.COUNT_ALL }] });
             const stream = kind === 'client'
                 ? client.query.reduce({ start, end, params })
@@ -167,7 +167,7 @@ describe.each([true, false])('Reduce responses with binary format %s', (useBinar
             }
             expect(fetch).toHaveBeenCalledTimes(1);
             expect(signal?.aborted).toBe(true);
-            if (kind === 'session') expect(session.fixedSequence()).toBeUndefined();
+            if (kind === 'session') expect(session.minSequenceNumber()).toBeUndefined();
         } finally {
             fetch.mockRestore();
         }
@@ -178,13 +178,13 @@ describe.each([true, false])('Reduce responses with binary format %s', (useBinar
         const fetch = jest.spyOn(globalThis, 'fetch').mockImplementation(async () =>
             response([detail], undefined, useBinaryFormat));
         try {
-            const session = new SerializableReadSession(new Client('http://reduce.test', { token: '', useBinaryFormat }));
+            const session = new ReadSession(new Client('http://reduce.test', { token: '', useBinaryFormat }));
             const params = create(ReduceParamsSchema, {
                 groupBy: [{ expr: { case: 'literal', value: { value: { case: 'uint64Value', value: 1n } } } }],
             });
             const stream = session.reduce(start, end, params)[Symbol.asyncIterator]();
             expect((await stream.next()).value).toEqual(detail);
-            expect(session.fixedSequence()).toBe(7n);
+            expect(session.minSequenceNumber()).toBe(7n);
             expect((await stream.next()).done).toBe(true);
             expect(fetch).toHaveBeenCalledTimes(1);
         } finally {
@@ -255,7 +255,7 @@ test.each(['store', 'session'])('returning a %s reduce iterator aborts the nativ
     });
     try {
         const client = new Client('http://reduce.test', { token: '', useBinaryFormat: true });
-        const store = kind === 'store' ? new StoreClient(client) : new SerializableReadSession(client);
+        const store = kind === 'store' ? new StoreClient(client) : new ReadSession(client);
         const stream = store.reduce(start, end, params)[Symbol.asyncIterator]();
         expect((await stream.next()).value).toEqual(frame(1n));
         expect(signal?.aborted).toBe(false);
@@ -288,20 +288,20 @@ test('reduce yields frames on demand and returning cancels the underlying stream
     expect(secondPolled).toBe(false);
 });
 
-test('reduce observes metadata on frame consumption and sends the fixed session floor', async () => {
+test('reduce observes metadata on frame consumption and sends the monotonic session floor', async () => {
     const floors: Array<bigint | undefined> = [];
     const client = clientWithReduce(async function* (request) {
         floors.push((request as ReduceRequest).minSequenceNumber);
         yield frame(1n);
         yield frame(2n, 7n);
     });
-    const session = new SerializableReadSession(client);
+    const session = new ReadSession(client);
     const stream = session.reduce(start, end, params)[Symbol.asyncIterator]();
-    expect(session.fixedSequence()).toBeUndefined();
+    expect(session.minSequenceNumber()).toBeUndefined();
     await stream.next();
-    expect(session.fixedSequence()).toBe(7n);
+    expect(session.minSequenceNumber()).toBe(7n);
     await stream.next();
-    expect(session.fixedSequence()).toBe(7n);
+    expect(session.minSequenceNumber()).toBe(7n);
     expect((await stream.next()).done).toBe(true);
     const second = session.reduce(start, end, params)[Symbol.asyncIterator]();
     await second.next();

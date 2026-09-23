@@ -167,7 +167,7 @@ cargo run -p exoware-sql --example versioned_kv    # versioned composite PK demo
 
 ## Scan consistency
 
-Store reads within one `Query` RPC share a `SerializableReadSession`.
+Store reads within one `Query` RPC share a `ReadSession`.
 The request can supply an initial minimum sequence. Each observed response
 advances the floor for subsequent reads, including pagination, index lookups,
 and aggregate reductions. This preserves monotonic freshness across query

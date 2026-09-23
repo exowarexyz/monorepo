@@ -10,7 +10,7 @@ use commonware_storage::{
         operation::Key as QmdbKey,
     },
 };
-use exoware_sdk::{PrefixedStoreClient, SerializableReadSession};
+use exoware_sdk::{PrefixedStoreClient, ReadSession};
 
 use crate::auth::{
     auth_inactive_peaks, compute_auth_root, load_auth_operation_at,
@@ -161,21 +161,24 @@ where
         max_locations: u32,
     ) -> Result<OperationRangeCheckpoint<H::Digest, F>, QmdbError> {
         let (proof, _) = self
-            .operation_range_checkpoint_with_read_floor(0, watermark, start_location, max_locations)
+            .operation_range_checkpoint_with_read_floor(
+                None,
+                watermark,
+                start_location,
+                max_locations,
+            )
             .await?;
         Ok(proof)
     }
 
     pub(crate) async fn operation_range_checkpoint_with_read_floor(
         &self,
-        read_floor_sequence: u64,
+        read_floor_sequence: Option<u64>,
         watermark: Location<F>,
         start_location: Location<F>,
         max_locations: u32,
     ) -> Result<(OperationRangeCheckpoint<H::Digest, F>, u64), QmdbError> {
-        let session = self
-            .client
-            .create_session_with_sequence(read_floor_sequence);
+        let session = ReadSession::monotonic(self.client.clone(), read_floor_sequence);
         require_published_auth_watermark(&session, watermark).await?;
         let end = crate::proof::resolve_range_bounds(watermark, start_location, max_locations)?;
         let storage = KvMerkleStorage::<F, H::Digest> {
@@ -203,13 +206,11 @@ where
 
     pub(crate) async fn batch_multi_proof_with_read_floor(
         &self,
-        read_floor_sequence: u64,
+        read_floor_sequence: Option<u64>,
         watermark: Location<F>,
         operations: Vec<(Location<F>, Vec<u8>)>,
     ) -> Result<RawBatchMultiProof<H::Digest, F>, QmdbError> {
-        let session = self
-            .client
-            .create_session_with_sequence(read_floor_sequence);
+        let session = ReadSession::monotonic(self.client.clone(), read_floor_sequence);
         require_published_auth_watermark(&session, watermark).await?;
         let storage = KvMerkleStorage::<F, H::Digest> {
             session: &session,
@@ -230,7 +231,7 @@ where
 
     async fn inactive_peaks_at(
         &self,
-        session: &SerializableReadSession,
+        session: &ReadSession,
         watermark: Location<F>,
     ) -> Result<usize, QmdbError> {
         let operation = load_auth_operation_at::<F, immutable::Operation<F, K, E>>(

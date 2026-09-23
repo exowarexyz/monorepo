@@ -13,7 +13,7 @@ use commonware_storage::qmdb::{
     operation::{Key as QmdbKey, Operation as _},
 };
 use exoware_sdk::keys::Key;
-use exoware_sdk::{PrefixedStoreClient, RangeMode, SerializableReadSession};
+use exoware_sdk::{PrefixedStoreClient, RangeMode, ReadSession};
 
 use crate::codec::{
     chunk_index_for_location, clear_below_floor, decode_current_boundary_metadata,
@@ -72,7 +72,7 @@ where
 {
     async fn resolve_latest_value(
         &self,
-        session: &SerializableReadSession,
+        session: &ReadSession,
         location: Location<F>,
         requested_key: &[u8],
     ) -> Result<VersionedValue<K, V, F>, QmdbError> {
@@ -190,21 +190,24 @@ where
         max_locations: u32,
     ) -> Result<OperationRangeCheckpoint<H::Digest, F>, QmdbError> {
         let (proof, _) = self
-            .operation_range_checkpoint_with_read_floor(0, watermark, start_location, max_locations)
+            .operation_range_checkpoint_with_read_floor(
+                None,
+                watermark,
+                start_location,
+                max_locations,
+            )
             .await?;
         Ok(proof)
     }
 
     pub(crate) async fn operation_range_checkpoint_with_read_floor(
         &self,
-        read_floor_sequence: u64,
+        read_floor_sequence: Option<u64>,
         watermark: Location<F>,
         start_location: Location<F>,
         max_locations: u32,
     ) -> Result<(OperationRangeCheckpoint<H::Digest, F>, u64), QmdbError> {
-        let session = self
-            .client
-            .create_session_with_sequence(read_floor_sequence);
+        let session = ReadSession::monotonic(self.client.clone(), read_floor_sequence);
         self.core()
             .require_published_watermark(&session, watermark)
             .await?;
@@ -240,13 +243,11 @@ where
 
     pub(crate) async fn batch_multi_proof_with_read_floor(
         &self,
-        read_floor_sequence: u64,
+        read_floor_sequence: Option<u64>,
         watermark: Location<F>,
         operations: Vec<(Location<F>, Vec<u8>)>,
     ) -> Result<RawBatchMultiProof<H::Digest, F>, QmdbError> {
-        let session = self
-            .client
-            .create_session_with_sequence(read_floor_sequence);
+        let session = ReadSession::monotonic(self.client.clone(), read_floor_sequence);
         self.core()
             .require_published_watermark(&session, watermark)
             .await?;
@@ -303,7 +304,7 @@ where
 
     async fn current_operation_range_proof_raw_in_session<const N: usize>(
         &self,
-        session: &SerializableReadSession,
+        session: &ReadSession,
         watermark: Location<F>,
         start_location: Location<F>,
         max_locations: u32,
@@ -366,7 +367,7 @@ where
 
     async fn key_value_proof_raw_in_session<const N: usize, Q: AsRef<[u8]>>(
         &self,
-        session: &SerializableReadSession,
+        session: &ReadSession,
         watermark: Location<F>,
         key: Q,
     ) -> Result<RawKeyValueProof<H::Digest, unordered::Operation<F, K, E>, N, F>, QmdbError> {
@@ -490,7 +491,7 @@ where
 
     async fn load_current_boundary_metadata(
         &self,
-        session: &SerializableReadSession,
+        session: &ReadSession,
         location: Location<F>,
     ) -> Result<CurrentBoundaryMetadata<H::Digest>, QmdbError> {
         let Some(bytes) = session.get(&encode_current_meta_key(location)).await? else {
@@ -506,7 +507,7 @@ where
 
     async fn load_current_boundary_root(
         &self,
-        session: &SerializableReadSession,
+        session: &ReadSession,
         location: Location<F>,
     ) -> Result<H::Digest, QmdbError> {
         Ok(self
@@ -517,7 +518,7 @@ where
 
     async fn load_ops_root_witness(
         &self,
-        session: &SerializableReadSession,
+        session: &ReadSession,
         location: Location<F>,
     ) -> Result<Option<OpsRootWitness<F, H::Digest>>, QmdbError> {
         let Some(bytes) = session.get(&encode_ops_root_witness_key(location)).await? else {
@@ -534,7 +535,7 @@ where
 
     async fn proof_bitmap<const N: usize>(
         &self,
-        session: &SerializableReadSession,
+        session: &ReadSession,
         watermark: Location<F>,
         inactivity_floor: Location<F>,
         location: Option<Location<F>>,
@@ -550,7 +551,7 @@ where
 
     async fn build_current_operation_proof<const N: usize>(
         &self,
-        session: &SerializableReadSession,
+        session: &ReadSession,
         watermark: Location<F>,
         location: Location<F>,
     ) -> Result<OperationProof<F, H::Digest, N>, QmdbError> {
@@ -584,7 +585,7 @@ where
 
     async fn build_current_range_proof<const N: usize>(
         &self,
-        session: &SerializableReadSession,
+        session: &ReadSession,
         watermark: Location<F>,
         start_location: Location<F>,
         end_location_exclusive: Location<F>,
@@ -613,7 +614,7 @@ where
 
     async fn load_inactivity_floor_at(
         &self,
-        session: &SerializableReadSession,
+        session: &ReadSession,
         watermark: Location<F>,
     ) -> Result<Location<F>, QmdbError> {
         let operation = self.load_operation_at(session, watermark).await?;
@@ -627,7 +628,7 @@ where
 
     async fn load_ops_inactivity_floor_at(
         &self,
-        session: &SerializableReadSession,
+        session: &ReadSession,
         watermark: Location<F>,
     ) -> Result<Location<F>, QmdbError> {
         let mut location = watermark;
@@ -648,7 +649,7 @@ where
 
     async fn compute_ops_root(
         &self,
-        session: &SerializableReadSession,
+        session: &ReadSession,
         watermark: Location<F>,
     ) -> Result<H::Digest, QmdbError> {
         let inactive_peaks = self.ops_inactive_peaks_at(session, watermark).await?;
@@ -659,7 +660,7 @@ where
 
     async fn ops_inactive_peaks_at(
         &self,
-        session: &SerializableReadSession,
+        session: &ReadSession,
         watermark: Location<F>,
     ) -> Result<usize, QmdbError> {
         let inactivity_floor = self
@@ -673,7 +674,7 @@ where
 
     async fn load_bitmap_chunk_with_floor<const N: usize>(
         &self,
-        session: &SerializableReadSession,
+        session: &ReadSession,
         watermark: Location<F>,
         inactivity_floor: Location<F>,
         chunk_index: u64,
@@ -699,7 +700,7 @@ where
 
     async fn load_bitmap_chunks<const N: usize>(
         &self,
-        session: &SerializableReadSession,
+        session: &ReadSession,
         watermark: Location<F>,
         start_location: Location<F>,
         end_location_exclusive: Location<F>,
@@ -715,7 +716,7 @@ where
 
     async fn load_operation_at(
         &self,
-        session: &SerializableReadSession,
+        session: &ReadSession,
         location: Location<F>,
     ) -> Result<unordered::Operation<F, K, E>, QmdbError> {
         let bytes = self
@@ -731,7 +732,7 @@ where
 
     async fn load_operation_range(
         &self,
-        session: &SerializableReadSession,
+        session: &ReadSession,
         start_location: Location<F>,
         end_location_exclusive: Location<F>,
     ) -> Result<Vec<unordered::Operation<F, K, E>>, QmdbError> {
@@ -756,7 +757,7 @@ where
 
     async fn load_latest_update_row(
         &self,
-        session: &SerializableReadSession,
+        session: &ReadSession,
         watermark: Location<F>,
         key: &[u8],
     ) -> Result<Option<(Key, Vec<u8>)>, QmdbError> {
