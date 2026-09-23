@@ -6,10 +6,11 @@ This package exposes a TypeScript client for `sql.v1.Service` over Connect-Web.
 It reuses `@exowarexyz/sdk` transport setup and owns its generated `sql.v1`
 protobuf bindings.
 
-Queries return `DecodedQueryResult` objects containing the observed Store
-`sequenceNumber` and a native Apache Arrow `table`. Queries without Store reads
-return the requested floor, or `0n` if none was supplied. Subscription frames contain
-the same fields. Arrow IPC preserves the result schema, field order,
+Queries return `DecodedQueryResult` objects containing a native Apache Arrow
+`table` and the highest Store `sequenceNumber` observed by the query. The
+sequence number is `undefined` when the query does not read Store; a requested
+minimum is not an observation. Subscription frames always contain a sequence
+number. Arrow IPC preserves the result schema, field order,
 nulls, nested values, decimal scale, and timestamp units/timezones. The client uses
 binary Connect encoding by default.
 

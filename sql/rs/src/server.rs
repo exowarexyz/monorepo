@@ -391,11 +391,7 @@ impl Service for SqlConnect {
                 .map_err(|error| datafusion_error_to_connect(error.into()))?
                 .into();
 
-            // Queries that skip Store reads preserve the requested floor.
-            let sequence_number = read_session
-                .evaluated_sequence()
-                .or(min_sequence_number)
-                .unwrap_or_default();
+            let sequence_number = read_session.evaluated_sequence();
             connectrpc::Response::ok(QueryResponse {
                 results,
                 sequence_number,
@@ -647,6 +643,8 @@ fn client_error_to_connect(err: &exoware_sdk::ClientError) -> ConnectError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::TableColumnConfig;
+    use buffa::Message;
     use datafusion::arrow::array::{
         Array, ArrayRef, BinaryViewArray, Date32Array, Date64Array, Decimal256Array,
         FixedSizeBinaryBuilder, Int64Array, LargeListArray, StringArray, StringViewArray,
@@ -663,6 +661,49 @@ mod tests {
     use std::sync::Mutex;
 
     use futures::{FutureExt, StreamExt};
+
+    #[derive(Clone)]
+    struct ObservedRangeTransport {
+        requests: Arc<AtomicUsize>,
+        sequence_number: u64,
+    }
+
+    impl connectrpc::client::ClientTransport for ObservedRangeTransport {
+        type ResponseBody = axum::body::Body;
+        type Error = ConnectError;
+
+        fn send(
+            &self,
+            request: axum::http::Request<connectrpc::client::ClientBody>,
+        ) -> connectrpc::client::BoxFuture<
+            'static,
+            Result<axum::http::Response<Self::ResponseBody>, Self::Error>,
+        > {
+            let transport = self.clone();
+            Box::pin(async move {
+                assert_eq!(request.uri().path(), "/store.query.v1.Service/Range");
+                transport.requests.fetch_add(1, Ordering::SeqCst);
+                let response = exoware_sdk::query::RangeFrame {
+                    detail: Some(exoware_sdk::query::Detail {
+                        sequence_number: transport.sequence_number,
+                        ..Default::default()
+                    })
+                    .into(),
+                    ..Default::default()
+                };
+                let mut body = connectrpc::envelope::Envelope::data(response.encode_to_bytes())
+                    .encode()
+                    .to_vec();
+                body.extend_from_slice(
+                    &connectrpc::envelope::Envelope::end_stream(Bytes::from_static(b"{}")).encode(),
+                );
+                Ok(axum::http::Response::builder()
+                    .header("content-type", "application/connect+proto")
+                    .body(axum::body::Body::from(body))
+                    .unwrap())
+            })
+        }
+    }
 
     fn check_ipc_fixture(name: &str, ipc: &[u8]) {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -739,6 +780,69 @@ mod tests {
             HashMap::from([("source".to_string(), "native IPC fixture".to_string())]),
         );
         batch.with_schema(Arc::new(schema)).unwrap()
+    }
+
+    #[tokio::test]
+    async fn query_response_reports_only_observed_store_sequences() {
+        use crate::proto::sql::v1::ServiceClient;
+        use connectrpc::client::{ClientConfig, HttpClient};
+
+        for (observed_sequence, min_sequence_number) in [(0, Some(0)), (73, Some(61))] {
+            let transport = ObservedRangeTransport {
+                requests: Arc::new(AtomicUsize::new(0)),
+                sequence_number: observed_sequence,
+            };
+            let store = StoreClient::builder()
+                .url("http://observed-store.test")
+                .client_transport(transport.clone())
+                .retry_config(exoware_sdk::RetryConfig::disabled())
+                .build()
+                .unwrap();
+            let schema = KvSchema::new(PrefixedStoreClient::empty(store))
+                .table(
+                    "observed",
+                    vec![TableColumnConfig::new("id", DataType::Int64, false)],
+                    vec!["id".to_string()],
+                    vec![],
+                )
+                .unwrap();
+            let server = Arc::new(SqlServer::new(schema).unwrap());
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let app = axum::Router::new().fallback_service(sql_connect_stack(server));
+            let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+            let client = ServiceClient::new(
+                HttpClient::plaintext(),
+                ClientConfig::new(format!("http://{address}").parse().unwrap()),
+            );
+
+            for required_sequence in [None, Some(0), Some(u64::MAX)] {
+                let response = client
+                    .query(QueryRequest {
+                        sql: "SELECT 1".into(),
+                        min_sequence_number: required_sequence,
+                        ..Default::default()
+                    })
+                    .await
+                    .unwrap()
+                    .into_owned();
+                assert_eq!(response.sequence_number, None, "{required_sequence:?}");
+            }
+            assert_eq!(transport.requests.load(Ordering::SeqCst), 0);
+
+            let response = client
+                .query(QueryRequest {
+                    sql: "SELECT id FROM observed".into(),
+                    min_sequence_number,
+                    ..Default::default()
+                })
+                .await
+                .unwrap()
+                .into_owned();
+            assert_eq!(response.sequence_number, Some(observed_sequence));
+            assert_eq!(transport.requests.load(Ordering::SeqCst), 1);
+            task.abort();
+        }
     }
 
     #[tokio::test]

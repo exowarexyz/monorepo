@@ -11,7 +11,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file sql/v1/query.proto.
  */
 export const file_sql_v1_query: GenFile = /*@__PURE__*/
-  fileDesc("ChJzcWwvdjEvcXVlcnkucHJvdG8SBnNxbC52MSJiCgxRdWVyeVJlcXVlc3QSGAoDc3FsGAEgASgJQgu6SAhyBhABGP//AxIgChNtaW5fc2VxdWVuY2VfbnVtYmVyGAIgASgESACIAQFCFgoUX21pbl9zZXF1ZW5jZV9udW1iZXIiOQoNUXVlcnlSZXNwb25zZRIPCgdyZXN1bHRzGAEgASgMEhcKD3NlcXVlbmNlX251bWJlchgDIAEoBGIGcHJvdG8z", [file_buf_validate_validate]);
+  fileDesc("ChJzcWwvdjEvcXVlcnkucHJvdG8SBnNxbC52MSJiCgxRdWVyeVJlcXVlc3QSGAoDc3FsGAEgASgJQgu6SAhyBhABGP//AxIgChNtaW5fc2VxdWVuY2VfbnVtYmVyGAIgASgESACIAQFCFgoUX21pbl9zZXF1ZW5jZV9udW1iZXIiUgoNUXVlcnlSZXNwb25zZRIPCgdyZXN1bHRzGAEgASgMEhwKD3NlcXVlbmNlX251bWJlchgDIAEoBEgAiAEBQhIKEF9zZXF1ZW5jZV9udW1iZXJiBnByb3RvMw", [file_buf_validate_validate]);
 
 /**
  * Ad-hoc SQL statement.
@@ -54,12 +54,12 @@ export type QueryResponse = Message<"sql.v1.QueryResponse"> & {
   results: Uint8Array;
 
   /**
-   * Highest Store sequence observed. Queries that skip Store reads return
-   * the requested floor.
+   * Highest Store sequence observed by this query. Absent when the query does
+   * not read Store.
    *
-   * @generated from field: uint64 sequence_number = 3;
+   * @generated from field: optional uint64 sequence_number = 3;
    */
-  sequenceNumber: bigint;
+  sequenceNumber?: bigint;
 };
 
 /**

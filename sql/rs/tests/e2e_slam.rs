@@ -367,7 +367,7 @@ async fn connect_query_enforces_sequence_floor_and_returns_evaluated_sequence() 
                 .expect("query")
                 .into_view()
                 .to_owned_message();
-            assert!(response.sequence_number >= write_sequence, "{sql}");
+            assert!(response.sequence_number.unwrap() >= write_sequence, "{sql}");
             assert_eq!(result_row_count(&response.results), 1, "{sql}");
         }
 
@@ -407,7 +407,7 @@ async fn connect_query_enforces_sequence_floor_and_returns_evaluated_sequence() 
         .expect("empty query")
         .into_view()
         .to_owned_message();
-    assert!(response.sequence_number >= write_sequence);
+    assert!(response.sequence_number.unwrap() >= write_sequence);
     assert_eq!(result_row_count(&response.results), 0);
 
     for sql in ["SELECT 1", "SELECT value FROM items WHERE false"] {
@@ -421,7 +421,7 @@ async fn connect_query_enforces_sequence_floor_and_returns_evaluated_sequence() 
             .expect("query without Store reads")
             .into_view()
             .to_owned_message();
-        assert_eq!(response.sequence_number, u64::MAX, "{sql}");
+        assert_eq!(response.sequence_number, None, "{sql}");
     }
 
     handle.abort();
@@ -513,7 +513,7 @@ async fn connect_query_preserves_configured_tables_and_views() {
         .expect("query configured table")
         .into_view()
         .to_owned_message();
-    assert!(response.sequence_number >= write_sequence);
+    assert!(response.sequence_number.unwrap() >= write_sequence);
     assert_eq!(result_row_count(&response.results), 1);
 
     client
@@ -554,7 +554,7 @@ async fn connect_query_preserves_configured_tables_and_views() {
             ids.extend(column.iter());
         }
         assert_eq!(ids, vec![Some(2)], "{sql}");
-        assert!(response.sequence_number >= other_sequence);
+        assert!(response.sequence_number.unwrap() >= other_sequence);
     }
 
     for sql in [
@@ -596,7 +596,7 @@ async fn connect_query_preserves_configured_tables_and_views() {
         .expect("query configured view")
         .into_view()
         .to_owned_message();
-    assert!(response.sequence_number >= write_sequence);
+    assert!(response.sequence_number.unwrap() >= write_sequence);
     assert_eq!(result_row_count(&response.results), 1);
 
     let response = client
@@ -609,7 +609,7 @@ async fn connect_query_preserves_configured_tables_and_views() {
         .expect("query programmatic view")
         .into_view()
         .to_owned_message();
-    assert!(response.sequence_number >= write_sequence);
+    assert!(response.sequence_number.unwrap() >= write_sequence);
     assert_eq!(result_row_count(&response.results), 1);
 
     let error = client

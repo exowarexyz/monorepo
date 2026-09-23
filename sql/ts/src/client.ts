@@ -24,7 +24,7 @@ import {
 export type SqlClientOptions = SdkClientOptions;
 
 export interface DecodedQueryResult {
-  sequenceNumber: bigint;
+  sequenceNumber: bigint | undefined;
   table: Table;
 }
 
@@ -71,7 +71,14 @@ function decodeTableStream(bytes: Uint8Array): Table {
   return new Table(schema, batches);
 }
 
-function decodeResult(response: SqlQueryResponse | SqlSubscribeResponse): DecodedQueryResult {
+function decodeQueryResult(response: SqlQueryResponse): DecodedQueryResult {
+  return {
+    sequenceNumber: response.sequenceNumber,
+    table: decodeTableStream(response.results),
+  };
+}
+
+function decodeSubscribeFrame(response: SqlSubscribeResponse): DecodedSubscribeFrame {
   return {
     sequenceNumber: response.sequenceNumber,
     table: decodeTableStream(response.results),
@@ -141,7 +148,7 @@ export class SqlClient {
       }),
       options,
     );
-    return decodeResult(response);
+    return decodeQueryResult(response);
   }
 
   async tables(options?: CallOptions): Promise<DecodedTable[]> {
@@ -177,7 +184,7 @@ export class SqlClient {
       options,
     );
     for await (const frame of stream) {
-      yield decodeResult(frame);
+      yield decodeSubscribeFrame(frame);
     }
   }
 }
