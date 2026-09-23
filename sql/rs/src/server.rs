@@ -75,9 +75,7 @@ pub fn query_context_with_min_sequence(
         None => store.create_session(),
     };
 
-    let mut state = ctx.state();
-    state.config_mut().set_extension(Arc::new(read_session));
-    SessionContext::new_with_state(state)
+    crate::query_context_with_session(ctx, read_session)
 }
 
 /// One registered table's streaming-decode state.
