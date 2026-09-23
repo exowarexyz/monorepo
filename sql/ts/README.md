@@ -14,6 +14,19 @@ number. Arrow IPC preserves the result schema, field order,
 nulls, nested values, decimal scale, and timestamp units/timezones. The client uses
 binary Connect encoding by default.
 
+Clients are monotonic by default: each query starts with at least the highest
+Store sequence observed by earlier completed RPCs. Concurrent queries retain
+their starting minimums. `SqlClient.monotonic(url, initialFloor, options)` seeds
+that minimum; `SqlClient.fixed(url, floor, options)` keeps it fixed across queries.
+An absent floor imposes no requirement, while `0n` is an explicit minimum.
+Neither policy pins a snapshot. The server uses monotonic reads within each query.
+
+`minSequenceNumber()` reports the minimum for the next query, and
+`evaluatedSequence()` reports the highest observation. An explicit minimum passed
+to `query` can strengthen that request without changing the configured floor.
+Queries without Store reads leave observations unchanged. Subscription frames
+do not update query observations.
+
 *Duplicate column names retain their positional types and values. Arrow JS 21.2
 can reject `Table.slice` and `Table.selectAt` when duplicate names have different
 types ([upstream issue](https://github.com/apache/arrow-js/issues/288)). Use unique
@@ -27,7 +40,7 @@ const result = await client.query('SELECT region, COUNT(*) FROM orders GROUP BY 
 console.log(result.sequenceNumber, result.table.schema.fields, result.table.numRows);
 console.log(result.table.getChildAt(0)?.toArray());
 
-const next = await client.query('SELECT * FROM orders', result.sequenceNumber, {
+const next = await client.query('SELECT * FROM orders', undefined, {
   timeoutMs: 5000,
 });
 console.log(next.sequenceNumber, next.table.numRows);

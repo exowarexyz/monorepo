@@ -23,6 +23,21 @@ import {
 } from './generated/proto/sql/v1/stream_pb.js';
 export type SqlClientOptions = SdkClientOptions;
 
+function minimumSequence(value?: bigint): bigint | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== 'bigint') throw new TypeError('minimum sequence number must be a bigint');
+  if (value < 0n || value > (1n << 64n) - 1n) {
+    throw new RangeError('minimum sequence number must fit in u64');
+  }
+  return value;
+}
+
+function maxSequence(left?: bigint, right?: bigint): bigint | undefined {
+  if (left === undefined) return right;
+  if (right === undefined) return left;
+  return left > right ? left : right;
+}
+
 export interface DecodedQueryResult {
   sequenceNumber: bigint | undefined;
   table: Table;
@@ -120,34 +135,75 @@ function decodeTable(table: SqlTable): DecodedTable {
 }
 
 /**
- * Thin wrapper around the `sql.v1.Service` Connect client.
+ * SQL client with a fixed or monotonic minimum Store sequence across queries.
  *
  * `subscribe` evaluates a compiled scalar predicate on every ingest batch
  * that touches the named table and yields one frame per batch of matching rows.
  * `query` runs an arbitrary SQL statement against the server's session and
- * returns the observed Store sequence and a native Arrow Table with its result
- * schema and column buffers.
+ * returns the optional observed Store sequence and a native Arrow Table.
+ * Subscriptions retain their own resume cursor and do not advance query observations.
  */
 export class SqlClient {
   private readonly rpc: ConnectClient<typeof SqlService>;
+  private policy: 'fixed' | 'monotonic' = 'monotonic';
+  private configuredFloor: bigint | undefined;
+  private observedSequence: bigint | undefined;
 
+  /** Create a monotonic client with no initial minimum. */
   constructor(baseUrl: string, options: SqlClientOptions = {}) {
     const transport = createTransport(baseUrl, { useBinaryFormat: true, ...options });
     this.rpc = createClient(SqlService, transport);
   }
 
+  /** Create a client whose minimum advances to its highest observed sequence. */
+  static monotonic(
+    baseUrl: string,
+    initialFloor?: bigint,
+    options: SqlClientOptions = {},
+  ): SqlClient {
+    const floor = minimumSequence(initialFloor);
+    const client = new SqlClient(baseUrl, options);
+    client.configuredFloor = floor;
+    return client;
+  }
+
+  /** Create a client whose configured minimum stays fixed across queries. */
+  static fixed(
+    baseUrl: string,
+    floor?: bigint,
+    options: SqlClientOptions = {},
+  ): SqlClient {
+    const client = SqlClient.monotonic(baseUrl, floor, options);
+    client.policy = 'fixed';
+    return client;
+  }
+
+  minSequenceNumber(): bigint | undefined {
+    return this.policy === 'fixed'
+      ? this.configuredFloor
+      : maxSequence(this.configuredFloor, this.observedSequence);
+  }
+
+  evaluatedSequence(): bigint | undefined {
+    return this.observedSequence;
+  }
+
+  /** An explicit minimum can strengthen this query without changing the configured floor. */
   async query(
     sql: string,
     minSequenceNumber?: bigint,
     options?: CallOptions,
   ): Promise<DecodedQueryResult> {
+    const requested = minimumSequence(minSequenceNumber);
+    const floor = maxSequence(this.minSequenceNumber(), requested);
     const response = await this.rpc.query(
       create(SqlQueryRequestSchema, {
         sql,
-        ...(minSequenceNumber !== undefined ? { minSequenceNumber } : {}),
+        ...(floor !== undefined ? { minSequenceNumber: floor } : {}),
       }),
       options,
     );
+    this.observedSequence = maxSequence(this.observedSequence, response.sequenceNumber);
     return decodeQueryResult(response);
   }
 
