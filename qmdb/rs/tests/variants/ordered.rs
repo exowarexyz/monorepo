@@ -305,7 +305,8 @@ async fn verify_snapshots<F, K, V, E>(
         );
         let range = AuthenticatedOperationRange {
             start_location: packet.start_location,
-            proof: &packet.proof,
+            end_location: packet.proof.leaves,
+            inactive_peaks: packet.proof.inactive_peaks,
             pinned_nodes: &packet.pinned_nodes,
             encoded_operations: &packet.encoded_operations,
         };

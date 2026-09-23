@@ -40,9 +40,9 @@ by the client.
 ## Authenticated upload contract
 
 `AuthenticatedOperationRange` describes the half-open interval
-`[start_location, proof.leaves)` using:
+`[start_location, end_location)` using:
 
-- a Commonware operation range proof
+- the exclusive end location and canonical inactive peak count
 - pinned prefix nodes in `Family::nodes_to_pin(start_location)` order
 - the exact canonical encoded operations in location order
 
@@ -53,9 +53,12 @@ the range and pins, checks canonical operation encodings and commit floors, and
 prepares operation, keyed-index, and Merkle node rows, including a presence
 marker for the final location. Preparation is a pure function of those inputs.
 
-The packet must contain every operation in its declared interval and end at the
-proof's leaf count. Its final operation must be a commit whose inactivity floor
-matches the proof's canonical inactive-peak count. Earlier commits are allowed,
+Preparation reconstructs the operation-log root from the pins and encoded operations
+before decoding operations.
+
+The packet must contain every operation in its declared interval. Its final
+operation must be a commit whose inactivity floor determines the canonical
+inactive-peak count. Earlier commits are allowed,
 so the same API accepts bootstrap packets, complete prefixes, incremental
 suffixes, and overlapping ranges. A packet beginning at zero has no pinned
 prefix nodes.
@@ -83,7 +86,8 @@ let client = PrefixedStoreClient::empty(StoreClient::new(store_url));
 
 let range = AuthenticatedOperationRange {
     start_location,
-    proof: &proof,
+    end_location,
+    inactive_peaks,
     pinned_nodes: &pinned_nodes,
     encoded_operations: &encoded_operations,
 };
@@ -107,6 +111,28 @@ publication.commit(client.client()).await?;
 
 The expected root is a trust input, not a root accepted merely because it was
 included in the proof response.
+
+`stage_authenticated_range` always includes the supplied prefix pins. To avoid
+rewriting selected pins, use `stage_authenticated_range_with_existing_nodes`
+with a `&BTreeSet<Position<F>>` of exact positions. Only supplied pins at those
+positions are omitted. Reconstructed nodes, including delayed MMB parents, are
+always staged. Operation and index rows, presence markers, and attached current
+boundary rows are also always staged. Preparation still authenticates every
+supplied pin.
+
+The caller must guarantee that omitted nodes have the authenticated digest in
+the same namespace and operation history, become durable before a watermark
+covering the range is published, and remain retained for serving proofs. The
+set can describe already durable nodes or nodes promised by pending predecessor
+uploads. For pending uploads, publication must wait for every required data
+write in the contiguous prefix, even when uploads finish out of order. Tracking
+these dependencies through failures, retries, and restarts belongs to the
+caller. The library does not infer them from operation bounds or inspect Store.
+
+Use the default staging function for the first nonzero bootstrap or restart
+packet when prior pins are not guaranteed to be available. Later packets can
+omit exactly the pins covered by the caller's retention and publication
+guarantees. An empty set preserves the default behavior.
 
 ## Durable queue and publication
 

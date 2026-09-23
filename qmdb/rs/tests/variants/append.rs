@@ -385,7 +385,8 @@ async fn publish_source_batch<F, Op>(
         .collect::<Vec<_>>();
     let range = AuthenticatedOperationRange {
         start_location: batch.start,
-        proof: &batch.proof,
+        end_location: batch.proof.leaves,
+        inactive_peaks: batch.proof.inactive_peaks,
         pinned_nodes: &batch.pinned_nodes,
         encoded_operations: &encoded_operations,
     };
