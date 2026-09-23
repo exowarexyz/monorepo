@@ -37,9 +37,12 @@ mod connect;
 mod connect_client;
 mod core;
 pub mod error;
+mod operation_range;
+mod prefetch;
 pub mod proof;
 pub mod proto;
 pub mod prune;
+mod read_cache;
 mod request;
 pub(crate) mod storage;
 

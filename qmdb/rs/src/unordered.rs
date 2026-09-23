@@ -24,10 +24,12 @@ use crate::codec::{
 use crate::connect::OperationKv;
 use crate::core;
 use crate::error::{error_key, QmdbError};
+use crate::operation_range::load_operation_range_checkpoint;
 use crate::proof::{
     CurrentOperationRangeProofResult, OperationRangeCheckpoint, RawBatchMultiProof,
     RawKeyValueProof, VerifiedKeyValue, VerifiedOperationRange,
 };
+use crate::read_cache::ReadCache;
 use crate::storage::{KvCurrentStorage, KvMerkleStorage, ProofBitmap};
 use crate::VersionedValue;
 
@@ -43,6 +45,7 @@ pub struct UnorderedClient<
     store: PrefixedStoreClient,
     publication: Arc<core::PublicationCache<F>>,
     op_cfg: <unordered::Operation<F, K, E> as commonware_codec::Read>::Cfg,
+    read_cache: Arc<ReadCache<F, H::Digest>>,
     _marker: PhantomData<(F, H, K, E)>,
 }
 
@@ -61,6 +64,7 @@ where
             store: self.store.clone(),
             publication: self.publication.clone(),
             op_cfg: self.op_cfg.clone(),
+            read_cache: self.read_cache.clone(),
             _marker: PhantomData,
         }
     }
@@ -137,6 +141,7 @@ where
             store,
             publication: Arc::new(core::PublicationCache::default()),
             op_cfg,
+            read_cache: Arc::new(ReadCache::new()),
             _marker: PhantomData,
         }
     }
@@ -231,27 +236,40 @@ where
         let session = ReadSession::fixed(self.store.clone(), Some(watermark.sequence_number));
         let watermark = watermark.location;
         let end = crate::proof::resolve_range_bounds(watermark, start_location, max_locations)?;
-        let storage = KvMerkleStorage::<F, H::Digest> {
-            session: &session,
-            size: merkle_size_for_watermark(watermark)?,
-            _marker: PhantomData,
-        };
-        let inactive_peaks =
-            ops_inactive_peaks_at::<F, K, V, E>(&self.op_cfg, &session, watermark).await?;
-        let root = core::compute_ops_root::<F, H>(&session, watermark, inactive_peaks).await?;
-        let encoded_operations =
-            core::load_operation_bytes_range(&session, start_location, end).await?;
-        let mut checkpoint = crate::proof::build_operation_range_checkpoint::<F, H, _>(
-            &storage,
+        let checkpoint = load_operation_range_checkpoint::<F, H, _>(
+            &session,
+            &self.read_cache,
             watermark,
             start_location,
             end,
-            root,
-            inactive_peaks,
-            encoded_operations,
+            true,
+            |bytes| async {
+                let mut location = watermark;
+                let mut operation =
+                    unordered::Operation::<F, K, E>::decode_cfg(bytes, &self.op_cfg).map_err(
+                        |error| {
+                            QmdbError::CorruptData(format!(
+                                "operation at {watermark} decode error: {error}"
+                            ))
+                        },
+                    )?;
+                let floor = loop {
+                    if let unordered::Operation::CommitFloor(_, floor) = operation {
+                        break floor;
+                    }
+                    if *location == 0 {
+                        return Err(QmdbError::CorruptData(format!(
+                            "no CommitFloor found at or before watermark {watermark}"
+                        )));
+                    }
+                    location -= 1;
+                    operation =
+                        load_operation_at::<F, K, V, E>(&self.op_cfg, &session, location).await?;
+                };
+                core::inactive_peaks(watermark, floor)
+            },
         )
         .await?;
-        checkpoint.ops_root_witness = load_ops_root_witness::<F, H>(&session, watermark).await?;
         Ok(checkpoint)
     }
 

@@ -16,7 +16,9 @@ use crate::codec::merkle_size_for_watermark;
 use crate::connect::OperationKv;
 use crate::core::{self, PublishedWatermark};
 use crate::error::QmdbError;
+use crate::operation_range::load_operation_range_checkpoint;
 use crate::proof::{OperationRangeCheckpoint, RawBatchMultiProof, VerifiedOperationRange};
+use crate::read_cache::ReadCache;
 use crate::storage::KvMerkleStorage;
 
 pub struct KeylessClient<
@@ -30,6 +32,7 @@ pub struct KeylessClient<
     store: PrefixedStoreClient,
     publication: Arc<core::PublicationCache<F>>,
     op_cfg: <keyless::Operation<F, E> as CodecRead>::Cfg,
+    read_cache: Arc<ReadCache<F, H::Digest>>,
     _marker: PhantomData<(F, H, E)>,
 }
 
@@ -46,6 +49,7 @@ where
             store: self.store.clone(),
             publication: self.publication.clone(),
             op_cfg: self.op_cfg.clone(),
+            read_cache: self.read_cache.clone(),
             _marker: PhantomData,
         }
     }
@@ -81,6 +85,7 @@ where
             store,
             publication: Arc::new(core::PublicationCache::default()),
             op_cfg,
+            read_cache: Arc::new(ReadCache::new()),
             _marker: PhantomData,
         }
     }
@@ -173,27 +178,29 @@ where
         max_locations: u32,
     ) -> Result<OperationRangeCheckpoint<H::Digest, F>, QmdbError> {
         let session = ReadSession::fixed(self.store.clone(), Some(watermark.sequence_number));
-        let end =
-            crate::proof::resolve_range_bounds(watermark.location, start_location, max_locations)?;
-        let storage = KvMerkleStorage::<F, H::Digest> {
-            session: &session,
-            size: merkle_size_for_watermark(watermark.location)?,
-            _marker: PhantomData::<H::Digest>,
-        };
-        let inactive_peaks =
-            inactive_peaks_at::<F, V, E>(&session, watermark.location, &self.op_cfg).await?;
-        let root =
-            core::compute_ops_root::<F, H>(&session, watermark.location, inactive_peaks).await?;
-        let encoded_operations =
-            core::load_operation_bytes_range(&session, start_location, end).await?;
-        let proof = crate::proof::build_operation_range_checkpoint::<F, H, _>(
-            &storage,
-            watermark.location,
+        let watermark = watermark.location;
+        let end = crate::proof::resolve_range_bounds(watermark, start_location, max_locations)?;
+        let proof = load_operation_range_checkpoint::<F, H, _>(
+            &session,
+            &self.read_cache,
+            watermark,
             start_location,
             end,
-            root,
-            inactive_peaks,
-            encoded_operations,
+            false,
+            |bytes| async move {
+                let operation = keyless::Operation::<F, E>::decode_cfg(bytes, &self.op_cfg)
+                    .map_err(|error| {
+                        QmdbError::CorruptData(format!(
+                            "operation at {watermark} decode error: {error}"
+                        ))
+                    })?;
+                let keyless::Operation::Commit(_, floor) = operation else {
+                    return Err(QmdbError::CorruptData(format!(
+                        "keyless watermark {watermark} does not point at a Commit operation"
+                    )));
+                };
+                core::inactive_peaks(watermark, floor)
+            },
         )
         .await?;
         Ok(proof)

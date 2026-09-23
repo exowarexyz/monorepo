@@ -21,6 +21,12 @@ Split deployments can instead mount `ingest_service`, `query_stack`,
 component state. The stream service accepts an in-process `StreamNotifier`;
 `StreamHub` is the local default.
 
+Custom GetMany handlers can call `validate_get_many_request(request.view())`
+before opening a backend snapshot. Compare `min_sequence_number` with the
+snapshot sequence before returning data. If the snapshot is below that floor,
+return `consistency_not_ready_error(required, current)` to preserve the standard
+error details and one-second retry hint. Both helpers are exported from the crate root.
+
 ## Protocol limits
 
 See the [language-independent protocol contract](../proto/README.md) for the
