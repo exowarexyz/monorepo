@@ -41,15 +41,13 @@ where
         .expect("final commit");
     let inactive = F::inactive_peaks(end, floor);
     let root = merkle.root(&base, &hasher, inactive).unwrap();
-    let proof = merkle
-        .range_proof(&base, &hasher, start..end, inactive)
-        .unwrap();
     let pinned_nodes = F::nodes_to_pin(start)
         .map(|position| merkle.get_node(position).expect("source pinned node"))
         .collect::<Vec<_>>();
     let range = exoware_qmdb::AuthenticatedOperationRange {
         start_location: start,
-        proof: &proof,
+        end_location: end,
+        inactive_peaks: inactive,
         pinned_nodes: &pinned_nodes,
         encoded_operations: &encoded[usize::try_from(*start).expect("source start")..],
     };
