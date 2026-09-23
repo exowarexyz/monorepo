@@ -178,10 +178,7 @@ where
         start_location: Location<F>,
         max_locations: u32,
     ) -> Result<(OperationRangeCheckpoint<H::Digest, F>, u64), QmdbError> {
-        let session = match read_floor_sequence {
-            Some(sequence) => self.client.create_session_with_sequence(sequence),
-            None => self.client.create_session(),
-        };
+        let session = ReadSession::monotonic(self.client.clone(), read_floor_sequence);
         require_published_auth_watermark(&session, watermark).await?;
         let end = crate::proof::resolve_range_bounds(watermark, start_location, max_locations)?;
         let storage = KvMerkleStorage::<F, H::Digest> {
@@ -213,10 +210,7 @@ where
         watermark: Location<F>,
         operations: Vec<(Location<F>, Vec<u8>)>,
     ) -> Result<RawBatchMultiProof<H::Digest, F>, QmdbError> {
-        let session = match read_floor_sequence {
-            Some(sequence) => self.client.create_session_with_sequence(sequence),
-            None => self.client.create_session(),
-        };
+        let session = ReadSession::monotonic(self.client.clone(), read_floor_sequence);
         require_published_auth_watermark(&session, watermark).await?;
         let storage = KvMerkleStorage::<F, H::Digest> {
             session: &session,

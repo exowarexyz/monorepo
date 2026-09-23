@@ -676,8 +676,8 @@ fn execute_reduce_job(
         })
         .try_flatten();
 
-    // Every frame of an unseeded read can advance its floor. Drain that range
-    // before opening concurrent reads, and keep a zero-floor session sequential.
+    // Drain an unseeded range so concurrent reads inherit all its observations.
+    // A present minimum, including zero, needs no bootstrap read.
     let remaining_count = ranges.len();
     let remaining = futures::stream::once(async move {
         let concurrency = if session.min_sequence_number().is_some() {
