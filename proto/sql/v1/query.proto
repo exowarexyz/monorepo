@@ -21,7 +21,7 @@ message QueryResponse {
   // The schema is present even when the query returns no rows.
   bytes results = 1;
 
-  // Highest Store sequence observed. Queries that skip Store reads return
-  // the requested floor.
-  uint64 sequence_number = 3;
+  // Highest Store sequence observed by this query. Absent when the query does
+  // not read Store.
+  optional uint64 sequence_number = 3;
 }
