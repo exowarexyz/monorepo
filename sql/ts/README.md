@@ -14,12 +14,10 @@ number. Arrow IPC preserves the result schema, field order,
 nulls, nested values, decimal scale, and timestamp units/timezones. The client uses
 binary Connect encoding by default.
 
-Clients are monotonic by default: each query starts with at least the highest
-Store sequence observed by earlier completed RPCs. Concurrent queries retain
-their starting minimums. `SqlClient.monotonic(url, initialFloor, options)` seeds
+Client reads are monotonic by default: each query requires the highest
+Store sequence observed by earlier completed RPCs. `SqlClient.monotonic(url, initialFloor, options)` seeds
 that minimum; `SqlClient.fixed(url, floor, options)` keeps it fixed across queries.
-An absent floor imposes no requirement, while `0n` is an explicit minimum.
-Neither policy pins a snapshot. The server uses monotonic reads within each query.
+Neither policy pins an exact snapshot. The server uses monotonic reads within each query.
 
 `minSequenceNumber()` reports the minimum for the next query, and
 `evaluatedSequence()` reports the highest observation. An explicit minimum passed
