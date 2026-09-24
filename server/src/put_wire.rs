@@ -5,40 +5,12 @@ use connectrpc::ConnectError;
 use serde::de::{IgnoredAny, SeqAccess, Visitor};
 use serde::Deserialize;
 
-use crate::validate::{validate_put_count, validate_put_entry, IngestLimits};
+use crate::validate::{validate_put_entry, IngestLimits};
 
-#[derive(Debug, thiserror::Error)]
-pub(crate) enum PutParseError {
-    /// More input may complete the current top-level field.
-    #[error("failed to decode proto request: unexpected end of buffer")]
-    Incomplete,
-    /// Additional input cannot repair the wire structure.
-    #[error("{0}")]
-    Malformed(String),
-    /// Preserves the field violation details after structural decoding succeeds.
-    #[error("{0}")]
-    Validation(ConnectError),
+fn proto_error(error: DecodeError) -> ConnectError {
+    ConnectError::invalid_argument(format!("failed to decode proto request: {error}"))
 }
 
-impl From<DecodeError> for PutParseError {
-    fn from(error: DecodeError) -> Self {
-        Self::Malformed(format!("failed to decode proto request: {error}"))
-    }
-}
-
-impl From<PutParseError> for ConnectError {
-    fn from(error: PutParseError) -> Self {
-        match error {
-            PutParseError::Incomplete => {
-                Self::invalid_argument("failed to decode proto request: unexpected end of buffer")
-            }
-            PutParseError::Malformed(message) => Self::invalid_argument(message),
-            PutParseError::Validation(error) => error,
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug)]
 struct UnknownBudget {
     remaining: usize,
 }
@@ -94,44 +66,34 @@ struct Cursor<'a> {
 }
 
 impl<'a> Cursor<'a> {
-    fn next(&mut self, budget: &mut UnknownBudget) -> Result<Option<Field<'a>>, PutParseError> {
+    fn next(&mut self, budget: &mut UnknownBudget) -> Result<Option<Field<'a>>, DecodeError> {
         if self.remaining.is_empty() {
             return Ok(None);
         }
 
-        // Commit only complete fields so a later caller can retry the same cursor.
-        let mut remaining = self.remaining;
-        let mut next_budget = *budget;
-        let decoded = (|| {
-            let tag = Tag::decode(&mut remaining)?;
-            if tag.field_number() == 1 {
-                check_wire_type(tag, WireType::LengthDelimited)?;
-                return buffa::types::borrow_bytes(&mut remaining).map(Field::Entry);
-            }
-            skip_unknown(
-                tag,
-                self.remaining,
-                &mut remaining,
-                buffa::RECURSION_LIMIT,
-                &mut next_budget,
-            )?;
-            Ok(Field::Unknown)
-        })();
-        let field = decoded.map_err(|error| match error {
-            DecodeError::UnexpectedEof => PutParseError::Incomplete,
-            error => error.into(),
-        })?;
-        self.remaining = remaining;
-        *budget = next_budget;
-        Ok(Some(field))
+        let before_tag = self.remaining;
+        let tag = Tag::decode(&mut self.remaining)?;
+        if tag.field_number() == 1 {
+            check_wire_type(tag, WireType::LengthDelimited)?;
+            return buffa::types::borrow_bytes(&mut self.remaining)
+                .map(|entry| Some(Field::Entry(entry)));
+        }
+        skip_unknown(
+            tag,
+            before_tag,
+            &mut self.remaining,
+            buffa::RECURSION_LIMIT,
+            budget,
+        )?;
+        Ok(Some(Field::Unknown))
     }
 }
 
-pub(crate) fn count_put_entries(wire: &[u8]) -> Result<usize, PutParseError> {
+pub(crate) fn count_put_entries(wire: &[u8]) -> Result<usize, ConnectError> {
     let mut cursor = Cursor { remaining: wire };
     let mut budget = UnknownBudget::default();
     let mut count = 0;
-    while let Some(field) = cursor.next(&mut budget)? {
+    while let Some(field) = cursor.next(&mut budget).map_err(proto_error)? {
         if matches!(field, Field::Entry(_)) {
             count += 1;
         }
@@ -172,34 +134,32 @@ fn parse_entry<'a>(
 pub(crate) fn parse_put_entries(
     wire: &Bytes,
     limits: IngestLimits,
-    capacity: usize,
-) -> Result<Vec<(Bytes, Bytes)>, PutParseError> {
-    // Bound stale capacity hints independently from validation of the actual entries.
-    let capacity = capacity.min(limits.max_entries).min(wire.len() / 2);
-    let mut entries = Vec::with_capacity(capacity);
+    validated_count: usize,
+) -> Result<Vec<(Bytes, Bytes)>, ConnectError> {
+    // The dispatcher validates this count against the same immutable buffer before admission.
+    let mut entries = Vec::with_capacity(validated_count);
     let mut validation = None;
     let mut cursor = Cursor { remaining: wire };
     let mut budget = UnknownBudget::default();
     let mut count = 0;
-    while let Some(field) = cursor.next(&mut budget)? {
+    while let Some(field) = cursor.next(&mut budget).map_err(proto_error)? {
         let Field::Entry(entry) = field else {
             continue;
         };
         let index = count;
         count += 1;
-        let (key, value) = parse_entry(entry, &mut budget)?;
+        let (key, value) = parse_entry(entry, &mut budget).map_err(proto_error)?;
 
         // Finish decoding after validation fails so malformed wire retains precedence.
-        if validation.is_none() && index < limits.max_entries {
+        if validation.is_none() {
             match validate_put_entry(index, key, value, limits) {
                 Ok(()) => entries.push((wire.slice_ref(key), wire.slice_ref(value))),
                 Err(error) => validation = Some(error),
             }
         }
     }
-    validate_put_count(count, limits).map_err(PutParseError::Validation)?;
     if let Some(error) = validation {
-        return Err(PutParseError::Validation(error));
+        return Err(error);
     }
     Ok(entries)
 }
@@ -268,6 +228,8 @@ mod tests {
     use buffa::MessageView as _;
     use exoware_sdk::log::ingest::v1::{PutRequest, PutRequestView};
 
+    use crate::validate::validate_put_count;
+
     fn bytes_field(number: u32, payload: &[u8]) -> Vec<u8> {
         let mut wire = Vec::new();
         Tag::new(number, WireType::LengthDelimited).encode(&mut wire);
@@ -280,9 +242,16 @@ mod tests {
         bytes_field(1, &[bytes_field(1, key), bytes_field(2, value)].concat())
     }
 
-    fn parse(wire: &[u8], limits: IngestLimits) -> Result<Vec<(Bytes, Bytes)>, PutParseError> {
-        let capacity = count_put_entries(wire).unwrap_or(0);
-        parse_put_entries(&Bytes::copy_from_slice(wire), limits, capacity)
+    fn parse(wire: &[u8], limits: IngestLimits) -> Result<Vec<(Bytes, Bytes)>, ConnectError> {
+        // Compare malformed decoding even when admission would reject the outer structure first.
+        let count = match count_put_entries(wire) {
+            Ok(count) => {
+                validate_put_count(count, limits)?;
+                count
+            }
+            Err(_) => 0,
+        };
+        parse_put_entries(&Bytes::copy_from_slice(wire), limits, count)
     }
 
     fn assert_matches_generated(wire: &[u8], limits: IngestLimits) {
@@ -307,15 +276,6 @@ mod tests {
         match (actual, expected) {
             (Ok(actual), Ok(expected)) => assert_eq!(actual, expected),
             (Err(actual), Err(expected)) => {
-                if expected.details.is_empty() {
-                    assert!(matches!(
-                        actual,
-                        PutParseError::Incomplete | PutParseError::Malformed(_)
-                    ));
-                } else {
-                    assert!(matches!(actual, PutParseError::Validation(_)));
-                }
-                let actual = ConnectError::from(actual);
                 assert_eq!(
                     exoware_sdk::decode_connect_error(&actual).unwrap(),
                     exoware_sdk::decode_connect_error(&expected).unwrap(),
@@ -444,40 +404,16 @@ mod tests {
     }
 
     #[test]
-    fn known_entry_boundaries_distinguish_incomplete_from_malformed() {
+    fn truncated_fields_match_generated_errors_at_each_boundary() {
         for wire in [vec![0x0a], vec![0x0a, 3, 0x0a, 1], vec![0x13, 0x18, 0]] {
-            assert!(matches!(
-                parse(&wire, IngestLimits::default()),
-                Err(PutParseError::Incomplete)
-            ));
+            assert_matches_generated(&wire, IngestLimits::default());
+            assert!(parse(&wire, IngestLimits::default()).is_err());
         }
         for entry in [vec![0x0a], vec![0x0a, 3, 0], vec![0x1b, 0x20, 0]] {
             let wire = bytes_field(1, &entry);
             assert_eq!(count_put_entries(&wire).unwrap(), 1);
-            assert!(matches!(
-                parse(&wire, IngestLimits::default()),
-                Err(PutParseError::Malformed(_))
-            ));
-        }
-    }
-
-    #[test]
-    fn cursor_rolls_back_incomplete_fields_and_unknown_charges() {
-        let full = [0x13, 0x18, 0, 0x23, 0x28, 0, 0x24, 0x14];
-        for length in 1..full.len() {
-            let partial = &full[..length];
-            let mut cursor = Cursor { remaining: partial };
-            let mut budget = UnknownBudget::default();
-            assert!(matches!(
-                cursor.next(&mut budget),
-                Err(PutParseError::Incomplete)
-            ));
-            assert_eq!(cursor.remaining, partial);
-            assert_eq!(budget.remaining, buffa::DEFAULT_UNKNOWN_FIELD_LIMIT);
-            cursor.remaining = &full;
-            assert!(matches!(cursor.next(&mut budget), Ok(Some(Field::Unknown))));
-            assert_eq!(budget.remaining, buffa::DEFAULT_UNKNOWN_FIELD_LIMIT - 4);
-            assert!(cursor.remaining.is_empty());
+            assert_matches_generated(&wire, IngestLimits::default());
+            assert!(parse(&wire, IngestLimits::default()).is_err());
         }
     }
 
@@ -508,17 +444,14 @@ mod tests {
         wire.extend_from_slice(&[0x10, 0]);
         assert_eq!(count_put_entries(&wire).unwrap(), 2);
         assert_matches_generated(&wire, IngestLimits::default());
-        let error = ConnectError::from(parse(&wire, IngestLimits::default()).unwrap_err());
+        let error = parse(&wire, IngestLimits::default()).unwrap_err();
         assert_eq!(
             error.message.as_deref(),
             Some("failed to decode proto request: unknown field limit exceeded")
         );
 
         let top = [0x10, 0].repeat(buffa::DEFAULT_UNKNOWN_FIELD_LIMIT + 1);
-        assert!(matches!(
-            count_put_entries(&top),
-            Err(PutParseError::Malformed(_))
-        ));
+        assert_eq!(count_put_entries(&top).unwrap_err().message, error.message);
     }
 
     #[test]
@@ -558,25 +491,7 @@ mod tests {
         for tail in [vec![0], vec![0x80], bytes_field(1, &[0x0a])] {
             let wire = [bad_key.clone(), tail].concat();
             assert_matches_generated(&wire, limits);
-            assert!(!matches!(
-                parse(&wire, limits),
-                Err(PutParseError::Validation(_))
-            ));
-        }
-    }
-
-    #[test]
-    fn capacity_hints_cannot_bypass_count_backstops() {
-        let limits = IngestLimits {
-            max_entries: 1,
-            max_value_len: 3,
-        };
-        for capacity in [0, 1, 2, usize::MAX] {
-            for wire in [vec![], entry(b"a", b"b"), [0x0a, 0].repeat(2)] {
-                let actual = parse_put_entries(&Bytes::from(wire.clone()), limits, capacity);
-                assert_eq!(actual.is_ok(), wire == entry(b"a", b"b"));
-                assert_matches_generated(&wire, limits);
-            }
+            assert!(parse(&wire, limits).unwrap_err().details.is_empty());
         }
     }
 
