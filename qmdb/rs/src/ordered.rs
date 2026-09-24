@@ -423,33 +423,23 @@ where
         let session = ReadSession::fixed(self.store.clone(), Some(watermark.sequence_number));
         let watermark = watermark.location;
         let end = crate::proof::resolve_range_bounds(watermark, start_location, max_locations)?;
+        let session = &session;
         let checkpoint = load_operation_range_checkpoint::<F, H, _>(
-            &session,
+            session,
             &self.read_cache,
             watermark,
             start_location,
             end,
             true,
-            |bytes| async {
-                let mut location = watermark;
-                let mut operation = ordered::Operation::<F, K, E>::decode_cfg(bytes, &self.op_cfg)
-                    .map_err(|error| {
-                        QmdbError::CorruptData(format!(
-                            "operation at {watermark} decode error: {error}"
-                        ))
-                    })?;
-                let floor = loop {
-                    if let ordered::Operation::CommitFloor(_, floor) = operation {
-                        break floor;
-                    }
-                    if *location == 0 {
-                        return Err(QmdbError::CorruptData(format!(
-                            "no CommitFloor found at or before watermark {watermark}"
-                        )));
-                    }
-                    location -= 1;
-                    operation = Self::load_operation_at(&session, &self.op_cfg, location).await?;
-                };
+            |bytes| async move {
+                let operation = Self::decode_operation(&self.op_cfg, watermark, bytes.as_ref())?;
+                let floor = Self::load_ops_inactivity_floor_from(
+                    session,
+                    &self.op_cfg,
+                    watermark,
+                    operation,
+                )
+                .await?;
                 core::inactive_peaks(watermark, floor)
             },
         )
@@ -1022,11 +1012,19 @@ where
         op_cfg: &<ordered::Operation<F, K, E> as commonware_codec::Read>::Cfg,
         watermark: Location<F>,
     ) -> Result<Location<F>, QmdbError> {
+        let operation = Self::load_operation_at(session, op_cfg, watermark).await?;
+        Self::load_ops_inactivity_floor_from(session, op_cfg, watermark, operation).await
+    }
+
+    async fn load_ops_inactivity_floor_from(
+        session: &ReadSession,
+        op_cfg: &<ordered::Operation<F, K, E> as commonware_codec::Read>::Cfg,
+        watermark: Location<F>,
+        mut operation: ordered::Operation<F, K, E>,
+    ) -> Result<Location<F>, QmdbError> {
         let mut location = watermark;
         loop {
-            if let ordered::Operation::CommitFloor(_, floor) =
-                Self::load_operation_at(session, op_cfg, location).await?
-            {
+            if let ordered::Operation::CommitFloor(_, floor) = operation {
                 return Ok(floor);
             }
             if *location == 0 {
@@ -1035,6 +1033,7 @@ where
                 )));
             }
             location -= 1;
+            operation = Self::load_operation_at(session, op_cfg, location).await?;
         }
     }
 

@@ -20,6 +20,8 @@ pub(crate) struct RootContext<D: Digest> {
     pub inactive_peaks: usize,
 }
 
+// Each cache belongs to one namespace and immutable operation history. Successful Store
+// reads are trusted across read floors. Rewriting that history requires a new client.
 pub(crate) struct ReadCache<F: Family, D: Digest> {
     state: Mutex<State<F, D>>,
 }
@@ -197,7 +199,12 @@ impl<F: Family, D: Digest> Drop for NodeReservation<F, D> {
             return;
         }
 
-        let mut state = self.cache.state.lock().unwrap();
+        // Release followers even when a cache panic has poisoned the lock.
+        let mut state = self
+            .cache
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         for (position, _) in self.claims.drain() {
             state.flights.remove(&position);
         }
@@ -206,6 +213,7 @@ impl<F: Family, D: Digest> Drop for NodeReservation<F, D> {
 
 #[cfg(test)]
 mod tests {
+    use std::panic::{catch_unwind, AssertUnwindSafe};
     use std::time::Duration;
 
     use commonware_cryptography::sha256::Digest;
@@ -226,6 +234,31 @@ mod tests {
             root: Digest([value; 32]),
             inactive_peaks: value as usize,
         }
+    }
+
+    #[tokio::test]
+    async fn poisoned_cache_does_not_panic_when_releasing_claims() {
+        let cache = Arc::new(Cache::new());
+        let position = Node::new(1);
+        let leader = cache.reserve(&[position]);
+        let follower = cache.reserve(&[position]).complete([]);
+        assert!(catch_unwind(AssertUnwindSafe(|| {
+            let _state = cache.state.lock().unwrap();
+            panic!("poison the cache lock");
+        }))
+        .is_err());
+
+        drop(leader);
+        assert!(timeout(Duration::from_secs(1), follower.wait())
+            .await
+            .unwrap()
+            .is_empty());
+        assert!(cache
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .flights
+            .is_empty());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

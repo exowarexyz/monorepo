@@ -208,19 +208,12 @@ where
             end,
             false,
             |bytes| async move {
-                let operation =
-                    immutable::Operation::<F, K, E>::decode_cfg(bytes, &self.operation_cfg)
-                        .map_err(|error| {
-                            QmdbError::CorruptData(format!(
-                                "operation at {watermark} decode error: {error}"
-                            ))
-                        })?;
-                let immutable::Operation::Commit(_, floor) = operation else {
-                    return Err(QmdbError::CorruptData(format!(
-                        "immutable watermark {watermark} does not point at a Commit operation"
-                    )));
-                };
-                core::inactive_peaks(watermark, floor)
+                let operation = core::decode_operation_at::<F, immutable::Operation<F, K, E>>(
+                    bytes.as_ref(),
+                    watermark,
+                    &self.operation_cfg,
+                )?;
+                inactive_peaks_from_operation::<F, K, V, E>(watermark, operation)
             },
         )
         .await?;
@@ -304,6 +297,19 @@ where
         operation_cfg,
     )
     .await?;
+    inactive_peaks_from_operation::<F, K, V, E>(watermark, operation)
+}
+
+fn inactive_peaks_from_operation<F, K, V, E>(
+    watermark: Location<F>,
+    operation: immutable::Operation<F, K, E>,
+) -> Result<usize, QmdbError>
+where
+    F: Graftable,
+    K: QmdbKey,
+    V: Codec + Clone + Send + Sync,
+    E: ValueEncoding<Value = V>,
+{
     let immutable::Operation::Commit(_, floor) = operation else {
         return Err(QmdbError::CorruptData(format!(
             "immutable watermark {watermark} does not point at a Commit operation"

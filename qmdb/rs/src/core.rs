@@ -281,7 +281,15 @@ where
     Op: Decode,
 {
     let bytes = load_operation_bytes_at(session, location).await?;
-    Op::decode_cfg(bytes.as_slice(), cfg).map_err(|e| {
+    decode_operation_at::<F, Op>(&bytes, location, cfg)
+}
+
+pub(crate) fn decode_operation_at<F: Family, Op: Decode>(
+    bytes: &[u8],
+    location: Location<F>,
+    cfg: &Op::Cfg,
+) -> Result<Op, QmdbError> {
+    Op::decode_cfg(bytes, cfg).map_err(|e| {
         QmdbError::CorruptData(format!(
             "failed to decode authenticated operation at location {location}: {e}"
         ))

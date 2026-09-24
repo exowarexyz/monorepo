@@ -188,18 +188,12 @@ where
             end,
             false,
             |bytes| async move {
-                let operation = keyless::Operation::<F, E>::decode_cfg(bytes, &self.op_cfg)
-                    .map_err(|error| {
-                        QmdbError::CorruptData(format!(
-                            "operation at {watermark} decode error: {error}"
-                        ))
-                    })?;
-                let keyless::Operation::Commit(_, floor) = operation else {
-                    return Err(QmdbError::CorruptData(format!(
-                        "keyless watermark {watermark} does not point at a Commit operation"
-                    )));
-                };
-                core::inactive_peaks(watermark, floor)
+                let operation = core::decode_operation_at::<F, keyless::Operation<F, E>>(
+                    bytes.as_ref(),
+                    watermark,
+                    &self.op_cfg,
+                )?;
+                inactive_peaks_from_operation::<F, V, E>(watermark, operation)
             },
         )
         .await?;
@@ -277,6 +271,18 @@ where
 {
     let operation =
         core::load_operation_at::<F, keyless::Operation<F, E>>(session, watermark, op_cfg).await?;
+    inactive_peaks_from_operation::<F, V, E>(watermark, operation)
+}
+
+fn inactive_peaks_from_operation<F, V, E>(
+    watermark: Location<F>,
+    operation: keyless::Operation<F, E>,
+) -> Result<usize, QmdbError>
+where
+    F: Graftable,
+    V: Codec + Clone + Send + Sync,
+    E: ValueEncoding<Value = V>,
+{
     let keyless::Operation::Commit(_, floor) = operation else {
         return Err(QmdbError::CorruptData(format!(
             "keyless watermark {watermark} does not point at a Commit operation"

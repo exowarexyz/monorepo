@@ -9,11 +9,11 @@ use commonware_storage::merkle::{hasher::Hasher as _, Family, Graftable, Locatio
 use commonware_storage::qmdb::current::proof::OpsRootWitness;
 use exoware_sdk::{keys::Key, ReadSession};
 
-use crate::core::load_operation_bytes_range;
 use crate::codec::{
     decode_digest, encode_node_key, encode_operation_key, encode_ops_root_witness_key,
     merkle_size_for_watermark, op_count_for_watermark,
 };
+use crate::core::load_operation_bytes_range;
 use crate::prefetch::{range_positions, PrefetchedMerkleStorage};
 use crate::proof::{build_operation_range_checkpoint, OperationRangeCheckpoint};
 use crate::read_cache::{ReadCache, RootContext};
@@ -53,6 +53,7 @@ where
 
         // Fetch each request's rows before coalescing metadata work so a cold watermark
         // does not add another network phase for followers.
+        // The gate shares the floor walk. After failure, followers retry in their own sessions.
         let (context, context_guard) = match context {
             Some(context) => (Some(context), None),
             None => cache.context(watermark).await,
@@ -70,6 +71,7 @@ where
                 }
             }
         };
+        let witness_cached = witness.is_some();
         let witness = witness
             .or_else(|| rows.get(&encode_ops_root_witness_key(watermark)).cloned())
             .map(|bytes| {
@@ -79,7 +81,9 @@ where
                             "current ops-root witness at {watermark} decode error: {error}"
                         ))
                     })?;
-                cache.put_witness(watermark, bytes);
+                if !witness_cached {
+                    cache.put_witness(watermark, bytes);
+                }
                 Ok::<_, QmdbError>(witness)
             })
             .transpose();
@@ -162,48 +166,64 @@ async fn fetch_rows<F: Family, D: Digest>(
 ) -> Result<(HashMap<Key, Bytes>, BTreeMap<Position<F>, Option<Bytes>>), QmdbError> {
     let mut nodes = BTreeMap::new();
     let mut rows = HashMap::new();
-    let mut remaining = positions.to_vec();
-    loop {
-        let reservation = cache.reserve(&remaining);
-        nodes.extend(
-            reservation
-                .hits
-                .iter()
-                .map(|(&position, bytes)| (position, Some(bytes.clone()))),
+    let reservation = cache.reserve(positions);
+    nodes.extend(
+        reservation
+            .hits
+            .iter()
+            .map(|(&position, bytes)| (position, Some(bytes.clone()))),
+    );
+    for &position in &reservation.owned {
+        keys.insert(encode_node_key(position));
+    }
+    let keys = keys.into_iter().collect::<Vec<_>>();
+    if !keys.is_empty() {
+        let refs = keys.iter().collect::<Vec<_>>();
+        rows.extend(
+            session
+                .get_many(&refs, u32::try_from(keys.len()).unwrap_or(u32::MAX))
+                .await?
+                .collect()
+                .await?,
         );
-        for &position in &reservation.owned {
-            keys.insert(encode_node_key(position));
+    }
+    let mut positive = Vec::new();
+    for &position in &reservation.owned {
+        let bytes = rows.remove(&encode_node_key(position));
+        if let Some(bytes) = &bytes {
+            positive.push((position, bytes.clone()));
         }
-        let keys = std::mem::take(&mut keys).into_iter().collect::<Vec<_>>();
-        if !keys.is_empty() {
-            let refs = keys.iter().collect::<Vec<_>>();
-            rows.extend(
-                session
-                    .get_many(&refs, u32::try_from(keys.len()).unwrap_or(u32::MAX))
-                    .await?
-                    .collect()
-                    .await?,
-            );
-        }
-        let mut positive = Vec::new();
-        for &position in &reservation.owned {
-            let bytes = rows.remove(&encode_node_key(position));
-            if let Some(bytes) = &bytes {
-                positive.push((position, bytes.clone()));
-            }
-            nodes.insert(position, bytes);
-        }
-        let pending = reservation.complete(positive);
-        nodes.extend(
-            pending
-                .wait()
-                .await
-                .into_iter()
-                .map(|(position, bytes)| (position, Some(bytes))),
-        );
-        remaining.retain(|position| !nodes.contains_key(position));
-        if remaining.is_empty() {
-            return Ok((rows, nodes));
+        nodes.insert(position, bytes);
+    }
+    let pending = reservation.complete(positive);
+    nodes.extend(
+        pending
+            .wait()
+            .await
+            .into_iter()
+            .map(|(position, bytes)| (position, Some(bytes))),
+    );
+
+    // Read unresolved followers directly so replacement flights cannot keep delaying this request.
+    let remaining = positions
+        .iter()
+        .copied()
+        .filter(|position| !nodes.contains_key(position))
+        .collect::<Vec<_>>();
+    if !remaining.is_empty() {
+        let keys = remaining
+            .iter()
+            .map(|&position| encode_node_key(position))
+            .collect::<Vec<_>>();
+        let refs = keys.iter().collect::<Vec<_>>();
+        let mut fetched = session
+            .get_many(&refs, u32::try_from(keys.len()).unwrap_or(u32::MAX))
+            .await?
+            .collect()
+            .await?;
+        for (position, key) in remaining.into_iter().zip(keys) {
+            nodes.insert(position, fetched.remove(&key));
         }
     }
+    Ok((rows, nodes))
 }
