@@ -112,9 +112,11 @@ publication.commit(client.client()).await?;
 The expected root is a trust input, not a root accepted merely because it was
 included in the proof response.
 
-`stage_authenticated_range` always includes the supplied prefix pins. To avoid
-rewriting selected pins, use `stage_authenticated_range_with_existing_nodes`
-with a `&BTreeSet<Position<F>>` of exact positions. Only supplied pins at those
+### Pin omission
+
+By default, `stage_authenticated_range` includes the supplied prefix pins. To avoid
+rewriting selected pins, call `prepared.without_pins_at(&positions)` before staging,
+using a `BTreeSet<Position<F>>` of exact positions. Only supplied pins at those
 positions are omitted. Reconstructed nodes, including delayed MMB parents, are
 always staged. Operation and index rows, presence markers, and attached current
 boundary rows are also always staged. Preparation still authenticates every
@@ -129,7 +131,7 @@ write in the contiguous prefix, even when uploads finish out of order. Tracking
 these dependencies through failures, retries, and restarts belongs to the
 caller. The library does not infer them from operation bounds or inspect Store.
 
-Use the default staging function for the first nonzero bootstrap or restart
+Keep all supplied pins for the first nonzero bootstrap or restart
 packet when prior pins are not guaranteed to be available. Later packets can
 omit exactly the pins covered by the caller's retention and publication
 guarantees. An empty set preserves the default behavior.
