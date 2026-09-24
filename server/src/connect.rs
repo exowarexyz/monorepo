@@ -81,7 +81,7 @@ fn query_detail(sequence_number: u64, extra: QueryExtra) -> Detail {
     }
 }
 
-/// Build a consistency rejection for an observed snapshot with a one-second retry hint.
+/// Build a consistency rejection for an observed snapshot with the standard retry hint.
 pub fn consistency_not_ready_error(required: u64, current: u64) -> ConnectError {
     let err = with_retry_hint(
         ConnectError::aborted("minimum consistency token is not yet visible"),

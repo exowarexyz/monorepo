@@ -15,6 +15,7 @@ use commonware_storage::qmdb::any::ordered::{
     variable::Operation as OrderedOperation, Update as OrderedUpdate,
 };
 use commonware_storage::qmdb::any::unordered::variable::Operation as UnorderedOperation;
+use commonware_storage::qmdb::any::value::VariableEncoding;
 use commonware_storage::qmdb::immutable::variable::Operation as ImmutableOperation;
 use commonware_storage::qmdb::keyless::variable::Operation as KeylessOperation;
 use connectrpc::{ConnectError, ConnectRpcService, ErrorCode, RequestContext, ServiceRequest};
@@ -49,6 +50,27 @@ type Unordered = UnorderedClient<mmr::Family, Sha256, Vec<u8>, Vec<u8>>;
 type Immutable = ImmutableClient<mmr::Family, Sha256, Vec<u8>, Vec<u8>>;
 type ProofClient = OperationLogClient<PreferZstdHttpClient, mmr::Family, Sha256, Operation>;
 
+#[tokio::test]
+async fn range_calls_wake_the_store_waiter() {
+    let fixture = Fixture::new().await;
+    let mut waiter = Box::pin(
+        fixture
+            .store
+            .wait_for_calls(1, |call| matches!(call, Call::Range(_))),
+    );
+    assert!(futures::poll!(&mut waiter).is_pending());
+
+    fixture
+        .prefixed(&[])
+        .create_session()
+        .range(&Bytes::from_static(b"a"), &Bytes::from_static(b"z"), 1)
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(1), waiter)
+        .await
+        .expect("Range must notify its waiting observer");
+}
+
 #[derive(Clone, Debug)]
 enum Call {
     Get(GetRequest),
@@ -62,6 +84,7 @@ struct State {
     calls: Vec<Call>,
     get_sequence: u64,
     batch_sequences: Vec<u64>,
+    publication_sequence: u64,
     range_sequence: u64,
     batch_error: Option<ConnectError>,
     batch_gate: Option<Arc<Gate>>,
@@ -206,6 +229,7 @@ impl Service for Store {
         let (gate, results, sequence) = {
             let mut state = self.state.lock().unwrap();
             state.calls.push(Call::Range(request.clone()));
+            self.changed.notify_one();
             let mut rows = state
                 .rows
                 .iter()
@@ -223,12 +247,12 @@ impl Service for Store {
                 rows.reverse();
             }
             rows.truncate(request.limit.unwrap_or(u32::MAX) as usize);
-            let gate = if request.mode == TraversalMode::Reverse {
-                None
+            let (gate, sequence) = if request.mode == TraversalMode::Reverse {
+                (None, state.publication_sequence)
             } else {
-                state.range_gate.take()
+                (state.range_gate.take(), state.range_sequence)
             };
-            (gate, rows, state.range_sequence)
+            (gate, rows, sequence)
         };
         if let Some(gate) = gate {
             gate.hold().await;
@@ -355,32 +379,60 @@ impl Fixture {
         root
     }
 
-    async fn keyless(&mut self, client: Keyless) -> String {
+    async fn keyless(&mut self, store: PrefixedStoreClient) -> String {
         let (server, url) =
-            common::spawn_connect_service(keyless_operation_log_connect_stack(Arc::new(client)))
-                .await;
+            common::spawn_connect_service(keyless_operation_log_connect_stack::<
+                mmr::Family,
+                Sha256,
+                Vec<u8>,
+                VariableEncoding<Vec<u8>>,
+            >(store, ((0..=10000).into(), ())))
+            .await;
         self.servers.push(server);
         url
     }
 
-    async fn unordered(&mut self, client: Unordered) -> String {
-        let (server, url) =
-            common::spawn_connect_service(unordered_operation_log_connect_stack(Arc::new(client)))
-                .await;
+    async fn unordered(
+        &mut self,
+        store: PrefixedStoreClient,
+        cfg: <UnorderedOp as commonware_codec::Read>::Cfg,
+    ) -> String {
+        let (server, url) = common::spawn_connect_service(unordered_operation_log_connect_stack::<
+            mmr::Family,
+            Sha256,
+            Vec<u8>,
+            Vec<u8>,
+            VariableEncoding<Vec<u8>>,
+        >(store, cfg))
+        .await;
         self.servers.push(server);
         url
     }
 
-    async fn ordered(&mut self, client: Arc<Ordered>) -> String {
+    async fn ordered(&mut self, store: PrefixedStoreClient) -> String {
         let (server, url) =
-            common::spawn_connect_service(ordered_operation_log_connect_stack(client)).await;
+            common::spawn_connect_service(ordered_operation_log_connect_stack::<
+                mmr::Family,
+                Sha256,
+                Vec<u8>,
+                Vec<u8>,
+                32,
+                VariableEncoding<Vec<u8>>,
+            >(store, ordered_cfg(), key_cfg()))
+            .await;
         self.servers.push(server);
         url
     }
 
-    async fn immutable(&mut self, client: Arc<Immutable>) -> String {
-        let (server, url) =
-            common::spawn_connect_service(immutable_operation_log_connect_stack(client)).await;
+    async fn immutable(&mut self, store: PrefixedStoreClient) -> String {
+        let (server, url) = common::spawn_connect_service(immutable_operation_log_connect_stack::<
+            mmr::Family,
+            Sha256,
+            Vec<u8>,
+            Vec<u8>,
+            VariableEncoding<Vec<u8>>,
+        >(store, immutable_cfg()))
+        .await;
         self.servers.push(server);
         url
     }
@@ -394,15 +446,16 @@ impl Drop for Fixture {
     }
 }
 
-fn boundary_batch(calls: &[Call], tip: u64) -> &GetManyRequest {
-    assert_eq!(calls.len(), 2, "one publication lookup and one proof batch");
-    let Call::Get(publication) = &calls[0] else {
-        panic!("publication must be first")
-    };
-    assert_eq!(publication.key.as_ref(), key(3, tip));
-    let Call::GetMany(batch) = &calls[1] else {
-        panic!("proof nodes must be batched")
-    };
+fn boundary_batch(calls: &[Call], _tip: u64) -> &GetManyRequest {
+    let batches = calls
+        .iter()
+        .filter_map(|call| match call {
+            Call::GetMany(batch) => Some(batch),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(batches.len(), 1, "proof rows must use one batch");
+    let batch = batches[0];
     let unique = batch.keys.iter().collect::<BTreeSet<_>>();
     assert_eq!(
         unique.len(),
@@ -410,6 +463,31 @@ fn boundary_batch(calls: &[Call], tip: u64) -> &GetManyRequest {
         "batch keys must be deduplicated"
     );
     batch
+}
+
+fn publication_range(calls: &[Call]) -> &RangeRequest {
+    let ranges = calls
+        .iter()
+        .filter_map(|call| match call {
+            Call::Range(range) if range.mode == TraversalMode::Reverse => Some(range),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(ranges.len(), 1, "publication must use one reverse range");
+    assert_eq!(ranges[0].limit, Some(1));
+    ranges[0]
+}
+
+fn operation_range(calls: &[Call]) -> &RangeRequest {
+    let ranges = calls
+        .iter()
+        .filter_map(|call| match call {
+            Call::Range(range) if range.mode == TraversalMode::Forward => Some(range),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(ranges.len(), 1, "operations must use one forward range");
+    ranges[0]
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -475,39 +553,8 @@ async fn serve_variant(
     variant: HistoricalVariant,
 ) -> String {
     match variant {
-        HistoricalVariant::Ordered => {
-            fixture
-                .ordered(Arc::new(Ordered::new(store, ordered_cfg(), key_cfg())))
-                .await
-        }
-        HistoricalVariant::Immutable => {
-            fixture
-                .immutable(Arc::new(Immutable::new(store, immutable_cfg())))
-                .await
-        }
-    }
-}
-
-async fn serve_variant_clones(
-    fixture: &mut Fixture,
-    store: PrefixedStoreClient,
-    variant: HistoricalVariant,
-) -> [String; 2] {
-    match variant {
-        HistoricalVariant::Ordered => {
-            let client = Ordered::new(store, ordered_cfg(), key_cfg());
-            [
-                fixture.ordered(Arc::new(client.clone())).await,
-                fixture.ordered(Arc::new(client)).await,
-            ]
-        }
-        HistoricalVariant::Immutable => {
-            let client = Immutable::new(store, immutable_cfg());
-            [
-                fixture.immutable(Arc::new(client.clone())).await,
-                fixture.immutable(Arc::new(client)).await,
-            ]
-        }
+        HistoricalVariant::Ordered => fixture.ordered(store).await,
+        HistoricalVariant::Immutable => fixture.immutable(store).await,
     }
 }
 
@@ -516,7 +563,7 @@ async fn verify_variant_range(
     url: &str,
     query: GetOperationRangeRequest,
     root: &Digest,
-) -> u64 {
+) {
     let start = query.start_location as usize;
     let end = (start + query.max_locations as usize).min(query.tip as usize + 1);
     match variant {
@@ -529,7 +576,6 @@ async fn verify_variant_range(
             .await
             .unwrap();
             assert_eq!(proof.operations, ordered_operations()[start..end]);
-            proof.sequence_number
         }
         HistoricalVariant::Immutable => {
             let proof = OperationLogClient::<_, mmr::Family, Sha256, ImmutableOp>::plaintext(
@@ -540,27 +586,23 @@ async fn verify_variant_range(
             .await
             .unwrap();
             assert_eq!(proof.operations, immutable_operations()[start..end]);
-            proof.sequence_number
         }
     }
 }
 
 #[tokio::test]
 async fn boundary_singletons_batch_nodes_and_preserve_response_floors() {
-    for (floor, publication, batches, expected) in [(0, 0, vec![0], 0), (17, 23, vec![31, 47], 47)]
-    {
+    for (floor, publication, batches) in [(0, 0, vec![0]), (17, 23, vec![31, 47])] {
         let mut fixture = Fixture::new().await;
         let store = fixture.prefixed(&[]);
         let operations = operations();
         let root = fixture.stage(&store, &operations, &((0..=10000).into(), ()));
         {
             let mut state = fixture.store.state.lock().unwrap();
-            state.get_sequence = publication;
+            state.publication_sequence = publication;
             state.batch_sequences = batches;
         }
-        let url = fixture
-            .keyless(Keyless::new(store, ((0..=10000).into(), ())))
-            .await;
+        let url = fixture.keyless(store).await;
         let mut query = request(14, 14, 1);
         query.min_sequence_number = Some(floor);
         let proof = proof_client(&url)
@@ -568,7 +610,6 @@ async fn boundary_singletons_batch_nodes_and_preserve_response_floors() {
             .await
             .unwrap();
         assert_eq!(proof.operations, operations[14..]);
-        assert_eq!(proof.sequence_number, expected);
         let calls = fixture.store.calls();
         let batch = boundary_batch(&calls, 14);
         assert_eq!(
@@ -579,16 +620,14 @@ async fn boundary_singletons_batch_nodes_and_preserve_response_floors() {
                 .count(),
             1
         );
-        let Call::Get(publication_request) = &calls[0] else {
-            unreachable!()
-        };
+        let publication_request = publication_range(&calls);
         assert_eq!(publication_request.min_sequence_number, Some(floor));
         assert_eq!(batch.min_sequence_number, Some(publication));
     }
 }
 
 #[tokio::test]
-async fn historical_commit_without_marker_uses_reverse_publication_fallback() {
+async fn historical_commit_uses_cached_greater_publication() {
     let mut fixture = Fixture::new().await;
     let store = fixture.prefixed(&[]);
     let operations = operations();
@@ -597,21 +636,16 @@ async fn historical_commit_without_marker_uses_reverse_publication_fallback() {
         &operations[..4],
         &((0..=10000).into(), ()),
     );
-    let url = fixture
-        .keyless(Keyless::new(store, ((0..=10000).into(), ())))
-        .await;
+    let url = fixture.keyless(store).await;
     let proof = proof_client(&url)
         .get_operation_range(request(3, 1, 1), &root)
         .await
         .unwrap();
     assert_eq!(proof.operations, operations[1..2]);
     let calls = fixture.store.calls();
-    assert_eq!(calls.len(), 3);
-    assert!(matches!(&calls[0], Call::Get(get) if get.key.as_ref() == key(3, 3)));
-    assert!(
-        matches!(&calls[1], Call::Range(range) if range.mode == TraversalMode::Reverse && range.limit == Some(1))
-    );
-    assert!(matches!(&calls[2], Call::GetMany(_)));
+    assert_eq!(calls.len(), 2);
+    publication_range(&calls);
+    boundary_batch(&calls, 3);
 }
 
 #[tokio::test]
@@ -626,9 +660,7 @@ async fn unpublished_tip_precedes_bad_ranges_and_corrupt_rows_including_zero() {
             .unwrap()
             .rows
             .insert(key(4, tip), Bytes::from_static(b"corrupt"));
-        let url = fixture
-            .keyless(Keyless::new(store, ((0..=10000).into(), ())))
-            .await;
+        let url = fixture.keyless(store).await;
         for start in [tip + 1, 0] {
             let error = common::operation_log_rpc_client(&url)
                 .get_operation_range(request(tip, start, 1))
@@ -648,9 +680,7 @@ async fn unpublished_tip_precedes_bad_ranges_and_corrupt_rows_including_zero() {
     let store = fixture.prefixed(&[]);
     let operations = vec![Operation::Commit(None, Location::new(0))];
     let root = fixture.stage(&store, &operations, &((0..=10000).into(), ()));
-    let url = fixture
-        .keyless(Keyless::new(store, ((0..=10000).into(), ())))
-        .await;
+    let url = fixture.keyless(store).await;
     let proof = proof_client(&url)
         .get_operation_range(request(0, 0, 1), &root)
         .await
@@ -680,13 +710,11 @@ async fn assert_operation_scan_overlap(publication: u64) {
         let mut state = fixture.store.state.lock().unwrap();
         state.batch_gate = Some(batch_gate.clone());
         state.range_gate = Some(range_gate.clone());
-        state.get_sequence = publication;
+        state.publication_sequence = publication;
         state.batch_sequences = vec![20, 25];
         state.range_sequence = 30;
     }
-    let url = fixture
-        .keyless(Keyless::new(store, ((0..=10000).into(), ())))
-        .await;
+    let url = fixture.keyless(store).await;
     let query = tokio::spawn(async move {
         proof_client(&url)
             .get_operation_range(request(14, 2, 9), &root)
@@ -699,17 +727,11 @@ async fn assert_operation_scan_overlap(publication: u64) {
     range_gate.open();
     let proof = query.await.unwrap().unwrap();
     assert_eq!(proof.operations, operations[2..11]);
-    assert_eq!(proof.sequence_number, 30);
     let calls = fixture.store.calls();
     assert_eq!(calls.len(), 3);
-    assert!(matches!(calls[0], Call::Get(_)));
-    let range = calls
-        .iter()
-        .find_map(|call| match call {
-            Call::Range(range) => Some(range),
-            _ => None,
-        })
-        .unwrap();
+    let publication_request = publication_range(&calls);
+    assert_eq!(publication_request.min_sequence_number, None);
+    let range = operation_range(&calls);
     assert_eq!(range.start.as_ref(), key(4, 2));
     assert_eq!(range.end.as_ref(), key(4, 10));
     assert_eq!(range.min_sequence_number, Some(publication));
@@ -731,9 +753,7 @@ async fn cold_singleton_does_not_wait_for_another_proofs_operation_scan() {
     let root = fixture.stage(&store, &operations, &((0..=10000).into(), ()));
     let range_gate = Gate::new();
     fixture.store.state.lock().unwrap().range_gate = Some(range_gate.clone());
-    let url = fixture
-        .keyless(Keyless::new(store, ((0..=10000).into(), ())))
-        .await;
+    let url = fixture.keyless(store).await;
     let client = proof_client(&url);
     let range_client = client.clone();
     let range = tokio::spawn(async move {
@@ -746,7 +766,7 @@ async fn cold_singleton_does_not_wait_for_another_proofs_operation_scan() {
         tokio::spawn(async move { client.get_operation_range(request(14, 14, 1), &root).await });
     fixture
         .store
-        .wait_for_calls(2, |call| matches!(call, Call::Get(_)))
+        .wait_for_calls(2, |call| matches!(call, Call::GetMany(_)))
         .await;
     let result = tokio::time::timeout(Duration::from_secs(1), &mut singleton).await;
     assert!(!range.is_finished());
@@ -774,13 +794,11 @@ async fn failed_node_batch_returns_while_operation_scan_is_pending() {
         let mut state = fixture.store.state.lock().unwrap();
         state.batch_gate = Some(batch_gate.clone());
         state.range_gate = Some(range_gate.clone());
-        state.get_sequence = 23;
+        state.publication_sequence = 23;
         state.batch_sequences = vec![19];
         state.range_sequence = 23;
     }
-    let url = fixture
-        .keyless(Keyless::new(store, ((0..=10000).into(), ())))
-        .await;
+    let url = fixture.keyless(store).await;
     let mut query = tokio::spawn(async move {
         common::operation_log_rpc_client(&url)
             .get_operation_range(request(14, 2, 9))
@@ -804,42 +822,63 @@ async fn failed_node_batch_returns_while_operation_scan_is_pending() {
 }
 
 #[tokio::test]
-async fn clones_share_successful_roots_and_nodes_but_recheck_publication() {
-    let mut fixture = Fixture::new().await;
+async fn clones_share_publication_roots_and_nodes() {
+    let fixture = Fixture::new().await;
     let store = fixture.prefixed(&[]);
     let operations = operations();
     let root = fixture.stage(&store, &operations, &((0..=10000).into(), ()));
+    {
+        let mut state = fixture.store.state.lock().unwrap();
+        state.publication_sequence = 23;
+        state.batch_sequences = vec![23];
+    }
     let client = Keyless::new(store, ((0..=10000).into(), ()));
-    let first_url = fixture.keyless(client.clone()).await;
-    let second_url = fixture.keyless(client).await;
-    proof_client(&first_url)
-        .get_operation_range(request(14, 1, 1), &root)
+    let first = client.clone();
+    let proof = first
+        .operation_range_checkpoint(Location::new(14), Location::new(1), 1)
         .await
         .unwrap();
+    assert_eq!(proof.root, root);
+    assert!(proof.verify::<Sha256>());
+    assert_eq!(
+        proof.encoded_operations,
+        vec![operations[1].encode().to_vec()]
+    );
     fixture.store.state.lock().unwrap().calls.clear();
-    proof_client(&second_url)
-        .get_operation_range(request(14, 1, 1), &root)
+    let proof = client
+        .operation_range_checkpoint(Location::new(14), Location::new(1), 1)
         .await
         .unwrap();
+    assert_eq!(proof.root, root);
+    assert!(proof.verify::<Sha256>());
+    assert_eq!(
+        proof.encoded_operations,
+        vec![operations[1].encode().to_vec()]
+    );
     let calls = fixture.store.calls();
     let batch = boundary_batch(&calls, 14);
     assert_eq!(batch.keys, vec![Bytes::from(key(4, 1))]);
+    assert_eq!(batch.min_sequence_number, Some(23));
+    assert!(calls.iter().all(|call| !matches!(
+        call,
+        Call::Range(range) if range.mode == TraversalMode::Reverse
+    )));
 
     fixture.store.state.lock().unwrap().rows.remove(&key(3, 14));
-    let error = common::operation_log_rpc_client(&second_url)
-        .get_operation_range(request(14, 1, 1))
+    let proof = client
+        .operation_range_checkpoint(Location::new(14), Location::new(1), 1)
         .await
-        .unwrap_err();
-    assert_eq!(error.code, ErrorCode::OutOfRange);
+        .unwrap();
+    assert_eq!(proof.root, root);
+    assert!(proof.verify::<Sha256>());
     assert_eq!(
-        fixture
-            .store
-            .calls()
-            .iter()
-            .filter(|call| matches!(call, Call::Get(_)))
-            .count(),
-        2
+        proof.encoded_operations,
+        vec![operations[1].encode().to_vec()]
     );
+    assert!(fixture.store.calls().iter().all(|call| !matches!(
+        call,
+        Call::Range(range) if range.mode == TraversalMode::Reverse
+    )));
 }
 
 #[tokio::test]
@@ -850,9 +889,7 @@ async fn eleven_concurrent_singletons_fetch_each_node_once() {
     let root = fixture.stage(&store, &operations, &((0..=10000).into(), ()));
     let gate = Gate::new();
     fixture.store.state.lock().unwrap().batch_gate = Some(gate.clone());
-    let url = fixture
-        .keyless(Keyless::new(store, ((0..=10000).into(), ())))
-        .await;
+    let url = fixture.keyless(store).await;
     let client = proof_client(&url);
     let mut queries = Vec::new();
     let first = client.clone();
@@ -870,7 +907,10 @@ async fn eleven_concurrent_singletons_fetch_each_node_once() {
     }
     fixture
         .store
-        .wait_for_calls(11, |call| matches!(call, Call::Get(_)))
+        .wait_for_calls(
+            1,
+            |call| matches!(call, Call::Range(range) if range.mode == TraversalMode::Reverse),
+        )
         .await;
     fixture
         .store
@@ -887,7 +927,11 @@ async fn eleven_concurrent_singletons_fetch_each_node_once() {
         assert_eq!(proof.operations, operations[location..location + 1]);
     }
     let calls = fixture.store.calls();
-    assert_eq!(calls.len(), 22, "each proof needs one Get and one GetMany");
+    assert_eq!(
+        calls.len(),
+        12,
+        "publication is shared across proof batches"
+    );
     let mut nodes = BTreeMap::new();
     for call in &calls {
         if let Call::GetMany(batch) = call {
@@ -910,11 +954,84 @@ async fn eleven_concurrent_singletons_fetch_each_node_once() {
     assert_eq!(
         calls
             .iter()
-            .filter(|call| matches!(call, Call::Get(_)))
+            .filter(|call| {
+                matches!(call, Call::Range(range) if range.mode == TraversalMode::Reverse)
+            })
             .count(),
-        11
+        1
     );
-    assert!(calls.iter().all(|call| !matches!(call, Call::Range(_))));
+    assert!(calls.iter().all(|call| !matches!(
+        call,
+        Call::Range(range) if range.mode == TraversalMode::Forward
+    )));
+}
+
+#[tokio::test]
+async fn cancelled_node_leader_does_not_make_follower_wait_for_replacement() {
+    let fixture = Fixture::new().await;
+    let store = fixture.prefixed(&[]);
+    let operations = operations();
+    let root = fixture.stage(&store, &operations, &((0..=10000).into(), ()));
+    let client = Keyless::new(store, ((0..=10000).into(), ()));
+    let read = |client: Keyless| async move {
+        client
+            .operation_range_checkpoint(Location::new(14), Location::new(1), 1)
+            .await
+    };
+    let leader_gate = Gate::new();
+    {
+        let mut state = fixture.store.state.lock().unwrap();
+        state.publication_sequence = 23;
+        state.batch_sequences = vec![47];
+        state.batch_gate = Some(leader_gate.clone());
+    }
+    let leader = tokio::spawn(read(client.clone()));
+    leader_gate.wait().await;
+
+    // Hold the follower's metadata read so a replacement can claim the cancelled flight.
+    let follower_gate = Gate::new();
+    fixture.store.state.lock().unwrap().batch_gate = Some(follower_gate.clone());
+    let mut follower = tokio::spawn(read(client.clone()));
+    follower_gate.wait().await;
+    leader.abort();
+    assert!(leader.await.unwrap_err().is_cancelled());
+
+    let replacement_gate = Gate::new();
+    fixture.store.state.lock().unwrap().batch_gate = Some(replacement_gate.clone());
+    let replacement = tokio::spawn(read(client));
+    replacement_gate.wait().await;
+    follower_gate.open();
+    let result = tokio::time::timeout(Duration::from_secs(1), &mut follower).await;
+    assert!(!replacement.is_finished());
+    replacement_gate.open();
+    leader_gate.open();
+    let _ = replacement.await.unwrap().unwrap();
+    if result.is_err() {
+        let _ = follower.await.unwrap().unwrap();
+    }
+    let proof = result
+        .expect("follower must read unresolved nodes without joining the replacement flight")
+        .unwrap()
+        .unwrap();
+    assert_eq!(proof.root, root);
+    assert!(proof.verify::<Sha256>());
+    assert_eq!(
+        proof.encoded_operations,
+        vec![operations[1].encode().to_vec()]
+    );
+
+    let calls = fixture.store.calls();
+    let batches = calls
+        .iter()
+        .filter_map(|call| match call {
+            Call::GetMany(batch) => Some(batch),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(batches.len(), 4);
+    assert!(batches[1].keys.iter().all(|key| key[0] != NODE_FAMILY));
+    assert!(batches[3].keys.iter().all(|key| key[0] == NODE_FAMILY));
+    assert_eq!(batches[3].min_sequence_number, Some(23));
 }
 
 #[tokio::test]
@@ -927,7 +1044,7 @@ async fn ordered_and_immutable_overlap_wire_reads_and_verify_typed_proofs() {
         let range_gate = Gate::new();
         {
             let mut state = fixture.store.state.lock().unwrap();
-            state.get_sequence = 23;
+            state.publication_sequence = 23;
             state.batch_sequences = vec![31, 47];
             state.range_sequence = 41;
             state.batch_gate = Some(batch_gate.clone());
@@ -943,14 +1060,11 @@ async fn ordered_and_immutable_overlap_wire_reads_and_verify_typed_proofs() {
         assert!(!task.is_finished());
         batch_gate.open();
         range_gate.open();
-        assert_eq!(task.await.unwrap(), 47);
+        task.await.unwrap();
 
         let calls = fixture.store.calls();
         assert_eq!(calls.len(), 3, "unexpected calls for {variant:?}");
-        let Call::Get(publication) = &calls[0] else {
-            panic!("publication must be first")
-        };
-        assert_eq!(publication.key.as_ref(), key(3, 14));
+        let publication = publication_range(&calls);
         assert_eq!(publication.min_sequence_number, Some(17));
         let batch = calls
             .iter()
@@ -959,13 +1073,7 @@ async fn ordered_and_immutable_overlap_wire_reads_and_verify_typed_proofs() {
                 _ => None,
             })
             .unwrap();
-        let range = calls
-            .iter()
-            .find_map(|call| match call {
-                Call::Range(range) => Some(range),
-                _ => None,
-            })
-            .unwrap();
+        let range = operation_range(&calls);
         assert_eq!(batch.min_sequence_number, Some(23));
         assert_eq!(range.min_sequence_number, Some(23));
         assert_eq!(range.start.as_ref(), key(4, 2));
@@ -983,28 +1091,104 @@ async fn ordered_and_immutable_overlap_wire_reads_and_verify_typed_proofs() {
 }
 
 #[tokio::test]
-async fn ordered_and_immutable_clones_reuse_cache_and_recheck_publication() {
+async fn ordered_and_immutable_clones_reuse_publication_and_proof_caches() {
     for variant in [HistoricalVariant::Ordered, HistoricalVariant::Immutable] {
-        let mut fixture = Fixture::new().await;
+        let fixture = Fixture::new().await;
         let store = fixture.prefixed(&[]);
         let root = stage_variant(&fixture, &store, variant);
         {
             let mut state = fixture.store.state.lock().unwrap();
-            state.get_sequence = 23;
+            state.publication_sequence = 23;
             state.batch_sequences = vec![31];
         }
-        let [first_url, second_url] = serve_variant_clones(&mut fixture, store, variant).await;
-        assert_eq!(
-            verify_variant_range(variant, &first_url, request(14, 1, 1), &root).await,
-            31
-        );
-        fixture.store.state.lock().unwrap().calls.clear();
-        assert_eq!(
-            verify_variant_range(variant, &second_url, request(14, 1, 1), &root).await,
-            31
-        );
+        match variant {
+            HistoricalVariant::Ordered => {
+                let client = Ordered::new(store, ordered_cfg(), key_cfg());
+                let first = client.clone();
+                let proof = first
+                    .operation_range_checkpoint(Location::new(14), Location::new(1), 1)
+                    .await
+                    .unwrap();
+                assert_eq!(proof.root, root);
+                assert!(proof.verify::<Sha256>());
+                assert_eq!(
+                    proof.encoded_operations,
+                    vec![ordered_operations()[1].encode().to_vec()]
+                );
+                fixture.store.state.lock().unwrap().calls.clear();
+                let proof = client
+                    .operation_range_checkpoint(Location::new(14), Location::new(1), 1)
+                    .await
+                    .unwrap();
+                assert_eq!(proof.root, root);
+                assert!(proof.verify::<Sha256>());
+                assert_eq!(
+                    proof.encoded_operations,
+                    vec![ordered_operations()[1].encode().to_vec()]
+                );
+                fixture.store.state.lock().unwrap().rows.remove(&key(3, 14));
+                let proof = client
+                    .operation_range_checkpoint(Location::new(14), Location::new(1), 1)
+                    .await
+                    .unwrap();
+                assert_eq!(proof.root, root);
+                assert!(proof.verify::<Sha256>());
+                assert_eq!(
+                    proof.encoded_operations,
+                    vec![ordered_operations()[1].encode().to_vec()]
+                );
+            }
+            HistoricalVariant::Immutable => {
+                let client = Immutable::new(store, immutable_cfg());
+                let first = client.clone();
+                let proof = first
+                    .operation_range_checkpoint(Location::new(14), Location::new(1), 1)
+                    .await
+                    .unwrap();
+                assert_eq!(proof.root, root);
+                assert!(proof.verify::<Sha256>());
+                assert_eq!(
+                    proof.encoded_operations,
+                    vec![immutable_operations()[1].encode().to_vec()]
+                );
+                fixture.store.state.lock().unwrap().calls.clear();
+                let proof = client
+                    .operation_range_checkpoint(Location::new(14), Location::new(1), 1)
+                    .await
+                    .unwrap();
+                assert_eq!(proof.root, root);
+                assert!(proof.verify::<Sha256>());
+                assert_eq!(
+                    proof.encoded_operations,
+                    vec![immutable_operations()[1].encode().to_vec()]
+                );
+                fixture.store.state.lock().unwrap().rows.remove(&key(3, 14));
+                let proof = client
+                    .operation_range_checkpoint(Location::new(14), Location::new(1), 1)
+                    .await
+                    .unwrap();
+                assert_eq!(proof.root, root);
+                assert!(proof.verify::<Sha256>());
+                assert_eq!(
+                    proof.encoded_operations,
+                    vec![immutable_operations()[1].encode().to_vec()]
+                );
+            }
+        }
         let calls = fixture.store.calls();
-        let batch = boundary_batch(&calls, 14);
+        assert!(calls.iter().all(|call| !matches!(
+            call,
+            Call::Range(range) if range.mode == TraversalMode::Reverse
+        )));
+        let batches = calls
+            .iter()
+            .filter_map(|call| match call {
+                Call::GetMany(batch) => Some(batch),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(batches.len(), 2);
+        let batch = batches[0];
         assert!(batch.keys.contains(&key(4, 1)));
         assert_eq!(
             batch.keys.contains(&key(9, 14)),
@@ -1012,27 +1196,6 @@ async fn ordered_and_immutable_clones_reuse_cache_and_recheck_publication() {
         );
         assert!(batch.keys.iter().all(|key| key[0] != NODE_FAMILY));
         assert_eq!(batch.min_sequence_number, Some(23));
-
-        {
-            let mut state = fixture.store.state.lock().unwrap();
-            state.get_sequence = 31;
-            state.range_sequence = 31;
-            state.rows.remove(&key(3, 14));
-        }
-        let error = common::operation_log_rpc_client(&second_url)
-            .get_operation_range(request(14, 1, 1))
-            .await
-            .unwrap_err();
-        assert_eq!(error.code, ErrorCode::OutOfRange);
-        assert_eq!(
-            fixture
-                .store
-                .calls()
-                .iter()
-                .filter(|call| matches!(call, Call::Get(_)))
-                .count(),
-            2
-        );
     }
 }
 
@@ -1068,7 +1231,7 @@ async fn ordered_and_immutable_concurrent_singletons_share_in_flight_nodes() {
         }
 
         let calls = fixture.store.calls();
-        assert_eq!(calls.len(), 8, "unexpected calls for {variant:?}");
+        assert_eq!(calls.len(), 5, "unexpected calls for {variant:?}");
         let mut node_fetches = BTreeMap::new();
         for call in &calls {
             if let Call::GetMany(batch) = call {
@@ -1081,7 +1244,19 @@ async fn ordered_and_immutable_concurrent_singletons_share_in_flight_nodes() {
         }
         assert!(!node_fetches.is_empty());
         assert!(node_fetches.values().all(|count| *count == 1));
-        assert!(calls.iter().all(|call| !matches!(call, Call::Range(_))));
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|call| {
+                    matches!(call, Call::Range(range) if range.mode == TraversalMode::Reverse)
+                })
+                .count(),
+            1
+        );
+        assert!(calls.iter().all(|call| !matches!(
+            call,
+            Call::Range(range) if range.mode == TraversalMode::Forward
+        )));
     }
 }
 
@@ -1097,11 +1272,7 @@ async fn separate_namespaces_do_not_share_cached_nodes_or_roots() {
             Operation::Commit(None, Location::new(0)),
         ];
         roots.push(fixture.stage(&store, &operations, &((0..=10000).into(), ())));
-        urls.push(
-            fixture
-                .keyless(Keyless::new(store, ((0..=10000).into(), ())))
-                .await,
-        );
+        urls.push(fixture.keyless(store).await);
     }
     assert_ne!(roots[0], roots[1]);
     for (index, prefix) in [0xa1, 0xb2].into_iter().enumerate() {
@@ -1114,7 +1285,8 @@ async fn separate_namespaces_do_not_share_cached_nodes_or_roots() {
     let calls = fixture.store.calls();
     assert_eq!(calls.len(), 4);
     for (pair, prefix) in calls.as_chunks::<2>().0.iter().zip([0xa1, 0xb2]) {
-        assert!(matches!(&pair[0], Call::Get(get) if get.key[0] == prefix));
+        assert!(matches!(&pair[0], Call::Range(range)
+            if range.mode == TraversalMode::Reverse && range.start[0] == prefix));
         let Call::GetMany(batch) = &pair[1] else {
             panic!("namespace must fetch its proof rows")
         };
@@ -1147,7 +1319,7 @@ fn prefix_root(operations: &[UnorderedOp], floor: u64) -> Digest {
 
 #[tokio::test]
 async fn unordered_noncommit_tip_shares_floor_without_waiting_for_operation_scan() {
-    let mut fixture = Fixture::new().await;
+    let fixture = Fixture::new().await;
     let store = fixture.prefixed(&[]);
     let operations = vec![
         UnorderedOp::CommitFloor(None, Location::new(0)),
@@ -1164,33 +1336,45 @@ async fn unordered_noncommit_tip_shares_floor_without_waiting_for_operation_scan
     let root = prefix_root(&operations[..7], 4);
     let range_gate = Gate::new();
     fixture.store.state.lock().unwrap().range_gate = Some(range_gate.clone());
-    let backend = Unordered::new(store, cfg);
-    let range_url = fixture.unordered(backend.clone()).await;
-    let singleton_url = fixture.unordered(backend).await;
-    let range_client =
-        OperationLogClient::<_, mmr::Family, Sha256, UnorderedOp>::plaintext(&range_url, cfg);
-    let client =
-        OperationLogClient::<_, mmr::Family, Sha256, UnorderedOp>::plaintext(&singleton_url, cfg);
+    let client = Unordered::new(store, cfg);
+    let range_client = client.clone();
     let range = tokio::spawn(async move {
         range_client
-            .get_operation_range(request(6, 0, 2), &root)
+            .operation_range_checkpoint(Location::new(6), Location::new(0), 2)
             .await
     });
     range_gate.wait().await;
-    let mut singleton =
-        tokio::spawn(async move { client.get_operation_range(request(6, 6, 1), &root).await });
+    let mut singleton = tokio::spawn(async move {
+        client
+            .operation_range_checkpoint(Location::new(6), Location::new(6), 1)
+            .await
+    });
     let result = tokio::time::timeout(Duration::from_secs(1), &mut singleton).await;
     assert!(!range.is_finished());
     range_gate.open();
-    assert_eq!(range.await.unwrap().unwrap().operations, operations[..2]);
+    let range_proof = range.await.unwrap().unwrap();
+    assert_eq!(range_proof.root, root);
+    assert!(range_proof.verify::<Sha256>());
+    assert_eq!(
+        range_proof.encoded_operations,
+        operations[..2]
+            .iter()
+            .map(|operation| operation.encode().to_vec())
+            .collect::<Vec<_>>()
+    );
     if result.is_err() {
-        singleton.await.unwrap().unwrap();
+        let _ = singleton.await.unwrap().unwrap();
     }
     let proof = result
         .expect("shared floor initialization must not wait for the operation scan")
         .unwrap()
         .unwrap();
-    assert_eq!(proof.operations, operations[6..7]);
+    assert_eq!(proof.root, root);
+    assert!(proof.verify::<Sha256>());
+    assert_eq!(
+        proof.encoded_operations,
+        vec![operations[6].encode().to_vec()]
+    );
     let calls = fixture.store.calls();
     for location in [4, 5] {
         assert_eq!(
@@ -1213,7 +1397,7 @@ async fn missing_witness_is_reloaded_after_a_successful_cached_proof() {
     let operations = vec![UnorderedOp::CommitFloor(None, Location::new(0))];
     let cfg = (((0..=10000).into(), ()), ((0..=10000).into(), ()));
     let root = fixture.stage(&store, &operations, &cfg);
-    let url = fixture.unordered(Unordered::new(store, cfg)).await;
+    let url = fixture.unordered(store, cfg).await;
     let client = OperationLogClient::<_, mmr::Family, Sha256, UnorderedOp>::plaintext(&url, cfg);
     client
         .get_operation_range(request(0, 0, 1), &root)
@@ -1251,12 +1435,10 @@ async fn store_floor_rejections_survive_publication_and_late_batch_frames() {
         fixture.stage(&store, &operations(), &((0..=10000).into(), ()));
         {
             let mut state = fixture.store.state.lock().unwrap();
-            state.get_sequence = publication;
+            state.publication_sequence = publication;
             state.batch_sequences = batches;
         }
-        let url = fixture
-            .keyless(Keyless::new(store, ((0..=10000).into(), ())))
-            .await;
+        let url = fixture.keyless(store).await;
         let mut query = request(14, 1, 1);
         query.min_sequence_number = Some(floor);
         let error = common::operation_log_rpc_client(&url)
@@ -1273,51 +1455,49 @@ async fn store_floor_rejections_survive_publication_and_late_batch_frames() {
 }
 
 #[tokio::test]
-async fn late_batch_abort_preserves_all_structured_details() {
-    let mut fixture = Fixture::new().await;
-    let store = fixture.prefixed(&[]);
-    fixture.stage(&store, &operations(), &((0..=10000).into(), ()));
-    let info = ErrorInfo {
-        reason: "REPLICA_BEHIND".into(),
-        domain: "operation-range-test".into(),
-        ..Default::default()
-    };
-    let mut retry = RetryInfo::default();
-    retry.retry_delay.get_or_insert_default().seconds = 3;
-    let expected = with_query_detail(
-        with_retry_info_detail(
-            with_error_info_detail(
-                ConnectError::new(ErrorCode::Aborted, "proof batch replica moved behind"),
-                info.clone(),
+async fn late_batch_errors_preserve_all_structured_details() {
+    for code in [
+        ErrorCode::Aborted,
+        ErrorCode::Unavailable,
+        ErrorCode::DeadlineExceeded,
+    ] {
+        let mut fixture = Fixture::new().await;
+        let store = fixture.prefixed(&[]);
+        fixture.stage(&store, &operations(), &((0..=10000).into(), ()));
+        let info = ErrorInfo {
+            reason: "REPLICA_BEHIND".into(),
+            domain: "operation-range-test".into(),
+            ..Default::default()
+        };
+        let mut retry = RetryInfo::default();
+        retry.retry_delay.get_or_insert_default().seconds = 3;
+        let expected = with_query_detail(
+            with_retry_info_detail(
+                with_error_info_detail(ConnectError::new(code, "proof batch failed"), info.clone()),
+                retry.clone(),
             ),
-            retry.clone(),
-        ),
-        detail(19),
-    );
-    {
-        let mut state = fixture.store.state.lock().unwrap();
-        state.get_sequence = 23;
-        state.batch_sequences = vec![23];
-        state.batch_error = Some(expected);
+            detail(19),
+        );
+        {
+            let mut state = fixture.store.state.lock().unwrap();
+            state.publication_sequence = 23;
+            state.batch_sequences = vec![23];
+            state.batch_error = Some(expected);
+        }
+        let url = fixture.keyless(store).await;
+        let error = common::operation_log_rpc_client(&url)
+            .get_operation_range(request(14, 1, 1))
+            .await
+            .unwrap_err();
+        let decoded = decode_connect_error(&error).unwrap();
+        assert_eq!(decoded.code, code);
+        assert_eq!(decoded.message.as_deref(), Some("proof batch failed"));
+        assert_eq!(decoded.error_info, Some(info));
+        assert_eq!(decoded.retry_info, Some(retry));
+        assert_eq!(decoded.query_detail, Some(detail(19)));
+        assert_eq!(
+            boundary_batch(&fixture.store.calls(), 14).min_sequence_number,
+            Some(23)
+        );
     }
-    let url = fixture
-        .keyless(Keyless::new(store, ((0..=10000).into(), ())))
-        .await;
-    let error = common::operation_log_rpc_client(&url)
-        .get_operation_range(request(14, 1, 1))
-        .await
-        .unwrap_err();
-    let decoded = decode_connect_error(&error).unwrap();
-    assert_eq!(decoded.code, ErrorCode::Aborted);
-    assert_eq!(
-        decoded.message.as_deref(),
-        Some("proof batch replica moved behind")
-    );
-    assert_eq!(decoded.error_info, Some(info));
-    assert_eq!(decoded.retry_info, Some(retry));
-    assert_eq!(decoded.query_detail, Some(detail(19)));
-    assert_eq!(
-        boundary_batch(&fixture.store.calls(), 14).min_sequence_number,
-        Some(23)
-    );
 }
