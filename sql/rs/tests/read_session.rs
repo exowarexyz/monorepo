@@ -15,7 +15,7 @@ use exoware_sdk::store::query::v1::{
     ReduceRequest, ReduceResponse, Service, ServiceServer,
 };
 use exoware_sdk::{PrefixedStoreClient, ReadSession, StoreClient};
-use exoware_sql::{query_context_with_session, session_context, KvSchema, TableColumnConfig};
+use exoware_sql::{session_context, with_read_session, KvSchema, TableColumnConfig};
 use futures::stream;
 
 #[derive(Clone)]
@@ -130,7 +130,7 @@ fn row_value() -> Bytes {
 }
 
 fn context_with_table(client: PrefixedStoreClient) -> datafusion::prelude::SessionContext {
-    let ctx = session_context();
+    let ctx = session_context(client.clone());
     KvSchema::new(client)
         .table(
             "items",
@@ -177,7 +177,7 @@ async fn run_two_scans(monotonic: bool, floor: Option<u64>) -> (Vec<Option<u64>>
     };
     let retained = session.clone();
     let base = context_with_table(store.client.clone());
-    let ctx = query_context_with_session(&base, session);
+    let ctx = with_read_session(&base, session);
 
     execute_table_scan(&ctx).await;
     execute_table_scan(&ctx).await;
@@ -186,12 +186,65 @@ async fn run_two_scans(monotonic: bool, floor: Option<u64>) -> (Vec<Option<u64>>
 }
 
 #[tokio::test]
+async fn default_context_retains_observations_and_independent_contexts_start_fresh() {
+    let store = MockStore::start(11).await;
+    let ctx = context_with_table(store.client.clone());
+
+    execute_table_scan(&ctx).await;
+    execute_table_scan(&ctx.clone()).await;
+    execute_table_scan(&context_with_table(store.client.clone())).await;
+
+    assert_eq!(store.requested_floors(), [None, Some(11), None]);
+}
+
+#[tokio::test]
+async fn builder_uses_supplied_read_session() {
+    for (monotonic, floor) in [(true, None), (true, Some(0)), (false, Some(0))] {
+        let store = MockStore::start(11).await;
+        let base = context_with_table(store.client.clone());
+        let session = if monotonic {
+            ReadSession::monotonic(store.client.clone(), floor)
+        } else {
+            ReadSession::fixed(store.client.clone(), floor)
+        };
+        let ctx = datafusion::prelude::SessionContext::new_with_state(
+            exoware_sql::session_state_builder(session.clone()).build(),
+        );
+        ctx.register_table("items", base.table_provider("items").await.unwrap())
+            .unwrap();
+
+        execute_table_scan(&ctx).await;
+        execute_table_scan(&ctx).await;
+
+        assert_eq!(
+            store.requested_floors(),
+            [floor, if monotonic { Some(11) } else { floor }]
+        );
+        assert_eq!(session.evaluated_sequence(), Some(11));
+    }
+}
+
+#[tokio::test]
+async fn request_contexts_replace_the_base_session() {
+    let store = MockStore::start(11).await;
+    let base = context_with_table(store.client.clone());
+    execute_table_scan(&base).await;
+
+    for _ in 0..2 {
+        let ctx = with_read_session(&base, ReadSession::monotonic(store.client.clone(), None));
+        execute_table_scan(&ctx).await;
+    }
+
+    assert_eq!(store.requested_floors(), [None, None, None]);
+}
+
+#[tokio::test]
 async fn monotonic_session_shares_observations_across_sql_statements() {
     let store = MockStore::start(11).await;
     let session = ReadSession::monotonic(store.client.clone(), None);
     let retained = session.clone();
     let base = context_with_table(store.client.clone());
-    let ctx = query_context_with_session(&base, session);
+    let ctx = with_read_session(&base, session);
 
     execute_table_scan(&ctx).await;
     assert_eq!(retained.evaluated_sequence(), Some(11));
@@ -218,9 +271,8 @@ async fn fixed_and_monotonic_policies_preserve_absent_and_zero_floors() {
 #[tokio::test]
 async fn store_free_sql_does_not_create_an_observation() {
     let store = MockStore::start(11).await;
-    let session = ReadSession::monotonic(store.client.clone(), None);
-    let retained = session.clone();
-    let ctx = query_context_with_session(&session_context(), session);
+    let ctx = session_context(store.client.clone());
+    let retained = ctx.copied_config().get_extension::<ReadSession>().unwrap();
 
     let batches = ctx
         .sql("SELECT 1")
@@ -236,4 +288,25 @@ async fn store_free_sql_does_not_create_an_observation() {
     );
     assert!(store.requested_floors().is_empty());
     assert_eq!(retained.evaluated_sequence(), None);
+}
+
+#[test]
+fn context_override_preserves_optional_store_sequence_floor() {
+    let ctx = datafusion::prelude::SessionContext::new();
+    let store = PrefixedStoreClient::empty(StoreClient::new("http://localhost:10000"));
+    for floor in [None, Some(0), Some(41)] {
+        let query_ctx = with_read_session(&ctx, ReadSession::monotonic(store.clone(), floor));
+        let first = query_ctx
+            .copied_config()
+            .get_extension::<ReadSession>()
+            .unwrap();
+        let second = query_ctx
+            .copied_config()
+            .get_extension::<ReadSession>()
+            .unwrap();
+
+        assert_eq!(first.min_sequence_number(), floor);
+        assert_eq!(second.min_sequence_number(), floor);
+    }
+    assert!(ctx.copied_config().get_extension::<ReadSession>().is_none());
 }

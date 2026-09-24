@@ -56,24 +56,12 @@ use crate::codec::decode_primary_key_selected;
 use crate::filter::ScanAccessPlan;
 use crate::predicate::QueryPredicate;
 use crate::schema::KvSchema;
+use crate::session::with_read_session;
 use crate::types::{IndexLayout, ResolvedIndexSpec, TableModel};
 
 const MAX_CONNECTRPC_BODY_BYTES: usize = 256 * 1024 * 1024;
 
 type SubscribeStream = Pin<Box<dyn Stream<Item = Result<SubscribeResponse, ConnectError>> + Send>>;
-
-/// Build a query context whose Store scans share an optional minimum sequence.
-///
-/// All Store-backed providers in `ctx` must use the same Store as `store`.
-pub fn query_context_with_min_sequence(
-    ctx: &SessionContext,
-    store: &PrefixedStoreClient,
-    min_sequence_number: Option<u64>,
-) -> SessionContext {
-    let read_session = ReadSession::monotonic(store.clone(), min_sequence_number);
-
-    crate::query_context_with_session(ctx, read_session)
-}
 
 /// One registered table's streaming-decode state.
 #[derive(Clone)]
@@ -160,7 +148,7 @@ impl SqlServer {
             );
             table_names.push(name.clone());
         }
-        let ctx = crate::session_context();
+        let ctx = crate::session_context(store.clone());
         schema.register_all(&ctx)?;
         Ok(Self {
             ctx: Arc::new(ctx),
@@ -174,16 +162,6 @@ impl SqlServer {
     /// without going through the connect API.
     pub fn session(&self) -> &SessionContext {
         &self.ctx
-    }
-
-    fn query_session(
-        &self,
-        min_sequence_number: Option<u64>,
-    ) -> (SessionContext, exoware_sdk::ReadSession) {
-        let ctx = query_context_with_min_sequence(&self.ctx, &self.store, min_sequence_number);
-        let read_session = crate::types::request_read_session(&ctx.copied_config(), &self.store)
-            .expect("query context must retain its Store read session");
-        (ctx, read_session)
     }
 
     #[allow(clippy::result_large_err)]
@@ -342,7 +320,8 @@ impl Service for SqlConnect {
         AssertUnwindSafe(async move {
             let sql = request.sql.to_string();
             let min_sequence_number = request.min_sequence_number;
-            let (ctx, read_session) = server.query_session(min_sequence_number);
+            let read_session = ReadSession::monotonic(server.store.clone(), min_sequence_number);
+            let ctx = with_read_session(&server.ctx, read_session.clone());
             let plan = ctx
                 .state()
                 .create_logical_plan(&sql)
@@ -951,7 +930,6 @@ mod tests {
         use connectrpc::client::{ClientConfig, HttpClient};
         use datafusion::execution::memory_pool::{FairSpillPool, MemoryPool, PeakRecordingPool};
         use datafusion::execution::runtime_env::RuntimeEnvBuilder;
-        use datafusion::prelude::SessionConfig;
         use exoware_sdk::kv_codec::KvReducedValue;
         use exoware_sdk::{RangeReduceGroup, RangeReduceResponse, RangeReduceResult, StoreClient};
 
@@ -1084,12 +1062,16 @@ mod tests {
             .with_memory_pool(pool.clone())
             .build_arc()
             .unwrap();
-        let ctx = SessionContext::new_with_state(
-            crate::session_state_builder()
-                .with_runtime_env(runtime)
-                .with_config(SessionConfig::new().with_target_partitions(1))
-                .build(),
-        );
+        let mut builder =
+            crate::session_state_builder(ReadSession::monotonic(server.store.clone(), None));
+        builder
+            .config()
+            .as_mut()
+            .unwrap()
+            .options_mut()
+            .execution
+            .target_partitions = 1;
+        let ctx = SessionContext::new_with_state(builder.with_runtime_env(runtime).build());
         ctx.register_table(
             "counts",
             server.session().table_provider("counts").await.unwrap(),
@@ -1240,23 +1222,6 @@ mod tests {
                 "{sql}"
             );
         }
-    }
-
-    #[test]
-    fn query_context_preserves_optional_store_sequence_floor() {
-        let ctx = SessionContext::new();
-        let store = PrefixedStoreClient::empty(StoreClient::new("http://localhost:10000"));
-        for floor in [None, Some(0), Some(41)] {
-            let query_ctx = query_context_with_min_sequence(&ctx, &store, floor);
-            let first =
-                crate::types::request_read_session(query_ctx.state().config(), &store).unwrap();
-            let second =
-                crate::types::request_read_session(query_ctx.state().config(), &store).unwrap();
-
-            assert_eq!(first.min_sequence_number(), floor);
-            assert_eq!(second.min_sequence_number(), floor);
-        }
-        assert!(crate::types::request_read_session(ctx.state().config(), &store).is_none());
     }
 
     enum ControlledEvent {

@@ -35,6 +35,7 @@ use crate::codec::*;
 use crate::diagnostics::*;
 use crate::filter::*;
 use crate::predicate::*;
+use crate::session::read_session;
 use crate::types::*;
 
 // Amortize RPC framing and native predicate evaluation even with a small output limit
@@ -481,8 +482,7 @@ impl ExecutionPlan for KvScanExec {
 
         let mut builder = RecordBatchReceiverStreamBuilder::new(self.schema(), 2);
         let tx = builder.tx();
-        let session = request_read_session(context.session_config(), &self.client)
-            .unwrap_or_else(|| self.client.create_session());
+        let session = read_session(context.session_config(), &self.client);
         let key_prefix = self.client.key_prefix().clone();
         let model = self.model.clone();
         let index_specs = self.index_specs.clone();
@@ -1249,7 +1249,7 @@ mod tests {
                     .into_iter()
                     .map(|(key, value)| (prefix.encode_key(&key).unwrap(), Bytes::from(value))),
             );
-            let store = crate::session_context();
+            let store = crate::session_context(schema.client().clone());
             schema.register_all(&store).unwrap();
             let native = SessionContext::new();
             native
