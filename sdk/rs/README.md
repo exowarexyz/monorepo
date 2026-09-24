@@ -12,6 +12,20 @@ platform trust configuration.
 
 `exoware-sdk` is **ALPHA** software and is not yet recommended for production use. Developers should expect breaking changes and occasional instability.
 
+## Request compression
+
+Request compression is disabled by default. Select zstd and its compression level
+on the client builder:
+
+```rust
+use exoware_sdk::{ConnectRequestCompression, StoreClient};
+
+let client = StoreClient::builder()
+    .url("http://localhost:10000")
+    .connect_request_compression(ConnectRequestCompression::Zstd { level: -1 })
+    .build()?;
+```
+
 ## Store Key Prefixes
 
 Use `StoreKeyPrefix` when multiple logical QMDB, SQL, or raw KV instances share one Store database. The prefix is applied by the SDK, so higher-level clients keep using their normal logical keys:

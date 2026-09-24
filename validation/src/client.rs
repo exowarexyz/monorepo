@@ -27,7 +27,7 @@ pub enum RequestCompression {
 impl From<RequestCompression> for ConnectRequestCompression {
     fn from(value: RequestCompression) -> Self {
         match value {
-            RequestCompression::Zstd => Self::Zstd,
+            RequestCompression::Zstd => Self::Zstd { level: 0 },
             RequestCompression::Gzip => Self::Gzip,
             RequestCompression::None => Self::None,
         }
