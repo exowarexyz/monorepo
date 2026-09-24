@@ -51,6 +51,7 @@ use futures::{stream::BoxStream, StreamExt, TryStreamExt};
 use crate::diagnostics::*;
 use crate::filter::*;
 use crate::predicate::*;
+use crate::session::read_session;
 use crate::types::*;
 
 #[derive(Debug)]
@@ -552,8 +553,7 @@ impl ExecutionPlan for KvAggregateExec {
             )));
         }
 
-        let session = request_read_session(context.session_config(), &self.spec.client)
-            .unwrap_or_else(|| self.spec.client.create_session());
+        let session = read_session(context.session_config(), &self.spec.client);
         let source = Arc::new(self.clone());
         let concurrency = context.session_config().target_partitions().max(1);
         let jobs = self
@@ -2157,7 +2157,7 @@ mod tests {
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let url = format!("http://{}", listener.local_addr().unwrap());
             let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-            let store = crate::session_context();
+            let store = crate::session_context(PrefixedStoreClient::empty(StoreClient::new(&url)));
             let schema = crate::KvSchema::new(PrefixedStoreClient::empty(StoreClient::new(&url)))
                 .table(
                     "orders",
@@ -2397,15 +2397,24 @@ mod tests {
             self.rows.paths.lock().unwrap().clear();
             self.rows.reductions.lock().unwrap().clear();
             self.rows.scanned_rows.store(0, AtomicOrdering::Relaxed);
+            let session = self
+                .store
+                .copied_config()
+                .get_extension::<ReadSession>()
+                .unwrap();
+            let initial_floor = session.min_sequence_number();
             let actual = values(&self.store, sql).await.unwrap();
             assert_eq!(actual.as_slice(), expected, "{sql}");
             let requests = self.rows.reductions.lock().unwrap();
             for (idx, request) in requests.iter().enumerate() {
                 assert_eq!(
                     request.min_sequence_number,
-                    (idx > 0).then_some(7),
+                    if idx == 0 { initial_floor } else { Some(7) },
                     "shared read floor: {sql}"
                 );
+            }
+            if !requests.is_empty() {
+                assert_eq!(session.min_sequence_number(), Some(7));
             }
             let paths = self.rows.paths.lock().unwrap();
             assert_eq!(

@@ -16,35 +16,14 @@ mod writer;
 
 pub use aggregate::KvAggregateExtensionPlanner;
 pub use schema::KvSchema;
-pub use server::{query_context_with_min_sequence, sql_connect_stack, SqlConnect, SqlServer};
-pub use session::query_context_with_session;
+pub use server::{sql_connect_stack, SqlConnect, SqlServer};
+pub use session::{session_context, session_state_builder, with_read_session};
 pub use types::default_orders_index_specs;
 pub use types::{
     CellValue, IndexBackfillEvent, IndexBackfillOptions, IndexBackfillReport, IndexLayout,
     IndexSpec, TableColumnConfig,
 };
 pub use writer::{BatchReceipt, BatchWriter, PreparedBatch, TableWriter};
-
-/// Creates a DataFusion session with Store aggregate reduction enabled.
-pub fn session_context() -> datafusion::prelude::SessionContext {
-    datafusion::prelude::SessionContext::new_with_state(session_state_builder().build())
-}
-
-/// Creates a DataFusion session builder with Store aggregate reduction enabled.
-///
-/// Configure the returned builder before passing its state to
-/// [`datafusion::prelude::SessionContext::new_with_state`], then register tables with
-/// [`KvSchema::register_all`].
-///
-/// A custom query planner must include [`KvAggregateExtensionPlanner`] in its
-/// [`datafusion::physical_planner::DefaultPhysicalPlanner`] to plan Store aggregates.
-pub fn session_state_builder() -> datafusion::execution::session_state::SessionStateBuilder {
-    datafusion::execution::session_state::SessionStateBuilder::new_with_default_features()
-        .with_optimizer_rule(std::sync::Arc::new(
-            aggregate::KvAggregatePushdownRule::new(),
-        ))
-        .with_query_planner(std::sync::Arc::new(aggregate::KvQueryPlanner))
-}
 
 #[cfg(test)]
 mod tests {
@@ -511,7 +490,7 @@ mod tests {
                     .with_cover_columns(vec!["amount_cents".to_string()])],
             )
             .expect("schema");
-        let ctx = session_context();
+        let ctx = session_context(schema.client().clone());
         schema.register_all(&ctx).expect("register");
 
         let explain =
@@ -554,7 +533,7 @@ mod tests {
                     .with_cover_columns(vec!["amount_cents".to_string()])],
             )
             .expect("schema");
-        let ctx = session_context();
+        let ctx = session_context(schema.client().clone());
         schema.register_all(&ctx).expect("register");
 
         let explain = physical_plan_text(
@@ -607,7 +586,7 @@ mod tests {
                 ],
             )
             .expect("schema");
-        let ctx = session_context();
+        let ctx = session_context(schema.client().clone());
         schema.register_all(&ctx).expect("register");
 
         let explain = physical_plan_text(
@@ -651,7 +630,7 @@ mod tests {
                     .with_cover_columns(vec!["amount_cents".to_string()])],
             )
             .expect("schema");
-        let ctx = session_context();
+        let ctx = session_context(schema.client().clone());
         schema.register_all(&ctx).expect("register");
 
         let explain = physical_plan_text(
@@ -2763,7 +2742,7 @@ mod tests {
         }
         writer.flush().await.expect("flush");
 
-        let ctx = session_context();
+        let ctx = session_context(schema.client().clone());
         schema.register_all(&ctx).expect("register");
 
         for (name, expected_age) in [("alice", 30i64), ("bob", 25), ("", 99)] {
@@ -2866,7 +2845,7 @@ mod tests {
         }
         writer.flush().await.expect("flush");
 
-        let ctx = session_context();
+        let ctx = session_context(schema.client().clone());
         schema.register_all(&ctx).expect("register");
 
         for table in ["orders_nc", "orders_cov"] {
@@ -3283,8 +3262,8 @@ mod tests {
 
     #[tokio::test]
     async fn kv_schema_three_way_join() {
-        let ctx = session_context();
         let client = StoreClient::new("http://localhost:10000");
+        let ctx = session_context(PrefixedStoreClient::empty(client.clone()));
 
         KvSchema::new(PrefixedStoreClient::empty(client))
             .table(
@@ -6114,7 +6093,7 @@ mod tests {
             guard.insert(key, Bytes::new());
         }
 
-        let ctx = session_context();
+        let ctx = session_context(schema.client().clone());
         schema.register_all(&ctx).expect("register");
         let df = ctx
             .sql("SELECT amount_cents FROM orders WHERE status = 'open'")
@@ -6181,7 +6160,7 @@ mod tests {
             guard.insert(key, Bytes::from_static(b"not-codec"));
         }
 
-        let ctx = session_context();
+        let ctx = session_context(schema.client().clone());
         schema.register_all(&ctx).expect("register");
         let df = ctx
             .sql("SELECT amount_cents FROM orders WHERE status = 'open'")
@@ -6256,7 +6235,7 @@ mod tests {
             .expect("row");
         writer.flush().await.expect("flush");
 
-        let ctx = session_context();
+        let ctx = session_context(schema.client().clone());
         schema.register_all(&ctx).expect("register");
 
         let df = ctx
@@ -6824,7 +6803,7 @@ mod tests {
                 vec![],
             )
             .expect("schema");
-        let ctx = session_context();
+        let ctx = session_context(schema.client().clone());
         schema.register_all(&ctx).expect("register");
         let (batches, ()) = tokio::time::timeout(Duration::from_secs(5), async {
             tokio::join!(
@@ -7023,10 +7002,6 @@ mod tests {
         use datafusion::physical_plan::sorts::sort::SortExec;
 
         // Control the pass order that exposed the lost reverse pushdown.
-        let state = session_state_builder()
-            .with_physical_optimizer_rules(vec![])
-            .build();
-        let ctx = SessionContext::new_with_state(state);
         let schema = KvSchema::new(PrefixedStoreClient::empty(StoreClient::new(
             "http://127.0.0.1:0",
         )))
@@ -7037,6 +7012,13 @@ mod tests {
             vec![],
         )
         .expect("schema");
+        let state = session_state_builder(exoware_sdk::ReadSession::monotonic(
+            schema.client().clone(),
+            None,
+        ))
+        .with_physical_optimizer_rules(vec![])
+        .build();
+        let ctx = SessionContext::new_with_state(state);
         schema.register_all(&ctx).expect("register");
 
         let plan = ctx
@@ -7169,7 +7151,7 @@ mod tests {
                 vec![],
             )
             .expect("schema");
-        let ctx = session_context();
+        let ctx = session_context(schema.client().clone());
         schema.register_all(&ctx).expect("register");
 
         let (batches, ()) = tokio::time::timeout(Duration::from_secs(5), async {
@@ -7242,7 +7224,7 @@ mod tests {
                 vec![],
             )
             .expect("schema");
-        let ctx = session_context();
+        let ctx = session_context(schema.client().clone());
         schema.register_all(&ctx).expect("register");
 
         let explain = physical_plan_text(
@@ -7298,7 +7280,7 @@ mod tests {
                 vec![],
             )
             .expect("schema");
-        let ctx = session_context();
+        let ctx = session_context(schema.client().clone());
         schema.register_all(&ctx).expect("register");
 
         let explain = physical_plan_text(
@@ -7379,7 +7361,7 @@ mod tests {
             .expect("matching lower key");
         writer.flush().await.expect("seed rows");
 
-        let ctx = session_context();
+        let ctx = session_context(schema.client().clone());
         schema.register_all(&ctx).expect("register");
         let sql = "SELECT account, height \
                    FROM tx_activity \
@@ -7446,7 +7428,7 @@ mod tests {
         }
         writer.flush().await.expect("seed rows");
 
-        let ctx = session_context();
+        let ctx = session_context(schema.client().clone());
         schema.register_all(&ctx).expect("register");
         let sql = "SELECT id \
                    FROM events \
@@ -7504,7 +7486,7 @@ mod tests {
         }
         writer.flush().await.expect("seed rows");
 
-        let ctx = session_context();
+        let ctx = session_context(schema.client().clone());
         schema.register_all(&ctx).expect("register");
         let sql = "SELECT id \
                    FROM events \
@@ -7563,7 +7545,7 @@ mod tests {
         }
         writer.flush().await.expect("seed rows");
 
-        let ctx = session_context();
+        let ctx = session_context(schema.client().clone());
         schema.register_all(&ctx).expect("register");
 
         // Without an inner ORDER BY, LIMIT constrains the row count but not the selected rows.
@@ -7652,7 +7634,7 @@ mod tests {
             .expect("row");
         writer.flush().await.expect("seed rows");
 
-        let ctx = session_context();
+        let ctx = session_context(schema.client().clone());
         schema.register_all(&ctx).expect("register");
 
         let oversized = "a".repeat(
@@ -7720,7 +7702,7 @@ mod tests {
         }
         writer.flush().await.expect("seed rows");
 
-        let ctx = session_context();
+        let ctx = session_context(schema.client().clone());
         schema.register_all(&ctx).expect("register");
         // The two-row index frames contain one matching row followed by a rejection,
         // then a row whose residual predicate can either fail or satisfy the limit
@@ -7808,7 +7790,7 @@ mod tests {
         }
         writer.flush().await.expect("flush");
 
-        let ctx = session_context();
+        let ctx = session_context(schema.client().clone());
         schema.register_all(&ctx).expect("register");
 
         let batches = ctx
@@ -7890,7 +7872,7 @@ mod tests {
         }
         writer.flush().await.expect("flush");
 
-        let ctx = session_context();
+        let ctx = session_context(schema.client().clone());
         schema.register_all(&ctx).expect("register");
 
         state.range_calls.store(0, AtomicOrdering::SeqCst);
@@ -7971,7 +7953,7 @@ mod tests {
         }
         writer.flush().await.expect("flush");
 
-        let ctx = session_context();
+        let ctx = session_context(schema.client().clone());
         schema.register_all(&ctx).expect("register");
 
         state.range_calls.store(0, AtomicOrdering::SeqCst);
@@ -8068,7 +8050,7 @@ mod tests {
         }
         writer.flush().await.expect("flush");
 
-        let ctx = session_context();
+        let ctx = session_context(schema.client().clone());
         schema.register_all(&ctx).expect("register");
 
         state.range_calls.store(0, AtomicOrdering::SeqCst);
@@ -8188,7 +8170,7 @@ mod tests {
         }
         writer.flush().await.expect("flush");
 
-        let ctx = session_context();
+        let ctx = session_context(schema.client().clone());
         schema.register_all(&ctx).expect("register");
 
         state.range_calls.store(0, AtomicOrdering::SeqCst);
@@ -8275,7 +8257,7 @@ mod tests {
         }
         writer.flush().await.expect("flush");
 
-        let ctx = session_context();
+        let ctx = session_context(schema.client().clone());
         schema.register_all(&ctx).expect("register");
 
         state.range_calls.store(0, AtomicOrdering::SeqCst);
@@ -8362,7 +8344,7 @@ mod tests {
         }
         writer.flush().await.expect("flush");
 
-        let ctx = session_context();
+        let ctx = session_context(schema.client().clone());
         schema.register_all(&ctx).expect("register");
 
         state.range_calls.store(0, AtomicOrdering::SeqCst);
@@ -8447,7 +8429,7 @@ mod tests {
         }
         writer.flush().await.expect("flush");
 
-        let ctx = session_context();
+        let ctx = session_context(schema.client().clone());
         schema.register_all(&ctx).expect("register");
 
         state.range_calls.store(0, AtomicOrdering::SeqCst);
@@ -8535,7 +8517,7 @@ mod tests {
         }
         writer.flush().await.expect("flush");
 
-        let ctx = session_context();
+        let ctx = session_context(schema.client().clone());
         schema.register_all(&ctx).expect("register");
 
         state.range_calls.store(0, AtomicOrdering::SeqCst);
@@ -8623,7 +8605,7 @@ mod tests {
         }
         writer.flush().await.expect("flush");
 
-        let ctx = session_context();
+        let ctx = session_context(schema.client().clone());
         schema.register_all(&ctx).expect("register");
 
         state.range_calls.store(0, AtomicOrdering::SeqCst);
@@ -8705,7 +8687,7 @@ mod tests {
         }
         writer.flush().await.expect("flush");
 
-        let ctx = session_context();
+        let ctx = session_context(schema.client().clone());
         schema.register_all(&ctx).expect("register");
 
         state.range_calls.store(0, AtomicOrdering::SeqCst);
@@ -8791,7 +8773,7 @@ mod tests {
         }
         writer.flush().await.expect("flush");
 
-        let ctx = session_context();
+        let ctx = session_context(schema.client().clone());
         schema.register_all(&ctx).expect("register");
 
         state.range_calls.store(0, AtomicOrdering::SeqCst);
@@ -8871,7 +8853,7 @@ mod tests {
         }
         writer.flush().await.expect("flush");
 
-        let ctx = session_context();
+        let ctx = session_context(schema.client().clone());
         schema.register_all(&ctx).expect("register");
 
         state.range_calls.store(0, AtomicOrdering::SeqCst);
@@ -8972,7 +8954,7 @@ mod tests {
         }
         writer.flush().await.expect("flush");
 
-        let ctx = session_context();
+        let ctx = session_context(schema.client().clone());
         schema.register_all(&ctx).expect("register");
 
         state.range_calls.store(0, AtomicOrdering::SeqCst);
@@ -9080,7 +9062,7 @@ mod tests {
         }
         writer.flush().await.expect("flush");
 
-        let ctx = session_context();
+        let ctx = session_context(schema.client().clone());
         schema.register_all(&ctx).expect("register");
 
         state.range_calls.store(0, AtomicOrdering::SeqCst);
@@ -9166,11 +9148,16 @@ mod tests {
                 .expect("row");
         }
         writer.flush().await.expect("flush");
-        let ctx = SessionContext::new_with_state(
-            session_state_builder()
-                .with_config(datafusion::prelude::SessionConfig::new().with_batch_size(2))
-                .build(),
-        );
+        let mut state_builder = session_state_builder(exoware_sdk::ReadSession::monotonic(
+            schema.client().clone(),
+            None,
+        ));
+        let config = state_builder
+            .config()
+            .take()
+            .expect("session state builder config")
+            .with_batch_size(2);
+        let ctx = SessionContext::new_with_state(state_builder.with_config(config).build());
         schema.register_all(&ctx).expect("register");
         (ctx, state, shutdown_tx)
     }
@@ -9456,7 +9443,7 @@ mod tests {
         }
         writer.flush().await.expect("flush");
 
-        let ctx = session_context();
+        let ctx = session_context(schema.client().clone());
         schema.register_all(&ctx).expect("register");
 
         // Without an alias the optimizer drops the identity projection above the
@@ -9557,7 +9544,7 @@ mod tests {
         }
         writer.flush().await.expect("flush");
 
-        let ctx = session_context();
+        let ctx = session_context(schema.client().clone());
         schema.register_all(&ctx).expect("register");
 
         state.range_calls.store(0, AtomicOrdering::SeqCst);
@@ -9641,7 +9628,7 @@ mod tests {
         }
         writer.flush().await.expect("flush");
 
-        let ctx = session_context();
+        let ctx = session_context(schema.client().clone());
         schema.register_all(&ctx).expect("register");
 
         state.range_calls.store(0, AtomicOrdering::SeqCst);
@@ -9779,7 +9766,7 @@ mod tests {
             }
             writer.flush().await.expect("flush batch");
 
-            let ctx = session_context();
+            let ctx = session_context(schema.client().clone());
             schema.register_all(&ctx).expect("register tables");
 
             let batches = ctx

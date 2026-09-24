@@ -73,7 +73,7 @@ async fn sql_full_pipeline_insert_and_query() {
     }
     let min_sequence = writer.flush().await.expect("flush batch");
     assert!(min_sequence > 0);
-    let read_schema = KvSchema::new(PrefixedStoreClient::empty(read_client))
+    let read_schema = KvSchema::new(PrefixedStoreClient::empty(read_client.clone()))
         .table(
             "slam_orders",
             vec![
@@ -90,7 +90,7 @@ async fn sql_full_pipeline_insert_and_query() {
         )
         .expect("schema");
 
-    let ctx = exoware_sql::session_context();
+    let ctx = exoware_sql::session_context(PrefixedStoreClient::empty(read_client));
     read_schema.register_all(&ctx).expect("register tables");
 
     // Full scan (all rows are now visible)

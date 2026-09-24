@@ -24,8 +24,8 @@ use exoware_sdk::{StoreClient, StoreKeyPrefix};
 use exoware_sql::{session_context, IndexSpec, KvSchema, TableColumnConfig};
 use datafusion::arrow::datatypes::DataType;
 
-let ctx = session_context();
 let client = StoreClient::new("http://localhost:10000").prefixed(StoreKeyPrefix::identity());
+let ctx = session_context(client.clone());
 
 KvSchema::new(client)
     .table("customers", vec![
@@ -174,14 +174,21 @@ and aggregate reductions. This preserves monotonic freshness across query
 workers behind a load balancer. It does not provide snapshot isolation.
 Queries without Store reads do not report an observed sequence.
 
-Embedded DataFusion contexts can retain one session across SQL statements:
+`session_context(client)` installs a monotonic read session by default. Reusing
+the context carries observations across SQL statements, including scans and
+aggregate reductions. Independently constructed contexts start with independent
+sessions.
+
+Use `session_state_builder(session)` to construct a context with an explicit
+read session and customize DataFusion settings. Use `with_read_session` to
+replace the session in a copy of an existing context:
 
 ```rust
 use exoware_sdk::ReadSession;
-use exoware_sql::query_context_with_session;
+use exoware_sql::with_read_session;
 
 let session = ReadSession::monotonic(client, None);
-let query_ctx = query_context_with_session(&ctx, session.clone());
+let query_ctx = with_read_session(&ctx, session.clone());
 
 query_ctx.sql("SELECT * FROM customers").await?.collect().await?;
 query_ctx.sql("SELECT * FROM orders").await?.collect().await?;
@@ -191,8 +198,9 @@ let observed_sequence = session.evaluated_sequence();
 
 The context and session clones share observations. A monotonic session applies
 the highest observed sequence to later statements; a fixed session keeps its
-configured minimum. Without a session in the context, each scan or aggregate
-creates its own session.
+configured minimum. Plain DataFusion contexts without an installed session fall
+back to a separate session per scan or aggregate. When customizing the SQL state
+builder, mutate its existing configuration to preserve the installed session.
 
 Primary keys identify immutable rows. Inserting the same primary key more than
 once has undefined behavior. The write path does not enforce uniqueness. Use a
