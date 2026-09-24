@@ -47,7 +47,7 @@ use exoware_sdk::keys::Key;
 use exoware_sdk::kv_codec::{decode_stored_row, Utf8};
 use exoware_sdk::selector::Selector;
 use exoware_sdk::stream_filter::StreamFilter;
-use exoware_sdk::{PrefixedStoreClient, StreamSubscription, StreamSubscriptionFrame};
+use exoware_sdk::{PrefixedStoreClient, ReadSession, StreamSubscription, StreamSubscriptionFrame};
 use futures::stream::{self, Stream};
 use futures::{FutureExt, TryStreamExt};
 
@@ -70,10 +70,7 @@ pub fn query_context_with_min_sequence(
     store: &PrefixedStoreClient,
     min_sequence_number: Option<u64>,
 ) -> SessionContext {
-    let read_session = match min_sequence_number {
-        Some(sequence) => store.create_session_with_sequence(sequence),
-        None => store.create_session(),
-    };
+    let read_session = ReadSession::monotonic(store.clone(), min_sequence_number);
 
     crate::query_context_with_session(ctx, read_session)
 }
