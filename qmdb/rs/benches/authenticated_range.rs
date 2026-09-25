@@ -4,7 +4,7 @@ use commonware_codec::{Encode, RangeCfg};
 use commonware_cryptography::{sha256::Digest, Sha256};
 use commonware_parallel::{Rayon, Sequential, Strategy};
 use commonware_storage::{
-    merkle::{mem::Mem, mmr, Family as _, Location, Proof},
+    merkle::{mem::Mem, mmr, Family as _, Location},
     qmdb::keyless::variable::Operation,
 };
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
@@ -18,7 +18,8 @@ const VALUE_SIZE: usize = 64;
 
 struct AuthenticatedRangeFixture {
     root: Digest,
-    proof: Proof<Family, Digest>,
+    end_location: Location<Family>,
+    inactive_peaks: usize,
     pinned_nodes: Vec<Digest>,
     encoded_operations: Vec<Vec<u8>>,
 }
@@ -27,7 +28,8 @@ impl AuthenticatedRangeFixture {
     fn view(&self) -> AuthenticatedOperationRange<'_, Digest, Family> {
         AuthenticatedOperationRange {
             start_location: Location::new(PREFIX_OPERATIONS as u64),
-            proof: &self.proof,
+            end_location: self.end_location,
+            inactive_peaks: self.inactive_peaks,
             pinned_nodes: &self.pinned_nodes,
             encoded_operations: &self.encoded_operations,
         }
@@ -60,7 +62,7 @@ fn authenticated_range_fixture(count: usize) -> AuthenticatedRangeFixture {
         .map(|operation| operation.encode().to_vec())
         .collect::<Vec<_>>();
 
-    // Build the originating history and proof independently of the adapter outside the timed loop
+    // Build the originating history independently of the adapter outside the timed loop
     let hasher = commonware_storage::qmdb::hasher::<Sha256>();
     let mut memory = Mem::<Family, Digest>::new();
     let mut batch = memory.new_batch();
@@ -72,9 +74,8 @@ fn authenticated_range_fixture(count: usize) -> AuthenticatedRangeFixture {
     let inactive_peaks = Family::inactive_peaks(end, start);
     AuthenticatedRangeFixture {
         root: memory.root(&hasher, inactive_peaks).expect("source root"),
-        proof: memory
-            .range_proof(&hasher, start..end, inactive_peaks)
-            .expect("source continuation proof"),
+        end_location: end,
+        inactive_peaks,
         pinned_nodes: Family::nodes_to_pin(start)
             .map(|position| memory.get_node(position).expect("source pinned node"))
             .collect(),

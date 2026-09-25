@@ -108,7 +108,8 @@ async fn publish_source_range(
         .collect::<Vec<_>>();
     let range = AuthenticatedOperationRange {
         start_location: start,
-        proof: &proof,
+        end_location: proof.leaves,
+        inactive_peaks: proof.inactive_peaks,
         pinned_nodes: &pinned_nodes,
         encoded_operations: &encoded_operations,
     };

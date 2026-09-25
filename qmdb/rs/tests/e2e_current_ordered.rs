@@ -1211,7 +1211,8 @@ where
                     .collect::<Vec<_>>();
                 let authenticated = AuthenticatedOperationRange {
                     start_location: start,
-                    proof: &proof,
+                    end_location: proof.leaves,
+                    inactive_peaks: proof.inactive_peaks,
                     pinned_nodes: &pinned_nodes,
                     encoded_operations: &encoded,
                 };

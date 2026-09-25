@@ -57,21 +57,14 @@ async fn check_large_locations<F: Graftable + PartialEq>(family: &str, start: u6
     let expected_root = reference_batch
         .root(&reference, &hasher, F::inactive_peaks(end, start))
         .unwrap();
-    let proof = reference_batch
-        .range_proof(
-            &reference,
-            &hasher,
-            start..end,
-            F::inactive_peaks(end, start),
-        )
-        .unwrap();
     let encoded_operations = operations
         .iter()
         .map(|operation| operation.encode().to_vec())
         .collect::<Vec<_>>();
     let range = AuthenticatedOperationRange {
         start_location: start,
-        proof: &proof,
+        end_location: end,
+        inactive_peaks: F::inactive_peaks(end, start),
         pinned_nodes: &pins,
         encoded_operations: &encoded_operations,
     };
