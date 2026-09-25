@@ -40,6 +40,12 @@ Use `prepareHeader`, `prepareBlock`, `prepareNotarization`, and
 and `view`. The client does not decode certificate bytes, so a wrong value
 mis-keys the round row.
 
+Upload helpers validate Store limits before sending and keep all rows in one
+atomic Put. Oversized uploads throw `RangeError`. Caller-assembled batches can
+use `batch.validate(store.putOptions)` or `batch.split(store.putOptions)`, but
+splitting can separate an artifact's rows across writes. Only split when the
+application can safely handle partial completion and publication ordering.
+
 Use `getHeader` or `subscribeHeaders` when only header bytes are needed. Use
 `getBlock` or `subscribeBlocks` when the caller needs the full
 `{ header, body }` block data.

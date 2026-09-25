@@ -10,11 +10,32 @@ Interact with the Exoware API in TypeScript.
 
 ## Put limits
 
-The SDK exports the application and transport limits as `MAX_PUT_ENTRIES`,
-`MAX_REQUEST_MESSAGE_BYTES`, `MAX_VALUE_LEN`, and `MAX_KEY_LEN`. The TypeScript SDK
-does not provide a batch-splitting helper. See the
-[language-independent protocol contract](../../proto/README.md) for request
-size measurement, errors, and backend portability.
+`set`, `setMany`, and `StoreWriteBatch.commit` validate entry count, physical key
+length, value length, and encoded request size before sending. Invalid batches
+throw `RangeError`. Each call remains one atomic Put.
+
+`StoreWriteBatch` provides `encodedLen(encoding)`, `validate(options)`, and
+`split(options)`. Sizes include prefixed keys and the selected wire format.
+The default encoding is JSON, matching the client transport. Pass
+`store.putOptions` to match a client's encoding and limits:
+
+```ts
+const chunks = batch.split(store.putOptions);
+for (const chunk of chunks) {
+    await chunk.commit(store);
+}
+```
+
+Splitting preserves order and shares payload buffers without changing the
+original batch. An empty batch produces no chunks. An entry that cannot fit
+alone throws. Each chunk is a separate write, so callers must handle partial
+completion and any publication ordering they require.
+
+Defaults use `MAX_PUT_ENTRIES`, `MAX_REQUEST_MESSAGE_BYTES`, `MAX_VALUE_LEN`, and
+`MAX_KEY_LEN`. Configure `ClientOptions.putLimits` with `maxEntries`,
+`maxEncodedBytes`, or `maxValueLen` to match a deployment. The same options can
+be passed to `validate` and `split`. The byte budget is the RPC message limit.
+See the [protocol contract](../../proto/README.md) for errors and portability.
 
 ## Credentials
 

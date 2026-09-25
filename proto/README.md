@@ -61,5 +61,10 @@ Splitting preserves staged entries without copying or re-prefixing payloads.
 
 Each resulting batch remains atomic as one `Put`, but several chunks are
 several writes. Exoware data is immutable. Retry policy, concurrency, and
-publication barriers belong to the application. The TypeScript SDK exports
-the published constants and does not provide a batch-splitting helper.
+publication barriers belong to the application.
+
+The TypeScript SDK exports the same constants. Its `StoreWriteBatch` provides
+`encodedLen(encoding)`, `validate(options)`, and `split(options)` for JSON and
+binary protobuf. Pass `store.putOptions` to validation and splitting to use the
+client's encoding and configured limits. Store writes validate before sending
+and remain one atomic Put. Splitting is explicit.

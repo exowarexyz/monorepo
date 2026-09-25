@@ -94,6 +94,74 @@ test('stages block and finalization rows into one StoreWriteBatch', () => {
   });
 });
 
+test('upload validation rejects a finalization before ingest', async () => {
+  const client = new Client('http://127.0.0.1:1', {
+    putLimits: { maxEntries: 1 },
+  });
+  let calls = 0;
+  Object.defineProperty(client.ingest, 'put', {
+    value: async () => {
+      calls++;
+      return { sequenceNumber: 1n };
+    },
+  });
+  const simplex = new SimplexClient(client.store());
+
+  await assert.rejects(
+    () => simplex.uploadFinalization({
+      epoch: 0,
+      view: 7,
+      height: 11,
+      finalized: 'f1',
+    }),
+    /between 1 and 1 entries, got 2/,
+  );
+  assert.equal(calls, 0);
+});
+
+test('valid finalization upload remains one Put and one receipt', async () => {
+  const client = new Client('http://127.0.0.1:1', {
+    putLimits: { maxEntries: 2 },
+  });
+  let calls = 0;
+  let keys: string[] = [];
+  Object.defineProperty(client.ingest, 'put', {
+    value: async (request: Parameters<typeof client.ingest.put>[0]) => {
+      calls++;
+      assert.ok(request.kvs);
+      keys = request.kvs.map((entry) => {
+        assert.ok(entry.key);
+        return bytesToHex(entry.key);
+      });
+      return { sequenceNumber: 19n };
+    },
+  });
+  const simplex = new SimplexClient(client.store());
+
+  const receipt = await simplex.uploadFinalization({
+    epoch: 0,
+    view: 7,
+    height: 11,
+    finalized: 'f1',
+  });
+
+  assert.equal(calls, 1);
+  assert.deepEqual(keys, [
+    '0400000000000000000000000000000007',
+    '05000000000000000b',
+  ]);
+  assert.deepEqual(receipt, {
+    storeSequenceNumber: 19n,
+    summary: {
+      headers: 0,
+      blocks: 0,
+      notarizations: 0,
+      finalizations: 1,
+      finalizedHeightIndexes: 1,
+    },
+  });
+});
+
 test('streams header and full block data separately', async () => {
   const store = new Client('http://127.0.0.1:1').store();
   const full = encodeSimplexBlockData('aa', 'bbcc');

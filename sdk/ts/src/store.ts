@@ -14,7 +14,17 @@ import {
 import type { Selector } from './gen/ts/common/v1/kv_pb.js';
 import { ErrorInfoSchema } from './gen/ts/google/rpc/error_details_pb.js';
 import { PutRequestSchema } from './gen/ts/log/v1/ingest_pb.js';
-import { MAX_KEY_LEN } from './limits.js';
+import {
+    MAX_KEY_LEN,
+    normalizePutOptions,
+    putEncodedLen,
+    putEntryEncodedLen,
+    putMessageEncodedLen,
+    validatePut,
+    validatePutEntry,
+    type PutBatchOptions,
+    type PutEncoding,
+} from './limits.js';
 import {
     GetManyRequestSchema,
     GetRequestSchema as QueryGetRequestSchema,
@@ -212,6 +222,40 @@ export class StoreWriteBatch {
 
     clear(): void {
         this.kvs.length = 0;
+    }
+
+    encodedLen(encoding: PutEncoding = 'json'): number {
+        return putEncodedLen(this.kvs, encoding);
+    }
+
+    validate(options: PutBatchOptions = {}): void {
+        validatePut(this.kvs, options);
+    }
+
+    /** Each returned batch is a separate atomic Put. Payload buffers remain shared. */
+    split(options: PutBatchOptions = {}): StoreWriteBatch[] {
+        const limits = normalizePutOptions(options);
+        const batches: StoreWriteBatch[] = [];
+        let batch = new StoreWriteBatch();
+        let entryBytes = 0;
+        for (const [index, entry] of this.kvs.entries()) {
+            validatePutEntry(entry, index, limits.maxValueLen);
+            const length = putEntryEncodedLen(entry, limits.encoding);
+            const single = putMessageEncodedLen(length, 1, limits.encoding);
+            if (single > limits.maxEncodedBytes) {
+                throw new RangeError(`Put entry ${index} encoded size ${single} exceeds ${limits.maxEncodedBytes}`);
+            }
+            if (batch.length === limits.maxEntries
+                || putMessageEncodedLen(entryBytes + length, batch.length + 1, limits.encoding) > limits.maxEncodedBytes) {
+                batches.push(batch);
+                batch = new StoreWriteBatch();
+                entryBytes = 0;
+            }
+            batch.kvs.push({ key: entry.key, value: entry.value });
+            entryBytes += length;
+        }
+        if (batch.length > 0) batches.push(batch);
+        return batches;
     }
 
     async commit(client: StoreClient): Promise<bigint> {
@@ -929,48 +973,30 @@ export class StoreClient {
         return ReadSession.monotonic(this, sequence);
     }
 
+    /** Limits and encoding used by this client's Put validation and batch splitting. */
+    get putOptions(): Readonly<Required<PutBatchOptions>> {
+        return this.client.putOptions;
+    }
+
     async set(key: Uint8Array, value: Uint8Array | Buffer): Promise<bigint> {
-        const req = create(PutRequestSchema, {
-            kvs: [
-                create(EntrySchema, {
-                    key: this.encodeStoreKey(key),
-                    value: toUint8Array(value),
-                }),
-            ],
-        });
-        try {
-            const res = await this.client.ingest.put(req);
-            return res.sequenceNumber;
-        } catch (e) {
-            mapConnectToHttpError(e, this.client.credential);
-        }
+        return this.setMany([{ key, value }]);
     }
 
     async setMany(kvs: { key: Uint8Array; value: Uint8Array | Buffer }[]): Promise<bigint> {
-        const req = create(PutRequestSchema, {
-            kvs: kvs.map((kv) =>
-                create(EntrySchema, {
-                    key: this.encodeStoreKey(kv.key),
-                    value: toUint8Array(kv.value),
-                }),
-            ),
-        });
-        try {
-            const res = await this.client.ingest.put(req);
-            return res.sequenceNumber;
-        } catch (e) {
-            mapConnectToHttpError(e, this.client.credential);
-        }
+        return this.putEntries(kvs.map((kv) => create(EntrySchema, {
+            key: this.encodeStoreKey(kv.key),
+            value: toUint8Array(kv.value),
+        })));
     }
 
     async putPrepared(batch: StoreWriteBatch): Promise<bigint> {
+        return this.putEntries(batch.entries());
+    }
+
+    private async putEntries(entries: readonly StoreBatchEntry[]): Promise<bigint> {
+        validatePut(entries, this.putOptions);
         const req = create(PutRequestSchema, {
-            kvs: batch.entries().map((kv) =>
-                create(EntrySchema, {
-                    key: kv.key,
-                    value: kv.value,
-                }),
-            ),
+            kvs: entries.map((entry) => create(EntrySchema, entry)),
         });
         try {
             const res = await this.client.ingest.put(req);

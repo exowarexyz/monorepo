@@ -3,6 +3,7 @@ import { createConnectTransport } from '@connectrpc/connect-web';
 import { CookieJar, fetchWithCookieJar } from './cookies.js';
 import { environmentApiKey, resolveCredential, type Credential } from './credential.js';
 import { StoreClient, type StoreKeyPrefix } from './store.js';
+import { normalizePutOptions, type PutBatchOptions, type PutLimits } from './limits.js';
 import { Service as IngestService } from './gen/ts/log/v1/ingest_pb.js';
 import { Service as PruneService } from './gen/ts/store/v1/prune_pb.js';
 import { Service as QueryService } from './gen/ts/store/v1/query_pb.js';
@@ -90,6 +91,7 @@ export type ClientOptions = {
     token?: string;
     retry?: RetryConfig;
     useBinaryFormat?: boolean;
+    putLimits?: PutLimits;
 };
 
 function normalizeClientOptions(tokenOrOptions?: string | ClientOptions): ClientOptions {
@@ -145,6 +147,7 @@ export class Client {
     public readonly retention: ConnectClient<typeof RetentionService>;
     public readonly stream: ConnectClient<typeof StreamService>;
     public readonly retryConfig: RetryConfig;
+    public readonly putOptions: Readonly<Required<PutBatchOptions>>;
     /** Whether this client sends a credential, which is what makes a 401 explicable. */
     public readonly credential: Credential;
 
@@ -152,6 +155,10 @@ export class Client {
         const opts = normalizeClientOptions(tokenOrOptions);
         this.baseUrl = baseUrl.replace(/\/$/, '');
         this.retryConfig = opts.retry ?? DEFAULT_RETRY_CONFIG;
+        this.putOptions = Object.freeze(normalizePutOptions({
+            ...opts.putLimits,
+            encoding: opts.useBinaryFormat ? 'binary' : 'json',
+        }));
         const { transport, credential } = transportWithCredential(this.baseUrl, opts);
         this.credential = credential;
         this.ingest = createClient(IngestService, transport);
