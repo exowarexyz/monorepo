@@ -10,17 +10,17 @@ use std::sync::Arc;
 
 use buffa::Message;
 use bytes::Bytes;
+use connectrpc::dispatcher::{MethodDescriptor, RequestStream, StreamingResult, UnaryResult};
 use connectrpc::{
-    Chain, ConnectError, ConnectRpcService, Limits, RequestContext as Context, ServiceRequest,
+    Chain, CodecFormat, ConnectError, ConnectRpcService, Dispatcher, Limits, Payload,
+    RequestContext as Context, ServiceRequest,
 };
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::execution::context::TaskContext;
 use datafusion::execution::runtime_env::RuntimeEnv;
 use exoware_proto::common::Entry;
 use exoware_proto::google::rpc::{ErrorInfo, RetryInfo};
-use exoware_proto::ingest::{
-    PutResponse as ProtoPutResponse, Service as IngestApi, ServiceServer as IngestServiceServer,
-};
+use exoware_proto::ingest::{PutRequest, PutResponse as ProtoPutResponse, SERVICE_PUT_SPEC};
 #[cfg(test)]
 use exoware_proto::log::retention::v1::SetRetentionRequestView;
 use exoware_proto::log::retention::v1::{
@@ -53,13 +53,17 @@ use exoware_sdk::selector::Selector;
 use futures::{stream as stream_util, Stream, StreamExt};
 use tokio::sync::Notify;
 
+use crate::put_wire::{count_put_entries, count_put_entries_json, parse_put_entries};
 use crate::reduce::{decode_group, execute_reduce, RangeError, ReduceExecution, REDUCE_BATCH_ROWS};
 use crate::stream::{StreamHub, StreamNotifier};
 use crate::validate::{self, IngestLimits};
 use crate::{
-    FilteredBatch, Ingest, IngestError, Log, LogBatch, Prune, Query, QueryExtra, RangeScan,
-    RangeScanResult, Retention, StoreEngine,
+    FilteredBatch, Ingest, IngestError, Log, LogBatch, Prune, PutCodec, PutPlan, Query, QueryExtra,
+    RangeScan, RangeScanResult, Retention, StoreEngine,
 };
+
+#[cfg(test)]
+mod put_tests;
 
 pub const MAX_CONNECTRPC_BODY_BYTES: usize = MAX_REQUEST_MESSAGE_BYTES;
 pub const MAX_CONNECTRPC_MESSAGE_BYTES: usize = MAX_REQUEST_MESSAGE_BYTES;
@@ -427,11 +431,11 @@ impl<E> From<AppState<E>> for StreamState<E> {
     }
 }
 
-pub struct IngestConnect<I> {
+pub struct PutDispatcher<I> {
     state: IngestState<I>,
 }
 
-impl<I> Clone for IngestConnect<I> {
+impl<I> Clone for PutDispatcher<I> {
     fn clone(&self) -> Self {
         Self {
             state: self.state.clone(),
@@ -439,7 +443,7 @@ impl<I> Clone for IngestConnect<I> {
     }
 }
 
-impl<I> IngestConnect<I>
+impl<I> PutDispatcher<I>
 where
     I: Ingest,
 {
@@ -487,55 +491,128 @@ fn ingest_error_to_connect(err: IngestError) -> ConnectError {
     }
 }
 
-impl<I> IngestApi for IngestConnect<I>
+impl<I> Dispatcher for PutDispatcher<I>
 where
     I: Ingest,
 {
-    async fn put(
+    fn lookup(&self, path: &str) -> Option<MethodDescriptor> {
+        (path == "log.ingest.v1.Service/Put")
+            .then(|| MethodDescriptor::unary(false).with_spec(SERVICE_PUT_SPEC))
+    }
+
+    fn call_unary(
         &self,
+        path: &str,
         _ctx: Context,
-        request: ServiceRequest<'_, exoware_proto::log::ingest::v1::PutRequest>,
-    ) -> connectrpc::ServiceResult<ProtoPutResponse> {
-        if !self.state.ready.load(Ordering::SeqCst) {
-            return Err(with_retry_hint(
-                with_error_info_detail(
-                    ConnectError::unavailable("ingest is not ready"),
-                    ErrorInfo {
-                        reason: REASON_WORKER_NOT_READY.to_string(),
-                        domain: INGEST_ERROR_DOMAIN.to_string(),
-                        ..Default::default()
-                    },
-                ),
-                RETRY_HINT_DELAY,
-            ));
+        request: Payload,
+        format: CodecFormat,
+    ) -> UnaryResult {
+        if self.lookup(path).is_none() {
+            let error = ConnectError::unimplemented(format!("method not found. {path}"));
+            return Box::pin(async move { Err(error) });
         }
+        let state = self.state.clone();
+        Box::pin(async move {
+            // Readiness takes precedence over malformed input to avoid decoding rejected work.
+            if !state.ready.load(Ordering::SeqCst) {
+                return Err(with_retry_hint(
+                    with_error_info_detail(
+                        ConnectError::unavailable("ingest is not ready"),
+                        ErrorInfo {
+                            reason: REASON_WORKER_NOT_READY.to_string(),
+                            domain: INGEST_ERROR_DOMAIN.to_string(),
+                            ..Default::default()
+                        },
+                    ),
+                    RETRY_HINT_DELAY,
+                ));
+            }
 
-        validate::validate_put_request(request.view(), self.state.limits)?;
+            let wire = request.encoded()?;
+            let (count, codec) = match format {
+                CodecFormat::Proto => (count_put_entries(&wire)?, PutCodec::Proto),
+                CodecFormat::Json => (count_put_entries_json(&wire)?, PutCodec::Json),
+                _ => return Err(ConnectError::unimplemented("unsupported Put codec")),
+            };
 
-        let wire = request.bytes();
-        let mut batch = Vec::with_capacity(request.kvs.len());
-        for kv in request.kvs.iter() {
-            let key: Key = wire.slice_ref(kv.key);
-            let value = wire.slice_ref(kv.value);
-            batch.push((key, value));
-        }
+            // Count rejection precedes inner decoding, including malformed entries.
+            validate::validate_put_count(count, state.limits)?;
+            state
+                .ingest
+                .prepare(&PutPlan {
+                    entries: count,
+                    message_bytes: wire.len(),
+                    codec,
+                })
+                .map_err(ingest_error_to_connect)?;
 
-        let seq = self
-            .state
-            .ingest
-            .put_batch(batch)
-            .await
-            .map_err(ingest_error_to_connect)?;
+            let batch = match codec {
+                PutCodec::Proto => {
+                    drop(request);
+                    parse_put_entries(&wire, state.limits, count)?
+                }
+                PutCodec::Json => {
+                    let request = request.take_message::<PutRequest>()?;
+                    validate::validate_put_count(request.kvs.len(), state.limits)?;
+                    let mut batch = Vec::with_capacity(request.kvs.len());
+                    for (index, kv) in request.kvs.into_iter().enumerate() {
+                        validate::validate_put_entry(index, &kv.key, &kv.value, state.limits)?;
+                        batch.push((Bytes::from(kv.key), kv.value));
+                    }
+                    batch
+                }
+            };
+            drop(wire);
 
-        // Advance any attached stream frontier after the write is committed.
-        if let Some(notifier) = &self.state.notifier {
-            notifier.advance(seq);
-        }
+            let seq = state
+                .ingest
+                .put_batch(batch)
+                .await
+                .map_err(ingest_error_to_connect)?;
 
-        connectrpc::Response::ok(ProtoPutResponse {
-            sequence_number: seq,
-            ..Default::default()
+            if let Some(notifier) = &state.notifier {
+                notifier.advance(seq);
+            }
+
+            connectrpc::Response::ok(ProtoPutResponse {
+                sequence_number: seq,
+                ..Default::default()
+            })?
+            .encode::<ProtoPutResponse>(format)
         })
+    }
+
+    fn call_server_streaming(
+        &self,
+        path: &str,
+        _ctx: Context,
+        _request: Bytes,
+        _format: CodecFormat,
+    ) -> StreamingResult {
+        let error = ConnectError::unimplemented(format!("method not found. {path}"));
+        Box::pin(async move { Err(error) })
+    }
+
+    fn call_client_streaming(
+        &self,
+        path: &str,
+        _ctx: Context,
+        _requests: RequestStream,
+        _format: CodecFormat,
+    ) -> UnaryResult {
+        let error = ConnectError::unimplemented(format!("method not found. {path}"));
+        Box::pin(async move { Err(error) })
+    }
+
+    fn call_bidi_streaming(
+        &self,
+        path: &str,
+        _ctx: Context,
+        _requests: RequestStream,
+        _format: CodecFormat,
+    ) -> StreamingResult {
+        let error = ConnectError::unimplemented(format!("method not found. {path}"));
+        Box::pin(async move { Err(error) })
     }
 }
 
@@ -1287,7 +1364,7 @@ pub fn connect_limits() -> Limits {
         .with_element_memory_limit(MAX_CONNECTRPC_ELEMENT_MEMORY_BYTES)
 }
 
-pub(crate) type IngestService<I> = ConnectRpcService<IngestServiceServer<IngestConnect<I>>>;
+pub(crate) type IngestService<I> = ConnectRpcService<PutDispatcher<I>>;
 pub(crate) type QueryService<Q> = ConnectRpcService<QueryServiceServer<QueryConnect<Q>>>;
 pub(crate) type PruneService<P> = ConnectRpcService<PruneServiceServer<PruneConnect<P>>>;
 pub(crate) type RetentionService<R> =
@@ -1298,7 +1375,7 @@ pub(crate) type QueryStack<Q, B> = ConnectRpcService<
 >;
 pub(crate) type ConnectStack<I, Q, P, R, B> = ConnectRpcService<
     Chain<
-        IngestServiceServer<IngestConnect<I>>,
+        PutDispatcher<I>,
         Chain<
             QueryServiceServer<QueryConnect<Q>>,
             Chain<
@@ -1312,11 +1389,11 @@ pub(crate) type ConnectStack<I, Q, P, R, B> = ConnectRpcService<
     >,
 >;
 
-fn ingest_server<I>(state: IngestState<I>) -> IngestServiceServer<IngestConnect<I>>
+fn put_dispatcher<I>(state: IngestState<I>) -> PutDispatcher<I>
 where
     I: Ingest,
 {
-    IngestServiceServer::new(IngestConnect::new(state))
+    PutDispatcher::new(state)
 }
 
 fn query_server<Q>(state: QueryState<Q>) -> QueryServiceServer<QueryConnect<Q>>
@@ -1351,7 +1428,7 @@ pub fn ingest_service<I>(state: IngestState<I>) -> IngestService<I>
 where
     I: Ingest,
 {
-    ConnectRpcService::new(ingest_server(state))
+    ConnectRpcService::new(put_dispatcher(state))
         .with_limits(connect_limits())
         .with_compression(connect_compression_registry())
 }
@@ -1413,7 +1490,7 @@ where
     E: StoreEngine,
 {
     ConnectRpcService::new(Chain(
-        ingest_server(state.clone().into()),
+        put_dispatcher(state.clone().into()),
         Chain(
             query_server(state.clone().into()),
             Chain(
@@ -2240,10 +2317,17 @@ mod tests {
         .encode_to_vec()
     }
 
-    fn put_request(
-        value_len: usize,
-    ) -> buffa::view::OwnedView<exoware_proto::log::ingest::v1::PutRequestView<'static>> {
-        let bytes = exoware_proto::ingest::PutRequest {
+    fn dispatch_put<I: Ingest>(connect: &PutDispatcher<I>, wire: Bytes) -> UnaryResult {
+        connect.call_unary(
+            "log.ingest.v1.Service/Put",
+            Context::default(),
+            Payload::new(wire, CodecFormat::Proto),
+            CodecFormat::Proto,
+        )
+    }
+
+    fn put_request(value_len: usize) -> Bytes {
+        exoware_proto::ingest::PutRequest {
             kvs: vec![exoware_proto::common::Entry {
                 key: b"k".to_vec(),
                 value: Bytes::from(vec![1u8; value_len]),
@@ -2251,11 +2335,8 @@ mod tests {
             }],
             ..Default::default()
         }
-        .encode_to_vec();
-        buffa::view::OwnedView::<exoware_proto::log::ingest::v1::PutRequestView<'static>>::decode(
-            bytes.into(),
-        )
-        .expect("decode put request")
+        .encode_to_vec()
+        .into()
     }
 
     fn keys_scope() -> KeysScope {
@@ -2879,11 +2960,10 @@ mod tests {
             max_value_len: 4,
             ..IngestLimits::default()
         });
-        let connect = IngestConnect::new(state);
+        let connect = PutDispatcher::new(state);
 
         let request = put_request(5);
-        let request = ServiceRequest::from_parts(request.reborrow(), request.bytes());
-        let err = IngestApi::put(&connect, Context::default(), request)
+        let err = dispatch_put(&connect, request)
             .await
             .expect_err("put should reject oversized value");
 
@@ -2891,11 +2971,10 @@ mod tests {
     }
 
     #[test]
-    fn transport_admits_portable_puts() {
+    fn transport_bounds_put_wire_bytes() {
         let limits = connect_limits();
         assert_eq!(limits.max_request_body_size(), MAX_REQUEST_MESSAGE_BYTES);
         assert_eq!(limits.max_message_size(), MAX_REQUEST_MESSAGE_BYTES);
-        assert!(limits.element_memory_limit() >= MAX_PUT_ENTRIES * std::mem::size_of::<Entry>());
     }
 
     #[tokio::test]
@@ -3088,12 +3167,9 @@ mod tests {
         engine.set_put_error(IngestError::ResourceExhausted {
             message: "backend capacity exceeded".to_string(),
         });
-        let connect = IngestConnect::new(IngestState::new(engine));
+        let connect = PutDispatcher::new(IngestState::new(engine));
         let request = put_request(1);
-        let request = ServiceRequest::from_parts(request.reborrow(), request.bytes());
-        let error = IngestApi::put(&connect, Context::default(), request)
-            .await
-            .unwrap_err();
+        let error = dispatch_put(&connect, request).await.unwrap_err();
         assert_eq!(error.code, connectrpc::ErrorCode::ResourceExhausted);
         assert!(error.details.is_empty());
     }
@@ -3106,12 +3182,9 @@ mod tests {
             max_entries: 2,
         };
         engine.set_put_error(error.into());
-        let connect = IngestConnect::new(IngestState::new(engine));
+        let connect = PutDispatcher::new(IngestState::new(engine));
         let request = put_request(1);
-        let request = ServiceRequest::from_parts(request.reborrow(), request.bytes());
-        let actual = IngestApi::put(&connect, Context::default(), request)
-            .await
-            .unwrap_err();
+        let actual = dispatch_put(&connect, request).await.unwrap_err();
         let expected = validate::put_too_large_error(error);
         assert_eq!(
             decode_connect_error(&actual).unwrap(),
@@ -3125,11 +3198,10 @@ mod tests {
         engine.set_put_error(IngestError::Unavailable {
             message: "backend bouncing".to_string(),
         });
-        let connect = IngestConnect::new(IngestState::new(engine));
+        let connect = PutDispatcher::new(IngestState::new(engine));
 
         let request = put_request(1);
-        let request = ServiceRequest::from_parts(request.reborrow(), request.bytes());
-        let err = IngestApi::put(&connect, Context::default(), request)
+        let err = dispatch_put(&connect, request)
             .await
             .expect_err("transient put failure should surface");
 
@@ -3150,11 +3222,10 @@ mod tests {
         engine.set_put_error(IngestError::Internal {
             message: "invariant violated".to_string(),
         });
-        let connect = IngestConnect::new(IngestState::new(engine));
+        let connect = PutDispatcher::new(IngestState::new(engine));
 
         let request = put_request(1);
-        let request = ServiceRequest::from_parts(request.reborrow(), request.bytes());
-        let err = IngestApi::put(&connect, Context::default(), request)
+        let err = dispatch_put(&connect, request)
             .await
             .expect_err("fatal put failure should surface");
 
@@ -3168,11 +3239,10 @@ mod tests {
         let engine = Arc::new(FakeEngine::default());
         let state = IngestState::new(engine);
         state.ready.store(false, Ordering::SeqCst);
-        let connect = IngestConnect::new(state);
+        let connect = PutDispatcher::new(state);
 
         let request = put_request(1);
-        let request = ServiceRequest::from_parts(request.reborrow(), request.bytes());
-        let err = IngestApi::put(&connect, Context::default(), request)
+        let err = dispatch_put(&connect, request)
             .await
             .expect_err("not-ready gate should reject");
 
