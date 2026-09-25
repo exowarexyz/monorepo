@@ -483,7 +483,7 @@ fn make_sql_schema(client: PrefixedStoreClient) -> KvSchema {
 }
 
 async fn query_sql_items(client: PrefixedStoreClient) -> (Vec<i64>, Vec<i64>) {
-    let ctx = exoware_sql::session_context();
+    let ctx = exoware_sql::session_context(client.clone());
     make_sql_schema(client)
         .register_all(&ctx)
         .expect("register schema");
