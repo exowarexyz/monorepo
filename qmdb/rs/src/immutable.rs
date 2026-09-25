@@ -17,7 +17,9 @@ use crate::codec::{decode_update_location, merkle_size_for_watermark};
 use crate::connect::OperationKv;
 use crate::core::{self, PublishedWatermark};
 use crate::error::QmdbError;
+use crate::operation_range::load_operation_range_checkpoint;
 use crate::proof::{OperationRangeCheckpoint, RawBatchMultiProof, VerifiedOperationRange};
+use crate::read_cache::ReadCache;
 use crate::storage::KvMerkleStorage;
 use crate::VersionedValue;
 
@@ -33,6 +35,7 @@ pub struct ImmutableClient<
     store: PrefixedStoreClient,
     publication: Arc<core::PublicationCache<F>>,
     operation_cfg: <immutable::Operation<F, K, E> as CodecRead>::Cfg,
+    read_cache: Arc<ReadCache<F, H::Digest>>,
     _marker: PhantomData<(F, H, K, E)>,
 }
 
@@ -50,6 +53,7 @@ where
             store: self.store.clone(),
             publication: self.publication.clone(),
             operation_cfg: self.operation_cfg.clone(),
+            read_cache: self.read_cache.clone(),
             _marker: PhantomData,
         }
     }
@@ -87,6 +91,7 @@ where
             store,
             publication: Arc::new(core::PublicationCache::default()),
             operation_cfg,
+            read_cache: Arc::new(ReadCache::new()),
             _marker: PhantomData,
         }
     }
@@ -193,28 +198,23 @@ where
         max_locations: u32,
     ) -> Result<OperationRangeCheckpoint<H::Digest, F>, QmdbError> {
         let session = ReadSession::fixed(self.store.clone(), Some(watermark.sequence_number));
-        let end =
-            crate::proof::resolve_range_bounds(watermark.location, start_location, max_locations)?;
-        let storage = KvMerkleStorage::<F, H::Digest> {
-            session: &session,
-            size: merkle_size_for_watermark(watermark.location)?,
-            _marker: PhantomData::<H::Digest>,
-        };
-        let inactive_peaks =
-            inactive_peaks_at::<F, K, V, E>(&session, watermark.location, &self.operation_cfg)
-                .await?;
-        let root =
-            core::compute_ops_root::<F, H>(&session, watermark.location, inactive_peaks).await?;
-        let encoded_operations =
-            core::load_operation_bytes_range(&session, start_location, end).await?;
-        let proof = crate::proof::build_operation_range_checkpoint::<F, H, _>(
-            &storage,
-            watermark.location,
+        let watermark = watermark.location;
+        let end = crate::proof::resolve_range_bounds(watermark, start_location, max_locations)?;
+        let proof = load_operation_range_checkpoint::<F, H, _>(
+            &session,
+            &self.read_cache,
+            watermark,
             start_location,
             end,
-            root,
-            inactive_peaks,
-            encoded_operations,
+            false,
+            |bytes| async move {
+                let operation = core::decode_operation_at::<F, immutable::Operation<F, K, E>>(
+                    bytes.as_ref(),
+                    watermark,
+                    &self.operation_cfg,
+                )?;
+                inactive_peaks_from_operation::<F, K, V, E>(watermark, operation)
+            },
         )
         .await?;
         Ok(proof)
@@ -297,6 +297,19 @@ where
         operation_cfg,
     )
     .await?;
+    inactive_peaks_from_operation::<F, K, V, E>(watermark, operation)
+}
+
+fn inactive_peaks_from_operation<F, K, V, E>(
+    watermark: Location<F>,
+    operation: immutable::Operation<F, K, E>,
+) -> Result<usize, QmdbError>
+where
+    F: Graftable,
+    K: QmdbKey,
+    V: Codec + Clone + Send + Sync,
+    E: ValueEncoding<Value = V>,
+{
     let immutable::Operation::Commit(_, floor) = operation else {
         return Err(QmdbError::CorruptData(format!(
             "immutable watermark {watermark} does not point at a Commit operation"

@@ -3061,11 +3061,14 @@ mod tests {
     use super::*;
     use crate::kv_codec::{KvFieldKind, KvPredicate, KvPredicateCheck, KvPredicateConstraint};
     use buffa::Message as _;
+    use buffa_types::google::protobuf::Duration as ProtoDuration;
     use connectrpc::compression::{CompressionProvider, GzipProvider};
     use connectrpc::error::ErrorDetail;
     use exoware_proto::query::TraversalMode as ProtoTraversalMode;
     use http::header::{ACCEPT_ENCODING, AUTHORIZATION, CONTENT_ENCODING};
     use http_body_util::BodyExt;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use tokio::sync::{Barrier, Semaphore};
 
     #[derive(Clone, Debug, Default)]
     struct RecordingTransport {
@@ -4023,6 +4026,85 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn observed_zero_allows_concurrent_reads_and_later_floor_advancement() {
+        let client = PrefixedStoreClient::empty(StoreClient::new("http://unused.test"));
+        let session = client.create_session();
+        let failed = session
+            .run_read(|floor, _| async move {
+                assert_eq!(floor, None);
+                Err::<(), _>(ClientError::Rpc(Box::new(ConnectError::unavailable(
+                    "retry",
+                ))))
+            })
+            .await;
+        assert!(failed.is_err());
+        assert_eq!(session.evaluated_sequence(), None);
+
+        session
+            .run_read(|floor, observed| async move {
+                assert_eq!(floor, None);
+                observed.observe(0);
+                Ok::<_, ClientError>(())
+            })
+            .await
+            .unwrap();
+        assert_eq!(session.evaluated_sequence(), Some(0));
+
+        let barrier = Barrier::new(2);
+        let read = |sequence| {
+            let barrier = &barrier;
+            session.run_read(move |floor, observed| async move {
+                assert_eq!(floor, Some(0));
+                barrier.wait().await;
+                observed.observe(sequence);
+                Ok::<_, ClientError>(())
+            })
+        };
+        tokio::time::timeout(Duration::from_secs(1), async {
+            futures::try_join!(read(17), read(19))
+        })
+        .await
+        .expect("primed reads overlap")
+        .unwrap();
+        assert_eq!(session.evaluated_sequence(), Some(19));
+        session
+            .run_read(|floor, _| async move {
+                assert_eq!(floor, Some(19));
+                Ok::<_, ClientError>(())
+            })
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn concurrent_unseeded_reads_wait_for_the_first_observation() {
+        let client = PrefixedStoreClient::empty(StoreClient::new("http://unused.test"));
+        let session = client.create_session();
+        let release = Semaphore::new(0);
+        let calls = AtomicU64::new(0);
+        let (release, calls) = (&release, &calls);
+        let mut first = Box::pin(session.run_read(|floor, observed| async move {
+            assert_eq!(floor, None);
+            calls.fetch_add(1, Ordering::SeqCst);
+            release.acquire().await.unwrap().forget();
+            observed.observe(17);
+            Ok::<_, ClientError>(())
+        }));
+        let mut second = Box::pin(session.run_read(|floor, _| async move {
+            calls.fetch_add(1, Ordering::SeqCst);
+            assert_eq!(floor, Some(17));
+            Ok::<_, ClientError>(())
+        }));
+
+        assert!(futures::poll!(first.as_mut()).is_pending());
+        assert!(futures::poll!(second.as_mut()).is_pending());
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        release.add_permits(1);
+        futures::try_join!(first, second).unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
     async fn session_policies_apply_to_all_read_methods() {
         for (monotonic, initial_floor) in [
             (true, None),
@@ -4491,6 +4573,59 @@ mod tests {
         assert_eq!(retry_backoff_delay(2, config), Duration::from_millis(200));
         assert_eq!(retry_backoff_delay(3, config), Duration::from_millis(250));
         assert_eq!(retry_backoff_delay(4, config), Duration::from_millis(250));
+    }
+
+    #[test]
+    fn retry_delay_caps_retry_info_hint_at_configured_maximum() {
+        let error = proto::with_retry_info_detail(
+            ConnectError::unavailable("retry"),
+            proto::google::rpc::RetryInfo {
+                retry_delay: Some(ProtoDuration {
+                    seconds: 1,
+                    ..Default::default()
+                })
+                .into(),
+                ..Default::default()
+            },
+        );
+        let config = RetryConfig::standard().with_max_backoff(Duration::from_millis(100));
+
+        assert_eq!(
+            retry_delay_for_error(&error, 1, config),
+            Duration::from_millis(100)
+        );
+    }
+
+    #[test]
+    fn retry_delay_honors_retry_info_hint_below_configured_maximum() {
+        let error = proto::with_retry_info_detail(
+            ConnectError::unavailable("retry"),
+            proto::google::rpc::RetryInfo {
+                retry_delay: Some(ProtoDuration {
+                    nanos: 50_000_000,
+                    ..Default::default()
+                })
+                .into(),
+                ..Default::default()
+            },
+        );
+        let config = RetryConfig::standard().with_max_backoff(Duration::from_millis(100));
+
+        assert_eq!(
+            retry_delay_for_error(&error, 1, config),
+            Duration::from_millis(50)
+        );
+    }
+
+    #[test]
+    fn retry_delay_falls_back_to_exponential_backoff_without_retry_info() {
+        let error = ConnectError::unavailable("retry");
+        let config = RetryConfig::standard();
+
+        assert_eq!(
+            retry_delay_for_error(&error, 2, config),
+            Duration::from_millis(200)
+        );
     }
 
     #[test]

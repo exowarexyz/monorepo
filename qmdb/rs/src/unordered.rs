@@ -24,10 +24,12 @@ use crate::codec::{
 use crate::connect::OperationKv;
 use crate::core;
 use crate::error::{error_key, QmdbError};
+use crate::operation_range::load_operation_range_checkpoint;
 use crate::proof::{
     CurrentOperationRangeProofResult, OperationRangeCheckpoint, RawBatchMultiProof,
     RawKeyValueProof, VerifiedKeyValue, VerifiedOperationRange,
 };
+use crate::read_cache::ReadCache;
 use crate::storage::{KvCurrentStorage, KvMerkleStorage, ProofBitmap};
 use crate::VersionedValue;
 
@@ -43,6 +45,7 @@ pub struct UnorderedClient<
     store: PrefixedStoreClient,
     publication: Arc<core::PublicationCache<F>>,
     op_cfg: <unordered::Operation<F, K, E> as commonware_codec::Read>::Cfg,
+    read_cache: Arc<ReadCache<F, H::Digest>>,
     _marker: PhantomData<(F, H, K, E)>,
 }
 
@@ -61,6 +64,7 @@ where
             store: self.store.clone(),
             publication: self.publication.clone(),
             op_cfg: self.op_cfg.clone(),
+            read_cache: self.read_cache.clone(),
             _marker: PhantomData,
         }
     }
@@ -137,6 +141,7 @@ where
             store,
             publication: Arc::new(core::PublicationCache::default()),
             op_cfg,
+            read_cache: Arc::new(ReadCache::new()),
             _marker: PhantomData,
         }
     }
@@ -159,11 +164,7 @@ where
     where
         V: AsRef<[u8]>,
     {
-        let op = unordered::Operation::<F, K, E>::decode_cfg(bytes, &self.op_cfg).map_err(|e| {
-            QmdbError::CorruptData(format!(
-                "failed to decode unordered operation at location {location}: {e}"
-            ))
-        })?;
+        let op = decode_operation::<F, K, V, E>(&self.op_cfg, location, bytes)?;
         let key = op.key().map(|k| <K as AsRef<[u8]>>::as_ref(k).to_vec());
         let value = match &op {
             unordered::Operation::Update(update) => Some(update.1.as_ref().to_vec()),
@@ -231,27 +232,28 @@ where
         let session = ReadSession::fixed(self.store.clone(), Some(watermark.sequence_number));
         let watermark = watermark.location;
         let end = crate::proof::resolve_range_bounds(watermark, start_location, max_locations)?;
-        let storage = KvMerkleStorage::<F, H::Digest> {
-            session: &session,
-            size: merkle_size_for_watermark(watermark)?,
-            _marker: PhantomData,
-        };
-        let inactive_peaks =
-            ops_inactive_peaks_at::<F, K, V, E>(&self.op_cfg, &session, watermark).await?;
-        let root = core::compute_ops_root::<F, H>(&session, watermark, inactive_peaks).await?;
-        let encoded_operations =
-            core::load_operation_bytes_range(&session, start_location, end).await?;
-        let mut checkpoint = crate::proof::build_operation_range_checkpoint::<F, H, _>(
-            &storage,
+        let session = &session;
+        let checkpoint = load_operation_range_checkpoint::<F, H, _>(
+            session,
+            &self.read_cache,
             watermark,
             start_location,
             end,
-            root,
-            inactive_peaks,
-            encoded_operations,
+            true,
+            |bytes| async move {
+                let operation =
+                    decode_operation::<F, K, V, E>(&self.op_cfg, watermark, bytes.as_ref())?;
+                let floor = load_ops_inactivity_floor_from::<F, K, V, E>(
+                    &self.op_cfg,
+                    session,
+                    watermark,
+                    operation,
+                )
+                .await?;
+                core::inactive_peaks(watermark, floor)
+            },
         )
         .await?;
-        checkpoint.ops_root_witness = load_ops_root_witness::<F, H>(&session, watermark).await?;
         Ok(checkpoint)
     }
 
@@ -691,11 +693,26 @@ where
     E: ValueEncoding<Value = V>,
     unordered::Operation<F, K, E>: Encode + Decode,
 {
+    let operation = load_operation_at::<F, K, V, E>(op_cfg, session, watermark).await?;
+    load_ops_inactivity_floor_from::<F, K, V, E>(op_cfg, session, watermark, operation).await
+}
+
+async fn load_ops_inactivity_floor_from<F, K, V, E>(
+    op_cfg: &<unordered::Operation<F, K, E> as commonware_codec::Read>::Cfg,
+    session: &ReadSession,
+    watermark: Location<F>,
+    mut operation: unordered::Operation<F, K, E>,
+) -> Result<Location<F>, QmdbError>
+where
+    F: Graftable,
+    K: QmdbKey + Codec,
+    V: Codec + Clone + Send + Sync,
+    E: ValueEncoding<Value = V>,
+    unordered::Operation<F, K, E>: Encode + Decode,
+{
     let mut location = watermark;
     loop {
-        if let unordered::Operation::CommitFloor(_, floor) =
-            load_operation_at::<F, K, V, E>(op_cfg, session, location).await?
-        {
+        if let unordered::Operation::CommitFloor(_, floor) = operation {
             return Ok(floor);
         }
         if *location == 0 {
@@ -704,6 +721,7 @@ where
             )));
         }
         location -= 1;
+        operation = load_operation_at::<F, K, V, E>(op_cfg, session, location).await?;
     }
 }
 
