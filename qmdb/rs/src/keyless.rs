@@ -10,11 +10,11 @@ use commonware_storage::{
         keyless,
     },
 };
-use exoware_sdk::{PrefixedStoreClient, ReadSession};
+use exoware_sdk::{PrefixedStoreClient, ReadResult, ReadSession};
 
 use crate::codec::merkle_size_for_watermark;
 use crate::connect::OperationKv;
-use crate::core::{self, PublishedWatermark, ReadResult};
+use crate::core::{self, PublishedWatermark};
 use crate::error::QmdbError;
 use crate::proof::{OperationRangeCheckpoint, RawBatchMultiProof, VerifiedOperationRange};
 use crate::storage::KvMerkleStorage;
@@ -167,7 +167,7 @@ where
     ) -> Result<OperationRangeCheckpoint<H::Digest, F>, QmdbError> {
         let watermark = self.resolve_watermark(watermark, None).await?.value;
         Ok(self
-            .operation_range_checkpoint_at(watermark, start_location, max_locations, None)
+            .operation_range_checkpoint_at(watermark, start_location, max_locations)
             .await?
             .value)
     }
@@ -177,12 +177,8 @@ where
         watermark: PublishedWatermark<F>,
         start_location: Location<F>,
         max_locations: u32,
-        min_sequence_number: Option<u64>,
     ) -> Result<ReadResult<OperationRangeCheckpoint<H::Digest, F>>, QmdbError> {
-        let session = ReadSession::fixed(
-            self.store.clone(),
-            Some(watermark.sequence_number).max(min_sequence_number),
-        );
+        let session = ReadSession::fixed(self.store.clone(), Some(watermark.sequence_number));
         let end =
             crate::proof::resolve_range_bounds(watermark.location, start_location, max_locations)?;
         let storage = KvMerkleStorage::<F, H::Digest> {

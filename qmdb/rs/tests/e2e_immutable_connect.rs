@@ -239,6 +239,19 @@ async fn test_immutable_connect_get_operation_range_returns_verifiable_proof() {
         spawn_qmdb_server(PrefixedStoreClient::empty(store_client.clone())).await;
     let connect_client = operation_log_client(&qmdb_url);
 
+    let request = ProtoGetOperationRangeRequest {
+        tip: u64::try_from(source.operations.len() - 1).expect("tip fits"),
+        start_location: 1,
+        max_locations: 1,
+        min_sequence_number: Some(u64::MAX),
+        ..Default::default()
+    };
+    let error = common::operation_log_rpc_client(&qmdb_url)
+        .get_operation_range(request.clone())
+        .await
+        .expect_err("caller floor must govern an uncached publication lookup");
+    assert_eq!(error.code, connectrpc::ErrorCode::Aborted);
+
     for min_sequence_number in [None, Some(1)] {
         let proof = connect_client
             .get_operation_range(
@@ -260,17 +273,12 @@ async fn test_immutable_connect_get_operation_range_returns_verifiable_proof() {
         assert_eq!(proof.operations, vec![source.operations[1].clone()]);
     }
 
-    let error = common::operation_log_rpc_client(&qmdb_url)
-        .get_operation_range(ProtoGetOperationRangeRequest {
-            tip: u64::try_from(source.operations.len() - 1).expect("tip fits"),
-            start_location: 1,
-            max_locations: 1,
-            min_sequence_number: Some(u64::MAX),
-            ..Default::default()
-        })
+    let response = common::operation_log_rpc_client(&qmdb_url)
+        .get_operation_range(request)
         .await
-        .expect_err("unavailable sequence floor");
-    assert_eq!(error.code, connectrpc::ErrorCode::Aborted);
+        .expect("cached publication evidence fixes the downstream read floor")
+        .into_owned();
+    assert!(response.sequence_number < u64::MAX);
 }
 
 #[tokio::test]

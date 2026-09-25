@@ -402,6 +402,13 @@ async fn rpc_reads_do_not_inherit_previous_request_observations() {
         ..Default::default()
     };
 
+    let error = rpc
+        .get_operation_range(request(Some(101)))
+        .await
+        .expect_err("explicit floor must govern an uncached publication lookup");
+    assert_eq!(error.code, connectrpc::ErrorCode::Aborted);
+    query.publication_reads.store(0, Ordering::SeqCst);
+
     let warm = rpc
         .get_operation_range(request(None))
         .await
@@ -423,11 +430,13 @@ async fn rpc_reads_do_not_inherit_previous_request_observations() {
         .into_owned();
     assert_eq!(second.sequence_number, 100);
     assert_eq!(query.publication_reads.load(Ordering::SeqCst), 1);
-    let error = rpc
+    let third = rpc
         .get_operation_range(request(Some(101)))
         .await
-        .expect_err("explicit floor must reject the older replica");
-    assert_eq!(error.code, connectrpc::ErrorCode::Aborted);
+        .expect("cached publication evidence fixes the downstream read floor")
+        .into_owned();
+    assert_eq!(third.sequence_number, 100);
+    assert_eq!(query.publication_reads.load(Ordering::SeqCst), 1);
 
     qmdb_server.abort();
     store_server.abort();

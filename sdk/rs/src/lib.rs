@@ -1692,6 +1692,15 @@ pub struct StoreClient {
     credential: Credential,
 }
 
+/// A value and the highest Store sequence observed by the reads that produced it.
+pub struct ReadResult<T> {
+    /// The result of the operation.
+    pub value: T,
+    /// The highest sequence reported by a read, or `None` if no read reported one.
+    /// Required floors are not observations.
+    pub sequence_number: Option<u64>,
+}
+
 /// A read session with a fixed or monotonic minimum Store sequence.
 ///
 /// A fixed session keeps its configured floor. A monotonic session raises the

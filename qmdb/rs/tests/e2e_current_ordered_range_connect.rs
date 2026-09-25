@@ -731,6 +731,14 @@ async fn test_ordered_mmb_operation_range_client_rejects_missing_nonzero_pinned_
         min_sequence_number: Some(1),
         ..Default::default()
     };
+    let error = common::operation_log_rpc_client(&qmdb_url)
+        .get_operation_range(ProtoGetOperationRangeRequest {
+            min_sequence_number: Some(u64::MAX),
+            ..request.clone()
+        })
+        .await
+        .expect_err("caller floor must govern an uncached publication lookup");
+    assert_eq!(error.code, connectrpc::ErrorCode::Aborted);
     let mut response = common::operation_log_rpc_client(&qmdb_url)
         .get_operation_range(request.clone())
         .await
@@ -748,14 +756,15 @@ async fn test_ordered_mmb_operation_range_client_rejects_missing_nonzero_pinned_
         proof.operations,
         vec![source.operations[usize::try_from(*start).expect("start fits usize")].clone()]
     );
-    let error = common::operation_log_rpc_client(&qmdb_url)
+    let cached = common::operation_log_rpc_client(&qmdb_url)
         .get_operation_range(ProtoGetOperationRangeRequest {
             min_sequence_number: Some(u64::MAX),
             ..request.clone()
         })
         .await
-        .expect_err("unavailable sequence floor");
-    assert_eq!(error.code, connectrpc::ErrorCode::Aborted);
+        .expect("cached publication evidence fixes the downstream read floor")
+        .into_owned();
+    assert_eq!(cached.sequence_number, response.sequence_number);
 
     let mut proof = response
         .proof

@@ -13,7 +13,7 @@ use commonware_storage::qmdb::{
     current::proof::{OperationProof, OpsRootWitness, RangeProof},
     operation::{Key as QmdbKey, Operation as _},
 };
-use exoware_sdk::{PrefixedStoreClient, RangeMode, ReadSession};
+use exoware_sdk::{PrefixedStoreClient, RangeMode, ReadResult, ReadSession};
 
 use crate::codec::{
     chunk_index_for_location, clear_below_floor, decode_current_boundary_metadata,
@@ -206,10 +206,10 @@ where
         &self,
         watermark: Location<F>,
         min_sequence_number: Option<u64>,
-    ) -> Result<core::ReadResult<core::PublishedWatermark<F>>, QmdbError> {
+    ) -> Result<ReadResult<core::PublishedWatermark<F>>, QmdbError> {
         let session = ReadSession::fixed(self.store.clone(), min_sequence_number);
         let value = self.publication.require(&session, watermark).await?;
-        Ok(core::ReadResult {
+        Ok(ReadResult {
             value,
             sequence_number: session.evaluated_sequence(),
         })
@@ -223,7 +223,7 @@ where
     ) -> Result<OperationRangeCheckpoint<H::Digest, F>, QmdbError> {
         let watermark = self.resolve_watermark(watermark, None).await?.value;
         Ok(self
-            .operation_range_checkpoint_at(watermark, start_location, max_locations, None)
+            .operation_range_checkpoint_at(watermark, start_location, max_locations)
             .await?
             .value)
     }
@@ -233,12 +233,8 @@ where
         watermark: core::PublishedWatermark<F>,
         start_location: Location<F>,
         max_locations: u32,
-        min_sequence_number: Option<u64>,
-    ) -> Result<core::ReadResult<OperationRangeCheckpoint<H::Digest, F>>, QmdbError> {
-        let session = ReadSession::fixed(
-            self.store.clone(),
-            Some(watermark.sequence_number).max(min_sequence_number),
-        );
+    ) -> Result<ReadResult<OperationRangeCheckpoint<H::Digest, F>>, QmdbError> {
+        let session = ReadSession::fixed(self.store.clone(), Some(watermark.sequence_number));
         let watermark = watermark.location;
         let end = crate::proof::resolve_range_bounds(watermark, start_location, max_locations)?;
         let storage = KvMerkleStorage::<F, H::Digest> {
@@ -262,7 +258,7 @@ where
         )
         .await?;
         checkpoint.ops_root_witness = load_ops_root_witness::<F, H>(&session, watermark).await?;
-        Ok(core::ReadResult {
+        Ok(ReadResult {
             value: checkpoint,
             sequence_number: session.evaluated_sequence(),
         })

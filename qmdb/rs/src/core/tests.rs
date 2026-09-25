@@ -4,11 +4,15 @@ use std::sync::{
     Arc,
 };
 
+use commonware_cryptography::Sha256;
 use commonware_storage::merkle::mmr;
+use commonware_utils::sequence::FixedBytes;
 use connectrpc::client::{BoxFuture, ClientBody, ClientTransport};
 use exoware_sdk::proto::PreferZstdHttpClient;
 use exoware_sdk::{PrefixedStoreClient, RetryConfig, StoreClient, StoreWriteBatch};
 use tokio::sync::{mpsc, Semaphore};
+
+use crate::{ImmutableClient, KeylessClient, OrderedClient, UnorderedClient, MAX_OPERATION_SIZE};
 
 #[derive(Clone)]
 struct CountRequests {
@@ -281,6 +285,90 @@ async fn publication_cache_coalesces_misses_and_refreshes_without_data_observati
         second_sequence
     );
     assert_eq!(calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn client_resolvers_keep_cached_publication_evidence_with_a_higher_caller_floor() {
+    let (_server, url) = exoware_simulator::open_temp().await.unwrap();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let raw = StoreClient::builder()
+        .url(&url)
+        .client_transport(CountRequests {
+            calls: calls.clone(),
+            origin: None,
+            inner: PreferZstdHttpClient::plaintext(),
+        })
+        .retry_config(RetryConfig::disabled())
+        .build()
+        .unwrap();
+    let store = PrefixedStoreClient::empty(raw.clone());
+    let watermark = Location::<mmr::Family>::new(5);
+    let mut batch = StoreWriteBatch::new();
+    crate::stage_watermark(&store, watermark, &mut batch).unwrap();
+    let publication_sequence = batch.commit(&raw).await.unwrap();
+
+    let ordered: OrderedClient<mmr::Family, Sha256, Vec<u8>, Vec<u8>, 32> = OrderedClient::new(
+        store.clone(),
+        (
+            ((0..=MAX_OPERATION_SIZE).into(), ()),
+            ((0..=MAX_OPERATION_SIZE).into(), ()),
+        ),
+        ((0..=MAX_OPERATION_SIZE).into(), ()),
+    );
+    let unordered: UnorderedClient<mmr::Family, Sha256, Vec<u8>, Vec<u8>> = UnorderedClient::new(
+        store.clone(),
+        (
+            ((0..=MAX_OPERATION_SIZE).into(), ()),
+            ((0..=MAX_OPERATION_SIZE).into(), ()),
+        ),
+    );
+    let immutable: ImmutableClient<mmr::Family, Sha256, FixedBytes<32>, Vec<u8>> =
+        ImmutableClient::new(store.clone(), ((), ((0..=MAX_OPERATION_SIZE).into(), ())));
+    let keyless: KeylessClient<mmr::Family, Sha256, Vec<u8>> =
+        KeylessClient::new(store.clone(), ((0..=MAX_OPERATION_SIZE).into(), ()));
+
+    macro_rules! warm_resolver {
+        ($client:expr) => {{
+            let result = $client.resolve_watermark(watermark, None).await.unwrap();
+            assert_eq!(result.value.location, watermark);
+            assert_eq!(result.value.sequence_number, publication_sequence);
+            assert_eq!(result.sequence_number, Some(publication_sequence));
+        }};
+    }
+    warm_resolver!(ordered);
+    warm_resolver!(unordered);
+    warm_resolver!(immutable);
+    warm_resolver!(keyless);
+
+    let mut batch = StoreWriteBatch::new();
+    batch
+        .push(&store, &Key::from_static(b"unrelated"), b"value".as_slice())
+        .unwrap();
+    let caller_floor = batch.commit(&raw).await.unwrap();
+    assert!(caller_floor > publication_sequence);
+    calls.store(0, Ordering::SeqCst);
+
+    macro_rules! check_resolver {
+        ($client:expr) => {{
+            let result = $client
+                .resolve_watermark(watermark, Some(caller_floor))
+                .await
+                .unwrap();
+            assert_eq!(result.value.location, watermark);
+            assert_eq!(result.value.sequence_number, publication_sequence);
+            assert_eq!(result.sequence_number, None);
+
+            let cached = $client.resolve_watermark(watermark, None).await.unwrap();
+            assert_eq!(cached.value.location, watermark);
+            assert_eq!(cached.value.sequence_number, publication_sequence);
+            assert_eq!(cached.sequence_number, None);
+            assert_eq!(calls.load(Ordering::SeqCst), 0);
+        }};
+    }
+    check_resolver!(ordered);
+    check_resolver!(unordered);
+    check_resolver!(immutable);
+    check_resolver!(keyless);
 }
 
 #[tokio::test]

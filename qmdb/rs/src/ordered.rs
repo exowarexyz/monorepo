@@ -18,7 +18,7 @@ use commonware_storage::{
         operation::{Key as QmdbKey, Operation as _},
     },
 };
-use exoware_sdk::{PrefixedStoreClient, RangeMode, ReadSession};
+use exoware_sdk::{PrefixedStoreClient, RangeMode, ReadResult, ReadSession};
 
 use crate::codec::{
     chunk_index_for_location, clear_below_floor, decode_current_boundary_metadata,
@@ -27,7 +27,7 @@ use crate::codec::{
     encode_update_key, merkle_size_for_watermark, CurrentBoundaryMetadata, UPDATE_PREFIX,
 };
 use crate::connect::OperationKv;
-use crate::core::{self, PublishedWatermark, ReadResult};
+use crate::core::{self, PublishedWatermark};
 use crate::error::{error_key, QmdbError};
 use crate::proof::{
     CurrentOperationRangeProofResult, OperationRangeCheckpoint, RawBatchMultiProof,
@@ -410,7 +410,7 @@ where
     ) -> Result<OperationRangeCheckpoint<H::Digest, F>, QmdbError> {
         let watermark = self.resolve_watermark(watermark, None).await?.value;
         Ok(self
-            .operation_range_checkpoint_at(watermark, start_location, max_locations, None)
+            .operation_range_checkpoint_at(watermark, start_location, max_locations)
             .await?
             .value)
     }
@@ -420,12 +420,8 @@ where
         watermark: PublishedWatermark<F>,
         start_location: Location<F>,
         max_locations: u32,
-        min_sequence_number: Option<u64>,
     ) -> Result<ReadResult<OperationRangeCheckpoint<H::Digest, F>>, QmdbError> {
-        let session = ReadSession::fixed(
-            self.store.clone(),
-            Some(watermark.sequence_number).max(min_sequence_number),
-        );
+        let session = ReadSession::fixed(self.store.clone(), Some(watermark.sequence_number));
         let end =
             crate::proof::resolve_range_bounds(watermark.location, start_location, max_locations)?;
         let storage = KvMerkleStorage::<F, H::Digest> {

@@ -63,13 +63,6 @@ pub(crate) struct PublishedWatermark<F: Family> {
     pub(crate) sequence_number: u64,
 }
 
-/// A value and the highest Store sequence observed by this operation's reads.
-/// Required floors and cached publication evidence are not observations.
-pub(crate) struct ReadResult<T> {
-    pub(crate) value: T,
-    pub(crate) sequence_number: Option<u64>,
-}
-
 /// Caches the greatest published QMDB watermark and the store sequence returned
 /// by the publication lookup that observed it.
 ///
