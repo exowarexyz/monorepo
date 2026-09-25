@@ -18,6 +18,15 @@ export {
 } from './store.js';
 export { ExowareError, HttpError } from './error.js';
 export {
+    MAX_PUT_ENTRIES,
+    MAX_REQUEST_MESSAGE_BYTES,
+    MAX_VALUE_LEN,
+    MAX_KEY_LEN,
+    type PutEncoding,
+    type PutLimits,
+    type PutBatchOptions,
+} from './limits.js';
+export {
     RangeReduceOp,
     KvFieldKind,
     ReduceParamsSchema,

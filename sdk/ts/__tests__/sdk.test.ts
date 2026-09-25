@@ -584,10 +584,7 @@ describe('Exoware TS SDK', () => {
                 const key = new TextEncoder().encode('a'.repeat(MAX_KEY_LEN + 1));
                 const value = Buffer.from('test-value');
 
-                await expect(store.set(key, value)).rejects.toMatchObject({
-                    name: 'HttpError',
-                    status: 400,
-                });
+                await expect(store.set(key, value)).rejects.toThrow(RangeError);
             });
 
             it('should handle large values', async () => {

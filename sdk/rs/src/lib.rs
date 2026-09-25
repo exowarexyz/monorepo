@@ -13,6 +13,7 @@
 mod credential;
 pub mod keys;
 pub mod kv_codec;
+pub mod limits;
 pub mod proto;
 pub mod prune_policy;
 pub mod retention;
@@ -51,6 +52,10 @@ use futures::future::BoxFuture;
 use futures::{stream::BoxStream, StreamExt};
 use keys::is_valid_key_size;
 use kv_codec::{KvExpr, KvFieldRef, KvReducedValue};
+use limits::{
+    put_entry_encoded_len, PutTooLarge, INGEST_ERROR_DOMAIN, MAX_RESPONSE_ELEMENT_MEMORY_BYTES,
+    MAX_RESPONSE_MESSAGE_BYTES, PUT_TOO_LARGE_REASON,
+};
 use rustls_platform_verifier::ConfigVerifierExt;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -141,12 +146,6 @@ impl ConnectRequestCompression {
     }
 }
 
-/// Default max decompressed RPC message size for client decode (matches the query worker).
-///
-/// The underlying client uses 4 MiB unless configured; large `Range` frames need headroom.
-/// The store simulator uses the same 256 MiB cap for large `Range` frames.
-const STORE_CLIENT_MAX_MESSAGE_BYTES: usize = 256 * 1024 * 1024;
-
 /// Store client defaults: [`connect_compression_registry`] for codecs;
 /// [`PreferZstdHttpClient`] sets `Accept-Encoding: zstd, gzip` on responses.
 ///
@@ -165,7 +164,8 @@ fn store_connect_client_config(
 
     let config = ClientConfig::new(base_uri)
         .with_compression(compression)
-        .with_default_max_message_size(STORE_CLIENT_MAX_MESSAGE_BYTES);
+        .with_default_max_message_size(MAX_RESPONSE_MESSAGE_BYTES)
+        .with_default_element_memory_limit(MAX_RESPONSE_ELEMENT_MEMORY_BYTES);
     let config = match timeout {
         Some(timeout) => config.with_default_timeout(timeout),
         None => config,
@@ -207,6 +207,24 @@ impl ClientError {
         &self,
     ) -> Result<Option<exoware_proto::DecodedConnectError>, buffa::DecodeError> {
         self.rpc_error().map(proto_decode_connect_error).transpose()
+    }
+
+    /// Decode an ingest size rejection while retaining the original RPC error.
+    ///
+    /// Returns `None` for unrelated errors or malformed details.
+    pub fn put_too_large(&self) -> Option<PutTooLarge> {
+        let decoded = self.decoded_rpc_error().ok()??;
+        let info = decoded.error_info?;
+        if decoded.code != ErrorCode::InvalidArgument
+            || info.domain != INGEST_ERROR_DOMAIN
+            || info.reason != PUT_TOO_LARGE_REASON
+        {
+            return None;
+        }
+        Some(PutTooLarge {
+            entries: info.metadata.get("entries")?.parse().ok()?,
+            max_entries: info.metadata.get("max_entries")?.parse().ok()?,
+        })
     }
 }
 
@@ -832,6 +850,24 @@ async fn scalar_reduce_results(
 #[derive(Clone, Debug, Default)]
 pub struct StoreWriteBatch {
     entries: Vec<(Key, Bytes)>,
+    encoded_len: usize,
+}
+
+/// A batch cannot be split under the supplied limits.
+#[derive(Debug, Clone, Copy, Eq, PartialEq, thiserror::Error)]
+pub enum SplitError {
+    #[error("max_rows must be greater than zero")]
+    ZeroRows,
+    #[error("max_encoded_bytes must be greater than zero")]
+    ZeroEncodedBytes,
+    #[error(
+        "entry {index} needs {encoded_bytes} encoded bytes but the limit is {max_encoded_bytes}"
+    )]
+    EntryTooLarge {
+        index: usize,
+        encoded_bytes: usize,
+        max_encoded_bytes: usize,
+    },
 }
 
 impl StoreWriteBatch {
@@ -847,8 +883,14 @@ impl StoreWriteBatch {
         self.entries.is_empty()
     }
 
+    /// Exact uncompressed protobuf `PutRequest` size, including physical key prefixes.
+    pub fn encoded_len(&self) -> usize {
+        self.encoded_len
+    }
+
     pub fn clear(&mut self) {
         self.entries.clear();
+        self.encoded_len = 0;
     }
 
     pub fn reserve(&mut self, additional: usize) {
@@ -858,7 +900,7 @@ impl StoreWriteBatch {
     /// Stage a logical row under `client`'s namespace.
     ///
     /// The key is encoded as it is staged, so rows from several namespaces
-    /// can share one batch; [`Self::commit`] writes the encoded rows
+    /// can share one batch. [`Self::commit`] writes the encoded rows
     /// verbatim through the physical client.
     pub fn push(
         &mut self,
@@ -866,10 +908,10 @@ impl StoreWriteBatch {
         key: &Key,
         value: impl IntoStoreWriteValue,
     ) -> Result<&mut Self, ClientError> {
-        self.entries.push((
-            client.encode_store_key(key)?,
-            value.into_store_write_value(),
-        ));
+        let key = client.encode_store_key(key)?;
+        let value = value.into_store_write_value();
+        self.encoded_len += put_entry_encoded_len(&key, &value);
+        self.entries.push((key, value));
         Ok(self)
     }
 
@@ -878,6 +920,56 @@ impl StoreWriteBatch {
         &self.entries
     }
 
+    /// Split into ordered batches that each fit both limits without copying payloads.
+    ///
+    /// Committing the resulting batches is not atomic across batches.
+    /// Concurrent commits may be sequenced in a different order from the returned batches.
+    ///
+    /// Zero limits and entries that cannot fit alone return an error. An empty
+    /// batch produces no batches when both limits are positive.
+    pub fn split(self, max_rows: usize, max_encoded_bytes: usize) -> Result<Vec<Self>, SplitError> {
+        if max_rows == 0 {
+            return Err(SplitError::ZeroRows);
+        }
+        if max_encoded_bytes == 0 {
+            return Err(SplitError::ZeroEncodedBytes);
+        }
+
+        let mut batches = Vec::new();
+        let mut entries = self.entries.into_iter();
+        let mut offset = 0;
+        while !entries.as_slice().is_empty() {
+            // Byte limits can make chunks much smaller than max_rows.
+            let mut rows = 0;
+            let mut encoded_len = 0;
+            for (key, value) in entries.as_slice().iter().take(max_rows) {
+                let entry_encoded_len = put_entry_encoded_len(key, value);
+                if entry_encoded_len > max_encoded_bytes {
+                    return Err(SplitError::EntryTooLarge {
+                        index: offset + rows,
+                        encoded_bytes: entry_encoded_len,
+                        max_encoded_bytes,
+                    });
+                }
+                if entry_encoded_len > max_encoded_bytes - encoded_len {
+                    break;
+                }
+                rows += 1;
+                encoded_len += entry_encoded_len;
+            }
+
+            let mut batch_entries = Vec::with_capacity(rows);
+            batch_entries.extend(entries.by_ref().take(rows));
+            batches.push(Self {
+                entries: batch_entries,
+                encoded_len,
+            });
+            offset += rows;
+        }
+        Ok(batches)
+    }
+
+    /// Submit all rows in one atomic `Put` without applying local size limits.
     pub async fn commit(&self, client: &StoreClient) -> Result<u64, ClientError> {
         client.put_prepared_physical(&self.entries).await
     }
@@ -2970,6 +3062,7 @@ mod tests {
     use crate::kv_codec::{KvFieldKind, KvPredicate, KvPredicateCheck, KvPredicateConstraint};
     use buffa::Message as _;
     use connectrpc::compression::{CompressionProvider, GzipProvider};
+    use connectrpc::error::ErrorDetail;
     use exoware_proto::query::TraversalMode as ProtoTraversalMode;
     use http::header::{ACCEPT_ENCODING, AUTHORIZATION, CONTENT_ENCODING};
     use http_body_util::BodyExt;
@@ -4786,6 +4879,244 @@ mod tests {
         assert_eq!(
             batch.entries[1].0,
             b.key_prefix().encode_key(&key_b).unwrap()
+        );
+    }
+
+    fn generated_batch_len(batch: &StoreWriteBatch) -> usize {
+        ProtoPutRequest {
+            kvs: batch
+                .entries()
+                .iter()
+                .map(|(key, value)| exoware_proto::common::Entry {
+                    key: key.to_vec(),
+                    value: value.clone(),
+                    ..Default::default()
+                })
+                .collect(),
+            ..Default::default()
+        }
+        .encode_to_vec()
+        .len()
+    }
+
+    #[test]
+    fn batch_encoded_len_matches_protobuf_at_varint_boundaries() {
+        for prefix in [vec![], vec![1, 2, 3]] {
+            let client = StoreClient::new("http://localhost:10000")
+                .prefixed(StoreKeyPrefix::new(prefix).unwrap());
+            for key_len in [0, 1, 123, 124, 127, 128, 251] {
+                let key = Key::from(vec![7; key_len]);
+                for value_len in [
+                    0, 1, 120, 121, 122, 123, 124, 125, 126, 127, 128, 129, 16_376, 16_377, 16_378,
+                    16_379, 16_380, 16_381, 16_382, 16_383, 16_384,
+                ] {
+                    let mut batch = StoreWriteBatch::new();
+                    batch.push(&client, &key, vec![9; value_len]).unwrap();
+                    assert_eq!(batch.encoded_len(), generated_batch_len(&batch));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn batch_encoded_len_survives_mutations() {
+        let client = StoreClient::new("http://localhost:10000")
+            .prefixed(StoreKeyPrefix::new(vec![1]).unwrap());
+        let mut batch = StoreWriteBatch::default();
+        assert_eq!(batch.encoded_len(), 0);
+        batch.reserve(5);
+        assert_eq!(batch.encoded_len(), 0);
+        batch.push(&client, &Key::from_static(b"k"), b"v").unwrap();
+        let before = batch.clone();
+        assert_eq!(before.encoded_len(), generated_batch_len(&before));
+
+        assert!(batch
+            .push(&client, &Key::from(vec![0; MAX_KEY_LEN]), b"v")
+            .is_err());
+        assert_eq!(batch.entries(), before.entries());
+        assert_eq!(batch.encoded_len(), before.encoded_len());
+        batch.clear();
+        assert!(batch.is_empty());
+        assert_eq!(batch.encoded_len(), 0);
+        batch.push(&client, &Key::new(), b"").unwrap();
+        assert_eq!(batch.encoded_len(), generated_batch_len(&batch));
+    }
+
+    #[test]
+    fn batch_split_preserves_bounds_order_prefixes_and_shared_storage() {
+        let base = StoreClient::new("http://localhost:10000");
+        let clients = [
+            base.prefixed(StoreKeyPrefix::new(vec![1]).unwrap()),
+            base.prefixed(StoreKeyPrefix::new(vec![2]).unwrap()),
+        ];
+        let mut batch = StoreWriteBatch::new();
+        for i in 0..9 {
+            batch
+                .push(
+                    &clients[i % 2],
+                    &Key::from(vec![(i % 3) as u8]),
+                    vec![(i % 3) as u8; 128],
+                )
+                .unwrap();
+        }
+        let original = batch.clone();
+        let row_bytes = put_entry_encoded_len(&batch.entries()[0].0, &batch.entries()[0].1);
+        for (max_rows, max_bytes) in [(2, usize::MAX), (9, 2 * row_bytes), (2, 2 * row_bytes)] {
+            let batches = batch.clone().split(max_rows, max_bytes).unwrap();
+            assert_eq!(batches.len(), 5);
+            for part in &batches {
+                assert!(!part.is_empty());
+                assert!(part.len() <= max_rows);
+                assert!(part.encoded_len() <= max_bytes);
+                assert_eq!(part.encoded_len(), generated_batch_len(part));
+            }
+            let entries: Vec<_> = batches.iter().flat_map(|part| part.entries()).collect();
+            for (actual, expected) in entries.iter().zip(original.entries()) {
+                assert_eq!(*actual, expected);
+                assert_eq!(actual.0.as_ptr(), expected.0.as_ptr());
+                assert_eq!(actual.1.as_ptr(), expected.1.as_ptr());
+            }
+            assert_eq!(entries.len(), original.len());
+        }
+
+        let max_bytes = batch.encoded_len();
+        let parts = batch.split(9, max_bytes).unwrap();
+        assert_eq!(parts.len(), 1);
+        assert_eq!(parts[0].entries(), original.entries());
+        assert_eq!(parts[0].encoded_len(), max_bytes);
+    }
+
+    #[test]
+    fn batch_split_handles_empty_zero_and_oversized_entries() {
+        assert!(StoreWriteBatch::new().split(1, 1).unwrap().is_empty());
+        assert_eq!(
+            StoreWriteBatch::new().split(0, 1).unwrap_err(),
+            SplitError::ZeroRows
+        );
+        assert_eq!(
+            StoreWriteBatch::new().split(1, 0).unwrap_err(),
+            SplitError::ZeroEncodedBytes
+        );
+        assert_eq!(
+            StoreWriteBatch::new().split(0, 0).unwrap_err(),
+            SplitError::ZeroRows
+        );
+
+        let client = PrefixedStoreClient::empty(StoreClient::new("http://localhost:10000"));
+        let mut batch = StoreWriteBatch::new();
+        batch.push(&client, &Key::new(), b"").unwrap();
+        batch
+            .push(&client, &Key::from_static(b"k"), vec![0; 128])
+            .unwrap();
+        let encoded_bytes = put_entry_encoded_len(b"k", &[0; 128]);
+        let parts = batch.clone().split(1, encoded_bytes).unwrap();
+        assert_eq!(parts.len(), 2);
+        assert_eq!(parts[0].encoded_len(), 2);
+        assert_eq!(parts[1].encoded_len(), encoded_bytes);
+        assert_eq!(
+            batch.split(1, encoded_bytes - 1).unwrap_err(),
+            SplitError::EntryTooLarge {
+                index: 1,
+                encoded_bytes,
+                max_encoded_bytes: encoded_bytes - 1,
+            }
+        );
+    }
+
+    #[test]
+    fn put_too_large_accessor_preserves_rpc_details() {
+        let info = google::rpc::ErrorInfo {
+            domain: INGEST_ERROR_DOMAIN.to_string(),
+            reason: PUT_TOO_LARGE_REASON.to_string(),
+            metadata: [("entries", "2000001"), ("max_entries", "2000000")]
+                .into_iter()
+                .map(|(key, value)| (key.to_string(), value.to_string()))
+                .collect(),
+            ..Default::default()
+        };
+        let make_error = |info| {
+            ClientError::Rpc(Box::new(with_error_info_detail(
+                ConnectError::invalid_argument("too large"),
+                info,
+            )))
+        };
+        let error = make_error(info.clone());
+        assert_eq!(
+            error.put_too_large(),
+            Some(PutTooLarge {
+                entries: 2_000_001,
+                max_entries: 2_000_000,
+            })
+        );
+        assert_eq!(error.rpc_code(), Some(ErrorCode::InvalidArgument));
+        assert_eq!(
+            error.decoded_rpc_error().unwrap().unwrap().error_info,
+            Some(info.clone())
+        );
+
+        for key in ["entries", "max_entries"] {
+            for value in [None, Some("bad"), Some("-1"), Some("18446744073709551616")] {
+                let mut malformed = info.clone();
+                if let Some(value) = value {
+                    malformed
+                        .metadata
+                        .insert(key.to_string(), value.to_string());
+                } else {
+                    malformed.metadata.remove(key);
+                }
+                let error = make_error(malformed);
+                assert_eq!(error.put_too_large(), None);
+                assert!(error.rpc_error().is_some());
+                assert!(error.decoded_rpc_error().unwrap().is_some());
+            }
+        }
+        for (domain, reason) in [
+            ("other", PUT_TOO_LARGE_REASON),
+            (INGEST_ERROR_DOMAIN, "other"),
+        ] {
+            let error = make_error(google::rpc::ErrorInfo {
+                domain: domain.to_string(),
+                reason: reason.to_string(),
+                ..info.clone()
+            });
+            assert_eq!(error.put_too_large(), None);
+        }
+        let wrong_code = ClientError::Rpc(Box::new(with_error_info_detail(
+            ConnectError::resource_exhausted("other"),
+            info,
+        )));
+        assert_eq!(wrong_code.put_too_large(), None);
+        assert_eq!(
+            ClientError::WireFormat("other".to_string()).put_too_large(),
+            None
+        );
+
+        let malformed_wire = ClientError::Rpc(Box::new(
+            ConnectError::invalid_argument("too large").with_detail(ErrorDetail {
+                type_url: google::rpc::ErrorInfo::TYPE_URL.to_string(),
+                value: Some("!".to_string()),
+                debug: None,
+            }),
+        ));
+        assert_eq!(malformed_wire.put_too_large(), None);
+        assert!(malformed_wire.decoded_rpc_error().is_err());
+        assert_eq!(malformed_wire.rpc_error().unwrap().details.len(), 1);
+    }
+
+    #[test]
+    fn client_response_decode_budgets_match_shared_limits() {
+        let config = store_connect_client_config(
+            "http://localhost:10000".parse().unwrap(),
+            ConnectRequestCompression::None,
+            None,
+        );
+        assert_eq!(
+            config.default_max_message_size(),
+            Some(MAX_RESPONSE_MESSAGE_BYTES)
+        );
+        assert_eq!(
+            config.default_element_memory_limit(),
+            Some(MAX_RESPONSE_ELEMENT_MEMORY_BYTES)
         );
     }
 
