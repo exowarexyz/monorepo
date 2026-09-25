@@ -9,16 +9,19 @@ Store. The package mirrors the Rust `exoware-simplex` key layout:
 - finalized `{ proof, header }` bytes by Simplex epoch and view
 - finalized `{ proof, header }` bytes by block height
 
-The TypeScript client uploads raw encoded bytes. Certificate reads verify bytes
-before returning when the client is constructed with a verifier. Use the `*Raw`
-read methods when you explicitly want unverified bytes.
+`SimplexWriter` uploads raw encoded bytes. `new SimplexReader(store)` starts an
+independent monotonic session with no initial minimum. Clones share observations.
+Use `SimplexReader.withSession(session)` to supply an existing session or choose
+a fixed minimum.
+Certificate reads verify bytes before returning. Use the `*Raw` methods only
+when unverified bytes are required.
 
 ```ts
 import { Client, StoreWriteBatch } from '@exowarexyz/sdk';
-import { SimplexClient } from '@exowarexyz/simplex';
+import { SimplexWriter } from '@exowarexyz/simplex';
 
 const store = new Client('http://localhost:10000').store();
-const simplex = new SimplexClient(store);
+const simplex = new SimplexWriter(store);
 const batch = new StoreWriteBatch();
 simplex.stageUpload(simplex.prepareBlock({
   digest: '0x...',
@@ -37,12 +40,12 @@ await batch.commit(store);
 Use `prepareHeader`, `prepareBlock`, `prepareNotarization`, and
 `prepareFinalization` to stage multiple Simplex rows into one
 `StoreWriteBatch`. Raw uploads must provide the encoded certificate's `epoch`
-and `view`. The client does not decode certificate bytes, so a wrong value
+and `view`. The writer does not decode certificate bytes, so a wrong value
 mis-keys the round row.
 
-Use `getHeader` or `subscribeHeaders` when only header bytes are needed. Use
-`getBlock` or `subscribeBlocks` when the caller needs the full
-`{ header, body }` block data.
+Use `SimplexReader.getHeader` when only header bytes are needed and
+`SimplexReader.getBlock` when the full `{ header, body }` block data is needed.
+Store-backed streams remain separate on `SimplexSubscriptions`.
 
 ## Verification
 
@@ -51,15 +54,17 @@ Pass a `SimplexCertificateVerifier` to verify opaque certificate records before
 `latestFinalization`, or `subscribeCertificates` returns them:
 
 ```ts
-import { SimplexClient, type SimplexCertificateVerifier } from '@exowarexyz/simplex';
+import { Client } from '@exowarexyz/sdk';
+import { SimplexReader, type SimplexCertificateVerifier } from '@exowarexyz/simplex';
 
 const verifier: SimplexCertificateVerifier = {
   verifyNotarization: async (bytes, context) => verifyMyNotarization(bytes, context.epoch, context.view),
   verifyFinalization: async (bytes, context) => verifyMyFinalization(bytes, context),
 };
 
-const simplex = new SimplexClient('http://localhost:10000', { verifier });
-const latest = await simplex.latestFinalization();
+const store = new Client('http://localhost:10000').store();
+const reader = new SimplexReader(store, { verifier });
+const latest = await reader.latestFinalization();
 ```
 
 For upstream Commonware Simplex certificate types, build the optional WASM
@@ -71,7 +76,8 @@ npm --prefix simplex/ts run build:wasm
 
 ```ts
 import { createWasmSimplexVerifier } from '@exowarexyz/simplex/wasm';
-import { SimplexClient, hexToBytes } from '@exowarexyz/simplex';
+import { Client, ReadSession } from '@exowarexyz/sdk';
+import { SimplexReader, hexToBytes } from '@exowarexyz/simplex';
 
 const verifier = await createWasmSimplexVerifier({
   scheme: 'bls12381-threshold-vrf-min-sig',
@@ -82,7 +88,8 @@ const verifier = await createWasmSimplexVerifier({
   verifyHeader: ({ payload, header }) => verifyHeaderPayload(payload, header),
 });
 
-const simplex = new SimplexClient('http://localhost:10000', { verifier });
+const store = new Client('http://localhost:10000').store();
+const reader = SimplexReader.withSession(ReadSession.fixed(store, publicationSequence), { verifier });
 ```
 
 Supported schemes are `ed25519`, `secp256r1`,
@@ -99,9 +106,9 @@ verifies the configured certificate key material. Pass `verifyHeader` to
 validate the application-specific relationship between the certificate payload
 and header. Bodies are not embedded in streamed certificate records. Fetch full
 `{ header, body }` block data separately with `getBlock` or `subscribeBlocks`
-when needed. The client does not hardcode SHA or trust a server body-presence
+when needed. The package does not hardcode SHA or trust a server body-presence
 flag. The caller-selected verifier defines the required payload/header
-relationship before the TS client returns a fetched or streamed certificate.
+relationship before a reader or subscription returns a certificate.
 
 Header and block integrity can also live in caller-owned WASM. Implement the
 ABI you need:

@@ -119,6 +119,20 @@ test('constructors distinguish an absent floor from an explicit zero floor', () 
     expect(store.createSessionWithSequence(0n).minSequenceNumber()).toBe(0n);
 });
 
+test.each([
+    { value: -1n, error: RangeError },
+    { value: 1n << 64n, error: RangeError },
+    { value: 1 as unknown as bigint, error: TypeError },
+])('invalid minimum $value is rejected before a request is sent', async ({ value, error }) => {
+    const get = jest.fn(async () => create(GetResponseSchema));
+    const store = new StoreClient(mockClient({ get }));
+
+    expect(() => ReadSession.fixed(store, value)).toThrow(error);
+    expect(() => ReadSession.monotonic(store).withMinSequenceNumber(value)).toThrow(error);
+    await expect(store.get(key, value)).rejects.toThrow(error);
+    expect(get).not.toHaveBeenCalled();
+});
+
 test('direct read methods preserve omitted and explicit zero floors', async () => {
     const floors = {
         get: [] as Array<bigint | undefined>,
