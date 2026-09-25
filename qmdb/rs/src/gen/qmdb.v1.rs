@@ -2844,7 +2844,7 @@ pub struct GetOperationRangeRequest {
         skip_serializing_if = "::buffa::json_helpers::skip_if::is_zero_u32"
     )]
     pub max_locations: u32,
-    /// Minimum Store sequence for publication lookups when cached evidence is insufficient.
+    /// Minimum Store sequence for checking publication of the requested watermark.
     ///
     /// Field 4: `min_sequence_number`
     #[serde(
@@ -8846,7 +8846,7 @@ pub mod __buffa {
             pub start_location: u64,
             /// Field 3: `max_locations`
             pub max_locations: u32,
-            /// Minimum Store sequence for publication lookups when cached evidence is insufficient.
+            /// Minimum Store sequence for checking publication of the requested watermark.
             ///
             /// Field 4: `min_sequence_number`
             pub min_sequence_number: ::core::option::Option<u64>,
@@ -9163,7 +9163,7 @@ pub mod __buffa {
             pub fn max_locations(&self) -> u32 {
                 self.0.reborrow().max_locations
             }
-            /// Minimum Store sequence for publication lookups when cached evidence is insufficient.
+            /// Minimum Store sequence for checking publication of the requested watermark.
             ///
             /// Field 4: `min_sequence_number`
             #[must_use]

@@ -114,7 +114,7 @@ export type GetOperationRangeRequest = Message<"qmdb.v1.GetOperationRangeRequest
   maxLocations: number;
 
   /**
-   * Minimum Store sequence for publication lookups when cached evidence is insufficient.
+   * Minimum Store sequence for checking publication of the requested watermark.
    *
    * @generated from field: optional uint64 min_sequence_number = 4;
    */
