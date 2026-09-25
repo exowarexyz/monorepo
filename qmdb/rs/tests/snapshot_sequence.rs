@@ -414,28 +414,32 @@ async fn rpc_reads_do_not_inherit_previous_request_observations() {
         .await
         .unwrap()
         .into_owned();
-    assert_eq!(warm.sequence_number, 100);
+    assert!(warm.proof.as_option().is_some());
+    assert_eq!(query.publication_reads.load(Ordering::SeqCst), 1);
     query.new_reads.store(usize::MAX, Ordering::SeqCst);
     let first = rpc
         .get_operation_range(request(None))
         .await
         .unwrap()
         .into_owned();
-    assert_eq!(first.sequence_number, 101);
+    assert!(first.proof.as_option().is_some());
+    assert_eq!(query.reads.lock().unwrap().last().unwrap().sequence, 101);
     query.new_reads.store(0, Ordering::SeqCst);
     let second = rpc
         .get_operation_range(request(Some(0)))
         .await
         .unwrap()
         .into_owned();
-    assert_eq!(second.sequence_number, 100);
+    assert!(second.proof.as_option().is_some());
+    assert_eq!(query.reads.lock().unwrap().last().unwrap().sequence, 100);
     assert_eq!(query.publication_reads.load(Ordering::SeqCst), 1);
     let third = rpc
         .get_operation_range(request(Some(101)))
         .await
         .expect("cached publication evidence fixes the downstream read floor")
         .into_owned();
-    assert_eq!(third.sequence_number, 100);
+    assert_eq!(third.proof, second.proof);
+    assert_eq!(query.reads.lock().unwrap().last().unwrap().sequence, 100);
     assert_eq!(query.publication_reads.load(Ordering::SeqCst), 1);
 
     qmdb_server.abort();

@@ -467,8 +467,6 @@ pub struct OperationLogSubscribeProof<D: Digest, Op, F: Family> {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct OperationLogRangeProof<D: Digest, Op, F: Family> {
-    /// Highest Store sequence observed while building the proof. Not authenticated by the root.
-    pub sequence_number: u64,
     pub tip: Location<F>,
     pub root: D,
     pub start_location: Location<F>,
@@ -726,7 +724,7 @@ where
         let tip = Location::<F>::new(request.tip);
         let window =
             OperationWindow::new(request.tip, request.start_location, request.max_locations)?;
-        let (proof, sequence_number) = fetch_operation_range_proof(
+        let proof = fetch_operation_range_proof(
             &self.rpc,
             request,
             "qmdb get_operation_range response missing proof",
@@ -739,7 +737,6 @@ where
             window,
         )?;
         Ok(OperationLogRangeProof {
-            sequence_number,
             tip,
             root,
             start_location: Location::<F>::new(proof.start_location),
@@ -794,7 +791,7 @@ where
         };
         // The upstream maximum permits a smaller transport batch
         let max_locations = u32::try_from(max_ops.get()).unwrap_or(u32::MAX);
-        let (proof, _) = fetch_operation_range_proof(
+        let proof = fetch_operation_range_proof(
             &self.rpc,
             GetOperationRangeRequest {
                 tip,
@@ -864,7 +861,7 @@ async fn fetch_operation_range_proof<T>(
     rpc: &OperationLogServiceClient<T>,
     request: GetOperationRangeRequest,
     missing_proof_message: &'static str,
-) -> Result<(HistoricalOperationRangeProof, u64), QmdbError>
+) -> Result<HistoricalOperationRangeProof, QmdbError>
 where
     T: ClientTransport,
     T::ResponseBody: Body<Data = Bytes> + Unpin,
@@ -881,7 +878,7 @@ where
         .as_option()
         .cloned()
         .ok_or_else(|| QmdbError::CorruptData(missing_proof_message.to_string()))?;
-    Ok((proof, response.sequence_number))
+    Ok(proof)
 }
 
 fn proof_digest_cap<D: Digest>(encoded_proof: &[u8]) -> usize {

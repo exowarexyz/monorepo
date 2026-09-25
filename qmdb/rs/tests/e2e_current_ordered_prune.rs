@@ -265,6 +265,7 @@ async fn test_mirror_ordered_prune_past_chunk_zero() {
         .key_value_proof_at(
             expired_key_snapshot.watermark,
             expired_key_snapshot.key.as_slice(),
+            None,
         )
         .await
         .expect("old watermark proof for later-expired key");
@@ -279,7 +280,7 @@ async fn test_mirror_ordered_prune_past_chunk_zero() {
 
     let final_watermark = batches.last().expect("at least one batch").watermark;
     let latest_err = qmdb_client
-        .key_value_proof_at(final_watermark, expired_key_snapshot.key.as_slice())
+        .key_value_proof_at(final_watermark, expired_key_snapshot.key.as_slice(), None)
         .await
         .expect_err("expired key should be inactive at final watermark");
     match latest_err {
@@ -294,6 +295,7 @@ async fn test_mirror_ordered_prune_past_chunk_zero() {
             b"k-00000000".to_vec(),
             Some(b"k-00000001".to_vec()),
             10,
+            None,
         )
         .await
         .expect("old watermark range proof");

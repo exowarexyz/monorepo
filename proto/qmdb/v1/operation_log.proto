@@ -67,9 +67,8 @@ message GetOperationRangeRequest {
 }
 
 message GetOperationRangeResponse {
-  HistoricalOperationRangeProof proof = 1;
+  reserved 2;
+  reserved "sequence_number";
 
-  // Highest Store sequence observed while building the proof.
-  // This is freshness metadata and is not authenticated by the proof.
-  uint64 sequence_number = 2;
+  HistoricalOperationRangeProof proof = 1;
 }

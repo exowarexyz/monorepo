@@ -87,23 +87,22 @@ const readFloorCases = [
 
 for (const { name, fixture, Client, read } of readFloorCases) {
   for (const merkleFamily of ['mmr', 'mmb']) {
-    test(`test_${name}_${merkleFamily}_read_floor_and_observed_sequence`, async (t) => {
+    test(`test_${name}_${merkleFamily}_read_floor_and_verified_proof`, async (t) => {
       initSync({ module: readFileSync(new URL('../dist/generated/wasm/exoware_qmdb_wasm_bg.wasm', import.meta.url)) });
       const [rootHex, window, proofHex] = readFileSync(
         new URL(`fixtures/variants/${fixture}_${merkleFamily}.txt`, import.meta.url), 'utf8',
       ).trim().split('\n');
       const [tip, startLocation, maxLocations] = window.split(' ');
       const root = Buffer.from(rootHex, 'hex');
-      const sequenceNumber = (1n << 53n) + 101n;
+      const minSequenceNumber = (1n << 53n) + 100n;
       const request = {
         tip: BigInt(tip),
         startLocation: BigInt(startLocation),
         maxLocations: Number(maxLocations),
-        minSequenceNumber: sequenceNumber - 1n,
+        minSequenceNumber,
       };
       const response = create(GetOperationRangeResponseSchema, {
         proof: fromBinary(HistoricalOperationRangeProofSchema, Buffer.from(proofHex, 'hex')),
-        sequenceNumber,
       });
       t.mock.method(globalThis, 'fetch', async (input, init) => {
         const sent = new Request(input, init);
@@ -120,9 +119,11 @@ for (const { name, fixture, Client, read } of readFloorCases) {
       });
       const client = new Client('http://qmdb.test', { merkleFamily });
       const options = { timeoutMs: 1000, headers: { 'x-test-floor': 'forwarded' } };
-      const proof = await read(client, request, root, options);
-      assert.equal(proof.sequenceNumber, sequenceNumber);
-      assert.deepEqual(Buffer.from(proof.root), root);
+      for (const minimum of [undefined, 0n, minSequenceNumber]) {
+        request.minSequenceNumber = minimum;
+        const proof = await read(client, request, root, options);
+        assert.deepEqual(Buffer.from(proof.root), root);
+      }
 
       const wrongRoot = Buffer.from(root);
       wrongRoot[0] ^= 1;

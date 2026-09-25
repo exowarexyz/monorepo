@@ -330,9 +330,8 @@ async fn client_resolvers_keep_cached_publication_evidence_with_a_higher_caller_
     macro_rules! warm_resolver {
         ($client:expr) => {{
             let result = $client.resolve_watermark(watermark, None).await.unwrap();
-            assert_eq!(result.value.location, watermark);
-            assert_eq!(result.value.sequence_number, publication_sequence);
-            assert_eq!(result.sequence_number, Some(publication_sequence));
+            assert_eq!(result.location, watermark);
+            assert_eq!(result.sequence_number, publication_sequence);
         }};
     }
     warm_resolver!(ordered);
@@ -354,14 +353,12 @@ async fn client_resolvers_keep_cached_publication_evidence_with_a_higher_caller_
                 .resolve_watermark(watermark, Some(caller_floor))
                 .await
                 .unwrap();
-            assert_eq!(result.value.location, watermark);
-            assert_eq!(result.value.sequence_number, publication_sequence);
-            assert_eq!(result.sequence_number, None);
+            assert_eq!(result.location, watermark);
+            assert_eq!(result.sequence_number, publication_sequence);
 
             let cached = $client.resolve_watermark(watermark, None).await.unwrap();
-            assert_eq!(cached.value.location, watermark);
-            assert_eq!(cached.value.sequence_number, publication_sequence);
-            assert_eq!(cached.sequence_number, None);
+            assert_eq!(cached.location, watermark);
+            assert_eq!(cached.sequence_number, publication_sequence);
             assert_eq!(calls.load(Ordering::SeqCst), 0);
         }};
     }

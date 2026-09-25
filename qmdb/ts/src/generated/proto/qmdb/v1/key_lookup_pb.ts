@@ -13,7 +13,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file qmdb/v1/key_lookup.proto.
  */
 export const file_qmdb_v1_key_lookup: GenFile = /*@__PURE__*/
-  fileDesc("ChhxbWRiL3YxL2tleV9sb29rdXAucHJvdG8SB3FtZGIudjEiJgoKR2V0UmVxdWVzdBILCgNrZXkYASABKAwSCwoDdGlwGAIgASgEIjgKDkdldE1hbnlSZXF1ZXN0EhkKBGtleXMYASADKAxCC7pICJIBBQgBEIAIEgsKA3RpcBgCIAEoBCI7CgtHZXRSZXNwb25zZRIsCgVwcm9vZhgBIAEoCzIdLnFtZGIudjEuQ3VycmVudEtleVZhbHVlUHJvb2YiQwoPR2V0TWFueVJlc3BvbnNlEjAKB3Jlc3VsdHMYASADKAsyHy5xbWRiLnYxLkN1cnJlbnRLZXlMb29rdXBSZXN1bHQyggEKEEtleUxvb2t1cFNlcnZpY2USMAoDR2V0EhMucW1kYi52MS5HZXRSZXF1ZXN0GhQucW1kYi52MS5HZXRSZXNwb25zZRI8CgdHZXRNYW55EhcucW1kYi52MS5HZXRNYW55UmVxdWVzdBoYLnFtZGIudjEuR2V0TWFueVJlc3BvbnNlYgZwcm90bzM", [file_buf_validate_validate, file_qmdb_v1_proof]);
+  fileDesc("ChhxbWRiL3YxL2tleV9sb29rdXAucHJvdG8SB3FtZGIudjEiYAoKR2V0UmVxdWVzdBILCgNrZXkYASABKAwSCwoDdGlwGAIgASgEEiAKE21pbl9zZXF1ZW5jZV9udW1iZXIYAyABKARIAIgBAUIWChRfbWluX3NlcXVlbmNlX251bWJlciJyCg5HZXRNYW55UmVxdWVzdBIZCgRrZXlzGAEgAygMQgu6SAiSAQUIARCACBILCgN0aXAYAiABKAQSIAoTbWluX3NlcXVlbmNlX251bWJlchgDIAEoBEgAiAEBQhYKFF9taW5fc2VxdWVuY2VfbnVtYmVyIjsKC0dldFJlc3BvbnNlEiwKBXByb29mGAEgASgLMh0ucW1kYi52MS5DdXJyZW50S2V5VmFsdWVQcm9vZiJDCg9HZXRNYW55UmVzcG9uc2USMAoHcmVzdWx0cxgBIAMoCzIfLnFtZGIudjEuQ3VycmVudEtleUxvb2t1cFJlc3VsdDKCAQoQS2V5TG9va3VwU2VydmljZRIwCgNHZXQSEy5xbWRiLnYxLkdldFJlcXVlc3QaFC5xbWRiLnYxLkdldFJlc3BvbnNlEjwKB0dldE1hbnkSFy5xbWRiLnYxLkdldE1hbnlSZXF1ZXN0GhgucW1kYi52MS5HZXRNYW55UmVzcG9uc2ViBnByb3RvMw", [file_buf_validate_validate, file_qmdb_v1_proof]);
 
 /**
  * Current key proof request.
@@ -35,6 +35,13 @@ export type GetRequest = Message<"qmdb.v1.GetRequest"> & {
    * @generated from field: uint64 tip = 2;
    */
   tip: bigint;
+
+  /**
+   * Minimum Store sequence for checking publication of the requested watermark.
+   *
+   * @generated from field: optional uint64 min_sequence_number = 3;
+   */
+  minSequenceNumber?: bigint;
 };
 
 /**
@@ -64,6 +71,13 @@ export type GetManyRequest = Message<"qmdb.v1.GetManyRequest"> & {
    * @generated from field: uint64 tip = 2;
    */
   tip: bigint;
+
+  /**
+   * Minimum Store sequence for checking publication of the requested watermark.
+   *
+   * @generated from field: optional uint64 min_sequence_number = 3;
+   */
+  minSequenceNumber?: bigint;
 };
 
 /**

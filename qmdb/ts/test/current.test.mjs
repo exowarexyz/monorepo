@@ -1,11 +1,13 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
-import { fromBinary, toBinary } from '@bufbuild/protobuf';
+import { create, fromBinary, fromJsonString, toBinary, toJsonString } from '@bufbuild/protobuf';
 import { GetRequestSchema, GetResponseSchema, GetManyRequestSchema, GetManyResponseSchema } from '../dist/generated/proto/qmdb/v1/key_lookup_pb.js';
 import { GetRangeRequestSchema, GetRangeResponseSchema } from '../dist/generated/proto/qmdb/v1/key_range_pb.js';
+import { GetCurrentOperationRangeRequestSchema, GetCurrentOperationRangeResponseSchema } from '../dist/generated/proto/qmdb/v1/current_operation_pb.js';
 import { SubscribeRequestSchema, SubscribeResponseSchema } from '../dist/generated/proto/qmdb/v1/operation_log_pb.js';
-import { CurrentKeyValueProofSchema, HistoricalMultiProofSchema } from '../dist/generated/proto/qmdb/v1/proof_pb.js';
+import { CurrentKeyValueProofSchema, CurrentOperationRangeProofSchema, HistoricalMultiProofSchema } from '../dist/generated/proto/qmdb/v1/proof_pb.js';
+import { OrderedQmdbClient } from '../dist/client.js';
 import {
   decode_historical_multi_proof_operations, encode_vec_key, initSync, verify_current_key_value_proof,
   verify_get_many_response, verify_get_range_response,
@@ -45,6 +47,33 @@ function assertRange(actual, expected) {
   actual.entries.forEach((entry, index) => {
     assertHit(entry, rows[index]);
     assert.deepEqual(entry.key, entry.operation.key);
+  });
+}
+
+function decodeFixtureKey(key) {
+  const decoded = key.subarray(1);
+  assert.deepEqual(Buffer.from(encode_vec_key(decoded)), Buffer.from(key));
+  return decoded;
+}
+
+function decodeRequest(schema, body, contentType) {
+  return contentType === 'application/proto'
+    ? fromBinary(schema, body)
+    : fromJsonString(schema, new TextDecoder().decode(body));
+}
+
+async function requestBody(request) {
+  return new Uint8Array(await request.arrayBuffer());
+}
+
+function rpcResponse(request, schema, message) {
+  if (request.headers.get('content-type') === 'application/proto') {
+    return new Response(toBinary(schema, message), {
+      headers: { 'content-type': 'application/proto' },
+    });
+  }
+  return new Response(toJsonString(schema, message), {
+    headers: { 'content-type': 'application/json' },
   });
 }
 
@@ -107,4 +136,147 @@ for (const family of ['mmr', 'mmb']) {
     first.response.startProof = undefined;
     assert.throws(() => verifyRange(first, toBinary(GetRangeResponseSchema, first.response)));
   });
+
+  test(`test_current_${family}_clients_forward_read_floor_and_verify_proofs`, async (t) => {
+    const get = fixture(family, 'get', GetRequestSchema, GetResponseSchema);
+    const many = fixture(family, 'get_many', GetManyRequestSchema, GetManyResponseSchema);
+    const range = fixture(family, 'range_first', GetRangeRequestSchema, GetRangeResponseSchema);
+    const currentOperationResponse = create(GetCurrentOperationRangeResponseSchema, {
+      proof: create(CurrentOperationRangeProofSchema, {}),
+    });
+    const large = (1n << 53n) + 100n;
+    let abortFetch = false;
+    let fetchSignal;
+    let markFetchStarted;
+    const fetchStarted = new Promise((resolve) => {
+      markFetchStarted = resolve;
+    });
+    const forwarded = [];
+
+    t.mock.method(globalThis, 'fetch', async (input, init) => {
+      const request = new Request(input, init);
+      const body = await requestBody(request);
+      const path = new URL(request.url).pathname;
+      let cases;
+      if (path.endsWith('/GetMany')) {
+        cases = [GetManyRequestSchema, GetManyResponseSchema, many.response];
+      } else if (path.endsWith('/GetRange')) {
+        cases = [GetRangeRequestSchema, GetRangeResponseSchema, range.response];
+      } else if (path.endsWith('/GetCurrentOperationRange')) {
+        cases = [GetCurrentOperationRangeRequestSchema, GetCurrentOperationRangeResponseSchema, currentOperationResponse];
+      } else if (path.endsWith('/Get')) {
+        cases = [GetRequestSchema, GetResponseSchema, get.response];
+      } else {
+        throw new Error(`unexpected QMDB RPC path ${path}`);
+      }
+      const decoded = decodeRequest(cases[0], body, request.headers.get('content-type'));
+      forwarded.push({
+        path,
+        minSequenceNumber: decoded.minSequenceNumber,
+        testHeader: request.headers.get('x-test-floor'),
+        timeoutMs: Number(request.headers.get('connect-timeout-ms')),
+      });
+      if (abortFetch) {
+        fetchSignal = init.signal;
+        markFetchStarted();
+        return new Promise((resolve, reject) => {
+          init.signal.addEventListener('abort', () => reject(init.signal.reason), { once: true });
+        });
+      }
+      return rpcResponse(request, cases[1], cases[2]);
+    });
+
+    function assertForwarded(method, minSequenceNumber) {
+      const request = forwarded.shift();
+      assert.ok(request.path.endsWith(`/${method}`));
+      assert.equal(request.minSequenceNumber, minSequenceNumber);
+      assert.equal(request.testHeader, 'forwarded');
+      assert.ok(request.timeoutMs > 0);
+    }
+
+    const client = new OrderedQmdbClient('http://qmdb.test', {
+      merkleFamily: family,
+      currentChunkSize: get.chunkSize,
+    });
+    const options = {
+      headers: { 'x-test-floor': 'forwarded' },
+      timeoutMs: 1000,
+    };
+    const getKey = Buffer.from(get.expected[0].split(' ')[0], 'hex');
+    const manyKeys = many.expected.map((row) => Buffer.from(row.split(' ')[0], 'hex'));
+    const rangeRequest = {
+      startKey: decodeFixtureKey(range.request.startKey),
+      ...(range.request.endKey === undefined
+        ? {}
+        : { endKey: decodeFixtureKey(range.request.endKey) }),
+      limit: range.request.limit,
+      tip: range.request.tip,
+    };
+
+    for (const minimum of [undefined, 0n, large]) {
+      const one = await client.get(getKey, get.request.tip, get.root, minimum, options);
+      assertHit(one, get.expected[0]);
+      assertForwarded('Get', minimum);
+
+      const lookup = await client.getMany(manyKeys, many.request.tip, many.root, minimum, options);
+      assert.deepEqual(lookup.results.map((result) => result.type), ['hit', 'miss', 'hit']);
+      assertForwarded('GetMany', minimum);
+
+      const page = await client.getRange(
+        { ...rangeRequest, minSequenceNumber: minimum },
+        range.root,
+        options,
+      );
+      assertRange(page, range.expected);
+      assertForwarded('GetRange', minimum);
+
+      await assert.rejects(client.getCurrentOperationRange({
+        tip: range.request.tip,
+        startLocation: 0n,
+        maxLocations: 1,
+        minSequenceNumber: minimum,
+      }, range.root, options), /current operation range proof has no operations/);
+      assertForwarded('GetCurrentOperationRange', minimum);
+    }
+
+    abortFetch = true;
+    const controller = new AbortController();
+    const aborted = client.get(
+      getKey,
+      get.request.tip,
+      get.root,
+      undefined,
+      {
+        headers: { 'x-test-floor': 'forwarded' },
+        signal: controller.signal,
+        timeoutMs: 1000,
+      },
+    );
+    await fetchStarted;
+    controller.abort();
+    await assert.rejects(aborted);
+    assertForwarded('Get', undefined);
+    assert.equal(fetchSignal.aborted, true);
+    assert.equal(forwarded.length, 0);
+  });
 }
+
+test('test_current_clients_reject_invalid_read_floors_before_dispatch', async (t) => {
+  let requests = 0;
+  t.mock.method(globalThis, 'fetch', async () => {
+    requests += 1;
+    throw new Error('unexpected request');
+  });
+  const client = new OrderedQmdbClient('http://qmdb.test');
+  for (const minimum of [-1n, 1n << 64n, 1]) {
+    await assert.rejects(client.get('', 1n, '', minimum), /64-bit/);
+    await assert.rejects(client.getMany([''], 1n, '', minimum), /64-bit/);
+    await assert.rejects(client.getRange({
+      startKey: '', limit: 1, tip: 1n, minSequenceNumber: minimum,
+    }, ''), /64-bit/);
+    await assert.rejects(client.getCurrentOperationRange({
+      tip: 1n, startLocation: 0n, maxLocations: 1, minSequenceNumber: minimum,
+    }, ''), /64-bit/);
+  }
+  assert.equal(requests, 0);
+});

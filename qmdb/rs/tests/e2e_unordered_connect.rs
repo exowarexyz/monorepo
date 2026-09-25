@@ -533,7 +533,6 @@ async fn test_unordered_connect_get_operation_range_returns_verifiable_proof() {
             .await
             .expect("get operation range");
 
-        assert!(proof.sequence_number >= 1);
         assert_eq!(proof.root, source.root);
         assert_eq!(proof.start_location, Location::new(1));
         assert_eq!(proof.operations, vec![source.operations[1].clone()]);
@@ -544,7 +543,7 @@ async fn test_unordered_connect_get_operation_range_returns_verifiable_proof() {
         .await
         .expect("cached publication evidence fixes the downstream read floor")
         .into_owned();
-    assert!(response.sequence_number < u64::MAX);
+    assert!(response.proof.as_option().is_some());
 }
 
 #[tokio::test]
@@ -624,6 +623,122 @@ async fn test_unordered_current_operation_range_connect_returns_verifiable_proof
     assert_eq!(proof.start_location, Location::new(0));
     assert_eq!(proof.operations, source.operations);
     assert!(!proof.chunks.is_empty());
+}
+
+#[tokio::test]
+async fn test_unordered_current_endpoints_enforce_optional_sequence_minimum() {
+    let store_client = common::local_store_client().await;
+    let source = build_current_source_batch().await;
+    commit_current_upload(&store_client, &source).await;
+
+    let (_qmdb_server, qmdb_url) =
+        spawn_qmdb_full_server(PrefixedStoreClient::empty(store_client.clone())).await;
+    let lookup = key_lookup_rpc_client(&qmdb_url);
+    let current = current_operation_client(&qmdb_url);
+    let missing = Sha256::fill(0xCC);
+
+    let cold_get = lookup
+        .get(ProtoGetRequest {
+            key: source.alpha.as_ref().to_vec(),
+            tip: source.latest_location.as_u64() + 1,
+            min_sequence_number: Some(u64::MAX),
+            ..Default::default()
+        })
+        .await
+        .expect_err("cold unordered get must enforce the sequence minimum");
+    let cold_many = lookup
+        .get_many(ProtoGetManyRequest {
+            keys: vec![source.alpha.as_ref().to_vec(), missing.as_ref().to_vec()],
+            tip: source.latest_location.as_u64() + 1,
+            min_sequence_number: Some(u64::MAX),
+            ..Default::default()
+        })
+        .await
+        .expect_err("cold unordered get_many must enforce the sequence minimum");
+    let cold_current = current
+        .get_current_operation_range(
+            ProtoGetCurrentOperationRangeRequest {
+                tip: source.latest_location.as_u64() + 1,
+                start_location: 0,
+                max_locations: source.operations.len() as u32,
+                min_sequence_number: Some(u64::MAX),
+                ..Default::default()
+            },
+            &source.root,
+        )
+        .await
+        .expect_err("cold unordered current range must enforce the sequence minimum");
+    assert_eq!(cold_get.code, ErrorCode::Aborted);
+    assert_eq!(cold_many.code, ErrorCode::Aborted);
+    assert!(
+        matches!(cold_current, QmdbError::Client(ref error) if error.rpc_code() == Some(ErrorCode::Aborted))
+    );
+
+    for min_sequence_number in [None, Some(0)] {
+        lookup
+            .get(ProtoGetRequest {
+                key: source.alpha.as_ref().to_vec(),
+                tip: source.latest_location.as_u64(),
+                min_sequence_number,
+                ..Default::default()
+            })
+            .await
+            .expect("unordered get at available sequence");
+        lookup
+            .get_many(ProtoGetManyRequest {
+                keys: vec![source.alpha.as_ref().to_vec(), missing.as_ref().to_vec()],
+                tip: source.latest_location.as_u64(),
+                min_sequence_number,
+                ..Default::default()
+            })
+            .await
+            .expect("unordered get_many at available sequence");
+        current
+            .get_current_operation_range(
+                ProtoGetCurrentOperationRangeRequest {
+                    tip: source.latest_location.as_u64(),
+                    start_location: 0,
+                    max_locations: source.operations.len() as u32,
+                    min_sequence_number,
+                    ..Default::default()
+                },
+                &source.root,
+            )
+            .await
+            .expect("unordered current range at available sequence");
+    }
+
+    lookup
+        .get(ProtoGetRequest {
+            key: source.alpha.as_ref().to_vec(),
+            tip: source.latest_location.as_u64(),
+            min_sequence_number: Some(u64::MAX),
+            ..Default::default()
+        })
+        .await
+        .expect("cached unordered get uses the publication floor");
+    lookup
+        .get_many(ProtoGetManyRequest {
+            keys: vec![source.alpha.as_ref().to_vec(), missing.as_ref().to_vec()],
+            tip: source.latest_location.as_u64(),
+            min_sequence_number: Some(u64::MAX),
+            ..Default::default()
+        })
+        .await
+        .expect("cached unordered get_many uses the publication floor");
+    current
+        .get_current_operation_range(
+            ProtoGetCurrentOperationRangeRequest {
+                tip: source.latest_location.as_u64(),
+                start_location: 0,
+                max_locations: source.operations.len() as u32,
+                min_sequence_number: Some(u64::MAX),
+                ..Default::default()
+            },
+            &source.root,
+        )
+        .await
+        .expect("cached unordered current range uses the publication floor");
 }
 
 async fn aligned_commit_boundary<F: commonware_storage::merkle::Graftable + PartialEq>(

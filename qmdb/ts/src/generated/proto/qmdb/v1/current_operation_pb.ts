@@ -13,7 +13,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file qmdb/v1/current_operation.proto.
  */
 export const file_qmdb_v1_current_operation: GenFile = /*@__PURE__*/
-  fileDesc("Ch9xbWRiL3YxL2N1cnJlbnRfb3BlcmF0aW9uLnByb3RvEgdxbWRiLnYxImYKH0dldEN1cnJlbnRPcGVyYXRpb25SYW5nZVJlcXVlc3QSCwoDdGlwGAEgASgEEhYKDnN0YXJ0X2xvY2F0aW9uGAIgASgEEh4KDW1heF9sb2NhdGlvbnMYAyABKA1CB7pIBCoCIAAiVgogR2V0Q3VycmVudE9wZXJhdGlvblJhbmdlUmVzcG9uc2USMgoFcHJvb2YYASABKAsyIy5xbWRiLnYxLkN1cnJlbnRPcGVyYXRpb25SYW5nZVByb29mMooBChdDdXJyZW50T3BlcmF0aW9uU2VydmljZRJvChhHZXRDdXJyZW50T3BlcmF0aW9uUmFuZ2USKC5xbWRiLnYxLkdldEN1cnJlbnRPcGVyYXRpb25SYW5nZVJlcXVlc3QaKS5xbWRiLnYxLkdldEN1cnJlbnRPcGVyYXRpb25SYW5nZVJlc3BvbnNlYgZwcm90bzM", [file_buf_validate_validate, file_qmdb_v1_proof]);
+  fileDesc("Ch9xbWRiL3YxL2N1cnJlbnRfb3BlcmF0aW9uLnByb3RvEgdxbWRiLnYxIqABCh9HZXRDdXJyZW50T3BlcmF0aW9uUmFuZ2VSZXF1ZXN0EgsKA3RpcBgBIAEoBBIWCg5zdGFydF9sb2NhdGlvbhgCIAEoBBIeCg1tYXhfbG9jYXRpb25zGAMgASgNQge6SAQqAiAAEiAKE21pbl9zZXF1ZW5jZV9udW1iZXIYBCABKARIAIgBAUIWChRfbWluX3NlcXVlbmNlX251bWJlciJWCiBHZXRDdXJyZW50T3BlcmF0aW9uUmFuZ2VSZXNwb25zZRIyCgVwcm9vZhgBIAEoCzIjLnFtZGIudjEuQ3VycmVudE9wZXJhdGlvblJhbmdlUHJvb2YyigEKF0N1cnJlbnRPcGVyYXRpb25TZXJ2aWNlEm8KGEdldEN1cnJlbnRPcGVyYXRpb25SYW5nZRIoLnFtZGIudjEuR2V0Q3VycmVudE9wZXJhdGlvblJhbmdlUmVxdWVzdBopLnFtZGIudjEuR2V0Q3VycmVudE9wZXJhdGlvblJhbmdlUmVzcG9uc2ViBnByb3RvMw", [file_buf_validate_validate, file_qmdb_v1_proof]);
 
 /**
  * Unary current operation-range proof request. The proof covers
@@ -37,6 +37,13 @@ export type GetCurrentOperationRangeRequest = Message<"qmdb.v1.GetCurrentOperati
    * @generated from field: uint32 max_locations = 3;
    */
   maxLocations: number;
+
+  /**
+   * Minimum Store sequence for checking publication of the requested watermark.
+   *
+   * @generated from field: optional uint64 min_sequence_number = 4;
+   */
+  minSequenceNumber?: bigint;
 };
 
 /**

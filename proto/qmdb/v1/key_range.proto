@@ -22,6 +22,9 @@ message GetRangeRequest {
   optional bytes end_key = 2;
   uint32 limit = 3 [(buf.validate.field).uint32.gt = 0];
   uint64 tip = 4;
+
+  // Minimum Store sequence for checking publication of the requested watermark.
+  optional uint64 min_sequence_number = 5;
 }
 
 // Ordered current key-range proof response. `start_proof`, when present,

@@ -749,8 +749,6 @@ async fn test_ordered_mmb_operation_range_client_rejects_missing_nonzero_pinned_
         .get_operation_range(request.clone(), &source.current_boundary.root)
         .await
         .expect("nonzero operation range verifies with pinned nodes");
-    assert!(proof.sequence_number >= 1);
-    assert_eq!(response.sequence_number, proof.sequence_number);
     assert_eq!(proof.start_location, start);
     assert_eq!(
         proof.operations,
@@ -764,7 +762,7 @@ async fn test_ordered_mmb_operation_range_client_rejects_missing_nonzero_pinned_
         .await
         .expect("cached publication evidence fixes the downstream read floor")
         .into_owned();
-    assert_eq!(cached.sequence_number, response.sequence_number);
+    assert_eq!(cached.proof, response.proof);
 
     let mut proof = response
         .proof
