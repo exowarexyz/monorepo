@@ -29,7 +29,6 @@
 //! final published watermark. That is what preserves lower-boundary current
 //! proofs below a later published low watermark.
 
-mod auth;
 mod boundary;
 pub(crate) mod codec;
 #[cfg(feature = "test-utils")]

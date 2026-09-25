@@ -4,7 +4,10 @@
 mod common;
 
 use std::num::NonZeroU64;
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc,
+};
 use std::time::Duration;
 
 use commonware_runtime::{deterministic, Runner as _};
@@ -14,13 +17,14 @@ use commonware_storage::qmdb::immutable::variable::{
 };
 use commonware_storage::translator::TwoCap;
 use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16, NZU64};
+use connectrpc::client::{BoxFuture, ClientBody, ClientTransport};
 use exoware_qmdb::proto::qmdb::v1::{
     GetOperationRangeRequest as ProtoGetOperationRangeRequest,
     SubscribeRequest as ProtoSubscribeRequest,
 };
 use exoware_qmdb::{
-    immutable_operation_log_connect_stack, ImmutableClient, OperationLogClient,
-    OperationLogSubscribeProof, QmdbError,
+    immutable_operation_log_connect_stack, OperationLogClient, OperationLogSubscribeProof,
+    QmdbError,
 };
 use exoware_sdk::proto::PreferZstdHttpClient;
 use exoware_sdk::{PrefixedStoreClient, StoreClient};
@@ -35,14 +39,19 @@ type Db = Immutable<
     TwoCap,
     commonware_parallel::Sequential,
 >;
-type TestImmutableClient =
-    ImmutableClient<mmr::Family, commonware_cryptography::Sha256, FixedBytes<32>, Vec<u8>>;
 type BatchOperation = ImmutableOperation<mmr::Family, FixedBytes<32>, Vec<u8>>;
 
 async fn spawn_qmdb_server(
-    qmdb_client: Arc<TestImmutableClient>,
+    raw_store: PrefixedStoreClient,
 ) -> (tokio::task::JoinHandle<()>, String) {
-    common::spawn_connect_service(immutable_operation_log_connect_stack(qmdb_client)).await
+    common::spawn_connect_service(immutable_operation_log_connect_stack::<
+        mmr::Family,
+        commonware_cryptography::Sha256,
+        FixedBytes<32>,
+        Vec<u8>,
+        commonware_storage::qmdb::any::value::VariableEncoding<Vec<u8>>,
+    >(raw_store, ((), ((0..=10000).into(), ()))))
+    .await
 }
 
 fn operation_log_client(
@@ -141,17 +150,45 @@ async fn commit_upload(store_client: &StoreClient, batch: &SourceBatch) {
 
 #[tokio::test]
 async fn test_immutable_connect_subscribe_emits_verifiable_multi_proof() {
-    let store_client = common::local_store_client().await;
+    #[derive(Clone)]
+    struct CountRangeRequests {
+        ranges: Arc<AtomicUsize>,
+        inner: PreferZstdHttpClient,
+    }
+
+    impl ClientTransport for CountRangeRequests {
+        type ResponseBody = <PreferZstdHttpClient as ClientTransport>::ResponseBody;
+        type Error = <PreferZstdHttpClient as ClientTransport>::Error;
+
+        fn send(
+            &self,
+            request: axum::http::Request<ClientBody>,
+        ) -> BoxFuture<'static, Result<axum::http::Response<Self::ResponseBody>, Self::Error>>
+        {
+            if request.uri().path().ends_with("/Range") {
+                self.ranges.fetch_add(1, Ordering::SeqCst);
+            }
+            self.inner.send(request)
+        }
+    }
+
+    let (_store_server, store_url) = exoware_simulator::open_temp().await.unwrap();
+    let ranges = Arc::new(AtomicUsize::new(0));
+    let store_client = StoreClient::builder()
+        .url(&store_url)
+        .client_transport(CountRangeRequests {
+            ranges: ranges.clone(),
+            inner: PreferZstdHttpClient::plaintext(),
+        })
+        .build()
+        .unwrap();
     let source = build_source_batch().await;
     assert!(
         *source.inactivity_floor > 0,
         "test must not rely on inactivity_floor = 0"
     );
-    let immutable_client = Arc::new(TestImmutableClient::new(
-        PrefixedStoreClient::empty(store_client.clone()),
-        ((), ((0..=10000).into(), ())),
-    ));
-    let (_qmdb_server, qmdb_url) = spawn_qmdb_server(immutable_client).await;
+    let (_qmdb_server, qmdb_url) =
+        spawn_qmdb_server(PrefixedStoreClient::empty(store_client.clone())).await;
     let connect_client = operation_log_client(&qmdb_url);
 
     let mut stream = connect_client
@@ -181,6 +218,11 @@ async fn test_immutable_connect_subscribe_emits_verifiable_multi_proof() {
         .map(|(i, op)| (Location::new(i as u64), op.clone()))
         .collect();
     assert_eq!(frame.operations, expected);
+    assert_eq!(
+        ranges.load(Ordering::SeqCst),
+        0,
+        "the subscription's covering watermark must avoid a publication lookup"
+    );
 }
 
 #[tokio::test]
@@ -193,12 +235,22 @@ async fn test_immutable_connect_get_operation_range_returns_verifiable_proof() {
     );
     commit_upload(&store_client, &source).await;
 
-    let immutable_client = Arc::new(TestImmutableClient::new(
-        PrefixedStoreClient::empty(store_client.clone()),
-        ((), ((0..=10000).into(), ())),
-    ));
-    let (_qmdb_server, qmdb_url) = spawn_qmdb_server(immutable_client).await;
+    let (_qmdb_server, qmdb_url) =
+        spawn_qmdb_server(PrefixedStoreClient::empty(store_client.clone())).await;
     let connect_client = operation_log_client(&qmdb_url);
+
+    let request = ProtoGetOperationRangeRequest {
+        tip: u64::try_from(source.operations.len() - 1).expect("tip fits"),
+        start_location: 1,
+        max_locations: 1,
+        min_sequence_number: Some(u64::MAX),
+        ..Default::default()
+    };
+    let error = common::operation_log_rpc_client(&qmdb_url)
+        .get_operation_range(request.clone())
+        .await
+        .expect_err("caller floor must govern an uncached publication lookup");
+    assert_eq!(error.code, connectrpc::ErrorCode::Aborted);
 
     for min_sequence_number in [None, Some(1)] {
         let proof = connect_client
@@ -221,17 +273,12 @@ async fn test_immutable_connect_get_operation_range_returns_verifiable_proof() {
         assert_eq!(proof.operations, vec![source.operations[1].clone()]);
     }
 
-    let error = common::operation_log_rpc_client(&qmdb_url)
-        .get_operation_range(ProtoGetOperationRangeRequest {
-            tip: u64::try_from(source.operations.len() - 1).expect("tip fits"),
-            start_location: 1,
-            max_locations: 1,
-            min_sequence_number: Some(u64::MAX),
-            ..Default::default()
-        })
+    let response = common::operation_log_rpc_client(&qmdb_url)
+        .get_operation_range(request)
         .await
-        .expect_err("unavailable sequence floor");
-    assert_eq!(error.code, connectrpc::ErrorCode::Aborted);
+        .expect("cached publication evidence fixes the downstream read floor")
+        .into_owned();
+    assert!(response.sequence_number < u64::MAX);
 }
 
 #[tokio::test]
@@ -244,11 +291,8 @@ async fn test_immutable_connect_client_rejects_invalid_streamed_proof() {
     );
     commit_upload(&store_client, &source).await;
 
-    let immutable_client = Arc::new(TestImmutableClient::new(
-        PrefixedStoreClient::empty(store_client.clone()),
-        ((), ((0..=10000).into(), ())),
-    ));
-    let (_qmdb_server, qmdb_url) = spawn_qmdb_server(immutable_client).await;
+    let (_qmdb_server, qmdb_url) =
+        spawn_qmdb_server(PrefixedStoreClient::empty(store_client.clone())).await;
     let rpc = common::operation_log_rpc_client(&qmdb_url);
     let mut raw_stream = rpc
         .subscribe(ProtoSubscribeRequest {

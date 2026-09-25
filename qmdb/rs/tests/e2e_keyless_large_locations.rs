@@ -12,6 +12,7 @@ use commonware_storage::merkle::{
     hasher::Hasher as _, mem::Mem, mmb, mmr, Graftable, Location, Position,
 };
 use commonware_storage::qmdb::{
+    any::value::VariableEncoding,
     keyless::variable::Operation,
     sync::{Request, Response, Source as _},
 };
@@ -91,16 +92,21 @@ async fn check_large_locations<F: Graftable + PartialEq>(family: &str, start: u6
     publication.commit(&store_client).await.unwrap();
 
     let qmdb_client = Arc::new(KeylessClient::<F, Sha256, Vec<u8>>::new(
-        upload_client,
+        upload_client.clone(),
         config,
     ));
     assert_eq!(
-        qmdb_client.writer_location_watermark().await.unwrap(),
+        qmdb_client.latest_published_watermark().await.unwrap(),
         Some(end - 1)
     );
     assert_eq!(qmdb_client.root_at(end - 1).await.unwrap(), expected_root);
-    let (server, url) =
-        common::spawn_connect_service(keyless_operation_log_connect_stack(qmdb_client)).await;
+    let (server, url) = common::spawn_connect_service(keyless_operation_log_connect_stack::<
+        F,
+        Sha256,
+        Vec<u8>,
+        VariableEncoding<Vec<u8>>,
+    >(upload_client, config))
+    .await;
     let request = GetOperationRangeRequest {
         tip: (end - 1).as_u64(),
         start_location: start.as_u64(),

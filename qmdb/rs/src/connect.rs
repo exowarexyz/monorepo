@@ -33,9 +33,11 @@ use connectrpc::{
 };
 use exoware_sdk::common::kv::v1::filter::KindView as ProtoFilterKindView;
 use exoware_sdk::stream_filter::{CompiledFilters, Filter};
+use exoware_sdk::{PrefixedStoreClient, ReadResult};
 use futures::future::BoxFuture;
 use futures::{FutureExt, Stream};
 
+use crate::core::PublishedWatermark;
 use crate::proof::{
     CurrentOperationRangeProofResult, OperationRangeCheckpoint, RawBatchMultiProof,
 };
@@ -90,7 +92,6 @@ fn qmdb_error_to_connect(err: QmdbError) -> ConnectError {
     }
 }
 
-#[derive(Clone)]
 pub struct OrderedConnect<
     F: Graftable,
     H: Hasher,
@@ -104,7 +105,44 @@ pub struct OrderedConnect<
     client: Arc<OrderedClient<F, H, K, V, N, E>>,
 }
 
-#[derive(Clone)]
+impl<F, H, K, V, const N: usize, E> Clone for OrderedConnect<F, H, K, V, N, E>
+where
+    F: Graftable,
+    H: Hasher,
+    K: commonware_storage::qmdb::operation::Key + commonware_codec::Codec,
+    V: commonware_codec::Codec + Clone + Send + Sync,
+    E: ValueEncoding<Value = V>,
+    ordered::Operation<F, K, E>: commonware_codec::Read,
+{
+    fn clone(&self) -> Self {
+        Self {
+            client: self.client.clone(),
+        }
+    }
+}
+
+impl<F, H, K, V, const N: usize, E> OrderedConnect<F, H, K, V, N, E>
+where
+    F: Graftable,
+    H: Hasher,
+    K: commonware_storage::qmdb::operation::Key + commonware_codec::Codec,
+    V: commonware_codec::Codec + Clone + Send + Sync,
+    E: ValueEncoding<Value = V>,
+    ordered::Operation<F, K, E>: commonware_codec::Read,
+{
+    pub fn new(
+        raw_store: PrefixedStoreClient,
+        op_cfg: <ordered::Operation<F, K, E> as commonware_codec::Read>::Cfg,
+        key_cfg: K::Cfg,
+    ) -> Self {
+        Self::from_client(Arc::new(OrderedClient::new(raw_store, op_cfg, key_cfg)))
+    }
+
+    fn from_client(client: Arc<OrderedClient<F, H, K, V, N, E>>) -> Self {
+        Self { client }
+    }
+}
+
 pub struct UnorderedConnect<
     F: Graftable,
     H: Hasher,
@@ -119,6 +157,23 @@ pub struct UnorderedConnect<
     key_cfg: Arc<K::Cfg>,
 }
 
+impl<F, H, K, V, const N: usize, E> Clone for UnorderedConnect<F, H, K, V, N, E>
+where
+    F: Graftable,
+    H: Hasher,
+    K: commonware_storage::qmdb::operation::Key + commonware_codec::Codec,
+    V: commonware_codec::Codec + Clone + Send + Sync,
+    E: ValueEncoding<Value = V>,
+    unordered::Operation<F, K, E>: commonware_codec::Read,
+{
+    fn clone(&self) -> Self {
+        Self {
+            client: self.client.clone(),
+            key_cfg: self.key_cfg.clone(),
+        }
+    }
+}
+
 impl<F, H, K, V, const N: usize, E> UnorderedConnect<F, H, K, V, N, E>
 where
     F: Graftable,
@@ -128,7 +183,15 @@ where
     E: ValueEncoding<Value = V>,
     unordered::Operation<F, K, E>: commonware_codec::Read,
 {
-    pub fn new(client: Arc<UnorderedClient<F, H, K, V, E>>, key_cfg: K::Cfg) -> Self {
+    pub fn new(
+        raw_store: PrefixedStoreClient,
+        op_cfg: <unordered::Operation<F, K, E> as commonware_codec::Read>::Cfg,
+        key_cfg: K::Cfg,
+    ) -> Self {
+        Self::from_client(Arc::new(UnorderedClient::new(raw_store, op_cfg)), key_cfg)
+    }
+
+    fn from_client(client: Arc<UnorderedClient<F, H, K, V, E>>, key_cfg: K::Cfg) -> Self {
         Self {
             client,
             key_cfg: Arc::new(key_cfg),
@@ -136,67 +199,65 @@ where
     }
 }
 
-impl<F, H, K, V, const N: usize, E> OrderedConnect<F, H, K, V, N, E>
-where
-    F: Graftable,
-    H: Hasher,
-    K: commonware_storage::qmdb::operation::Key + commonware_codec::Codec,
-    V: commonware_codec::Codec + Clone + Send + Sync,
-    E: ValueEncoding<Value = V>,
-    ordered::Operation<F, K, E>: commonware_codec::Read,
-{
-    pub fn new(client: Arc<OrderedClient<F, H, K, V, N, E>>) -> Self {
-        Self { client }
-    }
-}
-
-/// Implemented by each QMDB backend client (`Arc<OrderedClient<...>>`,
-/// `Arc<UnorderedClient<...>>`, etc.) to expose just the surface the generic
-/// `OperationLogService` path needs.
-trait OperationLogBackend: Clone + Send + Sync + 'static {
+/// Read capabilities needed by the generic `OperationLogService` adapter.
+trait OperationLogReader: Send + Sync + 'static {
     type Family: Graftable;
     type Digest: commonware_cryptography::Digest;
     /// Reject `key_filters` at subscribe time (set true for keyless, whose
     /// ops have no logical key).
     const REJECTS_KEY_FILTERS: bool = false;
 
-    fn store_client(&self) -> &exoware_sdk::PrefixedStoreClient;
     fn extract_operation_kv(
         &self,
         location: Location<Self::Family>,
         bytes: &[u8],
     ) -> Result<OperationKv, QmdbError>;
-    fn batch_multi_proof_with_read_floor(
+    fn resolve_watermark(
         &self,
-        read_floor_sequence: Option<u64>,
         watermark: Location<Self::Family>,
+        min_sequence_number: Option<u64>,
+    ) -> impl Future<Output = Result<ReadResult<PublishedWatermark<Self::Family>>, QmdbError>> + Send;
+    fn batch_multi_proof(
+        &self,
+        watermark: PublishedWatermark<Self::Family>,
         operations: Vec<(Location<Self::Family>, Vec<u8>)>,
     ) -> impl Future<Output = Result<RawBatchMultiProof<Self::Digest, Self::Family>, QmdbError>> + Send;
-    fn operation_range_checkpoint(
+    fn operation_range_checkpoint_at(
         &self,
-        read_floor_sequence: Option<u64>,
-        watermark: Location<Self::Family>,
+        watermark: PublishedWatermark<Self::Family>,
         start_location: Location<Self::Family>,
         max_locations: u32,
     ) -> impl Future<
-        Output = Result<(OperationRangeCheckpoint<Self::Digest, Self::Family>, u64), QmdbError>,
+        Output = Result<
+            ReadResult<OperationRangeCheckpoint<Self::Digest, Self::Family>>,
+            QmdbError,
+        >,
     > + Send;
 }
 
-/// Wrapper that bridges any `OperationLogBackend` into a concrete
+/// Wrapper that bridges any `OperationLogReader` into a concrete
 /// `OperationLogService` implementation usable with `OperationLogServiceServer`.
-#[derive(Clone)]
-struct OperationLogConnect<B: OperationLogBackend> {
-    backend: B,
+struct OperationLogConnect<C: OperationLogReader> {
+    client: Arc<C>,
+    raw_store: PrefixedStoreClient,
 }
 
-impl<B: OperationLogBackend> OperationLogConnect<B> {
-    fn new(backend: B) -> Self {
-        Self { backend }
+impl<C: OperationLogReader> Clone for OperationLogConnect<C> {
+    fn clone(&self) -> Self {
+        Self {
+            client: self.client.clone(),
+            raw_store: self.raw_store.clone(),
+        }
     }
 }
 
-trait CurrentOperationRangeBackend<const N: usize>: Clone + Send + Sync + 'static {
+impl<C: OperationLogReader> OperationLogConnect<C> {
+    fn from_client(client: Arc<C>, raw_store: PrefixedStoreClient) -> Self {
+        Self { client, raw_store }
+    }
+}
+
+trait CurrentOperationRangeReader<const N: usize>: Send + Sync + 'static {
     type Family: Graftable;
     type Digest: commonware_cryptography::Digest;
     type Operation: commonware_codec::Codec;
@@ -214,24 +275,34 @@ trait CurrentOperationRangeBackend<const N: usize>: Clone + Send + Sync + 'stati
     > + Send;
 }
 
-#[derive(Clone)]
-struct CurrentOperationConnect<B, const N: usize>
+struct CurrentOperationConnect<C, const N: usize>
 where
-    B: CurrentOperationRangeBackend<N>,
+    C: CurrentOperationRangeReader<N>,
 {
-    backend: B,
+    client: Arc<C>,
 }
 
-impl<B, const N: usize> CurrentOperationConnect<B, N>
+impl<C, const N: usize> Clone for CurrentOperationConnect<C, N>
 where
-    B: CurrentOperationRangeBackend<N>,
+    C: CurrentOperationRangeReader<N>,
 {
-    fn new(backend: B) -> Self {
-        Self { backend }
+    fn clone(&self) -> Self {
+        Self {
+            client: self.client.clone(),
+        }
     }
 }
 
-impl<F, H, K, V, const N: usize, E> OperationLogBackend for Arc<OrderedClient<F, H, K, V, N, E>>
+impl<C, const N: usize> CurrentOperationConnect<C, N>
+where
+    C: CurrentOperationRangeReader<N>,
+{
+    fn from_client(client: Arc<C>) -> Self {
+        Self { client }
+    }
+}
+
+impl<F, H, K, V, const N: usize, E> OperationLogReader for OrderedClient<F, H, K, V, N, E>
 where
     F: Graftable,
     H: Hasher + Send + Sync + 'static,
@@ -243,51 +314,42 @@ where
     type Family = F;
     type Digest = H::Digest;
 
-    fn store_client(&self) -> &exoware_sdk::PrefixedStoreClient {
-        OrderedClient::store_client(self)
-    }
-
     fn extract_operation_kv(
         &self,
         location: Location<F>,
         bytes: &[u8],
     ) -> Result<OperationKv, QmdbError> {
-        OrderedClient::extract_operation_kv(self, location, bytes)
+        OrderedClient::<F, H, K, V, N, E>::extract_operation_kv(self, location, bytes)
     }
 
-    fn batch_multi_proof_with_read_floor(
+    fn resolve_watermark(
         &self,
-        read_floor_sequence: Option<u64>,
         watermark: Location<F>,
+        min_sequence_number: Option<u64>,
+    ) -> impl Future<Output = Result<ReadResult<PublishedWatermark<F>>, QmdbError>> + Send {
+        OrderedClient::resolve_watermark(self, watermark, min_sequence_number)
+    }
+
+    fn batch_multi_proof(
+        &self,
+        watermark: PublishedWatermark<F>,
         operations: Vec<(Location<F>, Vec<u8>)>,
     ) -> impl Future<Output = Result<RawBatchMultiProof<Self::Digest, F>, QmdbError>> + Send {
-        OrderedClient::batch_multi_proof_with_read_floor(
-            self,
-            read_floor_sequence,
-            watermark,
-            operations,
-        )
+        OrderedClient::batch_multi_proof(self, watermark, operations)
     }
 
-    fn operation_range_checkpoint(
+    fn operation_range_checkpoint_at(
         &self,
-        read_floor_sequence: Option<u64>,
-        watermark: Location<F>,
+        watermark: PublishedWatermark<F>,
         start_location: Location<F>,
         max_locations: u32,
-    ) -> impl Future<Output = Result<(OperationRangeCheckpoint<Self::Digest, F>, u64), QmdbError>> + Send
-    {
-        OrderedClient::operation_range_checkpoint_with_read_floor(
-            self,
-            read_floor_sequence,
-            watermark,
-            start_location,
-            max_locations,
-        )
+    ) -> impl Future<Output = Result<ReadResult<OperationRangeCheckpoint<Self::Digest, F>>, QmdbError>>
+           + Send {
+        OrderedClient::operation_range_checkpoint_at(self, watermark, start_location, max_locations)
     }
 }
 
-impl<F, H, K, V, E> OperationLogBackend for Arc<UnorderedClient<F, H, K, V, E>>
+impl<F, H, K, V, E> OperationLogReader for UnorderedClient<F, H, K, V, E>
 where
     F: Graftable,
     H: Hasher + Send + Sync + 'static,
@@ -299,43 +361,39 @@ where
     type Family = F;
     type Digest = H::Digest;
 
-    fn store_client(&self) -> &exoware_sdk::PrefixedStoreClient {
-        UnorderedClient::store_client(self)
-    }
-
     fn extract_operation_kv(
         &self,
         location: Location<F>,
         bytes: &[u8],
     ) -> Result<OperationKv, QmdbError> {
-        UnorderedClient::extract_operation_kv(self, location, bytes)
+        UnorderedClient::<F, H, K, V, E>::extract_operation_kv(self, location, bytes)
     }
 
-    fn batch_multi_proof_with_read_floor(
+    fn resolve_watermark(
         &self,
-        read_floor_sequence: Option<u64>,
         watermark: Location<F>,
+        min_sequence_number: Option<u64>,
+    ) -> impl Future<Output = Result<ReadResult<PublishedWatermark<F>>, QmdbError>> + Send {
+        UnorderedClient::resolve_watermark(self, watermark, min_sequence_number)
+    }
+
+    fn batch_multi_proof(
+        &self,
+        watermark: PublishedWatermark<F>,
         operations: Vec<(Location<F>, Vec<u8>)>,
     ) -> impl Future<Output = Result<RawBatchMultiProof<Self::Digest, F>, QmdbError>> + Send {
-        UnorderedClient::batch_multi_proof_with_read_floor(
-            self,
-            read_floor_sequence,
-            watermark,
-            operations,
-        )
+        UnorderedClient::batch_multi_proof(self, watermark, operations)
     }
 
-    fn operation_range_checkpoint(
+    fn operation_range_checkpoint_at(
         &self,
-        read_floor_sequence: Option<u64>,
-        watermark: Location<F>,
+        watermark: PublishedWatermark<F>,
         start_location: Location<F>,
         max_locations: u32,
-    ) -> impl Future<Output = Result<(OperationRangeCheckpoint<Self::Digest, F>, u64), QmdbError>> + Send
-    {
-        UnorderedClient::operation_range_checkpoint_with_read_floor(
+    ) -> impl Future<Output = Result<ReadResult<OperationRangeCheckpoint<Self::Digest, F>>, QmdbError>>
+           + Send {
+        UnorderedClient::operation_range_checkpoint_at(
             self,
-            read_floor_sequence,
             watermark,
             start_location,
             max_locations,
@@ -343,7 +401,7 @@ where
     }
 }
 
-impl<F, H, K, V, E> OperationLogBackend for Arc<ImmutableClient<F, H, K, V, E>>
+impl<F, H, K, V, E> OperationLogReader for ImmutableClient<F, H, K, V, E>
 where
     F: Graftable,
     H: Hasher + Send + Sync + 'static,
@@ -355,43 +413,39 @@ where
     type Family = F;
     type Digest = H::Digest;
 
-    fn store_client(&self) -> &exoware_sdk::PrefixedStoreClient {
-        ImmutableClient::store_client(self)
-    }
-
     fn extract_operation_kv(
         &self,
         location: Location<F>,
         bytes: &[u8],
     ) -> Result<OperationKv, QmdbError> {
-        ImmutableClient::extract_operation_kv(self, location, bytes)
+        ImmutableClient::<F, H, K, V, E>::extract_operation_kv(self, location, bytes)
     }
 
-    fn batch_multi_proof_with_read_floor(
+    fn resolve_watermark(
         &self,
-        read_floor_sequence: Option<u64>,
         watermark: Location<F>,
+        min_sequence_number: Option<u64>,
+    ) -> impl Future<Output = Result<ReadResult<PublishedWatermark<F>>, QmdbError>> + Send {
+        ImmutableClient::resolve_watermark(self, watermark, min_sequence_number)
+    }
+
+    fn batch_multi_proof(
+        &self,
+        watermark: PublishedWatermark<F>,
         operations: Vec<(Location<F>, Vec<u8>)>,
     ) -> impl Future<Output = Result<RawBatchMultiProof<Self::Digest, F>, QmdbError>> + Send {
-        ImmutableClient::batch_multi_proof_with_read_floor(
-            self,
-            read_floor_sequence,
-            watermark,
-            operations,
-        )
+        ImmutableClient::batch_multi_proof(self, watermark, operations)
     }
 
-    fn operation_range_checkpoint(
+    fn operation_range_checkpoint_at(
         &self,
-        read_floor_sequence: Option<u64>,
-        watermark: Location<F>,
+        watermark: PublishedWatermark<F>,
         start_location: Location<F>,
         max_locations: u32,
-    ) -> impl Future<Output = Result<(OperationRangeCheckpoint<Self::Digest, F>, u64), QmdbError>> + Send
-    {
-        ImmutableClient::operation_range_checkpoint_with_read_floor(
+    ) -> impl Future<Output = Result<ReadResult<OperationRangeCheckpoint<Self::Digest, F>>, QmdbError>>
+           + Send {
+        ImmutableClient::operation_range_checkpoint_at(
             self,
-            read_floor_sequence,
             watermark,
             start_location,
             max_locations,
@@ -399,7 +453,7 @@ where
     }
 }
 
-impl<F, H, V, E> OperationLogBackend for Arc<KeylessClient<F, H, V, E>>
+impl<F, H, V, E> OperationLogReader for KeylessClient<F, H, V, E>
 where
     F: Graftable,
     H: Hasher + Send + Sync + 'static,
@@ -411,52 +465,43 @@ where
     type Digest = H::Digest;
     const REJECTS_KEY_FILTERS: bool = true;
 
-    fn store_client(&self) -> &exoware_sdk::PrefixedStoreClient {
-        KeylessClient::store_client(self)
-    }
-
     fn extract_operation_kv(
         &self,
         location: Location<F>,
         bytes: &[u8],
     ) -> Result<OperationKv, QmdbError> {
-        KeylessClient::extract_operation_kv(self, location, bytes)
+        KeylessClient::<F, H, V, E>::extract_operation_kv(self, location, bytes)
     }
 
-    fn batch_multi_proof_with_read_floor(
+    fn resolve_watermark(
         &self,
-        read_floor_sequence: Option<u64>,
         watermark: Location<F>,
+        min_sequence_number: Option<u64>,
+    ) -> impl Future<Output = Result<ReadResult<PublishedWatermark<F>>, QmdbError>> + Send {
+        KeylessClient::resolve_watermark(self, watermark, min_sequence_number)
+    }
+
+    fn batch_multi_proof(
+        &self,
+        watermark: PublishedWatermark<F>,
         operations: Vec<(Location<F>, Vec<u8>)>,
     ) -> impl Future<Output = Result<RawBatchMultiProof<Self::Digest, F>, QmdbError>> + Send {
-        KeylessClient::batch_multi_proof_with_read_floor(
-            self,
-            read_floor_sequence,
-            watermark,
-            operations,
-        )
+        KeylessClient::batch_multi_proof(self, watermark, operations)
     }
 
-    fn operation_range_checkpoint(
+    fn operation_range_checkpoint_at(
         &self,
-        read_floor_sequence: Option<u64>,
-        watermark: Location<F>,
+        watermark: PublishedWatermark<F>,
         start_location: Location<F>,
         max_locations: u32,
-    ) -> impl Future<Output = Result<(OperationRangeCheckpoint<Self::Digest, F>, u64), QmdbError>> + Send
-    {
-        KeylessClient::operation_range_checkpoint_with_read_floor(
-            self,
-            read_floor_sequence,
-            watermark,
-            start_location,
-            max_locations,
-        )
+    ) -> impl Future<Output = Result<ReadResult<OperationRangeCheckpoint<Self::Digest, F>>, QmdbError>>
+           + Send {
+        KeylessClient::operation_range_checkpoint_at(self, watermark, start_location, max_locations)
     }
 }
 
-impl<F, H, K, V, const N: usize, E> CurrentOperationRangeBackend<N>
-    for Arc<OrderedClient<F, H, K, V, N, E>>
+impl<F, H, K, V, const N: usize, E> CurrentOperationRangeReader<N>
+    for OrderedClient<F, H, K, V, N, E>
 where
     F: Graftable,
     H: Hasher + Send + Sync + 'static,
@@ -489,8 +534,8 @@ where
     }
 }
 
-impl<F, H, K, V, const N: usize, E> CurrentOperationRangeBackend<N>
-    for Arc<UnorderedClient<F, H, K, V, E>>
+impl<F, H, K, V, const N: usize, E> CurrentOperationRangeReader<N>
+    for UnorderedClient<F, H, K, V, E>
 where
     F: Graftable,
     H: Hasher + Send + Sync + 'static,
@@ -575,9 +620,11 @@ impl<F: Family> PendingBatches<F> {
                 self.minimums.pop_front();
             }
             ready.push_back(ReadyBatch {
-                watermark,
+                watermark: PublishedWatermark {
+                    location: watermark,
+                    sequence_number: batch.sequence_number.max(watermark_sequence),
+                },
                 batch_sequence: batch.sequence_number,
-                read_floor_sequence: batch.sequence_number.max(watermark_sequence),
                 matched: batch.matched,
             });
         }
@@ -595,7 +642,7 @@ impl<F: Family> PendingBatches<F> {
 
 #[derive(Clone, Debug)]
 struct ReadyBatch<F: Family> {
-    watermark: Location<F>,
+    watermark: PublishedWatermark<F>,
     /// Store sequence of this batch's ops frame. Emitted as
     /// `resume_sequence_number`. It is unique per batch, so a client reconnecting
     /// at `resume + 1` skips only this batch. When multiple pending batches
@@ -603,10 +650,6 @@ struct ReadyBatch<F: Family> {
     /// per-batch sequence here or the reconnect cursor would jump past
     /// unread siblings.
     batch_sequence: u64,
-    /// Minimum store sequence for the read session that builds the proof.
-    /// Must be at least the watermark's publication sequence so the session
-    /// observes the watermark row.
-    read_floor_sequence: u64,
     matched: Vec<(Location<F>, Vec<u8>)>,
 }
 
@@ -652,8 +695,7 @@ struct BatchSubscribeStream<D: commonware_cryptography::Digest, F: Graftable> {
     >,
     build_proof: Arc<
         dyn Fn(
-                u64,
-                Location<F>,
+                PublishedWatermark<F>,
                 Vec<(Location<F>, Vec<u8>)>,
             ) -> BoxFuture<'static, Result<RawBatchMultiProof<D, F>, QmdbError>>
             + Send
@@ -696,8 +738,7 @@ impl<D: commonware_cryptography::Digest, F: Graftable> BatchSubscribeStream<D, F
         >,
         build_proof: Arc<
             dyn Fn(
-                    u64,
-                    Location<F>,
+                    PublishedWatermark<F>,
                     Vec<(Location<F>, Vec<u8>)>,
                 )
                     -> BoxFuture<'static, Result<RawBatchMultiProof<D, F>, QmdbError>>
@@ -842,7 +883,7 @@ impl<D: commonware_cryptography::Digest, F: Graftable> Stream for BatchSubscribe
             if let Some(batch) = this.ready.pop_front() {
                 let build = this.build_proof.clone();
                 let fut = async move {
-                    let proof = (build)(batch.read_floor_sequence, batch.watermark, batch.matched)
+                    let proof = (build)(batch.watermark, batch.matched)
                         .await
                         .map_err(qmdb_error_to_connect)?;
                     Ok(crate::proto::subscribe_response(
@@ -1029,26 +1070,33 @@ where
     }
 }
 
-impl<B: OperationLogBackend> OperationLogService for OperationLogConnect<B> {
+impl<C: OperationLogReader> OperationLogService for OperationLogConnect<C> {
     fn get_operation_range(
         &self,
         _ctx: Context,
         request: ServiceRequest<'_, GetOperationRangeRequest>,
     ) -> impl Future<Output = connectrpc::ServiceResult<PreEncoded<GetOperationRangeResponse>>> + Send
     {
-        let backend = self.backend.clone();
+        let client = self.client.clone();
         async move {
-            let (proof, sequence_number) = backend
-                .operation_range_checkpoint(
-                    request.min_sequence_number,
-                    Location::new(request.tip),
+            let watermark = client
+                .resolve_watermark(Location::new(request.tip), request.min_sequence_number)
+                .await
+                .map_err(qmdb_error_to_connect)?;
+            let proof = client
+                .operation_range_checkpoint_at(
+                    watermark.value,
                     Location::new(request.start_location),
                     request.max_locations,
                 )
                 .await
                 .map_err(qmdb_error_to_connect)?;
+            let sequence_number = watermark
+                .sequence_number
+                .max(proof.sequence_number)
+                .unwrap_or_default();
             connectrpc::Response::ok(crate::proto::get_operation_range_response(
-                &proof,
+                &proof.value,
                 sequence_number,
             ))
         }
@@ -1063,9 +1111,10 @@ impl<B: OperationLogBackend> OperationLogService for OperationLogConnect<B> {
             connectrpc::ServiceStream<PreEncoded<SubscribeResponse>>,
         >,
     > + Send {
-        let backend = self.backend.clone();
+        let raw_store = self.raw_store.clone();
+        let client = self.client.clone();
         async move {
-            if B::REJECTS_KEY_FILTERS && !request.key_filters.is_empty() {
+            if C::REJECTS_KEY_FILTERS && !request.key_filters.is_empty() {
                 return Err(ConnectError::invalid_argument(
                     "this OperationLogService endpoint does not accept key_filters",
                 ));
@@ -1075,31 +1124,23 @@ impl<B: OperationLogBackend> OperationLogService for OperationLogConnect<B> {
             let value_matcher = parse_filters(request.value_filters.iter(), "value")
                 .map_err(ConnectError::invalid_argument)?;
             let since = decode_since(request.since_sequence_number);
-            let (classify, filter) = sub::classify_and_filter::<B::Family>();
-            let sub = sub::open_store_subscription(backend.store_client(), filter, since)
+            let (classify, filter) = sub::classify_and_filter::<C::Family>();
+            let sub = sub::open_store_subscription(&raw_store, filter, since)
                 .await
                 .map_err(qmdb_error_to_connect)?;
             let extract_kv: Arc<
-                dyn for<'a> Fn(Location<B::Family>, &'a [u8]) -> Result<OperationKv, QmdbError>
+                dyn for<'a> Fn(Location<C::Family>, &'a [u8]) -> Result<OperationKv, QmdbError>
                     + Send
                     + Sync
                     + 'static,
             > = {
-                let backend = backend.clone();
-                Arc::new(move |location, bytes| backend.extract_operation_kv(location, bytes))
+                let client = client.clone();
+                Arc::new(move |location, bytes| client.extract_operation_kv(location, bytes))
             };
-            let build_proof = {
-                let backend = backend.clone();
-                Arc::new(move |seq, watermark, matched| {
-                    let backend = backend.clone();
-                    async move {
-                        backend
-                            .batch_multi_proof_with_read_floor(Some(seq), watermark, matched)
-                            .await
-                    }
-                    .boxed()
-                })
-            };
+            let build_proof = Arc::new(move |watermark, matched| {
+                let client = client.clone();
+                async move { client.batch_multi_proof(watermark, matched).await }.boxed()
+            });
             let stream: Pin<
                 Box<dyn Stream<Item = Result<PreEncoded<SubscribeResponse>, ConnectError>> + Send>,
             > = Box::pin(BatchSubscribeStream::new(
@@ -1115,10 +1156,10 @@ impl<B: OperationLogBackend> OperationLogService for OperationLogConnect<B> {
     }
 }
 
-impl<B, const N: usize> CurrentOperationService for CurrentOperationConnect<B, N>
+impl<C, const N: usize> CurrentOperationService for CurrentOperationConnect<C, N>
 where
-    B: CurrentOperationRangeBackend<N>,
-    B::Operation: Encode,
+    C: CurrentOperationRangeReader<N>,
+    C::Operation: Encode,
 {
     fn get_current_operation_range(
         &self,
@@ -1126,9 +1167,9 @@ where
         request: ServiceRequest<'_, GetCurrentOperationRangeRequest>,
     ) -> impl Future<Output = connectrpc::ServiceResult<PreEncoded<GetCurrentOperationRangeResponse>>>
            + Send {
-        let backend = self.backend.clone();
+        let client = self.client.clone();
         async move {
-            let proof = backend
+            let proof = client
                 .current_operation_range_proof(
                     Location::new(request.tip),
                     Location::new(request.start_location),
@@ -1157,21 +1198,29 @@ pub fn ordered_connect_stack<
     const N: usize,
     E: ValueEncoding<Value = V> + Send + Sync + 'static,
 >(
-    client: Arc<OrderedClient<F, H, K, V, N, E>>,
+    raw_store: PrefixedStoreClient,
+    op_cfg: <ordered::Operation<F, K, E> as commonware_codec::Read>::Cfg,
+    key_cfg: K::Cfg,
 ) -> ConnectRpcService<impl ::connectrpc::Dispatcher>
 where
     ordered::Operation<F, K, E>: Encode + commonware_codec::Decode,
     commonware_storage::qmdb::current::ordered::ExclusionProof<F, K, E, H::Digest, N>: Encode,
 {
+    let client = Arc::new(OrderedClient::<F, H, K, V, N, E>::new(
+        raw_store.clone(),
+        op_cfg,
+        key_cfg,
+    ));
+    let key_lookup = OrderedConnect::from_client(client.clone());
     wrap_stack(Chain(
-        KeyLookupServiceServer::new(OrderedConnect::new(client.clone())),
+        KeyLookupServiceServer::new(key_lookup.clone()),
         Chain(
-            OrderedKeyRangeServiceServer::new(OrderedConnect::new(client.clone())),
+            OrderedKeyRangeServiceServer::new(key_lookup),
             Chain(
-                CurrentOperationServiceServer::new(CurrentOperationConnect::<_, N>::new(
+                CurrentOperationServiceServer::new(CurrentOperationConnect::<_, N>::from_client(
                     client.clone(),
                 )),
-                OperationLogServiceServer::new(OperationLogConnect::new(client)),
+                OperationLogServiceServer::new(OperationLogConnect::from_client(client, raw_store)),
             ),
         ),
     ))
@@ -1188,22 +1237,27 @@ pub fn unordered_connect_stack<
     const N: usize,
     E: ValueEncoding<Value = V> + Send + Sync + 'static,
 >(
-    client: Arc<UnorderedClient<F, H, K, V, E>>,
+    raw_store: PrefixedStoreClient,
+    op_cfg: <unordered::Operation<F, K, E> as commonware_codec::Read>::Cfg,
     key_cfg: K::Cfg,
 ) -> ConnectRpcService<impl ::connectrpc::Dispatcher>
 where
     unordered::Operation<F, K, E>: Encode + commonware_codec::Decode,
 {
+    let client = Arc::new(UnorderedClient::<F, H, K, V, E>::new(
+        raw_store.clone(),
+        op_cfg,
+    ));
     wrap_stack(Chain(
-        KeyLookupServiceServer::new(UnorderedConnect::<F, H, K, V, N, E>::new(
+        KeyLookupServiceServer::new(UnorderedConnect::<F, H, K, V, N, E>::from_client(
             client.clone(),
             key_cfg,
         )),
         Chain(
-            CurrentOperationServiceServer::new(CurrentOperationConnect::<_, N>::new(
+            CurrentOperationServiceServer::new(CurrentOperationConnect::<_, N>::from_client(
                 client.clone(),
             )),
-            OperationLogServiceServer::new(OperationLogConnect::new(client)),
+            OperationLogServiceServer::new(OperationLogConnect::from_client(client, raw_store)),
         ),
     ))
 }
@@ -1216,14 +1270,21 @@ pub fn ordered_operation_log_connect_stack<
     const N: usize,
     E: ValueEncoding<Value = V> + Send + Sync + 'static,
 >(
-    client: Arc<OrderedClient<F, H, K, V, N, E>>,
+    raw_store: PrefixedStoreClient,
+    op_cfg: <ordered::Operation<F, K, E> as commonware_codec::Read>::Cfg,
+    key_cfg: K::Cfg,
 ) -> ConnectRpcService<impl ::connectrpc::Dispatcher>
 where
     ordered::Operation<F, K, E>: Encode + commonware_codec::Decode,
 {
-    wrap_stack(OperationLogServiceServer::new(OperationLogConnect::new(
-        client,
-    )))
+    let client = Arc::new(OrderedClient::<F, H, K, V, N, E>::new(
+        raw_store.clone(),
+        op_cfg,
+        key_cfg,
+    ));
+    wrap_stack(OperationLogServiceServer::new(
+        OperationLogConnect::from_client(client, raw_store),
+    ))
 }
 
 pub fn unordered_operation_log_connect_stack<
@@ -1233,14 +1294,19 @@ pub fn unordered_operation_log_connect_stack<
     V: commonware_codec::Codec + Clone + AsRef<[u8]> + Send + Sync + 'static,
     E: ValueEncoding<Value = V> + Send + Sync + 'static,
 >(
-    client: Arc<UnorderedClient<F, H, K, V, E>>,
+    raw_store: PrefixedStoreClient,
+    op_cfg: <unordered::Operation<F, K, E> as commonware_codec::Read>::Cfg,
 ) -> ConnectRpcService<impl ::connectrpc::Dispatcher>
 where
     unordered::Operation<F, K, E>: Encode + commonware_codec::Decode,
 {
-    wrap_stack(OperationLogServiceServer::new(OperationLogConnect::new(
-        client,
-    )))
+    let client = Arc::new(UnorderedClient::<F, H, K, V, E>::new(
+        raw_store.clone(),
+        op_cfg,
+    ));
+    wrap_stack(OperationLogServiceServer::new(
+        OperationLogConnect::from_client(client, raw_store),
+    ))
 }
 
 pub fn immutable_operation_log_connect_stack<
@@ -1250,14 +1316,19 @@ pub fn immutable_operation_log_connect_stack<
     V: commonware_codec::Codec + Clone + AsRef<[u8]> + Send + Sync + 'static,
     E: ValueEncoding<Value = V> + Send + Sync + 'static,
 >(
-    client: Arc<ImmutableClient<F, H, K, V, E>>,
+    raw_store: PrefixedStoreClient,
+    op_cfg: <immutable::Operation<F, K, E> as commonware_codec::Read>::Cfg,
 ) -> ConnectRpcService<impl ::connectrpc::Dispatcher>
 where
     immutable::Operation<F, K, E>: Encode + commonware_codec::Decode + Clone,
 {
-    wrap_stack(OperationLogServiceServer::new(OperationLogConnect::new(
-        client,
-    )))
+    let client = Arc::new(ImmutableClient::<F, H, K, V, E>::new(
+        raw_store.clone(),
+        op_cfg,
+    ));
+    wrap_stack(OperationLogServiceServer::new(
+        OperationLogConnect::from_client(client, raw_store),
+    ))
 }
 
 pub fn keyless_operation_log_connect_stack<
@@ -1266,19 +1337,47 @@ pub fn keyless_operation_log_connect_stack<
     V: commonware_codec::Codec + Clone + AsRef<[u8]> + Send + Sync + 'static,
     E: ValueEncoding<Value = V> + Send + Sync + 'static,
 >(
-    client: Arc<KeylessClient<F, H, V, E>>,
+    raw_store: PrefixedStoreClient,
+    op_cfg: <keyless::Operation<F, E> as commonware_codec::Read>::Cfg,
 ) -> ConnectRpcService<impl ::connectrpc::Dispatcher>
 where
     keyless::Operation<F, E>: Encode + commonware_codec::Decode + Clone,
 {
-    wrap_stack(OperationLogServiceServer::new(OperationLogConnect::new(
-        client,
-    )))
+    let client = Arc::new(KeylessClient::<F, H, V, E>::new(raw_store.clone(), op_cfg));
+    wrap_stack(OperationLogServiceServer::new(
+        OperationLogConnect::from_client(client, raw_store),
+    ))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn fixed_request_sessions_do_not_share_observations_or_advance_floors() {
+        let (_task, url) = exoware_simulator::open_temp().await.expect("simulator");
+        let raw_store = PrefixedStoreClient::empty(exoware_sdk::StoreClient::new(&url));
+        let first = exoware_sdk::ReadSession::fixed(raw_store.clone(), None);
+        let second = exoware_sdk::ReadSession::fixed(raw_store.clone(), None);
+        let explicit_zero = exoware_sdk::ReadSession::fixed(raw_store.clone(), Some(0));
+        let key = Bytes::from_static(b"request-session-isolation");
+        let sequence = raw_store
+            .ingest()
+            .put(&[(&key, b"value")])
+            .await
+            .expect("write fixture");
+
+        assert_eq!(
+            first.get(&key).await.expect("read fixture"),
+            Some(Bytes::from_static(b"value"))
+        );
+        assert_eq!(first.evaluated_sequence(), Some(sequence));
+        assert_eq!(first.min_sequence_number(), None);
+        assert_eq!(second.evaluated_sequence(), None);
+        assert_eq!(second.min_sequence_number(), None);
+        assert_eq!(explicit_zero.min_sequence_number(), Some(0));
+        assert_eq!(explicit_zero.evaluated_sequence(), None);
+    }
 
     fn pending(
         latest: u64,
@@ -1346,9 +1445,9 @@ mod tests {
         let cursors: Vec<u64> = ready.iter().map(|b| b.batch_sequence).collect();
         assert_eq!(cursors, vec![10, 11, 12]);
         for b in &ready {
-            assert_eq!(b.read_floor_sequence, 15);
+            assert_eq!(b.watermark.sequence_number, 15);
             assert_eq!(
-                b.watermark,
+                b.watermark.location,
                 Location::<commonware_storage::merkle::mmr::Family>::new(12)
             );
         }
@@ -1382,7 +1481,9 @@ mod tests {
         assert_eq!(cursors, [10, 11]);
         let resume = cursors[0] + 1;
         assert!(cursors[1..].iter().all(|cursor| *cursor >= resume));
-        assert!(ready.iter().all(|batch| batch.read_floor_sequence == 12));
+        assert!(ready
+            .iter()
+            .all(|batch| batch.watermark.sequence_number == 12));
     }
 
     #[test]
@@ -1453,8 +1554,8 @@ mod tests {
                 .iter()
                 .map(|batch| (
                     batch.batch_sequence,
-                    *batch.watermark,
-                    batch.read_floor_sequence
+                    *batch.watermark.location,
+                    batch.watermark.sequence_number
                 ))
                 .collect::<Vec<_>>(),
             [
@@ -1499,7 +1600,7 @@ mod authenticated_upload_subscription_tests {
                     value: Some(bytes.to_vec()),
                 })
             }),
-            Arc::new(|_, _, _| async { unreachable!("ingestion does not build proofs") }.boxed()),
+            Arc::new(|_, _| async { unreachable!("ingestion does not build proofs") }.boxed()),
             subscription,
         )
     }
@@ -1560,8 +1661,8 @@ mod authenticated_upload_subscription_tests {
                 .iter()
                 .map(|batch| (
                     batch.batch_sequence,
-                    *batch.watermark,
-                    batch.read_floor_sequence
+                    *batch.watermark.location,
+                    batch.watermark.sequence_number
                 ))
                 .collect::<Vec<_>>(),
             [(10, 5, 13), (11, 1, 12)]
@@ -1614,7 +1715,7 @@ mod authenticated_upload_subscription_tests {
             stream.ready[0].matched,
             [(Location::new(4), b"keep".to_vec())]
         );
-        assert_eq!(stream.ready[0].read_floor_sequence, 12);
+        assert_eq!(stream.ready[0].watermark.sequence_number, 12);
     }
 
     #[tokio::test]

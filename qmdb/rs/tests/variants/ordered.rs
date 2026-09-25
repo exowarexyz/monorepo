@@ -246,9 +246,21 @@ async fn verify_snapshots<F, K, V, E>(
         key_cfg.clone(),
     ));
     let (task, url) = if is_current {
-        common::spawn_connect_service(ordered_connect_stack(native.clone())).await
+        common::spawn_connect_service(ordered_connect_stack::<F, Sha256, K, V, N, E>(
+            prefixed.clone(),
+            op_cfg.clone(),
+            key_cfg.clone(),
+        ))
+        .await
     } else {
-        common::spawn_connect_service(ordered_operation_log_connect_stack(native.clone())).await
+        common::spawn_connect_service(
+            ordered_operation_log_connect_stack::<F, Sha256, K, V, N, E>(
+                prefixed.clone(),
+                op_cfg.clone(),
+                key_cfg.clone(),
+            ),
+        )
+        .await
     };
     let _server = AbortOnDrop(task);
     let historical =

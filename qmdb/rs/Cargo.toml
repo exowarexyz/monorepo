@@ -13,6 +13,7 @@ documentation = "https://docs.rs/exoware-qmdb"
 test-utils = []
 
 [dependencies]
+crossbeam-utils = { workspace = true }
 axum = { workspace = true }
 bytes = { workspace = true }
 buffa = { workspace = true }

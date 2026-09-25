@@ -406,7 +406,7 @@ async fn test_ordered_round_trip() {
         key_cfg(),
     );
     let watermark = qmdb_client
-        .writer_location_watermark()
+        .latest_published_watermark()
         .await
         .expect("watermark");
     assert_eq!(watermark, Some(source.latest_location));
@@ -451,7 +451,7 @@ async fn test_ordered_mmb_round_trip() {
         key_cfg(),
     );
     let watermark = qmdb_client
-        .writer_location_watermark()
+        .latest_published_watermark()
         .await
         .expect("watermark");
     assert_eq!(watermark, Some(source.latest_location));
@@ -856,7 +856,7 @@ async fn test_ordered_fixed_round_trip() {
     let qmdb_client =
         FixedClient::<mmr::Family>::new(PrefixedStoreClient::empty(store_client.clone()), (), ());
     let watermark = qmdb_client
-        .writer_location_watermark()
+        .latest_published_watermark()
         .await
         .expect("watermark");
     assert_eq!(watermark, Some(source.latest_location));
@@ -1244,7 +1244,10 @@ where
             .expect("persist current range");
         expected_boundaries.push((latest, root, value));
     }
-    assert_eq!(qmdb_client.writer_location_watermark().await.unwrap(), None);
+    assert_eq!(
+        qmdb_client.latest_published_watermark().await.unwrap(),
+        None
+    );
     for (boundary, _, _) in &expected_boundaries {
         assert!(matches!(
             qmdb_client.current_root_at(*boundary).await,
@@ -1262,7 +1265,7 @@ where
         .await
         .expect("publish final watermark");
     assert_eq!(
-        qmdb_client.writer_location_watermark().await.unwrap(),
+        qmdb_client.latest_published_watermark().await.unwrap(),
         Some(latest)
     );
 

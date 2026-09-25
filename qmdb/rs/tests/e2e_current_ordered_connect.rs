@@ -5,14 +5,15 @@
 mod common;
 
 use std::num::NonZeroU64;
-use std::sync::Arc;
 
 use commonware_codec::Encode;
 use commonware_cryptography::Sha256;
 use commonware_runtime::tokio as cw_tokio;
 use commonware_runtime::Runner as _;
 use commonware_storage::merkle::{mmr, Location, Proof};
-use commonware_storage::qmdb::any::ordered::variable::Operation as QmdbOperation;
+use commonware_storage::qmdb::any::{
+    ordered::variable::Operation as QmdbOperation, value::VariableEncoding,
+};
 use commonware_storage::qmdb::{
     any::ordered::Update, current::ordered::variable::Db as LocalQmdbDb,
 };
@@ -56,9 +57,17 @@ fn encoded_key(key: &[u8]) -> Vec<u8> {
 }
 
 async fn spawn_qmdb_server(
-    qmdb_client: Arc<TestOrderedClient>,
+    raw_store: PrefixedStoreClient,
 ) -> (tokio::task::JoinHandle<()>, String) {
-    common::spawn_connect_service(ordered_connect_stack(qmdb_client)).await
+    common::spawn_connect_service(ordered_connect_stack::<
+        mmr::Family,
+        Sha256,
+        Vec<u8>,
+        Vec<u8>,
+        N,
+        VariableEncoding<Vec<u8>>,
+    >(raw_store, op_cfg(), key_cfg()))
+    .await
 }
 
 fn rpc_client(base: &str) -> KeyLookupServiceClient<PreferZstdHttpClient> {
@@ -312,12 +321,8 @@ fn tamper_get_many_response(mut response: ProtoGetManyResponse) -> ProtoGetManyR
 
 #[tokio::test]
 async fn test_ordered_connect_rejects_malformed_request_keys() {
-    let ordered_client = Arc::new(TestOrderedClient::new(
-        PrefixedStoreClient::empty(StoreClient::new("http://127.0.0.1:1")),
-        op_cfg(),
-        key_cfg(),
-    ));
-    let (server, url) = spawn_qmdb_server(ordered_client).await;
+    let raw_store = PrefixedStoreClient::empty(StoreClient::new("http://127.0.0.1:1"));
+    let (server, url) = spawn_qmdb_server(raw_store).await;
     let lookup = rpc_client(&url);
     let ranges = range_rpc_client(&url);
     // A one-byte value length without its payload is invalid Vec key encoding
@@ -372,13 +377,9 @@ async fn test_ordered_connect_rejects_malformed_request_keys() {
 async fn test_ordered_connect_get_returns_current_key_value_proof() {
     let store_client = common::local_store_client().await;
     let source = build_source_batch().await;
-    let ordered_client = Arc::new(TestOrderedClient::new(
-        PrefixedStoreClient::empty(store_client.clone()),
-        op_cfg(),
-        key_cfg(),
-    ));
     commit_upload(&store_client, &source).await;
-    let (_qmdb_server, qmdb_url) = spawn_qmdb_server(ordered_client.clone()).await;
+    let (_qmdb_server, qmdb_url) =
+        spawn_qmdb_server(PrefixedStoreClient::empty(store_client.clone())).await;
     let connect_client = key_lookup_client(&qmdb_url);
 
     let proof = connect_client
@@ -433,13 +434,9 @@ async fn test_ordered_get_after_grafted_boundary_returns_current_key_value_proof
 async fn test_ordered_connect_get_many_returns_current_key_lookup_proofs() {
     let store_client = common::local_store_client().await;
     let source = build_source_batch().await;
-    let ordered_client = Arc::new(TestOrderedClient::new(
-        PrefixedStoreClient::empty(store_client.clone()),
-        op_cfg(),
-        key_cfg(),
-    ));
     commit_upload(&store_client, &source).await;
-    let (_qmdb_server, qmdb_url) = spawn_qmdb_server(ordered_client.clone()).await;
+    let (_qmdb_server, qmdb_url) =
+        spawn_qmdb_server(PrefixedStoreClient::empty(store_client.clone())).await;
     let connect_client = key_lookup_client(&qmdb_url);
 
     let proof = connect_client
@@ -479,13 +476,9 @@ async fn test_ordered_connect_get_many_returns_current_key_lookup_proofs() {
 async fn test_ordered_connect_get_many_returns_miss_proofs_and_rejects_duplicates() {
     let store_client = common::local_store_client().await;
     let source = build_source_batch().await;
-    let ordered_client = Arc::new(TestOrderedClient::new(
-        PrefixedStoreClient::empty(store_client.clone()),
-        op_cfg(),
-        key_cfg(),
-    ));
     commit_upload(&store_client, &source).await;
-    let (_qmdb_server, qmdb_url) = spawn_qmdb_server(ordered_client.clone()).await;
+    let (_qmdb_server, qmdb_url) =
+        spawn_qmdb_server(PrefixedStoreClient::empty(store_client.clone())).await;
     let connect_client = key_lookup_client(&qmdb_url);
 
     let proof = connect_client
@@ -525,13 +518,9 @@ async fn test_ordered_connect_get_many_returns_miss_proofs_and_rejects_duplicate
 async fn test_ordered_connect_get_range_verifies_complete_empty_and_partial_pages() {
     let store_client = common::local_store_client().await;
     let source = build_source_batch().await;
-    let ordered_client = Arc::new(TestOrderedClient::new(
-        PrefixedStoreClient::empty(store_client.clone()),
-        op_cfg(),
-        key_cfg(),
-    ));
     commit_upload(&store_client, &source).await;
-    let (_qmdb_server, qmdb_url) = spawn_qmdb_server(ordered_client.clone()).await;
+    let (_qmdb_server, qmdb_url) =
+        spawn_qmdb_server(PrefixedStoreClient::empty(store_client.clone())).await;
     let connect_client = key_lookup_client(&qmdb_url);
 
     let complete = connect_client
@@ -597,12 +586,8 @@ async fn test_ordered_connect_client_rejects_get_range_boundary_omission() {
     let source = build_source_batch().await;
     commit_upload(&store_client, &source).await;
 
-    let ordered_client = Arc::new(TestOrderedClient::new(
-        PrefixedStoreClient::empty(store_client.clone()),
-        op_cfg(),
-        key_cfg(),
-    ));
-    let (_qmdb_server, qmdb_url) = spawn_qmdb_server(ordered_client.clone()).await;
+    let (_qmdb_server, qmdb_url) =
+        spawn_qmdb_server(PrefixedStoreClient::empty(store_client.clone())).await;
     let rpc = rpc_client(&qmdb_url);
     let range_rpc = range_rpc_client(&qmdb_url);
 
@@ -670,12 +655,8 @@ async fn test_ordered_connect_client_rejects_empty_unbounded_get_range_before_ne
     let source = build_source_batch().await;
     commit_upload(&store_client, &source).await;
 
-    let ordered_client = Arc::new(TestOrderedClient::new(
-        PrefixedStoreClient::empty(store_client.clone()),
-        op_cfg(),
-        key_cfg(),
-    ));
-    let (_qmdb_server, qmdb_url) = spawn_qmdb_server(ordered_client.clone()).await;
+    let (_qmdb_server, qmdb_url) =
+        spawn_qmdb_server(PrefixedStoreClient::empty(store_client.clone())).await;
     let rpc = rpc_client(&qmdb_url);
     let range_rpc = range_rpc_client(&qmdb_url);
 
@@ -742,12 +723,8 @@ async fn test_ordered_connect_client_rejects_invalid_get_proof() {
     let source = build_source_batch().await;
     commit_upload(&store_client, &source).await;
 
-    let ordered_client = Arc::new(TestOrderedClient::new(
-        PrefixedStoreClient::empty(store_client.clone()),
-        op_cfg(),
-        key_cfg(),
-    ));
-    let (_qmdb_server, qmdb_url) = spawn_qmdb_server(ordered_client.clone()).await;
+    let (_qmdb_server, qmdb_url) =
+        spawn_qmdb_server(PrefixedStoreClient::empty(store_client.clone())).await;
     let rpc = rpc_client(&qmdb_url);
 
     let raw_get_response = rpc
@@ -804,12 +781,8 @@ async fn test_ordered_connect_client_rejects_invalid_get_many_proof() {
     let source = build_source_batch().await;
     commit_upload(&store_client, &source).await;
 
-    let ordered_client = Arc::new(TestOrderedClient::new(
-        PrefixedStoreClient::empty(store_client.clone()),
-        op_cfg(),
-        key_cfg(),
-    ));
-    let (_qmdb_server, qmdb_url) = spawn_qmdb_server(ordered_client.clone()).await;
+    let (_qmdb_server, qmdb_url) =
+        spawn_qmdb_server(PrefixedStoreClient::empty(store_client.clone())).await;
     let rpc = rpc_client(&qmdb_url);
 
     let raw_get_response = rpc
@@ -866,12 +839,8 @@ async fn test_ordered_connect_client_rejects_get_many_proof_for_different_key() 
     let source = build_source_batch().await;
     commit_upload(&store_client, &source).await;
 
-    let ordered_client = Arc::new(TestOrderedClient::new(
-        PrefixedStoreClient::empty(store_client.clone()),
-        op_cfg(),
-        key_cfg(),
-    ));
-    let (_qmdb_server, qmdb_url) = spawn_qmdb_server(ordered_client.clone()).await;
+    let (_qmdb_server, qmdb_url) =
+        spawn_qmdb_server(PrefixedStoreClient::empty(store_client.clone())).await;
     let rpc = rpc_client(&qmdb_url);
 
     let raw_get_many_response = rpc
@@ -918,12 +887,8 @@ async fn test_ordered_connect_client_rejects_get_range_page_shorter_than_limit()
     let source = build_source_batch().await;
     commit_upload(&store_client, &source).await;
 
-    let ordered_client = Arc::new(TestOrderedClient::new(
-        PrefixedStoreClient::empty(store_client.clone()),
-        op_cfg(),
-        key_cfg(),
-    ));
-    let (_qmdb_server, qmdb_url) = spawn_qmdb_server(ordered_client.clone()).await;
+    let (_qmdb_server, qmdb_url) =
+        spawn_qmdb_server(PrefixedStoreClient::empty(store_client.clone())).await;
     let rpc = rpc_client(&qmdb_url);
     let range_rpc = range_rpc_client(&qmdb_url);
 

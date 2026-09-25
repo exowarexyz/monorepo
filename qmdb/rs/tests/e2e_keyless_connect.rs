@@ -48,9 +48,15 @@ type TestKeylessClient = KeylessClient<mmr::Family, commonware_cryptography::Sha
 type BatchOperation = KeylessOperation<mmr::Family, Vec<u8>>;
 
 async fn spawn_qmdb_server(
-    qmdb_client: Arc<TestKeylessClient>,
+    raw_store: PrefixedStoreClient,
 ) -> (tokio::task::JoinHandle<()>, String) {
-    common::spawn_connect_service(keyless_operation_log_connect_stack(qmdb_client)).await
+    common::spawn_connect_service(keyless_operation_log_connect_stack::<
+        mmr::Family,
+        commonware_cryptography::Sha256,
+        Vec<u8>,
+        commonware_storage::qmdb::any::value::VariableEncoding<Vec<u8>>,
+    >(raw_store, ((0..=10000).into(), ())))
+    .await
 }
 
 fn operation_log_client(
@@ -89,11 +95,7 @@ async fn test_overlapping_atomic_uploads_emit_each_operation_once() {
     stage_watermark::<mmr::Family>(&upload_client, Location::new(3), &mut batch).unwrap();
     let sequence = batch.commit(&store_client).await.unwrap();
 
-    let qmdb_client = Arc::new(TestKeylessClient::new(
-        PrefixedStoreClient::empty(store_client),
-        ((0..=10000).into(), ()),
-    ));
-    let (server, url) = spawn_qmdb_server(qmdb_client).await;
+    let (server, url) = spawn_qmdb_server(PrefixedStoreClient::empty(store_client)).await;
     let mut stream = operation_log_client(&url)
         .subscribe(ProtoSubscribeRequest {
             since_sequence_number: Some(sequence),
@@ -206,11 +208,8 @@ async fn test_keyless_connect_subscribe_emits_verifiable_multi_proof() {
         *source.inactivity_floor > 0,
         "test must not rely on inactivity_floor = 0"
     );
-    let keyless_client = Arc::new(TestKeylessClient::new(
-        PrefixedStoreClient::empty(store_client.clone()),
-        ((0..=10000).into(), ()),
-    ));
-    let (_qmdb_server, qmdb_url) = spawn_qmdb_server(keyless_client).await;
+    let (_qmdb_server, qmdb_url) =
+        spawn_qmdb_server(PrefixedStoreClient::empty(store_client.clone())).await;
     let connect_client = operation_log_client(&qmdb_url);
 
     let mut stream = connect_client
@@ -252,12 +251,22 @@ async fn test_keyless_connect_get_operation_range_returns_verifiable_proof() {
     );
     commit_upload(&store_client, &source).await;
 
-    let keyless_client = Arc::new(TestKeylessClient::new(
-        PrefixedStoreClient::empty(store_client.clone()),
-        ((0..=10000).into(), ()),
-    ));
-    let (_qmdb_server, qmdb_url) = spawn_qmdb_server(keyless_client).await;
+    let (_qmdb_server, qmdb_url) =
+        spawn_qmdb_server(PrefixedStoreClient::empty(store_client.clone())).await;
     let connect_client = operation_log_client(&qmdb_url);
+
+    let request = ProtoGetOperationRangeRequest {
+        tip: u64::try_from(source.operations.len() - 1).expect("tip fits"),
+        start_location: 1,
+        max_locations: 1,
+        min_sequence_number: Some(u64::MAX),
+        ..Default::default()
+    };
+    let error = common::operation_log_rpc_client(&qmdb_url)
+        .get_operation_range(request.clone())
+        .await
+        .expect_err("caller floor must govern an uncached publication lookup");
+    assert_eq!(error.code, connectrpc::ErrorCode::Aborted);
 
     for min_sequence_number in [None, Some(1)] {
         let proof = connect_client
@@ -280,17 +289,12 @@ async fn test_keyless_connect_get_operation_range_returns_verifiable_proof() {
         assert_eq!(proof.operations, vec![source.operations[1].clone()]);
     }
 
-    let error = common::operation_log_rpc_client(&qmdb_url)
-        .get_operation_range(ProtoGetOperationRangeRequest {
-            tip: u64::try_from(source.operations.len() - 1).expect("tip fits"),
-            start_location: 1,
-            max_locations: 1,
-            min_sequence_number: Some(u64::MAX),
-            ..Default::default()
-        })
+    let response = common::operation_log_rpc_client(&qmdb_url)
+        .get_operation_range(request)
         .await
-        .expect_err("unavailable sequence floor");
-    assert_eq!(error.code, connectrpc::ErrorCode::Aborted);
+        .expect("cached publication evidence fixes the downstream read floor")
+        .into_owned();
+    assert!(response.sequence_number < u64::MAX);
 }
 
 #[tokio::test]
@@ -317,9 +321,9 @@ async fn test_operation_range_preserves_late_consistency_errors() {
                 calls.push(request.uri().path().to_string());
                 index
             };
-            let replica = if index < 4 {
+            let replica = if index < 3 {
                 0
-            } else if index == 4 {
+            } else if index == 3 {
                 1
             } else {
                 2
@@ -342,7 +346,7 @@ async fn test_operation_range_preserves_late_consistency_errors() {
     let mut origins = Vec::new();
     let mut handles = Vec::new();
     let mut replicas = Vec::new();
-    for frontier in [100, 200, 150] {
+    for frontier in [200, 250, 150] {
         let (handle, url) = exoware_simulator::open_temp().await.unwrap();
         let store = PrefixedStoreClient::empty(StoreClient::new(&url));
         common::commit_operations::<mmr::Family, BatchOperation>(&store, &operations, &config)
@@ -360,7 +364,7 @@ async fn test_operation_range_preserves_late_consistency_errors() {
         replicas.push(store);
     }
 
-    // All proof rows precede these frontiers. A later read raises the floor above the last replica.
+    // All proof rows precede these frontiers. The last replica cannot meet the requested floor.
     let calls = Arc::new(Mutex::new(Vec::new()));
     let client = StoreClient::builder()
         .url("http://replicas.test")
@@ -373,20 +377,17 @@ async fn test_operation_range_preserves_late_consistency_errors() {
         .build()
         .unwrap();
     let (root, _) = common::prepare_operations::<mmr::Family, BatchOperation>(&operations, &config);
-    let keyless = Arc::new(TestKeylessClient::new(
-        PrefixedStoreClient::empty(client),
-        config,
-    ));
-    let (qmdb_handle, url) = spawn_qmdb_server(keyless).await;
+    let (qmdb_handle, url) = spawn_qmdb_server(PrefixedStoreClient::empty(client)).await;
     let error = common::operation_log_rpc_client(&url)
         .get_operation_range(ProtoGetOperationRangeRequest {
             tip: 3,
             start_location: 1,
             max_locations: 1,
+            min_sequence_number: Some(200),
             ..Default::default()
         })
         .await
-        .expect_err("last replica cannot satisfy the advanced floor");
+        .expect_err("last replica cannot satisfy the requested floor");
     assert_eq!(
         calls
             .lock()
@@ -394,7 +395,7 @@ async fn test_operation_range_preserves_late_consistency_errors() {
             .iter()
             .map(|path| path.rsplit('/').next().unwrap())
             .collect::<Vec<_>>(),
-        ["Range", "Get", "Get", "GetMany", "Range", "GetMany"]
+        ["Range", "Get", "GetMany", "Range", "GetMany"]
     );
     assert_eq!(error.code, connectrpc::ErrorCode::Aborted);
 
@@ -431,11 +432,8 @@ async fn test_keyless_operation_log_source_fetches_api_batches() {
     let source = build_source_batch().await;
     commit_upload(&store_client, &source).await;
 
-    let keyless_client = Arc::new(TestKeylessClient::new(
-        PrefixedStoreClient::empty(store_client.clone()),
-        ((0..=10000).into(), ()),
-    ));
-    let (_qmdb_server, qmdb_url) = spawn_qmdb_server(keyless_client).await;
+    let (_qmdb_server, qmdb_url) =
+        spawn_qmdb_server(PrefixedStoreClient::empty(store_client.clone())).await;
     let resolver = OperationLogClient::<
         _,
         mmr::Family,
@@ -492,11 +490,8 @@ async fn test_keyless_commonware_glue_state_sync_uses_operation_log_client() {
     );
     commit_upload(&store_client, &source).await;
 
-    let keyless_client = Arc::new(TestKeylessClient::new(
-        PrefixedStoreClient::empty(store_client.clone()),
-        ((0..=10000).into(), ()),
-    ));
-    let (_qmdb_server, qmdb_url) = spawn_qmdb_server(keyless_client).await;
+    let (_qmdb_server, qmdb_url) =
+        spawn_qmdb_server(PrefixedStoreClient::empty(store_client.clone())).await;
     let resolver = OperationLogClient::<
         _,
         mmr::Family,
@@ -587,11 +582,8 @@ async fn test_keyless_connect_client_rejects_invalid_streamed_proof() {
     );
     commit_upload(&store_client, &source).await;
 
-    let keyless_client = Arc::new(TestKeylessClient::new(
-        PrefixedStoreClient::empty(store_client.clone()),
-        ((0..=10000).into(), ()),
-    ));
-    let (_qmdb_server, qmdb_url) = spawn_qmdb_server(keyless_client).await;
+    let (_qmdb_server, qmdb_url) =
+        spawn_qmdb_server(PrefixedStoreClient::empty(store_client.clone())).await;
     let rpc = common::operation_log_rpc_client(&qmdb_url);
     let mut raw_stream = rpc
         .subscribe(ProtoSubscribeRequest {
@@ -652,11 +644,8 @@ async fn test_keyless_connect_subscribe_filters_by_value_regex() {
         *source.inactivity_floor > 0,
         "test must not rely on inactivity_floor = 0"
     );
-    let keyless_client = Arc::new(TestKeylessClient::new(
-        PrefixedStoreClient::empty(store_client.clone()),
-        ((0..=10000).into(), ()),
-    ));
-    let (_qmdb_server, qmdb_url) = spawn_qmdb_server(keyless_client).await;
+    let (_qmdb_server, qmdb_url) =
+        spawn_qmdb_server(PrefixedStoreClient::empty(store_client.clone())).await;
     let connect_client = operation_log_client(&qmdb_url);
 
     // Only include ops whose value begins with "second".
@@ -705,11 +694,8 @@ async fn test_keyless_connect_subscribe_rejects_key_filters() {
         *source.inactivity_floor > 0,
         "test must not rely on inactivity_floor = 0"
     );
-    let keyless_client = Arc::new(TestKeylessClient::new(
-        PrefixedStoreClient::empty(store_client.clone()),
-        ((0..=10000).into(), ()),
-    ));
-    let (_qmdb_server, qmdb_url) = spawn_qmdb_server(keyless_client).await;
+    let (_qmdb_server, qmdb_url) =
+        spawn_qmdb_server(PrefixedStoreClient::empty(store_client.clone())).await;
 
     let rpc = common::operation_log_rpc_client(&qmdb_url);
     let mut stream = rpc
@@ -780,9 +766,15 @@ async fn test_keyless_data_only_frames_replay_in_store_order_after_delayed_publi
         upload_client.clone(),
         ((0..=10000).into(), ()),
     ));
-    assert_eq!(qmdb_client.writer_location_watermark().await.unwrap(), None);
+    assert_eq!(
+        qmdb_client.latest_published_watermark().await.unwrap(),
+        None
+    );
     let earlier_sequence = earlier.commit(&store_client).await.unwrap();
-    assert_eq!(qmdb_client.writer_location_watermark().await.unwrap(), None);
+    assert_eq!(
+        qmdb_client.latest_published_watermark().await.unwrap(),
+        None
+    );
     let mut publication = StoreWriteBatch::new();
     stage_watermark(
         &upload_client,
@@ -793,7 +785,7 @@ async fn test_keyless_data_only_frames_replay_in_store_order_after_delayed_publi
     let publication_sequence = publication.commit(&store_client).await.unwrap();
     assert!(later_sequence < earlier_sequence && earlier_sequence < publication_sequence);
 
-    let (server, url) = spawn_qmdb_server(qmdb_client).await;
+    let (server, url) = spawn_qmdb_server(upload_client.clone()).await;
     let mut stream = operation_log_client(&url)
         .subscribe(ProtoSubscribeRequest {
             since_sequence_number: Some(later_sequence),

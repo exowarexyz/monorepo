@@ -214,7 +214,7 @@ async fn test_unordered_round_trip() {
     let qmdb_client =
         VariableClient::new(PrefixedStoreClient::empty(store_client.clone()), op_cfg());
     let watermark = qmdb_client
-        .writer_location_watermark()
+        .latest_published_watermark()
         .await
         .expect("watermark");
     assert_eq!(watermark, Some(source.latest_location));
@@ -258,7 +258,7 @@ async fn test_unordered_fixed_round_trip() {
 
     let qmdb_client = FixedClient::new(PrefixedStoreClient::empty(store_client.clone()), ());
     let watermark = qmdb_client
-        .writer_location_watermark()
+        .latest_published_watermark()
         .await
         .expect("watermark");
     assert_eq!(watermark, Some(source.latest_location));

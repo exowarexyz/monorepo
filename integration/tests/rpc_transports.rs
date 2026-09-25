@@ -135,7 +135,8 @@ fn balanced_client(url: &str, request_timeout: Duration) -> StoreClient {
 #[tokio::test]
 async fn balanced_h2c_supports_unary_and_long_lived_streaming_calls() {
     let (_server, url) = exoware_simulator::open_temp().await.unwrap();
-    let store = prefixed(balanced_client(&url, Duration::from_millis(250)));
+    let request_timeout = Duration::from_secs(2);
+    let store = prefixed(balanced_client(&url, request_timeout));
     let key = Key::from(b"middle".to_vec());
 
     store.ingest().put(&[(&key, b"value")]).await.unwrap();
@@ -157,7 +158,7 @@ async fn balanced_h2c_supports_unary_and_long_lived_streaming_calls() {
         .await
         .unwrap();
 
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    tokio::time::sleep(request_timeout + Duration::from_secs(1)).await;
     let key = Key::from(b"late".to_vec());
     store.ingest().put(&[(&key, b"value")]).await.unwrap();
 

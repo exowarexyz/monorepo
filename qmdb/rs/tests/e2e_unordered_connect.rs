@@ -4,7 +4,6 @@
 mod common;
 
 use std::num::NonZeroU64;
-use std::sync::Arc;
 use std::time::Duration;
 
 use commonware_cryptography::Sha256;
@@ -28,7 +27,7 @@ use exoware_qmdb::proto::qmdb::v1::{
 use exoware_qmdb::{
     recover_boundary_state, unordered_connect_stack, unordered_operation_log_connect_stack,
     CurrentBoundaryState, CurrentOperationClient, OperationLogClient, OperationLogSubscribeProof,
-    QmdbError, UnorderedClient, UnorderedConnectClient, MAX_OPERATION_SIZE,
+    QmdbError, UnorderedConnectClient, MAX_OPERATION_SIZE,
 };
 use exoware_sdk::proto::PreferZstdHttpClient;
 use exoware_sdk::{PrefixedStoreClient, StoreClient};
@@ -40,9 +39,6 @@ type BatchOperation = UnorderedQmdbOperation<mmr::Family, Vec<u8>, Vec<u8>>;
 type MmbBatchProof = Proof<mmb::Family, Digest>;
 type MmbBatchOperation = UnorderedQmdbOperation<mmb::Family, Vec<u8>, Vec<u8>>;
 type FixedKeyOperation = UnorderedQmdbOperation<mmr::Family, Digest, Vec<u8>>;
-type TestUnorderedClient = UnorderedClient<mmr::Family, Sha256, Vec<u8>, Vec<u8>>;
-type MmbTestUnorderedClient = UnorderedClient<mmb::Family, Sha256, Vec<u8>, Vec<u8>>;
-type FixedKeyClient = UnorderedClient<mmr::Family, Sha256, Digest, Vec<u8>>;
 type AnyDb = LocalUnorderedDb<
     mmr::Family,
     cw_tokio::Context,
@@ -73,19 +69,33 @@ type CurrentDb = LocalCurrentUnorderedDb<
 >;
 
 async fn spawn_qmdb_range_server(
-    qmdb_client: Arc<TestUnorderedClient>,
+    raw_store: PrefixedStoreClient,
 ) -> (tokio::task::JoinHandle<()>, String) {
-    common::spawn_connect_service(unordered_operation_log_connect_stack(qmdb_client)).await
+    common::spawn_connect_service(unordered_operation_log_connect_stack::<
+        mmr::Family,
+        Sha256,
+        Vec<u8>,
+        Vec<u8>,
+        commonware_storage::qmdb::any::value::VariableEncoding<Vec<u8>>,
+    >(raw_store, op_cfg()))
+    .await
 }
 
 async fn spawn_mmb_qmdb_range_server(
-    qmdb_client: Arc<MmbTestUnorderedClient>,
+    raw_store: PrefixedStoreClient,
 ) -> (tokio::task::JoinHandle<()>, String) {
-    common::spawn_connect_service(unordered_operation_log_connect_stack(qmdb_client)).await
+    common::spawn_connect_service(unordered_operation_log_connect_stack::<
+        mmb::Family,
+        Sha256,
+        Vec<u8>,
+        Vec<u8>,
+        commonware_storage::qmdb::any::value::VariableEncoding<Vec<u8>>,
+    >(raw_store, op_cfg()))
+    .await
 }
 
 async fn spawn_qmdb_full_server(
-    qmdb_client: Arc<FixedKeyClient>,
+    raw_store: PrefixedStoreClient,
 ) -> (tokio::task::JoinHandle<()>, String) {
     common::spawn_connect_service(unordered_connect_stack::<
         mmr::Family,
@@ -93,8 +103,8 @@ async fn spawn_qmdb_full_server(
         Digest,
         Vec<u8>,
         N,
-        _,
-    >(qmdb_client, ()))
+        commonware_storage::qmdb::any::value::VariableEncoding<Vec<u8>>,
+    >(raw_store, fixed_key_op_cfg(), ()))
     .await
 }
 
@@ -460,11 +470,8 @@ fn latest_operation_for_fixed_key(
 #[tokio::test]
 async fn test_unordered_range_stack_does_not_expose_key_lookup_or_ordered_range_services() {
     let store_client = common::local_store_client().await;
-    let unordered_client = Arc::new(TestUnorderedClient::new(
-        PrefixedStoreClient::empty(store_client),
-        op_cfg(),
-    ));
-    let (_qmdb_server, qmdb_url) = spawn_qmdb_range_server(unordered_client).await;
+    let (_qmdb_server, qmdb_url) =
+        spawn_qmdb_range_server(PrefixedStoreClient::empty(store_client.clone())).await;
 
     let err = key_lookup_rpc_client(&qmdb_url)
         .get_many(ProtoGetManyRequest {
@@ -494,12 +501,22 @@ async fn test_unordered_connect_get_operation_range_returns_verifiable_proof() {
     let source = build_any_source_batch().await;
     commit_upload(&store_client, &source).await;
 
-    let unordered_client = Arc::new(TestUnorderedClient::new(
-        PrefixedStoreClient::empty(store_client),
-        op_cfg(),
-    ));
-    let (_qmdb_server, qmdb_url) = spawn_qmdb_range_server(unordered_client).await;
+    let (_qmdb_server, qmdb_url) =
+        spawn_qmdb_range_server(PrefixedStoreClient::empty(store_client.clone())).await;
     let connect_client = operation_log_client(&qmdb_url);
+
+    let request = ProtoGetOperationRangeRequest {
+        tip: u64::try_from(source.operations.len() - 1).expect("tip fits"),
+        start_location: 1,
+        max_locations: 1,
+        min_sequence_number: Some(u64::MAX),
+        ..Default::default()
+    };
+    let error = common::operation_log_rpc_client(&qmdb_url)
+        .get_operation_range(request.clone())
+        .await
+        .expect_err("caller floor must govern an uncached publication lookup");
+    assert_eq!(error.code, connectrpc::ErrorCode::Aborted);
 
     for min_sequence_number in [None, Some(1)] {
         let proof = connect_client
@@ -522,17 +539,12 @@ async fn test_unordered_connect_get_operation_range_returns_verifiable_proof() {
         assert_eq!(proof.operations, vec![source.operations[1].clone()]);
     }
 
-    let error = common::operation_log_rpc_client(&qmdb_url)
-        .get_operation_range(ProtoGetOperationRangeRequest {
-            tip: u64::try_from(source.operations.len() - 1).expect("tip fits"),
-            start_location: 1,
-            max_locations: 1,
-            min_sequence_number: Some(u64::MAX),
-            ..Default::default()
-        })
+    let response = common::operation_log_rpc_client(&qmdb_url)
+        .get_operation_range(request)
         .await
-        .expect_err("unavailable sequence floor");
-    assert_eq!(error.code, connectrpc::ErrorCode::Aborted);
+        .expect("cached publication evidence fixes the downstream read floor")
+        .into_owned();
+    assert!(response.sequence_number < u64::MAX);
 }
 
 #[tokio::test]
@@ -541,11 +553,8 @@ async fn test_unordered_connect_get_many_returns_present_key_proofs() {
     let source = build_current_source_batch().await;
     commit_current_upload(&store_client, &source).await;
 
-    let unordered_client = Arc::new(FixedKeyClient::new(
-        PrefixedStoreClient::empty(store_client),
-        fixed_key_op_cfg(),
-    ));
-    let (_qmdb_server, qmdb_url) = spawn_qmdb_full_server(unordered_client).await;
+    let (_qmdb_server, qmdb_url) =
+        spawn_qmdb_full_server(PrefixedStoreClient::empty(store_client.clone())).await;
     let connect_client = key_lookup_client(&qmdb_url);
 
     let results = connect_client
@@ -594,11 +603,8 @@ async fn test_unordered_current_operation_range_connect_returns_verifiable_proof
     let source = build_current_source_batch().await;
     commit_current_upload(&store_client, &source).await;
 
-    let unordered_client = Arc::new(FixedKeyClient::new(
-        PrefixedStoreClient::empty(store_client),
-        fixed_key_op_cfg(),
-    ));
-    let (_qmdb_server, qmdb_url) = spawn_qmdb_full_server(unordered_client).await;
+    let (_qmdb_server, qmdb_url) =
+        spawn_qmdb_full_server(PrefixedStoreClient::empty(store_client.clone())).await;
     let connect_client = current_operation_client(&qmdb_url);
 
     let proof = connect_client
@@ -722,16 +728,15 @@ async fn aligned_commit_boundary<F: commonware_storage::merkle::Graftable + Part
     let store = common::local_store_client().await;
     let prefixed = PrefixedStoreClient::empty(store);
     let op_cfg = ((), ((0..=MAX_OPERATION_SIZE).into(), ()));
-    let client = Arc::new(UnorderedClient::<F, Sha256, Digest, Vec<u8>>::new(
-        prefixed.clone(),
-        op_cfg,
-    ));
-    let (server, url) =
-        common::spawn_connect_service(unordered_connect_stack::<F, Sha256, Digest, Vec<u8>, N, _>(
-            client,
-            (),
-        ))
-        .await;
+    let (server, url) = common::spawn_connect_service(unordered_connect_stack::<
+        F,
+        Sha256,
+        Digest,
+        Vec<u8>,
+        N,
+        commonware_storage::qmdb::any::value::VariableEncoding<Vec<u8>>,
+    >(prefixed.clone(), op_cfg, ()))
+    .await;
     let connect_client =
         UnorderedConnectClient::<_, F, Sha256, Digest, Vec<u8>, N>::plaintext(&url, op_cfg);
     for (operations, boundary) in snapshots {
@@ -911,16 +916,15 @@ async fn current_boundary_nodes<F: commonware_storage::merkle::Graftable + Parti
     let store = common::local_store_client().await;
     let prefixed = PrefixedStoreClient::empty(store);
     let op_cfg = ((), ((0..=MAX_OPERATION_SIZE).into(), ()));
-    let client = Arc::new(UnorderedClient::<F, Sha256, Digest, Vec<u8>>::new(
-        prefixed.clone(),
-        op_cfg,
-    ));
-    let (server, url) =
-        common::spawn_connect_service(unordered_connect_stack::<F, Sha256, Digest, Vec<u8>, N, _>(
-            client,
-            (),
-        ))
-        .await;
+    let (server, url) = common::spawn_connect_service(unordered_connect_stack::<
+        F,
+        Sha256,
+        Digest,
+        Vec<u8>,
+        N,
+        commonware_storage::qmdb::any::value::VariableEncoding<Vec<u8>>,
+    >(prefixed.clone(), op_cfg, ()))
+    .await;
     let key_client =
         UnorderedConnectClient::<_, F, Sha256, Digest, Vec<u8>, N>::plaintext(&url, op_cfg);
     let range_client =
@@ -1028,11 +1032,8 @@ async fn test_unordered_connect_omits_missing_and_rejects_duplicate_range_and_st
     let source = build_current_source_batch().await;
     commit_current_upload(&store_client, &source).await;
 
-    let unordered_client = Arc::new(FixedKeyClient::new(
-        PrefixedStoreClient::empty(store_client),
-        fixed_key_op_cfg(),
-    ));
-    let (_qmdb_server, qmdb_url) = spawn_qmdb_full_server(unordered_client).await;
+    let (_qmdb_server, qmdb_url) =
+        spawn_qmdb_full_server(PrefixedStoreClient::empty(store_client.clone())).await;
 
     let missing = Sha256::fill(0xCC);
     let connect_client = key_lookup_client(&qmdb_url);
@@ -1128,11 +1129,7 @@ async fn test_current_unordered_variable_fixed_keys_variable_values_mmr_get_many
     let store = common::local_store_client().await;
     let source = build_current_source_batch().await;
     commit_current_upload(&store, &source).await;
-    let client = Arc::new(FixedKeyClient::new(
-        PrefixedStoreClient::empty(store),
-        fixed_key_op_cfg(),
-    ));
-    let (server, url) = spawn_qmdb_full_server(client).await;
+    let (server, url) = spawn_qmdb_full_server(PrefixedStoreClient::empty(store)).await;
     let request = ProtoGetManyRequest {
         keys: vec![
             source.alpha.as_ref().to_vec(),
@@ -1215,11 +1212,8 @@ async fn test_unordered_connect_subscribe_emits_verifiable_range_proof() {
         *source.inactivity_floor > 0,
         "test must not rely on inactivity_floor = 0"
     );
-    let unordered_client = Arc::new(TestUnorderedClient::new(
-        PrefixedStoreClient::empty(store_client.clone()),
-        op_cfg(),
-    ));
-    let (_qmdb_server, qmdb_url) = spawn_qmdb_range_server(unordered_client).await;
+    let (_qmdb_server, qmdb_url) =
+        spawn_qmdb_range_server(PrefixedStoreClient::empty(store_client.clone())).await;
     let connect_client = operation_log_client(&qmdb_url);
 
     let mut stream = connect_client
@@ -1258,11 +1252,8 @@ async fn test_unordered_mmb_connect_subscribe_emits_verifiable_range_proof() {
         *source.inactivity_floor > 0,
         "test must not rely on inactivity_floor = 0"
     );
-    let unordered_client = Arc::new(MmbTestUnorderedClient::new(
-        PrefixedStoreClient::empty(store_client.clone()),
-        op_cfg(),
-    ));
-    let (_qmdb_server, qmdb_url) = spawn_mmb_qmdb_range_server(unordered_client).await;
+    let (_qmdb_server, qmdb_url) =
+        spawn_mmb_qmdb_range_server(PrefixedStoreClient::empty(store_client.clone())).await;
     let connect_client = mmb_operation_log_client(&qmdb_url);
 
     let mut stream = connect_client
@@ -1299,11 +1290,8 @@ async fn test_unordered_connect_client_rejects_invalid_streamed_proof() {
     let source = build_any_source_batch().await;
     commit_upload(&store_client, &source).await;
 
-    let unordered_client = Arc::new(TestUnorderedClient::new(
-        PrefixedStoreClient::empty(store_client.clone()),
-        op_cfg(),
-    ));
-    let (_qmdb_server, qmdb_url) = spawn_qmdb_range_server(unordered_client).await;
+    let (_qmdb_server, qmdb_url) =
+        spawn_qmdb_range_server(PrefixedStoreClient::empty(store_client.clone())).await;
     let rpc = common::operation_log_rpc_client(&qmdb_url);
     let mut raw_stream = rpc
         .subscribe(ProtoSubscribeRequest {

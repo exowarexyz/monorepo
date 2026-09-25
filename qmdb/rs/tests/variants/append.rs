@@ -502,7 +502,11 @@ async fn check_immutable<F, K, V, E>(
         codec.clone(),
     ));
     let (server, url) =
-        common::spawn_connect_service(immutable_operation_log_connect_stack(reader.clone())).await;
+        common::spawn_connect_service(immutable_operation_log_connect_stack::<F, Sha256, K, V, E>(
+            prefixed.clone(),
+            codec.clone(),
+        ))
+        .await;
     let mut all_operations = vec![source.bootstrap];
     let (bootstrap_root, bootstrap) = common::prepare_operations::<F, _>(&all_operations, &codec);
     assert_eq!(bootstrap_root, source.bootstrap_root);
@@ -515,7 +519,7 @@ async fn check_immutable<F, K, V, E>(
         let latest = batch.proof.leaves - 1;
         assert_eq!(
             reader
-                .writer_location_watermark()
+                .latest_published_watermark()
                 .await
                 .expect("published watermark"),
             Some(latest)
@@ -568,7 +572,11 @@ async fn check_keyless<F, V, E>(
         codec.clone(),
     ));
     let (server, url) =
-        common::spawn_connect_service(keyless_operation_log_connect_stack(reader.clone())).await;
+        common::spawn_connect_service(keyless_operation_log_connect_stack::<F, Sha256, V, E>(
+            prefixed.clone(),
+            codec.clone(),
+        ))
+        .await;
     let mut all_operations = vec![source.bootstrap];
     let (bootstrap_root, bootstrap) = common::prepare_operations::<F, _>(&all_operations, &codec);
     assert_eq!(bootstrap_root, source.bootstrap_root);
@@ -581,7 +589,7 @@ async fn check_keyless<F, V, E>(
         let latest = batch.proof.leaves - 1;
         assert_eq!(
             reader
-                .writer_location_watermark()
+                .latest_published_watermark()
                 .await
                 .expect("published watermark"),
             Some(latest)
