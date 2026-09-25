@@ -37,7 +37,7 @@ export type GetRequest = Message<"qmdb.v1.GetRequest"> & {
   tip: bigint;
 
   /**
-   * Minimum Store sequence required by reads used to build this proof.
+   * Minimum Store sequence for checking publication of the requested watermark.
    *
    * @generated from field: optional uint64 min_sequence_number = 3;
    */
@@ -73,7 +73,7 @@ export type GetManyRequest = Message<"qmdb.v1.GetManyRequest"> & {
   tip: bigint;
 
   /**
-   * Minimum Store sequence required by reads used to build these proofs.
+   * Minimum Store sequence for checking publication of the requested watermark.
    *
    * @generated from field: optional uint64 min_sequence_number = 3;
    */

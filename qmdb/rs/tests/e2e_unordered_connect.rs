@@ -708,7 +708,7 @@ async fn test_unordered_current_endpoints_enforce_optional_sequence_minimum() {
             .expect("unordered current range at available sequence");
     }
 
-    let warm_get = lookup
+    lookup
         .get(ProtoGetRequest {
             key: source.alpha.as_ref().to_vec(),
             tip: source.latest_location.as_u64(),
@@ -716,8 +716,8 @@ async fn test_unordered_current_endpoints_enforce_optional_sequence_minimum() {
             ..Default::default()
         })
         .await
-        .expect_err("cached unordered get must retain the caller floor");
-    let warm_many = lookup
+        .expect("cached unordered get uses the publication floor");
+    lookup
         .get_many(ProtoGetManyRequest {
             keys: vec![source.alpha.as_ref().to_vec(), missing.as_ref().to_vec()],
             tip: source.latest_location.as_u64(),
@@ -725,8 +725,8 @@ async fn test_unordered_current_endpoints_enforce_optional_sequence_minimum() {
             ..Default::default()
         })
         .await
-        .expect_err("cached unordered get_many must retain the caller floor");
-    let warm_current = current
+        .expect("cached unordered get_many uses the publication floor");
+    current
         .get_current_operation_range(
             ProtoGetCurrentOperationRangeRequest {
                 tip: source.latest_location.as_u64(),
@@ -738,12 +738,7 @@ async fn test_unordered_current_endpoints_enforce_optional_sequence_minimum() {
             &source.root,
         )
         .await
-        .expect_err("cached unordered current range must retain the caller floor");
-    assert_eq!(warm_get.code, ErrorCode::Aborted);
-    assert_eq!(warm_many.code, ErrorCode::Aborted);
-    assert!(
-        matches!(warm_current, QmdbError::Client(ref error) if error.rpc_code() == Some(ErrorCode::Aborted))
-    );
+        .expect("cached unordered current range uses the publication floor");
 }
 
 async fn aligned_commit_boundary<F: commonware_storage::merkle::Graftable + PartialEq>(

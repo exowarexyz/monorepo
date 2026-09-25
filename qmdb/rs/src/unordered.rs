@@ -316,15 +316,11 @@ where
         watermark: core::PublishedWatermark<F>,
         start_location: Location<F>,
         max_locations: u32,
-        min_sequence_number: Option<u64>,
     ) -> Result<
         CurrentOperationRangeProofResult<H::Digest, unordered::Operation<F, K, E>, N, F>,
         QmdbError,
     > {
-        let session = ReadSession::fixed(
-            self.store.clone(),
-            Some(watermark.sequence_number).max(min_sequence_number),
-        );
+        let session = ReadSession::fixed(self.store.clone(), Some(watermark.sequence_number));
         let watermark = watermark.location;
         core::require_batch_boundary(&session, watermark).await?;
         let end = crate::proof::resolve_range_bounds(watermark, start_location, max_locations)?;
@@ -381,7 +377,6 @@ where
             watermark,
             start_location,
             max_locations,
-            min_sequence_number,
         )
         .await
     }
@@ -390,12 +385,8 @@ where
         &self,
         watermark: core::PublishedWatermark<F>,
         key: Q,
-        min_sequence_number: Option<u64>,
     ) -> Result<RawKeyValueProof<H::Digest, unordered::Operation<F, K, E>, N, F>, QmdbError> {
-        let session = ReadSession::fixed(
-            self.store.clone(),
-            Some(watermark.sequence_number).max(min_sequence_number),
-        );
+        let session = ReadSession::fixed(self.store.clone(), Some(watermark.sequence_number));
         let watermark = watermark.location;
         core::require_batch_boundary(&session, watermark).await?;
 
@@ -462,7 +453,7 @@ where
         let watermark = self
             .resolve_watermark(watermark, min_sequence_number)
             .await?;
-        self.key_value_proof_raw_at_watermark::<N, _>(watermark, key, min_sequence_number)
+        self.key_value_proof_raw_at_watermark::<N, _>(watermark, key)
             .await
     }
 
@@ -509,11 +500,7 @@ where
                 return Err(QmdbError::DuplicateRequestedKey { key: key_bytes });
             }
             match self
-                .key_value_proof_raw_at_watermark::<N, _>(
-                    watermark,
-                    key.as_ref(),
-                    min_sequence_number,
-                )
+                .key_value_proof_raw_at_watermark::<N, _>(watermark, key.as_ref())
                 .await
             {
                 Ok(proof) => proofs.push(proof),

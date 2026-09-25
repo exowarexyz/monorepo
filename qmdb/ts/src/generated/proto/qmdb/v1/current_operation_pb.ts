@@ -39,7 +39,7 @@ export type GetCurrentOperationRangeRequest = Message<"qmdb.v1.GetCurrentOperati
   maxLocations: number;
 
   /**
-   * Minimum Store sequence required by reads used to build this proof.
+   * Minimum Store sequence for checking publication of the requested watermark.
    *
    * @generated from field: optional uint64 min_sequence_number = 4;
    */

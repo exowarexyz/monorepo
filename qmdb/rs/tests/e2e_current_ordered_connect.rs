@@ -277,7 +277,7 @@ impl RangeScan for RoutedCursor {
 struct RoutedCurrentQuery {
     rows: BTreeMap<Bytes, Bytes>,
     publication_key: Bytes,
-    routes: Mutex<VecDeque<bool>>,
+    routes: Mutex<VecDeque<u64>>,
     reads: Mutex<Vec<u64>>,
     publication_reads: Mutex<usize>,
 }
@@ -286,15 +286,19 @@ impl RoutedCurrentQuery {
     fn use_new_replica_for(&self, reads: usize) {
         let mut routes = self.routes.lock().unwrap();
         routes.clear();
-        routes.extend(std::iter::repeat_n(true, reads));
+        routes.extend(std::iter::repeat_n(101, reads));
+    }
+
+    fn use_late_replica(&self, reads: usize, sequence: u64) {
+        assert!(reads > 0);
+        let mut routes = self.routes.lock().unwrap();
+        routes.clear();
+        routes.extend(std::iter::repeat_n(101, reads - 1));
+        routes.push_back(sequence);
     }
 
     fn route(&self) -> u64 {
-        let sequence = if self.routes.lock().unwrap().pop_front().unwrap_or(false) {
-            101
-        } else {
-            100
-        };
+        let sequence = self.routes.lock().unwrap().pop_front().unwrap_or(100);
         self.reads.lock().unwrap().push(sequence);
         sequence
     }
@@ -727,7 +731,7 @@ async fn test_ordered_connect_get_range_verifies_complete_empty_and_partial_page
 }
 
 #[tokio::test]
-async fn test_current_endpoints_enforce_optional_sequence_minimum_after_cache_hit() {
+async fn test_current_endpoints_enforce_cold_minimum_and_use_cached_publication() {
     let store_client = common::local_store_client().await;
     let source = build_source_batch().await;
     commit_upload(&store_client, &source).await;
@@ -828,7 +832,7 @@ async fn test_current_endpoints_enforce_optional_sequence_minimum_after_cache_hi
             .expect("get_current_operation_range at available sequence");
     }
 
-    let get_error = lookup
+    lookup
         .get(ProtoGetRequest {
             key: encoded_key(b"alpha"),
             tip: source.latest_location.as_u64(),
@@ -836,8 +840,8 @@ async fn test_current_endpoints_enforce_optional_sequence_minimum_after_cache_hi
             ..Default::default()
         })
         .await
-        .expect_err("get must enforce an unavailable sequence minimum");
-    let get_many_error = lookup
+        .expect("cached get uses the publication floor");
+    lookup
         .get_many(ProtoGetManyRequest {
             keys: vec![encoded_key(b"alpha"), encoded_key(b"aardvark")],
             tip: source.latest_location.as_u64(),
@@ -845,8 +849,8 @@ async fn test_current_endpoints_enforce_optional_sequence_minimum_after_cache_hi
             ..Default::default()
         })
         .await
-        .expect_err("get_many must enforce an unavailable sequence minimum");
-    let range_error = ranges
+        .expect("cached get_many uses the publication floor");
+    ranges
         .get_range(ProtoGetRangeRequest {
             start_key: encoded_key(b"aardvark"),
             end_key: Some(encoded_key(b"c")),
@@ -856,8 +860,8 @@ async fn test_current_endpoints_enforce_optional_sequence_minimum_after_cache_hi
             ..Default::default()
         })
         .await
-        .expect_err("get_range must enforce an unavailable sequence minimum");
-    let current_error = current_operations
+        .expect("cached get_range uses the publication floor");
+    current_operations
         .get_current_operation_range(ProtoGetCurrentOperationRangeRequest {
             tip: source.latest_location.as_u64(),
             start_location: 0,
@@ -866,12 +870,7 @@ async fn test_current_endpoints_enforce_optional_sequence_minimum_after_cache_hi
             ..Default::default()
         })
         .await
-        .expect_err("get_current_operation_range must enforce an unavailable sequence minimum");
-
-    assert_eq!(get_error.code, connectrpc::ErrorCode::Aborted);
-    assert_eq!(get_many_error.code, connectrpc::ErrorCode::Aborted);
-    assert_eq!(range_error.code, connectrpc::ErrorCode::Aborted);
-    assert_eq!(current_error.code, connectrpc::ErrorCode::Aborted);
+        .expect("cached current operation range uses the publication floor");
 }
 
 #[tokio::test]
@@ -920,11 +919,16 @@ async fn test_current_endpoints_keep_floor_for_every_dependent_read() {
     lookup.get(get.clone()).await.expect("fresh get");
     let get_reads = query.read_count() - before;
     assert!(get_reads > 1);
-    query.use_new_replica_for(get_reads - 1);
+    query.use_late_replica(get_reads, 100);
+    lookup
+        .get(get.clone())
+        .await
+        .expect("late get read at the publication floor");
+    query.use_late_replica(get_reads, 99);
     let error = lookup
         .get(get)
         .await
-        .expect_err("late stale get read must retain the caller floor");
+        .expect_err("late get read below the publication floor");
     assert_eq!(error.code, connectrpc::ErrorCode::Aborted);
 
     let get_many = ProtoGetManyRequest {
@@ -941,11 +945,16 @@ async fn test_current_endpoints_keep_floor_for_every_dependent_read() {
         .expect("fresh get_many with exclusion proof");
     let get_many_reads = query.read_count() - before;
     assert!(get_many_reads > 1);
-    query.use_new_replica_for(get_many_reads - 1);
+    query.use_late_replica(get_many_reads, 100);
+    lookup
+        .get_many(get_many.clone())
+        .await
+        .expect("late get_many read at the publication floor");
+    query.use_late_replica(get_many_reads, 99);
     let error = lookup
         .get_many(get_many)
         .await
-        .expect_err("late stale get_many read must retain the caller floor");
+        .expect_err("late get_many read below the publication floor");
     assert_eq!(error.code, connectrpc::ErrorCode::Aborted);
 
     let range = ProtoGetRangeRequest {
@@ -964,11 +973,16 @@ async fn test_current_endpoints_keep_floor_for_every_dependent_read() {
         .expect("fresh range with entries and start exclusion");
     let range_reads = query.read_count() - before;
     assert!(range_reads > 1);
-    query.use_new_replica_for(range_reads - 1);
+    query.use_late_replica(range_reads, 100);
+    ranges
+        .get_range(range.clone())
+        .await
+        .expect("late range read at the publication floor");
+    query.use_late_replica(range_reads, 99);
     let error = ranges
         .get_range(range)
         .await
-        .expect_err("late stale range read must retain the caller floor");
+        .expect_err("late range read below the publication floor");
     assert_eq!(error.code, connectrpc::ErrorCode::Aborted);
 
     let current = ProtoGetCurrentOperationRangeRequest {
@@ -986,11 +1000,16 @@ async fn test_current_endpoints_keep_floor_for_every_dependent_read() {
         .expect("fresh current operation range");
     let current_reads = query.read_count() - before;
     assert!(current_reads > 1);
-    query.use_new_replica_for(current_reads - 1);
+    query.use_late_replica(current_reads, 100);
+    current_operations
+        .get_current_operation_range(current.clone())
+        .await
+        .expect("late current operation read at the publication floor");
+    query.use_late_replica(current_reads, 99);
     let error = current_operations
         .get_current_operation_range(current)
         .await
-        .expect_err("late stale current operation read must retain the caller floor");
+        .expect_err("late current operation read below the publication floor");
     assert_eq!(error.code, connectrpc::ErrorCode::Aborted);
 
     assert_eq!(

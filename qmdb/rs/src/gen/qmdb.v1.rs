@@ -1442,7 +1442,7 @@ pub struct GetRequest {
         skip_serializing_if = "::buffa::json_helpers::skip_if::is_zero_u64"
     )]
     pub tip: u64,
-    /// Minimum Store sequence required by reads used to build this proof.
+    /// Minimum Store sequence for checking publication of the requested watermark.
     ///
     /// Field 3: `min_sequence_number`
     #[serde(
@@ -1632,7 +1632,7 @@ pub struct GetManyRequest {
         skip_serializing_if = "::buffa::json_helpers::skip_if::is_zero_u64"
     )]
     pub tip: u64,
-    /// Minimum Store sequence required by reads used to build these proofs.
+    /// Minimum Store sequence for checking publication of the requested watermark.
     ///
     /// Field 3: `min_sequence_number`
     #[serde(
@@ -2122,7 +2122,7 @@ pub struct GetRangeRequest {
         skip_serializing_if = "::buffa::json_helpers::skip_if::is_zero_u64"
     )]
     pub tip: u64,
-    /// Minimum Store sequence required by reads used to build this proof.
+    /// Minimum Store sequence for checking publication of the requested watermark.
     ///
     /// Field 5: `min_sequence_number`
     #[serde(
@@ -3302,7 +3302,7 @@ pub struct GetCurrentOperationRangeRequest {
         skip_serializing_if = "::buffa::json_helpers::skip_if::is_zero_u32"
     )]
     pub max_locations: u32,
-    /// Minimum Store sequence required by reads used to build this proof.
+    /// Minimum Store sequence for checking publication of the requested watermark.
     ///
     /// Field 4: `min_sequence_number`
     #[serde(
@@ -6261,7 +6261,7 @@ pub mod __buffa {
             ///
             /// Field 2: `tip`
             pub tip: u64,
-            /// Minimum Store sequence required by reads used to build this proof.
+            /// Minimum Store sequence for checking publication of the requested watermark.
             ///
             /// Field 3: `min_sequence_number`
             pub min_sequence_number: ::core::option::Option<u64>,
@@ -6541,7 +6541,7 @@ pub mod __buffa {
             pub fn tip(&self) -> u64 {
                 self.0.reborrow().tip
             }
-            /// Minimum Store sequence required by reads used to build this proof.
+            /// Minimum Store sequence for checking publication of the requested watermark.
             ///
             /// Field 3: `min_sequence_number`
             #[must_use]
@@ -6591,7 +6591,7 @@ pub mod __buffa {
             ///
             /// Field 2: `tip`
             pub tip: u64,
-            /// Minimum Store sequence required by reads used to build these proofs.
+            /// Minimum Store sequence for checking publication of the requested watermark.
             ///
             /// Field 3: `min_sequence_number`
             pub min_sequence_number: ::core::option::Option<u64>,
@@ -6883,7 +6883,7 @@ pub mod __buffa {
             pub fn tip(&self) -> u64 {
                 self.0.reborrow().tip
             }
-            /// Minimum Store sequence required by reads used to build these proofs.
+            /// Minimum Store sequence for checking publication of the requested watermark.
             ///
             /// Field 3: `min_sequence_number`
             #[must_use]
@@ -7537,7 +7537,7 @@ pub mod __buffa {
             pub limit: u32,
             /// Field 4: `tip`
             pub tip: u64,
-            /// Minimum Store sequence required by reads used to build this proof.
+            /// Minimum Store sequence for checking publication of the requested watermark.
             ///
             /// Field 5: `min_sequence_number`
             pub min_sequence_number: ::core::option::Option<u64>,
@@ -7874,7 +7874,7 @@ pub mod __buffa {
             pub fn tip(&self) -> u64 {
                 self.0.reborrow().tip
             }
-            /// Minimum Store sequence required by reads used to build this proof.
+            /// Minimum Store sequence for checking publication of the requested watermark.
             ///
             /// Field 5: `min_sequence_number`
             #[must_use]
@@ -9747,7 +9747,7 @@ pub mod __buffa {
             pub start_location: u64,
             /// Field 3: `max_locations`
             pub max_locations: u32,
-            /// Minimum Store sequence required by reads used to build this proof.
+            /// Minimum Store sequence for checking publication of the requested watermark.
             ///
             /// Field 4: `min_sequence_number`
             pub min_sequence_number: ::core::option::Option<u64>,
@@ -10068,7 +10068,7 @@ pub mod __buffa {
             pub fn max_locations(&self) -> u32 {
                 self.0.reborrow().max_locations
             }
-            /// Minimum Store sequence required by reads used to build this proof.
+            /// Minimum Store sequence for checking publication of the requested watermark.
             ///
             /// Field 4: `min_sequence_number`
             #[must_use]
