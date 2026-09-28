@@ -107,7 +107,7 @@ test('upload validation rejects a finalization before ingest', async () => {
       return { sequenceNumber: 1n };
     },
   });
-  const simplex = new SimplexClient(client.store());
+  const simplex = new SimplexWriter(client.store());
 
   await assert.rejects(
     () => simplex.uploadFinalization({
@@ -138,7 +138,7 @@ test('valid finalization upload remains one Put and one receipt', async () => {
       return { sequenceNumber: 19n };
     },
   });
-  const simplex = new SimplexClient(client.store());
+  const simplex = new SimplexWriter(client.store());
 
   const receipt = await simplex.uploadFinalization({
     epoch: 0,
@@ -824,6 +824,18 @@ test('Simplex WASM verifier adapter propagates verifier errors', async () => {
     }),
     /finalization certificate verification failed/,
   );
+});
+
+test('certificate streams require a verifier before subscribing', async () => {
+  const store = new Client('http://127.0.0.1:1').store();
+  let subscribed = false;
+  store.subscribe = async function* () {
+    subscribed = true;
+  };
+  const simplex = new SimplexSubscriptions(store);
+  const stream = simplex.subscribeCertificates()[Symbol.asyncIterator]();
+  await assert.rejects(stream.next(), /requires a configured verifier/);
+  assert.equal(subscribed, false);
 });
 
 test('streams and verifies certificate entries', async () => {

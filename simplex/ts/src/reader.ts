@@ -1,8 +1,8 @@
 import { ReadSession, TraversalMode, type StoreClient } from '@exowarexyz/sdk';
 
+import { verifyNotarization, verifyFinalization } from './certificate-verification.js';
 import {
   blockByDigestKey,
-  copyBytes,
   decodeSimplexBlockData,
   finalizationByRoundKey,
   finalizedByHeightKey,
@@ -16,11 +16,7 @@ import {
   type SimplexBlockData,
   type U64Like,
 } from './encoding.js';
-import {
-  type SimplexCertificateVerifier,
-  type SimplexFinalizationVerificationContext,
-  type SimplexNotarizationVerificationContext,
-} from './verification.js';
+import type { SimplexCertificateVerifier } from './verification.js';
 
 export interface SimplexReaderOptions<TNotarization = unknown, TFinalization = unknown> {
   verifier?: SimplexCertificateVerifier<TNotarization, TFinalization>;
@@ -107,7 +103,7 @@ export class SimplexReader<TNotarization = unknown, TFinalization = unknown> {
     if (raw === null) {
       return null;
     }
-    return this.verifyNotarization(verifier, raw, {
+    return verifyNotarization(verifier, raw, {
       kind: 'notarization',
       source: 'get',
       key,
@@ -136,7 +132,7 @@ export class SimplexReader<TNotarization = unknown, TFinalization = unknown> {
     if (raw === null) {
       return null;
     }
-    return this.verifyFinalization(verifier, raw, {
+    return verifyFinalization(verifier, raw, {
       kind: 'finalization',
       index: 'round',
       source: 'get',
@@ -165,7 +161,7 @@ export class SimplexReader<TNotarization = unknown, TFinalization = unknown> {
     if (raw === null) {
       return null;
     }
-    return this.verifyFinalization(verifier, raw, {
+    return verifyFinalization(verifier, raw, {
       kind: 'finalization',
       index: 'height',
       source: 'get',
@@ -188,7 +184,7 @@ export class SimplexReader<TNotarization = unknown, TFinalization = unknown> {
     if (!row) {
       return null;
     }
-    return this.verifyFinalization(verifier, row.value, {
+    return verifyFinalization(verifier, row.value, {
       kind: 'finalization',
       index: 'latest',
       source: 'get',
@@ -230,29 +226,5 @@ export class SimplexReader<TNotarization = unknown, TFinalization = unknown> {
       throw new Error('simplex certificate read requires a configured verifier; use the *Raw method for unverified bytes');
     }
     return this.verifier;
-  }
-
-  private async verifyNotarization(
-    verifier: SimplexCertificateVerifier<TNotarization, TFinalization>,
-    bytes: Uint8Array,
-    context: SimplexNotarizationVerificationContext,
-  ): Promise<TNotarization> {
-    const verified = await verifier.verifyNotarization(copyBytes(bytes), context);
-    if (!verified) {
-      throw new Error('simplex notarization verification failed');
-    }
-    return verified;
-  }
-
-  private async verifyFinalization(
-    verifier: SimplexCertificateVerifier<TNotarization, TFinalization>,
-    bytes: Uint8Array,
-    context: SimplexFinalizationVerificationContext,
-  ): Promise<TFinalization> {
-    const verified = await verifier.verifyFinalization(copyBytes(bytes), context);
-    if (!verified) {
-      throw new Error('simplex finalization verification failed');
-    }
-    return verified;
   }
 }

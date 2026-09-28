@@ -1,16 +1,13 @@
 import { StoreClient, type StoreBatchEntry } from '@exowarexyz/sdk';
 
+import { verifyNotarization, verifyFinalization } from './certificate-verification.js';
 import {
   decodeSimplexBlockData,
   roundFromKey,
   SimplexRecordKind,
   u64FromKey,
 } from './encoding.js';
-import {
-  type SimplexCertificateVerifier,
-  type SimplexFinalizationVerificationContext,
-  type SimplexNotarizationVerificationContext,
-} from './verification.js';
+import type { SimplexCertificateVerifier } from './verification.js';
 
 export interface RawSimplexHeaderEntry {
   type: 'header';
@@ -177,8 +174,8 @@ export class SimplexSubscriptions<TNotarization = unknown, TFinalization = unkno
     options: SimplexCertificateStreamOptions = {},
     callOptions?: Parameters<StoreClient['subscribe']>[1],
   ): AsyncIterable<SimplexStreamBatch<VerifiedSimplexCertificateStreamEntry<TNotarization, TFinalization>>> {
+    const verifier = this.requireVerifier();
     for await (const batch of this.subscribeCertificatesRaw(options, callOptions)) {
-      const verifier = this.requireVerifier();
       const entries: VerifiedSimplexCertificateStreamEntry<TNotarization, TFinalization>[] = [];
       for (const entry of batch.entries) {
         if (entry.type === 'notarization') {
@@ -253,28 +250,4 @@ function decodeRawStreamEntry(key: Uint8Array, value: Uint8Array): RawSimplexStr
     default:
       throw new Error(`unknown simplex stream kind ${kind}`);
   }
-}
-
-async function verifyNotarization<TNotarization, TFinalization>(
-  verifier: SimplexCertificateVerifier<TNotarization, TFinalization>,
-  bytes: Uint8Array,
-  context: SimplexNotarizationVerificationContext,
-): Promise<TNotarization> {
-  const verified = await verifier.verifyNotarization(bytes.slice(), context);
-  if (!verified) {
-    throw new Error('simplex notarization verification failed');
-  }
-  return verified;
-}
-
-async function verifyFinalization<TNotarization, TFinalization>(
-  verifier: SimplexCertificateVerifier<TNotarization, TFinalization>,
-  bytes: Uint8Array,
-  context: SimplexFinalizationVerificationContext,
-): Promise<TFinalization> {
-  const verified = await verifier.verifyFinalization(bytes.slice(), context);
-  if (!verified) {
-    throw new Error('simplex finalization verification failed');
-  }
-  return verified;
 }
