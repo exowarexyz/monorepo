@@ -1819,7 +1819,6 @@ enum ReadPolicy {
 #[derive(Debug)]
 struct SessionState {
     sequence: Arc<ObservedSequence>,
-    init_gate: tokio::sync::Mutex<()>,
 }
 
 impl SessionState {
@@ -2814,7 +2813,6 @@ impl ReadSession {
             configured_floor,
             state: Arc::new(SessionState {
                 sequence: Arc::new(ObservedSequence::default()),
-                init_gate: tokio::sync::Mutex::new(()),
             }),
         }
     }
@@ -2858,14 +2856,14 @@ impl ReadSession {
     }
 
     pub async fn get(&self, key: &Key) -> Result<Option<Bytes>, ClientError> {
-        self.run_read(|sequence, observed_sequence| async move {
-            let (response, detail) = self.client.send_get(key, sequence).await?;
-            if let Some(detail) = detail {
-                observed_sequence.observe(detail.sequence_number);
-            }
-            Ok(response.value)
-        })
-        .await
+        let (response, detail) = self
+            .client
+            .send_get(key, self.min_sequence_number())
+            .await?;
+        if let Some(detail) = detail {
+            self.state.sequence.observe(detail.sequence_number);
+        }
+        Ok(response.value)
     }
 
     pub async fn get_many(
@@ -2873,11 +2871,14 @@ impl ReadSession {
         keys: &[&Key],
         batch_size: u32,
     ) -> Result<GetManyStream, ClientError> {
-        self.run_read(|sequence, observed_sequence| {
-            self.client
-                .get_many_internal(keys, batch_size, sequence, Some(observed_sequence))
-        })
-        .await
+        self.client
+            .get_many_internal(
+                keys,
+                batch_size,
+                self.min_sequence_number(),
+                Some(self.state.sequence.clone()),
+            )
+            .await
     }
 
     pub async fn range(
@@ -2897,24 +2898,10 @@ impl ReadSession {
         limit: usize,
         mode: RangeMode,
     ) -> Result<Vec<(Key, Bytes)>, ClientError> {
-        self.run_read(|sequence, observed_sequence| async move {
-            self.client
-                .range_stream_internal(
-                    start,
-                    end,
-                    limit,
-                    limit.max(1),
-                    mode,
-                    QueryStreamReadOptions {
-                        min_sequence_number: sequence,
-                        observed_sequence: Some(observed_sequence),
-                    },
-                )
-                .await?
-                .collect()
-                .await
-        })
-        .await
+        self.range_stream_with_mode(start, end, limit, limit.max(1), mode)
+            .await?
+            .collect()
+            .await
     }
 
     pub async fn range_stream(
@@ -2936,20 +2923,19 @@ impl ReadSession {
         batch_size: usize,
         mode: RangeMode,
     ) -> Result<RangeStream, ClientError> {
-        self.run_read(|sequence, observed_sequence| {
-            self.client.range_stream_internal(
+        self.client
+            .range_stream_internal(
                 start,
                 end,
                 limit,
                 batch_size,
                 mode,
                 QueryStreamReadOptions {
-                    min_sequence_number: sequence,
-                    observed_sequence: Some(observed_sequence),
+                    min_sequence_number: self.min_sequence_number(),
+                    observed_sequence: Some(self.state.sequence.clone()),
                 },
             )
-        })
-        .await
+            .await
     }
 
     pub async fn range_reduce(
@@ -2971,43 +2957,17 @@ impl ReadSession {
         end: &Key,
         request: &DomainRangeReduceRequest,
     ) -> Result<ReduceStream, ClientError> {
-        self.run_read(|sequence, observed_sequence| {
-            self.client.range_reduce_stream_internal(
+        self.client
+            .range_reduce_stream_internal(
                 start,
                 end,
                 request,
                 QueryStreamReadOptions {
-                    min_sequence_number: sequence,
-                    observed_sequence: Some(observed_sequence),
+                    min_sequence_number: self.min_sequence_number(),
+                    observed_sequence: Some(self.state.sequence.clone()),
                 },
             )
-        })
-        .await
-    }
-
-    async fn run_read<T, Call, Fut>(&self, call: Call) -> Result<T, ClientError>
-    where
-        Call: FnOnce(Option<u64>, Arc<ObservedSequence>) -> Fut,
-        Fut: std::future::Future<Output = Result<T, ClientError>>,
-    {
-        if let ReadPolicy::Fixed = self.policy {
-            return call(self.min_sequence_number(), self.state.sequence.clone()).await;
-        }
-
-        if let Some(sequence) = self.min_sequence_number() {
-            return call(Some(sequence), self.state.sequence.clone()).await;
-        }
-
-        let gate = self.state.init_gate.lock().await;
-
-        if let Some(sequence) = self.min_sequence_number() {
-            drop(gate);
-            return call(Some(sequence), self.state.sequence.clone()).await;
-        }
-
-        let result = call(None, self.state.sequence.clone()).await;
-        drop(gate);
-        result
+            .await
     }
 }
 
@@ -3444,6 +3404,8 @@ mod tests {
     struct SessionSequenceTransport {
         requested_floors: Arc<std::sync::Mutex<Vec<Option<u64>>>>,
         response_sequences: Arc<std::sync::Mutex<std::collections::VecDeque<Option<u64>>>>,
+        response_gates:
+            Arc<std::sync::Mutex<std::collections::VecDeque<tokio::sync::oneshot::Receiver<()>>>>,
     }
 
     impl SessionSequenceTransport {
@@ -3471,6 +3433,7 @@ mod tests {
         > {
             let requested_floors = self.requested_floors.clone();
             let response_sequences = self.response_sequences.clone();
+            let response_gates = self.response_gates.clone();
             Box::pin(async move {
                 let (parts, body) = request.into_parts();
                 let body = http_body_util::BodyExt::collect(body)
@@ -3519,6 +3482,10 @@ mod tests {
                     .unwrap()
                     .pop_front()
                     .unwrap_or(Some(40 + request_number));
+                let gate = response_gates.lock().unwrap().pop_front();
+                if let Some(gate) = gate {
+                    gate.await.unwrap();
+                }
                 let detail = response_sequence.map(|sequence_number| proto_query::Detail {
                     sequence_number,
                     ..Default::default()
@@ -3997,7 +3964,48 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn zero_observation_initializes_clones_without_reinitializing() {
+    async fn overlapping_reads_keep_their_floors_and_share_the_highest_observation() {
+        for initial_floor in [None, Some(0), Some(7)] {
+            let transport =
+                SessionSequenceTransport::with_response_sequences([Some(10), Some(20), Some(20)]);
+            let (release, pending) = tokio::sync::oneshot::channel();
+            transport.response_gates.lock().unwrap().push_back(pending);
+            let client = StoreClient::builder()
+                .url("http://query.internal")
+                .retry_config(RetryConfig::disabled())
+                .client_transport(transport.clone())
+                .build()
+                .unwrap()
+                .prefixed(StoreKeyPrefix::identity());
+            let session = ReadSession::monotonic(client, initial_floor);
+            let clone = session.clone();
+            let key = Bytes::from_static(b"key");
+            let first = session.get(&key);
+            tokio::pin!(first);
+            assert!(futures::poll!(&mut first).is_pending());
+            assert_eq!(
+                *transport.requested_floors.lock().unwrap(),
+                vec![initial_floor]
+            );
+
+            tokio::time::timeout(Duration::from_secs(1), clone.get(&key))
+                .await
+                .expect("overlapping read must proceed while the first is pending")
+                .unwrap();
+            assert_eq!(session.evaluated_sequence(), Some(20));
+            release.send(()).unwrap();
+            first.await.unwrap();
+            assert_eq!(clone.evaluated_sequence(), Some(20));
+            session.get(&key).await.unwrap();
+            assert_eq!(
+                *transport.requested_floors.lock().unwrap(),
+                vec![initial_floor, initial_floor, Some(20)],
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn zero_observation_is_shared_by_clones() {
         let transport = SessionSequenceTransport::with_response_sequences([Some(0), Some(5)]);
         let client = StoreClient::builder()
             .url("http://query.internal")

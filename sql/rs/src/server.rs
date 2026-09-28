@@ -47,7 +47,7 @@ use exoware_sdk::keys::Key;
 use exoware_sdk::kv_codec::{decode_stored_row, Utf8};
 use exoware_sdk::selector::Selector;
 use exoware_sdk::stream_filter::StreamFilter;
-use exoware_sdk::{PrefixedStoreClient, StreamSubscription, StreamSubscriptionFrame};
+use exoware_sdk::{PrefixedStoreClient, ReadSession, StreamSubscription, StreamSubscriptionFrame};
 use futures::stream::{self, Stream};
 use futures::{FutureExt, TryStreamExt};
 
@@ -56,29 +56,12 @@ use crate::codec::decode_primary_key_selected;
 use crate::filter::ScanAccessPlan;
 use crate::predicate::QueryPredicate;
 use crate::schema::KvSchema;
+use crate::session::with_read_session;
 use crate::types::{IndexLayout, ResolvedIndexSpec, TableModel};
 
 const MAX_CONNECTRPC_BODY_BYTES: usize = 256 * 1024 * 1024;
 
 type SubscribeStream = Pin<Box<dyn Stream<Item = Result<SubscribeResponse, ConnectError>> + Send>>;
-
-/// Build a query context whose Store scans share an optional minimum sequence.
-///
-/// All Store-backed providers in `ctx` must use the same Store as `store`.
-pub fn query_context_with_min_sequence(
-    ctx: &SessionContext,
-    store: &PrefixedStoreClient,
-    min_sequence_number: Option<u64>,
-) -> SessionContext {
-    let read_session = match min_sequence_number {
-        Some(sequence) => store.create_session_with_sequence(sequence),
-        None => store.create_session(),
-    };
-
-    let mut state = ctx.state();
-    state.config_mut().set_extension(Arc::new(read_session));
-    SessionContext::new_with_state(state)
-}
 
 /// One registered table's streaming-decode state.
 #[derive(Clone)]
@@ -165,7 +148,7 @@ impl SqlServer {
             );
             table_names.push(name.clone());
         }
-        let ctx = crate::session_context();
+        let ctx = crate::session_context(store.clone());
         schema.register_all(&ctx)?;
         Ok(Self {
             ctx: Arc::new(ctx),
@@ -179,16 +162,6 @@ impl SqlServer {
     /// without going through the connect API.
     pub fn session(&self) -> &SessionContext {
         &self.ctx
-    }
-
-    fn query_session(
-        &self,
-        min_sequence_number: Option<u64>,
-    ) -> (SessionContext, exoware_sdk::ReadSession) {
-        let ctx = query_context_with_min_sequence(&self.ctx, &self.store, min_sequence_number);
-        let read_session = crate::types::request_read_session(&ctx.copied_config(), &self.store)
-            .expect("query context must retain its Store read session");
-        (ctx, read_session)
     }
 
     #[allow(clippy::result_large_err)]
@@ -347,7 +320,8 @@ impl Service for SqlConnect {
         AssertUnwindSafe(async move {
             let sql = request.sql.to_string();
             let min_sequence_number = request.min_sequence_number;
-            let (ctx, read_session) = server.query_session(min_sequence_number);
+            let read_session = ReadSession::monotonic(server.store.clone(), min_sequence_number);
+            let ctx = with_read_session(&server.ctx, read_session.clone());
             let plan = ctx
                 .state()
                 .create_logical_plan(&sql)
@@ -391,11 +365,7 @@ impl Service for SqlConnect {
                 .map_err(|error| datafusion_error_to_connect(error.into()))?
                 .into();
 
-            // Queries that skip Store reads preserve the requested floor.
-            let sequence_number = read_session
-                .evaluated_sequence()
-                .or(min_sequence_number)
-                .unwrap_or_default();
+            let sequence_number = read_session.evaluated_sequence();
             connectrpc::Response::ok(QueryResponse {
                 results,
                 sequence_number,
@@ -647,6 +617,8 @@ fn client_error_to_connect(err: &exoware_sdk::ClientError) -> ConnectError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::TableColumnConfig;
+    use buffa::Message;
     use datafusion::arrow::array::{
         Array, ArrayRef, BinaryViewArray, Date32Array, Date64Array, Decimal256Array,
         FixedSizeBinaryBuilder, Int64Array, LargeListArray, StringArray, StringViewArray,
@@ -663,6 +635,49 @@ mod tests {
     use std::sync::Mutex;
 
     use futures::{FutureExt, StreamExt};
+
+    #[derive(Clone)]
+    struct ObservedRangeTransport {
+        requests: Arc<AtomicUsize>,
+        sequence_number: u64,
+    }
+
+    impl connectrpc::client::ClientTransport for ObservedRangeTransport {
+        type ResponseBody = axum::body::Body;
+        type Error = ConnectError;
+
+        fn send(
+            &self,
+            request: axum::http::Request<connectrpc::client::ClientBody>,
+        ) -> connectrpc::client::BoxFuture<
+            'static,
+            Result<axum::http::Response<Self::ResponseBody>, Self::Error>,
+        > {
+            let transport = self.clone();
+            Box::pin(async move {
+                assert_eq!(request.uri().path(), "/store.query.v1.Service/Range");
+                transport.requests.fetch_add(1, Ordering::SeqCst);
+                let response = exoware_sdk::query::RangeFrame {
+                    detail: Some(exoware_sdk::query::Detail {
+                        sequence_number: transport.sequence_number,
+                        ..Default::default()
+                    })
+                    .into(),
+                    ..Default::default()
+                };
+                let mut body = connectrpc::envelope::Envelope::data(response.encode_to_bytes())
+                    .encode()
+                    .to_vec();
+                body.extend_from_slice(
+                    &connectrpc::envelope::Envelope::end_stream(Bytes::from_static(b"{}")).encode(),
+                );
+                Ok(axum::http::Response::builder()
+                    .header("content-type", "application/connect+proto")
+                    .body(axum::body::Body::from(body))
+                    .unwrap())
+            })
+        }
+    }
 
     fn check_ipc_fixture(name: &str, ipc: &[u8]) {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -739,6 +754,69 @@ mod tests {
             HashMap::from([("source".to_string(), "native IPC fixture".to_string())]),
         );
         batch.with_schema(Arc::new(schema)).unwrap()
+    }
+
+    #[tokio::test]
+    async fn query_response_reports_only_observed_store_sequences() {
+        use crate::proto::sql::v1::ServiceClient;
+        use connectrpc::client::{ClientConfig, HttpClient};
+
+        for (observed_sequence, min_sequence_number) in [(0, Some(0)), (73, Some(61))] {
+            let transport = ObservedRangeTransport {
+                requests: Arc::new(AtomicUsize::new(0)),
+                sequence_number: observed_sequence,
+            };
+            let store = StoreClient::builder()
+                .url("http://observed-store.test")
+                .client_transport(transport.clone())
+                .retry_config(exoware_sdk::RetryConfig::disabled())
+                .build()
+                .unwrap();
+            let schema = KvSchema::new(PrefixedStoreClient::empty(store))
+                .table(
+                    "observed",
+                    vec![TableColumnConfig::new("id", DataType::Int64, false)],
+                    vec!["id".to_string()],
+                    vec![],
+                )
+                .unwrap();
+            let server = Arc::new(SqlServer::new(schema).unwrap());
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let app = axum::Router::new().fallback_service(sql_connect_stack(server));
+            let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+            let client = ServiceClient::new(
+                HttpClient::plaintext(),
+                ClientConfig::new(format!("http://{address}").parse().unwrap()),
+            );
+
+            for required_sequence in [None, Some(0), Some(u64::MAX)] {
+                let response = client
+                    .query(QueryRequest {
+                        sql: "SELECT 1".into(),
+                        min_sequence_number: required_sequence,
+                        ..Default::default()
+                    })
+                    .await
+                    .unwrap()
+                    .into_owned();
+                assert_eq!(response.sequence_number, None, "{required_sequence:?}");
+            }
+            assert_eq!(transport.requests.load(Ordering::SeqCst), 0);
+
+            let response = client
+                .query(QueryRequest {
+                    sql: "SELECT id FROM observed".into(),
+                    min_sequence_number,
+                    ..Default::default()
+                })
+                .await
+                .unwrap()
+                .into_owned();
+            assert_eq!(response.sequence_number, Some(observed_sequence));
+            assert_eq!(transport.requests.load(Ordering::SeqCst), 1);
+            task.abort();
+        }
     }
 
     #[tokio::test]
@@ -852,7 +930,6 @@ mod tests {
         use connectrpc::client::{ClientConfig, HttpClient};
         use datafusion::execution::memory_pool::{FairSpillPool, MemoryPool, PeakRecordingPool};
         use datafusion::execution::runtime_env::RuntimeEnvBuilder;
-        use datafusion::prelude::SessionConfig;
         use exoware_sdk::kv_codec::KvReducedValue;
         use exoware_sdk::{RangeReduceGroup, RangeReduceResponse, RangeReduceResult, StoreClient};
 
@@ -985,12 +1062,16 @@ mod tests {
             .with_memory_pool(pool.clone())
             .build_arc()
             .unwrap();
-        let ctx = SessionContext::new_with_state(
-            crate::session_state_builder()
-                .with_runtime_env(runtime)
-                .with_config(SessionConfig::new().with_target_partitions(1))
-                .build(),
-        );
+        let mut builder =
+            crate::session_state_builder(ReadSession::monotonic(server.store.clone(), None));
+        builder
+            .config()
+            .as_mut()
+            .unwrap()
+            .options_mut()
+            .execution
+            .target_partitions = 1;
+        let ctx = SessionContext::new_with_state(builder.with_runtime_env(runtime).build());
         ctx.register_table(
             "counts",
             server.session().table_provider("counts").await.unwrap(),
@@ -1141,23 +1222,6 @@ mod tests {
                 "{sql}"
             );
         }
-    }
-
-    #[test]
-    fn query_context_preserves_optional_store_sequence_floor() {
-        let ctx = SessionContext::new();
-        let store = PrefixedStoreClient::empty(StoreClient::new("http://localhost:10000"));
-        for floor in [None, Some(0), Some(41)] {
-            let query_ctx = query_context_with_min_sequence(&ctx, &store, floor);
-            let first =
-                crate::types::request_read_session(query_ctx.state().config(), &store).unwrap();
-            let second =
-                crate::types::request_read_session(query_ctx.state().config(), &store).unwrap();
-
-            assert_eq!(first.min_sequence_number(), floor);
-            assert_eq!(second.min_sequence_number(), floor);
-        }
-        assert!(crate::types::request_read_session(ctx.state().config(), &store).is_none());
     }
 
     enum ControlledEvent {

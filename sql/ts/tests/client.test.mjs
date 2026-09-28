@@ -103,8 +103,7 @@ test('queries forward optional sequence floors and call options', async (t) => {
   const results = await fixture('empty');
   for (const minSequenceNumber of [undefined, 0n, 9007199254740993n]) {
     await t.test(String(minSequenceNumber), async (t) => {
-      const sequenceNumber = minSequenceNumber ?? 0n;
-      const body = toBinary(QueryResponseSchema, create(QueryResponseSchema, { sequenceNumber, results }));
+      const body = toBinary(QueryResponseSchema, create(QueryResponseSchema, { results }));
       t.mock.method(globalThis, 'fetch', async (_input, init) => {
         const request = fromBinary(QueryRequestSchema, init.body);
         assert.equal(request.sql, 'SELECT fixture');
@@ -117,7 +116,7 @@ test('queries forward optional sequence floors and call options', async (t) => {
       const response = await client.query('SELECT fixture', minSequenceNumber, {
         headers: { 'x-query-test': 'forwarded' },
       });
-      assert.equal(response.sequenceNumber, sequenceNumber);
+      assert.equal(response.sequenceNumber, undefined);
       assert.equal(response.table.numRows, 0);
     });
   }

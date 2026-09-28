@@ -80,6 +80,7 @@ let reader = ReadSession::fixed(orders.clone(), Some(publication_sequence));
 
 `min_sequence_number()` reports the effective read floor, and `evaluated_sequence()`
 reports the highest observed sequence. Clones share observations.
+Each request uses the floor known when it starts; overlapping reads proceed independently.
 `None` means no requirement or observation; `Some(0)` is an explicit sequence zero.
 `with_min_sequence_number(sequence)` derives a reader with a stronger floor when
 needed, for either policy. It leaves the parent's configured floor unchanged and
