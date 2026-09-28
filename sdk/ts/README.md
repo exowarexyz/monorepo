@@ -80,6 +80,7 @@ const reader = ReadSession.fixed(orders, publicationSequence);
 
 `minSequenceNumber()` reports the effective read floor, and `evaluatedSequence()`
 reports the highest observed sequence. `clone()` shares observations.
+Each request uses the floor known when it starts; overlapping reads proceed independently.
 `undefined` means no requirement or observation; `0n` is an explicit sequence zero.
 `withMinSequenceNumber(sequence)` derives a reader with a stronger floor when
 needed, for either policy. It leaves the parent's configured floor unchanged and

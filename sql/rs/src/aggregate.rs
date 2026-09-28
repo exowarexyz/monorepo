@@ -656,47 +656,10 @@ fn execute_reduce_job(
     source: Arc<KvAggregateExec>,
     concurrency: usize,
 ) -> impl futures::Stream<Item = DataFusionResult<RecordBatch>> {
-    let mut ranges = job.job.ranges.clone().into_iter();
-    let first_range = if session.min_sequence_number().is_none() {
-        ranges.next()
-    } else {
-        None
-    };
-    let first_session = session.clone();
-    let first_job = job.clone();
-    let first_source = source.clone();
-    let first = futures::stream::iter(first_range)
-        .then(move |range| {
-            execute_reduce_range(
-                first_session.clone(),
-                first_job.clone(),
-                first_source.clone(),
-                range,
-            )
-        })
-        .try_flatten();
-
-    // Drain an unseeded range so concurrent reads inherit all its observations.
-    // A present minimum, including zero, needs no bootstrap read.
-    let remaining_count = ranges.len();
-    let remaining = futures::stream::once(async move {
-        let concurrency = if session.min_sequence_number().is_some() {
-            concurrency
-        } else {
-            1
-        };
-        Ok::<_, DataFusionError>(
-            futures::stream::iter(ranges)
-                .map(move |range| {
-                    execute_reduce_range(session.clone(), job.clone(), source.clone(), range)
-                })
-                .buffered(concurrency)
-                .try_flatten(),
-        )
-    })
-    .take(remaining_count)
-    .try_flatten();
-    first.chain(remaining)
+    futures::stream::iter(job.job.ranges.clone())
+        .map(move |range| execute_reduce_range(session.clone(), job.clone(), source.clone(), range))
+        .buffered(concurrency)
+        .try_flatten()
 }
 
 async fn execute_reduce_range(
@@ -2406,11 +2369,12 @@ mod tests {
             let actual = values(&self.store, sql).await.unwrap();
             assert_eq!(actual.as_slice(), expected, "{sql}");
             let requests = self.rows.reductions.lock().unwrap();
-            for (idx, request) in requests.iter().enumerate() {
-                assert_eq!(
-                    request.min_sequence_number,
-                    if idx == 0 { initial_floor } else { Some(7) },
-                    "shared read floor: {sql}"
+            let observed_floor = initial_floor.max(Some(7));
+            for request in requests.iter() {
+                assert!(
+                    request.min_sequence_number == initial_floor
+                        || request.min_sequence_number == observed_floor,
+                    "request floor must reflect observations available at its start: {sql}"
                 );
             }
             if !requests.is_empty() {
@@ -3951,7 +3915,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sql_final_cancellation_drops_current_and_prefetched_reduce_bodies() {
+    async fn unseeded_reduce_ranges_start_concurrently_and_cancel_cleanly() {
         use datafusion::execution::memory_pool::MemoryPool;
 
         type BodyReceiver =
@@ -4030,8 +3994,9 @@ mod tests {
             .await
             .unwrap();
         let model = &provider.downcast_ref::<KvTable>().unwrap().model;
+        let mut starts = Vec::new();
         let mut senders = Vec::new();
-        for bucket in [1, 3, 5] {
+        for bucket in [1, 3, 5, 7] {
             let start = crate::codec::encode_primary_key_bound(
                 model.table_prefix,
                 &[&CellValue::Int64(bucket)],
@@ -4045,9 +4010,10 @@ mod tests {
                 .lock()
                 .unwrap()
                 .insert(start.to_vec(), receiver);
+            starts.push(start.to_vec());
             senders.push(sender);
         }
-        let frame = |keys: std::ops::Range<i64>| {
+        let frame = |keys: std::ops::Range<i64>, sequence_number| {
             let (results, groups) = exoware_sdk::to_proto_reduce_response(RangeReduceResponse {
                 results: vec![],
                 groups: keys
@@ -4063,7 +4029,7 @@ mod tests {
                 results,
                 groups,
                 detail: Some(exoware_sdk::query::Detail {
-                    sequence_number: 7,
+                    sequence_number,
                     ..Default::default()
                 })
                 .into(),
@@ -4071,15 +4037,12 @@ mod tests {
             };
             connectrpc::envelope::Envelope::data(response.encode_to_bytes()).encode()
         };
-        senders[0].unbounded_send(Ok(frame(0..1))).unwrap();
-        senders[0]
-            .unbounded_send(Ok(connectrpc::envelope::Envelope::end_stream(
-                Bytes::from_static(b"{}"),
-            )
-            .encode()))
-            .unwrap();
-        let sql = "SELECT category, COUNT(*) FROM pending_ranges WHERE bucket IN (1, 3, 5, 7) GROUP BY category";
+        let sql = "SELECT category, COUNT(*) FROM pending_ranges WHERE bucket IN (1, 3, 5, 7, 9) GROUP BY category";
         let (context, pool) = aggregate_session_with_pool(&fixture, 4 * 1024 * 1024, 2);
+        let session = context
+            .copied_config()
+            .get_extension::<ReadSession>()
+            .unwrap();
         let plan = context
             .sql(sql)
             .await
@@ -4093,7 +4056,7 @@ mod tests {
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
             loop {
                 assert!(futures::poll!(output.next()).is_pending());
-                if transport.requests.lock().unwrap().len() == 3 {
+                if transport.requests.lock().unwrap().len() == 2 {
                     break;
                 }
                 tokio::task::yield_now().await;
@@ -4101,16 +4064,28 @@ mod tests {
         })
         .await
         .unwrap();
-        let first_peak = pool.peak_reserved();
-        assert!(
-            first_peak > 0,
-            "the seed range must reach Final aggregation before prefetch"
-        );
-        senders[1].unbounded_send(Ok(frame(1..1025))).unwrap();
+        {
+            let requests = transport.requests.lock().unwrap();
+            assert_eq!(requests.len(), 2);
+            assert!(requests
+                .iter()
+                .all(|request| request.min_sequence_number.is_none()));
+            assert!(requests
+                .iter()
+                .all(|request| starts[..2].contains(&request.start)));
+        }
+
+        senders[1].unbounded_send(Ok(frame(1..2, 11))).unwrap();
+        senders[1]
+            .unbounded_send(Ok(connectrpc::envelope::Envelope::end_stream(
+                Bytes::from_static(b"{}"),
+            )
+            .encode()))
+            .unwrap();
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
             loop {
                 assert!(futures::poll!(output.next()).is_pending());
-                if pool.peak_reserved() > first_peak {
+                if session.evaluated_sequence() == Some(11) {
                     break;
                 }
                 tokio::task::yield_now().await;
@@ -4118,21 +4093,60 @@ mod tests {
         })
         .await
         .unwrap();
-        assert!(!senders[1].is_closed());
+
+        senders[0].unbounded_send(Ok(frame(0..1, 7))).unwrap();
+        senders[0]
+            .unbounded_send(Ok(connectrpc::envelope::Envelope::end_stream(
+                Bytes::from_static(b"{}"),
+            )
+            .encode()))
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                assert!(futures::poll!(output.next()).is_pending());
+                if transport.requests.lock().unwrap().len() == 4 {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(session.evaluated_sequence(), Some(11));
+        {
+            let requests = transport.requests.lock().unwrap();
+            for start in &starts[2..] {
+                let request = requests
+                    .iter()
+                    .find(|request| request.start == *start)
+                    .expect("replacement ranges must start after the initial bodies complete");
+                assert_eq!(request.min_sequence_number, Some(11));
+            }
+        }
+
+        senders[2].unbounded_send(Ok(frame(2..1026, 13))).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                assert!(futures::poll!(output.next()).is_pending());
+                if session.evaluated_sequence() == Some(13) && pool.peak_reserved() > 0 {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
         assert!(!senders[2].is_closed());
+        assert!(!senders[3].is_closed());
         drop(output);
-        assert!(senders[1].is_closed(), "current range body must be dropped");
+        assert!(senders[2].is_closed(), "current range body must be dropped");
         assert!(
-            senders[2].is_closed(),
+            senders[3].is_closed(),
             "prefetched range body must be dropped"
         );
         assert_eq!(pool.reserved(), 0);
         let requests = transport.requests.lock().unwrap();
-        assert_eq!(requests.len(), 3, "the fourth range must not open");
-        assert_eq!(requests[0].min_sequence_number, None);
-        assert!(requests[1..]
-            .iter()
-            .all(|request| request.min_sequence_number == Some(7)));
+        assert_eq!(requests.len(), 4, "the fifth range must not open");
     }
 
     #[tokio::test]

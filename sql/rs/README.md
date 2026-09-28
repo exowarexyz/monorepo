@@ -267,9 +267,9 @@ expressions do not decode payloads. Native base-row scans skip undecodable
 payloads, so queries over corrupt data can behave differently across plans.
 Requests use one read session with a shared minimum sequence number.
 That freshness floor does not pin a snapshot.
-Jobs execute in order, and range results merge in order. Once the first range has
-established the read floor, later range requests can overlap up to the query's
-DataFusion `target_partitions` setting.
+Jobs execute in order, and range results merge in order. Range requests overlap
+up to the query's DataFusion `target_partitions` setting from the outset. Each
+request uses the read session's current minimum sequence.
 
 Unsupported shapes use the normal streaming scan and DataFusion execution.
 Reduce avoids transferring full input rows. Workers aggregate with DataFusion

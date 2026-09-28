@@ -654,21 +654,6 @@ async function* performReduce(
     }
 }
 
-async function prefetchFirst<T>(iterable: AsyncIterable<T>): Promise<AsyncIterable<T>> {
-    const iterator = iterable[Symbol.asyncIterator]();
-    const first = await iterator.next();
-    return (async function* () {
-        try {
-            if (!first.done) {
-                yield first.value;
-                yield* { [Symbol.asyncIterator]: () => iterator };
-            }
-        } finally {
-            await iterator.return?.();
-        }
-    })();
-}
-
 async function performGetBatch(
     client: Client,
     sequenceNumber: bigint,
@@ -728,8 +713,6 @@ type ReadPolicy = 'fixed' | 'monotonic';
 
 interface ReadSessionState {
     sequence: bigint | undefined;
-    initGate: Promise<void>;
-    gateLocked: boolean;
 }
 
 interface StoreClientBinding {
@@ -751,8 +734,6 @@ export class ReadSession {
     private configuredFloor: bigint | undefined;
     private state: ReadSessionState = {
         sequence: undefined,
-        initGate: Promise.resolve(),
-        gateLocked: false,
     };
 
     /** Create a monotonic session from the low-level client. */
@@ -845,45 +826,14 @@ export class ReadSession {
         }
     }
 
-    private async acquireInitGate(): Promise<() => void> {
-        while (this.state.gateLocked) {
-            await this.state.initGate;
-        }
-        this.state.gateLocked = true;
-        let release!: () => void;
-        this.state.initGate = new Promise<void>((resolve) => {
-            release = resolve;
-        });
-        return () => {
-            this.state.gateLocked = false;
-            release();
-        };
-    }
-
-    private async runRead<T>(
-        call: (sequence: bigint | undefined, detailObserver: DetailObserver) => Promise<T>,
-    ): Promise<T> {
-        const observer = (detail: Detail) => this.observe(detail);
-        const minimum = this.minSequenceNumber();
-        if (this.policy === 'fixed' || minimum !== undefined) {
-            return call(minimum, observer);
-        }
-
-        const release = await this.acquireInitGate();
-        try {
-            const rechecked = this.minSequenceNumber();
-            if (rechecked !== undefined) {
-                return await call(rechecked, observer);
-            }
-            return await call(undefined, observer);
-        } finally {
-            release();
-        }
-    }
-
     async get(key: Uint8Array, options?: CallOptions): Promise<GetResult | null> {
-        return this.runRead((sequence, detailObserver) =>
-            performGet(this.client, key, sequence, detailObserver, this.keyPrefix, options),
+        return performGet(
+            this.client,
+            key,
+            this.minSequenceNumber(),
+            (detail) => this.observe(detail),
+            this.keyPrefix,
+            options,
         );
     }
 
@@ -892,16 +842,14 @@ export class ReadSession {
         batchSize?: number,
         onChunk?: (entries: GetManyResultItem[]) => void,
     ): Promise<GetManyResultItem[]> {
-        return this.runRead((sequence, detailObserver) =>
-            performGetMany(
-                this.client,
-                keys,
-                batchSize,
-                onChunk,
-                sequence,
-                detailObserver,
-                this.keyPrefix,
-            ),
+        return performGetMany(
+            this.client,
+            keys,
+            batchSize,
+            onChunk,
+            this.minSequenceNumber(),
+            (detail) => this.observe(detail),
+            this.keyPrefix,
         );
     }
 
@@ -913,19 +861,17 @@ export class ReadSession {
         mode: TraversalMode = TraversalMode.FORWARD,
         options?: CallOptions,
     ): Promise<QueryResult> {
-        return this.runRead((sequence, detailObserver) =>
-            performQuery(
-                this.client,
-                start,
-                end,
-                limit,
-                batchSize,
-                mode,
-                sequence,
-                detailObserver,
-                this.keyPrefix,
-                options,
-            ),
+        return performQuery(
+            this.client,
+            start,
+            end,
+            limit,
+            batchSize,
+            mode,
+            this.minSequenceNumber(),
+            (detail) => this.observe(detail),
+            this.keyPrefix,
+            options,
         );
     }
 
@@ -934,20 +880,15 @@ export class ReadSession {
         end: Uint8Array,
         params: ReduceParams,
     ): AsyncIterable<ReduceResponse> {
-        yield* await this.runRead(async (sequence, detailObserver) => {
-            const stream = performReduce(
-                this.client,
-                start,
-                end,
-                params,
-                sequence,
-                detailObserver,
-                this.keyPrefix,
-            );
-            return sequence === undefined && this.policy === 'monotonic'
-                ? prefetchFirst(stream)
-                : stream;
-        });
+        yield* performReduce(
+            this.client,
+            start,
+            end,
+            params,
+            this.minSequenceNumber(),
+            (detail) => this.observe(detail),
+            this.keyPrefix,
+        );
     }
 
 }

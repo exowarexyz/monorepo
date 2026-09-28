@@ -1,4 +1,5 @@
 import { create } from '@bufbuild/protobuf';
+import { Code, ConnectError } from '@connectrpc/connect';
 import { Client } from '../src/client';
 import {
     GetManyFrameSchema,
@@ -303,40 +304,121 @@ test('getMany observes empty frames and publishes detail before onChunk', async 
     expect(getFloors).toEqual([8n]);
 });
 
-test('the initialization gate waits for the first reduce frame without buffering later frames', async () => {
-    let releaseFirst!: () => void;
-    const firstReady = new Promise<void>((resolve) => {
-        releaseFirst = resolve;
-    });
-    let secondPolled = false;
-    const getFloors: Array<bigint | undefined> = [];
+test('concurrent unseeded reads start together and observations only advance', async () => {
+    let releaseLower!: () => void;
+    let releaseHigher!: () => void;
+    const floors: Array<bigint | undefined> = [];
     const client = mockClient({
-        reduce: async function* () {
-            await firstReady;
-            yield create(ReduceResponseSchema, { detail: { sequenceNumber: 12n } });
-            secondPolled = true;
-            yield create(ReduceResponseSchema, { detail: { sequenceNumber: 14n } });
-        },
         get: async (request) => {
-            getFloors.push((request as GetRequest).minSequenceNumber);
+            const call = floors.length;
+            floors.push((request as GetRequest).minSequenceNumber);
+            if (call === 0) {
+                await new Promise<void>((resolve) => {
+                    releaseLower = resolve;
+                });
+                return create(GetResponseSchema, { detail: { sequenceNumber: 7n }, value: key });
+            }
+            if (call === 1) {
+                await new Promise<void>((resolve) => {
+                    releaseHigher = resolve;
+                });
+                return create(GetResponseSchema, { detail: { sequenceNumber: 12n }, value: key });
+            }
             return create(GetResponseSchema, { detail: { sequenceNumber: 12n }, value: key });
         },
     });
     const session = ReadSession.monotonic(new StoreClient(client));
     const clone = session.clone();
+    const lower = session.get(key);
+    const higher = clone.get(key);
+
+    expect(floors).toEqual([undefined, undefined]);
+    releaseHigher();
+    await higher;
+    expect(session.evaluatedSequence()).toBe(12n);
+
+    releaseLower();
+    await lower;
+    expect(session.evaluatedSequence()).toBe(12n);
+
+    await session.get(key);
+    expect(floors).toEqual([undefined, undefined, 12n]);
+    expect(session.evaluatedSequence()).toBe(12n);
+});
+
+test('canceling one concurrent unseeded read does not cancel or delay another', async () => {
+    let releaseSuccessful!: () => void;
+    const floors: Array<bigint | undefined> = [];
+    const client = mockClient({
+        get: async (request, options) => {
+            const call = floors.length;
+            floors.push((request as GetRequest).minSequenceNumber);
+            if (call === 0) {
+                await new Promise<void>((_resolve, reject) => {
+                    options?.signal?.addEventListener('abort', () => {
+                        reject(new ConnectError('canceled', Code.Canceled));
+                    });
+                });
+            }
+            await new Promise<void>((resolve) => {
+                releaseSuccessful = resolve;
+            });
+            return create(GetResponseSchema, { detail: { sequenceNumber: 15n }, value: key });
+        },
+    });
+    const session = ReadSession.monotonic(new StoreClient(client));
+    const controller = new AbortController();
+    const canceled = session.get(key, { signal: controller.signal });
+    const successful = session.clone().get(key);
+
+    expect(floors).toEqual([undefined, undefined]);
+    controller.abort();
+    await expect(canceled).rejects.toMatchObject({ connectCode: Code.Canceled });
+
+    releaseSuccessful();
+    await expect(successful).resolves.toEqual({ value: key });
+    expect(session.evaluatedSequence()).toBe(15n);
+});
+
+test('a pending first reduce frame does not block reads or prefetch later frames', async () => {
+    let releaseFirst!: () => void;
+    const firstReady = new Promise<void>((resolve) => {
+        releaseFirst = resolve;
+    });
+    let secondPolled = false;
+    let canceled = false;
+    const getFloors: Array<bigint | undefined> = [];
+    const client = mockClient({
+        reduce: async function* () {
+            try {
+                await firstReady;
+                yield create(ReduceResponseSchema, { detail: { sequenceNumber: 12n } });
+                secondPolled = true;
+                yield create(ReduceResponseSchema, { detail: { sequenceNumber: 14n } });
+            } finally {
+                canceled = true;
+            }
+        },
+        get: async (request) => {
+            getFloors.push((request as GetRequest).minSequenceNumber);
+            return create(GetResponseSchema, { detail: { sequenceNumber: 10n }, value: key });
+        },
+    });
+    const session = ReadSession.monotonic(new StoreClient(client));
     const stream = session.reduce(key, key, create(ReduceParamsSchema))[Symbol.asyncIterator]();
     const first = stream.next();
-    const dependent = clone.get(key);
 
-    await Promise.resolve();
-    expect(getFloors).toEqual([]);
-    releaseFirst();
-    expect((await first).value?.detail?.sequenceNumber).toBe(12n);
-    await dependent;
-    expect(getFloors).toEqual([12n]);
+    await expect(session.clone().get(key)).resolves.toEqual({ value: key });
+    expect(getFloors).toEqual([undefined]);
+    expect(session.evaluatedSequence()).toBe(10n);
     expect(secondPolled).toBe(false);
 
-    expect((await stream.next()).value?.detail?.sequenceNumber).toBe(14n);
-    expect(session.evaluatedSequence()).toBe(14n);
+    releaseFirst();
+    expect((await first).value?.detail?.sequenceNumber).toBe(12n);
+    expect(session.evaluatedSequence()).toBe(12n);
+    expect(secondPolled).toBe(false);
+
     await stream.return?.();
+    expect(secondPolled).toBe(false);
+    expect(canceled).toBe(true);
 });
