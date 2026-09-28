@@ -28,8 +28,8 @@ use exoware_sdk::prune_policy::{
 use exoware_sdk::selector::Selector;
 use exoware_sdk::stream_filter::StreamFilter;
 use exoware_sdk::{
-    PrefixedStoreClient, RetryConfig, StoreBatchUpload, StoreClient, StoreKeyPrefix,
-    StoreWriteBatch, StreamSubscription, StreamSubscriptionFrame,
+    PrefixedStoreClient, RetryConfig, StoreBatch, StoreBatchUpload, StoreClient, StoreKeyPrefix,
+    StoreWriteBatch, StreamSubscription,
 };
 use exoware_sql::proto::sql::v1::{
     ServiceClient as SqlServiceClient, SubscribeRequest as SqlSubscribeRequest,
@@ -142,10 +142,7 @@ fn all_logical_keys_filter() -> StreamFilter {
     }
 }
 
-async fn next_frame(
-    sub: &mut StreamSubscription,
-    timeout_ms: u64,
-) -> Option<StreamSubscriptionFrame> {
+async fn next_frame(sub: &mut StreamSubscription, timeout_ms: u64) -> Option<StoreBatch> {
     tokio::time::timeout(Duration::from_millis(timeout_ms), sub.next())
         .await
         .ok()
@@ -345,10 +342,12 @@ async fn test_raw_prefixes_support_atomic_batch_fetch_range_and_stream() {
         .await
         .expect("stream get a")
         .expect("batch a");
-    assert_eq!(stream_batch_a.len(), 2);
+    assert_eq!(stream_batch_a.entries.len(), 2);
+    assert_eq!(stream_batch_a.sequence_number, sequence);
     assert!(stream_batch_a
+        .entries
         .iter()
-        .all(|(key, _)| key == &shared || key == &only_a));
+        .all(|entry| entry.key == shared || entry.key == only_a));
 
     let frame_a = next_frame(&mut sub_a, 1_000).await.expect("stream frame a");
     let frame_b = next_frame(&mut sub_b, 1_000).await.expect("stream frame b");
@@ -644,15 +643,13 @@ async fn test_prepared_sql_and_qmdb_batches_commit_atomically_with_sequence_rece
             .unwrap(),
         Some(QmdbLocation::new(5))
     );
-    assert!(
-        qmdb_client
-            .stream()
-            .get(sequence)
-            .await
-            .expect("atomic qmdb stream")
-            .is_some(),
-        "QMDB rows must share the SQL Store sequence"
-    );
+    let qmdb_stream_batch = qmdb_client
+        .stream()
+        .get(sequence)
+        .await
+        .expect("atomic qmdb stream")
+        .expect("QMDB rows must share the SQL Store sequence");
+    assert_eq!(qmdb_stream_batch.sequence_number, sequence);
 
     assert_eq!(query_sql_items(sql_client).await, (vec![42], vec![4200]));
     let reader = keyless_reader(qmdb_client);

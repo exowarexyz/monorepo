@@ -163,6 +163,27 @@ fn filter() -> crate::stream_filter::StreamFilter {
 }
 
 #[tokio::test]
+async fn client_get_preserves_batch_sequence_and_filters_namespace() {
+    let transport = LogTransport::default();
+    let mut response = get_response(41);
+    response.entries.push(entry(b"other/key", b"excluded"));
+    transport.0.lock().unwrap().gets.push_back(Ok(response));
+
+    let batch = client(transport.clone())
+        .stream()
+        .get(0)
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(batch.sequence_number, 41);
+    assert_eq!(batch.entries.len(), 1);
+    assert_eq!(batch.entries[0].key, Bytes::from_static(b"key"));
+    assert_eq!(batch.entries[0].value, Bytes::from_static(b"value"));
+    assert_eq!(transport.0.lock().unwrap().get_requests, vec![0]);
+}
+
+#[tokio::test]
 async fn log_deliveries_observe_before_return_and_clones_apply_each_policy() {
     for monotonic in [false, true] {
         let transport = LogTransport::default();

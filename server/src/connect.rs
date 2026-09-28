@@ -2949,10 +2949,14 @@ mod tests {
         assert_eq!(error.put_too_large().unwrap().entries, MAX_PUT_ENTRIES + 1);
         drop(batch);
         let entries = client.stream().get(sequence).await.unwrap().unwrap();
-        assert_eq!(entries.len(), MAX_PUT_ENTRIES);
-        for (index, (actual_key, value)) in entries.iter().enumerate() {
-            assert_eq!(actual_key, &keys[index % 2]);
-            assert_eq!(value.as_ref(), if index % 2 == 0 { b"a" } else { b"b" });
+        assert_eq!(entries.sequence_number, sequence);
+        assert_eq!(entries.entries.len(), MAX_PUT_ENTRIES);
+        for (index, entry) in entries.entries.iter().enumerate() {
+            assert_eq!(entry.key, keys[index % 2]);
+            assert_eq!(
+                entry.value.as_ref(),
+                if index % 2 == 0 { b"a" } else { b"b" }
+            );
         }
         drop(entries);
         let json_client = exoware_proto::log::stream::v1::ServiceClient::new(
@@ -3039,7 +3043,12 @@ mod tests {
         }
         let sequence = batch.commit(client.client()).await.unwrap();
         let entries = client.stream().get(sequence).await.unwrap().unwrap();
-        assert_eq!(entries.as_slice(), batch.entries());
+        assert_eq!(entries.sequence_number, sequence);
+        assert_eq!(entries.entries.len(), batch.len());
+        for (actual, (key, value)) in entries.entries.iter().zip(batch.entries()) {
+            assert_eq!(actual.key, key.as_ref());
+            assert_eq!(&actual.value, value);
+        }
         drop(entries);
         let filter = StreamFilter {
             selectors: vec![Selector {

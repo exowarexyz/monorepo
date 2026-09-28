@@ -767,7 +767,7 @@ impl<D: commonware_cryptography::Digest, F: Graftable> BatchSubscribeStream<D, F
     fn poll_frame(
         &mut self,
         cx: &mut TaskContext<'_>,
-    ) -> Poll<Result<Option<exoware_sdk::StreamSubscriptionFrame>, ConnectError>> {
+    ) -> Poll<Result<Option<exoware_sdk::StoreBatch>, ConnectError>> {
         let next_fut = self.sub.next();
         tokio::pin!(next_fut);
         next_fut.as_mut().poll(cx).map_err(|err| {
@@ -779,10 +779,7 @@ impl<D: commonware_cryptography::Digest, F: Graftable> BatchSubscribeStream<D, F
         })
     }
 
-    fn ingest_frame(
-        &mut self,
-        frame: &exoware_sdk::StreamSubscriptionFrame,
-    ) -> Result<(), Box<ConnectError>> {
+    fn ingest_frame(&mut self, frame: &exoware_sdk::StoreBatch) -> Result<(), Box<ConnectError>> {
         let mut latest: Option<Location<F>> = None;
         let mut matched: Vec<(Location<F>, Vec<u8>)> = Vec::new();
         let needs_decode = self.key_matcher.is_some() || self.value_matcher.is_some();
@@ -1582,7 +1579,7 @@ mod authenticated_upload_subscription_tests {
     use super::*;
     use commonware_cryptography::sha256::Digest;
     use commonware_storage::merkle::mmr;
-    use exoware_sdk::{StreamSubscriptionEntry, StreamSubscriptionFrame};
+    use exoware_sdk::{StoreBatch, StoreBatchEntry};
 
     type F = mmr::Family;
 
@@ -1606,15 +1603,15 @@ mod authenticated_upload_subscription_tests {
         )
     }
 
-    fn operation(location: u64, value: &'static [u8]) -> StreamSubscriptionEntry {
-        StreamSubscriptionEntry {
+    fn operation(location: u64, value: &'static [u8]) -> StoreBatchEntry {
+        StoreBatchEntry {
             key: crate::codec::encode_operation_key(Location::<F>::new(location)),
             value: Bytes::from_static(value),
         }
     }
 
-    fn watermark(location: u64) -> StreamSubscriptionEntry {
-        StreamSubscriptionEntry {
+    fn watermark(location: u64) -> StoreBatchEntry {
+        StoreBatchEntry {
             key: crate::codec::encode_watermark_key(Location::<F>::new(location)),
             value: Bytes::new(),
         }
@@ -1624,13 +1621,13 @@ mod authenticated_upload_subscription_tests {
     async fn test_data_only_frames_wait_for_publication_and_keep_store_order() {
         let mut stream = stream().await;
         stream
-            .ingest_frame(&StreamSubscriptionFrame {
+            .ingest_frame(&StoreBatch {
                 sequence_number: 10,
                 entries: vec![operation(4, b"four"), operation(5, b"five")],
             })
             .expect("authenticated data frames must not require a presence row");
         stream
-            .ingest_frame(&StreamSubscriptionFrame {
+            .ingest_frame(&StoreBatch {
                 sequence_number: 11,
                 entries: vec![operation(0, b"zero"), operation(1, b"one")],
             })
@@ -1639,7 +1636,7 @@ mod authenticated_upload_subscription_tests {
         assert!(stream.ready.is_empty());
 
         stream
-            .ingest_frame(&StreamSubscriptionFrame {
+            .ingest_frame(&StoreBatch {
                 sequence_number: 12,
                 entries: vec![watermark(1)],
             })
@@ -1649,7 +1646,7 @@ mod authenticated_upload_subscription_tests {
             "an earlier Store frame must not be skipped"
         );
         stream
-            .ingest_frame(&StreamSubscriptionFrame {
+            .ingest_frame(&StoreBatch {
                 sequence_number: 13,
                 entries: vec![watermark(5)],
             })
@@ -1690,13 +1687,13 @@ mod authenticated_upload_subscription_tests {
         stream.value_matcher =
             CompiledFilters::compile(&[Filter::Exact(Bytes::from_static(b"keep"))]).unwrap();
         stream
-            .ingest_frame(&StreamSubscriptionFrame {
+            .ingest_frame(&StoreBatch {
                 sequence_number: 10,
                 entries: vec![operation(4, b"keep"), operation(5, b"skip")],
             })
             .unwrap();
         stream
-            .ingest_frame(&StreamSubscriptionFrame {
+            .ingest_frame(&StoreBatch {
                 sequence_number: 11,
                 entries: vec![watermark(4)],
             })
@@ -1706,7 +1703,7 @@ mod authenticated_upload_subscription_tests {
             "filtering must not lower the required publication tip"
         );
         stream
-            .ingest_frame(&StreamSubscriptionFrame {
+            .ingest_frame(&StoreBatch {
                 sequence_number: 12,
                 entries: vec![watermark(5)],
             })
@@ -1723,7 +1720,7 @@ mod authenticated_upload_subscription_tests {
     async fn test_overlapping_atomic_ranges_emit_each_operation_once() {
         let mut stream = stream().await;
         stream
-            .ingest_frame(&StreamSubscriptionFrame {
+            .ingest_frame(&StoreBatch {
                 sequence_number: 10,
                 entries: vec![
                     operation(0, b"zero"),
@@ -1747,7 +1744,7 @@ mod authenticated_upload_subscription_tests {
     async fn test_conflicting_operation_rows_in_one_frame_are_rejected() {
         let mut stream = stream().await;
         assert!(stream
-            .ingest_frame(&StreamSubscriptionFrame {
+            .ingest_frame(&StoreBatch {
                 sequence_number: 10,
                 entries: vec![
                     operation(0, b"zero"),
