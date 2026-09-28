@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { Client, ReadSession } from '@exowarexyz/sdk';
 import {
   bytesToHex,
   hexToBytes,
@@ -6,7 +7,8 @@ import {
   type SimplexIdentity,
   type SimplexPayload,
   type SimplexScheme,
-  SimplexClient,
+  SimplexReader,
+  SimplexSubscriptions,
   type SimplexBlockData,
   type SimplexCertificateVerifier,
   type VerifiedSimplexCertificate,
@@ -153,13 +155,19 @@ export function SimplexPanel({
     >
   >();
   const [verifierStatus, setVerifierStatus] = useState<'loading' | 'ready' | 'error'>('loading');
+  const store = useMemo(() => new Client(simplexUrl).store(), [simplexUrl]);
+  const session = useMemo(() => ReadSession.monotonic(store), [store]);
   const client = useMemo(
     () =>
-      new SimplexClient<
+      SimplexReader.withSession<
         VerifiedSimplexCertificate,
         VerifiedSimplexCertificate
-      >(simplexUrl, verifier ? { verifier } : {}),
-    [simplexUrl, verifier],
+      >(session, verifier ? { verifier } : {}),
+    [session, verifier],
+  );
+  const subscriptions = useMemo(
+    () => new SimplexSubscriptions(store, verifier ? { verifier } : {}),
+    [store, verifier],
   );
 
   const [isConnected, setIsConnected] = useState(false);
@@ -465,7 +473,7 @@ export function SimplexPanel({
         const since = sinceSequenceNumber.trim()
           ? BigInt(sinceSequenceNumber.trim())
           : undefined;
-        for await (const batch of client.subscribeCertificates(
+        for await (const batch of subscriptions.subscribeCertificates(
           {
             includeFinalizedByHeight: true,
             sinceSequenceNumber: since,

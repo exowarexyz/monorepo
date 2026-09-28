@@ -6,13 +6,13 @@ use commonware_cryptography::{Digest, PublicKey};
 use commonware_resolver::opaque;
 use commonware_runtime::{Clock, Metrics, Spawner};
 
-use crate::SimplexClient;
+use crate::SimplexReader;
 
 const RETRY_DELAY: Duration = Duration::from_millis(50);
 
 #[derive(Clone)]
 struct MarshalFetcher<D: Digest> {
-    client: SimplexClient,
+    reader: SimplexReader,
     _marker: PhantomData<D>,
 }
 
@@ -25,11 +25,11 @@ where
 
     async fn fetch(&self, key: Self::Key) -> Option<Self::Value> {
         let result = match key {
-            MarshalKey::Block(commitment) => self.client.get_header_raw(&commitment).await,
+            MarshalKey::Block(commitment) => self.reader.get_header_raw(&commitment).await,
             MarshalKey::Finalized { height } => {
-                self.client.get_finalized_by_height_raw(height).await
+                self.reader.get_finalized_by_height_raw(height).await
             }
-            MarshalKey::Notarized { round } => self.client.get_notarized_by_round_raw(round).await,
+            MarshalKey::Notarized { round } => self.reader.get_notarized_by_round_raw(round).await,
         };
         match result {
             Ok(value) => value,
@@ -45,7 +45,7 @@ where
 pub fn init_marshal_resolver<E, D, P>(
     context: E,
     mailbox_size: NonZeroUsize,
-    client: SimplexClient,
+    reader: SimplexReader,
 ) -> (
     handler::Receiver<D>,
     opaque::Resolver<MarshalKey<D>, Annotation, P>,
@@ -59,7 +59,7 @@ where
     let resolver = opaque::init(
         context.child("opaque"),
         MarshalFetcher {
-            client,
+            reader,
             _marker: PhantomData,
         },
         handler,
