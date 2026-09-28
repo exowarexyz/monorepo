@@ -88,6 +88,10 @@ does not count the requirement as an observation.
 
 `create_session()` and `create_session_with_sequence(...)` create monotonic sessions.
 
+`get_batch(sequence)` and `subscribe(filter, cursor)` also record the sequence of
+each returned log batch. Subsequent queries in a monotonic session require at least
+that sequence; fixed sessions record the observations and retain their configured floor.
+
 ## Examples
 
 `remote` writes a batch to a deployed endpoint and reads it back, pinning each read to the sequence it just committed:

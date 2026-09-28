@@ -86,6 +86,10 @@ Each request uses the floor known when it starts; overlapping reads proceed inde
 needed, for either policy. It leaves the parent's configured floor unchanged and
 does not count the requirement as an observation.
 
+Successful `getBatch(...)` results and batches yielded by `subscribe(...)` are
+observations. They advance subsequent query floors for monotonic sessions; fixed
+sessions record them and retain their configured floor.
+
 `createSession()` and `createSessionWithSequence(...)` create monotonic sessions.
 
 ## Generated TypeScript (`gen/ts`)
