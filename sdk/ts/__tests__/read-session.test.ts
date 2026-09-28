@@ -1,6 +1,13 @@
 import { create } from '@bufbuild/protobuf';
 import { Code, ConnectError } from '@connectrpc/connect';
 import { Client } from '../src/client';
+import { SelectorSchema } from '../src/gen/ts/common/v1/kv_pb';
+import {
+    GetResponseSchema as StreamGetResponseSchema,
+    SubscribeResponseSchema,
+    type GetRequest as StreamGetRequest,
+    type SubscribeRequest,
+} from '../src/gen/ts/log/v1/stream_pb';
 import {
     GetManyFrameSchema,
     GetResponseSchema,
@@ -14,8 +21,11 @@ import {
 } from '../src/gen/ts/store/v1/query_pb';
 import { ReadSession, StoreClient, StoreKeyPrefix } from '../src/store';
 
-function mockClient(query: Partial<Client['query']>): Client {
-    return { query, credential: 'absent' } as unknown as Client;
+function mockClient(
+    query: Partial<Client['query']>,
+    stream: Partial<Client['stream']> = {},
+): Client {
+    return { query, stream, credential: 'absent' } as unknown as Client;
 }
 
 const key = new Uint8Array([3]);
@@ -421,4 +431,275 @@ test('a pending first reduce frame does not block reads or prefetch later frames
     await stream.return?.();
     expect(secondPolled).toBe(false);
     expect(canceled).toBe(true);
+});
+
+test('getBatch observes successful replay without using the query floor as its cursor', async () => {
+    const requests: StreamGetRequest[] = [];
+    const getFloors: Array<bigint | undefined> = [];
+    const options = { signal: new AbortController().signal, timeoutMs: 1_234 };
+    let seenOptions: unknown;
+    const client = mockClient(
+        {
+            get: async (request) => {
+                getFloors.push((request as GetRequest).minSequenceNumber);
+                return create(GetResponseSchema, { detail: { sequenceNumber: 12n } });
+            },
+        },
+        {
+            get: async (request, callOptions) => {
+                requests.push(request as StreamGetRequest);
+                seenOptions = callOptions;
+                return create(StreamGetResponseSchema, {
+                    sequenceNumber: 3n,
+                    entries: [{ key, value: key }],
+                });
+            },
+        },
+    );
+    const session = ReadSession.monotonic(new StoreClient(client), 10n);
+    const clone = session.clone();
+
+    const batch = await clone.getBatch(3n, options);
+
+    expect(requests.map((request) => request.sequenceNumber)).toEqual([3n]);
+    expect(seenOptions).toBe(options);
+    expect(batch?.sequenceNumber).toBe(3n);
+    expect(session.evaluatedSequence()).toBe(3n);
+    expect(session.minSequenceNumber()).toBe(10n);
+
+    await session.get(key);
+    expect(getFloors).toEqual([10n]);
+    expect(session.evaluatedSequence()).toBe(12n);
+});
+
+test.each(['monotonic', 'fixed'] as const)(
+    '%s getBatch observations are shared and preserve policy',
+    async (policy) => {
+        const client = mockClient({}, {
+            get: async () => create(StreamGetResponseSchema, {
+                sequenceNumber: 8n,
+                entries: [{ key, value: key }],
+            }),
+        });
+        const store = new StoreClient(client);
+        const session = policy === 'monotonic'
+            ? ReadSession.monotonic(store, 4n)
+            : ReadSession.fixed(store, 4n);
+        const clone = session.clone();
+
+        await session.getBatch(8n);
+
+        expect(clone.evaluatedSequence()).toBe(8n);
+        expect(clone.minSequenceNumber()).toBe(policy === 'monotonic' ? 8n : 4n);
+    },
+);
+
+test.each(['getBatch', 'subscribe'] as const)(
+    '%s observes sequence zero on an unseeded monotonic session',
+    async (method) => {
+        const client = mockClient({}, {
+            get: async () => create(StreamGetResponseSchema, {
+                sequenceNumber: 0n,
+                entries: [{ key, value: key }],
+            }),
+            subscribe: () => (async function* () {
+                yield create(SubscribeResponseSchema, {
+                    sequenceNumber: 0n,
+                    entries: [{ key, value: key }],
+                });
+            })(),
+        });
+        const session = ReadSession.monotonic(new StoreClient(client));
+
+        expect(session.evaluatedSequence()).toBeUndefined();
+        expect(session.minSequenceNumber()).toBeUndefined();
+
+        if (method === 'getBatch') {
+            await session.getBatch(0n);
+        } else {
+            const stream = session.subscribe({ selectors: [create(SelectorSchema)] })[
+                Symbol.asyncIterator
+            ]();
+            await stream.next();
+            await stream.return?.();
+        }
+
+        expect(session.evaluatedSequence()).toBe(0n);
+        expect(session.minSequenceNumber()).toBe(0n);
+    },
+);
+
+test('getBatch does not observe missing batches or terminal errors', async () => {
+    let response = 0;
+    const client = mockClient({}, {
+        get: async () => {
+            response += 1;
+            throw response === 1
+                ? new ConnectError('missing', Code.NotFound)
+                : new ConnectError('failed', Code.Internal);
+        },
+    });
+    const session = ReadSession.monotonic(new StoreClient(client));
+
+    await expect(session.getBatch(1n)).resolves.toBeNull();
+    expect(session.evaluatedSequence()).toBeUndefined();
+    await expect(session.getBatch(2n)).rejects.toMatchObject({ status: 500 });
+    expect(session.evaluatedSequence()).toBeUndefined();
+});
+
+test('log reads do not wait for query initialization', async () => {
+    let releaseQuery!: () => void;
+    const queryBlocked = new Promise<void>((resolve) => {
+        releaseQuery = resolve;
+    });
+    let queryStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+        queryStarted = resolve;
+    });
+    const client = mockClient(
+        {
+            get: async () => {
+                queryStarted();
+                await queryBlocked;
+                return create(GetResponseSchema);
+            },
+        },
+        {
+            get: async () => create(StreamGetResponseSchema, {
+                sequenceNumber: 5n,
+                entries: [{ key, value: key }],
+            }),
+            subscribe: () => (async function* () {
+                yield create(SubscribeResponseSchema, {
+                    sequenceNumber: 6n,
+                    entries: [{ key, value: key }],
+                });
+            })(),
+        },
+    );
+    const session = ReadSession.monotonic(new StoreClient(client));
+    const pendingQuery = session.get(key);
+    await started;
+
+    await expect(session.getBatch(5n)).resolves.toMatchObject({ sequenceNumber: 5n });
+    const subscription = session.subscribe({ selectors: [create(SelectorSchema)] })[
+        Symbol.asyncIterator
+    ]();
+    await expect(subscription.next()).resolves.toMatchObject({
+        value: { sequenceNumber: 6n },
+    });
+
+    releaseQuery();
+    await pendingQuery;
+    await subscription.return?.();
+});
+
+test('subscribe observes emitted batches before yielding and ignores omitted frames', async () => {
+    const prefix = new StoreKeyPrefix(new Uint8Array([1]));
+    const physicalKey = new Uint8Array([1, 3]);
+    const requests: SubscribeRequest[] = [];
+    const getFloors: Array<bigint | undefined> = [];
+    const client = mockClient(
+        {
+            get: async (request) => {
+                getFloors.push((request as GetRequest).minSequenceNumber);
+                return create(GetResponseSchema, { detail: { sequenceNumber: 9n } });
+            },
+        },
+        {
+            subscribe: (request) => {
+                requests.push(request as SubscribeRequest);
+                return (async function* () {
+                    yield create(SubscribeResponseSchema, { sequenceNumber: 20n });
+                    yield create(SubscribeResponseSchema, {
+                        sequenceNumber: 21n,
+                        entries: [{ key: new Uint8Array([2, 3]), value: key }],
+                    });
+                    yield create(SubscribeResponseSchema, {
+                        sequenceNumber: 9n,
+                        entries: [{ key: physicalKey, value: key }],
+                    });
+                })();
+            },
+        },
+    );
+    const store = new StoreClient(client, prefix);
+    const session = ReadSession.monotonic(store, 7n);
+    const clone = session.clone();
+    const stream = session.subscribe({
+        selectors: [create(SelectorSchema)],
+        sinceSequenceNumber: 2n,
+    })[Symbol.asyncIterator]();
+
+    const first = await stream.next();
+
+    expect(first.value).toEqual({
+        sequenceNumber: 9n,
+        entries: [{ key, value: key }],
+    });
+    expect(requests[0].sinceSequenceNumber).toBe(2n);
+    expect(clone.evaluatedSequence()).toBe(9n);
+    expect(clone.minSequenceNumber()).toBe(9n);
+    await clone.get(key);
+    expect(getFloors).toEqual([9n]);
+    await stream.return?.();
+});
+
+test('subscribe forwards cancellation options and cleans up when the consumer stops', async () => {
+    const options = { signal: new AbortController().signal };
+    let seenOptions: unknown;
+    let cleanedUp = false;
+    const client = mockClient({}, {
+        subscribe: (_request, callOptions) => {
+            seenOptions = callOptions;
+            return (async function* () {
+                try {
+                    yield create(SubscribeResponseSchema, {
+                        sequenceNumber: 6n,
+                        entries: [{ key, value: key }],
+                    });
+                    await new Promise<never>(() => {});
+                } finally {
+                    cleanedUp = true;
+                }
+            })();
+        },
+    });
+    const session = ReadSession.fixed(new StoreClient(client), 4n);
+    const stream = session.subscribe({ selectors: [create(SelectorSchema)] }, options)[
+        Symbol.asyncIterator
+    ]();
+
+    expect((await stream.next()).value?.sequenceNumber).toBe(6n);
+    expect(session.evaluatedSequence()).toBe(6n);
+    expect(session.minSequenceNumber()).toBe(4n);
+    expect(seenOptions).toBe(options);
+    await stream.return?.();
+    expect(cleanedUp).toBe(true);
+});
+
+test('subscribe preserves prior observations when the stream ends with an error', async () => {
+    let cleanedUp = false;
+    const client = mockClient({}, {
+        subscribe: () => (async function* () {
+            try {
+                yield create(SubscribeResponseSchema, {
+                    sequenceNumber: 6n,
+                    entries: [{ key, value: key }],
+                });
+                throw new ConnectError('stream failed', Code.Internal);
+            } finally {
+                cleanedUp = true;
+            }
+        })(),
+    });
+    const session = ReadSession.monotonic(new StoreClient(client));
+    const stream = session.subscribe({ selectors: [create(SelectorSchema)] })[
+        Symbol.asyncIterator
+    ]();
+
+    expect((await stream.next()).value?.sequenceNumber).toBe(6n);
+    await expect(stream.next()).rejects.toMatchObject({ status: 500 });
+    expect(cleanedUp).toBe(true);
+    expect(session.evaluatedSequence()).toBe(6n);
 });

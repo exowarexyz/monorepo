@@ -47,7 +47,7 @@ use exoware_sdk::keys::Key;
 use exoware_sdk::kv_codec::{decode_stored_row, Utf8};
 use exoware_sdk::selector::Selector;
 use exoware_sdk::stream_filter::StreamFilter;
-use exoware_sdk::{PrefixedStoreClient, ReadSession, StreamSubscription, StreamSubscriptionFrame};
+use exoware_sdk::{PrefixedStoreClient, ReadSession, StoreBatch, StreamSubscription};
 use futures::stream::{self, Stream};
 use futures::{FutureExt, TryStreamExt};
 
@@ -379,12 +379,10 @@ impl Service for SqlConnect {
     }
 }
 
-type BatchEvaluator = Box<
-    dyn FnMut(StreamSubscriptionFrame) -> Result<Option<SubscribeResponse>, ConnectError> + Send,
->;
-type SubscriptionStream =
-    Pin<Box<dyn Stream<Item = Result<StreamSubscriptionFrame, ConnectError>> + Send>>;
-type SubscriptionEvent = Option<Result<StreamSubscriptionFrame, ConnectError>>;
+type BatchEvaluator =
+    Box<dyn FnMut(StoreBatch) -> Result<Option<SubscribeResponse>, ConnectError> + Send>;
+type SubscriptionStream = Pin<Box<dyn Stream<Item = Result<StoreBatch, ConnectError>> + Send>>;
+type SubscriptionEvent = Option<Result<StoreBatch, ConnectError>>;
 
 const MAX_FILTERED_FRAMES_PER_POLL: usize = 16;
 
@@ -402,7 +400,7 @@ impl BatchPredicateStream {
         predicate: Option<Arc<dyn PhysicalExpr>>,
     ) -> Self {
         let upstream = subscription_stream(sub);
-        let evaluator = move |frame: StreamSubscriptionFrame| {
+        let evaluator = move |frame: StoreBatch| {
             let sequence_number = frame.sequence_number;
             let entries = frame
                 .entries
@@ -416,10 +414,8 @@ impl BatchPredicateStream {
 
     fn with_evaluator<S, E>(upstream: S, evaluator: E) -> Self
     where
-        S: Stream<Item = Result<StreamSubscriptionFrame, ConnectError>> + Send + 'static,
-        E: FnMut(StreamSubscriptionFrame) -> Result<Option<SubscribeResponse>, ConnectError>
-            + Send
-            + 'static,
+        S: Stream<Item = Result<StoreBatch, ConnectError>> + Send + 'static,
+        E: FnMut(StoreBatch) -> Result<Option<SubscribeResponse>, ConnectError> + Send + 'static,
     {
         Self {
             upstream: Box::pin(upstream),
@@ -1236,7 +1232,7 @@ mod tests {
     }
 
     impl Stream for ControlledInput {
-        type Item = Result<StreamSubscriptionFrame, ConnectError>;
+        type Item = Result<StoreBatch, ConnectError>;
 
         fn poll_next(
             mut self: Pin<&mut Self>,
@@ -1245,7 +1241,7 @@ mod tests {
             self.polls.fetch_add(1, Ordering::SeqCst);
             match self.events.pop_front() {
                 Some(ControlledEvent::Frame(sequence_number)) => {
-                    std::task::Poll::Ready(Some(Ok(StreamSubscriptionFrame {
+                    std::task::Poll::Ready(Some(Ok(StoreBatch {
                         sequence_number,
                         entries: Vec::new(),
                     })))

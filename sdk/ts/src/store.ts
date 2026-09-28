@@ -776,7 +776,7 @@ export class ReadSession {
             : maxSequenceNumber(this.configuredFloor, this.state.sequence);
     }
 
-    /** Highest Store sequence reported by a read in this session. */
+    /** Highest Store sequence observed by this session. */
     evaluatedSequence(): bigint | undefined {
         return this.state.sequence;
     }
@@ -821,8 +821,12 @@ export class ReadSession {
     }
 
     private observe(detail: Detail): void {
-        if (this.state.sequence === undefined || detail.sequenceNumber > this.state.sequence) {
-            this.state.sequence = detail.sequenceNumber;
+        this.observeSequence(detail.sequenceNumber);
+    }
+
+    private observeSequence(sequenceNumber: bigint): void {
+        if (this.state.sequence === undefined || sequenceNumber > this.state.sequence) {
+            this.state.sequence = sequenceNumber;
         }
     }
 
@@ -891,6 +895,30 @@ export class ReadSession {
         );
     }
 
+    /** Read a historical batch. */
+    async getBatch(sequenceNumber: bigint, options?: CallOptions): Promise<StoreBatch | null> {
+        const batch = await performGetBatch(this.client, sequenceNumber, this.keyPrefix, options);
+        if (batch !== null) {
+            this.observeSequence(batch.sequenceNumber);
+        }
+        return batch;
+    }
+
+    /** Subscribe to log batches, recording each batch's sequence before delivery. */
+    async *subscribe(
+        filters: SubscribeFilters,
+        options?: CallOptions,
+    ): AsyncIterable<StoreBatch> {
+        for await (const batch of performSubscribe(
+            this.client,
+            filters,
+            this.keyPrefix,
+            options,
+        )) {
+            this.observeSequence(batch.sequenceNumber);
+            yield batch;
+        }
+    }
 }
 
 export class StoreClient {

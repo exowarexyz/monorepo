@@ -36,7 +36,7 @@ fn filter(family: u8) -> StreamFilter {
 async fn next_with_timeout(
     sub: &mut exoware_sdk::StreamSubscription,
     ms: u64,
-) -> Option<exoware_sdk::StreamSubscriptionFrame> {
+) -> Option<exoware_sdk::StoreBatch> {
     tokio::time::timeout(Duration::from_millis(ms), sub.next())
         .await
         .ok()
@@ -288,12 +288,13 @@ async fn get_batch_returns_whole_batch_unfiltered() {
         .await
         .expect("get_batch")
         .expect("some");
-    assert_eq!(got.len(), 2);
+    assert_eq!(got.sequence_number, seq);
+    assert_eq!(got.entries.len(), 2);
     // Order must match write order.
-    assert_eq!(got[0].0.as_ref(), ka.as_ref());
-    assert_eq!(got[0].1.as_ref(), b"1");
-    assert_eq!(got[1].0.as_ref(), kb.as_ref());
-    assert_eq!(got[1].1.as_ref(), b"2");
+    assert_eq!(got.entries[0].key.as_ref(), ka.as_ref());
+    assert_eq!(got.entries[0].value.as_ref(), b"1");
+    assert_eq!(got.entries[1].key.as_ref(), kb.as_ref());
+    assert_eq!(got.entries[1].value.as_ref(), b"2");
 }
 
 #[tokio::test]
@@ -360,8 +361,9 @@ async fn get_batch_after_keep_latest_evicts_old_but_keeps_new() {
         .await
         .expect("get last")
         .expect("some");
-    assert_eq!(last.len(), 1);
-    assert_eq!(last[0].1.as_ref(), &[b'v', 19]);
+    assert_eq!(last.sequence_number, *seqs.last().unwrap());
+    assert_eq!(last.entries.len(), 1);
+    assert_eq!(last.entries[0].value.as_ref(), &[b'v', 19]);
 }
 
 // ---------- slow subscriber is dropped without blocking ingest ----------

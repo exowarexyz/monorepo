@@ -16,6 +16,8 @@ pub mod kv_codec;
 pub mod limits;
 pub mod proto;
 pub mod prune_policy;
+#[cfg(test)]
+mod read_session_log_tests;
 pub mod retention;
 pub mod selector;
 pub mod stream_filter;
@@ -773,10 +775,7 @@ impl PrefixedStoreClient {
         Ok(sub)
     }
 
-    pub(crate) async fn stream_get(
-        &self,
-        sequence_number: u64,
-    ) -> Result<Option<Vec<(Key, Bytes)>>, ClientError> {
+    async fn get_batch(&self, sequence_number: u64) -> Result<Option<StoreBatch>, ClientError> {
         let Some(owned) = self.client.stream_get_physical(sequence_number).await? else {
             return Ok(None);
         };
@@ -786,9 +785,15 @@ impl PrefixedStoreClient {
             if !self.prefix.matches(&key) {
                 continue;
             }
-            out.push((self.decode_store_key(&key)?, entry.value));
+            out.push(StoreBatchEntry {
+                key: self.decode_store_key(&key)?,
+                value: entry.value,
+            });
         }
-        Ok(Some(out))
+        Ok(Some(StoreBatch {
+            sequence_number: owned.sequence_number,
+            entries: out,
+        }))
     }
 
     pub(crate) async fn set_retention(
@@ -1343,23 +1348,21 @@ impl RangeMode {
     }
 }
 
-/// One delivered (key, value) row from a stream subscription. The client
-/// reapplies its own filter if it needs to know which selector matched —
-/// the wire frame doesn't carry the index.
+/// One key/value entry in a Store batch.
 #[derive(Clone, Debug)]
-pub struct StreamSubscriptionEntry {
+pub struct StoreBatchEntry {
     pub key: Key,
     pub value: Bytes,
 }
 
-/// One atomic Put batch delivered to a subscriber.
+/// Entries from one atomic Store write, returned by a log read or subscription.
 #[derive(Clone, Debug)]
-pub struct StreamSubscriptionFrame {
+pub struct StoreBatch {
     pub sequence_number: u64,
-    pub entries: Vec<StreamSubscriptionEntry>,
+    pub entries: Vec<StoreBatchEntry>,
 }
 
-/// Async stream of `StreamSubscriptionFrame`. Backed by the generated
+/// Async stream of `StoreBatch`. Backed by the generated
 /// connectrpc server stream.
 pub struct StreamSubscription {
     stream: ConnectServerStream<
@@ -1368,6 +1371,7 @@ pub struct StreamSubscription {
     >,
     key_prefix: Option<StoreKeyPrefix>,
     credential: Credential,
+    observed_sequence: Option<Arc<ObservedSequence>>,
 }
 
 impl std::fmt::Debug for StreamSubscription {
@@ -1378,7 +1382,7 @@ impl std::fmt::Debug for StreamSubscription {
 
 impl StreamSubscription {
     /// Pull the next frame. `Ok(None)` = server closed the stream cleanly.
-    pub async fn next(&mut self) -> Result<Option<StreamSubscriptionFrame>, ClientError> {
+    pub async fn next(&mut self) -> Result<Option<StoreBatch>, ClientError> {
         loop {
             match self
                 .stream
@@ -1395,7 +1399,7 @@ impl StreamSubscription {
                             Some(prefix) => prefix.decode_key(&key)?,
                             None => key,
                         };
-                        entries.push(StreamSubscriptionEntry {
+                        entries.push(StoreBatchEntry {
                             key,
                             value: entry.value,
                         });
@@ -1403,10 +1407,13 @@ impl StreamSubscription {
                     if entries.is_empty() {
                         continue;
                     }
-                    let frame = StreamSubscriptionFrame {
+                    let frame = StoreBatch {
                         sequence_number: owned.sequence_number,
                         entries,
                     };
+                    if let Some(observed) = &self.observed_sequence {
+                        observed.observe(frame.sequence_number);
+                    }
                     return Ok(Some(frame));
                 }
                 None => {
@@ -1802,6 +1809,7 @@ pub struct ReadResult<T> {
 ///
 /// Streamed reads record response sequences as frames arrive, including the
 /// first frame fetched before the stream is returned to the caller.
+/// Log reads record successfully returned batches.
 #[derive(Clone, Debug)]
 pub struct ReadSession {
     client: PrefixedStoreClient,
@@ -2106,6 +2114,7 @@ impl StoreClient {
             stream,
             key_prefix: None,
             credential: self.credential,
+            observed_sequence: None,
         })
     }
 
@@ -2770,11 +2779,8 @@ impl<'a> Stream<'a> {
 
     /// `log.stream.v1.Service.Get` — `Ok(None)` collapses the server's
     /// `BATCH_EVICTED` / `BATCH_NOT_FOUND` error details.
-    pub async fn get(
-        &self,
-        sequence_number: u64,
-    ) -> Result<Option<Vec<(Key, Bytes)>>, ClientError> {
-        self.c.stream_get(sequence_number).await
+    pub async fn get(&self, sequence_number: u64) -> Result<Option<StoreBatch>, ClientError> {
+        self.c.get_batch(sequence_number).await
     }
 }
 
@@ -2853,6 +2859,26 @@ impl ReadSession {
             client,
             ..self.clone()
         }
+    }
+
+    /// Fetch a historical log batch and record its sequence before returning it.
+    pub async fn get_batch(&self, sequence_number: u64) -> Result<Option<StoreBatch>, ClientError> {
+        let batch = self.client.get_batch(sequence_number).await?;
+        if let Some(batch) = &batch {
+            self.state.sequence.observe(batch.sequence_number);
+        }
+        Ok(batch)
+    }
+
+    /// Subscribe to log batches, recording each sequence before delivery.
+    pub async fn subscribe(
+        &self,
+        filter: crate::stream_filter::StreamFilter,
+        since_sequence_number: Option<u64>,
+    ) -> Result<StreamSubscription, ClientError> {
+        let mut subscription = self.client.subscribe(filter, since_sequence_number).await?;
+        subscription.observed_sequence = Some(self.state.sequence.clone());
+        Ok(subscription)
     }
 
     pub async fn get(&self, key: &Key) -> Result<Option<Bytes>, ClientError> {
