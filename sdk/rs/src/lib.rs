@@ -120,9 +120,8 @@ impl<const N: usize> IntoStoreWriteValue for &[u8; N] {
 ///
 /// Request compression is disabled by default because large ingest batches are
 /// often CPU-bound before they are network-bound. Use [`Zstd`](Self::Zstd) when
-/// upload bandwidth matters more than client CPU, or [`Gzip`](Self::Gzip) when
-/// talking to a peer that only accepts gzip-compressed requests. Response
-/// decompression still follows [`PreferZstdHttpClient`] and the shared
+/// upload bandwidth matters more than client CPU. Response decompression
+/// still follows [`PreferZstdHttpClient`] and the shared
 /// [`connect_compression_registry`].
 ///
 /// To drive this from configuration or environment variables, map your setting to this enum and
@@ -134,8 +133,6 @@ pub enum ConnectRequestCompression {
     None,
     /// Zstd request compression using the library's native level semantics.
     Zstd { level: i32 },
-    /// `compress_requests("gzip")`.
-    Gzip,
 }
 
 impl ConnectRequestCompression {
@@ -143,7 +140,6 @@ impl ConnectRequestCompression {
         match self {
             Self::None => None,
             Self::Zstd { .. } => Some("zstd"),
-            Self::Gzip => Some("gzip"),
         }
     }
 }
@@ -3091,6 +3087,34 @@ mod tests {
         }
     }
 
+    #[derive(Clone, Debug)]
+    struct GzipResponseTransport {
+        body: Bytes,
+    }
+
+    impl connectrpc::client::ClientTransport for GzipResponseTransport {
+        type ResponseBody =
+            http_body_util::combinators::UnsyncBoxBody<Bytes, std::convert::Infallible>;
+        type Error = ConnectError;
+
+        fn send(
+            &self,
+            _request: http::Request<connectrpc::client::ClientBody>,
+        ) -> connectrpc::client::BoxFuture<
+            'static,
+            Result<http::Response<Self::ResponseBody>, Self::Error>,
+        > {
+            let body = self.body.clone();
+            Box::pin(async move {
+                Ok(http::Response::builder()
+                    .header(http::header::CONTENT_TYPE, "application/proto")
+                    .header(CONTENT_ENCODING, "gzip")
+                    .body(http_body_util::Full::new(body).boxed_unsync())
+                    .unwrap())
+            })
+        }
+    }
+
     #[derive(Clone, Copy, Debug)]
     struct StalledStreamTransport;
 
@@ -3631,6 +3655,24 @@ mod tests {
         }
     }
 
+    fn assert_single_zstd_put_frame(body: &[u8], protobuf: &[u8]) {
+        assert!(body.starts_with(&[0x28, 0xb5, 0x2f, 0xfd]));
+        assert_eq!(
+            zstd_safe::get_frame_content_size(body).unwrap(),
+            Some(protobuf.len() as u64)
+        );
+        assert_eq!(
+            zstd_safe::find_frame_compressed_size(body).unwrap(),
+            body.len()
+        );
+        let decoded = proto_connect_compression_registry()
+            .get("zstd")
+            .unwrap()
+            .decompress_with_limit(body, protobuf.len())
+            .unwrap();
+        assert_eq!(decoded.as_ref(), protobuf);
+    }
+
     #[tokio::test]
     async fn request_compression_controls_put_body() {
         let key = Bytes::from_static(b"key");
@@ -3652,7 +3694,6 @@ mod tests {
 
         for compression in [
             ConnectRequestCompression::None,
-            ConnectRequestCompression::Gzip,
             ConnectRequestCompression::Zstd { level: 0 },
             ConnectRequestCompression::Zstd { level: 3 },
             ConnectRequestCompression::Zstd { level: -1 },
@@ -3669,9 +3710,6 @@ mod tests {
 
             let expected = match compression {
                 ConnectRequestCompression::None => Bytes::copy_from_slice(&encoded),
-                ConnectRequestCompression::Gzip => {
-                    GzipProvider::default().compress(&encoded).unwrap()
-                }
                 ConnectRequestCompression::Zstd { level: -1 } => fast.clone(),
                 ConnectRequestCompression::Zstd { .. } => default.clone(),
             };
@@ -3687,6 +3725,9 @@ mod tests {
             );
             let body = transport.bodies.lock().unwrap()[0].clone();
             assert_eq!(body, expected);
+            if matches!(compression, ConnectRequestCompression::Zstd { .. }) {
+                assert_single_zstd_put_frame(&body, &encoded);
+            }
             let decoded = match compression.wire_name() {
                 Some(name) => proto_connect_compression_registry()
                     .get(name)
@@ -3716,6 +3757,69 @@ mod tests {
             assert!(!transport.requests()[1].1.contains_key(CONTENT_ENCODING));
             assert!(transport.bodies.lock().unwrap()[1].is_empty());
         }
+    }
+
+    #[tokio::test]
+    async fn small_put_uses_uncompressed_protobuf_at_zstd_threshold() {
+        let key = Bytes::from_static(b"key");
+
+        for (value_len, protobuf_len, compressed) in [(1012, 1023, false), (1013, 1024, true)] {
+            let value = vec![b'a'; value_len];
+            let encoded = ProtoPutRequest {
+                kvs: vec![exoware_proto::common::Entry {
+                    key: key.to_vec(),
+                    value: Bytes::copy_from_slice(&value),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }
+            .encode_to_vec();
+            assert_eq!(encoded.len(), protobuf_len);
+
+            let transport = RecordingTransport::default();
+            let client = StoreClient::builder()
+                .url("http://ingest.internal")
+                .connect_request_compression(ConnectRequestCompression::Zstd { level: 3 })
+                .retry_config(RetryConfig::disabled())
+                .client_transport(transport.clone())
+                .build()
+                .unwrap();
+            client.put_physical(&[(&key, &value)]).await.unwrap_err();
+
+            let requests = transport.requests();
+            assert_eq!(requests.len(), 1);
+            let body = transport.bodies.lock().unwrap()[0].clone();
+            if compressed {
+                assert_eq!(requests[0].1.get(CONTENT_ENCODING).unwrap(), "zstd");
+                assert_single_zstd_put_frame(&body, &encoded);
+            } else {
+                assert!(!requests[0].1.contains_key(CONTENT_ENCODING));
+                assert_eq!(body.as_ref(), encoded.as_slice());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn zstd_put_accepts_gzip_response() {
+        let response = exoware_proto::log::ingest::v1::PutResponse {
+            sequence_number: 42,
+            ..Default::default()
+        }
+        .encode_to_vec();
+        let transport = GzipResponseTransport {
+            body: GzipProvider::default().compress(&response).unwrap(),
+        };
+        let client = StoreClient::builder()
+            .url("http://ingest.internal")
+            .connect_request_compression(ConnectRequestCompression::Zstd { level: 3 })
+            .retry_config(RetryConfig::disabled())
+            .client_transport(transport)
+            .build()
+            .unwrap();
+        let key = Bytes::from_static(b"key");
+        let value = vec![b'a'; 1024];
+
+        assert_eq!(client.put_physical(&[(&key, &value)]).await.unwrap(), 42);
     }
 
     #[tokio::test]

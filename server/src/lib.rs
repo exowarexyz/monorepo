@@ -19,8 +19,8 @@ pub use connect::{
     MAX_CONNECTRPC_MESSAGE_BYTES,
 };
 pub use engine::{
-    FilteredBatch, Ingest, IngestError, Log, LogBatch, Prune, PutCodec, PutPlan, Query, QueryExtra,
-    QueryResult, RangeScan, RangeScanBatch, RangeScanResult, Retention, Sequence, StoreEngine,
+    FilteredBatch, Ingest, IngestError, Log, LogBatch, Prune, Query, QueryExtra, QueryResult,
+    RangeScan, RangeScanBatch, RangeScanResult, Retention, Sequence, StoreEngine,
 };
 pub use put_wire::{decode_entry_with_budget, Field, PutEntryCursor, PutParseError, UnknownBudget};
 pub use reduce::RangeError;

@@ -1,4 +1,5 @@
-import { execSync, spawn } from 'child_process';
+import { execSync, spawn, type ChildProcess } from 'child_process';
+import { createConnection } from 'net';
 import * as path from 'path';
 import * as fs from 'fs';
 import * as os from 'os';
@@ -22,6 +23,29 @@ function cargoTargetDir(repoRoot: string): string {
     } catch {
         return path.join(repoRoot, 'target');
     }
+}
+
+async function waitForSimulator(port: number, simulatorProcess: ChildProcess): Promise<void> {
+    const deadline = Date.now() + 30_000;
+    while (Date.now() < deadline) {
+        if (simulatorProcess.exitCode !== null || simulatorProcess.signalCode !== null) {
+            throw new Error('Simulator exited before accepting connections');
+        }
+        try {
+            await new Promise<void>((resolve, reject) => {
+                const socket = createConnection({ host: '127.0.0.1', port });
+                socket.once('connect', () => {
+                    socket.destroy();
+                    resolve();
+                });
+                socket.once('error', reject);
+            });
+            return;
+        } catch {
+            await new Promise((resolve) => setTimeout(resolve, 100));
+        }
+    }
+    throw new Error('Simulator did not start listening within 30 seconds');
 }
 
 const setup = async () => {
@@ -55,9 +79,8 @@ const setup = async () => {
     };
 
     fs.writeFileSync(configFile, JSON.stringify(config));
+    await waitForSimulator(port, simulatorProcess);
     console.log('Simulator started.');
-
-    await new Promise((resolve) => setTimeout(resolve, 2000));
 };
 
 export default setup;

@@ -19,11 +19,9 @@ import {
     normalizePutOptions,
     putEncodedLen,
     putEntryEncodedLen,
-    putMessageEncodedLen,
     validatePut,
     validatePutEntry,
     type PutBatchOptions,
-    type PutEncoding,
 } from './limits.js';
 import {
     GetManyRequestSchema,
@@ -224,8 +222,8 @@ export class StoreWriteBatch {
         this.kvs.length = 0;
     }
 
-    encodedLen(encoding: PutEncoding = 'json'): number {
-        return putEncodedLen(this.kvs, encoding);
+    encodedLen(): number {
+        return putEncodedLen(this.kvs);
     }
 
     validate(options: PutBatchOptions = {}): void {
@@ -240,13 +238,12 @@ export class StoreWriteBatch {
         let entryBytes = 0;
         for (const [index, entry] of this.kvs.entries()) {
             validatePutEntry(entry, index, limits.maxValueLen);
-            const length = putEntryEncodedLen(entry, limits.encoding);
-            const single = putMessageEncodedLen(length, 1, limits.encoding);
-            if (single > limits.maxEncodedBytes) {
-                throw new RangeError(`Put entry ${index} encoded size ${single} exceeds ${limits.maxEncodedBytes}`);
+            const length = putEntryEncodedLen(entry);
+            if (length > limits.maxEncodedBytes) {
+                throw new RangeError(`Put entry ${index} encoded size ${length} exceeds ${limits.maxEncodedBytes}`);
             }
             if (batch.length === limits.maxEntries
-                || putMessageEncodedLen(entryBytes + length, batch.length + 1, limits.encoding) > limits.maxEncodedBytes) {
+                || entryBytes + length > limits.maxEncodedBytes) {
                 batches.push(batch);
                 batch = new StoreWriteBatch();
                 entryBytes = 0;
@@ -953,7 +950,7 @@ export class StoreClient {
         return ReadSession.monotonic(this, sequence);
     }
 
-    /** Limits and encoding used by this client's Put validation and batch splitting. */
+    /** Limits used by this client's Put validation and batch splitting. */
     get putOptions(): Readonly<Required<PutBatchOptions>> {
         return this.client.putOptions;
     }

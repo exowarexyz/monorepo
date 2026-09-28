@@ -27,6 +27,12 @@ snapshot sequence before returning data. If the snapshot is below that floor,
 return `consistency_not_ready_error(required, current)` to preserve the standard
 error details and standard retry hint. Both helpers are exported from the crate root.
 
+The shared Put adapter accepts protobuf requests and passes a complete validated
+batch to `Ingest::put_batch`. JSON Put requests are rejected. Other services
+continue to support JSON. Custom ingest handlers can reuse `PutEntryCursor`,
+`UnknownBudget`, `decode_entry_with_budget`, and the validation and error helpers
+without using the complete-batch adapter.
+
 ## Protocol limits
 
 See the [language-independent protocol contract](../proto/README.md) for the
