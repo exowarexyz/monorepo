@@ -4,11 +4,13 @@
 //! the same operation history, so repeated operation and Merkle node keys have identical values.
 //! The caller owns publication of the durable contiguous prefix through [`stage_watermark`].
 
+use std::collections::BTreeSet;
+
 use commonware_codec::{Codec, Encode};
 use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::Strategy;
 use commonware_storage::{
-    merkle::{Family, Graftable, Location, Position, Proof},
+    merkle::{Family, Graftable, Location, Position},
     qmdb::{
         any::{
             operation::{Operation as AnyOperation, Update},
@@ -32,14 +34,16 @@ use crate::{
     CurrentBoundaryState, ProofKind, QmdbError,
 };
 
-/// An operation range ending at the leaf count committed by its proof.
+/// An operation range and prefix frontier for authentication against a trusted root.
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[must_use]
 pub struct AuthenticatedOperationRange<'a, D: Digest, F: Family> {
     /// Inclusive operation location where the range starts.
     pub start_location: Location<F>,
-    /// Range proof whose leaves determine the exclusive range end.
-    pub proof: &'a Proof<F, D>,
+    /// Exclusive operation location committed by the expected root.
+    pub end_location: Location<F>,
+    /// Canonical inactive peak count determined by the final commit floor.
+    pub inactive_peaks: usize,
     /// Prefix frontier in [`Family::nodes_to_pin`] order.
     pub pinned_nodes: &'a [D],
     /// Canonical operation encodings in location order.
@@ -93,12 +97,22 @@ where
 #[must_use]
 pub struct PreparedAuthenticatedRange<D: Digest, F: Family> {
     rows: Vec<(Key, Vec<u8>)>,
+    pinned_nodes: Vec<(Position<F>, D)>,
     start_location: Location<F>,
     latest_location: Location<F>,
     ops_root: D,
 }
 
 impl<D: Digest, F: Family> PreparedAuthenticatedRange<D, F> {
+    /// Exclude supplied pins at these positions from staging, without omitting reconstructed nodes.
+    /// Omitted pins must be durable before publication and retained for proofs, as described in
+    /// the [pin omission contract](https://github.com/exowarexyz/monorepo/tree/main/qmdb/rs#pin-omission).
+    pub fn without_pins_at(mut self, positions: &BTreeSet<Position<F>>) -> Self {
+        self.pinned_nodes
+            .retain(|(position, _)| !positions.contains(position));
+        self
+    }
+
     /// Inclusive first operation location in this range.
     pub const fn start_location(&self) -> Location<F> {
         self.start_location
@@ -161,10 +175,11 @@ impl<D: Digest, F: Graftable> PreparedAuthenticatedRange<D, F> {
 
 /// Verify an operation range and prepare its operation, index, and Merkle node rows.
 ///
-/// `expected_root` must be trusted independently of the supplied proof and operations. The range
-/// must end at a commit whose floor determines the proof's canonical inactive peak count. Earlier
+/// `expected_root` must be trusted independently of the supplied range and pins. The range
+/// must end at a commit whose floor determines the canonical inactive peak count. Earlier
 /// commits are accepted, allowing bootstrap, prefixes, and overlapping uploads to use this API.
 /// The operation codec configuration must match the originating QMDB variant.
+/// Reconstruction authenticates the range and pins before operation decoding.
 pub fn prepare_authenticated_range<F, H, Op, S>(
     authenticated: &AuthenticatedOperationRange<'_, H::Digest, F>,
     expected_root: &H::Digest,
@@ -178,7 +193,7 @@ where
     S: Strategy,
 {
     let start = authenticated.start_location;
-    let end = authenticated.proof.leaves;
+    let end = authenticated.end_location;
     if !start.is_valid_index() || !end.is_valid() || start >= end {
         return Err(QmdbError::CorruptData(format!(
             "invalid authenticated operation range [{start}, {end})"
@@ -193,6 +208,8 @@ where
             authenticated.encoded_operations.len()
         )));
     }
+
+    // Reject oversized input before reconstruction hashes any operations.
     for encoded in authenticated.encoded_operations {
         ensure_encoded_value_size(encoded.len())?;
     }
@@ -205,14 +222,16 @@ where
             pinned_positions.len()
         )));
     }
-    let hasher = commonware_storage::qmdb::hasher::<H>();
-    if !authenticated.proof.verify_proof_and_pinned_nodes(
-        &hasher,
-        authenticated.encoded_operations,
+
+    // Reconstruction also creates delayed MMB parents hidden by folded proof prefixes.
+    let extension = extend_merkle_from_pinned_nodes::<F, H, S, _>(
+        authenticated.pinned_nodes.to_vec(),
         start,
-        authenticated.pinned_nodes,
-        expected_root,
-    ) {
+        authenticated.encoded_operations.iter().map(Vec::as_slice),
+        authenticated.inactive_peaks,
+        strategy,
+    )?;
+    if extension.root != *expected_root {
         return Err(QmdbError::ProofVerification {
             kind: ProofKind::RangeCheckpoint,
         });
@@ -256,40 +275,18 @@ where
     }
     let floor = final_floor
         .ok_or_else(|| QmdbError::CorruptData("authenticated range must end at a commit".into()))?;
-    if !authenticated
-        .proof
-        .matches_canonical_inactive_peaks(end, floor)
-    {
+    if authenticated.inactive_peaks != F::inactive_peaks(end, floor) {
         return Err(QmdbError::CorruptData(
-            "authenticated proof has a noncanonical inactive peak count".into(),
+            "authenticated range has a noncanonical inactive peak count".into(),
         ));
-    }
-
-    // Replaying verified pins also creates delayed MMB parents hidden by folded proof prefixes
-    let extension = extend_merkle_from_pinned_nodes::<F, H, S, _>(
-        authenticated.pinned_nodes.to_vec(),
-        start,
-        authenticated.encoded_operations.iter().map(Vec::as_slice),
-        authenticated.proof.inactive_peaks,
-        strategy,
-    )?;
-    let expected_size = Position::try_from(end).map_err(|error| {
-        QmdbError::CorruptData(format!("invalid authenticated range end: {error}"))
-    })?;
-    if extension.size != expected_size || extension.root != *expected_root {
-        return Err(QmdbError::ProofVerification {
-            kind: ProofKind::RangeCheckpoint,
-        });
     }
 
     let mut rows = operation_rows;
     rows.extend(index_rows);
-    rows.extend(
-        pinned_positions
-            .into_iter()
-            .zip(authenticated.pinned_nodes.iter())
-            .map(|(position, digest)| (encode_node_key(position), digest.encode().to_vec())),
-    );
+    let pinned_nodes = pinned_positions
+        .into_iter()
+        .zip(authenticated.pinned_nodes.iter().copied())
+        .collect();
     rows.extend(
         extension
             .new_nodes
@@ -299,21 +296,25 @@ where
     rows.push((encode_presence_key(latest_location), Vec::new()));
     Ok(PreparedAuthenticatedRange {
         rows,
+        pinned_nodes,
         start_location: start,
         latest_location,
         ops_root: *expected_root,
     })
 }
 
-/// Stage authenticated range rows under the client's configured namespace.
+/// Stage the prepared rows and remaining supplied pins under the client's namespace.
 pub fn stage_authenticated_range<D: Digest, F: Family>(
     client: &PrefixedStoreClient,
     prepared: PreparedAuthenticatedRange<D, F>,
     batch: &mut StoreWriteBatch,
 ) -> Result<(), QmdbError> {
-    batch.reserve(prepared.rows.len());
+    batch.reserve(prepared.rows.len() + prepared.pinned_nodes.len());
     for (key, value) in prepared.rows {
         batch.push(client, &key, value)?;
+    }
+    for (position, digest) in prepared.pinned_nodes {
+        batch.push(client, &encode_node_key(position), digest.encode())?;
     }
     Ok(())
 }
@@ -341,19 +342,29 @@ pub fn stage_watermark<F: Family>(
 mod tests {
     use super::*;
     use bytes::{Buf, BufMut};
-    use commonware_codec::{FixedSize, Read, Write};
+    use commonware_codec::{DecodeExt, FixedSize, Read, Write};
     use commonware_cryptography::{sha256::Digest as Sha256Digest, Sha256};
     use commonware_parallel::{Rayon, Sequential};
     use commonware_storage::{
         merkle::{mem::Mem, mmb, mmr},
-        qmdb::any::{
-            ordered, unordered,
-            value::{FixedEncoding, VariableEncoding},
+        qmdb::{
+            any::{
+                ordered, unordered,
+                value::{FixedEncoding, VariableEncoding},
+            },
+            current::proof::OpsRootWitness,
         },
     };
     use commonware_utils::sequence::FixedBytes;
     use exoware_sdk::{StoreClient, StoreKeyPrefix};
-    use std::{collections::BTreeMap, num::NonZeroUsize};
+    use std::{
+        collections::BTreeMap,
+        num::NonZeroUsize,
+        sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        },
+    };
 
     type FixedValueEncoding = FixedEncoding<FixedBytes<8>>;
     type FixedKeylessOperation<F> = keyless::Operation<F, FixedValueEncoding>;
@@ -362,7 +373,8 @@ mod tests {
     struct AuthenticatedRangeFixture<F: Family> {
         start_location: Location<F>,
         root: Sha256Digest,
-        proof: Proof<F, Sha256Digest>,
+        end_location: Location<F>,
+        inactive_peaks: usize,
         pinned_nodes: Vec<Sha256Digest>,
         encoded_operations: Vec<Vec<u8>>,
         merkle_nodes: BTreeMap<Position<F>, Sha256Digest>,
@@ -372,7 +384,8 @@ mod tests {
         fn view(&self) -> AuthenticatedOperationRange<'_, Sha256Digest, F> {
             AuthenticatedOperationRange {
                 start_location: self.start_location,
-                proof: &self.proof,
+                end_location: self.end_location,
+                inactive_peaks: self.inactive_peaks,
                 pinned_nodes: &self.pinned_nodes,
                 encoded_operations: &self.encoded_operations,
             }
@@ -407,9 +420,8 @@ mod tests {
         AuthenticatedRangeFixture {
             start_location,
             root: memory.root(&hasher, inactive_peaks).expect("test root"),
-            proof: memory
-                .range_proof(&hasher, start_location..end, inactive_peaks)
-                .expect("test range proof"),
+            end_location: end,
+            inactive_peaks,
             pinned_nodes: F::nodes_to_pin(start_location)
                 .map(|position| memory.get_node(position).expect("test pin"))
                 .collect(),
@@ -425,6 +437,25 @@ mod tests {
 
     fn encode<Op: Encode>(operations: &[Op]) -> Vec<Vec<u8>> {
         operations.iter().map(|op| op.encode().to_vec()).collect()
+    }
+
+    fn staged_rows<F: Family>(
+        prepared: PreparedAuthenticatedRange<Sha256Digest, F>,
+    ) -> BTreeMap<Key, Vec<u8>> {
+        let client = StoreClient::new("http://127.0.0.1:1")
+            .prefixed(StoreKeyPrefix::new(b"authenticated-range/".to_vec()).expect("prefix"));
+        let mut batch = StoreWriteBatch::new();
+        stage_authenticated_range(&client, prepared, &mut batch).expect("stage range");
+        batch
+            .entries()
+            .iter()
+            .map(|(key, value)| {
+                (
+                    client.decode_store_key(key).expect("client namespace"),
+                    value.to_vec(),
+                )
+            })
+            .collect()
     }
 
     fn committed_encoded_operations<F: Family>() -> Vec<Vec<u8>> {
@@ -443,28 +474,71 @@ mod tests {
         let _ = original.prepare().expect("valid authenticated range");
         let changed_digest = Sha256::hash(&[b"changed digest"]);
 
+        assert!(!original.pinned_nodes.is_empty());
+        for index in 0..original.pinned_nodes.len() {
+            let mut changed = original.clone();
+            changed.pinned_nodes[index] = changed_digest;
+            assert!(matches!(
+                changed.prepare(),
+                Err(QmdbError::ProofVerification { .. })
+            ));
+        }
+
+        for index in 0..original.encoded_operations.len() {
+            let mut changed = original.clone();
+            changed.encoded_operations[index][1] ^= 1;
+            assert!(matches!(
+                changed.prepare(),
+                Err(QmdbError::ProofVerification { .. })
+            ));
+        }
+
         let mut changed = original.clone();
-        assert!(!changed.proof.digests.is_empty());
-        changed.proof.digests[0] = changed_digest;
+        changed.inactive_peaks = 1;
         assert!(matches!(
             changed.prepare(),
             Err(QmdbError::ProofVerification { .. })
         ));
 
         let mut changed = original.clone();
-        assert!(!changed.pinned_nodes.is_empty());
-        changed.pinned_nodes[0] = changed_digest;
+        changed.start_location += 1;
+        assert!(matches!(changed.prepare(), Err(QmdbError::CorruptData(_))));
+
+        let mut changed = original.clone();
+        changed.end_location += 1;
+        assert!(matches!(changed.prepare(), Err(QmdbError::CorruptData(_))));
+
+        let mut changed = original.clone();
+        changed.start_location += 1;
+        changed.end_location += 1;
+
+        // Keep the pin count valid so relocation reaches root authentication.
+        changed.pinned_nodes.resize(
+            F::nodes_to_pin(changed.start_location).count(),
+            changed_digest,
+        );
         assert!(matches!(
             changed.prepare(),
             Err(QmdbError::ProofVerification { .. })
         ));
 
         let mut changed = original.clone();
-        changed.encoded_operations[0][1] ^= 1;
+        changed.encoded_operations.swap(0, 1);
         assert!(matches!(
             changed.prepare(),
             Err(QmdbError::ProofVerification { .. })
         ));
+
+        let mut changed = original.clone();
+        changed.inactive_peaks = usize::MAX;
+        assert!(matches!(
+            changed.prepare(),
+            Err(QmdbError::CommonwareMerkle(_))
+        ));
+
+        let mut changed = original.clone();
+        changed.pinned_nodes.push(changed_digest);
+        assert!(matches!(changed.prepare(), Err(QmdbError::CorruptData(_))));
 
         assert!(matches!(
             prepare_authenticated_range::<F, Sha256, FixedKeylessOperation<F>, _>(
@@ -486,9 +560,41 @@ mod tests {
     }
 
     #[test]
-    fn test_rejects_tampered_proof_pins_operations_and_trusted_root() {
+    fn test_rejects_tampered_range_pins_operations_and_trusted_root() {
         reject_tampering::<mmr::Family>();
         reject_tampering::<mmb::Family>();
+    }
+
+    fn authenticate_frontier_pins<F: Family>() {
+        for (start, end) in [(4, 5), (10, 11), (8, 13), (16, 19), (31, 34)] {
+            for floor in [0, start] {
+                let mut operations = (0u64..end - 1)
+                    .map(|index| {
+                        FixedKeylessOperation::<F>::Append(FixedBytes::new(index.to_be_bytes()))
+                    })
+                    .collect::<Vec<_>>();
+                operations.push(FixedKeylessOperation::Commit(None, Location::new(floor)));
+                let inactive_peaks = F::inactive_peaks(Location::new(end), Location::new(floor));
+                let original =
+                    authenticated_range_fixture::<F>(&encode(&operations), start, inactive_peaks);
+                let _ = original.prepare().expect("valid frontier");
+                assert!(!original.pinned_nodes.is_empty());
+                for index in 0..original.pinned_nodes.len() {
+                    let mut changed = original.clone();
+                    changed.pinned_nodes[index] = Sha256::hash(&[b"changed pin"]);
+                    assert!(matches!(
+                        changed.prepare(),
+                        Err(QmdbError::ProofVerification { .. })
+                    ));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_authenticates_pins_across_folded_and_delayed_merges() {
+        authenticate_frontier_pins::<mmr::Family>();
+        authenticate_frontier_pins::<mmb::Family>();
     }
 
     // This decoder deliberately accepts aliases so canonical encoding validation is exercised
@@ -505,10 +611,11 @@ mod tests {
     }
 
     impl Read for AliasedCommit {
-        type Cfg = ();
+        type Cfg = Arc<AtomicUsize>;
 
-        fn read_cfg(buf: &mut impl Buf, cfg: &()) -> Result<Self, commonware_codec::Error> {
-            Ok(Self(u8::read_cfg(buf, cfg)? & 1))
+        fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
+            cfg.fetch_add(1, Ordering::Relaxed);
+            Ok(Self(u8::read_cfg(buf, &())? & 1))
         }
     }
 
@@ -524,19 +631,37 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_rejects_authenticated_noncanonical_operation_encoding() {
-        let authenticated = authenticated_range_fixture::<mmr::Family>(&[vec![2]], 0, 0);
-        let error = prepare_authenticated_range::<mmr::Family, Sha256, AliasedCommit, _>(
+    fn authenticate_before_decode<F: Family>() {
+        let authenticated = authenticated_range_fixture::<F>(&[vec![2]], 0, 0);
+        let decoded = Arc::new(AtomicUsize::new(0));
+        let wrong_root = Sha256::hash(&[b"wrong root"]);
+        let error = prepare_authenticated_range::<F, Sha256, AliasedCommit, _>(
+            &authenticated.view(),
+            &wrong_root,
+            &decoded,
+            &Sequential,
+        )
+        .unwrap_err();
+        assert!(matches!(error, QmdbError::ProofVerification { .. }));
+        assert_eq!(decoded.load(Ordering::Relaxed), 0);
+
+        let error = prepare_authenticated_range::<F, Sha256, AliasedCommit, _>(
             &authenticated.view(),
             &authenticated.root,
-            &(),
+            &decoded,
             &Sequential,
         )
         .expect_err("noncanonical authenticated bytes must fail");
         assert!(
             matches!(error, QmdbError::CorruptData(message) if message.contains("not canonically encoded"))
         );
+        assert_eq!(decoded.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn test_authenticates_before_decoding_and_rejects_noncanonical_encoding() {
+        authenticate_before_decode::<mmr::Family>();
+        authenticate_before_decode::<mmb::Family>();
     }
 
     fn reject_invalid_commit_contract<F: Family>() {
@@ -605,10 +730,10 @@ mod tests {
         let full = authenticated_range_fixture::<F>(&operations, 0, 0)
             .prepare()
             .expect("full history with three commits");
-        let mut expected = full.rows.into_iter().collect::<BTreeMap<_, _>>();
-        let mut combined = prefix.rows.into_iter().collect::<BTreeMap<_, _>>();
+        let mut expected = staged_rows(full);
+        let mut combined = staged_rows(prefix);
         let mut repeated_rows = 0;
-        for (key, value) in overlap.rows {
+        for (key, value) in staged_rows(overlap) {
             if let Some(previous) = combined.insert(key, value.clone()) {
                 repeated_rows += 1;
                 assert_eq!(previous, value, "overlapping rows must be identical");
@@ -625,6 +750,149 @@ mod tests {
     fn test_bootstrap_and_overlapping_ranges_with_multiple_commits_are_accepted() {
         accept_overlap::<mmr::Family>();
         accept_overlap::<mmb::Family>();
+    }
+
+    fn omit_existing_pins<F: Family>() {
+        let operations = (0..13)
+            .map(|_| FixedKeylessOperation::<F>::Commit(None, Location::new(0)))
+            .collect::<Vec<_>>();
+        let encoded = encode(&operations);
+        let ranges = [(3, 6), (6, 10), (7, 13), (5, 11)]
+            .into_iter()
+            .map(|(start, end)| authenticated_range_fixture::<F>(&encoded[..end], start, 0))
+            .collect::<Vec<_>>();
+        let defaults = ranges
+            .iter()
+            .map(|range| staged_rows(range.prepare().expect("prepare default")))
+            .collect::<Vec<_>>();
+        let expected = defaults
+            .iter()
+            .flat_map(|rows| rows.clone())
+            .collect::<BTreeMap<_, _>>();
+        let bootstrap = &ranges[0];
+        let empty = BTreeSet::new();
+        assert_eq!(
+            staged_rows(
+                bootstrap
+                    .prepare()
+                    .expect("prepare bootstrap")
+                    .without_pins_at(&empty)
+            ),
+            defaults[0]
+        );
+        for (position, digest) in
+            F::nodes_to_pin(bootstrap.start_location).zip(&bootstrap.pinned_nodes)
+        {
+            assert_eq!(
+                defaults[0].get(&encode_node_key(position)),
+                Some(&digest.encode().to_vec())
+            );
+        }
+
+        for omit_all in [false, true] {
+            let mut admitted = defaults[0].clone();
+            let mut batches = vec![defaults[0].clone()];
+            for (index, range) in ranges.iter().enumerate().skip(1) {
+                let pins = F::nodes_to_pin(range.start_location).collect::<Vec<_>>();
+                assert!(pins.len() > 1);
+                let existing = pins
+                    .iter()
+                    .copied()
+                    .enumerate()
+                    .filter_map(|(index, position)| {
+                        (omit_all || index % 2 == 0).then_some(position)
+                    })
+                    .collect::<BTreeSet<_>>();
+                assert!(!existing.is_empty());
+                assert_eq!(existing.len() == pins.len(), omit_all);
+                for position in &existing {
+                    assert!(admitted.contains_key(&encode_node_key(*position)));
+                }
+                let staged = staged_rows(
+                    range
+                        .prepare()
+                        .expect("prepare omission")
+                        .without_pins_at(&existing),
+                );
+                assert_eq!(staged.len() + existing.len(), defaults[index].len());
+                for (position, digest) in pins.iter().zip(&range.pinned_nodes) {
+                    let value = staged.get(&encode_node_key(*position));
+                    if existing.contains(position) {
+                        assert!(value.is_none());
+                    } else {
+                        assert_eq!(value, Some(&digest.encode().to_vec()));
+                    }
+                }
+                admitted.extend(staged.clone());
+                batches.push(staged);
+            }
+
+            // Admitted predecessors can finish last, so publication waits for all prefix data
+            let client = PrefixedStoreClient::empty(StoreClient::new("http://127.0.0.1:1"));
+            let latest = Location::<F>::new(12);
+            let mut durable = BTreeMap::new();
+            for index in [2, 3, 1, 0] {
+                durable.extend(batches[index].clone());
+                assert!(!durable.contains_key(&encode_watermark_key(latest)));
+            }
+            assert_eq!(durable, expected);
+            let mut publication = StoreWriteBatch::new();
+            stage_watermark(&client, latest, &mut publication).expect("publish complete prefix");
+            for (key, value) in publication.entries() {
+                durable.insert(client.decode_store_key(key).unwrap(), value.to_vec());
+            }
+            assert!(durable.contains_key(&encode_watermark_key(latest)));
+
+            // Reconstruct the retained Store frontier to serve a proof after publication
+            let end = Location::new(encoded.len() as u64);
+            let start_size = Position::try_from(bootstrap.start_location).unwrap();
+            let end_size = Position::try_from(end).unwrap();
+            let nodes = (*start_size..*end_size)
+                .map(|position| {
+                    Sha256Digest::decode(
+                        durable[&encode_node_key(Position::<F>::new(position))].as_slice(),
+                    )
+                    .expect("stored Merkle node")
+                })
+                .collect();
+            let pins = F::nodes_to_pin(bootstrap.start_location)
+                .map(|position| {
+                    Sha256Digest::decode(durable[&encode_node_key(position)].as_slice())
+                        .expect("stored bootstrap pin")
+                })
+                .collect();
+            let memory =
+                Mem::<F, Sha256Digest>::from_components(nodes, bootstrap.start_location, pins)
+                    .expect("retained Store frontier");
+            let hasher = commonware_storage::qmdb::hasher::<Sha256>();
+            assert_eq!(memory.root(&hasher, 0).unwrap(), ranges[2].root);
+            for position in F::nodes_to_pin(end) {
+                assert_eq!(
+                    memory.get_node(position),
+                    Some(ranges[2].merkle_nodes[&position])
+                );
+            }
+            let proof = memory
+                .range_proof(&hasher, bootstrap.start_location..end, 0)
+                .expect("served proof");
+            assert!(proof.verify_proof_and_pinned_nodes(
+                &hasher,
+                &encoded[*bootstrap.start_location as usize..],
+                bootstrap.start_location,
+                &bootstrap.pinned_nodes,
+                &ranges[2].root,
+            ));
+        }
+    }
+
+    #[test]
+    fn test_existing_pins_preserve_mmr_rows_and_served_frontier() {
+        omit_existing_pins::<mmr::Family>();
+    }
+
+    #[test]
+    fn test_existing_pins_preserve_mmb_rows_and_served_frontier() {
+        omit_existing_pins::<mmb::Family>();
     }
 
     #[test]
@@ -713,10 +981,8 @@ mod tests {
 
     #[test]
     fn test_current_boundary_must_bind_to_the_authenticated_operation_root() {
-        use commonware_storage::qmdb::current::proof::OpsRootWitness;
-
         let operations = committed_encoded_operations::<mmr::Family>();
-        let authenticated = authenticated_range_fixture::<mmr::Family>(&operations, 0, 0);
+        let authenticated = authenticated_range_fixture::<mmr::Family>(&operations, 3, 0);
         let witness = OpsRootWitness::<mmr::Family, _> {
             grafted_root: Sha256::hash(&[b"grafted root"]),
             pending_chunk_digest: Default::default(),
@@ -731,10 +997,18 @@ mod tests {
         };
         let prepared = authenticated.prepare().expect("prepare operation range");
         let initial_rows = prepared.rows.len();
+        let pins = prepared.pinned_nodes.clone();
         let prepared = prepared
             .with_current_boundary::<Sha256, 32>(&boundary)
             .expect("matching binding");
         assert_eq!(prepared.rows.len(), initial_rows + 2);
+        assert_eq!(prepared.pinned_nodes, pins);
+        let existing_nodes = pins.iter().map(|(position, _)| *position).collect();
+        let mandatory = prepared.rows.iter().cloned().collect::<BTreeMap<_, _>>();
+        assert_eq!(
+            staged_rows(prepared.without_pins_at(&existing_nodes)),
+            mandatory
+        );
 
         boundary.root = Sha256::hash(&[b"unrelated current root"]);
         assert!(authenticated
@@ -763,6 +1037,7 @@ mod tests {
         };
         let prepared = PreparedAuthenticatedRange {
             rows: Vec::new(),
+            pinned_nodes: Vec::new(),
             start_location: Location::new(0),
             latest_location,
             ops_root: digest,
@@ -791,8 +1066,21 @@ mod tests {
         ]);
         let authenticated = authenticated_range_fixture::<mmb::Family>(&operations, 4, 1);
         let parent = Position::new(7);
-        let extracted = authenticated
-            .proof
+        let hasher = commonware_storage::qmdb::hasher::<Sha256>();
+        let memory = Mem::<mmb::Family, Sha256Digest>::from_components(
+            authenticated.merkle_nodes.values().copied().collect(),
+            Location::new(0),
+            Vec::new(),
+        )
+        .expect("source Merkle tree");
+        let proof = memory
+            .range_proof(
+                &hasher,
+                authenticated.start_location..authenticated.end_location,
+                authenticated.inactive_peaks,
+            )
+            .expect("source proof with an inactive prefix");
+        let extracted = proof
             .verify_range_inclusion_and_extract_digests(
                 &commonware_storage::qmdb::hasher::<Sha256>(),
                 &authenticated.encoded_operations,
@@ -805,7 +1093,7 @@ mod tests {
         let prepared = authenticated
             .prepare()
             .expect("replay authenticated MMB pins");
-        let rows = prepared.rows.into_iter().collect::<BTreeMap<_, _>>();
+        let rows = staged_rows(prepared);
         assert_eq!(
             rows.get(&encode_node_key(parent)),
             Some(&authenticated.merkle_nodes[&parent].encode().to_vec()),
@@ -818,6 +1106,17 @@ mod tests {
                 Some(&digest.encode().to_vec())
             );
         }
+
+        // Even an overbroad omission set cannot suppress the delayed parent or other new nodes
+        let existing_nodes = authenticated.merkle_nodes.keys().copied().collect();
+        let prepared = authenticated.prepare().expect("prepare with omitted pins");
+        let mandatory = prepared.rows.iter().cloned().collect::<BTreeMap<_, _>>();
+        let omitted = staged_rows(prepared.without_pins_at(&existing_nodes));
+        assert_eq!(omitted, mandatory);
+        assert_eq!(
+            omitted.get(&encode_node_key(parent)),
+            rows.get(&encode_node_key(parent))
+        );
     }
 
     #[test]

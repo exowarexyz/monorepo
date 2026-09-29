@@ -97,7 +97,8 @@ async fn check_mirror<F, K, V, E>(
             .collect::<Vec<_>>();
         let authenticated = AuthenticatedOperationRange {
             start_location: snapshot.start,
-            proof: &snapshot.proof,
+            end_location: snapshot.proof.leaves,
+            inactive_peaks: snapshot.proof.inactive_peaks,
             pinned_nodes: &snapshot.pinned_nodes,
             encoded_operations: &encoded_operations,
         };
@@ -110,22 +111,7 @@ async fn check_mirror<F, K, V, E>(
             )
             .is_err()
         );
-        let mut malformed = snapshot.proof.clone();
-        malformed.digests.push(wrong_root);
-        assert!(
-            prepare_authenticated_range::<F, Sha256, unordered::Operation<F, K, E>, Sequential>(
-                &AuthenticatedOperationRange {
-                    start_location: snapshot.start,
-                    proof: &malformed,
-                    pinned_nodes: &snapshot.pinned_nodes,
-                    encoded_operations: &encoded_operations,
-                },
-                &snapshot.ops_root,
-                &op_cfg,
-                &Sequential,
-            )
-            .is_err()
-        );
+
         let mut prepared = prepare_authenticated_range::<
             F,
             Sha256,
