@@ -96,7 +96,7 @@ impl<D: Digest, F: Graftable> OperationRangeCheckpoint<D, F> {
             ));
         }
 
-        let extension = crate::core::extend_merkle_from_pinned_nodes::<F, H, S, _>(
+        let extension = crate::adapter::core::extend_merkle_from_pinned_nodes::<F, H, S, _>(
             self.pinned_nodes.clone(),
             self.start_location,
             self.encoded_operations.iter().map(Vec::as_slice),

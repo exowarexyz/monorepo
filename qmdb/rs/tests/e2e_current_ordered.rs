@@ -21,15 +21,16 @@ use commonware_storage::qmdb::operation::Operation as _;
 use commonware_storage::translator::TwoCap;
 use commonware_utils::{NZUsize, NZU16, NZU64};
 use exoware_qmdb::MAX_OPERATION_SIZE;
-use exoware_qmdb::{recover_boundary_state, CurrentBoundaryState, OrderedClient};
+use exoware_qmdb::{adapter::upload::recover_boundary_state, CurrentBoundaryState};
 use exoware_sdk::{PrefixedStoreClient, StoreClient};
 
 const N: usize = 32;
 type Digest = commonware_cryptography::sha256::Digest;
 type BatchOperation<F> = QmdbOperation<F, Vec<u8>, Vec<u8>>;
 type FixedBatchOperation<F> = FixedQmdbOperation<F, Digest, Digest>;
-type VariableClient<F> = OrderedClient<F, Sha256, Vec<u8>, Vec<u8>, N>;
-type FixedClient<F> = OrderedClient<F, Sha256, Digest, Digest, N, FixedEncoding<Digest>>;
+type VariableClient<F> = exoware_qmdb::adapter::Ordered<F, Sha256, Vec<u8>, Vec<u8>, N>;
+type FixedClient<F> =
+    exoware_qmdb::adapter::Ordered<F, Sha256, Digest, Digest, N, FixedEncoding<Digest>>;
 type VariableDb<F> = LocalQmdbDb<
     F,
     cw_tokio::Context,
@@ -513,11 +514,12 @@ async fn test_ordered_mmb_multi_peak_grafted_chunk_round_trip() {
     .await
     .expect("commit upload");
 
-    let qmdb_client: OrderedClient<mmb::Family, Sha256, Vec<u8>, Vec<u8>, N> = OrderedClient::new(
-        PrefixedStoreClient::empty(store_client.clone()),
-        op_cfg::<mmb::Family>(),
-        key_cfg(),
-    );
+    let qmdb_client: exoware_qmdb::adapter::Ordered<mmb::Family, Sha256, Vec<u8>, Vec<u8>, N> =
+        exoware_qmdb::adapter::Ordered::new(
+            PrefixedStoreClient::empty(store_client.clone()),
+            op_cfg::<mmb::Family>(),
+            key_cfg(),
+        );
     let current = qmdb_client
         .current_operation_range_proof(
             source.latest_location,
@@ -644,7 +646,7 @@ async fn assert_incremental_seed_batches_keep_current_proofs_verifiable<F>(
             .expect("commit upload");
     }
 
-    let qmdb_client: VariableClient<F> = OrderedClient::new(
+    let qmdb_client: VariableClient<F> = exoware_qmdb::adapter::Ordered::new(
         PrefixedStoreClient::empty(store_client.clone()),
         op_cfg::<F>(),
         key_cfg(),
@@ -807,7 +809,7 @@ async fn test_ordered_mmb_persistent_interleaved_seed_batches_keep_current_proof
         .await
         .expect("join");
 
-    let qmdb_client: VariableClient<mmb::Family> = OrderedClient::new(
+    let qmdb_client: VariableClient<mmb::Family> = exoware_qmdb::adapter::Ordered::new(
         PrefixedStoreClient::empty(store_client.clone()),
         op_cfg::<mmb::Family>(),
         key_cfg(),
@@ -1085,7 +1087,7 @@ async fn assert_point_proof_reads_bounded_bitmap_chunks<F: Graftable>() {
     )
     .await
     .unwrap();
-    let qmdb_client: VariableClient<F> = OrderedClient::new(
+    let qmdb_client: VariableClient<F> = exoware_qmdb::adapter::Ordered::new(
         PrefixedStoreClient::empty(store_client),
         op_cfg::<F>(),
         key_cfg(),
@@ -1124,8 +1126,8 @@ where
     use commonware_codec::Encode as _;
     use commonware_parallel::Sequential;
     use exoware_qmdb::{
-        prepare_authenticated_range, stage_authenticated_range, stage_watermark,
-        AuthenticatedOperationRange,
+        adapter::upload::prepare_authenticated_range, adapter::upload::stage_authenticated_range,
+        adapter::upload::stage_watermark, adapter::upload::AuthenticatedOperationRange,
     };
     use exoware_sdk::StoreWriteBatch;
 
@@ -1238,7 +1240,7 @@ where
     let store_client = common::local_store_client().await;
     let upload_client = PrefixedStoreClient::empty(store_client.clone());
     let qmdb_client: VariableClient<F> =
-        OrderedClient::new(upload_client.clone(), op_cfg::<F>(), key_cfg());
+        exoware_qmdb::adapter::Ordered::new(upload_client.clone(), op_cfg::<F>(), key_cfg());
     let mut expected_boundaries = Vec::new();
     for (latest, root, value, prepared) in prepared_boundaries {
         let mut batch = StoreWriteBatch::new();

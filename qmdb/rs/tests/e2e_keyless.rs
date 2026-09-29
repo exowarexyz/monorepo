@@ -14,7 +14,7 @@ use commonware_storage::qmdb::keyless::fixed::{
 };
 use commonware_storage::qmdb::keyless::variable::{Db as Keyless, Operation as KeylessOperation};
 use commonware_utils::{NZUsize, NZU16, NZU64};
-use exoware_qmdb::KeylessClient;
+
 use exoware_sdk::{PrefixedStoreClient, StoreClient};
 
 use common::retry;
@@ -35,9 +35,14 @@ type FixedDb<F> = FixedKeyless<
     commonware_parallel::Sequential,
 >;
 
-type VariableClient<F> = KeylessClient<F, commonware_cryptography::Sha256, Vec<u8>>;
-type FixedClient<F> =
-    KeylessClient<F, commonware_cryptography::Sha256, Digest, FixedEncoding<Digest>>;
+type VariableClient<F> =
+    exoware_qmdb::adapter::Keyless<F, commonware_cryptography::Sha256, Vec<u8>>;
+type FixedClient<F> = exoware_qmdb::adapter::Keyless<
+    F,
+    commonware_cryptography::Sha256,
+    Digest,
+    FixedEncoding<Digest>,
+>;
 
 fn variable_client<F: Graftable>(store_client: StoreClient) -> VariableClient<F> {
     VariableClient::new(

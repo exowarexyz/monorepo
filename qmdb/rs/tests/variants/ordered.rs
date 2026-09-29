@@ -28,15 +28,16 @@ use commonware_storage::{
 use commonware_utils::{
     bitmap::Readable as _, iter::zip_eq, sequence::FixedBytes, NZUsize, NZU16, NZU64,
 };
-use exoware_qmdb::proto::qmdb::v1::{
+use exoware_qmdb::service::proto::qmdb::v1::{
     GetCurrentOperationRangeRequest, GetManyRequest, GetOperationRangeRequest, GetRangeRequest,
     GetRequest, SubscribeRequest,
 };
 use exoware_qmdb::{
-    ordered_connect_stack, ordered_operation_log_connect_stack, prepare_authenticated_range,
-    recover_boundary_state, stage_authenticated_range, stage_watermark,
-    AuthenticatedOperationRange, CurrentBoundaryState, CurrentOperationClient, OperationLogClient,
-    OrderedClient, OrderedConnectClient, UploadOperation, VerifiedKeyLookup, MAX_OPERATION_SIZE,
+    adapter::upload::prepare_authenticated_range, adapter::upload::recover_boundary_state,
+    adapter::upload::stage_authenticated_range, adapter::upload::stage_watermark,
+    adapter::upload::AuthenticatedOperationRange, adapter::upload::UploadOperation,
+    proof::VerifiedKeyLookup, service::client::rpc::CurrentOperationClient,
+    service::client::rpc::OperationLogClient, CurrentBoundaryState, MAX_OPERATION_SIZE,
 };
 use exoware_sdk::{proto::PreferZstdHttpClient, PrefixedStoreClient, StoreWriteBatch};
 
@@ -240,21 +241,26 @@ async fn verify_snapshots<F, K, V, E>(
         .all(|snapshot| snapshot.boundary.is_some() == is_current));
     let store = common::local_store_client().await;
     let prefixed = PrefixedStoreClient::empty(store);
-    let native = Arc::new(OrderedClient::<F, Sha256, K, V, N, E>::new(
-        prefixed.clone(),
-        op_cfg.clone(),
-        key_cfg.clone(),
-    ));
-    let (task, url) = if is_current {
-        common::spawn_connect_service(ordered_connect_stack::<F, Sha256, K, V, N, E>(
+    let native = Arc::new(
+        exoware_qmdb::adapter::Ordered::<F, Sha256, K, V, N, E>::new(
             prefixed.clone(),
             op_cfg.clone(),
             key_cfg.clone(),
-        ))
+        ),
+    );
+    let (task, url) = if is_current {
+        common::spawn_connect_service(exoware_qmdb::service::server::ordered_stack::<
+            F,
+            Sha256,
+            K,
+            V,
+            N,
+            E,
+        >(prefixed.clone(), op_cfg.clone(), key_cfg.clone()))
         .await
     } else {
         common::spawn_connect_service(
-            ordered_operation_log_connect_stack::<F, Sha256, K, V, N, E>(
+            exoware_qmdb::service::server::ordered_operation_log_stack::<F, Sha256, K, V, N, E>(
                 prefixed.clone(),
                 op_cfg.clone(),
                 key_cfg.clone(),
@@ -275,13 +281,15 @@ async fn verify_snapshots<F, K, V, E>(
         Operation<F, K, E>,
         N,
     >::plaintext(&url, op_cfg.clone());
-    let lookup = OrderedConnectClient::<PreferZstdHttpClient, F, Sha256, K, V, N, E>::plaintext(
-        &url,
-        op_cfg.clone(),
-        update_cfg,
-        key_cfg,
-        value_cfg,
-    );
+    let lookup = exoware_qmdb::service::client::Ordered::<
+        PreferZstdHttpClient,
+        F,
+        Sha256,
+        K,
+        V,
+        N,
+        E,
+    >::plaintext(&url, op_cfg.clone(), update_cfg, key_cfg, value_cfg);
     let mut subscription = historical
         .subscribe(SubscribeRequest::default())
         .await
@@ -375,7 +383,7 @@ async fn verify_snapshots<F, K, V, E>(
             if case_name.starts_with("test_current_ordered_variable_variable_keys_variable_values_")
             {
                 use connectrpc::client::ClientConfig;
-                use exoware_qmdb::proto::qmdb::v1::{
+                use exoware_qmdb::service::proto::qmdb::v1::{
                     KeyLookupServiceClient, OrderedKeyRangeServiceClient,
                 };
 
@@ -657,10 +665,15 @@ async fn verify_snapshots<F, K, V, E>(
                 ..Default::default()
             };
             let lookups = lookup
+                .key_lookup
                 .get_many(request.clone(), &snapshot.root)
                 .await
                 .expect("Connect hits and misses");
-            assert!(lookup.get_many(request, &wrong_root).await.is_err());
+            assert!(lookup
+                .key_lookup
+                .get_many(request, &wrong_root)
+                .await
+                .is_err());
             assert_eq!(lookups.len(), all_keys.len());
             let raw_lookups = native
                 .key_lookup_proofs_raw_at(tip, &all_keys, None)
@@ -681,11 +694,12 @@ async fn verify_snapshots<F, K, V, E>(
                             ..Default::default()
                         };
                         let one = lookup
+                            .key_lookup
                             .get(request.clone(), &snapshot.root)
                             .await
                             .expect("Connect key hit");
                         assert_update(&one.operation, key, value);
-                        assert!(lookup.get(request, &wrong_root).await.is_err());
+                        assert!(lookup.key_lookup.get(request, &wrong_root).await.is_err());
                     }
                     (
                         None,
@@ -713,10 +727,15 @@ async fn verify_snapshots<F, K, V, E>(
                     ..Default::default()
                 };
                 let page = lookup
+                    .key_range
                     .get_range(request.clone(), &snapshot.root)
                     .await
                     .expect("Connect ordered page");
-                assert!(lookup.get_range(request, &wrong_root).await.is_err());
+                assert!(lookup
+                    .key_range
+                    .get_range(request, &wrong_root)
+                    .await
+                    .is_err());
                 assert!(page.entries.len() <= 2);
                 for entry in page.entries {
                     let Operation::Update(update) = entry.operation else {
@@ -753,6 +772,7 @@ async fn verify_snapshots<F, K, V, E>(
                 ..Default::default()
             };
             let bounded = lookup
+                .key_range
                 .get_range(request, &snapshot.root)
                 .await
                 .expect("bounded range with exclusion");
@@ -796,6 +816,7 @@ async fn verify_snapshots<F, K, V, E>(
                 .await
                 .is_err());
             assert!(lookup
+                .key_lookup
                 .get(
                     GetRequest {
                         key: all_keys[0].encode().to_vec(),

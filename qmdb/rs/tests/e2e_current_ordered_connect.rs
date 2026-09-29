@@ -24,7 +24,7 @@ use commonware_storage::translator::TwoCap;
 use commonware_utils::{NZUsize, NZU16, NZU64};
 use connectrpc::client::ClientConfig;
 use connectrpc::{Chain, ConnectRpcService, RequestContext as Context, ServiceRequest};
-use exoware_qmdb::proto::qmdb::v1::{
+use exoware_qmdb::service::proto::qmdb::v1::{
     current_key_lookup_result, CurrentOperationServiceClient,
     GetCurrentOperationRangeRequest as ProtoGetCurrentOperationRangeRequest,
     GetManyRequest as ProtoGetManyRequest, GetManyResponse as ProtoGetManyResponse,
@@ -34,8 +34,8 @@ use exoware_qmdb::proto::qmdb::v1::{
     OrderedKeyRangeServiceClient, OrderedKeyRangeServiceServer,
 };
 use exoware_qmdb::{
-    ordered_connect_stack, recover_boundary_state, CurrentBoundaryState, OrderedClient,
-    OrderedConnectClient, QmdbError, VerifiedKeyLookup, MAX_OPERATION_SIZE,
+    adapter::upload::recover_boundary_state, proof::VerifiedKeyLookup, CurrentBoundaryState,
+    QmdbError, MAX_OPERATION_SIZE,
 };
 use exoware_sdk::proto::PreferZstdHttpClient;
 use exoware_sdk::{PrefixedStoreClient, RetryConfig, StoreClient, StoreWriteBatch};
@@ -47,7 +47,7 @@ const N: usize = 32;
 type Digest = commonware_cryptography::sha256::Digest;
 type BatchProof = Proof<mmr::Family, Digest>;
 type BatchOperation = QmdbOperation<mmr::Family, Vec<u8>, Vec<u8>>;
-type TestOrderedClient = OrderedClient<mmr::Family, Sha256, Vec<u8>, Vec<u8>, N>;
+type TestOrderedClient = exoware_qmdb::adapter::Ordered<mmr::Family, Sha256, Vec<u8>, Vec<u8>, N>;
 type Db = LocalQmdbDb<
     mmr::Family,
     cw_tokio::Context,
@@ -66,7 +66,7 @@ fn encoded_key(key: &[u8]) -> Vec<u8> {
 async fn spawn_qmdb_server(
     raw_store: PrefixedStoreClient,
 ) -> (tokio::task::JoinHandle<()>, String) {
-    common::spawn_connect_service(ordered_connect_stack::<
+    common::spawn_connect_service(exoware_qmdb::service::server::ordered_stack::<
         mmr::Family,
         Sha256,
         Vec<u8>,
@@ -100,9 +100,16 @@ fn current_operation_rpc_client(base: &str) -> CurrentOperationServiceClient<Pre
 
 fn key_lookup_client(
     base: &str,
-) -> OrderedConnectClient<PreferZstdHttpClient, mmr::Family, Sha256, Vec<u8>, Vec<u8>, N> {
+) -> exoware_qmdb::service::client::Ordered<
+    PreferZstdHttpClient,
+    mmr::Family,
+    Sha256,
+    Vec<u8>,
+    Vec<u8>,
+    N,
+> {
     let (key_cfg, value_cfg) = op_cfg();
-    OrderedConnectClient::plaintext(base, op_cfg(), op_cfg(), key_cfg, value_cfg)
+    exoware_qmdb::service::client::Ordered::plaintext(base, op_cfg(), op_cfg(), key_cfg, value_cfg)
 }
 
 async fn boundary_from_source_db(
@@ -244,9 +251,9 @@ fn current_snapshot_rows(source: &SourceBatch) -> BTreeMap<Bytes, Bytes> {
         .with_current_boundary::<Sha256, N>(&source.current_boundary)
         .expect("attach current boundary");
     let mut batch = StoreWriteBatch::new();
-    exoware_qmdb::stage_authenticated_range(&staging, prepared, &mut batch)
+    exoware_qmdb::adapter::upload::stage_authenticated_range(&staging, prepared, &mut batch)
         .expect("stage authenticated range");
-    exoware_qmdb::stage_watermark(&staging, source.latest_location, &mut batch)
+    exoware_qmdb::adapter::upload::stage_watermark(&staging, source.latest_location, &mut batch)
         .expect("stage watermark");
     batch.entries().iter().cloned().collect()
 }
@@ -254,8 +261,12 @@ fn current_snapshot_rows(source: &SourceBatch) -> BTreeMap<Bytes, Bytes> {
 fn publication_key() -> Bytes {
     let staging = PrefixedStoreClient::empty(StoreClient::new("http://127.0.0.1:1"));
     let mut batch = StoreWriteBatch::new();
-    exoware_qmdb::stage_watermark(&staging, Location::<mmr::Family>::new(0), &mut batch)
-        .expect("stage watermark key");
+    exoware_qmdb::adapter::upload::stage_watermark(
+        &staging,
+        Location::<mmr::Family>::new(0),
+        &mut batch,
+    )
+    .expect("stage watermark key");
     batch.entries()[0].0.clone()
 }
 
@@ -533,6 +544,7 @@ async fn test_ordered_connect_get_returns_current_key_value_proof() {
     let connect_client = key_lookup_client(&qmdb_url);
 
     let proof = connect_client
+        .key_lookup
         .get(
             ProtoGetRequest {
                 key: encoded_key(b"alpha"),
@@ -590,6 +602,7 @@ async fn test_ordered_connect_get_many_returns_current_key_lookup_proofs() {
     let connect_client = key_lookup_client(&qmdb_url);
 
     let proof = connect_client
+        .key_lookup
         .get_many(
             ProtoGetManyRequest {
                 keys: vec![encoded_key(b"alpha"), encoded_key(b"beta")],
@@ -632,6 +645,7 @@ async fn test_ordered_connect_get_many_returns_miss_proofs_and_rejects_duplicate
     let connect_client = key_lookup_client(&qmdb_url);
 
     let proof = connect_client
+        .key_lookup
         .get_many(
             ProtoGetManyRequest {
                 keys: vec![encoded_key(b"alpha"), encoded_key(b"aardvark")],
@@ -651,6 +665,7 @@ async fn test_ordered_connect_get_many_returns_miss_proofs_and_rejects_duplicate
     ));
 
     let err = connect_client
+        .key_lookup
         .get_many(
             ProtoGetManyRequest {
                 keys: vec![encoded_key(b"alpha"), encoded_key(b"alpha")],
@@ -674,6 +689,7 @@ async fn test_ordered_connect_get_range_verifies_complete_empty_and_partial_page
     let connect_client = key_lookup_client(&qmdb_url);
 
     let complete = connect_client
+        .key_range
         .get_range(
             ProtoGetRangeRequest {
                 start_key: encoded_key(b"a"),
@@ -698,6 +714,7 @@ async fn test_ordered_connect_get_range_verifies_complete_empty_and_partial_page
     assert_eq!(complete_keys, vec![b"alpha".to_vec(), b"beta".to_vec()]);
 
     let partial = connect_client
+        .key_range
         .get_range(
             ProtoGetRangeRequest {
                 start_key: encoded_key(b"a"),
@@ -714,6 +731,7 @@ async fn test_ordered_connect_get_range_verifies_complete_empty_and_partial_page
     assert_eq!(partial.next_start_key, Some(encoded_key(b"beta").into()));
 
     let empty = connect_client
+        .key_range
         .get_range(
             ProtoGetRangeRequest {
                 start_key: encoded_key(b"aardvark"),
@@ -1075,6 +1093,7 @@ async fn test_ordered_connect_client_rejects_get_range_boundary_omission() {
     let connect_client = key_lookup_client(&static_url);
 
     let err = connect_client
+        .key_range
         .get_range(
             ProtoGetRangeRequest {
                 start_key: encoded_key(b"a"),
@@ -1144,6 +1163,7 @@ async fn test_ordered_connect_client_rejects_empty_unbounded_get_range_before_ne
     let connect_client = key_lookup_client(&static_url);
 
     let err = connect_client
+        .key_range
         .get_range(
             ProtoGetRangeRequest {
                 start_key: encoded_key(b"aardvark"),
@@ -1198,6 +1218,7 @@ async fn test_ordered_connect_client_rejects_invalid_get_proof() {
     let connect_client = key_lookup_client(&static_url);
 
     let err = connect_client
+        .key_lookup
         .get(
             ProtoGetRequest {
                 key: encoded_key(b"alpha"),
@@ -1256,6 +1277,7 @@ async fn test_ordered_connect_client_rejects_invalid_get_many_proof() {
     let connect_client = key_lookup_client(&static_url);
 
     let err = connect_client
+        .key_lookup
         .get_many(
             ProtoGetManyRequest {
                 keys: vec![encoded_key(b"alpha"), encoded_key(b"beta")],
@@ -1304,6 +1326,7 @@ async fn test_ordered_connect_client_rejects_get_many_proof_for_different_key() 
     let connect_client = key_lookup_client(&static_url);
 
     let err = connect_client
+        .key_lookup
         .get_many(
             ProtoGetManyRequest {
                 keys: vec![encoded_key(b"alpha")],
@@ -1376,6 +1399,7 @@ async fn test_ordered_connect_client_rejects_get_range_page_shorter_than_limit()
     let connect_client = key_lookup_client(&static_url);
 
     let err = connect_client
+        .key_range
         .get_range(
             ProtoGetRangeRequest {
                 start_key: encoded_key(b"a"),
