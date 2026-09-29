@@ -1,18 +1,17 @@
 use datafusion::arrow::datatypes::DataType;
 use datafusion::arrow::util::pretty::print_batches;
 use datafusion::common::Result as DataFusionResult;
-use datafusion::prelude::SessionContext;
 use exoware_sdk::{StoreClient, StoreKeyPrefix};
-use exoware_sql::{IndexSpec, KvSchema, TableColumnConfig};
+use exoware_sql::{IndexSpec, KvSchema, SqlContext, TableColumnConfig};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let base_url =
         std::env::var("EXOWARE_URL").unwrap_or_else(|_| "http://localhost:10000".to_string());
     let client = StoreClient::new(&base_url);
-    let ctx = exoware_sql::session_context(client.prefixed(StoreKeyPrefix::identity()));
+    let ctx = SqlContext::new(client.prefixed(StoreKeyPrefix::identity()));
 
-    KvSchema::new(client.prefixed(StoreKeyPrefix::identity()))
+    let schema = KvSchema::new(client.prefixed(StoreKeyPrefix::identity()))
         .table(
             "customers",
             vec![
@@ -39,8 +38,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "customer_idx",
                 vec!["customer_id".to_string()],
             )?],
-        )?
-        .register_all(&ctx)?;
+        )?;
+    ctx.register_schema(schema)?;
 
     seed_sample_data(&ctx).await?;
 
@@ -92,7 +91,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-async fn seed_sample_data(ctx: &SessionContext) -> DataFusionResult<()> {
+async fn seed_sample_data(ctx: &SqlContext) -> DataFusionResult<()> {
     let nonce = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()

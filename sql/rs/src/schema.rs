@@ -11,7 +11,6 @@ use datafusion::datasource::TableProvider;
 use datafusion::logical_expr::dml::InsertOp;
 use datafusion::logical_expr::{Expr, TableProviderFilterPushDown, TableType};
 use datafusion::physical_plan::ExecutionPlan;
-use datafusion::prelude::SessionContext;
 use exoware_sdk::kv_codec::decode_stored_row;
 use exoware_sdk::PrefixedStoreClient;
 
@@ -20,6 +19,7 @@ use crate::predicate::*;
 use crate::scan::*;
 use crate::types::*;
 use crate::writer::*;
+use crate::SqlContext;
 
 pub struct KvSchema {
     client: PrefixedStoreClient,
@@ -118,11 +118,8 @@ impl KvSchema {
         &self.tables
     }
 
-    /// Registers the tables in an existing DataFusion session.
-    ///
-    /// Create the session with [`crate::session_context`] to enable Store
-    /// aggregate reduction. Other sessions execute aggregates through DataFusion.
-    pub fn register_all(self, ctx: &SessionContext) -> DataFusionResult<()> {
+    /// Registers the tables in a SQL context.
+    pub fn register_all(self, ctx: &SqlContext) -> DataFusionResult<()> {
         for (name, table) in self.tables {
             ctx.register_table(name, table)?;
         }
