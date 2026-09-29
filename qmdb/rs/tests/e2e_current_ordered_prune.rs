@@ -263,9 +263,9 @@ async fn test_mirror_ordered_prune_past_chunk_zero() {
     // historical current-state proofs use the requested watermark's root and
     // update index, not the final active-key set.
     let expired_key_proof = qmdb_client
-        .key_value_proof_at(
+        .get(
             expired_key_snapshot.watermark,
-            expired_key_snapshot.key.as_slice(),
+            &expired_key_snapshot.key,
             None,
         )
         .await
@@ -281,7 +281,7 @@ async fn test_mirror_ordered_prune_past_chunk_zero() {
 
     let final_watermark = batches.last().expect("at least one batch").watermark;
     let latest_err = qmdb_client
-        .key_value_proof_at(final_watermark, expired_key_snapshot.key.as_slice(), None)
+        .get(final_watermark, &expired_key_snapshot.key, None)
         .await
         .expect_err("expired key should be inactive at final watermark");
     match latest_err {
@@ -291,7 +291,7 @@ async fn test_mirror_ordered_prune_past_chunk_zero() {
     }
 
     let old_range = qmdb_client
-        .key_range_proof_raw_at(
+        .get_range(
             first.watermark,
             b"k-00000000".to_vec(),
             Some(b"k-00000001".to_vec()),
@@ -300,10 +300,8 @@ async fn test_mirror_ordered_prune_past_chunk_zero() {
         )
         .await
         .expect("old watermark range proof");
-    assert_eq!(old_range.watermark, first.watermark);
     assert_eq!(old_range.entries.len(), 1);
     let entry = &old_range.entries[0];
     assert_eq!(entry.operation.key(), Some(&b"k-00000000".to_vec()));
     assert_eq!(entry.root, first.root);
-    assert!(entry.verify::<Sha256>());
 }

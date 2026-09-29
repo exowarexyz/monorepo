@@ -1,4 +1,3 @@
-use bytes::Bytes;
 use commonware_codec::{Codec, Encode};
 use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::{Sequential, Strategy};
@@ -425,14 +424,19 @@ pub struct RawKeyRangeProof<
 }
 
 // `Verified*` types below all share one invariant: the Merkle proof has already
-// been checked against the store's root and the proof blob has been dropped.
-// Callers work with the plain payload fields.
+// been checked and the proof blob has been dropped. Service clients check against
+// the caller's trusted root; adapter readers check against the root stored with
+// the proof. Callers work with the plain payload fields.
 
-/// Contiguous range of operations verified against the store's root. Shared
-/// across ordered, unordered, immutable, and keyless variants.
+/// Contiguous range of operations ending at or before `tip`. Shared across
+/// ordered, unordered, immutable, and keyless variants.
 #[derive(Clone, Debug, PartialEq)]
 #[must_use]
 pub struct VerifiedOperationRange<D: Digest, Op, F: Family> {
+    pub tip: Location<F>,
+    /// Operations-log root the range is proven against. For a current database
+    /// this differs from the trusted current root a service client checks it
+    /// under, which commits to this root through an `OpsRootWitness`.
     pub root: D,
     pub start_location: Location<F>,
     pub operations: Vec<Op>,
@@ -472,7 +476,7 @@ pub enum VerifiedKeyLookup<
     E: ValueEncoding<Value = V> = VariableEncoding<V>,
 > {
     Hit(VerifiedKeyValue<D, ordered::Operation<F, K, E>, F>),
-    Miss { key: Bytes },
+    Miss { key: K },
 }
 
 /// A verified ordered current key range.
@@ -486,24 +490,19 @@ pub struct VerifiedKeyRange<
     E: ValueEncoding<Value = V> = VariableEncoding<V>,
 > {
     pub entries: Vec<VerifiedKeyValue<D, ordered::Operation<F, K, E>, F>>,
-    pub next_start_key: Option<Bytes>,
+    /// First key of the next page, if the range continues past `limit` entries.
+    pub next_start_key: Option<K>,
 }
 
 /// Contiguous range of operations plus bitmap chunks verified against the
 /// current-state root.
 #[derive(Clone, Debug, PartialEq)]
 #[must_use]
-pub struct VerifiedCurrentRange<
-    D: Digest,
-    K: QmdbKey + Codec,
-    V: Codec + Clone + Send + Sync,
-    const N: usize,
-    F: Family,
-    E: ValueEncoding<Value = V> = VariableEncoding<V>,
-> {
+pub struct VerifiedCurrentRange<D: Digest, Op, const N: usize, F: Family> {
+    pub tip: Location<F>,
     pub root: D,
     pub start_location: Location<F>,
-    pub operations: Vec<ordered::Operation<F, K, E>>,
+    pub operations: Vec<Op>,
     pub chunks: Vec<[u8; N]>,
 }
 

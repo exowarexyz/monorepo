@@ -532,7 +532,7 @@ async fn test_prefixed_qmdb_uploads_handle_concurrent_inflight_batches_per_insta
             let reader = reader_a.clone();
             async move {
                 reader
-                    .operation_range_proof(latest_a, QmdbLocation::new(0), total_a as u32)
+                    .operation_range(latest_a, QmdbLocation::new(0), total_a as u32, None)
                     .await
             }
         },
@@ -544,7 +544,7 @@ async fn test_prefixed_qmdb_uploads_handle_concurrent_inflight_batches_per_insta
             let reader = reader_b.clone();
             async move {
                 reader
-                    .operation_range_proof(latest_b, QmdbLocation::new(0), total_b as u32)
+                    .operation_range(latest_b, QmdbLocation::new(0), total_b as u32, None)
                     .await
             }
         },
@@ -662,7 +662,12 @@ async fn test_prepared_sql_and_qmdb_batches_commit_atomically_with_sequence_rece
             let expected_len = expected_qmdb.len() as u32;
             async move {
                 reader
-                    .operation_range_proof(QmdbLocation::new(5), QmdbLocation::new(0), expected_len)
+                    .operation_range(
+                        QmdbLocation::new(5),
+                        QmdbLocation::new(0),
+                        expected_len,
+                        None,
+                    )
                     .await
             }
         },

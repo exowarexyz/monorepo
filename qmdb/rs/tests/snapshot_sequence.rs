@@ -313,7 +313,7 @@ async fn cached_publication_fences_dependent_reads() {
     let cloned = qmdb.clone();
     assert_eq!(cloned.root_at(watermark).await.unwrap(), expected_root);
     let checkpoint = qmdb
-        .operation_range_checkpoint(watermark, Location::new(0), 1)
+        .operation_range_checkpoint(watermark, Location::new(0), 1, None)
         .await
         .unwrap();
     assert_eq!(checkpoint.root, expected_root);
@@ -330,7 +330,7 @@ async fn cached_publication_fences_dependent_reads() {
     let (previous_root, _) =
         common::prepare_operations::<Family, Operation>(&first_operations, &operation_cfg());
     let checkpoint = qmdb
-        .operation_range_checkpoint(previous_watermark, Location::new(0), 1)
+        .operation_range_checkpoint(previous_watermark, Location::new(0), 1, None)
         .await
         .unwrap();
     assert_eq!(checkpoint.root, previous_root);

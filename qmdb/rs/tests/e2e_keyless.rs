@@ -274,10 +274,11 @@ where
     assert_eq!(got, source.queried_value);
 
     let proof = qmdb_client
-        .operation_range_proof(
+        .operation_range(
             source.latest_location,
             Location::new(0),
             source.operations.len() as u32,
+            None,
         )
         .await
         .expect("proof");
@@ -289,6 +290,7 @@ where
             source.latest_location,
             Location::new(0),
             source.operations.len() as u32,
+            None,
         )
         .await
         .expect("checkpoint");
@@ -318,7 +320,7 @@ where
     assert_eq!(reconstructed_root, checkpoint.root);
 
     let suffix_checkpoint = qmdb_client
-        .operation_range_checkpoint(source.latest_location, source.latest_location, 1)
+        .operation_range_checkpoint(source.latest_location, source.latest_location, 1, None)
         .await
         .expect("suffix checkpoint");
     assert!(suffix_checkpoint.verify::<commonware_cryptography::Sha256>());
@@ -376,7 +378,7 @@ where
         .is_err());
 
     let middle_checkpoint = qmdb_client
-        .operation_range_checkpoint(source.latest_location, source.latest_location - 1, 1)
+        .operation_range_checkpoint(source.latest_location, source.latest_location - 1, 1, None)
         .await
         .expect("middle checkpoint");
     assert!(middle_checkpoint.verify::<commonware_cryptography::Sha256>());
@@ -446,10 +448,11 @@ async fn test_keyless_fixed_round_trip() {
     assert_eq!(got, source.queried_value);
 
     let proof = qmdb_client
-        .operation_range_proof(
+        .operation_range(
             source.latest_location,
             Location::new(0),
             source.operations.len() as u32,
+            None,
         )
         .await
         .expect("fixed proof");

@@ -11,13 +11,10 @@ pub(crate) mod verify;
 
 pub use super::ordered::OrderedLookupVerifier;
 pub use super::unordered::UnorderedLookupVerifier;
-pub use current_operation::{CurrentOperationClient, CurrentOperationRangeProof};
+pub use current_operation::CurrentOperationClient;
 pub use key_lookup::{KeyLookupClient, LookupVerifier};
 pub use key_range::KeyRangeClient;
-pub use operation_log::{
-    OperationLogClient, OperationLogRangeProof, OperationLogSubscribeProof,
-    OperationLogSubscription,
-};
+pub use operation_log::{OperationLogClient, OperationLogSubscribeProof, OperationLogSubscription};
 
 use commonware_cryptography::Digest;
 use connectrpc::ConnectError;

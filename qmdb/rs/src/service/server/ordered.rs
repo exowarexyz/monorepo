@@ -92,7 +92,7 @@ where
     type Digest = H::Digest;
     type Operation = ordered::Operation<F, K, E>;
 
-    fn current_operation_range_proof(
+    fn current_operation_range(
         &self,
         watermark: Location<F>,
         start_location: Location<F>,
@@ -104,7 +104,7 @@ where
             QmdbError,
         >,
     > + Send {
-        Ordered::current_operation_range_proof_raw_at(
+        Ordered::current_operation_range_raw(
             self,
             watermark,
             start_location,
@@ -137,7 +137,7 @@ where
         min_sequence_number: Option<u64>,
     ) -> impl Future<Output = Result<RawKeyValueProof<Self::Digest, Self::Operation, N, F>, QmdbError>>
            + Send {
-        Ordered::key_value_proof_raw_at(self, tip, key.as_ref(), min_sequence_number)
+        Ordered::get_raw(self, tip, key.as_ref(), min_sequence_number)
     }
 
     fn key_lookup_proofs(
@@ -146,7 +146,7 @@ where
         keys: &[K],
         min_sequence_number: Option<u64>,
     ) -> impl Future<Output = Result<Vec<Self::Lookup>, QmdbError>> + Send {
-        Ordered::key_lookup_proofs_raw_at(self, tip, keys, min_sequence_number)
+        Ordered::get_many_raw(self, tip, keys, min_sequence_number)
     }
 }
 
@@ -175,7 +175,7 @@ where
         min_sequence_number: Option<u64>,
     ) -> impl Future<Output = Result<RawKeyRangeProof<H::Digest, K, V, N, F, E>, QmdbError>> + Send
     {
-        Ordered::key_range_proof_raw_at(self, tip, start_key, end_key, limit, min_sequence_number)
+        Ordered::get_range_raw(self, tip, start_key, end_key, limit, min_sequence_number)
     }
 }
 

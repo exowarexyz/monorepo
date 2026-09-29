@@ -31,7 +31,7 @@ use crate::service::proto::qmdb::v1::{
 };
 use crate::{OperationKv, PublishedWatermark, QmdbError};
 
-impl<F, H, K, V, E> OperationLogReader for Unordered<F, H, K, V, E>
+impl<F, H, K, V, const N: usize, E> OperationLogReader for Unordered<F, H, K, V, N, E>
 where
     F: Graftable,
     H: Hasher + Send + Sync + 'static,
@@ -78,7 +78,7 @@ where
     }
 }
 
-impl<F, H, K, V, const N: usize, E> CurrentOperationReader<N> for Unordered<F, H, K, V, E>
+impl<F, H, K, V, const N: usize, E> CurrentOperationReader<N> for Unordered<F, H, K, V, N, E>
 where
     F: Graftable,
     H: Hasher + Send + Sync + 'static,
@@ -91,7 +91,7 @@ where
     type Digest = H::Digest;
     type Operation = unordered::Operation<F, K, E>;
 
-    fn current_operation_range_proof(
+    fn current_operation_range(
         &self,
         watermark: Location<F>,
         start_location: Location<F>,
@@ -103,7 +103,7 @@ where
             QmdbError,
         >,
     > + Send {
-        Unordered::current_operation_range_proof_raw_at::<N>(
+        Unordered::current_operation_range_raw(
             self,
             watermark,
             start_location,
@@ -113,7 +113,7 @@ where
     }
 }
 
-impl<F, H, K, V, const N: usize, E> KeyLookupReader<N> for Unordered<F, H, K, V, E>
+impl<F, H, K, V, const N: usize, E> KeyLookupReader<N> for Unordered<F, H, K, V, N, E>
 where
     F: Graftable,
     H: Hasher + Send + Sync + 'static,
@@ -135,7 +135,7 @@ where
         min_sequence_number: Option<u64>,
     ) -> impl Future<Output = Result<RawKeyValueProof<Self::Digest, Self::Operation, N, F>, QmdbError>>
            + Send {
-        Unordered::key_value_proof_raw_at::<N, _>(self, tip, key.as_ref(), min_sequence_number)
+        Unordered::get_raw(self, tip, key.as_ref(), min_sequence_number)
     }
 
     fn key_lookup_proofs(
@@ -144,7 +144,7 @@ where
         keys: &[K],
         min_sequence_number: Option<u64>,
     ) -> impl Future<Output = Result<Vec<Self::Lookup>, QmdbError>> + Send {
-        Unordered::key_lookup_proofs_raw_at::<N, _>(self, tip, keys, min_sequence_number)
+        Unordered::get_many_raw(self, tip, keys, min_sequence_number)
     }
 }
 
@@ -165,7 +165,10 @@ pub fn unordered_stack<
 where
     unordered::Operation<F, K, E>: Encode + Decode,
 {
-    let reader = Arc::new(Unordered::<F, H, K, V, E>::new(raw_store.clone(), op_cfg));
+    let reader = Arc::new(Unordered::<F, H, K, V, N, E>::new(
+        raw_store.clone(),
+        op_cfg,
+    ));
     super::stack(Chain(
         KeyLookupServiceServer::new(KeyLookupServer::<_, N>::new(reader.clone(), key_cfg)),
         Chain(
@@ -181,6 +184,7 @@ pub fn unordered_operation_log_stack<
     H: Hasher + Send + Sync + 'static,
     K: QmdbKey + commonware_codec::Codec + Send + Sync + 'static,
     V: commonware_codec::Codec + Clone + AsRef<[u8]> + Send + Sync + 'static,
+    const N: usize,
     E: ValueEncoding<Value = V> + Send + Sync + 'static,
 >(
     raw_store: PrefixedStoreClient,
@@ -189,7 +193,10 @@ pub fn unordered_operation_log_stack<
 where
     unordered::Operation<F, K, E>: Encode + Decode,
 {
-    let reader = Arc::new(Unordered::<F, H, K, V, E>::new(raw_store.clone(), op_cfg));
+    let reader = Arc::new(Unordered::<F, H, K, V, N, E>::new(
+        raw_store.clone(),
+        op_cfg,
+    ));
     super::stack(OperationLogServiceServer::new(OperationLogServer::new(
         reader, raw_store,
     )))

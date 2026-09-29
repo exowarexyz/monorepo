@@ -34,9 +34,10 @@ use crate::error::{error_key, QmdbError};
 use crate::proof::{
     CurrentOperationRangeProofResult, OperationRangeCheckpoint, RawBatchMultiProof,
     RawKeyExclusionProof, RawKeyLookupProof, RawKeyRangeProof, RawKeyValueProof, RawMultiProof,
-    VerifiedCurrentRange, VerifiedKeyValue, VerifiedMultiOperations, VerifiedOperationRange,
+    VerifiedCurrentRange, VerifiedKeyLookup, VerifiedKeyRange, VerifiedKeyValue,
+    VerifiedMultiOperations, VerifiedOperationRange,
 };
-use crate::request::span_contains;
+use crate::request::{span_contains, validate_key_range};
 use crate::OperationKv;
 use crate::PublishedWatermark;
 use crate::VersionedValue;
@@ -349,7 +350,7 @@ where
     }
 
     /// Verified raw multi-proof over a set of keys.
-    pub async fn multi_proof_raw_at<Q: AsRef<[u8]>>(
+    pub async fn multi_proof_raw<Q: AsRef<[u8]>>(
         &self,
         watermark: Location<F>,
         keys: &[Q],
@@ -362,12 +363,12 @@ where
     }
 
     /// Verified multi-proof over a set of keys.
-    pub async fn multi_proof_at<Q: AsRef<[u8]>>(
+    pub async fn multi_proof<Q: AsRef<[u8]>>(
         &self,
         watermark: Location<F>,
         keys: &[Q],
     ) -> Result<VerifiedMultiOperations<H::Digest, K, V, F, E>, QmdbError> {
-        let raw = self.multi_proof_raw_at(watermark, keys).await?;
+        let raw = self.multi_proof_raw(watermark, keys).await?;
         Ok(VerifiedMultiOperations {
             root: raw.root,
             operations: raw.operations,
@@ -375,14 +376,15 @@ where
     }
 
     /// Verified contiguous range of operations.
-    pub async fn operation_range_proof(
+    pub async fn operation_range(
         &self,
-        watermark: Location<F>,
+        tip: Location<F>,
         start_location: Location<F>,
         max_locations: u32,
+        min_sequence_number: Option<u64>,
     ) -> Result<VerifiedOperationRange<H::Digest, ordered::Operation<F, K, E>, F>, QmdbError> {
         let checkpoint = self
-            .operation_range_checkpoint(watermark, start_location, max_locations)
+            .operation_range_checkpoint(tip, start_location, max_locations, min_sequence_number)
             .await?;
         let operations = checkpoint
             .encoded_operations
@@ -394,19 +396,22 @@ where
             })
             .collect::<Result<Vec<_>, _>>()?;
         Ok(VerifiedOperationRange {
+            tip: checkpoint.watermark,
             root: checkpoint.root,
             start_location: checkpoint.start_location,
             operations,
         })
     }
 
+    /// Operation-range checkpoint: the proof, pinned nodes, and encoded operations.
     pub async fn operation_range_checkpoint(
         &self,
-        watermark: Location<F>,
+        tip: Location<F>,
         start_location: Location<F>,
         max_locations: u32,
+        min_sequence_number: Option<u64>,
     ) -> Result<OperationRangeCheckpoint<H::Digest, F>, QmdbError> {
-        let watermark = self.resolve_watermark(watermark, None).await?;
+        let watermark = self.resolve_watermark(tip, min_sequence_number).await?;
         self.operation_range_checkpoint_at(watermark, start_location, max_locations)
             .await
     }
@@ -445,7 +450,7 @@ where
     }
 
     /// Verified raw current-state proof for a contiguous operation range.
-    pub async fn current_operation_range_proof_raw_at(
+    pub async fn current_operation_range_raw(
         &self,
         watermark: Location<F>,
         start_location: Location<F>,
@@ -498,15 +503,15 @@ where
     }
 
     /// Verified contiguous range from the current-state variant (with bitmap chunks).
-    pub async fn current_operation_range_proof(
+    pub async fn current_operation_range(
         &self,
         watermark: Location<F>,
         start_location: Location<F>,
         max_locations: u32,
         min_sequence_number: Option<u64>,
-    ) -> Result<VerifiedCurrentRange<H::Digest, K, V, N, F, E>, QmdbError> {
+    ) -> Result<VerifiedCurrentRange<H::Digest, ordered::Operation<F, K, E>, N, F>, QmdbError> {
         let raw = self
-            .current_operation_range_proof_raw_at(
+            .current_operation_range_raw(
                 watermark,
                 start_location,
                 max_locations,
@@ -514,6 +519,7 @@ where
             )
             .await?;
         Ok(VerifiedCurrentRange {
+            tip: raw.watermark,
             root: raw.root,
             start_location: raw.start_location,
             operations: raw.operations,
@@ -585,7 +591,7 @@ where
     }
 
     /// Verified raw current-state proof for a single key.
-    pub async fn key_value_proof_raw_at<Q: AsRef<[u8]>>(
+    pub async fn get_raw<Q: AsRef<[u8]>>(
         &self,
         watermark: Location<F>,
         key: Q,
@@ -600,19 +606,85 @@ where
     /// Verified current-state proof for a single key. The returned
     /// `operation` is the matching `Update`. Its `next_key` is the value
     /// the proof was verified against.
-    pub async fn key_value_proof_at<Q: AsRef<[u8]>>(
+    pub async fn get(
         &self,
-        watermark: Location<F>,
-        key: Q,
+        tip: Location<F>,
+        key: &K,
         min_sequence_number: Option<u64>,
     ) -> Result<VerifiedKeyValue<H::Digest, ordered::Operation<F, K, E>, F>, QmdbError> {
+        let raw = self.get_raw(tip, key.as_ref(), min_sequence_number).await?;
+        Ok(verified_key_value(raw))
+    }
+
+    /// Verified current-state lookups for `keys`: a hit with its value proof,
+    /// or a miss proven by exclusion, in request order.
+    pub async fn get_many(
+        &self,
+        tip: Location<F>,
+        keys: &[K],
+        min_sequence_number: Option<u64>,
+    ) -> Result<Vec<VerifiedKeyLookup<H::Digest, K, V, F, E>>, QmdbError> {
+        let raw = self.get_many_raw(tip, keys, min_sequence_number).await?;
+        Ok(raw
+            .into_iter()
+            .map(|lookup| match lookup {
+                RawKeyLookupProof::Hit(proof) => VerifiedKeyLookup::Hit(verified_key_value(proof)),
+                RawKeyLookupProof::Miss(proof) => VerifiedKeyLookup::Miss {
+                    key: proof.requested_key,
+                },
+            })
+            .collect())
+    }
+
+    /// Verified ordered current-state range for `[start_key, end_key)`, at most
+    /// `limit` entries.
+    pub async fn get_range(
+        &self,
+        tip: Location<F>,
+        start_key: K,
+        end_key: Option<K>,
+        limit: u32,
+        min_sequence_number: Option<u64>,
+    ) -> Result<VerifiedKeyRange<H::Digest, K, V, F, E>, QmdbError> {
         let raw = self
-            .key_value_proof_raw_at(watermark, key, min_sequence_number)
+            .get_range_raw(
+                tip,
+                start_key.clone(),
+                end_key.clone(),
+                limit,
+                min_sequence_number,
+            )
             .await?;
-        Ok(VerifiedKeyValue {
-            root: raw.root,
-            location: raw.proof.loc,
-            operation: raw.operation,
+        let start_successor = raw.start_proof.map(|proof| match proof.proof {
+            ExclusionProof::KeyValue(_, update) => Some(update.next_key),
+            ExclusionProof::Commit(_, _) => None,
+        });
+        let entries = raw
+            .entries
+            .into_iter()
+            .map(verified_key_value)
+            .collect::<Vec<_>>();
+        let keys = entries
+            .iter()
+            .map(|entry| match &entry.operation {
+                ordered::Operation::Update(update) => Ok((&update.key, &update.next_key)),
+                _ => Err(QmdbError::CorruptData(
+                    "key range entry is not an update".to_string(),
+                )),
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let next_start_key = validate_key_range(
+            &start_key,
+            end_key.as_ref(),
+            limit,
+            &keys,
+            start_successor.flatten().as_ref(),
+        )
+        .map_err(QmdbError::RangeMismatch)?
+        .cloned();
+        Ok(VerifiedKeyRange {
+            entries,
+            next_start_key,
         })
     }
 
@@ -776,7 +848,7 @@ where
     }
 
     /// Verified current-state lookup proofs for explicit keys, preserving request order.
-    pub async fn key_lookup_proofs_raw_at(
+    pub async fn get_many_raw(
         &self,
         watermark: Location<F>,
         keys: &[K],
@@ -814,7 +886,7 @@ where
     }
 
     /// Verified ordered current-state range proof for `[start_key, end_key)`.
-    pub async fn key_range_proof_raw_at(
+    pub async fn get_range_raw(
         &self,
         watermark: Location<F>,
         start_key: K,
@@ -1108,5 +1180,15 @@ where
                 Self::decode_operation(op_cfg, start_location + offset as u64, &bytes)
             })
             .collect()
+    }
+}
+
+fn verified_key_value<D: commonware_cryptography::Digest, Op, F: Graftable, const N: usize>(
+    raw: RawKeyValueProof<D, Op, N, F>,
+) -> VerifiedKeyValue<D, Op, F> {
+    VerifiedKeyValue {
+        root: raw.root,
+        location: raw.proof.loc,
+        operation: raw.operation,
     }
 }

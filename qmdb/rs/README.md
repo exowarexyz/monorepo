@@ -241,13 +241,19 @@ the source DB.
 
 All four readers expose historical operation roots and range proofs. Ordered
 and unordered readers provide indexed historical key queries. `adapter::Ordered`
-also exposes `multi_proof_at`. Immutable provides indexed `get_at`, and keyless
+also exposes `multi_proof`. Immutable provides indexed `get_at`, and keyless
 provides location-based `get_at`.
 
 Each `service::server` stack function mounts the services one kind supports.
 The matching `service::client` kind type (`Ordered`, `Unordered`, `Immutable`,
 `Keyless`) composes the per-service clients from `service::client::rpc` for
 that stack.
+
+Adapter readers and service clients of the same kind share method names,
+arguments, and `Verified*` result types: `get`, `get_many`, `get_range`,
+`operation_range`, and `current_operation_range`, as each kind supports them.
+Service client methods also take the trusted root to verify against. Adapter
+readers verify against the root stored with the proof.
 
 | Connect stack | Services |
 |---|---|
@@ -269,7 +275,9 @@ the requested watermark.
 `OperationLogClient` verifies historical ranges against a caller-supplied root.
 Without a current-root witness this is the operation-log root. When a response
 contains that witness, verification binds the operation log to the supplied
-current root. Native `root_at` always returns the operation-log root.
+current root. Either way, the returned `VerifiedOperationRange.root` is the
+operation-log root the range is proven against, as on the adapter path. Native
+`root_at` always returns the operation-log root.
 `current_root_at` returns the current root.
 
 Unary range verification binds the exact requested
@@ -278,7 +286,8 @@ verify a linear interval and forward pagination over authenticated successor
 links. Generic key ordering follows `K::Ord`.
 
 Rust subscriptions use `message_with_root` to obtain an independently trusted
-root for each frame tip. Subscription filters support exact bytes, prefixes,
+root for each frame tip. Each frame's `root` is the operation-log root the frame is
+proven against, which matches `VerifiedOperationRange.root`. Subscription filters support exact bytes, prefixes,
 and regexes over logical keys and values. Reconnect from
 `resume_sequence_number + 1`.
 
