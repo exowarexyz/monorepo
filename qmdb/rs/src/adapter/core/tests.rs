@@ -320,7 +320,7 @@ async fn client_resolvers_keep_cached_publication_evidence_with_a_higher_caller_
         ),
         ((0..=MAX_OPERATION_SIZE).into(), ()),
     );
-    let unordered: Unordered<mmr::Family, Sha256, Vec<u8>, Vec<u8>> = Unordered::new(
+    let unordered: Unordered<mmr::Family, Sha256, Vec<u8>, Vec<u8>, 32> = Unordered::new(
         store.clone(),
         (
             ((0..=MAX_OPERATION_SIZE).into(), ()),

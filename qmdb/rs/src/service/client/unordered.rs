@@ -6,6 +6,8 @@ use std::fmt::Display;
 use bytes::Bytes;
 use commonware_codec::{Decode, DecodeExt, Encode, Read};
 use commonware_cryptography::Hasher;
+use commonware_storage::merkle::Location;
+use commonware_storage::qmdb::sync::Target as SyncTarget;
 use commonware_storage::{
     merkle::Graftable,
     qmdb::{
@@ -16,9 +18,17 @@ use commonware_storage::{
         operation::Key as QmdbKey,
     },
 };
+use commonware_utils::range::NonEmptyRange;
 use connectrpc::client::{ClientConfig, ClientTransport};
 use exoware_sdk::proto::PreferZstdHttpClient;
 use http_body::Body;
+
+use super::rpc::OperationLogSubscription;
+use crate::proof::{VerifiedCurrentRange, VerifiedOperationRange};
+use crate::service::proto::qmdb::v1::{
+    GetCurrentOperationRangeRequest, GetManyRequest, GetOperationRangeRequest, GetRequest,
+    SubscribeRequest,
+};
 
 use crate::proof::VerifiedKeyValue;
 use crate::service::proto::qmdb::v1::{
@@ -166,9 +176,9 @@ pub struct Unordered<
 > where
     unordered::Operation<F, K, E>: Encode + Read,
 {
-    pub key_lookup: KeyLookupClient<T, UnorderedLookupVerifier<F, H, K, V, N, E>>,
-    pub current_operation: CurrentOperationClient<T, F, H, unordered::Operation<F, K, E>, N>,
-    pub operation_log: OperationLogClient<T, F, H, unordered::Operation<F, K, E>>,
+    key_lookup: KeyLookupClient<T, UnorderedLookupVerifier<F, H, K, V, N, E>>,
+    current_operation: CurrentOperationClient<T, F, H, unordered::Operation<F, K, E>, N>,
+    operation_log: OperationLogClient<T, F, H, unordered::Operation<F, K, E>>,
 }
 
 impl<F, H, K, V, const N: usize, E> Unordered<PreferZstdHttpClient, F, H, K, V, N, E>
@@ -221,5 +231,119 @@ where
             ),
             operation_log: OperationLogClient::new(transport, config, op_cfg),
         }
+    }
+
+    /// Verified current-state proof for `key` at `tip`.
+    pub async fn get(
+        &self,
+        tip: Location<F>,
+        key: &K,
+        min_sequence_number: Option<u64>,
+        root: &H::Digest,
+    ) -> Result<VerifiedKeyValue<H::Digest, unordered::Operation<F, K, E>, F>, QmdbError> {
+        self.key_lookup
+            .get(
+                GetRequest {
+                    key: key.encode().to_vec(),
+                    tip: tip.as_u64(),
+                    min_sequence_number,
+                    ..Default::default()
+                },
+                root,
+            )
+            .await
+    }
+
+    /// Verified current-state hits for `keys`, in request order. Missing or
+    /// inactive keys are omitted: unordered QMDB has no exclusion proofs.
+    pub async fn get_many(
+        &self,
+        tip: Location<F>,
+        keys: &[K],
+        min_sequence_number: Option<u64>,
+        root: &H::Digest,
+    ) -> Result<Vec<VerifiedKeyValue<H::Digest, unordered::Operation<F, K, E>, F>>, QmdbError> {
+        self.key_lookup
+            .get_many(
+                GetManyRequest {
+                    keys: keys.iter().map(|key| key.encode().to_vec()).collect(),
+                    tip: tip.as_u64(),
+                    min_sequence_number,
+                    ..Default::default()
+                },
+                root,
+            )
+            .await
+    }
+
+    /// Verified current-state operations and bitmap chunks for
+    /// `[start_location, start_location + max_locations)`, capped at `tip`.
+    pub async fn current_operation_range(
+        &self,
+        tip: Location<F>,
+        start_location: Location<F>,
+        max_locations: u32,
+        min_sequence_number: Option<u64>,
+        root: &H::Digest,
+    ) -> Result<VerifiedCurrentRange<H::Digest, unordered::Operation<F, K, E>, N, F>, QmdbError>
+    {
+        self.current_operation
+            .get_current_operation_range(
+                GetCurrentOperationRangeRequest {
+                    tip: tip.as_u64(),
+                    start_location: start_location.as_u64(),
+                    max_locations,
+                    min_sequence_number,
+                    ..Default::default()
+                },
+                root,
+            )
+            .await
+    }
+
+    /// Commonware sync target for `range`, authenticated against the trusted
+    /// current `root`.
+    pub async fn current_sync_target(
+        &self,
+        range: NonEmptyRange<Location<F>>,
+        root: &H::Digest,
+    ) -> Result<SyncTarget<F, H::Digest>, QmdbError> {
+        self.operation_log.current_sync_target(range, root).await
+    }
+
+    /// Verified contiguous operations `[start_location, start_location + max_locations)`,
+    /// capped at `tip`.
+    pub async fn operation_range(
+        &self,
+        tip: Location<F>,
+        start_location: Location<F>,
+        max_locations: u32,
+        min_sequence_number: Option<u64>,
+        root: &H::Digest,
+    ) -> Result<VerifiedOperationRange<H::Digest, unordered::Operation<F, K, E>, F>, QmdbError>
+    {
+        self.operation_log
+            .get_operation_range(
+                GetOperationRangeRequest {
+                    tip: tip.as_u64(),
+                    start_location: start_location.as_u64(),
+                    max_locations,
+                    min_sequence_number,
+                    ..Default::default()
+                },
+                root,
+            )
+            .await
+    }
+
+    /// Subscribe to proof-carrying batches of the operation log.
+    pub async fn subscribe(
+        &self,
+        request: SubscribeRequest,
+    ) -> Result<
+        OperationLogSubscription<T::ResponseBody, F, H, unordered::Operation<F, K, E>>,
+        QmdbError,
+    > {
+        self.operation_log.subscribe(request).await
     }
 }

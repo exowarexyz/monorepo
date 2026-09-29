@@ -21,7 +21,7 @@ pub(crate) trait CurrentOperationReader<const N: usize>: Send + Sync + 'static {
     type Digest: commonware_cryptography::Digest;
     type Operation: commonware_codec::Codec;
 
-    fn current_operation_range_proof(
+    fn current_operation_range(
         &self,
         watermark: Location<Self::Family>,
         start_location: Location<Self::Family>,
@@ -68,7 +68,7 @@ where
         let reader = self.reader.clone();
         async move {
             let proof = reader
-                .current_operation_range_proof(
+                .current_operation_range(
                     Location::new(request.tip),
                     Location::new(request.start_location),
                     request.max_locations,

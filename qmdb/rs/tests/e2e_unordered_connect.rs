@@ -77,6 +77,7 @@ async fn spawn_qmdb_range_server(
             Sha256,
             Vec<u8>,
             Vec<u8>,
+            N,
             commonware_storage::qmdb::any::value::VariableEncoding<Vec<u8>>,
         >(raw_store, op_cfg()),
     )
@@ -92,6 +93,7 @@ async fn spawn_mmb_qmdb_range_server(
             Sha256,
             Vec<u8>,
             Vec<u8>,
+            N,
             commonware_storage::qmdb::any::value::VariableEncoding<Vec<u8>>,
         >(raw_store, op_cfg()),
     )
@@ -122,6 +124,26 @@ fn mmb_operation_log_client(
     base: &str,
 ) -> OperationLogClient<PreferZstdHttpClient, mmb::Family, Sha256, MmbBatchOperation> {
     OperationLogClient::plaintext(base, op_cfg())
+}
+
+type RpcLookupVerifier = exoware_qmdb::service::client::rpc::UnorderedLookupVerifier<
+    mmr::Family,
+    Sha256,
+    Digest,
+    Vec<u8>,
+    N,
+    commonware_storage::qmdb::any::value::VariableEncoding<Vec<u8>>,
+>;
+
+/// Request-level verifying client, for responses the typed API cannot shape.
+fn key_lookup_rpc_verifier(
+    base: &str,
+) -> exoware_qmdb::service::client::rpc::KeyLookupClient<PreferZstdHttpClient, RpcLookupVerifier> {
+    exoware_qmdb::service::client::rpc::KeyLookupClient::new(
+        PreferZstdHttpClient::plaintext(),
+        ClientConfig::new(base.parse().expect("qmdb uri")),
+        RpcLookupVerifier::new(fixed_key_op_cfg()),
+    )
 }
 
 fn key_lookup_client(
@@ -568,16 +590,10 @@ async fn test_unordered_connect_get_many_returns_present_key_proofs() {
     let connect_client = key_lookup_client(&qmdb_url);
 
     let results = connect_client
-        .key_lookup
         .get_many(
-            ProtoGetManyRequest {
-                keys: vec![
-                    source.alpha.as_ref().to_vec(),
-                    source.beta.as_ref().to_vec(),
-                ],
-                tip: source.latest_location.as_u64(),
-                ..Default::default()
-            },
+            source.latest_location,
+            &[source.alpha, source.beta],
+            None,
             &source.root,
         )
         .await
@@ -594,15 +610,7 @@ async fn test_unordered_connect_get_many_returns_present_key_proofs() {
     assert_eq!(results[1].operation, expected_beta.1);
 
     let one = connect_client
-        .key_lookup
-        .get(
-            ProtoGetRequest {
-                key: source.alpha.as_ref().to_vec(),
-                tip: source.latest_location.as_u64(),
-                ..Default::default()
-            },
-            &source.root,
-        )
+        .get(source.latest_location, &source.alpha, None, &source.root)
         .await
         .expect("get");
     assert_eq!(one.location, expected_alpha.0);
@@ -706,7 +714,7 @@ async fn test_unordered_current_endpoints_enforce_optional_sequence_minimum() {
             })
             .await
             .expect("unordered get_many at available sequence");
-        current
+        let _ = current
             .get_current_operation_range(
                 ProtoGetCurrentOperationRangeRequest {
                     tip: source.latest_location.as_u64(),
@@ -739,7 +747,7 @@ async fn test_unordered_current_endpoints_enforce_optional_sequence_minimum() {
         })
         .await
         .expect("cached unordered get_many uses the publication floor");
-    current
+    let _ = current
         .get_current_operation_range(
             ProtoGetCurrentOperationRangeRequest {
                 tip: source.latest_location.as_u64(),
@@ -875,13 +883,10 @@ async fn aligned_commit_boundary<F: commonware_storage::merkle::Graftable + Part
             .await
             .expect("publish current boundary");
         let proof = connect_client
-            .key_lookup
             .get(
-                ProtoGetRequest {
-                    key: key(257).as_ref().to_vec(),
-                    tip: operations.len() as u64 - 1,
-                    ..Default::default()
-                },
+                Location::new(operations.len() as u64 - 1),
+                &key(257),
+                None,
                 &boundary.root,
             )
             .await
@@ -1076,15 +1081,7 @@ async fn current_boundary_nodes<F: commonware_storage::merkle::Graftable + Parti
         let tip = operations.len() as u64 - 1;
         for (key_index, location) in queries {
             let proof = key_client
-                .key_lookup
-                .get(
-                    ProtoGetRequest {
-                        key: key(*key_index).as_ref().to_vec(),
-                        tip,
-                        ..Default::default()
-                    },
-                    &boundary.root,
-                )
+                .get(Location::new(tip), &key(*key_index), None, &boundary.root)
                 .await
                 .expect("current key proof across boundary transition");
             assert_eq!(proof.location, *location);
@@ -1174,13 +1171,10 @@ async fn test_unordered_connect_omits_missing_and_rejects_duplicate_range_and_st
     let missing = Sha256::fill(0xCC);
     let connect_client = key_lookup_client(&qmdb_url);
     let existing = connect_client
-        .key_lookup
         .get_many(
-            ProtoGetManyRequest {
-                keys: vec![source.alpha.as_ref().to_vec(), missing.as_ref().to_vec()],
-                tip: source.latest_location.as_u64(),
-                ..Default::default()
-            },
+            source.latest_location,
+            &[source.alpha, missing],
+            None,
             &source.root,
         )
         .await
@@ -1216,15 +1210,7 @@ async fn test_unordered_connect_omits_missing_and_rejects_duplicate_range_and_st
 
     let stale_root = Sha256::fill(0xDD);
     let err = connect_client
-        .key_lookup
-        .get_many(
-            ProtoGetManyRequest {
-                keys: vec![source.alpha.as_ref().to_vec()],
-                tip: source.latest_location.as_u64(),
-                ..Default::default()
-            },
-            &stale_root,
-        )
+        .get_many(source.latest_location, &[source.alpha], None, &stale_root)
         .await
         .expect_err("stale root should be rejected");
     assert!(matches!(
@@ -1317,8 +1303,7 @@ async fn test_current_unordered_variable_fixed_keys_variable_values_mmr_get_many
             })),
         ))
         .await;
-        let result = key_lookup_client(&url)
-            .key_lookup
+        let result = key_lookup_rpc_verifier(&url)
             .get_many(
                 ProtoGetManyRequest {
                     keys,

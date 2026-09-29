@@ -25,9 +25,11 @@ type Digest = commonware_cryptography::sha256::Digest;
 type BatchProof = Proof<mmr::Family, Digest>;
 type UnorderedBatchOperation = UnorderedQmdbOperation<mmr::Family, Vec<u8>, Vec<u8>>;
 type FixedUnorderedBatchOperation = FixedUnorderedOperation<mmr::Family, Digest, Digest>;
-type VariableClient = exoware_qmdb::adapter::Unordered<mmr::Family, Sha256, Vec<u8>, Vec<u8>>;
+// Bitmap chunk size; unused here because these tests upload no current state.
+const N: usize = 32;
+type VariableClient = exoware_qmdb::adapter::Unordered<mmr::Family, Sha256, Vec<u8>, Vec<u8>, N>;
 type FixedClient =
-    exoware_qmdb::adapter::Unordered<mmr::Family, Sha256, Digest, Digest, FixedEncoding<Digest>>;
+    exoware_qmdb::adapter::Unordered<mmr::Family, Sha256, Digest, Digest, N, FixedEncoding<Digest>>;
 type VariableDb = LocalUnorderedDb<
     mmr::Family,
     cw_tokio::Context,
@@ -237,10 +239,11 @@ async fn test_unordered_round_trip() {
     );
 
     let proof = qmdb_client
-        .operation_range_proof(
+        .operation_range(
             source.latest_location,
             Location::new(0),
             source.operations.len() as u32,
+            None,
         )
         .await
         .expect("proof");
@@ -277,10 +280,11 @@ async fn test_unordered_fixed_round_trip() {
     }
 
     let proof = qmdb_client
-        .operation_range_proof(
+        .operation_range(
             source.latest_location,
             Location::new(0),
             source.operations.len() as u32,
+            None,
         )
         .await
         .expect("fixed proof");

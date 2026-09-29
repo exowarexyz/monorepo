@@ -157,7 +157,7 @@ async fn test_mirror_unordered_from_local() {
     )
     .await
     .expect("upload 1");
-    let qmdb_client: exoware_qmdb::adapter::Unordered<mmr::Family, Sha256, Vec<u8>, Vec<u8>> =
+    let qmdb_client: exoware_qmdb::adapter::Unordered<mmr::Family, Sha256, Vec<u8>, Vec<u8>, N> =
         exoware_qmdb::adapter::Unordered::new(
             PrefixedStoreClient::empty(store_client.clone()),
             (

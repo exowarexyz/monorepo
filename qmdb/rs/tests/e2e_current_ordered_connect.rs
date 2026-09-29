@@ -544,13 +544,10 @@ async fn test_ordered_connect_get_returns_current_key_value_proof() {
     let connect_client = key_lookup_client(&qmdb_url);
 
     let proof = connect_client
-        .key_lookup
         .get(
-            ProtoGetRequest {
-                key: encoded_key(b"alpha"),
-                tip: source.latest_location.as_u64(),
-                ..Default::default()
-            },
+            source.latest_location,
+            &b"alpha".to_vec(),
+            None,
             &source.current_boundary.root,
         )
         .await
@@ -583,7 +580,7 @@ async fn test_ordered_get_after_grafted_boundary_returns_current_key_value_proof
 
     let key = b"k-00000400".to_vec();
     let proof = ordered_client
-        .key_value_proof_at(source.latest_location, key.as_slice(), None)
+        .get(source.latest_location, &key, None)
         .await
         .expect("get after grafted boundary");
     let expected = latest_operation_for_key(&source.operations, &key);
@@ -602,13 +599,10 @@ async fn test_ordered_connect_get_many_returns_current_key_lookup_proofs() {
     let connect_client = key_lookup_client(&qmdb_url);
 
     let proof = connect_client
-        .key_lookup
         .get_many(
-            ProtoGetManyRequest {
-                keys: vec![encoded_key(b"alpha"), encoded_key(b"beta")],
-                tip: source.latest_location.as_u64(),
-                ..Default::default()
-            },
+            source.latest_location,
+            &[b"alpha".to_vec(), b"beta".to_vec()],
+            None,
             &source.current_boundary.root,
         )
         .await
@@ -645,33 +639,27 @@ async fn test_ordered_connect_get_many_returns_miss_proofs_and_rejects_duplicate
     let connect_client = key_lookup_client(&qmdb_url);
 
     let proof = connect_client
-        .key_lookup
         .get_many(
-            ProtoGetManyRequest {
-                keys: vec![encoded_key(b"alpha"), encoded_key(b"aardvark")],
-                tip: source.latest_location.as_u64(),
-                ..Default::default()
-            },
+            source.latest_location,
+            &[b"alpha".to_vec(), b"aardvark".to_vec()],
+            None,
             &source.current_boundary.root,
         )
         .await
         .expect("get_many");
     assert_eq!(proof.len(), 2);
     assert!(matches!(proof[0], VerifiedKeyLookup::Hit(_)));
-    let aardvark = encoded_key(b"aardvark");
+    let aardvark = b"aardvark".to_vec();
     assert!(matches!(
         &proof[1],
         VerifiedKeyLookup::Miss { key } if key == &aardvark
     ));
 
     let err = connect_client
-        .key_lookup
         .get_many(
-            ProtoGetManyRequest {
-                keys: vec![encoded_key(b"alpha"), encoded_key(b"alpha")],
-                tip: source.latest_location.as_u64(),
-                ..Default::default()
-            },
+            source.latest_location,
+            &[b"alpha".to_vec(), b"alpha".to_vec()],
+            None,
             &source.current_boundary.root,
         )
         .await
@@ -689,15 +677,12 @@ async fn test_ordered_connect_get_range_verifies_complete_empty_and_partial_page
     let connect_client = key_lookup_client(&qmdb_url);
 
     let complete = connect_client
-        .key_range
         .get_range(
-            ProtoGetRangeRequest {
-                start_key: encoded_key(b"a"),
-                end_key: Some(encoded_key(b"c")),
-                limit: 10,
-                tip: source.latest_location.as_u64(),
-                ..Default::default()
-            },
+            source.latest_location,
+            b"a".to_vec(),
+            Some(b"c".to_vec()),
+            10,
+            None,
             &source.current_boundary.root,
         )
         .await
@@ -714,32 +699,26 @@ async fn test_ordered_connect_get_range_verifies_complete_empty_and_partial_page
     assert_eq!(complete_keys, vec![b"alpha".to_vec(), b"beta".to_vec()]);
 
     let partial = connect_client
-        .key_range
         .get_range(
-            ProtoGetRangeRequest {
-                start_key: encoded_key(b"a"),
-                end_key: Some(encoded_key(b"z")),
-                limit: 1,
-                tip: source.latest_location.as_u64(),
-                ..Default::default()
-            },
+            source.latest_location,
+            b"a".to_vec(),
+            Some(b"z".to_vec()),
+            1,
+            None,
             &source.current_boundary.root,
         )
         .await
         .expect("partial get_range");
     assert_eq!(partial.entries.len(), 1);
-    assert_eq!(partial.next_start_key, Some(encoded_key(b"beta").into()));
+    assert_eq!(partial.next_start_key, Some(b"beta".to_vec()));
 
     let empty = connect_client
-        .key_range
         .get_range(
-            ProtoGetRangeRequest {
-                start_key: encoded_key(b"aardvark"),
-                end_key: Some(encoded_key(b"alpha")),
-                limit: 10,
-                tip: source.latest_location.as_u64(),
-                ..Default::default()
-            },
+            source.latest_location,
+            b"aardvark".to_vec(),
+            Some(b"alpha".to_vec()),
+            10,
+            None,
             &source.current_boundary.root,
         )
         .await
@@ -1093,15 +1072,12 @@ async fn test_ordered_connect_client_rejects_get_range_boundary_omission() {
     let connect_client = key_lookup_client(&static_url);
 
     let err = connect_client
-        .key_range
         .get_range(
-            ProtoGetRangeRequest {
-                start_key: encoded_key(b"a"),
-                end_key: Some(encoded_key(b"c")),
-                limit: 10,
-                tip: source.latest_location.as_u64(),
-                ..Default::default()
-            },
+            source.latest_location,
+            b"a".to_vec(),
+            Some(b"c".to_vec()),
+            10,
+            None,
             &source.current_boundary.root,
         )
         .await
@@ -1163,14 +1139,12 @@ async fn test_ordered_connect_client_rejects_empty_unbounded_get_range_before_ne
     let connect_client = key_lookup_client(&static_url);
 
     let err = connect_client
-        .key_range
         .get_range(
-            ProtoGetRangeRequest {
-                start_key: encoded_key(b"aardvark"),
-                limit: 10,
-                tip: source.latest_location.as_u64(),
-                ..Default::default()
-            },
+            source.latest_location,
+            b"aardvark".to_vec(),
+            None,
+            10,
+            None,
             &source.current_boundary.root,
         )
         .await
@@ -1218,13 +1192,10 @@ async fn test_ordered_connect_client_rejects_invalid_get_proof() {
     let connect_client = key_lookup_client(&static_url);
 
     let err = connect_client
-        .key_lookup
         .get(
-            ProtoGetRequest {
-                key: encoded_key(b"alpha"),
-                tip: source.latest_location.as_u64(),
-                ..Default::default()
-            },
+            source.latest_location,
+            &b"alpha".to_vec(),
+            None,
             &source.current_boundary.root,
         )
         .await
@@ -1277,13 +1248,10 @@ async fn test_ordered_connect_client_rejects_invalid_get_many_proof() {
     let connect_client = key_lookup_client(&static_url);
 
     let err = connect_client
-        .key_lookup
         .get_many(
-            ProtoGetManyRequest {
-                keys: vec![encoded_key(b"alpha"), encoded_key(b"beta")],
-                tip: source.latest_location.as_u64(),
-                ..Default::default()
-            },
+            source.latest_location,
+            &[b"alpha".to_vec(), b"beta".to_vec()],
+            None,
             &source.current_boundary.root,
         )
         .await
@@ -1326,13 +1294,10 @@ async fn test_ordered_connect_client_rejects_get_many_proof_for_different_key() 
     let connect_client = key_lookup_client(&static_url);
 
     let err = connect_client
-        .key_lookup
         .get_many(
-            ProtoGetManyRequest {
-                keys: vec![encoded_key(b"alpha")],
-                tip: source.latest_location.as_u64(),
-                ..Default::default()
-            },
+            source.latest_location,
+            &[b"alpha".to_vec()],
+            None,
             &source.current_boundary.root,
         )
         .await
@@ -1399,14 +1364,12 @@ async fn test_ordered_connect_client_rejects_get_range_page_shorter_than_limit()
     let connect_client = key_lookup_client(&static_url);
 
     let err = connect_client
-        .key_range
         .get_range(
-            ProtoGetRangeRequest {
-                start_key: encoded_key(b"a"),
-                limit: 2,
-                tip: source.latest_location.as_u64(),
-                ..Default::default()
-            },
+            source.latest_location,
+            b"a".to_vec(),
+            None,
+            2,
+            None,
             &source.current_boundary.root,
         )
         .await

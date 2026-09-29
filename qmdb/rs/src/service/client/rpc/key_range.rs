@@ -230,7 +230,7 @@ where
         start_successor.as_ref(),
     )
     .map_err(QmdbError::RangeMismatch)?
-    .map(Encode::encode);
+    .cloned();
 
     Ok(VerifiedKeyRange {
         entries,

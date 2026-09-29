@@ -24,6 +24,7 @@ use connectrpc::client::{ClientConfig, ClientTransport, ServerStream};
 use exoware_sdk::proto::PreferZstdHttpClient;
 use http_body::Body;
 
+use crate::proof::VerifiedOperationRange;
 use crate::request::OperationWindow;
 use crate::service::proto::qmdb::v1::{
     GetOperationRangeRequest, HistoricalMultiProof, HistoricalOperationRangeProof,
@@ -37,16 +38,10 @@ use super::{connect_error_to_qmdb, proof_digest_cap};
 pub struct OperationLogSubscribeProof<D: Digest, Op, F: Family> {
     pub resume_sequence_number: u64,
     pub tip: Location<F>,
+    /// Operations-log root the frame is proven against; see
+    /// [`crate::proof::VerifiedOperationRange::root`].
     pub root: D,
     pub operations: Vec<(Location<F>, Op)>,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct OperationLogRangeProof<D: Digest, Op, F: Family> {
-    pub tip: Location<F>,
-    pub root: D,
-    pub start_location: Location<F>,
-    pub operations: Vec<Op>,
 }
 
 impl<T, F, H, Op> Source for OperationLogClient<T, F, H, Op>
@@ -201,7 +196,7 @@ where
         &self,
         request: GetOperationRangeRequest,
         expected_root: &H::Digest,
-    ) -> Result<OperationLogRangeProof<H::Digest, Op, F>, QmdbError> {
+    ) -> Result<VerifiedOperationRange<H::Digest, Op, F>, QmdbError> {
         let tip = Location::<F>::new(request.tip);
         let window =
             OperationWindow::new(request.tip, request.start_location, request.max_locations)?;
@@ -217,7 +212,7 @@ where
             expected_root,
             window,
         )?;
-        Ok(OperationLogRangeProof {
+        Ok(VerifiedOperationRange {
             tip,
             root,
             start_location: Location::<F>::new(proof.start_location),
@@ -458,7 +453,7 @@ where
             kind: crate::ProofKind::BatchMulti,
         });
     }
-    Ok((*root, operations))
+    Ok((target_root, operations))
 }
 
 fn verify_operation_range_from_proto<F, H, Op>(
@@ -523,5 +518,5 @@ where
             kind: crate::ProofKind::RangeCheckpoint,
         });
     }
-    Ok((*root, decoded_operations))
+    Ok((target_root, decoded_operations))
 }

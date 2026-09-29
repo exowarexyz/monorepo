@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use commonware_codec::{Decode, DecodeExt, Encode, Read};
-use commonware_cryptography::{Digest, Hasher};
+use commonware_cryptography::Hasher;
 use commonware_storage::{
     merkle::{Graftable, Location},
     qmdb::current::proof::RangeProof,
@@ -15,6 +15,7 @@ use connectrpc::client::{ClientConfig, ClientTransport};
 use exoware_sdk::proto::PreferZstdHttpClient;
 use http_body::Body;
 
+use crate::proof::VerifiedCurrentRange;
 use crate::request::OperationWindow;
 use crate::service::proto::qmdb::v1::{
     CurrentOperationRangeProof as ProtoCurrentOperationRangeProof, CurrentOperationServiceClient,
@@ -23,15 +24,6 @@ use crate::service::proto::qmdb::v1::{
 use crate::QmdbError;
 
 use super::{connect_error_to_qmdb, proof_digest_cap};
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct CurrentOperationRangeProof<D: Digest, Op, const N: usize, F: Graftable> {
-    pub tip: Location<F>,
-    pub root: D,
-    pub start_location: Location<F>,
-    pub operations: Vec<Op>,
-    pub chunks: Vec<[u8; N]>,
-}
 
 /// Client for `qmdb.v1.CurrentOperationService`, parameterized on the Merkle
 /// family and current-state operation type.
@@ -87,7 +79,7 @@ where
         &self,
         request: GetCurrentOperationRangeRequest,
         expected_root: &H::Digest,
-    ) -> Result<CurrentOperationRangeProof<H::Digest, Op, N, F>, QmdbError> {
+    ) -> Result<VerifiedCurrentRange<H::Digest, Op, N, F>, QmdbError> {
         let tip = Location::<F>::new(request.tip);
         let window =
             OperationWindow::new(request.tip, request.start_location, request.max_locations)?;
@@ -109,7 +101,7 @@ where
             expected_root,
             window,
         )?;
-        Ok(CurrentOperationRangeProof {
+        Ok(VerifiedCurrentRange {
             tip,
             root,
             start_location: Location::<F>::new(proof.start_location),

@@ -181,13 +181,15 @@ where
         }
     }
 
+    /// Operation-range checkpoint: the proof, pinned nodes, and encoded operations.
     pub async fn operation_range_checkpoint(
         &self,
-        watermark: Location<F>,
+        tip: Location<F>,
         start_location: Location<F>,
         max_locations: u32,
+        min_sequence_number: Option<u64>,
     ) -> Result<OperationRangeCheckpoint<H::Digest, F>, QmdbError> {
-        let watermark = self.resolve_watermark(watermark, None).await?;
+        let watermark = self.resolve_watermark(tip, min_sequence_number).await?;
         self.operation_range_checkpoint_at(watermark, start_location, max_locations)
             .await
     }
@@ -248,15 +250,16 @@ where
     }
 
     /// Verified contiguous range of operations.
-    pub async fn operation_range_proof(
+    pub async fn operation_range(
         &self,
-        watermark: Location<F>,
+        tip: Location<F>,
         start_location: Location<F>,
         max_locations: u32,
+        min_sequence_number: Option<u64>,
     ) -> Result<VerifiedOperationRange<H::Digest, immutable::Operation<F, K, E>, F>, QmdbError>
     {
         let checkpoint = self
-            .operation_range_checkpoint(watermark, start_location, max_locations)
+            .operation_range_checkpoint(tip, start_location, max_locations, min_sequence_number)
             .await?;
         let operations = checkpoint
             .encoded_operations
@@ -273,6 +276,7 @@ where
             })
             .collect::<Result<Vec<_>, _>>()?;
         Ok(VerifiedOperationRange {
+            tip: checkpoint.watermark,
             root: checkpoint.root,
             start_location: checkpoint.start_location,
             operations,

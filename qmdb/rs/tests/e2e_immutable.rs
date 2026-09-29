@@ -246,10 +246,11 @@ async fn test_immutable_round_trip() {
         .is_none());
 
     let proof = qmdb_client
-        .operation_range_proof(
+        .operation_range(
             source.latest_location,
             Location::<mmr::Family>::new(0),
             source.operations.len() as u32,
+            None,
         )
         .await
         .expect("proof");
@@ -291,10 +292,11 @@ async fn test_immutable_fixed_round_trip() {
     assert_eq!(got.value, Some(source.queried_value));
 
     let proof = qmdb_client
-        .operation_range_proof(
+        .operation_range(
             source.latest_location,
             Location::<mmr::Family>::new(0),
             source.operations.len() as u32,
+            None,
         )
         .await
         .expect("fixed proof");
