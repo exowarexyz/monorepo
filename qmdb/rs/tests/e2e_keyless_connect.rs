@@ -26,7 +26,7 @@ use exoware_qmdb::{
     OperationLogSubscribeProof, QmdbError,
 };
 use exoware_sdk::common::kv::v1::{filter as proto_filter, Filter as ProtoFilter};
-use exoware_sdk::proto::PreferZstdHttpClient;
+use exoware_sdk::proto::{decode_connect_error, PreferZstdHttpClient};
 use exoware_sdk::{PrefixedStoreClient, RetryConfig, StoreClient};
 
 type Digest = commonware_cryptography::sha256::Digest;
@@ -268,6 +268,21 @@ async fn test_keyless_connect_get_operation_range_returns_verifiable_proof() {
         .expect_err("caller floor must govern an uncached publication lookup");
     assert_eq!(error.code, connectrpc::ErrorCode::Aborted);
 
+    let detail = decode_connect_error(&error).expect("structured consistency error");
+    let info = detail.error_info.expect("consistency reason");
+    assert_eq!(info.reason, "CONSISTENCY_NOT_READY");
+    assert_eq!(info.domain, "store.query");
+    assert_eq!(
+        detail
+            .retry_info
+            .expect("retry hint")
+            .retry_delay
+            .as_option()
+            .unwrap()
+            .seconds,
+        1
+    );
+
     for min_sequence_number in [None, Some(1)] {
         let proof = connect_client
             .get_operation_range(
@@ -314,19 +329,14 @@ async fn test_operation_range_preserves_late_consistency_errors() {
             mut request: axum::http::Request<ClientBody>,
         ) -> BoxFuture<'static, Result<axum::http::Response<Self::ResponseBody>, Self::Error>>
         {
-            let index = {
-                let mut calls = self.calls.lock().unwrap();
-                let index = calls.len();
-                calls.push(request.uri().path().to_string());
-                index
+            let replica = match request.uri().path().rsplit('/').next().unwrap() {
+                "GetMany" => 2,
+                _ => 0,
             };
-            let replica = if index < 3 {
-                0
-            } else if index == 3 {
-                1
-            } else {
-                2
-            };
+            self.calls
+                .lock()
+                .unwrap()
+                .push(request.uri().path().to_string());
             let mut parts = request.uri().clone().into_parts();
             parts.scheme = self.origins[replica].scheme().cloned();
             parts.authority = self.origins[replica].authority().cloned();
@@ -363,7 +373,7 @@ async fn test_operation_range_preserves_late_consistency_errors() {
         replicas.push(store);
     }
 
-    // All proof rows precede these frontiers. The last replica cannot meet the requested floor.
+    // Publication raises the floor above the replica selected for the proof data.
     let calls = Arc::new(Mutex::new(Vec::new()));
     let client = StoreClient::builder()
         .url("http://replicas.test")
@@ -382,7 +392,6 @@ async fn test_operation_range_preserves_late_consistency_errors() {
             tip: 3,
             start_location: 1,
             max_locations: 1,
-            min_sequence_number: Some(200),
             ..Default::default()
         })
         .await
@@ -394,9 +403,40 @@ async fn test_operation_range_preserves_late_consistency_errors() {
             .iter()
             .map(|path| path.rsplit('/').next().unwrap())
             .collect::<Vec<_>>(),
-        ["Range", "Get", "GetMany", "Range", "GetMany"]
+        ["Range", "GetMany"]
     );
     assert_eq!(error.code, connectrpc::ErrorCode::Aborted);
+
+    let detail = decode_connect_error(&error).expect("structured consistency error");
+    let info = detail.error_info.expect("consistency reason");
+    assert_eq!(info.reason, "CONSISTENCY_NOT_READY");
+    assert_eq!(info.domain, "store.query");
+    assert_eq!(
+        info.metadata
+            .get("required_sequence_number")
+            .map(String::as_str),
+        Some("200")
+    );
+    assert_eq!(
+        info.metadata
+            .get("current_sequence_number")
+            .map(String::as_str),
+        Some("150")
+    );
+    assert_eq!(
+        detail.query_detail.expect("query metadata").sequence_number,
+        150
+    );
+    assert_eq!(
+        detail
+            .retry_info
+            .expect("retry hint")
+            .retry_delay
+            .as_option()
+            .unwrap()
+            .seconds,
+        1
+    );
 
     for sequence in 151u64..=200 {
         let key = Bytes::from(format!("unrelated/{sequence}"));

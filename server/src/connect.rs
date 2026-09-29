@@ -81,7 +81,8 @@ fn query_detail(sequence_number: u64, extra: QueryExtra) -> Detail {
     }
 }
 
-fn consistency_not_ready_error(required: u64, current: u64) -> ConnectError {
+/// Build a consistency rejection for an observed snapshot with the standard retry hint.
+pub fn consistency_not_ready_error(required: u64, current: u64) -> ConnectError {
     let err = with_retry_hint(
         ConnectError::aborted("minimum consistency token is not yet visible"),
         RETRY_HINT_DELAY,
@@ -2774,6 +2775,25 @@ mod tests {
             assert_eq!(engine.state.lock().unwrap().query_calls, [1, 1, 2]);
             assert_eq!(engine.range_next_count(), 0);
         }
+    }
+
+    #[test]
+    fn consistency_rejection_preserves_snapshot_and_retry_details() {
+        let error = consistency_not_ready_error(9, 7);
+        assert_eq!(error.code, connectrpc::ErrorCode::Aborted);
+        let decoded = decode_connect_error(&error).expect("decode consistency error");
+        let info = decoded.error_info.expect("error info");
+        assert_eq!(info.domain, "store.query");
+        assert_eq!(info.reason, "CONSISTENCY_NOT_READY");
+        assert_eq!(info.metadata["required_sequence_number"], "9");
+        assert_eq!(info.metadata["current_sequence_number"], "7");
+        assert_eq!(
+            decoded.query_detail.expect("query detail").sequence_number,
+            7
+        );
+        let retry = decoded.retry_info.expect("retry info").retry_delay;
+        let retry = retry.as_option().expect("retry delay");
+        assert_eq!((retry.seconds, retry.nanos), (1, 0));
     }
 
     #[tokio::test]
