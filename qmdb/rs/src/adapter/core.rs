@@ -11,14 +11,13 @@ use crossbeam_utils::atomic::AtomicCell;
 use exoware_sdk::keys::Key;
 use exoware_sdk::{RangeMode, ReadSession};
 
-use crate::codec::{
-    decode_digest, decode_operation_location_key, decode_update_location,
-    decode_watermark_location, encode_node_key, encode_operation_key, encode_presence_key,
-    encode_update_key, ensure_encoded_value_size, merkle_size_for_watermark,
-    op_count_for_watermark, WATERMARK_PREFIX,
+use crate::adapter::codec::{
+    decode_operation_location_key, decode_update_location, decode_watermark_location,
+    encode_node_key, encode_operation_key, encode_presence_key, encode_update_key,
+    ensure_encoded_value_size, merkle_size_for_watermark, op_count_for_watermark, WATERMARK_PREFIX,
 };
 use crate::error::QmdbError;
-use crate::VersionedValue;
+use crate::{decode_digest, PublishedWatermark, VersionedValue};
 
 pub(crate) async fn read_latest_watermark_with_sequence<F: Family>(
     session: &ReadSession,
@@ -54,13 +53,6 @@ pub(crate) trait LatestValueResolver<F: Family, K: Codec, V: Codec> {
         requested_key: &[u8],
         op_bytes: Vec<u8>,
     ) -> Result<VersionedValue<K, V, F>, QmdbError>;
-}
-
-/// A requested watermark and the minimum Store sequence that makes it readable.
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct PublishedWatermark<F: Family> {
-    pub(crate) location: Location<F>,
-    pub(crate) sequence_number: u64,
 }
 
 /// Caches the greatest published QMDB watermark and the store sequence returned

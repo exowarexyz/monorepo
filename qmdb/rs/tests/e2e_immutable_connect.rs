@@ -18,12 +18,12 @@ use commonware_storage::qmdb::immutable::variable::{
 use commonware_storage::translator::TwoCap;
 use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16, NZU64};
 use connectrpc::client::{BoxFuture, ClientBody, ClientTransport};
-use exoware_qmdb::proto::qmdb::v1::{
+use exoware_qmdb::service::proto::qmdb::v1::{
     GetOperationRangeRequest as ProtoGetOperationRangeRequest,
     SubscribeRequest as ProtoSubscribeRequest,
 };
 use exoware_qmdb::{
-    immutable_operation_log_connect_stack, OperationLogClient, OperationLogSubscribeProof,
+    service::client::rpc::OperationLogClient, service::client::rpc::OperationLogSubscribeProof,
     QmdbError,
 };
 use exoware_sdk::proto::PreferZstdHttpClient;
@@ -44,13 +44,15 @@ type BatchOperation = ImmutableOperation<mmr::Family, FixedBytes<32>, Vec<u8>>;
 async fn spawn_qmdb_server(
     raw_store: PrefixedStoreClient,
 ) -> (tokio::task::JoinHandle<()>, String) {
-    common::spawn_connect_service(immutable_operation_log_connect_stack::<
-        mmr::Family,
-        commonware_cryptography::Sha256,
-        FixedBytes<32>,
-        Vec<u8>,
-        commonware_storage::qmdb::any::value::VariableEncoding<Vec<u8>>,
-    >(raw_store, ((), ((0..=10000).into(), ()))))
+    common::spawn_connect_service(
+        exoware_qmdb::service::server::immutable_operation_log_stack::<
+            mmr::Family,
+            commonware_cryptography::Sha256,
+            FixedBytes<32>,
+            Vec<u8>,
+            commonware_storage::qmdb::any::value::VariableEncoding<Vec<u8>>,
+        >(raw_store, ((), ((0..=10000).into(), ()))),
+    )
     .await
 }
 

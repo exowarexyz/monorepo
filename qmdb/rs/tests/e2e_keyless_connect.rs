@@ -17,13 +17,13 @@ use commonware_storage::qmdb::sync::{Request, Response, Source as _, Target};
 use commonware_utils::channel::mpsc;
 use commonware_utils::{NZUsize, NZU16, NZU64};
 use connectrpc::client::{BoxFuture, ClientBody, ClientTransport};
-use exoware_qmdb::proto::qmdb::v1::{
+use exoware_qmdb::service::proto::qmdb::v1::{
     GetOperationRangeRequest as ProtoGetOperationRangeRequest,
     SubscribeRequest as ProtoSubscribeRequest,
 };
 use exoware_qmdb::{
-    keyless_operation_log_connect_stack, KeylessClient, OperationLogClient,
-    OperationLogSubscribeProof, QmdbError,
+    service::client::rpc::OperationLogClient, service::client::rpc::OperationLogSubscribeProof,
+    QmdbError,
 };
 use exoware_sdk::common::kv::v1::{filter as proto_filter, Filter as ProtoFilter};
 use exoware_sdk::proto::{decode_connect_error, PreferZstdHttpClient};
@@ -44,18 +44,21 @@ type SyncDb = Keyless<
     commonware_cryptography::Sha256,
     commonware_parallel::Sequential,
 >;
-type TestKeylessClient = KeylessClient<mmr::Family, commonware_cryptography::Sha256, Vec<u8>>;
+type TestKeylessClient =
+    exoware_qmdb::adapter::Keyless<mmr::Family, commonware_cryptography::Sha256, Vec<u8>>;
 type BatchOperation = KeylessOperation<mmr::Family, Vec<u8>>;
 
 async fn spawn_qmdb_server(
     raw_store: PrefixedStoreClient,
 ) -> (tokio::task::JoinHandle<()>, String) {
-    common::spawn_connect_service(keyless_operation_log_connect_stack::<
-        mmr::Family,
-        commonware_cryptography::Sha256,
-        Vec<u8>,
-        commonware_storage::qmdb::any::value::VariableEncoding<Vec<u8>>,
-    >(raw_store, ((0..=10000).into(), ())))
+    common::spawn_connect_service(
+        exoware_qmdb::service::server::keyless_operation_log_stack::<
+            mmr::Family,
+            commonware_cryptography::Sha256,
+            Vec<u8>,
+            commonware_storage::qmdb::any::value::VariableEncoding<Vec<u8>>,
+        >(raw_store, ((0..=10000).into(), ())),
+    )
     .await
 }
 
@@ -72,7 +75,9 @@ fn operation_log_client(
 
 #[tokio::test]
 async fn test_overlapping_atomic_uploads_emit_each_operation_once() {
-    use exoware_qmdb::{stage_authenticated_range, stage_watermark};
+    use exoware_qmdb::{
+        adapter::upload::stage_authenticated_range, adapter::upload::stage_watermark,
+    };
     use exoware_sdk::StoreWriteBatch;
 
     let store_client = common::local_store_client().await;
@@ -767,7 +772,9 @@ async fn test_keyless_connect_subscribe_rejects_key_filters() {
 
 #[tokio::test]
 async fn test_keyless_data_only_frames_replay_in_store_order_after_delayed_publication() {
-    use exoware_qmdb::{stage_authenticated_range, stage_watermark, NODE_FAMILY};
+    use exoware_qmdb::{
+        adapter::upload::stage_authenticated_range, adapter::upload::stage_watermark, NODE_FAMILY,
+    };
     use exoware_sdk::StoreWriteBatch;
 
     let store_client = common::local_store_client().await;

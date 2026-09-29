@@ -15,25 +15,25 @@ use commonware_storage::qmdb::{
 };
 use exoware_sdk::{PrefixedStoreClient, RangeMode, ReadSession};
 
-use crate::codec::{
+use crate::adapter::codec::{
     chunk_index_for_location, clear_below_floor, decode_current_boundary_metadata,
     decode_update_index_value_present, decode_update_location, encode_chunk_key,
     encode_current_meta_key, encode_ops_root_witness_key, merkle_size_for_watermark,
     CurrentBoundaryMetadata,
 };
-use crate::connect::OperationKv;
-use crate::core;
+use crate::adapter::core;
+use crate::adapter::operation_range::load_operation_range_checkpoint;
+use crate::adapter::read_cache::ReadCache;
+use crate::adapter::storage::{KvCurrentStorage, KvMerkleStorage, ProofBitmap};
 use crate::error::{error_key, QmdbError};
-use crate::operation_range::load_operation_range_checkpoint;
 use crate::proof::{
     CurrentOperationRangeProofResult, OperationRangeCheckpoint, RawBatchMultiProof,
     RawKeyValueProof, VerifiedKeyValue, VerifiedOperationRange,
 };
-use crate::read_cache::ReadCache;
-use crate::storage::{KvCurrentStorage, KvMerkleStorage, ProofBitmap};
 use crate::VersionedValue;
+use crate::{OperationKv, PublishedWatermark};
 
-pub struct UnorderedClient<
+pub struct Unordered<
     F: Graftable,
     H: Hasher,
     K: QmdbKey + Codec,
@@ -55,7 +55,7 @@ impl<
         K: QmdbKey + Codec,
         V: Codec + Clone + Send + Sync,
         E: ValueEncoding<Value = V>,
-    > Clone for UnorderedClient<F, H, K, V, E>
+    > Clone for Unordered<F, H, K, V, E>
 where
     unordered::Operation<F, K, E>: commonware_codec::Read,
 {
@@ -76,16 +76,16 @@ impl<
         K: QmdbKey + Codec,
         V: Codec + Clone + Send + Sync,
         E: ValueEncoding<Value = V>,
-    > std::fmt::Debug for UnorderedClient<F, H, K, V, E>
+    > std::fmt::Debug for Unordered<F, H, K, V, E>
 where
     unordered::Operation<F, K, E>: commonware_codec::Read,
 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("UnorderedClient").finish_non_exhaustive()
+        f.debug_struct("Unordered").finish_non_exhaustive()
     }
 }
 
-impl<F, H, K, V, E> crate::core::LatestValueResolver<F, K, V> for UnorderedClient<F, H, K, V, E>
+impl<F, H, K, V, E> crate::adapter::core::LatestValueResolver<F, K, V> for Unordered<F, H, K, V, E>
 where
     F: Graftable,
     H: Hasher,
@@ -123,7 +123,7 @@ where
     }
 }
 
-impl<F, H, K, V, E> UnorderedClient<F, H, K, V, E>
+impl<F, H, K, V, E> Unordered<F, H, K, V, E>
 where
     F: Graftable,
     H: Hasher,
@@ -147,7 +147,7 @@ where
     }
 }
 
-impl<F, H, K, V, E> UnorderedClient<F, H, K, V, E>
+impl<F, H, K, V, E> Unordered<F, H, K, V, E>
 where
     F: Graftable,
     H: Hasher,
@@ -207,7 +207,7 @@ where
         &self,
         watermark: Location<F>,
         min_sequence_number: Option<u64>,
-    ) -> Result<core::PublishedWatermark<F>, QmdbError> {
+    ) -> Result<PublishedWatermark<F>, QmdbError> {
         let session = ReadSession::fixed(self.store.clone(), min_sequence_number);
         self.publication.require(&session, watermark).await
     }
@@ -225,7 +225,7 @@ where
 
     pub(crate) async fn operation_range_checkpoint_at(
         &self,
-        watermark: core::PublishedWatermark<F>,
+        watermark: PublishedWatermark<F>,
         start_location: Location<F>,
         max_locations: u32,
     ) -> Result<OperationRangeCheckpoint<H::Digest, F>, QmdbError> {
@@ -259,7 +259,7 @@ where
 
     pub(crate) async fn batch_multi_proof(
         &self,
-        watermark: core::PublishedWatermark<F>,
+        watermark: PublishedWatermark<F>,
         operations: Vec<(Location<F>, Vec<u8>)>,
     ) -> Result<RawBatchMultiProof<H::Digest, F>, QmdbError> {
         let session = ReadSession::fixed(self.store.clone(), Some(watermark.sequence_number));
@@ -315,7 +315,7 @@ where
 
     async fn current_operation_range_proof_raw_at_watermark<const N: usize>(
         &self,
-        watermark: core::PublishedWatermark<F>,
+        watermark: PublishedWatermark<F>,
         start_location: Location<F>,
         max_locations: u32,
     ) -> Result<
@@ -385,7 +385,7 @@ where
 
     async fn key_value_proof_raw_at_watermark<const N: usize, Q: AsRef<[u8]>>(
         &self,
-        watermark: core::PublishedWatermark<F>,
+        watermark: PublishedWatermark<F>,
         key: Q,
     ) -> Result<RawKeyValueProof<H::Digest, unordered::Operation<F, K, E>, N, F>, QmdbError> {
         let session = ReadSession::fixed(self.store.clone(), Some(watermark.sequence_number));

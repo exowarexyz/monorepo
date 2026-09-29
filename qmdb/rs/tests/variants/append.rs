@@ -23,10 +23,11 @@ use commonware_storage::{
 };
 use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16, NZU64};
 use exoware_qmdb::{
-    immutable_operation_log_connect_stack, keyless_operation_log_connect_stack,
-    prepare_authenticated_range, proto::qmdb::v1::GetOperationRangeRequest,
-    stage_authenticated_range, stage_watermark, AuthenticatedOperationRange, ImmutableClient,
-    KeylessClient, OperationLogClient, PreparedAuthenticatedRange, QmdbError, UploadOperation,
+    adapter::upload::prepare_authenticated_range, adapter::upload::stage_authenticated_range,
+    adapter::upload::stage_watermark, adapter::upload::AuthenticatedOperationRange,
+    adapter::upload::PreparedAuthenticatedRange, adapter::upload::UploadOperation,
+    service::client::rpc::OperationLogClient, service::proto::qmdb::v1::GetOperationRangeRequest,
+    QmdbError,
 };
 use exoware_sdk::{PrefixedStoreClient, StoreWriteBatch};
 
@@ -498,16 +499,17 @@ async fn check_immutable<F, K, V, E>(
         .expect("join immutable source runner");
     let store = common::local_store_client().await;
     let prefixed = PrefixedStoreClient::empty(store);
-    let reader = Arc::new(ImmutableClient::<F, Sha256, K, V, E>::new(
+    let reader = Arc::new(exoware_qmdb::adapter::Immutable::<F, Sha256, K, V, E>::new(
         prefixed.clone(),
         codec.clone(),
     ));
-    let (server, url) =
-        common::spawn_connect_service(immutable_operation_log_connect_stack::<F, Sha256, K, V, E>(
+    let (server, url) = common::spawn_connect_service(
+        exoware_qmdb::service::server::immutable_operation_log_stack::<F, Sha256, K, V, E>(
             prefixed.clone(),
             codec.clone(),
-        ))
-        .await;
+        ),
+    )
+    .await;
     let mut all_operations = vec![source.bootstrap];
     let (bootstrap_root, bootstrap) = common::prepare_operations::<F, _>(&all_operations, &codec);
     assert_eq!(bootstrap_root, source.bootstrap_root);
@@ -568,16 +570,17 @@ async fn check_keyless<F, V, E>(
         .expect("join keyless source runner");
     let store = common::local_store_client().await;
     let prefixed = PrefixedStoreClient::empty(store);
-    let reader = Arc::new(KeylessClient::<F, Sha256, V, E>::new(
+    let reader = Arc::new(exoware_qmdb::adapter::Keyless::<F, Sha256, V, E>::new(
         prefixed.clone(),
         codec.clone(),
     ));
-    let (server, url) =
-        common::spawn_connect_service(keyless_operation_log_connect_stack::<F, Sha256, V, E>(
+    let (server, url) = common::spawn_connect_service(
+        exoware_qmdb::service::server::keyless_operation_log_stack::<F, Sha256, V, E>(
             prefixed.clone(),
             codec.clone(),
-        ))
-        .await;
+        ),
+    )
+    .await;
     let mut all_operations = vec![source.bootstrap];
     let (bootstrap_root, bootstrap) = common::prepare_operations::<F, _>(&all_operations, &codec);
     assert_eq!(bootstrap_root, source.bootstrap_root);

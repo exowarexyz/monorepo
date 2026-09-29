@@ -16,10 +16,11 @@ use commonware_storage::qmdb::{
     keyless::variable::Operation,
     sync::{Request, Response, Source as _},
 };
-use exoware_qmdb::proto::qmdb::v1::GetOperationRangeRequest;
+use exoware_qmdb::service::proto::qmdb::v1::GetOperationRangeRequest;
 use exoware_qmdb::{
-    keyless_operation_log_connect_stack, prepare_authenticated_range, stage_authenticated_range,
-    stage_watermark, AuthenticatedOperationRange, KeylessClient, OperationLogClient,
+    adapter::upload::prepare_authenticated_range, adapter::upload::stage_authenticated_range,
+    adapter::upload::stage_watermark, adapter::upload::AuthenticatedOperationRange,
+    service::client::rpc::OperationLogClient,
 };
 use exoware_sdk::{PrefixedStoreClient, StoreWriteBatch};
 
@@ -84,7 +85,7 @@ async fn check_large_locations<F: Graftable + PartialEq>(family: &str, start: u6
     stage_watermark(&upload_client, end - 1, &mut publication).unwrap();
     publication.commit(&store_client).await.unwrap();
 
-    let qmdb_client = Arc::new(KeylessClient::<F, Sha256, Vec<u8>>::new(
+    let qmdb_client = Arc::new(exoware_qmdb::adapter::Keyless::<F, Sha256, Vec<u8>>::new(
         upload_client.clone(),
         config,
     ));
@@ -93,12 +94,14 @@ async fn check_large_locations<F: Graftable + PartialEq>(family: &str, start: u6
         Some(end - 1)
     );
     assert_eq!(qmdb_client.root_at(end - 1).await.unwrap(), expected_root);
-    let (server, url) = common::spawn_connect_service(keyless_operation_log_connect_stack::<
-        F,
-        Sha256,
-        Vec<u8>,
-        VariableEncoding<Vec<u8>>,
-    >(upload_client, config))
+    let (server, url) = common::spawn_connect_service(
+        exoware_qmdb::service::server::keyless_operation_log_stack::<
+            F,
+            Sha256,
+            Vec<u8>,
+            VariableEncoding<Vec<u8>>,
+        >(upload_client, config),
+    )
     .await;
     let request = GetOperationRangeRequest {
         tip: (end - 1).as_u64(),

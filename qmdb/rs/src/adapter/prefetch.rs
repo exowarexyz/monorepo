@@ -10,10 +10,8 @@ use commonware_storage::merkle::{
     self, storage::Storage as MerkleStorage, Family, Location, Position,
 };
 
-use crate::{
-    codec::{merkle_size_for_watermark, op_count_for_watermark},
-    QmdbError,
-};
+use crate::adapter::codec::{merkle_size_for_watermark, op_count_for_watermark};
+use crate::QmdbError;
 
 pub(crate) fn range_positions<F: Family>(
     watermark: Location<F>,

@@ -22,14 +22,15 @@ use commonware_storage::qmdb::{
 };
 use commonware_storage::translator::TwoCap;
 use commonware_utils::{channel::mpsc, NZUsize, NZU16, NZU64};
-use exoware_qmdb::proto::qmdb::v1::{
+use exoware_qmdb::service::proto::qmdb::v1::{
     GetCurrentOperationRangeRequest as ProtoGetCurrentOperationRangeRequest,
     GetOperationRangeRequest as ProtoGetOperationRangeRequest,
     SubscribeRequest as ProtoSubscribeRequest,
 };
 use exoware_qmdb::{
-    ordered_connect_stack, recover_boundary_state, CurrentBoundaryState, CurrentOperationClient,
-    OperationLogClient, OperationLogSubscribeProof, QmdbError, MAX_OPERATION_SIZE,
+    adapter::upload::recover_boundary_state, service::client::rpc::CurrentOperationClient,
+    service::client::rpc::OperationLogClient, service::client::rpc::OperationLogSubscribeProof,
+    CurrentBoundaryState, QmdbError, MAX_OPERATION_SIZE,
 };
 use exoware_sdk::common::kv::v1::{filter as proto_filter, Filter as ProtoFilter};
 use exoware_sdk::proto::PreferZstdHttpClient;
@@ -75,7 +76,7 @@ type MmbAnyDb = AnyOrderedQmdbDb<
 async fn spawn_qmdb_server(
     raw_store: PrefixedStoreClient,
 ) -> (tokio::task::JoinHandle<()>, String) {
-    common::spawn_connect_service(ordered_connect_stack::<
+    common::spawn_connect_service(exoware_qmdb::service::server::ordered_stack::<
         mmr::Family,
         Sha256,
         Vec<u8>,
@@ -101,7 +102,7 @@ fn current_operation_client(
 async fn spawn_mmb_qmdb_server(
     raw_store: PrefixedStoreClient,
 ) -> (tokio::task::JoinHandle<()>, String) {
-    common::spawn_connect_service(ordered_connect_stack::<
+    common::spawn_connect_service(exoware_qmdb::service::server::ordered_stack::<
         mmb::Family,
         Sha256,
         Vec<u8>,

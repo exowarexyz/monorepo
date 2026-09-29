@@ -19,14 +19,15 @@ use commonware_storage::qmdb::{
     operation::Key as QmdbKey,
 };
 use commonware_utils::{iter::zip_eq, NZUsize, NZU16, NZU64};
-use exoware_qmdb::proto::qmdb::v1::{
+use exoware_qmdb::service::proto::qmdb::v1::{
     GetCurrentOperationRangeRequest, GetManyRequest, GetOperationRangeRequest, GetRequest,
 };
 use exoware_qmdb::{
-    prepare_authenticated_range, recover_boundary_state, stage_authenticated_range,
-    stage_watermark, unordered_connect_stack, unordered_operation_log_connect_stack,
-    AuthenticatedOperationRange, CurrentBoundaryState, CurrentOperationClient, OperationLogClient,
-    UnorderedClient, UnorderedConnectClient, UploadOperation, MAX_OPERATION_SIZE,
+    adapter::upload::prepare_authenticated_range, adapter::upload::recover_boundary_state,
+    adapter::upload::stage_authenticated_range, adapter::upload::stage_watermark,
+    adapter::upload::AuthenticatedOperationRange, adapter::upload::UploadOperation,
+    service::client::rpc::CurrentOperationClient, service::client::rpc::OperationLogClient,
+    CurrentBoundaryState, MAX_OPERATION_SIZE,
 };
 use exoware_sdk::{PrefixedStoreClient, StoreWriteBatch};
 
@@ -59,22 +60,27 @@ async fn check_mirror<F, K, V, E>(
 {
     let store = common::local_store_client().await;
     let prefixed = PrefixedStoreClient::empty(store.clone());
-    let local = Arc::new(UnorderedClient::<F, Sha256, K, V, E>::new(
+    let local = Arc::new(exoware_qmdb::adapter::Unordered::<F, Sha256, K, V, E>::new(
         prefixed.clone(),
         op_cfg.clone(),
     ));
     let (server, url) = if snapshots[0].current.is_some() {
-        common::spawn_connect_service(unordered_connect_stack::<F, Sha256, K, V, N, E>(
-            prefixed.clone(),
-            op_cfg.clone(),
-            key_cfg,
-        ))
+        common::spawn_connect_service(exoware_qmdb::service::server::unordered_stack::<
+            F,
+            Sha256,
+            K,
+            V,
+            N,
+            E,
+        >(prefixed.clone(), op_cfg.clone(), key_cfg))
         .await
     } else {
-        common::spawn_connect_service(unordered_operation_log_connect_stack::<F, Sha256, K, V, E>(
-            prefixed.clone(),
-            op_cfg.clone(),
-        ))
+        common::spawn_connect_service(
+            exoware_qmdb::service::server::unordered_operation_log_stack::<F, Sha256, K, V, E>(
+                prefixed.clone(),
+                op_cfg.clone(),
+            ),
+        )
         .await
     };
     let remote = OperationLogClient::<_, F, Sha256, unordered::Operation<F, K, E>>::plaintext(
@@ -86,8 +92,10 @@ async fn check_mirror<F, K, V, E>(
             &url,
             op_cfg.clone(),
         );
-    let lookup =
-        UnorderedConnectClient::<_, F, Sha256, K, V, N, E>::plaintext(&url, op_cfg.clone());
+    let lookup = exoware_qmdb::service::client::Unordered::<_, F, Sha256, K, V, N, E>::plaintext(
+        &url,
+        op_cfg.clone(),
+    );
     let wrong_root = Sha256::fill(0xDD);
     for snapshot in &snapshots {
         let tip = Location::<F>::new(snapshot.operations.len() as u64 - 1);
@@ -262,6 +270,7 @@ async fn check_mirror<F, K, V, E>(
 
             // Reversed request order also checks omission of absent or deleted keys
             let results = lookup
+                .key_lookup
                 .get_many(
                     GetManyRequest {
                         tip: tip.as_u64(),
@@ -294,6 +303,7 @@ async fn check_mirror<F, K, V, E>(
             };
             if let Some(value) = &snapshot.values[0] {
                 let hit = lookup
+                    .key_lookup
                     .get(get_request.clone(), &trusted_root)
                     .await
                     .expect("current key hit");
@@ -303,7 +313,11 @@ async fn check_mirror<F, K, V, E>(
                 assert_eq!(update.0, keys[0]);
                 assert_eq!(&update.1, value);
             }
-            assert!(lookup.get(get_request, &wrong_root).await.is_err());
+            assert!(lookup
+                .key_lookup
+                .get(get_request, &wrong_root)
+                .await
+                .is_err());
         }
     }
 

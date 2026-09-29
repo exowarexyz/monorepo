@@ -20,29 +20,30 @@ use commonware_storage::{
 };
 use exoware_sdk::{PrefixedStoreClient, RangeMode, ReadSession};
 
-use crate::codec::{
+use crate::adapter::codec::{
     chunk_index_for_location, clear_below_floor, decode_current_boundary_metadata,
     decode_update_index_value_present, decode_update_location, decode_update_raw_key,
     encode_chunk_key, encode_current_meta_key, encode_operation_key, encode_ops_root_witness_key,
     encode_update_key, merkle_size_for_watermark, CurrentBoundaryMetadata, UPDATE_PREFIX,
 };
-use crate::connect::OperationKv;
-use crate::core::{self, PublishedWatermark};
+use crate::adapter::core;
+use crate::adapter::operation_range::load_operation_range_checkpoint;
+use crate::adapter::read_cache::ReadCache;
+use crate::adapter::storage::{KvCurrentStorage, KvMerkleStorage, ProofBitmap};
 use crate::error::{error_key, QmdbError};
-use crate::operation_range::load_operation_range_checkpoint;
 use crate::proof::{
     CurrentOperationRangeProofResult, OperationRangeCheckpoint, RawBatchMultiProof,
     RawKeyExclusionProof, RawKeyLookupProof, RawKeyRangeProof, RawKeyValueProof, RawMultiProof,
     VerifiedCurrentRange, VerifiedKeyValue, VerifiedMultiOperations, VerifiedOperationRange,
 };
-use crate::read_cache::ReadCache;
 use crate::request::span_contains;
-use crate::storage::{KvCurrentStorage, KvMerkleStorage, ProofBitmap};
+use crate::OperationKv;
+use crate::PublishedWatermark;
 use crate::VersionedValue;
 
 const ACTIVE_OPERATION_GET_MANY_BATCH: usize = 1024;
 
-pub struct OrderedClient<
+pub struct Ordered<
     F: Graftable,
     H: Hasher,
     K: QmdbKey + Codec,
@@ -67,7 +68,7 @@ impl<
         V: Codec + Clone + Send + Sync,
         const N: usize,
         E: ValueEncoding<Value = V>,
-    > Clone for OrderedClient<F, H, K, V, N, E>
+    > Clone for Ordered<F, H, K, V, N, E>
 where
     ordered::Operation<F, K, E>: commonware_codec::Read,
 {
@@ -90,17 +91,17 @@ impl<
         V: Codec + Clone + Send + Sync,
         const N: usize,
         E: ValueEncoding<Value = V>,
-    > std::fmt::Debug for OrderedClient<F, H, K, V, N, E>
+    > std::fmt::Debug for Ordered<F, H, K, V, N, E>
 where
     ordered::Operation<F, K, E>: commonware_codec::Read,
 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("OrderedClient").finish_non_exhaustive()
+        f.debug_struct("Ordered").finish_non_exhaustive()
     }
 }
 
-impl<F, H, K, V, const N: usize, E> crate::core::LatestValueResolver<F, K, V>
-    for OrderedClient<F, H, K, V, N, E>
+impl<F, H, K, V, const N: usize, E> crate::adapter::core::LatestValueResolver<F, K, V>
+    for Ordered<F, H, K, V, N, E>
 where
     F: Graftable,
     H: Hasher,
@@ -137,7 +138,7 @@ where
     }
 }
 
-impl<F, H, K, V, const N: usize, E> OrderedClient<F, H, K, V, N, E>
+impl<F, H, K, V, const N: usize, E> Ordered<F, H, K, V, N, E>
 where
     F: Graftable,
     H: Hasher,
@@ -163,7 +164,7 @@ where
     }
 }
 
-impl<F, H, K, V, const N: usize, E> OrderedClient<F, H, K, V, N, E>
+impl<F, H, K, V, const N: usize, E> Ordered<F, H, K, V, N, E>
 where
     F: Graftable,
     H: Hasher,
@@ -172,10 +173,6 @@ where
     E: ValueEncoding<Value = V>,
     ordered::Operation<F, K, E>: Encode + Decode,
 {
-    pub(crate) fn decode_key(&self, encoded_key: &[u8]) -> Result<K, commonware_codec::Error> {
-        K::decode_cfg(encoded_key, &self.key_cfg)
-    }
-
     /// Refresh publication evidence and return the greatest watermark observed by this client.
     pub async fn latest_published_watermark(&self) -> Result<Option<Location<F>>, QmdbError> {
         let session = ReadSession::fixed(self.store.clone(), None);

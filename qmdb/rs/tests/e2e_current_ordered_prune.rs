@@ -19,7 +19,7 @@ use commonware_storage::qmdb::{
 use commonware_storage::translator::TwoCap;
 use commonware_utils::{NZUsize, NZU16, NZU64};
 use exoware_qmdb::{
-    recover_boundary_state, CurrentBoundaryState, OrderedClient, MAX_OPERATION_SIZE,
+    adapter::upload::recover_boundary_state, CurrentBoundaryState, MAX_OPERATION_SIZE,
 };
 use exoware_sdk::PrefixedStoreClient;
 
@@ -209,14 +209,15 @@ async fn test_mirror_ordered_prune_past_chunk_zero() {
     // `load_bitmap_chunk` must fold that bit to 0 for the root recomputation
     // to match.
     let upload_client = PrefixedStoreClient::empty(store_client.clone());
-    let qmdb_client: OrderedClient<mmr::Family, Sha256, Vec<u8>, Vec<u8>, N> = OrderedClient::new(
-        PrefixedStoreClient::empty(store_client.clone()),
-        (
+    let qmdb_client: exoware_qmdb::adapter::Ordered<mmr::Family, Sha256, Vec<u8>, Vec<u8>, N> =
+        exoware_qmdb::adapter::Ordered::new(
+            PrefixedStoreClient::empty(store_client.clone()),
+            (
+                ((0..=MAX_OPERATION_SIZE).into(), ()),
+                ((0..=MAX_OPERATION_SIZE).into(), ()),
+            ),
             ((0..=MAX_OPERATION_SIZE).into(), ()),
-            ((0..=MAX_OPERATION_SIZE).into(), ()),
-        ),
-        ((0..=MAX_OPERATION_SIZE).into(), ()),
-    );
+        );
 
     let mut operations = Vec::new();
     for outcome in &batches {

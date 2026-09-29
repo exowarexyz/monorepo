@@ -7,90 +7,85 @@ use commonware_storage::{
     merkle::{Family, Graftable, Location},
     qmdb::{
         any::value::{ValueEncoding, VariableEncoding},
-        immutable,
-        operation::Key as QmdbKey,
+        keyless,
     },
 };
 use exoware_sdk::{PrefixedStoreClient, ReadSession};
 
-use crate::codec::{decode_update_location, merkle_size_for_watermark};
-use crate::connect::OperationKv;
-use crate::core::{self, PublishedWatermark};
+use crate::adapter::codec::merkle_size_for_watermark;
+use crate::adapter::core;
+use crate::adapter::operation_range::load_operation_range_checkpoint;
+use crate::adapter::read_cache::ReadCache;
+use crate::adapter::storage::KvMerkleStorage;
 use crate::error::QmdbError;
-use crate::operation_range::load_operation_range_checkpoint;
 use crate::proof::{OperationRangeCheckpoint, RawBatchMultiProof, VerifiedOperationRange};
-use crate::read_cache::ReadCache;
-use crate::storage::KvMerkleStorage;
-use crate::VersionedValue;
+use crate::OperationKv;
+use crate::PublishedWatermark;
 
-pub struct ImmutableClient<
+pub struct Keyless<
     F: Family,
     H: Hasher,
-    K: QmdbKey,
     V: Codec + Send + Sync,
     E: ValueEncoding<Value = V> = VariableEncoding<V>,
 > where
-    immutable::Operation<F, K, E>: CodecRead,
+    keyless::Operation<F, E>: CodecRead,
 {
     store: PrefixedStoreClient,
     publication: Arc<core::PublicationCache<F>>,
-    operation_cfg: <immutable::Operation<F, K, E> as CodecRead>::Cfg,
+    op_cfg: <keyless::Operation<F, E> as CodecRead>::Cfg,
     read_cache: Arc<ReadCache<F, H::Digest>>,
-    _marker: PhantomData<(F, H, K, E)>,
+    _marker: PhantomData<(F, H, E)>,
 }
 
-impl<F, H, K, V, E> Clone for ImmutableClient<F, H, K, V, E>
+impl<F, H, V, E> Clone for Keyless<F, H, V, E>
 where
     F: Family,
     H: Hasher,
-    K: QmdbKey,
     V: Codec + Send + Sync,
     E: ValueEncoding<Value = V>,
-    immutable::Operation<F, K, E>: CodecRead,
+    keyless::Operation<F, E>: CodecRead,
 {
     fn clone(&self) -> Self {
         Self {
             store: self.store.clone(),
             publication: self.publication.clone(),
-            operation_cfg: self.operation_cfg.clone(),
+            op_cfg: self.op_cfg.clone(),
             read_cache: self.read_cache.clone(),
             _marker: PhantomData,
         }
     }
 }
 
-impl<F, H, K, V, E> std::fmt::Debug for ImmutableClient<F, H, K, V, E>
+impl<F, H, V, E> std::fmt::Debug for Keyless<F, H, V, E>
 where
     F: Family,
     H: Hasher,
-    K: QmdbKey,
     V: Codec + Send + Sync,
     E: ValueEncoding<Value = V>,
-    immutable::Operation<F, K, E>: CodecRead,
+    keyless::Operation<F, E>: CodecRead,
 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ImmutableClient").finish_non_exhaustive()
+        f.debug_struct("Keyless").finish_non_exhaustive()
     }
 }
 
-impl<F, H, K, V, E> ImmutableClient<F, H, K, V, E>
+impl<F, H, V, E> Keyless<F, H, V, E>
 where
     F: Graftable,
     H: Hasher,
-    K: QmdbKey,
     V: Codec + Clone + Send + Sync,
     E: ValueEncoding<Value = V>,
-    immutable::Operation<F, K, E>: Encode + Decode + Clone,
+    keyless::Operation<F, E>: Encode + Decode + Clone,
 {
     /// Read client for the Store namespace.
     pub fn new(
         store: PrefixedStoreClient,
-        operation_cfg: <immutable::Operation<F, K, E> as CodecRead>::Cfg,
+        op_cfg: <keyless::Operation<F, E> as CodecRead>::Cfg,
     ) -> Self {
         Self {
             store,
             publication: Arc::new(core::PublicationCache::default()),
-            operation_cfg,
+            op_cfg,
             read_cache: Arc::new(ReadCache::new()),
             _marker: PhantomData,
         }
@@ -104,20 +99,17 @@ where
     where
         V: AsRef<[u8]>,
     {
-        let op = immutable::Operation::<F, K, E>::decode_cfg(bytes, &self.operation_cfg).map_err(
-            |e| {
-                QmdbError::CorruptData(format!(
-                    "failed to decode immutable operation at location {location}: {e}"
-                ))
-            },
-        )?;
-        let key = op.key().map(|k| <K as AsRef<[u8]>>::as_ref(k).to_vec());
+        let op = keyless::Operation::<F, E>::decode_cfg(bytes, &self.op_cfg).map_err(|e| {
+            QmdbError::CorruptData(format!(
+                "failed to decode keyless operation at location {location}: {e}"
+            ))
+        })?;
         let value = match &op {
-            immutable::Operation::Set(_, value) => Some(value.as_ref().to_vec()),
-            immutable::Operation::Commit(Some(value), _) => Some(value.as_ref().to_vec()),
-            immutable::Operation::Commit(None, _) => None,
+            keyless::Operation::Append(value) => Some(value.as_ref().to_vec()),
+            keyless::Operation::Commit(Some(value), _) => Some(value.as_ref().to_vec()),
+            keyless::Operation::Commit(None, _) => None,
         };
-        Ok(OperationKv { key, value })
+        Ok(OperationKv { key: None, value })
     }
 
     /// Refresh publication evidence and return the greatest watermark observed by this client.
@@ -139,45 +131,34 @@ where
         let watermark = self.resolve_watermark(watermark, None).await?;
         let session = ReadSession::fixed(self.store.clone(), Some(watermark.sequence_number));
         let inactive_peaks =
-            inactive_peaks_at::<F, K, V, E>(&session, watermark.location, &self.operation_cfg)
-                .await?;
+            inactive_peaks_at::<F, V, E>(&session, watermark.location, &self.op_cfg).await?;
         core::compute_ops_root::<F, H>(&session, watermark.location, inactive_peaks).await
     }
 
     pub async fn get_at(
         &self,
-        key: &K,
+        location: Location<F>,
         watermark: Location<F>,
-    ) -> Result<Option<VersionedValue<K, V, F>>, QmdbError> {
+    ) -> Result<Option<V>, QmdbError> {
         let watermark = self.resolve_watermark(watermark, None).await?;
         let session = ReadSession::fixed(self.store.clone(), Some(watermark.sequence_number));
-        let Some((row_key, _row_value)) =
-            core::load_latest_update_row(&session, watermark.location, key.as_ref()).await?
-        else {
-            return Ok(None);
-        };
-        let location = decode_update_location::<F>(&row_key)?;
-        let operation = core::load_operation_at::<F, immutable::Operation<F, K, E>>(
+        let count = watermark
+            .location
+            .checked_add(1)
+            .ok_or_else(|| QmdbError::CorruptData("watermark overflow".to_string()))?;
+        if location >= count {
+            return Err(QmdbError::RangeStartOutOfBounds {
+                start: location.as_u64(),
+                count: count.as_u64(),
+            });
+        }
+        let operation = core::load_operation_at::<F, keyless::Operation<F, E>>(
             &session,
             location,
-            &self.operation_cfg,
+            &self.op_cfg,
         )
         .await?;
-        match operation {
-            immutable::Operation::Set(operation_key, value) if operation_key == *key => {
-                Ok(Some(VersionedValue {
-                    key: operation_key,
-                    location,
-                    value: Some(value),
-                }))
-            }
-            immutable::Operation::Set(_, _) => Err(QmdbError::CorruptData(format!(
-                "authenticated immutable update row does not match operation key at location {location}"
-            ))),
-            immutable::Operation::Commit(_, _) => Err(QmdbError::CorruptData(format!(
-                "authenticated immutable update row points at commit location {location}"
-            ))),
-        }
+        Ok(operation.into_value())
     }
 
     pub async fn operation_range_checkpoint(
@@ -208,12 +189,12 @@ where
             end,
             false,
             |bytes| async move {
-                let operation = core::decode_operation_at::<F, immutable::Operation<F, K, E>>(
+                let operation = core::decode_operation_at::<F, keyless::Operation<F, E>>(
                     bytes.as_ref(),
                     watermark,
-                    &self.operation_cfg,
+                    &self.op_cfg,
                 )?;
-                inactive_peaks_from_operation::<F, K, V, E>(watermark, operation)
+                inactive_peaks_from_operation::<F, V, E>(watermark, operation)
             },
         )
         .await?;
@@ -232,8 +213,7 @@ where
             _marker: PhantomData::<H::Digest>,
         };
         let inactive_peaks =
-            inactive_peaks_at::<F, K, V, E>(&session, watermark.location, &self.operation_cfg)
-                .await?;
+            inactive_peaks_at::<F, V, E>(&session, watermark.location, &self.op_cfg).await?;
         let root =
             core::compute_ops_root::<F, H>(&session, watermark.location, inactive_peaks).await?;
         crate::proof::build_batch_multi_proof::<F, H, _>(
@@ -252,8 +232,7 @@ where
         watermark: Location<F>,
         start_location: Location<F>,
         max_locations: u32,
-    ) -> Result<VerifiedOperationRange<H::Digest, immutable::Operation<F, K, E>, F>, QmdbError>
-    {
+    ) -> Result<VerifiedOperationRange<H::Digest, keyless::Operation<F, E>, F>, QmdbError> {
         let checkpoint = self
             .operation_range_checkpoint(watermark, start_location, max_locations)
             .await?;
@@ -263,12 +242,13 @@ where
             .enumerate()
             .map(|(offset, bytes)| {
                 let location = checkpoint.start_location + offset as u64;
-                immutable::Operation::<F, K, E>::decode_cfg(bytes.as_slice(), &self.operation_cfg)
-                    .map_err(|e| {
+                keyless::Operation::<F, E>::decode_cfg(bytes.as_slice(), &self.op_cfg).map_err(
+                    |e| {
                         QmdbError::CorruptData(format!(
                             "failed to decode authenticated operation at location {location}: {e}"
                         ))
-                    })
+                    },
+                )
             })
             .collect::<Result<Vec<_>, _>>()?;
         Ok(VerifiedOperationRange {
@@ -279,40 +259,34 @@ where
     }
 }
 
-async fn inactive_peaks_at<F, K, V, E>(
+async fn inactive_peaks_at<F, V, E>(
     session: &ReadSession,
     watermark: Location<F>,
-    operation_cfg: &<immutable::Operation<F, K, E> as CodecRead>::Cfg,
+    op_cfg: &<keyless::Operation<F, E> as CodecRead>::Cfg,
 ) -> Result<usize, QmdbError>
 where
     F: Graftable,
-    K: QmdbKey,
     V: Codec + Clone + Send + Sync,
     E: ValueEncoding<Value = V>,
-    immutable::Operation<F, K, E>: Decode,
+    keyless::Operation<F, E>: Decode,
 {
-    let operation = core::load_operation_at::<F, immutable::Operation<F, K, E>>(
-        session,
-        watermark,
-        operation_cfg,
-    )
-    .await?;
-    inactive_peaks_from_operation::<F, K, V, E>(watermark, operation)
+    let operation =
+        core::load_operation_at::<F, keyless::Operation<F, E>>(session, watermark, op_cfg).await?;
+    inactive_peaks_from_operation::<F, V, E>(watermark, operation)
 }
 
-fn inactive_peaks_from_operation<F, K, V, E>(
+fn inactive_peaks_from_operation<F, V, E>(
     watermark: Location<F>,
-    operation: immutable::Operation<F, K, E>,
+    operation: keyless::Operation<F, E>,
 ) -> Result<usize, QmdbError>
 where
     F: Graftable,
-    K: QmdbKey,
     V: Codec + Clone + Send + Sync,
     E: ValueEncoding<Value = V>,
 {
-    let immutable::Operation::Commit(_, floor) = operation else {
+    let keyless::Operation::Commit(_, floor) = operation else {
         return Err(QmdbError::CorruptData(format!(
-            "immutable watermark {watermark} does not point at a Commit operation"
+            "keyless watermark {watermark} does not point at a Commit operation"
         )));
     };
     core::inactive_peaks(watermark, floor)

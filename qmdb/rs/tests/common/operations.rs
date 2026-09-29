@@ -9,11 +9,14 @@ pub fn prepare_operation_range<F, Op>(
     cfg: &Op::Cfg,
 ) -> (
     commonware_cryptography::sha256::Digest,
-    exoware_qmdb::PreparedAuthenticatedRange<commonware_cryptography::sha256::Digest, F>,
+    exoware_qmdb::adapter::upload::PreparedAuthenticatedRange<
+        commonware_cryptography::sha256::Digest,
+        F,
+    >,
 )
 where
     F: Family,
-    Op: exoware_qmdb::UploadOperation<F>,
+    Op: exoware_qmdb::adapter::upload::UploadOperation<F>,
 {
     use commonware_cryptography::Sha256;
     use commonware_storage::merkle::{hasher::Hasher as _, mem::Mem, Location, Position};
@@ -44,19 +47,19 @@ where
     let pinned_nodes = F::nodes_to_pin(start)
         .map(|position| merkle.get_node(position).expect("source pinned node"))
         .collect::<Vec<_>>();
-    let range = exoware_qmdb::AuthenticatedOperationRange {
+    let range = exoware_qmdb::adapter::upload::AuthenticatedOperationRange {
         start_location: start,
         end_location: end,
         inactive_peaks: inactive,
         pinned_nodes: &pinned_nodes,
         encoded_operations: &encoded[usize::try_from(*start).expect("source start")..],
     };
-    let prepared = exoware_qmdb::prepare_authenticated_range::<F, Sha256, Op, Sequential>(
-        &range,
-        &root,
-        cfg,
-        &Sequential,
-    )
+    let prepared = exoware_qmdb::adapter::upload::prepare_authenticated_range::<
+        F,
+        Sha256,
+        Op,
+        Sequential,
+    >(&range, &root, cfg, &Sequential)
     .expect("prepare authenticated fixture");
     (root, prepared)
 }
@@ -68,11 +71,14 @@ pub fn prepare_operations<F, Op>(
     cfg: &Op::Cfg,
 ) -> (
     commonware_cryptography::sha256::Digest,
-    exoware_qmdb::PreparedAuthenticatedRange<commonware_cryptography::sha256::Digest, F>,
+    exoware_qmdb::adapter::upload::PreparedAuthenticatedRange<
+        commonware_cryptography::sha256::Digest,
+        F,
+    >,
 )
 where
     F: Family,
-    Op: exoware_qmdb::UploadOperation<F>,
+    Op: exoware_qmdb::adapter::upload::UploadOperation<F>,
 {
     prepare_operation_range(
         operations,

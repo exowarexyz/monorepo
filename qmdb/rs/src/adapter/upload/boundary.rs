@@ -15,7 +15,7 @@ use commonware_storage::qmdb::{
     operation::Operation as QmdbOperation,
 };
 
-use crate::codec::{bitmap_chunk_bits, chunk_index_for_location};
+use crate::adapter::codec::{bitmap_chunk_bits, chunk_index_for_location};
 use crate::error::QmdbError;
 use crate::CurrentBoundaryState;
 
@@ -103,7 +103,7 @@ where
 /// The caller must obtain `root`, `pruned_chunks`, and `ops_root_witness` from the
 /// same trusted local state. This function authenticates recovered chunks and nodes
 /// against `root`. It does not independently authenticate the pruned chunk count.
-/// Attach the result with [`crate::PreparedAuthenticatedRange::with_current_boundary`].
+/// Attach the result with [`crate::adapter::upload::PreparedAuthenticatedRange::with_current_boundary`].
 pub async fn recover_boundary_state<M, H, Op, const N: usize, Prove, Fut>(
     previous_operations: Option<&[Op]>,
     operations: &[Op],

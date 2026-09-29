@@ -14,10 +14,11 @@ use connectrpc::client::ClientConfig;
 use datafusion::arrow::array::Int64Array;
 use datafusion::arrow::datatypes::DataType;
 use datafusion::arrow::ipc::reader::StreamReader;
-use exoware_qmdb::proto::qmdb::v1::SubscribeRequest as QmdbSubscribeRequest;
+use exoware_qmdb::service::proto::qmdb::v1::SubscribeRequest as QmdbSubscribeRequest;
 use exoware_qmdb::{
-    keyless_operation_log_connect_stack, stage_authenticated_range, stage_watermark, KeylessClient,
-    OperationLogClient, OperationLogSubscribeProof, QmdbError,
+    adapter::upload::stage_authenticated_range, adapter::upload::stage_watermark,
+    service::client::rpc::OperationLogClient, service::client::rpc::OperationLogSubscribeProof,
+    QmdbError,
 };
 use exoware_sdk::keys::Key;
 use exoware_sdk::kv_codec::Utf8;
@@ -41,7 +42,7 @@ type Digest = commonware_cryptography::sha256::Digest;
 type QmdbFamily = mmr::Family;
 type QmdbLocation = Location<QmdbFamily>;
 type QmdbOperation = KeylessOperation<QmdbFamily, Vec<u8>>;
-type QmdbReader = KeylessClient<QmdbFamily, Sha256, Vec<u8>>;
+type QmdbReader = exoware_qmdb::adapter::Keyless<QmdbFamily, Sha256, Vec<u8>>;
 type QmdbConnectClient =
     OperationLogClient<PreferZstdHttpClient, QmdbFamily, Sha256, QmdbOperation>;
 
@@ -99,12 +100,14 @@ async fn spawn_sql_service(schema: KvSchema) -> (tokio::task::JoinHandle<()>, St
 async fn spawn_qmdb_service(client: PrefixedStoreClient) -> (tokio::task::JoinHandle<()>, String) {
     let app = Router::new()
         .route("/health", get(health))
-        .fallback_service(keyless_operation_log_connect_stack::<
-            QmdbFamily,
-            Sha256,
-            Vec<u8>,
-            VariableEncoding<Vec<u8>>,
-        >(client, ((0..=10000).into(), ())));
+        .fallback_service(
+            exoware_qmdb::service::server::keyless_operation_log_stack::<
+                QmdbFamily,
+                Sha256,
+                Vec<u8>,
+                VariableEncoding<Vec<u8>>,
+            >(client, ((0..=10000).into(), ())),
+        );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind qmdb service");

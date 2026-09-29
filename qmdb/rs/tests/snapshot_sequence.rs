@@ -19,8 +19,8 @@ use commonware_storage::qmdb::immutable::variable::{
 };
 use commonware_storage::translator::TwoCap;
 use commonware_utils::{NZUsize, NZU16, NZU64};
-use exoware_qmdb::proto::qmdb::v1::GetOperationRangeRequest;
-use exoware_qmdb::{immutable_operation_log_connect_stack, ImmutableClient, QmdbError};
+use exoware_qmdb::service::proto::qmdb::v1::GetOperationRangeRequest;
+use exoware_qmdb::QmdbError;
 use exoware_sdk::{PrefixedStoreClient, RetryConfig, StoreClient, StoreWriteBatch};
 use exoware_server::{
     Query, QueryExtra, QueryResult, RangeScan, RangeScanBatch, RangeScanResult, Sequence,
@@ -37,7 +37,8 @@ type Db = Immutable<
     TwoCap,
     commonware_parallel::Sequential,
 >;
-type Client = ImmutableClient<Family, commonware_cryptography::Sha256, Vec<u8>, Vec<u8>>;
+type Client =
+    exoware_qmdb::adapter::Immutable<Family, commonware_cryptography::Sha256, Vec<u8>, Vec<u8>>;
 
 fn operation_cfg() -> <Operation as commonware_codec::Read>::Cfg {
     (((0..=10_000).into(), ()), ((0..=10_000).into(), ()))
@@ -103,9 +104,9 @@ fn snapshot_rows(operations: &[Operation]) -> BTreeMap<Bytes, Bytes> {
         common::prepare_operations::<Family, Operation>(operations, &operation_cfg());
     let latest = prepared.latest_location();
     let mut batch = StoreWriteBatch::new();
-    exoware_qmdb::stage_authenticated_range(&staging_client, prepared, &mut batch)
+    exoware_qmdb::adapter::upload::stage_authenticated_range(&staging_client, prepared, &mut batch)
         .expect("stage authenticated range");
-    exoware_qmdb::stage_watermark(&staging_client, latest, &mut batch)
+    exoware_qmdb::adapter::upload::stage_watermark(&staging_client, latest, &mut batch)
         .expect("stage publication watermark");
     batch.entries().iter().cloned().collect()
 }
@@ -113,7 +114,8 @@ fn snapshot_rows(operations: &[Operation]) -> BTreeMap<Bytes, Bytes> {
 fn publication_key() -> Bytes {
     let store = PrefixedStoreClient::empty(StoreClient::new("http://127.0.0.1:1"));
     let mut batch = StoreWriteBatch::new();
-    exoware_qmdb::stage_watermark(&store, Location::<Family>::new(0), &mut batch).unwrap();
+    exoware_qmdb::adapter::upload::stage_watermark(&store, Location::<Family>::new(0), &mut batch)
+        .unwrap();
     batch.entries()[0].0.clone()
 }
 
@@ -384,15 +386,16 @@ async fn rpc_reads_do_not_inherit_previous_request_observations() {
             .build()
             .unwrap(),
     );
-    let (qmdb_server, qmdb_url) =
-        common::spawn_connect_service(immutable_operation_log_connect_stack::<
+    let (qmdb_server, qmdb_url) = common::spawn_connect_service(
+        exoware_qmdb::service::server::immutable_operation_log_stack::<
             Family,
             commonware_cryptography::Sha256,
             Vec<u8>,
             Vec<u8>,
             VariableEncoding<Vec<u8>>,
-        >(store, operation_cfg()))
-        .await;
+        >(store, operation_cfg()),
+    )
+    .await;
     let rpc = common::operation_log_rpc_client(&qmdb_url);
     let request = |min_sequence_number| GetOperationRangeRequest {
         tip: watermark,

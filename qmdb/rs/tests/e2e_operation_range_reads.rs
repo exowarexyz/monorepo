@@ -19,12 +19,10 @@ use commonware_storage::qmdb::any::value::VariableEncoding;
 use commonware_storage::qmdb::immutable::variable::Operation as ImmutableOperation;
 use commonware_storage::qmdb::keyless::variable::Operation as KeylessOperation;
 use connectrpc::{ConnectError, ConnectRpcService, ErrorCode, RequestContext, ServiceRequest};
-use exoware_qmdb::proto::qmdb::v1::GetOperationRangeRequest;
+use exoware_qmdb::service::proto::qmdb::v1::GetOperationRangeRequest;
 use exoware_qmdb::{
-    immutable_operation_log_connect_stack, keyless_operation_log_connect_stack,
-    ordered_operation_log_connect_stack, stage_authenticated_range, stage_watermark,
-    unordered_operation_log_connect_stack, ImmutableClient, KeylessClient, OperationLogClient,
-    OrderedClient, UnorderedClient, UploadOperation, NODE_FAMILY,
+    adapter::upload::stage_authenticated_range, adapter::upload::stage_watermark,
+    adapter::upload::UploadOperation, service::client::rpc::OperationLogClient, NODE_FAMILY,
 };
 use exoware_sdk::common::kv::v1::Entry;
 use exoware_sdk::google::rpc::{ErrorInfo, RetryInfo};
@@ -44,10 +42,10 @@ type Operation = KeylessOperation<mmr::Family, Vec<u8>>;
 type OrderedOp = OrderedOperation<mmr::Family, Vec<u8>, Vec<u8>>;
 type UnorderedOp = UnorderedOperation<mmr::Family, Vec<u8>, Vec<u8>>;
 type ImmutableOp = ImmutableOperation<mmr::Family, Vec<u8>, Vec<u8>>;
-type Keyless = KeylessClient<mmr::Family, Sha256, Vec<u8>>;
-type Ordered = OrderedClient<mmr::Family, Sha256, Vec<u8>, Vec<u8>, 32>;
-type Unordered = UnorderedClient<mmr::Family, Sha256, Vec<u8>, Vec<u8>>;
-type Immutable = ImmutableClient<mmr::Family, Sha256, Vec<u8>, Vec<u8>>;
+type Keyless = exoware_qmdb::adapter::Keyless<mmr::Family, Sha256, Vec<u8>>;
+type Ordered = exoware_qmdb::adapter::Ordered<mmr::Family, Sha256, Vec<u8>, Vec<u8>, 32>;
+type Unordered = exoware_qmdb::adapter::Unordered<mmr::Family, Sha256, Vec<u8>, Vec<u8>>;
+type Immutable = exoware_qmdb::adapter::Immutable<mmr::Family, Sha256, Vec<u8>, Vec<u8>>;
 type ProofClient = OperationLogClient<PreferZstdHttpClient, mmr::Family, Sha256, Operation>;
 
 #[tokio::test]
@@ -380,14 +378,15 @@ impl Fixture {
     }
 
     async fn keyless(&mut self, store: PrefixedStoreClient) -> String {
-        let (server, url) =
-            common::spawn_connect_service(keyless_operation_log_connect_stack::<
+        let (server, url) = common::spawn_connect_service(
+            exoware_qmdb::service::server::keyless_operation_log_stack::<
                 mmr::Family,
                 Sha256,
                 Vec<u8>,
                 VariableEncoding<Vec<u8>>,
-            >(store, ((0..=10000).into(), ())))
-            .await;
+            >(store, ((0..=10000).into(), ())),
+        )
+        .await;
         self.servers.push(server);
         url
     }
@@ -397,41 +396,46 @@ impl Fixture {
         store: PrefixedStoreClient,
         cfg: <UnorderedOp as commonware_codec::Read>::Cfg,
     ) -> String {
-        let (server, url) = common::spawn_connect_service(unordered_operation_log_connect_stack::<
-            mmr::Family,
-            Sha256,
-            Vec<u8>,
-            Vec<u8>,
-            VariableEncoding<Vec<u8>>,
-        >(store, cfg))
+        let (server, url) = common::spawn_connect_service(
+            exoware_qmdb::service::server::unordered_operation_log_stack::<
+                mmr::Family,
+                Sha256,
+                Vec<u8>,
+                Vec<u8>,
+                VariableEncoding<Vec<u8>>,
+            >(store, cfg),
+        )
         .await;
         self.servers.push(server);
         url
     }
 
     async fn ordered(&mut self, store: PrefixedStoreClient) -> String {
-        let (server, url) =
-            common::spawn_connect_service(ordered_operation_log_connect_stack::<
+        let (server, url) = common::spawn_connect_service(
+            exoware_qmdb::service::server::ordered_operation_log_stack::<
                 mmr::Family,
                 Sha256,
                 Vec<u8>,
                 Vec<u8>,
                 32,
                 VariableEncoding<Vec<u8>>,
-            >(store, ordered_cfg(), key_cfg()))
-            .await;
+            >(store, ordered_cfg(), key_cfg()),
+        )
+        .await;
         self.servers.push(server);
         url
     }
 
     async fn immutable(&mut self, store: PrefixedStoreClient) -> String {
-        let (server, url) = common::spawn_connect_service(immutable_operation_log_connect_stack::<
-            mmr::Family,
-            Sha256,
-            Vec<u8>,
-            Vec<u8>,
-            VariableEncoding<Vec<u8>>,
-        >(store, immutable_cfg()))
+        let (server, url) = common::spawn_connect_service(
+            exoware_qmdb::service::server::immutable_operation_log_stack::<
+                mmr::Family,
+                Sha256,
+                Vec<u8>,
+                Vec<u8>,
+                VariableEncoding<Vec<u8>>,
+            >(store, immutable_cfg()),
+        )
         .await;
         self.servers.push(server);
         url
