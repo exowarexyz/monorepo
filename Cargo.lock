@@ -2746,6 +2746,7 @@ dependencies = [
  "tokio",
  "tower",
  "tracing",
+ "zstd-safe",
 ]
 
 [[package]]
@@ -2762,8 +2763,6 @@ dependencies = [
  "futures",
  "http",
  "regex",
- "serde",
- "serde_json",
  "thiserror",
  "tokio",
 ]

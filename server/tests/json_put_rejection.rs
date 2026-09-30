@@ -6,7 +6,7 @@ use bytes::Bytes;
 use connectrpc::client::{full_body, ClientTransport};
 use exoware_sdk::limits::MAX_PUT_ENTRIES;
 use exoware_sdk::transport::ServiceTransport;
-use exoware_server::{ingest_service, Ingest, IngestError, IngestState, PutPlan};
+use exoware_server::{ingest_service, Ingest, IngestError, IngestState};
 
 struct TrackingAllocator;
 
@@ -40,19 +40,20 @@ unsafe impl GlobalAlloc for TrackingAllocator {
 struct RejectIngest;
 
 impl Ingest for RejectIngest {
-    fn prepare(&self, _: &PutPlan) -> Result<(), IngestError> {
-        panic!("malformed JSON must fail before preparation")
-    }
-
     async fn put_batch(&self, _: Vec<(Bytes, Bytes)>) -> Result<u64, IngestError> {
-        panic!("malformed JSON must never be written")
+        panic!("JSON Put requests must never be written")
     }
 }
 
 #[tokio::test]
-async fn malformed_json_does_not_materialize_entries_before_admission() {
+async fn json_rejection_does_not_materialize_entries() {
     let transport = ServiceTransport::new(ingest_service(IngestState::new(Arc::new(RejectIngest))));
-    for tail in [b"],\"kvs\":[]}".as_slice(), b",", b"],\"unknown\":[1,]}"] {
+    for tail in [
+        b"]}".as_slice(),
+        b"],\"kvs\":[]}",
+        b",",
+        b"],\"unknown\":[1,]}",
+    ] {
         let mut body = Vec::with_capacity(MAX_PUT_ENTRIES * 3 + 64);
         body.extend_from_slice(b"{\"kvs\":[");
         for index in 0..MAX_PUT_ENTRIES {
@@ -73,7 +74,7 @@ async fn malformed_json_does_not_materialize_entries_before_admission() {
         let response = transport.send(request).await.unwrap();
         let largest = LARGEST_ALLOCATION.load(Ordering::Relaxed);
 
-        assert_eq!(response.status(), http::StatusCode::BAD_REQUEST);
+        assert_eq!(response.status(), http::StatusCode::NOT_IMPLEMENTED);
 
         // Allow transport buffering while detecting entry vectors amplified from tiny JSON rows.
         assert!(

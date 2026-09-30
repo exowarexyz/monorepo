@@ -2,6 +2,8 @@
 
 This document defines the portable size contract for `log.ingest.v1.Put`.
 The message schema is [`log/v1/ingest.proto`](./log/v1/ingest.proto).
+The shared Put endpoint accepts protobuf requests only. Other services continue
+to support JSON requests.
 
 ## Portable Put limits
 
@@ -25,8 +27,8 @@ be accepted or rejected by a particular deployment.
 RPC request bodies and decompressed messages are limited to 256 MiB. This is
 the transport byte limit for all methods. Put has no additional application
 byte limit. `MAX_REQUEST_MESSAGE_BYTES` exposes the message limit in both SDKs.
-JSON and compression can change the body size relative to the binary protobuf
-size reported by `StoreWriteBatch::encoded_len()`.
+Compression can change the body size relative to the binary protobuf size
+reported by `StoreWriteBatch::encoded_len()`.
 
 The value limit applies to each individual value. Chunking a `PutRequest` does
 not divide a value across requests. Splitting cannot make a value above a
@@ -64,7 +66,8 @@ several writes. Exoware data is immutable. Retry policy, concurrency, and
 publication barriers belong to the application.
 
 The TypeScript SDK exports the same constants. Its `StoreWriteBatch` provides
-`encodedLen(encoding)`, `validate(options)`, and `split(options)` for JSON and
-binary protobuf. Pass `store.putOptions` to validation and splitting to use the
-client's encoding and configured limits. Store writes validate before sending
-and remain one atomic Put. Splitting is explicit.
+`encodedLen()`, `validate(options)`, and `split(options)` for protobuf.
+All TypeScript Put requests use protobuf. `ClientOptions.useBinaryFormat` controls
+only non-ingest services. Pass `store.putOptions` to validation and splitting to
+use the client's configured limits. Store writes validate before sending and
+remain one atomic Put. Splitting is explicit.

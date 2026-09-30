@@ -20,7 +20,7 @@ use datafusion::execution::context::TaskContext;
 use datafusion::execution::runtime_env::RuntimeEnv;
 use exoware_proto::common::Entry;
 use exoware_proto::google::rpc::{ErrorInfo, RetryInfo};
-use exoware_proto::ingest::{PutRequest, PutResponse as ProtoPutResponse, SERVICE_PUT_SPEC};
+use exoware_proto::ingest::{PutResponse as ProtoPutResponse, SERVICE_PUT_SPEC};
 #[cfg(test)]
 use exoware_proto::log::retention::v1::SetRetentionRequestView;
 use exoware_proto::log::retention::v1::{
@@ -53,13 +53,13 @@ use exoware_sdk::selector::Selector;
 use futures::{stream as stream_util, Stream, StreamExt};
 use tokio::sync::Notify;
 
-use crate::put_wire::{count_put_entries, count_put_entries_json, parse_put_entries};
+use crate::put_wire::{count_put_entries, parse_put_entries};
 use crate::reduce::{decode_group, execute_reduce, RangeError, ReduceExecution, REDUCE_BATCH_ROWS};
 use crate::stream::{StreamHub, StreamNotifier};
 use crate::validate::{self, IngestLimits};
 use crate::{
-    FilteredBatch, Ingest, IngestError, Log, LogBatch, Prune, PutCodec, PutPlan, Query, QueryExtra,
-    RangeScan, RangeScanResult, Retention, StoreEngine,
+    FilteredBatch, Ingest, IngestError, Log, LogBatch, Prune, Query, QueryExtra, RangeScan,
+    RangeScanResult, Retention, StoreEngine,
 };
 
 #[cfg(test)]
@@ -528,40 +528,16 @@ where
                 ));
             }
 
-            let wire = request.encoded()?;
-            let (count, codec) = match format {
-                CodecFormat::Proto => (count_put_entries(&wire)?, PutCodec::Proto),
-                CodecFormat::Json => (count_put_entries_json(&wire)?, PutCodec::Json),
-                _ => return Err(ConnectError::unimplemented("unsupported Put codec")),
-            };
+            if format != CodecFormat::Proto {
+                return Err(ConnectError::unimplemented("Put requires protobuf"));
+            }
 
             // Count rejection precedes inner decoding, including malformed entries.
+            let wire = request.encoded()?;
+            let count = count_put_entries(&wire)?;
             validate::validate_put_count(count, state.limits)?;
-            state
-                .ingest
-                .prepare(&PutPlan {
-                    entries: count,
-                    message_bytes: wire.len(),
-                    codec,
-                })
-                .map_err(ingest_error_to_connect)?;
-
-            let batch = match codec {
-                PutCodec::Proto => {
-                    drop(request);
-                    parse_put_entries(&wire, state.limits, count)?
-                }
-                PutCodec::Json => {
-                    let request = request.take_message::<PutRequest>()?;
-                    validate::validate_put_count(request.kvs.len(), state.limits)?;
-                    let mut batch = Vec::with_capacity(request.kvs.len());
-                    for (index, kv) in request.kvs.into_iter().enumerate() {
-                        validate::validate_put_entry(index, &kv.key, &kv.value, state.limits)?;
-                        batch.push((Bytes::from(kv.key), kv.value));
-                    }
-                    batch
-                }
-            };
+            drop(request);
+            let batch = parse_put_entries(&wire, state.limits, count)?;
             drop(wire);
 
             let seq = state
@@ -578,7 +554,7 @@ where
                 sequence_number: seq,
                 ..Default::default()
             })?
-            .encode::<ProtoPutResponse>(format)
+            .encode::<ProtoPutResponse>(CodecFormat::Proto)
         })
     }
 
