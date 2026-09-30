@@ -44,3 +44,4 @@ connectrpc-build = { workspace = true }
 [dev-dependencies]
 hex = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
+zstd-safe = "7.2.4"

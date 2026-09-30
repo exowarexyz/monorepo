@@ -14,10 +14,10 @@ Interact with the Exoware API in TypeScript.
 length, value length, and encoded request size before sending. Invalid batches
 throw `RangeError`. Each call remains one atomic Put.
 
-`StoreWriteBatch` provides `encodedLen(encoding)`, `validate(options)`, and
-`split(options)`. Sizes include prefixed keys and the selected wire format.
-The default encoding is JSON, matching the client transport. Pass
-`store.putOptions` to match a client's encoding and limits:
+`StoreWriteBatch` provides `encodedLen()`, `validate(options)`, and
+`split(options)`. Sizes include prefixed keys and use the protobuf wire format
+that Ingest always sends. `ClientOptions.useBinaryFormat` controls the other
+services. Pass `store.putOptions` to use a client's configured limits:
 
 ```ts
 const chunks = batch.split(store.putOptions);

@@ -10,32 +10,22 @@ use exoware_sdk::keys::MAX_KEY_LEN;
 use exoware_sdk::limits::PutTooLarge;
 use exoware_sdk::transport::ServiceTransport;
 
-use crate::{PutCodec, PutPlan};
-
 const PUT_PATH: &str = "log.ingest.v1.Service/Put";
 
 #[derive(Default)]
 struct TestIngest {
-    panic_prepare: bool,
-    prepare_error: Option<IngestError>,
-    plans: Mutex<Vec<PutPlan>>,
+    put_error: Option<IngestError>,
     batches: Mutex<Vec<Vec<(Bytes, Bytes)>>>,
 }
 
 impl Ingest for TestIngest {
-    fn prepare(&self, plan: &PutPlan) -> Result<(), IngestError> {
-        assert!(!self.panic_prepare, "prepare must not be reached");
-        self.plans.lock().unwrap().push(*plan);
-        match &self.prepare_error {
-            Some(error) => Err(error.clone()),
-            None => Ok(()),
-        }
-    }
-
     async fn put_batch(&self, batch: Vec<(Bytes, Bytes)>) -> Result<u64, IngestError> {
         let mut batches = self.batches.lock().unwrap();
         batches.push(batch);
-        Ok(batches.len() as u64)
+        match &self.put_error {
+            Some(error) => Err(error.clone()),
+            None => Ok(batches.len() as u64),
+        }
     }
 }
 
@@ -84,11 +74,8 @@ fn assert_overcount(error: &ConnectError) {
 }
 
 #[tokio::test]
-async fn overcount_precedes_oversized_key_and_prepare() {
-    let ingest = Arc::new(TestIngest {
-        panic_prepare: true,
-        ..Default::default()
-    });
+async fn overcount_precedes_oversized_key() {
+    let ingest = Arc::new(TestIngest::default());
     let state = IngestState::new(ingest.clone()).with_limits(IngestLimits {
         max_entries: 1,
         ..Default::default()
@@ -104,11 +91,8 @@ async fn overcount_precedes_oversized_key_and_prepare() {
 }
 
 #[tokio::test]
-async fn overcount_precedes_malformed_inner_entry_and_prepare() {
-    let ingest = Arc::new(TestIngest {
-        panic_prepare: true,
-        ..Default::default()
-    });
+async fn overcount_precedes_malformed_inner_entry() {
+    let ingest = Arc::new(TestIngest::default());
     let state = IngestState::new(ingest.clone()).with_limits(IngestLimits {
         max_entries: 1,
         ..Default::default()
@@ -127,10 +111,7 @@ async fn readiness_precedes_malformed_body() {
         (CodecFormat::Proto, Bytes::from_static(&[0x0a, 0x80])),
         (CodecFormat::Json, Bytes::from_static(b"{")),
     ] {
-        let ingest = Arc::new(TestIngest {
-            panic_prepare: true,
-            ..Default::default()
-        });
+        let ingest = Arc::new(TestIngest::default());
         let state = IngestState::new(ingest.clone());
         state.ready.store(false, Ordering::SeqCst);
         let error = dispatch(state, body, format).await.unwrap_err();
@@ -144,68 +125,53 @@ async fn readiness_precedes_malformed_body() {
 }
 
 #[tokio::test]
-async fn empty_batch_precedes_prepare() {
-    for (format, body) in [
-        (CodecFormat::Proto, Bytes::new()),
-        (CodecFormat::Json, Bytes::from_static(br#"{"kvs":[]}"#)),
-    ] {
-        let ingest = Arc::new(TestIngest {
-            panic_prepare: true,
-            ..Default::default()
-        });
-        let error = dispatch(IngestState::new(ingest.clone()), body, format)
-            .await
-            .unwrap_err();
-
-        assert_eq!(error.code, ErrorCode::InvalidArgument);
-        assert_eq!(
-            decode_connect_error(&error)
-                .unwrap()
-                .bad_request
-                .unwrap()
-                .field_violations[0]
-                .field,
-            "kvs"
-        );
-        assert_no_writes(&ingest);
-    }
-}
-
-#[tokio::test]
-async fn prepare_resource_exhausted_precedes_inner_decode() {
-    let ingest = Arc::new(TestIngest {
-        prepare_error: Some(IngestError::ResourceExhausted {
-            message: "admission capacity exceeded".into(),
-        }),
-        ..Default::default()
-    });
-    let body = Bytes::from_static(&[0x0a, 1, 0x0a]);
+async fn empty_batch_is_rejected_before_backend() {
+    let ingest = Arc::new(TestIngest::default());
     let error = dispatch(
         IngestState::new(ingest.clone()),
-        body.clone(),
+        Bytes::new(),
         CodecFormat::Proto,
     )
     .await
     .unwrap_err();
 
-    assert_eq!(error.code, ErrorCode::ResourceExhausted);
-    assert!(error.details.is_empty());
+    assert_eq!(error.code, ErrorCode::InvalidArgument);
     assert_eq!(
-        *ingest.plans.lock().unwrap(),
-        vec![PutPlan {
-            entries: 1,
-            message_bytes: body.len(),
-            codec: PutCodec::Proto
-        }]
+        decode_connect_error(&error)
+            .unwrap()
+            .bad_request
+            .unwrap()
+            .field_violations[0]
+            .field,
+        "kvs"
     );
     assert_no_writes(&ingest);
 }
 
 #[tokio::test]
-async fn prepare_unavailable_preserves_retry_details() {
+async fn malformed_entry_is_rejected_before_backend() {
+    let ingest = Arc::new(TestIngest::default());
+    let error = dispatch(
+        IngestState::new(ingest.clone()),
+        Bytes::from_static(&[0x0a, 1, 0x0a]),
+        CodecFormat::Proto,
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error.code, ErrorCode::InvalidArgument);
+    assert_eq!(
+        error.message.as_deref(),
+        Some("failed to decode proto request: unexpected end of buffer")
+    );
+    assert_no_writes(&ingest);
+}
+
+#[tokio::test]
+async fn backend_unavailable_preserves_retry_details() {
     let ingest = Arc::new(TestIngest {
-        prepare_error: Some(IngestError::Unavailable {
-            message: "admission is temporarily unavailable".into(),
+        put_error: Some(IngestError::Unavailable {
+            message: "backend is temporarily unavailable".into(),
         }),
         ..Default::default()
     });
@@ -225,67 +191,44 @@ async fn prepare_unavailable_preserves_retry_details() {
     let retry = decoded.retry_info.unwrap();
     let delay = retry.retry_delay.as_option().unwrap();
     assert_eq!((delay.seconds, delay.nanos), (1, 0));
-    assert_eq!(ingest.plans.lock().unwrap().len(), 1);
-    assert_no_writes(&ingest);
+    assert_eq!(ingest.batches.lock().unwrap().len(), 1);
 }
 
 #[tokio::test]
 async fn interceptor_replacement_is_counted_and_written() {
-    for format in [CodecFormat::Proto, CodecFormat::Json] {
-        let ingest = Arc::new(TestIngest::default());
-        let state = IngestState::new(ingest.clone()).with_limits(IngestLimits {
-            max_entries: 1,
-            ..Default::default()
-        });
-        let service = ingest_service(state).with_interceptor(connectrpc::unary_interceptor(
-            |mut incoming, next| {
-                Box::pin(async move {
-                    assert_eq!(incoming.ctx.spec(), Some(SERVICE_PUT_SPEC));
-                    incoming.payload.set_message(request(1));
-                    next.run(incoming).await
-                })
-            },
-        ));
-        let mut config = ClientConfig::new("http://store.test".parse().unwrap());
-        if format == CodecFormat::Json {
-            config = config.json();
-        }
-        let client = ServiceClient::new(ServiceTransport::new(service), config);
-        let response = client.put(request(2)).await.unwrap();
-        assert_eq!(response.view().sequence_number, 1);
+    let ingest = Arc::new(TestIngest::default());
+    let state = IngestState::new(ingest.clone()).with_limits(IngestLimits {
+        max_entries: 1,
+        ..Default::default()
+    });
+    let service = ingest_service(state).with_interceptor(connectrpc::unary_interceptor(
+        |mut incoming, next| {
+            Box::pin(async move {
+                assert_eq!(incoming.ctx.spec(), Some(SERVICE_PUT_SPEC));
+                incoming.payload.set_message(request(1));
+                next.run(incoming).await
+            })
+        },
+    ));
+    let client = ServiceClient::new(
+        ServiceTransport::new(service),
+        ClientConfig::new("http://store.test".parse().unwrap()),
+    );
+    let response = client.put(request(2)).await.unwrap();
 
-        let (codec, message_bytes) = match format {
-            CodecFormat::Proto => (PutCodec::Proto, request(1).encode_to_vec().len()),
-            CodecFormat::Json => (
-                PutCodec::Json,
-                connectrpc::codec::encode_json(&request(1)).unwrap().len(),
-            ),
-            _ => unreachable!("only protobuf and JSON are exercised"),
-        };
-        assert_eq!(
-            *ingest.plans.lock().unwrap(),
-            vec![PutPlan {
-                entries: 1,
-                message_bytes,
-                codec
-            }]
-        );
-        assert_eq!(
-            *ingest.batches.lock().unwrap(),
-            vec![vec![(
-                Bytes::from_static(b"key"),
-                Bytes::from_static(b"value")
-            )]]
-        );
-    }
+    assert_eq!(response.view().sequence_number, 1);
+    assert_eq!(
+        *ingest.batches.lock().unwrap(),
+        vec![vec![(
+            Bytes::from_static(b"key"),
+            Bytes::from_static(b"value")
+        )]]
+    );
 }
 
 #[tokio::test]
 async fn put_get_returns_method_not_allowed() {
-    let ingest = Arc::new(TestIngest {
-        panic_prepare: true,
-        ..Default::default()
-    });
+    let ingest = Arc::new(TestIngest::default());
     let transport = ServiceTransport::new(ingest_service(IngestState::new(ingest.clone())));
     let request = http::Request::get(format!(
         "http://store.test/{PUT_PATH}?encoding=json&message=%7B%7D"
@@ -301,10 +244,7 @@ async fn put_get_returns_method_not_allowed() {
 
 #[tokio::test]
 async fn put_head_returns_method_not_allowed_with_allow() {
-    let ingest = Arc::new(TestIngest {
-        panic_prepare: true,
-        ..Default::default()
-    });
+    let ingest = Arc::new(TestIngest::default());
     let transport = ServiceTransport::new(ingest_service(IngestState::new(ingest.clone())));
     let request = http::Request::head(format!("http://store.test/{PUT_PATH}"))
         .body(full_body(Bytes::new()))
@@ -333,141 +273,40 @@ fn put_dispatcher_preserves_generated_method_metadata() {
 }
 
 #[tokio::test]
-async fn malformed_json_http_request_rejected_before_prepare() {
-    let ingest = Arc::new(TestIngest {
-        panic_prepare: true,
-        ..Default::default()
-    });
-    let transport = ServiceTransport::new(ingest_service(IngestState::new(ingest.clone())));
-    let request = http::Request::post(format!("http://store.test/{PUT_PATH}"))
-        .header(http::header::CONTENT_TYPE, "application/json")
-        .header("connect-protocol-version", "1")
-        .body(full_body(Bytes::from_static(br#"{"kvs":["#)))
-        .unwrap();
-    let response = transport.send(request).await.unwrap();
-
-    assert_eq!(response.status(), http::StatusCode::BAD_REQUEST);
-    assert_no_writes(&ingest);
-}
-
-#[tokio::test]
-async fn json_overcount_precedes_invalid_entry_and_prepare() {
-    let ingest = Arc::new(TestIngest {
-        panic_prepare: true,
-        ..Default::default()
-    });
-    let state = IngestState::new(ingest.clone()).with_limits(IngestLimits {
-        max_entries: 1,
-        ..Default::default()
-    });
-    let body = Bytes::from_static(br#"{"kvs":[{"key":"!"},{}]}"#);
-    let error = dispatch(state, body, CodecFormat::Json).await.unwrap_err();
-
-    assert_overcount(&error);
-    assert_no_writes(&ingest);
-}
-
-#[tokio::test]
-async fn malformed_json_never_writes() {
+async fn json_put_is_rejected_before_decoding() {
     for body in [
+        Bytes::from_static(br#"{"kvs":[{"key":"a2V5","value":"dmFsdWU="}]}"#),
+        Bytes::from_static(br#"{"kvs":[]}"#),
         Bytes::from_static(br#"{"kvs":["#),
-        Bytes::from_static(br#"{"kvs":[{"key":"!"}]}"#),
     ] {
         let ingest = Arc::new(TestIngest::default());
         let error = dispatch(IngestState::new(ingest.clone()), body, CodecFormat::Json)
             .await
             .unwrap_err();
-        assert_eq!(error.code, ErrorCode::InvalidArgument);
+
+        assert_eq!(error.code, ErrorCode::Unimplemented);
+        assert_eq!(error.message.as_deref(), Some("Put requires protobuf"));
         assert_no_writes(&ingest);
     }
 }
 
 #[tokio::test]
-async fn json_duplicate_kvs_rejected_before_prepare() {
-    let body = Bytes::from_static(br#"{"kvs":[{"key":"a2V5"}],"kvs":[]}"#);
-    assert!(connectrpc::codec::decode_json::<PutRequest>(&body).is_err());
-
-    let ingest = Arc::new(TestIngest {
-        panic_prepare: true,
-        ..Default::default()
-    });
-    let error = dispatch(IngestState::new(ingest.clone()), body, CodecFormat::Json)
-        .await
-        .unwrap_err();
-
-    assert_eq!(error.code, ErrorCode::InvalidArgument);
-    assert_no_writes(&ingest);
-}
-
-#[tokio::test]
-async fn json_malformed_unknown_field_rejected_before_prepare() {
-    let body = Bytes::from_static(br#"{"kvs":[{"key":"a2V5"}],"unknown":[1,]}"#);
-    assert!(connectrpc::codec::decode_json::<PutRequest>(&body).is_err());
-
-    let ingest = Arc::new(TestIngest {
-        panic_prepare: true,
-        ..Default::default()
-    });
-    let error = dispatch(IngestState::new(ingest.clone()), body, CodecFormat::Json)
-        .await
-        .unwrap_err();
-
-    assert_eq!(error.code, ErrorCode::InvalidArgument);
-    assert_no_writes(&ingest);
-}
-
-#[tokio::test]
-async fn json_generated_client_round_trip() {
+async fn json_generated_client_is_rejected() {
     let ingest = Arc::new(TestIngest::default());
     let client = ServiceClient::new(
         ServiceTransport::new(ingest_service(IngestState::new(ingest.clone()))),
         ClientConfig::new("http://store.test".parse().unwrap()).json(),
     );
-    let response = client.put(request(1)).await.unwrap();
+    let error = client.put(request(1)).await.unwrap_err();
 
-    assert_eq!(response.view().sequence_number, 1);
-    assert_eq!(
-        *ingest.batches.lock().unwrap(),
-        vec![vec![(
-            Bytes::from_static(b"key"),
-            Bytes::from_static(b"value")
-        )]]
-    );
-    assert_eq!(
-        *ingest.plans.lock().unwrap(),
-        vec![PutPlan {
-            entries: 1,
-            message_bytes: connectrpc::codec::encode_json(&request(1)).unwrap().len(),
-            codec: PutCodec::Json,
-        }]
-    );
-}
-
-#[tokio::test]
-async fn json_unknown_fields_match_generated_decoder() {
-    let body = Bytes::from_static(
-        br#"{"unknown":{"nested":[1,2]},"kvs":[{"key":"a2V5","value":"dmFsdWU=","unknown":true}]}"#,
-    );
-    let generated = connectrpc::codec::decode_json::<PutRequest>(&body).unwrap();
-    assert_eq!(generated, request(1));
-
-    let ingest = Arc::new(TestIngest::default());
-    let response = dispatch(IngestState::new(ingest.clone()), body, CodecFormat::Json)
-        .await
-        .unwrap();
-    let response =
-        connectrpc::codec::decode_json::<ProtoPutResponse>(&response.body.into_contiguous())
-            .unwrap();
-    assert_eq!(response.sequence_number, 1);
-    assert_eq!(ingest.batches.lock().unwrap()[0].len(), 1);
+    assert_eq!(error.code, ErrorCode::Unimplemented);
+    assert_eq!(error.message.as_deref(), Some("Put requires protobuf"));
+    assert_no_writes(&ingest);
 }
 
 #[tokio::test]
 async fn cancellation_while_interceptor_is_pending_never_writes() {
-    let ingest = Arc::new(TestIngest {
-        panic_prepare: true,
-        ..Default::default()
-    });
+    let ingest = Arc::new(TestIngest::default());
     let entered = Arc::new(AtomicBool::new(false));
     let observed = entered.clone();
     let service = ingest_service(IngestState::new(ingest.clone())).with_interceptor(
@@ -489,6 +328,5 @@ async fn cancellation_while_interceptor_is_pending_never_writes() {
     assert!(observed.load(Ordering::SeqCst));
     drop(call);
 
-    assert!(ingest.plans.lock().unwrap().is_empty());
     assert_no_writes(&ingest);
 }

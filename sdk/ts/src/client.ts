@@ -98,14 +98,11 @@ function normalizeClientOptions(tokenOrOptions?: string | ClientOptions): Client
     return typeof tokenOrOptions === 'string' ? { token: tokenOrOptions } : tokenOrOptions ?? {};
 }
 
-/**
- * Builds the transport and reports whether it carries a credential, so a `Client` resolves the
- * token once rather than reading the environment again.
- */
-function transportWithCredential(
-    baseUrl: string,
-    opts: ClientOptions,
-): { transport: ReturnType<typeof createConnectTransport>; credential: Credential } {
+// Both transports from one factory share credential resolution, retry policy, and cookies.
+function transportFactory(opts: ClientOptions): {
+    create: (baseUrl: string, useBinaryFormat?: boolean) => ReturnType<typeof createConnectTransport>;
+    credential: Credential;
+} {
     const retryConfig = opts.retry ?? DEFAULT_RETRY_CONFIG;
     const { token, credential } = resolveCredential(opts.token, environmentApiKey());
     const interceptors: Interceptor[] = [];
@@ -120,12 +117,13 @@ function transportWithCredential(
         });
     }
     interceptors.push(makeRetryInterceptor(retryConfig));
+    const fetch = fetchWithCookieJar(new CookieJar());
     return {
-        transport: createConnectTransport({
+        create: (baseUrl, useBinaryFormat) => createConnectTransport({
             baseUrl: baseUrl.replace(/\/$/, ''),
-            useBinaryFormat: opts.useBinaryFormat,
+            useBinaryFormat,
             interceptors,
-            fetch: fetchWithCookieJar(new CookieJar()),
+            fetch,
         }),
         credential,
     };
@@ -136,7 +134,8 @@ function transportWithCredential(
  * throws `InvalidApiKeyError` if either cannot be an HTTP header.
  */
 export function createTransport(baseUrl: string, tokenOrOptions?: string | ClientOptions) {
-    return transportWithCredential(baseUrl, normalizeClientOptions(tokenOrOptions)).transport;
+    const opts = normalizeClientOptions(tokenOrOptions);
+    return transportFactory(opts).create(baseUrl, opts.useBinaryFormat);
 }
 
 export class Client {
@@ -155,13 +154,11 @@ export class Client {
         const opts = normalizeClientOptions(tokenOrOptions);
         this.baseUrl = baseUrl.replace(/\/$/, '');
         this.retryConfig = opts.retry ?? DEFAULT_RETRY_CONFIG;
-        this.putOptions = Object.freeze(normalizePutOptions({
-            ...opts.putLimits,
-            encoding: opts.useBinaryFormat ? 'binary' : 'json',
-        }));
-        const { transport, credential } = transportWithCredential(this.baseUrl, opts);
+        this.putOptions = Object.freeze(normalizePutOptions(opts.putLimits));
+        const { create, credential } = transportFactory(opts);
+        const transport = create(this.baseUrl, opts.useBinaryFormat);
         this.credential = credential;
-        this.ingest = createClient(IngestService, transport);
+        this.ingest = createClient(IngestService, create(this.baseUrl, true));
         this.prune = createClient(PruneService, transport);
         this.query = createClient(QueryService, transport);
         this.retention = createClient(RetentionService, transport);

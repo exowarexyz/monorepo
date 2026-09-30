@@ -2,8 +2,6 @@ use buffa::encoding::{check_wire_type, skip_field_depth, Tag, WireType};
 use buffa::DecodeError;
 use bytes::Bytes;
 use connectrpc::ConnectError;
-use serde::de::{IgnoredAny, SeqAccess, Visitor};
-use serde::Deserialize;
 
 use crate::validate::{validate_put_entry, IngestLimits};
 
@@ -136,7 +134,7 @@ pub(crate) fn parse_put_entries(
     limits: IngestLimits,
     validated_count: usize,
 ) -> Result<Vec<(Bytes, Bytes)>, ConnectError> {
-    // The dispatcher validates this count against the same immutable buffer before admission.
+    // The validated count bounds allocation before any entries are decoded.
     let mut entries = Vec::with_capacity(validated_count);
     let mut validation = None;
     let mut cursor = Cursor { remaining: wire };
@@ -164,69 +162,11 @@ pub(crate) fn parse_put_entries(
     Ok(entries)
 }
 
-pub(crate) fn count_put_entries_json(wire: &[u8]) -> Result<usize, ConnectError> {
-    // Error reporting must not materialize entries before admission either.
-    serde_json::from_slice::<RequestShape>(wire)
-        .map(|shape| shape.kvs.0)
-        .map_err(|error| ConnectError::invalid_argument(format!("failed to decode JSON: {error}")))
-}
-
-// Matching the generated struct derive preserves map and sequence JSON forms.
-#[derive(Default, Deserialize)]
-#[serde(default)]
-struct RequestShape {
-    kvs: EntryCount,
-}
-
-#[derive(Default)]
-struct EntryCount(usize);
-
-impl<'de> Deserialize<'de> for EntryCount {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        deserializer.deserialize_option(CountVisitor)
-    }
-}
-
-struct CountVisitor;
-
-impl<'de> Visitor<'de> for CountVisitor {
-    type Value = EntryCount;
-
-    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("an array of entries or null")
-    }
-
-    fn visit_none<E>(self) -> Result<Self::Value, E> {
-        Ok(EntryCount(0))
-    }
-
-    fn visit_some<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        deserializer.deserialize_seq(self)
-    }
-
-    fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
-    where
-        A: SeqAccess<'de>,
-    {
-        let mut count = 0;
-        while sequence.next_element::<IgnoredAny>()?.is_some() {
-            count += 1;
-        }
-        Ok(EntryCount(count))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use buffa::MessageView as _;
-    use exoware_sdk::log::ingest::v1::{PutRequest, PutRequestView};
+    use exoware_sdk::log::ingest::v1::PutRequestView;
 
     use crate::validate::validate_put_count;
 
@@ -507,42 +447,6 @@ mod tests {
                 assert_matches_generated(&[first, second], limits);
                 assert_matches_generated(&bytes_field(1, &[first, second]), limits);
             }
-        }
-    }
-
-    #[test]
-    fn json_count_preserves_generated_map_and_sequence_layouts() {
-        for wire in [
-            br#"{"kvs":[{}, {"key":null,"value":"YQ"}]}"#.as_slice(),
-            br#"[[["", "YQ=="], []]]"#,
-            br#"{"ignored":{"kvs":[1,2,3]},"kvs":[{}]}"#,
-            br#"{"kvs":null}"#,
-            br#"[null]"#,
-            br#"{}"#,
-            br#"[]"#,
-        ] {
-            let generated: PutRequest = serde_json::from_slice(wire).unwrap();
-            assert_eq!(count_put_entries_json(wire).unwrap(), generated.kvs.len());
-        }
-    }
-
-    #[test]
-    fn json_duplicate_kvs_and_malformed_shapes_are_rejected() {
-        for wire in [
-            br#"{"kvs":[],"kvs":[]}"#.as_slice(),
-            br#"{"kvs":null,"kvs":[]}"#,
-            br#"{"kvs":[}"#,
-            br#"{"kvs":42}"#,
-            br#"[[],[]]"#,
-            br#"{} false"#,
-        ] {
-            let expected = connectrpc::codec::decode_json::<PutRequest>(wire).unwrap_err();
-            let error = count_put_entries_json(wire).unwrap_err();
-            assert_eq!(error.code, expected.code);
-            assert!(error
-                .message
-                .unwrap()
-                .starts_with("failed to decode JSON: "));
         }
     }
 }

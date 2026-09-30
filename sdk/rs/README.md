@@ -30,8 +30,9 @@ across chunks.
 
 ## Request compression
 
-Request compression is disabled by default. Select zstd and its compression level
-on the client builder:
+Outgoing requests support `ConnectRequestCompression::None` (the default) and
+`ConnectRequestCompression::Zstd { level }`. The SDK still decodes gzip responses.
+Select zstd and its compression level on the client builder.
 
 ```rust
 use exoware_sdk::{ConnectRequestCompression, StoreClient};
