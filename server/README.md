@@ -53,6 +53,12 @@ termination when unfinished requests reach their deadlines. Returning an error
 response alone cannot bound connection lifetime when outbound writes are blocked.
 HTTP/2 cleanup failure terminates the affected stream.
 
+Put honors `connect-timeout-ms` when present. Otherwise it uses `PutConfig.timeout`,
+which defaults to 30 seconds. The same deadline covers middleware, reception,
+decoding, backend work and rejection cleanup. Size the fallback for
+`max_wire_bytes` over the slowest supported link, with room for processing and
+backend latency.
+
 `AppState::with_put_config` and `IngestState::with_put_config` configure the host
 budget, admitted wire bound, timeout, and observer. Memory upgrades fail immediately
 while bootstrap admission is held. Known request lengths reserve their enforced
