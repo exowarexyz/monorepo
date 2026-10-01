@@ -8,14 +8,12 @@ jest.mock('../src/credential', () => ({
 import { Client } from '../src/client';
 import { EntrySchema } from '../src/gen/ts/common/v1/kv_pb';
 import { PutRequestSchema, PutResponseSchema } from '../src/gen/ts/log/v1/ingest_pb';
+import { GetRequestSchema, GetResponseSchema } from '../src/gen/ts/store/v1/query_pb';
 import {
     StoreKeyPrefix,
     StoreWriteBatch,
     type StoreBatchEntry,
 } from '../src/store';
-import type { PutEncoding } from '../src/limits';
-
-const textEncoder = new TextEncoder();
 
 function client(options: ConstructorParameters<typeof Client>[1] = { token: '' }): Client {
     return new Client('http://put-batch.test', options);
@@ -27,11 +25,8 @@ function request(entries: readonly StoreBatchEntry[]) {
     });
 }
 
-function serializedLen(entries: readonly StoreBatchEntry[], encoding: PutEncoding): number {
-    const message = request(entries);
-    return encoding === 'binary'
-        ? toBinary(PutRequestSchema, message).byteLength
-        : textEncoder.encode(toJsonString(PutRequestSchema, message)).byteLength;
+function serializedLen(entries: readonly StoreBatchEntry[]): number {
+    return toBinary(PutRequestSchema, request(entries)).byteLength;
 }
 
 function filled(length: number, byte: number): Uint8Array {
@@ -46,7 +41,7 @@ function batch(entries: readonly StoreBatchEntry[], store = client().store()): S
     return result;
 }
 
-describe.each<PutEncoding>(['binary', 'json'])('%s Put accounting', (encoding) => {
+describe('protobuf Put accounting', () => {
     test.each([
         [0, 0],
         [1, 0],
@@ -62,12 +57,12 @@ describe.each<PutEncoding>(['binary', 'json'])('%s Put accounting', (encoding) =
             value: filled(valueLen, 0x56),
         }]);
 
-        expect(write.encodedLen(encoding)).toBe(serializedLen(write.entries(), encoding));
+        expect(write.encodedLen()).toBe(serializedLen(write.entries()));
     });
 
     test('matches the real serializer for empty and mixed batches', () => {
         const empty = new StoreWriteBatch();
-        expect(empty.encodedLen(encoding)).toBe(serializedLen([], encoding));
+        expect(empty.encodedLen()).toBe(serializedLen([]));
 
         const write = batch([
             { key: new Uint8Array(), value: new Uint8Array() },
@@ -75,7 +70,7 @@ describe.each<PutEncoding>(['binary', 'json'])('%s Put accounting', (encoding) =
             { key: new Uint8Array(), value: filled(3, 2) },
             { key: filled(128, 3), value: filled(16_384, 4) },
         ]);
-        expect(write.encodedLen(encoding)).toBe(serializedLen(write.entries(), encoding));
+        expect(write.encodedLen()).toBe(serializedLen(write.entries()));
     });
 
     test('counts the physical prefixed key', () => {
@@ -83,7 +78,7 @@ describe.each<PutEncoding>(['binary', 'json'])('%s Put accounting', (encoding) =
         const write = batch([{ key: filled(1, 0x4b), value: filled(2, 0x56) }], store);
 
         expect(write.entries()[0].key).toHaveLength(128);
-        expect(write.encodedLen(encoding)).toBe(serializedLen(write.entries(), encoding));
+        expect(write.encodedLen()).toBe(serializedLen(write.entries()));
     });
 
     test('splits at the exact serialized byte boundary', () => {
@@ -93,12 +88,12 @@ describe.each<PutEncoding>(['binary', 'json'])('%s Put accounting', (encoding) =
             { key: filled(2, 5), value: filled(3, 6) },
         ]);
         const originalEntries = [...original.entries()];
-        const boundary = serializedLen(originalEntries.slice(0, 2), encoding);
-        const chunks = original.split({ encoding, maxEncodedBytes: boundary });
+        const boundary = serializedLen(originalEntries.slice(0, 2));
+        const chunks = original.split({ maxEncodedBytes: boundary });
 
         expect(chunks.map((chunk) => chunk.length)).toEqual([2, 1]);
-        expect(chunks[0].encodedLen(encoding)).toBe(boundary);
-        expect(chunks.every((chunk) => serializedLen(chunk.entries(), encoding) <= boundary))
+        expect(chunks[0].encodedLen()).toBe(boundary);
+        expect(chunks.every((chunk) => serializedLen(chunk.entries()) <= boundary))
             .toBe(true);
         expect(chunks.flatMap((chunk) => [...chunk.entries()])).toEqual(originalEntries);
         expect(original.entries()).toEqual(originalEntries);
@@ -117,7 +112,7 @@ describe.each<PutEncoding>(['binary', 'json'])('%s Put accounting', (encoding) =
             { key: filled(3, 3), value: filled(3, 3) },
         ]);
 
-        const chunks = original.split({ encoding, maxEntries: 1 });
+        const chunks = original.split({ maxEntries: 1 });
 
         expect(chunks.map((chunk) => chunk.length)).toEqual([1, 1, 1]);
         expect(original.length).toBe(3);
@@ -125,12 +120,12 @@ describe.each<PutEncoding>(['binary', 'json'])('%s Put accounting', (encoding) =
 
     test('rejects an entry that cannot fit alone', () => {
         const original = batch([{ key: filled(2, 1), value: filled(3, 2) }]);
-        const single = serializedLen(original.entries(), encoding);
+        const single = serializedLen(original.entries());
 
-        expect(() => original.validate({ encoding, maxEncodedBytes: single })).not.toThrow();
-        expect(() => original.validate({ encoding, maxEncodedBytes: single - 1 }))
+        expect(() => original.validate({ maxEncodedBytes: single })).not.toThrow();
+        expect(() => original.validate({ maxEncodedBytes: single - 1 }))
             .toThrow(`Put encoded size ${single} exceeds ${single - 1}`);
-        expect(() => original.split({ encoding, maxEncodedBytes: single - 1 }))
+        expect(() => original.split({ maxEncodedBytes: single - 1 }))
             .toThrow(`Put entry 0 encoded size ${single} exceeds ${single - 1}`);
     });
 });
@@ -151,11 +146,11 @@ test('validates empty batches, value limits, and option domains', () => {
 
 test('validation uses live mutable entry buffers', () => {
     const write = batch([{ key: filled(1, 1), value: filled(1, 2) }]);
-    const firstLength = write.encodedLen('json');
+    const firstLength = write.encodedLen();
     write.entries()[0].value = filled(128, 3);
 
-    expect(write.encodedLen('json')).not.toBe(firstLength);
-    expect(write.encodedLen('json')).toBe(serializedLen(write.entries(), 'json'));
+    expect(write.encodedLen()).not.toBe(firstLength);
+    expect(write.encodedLen()).toBe(serializedLen(write.entries()));
     expect(() => write.validate({ maxValueLen: 127 })).toThrow('value length 128 exceeds 127');
 });
 
@@ -188,29 +183,27 @@ test('rejects an oversized raw key before invoking the transport', async () => {
     expect(put).not.toHaveBeenCalled();
 });
 
-test('applies encoded-byte limits to the selected transport codec', async () => {
+test.each([undefined, false, true])('applies protobuf byte limits when binary is %s', async (useBinaryFormat) => {
     const key = filled(1, 1);
     const value = filled(1, 2);
     const entries = [{ key, value }];
-    const binaryBytes = serializedLen(entries, 'binary');
-    const jsonBytes = serializedLen(entries, 'json');
-    expect(jsonBytes).toBeGreaterThan(binaryBytes);
+    const binaryBytes = serializedLen(entries);
 
-    const jsonClient = client({ token: '', putLimits: { maxEncodedBytes: binaryBytes } });
-    const jsonPut = jest.spyOn(jsonClient.ingest, 'put');
-    await expect(jsonClient.store().set(key, value))
-        .rejects.toThrow(`Put encoded size ${jsonBytes} exceeds ${binaryBytes}`);
-    expect(jsonPut).not.toHaveBeenCalled();
-
-    const binaryClient = client({
+    const sdk = client({
         token: '',
-        useBinaryFormat: true,
+        useBinaryFormat,
         putLimits: { maxEncodedBytes: binaryBytes },
     });
-    const binaryPut = jest.spyOn(binaryClient.ingest, 'put')
+    const binaryPut = jest.spyOn(sdk.ingest, 'put')
         .mockResolvedValue(create(PutResponseSchema, { sequenceNumber: 9n }));
-    await expect(binaryClient.store().set(key, value)).resolves.toBe(9n);
+    await expect(sdk.store().set(key, value)).resolves.toBe(9n);
     expect(binaryPut).toHaveBeenCalledTimes(1);
+
+    const tooSmall = client({ token: '', useBinaryFormat, putLimits: { maxEncodedBytes: binaryBytes - 1 } });
+    const rejectedPut = jest.spyOn(tooSmall.ingest, 'put');
+    await expect(tooSmall.store().set(key, value))
+        .rejects.toThrow(`Put encoded size ${binaryBytes} exceeds ${binaryBytes - 1}`);
+    expect(rejectedPut).not.toHaveBeenCalled();
 });
 
 test('validates the prefixed request at its exact serialized-byte budget', async () => {
@@ -218,7 +211,7 @@ test('validates the prefixed request at its exact serialized-byte budget', async
     const key = filled(1, 0x4b);
     const value = filled(2, 0x56);
     const physical = [{ key: prefix.encodeKey(key), value }];
-    const exact = serializedLen(physical, 'json');
+    const exact = serializedLen(physical);
 
     const accepted = client({ token: '', putLimits: { maxEncodedBytes: exact } });
     const acceptedPut = jest.spyOn(accepted.ingest, 'put')
@@ -233,43 +226,111 @@ test('validates the prefixed request at its exact serialized-byte budget', async
     expect(rejectedPut).not.toHaveBeenCalled();
 });
 
-test.each([
-    [undefined, 'json' as const, 'application/json'],
-    [true, 'binary' as const, 'application/proto'],
-])('the transport and Put limits use the same codec when binary is %s', async (
-    useBinaryFormat,
-    encoding,
-    contentType,
-) => {
-    let sentBody: Uint8Array | undefined;
-    let sentContentType: string | null = null;
-    const fetch = jest.spyOn(globalThis, 'fetch').mockImplementation(async (_input, init) => {
-        sentContentType = new Headers(init?.headers).get('content-type');
-        sentBody = init?.body as Uint8Array;
-        const response = create(PutResponseSchema, { sequenceNumber: 7n });
-        const body = useBinaryFormat
-            ? toBinary(PutResponseSchema, response)
-            : toJsonString(PutResponseSchema, response);
-        return new Response(body, { headers: { 'content-type': contentType } });
+test.each([undefined, false, true])('Put is protobuf while Query follows binary option %s', async (useBinaryFormat) => {
+    const sent: Array<{ path: string; contentType: string | null; body: Uint8Array }> = [];
+    const fetch = jest.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+        const path = new URL(String(input)).pathname;
+        sent.push({ path, contentType: new Headers(init?.headers).get('content-type'), body: init?.body as Uint8Array });
+        if (path.endsWith('/Put')) {
+            return new Response(toBinary(PutResponseSchema, create(PutResponseSchema, { sequenceNumber: 7n })), {
+                headers: { 'content-type': 'application/proto' },
+            });
+        }
+        const response = create(GetResponseSchema, { value: filled(3, 2) });
+        return new Response(useBinaryFormat
+            ? toBinary(GetResponseSchema, response)
+            : toJsonString(GetResponseSchema, response), {
+            headers: { 'content-type': useBinaryFormat ? 'application/proto' : 'application/json' },
+        });
     });
 
     try {
-        const sdk = client(useBinaryFormat === undefined
-            ? { token: '' }
-            : { token: '', useBinaryFormat });
+        const sdk = client(useBinaryFormat === undefined ? { token: '' } : { token: '', useBinaryFormat });
         const store = sdk.store();
         const key = filled(2, 1);
         const value = filled(3, 2);
         const entries = [{ key, value }];
 
         await expect(store.set(key, value)).resolves.toBe(7n);
-        expect(store.putOptions.encoding).toBe(encoding);
-        expect(sentContentType).toBe(contentType);
-        expect(sentBody).toEqual(
-            encoding === 'binary'
-                ? toBinary(PutRequestSchema, request(entries))
-                : textEncoder.encode(toJsonString(PutRequestSchema, request(entries))),
-        );
+        await expect(store.get(key)).resolves.toEqual({ value });
+        expect(store.putOptions).toEqual({
+            maxEntries: 2_000_000,
+            maxEncodedBytes: 256 * 1024 * 1024,
+            maxValueLen: 32 * 1024 * 1024,
+        });
+        expect(sent).toHaveLength(2);
+        expect(sent[0].contentType).toBe('application/proto');
+        expect(sent[0].body).toEqual(toBinary(PutRequestSchema, request(entries)));
+        expect(batch(entries, store).encodedLen()).toBe(sent[0].body.byteLength);
+        expect(sent[1].contentType).toBe(useBinaryFormat ? 'application/proto' : 'application/json');
+        const get = create(GetRequestSchema, { key });
+        expect(sent[1].body).toEqual(useBinaryFormat
+            ? toBinary(GetRequestSchema, get)
+            : new TextEncoder().encode(toJsonString(GetRequestSchema, get)));
+    } finally {
+        fetch.mockRestore();
+    }
+});
+
+test('ingest and query share authentication, retries, and cookies in both directions', async () => {
+    const seen: Array<{ method: string; cookie: string | null; authorization: string | null }> = [];
+    let putAttempts = 0;
+    let getAttempts = 0;
+    const fetch = jest.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+        const url = String(input);
+        const method = new URL(url).pathname.split('/').at(-1)!;
+        const headers = new Headers(init?.headers);
+        seen.push({ method, cookie: headers.get('cookie'), authorization: headers.get('authorization') });
+        let response: Response;
+        if (method === 'Put' && ++putAttempts === 1) {
+            response = new Response(JSON.stringify({ code: 'unavailable', message: 'retry Put' }), {
+                status: 503,
+                headers: { 'content-type': 'application/json', 'set-cookie': 'fromPut=one; Path=/' },
+            });
+        } else if (method === 'Get' && ++getAttempts === 1) {
+            response = new Response(JSON.stringify({ code: 'unavailable', message: 'retry Get' }), {
+                status: 503,
+                headers: { 'content-type': 'application/json', 'set-cookie': 'fromGet=two; Path=/' },
+            });
+        } else if (method === 'Put') {
+            response = new Response(toBinary(PutResponseSchema, create(PutResponseSchema, { sequenceNumber: 7n })), {
+                headers: { 'content-type': 'application/proto' },
+            });
+        } else {
+            response = new Response(toJsonString(GetResponseSchema, create(GetResponseSchema, { value: filled(1, 2) })), {
+                headers: { 'content-type': 'application/json' },
+            });
+        }
+        Object.defineProperty(response, 'url', { value: url });
+        return response;
+    });
+
+    try {
+        const sdk = client({
+            token: 'shared-token',
+            retry: { maxAttempts: 2, initialBackoffMs: 0, maxBackoffMs: 0 },
+        });
+        const key = filled(1, 1);
+        await expect(sdk.store().set(key, filled(1, 2))).resolves.toBe(7n);
+        await expect(sdk.store().get(key)).resolves.toEqual({ value: filled(1, 2) });
+        await expect(sdk.store().set(key, filled(1, 2))).resolves.toBe(7n);
+        await expect(sdk.query.get(create(GetRequestSchema, { key }), {
+            headers: { Authorization: 'Bearer caller-token' },
+        })).resolves.toMatchObject({ value: filled(1, 2) });
+
+        expect(seen.map(({ method }) => method)).toEqual(['Put', 'Put', 'Get', 'Get', 'Put', 'Get']);
+        expect(seen.map(({ cookie }) => cookie)).toEqual([
+            null,
+            'fromPut=one',
+            'fromPut=one',
+            'fromPut=one; fromGet=two',
+            'fromPut=one; fromGet=two',
+            'fromPut=one; fromGet=two',
+        ]);
+        expect(seen.map(({ authorization }) => authorization)).toEqual([
+            ...Array(5).fill('Bearer shared-token'),
+            'Bearer caller-token',
+        ]);
     } finally {
         fetch.mockRestore();
     }

@@ -6,15 +6,17 @@
 
 mod connect;
 mod engine;
+pub mod ingest;
 mod reduce;
 mod stream;
 mod validate;
 
 pub use connect::{
-    connect_limits, connect_stack, consistency_not_ready_error, ingest_service, prune_service,
-    query_service, query_stack, retention_service, stream_service, AppState, IngestState,
-    PruneState, QueryState, RetentionState, StreamState, MAX_CONNECTRPC_BODY_BYTES,
-    MAX_CONNECTRPC_ELEMENT_MEMORY_BYTES, MAX_CONNECTRPC_MESSAGE_BYTES,
+    connect_limits, connect_stack, consistency_not_ready_error, ingest_error_to_connect,
+    ingest_service, prune_service, query_service, query_stack, retention_service, stream_service,
+    worker_not_ready_error, AppState, IngestState, PruneState, QueryState, RetentionState,
+    StreamState, MAX_CONNECTRPC_BODY_BYTES, MAX_CONNECTRPC_ELEMENT_MEMORY_BYTES,
+    MAX_CONNECTRPC_MESSAGE_BYTES,
 };
 pub use engine::{
     FilteredBatch, Ingest, IngestError, Log, LogBatch, Prune, Query, QueryExtra, QueryResult,
@@ -35,3 +37,6 @@ pub use exoware_sdk::{
     selector::Selector,
     stream_filter::{Filter, StreamFilter},
 };
+
+pub use ingest::service::{PutConfig, PutMiddleware, PutService};
+pub use ingest::{PutError, PutInput};

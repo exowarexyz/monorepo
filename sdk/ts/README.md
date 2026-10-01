@@ -14,10 +14,10 @@ Interact with the Exoware API in TypeScript.
 length, value length, and encoded request size before sending. Invalid batches
 throw `RangeError`. Each call remains one atomic Put.
 
-`StoreWriteBatch` provides `encodedLen(encoding)`, `validate(options)`, and
-`split(options)`. Sizes include prefixed keys and the selected wire format.
-The default encoding is JSON, matching the client transport. Pass
-`store.putOptions` to match a client's encoding and limits:
+`StoreWriteBatch` provides `encodedLen()`, `validate(options)`, and
+`split(options)`. Sizes include prefixed keys and use the protobuf wire format
+that Ingest always sends. `ClientOptions.useBinaryFormat` controls the other
+services. Pass `store.putOptions` to use a client's configured limits:
 
 ```ts
 const chunks = batch.split(store.putOptions);
@@ -36,6 +36,20 @@ Defaults use `MAX_PUT_ENTRIES`, `MAX_REQUEST_MESSAGE_BYTES`, `MAX_VALUE_LEN`, an
 `maxEncodedBytes`, or `maxValueLen` to match a deployment. The same options can
 be passed to `validate` and `split`. The byte budget is the RPC message limit.
 See the [protocol contract](../../proto/README.md) for errors and portability.
+
+Use your generated `IngestService` descriptor with an explicitly binary transport:
+
+```ts
+import { createClient } from '@connectrpc/connect';
+import { createTransport } from '@exowarexyz/sdk';
+
+const ingest = createClient(IngestService, createTransport(url, { useBinaryFormat: true }));
+```
+
+Remove references to the former `PutEncoding` type, `PutBatchOptions.encoding`,
+the encoding argument to `StoreWriteBatch.encodedLen`, and the `encoding` property
+on `Client.putOptions` and `StoreClient.putOptions`. Put sizing and transport now
+always use protobuf.
 
 ## Credentials
 

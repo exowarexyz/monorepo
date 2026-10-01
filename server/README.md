@@ -27,6 +27,61 @@ snapshot sequence before returning data. If the snapshot is below that floor,
 return `consistency_not_ready_error(required, current)` to preserve the standard
 error details and standard retry hint. Both helpers are exported from the crate root.
 
+The shared Put adapter accepts Connect unary protobuf requests with identity or
+bounded single-frame zstd encoding. It admits transport capacity before reading
+and lends `&mut PutInput` to `Ingest::put`. Backends incrementally decode into
+reserved preparation storage and call `finish().await` before publication.
+Rejected input is drained separately within its wire bound and original deadline.
+Put rejects gzip request compression even though other services accept it.
+Encoding rejections advertise zstd through `Accept-Encoding`.
+Other services continue through the ordinary ConnectRPC dispatcher.
+
+Call `message_bound().await` before sizing preparation memory. Identity requests
+use their enforced wire and message limits. Zstd requests use the validated size
+pledge. Inspection runs through the configured CPU executor and retains any
+charged payload suffix without starting the decoder or allocating entry buffers.
+The bound is cached. `finish().await` still verifies the complete request before
+publication.
+
+Admission ownership follows the allocations and work it protects. Detached CPU
+jobs own decoding state and reservations. Accepted writer work retains its
+reservations and advances the subscriber notifier after durable publication,
+even when the requesting future has been cancelled.
+
+Serve the combined service through the shared ingest listener to enforce HTTP/1.1
+termination when unfinished requests reach their deadlines. Returning an error
+response alone cannot bound connection lifetime when outbound writes are blocked.
+HTTP/2 cleanup failure terminates the affected stream.
+
+Put honors `connect-timeout-ms` when present. Otherwise it uses `PutConfig.timeout`,
+which defaults to 30 seconds. The same deadline covers middleware, reception,
+decoding, backend work and rejection cleanup. Size the fallback for
+`max_wire_bytes` over the slowest supported link, with room for processing and
+backend latency.
+
+`AppState::with_put_config` and `IngestState::with_put_config` configure the host
+budget, admitted wire bound, timeout, and observer. Memory upgrades fail immediately
+while bootstrap admission is held. Known request lengths reserve their enforced
+wire bound. Unknown lengths reserve the configured wire maximum before the first
+body poll. Requests rejected from metadata retain only a request slot during raw
+cleanup, which still enforces the wire bound and deadline. Hosts must leave room for decoder and backend reservations in addition
+to transport admission. The byte budget accounts for admitted request allocations.
+Fixed listener overhead and storage-engine memory have separate bounds.
+
+Use `ingest::maximum_reception_bytes(limits, &buffers)` when checking that a host
+budget can admit one maximum Put. Pass the enforced `PutLimits` and the largest
+`DecodeBuffers` capacities used by the backend. The checked estimate covers
+transport admission and copies, decoding with one returned chunk still alive,
+allocation replacement, entry ranges, and the maximum accepted zstd workspace.
+Large fields can grow beyond
+the requested byte capacity up to the message limit. Add backend preparation and
+any additional retained chunk or slice allocations separately. Those owners retain
+their full backing capacity.
+
+Observers receive byte counts, HTTP EOF, validation and cleanup outcomes, and phase
+elapsed times. Response timing ends when the adapter returns the response. It does
+not measure the peer receiving the response.
+
 ## Protocol limits
 
 See the [language-independent protocol contract](../proto/README.md) for the
@@ -58,7 +113,7 @@ Unordered aggregation consumes its input before producing results.
 use bytes::Bytes;
 use exoware_sdk::prune_policy::PrunePolicyDocument;
 use exoware_server::{
-    AppState, Log, Ingest, IngestError, Prune, Query, QueryResult,
+    AppState, Log, Ingest, PutInput, PutError, Prune, Query, QueryResult,
     RangeScan, RangeScanBatch, RangeScanResult, Retention, Sequence, StoreEngine, connect_stack,
 };
 use std::future::Future;
@@ -68,7 +123,7 @@ use std::future::Future;
 //   fn current_sequence(&self) -> u64;
 //
 //   Ingest:
-//   fn put_batch(&self, kvs: Vec<(Bytes, Bytes)>) -> impl Future<Output = Result<u64, IngestError>> + Send + '_;
+//   fn put(&self, input: &mut PutInput) -> impl Future<Output = Result<u64, PutError>> + Send;
 //
 //   Query:
 //   type RangeScan: RangeScan;

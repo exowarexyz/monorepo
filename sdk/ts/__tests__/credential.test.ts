@@ -136,6 +136,14 @@ describe('Client credential', () => {
         expect(new Client('http://localhost:10000').credential).toBe('sent');
     });
 
+    test('resolves an environment token once for both transports', () => {
+        givenEnvironmentKey('from-env');
+        jest.mocked(environmentApiKey).mockClear();
+
+        expect(new Client('http://localhost:10000').credential).toBe('sent');
+        expect(environmentApiKey).toHaveBeenCalledTimes(1);
+    });
+
     test('an unusable token fails construction', () => {
         expect(() => new Client('http://localhost:10000', UNUSABLE)).toThrow(InvalidApiKeyError);
     });

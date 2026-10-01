@@ -811,7 +811,7 @@ mod tests {
                 value_generator_version: VALUE_GENERATOR_VERSION,
                 workload_generator_version: WORKLOAD_GENERATOR_VERSION,
                 read_retry_attempts: 5,
-                request_compression: Some(RequestCompression::Gzip),
+                request_compression: Some(RequestCompression::None),
             },
             123,
         )
@@ -1178,7 +1178,7 @@ mod tests {
         assert_eq!(config.batch_size, DEFAULT_INGEST_BATCH_SIZE);
         assert_eq!(
             config.client.request_compression(),
-            RequestCompression::Gzip
+            RequestCompression::None
         );
         assert_eq!(config.scenario, Scenario::ScanHeavy);
         assert_eq!(config.workload.key_dist, KeyDistribution::Latest);

@@ -20,7 +20,6 @@ const DEFAULT_MAX_BACKOFF_MS: u64 = 1_000;
 pub enum RequestCompression {
     #[default]
     Zstd,
-    Gzip,
     None,
 }
 
@@ -28,7 +27,6 @@ impl From<RequestCompression> for ConnectRequestCompression {
     fn from(value: RequestCompression) -> Self {
         match value {
             RequestCompression::Zstd => Self::Zstd { level: 0 },
-            RequestCompression::Gzip => Self::Gzip,
             RequestCompression::None => Self::None,
         }
     }
@@ -180,6 +178,28 @@ fn normalize_endpoint(endpoint: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::Parser;
+
+    #[derive(Parser)]
+    struct ClientCli {
+        #[command(flatten)]
+        client: ClientArgs,
+    }
+
+    #[test]
+    fn request_compression_cli_accepts_zstd_and_none_without_gzip() {
+        for (arg, expected) in [
+            ("zstd", RequestCompression::Zstd),
+            ("none", RequestCompression::None),
+        ] {
+            let parsed =
+                ClientCli::try_parse_from(["validation", "--request-compression", arg]).unwrap();
+            assert_eq!(parsed.client.request_compression, expected);
+        }
+        assert!(
+            ClientCli::try_parse_from(["validation", "--request-compression", "gzip"]).is_err()
+        );
+    }
 
     #[test]
     fn config_normalizes_endpoint() {

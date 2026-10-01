@@ -12,7 +12,7 @@ use exoware_sdk::prune_policy::{
 };
 use exoware_sdk::retention::RetentionPolicy;
 use exoware_sdk::selector::Selector;
-use exoware_server::{Ingest, Log, Prune, Query, Retention, Sequence};
+use exoware_server::{Log, Prune, Query, Retention, Sequence};
 use exoware_simulator::RocksStore;
 use tempfile::tempdir;
 
