@@ -275,10 +275,12 @@ the requested watermark.
 `OperationLogClient` verifies historical ranges against a caller-supplied root.
 Without a current-root witness this is the operation-log root. When a response
 contains that witness, verification binds the operation log to the supplied
-current root. Either way, the returned `VerifiedOperationRange.root` is the
-operation-log root the range is proven against, as on the adapter path. Native
-`root_at` always returns the operation-log root.
-`current_root_at` returns the current root.
+current root.
+
+Every `Verified*` result reports the canonical root at its tip. Service clients return the trusted
+root they verified against; adapter readers derive it from the stored witness.
+Adapter `root_at` returns the canonical root and `ops_root_at` the operation-log
+root.
 
 Unary range verification binds the exact requested
 `[start, min(start + max_locations, tip + 1))` interval. Ordered key ranges
@@ -286,10 +288,9 @@ verify a linear interval and forward pagination over authenticated successor
 links. Generic key ordering follows `K::Ord`.
 
 Rust subscriptions use `message_with_root` to obtain an independently trusted
-root for each frame tip. Each frame's `root` is the operation-log root the frame is
-proven against, which matches `VerifiedOperationRange.root`. Subscription filters support exact bytes, prefixes,
-and regexes over logical keys and values. Reconnect from
-`resume_sequence_number + 1`.
+root for each frame tip; each frame's `root` is that canonical root.
+Subscription filters support exact bytes, prefixes, and regexes over logical
+keys and values. Reconnect from `resume_sequence_number + 1`.
 
 Subscription delivery follows Store write frames and waits for the caller to
 publish a watermark covering each frame's operations. Data rows may span Store

@@ -817,14 +817,14 @@ async fn test_ordered_mmb_persistent_interleaved_seed_batches_keep_current_proof
     );
     assert_eq!(
         qmdb_client
-            .current_root_at(latest_location)
+            .root_at(latest_location)
             .await
             .expect("current root"),
         expected_root
     );
     assert_eq!(
         qmdb_client
-            .root_at(latest_location)
+            .ops_root_at(latest_location)
             .await
             .expect("ops root"),
         expected_ops_root
@@ -917,7 +917,7 @@ async fn test_ordered_fixed_round_trip() {
 }
 
 #[tokio::test]
-async fn test_current_root_at() {
+async fn test_root_at_returns_current_root() {
     let store_client = common::local_store_client().await;
     let source = build_variable_source::<mmr::Family>().await;
 
@@ -929,9 +929,9 @@ async fn test_current_root_at() {
         key_cfg(),
     );
     let root = qmdb_client
-        .current_root_at(source.latest_location)
+        .root_at(source.latest_location)
         .await
-        .expect("current_root_at");
+        .expect("root_at");
     assert!(!root.as_ref().iter().all(|&b| b == 0));
 }
 
@@ -1259,7 +1259,7 @@ where
     );
     for (boundary, _, _) in &expected_boundaries {
         assert!(matches!(
-            qmdb_client.current_root_at(*boundary).await,
+            qmdb_client.root_at(*boundary).await,
             Err(exoware_qmdb::QmdbError::WatermarkTooLow { requested, available: 0 })
                 if requested == boundary.as_u64()
         ));
@@ -1279,12 +1279,9 @@ where
     );
 
     for (boundary, expected_root, expected_value) in expected_boundaries {
-        let root = qmdb_client
-            .current_root_at(boundary)
-            .await
-            .unwrap_or_else(|error| {
-                panic!("current root at uploaded boundary {boundary}: {error}")
-            });
+        let root = qmdb_client.root_at(boundary).await.unwrap_or_else(|error| {
+            panic!("current root at uploaded boundary {boundary}: {error}")
+        });
         assert_eq!(root, expected_root);
         let proof = qmdb_client
             .get(boundary, &b"alpha".to_vec(), None)

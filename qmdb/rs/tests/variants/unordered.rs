@@ -146,7 +146,7 @@ async fn check_mirror<F, K, V, E>(
 
         let uploaded = snapshot.operations.len();
         assert_eq!(
-            local.root_at(tip).await.expect("ops root"),
+            local.ops_root_at(tip).await.expect("ops root"),
             snapshot.ops_root
         );
         let found = local
@@ -163,14 +163,18 @@ async fn check_mirror<F, K, V, E>(
             .operation_range(tip, Location::new(0), uploaded as u32, None)
             .await
             .expect("native historical proof");
-        assert_eq!(native_range.root, snapshot.ops_root);
-        assert_eq!(native_range.operations, snapshot.operations);
-
         // Current RPCs authenticate historical ranges through the source's canonical root
         let trusted_root = snapshot
             .current
             .as_ref()
             .map_or(snapshot.ops_root, |b| b.root);
+        assert_eq!(native_range.root, trusted_root);
+        assert_eq!(native_range.operations, snapshot.operations);
+        assert_eq!(local.root_at(tip).await.expect("root"), trusted_root);
+        assert_eq!(
+            local.ops_root_at(tip).await.expect("ops root"),
+            snapshot.ops_root
+        );
         let request = GetOperationRangeRequest {
             tip: tip.as_u64(),
             start_location: 0,
@@ -181,7 +185,7 @@ async fn check_mirror<F, K, V, E>(
             .get_operation_range(request.clone(), &trusted_root)
             .await
             .expect("remote historical proof");
-        assert_eq!(proof.root, snapshot.ops_root);
+        assert_eq!(proof.root, trusted_root);
         assert_eq!(proof.operations, snapshot.operations);
         if uploaded >= 3 {
             let suffix = remote
@@ -250,7 +254,7 @@ async fn check_mirror<F, K, V, E>(
 
         if snapshot.current.is_some() {
             assert_eq!(
-                local.current_root_at(tip).await.expect("current root"),
+                local.root_at(tip).await.expect("current root"),
                 trusted_root
             );
             let range_request = GetCurrentOperationRangeRequest {

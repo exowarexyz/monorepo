@@ -153,7 +153,7 @@ fn historical_multi_proof_len<D: Digest, F: Graftable>(proof: &RawBatchMultiProo
                 message_field_len(2, multi_proof_operation_len(location.as_u64(), encoded))
             })
             .sum::<usize>()
-        + codec_field_len(3, &proof.root)
+        + codec_field_len(3, &proof.ops_root)
         + proof
             .ops_root_witness
             .as_ref()
@@ -171,7 +171,7 @@ fn write_historical_multi_proof<D: Digest, F: Graftable>(
         write_message_field(buf, 2, inner_len);
         write_multi_proof_operation(buf, location.as_u64(), encoded);
     }
-    write_codec_field(buf, 3, &proof.root);
+    write_codec_field(buf, 3, &proof.ops_root);
     if let Some(witness) = &proof.ops_root_witness {
         write_codec_field(buf, 4, witness);
     }
@@ -187,7 +187,7 @@ fn operation_range_checkpoint_len<D: Digest, F: Graftable>(
             .iter()
             .map(|encoded| repeated_bytes_field_len(3, encoded))
             .sum::<usize>()
-        + codec_field_len(4, &proof.root)
+        + codec_field_len(4, &proof.ops_root)
         + proof
             .ops_root_witness
             .as_ref()
@@ -209,7 +209,7 @@ fn write_operation_range_checkpoint<D: Digest, F: Graftable>(
     for encoded in &proof.encoded_operations {
         write_repeated_bytes_field(buf, 3, encoded);
     }
-    write_codec_field(buf, 4, &proof.root);
+    write_codec_field(buf, 4, &proof.ops_root);
     if let Some(witness) = &proof.ops_root_witness {
         write_codec_field(buf, 5, witness);
     }

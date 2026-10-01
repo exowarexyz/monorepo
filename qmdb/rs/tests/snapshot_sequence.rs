@@ -316,7 +316,7 @@ async fn cached_publication_fences_dependent_reads() {
         .operation_range_checkpoint(watermark, Location::new(0), 1, None)
         .await
         .unwrap();
-    assert_eq!(checkpoint.root, expected_root);
+    assert_eq!(checkpoint.ops_root, expected_root);
     assert!(checkpoint.verify::<commonware_cryptography::Sha256>());
     assert_eq!(query.publication_reads.load(Ordering::SeqCst), 1);
 
@@ -333,7 +333,7 @@ async fn cached_publication_fences_dependent_reads() {
         .operation_range_checkpoint(previous_watermark, Location::new(0), 1, None)
         .await
         .unwrap();
-    assert_eq!(checkpoint.root, previous_root);
+    assert_eq!(checkpoint.ops_root, previous_root);
     assert!(checkpoint.verify::<commonware_cryptography::Sha256>());
     assert_eq!(query.publication_reads.load(Ordering::SeqCst), 1);
 

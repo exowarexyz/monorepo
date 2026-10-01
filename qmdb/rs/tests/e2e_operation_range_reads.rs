@@ -843,7 +843,7 @@ async fn clones_share_publication_roots_and_nodes() {
         .operation_range_checkpoint(Location::new(14), Location::new(1), 1, None)
         .await
         .unwrap();
-    assert_eq!(proof.root, root);
+    assert_eq!(proof.ops_root, root);
     assert!(proof.verify::<Sha256>());
     assert_eq!(
         proof.encoded_operations,
@@ -854,7 +854,7 @@ async fn clones_share_publication_roots_and_nodes() {
         .operation_range_checkpoint(Location::new(14), Location::new(1), 1, None)
         .await
         .unwrap();
-    assert_eq!(proof.root, root);
+    assert_eq!(proof.ops_root, root);
     assert!(proof.verify::<Sha256>());
     assert_eq!(
         proof.encoded_operations,
@@ -874,7 +874,7 @@ async fn clones_share_publication_roots_and_nodes() {
         .operation_range_checkpoint(Location::new(14), Location::new(1), 1, None)
         .await
         .unwrap();
-    assert_eq!(proof.root, root);
+    assert_eq!(proof.ops_root, root);
     assert!(proof.verify::<Sha256>());
     assert_eq!(
         proof.encoded_operations,
@@ -1018,7 +1018,7 @@ async fn cancelled_node_leader_does_not_make_follower_wait_for_replacement() {
         .expect("follower must read unresolved nodes without joining the replacement flight")
         .unwrap()
         .unwrap();
-    assert_eq!(proof.root, root);
+    assert_eq!(proof.ops_root, root);
     assert!(proof.verify::<Sha256>());
     assert_eq!(
         proof.encoded_operations,
@@ -1114,7 +1114,7 @@ async fn ordered_and_immutable_clones_reuse_publication_and_proof_caches() {
                     .operation_range_checkpoint(Location::new(14), Location::new(1), 1, None)
                     .await
                     .unwrap();
-                assert_eq!(proof.root, root);
+                assert_eq!(proof.ops_root, root);
                 assert!(proof.verify::<Sha256>());
                 assert_eq!(
                     proof.encoded_operations,
@@ -1125,7 +1125,7 @@ async fn ordered_and_immutable_clones_reuse_publication_and_proof_caches() {
                     .operation_range_checkpoint(Location::new(14), Location::new(1), 1, None)
                     .await
                     .unwrap();
-                assert_eq!(proof.root, root);
+                assert_eq!(proof.ops_root, root);
                 assert!(proof.verify::<Sha256>());
                 assert_eq!(
                     proof.encoded_operations,
@@ -1136,7 +1136,7 @@ async fn ordered_and_immutable_clones_reuse_publication_and_proof_caches() {
                     .operation_range_checkpoint(Location::new(14), Location::new(1), 1, None)
                     .await
                     .unwrap();
-                assert_eq!(proof.root, root);
+                assert_eq!(proof.ops_root, root);
                 assert!(proof.verify::<Sha256>());
                 assert_eq!(
                     proof.encoded_operations,
@@ -1150,7 +1150,7 @@ async fn ordered_and_immutable_clones_reuse_publication_and_proof_caches() {
                     .operation_range_checkpoint(Location::new(14), Location::new(1), 1, None)
                     .await
                     .unwrap();
-                assert_eq!(proof.root, root);
+                assert_eq!(proof.ops_root, root);
                 assert!(proof.verify::<Sha256>());
                 assert_eq!(
                     proof.encoded_operations,
@@ -1161,7 +1161,7 @@ async fn ordered_and_immutable_clones_reuse_publication_and_proof_caches() {
                     .operation_range_checkpoint(Location::new(14), Location::new(1), 1, None)
                     .await
                     .unwrap();
-                assert_eq!(proof.root, root);
+                assert_eq!(proof.ops_root, root);
                 assert!(proof.verify::<Sha256>());
                 assert_eq!(
                     proof.encoded_operations,
@@ -1172,7 +1172,7 @@ async fn ordered_and_immutable_clones_reuse_publication_and_proof_caches() {
                     .operation_range_checkpoint(Location::new(14), Location::new(1), 1, None)
                     .await
                     .unwrap();
-                assert_eq!(proof.root, root);
+                assert_eq!(proof.ops_root, root);
                 assert!(proof.verify::<Sha256>());
                 assert_eq!(
                     proof.encoded_operations,
@@ -1358,7 +1358,7 @@ async fn unordered_noncommit_tip_shares_floor_without_waiting_for_operation_scan
     assert!(!range.is_finished());
     range_gate.open();
     let range_proof = range.await.unwrap().unwrap();
-    assert_eq!(range_proof.root, root);
+    assert_eq!(range_proof.ops_root, root);
     assert!(range_proof.verify::<Sha256>());
     assert_eq!(
         range_proof.encoded_operations,
@@ -1374,7 +1374,7 @@ async fn unordered_noncommit_tip_shares_floor_without_waiting_for_operation_scan
         .expect("shared floor initialization must not wait for the operation scan")
         .unwrap()
         .unwrap();
-    assert_eq!(proof.root, root);
+    assert_eq!(proof.ops_root, root);
     assert!(proof.verify::<Sha256>());
     assert_eq!(
         proof.encoded_operations,

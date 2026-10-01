@@ -564,7 +564,7 @@ mod tests {
         let root = Sha256::fill(0x42);
         let raw = RawBatchMultiProof::<Sha256Digest, mmr::Family> {
             watermark: Location::new(0),
-            root,
+            ops_root: root,
             ops_root_witness: None,
             proof: Proof {
                 leaves: Location::new(1),

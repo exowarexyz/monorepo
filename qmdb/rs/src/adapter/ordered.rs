@@ -189,17 +189,27 @@ where
         self.publication.require(&session, watermark).await
     }
 
+    /// Canonical root at `watermark`, as the source database's `root()` returns
+    /// it: the current root when current-state rows were uploaded for this
+    /// boundary, otherwise the operations-log root.
     pub async fn root_at(&self, watermark: Location<F>) -> Result<H::Digest, QmdbError> {
         let watermark = self.resolve_watermark(watermark, None).await?;
         let session = ReadSession::fixed(self.store.clone(), Some(watermark.sequence_number));
+        if Self::load_ops_root_witness(&session, watermark.location)
+            .await?
+            .is_some()
+        {
+            return Self::load_current_boundary_root(&session, watermark.location).await;
+        }
         Self::compute_ops_root(&session, &self.op_cfg, watermark.location).await
     }
 
-    pub async fn current_root_at(&self, watermark: Location<F>) -> Result<H::Digest, QmdbError> {
+    /// Operations-log root at `watermark`, as the source database's `ops_root()`
+    /// returns it.
+    pub async fn ops_root_at(&self, watermark: Location<F>) -> Result<H::Digest, QmdbError> {
         let watermark = self.resolve_watermark(watermark, None).await?;
         let session = ReadSession::fixed(self.store.clone(), Some(watermark.sequence_number));
-        core::require_batch_boundary(&session, watermark.location).await?;
-        Self::load_current_boundary_root(&session, watermark.location).await
+        Self::compute_ops_root(&session, &self.op_cfg, watermark.location).await
     }
 
     pub async fn query_many_at<Q: AsRef<[u8]>>(
@@ -309,11 +319,14 @@ where
                 .collect::<Result<Vec<_>, _>>()?;
             Ok::<_, QmdbError>(RawMultiProof {
                 watermark: raw.watermark,
-                root: raw.root,
+                ops_root: raw.ops_root,
+                ops_root_witness: None,
                 proof: raw.proof,
                 operations,
             })
         })??;
+        let mut raw = raw;
+        raw.ops_root_witness = Self::load_ops_root_witness(&session, watermark.location).await?;
         if !raw.verify::<H>() {
             return Err(QmdbError::ProofVerification {
                 kind: crate::ProofKind::HistoricalMultiKey,
@@ -370,7 +383,10 @@ where
     ) -> Result<VerifiedMultiOperations<H::Digest, K, V, F, E>, QmdbError> {
         let raw = self.multi_proof_raw(watermark, keys).await?;
         Ok(VerifiedMultiOperations {
-            root: raw.root,
+            root: crate::proof::canonical_root::<F, H>(
+                &raw.ops_root,
+                raw.ops_root_witness.as_ref(),
+            ),
             operations: raw.operations,
         })
     }
@@ -397,7 +413,7 @@ where
             .collect::<Result<Vec<_>, _>>()?;
         Ok(VerifiedOperationRange {
             tip: checkpoint.watermark,
-            root: checkpoint.root,
+            root: checkpoint.canonical_root::<H>(),
             start_location: checkpoint.start_location,
             operations,
         })

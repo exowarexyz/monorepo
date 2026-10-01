@@ -194,17 +194,27 @@ where
         core::query_many_at(&session, keys, watermark.location, self).await
     }
 
+    /// Canonical root at `watermark`, as the source database's `root()` returns
+    /// it: the current root when current-state rows were uploaded for this
+    /// boundary, otherwise the operations-log root.
     pub async fn root_at(&self, watermark: Location<F>) -> Result<H::Digest, QmdbError> {
         let watermark = self.resolve_watermark(watermark, None).await?;
         let session = ReadSession::fixed(self.store.clone(), Some(watermark.sequence_number));
+        if load_ops_root_witness::<F, H>(&session, watermark.location)
+            .await?
+            .is_some()
+        {
+            return load_current_boundary_root::<F, H>(&session, watermark.location).await;
+        }
         compute_ops_root::<F, H, K, V, E>(&self.op_cfg, &session, watermark.location).await
     }
 
-    pub async fn current_root_at(&self, watermark: Location<F>) -> Result<H::Digest, QmdbError> {
+    /// Operations-log root at `watermark`, as the source database's `ops_root()`
+    /// returns it.
+    pub async fn ops_root_at(&self, watermark: Location<F>) -> Result<H::Digest, QmdbError> {
         let watermark = self.resolve_watermark(watermark, None).await?;
         let session = ReadSession::fixed(self.store.clone(), Some(watermark.sequence_number));
-        core::require_batch_boundary(&session, watermark.location).await?;
-        load_current_boundary_root::<F, H>(&session, watermark.location).await
+        compute_ops_root::<F, H, K, V, E>(&self.op_cfg, &session, watermark.location).await
     }
 
     pub(crate) async fn resolve_watermark(
@@ -315,7 +325,7 @@ where
         }
         Ok(VerifiedOperationRange {
             tip: checkpoint.watermark,
-            root: checkpoint.root,
+            root: checkpoint.canonical_root::<H>(),
             start_location: checkpoint.start_location,
             operations,
         })
