@@ -28,7 +28,7 @@ use datafusion::physical_plan::{collect, ExecutionPlan};
 use datafusion::prelude::SessionContext;
 use exoware_sdk::{StoreClient, StoreKeyPrefix};
 use exoware_server::{
-    Ingest, IngestError, IngestState, Query, QueryExtra, QueryResult, QueryState, RangeScan,
+    Ingest, IngestState, PutError, PutInput, Query, QueryExtra, QueryResult, QueryState, RangeScan,
     RangeScanBatch, RangeScanResult, Sequence,
 };
 use exoware_sql::proto::sql::v1::{QueryRequest, ServiceClient};
@@ -218,10 +218,28 @@ impl Sequence for Backend {
 }
 
 impl Ingest for Backend {
-    async fn put_batch(&self, kvs: Vec<(Bytes, Bytes)>) -> Result<u64, IngestError> {
+    async fn put(&self, input: &mut PutInput) -> Result<u64, PutError> {
+        let mut kvs = Vec::new();
+        while let Some(chunk) = input
+            .next_batch(exoware_server::ingest::DecodeBuffers::default())
+            .await?
+        {
+            kvs.extend(
+                chunk.entries().map(|(key, value)| {
+                    (Bytes::copy_from_slice(key), Bytes::copy_from_slice(value))
+                }),
+            );
+        }
+        input.finish().await?;
+        input.check_deadline()?;
+
         let mut kv = self.kv.lock().unwrap();
         kv.extend(kvs);
-        Ok(self.sequence.fetch_add(1, Ordering::Relaxed) + 1)
+        let sequence = self.sequence.fetch_add(1, Ordering::Relaxed) + 1;
+        if let Some(notifier) = input.notifier() {
+            notifier.advance(sequence);
+        }
+        Ok(sequence)
     }
 }
 

@@ -6,7 +6,7 @@ use bytes::Bytes;
 use connectrpc::client::{full_body, ClientTransport};
 use exoware_sdk::limits::MAX_PUT_ENTRIES;
 use exoware_sdk::transport::ServiceTransport;
-use exoware_server::{ingest_service, Ingest, IngestError, IngestState};
+use exoware_server::{ingest_service, Ingest, IngestState, PutError, PutInput};
 
 struct TrackingAllocator;
 
@@ -40,7 +40,7 @@ unsafe impl GlobalAlloc for TrackingAllocator {
 struct RejectIngest;
 
 impl Ingest for RejectIngest {
-    async fn put_batch(&self, _: Vec<(Bytes, Bytes)>) -> Result<u64, IngestError> {
+    async fn put(&self, _: &mut PutInput) -> Result<u64, PutError> {
         panic!("JSON Put requests must never be written")
     }
 }

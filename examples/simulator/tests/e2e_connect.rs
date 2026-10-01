@@ -49,6 +49,37 @@ async fn put_and_get_round_trip() {
 }
 
 #[tokio::test]
+async fn generated_zstd_put_uses_the_shared_streaming_path() {
+    use exoware_sdk::common::Entry;
+    use exoware_sdk::ingest::{PutRequest, ServiceClient};
+
+    let (client, url) = spawn_client().await;
+    let key = key(b"compressed-put");
+    let value = Bytes::from(vec![b'x'; 64 * 1024]);
+    let config = ClientConfig::new(url.parse().unwrap())
+        .with_compression(connect_compression_registry())
+        .compress_requests("zstd");
+    let ingest = ServiceClient::new(PreferZstdHttpClient::plaintext(), config);
+    let response = ingest
+        .put(PutRequest {
+            kvs: vec![Entry {
+                key: key.to_vec(),
+                value: value.clone(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        })
+        .await
+        .expect("compressed Put");
+    let stored = client
+        .query()
+        .get_with_min_sequence_number(&key, response.view().sequence_number)
+        .await
+        .expect("read compressed Put");
+    assert_eq!(stored.as_deref(), Some(value.as_ref()));
+}
+
+#[tokio::test]
 async fn get_missing_key_returns_none() {
     let (client, _url) = spawn_client().await;
     let got = client.query().get(&key(b"nope")).await.expect("get");
