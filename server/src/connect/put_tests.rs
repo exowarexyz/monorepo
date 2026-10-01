@@ -756,3 +756,69 @@ async fn rejected_content_lengths_drain_under_admission_without_ingest() {
         assert_eq!(budget.usage(), (0, 0));
     }
 }
+
+struct RecordDeadline {
+    remaining: Mutex<Option<std::time::Duration>>,
+}
+
+impl Ingest for RecordDeadline {
+    async fn put(&self, input: &mut PutInput) -> Result<u64, PutError> {
+        *self.remaining.lock().unwrap() = Some(
+            input
+                .deadline()
+                .saturating_duration_since(tokio::time::Instant::now()),
+        );
+        while input.next_batch(DecodeBuffers::default()).await?.is_some() {}
+        input.finish().await?;
+        Ok(1)
+    }
+}
+
+#[tokio::test]
+async fn review_client_timeout_longer_than_server_default_is_honored() {
+    let ingest = Arc::new(RecordDeadline {
+        remaining: Mutex::new(None),
+    });
+    let incoming = http::Request::post(format!("http://store.test/{PUT_PATH}"))
+        .header(http::header::CONTENT_TYPE, "application/proto")
+        .header("connect-protocol-version", "1")
+        .header("connect-timeout-ms", "90000")
+        .body(full_body(request(1).encode_to_vec().into()))
+        .unwrap();
+    let response =
+        tower::ServiceExt::oneshot(ingest_service(IngestState::new(ingest.clone())), incoming)
+            .await
+            .unwrap();
+    assert_eq!(response.status(), http::StatusCode::OK);
+    let remaining = ingest.remaining.lock().unwrap().unwrap();
+    assert!(
+        remaining > std::time::Duration::from_secs(60),
+        "client asked for 90s but the adapter granted {remaining:?}"
+    );
+}
+
+#[tokio::test]
+async fn upload_can_complete_after_server_fallback_before_client_deadline() {
+    let ingest = Arc::new(RecordDeadline {
+        remaining: Mutex::new(None),
+    });
+    let service = ingest_service(IngestState::new(ingest).with_put_config(
+        crate::ingest::PutConfig {
+            timeout: std::time::Duration::from_millis(25),
+            ..Default::default()
+        },
+    ));
+    let body = http_body_util::StreamBody::new(futures::stream::once(async {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        Ok::<_, ConnectError>(http_body::Frame::data(request(1).encode_to_vec().into()))
+    }));
+    let incoming = http::Request::post(format!("http://store.test/{PUT_PATH}"))
+        .header(http::header::CONTENT_TYPE, "application/proto")
+        .header("connect-protocol-version", "1")
+        .header("connect-timeout-ms", "1000")
+        .body(body)
+        .unwrap();
+    let response = tower::ServiceExt::oneshot(service, incoming).await.unwrap();
+
+    assert_eq!(response.status(), http::StatusCode::OK);
+}

@@ -22,6 +22,8 @@ pub struct PutConfig {
     /// Unknown-length bodies reserve this maximum before reception. Known lengths
     /// reserve a smaller bound that is enforced during reception and cleanup.
     pub max_wire_bytes: usize,
+    /// Request timeout when `connect-timeout-ms` is absent. Client timeouts take
+    /// precedence. The deadline covers reception, processing and cleanup.
     pub timeout: std::time::Duration,
     pub observer: Option<Arc<dyn super::IngestObserver>>,
 }
@@ -116,7 +118,6 @@ fn deadline(
                     .parse()
                     .map_err(|_| ConnectError::invalid_argument("invalid request timeout"))?,
             )
-            .min(default)
         }
     };
     Ok(tokio::time::Instant::now() + timeout)
