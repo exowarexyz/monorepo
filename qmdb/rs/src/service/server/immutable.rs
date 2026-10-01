@@ -64,6 +64,14 @@ where
     {
         Immutable::operation_range_checkpoint_at(self, watermark, start_location, max_locations)
     }
+
+    fn operations_multi_proof_at(
+        &self,
+        watermark: PublishedWatermark<F>,
+        locations: &[Location<F>],
+    ) -> impl Future<Output = Result<RawBatchMultiProof<Self::Digest, F>, QmdbError>> + Send {
+        Immutable::operations_multi_proof_at(self, watermark, locations)
+    }
 }
 
 /// Mount the immutable-QMDB operation log, the only service immutable QMDB serves.

@@ -1,5 +1,5 @@
-//! `qmdb.v1.OperationLogService`: historical operation ranges and
-//! proof-carrying subscriptions.
+//! `qmdb.v1.OperationLogService`: historical operation ranges, multi-location
+//! operation proofs, and proof-carrying subscriptions.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::future::Future;
@@ -19,9 +19,10 @@ use futures::{FutureExt, Stream};
 // The subscribe stream still classifies raw Store rows itself.
 use crate::adapter::subscription::{self as sub, RowClassifier};
 use crate::proof::{OperationRangeCheckpoint, RawBatchMultiProof};
+use crate::request::OperationLocations;
 use crate::service::proto::qmdb::v1::{
-    GetOperationRangeRequest, GetOperationRangeResponse, OperationLogService, SubscribeRequest,
-    SubscribeResponse,
+    GetOperationRangeRequest, GetOperationRangeResponse, GetOperationsRequest,
+    GetOperationsResponse, OperationLogService, SubscribeRequest, SubscribeResponse,
 };
 use crate::{OperationKv, PublishedWatermark, QmdbError};
 
@@ -57,6 +58,11 @@ pub(crate) trait OperationLogReader: Send + Sync + 'static {
         max_locations: u32,
     ) -> impl Future<Output = Result<OperationRangeCheckpoint<Self::Digest, Self::Family>, QmdbError>>
            + Send;
+    fn operations_multi_proof_at(
+        &self,
+        watermark: PublishedWatermark<Self::Family>,
+        locations: &[Location<Self::Family>],
+    ) -> impl Future<Output = Result<RawBatchMultiProof<Self::Digest, Self::Family>, QmdbError>> + Send;
 }
 
 /// `OperationLogService` handler over any [`OperationLogReader`].
@@ -452,6 +458,33 @@ impl<R: OperationLogReader> OperationLogService for OperationLogServer<R> {
                 .await
                 .map_err(qmdb_error_to_connect)?;
             connectrpc::Response::ok(encode::get_operation_range_response(&proof))
+        }
+    }
+
+    fn get_operations(
+        &self,
+        _ctx: Context,
+        request: ServiceRequest<'_, GetOperationsRequest>,
+    ) -> impl Future<Output = connectrpc::ServiceResult<PreEncoded<GetOperationsResponse>>> + Send
+    {
+        let reader = self.reader.clone();
+        async move {
+            let requested = request.locations.iter().copied().collect::<Vec<u64>>();
+            OperationLocations::new(request.tip, &requested)
+                .map_err(|err| qmdb_error_to_connect(err.into()))?;
+            let watermark = reader
+                .resolve_watermark(Location::new(request.tip), request.min_sequence_number)
+                .await
+                .map_err(qmdb_error_to_connect)?;
+            let locations = requested
+                .into_iter()
+                .map(Location::new)
+                .collect::<Vec<Location<R::Family>>>();
+            let proof = reader
+                .operations_multi_proof_at(watermark, &locations)
+                .await
+                .map_err(qmdb_error_to_connect)?;
+            connectrpc::Response::ok(encode::get_operations_response(&proof))
         }
     }
 

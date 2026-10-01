@@ -60,6 +60,50 @@ pub(crate) fn range_positions<F: Family>(
     Ok(positions.into_iter().collect())
 }
 
+/// Plan every node a multi-proof over `locations` may read, plus each peak for
+/// the root. Locations must be strictly ascending and below the watermark's
+/// leaf count. Commonware unions each location's single-element proof, so the
+/// plan is every peak plus each location's path siblings. It is the same for
+/// every inactive-peak count and bagging, so it can be read before the root
+/// context is known.
+pub(crate) fn multi_positions<F: Family>(
+    watermark: Location<F>,
+    locations: &[Location<F>],
+) -> Result<Vec<Position<F>>, QmdbError> {
+    let leaves = op_count_for_watermark(watermark)?;
+    let size = merkle_size_for_watermark(watermark)?;
+    if locations.is_empty()
+        || locations.windows(2).any(|pair| pair[0] >= pair[1])
+        || locations.last().is_some_and(|last| *last >= leaves)
+    {
+        return Err(QmdbError::CorruptData(
+            "invalid Merkle multi-proof prefetch locations".into(),
+        ));
+    }
+
+    // Running leaf offsets stay in range up to the family's maximum size, where
+    // per-peak position arithmetic does not.
+    let mut positions = BTreeSet::new();
+    let mut leaf_start = 0u64;
+    for (peak, height) in F::peaks(size) {
+        let leaf_end = 1u64
+            .checked_shl(height)
+            .and_then(|capacity| leaf_start.checked_add(capacity))
+            .ok_or_else(|| QmdbError::CorruptData("Merkle peak leaf range overflow".into()))?;
+        positions.insert(peak);
+        let first = locations.partition_point(|location| **location < leaf_start);
+        let last = locations.partition_point(|location| **location < leaf_end);
+        for &location in &locations[first..last] {
+            positions.extend(
+                merkle::path::Iterator::new(peak, height, Location::new(leaf_start), location)
+                    .map(|(_, sibling, _)| sibling),
+            );
+        }
+        leaf_start = leaf_end;
+    }
+    Ok(positions.into_iter().collect())
+}
+
 // The range plan includes every proof node and checkpoint pin before construction starts.
 pub(crate) struct PrefetchedMerkleStorage<F: Family, D: Digest> {
     size: Position<F>,
@@ -219,6 +263,123 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+
+    async fn assert_multi_plans<F: Family + PartialEq>() {
+        for bagging in [Bagging::ForwardFold, Bagging::BackwardFold] {
+            let hasher = Standard::<Sha256>::new(bagging);
+            for leaves in 1..=24u64 {
+                let mut memory = Mem::<F, Digest>::new();
+                let mut batch = memory.new_batch();
+                for leaf in 0u64..leaves {
+                    batch = batch.add(&hasher, &leaf.to_be_bytes());
+                }
+                memory
+                    .apply_batch(&batch.merkleize(&memory, &hasher))
+                    .unwrap();
+                let peaks = F::peaks(memory.size()).count();
+                // Every location subset up to 24 leaves is too many; use all
+                // singletons and pairs plus strided and full sets.
+                let mut sets = Vec::new();
+                for a in 0..leaves {
+                    sets.push(vec![a]);
+                    for b in a + 1..leaves {
+                        sets.push(vec![a, b]);
+                    }
+                }
+                for stride in 2..=4 {
+                    sets.push((0..leaves).step_by(stride).collect());
+                }
+                sets.push((0..leaves).collect());
+                for set in sets {
+                    let locations = set.into_iter().map(Location::new).collect::<Vec<_>>();
+                    let plan = multi_positions::<F>(Location::new(leaves - 1), &locations).unwrap();
+                    assert!(plan.is_sorted_by(|a, b| a < b));
+                    let nodes = plan
+                        .iter()
+                        .map(|&position| {
+                            (
+                                position,
+                                Some(Bytes::copy_from_slice(
+                                    memory.get_node(position).unwrap().as_ref(),
+                                )),
+                            )
+                        })
+                        .collect();
+                    let storage = PrefetchedMerkleStorage::<F, Digest>::new(memory.size(), nodes);
+                    for inactive in 0..=peaks {
+                        let actual =
+                            verification::multi_proof(&storage, inactive, bagging, &locations)
+                                .await
+                                .unwrap();
+                        let expected =
+                            verification::multi_proof(&memory, inactive, bagging, &locations)
+                                .await
+                                .unwrap();
+                        assert_eq!(
+                            actual, expected,
+                            "leaves={leaves}, locations={locations:?}, inactive={inactive}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn multi_plans_match_memory_proofs_for_both_families() {
+        assert_multi_plans::<mmr::Family>().await;
+        assert_multi_plans::<mmb::Family>().await;
+    }
+
+    async fn assert_large_multi_plans<F: Family>() {
+        let maximum = *F::MAX_LEAVES;
+        let mut sizes = BTreeSet::from([maximum - 1, maximum]);
+        for height in 1..=62 {
+            let boundary = 1u64 << height;
+            sizes.extend(
+                [boundary - 1, boundary, boundary + 1]
+                    .into_iter()
+                    .filter(|size| *size <= maximum),
+            );
+        }
+        for leaves in sizes {
+            let size = Position::<F>::try_from(Location::new(leaves)).unwrap();
+            let peaks = F::peaks(size).count();
+            let mut set = vec![0, leaves / 3, leaves / 2, leaves - 1];
+            set.dedup();
+            let locations = set.into_iter().map(Location::new).collect::<Vec<_>>();
+            let plan = multi_positions::<F>(Location::new(leaves - 1), &locations).unwrap();
+
+            // Synthetic digests check the proof builder's read set without allocating leaves.
+            let nodes = plan
+                .into_iter()
+                .map(|position| (position, Some(Bytes::from_static(&[0; 32]))))
+                .collect();
+            let storage = PrefetchedMerkleStorage::<F, Digest>::new(size, nodes);
+            for bagging in [Bagging::ForwardFold, Bagging::BackwardFold] {
+                for inactive in [0, peaks] {
+                    verification::multi_proof(&storage, inactive, bagging, &locations)
+                        .await
+                        .unwrap();
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn multi_plans_cover_large_topology_boundaries() {
+        assert_large_multi_plans::<mmr::Family>().await;
+        assert_large_multi_plans::<mmb::Family>().await;
+    }
+
+    #[test]
+    fn multi_plan_rejects_invalid_locations() {
+        let watermark = Location::<mmr::Family>::new(9);
+        for locations in [vec![], vec![3, 3], vec![4, 2], vec![0, 10]] {
+            let locations = locations.into_iter().map(Location::new).collect::<Vec<_>>();
+            assert!(multi_positions(watermark, &locations).is_err());
         }
     }
 

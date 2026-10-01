@@ -464,6 +464,17 @@ pub struct VerifiedOperationRange<D: Digest, Op, F: Family> {
     pub operations: Vec<Op>,
 }
 
+/// Operations at the requested locations of `tip`, in request order. Shared
+/// across ordered, unordered, immutable, and keyless variants.
+#[derive(Clone, Debug, PartialEq)]
+#[must_use]
+pub struct VerifiedOperations<D: Digest, Op, F: Family> {
+    pub tip: Location<F>,
+    /// Canonical root at `tip`; see [`VerifiedOperationRange::root`].
+    pub root: D,
+    pub operations: Vec<(Location<F>, Op)>,
+}
+
 /// Set of (location, operation) pairs verified as a multi-proof.
 #[derive(Clone, Debug, PartialEq)]
 #[must_use]

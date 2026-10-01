@@ -187,6 +187,15 @@ async fn check_mirror<F, K, V, E>(
             .expect("remote historical proof");
         assert_eq!(proof.root, trusted_root);
         assert_eq!(proof.operations, snapshot.operations);
+        crate::browser::assert_operations(
+            case_name,
+            &url,
+            &remote,
+            &trusted_root,
+            &snapshot.operations,
+            snapshot.operations.len() == snapshots.last().unwrap().operations.len(),
+        )
+        .await;
         if uploaded >= 3 {
             let suffix = remote
                 .get_operation_range(

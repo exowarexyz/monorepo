@@ -65,6 +65,14 @@ where
     {
         Keyless::operation_range_checkpoint_at(self, watermark, start_location, max_locations)
     }
+
+    fn operations_multi_proof_at(
+        &self,
+        watermark: PublishedWatermark<F>,
+        locations: &[Location<F>],
+    ) -> impl Future<Output = Result<RawBatchMultiProof<Self::Digest, F>, QmdbError>> + Send {
+        Keyless::operations_multi_proof_at(self, watermark, locations)
+    }
 }
 
 /// Mount the keyless-QMDB operation log, the only service keyless QMDB serves.

@@ -19,7 +19,7 @@ use commonware_storage::qmdb::any::value::VariableEncoding;
 use commonware_storage::qmdb::immutable::variable::Operation as ImmutableOperation;
 use commonware_storage::qmdb::keyless::variable::Operation as KeylessOperation;
 use connectrpc::{ConnectError, ConnectRpcService, ErrorCode, RequestContext, ServiceRequest};
-use exoware_qmdb::service::proto::qmdb::v1::GetOperationRangeRequest;
+use exoware_qmdb::service::proto::qmdb::v1::{GetOperationRangeRequest, GetOperationsRequest};
 use exoware_qmdb::{
     adapter::upload::stage_authenticated_range, adapter::upload::stage_watermark,
     adapter::upload::UploadOperation, service::client::rpc::OperationLogClient, NODE_FAMILY,
@@ -884,6 +884,63 @@ async fn clones_share_publication_roots_and_nodes() {
         call,
         Call::Range(range) if range.mode == TraversalMode::Reverse
     )));
+}
+
+#[tokio::test]
+async fn operations_multi_proof_reads_rows_and_nodes_in_one_batch() {
+    let mut fixture = Fixture::new().await;
+    let store = fixture.prefixed(&[]);
+    let operations = operations();
+    let root = fixture.stage(&store, &operations, &((0..=10000).into(), ()));
+    let url = fixture.keyless(store).await;
+    let client = proof_client(&url);
+    let locations = [1u64, 7, 14];
+    let verify = || async {
+        let proof = client
+            .get_operations(
+                GetOperationsRequest {
+                    tip: 14,
+                    locations: locations.to_vec(),
+                    ..Default::default()
+                },
+                &root,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            proof.operations,
+            locations
+                .map(|location| (
+                    Location::new(location),
+                    operations[location as usize].clone()
+                ))
+                .to_vec()
+        );
+    };
+
+    // Cold: the publication lookup, then rows, planned nodes, and the watermark row together.
+    verify().await;
+    let calls = fixture.store.calls();
+    assert_eq!(calls.len(), 2);
+    publication_range(&calls);
+    let batch = boundary_batch(&calls, 14);
+    for location in locations {
+        assert!(batch.keys.contains(&key(4, location)));
+    }
+    assert!(batch.keys.len() > locations.len());
+
+    // Warm: cached publication, root context, and nodes leave only the operation rows.
+    fixture.store.state.lock().unwrap().calls.clear();
+    verify().await;
+    let calls = fixture.store.calls();
+    assert_eq!(calls.len(), 1);
+    let batch = boundary_batch(&calls, 14);
+    assert_eq!(
+        batch.keys,
+        locations
+            .map(|location| Bytes::from(key(4, location)))
+            .to_vec()
+    );
 }
 
 #[tokio::test]

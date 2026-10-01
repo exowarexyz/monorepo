@@ -84,6 +84,15 @@ impl From<crate::request::InvalidWindow> for QmdbError {
     }
 }
 
+impl From<crate::request::InvalidLocations> for QmdbError {
+    fn from(err: crate::request::InvalidLocations) -> Self {
+        match err {
+            crate::request::InvalidLocations::TipOverflow => Self::CorruptData(err.to_string()),
+            _ => Self::InvalidRequestedLocations(err.to_string()),
+        }
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum QmdbError {
     #[error(transparent)]
@@ -113,6 +122,8 @@ pub enum QmdbError {
     CurrentBoundaryStateMissing { location: u64 },
     #[error("range proof start {start} is out of bounds for watermark with {count} leaves")]
     RangeStartOutOfBounds { start: u64, count: u64 },
+    #[error("invalid requested locations: {0}")]
+    InvalidRequestedLocations(String),
     #[error("encoded value exceeds store value limit ({len} > {max})")]
     EncodedValueTooLarge { len: usize, max: usize },
     #[error(

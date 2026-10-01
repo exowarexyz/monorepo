@@ -24,11 +24,12 @@ use connectrpc::client::{ClientConfig, ClientTransport, ServerStream};
 use exoware_sdk::proto::PreferZstdHttpClient;
 use http_body::Body;
 
-use crate::proof::VerifiedOperationRange;
-use crate::request::OperationWindow;
+use crate::proof::{VerifiedOperationRange, VerifiedOperations};
+use crate::request::{OperationLocations, OperationWindow};
 use crate::service::proto::qmdb::v1::{
-    GetOperationRangeRequest, HistoricalMultiProof, HistoricalOperationRangeProof,
-    OperationLogServiceClient, SubscribeRequest, SubscribeResponseView,
+    GetOperationRangeRequest, GetOperationsRequest, HistoricalMultiProof,
+    HistoricalOperationRangeProof, OperationLogServiceClient, SubscribeRequest,
+    SubscribeResponseView,
 };
 use crate::{decode_digest, QmdbError};
 
@@ -215,6 +216,49 @@ where
             tip,
             root,
             start_location: Location::<F>::new(proof.start_location),
+            operations,
+        })
+    }
+
+    /// Fetch and verify the operations at `request.locations` of `request.tip`.
+    pub async fn get_operations(
+        &self,
+        request: GetOperationsRequest,
+        expected_root: &H::Digest,
+    ) -> Result<VerifiedOperations<H::Digest, Op, F>, QmdbError> {
+        let tip = Location::<F>::new(request.tip);
+        let requested = request.locations.clone();
+        let locations = OperationLocations::new(request.tip, &requested)?;
+        let response = self
+            .rpc
+            .get_operations(request)
+            .await
+            .map_err(connect_error_to_qmdb)?
+            .into_view()
+            .to_owned_message();
+        let proof = response.proof.as_option().ok_or_else(|| {
+            QmdbError::CorruptData("qmdb get_operations response missing proof".to_string())
+        })?;
+        let max_digests = proof_digest_cap::<H::Digest>(&proof.proof);
+        let merkle_proof = Proof::<F, H::Digest>::decode_cfg(proof.proof.as_ref(), &max_digests)
+            .map_err(|err| {
+                QmdbError::CorruptData(format!("failed to decode operations multi proof: {err}"))
+            })?;
+        locations
+            .validate(
+                proof.operations.iter().map(|op| op.location),
+                merkle_proof.leaves.as_u64(),
+            )
+            .map_err(QmdbError::RangeMismatch)?;
+        let (root, operations) = verify_multi_from_proto::<F, H, Op>(
+            proof,
+            &merkle_proof,
+            self.op_cfg.as_ref(),
+            expected_root,
+        )?;
+        Ok(VerifiedOperations {
+            tip,
+            root,
             operations,
         })
     }

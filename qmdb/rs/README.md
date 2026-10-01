@@ -283,7 +283,9 @@ Adapter `root_at` returns the canonical root and `ops_root_at` the operation-log
 root.
 
 Unary range verification binds the exact requested
-`[start, min(start + max_locations, tip + 1))` interval. Ordered key ranges
+`[start, min(start + max_locations, tip + 1))` interval. `get_operations`
+proves up to 1024 strictly ascending locations at one tip in a single
+multi-proof and binds exactly that tip and those locations. Ordered key ranges
 verify a linear interval and forward pagination over authenticated successor
 links. Generic key ordering follows `K::Ord`.
 
@@ -315,8 +317,9 @@ historical reads and proofs.
 
 The TypeScript/WASM API supports both MMR and MMB. `QmdbOperationLogClient`
 authenticates historical operation ranges as raw bytes across backend and
-encoding variants. It also exposes fixed keyless append and fixed unordered
-update helpers that check the requested operation's semantics.
+encoding variants, as contiguous ranges or as operations at chosen locations.
+It also exposes fixed keyless append and fixed unordered update helpers, for one
+location or many per proof, that check the requested operations' semantics.
 
 `OrderedQmdbClient` decodes variable-encoded ordered operations with `Vec<u8>`
 keys and values. Its typed historical ranges, subscriptions, current operation

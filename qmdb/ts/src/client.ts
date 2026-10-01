@@ -28,6 +28,7 @@ import {
 import {
   OperationLogService,
   GetOperationRangeRequestSchema,
+  GetOperationsRequestSchema,
   SubscribeRequestSchema,
 } from './generated/proto/qmdb/v1/operation_log_pb.js';
 import {
@@ -45,9 +46,12 @@ import initWasm, {
   verify_current_key_value_proof,
   verify_get_many_response,
   verify_get_range_response,
+  verify_historical_fixed_keyless_append_operations_proof,
   verify_historical_fixed_keyless_append_proof,
+  verify_historical_fixed_unordered_update_operations_proof,
   verify_historical_fixed_unordered_update_proof,
   verify_historical_operation_range_proof,
+  verify_historical_operations_proof,
   verify_historical_raw_operation_range_proof,
 } from './generated/wasm/exoware_qmdb_wasm.js';
 
@@ -95,6 +99,18 @@ export interface OperationRangeRequest {
   minSequenceNumber?: bigint;
 }
 
+/** Operations at `locations`, strictly ascending and each at most `tip`. */
+export interface OperationsRequest {
+  tip: bigint;
+  locations: readonly bigint[];
+  minSequenceNumber?: bigint;
+}
+
+export interface OperationsTipRequest {
+  tip: bigint;
+  minSequenceNumber?: bigint;
+}
+
 export interface LocatedRawOperation {
   location: bigint;
   encodedOperation: Uint8Array;
@@ -103,6 +119,42 @@ export interface LocatedRawOperation {
 export interface VerifiedRawOperationRangeProof {
   root: Uint8Array;
   operations: LocatedRawOperation[];
+  proofSizeBytes: number;
+}
+
+/**
+ * Operations in request order. `root` is the trusted root supplied to
+ * verification; for current-boundary endpoints an ops-root witness binds the
+ * proven operation-log root to it.
+ */
+export interface VerifiedRawOperationsProof {
+  root: Uint8Array;
+  operations: LocatedRawOperation[];
+  proofSizeBytes: number;
+}
+
+export interface VerifiedFixedKeylessAppend {
+  location: bigint;
+  value: Uint8Array;
+}
+
+/** Appends in ascending location order. `root` is as in {@link VerifiedRawOperationsProof}. */
+export interface VerifiedFixedKeylessAppendsProof {
+  root: Uint8Array;
+  operations: VerifiedFixedKeylessAppend[];
+  proofSizeBytes: number;
+}
+
+export interface VerifiedFixedUnorderedUpdate {
+  location: bigint;
+  key: Uint8Array;
+  value: Uint8Array;
+}
+
+/** Updates in ascending location order. `root` is as in {@link VerifiedRawOperationsProof}. */
+export interface VerifiedFixedUnorderedUpdatesProof {
+  root: Uint8Array;
+  operations: VerifiedFixedUnorderedUpdate[];
   proofSizeBytes: number;
 }
 
@@ -258,6 +310,43 @@ function assertOperationWindow(request: OperationRangeRequest): void {
   }
 }
 
+const MAX_REQUESTED_LOCATIONS = 1024;
+
+function assertOperationsRequest(request: OperationsRequest): void {
+  assertU64(request.tip, 'tip');
+  assertOptionalMinSequenceNumber(request.minSequenceNumber);
+  const { locations } = request;
+  if (locations.length === 0 || locations.length > MAX_REQUESTED_LOCATIONS) {
+    throw new Error(`operations request must have 1 to ${MAX_REQUESTED_LOCATIONS} locations`);
+  }
+  locations.forEach((location, index) => {
+    assertU64(location, 'location');
+    if (index > 0 && location <= locations[index - 1]) {
+      throw new Error('operations request locations must be strictly ascending');
+    }
+  });
+  if (locations[locations.length - 1] > request.tip) {
+    throw new Error('operations request location is above tip');
+  }
+}
+
+/** Sort expectations by location and concatenate their equal-size bytes. */
+function fixedOperationExpectations(
+  expected: readonly { location: bigint; bytes: Uint8Array }[],
+  label: string,
+): { locations: bigint[]; bytes: Uint8Array; size: number } {
+  const sorted = [...expected].sort((a, b) =>
+    a.location < b.location ? -1 : a.location > b.location ? 1 : 0,
+  );
+  const size = sorted[0]?.bytes.length ?? 0;
+  if (size === 0 || sorted.some(({ bytes }) => bytes.length !== size)) {
+    throw new Error(`expected ${label}s must be non-empty and equal in size`);
+  }
+  const bytes = new Uint8Array(size * sorted.length);
+  sorted.forEach((entry, index) => bytes.set(entry.bytes, index * size));
+  return { locations: sorted.map(({ location }) => location), bytes, size };
+}
+
 export function matchExact(bytes: BytesLike): Filter {
   return create(FilterSchema, {
     kind: {
@@ -298,6 +387,25 @@ async function operationRangeProofBytes(
     throw new Error('qmdb getOperationRange response missing proof');
   }
   return toBinary(HistoricalOperationRangeProofSchema, response.proof);
+}
+
+async function operationsProofBytes(
+  operationLog: ConnectClient<typeof OperationLogService>,
+  request: OperationsRequest,
+  options?: CallOptions,
+): Promise<Uint8Array> {
+  const response = await operationLog.getOperations(
+    create(GetOperationsRequestSchema, {
+      tip: request.tip,
+      locations: [...request.locations],
+      minSequenceNumber: request.minSequenceNumber,
+    }),
+    options,
+  );
+  if (!response.proof) {
+    throw new Error('qmdb getOperations response missing proof');
+  }
+  return toBinary(HistoricalMultiProofSchema, response.proof);
 }
 
 export class QmdbOperationLogClient {
@@ -403,6 +511,85 @@ export class QmdbOperationLogClient {
       request.startLocation,
       request.maxLocations,
     ) as Omit<VerifiedFixedUnorderedUpdateProof, 'proofSizeBytes'>;
+    return { ...verified, proofSizeBytes: proofBytes.length };
+  }
+
+  /** Fetch and verify the raw operations at `request.locations` of one tip. */
+  async getOperations(
+    request: OperationsRequest,
+    expectedRoot: BytesLike,
+    options?: CallOptions,
+  ): Promise<VerifiedRawOperationsProof> {
+    assertOperationsRequest(request);
+    await ensureWasm();
+    const proofBytes = await operationsProofBytes(this.operationLog, request, options);
+    const verified = verify_historical_operations_proof(
+      proofBytes,
+      toBytes(expectedRoot),
+      this.merkleFamily,
+      this.hashFamily,
+      request.tip,
+      BigUint64Array.from(request.locations),
+    ) as Omit<VerifiedRawOperationsProof, 'proofSizeBytes'>;
+    return { ...verified, proofSizeBytes: proofBytes.length };
+  }
+
+  /** Verify that each expected value was appended at its location, in one proof. */
+  async getFixedKeylessAppendMany(
+    request: OperationsTipRequest,
+    expectedRoot: BytesLike,
+    expected: readonly { location: bigint; value: BytesLike }[],
+    options?: CallOptions,
+  ): Promise<VerifiedFixedKeylessAppendsProof> {
+    const { locations, bytes, size } = fixedOperationExpectations(
+      expected.map(({ location, value }) => ({ location, bytes: toBytes(value) })),
+      'value',
+    );
+    const operations = { ...request, locations };
+    assertOperationsRequest(operations);
+    await ensureWasm();
+    const proofBytes = await operationsProofBytes(this.operationLog, operations, options);
+    const verified = verify_historical_fixed_keyless_append_operations_proof(
+      proofBytes,
+      toBytes(expectedRoot),
+      this.merkleFamily,
+      this.hashFamily,
+      request.tip,
+      BigUint64Array.from(locations),
+      bytes,
+      size,
+    ) as Omit<VerifiedFixedKeylessAppendsProof, 'proofSizeBytes'>;
+    return { ...verified, proofSizeBytes: proofBytes.length };
+  }
+
+  /** Verify that each expected key was updated at its location, in one proof. */
+  async getFixedUnorderedUpdateMany(
+    request: OperationsTipRequest,
+    expectedRoot: BytesLike,
+    expected: readonly { location: bigint; key: BytesLike }[],
+    valueSize: number,
+    options?: CallOptions,
+  ): Promise<VerifiedFixedUnorderedUpdatesProof> {
+    assertU32(valueSize, 'valueSize');
+    const { locations, bytes, size } = fixedOperationExpectations(
+      expected.map(({ location, key }) => ({ location, bytes: toBytes(key) })),
+      'key',
+    );
+    const operations = { ...request, locations };
+    assertOperationsRequest(operations);
+    await ensureWasm();
+    const proofBytes = await operationsProofBytes(this.operationLog, operations, options);
+    const verified = verify_historical_fixed_unordered_update_operations_proof(
+      proofBytes,
+      toBytes(expectedRoot),
+      this.merkleFamily,
+      this.hashFamily,
+      request.tip,
+      BigUint64Array.from(locations),
+      bytes,
+      size,
+      valueSize,
+    ) as Omit<VerifiedFixedUnorderedUpdatesProof, 'proofSizeBytes'>;
     return { ...verified, proofSizeBytes: proofBytes.length };
   }
 }

@@ -27,7 +27,9 @@ use crate::adapter::codec::{
     encode_update_key, merkle_size_for_watermark, CurrentBoundaryMetadata, UPDATE_PREFIX,
 };
 use crate::adapter::core;
-use crate::adapter::operation_range::load_operation_range_checkpoint;
+use crate::adapter::operation_range::{
+    load_operation_range_checkpoint, load_operations_multi_proof,
+};
 use crate::adapter::read_cache::ReadCache;
 use crate::adapter::storage::{KvCurrentStorage, KvMerkleStorage, ProofBitmap};
 use crate::error::{error_key, QmdbError};
@@ -463,6 +465,37 @@ where
         )
         .await?;
         Ok(checkpoint)
+    }
+
+    /// Multi-proof over `locations` at a published watermark, built from the
+    /// same cached reads as [`Self::operation_range_checkpoint_at`].
+    pub(crate) async fn operations_multi_proof_at(
+        &self,
+        watermark: PublishedWatermark<F>,
+        locations: &[Location<F>],
+    ) -> Result<RawBatchMultiProof<H::Digest, F>, QmdbError> {
+        let session = ReadSession::fixed(self.store.clone(), Some(watermark.sequence_number));
+        let watermark = watermark.location;
+        let session = &session;
+        load_operations_multi_proof::<F, H, _>(
+            session,
+            &self.read_cache,
+            watermark,
+            locations,
+            true,
+            |bytes| async move {
+                let operation = Self::decode_operation(&self.op_cfg, watermark, bytes.as_ref())?;
+                let floor = Self::load_ops_inactivity_floor_from(
+                    session,
+                    &self.op_cfg,
+                    watermark,
+                    operation,
+                )
+                .await?;
+                core::inactive_peaks(watermark, floor)
+            },
+        )
+        .await
     }
 
     /// Verified raw current-state proof for a contiguous operation range.

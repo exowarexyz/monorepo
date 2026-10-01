@@ -15,7 +15,9 @@ use exoware_sdk::{PrefixedStoreClient, ReadSession};
 
 use crate::adapter::codec::{decode_update_location, merkle_size_for_watermark};
 use crate::adapter::core;
-use crate::adapter::operation_range::load_operation_range_checkpoint;
+use crate::adapter::operation_range::{
+    load_operation_range_checkpoint, load_operations_multi_proof,
+};
 use crate::adapter::read_cache::ReadCache;
 use crate::adapter::storage::KvMerkleStorage;
 use crate::error::QmdbError;
@@ -221,6 +223,33 @@ where
         )
         .await?;
         Ok(proof)
+    }
+
+    /// Multi-proof over `locations` at a published watermark, built from the
+    /// same cached reads as [`Self::operation_range_checkpoint_at`].
+    pub(crate) async fn operations_multi_proof_at(
+        &self,
+        watermark: PublishedWatermark<F>,
+        locations: &[Location<F>],
+    ) -> Result<RawBatchMultiProof<H::Digest, F>, QmdbError> {
+        let session = ReadSession::fixed(self.store.clone(), Some(watermark.sequence_number));
+        let watermark = watermark.location;
+        load_operations_multi_proof::<F, H, _>(
+            &session,
+            &self.read_cache,
+            watermark,
+            locations,
+            false,
+            |bytes| async move {
+                let operation = core::decode_operation_at::<F, immutable::Operation<F, K, E>>(
+                    bytes.as_ref(),
+                    watermark,
+                    &self.operation_cfg,
+                )?;
+                inactive_peaks_from_operation::<F, K, V, E>(watermark, operation)
+            },
+        )
+        .await
     }
 
     pub(crate) async fn batch_multi_proof(

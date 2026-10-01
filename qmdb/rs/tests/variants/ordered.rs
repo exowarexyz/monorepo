@@ -582,6 +582,16 @@ async fn verify_snapshots<F, K, V, E>(
                 .collect::<Vec<_>>()
         );
 
+        crate::browser::assert_operations(
+            case_name,
+            &url,
+            &historical,
+            &snapshot.root,
+            &snapshot.operations,
+            count == snapshots.last().unwrap().operations.len(),
+        )
+        .await;
+
         // Exercise both the initial root and pinned prefix nodes at a nonzero start
         for start in [0, 1] {
             let request = GetOperationRangeRequest {

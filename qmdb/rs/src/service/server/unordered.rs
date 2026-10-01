@@ -76,6 +76,14 @@ where
     {
         Unordered::operation_range_checkpoint_at(self, watermark, start_location, max_locations)
     }
+
+    fn operations_multi_proof_at(
+        &self,
+        watermark: PublishedWatermark<F>,
+        locations: &[Location<F>],
+    ) -> impl Future<Output = Result<RawBatchMultiProof<Self::Digest, F>, QmdbError>> + Send {
+        Unordered::operations_multi_proof_at(self, watermark, locations)
+    }
 }
 
 impl<F, H, K, V, const N: usize, E> CurrentOperationReader<N> for Unordered<F, H, K, V, N, E>

@@ -36,7 +36,7 @@ pub mod proto;
 
 #[path = "../../src/request.rs"]
 mod request;
-use request::{span_contains, validate_key_range, OperationWindow};
+use request::{span_contains, validate_key_range, OperationLocations, OperationWindow};
 
 const MAX_OPERATION_SIZE: usize = u16::MAX as usize;
 
@@ -1074,6 +1074,126 @@ fn fixed_unordered_update_value(
     }
 }
 
+fn verify_raw_operations<F, H>(
+    proto: &HistoricalMultiProof,
+    root: &H::Digest,
+    locations: &OperationLocations<'_>,
+) -> Result<(H::Digest, Vec<(Location<F>, Vec<u8>)>), String>
+where
+    F: merkle::Graftable,
+    H: commonware_cryptography::Hasher,
+    H::Digest: DecodeExt<()>,
+{
+    let target_root =
+        historical_target_root::<F, H>(&proto.ops_root, &proto.ops_root_witness, root)?;
+    let max_digests = proof_digest_cap::<H::Digest>(&proto.proof);
+    let proof = merkle::Proof::<F, H::Digest>::decode_cfg(proto.proof.as_ref(), &max_digests)
+        .map_err(|err| format!("failed to decode operations multi proof: {err}"))?;
+    locations.validate(
+        proto.operations.iter().map(|operation| operation.location),
+        proof.leaves.as_u64(),
+    )?;
+    let elements = proto
+        .operations
+        .iter()
+        .map(|operation| {
+            (
+                operation.encoded_operation.as_ref(),
+                Location::<F>::new(operation.location),
+            )
+        })
+        .collect::<Vec<_>>();
+    if !proof.verify_multi_inclusion(
+        &commonware_storage::qmdb::hasher::<H>(),
+        &elements,
+        &target_root,
+    ) {
+        return Err("operations multi proof failed verification".to_string());
+    }
+    let operations = proto
+        .operations
+        .iter()
+        .map(|operation| {
+            (
+                Location::new(operation.location),
+                operation.encoded_operation.to_vec(),
+            )
+        })
+        .collect();
+    Ok((*root, operations))
+}
+
+fn decode_operations_proof(bytes: &[u8]) -> Result<HistoricalMultiProof, JsValue> {
+    HistoricalMultiProofView::decode_view(bytes)
+        .map_err(|err| js_err(format!("decode operations multi proof: {err}")))?
+        .to_owned_message()
+        .map_err(|err| js_err(format!("materialize operations multi proof: {err}")))
+}
+
+/// Split concatenated fixed-size expectations into one slice per location.
+fn fixed_size_parts<'a>(
+    bytes: &'a [u8],
+    size: usize,
+    count: usize,
+    label: &str,
+) -> Result<Vec<&'a [u8]>, String> {
+    if size == 0 || Some(bytes.len()) != size.checked_mul(count) {
+        return Err(format!(
+            "expected {count} {label}s of {size} bytes, got {} bytes",
+            bytes.len()
+        ));
+    }
+    Ok(bytes.chunks_exact(size).collect())
+}
+
+fn fixed_keyless_appends_to_js<F, D>(
+    root: D,
+    operations: &[(Location<F>, Vec<u8>)],
+    values: &[&[u8]],
+) -> Result<JsValue, JsValue>
+where
+    F: merkle::Family,
+    D: Digest,
+{
+    let appends = Array::new();
+    for ((location, operation), expected) in operations.iter().zip(values) {
+        let value = fixed_keyless_append_value(operation, expected).map_err(js_err)?;
+        let entry = Object::new();
+        set_field(&entry, "location", &location_to_bigint(*location))?;
+        set_field(&entry, "value", &bytes_to_js(&value))?;
+        appends.push(&entry.into());
+    }
+    let verified = Object::new();
+    set_field(&verified, "root", &bytes_to_js(root.as_ref()))?;
+    set_field(&verified, "operations", &appends.into())?;
+    Ok(verified.into())
+}
+
+fn fixed_unordered_updates_to_js<F, D>(
+    root: D,
+    operations: &[(Location<F>, Vec<u8>)],
+    keys: &[&[u8]],
+    value_size: usize,
+) -> Result<JsValue, JsValue>
+where
+    F: merkle::Family,
+    D: Digest,
+{
+    let updates = Array::new();
+    for ((location, operation), key) in operations.iter().zip(keys) {
+        let value = fixed_unordered_update_value(operation, key, value_size).map_err(js_err)?;
+        let entry = Object::new();
+        set_field(&entry, "location", &location_to_bigint(*location))?;
+        set_field(&entry, "key", &bytes_to_js(key))?;
+        set_field(&entry, "value", &bytes_to_js(&value))?;
+        updates.push(&entry.into());
+    }
+    let verified = Object::new();
+    set_field(&verified, "root", &bytes_to_js(root.as_ref()))?;
+    set_field(&verified, "operations", &updates.into())?;
+    Ok(verified.into())
+}
+
 fn fixed_keyless_append_to_js<F, D>(
     root: D,
     operation_count: usize,
@@ -1563,6 +1683,141 @@ pub fn verify_historical_fixed_unordered_update_proof(
                     expected_key,
                     &value,
                 )
+            }
+            _ => unreachable!("normalize_family only returns supported values"),
+        }
+    })
+}
+
+/// Verify a `GetOperations` multi-proof and return the raw operations, in
+/// request order, with the trusted root they were verified against.
+#[wasm_bindgen]
+pub fn verify_historical_operations_proof(
+    bytes: &[u8],
+    root: &[u8],
+    merkle_family: &str,
+    hash_family: &str,
+    expected_tip: u64,
+    expected_locations: Vec<u64>,
+) -> Result<JsValue, JsValue> {
+    let locations = OperationLocations::new(expected_tip, &expected_locations)
+        .map_err(|err| js_err(err.to_string()))?;
+    let proto = decode_operations_proof(bytes)?;
+    with_hash_family!(hash_family, "operations multi proof", {
+        let root = decode_digest::<<H as commonware_cryptography::Hasher>::Digest>(
+            root,
+            "operations multi proof root",
+        )
+        .map_err(js_err)?;
+        match normalize_family(merkle_family, "operations multi proof").map_err(js_err)? {
+            "mmr" => {
+                let (root, operations) =
+                    verify_raw_operations::<mmr::Family, H>(&proto, &root, &locations)
+                        .map_err(js_err)?;
+                raw_operations_to_js(root, operations)
+            }
+            "mmb" => {
+                let (root, operations) =
+                    verify_raw_operations::<mmb::Family, H>(&proto, &root, &locations)
+                        .map_err(js_err)?;
+                raw_operations_to_js(root, operations)
+            }
+            _ => unreachable!("normalize_family only returns supported values"),
+        }
+    })
+}
+
+/// Verify a `GetOperations` multi-proof over fixed keyless appends.
+/// `expected_values` concatenates one `value_size`-byte value per location.
+#[wasm_bindgen]
+#[allow(clippy::too_many_arguments)]
+pub fn verify_historical_fixed_keyless_append_operations_proof(
+    bytes: &[u8],
+    root: &[u8],
+    merkle_family: &str,
+    hash_family: &str,
+    expected_tip: u64,
+    expected_locations: Vec<u64>,
+    expected_values: &[u8],
+    value_size: usize,
+) -> Result<JsValue, JsValue> {
+    let locations = OperationLocations::new(expected_tip, &expected_locations)
+        .map_err(|err| js_err(err.to_string()))?;
+    let values = fixed_size_parts(
+        expected_values,
+        value_size,
+        expected_locations.len(),
+        "keyless value",
+    )
+    .map_err(js_err)?;
+    let proto = decode_operations_proof(bytes)?;
+    with_hash_family!(hash_family, "operations multi proof", {
+        let root = decode_digest::<<H as commonware_cryptography::Hasher>::Digest>(
+            root,
+            "operations multi proof root",
+        )
+        .map_err(js_err)?;
+        match normalize_family(merkle_family, "operations multi proof").map_err(js_err)? {
+            "mmr" => {
+                let (root, operations) =
+                    verify_raw_operations::<mmr::Family, H>(&proto, &root, &locations)
+                        .map_err(js_err)?;
+                fixed_keyless_appends_to_js(root, &operations, &values)
+            }
+            "mmb" => {
+                let (root, operations) =
+                    verify_raw_operations::<mmb::Family, H>(&proto, &root, &locations)
+                        .map_err(js_err)?;
+                fixed_keyless_appends_to_js(root, &operations, &values)
+            }
+            _ => unreachable!("normalize_family only returns supported values"),
+        }
+    })
+}
+
+/// Verify a `GetOperations` multi-proof over fixed unordered updates.
+/// `expected_keys` concatenates one `key_size`-byte key per location.
+#[wasm_bindgen]
+#[allow(clippy::too_many_arguments)]
+pub fn verify_historical_fixed_unordered_update_operations_proof(
+    bytes: &[u8],
+    root: &[u8],
+    merkle_family: &str,
+    hash_family: &str,
+    expected_tip: u64,
+    expected_locations: Vec<u64>,
+    expected_keys: &[u8],
+    key_size: usize,
+    value_size: usize,
+) -> Result<JsValue, JsValue> {
+    let locations = OperationLocations::new(expected_tip, &expected_locations)
+        .map_err(|err| js_err(err.to_string()))?;
+    let keys = fixed_size_parts(
+        expected_keys,
+        key_size,
+        expected_locations.len(),
+        "unordered key",
+    )
+    .map_err(js_err)?;
+    let proto = decode_operations_proof(bytes)?;
+    with_hash_family!(hash_family, "operations multi proof", {
+        let root = decode_digest::<<H as commonware_cryptography::Hasher>::Digest>(
+            root,
+            "operations multi proof root",
+        )
+        .map_err(js_err)?;
+        match normalize_family(merkle_family, "operations multi proof").map_err(js_err)? {
+            "mmr" => {
+                let (root, operations) =
+                    verify_raw_operations::<mmr::Family, H>(&proto, &root, &locations)
+                        .map_err(js_err)?;
+                fixed_unordered_updates_to_js(root, &operations, &keys, value_size)
+            }
+            "mmb" => {
+                let (root, operations) =
+                    verify_raw_operations::<mmb::Family, H>(&proto, &root, &locations)
+                        .map_err(js_err)?;
+                fixed_unordered_updates_to_js(root, &operations, &keys, value_size)
             }
             _ => unreachable!("normalize_family only returns supported values"),
         }
@@ -2449,6 +2704,106 @@ mod tests {
             .unwrap_err();
 
         assert_eq!(err, "historical operation range proof failed verification");
+    }
+
+    fn assert_operations_proof_verifies<F>()
+    where
+        F: merkle::Graftable,
+        OrderedVariableOperation<F>:
+            Decode + Encode + Read<Cfg = ((RangeCfg<usize>, ()), (RangeCfg<usize>, ()))>,
+    {
+        let (proto, ops_root, expected) = historical_multi_fixture::<F>();
+        let locations = OperationLocations::new(4, &[0, 2]).unwrap();
+        let (root, verified) =
+            verify_raw_operations::<F, Sha256>(&proto, &ops_root, &locations).unwrap();
+        assert_eq!(root, ops_root);
+        assert_eq!(
+            verified,
+            expected
+                .into_iter()
+                .map(|(location, operation)| (location, operation.encode().to_vec()))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_operations_proof_verifies_requested_locations() {
+        assert_operations_proof_verifies::<mmr::Family>();
+        assert_operations_proof_verifies::<mmb::Family>();
+    }
+
+    #[test]
+    fn test_operations_proof_rejects_mismatched_requests_and_tampering() {
+        let (proto, ops_root, _) = historical_multi_fixture::<mmr::Family>();
+        let verify = |proto: &HistoricalMultiProof, tip: u64, locations: &[u64], root| {
+            let locations = OperationLocations::new(tip, locations).unwrap();
+            verify_raw_operations::<mmr::Family, Sha256>(proto, root, &locations)
+        };
+
+        assert!(verify(&proto, 5, &[0, 2], &ops_root)
+            .unwrap_err()
+            .contains("requested tip"));
+        assert!(verify(&proto, 3, &[0, 2], &ops_root)
+            .unwrap_err()
+            .contains("requested tip"));
+        for locations in [&[0, 1][..], &[0, 2, 3], &[2]] {
+            assert!(verify(&proto, 4, locations, &ops_root)
+                .unwrap_err()
+                .contains("requested locations"));
+        }
+        let untrusted = Sha256Digest::from([9u8; 32]);
+        assert!(verify(&proto, 4, &[0, 2], &untrusted).is_err());
+
+        let mut tampered = proto.clone();
+        let mut bytes = tampered.operations[1].encoded_operation.to_vec();
+        *bytes.last_mut().unwrap() ^= 0x01;
+        tampered.operations[1].encoded_operation = bytes.into();
+        assert!(verify(&tampered, 4, &[0, 2], &ops_root)
+            .unwrap_err()
+            .contains("failed verification"));
+
+        // A relabeled location that matches the request still fails the proof.
+        let mut relabeled = proto.clone();
+        relabeled.operations[1].location = 1;
+        assert!(verify(&relabeled, 4, &[0, 1], &ops_root)
+            .unwrap_err()
+            .contains("failed verification"));
+    }
+
+    #[test]
+    fn test_operations_proof_binds_ops_root_through_witness() {
+        let (mut proto, ops_root, _) = historical_multi_fixture::<mmb::Family>();
+        let witness = OpsRootWitness::<mmb::Family, Sha256Digest> {
+            grafted_root: Sha256::fill(0x11),
+            pending_chunk_digest: Some(Sha256::fill(0x22)),
+            partial_chunk: Some((13, Sha256::fill(0x33))),
+        };
+        let current_root = witness.root::<Sha256>(&ops_root);
+        proto.ops_root_witness = witness.encode();
+        let locations = OperationLocations::new(4, &[0, 2]).unwrap();
+
+        // The trusted root is the current root; the witness binds the ops root to it.
+        let (root, _) =
+            verify_raw_operations::<mmb::Family, Sha256>(&proto, &current_root, &locations)
+                .unwrap();
+        assert_eq!(root, current_root);
+        assert!(
+            verify_raw_operations::<mmb::Family, Sha256>(&proto, &ops_root, &locations)
+                .unwrap_err()
+                .contains("witness")
+        );
+    }
+
+    #[test]
+    fn test_fixed_size_parts_require_one_part_per_location() {
+        assert_eq!(
+            fixed_size_parts(&[1, 2, 3, 4], 2, 2, "value").unwrap(),
+            vec![&[1, 2][..], &[3, 4][..]]
+        );
+        assert!(fixed_size_parts(&[1, 2, 3], 2, 2, "value").is_err());
+        assert!(fixed_size_parts(&[1, 2, 3, 4], 2, 3, "value").is_err());
+        assert!(fixed_size_parts(&[], 0, 2, "value").is_err());
+        assert!(fixed_size_parts(&[1], usize::MAX, 2, "value").is_err());
     }
 
     #[test]
