@@ -14,9 +14,12 @@ use crate::adapter::codec::{
     op_count_for_watermark,
 };
 use crate::adapter::core::load_operation_bytes_range;
-use crate::adapter::prefetch::{range_positions, PrefetchedMerkleStorage};
+use crate::adapter::prefetch::{multi_positions, range_positions, PrefetchedMerkleStorage};
 use crate::adapter::read_cache::{ReadCache, RootContext};
-use crate::proof::{build_operation_range_checkpoint, OperationRangeCheckpoint};
+use crate::proof::{
+    build_batch_multi_proof, build_operation_range_checkpoint, OperationRangeCheckpoint,
+    RawBatchMultiProof,
+};
 use crate::{decode_digest, QmdbError};
 
 pub(crate) async fn load_operation_range_checkpoint<F, H, Fut>(
@@ -35,70 +38,23 @@ where
 {
     let size = merkle_size_for_watermark(watermark)?;
     let positions = range_positions(watermark, start, end)?;
-    let context = cache.cached_context(watermark);
-    let witness = with_witness.then(|| cache.witness(watermark)).flatten();
     let mut keys = BTreeSet::new();
-    if context.is_none() {
-        keys.insert(encode_operation_key(watermark));
-    }
     if *end - *start == 1 {
         keys.insert(encode_operation_key(start));
     }
-    if with_witness && witness.is_none() {
-        keys.insert(encode_ops_root_witness_key(watermark));
-    }
-
-    let metadata = async {
-        let (mut rows, nodes) = fetch_rows(session, cache, &positions, keys).await?;
-
-        // Fetch each request's rows before coalescing metadata work so a cold watermark
-        // does not add another network phase for followers.
-        // The gate shares the floor walk. After failure, followers retry in their own sessions.
-        let (context, context_guard) = match context {
-            Some(context) => (Some(context), None),
-            None => cache.context(watermark).await,
-        };
-        let context = match context {
-            Some(context) => context,
-            None => {
-                let operation = rows.get(&encode_operation_key(watermark)).ok_or_else(|| {
-                    QmdbError::CorruptData(format!("missing operation row at location {watermark}"))
-                })?;
-                let inactive_peaks = resolve_inactive_peaks(operation.clone()).await?;
-                RootContext {
-                    root: root::<F, H>(&nodes, watermark, inactive_peaks)?,
-                    inactive_peaks,
-                }
-            }
-        };
-        let witness_cached = witness.is_some();
-        let witness = witness
-            .or_else(|| rows.get(&encode_ops_root_witness_key(watermark)).cloned())
-            .map(|bytes| {
-                let witness = OpsRootWitness::<F, H::Digest>::decode(Copying(bytes.as_ref()))
-                    .map_err(|error| {
-                        QmdbError::CorruptData(format!(
-                            "current ops-root witness at {watermark} decode error: {error}"
-                        ))
-                    })?;
-                if !witness_cached {
-                    cache.put_witness(watermark, bytes);
-                }
-                Ok::<_, QmdbError>(witness)
-            })
-            .transpose();
-
-        // Published metadata is immutable. Share it without waiting for this request's
-        // operation scan or proof, which each caller still verifies independently.
-        cache.put_context(watermark, context);
-        drop(context_guard);
-        let operation = rows.remove(&encode_operation_key(start));
-        Ok::<_, QmdbError>((operation, nodes, context, witness))
-    };
+    let metadata = load_published_reads::<F, H, _>(
+        session,
+        cache,
+        watermark,
+        &positions,
+        keys,
+        with_witness,
+        resolve_inactive_peaks,
+    );
 
     // Both reads inherit the publication check's observed floor. Interpret range errors
     // after inactivity metadata and root peaks, regardless of completion order.
-    let ((operation, nodes, context, witness), operations) = futures::try_join!(metadata, async {
+    let (mut reads, operations) = futures::try_join!(metadata, async {
         let operations = if *end - *start > 1 {
             load_operation_bytes_range(session, start, end).await
         } else {
@@ -107,7 +63,9 @@ where
         Ok::<_, QmdbError>(operations)
     })?;
     let operations = if *end - *start == 1 {
-        vec![operation
+        vec![reads
+            .rows
+            .remove(&encode_operation_key(start))
             .ok_or_else(|| {
                 QmdbError::CorruptData(format!("missing operation row at location {start}"))
             })?
@@ -115,19 +73,161 @@ where
     } else {
         operations?
     };
-    let storage = PrefetchedMerkleStorage::<F, H::Digest>::new(size, nodes);
+    let storage = PrefetchedMerkleStorage::<F, H::Digest>::new(size, reads.nodes);
     let mut checkpoint = build_operation_range_checkpoint::<F, H, _>(
         &storage,
         watermark,
         start,
         end,
-        context.root,
-        context.inactive_peaks,
+        reads.context.root,
+        reads.context.inactive_peaks,
         operations,
     )
     .await?;
-    checkpoint.ops_root_witness = witness?;
+    checkpoint.ops_root_witness = reads.witness?;
     Ok(checkpoint)
+}
+
+/// Build a multi-proof over `locations` (strictly ascending, at most
+/// `watermark`) with one batched read of the operation rows and every planned
+/// node, reusing cached root context, witness, and nodes like range reads.
+pub(crate) async fn load_operations_multi_proof<F, H, Fut>(
+    session: &ReadSession,
+    cache: &Arc<ReadCache<F, H::Digest>>,
+    watermark: Location<F>,
+    locations: &[Location<F>],
+    with_witness: bool,
+    resolve_inactive_peaks: impl FnOnce(Bytes) -> Fut,
+) -> Result<RawBatchMultiProof<H::Digest, F>, QmdbError>
+where
+    F: Graftable,
+    H: Hasher,
+    Fut: Future<Output = Result<usize, QmdbError>>,
+{
+    let size = merkle_size_for_watermark(watermark)?;
+    let positions = multi_positions(watermark, locations)?;
+    let keys = locations
+        .iter()
+        .map(|&location| encode_operation_key(location))
+        .collect();
+    let mut reads = load_published_reads::<F, H, _>(
+        session,
+        cache,
+        watermark,
+        &positions,
+        keys,
+        with_witness,
+        resolve_inactive_peaks,
+    )
+    .await?;
+    let operations = locations
+        .iter()
+        .map(|&location| {
+            let bytes = reads
+                .rows
+                .remove(&encode_operation_key(location))
+                .ok_or_else(|| {
+                    QmdbError::CorruptData(format!("missing operation row at location {location}"))
+                })?;
+            Ok((location, bytes.to_vec()))
+        })
+        .collect::<Result<Vec<_>, QmdbError>>()?;
+    let storage = PrefetchedMerkleStorage::<F, H::Digest>::new(size, reads.nodes);
+    let mut proof = build_batch_multi_proof::<F, H, _>(
+        &storage,
+        watermark,
+        reads.context.root,
+        reads.context.inactive_peaks,
+        operations,
+    )
+    .await?;
+    proof.ops_root_witness = reads.witness?;
+    Ok(proof)
+}
+
+/// Rows, nodes, root context, and ops-root witness for one published watermark.
+struct PublishedReads<F: Graftable, D: Digest> {
+    rows: HashMap<Key, Bytes>,
+    nodes: BTreeMap<Position<F>, Option<Bytes>>,
+    context: RootContext<D>,
+    /// Decode errors surface after the proof is built, matching range reads.
+    witness: Result<Option<OpsRootWitness<F, D>>, QmdbError>,
+}
+
+/// Read `keys` and the planned `positions` in one batched request, adding the
+/// watermark operation and witness rows only when the cache lacks them.
+async fn load_published_reads<F, H, Fut>(
+    session: &ReadSession,
+    cache: &Arc<ReadCache<F, H::Digest>>,
+    watermark: Location<F>,
+    positions: &[Position<F>],
+    mut keys: BTreeSet<Key>,
+    with_witness: bool,
+    resolve_inactive_peaks: impl FnOnce(Bytes) -> Fut,
+) -> Result<PublishedReads<F, H::Digest>, QmdbError>
+where
+    F: Graftable,
+    H: Hasher,
+    Fut: Future<Output = Result<usize, QmdbError>>,
+{
+    let context = cache.cached_context(watermark);
+    let witness = with_witness.then(|| cache.witness(watermark)).flatten();
+    if context.is_none() {
+        keys.insert(encode_operation_key(watermark));
+    }
+    if with_witness && witness.is_none() {
+        keys.insert(encode_ops_root_witness_key(watermark));
+    }
+    let (rows, nodes) = fetch_rows(session, cache, positions, keys).await?;
+
+    // Fetch each request's rows before coalescing metadata work so a cold watermark
+    // does not add another network phase for followers.
+    // The gate shares the floor walk. After failure, followers retry in their own sessions.
+    let (context, context_guard) = match context {
+        Some(context) => (Some(context), None),
+        None => cache.context(watermark).await,
+    };
+    let context = match context {
+        Some(context) => context,
+        None => {
+            let operation = rows.get(&encode_operation_key(watermark)).ok_or_else(|| {
+                QmdbError::CorruptData(format!("missing operation row at location {watermark}"))
+            })?;
+            let inactive_peaks = resolve_inactive_peaks(operation.clone()).await?;
+            RootContext {
+                root: root::<F, H>(&nodes, watermark, inactive_peaks)?,
+                inactive_peaks,
+            }
+        }
+    };
+    let witness_cached = witness.is_some();
+    let witness = witness
+        .or_else(|| rows.get(&encode_ops_root_witness_key(watermark)).cloned())
+        .map(|bytes| {
+            let witness = OpsRootWitness::<F, H::Digest>::decode(Copying(bytes.as_ref())).map_err(
+                |error| {
+                    QmdbError::CorruptData(format!(
+                        "current ops-root witness at {watermark} decode error: {error}"
+                    ))
+                },
+            )?;
+            if !witness_cached {
+                cache.put_witness(watermark, bytes);
+            }
+            Ok::<_, QmdbError>(witness)
+        })
+        .transpose();
+
+    // Published metadata is immutable. Share it without waiting for this request's
+    // operation scan or proof, which each caller still verifies independently.
+    cache.put_context(watermark, context);
+    drop(context_guard);
+    Ok(PublishedReads {
+        rows,
+        nodes,
+        context,
+        witness,
+    })
 }
 
 fn root<F: Family, H: Hasher>(

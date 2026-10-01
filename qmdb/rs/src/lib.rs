@@ -123,7 +123,10 @@ pub(crate) fn decode_digest<D: Digest>(
 // The native crate owns tests for request constraints shared with the WASM verifier.
 #[cfg(test)]
 mod tests {
-    use crate::request::{span_contains, validate_key_range, InvalidWindow, OperationWindow};
+    use crate::request::{
+        span_contains, validate_key_range, InvalidLocations, InvalidWindow, OperationLocations,
+        OperationWindow, MAX_REQUESTED_LOCATIONS,
+    };
 
     #[test]
     fn test_spans_wrap_past_the_greatest_key() {
@@ -162,6 +165,60 @@ mod tests {
             OperationWindow::new(10, 0, 0),
             Err(InvalidWindow::ZeroMaximum)
         ));
+    }
+
+    #[test]
+    fn test_operation_locations_require_ascending_locations_within_tip() {
+        assert!(OperationLocations::new(10, &[0, 4, 10]).is_ok());
+        assert!(matches!(
+            OperationLocations::new(u64::MAX, &[0]),
+            Err(InvalidLocations::TipOverflow)
+        ));
+        assert!(matches!(
+            OperationLocations::new(10, &[]),
+            Err(InvalidLocations::Empty)
+        ));
+        assert!(matches!(
+            OperationLocations::new(10, &[3, 3]),
+            Err(InvalidLocations::NotAscending { location: 3 })
+        ));
+        assert!(matches!(
+            OperationLocations::new(10, &[4, 2]),
+            Err(InvalidLocations::NotAscending { location: 2 })
+        ));
+        assert!(matches!(
+            OperationLocations::new(10, &[0, 11]),
+            Err(InvalidLocations::OutOfBounds {
+                location: 11,
+                count: 11
+            })
+        ));
+        let many = (0..=MAX_REQUESTED_LOCATIONS as u64).collect::<Vec<_>>();
+        assert!(matches!(
+            OperationLocations::new(u64::MAX - 1, &many),
+            Err(InvalidLocations::TooMany { count }) if count == MAX_REQUESTED_LOCATIONS + 1
+        ));
+        assert!(OperationLocations::new(u64::MAX - 1, &many[..MAX_REQUESTED_LOCATIONS]).is_ok());
+    }
+
+    #[test]
+    fn test_operation_locations_match_responses_exactly() {
+        let start = (1u64 << 53) + 1;
+        let requested = [start, start + 7];
+        let locations = OperationLocations::new(start + 9, &requested).unwrap();
+        assert!(locations
+            .validate(requested.into_iter(), start + 10)
+            .is_ok());
+        assert!(locations
+            .validate(requested.into_iter(), start + 11)
+            .is_err());
+        assert!(locations.validate([start].into_iter(), start + 10).is_err());
+        assert!(locations
+            .validate([start, start + 7, start + 8].into_iter(), start + 10)
+            .is_err());
+        assert!(locations
+            .validate([start + 7, start].into_iter(), start + 10)
+            .is_err());
     }
 
     #[test]

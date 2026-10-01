@@ -22,7 +22,9 @@ use crate::adapter::codec::{
     CurrentBoundaryMetadata,
 };
 use crate::adapter::core;
-use crate::adapter::operation_range::load_operation_range_checkpoint;
+use crate::adapter::operation_range::{
+    load_operation_range_checkpoint, load_operations_multi_proof,
+};
 use crate::adapter::read_cache::ReadCache;
 use crate::adapter::storage::{KvCurrentStorage, KvMerkleStorage, ProofBitmap};
 use crate::error::{error_key, QmdbError};
@@ -271,6 +273,38 @@ where
         )
         .await?;
         Ok(checkpoint)
+    }
+
+    /// Multi-proof over `locations` at a published watermark, built from the
+    /// same cached reads as [`Self::operation_range_checkpoint_at`].
+    pub(crate) async fn operations_multi_proof_at(
+        &self,
+        watermark: PublishedWatermark<F>,
+        locations: &[Location<F>],
+    ) -> Result<RawBatchMultiProof<H::Digest, F>, QmdbError> {
+        let session = ReadSession::fixed(self.store.clone(), Some(watermark.sequence_number));
+        let watermark = watermark.location;
+        let session = &session;
+        load_operations_multi_proof::<F, H, _>(
+            session,
+            &self.read_cache,
+            watermark,
+            locations,
+            true,
+            |bytes| async move {
+                let operation =
+                    decode_operation::<F, K, V, E>(&self.op_cfg, watermark, bytes.as_ref())?;
+                let floor = load_ops_inactivity_floor_from::<F, K, V, E>(
+                    &self.op_cfg,
+                    session,
+                    watermark,
+                    operation,
+                )
+                .await?;
+                core::inactive_peaks(watermark, floor)
+            },
+        )
+        .await
     }
 
     pub(crate) async fn batch_multi_proof(

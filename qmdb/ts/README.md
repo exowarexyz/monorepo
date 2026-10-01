@@ -6,10 +6,10 @@ This package:
 
 - calls `qmdb.v1.KeyLookupService`, `qmdb.v1.OrderedKeyRangeService`,
   `qmdb.v1.OperationLogService`, and `qmdb.v1.CurrentOperationService` over Connect-Web
-- verifies `get`, `getMany`, `getRange`, `getOperationRange`,
+- verifies `get`, `getMany`, `getRange`, `getOperationRange`, `getOperations`,
   `getCurrentOperationRange`, and `subscribe` proofs for MMR or MMB through a small WASM module
 - exposes `QmdbOperationLogClient` for backend-agnostic historical operation-log proofs,
-  including fixed keyless appends and fixed unordered updates
+  including fixed keyless appends and fixed unordered updates, singly or many per proof
 - supports `exact`, `prefix`, and `regex` subscription matchers
 
 Proof verification is root-driven: callers supply the current/global root for
@@ -19,6 +19,8 @@ Merkle family (`mmr` by default) and uses that for all proof decoding and
 verification.
 
 Operation range verification binds the exact requested start, count, and tip.
+Operations multi-proofs bind the exact requested tip and strictly ascending
+locations.
 Key ranges enforce linear ordering, bounds, and pagination. Absolute positions
 use `bigint`. Batch limits and WASM byte-size arguments must fit their unsigned
 32-bit representation.

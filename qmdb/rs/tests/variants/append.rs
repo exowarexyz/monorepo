@@ -453,6 +453,15 @@ async fn check_connect<F, Op>(
         .await
         .expect("verify Connect prefix against Commonware root");
     assert_eq!(verified_prefix.operations, all_operations);
+    crate::browser::assert_operations(
+        case_name,
+        url,
+        &client,
+        &batch.root,
+        all_operations,
+        is_final_batch,
+    )
+    .await;
 
     if is_final_batch {
         let response = common::operation_log_rpc_client(url)

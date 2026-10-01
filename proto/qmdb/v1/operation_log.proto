@@ -18,6 +18,7 @@ import "common/v1/kv.proto";
 service OperationLogService {
   rpc GetOperationRange(GetOperationRangeRequest)
       returns (GetOperationRangeResponse);
+  rpc GetOperations(GetOperationsRequest) returns (GetOperationsResponse);
   rpc Subscribe(SubscribeRequest) returns (stream SubscribeResponse);
 }
 
@@ -71,4 +72,20 @@ message GetOperationRangeResponse {
   reserved "sequence_number";
 
   HistoricalOperationRangeProof proof = 1;
+}
+
+// Unary multi-proof request for operations at arbitrary locations of one
+// published tip. `locations` must be strictly ascending and each at most `tip`.
+message GetOperationsRequest {
+  uint64 tip = 1;
+  repeated uint64 locations = 2 [(buf.validate.field).repeated = {min_items: 1, max_items: 1024}];
+
+  // Minimum Store sequence for checking publication of the requested watermark.
+  optional uint64 min_sequence_number = 3;
+}
+
+// The proof carries exactly one operation per requested location, in request
+// order. Its embedded Merkle proof has `tip + 1` leaves.
+message GetOperationsResponse {
+  HistoricalMultiProof proof = 1;
 }

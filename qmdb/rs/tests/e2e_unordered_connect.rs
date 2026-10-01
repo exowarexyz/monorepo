@@ -21,8 +21,9 @@ use exoware_qmdb::service::proto::qmdb::v1::{
     GetCurrentOperationRangeRequest as ProtoGetCurrentOperationRangeRequest,
     GetManyRequest as ProtoGetManyRequest,
     GetOperationRangeRequest as ProtoGetOperationRangeRequest,
-    GetRangeRequest as ProtoGetRangeRequest, GetRequest as ProtoGetRequest, KeyLookupServiceClient,
-    OrderedKeyRangeServiceClient, SubscribeRequest as ProtoSubscribeRequest,
+    GetOperationsRequest as ProtoGetOperationsRequest, GetRangeRequest as ProtoGetRangeRequest,
+    GetRequest as ProtoGetRequest, KeyLookupServiceClient, OrderedKeyRangeServiceClient,
+    SubscribeRequest as ProtoSubscribeRequest,
 };
 use exoware_qmdb::{
     adapter::upload::recover_boundary_state, service::client::rpc::CurrentOperationClient,
@@ -580,6 +581,86 @@ async fn test_unordered_connect_get_operation_range_returns_verifiable_proof() {
         .expect("cached publication evidence fixes the downstream read floor")
         .into_owned();
     assert!(response.proof.as_option().is_some());
+}
+
+#[tokio::test]
+async fn test_unordered_connect_get_operations_returns_verifiable_multi_proof() {
+    let store_client = common::local_store_client().await;
+    let source = build_any_source_batch().await;
+    commit_upload(&store_client, &source).await;
+
+    let (_qmdb_server, qmdb_url) =
+        spawn_qmdb_range_server(PrefixedStoreClient::empty(store_client.clone())).await;
+    let tip = u64::try_from(source.operations.len() - 1).expect("tip fits");
+    let locations = vec![0, tip / 2, tip];
+    let verified = operation_log_client(&qmdb_url)
+        .get_operations(
+            ProtoGetOperationsRequest {
+                tip,
+                locations: locations.clone(),
+                ..Default::default()
+            },
+            &source.root,
+        )
+        .await
+        .expect("get operations");
+
+    assert_eq!(verified.root, source.root);
+    assert_eq!(
+        verified.operations,
+        locations
+            .iter()
+            .map(|&location| (
+                Location::new(location),
+                source.operations[location as usize].clone()
+            ))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[tokio::test]
+async fn test_unordered_current_get_operations_authenticates_ops_root_witness() {
+    let store_client = common::local_store_client().await;
+    let source = build_current_source_batch().await;
+    commit_current_upload(&store_client, &source).await;
+
+    let (_qmdb_server, qmdb_url) =
+        spawn_qmdb_full_server(PrefixedStoreClient::empty(store_client.clone())).await;
+    let client = OperationLogClient::<PreferZstdHttpClient, mmr::Family, Sha256, FixedKeyOperation>::plaintext(
+        &qmdb_url,
+        fixed_key_op_cfg(),
+    );
+    let tip = source.latest_location.as_u64();
+    let request = ProtoGetOperationsRequest {
+        tip,
+        locations: vec![0, tip],
+        ..Default::default()
+    };
+
+    // The trusted root is the current root. The witness binds the ops root to it.
+    let verified = client
+        .get_operations(request.clone(), &source.root)
+        .await
+        .expect("get operations under current root");
+    assert_eq!(verified.root, source.root);
+    assert_eq!(
+        verified.operations,
+        vec![
+            (Location::new(0), source.operations[0].clone()),
+            (Location::new(tip), source.operations[tip as usize].clone()),
+        ]
+    );
+
+    let error = client
+        .get_operations(request, &Sha256::fill(0xAB))
+        .await
+        .expect_err("witness must not verify under another root");
+    assert!(matches!(
+        error,
+        QmdbError::ProofVerification {
+            kind: exoware_qmdb::ProofKind::BatchMulti
+        }
+    ));
 }
 
 #[tokio::test]
