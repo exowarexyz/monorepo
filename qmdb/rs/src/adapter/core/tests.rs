@@ -12,7 +12,8 @@ use exoware_sdk::proto::PreferZstdHttpClient;
 use exoware_sdk::{PrefixedStoreClient, RetryConfig, StoreClient, StoreWriteBatch};
 use tokio::sync::{mpsc, Semaphore};
 
-use crate::{ImmutableClient, KeylessClient, OrderedClient, UnorderedClient, MAX_OPERATION_SIZE};
+use crate::adapter::{Immutable, Keyless, Ordered, Unordered};
+use crate::MAX_OPERATION_SIZE;
 
 #[derive(Clone)]
 struct CountRequests {
@@ -139,8 +140,12 @@ async fn publication_cache_distinguishes_absent_from_zero_and_keeps_smaller_publ
     ] {
         if let Some(published) = published {
             let mut batch = StoreWriteBatch::new();
-            crate::stage_watermark(&store, Location::<mmr::Family>::new(published), &mut batch)
-                .unwrap();
+            crate::adapter::upload::stage_watermark(
+                &store,
+                Location::<mmr::Family>::new(published),
+                &mut batch,
+            )
+            .unwrap();
             sequence = batch.commit(&raw).await.unwrap();
         }
         let cache = PublicationCache::<mmr::Family>::default();
@@ -184,7 +189,7 @@ async fn publication_cache_coalesces_misses_and_refreshes_without_data_observati
     let first = Location::new(5);
     let second = Location::new(10);
     let mut batch = StoreWriteBatch::new();
-    crate::stage_watermark(&store, first, &mut batch).unwrap();
+    crate::adapter::upload::stage_watermark(&store, first, &mut batch).unwrap();
     let first_sequence = batch.commit(&raw).await.unwrap();
 
     calls.store(0, Ordering::SeqCst);
@@ -209,7 +214,7 @@ async fn publication_cache_coalesces_misses_and_refreshes_without_data_observati
     assert_eq!(calls.load(Ordering::SeqCst), 1);
 
     let mut batch = StoreWriteBatch::new();
-    crate::stage_watermark(&store, second, &mut batch).unwrap();
+    crate::adapter::upload::stage_watermark(&store, second, &mut batch).unwrap();
     let second_sequence = batch.commit(&raw).await.unwrap();
     let session = ReadSession::fixed(store.clone(), None);
     calls.store(0, Ordering::SeqCst);
@@ -304,10 +309,10 @@ async fn client_resolvers_keep_cached_publication_evidence_with_a_higher_caller_
     let store = PrefixedStoreClient::empty(raw.clone());
     let watermark = Location::<mmr::Family>::new(5);
     let mut batch = StoreWriteBatch::new();
-    crate::stage_watermark(&store, watermark, &mut batch).unwrap();
+    crate::adapter::upload::stage_watermark(&store, watermark, &mut batch).unwrap();
     let publication_sequence = batch.commit(&raw).await.unwrap();
 
-    let ordered: OrderedClient<mmr::Family, Sha256, Vec<u8>, Vec<u8>, 32> = OrderedClient::new(
+    let ordered: Ordered<mmr::Family, Sha256, Vec<u8>, Vec<u8>, 32> = Ordered::new(
         store.clone(),
         (
             ((0..=MAX_OPERATION_SIZE).into(), ()),
@@ -315,17 +320,17 @@ async fn client_resolvers_keep_cached_publication_evidence_with_a_higher_caller_
         ),
         ((0..=MAX_OPERATION_SIZE).into(), ()),
     );
-    let unordered: UnorderedClient<mmr::Family, Sha256, Vec<u8>, Vec<u8>> = UnorderedClient::new(
+    let unordered: Unordered<mmr::Family, Sha256, Vec<u8>, Vec<u8>, 32> = Unordered::new(
         store.clone(),
         (
             ((0..=MAX_OPERATION_SIZE).into(), ()),
             ((0..=MAX_OPERATION_SIZE).into(), ()),
         ),
     );
-    let immutable: ImmutableClient<mmr::Family, Sha256, FixedBytes<32>, Vec<u8>> =
-        ImmutableClient::new(store.clone(), ((), ((0..=MAX_OPERATION_SIZE).into(), ())));
-    let keyless: KeylessClient<mmr::Family, Sha256, Vec<u8>> =
-        KeylessClient::new(store.clone(), ((0..=MAX_OPERATION_SIZE).into(), ()));
+    let immutable: Immutable<mmr::Family, Sha256, FixedBytes<32>, Vec<u8>> =
+        Immutable::new(store.clone(), ((), ((0..=MAX_OPERATION_SIZE).into(), ())));
+    let keyless: Keyless<mmr::Family, Sha256, Vec<u8>> =
+        Keyless::new(store.clone(), ((0..=MAX_OPERATION_SIZE).into(), ()));
 
     macro_rules! warm_resolver {
         ($client:expr) => {{
@@ -375,7 +380,7 @@ async fn publication_cache_hits_bypass_blocked_miss_and_refresh() {
     let store = PrefixedStoreClient::empty(raw.clone());
     let covered = Location::<mmr::Family>::new(5);
     let mut batch = StoreWriteBatch::new();
-    crate::stage_watermark(&store, covered, &mut batch).unwrap();
+    crate::adapter::upload::stage_watermark(&store, covered, &mut batch).unwrap();
     let sequence = batch.commit(&raw).await.unwrap();
 
     let (session, permits, mut starts, _) = gated_session(&url);
@@ -431,7 +436,7 @@ async fn publication_cache_cancelled_lookup_releases_gate_and_waiter_retries() {
     let store = PrefixedStoreClient::empty(raw.clone());
     let watermark = Location::<mmr::Family>::new(5);
     let mut batch = StoreWriteBatch::new();
-    crate::stage_watermark(&store, watermark, &mut batch).unwrap();
+    crate::adapter::upload::stage_watermark(&store, watermark, &mut batch).unwrap();
     let sequence = batch.commit(&raw).await.unwrap();
 
     let (session, permits, mut starts, _) = gated_session(&url);
@@ -459,7 +464,7 @@ async fn publication_cache_failed_lookup_preserves_evidence_and_allows_retry() {
     let bad_store = PrefixedStoreClient::empty(bad_raw.clone());
     let covered = Location::<mmr::Family>::new(5);
     let mut batch = StoreWriteBatch::new();
-    crate::stage_watermark(&bad_store, covered, &mut batch).unwrap();
+    crate::adapter::upload::stage_watermark(&bad_store, covered, &mut batch).unwrap();
     let covered_sequence = batch.commit(&bad_raw).await.unwrap();
     let corrupt = WATERMARK_PREFIX.encode(&[255]).unwrap();
     let mut batch = StoreWriteBatch::new();
@@ -471,7 +476,7 @@ async fn publication_cache_failed_lookup_preserves_evidence_and_allows_retry() {
     let good_store = PrefixedStoreClient::empty(good_raw.clone());
     let requested = Location::<mmr::Family>::new(10);
     let mut batch = StoreWriteBatch::new();
-    crate::stage_watermark(&good_store, requested, &mut batch).unwrap();
+    crate::adapter::upload::stage_watermark(&good_store, requested, &mut batch).unwrap();
     let requested_sequence = batch.commit(&good_raw).await.unwrap();
 
     let (session, permits, mut starts, origin) = gated_session(&bad_url);
@@ -577,8 +582,12 @@ async fn publication_cache_refresh_preserves_evidence_on_lagging_and_empty_repli
         let store = PrefixedStoreClient::empty(raw.clone());
         let mut batch = StoreWriteBatch::new();
         if let Some(watermark) = watermark {
-            crate::stage_watermark(&store, Location::<mmr::Family>::new(watermark), &mut batch)
-                .unwrap();
+            crate::adapter::upload::stage_watermark(
+                &store,
+                Location::<mmr::Family>::new(watermark),
+                &mut batch,
+            )
+            .unwrap();
         } else {
             batch
                 .push(&store, &Key::from_static(b"unrelated"), b"value".as_slice())
@@ -635,7 +644,8 @@ async fn publication_cache_refresh_preserves_evidence_on_lagging_and_empty_repli
     let raw = StoreClient::new(&new_url);
     let store = PrefixedStoreClient::empty(raw.clone());
     let mut batch = StoreWriteBatch::new();
-    crate::stage_watermark(&store, Location::<mmr::Family>::new(10), &mut batch).unwrap();
+    crate::adapter::upload::stage_watermark(&store, Location::<mmr::Family>::new(10), &mut batch)
+        .unwrap();
     let next_sequence = batch.commit(&raw).await.unwrap();
     *origin.lock().unwrap() = new_url;
     calls.store(0, Ordering::SeqCst);

@@ -9,15 +9,15 @@ use commonware_storage::merkle::{hasher::Hasher as _, Family, Graftable, Locatio
 use commonware_storage::qmdb::current::proof::OpsRootWitness;
 use exoware_sdk::{keys::Key, ReadSession};
 
-use crate::codec::{
-    decode_digest, encode_node_key, encode_operation_key, encode_ops_root_witness_key,
-    merkle_size_for_watermark, op_count_for_watermark,
+use crate::adapter::codec::{
+    encode_node_key, encode_operation_key, encode_ops_root_witness_key, merkle_size_for_watermark,
+    op_count_for_watermark,
 };
-use crate::core::load_operation_bytes_range;
-use crate::prefetch::{range_positions, PrefetchedMerkleStorage};
+use crate::adapter::core::load_operation_bytes_range;
+use crate::adapter::prefetch::{range_positions, PrefetchedMerkleStorage};
+use crate::adapter::read_cache::{ReadCache, RootContext};
 use crate::proof::{build_operation_range_checkpoint, OperationRangeCheckpoint};
-use crate::read_cache::{ReadCache, RootContext};
-use crate::QmdbError;
+use crate::{decode_digest, QmdbError};
 
 pub(crate) async fn load_operation_range_checkpoint<F, H, Fut>(
     session: &ReadSession,

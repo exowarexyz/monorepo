@@ -19,7 +19,7 @@ use commonware_storage::qmdb::{
 use commonware_storage::translator::TwoCap;
 use commonware_utils::{NZUsize, NZU16, NZU64};
 use exoware_qmdb::{
-    recover_boundary_state, CurrentBoundaryState, OrderedClient, MAX_OPERATION_SIZE,
+    adapter::upload::recover_boundary_state, CurrentBoundaryState, MAX_OPERATION_SIZE,
 };
 use exoware_sdk::PrefixedStoreClient;
 
@@ -209,14 +209,15 @@ async fn test_mirror_ordered_prune_past_chunk_zero() {
     // `load_bitmap_chunk` must fold that bit to 0 for the root recomputation
     // to match.
     let upload_client = PrefixedStoreClient::empty(store_client.clone());
-    let qmdb_client: OrderedClient<mmr::Family, Sha256, Vec<u8>, Vec<u8>, N> = OrderedClient::new(
-        PrefixedStoreClient::empty(store_client.clone()),
-        (
+    let qmdb_client: exoware_qmdb::adapter::Ordered<mmr::Family, Sha256, Vec<u8>, Vec<u8>, N> =
+        exoware_qmdb::adapter::Ordered::new(
+            PrefixedStoreClient::empty(store_client.clone()),
+            (
+                ((0..=MAX_OPERATION_SIZE).into(), ()),
+                ((0..=MAX_OPERATION_SIZE).into(), ()),
+            ),
             ((0..=MAX_OPERATION_SIZE).into(), ()),
-            ((0..=MAX_OPERATION_SIZE).into(), ()),
-        ),
-        ((0..=MAX_OPERATION_SIZE).into(), ()),
-    );
+        );
 
     let mut operations = Vec::new();
     for outcome in &batches {
@@ -233,9 +234,9 @@ async fn test_mirror_ordered_prune_past_chunk_zero() {
         .await
         .expect("upload");
         let remote_root = qmdb_client
-            .current_root_at(outcome.watermark)
+            .root_at(outcome.watermark)
             .await
-            .expect("current_root_at");
+            .expect("root_at");
         assert_eq!(
             remote_root, outcome.root,
             "remote current_root disagrees with local at watermark {}",
@@ -249,9 +250,9 @@ async fn test_mirror_ordered_prune_past_chunk_zero() {
     // value predates every subsequent CommitFloor, forcing the mask path.
     let first = &batches[0];
     let remote_root_old = qmdb_client
-        .current_root_at(first.watermark)
+        .root_at(first.watermark)
         .await
-        .expect("current_root_at (old watermark)");
+        .expect("root_at (old watermark)");
     assert_eq!(
         remote_root_old, first.root,
         "remote current_root at first watermark disagrees with local root"
@@ -262,9 +263,9 @@ async fn test_mirror_ordered_prune_past_chunk_zero() {
     // historical current-state proofs use the requested watermark's root and
     // update index, not the final active-key set.
     let expired_key_proof = qmdb_client
-        .key_value_proof_at(
+        .get(
             expired_key_snapshot.watermark,
-            expired_key_snapshot.key.as_slice(),
+            &expired_key_snapshot.key,
             None,
         )
         .await
@@ -280,7 +281,7 @@ async fn test_mirror_ordered_prune_past_chunk_zero() {
 
     let final_watermark = batches.last().expect("at least one batch").watermark;
     let latest_err = qmdb_client
-        .key_value_proof_at(final_watermark, expired_key_snapshot.key.as_slice(), None)
+        .get(final_watermark, &expired_key_snapshot.key, None)
         .await
         .expect_err("expired key should be inactive at final watermark");
     match latest_err {
@@ -290,7 +291,7 @@ async fn test_mirror_ordered_prune_past_chunk_zero() {
     }
 
     let old_range = qmdb_client
-        .key_range_proof_raw_at(
+        .get_range(
             first.watermark,
             b"k-00000000".to_vec(),
             Some(b"k-00000001".to_vec()),
@@ -299,10 +300,8 @@ async fn test_mirror_ordered_prune_past_chunk_zero() {
         )
         .await
         .expect("old watermark range proof");
-    assert_eq!(old_range.watermark, first.watermark);
     assert_eq!(old_range.entries.len(), 1);
     let entry = &old_range.entries[0];
     assert_eq!(entry.operation.key(), Some(&b"k-00000000".to_vec()));
     assert_eq!(entry.root, first.root);
-    assert!(entry.verify::<Sha256>());
 }

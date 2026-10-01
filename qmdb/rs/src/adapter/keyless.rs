@@ -12,16 +12,17 @@ use commonware_storage::{
 };
 use exoware_sdk::{PrefixedStoreClient, ReadSession};
 
-use crate::codec::merkle_size_for_watermark;
-use crate::connect::OperationKv;
-use crate::core::{self, PublishedWatermark};
+use crate::adapter::codec::merkle_size_for_watermark;
+use crate::adapter::core;
+use crate::adapter::operation_range::load_operation_range_checkpoint;
+use crate::adapter::read_cache::ReadCache;
+use crate::adapter::storage::KvMerkleStorage;
 use crate::error::QmdbError;
-use crate::operation_range::load_operation_range_checkpoint;
 use crate::proof::{OperationRangeCheckpoint, RawBatchMultiProof, VerifiedOperationRange};
-use crate::read_cache::ReadCache;
-use crate::storage::KvMerkleStorage;
+use crate::OperationKv;
+use crate::PublishedWatermark;
 
-pub struct KeylessClient<
+pub struct Keyless<
     F: Family,
     H: Hasher,
     V: Codec + Send + Sync,
@@ -36,7 +37,7 @@ pub struct KeylessClient<
     _marker: PhantomData<(F, H, E)>,
 }
 
-impl<F, H, V, E> Clone for KeylessClient<F, H, V, E>
+impl<F, H, V, E> Clone for Keyless<F, H, V, E>
 where
     F: Family,
     H: Hasher,
@@ -55,7 +56,7 @@ where
     }
 }
 
-impl<F, H, V, E> std::fmt::Debug for KeylessClient<F, H, V, E>
+impl<F, H, V, E> std::fmt::Debug for Keyless<F, H, V, E>
 where
     F: Family,
     H: Hasher,
@@ -64,11 +65,11 @@ where
     keyless::Operation<F, E>: CodecRead,
 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("KeylessClient").finish_non_exhaustive()
+        f.debug_struct("Keyless").finish_non_exhaustive()
     }
 }
 
-impl<F, H, V, E> KeylessClient<F, H, V, E>
+impl<F, H, V, E> Keyless<F, H, V, E>
 where
     F: Graftable,
     H: Hasher,
@@ -160,13 +161,15 @@ where
         Ok(operation.into_value())
     }
 
+    /// Operation-range checkpoint: the proof, pinned nodes, and encoded operations.
     pub async fn operation_range_checkpoint(
         &self,
-        watermark: Location<F>,
+        tip: Location<F>,
         start_location: Location<F>,
         max_locations: u32,
+        min_sequence_number: Option<u64>,
     ) -> Result<OperationRangeCheckpoint<H::Digest, F>, QmdbError> {
-        let watermark = self.resolve_watermark(watermark, None).await?;
+        let watermark = self.resolve_watermark(tip, min_sequence_number).await?;
         self.operation_range_checkpoint_at(watermark, start_location, max_locations)
             .await
     }
@@ -226,14 +229,15 @@ where
     }
 
     /// Verified contiguous range of operations.
-    pub async fn operation_range_proof(
+    pub async fn operation_range(
         &self,
-        watermark: Location<F>,
+        tip: Location<F>,
         start_location: Location<F>,
         max_locations: u32,
+        min_sequence_number: Option<u64>,
     ) -> Result<VerifiedOperationRange<H::Digest, keyless::Operation<F, E>, F>, QmdbError> {
         let checkpoint = self
-            .operation_range_checkpoint(watermark, start_location, max_locations)
+            .operation_range_checkpoint(tip, start_location, max_locations, min_sequence_number)
             .await?;
         let operations = checkpoint
             .encoded_operations
@@ -251,7 +255,8 @@ where
             })
             .collect::<Result<Vec<_>, _>>()?;
         Ok(VerifiedOperationRange {
-            root: checkpoint.root,
+            tip: checkpoint.watermark,
+            root: checkpoint.canonical_root::<H>(),
             start_location: checkpoint.start_location,
             operations,
         })

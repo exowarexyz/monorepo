@@ -24,7 +24,7 @@ use connectrpc::client::ClientConfig;
 use connectrpc::{
     ConnectError, ConnectRpcService, ErrorCode, RequestContext as Context, ServiceRequest,
 };
-use exoware_qmdb::proto::qmdb::v1::{
+use exoware_qmdb::service::proto::qmdb::v1::{
     GetOperationRangeRequest, GetOperationRangeResponse, OperationLogService,
     OperationLogServiceClient, OperationLogServiceServer, SubscribeRequest, SubscribeResponse,
 };
@@ -193,13 +193,13 @@ pub async fn commit_operations<F, Op>(
 ) -> Result<(), QmdbError>
 where
     F: Family,
-    Op: exoware_qmdb::UploadOperation<F>,
+    Op: exoware_qmdb::adapter::upload::UploadOperation<F>,
 {
     let (_, prepared) = prepare_operations::<F, Op>(operations, cfg);
     let mut batch = exoware_sdk::StoreWriteBatch::new();
     let latest = prepared.latest_location();
-    exoware_qmdb::stage_authenticated_range(client, prepared, &mut batch)?;
-    exoware_qmdb::stage_watermark(client, latest, &mut batch)?;
+    exoware_qmdb::adapter::upload::stage_authenticated_range(client, prepared, &mut batch)?;
+    exoware_qmdb::adapter::upload::stage_watermark(client, latest, &mut batch)?;
     batch.commit(client.client()).await?;
     Ok(())
 }
@@ -213,15 +213,15 @@ pub async fn commit_current_operations<F, Op, const N: usize>(
 ) -> Result<(), QmdbError>
 where
     F: Graftable,
-    Op: exoware_qmdb::UploadOperation<F>,
+    Op: exoware_qmdb::adapter::upload::UploadOperation<F>,
 {
     let (_, prepared) = prepare_operations::<F, Op>(operations, cfg);
     let prepared =
         prepared.with_current_boundary::<commonware_cryptography::Sha256, N>(boundary)?;
     let latest = prepared.latest_location();
     let mut batch = exoware_sdk::StoreWriteBatch::new();
-    exoware_qmdb::stage_authenticated_range(client, prepared, &mut batch)?;
-    exoware_qmdb::stage_watermark(client, latest, &mut batch)?;
+    exoware_qmdb::adapter::upload::stage_authenticated_range(client, prepared, &mut batch)?;
+    exoware_qmdb::adapter::upload::stage_watermark(client, latest, &mut batch)?;
     batch.commit(client.client()).await?;
     Ok(())
 }

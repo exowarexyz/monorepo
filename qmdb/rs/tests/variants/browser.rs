@@ -2,8 +2,8 @@
 pub fn assert_fixture(
     case_name: &str,
     expected_root: &commonware_cryptography::sha256::Digest,
-    request: &exoware_qmdb::proto::qmdb::v1::GetOperationRangeRequest,
-    response: &exoware_qmdb::proto::qmdb::v1::GetOperationRangeResponse,
+    request: &exoware_qmdb::service::proto::qmdb::v1::GetOperationRangeRequest,
+    response: &exoware_qmdb::service::proto::qmdb::v1::GetOperationRangeResponse,
     expected_operations: &[Vec<u8>],
 ) {
     use buffa::Message as _;

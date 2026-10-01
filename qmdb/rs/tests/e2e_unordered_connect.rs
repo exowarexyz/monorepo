@@ -17,7 +17,7 @@ use commonware_storage::translator::TwoCap;
 use commonware_utils::{NZUsize, NZU16, NZU64};
 use connectrpc::client::ClientConfig;
 use connectrpc::ErrorCode;
-use exoware_qmdb::proto::qmdb::v1::{
+use exoware_qmdb::service::proto::qmdb::v1::{
     GetCurrentOperationRangeRequest as ProtoGetCurrentOperationRangeRequest,
     GetManyRequest as ProtoGetManyRequest,
     GetOperationRangeRequest as ProtoGetOperationRangeRequest,
@@ -25,9 +25,9 @@ use exoware_qmdb::proto::qmdb::v1::{
     OrderedKeyRangeServiceClient, SubscribeRequest as ProtoSubscribeRequest,
 };
 use exoware_qmdb::{
-    recover_boundary_state, unordered_connect_stack, unordered_operation_log_connect_stack,
-    CurrentBoundaryState, CurrentOperationClient, OperationLogClient, OperationLogSubscribeProof,
-    QmdbError, UnorderedConnectClient, MAX_OPERATION_SIZE,
+    adapter::upload::recover_boundary_state, service::client::rpc::CurrentOperationClient,
+    service::client::rpc::OperationLogClient, service::client::rpc::OperationLogSubscribeProof,
+    CurrentBoundaryState, QmdbError, MAX_OPERATION_SIZE,
 };
 use exoware_sdk::proto::PreferZstdHttpClient;
 use exoware_sdk::{PrefixedStoreClient, StoreClient};
@@ -71,33 +71,39 @@ type CurrentDb = LocalCurrentUnorderedDb<
 async fn spawn_qmdb_range_server(
     raw_store: PrefixedStoreClient,
 ) -> (tokio::task::JoinHandle<()>, String) {
-    common::spawn_connect_service(unordered_operation_log_connect_stack::<
-        mmr::Family,
-        Sha256,
-        Vec<u8>,
-        Vec<u8>,
-        commonware_storage::qmdb::any::value::VariableEncoding<Vec<u8>>,
-    >(raw_store, op_cfg()))
+    common::spawn_connect_service(
+        exoware_qmdb::service::server::unordered_operation_log_stack::<
+            mmr::Family,
+            Sha256,
+            Vec<u8>,
+            Vec<u8>,
+            N,
+            commonware_storage::qmdb::any::value::VariableEncoding<Vec<u8>>,
+        >(raw_store, op_cfg()),
+    )
     .await
 }
 
 async fn spawn_mmb_qmdb_range_server(
     raw_store: PrefixedStoreClient,
 ) -> (tokio::task::JoinHandle<()>, String) {
-    common::spawn_connect_service(unordered_operation_log_connect_stack::<
-        mmb::Family,
-        Sha256,
-        Vec<u8>,
-        Vec<u8>,
-        commonware_storage::qmdb::any::value::VariableEncoding<Vec<u8>>,
-    >(raw_store, op_cfg()))
+    common::spawn_connect_service(
+        exoware_qmdb::service::server::unordered_operation_log_stack::<
+            mmb::Family,
+            Sha256,
+            Vec<u8>,
+            Vec<u8>,
+            N,
+            commonware_storage::qmdb::any::value::VariableEncoding<Vec<u8>>,
+        >(raw_store, op_cfg()),
+    )
     .await
 }
 
 async fn spawn_qmdb_full_server(
     raw_store: PrefixedStoreClient,
 ) -> (tokio::task::JoinHandle<()>, String) {
-    common::spawn_connect_service(unordered_connect_stack::<
+    common::spawn_connect_service(exoware_qmdb::service::server::unordered_stack::<
         mmr::Family,
         Sha256,
         Digest,
@@ -120,10 +126,37 @@ fn mmb_operation_log_client(
     OperationLogClient::plaintext(base, op_cfg())
 }
 
+type RpcLookupVerifier = exoware_qmdb::service::client::rpc::UnorderedLookupVerifier<
+    mmr::Family,
+    Sha256,
+    Digest,
+    Vec<u8>,
+    N,
+    commonware_storage::qmdb::any::value::VariableEncoding<Vec<u8>>,
+>;
+
+/// Request-level verifying client, for responses the typed API cannot shape.
+fn key_lookup_rpc_verifier(
+    base: &str,
+) -> exoware_qmdb::service::client::rpc::KeyLookupClient<PreferZstdHttpClient, RpcLookupVerifier> {
+    exoware_qmdb::service::client::rpc::KeyLookupClient::new(
+        PreferZstdHttpClient::plaintext(),
+        ClientConfig::new(base.parse().expect("qmdb uri")),
+        RpcLookupVerifier::new(fixed_key_op_cfg()),
+    )
+}
+
 fn key_lookup_client(
     base: &str,
-) -> UnorderedConnectClient<PreferZstdHttpClient, mmr::Family, Sha256, Digest, Vec<u8>, N> {
-    UnorderedConnectClient::plaintext(base, fixed_key_op_cfg())
+) -> exoware_qmdb::service::client::Unordered<
+    PreferZstdHttpClient,
+    mmr::Family,
+    Sha256,
+    Digest,
+    Vec<u8>,
+    N,
+> {
+    exoware_qmdb::service::client::Unordered::plaintext(base, fixed_key_op_cfg())
 }
 
 fn current_operation_client(
@@ -558,14 +591,9 @@ async fn test_unordered_connect_get_many_returns_present_key_proofs() {
 
     let results = connect_client
         .get_many(
-            ProtoGetManyRequest {
-                keys: vec![
-                    source.alpha.as_ref().to_vec(),
-                    source.beta.as_ref().to_vec(),
-                ],
-                tip: source.latest_location.as_u64(),
-                ..Default::default()
-            },
+            source.latest_location,
+            &[source.alpha, source.beta],
+            None,
             &source.root,
         )
         .await
@@ -582,14 +610,7 @@ async fn test_unordered_connect_get_many_returns_present_key_proofs() {
     assert_eq!(results[1].operation, expected_beta.1);
 
     let one = connect_client
-        .get(
-            ProtoGetRequest {
-                key: source.alpha.as_ref().to_vec(),
-                tip: source.latest_location.as_u64(),
-                ..Default::default()
-            },
-            &source.root,
-        )
+        .get(source.latest_location, &source.alpha, None, &source.root)
         .await
         .expect("get");
     assert_eq!(one.location, expected_alpha.0);
@@ -693,7 +714,7 @@ async fn test_unordered_current_endpoints_enforce_optional_sequence_minimum() {
             })
             .await
             .expect("unordered get_many at available sequence");
-        current
+        let _ = current
             .get_current_operation_range(
                 ProtoGetCurrentOperationRangeRequest {
                     tip: source.latest_location.as_u64(),
@@ -726,7 +747,7 @@ async fn test_unordered_current_endpoints_enforce_optional_sequence_minimum() {
         })
         .await
         .expect("cached unordered get_many uses the publication floor");
-    current
+    let _ = current
         .get_current_operation_range(
             ProtoGetCurrentOperationRangeRequest {
                 tip: source.latest_location.as_u64(),
@@ -843,28 +864,29 @@ async fn aligned_commit_boundary<F: commonware_storage::merkle::Graftable + Part
     let store = common::local_store_client().await;
     let prefixed = PrefixedStoreClient::empty(store);
     let op_cfg = ((), ((0..=MAX_OPERATION_SIZE).into(), ()));
-    let (server, url) = common::spawn_connect_service(unordered_connect_stack::<
-        F,
-        Sha256,
-        Digest,
-        Vec<u8>,
-        N,
-        commonware_storage::qmdb::any::value::VariableEncoding<Vec<u8>>,
-    >(prefixed.clone(), op_cfg, ()))
-    .await;
+    let (server, url) =
+        common::spawn_connect_service(exoware_qmdb::service::server::unordered_stack::<
+            F,
+            Sha256,
+            Digest,
+            Vec<u8>,
+            N,
+            commonware_storage::qmdb::any::value::VariableEncoding<Vec<u8>>,
+        >(prefixed.clone(), op_cfg, ()))
+        .await;
     let connect_client =
-        UnorderedConnectClient::<_, F, Sha256, Digest, Vec<u8>, N>::plaintext(&url, op_cfg);
+        exoware_qmdb::service::client::Unordered::<_, F, Sha256, Digest, Vec<u8>, N>::plaintext(
+            &url, op_cfg,
+        );
     for (operations, boundary) in snapshots {
         common::commit_current_operations(&prefixed, &operations, &op_cfg, &boundary)
             .await
             .expect("publish current boundary");
         let proof = connect_client
             .get(
-                ProtoGetRequest {
-                    key: key(257).as_ref().to_vec(),
-                    tip: operations.len() as u64 - 1,
-                    ..Default::default()
-                },
+                Location::new(operations.len() as u64 - 1),
+                &key(257),
+                None,
                 &boundary.root,
             )
             .await
@@ -1031,17 +1053,20 @@ async fn current_boundary_nodes<F: commonware_storage::merkle::Graftable + Parti
     let store = common::local_store_client().await;
     let prefixed = PrefixedStoreClient::empty(store);
     let op_cfg = ((), ((0..=MAX_OPERATION_SIZE).into(), ()));
-    let (server, url) = common::spawn_connect_service(unordered_connect_stack::<
-        F,
-        Sha256,
-        Digest,
-        Vec<u8>,
-        N,
-        commonware_storage::qmdb::any::value::VariableEncoding<Vec<u8>>,
-    >(prefixed.clone(), op_cfg, ()))
-    .await;
+    let (server, url) =
+        common::spawn_connect_service(exoware_qmdb::service::server::unordered_stack::<
+            F,
+            Sha256,
+            Digest,
+            Vec<u8>,
+            N,
+            commonware_storage::qmdb::any::value::VariableEncoding<Vec<u8>>,
+        >(prefixed.clone(), op_cfg, ()))
+        .await;
     let key_client =
-        UnorderedConnectClient::<_, F, Sha256, Digest, Vec<u8>, N>::plaintext(&url, op_cfg);
+        exoware_qmdb::service::client::Unordered::<_, F, Sha256, Digest, Vec<u8>, N>::plaintext(
+            &url, op_cfg,
+        );
     let range_client =
         CurrentOperationClient::<_, F, Sha256, Operation<F>, N>::plaintext(&url, op_cfg);
 
@@ -1056,14 +1081,7 @@ async fn current_boundary_nodes<F: commonware_storage::merkle::Graftable + Parti
         let tip = operations.len() as u64 - 1;
         for (key_index, location) in queries {
             let proof = key_client
-                .get(
-                    ProtoGetRequest {
-                        key: key(*key_index).as_ref().to_vec(),
-                        tip,
-                        ..Default::default()
-                    },
-                    &boundary.root,
-                )
+                .get(Location::new(tip), &key(*key_index), None, &boundary.root)
                 .await
                 .expect("current key proof across boundary transition");
             assert_eq!(proof.location, *location);
@@ -1154,11 +1172,9 @@ async fn test_unordered_connect_omits_missing_and_rejects_duplicate_range_and_st
     let connect_client = key_lookup_client(&qmdb_url);
     let existing = connect_client
         .get_many(
-            ProtoGetManyRequest {
-                keys: vec![source.alpha.as_ref().to_vec(), missing.as_ref().to_vec()],
-                tip: source.latest_location.as_u64(),
-                ..Default::default()
-            },
+            source.latest_location,
+            &[source.alpha, missing],
+            None,
             &source.root,
         )
         .await
@@ -1194,14 +1210,7 @@ async fn test_unordered_connect_omits_missing_and_rejects_duplicate_range_and_st
 
     let stale_root = Sha256::fill(0xDD);
     let err = connect_client
-        .get_many(
-            ProtoGetManyRequest {
-                keys: vec![source.alpha.as_ref().to_vec()],
-                tip: source.latest_location.as_u64(),
-                ..Default::default()
-            },
-            &stale_root,
-        )
+        .get_many(source.latest_location, &[source.alpha], None, &stale_root)
         .await
         .expect_err("stale root should be rejected");
     assert!(matches!(
@@ -1214,7 +1223,7 @@ async fn test_unordered_connect_omits_missing_and_rejects_duplicate_range_and_st
 
 #[tokio::test]
 async fn test_current_unordered_variable_fixed_keys_variable_values_mmr_get_many_key_binding() {
-    use exoware_qmdb::proto::qmdb::v1::{
+    use exoware_qmdb::service::proto::qmdb::v1::{
         current_key_lookup_result, CurrentKeyLookupResult, GetManyResponse, GetResponse,
         KeyLookupService, KeyLookupServiceServer,
     };
@@ -1294,7 +1303,7 @@ async fn test_current_unordered_variable_fixed_keys_variable_values_mmr_get_many
             })),
         ))
         .await;
-        let result = key_lookup_client(&url)
+        let result = key_lookup_rpc_verifier(&url)
             .get_many(
                 ProtoGetManyRequest {
                     keys,

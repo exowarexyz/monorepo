@@ -24,13 +24,13 @@ use commonware_storage::{
 use exoware_sdk::{keys::Key, PrefixedStoreClient, StoreWriteBatch};
 
 use crate::{
-    codec::{
+    adapter::codec::{
         encode_chunk_key, encode_current_meta_key, encode_grafted_node_key, encode_node_key,
         encode_operation_key, encode_ops_root_witness_key, encode_presence_key,
         encode_update_index_value, encode_update_key, encode_watermark_key,
         ensure_encoded_value_size, CurrentBoundaryMetadata,
     },
-    core::extend_merkle_from_pinned_nodes,
+    adapter::core::extend_merkle_from_pinned_nodes,
     CurrentBoundaryState, ProofKind, QmdbError,
 };
 
@@ -741,8 +741,8 @@ mod tests {
         }
         assert!(repeated_rows > 0);
         // Overlapping ranges can advertise additional intermediate batch boundaries
-        expected.retain(|key, _| !crate::codec::PRESENCE_PREFIX.matches(key));
-        combined.retain(|key, _| !crate::codec::PRESENCE_PREFIX.matches(key));
+        expected.retain(|key, _| !crate::adapter::codec::PRESENCE_PREFIX.matches(key));
+        combined.retain(|key, _| !crate::adapter::codec::PRESENCE_PREFIX.matches(key));
         assert_eq!(combined, expected);
     }
 

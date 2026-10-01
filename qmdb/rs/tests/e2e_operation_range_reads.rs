@@ -19,12 +19,10 @@ use commonware_storage::qmdb::any::value::VariableEncoding;
 use commonware_storage::qmdb::immutable::variable::Operation as ImmutableOperation;
 use commonware_storage::qmdb::keyless::variable::Operation as KeylessOperation;
 use connectrpc::{ConnectError, ConnectRpcService, ErrorCode, RequestContext, ServiceRequest};
-use exoware_qmdb::proto::qmdb::v1::GetOperationRangeRequest;
+use exoware_qmdb::service::proto::qmdb::v1::GetOperationRangeRequest;
 use exoware_qmdb::{
-    immutable_operation_log_connect_stack, keyless_operation_log_connect_stack,
-    ordered_operation_log_connect_stack, stage_authenticated_range, stage_watermark,
-    unordered_operation_log_connect_stack, ImmutableClient, KeylessClient, OperationLogClient,
-    OrderedClient, UnorderedClient, UploadOperation, NODE_FAMILY,
+    adapter::upload::stage_authenticated_range, adapter::upload::stage_watermark,
+    adapter::upload::UploadOperation, service::client::rpc::OperationLogClient, NODE_FAMILY,
 };
 use exoware_sdk::common::kv::v1::Entry;
 use exoware_sdk::google::rpc::{ErrorInfo, RetryInfo};
@@ -44,10 +42,10 @@ type Operation = KeylessOperation<mmr::Family, Vec<u8>>;
 type OrderedOp = OrderedOperation<mmr::Family, Vec<u8>, Vec<u8>>;
 type UnorderedOp = UnorderedOperation<mmr::Family, Vec<u8>, Vec<u8>>;
 type ImmutableOp = ImmutableOperation<mmr::Family, Vec<u8>, Vec<u8>>;
-type Keyless = KeylessClient<mmr::Family, Sha256, Vec<u8>>;
-type Ordered = OrderedClient<mmr::Family, Sha256, Vec<u8>, Vec<u8>, 32>;
-type Unordered = UnorderedClient<mmr::Family, Sha256, Vec<u8>, Vec<u8>>;
-type Immutable = ImmutableClient<mmr::Family, Sha256, Vec<u8>, Vec<u8>>;
+type Keyless = exoware_qmdb::adapter::Keyless<mmr::Family, Sha256, Vec<u8>>;
+type Ordered = exoware_qmdb::adapter::Ordered<mmr::Family, Sha256, Vec<u8>, Vec<u8>, 32>;
+type Unordered = exoware_qmdb::adapter::Unordered<mmr::Family, Sha256, Vec<u8>, Vec<u8>, 32>;
+type Immutable = exoware_qmdb::adapter::Immutable<mmr::Family, Sha256, Vec<u8>, Vec<u8>>;
 type ProofClient = OperationLogClient<PreferZstdHttpClient, mmr::Family, Sha256, Operation>;
 
 #[tokio::test]
@@ -380,14 +378,15 @@ impl Fixture {
     }
 
     async fn keyless(&mut self, store: PrefixedStoreClient) -> String {
-        let (server, url) =
-            common::spawn_connect_service(keyless_operation_log_connect_stack::<
+        let (server, url) = common::spawn_connect_service(
+            exoware_qmdb::service::server::keyless_operation_log_stack::<
                 mmr::Family,
                 Sha256,
                 Vec<u8>,
                 VariableEncoding<Vec<u8>>,
-            >(store, ((0..=10000).into(), ())))
-            .await;
+            >(store, ((0..=10000).into(), ())),
+        )
+        .await;
         self.servers.push(server);
         url
     }
@@ -397,41 +396,47 @@ impl Fixture {
         store: PrefixedStoreClient,
         cfg: <UnorderedOp as commonware_codec::Read>::Cfg,
     ) -> String {
-        let (server, url) = common::spawn_connect_service(unordered_operation_log_connect_stack::<
-            mmr::Family,
-            Sha256,
-            Vec<u8>,
-            Vec<u8>,
-            VariableEncoding<Vec<u8>>,
-        >(store, cfg))
-        .await;
-        self.servers.push(server);
-        url
-    }
-
-    async fn ordered(&mut self, store: PrefixedStoreClient) -> String {
-        let (server, url) =
-            common::spawn_connect_service(ordered_operation_log_connect_stack::<
+        let (server, url) = common::spawn_connect_service(
+            exoware_qmdb::service::server::unordered_operation_log_stack::<
                 mmr::Family,
                 Sha256,
                 Vec<u8>,
                 Vec<u8>,
                 32,
                 VariableEncoding<Vec<u8>>,
-            >(store, ordered_cfg(), key_cfg()))
-            .await;
+            >(store, cfg),
+        )
+        .await;
+        self.servers.push(server);
+        url
+    }
+
+    async fn ordered(&mut self, store: PrefixedStoreClient) -> String {
+        let (server, url) = common::spawn_connect_service(
+            exoware_qmdb::service::server::ordered_operation_log_stack::<
+                mmr::Family,
+                Sha256,
+                Vec<u8>,
+                Vec<u8>,
+                32,
+                VariableEncoding<Vec<u8>>,
+            >(store, ordered_cfg(), key_cfg()),
+        )
+        .await;
         self.servers.push(server);
         url
     }
 
     async fn immutable(&mut self, store: PrefixedStoreClient) -> String {
-        let (server, url) = common::spawn_connect_service(immutable_operation_log_connect_stack::<
-            mmr::Family,
-            Sha256,
-            Vec<u8>,
-            Vec<u8>,
-            VariableEncoding<Vec<u8>>,
-        >(store, immutable_cfg()))
+        let (server, url) = common::spawn_connect_service(
+            exoware_qmdb::service::server::immutable_operation_log_stack::<
+                mmr::Family,
+                Sha256,
+                Vec<u8>,
+                Vec<u8>,
+                VariableEncoding<Vec<u8>>,
+            >(store, immutable_cfg()),
+        )
         .await;
         self.servers.push(server);
         url
@@ -774,7 +779,7 @@ async fn cold_singleton_does_not_wait_for_another_proofs_operation_scan() {
     let proof = range.await.unwrap().unwrap();
     assert_eq!(proof.operations, operations[2..11]);
     if result.is_err() {
-        singleton.await.unwrap().unwrap();
+        let _ = singleton.await.unwrap().unwrap();
     }
     let proof = result
         .expect("a singleton must not wait for another proof's operation scan")
@@ -835,10 +840,10 @@ async fn clones_share_publication_roots_and_nodes() {
     let client = Keyless::new(store, ((0..=10000).into(), ()));
     let first = client.clone();
     let proof = first
-        .operation_range_checkpoint(Location::new(14), Location::new(1), 1)
+        .operation_range_checkpoint(Location::new(14), Location::new(1), 1, None)
         .await
         .unwrap();
-    assert_eq!(proof.root, root);
+    assert_eq!(proof.ops_root, root);
     assert!(proof.verify::<Sha256>());
     assert_eq!(
         proof.encoded_operations,
@@ -846,10 +851,10 @@ async fn clones_share_publication_roots_and_nodes() {
     );
     fixture.store.state.lock().unwrap().calls.clear();
     let proof = client
-        .operation_range_checkpoint(Location::new(14), Location::new(1), 1)
+        .operation_range_checkpoint(Location::new(14), Location::new(1), 1, None)
         .await
         .unwrap();
-    assert_eq!(proof.root, root);
+    assert_eq!(proof.ops_root, root);
     assert!(proof.verify::<Sha256>());
     assert_eq!(
         proof.encoded_operations,
@@ -866,10 +871,10 @@ async fn clones_share_publication_roots_and_nodes() {
 
     fixture.store.state.lock().unwrap().rows.remove(&key(3, 14));
     let proof = client
-        .operation_range_checkpoint(Location::new(14), Location::new(1), 1)
+        .operation_range_checkpoint(Location::new(14), Location::new(1), 1, None)
         .await
         .unwrap();
-    assert_eq!(proof.root, root);
+    assert_eq!(proof.ops_root, root);
     assert!(proof.verify::<Sha256>());
     assert_eq!(
         proof.encoded_operations,
@@ -975,7 +980,7 @@ async fn cancelled_node_leader_does_not_make_follower_wait_for_replacement() {
     let client = Keyless::new(store, ((0..=10000).into(), ()));
     let read = |client: Keyless| async move {
         client
-            .operation_range_checkpoint(Location::new(14), Location::new(1), 1)
+            .operation_range_checkpoint(Location::new(14), Location::new(1), 1, None)
             .await
     };
     let leader_gate = Gate::new();
@@ -1013,7 +1018,7 @@ async fn cancelled_node_leader_does_not_make_follower_wait_for_replacement() {
         .expect("follower must read unresolved nodes without joining the replacement flight")
         .unwrap()
         .unwrap();
-    assert_eq!(proof.root, root);
+    assert_eq!(proof.ops_root, root);
     assert!(proof.verify::<Sha256>());
     assert_eq!(
         proof.encoded_operations,
@@ -1106,10 +1111,10 @@ async fn ordered_and_immutable_clones_reuse_publication_and_proof_caches() {
                 let client = Ordered::new(store, ordered_cfg(), key_cfg());
                 let first = client.clone();
                 let proof = first
-                    .operation_range_checkpoint(Location::new(14), Location::new(1), 1)
+                    .operation_range_checkpoint(Location::new(14), Location::new(1), 1, None)
                     .await
                     .unwrap();
-                assert_eq!(proof.root, root);
+                assert_eq!(proof.ops_root, root);
                 assert!(proof.verify::<Sha256>());
                 assert_eq!(
                     proof.encoded_operations,
@@ -1117,10 +1122,10 @@ async fn ordered_and_immutable_clones_reuse_publication_and_proof_caches() {
                 );
                 fixture.store.state.lock().unwrap().calls.clear();
                 let proof = client
-                    .operation_range_checkpoint(Location::new(14), Location::new(1), 1)
+                    .operation_range_checkpoint(Location::new(14), Location::new(1), 1, None)
                     .await
                     .unwrap();
-                assert_eq!(proof.root, root);
+                assert_eq!(proof.ops_root, root);
                 assert!(proof.verify::<Sha256>());
                 assert_eq!(
                     proof.encoded_operations,
@@ -1128,10 +1133,10 @@ async fn ordered_and_immutable_clones_reuse_publication_and_proof_caches() {
                 );
                 fixture.store.state.lock().unwrap().rows.remove(&key(3, 14));
                 let proof = client
-                    .operation_range_checkpoint(Location::new(14), Location::new(1), 1)
+                    .operation_range_checkpoint(Location::new(14), Location::new(1), 1, None)
                     .await
                     .unwrap();
-                assert_eq!(proof.root, root);
+                assert_eq!(proof.ops_root, root);
                 assert!(proof.verify::<Sha256>());
                 assert_eq!(
                     proof.encoded_operations,
@@ -1142,10 +1147,10 @@ async fn ordered_and_immutable_clones_reuse_publication_and_proof_caches() {
                 let client = Immutable::new(store, immutable_cfg());
                 let first = client.clone();
                 let proof = first
-                    .operation_range_checkpoint(Location::new(14), Location::new(1), 1)
+                    .operation_range_checkpoint(Location::new(14), Location::new(1), 1, None)
                     .await
                     .unwrap();
-                assert_eq!(proof.root, root);
+                assert_eq!(proof.ops_root, root);
                 assert!(proof.verify::<Sha256>());
                 assert_eq!(
                     proof.encoded_operations,
@@ -1153,10 +1158,10 @@ async fn ordered_and_immutable_clones_reuse_publication_and_proof_caches() {
                 );
                 fixture.store.state.lock().unwrap().calls.clear();
                 let proof = client
-                    .operation_range_checkpoint(Location::new(14), Location::new(1), 1)
+                    .operation_range_checkpoint(Location::new(14), Location::new(1), 1, None)
                     .await
                     .unwrap();
-                assert_eq!(proof.root, root);
+                assert_eq!(proof.ops_root, root);
                 assert!(proof.verify::<Sha256>());
                 assert_eq!(
                     proof.encoded_operations,
@@ -1164,10 +1169,10 @@ async fn ordered_and_immutable_clones_reuse_publication_and_proof_caches() {
                 );
                 fixture.store.state.lock().unwrap().rows.remove(&key(3, 14));
                 let proof = client
-                    .operation_range_checkpoint(Location::new(14), Location::new(1), 1)
+                    .operation_range_checkpoint(Location::new(14), Location::new(1), 1, None)
                     .await
                     .unwrap();
-                assert_eq!(proof.root, root);
+                assert_eq!(proof.ops_root, root);
                 assert!(proof.verify::<Sha256>());
                 assert_eq!(
                     proof.encoded_operations,
@@ -1340,20 +1345,20 @@ async fn unordered_noncommit_tip_shares_floor_without_waiting_for_operation_scan
     let range_client = client.clone();
     let range = tokio::spawn(async move {
         range_client
-            .operation_range_checkpoint(Location::new(6), Location::new(0), 2)
+            .operation_range_checkpoint(Location::new(6), Location::new(0), 2, None)
             .await
     });
     range_gate.wait().await;
     let mut singleton = tokio::spawn(async move {
         client
-            .operation_range_checkpoint(Location::new(6), Location::new(6), 1)
+            .operation_range_checkpoint(Location::new(6), Location::new(6), 1, None)
             .await
     });
     let result = tokio::time::timeout(Duration::from_secs(1), &mut singleton).await;
     assert!(!range.is_finished());
     range_gate.open();
     let range_proof = range.await.unwrap().unwrap();
-    assert_eq!(range_proof.root, root);
+    assert_eq!(range_proof.ops_root, root);
     assert!(range_proof.verify::<Sha256>());
     assert_eq!(
         range_proof.encoded_operations,
@@ -1369,7 +1374,7 @@ async fn unordered_noncommit_tip_shares_floor_without_waiting_for_operation_scan
         .expect("shared floor initialization must not wait for the operation scan")
         .unwrap()
         .unwrap();
-    assert_eq!(proof.root, root);
+    assert_eq!(proof.ops_root, root);
     assert!(proof.verify::<Sha256>());
     assert_eq!(
         proof.encoded_operations,
@@ -1399,7 +1404,7 @@ async fn missing_witness_is_reloaded_after_a_successful_cached_proof() {
     let root = fixture.stage(&store, &operations, &cfg);
     let url = fixture.unordered(store, cfg).await;
     let client = OperationLogClient::<_, mmr::Family, Sha256, UnorderedOp>::plaintext(&url, cfg);
-    client
+    let _ = client
         .get_operation_range(request(0, 0, 1), &root)
         .await
         .unwrap();

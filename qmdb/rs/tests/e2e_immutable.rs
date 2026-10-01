@@ -17,7 +17,7 @@ use commonware_storage::qmdb::immutable::variable::{
 };
 use commonware_storage::translator::TwoCap;
 use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16, NZU64};
-use exoware_qmdb::ImmutableClient;
+
 use exoware_sdk::{PrefixedStoreClient, StoreClient};
 
 use common::retry;
@@ -42,9 +42,13 @@ type FixedDb = FixedImmutable<
     commonware_parallel::Sequential,
 >;
 
-type VariableClient =
-    ImmutableClient<mmr::Family, commonware_cryptography::Sha256, Vec<u8>, Vec<u8>>;
-type FixedClient = ImmutableClient<
+type VariableClient = exoware_qmdb::adapter::Immutable<
+    mmr::Family,
+    commonware_cryptography::Sha256,
+    Vec<u8>,
+    Vec<u8>,
+>;
+type FixedClient = exoware_qmdb::adapter::Immutable<
     mmr::Family,
     commonware_cryptography::Sha256,
     FixedBytes<32>,
@@ -242,10 +246,11 @@ async fn test_immutable_round_trip() {
         .is_none());
 
     let proof = qmdb_client
-        .operation_range_proof(
+        .operation_range(
             source.latest_location,
             Location::<mmr::Family>::new(0),
             source.operations.len() as u32,
+            None,
         )
         .await
         .expect("proof");
@@ -287,10 +292,11 @@ async fn test_immutable_fixed_round_trip() {
     assert_eq!(got.value, Some(source.queried_value));
 
     let proof = qmdb_client
-        .operation_range_proof(
+        .operation_range(
             source.latest_location,
             Location::<mmr::Family>::new(0),
             source.operations.len() as u32,
+            None,
         )
         .await
         .expect("fixed proof");

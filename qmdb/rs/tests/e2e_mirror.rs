@@ -20,8 +20,7 @@ use commonware_storage::qmdb::{
 use commonware_storage::translator::TwoCap;
 use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16, NZU64};
 use exoware_qmdb::{
-    recover_boundary_state, CurrentBoundaryState, ImmutableClient, KeylessClient, OrderedClient,
-    UnorderedClient, MAX_OPERATION_SIZE,
+    adapter::upload::recover_boundary_state, CurrentBoundaryState, MAX_OPERATION_SIZE,
 };
 use exoware_sdk::PrefixedStoreClient;
 
@@ -48,10 +47,11 @@ async fn test_mirror_keyless_from_local() {
     )
     .await
     .expect("upload 1");
-    let qmdb_client: KeylessClient<mmr::Family, Sha256, Vec<u8>> = KeylessClient::new(
-        PrefixedStoreClient::empty(store_client.clone()),
-        ((0..=MAX_OPERATION_SIZE).into(), ()),
-    );
+    let qmdb_client: exoware_qmdb::adapter::Keyless<mmr::Family, Sha256, Vec<u8>> =
+        exoware_qmdb::adapter::Keyless::new(
+            PrefixedStoreClient::empty(store_client.clone()),
+            ((0..=MAX_OPERATION_SIZE).into(), ()),
+        );
     assert_eq!(
         qmdb_client.root_at(latest1).await.expect("root_at 1"),
         root1,
@@ -157,13 +157,14 @@ async fn test_mirror_unordered_from_local() {
     )
     .await
     .expect("upload 1");
-    let qmdb_client: UnorderedClient<mmr::Family, Sha256, Vec<u8>, Vec<u8>> = UnorderedClient::new(
-        PrefixedStoreClient::empty(store_client.clone()),
-        (
-            ((0..=MAX_OPERATION_SIZE).into(), ()),
-            ((0..=MAX_OPERATION_SIZE).into(), ()),
-        ),
-    );
+    let qmdb_client: exoware_qmdb::adapter::Unordered<mmr::Family, Sha256, Vec<u8>, Vec<u8>, N> =
+        exoware_qmdb::adapter::Unordered::new(
+            PrefixedStoreClient::empty(store_client.clone()),
+            (
+                ((0..=MAX_OPERATION_SIZE).into(), ()),
+                ((0..=MAX_OPERATION_SIZE).into(), ()),
+            ),
+        );
     assert_eq!(
         qmdb_client.root_at(latest1).await.expect("root_at 1"),
         root1,
@@ -275,10 +276,11 @@ async fn test_mirror_immutable_from_local() {
     )
     .await
     .expect("upload 1");
-    let qmdb_client: ImmutableClient<mmr::Family, Sha256, ImmK, Vec<u8>> = ImmutableClient::new(
-        PrefixedStoreClient::empty(store_client.clone()),
-        ((), ((0..=MAX_OPERATION_SIZE).into(), ())),
-    );
+    let qmdb_client: exoware_qmdb::adapter::Immutable<mmr::Family, Sha256, ImmK, Vec<u8>> =
+        exoware_qmdb::adapter::Immutable::new(
+            PrefixedStoreClient::empty(store_client.clone()),
+            ((), ((0..=MAX_OPERATION_SIZE).into(), ())),
+        );
     assert_eq!(
         qmdb_client.root_at(latest1).await.expect("root_at 1"),
         root1,
@@ -421,19 +423,17 @@ async fn test_mirror_ordered_from_local() {
     .await
     .expect("upload 1");
 
-    let qmdb_client: OrderedClient<mmr::Family, Sha256, Vec<u8>, Vec<u8>, N> = OrderedClient::new(
-        PrefixedStoreClient::empty(store_client.clone()),
-        (
+    let qmdb_client: exoware_qmdb::adapter::Ordered<mmr::Family, Sha256, Vec<u8>, Vec<u8>, N> =
+        exoware_qmdb::adapter::Ordered::new(
+            PrefixedStoreClient::empty(store_client.clone()),
+            (
+                ((0..=MAX_OPERATION_SIZE).into(), ()),
+                ((0..=MAX_OPERATION_SIZE).into(), ()),
+            ),
             ((0..=MAX_OPERATION_SIZE).into(), ()),
-            ((0..=MAX_OPERATION_SIZE).into(), ()),
-        ),
-        ((0..=MAX_OPERATION_SIZE).into(), ()),
-    );
+        );
     assert_eq!(
-        qmdb_client
-            .current_root_at(latest1)
-            .await
-            .expect("root_at 1"),
+        qmdb_client.root_at(latest1).await.expect("root_at 1"),
         root1,
         "remote root must match local (after batch 1)"
     );
@@ -463,10 +463,7 @@ async fn test_mirror_ordered_from_local() {
     .await
     .expect("upload 2");
     assert_eq!(
-        qmdb_client
-            .current_root_at(latest2)
-            .await
-            .expect("root_at 2"),
+        qmdb_client.root_at(latest2).await.expect("root_at 2"),
         root2,
         "remote root must match local (after batch 2)"
     );

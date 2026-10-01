@@ -1,40 +1,22 @@
-pub mod common {
-    pub mod kv {
-        pub mod v1 {
-            pub use exoware_sdk::common::kv::v1::*;
-        }
-    }
-}
-
-pub mod qmdb {
-    pub mod v1 {
-        #![allow(non_camel_case_types)]
-        #![allow(unused_imports)]
-        #![allow(clippy::derivable_impls)]
-        #![allow(clippy::match_single_binding)]
-        include!("gen/qmdb.v1.rs");
-    }
-}
-
 use bytes::{BufMut, Bytes, BytesMut};
 use commonware_codec::{Encode, EncodeSize, Write as CodecWrite};
 use commonware_cryptography::Digest;
 use commonware_storage::{
     merkle::Graftable,
     qmdb::{
-        any::{ordered, unordered, value::ValueEncoding},
+        any::{ordered, value::ValueEncoding},
         operation::Key as QmdbKey,
     },
 };
 use connectrpc::PreEncoded;
 
-use self::qmdb::v1::{
-    GetCurrentOperationRangeResponse, GetManyResponse, GetOperationRangeResponse, GetRangeResponse,
-    GetResponse, SubscribeResponse,
-};
 use crate::proof::{
     CurrentOperationRangeProofResult, OperationRangeCheckpoint, RawBatchMultiProof,
     RawKeyExclusionProof, RawKeyLookupProof, RawKeyRangeProof, RawKeyValueProof,
+};
+use crate::service::proto::qmdb::v1::{
+    GetCurrentOperationRangeResponse, GetManyResponse, GetOperationRangeResponse, GetRangeResponse,
+    GetResponse, SubscribeResponse,
 };
 
 const WIRE_VARINT: u64 = buffa::encoding::WireType::Varint as u64;
@@ -171,7 +153,7 @@ fn historical_multi_proof_len<D: Digest, F: Graftable>(proof: &RawBatchMultiProo
                 message_field_len(2, multi_proof_operation_len(location.as_u64(), encoded))
             })
             .sum::<usize>()
-        + codec_field_len(3, &proof.root)
+        + codec_field_len(3, &proof.ops_root)
         + proof
             .ops_root_witness
             .as_ref()
@@ -189,7 +171,7 @@ fn write_historical_multi_proof<D: Digest, F: Graftable>(
         write_message_field(buf, 2, inner_len);
         write_multi_proof_operation(buf, location.as_u64(), encoded);
     }
-    write_codec_field(buf, 3, &proof.root);
+    write_codec_field(buf, 3, &proof.ops_root);
     if let Some(witness) = &proof.ops_root_witness {
         write_codec_field(buf, 4, witness);
     }
@@ -205,7 +187,7 @@ fn operation_range_checkpoint_len<D: Digest, F: Graftable>(
             .iter()
             .map(|encoded| repeated_bytes_field_len(3, encoded))
             .sum::<usize>()
-        + codec_field_len(4, &proof.root)
+        + codec_field_len(4, &proof.ops_root)
         + proof
             .ops_root_witness
             .as_ref()
@@ -227,7 +209,7 @@ fn write_operation_range_checkpoint<D: Digest, F: Graftable>(
     for encoded in &proof.encoded_operations {
         write_repeated_bytes_field(buf, 3, encoded);
     }
-    write_codec_field(buf, 4, &proof.root);
+    write_codec_field(buf, 4, &proof.ops_root);
     if let Some(witness) = &proof.ops_root_witness {
         write_codec_field(buf, 5, witness);
     }
@@ -351,67 +333,64 @@ pub(crate) fn get_response<D: Digest, Op: Encode, const N: usize, F: Graftable>(
     }))
 }
 
-pub(crate) fn ordered_get_many_response<
-    D: Digest,
-    K: QmdbKey + commonware_codec::Codec,
-    V: commonware_codec::Codec + Clone + Send + Sync,
-    const N: usize,
-    F: Graftable,
-    E: ValueEncoding<Value = V>,
->(
-    proofs: &[RawKeyLookupProof<D, K, V, N, F, E>],
-) -> PreEncoded<GetManyResponse>
+/// One `CurrentKeyLookupResult` entry of a `GetMany` response.
+pub(crate) trait LookupResult {
+    fn result_len(&self) -> usize;
+    fn write_result(&self, buf: &mut impl BufMut);
+}
+
+impl<D: Digest, Op: Encode, const N: usize, F: Graftable> LookupResult
+    for RawKeyValueProof<D, Op, N, F>
+{
+    fn result_len(&self) -> usize {
+        key_lookup_result_hit_len(self)
+    }
+
+    fn write_result(&self, buf: &mut impl BufMut) {
+        write_key_lookup_result_hit(buf, self)
+    }
+}
+
+impl<
+        D: Digest,
+        K: QmdbKey + commonware_codec::Codec,
+        V: commonware_codec::Codec + Clone + Send + Sync,
+        const N: usize,
+        F: Graftable,
+        E: ValueEncoding<Value = V>,
+    > LookupResult for RawKeyLookupProof<D, K, V, N, F, E>
 where
     ordered::Operation<F, K, E>: Encode,
     commonware_storage::qmdb::current::ordered::ExclusionProof<F, K, E, D, N>: Encode,
 {
-    let result_lens = proofs
-        .iter()
-        .map(|proof| match proof {
+    fn result_len(&self) -> usize {
+        match self {
             RawKeyLookupProof::Hit(proof) => key_lookup_result_hit_len(proof),
             RawKeyLookupProof::Miss(proof) => key_lookup_result_miss_len(proof),
-        })
-        .collect::<Vec<_>>();
-    let len = result_lens
-        .iter()
-        .map(|inner| message_field_len(1, *inner))
-        .sum::<usize>();
-    PreEncoded::from_bytes_unchecked(message_bytes(len, |buf| {
-        for (proof, result_len) in commonware_utils::iter::zip_eq(proofs, result_lens) {
-            write_message_field(buf, 1, result_len);
-            match proof {
-                RawKeyLookupProof::Hit(proof) => write_key_lookup_result_hit(buf, proof),
-                RawKeyLookupProof::Miss(proof) => write_key_lookup_result_miss(buf, proof),
-            }
         }
-    }))
+    }
+
+    fn write_result(&self, buf: &mut impl BufMut) {
+        match self {
+            RawKeyLookupProof::Hit(proof) => write_key_lookup_result_hit(buf, proof),
+            RawKeyLookupProof::Miss(proof) => write_key_lookup_result_miss(buf, proof),
+        }
+    }
 }
 
-pub(crate) fn unordered_get_many_response<
-    D: Digest,
-    K: QmdbKey + commonware_codec::Codec,
-    V: commonware_codec::Codec + Clone + Send + Sync,
-    const N: usize,
-    F: Graftable,
-    E: ValueEncoding<Value = V>,
->(
-    proofs: &[RawKeyValueProof<D, unordered::Operation<F, K, E>, N, F>],
-) -> PreEncoded<GetManyResponse>
-where
-    unordered::Operation<F, K, E>: Encode,
-{
-    let result_lens = proofs
+pub(crate) fn get_many_response<R: LookupResult>(results: &[R]) -> PreEncoded<GetManyResponse> {
+    let result_lens = results
         .iter()
-        .map(key_lookup_result_hit_len)
+        .map(LookupResult::result_len)
         .collect::<Vec<_>>();
     let len = result_lens
         .iter()
         .map(|inner| message_field_len(1, *inner))
         .sum::<usize>();
     PreEncoded::from_bytes_unchecked(message_bytes(len, |buf| {
-        for (proof, result_len) in commonware_utils::iter::zip_eq(proofs, result_lens) {
+        for (result, result_len) in commonware_utils::iter::zip_eq(results, result_lens) {
             write_message_field(buf, 1, result_len);
-            write_key_lookup_result_hit(buf, proof);
+            result.write_result(buf);
         }
     }))
 }

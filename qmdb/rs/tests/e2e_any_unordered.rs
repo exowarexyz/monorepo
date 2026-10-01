@@ -18,15 +18,18 @@ use commonware_storage::qmdb::any::unordered::variable::Operation as UnorderedQm
 use commonware_storage::qmdb::any::value::FixedEncoding;
 use commonware_storage::translator::TwoCap;
 use commonware_utils::{NZUsize, NZU16, NZU64};
-use exoware_qmdb::{UnorderedClient, MAX_OPERATION_SIZE};
+use exoware_qmdb::MAX_OPERATION_SIZE;
 use exoware_sdk::PrefixedStoreClient;
 
 type Digest = commonware_cryptography::sha256::Digest;
 type BatchProof = Proof<mmr::Family, Digest>;
 type UnorderedBatchOperation = UnorderedQmdbOperation<mmr::Family, Vec<u8>, Vec<u8>>;
 type FixedUnorderedBatchOperation = FixedUnorderedOperation<mmr::Family, Digest, Digest>;
-type VariableClient = UnorderedClient<mmr::Family, Sha256, Vec<u8>, Vec<u8>>;
-type FixedClient = UnorderedClient<mmr::Family, Sha256, Digest, Digest, FixedEncoding<Digest>>;
+// Bitmap chunk size; unused here because these tests upload no current state.
+const N: usize = 32;
+type VariableClient = exoware_qmdb::adapter::Unordered<mmr::Family, Sha256, Vec<u8>, Vec<u8>, N>;
+type FixedClient =
+    exoware_qmdb::adapter::Unordered<mmr::Family, Sha256, Digest, Digest, N, FixedEncoding<Digest>>;
 type VariableDb = LocalUnorderedDb<
     mmr::Family,
     cw_tokio::Context,
@@ -236,10 +239,11 @@ async fn test_unordered_round_trip() {
     );
 
     let proof = qmdb_client
-        .operation_range_proof(
+        .operation_range(
             source.latest_location,
             Location::new(0),
             source.operations.len() as u32,
+            None,
         )
         .await
         .expect("proof");
@@ -276,10 +280,11 @@ async fn test_unordered_fixed_round_trip() {
     }
 
     let proof = qmdb_client
-        .operation_range_proof(
+        .operation_range(
             source.latest_location,
             Location::new(0),
             source.operations.len() as u32,
+            None,
         )
         .await
         .expect("fixed proof");

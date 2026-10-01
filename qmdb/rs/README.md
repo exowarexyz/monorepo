@@ -8,6 +8,15 @@ serve historical reads, proofs, and ConnectRPC APIs.
 `exoware-qmdb` is **ALPHA** software and is not yet recommended for production
 use. Developers should expect breaking changes and occasional instability.
 
+## Crate layout
+
+| Module | Contents |
+|---|---|
+| `adapter` | Store-backed readers (`Ordered`, `Unordered`, `Immutable`, `Keyless`), upload staging (`adapter::upload`), and prune policies |
+| `service::proto` | Generated `qmdb.v1` types |
+| `service::server` | One Connect stack function per kind (`service::server::ordered_stack`, ...) |
+| `service::client` | One verifying client per kind (`service::client::Ordered`, ...), built from the per-service clients in `service::client::rpc` |
+
 ## Native backends
 
 All backends use the same stateless upload functions. Rust readers and proof
@@ -16,10 +25,10 @@ Both MMR and MMB are supported.
 
 | Commonware source | Rust reader | Operation encodings and keys | Source storage/index variants |
 |---|---|---|---|
-| `any::ordered`, `current::ordered` | `OrderedClient` | Fixed encoding with fixed keys, or variable encoding with fixed or `Vec<u8>` keys | Plain and partitioned |
-| `any::unordered`, `current::unordered` | `UnorderedClient` | Fixed encoding with fixed keys, or variable encoding with fixed or `Vec<u8>` keys | Plain and partitioned |
-| `immutable` | `ImmutableClient` | Fixed encoding with fixed keys, or variable encoding with fixed or `Vec<u8>` keys | Full and compact |
-| `keyless` | `KeylessClient` | Fixed or variable encoding | Full and compact |
+| `any::ordered`, `current::ordered` | `adapter::Ordered` | Fixed encoding with fixed keys, or variable encoding with fixed or `Vec<u8>` keys | Plain and partitioned |
+| `any::unordered`, `current::unordered` | `adapter::Unordered` | Fixed encoding with fixed keys, or variable encoding with fixed or `Vec<u8>` keys | Plain and partitioned |
+| `immutable` | `adapter::Immutable` | Fixed encoding with fixed keys, or variable encoding with fixed or `Vec<u8>` keys | Full and compact |
+| `keyless` | `adapter::Keyless` | Fixed or variable encoding | Full and compact |
 
 Readers default to `VariableEncoding<V>`. Select `FixedEncoding<V>` for fixed
 operation codecs. Source indexing and compactness control how Commonware retains
@@ -76,7 +85,7 @@ operation type:
 
 ```rust,ignore
 use commonware_parallel::Sequential;
-use exoware_qmdb::{
+use exoware_qmdb::adapter::upload::{
     prepare_authenticated_range, stage_authenticated_range, stage_watermark,
     AuthenticatedOperationRange,
 };
@@ -231,16 +240,27 @@ the source DB.
 ## Reads and ConnectRPC
 
 All four readers expose historical operation roots and range proofs. Ordered
-and unordered readers provide indexed historical key queries. `OrderedClient`
-also exposes `multi_proof_at`. Immutable provides indexed `get_at`, and keyless
+and unordered readers provide indexed historical key queries. `adapter::Ordered`
+also exposes `multi_proof`. Immutable provides indexed `get_at`, and keyless
 provides location-based `get_at`.
+
+Each `service::server` stack function mounts the services one kind supports.
+The matching `service::client` kind type (`Ordered`, `Unordered`, `Immutable`,
+`Keyless`) composes the per-service clients from `service::client::rpc` for
+that stack.
+
+Adapter readers and service clients of the same kind share method names,
+arguments, and `Verified*` result types: `get`, `get_many`, `get_range`,
+`operation_range`, and `current_operation_range`, as each kind supports them.
+Service client methods also take the trusted root to verify against. Adapter
+readers verify against the root stored with the proof.
 
 | Connect stack | Services |
 |---|---|
-| `ordered_operation_log_connect_stack`, `unordered_operation_log_connect_stack` | Historical operation ranges and subscriptions |
-| `immutable_operation_log_connect_stack`, `keyless_operation_log_connect_stack` | Historical operation ranges and subscriptions |
-| `ordered_connect_stack` | Historical operations, subscriptions, current operation ranges, current key hits and exclusions, ordered key ranges |
-| `unordered_connect_stack` | Historical operations, subscriptions, current operation ranges, current key hits |
+| `server::ordered_operation_log_stack`, `server::unordered_operation_log_stack` | Historical operation ranges and subscriptions |
+| `server::immutable_operation_log_stack`, `server::keyless_operation_log_stack` | Historical operation ranges and subscriptions |
+| `server::ordered_stack` | Historical operations, subscriptions, current operation ranges, current key hits and exclusions, ordered key ranges |
+| `server::unordered_stack` | Historical operations, subscriptions, current operation ranges, current key hits |
 
 Full ordered and unordered stacks require uploaded current-boundary material.
 Unordered QMDB omits missing keys from `GetMany` because it has no authenticated
@@ -255,8 +275,12 @@ the requested watermark.
 `OperationLogClient` verifies historical ranges against a caller-supplied root.
 Without a current-root witness this is the operation-log root. When a response
 contains that witness, verification binds the operation log to the supplied
-current root. Native `root_at` always returns the operation-log root.
-`current_root_at` returns the current root.
+current root.
+
+Every `Verified*` result reports the canonical root at its tip. Service clients return the trusted
+root they verified against; adapter readers derive it from the stored witness.
+Adapter `root_at` returns the canonical root and `ops_root_at` the operation-log
+root.
 
 Unary range verification binds the exact requested
 `[start, min(start + max_locations, tip + 1))` interval. Ordered key ranges
@@ -264,9 +288,9 @@ verify a linear interval and forward pagination over authenticated successor
 links. Generic key ordering follows `K::Ord`.
 
 Rust subscriptions use `message_with_root` to obtain an independently trusted
-root for each frame tip. Subscription filters support exact bytes, prefixes,
-and regexes over logical keys and values. Reconnect from
-`resume_sequence_number + 1`.
+root for each frame tip; each frame's `root` is that canonical root.
+Subscription filters support exact bytes, prefixes, and regexes over logical
+keys and values. Reconnect from `resume_sequence_number + 1`.
 
 Subscription delivery follows Store write frames and waits for the caller to
 publish a watermark covering each frame's operations. Data rows may span Store

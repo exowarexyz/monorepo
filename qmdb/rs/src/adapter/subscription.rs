@@ -6,7 +6,7 @@ use exoware_sdk::selector::Selector;
 use exoware_sdk::stream_filter::StreamFilter;
 use exoware_sdk::{PrefixedStoreClient, StreamSubscription};
 
-use crate::codec::{
+use crate::adapter::codec::{
     decode_operation_location_key, decode_watermark_location, OPERATION_PREFIX, WATERMARK_PREFIX,
 };
 use crate::QmdbError;
@@ -108,7 +108,7 @@ mod tests {
     use exoware_sdk::selector::compile_payload_regex;
 
     use super::{classify_and_filter, RowFamily};
-    use crate::codec::{encode_operation_key, encode_watermark_key};
+    use crate::adapter::codec::{encode_operation_key, encode_watermark_key};
 
     const LOCATIONS: [u64; 4] = [0, 1, 0x0102_0304_0506_0708, u64::MAX];
 
