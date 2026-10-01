@@ -90,8 +90,8 @@ async fn sql_full_pipeline_insert_and_query() {
         )
         .expect("schema");
 
-    let ctx = exoware_sql::session_context(PrefixedStoreClient::empty(read_client));
-    read_schema.register_all(&ctx).expect("register tables");
+    let ctx = exoware_sql::SqlContext::new(PrefixedStoreClient::empty(read_client));
+    ctx.register_schema(read_schema).expect("register tables");
 
     // Full scan (all rows are now visible)
     let batches = ctx
@@ -278,7 +278,7 @@ async fn connect_query_preserves_session_settings() {
         common::local_store_client().await,
     ));
     let server = Arc::new(SqlServer::new(schema).expect("SQL server"));
-    let initial_batch_size = server.session().state().config().batch_size();
+    let initial_batch_size = server.session().datafusion().state().config().batch_size();
     let (client, handle) = serve_sql(server.clone()).await;
 
     for (sql, expected) in [
@@ -293,7 +293,7 @@ async fn connect_query_preserves_session_settings() {
             .await
             .expect("update session setting");
         assert_eq!(
-            server.session().state().config().batch_size(),
+            server.session().datafusion().state().config().batch_size(),
             expected,
             "{sql}"
         );
@@ -474,8 +474,9 @@ async fn connect_query_preserves_configured_tables_and_views() {
         MemTable::try_new(configured_batch.schema(), vec![vec![configured_batch]])
             .expect("configured table");
     let server = SqlServer::new(schema).expect("SQL server");
-    other_schema
-        .register_all(server.session())
+    server
+        .session()
+        .register_schema(other_schema)
         .expect("register other namespace");
     server
         .session()

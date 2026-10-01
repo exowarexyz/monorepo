@@ -25,14 +25,13 @@ use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use datafusion::arrow::datatypes::DataType;
 use datafusion::physical_plan::execution_plan::reset_plan_states;
 use datafusion::physical_plan::{collect, ExecutionPlan};
-use datafusion::prelude::SessionContext;
 use exoware_sdk::{StoreClient, StoreKeyPrefix};
 use exoware_server::{
     Ingest, IngestError, IngestState, Query, QueryExtra, QueryResult, QueryState, RangeScan,
     RangeScanBatch, RangeScanResult, Sequence,
 };
 use exoware_sql::proto::sql::v1::{QueryRequest, ServiceClient};
-use exoware_sql::{CellValue, IndexSpec, KvSchema, TableColumnConfig};
+use exoware_sql::{CellValue, IndexSpec, KvSchema, SqlContext, TableColumnConfig};
 use http_body::{Body as HttpBody, Frame, SizeHint};
 use tokio::runtime::Runtime;
 
@@ -330,7 +329,7 @@ impl Query for Backend {
 
 struct Fixture {
     runtime: Runtime,
-    ctx: SessionContext,
+    ctx: SqlContext,
     sql_client: ServiceClient<connectrpc::client::HttpClient>,
     traffic: Arc<Traffic>,
     servers: Vec<tokio::task::JoinHandle<()>>,
@@ -476,7 +475,7 @@ impl Fixture {
     fn execute(&self, plan: Arc<dyn ExecutionPlan>) -> usize {
         let plan = reset_plan_states(plan).unwrap();
         self.runtime.block_on(async {
-            collect(plan, self.ctx.task_ctx())
+            collect(plan, self.ctx.datafusion().task_ctx())
                 .await
                 .unwrap()
                 .iter()

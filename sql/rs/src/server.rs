@@ -42,7 +42,7 @@ use datafusion::logical_expr::{
 use datafusion::optimizer::simplify_expressions::ExprSimplifier;
 use datafusion::physical_expr::PhysicalExpr;
 use datafusion::physical_plan::filter::batch_filter;
-use datafusion::prelude::SessionContext;
+use datafusion::prelude::SessionContext as DataFusionContext;
 use exoware_sdk::keys::Key;
 use exoware_sdk::kv_codec::{decode_stored_row, Utf8};
 use exoware_sdk::selector::Selector;
@@ -56,8 +56,8 @@ use crate::codec::decode_primary_key_selected;
 use crate::filter::ScanAccessPlan;
 use crate::predicate::QueryPredicate;
 use crate::schema::KvSchema;
-use crate::session::with_read_session;
 use crate::types::{IndexLayout, ResolvedIndexSpec, TableModel};
+use crate::SqlContext;
 
 const MAX_CONNECTRPC_BODY_BYTES: usize = 256 * 1024 * 1024;
 
@@ -125,7 +125,7 @@ impl TableStream {
 /// Construct with [`SqlServer::new`], pass to [`sql_connect_stack`] to mount
 /// on an axum router.
 pub struct SqlServer {
-    ctx: Arc<SessionContext>,
+    ctx: Arc<SqlContext>,
     streams: HashMap<String, TableStream>,
     // Registration order, preserved for the `Tables` RPC so clients see
     // tables in the same order the operator declared them.
@@ -135,7 +135,7 @@ pub struct SqlServer {
 
 impl SqlServer {
     /// Build a server from a [`KvSchema`]. The schema's tables are registered
-    /// in a new [`SessionContext`] that drives both unary `Query` and the
+    /// in a new [`SqlContext`] that drives both unary `Query` and the
     /// scalar predicate compilation on `Subscribe`.
     pub fn new(schema: KvSchema) -> DataFusionResult<Self> {
         let store = schema.client().clone();
@@ -148,8 +148,8 @@ impl SqlServer {
             );
             table_names.push(name.clone());
         }
-        let ctx = crate::session_context(store.clone());
-        schema.register_all(&ctx)?;
+        let ctx = SqlContext::new(store.clone());
+        ctx.register_schema(schema)?;
         Ok(Self {
             ctx: Arc::new(ctx),
             streams,
@@ -158,9 +158,8 @@ impl SqlServer {
         })
     }
 
-    /// Borrow the underlying DataFusion session, e.g. to `INSERT` seed rows
-    /// without going through the connect API.
-    pub fn session(&self) -> &SessionContext {
+    /// Borrow the SQL context for direct queries and table registration.
+    pub fn session(&self) -> &SqlContext {
         &self.ctx
     }
 
@@ -274,7 +273,7 @@ impl Service for SqlConnect {
             let since = request.since_sequence_number.filter(|seq| *seq != 0);
             let stream = server.stream(&table_name)?.clone();
             let predicate = compile_subscription_predicate(
-                &server.ctx,
+                server.ctx.datafusion(),
                 &stream.schema,
                 &table_name,
                 &where_sql,
@@ -321,8 +320,9 @@ impl Service for SqlConnect {
             let sql = request.sql.to_string();
             let min_sequence_number = request.min_sequence_number;
             let read_session = ReadSession::monotonic(server.store.clone(), min_sequence_number);
-            let ctx = with_read_session(&server.ctx, read_session.clone());
+            let ctx = server.ctx.with_read_session(read_session.clone());
             let plan = ctx
+                .datafusion()
                 .state()
                 .create_logical_plan(&sql)
                 .await
@@ -338,8 +338,8 @@ impl Service for SqlConnect {
                 )
                 | LogicalPlan::Ddl(
                     DdlStatement::CreateFunction(_) | DdlStatement::DropFunction(_),
-                ) => server.ctx.as_ref(),
-                _ => &ctx,
+                ) => server.ctx.datafusion(),
+                _ => ctx.datafusion(),
             };
             let df = execution_ctx
                 .execute_logical_plan(plan)
@@ -527,7 +527,7 @@ fn evaluate_batch(
 }
 
 fn compile_subscription_predicate(
-    ctx: &SessionContext,
+    ctx: &DataFusionContext,
     schema: &SchemaRef,
     table_name: &str,
     where_sql: &str,
@@ -1058,16 +1058,10 @@ mod tests {
             .with_memory_pool(pool.clone())
             .build_arc()
             .unwrap();
-        let mut builder =
-            crate::session_state_builder(ReadSession::monotonic(server.store.clone(), None));
-        builder
-            .config()
-            .as_mut()
-            .unwrap()
-            .options_mut()
-            .execution
-            .target_partitions = 1;
-        let ctx = SessionContext::new_with_state(builder.with_runtime_env(runtime).build());
+        let ctx = SqlContext::builder(server.store.clone())
+            .with_config(datafusion::prelude::SessionConfig::new().with_target_partitions(1))
+            .with_runtime_env(runtime)
+            .build();
         ctx.register_table(
             "counts",
             server.session().table_provider("counts").await.unwrap(),
@@ -1170,7 +1164,7 @@ mod tests {
 
     #[tokio::test]
     async fn query_parse_errors_map_to_invalid_argument() {
-        let ctx = SessionContext::new();
+        let ctx = DataFusionContext::new();
         let DataFusionError::SQL(parser_error, _) = ctx.sql("SELECT FROM").await.unwrap_err()
         else {
             panic!("malformed SQL did not return a parser error");
@@ -1189,7 +1183,7 @@ mod tests {
 
     #[tokio::test]
     async fn wrapped_planning_errors_map_to_invalid_argument() {
-        let ctx = SessionContext::new();
+        let ctx = DataFusionContext::new();
         for sql in ["SELECT * FROM nope", "SELECT 1 + 'a'", "SELECT 1 LIMIT 'x'"] {
             let query_error = match ctx.sql(sql).await {
                 Ok(frame) => frame.create_physical_plan().await.unwrap_err(),
@@ -1414,7 +1408,7 @@ mod tests {
         use datafusion::datasource::MemTable;
 
         let batch = predicate_batch();
-        let ctx = SessionContext::new();
+        let ctx = DataFusionContext::new();
         ctx.register_table(
             "orders",
             Arc::new(MemTable::try_new(batch.schema(), vec![vec![batch.clone()]]).unwrap()),
@@ -1458,7 +1452,7 @@ mod tests {
 
     #[test]
     fn subscription_rejects_non_scalar_and_non_boolean_predicates() {
-        let ctx = SessionContext::new();
+        let ctx = DataFusionContext::new();
         let batch = predicate_batch();
         for sql in [
             "id + 1",
@@ -1487,7 +1481,7 @@ mod tests {
 
     #[test]
     fn subscription_quoted_table_names_are_resolved_without_sql_interpolation() {
-        let ctx = SessionContext::new();
+        let ctx = DataFusionContext::new();
         let batch = predicate_batch();
         let predicate = compile_subscription_predicate(
             &ctx,
@@ -1502,7 +1496,7 @@ mod tests {
 
     #[test]
     fn subscription_evaluates_decoded_frames_and_preserves_their_sequence() {
-        let ctx = SessionContext::new();
+        let ctx = DataFusionContext::new();
         let batch = predicate_batch();
         let schema = KvSchema::new(exoware_sdk::PrefixedStoreClient::empty(
             exoware_sdk::StoreClient::new("http://127.0.0.1:1"),
@@ -1561,7 +1555,7 @@ mod tests {
 
     #[test]
     fn subscription_time_is_bound_once_and_random_remains_volatile() {
-        let ctx = SessionContext::new();
+        let ctx = DataFusionContext::new();
         let batch = predicate_batch();
         let predicate = compile_subscription_predicate(
             &ctx,
@@ -1593,7 +1587,7 @@ mod tests {
     fn subscription_compiles_stable_functions_once_and_evaluates_volatile_functions_per_batch() {
         let batch = predicate_batch();
         for volatility in [Volatility::Stable, Volatility::Volatile] {
-            let ctx = SessionContext::new();
+            let ctx = DataFusionContext::new();
             let calls = Arc::new(AtomicUsize::new(0));
             let evaluations = calls.clone();
             ctx.register_udf(create_udf(

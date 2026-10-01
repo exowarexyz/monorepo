@@ -482,9 +482,8 @@ fn make_sql_schema(client: PrefixedStoreClient) -> KvSchema {
 }
 
 async fn query_sql_items(client: PrefixedStoreClient) -> (Vec<i64>, Vec<i64>) {
-    let ctx = exoware_sql::session_context(client.clone());
-    make_sql_schema(client)
-        .register_all(&ctx)
+    let ctx = exoware_sql::SqlContext::new(client.clone());
+    ctx.register_schema(make_sql_schema(client))
         .expect("register schema");
     let batches = ctx
         .sql("SELECT id, amount_cents FROM items ORDER BY id")

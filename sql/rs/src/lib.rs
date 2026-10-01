@@ -17,7 +17,7 @@ mod writer;
 pub use aggregate::KvAggregateExtensionPlanner;
 pub use schema::KvSchema;
 pub use server::{sql_connect_stack, SqlConnect, SqlServer};
-pub use session::{session_context, session_state_builder, with_read_session};
+pub use session::{SqlContext, SqlContextBuilder};
 pub use types::default_orders_index_specs;
 pub use types::{
     CellValue, IndexBackfillEvent, IndexBackfillOptions, IndexBackfillReport, IndexLayout,
@@ -52,7 +52,7 @@ mod tests {
     use datafusion::physical_optimizer::PhysicalOptimizerRule;
     use datafusion::physical_plan::limit::GlobalLimitExec;
     use datafusion::physical_plan::ExecutionPlan;
-    use datafusion::prelude::SessionContext;
+    use datafusion::prelude::{SessionConfig, SessionContext as DataFusionSessionContext};
     use exoware_sdk::keys::{Key, Prefix};
     use exoware_sdk::kv_codec::{decode_stored_row, KvReducedValue, StoredRow};
     use exoware_sdk::{PrefixedStoreClient, StoreBatchUpload, StoreClient};
@@ -432,7 +432,7 @@ mod tests {
         values
     }
 
-    async fn explain_plan_rows(ctx: &SessionContext, sql: &str) -> Vec<(String, String)> {
+    async fn explain_plan_rows(ctx: &SqlContext, sql: &str) -> Vec<(String, String)> {
         let batches = ctx
             .sql(&format!("EXPLAIN {sql}"))
             .await
@@ -490,8 +490,8 @@ mod tests {
                     .with_cover_columns(vec!["amount_cents".to_string()])],
             )
             .expect("schema");
-        let ctx = session_context(schema.client().clone());
-        schema.register_all(&ctx).expect("register");
+        let ctx = SqlContext::new(schema.client().clone());
+        ctx.register_schema(schema).expect("register");
 
         let explain =
             physical_plan_text(&explain_plan_rows(&ctx, "SELECT id, status FROM orders").await);
@@ -533,8 +533,8 @@ mod tests {
                     .with_cover_columns(vec!["amount_cents".to_string()])],
             )
             .expect("schema");
-        let ctx = session_context(schema.client().clone());
-        schema.register_all(&ctx).expect("register");
+        let ctx = SqlContext::new(schema.client().clone());
+        ctx.register_schema(schema).expect("register");
 
         let explain = physical_plan_text(
             &explain_plan_rows(
@@ -586,8 +586,8 @@ mod tests {
                 ],
             )
             .expect("schema");
-        let ctx = session_context(schema.client().clone());
-        schema.register_all(&ctx).expect("register");
+        let ctx = SqlContext::new(schema.client().clone());
+        ctx.register_schema(schema).expect("register");
 
         let explain = physical_plan_text(
             &explain_plan_rows(
@@ -630,8 +630,8 @@ mod tests {
                     .with_cover_columns(vec!["amount_cents".to_string()])],
             )
             .expect("schema");
-        let ctx = session_context(schema.client().clone());
-        schema.register_all(&ctx).expect("register");
+        let ctx = SqlContext::new(schema.client().clone());
+        ctx.register_schema(schema).expect("register");
 
         let explain = physical_plan_text(
             &explain_plan_rows(
@@ -2742,8 +2742,8 @@ mod tests {
         }
         writer.flush().await.expect("flush");
 
-        let ctx = session_context(schema.client().clone());
-        schema.register_all(&ctx).expect("register");
+        let ctx = SqlContext::new(schema.client().clone());
+        ctx.register_schema(schema).expect("register");
 
         for (name, expected_age) in [("alice", 30i64), ("bob", 25), ("", 99)] {
             let df = ctx
@@ -2845,8 +2845,8 @@ mod tests {
         }
         writer.flush().await.expect("flush");
 
-        let ctx = session_context(schema.client().clone());
-        schema.register_all(&ctx).expect("register");
+        let ctx = SqlContext::new(schema.client().clone());
+        ctx.register_schema(schema).expect("register");
 
         for table in ["orders_nc", "orders_cov"] {
             let df = ctx
@@ -3213,10 +3213,10 @@ mod tests {
 
     #[tokio::test]
     async fn kv_schema_register_all_enables_join() {
-        let ctx = SessionContext::new();
-        let client = StoreClient::new("http://localhost:10000");
+        let client = PrefixedStoreClient::empty(StoreClient::new("http://localhost:10000"));
+        let ctx = SqlContext::new(client.clone());
 
-        let result = KvSchema::new(PrefixedStoreClient::empty(client))
+        let result = KvSchema::new(client)
             .table(
                 "customers",
                 vec![
@@ -3263,9 +3263,9 @@ mod tests {
     #[tokio::test]
     async fn kv_schema_three_way_join() {
         let client = StoreClient::new("http://localhost:10000");
-        let ctx = session_context(PrefixedStoreClient::empty(client.clone()));
+        let ctx = SqlContext::new(PrefixedStoreClient::empty(client.clone()));
 
-        KvSchema::new(PrefixedStoreClient::empty(client))
+        let schema = KvSchema::new(PrefixedStoreClient::empty(client))
             .table(
                 "products",
                 vec![
@@ -3301,9 +3301,8 @@ mod tests {
                 vec!["order_id".to_string()],
                 vec![],
             )
-            .unwrap()
-            .register_all(&ctx)
             .unwrap();
+        ctx.register_schema(schema).unwrap();
 
         let plan = ctx
             .sql(
@@ -6093,8 +6092,8 @@ mod tests {
             guard.insert(key, Bytes::new());
         }
 
-        let ctx = session_context(schema.client().clone());
-        schema.register_all(&ctx).expect("register");
+        let ctx = SqlContext::new(schema.client().clone());
+        ctx.register_schema(schema).expect("register");
         let df = ctx
             .sql("SELECT amount_cents FROM orders WHERE status = 'open'")
             .await
@@ -6160,8 +6159,8 @@ mod tests {
             guard.insert(key, Bytes::from_static(b"not-codec"));
         }
 
-        let ctx = session_context(schema.client().clone());
-        schema.register_all(&ctx).expect("register");
+        let ctx = SqlContext::new(schema.client().clone());
+        ctx.register_schema(schema).expect("register");
         let df = ctx
             .sql("SELECT amount_cents FROM orders WHERE status = 'open'")
             .await
@@ -6235,8 +6234,8 @@ mod tests {
             .expect("row");
         writer.flush().await.expect("flush");
 
-        let ctx = session_context(schema.client().clone());
-        schema.register_all(&ctx).expect("register");
+        let ctx = SqlContext::new(schema.client().clone());
+        ctx.register_schema(schema).expect("register");
 
         let df = ctx
             .sql("SELECT id, notes FROM orders WHERE status = 'open' ORDER BY id")
@@ -6723,9 +6722,14 @@ mod tests {
             None,
         );
 
-        let session_ctx = SessionContext::new();
+        let missing_session = DataFusionSessionContext::new();
+        assert!(matches!(
+            scan.execute(0, missing_session.task_ctx()),
+            Err(datafusion::common::DataFusionError::Configuration(_))
+        ));
+        let session_ctx = SqlContext::new(scan.client.clone());
         let mut stream = scan
-            .execute(0, session_ctx.task_ctx())
+            .execute(0, session_ctx.datafusion().task_ctx())
             .expect("scan execute should start");
 
         tokio::time::timeout(Duration::from_secs(1), first_chunk_sent.notified())
@@ -6803,8 +6807,8 @@ mod tests {
                 vec![],
             )
             .expect("schema");
-        let ctx = session_context(schema.client().clone());
-        schema.register_all(&ctx).expect("register");
+        let ctx = SqlContext::new(schema.client().clone());
+        ctx.register_schema(schema).expect("register");
         let (batches, ()) = tokio::time::timeout(Duration::from_secs(5), async {
             tokio::join!(
                 async {
@@ -7012,14 +7016,10 @@ mod tests {
             vec![],
         )
         .expect("schema");
-        let state = session_state_builder(exoware_sdk::ReadSession::monotonic(
-            schema.client().clone(),
-            None,
-        ))
-        .with_physical_optimizer_rules(vec![])
-        .build();
-        let ctx = SessionContext::new_with_state(state);
-        schema.register_all(&ctx).expect("register");
+        let ctx = SqlContext::builder(schema.client().clone())
+            .configure_datafusion(|builder| builder.with_physical_optimizer_rules(vec![]))
+            .build();
+        ctx.register_schema(schema).expect("register");
 
         let plan = ctx
             .sql(
@@ -7151,8 +7151,8 @@ mod tests {
                 vec![],
             )
             .expect("schema");
-        let ctx = session_context(schema.client().clone());
-        schema.register_all(&ctx).expect("register");
+        let ctx = SqlContext::new(schema.client().clone());
+        ctx.register_schema(schema).expect("register");
 
         let (batches, ()) = tokio::time::timeout(Duration::from_secs(5), async {
             tokio::join!(
@@ -7224,8 +7224,8 @@ mod tests {
                 vec![],
             )
             .expect("schema");
-        let ctx = session_context(schema.client().clone());
-        schema.register_all(&ctx).expect("register");
+        let ctx = SqlContext::new(schema.client().clone());
+        ctx.register_schema(schema).expect("register");
 
         let explain = physical_plan_text(
             &explain_plan_rows(
@@ -7280,8 +7280,8 @@ mod tests {
                 vec![],
             )
             .expect("schema");
-        let ctx = session_context(schema.client().clone());
-        schema.register_all(&ctx).expect("register");
+        let ctx = SqlContext::new(schema.client().clone());
+        ctx.register_schema(schema).expect("register");
 
         let explain = physical_plan_text(
             &explain_plan_rows(
@@ -7361,8 +7361,8 @@ mod tests {
             .expect("matching lower key");
         writer.flush().await.expect("seed rows");
 
-        let ctx = session_context(schema.client().clone());
-        schema.register_all(&ctx).expect("register");
+        let ctx = SqlContext::new(schema.client().clone());
+        ctx.register_schema(schema).expect("register");
         let sql = "SELECT account, height \
                    FROM tx_activity \
                    WHERE account >= 7 AND height = 9 \
@@ -7428,8 +7428,8 @@ mod tests {
         }
         writer.flush().await.expect("seed rows");
 
-        let ctx = session_context(schema.client().clone());
-        schema.register_all(&ctx).expect("register");
+        let ctx = SqlContext::new(schema.client().clone());
+        ctx.register_schema(schema).expect("register");
         let sql = "SELECT id \
                    FROM events \
                    WHERE id IN (3, 20, 1, 10) \
@@ -7486,8 +7486,8 @@ mod tests {
         }
         writer.flush().await.expect("seed rows");
 
-        let ctx = session_context(schema.client().clone());
-        schema.register_all(&ctx).expect("register");
+        let ctx = SqlContext::new(schema.client().clone());
+        ctx.register_schema(schema).expect("register");
         let sql = "SELECT id \
                    FROM events \
                    WHERE id IN (3, 20, 1, 10) \
@@ -7545,8 +7545,8 @@ mod tests {
         }
         writer.flush().await.expect("seed rows");
 
-        let ctx = session_context(schema.client().clone());
-        schema.register_all(&ctx).expect("register");
+        let ctx = SqlContext::new(schema.client().clone());
+        ctx.register_schema(schema).expect("register");
 
         // Without an inner ORDER BY, LIMIT constrains the row count but not the selected rows.
         for (outer, limit, expected_len) in [("DESC", 1, 1), ("ASC", 1, 1), ("ASC", 5, 2)] {
@@ -7600,7 +7600,7 @@ mod tests {
             let plan = PushdownSort::new()
                 .optimize(plan, &ConfigOptions::new())
                 .expect("sort pushdown");
-            let batches = datafusion::physical_plan::collect(plan, ctx.task_ctx())
+            let batches = datafusion::physical_plan::collect(plan, ctx.datafusion().task_ctx())
                 .await
                 .expect("collect");
             assert_eq!(collect_i64_column(&batches, 0), expected, "{sql}");
@@ -7634,8 +7634,8 @@ mod tests {
             .expect("row");
         writer.flush().await.expect("seed rows");
 
-        let ctx = session_context(schema.client().clone());
-        schema.register_all(&ctx).expect("register");
+        let ctx = SqlContext::new(schema.client().clone());
+        ctx.register_schema(schema).expect("register");
 
         let oversized = "a".repeat(
             primary_key_prefix(0)
@@ -7702,8 +7702,8 @@ mod tests {
         }
         writer.flush().await.expect("seed rows");
 
-        let ctx = session_context(schema.client().clone());
-        schema.register_all(&ctx).expect("register");
+        let ctx = SqlContext::new(schema.client().clone());
+        ctx.register_schema(schema).expect("register");
         // The two-row index frames contain one matching row followed by a rejection,
         // then a row whose residual predicate can either fail or satisfy the limit
         for minimum in [20, 10] {
@@ -7722,7 +7722,7 @@ mod tests {
             }
             assert!(plan.downcast_ref::<KvScanExec>().is_some());
             assert_eq!(plan.fetch(), Some(2));
-            let batches = datafusion::physical_plan::collect(plan, ctx.task_ctx())
+            let batches = datafusion::physical_plan::collect(plan, ctx.datafusion().task_ctx())
                 .await
                 .expect("collect scan");
             let mut ids = collect_i64_column(&batches, 0);
@@ -7790,8 +7790,8 @@ mod tests {
         }
         writer.flush().await.expect("flush");
 
-        let ctx = session_context(schema.client().clone());
-        schema.register_all(&ctx).expect("register");
+        let ctx = SqlContext::new(schema.client().clone());
+        ctx.register_schema(schema).expect("register");
 
         let batches = ctx
             .sql(
@@ -7872,8 +7872,8 @@ mod tests {
         }
         writer.flush().await.expect("flush");
 
-        let ctx = session_context(schema.client().clone());
-        schema.register_all(&ctx).expect("register");
+        let ctx = SqlContext::new(schema.client().clone());
+        ctx.register_schema(schema).expect("register");
 
         state.range_calls.store(0, AtomicOrdering::SeqCst);
         state.range_reduce_calls.store(0, AtomicOrdering::SeqCst);
@@ -7953,8 +7953,8 @@ mod tests {
         }
         writer.flush().await.expect("flush");
 
-        let ctx = session_context(schema.client().clone());
-        schema.register_all(&ctx).expect("register");
+        let ctx = SqlContext::new(schema.client().clone());
+        ctx.register_schema(schema).expect("register");
 
         state.range_calls.store(0, AtomicOrdering::SeqCst);
         state.range_reduce_calls.store(0, AtomicOrdering::SeqCst);
@@ -8050,8 +8050,8 @@ mod tests {
         }
         writer.flush().await.expect("flush");
 
-        let ctx = session_context(schema.client().clone());
-        schema.register_all(&ctx).expect("register");
+        let ctx = SqlContext::new(schema.client().clone());
+        ctx.register_schema(schema).expect("register");
 
         state.range_calls.store(0, AtomicOrdering::SeqCst);
         state.range_reduce_calls.store(0, AtomicOrdering::SeqCst);
@@ -8170,8 +8170,8 @@ mod tests {
         }
         writer.flush().await.expect("flush");
 
-        let ctx = session_context(schema.client().clone());
-        schema.register_all(&ctx).expect("register");
+        let ctx = SqlContext::new(schema.client().clone());
+        ctx.register_schema(schema).expect("register");
 
         state.range_calls.store(0, AtomicOrdering::SeqCst);
         state.range_reduce_calls.store(0, AtomicOrdering::SeqCst);
@@ -8257,8 +8257,8 @@ mod tests {
         }
         writer.flush().await.expect("flush");
 
-        let ctx = session_context(schema.client().clone());
-        schema.register_all(&ctx).expect("register");
+        let ctx = SqlContext::new(schema.client().clone());
+        ctx.register_schema(schema).expect("register");
 
         state.range_calls.store(0, AtomicOrdering::SeqCst);
         state.range_reduce_calls.store(0, AtomicOrdering::SeqCst);
@@ -8344,8 +8344,8 @@ mod tests {
         }
         writer.flush().await.expect("flush");
 
-        let ctx = session_context(schema.client().clone());
-        schema.register_all(&ctx).expect("register");
+        let ctx = SqlContext::new(schema.client().clone());
+        ctx.register_schema(schema).expect("register");
 
         state.range_calls.store(0, AtomicOrdering::SeqCst);
         state.range_reduce_calls.store(0, AtomicOrdering::SeqCst);
@@ -8429,8 +8429,8 @@ mod tests {
         }
         writer.flush().await.expect("flush");
 
-        let ctx = session_context(schema.client().clone());
-        schema.register_all(&ctx).expect("register");
+        let ctx = SqlContext::new(schema.client().clone());
+        ctx.register_schema(schema).expect("register");
 
         state.range_calls.store(0, AtomicOrdering::SeqCst);
         state.range_reduce_calls.store(0, AtomicOrdering::SeqCst);
@@ -8517,8 +8517,8 @@ mod tests {
         }
         writer.flush().await.expect("flush");
 
-        let ctx = session_context(schema.client().clone());
-        schema.register_all(&ctx).expect("register");
+        let ctx = SqlContext::new(schema.client().clone());
+        ctx.register_schema(schema).expect("register");
 
         state.range_calls.store(0, AtomicOrdering::SeqCst);
         state.range_reduce_calls.store(0, AtomicOrdering::SeqCst);
@@ -8605,8 +8605,8 @@ mod tests {
         }
         writer.flush().await.expect("flush");
 
-        let ctx = session_context(schema.client().clone());
-        schema.register_all(&ctx).expect("register");
+        let ctx = SqlContext::new(schema.client().clone());
+        ctx.register_schema(schema).expect("register");
 
         state.range_calls.store(0, AtomicOrdering::SeqCst);
         state.range_reduce_calls.store(0, AtomicOrdering::SeqCst);
@@ -8687,8 +8687,8 @@ mod tests {
         }
         writer.flush().await.expect("flush");
 
-        let ctx = session_context(schema.client().clone());
-        schema.register_all(&ctx).expect("register");
+        let ctx = SqlContext::new(schema.client().clone());
+        ctx.register_schema(schema).expect("register");
 
         state.range_calls.store(0, AtomicOrdering::SeqCst);
         state.range_reduce_calls.store(0, AtomicOrdering::SeqCst);
@@ -8773,8 +8773,8 @@ mod tests {
         }
         writer.flush().await.expect("flush");
 
-        let ctx = session_context(schema.client().clone());
-        schema.register_all(&ctx).expect("register");
+        let ctx = SqlContext::new(schema.client().clone());
+        ctx.register_schema(schema).expect("register");
 
         state.range_calls.store(0, AtomicOrdering::SeqCst);
         state.range_reduce_calls.store(0, AtomicOrdering::SeqCst);
@@ -8853,8 +8853,8 @@ mod tests {
         }
         writer.flush().await.expect("flush");
 
-        let ctx = session_context(schema.client().clone());
-        schema.register_all(&ctx).expect("register");
+        let ctx = SqlContext::new(schema.client().clone());
+        ctx.register_schema(schema).expect("register");
 
         state.range_calls.store(0, AtomicOrdering::SeqCst);
         state.range_reduce_calls.store(0, AtomicOrdering::SeqCst);
@@ -8954,8 +8954,8 @@ mod tests {
         }
         writer.flush().await.expect("flush");
 
-        let ctx = session_context(schema.client().clone());
-        schema.register_all(&ctx).expect("register");
+        let ctx = SqlContext::new(schema.client().clone());
+        ctx.register_schema(schema).expect("register");
 
         state.range_calls.store(0, AtomicOrdering::SeqCst);
         state.range_reduce_calls.store(0, AtomicOrdering::SeqCst);
@@ -9062,8 +9062,8 @@ mod tests {
         }
         writer.flush().await.expect("flush");
 
-        let ctx = session_context(schema.client().clone());
-        schema.register_all(&ctx).expect("register");
+        let ctx = SqlContext::new(schema.client().clone());
+        ctx.register_schema(schema).expect("register");
 
         state.range_calls.store(0, AtomicOrdering::SeqCst);
         state.range_reduce_calls.store(0, AtomicOrdering::SeqCst);
@@ -9109,7 +9109,7 @@ mod tests {
         let _ = shutdown_tx.send(());
     }
 
-    async fn aggregate_test_context() -> (SessionContext, MockState, oneshot::Sender<()>) {
+    async fn aggregate_test_context() -> (SqlContext, MockState, oneshot::Sender<()>) {
         let state = MockState {
             kv: Arc::new(Mutex::new(BTreeMap::new())),
             range_calls: Arc::new(AtomicUsize::new(0)),
@@ -9148,17 +9148,10 @@ mod tests {
                 .expect("row");
         }
         writer.flush().await.expect("flush");
-        let mut state_builder = session_state_builder(exoware_sdk::ReadSession::monotonic(
-            schema.client().clone(),
-            None,
-        ));
-        let config = state_builder
-            .config()
-            .take()
-            .expect("session state builder config")
-            .with_batch_size(2);
-        let ctx = SessionContext::new_with_state(state_builder.with_config(config).build());
-        schema.register_all(&ctx).expect("register");
+        let ctx = SqlContext::builder(schema.client().clone())
+            .with_config(SessionConfig::new().with_batch_size(2))
+            .build();
+        ctx.register_schema(schema).expect("register");
         (ctx, state, shutdown_tx)
     }
 
@@ -9213,7 +9206,7 @@ mod tests {
             .collect()
             .await
             .expect("collect rows");
-        let native = SessionContext::new();
+        let native = DataFusionSessionContext::new();
         native
             .register_table(
                 "orders",
@@ -9230,7 +9223,7 @@ mod tests {
             sum(col("amount_cents")).alias_qualified(Some("totals"), "status"),
         ] {
             let mut expected_rows = Vec::new();
-            for (session, pushed) in [(&native, false), (&ctx, true)] {
+            for (session, pushed) in [(&native, false), (ctx.datafusion(), true)] {
                 let df = session
                     .table("orders")
                     .await
@@ -9295,6 +9288,7 @@ mod tests {
                     assert!(state.range_reduce_calls.load(AtomicOrdering::SeqCst) > 0);
 
                     let projected = ctx
+                        .datafusion()
                         .execute_logical_plan(plan)
                         .await
                         .expect("optimized aggregate")
@@ -9331,7 +9325,7 @@ mod tests {
     #[tokio::test]
     async fn kv_scan_preserves_row_counts_without_projected_columns() {
         let (ctx, state, shutdown_tx) = aggregate_test_context().await;
-        let native = SessionContext::new();
+        let native = DataFusionSessionContext::new_with_config(ctx.datafusion().copied_config());
         let table = ctx.table_provider("orders").await.expect("table");
         native
             .register_table("orders", table)
@@ -9383,6 +9377,7 @@ mod tests {
             state.range_calls.store(0, AtomicOrdering::SeqCst);
             state.range_reduce_calls.store(0, AtomicOrdering::SeqCst);
             let batches = ctx
+                .datafusion()
                 .execute_logical_plan(plan)
                 .await
                 .expect("optimized query")
@@ -9443,8 +9438,8 @@ mod tests {
         }
         writer.flush().await.expect("flush");
 
-        let ctx = session_context(schema.client().clone());
-        schema.register_all(&ctx).expect("register");
+        let ctx = SqlContext::new(schema.client().clone());
+        ctx.register_schema(schema).expect("register");
 
         // Without an alias the optimizer drops the identity projection above the
         // aggregate, so the pushdown rewrite becomes the plan root and must
@@ -9544,8 +9539,8 @@ mod tests {
         }
         writer.flush().await.expect("flush");
 
-        let ctx = session_context(schema.client().clone());
-        schema.register_all(&ctx).expect("register");
+        let ctx = SqlContext::new(schema.client().clone());
+        ctx.register_schema(schema).expect("register");
 
         state.range_calls.store(0, AtomicOrdering::SeqCst);
         state.range_reduce_calls.store(0, AtomicOrdering::SeqCst);
@@ -9628,8 +9623,8 @@ mod tests {
         }
         writer.flush().await.expect("flush");
 
-        let ctx = session_context(schema.client().clone());
-        schema.register_all(&ctx).expect("register");
+        let ctx = SqlContext::new(schema.client().clone());
+        ctx.register_schema(schema).expect("register");
 
         state.range_calls.store(0, AtomicOrdering::SeqCst);
         state.range_reduce_calls.store(0, AtomicOrdering::SeqCst);
@@ -9766,8 +9761,8 @@ mod tests {
             }
             writer.flush().await.expect("flush batch");
 
-            let ctx = session_context(schema.client().clone());
-            schema.register_all(&ctx).expect("register tables");
+            let ctx = SqlContext::new(schema.client().clone());
+            ctx.register_schema(schema).expect("register tables");
 
             let batches = ctx
                 .sql("SELECT id, amount_cents FROM orders ORDER BY id")
