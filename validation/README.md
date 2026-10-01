@@ -78,6 +78,8 @@ Generated load and benchmark keys open with a byte derived from the logical inde
 `load`, `bench`, and `validate` accept `--value-size` (bytes, default 160) to control generated value size. Pass the same `--value-size` to `load` and a reading `bench` so writes appended during the benchmark match the loaded data.
 
 All three commands accept `--request-compression zstd|none`. Zstd is the default.
+Saved manifests with `config.request_compression` set to `"gzip"` must be changed
+to `"zstd"` or `"none"` before replay.
 
 ## Benchmark Manifests
 

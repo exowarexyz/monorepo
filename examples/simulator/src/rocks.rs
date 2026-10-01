@@ -34,24 +34,29 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{mpsc, Arc};
 use std::thread;
 
-use buffa::{DecodeOptions, Message};
+#[cfg(test)]
+use buffa::Message;
+use buffa::{DecodeOptions, ViewEncode};
 use bytes::Bytes;
 use commonware_codec::{Copying, DecodeExt, Encode};
+#[cfg(test)]
 use exoware_sdk::common::kv::v1::Entry;
+use exoware_sdk::common::kv::v1::EntryView;
 use exoware_sdk::keys::Prefix;
 use exoware_sdk::limits::{
     put_encoded_len, PutTooLarge, MAX_PUT_ENTRIES, MAX_REQUEST_MESSAGE_BYTES,
     MAX_RESPONSE_ELEMENT_MEMORY_BYTES, MAX_RESPONSE_MESSAGE_BYTES,
 };
-use exoware_sdk::log::stream::v1::{
-    GetResponse as StreamGetResponse, GetResponseView as StreamGetResponseView,
-};
+#[cfg(test)]
+use exoware_sdk::log::stream::v1::GetResponse as StreamGetResponse;
+use exoware_sdk::log::stream::v1::GetResponseView as StreamGetResponseView;
 use exoware_sdk::prune_policy::{KeysScope, OrderEncoding, PrunePolicyDocument, RetainPolicy};
 use exoware_sdk::retention::{validate_retention_policy, RetentionPolicy};
 use exoware_sdk::selector::compile_payload_regex;
+use exoware_server::ingest::{BudgetConfig, ByteLease, DecodeBuffers, IngestBudget, RequestLease};
 use exoware_server::{
-    Ingest, IngestError, Log, LogBatch, Prune, Query, QueryExtra, QueryResult, RangeScan,
-    RangeScanBatch, RangeScanResult, Retention, Sequence,
+    Ingest, IngestError, Log, LogBatch, Prune, PutError, PutInput, Query, QueryExtra, QueryResult,
+    RangeScan, RangeScanBatch, RangeScanResult, Retention, Sequence, StreamNotifier,
 };
 use parking_lot::Mutex;
 use regex::bytes::Regex;
@@ -78,6 +83,7 @@ const LOG_CF: &str = "log";
 const LOG_BATCH_KEY_LEN: usize = 8;
 pub const WRITER_THREAD_PREFIX: &str = "simulator-rocks-";
 const DEFAULT_STAGE_WORKERS: usize = 4;
+const WRITER_OVERHEAD: usize = 16 * 1024;
 type RocksIterItem = Result<(Box<[u8]>, Box<[u8]>), rocksdb::Error>;
 
 /// A resource dropped strictly after the database has closed (see [`Database`]).
@@ -400,37 +406,80 @@ impl Frontiers {
     }
 }
 
+// Row backing is charged separately. These charges cover later coalescing,
+// indexed sorting, compact payload owners, and encoded log output.
+fn writer_growth(entries: usize, encoded_len: usize) -> usize {
+    let row = std::mem::size_of::<(Bytes, Bytes)>();
+    let sort_row = std::mem::size_of::<usize>();
+    encoded_len
+        .saturating_mul(2)
+        .saturating_add(entries.saturating_mul(2 * row + sort_row + 128))
+}
+
+fn writer_memory(entries: usize, encoded_len: usize, capacity: usize) -> usize {
+    WRITER_OVERHEAD
+        .saturating_add(writer_growth(entries, encoded_len))
+        .saturating_add(capacity.saturating_mul(std::mem::size_of::<(Bytes, Bytes)>()))
+}
+
+#[derive(Default)]
+struct WriterMemory {
+    growth: Option<ByteLease>,
+    rows: Option<ByteLease>,
+}
+
+impl WriterMemory {
+    fn reserve(&mut self, request: &RequestLease, bytes: usize) -> Result<(), PutError> {
+        if let Some(growth) = &mut self.growth {
+            growth.try_extend(bytes)?;
+        } else {
+            self.growth = Some(request.reserve_bytes(bytes)?);
+        }
+        Ok(())
+    }
+}
+
+struct WriteLease {
+    _memory: WriterMemory,
+    _request: Arc<RequestLease>,
+}
+
 struct WriteRequest {
     kvs: Vec<(Bytes, Bytes)>,
     encoded_len: usize,
     response: oneshot::Sender<Result<u64, IngestError>>,
+    notifier: Option<Arc<dyn StreamNotifier>>,
+    lease: Arc<WriteLease>,
 }
 
 /// One coalesced wave awaiting SST staging: every request shares a single sequence number,
 /// whose log row carries all their rows in arrival order.
 struct QueuedWave {
     sequence: u64,
-    requests: Vec<WriteRequest>,
     rows: Vec<(Bytes, Bytes)>,
+    requests: Vec<WriteRequest>,
+    _leases: Vec<Arc<WriteLease>>,
 }
 
 /// One staged commit group: every coalesced request shares a single sequence number, whose log
 /// row carries all their rows in arrival order.
 struct PreparedWrite {
     sequence: u64,
-    requests: Vec<WriteRequest>,
     /// Staged single-row log SST (the group's encoded batch), ready for ingestion.
     log: PathBuf,
     /// Staged current-state SST (sorted by key, last write per key), ready for ingestion.
     state: PathBuf,
     /// Combined payload bytes staged, for debug logging.
     staged_bytes: usize,
+    requests: Vec<WriteRequest>,
+    _leases: Vec<Arc<WriteLease>>,
 }
 
 struct Writer {
     /// `None` only during `Drop`, which closes the channel before joining the workers.
     sender: Option<mpsc::Sender<WriteRequest>>,
     handles: Vec<thread::JoinHandle<()>>,
+    local_budget: Arc<IngestBudget>,
 }
 
 impl Writer {
@@ -495,6 +544,7 @@ impl Writer {
         Self {
             sender: Some(request_sender),
             handles,
+            local_budget: IngestBudget::new(BudgetConfig::default()),
         }
     }
 
@@ -527,12 +577,36 @@ impl Writer {
             });
         }
 
-        let (response, result) = oneshot::channel();
+        let admission =
+            self.local_budget
+                .try_admit(0)
+                .map_err(|error| IngestError::ResourceExhausted {
+                    message: error.to_string(),
+                })?;
+        let request = admission.request_lease();
+        let mut memory = WriterMemory::default();
+        memory
+            .reserve(&request, writer_memory(kvs.len(), encoded_len, kvs.len()))
+            .map_err(|error| IngestError::ResourceExhausted {
+                message: error.to_string(),
+            })?;
+        let mut admitted = Vec::with_capacity(kvs.len());
+        for (key, value) in kvs {
+            admitted.push((Bytes::copy_from_slice(&key), Bytes::copy_from_slice(&value)));
+        }
+        self.submit(admitted, encoded_len, None, memory, request)
+            .await
+    }
 
-        // The sender is `None` only inside `Writer::drop`, which cannot overlap a live call:
-        // dropping the writer requires exclusive access, and every in-flight `put_batch`
-        // holds a borrow through the store's `Arc<Writer>`. A writer whose workers are gone
-        // is the closed-channel case, surfaced as an error by `send` below.
+    async fn submit(
+        &self,
+        kvs: Vec<(Bytes, Bytes)>,
+        encoded_len: usize,
+        notifier: Option<Arc<dyn StreamNotifier>>,
+        memory: WriterMemory,
+        request: Arc<RequestLease>,
+    ) -> Result<u64, IngestError> {
+        let (response, result) = oneshot::channel();
         self.sender
             .as_ref()
             .expect("sender is None only during drop, which cannot overlap a call")
@@ -540,6 +614,11 @@ impl Writer {
                 kvs,
                 encoded_len,
                 response,
+                notifier,
+                lease: Arc::new(WriteLease {
+                    _memory: memory,
+                    _request: request,
+                }),
             })
             .map_err(|_| IngestError::Internal {
                 message: "rocks writer stopped".to_string(),
@@ -641,7 +720,8 @@ fn coalesce_queued_write(
     let sequence = from
         .checked_add(1)
         .expect("rocks sequence number overflowed");
-    let mut requests = Vec::with_capacity(64);
+    let mut leases = Vec::new();
+    let mut requests = Vec::with_capacity(1);
     let mut rows: Vec<(Bytes, Bytes)> = Vec::with_capacity(first.kvs.len());
     let mut staged_bytes = 0usize;
     let mut encoded_bytes = 0;
@@ -664,6 +744,7 @@ fn coalesce_queued_write(
             .iter()
             .map(|(k, v)| k.len() + v.len())
             .sum::<usize>();
+        leases.push(request.lease.clone());
         rows.extend(request.kvs.iter().cloned());
         requests.push(request);
         if staged_bytes >= max_batch_bytes {
@@ -681,6 +762,7 @@ fn coalesce_queued_write(
             sequence,
             requests,
             rows,
+            _leases: leases,
         },
         carried,
     )
@@ -691,19 +773,16 @@ fn coalesce_queued_write(
 /// families, so each payload byte reaches the disk exactly once, in its final resting place.
 /// A staging failure is fatal; leftover staged files are removed by the next open.
 fn stage_wave(ingest_dir: &Path, wave: QueuedWave) -> PreparedWrite {
-    let QueuedWave {
-        sequence,
-        requests,
-        rows,
-    } = wave;
+    let sequence = wave.sequence;
+    let rows = &wave.rows;
     let log = ingest_dir.join(format!("log-{sequence:020}.sst"));
     let state = ingest_dir.join(format!("state-{sequence:020}.sst"));
     let (log_result, state_result) = thread::scope(|scope| {
         let state_task = thread::Builder::new()
             .name(format!("{WRITER_THREAD_PREFIX}stage"))
-            .spawn_scoped(scope, || stage_state_file(&state, &rows))
+            .spawn_scoped(scope, || stage_state_file(&state, rows))
             .expect("failed to spawn SST staging thread");
-        let log_result = stage_log_file(&log, sequence, &rows);
+        let log_result = stage_log_file(&log, sequence, rows);
         (
             log_result,
             state_task.join().expect("state staging thread panicked"),
@@ -712,9 +791,11 @@ fn stage_wave(ingest_dir: &Path, wave: QueuedWave) -> PreparedWrite {
     let log_bytes = log_result.unwrap_or_else(|error| panic!("failed to stage log SST: {error}"));
     let state_bytes =
         state_result.unwrap_or_else(|error| panic!("failed to stage state SST: {error}"));
+    drop(wave.rows);
     PreparedWrite {
         sequence,
-        requests,
+        requests: wave.requests,
+        _leases: wave._leases,
         log,
         state,
         staged_bytes: log_bytes + state_bytes,
@@ -743,18 +824,22 @@ fn stage_log_file(path: &Path, sequence: u64, rows: &[(Bytes, Bytes)]) -> Result
 /// ingest path would trade ack latency for bytes, and the state CF keeps compression off at
 /// every level per [`state_cf_options`].
 fn stage_state_file(path: &Path, rows: &[(Bytes, Bytes)]) -> Result<usize, String> {
-    let mut rows: Vec<(&Bytes, &Bytes)> = rows.iter().map(|(key, value)| (key, value)).collect();
+    let mut order: Vec<usize> = (0..rows.len()).collect();
 
-    // Stable sort: equal keys keep arrival order, so the last occurrence is the newest.
-    rows.sort_by(|a, b| a.0.cmp(b.0));
+    // Arrival indices preserve the newest duplicate without a sorting workspace.
+    order.sort_unstable_by(|a, b| rows[*a].0.cmp(&rows[*b].0).then_with(|| a.cmp(b)));
 
     let mut options = Options::default();
     options.set_compression_type(DBCompressionType::None);
     let mut writer = SstFileWriter::create(&options);
     writer.open(path).map_err(|e| e.to_string())?;
     let mut bytes = 0;
-    for (index, (key, value)) in rows.iter().enumerate() {
-        if rows.get(index + 1).is_some_and(|next| next.0 == *key) {
+    for (index, row) in order.iter().enumerate() {
+        let (key, value) = &rows[*row];
+        if order
+            .get(index + 1)
+            .is_some_and(|next| rows[*next].0 == *key)
+        {
             continue;
         }
         bytes += key.len() + value.len();
@@ -777,35 +862,36 @@ fn stage_state_file(path: &Path, rows: &[(Bytes, Bytes)]) -> Result<usize, Strin
 /// accepted at-least-once ambiguity of this severe error path.
 fn commit_group(db: &DB, frontiers: &Frontiers, group: PreparedWrite) {
     assert!(!group.requests.is_empty(), "groups are never empty");
-    let PreparedWrite {
-        sequence,
-        requests,
-        log,
-        state,
-        staged_bytes,
-    } = group;
+    let sequence = group.sequence;
 
     // Log first: the durable row alone defines the group (an ingested state file without its
     // log row could leave keys in the store that were never part of a sequenced batch). Safe
     // against a concurrent prune without a lock: a prune only deletes rows below a published
     // frontier it loaded earlier, and this sequence sits above every published frontier until
     // publish.
-    ingest_staged_file(db, LOG_CF, &log);
+    ingest_staged_file(db, LOG_CF, &group.log);
 
     // Ingest and publish under the floor lock: a prune loads the published frontier as its
     // state floor under the same lock, so no scan-visible state row can outrun the frontier
     // covering it (a key prune must never delete a row the floor does not cover).
     let publish_guard = frontiers.persist.lock();
-    ingest_staged_file(db, STATE_CF, &state);
+    ingest_staged_file(db, STATE_CF, &group.state);
 
     // Release so `current_sequence` readers only observe frontiers whose rows are readable.
     frontiers.published.store(sequence, Ordering::Release);
     drop(publish_guard);
     debug!(
-        requests = requests.len(),
-        staged_bytes, sequence, "committed write batch"
+        requests = group.requests.len(),
+        staged_bytes = group.staged_bytes,
+        sequence,
+        "committed write batch"
     );
-    for request in requests {
+    for request in &group.requests {
+        if let Some(notifier) = &request.notifier {
+            notifier.advance(sequence);
+        }
+    }
+    for request in group.requests {
         let _ = request.response.send(Ok(sequence));
     }
 }
@@ -1383,18 +1469,118 @@ impl Sequence for RocksStore {
     }
 }
 
+struct AdmittedBatch {
+    kvs: Vec<(Bytes, Bytes)>,
+    memory: WriterMemory,
+    request: Arc<RequestLease>,
+}
+
+impl AdmittedBatch {
+    fn append(
+        &mut self,
+        chunk: &exoware_server::ingest::PutChunk,
+        encoded_len: usize,
+    ) -> Result<(), PutError> {
+        let count = chunk.entries().len();
+        let overhead = if self.memory.growth.is_none() {
+            WRITER_OVERHEAD
+        } else {
+            0
+        };
+        self.memory
+            .reserve(&self.request, writer_growth(count, encoded_len) + overhead)?;
+        let required = self.kvs.len() + count;
+        if required > self.kvs.capacity() {
+            let capacity = required.max(self.kvs.capacity().saturating_mul(2));
+            let rows = self
+                .request
+                .reserve_bytes(capacity * std::mem::size_of::<(Bytes, Bytes)>())?;
+            let mut next = Vec::with_capacity(capacity);
+            next.append(&mut self.kvs);
+
+            // Keep the old backing charged until assignment destroys it.
+            self.kvs = next;
+            self.memory.rows = Some(rows);
+        }
+        self.kvs.extend(
+            chunk
+                .entries()
+                .map(|(key, value)| (Bytes::copy_from_slice(key), Bytes::copy_from_slice(value))),
+        );
+        Ok(())
+    }
+}
+
+impl Ingest for RocksStore {
+    async fn put(&self, input: &mut PutInput) -> Result<u64, PutError> {
+        let mut batch = Some(AdmittedBatch {
+            kvs: Vec::new(),
+            memory: WriterMemory::default(),
+            request: input.request_lease(),
+        });
+        let mut encoded_len = 0usize;
+        while let Some(chunk) = input.next_batch(DecodeBuffers::default()).await? {
+            let Some(prepared) = batch.as_mut() else {
+                continue;
+            };
+            let entries = chunk.entries();
+            let count = entries.len();
+            let chunk_len = put_encoded_len(entries);
+            let rejection = if count > MAX_SEQUENCE_ENTRIES.saturating_sub(prepared.kvs.len()) {
+                Some(IngestError::PutTooLarge(PutTooLarge {
+                    entries: prepared.kvs.len() + count,
+                    max_entries: MAX_SEQUENCE_ENTRIES,
+                }))
+            } else if chunk_len > MAX_REQUEST_MESSAGE_BYTES.saturating_sub(encoded_len) {
+                Some(IngestError::ResourceExhausted {
+                    message: "put exceeds the request message size limit".to_string(),
+                })
+            } else {
+                None
+            };
+            if let Some(error) = rejection {
+                input.reject(error.into());
+                drop(batch.take());
+                continue;
+            }
+            if let Err(error) = prepared.append(&chunk, chunk_len) {
+                input.reject(error);
+                drop(batch.take());
+                continue;
+            }
+            encoded_len += chunk_len;
+        }
+        input.finish().await?;
+        input.check_deadline()?;
+        let batch = batch.expect("finalization rejects a failed writer reservation");
+        let notifier = input.notifier();
+        let sequence = self
+            .writer
+            .submit(
+                batch.kvs,
+                encoded_len,
+                notifier,
+                batch.memory,
+                batch.request,
+            )
+            .await?;
+        self.enforce_committed_retention(sequence).await;
+        Ok(sequence)
+    }
+}
+
 // Ingest uses dedicated writer threads so blocking storage writes do not occupy Tokio workers.
 // The writer folds already-queued requests into one commit group that shares a single sequence
 // number and replay-log batch.
-impl Ingest for RocksStore {
-    async fn put_batch(&self, kvs: Vec<(Bytes, Bytes)>) -> Result<u64, IngestError> {
+impl RocksStore {
+    pub async fn put_batch(&self, kvs: Vec<(Bytes, Bytes)>) -> Result<u64, IngestError> {
         let sequence = self.writer.put_batch(kvs).await?;
 
-        // Continuous retention: trim the just-grown log to the active rule's floor so the rule
-        // tracks the frontier without another RPC. The rule-less case is a cheap cache check;
-        // an installed rule takes the blocking trim (an unsynced range tombstone, skipped
-        // outright when the floor has not advanced) off the Tokio worker.
-        //
+        self.enforce_committed_retention(sequence).await;
+        Ok(sequence)
+    }
+
+    async fn enforce_committed_retention(&self, sequence: u64) {
         // Best-effort: the batch is already durably committed and acked above, so a trim failure
         // must NOT fail the ingest. Failing here would make the caller re-ingest durable data
         // under a fresh sequence, duplicating the batch for subscribers. The trim is idempotent,
@@ -1415,7 +1601,6 @@ impl Ingest for RocksStore {
                 ),
             }
         }
-        Ok(sequence)
     }
 }
 
@@ -1521,7 +1706,7 @@ impl Log for RocksStore {
 
 // Retention persists a rule (a synced write) and trims the sequence log, so it runs on the
 // blocking pool instead of occupying a Tokio worker. The ingest path enforces the same rule
-// continuously as the log grows (see `Ingest::put_batch`).
+// continuously as the log grows (see `RocksStore::put_batch`).
 impl Retention for RocksStore {
     async fn set_retention(&self, policy: Option<RetentionPolicy>) -> Result<Option<u64>, String> {
         let store = self.clone();
@@ -1533,19 +1718,31 @@ impl Retention for RocksStore {
 
 /// Encodes the batch payload served for one sequence's key/value rows.
 fn encode_log_value(sequence: u64, kvs: &[(Bytes, Bytes)]) -> Vec<u8> {
-    StreamGetResponse {
-        sequence_number: sequence,
-        entries: kvs
-            .iter()
-            .map(|(key, value)| Entry {
-                key: key.to_vec(),
-                value: value.clone(),
-                ..Default::default()
-            })
-            .collect(),
-        ..Default::default()
+    let sequence_len = if sequence == 0 {
+        0
+    } else {
+        1 + buffa::encoding::varint_len(sequence)
+    };
+    let encoded_len = put_encoded_len(
+        kvs.iter()
+            .map(|(key, value)| (key.as_ref(), value.as_ref())),
+    );
+    let mut payload = Vec::with_capacity(sequence_len + encoded_len);
+    if sequence != 0 {
+        buffa::types::put_uint64_field(1, sequence, &mut payload);
     }
-    .encode_to_vec()
+    let mut cache = buffa::SizeCache::new();
+    for (key, value) in kvs {
+        let entry = EntryView {
+            key,
+            value,
+            ..Default::default()
+        };
+        let size = entry.compute_size(&mut cache);
+        buffa::types::put_len_delimited_header(2, u64::from(size), &mut payload);
+        entry.write_to(&mut cache, &mut payload);
+    }
+    payload
 }
 
 #[cfg(test)]
@@ -1554,11 +1751,459 @@ mod tests {
     use std::collections::BTreeSet;
 
     use buffa::encoding::varint_len;
-    use exoware_sdk::common::kv::v1::EntryView;
     use exoware_sdk::limits::{put_entry_encoded_len, MAX_VALUE_LEN};
     use exoware_sdk::log::ingest::v1::PutRequest;
     use exoware_server::{Ingest, Log, Sequence};
     use tempfile::tempdir;
+
+    fn wire_request(key: &[u8], value: &[u8]) -> Bytes {
+        Bytes::from(
+            PutRequest {
+                kvs: vec![Entry {
+                    key: key.to_vec(),
+                    value: Bytes::copy_from_slice(value),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }
+            .encode_to_vec(),
+        )
+    }
+
+    #[tokio::test]
+    async fn fragmented_small_put_pays_writer_overhead_once() {
+        let entry = wire_request(b"k", b"v");
+        assert_eq!(entry.len(), 8);
+        let wire = Bytes::from(entry.repeat(128));
+        assert_eq!(wire.len(), 1024);
+        for frames in [1, 128] {
+            let dir = tempdir().unwrap();
+            let store = RocksStore::open(dir.path(), None).unwrap();
+            let budget = IngestBudget::new(BudgetConfig {
+                max_requests: 1,
+                max_bytes: 1024 * 1024,
+            });
+            let admission = budget.try_admit(wire.len()).unwrap();
+            let fragments: Vec<_> = (0..frames)
+                .map(|frame| {
+                    let start = frame * wire.len() / frames;
+                    let end = (frame + 1) * wire.len() / frames;
+                    Ok::<_, std::io::Error>(wire.slice(start..end))
+                })
+                .collect();
+            let mut input = PutInput::new(
+                exoware_server::ingest::box_body(axum::body::Body::from_stream(
+                    futures::stream::iter(fragments),
+                )),
+                exoware_server::ingest::PutMetadata::default(),
+                exoware_server::ingest::PutLimits::default(),
+                tokio::time::Instant::now() + std::time::Duration::from_secs(5),
+                admission,
+            );
+            assert_eq!(store.put(&mut input).await.unwrap(), 1, "{frames} frames");
+            assert_eq!(store.db.get(b"k").unwrap().unwrap(), b"v");
+            let rows = store.get_batch(1).await.unwrap().unwrap();
+            let response = rows.decode_response().unwrap();
+            assert_eq!(response.entries.len(), 128);
+            drop(input);
+            assert_eq!(budget.usage(), (0, 0));
+        }
+    }
+
+    #[tokio::test]
+    async fn row_growth_reserves_old_and_new_backing_before_allocation() {
+        let budget = IngestBudget::new(BudgetConfig {
+            max_requests: 1,
+            max_bytes: 1024 * 1024,
+        });
+        let wire = wire_request(b"k", b"v");
+        let admission = budget.try_admit(2 * wire.len()).unwrap();
+        let mut input = PutInput::new(
+            exoware_server::ingest::box_body(axum::body::Body::from(wire.repeat(2))),
+            exoware_server::ingest::PutMetadata::default(),
+            exoware_server::ingest::PutLimits::default(),
+            tokio::time::Instant::now() + std::time::Duration::from_secs(5),
+            admission,
+        );
+        let mut batch = AdmittedBatch {
+            kvs: Vec::new(),
+            memory: WriterMemory::default(),
+            request: input.request_lease(),
+        };
+        let chunk = input
+            .next_batch(DecodeBuffers::new(1024, 1))
+            .await
+            .unwrap()
+            .unwrap();
+        batch.append(&chunk, wire.len()).unwrap();
+        assert_eq!(batch.kvs.capacity(), 1);
+        drop(chunk);
+        let chunk = input
+            .next_batch(DecodeBuffers::new(1024, 1))
+            .await
+            .unwrap()
+            .unwrap();
+        let old_allocation = batch.kvs.as_ptr();
+        let row_bytes = std::mem::size_of::<(Bytes, Bytes)>();
+        let available = writer_growth(1, wire.len()) + row_bytes;
+        let pressure = batch
+            .request
+            .reserve_bytes(1024 * 1024 - budget.usage().1 - available)
+            .unwrap();
+
+        // A capacity delta would fit. The simultaneous replacement allocation does not.
+        assert!(batch.append(&chunk, wire.len()).is_err());
+        assert_eq!(batch.kvs.as_ptr(), old_allocation);
+        assert_eq!(batch.kvs.len(), 1);
+        assert_eq!(batch.kvs.capacity(), 1);
+        drop(pressure);
+        drop(chunk);
+        drop(batch);
+        drop(input);
+        assert_eq!(budget.usage(), (0, 0));
+    }
+
+    #[test]
+    fn writer_reservation_growth_is_failure_atomic() {
+        let budget = IngestBudget::new(BudgetConfig {
+            max_requests: 1,
+            max_bytes: 32,
+        });
+        let admission = budget.try_admit(0).unwrap();
+        let request = admission.request_lease();
+        let mut memory = WriterMemory::default();
+        memory.reserve(&request, 8).unwrap();
+        memory.reserve(&request, 16).unwrap();
+        assert_eq!(memory.growth.as_ref().unwrap().bytes(), 24);
+        assert!(memory.reserve(&request, 9).is_err());
+        assert_eq!(memory.growth.as_ref().unwrap().bytes(), 24);
+        assert_eq!(budget.usage(), (1, 24));
+        memory.reserve(&request, 8).unwrap();
+        assert_eq!(budget.usage(), (1, 32));
+        drop(memory);
+        assert_eq!(budget.usage(), (1, 0));
+        drop(request);
+        drop(admission);
+        assert_eq!(budget.usage(), (0, 0));
+    }
+
+    #[tokio::test]
+    async fn cancelling_streamed_put_before_eof_never_enqueues() {
+        struct SeenBatch(Arc<tokio::sync::Notify>);
+
+        impl exoware_server::ingest::IngestObserver for SeenBatch {
+            fn observe(&self, event: exoware_server::ingest::IngestEvent) {
+                if matches!(event, exoware_server::ingest::IngestEvent::Batch { .. }) {
+                    self.0.notify_one();
+                }
+            }
+        }
+
+        let dir = tempdir().unwrap();
+        let store = RocksStore::open(dir.path(), None).unwrap();
+        let budget = IngestBudget::new(BudgetConfig {
+            max_requests: 1,
+            max_bytes: 1024 * 1024,
+        });
+        let admission = budget.try_admit(1024).unwrap();
+        let (sender, receiver) = tokio::sync::mpsc::channel::<Bytes>(1);
+        sender
+            .send(wire_request(b"before-eof", b"value"))
+            .await
+            .unwrap();
+        let stream = futures::stream::unfold(receiver, |mut receiver| async {
+            receiver
+                .recv()
+                .await
+                .map(|bytes| (Ok::<_, std::io::Error>(bytes), receiver))
+        });
+        let seen = Arc::new(tokio::sync::Notify::new());
+        let mut input = PutInput::new(
+            exoware_server::ingest::box_body(axum::body::Body::from_stream(stream)),
+            exoware_server::ingest::PutMetadata::default(),
+            exoware_server::ingest::PutLimits::default(),
+            tokio::time::Instant::now() + std::time::Duration::from_secs(5),
+            admission,
+        )
+        .with_observer(Arc::new(SeenBatch(seen.clone())));
+        let put_store = store.clone();
+        let task = tokio::spawn(async move { put_store.put(&mut input).await });
+        tokio::time::timeout(std::time::Duration::from_secs(5), seen.notified())
+            .await
+            .unwrap();
+        assert_eq!(store.current_sequence(), 0);
+        assert_eq!(budget.usage().0, 1);
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while budget.usage() != (0, 0) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(store.current_sequence(), 0);
+        assert!(store.db.get(b"before-eof").unwrap().is_none());
+        drop(sender);
+    }
+
+    #[tokio::test]
+    async fn malformed_suffix_releases_streamed_batch_without_publication() {
+        let dir = tempdir().unwrap();
+        let store = RocksStore::open(dir.path(), None).unwrap();
+        let budget = IngestBudget::new(BudgetConfig {
+            max_requests: 1,
+            max_bytes: 1024 * 1024,
+        });
+        let wire = wire_request(b"late-error", b"value");
+        let admission = budget.try_admit(wire.len() + 1).unwrap();
+        let stream = futures::stream::iter([
+            Ok::<_, std::io::Error>(wire),
+            Ok(Bytes::from_static(&[0x80])),
+        ]);
+        let mut input = PutInput::new(
+            exoware_server::ingest::box_body(axum::body::Body::from_stream(stream)),
+            exoware_server::ingest::PutMetadata::default(),
+            exoware_server::ingest::PutLimits::default(),
+            tokio::time::Instant::now() + std::time::Duration::from_secs(5),
+            admission,
+        );
+        assert!(store.put(&mut input).await.is_err());
+        assert_eq!(store.current_sequence(), 0);
+        assert!(store.db.get(b"late-error").unwrap().is_none());
+        drop(input);
+        assert_eq!(budget.usage(), (0, 0));
+    }
+
+    #[tokio::test]
+    async fn writer_reservation_failure_does_not_hide_malformed_tail() {
+        struct ExhaustWriter {
+            budget: Arc<IngestBudget>,
+            request: Arc<RequestLease>,
+            pressure: Mutex<Option<ByteLease>>,
+            rejected: Arc<std::sync::atomic::AtomicBool>,
+        }
+
+        impl exoware_server::ingest::IngestObserver for ExhaustWriter {
+            fn observe(&self, event: exoware_server::ingest::IngestEvent) {
+                match event {
+                    exoware_server::ingest::IngestEvent::Batch { .. } => {
+                        let available = 1024 * 1024 - self.budget.usage().1;
+                        *self.pressure.lock() =
+                            Some(self.request.reserve_bytes(available - 1024).unwrap());
+                    }
+                    exoware_server::ingest::IngestEvent::Rejected => {
+                        self.rejected.store(true, Ordering::Release);
+                        self.pressure.lock().take();
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        let dir = tempdir().unwrap();
+        let store = RocksStore::open(dir.path(), None).unwrap();
+        let budget = IngestBudget::new(BudgetConfig {
+            max_requests: 1,
+            max_bytes: 1024 * 1024,
+        });
+        let wire = wire_request(b"capacity", b"value");
+        let admission = budget.try_admit(wire.len() + 1).unwrap();
+        let rejected = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let observer = Arc::new(ExhaustWriter {
+            budget: budget.clone(),
+            request: admission.request_lease(),
+            pressure: Mutex::new(None),
+            rejected: rejected.clone(),
+        });
+        let stream = futures::stream::iter([
+            Ok::<_, std::io::Error>(wire),
+            Ok(Bytes::from_static(&[0x80])),
+        ]);
+        let mut input = PutInput::new(
+            exoware_server::ingest::box_body(axum::body::Body::from_stream(stream)),
+            exoware_server::ingest::PutMetadata::default(),
+            exoware_server::ingest::PutLimits::default(),
+            tokio::time::Instant::now() + std::time::Duration::from_secs(5),
+            admission,
+        )
+        .with_observer(observer);
+        let error = store.put(&mut input).await.unwrap_err().into_connect();
+        assert!(rejected.load(Ordering::Acquire));
+        assert_eq!(error.code, connectrpc::ErrorCode::InvalidArgument);
+        assert!(error
+            .message
+            .as_deref()
+            .unwrap()
+            .contains("unexpected end of buffer"));
+        assert_eq!(store.current_sequence(), 0);
+        drop(input);
+        assert_eq!(budget.usage(), (0, 0));
+    }
+
+    // Keep publication blocked while cancelling an accepted request.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn cancelled_streamed_put_after_enqueue_keeps_writer_and_notifier_alive() {
+        let dir = tempdir().unwrap();
+        let store = RocksStore::open(dir.path(), None).unwrap();
+        let budget = IngestBudget::new(BudgetConfig {
+            max_requests: 1,
+            max_bytes: 1024 * 1024,
+        });
+        let wire = wire_request(b"accepted", b"durable");
+        let admission = budget.try_admit(wire.len()).unwrap();
+        let hub = Arc::new(exoware_server::StreamHub::new(0));
+        let notification = hub.subscribe();
+        let notified = notification.notify.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        let mut input = PutInput::new(
+            exoware_server::ingest::box_body(axum::body::Body::from(wire)),
+            exoware_server::ingest::PutMetadata::default(),
+            exoware_server::ingest::PutLimits::default(),
+            tokio::time::Instant::now() + std::time::Duration::from_secs(5),
+            admission,
+        )
+        .with_notifier(Some(hub.clone()));
+        let publish_guard = store.frontiers.persist.lock();
+        let put_store = store.clone();
+        let task = tokio::spawn(async move { put_store.put(&mut input).await });
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while store
+                .db
+                .get_cf(store.log_cf(), sequence_log_key(1))
+                .unwrap()
+                .is_none()
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        assert_eq!(store.current_sequence(), 0);
+        assert_eq!(hub.current_sequence(), 0);
+        assert_eq!(budget.usage().0, 1);
+        assert!(budget.usage().1 > 0);
+        assert!(budget.try_admit(0).is_err());
+        drop(publish_guard);
+        tokio::time::timeout(std::time::Duration::from_secs(5), &mut notified)
+            .await
+            .unwrap();
+        assert_eq!(store.current_sequence(), 1);
+        assert_eq!(hub.current_sequence(), 1);
+        assert_eq!(store.db.get(b"accepted").unwrap().unwrap(), b"durable");
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while budget.usage() != (0, 0) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+    }
+
+    // Keep publication blocked while cancelling an accepted request.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn cancelled_writer_wait_keeps_admission_and_notifies_after_publication() {
+        struct CheckedNotifier {
+            hub: exoware_server::StreamHub,
+            db: Arc<Database>,
+            frontiers: Arc<Frontiers>,
+        }
+
+        impl StreamNotifier for CheckedNotifier {
+            fn subscribe(&self) -> exoware_server::StreamNotification {
+                self.hub.subscribe()
+            }
+
+            fn current_sequence(&self) -> u64 {
+                self.hub.current_sequence()
+            }
+
+            fn advance(&self, sequence: u64) {
+                assert_eq!(self.frontiers.published.load(Ordering::Acquire), sequence);
+                assert_eq!(self.db.get(b"cancelled").unwrap().unwrap(), b"durable");
+                self.hub.advance(sequence);
+            }
+        }
+
+        struct CheckedOwner {
+            budget: Arc<IngestBudget>,
+            dropped: Arc<std::sync::atomic::AtomicBool>,
+        }
+
+        impl AsRef<[u8]> for CheckedOwner {
+            fn as_ref(&self) -> &[u8] {
+                b"durable"
+            }
+        }
+
+        impl Drop for CheckedOwner {
+            fn drop(&mut self) {
+                let (requests, bytes) = self.budget.usage();
+                assert_eq!(requests, 1);
+                assert!(bytes > 0);
+                self.dropped.store(true, Ordering::Release);
+            }
+        }
+
+        let dir = tempdir().unwrap();
+        let store = RocksStore::open(dir.path(), None).unwrap();
+        let budget = IngestBudget::new(BudgetConfig {
+            max_requests: 1,
+            max_bytes: 1024 * 1024,
+        });
+        let admission = budget.try_admit(0).unwrap();
+        let request = admission.request_lease();
+        let mut memory = WriterMemory::default();
+        memory.reserve(&request, writer_memory(1, 32, 1)).unwrap();
+        let dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let value = Bytes::from_owner(CheckedOwner {
+            budget: budget.clone(),
+            dropped: dropped.clone(),
+        });
+        let notifier = Arc::new(CheckedNotifier {
+            hub: exoware_server::StreamHub::new(0),
+            db: store.db.clone(),
+            frontiers: store.frontiers.clone(),
+        });
+        let notification = notifier.subscribe();
+        let notified = notification.notify.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        let publish_guard = store.frontiers.persist.lock();
+        let mut write = Box::pin(store.writer.submit(
+            vec![(Bytes::from_static(b"cancelled"), value)],
+            32,
+            Some(notifier.clone()),
+            memory,
+            request,
+        ));
+        assert!(futures::poll!(&mut write).is_pending());
+        drop(admission);
+        drop(write);
+
+        assert_eq!(budget.usage().0, 1);
+        assert!(budget.try_admit(0).is_err());
+        assert_eq!(notifier.current_sequence(), 0);
+        assert!(!dropped.load(Ordering::Acquire));
+        drop(publish_guard);
+        tokio::time::timeout(std::time::Duration::from_secs(5), &mut notified)
+            .await
+            .unwrap();
+        assert_eq!(notifier.current_sequence(), 1);
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while budget.usage() != (0, 0) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(dropped.load(Ordering::Acquire));
+    }
 
     fn write_request(key: &'static [u8]) -> WriteRequest {
         write_request_with_kvs(vec![(
@@ -1573,10 +2218,24 @@ mod tests {
             kvs.iter()
                 .map(|(key, value)| (key.as_ref(), value.as_ref())),
         );
+        let bytes = writer_memory(kvs.len(), encoded_len, kvs.capacity());
+        let budget = IngestBudget::new(BudgetConfig {
+            max_requests: 1,
+            max_bytes: bytes,
+        });
+        let admission = budget.try_admit(0).unwrap();
+        let request = admission.request_lease();
+        let mut memory = WriterMemory::default();
+        memory.reserve(&request, bytes).unwrap();
         WriteRequest {
             kvs,
             encoded_len,
             response,
+            notifier: None,
+            lease: Arc::new(WriteLease {
+                _memory: memory,
+                _request: request,
+            }),
         }
     }
 
@@ -1993,10 +2652,14 @@ mod tests {
             put_encoded_len(std::iter::empty()),
             PutRequest::default().encode_to_vec().len()
         );
-        let kvs: Vec<_> = [0, 1, 127, 128, 16_383, 16_384]
+        let mut kvs: Vec<_> = [0, 1, 127, 128, 16_383, 16_384]
             .into_iter()
             .map(|len| (Bytes::from(vec![1; len]), Bytes::from(vec![2; len])))
             .collect();
+        kvs.extend([
+            (Bytes::new(), Bytes::from_static(b"value")),
+            (Bytes::from_static(b"key"), Bytes::new()),
+        ]);
         let request = PutRequest {
             kvs: kvs
                 .iter()
@@ -2013,10 +2676,14 @@ mod tests {
                 .map(|(key, value)| (key.as_ref(), value.as_ref())),
         );
         assert_eq!(encoded_len, request.encode_to_vec().len());
-        assert_eq!(
-            encoded_len + 1 + varint_len(128),
-            encode_log_value(128, &kvs).len()
-        );
+        for sequence in [0, 1, 127, 128, u64::MAX] {
+            let response = StreamGetResponse {
+                sequence_number: sequence,
+                entries: request.kvs.clone(),
+                ..Default::default()
+            };
+            assert_eq!(encode_log_value(sequence, &kvs), response.encode_to_vec());
+        }
     }
 
     #[tokio::test]

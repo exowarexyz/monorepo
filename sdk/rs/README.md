@@ -34,6 +34,9 @@ Outgoing requests support `ConnectRequestCompression::None` (the default) and
 `ConnectRequestCompression::Zstd { level }`. The SDK still decodes gzip responses.
 Select zstd and its compression level on the client builder.
 
+`ConnectRequestCompression::Gzip` has been removed. Replace it with `None` or
+`Zstd { level }` because Put accepts only identity and zstd request bodies.
+
 ```rust
 use exoware_sdk::{ConnectRequestCompression, StoreClient};
 

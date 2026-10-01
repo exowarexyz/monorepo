@@ -2,6 +2,7 @@
 
 #![allow(refining_impl_trait)]
 
+use std::convert::Infallible;
 use std::num::NonZeroU64;
 use std::time::Duration;
 
@@ -251,25 +252,25 @@ pub async fn wait_for_health(base: &str) {
     panic!("qmdb server did not become ready at {url}");
 }
 
-/// Bind a QMDB operation-log `ConnectRpcService` stack to a random local port
-/// alongside `/health`, and block until it responds.
+/// Binds a service and health endpoint to an ephemeral local port.
 #[allow(dead_code)]
-pub async fn spawn_connect_service<D>(
-    dispatcher: ConnectRpcService<D>,
-) -> (tokio::task::JoinHandle<()>, String)
+pub async fn spawn_connect_service<S>(service: S) -> (tokio::task::JoinHandle<()>, String)
 where
-    D: ::connectrpc::Dispatcher + Send + Sync + 'static,
+    S: tower::Service<axum::extract::Request, Error = Infallible> + Clone + Send + Sync + 'static,
+    S::Response: axum::response::IntoResponse,
+    S::Future: Send + 'static,
 {
     let app = Router::new()
         .route("/health", get(health_handler))
-        .fallback_service(dispatcher);
+        .fallback_service(service);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind qmdb server");
     let port = listener.local_addr().expect("local addr").port();
     let url = format!("http://127.0.0.1:{port}");
     let handle = tokio::spawn(async move {
-        let _ = axum::serve(listener, app).await;
+        let _ =
+            exoware_server::ingest::transport::serve(listener, app, std::future::pending()).await;
     });
     wait_for_health(&url).await;
     (handle, url)
