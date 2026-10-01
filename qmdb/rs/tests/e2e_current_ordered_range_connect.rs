@@ -926,8 +926,7 @@ async fn test_ordered_operation_range_connect_uses_current_root_witness() {
         .get_operation_range(request, &source.current_boundary.root)
         .await
         .expect("get operation range");
-    assert_eq!(proof.root.as_ref(), raw_proof.ops_root.as_ref());
-    assert_ne!(proof.root, source.current_boundary.root);
+    assert_eq!(proof.root, source.current_boundary.root);
     assert_eq!(proof.start_location, Location::new(0));
     assert_eq!(proof.operations, source.operations);
 }

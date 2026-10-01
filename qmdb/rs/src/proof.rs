@@ -27,7 +27,9 @@ use crate::QmdbError;
 #[must_use]
 pub struct OperationRangeCheckpoint<D: Digest, F: Graftable> {
     pub watermark: Location<F>,
-    pub root: D,
+    /// Operations-log root the proof is checked against.
+    pub ops_root: D,
+    /// Links `ops_root` to the canonical root of a database with current state.
     pub ops_root_witness: Option<OpsRootWitness<F, D>>,
     pub start_location: Location<F>,
     pub pinned_nodes: Vec<D>,
@@ -35,7 +37,22 @@ pub struct OperationRangeCheckpoint<D: Digest, F: Graftable> {
     pub encoded_operations: Vec<Vec<u8>>,
 }
 
+/// Canonical root committing to `ops_root`: the current root when `witness` is
+/// present (a database with current state), otherwise `ops_root` itself.
+pub(crate) fn canonical_root<F: Graftable, H: Hasher>(
+    ops_root: &H::Digest,
+    witness: Option<&OpsRootWitness<F, H::Digest>>,
+) -> H::Digest {
+    witness.map_or(*ops_root, |witness| witness.root::<H>(ops_root))
+}
+
 impl<D: Digest, F: Graftable> OperationRangeCheckpoint<D, F> {
+    /// Canonical root at `watermark`: the current root when `ops_root_witness` is
+    /// present, otherwise `ops_root`.
+    pub fn canonical_root<H: Hasher<Digest = D>>(&self) -> D {
+        canonical_root::<F, H>(&self.ops_root, self.ops_root_witness.as_ref())
+    }
+
     pub fn verify<H: Hasher<Digest = D>>(&self) -> bool {
         let hasher = commonware_storage::qmdb::hasher::<H>();
         self.proof.verify_proof_and_pinned_nodes(
@@ -43,7 +60,7 @@ impl<D: Digest, F: Graftable> OperationRangeCheckpoint<D, F> {
             &self.encoded_operations,
             self.start_location,
             &self.pinned_nodes,
-            &self.root,
+            &self.ops_root,
         )
     }
 
@@ -108,7 +125,7 @@ impl<D: Digest, F: Graftable> OperationRangeCheckpoint<D, F> {
                 extension.size
             )));
         }
-        if extension.root != self.root {
+        if extension.root != self.ops_root {
             return Err(QmdbError::CorruptData(
                 "checkpoint extension root mismatch".into(),
             ));
@@ -125,11 +142,14 @@ pub struct RawMultiProof<
     D: Digest,
     K: QmdbKey + Codec,
     V: Codec + Clone + Send + Sync,
-    F: Family,
+    F: Graftable,
     E: ValueEncoding<Value = V> = VariableEncoding<V>,
 > {
     pub watermark: Location<F>,
-    pub root: D,
+    /// Operations-log root the proof is checked against.
+    pub ops_root: D,
+    /// Links `ops_root` to the canonical root of a database with current state.
+    pub ops_root_witness: Option<OpsRootWitness<F, D>>,
     pub proof: Proof<F, D>,
     pub operations: Vec<(Location<F>, ordered::Operation<F, K, E>)>,
 }
@@ -138,14 +158,14 @@ impl<
         D: Digest,
         K: QmdbKey + Codec,
         V: Codec + Clone + Send + Sync,
-        F: Family,
+        F: Graftable,
         E: ValueEncoding<Value = V>,
     > RawMultiProof<D, K, V, F, E>
 where
     ordered::Operation<F, K, E>: Encode,
 {
     pub fn verify<H: Hasher<Digest = D>>(&self) -> bool {
-        verify_multi_proof::<H, _, _>(&self.proof, &self.operations, &self.root)
+        verify_multi_proof::<H, _, _>(&self.proof, &self.operations, &self.ops_root)
     }
 }
 
@@ -156,7 +176,9 @@ where
 #[must_use]
 pub struct RawBatchMultiProof<D: Digest, F: Graftable> {
     pub watermark: Location<F>,
-    pub root: D,
+    /// Operations-log root the proof is checked against.
+    pub ops_root: D,
+    /// Links `ops_root` to the canonical root of a database with current state.
     pub ops_root_witness: Option<OpsRootWitness<F, D>>,
     pub proof: Proof<F, D>,
     pub operations: Vec<(Location<F>, Vec<u8>)>,
@@ -171,7 +193,7 @@ impl<D: Digest, F: Graftable> RawBatchMultiProof<D, F> {
             .map(|(loc, bytes)| (bytes.as_slice(), *loc))
             .collect();
         self.proof
-            .verify_multi_inclusion(&hasher, &elements, &self.root)
+            .verify_multi_inclusion(&hasher, &elements, &self.ops_root)
     }
 }
 
@@ -229,7 +251,7 @@ where
     .map_err(crate::error::merkle_error)?;
     let raw = RawBatchMultiProof {
         watermark,
-        root,
+        ops_root: root,
         ops_root_witness: None,
         proof,
         operations,
@@ -286,7 +308,7 @@ where
     };
     let checkpoint = OperationRangeCheckpoint {
         watermark,
-        root,
+        ops_root: root,
         ops_root_witness: None,
         start_location,
         pinned_nodes,
@@ -434,9 +456,9 @@ pub struct RawKeyRangeProof<
 #[must_use]
 pub struct VerifiedOperationRange<D: Digest, Op, F: Family> {
     pub tip: Location<F>,
-    /// Operations-log root the range is proven against. For a current database
-    /// this differs from the trusted current root a service client checks it
-    /// under, which commits to this root through an `OpsRootWitness`.
+    /// Canonical root at `tip`, as returned by the source database's `root()`:
+    /// the current root for a database with current state, otherwise the
+    /// operations-log root.
     pub root: D,
     pub start_location: Location<F>,
     pub operations: Vec<Op>,

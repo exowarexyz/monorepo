@@ -38,8 +38,7 @@ use super::{connect_error_to_qmdb, proof_digest_cap};
 pub struct OperationLogSubscribeProof<D: Digest, Op, F: Family> {
     pub resume_sequence_number: u64,
     pub tip: Location<F>,
-    /// Operations-log root the frame is proven against; see
-    /// [`crate::proof::VerifiedOperationRange::root`].
+    /// Canonical root at `tip`; see [`crate::proof::VerifiedOperationRange::root`].
     pub root: D,
     pub operations: Vec<(Location<F>, Op)>,
 }
@@ -453,7 +452,7 @@ where
             kind: crate::ProofKind::BatchMulti,
         });
     }
-    Ok((target_root, operations))
+    Ok((*root, operations))
 }
 
 fn verify_operation_range_from_proto<F, H, Op>(
@@ -518,5 +517,5 @@ where
             kind: crate::ProofKind::RangeCheckpoint,
         });
     }
-    Ok((target_root, decoded_operations))
+    Ok((*root, decoded_operations))
 }

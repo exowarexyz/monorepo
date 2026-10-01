@@ -277,7 +277,7 @@ where
             .collect::<Result<Vec<_>, _>>()?;
         Ok(VerifiedOperationRange {
             tip: checkpoint.watermark,
-            root: checkpoint.root,
+            root: checkpoint.canonical_root::<H>(),
             start_location: checkpoint.start_location,
             operations,
         })

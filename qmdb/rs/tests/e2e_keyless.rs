@@ -298,7 +298,7 @@ where
     let mut malformed_checkpoint = checkpoint.clone();
     malformed_checkpoint
         .pinned_nodes
-        .push(malformed_checkpoint.root);
+        .push(malformed_checkpoint.ops_root);
     assert!(
         !malformed_checkpoint.verify::<commonware_cryptography::Sha256>(),
         "zero-start checkpoints must not verify with pinned nodes"
@@ -317,7 +317,7 @@ where
         peaks.iter().map(|(_, _, digest)| digest),
     )
     .expect("reconstruct root");
-    assert_eq!(reconstructed_root, checkpoint.root);
+    assert_eq!(reconstructed_root, checkpoint.ops_root);
 
     let suffix_checkpoint = qmdb_client
         .operation_range_checkpoint(source.latest_location, source.latest_location, 1, None)
@@ -335,7 +335,7 @@ where
             &hasher,
             &suffix_checkpoint.encoded_operations,
             suffix_checkpoint.start_location,
-            &suffix_checkpoint.root,
+            &suffix_checkpoint.ops_root,
         )
         .expect("verify suffix range");
     assert!(
@@ -354,11 +354,11 @@ where
     let mut suffix_without_pins = suffix_checkpoint.clone();
     suffix_without_pins.pinned_nodes.clear();
     let mut suffix_with_wrong_pin = suffix_checkpoint.clone();
-    suffix_with_wrong_pin.pinned_nodes[0] = suffix_with_wrong_pin.root;
+    suffix_with_wrong_pin.pinned_nodes[0] = suffix_with_wrong_pin.ops_root;
     let mut suffix_with_extra_pin = suffix_checkpoint.clone();
     suffix_with_extra_pin
         .pinned_nodes
-        .push(suffix_with_extra_pin.root);
+        .push(suffix_with_extra_pin.ops_root);
     for malformed in [
         &suffix_without_pins,
         &suffix_with_wrong_pin,

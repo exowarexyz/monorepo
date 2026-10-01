@@ -234,9 +234,9 @@ async fn test_mirror_ordered_prune_past_chunk_zero() {
         .await
         .expect("upload");
         let remote_root = qmdb_client
-            .current_root_at(outcome.watermark)
+            .root_at(outcome.watermark)
             .await
-            .expect("current_root_at");
+            .expect("root_at");
         assert_eq!(
             remote_root, outcome.root,
             "remote current_root disagrees with local at watermark {}",
@@ -250,9 +250,9 @@ async fn test_mirror_ordered_prune_past_chunk_zero() {
     // value predates every subsequent CommitFloor, forcing the mask path.
     let first = &batches[0];
     let remote_root_old = qmdb_client
-        .current_root_at(first.watermark)
+        .root_at(first.watermark)
         .await
-        .expect("current_root_at (old watermark)");
+        .expect("root_at (old watermark)");
     assert_eq!(
         remote_root_old, first.root,
         "remote current_root at first watermark disagrees with local root"

@@ -353,8 +353,12 @@ async fn verify_snapshots<F, K, V, E>(
             .await
             .expect("publish source boundary");
         assert_eq!(
-            native.root_at(tip).await.expect("native ops root"),
+            native.ops_root_at(tip).await.expect("native ops root"),
             snapshot.ops_root
+        );
+        assert_eq!(
+            native.root_at(tip).await.expect("native root"),
+            snapshot.root
         );
 
         if count == snapshots.last().unwrap().operations.len() {
@@ -567,7 +571,7 @@ async fn verify_snapshots<F, K, V, E>(
             .expect("authenticate subscription")
             .expect("batch frame");
         assert_eq!(frame.tip, tip);
-        assert_eq!(frame.root, snapshot.ops_root);
+        assert_eq!(frame.root, snapshot.root);
         assert_eq!(
             frame.operations,
             delta
@@ -590,7 +594,7 @@ async fn verify_snapshots<F, K, V, E>(
                 .get_operation_range(request.clone(), &snapshot.root)
                 .await
                 .expect("Connect historical range");
-            assert_eq!(proof.root, snapshot.ops_root);
+            assert_eq!(proof.root, snapshot.root);
             assert_eq!(proof.start_location, Location::new(start));
             assert_eq!(proof.operations, snapshot.operations[start as usize..]);
             assert!(historical
@@ -601,7 +605,7 @@ async fn verify_snapshots<F, K, V, E>(
                 .operation_range_checkpoint(tip, Location::new(start), count as u32, None)
                 .await
                 .expect("native checkpoint");
-            assert_eq!(checkpoint.root, snapshot.ops_root);
+            assert_eq!(checkpoint.ops_root, snapshot.ops_root);
             assert_eq!(checkpoint.ops_root_witness.is_some(), is_current);
             assert!(checkpoint.verify::<Sha256>());
             assert_eq!(
@@ -615,10 +619,7 @@ async fn verify_snapshots<F, K, V, E>(
 
         if is_current {
             assert_eq!(
-                native
-                    .current_root_at(tip)
-                    .await
-                    .expect("native current root"),
+                native.root_at(tip).await.expect("native current root"),
                 snapshot.root
             );
             let request = GetCurrentOperationRangeRequest {
@@ -826,7 +827,8 @@ async fn verify_snapshots<F, K, V, E>(
             assert_eq!(typed_ops.start_location, native_ops.start_location);
             assert_eq!(typed_ops.operations, native_ops.operations);
         } else {
-            assert!(native.current_root_at(tip).await.is_err());
+            // Without current state the canonical root is the operations-log root
+            assert_eq!(native.root_at(tip).await.expect("root"), snapshot.ops_root);
             assert!(current_operations
                 .get_current_operation_range(
                     GetCurrentOperationRangeRequest {
