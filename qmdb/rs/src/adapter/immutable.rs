@@ -129,6 +129,11 @@ where
         self.publication.refresh(&session).await
     }
 
+    /// Record a watermark published at `sequence`, as seen by a subscription.
+    pub(crate) fn observe_published(&self, location: Location<F>, sequence: u64) {
+        self.publication.observe(location, sequence);
+    }
+
     pub(crate) async fn resolve_watermark(
         &self,
         watermark: Location<F>,

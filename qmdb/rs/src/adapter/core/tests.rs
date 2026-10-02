@@ -548,6 +548,36 @@ async fn publication_lookups_respect_sdk_retry_budget() {
 }
 
 #[tokio::test]
+async fn publication_cache_observations_answer_requires_without_store_reads() {
+    let (_server, url) = exoware_simulator::open_temp().await.unwrap();
+    let (session, _permits, mut starts, _) = gated_session(&url);
+    let cache = PublicationCache::<mmr::Family>::default();
+
+    cache.observe(Location::new(8), 40);
+    cache.observe(Location::new(5), 30);
+    for (watermark, sequence) in [(8, 40), (5, 40)] {
+        let published = cache
+            .require(&session, Location::new(watermark))
+            .await
+            .unwrap();
+        assert_eq!(published.location.as_u64(), watermark);
+        assert_eq!(published.sequence_number, sequence);
+    }
+    assert!(
+        starts.try_recv().is_err(),
+        "observed watermarks need no lookup"
+    );
+
+    // A refresh in progress keeps its gate; the observation is skipped.
+    {
+        let _gate = cache.refresh_gate.lock().await;
+        cache.observe(Location::new(12), 60);
+    }
+    let published = cache.published.load();
+    assert_eq!(published.as_ref().unwrap().location.as_u64(), 8);
+}
+
+#[tokio::test]
 async fn publication_cache_keeps_sequence_paired_with_greatest_watermark() {
     let cache = PublicationCache::<mmr::Family>::default();
     let _gate = cache.refresh_gate.lock().await;

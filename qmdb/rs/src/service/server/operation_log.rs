@@ -46,6 +46,9 @@ pub(crate) trait OperationLogReader: Send + Sync + 'static {
         watermark: Location<Self::Family>,
         min_sequence_number: Option<u64>,
     ) -> impl Future<Output = Result<PublishedWatermark<Self::Family>, QmdbError>> + Send;
+    /// Record a watermark row a subscription saw committed at `sequence`, so
+    /// unary reads at or below it skip the publication lookup.
+    fn observe_published(&self, location: Location<Self::Family>, sequence: u64);
     fn operation_range_checkpoint_at(
         &self,
         watermark: PublishedWatermark<Self::Family>,
@@ -215,6 +218,7 @@ struct BatchSubscribeStream<D: commonware_cryptography::Digest, F: Graftable> {
             + Sync
             + 'static,
     >,
+    observe_watermark: Arc<dyn Fn(Location<F>, u64) + Send + Sync + 'static>,
     sub: exoware_sdk::StreamSubscription,
     pending: PendingBatches<F>,
     watermarks: BTreeMap<Location<F>, u64>,
@@ -259,6 +263,7 @@ impl<D: commonware_cryptography::Digest, F: Graftable> BatchSubscribeStream<D, F
                 + Sync
                 + 'static,
         >,
+        observe_watermark: Arc<dyn Fn(Location<F>, u64) + Send + Sync + 'static>,
         sub: exoware_sdk::StreamSubscription,
     ) -> Self {
         Self {
@@ -267,6 +272,7 @@ impl<D: commonware_cryptography::Digest, F: Graftable> BatchSubscribeStream<D, F
             classify,
             extract_kv,
             build_proof,
+            observe_watermark,
             sub,
             pending: PendingBatches::new(),
             watermarks: BTreeMap::new(),
@@ -321,6 +327,7 @@ impl<D: commonware_cryptography::Digest, F: Graftable> BatchSubscribeStream<D, F
                     self.watermarks
                         .entry(location)
                         .or_insert(frame.sequence_number);
+                    (self.observe_watermark)(location, frame.sequence_number);
                 }
             }
         }
@@ -518,6 +525,10 @@ impl<R: OperationLogReader> OperationLogService for OperationLogServer<R> {
                 let reader = reader.clone();
                 Arc::new(move |location, bytes| reader.extract_operation_kv(location, bytes))
             };
+            let observe_watermark: Arc<dyn Fn(Location<R::Family>, u64) + Send + Sync + 'static> = {
+                let reader = reader.clone();
+                Arc::new(move |location, sequence| reader.observe_published(location, sequence))
+            };
             let build_proof = Arc::new(move |watermark, matched| {
                 let reader = reader.clone();
                 async move {
@@ -535,6 +546,7 @@ impl<R: OperationLogReader> OperationLogService for OperationLogServer<R> {
                 classify,
                 extract_kv,
                 build_proof,
+                observe_watermark,
                 sub,
             ));
             Ok(connectrpc::Response::stream(stream))
@@ -780,6 +792,12 @@ mod authenticated_upload_subscription_tests {
     type F = mmr::Family;
 
     async fn stream() -> BatchSubscribeStream<Digest, F> {
+        observed_stream(Arc::new(|_, _| {})).await
+    }
+
+    async fn observed_stream(
+        observe: Arc<dyn Fn(Location<F>, u64) + Send + Sync + 'static>,
+    ) -> BatchSubscribeStream<Digest, F> {
         let (_task, url) = exoware_simulator::open_temp().await.expect("simulator");
         let client = exoware_sdk::PrefixedStoreClient::empty(exoware_sdk::StoreClient::new(&url));
         let (classifier, filter) = sub::classify_and_filter::<F>();
@@ -795,6 +813,7 @@ mod authenticated_upload_subscription_tests {
                 })
             }),
             Arc::new(|_, _| async { unreachable!("ingestion does not build proofs") }.boxed()),
+            observe,
             subscription,
         )
     }
@@ -811,6 +830,32 @@ mod authenticated_upload_subscription_tests {
             key: crate::adapter::codec::encode_watermark_key(Location::<F>::new(location)),
             value: Bytes::new(),
         }
+    }
+
+    #[tokio::test]
+    async fn test_every_watermark_row_is_observed_with_its_commit_sequence() {
+        let observed = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut stream = observed_stream({
+            let observed = observed.clone();
+            Arc::new(move |location: Location<F>, sequence| {
+                observed.lock().unwrap().push((location.as_u64(), sequence));
+            })
+        })
+        .await;
+        stream
+            .ingest_frame(&StoreBatch {
+                sequence_number: 10,
+                entries: vec![operation(4, b"four"), watermark(4)],
+            })
+            .unwrap();
+        // Watermark-only frames carry no operations but still publish.
+        stream
+            .ingest_frame(&StoreBatch {
+                sequence_number: 11,
+                entries: vec![watermark(6), watermark(7)],
+            })
+            .unwrap();
+        assert_eq!(*observed.lock().unwrap(), vec![(4, 10), (6, 11), (7, 11)]);
     }
 
     #[tokio::test]
