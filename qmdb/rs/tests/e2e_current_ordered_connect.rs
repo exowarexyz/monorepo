@@ -721,6 +721,25 @@ async fn test_ordered_connect_rejects_malformed_request_keys() {
 }
 
 #[tokio::test]
+async fn test_ordered_connect_rejects_get_range_limit_above_maximum() {
+    let raw_store = PrefixedStoreClient::empty(StoreClient::new("http://127.0.0.1:1"));
+    let (server, url) = spawn_qmdb_server(raw_store).await;
+    let ranges = range_rpc_client(&url);
+    let request = |limit| ProtoGetRangeRequest {
+        start_key: encoded_key(b"alpha"),
+        limit,
+        tip: 1,
+        ..Default::default()
+    };
+    let too_large = ranges.get_range(request(1001)).await.unwrap_err();
+    assert_eq!(too_large.code, connectrpc::ErrorCode::InvalidArgument);
+    // The maximum passes validation and fails at the unreachable Store.
+    let maximum = ranges.get_range(request(1000)).await.unwrap_err();
+    assert_ne!(maximum.code, connectrpc::ErrorCode::InvalidArgument);
+    server.abort();
+}
+
+#[tokio::test]
 async fn test_ordered_connect_get_returns_current_key_value_proof() {
     let store_client = common::local_store_client().await;
     let source = build_source_batch().await;

@@ -100,6 +100,8 @@ pub enum QmdbError {
     EmptyProofRequest,
     #[error("range proof max_locations must be > 0")]
     InvalidRangeLength,
+    #[error("range limit {limit} exceeds maximum {max}")]
+    RangeLimitTooLarge { limit: u32, max: u32 },
     #[error("invalid key range: start_key {start_key:?} must be less than end_key {end_key:?}")]
     InvalidKeyRange {
         start_key: Vec<u8>,

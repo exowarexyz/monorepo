@@ -45,6 +45,8 @@ use crate::PublishedWatermark;
 use crate::VersionedValue;
 
 const ACTIVE_OPERATION_GET_MANY_BATCH: usize = 1024;
+/// Maximum number of entries in one key range proof request.
+const MAX_RANGE_LIMIT: u32 = 1000;
 /// Update-index rows in a walk's first request. An exclusion walk usually
 /// reads the probed key's own overwritten or deleted versions and stops at
 /// its neighbour's newest one.
@@ -973,6 +975,12 @@ where
     ) -> Result<RawKeyRangeProof<H::Digest, K, V, N, F, E>, QmdbError> {
         if limit == 0 {
             return Err(QmdbError::InvalidRangeLength);
+        }
+        if limit > MAX_RANGE_LIMIT {
+            return Err(QmdbError::RangeLimitTooLarge {
+                limit,
+                max: MAX_RANGE_LIMIT,
+            });
         }
         if let Some(end) = end_key.as_ref() {
             if end <= &start_key {
