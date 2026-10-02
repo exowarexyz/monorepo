@@ -240,9 +240,8 @@ the source DB.
 ## Reads and ConnectRPC
 
 All four readers expose historical operation roots and range proofs. Ordered
-and unordered readers provide indexed historical key queries. `adapter::Ordered`
-also exposes `multi_proof`. Immutable provides indexed `get_at`, and keyless
-provides location-based `get_at`.
+and unordered readers provide indexed historical key queries. Immutable provides
+indexed `get_at`, and keyless provides location-based `get_at`.
 
 Each `service::server` stack function mounts the services one kind supports.
 The matching `service::client` kind type (`Ordered`, `Unordered`, `Immutable`,
