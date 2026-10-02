@@ -7,6 +7,8 @@ pub use crate::keys::MAX_KEY_LEN;
 pub const MAX_PUT_ENTRIES: usize = 2_000_000;
 pub const MAX_REQUEST_MESSAGE_BYTES: usize = 256 * 1024 * 1024;
 pub const MAX_VALUE_LEN: usize = 32 * 1024 * 1024;
+pub const MAX_PUT_CHUNK_BYTES: usize = 64 * 1024 * 1024;
+pub const PUT_CHUNK_TARGET_BYTES: usize = 1024 * 1024;
 
 // A stored batch adds sequence metadata to a full-size request. JSON reads also add
 // base64 expansion, so responses get double the request budget.

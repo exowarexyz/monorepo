@@ -27,6 +27,27 @@ snapshot sequence before returning data. If the snapshot is below that floor,
 return `consistency_not_ready_error(required, current)` to preserve the standard
 error details and standard retry hint. Both helpers are exported from the crate root.
 
+Put is a client-streaming RPC served by the generated ConnectRPC handler. Each
+`PutRequest` contains one chunk of the same atomic write. Implement
+`Ingest::begin_put` with an owned `IngestPut` session that prepares each chunk in
+`append`. Preparation must remain invisible until `submit` accepts publication.
+Submission runs only after validation and verified HTTP EOF. Accepted work and
+subscriber notification continue if the request is cancelled.
+
+The Put wrapper checks envelope boundaries and records physical EOF. Protobuf
+decoding and per-message compression remain in ConnectRPC. Serve the combined
+service with `transport::serve` to terminate HTTP/1 connections when upload or
+preparation exceeds its deadline. A clean upload and completed handler disarm
+that deadline. Response flushing follows the HTTP server's normal behavior.
+
+`PutService::with_config` configures the concurrent request cap and fallback
+timeout. Defaults admit sixteen Puts and use 30 seconds without `connect-timeout-ms`.
+An explicit protocol timeout takes precedence, including `grpc-timeout` for gRPC.
+The original deadline covers upload
+and preparation. Accepted publication can complete after the caller times out.
+Request slots remain held by surviving reception, preparation and publication.
+Backends remain responsible for bounding their preparation allocations.
+
 ## Protocol limits
 
 See the [language-independent protocol contract](../proto/README.md) for the
@@ -34,8 +55,10 @@ portable Put limits and size error details. Default ingest validation uses the
 published limits. A deployment can explicitly configure larger limits, but
 requests above the published baseline are not portable.
 
-Transport admission has separate backstops. Request bodies and decompressed
-messages are capped at 256 MiB. Decoder element memory is capped at 192 MiB.
+Put messages are capped at 64 MiB, with a 256 MiB aggregate protobuf budget across
+the stream. The wire bound additionally allows five framing bytes per permitted
+entry. Other request bodies and decompressed messages are capped at 256 MiB.
+Decoder element memory is capped at 192 MiB per message.
 Stored stream responses and the Rust SDK response decoder allow 512 MiB messages
 and 256 MiB of element memory. The response byte budget leaves room for metadata
 and compression overhead when reading a full-size request back.
@@ -58,7 +81,7 @@ Unordered aggregation consumes its input before producing results.
 use bytes::Bytes;
 use exoware_sdk::prune_policy::PrunePolicyDocument;
 use exoware_server::{
-    AppState, Log, Ingest, IngestError, Prune, Query, QueryResult,
+    AppState, Log, Ingest, IngestError, IngestPut, Prune, Query, QueryResult,
     RangeScan, RangeScanBatch, RangeScanResult, Retention, Sequence, StoreEngine, connect_stack,
 };
 use std::future::Future;
@@ -68,7 +91,12 @@ use std::future::Future;
 //   fn current_sequence(&self) -> u64;
 //
 //   Ingest:
-//   fn put_batch(&self, kvs: Vec<(Bytes, Bytes)>) -> impl Future<Output = Result<u64, IngestError>> + Send + '_;
+//   type Put: IngestPut;
+//   fn begin_put(&self) -> Result<Self::Put, IngestError>;
+//
+//   IngestPut:
+//   fn append(&mut self, kvs: Vec<(Bytes, Bytes)>) -> impl Future<Output = Result<(), IngestError>> + Send;
+//   fn submit(self) -> Result<impl Future<Output = Result<u64, IngestError>> + Send + 'static, IngestError>;
 //
 //   Query:
 //   type RangeScan: RangeScan;

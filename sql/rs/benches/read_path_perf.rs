@@ -28,8 +28,8 @@ use datafusion::physical_plan::{collect, ExecutionPlan};
 use datafusion::prelude::SessionContext;
 use exoware_sdk::{StoreClient, StoreKeyPrefix};
 use exoware_server::{
-    Ingest, IngestError, IngestState, Query, QueryExtra, QueryResult, QueryState, RangeScan,
-    RangeScanBatch, RangeScanResult, Sequence,
+    Ingest, IngestError, IngestPut, IngestState, Query, QueryExtra, QueryResult, QueryState,
+    RangeScan, RangeScanBatch, RangeScanResult, Sequence,
 };
 use exoware_sql::proto::sql::v1::{QueryRequest, ServiceClient};
 use exoware_sql::{CellValue, IndexSpec, KvSchema, TableColumnConfig};
@@ -207,7 +207,7 @@ async fn measure_traffic(
 #[derive(Default)]
 struct Backend {
     kv: Arc<Mutex<BTreeMap<Bytes, Bytes>>>,
-    sequence: AtomicU64,
+    sequence: Arc<AtomicU64>,
     traffic: Arc<Traffic>,
 }
 
@@ -218,10 +218,39 @@ impl Sequence for Backend {
 }
 
 impl Ingest for Backend {
-    async fn put_batch(&self, kvs: Vec<(Bytes, Bytes)>) -> Result<u64, IngestError> {
-        let mut kv = self.kv.lock().unwrap();
-        kv.extend(kvs);
-        Ok(self.sequence.fetch_add(1, Ordering::Relaxed) + 1)
+    type Put = BackendPut;
+
+    fn begin_put(&self) -> Result<Self::Put, IngestError> {
+        Ok(BackendPut {
+            kv: self.kv.clone(),
+            sequence: self.sequence.clone(),
+            rows: Vec::new(),
+        })
+    }
+}
+
+struct BackendPut {
+    kv: Arc<Mutex<BTreeMap<Bytes, Bytes>>>,
+    sequence: Arc<AtomicU64>,
+    rows: Vec<(Bytes, Bytes)>,
+}
+
+impl IngestPut for BackendPut {
+    async fn append(&mut self, kvs: Vec<(Bytes, Bytes)>) -> Result<(), IngestError> {
+        self.rows.extend(kvs);
+        Ok(())
+    }
+
+    fn submit(
+        self,
+    ) -> Result<
+        impl std::future::Future<Output = Result<u64, IngestError>> + Send + 'static,
+        IngestError,
+    > {
+        Ok(async move {
+            self.kv.lock().unwrap().extend(self.rows);
+            Ok(self.sequence.fetch_add(1, Ordering::Relaxed) + 1)
+        })
     }
 }
 

@@ -253,11 +253,15 @@ pub async fn wait_for_health(base: &str) {
 /// Bind a QMDB operation-log `ConnectRpcService` stack to a random local port
 /// alongside `/health`, and block until it responds.
 #[allow(dead_code)]
-pub async fn spawn_connect_service<D>(
-    dispatcher: ConnectRpcService<D>,
-) -> (tokio::task::JoinHandle<()>, String)
+pub async fn spawn_connect_service<S>(dispatcher: S) -> (tokio::task::JoinHandle<()>, String)
 where
-    D: ::connectrpc::Dispatcher + Send + Sync + 'static,
+    S: tower::Service<axum::http::Request<axum::body::Body>, Error = std::convert::Infallible>
+        + Clone
+        + Send
+        + Sync
+        + 'static,
+    S::Response: axum::response::IntoResponse,
+    S::Future: Send + 'static,
 {
     let app = Router::new()
         .route("/health", get(health_handler))

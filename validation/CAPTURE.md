@@ -241,7 +241,7 @@ cargo run -p exoware-validation -- replay --capture ./sample --url http://localh
 ```
 
 Replay validates the complete capture and pass range before writes. It fills its
-bounded preparation buffer before starting the replay clock. It sends one unary Store request per
+bounded preparation buffer before starting the replay clock. It sends one streaming RPC containing one or more messages per
 captured batch using the physical keys without adding a namespace. Due times use
 the captured offsets and repeat period, divided by `--speed`. `--concurrency` bounds
 in-flight requests across pass boundaries. `--duration-secs` stops new issuance and
@@ -252,8 +252,8 @@ and response. A response completed after the deadline is recorded as a timeout,
 even if synchronous work delayed the timer. A timed-out write may have reached the
 server. Compression defaults to `none`. `zstd` is optional.
 
-Unary requests must fit the SDK's 2 GiB Protobuf limit. Larger batches fail with
-an error and are not split.
+The SDK frames and compresses transport messages. Each captured batch remains one
+complete write. Oversized writes fail rather than splitting into separate commits.
 
 Replay never retries requests. A request failure, timeout, or schedule lag beyond
 `--max-lag-ms` stops issuance, drains admitted requests, writes the requested report,

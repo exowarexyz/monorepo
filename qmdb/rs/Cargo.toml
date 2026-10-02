@@ -43,6 +43,7 @@ buffa-codegen = { workspace = true }
 connectrpc-build = { workspace = true }
 
 [dev-dependencies]
+tower = { workspace = true }
 exoware-qmdb = { path = ".", features = ["test-utils"] }
 axum = { workspace = true }
 bytes = { workspace = true }

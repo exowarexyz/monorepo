@@ -1,3 +1,5 @@
+export const MAX_PUT_CHUNK_BYTES = 64 * 1024 * 1024;
+export const PUT_CHUNK_TARGET_BYTES = 1024 * 1024;
 export const MAX_PUT_ENTRIES = 2_000_000;
 export const MAX_REQUEST_MESSAGE_BYTES = 256 * 1024 * 1024;
 export const MAX_VALUE_LEN = 32 * 1024 * 1024;
@@ -83,10 +85,36 @@ export function validatePut(entries: readonly PutEntry[], options: PutBatchOptio
     let entryBytes = 0;
     for (const [index, entry] of entries.entries()) {
         validatePutEntry(entry, index, limits.maxValueLen);
-        entryBytes += putEntryEncodedLen(entry, limits.encoding);
+        const size = putEntryEncodedLen(entry, limits.encoding);
+        const single = putMessageEncodedLen(size, 1, limits.encoding);
+        if (single > MAX_PUT_CHUNK_BYTES) {
+            throw new RangeError(`Put entry ${index} encoded size ${single} exceeds ${MAX_PUT_CHUNK_BYTES}`);
+        }
+        entryBytes += size;
     }
     const length = putMessageEncodedLen(entryBytes, entries.length, limits.encoding);
     if (length > limits.maxEncodedBytes) {
         throw new RangeError(`Put encoded size ${length} exceeds ${limits.maxEncodedBytes}`);
     }
+}
+
+// The target bounds ordinary frames while allowing a supported large value in its own frame.
+export function* putChunks(entries: readonly PutEntry[], encoding: PutEncoding): Generator<PutEntry[]> {
+    let chunk: PutEntry[] = [];
+    let entryBytes = 0;
+    for (const entry of entries) {
+        const size = putEntryEncodedLen(entry, encoding);
+        const single = putMessageEncodedLen(size, 1, encoding);
+        if (single > MAX_PUT_CHUNK_BYTES) {
+            throw new RangeError(`Put entry encoded size ${single} exceeds ${MAX_PUT_CHUNK_BYTES}`);
+        }
+        if (chunk.length > 0 && putMessageEncodedLen(entryBytes + size, chunk.length + 1, encoding) > PUT_CHUNK_TARGET_BYTES) {
+            yield chunk;
+            chunk = [];
+            entryBytes = 0;
+        }
+        chunk.push(entry);
+        entryBytes += size;
+    }
+    if (chunk.length > 0) yield chunk;
 }

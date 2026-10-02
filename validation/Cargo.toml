@@ -15,11 +15,10 @@ default = ["cli"]
 cli = [
     "dep:exoware-sdk", "dep:tokio", "dep:futures", "dep:rand",
     "dep:chrono", "dep:tracing", "dep:tracing-subscriber", "dep:clap",
-    "dep:connectrpc", "dep:http", "dep:buffa",
+    "dep:connectrpc", "dep:http",
 ]
 
 [dependencies]
-buffa = { workspace = true, optional = true }
 bytes = { workspace = true }
 sha2 = "0.11"
 exoware-sdk = { workspace = true, optional = true }

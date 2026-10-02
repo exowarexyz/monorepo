@@ -18,6 +18,8 @@ export {
 } from './store.js';
 export { ExowareError, HttpError } from './error.js';
 export {
+    MAX_PUT_CHUNK_BYTES,
+    PUT_CHUNK_TARGET_BYTES,
     MAX_PUT_ENTRIES,
     MAX_REQUEST_MESSAGE_BYTES,
     MAX_VALUE_LEN,

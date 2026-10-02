@@ -418,11 +418,12 @@ async fn main() -> std::process::ExitCode {
 mod tests {
     use super::*;
     use bytes::Bytes;
-    use connectrpc::{ConnectError, ConnectRpcService, Limits, RequestContext, ServiceRequest};
+    use connectrpc::{ConnectError, ConnectRpcService, Limits, RequestContext};
     use exoware_sdk::{
         ingest::{PutRequest, PutResponse, Service, ServiceServer},
         keys::Key,
     };
+    use futures::StreamExt;
     use std::{
         collections::BTreeMap,
         sync::{Arc, Mutex},
@@ -452,11 +453,25 @@ mod tests {
         async fn put(
             &self,
             _: RequestContext,
-            request: ServiceRequest<'_, PutRequest>,
+            mut requests: connectrpc::InboundStream<PutRequest>,
         ) -> connectrpc::ServiceResult<PutResponse> {
+            let mut size = 0;
+            let mut entries = Vec::new();
+            while let Some(request) = requests.next().await {
+                let request = request?;
+                size += request.bytes().len();
+                entries.extend(request.view().kvs.iter().map(|entry| {
+                    (
+                        Bytes::copy_from_slice(entry.key),
+                        Bytes::copy_from_slice(entry.value),
+                    )
+                }));
+            }
             let mut state = self.0.lock().unwrap();
-            state.sizes.push(request.bytes().len());
-            let publishes = request.kvs.iter().any(|entry| entry.key == state.watermark);
+            state.sizes.push(size);
+            let publishes = entries
+                .iter()
+                .any(|(key, _)| key.as_ref() == state.watermark);
             let fails = match state.failure {
                 Some(Failure::BeforeData | Failure::AfterData) => state.sizes.len() == 2,
                 Some(Failure::AfterPublication) => publishes,
@@ -465,11 +480,8 @@ mod tests {
             if fails && state.failure == Some(Failure::BeforeData) {
                 return Err(ConnectError::unavailable("data write not accepted"));
             }
-            for entry in request.kvs.iter() {
-                state.rows.insert(
-                    Bytes::copy_from_slice(entry.key),
-                    Bytes::copy_from_slice(entry.value),
-                );
+            for (key, value) in entries {
+                state.rows.insert(key, value);
             }
             if publishes {
                 state.publications += 1;

@@ -28,6 +28,7 @@
 
 use std::cmp::Ordering as CmpOrdering;
 use std::collections::BTreeMap;
+use std::future::Future;
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -43,15 +44,15 @@ use exoware_sdk::limits::{
     put_encoded_len, PutTooLarge, MAX_PUT_ENTRIES, MAX_REQUEST_MESSAGE_BYTES,
     MAX_RESPONSE_ELEMENT_MEMORY_BYTES, MAX_RESPONSE_MESSAGE_BYTES,
 };
-use exoware_sdk::log::stream::v1::{
-    GetResponse as StreamGetResponse, GetResponseView as StreamGetResponseView,
-};
+#[cfg(test)]
+use exoware_sdk::log::stream::v1::GetResponse as StreamGetResponse;
+use exoware_sdk::log::stream::v1::GetResponseView as StreamGetResponseView;
 use exoware_sdk::prune_policy::{KeysScope, OrderEncoding, PrunePolicyDocument, RetainPolicy};
 use exoware_sdk::retention::{validate_retention_policy, RetentionPolicy};
 use exoware_sdk::selector::compile_payload_regex;
 use exoware_server::{
-    Ingest, IngestError, Log, LogBatch, Prune, Query, QueryExtra, QueryResult, RangeScan,
-    RangeScanBatch, RangeScanResult, Retention, Sequence,
+    Ingest, IngestError, IngestPut, Log, LogBatch, Prune, Query, QueryExtra, QueryResult,
+    RangeScan, RangeScanBatch, RangeScanResult, Retention, Sequence,
 };
 use parking_lot::Mutex;
 use regex::bytes::Regex;
@@ -400,9 +401,83 @@ impl Frontiers {
     }
 }
 
-struct WriteRequest {
-    kvs: Vec<(Bytes, Bytes)>,
+#[derive(Default)]
+struct PreparedBatch {
+    state: BTreeMap<Bytes, Bytes>,
+    log: Vec<Bytes>,
+    entries: usize,
     encoded_len: usize,
+    payload_bytes: usize,
+}
+
+impl PreparedBatch {
+    fn append(&mut self, kvs: Vec<(Bytes, Bytes)>) -> Result<(), IngestError> {
+        let entries = self.entries.saturating_add(kvs.len());
+        if entries > MAX_SEQUENCE_ENTRIES {
+            return Err(PutTooLarge {
+                entries,
+                max_entries: MAX_SEQUENCE_ENTRIES,
+            }
+            .into());
+        }
+
+        let encoded_len = put_encoded_len(
+            kvs.iter()
+                .map(|(key, value)| (key.as_ref(), value.as_ref())),
+        );
+        if encoded_len > MAX_REQUEST_MESSAGE_BYTES.saturating_sub(self.encoded_len) {
+            return Err(IngestError::ResourceExhausted {
+                message: "put exceeds the request message size limit".to_string(),
+            });
+        }
+
+        self.prepare(kvs, encoded_len);
+        Ok(())
+    }
+
+    fn prepare(&mut self, kvs: Vec<(Bytes, Bytes)>, encoded_len: usize) {
+        let mut log = Vec::with_capacity(encoded_len);
+        self.entries += kvs.len();
+        self.encoded_len += encoded_len;
+
+        // Keep every log entry in arrival order while state retains only the latest value.
+        for (key, value) in kvs {
+            self.payload_bytes += key.len() + value.len();
+            let entry = Entry {
+                key: key.to_vec(),
+                value: value.clone(),
+                ..Default::default()
+            };
+            buffa::types::put_len_delimited_header(2, u64::from(entry.encoded_len()), &mut log);
+            entry.encode(&mut log);
+            self.state.insert(key, value);
+        }
+
+        if !log.is_empty() {
+            self.log.push(Bytes::from(log));
+        }
+    }
+
+    fn merge(&mut self, next: Self) {
+        self.state.extend(next.state);
+        self.log.extend(next.log);
+        self.entries += next.entries;
+        self.encoded_len += next.encoded_len;
+        self.payload_bytes += next.payload_bytes;
+    }
+
+    fn encode_log(&self, sequence: u64) -> Vec<u8> {
+        let mut payload = Vec::with_capacity(self.encoded_len + 11);
+        buffa::types::put_uint64_field(1, sequence, &mut payload);
+        for chunk in &self.log {
+            payload.extend_from_slice(chunk);
+        }
+        payload
+    }
+}
+
+struct WriteRequest {
+    batch: PreparedBatch,
     response: oneshot::Sender<Result<u64, IngestError>>,
 }
 
@@ -410,15 +485,15 @@ struct WriteRequest {
 /// whose log row carries all their rows in arrival order.
 struct QueuedWave {
     sequence: u64,
-    requests: Vec<WriteRequest>,
-    rows: Vec<(Bytes, Bytes)>,
+    requests: Vec<oneshot::Sender<Result<u64, IngestError>>>,
+    batch: PreparedBatch,
 }
 
 /// One staged commit group: every coalesced request shares a single sequence number, whose log
 /// row carries all their rows in arrival order.
 struct PreparedWrite {
     sequence: u64,
-    requests: Vec<WriteRequest>,
+    requests: Vec<oneshot::Sender<Result<u64, IngestError>>>,
     /// Staged single-row log SST (the group's encoded batch), ready for ingestion.
     log: PathBuf,
     /// Staged current-state SST (sorted by key, last write per key), ready for ingestion.
@@ -498,55 +573,31 @@ impl Writer {
         }
     }
 
-    /// Enqueues one ingest request and resolves once `commit` has durably published it.
-    async fn put_batch(&self, kvs: Vec<(Bytes, Bytes)>) -> Result<u64, IngestError> {
+    fn submit(
+        &self,
+        batch: PreparedBatch,
+    ) -> Result<oneshot::Receiver<Result<u64, IngestError>>, IngestError> {
         // An empty batch would still cut a log row, but rejecting it keeps every sequence
         // backed by at least one entry. The RPC layer already requires at least one entry per
         // put.
-        if kvs.is_empty() {
+        if batch.entries == 0 {
             return Err(IngestError::Internal {
                 message: "cannot ingest an empty batch".to_string(),
             });
         }
 
-        // Direct backend callers must also leave every committed sequence decodable.
-        if kvs.len() > MAX_SEQUENCE_ENTRIES {
-            return Err(PutTooLarge {
-                entries: kvs.len(),
-                max_entries: MAX_SEQUENCE_ENTRIES,
-            }
-            .into());
-        }
-        let encoded_len = put_encoded_len(
-            kvs.iter()
-                .map(|(key, value)| (key.as_ref(), value.as_ref())),
-        );
-        if encoded_len > MAX_REQUEST_MESSAGE_BYTES {
-            return Err(IngestError::ResourceExhausted {
-                message: "put exceeds the request message size limit".to_string(),
-            });
-        }
-
         let (response, result) = oneshot::channel();
 
-        // The sender is `None` only inside `Writer::drop`, which cannot overlap a live call:
-        // dropping the writer requires exclusive access, and every in-flight `put_batch`
-        // holds a borrow through the store's `Arc<Writer>`. A writer whose workers are gone
-        // is the closed-channel case, surfaced as an error by `send` below.
+        // The store retains the writer during submission, so only stopped workers can
+        // close its sender before this handoff.
         self.sender
             .as_ref()
             .expect("sender is None only during drop, which cannot overlap a call")
-            .send(WriteRequest {
-                kvs,
-                encoded_len,
-                response,
-            })
+            .send(WriteRequest { batch, response })
             .map_err(|_| IngestError::Internal {
                 message: "rocks writer stopped".to_string(),
             })?;
-        result.await.map_err(|_| IngestError::Internal {
-            message: "rocks writer stopped before completing write".to_string(),
-        })?
+        Ok(result)
     }
 }
 
@@ -642,30 +693,25 @@ fn coalesce_queued_write(
         .checked_add(1)
         .expect("rocks sequence number overflowed");
     let mut requests = Vec::with_capacity(64);
-    let mut rows: Vec<(Bytes, Bytes)> = Vec::with_capacity(first.kvs.len());
+    let mut batch = PreparedBatch::default();
     let mut staged_bytes = 0usize;
-    let mut encoded_bytes = 0;
     let mut request = first;
     let mut carried = None;
 
     loop {
-        if !rows.is_empty()
-            && (request.kvs.len() > MAX_SEQUENCE_ENTRIES.saturating_sub(rows.len())
-                || request.encoded_len > MAX_REQUEST_MESSAGE_BYTES.saturating_sub(encoded_bytes))
+        if batch.entries != 0
+            && (request.batch.entries > MAX_SEQUENCE_ENTRIES.saturating_sub(batch.entries)
+                || request.batch.encoded_len
+                    > MAX_REQUEST_MESSAGE_BYTES.saturating_sub(batch.encoded_len))
         {
             carried = Some(request);
             break;
         }
 
-        encoded_bytes += request.encoded_len;
         // Payload counted twice: once as state rows and once inside the encoded log batch.
-        staged_bytes += 2 * request
-            .kvs
-            .iter()
-            .map(|(k, v)| k.len() + v.len())
-            .sum::<usize>();
-        rows.extend(request.kvs.iter().cloned());
-        requests.push(request);
+        staged_bytes += 2 * request.batch.payload_bytes;
+        batch.merge(request.batch);
+        requests.push(request.response);
         if staged_bytes >= max_batch_bytes {
             break;
         }
@@ -680,7 +726,7 @@ fn coalesce_queued_write(
         QueuedWave {
             sequence,
             requests,
-            rows,
+            batch,
         },
         carried,
     )
@@ -694,16 +740,16 @@ fn stage_wave(ingest_dir: &Path, wave: QueuedWave) -> PreparedWrite {
     let QueuedWave {
         sequence,
         requests,
-        rows,
+        batch,
     } = wave;
     let log = ingest_dir.join(format!("log-{sequence:020}.sst"));
     let state = ingest_dir.join(format!("state-{sequence:020}.sst"));
     let (log_result, state_result) = thread::scope(|scope| {
         let state_task = thread::Builder::new()
             .name(format!("{WRITER_THREAD_PREFIX}stage"))
-            .spawn_scoped(scope, || stage_state_file(&state, &rows))
+            .spawn_scoped(scope, || stage_state_file(&state, &batch.state))
             .expect("failed to spawn SST staging thread");
-        let log_result = stage_log_file(&log, sequence, &rows);
+        let log_result = stage_log_file(&log, sequence, &batch);
         (
             log_result,
             state_task.join().expect("state staging thread panicked"),
@@ -723,8 +769,8 @@ fn stage_wave(ingest_dir: &Path, wave: QueuedWave) -> PreparedWrite {
 
 /// Stages the single-row log SST: the group's sequence mapped to the exact encoded batch the
 /// stream service serves. Uncompressed, like the state SST.
-fn stage_log_file(path: &Path, sequence: u64, rows: &[(Bytes, Bytes)]) -> Result<usize, String> {
-    let payload = encode_log_value(sequence, rows);
+fn stage_log_file(path: &Path, sequence: u64, batch: &PreparedBatch) -> Result<usize, String> {
+    let payload = batch.encode_log(sequence);
     let mut options = Options::default();
     options.set_compression_type(DBCompressionType::None);
     let mut writer = SstFileWriter::create(&options);
@@ -742,21 +788,13 @@ fn stage_log_file(path: &Path, sequence: u64, rows: &[(Bytes, Bytes)]) -> Result
 /// winning (in arrival order across coalesced requests). Uncompressed: compressing on the
 /// ingest path would trade ack latency for bytes, and the state CF keeps compression off at
 /// every level per [`state_cf_options`].
-fn stage_state_file(path: &Path, rows: &[(Bytes, Bytes)]) -> Result<usize, String> {
-    let mut rows: Vec<(&Bytes, &Bytes)> = rows.iter().map(|(key, value)| (key, value)).collect();
-
-    // Stable sort: equal keys keep arrival order, so the last occurrence is the newest.
-    rows.sort_by(|a, b| a.0.cmp(b.0));
-
+fn stage_state_file(path: &Path, rows: &BTreeMap<Bytes, Bytes>) -> Result<usize, String> {
     let mut options = Options::default();
     options.set_compression_type(DBCompressionType::None);
     let mut writer = SstFileWriter::create(&options);
     writer.open(path).map_err(|e| e.to_string())?;
     let mut bytes = 0;
-    for (index, (key, value)) in rows.iter().enumerate() {
-        if rows.get(index + 1).is_some_and(|next| next.0 == *key) {
-            continue;
-        }
+    for (key, value) in rows {
         bytes += key.len() + value.len();
         writer
             .put(key.as_ref(), value.as_ref())
@@ -806,7 +844,7 @@ fn commit_group(db: &DB, frontiers: &Frontiers, group: PreparedWrite) {
         staged_bytes, sequence, "committed write batch"
     );
     for request in requests {
-        let _ = request.response.send(Ok(sequence));
+        let _ = request.send(Ok(sequence));
     }
 }
 
@@ -1383,39 +1421,76 @@ impl Sequence for RocksStore {
     }
 }
 
-// Ingest uses dedicated writer threads so blocking storage writes do not occupy Tokio workers.
-// The writer folds already-queued requests into one commit group that shares a single sequence
-// number and replay-log batch.
-impl Ingest for RocksStore {
-    async fn put_batch(&self, kvs: Vec<(Bytes, Bytes)>) -> Result<u64, IngestError> {
-        let sequence = self.writer.put_batch(kvs).await?;
+pub struct RocksPut {
+    store: RocksStore,
+    batch: Option<PreparedBatch>,
+}
 
-        // Continuous retention: trim the just-grown log to the active rule's floor so the rule
-        // tracks the frontier without another RPC. The rule-less case is a cheap cache check;
-        // an installed rule takes the blocking trim (an unsynced range tombstone, skipped
-        // outright when the floor has not advanced) off the Tokio worker.
-        //
-        // Best-effort: the batch is already durably committed and acked above, so a trim failure
-        // must NOT fail the ingest. Failing here would make the caller re-ingest durable data
-        // under a fresh sequence, duplicating the batch for subscribers. The trim is idempotent,
-        // so the next append (or a `SetRetention`) reapplies it.
-        if self.retention.lock().is_some() {
-            let store = self.clone();
-            match tokio::task::spawn_blocking(move || store.enforce_retention()).await {
-                Ok(Ok(_)) => {}
-                Ok(Err(message)) => tracing::warn!(
-                    sequence,
-                    error = %message,
-                    "continuous retention trim failed after commit; batch is durable, retrying on the next append",
-                ),
-                Err(join_error) => tracing::warn!(
-                    sequence,
-                    error = %join_error,
-                    "retention enforcement task failed after commit; batch is durable, retrying on the next append",
-                ),
+impl IngestPut for RocksPut {
+    async fn append(&mut self, kvs: Vec<(Bytes, Bytes)>) -> Result<(), IngestError> {
+        // Moving preparation into the task leaves a cancelled append unable to submit.
+        let mut batch = self.batch.take().ok_or_else(|| IngestError::Internal {
+            message: "put preparation is incomplete".to_string(),
+        })?;
+        self.batch = Some(
+            tokio::task::spawn_blocking(move || {
+                batch.append(kvs)?;
+                Ok::<_, IngestError>(batch)
+            })
+            .await
+            .map_err(|error| IngestError::Internal {
+                message: format!("put preparation task failed: {error}"),
+            })??,
+        );
+        Ok(())
+    }
+
+    fn submit(
+        self,
+    ) -> Result<impl Future<Output = Result<u64, IngestError>> + Send + 'static, IngestError> {
+        let batch = self.batch.ok_or_else(|| IngestError::Internal {
+            message: "put preparation is incomplete".to_string(),
+        })?;
+        let store = self.store;
+        let result = store.writer.submit(batch)?;
+
+        Ok(async move {
+            let sequence = result.await.map_err(|_| IngestError::Internal {
+                message: "rocks writer stopped before completing write".to_string(),
+            })??;
+
+            // Retention failures must not turn a durable write into a retryable failure.
+            // Reapply the idempotent trim on a later write or retention update.
+            if store.retention.lock().is_some() {
+                let store = store.clone();
+                match tokio::task::spawn_blocking(move || store.enforce_retention()).await {
+                    Ok(Ok(_)) => {}
+                    Ok(Err(message)) => tracing::warn!(
+                        sequence,
+                        error = %message,
+                        "retention trim failed after durable commit. Retrying on the next append",
+                    ),
+                    Err(join_error) => tracing::warn!(
+                        sequence,
+                        error = %join_error,
+                        "retention task failed after durable commit. Retrying on the next append",
+                    ),
+                }
             }
-        }
-        Ok(sequence)
+            Ok(sequence)
+        })
+    }
+}
+
+// The session owns the store so accepted completion can outlive its request.
+impl Ingest for RocksStore {
+    type Put = RocksPut;
+
+    fn begin_put(&self) -> Result<Self::Put, IngestError> {
+        Ok(RocksPut {
+            store: self.clone(),
+            batch: Some(PreparedBatch::default()),
+        })
     }
 }
 
@@ -1531,7 +1606,7 @@ impl Retention for RocksStore {
     }
 }
 
-/// Encodes the batch payload served for one sequence's key/value rows.
+#[cfg(test)]
 fn encode_log_value(sequence: u64, kvs: &[(Bytes, Bytes)]) -> Vec<u8> {
     StreamGetResponse {
         sequence_number: sequence,
@@ -1573,11 +1648,19 @@ mod tests {
             kvs.iter()
                 .map(|(key, value)| (key.as_ref(), value.as_ref())),
         );
-        WriteRequest {
-            kvs,
-            encoded_len,
-            response,
-        }
+        let mut batch = PreparedBatch::default();
+        batch.prepare(kvs, encoded_len);
+        WriteRequest { batch, response }
+    }
+
+    fn prepared_entries(batch: &PreparedBatch) -> Vec<(Bytes, Bytes)> {
+        response_entries(
+            DecodeOptions::new()
+                .with_max_message_size(MAX_RESPONSE_MESSAGE_BYTES)
+                .with_element_memory_limit(MAX_RESPONSE_ELEMENT_MEMORY_BYTES)
+                .decode_from_slice(&batch.encode_log(1))
+                .expect("decode prepared entries"),
+        )
     }
 
     fn response_entries(response: StreamGetResponse) -> Vec<(Bytes, Bytes)> {
@@ -1630,6 +1713,229 @@ mod tests {
             DEFAULT_COMMIT_COALESCE_MAX_BATCH_BYTES,
         );
         stage_wave(&ingest_dir, wave)
+    }
+
+    #[tokio::test]
+    async fn streaming_put_prepares_each_chunk_before_publication() {
+        let dir = tempdir().expect("tempdir");
+        let store = RocksStore::open(dir.path(), None).expect("open db");
+        let mut put = store.begin_put().expect("begin put");
+        let first = vec![
+            (Bytes::from_static(b"b"), Bytes::from_static(b"old")),
+            (Bytes::from_static(b"a"), Bytes::from_static(b"first")),
+        ];
+        put.append(first.clone()).await.expect("first chunk");
+        let prepared = put.batch.as_ref().expect("prepared first chunk");
+        assert_eq!(prepared.entries, 2);
+        assert_eq!(prepared.log.len(), 1);
+        assert_eq!(prepared_entries(prepared), first);
+        assert_eq!(
+            prepared.state.keys().map(Bytes::as_ref).collect::<Vec<_>>(),
+            [b"a", b"b"]
+        );
+        assert_eq!(store.current_sequence(), 0);
+        assert_eq!(store.db.get(b"a").expect("unpublished state"), None);
+
+        let second = vec![
+            (Bytes::from_static(b"b"), Bytes::from_static(b"new")),
+            (Bytes::from_static(b"c"), Bytes::from_static(b"last")),
+        ];
+        put.append(second.clone()).await.expect("second chunk");
+        let prepared = put.batch.as_ref().expect("prepared second chunk");
+        assert_eq!(prepared.entries, 4);
+        assert_eq!(prepared.log.len(), 2);
+        assert_eq!(prepared.state.len(), 3);
+        assert_eq!(
+            prepared.state.get(b"b".as_slice()).unwrap().as_ref(),
+            b"new"
+        );
+        let expected = first.into_iter().chain(second).collect::<Vec<_>>();
+        assert_eq!(prepared_entries(prepared), expected);
+        assert_eq!(store.current_sequence(), 0);
+
+        let sequence = put.submit().expect("submit").await.expect("commit");
+        assert_eq!(sequence, 1);
+        assert_eq!(
+            store.db.get(b"b").expect("committed state"),
+            Some(b"new".to_vec())
+        );
+        let logged = store
+            .get_batch(sequence)
+            .await
+            .expect("get batch")
+            .expect("retained batch");
+        assert_eq!(batch_entries(logged), expected);
+    }
+
+    #[test]
+    fn coalescing_keeps_duplicate_log_entries_and_latest_state() {
+        let first = vec![(Bytes::from_static(b"k"), Bytes::from_static(b"old"))];
+        let second = vec![(Bytes::from_static(b"k"), Bytes::from_static(b"new"))];
+        let (sender, receiver) = mpsc::channel();
+        sender
+            .send(write_request_with_kvs(second.clone()))
+            .expect("queued request");
+        let (wave, carried) = coalesce_queued_write(
+            &receiver,
+            write_request_with_kvs(first.clone()),
+            0,
+            DEFAULT_COMMIT_COALESCE_MAX_BATCH_BYTES,
+        );
+        assert!(carried.is_none());
+        assert_eq!(wave.requests.len(), 2);
+        assert_eq!(wave.batch.state.len(), 1);
+        assert_eq!(
+            wave.batch.state.get(b"k".as_slice()).unwrap().as_ref(),
+            b"new"
+        );
+        assert_eq!(
+            prepared_entries(&wave.batch),
+            first.into_iter().chain(second).collect::<Vec<_>>()
+        );
+    }
+
+    #[tokio::test]
+    async fn dropping_prepared_put_does_not_publish() {
+        let dir = tempdir().expect("tempdir");
+        let store = RocksStore::open(dir.path(), None).expect("open db");
+        let mut put = store.begin_put().expect("begin put");
+        put.append(vec![(Bytes::from_static(b"k"), Bytes::from_static(b"v"))])
+            .await
+            .expect("prepare");
+        drop(put);
+        drop(store);
+
+        let store = RocksStore::open(dir.path(), None).expect("reopen db");
+        assert_eq!(store.current_sequence(), 0);
+        assert_eq!(store.db.get(b"k").expect("unpublished state"), None);
+        assert_eq!(live_log_rows(&store), 0);
+    }
+
+    #[tokio::test]
+    async fn streaming_put_checks_aggregate_entry_limit() {
+        let dir = tempdir().expect("tempdir");
+        let store = RocksStore::open(dir.path(), None).expect("open db");
+        let mut put = store.begin_put().expect("begin put");
+        put.append(vec![(Bytes::new(), Bytes::new()); MAX_SEQUENCE_ENTRIES])
+            .await
+            .expect("full first chunk");
+        let error = put
+            .append(vec![(Bytes::new(), Bytes::new())])
+            .await
+            .expect_err("reject aggregate count");
+        assert_eq!(
+            error,
+            IngestError::PutTooLarge(PutTooLarge {
+                entries: MAX_SEQUENCE_ENTRIES + 1,
+                max_entries: MAX_SEQUENCE_ENTRIES,
+            })
+        );
+        assert!(put.submit().is_err());
+        assert_eq!(store.current_sequence(), 0);
+        assert_eq!(live_log_rows(&store), 0);
+    }
+
+    #[test]
+    fn cancelled_append_cannot_submit_partial_preparation() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .max_blocking_threads(1)
+            .build()
+            .expect("runtime");
+        runtime.block_on(async {
+            let dir = tempdir().expect("tempdir");
+            let store = RocksStore::open(dir.path(), None).expect("open db");
+            let mut put = store.begin_put().expect("begin put");
+            let (started, ready) = oneshot::channel();
+            let (release, blocked) = mpsc::channel();
+            let blocker = tokio::task::spawn_blocking(move || {
+                started.send(()).expect("blocking worker started");
+                blocked.recv().expect("release worker");
+            });
+            ready.await.expect("worker ready");
+
+            // Occupying the only worker keeps preparation pending at cancellation.
+            let mut append =
+                Box::pin(put.append(vec![(Bytes::from_static(b"k"), Bytes::from_static(b"v"))]));
+            assert!(futures::poll!(append.as_mut()).is_pending());
+            drop(append);
+            let result = put.submit();
+            assert!(matches!(result, Err(IngestError::Internal { .. })));
+            release.send(()).expect("release blocker");
+            blocker.await.expect("blocker joined");
+            assert_eq!(store.current_sequence(), 0);
+            assert_eq!(store.db.get(b"k").expect("unpublished state"), None);
+            assert_eq!(live_log_rows(&store), 0);
+        });
+    }
+
+    #[tokio::test]
+    async fn accepted_put_publishes_after_completion_is_dropped() {
+        let dir = tempdir().expect("tempdir");
+        let store = RocksStore::open(dir.path(), None).expect("open db");
+        let mut put = store.begin_put().expect("begin put");
+        put.append(vec![(Bytes::from_static(b"k"), Bytes::from_static(b"v"))])
+            .await
+            .expect("prepare");
+        let publish = store.frontiers.persist.lock();
+        let completion = put.submit().expect("accepted submission");
+        assert_eq!(store.current_sequence(), 0);
+        drop(completion);
+        drop(publish);
+        drop(store);
+
+        let store = RocksStore::open(dir.path(), None).expect("reopen db");
+        assert_eq!(store.current_sequence(), 1);
+        assert_eq!(
+            store.db.get(b"k").expect("published state"),
+            Some(b"v".to_vec())
+        );
+        let batch = store
+            .get_batch(1)
+            .await
+            .expect("get batch")
+            .expect("retained batch");
+        assert_eq!(
+            batch_entries(batch),
+            [(Bytes::from_static(b"k"), Bytes::from_static(b"v"))]
+        );
+    }
+
+    #[tokio::test]
+    async fn detached_completion_finishes_retention_after_acceptance() {
+        let dir = tempdir().expect("tempdir");
+        let store = RocksStore::open(dir.path(), None).expect("open db");
+        store
+            .set_retention(Some(RetentionPolicy::KeepLatest { count: 1 }))
+            .expect("retention");
+        store
+            .put_batch(vec![(Bytes::from_static(b"k"), Bytes::from_static(b"old"))])
+            .await
+            .expect("first put");
+        let mut put = store.begin_put().expect("begin put");
+        put.append(vec![(Bytes::from_static(b"k"), Bytes::from_static(b"new"))])
+            .await
+            .expect("prepare");
+        let publish = store.frontiers.persist.lock();
+        let completion = put.submit().expect("accepted submission");
+        let (finished, observed) = oneshot::channel();
+        let task = tokio::spawn(async move {
+            let result = completion.await;
+            finished.send(result).expect("completion observer");
+        });
+        drop(task);
+        assert_eq!(store.current_sequence(), 1);
+        drop(publish);
+
+        let sequence = tokio::time::timeout(std::time::Duration::from_secs(5), observed)
+            .await
+            .expect("completion deadline")
+            .expect("completion task")
+            .expect("committed");
+        assert_eq!(sequence, 2);
+        assert_eq!(store.current_sequence(), 2);
+        assert!(store.get_batch(1).await.expect("old log").is_none());
+        assert!(store.get_batch(2).await.expect("new log").is_some());
     }
 
     #[test]
@@ -1823,13 +2129,16 @@ mod tests {
         let (wave, carried) = coalesce_queued_write(&receiver, first, 0, 1);
 
         assert_eq!(wave.requests.len(), 1);
-        assert_eq!(wave.requests[0].kvs[0].0.as_ref(), b"a");
+        assert_eq!(wave.batch.state.first_key_value().unwrap().0.as_ref(), b"a");
         assert!(carried.is_none());
         assert_eq!(
             receiver
                 .try_recv()
                 .expect("next wave should keep queued request")
-                .kvs[0]
+                .batch
+                .state
+                .first_key_value()
+                .unwrap()
                 .0
                 .as_ref(),
             b"b"
@@ -1851,21 +2160,24 @@ mod tests {
                 ]
             };
             let first = write_request_with_kvs(kvs);
-            let first_len = first.kvs.len();
+            let first_len = first.batch.entries;
             let (sender, receiver) = mpsc::channel();
             sender.send(write_request(b"next")).unwrap();
             drop(sender);
 
             let (wave, carried) = coalesce_queued_write(&receiver, first, 0, usize::MAX);
             assert_eq!(wave.sequence, 1);
-            assert_eq!(wave.rows.len(), first_len);
+            assert_eq!(wave.batch.entries, first_len);
             assert_eq!(wave.requests.len(), 1);
             let next = carried.unwrap();
-            assert_eq!(next.kvs[0].0.as_ref(), b"next");
+            assert_eq!(
+                next.batch.state.first_key_value().unwrap().0.as_ref(),
+                b"next"
+            );
 
             let (wave, carried) = coalesce_queued_write(&receiver, next, wave.sequence, usize::MAX);
             assert_eq!(wave.sequence, 2);
-            assert_eq!(wave.rows.len(), 1);
+            assert_eq!(wave.batch.entries, 1);
             assert_eq!(wave.requests.len(), 1);
             assert!(carried.is_none());
             assert!(matches!(
@@ -1901,17 +2213,24 @@ mod tests {
             let second = prepared.recv().expect("second wave");
             assert_eq!((first.sequence, second.sequence), (1, 2));
             assert_eq!(
-                first.rows.len(),
+                first.batch.entries,
                 MAX_SEQUENCE_ENTRIES - usize::from(second_len == 2)
             );
-            assert_eq!(second.rows.len(), if second_len == 1 { 1 } else { 3 });
-            assert_eq!(first.rows[0].0.as_ref(), b"a");
-            assert_eq!(second.rows.last().expect("last row").0.as_ref(), b"c");
+            assert_eq!(second.batch.entries, if second_len == 1 { 1 } else { 3 });
+            assert_eq!(
+                first.batch.state.first_key_value().unwrap().0.as_ref(),
+                b"a"
+            );
+            assert_eq!(
+                second.batch.state.last_key_value().unwrap().0.as_ref(),
+                b"c"
+            );
             let request_keys: Vec<_> = first
-                .requests
-                .iter()
-                .chain(&second.requests)
-                .map(|request| request.kvs[0].0.as_ref())
+                .batch
+                .state
+                .keys()
+                .chain(second.batch.state.keys())
+                .map(Bytes::as_ref)
                 .collect();
             assert_eq!(request_keys, [b"a", b"b", b"c"]);
             assert!(prepared.recv().is_err());
@@ -1934,15 +2253,11 @@ mod tests {
         let second = prepared.recv().expect("second wave");
         assert_eq!((first.sequence, second.sequence), (1, 2));
         assert_eq!((first.requests.len(), second.requests.len()), (2, 1));
-        assert!(
-            put_encoded_len(
-                first
-                    .rows
-                    .iter()
-                    .map(|(key, value)| (key.as_ref(), value.as_ref()))
-            ) <= MAX_REQUEST_MESSAGE_BYTES
+        assert!(first.batch.encoded_len <= MAX_REQUEST_MESSAGE_BYTES);
+        assert_eq!(
+            second.batch.state.first_key_value().unwrap().0.as_ref(),
+            b"c"
         );
-        assert_eq!(second.rows[0].0.as_ref(), b"c");
         assert!(prepared.recv().is_err());
     }
 
@@ -1961,7 +2276,7 @@ mod tests {
             })
             .collect();
         let first = write_request_with_kvs(kvs);
-        assert_eq!(first.encoded_len, MAX_REQUEST_MESSAGE_BYTES);
+        assert_eq!(first.batch.encoded_len, MAX_REQUEST_MESSAGE_BYTES);
         let (sender, receiver) = mpsc::channel();
         sender.send(first).unwrap();
         sender.send(write_request(b"next")).unwrap();
@@ -1971,19 +2286,15 @@ mod tests {
         let first = prepared.recv().unwrap();
         let second = prepared.recv().unwrap();
         assert_eq!((first.sequence, second.sequence), (u64::MAX - 1, u64::MAX));
-        assert_eq!((first.rows.len(), second.rows.len()), (8, 1));
+        assert_eq!((first.batch.entries, second.batch.entries), (8, 1));
         assert_eq!((first.requests.len(), second.requests.len()), (1, 1));
         assert!(
-            put_encoded_len(
-                first
-                    .rows
-                    .iter()
-                    .map(|(key, value)| (key.as_ref(), value.as_ref()))
-            ) + 1
-                + varint_len(first.sequence)
-                <= MAX_RESPONSE_MESSAGE_BYTES
+            first.batch.encoded_len + 1 + varint_len(first.sequence) <= MAX_RESPONSE_MESSAGE_BYTES
         );
-        assert_eq!(second.rows[0].0.as_ref(), b"next");
+        assert_eq!(
+            second.batch.state.first_key_value().unwrap().0.as_ref(),
+            b"next"
+        );
         assert!(prepared.recv().is_err());
     }
 

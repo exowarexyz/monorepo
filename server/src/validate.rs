@@ -127,11 +127,31 @@ fn validate_value_field(
     Ok(())
 }
 
+pub(crate) fn empty_put_error() -> ConnectError {
+    field_error(
+        INGEST_ERROR_DOMAIN,
+        "kvs",
+        "at least one key-value pair is required",
+        "INVALID_BATCH",
+        "put request must contain at least one key-value pair",
+        [],
+    )
+}
+
 // -- ingest --
 
+#[cfg(test)]
 pub fn validate_put_request(
     request: &exoware_proto::log::ingest::v1::PutRequestView<'_>,
     limits: IngestLimits,
+) -> Result<(), ConnectError> {
+    validate_put_chunk(request, limits, 0)
+}
+
+pub(crate) fn validate_put_chunk(
+    request: &exoware_proto::log::ingest::v1::PutRequestView<'_>,
+    limits: IngestLimits,
+    offset: usize,
 ) -> Result<(), ConnectError> {
     if request.kvs.len() > limits.max_entries {
         return Err(put_too_large_error(PutTooLarge {
@@ -142,17 +162,11 @@ pub fn validate_put_request(
 
     // buf.validate: repeated.min_items = 1
     if request.kvs.is_empty() {
-        return Err(field_error(
-            INGEST_ERROR_DOMAIN,
-            "kvs",
-            "at least one key-value pair is required",
-            "INVALID_BATCH",
-            "put request must contain at least one key-value pair",
-            [],
-        ));
+        return Err(empty_put_error());
     }
     // buf.validate: Entry.key bytes.max_len = 254
     for (index, kv) in request.kvs.iter().enumerate() {
+        let index = offset + index;
         validate_key_field(INGEST_ERROR_DOMAIN, || format!("kvs[{index}].key"), kv.key)?;
         validate_value_field(
             INGEST_ERROR_DOMAIN,

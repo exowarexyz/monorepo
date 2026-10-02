@@ -2693,6 +2693,7 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tokio",
+ "tower",
  "tower-http 0.5.2",
  "tracing",
  "tracing-subscriber",
@@ -2752,6 +2753,7 @@ dependencies = [
 name = "exoware-server"
 version = "2026.9.0"
 dependencies = [
+ "axum",
  "buffa",
  "buffa-types",
  "bytes",
@@ -2761,9 +2763,14 @@ dependencies = [
  "exoware-sdk",
  "futures",
  "http",
+ "http-body",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
  "regex",
  "thiserror",
  "tokio",
+ "tower",
 ]
 
 [[package]]
@@ -2875,7 +2882,6 @@ version = "2026.9.0"
 dependencies = [
  "anyhow",
  "axum",
- "buffa",
  "bytes",
  "chrono",
  "clap",

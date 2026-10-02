@@ -93,13 +93,44 @@ pub enum IngestError {
 
 /// Ingest write capability.
 pub trait Ingest: Send + Sync + 'static {
+    type Put: IngestPut;
+
+    fn begin_put(&self) -> Result<Self::Put, IngestError>;
+
     /// Persist key-value pairs atomically and return the global sequence number that includes this
     /// write. Backends may coalesce concurrent writes and return the same sequence number to each
     /// coalesced caller.
     fn put_batch(
         &self,
         kvs: Vec<(Bytes, Bytes)>,
-    ) -> impl Future<Output = Result<u64, IngestError>> + Send;
+    ) -> impl Future<Output = Result<u64, IngestError>> + Send {
+        async move {
+            let mut put = self.begin_put()?;
+            put.append(kvs).await?;
+            let accepted = put.submit()?;
+            tokio::spawn(accepted)
+                .await
+                .map_err(|error| IngestError::Internal {
+                    message: format!("Put completion failed: {error}"),
+                })?
+        }
+    }
+}
+
+/// Preparation remains private until the complete upload is accepted.
+pub trait IngestPut: Send + 'static {
+    /// Must finish its owned work before returning, including on preparation failure.
+    fn append(
+        &mut self,
+        kvs: Vec<(Bytes, Bytes)>,
+    ) -> impl Future<Output = Result<(), IngestError>> + Send;
+
+    /// A successful submission transfers publication ownership before returning.
+    /// The completion future must own everything it needs to survive cancellation.
+    /// Submission must return without waiting for publication.
+    fn submit(
+        self,
+    ) -> Result<impl Future<Output = Result<u64, IngestError>> + Send + 'static, IngestError>;
 }
 
 /// Query read capability.
