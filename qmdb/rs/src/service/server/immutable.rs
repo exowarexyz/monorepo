@@ -47,6 +47,10 @@ where
         Immutable::resolve_watermark(self, watermark, min_sequence_number)
     }
 
+    fn observe_published(&self, location: Location<F>, sequence: u64) {
+        Immutable::observe_published(self, location, sequence)
+    }
+
     fn operation_range_checkpoint_at(
         &self,
         watermark: PublishedWatermark<F>,
