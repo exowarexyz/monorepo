@@ -102,6 +102,16 @@ impl<F: Family> PublicationCache<F> {
             .map(|known| known.sequence_number)
     }
 
+    /// Record a watermark row seen in the Store batch log, at the sequence of
+    /// the batch that committed it. Skips the update while a refresh holds the
+    /// gate; that only leaves the cache colder, since both sources record
+    /// published watermarks.
+    pub(crate) fn observe(&self, location: Location<F>, sequence: u64) {
+        if let Ok(_gate) = self.refresh_gate.try_lock() {
+            self.remember(Some(location), sequence);
+        }
+    }
+
     pub(crate) async fn refresh(
         &self,
         session: &ReadSession,

@@ -15,7 +15,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file qmdb/v1/operation_log.proto.
  */
 export const file_qmdb_v1_operation_log: GenFile = /*@__PURE__*/
-  fileDesc("ChtxbWRiL3YxL29wZXJhdGlvbl9sb2cucHJvdG8SB3FtZGIudjEivgEKEFN1YnNjcmliZVJlcXVlc3QSNAoLa2V5X2ZpbHRlcnMYASADKAsyFC5jb21tb24ua3YudjEuRmlsdGVyQgm6SAaSAQMQgAgSNgoNdmFsdWVfZmlsdGVycxgCIAMoCzIULmNvbW1vbi5rdi52MS5GaWx0ZXJCCbpIBpIBAxCACBIiChVzaW5jZV9zZXF1ZW5jZV9udW1iZXIYAyABKARIAIgBAUIYChZfc2luY2Vfc2VxdWVuY2VfbnVtYmVyImEKEVN1YnNjcmliZVJlc3BvbnNlEh4KFnJlc3VtZV9zZXF1ZW5jZV9udW1iZXIYASABKAQSLAoFcHJvb2YYAiABKAsyHS5xbWRiLnYxLkhpc3RvcmljYWxNdWx0aVByb29mIpkBChhHZXRPcGVyYXRpb25SYW5nZVJlcXVlc3QSCwoDdGlwGAEgASgEEhYKDnN0YXJ0X2xvY2F0aW9uGAIgASgEEh4KDW1heF9sb2NhdGlvbnMYAyABKA1CB7pIBCoCIAASIAoTbWluX3NlcXVlbmNlX251bWJlchgEIAEoBEgAiAEBQhYKFF9taW5fc2VxdWVuY2VfbnVtYmVyImkKGUdldE9wZXJhdGlvblJhbmdlUmVzcG9uc2USNQoFcHJvb2YYASABKAsyJi5xbWRiLnYxLkhpc3RvcmljYWxPcGVyYXRpb25SYW5nZVByb29mSgQIAhADUg9zZXF1ZW5jZV9udW1iZXIytwEKE09wZXJhdGlvbkxvZ1NlcnZpY2USWgoRR2V0T3BlcmF0aW9uUmFuZ2USIS5xbWRiLnYxLkdldE9wZXJhdGlvblJhbmdlUmVxdWVzdBoiLnFtZGIudjEuR2V0T3BlcmF0aW9uUmFuZ2VSZXNwb25zZRJECglTdWJzY3JpYmUSGS5xbWRiLnYxLlN1YnNjcmliZVJlcXVlc3QaGi5xbWRiLnYxLlN1YnNjcmliZVJlc3BvbnNlMAFiBnByb3RvMw", [file_buf_validate_validate, file_qmdb_v1_proof, file_common_v1_kv]);
+  fileDesc("ChtxbWRiL3YxL29wZXJhdGlvbl9sb2cucHJvdG8SB3FtZGIudjEivgEKEFN1YnNjcmliZVJlcXVlc3QSNAoLa2V5X2ZpbHRlcnMYASADKAsyFC5jb21tb24ua3YudjEuRmlsdGVyQgm6SAaSAQMQgAgSNgoNdmFsdWVfZmlsdGVycxgCIAMoCzIULmNvbW1vbi5rdi52MS5GaWx0ZXJCCbpIBpIBAxCACBIiChVzaW5jZV9zZXF1ZW5jZV9udW1iZXIYAyABKARIAIgBAUIYChZfc2luY2Vfc2VxdWVuY2VfbnVtYmVyImEKEVN1YnNjcmliZVJlc3BvbnNlEh4KFnJlc3VtZV9zZXF1ZW5jZV9udW1iZXIYASABKAQSLAoFcHJvb2YYAiABKAsyHS5xbWRiLnYxLkhpc3RvcmljYWxNdWx0aVByb29mIpkBChhHZXRPcGVyYXRpb25SYW5nZVJlcXVlc3QSCwoDdGlwGAEgASgEEhYKDnN0YXJ0X2xvY2F0aW9uGAIgASgEEh4KDW1heF9sb2NhdGlvbnMYAyABKA1CB7pIBCoCIAASIAoTbWluX3NlcXVlbmNlX251bWJlchgEIAEoBEgAiAEBQhYKFF9taW5fc2VxdWVuY2VfbnVtYmVyImkKGUdldE9wZXJhdGlvblJhbmdlUmVzcG9uc2USNQoFcHJvb2YYASABKAsyJi5xbWRiLnYxLkhpc3RvcmljYWxPcGVyYXRpb25SYW5nZVByb29mSgQIAhADUg9zZXF1ZW5jZV9udW1iZXIifQoUR2V0T3BlcmF0aW9uc1JlcXVlc3QSCwoDdGlwGAEgASgEEh4KCWxvY2F0aW9ucxgCIAMoBEILukgIkgEFCAEQgAgSIAoTbWluX3NlcXVlbmNlX251bWJlchgDIAEoBEgAiAEBQhYKFF9taW5fc2VxdWVuY2VfbnVtYmVyIkUKFUdldE9wZXJhdGlvbnNSZXNwb25zZRIsCgVwcm9vZhgBIAEoCzIdLnFtZGIudjEuSGlzdG9yaWNhbE11bHRpUHJvb2YyhwIKE09wZXJhdGlvbkxvZ1NlcnZpY2USWgoRR2V0T3BlcmF0aW9uUmFuZ2USIS5xbWRiLnYxLkdldE9wZXJhdGlvblJhbmdlUmVxdWVzdBoiLnFtZGIudjEuR2V0T3BlcmF0aW9uUmFuZ2VSZXNwb25zZRJOCg1HZXRPcGVyYXRpb25zEh0ucW1kYi52MS5HZXRPcGVyYXRpb25zUmVxdWVzdBoeLnFtZGIudjEuR2V0T3BlcmF0aW9uc1Jlc3BvbnNlEkQKCVN1YnNjcmliZRIZLnFtZGIudjEuU3Vic2NyaWJlUmVxdWVzdBoaLnFtZGIudjEuU3Vic2NyaWJlUmVzcG9uc2UwAWIGcHJvdG8z", [file_buf_validate_validate, file_qmdb_v1_proof, file_common_v1_kv]);
 
 /**
  * Subscribe to operations whose logical key and/or value match the given
@@ -146,6 +146,58 @@ export const GetOperationRangeResponseSchema: GenMessage<GetOperationRangeRespon
   messageDesc(file_qmdb_v1_operation_log, 3);
 
 /**
+ * Unary multi-proof request for operations at arbitrary locations of one
+ * published tip. `locations` must be strictly ascending and each at most `tip`.
+ *
+ * @generated from message qmdb.v1.GetOperationsRequest
+ */
+export type GetOperationsRequest = Message<"qmdb.v1.GetOperationsRequest"> & {
+  /**
+   * @generated from field: uint64 tip = 1;
+   */
+  tip: bigint;
+
+  /**
+   * @generated from field: repeated uint64 locations = 2;
+   */
+  locations: bigint[];
+
+  /**
+   * Minimum Store sequence for checking publication of the requested watermark.
+   *
+   * @generated from field: optional uint64 min_sequence_number = 3;
+   */
+  minSequenceNumber?: bigint;
+};
+
+/**
+ * Describes the message qmdb.v1.GetOperationsRequest.
+ * Use `create(GetOperationsRequestSchema)` to create a new message.
+ */
+export const GetOperationsRequestSchema: GenMessage<GetOperationsRequest> = /*@__PURE__*/
+  messageDesc(file_qmdb_v1_operation_log, 4);
+
+/**
+ * The proof carries exactly one operation per requested location, in request
+ * order. Its embedded Merkle proof has `tip + 1` leaves.
+ *
+ * @generated from message qmdb.v1.GetOperationsResponse
+ */
+export type GetOperationsResponse = Message<"qmdb.v1.GetOperationsResponse"> & {
+  /**
+   * @generated from field: qmdb.v1.HistoricalMultiProof proof = 1;
+   */
+  proof?: HistoricalMultiProof;
+};
+
+/**
+ * Describes the message qmdb.v1.GetOperationsResponse.
+ * Use `create(GetOperationsResponseSchema)` to create a new message.
+ */
+export const GetOperationsResponseSchema: GenMessage<GetOperationsResponse> = /*@__PURE__*/
+  messageDesc(file_qmdb_v1_operation_log, 5);
+
+/**
  * Historical operation-log proof service over a QMDB backend.
  *
  * Clients dial the endpoint bound to the backend variant they want to read
@@ -166,6 +218,14 @@ export const OperationLogService: GenService<{
     methodKind: "unary";
     input: typeof GetOperationRangeRequestSchema;
     output: typeof GetOperationRangeResponseSchema;
+  },
+  /**
+   * @generated from rpc qmdb.v1.OperationLogService.GetOperations
+   */
+  getOperations: {
+    methodKind: "unary";
+    input: typeof GetOperationsRequestSchema;
+    output: typeof GetOperationsResponseSchema;
   },
   /**
    * @generated from rpc qmdb.v1.OperationLogService.Subscribe

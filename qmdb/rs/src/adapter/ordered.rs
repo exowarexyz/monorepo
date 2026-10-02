@@ -24,18 +24,20 @@ use crate::adapter::codec::{
     chunk_index_for_location, clear_below_floor, decode_current_boundary_metadata,
     decode_update_index_value_present, decode_update_location, decode_update_raw_key,
     encode_chunk_key, encode_current_meta_key, encode_operation_key, encode_ops_root_witness_key,
-    encode_update_key, merkle_size_for_watermark, CurrentBoundaryMetadata, UPDATE_PREFIX,
+    merkle_size_for_watermark, CurrentBoundaryMetadata, UPDATE_PREFIX,
 };
 use crate::adapter::core;
-use crate::adapter::operation_range::load_operation_range_checkpoint;
+use crate::adapter::operation_range::{
+    load_operation_range_checkpoint, load_operations_multi_proof,
+};
 use crate::adapter::read_cache::ReadCache;
-use crate::adapter::storage::{KvCurrentStorage, KvMerkleStorage, ProofBitmap};
+use crate::adapter::storage::{KvCurrentStorage, ProofBitmap};
 use crate::error::{error_key, QmdbError};
 use crate::proof::{
-    CurrentOperationRangeProofResult, OperationRangeCheckpoint, RawBatchMultiProof,
-    RawKeyExclusionProof, RawKeyLookupProof, RawKeyRangeProof, RawKeyValueProof, RawMultiProof,
-    VerifiedCurrentRange, VerifiedKeyLookup, VerifiedKeyRange, VerifiedKeyValue,
-    VerifiedMultiOperations, VerifiedOperationRange,
+    CurrentOperationRangeProofResult, MultiProofOperations, OperationRangeCheckpoint,
+    RawBatchMultiProof, RawKeyExclusionProof, RawKeyLookupProof, RawKeyRangeProof,
+    RawKeyValueProof, VerifiedCurrentRange, VerifiedKeyLookup, VerifiedKeyRange, VerifiedKeyValue,
+    VerifiedOperationRange,
 };
 use crate::request::{span_contains, validate_key_range};
 use crate::OperationKv;
@@ -180,6 +182,11 @@ where
         self.publication.refresh(&session).await
     }
 
+    /// Record a watermark published at `sequence`, as seen by a subscription.
+    pub(crate) fn observe_published(&self, location: Location<F>, sequence: u64) {
+        self.publication.observe(location, sequence);
+    }
+
     pub(crate) async fn resolve_watermark(
         &self,
         watermark: Location<F>,
@@ -260,137 +267,6 @@ where
         Ok(OperationKv { key, value })
     }
 
-    async fn multi_proof_raw_at_watermark<Q: AsRef<[u8]>>(
-        &self,
-        watermark: PublishedWatermark<F>,
-        keys: &[Q],
-    ) -> Result<RawMultiProof<H::Digest, K, V, F, E>, QmdbError> {
-        let session = ReadSession::fixed(self.store.clone(), Some(watermark.sequence_number));
-        let storage = KvMerkleStorage::<F, H::Digest> {
-            session: &session,
-            size: merkle_size_for_watermark(watermark.location)?,
-            _marker: PhantomData,
-        };
-        let inactive_peaks =
-            Self::ops_inactive_peaks_at(&session, &self.op_cfg, watermark.location).await?;
-        let root =
-            core::compute_ops_root::<F, H>(&session, watermark.location, inactive_peaks).await?;
-
-        let mut seen = BTreeSet::<Vec<u8>>::new();
-        let mut operation_bytes = Vec::<(Location<F>, Vec<u8>)>::with_capacity(keys.len());
-        for key in keys {
-            let key_bytes = error_key(key);
-            if !seen.insert(key_bytes.clone()) {
-                return Err(QmdbError::DuplicateRequestedKey { key: key_bytes });
-            }
-            let start = encode_update_key(key.as_ref(), Location::<F>::new(0))?;
-            let end = encode_update_key(key.as_ref(), watermark.location)?;
-            let rows = session
-                .range_with_mode(&start, &end, 1, RangeMode::Reverse)
-                .await?;
-            let Some((row_key, _row_value)) = rows.into_iter().next() else {
-                return Err(QmdbError::ProofKeyNotFound {
-                    watermark: watermark.location.as_u64(),
-                    key: key_bytes.clone(),
-                });
-            };
-            let global_loc = decode_update_location(&row_key)?;
-            let encoded = core::load_operation_bytes_at(&session, global_loc).await?;
-            operation_bytes.push((global_loc, encoded));
-        }
-        operation_bytes.sort_by_key(|(loc, _)| *loc);
-
-        let raw = crate::proof::build_batch_multi_proof::<F, H, _>(
-            &storage,
-            watermark.location,
-            root,
-            inactive_peaks,
-            operation_bytes,
-        )
-        .await
-        .map(|raw| {
-            let operations = raw
-                .operations
-                .iter()
-                .map(|(location, bytes)| {
-                    self.decode_operation_bytes(*location, bytes)
-                        .map(|operation| (*location, operation))
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            Ok::<_, QmdbError>(RawMultiProof {
-                watermark: raw.watermark,
-                ops_root: raw.ops_root,
-                ops_root_witness: None,
-                proof: raw.proof,
-                operations,
-            })
-        })??;
-        let mut raw = raw;
-        raw.ops_root_witness = Self::load_ops_root_witness(&session, watermark.location).await?;
-        if !raw.verify::<H>() {
-            return Err(QmdbError::ProofVerification {
-                kind: crate::ProofKind::HistoricalMultiKey,
-            });
-        }
-        Ok(raw)
-    }
-
-    pub(crate) async fn batch_multi_proof(
-        &self,
-        watermark: PublishedWatermark<F>,
-        operations: Vec<(Location<F>, Vec<u8>)>,
-    ) -> Result<RawBatchMultiProof<H::Digest, F>, QmdbError> {
-        let session = ReadSession::fixed(self.store.clone(), Some(watermark.sequence_number));
-        let storage = KvMerkleStorage::<F, H::Digest> {
-            session: &session,
-            size: merkle_size_for_watermark(watermark.location)?,
-            _marker: PhantomData,
-        };
-        let inactive_peaks =
-            Self::ops_inactive_peaks_at(&session, &self.op_cfg, watermark.location).await?;
-        let root =
-            core::compute_ops_root::<F, H>(&session, watermark.location, inactive_peaks).await?;
-        let mut proof = crate::proof::build_batch_multi_proof::<F, H, _>(
-            &storage,
-            watermark.location,
-            root,
-            inactive_peaks,
-            operations,
-        )
-        .await?;
-        proof.ops_root_witness = Self::load_ops_root_witness(&session, watermark.location).await?;
-        Ok(proof)
-    }
-
-    /// Verified raw multi-proof over a set of keys.
-    pub async fn multi_proof_raw<Q: AsRef<[u8]>>(
-        &self,
-        watermark: Location<F>,
-        keys: &[Q],
-    ) -> Result<RawMultiProof<H::Digest, K, V, F, E>, QmdbError> {
-        if keys.is_empty() {
-            return Err(QmdbError::EmptyProofRequest);
-        }
-        let watermark = self.resolve_watermark(watermark, None).await?;
-        self.multi_proof_raw_at_watermark(watermark, keys).await
-    }
-
-    /// Verified multi-proof over a set of keys.
-    pub async fn multi_proof<Q: AsRef<[u8]>>(
-        &self,
-        watermark: Location<F>,
-        keys: &[Q],
-    ) -> Result<VerifiedMultiOperations<H::Digest, K, V, F, E>, QmdbError> {
-        let raw = self.multi_proof_raw(watermark, keys).await?;
-        Ok(VerifiedMultiOperations {
-            root: crate::proof::canonical_root::<F, H>(
-                &raw.ops_root,
-                raw.ops_root_witness.as_ref(),
-            ),
-            operations: raw.operations,
-        })
-    }
-
     /// Verified contiguous range of operations.
     pub async fn operation_range(
         &self,
@@ -463,6 +339,37 @@ where
         )
         .await?;
         Ok(checkpoint)
+    }
+
+    /// Multi-proof at a published watermark, built from the same cached reads
+    /// as [`Self::operation_range_checkpoint_at`].
+    pub(crate) async fn multi_proof_at(
+        &self,
+        watermark: PublishedWatermark<F>,
+        operations: MultiProofOperations<'_, F>,
+    ) -> Result<RawBatchMultiProof<H::Digest, F>, QmdbError> {
+        let session = ReadSession::fixed(self.store.clone(), Some(watermark.sequence_number));
+        let watermark = watermark.location;
+        let session = &session;
+        load_operations_multi_proof::<F, H, _>(
+            session,
+            &self.read_cache,
+            watermark,
+            operations,
+            true,
+            |bytes| async move {
+                let operation = Self::decode_operation(&self.op_cfg, watermark, bytes.as_ref())?;
+                let floor = Self::load_ops_inactivity_floor_from(
+                    session,
+                    &self.op_cfg,
+                    watermark,
+                    operation,
+                )
+                .await?;
+                core::inactive_peaks(watermark, floor)
+            },
+        )
+        .await
     }
 
     /// Verified raw current-state proof for a contiguous operation range.

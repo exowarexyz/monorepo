@@ -25,8 +25,9 @@ use connectrpc::{
     ConnectError, ConnectRpcService, ErrorCode, RequestContext as Context, ServiceRequest,
 };
 use exoware_qmdb::service::proto::qmdb::v1::{
-    GetOperationRangeRequest, GetOperationRangeResponse, OperationLogService,
-    OperationLogServiceClient, OperationLogServiceServer, SubscribeRequest, SubscribeResponse,
+    GetOperationRangeRequest, GetOperationRangeResponse, GetOperationsRequest,
+    GetOperationsResponse, OperationLogService, OperationLogServiceClient,
+    OperationLogServiceServer, SubscribeRequest, SubscribeResponse,
 };
 use exoware_qmdb::{CurrentBoundaryState, QmdbError};
 use exoware_sdk::proto::PreferZstdHttpClient;
@@ -309,6 +310,17 @@ impl OperationLogService for StaticOperationLogService {
         ))
     }
 
+    async fn get_operations(
+        &self,
+        _ctx: Context,
+        _request: ServiceRequest<'_, GetOperationsRequest>,
+    ) -> connectrpc::ServiceResult<GetOperationsResponse> {
+        Err(ConnectError::new(
+            ErrorCode::Unimplemented,
+            "not implemented",
+        ))
+    }
+
     fn subscribe(
         &self,
         _ctx: Context,
@@ -342,6 +354,17 @@ impl OperationLogService for StaticOperationRangeService {
         connectrpc::Response::ok(self.operation_range_response.clone())
     }
 
+    async fn get_operations(
+        &self,
+        _ctx: Context,
+        _request: ServiceRequest<'_, GetOperationsRequest>,
+    ) -> connectrpc::ServiceResult<GetOperationsResponse> {
+        Err(ConnectError::new(
+            ErrorCode::Unimplemented,
+            "not implemented",
+        ))
+    }
+
     async fn subscribe(
         &self,
         _ctx: Context,
@@ -352,6 +375,57 @@ impl OperationLogService for StaticOperationRangeService {
             "not implemented",
         ))
     }
+}
+
+/// An `OperationLogService` impl that returns one caller-supplied
+/// `GetOperationsResponse`. Used to feed tampered multi-proofs into the
+/// validated client.
+#[derive(Clone)]
+pub struct StaticOperationsService {
+    pub operations_response: GetOperationsResponse,
+}
+
+impl OperationLogService for StaticOperationsService {
+    async fn get_operation_range(
+        &self,
+        _ctx: Context,
+        _request: ServiceRequest<'_, GetOperationRangeRequest>,
+    ) -> connectrpc::ServiceResult<GetOperationRangeResponse> {
+        Err(ConnectError::new(
+            ErrorCode::Unimplemented,
+            "not implemented",
+        ))
+    }
+
+    async fn get_operations(
+        &self,
+        _ctx: Context,
+        _request: ServiceRequest<'_, GetOperationsRequest>,
+    ) -> connectrpc::ServiceResult<GetOperationsResponse> {
+        connectrpc::Response::ok(self.operations_response.clone())
+    }
+
+    async fn subscribe(
+        &self,
+        _ctx: Context,
+        _request: ServiceRequest<'_, SubscribeRequest>,
+    ) -> connectrpc::ServiceResult<connectrpc::ServiceStream<SubscribeResponse>> {
+        Err(ConnectError::new(
+            ErrorCode::Unimplemented,
+            "not implemented",
+        ))
+    }
+}
+
+#[allow(dead_code)]
+pub async fn spawn_static_operations_service(
+    service: StaticOperationsService,
+) -> (tokio::task::JoinHandle<()>, String) {
+    spawn_connect_service(
+        ConnectRpcService::new(OperationLogServiceServer::new(service))
+            .with_compression(exoware_sdk::connect_compression_registry()),
+    )
+    .await
 }
 
 #[allow(dead_code)]

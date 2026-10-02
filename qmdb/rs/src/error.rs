@@ -46,8 +46,6 @@ pub enum ProofKind {
     CurrentKeyValue,
     /// Current ordered proof that a key is inactive.
     CurrentKeyExclusion,
-    /// Historical multi-proof over subscribed operations.
-    HistoricalMultiKey,
     /// Subscribe-time multi-proof covering matched operations in one batch
     /// (`OperationLogService.Subscribe`).
     BatchMulti,
@@ -62,7 +60,6 @@ impl std::fmt::Display for ProofKind {
         let s = match self {
             Self::CurrentKeyValue => "current key-value",
             Self::CurrentKeyExclusion => "current key-exclusion",
-            Self::HistoricalMultiKey => "historical many-key",
             Self::BatchMulti => "batch multi",
             Self::RangeCheckpoint => "range checkpoint",
             Self::CurrentRange => "current range",
@@ -80,6 +77,15 @@ impl From<crate::request::InvalidWindow> for QmdbError {
                 Self::RangeStartOutOfBounds { start, count }
             }
             InvalidWindow::ZeroMaximum => Self::InvalidRangeLength,
+        }
+    }
+}
+
+impl From<crate::request::InvalidLocations> for QmdbError {
+    fn from(err: crate::request::InvalidLocations) -> Self {
+        match err {
+            crate::request::InvalidLocations::TipOverflow => Self::CorruptData(err.to_string()),
+            _ => Self::InvalidRequestedLocations(err.to_string()),
         }
     }
 }
@@ -113,6 +119,8 @@ pub enum QmdbError {
     CurrentBoundaryStateMissing { location: u64 },
     #[error("range proof start {start} is out of bounds for watermark with {count} leaves")]
     RangeStartOutOfBounds { start: u64, count: u64 },
+    #[error("invalid requested locations: {0}")]
+    InvalidRequestedLocations(String),
     #[error("encoded value exceeds store value limit ({len} > {max})")]
     EncodedValueTooLarge { len: usize, max: usize },
     #[error(
