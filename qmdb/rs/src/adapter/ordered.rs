@@ -39,7 +39,7 @@ use crate::proof::{
     RawKeyValueProof, VerifiedCurrentRange, VerifiedKeyLookup, VerifiedKeyRange, VerifiedKeyValue,
     VerifiedOperationRange,
 };
-use crate::request::{span_contains, validate_key_range};
+use crate::request::{span_contains, validate_key_range, MAX_RANGE_LIMIT};
 use crate::OperationKv;
 use crate::PublishedWatermark;
 use crate::VersionedValue;
@@ -973,6 +973,9 @@ where
     ) -> Result<RawKeyRangeProof<H::Digest, K, V, N, F, E>, QmdbError> {
         if limit == 0 {
             return Err(QmdbError::InvalidRangeLength);
+        }
+        if limit > MAX_RANGE_LIMIT {
+            return Err(QmdbError::RangeLimitTooLarge { limit });
         }
         if let Some(end) = end_key.as_ref() {
             if end <= &start_key {

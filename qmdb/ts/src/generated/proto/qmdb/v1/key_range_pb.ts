@@ -13,14 +13,14 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file qmdb/v1/key_range.proto.
  */
 export const file_qmdb_v1_key_range: GenFile = /*@__PURE__*/
-  fileDesc("ChdxbWRiL3YxL2tleV9yYW5nZS5wcm90bxIHcW1kYi52MSKlAQoPR2V0UmFuZ2VSZXF1ZXN0EhEKCXN0YXJ0X2tleRgBIAEoDBIUCgdlbmRfa2V5GAIgASgMSACIAQESFgoFbGltaXQYAyABKA1CB7pIBCoCIAASCwoDdGlwGAQgASgEEiAKE21pbl9zZXF1ZW5jZV9udW1iZXIYBSABKARIAYgBAUIKCghfZW5kX2tleUIWChRfbWluX3NlcXVlbmNlX251bWJlciKPAQoQR2V0UmFuZ2VSZXNwb25zZRIuCgdlbnRyaWVzGAEgAygLMh0ucW1kYi52MS5DdXJyZW50S2V5VmFsdWVQcm9vZhI7CgtzdGFydF9wcm9vZhgCIAEoCzIhLnFtZGIudjEuQ3VycmVudEtleUV4Y2x1c2lvblByb29mSACIAQFCDgoMX3N0YXJ0X3Byb29mMlkKFk9yZGVyZWRLZXlSYW5nZVNlcnZpY2USPwoIR2V0UmFuZ2USGC5xbWRiLnYxLkdldFJhbmdlUmVxdWVzdBoZLnFtZGIudjEuR2V0UmFuZ2VSZXNwb25zZWIGcHJvdG8z", [file_buf_validate_validate, file_qmdb_v1_proof]);
+  fileDesc("ChdxbWRiL3YxL2tleV9yYW5nZS5wcm90bxIHcW1kYi52MSKoAQoPR2V0UmFuZ2VSZXF1ZXN0EhEKCXN0YXJ0X2tleRgBIAEoDBIUCgdlbmRfa2V5GAIgASgMSACIAQESGQoFbGltaXQYAyABKA1CCrpIByoFGOgHIAASCwoDdGlwGAQgASgEEiAKE21pbl9zZXF1ZW5jZV9udW1iZXIYBSABKARIAYgBAUIKCghfZW5kX2tleUIWChRfbWluX3NlcXVlbmNlX251bWJlciKPAQoQR2V0UmFuZ2VSZXNwb25zZRIuCgdlbnRyaWVzGAEgAygLMh0ucW1kYi52MS5DdXJyZW50S2V5VmFsdWVQcm9vZhI7CgtzdGFydF9wcm9vZhgCIAEoCzIhLnFtZGIudjEuQ3VycmVudEtleUV4Y2x1c2lvblByb29mSACIAQFCDgoMX3N0YXJ0X3Byb29mMlkKFk9yZGVyZWRLZXlSYW5nZVNlcnZpY2USPwoIR2V0UmFuZ2USGC5xbWRiLnYxLkdldFJhbmdlUmVxdWVzdBoZLnFtZGIudjEuR2V0UmFuZ2VSZXNwb25zZWIGcHJvdG8z", [file_buf_validate_validate, file_qmdb_v1_proof]);
 
 /**
  * Current ordered key range proof request. Key fields are codec-encoded logical
  * QMDB keys (`K::encode()` bytes), not store row keys. The range is half-open:
  * `start_key <= key < end_key` after decoding `K` when `end_key` is set;
  * otherwise it scans to the end of the ordered keyspace. `limit` must be
- * non-zero.
+ * between 1 and 1000.
  *
  * @generated from message qmdb.v1.GetRangeRequest
  */
