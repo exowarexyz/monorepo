@@ -66,6 +66,9 @@ impl OperationWindow {
 /// Maximum number of locations in one operations multi-proof request
 pub(crate) const MAX_REQUESTED_LOCATIONS: usize = 1024;
 
+/// Maximum number of entries in one key range proof request
+pub(crate) const MAX_RANGE_LIMIT: u32 = 1000;
+
 /// Requested operation locations that cannot be served regardless of the response
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum InvalidLocations {

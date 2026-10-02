@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::marker::PhantomData;
 use std::sync::Arc;
 
@@ -18,13 +18,13 @@ use commonware_storage::{
         operation::{Key as QmdbKey, Operation as _},
     },
 };
-use exoware_sdk::{PrefixedStoreClient, RangeMode, ReadSession};
+use exoware_sdk::{keys::Key, PrefixedStoreClient, RangeMode, ReadSession};
 
 use crate::adapter::codec::{
     chunk_index_for_location, clear_below_floor, decode_current_boundary_metadata,
     decode_update_index_value_present, decode_update_location, decode_update_raw_key,
     encode_chunk_key, encode_current_meta_key, encode_operation_key, encode_ops_root_witness_key,
-    merkle_size_for_watermark, CurrentBoundaryMetadata, UPDATE_PREFIX,
+    encode_update_key, merkle_size_for_watermark, CurrentBoundaryMetadata, UPDATE_PREFIX,
 };
 use crate::adapter::core;
 use crate::adapter::operation_range::{
@@ -39,12 +39,21 @@ use crate::proof::{
     RawKeyValueProof, VerifiedCurrentRange, VerifiedKeyLookup, VerifiedKeyRange, VerifiedKeyValue,
     VerifiedOperationRange,
 };
-use crate::request::{span_contains, validate_key_range};
+use crate::request::{span_contains, validate_key_range, MAX_RANGE_LIMIT};
 use crate::OperationKv;
 use crate::PublishedWatermark;
 use crate::VersionedValue;
 
 const ACTIVE_OPERATION_GET_MANY_BATCH: usize = 1024;
+/// Update-index rows in a walk's first request. An exclusion walk usually
+/// reads the probed key's own overwritten or deleted versions and stops at
+/// its neighbour's newest one.
+const UPDATE_WALK_FIRST_PAGE_ROWS: usize = 128;
+/// Factor by which each further request grows, so a long run of inactive keys
+/// costs round trips logarithmic in its length.
+const UPDATE_WALK_PAGE_GROWTH: usize = 8;
+/// Largest walk request, the Store's row limit for one range frame.
+const UPDATE_WALK_MAX_PAGE_ROWS: usize = 4096;
 
 pub struct Ordered<
     F: Graftable,
@@ -611,92 +620,247 @@ where
         })
     }
 
-    async fn active_ordered_updates(
+    /// Visit keys of the key-ordered update index in `[start, end]`, in `mode`
+    /// order, with each key's latest version at or below `watermark` as
+    /// `(raw key, location, value present)`. Stops when `visit` returns
+    /// `false`, so a walk reads only up to the keys its caller needs. Index
+    /// order is raw key byte order, which matches `K`'s order as commonware's
+    /// ordered index already requires of ordered QMDB keys.
+    ///
+    /// A key is visited as soon as its rows settle it: in reverse at its newest
+    /// version at or below `watermark`, and forward at the first version above
+    /// `watermark` or the next key. Later requests skip the rest of a settled
+    /// key's rows. Reads pages of at least `first_page_rows` rows, each later page
+    /// [`UPDATE_WALK_PAGE_GROWTH`] times larger up to [`UPDATE_WALK_MAX_PAGE_ROWS`],
+    /// so the Store reads little past the row where `visit` stops.
+    async fn walk_latest_updates(
         session: &ReadSession,
-        op_cfg: &<ordered::Operation<F, K, E> as commonware_codec::Read>::Cfg,
+        start: &Key,
+        end: &Key,
+        mode: RangeMode,
         watermark: Location<F>,
-    ) -> Result<Vec<(Location<F>, ordered::Update<K, E>)>, QmdbError> {
-        let inactivity_floor = Self::load_inactivity_floor_at(session, op_cfg, watermark).await?;
-        let (start, end) = UPDATE_PREFIX.bounds();
-        let mut rows = session.range_stream(&start, &end, usize::MAX, 1024).await?;
-        let mut latest = BTreeMap::<Vec<u8>, (Location<F>, bool)>::new();
-        while let Some(chunk) = rows.next_chunk().await? {
-            for (row_key, row_value) in chunk.rows {
+        first_page_rows: usize,
+        mut visit: impl FnMut(Vec<u8>, Location<F>, bool) -> Result<bool, QmdbError>,
+    ) -> Result<(), QmdbError> {
+        let (mut start, mut end) = (start.clone(), end.clone());
+        let mut page_rows =
+            first_page_rows.clamp(UPDATE_WALK_FIRST_PAGE_ROWS, UPDATE_WALK_MAX_PAGE_ROWS);
+        let mut last_row_key: Option<Key> = None;
+        // Rows arrive grouped by key; versions oldest first forward, newest first reverse.
+        // A key's versions may span pages, so the settled and pending keys carry across them.
+        let mut settled_raw_key: Option<Vec<u8>> = None;
+        // Forward, the newest version at or below `watermark` so far of the current key.
+        let mut pending: Option<(Vec<u8>, Location<F>, bool)> = None;
+        loop {
+            let rows = session
+                .range_with_mode(&start, &end, page_rows, mode)
+                .await?;
+            let exhausted = rows.len() < page_rows;
+            // Each page after the first restarts at the previous page's last row, inclusive.
+            let repeats_last_row = rows
+                .first()
+                .is_some_and(|(row_key, _)| last_row_key.as_ref() == Some(row_key));
+            for (row_key, row_value) in rows.into_iter().skip(usize::from(repeats_last_row)) {
+                let raw_key = decode_update_raw_key(&row_key)?;
+                last_row_key = Some(row_key.clone());
+                if settled_raw_key.as_ref() == Some(&raw_key) {
+                    continue;
+                }
+                // Forward, a new key settles the pending one
+                if let Some((pending_raw_key, location, value_present)) =
+                    pending.take_if(|(pending_raw_key, _, _)| *pending_raw_key != raw_key)
+                {
+                    if !visit(pending_raw_key, location, value_present)? {
+                        return Ok(());
+                    }
+                }
                 let location = decode_update_location(&row_key)?;
-                if location < inactivity_floor || location > watermark {
+                if location > watermark {
+                    // Forward, versions above `watermark` follow every eligible one
+                    if mode == RangeMode::Forward {
+                        settled_raw_key = Some(raw_key);
+                        if let Some((pending_raw_key, location, value_present)) = pending.take() {
+                            if !visit(pending_raw_key, location, value_present)? {
+                                return Ok(());
+                            }
+                        }
+                    }
                     continue;
                 }
                 let value_present = decode_update_index_value_present(&row_value)?;
-                let key = decode_update_raw_key(&row_key)?;
-                latest
-                    .entry(key)
-                    .and_modify(|(known_location, known_value_present)| {
-                        if location > *known_location {
-                            *known_location = location;
-                            *known_value_present = value_present;
+                match mode {
+                    RangeMode::Forward => pending = Some((raw_key, location, value_present)),
+                    RangeMode::Reverse => {
+                        settled_raw_key = Some(raw_key.clone());
+                        if !visit(raw_key, location, value_present)? {
+                            return Ok(());
                         }
-                    })
-                    .or_insert((location, value_present));
+                    }
+                }
             }
-        }
-
-        let active_locations = latest
-            .into_iter()
-            .filter_map(|(key, (location, value_present))| value_present.then_some((key, location)))
-            .collect::<Vec<_>>();
-
-        let mut loaded_operations =
-            std::collections::HashMap::with_capacity(active_locations.len());
-        for chunk in active_locations.chunks(ACTIVE_OPERATION_GET_MANY_BATCH) {
-            let operation_keys = chunk
-                .iter()
-                .map(|(_, location)| encode_operation_key(*location))
-                .collect::<Vec<_>>();
-            let operation_key_refs = operation_keys.iter().collect::<Vec<_>>();
-            let batch_size = u32::try_from(operation_key_refs.len()).map_err(|_| {
-                QmdbError::CorruptData(
-                    "active operation get_many batch size overflows u32".to_string(),
-                )
-            })?;
-            let fetched = session
-                .get_many(&operation_key_refs, batch_size)
-                .await?
-                .collect()
-                .await?;
-            loaded_operations.extend(fetched);
-        }
-
-        let mut active = Vec::new();
-        for (key, location) in active_locations {
-            let operation_key = encode_operation_key(location);
-            let Some(encoded) = loaded_operations.remove(&operation_key) else {
-                return Err(QmdbError::CorruptData(format!(
-                    "missing operation row at location {location}"
-                )));
+            let Some(last_row_key) = last_row_key.clone().filter(|_| !exhausted) else {
+                break;
             };
-            let operation = Self::decode_operation(op_cfg, location, encoded.as_ref())?;
-            let ordered::Operation::Update(update) = operation else {
-                return Err(QmdbError::CorruptData(format!(
-                    "latest active key row at {location} does not point to an update operation"
-                )));
-            };
-            if update.key.as_ref() != key.as_slice() {
-                return Err(QmdbError::CorruptData(format!(
-                    "active update key mismatch at {location}"
-                )));
+            // Past a settled key, resume beyond its remaining versions
+            let last_raw_key = decode_update_raw_key(&last_row_key)?;
+            let last_key_settled = settled_raw_key.as_ref() == Some(&last_raw_key);
+            match mode {
+                RangeMode::Forward => {
+                    start = if last_key_settled {
+                        encode_update_key(&last_raw_key, Location::<F>::new(u64::MAX))?
+                    } else {
+                        last_row_key
+                    };
+                    if start > end {
+                        break;
+                    }
+                }
+                RangeMode::Reverse => {
+                    end = if last_key_settled {
+                        encode_update_key(&last_raw_key, Location::<F>::new(0))?
+                    } else {
+                        last_row_key
+                    };
+                    if end < start {
+                        break;
+                    }
+                }
             }
-            active.push((location, update));
+            page_rows = page_rows
+                .saturating_mul(UPDATE_WALK_PAGE_GROWTH)
+                .min(UPDATE_WALK_MAX_PAGE_ROWS);
         }
-        active.sort_by(|a, b| a.1.key.cmp(&b.1.key));
-        Ok(active)
+        if let Some((pending_raw_key, location, value_present)) = pending {
+            visit(pending_raw_key, location, value_present)?;
+        }
+        Ok(())
     }
 
-    async fn active_ordered_updates_at_watermark(
-        &self,
-        watermark: PublishedWatermark<F>,
+    /// Greatest key active at `watermark` in `[start, end]`, as `(raw key, location)`.
+    /// Fails if `absent_key` is active, since an exclusion proof requires it not to be.
+    async fn greatest_active_key(
+        session: &ReadSession,
+        start: &Key,
+        end: &Key,
+        watermark: Location<F>,
+        inactivity_floor: Location<F>,
+        absent_key: &[u8],
+    ) -> Result<Option<(Vec<u8>, Location<F>)>, QmdbError> {
+        let mut found = None;
+        Self::walk_latest_updates(
+            session,
+            start,
+            end,
+            RangeMode::Reverse,
+            watermark,
+            UPDATE_WALK_FIRST_PAGE_ROWS,
+            |raw_key, location, value_present| {
+                if !value_present || location < inactivity_floor {
+                    return Ok(true);
+                }
+                if raw_key == absent_key {
+                    return Err(QmdbError::CorruptData(
+                        "cannot build exclusion proof for active key".to_string(),
+                    ));
+                }
+                found = Some((raw_key, location));
+                Ok(false)
+            },
+        )
+        .await?;
+        Ok(found)
+    }
+
+    /// The active update whose span covers the inactive `key`: the greatest
+    /// active key below it or, when none is, the greatest active key overall,
+    /// whose span wraps. `None` when no key is active.
+    async fn covering_update(
+        session: &ReadSession,
+        op_cfg: &<ordered::Operation<F, K, E> as commonware_codec::Read>::Cfg,
+        watermark: Location<F>,
+        inactivity_floor: Location<F>,
+        key: &K,
+    ) -> Result<Option<(Location<F>, ordered::Update<K, E>)>, QmdbError> {
+        let (index_start, index_end) = UPDATE_PREFIX.bounds();
+        let through_key = encode_update_key(key.as_ref(), watermark)?;
+        let mut found = Self::greatest_active_key(
+            session,
+            &index_start,
+            &through_key,
+            watermark,
+            inactivity_floor,
+            key.as_ref(),
+        )
+        .await?;
+        if found.is_none() {
+            // Nothing below `key` is active, so only keys above it can cover the wrap.
+            let after_key = encode_update_key(key.as_ref(), Location::<F>::new(u64::MAX))?;
+            found = Self::greatest_active_key(
+                session,
+                &after_key,
+                &index_end,
+                watermark,
+                inactivity_floor,
+                key.as_ref(),
+            )
+            .await?;
+        }
+        let Some((active_key, location)) = found else {
+            return Ok(None);
+        };
+        let mut updates =
+            Self::load_active_updates(session, op_cfg, &[(active_key, location)]).await?;
+        Ok(updates.pop())
+    }
+
+    /// Load the update operations behind active `(key, location)` index entries.
+    async fn load_active_updates(
+        session: &ReadSession,
+        op_cfg: &<ordered::Operation<F, K, E> as commonware_codec::Read>::Cfg,
+        entries: &[(Vec<u8>, Location<F>)],
     ) -> Result<Vec<(Location<F>, ordered::Update<K, E>)>, QmdbError> {
-        let session = ReadSession::fixed(self.store.clone(), Some(watermark.sequence_number));
-        Self::active_ordered_updates(&session, &self.op_cfg, watermark.location).await
+        if entries.is_empty() {
+            return Ok(Vec::new());
+        }
+        let operation_keys = entries
+            .iter()
+            .map(|(_, location)| encode_operation_key(*location))
+            .collect::<Vec<_>>();
+        let operation_key_refs = operation_keys.iter().collect::<Vec<_>>();
+        let batch_size = u32::try_from(
+            operation_key_refs
+                .len()
+                .min(ACTIVE_OPERATION_GET_MANY_BATCH),
+        )
+        .expect("batch bound fits u32");
+        let mut loaded = session
+            .get_many(&operation_key_refs, batch_size)
+            .await?
+            .collect()
+            .await?;
+        entries
+            .iter()
+            .zip(&operation_keys)
+            .map(|((key, location), operation_key)| {
+                let Some(encoded) = loaded.remove(operation_key) else {
+                    return Err(QmdbError::CorruptData(format!(
+                        "missing operation row at location {location}"
+                    )));
+                };
+                let operation = Self::decode_operation(op_cfg, *location, encoded.as_ref())?;
+                let ordered::Operation::Update(update) = operation else {
+                    return Err(QmdbError::CorruptData(format!(
+                        "latest active key row at {location} does not point to an update operation"
+                    )));
+                };
+                if update.key.as_ref() != key.as_slice() {
+                    return Err(QmdbError::CorruptData(format!(
+                        "active update key mismatch at {location}"
+                    )));
+                }
+                Ok((*location, update))
+            })
+            .collect()
     }
 
     async fn key_exclusion_proof(
@@ -707,9 +871,20 @@ where
     ) -> Result<RawKeyExclusionProof<H::Digest, K, V, N, F, E>, QmdbError> {
         core::require_batch_boundary(session, watermark).await?;
         let root = Self::load_current_boundary_root(session, watermark).await?;
-        let active = Self::active_ordered_updates(session, op_cfg, watermark).await?;
+        let inactivity_floor = Self::load_inactivity_floor_at(session, op_cfg, watermark).await?;
+        let covering =
+            Self::covering_update(session, op_cfg, watermark, inactivity_floor, key).await?;
 
-        let proof = if active.is_empty() {
+        let proof = if let Some((location, update)) = covering {
+            if !span_contains(&update.key, &update.next_key, key) {
+                return Err(QmdbError::CorruptData(format!(
+                    "no ordered active-key span contains requested key {key:?}"
+                )));
+            }
+            let op_proof =
+                Self::build_current_operation_proof(session, op_cfg, watermark, location).await?;
+            ExclusionProof::KeyValue(op_proof, update)
+        } else {
             let operation = Self::load_operation_at(session, op_cfg, watermark).await?;
             let ordered::Operation::CommitFloor(value, floor) = operation else {
                 return Err(QmdbError::CorruptData(format!(
@@ -724,27 +899,6 @@ where
             let op_proof =
                 Self::build_current_operation_proof(session, op_cfg, watermark, watermark).await?;
             ExclusionProof::Commit(op_proof, value)
-        } else {
-            let mut span = None;
-            for (location, update) in active {
-                if update.key == *key {
-                    return Err(QmdbError::CorruptData(
-                        "cannot build exclusion proof for active key".to_string(),
-                    ));
-                }
-                if span_contains(&update.key, &update.next_key, key) {
-                    span = Some((location, update));
-                    break;
-                }
-            }
-            let Some((location, update)) = span else {
-                return Err(QmdbError::CorruptData(format!(
-                    "no ordered active-key span contains requested key {key:?}"
-                )));
-            };
-            let op_proof =
-                Self::build_current_operation_proof(session, op_cfg, watermark, location).await?;
-            ExclusionProof::KeyValue(op_proof, update)
         };
 
         let raw = RawKeyExclusionProof {
@@ -820,6 +974,9 @@ where
         if limit == 0 {
             return Err(QmdbError::InvalidRangeLength);
         }
+        if limit > MAX_RANGE_LIMIT {
+            return Err(QmdbError::RangeLimitTooLarge { limit });
+        }
         if let Some(end) = end_key.as_ref() {
             if end <= &start_key {
                 return Err(QmdbError::InvalidKeyRange {
@@ -833,19 +990,40 @@ where
             .resolve_watermark(watermark, min_sequence_number)
             .await?;
 
-        let active = self.active_ordered_updates_at_watermark(watermark).await?;
-        let selected = active
-            .into_iter()
-            .filter(|(_, update)| {
-                update.key >= start_key && end_key.as_ref().is_none_or(|end| update.key < *end)
-            })
-            .take(limit as usize)
-            .collect::<Vec<_>>();
-
-        let mut entries = Vec::with_capacity(selected.len());
-        for (_, update) in &selected {
+        let session = ReadSession::fixed(self.store.clone(), Some(watermark.sequence_number));
+        let inactivity_floor =
+            Self::load_inactivity_floor_at(&session, &self.op_cfg, watermark.location).await?;
+        let start = encode_update_key(start_key.as_ref(), Location::<F>::new(0))?;
+        let (_, index_end) = UPDATE_PREFIX.bounds();
+        let mut active = Vec::new();
+        // Settling the `limit`th active key can take a row of the key after it.
+        let first_page_rows = (limit as usize).saturating_add(1);
+        Self::walk_latest_updates(
+            &session,
+            &start,
+            &index_end,
+            RangeMode::Forward,
+            watermark.location,
+            first_page_rows,
+            |raw_key, location, value_present| {
+                if end_key
+                    .as_ref()
+                    .is_some_and(|end| raw_key.as_slice() >= end.as_ref())
+                {
+                    return Ok(false);
+                }
+                if value_present && location >= inactivity_floor {
+                    active.push((raw_key, location));
+                }
+                Ok(active.len() < limit as usize)
+            },
+        )
+        .await?;
+        // Each entry's proof loads and checks its own operation.
+        let mut entries = Vec::with_capacity(active.len());
+        for (key, _) in &active {
             let proof = self
-                .key_value_proof_raw_at_watermark(watermark, update.key.as_ref())
+                .key_value_proof_raw_at_watermark(watermark, key.as_slice())
                 .await?;
             entries.push(proof);
         }

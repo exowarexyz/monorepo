@@ -2087,7 +2087,7 @@ pub const __GET_MANY_RESPONSE_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = :
 /// QMDB keys (`K::encode()` bytes), not store row keys. The range is half-open:
 /// `start_key <= key < end_key` after decoding `K` when `end_key` is set;
 /// otherwise it scans to the end of the ordered keyspace. `limit` must be
-/// non-zero.
+/// between 1 and 1000.
 #[derive(Clone, PartialEq, Default)]
 #[derive(::serde::Serialize, ::serde::Deserialize)]
 #[serde(default)]
@@ -7900,7 +7900,7 @@ pub mod __buffa {
         /// QMDB keys (`K::encode()` bytes), not store row keys. The range is half-open:
         /// `start_key <= key < end_key` after decoding `K` when `end_key` is set;
         /// otherwise it scans to the end of the ordered keyspace. `limit` must be
-        /// non-zero.
+        /// between 1 and 1000.
         #[derive(Clone, Debug, Default)]
         pub struct GetRangeRequestView<'a> {
             /// Field 1: `start_key`
