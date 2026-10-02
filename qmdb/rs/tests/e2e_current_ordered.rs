@@ -17,11 +17,14 @@ use commonware_storage::qmdb::any::ordered::variable::Operation as QmdbOperation
 use commonware_storage::qmdb::any::value::FixedEncoding;
 use commonware_storage::qmdb::current::ordered::fixed::Db as LocalFixedQmdbDb;
 use commonware_storage::qmdb::current::ordered::variable::Db as LocalQmdbDb;
+use commonware_storage::qmdb::current::ordered::ExclusionProof;
 use commonware_storage::qmdb::operation::Operation as _;
 use commonware_storage::translator::TwoCap;
 use commonware_utils::{NZUsize, NZU16, NZU64};
 use exoware_qmdb::MAX_OPERATION_SIZE;
-use exoware_qmdb::{adapter::upload::recover_boundary_state, CurrentBoundaryState};
+use exoware_qmdb::{
+    adapter::upload::recover_boundary_state, proof::RawKeyLookupProof, CurrentBoundaryState,
+};
 use exoware_sdk::{PrefixedStoreClient, StoreClient};
 
 const N: usize = 32;
@@ -984,74 +987,8 @@ async fn test_key_value_proof() {
     }
 }
 
-struct CountingQuery {
-    store: std::sync::Arc<exoware_simulator::RocksStore>,
-    bitmap_chunks: std::sync::Mutex<BTreeSet<u64>>,
-}
-
-impl exoware_server::Sequence for CountingQuery {
-    fn current_sequence(&self) -> u64 {
-        exoware_server::Sequence::current_sequence(self.store.as_ref())
-    }
-}
-
-impl exoware_server::Query for CountingQuery {
-    type RangeScan = <exoware_simulator::RocksStore as exoware_server::Query>::RangeScan;
-
-    async fn get(
-        &self,
-        key: bytes::Bytes,
-    ) -> Result<exoware_server::QueryResult<Option<bytes::Bytes>>, String> {
-        exoware_server::Query::get(self.store.as_ref(), key).await
-    }
-
-    async fn get_many(
-        &self,
-        keys: Vec<bytes::Bytes>,
-    ) -> Result<exoware_server::QueryResult<Vec<(bytes::Bytes, Option<bytes::Bytes>)>>, String>
-    {
-        exoware_server::Query::get_many(self.store.as_ref(), keys).await
-    }
-
-    async fn range_scan(
-        &self,
-        start: bytes::Bytes,
-        end: bytes::Bytes,
-        limit: usize,
-        forward: bool,
-    ) -> Result<exoware_server::RangeScanResult<Self::RangeScan>, String> {
-        // A chunk row key is the chunk family byte, the u64 chunk index, then the u64 boundary location
-        if start.first() == Some(&exoware_qmdb::CHUNK_FAMILY) && start.len() == 17 {
-            self.bitmap_chunks
-                .lock()
-                .unwrap()
-                .insert(u64::from_be_bytes(start[1..9].try_into().unwrap()));
-        }
-        exoware_server::Query::range_scan(self.store.as_ref(), start, end, limit, forward).await
-    }
-}
-
 async fn assert_point_proof_reads_bounded_bitmap_chunks<F: Graftable>() {
-    let store = std::sync::Arc::new(
-        exoware_simulator::RocksStore::open_owned(tempfile::tempdir().unwrap(), None).unwrap(),
-    );
-    let query = std::sync::Arc::new(CountingQuery {
-        store: store.clone(),
-        bitmap_chunks: Default::default(),
-    });
-    let (store_server, store_url) = common::spawn_connect_service(exoware_server::connect_stack(
-        exoware_server::AppState::new(store),
-    ))
-    .await;
-    let (query_server, query_url) = common::spawn_connect_service(exoware_server::query_service(
-        exoware_server::QueryState::new(query.clone()),
-    ))
-    .await;
-    let store_client = StoreClient::builder()
-        .url(&store_url)
-        .query_url(&query_url)
-        .build()
-        .unwrap();
+    let (query, store_client, servers) = common::counting_store().await;
     let source = build_variable_source_with_write_count::<F, N>(
         "current_ordered_variable_bounded_bitmap_source",
         2048,
@@ -1083,8 +1020,9 @@ async fn assert_point_proof_reads_bounded_bitmap_chunks<F: Graftable>() {
         chunks.len() <= 3,
         "point proof fetched unrelated bitmap chunks: {chunks:?}"
     );
-    store_server.abort();
-    query_server.abort();
+    for server in servers {
+        server.abort();
+    }
 }
 
 #[tokio::test]
@@ -1095,6 +1033,60 @@ async fn test_ordered_mmr_point_proof_reads_bounded_bitmap_chunks() {
 #[tokio::test]
 async fn test_ordered_mmb_point_proof_reads_bounded_bitmap_chunks() {
     assert_point_proof_reads_bounded_bitmap_chunks::<mmb::Family>().await;
+}
+
+#[tokio::test]
+async fn test_ordered_mmr_exclusion_proof_reads_one_update_page() {
+    let (query, store_client, servers) = common::counting_store().await;
+    let write_count = 2048;
+    let source = build_variable_source_with_write_count::<mmr::Family, N>(
+        "current_ordered_variable_bounded_update_walk_source",
+        write_count,
+    )
+    .await;
+    let upload_client = PrefixedStoreClient::empty(store_client.clone());
+    common::commit_current_operations(
+        &upload_client,
+        &source.operations,
+        &op_cfg::<mmr::Family>(),
+        &source.current_boundary,
+    )
+    .await
+    .unwrap();
+    let qmdb_client: VariableClient<mmr::Family> = exoware_qmdb::adapter::Ordered::new(
+        PrefixedStoreClient::empty(store_client),
+        op_cfg::<mmr::Family>(),
+        key_cfg(),
+    );
+
+    // The probe sits near the top of the index, so a walk that read past its
+    // predecessor would read thousands of rows below it
+    let missing = b"k-00002040x".to_vec();
+    query.reset_update_reads();
+    let mut lookups = qmdb_client
+        .get_many_raw(source.latest_location, std::slice::from_ref(&missing), None)
+        .await
+        .unwrap();
+    let (scans, rows) = query.update_reads();
+    let Some(RawKeyLookupProof::Miss(proof)) = lookups.pop() else {
+        panic!("missing key should be a miss");
+    };
+    assert_eq!(proof.root, source.current_boundary.root);
+    assert!(proof.verify::<Sha256>());
+    let ExclusionProof::KeyValue(_, update) = &proof.proof else {
+        panic!("missing key should be covered by an active key");
+    };
+    assert_eq!(update.key, b"k-00002040".to_vec());
+    assert_eq!(update.next_key, b"k-00002041".to_vec());
+    // One scan looks up the probe itself, and the walk reads one first page
+    assert_eq!(
+        (scans, rows),
+        (1 + 1, 128),
+        "exclusion proof read {rows} of {write_count} update rows"
+    );
+    for server in servers {
+        server.abort();
+    }
 }
 
 async fn assert_current_boundaries_survive_coalesced_publication<F>()
