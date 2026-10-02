@@ -235,10 +235,11 @@ mod tests {
     use crate::client::RequestCompression;
     use crate::keyspace::DEFAULT_KEY_LEN;
     use axum::Router;
-    use connectrpc::{ConnectError, ConnectRpcService, RequestContext, ServiceRequest};
+    use connectrpc::{ConnectError, ConnectRpcService, RequestContext};
     use exoware_sdk::ingest::{
         PutRequest, PutResponse, Service as IngestService, ServiceServer as IngestServiceServer,
     };
+    use futures::StreamExt;
 
     #[derive(Clone, Copy)]
     enum IngestFault {
@@ -258,8 +259,12 @@ mod tests {
         async fn put(
             &self,
             _ctx: RequestContext,
-            _request: ServiceRequest<'_, PutRequest>,
+            mut requests: connectrpc::InboundStream<PutRequest>,
         ) -> connectrpc::ServiceResult<PutResponse> {
+            let mut entries = Vec::new();
+            while let Some(request) = requests.next().await {
+                entries.extend(request?.view().kvs.iter().map(|entry| entry.key.to_vec()));
+            }
             let call = self.puts.fetch_add(1, Ordering::SeqCst) + 1;
             match self.fault {
                 IngestFault::AlwaysInvalidArgument => {

@@ -6,8 +6,10 @@
 
 mod connect;
 mod engine;
+mod put_body;
 mod reduce;
 mod stream;
+pub mod transport;
 mod validate;
 
 pub use connect::{
@@ -17,9 +19,10 @@ pub use connect::{
     MAX_CONNECTRPC_ELEMENT_MEMORY_BYTES, MAX_CONNECTRPC_MESSAGE_BYTES,
 };
 pub use engine::{
-    FilteredBatch, Ingest, IngestError, Log, LogBatch, Prune, Query, QueryExtra, QueryResult,
-    RangeScan, RangeScanBatch, RangeScanResult, Retention, Sequence, StoreEngine,
+    FilteredBatch, Ingest, IngestError, IngestPut, Log, LogBatch, Prune, Query, QueryExtra,
+    QueryResult, RangeScan, RangeScanBatch, RangeScanResult, Retention, Sequence, StoreEngine,
 };
+pub use put_body::{PutConfig, PutService};
 pub use reduce::RangeError;
 pub use stream::{
     CompiledMatchers, CompiledSelector, InvalidFilter, StreamHub, StreamNotification,

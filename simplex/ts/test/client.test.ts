@@ -128,13 +128,15 @@ test('valid finalization upload remains one Put and one receipt', async () => {
   let calls = 0;
   let keys: string[] = [];
   Object.defineProperty(client.ingest, 'put', {
-    value: async (request: Parameters<typeof client.ingest.put>[0]) => {
+    value: async (requests: Parameters<typeof client.ingest.put>[0]) => {
       calls++;
-      assert.ok(request.kvs);
-      keys = request.kvs.map((entry) => {
-        assert.ok(entry.key);
-        return bytesToHex(entry.key);
-      });
+      for await (const request of requests) {
+        assert.ok(request.kvs);
+        keys.push(...request.kvs.map((entry) => {
+          assert.ok(entry.key);
+          return bytesToHex(entry.key);
+        }));
+      }
       return { sequenceNumber: 19n };
     },
   });

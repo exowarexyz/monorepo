@@ -55,8 +55,9 @@ use futures::{stream::BoxStream, StreamExt};
 use keys::is_valid_key_size;
 use kv_codec::{KvExpr, KvFieldRef, KvReducedValue};
 use limits::{
-    put_entry_encoded_len, PutTooLarge, INGEST_ERROR_DOMAIN, MAX_RESPONSE_ELEMENT_MEMORY_BYTES,
-    MAX_RESPONSE_MESSAGE_BYTES, PUT_TOO_LARGE_REASON,
+    put_entry_encoded_len, PutTooLarge, INGEST_ERROR_DOMAIN, MAX_PUT_CHUNK_BYTES,
+    MAX_RESPONSE_ELEMENT_MEMORY_BYTES, MAX_RESPONSE_MESSAGE_BYTES, PUT_CHUNK_TARGET_BYTES,
+    PUT_TOO_LARGE_REASON,
 };
 use rustls_platform_verifier::ConfigVerifierExt;
 use std::collections::HashMap;
@@ -847,6 +848,47 @@ async fn scalar_reduce_results(
         .collect())
 }
 
+fn put_request_stream(
+    kvs: Vec<exoware_proto::common::Entry>,
+) -> Result<impl futures::Stream<Item = ProtoPutRequest> + Send + 'static, ClientError> {
+    for entry in &kvs {
+        let encoded_len = put_entry_encoded_len(&entry.key, &entry.value);
+        if encoded_len > MAX_PUT_CHUNK_BYTES {
+            return Err(ClientError::WireFormat(format!(
+                "put entry needs {encoded_len} encoded bytes, exceeding the message limit of {MAX_PUT_CHUNK_BYTES}"
+            )));
+        }
+    }
+
+    let mut entries = kvs.into_iter();
+    let mut emit_empty = entries.as_slice().is_empty();
+    Ok(futures::stream::iter(std::iter::from_fn(move || {
+        if emit_empty {
+            emit_empty = false;
+            return Some(ProtoPutRequest::default());
+        }
+        if entries.as_slice().is_empty() {
+            return None;
+        }
+
+        // Assemble only the next message when transport requests it.
+        let mut rows = 0;
+        let mut encoded_len = 0;
+        for entry in entries.as_slice() {
+            let entry_len = put_entry_encoded_len(&entry.key, &entry.value);
+            if rows > 0 && entry_len > PUT_CHUNK_TARGET_BYTES.saturating_sub(encoded_len) {
+                break;
+            }
+            rows += 1;
+            encoded_len += entry_len;
+        }
+        Some(ProtoPutRequest {
+            kvs: entries.by_ref().take(rows).collect(),
+            ..Default::default()
+        })
+    })))
+}
+
 /// A physical Store write batch assembled from one or more logical clients.
 ///
 /// Use [`Self::push`] with the specific prefixed client that produced each
@@ -888,7 +930,7 @@ impl StoreWriteBatch {
         self.entries.is_empty()
     }
 
-    /// Exact uncompressed protobuf `PutRequest` size, including physical key prefixes.
+    /// Aggregate uncompressed protobuf size, including entry framing and physical key prefixes.
     pub fn encoded_len(&self) -> usize {
         self.encoded_len
     }
@@ -974,7 +1016,7 @@ impl StoreWriteBatch {
         Ok(batches)
     }
 
-    /// Submit all rows in one atomic `Put` without applying local size limits.
+    /// Submit all rows in one atomic `Put` without splitting the logical write.
     pub async fn commit(&self, client: &StoreClient) -> Result<u64, ClientError> {
         client.put_prepared_physical(&self.entries).await
     }
@@ -1962,13 +2004,11 @@ impl StoreClient {
     }
 
     async fn send_put(&self, kvs: Vec<exoware_proto::common::Entry>) -> Result<u64, ClientError> {
+        let requests = put_request_stream(kvs)?;
         let config = self.unary_client_config(self.ingest_uri.clone());
         let client = IngestServiceClient::new(self.connect_http.clone(), config);
         let response = client
-            .put(ProtoPutRequest {
-                kvs,
-                ..Default::default()
-            })
+            .put(requests)
             .await
             .map_err(|err| client_error_from_connect(err, self.credential))?;
         Ok(response.into_owned().sequence_number)
@@ -3051,13 +3091,14 @@ mod tests {
     use connectrpc::compression::{CompressionProvider, GzipProvider};
     use connectrpc::error::ErrorDetail;
     use exoware_proto::query::TraversalMode as ProtoTraversalMode;
-    use http::header::{ACCEPT_ENCODING, AUTHORIZATION, CONTENT_ENCODING};
+    use http::header::{ACCEPT_ENCODING, AUTHORIZATION};
     use http_body_util::BodyExt;
 
     #[derive(Clone, Debug, Default)]
     struct RecordingTransport {
         requests: Arc<std::sync::Mutex<Vec<(http::Uri, http::HeaderMap)>>>,
         bodies: Arc<std::sync::Mutex<Vec<Bytes>>>,
+        put_sequence: Option<u64>,
     }
 
     impl RecordingTransport {
@@ -3083,9 +3124,25 @@ mod tests {
                 .unwrap()
                 .push((request.uri().clone(), request.headers().clone()));
             let bodies = self.bodies.clone();
+            let put_sequence = self.put_sequence;
             Box::pin(async move {
                 let body = request.into_body().collect().await.unwrap().to_bytes();
                 bodies.lock().unwrap().push(body);
+                if let Some(sequence_number) = put_sequence {
+                    let payload = exoware_proto::log::ingest::v1::PutResponse {
+                        sequence_number,
+                        ..Default::default()
+                    }
+                    .encode_to_vec();
+                    let mut response = vec![0];
+                    response.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+                    response.extend_from_slice(&payload);
+                    response.extend_from_slice(&[2, 0, 0, 0, 2, b'{', b'}']);
+                    return Ok(http::Response::builder()
+                        .header("content-type", "application/connect+proto")
+                        .body(http_body_util::Full::new(Bytes::from(response)).boxed_unsync())
+                        .unwrap());
+                }
                 Err(ConnectError::unavailable("recorded test request"))
             })
         }
@@ -3631,6 +3688,156 @@ mod tests {
         }
     }
 
+    fn put_test_entry(key: u8, value: Bytes) -> exoware_proto::common::Entry {
+        exoware_proto::common::Entry {
+            key: vec![key],
+            value,
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn put_chunks_preserve_exact_target_boundaries_and_order() {
+        let value_len = (PUT_CHUNK_TARGET_BYTES - 16..PUT_CHUNK_TARGET_BYTES)
+            .find(|len| put_entry_encoded_len(&[1], &vec![0; *len]) == PUT_CHUNK_TARGET_BYTES)
+            .unwrap();
+        let entries = vec![
+            put_test_entry(1, Bytes::from(vec![1; value_len])),
+            put_test_entry(2, Bytes::new()),
+            put_test_entry(3, Bytes::from_static(b"value")),
+        ];
+        let expected = entries.clone();
+        let messages = put_request_stream(entries)
+            .unwrap()
+            .collect::<Vec<_>>()
+            .await;
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].encoded_len() as usize, PUT_CHUNK_TARGET_BYTES);
+        assert_eq!(messages[0].kvs.len(), 1);
+        assert!(messages
+            .iter()
+            .all(|message| message.encoded_len() as usize <= MAX_PUT_CHUNK_BYTES));
+        let actual = messages
+            .into_iter()
+            .flat_map(|message| message.kvs)
+            .collect::<Vec<_>>();
+        assert_eq!(actual, expected);
+        for (actual, expected) in actual.iter().zip(&expected) {
+            assert_eq!(actual.value.as_ptr(), expected.value.as_ptr());
+        }
+    }
+
+    #[tokio::test]
+    async fn put_chunks_isolate_maximum_values_and_keep_empty_put() {
+        let entries = vec![
+            put_test_entry(1, Bytes::from_static(b"first")),
+            put_test_entry(2, Bytes::from(vec![2; limits::MAX_VALUE_LEN])),
+            put_test_entry(3, Bytes::from_static(b"last")),
+        ];
+        let expected = entries.clone();
+        let messages = put_request_stream(entries)
+            .unwrap()
+            .collect::<Vec<_>>()
+            .await;
+        assert_eq!(messages.len(), 3);
+        assert!(messages[1].encoded_len() as usize > PUT_CHUNK_TARGET_BYTES);
+        assert!(messages[1].encoded_len() as usize <= MAX_PUT_CHUNK_BYTES);
+        assert_eq!(messages[1].kvs.len(), 1);
+        assert_eq!(
+            messages
+                .into_iter()
+                .flat_map(|message| message.kvs)
+                .collect::<Vec<_>>(),
+            expected
+        );
+
+        let messages = put_request_stream(Vec::new())
+            .unwrap()
+            .collect::<Vec<_>>()
+            .await;
+        assert_eq!(messages.len(), 1);
+        assert!(messages[0].kvs.is_empty());
+    }
+
+    #[test]
+    fn put_chunks_reject_entries_exceeding_hard_message_cap() {
+        let entry = put_test_entry(1, Bytes::from(vec![0; MAX_PUT_CHUNK_BYTES]));
+        assert!(matches!(
+            put_request_stream(vec![entry]),
+            Err(ClientError::WireFormat(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn put_chunks_share_one_rpc() {
+        let transport = RecordingTransport {
+            put_sequence: Some(42),
+            ..Default::default()
+        };
+        let client = StoreClient::builder()
+            .url("http://ingest.internal")
+            .retry_config(RetryConfig::disabled())
+            .client_transport(transport.clone())
+            .build()
+            .unwrap();
+        let entries = (1..=3)
+            .map(|key| put_test_entry(key, Bytes::from(vec![key; PUT_CHUNK_TARGET_BYTES])))
+            .collect();
+        assert_eq!(client.send_put(entries).await.unwrap(), 42);
+        assert_eq!(transport.requests().len(), 1);
+        let bodies = transport.bodies.lock().unwrap();
+        assert_eq!(bodies.len(), 1);
+        let mut body = bodies[0].as_ref();
+        let mut keys = Vec::new();
+        while !body.is_empty() {
+            assert_eq!(body[0], 0);
+            let len = u32::from_be_bytes(body[1..5].try_into().unwrap()) as usize;
+            assert!(len <= MAX_PUT_CHUNK_BYTES);
+            let message = ProtoPutRequest::decode(&mut &body[5..5 + len]).unwrap();
+            assert_eq!(message.kvs.len(), 1);
+            keys.push(message.kvs[0].key[0]);
+            body = &body[5 + len..];
+        }
+        assert_eq!(keys, [1, 2, 3]);
+    }
+
+    #[tokio::test]
+    async fn put_forwards_configured_timeout_and_omits_unset_timeout() {
+        for timeout in [Some(Duration::from_secs(90)), None] {
+            let transport = RecordingTransport {
+                put_sequence: Some(42),
+                ..Default::default()
+            };
+            let mut client = StoreClient::builder()
+                .url("http://ingest.internal")
+                .client_transport(transport.clone())
+                .build()
+                .unwrap();
+            client.rpc_timeout = timeout;
+            assert_eq!(client.send_put(Vec::new()).await.unwrap(), 42);
+            let requests = transport.requests();
+            assert_eq!(requests.len(), 1);
+            assert_eq!(
+                requests[0]
+                    .1
+                    .get("connect-timeout-ms")
+                    .map(|value| value.to_str().unwrap()),
+                timeout.map(|_| "90000"),
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn put_timeout_includes_response_completion() {
+        let mut client = StoreClient::builder()
+            .url("http://ingest.internal")
+            .client_transport(StalledStreamTransport)
+            .build()
+            .unwrap();
+        client.rpc_timeout = Some(Duration::from_millis(25));
+        assert_streaming_deadline(client.send_put(vec![put_test_entry(1, Bytes::new())])).await;
+    }
+
     #[tokio::test]
     async fn request_compression_controls_put_body() {
         let key = Bytes::from_static(b"key");
@@ -3681,19 +3888,25 @@ mod tests {
             let headers = &requests[0].1;
             assert_eq!(
                 headers
-                    .get(CONTENT_ENCODING)
+                    .get("connect-content-encoding")
                     .map(|value| value.to_str().unwrap()),
                 compression.wire_name(),
             );
             let body = transport.bodies.lock().unwrap()[0].clone();
-            assert_eq!(body, expected);
+            assert_eq!(body[0], u8::from(compression.wire_name().is_some()));
+            assert_eq!(
+                u32::from_be_bytes(body[1..5].try_into().unwrap()) as usize,
+                expected.len()
+            );
+            assert_eq!(&body[5..], expected.as_ref());
+            let payload = body.slice(5..);
             let decoded = match compression.wire_name() {
                 Some(name) => proto_connect_compression_registry()
                     .get(name)
                     .unwrap()
-                    .decompress_with_limit(&body, encoded.len())
+                    .decompress_with_limit(&payload, encoded.len())
                     .unwrap(),
-                None => body,
+                None => payload,
             };
             assert_eq!(decoded.as_ref(), encoded);
 
@@ -3713,8 +3926,10 @@ mod tests {
             }
 
             client.put_physical(&[]).await.unwrap_err();
-            assert!(!transport.requests()[1].1.contains_key(CONTENT_ENCODING));
-            assert!(transport.bodies.lock().unwrap()[1].is_empty());
+            assert_eq!(
+                transport.bodies.lock().unwrap()[1].as_ref(),
+                &[0, 0, 0, 0, 0]
+            );
         }
     }
 

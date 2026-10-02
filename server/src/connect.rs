@@ -19,7 +19,7 @@ use datafusion::execution::runtime_env::RuntimeEnv;
 use exoware_proto::common::Entry;
 use exoware_proto::google::rpc::{ErrorInfo, RetryInfo};
 use exoware_proto::ingest::{
-    PutResponse as ProtoPutResponse, Service as IngestApi, ServiceServer as IngestServiceServer,
+    PutRequest as ProtoPutRequest, PutResponse as ProtoPutResponse, Service as IngestApi,
 };
 #[cfg(test)]
 use exoware_proto::log::retention::v1::SetRetentionRequestView;
@@ -53,12 +53,13 @@ use exoware_sdk::selector::Selector;
 use futures::{stream as stream_util, Stream, StreamExt};
 use tokio::sync::Notify;
 
+use crate::put_body::{PutService, UploadCompletion};
 use crate::reduce::{decode_group, execute_reduce, RangeError, ReduceExecution, REDUCE_BATCH_ROWS};
 use crate::stream::{StreamHub, StreamNotifier};
 use crate::validate::{self, IngestLimits};
 use crate::{
-    FilteredBatch, Ingest, IngestError, Log, LogBatch, Prune, Query, QueryExtra, RangeScan,
-    RangeScanResult, Retention, StoreEngine,
+    FilteredBatch, Ingest, IngestError, IngestPut, Log, LogBatch, Prune, Query, QueryExtra,
+    RangeScan, RangeScanResult, Retention, StoreEngine,
 };
 
 pub const MAX_CONNECTRPC_BODY_BYTES: usize = MAX_REQUEST_MESSAGE_BYTES;
@@ -427,6 +428,44 @@ impl<E> From<AppState<E>> for StreamState<E> {
     }
 }
 
+#[derive(Default)]
+struct PutCancellation {
+    cancelled: std::sync::Mutex<bool>,
+    notify: Notify,
+}
+
+impl PutCancellation {
+    fn is_cancelled(&self) -> bool {
+        *self.cancelled.lock().unwrap()
+    }
+
+    fn submit<T>(
+        &self,
+        deadline: tokio::time::Instant,
+        submit: impl FnOnce() -> Result<T, IngestError>,
+    ) -> Result<T, ConnectError> {
+        let cancelled = self.cancelled.lock().unwrap();
+        if *cancelled {
+            return Err(ConnectError::canceled("Put request cancelled"));
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(ConnectError::deadline_exceeded("request timeout"));
+        }
+
+        // Cancellation and publication acceptance share one synchronous boundary.
+        submit().map_err(ingest_error_to_connect)
+    }
+}
+
+struct CancelPutOnDrop(Arc<PutCancellation>);
+
+impl Drop for CancelPutOnDrop {
+    fn drop(&mut self) {
+        *self.0.cancelled.lock().unwrap() = true;
+        self.0.notify.notify_one();
+    }
+}
+
 pub struct IngestConnect<I> {
     state: IngestState<I>,
 }
@@ -447,6 +486,83 @@ where
         Self {
             state: state.into(),
         }
+    }
+    async fn receive_put(
+        self,
+        mut requests: connectrpc::InboundStream<ProtoPutRequest>,
+        completion: &UploadCompletion,
+        cancellation: Arc<PutCancellation>,
+    ) -> connectrpc::ServiceResult<ProtoPutResponse> {
+        let mut prepared = self
+            .state
+            .ingest
+            .begin_put()
+            .map_err(ingest_error_to_connect)?;
+        let mut entries = 0usize;
+        let mut encoded_bytes = 0usize;
+        loop {
+            if cancellation.is_cancelled() {
+                return Err(ConnectError::canceled("Put request cancelled"));
+            }
+            if tokio::time::Instant::now() >= completion.deadline() {
+                return Err(ConnectError::deadline_exceeded("request timeout"));
+            }
+            let request = tokio::select! {
+                _ = cancellation.notify.notified() => return Err(ConnectError::canceled("Put request cancelled")),
+                request = requests.next() => request,
+            };
+            let Some(request) = request else { break };
+            let request = request.map_err(|error| completion.failure().unwrap_or(error))?;
+            let next_entries = entries
+                .checked_add(request.view().kvs.len())
+                .ok_or_else(|| ConnectError::resource_exhausted("Put entry count overflow"))?;
+            if next_entries > self.state.limits.max_entries {
+                return Err(validate::put_too_large_error(
+                    exoware_sdk::limits::PutTooLarge {
+                        entries: next_entries,
+                        max_entries: self.state.limits.max_entries,
+                    },
+                ));
+            }
+            encoded_bytes = encoded_bytes
+                .checked_add(request.bytes().len())
+                .filter(|bytes| *bytes <= MAX_REQUEST_MESSAGE_BYTES)
+                .ok_or_else(|| {
+                    ConnectError::resource_exhausted("Put exceeds the request message size limit")
+                })?;
+            validate::validate_put_chunk(request.view(), self.state.limits, entries)?;
+            let batch = request
+                .view()
+                .kvs
+                .iter()
+                .map(|kv| {
+                    (
+                        request.bytes().slice_ref(kv.key),
+                        request.bytes().slice_ref(kv.value),
+                    )
+                })
+                .collect();
+            prepared
+                .append(batch)
+                .await
+                .map_err(ingest_error_to_connect)?;
+            entries = next_entries;
+        }
+        if entries == 0 {
+            return Err(validate::empty_put_error());
+        }
+        completion.check()?;
+        // The task owns accepted completion independently of the RPC future.
+        let accepted = cancellation.submit(completion.deadline(), || prepared.submit())?;
+        let seq = accepted.await.map_err(ingest_error_to_connect)?;
+        if let Some(notifier) = &self.state.notifier {
+            notifier.advance(seq);
+        }
+
+        connectrpc::Response::ok(ProtoPutResponse {
+            sequence_number: seq,
+            ..Default::default()
+        })
     }
 }
 
@@ -493,10 +609,16 @@ where
 {
     async fn put(
         &self,
-        _ctx: Context,
-        request: ServiceRequest<'_, exoware_proto::log::ingest::v1::PutRequest>,
+        ctx: Context,
+        requests: connectrpc::InboundStream<ProtoPutRequest>,
     ) -> connectrpc::ServiceResult<ProtoPutResponse> {
+        let completion = ctx
+            .extensions()
+            .get::<UploadCompletion>()
+            .cloned()
+            .ok_or_else(|| ConnectError::internal("Put requires the ingest transport wrapper"))?;
         if !self.state.ready.load(Ordering::SeqCst) {
+            completion.handler_finished();
             return Err(with_retry_hint(
                 with_error_info_detail(
                     ConnectError::unavailable("ingest is not ready"),
@@ -510,32 +632,26 @@ where
             ));
         }
 
-        validate::validate_put_request(request.view(), self.state.limits)?;
-
-        let wire = request.bytes();
-        let mut batch = Vec::with_capacity(request.kvs.len());
-        for kv in request.kvs.iter() {
-            let key: Key = wire.slice_ref(kv.key);
-            let value = wire.slice_ref(kv.value);
-            batch.push((key, value));
+        if let Some(error) = completion.failure() {
+            completion.handler_finished();
+            return Err(error);
         }
-
-        let seq = self
-            .state
-            .ingest
-            .put_batch(batch)
+        let deadline = completion.deadline();
+        let cancellation = Arc::new(PutCancellation::default());
+        let _cancel_on_drop = CancelPutOnDrop(cancellation.clone());
+        let connect = self.clone();
+        let worker = tokio::spawn(async move {
+            let result = connect
+                .receive_put(requests, &completion, cancellation)
+                .await;
+            completion.handler_finished();
+            drop(completion);
+            result
+        });
+        tokio::time::timeout_at(deadline, worker)
             .await
-            .map_err(ingest_error_to_connect)?;
-
-        // Advance any attached stream frontier after the write is committed.
-        if let Some(notifier) = &self.state.notifier {
-            notifier.advance(seq);
-        }
-
-        connectrpc::Response::ok(ProtoPutResponse {
-            sequence_number: seq,
-            ..Default::default()
-        })
+            .map_err(|_| ConnectError::deadline_exceeded("request timeout"))?
+            .map_err(|error| ConnectError::internal(format!("Put worker failed: {error}")))?
     }
 }
 
@@ -1287,7 +1403,7 @@ pub fn connect_limits() -> Limits {
         .with_element_memory_limit(MAX_CONNECTRPC_ELEMENT_MEMORY_BYTES)
 }
 
-pub(crate) type IngestService<I> = ConnectRpcService<IngestServiceServer<IngestConnect<I>>>;
+pub(crate) type IngestService = PutService<ConnectRpcService<connectrpc::Router>>;
 pub(crate) type QueryService<Q> = ConnectRpcService<QueryServiceServer<QueryConnect<Q>>>;
 pub(crate) type PruneService<P> = ConnectRpcService<PruneServiceServer<PruneConnect<P>>>;
 pub(crate) type RetentionService<R> =
@@ -1296,27 +1412,34 @@ pub(crate) type StreamService<B> = ConnectRpcService<StreamServiceServer<StreamC
 pub(crate) type QueryStack<Q, B> = ConnectRpcService<
     Chain<QueryServiceServer<QueryConnect<Q>>, StreamServiceServer<StreamConnect<B>>>,
 >;
-pub(crate) type ConnectStack<I, Q, P, R, B> = ConnectRpcService<
-    Chain<
-        IngestServiceServer<IngestConnect<I>>,
+pub(crate) type ConnectStack<Q, P, R, B> = PutService<
+    ConnectRpcService<
         Chain<
-            QueryServiceServer<QueryConnect<Q>>,
+            connectrpc::Router,
             Chain<
-                PruneServiceServer<PruneConnect<P>>,
+                QueryServiceServer<QueryConnect<Q>>,
                 Chain<
-                    RetentionServiceServer<RetentionConnect<R>>,
-                    StreamServiceServer<StreamConnect<B>>,
+                    PruneServiceServer<PruneConnect<P>>,
+                    Chain<
+                        RetentionServiceServer<RetentionConnect<R>>,
+                        StreamServiceServer<StreamConnect<B>>,
+                    >,
                 >,
             >,
         >,
     >,
 >;
 
-fn ingest_server<I>(state: IngestState<I>) -> IngestServiceServer<IngestConnect<I>>
+fn ingest_server<I>(state: IngestState<I>) -> connectrpc::Router
 where
     I: Ingest,
 {
-    IngestServiceServer::new(IngestConnect::new(state))
+    connectrpc::Router::new()
+        .add_service(Arc::new(IngestConnect::new(state)))
+        .with_route_limits(
+            exoware_sdk::ingest::SERVICE_PUT_SPEC.procedure,
+            connect_limits().with_max_message_size(exoware_sdk::limits::MAX_PUT_CHUNK_BYTES),
+        )
 }
 
 fn query_server<Q>(state: QueryState<Q>) -> QueryServiceServer<QueryConnect<Q>>
@@ -1347,13 +1470,15 @@ where
     StreamServiceServer::new(StreamConnect::new(state))
 }
 
-pub fn ingest_service<I>(state: IngestState<I>) -> IngestService<I>
+pub fn ingest_service<I>(state: IngestState<I>) -> IngestService
 where
     I: Ingest,
 {
-    ConnectRpcService::new(ingest_server(state))
-        .with_limits(connect_limits())
-        .with_compression(connect_compression_registry())
+    PutService::new(
+        ConnectRpcService::new(ingest_server(state))
+            .with_limits(connect_limits())
+            .with_compression(connect_compression_registry()),
+    )
 }
 
 pub fn query_service<Q>(state: QueryState<Q>) -> QueryService<Q>
@@ -1408,25 +1533,27 @@ where
     .with_compression(connect_compression_registry())
 }
 
-pub fn connect_stack<E>(state: AppState<E>) -> ConnectStack<E, E, E, E, E>
+pub fn connect_stack<E>(state: AppState<E>) -> ConnectStack<E, E, E, E>
 where
     E: StoreEngine,
 {
-    ConnectRpcService::new(Chain(
-        ingest_server(state.clone().into()),
-        Chain(
-            query_server(state.clone().into()),
+    PutService::new(
+        ConnectRpcService::new(Chain(
+            ingest_server(state.clone().into()),
             Chain(
-                prune_server(state.clone().into()),
+                query_server(state.clone().into()),
                 Chain(
-                    retention_server(state.clone().into()),
-                    stream_server(state.into()),
+                    prune_server(state.clone().into()),
+                    Chain(
+                        retention_server(state.clone().into()),
+                        stream_server(state.into()),
+                    ),
                 ),
             ),
-        ),
-    ))
-    .with_limits(connect_limits())
-    .with_compression(connect_compression_registry())
+        ))
+        .with_limits(connect_limits())
+        .with_compression(connect_compression_registry()),
+    )
 }
 
 #[cfg(test)]
@@ -1627,8 +1754,34 @@ mod tests {
         }
     }
 
+    struct FakePut {
+        state: Arc<Mutex<FakeEngineState>>,
+        kvs: Vec<(Bytes, Bytes)>,
+    }
+
     impl Ingest for FakeEngine {
-        async fn put_batch(&self, kvs: Vec<(Bytes, Bytes)>) -> Result<u64, IngestError> {
+        type Put = FakePut;
+
+        fn begin_put(&self) -> Result<FakePut, IngestError> {
+            Ok(FakePut {
+                state: self.state.clone(),
+                kvs: Vec::new(),
+            })
+        }
+    }
+
+    impl IngestPut for FakePut {
+        async fn append(&mut self, kvs: Vec<(Bytes, Bytes)>) -> Result<(), IngestError> {
+            self.kvs.extend(kvs);
+            Ok(())
+        }
+
+        fn submit(
+            self,
+        ) -> Result<
+            impl std::future::Future<Output = Result<u64, IngestError>> + Send + 'static,
+            IngestError,
+        > {
             let mut state = self.state.lock().map_err(|e| IngestError::Internal {
                 message: e.to_string(),
             })?;
@@ -1637,8 +1790,8 @@ mod tests {
             }
             state.current_sequence += 1;
             let seq = state.current_sequence;
-            state.batches.insert(seq, Some(kvs));
-            Ok(seq)
+            state.batches.insert(seq, Some(self.kvs));
+            Ok(std::future::ready(Ok(seq)))
         }
     }
 
@@ -2240,9 +2393,7 @@ mod tests {
         .encode_to_vec()
     }
 
-    fn put_request(
-        value_len: usize,
-    ) -> buffa::view::OwnedView<exoware_proto::log::ingest::v1::PutRequestView<'static>> {
+    fn put_request(value_len: usize) -> connectrpc::InboundStream<ProtoPutRequest> {
         let bytes = exoware_proto::ingest::PutRequest {
             kvs: vec![exoware_proto::common::Entry {
                 key: b"k".to_vec(),
@@ -2252,10 +2403,19 @@ mod tests {
             ..Default::default()
         }
         .encode_to_vec();
-        buffa::view::OwnedView::<exoware_proto::log::ingest::v1::PutRequestView<'static>>::decode(
+        let view = buffa::view::OwnedView::<exoware_proto::log::ingest::v1::PutRequestView<'static>>::decode(
             bytes.into(),
         )
-        .expect("decode put request")
+        .expect("decode put request");
+        Box::pin(stream_util::once(std::future::ready(Ok(
+            connectrpc::StreamMessage::from_owned_view(view),
+        ))))
+    }
+
+    fn ingest_context() -> Context {
+        let mut ctx = Context::default();
+        ctx.extensions_mut().insert(UploadCompletion::test_clean());
+        ctx
     }
 
     fn keys_scope() -> KeysScope {
@@ -2872,6 +3032,32 @@ mod tests {
         let _query_stack = query_stack(state.clone().into(), state.into());
     }
 
+    #[test]
+    fn cancellation_between_observation_and_submission_prevents_publication() {
+        let cancellation = Arc::new(PutCancellation::default());
+        let observed = Arc::new(std::sync::Barrier::new(2));
+        let release = Arc::new(std::sync::Barrier::new(2));
+        let worker = {
+            let cancellation = cancellation.clone();
+            let observed = observed.clone();
+            let release = release.clone();
+            std::thread::spawn(move || {
+                assert!(!cancellation.is_cancelled());
+                observed.wait();
+                release.wait();
+                cancellation.submit(
+                    tokio::time::Instant::now() + std::time::Duration::from_secs(5),
+                    || panic!("cancelled preparation must never submit"),
+                )
+            })
+        };
+        observed.wait();
+        drop(CancelPutOnDrop(cancellation));
+        release.wait();
+        let result: Result<(), _> = worker.join().unwrap();
+        assert_eq!(result.unwrap_err().code, connectrpc::ErrorCode::Canceled);
+    }
+
     #[tokio::test]
     async fn ingest_uses_configured_value_limit() {
         let engine = Arc::new(FakeEngine::default());
@@ -2882,8 +3068,7 @@ mod tests {
         let connect = IngestConnect::new(state);
 
         let request = put_request(5);
-        let request = ServiceRequest::from_parts(request.reborrow(), request.bytes());
-        let err = IngestApi::put(&connect, Context::default(), request)
+        let err = IngestApi::put(&connect, ingest_context(), request)
             .await
             .expect_err("put should reject oversized value");
 
@@ -3099,8 +3284,7 @@ mod tests {
         });
         let connect = IngestConnect::new(IngestState::new(engine));
         let request = put_request(1);
-        let request = ServiceRequest::from_parts(request.reborrow(), request.bytes());
-        let error = IngestApi::put(&connect, Context::default(), request)
+        let error = IngestApi::put(&connect, ingest_context(), request)
             .await
             .unwrap_err();
         assert_eq!(error.code, connectrpc::ErrorCode::ResourceExhausted);
@@ -3117,8 +3301,7 @@ mod tests {
         engine.set_put_error(error.into());
         let connect = IngestConnect::new(IngestState::new(engine));
         let request = put_request(1);
-        let request = ServiceRequest::from_parts(request.reborrow(), request.bytes());
-        let actual = IngestApi::put(&connect, Context::default(), request)
+        let actual = IngestApi::put(&connect, ingest_context(), request)
             .await
             .unwrap_err();
         let expected = validate::put_too_large_error(error);
@@ -3137,8 +3320,7 @@ mod tests {
         let connect = IngestConnect::new(IngestState::new(engine));
 
         let request = put_request(1);
-        let request = ServiceRequest::from_parts(request.reborrow(), request.bytes());
-        let err = IngestApi::put(&connect, Context::default(), request)
+        let err = IngestApi::put(&connect, ingest_context(), request)
             .await
             .expect_err("transient put failure should surface");
 
@@ -3162,8 +3344,7 @@ mod tests {
         let connect = IngestConnect::new(IngestState::new(engine));
 
         let request = put_request(1);
-        let request = ServiceRequest::from_parts(request.reborrow(), request.bytes());
-        let err = IngestApi::put(&connect, Context::default(), request)
+        let err = IngestApi::put(&connect, ingest_context(), request)
             .await
             .expect_err("fatal put failure should surface");
 
@@ -3180,8 +3361,7 @@ mod tests {
         let connect = IngestConnect::new(state);
 
         let request = put_request(1);
-        let request = ServiceRequest::from_parts(request.reborrow(), request.bytes());
-        let err = IngestApi::put(&connect, Context::default(), request)
+        let err = IngestApi::put(&connect, ingest_context(), request)
             .await
             .expect_err("not-ready gate should reject");
 

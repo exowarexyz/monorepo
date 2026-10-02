@@ -18,6 +18,7 @@ import {
     MAX_KEY_LEN,
     normalizePutOptions,
     putEncodedLen,
+    putChunks,
     putEntryEncodedLen,
     putMessageEncodedLen,
     validatePut,
@@ -975,9 +976,14 @@ export class StoreClient {
 
     private async putEntries(entries: readonly StoreBatchEntry[]): Promise<bigint> {
         validatePut(entries, this.putOptions);
-        const req = create(PutRequestSchema, {
-            kvs: entries.map((entry) => create(EntrySchema, entry)),
-        });
+        const encoding = this.putOptions.encoding;
+        const req = (async function* () {
+            for (const chunk of putChunks(entries, encoding)) {
+                yield create(PutRequestSchema, {
+                    kvs: chunk.map((entry) => create(EntrySchema, entry)),
+                });
+            }
+        })();
         try {
             const res = await this.client.ingest.put(req);
             return res.sequenceNumber;

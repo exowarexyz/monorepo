@@ -13,10 +13,10 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file log/v1/ingest.proto.
  */
 export const file_log_v1_ingest: GenFile = /*@__PURE__*/
-  fileDesc("ChNsb2cvdjEvaW5nZXN0LnByb3RvEg1sb2cuaW5nZXN0LnYxIjgKClB1dFJlcXVlc3QSKgoDa3ZzGAEgAygLMhMuY29tbW9uLmt2LnYxLkVudHJ5Qgi6SAWSAQIIASImCgtQdXRSZXNwb25zZRIXCg9zZXF1ZW5jZV9udW1iZXIYASABKAQyRwoHU2VydmljZRI8CgNQdXQSGS5sb2cuaW5nZXN0LnYxLlB1dFJlcXVlc3QaGi5sb2cuaW5nZXN0LnYxLlB1dFJlc3BvbnNlYgZwcm90bzM", [file_buf_validate_validate, file_common_v1_kv]);
+  fileDesc("ChNsb2cvdjEvaW5nZXN0LnByb3RvEg1sb2cuaW5nZXN0LnYxIjgKClB1dFJlcXVlc3QSKgoDa3ZzGAEgAygLMhMuY29tbW9uLmt2LnYxLkVudHJ5Qgi6SAWSAQIIASImCgtQdXRSZXNwb25zZRIXCg9zZXF1ZW5jZV9udW1iZXIYASABKAQySQoHU2VydmljZRI+CgNQdXQSGS5sb2cuaW5nZXN0LnYxLlB1dFJlcXVlc3QaGi5sb2cuaW5nZXN0LnYxLlB1dFJlc3BvbnNlKAFiBnByb3RvMw", [file_buf_validate_validate, file_common_v1_kv]);
 
 /**
- * Batch write request. All pairs are applied atomically.
+ * One chunk of an atomic write. All chunks in the call are applied together.
  *
  * @generated from message log.ingest.v1.PutRequest
  */
@@ -70,11 +70,13 @@ export const Service: GenService<{
    * is persisted and the response carries the store sequence number that
    * covers this write. Clients can pass that sequence number to query RPCs
    * (via `min_sequence_number`) for read-after-write consistency.
+   * Each message carries a chunk of the same write. Publication follows successful
+   * completion of the entire request stream.
    *
    * @generated from rpc log.ingest.v1.Service.Put
    */
   put: {
-    methodKind: "unary";
+    methodKind: "client_streaming";
     input: typeof PutRequestSchema;
     output: typeof PutResponseSchema;
   },

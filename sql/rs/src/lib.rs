@@ -84,7 +84,7 @@ mod tests {
         Query, QueryExtra, QueryResult, QueryState, RangeScan, RangeScanBatch, RangeScanResult,
         Sequence,
     };
-    use futures::{stream, TryStreamExt};
+    use futures::{stream, StreamExt, TryStreamExt};
     use tokio::sync::{mpsc, oneshot, Notify};
 
     /// Assert EXPLAIN text includes the same `query_stats=...` suffix as [`format_query_stats_explain`].
@@ -333,12 +333,15 @@ mod tests {
         async fn put(
             &self,
             _ctx: Context,
-            request: ServiceRequest<'_, ProtoPutRequest>,
+            mut requests: connectrpc::InboundStream<ProtoPutRequest>,
         ) -> connectrpc::ServiceResult<ProtoPutResponse> {
             let mut parsed = Vec::<(Key, Bytes)>::new();
-            let wire = request.bytes();
-            for kv in request.kvs.iter() {
-                parsed.push((wire.slice_ref(kv.key), wire.slice_ref(kv.value)));
+            while let Some(request) = requests.next().await {
+                let request = request?;
+                let wire = request.bytes();
+                for kv in request.view().kvs.iter() {
+                    parsed.push((wire.slice_ref(kv.key), wire.slice_ref(kv.value)));
+                }
             }
             let mut guard = self.state.kv.lock().expect("kv mutex poisoned");
             for (key, value) in parsed.iter() {

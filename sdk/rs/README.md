@@ -19,8 +19,15 @@ The published limits are available under `exoware_sdk::limits`. See the
 application limits, transport byte limits, and size errors. The [server documentation](../../server/README.md#protocol-limits)
 describes transport and response decode budgets.
 
-`StoreWriteBatch::encoded_len` reports the exact uncompressed protobuf size of
-the staged `PutRequest`. `StoreWriteBatch::split` creates ordered batches that
+`put` and `StoreWriteBatch::commit` send one atomic logical batch in a single
+client-streaming RPC and return one sequence number. Messages target 1 MiB of
+uncompressed protobuf and have a hard 64 MiB encoded limit. An entry larger than
+the target gets its own message, including values up to the 32 MiB value limit.
+Transport messages preserve row order and do not create separate writes.
+
+`StoreWriteBatch::encoded_len` reports the aggregate uncompressed protobuf size of
+the staged entries, including repeated entry framing. `StoreWriteBatch::split`
+creates ordered batches that
 fit positive row and byte limits without copying or re-prefixing staged rows.
 An empty batch produces no chunks. An entry that cannot fit alone returns an
 error. Each chunk is atomic as one write, but splitting creates several writes.
@@ -30,8 +37,8 @@ across chunks.
 
 ## Request compression
 
-Request compression is disabled by default. Select zstd and its compression level
-on the client builder:
+Request compression is disabled by default. Put compresses each message independently.
+Select zstd and its compression level on the client builder:
 
 ```rust
 use exoware_sdk::{ConnectRequestCompression, StoreClient};
@@ -127,9 +134,11 @@ let client = StoreClient::builder()
 HTTP uses prior-knowledge h2c. HTTPS requires HTTP/2 through ALPN and uses platform trust by
 default. `with_tls_config` accepts custom roots and client certificates but replaces configured
 ALPN protocols with HTTP/2. HTTP/2 PINGs detect dead peers on open and idle connections. The request
-timeout bounds complete unary calls. It also bounds query streams through their first frame and
+timeout bounds complete unary calls and the entire Put upload and response. It also bounds query
+streams through their first frame and
 subscriptions through their response headers without stopping the streaming body after the call
-returns.
+returns. Put forwards the configured timeout to the server. Without a configured client
+timeout, the SDK sends no timeout header and the server uses its own timeout policy.
 
 `StoreClientBuilder::client_transport` accepts types re-exported under `exoware_sdk::transport`.
 The SDK still owns authentication, cookies, and compression preferences. Tower services can use

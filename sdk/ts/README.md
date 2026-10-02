@@ -34,8 +34,24 @@ completion and any publication ordering they require.
 Defaults use `MAX_PUT_ENTRIES`, `MAX_REQUEST_MESSAGE_BYTES`, `MAX_VALUE_LEN`, and
 `MAX_KEY_LEN`. Configure `ClientOptions.putLimits` with `maxEntries`,
 `maxEncodedBytes`, or `maxValueLen` to match a deployment. The same options can
-be passed to `validate` and `split`. The byte budget is the RPC message limit.
+be passed to `validate` and `split`. The byte budget is the logical batch size before stream envelopes.
 See the [protocol contract](../../proto/README.md) for errors and portability.
+
+## Streaming ingestion
+
+Ingestion requires Node.js. The client uses the Connect Node HTTP/1.1 transport
+for Put and keeps the fetch transport for other services.
+`createTransport` creates a fetch transport for those other services. Both transports share
+credentials and affinity cookies. Put failures are never retried automatically,
+because an interrupted request may have committed.
+
+Each Put sends one async stream of messages and returns one sequence number.
+`PUT_CHUNK_TARGET_BYTES` is a 1 MiB soft target. A larger entry travels alone,
+including supported 32 MiB values. `MAX_PUT_CHUNK_BYTES` caps each encoded message
+at 64 MiB. These transport chunks preserve one atomic write.
+`encodedLen` and aggregate validation describe the logical batch encoding and
+exclude the five-byte stream envelopes. Explicit `split` calls still produce
+separate writes.
 
 ## Credentials
 

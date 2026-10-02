@@ -11,10 +11,12 @@ service Service {
   // is persisted and the response carries the store sequence number that
   // covers this write. Clients can pass that sequence number to query RPCs
   // (via `min_sequence_number`) for read-after-write consistency.
-  rpc Put(PutRequest) returns (PutResponse);
+  // Each message carries a chunk of the same write. Publication follows successful
+  // completion of the entire request stream.
+  rpc Put(stream PutRequest) returns (PutResponse);
 }
 
-// Batch write request. All pairs are applied atomically.
+// One chunk of an atomic write. All chunks in the call are applied together.
 message PutRequest {
   // Key-value pairs to write. At least one pair is required.
   repeated common.kv.v1.Entry kvs = 1

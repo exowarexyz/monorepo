@@ -1,3 +1,5 @@
+import { ConnectError, type Interceptor } from '@connectrpc/connect';
+
 type FetchCookieRequestInit = RequestInit & {
     maxRedirect?: number;
     redirectCount?: number;
@@ -203,5 +205,27 @@ export function fetchWithCookieJar(jar: CookieJar = new CookieJar(), baseFetch: 
 
         const request = prepareRequestForCookieJar(input, init);
         return fetchWithCookies(request.input, request.init);
+    };
+}
+
+// Ingestion and fetch transports share affinity cookies across service calls.
+export function cookieInterceptor(jar: CookieJar): Interceptor {
+    return (next) => async (req) => {
+        const cookie = await jar.getCookieString(req.url);
+        if (cookie) addCookieHeader(req.header, cookie);
+
+        const save = async (headers: Headers) => {
+            for (const value of headers.getSetCookie()) {
+                await jar.setCookie(value, req.url, { ignoreError: true });
+            }
+        };
+        try {
+            const response = await next(req);
+            await save(response.header);
+            return response;
+        } catch (error) {
+            if (error instanceof ConnectError) await save(error.metadata);
+            throw error;
+        }
     };
 }

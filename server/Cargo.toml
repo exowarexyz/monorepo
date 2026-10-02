@@ -10,6 +10,9 @@ repository = "https://github.com/exowarexyz/monorepo/tree/main/server"
 documentation = "https://docs.rs/exoware-server"
 
 [dependencies]
+axum = { workspace = true }
+hyper = { workspace = true }
+hyper-util = { version = "0.1", features = ["server-auto", "service", "tokio"] }
 bytes = { workspace = true }
 buffa = { workspace = true }
 buffa-types = { workspace = true }
@@ -17,10 +20,13 @@ connectrpc = { workspace = true }
 datafusion = { version = "55.0.0", default-features = false, features = ["datetime_expressions", "string_expressions"] }
 futures = { workspace = true }
 http = { workspace = true }
+http-body = "1"
 regex = { workspace = true }
 thiserror = { workspace = true }
-tokio = { workspace = true, features = ["sync"] }
+tokio = { workspace = true, features = ["sync", "time"] }
+tower = { workspace = true }
 exoware-sdk = { workspace = true }
 
 [dev-dependencies]
 commonware-codec = { workspace = true }
+http-body-util = { workspace = true }

@@ -541,7 +541,7 @@ mod tests {
         ReduceRequest, ReduceResponse, Service as QueryService,
         ServiceServer as QueryServiceServer,
     };
-    use futures::stream;
+    use futures::{stream, StreamExt};
 
     #[derive(Parser)]
     struct BenchCli {
@@ -584,12 +584,16 @@ mod tests {
         async fn put(
             &self,
             _ctx: RequestContext,
-            request: ServiceRequest<'_, PutRequest>,
+            mut requests: connectrpc::InboundStream<PutRequest>,
         ) -> connectrpc::ServiceResult<PutResponse> {
+            let mut count = 0;
+            while let Some(request) = requests.next().await {
+                count += request?.view().kvs.len();
+            }
             self.batch_sizes
                 .lock()
                 .expect("batch size lock")
-                .push(request.kvs.len());
+                .push(count);
             connectrpc::Response::ok(PutResponse {
                 sequence_number: 1,
                 ..Default::default()
@@ -655,14 +659,17 @@ mod tests {
         async fn put(
             &self,
             _ctx: RequestContext,
-            request: ServiceRequest<'_, PutRequest>,
+            mut requests: connectrpc::InboundStream<PutRequest>,
         ) -> connectrpc::ServiceResult<PutResponse> {
+            let mut entries = Vec::new();
+            while let Some(request) = requests.next().await {
+                entries.extend(request?.view().kvs.iter().map(|entry| entry.key.to_vec()));
+            }
             let mut state = self.state.lock().expect("store state lock");
             if state.reject_writes {
                 return Err(ConnectError::invalid_argument("put rejected"));
             }
-            for entry in request.kvs.iter() {
-                let key = entry.key.to_vec();
+            for key in entries {
                 state.available_keys.insert(key.clone());
                 state.written_keys.insert(key);
             }

@@ -1,9 +1,9 @@
-import { createClient, type Client as ConnectClient, type Interceptor, Code, ConnectError } from '@connectrpc/connect';
+import { createClient, type Client as ConnectClient, type Interceptor, type Transport, Code, ConnectError } from '@connectrpc/connect';
 import { createConnectTransport } from '@connectrpc/connect-web';
-import { CookieJar, fetchWithCookieJar } from './cookies.js';
+import { CookieJar, fetchWithCookieJar, cookieInterceptor } from './cookies.js';
 import { environmentApiKey, resolveCredential, type Credential } from './credential.js';
 import { StoreClient, type StoreKeyPrefix } from './store.js';
-import { normalizePutOptions, type PutBatchOptions, type PutLimits } from './limits.js';
+import { normalizePutOptions, type PutBatchOptions, type PutLimits, MAX_PUT_CHUNK_BYTES } from './limits.js';
 import { Service as IngestService } from './gen/ts/log/v1/ingest_pb.js';
 import { Service as PruneService } from './gen/ts/store/v1/prune_pb.js';
 import { Service as QueryService } from './gen/ts/store/v1/query_pb.js';
@@ -39,6 +39,9 @@ function retryBackoffDelay(attempt: number, config: RetryConfig): number {
 function makeRetryInterceptor(config: RetryConfig): Interceptor {
     const maxAttempts = Math.max(config.maxAttempts, 1);
     return (next) => async (req) => {
+        // A failed write can have committed, and its consumed iterator cannot be replayed safely.
+        if (req.method === IngestService.method.put) return next(req);
+
         if (req.stream && req.method === QueryService.method.reduce) {
             // Each retry must serialize the same input after Connect consumes its request iterator.
             const input = await req.message[Symbol.asyncIterator]().next();
@@ -105,7 +108,8 @@ function normalizeClientOptions(tokenOrOptions?: string | ClientOptions): Client
 function transportWithCredential(
     baseUrl: string,
     opts: ClientOptions,
-): { transport: ReturnType<typeof createConnectTransport>; credential: Credential } {
+    jar = new CookieJar(),
+): { transport: ReturnType<typeof createConnectTransport>; credential: Credential; interceptors: Interceptor[] } {
     const retryConfig = opts.retry ?? DEFAULT_RETRY_CONFIG;
     const { token, credential } = resolveCredential(opts.token, environmentApiKey());
     const interceptors: Interceptor[] = [];
@@ -121,11 +125,12 @@ function transportWithCredential(
     }
     interceptors.push(makeRetryInterceptor(retryConfig));
     return {
+        interceptors,
         transport: createConnectTransport({
             baseUrl: baseUrl.replace(/\/$/, ''),
             useBinaryFormat: opts.useBinaryFormat,
             interceptors,
-            fetch: fetchWithCookieJar(new CookieJar()),
+            fetch: fetchWithCookieJar(jar),
         }),
         credential,
     };
@@ -159,9 +164,25 @@ export class Client {
             ...opts.putLimits,
             encoding: opts.useBinaryFormat ? 'binary' : 'json',
         }));
-        const { transport, credential } = transportWithCredential(this.baseUrl, opts);
+        const jar = new CookieJar();
+        const { transport, credential, interceptors } = transportWithCredential(this.baseUrl, opts, jar);
+
+        // Loading the Node transport on demand keeps fetch services usable in browser runtimes.
+        let ingestTransportPromise: Promise<Transport> | undefined;
+        const nodeTransport = () => ingestTransportPromise ??= import('@connectrpc/connect-node')
+            .then(({ createConnectTransport }) => createConnectTransport({
+                baseUrl: this.baseUrl,
+                httpVersion: '1.1',
+                useBinaryFormat: opts.useBinaryFormat ?? false,
+                writeMaxBytes: MAX_PUT_CHUNK_BYTES,
+                interceptors: [...interceptors, cookieInterceptor(jar)],
+            }));
+        const ingestTransport: Transport = {
+            unary: async (...args) => (await nodeTransport()).unary(...args),
+            stream: async (...args) => (await nodeTransport()).stream(...args),
+        };
         this.credential = credential;
-        this.ingest = createClient(IngestService, transport);
+        this.ingest = createClient(IngestService, ingestTransport);
         this.prune = createClient(PruneService, transport);
         this.query = createClient(QueryService, transport);
         this.retention = createClient(RetentionService, transport);
