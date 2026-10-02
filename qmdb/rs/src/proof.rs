@@ -222,6 +222,14 @@ pub(crate) fn resolve_range_bounds<F: Family>(
         .min(count))
 }
 
+/// Operations a cached multi-proof covers: rows still to read at `Read`
+/// locations, or rows the caller already holds, such as a subscription frame.
+/// Locations are strictly ascending and at most the proof's watermark.
+pub(crate) enum MultiProofOperations<'a, F: Family> {
+    Read(&'a [Location<F>]),
+    Given(Vec<(Location<F>, Vec<u8>)>),
+}
+
 /// Build and self-verify a `RawBatchMultiProof` over the given operations,
 /// sourcing Merkle nodes from `storage` and using the caller-supplied `root`.
 pub(crate) async fn build_batch_multi_proof<F, H, S>(

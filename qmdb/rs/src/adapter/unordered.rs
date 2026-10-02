@@ -26,11 +26,12 @@ use crate::adapter::operation_range::{
     load_operation_range_checkpoint, load_operations_multi_proof,
 };
 use crate::adapter::read_cache::ReadCache;
-use crate::adapter::storage::{KvCurrentStorage, KvMerkleStorage, ProofBitmap};
+use crate::adapter::storage::{KvCurrentStorage, ProofBitmap};
 use crate::error::{error_key, QmdbError};
 use crate::proof::{
-    CurrentOperationRangeProofResult, OperationRangeCheckpoint, RawBatchMultiProof,
-    RawKeyValueProof, VerifiedCurrentRange, VerifiedKeyValue, VerifiedOperationRange,
+    CurrentOperationRangeProofResult, MultiProofOperations, OperationRangeCheckpoint,
+    RawBatchMultiProof, RawKeyValueProof, VerifiedCurrentRange, VerifiedKeyValue,
+    VerifiedOperationRange,
 };
 use crate::VersionedValue;
 use crate::{OperationKv, PublishedWatermark};
@@ -275,12 +276,12 @@ where
         Ok(checkpoint)
     }
 
-    /// Multi-proof over `locations` at a published watermark, built from the
-    /// same cached reads as [`Self::operation_range_checkpoint_at`].
-    pub(crate) async fn operations_multi_proof_at(
+    /// Multi-proof at a published watermark, built from the same cached reads
+    /// as [`Self::operation_range_checkpoint_at`].
+    pub(crate) async fn multi_proof_at(
         &self,
         watermark: PublishedWatermark<F>,
-        locations: &[Location<F>],
+        operations: MultiProofOperations<'_, F>,
     ) -> Result<RawBatchMultiProof<H::Digest, F>, QmdbError> {
         let session = ReadSession::fixed(self.store.clone(), Some(watermark.sequence_number));
         let watermark = watermark.location;
@@ -289,7 +290,7 @@ where
             session,
             &self.read_cache,
             watermark,
-            locations,
+            operations,
             true,
             |bytes| async move {
                 let operation =
@@ -305,33 +306,6 @@ where
             },
         )
         .await
-    }
-
-    pub(crate) async fn batch_multi_proof(
-        &self,
-        watermark: PublishedWatermark<F>,
-        operations: Vec<(Location<F>, Vec<u8>)>,
-    ) -> Result<RawBatchMultiProof<H::Digest, F>, QmdbError> {
-        let session = ReadSession::fixed(self.store.clone(), Some(watermark.sequence_number));
-        let watermark = watermark.location;
-        let storage = KvMerkleStorage::<F, H::Digest> {
-            session: &session,
-            size: merkle_size_for_watermark(watermark)?,
-            _marker: PhantomData,
-        };
-        let inactive_peaks =
-            ops_inactive_peaks_at::<F, K, V, E>(&self.op_cfg, &session, watermark).await?;
-        let root = core::compute_ops_root::<F, H>(&session, watermark, inactive_peaks).await?;
-        let mut proof = crate::proof::build_batch_multi_proof::<F, H, _>(
-            &storage,
-            watermark,
-            root,
-            inactive_peaks,
-            operations,
-        )
-        .await?;
-        proof.ops_root_witness = load_ops_root_witness::<F, H>(&session, watermark).await?;
-        Ok(proof)
     }
 
     /// Verified contiguous range of operations.
