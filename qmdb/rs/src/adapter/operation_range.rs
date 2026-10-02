@@ -17,8 +17,8 @@ use crate::adapter::core::load_operation_bytes_range;
 use crate::adapter::prefetch::{multi_positions, range_positions, PrefetchedMerkleStorage};
 use crate::adapter::read_cache::{ReadCache, RootContext};
 use crate::proof::{
-    build_batch_multi_proof, build_operation_range_checkpoint, OperationRangeCheckpoint,
-    RawBatchMultiProof,
+    build_batch_multi_proof, build_operation_range_checkpoint, MultiProofOperations,
+    OperationRangeCheckpoint, RawBatchMultiProof,
 };
 use crate::{decode_digest, QmdbError};
 
@@ -88,14 +88,14 @@ where
     Ok(checkpoint)
 }
 
-/// Build a multi-proof over `locations` (strictly ascending, at most
-/// `watermark`) with one batched read of the operation rows and every planned
-/// node, reusing cached root context, witness, and nodes like range reads.
+/// Build a multi-proof with one batched read of any operation rows still to
+/// read and every planned node, reusing cached root context, witness, and nodes
+/// like range reads.
 pub(crate) async fn load_operations_multi_proof<F, H, Fut>(
     session: &ReadSession,
     cache: &Arc<ReadCache<F, H::Digest>>,
     watermark: Location<F>,
-    locations: &[Location<F>],
+    operations: MultiProofOperations<'_, F>,
     with_witness: bool,
     resolve_inactive_peaks: impl FnOnce(Bytes) -> Fut,
 ) -> Result<RawBatchMultiProof<H::Digest, F>, QmdbError>
@@ -105,11 +105,20 @@ where
     Fut: Future<Output = Result<usize, QmdbError>>,
 {
     let size = merkle_size_for_watermark(watermark)?;
-    let positions = multi_positions(watermark, locations)?;
-    let keys = locations
-        .iter()
-        .map(|&location| encode_operation_key(location))
-        .collect();
+    let locations = match &operations {
+        MultiProofOperations::Read(locations) => locations.to_vec(),
+        MultiProofOperations::Given(operations) => {
+            operations.iter().map(|(location, _)| *location).collect()
+        }
+    };
+    let positions = multi_positions(watermark, &locations)?;
+    let keys = match &operations {
+        MultiProofOperations::Read(locations) => locations
+            .iter()
+            .map(|&location| encode_operation_key(location))
+            .collect(),
+        MultiProofOperations::Given(_) => BTreeSet::new(),
+    };
     let mut reads = load_published_reads::<F, H, _>(
         session,
         cache,
@@ -120,18 +129,23 @@ where
         resolve_inactive_peaks,
     )
     .await?;
-    let operations = locations
-        .iter()
-        .map(|&location| {
-            let bytes = reads
-                .rows
-                .remove(&encode_operation_key(location))
-                .ok_or_else(|| {
-                    QmdbError::CorruptData(format!("missing operation row at location {location}"))
-                })?;
-            Ok((location, bytes.to_vec()))
-        })
-        .collect::<Result<Vec<_>, QmdbError>>()?;
+    let operations = match operations {
+        MultiProofOperations::Read(locations) => locations
+            .iter()
+            .map(|&location| {
+                let bytes = reads
+                    .rows
+                    .remove(&encode_operation_key(location))
+                    .ok_or_else(|| {
+                        QmdbError::CorruptData(format!(
+                            "missing operation row at location {location}"
+                        ))
+                    })?;
+                Ok((location, bytes.to_vec()))
+            })
+            .collect::<Result<Vec<_>, QmdbError>>()?,
+        MultiProofOperations::Given(operations) => operations,
+    };
     let storage = PrefetchedMerkleStorage::<F, H::Digest>::new(size, reads.nodes);
     let mut proof = build_batch_multi_proof::<F, H, _>(
         &storage,

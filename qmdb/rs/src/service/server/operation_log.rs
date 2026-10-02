@@ -18,7 +18,7 @@ use futures::{FutureExt, Stream};
 
 // The subscribe stream still classifies raw Store rows itself.
 use crate::adapter::subscription::{self as sub, RowClassifier};
-use crate::proof::{OperationRangeCheckpoint, RawBatchMultiProof};
+use crate::proof::{MultiProofOperations, OperationRangeCheckpoint, RawBatchMultiProof};
 use crate::request::OperationLocations;
 use crate::service::proto::qmdb::v1::{
     GetOperationRangeRequest, GetOperationRangeResponse, GetOperationsRequest,
@@ -46,11 +46,6 @@ pub(crate) trait OperationLogReader: Send + Sync + 'static {
         watermark: Location<Self::Family>,
         min_sequence_number: Option<u64>,
     ) -> impl Future<Output = Result<PublishedWatermark<Self::Family>, QmdbError>> + Send;
-    fn batch_multi_proof(
-        &self,
-        watermark: PublishedWatermark<Self::Family>,
-        operations: Vec<(Location<Self::Family>, Vec<u8>)>,
-    ) -> impl Future<Output = Result<RawBatchMultiProof<Self::Digest, Self::Family>, QmdbError>> + Send;
     fn operation_range_checkpoint_at(
         &self,
         watermark: PublishedWatermark<Self::Family>,
@@ -58,10 +53,10 @@ pub(crate) trait OperationLogReader: Send + Sync + 'static {
         max_locations: u32,
     ) -> impl Future<Output = Result<OperationRangeCheckpoint<Self::Digest, Self::Family>, QmdbError>>
            + Send;
-    fn operations_multi_proof_at(
+    fn multi_proof_at(
         &self,
         watermark: PublishedWatermark<Self::Family>,
-        locations: &[Location<Self::Family>],
+        operations: MultiProofOperations<'_, Self::Family>,
     ) -> impl Future<Output = Result<RawBatchMultiProof<Self::Digest, Self::Family>, QmdbError>> + Send;
 }
 
@@ -481,7 +476,7 @@ impl<R: OperationLogReader> OperationLogService for OperationLogServer<R> {
                 .map(Location::new)
                 .collect::<Vec<Location<R::Family>>>();
             let proof = reader
-                .operations_multi_proof_at(watermark, &locations)
+                .multi_proof_at(watermark, MultiProofOperations::Read(&locations))
                 .await
                 .map_err(qmdb_error_to_connect)?;
             connectrpc::Response::ok(encode::get_operations_response(&proof))
@@ -525,7 +520,12 @@ impl<R: OperationLogReader> OperationLogService for OperationLogServer<R> {
             };
             let build_proof = Arc::new(move |watermark, matched| {
                 let reader = reader.clone();
-                async move { reader.batch_multi_proof(watermark, matched).await }.boxed()
+                async move {
+                    reader
+                        .multi_proof_at(watermark, MultiProofOperations::Given(matched))
+                        .await
+                }
+                .boxed()
             });
             let stream: Pin<
                 Box<dyn Stream<Item = Result<PreEncoded<SubscribeResponse>, ConnectError>> + Send>,
