@@ -1,4 +1,4 @@
-use commonware_codec::{Codec, Encode};
+use commonware_codec::Codec;
 use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::{Sequential, Strategy};
 use commonware_storage::{
@@ -15,7 +15,6 @@ use commonware_storage::{
             proof::{OperationProof, OpsRootWitness, RangeProof},
         },
         operation::{Key as QmdbKey, Operation},
-        verify::verify_multi_proof,
     },
 };
 
@@ -132,40 +131,6 @@ impl<D: Digest, F: Graftable> OperationRangeCheckpoint<D, F> {
         }
 
         Ok(extension.peaks)
-    }
-}
-
-/// Historical multi-proof plus the exact operations it authenticates.
-#[derive(Clone, Debug, PartialEq)]
-#[must_use]
-pub struct RawMultiProof<
-    D: Digest,
-    K: QmdbKey + Codec,
-    V: Codec + Clone + Send + Sync,
-    F: Graftable,
-    E: ValueEncoding<Value = V> = VariableEncoding<V>,
-> {
-    pub watermark: Location<F>,
-    /// Operations-log root the proof is checked against.
-    pub ops_root: D,
-    /// Links `ops_root` to the canonical root of a database with current state.
-    pub ops_root_witness: Option<OpsRootWitness<F, D>>,
-    pub proof: Proof<F, D>,
-    pub operations: Vec<(Location<F>, ordered::Operation<F, K, E>)>,
-}
-
-impl<
-        D: Digest,
-        K: QmdbKey + Codec,
-        V: Codec + Clone + Send + Sync,
-        F: Graftable,
-        E: ValueEncoding<Value = V>,
-    > RawMultiProof<D, K, V, F, E>
-where
-    ordered::Operation<F, K, E>: Encode,
-{
-    pub fn verify<H: Hasher<Digest = D>>(&self) -> bool {
-        verify_multi_proof::<H, _, _>(&self.proof, &self.operations, &self.ops_root)
     }
 }
 
@@ -481,20 +446,6 @@ pub struct VerifiedOperations<D: Digest, Op, F: Family> {
     /// Canonical root at `tip`; see [`VerifiedOperationRange::root`].
     pub root: D,
     pub operations: Vec<(Location<F>, Op)>,
-}
-
-/// Set of (location, operation) pairs verified as a multi-proof.
-#[derive(Clone, Debug, PartialEq)]
-#[must_use]
-pub struct VerifiedMultiOperations<
-    D: Digest,
-    K: QmdbKey + Codec,
-    V: Codec + Clone + Send + Sync,
-    F: Family,
-    E: ValueEncoding<Value = V> = VariableEncoding<V>,
-> {
-    pub root: D,
-    pub operations: Vec<(Location<F>, ordered::Operation<F, K, E>)>,
 }
 
 /// A single key's `Update` operation verified against the current-state root.

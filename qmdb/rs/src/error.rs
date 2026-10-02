@@ -46,8 +46,6 @@ pub enum ProofKind {
     CurrentKeyValue,
     /// Current ordered proof that a key is inactive.
     CurrentKeyExclusion,
-    /// Historical multi-proof over subscribed operations.
-    HistoricalMultiKey,
     /// Subscribe-time multi-proof covering matched operations in one batch
     /// (`OperationLogService.Subscribe`).
     BatchMulti,
@@ -62,7 +60,6 @@ impl std::fmt::Display for ProofKind {
         let s = match self {
             Self::CurrentKeyValue => "current key-value",
             Self::CurrentKeyExclusion => "current key-exclusion",
-            Self::HistoricalMultiKey => "historical many-key",
             Self::BatchMulti => "batch multi",
             Self::RangeCheckpoint => "range checkpoint",
             Self::CurrentRange => "current range",
