@@ -1,5 +1,5 @@
-use bytes::{Buf, BufMut, Bytes, BytesMut};
-use commonware_codec::{Decode, EncodeSize, Error, Read, Write};
+use bytes::{BufMut, Bytes, BytesMut};
+use commonware_codec::{Buf, Decode, EncodeSize, Error, Read, Write};
 use commonware_consensus::{simplex::types, Block};
 use commonware_cryptography::{certificate, Digest};
 

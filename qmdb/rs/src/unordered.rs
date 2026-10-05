@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 use std::marker::PhantomData;
 use std::sync::Arc;
 
-use commonware_codec::{Codec, Decode, DecodeExt, Encode};
+use commonware_codec::{Codec, Copying, Decode, DecodeExt, Encode};
 use commonware_cryptography::Hasher;
 use commonware_storage::merkle::{Graftable, Location};
 use commonware_storage::qmdb::{
@@ -10,7 +10,7 @@ use commonware_storage::qmdb::{
         unordered,
         value::{ValueEncoding, VariableEncoding},
     },
-    current::proof::{OperationProof, OpsRootWitness, RangeProof},
+    current::proof::{constant::OperationProof, OpsRootWitness, RangeProof},
     operation::{Key as QmdbKey, Operation as _},
 };
 use exoware_sdk::{PrefixedStoreClient, RangeMode, ReadSession};
@@ -298,12 +298,15 @@ where
         let mut operations = Vec::with_capacity(checkpoint.encoded_operations.len());
         for (offset, value) in checkpoint.encoded_operations.iter().enumerate() {
             let location = checkpoint.start_location + offset as u64;
-            let op = unordered::Operation::<F, K, E>::decode_cfg(value.as_slice(), &self.op_cfg)
-                .map_err(|e| {
-                    QmdbError::CorruptData(format!(
-                        "failed to decode unordered operation at location {location}: {e}"
-                    ))
-                })?;
+            let op = unordered::Operation::<F, K, E>::decode_cfg(
+                Copying(value.as_slice()),
+                &self.op_cfg,
+            )
+            .map_err(|e| {
+                QmdbError::CorruptData(format!(
+                    "failed to decode unordered operation at location {location}: {e}"
+                ))
+            })?;
             operations.push(op);
         }
         Ok(VerifiedOperationRange {
@@ -528,7 +531,7 @@ where
     E: ValueEncoding<Value = V>,
     unordered::Operation<F, K, E>: Encode + Decode,
 {
-    unordered::Operation::<F, K, E>::decode_cfg(bytes, op_cfg).map_err(|e| {
+    unordered::Operation::<F, K, E>::decode_cfg(Copying(bytes), op_cfg).map_err(|e| {
         QmdbError::CorruptData(format!(
             "failed to decode unordered operation at location {location}: {e}"
         ))
@@ -566,7 +569,7 @@ async fn load_ops_root_witness<F: Graftable, H: Hasher>(
     let Some(bytes) = session.get(&encode_ops_root_witness_key(location)).await? else {
         return Ok(None);
     };
-    OpsRootWitness::<F, H::Digest>::decode(bytes.as_ref())
+    OpsRootWitness::<F, H::Digest>::decode(Copying(bytes.as_ref()))
         .map(Some)
         .map_err(|e| {
             QmdbError::CorruptData(format!(
@@ -771,7 +774,7 @@ async fn load_bitmap_chunk_with_floor<F: Graftable, const N: usize>(
         .range_with_mode(&start, &end, 1, RangeMode::Reverse)
         .await?;
     let mut chunk = match rows.into_iter().next() {
-        Some((_, bytes)) => <[u8; N]>::decode(bytes.as_ref()).map_err(|e| {
+        Some((_, bytes)) => <[u8; N]>::decode(Copying(bytes.as_ref())).map_err(|e| {
             QmdbError::CorruptData(format!("bitmap chunk {chunk_index} decode error: {e}"))
         })?,
         None => {

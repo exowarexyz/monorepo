@@ -79,10 +79,13 @@ async fn build_variable_source() -> VariableSource {
                 ),
                 NZU64!(8),
             );
-            let mut db: VariableDb =
-                VariableDb::init(context.child("any_unordered_variable_mmr_source"), cfg)
-                    .await
-                    .expect("init");
+            let mut db: VariableDb = VariableDb::init(
+                context.child("any_unordered_variable_mmr_source"),
+                cfg,
+                None,
+            )
+            .await
+            .expect("init");
 
             let finalized = {
                 let batch = db
@@ -145,12 +148,12 @@ async fn build_fixed_source() -> FixedSource {
                     replay_buffer: NZUsize!(1024),
                 },
                 translator: TwoCap,
-                init_cache_size: None,
+                init_cache: None,
                 init_buffer: NZUsize!(1 << 21),
                 init_concurrency: (),
             };
             let mut db: FixedDb =
-                FixedDb::init(context.child("any_unordered_fixed_mmr_source"), cfg)
+                FixedDb::init(context.child("any_unordered_fixed_mmr_source"), cfg, None)
                     .await
                     .expect("init fixed");
 

@@ -1,6 +1,6 @@
-use bytes::{Buf, BufMut, Bytes, BytesMut};
+use bytes::{BufMut, Bytes, BytesMut};
 use clap::{Parser, Subcommand};
-use commonware_codec::{Encode, EncodeSize, Error, Read, ReadExt, Write};
+use commonware_codec::{Buf, Encode, EncodeSize, Error, Read, ReadExt, Write};
 use commonware_consensus::{
     simplex::{
         scheme::bls12381_threshold::vrf as threshold_vrf,

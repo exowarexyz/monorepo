@@ -38,7 +38,7 @@ macro_rules! source_config {
             merkle_config: crate::common::merkle_config($prefix, $cache.clone()),
             journal_config: journal_config!($encoding, $prefix, $cache, $cfg),
             translator: commonware_storage::translator::TwoCap,
-            init_cache_size: None,
+            init_cache: None,
             init_buffer: commonware_utils::NZUsize!(1 << 21),
             init_concurrency: (),
         }
@@ -49,7 +49,7 @@ macro_rules! source_config {
             journal_config: journal_config!($encoding, $prefix, $cache, $cfg),
             grafted_metadata_partition: format!("{}-grafted-metadata", $prefix),
             translator: commonware_storage::translator::TwoCap,
-            init_cache_size: None,
+            init_cache: None,
             init_buffer: commonware_utils::NZUsize!(1 << 21),
             init_concurrency: (),
         }

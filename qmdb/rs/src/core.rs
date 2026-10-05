@@ -1,7 +1,7 @@
 #[cfg(test)]
 mod tests;
 
-use commonware_codec::{Codec, Decode};
+use commonware_codec::{Codec, Copying, Decode};
 use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::Strategy;
 use commonware_storage::merkle::{
@@ -289,7 +289,7 @@ pub(crate) fn decode_operation_at<F: Family, Op: Decode>(
     location: Location<F>,
     cfg: &Op::Cfg,
 ) -> Result<Op, QmdbError> {
-    Op::decode_cfg(bytes, cfg).map_err(|e| {
+    Op::decode_cfg(Copying(bytes), cfg).map_err(|e| {
         QmdbError::CorruptData(format!(
             "failed to decode authenticated operation at location {location}: {e}"
         ))

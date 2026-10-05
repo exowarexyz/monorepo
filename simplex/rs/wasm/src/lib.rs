@@ -1,4 +1,4 @@
-use commonware_codec::{Decode, DecodeExt, Encode, Read};
+use commonware_codec::{Copying, Decode, DecodeExt, Encode, Read};
 use commonware_coding::ReedSolomon;
 use commonware_consensus::{
     simplex::{
@@ -74,7 +74,7 @@ fn participant_set<T>(bytes: &[u8]) -> Result<Set<T>, commonware_codec::Error>
 where
     T: Read<Cfg = ()> + Ord,
 {
-    Set::<T>::decode_cfg(bytes, &((0..=MAX_PARTICIPANTS).into(), ()))
+    Set::<T>::decode_cfg(Copying(bytes), &((0..=MAX_PARTICIPANTS).into(), ()))
 }
 
 fn participant_map<K, V>(bytes: &[u8]) -> Result<BiMap<K, V>, commonware_codec::Error>
@@ -82,14 +82,14 @@ where
     K: Read<Cfg = ()> + Ord,
     V: Read<Cfg = ()> + Eq + Hash,
 {
-    BiMap::<K, V>::decode_cfg(bytes, &((0..=MAX_PARTICIPANTS).into(), (), ()))
+    BiMap::<K, V>::decode_cfg(Copying(bytes), &((0..=MAX_PARTICIPANTS).into(), (), ()))
 }
 
 fn read_identity<V: Variant>(bytes: &[u8]) -> Result<V::Public, commonware_codec::Error>
 where
     V::Public: DecodeExt<()>,
 {
-    V::Public::decode(bytes)
+    V::Public::decode(Copying(bytes))
 }
 
 fn verify_notarized<S, D>(scheme: S, bytes: &[u8]) -> Result<VerifiedCertificate, String>
@@ -98,13 +98,13 @@ where
     D: Digest,
     <S::Certificate as Read>::Cfg: Clone,
 {
-    let mut reader = bytes;
+    let mut reader = Copying(bytes);
     let proof = Notarization::<S, D>::read_cfg(&mut reader, &scheme.certificate_codec_config())
         .map_err(|err| format!("failed to decode notarized artifact: {err}"))?;
     if !proof.verify(&mut sys_rng(), &scheme, &Sequential) {
         return Err("notarization certificate verification failed".to_string());
     }
-    let header = read_header(reader, "notarized artifact")?;
+    let header = read_header(reader.0, "notarized artifact")?;
     Ok(VerifiedCertificate {
         epoch: proof.round().epoch().get(),
         view: proof.view().get(),
@@ -121,13 +121,13 @@ where
     D: Digest,
     <S::Certificate as Read>::Cfg: Clone,
 {
-    let mut reader = bytes;
+    let mut reader = Copying(bytes);
     let proof = Finalization::<S, D>::read_cfg(&mut reader, &scheme.certificate_codec_config())
         .map_err(|err| format!("failed to decode finalized artifact: {err}"))?;
     if !proof.verify(&mut sys_rng(), &scheme, &Sequential) {
         return Err("finalization certificate verification failed".to_string());
     }
-    let header = read_header(reader, "finalized artifact")?;
+    let header = read_header(reader.0, "finalized artifact")?;
     Ok(VerifiedCertificate {
         epoch: proof.round().epoch().get(),
         view: proof.view().get(),
@@ -432,7 +432,8 @@ mod tests {
     fn coding_commitment_preserves_wire_layout() {
         let mut bytes: [u8; 100] = core::array::from_fn(|i| i as u8);
         bytes[96..].copy_from_slice(&[0, 4, 0, 2]);
-        let commitment = CodingCommitment::decode(bytes.as_slice()).expect("coding commitment");
+        let commitment =
+            CodingCommitment::decode(Copying(bytes.as_slice())).expect("coding commitment");
         assert_eq!(commitment.block().as_ref(), &bytes[..32]);
         assert_eq!(commitment.root().as_ref(), &bytes[32..64]);
         assert_eq!(commitment.context().as_ref(), &bytes[64..96]);
@@ -441,9 +442,9 @@ mod tests {
         assert_eq!(commitment.encode().as_ref(), bytes.as_slice());
 
         bytes[96..98].fill(0);
-        assert!(CodingCommitment::decode(bytes.as_slice()).is_err());
+        assert!(CodingCommitment::decode(Copying(bytes.as_slice())).is_err());
         bytes[96..].copy_from_slice(&[0, 4, 0, 0]);
-        assert!(CodingCommitment::decode(bytes.as_slice()).is_err());
+        assert!(CodingCommitment::decode(Copying(bytes.as_slice())).is_err());
     }
 
     fn verify_round_trip<S, D>(

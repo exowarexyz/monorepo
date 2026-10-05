@@ -160,7 +160,7 @@ where
                 NZU64!(8),
             );
             let mut db: VariableDb<F> =
-                VariableDb::init(context.child("current_ordered_variable_source"), cfg)
+                VariableDb::init(context.child("current_ordered_variable_source"), cfg, None)
                     .await
                     .expect("init");
 
@@ -268,7 +268,7 @@ where
                 TwoCap,
                 M,
                 commonware_parallel::Sequential,
-            > = LocalQmdbDb::init(context.child(partition_prefix), cfg)
+            > = LocalQmdbDb::init(context.child(partition_prefix), cfg, None)
                 .await
                 .expect("init");
 
@@ -334,12 +334,12 @@ where
                 grafted_metadata_partition: "current_ordered_fixed_source-grafted-metadata"
                     .to_string(),
                 translator: TwoCap,
-                init_cache_size: None,
+                init_cache: None,
                 init_buffer: NZUsize!(1 << 21),
                 init_concurrency: (),
             };
             let mut db: FixedDb<F> =
-                FixedDb::init(context.child("current_ordered_fixed_source"), cfg)
+                FixedDb::init(context.child("current_ordered_fixed_source"), cfg, None)
                     .await
                     .expect("init fixed");
 
@@ -563,9 +563,10 @@ async fn assert_incremental_seed_batches_keep_current_proofs_verifiable<F>(
                     op_cfg::<F>(),
                     NZU64!(8),
                 );
-                let mut db: VariableDb<F> = LocalQmdbDb::init(context.child(partition_prefix), cfg)
-                    .await
-                    .expect("init");
+                let mut db: VariableDb<F> =
+                    LocalQmdbDb::init(context.child(partition_prefix), cfg, None)
+                        .await
+                        .expect("init");
 
                 let mut previous_ops = Vec::<BatchOperation<F>>::new();
                 let mut uploads =
@@ -734,6 +735,7 @@ async fn test_ordered_mmb_persistent_interleaved_seed_batches_keep_current_proof
                     let mut db: VariableDb<mmb::Family> = LocalQmdbDb::init(
                         context.child("current_ordered_variable_mmb_persistent_seed_source"),
                         cfg,
+                        None,
                     )
                     .await
                     .expect("init");
@@ -1143,6 +1145,7 @@ where
             let mut db: VariableDb<F> = VariableDb::init(
                 context.child("current_ordered_variable_coalesced_source"),
                 cfg,
+                None,
             )
             .await
             .expect("init source current DB");

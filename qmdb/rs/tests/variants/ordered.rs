@@ -21,7 +21,7 @@ use commonware_storage::{
             ordered,
             value::{FixedEncoding, ValueEncoding, VariableEncoding},
         },
-        current::ordered::ExclusionProof,
+        current::ordered::proof::constant::ExclusionProof,
         operation::Key as QmdbKey,
     },
 };
@@ -991,7 +991,7 @@ macro_rules! variant_case {
                         cache,
                         $fixture::op_cfg::<$family>()
                     );
-                    let mut db: Source = Source::init(context.child(stringify!($name)), cfg)
+                    let mut db: Source = Source::init(context.child(stringify!($name)), cfg, None)
                         .await
                         .expect("init source alias");
                     let batches = [

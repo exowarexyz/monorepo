@@ -98,6 +98,7 @@ async fn test_mirror_ordered_prune_past_chunk_zero() {
                 let mut db: Db = Db::init(
                     context.child("current_ordered_variable_mmr_pruned_source"),
                     cfg,
+                    None,
                 )
                 .await
                 .expect("init");
@@ -134,17 +135,18 @@ async fn test_mirror_ordered_prune_past_chunk_zero() {
                     // historical operation log intact for this mirror test while
                     // allowing the current bitmap/grafted overlay to prune as far
                     // as the sync boundary permits.
-                    db = db
-                        .prune(Location::<mmr::Family>::new(0))
-                        .await
-                        .expect("prune current");
+                    let prune_boundary = db.sync_boundary();
+                    db = db.prune(prune_boundary).await.expect("prune current");
 
                     let latest = db.bounds().end - 1;
-                    let total = NonZeroU64::new(*latest + 1).expect("non-zero");
-                    let (_proof, cumulative) = db
-                        .ops_historical_proof(latest + 1, Location::<mmr::Family>::new(0), total)
+                    let start = Location::<mmr::Family>::new(previous_ops.len() as u64);
+                    let count = NonZeroU64::new(*latest + 1 - *start).expect("non-zero");
+                    let (_proof, delta) = db
+                        .ops_historical_proof(latest + 1, start, count)
                         .await
                         .expect("ops_historical_proof");
+                    let mut cumulative = previous_ops.clone();
+                    cumulative.extend(delta);
                     let previous_slice = if previous_ops.is_empty() {
                         None
                     } else {

@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::task::{Context as TaskContext, Poll};
 
 use bytes::Bytes;
-use commonware_codec::Encode;
+use commonware_codec::{Copying, Encode};
 use commonware_cryptography::Hasher;
 use commonware_storage::{
     merkle::{Family, Graftable, Location},
@@ -931,7 +931,13 @@ where
     V: commonware_codec::Codec + Clone + AsRef<[u8]> + Send + Sync + 'static,
     E: ValueEncoding<Value = V> + Send + Sync + 'static,
     ordered::Operation<F, K, E>: Encode + commonware_codec::Decode,
-    commonware_storage::qmdb::current::ordered::ExclusionProof<F, K, E, H::Digest, N>: Encode,
+    commonware_storage::qmdb::current::ordered::proof::constant::ExclusionProof<
+        F,
+        K,
+        E,
+        H::Digest,
+        N,
+    >: Encode,
 {
     fn get(
         &self,
@@ -994,7 +1000,7 @@ where
         let client = self.client.clone();
         let key_cfg = self.key_cfg.clone();
         async move {
-            let key = K::decode_cfg(request.key, &key_cfg).map_err(|error| {
+            let key = K::decode_cfg(Copying(request.key), &key_cfg).map_err(|error| {
                 ConnectError::invalid_argument(format!("invalid QMDB key: {error}"))
             })?;
             let tip = Location::new(request.tip);
@@ -1018,7 +1024,7 @@ where
             let keys = request
                 .keys
                 .iter()
-                .map(|key| K::decode_cfg(*key, &key_cfg))
+                .map(|key| K::decode_cfg(Copying(key), &key_cfg))
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(|error| {
                     ConnectError::invalid_argument(format!("invalid QMDB key: {error}"))
@@ -1040,7 +1046,13 @@ where
     V: commonware_codec::Codec + Clone + AsRef<[u8]> + Send + Sync + 'static,
     E: ValueEncoding<Value = V> + Send + Sync + 'static,
     ordered::Operation<F, K, E>: Encode + commonware_codec::Decode,
-    commonware_storage::qmdb::current::ordered::ExclusionProof<F, K, E, H::Digest, N>: Encode,
+    commonware_storage::qmdb::current::ordered::proof::constant::ExclusionProof<
+        F,
+        K,
+        E,
+        H::Digest,
+        N,
+    >: Encode,
 {
     fn get_range(
         &self,
@@ -1203,7 +1215,13 @@ pub fn ordered_connect_stack<
 ) -> ConnectRpcService<impl ::connectrpc::Dispatcher>
 where
     ordered::Operation<F, K, E>: Encode + commonware_codec::Decode,
-    commonware_storage::qmdb::current::ordered::ExclusionProof<F, K, E, H::Digest, N>: Encode,
+    commonware_storage::qmdb::current::ordered::proof::constant::ExclusionProof<
+        F,
+        K,
+        E,
+        H::Digest,
+        N,
+    >: Encode,
 {
     let client = Arc::new(OrderedClient::<F, H, K, V, N, E>::new(
         raw_store.clone(),
