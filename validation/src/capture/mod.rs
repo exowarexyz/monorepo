@@ -5,11 +5,13 @@ mod generate;
 mod profile;
 mod reader;
 mod recorder;
+mod stats;
 
 pub use generate::Generator;
 pub use profile::{Domain, Endian, Family, Offset, Patch, Profile, Target};
 pub use reader::FileGenerator;
 pub use recorder::{Limits, Recorder};
+pub use stats::{Statistics, StatisticsSnapshot};
 
 use bytes::Bytes;
 use std::collections::BTreeMap;

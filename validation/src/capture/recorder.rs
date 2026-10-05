@@ -1,4 +1,4 @@
-use super::{bundle, Batch, Profile, Row};
+use super::{bundle, stats::elapsed_ns, Batch, Profile, Row, Statistics};
 use anyhow::{anyhow, ensure, Result};
 use std::{
     collections::BTreeMap,
@@ -60,9 +60,59 @@ impl Drop for Reservation {
 
 #[derive(Debug)]
 struct QueuedBatch {
-    // Field drop order releases payload references before returning capacity.
+    // Release payloads before gauges, then return capacity so new admissions cannot inflate peaks.
     batch: Batch,
+    tracking: BatchTracking,
     _reservation: Reservation,
+}
+
+#[derive(Debug)]
+struct BatchTracking {
+    statistics: Statistics,
+    bytes: u64,
+    registered: bool,
+    started: bool,
+}
+
+impl BatchTracking {
+    fn start(&mut self) {
+        self.statistics.update(|snapshot| {
+            snapshot.queued_batches -= 1;
+            snapshot.writer_active = true;
+        });
+        self.started = true;
+    }
+}
+
+impl Drop for BatchTracking {
+    fn drop(&mut self) {
+        if self.registered {
+            self.statistics.update(|snapshot| {
+                if self.started {
+                    snapshot.writer_active = false;
+                } else {
+                    snapshot.queued_batches -= 1;
+                }
+                snapshot.outstanding_bytes -= self.bytes;
+            });
+        }
+    }
+}
+
+struct WriterLifecycle {
+    statistics: Statistics,
+    succeeded: bool,
+}
+
+impl Drop for WriterLifecycle {
+    fn drop(&mut self) {
+        self.statistics.update(|snapshot| {
+            snapshot.writer_active = false;
+            if !self.succeeded {
+                snapshot.writer_failures = snapshot.writer_failures.saturating_add(1);
+            }
+        });
+    }
 }
 
 fn queued_size(rows: &Vec<Row>) -> Result<u64> {
@@ -84,11 +134,19 @@ fn queued_size(rows: &Vec<Row>) -> Result<u64> {
 fn write_batches(
     receiver: Receiver<QueuedBatch>,
     mut writer: bundle::RowWriter,
+    statistics: Statistics,
 ) -> Result<bundle::Spool> {
-    for queued in receiver {
+    let mut lifecycle = WriterLifecycle {
+        statistics,
+        succeeded: false,
+    };
+    for mut queued in receiver {
+        queued.tracking.start();
         writer.batch(&queued.batch)?;
     }
-    writer.finish()
+    let spool = writer.finish()?;
+    lifecycle.succeeded = true;
+    Ok(spool)
 }
 
 pub struct Recorder {
@@ -101,6 +159,7 @@ pub struct Recorder {
     stopped: bool,
     failure: Option<String>,
     outstanding: Arc<AtomicU64>,
+    statistics: Statistics,
     sender: SyncSender<QueuedBatch>,
     worker: JoinHandle<Result<bundle::Spool>>,
 }
@@ -121,11 +180,13 @@ impl Recorder {
         profile.validate()?;
 
         let path = path.as_ref().to_owned();
-        let writer = bundle::RowWriter::new(&path)?;
+        let statistics = Statistics::default();
+        let writer = bundle::RowWriter::with_statistics(&path, statistics.clone())?;
         let (sender, receiver) = mpsc::sync_channel(limits.queue_batches);
+        let worker_statistics = statistics.clone();
         let worker = thread::Builder::new()
             .name("capture-recorder".into())
-            .spawn(move || write_batches(receiver, writer))?;
+            .spawn(move || write_batches(receiver, writer, worker_statistics))?;
         Ok(Self {
             path,
             profile,
@@ -136,9 +197,14 @@ impl Recorder {
             stopped: false,
             failure: None,
             outstanding: Arc::new(AtomicU64::new(0)),
+            statistics,
             sender,
             worker,
         })
+    }
+
+    pub fn statistics(&self) -> Statistics {
+        self.statistics.clone()
     }
 
     fn invalidate<T>(&mut self, error: impl std::fmt::Display) -> Result<T> {
@@ -179,19 +245,54 @@ impl Recorder {
             queued_bytes,
             self.limits.max_queued_bytes,
         ) else {
+            self.statistics.update(|snapshot| {
+                snapshot.byte_budget_overflows = snapshot.byte_budget_overflows.saturating_add(1);
+            });
             return self.invalidate("capture queued byte budget exceeded");
         };
         let queued = QueuedBatch {
             batch: Batch { offset_ns, rows },
             _reservation: reservation,
+            tracking: BatchTracking {
+                statistics: self.statistics.clone(),
+                bytes: queued_bytes,
+                registered: true,
+                started: false,
+            },
         };
-        match self.sender.try_send(queued) {
+
+        // Registration and receive handoff share a lock so teardown cannot run first.
+        let result = self.statistics.update(|snapshot| {
+            let sent = self.sender.try_send(queued);
+            if sent.is_ok() {
+                snapshot.queued_batches += 1;
+                snapshot.outstanding_bytes += queued_bytes;
+                snapshot.accepted_batches = snapshot.accepted_batches.saturating_add(1);
+                snapshot.peak_queued_batches =
+                    snapshot.peak_queued_batches.max(snapshot.queued_batches);
+                snapshot.peak_outstanding_bytes = snapshot
+                    .peak_outstanding_bytes
+                    .max(snapshot.outstanding_bytes);
+            } else if matches!(&sent, Err(TrySendError::Full(_))) {
+                snapshot.queue_overflows = snapshot.queue_overflows.saturating_add(1);
+            }
+            sent
+        });
+        match result {
             Ok(()) => {
                 self.accepted_bytes += size;
                 Ok(true)
             }
-            Err(TrySendError::Full(_)) => self.invalidate("capture queue is full"),
-            Err(TrySendError::Disconnected(_)) => self.invalidate("capture writer stopped"),
+            Err(TrySendError::Full(mut queued)) => {
+                queued.tracking.registered = false;
+                drop(queued);
+                self.invalidate("capture queue is full")
+            }
+            Err(TrySendError::Disconnected(mut queued)) => {
+                queued.tracking.registered = false;
+                drop(queued);
+                self.invalidate("capture writer stopped")
+            }
         }
     }
 
@@ -204,14 +305,33 @@ impl Recorder {
         if let Some(failure) = self.failure {
             return Err(anyhow!(failure));
         }
-        let repeat_period_ns = u64::try_from(repeat_period.as_nanos())?;
-        bundle::publish(
+        let repeat_period_ns = match u64::try_from(repeat_period.as_nanos()) {
+            Ok(period) => period,
+            Err(error) => {
+                self.statistics.update(|snapshot| {
+                    snapshot.publication_failures = snapshot.publication_failures.saturating_add(1);
+                });
+                return Err(error.into());
+            }
+        };
+        let started = Instant::now();
+        let published = bundle::publish(
             &self.path,
             &self.profile,
             self.source,
             repeat_period_ns,
             spool,
-        )
+        );
+        let publication_ns = elapsed_ns(started);
+        self.statistics.update(|snapshot| {
+            snapshot.publication_ns = snapshot.publication_ns.saturating_add(publication_ns);
+            if published.is_ok() {
+                snapshot.published = true;
+            } else {
+                snapshot.publication_failures = snapshot.publication_failures.saturating_add(1);
+            }
+        });
+        published
     }
 }
 
@@ -253,16 +373,43 @@ mod tests {
     }
 
     fn queued(batch: Batch, outstanding: &Arc<AtomicU64>, limit: u64) -> QueuedBatch {
+        queued_with_statistics(batch, outstanding, limit, Statistics::default())
+    }
+
+    fn queued_with_statistics(
+        batch: Batch,
+        outstanding: &Arc<AtomicU64>,
+        limit: u64,
+        statistics: Statistics,
+    ) -> QueuedBatch {
         let bytes = queued_size(&batch.rows).unwrap();
+        let reservation = Reservation::acquire(outstanding, bytes, limit).unwrap();
+        statistics.update(|snapshot| {
+            snapshot.queued_batches += 1;
+            snapshot.outstanding_bytes += bytes;
+            snapshot.accepted_batches += 1;
+            snapshot.peak_queued_batches =
+                snapshot.peak_queued_batches.max(snapshot.queued_batches);
+            snapshot.peak_outstanding_bytes = snapshot
+                .peak_outstanding_bytes
+                .max(snapshot.outstanding_bytes);
+        });
         QueuedBatch {
             batch,
-            _reservation: Reservation::acquire(outstanding, bytes, limit).unwrap(),
+            _reservation: reservation,
+            tracking: BatchTracking {
+                statistics,
+                bytes,
+                registered: true,
+                started: false,
+            },
         }
     }
 
     struct TrackedPayload {
         bytes: Vec<u8>,
         outstanding: Arc<AtomicU64>,
+        statistics: Statistics,
         dropped: Arc<AtomicBool>,
     }
 
@@ -275,6 +422,7 @@ mod tests {
     impl Drop for TrackedPayload {
         fn drop(&mut self) {
             assert!(self.outstanding.load(Ordering::Relaxed) > 0);
+            assert!(self.statistics.snapshot().outstanding_bytes > 0);
             self.dropped.store(true, Ordering::Relaxed);
         }
     }
@@ -305,12 +453,14 @@ mod tests {
         let temp = tempdir().unwrap();
         let outstanding = Arc::new(AtomicU64::new(0));
         let dropped = Arc::new(AtomicBool::new(false));
+        let statistics = Statistics::default();
         let tracked = Row {
             family: 7,
             key: Bytes::from_static(b"key"),
             value: Bytes::from_owner(TrackedPayload {
                 bytes: b"value".to_vec(),
                 outstanding: Arc::clone(&outstanding),
+                statistics: statistics.clone(),
                 dropped: Arc::clone(&dropped),
             }),
         };
@@ -320,25 +470,47 @@ mod tests {
         };
         let limit = queued_size(&batch.rows).unwrap();
         let (sender, receiver) = mpsc::sync_channel(1);
-        sender.try_send(queued(batch, &outstanding, limit)).unwrap();
-        let held = receiver.recv().unwrap();
+        sender
+            .try_send(queued_with_statistics(
+                batch,
+                &outstanding,
+                limit,
+                statistics.clone(),
+            ))
+            .unwrap();
+        let mut held = receiver.recv().unwrap();
+        assert_eq!(statistics.snapshot().queued_batches, 1);
+        held.tracking.start();
+        assert_eq!(statistics.snapshot().queued_batches, 0);
+        assert!(statistics.snapshot().writer_active);
+        assert_eq!(statistics.snapshot().outstanding_bytes, limit);
         assert_eq!(outstanding.load(Ordering::Relaxed), limit);
         assert!(Reservation::acquire(&outstanding, limit, limit).is_none());
 
         let path = temp.path().join("capture");
-        let mut writer = bundle::RowWriter::new(&path).unwrap();
+        let mut writer = bundle::RowWriter::with_statistics(&path, statistics.clone()).unwrap();
         writer.batch(&held.batch).unwrap();
         assert_eq!(outstanding.load(Ordering::Relaxed), limit);
         assert!(!dropped.load(Ordering::Relaxed));
         drop(held);
         assert!(dropped.load(Ordering::Relaxed));
         assert_eq!(outstanding.load(Ordering::Relaxed), 0);
+        assert_eq!(statistics.snapshot().outstanding_bytes, 0);
+        assert!(!statistics.snapshot().writer_active);
         let batch = Batch {
             offset_ns: 1,
             rows: vec![row(2)],
         };
-        sender.try_send(queued(batch, &outstanding, limit)).unwrap();
-        let held = receiver.recv().unwrap();
+        sender
+            .try_send(queued_with_statistics(
+                batch,
+                &outstanding,
+                limit,
+                statistics.clone(),
+            ))
+            .unwrap();
+        let mut held = receiver.recv().unwrap();
+        held.tracking.start();
         writer.batch(&held.batch).unwrap();
         drop(held);
         assert_eq!(outstanding.load(Ordering::Relaxed), 0);
@@ -351,6 +523,54 @@ mod tests {
         )
         .unwrap();
         assert_eq!(Bundle::read(&path).unwrap().batches.len(), 2);
+    }
+
+    #[test]
+    fn receiver_cleanup_preserves_the_writer_held_batch() {
+        let outstanding = Arc::new(AtomicU64::new(0));
+        let statistics = Statistics::default();
+        let (sender, receiver) = mpsc::sync_channel(1);
+        let batch = Batch {
+            offset_ns: 0,
+            rows: vec![row(1)],
+        };
+        let bytes = queued_size(&batch.rows).unwrap();
+        sender
+            .try_send(queued_with_statistics(
+                batch.clone(),
+                &outstanding,
+                4096,
+                statistics.clone(),
+            ))
+            .unwrap();
+        let mut held = receiver.recv().unwrap();
+        held.tracking.start();
+        sender
+            .try_send(queued_with_statistics(
+                batch,
+                &outstanding,
+                4096,
+                statistics.clone(),
+            ))
+            .unwrap();
+        let snapshot = statistics.snapshot();
+        assert_eq!(snapshot.accepted_batches, 2);
+        assert_eq!(snapshot.queued_batches, 1);
+        assert!(snapshot.writer_active);
+        assert_eq!(snapshot.outstanding_bytes, 2 * bytes);
+        assert_eq!(snapshot.peak_queued_batches, 1);
+        assert_eq!(snapshot.peak_outstanding_bytes, 2 * bytes);
+        drop(receiver);
+        let snapshot = statistics.snapshot();
+        assert_eq!(snapshot.queued_batches, 0);
+        assert!(snapshot.writer_active);
+        assert_eq!(snapshot.outstanding_bytes, bytes);
+        assert_eq!(outstanding.load(Ordering::Relaxed), bytes);
+        drop(held);
+        let snapshot = statistics.snapshot();
+        assert_eq!(snapshot.outstanding_bytes, 0);
+        assert!(!snapshot.writer_active);
+        assert_eq!(outstanding.load(Ordering::Relaxed), 0);
     }
 
     #[test]
@@ -388,15 +608,27 @@ mod tests {
         limits.max_queued_bytes = limit;
         let mut recorder = Recorder::start(&path, profile(), BTreeMap::new(), limits).unwrap();
         let outstanding = Arc::clone(&recorder.outstanding);
+        let statistics = recorder.statistics();
         assert!(recorder.record(rows).unwrap());
         entered_receiver
             .recv_timeout(Duration::from_secs(10))
             .unwrap();
         assert_eq!(outstanding.load(Ordering::Relaxed), limit);
+        let snapshot = statistics.snapshot();
+        assert_eq!(snapshot.queued_batches, 0);
+        assert!(snapshot.writer_active);
+        assert_eq!(snapshot.outstanding_bytes, limit);
         assert!(recorder.record(vec![row(2)]).is_err());
         release_sender.send(()).unwrap();
         assert!(recorder.finish(Duration::from_secs(60)).is_err());
         assert_eq!(outstanding.load(Ordering::Relaxed), 0);
+        let snapshot = statistics.snapshot();
+        assert_eq!(snapshot.byte_budget_overflows, 1);
+        assert_eq!(snapshot.accepted_batches, 1);
+        assert_eq!(snapshot.peak_outstanding_bytes, limit);
+        assert_eq!(snapshot.queued_batches, 0);
+        assert_eq!(snapshot.outstanding_bytes, 0);
+        assert!(!snapshot.writer_active);
         assert!(!path.join("manifest.json").exists());
     }
 
@@ -405,24 +637,114 @@ mod tests {
         let temp = tempdir().unwrap();
         let path = temp.path().join("capture");
         let outstanding = Arc::new(AtomicU64::new(0));
+        let statistics = Statistics::default();
         let (sender, receiver) = mpsc::sync_channel(3);
         for offset_ns in [1, 0, 2] {
             sender
-                .try_send(queued(
+                .try_send(queued_with_statistics(
                     Batch {
                         offset_ns,
                         rows: vec![row(1)],
                     },
                     &outstanding,
                     4096,
+                    statistics.clone(),
                 ))
                 .unwrap();
         }
         drop(sender);
-        assert!(write_batches(receiver, bundle::RowWriter::new(&path).unwrap()).is_err());
+        assert!(write_batches(
+            receiver,
+            bundle::RowWriter::with_statistics(&path, statistics.clone()).unwrap(),
+            statistics.clone(),
+        )
+        .is_err());
         assert_eq!(outstanding.load(Ordering::Relaxed), 0);
         assert!(!path.join("manifest.json").exists());
         assert!(Bundle::read(&path).is_err());
+        let snapshot = statistics.snapshot();
+        assert_eq!(snapshot.accepted_batches, 3);
+        assert_eq!(snapshot.processed_batches, 1);
+        assert_eq!(snapshot.writer_failures, 1);
+        assert_eq!(snapshot.publication_failures, 0);
+        assert_eq!(snapshot.queued_batches, 0);
+        assert_eq!(snapshot.outstanding_bytes, 0);
+        assert!(!snapshot.writer_active);
+        assert!(!snapshot.published);
+    }
+
+    #[test]
+    fn empty_capture_counts_publication_failure() {
+        let temp = tempdir().unwrap();
+        let path = temp.path().join("capture");
+        let recorder = Recorder::start(&path, profile(), BTreeMap::new(), limits()).unwrap();
+        let statistics = recorder.statistics();
+        assert!(recorder.finish(Duration::from_secs(60)).is_err());
+        let snapshot = statistics.snapshot();
+        assert_eq!(snapshot.writer_failures, 0);
+        assert_eq!(snapshot.publication_failures, 1);
+        assert_eq!(snapshot.outstanding_bytes, 0);
+        assert!(!snapshot.writer_active);
+        assert!(!snapshot.published);
+    }
+
+    #[test]
+    fn writer_panics_release_gauges_and_count_one_failure() {
+        struct PanickingPayload;
+
+        impl AsRef<[u8]> for PanickingPayload {
+            fn as_ref(&self) -> &[u8] {
+                b"value"
+            }
+        }
+
+        impl Drop for PanickingPayload {
+            fn drop(&mut self) {
+                panic!("injected payload teardown failure");
+            }
+        }
+
+        let temp = tempdir().unwrap();
+        let path = temp.path().join("capture");
+        let mut recorder = Recorder::start(&path, profile(), BTreeMap::new(), limits()).unwrap();
+        let statistics = recorder.statistics();
+        let outstanding = Arc::clone(&recorder.outstanding);
+        let mut captured = row(1);
+        captured.value = Bytes::from_owner(PanickingPayload);
+        assert!(recorder.record(vec![captured]).unwrap());
+        assert!(recorder.finish(Duration::from_secs(60)).is_err());
+        let snapshot = statistics.snapshot();
+        assert_eq!(snapshot.accepted_batches, 1);
+        assert_eq!(snapshot.writer_failures, 1);
+        assert_eq!(snapshot.publication_failures, 0);
+        assert_eq!(snapshot.queued_batches, 0);
+        assert_eq!(snapshot.outstanding_bytes, 0);
+        assert_eq!(outstanding.load(Ordering::Relaxed), 0);
+        assert!(!snapshot.writer_active);
+        assert!(!snapshot.published);
+    }
+
+    #[test]
+    fn statistics_survive_recorder_drop_and_receiver_cleanup() {
+        let temp = tempdir().unwrap();
+        let path = temp.path().join("capture");
+        let mut recorder = Recorder::start(&path, profile(), BTreeMap::new(), limits()).unwrap();
+        let (sender, receiver) = mpsc::sync_channel(1);
+        recorder.sender = sender;
+        let statistics = recorder.statistics();
+        assert!(recorder.record(vec![row(1)]).unwrap());
+        drop(recorder);
+        let snapshot = statistics.snapshot();
+        assert_eq!(snapshot.accepted_batches, 1);
+        assert_eq!(snapshot.queued_batches, 1);
+        assert!(snapshot.outstanding_bytes > 0);
+        assert!(!snapshot.published);
+        drop(receiver);
+        let snapshot = statistics.snapshot();
+        assert_eq!(snapshot.accepted_batches, 1);
+        assert_eq!(snapshot.queued_batches, 0);
+        assert_eq!(snapshot.outstanding_bytes, 0);
+        assert!(!snapshot.published);
     }
 
     #[test]
@@ -444,7 +766,12 @@ mod tests {
         }
         assert!(outstanding.load(Ordering::Relaxed) > 0);
         drop(sender);
-        let spool = write_batches(receiver, bundle::RowWriter::new(&path).unwrap()).unwrap();
+        let spool = write_batches(
+            receiver,
+            bundle::RowWriter::new(&path).unwrap(),
+            Statistics::default(),
+        )
+        .unwrap();
         assert_eq!(outstanding.load(Ordering::Relaxed), 0);
         assert!(!path.join("manifest.json").exists());
         bundle::publish(&path, &profile(), BTreeMap::new(), 8, spool).unwrap();
@@ -520,6 +847,10 @@ mod tests {
         let path = temp.path().join("capture");
         let source = BTreeMap::from([("producer".into(), "test".into())]);
         let mut recorder = Recorder::start(&path, profile(), source.clone(), limits()).unwrap();
+        let statistics = recorder.statistics();
+        let processed_bytes = bundle::encoded_size(&[row(1), row(2)]).unwrap()
+            + bundle::encoded_size(&[row(3)]).unwrap()
+            - 2 * bundle::EVENT_HEADER_BYTES;
         assert!(recorder.record(vec![row(1), row(2)]).unwrap());
         assert!(recorder.record(vec![row(3)]).unwrap());
         assert!(!path.join("manifest.json").exists());
@@ -530,6 +861,17 @@ mod tests {
         assert_eq!(bundle.batches[1].rows, vec![row(3)]);
         assert!(bundle.batches[0].offset_ns <= bundle.batches[1].offset_ns);
         assert_eq!(bundle.source, source);
+        let snapshot = statistics.snapshot();
+        assert_eq!(snapshot.accepted_batches, 2);
+        assert_eq!(snapshot.processed_batches, 2);
+        assert_eq!(snapshot.processed_rows, 3);
+        assert_eq!(snapshot.processed_bytes, processed_bytes);
+        assert_eq!(snapshot.queued_batches, 0);
+        assert_eq!(snapshot.outstanding_bytes, 0);
+        assert!(!snapshot.writer_active);
+        assert_eq!(snapshot.writer_failures, 0);
+        assert_eq!(snapshot.publication_failures, 0);
+        assert!(snapshot.published);
     }
 
     #[test]
@@ -627,18 +969,33 @@ mod tests {
                 Recorder::start(&path, profile(), BTreeMap::new(), limits()).unwrap();
             let (sender, receiver) = mpsc::sync_channel(1);
             recorder.sender = sender;
+            let statistics = recorder.statistics();
             if disconnected {
                 drop(receiver);
                 assert!(recorder.record(vec![row(1)]).is_err());
                 assert_eq!(recorder.outstanding.load(Ordering::Relaxed), 0);
+                let snapshot = statistics.snapshot();
+                assert_eq!(snapshot.accepted_batches, 0);
+                assert_eq!(snapshot.peak_queued_batches, 0);
+                assert_eq!(snapshot.peak_outstanding_bytes, 0);
+                assert_eq!(snapshot.queue_overflows, 0);
             } else {
                 assert!(recorder.record(vec![row(1)]).unwrap());
                 let reserved = recorder.outstanding.load(Ordering::Relaxed);
                 assert!(recorder.record(vec![row(2)]).is_err());
                 assert_eq!(recorder.outstanding.load(Ordering::Relaxed), reserved);
+                let snapshot = statistics.snapshot();
+                assert_eq!(snapshot.accepted_batches, 1);
+                assert_eq!(snapshot.queued_batches, 1);
+                assert_eq!(snapshot.outstanding_bytes, reserved);
+                assert_eq!(snapshot.peak_queued_batches, 1);
+                assert_eq!(snapshot.peak_outstanding_bytes, reserved);
+                assert_eq!(snapshot.queue_overflows, 1);
                 drop(receiver);
                 assert_eq!(recorder.outstanding.load(Ordering::Relaxed), 0);
             }
+            assert_eq!(statistics.snapshot().queued_batches, 0);
+            assert_eq!(statistics.snapshot().outstanding_bytes, 0);
             assert!(recorder.finish(Duration::from_secs(60)).is_err());
             assert!(!path.join("manifest.json").exists());
         }
@@ -651,11 +1008,16 @@ mod tests {
             let path = temp.path().join("capture");
             let mut recorder =
                 Recorder::start(&path, profile(), BTreeMap::new(), limits()).unwrap();
+            let statistics = recorder.statistics();
             assert!(recorder.record(vec![row(1)]).unwrap());
             fs::write(path.join(occupied), b"occupied").unwrap();
             assert!(recorder.finish(Duration::from_secs(60)).is_err());
             assert_eq!(fs::read(path.join(occupied)).unwrap(), b"occupied");
             assert!(Bundle::read(&path).is_err());
+            let snapshot = statistics.snapshot();
+            assert_eq!(snapshot.publication_failures, 1);
+            assert_eq!(snapshot.writer_failures, 0);
+            assert!(!snapshot.published);
         }
     }
 }

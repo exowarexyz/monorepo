@@ -1,3 +1,4 @@
+use super::stats::{elapsed_ns, Statistics};
 use super::{Batch, Bundle, Profile, Row};
 use anyhow::{anyhow, bail, ensure, Context, Result};
 use bytes::Bytes;
@@ -8,11 +9,13 @@ use std::{
     fs::{self, File, OpenOptions},
     io::{BufWriter, Write},
     path::Path,
+    time::Instant,
 };
 
 pub(super) const VERSION: u32 = 1;
 pub(super) const ROW_HEADER_BYTES: u64 = 20;
 pub(super) const EVENT_HEADER_BYTES: u64 = 16;
+const PAYLOAD_BUFFER_BYTES: usize = 1024 * 1024;
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -43,16 +46,30 @@ pub(super) struct Spool {
     rows_sha256: String,
 }
 
-struct PayloadWriter {
-    writer: BufWriter<File>,
+struct ChecksummedFile {
+    file: File,
     digest: Sha256,
+}
+
+impl Write for ChecksummedFile {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        let written = self.file.write(bytes)?;
+        self.digest.update(&bytes[..written]);
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.file.flush()
+    }
+}
+
+struct PayloadWriter {
+    writer: BufWriter<ChecksummedFile>,
 }
 
 impl Write for PayloadWriter {
     fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-        let written = self.writer.write(bytes)?;
-        self.digest.update(&bytes[..written]);
-        Ok(written)
+        self.writer.write(bytes)
     }
 
     fn flush(&mut self) -> std::io::Result<()> {
@@ -63,15 +80,36 @@ impl Write for PayloadWriter {
 impl PayloadWriter {
     fn new(path: &Path) -> Result<Self> {
         Ok(Self {
-            writer: BufWriter::new(create_file(path)?),
-            digest: Sha256::new(),
+            writer: BufWriter::with_capacity(
+                PAYLOAD_BUFFER_BYTES,
+                ChecksummedFile {
+                    file: create_file(path)?,
+                    digest: Sha256::new(),
+                },
+            ),
         })
     }
 
-    fn finish(mut self) -> Result<String> {
-        self.flush()?;
-        self.writer.get_ref().sync_all()?;
-        Ok(hex::encode(self.digest.finalize()))
+    fn finish(mut self, statistics: &Statistics) -> Result<String> {
+        let started = Instant::now();
+        let flushed = self.flush();
+        let elapsed = elapsed_ns(started);
+        statistics.update(|snapshot| {
+            snapshot.final_flush_ns = snapshot.final_flush_ns.saturating_add(elapsed);
+        });
+        flushed?;
+        let writer = self
+            .writer
+            .into_inner()
+            .map_err(|error| error.into_error())?;
+        let started = Instant::now();
+        let synced = writer.file.sync_all();
+        let elapsed = elapsed_ns(started);
+        statistics.update(|snapshot| {
+            snapshot.final_sync_ns = snapshot.final_sync_ns.saturating_add(elapsed);
+        });
+        synced?;
+        Ok(hex::encode(writer.digest.finalize()))
     }
 }
 
@@ -81,6 +119,7 @@ pub(super) struct RowWriter {
     event_count: u64,
     row_count: u64,
     last_offset_ns: u64,
+    statistics: Statistics,
 }
 
 fn create_file(path: &Path) -> Result<File> {
@@ -118,6 +157,10 @@ pub(super) fn encoded_size(rows: &[Row]) -> Result<u64> {
 
 impl RowWriter {
     pub(super) fn new(path: &Path) -> Result<Self> {
+        Self::with_statistics(path, Statistics::default())
+    }
+
+    pub(super) fn with_statistics(path: &Path, statistics: Statistics) -> Result<Self> {
         fs::create_dir(path).with_context(|| format!("create capture {}", path.display()))?;
         let rows = PayloadWriter::new(&path.join("rows.bin"))?;
         let mut events = PayloadWriter::new(&path.join("events.json"))?;
@@ -128,11 +171,29 @@ impl RowWriter {
             event_count: 0,
             row_count: 0,
             last_offset_ns: 0,
+            statistics,
         })
     }
 
     pub(super) fn batch(&mut self, batch: &Batch) -> Result<()> {
-        encoded_size(&batch.rows)?;
+        let started = Instant::now();
+        let result = self.write_batch(batch);
+        let elapsed = elapsed_ns(started);
+        self.statistics.update(|snapshot| {
+            snapshot.processing_ns = snapshot.processing_ns.saturating_add(elapsed);
+            if let Ok(bytes) = result {
+                snapshot.processed_batches = snapshot.processed_batches.saturating_add(1);
+                snapshot.processed_rows = snapshot
+                    .processed_rows
+                    .saturating_add(batch.rows.len() as u64);
+                snapshot.processed_bytes = snapshot.processed_bytes.saturating_add(bytes);
+            }
+        });
+        result.map(|_| ())
+    }
+
+    fn write_batch(&mut self, batch: &Batch) -> Result<u64> {
+        let size = encoded_size(&batch.rows)?;
         ensure!(
             batch.offset_ns >= self.last_offset_ns,
             "capture offsets decrease"
@@ -147,11 +208,11 @@ impl RowWriter {
             .checked_add(1)
             .context("capture event count overflow")?;
         for row in &batch.rows {
-            self.rows.write_all(&row.family.to_le_bytes())?;
-            self.rows
-                .write_all(&u64::try_from(row.key.len())?.to_le_bytes())?;
-            self.rows
-                .write_all(&u64::try_from(row.value.len())?.to_le_bytes())?;
+            let mut header = [0; ROW_HEADER_BYTES as usize];
+            header[..4].copy_from_slice(&row.family.to_le_bytes());
+            header[4..12].copy_from_slice(&u64::try_from(row.key.len())?.to_le_bytes());
+            header[12..].copy_from_slice(&u64::try_from(row.value.len())?.to_le_bytes());
+            self.rows.write_all(&header)?;
             self.rows.write_all(&row.key)?;
             self.rows.write_all(&row.value)?;
         }
@@ -168,17 +229,23 @@ impl RowWriter {
         self.event_count = event_count;
         self.row_count = total_rows;
         self.last_offset_ns = batch.offset_ns;
-        Ok(())
+        Ok(size - EVENT_HEADER_BYTES)
     }
 
     pub(super) fn finish(mut self) -> Result<Spool> {
-        self.events.write_all(b"]")?;
+        let started = Instant::now();
+        let closed = self.events.write_all(b"]");
+        let elapsed = elapsed_ns(started);
+        self.statistics.update(|snapshot| {
+            snapshot.final_flush_ns = snapshot.final_flush_ns.saturating_add(elapsed);
+        });
+        closed?;
         Ok(Spool {
             event_count: self.event_count,
             row_count: self.row_count,
             last_offset_ns: self.last_offset_ns,
-            rows_sha256: self.rows.finish()?,
-            events_sha256: self.events.finish()?,
+            rows_sha256: self.rows.finish(&self.statistics)?,
+            events_sha256: self.events.finish(&self.statistics)?,
         })
     }
 }
@@ -420,13 +487,41 @@ pub(super) mod tests {
     }
 
     #[test]
+    fn row_bytes_and_checksums_match_v1_across_buffer_boundaries() {
+        let temp = tempdir().unwrap();
+        let path = temp.path().join("capture");
+        let mut capture = bundle();
+        capture.batches[0].rows[0].value = Bytes::from(vec![1; PAYLOAD_BUFFER_BYTES - 64]);
+        capture.batches[0].rows[1].value = Bytes::from(vec![2; PAYLOAD_BUFFER_BYTES + 17]);
+        capture.batches[1].rows[0].value = Bytes::new();
+        let mut expected = Vec::new();
+        for batch in &capture.batches {
+            for row in &batch.rows {
+                expected.extend_from_slice(&row.family.to_le_bytes());
+                expected.extend_from_slice(&(row.key.len() as u64).to_le_bytes());
+                expected.extend_from_slice(&(row.value.len() as u64).to_le_bytes());
+                expected.extend_from_slice(&row.key);
+                expected.extend_from_slice(&row.value);
+            }
+        }
+
+        capture.write(&path).unwrap();
+        assert_eq!(fs::read(path.join("rows.bin")).unwrap(), expected);
+        let manifest: Manifest =
+            serde_json::from_slice(&fs::read(path.join("manifest.json")).unwrap()).unwrap();
+        assert_eq!(manifest.rows_sha256, digest(&expected));
+        assert_eq!(Bundle::read(&path).unwrap().batches, capture.batches);
+    }
+
+    #[test]
     fn rows_and_v1_event_array_stream_before_finalization() {
         let temp = tempdir().unwrap();
         let path = temp.path().join("capture");
         let mut writer = RowWriter::new(&path).unwrap();
         let mut expected_events = Vec::new();
         let mut batches = Vec::new();
-        for offset_ns in 0..1024 {
+        let count = 32768;
+        for offset_ns in 0..count {
             let batch = Batch {
                 offset_ns,
                 rows: vec![row(1), row(1)],
@@ -444,15 +539,15 @@ pub(super) mod tests {
         assert!(!partial_events.ends_with(b"]"));
         assert!(!path.join("manifest.json").exists());
         let spool = writer.finish().unwrap();
-        assert_eq!(spool.event_count, 1024);
-        assert_eq!(spool.row_count, 2048);
-        assert_eq!(spool.last_offset_ns, 1023);
+        assert_eq!(spool.event_count, count);
+        assert_eq!(spool.row_count, count * 2);
+        assert_eq!(spool.last_offset_ns, count - 1);
         let expected_events = serde_json::to_vec(&expected_events).unwrap();
         assert_eq!(fs::read(path.join("events.json")).unwrap(), expected_events);
         assert_eq!(spool.events_sha256, digest(&expected_events));
         let rows = fs::read(path.join("rows.bin")).unwrap();
         assert_eq!(spool.rows_sha256, digest(&rows));
-        publish(&path, &profile(), BTreeMap::new(), 1024, spool).unwrap();
+        publish(&path, &profile(), BTreeMap::new(), count, spool).unwrap();
         assert_eq!(Bundle::read(&path).unwrap().batches, batches);
     }
 
@@ -461,8 +556,13 @@ pub(super) mod tests {
         let temp = tempdir().unwrap();
         let path = temp.path().join("capture");
         let mut writer = RowWriter::new(&path).unwrap();
-        writer.rows.writer =
-            BufWriter::with_capacity(0, File::open(path.join("rows.bin")).unwrap());
+        writer.rows.writer = BufWriter::with_capacity(
+            0,
+            ChecksummedFile {
+                file: File::open(path.join("rows.bin")).unwrap(),
+                digest: Sha256::new(),
+            },
+        );
         assert!(writer
             .batch(&Batch {
                 offset_ns: 0,
@@ -480,10 +580,10 @@ pub(super) mod tests {
             let temp = tempdir().unwrap();
             let path = temp.path().join("capture");
             let mut writer = RowWriter::new(&path).unwrap();
-            let readonly = BufWriter::new(File::open(path.join(name)).unwrap());
+            let readonly = File::open(path.join(name)).unwrap();
             match name {
-                "rows.bin" => writer.rows.writer = readonly,
-                "events.json" => writer.events.writer = readonly,
+                "rows.bin" => writer.rows.writer.get_mut().file = readonly,
+                "events.json" => writer.events.writer.get_mut().file = readonly,
                 _ => unreachable!(),
             }
             writer
