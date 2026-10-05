@@ -101,6 +101,7 @@ fn example() -> anyhow::Result<()> {
             queue_batches: 32,
         },
     )?;
+    let statistics = recorder.statistics();
 
     for height in 1_u64..=2 {
         let mut key = vec![0x04];
@@ -116,6 +117,7 @@ fn example() -> anyhow::Result<()> {
     }
 
     recorder.finish(started.elapsed() + Duration::from_nanos(1))?;
+    assert!(statistics.snapshot().published);
 
     let mut generator = FileGenerator::open("capture-run", 7)?;
     generator.validate_passes(0, 3)?;
@@ -137,6 +139,34 @@ completed artifact. Its repeat period must be positive and greater than every
 recorded offset. Dropping a recorder closes its queue without waiting for disk I/O
 and leaves an incomplete artifact that readers reject. Call `finish` from a
 blocking context when recording inside an async application.
+
+`Recorder::statistics` returns a cloneable handle. Consumers can retain it separately
+from the recorder and call `snapshot` during recording, finalization, and after
+`finish` consumes the recorder. Export the snapshots through the application's
+metrics system. The library does not require a metrics backend.
+
+| Measurement | Meaning |
+| --- | --- |
+| `queued_batches`, `peak_queued_batches` | Accepted batches not yet started by the writer, including the receive handoff. |
+| `writer_active` | The writer holds a batch and its memory reservation. |
+| `outstanding_bytes`, `peak_outstanding_bytes` | Accounted bytes across accepted queued and writer-held batches. |
+| `accepted_batches` | Successful batch admissions. |
+| `processed_batches`, `processed_rows`, `processed_bytes` | Successfully serialized batches, rows, and binary row-record bytes. Bytes exclude event JSON and other metadata. |
+| `processing_ns` | Cumulative batch validation, serialization, hashing, and buffered-write time. Excludes queue waits and finalization. |
+| `final_flush_ns`, `final_sync_ns` | Cumulative payload-buffer finalization and payload-file sync time. |
+| `publication_ns` | Time writing and syncing the profile, manifest, and capture directory during publication. |
+| `queue_overflows`, `byte_budget_overflows` | Batch-count and queued-byte admission failures. |
+| `writer_failures`, `publication_failures` | Background writer failures and final publication failures. |
+| `published` | Successful publication of the completed capture. |
+
+Derive throughput from changes in processed counters over elapsed wall time.
+Processing and finalization durations include failed attempts. Processed bytes may
+still be buffered and do not imply durability. The receive handoff can temporarily
+make `queued_batches` exceed the channel's waiting-slot limit by one. Counters are
+updated at batch and finalization boundaries, with no per-row atomic operations.
+Custom owners supplied through `Bytes::from_owner` must not panic when dropped.
+Rust's channel cleanup can otherwise abandon queued payloads, leaving their memory
+and gauges retained after writer failure.
 
 `Recorder::start` validates profile declarations before creating the output
 directory. Generation checks observed patch layouts and numeric capacity.
@@ -179,6 +209,8 @@ outstanding key/value bytes and row-container storage, including the batch held 
 the writer. Capacity is released after its row references are dropped. Exceeding
 either queue limit invalidates the capture. These are accounting limits, not exact
 process-memory limits. Shared `Bytes` slices can retain larger backing allocations.
+The writer also holds two fixed 1 MiB buffers, one per payload file. These buffers
+combine small writes before checksum updates and are outside the queued-byte budget.
 
 `FileGenerator::open` scans the complete artifact before returning. It checks
 checksums, structure, and patch layouts, and computes numeric bounds without
