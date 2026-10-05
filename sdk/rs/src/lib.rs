@@ -1573,6 +1573,7 @@ pub struct StoreClientBuilder {
     connect_request_compression: ConnectRequestCompression,
     api_key: Option<ApiKey>,
     rpc_transport: Option<RpcTransportChoice>,
+    request_timeout: Option<Duration>,
 }
 
 impl StoreClientBuilder {
@@ -1644,6 +1645,13 @@ impl StoreClientBuilder {
     /// Codec for compressing **outgoing** RPC request bodies (default [`ConnectRequestCompression::None`]).
     pub fn connect_request_compression(mut self, compression: ConnectRequestCompression) -> Self {
         self.connect_request_compression = compression;
+        self
+    }
+
+    /// Bounds unary calls and the opening of streaming calls across RPC transports.
+    /// Overrides the timeout supplied by [`Self::balanced_http2_transport`].
+    pub fn request_timeout(mut self, timeout: Duration) -> Self {
+        self.request_timeout = Some(timeout);
         self
     }
 
@@ -1731,12 +1739,19 @@ impl StoreClientBuilder {
                     Some(value) => connect_http.with_authorization(value),
                     None => connect_http,
                 };
-                (ProtoErasedClientTransport::new(connect_http), None)
+                (
+                    ProtoErasedClientTransport::new(connect_http),
+                    self.request_timeout,
+                )
             }
-            Some(RpcTransportChoice::Custom(transport)) => {
-                (transport.with_metadata(resolved.header), None)
-            }
+            Some(RpcTransportChoice::Custom(transport)) => (
+                transport.with_metadata(resolved.header),
+                self.request_timeout,
+            ),
             Some(RpcTransportChoice::BalancedHttp2(mut config)) => {
+                if let Some(timeout) = self.request_timeout {
+                    config.request_timeout = timeout;
+                }
                 let rpc_timeout = config.request_timeout;
                 if uses_tls && config.tls_config.is_none() {
                     config = config.with_tls_config(Arc::new(
@@ -3870,6 +3885,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn custom_transport_request_timeout_controls_unary_header() {
+        for timeout in [None, Some(Duration::from_millis(1234))] {
+            let transport = RecordingTransport::default();
+            let builder = StoreClient::builder()
+                .url("http://ingest.internal")
+                .retry_config(RetryConfig::disabled())
+                .client_transport(transport.clone());
+            let builder = match timeout {
+                Some(timeout) => builder.request_timeout(timeout),
+                None => builder,
+            };
+            let client = builder.build().unwrap();
+
+            client.put_physical(&[]).await.unwrap_err();
+
+            let requests = transport.requests();
+            assert_eq!(requests.len(), 1);
+            assert_eq!(
+                requests[0]
+                    .1
+                    .get("connect-timeout-ms")
+                    .map(|value| value.to_str().unwrap()),
+                timeout.map(|_| "1234"),
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn generated_reduce_stream_prefers_zstd() {
         let transport = RecordingTransport::default();
         let client = StoreClient::builder()
@@ -3905,13 +3948,13 @@ mod tests {
 
     #[tokio::test]
     async fn streaming_timeout_includes_first_frame_prefetch() {
-        let mut client = StoreClient::builder()
+        let client = StoreClient::builder()
             .url("http://query.internal")
             .retry_config(RetryConfig::disabled())
+            .request_timeout(Duration::from_millis(25))
             .client_transport(StalledStreamTransport)
             .build()
             .unwrap();
-        client.rpc_timeout = Some(Duration::from_millis(25));
         let client = client.prefixed(StoreKeyPrefix::new("timeout/").unwrap());
         let key = Key::from(b"key".to_vec());
         let start = Key::from(b"a".to_vec());
@@ -4390,6 +4433,42 @@ mod tests {
         assert_eq!(client.ingest_uri.scheme_str(), Some("http"));
         assert_eq!(client.query_uri.scheme_str(), Some("https"));
         assert_eq!(client.rpc_timeout, Some(timeout));
+    }
+
+    #[test]
+    fn default_transport_request_timeout_is_optional() {
+        let builder = StoreClient::builder().url("http://ingest.internal");
+        assert_eq!(builder.build().unwrap().rpc_timeout, None);
+
+        let timeout = Duration::from_millis(456);
+        let client = StoreClient::builder()
+            .url("http://ingest.internal")
+            .request_timeout(timeout)
+            .build()
+            .unwrap();
+        assert_eq!(client.rpc_timeout, Some(timeout));
+    }
+
+    #[test]
+    fn balanced_http2_builder_request_timeout_overrides_config_in_either_order() {
+        let config_timeout = Duration::from_millis(123);
+        let builder_timeout = Duration::from_millis(456);
+
+        for override_first in [false, true] {
+            let builder = StoreClient::builder().url("http://ingest.internal");
+            let config = ProtoBalancedHttp2Config::default().with_request_timeout(config_timeout);
+            let builder = if override_first {
+                builder
+                    .request_timeout(builder_timeout)
+                    .balanced_http2_transport(config)
+            } else {
+                builder
+                    .balanced_http2_transport(config)
+                    .request_timeout(builder_timeout)
+            };
+
+            assert_eq!(builder.build().unwrap().rpc_timeout, Some(builder_timeout));
+        }
     }
 
     #[test]
