@@ -212,6 +212,7 @@ async fn build_any_source_batch() -> AnySourceBatch {
             let mut db: AnyDb = AnyDb::init(
                 context.child("any_unordered_variable_mmr_connect_source"),
                 cfg,
+                None,
             )
             .await
             .expect("init");
@@ -294,6 +295,7 @@ async fn build_mmb_any_source_batch() -> MmbAnySourceBatch {
             let mut db: MmbAnyDb = MmbAnyDb::init(
                 context.child("any_unordered_variable_mmb_connect_source"),
                 cfg,
+                None,
             )
             .await
             .expect("init");
@@ -373,6 +375,7 @@ async fn build_current_source_batch() -> CurrentSourceBatch {
             let mut db: CurrentDb = CurrentDb::init(
                 context.child("current_unordered_variable_mmr_connect_source"),
                 cfg,
+                None,
             )
             .await
             .expect("init");
@@ -772,7 +775,7 @@ async fn aligned_commit_boundary<F: commonware_storage::merkle::Graftable + Part
                 ((), ((0..=MAX_OPERATION_SIZE).into(), ())),
                 NZU64!(8),
             );
-            let mut db = Db::<F>::init(context.child(case_name), cfg)
+            let mut db = Db::<F>::init(context.child(case_name), cfg, None)
                 .await
                 .expect("source init");
             let mut previous: Vec<Operation<F>> = Vec::new();
@@ -925,7 +928,7 @@ async fn current_boundary_nodes<F: commonware_storage::merkle::Graftable + Parti
                 ((), ((0..=MAX_OPERATION_SIZE).into(), ())),
                 NZU64!(8),
             );
-            let mut db = Db::<F>::init(context.child(case_name), cfg)
+            let mut db = Db::<F>::init(context.child(case_name), cfg, None)
                 .await
                 .expect("source init");
             let mut previous: Vec<Operation<F>> = Vec::new();

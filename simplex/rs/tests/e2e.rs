@@ -1,8 +1,8 @@
 use std::{sync::Arc, time::Duration};
 
-use bytes::{Buf, BufMut, Bytes, BytesMut};
+use bytes::{BufMut, Bytes, BytesMut};
 use commonware_actor::Feedback;
-use commonware_codec::{Decode, Encode, EncodeSize, Error, Read, ReadExt, Write};
+use commonware_codec::{Buf, Decode, Encode, EncodeSize, Error, Read, ReadExt, Write};
 use commonware_consensus::{
     marshal::{core::Actor, standard::Standard, Config as MarshalConfig, Start, Update},
     simplex::types::{Finalization, Finalize, Notarization, Notarize, Proposal},
@@ -470,10 +470,10 @@ async fn marshal_resolver_sinks_finalized_chain_from_simplex_api() {
             cw_tokio::Runner::default().start(|context| async move {
                 let partition_prefix = "simplex-marshal-resolver-sink";
                 let page_cache = CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(8));
-                let config: MarshalConfig<_, _, _, TestBlock, TestBlock> = MarshalConfig {
+                let config: MarshalConfig<_, _, _, TestBlock, Arc<TestBlock>> = MarshalConfig {
                     provider: ConstantProvider::new(schemes[0].clone()),
                     epocher: FixedEpocher::new(NZU64!(100)),
-                    start: Start::Genesis(genesis),
+                    start: Start::Genesis(genesis.into()),
                     partition_prefix: partition_prefix.to_string(),
                     mailbox_size: NZUsize!(100),
                     view_retention: ViewDelta::new(10),
@@ -527,7 +527,7 @@ async fn marshal_resolver_sinks_finalized_chain_from_simplex_api() {
                 .await
                 .expect("init finalizations archive");
 
-                let finalized_blocks: immutable::Archive<_, Sha256Digest, TestBlock> =
+                let finalized_blocks: immutable::Archive<_, Sha256Digest, Arc<TestBlock>> =
                     immutable::Archive::init(
                     context.child("finalized_blocks"),
                     immutable::Config {

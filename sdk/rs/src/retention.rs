@@ -5,8 +5,8 @@
 //! rule can be persisted next to the log) and its validation.
 
 use anyhow::ensure;
-use bytes::{Buf, BufMut};
-use commonware_codec::{EncodeSize, Error as CodecError, FixedSize, Read, ReadExt, Write};
+use bytes::BufMut;
+use commonware_codec::{Buf, EncodeSize, Error as CodecError, FixedSize, Read, ReadExt, Write};
 
 /// A sequence-log retention rule. Interpreted directly over sequence numbers;
 /// the stream service tracks the live frontier and evicts continuously.

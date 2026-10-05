@@ -1,7 +1,7 @@
 use std::marker::PhantomData;
 use std::sync::Arc;
 
-use commonware_codec::{Codec, Decode, Encode, Read as CodecRead};
+use commonware_codec::{Codec, Copying, Decode, Encode, Read as CodecRead};
 use commonware_cryptography::Hasher;
 use commonware_storage::{
     merkle::{Family, Graftable, Location},
@@ -98,11 +98,12 @@ where
     where
         V: AsRef<[u8]>,
     {
-        let op = keyless::Operation::<F, E>::decode_cfg(bytes, &self.op_cfg).map_err(|e| {
-            QmdbError::CorruptData(format!(
-                "failed to decode keyless operation at location {location}: {e}"
-            ))
-        })?;
+        let op =
+            keyless::Operation::<F, E>::decode_cfg(Copying(bytes), &self.op_cfg).map_err(|e| {
+                QmdbError::CorruptData(format!(
+                    "failed to decode keyless operation at location {location}: {e}"
+                ))
+            })?;
         let value = match &op {
             keyless::Operation::Append(value) => Some(value.as_ref().to_vec()),
             keyless::Operation::Commit(Some(value), _) => Some(value.as_ref().to_vec()),
@@ -241,13 +242,12 @@ where
             .enumerate()
             .map(|(offset, bytes)| {
                 let location = checkpoint.start_location + offset as u64;
-                keyless::Operation::<F, E>::decode_cfg(bytes.as_slice(), &self.op_cfg).map_err(
-                    |e| {
+                keyless::Operation::<F, E>::decode_cfg(Copying(bytes.as_slice()), &self.op_cfg)
+                    .map_err(|e| {
                         QmdbError::CorruptData(format!(
                             "failed to decode authenticated operation at location {location}: {e}"
                         ))
-                    },
-                )
+                    })
             })
             .collect::<Result<Vec<_>, _>>()?;
         Ok(VerifiedOperationRange {

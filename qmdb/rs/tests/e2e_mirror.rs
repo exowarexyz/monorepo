@@ -103,6 +103,7 @@ async fn build_keyless_source(
             > = Keyless::init(
                 context.child("keyless_variable_full_mmr_mirror_source"),
                 cfg,
+                None,
             )
             .await
             .expect("init");
@@ -114,6 +115,7 @@ async fn build_keyless_source(
                     }
                     b.merkleize(&db, None::<Vec<u8>>, db.inactivity_floor_loc())
                         .await
+                        .expect("merkleize")
                 };
                 (db, _) = db.apply_batch(finalized).await.expect("apply");
             }
@@ -226,6 +228,7 @@ async fn build_any_unordered_source(
             > = LocalUnorderedDb::init(
                 context.child("any_unordered_variable_mmr_mirror_source"),
                 cfg,
+                None,
             )
             .await
             .expect("init");
@@ -334,6 +337,7 @@ async fn build_immutable_source(
             > = Immutable::init(
                 context.child("immutable_variable_full_mmr_mirror_source"),
                 cfg,
+                None,
             )
             .await
             .expect("init");
@@ -345,6 +349,7 @@ async fn build_immutable_source(
                     }
                     b.merkleize(&db, None::<Vec<u8>>, db.inactivity_floor_loc())
                         .await
+                        .expect("merkleize")
                 };
                 (db, _) = db.apply_batch(finalized).await.expect("apply");
             }
@@ -507,6 +512,7 @@ async fn build_current_ordered_source(
             > = LocalOrderedDb::init(
                 context.child("current_ordered_variable_mmr_mirror_source"),
                 cfg,
+                None,
             )
             .await
             .expect("init");

@@ -3,7 +3,7 @@ use std::future::Future;
 use std::sync::Arc;
 
 use bytes::Bytes;
-use commonware_codec::DecodeExt;
+use commonware_codec::{Copying, DecodeExt};
 use commonware_cryptography::{Digest, Hasher};
 use commonware_storage::merkle::{hasher::Hasher as _, Family, Graftable, Location, Position};
 use commonware_storage::qmdb::current::proof::OpsRootWitness;
@@ -75,8 +75,8 @@ where
         let witness = witness
             .or_else(|| rows.get(&encode_ops_root_witness_key(watermark)).cloned())
             .map(|bytes| {
-                let witness =
-                    OpsRootWitness::<F, H::Digest>::decode(bytes.as_ref()).map_err(|error| {
+                let witness = OpsRootWitness::<F, H::Digest>::decode(Copying(bytes.as_ref()))
+                    .map_err(|error| {
                         QmdbError::CorruptData(format!(
                             "current ops-root witness at {watermark} decode error: {error}"
                         ))

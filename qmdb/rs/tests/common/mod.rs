@@ -92,7 +92,7 @@ pub fn any_variable_config<C>(
             items_per_section,
         ),
         translator: TwoCap,
-        init_cache_size: None,
+        init_cache: None,
         init_buffer: NZUsize!(1 << 21),
         init_concurrency: (),
     }
@@ -115,7 +115,7 @@ pub fn current_variable_config<C>(
         ),
         grafted_metadata_partition: format!("{prefix}-grafted-metadata"),
         translator: TwoCap,
-        init_cache_size: None,
+        init_cache: None,
         init_buffer: NZUsize!(1 << 21),
         init_concurrency: (),
     }

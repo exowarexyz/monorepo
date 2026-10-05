@@ -1,7 +1,7 @@
 use std::marker::PhantomData;
 
 use bytes::Bytes;
-use commonware_codec::{DecodeExt, FixedSize};
+use commonware_codec::{Copying, DecodeExt, FixedSize};
 use commonware_cryptography::{Digest, Hasher};
 use commonware_macros::boxed;
 use commonware_storage::merkle::{
@@ -61,7 +61,7 @@ impl<F: Family, D: Digest> KvMerkleStorage<'_, F, D> {
                 "exoware-qmdb node digest has invalid length",
             ));
         }
-        D::decode(bytes)
+        D::decode(Copying(bytes))
             .map_err(|_| merkle::Error::DataCorrupted("exoware-qmdb node digest decode failed"))
     }
 
@@ -213,9 +213,13 @@ impl<F: Graftable, H: Hasher, const N: usize> KvCurrentStorage<'_, F, H, N> {
                         "exoware-qmdb current grafted node has invalid length",
                     ));
                 }
-                return H::Digest::decode(bytes.as_ref()).map(Some).map_err(|_| {
-                    merkle::Error::DataCorrupted("exoware-qmdb current grafted node decode failed")
-                });
+                return H::Digest::decode(Copying(bytes.as_ref()))
+                    .map(Some)
+                    .map_err(|_| {
+                        merkle::Error::DataCorrupted(
+                            "exoware-qmdb current grafted node decode failed",
+                        )
+                    });
             }
         }
 
@@ -767,7 +771,7 @@ mod tests {
     #[tokio::test]
     async fn reported_snapshot_sequence_gates_following_reads() {
         let positions = [0, 3, 8].map(Position::<mmr::Family>::new);
-        let digests = [1, 2, 3].map(|byte| Digest::decode(&[byte; 32][..]).unwrap());
+        let digests = [1, 2, 3].map(|byte| Digest::decode(Copying(&[byte; 32][..])).unwrap());
         let store = NodeQueries {
             sequence: Some(40),
             rows: positions

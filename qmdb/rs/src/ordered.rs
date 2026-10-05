@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::marker::PhantomData;
 use std::sync::Arc;
 
-use commonware_codec::{Codec, Decode, DecodeExt, Encode};
+use commonware_codec::{Codec, Copying, Decode, DecodeExt, Encode};
 use commonware_cryptography::Hasher;
 use commonware_storage::{
     merkle::{Graftable, Location},
@@ -12,8 +12,8 @@ use commonware_storage::{
             value::{ValueEncoding, VariableEncoding},
         },
         current::{
-            ordered::ExclusionProof,
-            proof::{OperationProof, OpsRootWitness, RangeProof},
+            ordered::proof::constant::ExclusionProof,
+            proof::{constant::OperationProof, OpsRootWitness, RangeProof},
         },
         operation::{Key as QmdbKey, Operation as _},
     },
@@ -173,7 +173,7 @@ where
     ordered::Operation<F, K, E>: Encode + Decode,
 {
     pub(crate) fn decode_key(&self, encoded_key: &[u8]) -> Result<K, commonware_codec::Error> {
-        K::decode_cfg(encoded_key, &self.key_cfg)
+        K::decode_cfg(Copying(encoded_key), &self.key_cfg)
     }
 
     /// Refresh publication evidence and return the greatest watermark observed by this client.
@@ -219,7 +219,7 @@ where
         location: Location<F>,
         bytes: &[u8],
     ) -> Result<ordered::Operation<F, K, E>, QmdbError> {
-        ordered::Operation::<F, K, E>::decode_cfg(bytes, op_cfg).map_err(|e| {
+        ordered::Operation::<F, K, E>::decode_cfg(Copying(bytes), op_cfg).map_err(|e| {
             QmdbError::CorruptData(format!(
                 "failed to decode qmdb operation at location {location}: {e}"
             ))
@@ -908,7 +908,7 @@ where
         let Some(bytes) = session.get(&encode_ops_root_witness_key(location)).await? else {
             return Ok(None);
         };
-        OpsRootWitness::<F, H::Digest>::decode(bytes.as_ref())
+        OpsRootWitness::<F, H::Digest>::decode(Copying(bytes.as_ref()))
             .map(Some)
             .map_err(|e| {
                 QmdbError::CorruptData(format!(
@@ -1059,7 +1059,7 @@ where
             .range_with_mode(&start, &end, 1, RangeMode::Reverse)
             .await?;
         let mut chunk = match rows.into_iter().next() {
-            Some((_, bytes)) => <[u8; N]>::decode(bytes.as_ref()).map_err(|e| {
+            Some((_, bytes)) => <[u8; N]>::decode(Copying(bytes.as_ref())).map_err(|e| {
                 QmdbError::CorruptData(format!("bitmap chunk {chunk_index} decode error: {e}"))
             })?,
             None => {
