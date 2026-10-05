@@ -9,7 +9,7 @@ use crate::proto::qmdb::v1::{
 };
 use buffa::MessageView;
 use commonware_codec::{
-    Decode, DecodeExt, DecodeRangeExt, Encode, FixedSize, RangeCfg, Read, ReadExt,
+    Copying, Decode, DecodeExt, DecodeRangeExt, Encode, FixedSize, RangeCfg, Read, ReadExt,
 };
 use commonware_cryptography::{Blake3, Crc32, Digest, Sha256};
 use commonware_storage::{
@@ -50,7 +50,7 @@ const FIXED_UNORDERED_UPDATE_CONTEXT: u8 = 0xD2;
 const FIXED_UNORDERED_COMMIT_CONTEXT: u8 = 0xD3;
 
 fn decode_vec_key_wire(encoded_key: &[u8]) -> Result<Vec<u8>, String> {
-    Vec::<u8>::decode_range(encoded_key, 0..=MAX_OPERATION_SIZE)
+    Vec::<u8>::decode_range(Copying(encoded_key), 0..=MAX_OPERATION_SIZE)
         .map_err(|err| format!("failed to decode QMDB key: {err}"))
 }
 
@@ -92,7 +92,7 @@ fn js_err(message: impl Into<String>) -> JsValue {
 }
 
 fn decode_digest<D: Digest + DecodeExt<()>>(bytes: &[u8], label: &str) -> Result<D, String> {
-    D::decode(bytes).map_err(|err| format!("failed to decode {label}: {err}"))
+    D::decode(Copying(bytes)).map_err(|err| format!("failed to decode {label}: {err}"))
 }
 
 fn proof_digest_cap<D: Digest>(encoded_proof: &[u8]) -> usize {
@@ -309,7 +309,7 @@ where
         }
         return Ok(ops_root);
     }
-    let witness = OpsRootWitness::<F, H::Digest>::decode(ops_root_witness)
+    let witness = OpsRootWitness::<F, H::Digest>::decode(Copying(ops_root_witness))
         .map_err(|err| format!("failed to decode historical ops-root witness: {err}"))?;
     if !witness.verify::<H>(&ops_root, expected_root) {
         return Err("historical ops-root witness failed verification".to_string());
@@ -338,8 +338,9 @@ where
     let target_root =
         historical_target_root::<F, H>(&proto.ops_root, &proto.ops_root_witness, root)?;
     let max_digests = proof_digest_cap::<H::Digest>(&proto.proof);
-    let proof = merkle::Proof::<F, H::Digest>::decode_cfg(proto.proof.as_ref(), &max_digests)
-        .map_err(|err| format!("failed to decode historical multi proof: {err}"))?;
+    let proof =
+        merkle::Proof::<F, H::Digest>::decode_cfg(Copying(proto.proof.as_ref()), &max_digests)
+            .map_err(|err| format!("failed to decode historical multi proof: {err}"))?;
     if !verify_multi_proof::<H, _, _>(&proof, &operations, &target_root) {
         return Err("historical multi proof failed verification".to_string());
     }
@@ -372,8 +373,9 @@ where
         "historical multi proof ops root",
     )?;
     let max_digests = proof_digest_cap::<H::Digest>(&proto.proof);
-    let proof = merkle::Proof::<F, H::Digest>::decode_cfg(proto.proof.as_ref(), &max_digests)
-        .map_err(|err| format!("failed to decode historical multi proof: {err}"))?;
+    let proof =
+        merkle::Proof::<F, H::Digest>::decode_cfg(Copying(proto.proof.as_ref()), &max_digests)
+            .map_err(|err| format!("failed to decode historical multi proof: {err}"))?;
     let tip = proof
         .leaves
         .checked_sub(1)
@@ -384,8 +386,8 @@ where
     if proto.ops_root_witness.is_empty() {
         return Ok((tip, ops_root, operations));
     }
-    let witness =
-        OpsRootWitness::<F, H::Digest>::decode(proto.ops_root_witness.as_ref()).map_err(|err| {
+    let witness = OpsRootWitness::<F, H::Digest>::decode(Copying(proto.ops_root_witness.as_ref()))
+        .map_err(|err| {
             format!("failed to decode historical multi proof ops-root witness: {err}")
         })?;
     Ok((tip, witness.root::<H>(&ops_root), operations))
@@ -406,7 +408,7 @@ where
             Ok((
                 Location::new(operation.location),
                 OrderedOperation::<F, Vec<u8>, Vec<u8>>::decode_cfg(
-                    operation.encoded_operation.as_ref(),
+                    Copying(operation.encoded_operation.as_ref()),
                     &op_cfg::<F>(),
                 )
                 .map_err(|err| {
@@ -444,8 +446,9 @@ where
     let target_root =
         historical_target_root::<F, H>(&proto.ops_root, &proto.ops_root_witness, root)?;
     let max_digests = proof_digest_cap::<H::Digest>(&proto.proof);
-    let proof = merkle::Proof::<F, H::Digest>::decode_cfg(proto.proof.as_ref(), &max_digests)
-        .map_err(|err| format!("failed to decode historical operation range proof: {err}"))?;
+    let proof =
+        merkle::Proof::<F, H::Digest>::decode_cfg(Copying(proto.proof.as_ref()), &max_digests)
+            .map_err(|err| format!("failed to decode historical operation range proof: {err}"))?;
     window.validate(
         proto.start_location,
         proto.encoded_operations.len(),
@@ -465,14 +468,16 @@ where
                     .checked_add(offset)
                     .ok_or_else(|| "operation range location overflow".to_string())?,
             );
-            let operation =
-                OrderedOperation::<F, Vec<u8>, Vec<u8>>::decode_cfg(bytes.as_ref(), &op_cfg::<F>())
-                    .map_err(|err| {
-                        format!(
-                            "failed to decode operation range entry at {}: {err}",
-                            *location
-                        )
-                    })?;
+            let operation = OrderedOperation::<F, Vec<u8>, Vec<u8>>::decode_cfg(
+                Copying(bytes.as_ref()),
+                &op_cfg::<F>(),
+            )
+            .map_err(|err| {
+                format!(
+                    "failed to decode operation range entry at {}: {err}",
+                    *location
+                )
+            })?;
             Ok((location, operation))
         })
         .collect::<Result<Vec<_>, String>>()?;
@@ -518,8 +523,9 @@ where
     let target_root =
         historical_target_root::<F, H>(&proto.ops_root, &proto.ops_root_witness, root)?;
     let max_digests = proof_digest_cap::<H::Digest>(&proto.proof);
-    let proof = merkle::Proof::<F, H::Digest>::decode_cfg(proto.proof.as_ref(), &max_digests)
-        .map_err(|err| format!("failed to decode historical operation range proof: {err}"))?;
+    let proof =
+        merkle::Proof::<F, H::Digest>::decode_cfg(Copying(proto.proof.as_ref()), &max_digests)
+            .map_err(|err| format!("failed to decode historical operation range proof: {err}"))?;
     window.validate(
         proto.start_location,
         proto.encoded_operations.len(),
@@ -584,7 +590,7 @@ where
         return Err("current operation range proof has no chunks".to_string());
     }
     let max_digests = proof_digest_cap::<H::Digest>(&proto.proof);
-    let proof = RangeProof::<F, H::Digest>::decode_cfg(proto.proof.as_ref(), &max_digests)
+    let proof = RangeProof::<F, H::Digest>::decode_cfg(Copying(proto.proof.as_ref()), &max_digests)
         .map_err(|err| format!("failed to decode current operation range proof: {err}"))?;
     window.validate(
         proto.start_location,
@@ -605,14 +611,16 @@ where
                     .checked_add(offset)
                     .ok_or_else(|| "operation range location overflow".to_string())?,
             );
-            let operation =
-                OrderedOperation::<F, Vec<u8>, Vec<u8>>::decode_cfg(bytes.as_ref(), &op_cfg::<F>())
-                    .map_err(|err| {
-                        format!(
-                            "failed to decode current operation range entry at {}: {err}",
-                            *location
-                        )
-                    })?;
+            let operation = OrderedOperation::<F, Vec<u8>, Vec<u8>>::decode_cfg(
+                Copying(bytes.as_ref()),
+                &op_cfg::<F>(),
+            )
+            .map_err(|err| {
+                format!(
+                    "failed to decode current operation range entry at {}: {err}",
+                    *location
+                )
+            })?;
             Ok((location, operation))
         })
         .collect::<Result<Vec<_>, String>>()?;
@@ -630,7 +638,7 @@ where
 }
 
 fn read_operation_proof<F, D>(
-    buf: &mut &[u8],
+    buf: &mut Copying<'_>,
     max_digests: usize,
     config: &CurrentProofConfig,
 ) -> Result<OperationProof<F, D>, String>
@@ -640,11 +648,11 @@ where
 {
     let loc = Location::<F>::read(buf)
         .map_err(|err| format!("failed to decode current operation proof location: {err}"))?;
-    if buf.len() < config.chunk_size {
+    if buf.0.len() < config.chunk_size {
         return Err("current operation proof chunk is truncated".to_string());
     }
-    let chunk = buf[..config.chunk_size].to_vec();
-    *buf = &buf[config.chunk_size..];
+    let chunk = buf.0[..config.chunk_size].to_vec();
+    buf.0 = &buf.0[config.chunk_size..];
     let range_proof = RangeProof::<F, D>::read_cfg(buf, &max_digests)
         .map_err(|err| format!("failed to decode current operation range proof: {err}"))?;
     Ok(OperationProof {
@@ -666,7 +674,7 @@ where
     const KEY_VALUE_CONTEXT: u8 = 0;
     const COMMIT_CONTEXT: u8 = 1;
 
-    let mut buf = bytes;
+    let mut buf = Copying(bytes);
     let tag = u8::read(&mut buf)
         .map_err(|err| format!("failed to decode current key-exclusion proof tag: {err}"))?;
     let proof = read_operation_proof::<F, D>(&mut buf, max_digests, config)?;
@@ -677,7 +685,7 @@ where
                     .map_err(|err| {
                         format!("failed to decode current key-exclusion update: {err}")
                     })?;
-            if !buf.is_empty() {
+            if !buf.0.is_empty() {
                 return Err("current key-exclusion proof has trailing bytes".to_string());
             }
             Ok(ExclusionProof::KeyValue(proof, update))
@@ -688,7 +696,7 @@ where
                     .map_err(|err| {
                         format!("failed to decode current key-exclusion commit value: {err}")
                     })?;
-            if !buf.is_empty() {
+            if !buf.0.is_empty() {
                 return Err("current key-exclusion proof has trailing bytes".to_string());
             }
             Ok(ExclusionProof::Commit(proof, value))
@@ -735,14 +743,14 @@ where
         Decode + Encode + Read<Cfg = ((RangeCfg<usize>, ()), (RangeCfg<usize>, ()))>,
 {
     let operation = OrderedOperation::<F, Vec<u8>, Vec<u8>>::decode_cfg(
-        proto.encoded_operation.as_ref(),
+        Copying(proto.encoded_operation.as_ref()),
         &op_cfg::<F>(),
     )
     .map_err(|err| format!("failed to decode current key-value operation: {err}"))?;
     let max_digests = proof_digest_cap::<H::Digest>(&proto.proof);
-    let mut buf = proto.proof.as_ref();
+    let mut buf = Copying(proto.proof.as_ref());
     let proof = read_operation_proof::<F, H::Digest>(&mut buf, max_digests, config)?;
-    if !buf.is_empty() {
+    if !buf.0.is_empty() {
         return Err("current key-value proof has trailing bytes".to_string());
     }
     verify_operation_proof::<F, H>(&proof, &operation, root, config)?;
@@ -1774,8 +1782,8 @@ mod tests {
             value::FixedEncoding,
         },
         current::{
-            ordered::ExclusionProof as UpstreamExclusionProof,
-            proof::OperationProof as UpstreamOperationProof,
+            ordered::proof::constant::ExclusionProof as UpstreamExclusionProof,
+            proof::constant::OperationProof as UpstreamOperationProof,
         },
         keyless,
     };
@@ -2158,14 +2166,14 @@ mod tests {
         }
 
         let encoded = expected.encode();
-        let mut buf = encoded.as_ref();
+        let mut buf = Copying(encoded.as_ref());
         let decoded = read_operation_proof::<F, Sha256Digest>(
             &mut buf,
             proof_digest_cap::<Sha256Digest>(&encoded),
             &config,
         )
         .unwrap();
-        assert!(buf.is_empty());
+        assert!(buf.0.is_empty());
         assert_proof(&decoded);
     }
 

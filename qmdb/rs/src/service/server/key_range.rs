@@ -8,7 +8,7 @@ use commonware_storage::{
     merkle::{Graftable, Location},
     qmdb::{
         any::{ordered, value::ValueEncoding},
-        current::ordered::ExclusionProof,
+        current::ordered::proof::constant::ExclusionProof,
         operation::Key as QmdbKey,
     },
 };

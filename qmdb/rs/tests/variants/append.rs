@@ -142,7 +142,7 @@ macro_rules! source {
         fn $name<$family: Graftable + Eq>(prefix: &'static str) -> Source<$family, $operation> {
             deterministic::Runner::default().start(move |context| async move {
                 let config = ($config)(prefix, &context);
-                let mut db: $database = <$database>::init(context.child(prefix), config)
+                let mut db: $database = <$database>::init(context.child(prefix), config, None)
                     .await
                     .expect("initialize Commonware source");
                 let bootstrap = <$operation>::Commit(None, Location::new(0));
@@ -160,7 +160,8 @@ macro_rules! source {
                     }
                     let batch = batch
                         .merkleize(&db, Some($value(200 + batch_index as u8)), floor)
-                        .await;
+                        .await
+                        .expect("merkleize source batch");
                     let (start, operations) = batch.operations();
                     let root = batch.root();
                     let end = start + operations.len() as u64;

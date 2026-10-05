@@ -94,10 +94,13 @@ async fn build_variable_source() -> VariableSource {
                 (((0..=10000).into(), ()), ((0..=10000).into(), ())),
                 NZU64!(5),
             );
-            let mut db: VariableDb =
-                VariableDb::init(context.child("immutable_variable_full_mmr_source"), cfg)
-                    .await
-                    .expect("init");
+            let mut db: VariableDb = VariableDb::init(
+                context.child("immutable_variable_full_mmr_source"),
+                cfg,
+                None,
+            )
+            .await
+            .expect("init");
 
             let key_a = b"a".to_vec();
             let key_b = b"a\0".to_vec();
@@ -112,6 +115,7 @@ async fn build_variable_source() -> VariableSource {
                 batch
                     .merkleize(&db, None::<Vec<u8>>, db.inactivity_floor_loc())
                     .await
+                    .expect("merkleize")
             };
             (db, _) = db.apply_batch(finalized).await.expect("apply");
 
@@ -158,7 +162,7 @@ async fn build_fixed_source() -> FixedSource {
                 init_buffer: NZUsize!(1 << 21),
             };
             let mut db: FixedDb =
-                FixedDb::init(context.child("immutable_fixed_full_mmr_source"), cfg)
+                FixedDb::init(context.child("immutable_fixed_full_mmr_source"), cfg, None)
                     .await
                     .expect("init fixed");
 
@@ -172,6 +176,7 @@ async fn build_fixed_source() -> FixedSource {
                 batch
                     .merkleize(&db, None::<Digest>, db.inactivity_floor_loc())
                     .await
+                    .expect("merkleize")
             };
             (db, _) = db.apply_batch(finalized).await.expect("apply fixed");
 

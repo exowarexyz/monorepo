@@ -1,7 +1,8 @@
 use anyhow::{ensure, Context};
-use bytes::{Buf, BufMut};
+use bytes::BufMut;
 use commonware_codec::{
-    Encode, EncodeSize, Error as CodecError, FixedSize, RangeCfg, Read, ReadExt, Write,
+    Buf, Copying, Encode, EncodeSize, Error as CodecError, FixedSize, RangeCfg, Read, ReadExt,
+    Write,
 };
 use std::collections::HashSet;
 
@@ -351,7 +352,7 @@ pub fn decode_policy_document(raw: &[u8]) -> anyhow::Result<PrunePolicyDocument>
             policies: Vec::new(),
         });
     }
-    let document = PrunePolicyDocument::read_cfg(&mut &*raw, &())
+    let document = PrunePolicyDocument::read_cfg(&mut Copying(raw), &())
         .context("failed to decode prune policy document")?;
     validate_policy_document(&document)?;
     Ok(document)

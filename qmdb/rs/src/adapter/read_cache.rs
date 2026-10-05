@@ -5,10 +5,10 @@ use std::{
 };
 
 use bytes::Bytes;
-use commonware_codec::DecodeExt;
+use commonware_codec::{Copying, DecodeExt};
 use commonware_cryptography::Digest;
 use commonware_storage::merkle::{Family, Location, Position};
-use commonware_utils::cache::Clock;
+use commonware_utils::cache::Cache;
 use tokio::sync::{watch, Mutex as AsyncMutex, OwnedMutexGuard};
 
 const NODE_CAPACITY: usize = 16_384;
@@ -27,9 +27,9 @@ pub(crate) struct ReadCache<F: Family, D: Digest> {
 }
 
 struct State<F: Family, D: Digest> {
-    nodes: Clock<Position<F>, Bytes>,
-    contexts: Clock<Location<F>, RootContext<D>>,
-    witnesses: Clock<Location<F>, Bytes>,
+    nodes: Cache<Position<F>, Bytes>,
+    contexts: Cache<Location<F>, RootContext<D>>,
+    witnesses: Cache<Location<F>, Bytes>,
     context_gates: HashMap<Location<F>, Weak<AsyncMutex<()>>>,
     flights: HashMap<Position<F>, watch::Receiver<Option<Bytes>>>,
 }
@@ -54,9 +54,9 @@ impl<F: Family, D: Digest> ReadCache<F, D> {
     fn with_capacities(nodes: usize, contexts: usize) -> Self {
         Self {
             state: Mutex::new(State {
-                nodes: Clock::new(NonZeroUsize::new(nodes).unwrap()),
-                contexts: Clock::new(NonZeroUsize::new(contexts).unwrap()),
-                witnesses: Clock::new(NonZeroUsize::new(contexts).unwrap()),
+                nodes: Cache::new(NonZeroUsize::new(nodes).unwrap()),
+                contexts: Cache::new(NonZeroUsize::new(contexts).unwrap()),
+                witnesses: Cache::new(NonZeroUsize::new(contexts).unwrap()),
                 context_gates: HashMap::new(),
                 flights: HashMap::new(),
             }),
@@ -160,7 +160,7 @@ impl<F: Family, D: Digest> NodeReservation<F, D> {
             let Some(sender) = self.claims.get(&position) else {
                 continue;
             };
-            if bytes.len() != D::SIZE || D::decode(bytes.as_ref()).is_err() {
+            if bytes.len() != D::SIZE || D::decode(Copying(bytes.as_ref())).is_err() {
                 continue;
             }
 

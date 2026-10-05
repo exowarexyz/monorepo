@@ -176,7 +176,7 @@ async fn build_source_batch_with_writes(
                 ),
                 NZU64!(8),
             );
-            let mut db: Db = Db::init(context.child(partition_prefix), cfg)
+            let mut db: Db = Db::init(context.child(partition_prefix), cfg, None)
                 .await
                 .expect("init");
 

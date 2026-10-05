@@ -145,6 +145,7 @@ async fn build_source_batch() -> SourceBatch {
             let mut db: Db = Db::init(
                 context.child("keyless_variable_full_mmr_connect_source"),
                 cfg,
+                None,
             )
             .await
             .expect("init");
@@ -157,6 +158,7 @@ async fn build_source_batch() -> SourceBatch {
                 batch
                     .merkleize(&db, None::<Vec<u8>>, db.inactivity_floor_loc())
                     .await
+                    .expect("merkleize")
             };
             (db, _) = db.apply_batch(finalized).await.expect("apply");
             let finalized = {
@@ -164,6 +166,7 @@ async fn build_source_batch() -> SourceBatch {
                 batch
                     .merkleize(&db, None::<Vec<u8>>, db.bounds().end - 1)
                     .await
+                    .expect("merkleize")
             };
             (db, _) = db.apply_batch(finalized).await.expect("apply second");
 

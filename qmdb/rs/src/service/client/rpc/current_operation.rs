@@ -5,7 +5,7 @@ use std::marker::PhantomData;
 use std::sync::Arc;
 
 use bytes::Bytes;
-use commonware_codec::{Decode, DecodeExt, Encode, Read};
+use commonware_codec::{Copying, Decode, DecodeExt, Encode, Read};
 use commonware_cryptography::Hasher;
 use commonware_storage::{
     merkle::{Graftable, Location},
@@ -129,7 +129,7 @@ where
         ));
     }
     let max_digests = proof_digest_cap::<H::Digest>(&proto.proof);
-    let proof = RangeProof::<F, H::Digest>::decode_cfg(proto.proof.as_ref(), &max_digests)
+    let proof = RangeProof::<F, H::Digest>::decode_cfg(Copying(proto.proof.as_ref()), &max_digests)
         .map_err(|err| {
             QmdbError::CorruptData(format!(
                 "failed to decode current operation range proof: {err}"
@@ -147,7 +147,7 @@ where
         .encoded_operations
         .iter()
         .map(|bytes| {
-            let decoded = Op::decode_cfg(bytes.as_ref(), op_cfg).map_err(|err| {
+            let decoded = Op::decode_cfg(Copying(bytes.as_ref()), op_cfg).map_err(|err| {
                 QmdbError::CorruptData(format!(
                     "failed to decode current operation range entry: {err}"
                 ))
@@ -160,7 +160,7 @@ where
         .iter()
         .enumerate()
         .map(|(index, bytes)| {
-            <[u8; N]>::decode(bytes.as_ref()).map_err(|e| {
+            <[u8; N]>::decode(Copying(bytes.as_ref())).map_err(|e| {
                 QmdbError::CorruptData(format!(
                     "current operation range chunk {index} decode error: {e}"
                 ))

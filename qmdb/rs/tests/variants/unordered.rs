@@ -522,7 +522,7 @@ macro_rules! case {
                         cache,
                         op_cfg!($encoding, $key, $value)
                     );
-                    let mut db = Db::init(context.child(stringify!($name)), cfg)
+                    let mut db = Db::init(context.child(stringify!($name)), cfg, None)
                         .await
                         .expect("source init");
                     let values: [V; 3] = values!($value);

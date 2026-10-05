@@ -11,8 +11,8 @@ use commonware_storage::{
             value::{ValueEncoding, VariableEncoding},
         },
         current::{
-            ordered::ExclusionProof,
-            proof::{OperationProof, OpsRootWitness, RangeProof},
+            ordered::proof::constant::ExclusionProof,
+            proof::{constant::OperationProof, OpsRootWitness, RangeProof},
         },
         operation::{Key as QmdbKey, Operation},
         verify::verify_multi_proof,
@@ -333,25 +333,6 @@ pub struct RawKeyValueProof<D: Digest, Op, const N: usize, F: Graftable> {
     pub operation: Op,
 }
 
-type OrderedVerifierDb<F, K, E, H, const N: usize> =
-    commonware_storage::qmdb::current::ordered::db::Db<
-        F,
-        commonware_runtime::deterministic::Context,
-        commonware_storage::journal::contiguous::variable::Journal<
-            commonware_runtime::deterministic::Context,
-            ordered::Operation<F, K, E>,
-        >,
-        K,
-        E,
-        commonware_storage::index::ordered::Index<
-            commonware_storage::translator::TwoCap,
-            Location<F>,
-        >,
-        H,
-        N,
-        commonware_parallel::Sequential,
-    >;
-
 pub(crate) fn verify_ordered_exclusion_proof<F, H, K, E, const N: usize>(
     key: &K,
     proof: &ExclusionProof<F, K, E, H::Digest, N>,
@@ -364,7 +345,7 @@ where
     E: ValueEncoding,
     ordered::Operation<F, K, E>: Codec,
 {
-    OrderedVerifierDb::<F, K, E, H, N>::verify_exclusion_proof(key, proof, root)
+    proof.verify::<H>(key, root)
 }
 
 impl<D: Digest, Op, const N: usize, F: Graftable> RawKeyValueProof<D, Op, N, F>

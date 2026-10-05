@@ -6,15 +6,14 @@ use std::num::NonZeroU64;
 use std::sync::Arc;
 
 use bytes::Bytes;
-use commonware_codec::{Decode, DecodeExt, Encode, Read};
+use commonware_codec::{Copying, Decode, DecodeExt, Encode, Read};
 use commonware_cryptography::{Digest, Hasher};
 use commonware_storage::{
     merkle::{Family, Graftable, Location, Proof},
     qmdb::{
         current::proof::OpsRootWitness,
         sync::{
-            FeedbackTx, Request as SyncRequest, Response as SyncResponse, Source,
-            Target as SyncTarget,
+            source, Request as SyncRequest, Response as SyncResponse, Source, Target as SyncTarget,
         },
         verify::{verify_multi_proof, verify_proof_and_pinned_nodes},
     },
@@ -58,16 +57,7 @@ where
     type Op = Op;
     type Error = QmdbError;
 
-    async fn serve(
-        &self,
-        request: SyncRequest<Self::Family>,
-    ) -> Result<
-        (
-            SyncResponse<Self::Family, Self::Op, Self::Digest>,
-            FeedbackTx,
-        ),
-        Self::Error,
-    > {
+    async fn serve(&self, request: SyncRequest<Self::Family>) -> source::Result<Self> {
         let proto = self
             .operation_range_proto(request.size(), request.start(), request.max_ops())
             .await?;
@@ -105,10 +95,13 @@ where
             QmdbError::CorruptData("qmdb subscribe response missing proof".to_string())
         })?;
         let max_digests = proof_digest_cap::<H::Digest>(&proof.proof);
-        let merkle_proof = Proof::<F, H::Digest>::decode_cfg(proof.proof.as_ref(), &max_digests)
-            .map_err(|err| {
-                QmdbError::CorruptData(format!("failed to decode historical multi proof: {err}"))
-            })?;
+        let merkle_proof =
+            Proof::<F, H::Digest>::decode_cfg(Copying(proof.proof.as_ref()), &max_digests)
+                .map_err(|err| {
+                    QmdbError::CorruptData(format!(
+                        "failed to decode historical multi proof: {err}"
+                    ))
+                })?;
         let tip = merkle_proof.leaves.checked_sub(1).ok_or_else(|| {
             QmdbError::CorruptData("subscription proof has no leaves".to_string())
         })?;
@@ -286,18 +279,17 @@ where
         request: SyncRequest<F>,
     ) -> Result<SyncResponse<F, Op, H::Digest>, QmdbError> {
         let max_digests = proof_digest_cap::<H::Digest>(&proto.proof);
-        let proof = Proof::<F, H::Digest>::decode_cfg(proto.proof.as_ref(), &max_digests).map_err(
-            |err| {
+        let proof = Proof::<F, H::Digest>::decode_cfg(Copying(proto.proof.as_ref()), &max_digests)
+            .map_err(|err| {
                 QmdbError::CorruptData(format!(
                     "failed to decode sync operation range proof: {err}"
                 ))
-            },
-        )?;
+            })?;
         let operations = proto
             .encoded_operations
             .iter()
             .map(|bytes| {
-                Op::decode_cfg(bytes.as_ref(), self.op_cfg.as_ref()).map_err(|err| {
+                Op::decode_cfg(Copying(bytes.as_ref()), self.op_cfg.as_ref()).map_err(|err| {
                     QmdbError::CorruptData(format!("failed to decode sync operation: {err}"))
                 })
             })
@@ -370,11 +362,12 @@ where
     H: Hasher,
 {
     let ops_root = decode_digest::<H::Digest>(ops_root, "current sync ops root")?;
-    let witness = OpsRootWitness::<F, H::Digest>::decode(ops_root_witness).map_err(|err| {
-        QmdbError::CorruptData(format!(
-            "failed to decode current sync ops-root witness: {err}"
-        ))
-    })?;
+    let witness =
+        OpsRootWitness::<F, H::Digest>::decode(Copying(ops_root_witness)).map_err(|err| {
+            QmdbError::CorruptData(format!(
+                "failed to decode current sync ops-root witness: {err}"
+            ))
+        })?;
     if !witness.verify::<H>(&ops_root, current_root) {
         return Err(QmdbError::ProofVerification {
             kind: crate::ProofKind::RangeCheckpoint,
@@ -407,11 +400,12 @@ where
         }
         return Ok(ops_root);
     }
-    let witness = OpsRootWitness::<F, H::Digest>::decode(ops_root_witness).map_err(|err| {
-        QmdbError::CorruptData(format!(
-            "failed to decode historical ops-root witness: {err}"
-        ))
-    })?;
+    let witness =
+        OpsRootWitness::<F, H::Digest>::decode(Copying(ops_root_witness)).map_err(|err| {
+            QmdbError::CorruptData(format!(
+                "failed to decode historical ops-root witness: {err}"
+            ))
+        })?;
     if !witness.verify::<H>(&ops_root, expected_root) {
         return Err(QmdbError::ProofVerification {
             kind: crate::ProofKind::BatchMulti,
@@ -436,12 +430,13 @@ where
         .operations
         .iter()
         .map(|op| {
-            let decoded = Op::decode_cfg(op.encoded_operation.as_ref(), op_cfg).map_err(|err| {
-                QmdbError::CorruptData(format!(
-                    "failed to decode multi-proof operation at {}: {err}",
-                    op.location
-                ))
-            })?;
+            let decoded =
+                Op::decode_cfg(Copying(op.encoded_operation.as_ref()), op_cfg).map_err(|err| {
+                    QmdbError::CorruptData(format!(
+                        "failed to decode multi-proof operation at {}: {err}",
+                        op.location
+                    ))
+                })?;
             Ok((Location::<F>::new(op.location), decoded))
         })
         .collect::<Result<Vec<_>, QmdbError>>()?;
@@ -475,8 +470,8 @@ where
     let target_root =
         historical_target_root::<F, H>(&proto.ops_root, &proto.ops_root_witness, root)?;
     let max_digests = proof_digest_cap::<H::Digest>(&proto.proof);
-    let proof =
-        Proof::<F, H::Digest>::decode_cfg(proto.proof.as_ref(), &max_digests).map_err(|err| {
+    let proof = Proof::<F, H::Digest>::decode_cfg(Copying(proto.proof.as_ref()), &max_digests)
+        .map_err(|err| {
             QmdbError::CorruptData(format!(
                 "failed to decode historical operation range proof: {err}"
             ))
@@ -493,7 +488,7 @@ where
         .encoded_operations
         .iter()
         .map(|bytes| {
-            let decoded = Op::decode_cfg(bytes.as_ref(), op_cfg).map_err(|err| {
+            let decoded = Op::decode_cfg(Copying(bytes.as_ref()), op_cfg).map_err(|err| {
                 QmdbError::CorruptData(format!("failed to decode operation range entry: {err}"))
             })?;
             Ok(decoded)

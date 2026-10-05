@@ -3,7 +3,7 @@
 use std::future::Future;
 use std::sync::Arc;
 
-use commonware_codec::{Decode, Encode, Read};
+use commonware_codec::{Copying, Decode, Encode, Read};
 use commonware_storage::merkle::{Graftable, Location};
 use connectrpc::{ConnectError, PreEncoded, RequestContext as Context, ServiceRequest};
 
@@ -71,7 +71,7 @@ impl<R: KeyLookupReader<N>, const N: usize> KeyLookupServer<R, N> {
 }
 
 pub(super) fn decode_key<K: Read>(bytes: &[u8], cfg: &K::Cfg) -> Result<K, ConnectError> {
-    K::decode_cfg(bytes, cfg)
+    K::decode_cfg(Copying(bytes), cfg)
         .map_err(|error| ConnectError::invalid_argument(format!("invalid QMDB key: {error}")))
 }
 

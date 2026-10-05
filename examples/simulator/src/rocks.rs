@@ -36,7 +36,7 @@ use std::thread;
 
 use buffa::{DecodeOptions, Message};
 use bytes::Bytes;
-use commonware_codec::{DecodeExt, Encode};
+use commonware_codec::{Copying, DecodeExt, Encode};
 use exoware_sdk::common::kv::v1::Entry;
 use exoware_sdk::keys::Prefix;
 use exoware_sdk::limits::{
@@ -904,7 +904,7 @@ fn read_retention_policy(db: &DB) -> Result<Option<RetentionPolicy>, String> {
         .map_err(|e| e.to_string())?
     {
         Some(bytes) => {
-            let policy = RetentionPolicy::decode(bytes.as_slice())
+            let policy = RetentionPolicy::decode(Copying(bytes.as_slice()))
                 .map_err(|e| format!("corrupt retention rule meta row: {e}"))?;
             validate_retention_policy(&policy)
                 .map_err(|e| format!("corrupt retention rule meta row: {e}"))?;

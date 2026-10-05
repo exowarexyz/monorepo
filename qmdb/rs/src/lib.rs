@@ -57,7 +57,7 @@ pub mod service;
 pub use adapter::codec::{CHUNK_FAMILY, NODE_FAMILY};
 pub use error::{ProofKind, QmdbError};
 
-use commonware_codec::DecodeExt;
+use commonware_codec::{Copying, DecodeExt};
 use commonware_cryptography::Digest;
 use commonware_storage::merkle::{self, Family, Graftable, Location};
 use commonware_storage::qmdb::current::proof::OpsRootWitness;
@@ -116,7 +116,8 @@ pub(crate) fn decode_digest<D: Digest>(
     bytes: &[u8],
     label: impl std::fmt::Display,
 ) -> Result<D, QmdbError> {
-    D::decode(bytes).map_err(|e| QmdbError::CorruptData(format!("{label} decode error: {e}")))
+    D::decode(Copying(bytes))
+        .map_err(|e| QmdbError::CorruptData(format!("{label} decode error: {e}")))
 }
 
 // The native crate owns tests for request constraints shared with the WASM verifier.

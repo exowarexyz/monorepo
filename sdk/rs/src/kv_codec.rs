@@ -1,8 +1,8 @@
 use std::cmp::Ordering;
 
-use bytes::{Buf, BufMut, Bytes};
+use bytes::{BufMut, Bytes};
 use commonware_codec::{
-    EncodeSize, Error as CodecError, FixedSize, RangeCfg, Read, ReadExt, Write,
+    Buf, Copying, EncodeSize, Error as CodecError, FixedSize, RangeCfg, Read, ReadExt, Write,
 };
 
 use crate::keys::{read_bit_be, read_bits_to_bytes, write_bit_be, Key};
@@ -299,7 +299,7 @@ impl Read for StoredRow {
 }
 
 pub fn decode_stored_row(value: &[u8]) -> Result<StoredRow, CodecError> {
-    StoredRow::read_cfg(&mut &*value, &())
+    StoredRow::read_cfg(&mut Copying(value), &())
 }
 
 /// Read a typed field. Key fields do not require a decoded stored row.

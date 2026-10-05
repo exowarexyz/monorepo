@@ -1,13 +1,13 @@
 //! Proof checks shared by the key lookup and key range clients.
 
-use commonware_codec::{Decode, DecodeExt, Encode, Read};
+use commonware_codec::{Copying, Decode, DecodeExt, Encode, Read};
 use commonware_cryptography::Hasher;
 use commonware_storage::{
     merkle::Graftable,
     qmdb::{
         any::{ordered, value::ValueEncoding},
-        current::ordered::ExclusionProof,
-        current::proof::OperationProof,
+        current::ordered::proof::constant::ExclusionProof,
+        current::proof::constant::OperationProof,
         operation::{Key as QmdbKey, Operation},
     },
 };
@@ -32,21 +32,23 @@ where
     H::Digest: DecodeExt<()>,
     Op: commonware_codec::Codec + Clone + Operation<F>,
 {
-    let operation = Op::decode_cfg(proto.encoded_operation.as_ref(), op_cfg).map_err(|err| {
-        QmdbError::CorruptData(format!(
-            "failed to decode current key-value operation: {err}",
-        ))
-    })?;
+    let operation =
+        Op::decode_cfg(Copying(proto.encoded_operation.as_ref()), op_cfg).map_err(|err| {
+            QmdbError::CorruptData(format!(
+                "failed to decode current key-value operation: {err}",
+            ))
+        })?;
     if !operation.is_update() {
         return Err(QmdbError::CorruptData(
             "current key-value proof operation must be an update".to_string(),
         ));
     }
     let max_digests = proof_digest_cap::<H::Digest>(&proto.proof);
-    let proof = OperationProof::<F, H::Digest, N>::decode_cfg(proto.proof.as_ref(), &max_digests)
-        .map_err(|err| {
-        QmdbError::CorruptData(format!("failed to decode current key-value proof: {err}"))
-    })?;
+    let proof =
+        OperationProof::<F, H::Digest, N>::decode_cfg(Copying(proto.proof.as_ref()), &max_digests)
+            .map_err(|err| {
+                QmdbError::CorruptData(format!("failed to decode current key-value proof: {err}"))
+            })?;
     if !proof.verify::<H, _>(operation.clone(), root) {
         return Err(QmdbError::ProofVerification {
             kind: crate::ProofKind::CurrentKeyValue,
@@ -83,7 +85,7 @@ where
 {
     let max_digests = proof_digest_cap::<H::Digest>(&proto.proof);
     let proof = ExclusionProof::<F, K, E, H::Digest, N>::decode_cfg(
-        proto.proof.as_ref(),
+        Copying(proto.proof.as_ref()),
         &(max_digests, update_cfg.clone(), value_cfg.clone()),
     )
     .map_err(|err| {
@@ -91,7 +93,7 @@ where
             "failed to decode current key-exclusion proof: {err}"
         ))
     })?;
-    let requested_key = K::decode_cfg(requested_key, key_cfg).map_err(|err| {
+    let requested_key = K::decode_cfg(Copying(requested_key), key_cfg).map_err(|err| {
         QmdbError::CorruptData(format!("failed to decode requested exclusion key: {err}"))
     })?;
     if !verify_ordered_exclusion_proof::<F, H, K, E, N>(&requested_key, &proof, root) {

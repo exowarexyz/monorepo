@@ -1,7 +1,7 @@
 use std::marker::PhantomData;
 use std::sync::Arc;
 
-use commonware_codec::{Codec, Decode, Encode, Read as CodecRead};
+use commonware_codec::{Codec, Copying, Decode, Encode, Read as CodecRead};
 use commonware_cryptography::Hasher;
 use commonware_storage::{
     merkle::{Family, Graftable, Location},
@@ -105,13 +105,12 @@ where
     where
         V: AsRef<[u8]>,
     {
-        let op = immutable::Operation::<F, K, E>::decode_cfg(bytes, &self.operation_cfg).map_err(
-            |e| {
-                QmdbError::CorruptData(format!(
-                    "failed to decode immutable operation at location {location}: {e}"
-                ))
-            },
-        )?;
+        let op = immutable::Operation::<F, K, E>::decode_cfg(Copying(bytes), &self.operation_cfg)
+            .map_err(|e| {
+            QmdbError::CorruptData(format!(
+                "failed to decode immutable operation at location {location}: {e}"
+            ))
+        })?;
         let key = op.key().map(|k| <K as AsRef<[u8]>>::as_ref(k).to_vec());
         let value = match &op {
             immutable::Operation::Set(_, value) => Some(value.as_ref().to_vec()),
@@ -267,12 +266,15 @@ where
             .enumerate()
             .map(|(offset, bytes)| {
                 let location = checkpoint.start_location + offset as u64;
-                immutable::Operation::<F, K, E>::decode_cfg(bytes.as_slice(), &self.operation_cfg)
-                    .map_err(|e| {
-                        QmdbError::CorruptData(format!(
-                            "failed to decode authenticated operation at location {location}: {e}"
-                        ))
-                    })
+                immutable::Operation::<F, K, E>::decode_cfg(
+                    Copying(bytes.as_slice()),
+                    &self.operation_cfg,
+                )
+                .map_err(|e| {
+                    QmdbError::CorruptData(format!(
+                        "failed to decode authenticated operation at location {location}: {e}"
+                    ))
+                })
             })
             .collect::<Result<Vec<_>, _>>()?;
         Ok(VerifiedOperationRange {

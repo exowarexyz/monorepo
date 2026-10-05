@@ -279,13 +279,17 @@ async fn seed(
                 grafted_metadata_partition: "current-ordered-variable-mmb-seed-grafted-metadata"
                     .into(),
                 translator: TwoCap,
-                init_cache_size: None,
+                init_cache: None,
                 init_buffer: NZUsize!(1 << 21),
                 init_concurrency: (),
             };
-            let mut source_db = Db::init(context.child("current_ordered_variable_mmb_seed"), cfg)
-                .await
-                .expect("init local ordered db");
+            let mut source_db = Db::init(
+                context.child("current_ordered_variable_mmb_seed"),
+                cfg,
+                None,
+            )
+            .await
+            .expect("init local ordered db");
 
             let end = source_db.bounds().end;
             let (_, mut previous_operations) = source_db
