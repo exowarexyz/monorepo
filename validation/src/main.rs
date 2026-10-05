@@ -1,5 +1,5 @@
 use clap::{Parser, Subcommand};
-use exoware_validation::{bench, load, validate};
+use exoware_validation::{bench, inspect, load, replay, validate};
 
 #[derive(Parser, Debug)]
 #[command(name = "validation", about = "Validate an Exoware deployment.")]
@@ -13,6 +13,8 @@ enum Command {
     Load(load::Args),
     Bench(bench::Args),
     Validate(validate::Args),
+    Inspect(inspect::Args),
+    Replay(replay::Args),
 }
 
 #[tokio::main]
@@ -29,5 +31,7 @@ async fn main() -> anyhow::Result<()> {
         Command::Load(args) => load::run(args).await,
         Command::Bench(args) => bench::run(args).await,
         Command::Validate(args) => validate::run(args).await,
+        Command::Inspect(args) => inspect::run(args),
+        Command::Replay(args) => replay::run(args).await,
     }
 }

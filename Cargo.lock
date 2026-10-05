@@ -2875,6 +2875,8 @@ version = "2026.9.0"
 dependencies = [
  "anyhow",
  "axum",
+ "buffa",
+ "bytes",
  "chrono",
  "clap",
  "connectrpc",
@@ -2885,6 +2887,8 @@ dependencies = [
  "rand 0.10.2",
  "serde",
  "serde_json",
+ "sha2",
+ "tempfile",
  "tokio",
  "tracing",
  "tracing-subscriber",

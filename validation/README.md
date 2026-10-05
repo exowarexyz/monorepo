@@ -13,11 +13,20 @@ Validate an Exoware deployment.
 
 `exoware-validation` provides small CLI workloads for exercising Exoware-compatible stores. It is meant to support local development, deployment validation, and reproducible benchmark runs.
 
-The tool has three modes:
+The tool has five modes:
 
 - `load`: write a deterministic keyspace.
 - `bench`: run a mixed read/write/scan workload and print a benchmark report.
 - `validate`: write and query deterministic records to check correctness.
+- `inspect`: validate a captured workload and print its shape and generation capacity.
+- `replay`: send extended captured batches on their recorded schedule without retries.
+
+See [Captured workloads](CAPTURE.md) for the reusable capture/generation library,
+profile format, recording example, and inspect/replay commands. Numeric patches
+shift captured coordinates by their domain span. Identity patches generate
+independent seeded bytes without preserving references or guaranteeing uniqueness.
+Replay reads capture rows and event metadata incrementally with bounded batch
+read-ahead. Optional reports stream completed request records to disk.
 
 ## Setup
 
@@ -62,6 +71,7 @@ Exit codes follow each command's purpose:
 - `bench` is a measurement tool. It exits non-zero only when the tool itself fails (invalid configuration, a failed manifest read, or a failed JSON report write). Backend operation failures and absent reads are recorded as `errors` and `read_misses` in the report, not treated as failures; inspect both and apply your own policy.
 - `load` prepares a complete keyspace for later benchmarking. It retries transient ingest failures (`--ingest-retry-attempts`, `--ingest-retry-backoff-ms`) so a complete fixture is far more likely, while still surfacing them: every retry is logged, the total retried count is reported in the final summary, and a persistent failure or any non-transient error still makes `load` exit non-zero rather than hand back an incomplete keyspace.
 - `validate` is a correctness check. It exits non-zero when the tool fails or when any correctness check fails.
+- `inspect` exits non-zero for an invalid capture or profile. `replay` stops issuance on request failure, timeout, or excessive schedule lag, drains admitted requests, and exits non-zero after writing the requested report.
 
 ## Benchmark Reports
 
