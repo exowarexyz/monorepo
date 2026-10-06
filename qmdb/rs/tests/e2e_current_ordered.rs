@@ -1282,3 +1282,81 @@ async fn test_ordered_mmr_current_boundaries_survive_coalesced_publication() {
 async fn test_ordered_mmb_current_boundaries_survive_coalesced_publication() {
     assert_current_boundaries_survive_coalesced_publication::<mmb::Family>().await;
 }
+
+/// Store requests `operation` makes.
+async fn store_calls<T>(
+    query: &common::CountingQuery,
+    operation: impl std::future::Future<Output = Result<T, exoware_qmdb::QmdbError>>,
+) -> common::StoreCalls {
+    query.take_calls();
+    operation.await.unwrap();
+    query.take_calls()
+}
+
+#[tokio::test]
+async fn test_ordered_current_proofs_store_calls() {
+    let (query, store_client, servers) = common::counting_store().await;
+    let source = build_variable_source_with_write_count::<mmr::Family, N>(
+        "current_ordered_variable_store_calls_source",
+        300,
+    )
+    .await;
+    common::commit_current_operations(
+        &PrefixedStoreClient::empty(store_client.clone()),
+        &source.operations,
+        &op_cfg::<mmr::Family>(),
+        &source.current_boundary,
+    )
+    .await
+    .unwrap();
+    let client: VariableClient<mmr::Family> = exoware_qmdb::adapter::Ordered::new(
+        PrefixedStoreClient::empty(store_client),
+        op_cfg::<mmr::Family>(),
+        key_cfg(),
+    );
+    let tip = source.latest_location;
+    client.latest_published_watermark().await.unwrap();
+
+    let key = |index: usize| format!("k-{index:08}").into_bytes();
+    let present = [key(7), key(150), key(290)];
+    let missing = b"k-00000150x".to_vec();
+    let calls = |get, get_many, range| common::StoreCalls {
+        get,
+        get_many,
+        range,
+    };
+    // A second round at the same tip repeats every per-tip read
+    for _round in ["cold", "warm"] {
+        assert_eq!(
+            store_calls(&query, client.get_raw(tip, key(7), None)).await,
+            calls(8, 2, 3),
+        );
+        assert_eq!(
+            store_calls(&query, client.get_many_raw(tip, &present, None)).await,
+            calls(24, 6, 9),
+        );
+        assert_eq!(
+            store_calls(
+                &query,
+                client.get_many_raw(tip, std::slice::from_ref(&missing), None),
+            )
+            .await,
+            calls(8, 3, 4),
+        );
+        assert_eq!(
+            store_calls(&query, client.get_range_raw(tip, key(10), None, 5, None)).await,
+            calls(31, 10, 11),
+        );
+        assert_eq!(
+            store_calls(
+                &query,
+                client.current_operation_range_raw(tip, tip - 4, 4, None),
+            )
+            .await,
+            calls(6, 2, 4),
+        );
+    }
+    for server in servers {
+        server.abort();
+    }
+}

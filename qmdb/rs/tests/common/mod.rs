@@ -287,6 +287,16 @@ pub struct CountingQuery {
     pub update_scans: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     /// Update-index rows handed to the server.
     pub update_rows: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    /// Store requests of each kind.
+    pub calls: std::sync::Mutex<StoreCalls>,
+}
+
+/// Store requests served by a [`CountingQuery`], by kind.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct StoreCalls {
+    pub get: usize,
+    pub get_many: usize,
+    pub range: usize,
 }
 
 impl CountingQuery {
@@ -297,6 +307,12 @@ impl CountingQuery {
             .store(0, std::sync::atomic::Ordering::Relaxed);
         self.update_rows
             .store(0, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Store requests since the last call, resetting the count.
+    #[allow(dead_code)]
+    pub fn take_calls(&self) -> StoreCalls {
+        std::mem::take(&mut *self.calls.lock().unwrap())
     }
 
     /// Update-index `(scans, rows)` read since the last reset.
@@ -341,6 +357,7 @@ impl exoware_server::Query for CountingQuery {
         &self,
         key: bytes::Bytes,
     ) -> Result<exoware_server::QueryResult<Option<bytes::Bytes>>, String> {
+        self.calls.lock().unwrap().get += 1;
         exoware_server::Query::get(self.store.as_ref(), key).await
     }
 
@@ -349,6 +366,7 @@ impl exoware_server::Query for CountingQuery {
         keys: Vec<bytes::Bytes>,
     ) -> Result<exoware_server::QueryResult<Vec<(bytes::Bytes, Option<bytes::Bytes>)>>, String>
     {
+        self.calls.lock().unwrap().get_many += 1;
         exoware_server::Query::get_many(self.store.as_ref(), keys).await
     }
 
@@ -359,6 +377,7 @@ impl exoware_server::Query for CountingQuery {
         limit: usize,
         forward: bool,
     ) -> Result<exoware_server::RangeScanResult<Self::RangeScan>, String> {
+        self.calls.lock().unwrap().range += 1;
         // A chunk row key is the chunk family byte, the u64 chunk index, then the u64 boundary location
         if start.first() == Some(&exoware_qmdb::CHUNK_FAMILY) && start.len() == 17 {
             self.bitmap_chunks
@@ -399,6 +418,7 @@ pub async fn counting_store() -> (
         bitmap_chunks: Default::default(),
         update_scans: Default::default(),
         update_rows: Default::default(),
+        calls: Default::default(),
     });
     let (store_server, store_url) = spawn_connect_service(exoware_server::connect_stack(
         exoware_server::AppState::new(store),

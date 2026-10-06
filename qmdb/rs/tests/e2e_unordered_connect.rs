@@ -1537,3 +1537,58 @@ async fn test_unordered_connect_client_rejects_invalid_streamed_proof() {
         }
     ));
 }
+
+/// Store requests `operation` makes.
+async fn store_calls<T>(
+    query: &common::CountingQuery,
+    operation: impl std::future::Future<Output = Result<T, QmdbError>>,
+) -> common::StoreCalls {
+    query.take_calls();
+    operation.await.unwrap();
+    query.take_calls()
+}
+
+#[tokio::test]
+async fn test_unordered_current_proofs_store_calls() {
+    let (query, store_client, servers) = common::counting_store().await;
+    let source = build_current_source_batch().await;
+    commit_current_upload(&store_client, &source).await;
+    let client = exoware_qmdb::adapter::Unordered::<mmr::Family, Sha256, Digest, Vec<u8>, N>::new(
+        PrefixedStoreClient::empty(store_client),
+        fixed_key_op_cfg(),
+    );
+    let tip = source.latest_location;
+    client.latest_published_watermark().await.unwrap();
+
+    let calls = |get, get_many, range| common::StoreCalls {
+        get,
+        get_many,
+        range,
+    };
+    // A second round at the same tip repeats every per-tip read
+    for _round in ["cold", "warm"] {
+        assert_eq!(
+            store_calls(&query, client.get_raw(tip, source.alpha, None)).await,
+            calls(7, 2, 2),
+        );
+        assert_eq!(
+            store_calls(
+                &query,
+                client.get_many_raw(tip, &[source.alpha, source.beta], None),
+            )
+            .await,
+            calls(14, 4, 4),
+        );
+        assert_eq!(
+            store_calls(
+                &query,
+                client.current_operation_range_raw(tip, tip - 2, 2, None),
+            )
+            .await,
+            calls(6, 2, 3),
+        );
+    }
+    for server in servers {
+        server.abort();
+    }
+}
