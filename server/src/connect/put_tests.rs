@@ -369,13 +369,9 @@ async fn metadata_middleware_preserves_extensions_before_body_poll() {
 
 #[tokio::test]
 async fn put_get_and_head_preserve_method_rejection_headers() {
-    for (method, query, allow) in [
-        (http::Method::GET, "?encoding=json&message=%7B%7D", None),
-        (
-            http::Method::HEAD,
-            "",
-            Some(http::HeaderValue::from_static("POST")),
-        ),
+    for (method, query) in [
+        (http::Method::GET, "?encoding=json&message=%7B%7D"),
+        (http::Method::HEAD, ""),
     ] {
         let ingest = Arc::new(TestIngest::default());
         let transport = ServiceTransport::new(ingest_service(IngestState::new(ingest.clone())));
@@ -387,7 +383,7 @@ async fn put_get_and_head_preserve_method_rejection_headers() {
         let response = transport.send(request).await.unwrap();
 
         assert_eq!(response.status(), http::StatusCode::METHOD_NOT_ALLOWED);
-        assert_eq!(response.headers().get(http::header::ALLOW), allow.as_ref());
+        assert_eq!(response.headers().get(http::header::ALLOW).unwrap(), "POST");
         assert_no_writes(&ingest);
     }
 }

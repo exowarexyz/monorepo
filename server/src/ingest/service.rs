@@ -218,7 +218,7 @@ async fn put<I: Ingest>(
     let request_deadline = parsed_deadline
         .as_ref()
         .copied()
-        .unwrap_or_else(|_| tokio::time::Instant::now());
+        .unwrap_or_else(|_| tokio::time::Instant::now() + state.put_config.timeout);
     let control = parts.extensions.get::<ConnectionControl>().cloned();
     let generation = control
         .as_ref()
@@ -400,7 +400,7 @@ async fn put<I: Ingest>(
     }
 }
 
-fn method_response(method: &http::Method, response: Response<Body>) -> Response<Body> {
+fn method_response(method: &http::Method, mut response: Response<Body>) -> Response<Body> {
     if method != http::Method::POST && method != http::Method::GET {
         Response::builder()
             .status(http::StatusCode::METHOD_NOT_ALLOWED)
@@ -408,6 +408,11 @@ fn method_response(method: &http::Method, response: Response<Body>) -> Response<
             .body(Body::empty())
             .expect("static method rejection headers are valid")
     } else {
+        if response.status() == http::StatusCode::METHOD_NOT_ALLOWED {
+            response
+                .headers_mut()
+                .insert(http::header::ALLOW, http::HeaderValue::from_static("POST"));
+        }
         response
     }
 }

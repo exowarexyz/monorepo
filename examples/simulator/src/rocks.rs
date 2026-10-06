@@ -1573,6 +1573,8 @@ impl Ingest for RocksStore {
 // The writer folds already-queued requests into one commit group that shares a single sequence
 // number and replay-log batch.
 impl RocksStore {
+    /// Direct writes use a separate budget of 256 requests and 1 GiB.
+    /// Mixed direct and HTTP traffic can consume this and the configured HTTP budget.
     pub async fn put_batch(&self, kvs: Vec<(Bytes, Bytes)>) -> Result<u64, IngestError> {
         let sequence = self.writer.put_batch(kvs).await?;
 

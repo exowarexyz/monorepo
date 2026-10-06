@@ -2,7 +2,9 @@
 //!
 //! Compares the direct writer with streaming protobuf decode and batch assembly.
 //! Rust allocation peaks exclude native storage allocations. Reservation peaks
-//! are samples taken at ingest observation events.
+//! are samples taken at streaming ingest observation events. Direct writes use
+//! the store's independent budget of 256 requests and 1 GiB, which is excluded
+//! from those samples. `BENCH_MEMORY_BYTES` controls only the streaming budget.
 //!
 //! Run with `cargo bench -p exoware-simulator --bench ingest`.
 //! Environment overrides are `BENCH_BATCHES`, `BENCH_KEYS_PER_BATCH`,

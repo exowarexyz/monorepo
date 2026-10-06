@@ -1050,7 +1050,7 @@ async fn production_unsupported_methods_preserve_http_and_client_errors() {
         let response = service.clone().oneshot(request).await.unwrap();
         assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
         if method == http::Method::GET {
-            assert!(response.headers().get(header::ALLOW).is_none());
+            assert_eq!(response.headers().get(header::ALLOW).unwrap(), "POST");
             let body = response.into_body().collect().await.unwrap().to_bytes();
             let error: serde_json::Value = serde_json::from_slice(&body).unwrap();
             assert_eq!(error["code"], "unknown");
@@ -1348,5 +1348,92 @@ async fn http2_completed_rejections_preserve_connect_errors() -> Result<(), Erro
         shutdown.send(()).unwrap();
         server.await??;
     }
+    Ok(())
+}
+
+#[tokio::test]
+async fn http1_malformed_timeout_delivers_error_after_write_backpressure() -> Result<(), Error> {
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let addr = listener.local_addr()?;
+    let gate = Arc::new(Gate::default());
+    gate.blocked.store(true, Ordering::SeqCst);
+    let listener = MeasuredListener {
+        tcp: listener,
+        stats: Arc::new(Stats::default()),
+        gate: gate.clone(),
+    };
+    let service = ingest_service(IngestState::new(Arc::new(ConsumeIngest)).with_put_config(
+        PutConfig {
+            timeout: DEADLINE,
+            ..PutConfig::default()
+        },
+    ));
+    let (shutdown, receive) = oneshot::channel();
+    let server = tokio::spawn(serve(listener, service, async {
+        let _ = receive.await;
+    }));
+    let mut tcp = client(addr).await?;
+    tcp.write_all(b"POST /log.ingest.v1.Service/Put HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Type: application/proto\r\nconnect-timeout-ms: invalid\r\nContent-Length: 1\r\n\r\n")
+        .await?;
+    sleep(Duration::from_millis(25)).await;
+    gate.blocked.store(false, Ordering::SeqCst);
+    if let Some(waker) = gate.waker.lock().unwrap().take() {
+        waker.wake();
+    }
+    let _ = tcp.write_all(b"x").await;
+    let mut raw = Vec::new();
+    let _ = timeout(Duration::from_secs(2), tcp.read_to_end(&mut raw)).await?;
+    drop(tcp);
+    shutdown.send(()).unwrap();
+    timeout(Duration::from_secs(2), server).await???;
+    let response = String::from_utf8_lossy(&raw);
+    assert!(
+        response.starts_with("HTTP/1.1 400"),
+        "missing 400 response, received {response:?}"
+    );
+    assert!(response.contains("invalid_argument"), "{response}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn http2_malformed_timeout_preserves_connect_error() -> Result<(), Error> {
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let addr = listener.local_addr()?;
+    let service = ingest_service(IngestState::new(Arc::new(UnreachableIngest)));
+    let (shutdown, stop) = oneshot::channel();
+    let server = tokio::spawn(serve(listener, service, async {
+        let _ = stop.await;
+    }));
+    let (mut connection, driver) = h2::client::handshake(TcpStream::connect(addr).await?).await?;
+    let driver = tokio::spawn(driver);
+    let request = Request::post(format!("http://{addr}{PUT_PATH}"))
+        .header(header::CONTENT_TYPE, "application/proto")
+        .header("connect-timeout-ms", "invalid")
+        .body(())?;
+    let (response, mut upload) = connection.send_request(request, false)?;
+    upload.send_data(Bytes::from_static(TINY_PUT), true)?;
+    let response = timeout(Duration::from_secs(2), async {
+        let response = response.await?;
+        let status = response.status();
+        let mut stream = response.into_body();
+        let mut body = Vec::new();
+        while let Some(data) = stream.data().await {
+            let data = data?;
+            body.extend_from_slice(&data);
+            stream.flow_control().release_capacity(data.len())?;
+        }
+        Ok::<_, Error>((status, body))
+    })
+    .await?;
+    drop(upload);
+    drop(connection);
+    driver.abort();
+    shutdown.send(()).unwrap();
+    timeout(Duration::from_secs(2), server).await???;
+    let (status, body) = response?;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let error: serde_json::Value = serde_json::from_slice(&body)?;
+    assert_eq!(error["code"], "invalid_argument");
+    assert_eq!(error["message"], "invalid request timeout");
     Ok(())
 }

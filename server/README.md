@@ -72,6 +72,18 @@ cleanup, which still enforces the wire bound and deadline. Hosts must leave room
 to transport admission. The byte budget accounts for admitted request allocations.
 Fixed listener overhead and storage-engine memory have separate bounds.
 
+The simulator also needs a native SST staging allowance outside `IngestBudget`.
+RocksDB copies the encoded log value while its Rust buffer is still live and
+builds the state SST in parallel. Each `stage_workers` worker stages one wave.
+Each wave is capped at 256 MiB of canonical Put encoding and 2,000,000 entries.
+Allow native headroom per active worker for those buffers and table-building
+overhead. `max_commit_batch_bytes` is a soft coalescing threshold, not a native
+memory ceiling.
+
+Direct simulator `RocksStore::put_batch` calls use a separate budget of 256
+requests and 1 GiB. They do not consume the budget supplied through `PutConfig`.
+Mixed direct and HTTP traffic can consume both budgets at once.
+
 Use `ingest::maximum_reception_bytes(limits, &buffers)` when checking that a host
 budget can admit one maximum Put. Pass the enforced `PutLimits` and the largest
 `DecodeBuffers` capacities used by the backend. The checked estimate covers
@@ -94,7 +106,9 @@ published limits. A deployment can explicitly configure larger limits, but
 requests above the published baseline are not portable.
 
 Transport admission has separate backstops. Request bodies and decompressed
-messages are capped at 256 MiB. Decoder element memory is capped at 192 MiB.
+messages are capped at 256 MiB. The ordinary ConnectRPC dispatcher caps decoder
+element memory at 192 MiB. Put uses the ingest validation limits and the configured
+`IngestBudget` for allocation admission.
 Stored stream responses and the Rust SDK response decoder allow 512 MiB messages
 and 256 MiB of element memory. The response byte budget leaves room for metadata
 and compression overhead when reading a full-size request back.

@@ -78,9 +78,6 @@ impl ArenaDecoder {
             ));
         }
 
-        if !self.started {
-            validate_window_header(input)?;
-        }
         let mut source = InBuffer::around(input);
         let remaining = self.limit - self.total;
         let (result, produced) = if remaining == 0 {
