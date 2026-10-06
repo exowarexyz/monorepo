@@ -13,8 +13,8 @@ use exoware_sdk::{RangeMode, ReadSession};
 
 use crate::adapter::codec::{
     decode_operation_location_key, decode_update_location, decode_watermark_location,
-    encode_node_key, encode_operation_key, encode_presence_key, encode_update_key,
-    ensure_encoded_value_size, merkle_size_for_watermark, op_count_for_watermark, WATERMARK_PREFIX,
+    encode_node_key, encode_operation_key, encode_update_key, ensure_encoded_value_size,
+    merkle_size_for_watermark, op_count_for_watermark, WATERMARK_PREFIX,
 };
 use crate::error::QmdbError;
 use crate::{decode_digest, PublishedWatermark, VersionedValue};
@@ -157,19 +157,6 @@ impl<F: Family> PublicationCache<F> {
                     .map_or(0, |known| known.location.as_u64()),
             }),
         }
-    }
-}
-
-pub(crate) async fn require_batch_boundary<F: Family>(
-    session: &ReadSession,
-    location: Location<F>,
-) -> Result<(), QmdbError> {
-    if session.get(&encode_presence_key(location)).await?.is_some() {
-        Ok(())
-    } else {
-        Err(QmdbError::CurrentProofRequiresBatchBoundary {
-            location: location.as_u64(),
-        })
     }
 }
 

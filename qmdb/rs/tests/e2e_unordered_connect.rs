@@ -1565,11 +1565,11 @@ async fn test_unordered_current_proofs_store_calls() {
         get_many,
         range,
     };
-    // A second round at the same tip repeats every per-tip read
+    // A second round at the same tip reloads the tip
     for _round in ["cold", "warm"] {
         assert_eq!(
             store_calls(&query, client.get_raw(tip, source.alpha, None)).await,
-            calls(7, 2, 2),
+            calls(1, 2, 2),
         );
         assert_eq!(
             store_calls(
@@ -1577,7 +1577,7 @@ async fn test_unordered_current_proofs_store_calls() {
                 client.get_many_raw(tip, &[source.alpha, source.beta], None),
             )
             .await,
-            calls(14, 4, 4),
+            calls(2, 3, 3),
         );
         assert_eq!(
             store_calls(
@@ -1585,7 +1585,7 @@ async fn test_unordered_current_proofs_store_calls() {
                 client.current_operation_range_raw(tip, tip - 2, 2, None),
             )
             .await,
-            calls(6, 2, 3),
+            calls(0, 2, 2),
         );
     }
     for server in servers {

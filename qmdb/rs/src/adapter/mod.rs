@@ -11,6 +11,7 @@
 
 pub(crate) mod codec;
 pub(crate) mod core;
+mod current;
 mod immutable;
 mod keyless;
 mod operation_range;

@@ -241,6 +241,26 @@ impl<F: Graftable, H: Hasher, const N: usize> KvCurrentStorage<'_, F, H, N> {
     }
 }
 
+/// Bitmap chunks every current proof at `watermark` reads: the partial last
+/// chunk when the length is not chunk-aligned, and the pending chunk when one
+/// complete chunk is not yet grafted.
+pub(crate) fn tail_chunks<F: Graftable, const N: usize>(
+    watermark: Location<F>,
+) -> Result<Vec<u64>, crate::QmdbError> {
+    let len = crate::adapter::codec::op_count_for_watermark(watermark)?.as_u64();
+    let chunk_bits = crate::adapter::codec::bitmap_chunk_bits::<N>();
+    let complete = len / chunk_bits;
+    let graftable = grafting::graftable_chunks::<F>(len, grafting::height::<N>()).min(complete);
+    let mut chunks = Vec::with_capacity(2);
+    if complete > graftable {
+        chunks.push(graftable);
+    }
+    if len % chunk_bits != 0 {
+        chunks.push(chunk_index_for_location::<F, N>(watermark));
+    }
+    Ok(chunks)
+}
+
 /// Bitmap metadata and the chunks consumed by one native current proof
 pub(crate) struct ProofBitmap<const N: usize> {
     len: u64,
@@ -276,17 +296,12 @@ impl<const N: usize> ProofBitmap<N> {
                 crate::QmdbError::CorruptData("current bitmap chunk index exceeds usize".into())
             })
         };
-        // Current proof construction reads the partial trailing chunk (`last_chunk`, only when
-        // the length is not chunk-aligned), the pending chunk (if any) and the queried chunk
+        // Current proof construction reads the tail chunks and the queried chunk
         // (`get_chunk`). Upstream rejects a queried location in a pruned chunk before reading it.
         let last = chunk_index_for_location::<F, N>(watermark);
-        let mut required = std::collections::BTreeSet::new();
-        if len % chunk_bits != 0 {
-            required.insert(last);
-        }
-        if complete > graftable {
-            required.insert(graftable);
-        }
+        let mut required = tail_chunks::<F, N>(watermark)?
+            .into_iter()
+            .collect::<std::collections::BTreeSet<_>>();
         if let Some(location) = location {
             if location > watermark {
                 return Err(crate::QmdbError::CorruptData(
