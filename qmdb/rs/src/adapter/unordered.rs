@@ -407,7 +407,7 @@ where
         session: &ReadSession,
         watermark: Location<F>,
     ) -> Result<CurrentTip<F, H::Digest>, QmdbError> {
-        current::load_current_tip::<F, H, N>(session, watermark, |bytes| {
+        current::current_tip::<F, H, N>(session, &self.read_cache, watermark, |bytes| {
             match decode_operation::<F, K, V, E>(&self.op_cfg, watermark, bytes)? {
                 unordered::Operation::CommitFloor(_, floor) => Ok(floor),
                 _ => Err(QmdbError::CorruptData(format!(

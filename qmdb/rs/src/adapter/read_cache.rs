@@ -11,6 +11,8 @@ use commonware_storage::merkle::{Family, Location, Position};
 use commonware_utils::cache::Cache;
 use tokio::sync::{watch, Mutex as AsyncMutex, OwnedMutexGuard};
 
+use crate::adapter::current::CurrentTip;
+
 const NODE_CAPACITY: usize = 16_384;
 const CONTEXT_CAPACITY: usize = 128;
 
@@ -30,9 +32,14 @@ struct State<F: Family, D: Digest> {
     nodes: Cache<Position<F>, Bytes>,
     contexts: Cache<Location<F>, RootContext<D>>,
     witnesses: Cache<Location<F>, Bytes>,
-    context_gates: HashMap<Location<F>, Weak<AsyncMutex<()>>>,
+    currents: Cache<Location<F>, CurrentTip<F, D>>,
+    context_gates: Gates<F>,
+    current_gates: Gates<F>,
     flights: HashMap<Position<F>, watch::Receiver<Option<Bytes>>>,
 }
+
+/// Per-watermark gates that let one request load a value while others wait.
+type Gates<F> = HashMap<Location<F>, Weak<AsyncMutex<()>>>;
 
 pub(crate) struct NodeReservation<F: Family, D: Digest> {
     pub hits: HashMap<Position<F>, Bytes>,
@@ -57,7 +64,9 @@ impl<F: Family, D: Digest> ReadCache<F, D> {
                 nodes: Cache::new(NonZeroUsize::new(nodes).unwrap()),
                 contexts: Cache::new(NonZeroUsize::new(contexts).unwrap()),
                 witnesses: Cache::new(NonZeroUsize::new(contexts).unwrap()),
+                currents: Cache::new(NonZeroUsize::new(contexts).unwrap()),
                 context_gates: HashMap::new(),
+                current_gates: HashMap::new(),
                 flights: HashMap::new(),
             }),
         }
@@ -71,16 +80,45 @@ impl<F: Family, D: Digest> ReadCache<F, D> {
         self: &Arc<Self>,
         watermark: Location<F>,
     ) -> (Option<RootContext<D>>, Option<OwnedMutexGuard<()>>) {
+        self.get_or_gate(watermark, |state| {
+            (&mut state.contexts, &mut state.context_gates)
+        })
+        .await
+    }
+
+    /// The [`CurrentTip`] at `watermark`, or else a guard under which the caller
+    /// loads it while other callers for the same watermark wait.
+    pub async fn current(
+        self: &Arc<Self>,
+        watermark: Location<F>,
+    ) -> (Option<CurrentTip<F, D>>, Option<OwnedMutexGuard<()>>) {
+        self.get_or_gate(watermark, |state| {
+            (&mut state.currents, &mut state.current_gates)
+        })
+        .await
+    }
+
+    /// Cache `tip`, and its ops root context for operation-log reads.
+    pub fn put_current(&self, tip: CurrentTip<F, D>) {
+        let mut state = self.state.lock().unwrap();
+        state.contexts.put(tip.watermark, tip.ops);
+        state.currents.put(tip.watermark, tip);
+    }
+
+    async fn get_or_gate<T: Clone>(
+        self: &Arc<Self>,
+        watermark: Location<F>,
+        select: impl Fn(&mut State<F, D>) -> (&mut Cache<Location<F>, T>, &mut Gates<F>),
+    ) -> (Option<T>, Option<OwnedMutexGuard<()>>) {
         let gate = {
             let mut state = self.state.lock().unwrap();
-            state
-                .context_gates
-                .retain(|_, gate| gate.strong_count() > 0);
-            if let Some(context) = state.contexts.get(&watermark) {
-                return (Some(*context), None);
+            let (values, gates) = select(&mut state);
+            gates.retain(|_, gate| gate.strong_count() > 0);
+            if let Some(value) = values.get(&watermark) {
+                return (Some(value.clone()), None);
             }
 
-            let entry = state.context_gates.entry(watermark).or_default();
+            let entry = gates.entry(watermark).or_default();
             match entry.upgrade() {
                 Some(gate) => gate,
                 None => {
@@ -91,11 +129,12 @@ impl<F: Family, D: Digest> ReadCache<F, D> {
             }
         };
 
-        // Another request may publish the context while this one waits.
+        // Another request may publish the value while this one waits.
         let guard = gate.lock_owned().await;
-        let state = self.state.lock().unwrap();
-        match state.contexts.get(&watermark) {
-            Some(context) => (Some(*context), None),
+        let mut state = self.state.lock().unwrap();
+        let (values, _) = select(&mut state);
+        match values.get(&watermark) {
+            Some(value) => (Some(value.clone()), None),
             None => (None, Some(guard)),
         }
     }
@@ -234,6 +273,70 @@ mod tests {
             root: Digest([value; 32]),
             inactive_peaks: value as usize,
         }
+    }
+
+    fn tip(watermark: u64, value: u8) -> CurrentTip<mmr::Family, Digest> {
+        CurrentTip {
+            watermark: Location::new(watermark),
+            root: Digest([value; 32]),
+            pruned_chunks: 0,
+            inactivity_floor: Location::new(0),
+            ops: context(value),
+            tail_chunks: Vec::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn cached_tip_shares_its_ops_context() {
+        let cache = Arc::new(Cache::new());
+        let watermark = Location::new(1);
+        cache.put_current(tip(1, 3));
+
+        let (found, guard) = cache.current(watermark).await;
+        assert!(guard.is_none());
+        assert_eq!(found.unwrap().root, Digest([3; 32]));
+        assert_eq!(
+            cache.cached_context(watermark).unwrap().root,
+            Digest([3; 32])
+        );
+    }
+
+    #[tokio::test]
+    async fn evicted_tip_is_loaded_again() {
+        let cache = Arc::new(Cache::with_capacities(4, 1));
+        cache.put_current(tip(1, 1));
+        cache.put_current(tip(2, 2));
+
+        let (found, guard) = cache.current(Location::new(1)).await;
+        assert!(found.is_none());
+        assert!(guard.is_some());
+    }
+
+    #[tokio::test]
+    async fn tip_waiters_share_one_load_and_retry_after_failure() {
+        let cache = Arc::new(Cache::new());
+        let watermark = Location::new(1);
+
+        // A failed load caches nothing, so the next waiter loads.
+        let (_, guard) = cache.current(watermark).await;
+        let mut retry = Box::pin(cache.current(watermark));
+        assert!(timeout(Duration::from_millis(10), &mut retry)
+            .await
+            .is_err());
+        drop(guard);
+        let (found, guard) = timeout(Duration::from_secs(1), retry).await.unwrap();
+        assert!(found.is_none());
+
+        // A loaded tip reaches the waiters without another load.
+        let mut follower = Box::pin(cache.current(watermark));
+        assert!(timeout(Duration::from_millis(10), &mut follower)
+            .await
+            .is_err());
+        cache.put_current(tip(1, 4));
+        drop(guard);
+        let (found, guard) = timeout(Duration::from_secs(1), follower).await.unwrap();
+        assert!(guard.is_none());
+        assert_eq!(found.unwrap().root, Digest([4; 32]));
     }
 
     #[tokio::test]

@@ -2,11 +2,12 @@
 
 use std::collections::BTreeMap;
 use std::marker::PhantomData;
+use std::sync::Arc;
 
 use bytes::Bytes;
 use commonware_codec::{Copying, DecodeExt};
 use commonware_cryptography::{Digest, Hasher};
-use commonware_storage::merkle::{Graftable, Location, Position};
+use commonware_storage::merkle::{Family, Graftable, Location, Position};
 use commonware_storage::qmdb::current::proof::{constant::OperationProof, RangeProof};
 use exoware_sdk::{RangeMode, ReadSession};
 
@@ -17,13 +18,13 @@ use crate::adapter::codec::{
 };
 use crate::adapter::core;
 use crate::adapter::operation_range::root;
-use crate::adapter::read_cache::RootContext;
+use crate::adapter::read_cache::{ReadCache, RootContext};
 use crate::adapter::storage::{tail_chunks, KvCurrentStorage, ProofBitmap};
 use crate::QmdbError;
 
 /// Current-state values fixed by one published batch boundary.
 #[derive(Clone)]
-pub(crate) struct CurrentTip<F: Graftable, D: Digest> {
+pub(crate) struct CurrentTip<F: Family, D: Digest> {
     pub watermark: Location<F>,
     /// Canonical current root.
     pub root: D,
@@ -34,10 +35,10 @@ pub(crate) struct CurrentTip<F: Graftable, D: Digest> {
     /// Operations-log root and its inactive peaks.
     pub ops: RootContext<D>,
     /// The [`tail_chunks`] as `(index, chunk)`, cleared below the floor.
-    tail_chunks: Vec<(u64, Bytes)>,
+    pub tail_chunks: Vec<(u64, Bytes)>,
 }
 
-impl<F: Graftable, D: Digest> CurrentTip<F, D> {
+impl<F: Family, D: Digest> CurrentTip<F, D> {
     fn tail_chunk<const N: usize>(&self, index: u64) -> Option<[u8; N]> {
         self.tail_chunks
             .iter()
@@ -46,20 +47,43 @@ impl<F: Graftable, D: Digest> CurrentTip<F, D> {
     }
 }
 
-/// Load the [`CurrentTip`] at `watermark` in one round of concurrent reads.
-/// `commit_floor` decodes the operation at `watermark`, which must be a commit,
-/// and returns its inactivity floor.
-pub(crate) async fn load_current_tip<F: Graftable, H: Hasher, const N: usize>(
+/// The [`CurrentTip`] at `watermark`, from `cache` or else loaded and cached.
+/// Concurrent callers for one watermark share a single load. `commit_floor`
+/// decodes the operation at `watermark`, which must be a commit, and returns
+/// its inactivity floor.
+pub(crate) async fn current_tip<F: Graftable, H: Hasher, const N: usize>(
+    session: &ReadSession,
+    cache: &Arc<ReadCache<F, H::Digest>>,
+    watermark: Location<F>,
+    commit_floor: impl FnOnce(&[u8]) -> Result<Location<F>, QmdbError>,
+) -> Result<CurrentTip<F, H::Digest>, QmdbError> {
+    let (tip, _guard) = cache.current(watermark).await;
+    if let Some(tip) = tip {
+        return Ok(tip);
+    }
+    let ops = cache.cached_context(watermark);
+    let tip = load_current_tip::<F, H, N>(session, watermark, ops, commit_floor).await?;
+    cache.put_current(tip.clone());
+    Ok(tip)
+}
+
+/// Load the [`CurrentTip`] at `watermark` in one round of concurrent reads,
+/// reading the ops root peaks only when `ops` is unknown.
+async fn load_current_tip<F: Graftable, H: Hasher, const N: usize>(
     session: &ReadSession,
     watermark: Location<F>,
+    ops: Option<RootContext<H::Digest>>,
     commit_floor: impl FnOnce(&[u8]) -> Result<Location<F>, QmdbError>,
 ) -> Result<CurrentTip<F, H::Digest>, QmdbError> {
     let presence_key = encode_presence_key(watermark);
     let meta_key = encode_current_meta_key(watermark);
     let commit_key = encode_operation_key(watermark);
-    let peaks = F::peaks(merkle_size_for_watermark(watermark)?)
-        .map(|(position, _)| position)
-        .collect::<Vec<_>>();
+    let peaks = match ops {
+        Some(_) => Vec::new(),
+        None => F::peaks(merkle_size_for_watermark(watermark)?)
+            .map(|(position, _)| position)
+            .collect::<Vec<_>>(),
+    };
     let peak_keys = peaks
         .iter()
         .map(|&position| encode_node_key(position))
@@ -98,15 +122,20 @@ pub(crate) async fn load_current_tip<F: Graftable, H: Hasher, const N: usize>(
         )));
     };
     let inactivity_floor = commit_floor(commit.as_ref())?;
-    let inactive_peaks = core::inactive_peaks(watermark, inactivity_floor)?;
-    let nodes = peaks
-        .iter()
-        .zip(&peak_keys)
-        .map(|(&position, key)| (position, rows.remove(key)))
-        .collect::<BTreeMap<Position<F>, Option<Bytes>>>();
-    let ops = RootContext {
-        root: root::<F, H>(&nodes, watermark, inactive_peaks)?,
-        inactive_peaks,
+    let ops = match ops {
+        Some(ops) => ops,
+        None => {
+            let inactive_peaks = core::inactive_peaks(watermark, inactivity_floor)?;
+            let nodes = peaks
+                .iter()
+                .zip(&peak_keys)
+                .map(|(&position, key)| (position, rows.remove(key)))
+                .collect::<BTreeMap<Position<F>, Option<Bytes>>>();
+            RootContext {
+                root: root::<F, H>(&nodes, watermark, inactive_peaks)?,
+                inactive_peaks,
+            }
+        }
     };
     let tail_chunks = tail
         .into_iter()
