@@ -482,7 +482,7 @@ impl ExecutionPlan for KvScanExec {
 
         let mut builder = RecordBatchReceiverStreamBuilder::new(self.schema(), 2);
         let tx = builder.tx();
-        let session = read_session(context.session_config(), &self.client);
+        let session = read_session(context.session_config(), &self.client)?;
         let key_prefix = self.client.key_prefix().clone();
         let model = self.model.clone();
         let index_specs = self.index_specs.clone();
@@ -1058,7 +1058,7 @@ mod tests {
     use datafusion::arrow::record_batch::RecordBatch;
     use datafusion::common::{Result as DataFusionResult, ScalarValue};
     use datafusion::datasource::MemTable;
-    use datafusion::prelude::SessionContext;
+    use datafusion::prelude::SessionContext as DataFusionSessionContext;
     use exoware_sdk::{StoreClient, StoreKeyPrefix};
     use exoware_server::{
         Query, QueryExtra, QueryResult, QueryState, RangeScan, RangeScanBatch, RangeScanResult,
@@ -1203,8 +1203,8 @@ mod tests {
     }
 
     struct Fixture {
-        store: SessionContext,
-        native: SessionContext,
+        store: crate::SqlContext,
+        native: DataFusionSessionContext,
         rows: Arc<Rows>,
         table: Arc<KvTable>,
         prefix: StoreKeyPrefix,
@@ -1249,9 +1249,9 @@ mod tests {
                     .into_iter()
                     .map(|(key, value)| (prefix.encode_key(&key).unwrap(), Bytes::from(value))),
             );
-            let store = crate::session_context(schema.client().clone());
-            schema.register_all(&store).unwrap();
-            let native = SessionContext::new();
+            let store = crate::SqlContext::new(schema.client().clone());
+            store.register_schema(schema).unwrap();
+            let native = DataFusionSessionContext::new();
             native
                 .register_table(
                     "orders",
@@ -1273,7 +1273,7 @@ mod tests {
             self.rows.requests.lock().unwrap().clear();
             self.rows.returned_rows.store(0, Ordering::SeqCst);
             self.rows.returned_bytes.store(0, Ordering::SeqCst);
-            let actual = values(&self.store, sql).await.unwrap();
+            let actual = values(self.store.datafusion(), sql).await.unwrap();
             assert_eq!(actual, expected, "{sql}");
             let requests = self.rows.requests.lock().unwrap().clone();
             for request in &requests {
@@ -1297,7 +1297,10 @@ mod tests {
         }
     }
 
-    async fn values(ctx: &SessionContext, sql: &str) -> DataFusionResult<Vec<Vec<ScalarValue>>> {
+    async fn values(
+        ctx: &DataFusionSessionContext,
+        sql: &str,
+    ) -> DataFusionResult<Vec<Vec<ScalarValue>>> {
         let batches = ctx.sql(sql).await?.collect().await?;
         batches
             .iter()

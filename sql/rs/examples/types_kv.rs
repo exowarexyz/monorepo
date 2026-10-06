@@ -1,15 +1,14 @@
 use datafusion::arrow::datatypes::DataType;
 use datafusion::arrow::util::pretty::print_batches;
-use datafusion::prelude::SessionContext;
 use exoware_sdk::{StoreClient, StoreKeyPrefix};
-use exoware_sql::{CellValue, IndexSpec, KvSchema, TableColumnConfig};
+use exoware_sql::{CellValue, IndexSpec, KvSchema, SqlContext, TableColumnConfig};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let base_url =
         std::env::var("EXOWARE_URL").unwrap_or_else(|_| "http://localhost:10000".to_string());
     let client = StoreClient::new(&base_url);
-    let ctx = exoware_sql::session_context(client.prefixed(StoreKeyPrefix::identity()));
+    let ctx = SqlContext::new(client.prefixed(StoreKeyPrefix::identity()));
 
     let schema = KvSchema::new(client.prefixed(StoreKeyPrefix::identity()))
         .table(
@@ -41,7 +40,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )?;
 
     // Register tables for SQL queries
-    schema.register_all(&ctx)?;
+    ctx.register_schema(schema)?;
 
     // Use BatchWriter to atomically insert across both tables
     demo_batch_writer_insert().await;
@@ -130,7 +129,7 @@ async fn demo_batch_writer_insert() {
     println!("  (skipping flush -- no server in this demo)");
 }
 
-async fn demo_sql_insert(ctx: &SessionContext) -> Result<(), Box<dyn std::error::Error>> {
+async fn demo_sql_insert(ctx: &SqlContext) -> Result<(), Box<dyn std::error::Error>> {
     println!("\n== SQL INSERT with hex binary literals ==");
     println!("  Example SQL (requires running KV server):");
     println!("    INSERT INTO wallets (address, label, balance_wei)");

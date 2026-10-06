@@ -1,21 +1,20 @@
 use datafusion::arrow::util::pretty::print_batches;
 use datafusion::common::Result as DataFusionResult;
-use datafusion::prelude::SessionContext;
 use exoware_sdk::{StoreClient, StoreKeyPrefix};
-use exoware_sql::{default_orders_index_specs, KvSchema};
+use exoware_sql::{default_orders_index_specs, KvSchema, SqlContext};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let base_url =
         std::env::var("EXOWARE_URL").unwrap_or_else(|_| "http://localhost:10000".to_string());
     let client = StoreClient::new(&base_url);
-    let ctx = exoware_sql::session_context(client.prefixed(StoreKeyPrefix::identity()));
+    let ctx = SqlContext::new(client.prefixed(StoreKeyPrefix::identity()));
     let index_specs = default_orders_index_specs();
 
-    KvSchema::new(client.prefixed(StoreKeyPrefix::identity()))
+    let schema = KvSchema::new(client.prefixed(StoreKeyPrefix::identity()))
         .orders_table("orders_kv", index_specs)
-        .map_err(datafusion::common::DataFusionError::Execution)?
-        .register_all(&ctx)?;
+        .map_err(datafusion::common::DataFusionError::Execution)?;
+    ctx.register_schema(schema)?;
 
     let seed_sample = std::env::var("EXOWARE_SEED_SAMPLE")
         .map(|v| v != "0")
@@ -49,7 +48,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-async fn seed_sample_orders_via_sql(ctx: &SessionContext) -> DataFusionResult<()> {
+async fn seed_sample_orders_via_sql(ctx: &SqlContext) -> DataFusionResult<()> {
     let run_nonce = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_err(|e| datafusion::common::DataFusionError::Execution(format!("clock error: {e}")))?

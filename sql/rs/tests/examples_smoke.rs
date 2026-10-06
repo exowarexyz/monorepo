@@ -4,7 +4,9 @@ use datafusion::arrow::array::{Int64Array, StringArray, UInt64Array};
 use datafusion::arrow::datatypes::DataType;
 use datafusion::common::ScalarValue;
 use exoware_sdk::PrefixedStoreClient;
-use exoware_sql::{default_orders_index_specs, CellValue, IndexSpec, KvSchema, TableColumnConfig};
+use exoware_sql::{
+    default_orders_index_specs, CellValue, IndexSpec, KvSchema, SqlContext, TableColumnConfig,
+};
 
 fn collect_i64_rows(
     batches: &[datafusion::arrow::record_batch::RecordBatch],
@@ -99,13 +101,12 @@ fn collect_two_strings(
 #[tokio::test]
 async fn orders_example_queries_work_end_to_end() {
     let client = common::local_store_client().await;
-    let ctx = exoware_sql::session_context(PrefixedStoreClient::empty(client.clone()));
+    let ctx = SqlContext::new(PrefixedStoreClient::empty(client.clone()));
 
-    KvSchema::new(PrefixedStoreClient::empty(client))
+    let schema = KvSchema::new(PrefixedStoreClient::empty(client))
         .orders_table("orders_kv", default_orders_index_specs())
-        .expect("orders schema")
-        .register_all(&ctx)
-        .expect("register");
+        .expect("orders schema");
+    ctx.register_schema(schema).expect("register");
 
     ctx.sql(
         "INSERT INTO orders_kv (region, customer_id, order_id, amount_cents, status) VALUES \
@@ -180,9 +181,9 @@ async fn orders_example_queries_work_end_to_end() {
 #[tokio::test]
 async fn join_example_queries_work_end_to_end() {
     let client = common::local_store_client().await;
-    let ctx = exoware_sql::session_context(PrefixedStoreClient::empty(client.clone()));
+    let ctx = SqlContext::new(PrefixedStoreClient::empty(client.clone()));
 
-    KvSchema::new(PrefixedStoreClient::empty(client))
+    let schema = KvSchema::new(PrefixedStoreClient::empty(client))
         .table(
             "customers",
             vec![
@@ -210,9 +211,8 @@ async fn join_example_queries_work_end_to_end() {
                     .expect("index"),
             ],
         )
-        .expect("orders schema")
-        .register_all(&ctx)
-        .expect("register");
+        .expect("orders schema");
+    ctx.register_schema(schema).expect("register");
 
     ctx.sql(
         "INSERT INTO customers (customer_id, name, region) VALUES \
@@ -289,7 +289,7 @@ async fn join_example_queries_work_end_to_end() {
 #[tokio::test]
 async fn versioned_example_queries_work_end_to_end() {
     let client = common::local_store_client().await;
-    let ctx = exoware_sql::session_context(PrefixedStoreClient::empty(client.clone()));
+    let ctx = SqlContext::new(PrefixedStoreClient::empty(client.clone()));
     let writer_client = client.clone();
 
     let schema = KvSchema::new(PrefixedStoreClient::empty(client))
@@ -307,7 +307,7 @@ async fn versioned_example_queries_work_end_to_end() {
             vec![],
         )
         .expect("documents schema");
-    schema.register_all(&ctx).expect("register");
+    ctx.register_schema(schema).expect("register");
 
     let doc_id_hex = "d0c1aabbccddeeff0011223344556677";
     let doc_id = hex::decode(doc_id_hex).expect("doc_id hex");
@@ -409,7 +409,7 @@ async fn versioned_example_queries_work_end_to_end() {
 #[tokio::test]
 async fn fixed_binary_example_filters_work_end_to_end() {
     let client = common::local_store_client().await;
-    let ctx = exoware_sql::session_context(PrefixedStoreClient::empty(client.clone()));
+    let ctx = SqlContext::new(PrefixedStoreClient::empty(client.clone()));
     let writer_client = client.clone();
 
     let schema = KvSchema::new(PrefixedStoreClient::empty(client))
@@ -441,7 +441,7 @@ async fn fixed_binary_example_filters_work_end_to_end() {
         )
         .expect("transfers schema");
 
-    schema.register_all(&ctx).expect("register");
+    ctx.register_schema(schema).expect("register");
 
     let mut batch = KvSchema::new(PrefixedStoreClient::empty(writer_client))
         .table(

@@ -21,13 +21,13 @@ give each instance a distinct SDK `StoreKeyPrefix` and pass that prefixed
 
 ```rust
 use exoware_sdk::{StoreClient, StoreKeyPrefix};
-use exoware_sql::{session_context, IndexSpec, KvSchema, TableColumnConfig};
+use exoware_sql::{IndexSpec, KvSchema, SqlContext, TableColumnConfig};
 use datafusion::arrow::datatypes::DataType;
 
 let client = StoreClient::new("http://localhost:10000").prefixed(StoreKeyPrefix::identity());
-let ctx = session_context(client.clone());
+let ctx = SqlContext::new(client.clone());
 
-KvSchema::new(client)
+let schema = KvSchema::new(client)
     .table("customers", vec![
         TableColumnConfig::new("customer_id", DataType::Int64, false),
         TableColumnConfig::new("name", DataType::Utf8, false),
@@ -39,8 +39,8 @@ KvSchema::new(client)
     ], vec!["order_id".to_string()], vec![
         IndexSpec::lexicographic("cust_idx", vec!["customer_id".to_string()])?
             .with_cover_columns(vec!["amount".to_string()]),
-    ])?
-    .register_all(&ctx)?;
+    ])?;
+ctx.register_schema(schema)?;
 
 // Standard SQL JOINs are supported:
 // SELECT c.name, o.amount FROM orders o JOIN customers c ON ...
@@ -174,33 +174,40 @@ and aggregate reductions. This preserves monotonic freshness across query
 workers behind a load balancer. It does not provide snapshot isolation.
 Queries without Store reads do not report an observed sequence.
 
-`session_context(client)` installs a monotonic read session by default. Reusing
-the context carries observations across SQL statements, including scans and
-aggregate reductions. Independently constructed contexts start with independent
-sessions.
+`SqlContext::new(client)` installs a monotonic read session by default.
+Reusing the context carries observations across SQL statements, including scans
+and aggregate reductions. Independently constructed contexts start with
+independent sessions.
 
-Use `session_state_builder(session)` to construct a context with an explicit
-read session and customize DataFusion settings. Use `with_read_session` to
-replace the session in a copy of an existing context:
+Use `SqlContext::builder(client)` to supply a read session or customize
+DataFusion settings. The builder installs the read session after applying the
+DataFusion configuration:
 
 ```rust
 use exoware_sdk::ReadSession;
-use exoware_sql::with_read_session;
+use exoware_sql::SqlContext;
+use datafusion::prelude::SessionConfig;
 
-let session = ReadSession::monotonic(client, None);
-let query_ctx = with_read_session(&ctx, session.clone());
+let session = ReadSession::monotonic(client.clone(), None);
+let ctx = SqlContext::builder(client)
+    .with_read_session(session)
+    .with_config(SessionConfig::new().with_batch_size(8192))
+    .build();
 
-query_ctx.sql("SELECT * FROM customers").await?.collect().await?;
-query_ctx.sql("SELECT * FROM orders").await?.collect().await?;
+ctx.sql("SELECT * FROM customers").await?.collect().await?;
+ctx.sql("SELECT * FROM orders").await?.collect().await?;
 
-let observed_sequence = session.evaluated_sequence();
+let observed_sequence = ctx.read_session().evaluated_sequence();
 ```
 
-The context and session clones share observations. A monotonic session applies
-the highest observed sequence to later statements; a fixed session keeps its
-configured minimum. Plain DataFusion contexts without an installed session fall
-back to a separate session per scan or aggregate. When customizing the SQL state
-builder, mutate its existing configuration to preserve the installed session.
+`ctx.with_read_session(session)` returns a context that shares the registered
+catalogs but uses the supplied session. The context and session clones share
+observations. A monotonic session applies the highest observed sequence to later
+statements; a fixed session keeps its configured minimum. Store scans and
+aggregates require a configured read session. Use `ctx.read_session()` to inspect
+the active session, and use
+`ctx.datafusion()` for DataFusion APIs that the SQL context does not expose
+directly.
 
 Primary keys identify immutable rows. Inserting the same primary key more than
 once has undefined behavior. The write path does not enforce uniqueness. Use a

@@ -1,8 +1,7 @@
 use datafusion::arrow::datatypes::DataType;
 use datafusion::arrow::util::pretty::print_batches;
-use datafusion::prelude::SessionContext;
 use exoware_sdk::{StoreClient, StoreKeyPrefix};
-use exoware_sql::{CellValue, KvSchema, TableColumnConfig};
+use exoware_sql::{CellValue, KvSchema, SqlContext, TableColumnConfig};
 
 const DOC_ID_HEX: &str = "d0c1aabbccddeeff0011223344556677";
 
@@ -15,12 +14,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let base_url =
         std::env::var("EXOWARE_URL").unwrap_or_else(|_| "http://localhost:10000".to_string());
     let client = StoreClient::new(&base_url);
-    let ctx = exoware_sql::session_context(client.prefixed(StoreKeyPrefix::identity()));
+    let ctx = SqlContext::new(client.prefixed(StoreKeyPrefix::identity()));
 
     // -- Define the versioned document table --
     let schema = build_schema(client)?;
 
-    schema.register_all(&ctx)?;
+    ctx.register_schema(schema)?;
 
     // -- Demonstrate programmatic inserts with BatchWriter --
     demo_batch_writer_insert().await;
@@ -127,7 +126,7 @@ async fn demo_batch_writer_insert() {
     println!("  (skipping flush -- no server in this demo)");
 }
 
-async fn demo_sql_queries(ctx: &SessionContext) -> Result<(), Box<dyn std::error::Error>> {
+async fn demo_sql_queries(ctx: &SqlContext) -> Result<(), Box<dyn std::error::Error>> {
     println!("\n== SQL query patterns for versioned documents ==");
     let doc_id = format!("X'{}'", DOC_ID_HEX.to_uppercase());
 
