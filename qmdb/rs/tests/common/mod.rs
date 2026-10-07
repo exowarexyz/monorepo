@@ -277,6 +277,20 @@ where
 
 /// Update-index rows are keyed by this family byte.
 const UPDATE_FAMILY: u8 = 0x1;
+/// Operation rows are keyed by this family byte.
+#[allow(dead_code)]
+pub const OPERATION_FAMILY: u8 = 0x4;
+
+/// Makes the next `GetMany` and the next range read of one key family wait for
+/// each other: each is held until the other has also started. Reads sent
+/// concurrently both proceed; reads sent one after the other deadlock, so a
+/// test that times out proves the code under test does not overlap them.
+struct OverlapGate {
+    barrier: std::sync::Arc<tokio::sync::Barrier>,
+    range_family: u8,
+    get_many_pending: bool,
+    range_pending: bool,
+}
 
 /// A simulator store that records which current-state rows queries read.
 pub struct CountingQuery {
@@ -289,6 +303,7 @@ pub struct CountingQuery {
     pub update_rows: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     /// Store requests of each kind.
     pub calls: std::sync::Mutex<StoreCalls>,
+    overlap: std::sync::Mutex<Option<OverlapGate>>,
 }
 
 /// Store requests served by a [`CountingQuery`], by kind.
@@ -307,6 +322,36 @@ impl CountingQuery {
             .store(0, std::sync::atomic::Ordering::Relaxed);
         self.update_rows
             .store(0, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Require the next `GetMany` and the next range read of `range_family` to
+    /// be in flight at the same time; a test fails by timing out if they are not.
+    #[allow(dead_code)]
+    pub fn require_overlap(&self, range_family: u8) {
+        *self.overlap.lock().unwrap() = Some(OverlapGate {
+            barrier: std::sync::Arc::new(tokio::sync::Barrier::new(2)),
+            range_family,
+            get_many_pending: true,
+            range_pending: true,
+        });
+    }
+
+    /// The overlap barrier, if `is_get_many` or `range_family` is the next gated read.
+    fn overlap_barrier(
+        &self,
+        is_get_many: bool,
+        range_family: Option<u8>,
+    ) -> Option<std::sync::Arc<tokio::sync::Barrier>> {
+        let mut gate = self.overlap.lock().unwrap();
+        let gate = gate.as_mut()?;
+        let pending = if is_get_many {
+            &mut gate.get_many_pending
+        } else if range_family == Some(gate.range_family) {
+            &mut gate.range_pending
+        } else {
+            return None;
+        };
+        std::mem::take(pending).then(|| gate.barrier.clone())
     }
 
     /// Store requests since the last call, resetting the count.
@@ -367,6 +412,9 @@ impl exoware_server::Query for CountingQuery {
     ) -> Result<exoware_server::QueryResult<Vec<(bytes::Bytes, Option<bytes::Bytes>)>>, String>
     {
         self.calls.lock().unwrap().get_many += 1;
+        if let Some(barrier) = self.overlap_barrier(true, None) {
+            barrier.wait().await;
+        }
         exoware_server::Query::get_many(self.store.as_ref(), keys).await
     }
 
@@ -378,6 +426,9 @@ impl exoware_server::Query for CountingQuery {
         forward: bool,
     ) -> Result<exoware_server::RangeScanResult<Self::RangeScan>, String> {
         self.calls.lock().unwrap().range += 1;
+        if let Some(barrier) = self.overlap_barrier(false, start.first().copied()) {
+            barrier.wait().await;
+        }
         // A chunk row key is the chunk family byte, the u64 chunk index, then the u64 boundary location
         if start.first() == Some(&exoware_qmdb::CHUNK_FAMILY) && start.len() == 17 {
             self.bitmap_chunks
@@ -419,6 +470,7 @@ pub async fn counting_store() -> (
         update_scans: Default::default(),
         update_rows: Default::default(),
         calls: Default::default(),
+        overlap: Default::default(),
     });
     let (store_server, store_url) = spawn_connect_service(exoware_server::connect_stack(
         exoware_server::AppState::new(store),

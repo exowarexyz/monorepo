@@ -272,7 +272,7 @@ pub(crate) fn root<F: Family, H: Hasher>(
         .map_err(|error| QmdbError::CommonwareMerkle(error.to_string()))
 }
 
-async fn fetch_rows<F: Family, D: Digest>(
+pub(crate) async fn fetch_rows<F: Family, D: Digest>(
     session: &ReadSession,
     cache: &Arc<ReadCache<F, D>>,
     positions: &[Position<F>],

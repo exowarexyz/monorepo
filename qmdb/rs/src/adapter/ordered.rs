@@ -19,11 +19,11 @@ use exoware_sdk::{keys::Key, PrefixedStoreClient, RangeMode, ReadSession};
 
 use crate::adapter::codec::{
     decode_current_boundary_metadata, decode_update_index_value_present, decode_update_location,
-    decode_update_raw_key, encode_current_meta_key, encode_operation_key,
-    encode_ops_root_witness_key, encode_update_key, CurrentBoundaryMetadata, UPDATE_PREFIX,
+    decode_update_raw_key, encode_current_meta_key, encode_ops_root_witness_key, encode_update_key,
+    CurrentBoundaryMetadata, UPDATE_PREFIX,
 };
 use crate::adapter::core;
-use crate::adapter::current::{self, CurrentTip};
+use crate::adapter::current::{self, CurrentTip, ProofReads};
 use crate::adapter::operation_range::{
     load_operation_range_checkpoint, load_operations_multi_proof,
 };
@@ -40,7 +40,6 @@ use crate::OperationKv;
 use crate::PublishedWatermark;
 use crate::VersionedValue;
 
-const ACTIVE_OPERATION_GET_MANY_BATCH: usize = 1024;
 /// Maximum number of entries in one key range proof request.
 const MAX_RANGE_LIMIT: u32 = 1000;
 /// Update-index rows in a walk's first request. An exclusion walk usually
@@ -402,11 +401,18 @@ where
             crate::proof::resolve_range_bounds(watermark.location, start_location, max_locations)?;
         let session = ReadSession::fixed(self.store.clone(), Some(watermark.sequence_number));
         let tip = self.current_tip(&session, watermark.location).await?;
-        let proof = current::range_proof::<F, H, N>(&session, &tip, start_location, end).await?;
-        let operations =
-            Self::load_operation_range(&session, &self.op_cfg, start_location, end).await?;
-        let chunks =
-            current::load_chunks::<F, H::Digest, N>(&session, &tip, start_location, end).await?;
+        let (nodes, operations, chunks) = futures::try_join!(
+            current::load_range_nodes::<F, H, N>(
+                &session,
+                &self.read_cache,
+                &tip,
+                start_location,
+                end
+            ),
+            Self::load_operation_range(&session, &self.op_cfg, start_location, end),
+            current::load_chunks::<F, H::Digest, N>(&session, &tip, start_location, end),
+        )?;
+        let proof = current::range_proof::<F, H, N>(&tip, &nodes, start_location, end)?;
         let raw = CurrentOperationRangeProofResult {
             watermark: watermark.location,
             root: tip.root,
@@ -465,16 +471,37 @@ where
         .await
     }
 
-    async fn key_value_proof_raw<Q: AsRef<[u8]>>(
+    /// Rows and nodes for current proofs of `locations` at the tip, read together.
+    async fn proof_reads(
+        &self,
         session: &ReadSession,
-        op_cfg: &<ordered::Operation<F, K, E> as commonware_codec::Read>::Cfg,
+        tip: &CurrentTip<F, H::Digest>,
+        location: Location<F>,
+    ) -> Result<ProofReads<F, N>, QmdbError> {
+        current::load_proof_reads::<F, H, N>(session, &self.read_cache, tip, location).await
+    }
+
+    async fn key_value_proof_raw<Q: AsRef<[u8]>>(
+        &self,
+        session: &ReadSession,
         tip: &CurrentTip<F, H::Digest>,
         key: Q,
     ) -> Result<RawKeyValueProof<H::Digest, ordered::Operation<F, K, E>, N, F>, QmdbError> {
+        let location = Self::locate_active_key(session, tip, key.as_ref()).await?;
+        let reads = self.proof_reads(session, tip, location).await?;
+        Self::active_key_proof(&self.op_cfg, tip, &reads, key, location)
+    }
+
+    /// Location of `key`'s latest update, which must be active at the tip.
+    async fn locate_active_key(
+        session: &ReadSession,
+        tip: &CurrentTip<F, H::Digest>,
+        key: &[u8],
+    ) -> Result<Location<F>, QmdbError> {
         let watermark = tip.watermark;
-        let key_bytes = error_key(&key);
+        let key_bytes = key.to_vec();
         let Some((row_key, row_value)) =
-            core::load_latest_update_row(session, watermark, key.as_ref()).await?
+            core::load_latest_update_row(session, watermark, key).await?
         else {
             return Err(QmdbError::ProofKeyNotFound {
                 watermark: watermark.as_u64(),
@@ -490,19 +517,19 @@ where
                 key: key_bytes,
             });
         }
-        Self::active_key_proof(session, op_cfg, tip, key, location).await
+        Ok(location)
     }
 
     /// Current proof for `key`, active at the tip with its latest update at `location`.
-    async fn active_key_proof<Q: AsRef<[u8]>>(
-        session: &ReadSession,
+    fn active_key_proof<Q: AsRef<[u8]>>(
         op_cfg: &<ordered::Operation<F, K, E> as commonware_codec::Read>::Cfg,
         tip: &CurrentTip<F, H::Digest>,
+        reads: &ProofReads<F, N>,
         key: Q,
         location: Location<F>,
     ) -> Result<RawKeyValueProof<H::Digest, ordered::Operation<F, K, E>, N, F>, QmdbError> {
         let watermark = tip.watermark;
-        let operation = Self::load_operation_at(session, op_cfg, location).await?;
+        let operation = Self::decode_operation(op_cfg, location, &reads.operation)?;
         let ordered::Operation::Update(update) = &operation else {
             return Err(QmdbError::KeyNotActive {
                 watermark: watermark.as_u64(),
@@ -514,7 +541,7 @@ where
                 "latest active ordered key row at {location} points to a different key"
             )));
         }
-        let proof = current::operation_proof::<F, H, N>(session, tip, location).await?;
+        let proof = current::operation_proof::<F, H, N>(tip, reads)?;
         let raw = RawKeyValueProof {
             watermark,
             root: tip.root,
@@ -536,7 +563,7 @@ where
     ) -> Result<RawKeyValueProof<H::Digest, ordered::Operation<F, K, E>, N, F>, QmdbError> {
         let session = ReadSession::fixed(self.store.clone(), Some(watermark.sequence_number));
         let tip = self.current_tip(&session, watermark.location).await?;
-        Self::key_value_proof_raw(&session, &self.op_cfg, &tip, key).await
+        self.key_value_proof_raw(&session, &tip, key).await
     }
 
     /// Verified raw current-state proof for a single key.
@@ -787,16 +814,16 @@ where
         Ok(found)
     }
 
-    /// The active update whose span covers the inactive `key`: the greatest
-    /// active key below it or, when none is, the greatest active key overall,
-    /// whose span wraps. `None` when no key is active.
-    async fn covering_update(
+    /// The active key whose span covers the inactive `key`, as `(raw key,
+    /// location)`: the greatest active key below it or, when none is, the
+    /// greatest active key overall, whose span wraps. `None` when no key is
+    /// active.
+    async fn covering_key(
         session: &ReadSession,
-        op_cfg: &<ordered::Operation<F, K, E> as commonware_codec::Read>::Cfg,
         watermark: Location<F>,
         inactivity_floor: Location<F>,
         key: &K,
-    ) -> Result<Option<(Location<F>, ordered::Update<K, E>)>, QmdbError> {
+    ) -> Result<Option<(Vec<u8>, Location<F>)>, QmdbError> {
         let (index_start, index_end) = UPDATE_PREFIX.bounds();
         let through_key = encode_update_key(key.as_ref(), watermark)?;
         let mut found = Self::greatest_active_key(
@@ -821,84 +848,80 @@ where
             )
             .await?;
         }
-        let Some((active_key, location)) = found else {
-            return Ok(None);
-        };
-        let mut updates =
-            Self::load_active_updates(session, op_cfg, &[(active_key, location)]).await?;
-        Ok(updates.pop())
+        Ok(found)
     }
 
-    /// Load the update operations behind active `(key, location)` index entries.
-    async fn load_active_updates(
-        session: &ReadSession,
+    /// The update operation behind the active index entry `(key, location)`.
+    fn active_update(
         op_cfg: &<ordered::Operation<F, K, E> as commonware_codec::Read>::Cfg,
-        entries: &[(Vec<u8>, Location<F>)],
-    ) -> Result<Vec<(Location<F>, ordered::Update<K, E>)>, QmdbError> {
-        if entries.is_empty() {
-            return Ok(Vec::new());
+        reads: &ProofReads<F, N>,
+        key: &[u8],
+        location: Location<F>,
+    ) -> Result<ordered::Update<K, E>, QmdbError> {
+        let operation = Self::decode_operation(op_cfg, location, &reads.operation)?;
+        let ordered::Operation::Update(update) = operation else {
+            return Err(QmdbError::CorruptData(format!(
+                "latest active key row at {location} does not point to an update operation"
+            )));
+        };
+        if update.key.as_ref() != key {
+            return Err(QmdbError::CorruptData(format!(
+                "active update key mismatch at {location}"
+            )));
         }
-        let operation_keys = entries
-            .iter()
-            .map(|(_, location)| encode_operation_key(*location))
-            .collect::<Vec<_>>();
-        let operation_key_refs = operation_keys.iter().collect::<Vec<_>>();
-        let batch_size = u32::try_from(
-            operation_key_refs
-                .len()
-                .min(ACTIVE_OPERATION_GET_MANY_BATCH),
-        )
-        .expect("batch bound fits u32");
-        let mut loaded = session
-            .get_many(&operation_key_refs, batch_size)
-            .await?
-            .collect()
-            .await?;
-        entries
-            .iter()
-            .zip(&operation_keys)
-            .map(|((key, location), operation_key)| {
-                let Some(encoded) = loaded.remove(operation_key) else {
-                    return Err(QmdbError::CorruptData(format!(
-                        "missing operation row at location {location}"
-                    )));
-                };
-                let operation = Self::decode_operation(op_cfg, *location, encoded.as_ref())?;
-                let ordered::Operation::Update(update) = operation else {
-                    return Err(QmdbError::CorruptData(format!(
-                        "latest active key row at {location} does not point to an update operation"
-                    )));
-                };
-                if update.key.as_ref() != key.as_slice() {
-                    return Err(QmdbError::CorruptData(format!(
-                        "active update key mismatch at {location}"
-                    )));
-                }
-                Ok((*location, update))
-            })
-            .collect()
+        Ok(update)
+    }
+
+    /// The operation an exclusion proof of `key` proves: its covering key's
+    /// update, or the tip's commit when no key is active.
+    async fn exclusion_target(
+        session: &ReadSession,
+        tip: &CurrentTip<F, H::Digest>,
+        key: &K,
+    ) -> Result<ExclusionTarget<F>, QmdbError> {
+        let covering =
+            Self::covering_key(session, tip.watermark, tip.inactivity_floor, key).await?;
+        Ok(match covering {
+            Some((key, location)) => ExclusionTarget::Covering { key, location },
+            None => ExclusionTarget::Commit(tip.watermark),
+        })
     }
 
     async fn key_exclusion_proof(
+        &self,
         session: &ReadSession,
-        op_cfg: &<ordered::Operation<F, K, E> as commonware_codec::Read>::Cfg,
         tip: &CurrentTip<F, H::Digest>,
         key: &K,
     ) -> Result<RawKeyExclusionProof<H::Digest, K, V, N, F, E>, QmdbError> {
-        let watermark = tip.watermark;
-        let covering =
-            Self::covering_update(session, op_cfg, watermark, tip.inactivity_floor, key).await?;
+        let target = Self::exclusion_target(session, tip, key).await?;
+        let reads = self.proof_reads(session, tip, target.location()).await?;
+        Self::exclusion_proof(&self.op_cfg, tip, &reads, key, target)
+    }
 
-        let proof = if let Some((location, update)) = covering {
+    /// Exclusion proof of `key` against `target`, from `reads` covering it.
+    fn exclusion_proof(
+        op_cfg: &<ordered::Operation<F, K, E> as commonware_codec::Read>::Cfg,
+        tip: &CurrentTip<F, H::Digest>,
+        reads: &ProofReads<F, N>,
+        key: &K,
+        target: ExclusionTarget<F>,
+    ) -> Result<RawKeyExclusionProof<H::Digest, K, V, N, F, E>, QmdbError> {
+        let watermark = tip.watermark;
+        let proof = if let ExclusionTarget::Covering {
+            key: active_key,
+            location,
+        } = target
+        {
+            let update = Self::active_update(op_cfg, reads, &active_key, location)?;
             if !span_contains(&update.key, &update.next_key, key) {
                 return Err(QmdbError::CorruptData(format!(
                     "no ordered active-key span contains requested key {key:?}"
                 )));
             }
-            let op_proof = current::operation_proof::<F, H, N>(session, tip, location).await?;
+            let op_proof = current::operation_proof::<F, H, N>(tip, reads)?;
             ExclusionProof::KeyValue(op_proof, update)
         } else {
-            let operation = Self::load_operation_at(session, op_cfg, watermark).await?;
+            let operation = Self::decode_operation(op_cfg, watermark, &reads.operation)?;
             let ordered::Operation::CommitFloor(value, floor) = operation else {
                 return Err(QmdbError::CorruptData(format!(
                     "empty ordered exclusion proof expected CommitFloor at watermark {watermark}"
@@ -909,7 +932,7 @@ where
                     "empty ordered exclusion proof expected floor {watermark}, got {floor}"
                 )));
             }
-            let op_proof = current::operation_proof::<F, H, N>(session, tip, watermark).await?;
+            let op_proof = current::operation_proof::<F, H, N>(tip, reads)?;
             ExclusionProof::Commit(op_proof, value)
         };
 
@@ -950,11 +973,10 @@ where
             if !seen.insert(key_bytes.clone()) {
                 return Err(QmdbError::DuplicateRequestedKey { key: key_bytes });
             }
-            match Self::key_value_proof_raw(&session, &self.op_cfg, &tip, key.as_ref()).await {
+            match self.key_value_proof_raw(&session, &tip, key.as_ref()).await {
                 Ok(proof) => proofs.push(RawKeyLookupProof::Hit(proof)),
                 Err(QmdbError::ProofKeyNotFound { .. } | QmdbError::KeyNotActive { .. }) => {
-                    let proof =
-                        Self::key_exclusion_proof(&session, &self.op_cfg, &tip, key).await?;
+                    let proof = self.key_exclusion_proof(&session, &tip, key).await?;
                     proofs.push(RawKeyLookupProof::Miss(proof));
                 }
                 Err(err) => return Err(err),
@@ -1030,9 +1052,9 @@ where
         // The walk found each entry's location, so entries skip the key lookup.
         let mut entries = Vec::with_capacity(active.len());
         for (key, location) in &active {
+            let reads = self.proof_reads(&session, &tip, *location).await?;
             let proof =
-                Self::active_key_proof(&session, &self.op_cfg, &tip, key.as_slice(), *location)
-                    .await?;
+                Self::active_key_proof(&self.op_cfg, &tip, &reads, key.as_slice(), *location)?;
             entries.push(proof);
         }
 
@@ -1042,7 +1064,7 @@ where
         {
             None
         } else {
-            Some(Self::key_exclusion_proof(&session, &self.op_cfg, &tip, &start_key).await?)
+            Some(self.key_exclusion_proof(&session, &tip, &start_key).await?)
         };
 
         Ok(RawKeyRangeProof {
@@ -1174,5 +1196,22 @@ fn verified_key_value<D: commonware_cryptography::Digest, Op, F: Graftable, cons
         root: raw.root,
         location: raw.proof.loc,
         operation: raw.operation,
+    }
+}
+
+/// The operation an ordered exclusion proof proves.
+enum ExclusionTarget<F: Graftable> {
+    /// The active key whose span covers the excluded key.
+    Covering { key: Vec<u8>, location: Location<F> },
+    /// The tip's commit, when no key is active.
+    Commit(Location<F>),
+}
+
+impl<F: Graftable> ExclusionTarget<F> {
+    fn location(&self) -> Location<F> {
+        match self {
+            Self::Covering { location, .. } => *location,
+            Self::Commit(location) => *location,
+        }
     }
 }

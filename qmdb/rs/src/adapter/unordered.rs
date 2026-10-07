@@ -20,7 +20,7 @@ use crate::adapter::codec::{
     encode_current_meta_key, encode_ops_root_witness_key, CurrentBoundaryMetadata,
 };
 use crate::adapter::core;
-use crate::adapter::current::{self, CurrentTip};
+use crate::adapter::current::{self, CurrentTip, ProofReads};
 use crate::adapter::operation_range::{
     load_operation_range_checkpoint, load_operations_multi_proof,
 };
@@ -358,11 +358,18 @@ where
         let watermark = watermark.location;
         let end = crate::proof::resolve_range_bounds(watermark, start_location, max_locations)?;
         let tip = self.current_tip(&session, watermark).await?;
-        let proof = current::range_proof::<F, H, N>(&session, &tip, start_location, end).await?;
-        let operations =
-            load_operation_range::<F, K, V, E>(&self.op_cfg, &session, start_location, end).await?;
-        let chunks =
-            current::load_chunks::<F, H::Digest, N>(&session, &tip, start_location, end).await?;
+        let (nodes, operations, chunks) = futures::try_join!(
+            current::load_range_nodes::<F, H, N>(
+                &session,
+                &self.read_cache,
+                &tip,
+                start_location,
+                end
+            ),
+            load_operation_range::<F, K, V, E>(&self.op_cfg, &session, start_location, end),
+            current::load_chunks::<F, H::Digest, N>(&session, &tip, start_location, end),
+        )?;
+        let proof = current::range_proof::<F, H, N>(&tip, &nodes, start_location, end)?;
         let raw = CurrentOperationRangeProofResult {
             watermark,
             root: tip.root,
@@ -424,25 +431,23 @@ where
         tip: &CurrentTip<F, H::Digest>,
         key: Q,
     ) -> Result<RawKeyValueProof<H::Digest, unordered::Operation<F, K, E>, N, F>, QmdbError> {
+        let location = Self::locate_active_key(session, tip, key.as_ref()).await?;
+        let reads =
+            current::load_proof_reads::<F, H, N>(session, &self.read_cache, tip, location).await?;
+        self.active_key_proof(tip, &reads, key, location)
+    }
+
+    /// Current proof for `key`, whose latest update at the tip is at `location`.
+    fn active_key_proof<Q: AsRef<[u8]>>(
+        &self,
+        tip: &CurrentTip<F, H::Digest>,
+        reads: &ProofReads<F, N>,
+        key: Q,
+        location: Location<F>,
+    ) -> Result<RawKeyValueProof<H::Digest, unordered::Operation<F, K, E>, N, F>, QmdbError> {
         let watermark = tip.watermark;
         let key_bytes = error_key(&key);
-        let Some((row_key, row_value)) =
-            core::load_latest_update_row(session, watermark, key.as_ref()).await?
-        else {
-            return Err(QmdbError::ProofKeyNotFound {
-                watermark: watermark.as_u64(),
-                key: key_bytes,
-            });
-        };
-        let location = decode_update_location(&row_key)?;
-        if !decode_update_index_value_present(row_value.as_ref())? {
-            return Err(QmdbError::KeyNotActive {
-                watermark: watermark.as_u64(),
-                key: key_bytes.clone(),
-            });
-        }
-
-        let operation = load_operation_at::<F, K, V, E>(&self.op_cfg, session, location).await?;
+        let operation = decode_operation::<F, K, V, E>(&self.op_cfg, location, &reads.operation)?;
         let unordered::Operation::Update(update) = &operation else {
             return Err(QmdbError::KeyNotActive {
                 watermark: watermark.as_u64(),
@@ -455,7 +460,7 @@ where
             )));
         }
 
-        let proof = current::operation_proof::<F, H, N>(session, tip, location).await?;
+        let proof = current::operation_proof::<F, H, N>(tip, reads)?;
         let raw = RawKeyValueProof {
             watermark,
             root: tip.root,
@@ -468,6 +473,32 @@ where
             });
         }
         Ok(raw)
+    }
+
+    /// Location of `key`'s latest update, which must hold a value at the tip.
+    async fn locate_active_key(
+        session: &ReadSession,
+        tip: &CurrentTip<F, H::Digest>,
+        key: &[u8],
+    ) -> Result<Location<F>, QmdbError> {
+        let watermark = tip.watermark;
+        let key_bytes = key.to_vec();
+        let Some((row_key, row_value)) =
+            core::load_latest_update_row(session, watermark, key).await?
+        else {
+            return Err(QmdbError::ProofKeyNotFound {
+                watermark: watermark.as_u64(),
+                key: key_bytes,
+            });
+        };
+        let location = decode_update_location(&row_key)?;
+        if !decode_update_index_value_present(row_value.as_ref())? {
+            return Err(QmdbError::KeyNotActive {
+                watermark: watermark.as_u64(),
+                key: key_bytes,
+            });
+        }
+        Ok(location)
     }
 
     /// Verified raw current-state proof for a single active unordered key.

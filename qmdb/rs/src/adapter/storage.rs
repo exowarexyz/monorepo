@@ -1,5 +1,6 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::marker::PhantomData;
+use std::sync::Arc;
 
 use bytes::Bytes;
 use commonware_codec::{Copying, DecodeExt, FixedSize};
@@ -9,9 +10,11 @@ use commonware_storage::merkle::{
     Position,
 };
 use commonware_storage::qmdb::current::grafting;
-use exoware_sdk::{RangeMode, ReadSession};
+use exoware_sdk::{keys::Key, RangeMode, ReadSession};
 
 use crate::adapter::codec::{chunk_index_for_location, encode_grafted_node_key, encode_node_key};
+use crate::adapter::operation_range::fetch_rows;
+use crate::adapter::read_cache::ReadCache;
 
 pub(crate) struct KvMerkleStorage<'a, F: Family, D: Digest> {
     pub(crate) session: &'a ReadSession,
@@ -152,20 +155,30 @@ pub(crate) struct ProofNodes<F: Family> {
 }
 
 /// Read every node a current proof needs at `watermark`, given the
-/// operation-tree `positions` it requests. Each round reads operation-tree
-/// nodes in one batch alongside one range read per grafted node. A node rebuilt
-/// from its children adds them to the next round: before reading when it spans
-/// the pruning boundary, after reading when its stored grafted row is absent.
-pub(crate) async fn load_proof_nodes<F: Graftable, const N: usize>(
+/// operation-tree `positions` it requests, plus the rows at `keys`.
+///
+/// Returns the rows found at `keys`, keyed by those keys with absent rows
+/// left out, and the proof's [`ProofNodes`].
+///
+/// Each round reads operation-tree nodes in one batch through the node cache,
+/// alongside one range read per grafted node; `keys` join the first round's
+/// batch. A node rebuilt from its children adds them to the next round: before
+/// reading when it spans the pruning boundary, after reading when its stored
+/// grafted row is absent.
+pub(crate) async fn load_proof_nodes<F: Graftable, D: Digest, const N: usize>(
     session: &ReadSession,
+    cache: &Arc<ReadCache<F, D>>,
     watermark: Location<F>,
     pruned_chunks: u64,
     positions: impl IntoIterator<Item = Position<F>>,
-) -> Result<ProofNodes<F>, crate::QmdbError> {
+    keys: BTreeSet<Key>,
+) -> Result<(HashMap<Key, Bytes>, ProofNodes<F>), crate::QmdbError> {
     let merkle_error = crate::error::merkle_error::<F>;
     let mut nodes = ProofNodes::default();
+    let mut rows = HashMap::new();
+    let mut keys = Some(keys);
     let mut pending = positions.into_iter().collect::<Vec<_>>();
-    while !pending.is_empty() {
+    while !pending.is_empty() || keys.is_some() {
         let mut ops = BTreeSet::new();
         // Grafted position to the operation-tree position it stands for
         let mut grafted = BTreeMap::new();
@@ -184,15 +197,17 @@ pub(crate) async fn load_proof_nodes<F: Graftable, const N: usize>(
             }
         }
         let ops = ops.into_iter().collect::<Vec<_>>();
-        let (ops_rows, grafted_rows) = futures::try_join!(
-            async { load_node_rows(session, &ops).await.map_err(merkle_error) },
+        let round_keys = keys.take().unwrap_or_default();
+        let ((round_rows, ops_rows), grafted_rows) = futures::try_join!(
+            fetch_rows(session, cache, &ops, round_keys),
             futures::future::try_join_all(grafted.keys().map(|&grafted_position| async move {
                 Ok::<_, crate::QmdbError>(
                     load_grafted_node(session, watermark, grafted_position).await?,
                 )
             })),
         )?;
-        for (position, row) in ops.into_iter().zip(ops_rows) {
+        rows.extend(round_rows);
+        for (position, row) in ops_rows {
             let row = row.ok_or_else(|| merkle_error(merkle::Error::ElementPruned(position)))?;
             nodes.ops.insert(position, row);
         }
@@ -204,7 +219,7 @@ pub(crate) async fn load_proof_nodes<F: Graftable, const N: usize>(
             nodes.grafted.insert(grafted_position, row);
         }
     }
-    Ok(nodes)
+    Ok((rows, nodes))
 }
 
 fn children<F: Family>(position: Position<F>) -> [Position<F>; 2] {
@@ -856,9 +871,16 @@ mod tests {
         let (client, server) = serve(queries).await;
         let session = client.create_session_with_sequence(1);
         // The watchdog reports a stalled sequential reader, without measuring request latency
-        let read = tokio::time::timeout(
+        let (_, read) = tokio::time::timeout(
             std::time::Duration::from_secs(30),
-            load_proof_nodes::<mmr::Family, 1>(&session, watermark, 0, positions.iter().copied()),
+            load_proof_nodes::<mmr::Family, Digest, 1>(
+                &session,
+                &Arc::new(ReadCache::new()),
+                watermark,
+                0,
+                positions.iter().copied(),
+                BTreeSet::new(),
+            ),
         )
         .await
         .expect("grafted reads must reach the barrier concurrently")
@@ -914,9 +936,16 @@ mod tests {
         let (client, server) = serve(queries).await;
         let session = client.create_session_with_sequence(1);
         let root = Position::<mmr::Family>::new(30);
-        let read = load_proof_nodes::<mmr::Family, 1>(&session, watermark, 0, [root])
-            .await
-            .unwrap();
+        let (_, read) = load_proof_nodes::<mmr::Family, Digest, 1>(
+            &session,
+            &Arc::new(ReadCache::new()),
+            watermark,
+            0,
+            [root],
+            BTreeSet::new(),
+        )
+        .await
+        .unwrap();
         // The absent parent's row, then both children in a second round
         assert_eq!(*calls.lock().unwrap(), [("range", 1); 3]);
 
