@@ -64,6 +64,7 @@ fn qmdb_error_to_connect(err: QmdbError) -> ConnectError {
         | QmdbError::DuplicateRequestedKey { .. }
         | QmdbError::RangeStartOutOfBounds { .. }
         | QmdbError::InvalidRequestedLocations(_)
+        | QmdbError::TipOverflow
         | QmdbError::EncodedValueTooLarge { .. }
         | QmdbError::SortableKeyTooLarge { .. } => ConnectError::invalid_argument(err.to_string()),
         QmdbError::WatermarkTooLow { .. } => ConnectError::out_of_range(err.to_string()),

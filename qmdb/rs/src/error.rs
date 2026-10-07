@@ -72,7 +72,7 @@ impl From<crate::request::InvalidWindow> for QmdbError {
     fn from(err: crate::request::InvalidWindow) -> Self {
         use crate::request::InvalidWindow;
         match err {
-            InvalidWindow::TipOverflow => Self::CorruptData(err.to_string()),
+            InvalidWindow::TipOverflow => Self::TipOverflow,
             InvalidWindow::StartOutOfBounds { start, count } => {
                 Self::RangeStartOutOfBounds { start, count }
             }
@@ -84,7 +84,7 @@ impl From<crate::request::InvalidWindow> for QmdbError {
 impl From<crate::request::InvalidLocations> for QmdbError {
     fn from(err: crate::request::InvalidLocations) -> Self {
         match err {
-            crate::request::InvalidLocations::TipOverflow => Self::CorruptData(err.to_string()),
+            crate::request::InvalidLocations::TipOverflow => Self::TipOverflow,
             _ => Self::InvalidRequestedLocations(err.to_string()),
         }
     }
@@ -121,6 +121,8 @@ pub enum QmdbError {
     RangeStartOutOfBounds { start: u64, count: u64 },
     #[error("invalid requested locations: {0}")]
     InvalidRequestedLocations(String),
+    #[error("requested tip {} exceeds the operation location domain", u64::MAX)]
+    TipOverflow,
     #[error("encoded value exceeds store value limit ({len} > {max})")]
     EncodedValueTooLarge { len: usize, max: usize },
     #[error(

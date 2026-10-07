@@ -422,6 +422,22 @@ async fn test_keyless_connect_get_operations_rejects_invalid_requests() {
         .expect_err("unpublished tip");
     assert_eq!(error.code, connectrpc::ErrorCode::OutOfRange);
 
+    let request = ProtoGetOperationsRequest {
+        tip: u64::MAX,
+        locations: vec![0],
+        ..Default::default()
+    };
+    let error = rpc
+        .get_operations(request.clone())
+        .await
+        .expect_err("server rejects overflowing tip");
+    assert_eq!(error.code, connectrpc::ErrorCode::InvalidArgument);
+    let error = connect_client
+        .get_operations(request, &source.root)
+        .await
+        .expect_err("client rejects overflowing tip before sending");
+    assert!(matches!(error, QmdbError::TipOverflow));
+
     let error = connect_client
         .get_operations(
             ProtoGetOperationsRequest {
