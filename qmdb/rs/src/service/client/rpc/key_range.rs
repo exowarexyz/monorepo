@@ -5,7 +5,7 @@ use std::marker::PhantomData;
 use std::sync::Arc;
 
 use bytes::Bytes;
-use commonware_codec::{Decode, DecodeExt, Encode, Read};
+use commonware_codec::{Copying, Decode, DecodeExt, Encode, Read};
 use commonware_cryptography::Hasher;
 use commonware_storage::{
     merkle::Graftable,
@@ -14,7 +14,7 @@ use commonware_storage::{
             ordered,
             value::{ValueEncoding, VariableEncoding},
         },
-        current::ordered::ExclusionProof,
+        current::ordered::proof::constant::ExclusionProof,
         operation::Key as QmdbKey,
     },
 };
@@ -180,12 +180,12 @@ where
 {
     let encoded_start_key = start_key;
     let encoded_end_key = end_key;
-    let start_key = K::decode_cfg(encoded_start_key, key_cfg).map_err(|err| {
+    let start_key = K::decode_cfg(Copying(encoded_start_key), key_cfg).map_err(|err| {
         QmdbError::CorruptData(format!("failed to decode range start key: {err}"))
     })?;
     let end_key = encoded_end_key
         .map(|key| {
-            K::decode_cfg(key, key_cfg).map_err(|err| {
+            K::decode_cfg(Copying(key), key_cfg).map_err(|err| {
                 QmdbError::CorruptData(format!("failed to decode range end key: {err}"))
             })
         })

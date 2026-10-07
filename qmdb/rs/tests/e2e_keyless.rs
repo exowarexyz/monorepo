@@ -93,7 +93,7 @@ where
                 NZU64!(7),
             );
             let mut db: VariableDb<F> =
-                VariableDb::init(context.child("keyless_variable_full_source"), cfg)
+                VariableDb::init(context.child("keyless_variable_full_source"), cfg, None)
                     .await
                     .expect("init");
 
@@ -114,6 +114,7 @@ where
                 batch
                     .merkleize(&db, None::<Vec<u8>>, db.inactivity_floor_loc())
                     .await
+                    .expect("merkleize")
             };
             (db, _) = db.apply_batch(finalized).await.expect("apply");
 
@@ -122,6 +123,7 @@ where
                 batch
                     .merkleize(&db, None::<Vec<u8>>, db.bounds().end - 1)
                     .await
+                    .expect("merkleize")
             };
             (db, _) = db.apply_batch(finalized).await.expect("apply second");
 
@@ -138,6 +140,7 @@ where
                 batch
                     .merkleize(&db, None::<Vec<u8>>, db.bounds().end - 1)
                     .await
+                    .expect("merkleize")
             };
             (db, _) = db.apply_batch(finalized).await.expect("apply third");
 
@@ -193,9 +196,10 @@ where
                     replay_buffer: NZUsize!(1024),
                 },
             };
-            let mut db: FixedDb<F> = FixedDb::init(context.child("keyless_fixed_full_source"), cfg)
-                .await
-                .expect("init fixed");
+            let mut db: FixedDb<F> =
+                FixedDb::init(context.child("keyless_fixed_full_source"), cfg, None)
+                    .await
+                    .expect("init fixed");
 
             let first = commonware_cryptography::Sha256::fill(0x11);
             let second = commonware_cryptography::Sha256::fill(0x22);
@@ -204,6 +208,7 @@ where
                 batch
                     .merkleize(&db, None::<Digest>, db.inactivity_floor_loc())
                     .await
+                    .expect("merkleize")
             };
             (db, _) = db.apply_batch(finalized).await.expect("apply fixed");
 

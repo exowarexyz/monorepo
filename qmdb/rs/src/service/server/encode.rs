@@ -298,7 +298,8 @@ fn key_lookup_result_miss_len<
     proof: &RawKeyExclusionProof<D, K, V, N, F, E>,
 ) -> usize
 where
-    commonware_storage::qmdb::current::ordered::ExclusionProof<F, K, E, D, N>: Encode,
+    commonware_storage::qmdb::current::ordered::proof::constant::ExclusionProof<F, K, E, D, N>:
+        Encode,
 {
     let proof_len = key_exclusion_proof_len(&proof.proof);
     message_field_len(2, proof_len)
@@ -315,7 +316,8 @@ fn write_key_lookup_result_miss<
     buf: &mut impl BufMut,
     proof: &RawKeyExclusionProof<D, K, V, N, F, E>,
 ) where
-    commonware_storage::qmdb::current::ordered::ExclusionProof<F, K, E, D, N>: Encode,
+    commonware_storage::qmdb::current::ordered::proof::constant::ExclusionProof<F, K, E, D, N>:
+        Encode,
 {
     let proof_len = key_exclusion_proof_len(&proof.proof);
     write_message_field(buf, 2, proof_len);
@@ -361,7 +363,8 @@ impl<
     > LookupResult for RawKeyLookupProof<D, K, V, N, F, E>
 where
     ordered::Operation<F, K, E>: Encode,
-    commonware_storage::qmdb::current::ordered::ExclusionProof<F, K, E, D, N>: Encode,
+    commonware_storage::qmdb::current::ordered::proof::constant::ExclusionProof<F, K, E, D, N>:
+        Encode,
 {
     fn result_len(&self) -> usize {
         match self {
@@ -407,7 +410,8 @@ pub(crate) fn get_range_response<
 ) -> PreEncoded<GetRangeResponse>
 where
     ordered::Operation<F, K, E>: Encode,
-    commonware_storage::qmdb::current::ordered::ExclusionProof<F, K, E, D, N>: Encode,
+    commonware_storage::qmdb::current::ordered::proof::constant::ExclusionProof<F, K, E, D, N>:
+        Encode,
 {
     let entry_lens = proof
         .entries

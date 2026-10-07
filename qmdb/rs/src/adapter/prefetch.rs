@@ -4,7 +4,7 @@ use std::{
 };
 
 use bytes::Bytes;
-use commonware_codec::DecodeExt;
+use commonware_codec::{Copying, DecodeExt};
 use commonware_cryptography::Digest;
 use commonware_storage::merkle::{
     self, storage::Storage as MerkleStorage, Family, Location, Position,
@@ -82,7 +82,7 @@ impl<F: Family, D: Digest> PrefetchedMerkleStorage<F, D> {
                 "exoware-qmdb node digest has invalid length",
             ));
         }
-        D::decode(bytes)
+        D::decode(Copying(bytes))
             .map_err(|_| merkle::Error::DataCorrupted("exoware-qmdb node digest decode failed"))
     }
 }

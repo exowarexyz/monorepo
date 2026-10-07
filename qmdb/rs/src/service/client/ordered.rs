@@ -3,7 +3,7 @@
 use std::fmt::Display;
 
 use bytes::Bytes;
-use commonware_codec::{Decode, DecodeExt, Encode, Read};
+use commonware_codec::{Copying, Decode, DecodeExt, Encode, Read};
 use commonware_cryptography::Hasher;
 use commonware_storage::merkle::Location;
 use commonware_storage::qmdb::sync::Target as SyncTarget;
@@ -14,7 +14,7 @@ use commonware_storage::{
             ordered,
             value::{ValueEncoding, VariableEncoding},
         },
-        current::ordered::ExclusionProof,
+        current::ordered::proof::constant::ExclusionProof,
         operation::Key as QmdbKey,
     },
 };
@@ -87,7 +87,7 @@ where
     }
 
     fn decode_requested_key(&self, key: &[u8]) -> Result<K, QmdbError> {
-        K::decode_cfg(key, &self.key_cfg).map_err(|err| {
+        K::decode_cfg(Copying(key), &self.key_cfg).map_err(|err| {
             QmdbError::CorruptData(format!("failed to decode requested QMDB key: {err}"))
         })
     }

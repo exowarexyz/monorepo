@@ -6,7 +6,7 @@
 
 use std::collections::BTreeSet;
 
-use commonware_codec::{Codec, Encode};
+use commonware_codec::{Codec, Copying, Encode};
 use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::Strategy;
 use commonware_storage::{
@@ -247,11 +247,12 @@ where
         let location = start.checked_add(offset as u64).ok_or_else(|| {
             QmdbError::CorruptData("authenticated operation location overflow".into())
         })?;
-        let operation = Op::decode_cfg(encoded.as_slice(), operation_cfg).map_err(|error| {
-            QmdbError::CorruptData(format!(
-                "failed to decode authenticated operation at {location}: {error}"
-            ))
-        })?;
+        let operation =
+            Op::decode_cfg(Copying(encoded.as_slice()), operation_cfg).map_err(|error| {
+                QmdbError::CorruptData(format!(
+                    "failed to decode authenticated operation at {location}: {error}"
+                ))
+            })?;
         if operation.encode().as_ref() != encoded.as_slice() {
             return Err(QmdbError::CorruptData(format!(
                 "authenticated operation at {location} is not canonically encoded"
@@ -341,8 +342,8 @@ pub fn stage_watermark<F: Family>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bytes::{Buf, BufMut};
-    use commonware_codec::{DecodeExt, FixedSize, Read, Write};
+    use bytes::BufMut;
+    use commonware_codec::{Buf, DecodeExt, FixedSize, Read, Write};
     use commonware_cryptography::{sha256::Digest as Sha256Digest, Sha256};
     use commonware_parallel::{Rayon, Sequential};
     use commonware_storage::{
@@ -849,15 +850,15 @@ mod tests {
             let end_size = Position::try_from(end).unwrap();
             let nodes = (*start_size..*end_size)
                 .map(|position| {
-                    Sha256Digest::decode(
+                    Sha256Digest::decode(Copying(
                         durable[&encode_node_key(Position::<F>::new(position))].as_slice(),
-                    )
+                    ))
                     .expect("stored Merkle node")
                 })
                 .collect();
             let pins = F::nodes_to_pin(bootstrap.start_location)
                 .map(|position| {
-                    Sha256Digest::decode(durable[&encode_node_key(position)].as_slice())
+                    Sha256Digest::decode(Copying(durable[&encode_node_key(position)].as_slice()))
                         .expect("stored bootstrap pin")
                 })
                 .collect();

@@ -194,6 +194,7 @@ async fn build_source_batch() -> SourceBatch {
             let mut db: CurrentDb = CurrentDb::init(
                 context.child("current_ordered_variable_mmr_connect_source"),
                 cfg,
+                None,
             )
             .await
             .expect("init");
@@ -289,6 +290,7 @@ async fn build_mmb_source_batch() -> MmbSourceBatch {
             let mut db: MmbCurrentDb = MmbCurrentDb::init(
                 context.child("current_ordered_variable_mmb_connect_source"),
                 cfg,
+                None,
             )
             .await
             .expect("init");
@@ -361,6 +363,7 @@ async fn build_mmb_growing_source_batch() -> MmbGrowingSourceBatch {
             let mut db: MmbCurrentDb = MmbCurrentDb::init(
                 context.child("current_ordered_variable_mmb_growing_connect_source"),
                 cfg,
+                None,
             )
             .await
             .expect("init");

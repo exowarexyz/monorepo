@@ -1,4 +1,4 @@
-use commonware_codec::DecodeExt;
+use commonware_codec::{Buf, Copying, DecodeExt};
 use commonware_cryptography::Digest;
 use commonware_storage::merkle::{Family, Location, Position};
 use commonware_utils::bitmap::Prunable;
@@ -72,10 +72,7 @@ impl<D: Digest> commonware_codec::FixedSize for CurrentBoundaryMetadata<D> {
 impl<D: Digest> commonware_codec::Read for CurrentBoundaryMetadata<D> {
     type Cfg = ();
 
-    fn read_cfg(
-        buf: &mut impl ::bytes::Buf,
-        _: &Self::Cfg,
-    ) -> Result<Self, commonware_codec::Error> {
+    fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
         let (root, pruned_chunks) = <(D, u64) as commonware_codec::Read>::read_cfg(buf, &((), ()))?;
         Ok(CurrentBoundaryMetadata {
             root,
@@ -88,7 +85,7 @@ pub(crate) fn decode_current_boundary_metadata<D: Digest>(
     bytes: &[u8],
     label: impl std::fmt::Display,
 ) -> Result<CurrentBoundaryMetadata<D>, QmdbError> {
-    CurrentBoundaryMetadata::<D>::decode(bytes)
+    CurrentBoundaryMetadata::<D>::decode(Copying(bytes))
         .map_err(|e| QmdbError::CorruptData(format!("{label} decode error: {e}")))
 }
 
