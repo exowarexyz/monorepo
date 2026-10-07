@@ -1,13 +1,31 @@
 #![allow(clippy::type_complexity)]
 
-//! Store-backed bridge for Commonware authenticated storage proofs.
+//! Read and verify Commonware QMDB proofs from Exoware.
 //!
-//! The crate currently supports multiple Commonware authenticated backends:
-//! - ordered QMDB (`qmdb::any::ordered` and `qmdb::current::ordered`)
-//! - unordered QMDB (`qmdb::any::unordered` and current hit proofs when callers
-//!   upload current-boundary rows)
-//! - immutable (`qmdb::immutable`)
-//! - keyless (`qmdb::keyless`)
+//! Supports ordered, unordered, immutable, and keyless QMDB.
+//!
+//! Writes go directly to the store service, with this crate offering helpers such as
+//! [`adapter::upload::prepare_authenticated_range`], [`adapter::upload::stage_authenticated_range`]
+//! and [`adapter::upload::stage_watermark`].
+//!
+//! Reads take one of two paths. The adapters ([`adapter::Ordered`], [`adapter::Unordered`],
+//! [`adapter::Immutable`], and [`adapter::Keyless`]) query the store service directly. The
+//! clients under [`service::client`] query the QMDB ConnectRPC service and verify each
+//! response against a trusted root.
+//!
+//! # Crate map
+//!
+//! - [`adapter`]: Commonware QMDB on the Exoware Store. One reader per kind
+//!   (e.g. [`adapter::Ordered`]), plus upload staging in [`adapter::upload`].
+//! - [`service`]: the `qmdb.v1` ConnectRPC services.
+//!   - [`service::proto`]: generated request, response, and proof messages.
+//!   - [`service::server`]: one Connect stack function per kind.
+//!   - [`service::client`]: one verifying client per kind (e.g. [`service::client::Ordered`]),
+//!     built from the per-service clients in [`service::client::rpc`].
+//! - [`proof`]: raw and verified proof types shared by readers and clients.
+//! - [`error`]: [`QmdbError`] and [`ProofKind`].
+//!
+//! # Uploads and publication
 //!
 //! Callers provide authenticated Commonware operation ranges and stage their Store rows
 //! without constructing an uploader or reading remote state. An application-owned durable
@@ -29,57 +47,17 @@
 //! final published watermark. That is what preserves lower-boundary current
 //! proofs below a later published low watermark.
 
-mod boundary;
-pub(crate) mod codec;
-#[cfg(feature = "test-utils")]
-pub use codec::{CHUNK_FAMILY, NODE_FAMILY};
-mod connect;
-mod connect_client;
-mod core;
+pub mod adapter;
 pub mod error;
-mod operation_range;
-mod prefetch;
 pub mod proof;
-pub mod proto;
-pub mod prune;
-mod read_cache;
 mod request;
-pub(crate) mod storage;
+pub mod service;
 
-mod authenticated_range;
-mod immutable;
-mod keyless;
-mod ordered;
-mod subscription;
-mod unordered;
-
-pub use authenticated_range::{
-    prepare_authenticated_range, stage_authenticated_range, stage_watermark,
-    AuthenticatedOperationRange, PreparedAuthenticatedRange, UploadOperation,
-};
+#[cfg(feature = "test-utils")]
+pub use adapter::codec::{CHUNK_FAMILY, NODE_FAMILY};
 pub use error::{ProofKind, QmdbError};
-pub use immutable::ImmutableClient;
-pub use keyless::KeylessClient;
-pub use ordered::OrderedClient;
-pub use proof::{
-    CurrentOperationRangeProofResult, OperationRangeCheckpoint, RawKeyValueProof, RawMultiProof,
-    VerifiedCurrentRange, VerifiedKeyLookup, VerifiedKeyRange, VerifiedKeyValue,
-    VerifiedMultiOperations, VerifiedOperationRange,
-};
-pub use unordered::UnorderedClient;
 
-pub use boundary::recover_boundary_state;
-pub use connect::{
-    immutable_operation_log_connect_stack, keyless_operation_log_connect_stack,
-    ordered_connect_stack, ordered_operation_log_connect_stack, unordered_connect_stack,
-    unordered_operation_log_connect_stack, OrderedConnect, UnorderedConnect,
-};
-pub use connect_client::{
-    CurrentOperationClient, CurrentOperationRangeProof, OperationLogClient, OperationLogRangeProof,
-    OperationLogSubscribeProof, OperationLogSubscription, OrderedConnectClient,
-    UnorderedConnectClient,
-};
-
+use commonware_codec::DecodeExt;
 use commonware_cryptography::Digest;
 use commonware_storage::merkle::{self, Family, Graftable, Location};
 use commonware_storage::qmdb::current::proof::OpsRootWitness;
@@ -102,9 +80,9 @@ pub struct VersionedValue<K, V, F: Family> {
 /// subset of bitmap chunks and grafted nodes that changed at that boundary.
 /// This struct is that versioned delta payload.
 ///
-/// Callers typically obtain it from [`recover_boundary_state`], using a local
+/// Callers typically obtain it from [`adapter::upload::recover_boundary_state`], using a local
 /// Commonware current DB, then attach it with
-/// [`PreparedAuthenticatedRange::with_current_boundary`].
+/// [`adapter::upload::PreparedAuthenticatedRange::with_current_boundary`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CurrentBoundaryState<D: Digest, const N: usize, F: Graftable> {
     /// Canonical current-state root at this batch boundary.
@@ -118,6 +96,27 @@ pub struct CurrentBoundaryState<D: Digest, const N: usize, F: Graftable> {
     pub chunks: Vec<(u64, [u8; N])>,
     /// Changed grafted digests keyed by ops-space Merkle position.
     pub grafted_nodes: Vec<(merkle::Position<F>, D)>,
+}
+
+/// Decoded (key, value) payload for a QMDB operation. Either element is `None`
+/// when the operation's logical key or value is absent (e.g. keyless ops).
+pub(crate) struct OperationKv {
+    pub(crate) key: Option<Vec<u8>>,
+    pub(crate) value: Option<Vec<u8>>,
+}
+
+/// A requested watermark and the minimum Store sequence that makes it readable.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct PublishedWatermark<F: Family> {
+    pub(crate) location: Location<F>,
+    pub(crate) sequence_number: u64,
+}
+
+pub(crate) fn decode_digest<D: Digest>(
+    bytes: &[u8],
+    label: impl std::fmt::Display,
+) -> Result<D, QmdbError> {
+    D::decode(bytes).map_err(|e| QmdbError::CorruptData(format!("{label} decode error: {e}")))
 }
 
 // The native crate owns tests for request constraints shared with the WASM verifier.

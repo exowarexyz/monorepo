@@ -8,7 +8,9 @@ use commonware_storage::{
     qmdb::keyless::variable::Operation,
 };
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
-use exoware_qmdb::{prepare_authenticated_range, AuthenticatedOperationRange};
+use exoware_qmdb::{
+    adapter::upload::prepare_authenticated_range, adapter::upload::AuthenticatedOperationRange,
+};
 
 type Family = mmr::Family;
 type BatchOperation = Operation<Family, Vec<u8>>;

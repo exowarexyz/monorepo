@@ -19,14 +19,15 @@ use commonware_storage::qmdb::{
     operation::Key as QmdbKey,
 };
 use commonware_utils::{iter::zip_eq, NZUsize, NZU16, NZU64};
-use exoware_qmdb::proto::qmdb::v1::{
-    GetCurrentOperationRangeRequest, GetManyRequest, GetOperationRangeRequest, GetRequest,
+use exoware_qmdb::service::proto::qmdb::v1::{
+    GetCurrentOperationRangeRequest, GetOperationRangeRequest,
 };
 use exoware_qmdb::{
-    prepare_authenticated_range, recover_boundary_state, stage_authenticated_range,
-    stage_watermark, unordered_connect_stack, unordered_operation_log_connect_stack,
-    AuthenticatedOperationRange, CurrentBoundaryState, CurrentOperationClient, OperationLogClient,
-    UnorderedClient, UnorderedConnectClient, UploadOperation, MAX_OPERATION_SIZE,
+    adapter::upload::prepare_authenticated_range, adapter::upload::recover_boundary_state,
+    adapter::upload::stage_authenticated_range, adapter::upload::stage_watermark,
+    adapter::upload::AuthenticatedOperationRange, adapter::upload::UploadOperation,
+    service::client::rpc::CurrentOperationClient, service::client::rpc::OperationLogClient,
+    CurrentBoundaryState, MAX_OPERATION_SIZE,
 };
 use exoware_sdk::{PrefixedStoreClient, StoreWriteBatch};
 
@@ -59,22 +60,29 @@ async fn check_mirror<F, K, V, E>(
 {
     let store = common::local_store_client().await;
     let prefixed = PrefixedStoreClient::empty(store.clone());
-    let local = Arc::new(UnorderedClient::<F, Sha256, K, V, E>::new(
-        prefixed.clone(),
-        op_cfg.clone(),
-    ));
-    let (server, url) = if snapshots[0].current.is_some() {
-        common::spawn_connect_service(unordered_connect_stack::<F, Sha256, K, V, N, E>(
+    let local = Arc::new(
+        exoware_qmdb::adapter::Unordered::<F, Sha256, K, V, N, E>::new(
             prefixed.clone(),
             op_cfg.clone(),
-            key_cfg,
-        ))
+        ),
+    );
+    let (server, url) = if snapshots[0].current.is_some() {
+        common::spawn_connect_service(exoware_qmdb::service::server::unordered_stack::<
+            F,
+            Sha256,
+            K,
+            V,
+            N,
+            E,
+        >(prefixed.clone(), op_cfg.clone(), key_cfg))
         .await
     } else {
-        common::spawn_connect_service(unordered_operation_log_connect_stack::<F, Sha256, K, V, E>(
-            prefixed.clone(),
-            op_cfg.clone(),
-        ))
+        common::spawn_connect_service(
+            exoware_qmdb::service::server::unordered_operation_log_stack::<F, Sha256, K, V, N, E>(
+                prefixed.clone(),
+                op_cfg.clone(),
+            ),
+        )
         .await
     };
     let remote = OperationLogClient::<_, F, Sha256, unordered::Operation<F, K, E>>::plaintext(
@@ -86,8 +94,10 @@ async fn check_mirror<F, K, V, E>(
             &url,
             op_cfg.clone(),
         );
-    let lookup =
-        UnorderedConnectClient::<_, F, Sha256, K, V, N, E>::plaintext(&url, op_cfg.clone());
+    let lookup = exoware_qmdb::service::client::Unordered::<_, F, Sha256, K, V, N, E>::plaintext(
+        &url,
+        op_cfg.clone(),
+    );
     let wrong_root = Sha256::fill(0xDD);
     for snapshot in &snapshots {
         let tip = Location::<F>::new(snapshot.operations.len() as u64 - 1);
@@ -136,7 +146,7 @@ async fn check_mirror<F, K, V, E>(
 
         let uploaded = snapshot.operations.len();
         assert_eq!(
-            local.root_at(tip).await.expect("ops root"),
+            local.ops_root_at(tip).await.expect("ops root"),
             snapshot.ops_root
         );
         let found = local
@@ -150,17 +160,21 @@ async fn check_mirror<F, K, V, E>(
             );
         }
         let native_range = local
-            .operation_range_proof(tip, Location::new(0), uploaded as u32)
+            .operation_range(tip, Location::new(0), uploaded as u32, None)
             .await
             .expect("native historical proof");
-        assert_eq!(native_range.root, snapshot.ops_root);
-        assert_eq!(native_range.operations, snapshot.operations);
-
         // Current RPCs authenticate historical ranges through the source's canonical root
         let trusted_root = snapshot
             .current
             .as_ref()
             .map_or(snapshot.ops_root, |b| b.root);
+        assert_eq!(native_range.root, trusted_root);
+        assert_eq!(native_range.operations, snapshot.operations);
+        assert_eq!(local.root_at(tip).await.expect("root"), trusted_root);
+        assert_eq!(
+            local.ops_root_at(tip).await.expect("ops root"),
+            snapshot.ops_root
+        );
         let request = GetOperationRangeRequest {
             tip: tip.as_u64(),
             start_location: 0,
@@ -240,7 +254,7 @@ async fn check_mirror<F, K, V, E>(
 
         if snapshot.current.is_some() {
             assert_eq!(
-                local.current_root_at(tip).await.expect("current root"),
+                local.root_at(tip).await.expect("current root"),
                 trusted_root
             );
             let range_request = GetCurrentOperationRangeRequest {
@@ -263,11 +277,9 @@ async fn check_mirror<F, K, V, E>(
             // Reversed request order also checks omission of absent or deleted keys
             let results = lookup
                 .get_many(
-                    GetManyRequest {
-                        tip: tip.as_u64(),
-                        keys: keys.iter().rev().map(|key| key.encode().to_vec()).collect(),
-                        ..Default::default()
-                    },
+                    tip,
+                    &keys.iter().rev().cloned().collect::<Vec<_>>(),
+                    None,
                     &trusted_root,
                 )
                 .await
@@ -287,14 +299,9 @@ async fn check_mirror<F, K, V, E>(
                 assert_eq!(&update.1, value);
                 assert_eq!(result.root, trusted_root);
             }
-            let get_request = GetRequest {
-                tip: tip.as_u64(),
-                key: keys[0].encode().to_vec(),
-                ..Default::default()
-            };
             if let Some(value) = &snapshot.values[0] {
                 let hit = lookup
-                    .get(get_request.clone(), &trusted_root)
+                    .get(tip, &keys[0], None, &trusted_root)
                     .await
                     .expect("current key hit");
                 let unordered::Operation::Update(update) = hit.operation else {
@@ -303,7 +310,49 @@ async fn check_mirror<F, K, V, E>(
                 assert_eq!(update.0, keys[0]);
                 assert_eq!(&update.1, value);
             }
-            assert!(lookup.get(get_request, &wrong_root).await.is_err());
+            assert!(lookup.get(tip, &keys[0], None, &wrong_root).await.is_err());
+
+            // Store-direct reads and verified service reads agree through the same API
+            let typed = lookup
+                .get_many(tip, &keys, None, &trusted_root)
+                .await
+                .expect("typed get_many");
+            let direct = local
+                .get_many(tip, &keys, None)
+                .await
+                .expect("native get_many");
+            assert_eq!(typed.len(), direct.len());
+            for (typed, direct) in typed.iter().zip(&direct) {
+                assert_same_key_value(typed, direct);
+            }
+            if snapshot.values[0].is_some() {
+                assert_same_key_value(
+                    &lookup
+                        .get(tip, &keys[0], None, &trusted_root)
+                        .await
+                        .expect("typed get"),
+                    &local.get(tip, &keys[0], None).await.expect("native get"),
+                );
+            }
+            let typed = lookup
+                .current_operation_range(
+                    tip,
+                    Location::new(0),
+                    uploaded as u32,
+                    None,
+                    &trusted_root,
+                )
+                .await
+                .expect("typed current range");
+            let direct = local
+                .current_operation_range(tip, Location::new(0), uploaded as u32, None)
+                .await
+                .expect("native current range");
+            assert_eq!(typed.tip, direct.tip);
+            assert_eq!(typed.root, direct.root);
+            assert_eq!(typed.start_location, direct.start_location);
+            assert_eq!(typed.operations, direct.operations);
+            assert_eq!(typed.chunks, direct.chunks);
         }
     }
 
@@ -610,4 +659,17 @@ cases! {
     test_current_unordered_variable_variable_keys_fixed_values_mmb: current, mmb::Family, variable, variable, fixed;
     test_current_unordered_variable_variable_keys_variable_values_mmr: current, mmr::Family, variable, variable, variable;
     test_current_unordered_variable_variable_keys_variable_values_mmb: current, mmb::Family, variable, variable, variable;
+}
+
+fn assert_same_key_value<D, Op, F>(
+    typed: &exoware_qmdb::proof::VerifiedKeyValue<D, Op, F>,
+    direct: &exoware_qmdb::proof::VerifiedKeyValue<D, Op, F>,
+) where
+    D: commonware_cryptography::Digest,
+    Op: PartialEq + std::fmt::Debug,
+    F: commonware_storage::merkle::Family,
+{
+    assert_eq!(typed.root, direct.root);
+    assert_eq!(typed.location, direct.location);
+    assert_eq!(typed.operation, direct.operation);
 }

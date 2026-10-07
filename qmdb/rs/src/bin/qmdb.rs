@@ -23,9 +23,9 @@ use commonware_storage::{
 };
 use commonware_utils::{NZUsize, NZU16, NZU64};
 use exoware_qmdb::{
-    ordered_connect_stack, prepare_authenticated_range, recover_boundary_state,
-    stage_authenticated_range, stage_watermark, AuthenticatedOperationRange, CurrentBoundaryState,
-    MAX_OPERATION_SIZE,
+    adapter::upload::prepare_authenticated_range, adapter::upload::recover_boundary_state,
+    adapter::upload::stage_authenticated_range, adapter::upload::stage_watermark,
+    adapter::upload::AuthenticatedOperationRange, CurrentBoundaryState, MAX_OPERATION_SIZE,
 };
 use exoware_sdk::{PrefixedStoreClient, StoreClient, StoreKeyPrefix, StoreWriteBatch};
 use tower_http::cors::CorsLayer;
@@ -211,7 +211,7 @@ async fn run(
     let store = StoreClient::new(store_url).prefixed(StoreKeyPrefix::identity());
     let app = Router::new()
         .route("/health", get(health))
-        .fallback_service(ordered_connect_stack::<
+        .fallback_service(exoware_qmdb::service::server::ordered_stack::<
             Family,
             Sha256,
             Vec<u8>,

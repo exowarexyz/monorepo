@@ -13,17 +13,18 @@ use commonware_storage::{
 };
 use exoware_sdk::{PrefixedStoreClient, ReadSession};
 
-use crate::codec::{decode_update_location, merkle_size_for_watermark};
-use crate::connect::OperationKv;
-use crate::core::{self, PublishedWatermark};
+use crate::adapter::codec::{decode_update_location, merkle_size_for_watermark};
+use crate::adapter::core;
+use crate::adapter::operation_range::load_operation_range_checkpoint;
+use crate::adapter::read_cache::ReadCache;
+use crate::adapter::storage::KvMerkleStorage;
 use crate::error::QmdbError;
-use crate::operation_range::load_operation_range_checkpoint;
 use crate::proof::{OperationRangeCheckpoint, RawBatchMultiProof, VerifiedOperationRange};
-use crate::read_cache::ReadCache;
-use crate::storage::KvMerkleStorage;
+use crate::OperationKv;
+use crate::PublishedWatermark;
 use crate::VersionedValue;
 
-pub struct ImmutableClient<
+pub struct Immutable<
     F: Family,
     H: Hasher,
     K: QmdbKey,
@@ -39,7 +40,7 @@ pub struct ImmutableClient<
     _marker: PhantomData<(F, H, K, E)>,
 }
 
-impl<F, H, K, V, E> Clone for ImmutableClient<F, H, K, V, E>
+impl<F, H, K, V, E> Clone for Immutable<F, H, K, V, E>
 where
     F: Family,
     H: Hasher,
@@ -59,7 +60,7 @@ where
     }
 }
 
-impl<F, H, K, V, E> std::fmt::Debug for ImmutableClient<F, H, K, V, E>
+impl<F, H, K, V, E> std::fmt::Debug for Immutable<F, H, K, V, E>
 where
     F: Family,
     H: Hasher,
@@ -69,11 +70,11 @@ where
     immutable::Operation<F, K, E>: CodecRead,
 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ImmutableClient").finish_non_exhaustive()
+        f.debug_struct("Immutable").finish_non_exhaustive()
     }
 }
 
-impl<F, H, K, V, E> ImmutableClient<F, H, K, V, E>
+impl<F, H, K, V, E> Immutable<F, H, K, V, E>
 where
     F: Graftable,
     H: Hasher,
@@ -180,13 +181,15 @@ where
         }
     }
 
+    /// Operation-range checkpoint: the proof, pinned nodes, and encoded operations.
     pub async fn operation_range_checkpoint(
         &self,
-        watermark: Location<F>,
+        tip: Location<F>,
         start_location: Location<F>,
         max_locations: u32,
+        min_sequence_number: Option<u64>,
     ) -> Result<OperationRangeCheckpoint<H::Digest, F>, QmdbError> {
-        let watermark = self.resolve_watermark(watermark, None).await?;
+        let watermark = self.resolve_watermark(tip, min_sequence_number).await?;
         self.operation_range_checkpoint_at(watermark, start_location, max_locations)
             .await
     }
@@ -247,15 +250,16 @@ where
     }
 
     /// Verified contiguous range of operations.
-    pub async fn operation_range_proof(
+    pub async fn operation_range(
         &self,
-        watermark: Location<F>,
+        tip: Location<F>,
         start_location: Location<F>,
         max_locations: u32,
+        min_sequence_number: Option<u64>,
     ) -> Result<VerifiedOperationRange<H::Digest, immutable::Operation<F, K, E>, F>, QmdbError>
     {
         let checkpoint = self
-            .operation_range_checkpoint(watermark, start_location, max_locations)
+            .operation_range_checkpoint(tip, start_location, max_locations, min_sequence_number)
             .await?;
         let operations = checkpoint
             .encoded_operations
@@ -272,7 +276,8 @@ where
             })
             .collect::<Result<Vec<_>, _>>()?;
         Ok(VerifiedOperationRange {
-            root: checkpoint.root,
+            tip: checkpoint.watermark,
+            root: checkpoint.canonical_root::<H>(),
             start_location: checkpoint.start_location,
             operations,
         })

@@ -4,8 +4,6 @@
 
 use crate::common;
 
-use exoware_qmdb::proof::RawKeyLookupProof;
-
 use std::{collections::BTreeMap, fmt::Debug, sync::Arc};
 
 use commonware_codec::{Codec, Encode, Read};
@@ -28,15 +26,16 @@ use commonware_storage::{
 use commonware_utils::{
     bitmap::Readable as _, iter::zip_eq, sequence::FixedBytes, NZUsize, NZU16, NZU64,
 };
-use exoware_qmdb::proto::qmdb::v1::{
+use exoware_qmdb::service::proto::qmdb::v1::{
     GetCurrentOperationRangeRequest, GetManyRequest, GetOperationRangeRequest, GetRangeRequest,
     GetRequest, SubscribeRequest,
 };
 use exoware_qmdb::{
-    ordered_connect_stack, ordered_operation_log_connect_stack, prepare_authenticated_range,
-    recover_boundary_state, stage_authenticated_range, stage_watermark,
-    AuthenticatedOperationRange, CurrentBoundaryState, CurrentOperationClient, OperationLogClient,
-    OrderedClient, OrderedConnectClient, UploadOperation, VerifiedKeyLookup, MAX_OPERATION_SIZE,
+    adapter::upload::prepare_authenticated_range, adapter::upload::recover_boundary_state,
+    adapter::upload::stage_authenticated_range, adapter::upload::stage_watermark,
+    adapter::upload::AuthenticatedOperationRange, adapter::upload::UploadOperation,
+    proof::VerifiedKeyLookup, service::client::rpc::CurrentOperationClient,
+    service::client::rpc::OperationLogClient, CurrentBoundaryState, MAX_OPERATION_SIZE,
 };
 use exoware_sdk::{proto::PreferZstdHttpClient, PrefixedStoreClient, StoreWriteBatch};
 
@@ -240,21 +239,26 @@ async fn verify_snapshots<F, K, V, E>(
         .all(|snapshot| snapshot.boundary.is_some() == is_current));
     let store = common::local_store_client().await;
     let prefixed = PrefixedStoreClient::empty(store);
-    let native = Arc::new(OrderedClient::<F, Sha256, K, V, N, E>::new(
-        prefixed.clone(),
-        op_cfg.clone(),
-        key_cfg.clone(),
-    ));
-    let (task, url) = if is_current {
-        common::spawn_connect_service(ordered_connect_stack::<F, Sha256, K, V, N, E>(
+    let native = Arc::new(
+        exoware_qmdb::adapter::Ordered::<F, Sha256, K, V, N, E>::new(
             prefixed.clone(),
             op_cfg.clone(),
             key_cfg.clone(),
-        ))
+        ),
+    );
+    let (task, url) = if is_current {
+        common::spawn_connect_service(exoware_qmdb::service::server::ordered_stack::<
+            F,
+            Sha256,
+            K,
+            V,
+            N,
+            E,
+        >(prefixed.clone(), op_cfg.clone(), key_cfg.clone()))
         .await
     } else {
         common::spawn_connect_service(
-            ordered_operation_log_connect_stack::<F, Sha256, K, V, N, E>(
+            exoware_qmdb::service::server::ordered_operation_log_stack::<F, Sha256, K, V, N, E>(
                 prefixed.clone(),
                 op_cfg.clone(),
                 key_cfg.clone(),
@@ -275,13 +279,15 @@ async fn verify_snapshots<F, K, V, E>(
         Operation<F, K, E>,
         N,
     >::plaintext(&url, op_cfg.clone());
-    let lookup = OrderedConnectClient::<PreferZstdHttpClient, F, Sha256, K, V, N, E>::plaintext(
-        &url,
-        op_cfg.clone(),
-        update_cfg,
-        key_cfg,
-        value_cfg,
-    );
+    let lookup = exoware_qmdb::service::client::Ordered::<
+        PreferZstdHttpClient,
+        F,
+        Sha256,
+        K,
+        V,
+        N,
+        E,
+    >::plaintext(&url, op_cfg.clone(), update_cfg, key_cfg, value_cfg);
     let mut subscription = historical
         .subscribe(SubscribeRequest::default())
         .await
@@ -347,8 +353,12 @@ async fn verify_snapshots<F, K, V, E>(
             .await
             .expect("publish source boundary");
         assert_eq!(
-            native.root_at(tip).await.expect("native ops root"),
+            native.ops_root_at(tip).await.expect("native ops root"),
             snapshot.ops_root
+        );
+        assert_eq!(
+            native.root_at(tip).await.expect("native root"),
+            snapshot.root
         );
 
         if count == snapshots.last().unwrap().operations.len() {
@@ -375,7 +385,7 @@ async fn verify_snapshots<F, K, V, E>(
             if case_name.starts_with("test_current_ordered_variable_variable_keys_variable_values_")
             {
                 use connectrpc::client::ClientConfig;
-                use exoware_qmdb::proto::qmdb::v1::{
+                use exoware_qmdb::service::proto::qmdb::v1::{
                     KeyLookupServiceClient, OrderedKeyRangeServiceClient,
                 };
 
@@ -592,10 +602,10 @@ async fn verify_snapshots<F, K, V, E>(
                 .await
                 .is_err());
             let checkpoint = native
-                .operation_range_checkpoint(tip, Location::new(start), count as u32)
+                .operation_range_checkpoint(tip, Location::new(start), count as u32, None)
                 .await
                 .expect("native checkpoint");
-            assert_eq!(checkpoint.root, snapshot.ops_root);
+            assert_eq!(checkpoint.ops_root, snapshot.ops_root);
             assert_eq!(checkpoint.ops_root_witness.is_some(), is_current);
             assert!(checkpoint.verify::<Sha256>());
             assert_eq!(
@@ -609,10 +619,7 @@ async fn verify_snapshots<F, K, V, E>(
 
         if is_current {
             assert_eq!(
-                native
-                    .current_root_at(tip)
-                    .await
-                    .expect("native current root"),
+                native.root_at(tip).await.expect("native current root"),
                 snapshot.root
             );
             let request = GetCurrentOperationRangeRequest {
@@ -632,7 +639,7 @@ async fn verify_snapshots<F, K, V, E>(
                 .await
                 .is_err());
             let native_current = native
-                .current_operation_range_proof(tip, Location::new(0), count as u32, None)
+                .current_operation_range(tip, Location::new(0), count as u32, None)
                 .await
                 .expect("native current range");
             assert_eq!(native_current.root, snapshot.root);
@@ -651,50 +658,29 @@ async fn verify_snapshots<F, K, V, E>(
                 assert!(activity[..previous_count].iter().any(|active| !active));
             }
 
-            let request = GetManyRequest {
-                tip: *tip,
-                keys: all_keys.iter().map(|key| key.encode().to_vec()).collect(),
-                ..Default::default()
-            };
             let lookups = lookup
-                .get_many(request.clone(), &snapshot.root)
+                .get_many(tip, &all_keys, None, &snapshot.root)
                 .await
                 .expect("Connect hits and misses");
-            assert!(lookup.get_many(request, &wrong_root).await.is_err());
-            assert_eq!(lookups.len(), all_keys.len());
-            let raw_lookups = native
-                .key_lookup_proofs_raw_at(tip, &all_keys, None)
+            assert!(lookup
+                .get_many(tip, &all_keys, None, &wrong_root)
                 .await
-                .expect("native hits and misses");
-            assert_eq!(raw_lookups.len(), all_keys.len());
-            for ((key, result), raw) in all_keys.iter().zip(lookups).zip(raw_lookups) {
-                match (snapshot.values.get(key), result, raw) {
-                    (Some(value), VerifiedKeyLookup::Hit(hit), RawKeyLookupProof::Hit(raw)) => {
+                .is_err());
+            assert_eq!(lookups.len(), all_keys.len());
+            for (key, result) in all_keys.iter().zip(lookups) {
+                match (snapshot.values.get(key), result) {
+                    (Some(value), VerifiedKeyLookup::Hit(hit)) => {
                         assert_update(&hit.operation, key, value);
                         assert_eq!(hit.root, snapshot.root);
-                        assert!(raw.verify::<Sha256>());
-                        assert_eq!(raw.root, snapshot.root);
-                        assert_eq!(hit.location, raw.proof.loc);
-                        let request = GetRequest {
-                            key: key.encode().to_vec(),
-                            tip: *tip,
-                            ..Default::default()
-                        };
                         let one = lookup
-                            .get(request.clone(), &snapshot.root)
+                            .get(tip, key, None, &snapshot.root)
                             .await
                             .expect("Connect key hit");
                         assert_update(&one.operation, key, value);
-                        assert!(lookup.get(request, &wrong_root).await.is_err());
+                        assert!(lookup.get(tip, key, None, &wrong_root).await.is_err());
                     }
-                    (
-                        None,
-                        VerifiedKeyLookup::Miss { key: missed },
-                        RawKeyLookupProof::Miss(raw),
-                    ) => {
-                        assert_eq!(missed.as_ref(), key.encode().as_ref());
-                        assert!(raw.verify::<Sha256>());
-                        assert_eq!(raw.root, snapshot.root);
+                    (None, VerifiedKeyLookup::Miss { key: missed }) => {
+                        assert_eq!(&missed, key);
                     }
                     _ => panic!("lookup disagrees with source state"),
                 }
@@ -702,21 +688,17 @@ async fn verify_snapshots<F, K, V, E>(
 
             // Authenticate successor links across multiple pages
             let expected = snapshot.values.iter().collect::<Vec<_>>();
-            let mut cursor = all_keys[0].encode().to_vec();
+            let mut cursor = all_keys[0].clone();
             let mut seen = Vec::new();
             loop {
-                let request = GetRangeRequest {
-                    start_key: cursor.clone(),
-                    end_key: None,
-                    limit: 2,
-                    tip: *tip,
-                    ..Default::default()
-                };
                 let page = lookup
-                    .get_range(request.clone(), &snapshot.root)
+                    .get_range(tip, cursor.clone(), None, 2, None, &snapshot.root)
                     .await
                     .expect("Connect ordered page");
-                assert!(lookup.get_range(request, &wrong_root).await.is_err());
+                assert!(lookup
+                    .get_range(tip, cursor.clone(), None, 2, None, &wrong_root)
+                    .await
+                    .is_err());
                 assert!(page.entries.len() <= 2);
                 for entry in page.entries {
                     let Operation::Update(update) = entry.operation else {
@@ -726,12 +708,12 @@ async fn verify_snapshots<F, K, V, E>(
                 }
                 match page.next_start_key {
                     Some(next) => {
-                        assert_ne!(next.as_ref(), cursor.as_slice());
+                        assert_ne!(next, cursor);
                         assert!(
                             seen.len() < expected.len(),
                             "continuation must advance within the source range"
                         );
-                        cursor = next.to_vec();
+                        cursor = next;
                     }
                     None => break,
                 }
@@ -745,15 +727,15 @@ async fn verify_snapshots<F, K, V, E>(
             );
 
             // The second snapshot starts this bounded range at a deleted key
-            let request = GetRangeRequest {
-                start_key: all_keys[1].encode().to_vec(),
-                end_key: Some(all_keys[5].encode().to_vec()),
-                limit: 20,
-                tip: *tip,
-                ..Default::default()
-            };
             let bounded = lookup
-                .get_range(request, &snapshot.root)
+                .get_range(
+                    tip,
+                    all_keys[1].clone(),
+                    Some(all_keys[5].clone()),
+                    20,
+                    None,
+                    &snapshot.root,
+                )
                 .await
                 .expect("bounded range with exclusion");
             assert!(bounded.next_start_key.is_none());
@@ -765,8 +747,51 @@ async fn verify_snapshots<F, K, V, E>(
             for (entry, (key, value)) in bounded.entries.iter().zip(expected) {
                 assert_update(&entry.operation, key, value);
             }
-            let raw = native
-                .key_range_proof_raw_at(
+
+            // Store-direct reads and verified service reads agree through the same API
+            let typed = lookup
+                .get_many(tip, &all_keys, None, &snapshot.root)
+                .await
+                .expect("typed get_many");
+            let direct = native
+                .get_many(tip, &all_keys, None)
+                .await
+                .expect("native get_many");
+            assert_eq!(typed.len(), direct.len());
+            for (typed, direct) in typed.iter().zip(&direct) {
+                match (typed, direct) {
+                    (VerifiedKeyLookup::Hit(typed), VerifiedKeyLookup::Hit(direct)) => {
+                        assert_same_key_value(typed, direct)
+                    }
+                    (
+                        VerifiedKeyLookup::Miss { key: typed },
+                        VerifiedKeyLookup::Miss { key: direct },
+                    ) => assert_eq!(typed, direct),
+                    _ => panic!("typed and native lookups disagree"),
+                }
+            }
+            if let Some(key) = snapshot.values.keys().next() {
+                assert_same_key_value(
+                    &lookup
+                        .get(tip, key, None, &snapshot.root)
+                        .await
+                        .expect("typed get"),
+                    &native.get(tip, key, None).await.expect("native get"),
+                );
+            }
+            let typed = lookup
+                .get_range(
+                    tip,
+                    all_keys[1].clone(),
+                    Some(all_keys[5].clone()),
+                    20,
+                    None,
+                    &snapshot.root,
+                )
+                .await
+                .expect("typed get_range");
+            let direct = native
+                .get_range(
                     tip,
                     all_keys[1].clone(),
                     Some(all_keys[5].clone()),
@@ -774,15 +799,36 @@ async fn verify_snapshots<F, K, V, E>(
                     None,
                 )
                 .await
-                .expect("native bounded range");
-            assert_eq!(raw.entries.len(), bounded.entries.len());
-            if !snapshot.values.contains_key(&all_keys[1]) {
-                let exclusion = raw.start_proof.as_ref().expect("excluded start");
-                assert_eq!(exclusion.root, snapshot.root);
-                assert!(exclusion.verify::<Sha256>());
+                .expect("native get_range");
+            assert_eq!(typed.next_start_key, direct.next_start_key);
+            assert_eq!(typed.entries.len(), direct.entries.len());
+            for (typed, direct) in typed.entries.iter().zip(&direct.entries) {
+                assert_same_key_value(typed, direct);
             }
+            let typed = lookup
+                .current_operation_range(tip, Location::new(0), count as u32, None, &snapshot.root)
+                .await
+                .expect("typed current range");
+            assert_eq!(typed.tip, native_current.tip);
+            assert_eq!(typed.root, native_current.root);
+            assert_eq!(typed.start_location, native_current.start_location);
+            assert_eq!(typed.operations, native_current.operations);
+            assert_eq!(typed.chunks, native_current.chunks);
+            let typed_ops = lookup
+                .operation_range(tip, Location::new(0), count as u32, None, &snapshot.root)
+                .await
+                .expect("typed operation range");
+            let native_ops = native
+                .operation_range(tip, Location::new(0), count as u32, None)
+                .await
+                .expect("native operation range");
+            assert_eq!(typed_ops.tip, native_ops.tip);
+            assert_eq!(typed_ops.root, native_ops.root);
+            assert_eq!(typed_ops.start_location, native_ops.start_location);
+            assert_eq!(typed_ops.operations, native_ops.operations);
         } else {
-            assert!(native.current_root_at(tip).await.is_err());
+            // Without current state the canonical root is the operations-log root
+            assert_eq!(native.root_at(tip).await.expect("root"), snapshot.ops_root);
             assert!(current_operations
                 .get_current_operation_range(
                     GetCurrentOperationRangeRequest {
@@ -796,14 +842,7 @@ async fn verify_snapshots<F, K, V, E>(
                 .await
                 .is_err());
             assert!(lookup
-                .get(
-                    GetRequest {
-                        key: all_keys[0].encode().to_vec(),
-                        tip: *tip,
-                        ..Default::default()
-                    },
-                    &snapshot.root
-                )
+                .get(tip, &all_keys[0], None, &snapshot.root)
                 .await
                 .is_err());
         }
@@ -1233,3 +1272,16 @@ variant_case!(
     mmb::Family,
     variable_variable_keys_variable_values
 );
+
+fn assert_same_key_value<D, Op, F>(
+    typed: &exoware_qmdb::proof::VerifiedKeyValue<D, Op, F>,
+    direct: &exoware_qmdb::proof::VerifiedKeyValue<D, Op, F>,
+) where
+    D: commonware_cryptography::Digest,
+    Op: PartialEq + std::fmt::Debug,
+    F: commonware_storage::merkle::Family,
+{
+    assert_eq!(typed.root, direct.root);
+    assert_eq!(typed.location, direct.location);
+    assert_eq!(typed.operation, direct.operation);
+}

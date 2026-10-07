@@ -52,13 +52,6 @@ pub(crate) fn chunk_index_for_location<F: Family, const N: usize>(location: Loca
     *location / bitmap_chunk_bits::<N>()
 }
 
-pub(crate) fn decode_digest<D: Digest>(
-    bytes: &[u8],
-    label: impl std::fmt::Display,
-) -> Result<D, QmdbError> {
-    D::decode(bytes).map_err(|e| QmdbError::CorruptData(format!("{label} decode error: {e}")))
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct CurrentBoundaryMetadata<D: Digest> {
     pub(crate) root: D,

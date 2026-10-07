@@ -21,15 +21,16 @@ use commonware_storage::qmdb::operation::Operation as _;
 use commonware_storage::translator::TwoCap;
 use commonware_utils::{NZUsize, NZU16, NZU64};
 use exoware_qmdb::MAX_OPERATION_SIZE;
-use exoware_qmdb::{recover_boundary_state, CurrentBoundaryState, OrderedClient};
+use exoware_qmdb::{adapter::upload::recover_boundary_state, CurrentBoundaryState};
 use exoware_sdk::{PrefixedStoreClient, StoreClient};
 
 const N: usize = 32;
 type Digest = commonware_cryptography::sha256::Digest;
 type BatchOperation<F> = QmdbOperation<F, Vec<u8>, Vec<u8>>;
 type FixedBatchOperation<F> = FixedQmdbOperation<F, Digest, Digest>;
-type VariableClient<F> = OrderedClient<F, Sha256, Vec<u8>, Vec<u8>, N>;
-type FixedClient<F> = OrderedClient<F, Sha256, Digest, Digest, N, FixedEncoding<Digest>>;
+type VariableClient<F> = exoware_qmdb::adapter::Ordered<F, Sha256, Vec<u8>, Vec<u8>, N>;
+type FixedClient<F> =
+    exoware_qmdb::adapter::Ordered<F, Sha256, Digest, Digest, N, FixedEncoding<Digest>>;
 type VariableDb<F> = LocalQmdbDb<
     F,
     cw_tokio::Context,
@@ -428,10 +429,11 @@ async fn test_ordered_round_trip() {
     );
 
     let proof = qmdb_client
-        .operation_range_proof(
+        .operation_range(
             source.latest_location,
             Location::<mmr::Family>::new(0),
             source.operations.len() as u32,
+            None,
         )
         .await
         .expect("proof");
@@ -457,17 +459,18 @@ async fn test_ordered_mmb_round_trip() {
     assert_eq!(watermark, Some(source.latest_location));
 
     let range = qmdb_client
-        .operation_range_proof(
+        .operation_range(
             source.latest_location,
             Location::<mmb::Family>::new(0),
             source.operations.len() as u32,
+            None,
         )
         .await
         .expect("operation range proof");
     assert_eq!(range.operations, source.operations);
 
     let current = qmdb_client
-        .current_operation_range_proof(
+        .current_operation_range(
             source.latest_location,
             Location::<mmb::Family>::new(0),
             source.operations.len() as u32,
@@ -478,9 +481,9 @@ async fn test_ordered_mmb_round_trip() {
     assert_eq!(current.operations, source.operations);
 
     let key_proof = qmdb_client
-        .key_value_proof_at(source.latest_location, b"alpha".as_slice(), None)
+        .get(source.latest_location, &b"alpha".to_vec(), None)
         .await
-        .expect("key_value_proof_at");
+        .expect("get");
     match &key_proof.operation {
         QmdbOperation::Update(update) => {
             assert_eq!(update.key, b"alpha".to_vec());
@@ -513,13 +516,14 @@ async fn test_ordered_mmb_multi_peak_grafted_chunk_round_trip() {
     .await
     .expect("commit upload");
 
-    let qmdb_client: OrderedClient<mmb::Family, Sha256, Vec<u8>, Vec<u8>, N> = OrderedClient::new(
-        PrefixedStoreClient::empty(store_client.clone()),
-        op_cfg::<mmb::Family>(),
-        key_cfg(),
-    );
+    let qmdb_client: exoware_qmdb::adapter::Ordered<mmb::Family, Sha256, Vec<u8>, Vec<u8>, N> =
+        exoware_qmdb::adapter::Ordered::new(
+            PrefixedStoreClient::empty(store_client.clone()),
+            op_cfg::<mmb::Family>(),
+            key_cfg(),
+        );
     let current = qmdb_client
-        .current_operation_range_proof(
+        .current_operation_range(
             source.latest_location,
             Location::<mmb::Family>::new(0),
             source.operations.len() as u32,
@@ -531,9 +535,9 @@ async fn test_ordered_mmb_multi_peak_grafted_chunk_round_trip() {
 
     let key = b"k-00000007".to_vec();
     let key_proof = qmdb_client
-        .key_value_proof_at(source.latest_location, key.as_slice(), None)
+        .get(source.latest_location, &key, None)
         .await
-        .expect("key_value_proof_at");
+        .expect("get");
     assert_eq!(key_proof.root, source.current_boundary.root);
     match &key_proof.operation {
         QmdbOperation::Update(update) => {
@@ -644,13 +648,13 @@ async fn assert_incremental_seed_batches_keep_current_proofs_verifiable<F>(
             .expect("commit upload");
     }
 
-    let qmdb_client: VariableClient<F> = OrderedClient::new(
+    let qmdb_client: VariableClient<F> = exoware_qmdb::adapter::Ordered::new(
         PrefixedStoreClient::empty(store_client.clone()),
         op_cfg::<F>(),
         key_cfg(),
     );
     let key_proof = qmdb_client
-        .key_value_proof_at(latest_location, latest_key.as_slice(), None)
+        .get(latest_location, &latest_key, None)
         .await
         .expect("latest key proof");
     assert_eq!(key_proof.root, expected_root);
@@ -669,7 +673,7 @@ async fn assert_incremental_seed_batches_keep_current_proofs_verifiable<F>(
             .get(&key)
             .expect("sample key must be active");
         let proof = qmdb_client
-            .key_value_proof_at(latest_location, key.as_slice(), None)
+            .get(latest_location, &key, None)
             .await
             .unwrap_or_else(|error| panic!("active key proof for {key:?}: {error:?}"));
         assert_eq!(proof.root, expected_root);
@@ -682,8 +686,8 @@ async fn assert_incremental_seed_batches_keep_current_proofs_verifiable<F>(
         }
     }
 
-    let raw_range = qmdb_client
-        .key_range_proof_raw_at(
+    let range = qmdb_client
+        .get_range(
             latest_location,
             b"k-00000000".to_vec(),
             Some(b"k-00000020".to_vec()),
@@ -697,10 +701,9 @@ async fn assert_incremental_seed_batches_keep_current_proofs_verifiable<F>(
         .take(10)
         .map(|(key, _)| key.clone())
         .collect::<Vec<_>>();
-    assert_eq!(raw_range.entries.len(), expected_range_keys.len());
-    for (entry, expected_key) in raw_range.entries.iter().zip(expected_range_keys) {
+    assert_eq!(range.entries.len(), expected_range_keys.len());
+    for (entry, expected_key) in range.entries.iter().zip(expected_range_keys) {
         assert_eq!(entry.operation.key(), Some(&expected_key));
-        assert!(entry.verify::<Sha256>());
     }
 }
 
@@ -807,27 +810,27 @@ async fn test_ordered_mmb_persistent_interleaved_seed_batches_keep_current_proof
         .await
         .expect("join");
 
-    let qmdb_client: VariableClient<mmb::Family> = OrderedClient::new(
+    let qmdb_client: VariableClient<mmb::Family> = exoware_qmdb::adapter::Ordered::new(
         PrefixedStoreClient::empty(store_client.clone()),
         op_cfg::<mmb::Family>(),
         key_cfg(),
     );
     assert_eq!(
         qmdb_client
-            .current_root_at(latest_location)
+            .root_at(latest_location)
             .await
             .expect("current root"),
         expected_root
     );
     assert_eq!(
         qmdb_client
-            .root_at(latest_location)
+            .ops_root_at(latest_location)
             .await
             .expect("ops root"),
         expected_ops_root
     );
     let proof = qmdb_client
-        .key_value_proof_at(latest_location, b"k-00000005".as_slice(), None)
+        .get(latest_location, &b"k-00000005".to_vec(), None)
         .await
         .expect("key proof");
     assert_eq!(proof.root, expected_root);
@@ -877,17 +880,18 @@ async fn test_ordered_fixed_round_trip() {
     }
 
     let range = qmdb_client
-        .operation_range_proof(
+        .operation_range(
             source.latest_location,
             Location::<mmr::Family>::new(0),
             source.operations.len() as u32,
+            None,
         )
         .await
         .expect("fixed operation range proof");
     assert_eq!(range.operations, source.operations);
 
     let current = qmdb_client
-        .current_operation_range_proof(
+        .current_operation_range(
             source.latest_location,
             Location::<mmr::Family>::new(0),
             source.operations.len() as u32,
@@ -900,9 +904,9 @@ async fn test_ordered_fixed_round_trip() {
     let alpha = Sha256::fill(0xA1);
     let one = Sha256::fill(0x01);
     let key_proof = qmdb_client
-        .key_value_proof_at(source.latest_location, alpha.as_ref(), None)
+        .get(source.latest_location, &alpha, None)
         .await
-        .expect("fixed key_value_proof_at");
+        .expect("fixed get");
     match &key_proof.operation {
         FixedQmdbOperation::Update(update) => {
             assert_eq!(update.key, alpha);
@@ -913,7 +917,7 @@ async fn test_ordered_fixed_round_trip() {
 }
 
 #[tokio::test]
-async fn test_current_root_at() {
+async fn test_root_at_returns_current_root() {
     let store_client = common::local_store_client().await;
     let source = build_variable_source::<mmr::Family>().await;
 
@@ -925,9 +929,9 @@ async fn test_current_root_at() {
         key_cfg(),
     );
     let root = qmdb_client
-        .current_root_at(source.latest_location)
+        .root_at(source.latest_location)
         .await
-        .expect("current_root_at");
+        .expect("root_at");
     assert!(!root.as_ref().iter().all(|&b| b == 0));
 }
 
@@ -944,14 +948,14 @@ async fn test_current_operation_range_proof() {
         key_cfg(),
     );
     let proof = qmdb_client
-        .current_operation_range_proof(
+        .current_operation_range(
             source.latest_location,
             Location::<mmr::Family>::new(0),
             source.operations.len() as u32,
             None,
         )
         .await
-        .expect("current_operation_range_proof");
+        .expect("current_operation_range");
     assert_eq!(proof.operations, source.operations);
 }
 
@@ -968,9 +972,9 @@ async fn test_key_value_proof() {
         key_cfg(),
     );
     let result = qmdb_client
-        .key_value_proof_at(source.latest_location, b"alpha".as_slice(), None)
+        .get(source.latest_location, &b"alpha".to_vec(), None)
         .await
-        .expect("key_value_proof_at");
+        .expect("get");
     match &result.operation {
         QmdbOperation::Update(u) => {
             assert_eq!(u.key, b"alpha".to_vec());
@@ -993,12 +997,12 @@ async fn test_multi_proof() {
         key_cfg(),
     );
     let result = qmdb_client
-        .multi_proof_at(
+        .multi_proof(
             source.latest_location,
             &[b"alpha".as_slice(), b"beta".as_slice()],
         )
         .await
-        .expect("multi_proof_at");
+        .expect("multi_proof");
     assert_eq!(result.operations.len(), 2);
 }
 
@@ -1085,18 +1089,17 @@ async fn assert_point_proof_reads_bounded_bitmap_chunks<F: Graftable>() {
     )
     .await
     .unwrap();
-    let qmdb_client: VariableClient<F> = OrderedClient::new(
+    let qmdb_client: VariableClient<F> = exoware_qmdb::adapter::Ordered::new(
         PrefixedStoreClient::empty(store_client),
         op_cfg::<F>(),
         key_cfg(),
     );
     query.bitmap_chunks.lock().unwrap().clear();
     let proof = qmdb_client
-        .key_value_proof_raw_at(source.latest_location, b"k-00000007", None)
+        .get(source.latest_location, &b"k-00000007".to_vec(), None)
         .await
         .unwrap();
     assert_eq!(proof.root, source.current_boundary.root);
-    assert!(proof.verify::<Sha256>());
     let chunks = query.bitmap_chunks.lock().unwrap().clone();
     assert!(
         chunks.len() <= 3,
@@ -1124,8 +1127,8 @@ where
     use commonware_codec::Encode as _;
     use commonware_parallel::Sequential;
     use exoware_qmdb::{
-        prepare_authenticated_range, stage_authenticated_range, stage_watermark,
-        AuthenticatedOperationRange,
+        adapter::upload::prepare_authenticated_range, adapter::upload::stage_authenticated_range,
+        adapter::upload::stage_watermark, adapter::upload::AuthenticatedOperationRange,
     };
     use exoware_sdk::StoreWriteBatch;
 
@@ -1238,7 +1241,7 @@ where
     let store_client = common::local_store_client().await;
     let upload_client = PrefixedStoreClient::empty(store_client.clone());
     let qmdb_client: VariableClient<F> =
-        OrderedClient::new(upload_client.clone(), op_cfg::<F>(), key_cfg());
+        exoware_qmdb::adapter::Ordered::new(upload_client.clone(), op_cfg::<F>(), key_cfg());
     let mut expected_boundaries = Vec::new();
     for (latest, root, value, prepared) in prepared_boundaries {
         let mut batch = StoreWriteBatch::new();
@@ -1256,7 +1259,7 @@ where
     );
     for (boundary, _, _) in &expected_boundaries {
         assert!(matches!(
-            qmdb_client.current_root_at(*boundary).await,
+            qmdb_client.root_at(*boundary).await,
             Err(exoware_qmdb::QmdbError::WatermarkTooLow { requested, available: 0 })
                 if requested == boundary.as_u64()
         ));
@@ -1276,21 +1279,17 @@ where
     );
 
     for (boundary, expected_root, expected_value) in expected_boundaries {
-        let root = qmdb_client
-            .current_root_at(boundary)
-            .await
-            .unwrap_or_else(|error| {
-                panic!("current root at uploaded boundary {boundary}: {error}")
-            });
+        let root = qmdb_client.root_at(boundary).await.unwrap_or_else(|error| {
+            panic!("current root at uploaded boundary {boundary}: {error}")
+        });
         assert_eq!(root, expected_root);
         let proof = qmdb_client
-            .key_value_proof_raw_at(boundary, b"alpha".as_slice(), None)
+            .get(boundary, &b"alpha".to_vec(), None)
             .await
             .unwrap_or_else(|error| {
                 panic!("current proof at uploaded boundary {boundary}: {error}")
             });
         assert_eq!(proof.root, expected_root);
-        assert!(proof.verify::<Sha256>());
         match proof.operation {
             BatchOperation::Update(update) => {
                 assert_eq!(update.key, b"alpha".to_vec());

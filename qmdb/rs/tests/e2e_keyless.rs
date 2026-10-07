@@ -14,7 +14,7 @@ use commonware_storage::qmdb::keyless::fixed::{
 };
 use commonware_storage::qmdb::keyless::variable::{Db as Keyless, Operation as KeylessOperation};
 use commonware_utils::{NZUsize, NZU16, NZU64};
-use exoware_qmdb::KeylessClient;
+
 use exoware_sdk::{PrefixedStoreClient, StoreClient};
 
 use common::retry;
@@ -35,9 +35,14 @@ type FixedDb<F> = FixedKeyless<
     commonware_parallel::Sequential,
 >;
 
-type VariableClient<F> = KeylessClient<F, commonware_cryptography::Sha256, Vec<u8>>;
-type FixedClient<F> =
-    KeylessClient<F, commonware_cryptography::Sha256, Digest, FixedEncoding<Digest>>;
+type VariableClient<F> =
+    exoware_qmdb::adapter::Keyless<F, commonware_cryptography::Sha256, Vec<u8>>;
+type FixedClient<F> = exoware_qmdb::adapter::Keyless<
+    F,
+    commonware_cryptography::Sha256,
+    Digest,
+    FixedEncoding<Digest>,
+>;
 
 fn variable_client<F: Graftable>(store_client: StoreClient) -> VariableClient<F> {
     VariableClient::new(
@@ -269,10 +274,11 @@ where
     assert_eq!(got, source.queried_value);
 
     let proof = qmdb_client
-        .operation_range_proof(
+        .operation_range(
             source.latest_location,
             Location::new(0),
             source.operations.len() as u32,
+            None,
         )
         .await
         .expect("proof");
@@ -284,6 +290,7 @@ where
             source.latest_location,
             Location::new(0),
             source.operations.len() as u32,
+            None,
         )
         .await
         .expect("checkpoint");
@@ -291,7 +298,7 @@ where
     let mut malformed_checkpoint = checkpoint.clone();
     malformed_checkpoint
         .pinned_nodes
-        .push(malformed_checkpoint.root);
+        .push(malformed_checkpoint.ops_root);
     assert!(
         !malformed_checkpoint.verify::<commonware_cryptography::Sha256>(),
         "zero-start checkpoints must not verify with pinned nodes"
@@ -310,10 +317,10 @@ where
         peaks.iter().map(|(_, _, digest)| digest),
     )
     .expect("reconstruct root");
-    assert_eq!(reconstructed_root, checkpoint.root);
+    assert_eq!(reconstructed_root, checkpoint.ops_root);
 
     let suffix_checkpoint = qmdb_client
-        .operation_range_checkpoint(source.latest_location, source.latest_location, 1)
+        .operation_range_checkpoint(source.latest_location, source.latest_location, 1, None)
         .await
         .expect("suffix checkpoint");
     assert!(suffix_checkpoint.verify::<commonware_cryptography::Sha256>());
@@ -328,7 +335,7 @@ where
             &hasher,
             &suffix_checkpoint.encoded_operations,
             suffix_checkpoint.start_location,
-            &suffix_checkpoint.root,
+            &suffix_checkpoint.ops_root,
         )
         .expect("verify suffix range");
     assert!(
@@ -347,11 +354,11 @@ where
     let mut suffix_without_pins = suffix_checkpoint.clone();
     suffix_without_pins.pinned_nodes.clear();
     let mut suffix_with_wrong_pin = suffix_checkpoint.clone();
-    suffix_with_wrong_pin.pinned_nodes[0] = suffix_with_wrong_pin.root;
+    suffix_with_wrong_pin.pinned_nodes[0] = suffix_with_wrong_pin.ops_root;
     let mut suffix_with_extra_pin = suffix_checkpoint.clone();
     suffix_with_extra_pin
         .pinned_nodes
-        .push(suffix_with_extra_pin.root);
+        .push(suffix_with_extra_pin.ops_root);
     for malformed in [
         &suffix_without_pins,
         &suffix_with_wrong_pin,
@@ -371,7 +378,7 @@ where
         .is_err());
 
     let middle_checkpoint = qmdb_client
-        .operation_range_checkpoint(source.latest_location, source.latest_location - 1, 1)
+        .operation_range_checkpoint(source.latest_location, source.latest_location - 1, 1, None)
         .await
         .expect("middle checkpoint");
     assert!(middle_checkpoint.verify::<commonware_cryptography::Sha256>());
@@ -441,10 +448,11 @@ async fn test_keyless_fixed_round_trip() {
     assert_eq!(got, source.queried_value);
 
     let proof = qmdb_client
-        .operation_range_proof(
+        .operation_range(
             source.latest_location,
             Location::new(0),
             source.operations.len() as u32,
+            None,
         )
         .await
         .expect("fixed proof");

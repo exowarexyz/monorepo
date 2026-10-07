@@ -4,7 +4,7 @@ use exoware_sdk::prune_policy::{
 };
 use exoware_sdk::selector::Selector;
 
-use crate::codec::UPDATE_PREFIX;
+use crate::adapter::codec::UPDATE_PREFIX;
 
 fn base_keys_scope() -> KeysScope {
     KeysScope {
@@ -49,7 +49,7 @@ mod tests {
     use std::collections::HashSet;
 
     use super::{keep_latest_updates, keep_positions_gte};
-    use crate::codec::{
+    use crate::adapter::codec::{
         encode_ordered_key_bytes, encode_update_key, ORDERED_KEY_TERMINATOR_LEN, UPDATE_FAMILY,
         UPDATE_PREFIX,
     };

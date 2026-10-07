@@ -11,7 +11,7 @@ use commonware_storage::merkle::{
 use commonware_storage::qmdb::current::grafting;
 use exoware_sdk::{RangeMode, ReadSession};
 
-use crate::codec::{chunk_index_for_location, encode_grafted_node_key, encode_node_key};
+use crate::adapter::codec::{chunk_index_for_location, encode_grafted_node_key, encode_node_key};
 
 pub(crate) struct KvMerkleStorage<'a, F: Family, D: Digest> {
     pub(crate) session: &'a ReadSession,
@@ -258,8 +258,8 @@ impl<const N: usize> ProofBitmap<N> {
         Load: FnMut(u64) -> Fut,
         Fut: std::future::Future<Output = Result<[u8; N], crate::QmdbError>>,
     {
-        let len = crate::codec::op_count_for_watermark(watermark)?.as_u64();
-        let chunk_bits = crate::codec::bitmap_chunk_bits::<N>();
+        let len = crate::adapter::codec::op_count_for_watermark(watermark)?.as_u64();
+        let chunk_bits = crate::adapter::codec::bitmap_chunk_bits::<N>();
         let complete = len / chunk_bits;
         let graftable = grafting::graftable_chunks::<F>(len, grafting::height::<N>()).min(complete);
         if pruned_chunks > graftable || complete - graftable > 1 {
@@ -325,7 +325,7 @@ impl<const N: usize> commonware_utils::bitmap::Readable<N> for ProofBitmap<N> {
     }
 
     fn last_chunk(&self) -> ([u8; N], u64) {
-        let bits = (self.len - 1) % crate::codec::bitmap_chunk_bits::<N>() + 1;
+        let bits = (self.len - 1) % crate::adapter::codec::bitmap_chunk_bits::<N>() + 1;
         (self.get_chunk(self.last_chunk), bits)
     }
 
