@@ -485,12 +485,22 @@ where
                 key: key_bytes,
             });
         }
+        Self::active_key_proof(session, op_cfg, watermark, key, location).await
+    }
 
+    /// Current proof for `key`, active at `watermark` with its latest update at `location`.
+    async fn active_key_proof<Q: AsRef<[u8]>>(
+        session: &ReadSession,
+        op_cfg: &<ordered::Operation<F, K, E> as commonware_codec::Read>::Cfg,
+        watermark: Location<F>,
+        key: Q,
+        location: Location<F>,
+    ) -> Result<RawKeyValueProof<H::Digest, ordered::Operation<F, K, E>, N, F>, QmdbError> {
         let operation = Self::load_operation_at(session, op_cfg, location).await?;
         let ordered::Operation::Update(update) = &operation else {
             return Err(QmdbError::KeyNotActive {
                 watermark: watermark.as_u64(),
-                key: key_bytes,
+                key: error_key(&key),
             });
         };
         if update.key.as_ref() != key.as_ref() {
@@ -1024,12 +1034,17 @@ where
             },
         )
         .await?;
-        // Each entry's proof loads and checks its own operation.
+        // The walk found each entry's location, so entries skip the key lookup.
         let mut entries = Vec::with_capacity(active.len());
-        for (key, _) in &active {
-            let proof = self
-                .key_value_proof_raw_at_watermark(watermark, key.as_slice())
-                .await?;
+        for (key, location) in &active {
+            let proof = Self::active_key_proof(
+                &session,
+                &self.op_cfg,
+                watermark.location,
+                key.as_slice(),
+                *location,
+            )
+            .await?;
             entries.push(proof);
         }
 

@@ -1270,7 +1270,7 @@ async fn test_ordered_connect_miss_proofs_walk_long_deleted_runs_in_growing_page
 
 #[tokio::test]
 async fn test_ordered_connect_get_range_spans_walk_pages() {
-    let store_client = common::local_store_client().await;
+    let (query, store_client, _servers) = common::counting_store().await;
     let tips = build_source_tips(
         "current_ordered_variable_mmr_connect_long_run_ranges",
         long_run_batches(),
@@ -1296,9 +1296,23 @@ async fn test_ordered_connect_get_range_spans_walk_pages() {
     assert_eq!(past_run.keys, [last.as_str()]);
     assert_eq!(past_run.start_proof, Some(span(&first, &last)));
 
-    // Before the deletes every key is active but has a later delete row, so a
-    // first page of `limit + 1` rows covers only about half the keys
+    // Before the deletes every key is active but has a later delete row, so the
+    // 128-row first page settles 64 keys. Entries are proven from the walk's
+    // locations without reading the index again
     let limit = 40;
+    query.reset_update_reads();
+    let raw = ordered
+        .get_range_raw(
+            tips[0].latest_location,
+            long_run_key(1).into_bytes(),
+            None,
+            limit,
+            None,
+        )
+        .await
+        .expect("get_range_raw");
+    assert_eq!(raw.entries.len(), limit as usize);
+    assert_eq!(query.update_reads(), (1, 128));
     let earlier = range_page(&ordered, &connect, &tips[0], &long_run_key(1), None, limit).await;
     assert_eq!(
         earlier.keys,
