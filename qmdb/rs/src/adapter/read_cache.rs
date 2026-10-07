@@ -282,7 +282,7 @@ mod tests {
             pruned_chunks: 0,
             inactivity_floor: Location::new(0),
             ops: context(value),
-            tail_chunks: Vec::new(),
+            tail: Default::default(),
         }
     }
 
