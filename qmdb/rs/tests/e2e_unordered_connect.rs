@@ -263,7 +263,11 @@ async fn build_any_source_batch() -> AnySourceBatch {
                             Some(b"two".to_vec()),
                         );
                     batch
-                        .merkleize(&db, None::<Vec<u8>>)
+                        .merkleize(
+                            &db,
+                            None::<Vec<u8>>,
+                            &mut commonware_storage::qmdb::floor::Proportional,
+                        )
                         .await
                         .expect("merkleize")
                 };
@@ -346,7 +350,11 @@ async fn build_mmb_any_source_batch() -> MmbAnySourceBatch {
                             Some(b"two".to_vec()),
                         );
                     batch
-                        .merkleize(&db, None::<Vec<u8>>)
+                        .merkleize(
+                            &db,
+                            None::<Vec<u8>>,
+                            &mut commonware_storage::qmdb::floor::Proportional,
+                        )
                         .await
                         .expect("merkleize")
                 };
@@ -422,7 +430,11 @@ async fn build_current_source_batch() -> CurrentSourceBatch {
                     .write(alpha, Some(b"one".to_vec()))
                     .write(beta, Some(b"two".to_vec()));
                 batch
-                    .merkleize(&db, None::<Vec<u8>>)
+                    .merkleize(
+                        &db,
+                        None::<Vec<u8>>,
+                        &mut commonware_storage::qmdb::floor::Proportional,
+                    )
                     .await
                     .expect("merkleize")
             };
@@ -891,7 +903,11 @@ async fn aligned_commit_boundary<F: commonware_storage::merkle::Graftable + Part
                     }
                 }
                 let batch = batch
-                    .merkleize(&db, None::<Vec<u8>>)
+                    .merkleize(
+                        &db,
+                        None::<Vec<u8>>,
+                        &mut commonware_storage::qmdb::floor::Proportional,
+                    )
                     .await
                     .expect("source merkleize");
                 (db, _) = db.apply_batch(batch).await.expect("source apply");
@@ -1048,7 +1064,7 @@ async fn current_boundary_nodes<F: commonware_storage::merkle::Graftable + Parti
                     }
                 }
                 let batch = batch
-                    .merkleize(&db, None::<Vec<u8>>)
+                    .merkleize(&db, None::<Vec<u8>>, &mut commonware_storage::qmdb::floor::Proportional)
                     .await
                     .expect("source merkleize");
                 (db, _) = db.apply_batch(batch).await.expect("source apply");

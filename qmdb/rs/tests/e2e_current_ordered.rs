@@ -174,7 +174,11 @@ where
                     .write(b"alpha".to_vec(), Some(b"one".to_vec()))
                     .write(b"beta".to_vec(), Some(b"two".to_vec()));
                 batch
-                    .merkleize(&db, None::<Vec<u8>>)
+                    .merkleize(
+                        &db,
+                        None::<Vec<u8>>,
+                        &mut commonware_storage::qmdb::floor::Proportional,
+                    )
                     .await
                     .expect("merkleize")
             };
@@ -285,7 +289,11 @@ where
                     );
                 }
                 batch
-                    .merkleize(&db, None::<Vec<u8>>)
+                    .merkleize(
+                        &db,
+                        None::<Vec<u8>>,
+                        &mut commonware_storage::qmdb::floor::Proportional,
+                    )
                     .await
                     .expect("merkleize")
             };
@@ -357,7 +365,11 @@ where
                     .write(alpha, Some(one))
                     .write(beta, Some(two));
                 batch
-                    .merkleize(&db, None::<Digest>)
+                    .merkleize(
+                        &db,
+                        None::<Digest>,
+                        &mut commonware_storage::qmdb::floor::Proportional,
+                    )
                     .await
                     .expect("fixed merkleize")
             };
@@ -603,7 +615,11 @@ async fn assert_incremental_seed_batches_keep_current_proofs_verifiable<F>(
                         }
                         counter += 3;
                         batch
-                            .merkleize(&db, None::<Vec<u8>>)
+                            .merkleize(
+                                &db,
+                                None::<Vec<u8>>,
+                                &mut commonware_storage::qmdb::floor::Proportional,
+                            )
                             .await
                             .expect("merkleize")
                     };
@@ -764,7 +780,11 @@ async fn test_ordered_mmb_persistent_interleaved_seed_batches_keep_current_proof
                             }
                             counter += 3;
                             batch
-                                .merkleize(&db, None::<Vec<u8>>)
+                                .merkleize(
+                                    &db,
+                                    None::<Vec<u8>>,
+                                    &mut commonware_storage::qmdb::floor::Proportional,
+                                )
                                 .await
                                 .expect("merkleize")
                         };
@@ -1141,7 +1161,11 @@ where
                     );
                 }
                 let batch = batch
-                    .merkleize(&db, None::<Vec<u8>>)
+                    .merkleize(
+                        &db,
+                        None::<Vec<u8>>,
+                        &mut commonware_storage::qmdb::floor::Proportional,
+                    )
                     .await
                     .expect("merkleize source batch");
                 (db, _) = db.apply_batch(batch).await.expect("apply source batch");

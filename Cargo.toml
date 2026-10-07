@@ -36,20 +36,20 @@ axum = "0.8.1"
 base64 = "0.22.1"
 hex = "0.4"
 regex = "1"
-commonware-codec = { git = "https://github.com/commonwarexyz/monorepo", rev = "4c4407b6907f520ea828b825829ecea942a0e9b9" }
-commonware-coding = { git = "https://github.com/commonwarexyz/monorepo", rev = "4c4407b6907f520ea828b825829ecea942a0e9b9" }
-commonware-actor = { git = "https://github.com/commonwarexyz/monorepo", rev = "4c4407b6907f520ea828b825829ecea942a0e9b9" }
-commonware-consensus = { git = "https://github.com/commonwarexyz/monorepo", rev = "4c4407b6907f520ea828b825829ecea942a0e9b9" }
-commonware-cryptography = { git = "https://github.com/commonwarexyz/monorepo", rev = "4c4407b6907f520ea828b825829ecea942a0e9b9" }
-commonware-glue = { git = "https://github.com/commonwarexyz/monorepo", rev = "4c4407b6907f520ea828b825829ecea942a0e9b9" }
-commonware-macros = { git = "https://github.com/commonwarexyz/monorepo", rev = "4c4407b6907f520ea828b825829ecea942a0e9b9" }
-commonware-math = { git = "https://github.com/commonwarexyz/monorepo", rev = "4c4407b6907f520ea828b825829ecea942a0e9b9" }
-commonware-parallel = { git = "https://github.com/commonwarexyz/monorepo", rev = "4c4407b6907f520ea828b825829ecea942a0e9b9" }
-commonware-p2p = { git = "https://github.com/commonwarexyz/monorepo", rev = "4c4407b6907f520ea828b825829ecea942a0e9b9" }
-commonware-resolver = { git = "https://github.com/commonwarexyz/monorepo", rev = "4c4407b6907f520ea828b825829ecea942a0e9b9" }
-commonware-runtime = { git = "https://github.com/commonwarexyz/monorepo", rev = "4c4407b6907f520ea828b825829ecea942a0e9b9" }
-commonware-storage = { git = "https://github.com/commonwarexyz/monorepo", rev = "4c4407b6907f520ea828b825829ecea942a0e9b9" }
-commonware-utils = { git = "https://github.com/commonwarexyz/monorepo", rev = "4c4407b6907f520ea828b825829ecea942a0e9b9" }
+commonware-codec = { git = "https://github.com/commonwarexyz/monorepo", rev = "982cd18ea7c3a2fc9e134c3489b842decf9988d6" }
+commonware-coding = { git = "https://github.com/commonwarexyz/monorepo", rev = "982cd18ea7c3a2fc9e134c3489b842decf9988d6" }
+commonware-actor = { git = "https://github.com/commonwarexyz/monorepo", rev = "982cd18ea7c3a2fc9e134c3489b842decf9988d6" }
+commonware-consensus = { git = "https://github.com/commonwarexyz/monorepo", rev = "982cd18ea7c3a2fc9e134c3489b842decf9988d6" }
+commonware-cryptography = { git = "https://github.com/commonwarexyz/monorepo", rev = "982cd18ea7c3a2fc9e134c3489b842decf9988d6" }
+commonware-glue = { git = "https://github.com/commonwarexyz/monorepo", rev = "982cd18ea7c3a2fc9e134c3489b842decf9988d6" }
+commonware-macros = { git = "https://github.com/commonwarexyz/monorepo", rev = "982cd18ea7c3a2fc9e134c3489b842decf9988d6" }
+commonware-math = { git = "https://github.com/commonwarexyz/monorepo", rev = "982cd18ea7c3a2fc9e134c3489b842decf9988d6" }
+commonware-parallel = { git = "https://github.com/commonwarexyz/monorepo", rev = "982cd18ea7c3a2fc9e134c3489b842decf9988d6" }
+commonware-p2p = { git = "https://github.com/commonwarexyz/monorepo", rev = "982cd18ea7c3a2fc9e134c3489b842decf9988d6" }
+commonware-resolver = { git = "https://github.com/commonwarexyz/monorepo", rev = "982cd18ea7c3a2fc9e134c3489b842decf9988d6" }
+commonware-runtime = { git = "https://github.com/commonwarexyz/monorepo", rev = "982cd18ea7c3a2fc9e134c3489b842decf9988d6" }
+commonware-storage = { git = "https://github.com/commonwarexyz/monorepo", rev = "982cd18ea7c3a2fc9e134c3489b842decf9988d6" }
+commonware-utils = { git = "https://github.com/commonwarexyz/monorepo", rev = "982cd18ea7c3a2fc9e134c3489b842decf9988d6" }
 rocksdb = "0.24.0"
 mimalloc = "0.1.52"
 rand = "0.10.2"

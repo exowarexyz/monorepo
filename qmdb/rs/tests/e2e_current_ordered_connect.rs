@@ -208,7 +208,11 @@ async fn build_source_tips(
                         batch = batch.write(key, value);
                     }
                     batch
-                        .merkleize(&db, None::<Vec<u8>>)
+                        .merkleize(
+                            &db,
+                            None::<Vec<u8>>,
+                            &mut commonware_storage::qmdb::floor::Proportional,
+                        )
                         .await
                         .expect("merkleize")
                 };
