@@ -12,6 +12,14 @@ platform trust configuration.
 
 `exoware-sdk` is **ALPHA** software and is not yet recommended for production use. Developers should expect breaking changes and occasional instability.
 
+## Put compatibility
+
+`StoreClient` sends Put requests using Connect unary protobuf, uncompressed by
+default or with the zstd option below. Put rejects Connect JSON, gzip request
+compression, gRPC, and gRPC-Web. Custom clients must select Connect unary with
+binary protobuf. See the [Put compatibility table](../../proto/README.md#put-client-compatibility)
+for supported formats and the restrictions on custom zstd encoders.
+
 ## Put limits and batching
 
 The published limits are available under `exoware_sdk::limits`. See the

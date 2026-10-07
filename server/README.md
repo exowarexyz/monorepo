@@ -28,13 +28,19 @@ return `consistency_not_ready_error(required, current)` to preserve the standard
 error details and standard retry hint. Both helpers are exported from the crate root.
 
 The shared Put adapter accepts Connect unary protobuf requests with identity or
-bounded single-frame zstd encoding. It admits transport capacity before reading
-and lends `&mut PutInput` to `Ingest::put`. Backends incrementally decode into
+bounded single-frame zstd encoding. It rejects Connect JSON, gzip request
+compression, gRPC, gRPC-Web, and Connect streaming envelopes. Custom clients must
+select the Connect unary protocol and binary protobuf. See
+[Put client compatibility](../proto/README.md#put-client-compatibility) for the
+format table, request headers, and zstd restrictions.
+
+The adapter admits transport capacity before reading and lends `&mut PutInput`
+to `Ingest::put`. Backends incrementally decode into
 reserved preparation storage and call `finish().await` before publication.
 Rejected input is drained separately within its wire bound and original deadline.
-Put rejects gzip request compression even though other services accept it.
 Encoding rejections advertise zstd through `Accept-Encoding`.
-Other services continue through the ordinary ConnectRPC dispatcher.
+Other services continue through the ordinary ConnectRPC dispatcher and still
+accept JSON and gzip requests.
 
 Custom ingest handlers can reuse `PutEntryCursor`, `UnknownBudget`,
 `decode_entry_with_budget`, and the validation and error helpers exported from
@@ -57,11 +63,18 @@ termination when unfinished requests reach their deadlines. Returning an error
 response alone cannot bound connection lifetime when outbound writes are blocked.
 HTTP/2 cleanup failure terminates the affected stream.
 
-Put honors `connect-timeout-ms` when present. Otherwise it uses `PutConfig.timeout`,
-which defaults to 30 seconds. The same deadline covers middleware, reception,
-decoding, backend work and rejection cleanup. Size the fallback for
-`max_wire_bytes` over the slowest supported link, with room for processing and
-backend latency.
+Put uses `connect-timeout-ms` when present and otherwise uses `PutConfig.timeout`,
+which defaults to 30 seconds. Both are capped by `PutConfig.max_timeout`, which
+defaults to five minutes. Clients can request more time than the fallback, but
+cannot extend the host ceiling. Malformed timeout headers are rejected with
+cleanup bounded by the smaller of the fallback and the host ceiling.
+
+The same absolute deadline covers middleware, reception, decoding, backend work
+and rejection cleanup. Stalled uploads cannot extend it during graceful shutdown.
+Configure the fallback and ceiling for `max_wire_bytes` over the slowest supported
+link, with room for processing and backend latency. Cancellation does not release
+reservations still owned by detached decoding or accepted writer work. Those
+reservations remain charged until the work releases its allocations.
 
 `AppState::with_put_config` and `IngestState::with_put_config` configure the host
 budget, admitted wire bound, timeout, and observer. Memory upgrades fail immediately

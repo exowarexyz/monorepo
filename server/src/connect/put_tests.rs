@@ -818,3 +818,47 @@ async fn upload_can_complete_after_server_fallback_before_client_deadline() {
 
     assert_eq!(response.status(), http::StatusCode::OK);
 }
+
+#[tokio::test]
+async fn put_timeouts_respect_the_host_ceiling() {
+    use std::time::Duration;
+
+    for (header, fallback, maximum, expected) in [
+        (None, 30, 300, 30),
+        (Some("1000"), 30, 300, 1),
+        (Some("90000"), 30, 300, 90),
+        (Some("9999999999"), 30, 300, 300),
+        (None, 600, 300, 300),
+        (Some("900000"), 30, 600, 600),
+        (Some("90000"), 30, 60, 60),
+    ] {
+        let ingest = Arc::new(RecordDeadline {
+            remaining: Mutex::new(None),
+        });
+        let service = ingest_service(IngestState::new(ingest.clone()).with_put_config(
+            crate::ingest::PutConfig {
+                timeout: Duration::from_secs(fallback),
+                max_timeout: Duration::from_secs(maximum),
+                ..Default::default()
+            },
+        ));
+        let mut incoming = http::Request::post(format!("http://store.test/{PUT_PATH}"))
+            .header(http::header::CONTENT_TYPE, "application/proto");
+        if let Some(header) = header {
+            incoming = incoming.header("connect-timeout-ms", header);
+        }
+        let incoming = incoming
+            .body(full_body(request(1).encode_to_vec().into()))
+            .unwrap();
+        let started = tokio::time::Instant::now();
+        let response = tower::ServiceExt::oneshot(service, incoming).await.unwrap();
+        assert_eq!(response.status(), http::StatusCode::OK);
+        let remaining = ingest.remaining.lock().unwrap().unwrap();
+        let expected = Duration::from_secs(expected);
+        assert!(
+            remaining <= expected,
+            "granted {remaining:?}, expected {expected:?}"
+        );
+        assert!(remaining >= expected.saturating_sub(started.elapsed()));
+    }
+}

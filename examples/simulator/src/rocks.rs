@@ -1808,8 +1808,92 @@ mod tests {
             let response = rows.decode_response().unwrap();
             assert_eq!(response.entries.len(), 128);
             drop(input);
+
+            // The receipt confirms publication before the writer drops its admission leases.
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                while budget.usage() != (0, 0) {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
             assert_eq!(budget.usage(), (0, 0));
         }
+    }
+
+    #[tokio::test]
+    async fn published_receipt_can_precede_writer_admission_release() {
+        struct PausedOwner {
+            started: Option<oneshot::Sender<()>>,
+            release: mpsc::Receiver<()>,
+        }
+
+        impl AsRef<[u8]> for PausedOwner {
+            fn as_ref(&self) -> &[u8] {
+                b"v"
+            }
+        }
+
+        impl Drop for PausedOwner {
+            fn drop(&mut self) {
+                let _ = self.started.take().unwrap().send(());
+                let _ = self.release.recv();
+            }
+        }
+
+        let dir = tempdir().unwrap();
+        let store = RocksStore::open(dir.path(), None).unwrap();
+        let budget = IngestBudget::new(BudgetConfig {
+            max_requests: 1,
+            max_bytes: 1024 * 1024,
+        });
+        let admission = budget.try_admit(0).unwrap();
+        let request = admission.request_lease();
+        let encoded_len = put_encoded_len((0..128).map(|_| (b"k".as_slice(), b"v".as_slice())));
+        let reserved_bytes = writer_memory(128, encoded_len, 128);
+        let mut memory = WriterMemory::default();
+        memory.reserve(&request, reserved_bytes).unwrap();
+        drop(admission);
+
+        // Pausing the final payload drop makes the reply and cleanup ordering deterministic.
+        let (started, dropping) = oneshot::channel();
+        let (release, resume) = mpsc::channel();
+        let value = Bytes::from_owner(PausedOwner {
+            started: Some(started),
+            release: resume,
+        });
+        let sequence = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            store.writer.submit(
+                vec![(Bytes::from_static(b"k"), value); 128],
+                encoded_len,
+                None,
+                memory,
+                request,
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), dropping)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(sequence, 1);
+        assert_eq!(store.current_sequence(), sequence);
+        assert_eq!(store.db.get(b"k").unwrap().unwrap(), b"v");
+        assert_eq!(budget.usage(), (1, reserved_bytes));
+        assert!(budget.try_admit(0).is_err());
+
+        release.send(()).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while budget.usage() != (0, 0) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(budget.try_admit(0).is_ok());
     }
 
     #[tokio::test]

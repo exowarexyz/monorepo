@@ -22,9 +22,11 @@ pub struct PutConfig {
     /// Unknown-length bodies reserve this maximum before reception. Known lengths
     /// reserve a smaller bound that is enforced during reception and cleanup.
     pub max_wire_bytes: usize,
-    /// Request timeout when `connect-timeout-ms` is absent. Client timeouts take
-    /// precedence. The deadline covers reception, processing and cleanup.
+    /// Request timeout when `connect-timeout-ms` is absent.
     pub timeout: std::time::Duration,
+    /// Host ceiling for client and fallback timeouts. The deadline covers
+    /// middleware, reception, processing and rejection cleanup.
+    pub max_timeout: std::time::Duration,
     pub observer: Option<Arc<dyn super::IngestObserver>>,
 }
 
@@ -34,6 +36,7 @@ impl Default for PutConfig {
             budget: super::IngestBudget::new(super::BudgetConfig::default()),
             max_wire_bytes: crate::MAX_CONNECTRPC_BODY_BYTES,
             timeout: std::time::Duration::from_secs(30),
+            max_timeout: std::time::Duration::from_secs(300),
             observer: None,
         }
     }
@@ -97,10 +100,10 @@ fn compressed(parts: &Parts) -> Result<bool, ConnectError> {
     }
 }
 
-fn deadline(
+fn request_timeout(
     parts: &Parts,
     default: std::time::Duration,
-) -> Result<tokio::time::Instant, ConnectError> {
+) -> Result<std::time::Duration, ConnectError> {
     let timeout = match parts.headers.get("connect-timeout-ms") {
         None => default,
         Some(value) => {
@@ -120,7 +123,7 @@ fn deadline(
             )
         }
     };
-    Ok(tokio::time::Instant::now() + timeout)
+    Ok(timeout)
 }
 
 /// Put middleware runs on metadata while the body remains unread.
@@ -214,11 +217,13 @@ async fn put<I: Ingest>(
 
     let (mut parts, body) = request.into_parts();
     let headers = parts.headers.clone();
-    let parsed_deadline = deadline(&parts, state.put_config.timeout);
-    let request_deadline = parsed_deadline
-        .as_ref()
-        .copied()
-        .unwrap_or_else(|_| tokio::time::Instant::now() + state.put_config.timeout);
+    let parsed_timeout = request_timeout(&parts, state.put_config.timeout);
+    let request_deadline = tokio::time::Instant::now()
+        + parsed_timeout
+            .as_ref()
+            .copied()
+            .unwrap_or(state.put_config.timeout)
+            .min(state.put_config.max_timeout);
     let control = parts.extensions.get::<ConnectionControl>().cloned();
     let generation = control
         .as_ref()
@@ -261,7 +266,7 @@ async fn put<I: Ingest>(
             .flatten()
             .or(exact_length),
     };
-    let mut rejection = if let Err(error) = parsed_deadline {
+    let mut rejection = if let Err(error) = parsed_timeout {
         Some(error)
     } else if !state.ready.load(Ordering::SeqCst) {
         Some(crate::connect::worker_not_ready_error())

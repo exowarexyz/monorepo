@@ -27,7 +27,7 @@ use socket2::SockRef;
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf},
     net::{TcpListener, TcpStream},
-    sync::oneshot,
+    sync::{oneshot, Notify},
     task::JoinHandle,
     time::{sleep, timeout, timeout_at, Instant},
 };
@@ -48,6 +48,10 @@ struct Stats {
     request_polls: AtomicUsize,
     body_polls: AtomicUsize,
     body_drops: AtomicUsize,
+    hold_started: Notify,
+    hold_release: Notify,
+    shutdown_started: Notify,
+    stale_id: Mutex<Option<u64>>,
     stale_attempts: AtomicUsize,
     stale_disarms: AtomicUsize,
 }
@@ -254,6 +258,11 @@ async fn handler(
         sleep(DEADLINE + SCHEDULING_SLACK).await;
         return Ok(Response::new(Body::from("ok")));
     }
+    if path == "/hold-gated" {
+        stats.hold_started.notify_one();
+        stats.hold_release.notified().await;
+        return Ok(Response::new(Body::from("ok")));
+    }
 
     let started = Instant::now();
     *stats.request_started.lock().unwrap() = Some(started);
@@ -267,6 +276,14 @@ async fn handler(
     }
     let id = control.arm_http1(version, deadline);
 
+    // Run the previous request's cleanup only after its successor is armed.
+    if let Some(stale_id) = stats.stale_id.lock().unwrap().take() {
+        stats.stale_attempts.fetch_add(1, Ordering::SeqCst);
+        if control.disarm(stale_id) {
+            stats.stale_disarms.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
     if path.starts_with("/complete") {
         while timeout_at(deadline, request.body_mut().frame())
             .await
@@ -275,14 +292,7 @@ async fn handler(
         {}
         assert!(control.disarm(id.unwrap()));
         if path == "/complete-stale" {
-            let stats = stats.clone();
-            tokio::spawn(async move {
-                sleep(Duration::from_millis(40)).await;
-                stats.stale_attempts.fetch_add(1, Ordering::SeqCst);
-                if control.disarm(id.unwrap()) {
-                    stats.stale_disarms.fetch_add(1, Ordering::SeqCst);
-                }
-            });
+            *stats.stale_id.lock().unwrap() = id;
         }
         return Ok(Response::new(Body::from("ok")));
     }
@@ -407,9 +417,11 @@ impl Server {
             }
         });
         let (shutdown, receive) = oneshot::channel();
+        let shutdown_stats = stats.clone();
         let task = tokio::spawn(async move {
             serve(listener, service, async {
                 let _ = receive.await;
+                shutdown_stats.shutdown_started.notify_one();
             })
             .await
             .unwrap();
@@ -736,10 +748,17 @@ async fn graceful_shutdown_waits_for_an_active_disarmed_request() -> Result<(), 
     tcp.write_all(b"POST /complete HTTP/1.1\r\nHost: localhost\r\nContent-Length: 1\r\n\r\nx")
         .await?;
     read_response(&mut tcp).await?;
-    tcp.write_all(b"GET /hold HTTP/1.1\r\nHost: localhost\r\n\r\n")
+    tcp.write_all(b"GET /hold-gated HTTP/1.1\r\nHost: localhost\r\n\r\n")
         .await?;
-    sleep(Duration::from_millis(20)).await;
+    timeout(Duration::from_secs(2), server.stats.hold_started.notified()).await?;
     server.shutdown.take().unwrap().send(()).unwrap();
+    timeout(
+        Duration::from_secs(2),
+        server.stats.shutdown_started.notified(),
+    )
+    .await?;
+    assert!(!server.task.is_finished());
+    server.stats.hold_release.notify_one();
     assert!(read_response(&mut tcp).await?.contains("200 OK"));
     timeout(Duration::from_secs(2), &mut server.task).await??;
     assert_eq!(server.stats.io_drops.load(Ordering::SeqCst), 1);
@@ -750,9 +769,9 @@ async fn graceful_shutdown_waits_for_an_active_disarmed_request() -> Result<(), 
 async fn aborting_the_listener_task_releases_its_connections() -> Result<(), Error> {
     let mut server = Server::open(false).await?;
     let mut tcp = client(server.addr).await?;
-    tcp.write_all(b"GET /hold HTTP/1.1\r\nHost: localhost\r\n\r\n")
+    tcp.write_all(b"GET /hold-gated HTTP/1.1\r\nHost: localhost\r\n\r\n")
         .await?;
-    sleep(Duration::from_millis(20)).await;
+    timeout(Duration::from_secs(2), server.stats.hold_started.notified()).await?;
     server.task.abort();
     assert!(timeout(Duration::from_secs(1), &mut server.task)
         .await?
@@ -1357,9 +1376,10 @@ async fn http1_malformed_timeout_delivers_error_after_write_backpressure() -> Re
     let addr = listener.local_addr()?;
     let gate = Arc::new(Gate::default());
     gate.blocked.store(true, Ordering::SeqCst);
+    let stats = Arc::new(Stats::default());
     let listener = MeasuredListener {
         tcp: listener,
-        stats: Arc::new(Stats::default()),
+        stats: stats.clone(),
         gate: gate.clone(),
     };
     let service = ingest_service(IngestState::new(Arc::new(ConsumeIngest)).with_put_config(
@@ -1373,14 +1393,18 @@ async fn http1_malformed_timeout_delivers_error_after_write_backpressure() -> Re
         let _ = receive.await;
     }));
     let mut tcp = client(addr).await?;
-    tcp.write_all(b"POST /log.ingest.v1.Service/Put HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Type: application/proto\r\nconnect-timeout-ms: invalid\r\nContent-Length: 1\r\n\r\n")
+    tcp.write_all(b"POST /log.ingest.v1.Service/Put HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Type: application/proto\r\nconnect-timeout-ms: invalid\r\nContent-Length: 1\r\n\r\nx")
         .await?;
-    sleep(Duration::from_millis(25)).await;
+    timeout(Duration::from_secs(2), async {
+        while stats.pending_writes.load(Ordering::SeqCst) == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await?;
     gate.blocked.store(false, Ordering::SeqCst);
     if let Some(waker) = gate.waker.lock().unwrap().take() {
         waker.wake();
     }
-    let _ = tcp.write_all(b"x").await;
     let mut raw = Vec::new();
     let _ = timeout(Duration::from_secs(2), tcp.read_to_end(&mut raw)).await?;
     drop(tcp);
@@ -1435,5 +1459,132 @@ async fn http2_malformed_timeout_preserves_connect_error() -> Result<(), Error> 
     let error: serde_json::Value = serde_json::from_slice(&body)?;
     assert_eq!(error["code"], "invalid_argument");
     assert_eq!(error["message"], "invalid request timeout");
+    Ok(())
+}
+
+#[tokio::test]
+async fn http1_host_timeout_releases_stalled_uploads_during_shutdown() -> Result<(), Error> {
+    use exoware_server::ingest::{BudgetConfig, IngestBudget};
+
+    let cap = Duration::from_secs(3600);
+    for (header, count, reserved, fallback) in [
+        ("9999999999", 4, 1024 * 1024 * 1024, cap / 2),
+        ("invalid", 1, 0, cap * 2),
+    ] {
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let addr = listener.local_addr()?;
+        let budget = IngestBudget::new(BudgetConfig::default());
+        let service = ingest_service(IngestState::new(Arc::new(ConsumeIngest)).with_put_config(
+            PutConfig {
+                budget: budget.clone(),
+                timeout: fallback,
+                max_timeout: cap,
+                ..PutConfig::default()
+            },
+        ));
+        let (shutdown, receive) = oneshot::channel();
+        let (started, shutdown_started) = oneshot::channel();
+        let mut server = tokio::spawn(serve(listener, service, async {
+            let _ = receive.await;
+            let _ = started.send(());
+        }));
+        let first = Instant::now();
+        let mut clients = Vec::new();
+        for _ in 0..count {
+            let mut tcp = client(addr).await?;
+            tcp.write_all(format!("POST {PUT_PATH} HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/proto\r\nconnect-timeout-ms: {header}\r\nTransfer-Encoding: chunked\r\n\r\n").as_bytes())
+                .await?;
+            clients.push(tcp);
+        }
+        timeout(Duration::from_secs(2), async {
+            while budget.usage().0 != count {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await?;
+        shutdown.send(()).unwrap();
+        timeout(Duration::from_secs(2), shutdown_started).await??;
+
+        // Pause only after real I/O and admission so idle socket waits cannot advance time.
+        tokio::time::pause();
+        let admitted = Instant::now();
+        tokio::time::advance(first + cap - Duration::from_millis(1) - admitted).await;
+        assert_eq!(budget.usage(), (count, reserved));
+        assert!(futures::poll!(&mut server).is_pending());
+        if count == 4 {
+            assert!(budget.try_admit(1).is_err());
+        }
+
+        // Every request started between the first write and the admission barrier.
+        tokio::time::advance(admitted + cap - Instant::now()).await;
+        tokio::time::resume();
+        timeout(Duration::from_secs(2), server).await???;
+        assert_eq!(budget.usage(), (0, 0));
+        drop(clients);
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn http2_host_timeout_releases_a_stalled_upload() -> Result<(), Error> {
+    use exoware_server::ingest::{BudgetConfig, IngestBudget};
+
+    let cap = Duration::from_secs(3600);
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let addr = listener.local_addr()?;
+    let budget = IngestBudget::new(BudgetConfig::default());
+    let service = ingest_service(IngestState::new(Arc::new(ConsumeIngest)).with_put_config(
+        PutConfig {
+            budget: budget.clone(),
+            max_timeout: cap,
+            ..PutConfig::default()
+        },
+    ));
+    let (shutdown, receive) = oneshot::channel();
+    let server = tokio::spawn(serve(listener, service, async {
+        let _ = receive.await;
+    }));
+    let mut h2 = Http2::open(addr).await?;
+    let first = Instant::now();
+    let request = Request::post(format!("http://{addr}{PUT_PATH}"))
+        .header(header::CONTENT_TYPE, "application/proto")
+        .header("connect-timeout-ms", "9999999999")
+        .body(())?;
+    let (response, mut upload) = h2.connection.send_request(request, false)?;
+    timeout(Duration::from_secs(2), async {
+        while budget.usage().0 != 1 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await?;
+
+    tokio::time::pause();
+    let admitted = Instant::now();
+    tokio::time::advance(first + cap - Duration::from_millis(1) - admitted).await;
+    assert_eq!(budget.usage(), (1, PutConfig::default().max_wire_bytes));
+    assert!(futures::poll!(poll_fn(|cx| upload.poll_reset(cx))).is_pending());
+    tokio::time::advance(admitted + cap - Instant::now()).await;
+    tokio::time::resume();
+    let reason = timeout(Duration::from_secs(2), poll_fn(|cx| upload.poll_reset(cx))).await??;
+    assert_eq!(reason, h2::Reason::CANCEL);
+    assert_eq!(budget.usage(), (0, 0));
+
+    // A completed Put still succeeds on the connection that carried the cancelled stream.
+    poll_fn(|cx| h2.connection.poll_ready(cx)).await?;
+    let request = Request::post(format!("http://{addr}{PUT_PATH}"))
+        .header(header::CONTENT_TYPE, "application/proto")
+        .body(())?;
+    let (healthy, mut completed) = h2.connection.send_request(request, false)?;
+    completed.send_data(Bytes::from_static(TINY_PUT), true)?;
+    assert_eq!(
+        timeout(Duration::from_secs(2), healthy).await??.status(),
+        StatusCode::OK
+    );
+    drop(response);
+    drop(upload);
+    drop(completed);
+    drop(h2);
+    shutdown.send(()).unwrap();
+    timeout(Duration::from_secs(2), server).await???;
     Ok(())
 }

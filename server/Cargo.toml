@@ -35,3 +35,4 @@ commonware-codec = { workspace = true }
 commonware-parallel = { workspace = true }
 socket2 = "0.6"
 serde_json = "1"
+tokio = { workspace = true, features = ["test-util"] }

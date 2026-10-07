@@ -1,9 +1,48 @@
-# Exoware protocol limits
+# Exoware protocol compatibility and limits
 
-This document defines the portable size contract for `log.ingest.v1.Put`.
+This document defines the supported request formats and portable size contract
+for `log.ingest.v1.Put`.
 The message schema is [`log/v1/ingest.proto`](./log/v1/ingest.proto).
-The shared Put endpoint accepts protobuf requests only. Other services continue
-to support JSON requests.
+
+## Put client compatibility
+
+The shared Put endpoint supports the Connect unary protocol with binary protobuf.
+The Rust SDK and TypeScript SDK use this format. Custom or generated clients must
+also select Connect unary and protobuf. Generating a client from the same schema
+does not make a gRPC or gRPC-Web transport compatible with Put.
+
+| Request format | Put support |
+| --- | --- |
+| Connect unary protobuf, uncompressed | Accepted |
+| Connect unary protobuf, zstd meeting the restrictions below | Accepted |
+| Connect unary JSON | Rejected |
+| Connect unary protobuf with gzip or another unsupported content encoding | Rejected |
+| gRPC or gRPC-Web, including protobuf requests | Rejected |
+| Connect streaming envelopes | Rejected |
+
+Send an HTTP `POST` to `/log.ingest.v1.Service/Put` with
+`Content-Type: application/proto`. For an uncompressed body, omit
+`Content-Encoding` or use `Content-Encoding: identity`. For zstd, use
+`Content-Encoding: zstd`. Multiple content encodings and the streaming compression
+headers `Connect-Content-Encoding` and `Grpc-Encoding` are rejected.
+
+These restrictions apply to Put. Other services continue to support JSON and
+gzip requests through the ordinary ConnectRPC dispatcher.
+
+### Zstd restrictions
+
+A compressed Put body must satisfy all of the following:
+
+- Contain exactly one complete standard zstd frame, with no trailing bytes,
+  concatenated frames, or skippable frames.
+- Declare the decompressed content size in the zstd frame header. The decoded
+  byte count must match that declaration. This is separate from HTTP
+  `Content-Length` and is required even when that HTTP header is omitted.
+- Use a window no larger than 128 MiB and require no compression dictionary.
+- Stay within the request body and decompressed message limits described below.
+
+The Rust SDK's zstd request compression produces this format. Custom compressors
+must include the content size even if their default streaming mode omits it.
 
 ## Portable Put limits
 
