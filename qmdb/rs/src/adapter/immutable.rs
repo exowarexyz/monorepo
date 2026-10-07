@@ -13,13 +13,16 @@ use commonware_storage::{
 };
 use exoware_sdk::{PrefixedStoreClient, ReadSession};
 
-use crate::adapter::codec::{decode_update_location, merkle_size_for_watermark};
+use crate::adapter::codec::decode_update_location;
 use crate::adapter::core;
-use crate::adapter::operation_range::load_operation_range_checkpoint;
+use crate::adapter::operation_range::{
+    load_operation_range_checkpoint, load_operations_multi_proof,
+};
 use crate::adapter::read_cache::ReadCache;
-use crate::adapter::storage::KvMerkleStorage;
 use crate::error::QmdbError;
-use crate::proof::{OperationRangeCheckpoint, RawBatchMultiProof, VerifiedOperationRange};
+use crate::proof::{
+    MultiProofOperations, OperationRangeCheckpoint, RawBatchMultiProof, VerifiedOperationRange,
+};
 use crate::OperationKv;
 use crate::PublishedWatermark;
 use crate::VersionedValue;
@@ -126,6 +129,11 @@ where
         self.publication.refresh(&session).await
     }
 
+    /// Record a watermark published at `sequence`, as seen by a subscription.
+    pub(crate) fn observe_published(&self, location: Location<F>, sequence: u64) {
+        self.publication.observe(location, sequence);
+    }
+
     pub(crate) async fn resolve_watermark(
         &self,
         watermark: Location<F>,
@@ -222,28 +230,29 @@ where
         Ok(proof)
     }
 
-    pub(crate) async fn batch_multi_proof(
+    /// Multi-proof at a published watermark, built from the same cached reads
+    /// as [`Self::operation_range_checkpoint_at`].
+    pub(crate) async fn multi_proof_at(
         &self,
         watermark: PublishedWatermark<F>,
-        operations: Vec<(Location<F>, Vec<u8>)>,
+        operations: MultiProofOperations<'_, F>,
     ) -> Result<RawBatchMultiProof<H::Digest, F>, QmdbError> {
         let session = ReadSession::fixed(self.store.clone(), Some(watermark.sequence_number));
-        let storage = KvMerkleStorage::<F, H::Digest> {
-            session: &session,
-            size: merkle_size_for_watermark(watermark.location)?,
-            _marker: PhantomData::<H::Digest>,
-        };
-        let inactive_peaks =
-            inactive_peaks_at::<F, K, V, E>(&session, watermark.location, &self.operation_cfg)
-                .await?;
-        let root =
-            core::compute_ops_root::<F, H>(&session, watermark.location, inactive_peaks).await?;
-        crate::proof::build_batch_multi_proof::<F, H, _>(
-            &storage,
-            watermark.location,
-            root,
-            inactive_peaks,
+        let watermark = watermark.location;
+        load_operations_multi_proof::<F, H, _>(
+            &session,
+            &self.read_cache,
+            watermark,
             operations,
+            false,
+            |bytes| async move {
+                let operation = core::decode_operation_at::<F, immutable::Operation<F, K, E>>(
+                    bytes.as_ref(),
+                    watermark,
+                    &self.operation_cfg,
+                )?;
+                inactive_peaks_from_operation::<F, K, V, E>(watermark, operation)
+            },
         )
         .await
     }

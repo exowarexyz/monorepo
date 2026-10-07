@@ -15,7 +15,7 @@ use exoware_sdk::PrefixedStoreClient;
 
 use super::{OperationLogReader, OperationLogServer};
 use crate::adapter::Immutable;
-use crate::proof::{OperationRangeCheckpoint, RawBatchMultiProof};
+use crate::proof::{MultiProofOperations, OperationRangeCheckpoint, RawBatchMultiProof};
 use crate::service::proto::qmdb::v1::OperationLogServiceServer;
 use crate::{OperationKv, PublishedWatermark, QmdbError};
 
@@ -47,12 +47,8 @@ where
         Immutable::resolve_watermark(self, watermark, min_sequence_number)
     }
 
-    fn batch_multi_proof(
-        &self,
-        watermark: PublishedWatermark<F>,
-        operations: Vec<(Location<F>, Vec<u8>)>,
-    ) -> impl Future<Output = Result<RawBatchMultiProof<Self::Digest, F>, QmdbError>> + Send {
-        Immutable::batch_multi_proof(self, watermark, operations)
+    fn observe_published(&self, location: Location<F>, sequence: u64) {
+        Immutable::observe_published(self, location, sequence)
     }
 
     fn operation_range_checkpoint_at(
@@ -63,6 +59,14 @@ where
     ) -> impl Future<Output = Result<OperationRangeCheckpoint<Self::Digest, F>, QmdbError>> + Send
     {
         Immutable::operation_range_checkpoint_at(self, watermark, start_location, max_locations)
+    }
+
+    fn multi_proof_at(
+        &self,
+        watermark: PublishedWatermark<F>,
+        operations: MultiProofOperations<'_, F>,
+    ) -> impl Future<Output = Result<RawBatchMultiProof<Self::Digest, F>, QmdbError>> + Send {
+        Immutable::multi_proof_at(self, watermark, operations)
     }
 }
 

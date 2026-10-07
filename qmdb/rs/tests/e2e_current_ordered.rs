@@ -986,28 +986,6 @@ async fn test_key_value_proof() {
     }
 }
 
-#[tokio::test]
-async fn test_multi_proof() {
-    let store_client = common::local_store_client().await;
-    let source = build_variable_source::<mmr::Family>().await;
-
-    upload_source(&store_client, &source).await;
-
-    let qmdb_client = VariableClient::<mmr::Family>::new(
-        PrefixedStoreClient::empty(store_client.clone()),
-        op_cfg::<mmr::Family>(),
-        key_cfg(),
-    );
-    let result = qmdb_client
-        .multi_proof(
-            source.latest_location,
-            &[b"alpha".as_slice(), b"beta".as_slice()],
-        )
-        .await
-        .expect("multi_proof");
-    assert_eq!(result.operations.len(), 2);
-}
-
 struct CountingQuery {
     store: std::sync::Arc<exoware_simulator::RocksStore>,
     bitmap_chunks: std::sync::Mutex<BTreeSet<u64>>,

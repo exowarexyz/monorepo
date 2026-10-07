@@ -19,7 +19,7 @@ use commonware_utils::{NZUsize, NZU16, NZU64};
 use connectrpc::client::{BoxFuture, ClientBody, ClientTransport};
 use exoware_qmdb::service::proto::qmdb::v1::{
     GetOperationRangeRequest as ProtoGetOperationRangeRequest,
-    SubscribeRequest as ProtoSubscribeRequest,
+    GetOperationsRequest as ProtoGetOperationsRequest, SubscribeRequest as ProtoSubscribeRequest,
 };
 use exoware_qmdb::{
     service::client::rpc::OperationLogClient, service::client::rpc::OperationLogSubscribeProof,
@@ -317,6 +317,249 @@ async fn test_keyless_connect_get_operation_range_returns_verifiable_proof() {
         .expect("cached publication evidence fixes the downstream read floor")
         .into_owned();
     assert!(response.proof.as_option().is_some());
+}
+
+#[tokio::test]
+async fn test_keyless_connect_get_operations_returns_verifiable_multi_proof() {
+    let store_client = common::local_store_client().await;
+    let source = build_source_batch().await;
+    commit_upload(&store_client, &source).await;
+    let (_qmdb_server, qmdb_url) =
+        spawn_qmdb_server(PrefixedStoreClient::empty(store_client.clone())).await;
+    let connect_client = operation_log_client(&qmdb_url);
+    let tip = u64::try_from(source.operations.len() - 1).expect("tip fits");
+
+    for locations in [vec![0, 3], vec![tip], (0..=tip).collect::<Vec<_>>()] {
+        let verified = connect_client
+            .get_operations(
+                ProtoGetOperationsRequest {
+                    tip,
+                    locations: locations.clone(),
+                    min_sequence_number: Some(1),
+                    ..Default::default()
+                },
+                &source.root,
+            )
+            .await
+            .expect("get operations");
+        assert_eq!(verified.tip, Location::new(tip));
+        assert_eq!(verified.root, source.root);
+        let expected = locations
+            .iter()
+            .map(|&location| {
+                (
+                    Location::new(location),
+                    source.operations[location as usize].clone(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(verified.operations, expected);
+
+        // Each operation matches what a single-location range proof returns.
+        for &location in &locations {
+            let range = connect_client
+                .get_operation_range(
+                    ProtoGetOperationRangeRequest {
+                        tip,
+                        start_location: location,
+                        max_locations: 1,
+                        ..Default::default()
+                    },
+                    &source.root,
+                )
+                .await
+                .expect("get operation range");
+            assert_eq!(
+                range.operations,
+                vec![source.operations[location as usize].clone()]
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_keyless_connect_get_operations_rejects_invalid_requests() {
+    let store_client = common::local_store_client().await;
+    let source = build_source_batch().await;
+    commit_upload(&store_client, &source).await;
+    let (_qmdb_server, qmdb_url) =
+        spawn_qmdb_server(PrefixedStoreClient::empty(store_client.clone())).await;
+    let rpc = common::operation_log_rpc_client(&qmdb_url);
+    let connect_client = operation_log_client(&qmdb_url);
+    let tip = u64::try_from(source.operations.len() - 1).expect("tip fits");
+
+    for locations in [
+        vec![],
+        vec![2, 1],
+        vec![1, 1],
+        vec![0, tip + 1],
+        vec![0; 1025],
+    ] {
+        let request = ProtoGetOperationsRequest {
+            tip,
+            locations,
+            ..Default::default()
+        };
+        let error = rpc
+            .get_operations(request.clone())
+            .await
+            .expect_err("server rejects invalid locations");
+        assert_eq!(error.code, connectrpc::ErrorCode::InvalidArgument);
+        let error = connect_client
+            .get_operations(request, &source.root)
+            .await
+            .expect_err("client rejects invalid locations before sending");
+        assert!(matches!(error, QmdbError::InvalidRequestedLocations(_)));
+    }
+
+    let error = rpc
+        .get_operations(ProtoGetOperationsRequest {
+            tip: tip + 10,
+            locations: vec![0],
+            ..Default::default()
+        })
+        .await
+        .expect_err("unpublished tip");
+    assert_eq!(error.code, connectrpc::ErrorCode::OutOfRange);
+
+    let request = ProtoGetOperationsRequest {
+        tip: u64::MAX,
+        locations: vec![0],
+        ..Default::default()
+    };
+    let error = rpc
+        .get_operations(request.clone())
+        .await
+        .expect_err("server rejects overflowing tip");
+    assert_eq!(error.code, connectrpc::ErrorCode::InvalidArgument);
+    let error = connect_client
+        .get_operations(request, &source.root)
+        .await
+        .expect_err("client rejects overflowing tip before sending");
+    assert!(matches!(error, QmdbError::TipOverflow));
+
+    let error = connect_client
+        .get_operations(
+            ProtoGetOperationsRequest {
+                tip,
+                locations: vec![0, 3],
+                ..Default::default()
+            },
+            &Digest::from([7u8; 32]),
+        )
+        .await
+        .expect_err("untrusted root");
+    assert!(matches!(
+        error,
+        QmdbError::ProofVerification {
+            kind: exoware_qmdb::ProofKind::BatchMulti
+        }
+    ));
+}
+
+#[tokio::test]
+async fn test_keyless_connect_client_rejects_mismatched_operations_proof() {
+    use exoware_qmdb::service::proto::qmdb::v1::GetOperationsResponse;
+
+    let store_client = common::local_store_client().await;
+    let source = build_source_batch().await;
+    commit_upload(&store_client, &source).await;
+    let (_qmdb_server, qmdb_url) =
+        spawn_qmdb_server(PrefixedStoreClient::empty(store_client.clone())).await;
+    let tip = u64::try_from(source.operations.len() - 1).expect("tip fits");
+    let honest = common::operation_log_rpc_client(&qmdb_url)
+        .get_operations(ProtoGetOperationsRequest {
+            tip,
+            locations: vec![0, 1, 3],
+            ..Default::default()
+        })
+        .await
+        .expect("get operations")
+        .into_owned();
+
+    let tamper = |edit: &dyn Fn(&mut GetOperationsResponse)| {
+        let mut response = honest.clone();
+        edit(&mut response);
+        response
+    };
+    let proof = |response: &mut GetOperationsResponse| {
+        response
+            .proof
+            .as_option_mut()
+            .expect("proof")
+            .operations
+            .clone()
+    };
+    let mismatch = |err: &QmdbError| matches!(err, QmdbError::RangeMismatch(_));
+    let unverified = |err: &QmdbError| {
+        matches!(
+            err,
+            QmdbError::ProofVerification {
+                kind: exoware_qmdb::ProofKind::BatchMulti
+            }
+        )
+    };
+    type Expect = fn(&QmdbError) -> bool;
+    let cases: Vec<(&str, GetOperationsResponse, u64, Expect)> = vec![
+        (
+            "dropped location",
+            tamper(&|response| {
+                let mut operations = proof(response);
+                operations.pop();
+                response.proof.as_option_mut().unwrap().operations = operations;
+            }),
+            tip,
+            mismatch,
+        ),
+        (
+            "substituted location",
+            tamper(&|response| {
+                response.proof.as_option_mut().unwrap().operations[1].location = 2;
+            }),
+            tip,
+            mismatch,
+        ),
+        (
+            "tampered operation",
+            tamper(&|response| {
+                let operation = &mut response.proof.as_option_mut().unwrap().operations[0];
+                let mut bytes = operation.encoded_operation.to_vec();
+                *bytes.last_mut().unwrap() ^= 0x01;
+                operation.encoded_operation = bytes.into();
+            }),
+            tip,
+            unverified,
+        ),
+        (
+            "proof for a different tip",
+            honest.clone(),
+            tip - 1,
+            mismatch,
+        ),
+    ];
+
+    for (label, response, requested_tip, expect) in cases {
+        let (_static_server, static_url) =
+            common::spawn_static_operations_service(common::StaticOperationsService {
+                operations_response: response,
+            })
+            .await;
+        let result = operation_log_client(&static_url)
+            .get_operations(
+                ProtoGetOperationsRequest {
+                    tip: requested_tip,
+                    locations: vec![0, 1, 3],
+                    ..Default::default()
+                },
+                &source.root,
+            )
+            .await;
+        let err = result.expect_err(label);
+        assert!(
+            expect(&err),
+            "{label} rejected for the wrong reason: {err:?}"
+        );
+    }
 }
 
 #[tokio::test]

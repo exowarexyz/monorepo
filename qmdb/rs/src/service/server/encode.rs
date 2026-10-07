@@ -15,8 +15,8 @@ use crate::proof::{
     RawKeyExclusionProof, RawKeyLookupProof, RawKeyRangeProof, RawKeyValueProof,
 };
 use crate::service::proto::qmdb::v1::{
-    GetCurrentOperationRangeResponse, GetManyResponse, GetOperationRangeResponse, GetRangeResponse,
-    GetResponse, SubscribeResponse,
+    GetCurrentOperationRangeResponse, GetManyResponse, GetOperationRangeResponse,
+    GetOperationsResponse, GetRangeResponse, GetResponse, SubscribeResponse,
 };
 
 const WIRE_VARINT: u64 = buffa::encoding::WireType::Varint as u64;
@@ -448,6 +448,16 @@ pub(crate) fn get_operation_range_response<D: Digest, F: Graftable>(
     PreEncoded::from_bytes_unchecked(message_bytes(message_field_len(1, proof_len), |buf| {
         write_message_field(buf, 1, proof_len);
         write_operation_range_checkpoint(buf, proof);
+    }))
+}
+
+pub(crate) fn get_operations_response<D: Digest, F: Graftable>(
+    proof: &RawBatchMultiProof<D, F>,
+) -> PreEncoded<GetOperationsResponse> {
+    let proof_len = historical_multi_proof_len(proof);
+    PreEncoded::from_bytes_unchecked(message_bytes(message_field_len(1, proof_len), |buf| {
+        write_message_field(buf, 1, proof_len);
+        write_historical_multi_proof(buf, proof);
     }))
 }
 

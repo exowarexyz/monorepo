@@ -1,5 +1,5 @@
-//! `qmdb.v1.OperationLogService`: historical operation ranges and
-//! proof-carrying subscriptions.
+//! `qmdb.v1.OperationLogService`: historical operation ranges, multi-location
+//! operation proofs, and proof-carrying subscriptions.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::future::Future;
@@ -18,10 +18,11 @@ use futures::{FutureExt, Stream};
 
 // The subscribe stream still classifies raw Store rows itself.
 use crate::adapter::subscription::{self as sub, RowClassifier};
-use crate::proof::{OperationRangeCheckpoint, RawBatchMultiProof};
+use crate::proof::{MultiProofOperations, OperationRangeCheckpoint, RawBatchMultiProof};
+use crate::request::OperationLocations;
 use crate::service::proto::qmdb::v1::{
-    GetOperationRangeRequest, GetOperationRangeResponse, OperationLogService, SubscribeRequest,
-    SubscribeResponse,
+    GetOperationRangeRequest, GetOperationRangeResponse, GetOperationsRequest,
+    GetOperationsResponse, OperationLogService, SubscribeRequest, SubscribeResponse,
 };
 use crate::{OperationKv, PublishedWatermark, QmdbError};
 
@@ -45,11 +46,9 @@ pub(crate) trait OperationLogReader: Send + Sync + 'static {
         watermark: Location<Self::Family>,
         min_sequence_number: Option<u64>,
     ) -> impl Future<Output = Result<PublishedWatermark<Self::Family>, QmdbError>> + Send;
-    fn batch_multi_proof(
-        &self,
-        watermark: PublishedWatermark<Self::Family>,
-        operations: Vec<(Location<Self::Family>, Vec<u8>)>,
-    ) -> impl Future<Output = Result<RawBatchMultiProof<Self::Digest, Self::Family>, QmdbError>> + Send;
+    /// Record a watermark row a subscription saw committed at `sequence`, so
+    /// unary reads at or below it skip the publication lookup.
+    fn observe_published(&self, location: Location<Self::Family>, sequence: u64);
     fn operation_range_checkpoint_at(
         &self,
         watermark: PublishedWatermark<Self::Family>,
@@ -57,6 +56,11 @@ pub(crate) trait OperationLogReader: Send + Sync + 'static {
         max_locations: u32,
     ) -> impl Future<Output = Result<OperationRangeCheckpoint<Self::Digest, Self::Family>, QmdbError>>
            + Send;
+    fn multi_proof_at(
+        &self,
+        watermark: PublishedWatermark<Self::Family>,
+        operations: MultiProofOperations<'_, Self::Family>,
+    ) -> impl Future<Output = Result<RawBatchMultiProof<Self::Digest, Self::Family>, QmdbError>> + Send;
 }
 
 /// `OperationLogService` handler over any [`OperationLogReader`].
@@ -195,29 +199,15 @@ fn matcher_passes(matcher: &Option<CompiledFilters>, bytes: Option<&[u8]>) -> bo
     }
 }
 
-struct BatchSubscribeStream<D: commonware_cryptography::Digest, F: Graftable> {
+struct BatchSubscribeStream<R: OperationLogReader> {
     key_matcher: Option<CompiledFilters>,
     value_matcher: Option<CompiledFilters>,
-    classify: RowClassifier<F>,
-    extract_kv: Arc<
-        dyn for<'a> Fn(Location<F>, &'a [u8]) -> Result<OperationKv, QmdbError>
-            + Send
-            + Sync
-            + 'static,
-    >,
-    build_proof: Arc<
-        dyn Fn(
-                PublishedWatermark<F>,
-                Vec<(Location<F>, Vec<u8>)>,
-            ) -> BoxFuture<'static, Result<RawBatchMultiProof<D, F>, QmdbError>>
-            + Send
-            + Sync
-            + 'static,
-    >,
+    classify: RowClassifier<R::Family>,
+    reader: Arc<R>,
     sub: exoware_sdk::StreamSubscription,
-    pending: PendingBatches<F>,
-    watermarks: BTreeMap<Location<F>, u64>,
-    ready: VecDeque<ReadyBatch<F>>,
+    pending: PendingBatches<R::Family>,
+    watermarks: BTreeMap<Location<R::Family>, u64>,
+    ready: VecDeque<ReadyBatch<R::Family>>,
     building: Option<BoxFuture<'static, Result<PreEncoded<SubscribeResponse>, ConnectError>>>,
     // Terminal upstream event observed while a proof was still building. It is
     // delivered after the staged batches drain.
@@ -235,37 +225,21 @@ enum StagedTerminal {
     Error(ConnectError),
 }
 
-impl<D: commonware_cryptography::Digest, F: Graftable> Unpin for BatchSubscribeStream<D, F> {}
+impl<R: OperationLogReader> Unpin for BatchSubscribeStream<R> {}
 
-impl<D: commonware_cryptography::Digest, F: Graftable> BatchSubscribeStream<D, F> {
+impl<R: OperationLogReader> BatchSubscribeStream<R> {
     fn new(
         key_matcher: Option<CompiledFilters>,
         value_matcher: Option<CompiledFilters>,
-        classify: RowClassifier<F>,
-        extract_kv: Arc<
-            dyn for<'a> Fn(Location<F>, &'a [u8]) -> Result<OperationKv, QmdbError>
-                + Send
-                + Sync
-                + 'static,
-        >,
-        build_proof: Arc<
-            dyn Fn(
-                    PublishedWatermark<F>,
-                    Vec<(Location<F>, Vec<u8>)>,
-                )
-                    -> BoxFuture<'static, Result<RawBatchMultiProof<D, F>, QmdbError>>
-                + Send
-                + Sync
-                + 'static,
-        >,
+        classify: RowClassifier<R::Family>,
+        reader: Arc<R>,
         sub: exoware_sdk::StreamSubscription,
     ) -> Self {
         Self {
             key_matcher,
             value_matcher,
             classify,
-            extract_kv,
-            build_proof,
+            reader,
             sub,
             pending: PendingBatches::new(),
             watermarks: BTreeMap::new(),
@@ -291,8 +265,8 @@ impl<D: commonware_cryptography::Digest, F: Graftable> BatchSubscribeStream<D, F
     }
 
     fn ingest_frame(&mut self, frame: &exoware_sdk::StoreBatch) -> Result<(), Box<ConnectError>> {
-        let mut latest: Option<Location<F>> = None;
-        let mut matched: Vec<(Location<F>, Vec<u8>)> = Vec::new();
+        let mut latest: Option<Location<R::Family>> = None;
+        let mut matched: Vec<(Location<R::Family>, Vec<u8>)> = Vec::new();
         let needs_decode = self.key_matcher.is_some() || self.value_matcher.is_some();
 
         for entry in &frame.entries {
@@ -304,9 +278,10 @@ impl<D: commonware_cryptography::Digest, F: Graftable> BatchSubscribeStream<D, F
                 sub::RowFamily::Op => {
                     latest = latest.max(Some(location));
                     let include = if needs_decode {
-                        let OperationKv { key, value } =
-                            (self.extract_kv)(location, entry.value.as_ref())
-                                .map_err(qmdb_error_to_connect)?;
+                        let OperationKv { key, value } = self
+                            .reader
+                            .extract_operation_kv(location, entry.value.as_ref())
+                            .map_err(qmdb_error_to_connect)?;
                         matcher_passes(&self.key_matcher, key.as_deref())
                             && matcher_passes(&self.value_matcher, value.as_deref())
                     } else {
@@ -320,6 +295,8 @@ impl<D: commonware_cryptography::Digest, F: Graftable> BatchSubscribeStream<D, F
                     self.watermarks
                         .entry(location)
                         .or_insert(frame.sequence_number);
+                    self.reader
+                        .observe_published(location, frame.sequence_number);
                 }
             }
         }
@@ -349,7 +326,7 @@ impl<D: commonware_cryptography::Digest, F: Graftable> BatchSubscribeStream<D, F
     }
 }
 
-impl<D: commonware_cryptography::Digest, F: Graftable> Stream for BatchSubscribeStream<D, F> {
+impl<R: OperationLogReader> Stream for BatchSubscribeStream<R> {
     type Item = Result<PreEncoded<SubscribeResponse>, ConnectError>;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<Option<Self::Item>> {
@@ -390,9 +367,10 @@ impl<D: commonware_cryptography::Digest, F: Graftable> Stream for BatchSubscribe
             }
 
             if let Some(batch) = this.ready.pop_front() {
-                let build = this.build_proof.clone();
+                let reader = this.reader.clone();
                 let fut = async move {
-                    let proof = (build)(batch.watermark, batch.matched)
+                    let proof = reader
+                        .multi_proof_at(batch.watermark, MultiProofOperations::Given(batch.matched))
                         .await
                         .map_err(qmdb_error_to_connect)?;
                     Ok(encode::subscribe_response(batch.batch_sequence, &proof))
@@ -455,6 +433,33 @@ impl<R: OperationLogReader> OperationLogService for OperationLogServer<R> {
         }
     }
 
+    fn get_operations(
+        &self,
+        _ctx: Context,
+        request: ServiceRequest<'_, GetOperationsRequest>,
+    ) -> impl Future<Output = connectrpc::ServiceResult<PreEncoded<GetOperationsResponse>>> + Send
+    {
+        let reader = self.reader.clone();
+        async move {
+            let requested = request.locations.iter().copied().collect::<Vec<u64>>();
+            OperationLocations::new(request.tip, &requested)
+                .map_err(|err| qmdb_error_to_connect(err.into()))?;
+            let watermark = reader
+                .resolve_watermark(Location::new(request.tip), request.min_sequence_number)
+                .await
+                .map_err(qmdb_error_to_connect)?;
+            let locations = requested
+                .into_iter()
+                .map(Location::new)
+                .collect::<Vec<Location<R::Family>>>();
+            let proof = reader
+                .multi_proof_at(watermark, MultiProofOperations::Read(&locations))
+                .await
+                .map_err(qmdb_error_to_connect)?;
+            connectrpc::Response::ok(encode::get_operations_response(&proof))
+        }
+    }
+
     fn subscribe(
         &self,
         _ctx: Context,
@@ -481,27 +486,13 @@ impl<R: OperationLogReader> OperationLogService for OperationLogServer<R> {
             let sub = sub::open_store_subscription(&raw_store, filter, since)
                 .await
                 .map_err(qmdb_error_to_connect)?;
-            let extract_kv: Arc<
-                dyn for<'a> Fn(Location<R::Family>, &'a [u8]) -> Result<OperationKv, QmdbError>
-                    + Send
-                    + Sync
-                    + 'static,
-            > = {
-                let reader = reader.clone();
-                Arc::new(move |location, bytes| reader.extract_operation_kv(location, bytes))
-            };
-            let build_proof = Arc::new(move |watermark, matched| {
-                let reader = reader.clone();
-                async move { reader.batch_multi_proof(watermark, matched).await }.boxed()
-            });
             let stream: Pin<
                 Box<dyn Stream<Item = Result<PreEncoded<SubscribeResponse>, ConnectError>> + Send>,
             > = Box::pin(BatchSubscribeStream::new(
                 key_matcher,
                 value_matcher,
                 classify,
-                extract_kv,
-                build_proof,
+                reader,
                 sub,
             ));
             Ok(connectrpc::Response::stream(stream))
@@ -746,7 +737,62 @@ mod authenticated_upload_subscription_tests {
 
     type F = mmr::Family;
 
-    async fn stream() -> BatchSubscribeStream<Digest, F> {
+    /// Treats each operation's bytes as its value and records observed
+    /// watermarks. Ingestion never reads proofs or publication state.
+    #[derive(Default)]
+    struct IngestReader {
+        observed: std::sync::Mutex<Vec<(u64, u64)>>,
+    }
+
+    impl OperationLogReader for IngestReader {
+        type Family = F;
+        type Digest = Digest;
+
+        fn extract_operation_kv(
+            &self,
+            _location: Location<F>,
+            bytes: &[u8],
+        ) -> Result<OperationKv, QmdbError> {
+            Ok(OperationKv {
+                key: None,
+                value: Some(bytes.to_vec()),
+            })
+        }
+
+        async fn resolve_watermark(
+            &self,
+            _watermark: Location<F>,
+            _min_sequence_number: Option<u64>,
+        ) -> Result<PublishedWatermark<F>, QmdbError> {
+            unreachable!("ingestion does not resolve watermarks")
+        }
+
+        fn observe_published(&self, location: Location<F>, sequence: u64) {
+            self.observed
+                .lock()
+                .unwrap()
+                .push((location.as_u64(), sequence));
+        }
+
+        async fn operation_range_checkpoint_at(
+            &self,
+            _watermark: PublishedWatermark<F>,
+            _start_location: Location<F>,
+            _max_locations: u32,
+        ) -> Result<OperationRangeCheckpoint<Digest, F>, QmdbError> {
+            unreachable!("ingestion does not build range proofs")
+        }
+
+        async fn multi_proof_at(
+            &self,
+            _watermark: PublishedWatermark<F>,
+            _operations: MultiProofOperations<'_, F>,
+        ) -> Result<RawBatchMultiProof<Digest, F>, QmdbError> {
+            unreachable!("ingestion does not build proofs")
+        }
+    }
+
+    async fn stream() -> BatchSubscribeStream<IngestReader> {
         let (_task, url) = exoware_simulator::open_temp().await.expect("simulator");
         let client = exoware_sdk::PrefixedStoreClient::empty(exoware_sdk::StoreClient::new(&url));
         let (classifier, filter) = sub::classify_and_filter::<F>();
@@ -755,13 +801,7 @@ mod authenticated_upload_subscription_tests {
             None,
             None,
             classifier,
-            Arc::new(|_, bytes| {
-                Ok(OperationKv {
-                    key: None,
-                    value: Some(bytes.to_vec()),
-                })
-            }),
-            Arc::new(|_, _| async { unreachable!("ingestion does not build proofs") }.boxed()),
+            Arc::new(IngestReader::default()),
             subscription,
         )
     }
@@ -778,6 +818,28 @@ mod authenticated_upload_subscription_tests {
             key: crate::adapter::codec::encode_watermark_key(Location::<F>::new(location)),
             value: Bytes::new(),
         }
+    }
+
+    #[tokio::test]
+    async fn test_every_watermark_row_is_observed_with_its_commit_sequence() {
+        let mut stream = stream().await;
+        stream
+            .ingest_frame(&StoreBatch {
+                sequence_number: 10,
+                entries: vec![operation(4, b"four"), watermark(4)],
+            })
+            .unwrap();
+        // Watermark-only frames carry no operations but still publish.
+        stream
+            .ingest_frame(&StoreBatch {
+                sequence_number: 11,
+                entries: vec![watermark(6), watermark(7)],
+            })
+            .unwrap();
+        assert_eq!(
+            *stream.reader.observed.lock().unwrap(),
+            vec![(4, 10), (6, 11), (7, 11)]
+        );
     }
 
     #[tokio::test]
