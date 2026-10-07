@@ -8,18 +8,24 @@ use bytes::Bytes;
 use commonware_codec::{Copying, DecodeExt};
 use commonware_cryptography::{Digest, Hasher};
 use commonware_storage::merkle::{Family, Graftable, Location, Position};
-use commonware_storage::qmdb::current::proof::{constant::OperationProof, RangeProof};
+use commonware_storage::qmdb::current::proof::{
+    constant::OperationProof, operation_proof_positions, range_proof_positions, RangeProof,
+};
 use exoware_sdk::{RangeMode, ReadSession};
+use futures::FutureExt;
 
 use crate::adapter::codec::{
     chunk_index_for_location, clear_below_floor, decode_current_boundary_metadata,
     encode_chunk_key, encode_current_meta_key, encode_node_key, encode_operation_key,
-    encode_presence_key, merkle_size_for_watermark,
+    encode_presence_key, merkle_size_for_watermark, op_count_for_watermark,
 };
 use crate::adapter::core;
 use crate::adapter::operation_range::root;
 use crate::adapter::read_cache::{ReadCache, RootContext};
-use crate::adapter::storage::{tail_chunk, BitmapTail, KvCurrentStorage, ProofBitmap, TailIndices};
+use crate::adapter::storage::{
+    load_proof_nodes, tail_chunk, BitmapTail, CurrentProofStorage, ProofBitmap, ProofNodes,
+    TailIndices,
+};
 use crate::QmdbError;
 
 /// Current-state values fixed by one published batch boundary.
@@ -224,13 +230,18 @@ async fn proof_bitmap<F: Graftable, D: Digest, const N: usize>(
     Ok(bitmap)
 }
 
+/// Proof construction reads only [`ProofNodes`] already in memory, so it
+/// completes without waiting; waiting would mean it reached for the Store.
+fn construction_awaited() -> QmdbError {
+    QmdbError::CommonwareMerkle("current proof construction waited on unread nodes".into())
+}
+
 fn storage<'a, F: Graftable, H: Hasher, const N: usize>(
-    session: &'a ReadSession,
     tip: &CurrentTip<F, H::Digest>,
-) -> Result<KvCurrentStorage<'a, F, H, N>, QmdbError> {
-    Ok(KvCurrentStorage {
-        session,
-        watermark: tip.watermark,
+    nodes: &'a ProofNodes<F>,
+) -> Result<CurrentProofStorage<'a, F, H, N>, QmdbError> {
+    Ok(CurrentProofStorage {
+        nodes,
         pruned_chunks: tip.pruned_chunks,
         size: merkle_size_for_watermark(tip.watermark)?,
         _marker: PhantomData,
@@ -244,14 +255,20 @@ pub(crate) async fn operation_proof<F: Graftable, H: Hasher, const N: usize>(
     location: Location<F>,
 ) -> Result<OperationProof<F, H::Digest, N>, QmdbError> {
     let status = proof_bitmap::<F, H::Digest, N>(session, tip, Some(location)).await?;
+    let leaves = op_count_for_watermark(tip.watermark)?;
+    let positions = operation_proof_positions::<F, N>(leaves, tip.inactivity_floor, location)
+        .map_err(crate::error::current_proof_error)?;
+    let nodes =
+        load_proof_nodes::<F, N>(session, tip.watermark, tip.pruned_chunks, positions).await?;
     OperationProof::new::<H, _>(
         &status,
-        &storage::<F, H, N>(session, tip)?,
+        &storage::<F, H, N>(tip, &nodes)?,
         tip.inactivity_floor,
         location,
         tip.ops.root,
     )
-    .await
+    .now_or_never()
+    .ok_or_else(construction_awaited)?
     .map_err(crate::error::current_proof_error)
 }
 
@@ -263,13 +280,19 @@ pub(crate) async fn range_proof<F: Graftable, H: Hasher, const N: usize>(
     end: Location<F>,
 ) -> Result<RangeProof<F, H::Digest>, QmdbError> {
     let status = proof_bitmap::<F, H::Digest, N>(session, tip, None).await?;
+    let leaves = op_count_for_watermark(tip.watermark)?;
+    let positions = range_proof_positions::<F, N>(leaves, tip.inactivity_floor, start..end)
+        .map_err(crate::error::current_proof_error)?;
+    let nodes =
+        load_proof_nodes::<F, N>(session, tip.watermark, tip.pruned_chunks, positions).await?;
     RangeProof::new::<H, _, N>(
         &status,
-        &storage::<F, H, N>(session, tip)?,
+        &storage::<F, H, N>(tip, &nodes)?,
         tip.inactivity_floor,
         start..end,
         tip.ops.root,
     )
-    .await
+    .now_or_never()
+    .ok_or_else(construction_awaited)?
     .map_err(crate::error::current_proof_error)
 }
