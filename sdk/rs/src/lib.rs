@@ -17,6 +17,8 @@ pub mod limits;
 pub mod proto;
 pub mod prune_policy;
 #[cfg(test)]
+mod put_retry_tests;
+#[cfg(test)]
 mod read_session_log_tests;
 pub mod retention;
 pub mod selector;
@@ -55,9 +57,10 @@ use futures::{stream::BoxStream, StreamExt};
 use keys::is_valid_key_size;
 use kv_codec::{KvExpr, KvFieldRef, KvReducedValue};
 use limits::{
-    put_entry_encoded_len, PutTooLarge, INGEST_ERROR_DOMAIN, MAX_RESPONSE_ELEMENT_MEMORY_BYTES,
-    MAX_RESPONSE_MESSAGE_BYTES, PUT_TOO_LARGE_REASON,
+    put_entry_encoded_len, PutTooLarge, INGEST_ADMISSION_EXHAUSTED_REASON, INGEST_ERROR_DOMAIN,
+    MAX_RESPONSE_ELEMENT_MEMORY_BYTES, MAX_RESPONSE_MESSAGE_BYTES, PUT_TOO_LARGE_REASON,
 };
+use rand::RngExt as _;
 use rustls_platform_verifier::ConfigVerifierExt;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -1436,7 +1439,7 @@ fn is_batch_missing_error(err: &ConnectError) -> bool {
     }
 }
 
-/// Retry policy for idempotent read operations.
+/// Retry policy for idempotent reads and puts rejected before admission.
 #[derive(Clone, Copy, Debug)]
 pub struct RetryConfig {
     max_attempts: usize,
@@ -1636,7 +1639,7 @@ impl StoreClientBuilder {
         self
     }
 
-    /// Retry policy for idempotent read operations (get / range / reduce).
+    /// Retry policy for idempotent reads and puts rejected before admission.
     pub fn retry_config(mut self, retry: RetryConfig) -> Self {
         self.retry_config = retry.sanitized();
         self
@@ -1973,16 +1976,64 @@ impl StoreClient {
     }
 
     async fn send_put(&self, kvs: Vec<exoware_proto::common::Entry>) -> Result<u64, ClientError> {
-        let config = self.unary_client_config(self.ingest_uri.clone());
-        let client = IngestServiceClient::new(self.connect_http.clone(), config);
-        let response = client
-            .put(ProtoPutRequest {
-                kvs,
-                ..Default::default()
-            })
-            .await
-            .map_err(|err| client_error_from_connect(err, self.credential))?;
-        Ok(response.into_owned().sequence_number)
+        let started = tokio::time::Instant::now();
+        let mut request = ProtoPutRequest {
+            kvs,
+            ..Default::default()
+        };
+        let operation = async {
+            for attempt in 1..=self.retry_config.max_attempts {
+                let remaining = self
+                    .rpc_timeout
+                    .map(|timeout| timeout.saturating_sub(started.elapsed()));
+                if remaining.is_some_and(|timeout| timeout.is_zero()) {
+                    return Err(ConnectError::deadline_exceeded(
+                        "client-side deadline exceeded",
+                    ));
+                }
+
+                let config = store_connect_client_config(
+                    self.ingest_uri.clone(),
+                    self.connect_request_compression,
+                    remaining,
+                );
+                let client = IngestServiceClient::new(self.connect_http.clone(), config);
+
+                // The final attempt cannot retry, so transfer its keys instead of cloning them.
+                let attempt_request = if attempt == self.retry_config.max_attempts {
+                    std::mem::take(&mut request)
+                } else {
+                    request.clone()
+                };
+                match client.put(attempt_request).await {
+                    Ok(response) => return Ok(response.into_owned().sequence_number),
+                    Err(err) => {
+                        if attempt == self.retry_config.max_attempts {
+                            return Err(err);
+                        }
+                        let Some(delay) =
+                            put_retry_delay_for_error(&err, attempt, self.retry_config)
+                        else {
+                            return Err(err);
+                        };
+
+                        tokio::time::sleep(delay).await;
+                    }
+                }
+            }
+            unreachable!("retry configuration always permits one attempt")
+        };
+        let result = match self.rpc_timeout {
+            Some(timeout) => tokio::time::timeout_at(started + timeout, operation)
+                .await
+                .unwrap_or_else(|_| {
+                    Err(ConnectError::deadline_exceeded(
+                        "client-side deadline exceeded",
+                    ))
+                }),
+            None => operation.await,
+        };
+        result.map_err(|err| client_error_from_connect(err, self.credential))
     }
 
     pub(crate) async fn get(&self, key: &Key) -> Result<Option<Bytes>, ClientError> {
@@ -3008,6 +3059,67 @@ impl ReadSession {
     }
 }
 
+fn put_retry_delay_for_error(
+    err: &ConnectError,
+    attempt: usize,
+    retry_config: RetryConfig,
+) -> Option<Duration> {
+    if err.code != ErrorCode::ResourceExhausted {
+        return None;
+    }
+
+    // Duplicate details can hide a conflicting rejection in the shared decoder.
+    for (type_name, type_url) in [
+        (
+            "google.rpc.ErrorInfo",
+            proto::google::rpc::ErrorInfo::TYPE_URL,
+        ),
+        (
+            "google.rpc.RetryInfo",
+            proto::google::rpc::RetryInfo::TYPE_URL,
+        ),
+    ] {
+        if err
+            .details
+            .iter()
+            .filter(|detail| detail.type_url == type_name || detail.type_url == type_url)
+            .count()
+            != 1
+        {
+            return None;
+        }
+    }
+
+    // Only this rejection guarantees that the backend has not received the batch.
+    let decoded = proto_decode_connect_error(err).ok()?;
+    let info = decoded.error_info?;
+    if info.domain != INGEST_ERROR_DOMAIN || info.reason != INGEST_ADMISSION_EXHAUSTED_REASON {
+        return None;
+    }
+    let retry_info = decoded.retry_info?;
+    let delay = retry_info.retry_delay.as_option()?;
+    if !(0..=315_576_000_000).contains(&delay.seconds) || !(0..1_000_000_000).contains(&delay.nanos)
+    {
+        return None;
+    }
+    let hint = Duration::new(delay.seconds as u64, delay.nanos as u32);
+    if hint.is_zero() || hint > retry_config.max_backoff {
+        return None;
+    }
+
+    // Jitter spreads repeated admission attempts without undercutting the server's floor.
+    let backoff = retry_backoff_delay(attempt, retry_config);
+    let minimum = hint.max(backoff);
+    let maximum = minimum
+        .saturating_add(backoff)
+        .min(retry_config.max_backoff);
+    let nanos = rand::rng().random_range(minimum.as_nanos()..=maximum.as_nanos());
+    Some(Duration::new(
+        (nanos / 1_000_000_000) as u64,
+        (nanos % 1_000_000_000) as u32,
+    ))
+}
+
 fn is_retryable_error(err: &ConnectError) -> bool {
     matches!(
         err.code,
@@ -3884,7 +3996,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn custom_transport_request_timeout_controls_unary_header() {
         for timeout in [None, Some(Duration::from_millis(1234))] {
             let transport = RecordingTransport::default();

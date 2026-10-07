@@ -8,13 +8,104 @@ use std::{
 
 use axum::{body::Body, serve::Listener};
 use http::{Request, Response, Version};
-use hyper_util::{
-    rt::{TokioExecutor, TokioIo},
-    server::conn::auto::Builder,
-    service::TowerToHyperService,
-};
+use hyper_util::{rt::TokioIo, server::conn::auto::Builder, service::TowerToHyperService};
 use tokio::{sync::watch, task::JoinSet, time::Instant};
 use tower::{service_fn, Service, ServiceExt};
+
+tokio::task_local! {
+    static STREAM_DEADLINE: watch::Sender<Option<Instant>>;
+}
+
+#[derive(Clone, Copy)]
+struct StreamExecutor;
+
+struct AdmissionBody {
+    inner: Body,
+    tail: Option<bytes::Bytes>,
+}
+
+impl http_body::Body for AdmissionBody {
+    type Data = bytes::Bytes;
+    type Error = axum::Error;
+
+    fn poll_frame(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<http_body::Frame<Self::Data>, Self::Error>>> {
+        if let Some(tail) = self.tail.take() {
+            return Poll::Ready(Some(Ok(http_body::Frame::data(tail))));
+        }
+        match std::task::ready!(Pin::new(&mut self.inner).poll_frame(cx)) {
+            Some(Ok(frame)) => match frame.into_data() {
+                Ok(mut data) if data.len() > 1 => {
+                    let prefix = data.split_to(data.len() - 1);
+                    self.tail = Some(data);
+                    Poll::Ready(Some(Ok(http_body::Frame::data(prefix))))
+                }
+                Ok(data) => Poll::Ready(Some(Ok(http_body::Frame::data(data)))),
+                Err(frame) => Poll::Ready(Some(Ok(frame))),
+            },
+            frame => Poll::Ready(frame),
+        }
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.tail.is_none() && self.inner.is_end_stream()
+    }
+}
+
+impl<F> hyper::rt::Executor<F> for StreamExecutor
+where
+    F: Future + Send + 'static,
+    F::Output: Send + 'static,
+{
+    fn execute(&self, future: F) {
+        let (deadline, mut changes) = watch::channel(None);
+        tokio::spawn(STREAM_DEADLINE.scope(deadline, async move {
+            tokio::pin!(future);
+            loop {
+                let deadline = *changes.borrow_and_update();
+                tokio::select! {
+                    biased;
+                    _ = async {
+                        match deadline {
+                            Some(deadline) => tokio::time::sleep_until(deadline).await,
+                            None => std::future::pending().await,
+                        }
+                    } => return,
+                    _ = &mut future => return,
+                    _ = changes.changed() => {}
+                }
+            }
+        }));
+    }
+}
+
+// Hyper does not poll response bodies while DATA capacity is unavailable. The
+// executor owns cancellation so a rejected stream cannot retain its writer.
+pub(super) fn admission_rejection_response(
+    version: Version,
+    response: Response<Body>,
+    deadline: Instant,
+    control: Option<&ConnectionControl>,
+    generation: Option<u64>,
+) -> Response<Body> {
+    let deadline = deadline.min(Instant::now() + std::time::Duration::from_secs(1));
+    if version == Version::HTTP_2 {
+        if STREAM_DEADLINE
+            .try_with(|sender| sender.send_replace(Some(deadline)))
+            .is_ok()
+        {
+            // Hyper can queue a whole DATA frame after obtaining one byte of
+            // capacity. Keeping the final byte separate preserves the stream
+            // task until the peer grants capacity for the complete error.
+            return response.map(|inner| Body::new(AdmissionBody { inner, tail: None }));
+        }
+    } else if let (Some(control), Some(generation)) = (control, generation) {
+        control.shorten(generation, deadline);
+    }
+    terminate_unfinished_response(version, response)
+}
 
 struct CancelBody;
 
@@ -103,6 +194,23 @@ impl ConnectionControl {
         })
     }
 
+    /// Expires only the matching unfinished HTTP/1 request.
+    pub fn expire(&self, id: u64) -> bool {
+        self.shorten(id, Instant::now())
+    }
+
+    fn shorten(&self, id: u64, deadline: Instant) -> bool {
+        self.state.send_if_modified(|state| {
+            if let Some(arm) = &mut state.active {
+                if arm.id == id && deadline < arm.deadline {
+                    arm.deadline = deadline;
+                    return true;
+                }
+            }
+            false
+        })
+    }
+
     async fn cancelled(&self) {
         let mut receiver = self.state.subscribe();
         loop {
@@ -163,7 +271,7 @@ where
 
                 // Cancellation stays outside Hyper so stalled output cannot hold the socket.
                 connections.spawn(async move {
-                    let mut builder = Builder::new(TokioExecutor::new());
+                    let mut builder = Builder::new(StreamExecutor);
                     builder.http2().enable_connect_protocol();
                     let connection = builder.serve_connection_with_upgrades(
                         TokioIo::new(io),

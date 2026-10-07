@@ -33,8 +33,16 @@ fit positive row and byte limits without copying or re-prefixing staged rows.
 An empty batch produces no chunks. An entry that cannot fit alone returns an
 error. Each chunk is atomic as one write, but splitting creates several writes.
 Concurrent commits may be sequenced in a different order from the returned batches.
-Exoware data is immutable. Applications own retry and publication coordination
-across chunks.
+Exoware data is immutable. Applications own publication coordination across chunks.
+
+## Put retries
+
+Put retries use `RetryConfig` only for an explicit temporary admission rejection
+that guarantees the backend has not received the batch. They honor the server's
+minimum retry delay and retain the same atomic batch. `RetryConfig::disabled()`
+disables these retries. When configured, `request_timeout` covers all attempts
+and backoff together. Generic errors, timeouts, and lost responses are not
+automatically retried. See the [admission retry contract](../../proto/README.md#admission-retries).
 
 ## Request compression
 

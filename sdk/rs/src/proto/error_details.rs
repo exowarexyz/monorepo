@@ -94,7 +94,11 @@ fn decode_detail(detail: &ErrorDetail) -> Result<Any, buffa::DecodeError> {
         .map_err(|_| buffa::DecodeError::InvalidUtf8)?
         .unwrap_or_default();
     Ok(Any {
-        type_url: detail.type_url.clone(),
+        type_url: if detail.type_url.contains('/') {
+            detail.type_url.clone()
+        } else {
+            format!("type.googleapis.com/{}", detail.type_url)
+        },
         value: value.into(),
         ..Default::default()
     })
@@ -105,6 +109,23 @@ mod tests {
     use super::*;
     use crate::google::rpc::{bad_request::FieldViolation, ErrorInfo};
     use crate::query::Detail;
+
+    #[test]
+    fn decodes_connect_type_names_and_any_type_urls() {
+        let detail = ErrorInfo {
+            domain: "log.ingest".to_owned(),
+            reason: "INGEST_ADMISSION_EXHAUSTED".to_owned(),
+            ..Default::default()
+        };
+        for name in ["google.rpc.ErrorInfo", ErrorInfo::TYPE_URL] {
+            let err = ConnectError::resource_exhausted("busy")
+                .with_detail(ErrorDetail::from_message(name, &detail));
+            assert_eq!(
+                decode_connect_error(&err).unwrap().error_info,
+                Some(detail.clone())
+            );
+        }
+    }
 
     #[test]
     fn round_trips_query_detail() {

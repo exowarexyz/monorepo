@@ -91,6 +91,28 @@ same generic code. Key and value limits remain application validation errors.
 Decoder failures can return `INVALID_ARGUMENT` without `PUT_TOO_LARGE` details.
 The status alone does not establish a global retry rule.
 
+## Admission retries
+
+Temporary initial-admission exhaustion returns `RESOURCE_EXHAUSTED` with an
+`ErrorInfo` whose domain is `log.ingest` and reason is
+`INGEST_ADMISSION_EXHAUSTED`, plus a positive `RetryInfo.retry_delay`. This
+rejection guarantees that the request was not submitted to the backend.
+Requests that cannot fit the configured admission budget even when it is empty
+do not receive this retry hint. Memory reservation failures after admission do
+not receive it either.
+
+The Rust and TypeScript SDKs retry Put only when that complete rejection detail
+is present and valid. They retain the same atomic batch, respect the advertised
+minimum delay, and apply their configured attempt and backoff limits. If the hint
+exceeds the client's maximum backoff, they return the error. A configured call
+deadline covers attempts and backoff together.
+
+Generic errors, timeouts, and lost responses are not proof that a write was
+rejected before submission. The SDKs do not automatically retry those Put
+failures. Replaying a committed batch can create another sequence-log entry even
+when the key/value data is identical. A transport failure that prevents delivery
+of the admission details also remains non-retryable under this policy.
+
 ## SDK behavior
 
 The Rust SDK exposes the limits under `exoware_sdk::limits`. Its
@@ -101,8 +123,8 @@ batch produces no chunks. An entry that cannot fit alone returns an error.
 Splitting preserves staged entries without copying or re-prefixing payloads.
 
 Each resulting batch remains atomic as one `Put`, but several chunks are
-several writes. Exoware data is immutable. Retry policy, concurrency, and
-publication barriers belong to the application.
+several writes. Exoware data is immutable. Applications own retries beyond the
+admission policy above, concurrency, and publication barriers across chunks.
 
 The TypeScript SDK exports the same constants. Its `StoreWriteBatch` provides
 `encodedLen()`, `validate(options)`, and `split(options)` for protobuf.

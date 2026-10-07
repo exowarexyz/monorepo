@@ -61,6 +61,16 @@ the encoding argument to `StoreWriteBatch.encodedLen`, and the `encoding` proper
 on `Client.putOptions` and `StoreClient.putOptions`. Put sizing and transport now
 always use protobuf.
 
+## Put retries
+
+Put retries use `ClientOptions.retry` only for an explicit temporary admission
+rejection that guarantees the backend has not received the batch. They honor the
+server's minimum retry delay and retain the same atomic batch. Set `maxAttempts`
+to `1` to disable retries. Direct `client.ingest.put` calls can supply a timeout
+or abort signal covering attempts and backoff together. Generic errors,
+timeouts, and lost responses are not automatically retried. See the
+[admission retry contract](../../proto/README.md#admission-retries).
+
 ## Credentials
 
 An auth token can be provided when constructing the client:

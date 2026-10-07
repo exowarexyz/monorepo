@@ -1,4 +1,4 @@
-use std::{fmt::Display, pin::Pin, sync::Arc, task::Poll};
+use std::{fmt::Display, pin::Pin, sync::Arc, task::Poll, time::Duration};
 
 use bytes::Bytes;
 use connectrpc::ConnectError;
@@ -23,6 +23,36 @@ struct TransportCopy {
     data: Vec<u8>,
     _bytes: ByteLease,
     _request: Arc<RequestLease>,
+}
+
+struct IdleTimeout {
+    timeout: Duration,
+    remaining: Duration,
+    expired: bool,
+}
+
+struct IdleWait<'a> {
+    idle: &'a mut IdleTimeout,
+    started: Instant,
+}
+
+impl IdleWait<'_> {
+    fn deadline(&self) -> Instant {
+        self.started + self.idle.remaining
+    }
+
+    fn progress(&mut self) {
+        self.idle.remaining = self.idle.timeout;
+        self.started = Instant::now();
+    }
+}
+
+impl Drop for IdleWait<'_> {
+    fn drop(&mut self) {
+        // Cancelled lookahead reads retain elapsed waiting time without charging CPU work.
+        self.idle.remaining = self.idle.remaining.saturating_sub(self.started.elapsed());
+        self.idle.expired |= self.idle.remaining.is_zero();
+    }
 }
 
 impl AsRef<[u8]> for TransportCopy {
@@ -124,6 +154,7 @@ pub struct PutInput {
     metadata: PutMetadata,
     limits: PutLimits,
     deadline: Instant,
+    idle: Option<IdleTimeout>,
     observer: Arc<dyn IngestObserver>,
     notifier: Option<Arc<dyn crate::stream::StreamNotifier>>,
     executor: Arc<dyn DecodeExecutor>,
@@ -160,6 +191,7 @@ impl PutInput {
             metadata,
             limits,
             deadline,
+            idle: None,
             observer: Arc::new(()),
             notifier: None,
             executor: Arc::new(BlockingDecodeExecutor),
@@ -177,6 +209,19 @@ impl PutInput {
     pub fn with_parts(mut self, parts: http::request::Parts) -> Self {
         self.parts = Some(parts);
         self
+    }
+
+    pub fn with_idle_timeout(mut self, timeout: Option<Duration>) -> Self {
+        self.idle = timeout.map(|timeout| IdleTimeout {
+            timeout,
+            remaining: timeout,
+            expired: false,
+        });
+        self
+    }
+
+    pub(super) fn idle_timed_out(&self) -> bool {
+        self.idle.as_ref().is_some_and(|idle| idle.expired)
     }
     pub fn parts(&self) -> Option<&http::request::Parts> {
         self.parts.as_ref()
@@ -281,6 +326,11 @@ impl PutInput {
     }
 
     pub fn check_deadline(&self) -> Result<(), PutError> {
+        if self.idle_timed_out() {
+            return Err(
+                ConnectError::deadline_exceeded("ingest body idle timeout exceeded").into(),
+            );
+        }
         if Instant::now() >= self.deadline {
             return Err(ConnectError::deadline_exceeded("ingest deadline exceeded").into());
         }
@@ -302,29 +352,37 @@ impl PutInput {
         if self.stopped {
             return Err(ConnectError::resource_exhausted("request body exceeds wire limit").into());
         }
+        self.check_deadline()?;
+        let mut idle_wait = self.idle.as_mut().map(|idle| IdleWait {
+            idle,
+            started: Instant::now(),
+        });
+        let idle_deadline = idle_wait.as_ref().map(IdleWait::deadline);
+        let deadline = idle_deadline.map_or(self.deadline, |idle| idle.min(self.deadline));
+        let timeout_message = if idle_deadline.is_some_and(|idle| idle <= self.deadline) {
+            "ingest body idle timeout exceeded"
+        } else {
+            "ingest deadline exceeded"
+        };
         let mut frames = 0;
         loop {
             if frames == FRAME_WORK_BUDGET {
                 tokio::task::yield_now().await;
                 frames = 0;
             }
-            self.check_deadline()?;
             frames += 1;
-            let deadline = self.deadline;
             let body = &mut self.body;
             let frame = timeout_at(
                 deadline,
                 futures::future::poll_fn(|cx| {
                     if Instant::now() >= deadline {
-                        return Poll::Ready(Err(ConnectError::deadline_exceeded(
-                            "ingest deadline exceeded",
-                        )));
+                        return Poll::Ready(Err(ConnectError::deadline_exceeded(timeout_message)));
                     }
                     body.as_mut().poll_frame(cx).map(Ok)
                 }),
             )
             .await
-            .map_err(|_| ConnectError::deadline_exceeded("ingest deadline exceeded"))??;
+            .map_err(|_| ConnectError::deadline_exceeded(timeout_message))??;
             match frame {
                 Some(Ok(frame)) => {
                     let Ok(bytes) = frame.into_data() else {
@@ -342,6 +400,11 @@ impl PutInput {
                     if bytes.is_empty() {
                         continue;
                     }
+                    if let Some(idle) = &mut idle_wait {
+                        idle.progress();
+                    }
+                    drop(idle_wait);
+
                     // Copying prevents a transport slice from pinning an unbounded owner in a CPU job.
                     return Ok(Some(if copy {
                         let lease = self.reserve_input_bytes(bytes.len())?;
@@ -702,6 +765,130 @@ mod tests {
         }
         input.finish().await?;
         Ok(output)
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn idle_timeout_bounds_first_bytes_and_eof_without_restarting_cleanup() {
+        for receive_data in [false, true] {
+            let (input, budget, sender) = channel_input(1, 1024);
+            let mut input = input.with_idle_timeout(Some(Duration::from_secs(1)));
+            if receive_data {
+                sender.send(Bytes::from_static(b"a")).await.unwrap();
+                assert_eq!(input.raw_next(true).await.unwrap().unwrap(), b"a"[..]);
+            }
+            let started = Instant::now();
+            let error = input.raw_next(true).await.unwrap_err().into_connect();
+            assert_eq!(error.code, connectrpc::ErrorCode::DeadlineExceeded);
+            assert!(input.idle_timed_out());
+            assert_eq!(started.elapsed(), Duration::from_secs(1));
+            assert_eq!(input.drain_rejected().await, DrainOutcome::Deadline);
+            assert_eq!(started.elapsed(), Duration::from_secs(1));
+            assert!(input.finish().await.is_err());
+            drop(input);
+            assert_eq!(budget.usage(), (0, 0));
+            drop(sender);
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn idle_timeout_does_not_extend_the_absolute_deadline() {
+        let (input, _, _sender) = channel_input(1, 1024);
+        let mut input = input.with_idle_timeout(Some(Duration::from_secs(1)));
+        let started = Instant::now();
+        input.deadline = started + Duration::from_millis(100);
+        assert!(input.raw_next(true).await.is_err());
+        assert_eq!(started.elapsed(), Duration::from_millis(100));
+        assert!(!input.idle_timed_out());
+        assert_eq!(input.drain_rejected().await, DrainOutcome::Deadline);
+        assert_eq!(started.elapsed(), Duration::from_millis(100));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn idle_wait_survives_cancellation_and_pauses_between_reads() {
+        let (input, _, sender) = channel_input(2, 1024);
+        let mut input = input.with_idle_timeout(Some(Duration::from_secs(1)));
+        input.deadline = Instant::now() + Duration::from_secs(60);
+        let mut reading = Box::pin(input.raw_next(true));
+        assert!(futures::poll!(&mut reading).is_pending());
+        tokio::time::advance(Duration::from_millis(400)).await;
+        drop(reading);
+
+        // Time spent preparing a previous batch must not consume the peer's remaining wait.
+        tokio::time::advance(Duration::from_secs(10)).await;
+        let mut reading = Box::pin(input.raw_next(true));
+        assert!(futures::poll!(&mut reading).is_pending());
+        tokio::time::advance(Duration::from_millis(500)).await;
+        sender.send(Bytes::from_static(b"a")).await.unwrap();
+        assert_eq!(reading.await.unwrap().unwrap(), b"a"[..]);
+
+        let mut reading = Box::pin(input.raw_next(true));
+        assert!(futures::poll!(&mut reading).is_pending());
+        tokio::time::advance(Duration::from_millis(900)).await;
+        sender.send(Bytes::from_static(b"b")).await.unwrap();
+        assert_eq!(reading.await.unwrap().unwrap(), b"b"[..]);
+
+        let mut reading = Box::pin(input.raw_next(true));
+        assert!(futures::poll!(&mut reading).is_pending());
+        tokio::time::advance(Duration::from_millis(600)).await;
+        drop(reading);
+        let started = Instant::now();
+        assert!(input.raw_next(true).await.is_err());
+        assert_eq!(started.elapsed(), Duration::from_millis(400));
+        assert!(input.idle_timed_out());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn idle_timeout_ignores_empty_frames_and_trailers() {
+        for trailers in [false, true] {
+            let frames = futures::stream::unfold((), move |()| async move {
+                tokio::time::sleep(Duration::from_millis(600)).await;
+                let frame = if trailers {
+                    Frame::trailers(http::HeaderMap::new())
+                } else {
+                    Frame::data(Bytes::new())
+                };
+                Some((Ok::<_, Infallible>(frame), ()))
+            });
+            let (mut input, _) = input(&[], 1, PutEncoding::Identity, PutLimits::default());
+            input.body = box_body(StreamBody::new(frames));
+            let mut input = input.with_idle_timeout(Some(Duration::from_secs(1)));
+            let started = Instant::now();
+            assert_eq!(input.drain_rejected().await, DrainOutcome::Deadline);
+            assert_eq!(started.elapsed(), Duration::from_secs(1));
+            assert!(input.idle_timed_out());
+            assert_eq!(input.wire_bytes(), 0);
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn idle_timeout_excludes_decode_execution() {
+        struct SlowExecutor;
+
+        impl DecodeExecutor for SlowExecutor {
+            fn execute(
+                &self,
+                state: DecodeState,
+                buffers: DecodeBuffers,
+            ) -> futures::future::BoxFuture<'static, Result<DecodeOutput, PutError>> {
+                Box::pin(async move {
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+                    Ok(state.run(buffers))
+                })
+            }
+        }
+
+        let wire = entry(b"key", b"value");
+        let (mut input, _) = input(&wire, 1, PutEncoding::Identity, PutLimits::default());
+        input.deadline = Instant::now() + Duration::from_secs(60);
+        input.set_executor(Arc::new(SlowExecutor));
+        let mut input = input.with_idle_timeout(Some(Duration::from_secs(1)));
+        let started = Instant::now();
+        assert_eq!(
+            collect(&mut input).await.unwrap(),
+            vec![(b"key".to_vec(), b"value".to_vec())]
+        );
+        assert!(started.elapsed() > Duration::from_secs(1));
+        assert!(!input.idle_timed_out());
     }
 
     #[tokio::test]

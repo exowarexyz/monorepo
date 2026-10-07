@@ -9,6 +9,7 @@ import { Client } from '../src/client';
 import { EntrySchema } from '../src/gen/ts/common/v1/kv_pb';
 import { PutRequestSchema, PutResponseSchema } from '../src/gen/ts/log/v1/ingest_pb';
 import { GetRequestSchema, GetResponseSchema } from '../src/gen/ts/store/v1/query_pb';
+import { ErrorInfoSchema, RetryInfoSchema } from '../src/gen/ts/google/rpc/error_details_pb';
 import {
     StoreKeyPrefix,
     StoreWriteBatch,
@@ -283,8 +284,25 @@ test('ingest and query share authentication, retries, and cookies in both direct
         seen.push({ method, cookie: headers.get('cookie'), authorization: headers.get('authorization') });
         let response: Response;
         if (method === 'Put' && ++putAttempts === 1) {
-            response = new Response(JSON.stringify({ code: 'unavailable', message: 'retry Put' }), {
-                status: 503,
+            response = new Response(JSON.stringify({
+                code: 'resource_exhausted',
+                message: 'retry Put',
+                details: [
+                    {
+                        type: 'google.rpc.ErrorInfo',
+                        value: Buffer.from(toBinary(ErrorInfoSchema, create(ErrorInfoSchema, {
+                            domain: 'log.ingest', reason: 'INGEST_ADMISSION_EXHAUSTED',
+                        }))).toString('base64'),
+                    },
+                    {
+                        type: 'google.rpc.RetryInfo',
+                        value: Buffer.from(toBinary(RetryInfoSchema, create(RetryInfoSchema, {
+                            retryDelay: { nanos: 1_000_000 },
+                        }))).toString('base64'),
+                    },
+                ],
+            }), {
+                status: 429,
                 headers: { 'content-type': 'application/json', 'set-cookie': 'fromPut=one; Path=/' },
             });
         } else if (method === 'Get' && ++getAttempts === 1) {
@@ -308,7 +326,7 @@ test('ingest and query share authentication, retries, and cookies in both direct
     try {
         const sdk = client({
             token: 'shared-token',
-            retry: { maxAttempts: 2, initialBackoffMs: 0, maxBackoffMs: 0 },
+            retry: { maxAttempts: 2, initialBackoffMs: 0, maxBackoffMs: 1 },
         });
         const key = filled(1, 1);
         await expect(sdk.store().set(key, filled(1, 2))).resolves.toBe(7n);

@@ -10,7 +10,9 @@ use futures::future::BoxFuture;
 use http::{request::Parts, Request, Response};
 use tower::Service;
 
-use super::transport::{terminate_unfinished_response, ConnectionControl};
+use super::transport::{
+    admission_rejection_response, terminate_unfinished_response, ConnectionControl,
+};
 use super::{box_body, DrainOutcome, PutEncoding, PutInput, PutLimits, PutMetadata};
 use crate::{Ingest, IngestState};
 
@@ -27,6 +29,8 @@ pub struct PutConfig {
     /// Host ceiling for client and fallback timeouts. The deadline covers
     /// middleware, reception, processing and rejection cleanup.
     pub max_timeout: std::time::Duration,
+    /// Limits waits for upload progress without charging backend processing time.
+    pub idle_timeout: Option<std::time::Duration>,
     pub observer: Option<Arc<dyn super::IngestObserver>>,
 }
 
@@ -37,6 +41,7 @@ impl Default for PutConfig {
             max_wire_bytes: crate::MAX_CONNECTRPC_BODY_BYTES,
             timeout: std::time::Duration::from_secs(30),
             max_timeout: std::time::Duration::from_secs(300),
+            idle_timeout: Some(std::time::Duration::from_secs(30)),
             observer: None,
         }
     }
@@ -309,10 +314,19 @@ async fn put<I: Ingest>(
     let admission = match admission {
         Ok(admission) => admission,
         Err(error) => {
+            let admission_rejected = rejection.is_none();
             let error = rejection.unwrap_or(error);
             let response =
                 method_response(&method, error.into_http_response(&headers).map(Body::new));
-            return if body.is_end_stream() {
+            return if admission_rejected {
+                admission_rejection_response(
+                    version,
+                    response,
+                    request_deadline,
+                    control.as_ref(),
+                    generation,
+                )
+            } else if body.is_end_stream() {
                 if let (Some(control), Some(generation)) = (&control, generation) {
                     control.disarm(generation);
                 }
@@ -350,6 +364,7 @@ async fn put<I: Ingest>(
         request_deadline,
         admission,
     )
+    .with_idle_timeout(state.put_config.idle_timeout)
     .with_parts(parts)
     .with_notifier(state.notifier.clone());
     if let Some(observer) = &state.put_config.observer {
@@ -381,6 +396,10 @@ async fn put<I: Ingest>(
     if complete {
         if let (Some(control), Some(generation)) = (&control, generation) {
             control.disarm(generation);
+        }
+    } else if input.idle_timed_out() {
+        if let (Some(control), Some(generation)) = (&control, generation) {
+            control.expire(generation);
         }
     }
     let response = match result {

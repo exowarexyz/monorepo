@@ -48,12 +48,14 @@ struct Stats {
     request_polls: AtomicUsize,
     body_polls: AtomicUsize,
     body_drops: AtomicUsize,
+    response_drops: AtomicUsize,
     hold_started: Notify,
     hold_release: Notify,
     shutdown_started: Notify,
     stale_id: Mutex<Option<u64>>,
     stale_attempts: AtomicUsize,
     stale_disarms: AtomicUsize,
+    stale_expires: AtomicUsize,
 }
 
 #[derive(Default)]
@@ -189,6 +191,14 @@ impl http_body::Body for CountBody {
     }
 }
 
+impl Drop for CountBody {
+    fn drop(&mut self) {
+        if self.response {
+            self.stats.response_drops.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+}
+
 impl Drop for ResponseBody {
     fn drop(&mut self) {
         self.stats.body_drops.fetch_add(1, Ordering::SeqCst);
@@ -279,7 +289,11 @@ async fn handler(
     // Run the previous request's cleanup only after its successor is armed.
     if let Some(stale_id) = stats.stale_id.lock().unwrap().take() {
         stats.stale_attempts.fetch_add(1, Ordering::SeqCst);
-        if control.disarm(stale_id) {
+        if path.contains("stale-expire") {
+            if control.expire(stale_id) {
+                stats.stale_expires.fetch_add(1, Ordering::SeqCst);
+            }
+        } else if control.disarm(stale_id) {
             stats.stale_disarms.fetch_add(1, Ordering::SeqCst);
         }
     }
@@ -1479,6 +1493,7 @@ async fn http1_host_timeout_releases_stalled_uploads_during_shutdown() -> Result
                 budget: budget.clone(),
                 timeout: fallback,
                 max_timeout: cap,
+                idle_timeout: None,
                 ..PutConfig::default()
             },
         ));
@@ -1537,6 +1552,7 @@ async fn http2_host_timeout_releases_a_stalled_upload() -> Result<(), Error> {
         PutConfig {
             budget: budget.clone(),
             max_timeout: cap,
+            idle_timeout: None,
             ..PutConfig::default()
         },
     ));
@@ -1586,5 +1602,358 @@ async fn http2_host_timeout_releases_a_stalled_upload() -> Result<(), Error> {
     drop(h2);
     shutdown.send(()).unwrap();
     timeout(Duration::from_secs(2), server).await???;
+    Ok(())
+}
+
+impl Server {
+    async fn configured<I: Ingest>(
+        config: PutConfig,
+        backend: Arc<I>,
+        blocked: bool,
+    ) -> Result<Self, Error> {
+        use tower::ServiceExt;
+
+        let tcp = TcpListener::bind("127.0.0.1:0").await?;
+        let addr = tcp.local_addr()?;
+        let stats = Arc::new(Stats::default());
+        let gate = Arc::new(Gate::default());
+        gate.blocked.store(blocked, Ordering::SeqCst);
+        let listener = MeasuredListener {
+            tcp,
+            stats: stats.clone(),
+            gate,
+        };
+        let service = ingest_service(IngestState::new(backend).with_put_config(config));
+        let requests = stats.clone();
+        let service = service_fn(move |request: Request<Body>| {
+            let service = service.clone();
+            let stats = requests.clone();
+            async move {
+                if request.uri().path() == "/health" {
+                    return Ok(Response::new(Body::empty()));
+                }
+                *stats.request_started.lock().unwrap() = Some(Instant::now());
+                let request = request.map(|inner| {
+                    Body::new(CountBody {
+                        inner,
+                        stats: stats.clone(),
+                        response: false,
+                    })
+                });
+                let response = service.oneshot(request).await?;
+                Ok::<_, Infallible>(response.map(|inner| {
+                    Body::new(CountBody {
+                        inner,
+                        stats,
+                        response: true,
+                    })
+                }))
+            }
+        });
+        let (shutdown, receive) = oneshot::channel();
+        let task = tokio::spawn(async move {
+            serve(listener, service, async {
+                let _ = receive.await;
+            })
+            .await
+            .unwrap();
+        });
+        Ok(Self {
+            addr,
+            stats,
+            shutdown: Some(shutdown),
+            task,
+        })
+    }
+}
+
+struct CountCalls(AtomicUsize);
+
+impl Ingest for CountCalls {
+    async fn put(&self, input: &mut PutInput) -> Result<u64, PutError> {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        ConsumeIngest.put(input).await
+    }
+}
+
+fn assert_admission_hint(error: &connectrpc::ConnectError) {
+    use exoware_sdk::limits::{INGEST_ADMISSION_EXHAUSTED_REASON, INGEST_ERROR_DOMAIN};
+
+    let decoded = exoware_sdk::proto::decode_connect_error(error).unwrap();
+    assert_eq!(decoded.code, connectrpc::ErrorCode::ResourceExhausted);
+    let info = decoded.error_info.unwrap();
+    assert_eq!(info.domain, INGEST_ERROR_DOMAIN);
+    assert_eq!(info.reason, INGEST_ADMISSION_EXHAUSTED_REASON);
+    let delay = decoded.retry_info.unwrap().retry_delay.unwrap();
+    assert_eq!((delay.seconds, delay.nanos), (0, 100_000_000));
+}
+
+#[tokio::test]
+async fn rust_sdk_receives_admission_hints_and_retries_without_backend_replay() -> Result<(), Error>
+{
+    use exoware_sdk::{RetryConfig, StoreClient, StoreKeyPrefix};
+    use exoware_server::ingest::{BudgetConfig, IngestBudget};
+
+    let budget = IngestBudget::new(BudgetConfig {
+        max_requests: 1,
+        max_bytes: 64 * 1024 * 1024,
+    });
+    let held = budget.try_admit(1)?;
+    let backend = Arc::new(CountCalls(AtomicUsize::new(0)));
+    let mut server = Server::configured(
+        PutConfig {
+            budget: budget.clone(),
+            max_wire_bytes: 1024 * 1024,
+            ..Default::default()
+        },
+        backend.clone(),
+        false,
+    )
+    .await?;
+    let make_client = |retry| {
+        StoreClient::builder()
+            .url(&format!("http://{}", server.addr))
+            .balanced_http2_transport(Default::default())
+            .request_timeout(Duration::from_secs(5))
+            .retry_config(retry)
+            .build()
+            .unwrap()
+            .prefixed(StoreKeyPrefix::new("admission-wire/").unwrap())
+    };
+    let key = Bytes::from_static(b"a");
+    let value = vec![42; 256 * 1024];
+    let no_retry = make_client(RetryConfig::disabled());
+    let error = no_retry.ingest().put(&[(&key, &value)]).await.unwrap_err();
+    assert_admission_hint(error.rpc_error().unwrap());
+    assert_eq!(backend.0.load(Ordering::SeqCst), 0);
+    assert_eq!(server.stats.request_polls.load(Ordering::SeqCst), 0);
+
+    let retrying = make_client(RetryConfig::standard());
+    let baseline = server.stats.response_drops.load(Ordering::SeqCst);
+    let started = Instant::now();
+    let put = tokio::spawn(async move { retrying.ingest().put(&[(&key, &value)]).await });
+    timeout(Duration::from_secs(2), async {
+        while server.stats.response_drops.load(Ordering::SeqCst) == baseline {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await?;
+    assert_eq!(backend.0.load(Ordering::SeqCst), 0);
+    drop(held);
+    assert_eq!(timeout(Duration::from_secs(3), put).await???, 1);
+    assert!(started.elapsed() >= Duration::from_millis(100));
+    assert_eq!(backend.0.load(Ordering::SeqCst), 1);
+    assert_eq!(budget.usage(), (0, 0));
+    drop(no_retry);
+    server.close().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn http2_admission_error_with_blocked_window_expires_only_its_stream() -> Result<(), Error> {
+    use exoware_server::ingest::{BudgetConfig, IngestBudget};
+
+    for (window, ended) in [(0, false), (0, true), (1, false), (1, true)] {
+        let budget = IngestBudget::new(BudgetConfig {
+            max_requests: 1,
+            max_bytes: 1024,
+        });
+        let held = budget.try_admit(1)?;
+        let mut server = Server::configured(
+            PutConfig {
+                budget,
+                max_wire_bytes: 1024,
+                timeout: DEADLINE,
+                ..Default::default()
+            },
+            Arc::new(UnreachableIngest),
+            false,
+        )
+        .await?;
+        let (connection, driver) = h2::client::Builder::new()
+            .initial_window_size(window)
+            .handshake(TcpStream::connect(server.addr).await?)
+            .await?;
+        let mut h2 = Http2 {
+            connection,
+            driver: tokio::spawn(driver),
+        };
+        let request = Request::post(format!("http://{}{PUT_PATH}", server.addr))
+            .header(header::CONTENT_TYPE, "application/proto")
+            .body(())?;
+        let (response, mut upload) = h2.connection.send_request(request, ended)?;
+        let response = timeout(DEADLINE, response).await??;
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert!(!response.body().is_end_stream());
+        assert_eq!(server.stats.response_drops.load(Ordering::SeqCst), 0);
+        h2.assert_healthy(server.addr).await?;
+        let reset = timeout(
+            DEADLINE + SCHEDULING_SLACK,
+            poll_fn(|cx| upload.poll_reset(cx)),
+        )
+        .await??;
+        assert_eq!(reset, h2::Reason::CANCEL);
+        assert_eq!(server.stats.response_drops.load(Ordering::SeqCst), 1);
+        assert_eq!(server.stats.request_polls.load(Ordering::SeqCst), 0);
+        h2.assert_healthy(server.addr).await?;
+        assert_eq!(server.stats.io_drops.load(Ordering::SeqCst), 0);
+        drop(response);
+        drop(upload);
+        drop(held);
+        drop(h2);
+        server.close().await?;
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn http1_admission_error_is_delivered_without_waiting_for_upload() -> Result<(), Error> {
+    use exoware_server::ingest::{BudgetConfig, IngestBudget};
+
+    let budget = IngestBudget::new(BudgetConfig {
+        max_requests: 1,
+        max_bytes: 1024,
+    });
+    let held = budget.try_admit(1)?;
+    let mut server = Server::configured(
+        PutConfig {
+            budget,
+            max_wire_bytes: 1024,
+            ..Default::default()
+        },
+        Arc::new(UnreachableIngest),
+        false,
+    )
+    .await?;
+    let mut tcp = client(server.addr).await?;
+    tcp.write_all(format!("POST {PUT_PATH} HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/proto\r\nContent-Length: 100\r\n\r\n").as_bytes()).await?;
+    let mut wire = Vec::new();
+    timeout(Duration::from_secs(1), tcp.read_to_end(&mut wire)).await??;
+    let boundary = wire
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .unwrap();
+    assert!(wire.starts_with(b"HTTP/1.1 429"));
+    let chunked = &wire[boundary + 4..];
+    let size_end = chunked
+        .windows(2)
+        .position(|window| window == b"\r\n")
+        .unwrap();
+    let size = usize::from_str_radix(std::str::from_utf8(&chunked[..size_end])?, 16)?;
+    let body = &chunked[size_end + 2..size_end + 2 + size];
+    let error: connectrpc::ConnectError = serde_json::from_slice(body)?;
+    assert_admission_hint(&error);
+    assert_eq!(error.details[0].type_url, "google.rpc.ErrorInfo");
+    assert_eq!(error.details[1].type_url, "google.rpc.RetryInfo");
+    assert_eq!(server.stats.request_polls.load(Ordering::SeqCst), 0);
+    drop(held);
+    server.close().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn http1_admission_error_blocked_writer_has_a_short_deadline() -> Result<(), Error> {
+    use exoware_server::ingest::{BudgetConfig, IngestBudget};
+
+    let budget = IngestBudget::new(BudgetConfig {
+        max_requests: 1,
+        max_bytes: 1024,
+    });
+    let held = budget.try_admit(1)?;
+    let mut server = Server::configured(
+        PutConfig {
+            budget,
+            max_wire_bytes: 1024,
+            timeout: Duration::from_secs(300),
+            ..Default::default()
+        },
+        Arc::new(UnreachableIngest),
+        true,
+    )
+    .await?;
+    let mut tcp = client(server.addr).await?;
+    tcp.write_all(format!("POST {PUT_PATH} HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/proto\r\nContent-Length: 100\r\n\r\n").as_bytes()).await?;
+    server.wait_drop(1).await?;
+    let started = server.stats.request_started.lock().unwrap().unwrap();
+    let dropped = server.stats.io_dropped.lock().unwrap().unwrap();
+    assert!(dropped <= started + Duration::from_secs(1) + SCHEDULING_SLACK);
+    assert!(server.stats.pending_writes.load(Ordering::SeqCst) > 0);
+    assert_eq!(server.stats.request_polls.load(Ordering::SeqCst), 0);
+    drop(held);
+    server.close().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn http1_idle_upload_expires_even_when_error_writes_are_blocked() -> Result<(), Error> {
+    let mut server = Server::configured(
+        PutConfig {
+            idle_timeout: Some(DEADLINE),
+            timeout: Duration::from_secs(300),
+            ..Default::default()
+        },
+        Arc::new(ConsumeIngest),
+        true,
+    )
+    .await?;
+    let mut tcp = client(server.addr).await?;
+    tcp.write_all(format!("POST {PUT_PATH} HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/proto\r\nContent-Length: 100\r\n\r\n").as_bytes()).await?;
+    server.wait_drop(1).await?;
+    server.assert_original_deadline();
+    assert_eq!(server.stats.written.load(Ordering::SeqCst), 0);
+    server.close().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn http2_idle_upload_expires_only_its_stream() -> Result<(), Error> {
+    let mut server = Server::configured(
+        PutConfig {
+            idle_timeout: Some(DEADLINE),
+            timeout: Duration::from_secs(300),
+            ..Default::default()
+        },
+        Arc::new(ConsumeIngest),
+        false,
+    )
+    .await?;
+    let mut h2 = Http2::open(server.addr).await?;
+    let request = Request::post(format!("http://{}{PUT_PATH}", server.addr))
+        .header(header::CONTENT_TYPE, "application/proto")
+        .body(())?;
+    let (response, mut upload) = h2.connection.send_request(request, false)?;
+    let reset = timeout(
+        DEADLINE + SCHEDULING_SLACK,
+        poll_fn(|cx| upload.poll_reset(cx)),
+    )
+    .await??;
+    assert_eq!(reset, h2::Reason::CANCEL);
+    h2.assert_healthy(server.addr).await?;
+    assert_eq!(server.stats.io_drops.load(Ordering::SeqCst), 0);
+    drop(response);
+    drop(upload);
+    drop(h2);
+    server.close().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn http1_stale_expiry_cannot_shorten_a_successor_deadline() -> Result<(), Error> {
+    let mut server = Server::open(false).await?;
+    let mut tcp = client(server.addr).await?;
+    tcp.write_all(
+        b"POST /complete-stale HTTP/1.1\r\nHost: localhost\r\nContent-Length: 1\r\n\r\nx",
+    )
+    .await?;
+    assert!(read_response(&mut tcp).await?.contains("200 OK"));
+    unfinished(&mut tcp, "/large-stale-expire").await?;
+    server.wait_drop(1).await?;
+    server.assert_original_deadline();
+    let started = server.stats.request_started.lock().unwrap().unwrap();
+    let dropped = server.stats.io_dropped.lock().unwrap().unwrap();
+    assert!(dropped >= started + DEADLINE);
+    assert_eq!(server.stats.stale_attempts.load(Ordering::SeqCst), 1);
+    assert_eq!(server.stats.stale_expires.load(Ordering::SeqCst), 0);
+    server.close().await?;
     Ok(())
 }

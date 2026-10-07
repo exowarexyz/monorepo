@@ -9,6 +9,7 @@ import { Service as PruneService } from './gen/ts/store/v1/prune_pb.js';
 import { Service as QueryService } from './gen/ts/store/v1/query_pb.js';
 import { Service as RetentionService } from './gen/ts/log/v1/retention_pb.js';
 import { Service as StreamService } from './gen/ts/log/v1/stream_pb.js';
+import { ErrorInfoSchema, RetryInfoSchema } from './gen/ts/google/rpc/error_details_pb.js';
 
 export type RetryConfig = {
     maxAttempts: number;
@@ -36,9 +37,96 @@ function retryBackoffDelay(attempt: number, config: RetryConfig): number {
     return Math.round(jitter);
 }
 
+function putRetryHint(err: unknown): number | undefined {
+    if (!(err instanceof ConnectError) || err.code !== Code.ResourceExhausted) return undefined;
+
+    // findDetails skips undecodable details, so reject duplicate hints before decoding.
+    const types = err.details.map((detail) => {
+        const type = 'desc' in detail ? detail.desc.typeName : detail.type;
+        return type.replace(/^type\.googleapis\.com\//, '');
+    });
+    if (
+        types.filter((type) => type === ErrorInfoSchema.typeName).length !== 1 ||
+        types.filter((type) => type === RetryInfoSchema.typeName).length !== 1
+    ) return undefined;
+
+    const errors = err.findDetails(ErrorInfoSchema);
+    const retries = err.findDetails(RetryInfoSchema);
+    if (
+        errors.length !== 1 ||
+        errors[0].domain !== 'log.ingest' ||
+        errors[0].reason !== 'INGEST_ADMISSION_EXHAUSTED' ||
+        retries.length !== 1
+    ) return undefined;
+
+    const duration = retries[0].retryDelay;
+    if (
+        duration === undefined ||
+        duration.seconds < 0n ||
+        duration.seconds > 315_576_000_000n ||
+        !Number.isInteger(duration.nanos) ||
+        duration.nanos < 0 ||
+        duration.nanos >= 1_000_000_000 ||
+        (duration.seconds === 0n && duration.nanos === 0)
+    ) return undefined;
+
+    // Rounding up preserves the server's minimum even for submillisecond hints.
+    return Number(duration.seconds * 1000n) + Math.ceil(duration.nanos / 1_000_000);
+}
+
+function putDeadline(header: Headers): number | undefined {
+    const timeout = header.get('connect-timeout-ms');
+    if (timeout === null || !/^\d+$/.test(timeout)) return undefined;
+    const timeoutMs = Number(timeout);
+    return Number.isFinite(timeoutMs) && timeoutMs >= 0 ? performance.now() + timeoutMs : undefined;
+}
+
+function checkPutCancellation(signal: AbortSignal, deadline: number | undefined): void {
+    if (signal.aborted) throw ConnectError.from(signal.reason, Code.Canceled);
+    if (deadline !== undefined && performance.now() >= deadline) {
+        throw new ConnectError('the operation timed out', Code.DeadlineExceeded);
+    }
+}
+
+function waitForPutRetry(delay: number, signal: AbortSignal, deadline: number | undefined): Promise<void> {
+    return new Promise((resolve, reject) => {
+        const retryAt = performance.now() + delay;
+        let timer: ReturnType<typeof setTimeout>;
+        const cleanup = () => {
+            clearTimeout(timer);
+            signal.removeEventListener('abort', abort);
+        };
+        const wake = () => {
+            try {
+                checkPutCancellation(signal, deadline);
+                const remaining = retryAt - performance.now();
+                if (remaining > 0) {
+                    // Timers can fire early or overflow for long hints. Recheck before retrying.
+                    const budget = deadline === undefined ? Infinity : deadline - performance.now();
+                    timer = setTimeout(wake, Math.min(Math.ceil(Math.min(remaining, budget)), 2_147_483_647));
+                    return;
+                }
+                cleanup();
+                resolve();
+            } catch (err) {
+                cleanup();
+                reject(err);
+            }
+        };
+        const abort = () => {
+            cleanup();
+            reject(ConnectError.from(signal.reason, Code.Canceled));
+        };
+        signal.addEventListener('abort', abort, { once: true });
+        wake();
+    });
+}
+
 function makeRetryInterceptor(config: RetryConfig): Interceptor {
     const maxAttempts = Math.max(config.maxAttempts, 1);
     return (next) => async (req) => {
+        const isPut = req.service.typeName === IngestService.typeName && req.method.name === IngestService.method.put.name;
+        const deadline = isPut ? putDeadline(req.header) : undefined;
         if (req.stream && req.method === QueryService.method.reduce) {
             // Each retry must serialize the same input after Connect consumes its request iterator.
             const input = await req.message[Symbol.asyncIterator]().next();
@@ -53,6 +141,14 @@ function makeRetryInterceptor(config: RetryConfig): Interceptor {
         }
         let attempt = 1;
         for (;;) {
+            if (isPut) {
+                checkPutCancellation(req.signal, deadline);
+                if (deadline !== undefined) {
+                    const remaining = deadline - performance.now();
+                    if (remaining <= 0) throw new ConnectError('the operation timed out', Code.DeadlineExceeded);
+                    req.header.set('connect-timeout-ms', String(Math.ceil(remaining)));
+                }
+            }
             if (req.signal.aborted) throw ConnectError.from(req.signal.reason, Code.Canceled);
             try {
                 const response = await next(req);
@@ -71,6 +167,24 @@ function makeRetryInterceptor(config: RetryConfig): Interceptor {
                 }
                 return response;
             } catch (err) {
+                if (isPut) {
+                    checkPutCancellation(req.signal, deadline);
+                    const hint = putRetryHint(err);
+                    if (!(attempt < maxAttempts) || hint === undefined || !(hint <= config.maxBackoffMs)) throw err;
+
+                    const exponent = Math.min(Math.max(attempt - 1, 0), 20);
+                    const backoff = Math.min(config.initialBackoffMs * (1 << exponent), config.maxBackoffMs);
+                    if (!Number.isFinite(backoff) || backoff < 0) throw err;
+
+                    const minimum = Math.max(hint, backoff);
+                    const maximum = Math.min(config.maxBackoffMs, minimum + backoff);
+                    const delay = minimum + (maximum - minimum) * Math.random();
+                    if (!Number.isFinite(delay)) throw err;
+
+                    await waitForPutRetry(delay, req.signal, deadline);
+                    attempt++;
+                    continue;
+                }
                 if (
                     attempt < maxAttempts &&
                     err instanceof ConnectError &&
