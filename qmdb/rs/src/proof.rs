@@ -213,15 +213,9 @@ where
         return Err(crate::QmdbError::EmptyProofRequest);
     }
     let locations: Vec<Location<F>> = operations.iter().map(|(loc, _)| *loc).collect();
-    let hasher = commonware_storage::qmdb::hasher::<H>();
-    let proof = merkle::verification::multi_proof(
-        storage,
-        inactive_peaks,
-        hasher.root_bagging(),
-        &locations,
-    )
-    .await
-    .map_err(crate::error::merkle_error)?;
+    let proof = merkle::verification::multi_proof(storage, inactive_peaks, &locations)
+        .await
+        .map_err(crate::error::merkle_error)?;
     let raw = RawBatchMultiProof {
         watermark,
         ops_root: root,

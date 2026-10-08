@@ -157,8 +157,7 @@ pub(crate) struct ProofNodes<F: Family> {
 /// Read every node a current proof needs at `watermark`, given the
 /// operation-tree `positions` it requests, plus the rows at `keys`.
 ///
-/// Returns the rows found at `keys`, keyed by those keys with absent rows
-/// left out, and the proof's [`ProofNodes`].
+/// Returns the rows found at `keys`, with absent rows left out, and the proof's [`ProofNodes`].
 ///
 /// Each round reads operation-tree nodes in one batch through the node cache,
 /// alongside one range read per grafted node; `keys` join the first round's
@@ -242,55 +241,42 @@ async fn load_grafted_node<F: Family>(
     Ok(rows.into_iter().next().map(|(_, bytes)| bytes))
 }
 
-/// A current proof's operation tree, served from the [`ProofNodes`] read for
-/// it. A node that was not read is an error, never a Store read.
-pub(crate) struct CurrentProofStorage<'a, F: Graftable, H: Hasher, const N: usize> {
-    pub(crate) nodes: &'a ProofNodes<F>,
-    pub(crate) pruned_chunks: u64,
-    pub(crate) size: Position<F>,
-    pub(crate) _marker: PhantomData<H>,
-}
-
-impl<F: Graftable, H: Hasher, const N: usize> MerkleStorage<F>
-    for CurrentProofStorage<'_, F, H, N>
-{
-    type Digest = H::Digest;
-
-    fn size(&self) -> Position<F> {
-        self.size
-    }
-
-    async fn get_node(&self, position: Position<F>) -> Result<Option<H::Digest>, merkle::Error<F>> {
-        self.node(position)
-    }
-
-    async fn get_nodes(
+impl<F: Graftable> ProofNodes<F> {
+    /// The digest at each of `positions` as the grafted view of the operation
+    /// tree serves it: operation-tree digests below the grafting height and over
+    /// pruned chunks, stored grafted digests over retained chunks, and parents
+    /// rebuilt from their children. Positions whose rows are absent, such as
+    /// pruned grafted leaves, are left out. A position whose rows were not read
+    /// is an error, never a Store read.
+    pub(crate) fn digests<H: Hasher, const N: usize>(
         &self,
+        pruned_chunks: u64,
         positions: &[Position<F>],
-    ) -> Result<Vec<H::Digest>, merkle::Error<F>> {
-        positions
-            .iter()
-            .map(|&position| {
-                self.node(position)?
-                    .ok_or(merkle::Error::ElementPruned(position))
-            })
-            .collect()
+    ) -> Result<HashMap<Position<F>, H::Digest>, merkle::Error<F>> {
+        let mut digests = HashMap::with_capacity(positions.len());
+        for &position in positions {
+            if let Some(digest) = self.node::<H, N>(pruned_chunks, position)? {
+                digests.insert(position, digest);
+            }
+        }
+        Ok(digests)
     }
-}
 
-impl<F: Graftable, H: Hasher, const N: usize> CurrentProofStorage<'_, F, H, N> {
-    fn node(&self, position: Position<F>) -> Result<Option<H::Digest>, merkle::Error<F>> {
+    fn node<H: Hasher, const N: usize>(
+        &self,
+        pruned_chunks: u64,
+        position: Position<F>,
+    ) -> Result<Option<H::Digest>, merkle::Error<F>> {
         let unread = merkle::Error::DataCorrupted("exoware-qmdb current proof node was not read");
-        match node_source::<F, N>(position, self.pruned_chunks)? {
+        match node_source::<F, N>(position, pruned_chunks)? {
             NodeSource::Ops => self
-                .nodes
                 .ops
                 .get(&position)
                 .ok_or(unread)
                 .and_then(|bytes| KvMerkleStorage::<F, H::Digest>::decode_node(bytes.as_ref()))
                 .map(Some),
             NodeSource::Grafted(grafted_position) => {
-                match self.nodes.grafted.get(&grafted_position).ok_or(unread)? {
+                match self.grafted.get(&grafted_position).ok_or(unread)? {
                     Some(bytes) => {
                         if bytes.len() != H::Digest::SIZE {
                             return Err(merkle::Error::DataCorrupted(
@@ -306,21 +292,25 @@ impl<F: Graftable, H: Hasher, const N: usize> CurrentProofStorage<'_, F, H, N> {
                             })
                     }
                     None if F::pos_to_height(grafted_position) == 0 => Ok(None),
-                    None => self.rebuild(position),
+                    None => self.rebuild::<H, N>(pruned_chunks, position),
                 }
             }
-            NodeSource::Rebuilt => self.rebuild(position),
+            NodeSource::Rebuilt => self.rebuild::<H, N>(pruned_chunks, position),
         }
     }
 
     /// Rebuild parents spanning the pruning boundary and absent delayed-merge
     /// parents from their children.
-    fn rebuild(&self, position: Position<F>) -> Result<Option<H::Digest>, merkle::Error<F>> {
+    fn rebuild<H: Hasher, const N: usize>(
+        &self,
+        pruned_chunks: u64,
+        position: Position<F>,
+    ) -> Result<Option<H::Digest>, merkle::Error<F>> {
         let [left, right] = children(position);
-        let Some(left) = self.node(left)? else {
+        let Some(left) = self.node::<H, N>(pruned_chunks, left)? else {
             return Ok(None);
         };
-        let Some(right) = self.node(right)? else {
+        let Some(right) = self.node::<H, N>(pruned_chunks, right)? else {
             return Ok(None);
         };
         let hasher = commonware_storage::qmdb::hasher::<H>();
@@ -810,10 +800,10 @@ mod tests {
 
         calls.lock().unwrap().clear();
         let locations = [Location::new(3), Location::new(19), Location::new(55)];
-        let proof = verification::multi_proof(&storage, 0, hasher.root_bagging(), &locations)
+        let proof = verification::multi_proof(&storage, 0, &locations)
             .await
             .unwrap();
-        let expected = verification::multi_proof(&memory, 0, hasher.root_bagging(), &locations)
+        let expected = verification::multi_proof(&memory, 0, &locations)
             .await
             .unwrap();
         assert_eq!(proof, expected);
@@ -885,13 +875,11 @@ mod tests {
         .await
         .expect("grafted reads must reach the barrier concurrently")
         .unwrap();
-        let storage = CurrentProofStorage::<mmr::Family, Sha256, 1> {
-            nodes: &read,
-            pruned_chunks: 0,
-            size: Position::new(31),
-            _marker: PhantomData,
-        };
-        let nodes = storage.get_nodes(&positions).await.unwrap();
+        let resolved = read.digests::<Sha256, 1>(0, &positions).unwrap();
+        let nodes = positions
+            .iter()
+            .map(|position| resolved[position])
+            .collect::<Vec<_>>();
         assert_eq!(nodes, digests);
         let mut requested = calls.lock().unwrap().clone();
         requested.sort();
@@ -949,16 +937,11 @@ mod tests {
         // The absent parent's row, then both children in a second round
         assert_eq!(*calls.lock().unwrap(), [("range", 1); 3]);
 
-        let storage = CurrentProofStorage::<mmr::Family, Sha256, 1> {
-            nodes: &read,
-            pruned_chunks: 0,
-            size: Position::new(31),
-            _marker: PhantomData,
-        };
         let expected =
             commonware_storage::qmdb::hasher::<Sha256>().node_digest(root, &left.1, &right.1);
-        assert_eq!(storage.get_nodes(&[root]).await.unwrap(), [expected]);
-        assert_eq!(calls.lock().unwrap().len(), 3, "building reads nothing");
+        let resolved = read.digests::<Sha256, 1>(0, &[root]).unwrap();
+        assert_eq!(resolved[&root], expected);
+        assert_eq!(calls.lock().unwrap().len(), 3, "resolving reads nothing");
         server.abort();
     }
 

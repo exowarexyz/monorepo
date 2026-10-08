@@ -358,8 +358,8 @@ where
         let watermark = watermark.location;
         let end = crate::proof::resolve_range_bounds(watermark, start_location, max_locations)?;
         let tip = self.current_tip(&session, watermark).await?;
-        let (nodes, operations, chunks) = futures::try_join!(
-            current::load_range_nodes::<F, H, N>(
+        let (reads, operations, chunks) = futures::try_join!(
+            current::load_range_reads::<F, H, N>(
                 &session,
                 &self.read_cache,
                 &tip,
@@ -369,7 +369,7 @@ where
             load_operation_range::<F, K, V, E>(&self.op_cfg, &session, start_location, end),
             current::load_chunks::<F, H::Digest, N>(&session, &tip, start_location, end),
         )?;
-        let proof = current::range_proof::<F, H, N>(&tip, &nodes, start_location, end)?;
+        let proof = current::range_proof::<F, H, N>(&tip, reads)?;
         let raw = CurrentOperationRangeProofResult {
             watermark,
             root: tip.root,
@@ -434,14 +434,14 @@ where
         let location = Self::locate_active_key(session, tip, key.as_ref()).await?;
         let reads =
             current::load_proof_reads::<F, H, N>(session, &self.read_cache, tip, location).await?;
-        self.active_key_proof(tip, &reads, key, location)
+        self.active_key_proof(tip, reads, key, location)
     }
 
     /// Current proof for `key`, whose latest update at the tip is at `location`.
     fn active_key_proof<Q: AsRef<[u8]>>(
         &self,
         tip: &CurrentTip<F, H::Digest>,
-        reads: &ProofReads<F, N>,
+        reads: ProofReads<F, N>,
         key: Q,
         location: Location<F>,
     ) -> Result<RawKeyValueProof<H::Digest, unordered::Operation<F, K, E>, N, F>, QmdbError> {

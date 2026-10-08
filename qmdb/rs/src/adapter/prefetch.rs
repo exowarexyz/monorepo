@@ -309,14 +309,12 @@ mod tests {
                         .collect();
                     let storage = PrefetchedMerkleStorage::<F, Digest>::new(memory.size(), nodes);
                     for inactive in 0..=peaks {
-                        let actual =
-                            verification::multi_proof(&storage, inactive, bagging, &locations)
-                                .await
-                                .unwrap();
-                        let expected =
-                            verification::multi_proof(&memory, inactive, bagging, &locations)
-                                .await
-                                .unwrap();
+                        let actual = verification::multi_proof(&storage, inactive, &locations)
+                            .await
+                            .unwrap();
+                        let expected = verification::multi_proof(&memory, inactive, &locations)
+                            .await
+                            .unwrap();
                         assert_eq!(
                             actual, expected,
                             "leaves={leaves}, locations={locations:?}, inactive={inactive}"
@@ -358,12 +356,10 @@ mod tests {
                 .map(|position| (position, Some(Bytes::from_static(&[0; 32]))))
                 .collect();
             let storage = PrefetchedMerkleStorage::<F, Digest>::new(size, nodes);
-            for bagging in [Bagging::ForwardFold, Bagging::BackwardFold] {
-                for inactive in [0, peaks] {
-                    verification::multi_proof(&storage, inactive, bagging, &locations)
-                        .await
-                        .unwrap();
-                }
+            for inactive in [0, peaks] {
+                verification::multi_proof(&storage, inactive, &locations)
+                    .await
+                    .unwrap();
             }
         }
     }

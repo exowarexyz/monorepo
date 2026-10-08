@@ -2231,13 +2231,9 @@ mod tests {
 
         let root = merkle.root(&hasher, 0).unwrap();
         let locations = vec![Location::<F>::new(0), Location::<F>::new(2)];
-        let proof = futures::executor::block_on(merkle::verification::multi_proof(
-            &merkle,
-            0,
-            hasher.root_bagging(),
-            &locations,
-        ))
-        .unwrap();
+        let proof =
+            futures::executor::block_on(merkle::verification::multi_proof(&merkle, 0, &locations))
+                .unwrap();
         let expected = locations
             .iter()
             .map(|location| {

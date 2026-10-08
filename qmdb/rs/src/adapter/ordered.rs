@@ -401,8 +401,8 @@ where
             crate::proof::resolve_range_bounds(watermark.location, start_location, max_locations)?;
         let session = ReadSession::fixed(self.store.clone(), Some(watermark.sequence_number));
         let tip = self.current_tip(&session, watermark.location).await?;
-        let (nodes, operations, chunks) = futures::try_join!(
-            current::load_range_nodes::<F, H, N>(
+        let (reads, operations, chunks) = futures::try_join!(
+            current::load_range_reads::<F, H, N>(
                 &session,
                 &self.read_cache,
                 &tip,
@@ -412,7 +412,7 @@ where
             Self::load_operation_range(&session, &self.op_cfg, start_location, end),
             current::load_chunks::<F, H::Digest, N>(&session, &tip, start_location, end),
         )?;
-        let proof = current::range_proof::<F, H, N>(&tip, &nodes, start_location, end)?;
+        let proof = current::range_proof::<F, H, N>(&tip, reads)?;
         let raw = CurrentOperationRangeProofResult {
             watermark: watermark.location,
             root: tip.root,
@@ -489,7 +489,7 @@ where
     ) -> Result<RawKeyValueProof<H::Digest, ordered::Operation<F, K, E>, N, F>, QmdbError> {
         let location = Self::locate_active_key(session, tip, key.as_ref()).await?;
         let reads = self.proof_reads(session, tip, location).await?;
-        Self::active_key_proof(&self.op_cfg, tip, &reads, key, location)
+        Self::active_key_proof(&self.op_cfg, tip, reads, key, location)
     }
 
     /// Location of `key`'s latest update, which must be active at the tip.
@@ -524,7 +524,7 @@ where
     fn active_key_proof<Q: AsRef<[u8]>>(
         op_cfg: &<ordered::Operation<F, K, E> as commonware_codec::Read>::Cfg,
         tip: &CurrentTip<F, H::Digest>,
-        reads: &ProofReads<F, N>,
+        reads: ProofReads<F, N>,
         key: Q,
         location: Location<F>,
     ) -> Result<RawKeyValueProof<H::Digest, ordered::Operation<F, K, E>, N, F>, QmdbError> {
@@ -895,14 +895,14 @@ where
     ) -> Result<RawKeyExclusionProof<H::Digest, K, V, N, F, E>, QmdbError> {
         let target = Self::exclusion_target(session, tip, key).await?;
         let reads = self.proof_reads(session, tip, target.location()).await?;
-        Self::exclusion_proof(&self.op_cfg, tip, &reads, key, target)
+        Self::exclusion_proof(&self.op_cfg, tip, reads, key, target)
     }
 
     /// Exclusion proof of `key` against `target`, from `reads` covering it.
     fn exclusion_proof(
         op_cfg: &<ordered::Operation<F, K, E> as commonware_codec::Read>::Cfg,
         tip: &CurrentTip<F, H::Digest>,
-        reads: &ProofReads<F, N>,
+        reads: ProofReads<F, N>,
         key: &K,
         target: ExclusionTarget<F>,
     ) -> Result<RawKeyExclusionProof<H::Digest, K, V, N, F, E>, QmdbError> {
@@ -912,7 +912,7 @@ where
             location,
         } = target
         {
-            let update = Self::active_update(op_cfg, reads, &active_key, location)?;
+            let update = Self::active_update(op_cfg, &reads, &active_key, location)?;
             if !span_contains(&update.key, &update.next_key, key) {
                 return Err(QmdbError::CorruptData(format!(
                     "no ordered active-key span contains requested key {key:?}"
@@ -1054,7 +1054,7 @@ where
         for (key, location) in &active {
             let reads = self.proof_reads(&session, &tip, *location).await?;
             let proof =
-                Self::active_key_proof(&self.op_cfg, &tip, &reads, key.as_slice(), *location)?;
+                Self::active_key_proof(&self.op_cfg, &tip, reads, key.as_slice(), *location)?;
             entries.push(proof);
         }
 
