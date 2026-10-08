@@ -1206,6 +1206,46 @@ async fn test_ordered_connect_get_range_walks_past_deleted_keys() {
     assert_eq!(earlier.start_proof, Some(span("e", "g")));
 }
 
+#[tokio::test]
+async fn test_historical_bounded_range_skips_future_suffix() {
+    let (query, store_client, _servers) = common::counting_store().await;
+    let future_writes = (0..500)
+        .map(|index| (format!("z-{index:03}").into_bytes(), Some(vec![1])))
+        .collect();
+    let tips = build_source_tips(
+        "historical_bounded_range_future_suffix",
+        vec![tip_writes(&[("a", Some("a0"))]), future_writes],
+    )
+    .await;
+    upload_tips(&store_client, &tips).await;
+    let ordered = TestOrderedClient::new(
+        PrefixedStoreClient::empty(store_client),
+        op_cfg(),
+        key_cfg(),
+    );
+
+    query.reset_update_reads();
+    let range = ordered
+        .get_range_raw(
+            tips[0].latest_location,
+            b"a".to_vec(),
+            Some(b"b".to_vec()),
+            10,
+            None,
+        )
+        .await
+        .expect("historical bounded range");
+    assert_eq!(range.entries.len(), 1);
+    assert_eq!(range.entries[0].operation.key(), Some(&b"a".to_vec()));
+    assert!(range.entries[0].verify::<Sha256>());
+    assert!(range.start_proof.is_none());
+    let (scans, rows) = query.update_reads();
+    assert!(
+        scans <= 1 && rows <= 128,
+        "bounded historical range read {rows} rows in {scans} scans"
+    );
+}
+
 /// Keys in the deleted run of [`long_run_batches`].
 const LONG_RUN: usize = 298;
 

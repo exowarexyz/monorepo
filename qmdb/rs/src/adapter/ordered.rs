@@ -57,6 +57,11 @@ const UPDATE_WALK_PAGE_GROWTH: usize = 8;
 /// Largest walk request, the Store's row limit for one range frame.
 const UPDATE_WALK_MAX_PAGE_ROWS: usize = 4096;
 
+/// Reader for an ordered QMDB.
+///
+/// `K::Ord` must match the byte order of `K::as_ref()`. Commonware's ordered
+/// index navigates keys by their bytes, and this reader scans its key-ordered
+/// update index the same way.
 pub struct Ordered<
     F: Graftable,
     H: Hasher,
@@ -636,8 +641,7 @@ where
     /// order, with each key's latest version at or below `watermark` as
     /// `(raw key, location, value present)`. Stops when `visit` returns
     /// `false`, so a walk reads only up to the keys its caller needs. Index
-    /// order is raw key byte order, which matches `K`'s order as commonware's
-    /// ordered index already requires of ordered QMDB keys.
+    /// order is raw key byte order, which [`Ordered`] requires to match `K::Ord`.
     ///
     /// A key is visited as soon as its rows settle it: in reverse at its newest
     /// version at or below `watermark`, and forward at the first version above
@@ -1009,14 +1013,19 @@ where
         let inactivity_floor =
             Self::load_inactivity_floor_at(&session, &self.op_cfg, watermark.location).await?;
         let start = encode_update_key(start_key.as_ref(), Location::<F>::new(0))?;
-        let (_, index_end) = UPDATE_PREFIX.bounds();
+        // Keys at or past `end_key` that are written only above the watermark never reach
+        // `visit`, so bound the Store scan too. An end key too large to encode bounds nothing.
+        let end = end_key
+            .as_ref()
+            .and_then(|end| encode_update_key(end.as_ref(), Location::<F>::new(0)).ok())
+            .unwrap_or_else(|| UPDATE_PREFIX.bounds().1);
         let mut active = Vec::new();
         // Settling the `limit`th active key can take a row of the key after it.
         let first_page_rows = (limit as usize).saturating_add(1);
         Self::walk_latest_updates(
             &session,
             &start,
-            &index_end,
+            &end,
             RangeMode::Forward,
             watermark.location,
             first_page_rows,
