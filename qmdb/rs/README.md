@@ -286,7 +286,7 @@ Unary range verification binds the exact requested
 proves up to 1024 strictly ascending locations at one tip in a single
 multi-proof and binds exactly that tip and those locations. Ordered key ranges
 verify a linear interval and forward pagination over authenticated successor
-links. Generic key ordering follows `K::Ord`.
+links. Ordered keys order by `K::Ord`, which must match their byte order.
 
 Rust subscriptions use `message_with_root` to obtain an independently trusted
 root for each frame tip; each frame's `root` is that canonical root.

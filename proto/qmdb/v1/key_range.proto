@@ -16,11 +16,11 @@ service OrderedKeyRangeService {
 // QMDB keys (`K::encode()` bytes), not store row keys. The range is half-open:
 // `start_key <= key < end_key` after decoding `K` when `end_key` is set;
 // otherwise it scans to the end of the ordered keyspace. `limit` must be
-// non-zero.
+// between 1 and 1000.
 message GetRangeRequest {
   bytes start_key = 1;
   optional bytes end_key = 2;
-  uint32 limit = 3 [(buf.validate.field).uint32.gt = 0];
+  uint32 limit = 3 [(buf.validate.field).uint32 = {gt: 0, lte: 1000}];
   uint64 tip = 4;
 
   // Minimum Store sequence for checking publication of the requested watermark.

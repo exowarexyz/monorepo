@@ -60,6 +60,7 @@ fn qmdb_error_to_connect(err: QmdbError) -> ConnectError {
         QmdbError::EmptyBatch
         | QmdbError::EmptyProofRequest
         | QmdbError::InvalidRangeLength
+        | QmdbError::RangeLimitTooLarge { .. }
         | QmdbError::InvalidKeyRange { .. }
         | QmdbError::DuplicateRequestedKey { .. }
         | QmdbError::RangeStartOutOfBounds { .. }

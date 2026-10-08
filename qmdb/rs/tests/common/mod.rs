@@ -275,6 +275,147 @@ where
     (handle, url)
 }
 
+/// Update-index rows are keyed by this family byte.
+const UPDATE_FAMILY: u8 = 0x1;
+
+/// A simulator store that records which current-state rows queries read.
+pub struct CountingQuery {
+    store: std::sync::Arc<exoware_simulator::RocksStore>,
+    /// Bitmap chunk indexes whose rows were scanned.
+    pub bitmap_chunks: std::sync::Mutex<std::collections::BTreeSet<u64>>,
+    /// Update-index range scans started.
+    pub update_scans: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    /// Update-index rows handed to the server.
+    pub update_rows: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl CountingQuery {
+    /// Reset the update-index counters.
+    #[allow(dead_code)]
+    pub fn reset_update_reads(&self) {
+        self.update_scans
+            .store(0, std::sync::atomic::Ordering::Relaxed);
+        self.update_rows
+            .store(0, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Update-index `(scans, rows)` read since the last reset.
+    #[allow(dead_code)]
+    pub fn update_reads(&self) -> (usize, usize) {
+        (
+            self.update_scans.load(std::sync::atomic::Ordering::Relaxed),
+            self.update_rows.load(std::sync::atomic::Ordering::Relaxed),
+        )
+    }
+}
+
+/// Counts the update-index rows a scan hands to the server.
+pub struct CountingScan {
+    inner: <exoware_simulator::RocksStore as exoware_server::Query>::RangeScan,
+    update_rows: Option<std::sync::Arc<std::sync::atomic::AtomicUsize>>,
+}
+
+impl exoware_server::RangeScan for CountingScan {
+    async fn next_batch(
+        &mut self,
+        max_items: usize,
+    ) -> Result<exoware_server::RangeScanBatch, String> {
+        let batch = self.inner.next_batch(max_items).await?;
+        if let Some(rows) = &self.update_rows {
+            rows.fetch_add(batch.rows.len(), std::sync::atomic::Ordering::Relaxed);
+        }
+        Ok(batch)
+    }
+}
+
+impl exoware_server::Sequence for CountingQuery {
+    fn current_sequence(&self) -> u64 {
+        exoware_server::Sequence::current_sequence(self.store.as_ref())
+    }
+}
+
+impl exoware_server::Query for CountingQuery {
+    type RangeScan = CountingScan;
+
+    async fn get(
+        &self,
+        key: bytes::Bytes,
+    ) -> Result<exoware_server::QueryResult<Option<bytes::Bytes>>, String> {
+        exoware_server::Query::get(self.store.as_ref(), key).await
+    }
+
+    async fn get_many(
+        &self,
+        keys: Vec<bytes::Bytes>,
+    ) -> Result<exoware_server::QueryResult<Vec<(bytes::Bytes, Option<bytes::Bytes>)>>, String>
+    {
+        exoware_server::Query::get_many(self.store.as_ref(), keys).await
+    }
+
+    async fn range_scan(
+        &self,
+        start: bytes::Bytes,
+        end: bytes::Bytes,
+        limit: usize,
+        forward: bool,
+    ) -> Result<exoware_server::RangeScanResult<Self::RangeScan>, String> {
+        // A chunk row key is the chunk family byte, the u64 chunk index, then the u64 boundary location
+        if start.first() == Some(&exoware_qmdb::CHUNK_FAMILY) && start.len() == 17 {
+            self.bitmap_chunks
+                .lock()
+                .unwrap()
+                .insert(u64::from_be_bytes(start[1..9].try_into().unwrap()));
+        }
+        let update_rows = (start.first() == Some(&UPDATE_FAMILY)).then(|| {
+            self.update_scans
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            self.update_rows.clone()
+        });
+        let result =
+            exoware_server::Query::range_scan(self.store.as_ref(), start, end, limit, forward)
+                .await?;
+        Ok(exoware_server::RangeScanResult {
+            scan: CountingScan {
+                inner: result.scan,
+                update_rows,
+            },
+            sequence_number: result.sequence_number,
+        })
+    }
+}
+
+/// A store whose queries go through a [`CountingQuery`].
+#[allow(dead_code)]
+pub async fn counting_store() -> (
+    std::sync::Arc<CountingQuery>,
+    StoreClient,
+    [tokio::task::JoinHandle<()>; 2],
+) {
+    let store = std::sync::Arc::new(
+        exoware_simulator::RocksStore::open_owned(tempfile::tempdir().unwrap(), None).unwrap(),
+    );
+    let query = std::sync::Arc::new(CountingQuery {
+        store: store.clone(),
+        bitmap_chunks: Default::default(),
+        update_scans: Default::default(),
+        update_rows: Default::default(),
+    });
+    let (store_server, store_url) = spawn_connect_service(exoware_server::connect_stack(
+        exoware_server::AppState::new(store),
+    ))
+    .await;
+    let (query_server, query_url) = spawn_connect_service(exoware_server::query_service(
+        exoware_server::QueryState::new(query.clone()),
+    ))
+    .await;
+    let store_client = StoreClient::builder()
+        .url(&store_url)
+        .query_url(&query_url)
+        .build()
+        .unwrap();
+    (query, store_client, [store_server, query_server])
+}
+
 #[allow(dead_code)]
 pub fn operation_log_rpc_client(base: &str) -> OperationLogServiceClient<PreferZstdHttpClient> {
     OperationLogServiceClient::new(
