@@ -1,10 +1,10 @@
+use std::collections::HashMap;
+
 use commonware_codec::Codec;
 use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::{Sequential, Strategy};
 use commonware_storage::{
-    merkle::{
-        self, storage::Storage as MerkleStorage, Family, Graftable, Location, Position, Proof,
-    },
+    merkle::{self, Family, Graftable, Location, Position, Proof, RangePlan},
     qmdb::{
         any::{
             ordered,
@@ -18,6 +18,7 @@ use commonware_storage::{
     },
 };
 
+use crate::adapter::codec::op_count_for_watermark;
 use crate::QmdbError;
 
 /// Historical operation range plus the raw Merkle proof material used to verify
@@ -195,10 +196,12 @@ pub(crate) enum MultiProofOperations<'a, F: Family> {
     Given(Vec<(Location<F>, Vec<u8>)>),
 }
 
-/// Build and self-verify a `RawBatchMultiProof` over the given operations,
-/// sourcing Merkle nodes from `storage` and using the caller-supplied `root`.
-pub(crate) async fn build_batch_multi_proof<F, H, S>(
-    storage: &S,
+/// Build and self-verify a `RawBatchMultiProof` over the given operations from
+/// the digests at `positions`, the operations' multi-proof plan, and the
+/// caller-supplied `root`.
+pub(crate) fn build_batch_multi_proof<F, H>(
+    positions: &[Position<F>],
+    digests: &HashMap<Position<F>, H::Digest>,
     watermark: Location<F>,
     root: H::Digest,
     inactive_peaks: usize,
@@ -207,20 +210,34 @@ pub(crate) async fn build_batch_multi_proof<F, H, S>(
 where
     F: Graftable,
     H: Hasher,
-    S: MerkleStorage<F, Digest = H::Digest>,
 {
     if operations.is_empty() {
         return Err(crate::QmdbError::EmptyProofRequest);
     }
-    let locations: Vec<Location<F>> = operations.iter().map(|(loc, _)| *loc).collect();
-    let proof = merkle::verification::multi_proof(storage, inactive_peaks, &locations)
-        .await
+    let leaves = op_count_for_watermark(watermark)?;
+    let size = Position::try_from(leaves).map_err(crate::error::merkle_error)?;
+    if inactive_peaks > F::peaks(size).count() {
+        return Err(crate::error::merkle_error(merkle::Error::<F>::InvalidProof));
+    }
+    let digests = positions
+        .iter()
+        .map(|position| {
+            digests
+                .get(position)
+                .copied()
+                .ok_or(merkle::Error::ElementPruned(*position))
+        })
+        .collect::<Result<Vec<_>, _>>()
         .map_err(crate::error::merkle_error)?;
     let raw = RawBatchMultiProof {
         watermark,
         ops_root: root,
         ops_root_witness: None,
-        proof,
+        proof: Proof {
+            leaves,
+            inactive_peaks,
+            digests,
+        },
         operations,
     };
     if !raw.verify::<H>() {
@@ -231,14 +248,14 @@ where
     Ok(raw)
 }
 
-/// Build and self-verify an `OperationRangeCheckpoint` over the given
-/// contiguous span, sourcing Merkle nodes from `storage` and using the
+/// Build and self-verify an `OperationRangeCheckpoint` over `plan`'s range from
+/// the digests at its positions and the pins before `start_location`, using the
 /// caller-supplied `root` and pre-loaded `encoded_operations`.
-pub(crate) async fn build_operation_range_checkpoint<F, H, S>(
-    storage: &S,
+pub(crate) fn build_operation_range_checkpoint<F, H>(
+    plan: RangePlan<F>,
+    digests: &HashMap<Position<F>, H::Digest>,
     watermark: Location<F>,
     start_location: Location<F>,
-    end_location_exclusive: Location<F>,
     root: H::Digest,
     inactive_peaks: usize,
     encoded_operations: Vec<Vec<u8>>,
@@ -246,33 +263,22 @@ pub(crate) async fn build_operation_range_checkpoint<F, H, S>(
 where
     F: Graftable,
     H: Hasher,
-    S: MerkleStorage<F, Digest = H::Digest>,
 {
     let hasher = commonware_storage::qmdb::hasher::<H>();
-    let proof = merkle::verification::range_proof(
-        &hasher,
-        storage,
-        start_location..end_location_exclusive,
-        inactive_peaks,
-    )
-    .await
-    .map_err(crate::error::merkle_error)?;
-    let pinned_nodes = if start_location == Location::new(0) {
-        Vec::new()
-    } else {
-        futures::future::try_join_all(F::nodes_to_pin(start_location).map(|position| async move {
-            storage
-                .get_node(position)
-                .await
-                .map_err(crate::error::merkle_error)?
-                .ok_or_else(|| {
-                    crate::QmdbError::CommonwareMerkle(format!(
-                        "missing pinned node at position {position}"
-                    ))
-                })
-        }))
-        .await?
-    };
+    let proof = plan
+        .build(&hasher, inactive_peaks, |position| {
+            digests.get(&position).copied()
+        })
+        .map_err(crate::error::merkle_error)?;
+    let pinned_nodes = F::nodes_to_pin(start_location)
+        .map(|position| {
+            digests.get(&position).copied().ok_or_else(|| {
+                crate::QmdbError::CommonwareMerkle(format!(
+                    "missing pinned node at position {position}"
+                ))
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     let checkpoint = OperationRangeCheckpoint {
         watermark,
         ops_root: root,

@@ -5,7 +5,10 @@ use std::sync::Arc;
 use bytes::Bytes;
 use commonware_codec::{Copying, DecodeExt};
 use commonware_cryptography::{Digest, Hasher};
-use commonware_storage::merkle::{hasher::Hasher as _, Family, Graftable, Location, Position};
+use commonware_storage::merkle::{
+    self, hasher::Hasher as _, multi_proof_positions, Family, Graftable, Location, Position,
+    RangePlan,
+};
 use commonware_storage::qmdb::current::proof::OpsRootWitness;
 use exoware_sdk::{keys::Key, ReadSession};
 
@@ -14,8 +17,8 @@ use crate::adapter::codec::{
     op_count_for_watermark,
 };
 use crate::adapter::core::load_operation_bytes_range;
-use crate::adapter::prefetch::{multi_positions, range_positions, PrefetchedMerkleStorage};
 use crate::adapter::read_cache::{ReadCache, RootContext};
+use crate::error::merkle_error;
 use crate::proof::{
     build_batch_multi_proof, build_operation_range_checkpoint, MultiProofOperations,
     OperationRangeCheckpoint, RawBatchMultiProof,
@@ -37,7 +40,15 @@ where
     Fut: Future<Output = Result<usize, QmdbError>>,
 {
     let size = merkle_size_for_watermark(watermark)?;
-    let positions = range_positions(watermark, start, end)?;
+    let plan =
+        RangePlan::new(op_count_for_watermark(watermark)?, start..end).map_err(merkle_error)?;
+    // The checkpoint also carries the pins that extend the prefix before `start`.
+    let proof_positions = plan
+        .positions()
+        .into_iter()
+        .chain(F::nodes_to_pin(start))
+        .collect::<BTreeSet<_>>();
+    let positions = with_peaks(size, proof_positions.iter().copied());
     let mut keys = BTreeSet::new();
     if *end - *start == 1 {
         keys.insert(encode_operation_key(start));
@@ -73,19 +84,60 @@ where
     } else {
         operations?
     };
-    let storage = PrefetchedMerkleStorage::<F, H::Digest>::new(size, reads.nodes);
-    let mut checkpoint = build_operation_range_checkpoint::<F, H, _>(
-        &storage,
+    let digests = decode_nodes(&reads.nodes, proof_positions)?;
+    let mut checkpoint = build_operation_range_checkpoint::<F, H>(
+        plan,
+        &digests,
         watermark,
         start,
-        end,
         reads.context.root,
         reads.context.inactive_peaks,
         operations,
-    )
-    .await?;
+    )?;
     checkpoint.ops_root_witness = reads.witness?;
     Ok(checkpoint)
+}
+
+/// Return `positions` and every peak of a structure of `size`, sorted and
+/// deduplicated. Proof plans leave out the peaks a proof rebuilds, but the root
+/// is computed from all of them.
+fn with_peaks<F: Family>(
+    size: Position<F>,
+    positions: impl IntoIterator<Item = Position<F>>,
+) -> Vec<Position<F>> {
+    positions
+        .into_iter()
+        .chain(F::peaks(size).map(|(position, _)| position))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+/// Decode the node rows at `positions` in order, so the first missing or
+/// malformed row among them is the one reported.
+fn decode_nodes<F: Family, D: Digest>(
+    nodes: &BTreeMap<Position<F>, Option<Bytes>>,
+    positions: impl IntoIterator<Item = Position<F>>,
+) -> Result<HashMap<Position<F>, D>, QmdbError> {
+    positions
+        .into_iter()
+        .map(|position| {
+            let bytes = nodes
+                .get(&position)
+                .and_then(Option::as_ref)
+                .ok_or(merkle::Error::ElementPruned(position))?;
+            if bytes.len() != D::SIZE {
+                return Err(merkle::Error::DataCorrupted(
+                    "exoware-qmdb node digest has invalid length",
+                ));
+            }
+            let digest = D::decode(Copying(bytes.as_ref())).map_err(|_| {
+                merkle::Error::DataCorrupted("exoware-qmdb node digest decode failed")
+            })?;
+            Ok((position, digest))
+        })
+        .collect::<Result<_, _>>()
+        .map_err(merkle_error)
 }
 
 /// Build a multi-proof with one batched read of any operation rows still to
@@ -111,7 +163,9 @@ where
             operations.iter().map(|(location, _)| *location).collect()
         }
     };
-    let positions = multi_positions(watermark, &locations)?;
+    let proof_positions = multi_proof_positions(op_count_for_watermark(watermark)?, &locations)
+        .map_err(merkle_error)?;
+    let positions = with_peaks(size, proof_positions.iter().copied());
     let keys = match &operations {
         MultiProofOperations::Read(locations) => locations
             .iter()
@@ -146,15 +200,15 @@ where
             .collect::<Result<Vec<_>, QmdbError>>()?,
         MultiProofOperations::Given(operations) => operations,
     };
-    let storage = PrefetchedMerkleStorage::<F, H::Digest>::new(size, reads.nodes);
-    let mut proof = build_batch_multi_proof::<F, H, _>(
-        &storage,
+    let digests = decode_nodes(&reads.nodes, proof_positions.iter().copied())?;
+    let mut proof = build_batch_multi_proof::<F, H>(
+        &proof_positions,
+        &digests,
         watermark,
         reads.context.root,
         reads.context.inactive_peaks,
         operations,
-    )
-    .await?;
+    )?;
     proof.ops_root_witness = reads.witness?;
     Ok(proof)
 }
@@ -340,4 +394,38 @@ pub(crate) async fn fetch_rows<F: Family, D: Digest>(
         }
     }
     Ok((rows, nodes))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use commonware_cryptography::sha256::Digest;
+    use commonware_storage::merkle::mmr;
+
+    #[test]
+    fn missing_and_malformed_nodes_follow_requested_order() {
+        let positions = [0, 3, 8].map(Position::<mmr::Family>::new);
+        for malformed in positions[..2].iter().copied() {
+            let mut nodes = BTreeMap::from([
+                (positions[0], None),
+                (positions[1], None),
+                (positions[2], Some(Bytes::from_static(&[0; 32]))),
+            ]);
+            nodes.insert(malformed, Some(Bytes::from_static(b"invalid")));
+            let decoded = decode_nodes::<_, Digest>(&nodes, [positions[2]]).unwrap();
+            assert_eq!(decoded[&positions[2]], Digest([0; 32]));
+            assert!(decode_nodes::<_, Digest>(&nodes, []).unwrap().is_empty());
+            let error = decode_nodes::<_, Digest>(&nodes, positions[..2].iter().copied())
+                .unwrap_err()
+                .to_string();
+            let expected = if malformed == positions[0] {
+                merkle::Error::<mmr::Family>::DataCorrupted(
+                    "exoware-qmdb node digest has invalid length",
+                )
+            } else {
+                merkle::Error::ElementPruned(positions[0])
+            };
+            assert!(error.contains(&expected.to_string()), "{error}");
+        }
+    }
 }
