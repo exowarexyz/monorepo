@@ -1537,3 +1537,101 @@ async fn test_unordered_connect_client_rejects_invalid_streamed_proof() {
         }
     ));
 }
+
+/// Store requests `operation` makes.
+async fn store_calls<T>(
+    query: &common::CountingQuery,
+    operation: impl std::future::Future<Output = Result<T, QmdbError>>,
+) -> common::StoreCalls {
+    query.take_calls();
+    operation.await.unwrap();
+    query.take_calls()
+}
+
+#[tokio::test]
+async fn test_unordered_current_proofs_store_calls() {
+    let (query, store_client, servers) = common::counting_store().await;
+    let source = build_current_source_batch().await;
+    commit_current_upload(&store_client, &source).await;
+    // A new client starts with an empty read cache
+    let new_client = || async {
+        let client =
+            exoware_qmdb::adapter::Unordered::<mmr::Family, Sha256, Digest, Vec<u8>, N>::new(
+                PrefixedStoreClient::empty(store_client.clone()),
+                fixed_key_op_cfg(),
+            );
+        client.latest_published_watermark().await.unwrap();
+        client
+    };
+    let client = new_client().await;
+    let tip = source.latest_location;
+
+    let calls = |get, get_many, range| common::StoreCalls {
+        get,
+        get_many,
+        range,
+    };
+    // The first proof loads the tip; later ones read only their own rows and nodes
+    assert_eq!(
+        store_calls(&query, client.get_raw(tip, source.alpha, None)).await,
+        calls(1, 2, 2),
+    );
+    assert_eq!(
+        store_calls(&query, client.get_raw(tip, source.alpha, None)).await,
+        calls(1, 1, 1),
+    );
+    assert_eq!(
+        store_calls(
+            &query,
+            client.get_many_raw(tip, &[source.alpha, source.beta], None),
+        )
+        .await,
+        calls(2, 2, 2),
+    );
+    assert_eq!(
+        store_calls(
+            &query,
+            client.current_operation_range_raw(tip, tip - 2, 2, None),
+        )
+        .await,
+        calls(0, 1, 1),
+    );
+
+    // A request proving several keys loads a cold tip once
+    assert_eq!(
+        store_calls(
+            &query,
+            new_client()
+                .await
+                .get_many_raw(tip, &[source.alpha, source.beta], None),
+        )
+        .await,
+        calls(2, 3, 3),
+    );
+    for server in servers {
+        server.abort();
+    }
+}
+
+#[tokio::test]
+async fn test_unordered_concurrent_cold_proofs_load_the_tip_once() {
+    let (query, store_client, servers) = common::counting_store().await;
+    let source = build_current_source_batch().await;
+    commit_current_upload(&store_client, &source).await;
+    let client = exoware_qmdb::adapter::Unordered::<mmr::Family, Sha256, Digest, Vec<u8>, N>::new(
+        PrefixedStoreClient::empty(store_client),
+        fixed_key_op_cfg(),
+    );
+    let tip = source.latest_location;
+    client.latest_published_watermark().await.unwrap();
+
+    query.take_calls();
+    futures::future::try_join_all((0..4).map(|_| client.get_raw(tip, source.alpha, None)))
+        .await
+        .unwrap();
+    // One tip batch, then one proof-node batch per request
+    assert_eq!(query.take_calls().get_many, 1 + 4);
+    for server in servers {
+        server.abort();
+    }
+}

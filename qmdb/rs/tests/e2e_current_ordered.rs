@@ -1282,3 +1282,104 @@ async fn test_ordered_mmr_current_boundaries_survive_coalesced_publication() {
 async fn test_ordered_mmb_current_boundaries_survive_coalesced_publication() {
     assert_current_boundaries_survive_coalesced_publication::<mmb::Family>().await;
 }
+
+/// Store requests `operation` makes.
+async fn store_calls<T>(
+    query: &common::CountingQuery,
+    operation: impl std::future::Future<Output = Result<T, exoware_qmdb::QmdbError>>,
+) -> common::StoreCalls {
+    query.take_calls();
+    operation.await.unwrap();
+    query.take_calls()
+}
+
+#[tokio::test]
+async fn test_ordered_current_proofs_store_calls() {
+    let (query, store_client, servers) = common::counting_store().await;
+    let source = build_variable_source_with_write_count::<mmr::Family, N>(
+        "current_ordered_variable_store_calls_source",
+        300,
+    )
+    .await;
+    common::commit_current_operations(
+        &PrefixedStoreClient::empty(store_client.clone()),
+        &source.operations,
+        &op_cfg::<mmr::Family>(),
+        &source.current_boundary,
+    )
+    .await
+    .unwrap();
+    // A new client starts with an empty read cache
+    let new_client = || async {
+        let client: VariableClient<mmr::Family> = exoware_qmdb::adapter::Ordered::new(
+            PrefixedStoreClient::empty(store_client.clone()),
+            op_cfg::<mmr::Family>(),
+            key_cfg(),
+        );
+        client.latest_published_watermark().await.unwrap();
+        client
+    };
+    let client = new_client().await;
+    let tip = source.latest_location;
+
+    let key = |index: usize| format!("k-{index:08}").into_bytes();
+    let present = [key(7), key(150), key(290)];
+    let missing = b"k-00000150x".to_vec();
+    let calls = |get, get_many, range| common::StoreCalls {
+        get,
+        get_many,
+        range,
+    };
+    // The first proof loads the tip; later ones read only their own rows and nodes
+    assert_eq!(
+        store_calls(&query, client.get_raw(tip, key(7), None)).await,
+        calls(1, 2, 3),
+    );
+    assert_eq!(
+        store_calls(&query, client.get_raw(tip, key(7), None)).await,
+        calls(1, 1, 2),
+    );
+    assert_eq!(
+        store_calls(&query, client.get_many_raw(tip, &present, None)).await,
+        calls(3, 3, 6),
+    );
+    assert_eq!(
+        store_calls(
+            &query,
+            client.get_many_raw(tip, std::slice::from_ref(&missing), None),
+        )
+        .await,
+        calls(0, 2, 3),
+    );
+    assert_eq!(
+        store_calls(&query, client.get_range_raw(tip, key(10), None, 5, None)).await,
+        calls(5, 5, 6),
+    );
+    assert_eq!(
+        store_calls(
+            &query,
+            client.current_operation_range_raw(tip, tip - 4, 4, None),
+        )
+        .await,
+        calls(0, 1, 2),
+    );
+
+    // Requests proving several keys load a cold tip once
+    assert_eq!(
+        store_calls(&query, new_client().await.get_many_raw(tip, &present, None)).await,
+        calls(3, 4, 7),
+    );
+    assert_eq!(
+        store_calls(
+            &query,
+            new_client()
+                .await
+                .get_range_raw(tip, key(10), None, 5, None),
+        )
+        .await,
+        calls(5, 6, 7),
+    );
+    for server in servers {
+        server.abort();
+    }
+}

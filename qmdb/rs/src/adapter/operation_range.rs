@@ -244,7 +244,7 @@ where
     })
 }
 
-fn root<F: Family, H: Hasher>(
+pub(crate) fn root<F: Family, H: Hasher>(
     nodes: &BTreeMap<Position<F>, Option<Bytes>>,
     watermark: Location<F>,
     inactive_peaks: usize,
