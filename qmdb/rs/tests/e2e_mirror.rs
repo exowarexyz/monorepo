@@ -239,7 +239,13 @@ async fn build_any_unordered_source(
                     for (k, v) in batch {
                         b = b.write(k, v);
                     }
-                    b.merkleize(&db, None::<Vec<u8>>).await.expect("merkleize")
+                    b.merkleize(
+                        &db,
+                        None::<Vec<u8>>,
+                        &mut commonware_storage::qmdb::floor::Proportional,
+                    )
+                    .await
+                    .expect("merkleize")
                 };
                 (db, _) = db.apply_batch(finalized).await.expect("apply");
             }
@@ -519,7 +525,13 @@ async fn build_current_ordered_source(
                     for (k, v) in batch {
                         b = b.write(k, v);
                     }
-                    b.merkleize(&db, None::<Vec<u8>>).await.expect("merkleize")
+                    b.merkleize(
+                        &db,
+                        None::<Vec<u8>>,
+                        &mut commonware_storage::qmdb::floor::Proportional,
+                    )
+                    .await
+                    .expect("merkleize")
                 };
                 (db, _) = db.apply_batch(finalized).await.expect("apply");
             }

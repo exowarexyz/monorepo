@@ -1,17 +1,20 @@
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::marker::PhantomData;
+use std::sync::Arc;
 
 use bytes::Bytes;
 use commonware_codec::{Copying, DecodeExt, FixedSize};
 use commonware_cryptography::{Digest, Hasher};
-use commonware_macros::boxed;
 use commonware_storage::merkle::{
     self, hasher::Hasher as _, storage::Storage as MerkleStorage, Family, Graftable, Location,
     Position,
 };
 use commonware_storage::qmdb::current::grafting;
-use exoware_sdk::{RangeMode, ReadSession};
+use exoware_sdk::{keys::Key, RangeMode, ReadSession};
 
 use crate::adapter::codec::{chunk_index_for_location, encode_grafted_node_key, encode_node_key};
+use crate::adapter::operation_range::fetch_rows;
+use crate::adapter::read_cache::ReadCache;
 
 pub(crate) struct KvMerkleStorage<'a, F: Family, D: Digest> {
     pub(crate) session: &'a ReadSession,
@@ -69,171 +72,245 @@ impl<F: Family, D: Digest> KvMerkleStorage<'_, F, D> {
         &self,
         positions: &[Position<F>],
     ) -> Result<Vec<Option<Bytes>>, merkle::Error<F>> {
-        if positions.is_empty() {
-            return Ok(Vec::new());
-        }
-        let keys = positions
-            .iter()
-            .map(|&position| encode_node_key(position))
-            .collect::<Vec<_>>();
-        let refs = keys.iter().collect::<Vec<_>>();
-        let rows = self
-            .session
-            .get_many(&refs, u32::try_from(keys.len()).unwrap_or(u32::MAX))
-            .await
-            .map_err(|error| {
-                crate::error::store_read_error(error, "exoware-qmdb node fetch failed")
-            })?
-            .collect()
-            .await
-            .map_err(|error| {
-                crate::error::store_read_error(error, "exoware-qmdb node fetch failed")
-            })?;
-
-        // Leave decoding to callers so a later malformed node cannot mask an earlier missing node.
-        Ok(keys.iter().map(|key| rows.get(key).cloned()).collect())
+        load_node_rows(self.session, positions).await
     }
 }
 
-pub(crate) struct KvCurrentStorage<'a, F: Graftable, H: Hasher, const N: usize> {
-    pub(crate) session: &'a ReadSession,
-    pub(crate) watermark: Location<F>,
-    pub(crate) pruned_chunks: u64,
-    pub(crate) size: Position<F>,
-    pub(crate) _marker: PhantomData<H>,
+/// Operation-tree node rows at `positions` in one batched read, `None` where a
+/// row is absent. Decoding is left to callers so a later malformed node cannot
+/// mask an earlier missing node.
+async fn load_node_rows<F: Family>(
+    session: &ReadSession,
+    positions: &[Position<F>],
+) -> Result<Vec<Option<Bytes>>, merkle::Error<F>> {
+    if positions.is_empty() {
+        return Ok(Vec::new());
+    }
+    let keys = positions
+        .iter()
+        .map(|&position| encode_node_key(position))
+        .collect::<Vec<_>>();
+    let refs = keys.iter().collect::<Vec<_>>();
+    let rows = session
+        .get_many(&refs, u32::try_from(keys.len()).unwrap_or(u32::MAX))
+        .await
+        .map_err(|error| crate::error::store_read_error(error, "exoware-qmdb node fetch failed"))?
+        .collect()
+        .await
+        .map_err(|error| crate::error::store_read_error(error, "exoware-qmdb node fetch failed"))?;
+    Ok(keys.iter().map(|key| rows.get(key).cloned()).collect())
 }
 
-impl<F: Graftable, H: Hasher, const N: usize> MerkleStorage<F> for KvCurrentStorage<'_, F, H, N> {
-    type Digest = H::Digest;
+/// Where a current proof reads the node at an operation-tree position.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum NodeSource<F: Family> {
+    /// The operation-tree node: below the grafting height, or covering only
+    /// pruned chunks, whose bits are all zero.
+    Ops,
+    /// The stored grafted node at this grafted-tree position, latest version at
+    /// or below the watermark. An absent parent is rebuilt from its children.
+    Grafted(Position<F>),
+    /// Rebuilt from its children: the node spans the pruning boundary.
+    Rebuilt,
+}
 
-    fn size(&self) -> Position<F> {
-        self.size
+/// The [`NodeSource`] of the node at `position` when `pruned_chunks` bitmap
+/// chunks are pruned.
+pub(crate) fn node_source<F: Graftable, const N: usize>(
+    position: Position<F>,
+    pruned_chunks: u64,
+) -> Result<NodeSource<F>, merkle::Error<F>> {
+    let grafting_height = grafting::height::<N>();
+    if F::pos_to_height(position) < grafting_height {
+        return Ok(NodeSource::Ops);
     }
-
-    async fn get_node(&self, position: Position<F>) -> Result<Option<H::Digest>, merkle::Error<F>> {
-        self.get_node_inner(position).await
+    let grafted_position = grafting::ops_to_grafted_pos::<F>(position, grafting_height);
+    let grafted_height = F::pos_to_height(grafted_position);
+    let leftmost = F::leftmost_leaf(grafted_position, grafted_height);
+    let covered_chunks = 1u64.checked_shl(grafted_height).ok_or_else(|| {
+        merkle::Error::DataCorrupted("exoware-qmdb current grafted height overflow")
+    })?;
+    if (*leftmost).saturating_add(covered_chunks) <= pruned_chunks {
+        return Ok(NodeSource::Ops);
     }
+    // A parent can cover both discarded all-zero chunks and retained chunks with active bits
+    // Activity changes before pruning can change its hash
+    // Pruning itself preserves the root
+    // Boundary deltas omit discarded chunks, so only wholly retained nodes reuse stored current hashes
+    if *leftmost >= pruned_chunks {
+        return Ok(NodeSource::Grafted(grafted_position));
+    }
+    Ok(NodeSource::Rebuilt)
+}
 
-    async fn get_nodes(
-        &self,
-        positions: &[Position<F>],
-    ) -> Result<Vec<H::Digest>, merkle::Error<F>> {
-        assert!(
-            positions.is_sorted_by(|a, b| a < b),
-            "positions must be strictly increasing"
-        );
-        let grafting_height = grafting::height::<N>();
-        let (ops_positions, current_positions): (Vec<_>, Vec<_>) = positions
-            .iter()
-            .copied()
-            .partition(|position| F::pos_to_height(*position) < grafting_height);
-        let ops = KvMerkleStorage::<F, H::Digest> {
-            session: self.session,
-            size: self.size,
-            _marker: PhantomData,
-        };
-        let (ops_nodes, current_nodes) = futures::try_join!(
-            ops.load_nodes(&ops_positions),
-            futures::future::try_join_all(
-                current_positions
-                    .iter()
-                    .map(|&position| self.get_node_inner(position))
-            ),
-        )?;
-        let mut ops_nodes = ops_nodes.into_iter().map(|bytes| {
-            bytes
-                .map(|bytes| KvMerkleStorage::<F, H::Digest>::decode_node(bytes.as_ref()))
-                .transpose()
-        });
-        let mut current_nodes = current_nodes.into_iter().map(Ok);
+/// Node rows a current proof reads, all read by [`load_proof_nodes`] before
+/// the proof is built.
+#[derive(Default)]
+pub(crate) struct ProofNodes<F: Family> {
+    /// Operation-tree nodes by position.
+    ops: BTreeMap<Position<F>, Bytes>,
+    /// Grafted nodes by grafted-tree position, `None` where the row is absent
+    /// and the node is rebuilt from its children.
+    grafted: BTreeMap<Position<F>, Option<Bytes>>,
+}
 
-        // Resolve absent nodes in request order after all independent reads complete
-        positions
-            .iter()
-            .map(|&position| {
-                let node = if F::pos_to_height(position) < grafting_height {
-                    ops_nodes.next()
-                } else {
-                    current_nodes.next()
+/// Read every node a current proof needs at `watermark`, given the
+/// operation-tree `positions` it requests, plus the rows at `keys`.
+///
+/// Returns the rows found at `keys`, with absent rows left out, and the proof's [`ProofNodes`].
+///
+/// Each round reads operation-tree nodes in one batch through the node cache,
+/// alongside one range read per grafted node; `keys` join the first round's
+/// batch. A node rebuilt from its children adds them to the next round: before
+/// reading when it spans the pruning boundary, after reading when its stored
+/// grafted row is absent.
+pub(crate) async fn load_proof_nodes<F: Graftable, D: Digest, const N: usize>(
+    session: &ReadSession,
+    cache: &Arc<ReadCache<F, D>>,
+    watermark: Location<F>,
+    pruned_chunks: u64,
+    positions: impl IntoIterator<Item = Position<F>>,
+    keys: BTreeSet<Key>,
+) -> Result<(HashMap<Key, Bytes>, ProofNodes<F>), crate::QmdbError> {
+    let merkle_error = crate::error::merkle_error::<F>;
+    let mut nodes = ProofNodes::default();
+    let mut rows = HashMap::new();
+    let mut keys = Some(keys);
+    let mut pending = positions.into_iter().collect::<Vec<_>>();
+    while !pending.is_empty() || keys.is_some() {
+        let mut ops = BTreeSet::new();
+        // Grafted position to the operation-tree position it stands for
+        let mut grafted = BTreeMap::new();
+        while let Some(position) = pending.pop() {
+            match node_source::<F, N>(position, pruned_chunks).map_err(merkle_error)? {
+                NodeSource::Ops if !nodes.ops.contains_key(&position) => {
+                    ops.insert(position);
                 }
-                .expect("one result per requested position")?;
-                node.ok_or(merkle::Error::ElementPruned(position))
-            })
-            .collect()
-    }
-}
-
-impl<F: Graftable, H: Hasher, const N: usize> KvCurrentStorage<'_, F, H, N> {
-    #[boxed]
-    async fn get_node_inner(
-        &self,
-        position: Position<F>,
-    ) -> Result<Option<H::Digest>, merkle::Error<F>> {
-        let ops = KvMerkleStorage::<F, H::Digest> {
-            session: self.session,
-            size: self.size,
-            _marker: PhantomData,
-        };
-        let grafting_height = grafting::height::<N>();
-        let ops_height = F::pos_to_height(position);
-        if ops_height < grafting_height {
-            return ops.get_node(position).await;
-        }
-
-        let grafted_position = grafting::ops_to_grafted_pos::<F>(position, grafting_height);
-        let grafted_height = F::pos_to_height(grafted_position);
-        let leftmost = F::leftmost_leaf(grafted_position, grafted_height);
-        let covered_chunks = 1u64.checked_shl(grafted_height).ok_or_else(|| {
-            merkle::Error::DataCorrupted("exoware-qmdb current grafted height overflow")
-        })?;
-        if (*leftmost).saturating_add(covered_chunks) <= self.pruned_chunks {
-            return ops.get_node(position).await;
-        }
-
-        // A parent can cover both discarded all-zero chunks and retained chunks with active bits
-        // Activity changes before pruning can change its hash
-        // Pruning itself preserves the root
-        // Boundary deltas omit discarded chunks, so only wholly retained nodes reuse stored current hashes
-        if *leftmost >= self.pruned_chunks {
-            let start = encode_grafted_node_key(grafted_position, Location::new(0));
-            let end = encode_grafted_node_key(grafted_position, self.watermark);
-            let rows = self
-                .session
-                .range_with_mode(&start, &end, 1, RangeMode::Reverse)
-                .await
-                .map_err(|error| {
-                    crate::error::store_read_error(
-                        error,
-                        "exoware-qmdb current grafted node fetch failed",
-                    )
-                })?;
-            if let Some((_, bytes)) = rows.into_iter().next() {
-                if bytes.len() != H::Digest::SIZE {
-                    return Err(merkle::Error::DataCorrupted(
-                        "exoware-qmdb current grafted node has invalid length",
-                    ));
+                NodeSource::Grafted(grafted_position)
+                    if !nodes.grafted.contains_key(&grafted_position) =>
+                {
+                    grafted.insert(grafted_position, position);
                 }
-                return H::Digest::decode(Copying(bytes.as_ref()))
-                    .map(Some)
-                    .map_err(|_| {
-                        merkle::Error::DataCorrupted(
-                            "exoware-qmdb current grafted node decode failed",
-                        )
-                    });
+                NodeSource::Rebuilt => pending.extend(children(position)),
+                NodeSource::Ops | NodeSource::Grafted(_) => {}
             }
         }
-
-        // Grafted leaves require bitmap data and cannot be reconstructed from operation children
-        if grafted_height == 0 {
-            return Ok(None);
+        let ops = ops.into_iter().collect::<Vec<_>>();
+        let round_keys = keys.take().unwrap_or_default();
+        let ((round_rows, ops_rows), grafted_rows) = futures::try_join!(
+            fetch_rows(session, cache, &ops, round_keys),
+            futures::future::try_join_all(grafted.keys().map(|&grafted_position| async move {
+                Ok::<_, crate::QmdbError>(
+                    load_grafted_node(session, watermark, grafted_position).await?,
+                )
+            })),
+        )?;
+        rows.extend(round_rows);
+        for (position, row) in ops_rows {
+            let row = row.ok_or_else(|| merkle_error(merkle::Error::ElementPruned(position)))?;
+            nodes.ops.insert(position, row);
         }
+        for ((grafted_position, position), row) in grafted.into_iter().zip(grafted_rows) {
+            // Grafted leaves require bitmap data and cannot be rebuilt from operation children
+            if row.is_none() && F::pos_to_height(grafted_position) > 0 {
+                pending.extend(children(position));
+            }
+            nodes.grafted.insert(grafted_position, row);
+        }
+    }
+    Ok((rows, nodes))
+}
 
-        // Rebuild parents spanning the pruning boundary and absent delayed-merge parents from children
-        let (left, right) = F::children(position, ops_height);
-        let Some(left) = self.get_node_inner(left).await? else {
+fn children<F: Family>(position: Position<F>) -> [Position<F>; 2] {
+    let (left, right) = F::children(position, F::pos_to_height(position));
+    [left, right]
+}
+
+/// The stored grafted node at `grafted_position`, latest version at or below
+/// `watermark`.
+async fn load_grafted_node<F: Family>(
+    session: &ReadSession,
+    watermark: Location<F>,
+    grafted_position: Position<F>,
+) -> Result<Option<Bytes>, exoware_sdk::ClientError> {
+    let start = encode_grafted_node_key(grafted_position, Location::new(0));
+    let end = encode_grafted_node_key(grafted_position, watermark);
+    let rows = session
+        .range_with_mode(&start, &end, 1, RangeMode::Reverse)
+        .await?;
+    Ok(rows.into_iter().next().map(|(_, bytes)| bytes))
+}
+
+impl<F: Graftable> ProofNodes<F> {
+    /// The digest at each of `positions` as the grafted view of the operation
+    /// tree serves it: operation-tree digests below the grafting height and over
+    /// pruned chunks, stored grafted digests over retained chunks, and parents
+    /// rebuilt from their children. Positions whose rows are absent, such as
+    /// pruned grafted leaves, are left out. A position whose rows were not read
+    /// is an error, never a Store read.
+    pub(crate) fn digests<H: Hasher, const N: usize>(
+        &self,
+        pruned_chunks: u64,
+        positions: &[Position<F>],
+    ) -> Result<HashMap<Position<F>, H::Digest>, merkle::Error<F>> {
+        let mut digests = HashMap::with_capacity(positions.len());
+        for &position in positions {
+            if let Some(digest) = self.node::<H, N>(pruned_chunks, position)? {
+                digests.insert(position, digest);
+            }
+        }
+        Ok(digests)
+    }
+
+    fn node<H: Hasher, const N: usize>(
+        &self,
+        pruned_chunks: u64,
+        position: Position<F>,
+    ) -> Result<Option<H::Digest>, merkle::Error<F>> {
+        let unread = merkle::Error::DataCorrupted("exoware-qmdb current proof node was not read");
+        match node_source::<F, N>(position, pruned_chunks)? {
+            NodeSource::Ops => self
+                .ops
+                .get(&position)
+                .ok_or(unread)
+                .and_then(|bytes| KvMerkleStorage::<F, H::Digest>::decode_node(bytes.as_ref()))
+                .map(Some),
+            NodeSource::Grafted(grafted_position) => {
+                match self.grafted.get(&grafted_position).ok_or(unread)? {
+                    Some(bytes) => {
+                        if bytes.len() != H::Digest::SIZE {
+                            return Err(merkle::Error::DataCorrupted(
+                                "exoware-qmdb current grafted node has invalid length",
+                            ));
+                        }
+                        H::Digest::decode(Copying(bytes.as_ref()))
+                            .map(Some)
+                            .map_err(|_| {
+                                merkle::Error::DataCorrupted(
+                                    "exoware-qmdb current grafted node decode failed",
+                                )
+                            })
+                    }
+                    None if F::pos_to_height(grafted_position) == 0 => Ok(None),
+                    None => self.rebuild::<H, N>(pruned_chunks, position),
+                }
+            }
+            NodeSource::Rebuilt => self.rebuild::<H, N>(pruned_chunks, position),
+        }
+    }
+
+    /// Rebuild parents spanning the pruning boundary and absent delayed-merge
+    /// parents from their children.
+    fn rebuild<H: Hasher, const N: usize>(
+        &self,
+        pruned_chunks: u64,
+        position: Position<F>,
+    ) -> Result<Option<H::Digest>, merkle::Error<F>> {
+        let [left, right] = children(position);
+        let Some(left) = self.node::<H, N>(pruned_chunks, left)? else {
             return Ok(None);
         };
-        let Some(right) = self.get_node_inner(right).await? else {
+        let Some(right) = self.node::<H, N>(pruned_chunks, right)? else {
             return Ok(None);
         };
         let hasher = commonware_storage::qmdb::hasher::<H>();
@@ -723,10 +800,10 @@ mod tests {
 
         calls.lock().unwrap().clear();
         let locations = [Location::new(3), Location::new(19), Location::new(55)];
-        let proof = verification::multi_proof(&storage, 0, hasher.root_bagging(), &locations)
+        let proof = verification::multi_proof(&storage, 0, &locations)
             .await
             .unwrap();
-        let expected = verification::multi_proof(&memory, 0, hasher.root_bagging(), &locations)
+        let expected = verification::multi_proof(&memory, 0, &locations)
             .await
             .unwrap();
         assert_eq!(proof, expected);
@@ -783,21 +860,26 @@ mod tests {
         let calls = queries.calls.clone();
         let (client, server) = serve(queries).await;
         let session = client.create_session_with_sequence(1);
-        let storage = KvCurrentStorage::<mmr::Family, Sha256, 1> {
-            session: &session,
-            watermark,
-            pruned_chunks: 0,
-            size: Position::new(31),
-            _marker: PhantomData,
-        };
         // The watchdog reports a stalled sequential reader, without measuring request latency
-        let nodes = tokio::time::timeout(
+        let (_, read) = tokio::time::timeout(
             std::time::Duration::from_secs(30),
-            storage.get_nodes(&positions),
+            load_proof_nodes::<mmr::Family, Digest, 1>(
+                &session,
+                &Arc::new(ReadCache::new()),
+                watermark,
+                0,
+                positions.iter().copied(),
+                BTreeSet::new(),
+            ),
         )
         .await
         .expect("grafted reads must reach the barrier concurrently")
         .unwrap();
+        let resolved = read.digests::<Sha256, 1>(0, &positions).unwrap();
+        let nodes = positions
+            .iter()
+            .map(|position| resolved[position])
+            .collect::<Vec<_>>();
         assert_eq!(nodes, digests);
         let mut requested = calls.lock().unwrap().clone();
         requested.sort();
@@ -809,6 +891,58 @@ mod tests {
     async fn test_current_nodes_batch_operations_and_overlap_grafted_reads() {
         assert_current_nodes(&[0, 14, 15, 29], &[("many", 2), ("range", 1), ("range", 1)]).await;
         assert_current_nodes(&[14, 29], &[("range", 1), ("range", 1)]).await;
+    }
+
+    #[tokio::test]
+    async fn test_absent_grafted_parent_is_rebuilt_from_children_read_ahead() {
+        // With one-byte chunks (grafting height 3), the 16-leaf MMR's root (30)
+        // is a grafted parent over the grafted leaves 14 and 29.
+        let watermark = Location::<mmr::Family>::new(15);
+        let height = grafting::height::<1>();
+        let child = |position: u64| {
+            let position = Position::<mmr::Family>::new(position);
+            let digest = Sha256::hash(&[&position.as_u64().to_be_bytes()]);
+            (position, digest)
+        };
+        let (left, right) = (child(14), child(29));
+        let queries = NodeQueries {
+            rows: [left, right]
+                .iter()
+                .map(|&(position, digest)| {
+                    (
+                        encode_grafted_node_key(
+                            grafting::ops_to_grafted_pos(position, height),
+                            watermark,
+                        ),
+                        Bytes::copy_from_slice(digest.as_ref()),
+                    )
+                })
+                .collect(),
+            ..Default::default()
+        };
+        let calls = queries.calls.clone();
+        let (client, server) = serve(queries).await;
+        let session = client.create_session_with_sequence(1);
+        let root = Position::<mmr::Family>::new(30);
+        let (_, read) = load_proof_nodes::<mmr::Family, Digest, 1>(
+            &session,
+            &Arc::new(ReadCache::new()),
+            watermark,
+            0,
+            [root],
+            BTreeSet::new(),
+        )
+        .await
+        .unwrap();
+        // The absent parent's row, then both children in a second round
+        assert_eq!(*calls.lock().unwrap(), [("range", 1); 3]);
+
+        let expected =
+            commonware_storage::qmdb::hasher::<Sha256>().node_digest(root, &left.1, &right.1);
+        let resolved = read.digests::<Sha256, 1>(0, &[root]).unwrap();
+        assert_eq!(resolved[&root], expected);
+        assert_eq!(calls.lock().unwrap().len(), 3, "resolving reads nothing");
+        server.abort();
     }
 
     impl NodeQueries {

@@ -1072,7 +1072,11 @@ macro_rules! variant_case {
                             }
                         }
                         let finalized = batch
-                            .merkleize(&db, None::<$fixture::Value>)
+                            .merkleize(
+                                &db,
+                                None::<$fixture::Value>,
+                                &mut commonware_storage::qmdb::floor::Proportional,
+                            )
                             .await
                             .expect("source merkleize");
                         let captured = capture_source_batch!($state, $family, db, finalized);

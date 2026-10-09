@@ -208,7 +208,11 @@ async fn build_source_batch() -> SourceBatch {
                         .write(b"alpha".to_vec(), Some(b"one".to_vec()))
                         .write(b"beta".to_vec(), Some(b"two".to_vec()));
                     batch
-                        .merkleize(&db, None::<Vec<u8>>)
+                        .merkleize(
+                            &db,
+                            None::<Vec<u8>>,
+                            &mut commonware_storage::qmdb::floor::Proportional,
+                        )
                         .await
                         .expect("merkleize")
                 };
@@ -307,7 +311,11 @@ async fn build_mmb_source_batch() -> MmbSourceBatch {
                         .write(b"alpha".to_vec(), Some(alpha_value))
                         .write(key, Some(value));
                     batch
-                        .merkleize(&db, None::<Vec<u8>>)
+                        .merkleize(
+                            &db,
+                            None::<Vec<u8>>,
+                            &mut commonware_storage::qmdb::floor::Proportional,
+                        )
                         .await
                         .expect("merkleize")
                 };
@@ -382,7 +390,11 @@ async fn build_mmb_growing_source_batch() -> MmbGrowingSourceBatch {
                         .write(b"alpha".to_vec(), Some(alpha_value))
                         .write(key, Some(value));
                     batch
-                        .merkleize(&db, None::<Vec<u8>>)
+                        .merkleize(
+                            &db,
+                            None::<Vec<u8>>,
+                            &mut commonware_storage::qmdb::floor::Proportional,
+                        )
                         .await
                         .expect("merkleize")
                 };

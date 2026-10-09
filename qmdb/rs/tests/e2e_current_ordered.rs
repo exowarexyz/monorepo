@@ -174,7 +174,11 @@ where
                     .write(b"alpha".to_vec(), Some(b"one".to_vec()))
                     .write(b"beta".to_vec(), Some(b"two".to_vec()));
                 batch
-                    .merkleize(&db, None::<Vec<u8>>)
+                    .merkleize(
+                        &db,
+                        None::<Vec<u8>>,
+                        &mut commonware_storage::qmdb::floor::Proportional,
+                    )
                     .await
                     .expect("merkleize")
             };
@@ -285,7 +289,11 @@ where
                     );
                 }
                 batch
-                    .merkleize(&db, None::<Vec<u8>>)
+                    .merkleize(
+                        &db,
+                        None::<Vec<u8>>,
+                        &mut commonware_storage::qmdb::floor::Proportional,
+                    )
                     .await
                     .expect("merkleize")
             };
@@ -357,7 +365,11 @@ where
                     .write(alpha, Some(one))
                     .write(beta, Some(two));
                 batch
-                    .merkleize(&db, None::<Digest>)
+                    .merkleize(
+                        &db,
+                        None::<Digest>,
+                        &mut commonware_storage::qmdb::floor::Proportional,
+                    )
                     .await
                     .expect("fixed merkleize")
             };
@@ -603,7 +615,11 @@ async fn assert_incremental_seed_batches_keep_current_proofs_verifiable<F>(
                         }
                         counter += 3;
                         batch
-                            .merkleize(&db, None::<Vec<u8>>)
+                            .merkleize(
+                                &db,
+                                None::<Vec<u8>>,
+                                &mut commonware_storage::qmdb::floor::Proportional,
+                            )
                             .await
                             .expect("merkleize")
                     };
@@ -764,7 +780,11 @@ async fn test_ordered_mmb_persistent_interleaved_seed_batches_keep_current_proof
                             }
                             counter += 3;
                             batch
-                                .merkleize(&db, None::<Vec<u8>>)
+                                .merkleize(
+                                    &db,
+                                    None::<Vec<u8>>,
+                                    &mut commonware_storage::qmdb::floor::Proportional,
+                                )
                                 .await
                                 .expect("merkleize")
                         };
@@ -1141,7 +1161,11 @@ where
                     );
                 }
                 let batch = batch
-                    .merkleize(&db, None::<Vec<u8>>)
+                    .merkleize(
+                        &db,
+                        None::<Vec<u8>>,
+                        &mut commonware_storage::qmdb::floor::Proportional,
+                    )
                     .await
                     .expect("merkleize source batch");
                 (db, _) = db.apply_batch(batch).await.expect("apply source batch");
@@ -1333,15 +1357,15 @@ async fn test_ordered_current_proofs_store_calls() {
     // The first proof loads the tip; later ones read only their own rows and nodes
     assert_eq!(
         store_calls(&query, client.get_raw(tip, key(7), None)).await,
-        calls(1, 2, 3),
+        calls(0, 2, 3),
     );
     assert_eq!(
         store_calls(&query, client.get_raw(tip, key(7), None)).await,
-        calls(1, 1, 2),
+        calls(0, 1, 2),
     );
     assert_eq!(
         store_calls(&query, client.get_many_raw(tip, &present, None)).await,
-        calls(3, 3, 6),
+        calls(0, 3, 6),
     );
     assert_eq!(
         store_calls(
@@ -1349,11 +1373,11 @@ async fn test_ordered_current_proofs_store_calls() {
             client.get_many_raw(tip, std::slice::from_ref(&missing), None),
         )
         .await,
-        calls(0, 2, 3),
+        calls(0, 1, 3),
     );
     assert_eq!(
         store_calls(&query, client.get_range_raw(tip, key(10), None, 5, None)).await,
-        calls(5, 5, 6),
+        calls(0, 5, 6),
     );
     assert_eq!(
         store_calls(
@@ -1367,7 +1391,7 @@ async fn test_ordered_current_proofs_store_calls() {
     // Requests proving several keys load a cold tip once
     assert_eq!(
         store_calls(&query, new_client().await.get_many_raw(tip, &present, None)).await,
-        calls(3, 4, 7),
+        calls(0, 4, 7),
     );
     assert_eq!(
         store_calls(
@@ -1377,8 +1401,59 @@ async fn test_ordered_current_proofs_store_calls() {
                 .get_range_raw(tip, key(10), None, 5, None),
         )
         .await,
-        calls(5, 6, 7),
+        calls(0, 6, 7),
     );
+    for server in servers {
+        server.abort();
+    }
+}
+
+#[tokio::test]
+async fn test_ordered_current_proof_reads_overlap() {
+    let (query, store_client, servers) = common::counting_store().await;
+    let source = build_variable_source_with_write_count::<mmr::Family, N>(
+        "current_ordered_variable_overlap_source",
+        300,
+    )
+    .await;
+    common::commit_current_operations(
+        &PrefixedStoreClient::empty(store_client.clone()),
+        &source.operations,
+        &op_cfg::<mmr::Family>(),
+        &source.current_boundary,
+    )
+    .await
+    .unwrap();
+    let client: VariableClient<mmr::Family> = exoware_qmdb::adapter::Ordered::new(
+        PrefixedStoreClient::empty(store_client),
+        op_cfg::<mmr::Family>(),
+        key_cfg(),
+    );
+    let tip = source.latest_location;
+    let key = b"k-00000007".to_vec();
+    // Load the tip first, so the gated reads are the proof's own
+    let warm = client.get_raw(tip, &key, None).await.unwrap();
+    assert_eq!(warm.root, source.current_boundary.root);
+    let deadline = std::time::Duration::from_secs(10);
+
+    // A key proof reads its operation row and nodes while reading its chunk
+    query.require_overlap(exoware_qmdb::CHUNK_FAMILY);
+    let proof = tokio::time::timeout(deadline, client.get_raw(tip, &key, None))
+        .await
+        .expect("operation batch and chunk read must overlap")
+        .unwrap();
+    assert!(proof.verify::<Sha256>());
+
+    // A range proof reads its nodes while scanning its operations
+    query.require_overlap(common::OPERATION_FAMILY);
+    let range = tokio::time::timeout(
+        deadline,
+        client.current_operation_range_raw(tip, tip - 4, 4, None),
+    )
+    .await
+    .expect("node batch and operation scan must overlap")
+    .unwrap();
+    assert!(range.verify::<Sha256>());
     for server in servers {
         server.abort();
     }

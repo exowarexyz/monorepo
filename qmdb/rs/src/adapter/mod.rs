@@ -16,7 +16,6 @@ mod immutable;
 mod keyless;
 mod operation_range;
 mod ordered;
-mod prefetch;
 pub mod prune;
 mod read_cache;
 pub(crate) mod storage;

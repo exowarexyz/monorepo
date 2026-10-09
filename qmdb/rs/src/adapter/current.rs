@@ -1,25 +1,27 @@
 //! Current-state proof reads shared by the ordered and unordered adapters.
 
-use std::collections::BTreeMap;
-use std::marker::PhantomData;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use bytes::Bytes;
 use commonware_codec::{Copying, DecodeExt};
 use commonware_cryptography::{Digest, Hasher};
-use commonware_storage::merkle::{Family, Graftable, Location, Position};
+use commonware_storage::merkle::{ElementPlan, Family, Graftable, Location, Position, RangePlan};
 use commonware_storage::qmdb::current::proof::{constant::OperationProof, RangeProof};
 use exoware_sdk::{RangeMode, ReadSession};
 
 use crate::adapter::codec::{
     chunk_index_for_location, clear_below_floor, decode_current_boundary_metadata,
-    encode_chunk_key, encode_current_meta_key, encode_node_key, encode_operation_key,
-    encode_presence_key, merkle_size_for_watermark,
+    decode_update_index_value_present, decode_update_location, encode_chunk_key,
+    encode_current_meta_key, encode_node_key, encode_operation_key, encode_presence_key,
+    merkle_size_for_watermark, op_count_for_watermark,
 };
 use crate::adapter::core;
 use crate::adapter::operation_range::root;
 use crate::adapter::read_cache::{ReadCache, RootContext};
-use crate::adapter::storage::{tail_chunk, BitmapTail, KvCurrentStorage, ProofBitmap, TailIndices};
+use crate::adapter::storage::{
+    load_proof_nodes, tail_chunk, BitmapTail, ProofBitmap, ProofNodes, TailIndices,
+};
 use crate::QmdbError;
 
 /// Current-state values fixed by one published batch boundary.
@@ -210,66 +212,167 @@ pub(crate) async fn load_chunks<F: Graftable, D: Digest, const N: usize>(
     .await
 }
 
-async fn proof_bitmap<F: Graftable, D: Digest, const N: usize>(
-    session: &ReadSession,
-    tip: &CurrentTip<F, D>,
-    location: Option<Location<F>>,
-) -> Result<ProofBitmap<N>, QmdbError> {
-    let mut bitmap = ProofBitmap::new(tip.watermark, tip.pruned_chunks, &tip.tail)?;
-    if let Some(location) = location {
-        if let Some(index) = bitmap.chunk_to_prove(location)? {
-            bitmap.insert(index, load_chunk::<F, D, N>(session, tip, index).await?)?;
-        }
-    }
-    Ok(bitmap)
+/// The operation row, bitmap chunk and proof nodes for a current proof of one
+/// operation, read together by [`load_proof_reads`].
+pub(crate) struct ProofReads<F: Family, const N: usize> {
+    /// The proof's plan, which the reads cover and its build consumes.
+    plan: ElementPlan<F>,
+    /// The encoded operation at the plan's location.
+    pub(crate) operation: Bytes,
+    /// The operation's bitmap chunk, unless the chunk is pruned.
+    chunk: Option<[u8; N]>,
+    nodes: ProofNodes<F>,
 }
 
-fn storage<'a, F: Graftable, H: Hasher, const N: usize>(
-    session: &'a ReadSession,
+/// Location of `key`'s latest update at the tip, which must hold a value.
+/// An update that holds a value below the inactivity floor contradicts the
+/// tip, so the index is corrupt.
+pub(crate) async fn locate_active_key<F: Family, D: Digest>(
+    session: &ReadSession,
+    tip: &CurrentTip<F, D>,
+    key: &[u8],
+) -> Result<Location<F>, QmdbError> {
+    let watermark = tip.watermark;
+    let Some((row_key, row_value)) = core::load_latest_update_row(session, watermark, key).await?
+    else {
+        return Err(QmdbError::ProofKeyNotFound {
+            watermark: watermark.as_u64(),
+            key: key.to_vec(),
+        });
+    };
+    let location = decode_update_location(&row_key)?;
+    if !decode_update_index_value_present(row_value.as_ref())? {
+        return Err(QmdbError::KeyNotActive {
+            watermark: watermark.as_u64(),
+            key: key.to_vec(),
+        });
+    }
+    if location < tip.inactivity_floor {
+        return Err(QmdbError::CorruptData(format!(
+            "latest update at {location} holds a value below inactivity floor {}",
+            tip.inactivity_floor
+        )));
+    }
+    Ok(location)
+}
+
+/// Read everything a current proof of the operation at `location` needs in one
+/// phase: its proof nodes as planned by commonware, with the operation row in
+/// the first node batch, alongside its bitmap chunk (unless a tail chunk).
+pub(crate) async fn load_proof_reads<F: Graftable, H: Hasher, const N: usize>(
+    session: &ReadSession,
+    cache: &Arc<ReadCache<F, H::Digest>>,
     tip: &CurrentTip<F, H::Digest>,
-) -> Result<KvCurrentStorage<'a, F, H, N>, QmdbError> {
-    Ok(KvCurrentStorage {
-        session,
-        watermark: tip.watermark,
-        pruned_chunks: tip.pruned_chunks,
-        size: merkle_size_for_watermark(tip.watermark)?,
-        _marker: PhantomData,
+    location: Location<F>,
+) -> Result<ProofReads<F, N>, QmdbError> {
+    let leaves = op_count_for_watermark(tip.watermark)?;
+    let plan = ElementPlan::new(leaves, location).map_err(crate::error::merkle_error)?;
+    let positions = plan.positions();
+    let chunk_index = chunk_index_for_location::<F, N>(location);
+    let operation_key = encode_operation_key(location);
+    let ((mut rows, nodes), chunk) = futures::try_join!(
+        load_proof_nodes::<F, H::Digest, N>(
+            session,
+            cache,
+            tip.watermark,
+            tip.pruned_chunks,
+            positions,
+            BTreeSet::from([operation_key.clone()]),
+        ),
+        async {
+            if chunk_index < tip.pruned_chunks {
+                return Ok(None);
+            }
+            load_chunk::<F, H::Digest, N>(session, tip, chunk_index)
+                .await
+                .map(Some)
+        },
+    )?;
+    let Some(operation) = rows.remove(&operation_key) else {
+        return Err(QmdbError::CorruptData(format!(
+            "missing operation row at location {location}"
+        )));
+    };
+    Ok(ProofReads {
+        plan,
+        operation,
+        chunk,
+        nodes,
     })
 }
 
-/// Current-state proof for the operation at `location`.
-pub(crate) async fn operation_proof<F: Graftable, H: Hasher, const N: usize>(
-    session: &ReadSession,
-    tip: &CurrentTip<F, H::Digest>,
-    location: Location<F>,
-) -> Result<OperationProof<F, H::Digest, N>, QmdbError> {
-    let status = proof_bitmap::<F, H::Digest, N>(session, tip, Some(location)).await?;
-    OperationProof::new::<H, _>(
-        &status,
-        &storage::<F, H, N>(session, tip)?,
-        tip.inactivity_floor,
-        location,
-        tip.ops.root,
-    )
-    .await
-    .map_err(crate::error::current_proof_error)
+/// The plan and proof nodes for a current range proof, read together by
+/// [`load_range_reads`].
+pub(crate) struct RangeReads<F: Family> {
+    plan: RangePlan<F>,
+    nodes: ProofNodes<F>,
 }
 
-/// Current-state proof for the operations in `[start, end)`.
-pub(crate) async fn range_proof<F: Graftable, H: Hasher, const N: usize>(
+/// The plan and proof nodes for the current range proof of `[start, end)`.
+pub(crate) async fn load_range_reads<F: Graftable, H: Hasher, const N: usize>(
     session: &ReadSession,
+    cache: &Arc<ReadCache<F, H::Digest>>,
     tip: &CurrentTip<F, H::Digest>,
     start: Location<F>,
     end: Location<F>,
-) -> Result<RangeProof<F, H::Digest>, QmdbError> {
-    let status = proof_bitmap::<F, H::Digest, N>(session, tip, None).await?;
-    RangeProof::new::<H, _, N>(
+) -> Result<RangeReads<F>, QmdbError> {
+    let leaves = op_count_for_watermark(tip.watermark)?;
+    let plan = RangePlan::new(leaves, start..end).map_err(crate::error::merkle_error)?;
+    let (_, nodes) = load_proof_nodes::<F, H::Digest, N>(
+        session,
+        cache,
+        tip.watermark,
+        tip.pruned_chunks,
+        plan.positions(),
+        BTreeSet::new(),
+    )
+    .await?;
+    Ok(RangeReads { plan, nodes })
+}
+
+/// Current-state proof for the operation `reads` was loaded for, built from
+/// `reads` alone.
+pub(crate) fn operation_proof<F: Graftable, H: Hasher, const N: usize>(
+    tip: &CurrentTip<F, H::Digest>,
+    reads: ProofReads<F, N>,
+) -> Result<OperationProof<F, H::Digest, N>, QmdbError> {
+    let mut status = ProofBitmap::new(tip.watermark, tip.pruned_chunks, &tip.tail)?;
+    if let Some(index) = status.chunk_to_prove(reads.plan.location())? {
+        let chunk = reads.chunk.ok_or_else(|| {
+            QmdbError::CorruptData(format!("current proof chunk {index} was not read"))
+        })?;
+        status.insert(index, chunk)?;
+    }
+    let digests = reads
+        .nodes
+        .digests::<H, N>(tip.pruned_chunks, &reads.plan.positions())
+        .map_err(crate::error::merkle_error)?;
+    OperationProof::build::<H>(
         &status,
-        &storage::<F, H, N>(session, tip)?,
+        reads.plan,
+        |position| digests.get(&position).copied(),
         tip.inactivity_floor,
-        start..end,
         tip.ops.root,
     )
-    .await
+    .map_err(crate::error::current_proof_error)
+}
+
+/// Current-state range proof built from [`load_range_reads`].
+pub(crate) fn range_proof<F: Graftable, H: Hasher, const N: usize>(
+    tip: &CurrentTip<F, H::Digest>,
+    reads: RangeReads<F>,
+) -> Result<RangeProof<F, H::Digest>, QmdbError> {
+    let status = ProofBitmap::new(tip.watermark, tip.pruned_chunks, &tip.tail)?;
+    let digests = reads
+        .nodes
+        .digests::<H, N>(tip.pruned_chunks, &reads.plan.positions())
+        .map_err(crate::error::merkle_error)?;
+    RangeProof::build::<H, N>(
+        &status,
+        reads.plan,
+        |position| digests.get(&position).copied(),
+        tip.inactivity_floor,
+        tip.ops.root,
+    )
     .map_err(crate::error::current_proof_error)
 }

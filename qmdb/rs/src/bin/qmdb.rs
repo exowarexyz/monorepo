@@ -346,7 +346,11 @@ async fn seed(
                     }
                     counter += 3;
                     batch
-                        .merkleize(&source_db, None::<Vec<u8>>)
+                        .merkleize(
+                            &source_db,
+                            None::<Vec<u8>>,
+                            &mut commonware_storage::qmdb::floor::Proportional,
+                        )
                         .await
                         .expect("merkleize")
                 };

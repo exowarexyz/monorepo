@@ -96,7 +96,11 @@ async fn build_variable_source() -> VariableSource {
                     .write(b"alpha".to_vec(), Some(b"one".to_vec()))
                     .write(b"beta".to_vec(), Some(b"two".to_vec()));
                 batch
-                    .merkleize(&db, None::<Vec<u8>>)
+                    .merkleize(
+                        &db,
+                        None::<Vec<u8>>,
+                        &mut commonware_storage::qmdb::floor::Proportional,
+                    )
                     .await
                     .expect("merkleize")
             };
@@ -170,7 +174,11 @@ async fn build_fixed_source() -> FixedSource {
                     .write(alpha, Some(one))
                     .write(beta, Some(two));
                 batch
-                    .merkleize(&db, None::<Digest>)
+                    .merkleize(
+                        &db,
+                        None::<Digest>,
+                        &mut commonware_storage::qmdb::floor::Proportional,
+                    )
                     .await
                     .expect("merkleize fixed")
             };

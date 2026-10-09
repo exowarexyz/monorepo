@@ -565,7 +565,11 @@ macro_rules! case {
                                 .write(source_keys[2].clone(), Some(values[1].clone()))
                         };
                         let batch = batch
-                            .merkleize(&db, None::<V>)
+                            .merkleize(
+                                &db,
+                                None::<V>,
+                                &mut commonware_storage::qmdb::floor::Proportional,
+                            )
                             .await
                             .expect("source merkleize");
                         let (start, appended) = batch.operations();
