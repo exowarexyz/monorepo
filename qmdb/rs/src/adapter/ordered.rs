@@ -487,37 +487,9 @@ where
         tip: &CurrentTip<F, H::Digest>,
         key: Q,
     ) -> Result<RawKeyValueProof<H::Digest, ordered::Operation<F, K, E>, N, F>, QmdbError> {
-        let location = Self::locate_active_key(session, tip, key.as_ref()).await?;
+        let location = current::locate_active_key(session, tip, key.as_ref()).await?;
         let reads = self.proof_reads(session, tip, location).await?;
         Self::active_key_proof(&self.op_cfg, tip, reads, key, location)
-    }
-
-    /// Location of `key`'s latest update, which must be active at the tip.
-    async fn locate_active_key(
-        session: &ReadSession,
-        tip: &CurrentTip<F, H::Digest>,
-        key: &[u8],
-    ) -> Result<Location<F>, QmdbError> {
-        let watermark = tip.watermark;
-        let key_bytes = key.to_vec();
-        let Some((row_key, row_value)) =
-            core::load_latest_update_row(session, watermark, key).await?
-        else {
-            return Err(QmdbError::ProofKeyNotFound {
-                watermark: watermark.as_u64(),
-                key: key_bytes,
-            });
-        };
-        let location = decode_update_location(&row_key)?;
-        if location < tip.inactivity_floor
-            || !decode_update_index_value_present(row_value.as_ref())?
-        {
-            return Err(QmdbError::KeyNotActive {
-                watermark: watermark.as_u64(),
-                key: key_bytes,
-            });
-        }
-        Ok(location)
     }
 
     /// Current proof for `key`, active at the tip with its latest update at `location`.

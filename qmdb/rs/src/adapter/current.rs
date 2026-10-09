@@ -12,8 +12,9 @@ use exoware_sdk::{RangeMode, ReadSession};
 
 use crate::adapter::codec::{
     chunk_index_for_location, clear_below_floor, decode_current_boundary_metadata,
-    encode_chunk_key, encode_current_meta_key, encode_node_key, encode_operation_key,
-    encode_presence_key, merkle_size_for_watermark, op_count_for_watermark,
+    decode_update_index_value_present, decode_update_location, encode_chunk_key,
+    encode_current_meta_key, encode_node_key, encode_operation_key, encode_presence_key,
+    merkle_size_for_watermark, op_count_for_watermark,
 };
 use crate::adapter::core;
 use crate::adapter::operation_range::root;
@@ -221,6 +222,38 @@ pub(crate) struct ProofReads<F: Family, const N: usize> {
     /// The operation's bitmap chunk, unless the chunk is pruned.
     chunk: Option<[u8; N]>,
     nodes: ProofNodes<F>,
+}
+
+/// Location of `key`'s latest update at the tip, which must hold a value.
+/// An update that holds a value below the inactivity floor contradicts the
+/// tip, so the index is corrupt.
+pub(crate) async fn locate_active_key<F: Family, D: Digest>(
+    session: &ReadSession,
+    tip: &CurrentTip<F, D>,
+    key: &[u8],
+) -> Result<Location<F>, QmdbError> {
+    let watermark = tip.watermark;
+    let Some((row_key, row_value)) = core::load_latest_update_row(session, watermark, key).await?
+    else {
+        return Err(QmdbError::ProofKeyNotFound {
+            watermark: watermark.as_u64(),
+            key: key.to_vec(),
+        });
+    };
+    let location = decode_update_location(&row_key)?;
+    if !decode_update_index_value_present(row_value.as_ref())? {
+        return Err(QmdbError::KeyNotActive {
+            watermark: watermark.as_u64(),
+            key: key.to_vec(),
+        });
+    }
+    if location < tip.inactivity_floor {
+        return Err(QmdbError::CorruptData(format!(
+            "latest update at {location} holds a value below inactivity floor {}",
+            tip.inactivity_floor
+        )));
+    }
+    Ok(location)
 }
 
 /// Read everything a current proof of the operation at `location` needs in one

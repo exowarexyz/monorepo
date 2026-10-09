@@ -16,8 +16,8 @@ use commonware_storage::qmdb::{
 use exoware_sdk::{PrefixedStoreClient, ReadSession};
 
 use crate::adapter::codec::{
-    decode_current_boundary_metadata, decode_update_index_value_present, decode_update_location,
-    encode_current_meta_key, encode_ops_root_witness_key, CurrentBoundaryMetadata,
+    decode_current_boundary_metadata, encode_current_meta_key, encode_ops_root_witness_key,
+    CurrentBoundaryMetadata,
 };
 use crate::adapter::core;
 use crate::adapter::current::{self, CurrentTip, ProofReads};
@@ -431,7 +431,7 @@ where
         tip: &CurrentTip<F, H::Digest>,
         key: Q,
     ) -> Result<RawKeyValueProof<H::Digest, unordered::Operation<F, K, E>, N, F>, QmdbError> {
-        let location = Self::locate_active_key(session, tip, key.as_ref()).await?;
+        let location = current::locate_active_key(session, tip, key.as_ref()).await?;
         let reads =
             current::load_proof_reads::<F, H, N>(session, &self.read_cache, tip, location).await?;
         self.active_key_proof(tip, reads, key, location)
@@ -473,32 +473,6 @@ where
             });
         }
         Ok(raw)
-    }
-
-    /// Location of `key`'s latest update, which must hold a value at the tip.
-    async fn locate_active_key(
-        session: &ReadSession,
-        tip: &CurrentTip<F, H::Digest>,
-        key: &[u8],
-    ) -> Result<Location<F>, QmdbError> {
-        let watermark = tip.watermark;
-        let key_bytes = key.to_vec();
-        let Some((row_key, row_value)) =
-            core::load_latest_update_row(session, watermark, key).await?
-        else {
-            return Err(QmdbError::ProofKeyNotFound {
-                watermark: watermark.as_u64(),
-                key: key_bytes,
-            });
-        };
-        let location = decode_update_location(&row_key)?;
-        if !decode_update_index_value_present(row_value.as_ref())? {
-            return Err(QmdbError::KeyNotActive {
-                watermark: watermark.as_u64(),
-                key: key_bytes,
-            });
-        }
-        Ok(location)
     }
 
     /// Verified raw current-state proof for a single active unordered key.
