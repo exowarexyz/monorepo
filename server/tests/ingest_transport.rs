@@ -1,6 +1,6 @@
 use std::{
     convert::Infallible,
-    future::poll_fn,
+    future::{poll_fn, Future},
     io,
     net::SocketAddr,
     pin::Pin,
@@ -836,6 +836,166 @@ async fn production_put_blocked_header_flush_uses_the_deadline_before_middleware
 
 const PUT_PATH: &str = "/log.ingest.v1.Service/Put";
 const TINY_PUT: &[u8] = b"\x0a\x06\x0a\x01k\x12\x01v";
+
+#[derive(Default)]
+struct FinishedUploadIngest {
+    finished: AtomicBool,
+    entered: Notify,
+}
+
+impl Ingest for FinishedUploadIngest {
+    async fn put(&self, input: &mut PutInput) -> Result<u64, PutError> {
+        let mut rows = 0;
+        while let Some(chunk) = input.next_batch(DecodeBuffers::default()).await? {
+            rows += chunk.entries().count();
+        }
+        input.finish().await?;
+        assert_eq!(rows, 1);
+        self.finished.store(true, Ordering::SeqCst);
+        self.entered.notify_one();
+        futures::future::pending().await
+    }
+}
+
+#[tokio::test]
+async fn http1_finished_upload_keeps_backend_timeout_response_and_connection() -> Result<(), Error>
+{
+    use tower::ServiceExt;
+
+    let request_timeout = Duration::from_secs(30);
+    for chunked in [false, true] {
+        let tcp = TcpListener::bind("127.0.0.1:0").await?;
+        let addr = tcp.local_addr()?;
+        let stats = Arc::new(Stats::default());
+        let listener = MeasuredListener {
+            tcp,
+            stats: stats.clone(),
+            gate: Arc::new(Gate::default()),
+        };
+        let backend = Arc::new(FinishedUploadIngest::default());
+        let service = ingest_service(IngestState::new(backend.clone()).with_put_config(
+            PutConfig {
+                timeout: request_timeout,
+                ..PutConfig::default()
+            },
+        ));
+        let handler_gate = Arc::new(Gate::default());
+        handler_gate.blocked.store(true, Ordering::SeqCst);
+        let held_at_deadline = Arc::new(Notify::new());
+        let requests = backend.clone();
+        let gate = handler_gate.clone();
+        let held = held_at_deadline.clone();
+        let service = service_fn(move |request: Request<Body>| {
+            let service = service.clone();
+            let backend = requests.clone();
+            let gate = gate.clone();
+            let held = held.clone();
+            async move {
+                if request.uri().path() == "/health" {
+                    return Ok(Response::new(Body::empty()));
+                }
+                let deadline = Instant::now() + request_timeout;
+                let response = service.oneshot(request);
+                tokio::pin!(response);
+
+                // Hold handler cleanup so it cannot hide connection cancellation after EOF.
+                poll_fn(|cx| {
+                    if backend.finished.load(Ordering::SeqCst)
+                        && gate.blocked.load(Ordering::SeqCst)
+                    {
+                        *gate.waker.lock().unwrap() = Some(cx.waker().clone());
+                        if Instant::now() >= deadline {
+                            held.notify_one();
+                        }
+                        Poll::Pending
+                    } else {
+                        response.as_mut().poll(cx)
+                    }
+                })
+                .await
+            }
+        });
+        let (shutdown, receive) = oneshot::channel();
+        let task = tokio::spawn(async move {
+            serve(listener, service, async {
+                let _ = receive.await;
+            })
+            .await
+            .unwrap();
+        });
+        let mut server = Server {
+            addr,
+            stats,
+            shutdown: Some(shutdown),
+            task,
+        };
+        let (mut connection, driver) = hyper::client::conn::http1::handshake(
+            hyper_util::rt::TokioIo::new(client(addr).await?),
+        )
+        .await?;
+        let driver = tokio::spawn(driver);
+        let body = if chunked {
+            streaming_body(TINY_PUT)
+        } else {
+            Body::from(Bytes::from_static(TINY_PUT))
+        };
+        let response = connection.send_request(
+            Request::post(PUT_PATH)
+                .header(header::HOST, "localhost")
+                .header(header::CONTENT_TYPE, "application/proto")
+                .header("connect-protocol-version", "1")
+                .body(body)?,
+        );
+        tokio::pin!(response);
+        timeout(Duration::from_secs(5), backend.entered.notified()).await?;
+
+        // Pause only after real socket I/O and checked input finalization have completed.
+        tokio::time::pause();
+        tokio::time::advance(request_timeout + Duration::from_secs(1)).await;
+        timeout(Duration::from_secs(1), async {
+            tokio::select! {
+                _ = held_at_deadline.notified() => {}
+                result = &mut response => {
+                    panic!("connection ended before the backend timeout response with chunked={chunked}, response={result:?}");
+                }
+            }
+        })
+        .await?;
+        assert_eq!(
+            server.stats.io_drops.load(Ordering::SeqCst),
+            0,
+            "validated upload EOF must disarm connection cancellation with chunked={chunked}"
+        );
+        tokio::time::resume();
+        handler_gate.blocked.store(false, Ordering::SeqCst);
+        if let Some(waker) = handler_gate.waker.lock().unwrap().take() {
+            waker.wake();
+        }
+        let response = timeout(Duration::from_secs(2), response).await??;
+        assert_error(
+            response.map(Body::new),
+            StatusCode::GATEWAY_TIMEOUT,
+            "deadline_exceeded",
+        )
+        .await;
+        let response = timeout(
+            Duration::from_secs(2),
+            connection.send_request(
+                Request::get("/health")
+                    .header(header::HOST, "localhost")
+                    .body(Body::empty())?,
+            ),
+        )
+        .await??;
+        assert_eq!(response.status(), StatusCode::OK);
+        response.into_body().collect().await?;
+        assert_eq!(server.stats.io_drops.load(Ordering::SeqCst), 0);
+        drop(connection);
+        timeout(Duration::from_secs(2), driver).await???;
+        server.close().await?;
+    }
+    Ok(())
+}
 
 struct HeldIngest {
     entered: tokio::sync::Semaphore,
@@ -1806,8 +1966,12 @@ async fn http2_admission_error_with_blocked_window_expires_only_its_stream() -> 
     Ok(())
 }
 
-#[tokio::test]
-async fn http1_admission_error_is_delivered_without_waiting_for_upload() -> Result<(), Error> {
+// Exhausted admission covers both the ordinary path and an earlier metadata
+// rejection whose cleanup admission also fails.
+async fn exhausted_admission_server(
+    request_timeout: Duration,
+    blocked: bool,
+) -> Result<(Server, exoware_server::ingest::Admission), Error> {
     use exoware_server::ingest::{BudgetConfig, IngestBudget};
 
     let budget = IngestBudget::new(BudgetConfig {
@@ -1815,72 +1979,94 @@ async fn http1_admission_error_is_delivered_without_waiting_for_upload() -> Resu
         max_bytes: 1024,
     });
     let held = budget.try_admit(1)?;
-    let mut server = Server::configured(
+    let server = Server::configured(
         PutConfig {
             budget,
             max_wire_bytes: 1024,
+            timeout: request_timeout,
             ..Default::default()
         },
         Arc::new(UnreachableIngest),
-        false,
+        blocked,
     )
     .await?;
-    let mut tcp = client(server.addr).await?;
-    tcp.write_all(format!("POST {PUT_PATH} HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/proto\r\nContent-Length: 100\r\n\r\n").as_bytes()).await?;
-    let mut wire = Vec::new();
-    timeout(Duration::from_secs(1), tcp.read_to_end(&mut wire)).await??;
-    let boundary = wire
-        .windows(4)
-        .position(|window| window == b"\r\n\r\n")
-        .unwrap();
-    assert!(wire.starts_with(b"HTTP/1.1 429"));
-    let chunked = &wire[boundary + 4..];
-    let size_end = chunked
-        .windows(2)
-        .position(|window| window == b"\r\n")
-        .unwrap();
-    let size = usize::from_str_radix(std::str::from_utf8(&chunked[..size_end])?, 16)?;
-    let body = &chunked[size_end + 2..size_end + 2 + size];
-    let error: connectrpc::ConnectError = serde_json::from_slice(body)?;
-    assert_admission_hint(&error);
-    assert_eq!(error.details[0].type_url, "google.rpc.ErrorInfo");
-    assert_eq!(error.details[1].type_url, "google.rpc.RetryInfo");
-    assert_eq!(server.stats.request_polls.load(Ordering::SeqCst), 0);
-    drop(held);
-    server.close().await?;
+    Ok((server, held))
+}
+
+#[tokio::test]
+async fn http1_admission_error_is_delivered_without_waiting_for_upload() -> Result<(), Error> {
+    let cases = [
+        ("", "HTTP/1.1 429", true),
+        ("Content-Encoding: gzip\r\n", "HTTP/1.1 415", false),
+    ];
+    for (extra, status, hinted) in cases {
+        let (mut server, held) = exhausted_admission_server(Duration::from_secs(30), false).await?;
+        let mut tcp = client(server.addr).await?;
+        tcp.write_all(format!("POST {PUT_PATH} HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/proto\r\n{extra}Content-Length: 100\r\n\r\n").as_bytes()).await?;
+        let mut wire = Vec::new();
+        timeout(Duration::from_secs(1), tcp.read_to_end(&mut wire)).await??;
+        let boundary = wire
+            .windows(4)
+            .position(|window| window == b"\r\n\r\n")
+            .unwrap();
+        assert!(wire.starts_with(status.as_bytes()));
+        let head = String::from_utf8_lossy(&wire[..boundary]).to_lowercase();
+        assert!(head.contains("connection: close"), "{head}");
+        let chunked = &wire[boundary + 4..];
+        let size_end = chunked
+            .windows(2)
+            .position(|window| window == b"\r\n")
+            .unwrap();
+        let size = usize::from_str_radix(std::str::from_utf8(&chunked[..size_end])?, 16)?;
+        let body = &chunked[size_end + 2..size_end + 2 + size];
+        let error: connectrpc::ConnectError = serde_json::from_slice(body)?;
+        if hinted {
+            assert_admission_hint(&error);
+            assert_eq!(error.details[0].type_url, "google.rpc.ErrorInfo");
+            assert_eq!(error.details[1].type_url, "google.rpc.RetryInfo");
+        } else {
+            assert_eq!(
+                error.message.as_deref(),
+                Some("unsupported Put request encoding")
+            );
+            assert!(error.details.is_empty(), "{error:?}");
+        }
+        assert_eq!(server.stats.request_polls.load(Ordering::SeqCst), 0);
+        drop(held);
+        server.close().await?;
+    }
     Ok(())
 }
 
 #[tokio::test]
 async fn http1_admission_error_blocked_writer_has_a_short_deadline() -> Result<(), Error> {
-    use exoware_server::ingest::{BudgetConfig, IngestBudget};
-
-    let budget = IngestBudget::new(BudgetConfig {
-        max_requests: 1,
-        max_bytes: 1024,
-    });
-    let held = budget.try_admit(1)?;
-    let mut server = Server::configured(
-        PutConfig {
-            budget,
-            max_wire_bytes: 1024,
-            timeout: Duration::from_secs(300),
-            ..Default::default()
-        },
-        Arc::new(UnreachableIngest),
-        true,
-    )
-    .await?;
-    let mut tcp = client(server.addr).await?;
-    tcp.write_all(format!("POST {PUT_PATH} HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/proto\r\nContent-Length: 100\r\n\r\n").as_bytes()).await?;
-    server.wait_drop(1).await?;
-    let started = server.stats.request_started.lock().unwrap().unwrap();
-    let dropped = server.stats.io_dropped.lock().unwrap().unwrap();
-    assert!(dropped <= started + Duration::from_secs(1) + SCHEDULING_SLACK);
-    assert!(server.stats.pending_writes.load(Ordering::SeqCst) > 0);
-    assert_eq!(server.stats.request_polls.load(Ordering::SeqCst), 0);
-    drop(held);
-    server.close().await?;
+    // Earlier rejections whose cleanup admission fails must not keep the long
+    // request timeout. A shorter client timeout still wins.
+    let proto = "Content-Type: application/proto\r\n";
+    let short = Duration::from_secs(1);
+    let cases = [
+        (proto.to_owned(), short),
+        (format!("{proto}Content-Encoding: gzip\r\n"), short),
+        ("Content-Type: application/json\r\n".to_owned(), short),
+        (format!("{proto}connect-timeout-ms: bad\r\n"), short),
+        (
+            format!("{proto}Content-Encoding: gzip\r\nconnect-timeout-ms: 240\r\n"),
+            DEADLINE,
+        ),
+    ];
+    for (headers, bound) in cases {
+        let (mut server, held) = exhausted_admission_server(Duration::from_secs(300), true).await?;
+        let mut tcp = client(server.addr).await?;
+        tcp.write_all(format!("POST {PUT_PATH} HTTP/1.1\r\nHost: localhost\r\n{headers}Content-Length: 100\r\n\r\n").as_bytes()).await?;
+        server.wait_drop(1).await?;
+        let started = server.stats.request_started.lock().unwrap().unwrap();
+        let dropped = server.stats.io_dropped.lock().unwrap().unwrap();
+        assert!(dropped <= started + bound + SCHEDULING_SLACK, "{headers:?}");
+        assert!(server.stats.pending_writes.load(Ordering::SeqCst) > 0);
+        assert_eq!(server.stats.request_polls.load(Ordering::SeqCst), 0);
+        drop(held);
+        server.close().await?;
+    }
     Ok(())
 }
 

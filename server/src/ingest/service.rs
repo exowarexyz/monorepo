@@ -11,7 +11,8 @@ use http::{request::Parts, Request, Response};
 use tower::Service;
 
 use super::transport::{
-    admission_rejection_response, terminate_unfinished_response, ConnectionControl,
+    admission_rejection_response, terminate_rejected_response, terminate_unfinished_response,
+    ConnectionControl,
 };
 use super::{box_body, DrainOutcome, PutEncoding, PutInput, PutLimits, PutMetadata};
 use crate::{Ingest, IngestState};
@@ -332,10 +333,21 @@ async fn put<I: Ingest>(
                 }
                 response
             } else {
-                terminate_unfinished_response(version, response)
+                terminate_rejected_response(
+                    version,
+                    response,
+                    request_deadline,
+                    control.as_ref(),
+                    generation,
+                )
             };
         }
     };
+    let body = match (&control, generation) {
+        (Some(control), Some(generation)) => control.disarm_on_eof(body, generation),
+        _ => body,
+    };
+
     if rejection.is_none() {
         for middleware in &middleware {
             let result =

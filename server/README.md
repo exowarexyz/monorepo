@@ -59,8 +59,10 @@ reservations and advances the subscriber notifier after durable publication,
 even when the requesting future has been cancelled.
 
 Serve the combined service through the shared ingest listener to enforce HTTP/1.1
-termination when unfinished requests reach their deadlines. Returning an error
+termination when unfinished uploads reach their deadlines. Returning an error
 response alone cannot bound connection lifetime when outbound writes are blocked.
+After HTTP EOF, the handler enforces the deadline and can return a timeout
+response without the upload timer closing the connection.
 HTTP/2 cleanup failure terminates the affected stream.
 
 Put uses `connect-timeout-ms` when present and otherwise uses `PutConfig.timeout`,
@@ -104,6 +106,11 @@ error writes to one second. HTTP/2 allows up to one second for response flow
 control and cancels only the rejected stream if that wait expires. Both bounds
 respect the original request deadline. If delivery fails, the client may receive
 a transport error instead of the retry details.
+
+Metadata rejections that cannot obtain a cleanup slot retain their original error
+and details. They do not gain an admission retry hint. If the upload is
+unfinished, HTTP/1 closes the connection with the same one-second bound on
+blocked error writes. HTTP/2 resets the stream.
 
 The simulator also needs a native SST staging allowance outside `IngestBudget`.
 RocksDB copies the encoded log value while its Rust buffer is still live and

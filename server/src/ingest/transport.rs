@@ -8,6 +8,7 @@ use std::{
 
 use axum::{body::Body, serve::Listener};
 use http::{Request, Response, Version};
+use http_body::Body as _;
 use hyper_util::{rt::TokioIo, server::conn::auto::Builder, service::TowerToHyperService};
 use tokio::{sync::watch, task::JoinSet, time::Instant};
 use tower::{service_fn, Service, ServiceExt};
@@ -18,6 +19,38 @@ tokio::task_local! {
 
 #[derive(Clone, Copy)]
 struct StreamExecutor;
+
+// Release the upload timer before backend work can reach the same deadline.
+struct UploadBody {
+    inner: Body,
+    control: ConnectionControl,
+    generation: u64,
+}
+
+impl http_body::Body for UploadBody {
+    type Data = bytes::Bytes;
+    type Error = axum::Error;
+
+    fn poll_frame(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<http_body::Frame<Self::Data>, Self::Error>>> {
+        let frame = std::task::ready!(Pin::new(&mut self.inner).poll_frame(cx));
+        if frame.is_none() || self.inner.is_end_stream() {
+            self.control.disarm(self.generation);
+        }
+
+        Poll::Ready(frame)
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.inner.is_end_stream()
+    }
+
+    fn size_hint(&self) -> http_body::SizeHint {
+        self.inner.size_hint()
+    }
+}
 
 struct AdmissionBody {
     inner: Body,
@@ -81,6 +114,12 @@ where
     }
 }
 
+// Rejected uploads keep their writer only briefly, even when the request
+// deadline is much longer.
+fn rejection_deadline(deadline: Instant) -> Instant {
+    deadline.min(Instant::now() + std::time::Duration::from_secs(1))
+}
+
 // Hyper does not poll response bodies while DATA capacity is unavailable. The
 // executor owns cancellation so a rejected stream cannot retain its writer.
 pub(super) fn admission_rejection_response(
@@ -90,20 +129,35 @@ pub(super) fn admission_rejection_response(
     control: Option<&ConnectionControl>,
     generation: Option<u64>,
 ) -> Response<Body> {
-    let deadline = deadline.min(Instant::now() + std::time::Duration::from_secs(1));
-    if version == Version::HTTP_2 {
-        if STREAM_DEADLINE
+    let deadline = rejection_deadline(deadline);
+    if version == Version::HTTP_2
+        && STREAM_DEADLINE
             .try_with(|sender| sender.send_replace(Some(deadline)))
             .is_ok()
-        {
-            // Hyper can queue a whole DATA frame after obtaining one byte of
-            // capacity. Keeping the final byte separate preserves the stream
-            // task until the peer grants capacity for the complete error.
-            return response.map(|inner| Body::new(AdmissionBody { inner, tail: None }));
-        }
-    } else if let (Some(control), Some(generation)) = (control, generation) {
-        control.shorten(generation, deadline);
+    {
+        // Hyper can queue a whole DATA frame after obtaining one byte of
+        // capacity. Keeping the final byte separate preserves the stream
+        // task until the peer grants capacity for the complete error.
+        return response.map(|inner| Body::new(AdmissionBody { inner, tail: None }));
     }
+
+    terminate_rejected_response(version, response, deadline, control, generation)
+}
+
+// Rejections that cannot drain their upload close HTTP/1 connections after a
+// short bound instead of the full request deadline. HTTP/2 resets the stream
+// on the first body poll, so it needs no executor deadline.
+pub(super) fn terminate_rejected_response(
+    version: Version,
+    response: Response<Body>,
+    deadline: Instant,
+    control: Option<&ConnectionControl>,
+    generation: Option<u64>,
+) -> Response<Body> {
+    if let (Some(control), Some(generation)) = (control, generation) {
+        control.shorten(generation, rejection_deadline(deadline));
+    }
+
     terminate_unfinished_response(version, response)
 }
 
@@ -182,7 +236,20 @@ impl ConnectionControl {
         Some(id)
     }
 
-    /// Disarms only the matching request generation after cleanup succeeds.
+    pub(super) fn disarm_on_eof(&self, body: Body, generation: u64) -> Body {
+        if body.is_end_stream() {
+            self.disarm(generation);
+            return body;
+        }
+
+        Body::new(UploadBody {
+            inner: body,
+            control: self.clone(),
+            generation,
+        })
+    }
+
+    /// Disarms only the matching request generation after body reception or cleanup.
     pub fn disarm(&self, id: u64) -> bool {
         self.state.send_if_modified(|state| {
             if state.active.is_some_and(|arm| arm.id == id) {
@@ -298,4 +365,63 @@ where
     shutdown_tx.send_replace(true);
     while connections.join_next().await.is_some() {}
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bytes::Bytes;
+    use futures::{stream, StreamExt};
+    use http_body::Frame;
+    use http_body_util::{BodyExt, StreamBody};
+    use std::time::Duration;
+
+    #[tokio::test(start_paused = true)]
+    async fn completed_upload_disarms_without_another_body_poll() {
+        let frames = stream::iter([Ok::<_, Infallible>(Frame::data(Bytes::from_static(b"x")))]);
+        let bodies = [
+            (Body::empty(), 0),
+            (Body::from("x"), 1),
+            (Body::new(StreamBody::new(frames)), 2),
+        ];
+        for (body, polls) in bodies {
+            let control = ConnectionControl::new();
+            let generation = control
+                .arm_http1(Version::HTTP_11, Instant::now() + Duration::from_secs(1))
+                .unwrap();
+            let mut body = control.disarm_on_eof(body, generation);
+            for _ in 0..polls {
+                if let Some(frame) = body.frame().await {
+                    assert_eq!(frame.unwrap().into_data().unwrap(), "x");
+                }
+            }
+
+            tokio::time::advance(Duration::from_secs(1)).await;
+            assert!(
+                tokio::time::timeout(Duration::from_millis(1), control.cancelled())
+                    .await
+                    .is_err()
+            );
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn dropping_unfinished_upload_keeps_connection_deadline() {
+        let frames = stream::iter([Ok::<_, Infallible>(Frame::data(Bytes::from_static(b"x")))])
+            .chain(stream::pending());
+        let control = ConnectionControl::new();
+        let generation = control
+            .arm_http1(Version::HTTP_11, Instant::now() + Duration::from_secs(1))
+            .unwrap();
+        let mut body = control.disarm_on_eof(Body::new(StreamBody::new(frames)), generation);
+        assert_eq!(
+            body.frame().await.unwrap().unwrap().into_data().unwrap(),
+            "x"
+        );
+        drop(body);
+
+        tokio::time::timeout(Duration::from_secs(2), control.cancelled())
+            .await
+            .expect("unfinished upload must retain its connection deadline");
+    }
 }

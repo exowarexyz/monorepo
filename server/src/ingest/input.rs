@@ -119,6 +119,47 @@ pub enum DrainOutcome {
     BodyError,
 }
 
+// Decoder EOF follows a clean physical EOF, but validation can still fail after it.
+// A length mismatch releases the transport yet keeps failing every later read.
+enum Reception {
+    Reading,
+    Ended,
+    Decoded,
+    Validated,
+    LengthMismatch,
+    WireLimit,
+    Failed(ConnectError),
+}
+
+impl Reception {
+    fn ended(&self) -> bool {
+        matches!(
+            self,
+            Self::Ended | Self::Decoded | Self::Validated | Self::LengthMismatch
+        )
+    }
+
+    fn decoded(&self) -> bool {
+        matches!(self, Self::Decoded | Self::Validated)
+    }
+
+    // Rejection and raw cleanup revoke success without reopening decoding. A later finish
+    // then fails on the recorded rejection or the discarded decoder state.
+    fn invalidate(&mut self) {
+        if matches!(self, Self::Validated) {
+            *self = Self::Decoded;
+        }
+    }
+}
+
+fn wire_limit_error() -> ConnectError {
+    ConnectError::resource_exhausted("request body exceeds wire limit")
+}
+
+fn length_mismatch_error() -> ConnectError {
+    ConnectError::invalid_argument("request body differs from content length")
+}
+
 pub trait DecodeExecutor: Send + Sync + 'static {
     fn execute(
         &self,
@@ -159,13 +200,9 @@ pub struct PutInput {
     notifier: Option<Arc<dyn crate::stream::StreamNotifier>>,
     executor: Arc<dyn DecodeExecutor>,
     wire_bytes: usize,
-    eof: bool,
-    stopped: bool,
-    validated: bool,
+    reception: Reception,
     rejection_observed: bool,
-    body_error: Option<ConnectError>,
     copy_error: Option<ConnectError>,
-    decode_eof: bool,
 }
 
 impl PutInput {
@@ -196,13 +233,9 @@ impl PutInput {
             notifier: None,
             executor: Arc::new(BlockingDecodeExecutor),
             wire_bytes: 0,
-            eof: false,
-            stopped: false,
-            validated: false,
+            reception: Reception::Reading,
             rejection_observed: false,
-            body_error: None,
             copy_error: None,
-            decode_eof: false,
         }
     }
 
@@ -290,10 +323,10 @@ impl PutInput {
         self.wire_bytes
     }
     pub fn is_finished(&self) -> bool {
-        self.validated
+        matches!(self.reception, Reception::Validated)
     }
     pub(super) fn is_end_stream(&self) -> bool {
-        self.eof || self.body.is_end_stream()
+        self.reception.ended() || self.body.is_end_stream()
     }
 
     pub fn request_lease(&self) -> Arc<RequestLease> {
@@ -314,7 +347,7 @@ impl PutInput {
         if let Some(state) = &mut self.state {
             state.reject(error);
         }
-        self.validated = false;
+        self.reception.invalidate();
         self.observe_rejection();
     }
 
@@ -343,14 +376,12 @@ impl PutInput {
                 return Err(error.clone().into());
             }
         }
-        if let Some(error) = &self.body_error {
-            return Err(error.clone().into());
-        }
-        if self.eof {
-            return Ok(None);
-        }
-        if self.stopped {
-            return Err(ConnectError::resource_exhausted("request body exceeds wire limit").into());
+        match &self.reception {
+            Reception::Reading => {}
+            Reception::Ended | Reception::Decoded | Reception::Validated => return Ok(None),
+            Reception::LengthMismatch => return Err(length_mismatch_error().into()),
+            Reception::WireLimit => return Err(wire_limit_error().into()),
+            Reception::Failed(error) => return Err(error.clone().into()),
         }
         self.check_deadline()?;
         let mut idle_wait = self.idle.as_mut().map(|idle| IdleWait {
@@ -389,11 +420,8 @@ impl PutInput {
                         continue;
                     };
                     if bytes.len() > self.limits.wire_bytes.saturating_sub(self.wire_bytes) {
-                        self.stopped = true;
-                        return Err(ConnectError::resource_exhausted(
-                            "request body exceeds wire limit",
-                        )
-                        .into());
+                        self.reception = Reception::WireLimit;
+                        return Err(wire_limit_error().into());
                     }
                     self.wire_bytes += bytes.len();
                     self.observer.observe(IngestEvent::WireBytes(bytes.len()));
@@ -418,24 +446,20 @@ impl PutInput {
                     }));
                 }
                 Some(Err(error)) => {
-                    self.stopped = true;
-                    self.body_error = Some(error.clone());
+                    self.reception = Reception::Failed(error.clone());
                     return Err(error.into());
                 }
                 None => {
-                    self.eof = true;
                     self.observer.observe(IngestEvent::HttpEof);
                     if self
                         .metadata
                         .content_length
                         .is_some_and(|length| length != self.wire_bytes)
                     {
-                        let error = ConnectError::invalid_argument(
-                            "request body differs from content length",
-                        );
-                        self.body_error = Some(error.clone());
-                        return Err(error.into());
+                        self.reception = Reception::LengthMismatch;
+                        return Err(length_mismatch_error().into());
                     }
+                    self.reception = Reception::Ended;
                     return Ok(None);
                 }
             }
@@ -462,7 +486,9 @@ impl PutInput {
         }
         let decoded = state.total().saturating_sub(previous);
         self.state = Some(state);
-        self.decode_eof = matches!(result, Ok(DecodeStep::Eof));
+        if matches!(result, Ok(DecodeStep::Eof)) && matches!(self.reception, Reception::Ended) {
+            self.reception = Reception::Decoded;
+        }
         let result = self.check_deadline().and(result);
         self.observer.observe(IngestEvent::DecodedBytes(decoded));
         self.observer
@@ -490,7 +516,6 @@ impl PutInput {
             .as_mut()
             .unwrap()
             .feed(bytes.unwrap_or_default(), !received);
-        self.decode_eof = false;
         let mut queued = false;
 
         // A scheduler turn lets the connection supply buffered fragments before CPU handoff.
@@ -538,7 +563,7 @@ impl PutInput {
         buffers: DecodeBuffers,
     ) -> Result<Option<PutChunk>, PutError> {
         self.check_deadline()?;
-        if self.decode_eof {
+        if self.reception.decoded() {
             return Ok(None);
         }
         loop {
@@ -563,10 +588,10 @@ impl PutInput {
     pub async fn finish(&mut self) -> Result<(), PutError> {
         let started = Instant::now();
         self.check_deadline()?;
-        if self.validated {
+        if matches!(self.reception, Reception::Validated) {
             return Ok(());
         }
-        while !self.decode_eof {
+        while !self.reception.decoded() {
             let Some(chunk) = self.next_batch(DecodeBuffers::default()).await? else {
                 break;
             };
@@ -576,14 +601,14 @@ impl PutInput {
                 );
             }
         }
-        if !self.eof {
+        if !matches!(self.reception, Reception::Decoded) {
             return Err(ConnectError::internal("ingest finalization before HTTP EOF").into());
         }
         self.state
             .as_mut()
             .ok_or_else(|| ConnectError::internal("ingest decode state detached"))?
             .finish()?;
-        self.validated = true;
+        self.reception = Reception::Validated;
         self.observer.observe(IngestEvent::Validated);
         self.observer
             .observe(IngestEvent::ValidationElapsed(started.elapsed()));
@@ -601,7 +626,7 @@ impl PutInput {
     async fn drain_raw(&mut self) -> DrainOutcome {
         // Cancelled worker output has no restoration path after cleanup discards the state.
         self.state = None;
-        self.validated = false;
+        self.reception.invalidate();
         self.observe_rejection();
         let mut frames = 0;
         let mut bytes = self.wire_bytes;
@@ -1054,7 +1079,7 @@ mod tests {
                 assert_eq!(input.message_bound().await.unwrap(), payload.len());
                 assert_eq!(polls.load(Ordering::Relaxed), 1);
                 assert_eq!(input.state.as_ref().unwrap().total(), 0);
-                assert!(!input.eof);
+                assert!(!input.reception.ended());
                 assert_eq!(budget.usage().1, wire.len() + input.wire_bytes());
                 drop(input);
                 assert_eq!(budget.usage(), (0, 0));
@@ -1746,6 +1771,62 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn completed_input_finishes_once_and_later_rejection_revokes_success() {
+        struct Events(Arc<Mutex<Vec<IngestEvent>>>);
+
+        impl IngestObserver for Events {
+            fn observe(&self, event: IngestEvent) {
+                self.0.lock().unwrap().push(event);
+            }
+        }
+
+        let wire = entry(b"key", b"value");
+        for raw_cleanup in [false, true] {
+            let (mut input, budget) = input(&wire, 1, PutEncoding::Identity, PutLimits::default());
+            let events = Arc::new(Mutex::new(Vec::new()));
+            input = input.with_observer(Arc::new(Events(events.clone())));
+            assert_eq!(
+                collect(&mut input).await.unwrap(),
+                vec![(b"key".to_vec(), b"value".to_vec())]
+            );
+
+            // A repeated finish must not revalidate or report a second success.
+            input.finish().await.unwrap();
+            assert!(input.is_finished());
+            assert!(input.is_end_stream());
+            assert!(input
+                .next_batch(DecodeBuffers::default())
+                .await
+                .unwrap()
+                .is_none());
+
+            if raw_cleanup {
+                assert_eq!(input.drain_rejected().await, DrainOutcome::Complete);
+            } else {
+                input.reject(ConnectError::resource_exhausted("backend full").into());
+            }
+            assert!(!input.is_finished());
+            let error = input.finish().await.unwrap_err().into_connect();
+            if !raw_cleanup {
+                assert_eq!(error.code, connectrpc::ErrorCode::ResourceExhausted);
+                assert_eq!(input.drain_rejected().await, DrainOutcome::Complete);
+            }
+            assert!(input.finish().await.is_err());
+            assert!(!input.is_finished());
+            let recorded = events.lock().unwrap();
+            for expected in [IngestEvent::Validated, IngestEvent::Rejected] {
+                assert_eq!(
+                    recorded.iter().filter(|event| **event == expected).count(),
+                    1
+                );
+            }
+            drop(recorded);
+            drop(input);
+            assert_eq!(budget.usage(), (0, 0));
+        }
+    }
+
+    #[tokio::test]
     async fn zstd_requires_one_pledged_complete_frame_and_http_eof() {
         let payload = entry(b"a", b"b");
         let valid = zstd::bulk::compress(&payload, 1).unwrap();
@@ -1967,6 +2048,74 @@ mod tests {
         assert!(collect(&mut input).await.is_err());
         assert!(input.finish().await.is_err());
         assert!(!input.is_finished());
+    }
+
+    #[tokio::test]
+    async fn ended_and_failed_bodies_keep_their_errors_through_cleanup() {
+        struct Events(Arc<Mutex<Vec<IngestEvent>>>);
+
+        impl IngestObserver for Events {
+            fn observe(&self, event: IngestEvent) {
+                self.0.lock().unwrap().push(event);
+            }
+        }
+
+        // A length mismatch is physically ended but never reads as a clean EOF.
+        let wire = entry(b"a", b"b");
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let (input, budget) = input(
+            &wire,
+            wire.len(),
+            PutEncoding::Identity,
+            PutLimits::default(),
+        );
+        let mut input = input.with_observer(Arc::new(Events(events.clone())));
+        input.metadata.content_length = Some(wire.len() + 1);
+        assert!(input.raw_next(false).await.unwrap().is_some());
+        for _ in 0..2 {
+            let error = input.raw_next(false).await.unwrap_err().into_connect();
+            assert_eq!(error.code, connectrpc::ErrorCode::InvalidArgument);
+            assert!(input.is_end_stream());
+        }
+        assert_eq!(input.drain_rejected().await, DrainOutcome::BodyError);
+        assert!(input.finish().await.is_err());
+        assert!(!input.is_finished());
+        assert_eq!(input.wire_bytes(), wire.len());
+        let eofs = events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|event| matches!(event, IngestEvent::HttpEof))
+            .count();
+        assert_eq!(eofs, 1);
+        drop(input);
+        assert_eq!(budget.usage(), (0, 0));
+
+        // A failed body is not ended, and later reads must not poll past the failure.
+        let frames =
+            futures::stream::iter([Ok(Frame::data(Bytes::copy_from_slice(&wire))), Err("reset")]);
+        let budget = IngestBudget::new(BudgetConfig {
+            max_requests: 1,
+            max_bytes: 64,
+        });
+        let mut input = PutInput::new(
+            box_body(StreamBody::new(frames)),
+            PutMetadata::default(),
+            PutLimits::default(),
+            Instant::now() + Duration::from_secs(1),
+            budget.try_admit(wire.len()).unwrap(),
+        );
+        assert!(input.raw_next(false).await.unwrap().is_some());
+        for _ in 0..2 {
+            let error = input.raw_next(false).await.unwrap_err().into_connect();
+            assert_eq!(error.code, connectrpc::ErrorCode::InvalidArgument);
+            assert!(!input.is_end_stream());
+        }
+        assert_eq!(input.drain_rejected().await, DrainOutcome::BodyError);
+        assert!(input.finish().await.is_err());
+        assert!(!input.is_finished());
+        drop(input);
+        assert_eq!(budget.usage(), (0, 0));
     }
 
     #[tokio::test]
