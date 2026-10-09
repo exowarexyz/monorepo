@@ -12,6 +12,14 @@ platform trust configuration.
 
 `exoware-sdk` is **ALPHA** software and is not yet recommended for production use. Developers should expect breaking changes and occasional instability.
 
+## Put compatibility
+
+`StoreClient` sends Put requests using Connect unary protobuf, uncompressed by
+default or with the zstd option below. Put rejects Connect JSON, gzip request
+compression, gRPC, and gRPC-Web. Custom clients must select Connect unary with
+binary protobuf. See the [Put compatibility table](../../proto/README.md#put-client-compatibility)
+for supported formats and the restrictions on custom zstd encoders.
+
 ## Put limits and batching
 
 The published limits are available under `exoware_sdk::limits`. See the
@@ -25,13 +33,25 @@ fit positive row and byte limits without copying or re-prefixing staged rows.
 An empty batch produces no chunks. An entry that cannot fit alone returns an
 error. Each chunk is atomic as one write, but splitting creates several writes.
 Concurrent commits may be sequenced in a different order from the returned batches.
-Exoware data is immutable. Applications own retry and publication coordination
-across chunks.
+Exoware data is immutable. Applications own publication coordination across chunks.
+
+## Put retries
+
+Put retries use `RetryConfig` only for an explicit temporary admission rejection
+that guarantees the backend has not received the batch. They honor the server's
+minimum retry delay and retain the same atomic batch. `RetryConfig::disabled()`
+disables these retries. When configured, `request_timeout` covers all attempts
+and backoff together. Generic errors, timeouts, and lost responses are not
+automatically retried. See the [admission retry contract](../../proto/README.md#admission-retries).
 
 ## Request compression
 
-Request compression is disabled by default. Select zstd and its compression level
-on the client builder:
+Outgoing requests support `ConnectRequestCompression::None` (the default) and
+`ConnectRequestCompression::Zstd { level }`. The SDK still decodes gzip responses.
+Select zstd and its compression level on the client builder.
+
+`ConnectRequestCompression::Gzip` has been removed. Replace it with `None` or
+`Zstd { level }` because Put accepts only identity and zstd request bodies.
 
 ```rust
 use exoware_sdk::{ConnectRequestCompression, StoreClient};

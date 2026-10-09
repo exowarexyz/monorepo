@@ -26,6 +26,7 @@ hyper = { workspace = true }
 hyper-rustls = { version = "0.27", default-features = false, features = ["http2"] }
 hyper-util = { version = "0.1", features = ["client-legacy", "http2", "tokio"] }
 regex = { workspace = true }
+rand = { workspace = true }
 reqwest = { workspace = true, features = ["json"] }
 rustls-platform-verifier = { workspace = true }
 commonware-codec = { workspace = true }
@@ -44,3 +45,4 @@ connectrpc-build = { workspace = true }
 [dev-dependencies]
 hex = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
+zstd-safe = "7.2.4"

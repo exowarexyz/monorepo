@@ -14,6 +14,7 @@ pub const MAX_RESPONSE_MESSAGE_BYTES: usize = 2 * MAX_REQUEST_MESSAGE_BYTES;
 pub const MAX_RESPONSE_ELEMENT_MEMORY_BYTES: usize = 256 * 1024 * 1024;
 
 pub const INGEST_ERROR_DOMAIN: &str = "log.ingest";
+pub const INGEST_ADMISSION_EXHAUSTED_REASON: &str = "INGEST_ADMISSION_EXHAUSTED";
 pub const PUT_TOO_LARGE_REASON: &str = "PUT_TOO_LARGE";
 
 /// Encoded contribution of one physical key/value pair to a protobuf `PutRequest`.

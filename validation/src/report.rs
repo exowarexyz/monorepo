@@ -490,7 +490,7 @@ mod tests {
                 value_generator_version: crate::value::VALUE_GENERATOR_VERSION,
                 workload_generator_version: crate::workload::WORKLOAD_GENERATOR_VERSION,
                 read_retry_attempts: 3,
-                request_compression: Some(RequestCompression::Gzip),
+                request_compression: Some(RequestCompression::Zstd),
             },
             seed: 42,
             elapsed_ms: 2_000,
@@ -740,5 +740,15 @@ mod tests {
             .expect("manifest without compression should deserialize");
 
         assert_eq!(parsed.config.request_compression, None);
+    }
+
+    #[test]
+    fn manifest_rejects_gzip_request_compression() {
+        let report = sample_report();
+        let manifest = BenchManifest::new(report.config, report.seed);
+        let mut value = serde_json::to_value(manifest).unwrap();
+        value["config"]["request_compression"] = serde_json::json!("gzip");
+
+        assert!(serde_json::from_value::<BenchManifest>(value).is_err());
     }
 }

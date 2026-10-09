@@ -36,7 +36,7 @@ pub async fn run(
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
     info!(%addr, directory = %directory.display(), "store simulator listening");
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, app).await?;
+    exoware_server::ingest::transport::serve(listener, app, std::future::pending()).await?;
     Ok(())
 }
 
@@ -58,7 +58,8 @@ pub async fn open_temp(
     let port = listener.local_addr()?.port();
     let url = format!("http://127.0.0.1:{port}");
     let handle = tokio::spawn(async move {
-        let _ = axum::serve(listener, app).await;
+        let _ =
+            exoware_server::ingest::transport::serve(listener, app, std::future::pending()).await;
     });
     wait_for_health(&url).await?;
     Ok((handle, url))

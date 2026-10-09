@@ -8,16 +8,25 @@ Interact with the Exoware API in TypeScript.
 
 `@exowarexyz/sdk` is **ALPHA** software and is not yet recommended for production use. Developers should expect breaking changes and occasional instability.
 
+## Put compatibility
+
+`Client` sends Put requests using uncompressed Connect unary protobuf in both
+Node and browsers. It always selects binary protobuf for Put, even when
+`ClientOptions.useBinaryFormat` is false for other services. Put rejects Connect
+JSON, gzip request compression, gRPC, and gRPC-Web. Browser clients must also use
+the Connect protocol. See the [Put compatibility table](../../proto/README.md#put-client-compatibility)
+for supported formats and the restrictions on custom zstd encoders.
+
 ## Put limits
 
 `set`, `setMany`, and `StoreWriteBatch.commit` validate entry count, physical key
 length, value length, and encoded request size before sending. Invalid batches
 throw `RangeError`. Each call remains one atomic Put.
 
-`StoreWriteBatch` provides `encodedLen(encoding)`, `validate(options)`, and
-`split(options)`. Sizes include prefixed keys and the selected wire format.
-The default encoding is JSON, matching the client transport. Pass
-`store.putOptions` to match a client's encoding and limits:
+`StoreWriteBatch` provides `encodedLen()`, `validate(options)`, and
+`split(options)`. Sizes include prefixed keys and use the protobuf wire format
+that Ingest always sends. `ClientOptions.useBinaryFormat` controls the other
+services. Pass `store.putOptions` to use a client's configured limits:
 
 ```ts
 const chunks = batch.split(store.putOptions);
@@ -36,6 +45,31 @@ Defaults use `MAX_PUT_ENTRIES`, `MAX_REQUEST_MESSAGE_BYTES`, `MAX_VALUE_LEN`, an
 `maxEncodedBytes`, or `maxValueLen` to match a deployment. The same options can
 be passed to `validate` and `split`. The byte budget is the RPC message limit.
 See the [protocol contract](../../proto/README.md) for errors and portability.
+
+For a custom client, use your generated `IngestService` descriptor with an
+explicitly binary Connect transport. The SDK's `createTransport` selects Connect:
+
+```ts
+import { createClient } from '@connectrpc/connect';
+import { createTransport } from '@exowarexyz/sdk';
+
+const ingest = createClient(IngestService, createTransport(url, { useBinaryFormat: true }));
+```
+
+Remove references to the former `PutEncoding` type, `PutBatchOptions.encoding`,
+the encoding argument to `StoreWriteBatch.encodedLen`, and the `encoding` property
+on `Client.putOptions` and `StoreClient.putOptions`. Put sizing and transport now
+always use protobuf.
+
+## Put retries
+
+Put retries use `ClientOptions.retry` only for an explicit temporary admission
+rejection that guarantees the backend has not received the batch. They honor the
+server's minimum retry delay and retain the same atomic batch. Set `maxAttempts`
+to `1` to disable retries. Direct `client.ingest.put` calls can supply a timeout
+or abort signal covering attempts and backoff together. Generic errors,
+timeouts, and lost responses are not automatically retried. See the
+[admission retry contract](../../proto/README.md#admission-retries).
 
 ## Credentials
 

@@ -93,13 +93,16 @@ pub enum IngestError {
 
 /// Ingest write capability.
 pub trait Ingest: Send + Sync + 'static {
-    /// Persist key-value pairs atomically and return the global sequence number that includes this
-    /// write. Backends may coalesce concurrent writes and return the same sequence number to each
-    /// coalesced caller.
-    fn put_batch(
+    /// Finalize the input before submitting publication. Accepted work must retain
+    /// admission and durable notification ownership if the caller is cancelled.
+    /// After `reject`, continue consuming batches through EOF and call `finish`.
+    /// Structural and decompression errors take precedence over entry count, then
+    /// entry decoding, entry validation, and backend rejection. `finish` returns
+    /// the first error in that order.
+    fn put(
         &self,
-        kvs: Vec<(Bytes, Bytes)>,
-    ) -> impl Future<Output = Result<u64, IngestError>> + Send;
+        input: &mut crate::ingest::PutInput,
+    ) -> impl Future<Output = Result<u64, crate::ingest::PutError>> + Send;
 }
 
 /// Query read capability.

@@ -77,6 +77,10 @@ Generated load and benchmark keys open with a byte derived from the logical inde
 
 `load`, `bench`, and `validate` accept `--value-size` (bytes, default 160) to control generated value size. Pass the same `--value-size` to `load` and a reading `bench` so writes appended during the benchmark match the loaded data.
 
+All three commands accept `--request-compression zstd|none`. Zstd is the default.
+Saved manifests with `config.request_compression` set to `"gzip"` must be changed
+to `"zstd"` or `"none"` before replay.
+
 ## Benchmark Manifests
 
 `validation bench --manifest <path>` accepts the normalized `config` and `seed` fields from a benchmark JSON report, so a run can be replayed without reconstructing CLI flags. The config includes request compression because it materially affects measured throughput. For a fixed manifest and the same acknowledged write outcomes, each worker repeats its logical operation stream and its appended-key allocation independent of task scheduling. A manifest whose key, value, or workload-generator version differs from the current binary is rejected rather than silently replayed with different data. A minimal manifest has this shape:

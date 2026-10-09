@@ -1,9 +1,9 @@
-import { execSync, spawn } from 'child_process';
+import { execSync, spawn, type ChildProcess } from 'child_process';
+import { createConnection } from 'net';
 import * as path from 'path';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as portfinder from 'portfinder';
-import { createConnection } from 'net';
 
 const tempDir = path.join(os.tmpdir(), 'exoware-ts-sdk-tests');
 const configFile = path.join(tempDir, 'config.json');
@@ -23,6 +23,31 @@ function cargoTargetDir(repoRoot: string): string {
     } catch {
         return path.join(repoRoot, 'target');
     }
+}
+
+async function waitForSimulator(port: number, simulatorProcess: ChildProcess): Promise<void> {
+    const deadline = Date.now() + 30_000;
+    while (Date.now() < deadline) {
+        if (simulatorProcess.exitCode !== null || simulatorProcess.signalCode !== null) {
+            throw new Error('Simulator exited before accepting connections');
+        }
+        const ready = await new Promise<boolean>((resolve) => {
+            const socket = createConnection({ host: '127.0.0.1', port });
+            const finish = (connected: boolean) => {
+                socket.destroy();
+                resolve(connected);
+            };
+            socket.once('connect', () => finish(true));
+            socket.once('error', () => finish(false));
+            socket.setTimeout(1000, () => finish(false));
+        });
+        if (ready) {
+            return;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    simulatorProcess.kill('SIGTERM');
+    throw new Error('Simulator did not start listening within 30 seconds');
 }
 
 const setup = async () => {
@@ -56,32 +81,8 @@ const setup = async () => {
     };
 
     fs.writeFileSync(configFile, JSON.stringify(config));
+    await waitForSimulator(port, simulatorProcess);
     console.log('Simulator started.');
-
-    // Wait for the listener because simulator startup time varies.
-    const deadline = Date.now() + 30_000;
-    while (Date.now() < deadline) {
-        const ready = await new Promise<boolean>((resolve) => {
-            const socket = createConnection({ host: '127.0.0.1', port });
-            const finish = (connected: boolean) => {
-                socket.destroy();
-                resolve(connected);
-            };
-            socket.once('connect', () => finish(true));
-            socket.once('error', () => finish(false));
-            socket.setTimeout(1000, () => finish(false));
-        });
-        if (ready) {
-            return;
-        }
-        if (simulatorProcess.exitCode !== null || simulatorProcess.signalCode !== null) {
-            throw new Error('Simulator exited before becoming ready');
-        }
-        await new Promise((resolve) => setTimeout(resolve, 100));
-    }
-
-    simulatorProcess.kill('SIGTERM');
-    throw new Error('Simulator did not become ready within 30 seconds');
 };
 
 export default setup;

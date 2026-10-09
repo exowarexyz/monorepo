@@ -5,7 +5,9 @@
 
 use std::collections::HashMap;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
+#[cfg(test)]
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use buffa::Message;
@@ -18,9 +20,6 @@ use datafusion::execution::context::TaskContext;
 use datafusion::execution::runtime_env::RuntimeEnv;
 use exoware_proto::common::Entry;
 use exoware_proto::google::rpc::{ErrorInfo, RetryInfo};
-use exoware_proto::ingest::{
-    PutResponse as ProtoPutResponse, Service as IngestApi, ServiceServer as IngestServiceServer,
-};
 #[cfg(test)]
 use exoware_proto::log::retention::v1::SetRetentionRequestView;
 use exoware_proto::log::retention::v1::{
@@ -60,6 +59,9 @@ use crate::{
     FilteredBatch, Ingest, IngestError, Log, LogBatch, Prune, Query, QueryExtra, RangeScan,
     RangeScanResult, Retention, StoreEngine,
 };
+
+#[cfg(test)]
+mod put_tests;
 
 pub const MAX_CONNECTRPC_BODY_BYTES: usize = MAX_REQUEST_MESSAGE_BYTES;
 pub const MAX_CONNECTRPC_MESSAGE_BYTES: usize = MAX_REQUEST_MESSAGE_BYTES;
@@ -182,6 +184,7 @@ pub struct AppState<E> {
     pub engine: Arc<E>,
     /// Limits enforced by the ingest service before writing.
     pub ingest_limits: IngestLimits,
+    pub put_config: crate::ingest::service::PutConfig,
     /// Gates ingest (writes) only. The read and administrative services remain available during
     /// drains so that in-flight reads can complete while the worker sheds write traffic.
     pub ready: Arc<AtomicBool>,
@@ -194,6 +197,7 @@ impl<E> Clone for AppState<E> {
         Self {
             engine: self.engine.clone(),
             ingest_limits: self.ingest_limits,
+            put_config: self.put_config.clone(),
             ready: self.ready.clone(),
             stream: self.stream.clone(),
         }
@@ -209,6 +213,7 @@ where
         Self {
             engine,
             ingest_limits: IngestLimits::default(),
+            put_config: crate::ingest::service::PutConfig::default(),
             ready: Arc::new(AtomicBool::new(true)),
             stream: Arc::new(StreamHub::new(current_sequence)),
         }
@@ -216,6 +221,10 @@ where
 
     pub fn with_ingest_limits(mut self, limits: IngestLimits) -> Self {
         self.ingest_limits = limits;
+        self
+    }
+    pub fn with_put_config(mut self, config: crate::ingest::service::PutConfig) -> Self {
+        self.put_config = config;
         self
     }
 }
@@ -226,6 +235,7 @@ pub struct IngestState<I> {
     pub ingest: Arc<I>,
     /// Limits enforced before writes reach the backend.
     pub limits: IngestLimits,
+    pub put_config: crate::ingest::service::PutConfig,
     /// Gates ingest writes only.
     pub ready: Arc<AtomicBool>,
     /// Optional live-stream notifier.
@@ -237,6 +247,7 @@ impl<I> Clone for IngestState<I> {
         Self {
             ingest: self.ingest.clone(),
             limits: self.limits,
+            put_config: self.put_config.clone(),
             ready: self.ready.clone(),
             notifier: self.notifier.clone(),
         }
@@ -251,6 +262,7 @@ where
         Self {
             ingest,
             limits: IngestLimits::default(),
+            put_config: crate::ingest::service::PutConfig::default(),
             ready: Arc::new(AtomicBool::new(true)),
             notifier: None,
         }
@@ -260,6 +272,7 @@ where
         Self {
             ingest,
             limits: IngestLimits::default(),
+            put_config: crate::ingest::service::PutConfig::default(),
             ready: Arc::new(AtomicBool::new(true)),
             notifier: Some(notifier),
         }
@@ -269,6 +282,10 @@ where
         self.limits = limits;
         self
     }
+    pub fn with_put_config(mut self, config: crate::ingest::service::PutConfig) -> Self {
+        self.put_config = config;
+        self
+    }
 }
 
 impl<E> From<AppState<E>> for IngestState<E> {
@@ -276,6 +293,7 @@ impl<E> From<AppState<E>> for IngestState<E> {
         Self {
             ingest: state.engine,
             limits: state.ingest_limits,
+            put_config: state.put_config,
             ready: state.ready,
             notifier: Some(state.stream),
         }
@@ -427,35 +445,26 @@ impl<E> From<AppState<E>> for StreamState<E> {
     }
 }
 
-pub struct IngestConnect<I> {
-    state: IngestState<I>,
-}
-
-impl<I> Clone for IngestConnect<I> {
-    fn clone(&self) -> Self {
-        Self {
-            state: self.state.clone(),
-        }
-    }
-}
-
-impl<I> IngestConnect<I>
-where
-    I: Ingest,
-{
-    pub fn new(state: impl Into<IngestState<I>>) -> Self {
-        Self {
-            state: state.into(),
-        }
-    }
-}
-
 /// Backoff floor advertised to `RetryInfo`-aware clients for transient store conditions.
 const RETRY_HINT_DELAY: std::time::Duration = std::time::Duration::from_secs(1);
 /// `ErrorInfo.reason` when the ingest worker has not passed its readiness gate.
 const REASON_WORKER_NOT_READY: &str = "WORKER_NOT_READY";
 /// `ErrorInfo.reason` when the backend discovers a transient ingest write failure.
 const REASON_INGEST_UNAVAILABLE: &str = "INGEST_UNAVAILABLE";
+
+pub fn worker_not_ready_error() -> ConnectError {
+    with_retry_hint(
+        with_error_info_detail(
+            ConnectError::unavailable("ingest is not ready"),
+            ErrorInfo {
+                reason: REASON_WORKER_NOT_READY.to_string(),
+                domain: INGEST_ERROR_DOMAIN.to_string(),
+                ..Default::default()
+            },
+        ),
+        RETRY_HINT_DELAY,
+    )
+}
 
 /// Attaches an explicit retry hint for "come back soon" responses.
 fn with_retry_hint(err: ConnectError, retry_delay: std::time::Duration) -> ConnectError {
@@ -468,7 +477,7 @@ fn with_retry_hint(err: ConnectError, retry_delay: std::time::Duration) -> Conne
     )
 }
 
-fn ingest_error_to_connect(err: IngestError) -> ConnectError {
+pub fn ingest_error_to_connect(err: IngestError) -> ConnectError {
     match err {
         IngestError::PutTooLarge(error) => validate::put_too_large_error(error),
         IngestError::ResourceExhausted { message } => ConnectError::resource_exhausted(message),
@@ -484,58 +493,6 @@ fn ingest_error_to_connect(err: IngestError) -> ConnectError {
             RETRY_HINT_DELAY,
         ),
         IngestError::Internal { message } => ConnectError::internal(message),
-    }
-}
-
-impl<I> IngestApi for IngestConnect<I>
-where
-    I: Ingest,
-{
-    async fn put(
-        &self,
-        _ctx: Context,
-        request: ServiceRequest<'_, exoware_proto::log::ingest::v1::PutRequest>,
-    ) -> connectrpc::ServiceResult<ProtoPutResponse> {
-        if !self.state.ready.load(Ordering::SeqCst) {
-            return Err(with_retry_hint(
-                with_error_info_detail(
-                    ConnectError::unavailable("ingest is not ready"),
-                    ErrorInfo {
-                        reason: REASON_WORKER_NOT_READY.to_string(),
-                        domain: INGEST_ERROR_DOMAIN.to_string(),
-                        ..Default::default()
-                    },
-                ),
-                RETRY_HINT_DELAY,
-            ));
-        }
-
-        validate::validate_put_request(request.view(), self.state.limits)?;
-
-        let wire = request.bytes();
-        let mut batch = Vec::with_capacity(request.kvs.len());
-        for kv in request.kvs.iter() {
-            let key: Key = wire.slice_ref(kv.key);
-            let value = wire.slice_ref(kv.value);
-            batch.push((key, value));
-        }
-
-        let seq = self
-            .state
-            .ingest
-            .put_batch(batch)
-            .await
-            .map_err(ingest_error_to_connect)?;
-
-        // Advance any attached stream frontier after the write is committed.
-        if let Some(notifier) = &self.state.notifier {
-            notifier.advance(seq);
-        }
-
-        connectrpc::Response::ok(ProtoPutResponse {
-            sequence_number: seq,
-            ..Default::default()
-        })
     }
 }
 
@@ -1287,7 +1244,7 @@ pub fn connect_limits() -> Limits {
         .with_element_memory_limit(MAX_CONNECTRPC_ELEMENT_MEMORY_BYTES)
 }
 
-pub(crate) type IngestService<I> = ConnectRpcService<IngestServiceServer<IngestConnect<I>>>;
+pub type IngestService<I> = crate::ingest::service::PutService<I, connectrpc::Router>;
 pub(crate) type QueryService<Q> = ConnectRpcService<QueryServiceServer<QueryConnect<Q>>>;
 pub(crate) type PruneService<P> = ConnectRpcService<PruneServiceServer<PruneConnect<P>>>;
 pub(crate) type RetentionService<R> =
@@ -1296,28 +1253,19 @@ pub(crate) type StreamService<B> = ConnectRpcService<StreamServiceServer<StreamC
 pub(crate) type QueryStack<Q, B> = ConnectRpcService<
     Chain<QueryServiceServer<QueryConnect<Q>>, StreamServiceServer<StreamConnect<B>>>,
 >;
-pub(crate) type ConnectStack<I, Q, P, R, B> = ConnectRpcService<
+pub type ConnectStack<I, Q, P, R, B> = crate::ingest::service::PutService<
+    I,
     Chain<
-        IngestServiceServer<IngestConnect<I>>,
+        QueryServiceServer<QueryConnect<Q>>,
         Chain<
-            QueryServiceServer<QueryConnect<Q>>,
+            PruneServiceServer<PruneConnect<P>>,
             Chain<
-                PruneServiceServer<PruneConnect<P>>,
-                Chain<
-                    RetentionServiceServer<RetentionConnect<R>>,
-                    StreamServiceServer<StreamConnect<B>>,
-                >,
+                RetentionServiceServer<RetentionConnect<R>>,
+                StreamServiceServer<StreamConnect<B>>,
             >,
         >,
     >,
 >;
-
-fn ingest_server<I>(state: IngestState<I>) -> IngestServiceServer<IngestConnect<I>>
-where
-    I: Ingest,
-{
-    IngestServiceServer::new(IngestConnect::new(state))
-}
 
 fn query_server<Q>(state: QueryState<Q>) -> QueryServiceServer<QueryConnect<Q>>
 where
@@ -1351,9 +1299,10 @@ pub fn ingest_service<I>(state: IngestState<I>) -> IngestService<I>
 where
     I: Ingest,
 {
-    ConnectRpcService::new(ingest_server(state))
-        .with_limits(connect_limits())
-        .with_compression(connect_compression_registry())
+    crate::ingest::service::PutService::new(
+        state,
+        ConnectRpcService::new(connectrpc::Router::new()),
+    )
 }
 
 pub fn query_service<Q>(state: QueryState<Q>) -> QueryService<Q>
@@ -1412,21 +1361,20 @@ pub fn connect_stack<E>(state: AppState<E>) -> ConnectStack<E, E, E, E, E>
 where
     E: StoreEngine,
 {
-    ConnectRpcService::new(Chain(
-        ingest_server(state.clone().into()),
+    let ingest = state.clone().into();
+    let other = ConnectRpcService::new(Chain(
+        query_server(state.clone().into()),
         Chain(
-            query_server(state.clone().into()),
+            prune_server(state.clone().into()),
             Chain(
-                prune_server(state.clone().into()),
-                Chain(
-                    retention_server(state.clone().into()),
-                    stream_server(state.into()),
-                ),
+                retention_server(state.clone().into()),
+                stream_server(state.into()),
             ),
         ),
     ))
     .with_limits(connect_limits())
-    .with_compression(connect_compression_registry())
+    .with_compression(connect_compression_registry());
+    crate::ingest::service::PutService::new(ingest, other)
 }
 
 #[cfg(test)]
@@ -1628,16 +1576,29 @@ mod tests {
     }
 
     impl Ingest for FakeEngine {
-        async fn put_batch(&self, kvs: Vec<(Bytes, Bytes)>) -> Result<u64, IngestError> {
+        async fn put(&self, input: &mut crate::PutInput) -> Result<u64, crate::PutError> {
+            let mut kvs = Vec::new();
+            while let Some(chunk) = input
+                .next_batch(crate::ingest::DecodeBuffers::default())
+                .await?
+            {
+                kvs.extend(chunk.entries().map(|(key, value)| {
+                    (Bytes::copy_from_slice(key), Bytes::copy_from_slice(value))
+                }));
+            }
+            input.finish().await?;
             let mut state = self.state.lock().map_err(|e| IngestError::Internal {
                 message: e.to_string(),
             })?;
             if let Some(err) = state.put_error.take() {
-                return Err(err);
+                return Err(err.into());
             }
             state.current_sequence += 1;
             let seq = state.current_sequence;
             state.batches.insert(seq, Some(kvs));
+            if let Some(notifier) = input.notifier() {
+                notifier.advance(seq);
+            }
             Ok(seq)
         }
     }
@@ -2240,10 +2201,31 @@ mod tests {
         .encode_to_vec()
     }
 
-    fn put_request(
-        value_len: usize,
-    ) -> buffa::view::OwnedView<exoware_proto::log::ingest::v1::PutRequestView<'static>> {
-        let bytes = exoware_proto::ingest::PutRequest {
+    async fn dispatch_put<I: Ingest>(
+        state: &IngestState<I>,
+        wire: Bytes,
+    ) -> Result<Bytes, ConnectError> {
+        use connectrpc::client::{full_body, ClientTransport};
+        use http_body_util::BodyExt;
+
+        let transport = ServiceTransport::new(ingest_service(state.clone()));
+        let request = http::Request::post("http://store.test/log.ingest.v1.Service/Put")
+            .header(http::header::CONTENT_TYPE, "application/proto")
+            .header("connect-protocol-version", "1")
+            .body(full_body(wire))
+            .unwrap();
+        let response = transport.send(request).await.unwrap();
+        let status = response.status();
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        if status.is_success() {
+            Ok(body)
+        } else {
+            Err(serde_json::from_slice(&body).unwrap())
+        }
+    }
+
+    fn put_request(value_len: usize) -> Bytes {
+        exoware_proto::ingest::PutRequest {
             kvs: vec![exoware_proto::common::Entry {
                 key: b"k".to_vec(),
                 value: Bytes::from(vec![1u8; value_len]),
@@ -2251,11 +2233,8 @@ mod tests {
             }],
             ..Default::default()
         }
-        .encode_to_vec();
-        buffa::view::OwnedView::<exoware_proto::log::ingest::v1::PutRequestView<'static>>::decode(
-            bytes.into(),
-        )
-        .expect("decode put request")
+        .encode_to_vec()
+        .into()
     }
 
     fn keys_scope() -> KeysScope {
@@ -2879,11 +2858,10 @@ mod tests {
             max_value_len: 4,
             ..IngestLimits::default()
         });
-        let connect = IngestConnect::new(state);
+        let connect = state;
 
         let request = put_request(5);
-        let request = ServiceRequest::from_parts(request.reborrow(), request.bytes());
-        let err = IngestApi::put(&connect, Context::default(), request)
+        let err = dispatch_put(&connect, request)
             .await
             .expect_err("put should reject oversized value");
 
@@ -2891,11 +2869,10 @@ mod tests {
     }
 
     #[test]
-    fn transport_admits_portable_puts() {
+    fn transport_bounds_put_wire_bytes() {
         let limits = connect_limits();
         assert_eq!(limits.max_request_body_size(), MAX_REQUEST_MESSAGE_BYTES);
         assert_eq!(limits.max_message_size(), MAX_REQUEST_MESSAGE_BYTES);
-        assert!(limits.element_memory_limit() >= MAX_PUT_ENTRIES * std::mem::size_of::<Entry>());
     }
 
     #[tokio::test]
@@ -3097,12 +3074,9 @@ mod tests {
         engine.set_put_error(IngestError::ResourceExhausted {
             message: "backend capacity exceeded".to_string(),
         });
-        let connect = IngestConnect::new(IngestState::new(engine));
+        let connect = IngestState::new(engine);
         let request = put_request(1);
-        let request = ServiceRequest::from_parts(request.reborrow(), request.bytes());
-        let error = IngestApi::put(&connect, Context::default(), request)
-            .await
-            .unwrap_err();
+        let error = dispatch_put(&connect, request).await.unwrap_err();
         assert_eq!(error.code, connectrpc::ErrorCode::ResourceExhausted);
         assert!(error.details.is_empty());
     }
@@ -3115,12 +3089,9 @@ mod tests {
             max_entries: 2,
         };
         engine.set_put_error(error.into());
-        let connect = IngestConnect::new(IngestState::new(engine));
+        let connect = IngestState::new(engine);
         let request = put_request(1);
-        let request = ServiceRequest::from_parts(request.reborrow(), request.bytes());
-        let actual = IngestApi::put(&connect, Context::default(), request)
-            .await
-            .unwrap_err();
+        let actual = dispatch_put(&connect, request).await.unwrap_err();
         let expected = validate::put_too_large_error(error);
         assert_eq!(
             decode_connect_error(&actual).unwrap(),
@@ -3134,11 +3105,10 @@ mod tests {
         engine.set_put_error(IngestError::Unavailable {
             message: "backend bouncing".to_string(),
         });
-        let connect = IngestConnect::new(IngestState::new(engine));
+        let connect = IngestState::new(engine);
 
         let request = put_request(1);
-        let request = ServiceRequest::from_parts(request.reborrow(), request.bytes());
-        let err = IngestApi::put(&connect, Context::default(), request)
+        let err = dispatch_put(&connect, request)
             .await
             .expect_err("transient put failure should surface");
 
@@ -3159,11 +3129,10 @@ mod tests {
         engine.set_put_error(IngestError::Internal {
             message: "invariant violated".to_string(),
         });
-        let connect = IngestConnect::new(IngestState::new(engine));
+        let connect = IngestState::new(engine);
 
         let request = put_request(1);
-        let request = ServiceRequest::from_parts(request.reborrow(), request.bytes());
-        let err = IngestApi::put(&connect, Context::default(), request)
+        let err = dispatch_put(&connect, request)
             .await
             .expect_err("fatal put failure should surface");
 
@@ -3177,11 +3146,10 @@ mod tests {
         let engine = Arc::new(FakeEngine::default());
         let state = IngestState::new(engine);
         state.ready.store(false, Ordering::SeqCst);
-        let connect = IngestConnect::new(state);
+        let connect = state;
 
         let request = put_request(1);
-        let request = ServiceRequest::from_parts(request.reborrow(), request.bytes());
-        let err = IngestApi::put(&connect, Context::default(), request)
+        let err = dispatch_put(&connect, request)
             .await
             .expect_err("not-ready gate should reject");
 
