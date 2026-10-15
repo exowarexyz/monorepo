@@ -839,9 +839,8 @@ async fn test_keyless_commonware_glue_state_sync_uses_operation_log_client() {
                 SyncEngineConfig {
                     fetch_batch_size: NZU64!(1),
                     apply_batch_size: NZU64!(1),
-                    max_outstanding_requests: 2,
+                    max_outstanding_requests: NZUsize!(2),
                     update_channel_size: NZUsize!(1),
-                    max_retained_roots: 4,
                 },
             )
             .await

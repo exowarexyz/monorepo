@@ -153,7 +153,7 @@ where
 
 impl<B, S, D> Read for Notarized<B, S, D>
 where
-    B: Block<Digest = D>,
+    B: Block<Digest = D> + Read,
     S: certificate::Scheme,
     D: Digest,
     <S::Certificate as Read>::Cfg: Clone,
@@ -234,7 +234,7 @@ where
 
 impl<B, S, D> Read for Finalized<B, S, D>
 where
-    B: Block<Digest = D>,
+    B: Block<Digest = D> + Read,
     S: certificate::Scheme,
     D: Digest,
     <S::Certificate as Read>::Cfg: Clone,

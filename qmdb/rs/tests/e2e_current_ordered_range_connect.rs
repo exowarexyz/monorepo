@@ -554,14 +554,13 @@ async fn test_ordered_current_state_sync_from_connect_api_reconstructs_current_d
                 context: context.child("current_ordered_variable_mmr_sync_target"),
                 source: resolver,
                 target,
-                max_outstanding_requests: 4,
+                max_outstanding_requests: NZUsize!(4),
                 fetch_batch_size: NZU64!(7),
                 apply_batch_size: NZU64!(32),
                 db_config: cfg,
                 update_rx: None,
                 finish_rx: None,
                 reached_target_tx: None,
-                max_retained_roots: 4,
             })
             .await
             .expect("sync current db from API");
@@ -638,14 +637,13 @@ async fn test_ordered_mmb_current_state_sync_from_nonzero_connect_api_reconstruc
                 context: context.child("current_ordered_variable_mmb_nonzero_sync_target"),
                 source: resolver,
                 target,
-                max_outstanding_requests: 4,
+                max_outstanding_requests: NZUsize!(4),
                 fetch_batch_size: NZU64!(3),
                 apply_batch_size: NZU64!(32),
                 db_config: cfg,
                 update_rx: None,
                 finish_rx: None,
                 reached_target_tx: None,
-                max_retained_roots: 4,
             })
             .await
             .expect("sync current db from nonzero MMB API");
@@ -1251,14 +1249,13 @@ async fn test_ordered_mmb_operation_log_any_sync_from_connect_api_reconstructs_a
                 context: context.child("any_ordered_variable_mmb_sync_target"),
                 source: resolver,
                 target,
-                max_outstanding_requests: 4,
+                max_outstanding_requests: NZUsize!(4),
                 fetch_batch_size: NZU64!(3),
                 apply_batch_size: NZU64!(32),
                 db_config: cfg,
                 update_rx: None,
                 finish_rx: None,
                 reached_target_tx: None,
-                max_retained_roots: 4,
             })
             .await
             .expect("sync any db from MMB API");
@@ -1323,14 +1320,13 @@ async fn test_ordered_mmb_operation_log_any_sync_from_nonzero_connect_api_recons
                 context: context.child("any_ordered_variable_mmb_nonzero_sync_target"),
                 source: resolver,
                 target,
-                max_outstanding_requests: 4,
+                max_outstanding_requests: NZUsize!(4),
                 fetch_batch_size: NZU64!(3),
                 apply_batch_size: NZU64!(32),
                 db_config: cfg,
                 update_rx: None,
                 finish_rx: None,
                 reached_target_tx: None,
-                max_retained_roots: 4,
             })
             .await
             .expect("sync any db from nonzero MMB API");
@@ -1415,14 +1411,13 @@ async fn test_ordered_mmb_operation_log_any_sync_accepts_target_update_from_grow
                 context: context.child("any_ordered_variable_mmb_growing_sync_target"),
                 source: resolver,
                 target: initial_target,
-                max_outstanding_requests: 1,
+                max_outstanding_requests: NZUsize!(1),
                 fetch_batch_size: NZU64!(3),
                 apply_batch_size: NZU64!(4),
                 db_config: cfg,
                 update_rx: Some(update_rx),
                 finish_rx: Some(finish_rx),
                 reached_target_tx: Some(reached_tx),
-                max_retained_roots: 4,
             })
             .await
             .expect("sync any db from growing MMB API");

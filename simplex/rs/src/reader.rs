@@ -1,5 +1,5 @@
 use bytes::Bytes;
-use commonware_codec::Decode;
+use commonware_codec::{Decode, Read};
 use commonware_consensus::Block;
 use commonware_cryptography::{certificate, Digest};
 use exoware_sdk::keys::Key;
@@ -89,7 +89,7 @@ impl SimplexReader {
         cfg: &<B as commonware_codec::Read>::Cfg,
     ) -> Result<Option<B>, SimplexError>
     where
-        B: Block<Digest = D>,
+        B: Block<Digest = D> + Read,
         D: Digest,
     {
         self.decode_indexed(self.get_header_raw(digest).await?, cfg, |value: &B| {
@@ -103,7 +103,7 @@ impl SimplexReader {
         cfg: &<BlockData<B> as commonware_codec::Read>::Cfg,
     ) -> Result<Option<BlockData<B>>, SimplexError>
     where
-        B: Block<Digest = D>,
+        B: Block<Digest = D> + Read,
         D: Digest,
     {
         self.decode_indexed(
@@ -119,7 +119,7 @@ impl SimplexReader {
         cfg: &<Notarized<B, S, D> as commonware_codec::Read>::Cfg,
     ) -> Result<Option<Notarized<B, S, D>>, SimplexError>
     where
-        B: Block<Digest = D>,
+        B: Block<Digest = D> + Read,
         S: certificate::Scheme,
         D: Digest,
         <S::Certificate as commonware_codec::Read>::Cfg: Clone,
@@ -137,7 +137,7 @@ impl SimplexReader {
         cfg: &<Finalized<B, S, D> as commonware_codec::Read>::Cfg,
     ) -> Result<Option<Finalized<B, S, D>>, SimplexError>
     where
-        B: Block<Digest = D>,
+        B: Block<Digest = D> + Read,
         S: certificate::Scheme,
         D: Digest,
         <S::Certificate as commonware_codec::Read>::Cfg: Clone,
@@ -155,7 +155,7 @@ impl SimplexReader {
         cfg: &<Finalized<B, S, D> as commonware_codec::Read>::Cfg,
     ) -> Result<Option<Finalized<B, S, D>>, SimplexError>
     where
-        B: Block<Digest = D>,
+        B: Block<Digest = D> + Read,
         S: certificate::Scheme,
         D: Digest,
         <S::Certificate as commonware_codec::Read>::Cfg: Clone,
@@ -172,7 +172,7 @@ impl SimplexReader {
         cfg: &<Finalized<B, S, D> as commonware_codec::Read>::Cfg,
     ) -> Result<Option<Finalized<B, S, D>>, SimplexError>
     where
-        B: Block<Digest = D>,
+        B: Block<Digest = D> + Read,
         S: certificate::Scheme,
         D: Digest,
         <S::Certificate as commonware_codec::Read>::Cfg: Clone,
