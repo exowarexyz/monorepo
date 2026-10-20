@@ -11,7 +11,7 @@ use commonware_consensus::{
 };
 use commonware_cryptography::{
     certificate::{mocks::Fixture, ConstantProvider},
-    ed25519, sha256, Digest as _, Digestible, Hasher, Sha256, Signer,
+    ed25519, sha256, Digest as _, Digested, Digestible, Hasher, Sha256, Signer,
 };
 use commonware_parallel::Sequential;
 use commonware_runtime::{
@@ -104,7 +104,7 @@ impl Reporter for SinkReporter {
     fn report(&mut self, activity: Self::Activity) -> Feedback {
         if let Update::Block(block, ack) = activity {
             let mut delivered = self.delivered.lock();
-            delivered.push(Arc::unwrap_or_clone(block));
+            delivered.push(Arc::unwrap_or_clone(block.into()));
             if delivered.len() == self.expected {
                 if let Some(sender) = self.done.lock().take() {
                     let _ = sender.send(delivered.clone());
@@ -470,10 +470,10 @@ async fn marshal_resolver_sinks_finalized_chain_from_simplex_api() {
             cw_tokio::Runner::default().start(|context| async move {
                 let partition_prefix = "simplex-marshal-resolver-sink";
                 let page_cache = CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(8));
-                let config: MarshalConfig<_, _, _, TestBlock, Arc<TestBlock>> = MarshalConfig {
+                let config: MarshalConfig<_, _, _, TestBlock, Digested<TestBlock>> = MarshalConfig {
                     provider: ConstantProvider::new(schemes[0].clone()),
                     epocher: FixedEpocher::new(NZU64!(100)),
-                    start: Start::Genesis(genesis.into()),
+                    start: Start::Genesis(Digested::compute(genesis, &Sequential).await),
                     partition_prefix: partition_prefix.to_string(),
                     mailbox_size: NZUsize!(100),
                     view_retention: ViewDelta::new(10),
