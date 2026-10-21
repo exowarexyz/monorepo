@@ -113,25 +113,12 @@ pub fn build_client(config: &ClientConfig) -> anyhow::Result<PrefixedStoreClient
     Ok(PrefixedStoreClient::empty(client))
 }
 
-/// Ingest error codes that can self-resolve, so retrying the same batch is worthwhile.
+/// Ingest errors that can self-resolve, so retrying the same batch is worthwhile.
 ///
-/// Deliberately broader than the query list below: validation writes are
-/// deterministic and idempotent, so replaying a batch whose first attempt may
-/// have landed is safe.
-pub(crate) fn is_transient_ingest_code(code: ErrorCode) -> bool {
-    matches!(
-        code,
-        ErrorCode::ResourceExhausted
-            | ErrorCode::Unavailable
-            | ErrorCode::DeadlineExceeded
-            | ErrorCode::Unknown
-            | ErrorCode::Aborted
-            | ErrorCode::Internal
-    )
-}
-
+/// Extends the SDK's transient classification with `deadline_exceeded`. Validation writes are
+/// deterministic and idempotent, so replaying a batch whose first attempt may have landed is safe.
 pub(crate) fn is_transient_ingest_error(err: &ClientError) -> bool {
-    err.rpc_code().is_some_and(is_transient_ingest_code)
+    err.is_transient() || err.rpc_code() == Some(ErrorCode::DeadlineExceeded)
 }
 
 /// Query error codes worth re-polling; anything else fails validation fast so
@@ -144,10 +131,7 @@ pub(crate) fn is_transient_query_code(code: ErrorCode) -> bool {
 }
 
 pub(crate) fn is_transient_query_error(err: &ClientError) -> bool {
-    match err {
-        ClientError::Http(_) => true,
-        _ => err.rpc_code().is_some_and(is_transient_query_code),
-    }
+    err.rpc_code().is_some_and(is_transient_query_code)
 }
 
 fn validate_config(config: &ClientConfig) -> anyhow::Result<()> {
@@ -237,14 +221,22 @@ mod tests {
     }
 
     #[test]
-    fn transient_ingest_codes_cover_connect_transients() {
-        assert!(is_transient_ingest_code(ErrorCode::ResourceExhausted));
-        assert!(is_transient_ingest_code(ErrorCode::Unavailable));
-        assert!(is_transient_ingest_code(ErrorCode::DeadlineExceeded));
-        assert!(is_transient_ingest_code(ErrorCode::Unknown));
-        assert!(is_transient_ingest_code(ErrorCode::Aborted));
-        assert!(is_transient_ingest_code(ErrorCode::Internal));
-        assert!(!is_transient_ingest_code(ErrorCode::InvalidArgument));
+    fn transient_ingest_errors_extend_sdk_transients_with_deadlines() {
+        let rpc = |code| ClientError::Rpc(Box::new(connectrpc::ConnectError::new(code, "failed")));
+        for code in [
+            ErrorCode::ResourceExhausted,
+            ErrorCode::Unavailable,
+            ErrorCode::DeadlineExceeded,
+            ErrorCode::Unknown,
+            ErrorCode::Aborted,
+            ErrorCode::Internal,
+        ] {
+            assert!(is_transient_ingest_error(&rpc(code)), "{code:?}");
+        }
+        assert!(!is_transient_ingest_error(&rpc(ErrorCode::InvalidArgument)));
+        assert!(!is_transient_ingest_error(&ClientError::WireFormat(
+            "bad frame".to_string()
+        )));
     }
 
     #[test]

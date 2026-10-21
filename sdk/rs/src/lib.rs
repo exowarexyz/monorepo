@@ -5,10 +5,14 @@
 //!
 //! ## Errors
 //!
-//! RPC failures surface as [`ClientError::Rpc`] carrying a native [`ConnectError`]. Use
-//! [`ClientError::decoded_rpc_error`] or [`StoreClient::decode_error_details`] to unpack
-//! protobuf `google.rpc` details (and `store.query.v1.Detail` on query RPC errors), not string parsing.
-//! Idempotent reads honor `google.rpc.RetryInfo` when deciding backoff (see `retry_delay_for_error`).
+//! RPC failures, including transport failures, surface as [`ClientError::Rpc`] carrying a native
+//! [`ConnectError`]. See [`ClientError`] for how transport failures map to codes and for the
+//! SDK's retry classification. Use [`ClientError::decoded_rpc_error`] or
+//! [`StoreClient::decode_error_details`] to unpack protobuf `google.rpc` details (and
+//! `store.query.v1.Detail` on query RPC errors), not string parsing.
+//!
+//! The health and readiness probes are plain HTTP requests rather than RPCs, so they fail with
+//! [`ProbeError`] instead of [`ClientError`].
 
 mod credential;
 pub mod keys;
@@ -177,11 +181,16 @@ fn store_connect_client_config(
     }
 }
 
-/// Store client error.
+/// Error returned by store RPCs and the key handling around them.
+///
+/// Every failure to complete an RPC surfaces as [`ClientError::Rpc`] with a Connect code,
+/// including transport failures. There is no separate transport variant. With the built-in
+/// transports, connection and request-send failures report `unavailable`. Response-body read
+/// failures report `internal`, or `deadline_exceeded` once the RPC deadline has passed.
+/// SDK-enforced timeouts report `deadline_exceeded`. Use [`ClientError::is_transient`] to apply
+/// the SDK's read retry classification.
 #[derive(Debug, thiserror::Error)]
 pub enum ClientError {
-    #[error("HTTP error: {0}")]
-    Http(#[from] reqwest::Error),
     #[error("RPC error ({0})")]
     Rpc(Box<ConnectError>),
     #[error("store key prefix error: {0}")]
@@ -202,6 +211,27 @@ impl ClientError {
 
     pub fn rpc_code(&self) -> Option<ErrorCode> {
         self.rpc_error().map(|err| err.code)
+    }
+
+    /// Reports whether the SDK's read retry policy treats this error as transient.
+    ///
+    /// Only RPC errors can be transient. The transient codes are `aborted`,
+    /// `resource_exhausted`, `unavailable`, `unknown`, and `internal`. `internal` is included
+    /// because a connection lost while reading a response reports it, and proxies and load
+    /// balancers sometimes report transient faults with it. The cost is also retrying genuine
+    /// server bugs, so retries should use a bounded attempt budget.
+    ///
+    /// `deadline_exceeded` is excluded from this classification. Applications can add it to their
+    /// own retry policy when appropriate for their workload.
+    ///
+    /// The SDK's own retries also honor `google.rpc.RetryInfo` for backoff when the server
+    /// supplies it.
+    ///
+    /// A transient error means that repeating the request may succeed. It does not mean the failed
+    /// attempt had no effect, so a Put that fails with a transient error may still have been
+    /// applied.
+    pub fn is_transient(&self) -> bool {
+        self.rpc_code().is_some_and(is_transient_code)
     }
 
     pub fn decoded_rpc_error(
@@ -228,6 +258,14 @@ impl ClientError {
         })
     }
 }
+
+/// Error returned when a health or readiness probe cannot complete.
+///
+/// A probe that reaches the server and receives a non-success status is not an error. The probe
+/// reports `false` instead.
+#[derive(Debug, thiserror::Error)]
+#[error("probe request failed: {0}")]
+pub struct ProbeError(#[source] reqwest::Error);
 
 /// Errors returned by [`StoreKeyPrefix`] when a logical key cannot be mapped
 /// into the prefixed physical keyspace.
@@ -2095,7 +2133,7 @@ impl StoreClient {
             match result {
                 Ok(stream) => return Ok(stream),
                 Err(err) => {
-                    if attempt < max_attempts && is_retryable_error(&err) {
+                    if attempt < max_attempts && is_transient_code(err.code) {
                         let delay = retry_delay_for_error(&err, attempt, self.retry_config);
                         tokio::time::sleep(delay).await;
                         attempt += 1;
@@ -2236,21 +2274,23 @@ impl StoreClient {
         Ok(response.into_owned().oldest_retained_sequence)
     }
 
-    pub async fn health(&self) -> Result<bool, ClientError> {
+    pub async fn health(&self) -> Result<bool, ProbeError> {
         let resp = self
             .health_http
             .get(format!("{}/health", self.health_url))
             .send()
-            .await?;
+            .await
+            .map_err(ProbeError)?;
         Ok(resp.status().is_success())
     }
 
-    pub async fn ready(&self) -> Result<bool, ClientError> {
+    pub async fn ready(&self) -> Result<bool, ProbeError> {
         let resp = self
             .health_http
             .get(format!("{}/ready", self.health_url))
             .send()
-            .await?;
+            .await
+            .map_err(ProbeError)?;
         Ok(resp.status().is_success())
     }
 
@@ -2364,7 +2404,7 @@ impl StoreClient {
             match result {
                 Ok(stream) => return Ok(stream),
                 Err(err) => {
-                    if attempt < max_attempts && is_retryable_error(&err) {
+                    if attempt < max_attempts && is_transient_code(err.code) {
                         let delay = retry_delay_for_error(&err, attempt, self.retry_config);
                         tracing::debug!(
                             attempt,
@@ -2467,7 +2507,7 @@ impl StoreClient {
             match make_request().await {
                 Ok(response) => return Ok(response),
                 Err(err) => {
-                    if attempt < max_attempts && is_retryable_error(&err) {
+                    if attempt < max_attempts && is_transient_code(err.code) {
                         let delay = retry_delay_for_error(&err, attempt, self.retry_config);
                         tracing::debug!(
                             attempt,
@@ -3120,17 +3160,14 @@ fn put_retry_delay_for_error(
     ))
 }
 
-fn is_retryable_error(err: &ConnectError) -> bool {
+// Keep this list in step with the policy documented on `ClientError::is_transient`.
+fn is_transient_code(code: ErrorCode) -> bool {
     matches!(
-        err.code,
+        code,
         ErrorCode::Aborted
             | ErrorCode::ResourceExhausted
             | ErrorCode::Unavailable
             | ErrorCode::Unknown
-            // Retrying `internal` is a trade-off: proxies and load balancers sometimes surface
-            // transient faults this way; idempotent reads use a small attempt budget so we do not
-            // spin forever. Prefer interpreting `google.rpc.RetryInfo` when present (see
-            // `retry_delay_for_error`).
             | ErrorCode::Internal
     )
 }
@@ -4800,16 +4837,56 @@ mod tests {
     }
 
     #[test]
-    fn retryable_codes_include_connect_transients() {
-        assert!(is_retryable_error(&ConnectError::aborted("retry")));
-        assert!(is_retryable_error(&ConnectError::resource_exhausted(
-            "retry"
-        )));
-        assert!(is_retryable_error(&ConnectError::unavailable("retry")));
-        assert!(is_retryable_error(&ConnectError::internal("retry")));
-        assert!(!is_retryable_error(&ConnectError::invalid_argument(
-            "no retry"
-        )));
+    fn transient_classification_covers_connect_transients_only() {
+        let rpc = |code| ClientError::Rpc(Box::new(ConnectError::new(code, "failed")));
+        for code in [
+            ErrorCode::Aborted,
+            ErrorCode::ResourceExhausted,
+            ErrorCode::Unavailable,
+            ErrorCode::Unknown,
+            ErrorCode::Internal,
+        ] {
+            assert!(rpc(code).is_transient(), "{code:?} should be transient");
+        }
+        for code in [
+            ErrorCode::DeadlineExceeded,
+            ErrorCode::InvalidArgument,
+            ErrorCode::NotFound,
+            ErrorCode::Unauthenticated,
+        ] {
+            assert!(
+                !rpc(code).is_transient(),
+                "{code:?} should not be transient"
+            );
+        }
+        assert!(!ClientError::WireFormat("bad frame".to_string()).is_transient());
+    }
+
+    #[tokio::test]
+    async fn unreachable_server_fails_rpcs_as_transient_and_probes_as_probe_errors() {
+        // Binding and then dropping a listener yields a local port that refuses connections.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        drop(listener);
+
+        let client = StoreClient::builder()
+            .url(&url)
+            .retry_config(RetryConfig::disabled())
+            .build()
+            .unwrap();
+
+        let err = client
+            .get(&Key::from(b"key".to_vec()))
+            .await
+            .expect_err("connection should be refused");
+        assert_eq!(err.rpc_code(), Some(ErrorCode::Unavailable));
+        assert!(err.is_transient());
+
+        client.health().await.expect_err("health probe should fail");
+        client
+            .ready()
+            .await
+            .expect_err("readiness probe should fail");
     }
 
     #[test]

@@ -44,6 +44,22 @@ disables these retries. When configured, `request_timeout` covers all attempts
 and backoff together. Generic errors, timeouts, and lost responses are not
 automatically retried. See the [admission retry contract](../../proto/README.md#admission-retries).
 
+## Errors
+
+Every RPC failure surfaces as `ClientError::Rpc` with a Connect code, including
+transport failures. There is no separate HTTP or transport variant. The
+[`ClientError` documentation](https://docs.rs/exoware-sdk/latest/exoware_sdk/enum.ClientError.html)
+describes how transport failures map to codes.
+
+`ClientError::is_transient` reports whether an error is transient under the
+SDK's own read retry policy. Applications with their own retry loops can build
+on it and add codes that suit their workload. A transient error does not prove
+that a failed Put had no effect.
+
+The `health()` and `ready()` probes are plain `GET /health` and `GET /ready`
+requests rather than RPCs. They fail with `ProbeError` when the request cannot
+complete, and return `false` for a non-success status.
+
 ## Request compression
 
 Outgoing requests support `ConnectRequestCompression::None` (the default) and
