@@ -31,9 +31,7 @@ use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
 use rand::{RngExt, SeedableRng};
 
-use crate::client::{
-    build_client, is_transient_ingest_error, is_transient_query_error, ClientArgs, ClientConfig,
-};
+use crate::client::{build_client, is_transient_query_error, ClientArgs, ClientConfig};
 use crate::deterministic::mix64;
 use crate::ingest::{ingest_with_retry, retry_delay_for_error, IngestRetryArgs};
 use crate::keyspace::{default_run_namespace, Keyspace, KeyspaceArgs};
@@ -759,7 +757,7 @@ async fn run_overlap_ledger_write_mode(
                     sequence_number = token;
                     break;
                 }
-                Err(err) if is_transient_ingest_error(&err) => {
+                Err(err) if err.is_transient() => {
                     attempt = attempt.saturating_add(1);
                     tracing::warn!(
                         label,
