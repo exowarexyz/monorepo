@@ -115,10 +115,10 @@ pub fn build_client(config: &ClientConfig) -> anyhow::Result<PrefixedStoreClient
 
 /// Ingest errors that can self-resolve, so retrying the same batch is worthwhile.
 ///
-/// Extends the SDK's transient classification with `deadline_exceeded`. Validation writes are
-/// deterministic and idempotent, so replaying a batch whose first attempt may have landed is safe.
+/// Follows the SDK's transient classification. Validation writes are deterministic and
+/// idempotent, so replaying a batch whose first attempt may have landed is safe.
 pub(crate) fn is_transient_ingest_error(err: &ClientError) -> bool {
-    err.is_transient() || err.rpc_code() == Some(ErrorCode::DeadlineExceeded)
+    err.is_transient()
 }
 
 /// Query error codes worth re-polling; anything else fails validation fast so
@@ -221,7 +221,7 @@ mod tests {
     }
 
     #[test]
-    fn transient_ingest_errors_extend_sdk_transients_with_deadlines() {
+    fn transient_ingest_errors_follow_sdk_classification() {
         let rpc = |code| ClientError::Rpc(Box::new(connectrpc::ConnectError::new(code, "failed")));
         for code in [
             ErrorCode::ResourceExhausted,

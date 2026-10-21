@@ -6,8 +6,10 @@
 //! ## Errors
 //!
 //! RPC failures, including transport failures, surface as [`ClientError::Rpc`] carrying a native
-//! [`ConnectError`]. See [`ClientError`] for how transport failures map to codes and for the
-//! SDK's retry classification. Use [`ClientError::decoded_rpc_error`] or
+//! [`ConnectError`]. See [`ClientError`] for how transport failures map to codes. Use
+//! [`ClientError::is_transient`] to tell whether a failure may clear on retry, and
+//! [`StoreClientBuilder::request_timeout`] to bound each call, including all of its retry attempts
+//! and backoff. Use [`ClientError::decoded_rpc_error`] or
 //! [`StoreClient::decode_error_details`] to unpack protobuf `google.rpc` details (and
 //! `store.query.v1.Detail` on query RPC errors), not string parsing.
 //!
@@ -23,6 +25,8 @@ pub mod prune_policy;
 #[cfg(test)]
 mod put_retry_tests;
 #[cfg(test)]
+mod read_retry_tests;
+#[cfg(test)]
 mod read_session_log_tests;
 pub mod retention;
 pub mod selector;
@@ -33,7 +37,7 @@ pub use proto::*;
 extern crate self as exoware_proto;
 
 use bytes::Bytes;
-use connectrpc::client::{ClientConfig, ServerStream as ConnectServerStream};
+use connectrpc::client::{CallOptions, ClientConfig, ServerStream as ConnectServerStream};
 use connectrpc::compression::ZstdProvider;
 pub use connectrpc::{ConnectError, ErrorCode};
 use credential::{client_error_from_connect, ApiKey, Credential, UnusableEnvKey};
@@ -187,8 +191,8 @@ fn store_connect_client_config(
 /// including transport failures. There is no separate transport variant. With the built-in
 /// transports, connection and request-send failures report `unavailable`. Response-body read
 /// failures report `internal`, or `deadline_exceeded` once the RPC deadline has passed.
-/// SDK-enforced timeouts report `deadline_exceeded`. Use [`ClientError::is_transient`] to apply
-/// the SDK's read retry classification.
+/// SDK-enforced timeouts report `deadline_exceeded`. Use [`ClientError::is_transient`] to tell
+/// whether a failure may clear on retry.
 #[derive(Debug, thiserror::Error)]
 pub enum ClientError {
     #[error("RPC error ({0})")]
@@ -213,19 +217,22 @@ impl ClientError {
         self.rpc_error().map(|err| err.code)
     }
 
-    /// Reports whether the SDK's read retry policy treats this error as transient.
+    /// Reports whether this is the kind of failure that may clear if the request is repeated.
+    ///
+    /// The predicate describes the failure only. It does not consider whether any attempts or
+    /// time remain. The SDK's own read retries are bounded by [`RetryConfig`] attempts and by
+    /// [`StoreClientBuilder::request_timeout`]. Callers that run their own retry loops must bound
+    /// them as well.
     ///
     /// Only RPC errors can be transient. The transient codes are `aborted`,
-    /// `resource_exhausted`, `unavailable`, `unknown`, and `internal`. `internal` is included
-    /// because a connection lost while reading a response reports it, and proxies and load
-    /// balancers sometimes report transient faults with it. The cost is also retrying genuine
-    /// server bugs, so retries should use a bounded attempt budget.
+    /// `resource_exhausted`, `unavailable`, `deadline_exceeded`, `unknown`, and `internal`.
+    /// `internal` is included because a connection lost while reading a response reports it, and
+    /// proxies and load balancers sometimes report transient faults with it. The cost is also
+    /// retrying genuine server bugs, which the retry bounds keep finite.
     ///
-    /// `deadline_exceeded` is excluded from this classification. Applications can add it to their
-    /// own retry policy when appropriate for their workload.
-    ///
-    /// The SDK's own retries also honor `google.rpc.RetryInfo` for backoff when the server
-    /// supplies it.
+    /// The SDK's own read retries also honor `google.rpc.RetryInfo` for backoff when the server
+    /// supplies it. Put does not use this predicate. It retries only explicit admission
+    /// rejections.
     ///
     /// A transient error means that repeating the request may succeed. It does not mean the failed
     /// attempt had no effect, so a Put that fails with a transient error may still have been
@@ -1689,7 +1696,10 @@ impl StoreClientBuilder {
         self
     }
 
-    /// Bounds unary calls and the opening of streaming calls across RPC transports.
+    /// Bounds each unary call and the opening of each streaming call across RPC transports.
+    ///
+    /// The timeout covers the whole call, including every retry attempt and the backoff between
+    /// them.
     /// Overrides the timeout supplied by [`Self::balanced_http2_transport`].
     pub fn request_timeout(mut self, timeout: Duration) -> Self {
         self.request_timeout = Some(timeout);
@@ -1949,15 +1959,41 @@ impl StoreClient {
         store_connect_client_config(base_uri, self.connect_request_compression, None)
     }
 
-    async fn with_streaming_timeout<T>(
+    // A retrying call checks this before each attempt so it never starts one that has no time
+    // left. The remaining budget, rather than the full timeout, is what the attempt may use.
+    fn remaining_request_timeout(
         &self,
-        future: impl std::future::Future<Output = Result<T, ConnectError>>,
+        started: tokio::time::Instant,
+    ) -> Result<Option<Duration>, ConnectError> {
+        let remaining = self
+            .rpc_timeout
+            .map(|timeout| timeout.saturating_sub(started.elapsed()));
+        if remaining.is_some_and(|timeout| timeout.is_zero()) {
+            return Err(client_deadline_exceeded());
+        }
+
+        // Connect sends and enforces whole milliseconds, dropping any fraction. Rounding up keeps
+        // an attempt's own deadline from expiring before the call's, which would otherwise let a
+        // retrying loop start attempts in the sliver of budget left over.
+        Ok(remaining.map(|remaining| {
+            Duration::from_millis(
+                u64::try_from(remaining.as_nanos().div_ceil(1_000_000)).unwrap_or(u64::MAX),
+            )
+        }))
+    }
+
+    // One deadline per call, rather than per attempt, keeps `request_timeout` a bound on how
+    // long the caller waits. Attempts and backoff all draw from it.
+    async fn within_request_timeout<T>(
+        &self,
+        started: tokio::time::Instant,
+        operation: impl std::future::Future<Output = Result<T, ConnectError>>,
     ) -> Result<T, ConnectError> {
         match self.rpc_timeout {
-            Some(timeout) => tokio::time::timeout(timeout, future)
+            Some(timeout) => tokio::time::timeout_at(started + timeout, operation)
                 .await
-                .map_err(|_| ConnectError::deadline_exceeded("client-side deadline exceeded"))?,
-            None => future.await,
+                .unwrap_or_else(|_| Err(client_deadline_exceeded())),
+            None => operation.await,
         }
     }
 
@@ -2021,15 +2057,7 @@ impl StoreClient {
         };
         let operation = async {
             for attempt in 1..=self.retry_config.max_attempts {
-                let remaining = self
-                    .rpc_timeout
-                    .map(|timeout| timeout.saturating_sub(started.elapsed()));
-                if remaining.is_some_and(|timeout| timeout.is_zero()) {
-                    return Err(ConnectError::deadline_exceeded(
-                        "client-side deadline exceeded",
-                    ));
-                }
-
+                let remaining = self.remaining_request_timeout(started)?;
                 let config = store_connect_client_config(
                     self.ingest_uri.clone(),
                     self.connect_request_compression,
@@ -2061,17 +2089,9 @@ impl StoreClient {
             }
             unreachable!("retry configuration always permits one attempt")
         };
-        let result = match self.rpc_timeout {
-            Some(timeout) => tokio::time::timeout_at(started + timeout, operation)
-                .await
-                .unwrap_or_else(|_| {
-                    Err(ConnectError::deadline_exceeded(
-                        "client-side deadline exceeded",
-                    ))
-                }),
-            None => operation.await,
-        };
-        result.map_err(|err| client_error_from_connect(err, self.credential))
+        self.within_request_timeout(started, operation)
+            .await
+            .map_err(|err| client_error_from_connect(err, self.credential))
     }
 
     pub(crate) async fn get(&self, key: &Key) -> Result<Option<Bytes>, ClientError> {
@@ -2107,42 +2127,25 @@ impl StoreClient {
     ) -> Result<GetManyStream, ClientError> {
         let config = self.streaming_client_config(self.query_uri.clone());
         let client = QueryServiceClient::new(self.connect_http.clone(), config);
-        let max_attempts = self.retry_config.max_attempts.max(1);
-        let mut attempt = 1usize;
-        loop {
-            let result = self
-                .with_streaming_timeout(async {
-                    let response = client
-                        .get_many(ProtoGetManyRequest {
-                            keys: proto_keys.clone(),
-                            min_sequence_number,
-                            batch_size,
-                            ..Default::default()
-                        })
-                        .await?;
-                    let mut stream = GetManyStream::from_connect_stream(
-                        response,
-                        observed_sequence.clone(),
-                        None,
-                        self.credential,
-                    );
-                    stream.prefetch_first_frame().await?;
-                    Ok(stream)
+        self.send_with_retry(|_| async {
+            let response = client
+                .get_many(ProtoGetManyRequest {
+                    keys: proto_keys.clone(),
+                    min_sequence_number,
+                    batch_size,
+                    ..Default::default()
                 })
-                .await;
-            match result {
-                Ok(stream) => return Ok(stream),
-                Err(err) => {
-                    if attempt < max_attempts && is_transient_code(err.code) {
-                        let delay = retry_delay_for_error(&err, attempt, self.retry_config);
-                        tokio::time::sleep(delay).await;
-                        attempt += 1;
-                        continue;
-                    }
-                    return Err(client_error_from_connect(err, self.credential));
-                }
-            }
-        }
+                .await?;
+            let mut stream = GetManyStream::from_connect_stream(
+                response,
+                observed_sequence.clone(),
+                None,
+                self.credential,
+            );
+            stream.prefetch_first_frame().await?;
+            Ok(stream)
+        })
+        .await
     }
 
     pub(crate) async fn prune(
@@ -2207,7 +2210,7 @@ impl StoreClient {
         let client =
             exoware_proto::log::stream::v1::ServiceClient::new(self.connect_http.clone(), config);
         let stream = self
-            .with_streaming_timeout(client.subscribe(request))
+            .within_request_timeout(tokio::time::Instant::now(), client.subscribe(request))
             .await
             .map_err(|err| client_error_from_connect(err, self.credential))?;
         Ok(StreamSubscription {
@@ -2317,14 +2320,15 @@ impl StoreClient {
         let config = self.unary_client_config(self.query_uri.clone());
         let client = QueryServiceClient::new(self.connect_http.clone(), config);
         let response = self
-            .send_with_retry(|| async {
-                client
-                    .get(ProtoGetRequest {
+            .send_with_retry(|remaining| {
+                client.get_with_options(
+                    ProtoGetRequest {
                         key: key.clone().into(),
                         min_sequence_number,
                         ..Default::default()
-                    })
-                    .await
+                    },
+                    attempt_call_options(remaining),
+                )
             })
             .await?;
         let owned = response.into_owned();
@@ -2370,57 +2374,33 @@ impl StoreClient {
         let config = self.streaming_client_config(self.query_uri.clone());
         let client = QueryServiceClient::new(self.connect_http.clone(), config);
         let min_sequence_number = options.min_sequence_number;
-        let max_attempts = self.retry_config.max_attempts.max(1);
-        let mut attempt = 1usize;
-        loop {
-            // Server-streaming RPCs cannot transparently recover mid-stream failures,
-            // but retrying a transient error while opening the stream or before the
-            // first frame arrives is still safe. Treat both phases as a single
-            // attempt budget so range opens do not multiply retries quadratically.
-            let result = self
-                .with_streaming_timeout(async {
-                    let response = client
-                        .range(ProtoRangeRequest {
-                            start: start.clone().into(),
-                            end: end.clone().into(),
-                            limit: (limit != usize::MAX)
-                                .then(|| u32::try_from(limit).unwrap_or(u32::MAX)),
-                            batch_size: u32::try_from(batch_size).unwrap_or(u32::MAX),
-                            mode: mode.to_proto().into(),
-                            min_sequence_number,
-                            ..Default::default()
-                        })
-                        .await?;
-                    let mut stream = RangeStream::from_connect_stream(
-                        response,
-                        options.observed_sequence.clone(),
-                        None,
-                        self.credential,
-                    );
-                    stream.prefetch_first_frame().await?;
-                    Ok(stream)
+
+        // Server-streaming RPCs cannot transparently recover mid-stream failures, but retrying
+        // a transient error while opening the stream or before the first frame arrives is still
+        // safe. Both phases form one attempt so range opens do not multiply retries
+        // quadratically.
+        self.send_with_retry(|_| async {
+            let response = client
+                .range(ProtoRangeRequest {
+                    start: start.clone().into(),
+                    end: end.clone().into(),
+                    limit: (limit != usize::MAX).then(|| u32::try_from(limit).unwrap_or(u32::MAX)),
+                    batch_size: u32::try_from(batch_size).unwrap_or(u32::MAX),
+                    mode: mode.to_proto().into(),
+                    min_sequence_number,
+                    ..Default::default()
                 })
-                .await;
-            match result {
-                Ok(stream) => return Ok(stream),
-                Err(err) => {
-                    if attempt < max_attempts && is_transient_code(err.code) {
-                        let delay = retry_delay_for_error(&err, attempt, self.retry_config);
-                        tracing::debug!(
-                            attempt,
-                            max_attempts,
-                            code = err.code.as_str(),
-                            delay_ms = delay.as_millis() as u64,
-                            "store client retrying transient stream-open error",
-                        );
-                        tokio::time::sleep(delay).await;
-                        attempt += 1;
-                        continue;
-                    }
-                    return Err(client_error_from_connect(err, self.credential));
-                }
-            }
-        }
+                .await?;
+            let mut stream = RangeStream::from_connect_stream(
+                response,
+                options.observed_sequence.clone(),
+                None,
+                self.credential,
+            );
+            stream.prefetch_first_frame().await?;
+            Ok(stream)
+        })
+        .await
     }
 
     async fn range_reduce_stream_internal(
@@ -2435,28 +2415,26 @@ impl StoreClient {
         let proto_params = proto_to_proto_reduce_params(request.clone());
         let min_sequence_number = options.min_sequence_number;
         let (stream, first) = self
-            .send_with_retry(|| {
-                self.with_streaming_timeout(async {
-                    let mut stream = client
-                        .reduce(ProtoWireReduceRequest {
-                            start: start.clone().into(),
-                            end: end.clone().into(),
-                            params: Some(proto_params.clone()).into(),
-                            min_sequence_number,
-                            ..Default::default()
-                        })
-                        .await?;
-                    let first = stream
-                        .message::<proto_query::ReduceResponse>()
-                        .await?
-                        .ok_or_else(|| {
-                            ConnectError::new(
-                                ErrorCode::Internal,
-                                "reduction stream returned no frames",
-                            )
-                        })?;
-                    Ok((stream, first))
-                })
+            .send_with_retry(|_| async {
+                let mut stream = client
+                    .reduce(ProtoWireReduceRequest {
+                        start: start.clone().into(),
+                        end: end.clone().into(),
+                        params: Some(proto_params.clone()).into(),
+                        min_sequence_number,
+                        ..Default::default()
+                    })
+                    .await?;
+                let first = stream
+                    .message::<proto_query::ReduceResponse>()
+                    .await?
+                    .ok_or_else(|| {
+                        ConnectError::new(
+                            ErrorCode::Internal,
+                            "reduction stream returned no frames",
+                        )
+                    })?;
+                Ok((stream, first))
             })
             .await?;
         let observed_sequence = options.observed_sequence;
@@ -2496,18 +2474,28 @@ impl StoreClient {
         )
     }
 
+    /// Runs one idempotent read, retrying transient failures within the attempt and time budget.
+    ///
+    /// Each attempt receives the remaining `request_timeout`. Unary attempts pass it to Connect so
+    /// the server sees the same deadline. Streaming attempts ignore it because a Connect timeout
+    /// would also bound the returned body, which outlives this call. The call deadline already
+    /// bounds their opening.
     async fn send_with_retry<F, Fut, T>(&self, mut make_request: F) -> Result<T, ClientError>
     where
-        F: FnMut() -> Fut,
+        F: FnMut(Option<Duration>) -> Fut,
         Fut: std::future::Future<Output = Result<T, ConnectError>>,
     {
-        let max_attempts = self.retry_config.max_attempts.max(1);
-        let mut attempt = 1usize;
-        loop {
-            match make_request().await {
-                Ok(response) => return Ok(response),
-                Err(err) => {
-                    if attempt < max_attempts && is_transient_code(err.code) {
+        let started = tokio::time::Instant::now();
+        let max_attempts = self.retry_config.max_attempts;
+        let operation = async {
+            for attempt in 1..=max_attempts {
+                let remaining = self.remaining_request_timeout(started)?;
+                match make_request(remaining).await {
+                    Ok(response) => return Ok(response),
+                    Err(err) => {
+                        if attempt == max_attempts || !is_transient_code(err.code) {
+                            return Err(err);
+                        }
                         let delay = retry_delay_for_error(&err, attempt, self.retry_config);
                         tracing::debug!(
                             attempt,
@@ -2516,14 +2504,16 @@ impl StoreClient {
                             delay_ms = delay.as_millis() as u64,
                             "store client retrying transient RPC error",
                         );
+
                         tokio::time::sleep(delay).await;
-                        attempt += 1;
-                        continue;
                     }
-                    return Err(client_error_from_connect(err, self.credential));
                 }
             }
-        }
+            unreachable!("retry configuration always permits one attempt")
+        };
+        self.within_request_timeout(started, operation)
+            .await
+            .map_err(|err| client_error_from_connect(err, self.credential))
     }
 }
 
@@ -3167,9 +3157,21 @@ fn is_transient_code(code: ErrorCode) -> bool {
         ErrorCode::Aborted
             | ErrorCode::ResourceExhausted
             | ErrorCode::Unavailable
+            | ErrorCode::DeadlineExceeded
             | ErrorCode::Unknown
             | ErrorCode::Internal
     )
+}
+
+fn client_deadline_exceeded() -> ConnectError {
+    ConnectError::deadline_exceeded("client-side deadline exceeded")
+}
+
+fn attempt_call_options(timeout: Option<Duration>) -> CallOptions {
+    match timeout {
+        Some(timeout) => CallOptions::default().with_timeout(timeout),
+        None => CallOptions::default(),
+    }
 }
 
 fn retry_delay_for_error(
@@ -4843,13 +4845,13 @@ mod tests {
             ErrorCode::Aborted,
             ErrorCode::ResourceExhausted,
             ErrorCode::Unavailable,
+            ErrorCode::DeadlineExceeded,
             ErrorCode::Unknown,
             ErrorCode::Internal,
         ] {
             assert!(rpc(code).is_transient(), "{code:?} should be transient");
         }
         for code in [
-            ErrorCode::DeadlineExceeded,
             ErrorCode::InvalidArgument,
             ErrorCode::NotFound,
             ErrorCode::Unauthenticated,
