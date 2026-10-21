@@ -113,14 +113,6 @@ pub fn build_client(config: &ClientConfig) -> anyhow::Result<PrefixedStoreClient
     Ok(PrefixedStoreClient::empty(client))
 }
 
-/// Ingest errors that can self-resolve, so retrying the same batch is worthwhile.
-///
-/// Follows the SDK's transient classification. Validation writes are deterministic and
-/// idempotent, so replaying a batch whose first attempt may have landed is safe.
-pub(crate) fn is_transient_ingest_error(err: &ClientError) -> bool {
-    err.is_transient()
-}
-
 /// Query error codes worth re-polling; anything else fails validation fast so
 /// store bugs are not retried into a timeout.
 pub(crate) fn is_transient_query_code(code: ErrorCode) -> bool {
@@ -218,25 +210,6 @@ mod tests {
             request_compression: RequestCompression::default(),
         };
         build_client(&config).expect_err("malformed endpoint should be rejected");
-    }
-
-    #[test]
-    fn transient_ingest_errors_follow_sdk_classification() {
-        let rpc = |code| ClientError::Rpc(Box::new(connectrpc::ConnectError::new(code, "failed")));
-        for code in [
-            ErrorCode::ResourceExhausted,
-            ErrorCode::Unavailable,
-            ErrorCode::DeadlineExceeded,
-            ErrorCode::Unknown,
-            ErrorCode::Aborted,
-            ErrorCode::Internal,
-        ] {
-            assert!(is_transient_ingest_error(&rpc(code)), "{code:?}");
-        }
-        assert!(!is_transient_ingest_error(&rpc(ErrorCode::InvalidArgument)));
-        assert!(!is_transient_ingest_error(&ClientError::WireFormat(
-            "bad frame".to_string()
-        )));
     }
 
     #[test]

@@ -4,7 +4,6 @@ use anyhow::{anyhow, bail, ensure};
 use exoware_sdk::{ClientError, PrefixedStoreClient};
 use rand::RngExt;
 
-use crate::client::is_transient_ingest_error;
 use crate::record::{record_refs, Record};
 
 const MAX_INGEST_RETRY_BACKOFF: Duration = Duration::from_secs(5);
@@ -102,7 +101,9 @@ pub(crate) async fn ingest_with_retry(
                     transient_retries,
                 });
             }
-            Err(err) if is_transient_ingest_error(&err) && attempt < attempts => {
+            // A transient failure does not prove the batch was not applied. Replaying it is safe
+            // because validation writes are deterministic and idempotent.
+            Err(err) if err.is_transient() && attempt < attempts => {
                 transient_retries += 1;
                 let delay = retry_delay_for_error(&err, backoff, transient_retries);
                 tracing::warn!(
