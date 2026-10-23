@@ -143,9 +143,11 @@ where
     T::ResponseBody: http_body::Body<Data = Bytes> + Send + Unpin + 'static,
     <T::ResponseBody as http_body::Body>::Error: std::fmt::Display,
 {
+    // These scripted streams end after their frames, and resuming would request more.
     StoreClient::builder()
         .url("http://store.internal")
         .retry_config(RetryConfig::disabled())
+        .subscription_retry_config(SubscriptionRetryConfig::disabled())
         .client_transport(transport)
         .build()
         .unwrap()

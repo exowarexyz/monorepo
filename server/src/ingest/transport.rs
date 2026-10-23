@@ -3,22 +3,174 @@ use std::{
     future::Future,
     io,
     pin::Pin,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
     task::{Context, Poll},
+    time::Duration,
 };
 
 use axum::{body::Body, serve::Listener};
+use bytes::Buf as _;
 use http::{Request, Response, Version};
 use http_body::Body as _;
-use hyper_util::{rt::TokioIo, server::conn::auto::Builder, service::TowerToHyperService};
+use hyper::service::service_fn;
+use hyper_util::{rt::TokioIo, server::conn::auto::Builder};
 use tokio::{sync::watch, task::JoinSet, time::Instant};
-use tower::{service_fn, Service, ServiceExt};
+use tower::{Service, ServiceExt};
 
 tokio::task_local! {
     static STREAM_DEADLINE: watch::Sender<Option<Instant>>;
+    static CURRENT_REQUEST: StreamWatchdog;
 }
+
+/// How long a stalled response may outlive the bound that ended its subscription.
+///
+/// A responsive peer receives the terminal error well inside this window. A
+/// peer that withholds flow-control credit or stops reading is cut off when it
+/// elapses, so termination is bounded by the bound plus this grace period and
+/// not by the bound alone.
+pub(crate) const STALLED_RESPONSE_GRACE: Duration = Duration::from_secs(2);
 
 #[derive(Clone, Copy)]
 struct StreamExecutor;
+
+/// Cuts off the response of one request when its peer stops draining it.
+///
+/// Hyper stops polling a response body while the peer withholds output
+/// capacity, so termination for a streaming response cannot rely on the body
+/// being polled. The watchdog instead shortens the deadline owned by the
+/// per-stream executor task for HTTP/2, which drops only that response, and arms
+/// the connection deadline for HTTP/1, which has no other streams to protect.
+#[derive(Clone, Debug)]
+pub(crate) struct StreamWatchdog {
+    control: ConnectionControl,
+    stream_deadline: Option<watch::Sender<Option<Instant>>>,
+    version: Version,
+    request: u64,
+    supervised: Arc<AtomicBool>,
+    terminating: Arc<AtomicBool>,
+}
+
+impl StreamWatchdog {
+    pub(crate) fn current() -> Option<Self> {
+        CURRENT_REQUEST.try_with(Clone::clone).ok()
+    }
+
+    pub(crate) fn mark_supervised(&self) {
+        self.supervised.store(true, Ordering::Release);
+        self.control.mark_supervised();
+    }
+
+    /// Cuts the response off after the grace period unless it completes first.
+    ///
+    /// Both the stream and its supervisor call this when a bound fires, and the
+    /// earliest deadline wins. The stream cannot rely on the supervisor alone
+    /// because it may finish and drop it first. Termination also makes the
+    /// response body hold its final byte back. Hyper queues a whole chunk once
+    /// one byte of credit exists and may then finish the response, so holding
+    /// the last byte back keeps the stream task alive until every earlier byte
+    /// fits in the peer window and the deadline still covers the terminal
+    /// envelope.
+    pub(crate) fn cancel_after_grace(&self) {
+        self.terminating.store(true, Ordering::Release);
+        let deadline = Instant::now() + STALLED_RESPONSE_GRACE;
+        match &self.stream_deadline {
+            Some(sender) => {
+                sender.send_if_modified(|current| {
+                    if current.is_some_and(|current| current <= deadline) {
+                        return false;
+                    }
+                    *current = Some(deadline);
+                    true
+                });
+            }
+            None => self
+                .control
+                .arm_watchdog(self.version, deadline, self.request),
+        }
+    }
+}
+
+pin_project_lite::pin_project! {
+    // Streaming responses that opted in keep their final byte back once
+    // terminating. Every other response passes through untouched.
+    struct ResponseBody<B> {
+        #[pin]
+        inner: B,
+        _request: RequestGuard,
+        supervised: bool,
+        terminating: Arc<AtomicBool>,
+        tail: Option<bytes::Bytes>,
+    }
+}
+
+impl<B> http_body::Body for ResponseBody<B>
+where
+    B: http_body::Body,
+{
+    type Data = bytes::Bytes;
+    type Error = B::Error;
+
+    fn poll_frame(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<http_body::Frame<Self::Data>, Self::Error>>> {
+        let this = self.project();
+        if let Some(tail) = this.tail.take() {
+            return Poll::Ready(Some(Ok(http_body::Frame::data(tail))));
+        }
+        let frame = match std::task::ready!(this.inner.poll_frame(cx)) {
+            Some(Ok(frame)) => frame,
+            Some(Err(error)) => return Poll::Ready(Some(Err(error))),
+            None => return Poll::Ready(None),
+        };
+        let split = *this.supervised && this.terminating.load(Ordering::Acquire);
+        let frame = frame.map_data(|mut data| {
+            let length = data.remaining();
+            if split && length > 1 {
+                let prefix = data.copy_to_bytes(length - 1);
+                *this.tail = Some(data.copy_to_bytes(1));
+                prefix
+            } else {
+                data.copy_to_bytes(length)
+            }
+        });
+        Poll::Ready(Some(Ok(frame)))
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.tail.is_none() && self.inner.is_end_stream()
+    }
+
+    fn size_hint(&self) -> http_body::SizeHint {
+        self.inner.size_hint()
+    }
+}
+
+/// Reports that the server has begun shutting down.
+///
+/// `serve` inserts one into the extensions of every request. Streaming handlers
+/// pass [Self::closed] to `bound_subscription` so open subscriptions end with
+/// `UNAVAILABLE` instead of holding the graceful connection drain open.
+#[derive(Clone, Debug)]
+pub struct ShutdownSignal {
+    started: watch::Receiver<bool>,
+}
+
+impl ShutdownSignal {
+    /// Completes once shutdown has started, immediately if it already has.
+    ///
+    /// A dropped server also counts as shutdown, so a handler can never wait on a
+    /// transport that no longer exists.
+    pub fn closed(self) -> impl Future<Output = ()> + Send + 'static {
+        let mut started = self.started;
+        async move {
+            let _ = started.wait_for(|started| *started).await;
+        }
+    }
+}
 
 // Release the upload timer before backend work can reach the same deadline.
 struct UploadBody {
@@ -203,19 +355,80 @@ struct Arm {
 #[derive(Clone, Copy, Debug, Default)]
 struct State {
     next: u64,
+    request: u64,
     active: Option<Arm>,
+    watchdog: Option<u64>,
 }
 
 /// Controls termination of the connection that carried a request.
 #[derive(Clone, Debug)]
 pub struct ConnectionControl {
     state: watch::Sender<State>,
+    activity: watch::Sender<Activity>,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct Activity {
+    in_flight: usize,
+    supervised: bool,
+}
+
+// Counts requests until their response body is dropped, which Hyper does once
+// the body has been handed to the connection. A nonzero count means a stream
+// task still owns its response.
+struct RequestGuard(watch::Sender<Activity>);
+
+impl Drop for RequestGuard {
+    fn drop(&mut self) {
+        self.0.send_modify(|activity| activity.in_flight -= 1);
+    }
 }
 
 impl ConnectionControl {
     fn new() -> Self {
         let (state, _) = watch::channel(State::default());
-        Self { state }
+        let (activity, _) = watch::channel(Activity::default());
+        Self { state, activity }
+    }
+
+    fn begin_request(&self) -> RequestGuard {
+        self.activity
+            .send_modify(|activity| activity.in_flight += 1);
+        RequestGuard(self.activity.clone())
+    }
+
+    fn mark_supervised(&self) {
+        self.activity
+            .send_if_modified(|activity| !std::mem::replace(&mut activity.supervised, true));
+    }
+
+    // After a bounded subscription's stream task has finished, queued response
+    // bytes can still wait on a peer that stopped reading, with no deadline left
+    // to cancel them. This completes once such a connection has had no request
+    // in flight for the grace period. Connections that never carried a bounded
+    // subscription are left to drain as long as their requests need.
+    async fn flush_stalled(&self, grace: Duration) {
+        let mut activity = self.activity.subscribe();
+        let idle = |activity: &Activity| activity.supervised && activity.in_flight == 0;
+        loop {
+            let now_idle = idle(&activity.borrow_and_update());
+            if now_idle {
+                tokio::select! {
+                    _ = tokio::time::sleep(grace) => {
+                        if idle(&activity.borrow()) {
+                            return;
+                        }
+                    }
+                    changed = activity.changed() => {
+                        if changed.is_err() {
+                            return;
+                        }
+                    }
+                }
+            } else if activity.changed().await.is_err() {
+                return;
+            }
+        }
     }
 
     /// Arms an HTTP/1 connection with an absolute request deadline.
@@ -266,6 +479,51 @@ impl ConnectionControl {
         self.shorten(id, Instant::now())
     }
 
+    // An HTTP/1 connection carries one response at a time, so closing it cuts
+    // off only the stalled subscription. An armed upload deadline already
+    // bounds the connection, so it is left alone.
+    //
+    // The request number keeps a late arm from a finished response off its
+    // successor, because the next request on the connection advances it.
+    fn arm_watchdog(&self, version: Version, deadline: Instant, request: u64) {
+        if !matches!(version, Version::HTTP_10 | Version::HTTP_11) {
+            return;
+        }
+
+        self.state.send_if_modified(|state| {
+            if state.request != request || state.active.is_some() {
+                return false;
+            }
+            state.next = state
+                .next
+                .checked_add(1)
+                .expect("connection generation exhausted");
+            state.watchdog = Some(state.next);
+            state.active = Some(Arm {
+                id: state.next,
+                deadline,
+            });
+            true
+        });
+    }
+
+    // Hyper reads the next HTTP/1 request only after the previous response is
+    // written, so a new request proves the watched response completed and
+    // retires its watchdog arm.
+    fn start_request(&self) -> u64 {
+        let mut request = 0;
+        self.state.send_modify(|state| {
+            state.request += 1;
+            request = state.request;
+            if let Some(id) = state.watchdog.take() {
+                if state.active.is_some_and(|arm| arm.id == id) {
+                    state.active = None;
+                }
+            }
+        });
+        request
+    }
+
     fn shorten(&self, id: u64, deadline: Instant) -> bool {
         self.state.send_if_modified(|state| {
             if let Some(arm) = &mut state.active {
@@ -301,6 +559,19 @@ impl ConnectionControl {
 }
 
 /// Serves requests with connection control in their extensions and drains connections on shutdown.
+///
+/// Shutdown first signals every in-flight request through [ShutdownSignal] and
+/// then lets connections finish gracefully, however long their requests take.
+///
+/// Hyper stops polling a response body while the peer withholds output
+/// capacity, so a bounded subscription also arms a watchdog. A subscription
+/// whose bound fires, or that ends early, is reset after a fixed two second
+/// grace period if its peer has not drained the terminal error. Only the
+/// stalled response is dropped on HTTP/2, while HTTP/1 closes its single
+/// connection. A connection that carried a bounded subscription is also closed
+/// once shutdown has begun and it has had no request in flight for that grace
+/// period, which bounds output blocked in TCP. Connections without bounded
+/// subscriptions drain as long as their requests need.
 pub async fn serve<L, S, B, F>(mut listener: L, service: S, shutdown: F) -> io::Result<()>
 where
     L: Listener,
@@ -325,13 +596,46 @@ where
                 let control = ConnectionControl::new();
                 let requests = control.clone();
                 let service = service.clone();
+                let signal = ShutdownSignal { started: shutdown_rx.clone() };
                 let service = service_fn(move |request: Request<hyper::body::Incoming>| {
                     let service = service.clone();
                     let control = requests.clone();
+                    let signal = signal.clone();
+
+                    // Counting happens when Hyper invokes this closure. The closure
+                    // is handed to Hyper directly, because the Tower adapter only
+                    // calls the inner service on the first poll, which would leave
+                    // a queued stream task uncounted by the shutdown drain fallback.
+                    let version = request.version();
+                    let request_number = control.start_request();
+                    let request_guard = control.begin_request();
                     async move {
                         let mut request = request.map(Body::new);
-                        request.extensions_mut().insert(control);
-                        service.oneshot(request).await
+                        request.extensions_mut().insert(control.clone());
+                        request.extensions_mut().insert(signal);
+                        let watchdog = StreamWatchdog {
+                            control,
+                            stream_deadline: STREAM_DEADLINE
+                                .try_with(Clone::clone)
+                                .ok()
+                                .filter(|_| version == Version::HTTP_2),
+                            version,
+                            request: request_number,
+                            supervised: Arc::new(AtomicBool::new(false)),
+                            terminating: Arc::new(AtomicBool::new(false)),
+                        };
+                        let result = CURRENT_REQUEST
+                            .scope(watchdog.clone(), service.oneshot(request))
+                            .await;
+                        result.map(|response| {
+                            response.map(|inner| ResponseBody {
+                                inner,
+                                _request: request_guard,
+                                supervised: watchdog.supervised.load(Ordering::Acquire),
+                                terminating: watchdog.terminating.clone(),
+                                tail: None,
+                            })
+                        })
                     }
                 });
                 let mut shutdown = shutdown_rx.clone();
@@ -340,10 +644,8 @@ where
                 connections.spawn(async move {
                     let mut builder = Builder::new(StreamExecutor);
                     builder.http2().enable_connect_protocol();
-                    let connection = builder.serve_connection_with_upgrades(
-                        TokioIo::new(io),
-                        TowerToHyperService::new(service),
-                    );
+                    let connection =
+                        builder.serve_connection_with_upgrades(TokioIo::new(io), service);
                     tokio::pin!(connection);
                     tokio::select! {
                         _ = control.cancelled() => {}
@@ -353,6 +655,7 @@ where
                             tokio::select! {
                                 _ = control.cancelled() => {}
                                 _ = &mut connection => {}
+                                _ = control.flush_stalled(STALLED_RESPONSE_GRACE) => {}
                             }
                         }
                     }
@@ -423,5 +726,21 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(2), control.cancelled())
             .await
             .expect("unfinished upload must retain its connection deadline");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stale_watchdog_arm_cannot_target_a_successor_request() {
+        let control = ConnectionControl::new();
+        let first = control.start_request();
+        let second = control.start_request();
+        let deadline = Instant::now() + Duration::from_secs(1);
+
+        control.arm_watchdog(Version::HTTP_11, deadline, first);
+        assert!(control.state.borrow().active.is_none());
+
+        control.arm_watchdog(Version::HTTP_11, deadline, second);
+        assert!(control.state.borrow().active.is_some());
+        control.start_request();
+        assert!(control.state.borrow().active.is_none());
     }
 }

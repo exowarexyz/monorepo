@@ -1,9 +1,10 @@
-import { create, type MessageInitShape } from '@bufbuild/protobuf';
+import { clone, create, type MessageInitShape } from '@bufbuild/protobuf';
 import { Code, ConnectError } from '@connectrpc/connect';
 import type { CallOptions } from '@connectrpc/connect';
 import type { Client } from './client.js';
 import { credentialRemedy, withoutHtmlBody, type Credential } from './credential.js';
 import { HttpError } from './error.js';
+import { resumableSubscription } from './subscription.js';
 import { PruneRequestSchema } from './gen/ts/store/v1/prune_pb.js';
 import type { Policy } from './gen/ts/store/v1/prune_pb.js';
 import {
@@ -678,32 +679,49 @@ export interface SubscribeFilters {
     sinceSequenceNumber?: bigint;
 }
 
-async function* performSubscribe(
+function performSubscribe(
     client: Client,
     filters: SubscribeFilters,
     prefix?: StoreKeyPrefix,
     options?: CallOptions,
-): AsyncIterable<StoreBatch> {
+    observe?: (sequence: bigint) => void,
+): AsyncIterableIterator<StoreBatch> {
     const prefixed = prefixSubscribeFilters(filters, prefix);
-    const req = create(SubscribeRequestSchema, {
+    const req = clone(SubscribeRequestSchema, create(SubscribeRequestSchema, {
         selectors: prefixed.selectors,
         valueFilters: prefixed.valueFilters ?? [],
         ...(prefixed.sinceSequenceNumber !== undefined
             ? { sinceSequenceNumber: prefixed.sinceSequenceNumber }
             : {}),
-    });
-    try {
-        const stream = client.stream.subscribe(req, options);
-        for await (const frame of stream) {
+    }));
+    const stream = resumableSubscription(
+        (since, callOptions) => {
+            const attempt = clone(SubscribeRequestSchema, req);
+            attempt.sinceSequenceNumber = since;
+            return client.stream.subscribe(attempt, callOptions);
+        },
+        prefixed.sinceSequenceNumber,
+        client.subscriptionRetry,
+        options,
+        (frame) => {
             const batch = toStoreBatch(frame, prefix);
-            if (batch.entries.length === 0) {
-                continue;
+            if (batch.entries.length === 0) return undefined;
+            observe?.(batch.sequenceNumber);
+            return batch;
+        },
+    );
+    return {
+        [Symbol.asyncIterator]() { return this; },
+        next: async () => {
+            try {
+                return await stream.next();
+            } catch (error) {
+                mapConnectToHttpError(error, client.credential);
             }
-            yield batch;
-        }
-    } catch (e) {
-        mapConnectToHttpError(e, client.credential);
-    }
+        },
+        return: () => stream.return!(),
+        throw: (error?: unknown) => stream.throw!(error),
+    };
 }
 
 type ReadPolicy = 'fixed' | 'monotonic';
@@ -902,19 +920,17 @@ export class ReadSession {
     }
 
     /** Subscribe to log batches, recording each batch's sequence before delivery. */
-    async *subscribe(
+    subscribe(
         filters: SubscribeFilters,
         options?: CallOptions,
-    ): AsyncIterable<StoreBatch> {
-        for await (const batch of performSubscribe(
+    ): AsyncIterableIterator<StoreBatch> {
+        return performSubscribe(
             this.client,
             filters,
             this.keyPrefix,
             options,
-        )) {
-            this.observeSequence(batch.sequenceNumber);
-            yield batch;
-        }
+            (sequence) => this.observeSequence(sequence),
+        );
     }
 }
 
@@ -1061,10 +1077,10 @@ export class StoreClient {
         return performGetBatch(this.client, sequenceNumber, this.keyPrefix, options);
     }
 
-    async *subscribe(
+    subscribe(
         filters: SubscribeFilters,
         options?: CallOptions,
-    ): AsyncIterable<StoreBatch> {
-        yield* performSubscribe(this.client, filters, this.keyPrefix, options);
+    ): AsyncIterableIterator<StoreBatch> {
+        return performSubscribe(this.client, filters, this.keyPrefix, options);
     }
 }

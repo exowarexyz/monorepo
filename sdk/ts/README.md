@@ -126,6 +126,46 @@ sessions record them and retain their configured floor.
 
 `createSession()` and `createSessionWithSequence(...)` create monotonic sessions.
 
+## Subscriptions
+
+`store.subscribe(filters, options)` automatically resumes after transient failures.
+The cursor tracks every server frame, including empty checkpoints, and reconnects
+with the same filters starting at the next sequence. Empty frames are omitted from
+the iterator and do not advance read session observations.
+
+Configure subscription retries separately from ordinary request retries.
+
+```ts
+const client = new Client(baseUrl, {
+    subscriptionRetry: {
+        budgetMs: 60_000,
+        initialBackoffMs: 100,
+        maxBackoffMs: 2_000,
+    },
+});
+```
+
+These are the defaults. Delays use exponential backoff with uniform jitter between
+50 and 100 percent of the capped delay. The budget covers the initial connection
+until its first frame and each subsequent outage, including sleeps and stalled
+reconnects. Every frame received within it resets it. Set `budgetMs: null` to retry without a
+time limit, or `enabled: false` to disable resuming and retain ordinary stream close
+behavior.
+
+A live subscription that fails before its first checkpoint returns an error.
+It cannot safely reconnect without a cursor. A nonzero `sinceSequenceNumber`
+provides a safe replay cursor even when the first connection fails.
+Authentication errors, invalid filters, and evicted cursors fail immediately.
+Internal server errors are retried within the budget, so a persistent internal
+error can exhaust the budget. Because every frame resets the budget, a server that
+repeatedly sends a checkpoint before returning an internal error can keep
+reconnecting under a bounded policy.
+
+Subscriptions ignore `CallOptions.timeoutMs` because a Connect timeout
+also limits the lifetime of a healthy stream. Use `CallOptions.signal` to cancel.
+Cancellation interrupts connections and retry sleeps. Breaking a `for await` loop
+or calling the iterator's `return()` closes the active connection.
+
 ## Generated TypeScript (`gen/ts`)
 
 Protobuf-ES output lives under **`src/gen/ts/`** (mirrors the repo [`proto/`](../../proto/) tree, e.g. `proto/store/v1/query.proto` → `src/gen/ts/store/v1/query_pb.ts`). To regenerate after proto changes, run `../../gen.sh` from the repo root.

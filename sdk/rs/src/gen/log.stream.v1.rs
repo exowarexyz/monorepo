@@ -34,11 +34,13 @@ pub struct SubscribeRequest {
     >,
     /// Optional replay cursor.
     ///
-    /// Unset / 0 -\> subscription starts from the next live batch; no replay.
+    /// Unset / 0 starts from the next live batch without replay. The initial empty
+    /// frame carries the current published sequence.
     ///
     /// Set to N -\> the server first replays every retained batch with
     /// `sequence_number >= N` in ascending order, then transitions seamlessly
-    /// into the live stream. If `N` references a sequence number that has been
+    /// into the live stream. The initial empty frame carries N - 1. A future N
+    /// waits until that sequence is published. If `N` references a sequence that has been
     /// evicted from the log, the server returns OUT_OF_RANGE with an
     /// `ErrorInfo { reason: "BATCH_EVICTED", metadata: { "oldest_retained": ... } }`
     /// detail so callers can decide how to proceed.
@@ -367,10 +369,11 @@ pub const __GET_REQUEST_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa
     from_json: ::buffa::type_registry::any_from_json::<GetRequest>,
     is_wkt: false,
 };
-/// One item delivered on a `Subscribe` stream: all rows from a single atomic
-/// `Put` batch that matched the subscriber's filter. Live and replayed frames
-/// are indistinguishable by content; only the observed `sequence_number`
-/// (strictly monotonically increasing either way) differs.
+/// An empty initial checkpoint or the matching rows from one atomic `Put` batch.
+/// The checkpoint establishes where replay can safely resume even when no batch
+/// matches the filters. It does not report the sequence of an evaluated query.
+/// Subsequent batch sequences increase strictly from the checkpoint. Live and
+/// replayed batches have the same shape.
 #[derive(Clone, PartialEq, Default)]
 #[derive(::serde::Serialize, ::serde::Deserialize)]
 #[serde(default)]
@@ -749,11 +752,13 @@ pub mod __buffa {
             >,
             /// Optional replay cursor.
             ///
-            /// Unset / 0 -\> subscription starts from the next live batch; no replay.
+            /// Unset / 0 starts from the next live batch without replay. The initial empty
+            /// frame carries the current published sequence.
             ///
             /// Set to N -\> the server first replays every retained batch with
             /// `sequence_number >= N` in ascending order, then transitions seamlessly
-            /// into the live stream. If `N` references a sequence number that has been
+            /// into the live stream. The initial empty frame carries N - 1. A future N
+            /// waits until that sequence is published. If `N` references a sequence that has been
             /// evicted from the log, the server returns OUT_OF_RANGE with an
             /// `ErrorInfo { reason: "BATCH_EVICTED", metadata: { "oldest_retained": ... } }`
             /// detail so callers can decide how to proceed.
@@ -1109,11 +1114,13 @@ pub mod __buffa {
             }
             /// Optional replay cursor.
             ///
-            /// Unset / 0 -\> subscription starts from the next live batch; no replay.
+            /// Unset / 0 starts from the next live batch without replay. The initial empty
+            /// frame carries the current published sequence.
             ///
             /// Set to N -\> the server first replays every retained batch with
             /// `sequence_number >= N` in ascending order, then transitions seamlessly
-            /// into the live stream. If `N` references a sequence number that has been
+            /// into the live stream. The initial empty frame carries N - 1. A future N
+            /// waits until that sequence is published. If `N` references a sequence that has been
             /// evicted from the log, the server returns OUT_OF_RANGE with an
             /// `ErrorInfo { reason: "BATCH_EVICTED", metadata: { "oldest_retained": ... } }`
             /// detail so callers can decide how to proceed.
@@ -1415,10 +1422,11 @@ pub mod __buffa {
                 ::serde::Serialize::serialize(&self.0, __s)
             }
         }
-        /// One item delivered on a `Subscribe` stream: all rows from a single atomic
-        /// `Put` batch that matched the subscriber's filter. Live and replayed frames
-        /// are indistinguishable by content; only the observed `sequence_number`
-        /// (strictly monotonically increasing either way) differs.
+        /// An empty initial checkpoint or the matching rows from one atomic `Put` batch.
+        /// The checkpoint establishes where replay can safely resume even when no batch
+        /// matches the filters. It does not report the sequence of an evaluated query.
+        /// Subsequent batch sequences increase strictly from the checkpoint. Live and
+        /// replayed batches have the same shape.
         #[derive(Clone, Debug, Default)]
         pub struct SubscribeResponseView<'a> {
             /// Field 1: `sequence_number`
@@ -2195,9 +2203,11 @@ pub const SERVICE_GET_SPEC: ::connectrpc::Spec = ::connectrpc::Spec::server(
     .with_idempotency_level(::connectrpc::IdempotencyLevel::Unknown);
 /// Push-based subscription + point-lookup over the store's log.
 ///
-/// `Subscribe` delivers a `SubscribeResponse` per atomic `Put` batch whose
-/// entries match any of the subscriber's `selectors`. Optional
+/// `Subscribe` first delivers an empty checkpoint frame, then one response per
+/// atomic `Put` batch whose entries match the subscriber's filters. Optional
 /// `since_sequence_number` replays retained batches before transitioning live.
+/// A client can resume after a close or transient error from one past its highest
+/// received sequence, including empty frames. UNAVAILABLE requests a reconnect.
 ///
 /// `Get` returns the complete batch at a given sequence number (no filter
 /// applied server-side). `SubscribeResponse` and `GetResponse` carry the

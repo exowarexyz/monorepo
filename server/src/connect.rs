@@ -4,6 +4,7 @@
 #![allow(refining_impl_trait)]
 
 use std::collections::HashMap;
+use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::AtomicBool;
 #[cfg(test)]
@@ -52,8 +53,10 @@ use exoware_sdk::selector::Selector;
 use futures::{stream as stream_util, Stream, StreamExt};
 use tokio::sync::Notify;
 
+use crate::ingest::transport::ShutdownSignal;
 use crate::reduce::{decode_group, execute_reduce, RangeError, ReduceExecution, REDUCE_BATCH_ROWS};
 use crate::stream::{StreamHub, StreamNotifier};
+use crate::subscription::{bound_subscription, SubscriptionLifetime};
 use crate::validate::{self, IngestLimits};
 use crate::{
     FilteredBatch, Ingest, IngestError, Log, LogBatch, Prune, Query, QueryExtra, RangeScan,
@@ -190,6 +193,8 @@ pub struct AppState<E> {
     pub ready: Arc<AtomicBool>,
     /// Shared fan-out hub for `log.stream.v1.Subscribe`.
     pub stream: Arc<StreamHub>,
+    /// Maximum lifetime applied to each `log.stream.v1.Subscribe` stream.
+    pub subscription_lifetime: SubscriptionLifetime,
 }
 
 impl<E> Clone for AppState<E> {
@@ -200,6 +205,7 @@ impl<E> Clone for AppState<E> {
             put_config: self.put_config.clone(),
             ready: self.ready.clone(),
             stream: self.stream.clone(),
+            subscription_lifetime: self.subscription_lifetime,
         }
     }
 }
@@ -216,6 +222,7 @@ where
             put_config: crate::ingest::service::PutConfig::default(),
             ready: Arc::new(AtomicBool::new(true)),
             stream: Arc::new(StreamHub::new(current_sequence)),
+            subscription_lifetime: SubscriptionLifetime::unbounded(),
         }
     }
 
@@ -225,6 +232,11 @@ where
     }
     pub fn with_put_config(mut self, config: crate::ingest::service::PutConfig) -> Self {
         self.put_config = config;
+        self
+    }
+
+    pub fn with_subscription_lifetime(mut self, lifetime: SubscriptionLifetime) -> Self {
+        self.subscription_lifetime = lifetime;
         self
     }
 }
@@ -416,6 +428,8 @@ pub struct StreamState<L> {
     pub log: Arc<L>,
     /// In-process notifier used to wake subscribers after new batches commit.
     pub notifier: Arc<dyn StreamNotifier>,
+    /// Maximum lifetime applied to each subscription.
+    pub subscription_lifetime: SubscriptionLifetime,
 }
 
 impl<L> Clone for StreamState<L> {
@@ -423,6 +437,7 @@ impl<L> Clone for StreamState<L> {
         Self {
             log: self.log.clone(),
             notifier: self.notifier.clone(),
+            subscription_lifetime: self.subscription_lifetime,
         }
     }
 }
@@ -432,7 +447,16 @@ where
     L: Log,
 {
     pub fn new(log: Arc<L>, notifier: Arc<dyn StreamNotifier>) -> Self {
-        Self { log, notifier }
+        Self {
+            log,
+            notifier,
+            subscription_lifetime: SubscriptionLifetime::unbounded(),
+        }
+    }
+
+    pub fn with_subscription_lifetime(mut self, lifetime: SubscriptionLifetime) -> Self {
+        self.subscription_lifetime = lifetime;
+        self
     }
 }
 
@@ -441,6 +465,7 @@ impl<E> From<AppState<E>> for StreamState<E> {
         Self {
             log: state.engine,
             notifier: state.stream,
+            subscription_lifetime: state.subscription_lifetime,
         }
     }
 }
@@ -873,7 +898,6 @@ type OrderedBatchStream =
 fn ordered_batch_stream<B, S>(
     log: Arc<B>,
     sequences: S,
-    mut first_batch: Option<FilteredBatch>,
     matchers: Arc<crate::stream::CompiledMatchers>,
 ) -> OrderedBatchStream
 where
@@ -884,19 +908,11 @@ where
         sequences
             .map(move |sequence_number| {
                 let log = log.clone();
-                // The sequence stream is consumed in order, so only the first
-                // closure invocation observes the eagerly fetched batch and it
-                // pairs with the first sequence.
-                let first_batch = first_batch.take();
                 let matchers = matchers.clone();
                 async move {
-                    let batch = match first_batch {
-                        Some(batch) => Ok(Some(batch)),
-                        None => {
-                            log.get_batch_filtered(sequence_number, matchers.as_ref())
-                                .await
-                        }
-                    };
+                    let batch = log
+                        .get_batch_filtered(sequence_number, matchers.as_ref())
+                        .await;
                     (sequence_number, batch)
                 }
             })
@@ -945,6 +961,9 @@ enum ReplayProgress {
 
 struct SubscriptionState<B> {
     state: StreamState<B>,
+    // The opening frame is empty and only tells the client where to resume,
+    // so it is emitted before any batch read can stall or fail.
+    checkpoint: Option<u64>,
     // Both streams are dropped at termination so buffered batches free at the
     // failure boundary instead of when the client tears the stream down.
     replay: Option<ReplayState>,
@@ -956,9 +975,15 @@ impl<B> SubscriptionState<B>
 where
     B: Log,
 {
-    fn new(state: StreamState<B>, replay: Option<ReplayState>, live: OrderedBatchStream) -> Self {
+    fn new(
+        state: StreamState<B>,
+        checkpoint: u64,
+        replay: Option<ReplayState>,
+        live: OrderedBatchStream,
+    ) -> Self {
         Self {
             state,
+            checkpoint: Some(checkpoint),
             replay,
             live: Some(live),
             terminated: false,
@@ -972,6 +997,19 @@ where
             loop {
                 if state.terminated {
                     return None;
+                }
+
+                // Batches that match nothing produce no frame, so a long scan of
+                // ready batches would otherwise never leave this poll. Spending
+                // budget lets the scheduler and the bounds around this stream run.
+                tokio::task::coop::consume_budget().await;
+
+                if let Some(sequence_number) = state.checkpoint.take() {
+                    let frame = SubscribeResponse {
+                        sequence_number,
+                        ..Default::default()
+                    };
+                    return Some((Ok(frame), state));
                 }
 
                 if state.replay.is_some() {
@@ -1082,11 +1120,11 @@ where
 {
     async fn subscribe(
         &self,
-        _ctx: Context,
+        ctx: Context,
         request: ServiceRequest<'_, exoware_proto::log::stream::v1::SubscribeRequest>,
     ) -> connectrpc::ServiceResult<connectrpc::ServiceStream<SubscribeResponse>> {
         let filter = domain_filter_from_subscribe_view(request.view())?;
-        let since = request.since_sequence_number;
+        let since = request.since_sequence_number.filter(|since| *since > 0);
 
         // Snapshot the published frontier to bound replay and subscribe for
         // live wakeups. Bounded lookahead overlaps log reads while retaining
@@ -1096,53 +1134,52 @@ where
         let replay_bound = subscription.current_sequence;
         let live_notify = subscription.notify;
 
-        // Optional replay. The starting batch is read and filtered eagerly, so
-        // an already-evicted cursor and a first batch that fails to decode both
-        // fail the RPC at setup. Later replay holes and decode failures surface
-        // on the established stream itself so callers reconnect from a safe
-        // point instead of silently continuing.
+        // Replay reads, including the first, run inside the returned stream.
+        // The opening checkpoint is therefore never delayed by a slow backend,
+        // and the lifetime and close bounds cover every backend await. An
+        // evicted cursor or a batch that fails to decode ends the established
+        // stream so callers reconnect from a safe point.
         let replay = match since {
-            Some(s) if s <= replay_bound && s > 0 => {
-                let first_batch = self
-                    .state
-                    .log
-                    .get_batch_filtered(s, matchers.as_ref())
-                    .await
-                    .map_err(ConnectError::internal)?;
-                let Some(first_batch) = first_batch else {
-                    let oldest = self
-                        .state
-                        .log
-                        .oldest_retained_batch()
-                        .await
-                        .map_err(ConnectError::internal)?;
-                    return Err(self.batch_evicted_error(oldest));
-                };
-                Some(ReplayState {
-                    batches: ordered_batch_stream(
-                        self.state.log.clone(),
-                        stream_util::iter(s..=replay_bound),
-                        Some(first_batch),
-                        matchers.clone(),
-                    ),
-                })
-            }
+            Some(s) if s <= replay_bound => Some(ReplayState {
+                batches: ordered_batch_stream(
+                    self.state.log.clone(),
+                    stream_util::iter(s..=replay_bound),
+                    matchers.clone(),
+                ),
+            }),
             _ => None,
         };
+
+        // Clients resume at the checkpoint plus one. An explicit cursor keeps
+        // its own position even when this instance lags behind it, so the
+        // checkpoint can never skip batches that are not yet delivered. Live
+        // delivery starts at the cursor for the same reason.
+        let checkpoint = since.map_or(replay_bound, |since| since - 1);
         let live = ordered_batch_stream(
             self.state.log.clone(),
             live_sequence_stream(
                 self.state.notifier.clone(),
                 live_notify,
-                replay_bound.checked_add(1),
+                replay_bound.max(checkpoint).checked_add(1),
             ),
-            None,
             matchers,
         );
 
-        Ok(connectrpc::Response::stream(
-            SubscriptionState::new(self.state.clone(), replay, live).into_stream(),
-        ))
+        // Without a transport signal the subscription only ends by lifetime,
+        // failure, or client cancellation.
+        let close: Pin<Box<dyn Future<Output = ()> + Send>> =
+            match ctx.extensions().get::<ShutdownSignal>() {
+                Some(signal) => Box::pin(signal.clone().closed()),
+                None => Box::pin(std::future::pending()),
+            };
+        let stream =
+            SubscriptionState::new(self.state.clone(), checkpoint, replay, live).into_stream();
+
+        Ok(connectrpc::Response::stream(bound_subscription(
+            stream,
+            self.state.subscription_lifetime,
+            close,
+        )))
     }
 
     async fn get(
@@ -2290,7 +2327,7 @@ mod tests {
             .expect("decode prune request")
     }
 
-    async fn subscribe_stream<B>(
+    async fn subscribe_stream_with_checkpoint<B>(
         connect: &StreamConnect<B>,
         since_sequence_number: Option<u64>,
     ) -> Result<
@@ -2307,6 +2344,42 @@ mod tests {
         Ok(StreamApi::subscribe(connect, Context::default(), request)
             .await?
             .body)
+    }
+
+    async fn subscribe_stream<B>(
+        connect: &StreamConnect<B>,
+        since_sequence_number: Option<u64>,
+    ) -> Result<
+        Pin<Box<dyn Stream<Item = Result<SubscribeResponse, ConnectError>> + Send>>,
+        ConnectError,
+    >
+    where
+        B: Log,
+    {
+        let mut stream = subscribe_stream_with_checkpoint(connect, since_sequence_number).await?;
+        let checkpoint = stream
+            .next()
+            .await
+            .expect("opening frame")
+            .expect("opening frame ok");
+        assert!(checkpoint.entries.is_empty());
+        Ok(stream)
+    }
+
+    async fn checkpoint_of<B>(connect: &StreamConnect<B>, since: Option<u64>) -> u64
+    where
+        B: Log,
+    {
+        let mut stream = subscribe_stream_with_checkpoint(connect, since)
+            .await
+            .expect("subscribe");
+        let frame = stream
+            .next()
+            .await
+            .expect("opening frame")
+            .expect("opening frame ok");
+        assert!(frame.entries.is_empty());
+        frame.sequence_number
     }
 
     async fn next_subscribe_frame(
@@ -3738,7 +3811,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn subscribe_since_evicted_batch_fails_setup_with_batch_evicted_metadata() {
+    async fn subscribe_since_evicted_batch_ends_stream_after_checkpoint_with_batch_evicted() {
         let engine = Arc::new(FakeEngine::default());
         engine.set_current_sequence(3);
         engine.set_oldest_retained(Some(2));
@@ -3746,9 +3819,14 @@ mod tests {
         engine.set_batch(3, Some(vec![matching_kv(b"replay", b"v3")]));
 
         let connect = StreamConnect::new(AppState::new(engine));
-        let Err(err) = subscribe_stream(&connect, Some(1)).await else {
-            panic!("evicted cursor must fail subscription setup");
-        };
+        let mut stream = subscribe_stream(&connect, Some(1))
+            .await
+            .expect("subscribe");
+        let err = stream
+            .next()
+            .await
+            .expect("error item")
+            .expect_err("evicted cursor must end the stream");
 
         assert_eq!(err.code, connectrpc::ErrorCode::OutOfRange);
         let decoded = decode_connect_error(&err).expect("decode connect error");
@@ -3763,7 +3841,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn malformed_first_replay_batch_fails_subscription_setup() {
+    async fn malformed_first_replay_batch_ends_stream_after_checkpoint() {
         let engine = Arc::new(MalformedLog {
             current_sequence: 2,
             malformed: 1,
@@ -3771,9 +3849,14 @@ mod tests {
         let notifier = Arc::new(ManualNotifier::new(2));
         let connect = StreamConnect::new(StreamState::new(engine, notifier));
 
-        let Err(err) = subscribe_stream(&connect, Some(1)).await else {
-            panic!("malformed first replay batch must fail setup");
-        };
+        let mut stream = subscribe_stream(&connect, Some(1))
+            .await
+            .expect("subscribe");
+        let err = stream
+            .next()
+            .await
+            .expect("error item")
+            .expect_err("malformed first replay batch must end the stream");
         assert_eq!(err.code, connectrpc::ErrorCode::Internal);
     }
 
@@ -3849,7 +3932,7 @@ mod tests {
             .await
             .expect("subscribe");
 
-        assert_eq!(engine.started_sequences(), vec![1]);
+        assert!(engine.started_sequences().is_empty());
 
         let (sender, mut frames) = tokio::sync::mpsc::unbounded_channel();
         let reader = tokio::spawn(async move {
@@ -4194,7 +4277,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn subscribe_past_end_reads_only_future_live_batches() {
+    async fn subscribe_past_end_waits_for_the_requested_sequence() {
         let engine = Arc::new(FakeEngine::default());
         engine.set_current_sequence(5);
         for seq in 1..=5 {
@@ -4213,15 +4296,100 @@ mod tests {
             "past-end cursor should not replay synthetic or historical frames",
         );
 
-        engine.publish_live(state.stream.clone(), 6, vec![matching_kv(b"live", b"n")]);
+        engine.publish_live(state.stream.clone(), 6, vec![matching_kv(b"early", b"e")]);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), stream.next())
+                .await
+                .is_err(),
+            "a lagging server must not deliver sequences below the cursor",
+        );
+
+        engine.publish_live(state.stream.clone(), 15, vec![matching_kv(b"live", b"n")]);
         let frame = tokio::time::timeout(Duration::from_secs(1), stream.next())
             .await
             .expect("stream should yield")
             .expect("frame should exist")
             .expect("frame should be ok");
-        assert_eq!(frame.sequence_number, 6);
+        assert_eq!(frame.sequence_number, 15);
         assert_eq!(frame.entries.len(), 1);
         assert_eq!(frame.entries[0].value.as_ref(), b"n");
+    }
+
+    #[tokio::test]
+    async fn opening_checkpoint_names_the_safe_resume_cursor() {
+        let engine = Arc::new(FakeEngine::default());
+        engine.set_current_sequence(5);
+        for seq in 1..=5 {
+            engine.set_batch(seq, Some(vec![matching_kv(b"seed", b"v")]));
+        }
+        let connect = StreamConnect::new(AppState::new(engine));
+
+        assert_eq!(checkpoint_of(&connect, None).await, 5);
+        assert_eq!(checkpoint_of(&connect, Some(0)).await, 5);
+        assert_eq!(checkpoint_of(&connect, Some(1)).await, 0);
+        assert_eq!(checkpoint_of(&connect, Some(3)).await, 2);
+        assert_eq!(checkpoint_of(&connect, Some(6)).await, 5);
+        assert_eq!(checkpoint_of(&connect, Some(15)).await, 14);
+    }
+
+    #[tokio::test]
+    async fn opening_checkpoint_on_an_empty_log_resumes_at_the_first_batch() {
+        let engine = Arc::new(FakeEngine::default());
+        let state = AppState::new(engine.clone());
+        let connect = StreamConnect::new(state.clone());
+        assert_eq!(checkpoint_of(&connect, None).await, 0);
+
+        let mut stream = subscribe_stream(&connect, None).await.expect("subscribe");
+        engine.publish_live(state.stream.clone(), 1, vec![matching_kv(b"hit", b"v")]);
+        let frame = tokio::time::timeout(Duration::from_secs(1), stream.next())
+            .await
+            .expect("stream should yield")
+            .expect("frame should exist")
+            .expect("frame should be ok");
+        assert_eq!(frame.sequence_number, 1);
+    }
+
+    #[tokio::test]
+    async fn opening_checkpoint_precedes_replay_without_advancing_past_it() {
+        let engine = Arc::new(FakeEngine::default());
+        engine.set_current_sequence(3);
+        for seq in 1..=3 {
+            engine.set_batch(seq, Some(vec![matching_kv(b"seed", &[seq as u8])]));
+        }
+        let connect = StreamConnect::new(AppState::new(engine));
+        let mut stream = subscribe_stream_with_checkpoint(&connect, Some(2))
+            .await
+            .expect("subscribe");
+
+        let mut observed = Vec::new();
+        for _ in 0..3 {
+            let frame = stream.next().await.expect("frame").expect("frame ok");
+            observed.push((frame.sequence_number, frame.entries.len()));
+        }
+        assert_eq!(observed, vec![(1, 0), (2, 1), (3, 1)]);
+    }
+
+    #[tokio::test]
+    async fn idle_subscription_ends_at_its_lifetime() {
+        let engine = Arc::new(FakeEngine::default());
+        let state = AppState::new(engine).with_subscription_lifetime(
+            SubscriptionLifetime::new(Duration::from_millis(150)).with_jitter_fraction(0.0),
+        );
+        let connect = StreamConnect::new(state);
+        let mut stream = subscribe_stream(&connect, None).await.expect("subscribe");
+
+        let error = tokio::time::timeout(Duration::from_secs(2), stream.next())
+            .await
+            .expect("stream should end")
+            .expect("error item")
+            .expect_err("lifetime must end the subscription");
+        assert_eq!(error.code, connectrpc::ErrorCode::Unavailable);
+        let decoded = decode_connect_error(&error).expect("decode connect error");
+        assert_eq!(
+            decoded.error_info.expect("error info").reason,
+            crate::REASON_SUBSCRIPTION_EXPIRED,
+        );
+        assert!(stream.next().await.is_none());
     }
 
     #[tokio::test]
@@ -4333,5 +4501,102 @@ mod tests {
         }
         let expected: Vec<u64> = (1..=(REPLAY_BATCHES * 2)).collect();
         assert_eq!(sequence_numbers, expected);
+    }
+
+    #[tokio::test]
+    async fn blocked_first_replay_read_still_yields_checkpoint_and_ends_at_lifetime() {
+        let engine = Arc::new(GatedLog::default());
+        engine.set_batch(1, vec![matching_kv(b"replay", b"v1")]);
+        engine.gate(1);
+        let notifier = Arc::new(ManualNotifier::new(1));
+        let state = StreamState::new(engine.clone(), notifier).with_subscription_lifetime(
+            SubscriptionLifetime::new(Duration::from_millis(150)).with_jitter_fraction(0.0),
+        );
+        let connect = StreamConnect::new(state);
+
+        let mut stream = tokio::time::timeout(
+            Duration::from_millis(100),
+            subscribe_stream_with_checkpoint(&connect, Some(1)),
+        )
+        .await
+        .expect("opening the stream must not wait on a backend read")
+        .expect("subscribe");
+        let checkpoint = tokio::time::timeout(Duration::from_millis(100), stream.next())
+            .await
+            .expect("checkpoint must not wait on a backend read")
+            .expect("opening frame")
+            .expect("opening frame ok");
+        assert_eq!(checkpoint.sequence_number, 0);
+
+        let error = tokio::time::timeout(Duration::from_secs(2), stream.next())
+            .await
+            .expect("lifetime must cover the stalled read")
+            .expect("error item")
+            .expect_err("lifetime must end the stream");
+        assert_eq!(error.code, connectrpc::ErrorCode::Unavailable);
+    }
+    // Each read is immediately ready and costs a little CPU, like a cached log
+    // whose batches match nothing until the last one.
+    struct BusyLog {
+        last: u64,
+        fail_last: bool,
+    }
+
+    impl Sequence for BusyLog {
+        fn current_sequence(&self) -> u64 {
+            self.last
+        }
+    }
+
+    impl Log for BusyLog {
+        async fn get_batch(&self, sequence_number: u64) -> Result<Option<LogBatch>, String> {
+            std::thread::sleep(Duration::from_millis(1));
+            if sequence_number == self.last && self.fail_last {
+                return Err("backend failed".to_owned());
+            }
+            let kv = if sequence_number == self.last {
+                matching_kv(b"last", b"v")
+            } else {
+                nonmatching_kv(b"skip", b"v")
+            };
+            Ok(Some(LogBatch::from_entries(sequence_number, vec![kv])))
+        }
+
+        async fn oldest_retained_batch(&self) -> Result<Option<u64>, String> {
+            Ok(Some(1))
+        }
+    }
+
+    // Wall-clock time is required here because the scan under test is CPU
+    // bound and a paused clock would never reach the deadline during it. The
+    // bound wins over a late frame and over a late backend error alike.
+    #[tokio::test]
+    async fn a_long_scan_of_nonmatching_batches_cannot_deliver_past_the_lifetime() {
+        for fail_last in [false, true] {
+            let engine = Arc::new(BusyLog {
+                last: 100,
+                fail_last,
+            });
+            let notifier = Arc::new(ManualNotifier::new(100));
+            let state = StreamState::new(engine, notifier).with_subscription_lifetime(
+                SubscriptionLifetime::new(Duration::from_millis(30)).with_jitter_fraction(0.0),
+            );
+            let connect = StreamConnect::new(state);
+            let mut stream = subscribe_stream(&connect, Some(1))
+                .await
+                .expect("subscribe");
+
+            let error = tokio::time::timeout(Duration::from_secs(5), stream.next())
+                .await
+                .expect("stream should yield")
+                .expect("item")
+                .expect_err("the last batch arrives after the lifetime and must not be reported");
+            assert_eq!(error.code, connectrpc::ErrorCode::Unavailable);
+            let decoded = decode_connect_error(&error).expect("decode connect error");
+            assert_eq!(
+                decoded.error_info.expect("error info").reason,
+                crate::REASON_SUBSCRIPTION_EXPIRED,
+            );
+        }
     }
 }

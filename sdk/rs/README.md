@@ -112,6 +112,38 @@ does not count the requirement as an observation.
 each returned log batch. Subsequent queries in a monotonic session require at least
 that sequence; fixed sessions record the observations and retain their configured floor.
 
+## Subscriptions
+
+`stream().subscribe(filter, since)` resumes after the server closes the stream, the connection
+resets, or a transient error occurs. It resubscribes with the same filters from the sequence after
+the last frame it received, so `next()` yields one stream with no gap and no duplicate.
+Authentication, permission, invalid filter, and `BATCH_EVICTED` failures are returned immediately.
+
+```rust
+use std::time::Duration;
+use exoware_sdk::{StoreClient, SubscriptionRetryConfig};
+
+let client = StoreClient::builder()
+    .url("http://localhost:10000")
+    .subscription_retry_config(
+        SubscriptionRetryConfig::standard().with_outage_budget(Duration::from_secs(300)),
+    )
+    .build()?;
+```
+
+The default policy gives each outage 60 seconds, backing off from 100 ms up to 2 s. An outage
+starts at the first failure, or when `subscribe` starts opening, and any frame received within the
+budget ends it. The budget bounds backoff, stalled opens, and the wait for a reopened stream's first
+frame.
+`SubscriptionRetryConfig::unlimited()` retries until a permanent failure.
+`SubscriptionRetryConfig::disabled()` makes one unbounded open attempt and never resumes, so
+`next()` returns `Ok(None)` on a clean close. `request_timeout` does not bound subscriptions.
+
+A subscription opened with `since = None` or `Some(0)` learns its cursor from the server's first
+frame. If it fails before that frame, `subscribe` or `next()` returns the error, because
+subscribing again without a cursor could skip batches. A nonzero `since` is a cursor, so opening it
+is retried. The resume cursor is separate from read session floors.
+
 ## Examples
 
 `remote` writes a batch to a deployed endpoint and reads it back, pinning each read to the sequence it just committed:
@@ -147,9 +179,9 @@ let client = StoreClient::builder()
 HTTP uses prior-knowledge h2c. HTTPS requires HTTP/2 through ALPN and uses platform trust by
 default. `with_tls_config` accepts custom roots and client certificates but replaces configured
 ALPN protocols with HTTP/2. HTTP/2 PINGs detect dead peers on open and idle connections. The request
-timeout bounds complete unary calls. It also bounds query streams through their first frame and
-subscriptions through their response headers without stopping the streaming body after the call
-returns.
+timeout bounds complete unary calls. It also bounds query streams through their first frame without
+stopping the streaming body after the call returns. Subscriptions are bounded by their reconnect
+policy instead, as described in [Subscriptions](#subscriptions).
 
 `StoreClientBuilder::client_transport` accepts types re-exported under `exoware_sdk::transport`.
 The SDK still owns authentication, cookies, and compression preferences. Tower services can use

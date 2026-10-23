@@ -25,7 +25,7 @@ function mockClient(
     query: Partial<Client['query']>,
     stream: Partial<Client['stream']> = {},
 ): Client {
-    return { query, stream, credential: 'absent' } as unknown as Client;
+    return { query, stream, credential: 'absent', subscriptionRetry: { enabled: false } } as unknown as Client;
 }
 
 const key = new Uint8Array([3]);
@@ -673,7 +673,8 @@ test('subscribe forwards cancellation options and cleans up when the consumer st
     expect((await stream.next()).value?.sequenceNumber).toBe(6n);
     expect(session.evaluatedSequence()).toBe(6n);
     expect(session.minSequenceNumber()).toBe(4n);
-    expect(seenOptions).toBe(options);
+    expect(seenOptions).toMatchObject({ timeoutMs: undefined, signal: expect.any(AbortSignal) });
+    expect((seenOptions as { signal: AbortSignal }).signal.aborted).toBe(false);
     await stream.return?.();
     expect(cleanedUp).toBe(true);
 });

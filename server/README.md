@@ -21,6 +21,48 @@ Split deployments can instead mount `ingest_service`, `query_stack`,
 component state. The stream service accepts an in-process `StreamNotifier`;
 `StreamHub` is the local default.
 
+## Subscription lifetime
+
+Subscriptions begin with an empty checkpoint frame. Live subscriptions receive
+the published sequence at opening. Subscriptions starting at sequence `N` receive
+`N - 1`, then replay from `N`. Clients can resume from one past the highest received
+sequence, including checkpoints, without advancing their read-consistency floor.
+
+Subscription lifetimes are unlimited by default. Configure a maximum on
+`AppState` or `StreamState` to periodically reconnect subscribers.
+
+```rust
+use std::time::Duration;
+use exoware_server::SubscriptionLifetime;
+
+let lifetime = SubscriptionLifetime::new(Duration::from_secs(300))
+    .with_jitter_fraction(0.2);
+let state = state.with_subscription_lifetime(lifetime);
+```
+
+This samples each lifetime between 240 and 300 seconds. The jitter fraction
+subtracts from the maximum, so it never extends the configured limit.
+Expiration ends the stream with `UNAVAILABLE`. Resuming SDKs reconnect using
+their own retry policy. Older clients see the stream error.
+
+Custom `Subscribe` handlers can wrap their response stream with
+`bound_subscription(stream, lifetime, close)`. The `close` future ends the stream
+with `UNAVAILABLE` when it completes. The shared `ingest::transport::serve` listener
+inserts a `ShutdownSignal` into request extensions. Pass its `closed()` future to
+the wrapper to end active subscriptions during graceful shutdown. The built-in
+stream service already uses this path.
+
+The helper releases backend resources at the sampled lifetime or close signal.
+The shared listener then allows up to two seconds to flush the terminal response.
+If a subscriber stops reading, it resets that HTTP/2 stream or closes the HTTP/1
+connection after this grace period. Other HTTP/2 requests continue normally.
+During shutdown, once all active handlers finish, the listener allows a further
+two seconds to flush bytes already queued on a connection before closing it.
+Custom transports must provide cancellation outside response-body polling to
+bound stalled readers as well.
+
+## Backend adapters
+
 Custom GetMany handlers can call `validate_get_many_request(request.view())`
 before opening a backend snapshot. Compare `min_sequence_number` with the
 snapshot sequence before returning data. If the snapshot is below that floor,

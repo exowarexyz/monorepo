@@ -203,7 +203,7 @@ async fn replay_since_delivers_retained_batches_then_live() {
 }
 
 #[tokio::test]
-async fn replay_past_end_delivers_only_live() {
+async fn replay_past_end_waits_for_the_requested_sequence() {
     let client = spawn_client().await;
     let current = client
         .ingest()
@@ -217,11 +217,18 @@ async fn replay_past_end_delivers_only_live() {
         .await
         .expect("subscribe");
 
-    // No replay — should not receive a frame for current+10 since it doesn't
-    // exist and since > current triggers the unset-cursor path.
+    // A future cursor must also hold when the subscriber reaches a lagging server.
     assert!(next_with_timeout(&mut sub, 200).await.is_none());
 
-    // Next live PUT lands with its actual seq (no synthetic gaps).
+    for value in 1..10 {
+        client
+            .ingest()
+            .put(&[(&key(1, b"earlier"), &[value])])
+            .await
+            .expect("put before cursor");
+    }
+    assert!(next_with_timeout(&mut sub, 200).await.is_none());
+
     let live_seq = client
         .ingest()
         .put(&[(&key(1, b"next"), b"n")])
@@ -231,6 +238,7 @@ async fn replay_past_end_delivers_only_live() {
         .await
         .expect("live frame");
     assert_eq!(frame.sequence_number, live_seq);
+    assert_eq!(live_seq, current + 10);
 }
 
 #[tokio::test]
