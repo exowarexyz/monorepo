@@ -44,13 +44,6 @@ jobs:
         run: cd sdk/ts && npm ci
       - name: Test sdk/ts
         run: cd sdk/ts && npm test
-      - name: "TEMP measurement: disk, swap, target size"
-        if: always()
-        run: |
-          df -h /
-          free -h
-          grep -E '^pswp(in|out) ' /proc/vmstat
-          du -sh target ~/.cargo 2>/dev/null || true
 
   build:
     name: Build
