@@ -38,10 +38,6 @@ runs:
         save-if: ${{ github.ref == 'refs/heads/main' || github.head_ref == 'ci/fix-rust-caching' }}
         key: ${{ steps.cache-key.outputs.key }}
         cache-on-failure: false
-        # The runner image preinstalls ~240MB of tools in ~/.cargo/bin. Caching them would add
-        # that to every job's cache and eat into the repo's 10GB total. Tools CI needs are
-        # downloaded prebuilt by taiki-e/install-action in seconds.
-        cache-bin: false
     - name: Set up Node.js
       uses: actions/setup-node@v4
       with:
