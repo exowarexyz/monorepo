@@ -63,6 +63,12 @@ jobs:
         run: rustup toolchain install ${{ env.NIGHTLY_VERSION }}
       - name: Verify toolchain
         run: cargo +${{ env.NIGHTLY_VERSION }} --version && rustc +${{ env.NIGHTLY_VERSION }} --version
+      # cargo-udeps builds with `-Z binary-dep-depinfo`, which makes cargo treat the toolchain's
+      # own files as build inputs and compare their timestamps. rustup stamps them with the
+      # install time, so a fresh install makes every cached crate look stale and udeps rebuilds
+      # everything. Pinning the timestamps to a fixed old date lets the cache be reused.
+      - name: Pin nightly toolchain timestamps
+        run: find "$(rustc +${{ env.NIGHTLY_VERSION }} --print sysroot)" -exec touch -h -t 200001010000 {} +
       - name: Run setup
         uses: ./.github/actions/setup
       - name: Install cargo-udeps
