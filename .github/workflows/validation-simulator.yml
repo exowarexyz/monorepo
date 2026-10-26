@@ -87,6 +87,13 @@ jobs:
           commit: ${{ github.event.pull_request.head.sha || github.sha }}
           artifact-name: validation-benchmark-report-${{ github.event.pull_request.head.sha || github.sha }}
 
+      - name: "TEMP measurement: disk, swap, target size"
+        if: always()
+        run: |
+          df -h /
+          free -h
+          grep -E '^pswp(in|out) ' /proc/vmstat
+          du -sh target ~/.cargo 2>/dev/null || true
       - name: Print simulator log on failure
         if: failure()
         shell: bash

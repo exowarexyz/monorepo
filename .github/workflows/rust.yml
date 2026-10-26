@@ -35,6 +35,13 @@ jobs:
         run: cargo doc --no-deps --document-private-items
         env:
           RUSTDOCFLAGS: "-D warnings"
+      - name: "TEMP measurement: disk, swap, target size"
+        if: always()
+        run: |
+          df -h /
+          free -h
+          grep -E '^pswp(in|out) ' /proc/vmstat
+          du -sh target ~/.cargo 2>/dev/null || true
 
   test:
     name: Tests
@@ -49,6 +56,13 @@ jobs:
         uses: ./.github/actions/setup
       - name: Run tests
         run: cargo test --verbose
+      - name: "TEMP measurement: disk, swap, target size"
+        if: always()
+        run: |
+          df -h /
+          free -h
+          grep -E '^pswp(in|out) ' /proc/vmstat
+          du -sh target ~/.cargo 2>/dev/null || true
 
   dependencies:
     name: Dependencies
@@ -77,3 +91,10 @@ jobs:
           tool: cargo-udeps@${{ env.UDEPS_VERSION }}
       - name: Check for unused dependencies
         run: cargo +${{ env.NIGHTLY_VERSION }} udeps --all-targets
+      - name: "TEMP measurement: disk, swap, target size"
+        if: always()
+        run: |
+          df -h /
+          free -h
+          grep -E '^pswp(in|out) ' /proc/vmstat
+          du -sh target ~/.cargo 2>/dev/null || true

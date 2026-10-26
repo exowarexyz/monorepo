@@ -34,7 +34,8 @@ runs:
     - name: Setup rust cache
       uses: Swatinem/rust-cache@f13886b937689c021905a6b90929199931d60db1 # v2.8.1
       with:
-        save-if: ${{ github.ref == 'refs/heads/main' }}
+        # TEMP measurement: also save from this PR so a second push can measure warm runs.
+        save-if: ${{ github.ref == 'refs/heads/main' || github.head_ref == 'ci/fix-rust-caching' }}
         key: ${{ steps.cache-key.outputs.key }}
         cache-on-failure: false
     - name: Set up Node.js
