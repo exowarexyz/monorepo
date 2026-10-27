@@ -22,7 +22,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     ctx.register_schema(schema)?;
 
     // -- Demonstrate programmatic inserts with BatchWriter --
-    demo_batch_writer_insert().await;
+    demo_batch_writer_insert();
 
     // -- Demonstrate SQL query patterns --
     demo_sql_queries(&ctx).await?;
@@ -48,7 +48,7 @@ fn build_schema(client: StoreClient) -> Result<KvSchema, String> {
     )
 }
 
-async fn demo_batch_writer_insert() {
+fn demo_batch_writer_insert() {
     println!("\n== BatchWriter: multiple document versions ==");
 
     let client = StoreClient::new("http://localhost:10000");

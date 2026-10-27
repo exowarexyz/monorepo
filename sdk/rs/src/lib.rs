@@ -3169,6 +3169,8 @@ fn retry_backoff_delay(attempt: usize, retry_config: RetryConfig) -> Duration {
 }
 
 #[cfg(test)]
+// These futures hold whole servers inline. Boxing them in tests would only add noise.
+#[allow(clippy::large_futures)]
 mod tests {
     use super::*;
     use crate::kv_codec::{KvFieldKind, KvPredicate, KvPredicateCheck, KvPredicateConstraint};

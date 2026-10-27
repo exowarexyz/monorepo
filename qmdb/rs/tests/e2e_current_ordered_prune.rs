@@ -3,6 +3,9 @@
 //! Remote current roots and proofs must match the source at every batch boundary,
 //! including historical watermarks and keys below the latest inactivity floor.
 
+// These futures hold whole servers and stores inline. Boxing them in tests would only add noise.
+#![allow(clippy::large_futures)]
+
 mod common;
 
 use std::num::NonZeroU64;

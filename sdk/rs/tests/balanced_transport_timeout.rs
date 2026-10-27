@@ -1,3 +1,6 @@
+// These futures hold whole servers and stores inline. Boxing them in tests would only add noise.
+#![allow(clippy::large_futures)]
+
 use std::future::Future;
 use std::time::Duration;
 

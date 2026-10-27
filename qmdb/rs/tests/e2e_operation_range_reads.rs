@@ -1,4 +1,6 @@
 #![allow(refining_impl_trait)]
+// These futures hold whole servers and stores inline. Boxing them in tests would only add noise.
+#![allow(clippy::large_futures)]
 
 #[allow(dead_code)]
 mod common;

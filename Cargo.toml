@@ -28,6 +28,9 @@ redundant_clone = "warn"
 undocumented_unsafe_blocks = "deny"
 use_self = "warn"
 missing_const_for_fn = "warn"
+multiple_inherent_impl = "deny"
+unused_async = "warn"
+large_futures = "warn"
 
 [workspace.dependencies]
 crossbeam-utils = "0.8.22"

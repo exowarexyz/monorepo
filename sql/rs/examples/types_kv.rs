@@ -43,7 +43,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     ctx.register_schema(schema)?;
 
     // Use BatchWriter to atomically insert across both tables
-    demo_batch_writer_insert().await;
+    demo_batch_writer_insert();
 
     // Demonstrate SQL INSERT with hex binary literals
     demo_sql_insert(&ctx).await?;
@@ -51,7 +51,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-async fn demo_batch_writer_insert() {
+fn demo_batch_writer_insert() {
     println!("\n== BatchWriter: programmatic insert with FixedSizeBinary ==");
 
     let client = StoreClient::new("http://localhost:10000");
