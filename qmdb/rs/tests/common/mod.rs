@@ -166,7 +166,6 @@ where
 }
 
 mod operations;
-#[allow(unused_imports)]
 pub use operations::prepare_operations;
 
 /// Extract the one operation's bitmap chunk from a native current range proof
