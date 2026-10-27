@@ -77,7 +77,7 @@ pub(crate) enum IndexPredicatePlan {
 }
 
 impl IndexPredicatePlan {
-    pub(crate) fn is_impossible(&self) -> bool {
+    pub(crate) const fn is_impossible(&self) -> bool {
         match self {
             Self::Encoded(plan) => plan.impossible,
             Self::Shared(predicate) => predicate.contradiction,

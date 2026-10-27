@@ -95,7 +95,7 @@ fn decode_digest<D: Digest + DecodeExt<()>>(bytes: &[u8], label: &str) -> Result
     D::decode(Copying(bytes)).map_err(|err| format!("failed to decode {label}: {err}"))
 }
 
-fn proof_digest_cap<D: Digest>(encoded_proof: &[u8]) -> usize {
+const fn proof_digest_cap<D: Digest>(encoded_proof: &[u8]) -> usize {
     encoded_proof.len() / <D as FixedSize>::SIZE + 1
 }
 

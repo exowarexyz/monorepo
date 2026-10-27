@@ -132,14 +132,14 @@ enum Reception {
 }
 
 impl Reception {
-    fn ended(&self) -> bool {
+    const fn ended(&self) -> bool {
         matches!(
             self,
             Self::Ended | Self::Decoded | Self::Validated | Self::LengthMismatch
         )
     }
 
-    fn decoded(&self) -> bool {
+    const fn decoded(&self) -> bool {
         matches!(self, Self::Decoded | Self::Validated)
     }
 
@@ -256,7 +256,7 @@ impl PutInput {
     pub(super) fn idle_timed_out(&self) -> bool {
         self.idle.as_ref().is_some_and(|idle| idle.expired)
     }
-    pub fn parts(&self) -> Option<&http::request::Parts> {
+    pub const fn parts(&self) -> Option<&http::request::Parts> {
         self.parts.as_ref()
     }
     pub fn with_observer(mut self, observer: Arc<dyn IngestObserver>) -> Self {
@@ -277,10 +277,10 @@ impl PutInput {
     pub fn notifier(&self) -> Option<Arc<dyn crate::stream::StreamNotifier>> {
         self.notifier.clone()
     }
-    pub fn metadata(&self) -> &PutMetadata {
+    pub const fn metadata(&self) -> &PutMetadata {
         &self.metadata
     }
-    pub fn limits(&self) -> PutLimits {
+    pub const fn limits(&self) -> PutLimits {
         self.limits
     }
 
@@ -316,13 +316,13 @@ impl PutInput {
             }
         }
     }
-    pub fn deadline(&self) -> Instant {
+    pub const fn deadline(&self) -> Instant {
         self.deadline
     }
-    pub fn wire_bytes(&self) -> usize {
+    pub const fn wire_bytes(&self) -> usize {
         self.wire_bytes
     }
-    pub fn is_finished(&self) -> bool {
+    pub const fn is_finished(&self) -> bool {
         matches!(self.reception, Reception::Validated)
     }
     pub(super) fn is_end_stream(&self) -> bool {

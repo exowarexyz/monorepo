@@ -1180,7 +1180,7 @@ enum ExclusionTarget<F: Graftable> {
 }
 
 impl<F: Graftable> ExclusionTarget<F> {
-    fn location(&self) -> Location<F> {
+    const fn location(&self) -> Location<F> {
         match self {
             Self::Covering { location, .. } => *location,
             Self::Commit(location) => *location,

@@ -56,7 +56,7 @@ impl ArenaDecoder {
         self.validate_size()
     }
 
-    pub(super) fn limit(&self) -> usize {
+    pub(super) const fn limit(&self) -> usize {
         self.limit
     }
 

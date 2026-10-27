@@ -150,7 +150,7 @@ pub struct ByteLease {
 }
 
 impl ByteLease {
-    pub fn bytes(&self) -> usize {
+    pub const fn bytes(&self) -> usize {
         self.bytes
     }
 
@@ -204,7 +204,7 @@ impl Admission {
     pub fn reserve_bytes(&self, bytes: usize) -> Result<ByteLease, ConnectError> {
         self.request.reserve_bytes(bytes)
     }
-    pub fn wire_bound(&self) -> usize {
+    pub const fn wire_bound(&self) -> usize {
         self.wire_bound
     }
 }

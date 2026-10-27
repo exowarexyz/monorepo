@@ -121,7 +121,7 @@ impl Keyspace {
     }
 
     /// Returns the configured physical key length.
-    pub fn key_len(&self) -> usize {
+    pub const fn key_len(&self) -> usize {
         self.key_len
     }
 
@@ -202,7 +202,7 @@ impl Keyspace {
         Key::from(key)
     }
 
-    fn namespace_start(&self) -> usize {
+    const fn namespace_start(&self) -> usize {
         match self.layout {
             KeyLayout::Spread => ENTROPY_BYTES + NAMESPACE_LEN_BYTES,
             KeyLayout::Validation => VALIDATION_PREFIX.len() + NAMESPACE_LEN_BYTES,
@@ -215,11 +215,11 @@ impl Keyspace {
 /// Deriving it from the logical index alone spreads keys uniformly across all
 /// leading-bit shards while keeping inserted and missing keys for the same
 /// index aligned and reproducible.
-fn entropy_byte(index: u64) -> u8 {
+const fn entropy_byte(index: u64) -> u8 {
     mix64(index) as u8
 }
 
-fn min_key_len(layout: KeyLayout, namespace_len: usize) -> usize {
+const fn min_key_len(layout: KeyLayout, namespace_len: usize) -> usize {
     let prefix_len = match layout {
         KeyLayout::Spread => ENTROPY_BYTES,
         KeyLayout::Validation => VALIDATION_PREFIX.len(),

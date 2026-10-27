@@ -397,7 +397,7 @@ struct Frontiers {
 }
 
 impl Frontiers {
-    fn new(published: u64) -> Self {
+    const fn new(published: u64) -> Self {
         Self {
             published: AtomicU64::new(published),
             persist: Mutex::new(()),
@@ -408,7 +408,7 @@ impl Frontiers {
 
 // Row backing is charged separately. These charges cover later coalescing,
 // indexed sorting, compact payload owners, and encoded log output.
-fn writer_growth(entries: usize, encoded_len: usize) -> usize {
+const fn writer_growth(entries: usize, encoded_len: usize) -> usize {
     let row = std::mem::size_of::<(Bytes, Bytes)>();
     let sort_row = std::mem::size_of::<usize>();
     encoded_len
@@ -416,7 +416,7 @@ fn writer_growth(entries: usize, encoded_len: usize) -> usize {
         .saturating_add(entries.saturating_mul(2 * row + sort_row + 128))
 }
 
-fn writer_memory(entries: usize, encoded_len: usize, capacity: usize) -> usize {
+const fn writer_memory(entries: usize, encoded_len: usize, capacity: usize) -> usize {
     WRITER_OVERHEAD
         .saturating_add(writer_growth(entries, encoded_len))
         .saturating_add(capacity.saturating_mul(std::mem::size_of::<(Bytes, Bytes)>()))
@@ -942,7 +942,7 @@ fn prepare_ingest_dir(store_path: &Path) -> Result<PathBuf, String> {
 }
 
 /// Encodes a sequence number as a log-CF key that preserves numeric order in RocksDB.
-fn sequence_log_key(sequence: u64) -> [u8; LOG_BATCH_KEY_LEN] {
+const fn sequence_log_key(sequence: u64) -> [u8; LOG_BATCH_KEY_LEN] {
     sequence.to_be_bytes()
 }
 
@@ -1003,7 +1003,7 @@ fn read_retention_policy(db: &DB) -> Result<Option<RetentionPolicy>, String> {
 /// Lowest sequence a retention rule keeps against `frontier`: the exclusive cutoff for log
 /// trimming, so every row below it is evicted and the row at it (if any) is the oldest retained.
 /// Mirrors the floor math the stream service owns end to end.
-fn retention_floor(policy: &RetentionPolicy, frontier: u64) -> u64 {
+const fn retention_floor(policy: &RetentionPolicy, frontier: u64) -> u64 {
     match policy {
         RetentionPolicy::KeepLatest { count } => frontier.saturating_sub(*count).saturating_add(1),
         RetentionPolicy::GreaterThan { threshold } => threshold.saturating_add(1),

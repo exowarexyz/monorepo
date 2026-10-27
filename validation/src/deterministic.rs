@@ -8,7 +8,7 @@ const MURMUR3_FMIX64_MULTIPLIER_1: u64 = 0xFF51_AFD7_ED55_8CCD;
 const MURMUR3_FMIX64_MULTIPLIER_2: u64 = 0xC4CE_B9FE_1A85_EC53;
 
 /// Deterministic 64-bit avalanche used for validation data generation.
-pub(crate) fn mix64(mut x: u64) -> u64 {
+pub(crate) const fn mix64(mut x: u64) -> u64 {
     x ^= x >> 33;
     x = x.wrapping_mul(MURMUR3_FMIX64_MULTIPLIER_1);
     x ^= x >> 33;

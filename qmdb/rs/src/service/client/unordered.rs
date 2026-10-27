@@ -63,7 +63,7 @@ where
     E: ValueEncoding<Value = V>,
     unordered::Operation<F, K, E>: Read,
 {
-    pub fn new(op_cfg: <unordered::Operation<F, K, E> as Read>::Cfg) -> Self {
+    pub const fn new(op_cfg: <unordered::Operation<F, K, E> as Read>::Cfg) -> Self {
         Self {
             op_cfg,
             _marker: std::marker::PhantomData,

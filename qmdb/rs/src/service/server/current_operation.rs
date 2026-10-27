@@ -49,7 +49,7 @@ impl<R: CurrentOperationReader<N>, const N: usize> Clone for CurrentOperationSer
 }
 
 impl<R: CurrentOperationReader<N>, const N: usize> CurrentOperationServer<R, N> {
-    pub(crate) fn new(reader: Arc<R>) -> Self {
+    pub(crate) const fn new(reader: Arc<R>) -> Self {
         Self { reader }
     }
 }

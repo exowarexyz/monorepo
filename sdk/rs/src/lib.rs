@@ -139,7 +139,7 @@ pub enum ConnectRequestCompression {
 }
 
 impl ConnectRequestCompression {
-    fn wire_name(self) -> Option<&'static str> {
+    const fn wire_name(self) -> Option<&'static str> {
         match self {
             Self::None => None,
             Self::Zstd { .. } => Some("zstd"),
@@ -271,7 +271,7 @@ impl StoreKeyPrefix {
 
     /// The raw prefix bytes.
     #[inline]
-    pub fn prefix(&self) -> &Bytes {
+    pub const fn prefix(&self) -> &Bytes {
         self.inner.as_bytes()
     }
 
@@ -284,7 +284,7 @@ impl StoreKeyPrefix {
 
     /// Maximum logical key bytes available under this prefix.
     #[inline]
-    pub fn max_logical_key_len(&self) -> usize {
+    pub const fn max_logical_key_len(&self) -> usize {
         self.inner.max_payload_len()
     }
 
@@ -354,24 +354,24 @@ pub struct PrefixedStoreClient {
 
 impl PrefixedStoreClient {
     /// Pair a physical client with an explicit namespace prefix.
-    pub fn new(client: StoreClient, prefix: StoreKeyPrefix) -> Self {
+    pub const fn new(client: StoreClient, prefix: StoreKeyPrefix) -> Self {
         Self { client, prefix }
     }
 
     /// Pair a physical client with the zero-width [`StoreKeyPrefix::identity`],
     /// so keys pass through untranslated.
-    pub fn empty(client: StoreClient) -> Self {
+    pub const fn empty(client: StoreClient) -> Self {
         Self::new(client, StoreKeyPrefix::identity())
     }
 
     /// The configured key prefix.
-    pub fn key_prefix(&self) -> &StoreKeyPrefix {
+    pub const fn key_prefix(&self) -> &StoreKeyPrefix {
         &self.prefix
     }
 
     /// Borrow the underlying physical transport. Operations performed directly
     /// on it are *not* namespaced; prefer the methods on this type.
-    pub fn client(&self) -> &StoreClient {
+    pub const fn client(&self) -> &StoreClient {
         &self.client
     }
 
@@ -437,27 +437,27 @@ impl PrefixedStoreClient {
     // --- service-grouped accessors -------------------------------------------
 
     /// Typed access to the `log.ingest.v1` service.
-    pub fn ingest(&self) -> Ingest<'_> {
+    pub const fn ingest(&self) -> Ingest<'_> {
         Ingest { c: self }
     }
 
     /// Typed access to the `store.query.v1` service.
-    pub fn query(&self) -> Query<'_> {
+    pub const fn query(&self) -> Query<'_> {
         Query { c: self }
     }
 
     /// Typed access to the `store.prune.v1` service.
-    pub fn prune(&self) -> Prune<'_> {
+    pub const fn prune(&self) -> Prune<'_> {
         Prune { c: self }
     }
 
     /// Typed access to the `log.retention.v1` service.
-    pub fn retention(&self) -> Retention<'_> {
+    pub const fn retention(&self) -> Retention<'_> {
         Retention { c: self }
     }
 
     /// Typed access to the `log.stream.v1` service.
-    pub fn stream(&self) -> Stream<'_> {
+    pub const fn stream(&self) -> Stream<'_> {
         Stream { c: self }
     }
 
@@ -879,16 +879,16 @@ impl StoreWriteBatch {
         Self::default()
     }
 
-    pub fn len(&self) -> usize {
+    pub const fn len(&self) -> usize {
         self.entries.len()
     }
 
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
 
     /// Exact uncompressed protobuf `PutRequest` size, including physical key prefixes.
-    pub fn encoded_len(&self) -> usize {
+    pub const fn encoded_len(&self) -> usize {
         self.encoded_len
     }
 
@@ -1092,7 +1092,7 @@ pub struct RangeStream {
 }
 
 impl RangeStream {
-    fn from_connect_stream(
+    const fn from_connect_stream(
         stream: ConnectServerStream<
             ProtoErasedResponseBody,
             exoware_proto::query::RangeFrameView<'static>,
@@ -1113,7 +1113,7 @@ impl RangeStream {
         }
     }
 
-    pub fn final_count(&self) -> Option<usize> {
+    pub const fn final_count(&self) -> Option<usize> {
         self.final_count
     }
 
@@ -1227,7 +1227,7 @@ pub struct GetManyStream {
 }
 
 impl GetManyStream {
-    fn from_connect_stream(
+    const fn from_connect_stream(
         stream: ConnectServerStream<
             ProtoErasedResponseBody,
             exoware_proto::query::GetManyFrameView<'static>,
@@ -1339,7 +1339,7 @@ impl GetManyStream {
 }
 
 impl RangeMode {
-    fn to_proto(self) -> proto_query::TraversalMode {
+    const fn to_proto(self) -> proto_query::TraversalMode {
         match self {
             Self::Forward => proto_query::TraversalMode::TRAVERSAL_MODE_FORWARD,
             Self::Reverse => proto_query::TraversalMode::TRAVERSAL_MODE_REVERSE,
@@ -1448,7 +1448,7 @@ pub struct RetryConfig {
 }
 
 impl RetryConfig {
-    pub fn standard() -> Self {
+    pub const fn standard() -> Self {
         Self {
             max_attempts: DEFAULT_RETRY_MAX_ATTEMPTS,
             initial_backoff: Duration::from_millis(DEFAULT_RETRY_INITIAL_BACKOFF_MS),
@@ -1465,12 +1465,12 @@ impl RetryConfig {
         self
     }
 
-    pub fn with_initial_backoff(mut self, initial_backoff: Duration) -> Self {
+    pub const fn with_initial_backoff(mut self, initial_backoff: Duration) -> Self {
         self.initial_backoff = initial_backoff;
         self
     }
 
-    pub fn with_max_backoff(mut self, max_backoff: Duration) -> Self {
+    pub const fn with_max_backoff(mut self, max_backoff: Duration) -> Self {
         self.max_backoff = max_backoff;
         self
     }
@@ -1646,14 +1646,17 @@ impl StoreClientBuilder {
     }
 
     /// Codec for compressing **outgoing** RPC request bodies (default [`ConnectRequestCompression::None`]).
-    pub fn connect_request_compression(mut self, compression: ConnectRequestCompression) -> Self {
+    pub const fn connect_request_compression(
+        mut self,
+        compression: ConnectRequestCompression,
+    ) -> Self {
         self.connect_request_compression = compression;
         self
     }
 
     /// Bounds unary calls and the opening of streaming calls across RPC transports.
     /// Overrides the timeout supplied by [`Self::balanced_http2_transport`].
-    pub fn request_timeout(mut self, timeout: Duration) -> Self {
+    pub const fn request_timeout(mut self, timeout: Duration) -> Self {
         self.request_timeout = Some(timeout);
         self
     }
@@ -1899,7 +1902,7 @@ impl StoreClient {
     }
 
     /// Outgoing Connect request body compression (see [`ConnectRequestCompression`]).
-    pub fn connect_request_compression(&self) -> ConnectRequestCompression {
+    pub const fn connect_request_compression(&self) -> ConnectRequestCompression {
         self.connect_request_compression
     }
 
@@ -3120,7 +3123,7 @@ fn put_retry_delay_for_error(
     ))
 }
 
-fn is_retryable_error(err: &ConnectError) -> bool {
+const fn is_retryable_error(err: &ConnectError) -> bool {
     matches!(
         err.code,
         ErrorCode::Aborted

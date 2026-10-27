@@ -720,7 +720,7 @@ fn lower_expr(
     }
 }
 
-fn field_type(kind: KvFieldKind) -> DataType {
+const fn field_type(kind: KvFieldKind) -> DataType {
     match kind {
         KvFieldKind::Int64 => DataType::Int64,
         KvFieldKind::UInt64 => DataType::UInt64,
@@ -737,7 +737,7 @@ fn field_type(kind: KvFieldKind) -> DataType {
     }
 }
 
-fn reduced_size(value: Option<&KvReducedValue>) -> usize {
+const fn reduced_size(value: Option<&KvReducedValue>) -> usize {
     std::mem::size_of::<Option<KvReducedValue>>()
         + match value {
             Some(KvReducedValue::Utf8(s)) => s.len(),
