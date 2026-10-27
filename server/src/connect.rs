@@ -796,7 +796,7 @@ where
     ) -> connectrpc::ServiceResult<PruneResponse> {
         validate::validate_prune_request(request.view())?;
         let document = exoware_proto::parse_and_validate_policy_document(request.view())
-            .map_err(|e| ConnectError::invalid_argument(e.to_string()))?;
+            .map_err(ConnectError::invalid_argument)?;
 
         self.state
             .prune
@@ -1526,7 +1526,7 @@ mod tests {
         ) {
             let mut state = self.state.lock().expect("lock");
             state.current_sequence = state.current_sequence.max(sequence_number);
-            state.batches.insert(sequence_number, Some(kvs.clone()));
+            state.batches.insert(sequence_number, Some(kvs));
             drop(state);
             hub.publish(sequence_number);
         }

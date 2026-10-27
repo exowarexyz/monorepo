@@ -113,7 +113,7 @@ async fn demo_batch_writer_insert() {
         .insert(
             "documents",
             vec![
-                CellValue::FixedBinary(doc_id.clone()),
+                CellValue::FixedBinary(doc_id),
                 CellValue::UInt64(3),
                 CellValue::Utf8("Approved".to_string()),
                 CellValue::Utf8("Approved content.".to_string()),

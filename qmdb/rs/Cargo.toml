@@ -9,6 +9,9 @@ homepage.workspace = true
 repository = "https://github.com/exowarexyz/monorepo/tree/main/qmdb/rs"
 documentation = "https://docs.rs/exoware-qmdb"
 
+[lints]
+workspace = true
+
 [features]
 test-utils = []
 
