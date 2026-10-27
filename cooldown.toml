@@ -1,0 +1,11 @@
+# Settings for cargo-cooldown, which rejects dependency versions published less than
+# `cooldown_minutes` ago (7 days). A fresh release is the usual window for a hijacked or
+# malicious crate version, and waiting a week gives the ecosystem time to yank it.
+#
+# Exemptions for versions already locked at the merge base are appended by
+# .github/scripts/check_dependency_cooldown.sh. Invoking `cargo cooldown` directly applies
+# the cooldown window to every locked package.
+cooldown_minutes = 10080
+enforcement = "strict"
+lockfile_baseline = "ignore"
+cache_dir = "target/cargo-cooldown"

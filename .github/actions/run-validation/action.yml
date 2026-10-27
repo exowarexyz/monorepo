@@ -107,7 +107,7 @@ runs:
 
     - name: Checkout validation source
       if: inputs.validation-bin == ''
-      uses: actions/checkout@v4
+      uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       with:
         repository: ${{ steps.inferred-source.outputs.repository }}
         ref: ${{ steps.inferred-source.outputs.ref }}
@@ -115,7 +115,9 @@ runs:
 
     - name: Install stable Rust toolchain
       if: inputs.validation-bin == ''
-      uses: dtolnay/rust-toolchain@stable
+      uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable branch
+      with:
+        toolchain: stable
 
     - name: Build validation from source
       id: built-validation
@@ -237,7 +239,7 @@ runs:
 
     - name: Upload benchmark report
       if: ${{ !cancelled() }}
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
       with:
         name: ${{ inputs.artifact-name }}
         path: ${{ runner.temp }}/validation-bench-report.json
