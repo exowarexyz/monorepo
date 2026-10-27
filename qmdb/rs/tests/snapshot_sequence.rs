@@ -1,5 +1,8 @@
 //! Publication evidence and replica freshness across QMDB reads.
 
+// These futures hold whole servers and stores inline. Boxing them in tests would only add noise.
+#![allow(clippy::large_futures)]
+
 #[allow(dead_code)]
 mod common;
 

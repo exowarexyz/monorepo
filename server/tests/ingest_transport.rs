@@ -469,6 +469,66 @@ impl Server {
         timeout(Duration::from_secs(2), &mut self.task).await??;
         Ok(())
     }
+
+    async fn configured<I: Ingest>(
+        config: PutConfig,
+        backend: Arc<I>,
+        blocked: bool,
+    ) -> Result<Self, Error> {
+        use tower::ServiceExt;
+
+        let tcp = TcpListener::bind("127.0.0.1:0").await?;
+        let addr = tcp.local_addr()?;
+        let stats = Arc::new(Stats::default());
+        let gate = Arc::new(Gate::default());
+        gate.blocked.store(blocked, Ordering::SeqCst);
+        let listener = MeasuredListener {
+            tcp,
+            stats: stats.clone(),
+            gate,
+        };
+        let service = ingest_service(IngestState::new(backend).with_put_config(config));
+        let requests = stats.clone();
+        let service = service_fn(move |request: Request<Body>| {
+            let service = service.clone();
+            let stats = requests.clone();
+            async move {
+                if request.uri().path() == "/health" {
+                    return Ok(Response::new(Body::empty()));
+                }
+                *stats.request_started.lock().unwrap() = Some(Instant::now());
+                let request = request.map(|inner| {
+                    Body::new(CountBody {
+                        inner,
+                        stats: stats.clone(),
+                        response: false,
+                    })
+                });
+                let response = service.oneshot(request).await?;
+                Ok::<_, Infallible>(response.map(|inner| {
+                    Body::new(CountBody {
+                        inner,
+                        stats,
+                        response: true,
+                    })
+                }))
+            }
+        });
+        let (shutdown, receive) = oneshot::channel();
+        let task = tokio::spawn(async move {
+            serve(listener, service, async {
+                let _ = receive.await;
+            })
+            .await
+            .unwrap();
+        });
+        Ok(Self {
+            addr,
+            stats,
+            shutdown: Some(shutdown),
+            task,
+        })
+    }
 }
 
 struct ConsumeIngest;
@@ -1763,68 +1823,6 @@ async fn http2_host_timeout_releases_a_stalled_upload() -> Result<(), Error> {
     shutdown.send(()).unwrap();
     timeout(Duration::from_secs(2), server).await???;
     Ok(())
-}
-
-impl Server {
-    async fn configured<I: Ingest>(
-        config: PutConfig,
-        backend: Arc<I>,
-        blocked: bool,
-    ) -> Result<Self, Error> {
-        use tower::ServiceExt;
-
-        let tcp = TcpListener::bind("127.0.0.1:0").await?;
-        let addr = tcp.local_addr()?;
-        let stats = Arc::new(Stats::default());
-        let gate = Arc::new(Gate::default());
-        gate.blocked.store(blocked, Ordering::SeqCst);
-        let listener = MeasuredListener {
-            tcp,
-            stats: stats.clone(),
-            gate,
-        };
-        let service = ingest_service(IngestState::new(backend).with_put_config(config));
-        let requests = stats.clone();
-        let service = service_fn(move |request: Request<Body>| {
-            let service = service.clone();
-            let stats = requests.clone();
-            async move {
-                if request.uri().path() == "/health" {
-                    return Ok(Response::new(Body::empty()));
-                }
-                *stats.request_started.lock().unwrap() = Some(Instant::now());
-                let request = request.map(|inner| {
-                    Body::new(CountBody {
-                        inner,
-                        stats: stats.clone(),
-                        response: false,
-                    })
-                });
-                let response = service.oneshot(request).await?;
-                Ok::<_, Infallible>(response.map(|inner| {
-                    Body::new(CountBody {
-                        inner,
-                        stats,
-                        response: true,
-                    })
-                }))
-            }
-        });
-        let (shutdown, receive) = oneshot::channel();
-        let task = tokio::spawn(async move {
-            serve(listener, service, async {
-                let _ = receive.await;
-            })
-            .await
-            .unwrap();
-        });
-        Ok(Self {
-            addr,
-            stats,
-            shutdown: Some(shutdown),
-            task,
-        })
-    }
 }
 
 struct CountCalls(AtomicUsize);
