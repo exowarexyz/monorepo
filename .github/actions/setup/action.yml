@@ -29,7 +29,9 @@ runs:
       run: echo "CARGO_PROFILE_DEV_DEBUG=line-tables-only" >> "$GITHUB_ENV"
     - name: Install stable Rust toolchain
       if: inputs.rust == 'true'
-      uses: dtolnay/rust-toolchain@stable
+      uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable branch
+      with:
+        toolchain: stable
     # rust-cache keys by job id, and job ids repeat across workflows (`lint` and `test` exist in
     # both rust.yml and typescript.yml). Without the workflow name, whichever job finishes first
     # on main claims the shared key and the other job can never save its cache. rust-cache
@@ -61,6 +63,6 @@ runs:
         shared-key: ${{ steps.cache-key.outputs.shared }}
         cache-on-failure: false
     - name: Set up Node.js
-      uses: actions/setup-node@v4
+      uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
       with:
         node-version: '24'
