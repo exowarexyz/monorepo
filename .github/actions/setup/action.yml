@@ -56,8 +56,7 @@ runs:
       if: inputs.rust == 'true'
       uses: Swatinem/rust-cache@f13886b937689c021905a6b90929199931d60db1 # v2.8.1
       with:
-        # TEMP measurement: also save from this PR so a second push can measure warm runs.
-        save-if: ${{ (github.ref == 'refs/heads/main' || github.head_ref == 'ci/fix-rust-caching') && inputs.save-cache == 'true' }}
+        save-if: ${{ github.ref == 'refs/heads/main' && inputs.save-cache == 'true' }}
         key: ${{ steps.cache-key.outputs.key }}
         shared-key: ${{ steps.cache-key.outputs.shared }}
         cache-on-failure: false
