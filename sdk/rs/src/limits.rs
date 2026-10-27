@@ -7,6 +7,9 @@ pub use crate::keys::MAX_KEY_LEN;
 pub const MAX_PUT_ENTRIES: usize = 2_000_000;
 pub const MAX_REQUEST_MESSAGE_BYTES: usize = 256 * 1024 * 1024;
 pub const MAX_VALUE_LEN: usize = 32 * 1024 * 1024;
+/// Most keys one GetMany request may ask for. The server holds every key, value
+/// and response entry for a request at once, so this bounds that memory.
+pub const MAX_GET_MANY_KEYS: usize = 65_536;
 
 // A stored batch adds sequence metadata to a full-size request. JSON reads also add
 // base64 expansion, so responses get double the request budget.

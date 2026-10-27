@@ -13,7 +13,8 @@ use exoware_proto::{
 use exoware_sdk as exoware_proto;
 use exoware_sdk::keys::{validate_key_size, MAX_KEY_LEN};
 use exoware_sdk::limits::{
-    PutTooLarge, INGEST_ERROR_DOMAIN, MAX_PUT_ENTRIES, MAX_VALUE_LEN, PUT_TOO_LARGE_REASON,
+    PutTooLarge, INGEST_ERROR_DOMAIN, MAX_GET_MANY_KEYS, MAX_PUT_ENTRIES, MAX_VALUE_LEN,
+    PUT_TOO_LARGE_REASON,
 };
 
 /// Limits enforced before ingest requests reach the backend.
@@ -232,6 +233,21 @@ pub fn validate_get_many_request(
             "INVALID_BATCH",
             "get_many request must contain at least one key",
             [],
+        ));
+    }
+    // Unlike the other checks here, this one has no `buf.validate` annotation
+    // yet. `query.proto` only declares `min_items: 1` for `keys`.
+    if request.keys.len() > MAX_GET_MANY_KEYS {
+        return Err(field_error(
+            "store.query",
+            "keys",
+            format!("at most {MAX_GET_MANY_KEYS} keys are allowed"),
+            "INVALID_BATCH",
+            format!(
+                "get_many request has {} keys, exceeding the limit of {MAX_GET_MANY_KEYS}",
+                request.keys.len()
+            ),
+            [("max_keys".to_string(), MAX_GET_MANY_KEYS.to_string())],
         ));
     }
     for (index, key) in request.keys.iter().enumerate() {
@@ -561,6 +577,21 @@ mod tests {
     fn get_many_rejects_oversized_key() {
         let big = vec![0u8; 255];
         let bytes = get_many_request_bytes(&[&big], 10);
+        let view = exoware_proto::store::query::v1::GetManyRequestView::decode_view(&bytes)
+            .expect("parse");
+        let err = validate_get_many_request(&view).unwrap_err();
+        assert_eq!(err.code, connectrpc::ErrorCode::InvalidArgument);
+    }
+
+    #[test]
+    fn get_many_key_count_limit() {
+        let keys = vec![&b"k"[..]; MAX_GET_MANY_KEYS + 1];
+        let bytes = get_many_request_bytes(&keys[..MAX_GET_MANY_KEYS], 10);
+        let view = exoware_proto::store::query::v1::GetManyRequestView::decode_view(&bytes)
+            .expect("parse");
+        validate_get_many_request(&view).expect("the limit itself is allowed");
+
+        let bytes = get_many_request_bytes(&keys, 10);
         let view = exoware_proto::store::query::v1::GetManyRequestView::decode_view(&bytes)
             .expect("parse");
         let err = validate_get_many_request(&view).unwrap_err();
