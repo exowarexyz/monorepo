@@ -2768,7 +2768,7 @@ mod tests {
             .contains("failed verification"));
 
         // A relabeled location that matches the request still fails the proof.
-        let mut relabeled = proto.clone();
+        let mut relabeled = proto;
         relabeled.operations[1].location = 1;
         assert!(verify(&relabeled, 4, &[0, 1], &ops_root)
             .unwrap_err()

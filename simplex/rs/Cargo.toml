@@ -9,6 +9,9 @@ homepage.workspace = true
 repository = "https://github.com/exowarexyz/monorepo/tree/main/simplex/rs"
 documentation = "https://docs.rs/exoware-simplex"
 
+[lints]
+workspace = true
+
 [[bin]]
 name = "simplex"
 path = "src/bin/simplex.rs"

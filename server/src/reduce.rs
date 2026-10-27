@@ -1226,11 +1226,11 @@ mod tests {
                 Expr::Cast(Cast::new(Box::new(col("i")), DataType::Float64)),
             ),
             (
-                KvExpr::CastFloat64(Box::new(u.clone())),
+                KvExpr::CastFloat64(Box::new(u)),
                 Expr::Cast(Cast::new(Box::new(col("u")), DataType::Float64)),
             ),
             (
-                KvExpr::CastFloat64(Box::new(f.clone())),
+                KvExpr::CastFloat64(Box::new(f)),
                 Expr::Cast(Cast::new(Box::new(col("f")), DataType::Float64)),
             ),
             (

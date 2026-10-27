@@ -4413,7 +4413,7 @@ mod tests {
         let model = TableModel::from_config(&config).unwrap();
 
         let entity = vec![0xBB; 32];
-        let pk_entity = CellValue::FixedBinary(entity.clone());
+        let pk_entity = CellValue::FixedBinary(entity);
 
         let key_v1 = encode_primary_key(0, &[&pk_entity, &CellValue::UInt64(1)], &model)
             .expect("pk key encodes");
@@ -5316,10 +5316,7 @@ mod tests {
         let max_id = "i".repeat(max_payload - encode_string_variable(&max_tag).unwrap().len() - 1);
         let overflow_id = format!("{max_id}x");
         let max_row = KvRow {
-            values: vec![
-                CellValue::Utf8(max_id.clone()),
-                CellValue::Utf8(max_tag.clone()),
-            ],
+            values: vec![CellValue::Utf8(max_id.clone()), CellValue::Utf8(max_tag)],
         };
         let encoded_row = encode_base_row_value(&max_row, &model).expect("encode row");
         let archived = decode_stored_row(&encoded_row).expect("archive row");
@@ -5328,7 +5325,7 @@ mod tests {
             model.table_prefix,
             spec,
             &model,
-            &[CellValue::Utf8(max_id.clone())],
+            &[CellValue::Utf8(max_id)],
             &archived,
         )
         .expect("backfill path should encode max payload");

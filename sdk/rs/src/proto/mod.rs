@@ -9,6 +9,7 @@ pub mod log {
             #![allow(unused_imports)]
             #![allow(clippy::derivable_impls)]
             #![allow(clippy::match_single_binding)]
+            #![allow(elided_lifetimes_in_paths)]
             include!("../gen/log.ingest.v1.rs");
         }
     }
@@ -19,6 +20,7 @@ pub mod log {
             #![allow(unused_imports)]
             #![allow(clippy::derivable_impls)]
             #![allow(clippy::match_single_binding)]
+            #![allow(elided_lifetimes_in_paths)]
             include!("../gen/log.retention.v1.rs");
         }
     }
@@ -29,6 +31,7 @@ pub mod log {
             #![allow(unused_imports)]
             #![allow(clippy::derivable_impls)]
             #![allow(clippy::match_single_binding)]
+            #![allow(elided_lifetimes_in_paths)]
             include!("../gen/log.stream.v1.rs");
         }
     }
@@ -41,6 +44,7 @@ pub mod store {
             #![allow(unused_imports)]
             #![allow(clippy::derivable_impls)]
             #![allow(clippy::match_single_binding)]
+            #![allow(elided_lifetimes_in_paths)]
             include!("../gen/store.prune.v1.rs");
         }
     }
@@ -51,6 +55,7 @@ pub mod store {
             #![allow(unused_imports)]
             #![allow(clippy::derivable_impls)]
             #![allow(clippy::match_single_binding)]
+            #![allow(elided_lifetimes_in_paths)]
             include!("../gen/store.query.v1.rs");
         }
     }
@@ -62,6 +67,7 @@ pub mod google {
         #![allow(unused_imports)]
         #![allow(clippy::derivable_impls)]
         #![allow(clippy::match_single_binding)]
+        #![allow(elided_lifetimes_in_paths)]
         include!("../gen/google.rpc.rs");
     }
 }
@@ -73,6 +79,7 @@ pub mod common {
             #![allow(unused_imports)]
             #![allow(clippy::derivable_impls)]
             #![allow(clippy::match_single_binding)]
+            #![allow(elided_lifetimes_in_paths)]
             include!("../gen/common.kv.v1.rs");
         }
     }
@@ -84,6 +91,7 @@ pub mod ingest {
     #![allow(unused_imports)]
     #![allow(clippy::derivable_impls)]
     #![allow(clippy::match_single_binding)]
+    #![allow(elided_lifetimes_in_paths)]
     pub use crate::log::ingest::v1::*;
 }
 
@@ -92,6 +100,7 @@ pub mod prune {
     #![allow(unused_imports)]
     #![allow(clippy::derivable_impls)]
     #![allow(clippy::match_single_binding)]
+    #![allow(elided_lifetimes_in_paths)]
     pub use crate::store::prune::v1::*;
 }
 
@@ -100,6 +109,7 @@ pub mod query {
     #![allow(unused_imports)]
     #![allow(clippy::derivable_impls)]
     #![allow(clippy::match_single_binding)]
+    #![allow(elided_lifetimes_in_paths)]
     pub use crate::store::query::v1::*;
 }
 
@@ -108,6 +118,7 @@ pub mod stream {
     #![allow(unused_imports)]
     #![allow(clippy::derivable_impls)]
     #![allow(clippy::match_single_binding)]
+    #![allow(elided_lifetimes_in_paths)]
     pub use crate::log::stream::v1::*;
 }
 

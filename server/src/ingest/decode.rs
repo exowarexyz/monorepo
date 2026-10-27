@@ -718,7 +718,7 @@ mod tests {
                 ..PutLimits::default()
             },
             admission.transport.clone(),
-            admission.request.clone(),
+            admission.request,
         );
         (state, budget)
     }
@@ -1000,7 +1000,7 @@ mod tests {
     fn large_unknown_field_does_not_pin_its_backing_in_the_next_chunk() {
         let unknown = field(26, &vec![9; 2 * 1024 * 1024]);
         let suffix = entry(b"key", b"value");
-        let wire = [unknown.clone(), suffix].concat();
+        let wire = [unknown, suffix].concat();
         let (mut state, _) = state(PutEncoding::Identity, wire.len() + 64);
         state.feed(Bytes::from(wire), true);
         let output = state.run(DecodeBuffers::new(8192, 16));

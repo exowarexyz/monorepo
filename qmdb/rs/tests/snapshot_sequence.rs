@@ -211,7 +211,7 @@ impl Query for LoadBalancedQuery {
         let snapshot = self.route();
         let mut rows = snapshot
             .rows
-            .range(start.clone()..)
+            .range(start..)
             .take_while(|(key, _)| end.is_empty() || *key <= &end)
             .map(|(key, value)| (key.clone(), value.clone()))
             .collect::<Vec<_>>();

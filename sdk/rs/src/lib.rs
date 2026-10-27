@@ -3670,17 +3670,17 @@ mod tests {
                 });
                 let payload = match path {
                     "/store.query.v1.Service/Get" => proto_query::GetResponse {
-                        detail: detail.clone().into(),
+                        detail: detail.into(),
                         ..Default::default()
                     }
                     .encode_to_bytes(),
                     "/store.query.v1.Service/GetMany" => proto_query::GetManyFrame {
-                        detail: detail.clone().into(),
+                        detail: detail.into(),
                         ..Default::default()
                     }
                     .encode_to_bytes(),
                     "/store.query.v1.Service/Range" => proto_query::RangeFrame {
-                        detail: detail.clone().into(),
+                        detail: detail.into(),
                         ..Default::default()
                     }
                     .encode_to_bytes(),
@@ -4730,7 +4730,7 @@ mod tests {
         let client = PrefixedStoreClient::empty(StoreClient::new("http://localhost:10000/"));
         for parent in [
             ReadSession::monotonic(client.clone(), None),
-            ReadSession::fixed(client.clone(), None),
+            ReadSession::fixed(client, None),
         ] {
             let zero = parent.with_min_sequence_number(0);
             let stronger = zero.with_min_sequence_number(7);
@@ -5038,7 +5038,7 @@ mod tests {
         assert_eq!(merged.prefix.as_ref(), &[0x05, 0x06, 0x07]);
 
         // Reconstruct the codec EXACTLY as apply_key_prune_policy does.
-        let codec = Prefix::new(merged.prefix.clone()).unwrap();
+        let codec = Prefix::new(merged.prefix).unwrap();
 
         // Round-trip a real key through the reconstructed codec.
         let payload = [0xAA, 0xBB, 0xCC];
