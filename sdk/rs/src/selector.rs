@@ -41,7 +41,7 @@ impl Read for Selector {
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let range: RangeCfg<usize> = (..=MAX_KEY_LEN).into();
         let prefix = Vec::<u8>::read_cfg(buf, &(range, ()))?;
-        Ok(Selector {
+        Ok(Self {
             prefix: Bytes::from(prefix),
             payload_regex: Utf8::read(buf)?,
         })

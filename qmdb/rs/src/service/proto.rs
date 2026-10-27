@@ -13,6 +13,7 @@ pub mod qmdb {
         #![allow(clippy::derivable_impls)]
         #![allow(clippy::match_single_binding)]
         #![allow(elided_lifetimes_in_paths)]
+        #![allow(clippy::use_self)]
         include!("../gen/qmdb.v1.rs");
     }
 }

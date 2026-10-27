@@ -46,7 +46,7 @@ impl PreparedUpload {
         &self.entries
     }
 
-    pub fn extend(&mut self, other: PreparedUpload) {
+    pub fn extend(&mut self, other: Self) {
         self.summary.headers += other.summary.headers;
         self.summary.blocks += other.summary.blocks;
         self.summary.notarizations += other.summary.notarizations;

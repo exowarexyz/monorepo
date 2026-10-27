@@ -78,7 +78,7 @@ impl Read for Utf8 {
         let bytes = Vec::<u8>::read_cfg(buf, &(range, ()))?;
         let s =
             String::from_utf8(bytes).map_err(|_| CodecError::Invalid("Utf8", "invalid utf8"))?;
-        Ok(Utf8(s))
+        Ok(Self(s))
     }
 }
 
@@ -120,13 +120,13 @@ pub enum KvFieldRef {
 pub enum KvExpr {
     Field(KvFieldRef),
     Literal(KvReducedValue),
-    Add(Box<KvExpr>, Box<KvExpr>),
-    Sub(Box<KvExpr>, Box<KvExpr>),
-    Mul(Box<KvExpr>, Box<KvExpr>),
-    Div(Box<KvExpr>, Box<KvExpr>),
-    Lower(Box<KvExpr>),
-    DateTruncDay(Box<KvExpr>),
-    CastFloat64(Box<KvExpr>),
+    Add(Box<Self>, Box<Self>),
+    Sub(Box<Self>, Box<Self>),
+    Mul(Box<Self>, Box<Self>),
+    Div(Box<Self>, Box<Self>),
+    Lower(Box<Self>),
+    DateTruncDay(Box<Self>),
+    CastFloat64(Box<Self>),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -197,37 +197,37 @@ pub enum StoredValue {
     Boolean(bool),
     Utf8(String),
     Bytes(Vec<u8>),
-    List(Vec<StoredValue>),
+    List(Vec<Self>),
 }
 
 impl Write for StoredValue {
     fn write(&self, buf: &mut impl BufMut) {
         match self {
-            StoredValue::Int64(v) => {
+            Self::Int64(v) => {
                 0u8.write(buf);
                 v.write(buf);
             }
-            StoredValue::UInt64(v) => {
+            Self::UInt64(v) => {
                 1u8.write(buf);
                 v.write(buf);
             }
-            StoredValue::Float64(v) => {
+            Self::Float64(v) => {
                 2u8.write(buf);
                 v.write(buf);
             }
-            StoredValue::Boolean(v) => {
+            Self::Boolean(v) => {
                 3u8.write(buf);
                 v.write(buf);
             }
-            StoredValue::Utf8(v) => {
+            Self::Utf8(v) => {
                 4u8.write(buf);
                 v.as_bytes().write(buf);
             }
-            StoredValue::Bytes(v) => {
+            Self::Bytes(v) => {
                 5u8.write(buf);
                 v.as_slice().write(buf);
             }
-            StoredValue::List(items) => {
+            Self::List(items) => {
                 6u8.write(buf);
                 items.as_slice().write(buf);
             }
@@ -238,13 +238,13 @@ impl Write for StoredValue {
 impl EncodeSize for StoredValue {
     fn encode_size(&self) -> usize {
         1 + match self {
-            StoredValue::Int64(_) => i64::SIZE,
-            StoredValue::UInt64(_) => u64::SIZE,
-            StoredValue::Float64(_) => f64::SIZE,
-            StoredValue::Boolean(_) => bool::SIZE,
-            StoredValue::Utf8(v) => v.as_bytes().encode_size(),
-            StoredValue::Bytes(v) => v.as_slice().encode_size(),
-            StoredValue::List(items) => items.as_slice().encode_size(),
+            Self::Int64(_) => i64::SIZE,
+            Self::UInt64(_) => u64::SIZE,
+            Self::Float64(_) => f64::SIZE,
+            Self::Boolean(_) => bool::SIZE,
+            Self::Utf8(v) => v.as_bytes().encode_size(),
+            Self::Bytes(v) => v.as_slice().encode_size(),
+            Self::List(items) => items.as_slice().encode_size(),
         }
     }
 }
@@ -254,18 +254,18 @@ impl Read for StoredValue {
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let range: RangeCfg<usize> = (..).into();
         match u8::read(buf)? {
-            0 => Ok(StoredValue::Int64(i64::read(buf)?)),
-            1 => Ok(StoredValue::UInt64(u64::read(buf)?)),
-            2 => Ok(StoredValue::Float64(f64::read(buf)?)),
-            3 => Ok(StoredValue::Boolean(bool::read(buf)?)),
-            4 => Ok(StoredValue::Utf8(Utf8::read(buf)?.0)),
+            0 => Ok(Self::Int64(i64::read(buf)?)),
+            1 => Ok(Self::UInt64(u64::read(buf)?)),
+            2 => Ok(Self::Float64(f64::read(buf)?)),
+            3 => Ok(Self::Boolean(bool::read(buf)?)),
+            4 => Ok(Self::Utf8(Utf8::read(buf)?.0)),
             5 => {
                 let bytes = Vec::<u8>::read_cfg(buf, &(range, ()))?;
-                Ok(StoredValue::Bytes(bytes))
+                Ok(Self::Bytes(bytes))
             }
             6 => {
-                let items = Vec::<StoredValue>::read_cfg(buf, &(range, ()))?;
-                Ok(StoredValue::List(items))
+                let items = Vec::<Self>::read_cfg(buf, &(range, ()))?;
+                Ok(Self::List(items))
             }
             v => Err(CodecError::InvalidEnum(v)),
         }
@@ -294,7 +294,7 @@ impl Read for StoredRow {
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let range: RangeCfg<usize> = (..).into();
         let values = Vec::<Option<StoredValue>>::read_cfg(buf, &(range, ()))?;
-        Ok(StoredRow { values })
+        Ok(Self { values })
     }
 }
 

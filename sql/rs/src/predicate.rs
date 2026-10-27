@@ -1002,7 +1002,7 @@ impl QueryPredicate {
             for (col_idx, constraint) in combo {
                 tmp_constraints.insert(*col_idx, constraint.clone());
             }
-            let tmp = QueryPredicate {
+            let tmp = Self {
                 constraints: tmp_constraints,
                 contradiction: self.contradiction,
             };
