@@ -9,10 +9,11 @@ on:
     branches: ["main"]
 
 # Cancel a PR's in-flight run when a new commit is pushed, so the visible result always
-# corresponds to the latest commit rather than a slower, superseded run. Runs on main are
-# never cancelled, so each one gets to save its cache.
+# corresponds to the latest commit rather than a slower, superseded run. Every other run gets
+# its own group: a shared group only keeps one pending run and cancels the one before it, so
+# rapid merges to main would drop runs (and their benchmark reports).
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
