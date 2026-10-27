@@ -69,8 +69,14 @@ jobs:
       # everything. Pinning the timestamps to a fixed old date lets the cache be reused.
       - name: Pin nightly toolchain timestamps
         run: find "$(rustc +${{ env.NIGHTLY_VERSION }} --print sysroot)" -exec touch -h -t 200001010000 {} +
+      # The cache key only fingerprints the stable toolchain, but udeps compiles with nightly.
+      # Without the pin in the key, bumping NIGHTLY_VERSION would restore an exact match full of
+      # artifacts from the old nightly, rebuild them, and never save the result (rust-cache skips
+      # saving after an exact hit).
       - name: Run setup
         uses: ./.github/actions/setup
+        with:
+          additional-cache-key: ${{ env.NIGHTLY_VERSION }}
       - name: Install cargo-udeps
         uses: taiki-e/install-action@v2
         with:
