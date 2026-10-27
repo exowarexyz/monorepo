@@ -4,46 +4,50 @@
 
 mod common;
 
-use std::collections::{BTreeMap, VecDeque};
-use std::num::NonZeroU64;
-use std::sync::{Arc, Mutex};
-
 use bytes::Bytes;
 use commonware_codec::Encode;
 use commonware_cryptography::Sha256;
-use commonware_runtime::tokio as cw_tokio;
-use commonware_runtime::Runner as _;
-use commonware_storage::merkle::{mmr, Location, Proof};
-use commonware_storage::qmdb::any::{
-    ordered::variable::Operation as QmdbOperation, value::VariableEncoding,
+use commonware_runtime::{tokio as cw_tokio, Runner as _};
+use commonware_storage::{
+    merkle::{mmr, Location, Proof},
+    qmdb::{
+        any::{
+            ordered::{variable::Operation as QmdbOperation, Update},
+            value::VariableEncoding,
+        },
+        current::ordered::{proof::constant::ExclusionProof, variable::Db as LocalQmdbDb},
+        operation::Operation as _,
+    },
+    translator::TwoCap,
 };
-use commonware_storage::qmdb::{
-    any::ordered::Update,
-    current::ordered::{proof::constant::ExclusionProof, variable::Db as LocalQmdbDb},
-    operation::Operation as _,
-};
-use commonware_storage::translator::TwoCap;
 use commonware_utils::{NZUsize, NZU16, NZU64};
-use connectrpc::client::ClientConfig;
-use connectrpc::{Chain, ConnectRpcService, RequestContext as Context, ServiceRequest};
-use exoware_qmdb::service::proto::qmdb::v1::{
-    current_key_lookup_result, CurrentOperationServiceClient,
-    GetCurrentOperationRangeRequest as ProtoGetCurrentOperationRangeRequest,
-    GetManyRequest as ProtoGetManyRequest, GetManyResponse as ProtoGetManyResponse,
-    GetRangeRequest as ProtoGetRangeRequest, GetRangeResponse as ProtoGetRangeResponse,
-    GetRequest as ProtoGetRequest, GetResponse as ProtoGetResponse, KeyLookupService,
-    KeyLookupServiceClient, KeyLookupServiceServer, OrderedKeyRangeService,
-    OrderedKeyRangeServiceClient, OrderedKeyRangeServiceServer,
+use connectrpc::{
+    client::ClientConfig, Chain, ConnectRpcService, RequestContext as Context, ServiceRequest,
 };
 use exoware_qmdb::{
     adapter::upload::recover_boundary_state,
     proof::{RawKeyExclusionProof, RawKeyLookupProof, VerifiedKeyLookup},
+    service::proto::qmdb::v1::{
+        current_key_lookup_result, CurrentOperationServiceClient,
+        GetCurrentOperationRangeRequest as ProtoGetCurrentOperationRangeRequest,
+        GetManyRequest as ProtoGetManyRequest, GetManyResponse as ProtoGetManyResponse,
+        GetRangeRequest as ProtoGetRangeRequest, GetRangeResponse as ProtoGetRangeResponse,
+        GetRequest as ProtoGetRequest, GetResponse as ProtoGetResponse, KeyLookupService,
+        KeyLookupServiceClient, KeyLookupServiceServer, OrderedKeyRangeService,
+        OrderedKeyRangeServiceClient, OrderedKeyRangeServiceServer,
+    },
     CurrentBoundaryState, QmdbError, MAX_OPERATION_SIZE,
 };
-use exoware_sdk::proto::PreferZstdHttpClient;
-use exoware_sdk::{PrefixedStoreClient, RetryConfig, StoreClient, StoreWriteBatch};
+use exoware_sdk::{
+    proto::PreferZstdHttpClient, PrefixedStoreClient, RetryConfig, StoreClient, StoreWriteBatch,
+};
 use exoware_server::{
     Query, QueryExtra, QueryResult, RangeScan, RangeScanBatch, RangeScanResult, Sequence,
+};
+use std::{
+    collections::{BTreeMap, VecDeque},
+    num::NonZeroU64,
+    sync::{Arc, Mutex},
 };
 
 const N: usize = 32;

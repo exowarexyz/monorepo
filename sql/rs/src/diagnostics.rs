@@ -1,10 +1,5 @@
+use crate::{aggregate::AggregateAccessPath, codec::*, filter::*, predicate::*, types::*};
 use datafusion::common::Result as DataFusionResult;
-
-use crate::aggregate::AggregateAccessPath;
-use crate::codec::*;
-use crate::filter::*;
-use crate::predicate::*;
-use crate::types::*;
 
 #[derive(Debug, Clone)]
 pub(crate) struct AccessPathDiagnostics {

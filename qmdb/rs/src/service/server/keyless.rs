@@ -2,9 +2,13 @@
 //! filters because keyless operations have no logical key. Location reads are
 //! Rust helpers on [`crate::adapter::Keyless`].
 
-use std::future::Future;
-use std::sync::Arc;
-
+use super::{OperationLogReader, OperationLogServer};
+use crate::{
+    adapter::Keyless,
+    proof::{MultiProofOperations, OperationRangeCheckpoint, RawBatchMultiProof},
+    service::proto::qmdb::v1::OperationLogServiceServer,
+    OperationKv, PublishedWatermark, QmdbError,
+};
 use commonware_codec::{Decode, Encode, Read};
 use commonware_cryptography::Hasher;
 use commonware_storage::{
@@ -13,12 +17,7 @@ use commonware_storage::{
 };
 use connectrpc::ConnectRpcService;
 use exoware_sdk::PrefixedStoreClient;
-
-use super::{OperationLogReader, OperationLogServer};
-use crate::adapter::Keyless;
-use crate::proof::{MultiProofOperations, OperationRangeCheckpoint, RawBatchMultiProof};
-use crate::service::proto::qmdb::v1::OperationLogServiceServer;
-use crate::{OperationKv, PublishedWatermark, QmdbError};
+use std::{future::Future, sync::Arc};
 
 impl<F, H, V, E> OperationLogReader for Keyless<F, H, V, E>
 where

@@ -4,8 +4,18 @@
 //! the same operation history, so repeated operation and Merkle node keys have identical values.
 //! The caller owns publication of the durable contiguous prefix through [`stage_watermark`].
 
-use std::collections::BTreeSet;
-
+use crate::{
+    adapter::{
+        codec::{
+            encode_chunk_key, encode_current_meta_key, encode_grafted_node_key, encode_node_key,
+            encode_operation_key, encode_ops_root_witness_key, encode_presence_key,
+            encode_update_index_value, encode_update_key, encode_watermark_key,
+            ensure_encoded_value_size, CurrentBoundaryMetadata,
+        },
+        core::extend_merkle_from_pinned_nodes,
+    },
+    CurrentBoundaryState, ProofKind, QmdbError,
+};
 use commonware_codec::{Codec, Copying, Encode};
 use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::Strategy;
@@ -22,17 +32,7 @@ use commonware_storage::{
     },
 };
 use exoware_sdk::{keys::Key, PrefixedStoreClient, StoreWriteBatch};
-
-use crate::{
-    adapter::codec::{
-        encode_chunk_key, encode_current_meta_key, encode_grafted_node_key, encode_node_key,
-        encode_operation_key, encode_ops_root_witness_key, encode_presence_key,
-        encode_update_index_value, encode_update_key, encode_watermark_key,
-        ensure_encoded_value_size, CurrentBoundaryMetadata,
-    },
-    adapter::core::extend_merkle_from_pinned_nodes,
-    CurrentBoundaryState, ProofKind, QmdbError,
-};
+use std::collections::BTreeSet;
 
 /// An operation range and prefix frontier for authentication against a trusted root.
 #[derive(Clone, Copy, Debug, PartialEq)]

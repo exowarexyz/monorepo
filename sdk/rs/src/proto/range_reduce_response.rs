@@ -1,6 +1,5 @@
 use super::to_domain_reduced_value_from_view;
-use crate::query;
-use crate::{RangeReduceGroup, RangeReduceResponse, RangeReduceResult};
+use crate::{query, RangeReduceGroup, RangeReduceResponse, RangeReduceResult};
 
 /// Converts a borrowed wire response into the domain reduction model.
 pub fn to_domain_reduce_response(
@@ -63,8 +62,10 @@ pub fn to_domain_reduce_response(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::query::{self, kv_reduced_value};
-    use crate::{to_proto_reduce_response, KvReducedValue};
+    use crate::{
+        query::{self, kv_reduced_value},
+        to_proto_reduce_response, KvReducedValue,
+    };
 
     #[test]
     fn domain_round_trip_preserves_sparse_group_keys() {

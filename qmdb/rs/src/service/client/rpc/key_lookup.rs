@@ -1,20 +1,17 @@
 //! Verifying client for `qmdb.v1.KeyLookupService`.
 
-use std::collections::BTreeSet;
-use std::fmt::Display;
-use std::sync::Arc;
-
+use super::connect_error_to_qmdb;
+use crate::{
+    service::proto::qmdb::v1::{
+        CurrentKeyLookupResult, CurrentKeyValueProof, GetManyRequest, GetRequest,
+        KeyLookupServiceClient,
+    },
+    QmdbError,
+};
 use bytes::Bytes;
 use connectrpc::client::{ClientConfig, ClientTransport};
 use http_body::Body;
-
-use crate::service::proto::qmdb::v1::{
-    CurrentKeyLookupResult, CurrentKeyValueProof, GetManyRequest, GetRequest,
-    KeyLookupServiceClient,
-};
-use crate::QmdbError;
-
-use super::connect_error_to_qmdb;
+use std::{collections::BTreeSet, fmt::Display, sync::Arc};
 
 /// Kind-specific verification of `KeyLookupService` responses.
 ///

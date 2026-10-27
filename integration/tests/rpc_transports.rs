@@ -1,19 +1,28 @@
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
-use std::time::Duration;
-
 use axum::Router;
-use connectrpc::rustls::pki_types::{pem::PemObject, CertificateDer, PrivateKeyDer};
-use connectrpc::rustls::server::WebPkiClientVerifier;
-use connectrpc::rustls::{ClientConfig, RootCertStore, ServerConfig};
-use exoware_sdk::kv_codec::Utf8;
-use exoware_sdk::selector::Selector;
-use exoware_sdk::stream_filter::StreamFilter;
-use exoware_sdk::transport::{BalancedHttp2Config, HttpClient};
-use exoware_sdk::{Key, RetryConfig, StoreClient, StoreKeyPrefix};
+use connectrpc::rustls::{
+    pki_types::{pem::PemObject, CertificateDer, PrivateKeyDer},
+    server::WebPkiClientVerifier,
+    ClientConfig, RootCertStore, ServerConfig,
+};
+use exoware_sdk::{
+    kv_codec::Utf8,
+    selector::Selector,
+    stream_filter::StreamFilter,
+    transport::{BalancedHttp2Config, HttpClient},
+    Key, RetryConfig, StoreClient, StoreKeyPrefix,
+};
 use exoware_simulator::{connect_stack, AppState, RocksStore};
-use hyper_util::rt::{TokioExecutor, TokioIo};
-use hyper_util::service::TowerToHyperService;
+use hyper_util::{
+    rt::{TokioExecutor, TokioIo},
+    service::TowerToHyperService,
+};
+use std::{
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+    time::Duration,
+};
 use tokio_rustls::TlsAcceptor;
 
 const LOCALHOST_CERT: &str = include_str!("data/localhost-cert.pem");

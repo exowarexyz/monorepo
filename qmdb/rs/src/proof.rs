@@ -1,5 +1,4 @@
-use std::collections::HashMap;
-
+use crate::{adapter::codec::op_count_for_watermark, QmdbError};
 use commonware_codec::Codec;
 use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::{Sequential, Strategy};
@@ -17,9 +16,7 @@ use commonware_storage::{
         operation::{Key as QmdbKey, Operation},
     },
 };
-
-use crate::adapter::codec::op_count_for_watermark;
-use crate::QmdbError;
+use std::collections::HashMap;
 
 /// Historical operation range plus the raw Merkle proof material used to verify
 /// it. This is suitable for checkpointing and local Merkle continuation.

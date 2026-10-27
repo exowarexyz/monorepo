@@ -1,11 +1,9 @@
 //! Store simulator CLI (RocksDB).
 
 use clap::{Arg, ArgAction, Command};
+use exoware_simulator::{rocks::WRITER_THREAD_PREFIX, server};
 use std::path::PathBuf;
 use tracing::error;
-
-use exoware_simulator::rocks::WRITER_THREAD_PREFIX;
-use exoware_simulator::server;
 
 #[global_allocator]
 static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;

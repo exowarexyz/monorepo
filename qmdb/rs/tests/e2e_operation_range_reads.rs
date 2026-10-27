@@ -3,40 +3,52 @@
 #[allow(dead_code)]
 mod common;
 
-use std::collections::{BTreeMap, BTreeSet};
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
-
 use bytes::Bytes;
 use commonware_codec::Encode;
 use commonware_cryptography::{sha256::Digest, Sha256};
-use commonware_storage::merkle::{hasher::Hasher as _, mem::Mem, mmr, Family, Location, Position};
-use commonware_storage::qmdb::any::ordered::{
-    variable::Operation as OrderedOperation, Update as OrderedUpdate,
+use commonware_storage::{
+    merkle::{hasher::Hasher as _, mem::Mem, mmr, Family, Location, Position},
+    qmdb::{
+        any::{
+            ordered::{variable::Operation as OrderedOperation, Update as OrderedUpdate},
+            unordered::variable::Operation as UnorderedOperation,
+            value::VariableEncoding,
+        },
+        immutable::variable::Operation as ImmutableOperation,
+        keyless::variable::Operation as KeylessOperation,
+    },
 };
-use commonware_storage::qmdb::any::unordered::variable::Operation as UnorderedOperation;
-use commonware_storage::qmdb::any::value::VariableEncoding;
-use commonware_storage::qmdb::immutable::variable::Operation as ImmutableOperation;
-use commonware_storage::qmdb::keyless::variable::Operation as KeylessOperation;
 use connectrpc::{ConnectError, ConnectRpcService, ErrorCode, RequestContext, ServiceRequest};
-use exoware_qmdb::service::proto::qmdb::v1::{GetOperationRangeRequest, GetOperationsRequest};
 use exoware_qmdb::{
-    adapter::upload::stage_authenticated_range, adapter::upload::stage_watermark,
-    adapter::upload::UploadOperation, service::client::rpc::OperationLogClient, NODE_FAMILY,
+    adapter::upload::{stage_authenticated_range, stage_watermark, UploadOperation},
+    service::{
+        client::rpc::OperationLogClient,
+        proto::qmdb::v1::{GetOperationRangeRequest, GetOperationsRequest},
+    },
+    NODE_FAMILY,
 };
-use exoware_sdk::common::kv::v1::Entry;
-use exoware_sdk::google::rpc::{ErrorInfo, RetryInfo};
-use exoware_sdk::proto::PreferZstdHttpClient;
-use exoware_sdk::proto::{
-    decode_connect_error, with_error_info_detail, with_query_detail, with_retry_info_detail,
+use exoware_sdk::{
+    common::kv::v1::Entry,
+    google::rpc::{ErrorInfo, RetryInfo},
+    proto::{
+        decode_connect_error, with_error_info_detail, with_query_detail, with_retry_info_detail,
+        PreferZstdHttpClient,
+    },
+    query::{
+        Detail, GetManyEntry, GetManyFrame, GetManyRequest, GetRequest, GetResponse, RangeFrame,
+        RangeRequest, ReduceRequest, ReduceResponse, Service, ServiceServer, TraversalMode,
+    },
+    PrefixedStoreClient, RetryConfig, StoreClient, StoreKeyPrefix, StoreWriteBatch,
 };
-use exoware_sdk::query::{
-    Detail, GetManyEntry, GetManyFrame, GetManyRequest, GetRequest, GetResponse, RangeFrame,
-    RangeRequest, ReduceRequest, ReduceResponse, Service, ServiceServer, TraversalMode,
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::{Arc, Mutex},
+    time::Duration,
 };
-use exoware_sdk::{PrefixedStoreClient, RetryConfig, StoreClient, StoreKeyPrefix, StoreWriteBatch};
-use tokio::sync::{Notify, Semaphore};
-use tokio::task::JoinHandle;
+use tokio::{
+    sync::{Notify, Semaphore},
+    task::JoinHandle,
+};
 
 type Operation = KeylessOperation<mmr::Family, Vec<u8>>;
 type OrderedOp = OrderedOperation<mmr::Family, Vec<u8>, Vec<u8>>;

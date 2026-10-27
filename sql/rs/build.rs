@@ -1,5 +1,7 @@
-use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::{
+    path::{Path, PathBuf},
+    process::Command,
+};
 
 const SQL_PROTO_FILES: &[&str] = &[
     "sql/v1/schema.proto",

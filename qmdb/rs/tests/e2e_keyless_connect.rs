@@ -3,31 +3,40 @@
 
 mod common;
 
-use std::num::NonZeroU64;
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
-
 use bytes::Bytes;
 use commonware_codec::Encode;
 use commonware_glue::stateful::db::{StateSyncDb, SyncEngineConfig};
 use commonware_runtime::{deterministic, tokio as cw_tokio, Runner as _};
-use commonware_storage::merkle::{mmr, Location};
-use commonware_storage::qmdb::keyless::variable::{Db as Keyless, Operation as KeylessOperation};
-use commonware_storage::qmdb::sync::{Request, Response, Source as _, Target};
-use commonware_utils::channel::mpsc;
-use commonware_utils::{NZUsize, NZU16, NZU64};
-use connectrpc::client::{BoxFuture, ClientBody, ClientTransport};
-use exoware_qmdb::service::proto::qmdb::v1::{
-    GetOperationRangeRequest as ProtoGetOperationRangeRequest,
-    GetOperationsRequest as ProtoGetOperationsRequest, SubscribeRequest as ProtoSubscribeRequest,
+use commonware_storage::{
+    merkle::{mmr, Location},
+    qmdb::{
+        keyless::variable::{Db as Keyless, Operation as KeylessOperation},
+        sync::{Request, Response, Source as _, Target},
+    },
 };
+use commonware_utils::{channel::mpsc, NZUsize, NZU16, NZU64};
+use connectrpc::client::{BoxFuture, ClientBody, ClientTransport};
 use exoware_qmdb::{
-    service::client::rpc::OperationLogClient, service::client::rpc::OperationLogSubscribeProof,
+    service::{
+        client::rpc::{OperationLogClient, OperationLogSubscribeProof},
+        proto::qmdb::v1::{
+            GetOperationRangeRequest as ProtoGetOperationRangeRequest,
+            GetOperationsRequest as ProtoGetOperationsRequest,
+            SubscribeRequest as ProtoSubscribeRequest,
+        },
+    },
     QmdbError,
 };
-use exoware_sdk::common::kv::v1::{filter as proto_filter, Filter as ProtoFilter};
-use exoware_sdk::proto::{decode_connect_error, PreferZstdHttpClient};
-use exoware_sdk::{PrefixedStoreClient, RetryConfig, StoreClient};
+use exoware_sdk::{
+    common::kv::v1::{filter as proto_filter, Filter as ProtoFilter},
+    proto::{decode_connect_error, PreferZstdHttpClient},
+    PrefixedStoreClient, RetryConfig, StoreClient,
+};
+use std::{
+    num::NonZeroU64,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 type Digest = commonware_cryptography::sha256::Digest;
 type Db = Keyless<
@@ -75,9 +84,7 @@ fn operation_log_client(
 
 #[tokio::test]
 async fn test_overlapping_atomic_uploads_emit_each_operation_once() {
-    use exoware_qmdb::{
-        adapter::upload::stage_authenticated_range, adapter::upload::stage_watermark,
-    };
+    use exoware_qmdb::adapter::upload::{stage_authenticated_range, stage_watermark};
     use exoware_sdk::StoreWriteBatch;
 
     let store_client = common::local_store_client().await;
@@ -1018,7 +1025,8 @@ async fn test_keyless_connect_subscribe_rejects_key_filters() {
 #[tokio::test]
 async fn test_keyless_data_only_frames_replay_in_store_order_after_delayed_publication() {
     use exoware_qmdb::{
-        adapter::upload::stage_authenticated_range, adapter::upload::stage_watermark, NODE_FAMILY,
+        adapter::upload::{stage_authenticated_range, stage_watermark},
+        NODE_FAMILY,
     };
     use exoware_sdk::StoreWriteBatch;
 

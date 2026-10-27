@@ -3,9 +3,6 @@
 //! Public ordered source variants through shared native and Connect adapters
 
 use crate::common;
-
-use std::{collections::BTreeMap, fmt::Debug, sync::Arc};
-
 use commonware_codec::{Codec, Encode, Read};
 use commonware_cryptography::Sha256;
 use commonware_parallel::Sequential;
@@ -26,18 +23,23 @@ use commonware_storage::{
 use commonware_utils::{
     bitmap::Readable as _, iter::zip_eq, sequence::FixedBytes, NZUsize, NZU16, NZU64,
 };
-use exoware_qmdb::service::proto::qmdb::v1::{
-    GetCurrentOperationRangeRequest, GetManyRequest, GetOperationRangeRequest, GetRangeRequest,
-    GetRequest, SubscribeRequest,
-};
 use exoware_qmdb::{
-    adapter::upload::prepare_authenticated_range, adapter::upload::recover_boundary_state,
-    adapter::upload::stage_authenticated_range, adapter::upload::stage_watermark,
-    adapter::upload::AuthenticatedOperationRange, adapter::upload::UploadOperation,
-    proof::VerifiedKeyLookup, service::client::rpc::CurrentOperationClient,
-    service::client::rpc::OperationLogClient, CurrentBoundaryState, MAX_OPERATION_SIZE,
+    adapter::upload::{
+        prepare_authenticated_range, recover_boundary_state, stage_authenticated_range,
+        stage_watermark, AuthenticatedOperationRange, UploadOperation,
+    },
+    proof::VerifiedKeyLookup,
+    service::{
+        client::rpc::{CurrentOperationClient, OperationLogClient},
+        proto::qmdb::v1::{
+            GetCurrentOperationRangeRequest, GetManyRequest, GetOperationRangeRequest,
+            GetRangeRequest, GetRequest, SubscribeRequest,
+        },
+    },
+    CurrentBoundaryState, MAX_OPERATION_SIZE,
 };
 use exoware_sdk::{proto::PreferZstdHttpClient, PrefixedStoreClient, StoreWriteBatch};
+use std::{collections::BTreeMap, fmt::Debug, sync::Arc};
 
 const N: usize = 32;
 type Digest = commonware_cryptography::sha256::Digest;

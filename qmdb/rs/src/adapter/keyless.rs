@@ -1,6 +1,15 @@
-use std::marker::PhantomData;
-use std::sync::Arc;
-
+use crate::{
+    adapter::{
+        core,
+        operation_range::{load_operation_range_checkpoint, load_operations_multi_proof},
+        read_cache::ReadCache,
+    },
+    error::QmdbError,
+    proof::{
+        MultiProofOperations, OperationRangeCheckpoint, RawBatchMultiProof, VerifiedOperationRange,
+    },
+    OperationKv, PublishedWatermark,
+};
 use commonware_codec::{Codec, Copying, Decode, Encode, Read as CodecRead};
 use commonware_cryptography::Hasher;
 use commonware_storage::{
@@ -11,18 +20,7 @@ use commonware_storage::{
     },
 };
 use exoware_sdk::{PrefixedStoreClient, ReadSession};
-
-use crate::adapter::core;
-use crate::adapter::operation_range::{
-    load_operation_range_checkpoint, load_operations_multi_proof,
-};
-use crate::adapter::read_cache::ReadCache;
-use crate::error::QmdbError;
-use crate::proof::{
-    MultiProofOperations, OperationRangeCheckpoint, RawBatchMultiProof, VerifiedOperationRange,
-};
-use crate::OperationKv;
-use crate::PublishedWatermark;
+use std::{marker::PhantomData, sync::Arc};
 
 pub struct Keyless<
     F: Family,

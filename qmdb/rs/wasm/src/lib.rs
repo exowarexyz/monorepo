@@ -29,8 +29,7 @@ use commonware_storage::{
 };
 use js_sys::{Array, Object, Reflect, Uint8Array};
 use std::collections::BTreeSet;
-use wasm_bindgen::prelude::*;
-use wasm_bindgen::JsCast;
+use wasm_bindgen::{prelude::*, JsCast};
 
 pub mod proto;
 
@@ -2031,17 +2030,19 @@ pub fn verify_get_range_response(
 mod tests {
     use super::*;
     use commonware_cryptography::sha256::Digest as Sha256Digest;
-    use commonware_storage::merkle::mem::Mem;
-    use commonware_storage::qmdb::{
-        any::{
-            unordered::{Operation as UnorderedOperation, Update as UnorderedUpdate},
-            value::FixedEncoding,
+    use commonware_storage::{
+        merkle::mem::Mem,
+        qmdb::{
+            any::{
+                unordered::{Operation as UnorderedOperation, Update as UnorderedUpdate},
+                value::FixedEncoding,
+            },
+            current::{
+                ordered::proof::constant::ExclusionProof as UpstreamExclusionProof,
+                proof::constant::OperationProof as UpstreamOperationProof,
+            },
+            keyless,
         },
-        current::{
-            ordered::proof::constant::ExclusionProof as UpstreamExclusionProof,
-            proof::constant::OperationProof as UpstreamOperationProof,
-        },
-        keyless,
     };
 
     type OrderedVariableOperation<F> = OrderedOperation<F, Vec<u8>, Vec<u8>>;

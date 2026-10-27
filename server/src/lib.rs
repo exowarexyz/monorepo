@@ -22,6 +22,19 @@ pub use engine::{
     FilteredBatch, Ingest, IngestError, Log, LogBatch, Prune, Query, QueryExtra, QueryResult,
     RangeScan, RangeScanBatch, RangeScanResult, Retention, Sequence, StoreEngine,
 };
+/// Types used by filtered-batch and matcher APIs, re-exported so backends can
+/// use the server API without a version-matched direct SDK dependency.
+pub use exoware_sdk::{
+    common::kv::v1::Entry,
+    kv_codec::Utf8,
+    selector::Selector,
+    stream_filter::{Filter, StreamFilter},
+};
+pub use ingest::{
+    parser::{decode_entry_with_budget, Field, PutEntryCursor, PutParseError, UnknownBudget},
+    service::{PutConfig, PutMiddleware, PutService},
+    PutError, PutInput,
+};
 pub use reduce::RangeError;
 pub use stream::{
     CompiledMatchers, CompiledSelector, InvalidFilter, StreamHub, StreamNotification,
@@ -31,18 +44,3 @@ pub use validate::{
     put_too_large_error, validate_get_many_request, validate_put_count, validate_put_entry,
     IngestLimits,
 };
-
-/// Types used by filtered-batch and matcher APIs, re-exported so backends can
-/// use the server API without a version-matched direct SDK dependency.
-pub use exoware_sdk::{
-    common::kv::v1::Entry,
-    kv_codec::Utf8,
-    selector::Selector,
-    stream_filter::{Filter, StreamFilter},
-};
-
-pub use ingest::parser::{
-    decode_entry_with_budget, Field, PutEntryCursor, PutParseError, UnknownBudget,
-};
-pub use ingest::service::{PutConfig, PutMiddleware, PutService};
-pub use ingest::{PutError, PutInput};

@@ -1,14 +1,27 @@
 //! Verifying client for ordered QMDB.
 
-use std::fmt::Display;
-
+use super::rpc::{
+    verify::{verify_key_exclusion_from_proto, verify_key_value_from_proto},
+    CurrentOperationClient, KeyLookupClient, KeyRangeClient, OperationLogClient,
+    OperationLogSubscription,
+};
+use crate::{
+    proof::{
+        VerifiedCurrentRange, VerifiedKeyLookup, VerifiedKeyRange, VerifiedKeyValue,
+        VerifiedOperationRange,
+    },
+    service::proto::qmdb::v1::{
+        current_key_lookup_result, CurrentKeyLookupResult, CurrentKeyValueProof,
+        GetCurrentOperationRangeRequest, GetManyRequest, GetOperationRangeRequest, GetRangeRequest,
+        GetRequest, SubscribeRequest,
+    },
+    QmdbError,
+};
 use bytes::Bytes;
 use commonware_codec::{Copying, Decode, DecodeExt, Encode, Read};
 use commonware_cryptography::Hasher;
-use commonware_storage::merkle::Location;
-use commonware_storage::qmdb::sync::Target as SyncTarget;
 use commonware_storage::{
-    merkle::Graftable,
+    merkle::{Graftable, Location},
     qmdb::{
         any::{
             ordered,
@@ -16,28 +29,14 @@ use commonware_storage::{
         },
         current::ordered::proof::constant::ExclusionProof,
         operation::Key as QmdbKey,
+        sync::Target as SyncTarget,
     },
 };
 use commonware_utils::range::NonEmptyRange;
 use connectrpc::client::{ClientConfig, ClientTransport};
 use exoware_sdk::proto::PreferZstdHttpClient;
 use http_body::Body;
-
-use super::rpc::OperationLogSubscription;
-use crate::proof::{VerifiedCurrentRange, VerifiedKeyRange, VerifiedOperationRange};
-use crate::service::proto::qmdb::v1::{
-    GetCurrentOperationRangeRequest, GetManyRequest, GetOperationRangeRequest, GetRangeRequest,
-    GetRequest, SubscribeRequest,
-};
-
-use crate::proof::{VerifiedKeyLookup, VerifiedKeyValue};
-use crate::service::proto::qmdb::v1::{
-    current_key_lookup_result, CurrentKeyLookupResult, CurrentKeyValueProof,
-};
-use crate::QmdbError;
-
-use super::rpc::verify::{verify_key_exclusion_from_proto, verify_key_value_from_proto};
-use super::rpc::{CurrentOperationClient, KeyLookupClient, KeyRangeClient, OperationLogClient};
+use std::fmt::Display;
 
 /// Verifies ordered `KeyLookupService` responses: hits and exclusion-proven
 /// misses.

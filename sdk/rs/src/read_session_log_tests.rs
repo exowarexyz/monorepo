@@ -1,12 +1,15 @@
 use super::*;
-
 use buffa::Message as _;
 use futures::channel::mpsc;
 use http_body_util::BodyExt as _;
-use std::collections::VecDeque;
-use std::convert::Infallible;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Mutex;
+use std::{
+    collections::VecDeque,
+    convert::Infallible,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Mutex,
+    },
+};
 
 type TestBody = http_body_util::combinators::UnsyncBoxBody<Bytes, Infallible>;
 

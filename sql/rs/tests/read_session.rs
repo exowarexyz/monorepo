@@ -1,23 +1,25 @@
 #![allow(refining_impl_trait)]
 
-use std::sync::{Arc, Mutex};
-
 use axum::Router;
 use bytes::Bytes;
 use commonware_codec::Encode;
 use connectrpc::{ConnectError, ConnectRpcService, RequestContext, ServiceRequest};
-use datafusion::arrow::array::Int64Array;
-use datafusion::arrow::datatypes::DataType;
-use datafusion::prelude::SessionConfig;
-use exoware_sdk::common::kv::v1::Entry;
-use exoware_sdk::kv_codec::StoredRow;
-use exoware_sdk::store::query::v1::{
-    Detail, GetManyFrame, GetManyRequest, GetRequest, GetResponse, RangeFrame, RangeRequest,
-    ReduceRequest, ReduceResponse, Service, ServiceServer,
+use datafusion::{
+    arrow::{array::Int64Array, datatypes::DataType},
+    prelude::SessionConfig,
 };
-use exoware_sdk::{PrefixedStoreClient, ReadSession, StoreClient};
+use exoware_sdk::{
+    common::kv::v1::Entry,
+    kv_codec::StoredRow,
+    store::query::v1::{
+        Detail, GetManyFrame, GetManyRequest, GetRequest, GetResponse, RangeFrame, RangeRequest,
+        ReduceRequest, ReduceResponse, Service, ServiceServer,
+    },
+    PrefixedStoreClient, ReadSession, StoreClient,
+};
 use exoware_sql::{KvSchema, SqlContext, TableColumnConfig};
 use futures::stream;
+use std::sync::{Arc, Mutex};
 
 #[derive(Clone)]
 struct RangeHarness {

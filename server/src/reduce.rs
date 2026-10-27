@@ -1,48 +1,58 @@
 //! Native worker aggregation over evaluated Store expressions.
 
-use std::collections::{HashMap, VecDeque};
-use std::fmt;
-use std::panic::AssertUnwindSafe;
-use std::sync::{Arc, Mutex};
-
-use bytes::Bytes;
-use datafusion::arrow::array::{
-    ArrayRef, BinaryArray, BooleanArray, BooleanBuilder, Date32Array, Date64Array, Decimal128Array,
-    Decimal256Array, Float64Array, Int64Array, StringArray, TimestampMicrosecondArray, UInt64Array,
-};
-use datafusion::arrow::datatypes::{i256, DataType, Field, Schema, SchemaRef, TimeUnit};
-use datafusion::arrow::record_batch::{RecordBatch, RecordBatchOptions};
-use datafusion::common::{DFSchema, DataFusionError, Result as DfResult, ScalarValue};
-use datafusion::execution::context::TaskContext;
-use datafusion::execution::memory_pool::MemoryLimit;
-use datafusion::functions_aggregate::{
-    count::count_udaf,
-    min_max::{max_udaf, min_udaf},
-    sum::sum_udaf,
-};
-use datafusion::logical_expr::binary::binary_numeric_coercion;
-use datafusion::logical_expr::execution_props::ExecutionProps;
-use datafusion::logical_expr::expr::Cast;
-use datafusion::logical_expr::physical_planning_context::PhysicalPlanningContext;
-use datafusion::logical_expr::{col, lit, AggregateUDF, Expr};
-use datafusion::optimizer::simplify_expressions::{ExprSimplifier, SimplifyContext};
-use datafusion::physical_expr::aggregate::{AggregateExprBuilder, AggregateFunctionExpr};
-use datafusion::physical_expr::expressions::{BinaryExpr, CastExpr, Column, Literal};
-use datafusion::physical_expr::{create_physical_expr, PhysicalExpr};
-use datafusion::physical_plan::aggregates::{AggregateExec, AggregateMode, PhysicalGroupBy};
-use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
-use datafusion::physical_plan::streaming::{PartitionStream, StreamingTableExec};
-use datafusion::physical_plan::{ExecutionPlan, SendableRecordBatchStream};
-use exoware_sdk::keys::Key;
-use exoware_sdk::kv_codec::{
-    decode_stored_row, eval_predicate, extract_field, predicate_needs_value, KvExpr, KvFieldKind,
-    KvFieldRef, KvPredicate, KvReducedValue,
-};
-use exoware_sdk::proto::to_proto_reduced_value;
-use exoware_sdk::{RangeReduceOp, RangeReduceRequest};
-use futures::StreamExt;
-
 use crate::{Query, QueryExtra, RangeScan, RangeScanResult};
+use bytes::Bytes;
+use datafusion::{
+    arrow::{
+        array::{
+            ArrayRef, BinaryArray, BooleanArray, BooleanBuilder, Date32Array, Date64Array,
+            Decimal128Array, Decimal256Array, Float64Array, Int64Array, StringArray,
+            TimestampMicrosecondArray, UInt64Array,
+        },
+        datatypes::{i256, DataType, Field, Schema, SchemaRef, TimeUnit},
+        record_batch::{RecordBatch, RecordBatchOptions},
+    },
+    common::{DFSchema, DataFusionError, Result as DfResult, ScalarValue},
+    execution::{context::TaskContext, memory_pool::MemoryLimit},
+    functions_aggregate::{
+        count::count_udaf,
+        min_max::{max_udaf, min_udaf},
+        sum::sum_udaf,
+    },
+    logical_expr::{
+        binary::binary_numeric_coercion, col, execution_props::ExecutionProps, expr::Cast, lit,
+        physical_planning_context::PhysicalPlanningContext, AggregateUDF, Expr,
+    },
+    optimizer::simplify_expressions::{ExprSimplifier, SimplifyContext},
+    physical_expr::{
+        aggregate::{AggregateExprBuilder, AggregateFunctionExpr},
+        create_physical_expr,
+        expressions::{BinaryExpr, CastExpr, Column, Literal},
+        PhysicalExpr,
+    },
+    physical_plan::{
+        aggregates::{AggregateExec, AggregateMode, PhysicalGroupBy},
+        stream::RecordBatchStreamAdapter,
+        streaming::{PartitionStream, StreamingTableExec},
+        ExecutionPlan, SendableRecordBatchStream,
+    },
+};
+use exoware_sdk::{
+    keys::Key,
+    kv_codec::{
+        decode_stored_row, eval_predicate, extract_field, predicate_needs_value, KvExpr,
+        KvFieldKind, KvFieldRef, KvPredicate, KvReducedValue,
+    },
+    proto::to_proto_reduced_value,
+    RangeReduceOp, RangeReduceRequest,
+};
+use futures::StreamExt;
+use std::{
+    collections::{HashMap, VecDeque},
+    fmt,
+    panic::AssertUnwindSafe,
+    sync::{Arc, Mutex},
+};
 
 pub(crate) const REDUCE_BATCH_ROWS: usize = 4096;
 const REDUCE_BATCH_BYTES: usize = 16 * 1024 * 1024;
@@ -920,20 +930,20 @@ fn extract_reduce_row(
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use bytes::Bytes;
     use commonware_codec::Encode as _;
     use datafusion::arrow::compute::{
         concat_batches, lexsort_to_indices, take_record_batch, SortColumn,
     };
-    use exoware_sdk::keys::Key;
-    use exoware_sdk::kv_codec::{
-        KvExpr, KvFieldKind, KvFieldRef, KvPredicate, KvPredicateCheck, KvPredicateConstraint,
-        KvReducedValue, StoredRow, StoredValue,
+    use exoware_sdk::{
+        keys::Key,
+        kv_codec::{
+            KvExpr, KvFieldKind, KvFieldRef, KvPredicate, KvPredicateCheck, KvPredicateConstraint,
+            KvReducedValue, StoredRow, StoredValue,
+        },
+        RangeReduceGroup, RangeReduceOp, RangeReduceRequest, RangeReduceResponse, RangeReducerSpec,
     };
-    use exoware_sdk::{RangeReduceGroup, RangeReduceOp, RangeReduceRequest, RangeReducerSpec};
-
-    use super::*;
-    use exoware_sdk::RangeReduceResponse;
     use futures::{StreamExt, TryStreamExt};
 
     #[derive(Debug)]
@@ -1760,8 +1770,7 @@ mod tests {
 
     #[tokio::test]
     async fn expression_materialization_respects_input_byte_budget() {
-        use datafusion::execution::memory_pool::FairSpillPool;
-        use datafusion::execution::runtime_env::RuntimeEnvBuilder;
+        use datafusion::execution::{memory_pool::FairSpillPool, runtime_env::RuntimeEnvBuilder};
 
         #[derive(Clone)]
         struct Rows(Vec<(Bytes, Bytes)>);
@@ -2383,9 +2392,9 @@ mod tests {
 
     #[tokio::test]
     async fn spill_preserves_full_width_decimal_states_and_repeated_groups() {
-        use datafusion::execution::context::SessionConfig;
-        use datafusion::execution::memory_pool::FairSpillPool;
-        use datafusion::execution::runtime_env::RuntimeEnvBuilder;
+        use datafusion::execution::{
+            context::SessionConfig, memory_pool::FairSpillPool, runtime_env::RuntimeEnvBuilder,
+        };
         let groups = 4096usize;
         let field = |index, kind| {
             KvExpr::Field(KvFieldRef::Value {

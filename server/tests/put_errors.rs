@@ -1,7 +1,9 @@
 use connectrpc::{ConnectError, ErrorCode};
-use exoware_sdk::decode_connect_error;
-use exoware_sdk::google::rpc::{bad_request::FieldViolation, ErrorInfo};
-use exoware_sdk::limits::{PutTooLarge, MAX_KEY_LEN};
+use exoware_sdk::{
+    decode_connect_error,
+    google::rpc::{bad_request::FieldViolation, ErrorInfo},
+    limits::{PutTooLarge, MAX_KEY_LEN},
+};
 use exoware_server::{
     ingest_error_to_connect, put_too_large_error, validate_put_count, validate_put_entry,
     worker_not_ready_error, IngestError, IngestLimits,

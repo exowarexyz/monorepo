@@ -1,5 +1,7 @@
-use buffa::encoding::{check_wire_type, skip_field_depth, Tag, WireType};
-use buffa::DecodeError;
+use buffa::{
+    encoding::{check_wire_type, skip_field_depth, Tag, WireType},
+    DecodeError,
+};
 use connectrpc::ConnectError;
 
 /// Distinguishes input that can be resumed from invalid Put data.

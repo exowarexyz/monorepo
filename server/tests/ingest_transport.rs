@@ -1,3 +1,15 @@
+use axum::{body::Body, serve::Listener};
+use bytes::Bytes;
+use exoware_server::{
+    ingest::{
+        transport::{serve, terminate_unfinished_response, ConnectionControl},
+        DecodeBuffers, PutConfig, PutMiddleware,
+    },
+    ingest_service, Ingest, IngestState, PutError, PutInput,
+};
+use http::{header, Request, Response, StatusCode, Version};
+use http_body_util::BodyExt;
+use socket2::SockRef;
 use std::{
     convert::Infallible,
     future::{poll_fn, Future},
@@ -11,19 +23,6 @@ use std::{
     task::{Context, Poll, Waker},
     time::Duration,
 };
-
-use axum::{body::Body, serve::Listener};
-use bytes::Bytes;
-use exoware_server::{
-    ingest::{
-        transport::{serve, terminate_unfinished_response, ConnectionControl},
-        DecodeBuffers, PutConfig, PutMiddleware,
-    },
-    ingest_service, Ingest, IngestState, PutError, PutInput,
-};
-use http::{header, Request, Response, StatusCode, Version};
-use http_body_util::BodyExt;
-use socket2::SockRef;
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf},
     net::{TcpListener, TcpStream},
@@ -1481,8 +1480,10 @@ async fn production_http1_fragmented_upload_amortizes_cpu_handoffs() -> Result<(
 #[tokio::test]
 async fn http2_completed_rejections_preserve_connect_errors() -> Result<(), Error> {
     use connectrpc::client::ClientConfig;
-    use exoware_sdk::common::Entry;
-    use exoware_sdk::ingest::{PutRequest, ServiceClient};
+    use exoware_sdk::{
+        common::Entry,
+        ingest::{PutRequest, ServiceClient},
+    };
 
     for admission_exhausted in [true, false] {
         let listener = TcpListener::bind("127.0.0.1:0").await?;

@@ -1,8 +1,7 @@
 //! Range query traversal direction from `RangeRequest.mode`.
 
-use buffa::EnumValue;
-
 use crate::query::TraversalMode;
+use buffa::EnumValue;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RangeTraversalDirection {

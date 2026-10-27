@@ -1,12 +1,14 @@
-use std::alloc::{GlobalAlloc, Layout, System};
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
-
 use bytes::Bytes;
 use connectrpc::client::{full_body, ClientTransport};
-use exoware_sdk::limits::MAX_PUT_ENTRIES;
-use exoware_sdk::transport::ServiceTransport;
+use exoware_sdk::{limits::MAX_PUT_ENTRIES, transport::ServiceTransport};
 use exoware_server::{ingest_service, Ingest, IngestState, PutError, PutInput};
+use std::{
+    alloc::{GlobalAlloc, Layout, System},
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    },
+};
 
 struct TrackingAllocator;
 

@@ -8,10 +8,10 @@ mod reception;
 pub mod service;
 pub mod transport;
 mod zstd;
-pub use service::{PutConfig, PutMiddleware, PutService};
-
+use crate::engine::IngestError;
 pub use admission::{Admission, BudgetConfig, ByteLease, IngestBudget, RequestLease};
 pub use buffer::{DecodeBuffers, EntryRanges, PutChunk};
+use connectrpc::ConnectError;
 pub use decode::{DecodeOutput, DecodeState};
 pub use input::{
     box_body, BlockingDecodeExecutor, DecodeExecutor, DrainOutcome, PutBody, PutEncoding, PutInput,
@@ -19,9 +19,7 @@ pub use input::{
 };
 pub use observe::{IngestEvent, IngestObserver};
 pub use reception::maximum_reception_bytes;
-
-use crate::engine::IngestError;
-use connectrpc::ConnectError;
+pub use service::{PutConfig, PutMiddleware, PutService};
 
 #[derive(Clone, Debug, thiserror::Error)]
 pub enum PutError {

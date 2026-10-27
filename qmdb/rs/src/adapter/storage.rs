@@ -1,20 +1,24 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::marker::PhantomData;
-use std::sync::Arc;
-
+use crate::adapter::{
+    codec::{chunk_index_for_location, encode_grafted_node_key, encode_node_key},
+    operation_range::fetch_rows,
+    read_cache::ReadCache,
+};
 use bytes::Bytes;
 use commonware_codec::{Copying, DecodeExt, FixedSize};
 use commonware_cryptography::{Digest, Hasher};
-use commonware_storage::merkle::{
-    self, hasher::Hasher as _, storage::Storage as MerkleStorage, Family, Graftable, Location,
-    Position,
+use commonware_storage::{
+    merkle::{
+        self, hasher::Hasher as _, storage::Storage as MerkleStorage, Family, Graftable, Location,
+        Position,
+    },
+    qmdb::current::grafting,
 };
-use commonware_storage::qmdb::current::grafting;
 use exoware_sdk::{keys::Key, RangeMode, ReadSession};
-
-use crate::adapter::codec::{chunk_index_for_location, encode_grafted_node_key, encode_node_key};
-use crate::adapter::operation_range::fetch_rows;
-use crate::adapter::read_cache::ReadCache;
+use std::{
+    collections::{BTreeMap, BTreeSet, HashMap},
+    marker::PhantomData,
+    sync::Arc,
+};
 
 pub(crate) struct KvMerkleStorage<'a, F: Family, D: Digest> {
     pub(crate) session: &'a ReadSession,
@@ -469,6 +473,7 @@ mod tests {
     use bytes::Bytes;
     use commonware_cryptography::{sha256::Digest, Sha256};
     use commonware_storage::merkle::{mem::Mem, mmb, mmr, verification};
+    use commonware_utils::bitmap::Readable as _;
     use connectrpc::{ConnectError, ConnectRpcService, RequestContext, ServiceRequest};
     use exoware_sdk::{
         common::kv::v1::Entry,
@@ -483,8 +488,6 @@ mod tests {
         collections::BTreeMap,
         sync::{Arc, Mutex},
     };
-
-    use commonware_utils::bitmap::Readable as _;
 
     // N = 1 gives eight-bit chunks (grafting height 3). Each chunk's byte is its index.
     fn load<F: Graftable>(
