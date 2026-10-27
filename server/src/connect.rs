@@ -67,7 +67,11 @@ pub const MAX_CONNECTRPC_BODY_BYTES: usize = MAX_REQUEST_MESSAGE_BYTES;
 pub const MAX_CONNECTRPC_MESSAGE_BYTES: usize = MAX_REQUEST_MESSAGE_BYTES;
 pub const MAX_CONNECTRPC_ELEMENT_MEMORY_BYTES: usize = 192 * 1024 * 1024;
 const RANGE_STREAM_MAX_FRAME_ROWS: usize = 4096;
-const REDUCE_FRAME_TARGET_BYTES: usize = 16 * 1024 * 1024;
+// Soft cap on the encoded size of one Range, GetMany or Reduce frame. A frame
+// stops growing once the next item would pass it, so only a single item larger
+// than the target makes a bigger frame. Rows alone can't bound a frame because
+// values can be up to `MAX_VALUE_LEN` each.
+const FRAME_TARGET_BYTES: usize = 16 * 1024 * 1024;
 // Per-subscription bound on concurrent subscribe log reads. Each slot can pin
 // a fully materialized batch (in flight, or completed but held for in-order
 // delivery), so server-wide memory and engine read pressure scale with this
@@ -131,50 +135,92 @@ where
     S: RangeScan + 'static,
 {
     let RangeScanResult {
-        scan: entries,
+        scan,
         sequence_number,
     } = result;
 
     Box::pin(stream_util::unfold(
-        Some((entries, false)),
+        Some(RangeFrameState {
+            scan,
+            rows: Vec::new().into_iter(),
+            detail: Detail::default(),
+            emitted: false,
+        }),
         move |state| async move {
-            let (mut entries, emitted_frame) = state?;
-            let batch = match entries.next_batch(batch_size).await {
-                Ok(batch) => batch,
-                Err(e) => return Some((Err(ConnectError::internal(e)), None)),
-            };
-            let detail = query_detail(sequence_number, batch.extra);
-            if batch.rows.is_empty() {
-                if emitted_frame && detail.extra.is_empty() {
-                    return None;
+            let mut state = state?;
+            if state.rows.len() == 0 {
+                let batch = match state.scan.next_batch(batch_size).await {
+                    Ok(batch) => batch,
+                    Err(e) => return Some((Err(ConnectError::internal(e)), None)),
+                };
+                let detail = query_detail(sequence_number, batch.extra);
+                if batch.rows.is_empty() {
+                    if state.emitted && detail.extra.is_empty() {
+                        return None;
+                    }
+                    return Some((
+                        Ok(RangeFrame {
+                            detail: Some(detail).into(),
+                            ..Default::default()
+                        }),
+                        None,
+                    ));
                 }
-                return Some((
-                    Ok(RangeFrame {
-                        detail: Some(detail).into(),
-                        ..Default::default()
-                    }),
-                    None,
-                ));
+                state.rows = batch.rows.into_iter();
+                state.detail = detail;
             }
 
-            let mut chunk = Vec::with_capacity(batch.rows.len());
-            for (key, value) in batch.rows {
-                chunk.push(Entry {
+            // A batch too big for one frame is split across several. Each one
+            // carries the batch's detail, since the backend has already read
+            // every row in it.
+            let mut results = Vec::new();
+            let mut frame_bytes = 0usize;
+            while let Some((key, value)) = state.rows.as_slice().first() {
+                let entry_bytes = frame_entry_bytes(key, value);
+                if !results.is_empty()
+                    && frame_bytes.saturating_add(entry_bytes) > FRAME_TARGET_BYTES
+                {
+                    break;
+                }
+                frame_bytes = frame_bytes.saturating_add(entry_bytes);
+                let (key, value) = state.rows.next().unwrap();
+                results.push(Entry {
                     key: key.into(),
                     value,
                     ..Default::default()
                 });
             }
+            let detail = if state.rows.len() == 0 {
+                std::mem::take(&mut state.detail)
+            } else {
+                state.detail.clone()
+            };
+            state.emitted = true;
             Some((
                 Ok(RangeFrame {
-                    results: chunk,
+                    results,
                     detail: Some(detail).into(),
                     ..Default::default()
                 }),
-                Some((entries, true)),
+                Some(state),
             ))
         },
     ))
+}
+
+struct RangeFrameState<S> {
+    scan: S,
+    /// Rows of the current backend batch not yet sent.
+    rows: std::vec::IntoIter<(Bytes, Bytes)>,
+    /// Detail for the current backend batch.
+    detail: Detail,
+    emitted: bool,
+}
+
+/// Upper bound on what one key/value pair adds to an encoded frame: its bytes,
+/// plus field tags and length prefixes, which take well under 16 bytes.
+fn frame_entry_bytes(key: &[u8], value: &[u8]) -> usize {
+    key.len() + value.len() + 16
 }
 
 /// All-in-one single-process composition for a backend that serves every store capability.
@@ -574,19 +620,26 @@ where
         let batch_size = (request.batch_size as usize).min(RANGE_STREAM_MAX_FRAME_ROWS);
         let mut frames = Vec::new();
         let mut chunk = Vec::new();
+        let mut chunk_bytes = 0usize;
         for (key, value) in result.value {
-            chunk.push(GetManyEntry {
-                key: key.to_vec(),
-                value,
-                ..Default::default()
-            });
-            if chunk.len() >= batch_size {
+            let entry_bytes = frame_entry_bytes(&key, value.as_deref().unwrap_or_default());
+            if chunk.len() >= batch_size
+                || (!chunk.is_empty()
+                    && chunk_bytes.saturating_add(entry_bytes) > FRAME_TARGET_BYTES)
+            {
                 frames.push(Ok(GetManyFrame {
                     results: std::mem::take(&mut chunk),
                     detail: Some(detail.clone()).into(),
                     ..Default::default()
                 }));
+                chunk_bytes = 0;
             }
+            chunk_bytes = chunk_bytes.saturating_add(entry_bytes);
+            chunk.push(GetManyEntry {
+                key: key.to_vec(),
+                value,
+                ..Default::default()
+            });
         }
         if !chunk.is_empty() {
             frames.push(Ok(GetManyFrame {
@@ -737,7 +790,7 @@ fn reduce_frames(
                 }
                 let group_bytes = group.encoded_len() as usize + 16;
                 if !response.groups.is_empty()
-                    && frame_bytes.saturating_add(group_bytes) > REDUCE_FRAME_TARGET_BYTES
+                    && frame_bytes.saturating_add(group_bytes) > FRAME_TARGET_BYTES
                 {
                     break;
                 }
@@ -1436,6 +1489,7 @@ mod tests {
         range_eof_extra: QueryExtra,
         range_next_count: usize,
         range_batch_limit: Option<usize>,
+        get_many_value: Option<Bytes>,
         query_extra: QueryExtra,
         prune_policy_counts: Vec<usize>,
         put_error: Option<IngestError>,
@@ -1556,6 +1610,10 @@ mod tests {
             self.state.lock().expect("lock").range_next_count
         }
 
+        fn set_get_many_value(&self, value: Bytes) {
+            self.state.lock().expect("lock").get_many_value = Some(value);
+        }
+
         fn set_query_extra(&self, extra: QueryExtra) {
             self.state.lock().expect("lock").query_extra = extra;
         }
@@ -1625,7 +1683,10 @@ mod tests {
             state.query_calls[1] += 1;
             let sequence_number = state.query_sequence.unwrap_or(state.current_sequence);
             Ok(QueryResult {
-                value: keys.into_iter().map(|key| (key, None)).collect(),
+                value: keys
+                    .into_iter()
+                    .map(|key| (key, state.get_many_value.clone()))
+                    .collect(),
                 sequence_number,
                 extra: state.query_extra.clone(),
             })
@@ -3344,7 +3405,7 @@ mod tests {
         while let Some(frame) = frames.next().await {
             let frame = frame.unwrap();
             assert!(frame.groups.len() <= REDUCE_BATCH_ROWS);
-            assert!(frame.encoded_len() as usize <= REDUCE_FRAME_TARGET_BYTES);
+            assert!(frame.encoded_len() as usize <= FRAME_TARGET_BYTES);
             assert_eq!(frame.detail.as_option().unwrap().sequence_number, 9);
             assert_eq!(
                 frame.detail.as_option().unwrap().extra["final_rows"].as_number(),
@@ -3388,7 +3449,7 @@ mod tests {
         let mut frame_count = 0;
         while let Some(frame) = frames.next().await {
             let frame = frame.unwrap();
-            assert!(frame.encoded_len() as usize <= REDUCE_FRAME_TARGET_BYTES);
+            assert!(frame.encoded_len() as usize <= FRAME_TARGET_BYTES);
             count += frame.groups.len();
             frame_count += 1;
         }
@@ -3410,7 +3471,7 @@ mod tests {
             .unwrap();
         let mut frames = Box::pin(reduce_frames(execution));
         let frame = frames.next().await.unwrap().unwrap();
-        assert!(frame.encoded_len() as usize > REDUCE_FRAME_TARGET_BYTES);
+        assert!(frame.encoded_len() as usize > FRAME_TARGET_BYTES);
         assert!((frame.encoded_len() as usize) < MAX_CONNECTRPC_BODY_BYTES);
         let response =
             to_domain_reduce_response(connectrpc::StreamMessage::from_message(&frame).view())
@@ -3530,6 +3591,99 @@ mod tests {
 
         assert_eq!(frame_sizes, vec![2, 1]);
         assert_eq!(detail_frames, 2);
+    }
+
+    #[tokio::test]
+    async fn get_many_splits_frames_by_bytes() {
+        let engine = Arc::new(FakeEngine::default());
+        engine.set_current_sequence(11);
+        engine.set_get_many_value(Bytes::from(vec![0u8; 7 * 1024 * 1024]));
+        let connect = QueryConnect::new(AppState::new(engine));
+        let bytes = exoware_proto::query::GetManyRequest {
+            keys: vec![b"a".to_vec(), b"b".to_vec(), b"c".to_vec()],
+            batch_size: 10,
+            ..Default::default()
+        }
+        .encode_to_vec();
+        let request = buffa::view::OwnedView::<
+            exoware_proto::store::query::v1::GetManyRequestView<'static>,
+        >::decode(bytes.into())
+        .expect("decode get_many request");
+
+        let request = ServiceRequest::from_parts(request.reborrow(), request.bytes());
+        let mut stream = QueryApi::get_many(&connect, Context::default(), request)
+            .await
+            .expect("get_many")
+            .body;
+        let mut frame_sizes = Vec::new();
+        let mut keys = Vec::new();
+        while let Some(frame) = stream.next().await {
+            let frame = frame.expect("get_many frame");
+            assert!(frame.encoded_len() as usize <= FRAME_TARGET_BYTES);
+            let detail = frame.detail.as_option().expect("query detail");
+            assert_eq!(detail.sequence_number, 11);
+            frame_sizes.push(frame.results.len());
+            keys.extend(frame.results.into_iter().map(|entry| entry.key));
+        }
+
+        // Two 7 MiB values fit under the 16 MiB target and a third would not.
+        assert_eq!(frame_sizes, vec![2, 1]);
+        assert_eq!(keys, vec![b"a".to_vec(), b"b".to_vec(), b"c".to_vec()]);
+    }
+
+    #[tokio::test]
+    async fn range_splits_frames_by_bytes() {
+        const MIB: usize = 1024 * 1024;
+        let engine = Arc::new(FakeEngine::default());
+        engine.set_current_sequence(9);
+        let sizes = [7 * MIB, 7 * MIB, 7 * MIB, 20 * MIB, 1024];
+        engine.set_range_rows(
+            sizes
+                .iter()
+                .enumerate()
+                .map(|(i, &len)| (Bytes::from(format!("key-{i}")), Bytes::from(vec![0u8; len])))
+                .collect(),
+        );
+        let connect = QueryConnect::new(AppState::new(engine));
+        let bytes = exoware_proto::query::RangeRequest {
+            start: b"a".to_vec(),
+            end: b"z".to_vec(),
+            batch_size: 4096,
+            ..Default::default()
+        }
+        .encode_to_vec();
+        let request = buffa::view::OwnedView::<
+            exoware_proto::store::query::v1::RangeRequestView<'static>,
+        >::decode(bytes.into())
+        .expect("decode range request");
+
+        let request = ServiceRequest::from_parts(request.reborrow(), request.bytes());
+        let mut stream = QueryApi::range(&connect, Context::default(), request)
+            .await
+            .expect("range")
+            .body;
+        let mut frame_sizes = Vec::new();
+        let mut value_lens = Vec::new();
+        while let Some(frame) = stream.next().await {
+            let frame = frame.expect("range frame");
+            let detail = frame.detail.as_option().expect("query detail");
+            assert_eq!(detail.sequence_number, 9);
+            // Only a frame holding the single 20 MiB row may pass the target.
+            if frame
+                .results
+                .iter()
+                .all(|entry| entry.value.len() < 20 * MIB)
+            {
+                assert!(frame.encoded_len() as usize <= FRAME_TARGET_BYTES);
+            }
+            frame_sizes.push(frame.results.len());
+            value_lens.extend(frame.results.iter().map(|entry| entry.value.len()));
+        }
+
+        // The backend returns all five rows in one batch. Two 7 MiB rows fill a
+        // frame, the 20 MiB row goes alone, and the small row follows it.
+        assert_eq!(frame_sizes, vec![2, 1, 1, 1]);
+        assert_eq!(value_lens, sizes);
     }
 
     #[tokio::test]
