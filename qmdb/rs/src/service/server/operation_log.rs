@@ -1,32 +1,34 @@
 //! `qmdb.v1.OperationLogService`: historical operation ranges, multi-location
 //! operation proofs, and proof-carrying subscriptions.
 
-use std::collections::{BTreeMap, VecDeque};
-use std::future::Future;
-use std::pin::Pin;
-use std::sync::Arc;
-use std::task::{Context as TaskContext, Poll};
-
+use super::{encode, qmdb_error_to_connect};
+// The subscribe stream still classifies raw Store rows itself.
+use crate::adapter::subscription::{self as sub, RowClassifier};
+use crate::{
+    proof::{MultiProofOperations, OperationRangeCheckpoint, RawBatchMultiProof},
+    request::OperationLocations,
+    service::proto::qmdb::v1::{
+        GetOperationRangeRequest, GetOperationRangeResponse, GetOperationsRequest,
+        GetOperationsResponse, OperationLogService, SubscribeRequest, SubscribeResponse,
+    },
+    OperationKv, PublishedWatermark, QmdbError,
+};
 use bytes::Bytes;
 use commonware_storage::merkle::{Family, Graftable, Location};
 use connectrpc::{ConnectError, ErrorCode, PreEncoded, RequestContext as Context, ServiceRequest};
-use exoware_sdk::common::kv::v1::filter::KindView as ProtoFilterKindView;
-use exoware_sdk::stream_filter::{CompiledFilters, Filter};
-use exoware_sdk::PrefixedStoreClient;
-use futures::future::BoxFuture;
-use futures::{FutureExt, Stream};
-
-// The subscribe stream still classifies raw Store rows itself.
-use crate::adapter::subscription::{self as sub, RowClassifier};
-use crate::proof::{MultiProofOperations, OperationRangeCheckpoint, RawBatchMultiProof};
-use crate::request::OperationLocations;
-use crate::service::proto::qmdb::v1::{
-    GetOperationRangeRequest, GetOperationRangeResponse, GetOperationsRequest,
-    GetOperationsResponse, OperationLogService, SubscribeRequest, SubscribeResponse,
+use exoware_sdk::{
+    common::kv::v1::filter::KindView as ProtoFilterKindView,
+    stream_filter::{CompiledFilters, Filter},
+    PrefixedStoreClient,
 };
-use crate::{OperationKv, PublishedWatermark, QmdbError};
-
-use super::{encode, qmdb_error_to_connect};
+use futures::{future::BoxFuture, FutureExt, Stream};
+use std::{
+    collections::{BTreeMap, VecDeque},
+    future::Future,
+    pin::Pin,
+    sync::Arc,
+    task::{Context as TaskContext, Poll},
+};
 
 /// Read capabilities needed by [`OperationLogServer`].
 pub(crate) trait OperationLogReader: Send + Sync + 'static {

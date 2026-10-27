@@ -1,28 +1,32 @@
 //! Current-state proof reads shared by the ordered and unordered adapters.
 
-use std::collections::{BTreeMap, BTreeSet};
-use std::sync::Arc;
-
+use crate::{
+    adapter::{
+        codec::{
+            chunk_index_for_location, clear_below_floor, decode_current_boundary_metadata,
+            decode_update_index_value_present, decode_update_location, encode_chunk_key,
+            encode_current_meta_key, encode_node_key, encode_operation_key, encode_presence_key,
+            merkle_size_for_watermark, op_count_for_watermark,
+        },
+        core,
+        operation_range::root,
+        read_cache::{ReadCache, RootContext},
+        storage::{load_proof_nodes, tail_chunk, BitmapTail, ProofBitmap, ProofNodes, TailIndices},
+    },
+    QmdbError,
+};
 use bytes::Bytes;
 use commonware_codec::{Copying, DecodeExt};
 use commonware_cryptography::{Digest, Hasher};
-use commonware_storage::merkle::{ElementPlan, Family, Graftable, Location, Position, RangePlan};
-use commonware_storage::qmdb::current::proof::{constant::OperationProof, RangeProof};
+use commonware_storage::{
+    merkle::{ElementPlan, Family, Graftable, Location, Position, RangePlan},
+    qmdb::current::proof::{constant::OperationProof, RangeProof},
+};
 use exoware_sdk::{RangeMode, ReadSession};
-
-use crate::adapter::codec::{
-    chunk_index_for_location, clear_below_floor, decode_current_boundary_metadata,
-    decode_update_index_value_present, decode_update_location, encode_chunk_key,
-    encode_current_meta_key, encode_node_key, encode_operation_key, encode_presence_key,
-    merkle_size_for_watermark, op_count_for_watermark,
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
 };
-use crate::adapter::core;
-use crate::adapter::operation_range::root;
-use crate::adapter::read_cache::{ReadCache, RootContext};
-use crate::adapter::storage::{
-    load_proof_nodes, tail_chunk, BitmapTail, ProofBitmap, ProofNodes, TailIndices,
-};
-use crate::QmdbError;
 
 /// Current-state values fixed by one published batch boundary.
 #[derive(Clone)]

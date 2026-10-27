@@ -1,15 +1,14 @@
+use crate::{codec::*, filter::ScanAccessPlan, types::*};
+use datafusion::{
+    arrow::{array::ArrowNativeTypeOp, datatypes::i256},
+    common::{DataFusionError, Result as DataFusionResult, ScalarValue},
+    logical_expr::{utils::iter_conjunction, Expr, Operator},
+};
+use exoware_sdk::{
+    keys::{Key, Prefix},
+    kv_codec::interleave_ordered_key_fields,
+};
 use std::collections::HashMap;
-
-use datafusion::arrow::array::ArrowNativeTypeOp;
-use datafusion::arrow::datatypes::i256;
-use datafusion::common::{DataFusionError, Result as DataFusionResult, ScalarValue};
-use datafusion::logical_expr::{utils::iter_conjunction, Expr, Operator};
-use exoware_sdk::keys::{Key, Prefix};
-use exoware_sdk::kv_codec::interleave_ordered_key_fields;
-
-use crate::codec::*;
-use crate::filter::ScanAccessPlan;
-use crate::types::*;
 
 #[derive(Debug, Clone)]
 pub(crate) enum PredicateConstraint {

@@ -1,10 +1,9 @@
-use exoware_sdk::kv_codec::Utf8;
-use exoware_sdk::prune_policy::{
-    GroupBy, KeysScope, OrderBy, OrderEncoding, PrunePolicy, RetainPolicy,
-};
-use exoware_sdk::selector::Selector;
-
 use crate::adapter::codec::UPDATE_PREFIX;
+use exoware_sdk::{
+    kv_codec::Utf8,
+    prune_policy::{GroupBy, KeysScope, OrderBy, OrderEncoding, PrunePolicy, RetainPolicy},
+    selector::Selector,
+};
 
 fn base_keys_scope() -> KeysScope {
     KeysScope {
@@ -46,17 +45,18 @@ pub fn keep_positions_gte(min_location: u64) -> PrunePolicy {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashSet;
-
     use super::{keep_latest_updates, keep_positions_gte};
     use crate::adapter::codec::{
         encode_ordered_key_bytes, encode_update_key, ORDERED_KEY_TERMINATOR_LEN, UPDATE_FAMILY,
         UPDATE_PREFIX,
     };
     use commonware_storage::merkle::{mmr, Location};
-    use exoware_sdk::kv_codec::Utf8;
-    use exoware_sdk::prune_policy::{validate_policy, OrderEncoding, RetainPolicy};
-    use exoware_sdk::selector::compile_payload_regex;
+    use exoware_sdk::{
+        kv_codec::Utf8,
+        prune_policy::{validate_policy, OrderEncoding, RetainPolicy},
+        selector::compile_payload_regex,
+    };
+    use std::collections::HashSet;
 
     fn compiled_update_regex() -> regex::bytes::Regex {
         let policy = keep_latest_updates(1);

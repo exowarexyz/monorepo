@@ -1,11 +1,9 @@
+use crate::{error::QmdbError, MAX_OPERATION_SIZE};
 use commonware_codec::{Buf, Copying, DecodeExt};
 use commonware_cryptography::Digest;
 use commonware_storage::merkle::{Family, Location, Position};
 use commonware_utils::bitmap::Prunable;
 use exoware_sdk::keys::{Key, KeyMut, Prefix};
-
-use crate::error::QmdbError;
-use crate::MAX_OPERATION_SIZE;
 
 // A family byte encodes *row semantics* (what kind of row this is), not which
 // instance or backend it belongs to. The same semantic row therefore uses the

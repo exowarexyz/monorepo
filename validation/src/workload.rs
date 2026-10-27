@@ -1,11 +1,9 @@
+use crate::deterministic::GOLDEN_RATIO_64;
 use anyhow::{ensure, Context};
 use clap::ValueEnum;
 use rand::{RngExt, SeedableRng};
 use serde::{Deserialize, Serialize};
-use std::ops::Range;
-use std::sync::Arc;
-
-use crate::deterministic::GOLDEN_RATIO_64;
+use std::{ops::Range, sync::Arc};
 
 /// Default seed used when the caller does not provide one.
 pub const DEFAULT_BENCH_RNG_SEED: u64 = 0x5eed_c0de;
@@ -610,10 +608,9 @@ fn approx_eq(a: f64, b: f64, eps: f64) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashSet;
-
     use super::*;
     use rand::{RngExt, SeedableRng};
+    use std::collections::HashSet;
 
     fn sample_spec() -> WorkloadSpec {
         WorkloadSpec::new(

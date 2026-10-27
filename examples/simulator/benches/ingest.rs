@@ -11,20 +11,24 @@
 //! `BENCH_VALUE_LEN`, `BENCH_WRITERS`, `BENCH_FRAGMENT_BYTES`, and
 //! `BENCH_MEMORY_BYTES`.
 
-use std::alloc::{GlobalAlloc, Layout};
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
-use std::time::{Duration, Instant};
-
 use buffa::Message;
 use bytes::Bytes;
-use exoware_sdk::common::kv::v1::Entry;
-use exoware_sdk::log::ingest::v1::PutRequest;
-use exoware_server::ingest::{
-    box_body, BudgetConfig, IngestBudget, IngestEvent, IngestObserver, PutLimits, PutMetadata,
+use exoware_sdk::{common::kv::v1::Entry, log::ingest::v1::PutRequest};
+use exoware_server::{
+    ingest::{
+        box_body, BudgetConfig, IngestBudget, IngestEvent, IngestObserver, PutLimits, PutMetadata,
+    },
+    Ingest, PutInput,
 };
-use exoware_server::{Ingest, PutInput};
 use exoware_simulator::RocksStore;
+use std::{
+    alloc::{GlobalAlloc, Layout},
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    },
+    time::{Duration, Instant},
+};
 
 // Track Rust allocations across decode tasks and writer threads, including spare
 // vector capacity and simultaneous old and replacement backing allocations.

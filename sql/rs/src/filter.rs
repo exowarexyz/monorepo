@@ -1,16 +1,17 @@
-use std::cmp::Ordering;
-use std::collections::HashMap;
-
-use exoware_sdk::keys::{Key, Prefix};
-use exoware_sdk::kv_codec::{eval_predicate, KvPredicate, KvPredicateCheck};
-
-use crate::aggregate::{
-    compile_kv_predicate_constraint, index_row_field_ref, pk_field_ref_for_secondary_index,
+use crate::{
+    aggregate::{
+        compile_kv_predicate_constraint, index_row_field_ref, pk_field_ref_for_secondary_index,
+    },
+    builder::{projected_column_indices, ProjectionSource},
+    codec::*,
+    predicate::*,
+    types::*,
 };
-use crate::builder::{projected_column_indices, ProjectionSource};
-use crate::codec::*;
-use crate::predicate::*;
-use crate::types::*;
+use exoware_sdk::{
+    keys::{Key, Prefix},
+    kv_codec::{eval_predicate, KvPredicate, KvPredicateCheck},
+};
+use std::{cmp::Ordering, collections::HashMap};
 
 #[derive(Debug, Clone)]
 pub(crate) enum PredicateAccess {

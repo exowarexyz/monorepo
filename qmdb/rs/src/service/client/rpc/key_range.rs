@@ -1,9 +1,15 @@
 //! Verifying client for `qmdb.v1.OrderedKeyRangeService`.
 
-use std::fmt::Display;
-use std::marker::PhantomData;
-use std::sync::Arc;
-
+use super::{
+    connect_error_to_qmdb,
+    verify::{verify_key_exclusion_from_proto, verify_key_value_from_proto},
+};
+use crate::{
+    proof::VerifiedKeyRange,
+    request::validate_key_range,
+    service::proto::qmdb::v1::{GetRangeRequest, GetRangeResponse, OrderedKeyRangeServiceClient},
+    QmdbError,
+};
 use bytes::Bytes;
 use commonware_codec::{Copying, Decode, DecodeExt, Encode, Read};
 use commonware_cryptography::Hasher;
@@ -20,16 +26,7 @@ use commonware_storage::{
 };
 use connectrpc::client::{ClientConfig, ClientTransport};
 use http_body::Body;
-
-use crate::proof::VerifiedKeyRange;
-use crate::request::validate_key_range;
-use crate::service::proto::qmdb::v1::{
-    GetRangeRequest, GetRangeResponse, OrderedKeyRangeServiceClient,
-};
-use crate::QmdbError;
-
-use super::connect_error_to_qmdb;
-use super::verify::{verify_key_exclusion_from_proto, verify_key_value_from_proto};
+use std::{fmt::Display, marker::PhantomData, sync::Arc};
 
 /// Client for `qmdb.v1.OrderedKeyRangeService`.
 pub struct KeyRangeClient<

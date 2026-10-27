@@ -55,12 +55,13 @@ pub mod service;
 
 #[cfg(feature = "test-utils")]
 pub use adapter::codec::{CHUNK_FAMILY, NODE_FAMILY};
-pub use error::{ProofKind, QmdbError};
-
 use commonware_codec::{Copying, DecodeExt};
 use commonware_cryptography::Digest;
-use commonware_storage::merkle::{self, Family, Graftable, Location};
-use commonware_storage::qmdb::current::proof::OpsRootWitness;
+use commonware_storage::{
+    merkle::{self, Family, Graftable, Location},
+    qmdb::current::proof::OpsRootWitness,
+};
+pub use error::{ProofKind, QmdbError};
 
 /// Maximum encoded operation size for QMDB key and value payloads (u16 length on the wire).
 pub const MAX_OPERATION_SIZE: usize = u16::MAX as usize;

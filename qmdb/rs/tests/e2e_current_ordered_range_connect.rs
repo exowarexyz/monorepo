@@ -3,38 +3,44 @@
 
 mod common;
 
-use std::num::NonZeroU64;
-use std::time::Duration;
-
 use bytes::Bytes;
 use commonware_codec::Encode as _;
 use commonware_cryptography::Sha256;
-use commonware_runtime::tokio as cw_tokio;
-use commonware_runtime::Runner as _;
-use commonware_storage::merkle::{mmb, mmr, Location, Proof};
-use commonware_storage::qmdb::any::{
-    ordered::variable::Operation as QmdbOperation, value::VariableEncoding,
+use commonware_runtime::{tokio as cw_tokio, Runner as _};
+use commonware_storage::{
+    merkle::{mmb, mmr, Location, Proof},
+    qmdb::{
+        any::{
+            ordered::{
+                variable::{Db as AnyOrderedQmdbDb, Operation as QmdbOperation},
+                Update,
+            },
+            value::VariableEncoding,
+        },
+        current::ordered::variable::Db as LocalQmdbDb,
+        sync::{self as qmdb_sync, Request, Response, Source as _},
+    },
+    translator::TwoCap,
 };
-use commonware_storage::qmdb::{
-    any::ordered::{variable::Db as AnyOrderedQmdbDb, Update},
-    current::ordered::variable::Db as LocalQmdbDb,
-    sync::{self as qmdb_sync, Request, Response, Source as _},
-};
-use commonware_storage::translator::TwoCap;
 use commonware_utils::{channel::mpsc, NZUsize, NZU16, NZU64};
-use exoware_qmdb::service::proto::qmdb::v1::{
-    GetCurrentOperationRangeRequest as ProtoGetCurrentOperationRangeRequest,
-    GetOperationRangeRequest as ProtoGetOperationRangeRequest,
-    SubscribeRequest as ProtoSubscribeRequest,
-};
 use exoware_qmdb::{
-    adapter::upload::recover_boundary_state, service::client::rpc::CurrentOperationClient,
-    service::client::rpc::OperationLogClient, service::client::rpc::OperationLogSubscribeProof,
+    adapter::upload::recover_boundary_state,
+    service::{
+        client::rpc::{CurrentOperationClient, OperationLogClient, OperationLogSubscribeProof},
+        proto::qmdb::v1::{
+            GetCurrentOperationRangeRequest as ProtoGetCurrentOperationRangeRequest,
+            GetOperationRangeRequest as ProtoGetOperationRangeRequest,
+            SubscribeRequest as ProtoSubscribeRequest,
+        },
+    },
     CurrentBoundaryState, QmdbError, MAX_OPERATION_SIZE,
 };
-use exoware_sdk::common::kv::v1::{filter as proto_filter, Filter as ProtoFilter};
-use exoware_sdk::proto::PreferZstdHttpClient;
-use exoware_sdk::{PrefixedStoreClient, StoreClient};
+use exoware_sdk::{
+    common::kv::v1::{filter as proto_filter, Filter as ProtoFilter},
+    proto::PreferZstdHttpClient,
+    PrefixedStoreClient, StoreClient,
+};
+use std::{num::NonZeroU64, time::Duration};
 
 const N: usize = 32;
 const MIN_MMB_OPERATIONS: usize = 10;

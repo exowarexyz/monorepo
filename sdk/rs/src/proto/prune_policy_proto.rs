@@ -3,16 +3,18 @@
 //! Parsing checks only protobuf shape and numeric width conversions. Call the
 //! validation helpers on the parsed output before applying policy effects.
 
-use crate::common::kv::v1::Selector as ProtoSelector;
-use crate::kv_codec::Utf8;
-use crate::prune_policy::{
-    GroupBy, KeysScope, OrderBy, OrderEncoding, PrunePolicy, PrunePolicyDocument, RetainPolicy,
-    PRUNE_POLICY_DOCUMENT_VERSION,
-};
-use crate::selector::Selector;
-use crate::store::prune::v1::{
-    policy_retain, KeysScope as ProtoKeysScope, Policy as ProtoPolicy, PolicyOrderBy,
-    PolicyOrderEncoding, PruneRequestView,
+use crate::{
+    common::kv::v1::Selector as ProtoSelector,
+    kv_codec::Utf8,
+    prune_policy::{
+        GroupBy, KeysScope, OrderBy, OrderEncoding, PrunePolicy, PrunePolicyDocument, RetainPolicy,
+        PRUNE_POLICY_DOCUMENT_VERSION,
+    },
+    selector::Selector,
+    store::prune::v1::{
+        policy_retain, KeysScope as ProtoKeysScope, Policy as ProtoPolicy, PolicyOrderBy,
+        PolicyOrderEncoding, PruneRequestView,
+    },
 };
 use buffa::MessageView;
 
@@ -230,10 +232,11 @@ pub fn parse_and_validate_policy_document(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    use crate::kv_codec::Utf8;
-    use crate::prune_policy::{GroupBy, KeysScope, OrderBy, PrunePolicy, RetainPolicy};
-    use crate::selector::Selector;
+    use crate::{
+        kv_codec::Utf8,
+        prune_policy::{GroupBy, KeysScope, OrderBy, PrunePolicy, RetainPolicy},
+        selector::Selector,
+    };
 
     #[test]
     fn owned_proto_policy_round_trips_to_domain_policy() {
@@ -264,8 +267,7 @@ mod tests {
 
     #[test]
     fn parse_and_validate_rejects_invalid_policy_document() {
-        use buffa::view::MessageView as _;
-        use buffa::Message as _;
+        use buffa::{view::MessageView as _, Message as _};
 
         let invalid = PrunePolicy {
             scope: KeysScope {

@@ -1,16 +1,14 @@
+use crate::{
+    error::SimplexError,
+    keys,
+    types::{encode_block_data, BlockData, Finalized, Notarized, UploadReceipt, UploadSummary},
+};
 use bytes::Bytes;
 use commonware_codec::Encode;
 use commonware_consensus::Block;
 use commonware_cryptography::{certificate, Digest};
-use exoware_sdk::keys::Key;
-use exoware_sdk::{ClientError, PrefixedStoreClient, StoreBatchUpload, StoreWriteBatch};
+use exoware_sdk::{keys::Key, ClientError, PrefixedStoreClient, StoreBatchUpload, StoreWriteBatch};
 use futures::future::BoxFuture;
-
-use crate::error::SimplexError;
-use crate::keys;
-use crate::types::{
-    encode_block_data, BlockData, Finalized, Notarized, UploadReceipt, UploadSummary,
-};
 
 #[derive(Clone, Debug)]
 pub struct PreparedEntry {

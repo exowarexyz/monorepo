@@ -1,58 +1,63 @@
-use std::cmp::Ordering;
-use std::fmt;
-use std::hash::{Hash, Hasher};
-use std::sync::Arc;
-
+use crate::{diagnostics::*, filter::*, predicate::*, session::read_session, types::*};
 use async_trait::async_trait;
-use datafusion::arrow::array::{ArrayRef, UInt64Array};
-use datafusion::arrow::compute::cast_with_options;
-use datafusion::arrow::datatypes::{i256, DataType, Schema, SchemaRef, TimeUnit};
-use datafusion::arrow::record_batch::RecordBatch;
-use datafusion::catalog::Session;
-use datafusion::common::format::DEFAULT_CAST_OPTIONS;
-use datafusion::common::tree_node::{Transformed, TreeNode, TreeNodeRecursion};
-use datafusion::common::{DFSchemaRef, DataFusionError, Result as DataFusionResult, ScalarValue};
-use datafusion::datasource::source_as_provider;
-use datafusion::execution::context::{QueryPlanner, TaskContext};
-use datafusion::functions_aggregate::{
-    average::Avg,
-    count::Count,
-    min_max::{Max, Min},
-    sum::Sum,
+use datafusion::{
+    arrow::{
+        array::{ArrayRef, UInt64Array},
+        compute::cast_with_options,
+        datatypes::{i256, DataType, Schema, SchemaRef, TimeUnit},
+        record_batch::RecordBatch,
+    },
+    catalog::Session,
+    common::{
+        format::DEFAULT_CAST_OPTIONS,
+        tree_node::{Transformed, TreeNode, TreeNodeRecursion},
+        DFSchemaRef, DataFusionError, Result as DataFusionResult, ScalarValue,
+    },
+    datasource::source_as_provider,
+    execution::context::{QueryPlanner, TaskContext},
+    functions_aggregate::{
+        average::Avg,
+        count::Count,
+        min_max::{Max, Min},
+        sum::Sum,
+    },
+    logical_expr::{
+        physical_planning_context::PhysicalPlanningContext,
+        utils::{conjunction, disjunction},
+        Aggregate, Expr, ExprSchemable, Extension, LogicalPlan, Operator, UserDefinedLogicalNode,
+        UserDefinedLogicalNodeCore,
+    },
+    optimizer::optimizer::OptimizerRule,
+    physical_expr::{
+        aggregate::LoweredAggregateBuilder, expressions::Column, EquivalenceProperties,
+        Partitioning, PhysicalExpr,
+    },
+    physical_plan::{
+        aggregates::{AggregateExec, AggregateMode, PhysicalGroupBy},
+        execution_plan::{Boundedness, EmissionType},
+        stream::RecordBatchStreamAdapter,
+        DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties, SendableRecordBatchStream,
+    },
+    physical_planner::{DefaultPhysicalPlanner, ExtensionPlanner, PhysicalPlanner},
 };
-use datafusion::logical_expr::physical_planning_context::PhysicalPlanningContext;
-use datafusion::logical_expr::utils::{conjunction, disjunction};
-use datafusion::logical_expr::{
-    Aggregate, Expr, ExprSchemable, Extension, LogicalPlan, Operator, UserDefinedLogicalNode,
-    UserDefinedLogicalNodeCore,
-};
-use datafusion::optimizer::optimizer::OptimizerRule;
-use datafusion::physical_expr::aggregate::LoweredAggregateBuilder;
-use datafusion::physical_expr::expressions::Column;
-use datafusion::physical_expr::{EquivalenceProperties, Partitioning, PhysicalExpr};
-use datafusion::physical_plan::aggregates::{AggregateExec, AggregateMode, PhysicalGroupBy};
-use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
-use datafusion::physical_plan::{
-    stream::RecordBatchStreamAdapter, DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties,
-    SendableRecordBatchStream,
-};
-use datafusion::physical_planner::{DefaultPhysicalPlanner, ExtensionPlanner, PhysicalPlanner};
 use exoware_proto::{
     query, to_domain_reduced_value_from_view, RangeReduceOp, RangeReduceRequest, RangeReducerSpec,
 };
 use exoware_sdk as exoware_proto;
-use exoware_sdk::kv_codec::{
-    KvExpr, KvFieldKind, KvFieldRef, KvPredicate, KvPredicateCheck, KvPredicateConstraint,
-    KvReducedValue,
+use exoware_sdk::{
+    kv_codec::{
+        KvExpr, KvFieldKind, KvFieldRef, KvPredicate, KvPredicateCheck, KvPredicateConstraint,
+        KvReducedValue,
+    },
+    PrefixedStoreClient, ReadSession,
 };
-use exoware_sdk::{PrefixedStoreClient, ReadSession};
 use futures::{stream::BoxStream, StreamExt, TryStreamExt};
-
-use crate::diagnostics::*;
-use crate::filter::*;
-use crate::predicate::*;
-use crate::session::read_session;
-use crate::types::*;
+use std::{
+    cmp::Ordering,
+    fmt,
+    hash::{Hash, Hasher},
+    sync::Arc,
+};
 
 #[derive(Debug)]
 pub(crate) struct KvAggregatePushdownRule;
@@ -1956,25 +1961,28 @@ pub(crate) fn kv_field_kind(kind: ColumnKind) -> Option<KvFieldKind> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use buffa::Message;
-    use std::collections::BTreeMap;
-    use std::sync::{
-        atomic::{AtomicUsize, Ordering as AtomicOrdering},
-        Mutex,
-    };
-
     use axum::{extract::Request, middleware::Next, response::Response, Router};
+    use buffa::Message;
     use bytes::Bytes;
-    use datafusion::arrow::array::{
-        ArrayRef, Decimal128Array, FixedSizeBinaryBuilder, Float64Array, Int64Array, StringArray,
-        UInt64Array,
+    use datafusion::{
+        arrow::array::{
+            ArrayRef, Decimal128Array, FixedSizeBinaryBuilder, Float64Array, Int64Array,
+            StringArray, UInt64Array,
+        },
+        datasource::MemTable,
+        prelude::SessionContext as DataFusionSessionContext,
     };
-    use datafusion::datasource::MemTable;
-    use datafusion::prelude::SessionContext as DataFusionSessionContext;
     use exoware_sdk::{RangeReduceGroup, RangeReduceResponse, RangeReduceResult, StoreClient};
     use exoware_server::{
         Query, QueryExtra, QueryResult, QueryState, RangeScan, RangeScanBatch, RangeScanResult,
         Sequence,
+    };
+    use std::{
+        collections::BTreeMap,
+        sync::{
+            atomic::{AtomicUsize, Ordering as AtomicOrdering},
+            Mutex,
+        },
     };
 
     #[derive(Default)]
@@ -3079,19 +3087,19 @@ mod tests {
         batches: Vec<RecordBatch>,
         partial_final: bool,
     ) -> Vec<Vec<ScalarValue>> {
-        use datafusion::datasource::memory::MemorySourceConfig;
-        use datafusion::execution::context::SessionConfig;
-        use datafusion::functions_aggregate::{
-            count::count_udaf,
-            min_max::{max_udaf, min_udaf},
+        use datafusion::{
+            datasource::memory::MemorySourceConfig,
+            execution::context::SessionConfig,
+            functions_aggregate::{
+                count::count_udaf,
+                min_max::{max_udaf, min_udaf},
+            },
+            physical_expr::{aggregate::AggregateExprBuilder, expressions::Column, PhysicalExpr},
+            physical_plan::{
+                aggregates::{AggregateExec, AggregateMode, PhysicalGroupBy},
+                collect, ExecutionPlan,
+            },
         };
-        use datafusion::physical_expr::aggregate::AggregateExprBuilder;
-        use datafusion::physical_expr::expressions::Column;
-        use datafusion::physical_expr::PhysicalExpr;
-        use datafusion::physical_plan::aggregates::{
-            AggregateExec, AggregateMode, PhysicalGroupBy,
-        };
-        use datafusion::physical_plan::{collect, ExecutionPlan};
 
         let schema = batches[0].schema();
         let groups = PhysicalGroupBy::new_single(vec![(
@@ -3793,8 +3801,10 @@ mod tests {
         crate::SqlContext,
         Arc<datafusion::execution::memory_pool::PeakRecordingPool>,
     ) {
-        use datafusion::execution::memory_pool::{FairSpillPool, PeakRecordingPool};
-        use datafusion::execution::runtime_env::RuntimeEnvBuilder;
+        use datafusion::execution::{
+            memory_pool::{FairSpillPool, PeakRecordingPool},
+            runtime_env::RuntimeEnvBuilder,
+        };
 
         let pool = Arc::new(PeakRecordingPool::new(Arc::new(FairSpillPool::new(limit))));
         let runtime = RuntimeEnvBuilder::new()
@@ -4391,10 +4401,12 @@ mod tests {
 
     #[tokio::test]
     async fn naive_timestamp_casts_preserve_errors_and_nulls() {
-        use datafusion::arrow::array::TimestampMicrosecondArray;
-        use datafusion::functions_aggregate::expr_fn::min;
-        use datafusion::logical_expr::{Cast, TryCast};
-        use datafusion::prelude::col;
+        use datafusion::{
+            arrow::array::TimestampMicrosecondArray,
+            functions_aggregate::expr_fn::min,
+            logical_expr::{Cast, TryCast},
+            prelude::col,
+        };
 
         let fixture = Fixture::new().await;
         fixture

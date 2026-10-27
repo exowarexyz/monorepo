@@ -1,6 +1,7 @@
-use datafusion::arrow::datatypes::DataType;
-use datafusion::arrow::util::pretty::print_batches;
-use datafusion::common::Result as DataFusionResult;
+use datafusion::{
+    arrow::{datatypes::DataType, util::pretty::print_batches},
+    common::Result as DataFusionResult,
+};
 use exoware_sdk::{StoreClient, StoreKeyPrefix};
 use exoware_sql::{IndexSpec, KvSchema, SqlContext, TableColumnConfig};
 

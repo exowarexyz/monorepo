@@ -15,35 +15,36 @@
 //!     --url http://localhost:10000 \
 //!     --keys 100
 
-use std::collections::{HashMap, HashSet};
-use std::future::Future;
-use std::sync::Mutex;
-use std::time::{Duration, Instant};
-
+use crate::{
+    client::{
+        build_client, is_transient_ingest_error, is_transient_query_error, ClientArgs, ClientConfig,
+    },
+    deterministic::mix64,
+    ingest::{ingest_with_retry, retry_delay_for_error, IngestRetryArgs},
+    keyspace::{default_run_namespace, Keyspace, KeyspaceArgs},
+    ledger::{
+        read_overlap_ledger, snapshot_interval, validate_overlap_ledger, OverlapLedgerWriter,
+    },
+    record::Record,
+    value::{
+        overlap_value_for_index, validate_value_size, value_for_index, DEFAULT_MAX_VALUE_SIZE,
+        DEFAULT_VALUE_SIZE,
+    },
+};
 use anyhow::{anyhow, bail, ensure, Context};
 use clap::ValueEnum;
-use exoware_sdk::keys::{next_key, Key, MAX_KEY_LEN};
-use exoware_sdk::kv_codec::KvReducedValue;
-use exoware_sdk::{PrefixedStoreClient, RangeMode};
-use exoware_sdk::{RangeReduceOp, RangeReduceRequest, RangeReducerSpec};
+use exoware_sdk::{
+    keys::{next_key, Key, MAX_KEY_LEN},
+    kv_codec::KvReducedValue,
+    PrefixedStoreClient, RangeMode, RangeReduceOp, RangeReduceRequest, RangeReducerSpec,
+};
 use futures::stream::{self, StreamExt};
-use rand::rngs::StdRng;
-use rand::seq::SliceRandom;
-use rand::{RngExt, SeedableRng};
-
-use crate::client::{
-    build_client, is_transient_ingest_error, is_transient_query_error, ClientArgs, ClientConfig,
-};
-use crate::deterministic::mix64;
-use crate::ingest::{ingest_with_retry, retry_delay_for_error, IngestRetryArgs};
-use crate::keyspace::{default_run_namespace, Keyspace, KeyspaceArgs};
-use crate::ledger::{
-    read_overlap_ledger, snapshot_interval, validate_overlap_ledger, OverlapLedgerWriter,
-};
-use crate::record::Record;
-use crate::value::{
-    overlap_value_for_index, validate_value_size, value_for_index, DEFAULT_MAX_VALUE_SIZE,
-    DEFAULT_VALUE_SIZE,
+use rand::{rngs::StdRng, seq::SliceRandom, RngExt, SeedableRng};
+use std::{
+    collections::{HashMap, HashSet},
+    future::Future,
+    sync::Mutex,
+    time::{Duration, Instant},
 };
 
 const QUERY_RANGE_MAX_LIMIT: usize = 10_000;
@@ -1814,11 +1815,13 @@ mod tests {
     use crate::keyspace::DEFAULT_KEY_LEN;
     use axum::Router;
     use connectrpc::{ConnectError, ConnectRpcService, RequestContext, ServiceRequest};
-    use exoware_sdk::common::kv::v1::Entry;
-    use exoware_sdk::query::{
-        GetManyEntry, GetManyFrame, GetManyRequest, GetRequest, GetResponse, RangeFrame,
-        RangeRequest, ReduceRequest, ReduceResponse, Service as QueryService,
-        ServiceServer as QueryServiceServer,
+    use exoware_sdk::{
+        common::kv::v1::Entry,
+        query::{
+            GetManyEntry, GetManyFrame, GetManyRequest, GetRequest, GetResponse, RangeFrame,
+            RangeRequest, ReduceRequest, ReduceResponse, Service as QueryService,
+            ServiceServer as QueryServiceServer,
+        },
     };
     use futures::stream;
     use std::collections::HashSet;

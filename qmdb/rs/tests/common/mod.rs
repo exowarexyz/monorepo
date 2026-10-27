@@ -2,10 +2,6 @@
 
 #![allow(refining_impl_trait)]
 
-use std::convert::Infallible;
-use std::num::NonZeroU64;
-use std::time::Duration;
-
 use axum::{routing::get, Router};
 use commonware_cryptography::Digest;
 use commonware_parallel::Sequential;
@@ -21,18 +17,20 @@ use commonware_storage::{
     translator::TwoCap,
 };
 use commonware_utils::{NZUsize, NZU64};
-use connectrpc::client::ClientConfig;
 use connectrpc::{
-    ConnectError, ConnectRpcService, ErrorCode, RequestContext as Context, ServiceRequest,
+    client::ClientConfig, ConnectError, ConnectRpcService, ErrorCode, RequestContext as Context,
+    ServiceRequest,
 };
-use exoware_qmdb::service::proto::qmdb::v1::{
-    GetOperationRangeRequest, GetOperationRangeResponse, GetOperationsRequest,
-    GetOperationsResponse, OperationLogService, OperationLogServiceClient,
-    OperationLogServiceServer, SubscribeRequest, SubscribeResponse,
+use exoware_qmdb::{
+    service::proto::qmdb::v1::{
+        GetOperationRangeRequest, GetOperationRangeResponse, GetOperationsRequest,
+        GetOperationsResponse, OperationLogService, OperationLogServiceClient,
+        OperationLogServiceServer, SubscribeRequest, SubscribeResponse,
+    },
+    CurrentBoundaryState, QmdbError,
 };
-use exoware_qmdb::{CurrentBoundaryState, QmdbError};
-use exoware_sdk::proto::PreferZstdHttpClient;
-use exoware_sdk::StoreClient;
+use exoware_sdk::{proto::PreferZstdHttpClient, StoreClient};
+use std::{convert::Infallible, num::NonZeroU64, time::Duration};
 
 #[allow(dead_code)]
 pub fn merkle_config(prefix: &str, page_cache: CacheRef) -> MerkleConfig<Sequential> {

@@ -3,62 +3,65 @@
 
 #![allow(refining_impl_trait)]
 
-use std::collections::HashMap;
-use std::pin::Pin;
-use std::sync::atomic::AtomicBool;
-#[cfg(test)]
-use std::sync::atomic::Ordering;
-use std::sync::Arc;
-
+use crate::{
+    reduce::{decode_group, execute_reduce, RangeError, ReduceExecution, REDUCE_BATCH_ROWS},
+    stream::{StreamHub, StreamNotifier},
+    validate::{self, IngestLimits},
+    FilteredBatch, Ingest, IngestError, Log, LogBatch, Prune, Query, QueryExtra, RangeScan,
+    RangeScanResult, Retention, StoreEngine,
+};
 use buffa::Message;
 use bytes::Bytes;
 use connectrpc::{
     Chain, ConnectError, ConnectRpcService, Limits, RequestContext as Context, ServiceRequest,
 };
-use datafusion::arrow::record_batch::RecordBatch;
-use datafusion::execution::context::TaskContext;
-use datafusion::execution::runtime_env::RuntimeEnv;
-use exoware_proto::common::Entry;
-use exoware_proto::google::rpc::{ErrorInfo, RetryInfo};
+use datafusion::{
+    arrow::record_batch::RecordBatch,
+    execution::{context::TaskContext, runtime_env::RuntimeEnv},
+};
 #[cfg(test)]
 use exoware_proto::log::retention::v1::SetRetentionRequestView;
-use exoware_proto::log::retention::v1::{
-    Service as RetentionApi, ServiceServer as RetentionServiceServer, SetRetentionResponse,
-};
 #[cfg(test)]
 use exoware_proto::log::stream::v1::GetRequestView;
-use exoware_proto::log::stream::v1::{
-    Service as StreamApi, ServiceServer as StreamServiceServer, SubscribeRequestView,
-    SubscribeResponse,
-};
-use exoware_proto::prune::{
-    PruneResponse, Service as PruneApi, ServiceServer as PruneServiceServer,
-};
-use exoware_proto::query::{
-    Detail, GetManyEntry, GetManyFrame, GetResponse, RangeFrame, ReduceResponse,
-    Service as QueryApi, ServiceServer as QueryServiceServer,
-};
-use exoware_proto::stream_filter::{Filter, StreamFilter};
 use exoware_proto::{
-    connect_compression_registry, parse_range_traversal_direction,
+    common::Entry,
+    connect_compression_registry,
+    google::rpc::{ErrorInfo, RetryInfo},
+    log::{
+        retention::v1::{
+            Service as RetentionApi, ServiceServer as RetentionServiceServer, SetRetentionResponse,
+        },
+        stream::v1::{
+            Service as StreamApi, ServiceServer as StreamServiceServer, SubscribeRequestView,
+            SubscribeResponse,
+        },
+    },
+    parse_range_traversal_direction,
+    prune::{PruneResponse, Service as PruneApi, ServiceServer as PruneServiceServer},
+    query::{
+        Detail, GetManyEntry, GetManyFrame, GetResponse, RangeFrame, ReduceResponse,
+        Service as QueryApi, ServiceServer as QueryServiceServer,
+    },
+    stream_filter::{Filter, StreamFilter},
     to_domain_reduce_request_from_view, with_error_info_detail, with_query_detail,
     with_retry_info_detail, RangeTraversalDirection,
 };
 use exoware_sdk as exoware_proto;
-use exoware_sdk::common::kv::v1::filter::KindView as ProtoFilterKindView;
-use exoware_sdk::keys::Key;
-use exoware_sdk::limits::{INGEST_ERROR_DOMAIN, MAX_REQUEST_MESSAGE_BYTES};
-use exoware_sdk::selector::Selector;
-use futures::{stream as stream_util, Stream, StreamExt};
-use tokio::sync::Notify;
-
-use crate::reduce::{decode_group, execute_reduce, RangeError, ReduceExecution, REDUCE_BATCH_ROWS};
-use crate::stream::{StreamHub, StreamNotifier};
-use crate::validate::{self, IngestLimits};
-use crate::{
-    FilteredBatch, Ingest, IngestError, Log, LogBatch, Prune, Query, QueryExtra, RangeScan,
-    RangeScanResult, Retention, StoreEngine,
+use exoware_sdk::{
+    common::kv::v1::filter::KindView as ProtoFilterKindView,
+    keys::Key,
+    limits::{INGEST_ERROR_DOMAIN, MAX_REQUEST_MESSAGE_BYTES},
+    selector::Selector,
 };
+use futures::{stream as stream_util, Stream, StreamExt};
+#[cfg(test)]
+use std::sync::atomic::Ordering;
+use std::{
+    collections::HashMap,
+    pin::Pin,
+    sync::{atomic::AtomicBool, Arc},
+};
+use tokio::sync::Notify;
 
 #[cfg(test)]
 mod put_tests;
@@ -1380,39 +1383,44 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::{BTreeMap, HashMap};
-    use std::sync::atomic::{AtomicU64, AtomicUsize};
-    use std::sync::Mutex;
-    use std::time::Duration;
-
-    use buffa::Message;
-    use exoware_proto::common::kv::v1::Selector as ProtoSelector;
-    use exoware_proto::log::retention::v1::SetRetentionRequest;
-    use exoware_proto::log::stream::v1::{
-        GetRequest as StreamGetRequest, SubscribeRequest, SubscribeRequestView,
-    };
-    use exoware_proto::store::prune::v1::{
-        policy_retain, KeysScope, Policy as ProtoPolicy, PolicyRetain, PruneRequest,
-        PruneRequestView, RetainKeepLatest,
-    };
-    use exoware_sdk::keys::Prefix;
-    use exoware_sdk::kv_codec::KvReducedValue;
-    use exoware_sdk::limits::{
-        put_entry_encoded_len, PutTooLarge, MAX_PUT_ENTRIES, MAX_RESPONSE_ELEMENT_MEMORY_BYTES,
-        MAX_RESPONSE_MESSAGE_BYTES, MAX_VALUE_LEN,
-    };
-    use exoware_sdk::prune_policy::{PrunePolicyDocument, PRUNE_POLICY_DOCUMENT_VERSION};
-    use exoware_sdk::retention::RetentionPolicy;
-    use exoware_sdk::transport::ServiceTransport;
-    use exoware_sdk::{
-        decode_connect_error, to_domain_reduce_response, PrefixedStoreClient, StoreClient,
-        StoreWriteBatch,
-    };
-    use futures::StreamExt;
-
     use crate::{
         Ingest, IngestError, Log, LogBatch, Prune, Query, QueryExtra, QueryResult, RangeScan,
         RangeScanBatch, Retention, Sequence, StreamNotification, StreamNotifier,
+    };
+    use buffa::Message;
+    use exoware_proto::{
+        common::kv::v1::Selector as ProtoSelector,
+        log::{
+            retention::v1::SetRetentionRequest,
+            stream::v1::{GetRequest as StreamGetRequest, SubscribeRequest, SubscribeRequestView},
+        },
+        store::prune::v1::{
+            policy_retain, KeysScope, Policy as ProtoPolicy, PolicyRetain, PruneRequest,
+            PruneRequestView, RetainKeepLatest,
+        },
+    };
+    use exoware_sdk::{
+        decode_connect_error,
+        keys::Prefix,
+        kv_codec::KvReducedValue,
+        limits::{
+            put_entry_encoded_len, PutTooLarge, MAX_PUT_ENTRIES, MAX_RESPONSE_ELEMENT_MEMORY_BYTES,
+            MAX_RESPONSE_MESSAGE_BYTES, MAX_VALUE_LEN,
+        },
+        prune_policy::{PrunePolicyDocument, PRUNE_POLICY_DOCUMENT_VERSION},
+        retention::RetentionPolicy,
+        to_domain_reduce_response,
+        transport::ServiceTransport,
+        PrefixedStoreClient, StoreClient, StoreWriteBatch,
+    };
+    use futures::StreamExt;
+    use std::{
+        collections::{BTreeMap, HashMap},
+        sync::{
+            atomic::{AtomicU64, AtomicUsize},
+            Mutex,
+        },
+        time::Duration,
     };
 
     const TEST_PREFIX: u8 = 1;
@@ -3449,8 +3457,7 @@ mod tests {
 
     #[tokio::test]
     async fn concurrent_reduce_cancellation_releases_shared_pool() {
-        use datafusion::execution::memory_pool::FairSpillPool;
-        use datafusion::execution::runtime_env::RuntimeEnvBuilder;
+        use datafusion::execution::{memory_pool::FairSpillPool, runtime_env::RuntimeEnvBuilder};
         let (engine, request) = grouped_reduce_fixture(5000, 0);
         engine.state.lock().unwrap().range_batch_limit = Some(1);
         let runtime = RuntimeEnvBuilder::new()

@@ -1,8 +1,8 @@
-use std::future::Future;
-use std::time::Duration;
-
-use exoware_sdk::transport::BalancedHttp2Config;
-use exoware_sdk::{ClientError, ErrorCode, Key, RetryConfig, StoreClient, StoreKeyPrefix};
+use exoware_sdk::{
+    transport::BalancedHttp2Config, ClientError, ErrorCode, Key, RetryConfig, StoreClient,
+    StoreKeyPrefix,
+};
+use std::{future::Future, time::Duration};
 
 async fn timeout_code<T>(future: impl Future<Output = Result<T, ClientError>>) -> ErrorCode {
     match tokio::time::timeout(Duration::from_millis(400), future)

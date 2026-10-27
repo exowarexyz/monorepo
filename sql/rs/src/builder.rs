@@ -1,18 +1,19 @@
-use std::sync::Arc;
-
-use datafusion::arrow::array::{
-    ArrayRef, BinaryBuilder, BooleanBuilder, Date32Builder, Date64Builder, Decimal128Builder,
-    Decimal256Builder, FixedSizeBinaryBuilder, Float64Builder, Int64Builder, ListBuilder,
-    StringBuilder, TimestampMicrosecondBuilder, UInt64Builder,
+use crate::{filter::*, types::*};
+use datafusion::{
+    arrow::{
+        array::{
+            ArrayRef, BinaryBuilder, BooleanBuilder, Date32Builder, Date64Builder,
+            Decimal128Builder, Decimal256Builder, FixedSizeBinaryBuilder, Float64Builder,
+            Int64Builder, ListBuilder, StringBuilder, TimestampMicrosecondBuilder, UInt64Builder,
+        },
+        compute::cast,
+        datatypes::{i256, DataType, SchemaRef},
+        record_batch::{RecordBatch, RecordBatchOptions},
+    },
+    common::{DataFusionError, Result as DataFusionResult},
 };
-use datafusion::arrow::compute::cast;
-use datafusion::arrow::datatypes::{i256, DataType, SchemaRef};
-use datafusion::arrow::record_batch::{RecordBatch, RecordBatchOptions};
-use datafusion::common::{DataFusionError, Result as DataFusionResult};
 use exoware_sdk::kv_codec::{StoredRow, StoredValue};
-
-use crate::filter::*;
-use crate::types::*;
+use std::sync::Arc;
 
 pub(crate) enum ColumnBuilder {
     Int64(Int64Builder),

@@ -17,20 +17,17 @@ mod keyless;
 mod ordered;
 mod unordered;
 
-pub use immutable::immutable_operation_log_stack;
-pub use keyless::keyless_operation_log_stack;
-pub use ordered::{ordered_operation_log_stack, ordered_stack};
-pub use unordered::{unordered_operation_log_stack, unordered_stack};
-
+use crate::QmdbError;
+use connectrpc::{ConnectError, ConnectRpcService, Limits};
 use current_operation::{CurrentOperationReader, CurrentOperationServer};
+use exoware_sdk::ClientError;
+pub use immutable::immutable_operation_log_stack;
 use key_lookup::{KeyLookupReader, KeyLookupServer};
 use key_range::{KeyRangeReader, KeyRangeServer};
+pub use keyless::keyless_operation_log_stack;
 use operation_log::{OperationLogReader, OperationLogServer};
-
-use connectrpc::{ConnectError, ConnectRpcService, Limits};
-use exoware_sdk::ClientError;
-
-use crate::QmdbError;
+pub use ordered::{ordered_operation_log_stack, ordered_stack};
+pub use unordered::{unordered_operation_log_stack, unordered_stack};
 
 const MAX_CONNECTRPC_BODY_BYTES: usize = 256 * 1024 * 1024;
 
@@ -89,10 +86,11 @@ mod tests {
     use super::*;
     use buffa::Message as _;
     use connectrpc::ErrorCode;
-    use exoware_sdk::proto::google::rpc::{ErrorInfo, RetryInfo};
-    use exoware_sdk::proto::query::Detail;
     use exoware_sdk::proto::{
-        decode_connect_error, with_error_info_detail, with_query_detail, with_retry_info_detail,
+        decode_connect_error,
+        google::rpc::{ErrorInfo, RetryInfo},
+        query::Detail,
+        with_error_info_detail, with_query_detail, with_retry_info_detail,
     };
 
     #[test]

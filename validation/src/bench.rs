@@ -5,29 +5,34 @@
 //!
 //! Progress: `bench` emits `Benchmark progress` every `--progress-interval-secs` (default 10; 0 disables).
 
-use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
-use std::time::Instant;
-
+use crate::{
+    client::{build_client, ClientArgs, ClientConfig},
+    exec::{join_all_or_abort, spawn_progress_task, stop_progress_task},
+    ingest::DEFAULT_INGEST_BATCH_SIZE,
+    keyspace::{default_run_namespace, Keyspace, KeyspaceArgs, KEYSPACE_LAYOUT_VERSION},
+    record::{record_refs, Record},
+    report::{
+        print_bench_report, read_bench_manifest_json, write_bench_report_json, BenchConfig,
+        BenchManifest, BenchReport, LatencyHistogramsRecorder,
+    },
+    value::{value_for_index, DEFAULT_VALUE_SIZE, VALUE_GENERATOR_VERSION},
+    workload::{
+        resolve_mix, worker_operation_count, worker_write_index, KeyDistribution, Operation,
+        Scenario, WorkerPlan, WorkloadSpec, ZipfSampler, DEFAULT_BENCH_RNG_SEED,
+        WORKLOAD_GENERATOR_VERSION,
+    },
+};
 use anyhow::{anyhow, ensure, Context};
 use chrono::Utc;
+use std::{
+    path::PathBuf,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
+    time::Instant,
+};
 use tokio::task::JoinSet;
-
-use crate::client::{build_client, ClientArgs, ClientConfig};
-use crate::exec::{join_all_or_abort, spawn_progress_task, stop_progress_task};
-use crate::ingest::DEFAULT_INGEST_BATCH_SIZE;
-use crate::keyspace::{default_run_namespace, Keyspace, KeyspaceArgs, KEYSPACE_LAYOUT_VERSION};
-use crate::record::{record_refs, Record};
-use crate::report::{
-    print_bench_report, read_bench_manifest_json, write_bench_report_json, BenchConfig,
-    BenchManifest, BenchReport, LatencyHistogramsRecorder,
-};
-use crate::value::{value_for_index, DEFAULT_VALUE_SIZE, VALUE_GENERATOR_VERSION};
-use crate::workload::{
-    resolve_mix, worker_operation_count, worker_write_index, KeyDistribution, Operation, Scenario,
-    WorkerPlan, WorkloadSpec, ZipfSampler, DEFAULT_BENCH_RNG_SEED, WORKLOAD_GENERATOR_VERSION,
-};
 
 /// Run an Exoware benchmark scenario workload.
 #[derive(clap::Args, Debug)]
@@ -523,25 +528,27 @@ fn worker_batch_write_index(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashSet;
-    use std::sync::{Arc, Mutex};
-
     use super::*;
-    use crate::client::RequestCompression;
-    use crate::keyspace::DEFAULT_KEY_LEN;
+    use crate::{client::RequestCompression, keyspace::DEFAULT_KEY_LEN};
     use axum::Router;
     use clap::Parser;
     use connectrpc::{Chain, ConnectError, ConnectRpcService, RequestContext, ServiceRequest};
-    use exoware_sdk::common::kv::v1::Entry;
-    use exoware_sdk::ingest::{
-        PutRequest, PutResponse, Service as IngestService, ServiceServer as IngestServiceServer,
-    };
-    use exoware_sdk::query::{
-        GetManyFrame, GetManyRequest, GetRequest, GetResponse, RangeFrame, RangeRequest,
-        ReduceRequest, ReduceResponse, Service as QueryService,
-        ServiceServer as QueryServiceServer,
+    use exoware_sdk::{
+        common::kv::v1::Entry,
+        ingest::{
+            PutRequest, PutResponse, Service as IngestService, ServiceServer as IngestServiceServer,
+        },
+        query::{
+            GetManyFrame, GetManyRequest, GetRequest, GetResponse, RangeFrame, RangeRequest,
+            ReduceRequest, ReduceResponse, Service as QueryService,
+            ServiceServer as QueryServiceServer,
+        },
     };
     use futures::stream;
+    use std::{
+        collections::HashSet,
+        sync::{Arc, Mutex},
+    };
 
     #[derive(Parser)]
     struct BenchCli {

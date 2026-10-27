@@ -1,12 +1,17 @@
 //! Shared execution scaffolding for multi-worker commands.
 
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
-use std::time::{Duration, Instant};
-
 use anyhow::anyhow;
-use tokio::task::{JoinHandle, JoinSet};
-use tokio::time::MissedTickBehavior;
+use std::{
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
+    time::{Duration, Instant},
+};
+use tokio::{
+    task::{JoinHandle, JoinSet},
+    time::MissedTickBehavior,
+};
 
 /// Point-in-time completion numbers handed to a command's progress logger.
 pub(crate) struct Progress {

@@ -1,5 +1,3 @@
-use std::{sync::Arc, time::Duration};
-
 use bytes::{BufMut, Bytes, BytesMut};
 use commonware_actor::Feedback;
 use commonware_codec::{Buf, Decode, Encode, EncodeSize, Error, Read, ReadExt, Write};
@@ -31,6 +29,7 @@ use exoware_sdk::{
 use exoware_simplex::{
     init_marshal_resolver, keys, Finalized, Notarized, SimplexError, SimplexReader, SimplexWriter,
 };
+use std::{sync::Arc, time::Duration};
 
 const NAMESPACE: &[u8] = b"_EXOWARE_SIMPLEX_TEST";
 

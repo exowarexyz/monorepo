@@ -5,15 +5,17 @@
 //! the first constraint violation.
 
 use connectrpc::ConnectError;
-use exoware_proto::google::rpc::{bad_request::FieldViolation, BadRequest, ErrorInfo};
 use exoware_proto::{
+    google::rpc::{bad_request::FieldViolation, BadRequest, ErrorInfo},
     parse_range_traversal_direction, with_bad_request_detail, with_error_info_detail,
     RangeTraversalModeError,
 };
 use exoware_sdk as exoware_proto;
-use exoware_sdk::keys::{validate_key_size, MAX_KEY_LEN};
-use exoware_sdk::limits::{
-    PutTooLarge, INGEST_ERROR_DOMAIN, MAX_PUT_ENTRIES, MAX_VALUE_LEN, PUT_TOO_LARGE_REASON,
+use exoware_sdk::{
+    keys::{validate_key_size, MAX_KEY_LEN},
+    limits::{
+        PutTooLarge, INGEST_ERROR_DOMAIN, MAX_PUT_ENTRIES, MAX_VALUE_LEN, PUT_TOO_LARGE_REASON,
+    },
 };
 
 /// Limits enforced before ingest requests reach the backend.

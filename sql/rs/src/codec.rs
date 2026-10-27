@@ -1,11 +1,14 @@
-use datafusion::arrow::datatypes::i256;
-use datafusion::common::{DataFusionError, Result as DataFusionResult};
-use exoware_sdk::keys::{Key, Prefix};
-use exoware_sdk::kv_codec::{interleave_ordered_key_fields, StoredRow, StoredValue};
-
-use crate::builder::archived_non_pk_value_is_valid;
-use crate::types::*;
-use crate::writer::decode_list_element_archived;
+use crate::{
+    builder::archived_non_pk_value_is_valid, types::*, writer::decode_list_element_archived,
+};
+use datafusion::{
+    arrow::datatypes::i256,
+    common::{DataFusionError, Result as DataFusionResult},
+};
+use exoware_sdk::{
+    keys::{Key, Prefix},
+    kv_codec::{interleave_ordered_key_fields, StoredRow, StoredValue},
+};
 
 /// Pack table prefix (high nibble) and family discriminator (low nibble)
 /// into the one-byte family prefix. Callers validate both fit in 4 bits.
