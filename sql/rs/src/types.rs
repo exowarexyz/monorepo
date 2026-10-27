@@ -565,7 +565,7 @@ pub enum CellValue {
     Utf8(String),
     FixedBinary(Vec<u8>),
     Binary(Vec<u8>),
-    List(Vec<CellValue>),
+    List(Vec<Self>),
 }
 
 #[derive(Debug, Clone)]

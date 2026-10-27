@@ -368,15 +368,15 @@ where
 {
     fn result_len(&self) -> usize {
         match self {
-            RawKeyLookupProof::Hit(proof) => key_lookup_result_hit_len(proof),
-            RawKeyLookupProof::Miss(proof) => key_lookup_result_miss_len(proof),
+            Self::Hit(proof) => key_lookup_result_hit_len(proof),
+            Self::Miss(proof) => key_lookup_result_miss_len(proof),
         }
     }
 
     fn write_result(&self, buf: &mut impl BufMut) {
         match self {
-            RawKeyLookupProof::Hit(proof) => write_key_lookup_result_hit(buf, proof),
-            RawKeyLookupProof::Miss(proof) => write_key_lookup_result_miss(buf, proof),
+            Self::Hit(proof) => write_key_lookup_result_hit(buf, proof),
+            Self::Miss(proof) => write_key_lookup_result_miss(buf, proof),
         }
     }
 }

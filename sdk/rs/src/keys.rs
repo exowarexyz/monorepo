@@ -172,7 +172,7 @@ impl Prefix {
 
     /// Compose two prefixes by concatenation. Always valid and associative;
     /// fails only if the concatenation exceeds [`MAX_KEY_LEN`].
-    pub fn join(&self, other: &Prefix) -> Result<Prefix, PrefixError> {
+    pub fn join(&self, other: &Self) -> Result<Self, PrefixError> {
         let total = self.0.len() + other.0.len();
         if total > MAX_KEY_LEN {
             return Err(PrefixError::PrefixTooLong {
@@ -189,7 +189,7 @@ impl Prefix {
         let mut buf = BytesMut::with_capacity(total);
         buf.extend_from_slice(&self.0);
         buf.extend_from_slice(&other.0);
-        Ok(Prefix(buf.freeze()))
+        Ok(Self(buf.freeze()))
     }
 }
 

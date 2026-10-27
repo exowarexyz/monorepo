@@ -68,8 +68,8 @@ impl From<DataFusionError> for RangeError {
     fn from(error: DataFusionError) -> Self {
         match error.find_root() {
             DataFusionError::ResourcesExhausted(_) => Self::Resources(error.to_string()),
-            DataFusionError::External(source) if source.downcast_ref::<RangeError>().is_some() => {
-                match source.downcast_ref::<RangeError>().unwrap() {
+            DataFusionError::External(source) if source.downcast_ref::<Self>().is_some() => {
+                match source.downcast_ref::<Self>().unwrap() {
                     Self::Backend(s) => Self::Backend(s.clone()),
                     Self::Resources(s) => Self::Resources(s.clone()),
                     Self::Reduce(s) => Self::Reduce(s.clone()),

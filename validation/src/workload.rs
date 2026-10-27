@@ -110,29 +110,29 @@ impl Scenario {
     /// Returns the default operation mix for a named scenario.
     pub fn mix(self) -> WorkloadMix {
         match self {
-            Scenario::ReadHeavy => WorkloadMix {
+            Self::ReadHeavy => WorkloadMix {
                 read_ratio: 0.95,
                 write_ratio: 0.05,
                 scan_ratio: 0.00,
             },
             // Read-dominant with meaningful writes and a modest scan share, so the default mix
             // exercises every read path (point, ingest, range) rather than skipping scans.
-            Scenario::Balanced => WorkloadMix {
+            Self::Balanced => WorkloadMix {
                 read_ratio: 0.67,
                 write_ratio: 0.30,
                 scan_ratio: 0.03,
             },
-            Scenario::WriteHeavy => WorkloadMix {
+            Self::WriteHeavy => WorkloadMix {
                 read_ratio: 0.20,
                 write_ratio: 0.80,
                 scan_ratio: 0.00,
             },
-            Scenario::ScanHeavy => WorkloadMix {
+            Self::ScanHeavy => WorkloadMix {
                 read_ratio: 0.40,
                 write_ratio: 0.10,
                 scan_ratio: 0.50,
             },
-            Scenario::IngestBurst => WorkloadMix {
+            Self::IngestBurst => WorkloadMix {
                 read_ratio: 0.00,
                 write_ratio: 1.00,
                 scan_ratio: 0.00,
