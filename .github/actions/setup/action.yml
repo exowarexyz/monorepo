@@ -1,9 +1,22 @@
 name: Setup
+description: Install Rust and Node.js, and restore the Rust build cache.
 inputs:
+  rust:
+    description: "Whether to install Rust and restore the Rust build cache. Set to false for jobs that only need Node.js."
+    required: false
+    default: "true"
   additional-cache-key:
     description: "An additional cache key appended to the workflow-name prefix and automatic `job`-based cache key."
     required: false
     default: ""
+  shared-cache-key:
+    description: "Jobs in the same workflow with the same value share one cache instead of one per job. Use it for jobs that compile the same crates."
+    required: false
+    default: ""
+  save-cache:
+    description: "Whether this job saves the Rust cache on main. When several jobs share a cache, let only one of them save it."
+    required: false
+    default: "true"
 runs:
   using: composite
   steps:
@@ -11,31 +24,41 @@ runs:
     # info, which shrinks the build (and the cache saved from it) and speeds up linking.
     # Without this, the Rust Tests cache was over GitHub's 10GB per-entry limit and never saved.
     - name: Reduce debug info
+      if: inputs.rust == 'true'
       shell: bash
       run: echo "CARGO_PROFILE_DEV_DEBUG=line-tables-only" >> "$GITHUB_ENV"
     - name: Install stable Rust toolchain
+      if: inputs.rust == 'true'
       uses: dtolnay/rust-toolchain@stable
     # rust-cache keys by job id, and job ids repeat across workflows (`lint` and `test` exist in
     # both rust.yml and typescript.yml). Without the workflow name, whichever job finishes first
-    # on main claims the shared key and the other job can never save its cache.
+    # on main claims the shared key and the other job can never save its cache. rust-cache
+    # ignores `key` when `shared-key` is set, so the shared key gets the workflow name too.
     - name: Normalize cache key
+      if: inputs.rust == 'true'
       id: cache-key
       shell: bash
       env:
         WORKFLOW_NAME: ${{ github.workflow }}
         ADDITIONAL_CACHE_KEY: ${{ inputs.additional-cache-key }}
+        SHARED_CACHE_KEY: ${{ inputs.shared-cache-key }}
       run: |
+        normalize() { printf '%s' "$1" | LC_ALL=C tr -c 'A-Za-z0-9._-' '-'; }
         key="${WORKFLOW_NAME}"
         if [ -n "$ADDITIONAL_CACHE_KEY" ]; then
           key="${key}-${ADDITIONAL_CACHE_KEY}"
         fi
-        key="$(printf '%s' "$key" | LC_ALL=C tr -c 'A-Za-z0-9._-' '-')"
-        echo "key=${key}" >> "$GITHUB_OUTPUT"
+        echo "key=$(normalize "$key")" >> "$GITHUB_OUTPUT"
+        if [ -n "$SHARED_CACHE_KEY" ]; then
+          echo "shared=$(normalize "${key}-${SHARED_CACHE_KEY}")" >> "$GITHUB_OUTPUT"
+        fi
     - name: Setup rust cache
+      if: inputs.rust == 'true'
       uses: Swatinem/rust-cache@f13886b937689c021905a6b90929199931d60db1 # v2.8.1
       with:
-        save-if: ${{ github.ref == 'refs/heads/main' }}
+        save-if: ${{ github.ref == 'refs/heads/main' && inputs.save-cache == 'true' }}
         key: ${{ steps.cache-key.outputs.key }}
+        shared-key: ${{ steps.cache-key.outputs.shared }}
         cache-on-failure: false
     - name: Set up Node.js
       uses: actions/setup-node@v4

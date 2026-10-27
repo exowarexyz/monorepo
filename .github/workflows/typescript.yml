@@ -20,6 +20,8 @@ jobs:
         uses: ./.github/actions/swap
       - name: Run setup
         uses: ./.github/actions/setup
+        with:
+          rust: "false"
       - name: Install sdk/ts dependencies
         run: cd sdk/ts && npm ci
       - name: Lint sdk/ts
@@ -56,6 +58,8 @@ jobs:
         uses: ./.github/actions/swap
       - name: Run setup
         uses: ./.github/actions/setup
+        with:
+          rust: "false"
       - name: Install sdk/ts dependencies
         run: cd sdk/ts && npm ci
       - name: Build sdk/ts
@@ -72,8 +76,13 @@ jobs:
         uses: actions/checkout@v4
       - name: Configure swap
         uses: ./.github/actions/swap
+      # The three Web jobs compile the same two wasm crates (through the sandbox's prebuild),
+      # so they share one cache. SQL Web builds the most and is the only one that saves it.
       - name: Run setup
         uses: ./.github/actions/setup
+        with:
+          shared-cache-key: web
+          save-cache: "false"
       - name: Install wasm32 target
         run: rustup target add wasm32-unknown-unknown
       - name: Install wasm-pack + wasm-bindgen-cli
@@ -110,8 +119,13 @@ jobs:
         uses: actions/checkout@v4
       - name: Configure swap
         uses: ./.github/actions/swap
+      # The three Web jobs compile the same two wasm crates (through the sandbox's prebuild),
+      # so they share one cache. SQL Web builds the most and is the only one that saves it.
       - name: Run setup
         uses: ./.github/actions/setup
+        with:
+          shared-cache-key: web
+          save-cache: "false"
       - name: Install wasm32 target
         run: rustup target add wasm32-unknown-unknown
       - name: Install wasm-pack + wasm-bindgen-cli
@@ -152,8 +166,12 @@ jobs:
         uses: actions/checkout@v4
       - name: Configure swap
         uses: ./.github/actions/swap
+      # The three Web jobs compile the same two wasm crates (through the sandbox's prebuild),
+      # so they share one cache. SQL Web builds the most and is the only one that saves it.
       - name: Run setup
         uses: ./.github/actions/setup
+        with:
+          shared-cache-key: web
       - name: Install wasm32 target
         run: rustup target add wasm32-unknown-unknown
       - name: Install wasm-pack + wasm-bindgen-cli
