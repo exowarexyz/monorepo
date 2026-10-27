@@ -44,7 +44,7 @@ impl Default for UnknownBudget {
 }
 
 impl UnknownBudget {
-    pub fn remaining(&self) -> usize {
+    pub const fn remaining(&self) -> usize {
         self.remaining
     }
 
@@ -107,7 +107,7 @@ pub struct PutEntryCursor<'a> {
 }
 
 impl<'a> PutEntryCursor<'a> {
-    pub fn new(wire: &'a [u8]) -> Self {
+    pub const fn new(wire: &'a [u8]) -> Self {
         Self {
             remaining: wire,
             original_len: wire.len(),
@@ -115,12 +115,12 @@ impl<'a> PutEntryCursor<'a> {
     }
 
     /// Bytes consumed since [`Self::new`]. Subtract an entry's length for its payload offset.
-    pub fn consumed(&self) -> usize {
+    pub const fn consumed(&self) -> usize {
         self.original_len - self.remaining.len()
     }
 
     /// Preserve this unconsumed suffix when constructing a cursor over more input.
-    pub fn remaining(&self) -> &'a [u8] {
+    pub const fn remaining(&self) -> &'a [u8] {
         self.remaining
     }
 

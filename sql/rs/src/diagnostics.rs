@@ -31,7 +31,7 @@ pub(crate) enum QueryStatsExplainSurface {
     RangeReduceDetail,
 }
 
-pub(crate) fn format_query_stats_explain(surface: QueryStatsExplainSurface) -> &'static str {
+pub(crate) const fn format_query_stats_explain(surface: QueryStatsExplainSurface) -> &'static str {
     match surface {
         QueryStatsExplainSurface::StreamedRangeDetail => {
             "streamed_range(detail.extra: server-defined metadata)"

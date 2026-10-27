@@ -229,7 +229,7 @@ impl SqlServer {
     }
 }
 
-fn proto_index_layout(layout: IndexLayout) -> ProtoIndexLayout {
+const fn proto_index_layout(layout: IndexLayout) -> ProtoIndexLayout {
     match layout {
         IndexLayout::Lexicographic => ProtoIndexLayout::INDEX_LAYOUT_LEXICOGRAPHIC,
         IndexLayout::ZOrder => ProtoIndexLayout::INDEX_LAYOUT_Z_ORDER,
@@ -255,7 +255,7 @@ pub struct SqlConnect {
 }
 
 impl SqlConnect {
-    pub fn new(server: Arc<SqlServer>) -> Self {
+    pub const fn new(server: Arc<SqlServer>) -> Self {
         Self { server }
     }
 }

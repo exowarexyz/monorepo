@@ -53,7 +53,7 @@ fn byte_config() -> ByteConfig {
     ((0..=10_000).into(), ())
 }
 
-fn fixed_key(index: u8) -> FixedKey {
+const fn fixed_key(index: u8) -> FixedKey {
     FixedBytes::new([index; 32])
 }
 
@@ -61,7 +61,7 @@ fn variable_key(index: u8) -> Vec<u8> {
     vec![index; usize::from(index % 3 + 1)]
 }
 
-fn fixed_value(index: u8) -> FixedValue {
+const fn fixed_value(index: u8) -> FixedValue {
     FixedBytes::new([index; 16])
 }
 

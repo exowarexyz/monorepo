@@ -652,11 +652,11 @@ fn in_f64_bounds(value: f64, min: &Option<(f64, bool)>, max: &Option<(f64, bool)
     })
 }
 
-fn decode_i64_ordered(bytes: [u8; 8]) -> i64 {
+const fn decode_i64_ordered(bytes: [u8; 8]) -> i64 {
     (u64::from_be_bytes(bytes) ^ 0x8000_0000_0000_0000) as i64
 }
 
-fn decode_f64_ordered(bytes: [u8; 8]) -> f64 {
+const fn decode_f64_ordered(bytes: [u8; 8]) -> f64 {
     let bits = u64::from_be_bytes(bytes);
     let decoded = if bits & 0x8000_0000_0000_0000 != 0 {
         bits ^ 0x8000_0000_0000_0000
@@ -666,11 +666,11 @@ fn decode_f64_ordered(bytes: [u8; 8]) -> f64 {
     f64::from_bits(decoded)
 }
 
-fn decode_i32_ordered(bytes: [u8; 4]) -> i32 {
+const fn decode_i32_ordered(bytes: [u8; 4]) -> i32 {
     (u32::from_be_bytes(bytes) ^ 0x8000_0000) as i32
 }
 
-fn decode_i128_ordered(bytes: [u8; 16]) -> i128 {
+const fn decode_i128_ordered(bytes: [u8; 16]) -> i128 {
     (u128::from_be_bytes(bytes) ^ (1u128 << 127)) as i128
 }
 

@@ -53,15 +53,15 @@ pub(crate) fn primary_key_prefix_range(table_prefix: u8) -> KeyRange {
     KeyRange { start, end }
 }
 
-pub(crate) fn encode_i64_ordered(value: i64) -> [u8; 8] {
+pub(crate) const fn encode_i64_ordered(value: i64) -> [u8; 8] {
     ((value as u64) ^ 0x8000_0000_0000_0000).to_be_bytes()
 }
 
-pub(crate) fn decode_i64_ordered(bytes: [u8; 8]) -> i64 {
+pub(crate) const fn decode_i64_ordered(bytes: [u8; 8]) -> i64 {
     (u64::from_be_bytes(bytes) ^ 0x8000_0000_0000_0000) as i64
 }
 
-pub(crate) fn encode_f64_ordered(value: f64) -> [u8; 8] {
+pub(crate) const fn encode_f64_ordered(value: f64) -> [u8; 8] {
     let bits = value.to_bits();
     let encoded = if bits & 0x8000_0000_0000_0000 != 0 {
         !bits
@@ -71,7 +71,7 @@ pub(crate) fn encode_f64_ordered(value: f64) -> [u8; 8] {
     encoded.to_be_bytes()
 }
 
-pub(crate) fn decode_f64_ordered(bytes: [u8; 8]) -> f64 {
+pub(crate) const fn decode_f64_ordered(bytes: [u8; 8]) -> f64 {
     let bits = u64::from_be_bytes(bytes);
     let decoded = if bits & 0x8000_0000_0000_0000 != 0 {
         bits ^ 0x8000_0000_0000_0000
@@ -81,29 +81,29 @@ pub(crate) fn decode_f64_ordered(bytes: [u8; 8]) -> f64 {
     f64::from_bits(decoded)
 }
 
-pub(crate) fn encode_i32_ordered(value: i32) -> [u8; 4] {
+pub(crate) const fn encode_i32_ordered(value: i32) -> [u8; 4] {
     ((value as u32) ^ 0x8000_0000).to_be_bytes()
 }
 
-pub(crate) fn decode_i32_ordered(bytes: [u8; 4]) -> i32 {
+pub(crate) const fn decode_i32_ordered(bytes: [u8; 4]) -> i32 {
     (u32::from_be_bytes(bytes) ^ 0x8000_0000) as i32
 }
 
-pub(crate) fn encode_i128_ordered(value: i128) -> [u8; 16] {
+pub(crate) const fn encode_i128_ordered(value: i128) -> [u8; 16] {
     ((value as u128) ^ (1u128 << 127)).to_be_bytes()
 }
 
-pub(crate) fn decode_i128_ordered(bytes: [u8; 16]) -> i128 {
+pub(crate) const fn decode_i128_ordered(bytes: [u8; 16]) -> i128 {
     (u128::from_be_bytes(bytes) ^ (1u128 << 127)) as i128
 }
 
-pub(crate) fn encode_i256_ordered(value: i256) -> [u8; 32] {
+pub(crate) const fn encode_i256_ordered(value: i256) -> [u8; 32] {
     let mut bytes = value.to_be_bytes();
     bytes[0] ^= 0x80;
     bytes
 }
 
-pub(crate) fn decode_i256_ordered(mut bytes: [u8; 32]) -> i256 {
+pub(crate) const fn decode_i256_ordered(mut bytes: [u8; 32]) -> i256 {
     bytes[0] ^= 0x80;
     i256::from_be_bytes(bytes)
 }

@@ -12,7 +12,7 @@ pub struct DecodeBuffers {
 }
 
 impl DecodeBuffers {
-    pub fn new(byte_capacity: usize, entry_capacity: usize) -> Self {
+    pub const fn new(byte_capacity: usize, entry_capacity: usize) -> Self {
         Self {
             byte_capacity,
             entry_capacity,
@@ -20,7 +20,7 @@ impl DecodeBuffers {
         }
     }
 
-    pub(super) fn header() -> Self {
+    pub(super) const fn header() -> Self {
         Self {
             inspect_header: true,
             ..Self::new(0, 0)
@@ -63,7 +63,7 @@ impl AsRef<[u8]> for ChunkBacking {
 
 impl PutChunk {
     /// Full byte allocation retained by any clone or slice of this chunk.
-    pub fn backing_capacity(&self) -> usize {
+    pub const fn backing_capacity(&self) -> usize {
         self.backing_capacity
     }
 
