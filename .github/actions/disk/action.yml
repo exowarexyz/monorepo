@@ -1,0 +1,55 @@
+name: Disk and Swap
+description: Report free disk space, clear preinstalled software only when space is low, and give Linux runners 8GB of swap.
+inputs:
+  min-free-gb:
+    description: "Clear preinstalled software if / has less than this many GB free."
+    required: false
+    # Runners have started with ~86GB free since at least July 2026, and the heaviest job (Rust
+    # Tests) uses ~34GB, so the cleanup normally never runs. GitHub only documents 14GB for these
+    # runners, though, so this keeps CI working if that ever shrinks.
+    default: "50"
+runs:
+  using: composite
+  steps:
+    - name: Check free disk space (Linux)
+      id: space
+      if: runner.os == 'Linux'
+      shell: bash
+      env:
+        MIN_FREE_GB: ${{ inputs.min-free-gb }}
+      run: |
+        df -h /
+        free_gb="$(df --output=avail -BG / | tail -1 | tr -dc '0-9')"
+        if [ "$free_gb" -lt "$MIN_FREE_GB" ]; then
+          echo "::warning::Only ${free_gb}GB free on /, below ${MIN_FREE_GB}GB. Clearing preinstalled software."
+          echo "low=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "${free_gb}GB free on /, at least ${MIN_FREE_GB}GB. Skipping cleanup."
+        fi
+
+    - name: Clear disk space (Linux)
+      if: runner.os == 'Linux' && steps.space.outputs.low == 'true'
+      uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be
+      with:
+        android: true
+        dotnet: true
+        haskell: true
+        large-packages: false
+        docker-images: true
+        swap-storage: true
+
+    - name: Show disk free after cleanup (Linux)
+      if: runner.os == 'Linux' && steps.space.outputs.low == 'true'
+      shell: bash
+      run: df -h /
+
+    - name: Configure swap (Linux)
+      if: runner.os == 'Linux'
+      shell: bash
+      run: |
+        sudo swapoff -a
+        sudo fallocate -l 8G /swapfile
+        sudo chmod 600 /swapfile
+        sudo mkswap /swapfile
+        sudo swapon /swapfile
+        sudo swapon --show

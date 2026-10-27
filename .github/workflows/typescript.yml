@@ -16,8 +16,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-      - name: Configure swap
-        uses: ./.github/actions/swap
+      - name: Check disk space and configure swap
+        uses: ./.github/actions/disk
       - name: Run setup
         uses: ./.github/actions/setup
         with:
@@ -38,8 +38,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-      - name: Configure swap
-        uses: ./.github/actions/swap
+      - name: Check disk space and configure swap
+        uses: ./.github/actions/disk
       - name: Run setup
         uses: ./.github/actions/setup
       - name: Install sdk/ts dependencies
@@ -54,8 +54,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-      - name: Configure swap
-        uses: ./.github/actions/swap
+      - name: Check disk space and configure swap
+        uses: ./.github/actions/disk
       - name: Run setup
         uses: ./.github/actions/setup
         with:
@@ -74,8 +74,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-      - name: Configure swap
-        uses: ./.github/actions/swap
+      - name: Check disk space and configure swap
+        uses: ./.github/actions/disk
       # The three Web jobs compile the same two wasm crates (through the sandbox's prebuild),
       # so they share one cache. SQL Web builds the most and is the only one that saves it.
       - name: Run setup
@@ -117,8 +117,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-      - name: Configure swap
-        uses: ./.github/actions/swap
+      - name: Check disk space and configure swap
+        uses: ./.github/actions/disk
       # The three Web jobs compile the same two wasm crates (through the sandbox's prebuild),
       # so they share one cache. SQL Web builds the most and is the only one that saves it.
       - name: Run setup
@@ -164,8 +164,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-      - name: Configure swap
-        uses: ./.github/actions/swap
+      - name: Check disk space and configure swap
+        uses: ./.github/actions/disk
       # The three Web jobs compile the same two wasm crates (through the sandbox's prebuild),
       # so they share one cache. SQL Web builds the most and is the only one that saves it.
       - name: Run setup

@@ -31,8 +31,8 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Configure swap
-        uses: ./.github/actions/swap
+      - name: Check disk space and configure swap
+        uses: ./.github/actions/disk
 
       - name: Run setup
         uses: ./.github/actions/setup
