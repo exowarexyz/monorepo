@@ -10,11 +10,15 @@ use futures::future::BoxFuture;
 use http::{request::Parts, Request, Response};
 use tower::Service;
 
+use super::clock::timeout_at;
 use super::transport::{
     admission_rejection_response, terminate_rejected_response, terminate_unfinished_response,
     ConnectionControl,
 };
-use super::{box_body, DrainOutcome, PutEncoding, PutInput, PutLimits, PutMetadata};
+use super::{
+    box_body, DrainOutcome, PutClock, PutDeadline, PutEncoding, PutInput, PutLimits, PutMetadata,
+    TokioClock,
+};
 use crate::{Ingest, IngestState};
 
 const PUT_PATH: &str = exoware_sdk::ingest::SERVICE_PUT_SPEC.procedure;
@@ -33,6 +37,9 @@ pub struct PutConfig {
     /// Limits waits for upload progress without charging backend processing time.
     pub idle_timeout: Option<std::time::Duration>,
     pub observer: Option<Arc<dyn super::IngestObserver>>,
+    /// Measures Put deadlines and timings. The HTTP connection layer keeps
+    /// Tokio deadlines of its own.
+    pub clock: Arc<dyn PutClock>,
 }
 
 impl Default for PutConfig {
@@ -44,6 +51,7 @@ impl Default for PutConfig {
             max_timeout: std::time::Duration::from_secs(300),
             idle_timeout: Some(std::time::Duration::from_secs(30)),
             observer: None,
+            clock: Arc::new(TokioClock::new()),
         }
     }
 }
@@ -201,11 +209,12 @@ where
         let state = self.state.clone();
         let middleware = self.middleware.clone();
         Box::pin(async move {
-            let started = tokio::time::Instant::now();
+            let clock = state.put_config.clock.clone();
+            let started = clock.now();
             let observer = state.put_config.observer.clone();
             let response = put(state, middleware, request.map(Body::new)).await;
             if let Some(observer) = observer {
-                observer.observe(super::IngestEvent::ResponseElapsed(started.elapsed()));
+                observer.observe(super::IngestEvent::ResponseElapsed(clock.elapsed(started)));
             }
             Ok(response)
         })
@@ -224,16 +233,18 @@ async fn put<I: Ingest>(
     let (mut parts, body) = request.into_parts();
     let headers = parts.headers.clone();
     let parsed_timeout = request_timeout(&parts, state.put_config.timeout);
-    let request_deadline = tokio::time::Instant::now()
-        + parsed_timeout
-            .as_ref()
-            .copied()
-            .unwrap_or(state.put_config.timeout)
-            .min(state.put_config.max_timeout);
+    let timeout = parsed_timeout
+        .as_ref()
+        .copied()
+        .unwrap_or(state.put_config.timeout)
+        .min(state.put_config.max_timeout);
+    let request_deadline = PutDeadline::after(state.put_config.clock.clone(), timeout);
+    // The connection layer runs on Tokio, so it measures the same timeout there.
+    let connection_deadline = tokio::time::Instant::now() + timeout;
     let control = parts.extensions.get::<ConnectionControl>().cloned();
     let generation = control
         .as_ref()
-        .and_then(|control| control.arm_http1(parts.version, request_deadline));
+        .and_then(|control| control.arm_http1(parts.version, connection_deadline));
     let version = parts.version;
     let method = parts.method.clone();
     let mut lengths = parts.headers.get_all(http::header::CONTENT_LENGTH).iter();
@@ -323,7 +334,7 @@ async fn put<I: Ingest>(
                 admission_rejection_response(
                     version,
                     response,
-                    request_deadline,
+                    connection_deadline,
                     control.as_ref(),
                     generation,
                 )
@@ -336,7 +347,7 @@ async fn put<I: Ingest>(
                 terminate_rejected_response(
                     version,
                     response,
-                    request_deadline,
+                    connection_deadline,
                     control.as_ref(),
                     generation,
                 )
@@ -350,8 +361,12 @@ async fn put<I: Ingest>(
 
     if rejection.is_none() {
         for middleware in &middleware {
-            let result =
-                tokio::time::timeout_at(request_deadline, middleware.call(&mut parts)).await;
+            let result = timeout_at(
+                request_deadline.clock(),
+                request_deadline.at(),
+                middleware.call(&mut parts),
+            )
+            .await;
             match result {
                 Ok(Ok(())) => {}
                 Ok(Err(error)) => {
@@ -373,7 +388,7 @@ async fn put<I: Ingest>(
             ingest: state.limits,
             ..Default::default()
         },
-        request_deadline,
+        request_deadline.clone(),
         admission,
     )
     .with_idle_timeout(state.put_config.idle_timeout)
@@ -384,7 +399,12 @@ async fn put<I: Ingest>(
     }
     let mut result = match rejection {
         Some(error) => Err(error),
-        None => match tokio::time::timeout_at(request_deadline, state.ingest.put(&mut input)).await
+        None => match timeout_at(
+            request_deadline.clock(),
+            request_deadline.at(),
+            state.ingest.put(&mut input),
+        )
+        .await
         {
             Ok(Ok(sequence)) if input.is_finished() => Ok(sequence),
             Ok(Ok(_)) => Err(ConnectError::internal(

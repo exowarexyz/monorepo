@@ -5,7 +5,7 @@ use std::sync::atomic::AtomicUsize;
 use std::sync::Mutex;
 use std::task::Poll;
 
-use crate::ingest::{DecodeBuffers, IngestBudget, PutError, PutInput, PutMiddleware};
+use crate::ingest::{DecodeBuffers, IngestBudget, PutClock, PutError, PutInput, PutMiddleware};
 use futures::future::BoxFuture;
 
 use connectrpc::client::{full_body, ClientConfig, ClientTransport};
@@ -581,9 +581,11 @@ async fn backend_rejection_drains_only_the_admitted_wire_bound() {
 }
 
 #[derive(Clone)]
-struct LatestDeadline(tokio::time::Instant);
+struct LatestDeadline(std::time::SystemTime);
 
-struct DelayedMiddleware;
+struct DelayedMiddleware {
+    clock: crate::ingest::TokioClock,
+}
 
 impl PutMiddleware for DelayedMiddleware {
     fn call<'a>(
@@ -592,7 +594,7 @@ impl PutMiddleware for DelayedMiddleware {
     ) -> BoxFuture<'a, Result<(), ConnectError>> {
         Box::pin(async move {
             parts.extensions.insert(LatestDeadline(
-                tokio::time::Instant::now() + std::time::Duration::from_millis(100),
+                self.clock.now() + std::time::Duration::from_millis(100),
             ));
             tokio::time::sleep(std::time::Duration::from_millis(30)).await;
             Ok(())
@@ -615,7 +617,7 @@ impl Ingest for CheckDeadline {
             .unwrap()
             .0;
         assert!(
-            input.deadline() <= latest,
+            input.deadline().at() <= latest,
             "middleware must not restart the request timeout"
         );
         Err(IngestError::ResourceExhausted {
@@ -648,8 +650,13 @@ async fn middleware_and_rejection_drain_share_the_original_deadline() {
     let ingest = Arc::new(CheckDeadline {
         entered: AtomicBool::new(false),
     });
-    let service =
-        ingest_service(IngestState::new(ingest.clone())).with_put_middleware(DelayedMiddleware);
+    // The middleware reads the same clock so its deadline is comparable.
+    let clock = crate::ingest::TokioClock::new();
+    let state = IngestState::new(ingest.clone()).with_put_config(crate::ingest::PutConfig {
+        clock: Arc::new(clock),
+        ..Default::default()
+    });
+    let service = ingest_service(state).with_put_middleware(DelayedMiddleware { clock });
     let incoming = http::Request::post(format!("http://store.test/{PUT_PATH}"))
         .header(http::header::CONTENT_TYPE, "application/proto")
         .header("connect-protocol-version", "1")
@@ -759,11 +766,7 @@ struct RecordDeadline {
 
 impl Ingest for RecordDeadline {
     async fn put(&self, input: &mut PutInput) -> Result<u64, PutError> {
-        *self.remaining.lock().unwrap() = Some(
-            input
-                .deadline()
-                .saturating_duration_since(tokio::time::Instant::now()),
-        );
+        *self.remaining.lock().unwrap() = Some(input.deadline().remaining());
         while input.next_batch(DecodeBuffers::default()).await?.is_some() {}
         input.finish().await?;
         Ok(1)
@@ -861,4 +864,125 @@ async fn put_timeouts_respect_the_host_ceiling() {
         );
         assert!(remaining >= expected.saturating_sub(started.elapsed()));
     }
+}
+
+/// Reads time from Commonware's deterministic runtime, which simulates it.
+struct SimulatedClock(commonware_runtime::deterministic::Context);
+
+impl PutClock for SimulatedClock {
+    fn now(&self) -> std::time::SystemTime {
+        commonware_runtime::Clock::current(&self.0)
+    }
+
+    fn sleep_until(&self, deadline: std::time::SystemTime) -> BoxFuture<'static, ()> {
+        Box::pin(commonware_runtime::Clock::sleep_until(&self.0, deadline))
+    }
+}
+
+fn simulated_state<I: Ingest>(
+    context: &commonware_runtime::deterministic::Context,
+    ingest: Arc<I>,
+) -> IngestState<I> {
+    IngestState::new(ingest).with_put_config(crate::ingest::PutConfig {
+        clock: Arc::new(SimulatedClock(commonware_runtime::Supervisor::child(
+            context,
+            "put_clock",
+        ))),
+        ..Default::default()
+    })
+}
+
+/// Decodes on the calling task, since no Tokio blocking pool exists here.
+struct InlineDecode;
+
+impl crate::ingest::DecodeExecutor for InlineDecode {
+    fn execute(
+        &self,
+        state: crate::ingest::DecodeState,
+        buffers: DecodeBuffers,
+    ) -> BoxFuture<'static, Result<crate::ingest::DecodeOutput, PutError>> {
+        Box::pin(std::future::ready(Ok(state.run(buffers))))
+    }
+}
+
+struct InlineIngest(TestIngest);
+
+impl Ingest for InlineIngest {
+    async fn put(&self, input: &mut PutInput) -> Result<u64, PutError> {
+        input.set_executor(Arc::new(InlineDecode));
+        self.0.put(input).await
+    }
+}
+
+#[test]
+fn put_runs_on_a_simulated_clock_without_tokio() {
+    use commonware_runtime::Runner as _;
+
+    commonware_runtime::deterministic::Runner::default().start(|context| async move {
+        let ingest = Arc::new(InlineIngest(TestIngest::default()));
+        let incoming = http::Request::post(format!("http://store.test/{PUT_PATH}"))
+            .header(http::header::CONTENT_TYPE, "application/proto")
+            .header("connect-protocol-version", "1")
+            .body(full_body(request(2).encode_to_vec().into()))
+            .unwrap();
+        let response = tower::ServiceExt::oneshot(
+            ingest_service(simulated_state(&context, ingest.clone())),
+            incoming,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(response.status(), http::StatusCode::OK);
+        assert_eq!(ingest.0.batches.lock().unwrap()[0].len(), 2);
+    });
+}
+
+struct SleepingIngest {
+    context: commonware_runtime::deterministic::Context,
+    woke: AtomicBool,
+}
+
+impl Ingest for SleepingIngest {
+    async fn put(&self, _: &mut PutInput) -> Result<u64, PutError> {
+        commonware_runtime::Clock::sleep(&self.context, std::time::Duration::from_secs(60)).await;
+        self.woke.store(true, Ordering::SeqCst);
+        Ok(1)
+    }
+}
+
+#[test]
+fn put_deadline_fires_on_the_simulated_clock() {
+    use commonware_runtime::{Clock as _, Runner as _};
+    use std::time::Duration;
+
+    commonware_runtime::deterministic::Runner::default().start(|context| async move {
+        let ingest = Arc::new(SleepingIngest {
+            context: commonware_runtime::Supervisor::child(&context, "ingest"),
+            woke: AtomicBool::new(false),
+        });
+        let incoming = http::Request::post(format!("http://store.test/{PUT_PATH}"))
+            .header(http::header::CONTENT_TYPE, "application/proto")
+            .header("connect-protocol-version", "1")
+            .header("connect-timeout-ms", "10000")
+            .body(full_body(request(1).encode_to_vec().into()))
+            .unwrap();
+        let started = context.current();
+        let response = tower::ServiceExt::oneshot(
+            ingest_service(simulated_state(&context, ingest.clone())),
+            incoming,
+        )
+        .await
+        .unwrap();
+        let elapsed = context.current().duration_since(started).unwrap();
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let error: ConnectError = serde_json::from_slice(&body).unwrap();
+
+        // The runtime skips idle time, so the ten second deadline costs no real time.
+        assert_eq!(error.code, ErrorCode::DeadlineExceeded);
+        assert!(!ingest.woke.load(Ordering::SeqCst));
+        assert!(
+            (Duration::from_secs(10)..Duration::from_secs(11)).contains(&elapsed),
+            "deadline fired after {elapsed:?} of simulated time"
+        );
+    });
 }

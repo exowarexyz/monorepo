@@ -1,12 +1,18 @@
-use std::{fmt::Display, pin::Pin, sync::Arc, task::Poll, time::Duration};
+use std::{
+    fmt::Display,
+    pin::Pin,
+    sync::Arc,
+    task::Poll,
+    time::{Duration, SystemTime},
+};
 
 use bytes::Bytes;
 use connectrpc::ConnectError;
 use futures::FutureExt;
 use http_body::Body;
 use http_body_util::BodyExt;
-use tokio::time::{timeout_at, Instant};
 
+use super::clock::{timeout_at, PutClock, PutDeadline};
 use super::decode::{DecodeOutput, DecodeState, DecodeStep, WireBatch};
 use super::{
     Admission, ByteLease, DecodeBuffers, IngestEvent, IngestObserver, PutChunk, PutError,
@@ -33,24 +39,28 @@ struct IdleTimeout {
 
 struct IdleWait<'a> {
     idle: &'a mut IdleTimeout,
-    started: Instant,
+    clock: &'a dyn PutClock,
+    started: SystemTime,
 }
 
 impl IdleWait<'_> {
-    fn deadline(&self) -> Instant {
+    fn deadline(&self) -> SystemTime {
         self.started + self.idle.remaining
     }
 
     fn progress(&mut self) {
         self.idle.remaining = self.idle.timeout;
-        self.started = Instant::now();
+        self.started = self.clock.now();
     }
 }
 
 impl Drop for IdleWait<'_> {
     fn drop(&mut self) {
         // Cancelled lookahead reads retain elapsed waiting time without charging CPU work.
-        self.idle.remaining = self.idle.remaining.saturating_sub(self.started.elapsed());
+        self.idle.remaining = self
+            .idle
+            .remaining
+            .saturating_sub(self.clock.elapsed(self.started));
         self.idle.expired |= self.idle.remaining.is_zero();
     }
 }
@@ -194,7 +204,7 @@ pub struct PutInput {
     admission: Admission,
     metadata: PutMetadata,
     limits: PutLimits,
-    deadline: Instant,
+    deadline: PutDeadline,
     idle: Option<IdleTimeout>,
     observer: Arc<dyn IngestObserver>,
     notifier: Option<Arc<dyn crate::stream::StreamNotifier>>,
@@ -210,7 +220,7 @@ impl PutInput {
         body: PutBody,
         metadata: PutMetadata,
         mut limits: PutLimits,
-        deadline: Instant,
+        deadline: impl Into<PutDeadline>,
         admission: Admission,
     ) -> Self {
         limits.wire_bytes = limits.wire_bytes.min(admission.wire_bound());
@@ -227,7 +237,7 @@ impl PutInput {
             admission,
             metadata,
             limits,
-            deadline,
+            deadline: deadline.into(),
             idle: None,
             observer: Arc::new(()),
             notifier: None,
@@ -316,8 +326,11 @@ impl PutInput {
             }
         }
     }
-    pub fn deadline(&self) -> Instant {
-        self.deadline
+    pub fn deadline(&self) -> &PutDeadline {
+        &self.deadline
+    }
+    fn clock(&self) -> &dyn PutClock {
+        self.deadline.clock()
     }
     pub fn wire_bytes(&self) -> usize {
         self.wire_bytes
@@ -364,7 +377,7 @@ impl PutInput {
                 ConnectError::deadline_exceeded("ingest body idle timeout exceeded").into(),
             );
         }
-        if Instant::now() >= self.deadline {
+        if self.deadline.expired() {
             return Err(ConnectError::deadline_exceeded("ingest deadline exceeded").into());
         }
         Ok(())
@@ -384,17 +397,23 @@ impl PutInput {
             Reception::Failed(error) => return Err(error.clone().into()),
         }
         self.check_deadline()?;
+        let clock = self.deadline.clock();
+        let request_deadline = self.deadline.at();
         let mut idle_wait = self.idle.as_mut().map(|idle| IdleWait {
             idle,
-            started: Instant::now(),
+            clock,
+            started: clock.now(),
         });
         let idle_deadline = idle_wait.as_ref().map(IdleWait::deadline);
-        let deadline = idle_deadline.map_or(self.deadline, |idle| idle.min(self.deadline));
-        let timeout_message = if idle_deadline.is_some_and(|idle| idle <= self.deadline) {
+        let deadline = idle_deadline.map_or(request_deadline, |idle| idle.min(request_deadline));
+        let timeout_message = if idle_deadline.is_some_and(|idle| idle <= request_deadline) {
             "ingest body idle timeout exceeded"
         } else {
             "ingest deadline exceeded"
         };
+        // The deadline is fixed, so one timer serves every frame read below. It
+        // is created only once the body has to wait, keeping ready reads cheap.
+        let mut expiry = None;
         let mut frames = 0;
         loop {
             if frames == FRAME_WORK_BUDGET {
@@ -403,17 +422,21 @@ impl PutInput {
             }
             frames += 1;
             let body = &mut self.body;
-            let frame = timeout_at(
-                deadline,
-                futures::future::poll_fn(|cx| {
-                    if Instant::now() >= deadline {
-                        return Poll::Ready(Err(ConnectError::deadline_exceeded(timeout_message)));
-                    }
-                    body.as_mut().poll_frame(cx).map(Ok)
-                }),
-            )
-            .await
-            .map_err(|_| ConnectError::deadline_exceeded(timeout_message))??;
+            let frame = futures::future::poll_fn(|cx| {
+                let expired = || Poll::Ready(Err(ConnectError::deadline_exceeded(timeout_message)));
+                if clock.now() >= deadline {
+                    return expired();
+                }
+                if let Poll::Ready(frame) = body.as_mut().poll_frame(cx) {
+                    return Poll::Ready(Ok(frame));
+                }
+                let expiry = expiry.get_or_insert_with(|| clock.sleep_until(deadline));
+                match expiry.as_mut().poll(cx) {
+                    Poll::Ready(()) => expired(),
+                    Poll::Pending => Poll::Pending,
+                }
+            })
+            .await?;
             match frame {
                 Some(Ok(frame)) => {
                     let Ok(bytes) = frame.into_data() else {
@@ -472,10 +495,10 @@ impl PutInput {
             .state
             .take()
             .ok_or_else(|| ConnectError::internal("ingest decode state detached"))?;
-        let started = Instant::now();
+        let started = self.clock().now();
         let previous = state.total();
         let job = self.executor.execute(state, buffers);
-        let output = timeout_at(self.deadline, job)
+        let output = timeout_at(self.clock(), self.deadline.at(), job)
             .await
             .map_err(|_| ConnectError::deadline_exceeded("ingest deadline exceeded"))??;
         let DecodeOutput { result, state } = output;
@@ -492,7 +515,7 @@ impl PutInput {
         let result = self.check_deadline().and(result);
         self.observer.observe(IngestEvent::DecodedBytes(decoded));
         self.observer
-            .observe(IngestEvent::DecodeElapsed(started.elapsed()));
+            .observe(IngestEvent::DecodeElapsed(self.clock().elapsed(started)));
         if let Ok(DecodeStep::Batch(batch)) = &result {
             self.observer.observe(IngestEvent::Batch {
                 entries: batch.ranges.len(),
@@ -503,7 +526,7 @@ impl PutInput {
     }
 
     async fn read_wire(&mut self, batch: bool) -> Result<(), PutError> {
-        let started = Instant::now();
+        let started = self.clock().now();
         let bytes = self.raw_next(true).await?;
         let received = bytes.is_some();
         let mut wire_bytes = bytes.as_ref().map_or(0, Bytes::len);
@@ -554,7 +577,7 @@ impl PutInput {
             }
         }
         self.observer
-            .observe(IngestEvent::ReceiveElapsed(started.elapsed()));
+            .observe(IngestEvent::ReceiveElapsed(self.clock().elapsed(started)));
         Ok(())
     }
 
@@ -586,7 +609,7 @@ impl PutInput {
     }
 
     pub async fn finish(&mut self) -> Result<(), PutError> {
-        let started = Instant::now();
+        let started = self.clock().now();
         self.check_deadline()?;
         if matches!(self.reception, Reception::Validated) {
             return Ok(());
@@ -610,16 +633,17 @@ impl PutInput {
             .finish()?;
         self.reception = Reception::Validated;
         self.observer.observe(IngestEvent::Validated);
-        self.observer
-            .observe(IngestEvent::ValidationElapsed(started.elapsed()));
+        self.observer.observe(IngestEvent::ValidationElapsed(
+            self.clock().elapsed(started),
+        ));
         Ok(())
     }
 
     pub async fn drain_rejected(&mut self) -> DrainOutcome {
-        let started = Instant::now();
+        let started = self.clock().now();
         let outcome = self.drain_raw().await;
         self.observer
-            .observe(IngestEvent::CleanupElapsed(started.elapsed()));
+            .observe(IngestEvent::CleanupElapsed(self.clock().elapsed(started)));
         outcome
     }
 
@@ -679,6 +703,8 @@ mod tests {
     use futures::StreamExt;
     use http_body::Frame;
     use http_body_util::{Full, StreamBody};
+
+    use tokio::time::{timeout_at, Instant};
 
     use super::super::{BudgetConfig, IngestBudget};
     use super::*;
@@ -820,7 +846,7 @@ mod tests {
         let (input, _, _sender) = channel_input(1, 1024);
         let mut input = input.with_idle_timeout(Some(Duration::from_secs(1)));
         let started = Instant::now();
-        input.deadline = started + Duration::from_millis(100);
+        input.deadline = (started + Duration::from_millis(100)).into();
         assert!(input.raw_next(true).await.is_err());
         assert_eq!(started.elapsed(), Duration::from_millis(100));
         assert!(!input.idle_timed_out());
@@ -832,7 +858,7 @@ mod tests {
     async fn idle_wait_survives_cancellation_and_pauses_between_reads() {
         let (input, _, sender) = channel_input(2, 1024);
         let mut input = input.with_idle_timeout(Some(Duration::from_secs(1)));
-        input.deadline = Instant::now() + Duration::from_secs(60);
+        input.deadline = (Instant::now() + Duration::from_secs(60)).into();
         let mut reading = Box::pin(input.raw_next(true));
         assert!(futures::poll!(&mut reading).is_pending());
         tokio::time::advance(Duration::from_millis(400)).await;
@@ -904,7 +930,7 @@ mod tests {
 
         let wire = entry(b"key", b"value");
         let (mut input, _) = input(&wire, 1, PutEncoding::Identity, PutLimits::default());
-        input.deadline = Instant::now() + Duration::from_secs(60);
+        input.deadline = (Instant::now() + Duration::from_secs(60)).into();
         input.set_executor(Arc::new(SlowExecutor));
         let mut input = input.with_idle_timeout(Some(Duration::from_secs(1)));
         let started = Instant::now();
@@ -1208,6 +1234,7 @@ mod tests {
             ..
         } = original;
         drop(state);
+        let deadline_at = deadline.at();
         let mut input = PutInput::new(
             body,
             PutMetadata {
@@ -1225,7 +1252,7 @@ mod tests {
             .unwrap();
         assert!(input.message_bound().now_or_never().is_none());
         assert_eq!(input.wire_bytes(), 2);
-        assert_eq!(input.deadline(), deadline);
+        assert_eq!(input.deadline().at(), deadline_at);
         sender
             .send(Bytes::copy_from_slice(&wire[2..]))
             .await
@@ -1240,7 +1267,7 @@ mod tests {
         assert_eq!(budget.usage(), (0, 0));
 
         let (mut input, budget, _sender) = channel_input(64, 128);
-        input.deadline = Instant::now();
+        input.deadline = Instant::now().into();
         assert_eq!(
             input.message_bound().await.unwrap_err().into_connect().code,
             connectrpc::ErrorCode::DeadlineExceeded
@@ -1258,7 +1285,7 @@ mod tests {
             let (mut input, budget) =
                 input(&wire, wire.len(), PutEncoding::Zstd, PutLimits::default());
             if expire {
-                input.deadline = Instant::now() + Duration::from_secs(1);
+                input.deadline = (Instant::now() + Duration::from_secs(1)).into();
             }
             let (started_tx, started_rx) = std::sync::mpsc::channel();
             let (release_tx, release_rx) = std::sync::mpsc::channel();
@@ -1485,9 +1512,10 @@ mod tests {
             PutEncoding::Identity,
             PutLimits::default(),
         );
-        input.deadline = Instant::now() + Duration::from_millis(200);
+        let deadline = Instant::now() + Duration::from_millis(200);
+        input.deadline = deadline.into();
         let executor = Arc::new(Late {
-            deadline: input.deadline(),
+            deadline,
             calls: AtomicUsize::new(0),
         });
         input.set_executor(executor.clone());
