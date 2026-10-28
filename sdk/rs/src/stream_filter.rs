@@ -81,7 +81,7 @@ impl CompiledFilters {
     }
 
     pub fn matches(&self, bytes: &[u8]) -> bool {
-        self.exacts.iter().any(|exact| exact.as_ref() == bytes)
+        self.exacts.contains(bytes)
             || self.prefixes.iter().any(|p| bytes.starts_with(p))
             || self.regexes.iter().any(|r| r.is_match(bytes))
     }

@@ -259,8 +259,9 @@ async fn put<I: Ingest>(
         (Some(declared), Some(exact)) => Some(declared.min(exact)),
         (declared, exact) => declared.or(exact),
     };
+    let compression = compressed(&parts);
     let metadata = PutMetadata {
-        encoding: if compressed(&parts).unwrap_or(false) {
+        encoding: if matches!(compression, Ok(true)) {
             PutEncoding::Zstd
         } else {
             PutEncoding::Identity
@@ -278,7 +279,7 @@ async fn put<I: Ingest>(
         Some(crate::connect::worker_not_ready_error())
     } else {
         validate_protocol(&parts)
-            .and_then(|()| compressed(&parts).map(|_| ()))
+            .and_then(|()| compression.map(|_| ()))
             .and_then(|()| declared_length.map(|_| ()))
             .and_then(|()| {
                 if metadata
