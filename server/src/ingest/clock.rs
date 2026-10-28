@@ -1,11 +1,14 @@
 use std::{
+    fmt,
     future::Future,
+    pin::Pin,
     sync::Arc,
-    task::Poll,
+    task::{Context, Poll},
     time::{Duration, SystemTime},
 };
 
-use futures::future::BoxFuture;
+use connectrpc::ConnectError;
+use futures::future::{BoxFuture, Either};
 
 /// Source of time for Put deadlines and timings.
 ///
@@ -36,7 +39,9 @@ pub trait PutClock: Send + Sync + 'static {
 /// Tokio's monotonic clock, reported as wall time measured from construction.
 ///
 /// Reading Tokio rather than the system clock keeps deadlines immune to wall
-/// clock steps and lets tests that pause Tokio time drive Put timeouts.
+/// clock steps and lets tests that pause Tokio time drive Put timeouts. The
+/// reported times drift from the system clock over time, so compare them only
+/// with times from the same clock.
 #[derive(Clone, Copy, Debug)]
 pub struct TokioClock {
     system: SystemTime,
@@ -85,6 +90,11 @@ impl PutClock for TokioClock {
     }
 }
 
+/// The error for a Put that ran past its request deadline.
+pub(crate) fn deadline_exceeded() -> ConnectError {
+    ConnectError::deadline_exceeded("ingest deadline exceeded")
+}
+
 /// An absolute Put deadline and the clock that measures it.
 #[derive(Clone)]
 pub struct PutDeadline {
@@ -120,22 +130,20 @@ impl PutDeadline {
 
     /// Polls `future` until it finishes or the deadline passes. Like
     /// `tokio::time::timeout_at`, the future is polled before the deadline.
-    pub(crate) async fn timeout<F: Future>(&self, future: F) -> Result<F::Output, Elapsed> {
-        let mut future = std::pin::pin!(future);
-        let mut expiry = None;
-        std::future::poll_fn(|cx| {
-            if let Poll::Ready(output) = future.as_mut().poll(cx) {
-                return Poll::Ready(Ok(output));
-            }
-            // A future that spends Tokio's cooperative budget makes a Tokio timer
-            // report Pending even after its deadline, so read the clock directly.
-            if self.expired() {
-                return Poll::Ready(Err(Elapsed));
-            }
-            let expiry = expiry.get_or_insert_with(|| self.clock.sleep_until(self.at));
-            expiry.as_mut().poll(cx).map(|()| Err(Elapsed))
-        })
-        .await
+    pub(crate) async fn timeout<F: Future>(&self, future: F) -> Result<F::Output, ConnectError> {
+        let expiry = Expiry::new(self.clock(), self.at);
+        match futures::future::select(std::pin::pin!(future), expiry).await {
+            Either::Left((output, _)) => Ok(output),
+            Either::Right(((), _)) => Err(deadline_exceeded()),
+        }
+    }
+}
+
+impl fmt::Debug for PutDeadline {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PutDeadline")
+            .field("at", &self.at)
+            .finish_non_exhaustive()
     }
 }
 
@@ -147,7 +155,43 @@ impl From<tokio::time::Instant> for PutDeadline {
     }
 }
 
-pub(crate) struct Elapsed;
+/// Resolves once `clock` reaches `at`.
+///
+/// Each poll reads the clock before touching the timer. A Tokio timer polled
+/// after its task spent Tokio's cooperative budget reports Pending even past its
+/// deadline, and work that keeps finding ready channels can spend that budget on
+/// every poll. The timer is created on the first poll that has to wait, so work
+/// that finishes right away never allocates one.
+pub(crate) struct Expiry<'a> {
+    clock: &'a dyn PutClock,
+    at: SystemTime,
+    sleep: Option<BoxFuture<'static, ()>>,
+}
+
+impl<'a> Expiry<'a> {
+    pub(crate) fn new(clock: &'a dyn PutClock, at: SystemTime) -> Self {
+        Self {
+            clock,
+            at,
+            sleep: None,
+        }
+    }
+}
+
+impl Future for Expiry<'_> {
+    type Output = ();
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+        let Self { clock, at, sleep } = self.get_mut();
+        if clock.now() >= *at {
+            return Poll::Ready(());
+        }
+        sleep
+            .get_or_insert_with(|| clock.sleep_until(*at))
+            .as_mut()
+            .poll(cx)
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -163,8 +207,11 @@ mod tests {
                 tokio::task::consume_budget().await;
             }
         };
-        let result = tokio::time::timeout(Duration::from_secs(1), deadline.timeout(busy)).await;
+        let error = tokio::time::timeout(Duration::from_secs(1), deadline.timeout(busy))
+            .await
+            .expect("deadline did not fire")
+            .expect_err("the busy work never finishes");
 
-        assert!(matches!(result, Ok(Err(Elapsed))), "deadline did not fire");
+        assert_eq!(error.code, connectrpc::ErrorCode::DeadlineExceeded);
     }
 }

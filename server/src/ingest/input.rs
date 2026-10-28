@@ -8,11 +8,11 @@ use std::{
 
 use bytes::Bytes;
 use connectrpc::ConnectError;
-use futures::FutureExt;
+use futures::{future::Either, FutureExt};
 use http_body::Body;
 use http_body_util::BodyExt;
 
-use super::clock::{PutClock, PutDeadline};
+use super::clock::{deadline_exceeded, Expiry, PutClock, PutDeadline};
 use super::decode::{DecodeOutput, DecodeState, DecodeStep, WireBatch};
 use super::{
     Admission, ByteLease, DecodeBuffers, IngestEvent, IngestObserver, PutChunk, PutError,
@@ -378,7 +378,7 @@ impl PutInput {
             );
         }
         if self.deadline.expired() {
-            return Err(ConnectError::deadline_exceeded("ingest deadline exceeded").into());
+            return Err(deadline_exceeded().into());
         }
         Ok(())
     }
@@ -411,9 +411,8 @@ impl PutInput {
         } else {
             "ingest deadline exceeded"
         };
-        // The deadline is fixed, so one timer serves every frame read below. It
-        // is created only once the body has to wait, keeping ready reads cheap.
-        let mut expiry = None;
+        // The deadline is fixed, so one timer serves every frame read below.
+        let mut expiry = Expiry::new(clock, deadline);
         let mut frames = 0;
         loop {
             if frames == FRAME_WORK_BUDGET {
@@ -422,21 +421,19 @@ impl PutInput {
             }
             frames += 1;
             let body = &mut self.body;
-            let frame = futures::future::poll_fn(|cx| {
-                let expired = || Poll::Ready(Err(ConnectError::deadline_exceeded(timeout_message)));
+            // An expired deadline wins over a frame that is already buffered.
+            let read = futures::future::poll_fn(|cx| {
                 if clock.now() >= deadline {
-                    return expired();
+                    return Poll::Ready(Err(ConnectError::deadline_exceeded(timeout_message)));
                 }
-                if let Poll::Ready(frame) = body.as_mut().poll_frame(cx) {
-                    return Poll::Ready(Ok(frame));
+                body.as_mut().poll_frame(cx).map(Ok)
+            });
+            let frame = match futures::future::select(read, &mut expiry).await {
+                Either::Left((frame, _)) => frame?,
+                Either::Right(((), _)) => {
+                    return Err(ConnectError::deadline_exceeded(timeout_message).into())
                 }
-                let expiry = expiry.get_or_insert_with(|| clock.sleep_until(deadline));
-                match expiry.as_mut().poll(cx) {
-                    Poll::Ready(()) => expired(),
-                    Poll::Pending => Poll::Pending,
-                }
-            })
-            .await?;
+            };
             match frame {
                 Some(Ok(frame)) => {
                     let Ok(bytes) = frame.into_data() else {
@@ -498,11 +495,7 @@ impl PutInput {
         let started = self.clock().now();
         let previous = state.total();
         let job = self.executor.execute(state, buffers);
-        let output = self
-            .deadline
-            .timeout(job)
-            .await
-            .map_err(|_| ConnectError::deadline_exceeded("ingest deadline exceeded"))??;
+        let output = self.deadline.timeout(job).await??;
         let DecodeOutput { result, state } = output;
         if !state.belongs_to(&self.admission.request) {
             return Err(

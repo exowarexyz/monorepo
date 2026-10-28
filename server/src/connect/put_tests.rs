@@ -5,7 +5,9 @@ use std::sync::atomic::AtomicUsize;
 use std::sync::Mutex;
 use std::task::Poll;
 
-use crate::ingest::{DecodeBuffers, IngestBudget, PutClock, PutError, PutInput, PutMiddleware};
+use crate::ingest::{
+    DecodeBuffers, IngestBudget, PutClock, PutError, PutInput, PutMiddleware, TokioClock,
+};
 use futures::future::BoxFuture;
 
 use connectrpc::client::{full_body, ClientConfig, ClientTransport};
@@ -584,7 +586,7 @@ async fn backend_rejection_drains_only_the_admitted_wire_bound() {
 struct LatestDeadline(std::time::SystemTime);
 
 struct DelayedMiddleware {
-    clock: crate::ingest::TokioClock,
+    clock: TokioClock,
 }
 
 impl PutMiddleware for DelayedMiddleware {
@@ -651,7 +653,7 @@ async fn middleware_and_rejection_drain_share_the_original_deadline() {
         entered: AtomicBool::new(false),
     });
     // The middleware reads the same clock so its deadline is comparable.
-    let clock = crate::ingest::TokioClock::new();
+    let clock = TokioClock::new();
     let state = IngestState::new(ingest.clone()).with_put_config(crate::ingest::PutConfig {
         clock: Arc::new(clock),
         ..Default::default()
@@ -876,7 +878,7 @@ mod simulated_clock {
 
     use commonware_runtime::{deterministic, Clock as _, Runner as _, Supervisor as _};
 
-    use crate::ingest::{DecodeExecutor, DecodeOutput, DecodeState};
+    use crate::ingest::{DecodeExecutor, DecodeOutput, DecodeState, PutConfig};
 
     struct SimulatedClock(deterministic::Context);
 
@@ -894,7 +896,7 @@ mod simulated_clock {
         context: &deterministic::Context,
         ingest: Arc<I>,
     ) -> IngestState<I> {
-        IngestState::new(ingest).with_put_config(crate::ingest::PutConfig {
+        IngestState::new(ingest).with_put_config(PutConfig {
             clock: Arc::new(SimulatedClock(context.child("put_clock"))),
             ..Default::default()
         })

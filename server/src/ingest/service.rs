@@ -361,16 +361,9 @@ async fn put<I: Ingest>(
     if rejection.is_none() {
         for middleware in &middleware {
             let result = request_deadline.timeout(middleware.call(&mut parts)).await;
-            match result {
-                Ok(Ok(())) => {}
-                Ok(Err(error)) => {
-                    rejection = Some(error);
-                    break;
-                }
-                Err(_) => {
-                    rejection = Some(ConnectError::deadline_exceeded("ingest deadline exceeded"));
-                    break;
-                }
+            if let Err(error) = result.and_then(|result| result) {
+                rejection = Some(error);
+                break;
             }
         }
     }
@@ -399,7 +392,7 @@ async fn put<I: Ingest>(
                 "backend published without checked Put finalization",
             )),
             Ok(Err(error)) => Err(error.into_connect()),
-            Err(_) => Err(ConnectError::deadline_exceeded("ingest deadline exceeded")),
+            Err(error) => Err(error),
         },
     };
     let cleanup = if input.is_finished() {
