@@ -24,7 +24,6 @@ use commonware_storage::{
             grafting::{graftable_chunks, Verifier as GraftingVerifier},
             proof::{OpsRootWitness, RangeProof},
         },
-        verify::{verify_multi_proof, verify_proof_and_pinned_nodes},
     },
 };
 use js_sys::{Array, Object, Reflect, Uint8Array};
@@ -153,24 +152,25 @@ fn get_bit_from_chunk(chunk: &[u8], bit: u64, chunk_bits: u64) -> bool {
         .unwrap_or(false)
 }
 
-fn verify_current_range<F, H, O>(
+fn verify_current_range<F, H, E, C>(
     proof: &RangeProof<F, H::Digest>,
     config: &CurrentProofConfig,
     start_loc: Location<F>,
-    ops: &[O],
-    chunks: &[Vec<u8>],
+    encoded_ops: &[E],
+    chunks: &[C],
     root: &H::Digest,
 ) -> Result<(), String>
 where
     F: merkle::Graftable,
     H: commonware_cryptography::Hasher,
-    O: Encode,
+    E: AsRef<[u8]>,
+    C: AsRef<[u8]>,
 {
-    if ops.is_empty() || chunks.is_empty() {
+    if encoded_ops.is_empty() || chunks.is_empty() {
         return Err("current proof has empty operations or chunks".to_string());
     }
     let end_loc = start_loc
-        .checked_add(ops.len() as u64)
+        .checked_add(encoded_ops.len() as u64)
         .ok_or_else(|| "current proof end location overflow".to_string())?;
     let leaves = proof.proof.leaves;
     if end_loc > leaves {
@@ -183,6 +183,7 @@ where
         return Err("current proof chunk metadata length mismatch".to_string());
     }
     for (index, chunk) in chunks.iter().enumerate() {
+        let chunk = chunk.as_ref();
         if chunk.len() != config.chunk_size {
             return Err(format!(
                 "current proof chunk {index} has {} bytes, expected {}",
@@ -207,7 +208,7 @@ where
         return Err("current proof pending chunk presence mismatch".to_string());
     }
 
-    let chunk_refs = chunks.iter().map(Vec::as_slice).collect::<Vec<_>>();
+    let chunk_refs = chunks.iter().map(AsRef::as_ref).collect::<Vec<_>>();
     let grafting_verifier = GraftingVerifier::<F, H>::new(
         config.grafting_height,
         start_chunk,
@@ -221,7 +222,7 @@ where
         };
         if end_chunk == complete_chunks {
             let last_chunk = chunks.last().expect("chunks non-empty");
-            if *last_chunk_digest != grafting_verifier.hash(&[last_chunk.as_slice()]) {
+            if *last_chunk_digest != grafting_verifier.hash(&[last_chunk.as_ref()]) {
                 return Err("current proof partial chunk digest mismatch".to_string());
             }
         }
@@ -237,16 +238,15 @@ where
             let Some(pending_chunk) = chunks.get(local) else {
                 return Err("current proof pending chunk index out of range".to_string());
             };
-            if *pending_digest != grafting_verifier.hash(&[pending_chunk.as_slice()]) {
+            if *pending_digest != grafting_verifier.hash(&[pending_chunk.as_ref()]) {
                 return Err("current proof pending chunk digest mismatch".to_string());
             }
         }
     }
 
-    let encoded_ops = ops.iter().map(Encode::encode).collect::<Vec<_>>();
     let merkle_root = proof
         .proof
-        .reconstruct_root(&grafting_verifier, &encoded_ops, start_loc)
+        .reconstruct_root(&grafting_verifier, encoded_ops, start_loc)
         .map_err(|_| "current proof failed root reconstruction".to_string())?;
     let partial_chunk = has_partial_chunk.then(|| {
         (
@@ -341,7 +341,7 @@ where
     let proof =
         merkle::Proof::<F, H::Digest>::decode_cfg(Copying(proto.proof.as_ref()), &max_digests)
             .map_err(|err| format!("failed to decode historical multi proof: {err}"))?;
-    if !verify_multi_proof::<H, _, _>(&proof, &operations, &target_root) {
+    if !verify_received_multi_operations::<F, H>(&proof, proto, &target_root) {
         return Err("historical multi proof failed verification".to_string());
     }
     Ok((*root, operations))
@@ -380,7 +380,7 @@ where
         .leaves
         .checked_sub(1)
         .ok_or_else(|| "subscription proof has no leaves".to_string())?;
-    if !verify_multi_proof::<H, _, _>(&proof, &operations, &ops_root) {
+    if !verify_received_multi_operations::<F, H>(&proof, proto, &ops_root) {
         return Err("historical multi proof failed verification".to_string());
     }
     if proto.ops_root_witness.is_empty() {
@@ -391,6 +391,30 @@ where
             format!("failed to decode historical multi proof ops-root witness: {err}")
         })?;
     Ok((tip, witness.root::<H>(&ops_root), operations))
+}
+
+/// Verify the multi-proof against the operation bytes as received, so the proof
+/// authenticates exactly the bytes the caller decodes.
+fn verify_received_multi_operations<F, H>(
+    proof: &merkle::Proof<F, H::Digest>,
+    proto: &HistoricalMultiProof,
+    root: &H::Digest,
+) -> bool
+where
+    F: merkle::Graftable,
+    H: commonware_cryptography::Hasher,
+{
+    let elements = proto
+        .operations
+        .iter()
+        .map(|operation| {
+            (
+                operation.encoded_operation.as_ref(),
+                Location::<F>::new(operation.location),
+            )
+        })
+        .collect::<Vec<_>>();
+    proof.verify_multi_inclusion(&commonware_storage::qmdb::hasher::<H>(), &elements, root)
 }
 
 fn decode_multi_operations_from_proto<F>(
@@ -481,10 +505,6 @@ where
             Ok((location, operation))
         })
         .collect::<Result<Vec<_>, String>>()?;
-    let ordered_operations = operations
-        .iter()
-        .map(|(_, operation)| operation.clone())
-        .collect::<Vec<_>>();
     let pinned_nodes = proto
         .pinned_nodes
         .iter()
@@ -495,10 +515,10 @@ where
             )
         })
         .collect::<Result<Vec<_>, String>>()?;
-    if !verify_proof_and_pinned_nodes::<H, _, _>(
-        &proof,
+    if !proof.verify_proof_and_pinned_nodes(
+        &commonware_storage::qmdb::hasher::<H>(),
+        &proto.encoded_operations,
         start,
-        &ordered_operations,
         &pinned_nodes,
         &target_root,
     ) {
@@ -624,16 +644,14 @@ where
             Ok((location, operation))
         })
         .collect::<Result<Vec<_>, String>>()?;
-    let ordered_operations = operations
-        .iter()
-        .map(|(_, operation)| operation.clone())
-        .collect::<Vec<_>>();
-    let chunks = proto
-        .chunks
-        .iter()
-        .map(|bytes| bytes.to_vec())
-        .collect::<Vec<_>>();
-    verify_current_range::<F, H, _>(&proof, config, start, &ordered_operations, &chunks, root)?;
+    verify_current_range::<F, H, _, _>(
+        &proof,
+        config,
+        start,
+        &proto.encoded_operations,
+        &proto.chunks,
+        root,
+    )?;
     Ok(operations)
 }
 
@@ -709,7 +727,7 @@ where
 
 fn verify_operation_proof<F, H>(
     proof: &OperationProof<F, H::Digest>,
-    operation: &OrderedOperation<F, Vec<u8>, Vec<u8>>,
+    encoded_operation: &[u8],
     root: &H::Digest,
     config: &CurrentProofConfig,
 ) -> Result<(), String>
@@ -720,11 +738,11 @@ where
     if !get_bit_from_chunk(&proof.chunk, *proof.loc, config.chunk_bits) {
         return Err("current operation proof is inactive".to_string());
     }
-    verify_current_range::<F, H, _>(
+    verify_current_range::<F, H, _, _>(
         &proof.range_proof,
         config,
         proof.loc,
-        std::slice::from_ref(operation),
+        &[encoded_operation],
         std::slice::from_ref(&proof.chunk),
         root,
     )
@@ -753,13 +771,14 @@ where
     if !buf.0.is_empty() {
         return Err("current key-value proof has trailing bytes".to_string());
     }
-    verify_operation_proof::<F, H>(&proof, &operation, root, config)?;
+    verify_operation_proof::<F, H>(&proof, &proto.encoded_operation, root, config)?;
     match operation {
         OrderedOperation::Update(update) => Ok((proof.loc, update)),
         _ => Err("current key-value proof operation must be an update".to_string()),
     }
 }
 
+/// `requested_key` is the decoded key, not its wire encoding.
 fn verify_key_value_for_key_from_proto<F, H>(
     proto: &CurrentKeyValueProof,
     requested_key: &[u8],
@@ -773,7 +792,6 @@ where
     OrderedOperation<F, Vec<u8>, Vec<u8>>:
         Decode + Encode + Read<Cfg = ((RangeCfg<usize>, ()), (RangeCfg<usize>, ()))>,
 {
-    let requested_key = decode_vec_key_wire(requested_key)?;
     let (location, update) = verify_key_value_from_proto::<F, H>(proto, root, config)?;
     if update.key != requested_key {
         return Err("current key-value proof key mismatch".to_string());
@@ -781,6 +799,7 @@ where
     Ok((location, OrderedOperation::Update(update)))
 }
 
+/// `requested_key` is the decoded key, not its wire encoding.
 fn verify_key_exclusion_from_proto<F, H>(
     proto: &CurrentKeyExclusionProof,
     requested_key: &[u8],
@@ -796,23 +815,26 @@ where
 {
     let max_digests = proof_digest_cap::<H::Digest>(&proto.proof);
     let proof = read_exclusion_proof::<F, H::Digest>(&proto.proof, max_digests, config)?;
-    let requested_key = decode_vec_key_wire(requested_key)?;
     match proof {
         ExclusionProof::KeyValue(proof, update) => {
             if update.key == requested_key {
                 return Err("current key-exclusion proof proves requested key exists".to_string());
             }
-            if !span_contains(&update.key, &update.next_key, &requested_key) {
+            if !span_contains(
+                &update.key.as_slice(),
+                &update.next_key.as_slice(),
+                &requested_key,
+            ) {
                 return Err(
                     "current key-exclusion proof span does not contain requested key".to_string(),
                 );
             }
-            let operation = OrderedOperation::Update(update.clone());
+            let operation = OrderedOperation::<F, _, _>::Update(update.clone()).encode();
             verify_operation_proof::<F, H>(&proof, &operation, current_root, config)?;
             Ok(Some(update.next_key))
         }
         ExclusionProof::Commit(proof, value) => {
-            let operation = OrderedOperation::CommitFloor(value, proof.loc);
+            let operation = OrderedOperation::<F, _, _>::CommitFloor(value, proof.loc).encode();
             verify_operation_proof::<F, H>(&proof, &operation, current_root, config)?;
             Ok(None)
         }
@@ -1282,7 +1304,7 @@ where
             current_key_lookup_result::Result::Hit(proof) => {
                 let (location, operation) = verify_key_value_for_key_from_proto::<F, H>(
                     proof,
-                    requested_key,
+                    &decoded_requested_key,
                     current_root,
                     config,
                 )
@@ -1292,8 +1314,13 @@ where
                 set_field(&entry, "operation", &to_js_operation(operation)?)?;
             }
             current_key_lookup_result::Result::Miss(proof) => {
-                verify_key_exclusion_from_proto::<F, H>(proof, requested_key, current_root, config)
-                    .map_err(js_err)?;
+                verify_key_exclusion_from_proto::<F, H>(
+                    proof,
+                    &decoded_requested_key,
+                    current_root,
+                    config,
+                )
+                .map_err(js_err)?;
                 set_field(&entry, "type", &JsValue::from_str("miss"))?;
             }
         }
@@ -1319,8 +1346,7 @@ where
     OrderedOperation<F, Vec<u8>, Vec<u8>>:
         Decode + Encode + Read<Cfg = ((RangeCfg<usize>, ()), (RangeCfg<usize>, ()))>,
 {
-    let start_key_wire = start_key;
-    let start_key = decode_vec_key_wire(start_key_wire).map_err(js_err)?;
+    let start_key = decode_vec_key_wire(start_key).map_err(js_err)?;
     let end_key = end_key
         .map(|key| decode_vec_key_wire(key).map_err(js_err))
         .transpose()?;
@@ -1340,7 +1366,7 @@ where
             .start_proof
             .as_option()
             .ok_or_else(|| js_err("key range missing start boundary proof"))?;
-        verify_key_exclusion_from_proto::<F, H>(proof, start_key_wire, current_root, config)
+        verify_key_exclusion_from_proto::<F, H>(proof, &start_key, current_root, config)
             .map_err(js_err)?
     } else {
         None
@@ -1907,11 +1933,13 @@ pub fn verify_current_key_value_proof(
             "current key-value proof",
         )
         .map_err(js_err)?;
-        match normalize_family(merkle_family, "current key-value proof").map_err(js_err)? {
+        let family = normalize_family(merkle_family, "current key-value proof").map_err(js_err)?;
+        let requested_key = decode_vec_key_wire(requested_key).map_err(js_err)?;
+        match family {
             "mmr" => {
                 let (location, operation) = verify_key_value_for_key_from_proto::<mmr::Family, H>(
                     &proto,
-                    requested_key,
+                    &requested_key,
                     &root,
                     &config,
                 )
@@ -1921,7 +1949,7 @@ pub fn verify_current_key_value_proof(
             "mmb" => {
                 let (location, operation) = verify_key_value_for_key_from_proto::<mmb::Family, H>(
                     &proto,
-                    requested_key,
+                    &requested_key,
                     &root,
                     &config,
                 )
@@ -2905,5 +2933,213 @@ mod tests {
                 .unwrap_err();
 
         assert_eq!(err, "historical ops root did not match expected root");
+    }
+
+    // The verifiers hash operation bytes as received and return what those bytes decode to.
+    // The decoder accepts one encoding per operation, so that is the same operation the old
+    // decode-then-re-encode path authenticated.
+    #[test]
+    fn test_ordered_operation_decoder_accepts_only_canonical_bytes() {
+        type F = mmr::Family;
+        let decode = |bytes: &[u8]| {
+            OrderedVariableOperation::<F>::decode_cfg(Copying(bytes), &op_cfg::<F>())
+        };
+        let update = OrderedVariableOperation::<F>::Update(Update {
+            key: b"a".to_vec(),
+            value: b"v".to_vec(),
+            next_key: b"b".to_vec(),
+        });
+        let commit =
+            OrderedVariableOperation::<F>::CommitFloor(Some(b"m".to_vec()), Location::new(5));
+        for operation in [
+            update.clone(),
+            OrderedVariableOperation::<F>::Delete(b"a".to_vec()),
+            commit.clone(),
+            OrderedVariableOperation::<F>::CommitFloor(None, Location::new(300)),
+        ] {
+            let encoded = operation.encode().to_vec();
+            assert_eq!(decode(&encoded).unwrap(), operation);
+            let mut trailing = encoded;
+            trailing.push(0);
+            assert!(decode(&trailing).is_err());
+        }
+
+        // A key length of 1 padded to two varint bytes. Byte 0 is the operation tag.
+        let encoded = update.encode();
+        assert_eq!(encoded[1..3], [1, b'a']);
+        let mut overlong = vec![encoded[0], 0x81, 0x00];
+        overlong.extend_from_slice(&encoded[2..]);
+        assert!(decode(&overlong).is_err());
+
+        // A metadata presence flag of 2, and a floor of 5 padded to two varint bytes.
+        let encoded = commit.encode();
+        assert_eq!(encoded[1..], [1, 1, b'm', 5]);
+        let mut flag = encoded.to_vec();
+        flag[1] = 2;
+        assert!(decode(&flag).is_err());
+        let mut floor = encoded[..4].to_vec();
+        floor.extend_from_slice(&[0x85, 0x00]);
+        assert!(decode(&floor).is_err());
+    }
+
+    fn hex_bytes(hex: &str) -> Vec<u8> {
+        (0..hex.len())
+            .step_by(2)
+            .map(|index| u8::from_str_radix(&hex[index..index + 2], 16).unwrap())
+            .collect()
+    }
+
+    struct CurrentFixture {
+        root: Sha256Digest,
+        config: CurrentProofConfig,
+        request: Vec<u8>,
+        response: Vec<u8>,
+        expected: Vec<String>,
+    }
+
+    // The browser tests in qmdb/ts verify these same server responses through the JS bindings.
+    fn current_fixture(family: &str, suffix: &str) -> CurrentFixture {
+        let path = format!(
+            "{}/../../ts/test/fixtures/current/current_ordered_variable_variable_keys_variable_values_{family}_{suffix}.txt",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let text = std::fs::read_to_string(path).unwrap();
+        let mut lines = text.trim().lines();
+        let root = decode_digest(&hex_bytes(lines.next().unwrap()), "fixture root").unwrap();
+        let chunk_size = lines.next().unwrap().parse().unwrap();
+        CurrentFixture {
+            root,
+            config: current_proof_config::<Sha256Digest>(chunk_size, "fixture").unwrap(),
+            request: hex_bytes(lines.next().unwrap()),
+            response: hex_bytes(lines.next().unwrap()),
+            expected: lines.map(str::to_string).collect(),
+        }
+    }
+
+    fn assert_current_hit<F: merkle::Family>(
+        location: Location<F>,
+        update: &Update<Vec<u8>, VariableEncoding<Vec<u8>>>,
+        expected: &str,
+    ) {
+        let [key, value, expected_location] = expected.split(' ').collect::<Vec<_>>()[..] else {
+            panic!("malformed hit fixture line {expected}");
+        };
+        assert_eq!(update.key, hex_bytes(key));
+        assert_eq!(update.value, hex_bytes(value));
+        assert_eq!(*location, expected_location.parse::<u64>().unwrap());
+    }
+
+    fn assert_current_fixtures_verify<F>(family: &str)
+    where
+        F: merkle::Graftable,
+        OrderedVariableOperation<F>:
+            Decode + Encode + Read<Cfg = ((RangeCfg<usize>, ()), (RangeCfg<usize>, ()))>,
+    {
+        use crate::proto::qmdb::v1::{GetManyRequest, GetRangeRequest, GetRequest, GetResponse};
+        use buffa::Message;
+        let wrong_root = Sha256::fill(0x42);
+
+        let get = current_fixture(family, "get");
+        let key =
+            decode_vec_key_wire(&GetRequest::decode_from_slice(&get.request).unwrap().key).unwrap();
+        let response = GetResponse::decode_from_slice(&get.response).unwrap();
+        let proof = response.proof.as_option().unwrap();
+        let (location, operation) =
+            verify_key_value_for_key_from_proto::<F, Sha256>(proof, &key, &get.root, &get.config)
+                .unwrap();
+        let OrderedOperation::Update(update) = operation else {
+            panic!("get fixture did not verify an update");
+        };
+        assert_current_hit(location, &update, &get.expected[0]);
+        assert!(verify_key_value_for_key_from_proto::<F, Sha256>(
+            proof,
+            &key,
+            &wrong_root,
+            &get.config
+        )
+        .is_err());
+        assert!(verify_key_value_for_key_from_proto::<F, Sha256>(
+            proof,
+            &[0xFF],
+            &get.root,
+            &get.config
+        )
+        .is_err());
+
+        let many = current_fixture(family, "get_many");
+        let request = GetManyRequest::decode_from_slice(&many.request).unwrap();
+        let response = GetManyResponse::decode_from_slice(&many.response).unwrap();
+        let mut misses = 0;
+        for ((result, key), expected) in response
+            .results
+            .iter()
+            .zip(&request.keys)
+            .zip(&many.expected)
+        {
+            let key = decode_vec_key_wire(key).unwrap();
+            match result.result.as_ref().unwrap() {
+                current_key_lookup_result::Result::Hit(proof) => {
+                    let (location, operation) = verify_key_value_for_key_from_proto::<F, Sha256>(
+                        proof,
+                        &key,
+                        &many.root,
+                        &many.config,
+                    )
+                    .unwrap();
+                    let OrderedOperation::Update(update) = operation else {
+                        panic!("get_many hit did not verify an update");
+                    };
+                    assert_current_hit(location, &update, expected);
+                }
+                current_key_lookup_result::Result::Miss(proof) => {
+                    misses += 1;
+                    verify_key_exclusion_from_proto::<F, Sha256>(
+                        proof,
+                        &key,
+                        &many.root,
+                        &many.config,
+                    )
+                    .unwrap();
+                    assert!(verify_key_exclusion_from_proto::<F, Sha256>(
+                        proof,
+                        &key,
+                        &wrong_root,
+                        &many.config
+                    )
+                    .is_err());
+                }
+            }
+        }
+        assert_eq!(misses, 1);
+
+        let range = current_fixture(family, "range_first");
+        let request = GetRangeRequest::decode_from_slice(&range.request).unwrap();
+        let response = GetRangeResponse::decode_from_slice(&range.response).unwrap();
+        assert_eq!(response.entries.len(), range.expected.len() - 1);
+        for (proof, expected) in response.entries.iter().zip(&range.expected[1..]) {
+            let (location, update) =
+                verify_key_value_from_proto::<F, Sha256>(proof, &range.root, &range.config)
+                    .unwrap();
+            assert_current_hit(location, &update, expected);
+        }
+        let start_key = decode_vec_key_wire(&request.start_key).unwrap();
+        let start_proof = response.start_proof.as_option().unwrap();
+        verify_key_exclusion_from_proto::<F, Sha256>(
+            start_proof,
+            &start_key,
+            &range.root,
+            &range.config,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn test_verifies_current_server_fixtures_mmr() {
+        assert_current_fixtures_verify::<mmr::Family>("mmr");
+    }
+
+    #[test]
+    fn test_verifies_current_server_fixtures_mmb() {
+        assert_current_fixtures_verify::<mmb::Family>("mmb");
     }
 }

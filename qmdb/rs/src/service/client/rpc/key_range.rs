@@ -178,12 +178,10 @@ where
     ExclusionProof<F, K, E, H::Digest, N>:
         Read<Cfg = (usize, <ordered::Update<K, E> as Read>::Cfg, V::Cfg)>,
 {
-    let encoded_start_key = start_key;
-    let encoded_end_key = end_key;
-    let start_key = K::decode_cfg(Copying(encoded_start_key), key_cfg).map_err(|err| {
+    let start_key = K::decode_cfg(Copying(start_key), key_cfg).map_err(|err| {
         QmdbError::CorruptData(format!("failed to decode range start key: {err}"))
     })?;
-    let end_key = encoded_end_key
+    let end_key = end_key
         .map(|key| {
             K::decode_cfg(Copying(key), key_cfg).map_err(|err| {
                 QmdbError::CorruptData(format!("failed to decode range end key: {err}"))
@@ -212,12 +210,7 @@ where
             QmdbError::CorruptData("key range missing start boundary proof".into())
         })?;
         verify_key_exclusion_from_proto::<F, H, K, V, N, E>(
-            proof,
-            encoded_start_key,
-            root,
-            update_cfg,
-            key_cfg,
-            value_cfg,
+            proof, &start_key, root, update_cfg, value_cfg,
         )?
     } else {
         None

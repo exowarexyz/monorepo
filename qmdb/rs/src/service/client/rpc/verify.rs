@@ -65,10 +65,9 @@ where
 /// (`None` when the proof shows an empty database)
 pub(crate) fn verify_key_exclusion_from_proto<F, H, K, V, const N: usize, E>(
     proto: &ProtoCurrentKeyExclusionProof,
-    requested_key: &[u8],
+    requested_key: &K,
     root: &H::Digest,
     update_cfg: &<ordered::Update<K, E> as Read>::Cfg,
-    key_cfg: &K::Cfg,
     value_cfg: &V::Cfg,
 ) -> Result<Option<K>, QmdbError>
 where
@@ -93,10 +92,7 @@ where
             "failed to decode current key-exclusion proof: {err}"
         ))
     })?;
-    let requested_key = K::decode_cfg(Copying(requested_key), key_cfg).map_err(|err| {
-        QmdbError::CorruptData(format!("failed to decode requested exclusion key: {err}"))
-    })?;
-    if !verify_ordered_exclusion_proof::<F, H, K, E, N>(&requested_key, &proof, root) {
+    if !verify_ordered_exclusion_proof::<F, H, K, E, N>(requested_key, &proof, root) {
         return Err(QmdbError::ProofVerification {
             kind: crate::ProofKind::CurrentKeyExclusion,
         });
