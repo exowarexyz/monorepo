@@ -874,23 +874,12 @@ async fn put_timeouts_respect_the_host_ceiling() {
 mod simulated_clock {
     use super::*;
 
-    use std::time::{Duration, SystemTime};
+    use std::time::Duration;
 
     use commonware_runtime::{deterministic, Clock as _, Runner as _, Supervisor as _};
 
+    use crate::ingest::testing::SimulatedClock;
     use crate::ingest::{DecodeExecutor, DecodeOutput, DecodeState, PutConfig};
-
-    struct SimulatedClock(deterministic::Context);
-
-    impl PutClock for SimulatedClock {
-        fn now(&self) -> SystemTime {
-            self.0.current()
-        }
-
-        fn sleep_until(&self, deadline: SystemTime) -> BoxFuture<'static, ()> {
-            Box::pin(self.0.sleep_until(deadline))
-        }
-    }
 
     fn simulated_state<I: Ingest>(
         context: &deterministic::Context,

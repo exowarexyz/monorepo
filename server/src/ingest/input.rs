@@ -220,7 +220,7 @@ impl PutInput {
         body: PutBody,
         metadata: PutMetadata,
         mut limits: PutLimits,
-        deadline: impl Into<PutDeadline>,
+        deadline: PutDeadline,
         admission: Admission,
     ) -> Self {
         limits.wire_bytes = limits.wire_bytes.min(admission.wire_bound());
@@ -237,7 +237,7 @@ impl PutInput {
             admission,
             metadata,
             limits,
-            deadline: deadline.into(),
+            deadline,
             idle: None,
             observer: Arc::new(()),
             notifier: None,
@@ -701,6 +701,7 @@ mod tests {
 
     use tokio::time::{timeout_at, Instant};
 
+    use super::super::testing::tokio_deadline;
     use super::super::{BudgetConfig, IngestBudget};
     use super::*;
 
@@ -738,7 +739,7 @@ mod tests {
                     content_length: Some(wire.len()),
                 },
                 limits,
-                Instant::now() + Duration::from_secs(5),
+                tokio_deadline(Duration::from_secs(5)),
                 admission,
             ),
             budget,
@@ -771,7 +772,7 @@ mod tests {
                 ..PutMetadata::default()
             },
             PutLimits::default(),
-            Instant::now() + Duration::from_secs(5),
+            tokio_deadline(Duration::from_secs(5)),
             budget.try_admit(wire_len).unwrap(),
         );
         (input, budget, sender)
@@ -841,7 +842,7 @@ mod tests {
         let (input, _, _sender) = channel_input(1, 1024);
         let mut input = input.with_idle_timeout(Some(Duration::from_secs(1)));
         let started = Instant::now();
-        input.deadline = (started + Duration::from_millis(100)).into();
+        input.deadline = tokio_deadline(Duration::from_millis(100));
         assert!(input.raw_next(true).await.is_err());
         assert_eq!(started.elapsed(), Duration::from_millis(100));
         assert!(!input.idle_timed_out());
@@ -853,7 +854,7 @@ mod tests {
     async fn idle_wait_survives_cancellation_and_pauses_between_reads() {
         let (input, _, sender) = channel_input(2, 1024);
         let mut input = input.with_idle_timeout(Some(Duration::from_secs(1)));
-        input.deadline = (Instant::now() + Duration::from_secs(60)).into();
+        input.deadline = tokio_deadline(Duration::from_secs(60));
         let mut reading = Box::pin(input.raw_next(true));
         assert!(futures::poll!(&mut reading).is_pending());
         tokio::time::advance(Duration::from_millis(400)).await;
@@ -925,7 +926,7 @@ mod tests {
 
         let wire = entry(b"key", b"value");
         let (mut input, _) = input(&wire, 1, PutEncoding::Identity, PutLimits::default());
-        input.deadline = (Instant::now() + Duration::from_secs(60)).into();
+        input.deadline = tokio_deadline(Duration::from_secs(60));
         input.set_executor(Arc::new(SlowExecutor));
         let mut input = input.with_idle_timeout(Some(Duration::from_secs(1)));
         let started = Instant::now();
@@ -964,7 +965,7 @@ mod tests {
                     message_bytes: message_limit,
                     ..PutLimits::default()
                 },
-                Instant::now() + Duration::from_secs(1),
+                tokio_deadline(Duration::from_secs(1)),
                 budget.try_admit(wire_bound).unwrap(),
             );
             assert_eq!(input.message_bound().await.unwrap(), expected);
@@ -1093,7 +1094,7 @@ mod tests {
                         content_length: Some(wire.len()),
                     },
                     PutLimits::default(),
-                    Instant::now() + Duration::from_secs(1),
+                    tokio_deadline(Duration::from_secs(1)),
                     budget.try_admit(wire.len()).unwrap(),
                 );
                 assert_eq!(input.message_bound().await.unwrap(), payload.len());
@@ -1262,7 +1263,7 @@ mod tests {
         assert_eq!(budget.usage(), (0, 0));
 
         let (mut input, budget, _sender) = channel_input(64, 128);
-        input.deadline = Instant::now().into();
+        input.deadline = tokio_deadline(Duration::ZERO);
         assert_eq!(
             input.message_bound().await.unwrap_err().into_connect().code,
             connectrpc::ErrorCode::DeadlineExceeded
@@ -1280,7 +1281,7 @@ mod tests {
             let (mut input, budget) =
                 input(&wire, wire.len(), PutEncoding::Zstd, PutLimits::default());
             if expire {
-                input.deadline = (Instant::now() + Duration::from_secs(1)).into();
+                input.deadline = tokio_deadline(Duration::from_secs(1));
             }
             let (started_tx, started_rx) = std::sync::mpsc::channel();
             let (release_tx, release_rx) = std::sync::mpsc::channel();
@@ -1474,7 +1475,7 @@ mod tests {
     #[tokio::test]
     async fn late_cpu_output_is_rejected_before_batch_observation() {
         struct Late {
-            deadline: Instant,
+            deadline: PutDeadline,
             calls: AtomicUsize,
         }
         impl DecodeExecutor for Late {
@@ -1486,10 +1487,7 @@ mod tests {
                 let output = state.run(buffers);
                 self.calls.fetch_add(1, Ordering::Relaxed);
                 if matches!(output.result, Ok(DecodeStep::Batch(_))) {
-                    std::thread::sleep(
-                        self.deadline.saturating_duration_since(Instant::now())
-                            + Duration::from_millis(1),
-                    );
+                    std::thread::sleep(self.deadline.remaining() + Duration::from_millis(1));
                 }
                 Box::pin(async move { Ok(output) })
             }
@@ -1507,8 +1505,8 @@ mod tests {
             PutEncoding::Identity,
             PutLimits::default(),
         );
-        let deadline = Instant::now() + Duration::from_millis(200);
-        input.deadline = deadline.into();
+        let deadline = tokio_deadline(Duration::from_millis(200));
+        input.deadline = deadline.clone();
         let executor = Arc::new(Late {
             deadline,
             calls: AtomicUsize::new(0),
@@ -1893,7 +1891,7 @@ mod tests {
                 content_length: None,
             },
             PutLimits::default(),
-            Instant::now() + Duration::from_secs(1),
+            tokio_deadline(Duration::from_secs(1)),
             admission,
         );
         assert_eq!(polls.load(Ordering::SeqCst), 0);
@@ -1915,7 +1913,7 @@ mod tests {
             box_body(Full::new(Bytes::from_static(b"too big"))),
             PutMetadata::default(),
             PutLimits::default(),
-            Instant::now() + Duration::from_secs(1),
+            tokio_deadline(Duration::from_secs(1)),
             budget.try_admit(4).unwrap(),
         );
         assert_eq!(input.drain_rejected().await, DrainOutcome::WireLimit);
@@ -1925,7 +1923,7 @@ mod tests {
             box_body(Full::new(Bytes::new())),
             PutMetadata::default(),
             PutLimits::default(),
-            Instant::now(),
+            tokio_deadline(Duration::ZERO),
             budget.try_admit(4).unwrap(),
         );
         assert_eq!(input.drain_rejected().await, DrainOutcome::Deadline);
@@ -2125,7 +2123,7 @@ mod tests {
             box_body(StreamBody::new(frames)),
             PutMetadata::default(),
             PutLimits::default(),
-            Instant::now() + Duration::from_secs(1),
+            tokio_deadline(Duration::from_secs(1)),
             budget.try_admit(wire.len()).unwrap(),
         );
         assert!(input.raw_next(false).await.unwrap().is_some());
@@ -2153,7 +2151,7 @@ mod tests {
             box_body(Full::new(Bytes::from(wire))),
             PutMetadata::default(),
             PutLimits::default(),
-            Instant::now() + Duration::from_secs(1),
+            tokio_deadline(Duration::from_secs(1)),
             admission,
         );
         input.reject(
@@ -2215,7 +2213,7 @@ mod tests {
             box_body(Full::new(Bytes::from(wire.clone()))),
             PutMetadata::default(),
             PutLimits::default(),
-            Instant::now() + Duration::from_secs(1),
+            tokio_deadline(Duration::from_secs(1)),
             budget.try_admit(wire.len()).unwrap(),
         );
         let error = input
@@ -2241,7 +2239,7 @@ mod tests {
             box_body(Full::new(Bytes::from(wire.clone()))),
             PutMetadata::default(),
             PutLimits::default(),
-            Instant::now() + Duration::from_secs(1),
+            tokio_deadline(Duration::from_secs(1)),
             budget.try_admit(wire.len()).unwrap(),
         );
         let error = input
@@ -2271,7 +2269,7 @@ mod tests {
             box_body(StreamBody::new(futures::stream::iter(frames))),
             PutMetadata::default(),
             PutLimits::default(),
-            Instant::now() + Duration::from_secs(1),
+            tokio_deadline(Duration::from_secs(1)),
             budget.try_admit(wire.len()).unwrap(),
         );
         input.reject(
@@ -2304,7 +2302,7 @@ mod tests {
             box_body(Full::new(Bytes::from(wire.clone()))),
             PutMetadata::default(),
             PutLimits::default(),
-            Instant::now() + Duration::from_secs(1),
+            tokio_deadline(Duration::from_secs(1)),
             budget.try_admit(wire.len()).unwrap(),
         );
         let error = input
@@ -2333,12 +2331,12 @@ mod tests {
                 max_requests: 1,
                 max_bytes: 16,
             });
-            let deadline = Instant::now() + Duration::from_millis(20);
+            let deadline = tokio_deadline(Duration::from_millis(20));
             let mut input = PutInput::new(
                 box_body(StreamBody::new(frames)),
                 PutMetadata::default(),
                 PutLimits::default(),
-                deadline,
+                deadline.clone(),
                 budget.try_admit(16).unwrap(),
             );
             let progressed = Arc::new(AtomicUsize::new(0));
@@ -2349,7 +2347,7 @@ mod tests {
             assert_eq!(input.drain_rejected().await, DrainOutcome::Deadline);
             assert_eq!(progressed.load(Ordering::SeqCst), 1);
             other.await.unwrap();
-            assert!(Instant::now() >= deadline);
+            assert!(deadline.expired());
             drop(input);
             assert_eq!(budget.usage(), (0, 0));
         }
@@ -2368,7 +2366,7 @@ mod tests {
             box_body(StreamBody::new(frames)),
             PutMetadata::default(),
             PutLimits::default(),
-            Instant::now() + Duration::from_secs(1),
+            tokio_deadline(Duration::from_secs(1)),
             budget.try_admit(4096).unwrap(),
         );
         let progressed = Arc::new(AtomicUsize::new(0));

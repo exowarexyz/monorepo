@@ -13,6 +13,8 @@ pub use service::{PutConfig, PutMiddleware, PutService};
 
 pub use admission::{Admission, BudgetConfig, ByteLease, IngestBudget, RequestLease};
 pub use buffer::{DecodeBuffers, EntryRanges, PutChunk};
+#[cfg(test)]
+pub(crate) use clock::testing;
 pub use clock::{PutClock, PutDeadline, TokioClock};
 pub use decode::{DecodeOutput, DecodeState};
 pub use input::{

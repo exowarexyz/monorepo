@@ -21,6 +21,10 @@ use futures::future::{BoxFuture, Either};
 /// move backward. A step back delays every pending timeout by the same amount.
 /// Dropping a `sleep_until` future cancels it.
 ///
+/// Prefer a monotonic clock in production. The connection layer measures the
+/// same request timeout on Tokio's monotonic clock, so a clock that jumps, such
+/// as the system clock after an NTP step, makes the two deadlines disagree.
+///
 /// Only Put request handling reads this clock. Connection deadlines in
 /// [`transport`](super::transport) stay on Tokio. The default
 /// [`BlockingDecodeExecutor`](super::BlockingDecodeExecutor) also needs a Tokio
@@ -147,14 +151,6 @@ impl fmt::Debug for PutDeadline {
     }
 }
 
-// Callers that run on Tokio can keep passing Tokio instants.
-impl From<tokio::time::Instant> for PutDeadline {
-    fn from(instant: tokio::time::Instant) -> Self {
-        let clock = TokioClock::new();
-        Self::new(Arc::new(clock), clock.to_system(instant))
-    }
-}
-
 /// Resolves once `clock` reaches `at`.
 ///
 /// Each poll reads the clock before touching the timer. A Tokio timer polled
@@ -194,12 +190,86 @@ impl Future for Expiry<'_> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod testing {
     use super::*;
+
+    use commonware_runtime::{deterministic, Clock as _};
+
+    /// A deadline `timeout` from now on a fresh Tokio clock.
+    pub(crate) fn tokio_deadline(timeout: Duration) -> PutDeadline {
+        PutDeadline::after(Arc::new(TokioClock::new()), timeout)
+    }
+
+    /// Reads time from Commonware's deterministic runtime, which simulates it.
+    pub(crate) struct SimulatedClock(pub(crate) deterministic::Context);
+
+    impl PutClock for SimulatedClock {
+        fn now(&self) -> SystemTime {
+            self.0.current()
+        }
+
+        fn sleep_until(&self, deadline: SystemTime) -> BoxFuture<'static, ()> {
+            Box::pin(self.0.sleep_until(deadline))
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use commonware_runtime::{deterministic, Runner as _, Supervisor as _};
+
+    use super::testing::{tokio_deadline, SimulatedClock};
+    use super::*;
+
+    /// Checks the documented `PutClock` contract on `clock`, from inside the
+    /// runtime it belongs to.
+    async fn assert_contract(clock: &dyn PutClock) {
+        // A deadline that already passed finishes promptly, including one from
+        // before the clock was created.
+        let started = clock.now();
+        clock.sleep_until(started - Duration::from_secs(1)).await;
+        assert!(clock.elapsed(started) < Duration::from_millis(100));
+
+        // A sleep finishes once `now` reaches its deadline, and `now` never moves
+        // backward across it.
+        let deadline = clock.now() + Duration::from_millis(50);
+        clock.sleep_until(deadline).await;
+        let woke = clock.now();
+        assert!(woke >= deadline);
+        assert!(clock.now() >= woke);
+
+        // `elapsed` saturates at zero for times that have not happened yet.
+        assert_eq!(clock.elapsed(woke + Duration::from_secs(1)), Duration::ZERO);
+    }
+
+    #[tokio::test]
+    async fn tokio_clock_meets_the_contract() {
+        assert_contract(&TokioClock::new()).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn tokio_clock_meets_the_contract_on_paused_time() {
+        assert_contract(&TokioClock::new()).await;
+    }
+
+    #[test]
+    fn simulated_clock_meets_the_contract() {
+        deterministic::Runner::default().start(|context| async move {
+            assert_contract(&SimulatedClock(context.child("clock"))).await;
+        });
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn tokio_clock_follows_paused_time() {
+        let clock = TokioClock::new();
+        let started = clock.now();
+        tokio::time::advance(Duration::from_secs(5)).await;
+        assert_eq!(clock.elapsed(started), Duration::from_secs(5));
+    }
 
     #[tokio::test]
     async fn deadline_fires_after_the_future_spends_the_coop_budget() {
-        let deadline = PutDeadline::after(Arc::new(TokioClock::new()), Duration::from_millis(10));
+        let deadline = tokio_deadline(Duration::from_millis(10));
         // Every poll spends Tokio's cooperative budget, which makes a Tokio timer
         // polled afterwards return Pending.
         let busy = async {

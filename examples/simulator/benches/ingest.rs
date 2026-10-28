@@ -23,7 +23,7 @@ use exoware_sdk::log::ingest::v1::PutRequest;
 use exoware_server::ingest::{
     box_body, BudgetConfig, IngestBudget, IngestEvent, IngestObserver, PutLimits, PutMetadata,
 };
-use exoware_server::{Ingest, PutInput};
+use exoware_server::{Ingest, PutDeadline, PutInput, TokioClock};
 use exoware_simulator::RocksStore;
 
 // Track Rust allocations across decode tasks and writer threads, including spare
@@ -211,7 +211,10 @@ async fn run(
                                 ..Default::default()
                             },
                             PutLimits::default(),
-                            tokio::time::Instant::now() + Duration::from_secs(300),
+                            PutDeadline::after(
+                                Arc::new(TokioClock::new()),
+                                Duration::from_secs(300),
+                            ),
                             admission,
                         )
                         .with_observer(observed.clone());
