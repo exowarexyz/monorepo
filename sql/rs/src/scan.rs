@@ -134,6 +134,10 @@ pub(crate) struct KvScanExec {
     pub(crate) fetch: Option<usize>,
     pub(crate) filter: Option<ScanFilter>,
     cover_filter: Option<ScanFilter>,
+    /// The columns each row needs and the index to read, if any. Planned once
+    /// in `try_new`, since nothing they depend on changes afterwards.
+    access_plan: Arc<ScanAccessPlan>,
+    index_plan: Option<Arc<IndexPlan>>,
     /// Without a required ordering, traversal is unconstrained and defaults to forward.
     direction: Option<RangeMode>,
     pub(crate) projection: Option<Vec<usize>>,
@@ -159,47 +163,54 @@ impl KvScanExec {
         ))
     }
 
-    pub(crate) fn new(
-        client: PrefixedStoreClient,
-        model: Arc<TableModel>,
-        index_specs: Arc<Vec<ResolvedIndexSpec>>,
-        predicate: QueryPredicate,
+    pub(crate) fn try_new(
+        table: &KvTable,
+        state: &dyn Session,
+        projection: Option<&Vec<usize>>,
+        filters: &[Expr],
         fetch: Option<usize>,
-        projected_schema: SchemaRef,
-        projection: Option<Vec<usize>>,
-    ) -> Self {
-        let properties = Self::make_properties(projected_schema, None);
-        Self {
-            client,
+    ) -> DataFusionResult<Self> {
+        let model = table.model.clone();
+        let predicate = QueryPredicate::from_filters(filters, &model);
+        let projected_schema = match projection {
+            Some(proj) => Arc::new(model.schema.project(proj)?),
+            None => model.schema.clone(),
+        };
+        let projection = projection.cloned();
+        let access_plan = Arc::new(ScanAccessPlan::new(&model, &projection, &predicate));
+        let mut scan = Self {
+            client: table.client.clone(),
             model,
-            index_specs,
+            index_specs: table.index_specs.clone(),
             predicate,
             fetch,
             filter: None,
             cover_filter: None,
+            access_plan,
+            index_plan: None,
             direction: None,
             projection,
-            properties,
-        }
+            properties: Self::make_properties(projected_schema, None),
+        };
+        scan.set_filters(state, filters)?;
+        Ok(scan)
     }
 
-    pub(crate) fn set_filters(
-        &mut self,
-        state: &dyn Session,
-        filters: &[Expr],
-    ) -> DataFusionResult<()> {
+    fn set_filters(&mut self, state: &dyn Session, filters: &[Expr]) -> DataFusionResult<()> {
         if filters.is_empty() {
-            self.filter = None;
-            self.cover_filter = None;
+            self.index_plan = self
+                .predicate
+                .choose_index_plan(&self.model, &self.index_specs, &self.access_plan)?
+                .map(Arc::new);
             return Ok(());
         }
         let filter_access = ScanFilter::access_plan(&self.model, filters);
-        let access = self.access_plan_with_filter(Some(&filter_access.1));
-        let mut cover_filter = None;
-        if let Some(plan) =
+        let access = self.access_plan_with_filter(&filter_access.1);
+        let index_plan =
             self.predicate
-                .choose_index_plan(&self.model, &self.index_specs, &access)?
-        {
+                .choose_index_plan(&self.model, &self.index_specs, &access)?;
+        let mut cover_filter = None;
+        if let Some(plan) = &index_plan {
             let spec = &self.index_specs[plan.spec_idx];
             if !access.index_covers_required_non_pk(spec) {
                 let available = filters
@@ -226,36 +237,34 @@ impl KvScanExec {
             .all(|filter| QueryPredicate::supports_filter(filter, &self.model))
             && access.predicate_fully_enforced_by_primary_key(&self.model)
         {
-            self.filter = None;
-            self.cover_filter = None;
+            // No filter stays on the scan, so `access_plan` keeps only the
+            // projected and predicate columns. Fewer columns can change how
+            // `choose_index_plan` ranks indexes but not whether any qualifies,
+            // so `index_plan` stays `None`.
             return Ok(());
         }
         self.filter = ScanFilter::compile(state, &self.model, filters, filter_access)?;
         self.cover_filter = cover_filter;
+        self.access_plan = Arc::new(access);
+        self.index_plan = index_plan.map(Arc::new);
         Ok(())
     }
 
-    fn access_plan(&self) -> ScanAccessPlan {
-        self.access_plan_with_filter(self.filter.as_ref().map(|filter| &filter.access))
-    }
-
-    fn access_plan_with_filter(&self, filter_access: Option<&ScanAccessPlan>) -> ScanAccessPlan {
-        let mut access = ScanAccessPlan::new(&self.model, &self.projection, &self.predicate);
-        if let Some(filter_access) = filter_access {
-            for (required, filter_required) in access
-                .required_pk_mask
-                .iter_mut()
-                .zip(&filter_access.required_pk_mask)
-            {
-                *required |= filter_required;
-            }
-            for (required, filter_required) in access
-                .required_non_pk_columns
-                .iter_mut()
-                .zip(&filter_access.required_non_pk_columns)
-            {
-                *required |= filter_required;
-            }
+    fn access_plan_with_filter(&self, filter_access: &ScanAccessPlan) -> ScanAccessPlan {
+        let mut access = ScanAccessPlan::clone(&self.access_plan);
+        for (required, filter_required) in access
+            .required_pk_mask
+            .iter_mut()
+            .zip(&filter_access.required_pk_mask)
+        {
+            *required |= filter_required;
+        }
+        for (required, filter_required) in access
+            .required_non_pk_columns
+            .iter_mut()
+            .zip(&filter_access.required_non_pk_columns)
+        {
+            *required |= filter_required;
         }
         access
     }
@@ -271,14 +280,10 @@ impl KvScanExec {
         if self.predicate.contradiction {
             return Ok(None);
         }
-        let access_plan = self.access_plan();
-        let index_plan =
-            self.predicate
-                .choose_index_plan(&self.model, &self.index_specs, &access_plan)?;
-        let (key_columns, constant_prefix_len) = if let Some(plan) = index_plan {
+        let (key_columns, constant_prefix_len) = if let Some(plan) = &self.index_plan {
             let spec = &self.index_specs[plan.spec_idx];
             if spec.layout != IndexLayout::Lexicographic
-                || !access_plan.index_covers_required_non_pk(spec)
+                || !self.access_plan.index_covers_required_non_pk(spec)
             {
                 return Ok(None);
             }
@@ -403,7 +408,8 @@ impl KvScanExec {
             self.client.key_prefix().max_logical_key_len(),
             &self.index_specs,
             &self.predicate,
-            &self.access_plan(),
+            &self.access_plan,
+            self.index_plan.as_deref(),
             self.filter
                 .as_ref()
                 .is_none_or(|filter| filter.complete_ranges),
@@ -490,7 +496,8 @@ impl ExecutionPlan for KvScanExec {
         let fetch = self.fetch;
         let direction = self.scan_direction();
         let projected_schema = self.schema();
-        let access_plan = self.access_plan();
+        let access_plan = self.access_plan.clone();
+        let index_plan = self.index_plan.clone();
         let filter = self.filter.clone();
         let cover_filter = self.cover_filter.clone();
 
@@ -505,7 +512,16 @@ impl ExecutionPlan for KvScanExec {
                 filter: filter.as_ref(),
                 cover_filter: cover_filter.as_ref(),
             };
-            if let Err(e) = stream_kv_scan(&tx, &ctx, &index_specs, fetch, direction).await {
+            if let Err(e) = stream_kv_scan(
+                &tx,
+                &ctx,
+                &index_specs,
+                index_plan.as_deref(),
+                fetch,
+                direction,
+            )
+            .await
+            {
                 let _ = tx.send(Err(e)).await;
             }
             Ok(())
@@ -666,6 +682,7 @@ pub(crate) async fn stream_kv_scan(
     tx: &tokio::sync::mpsc::Sender<DataFusionResult<RecordBatch>>,
     ctx: &ScanCtx<'_>,
     index_specs: &[ResolvedIndexSpec],
+    index_plan: Option<&IndexPlan>,
     limit: Option<usize>,
     direction: RangeMode,
 ) -> DataFusionResult<()> {
@@ -686,10 +703,7 @@ pub(crate) async fn stream_kv_scan(
         return stream_point_scan(tx, ctx, &keys, flush_threshold, target_rows).await;
     }
 
-    if let Some(plan) = ctx
-        .predicate
-        .choose_index_plan(ctx.model, index_specs, ctx.access_plan)?
-    {
+    if let Some(plan) = index_plan {
         if plan.ranges.is_empty() {
             return Ok(());
         }
@@ -708,7 +722,7 @@ pub(crate) async fn stream_kv_scan(
             )
             .await;
         }
-        return stream_index_lookup_scan(tx, ctx, index_specs, &plan, flush_threshold, target_rows)
+        return stream_index_lookup_scan(tx, ctx, index_specs, plan, flush_threshold, target_rows)
             .await;
     }
 
@@ -1065,6 +1079,8 @@ mod tests {
         Sequence,
     };
 
+    use super::KvScanExec;
+    use crate::filter::ScanAccessPlan;
     use crate::types::KvTable;
     use crate::{IndexSpec, KvSchema, TableColumnConfig};
 
@@ -2047,6 +2063,113 @@ mod tests {
                 "SELECT tenant, COUNT(*) FROM orders WHERE {predicate} GROUP BY tenant ORDER BY tenant"
             ))
             .await;
+        }
+    }
+
+    #[tokio::test]
+    async fn optimized_scan_keeps_the_plan_its_inputs_give() {
+        let fixture = Fixture::new(
+            vec![
+                column("id", DataType::Int64, false),
+                column("status", DataType::Utf8, false),
+                column("amount", DataType::Int64, false),
+                column("payload", DataType::Utf8, false),
+            ],
+            &["id"],
+            vec![
+                index("status_idx", &["status"], &["amount"]),
+                index("status_amount_idx", &["status", "amount"], &[]),
+            ],
+            vec![
+                Arc::new(Int64Array::from((0..8).collect::<Vec<i64>>())),
+                Arc::new(StringArray::from(vec![
+                    "a", "b", "c", "a", "b", "c", "a", "b",
+                ])),
+                Arc::new(Int64Array::from(vec![5, 3, 8, 1, 9, 2, 7, 4])),
+                Arc::new(StringArray::from(
+                    (0..8).map(|i| format!("p{i}")).collect::<Vec<_>>(),
+                )),
+            ],
+        )
+        .await;
+        // Each query names whether it reads an index and whether a filter stays on the scan
+        for (sql, uses_index, filtered) in [
+            ("SELECT * FROM orders", false, false),
+            (
+                "SELECT id, amount FROM orders WHERE status IN ('a', 'b') AND amount > 2 ORDER BY id",
+                true,
+                true,
+            ),
+            (
+                "SELECT payload FROM orders WHERE status IN ('a', 'c') AND amount % 2 = 1 ORDER BY id",
+                true,
+                true,
+            ),
+            (
+                "SELECT id, amount FROM orders WHERE status = 'a' ORDER BY amount DESC LIMIT 2",
+                true,
+                true,
+            ),
+            ("SELECT payload FROM orders WHERE id >= 2 AND id < 6", false, false),
+            (
+                "SELECT payload FROM orders WHERE id >= 2 AND payload <> 'p3' ORDER BY id LIMIT 3",
+                false,
+                true,
+            ),
+        ] {
+            fixture.check(sql).await;
+            let mut plan = fixture
+                .store
+                .datafusion()
+                .sql(sql)
+                .await
+                .unwrap()
+                .create_physical_plan()
+                .await
+                .unwrap();
+            while let Some(child) = plan.children().first() {
+                plan = (*child).clone();
+            }
+            let scan = plan.downcast_ref::<KvScanExec>().expect("scan");
+            assert_eq!(scan.index_plan.is_some(), uses_index, "{sql}");
+            assert_eq!(scan.filter.is_some(), filtered, "{sql}");
+            // Rebuild the plan the way every call used to, after limit and sort pushdown
+            let mut access = ScanAccessPlan::new(&scan.model, &scan.projection, &scan.predicate);
+            if let Some(filter) = &scan.filter {
+                for (required, filter_required) in access
+                    .required_pk_mask
+                    .iter_mut()
+                    .zip(&filter.access.required_pk_mask)
+                {
+                    *required |= filter_required;
+                }
+                for (required, filter_required) in access
+                    .required_non_pk_columns
+                    .iter_mut()
+                    .zip(&filter.access.required_non_pk_columns)
+                {
+                    *required |= filter_required;
+                }
+            }
+            assert_eq!(
+                access.required_pk_mask, scan.access_plan.required_pk_mask,
+                "{sql}"
+            );
+            assert_eq!(
+                access.required_non_pk_columns, scan.access_plan.required_non_pk_columns,
+                "{sql}"
+            );
+            let fresh = scan
+                .predicate
+                .choose_index_plan(&scan.model, &scan.index_specs, &access)
+                .unwrap();
+            assert_eq!(
+                scan.index_plan
+                    .as_ref()
+                    .map(|plan| (plan.spec_idx, plan.ranges.clone())),
+                fresh.map(|plan| (plan.spec_idx, plan.ranges)),
+                "{sql}"
+            );
         }
     }
 }

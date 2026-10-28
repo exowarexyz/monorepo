@@ -110,6 +110,20 @@ mod tests {
         TableModel::from_config(&config).unwrap()
     }
 
+    fn unfiltered_scan(
+        client: StoreClient,
+        model: Arc<TableModel>,
+        fetch: Option<usize>,
+    ) -> KvScanExec {
+        let table = KvTable {
+            client: PrefixedStoreClient::empty(client),
+            model,
+            index_specs: Arc::new(Vec::new()),
+        };
+        let state = DataFusionSessionContext::new().state();
+        KvScanExec::try_new(&table, &state, None, &[], fetch).expect("scan")
+    }
+
     fn key_payload(prefix: &Prefix, key: &Key, offset: usize, len: usize) -> Vec<u8> {
         let payload = prefix.strip(key).expect("key payload");
         payload[offset..offset + len].to_vec()
@@ -6712,15 +6726,7 @@ mod tests {
         });
 
         let client = StoreClient::new(&url);
-        let scan = KvScanExec::new(
-            PrefixedStoreClient::empty(client),
-            model.clone(),
-            Arc::new(Vec::new()),
-            QueryPredicate::default(),
-            None,
-            model.schema.clone(),
-            None,
-        );
+        let scan = unfiltered_scan(client, model.clone(), None);
 
         let missing_session = DataFusionSessionContext::new();
         assert!(matches!(
@@ -6842,13 +6848,9 @@ mod tests {
     #[test]
     fn kv_scan_physical_limit_pushdown_sets_leaf_fetch() {
         let model = Arc::new(simple_int64_model(0));
-        let scan = Arc::new(KvScanExec::new(
-            PrefixedStoreClient::empty(StoreClient::new("http://127.0.0.1:0")),
+        let scan = Arc::new(unfiltered_scan(
+            StoreClient::new("http://127.0.0.1:0"),
             model.clone(),
-            Arc::new(Vec::new()),
-            QueryPredicate::default(),
-            None,
-            model.schema.clone(),
             None,
         ));
         let limited: Arc<dyn ExecutionPlan> = Arc::new(GlobalLimitExec::new(scan, 0, Some(1)));
@@ -6872,13 +6874,9 @@ mod tests {
         use datafusion::physical_plan::sorts::sort::SortExec;
 
         let model = Arc::new(simple_int64_model(0));
-        let scan = Arc::new(KvScanExec::new(
-            PrefixedStoreClient::empty(StoreClient::new("http://127.0.0.1:0")),
+        let scan = Arc::new(unfiltered_scan(
+            StoreClient::new("http://127.0.0.1:0"),
             model.clone(),
-            Arc::new(Vec::new()),
-            QueryPredicate::default(),
-            None,
-            model.schema.clone(),
             None,
         ));
         let ordering = LexOrdering::new([PhysicalSortExpr {
@@ -6919,14 +6917,10 @@ mod tests {
         )
         .expect("config");
         let model = Arc::new(TableModel::from_config(&config).expect("model"));
-        let scan = KvScanExec::new(
-            PrefixedStoreClient::empty(StoreClient::new("http://127.0.0.1:0")),
+        let scan = unfiltered_scan(
+            StoreClient::new("http://127.0.0.1:0"),
             model.clone(),
-            Arc::new(Vec::new()),
-            QueryPredicate::default(),
             Some(2),
-            model.schema.clone(),
-            None,
         );
         let ordering = LexOrdering::new([
             PhysicalSortExpr {
