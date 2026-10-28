@@ -11,6 +11,18 @@ use futures::future::BoxFuture;
 ///
 /// The default reads Tokio's clock. A backend can substitute another clock, such
 /// as a deterministic runtime's simulated one, so Put timeouts follow that clock.
+///
+/// `now` and `sleep_until` must share one timeline. A sleep until `t` finishes
+/// once `now()` reaches `t`, and finishes promptly if `t` has already passed.
+/// Deadlines are also checked by comparing `now()` with them, so `now` should not
+/// move backward. A step back delays every pending timeout by the same amount.
+/// Dropping a `sleep_until` future cancels it.
+///
+/// Only Put request handling reads this clock. Connection deadlines in
+/// [`transport`](super::transport) stay on Tokio. The default
+/// [`BlockingDecodeExecutor`](super::BlockingDecodeExecutor) also needs a Tokio
+/// runtime, so a backend that runs without one supplies its own
+/// [`DecodeExecutor`](super::DecodeExecutor).
 pub trait PutClock: Send + Sync + 'static {
     fn now(&self) -> SystemTime;
 
@@ -105,6 +117,26 @@ impl PutDeadline {
     pub fn expired(&self) -> bool {
         self.clock.now() >= self.at
     }
+
+    /// Polls `future` until it finishes or the deadline passes. Like
+    /// `tokio::time::timeout_at`, the future is polled before the deadline.
+    pub(crate) async fn timeout<F: Future>(&self, future: F) -> Result<F::Output, Elapsed> {
+        let mut future = std::pin::pin!(future);
+        let mut expiry = None;
+        std::future::poll_fn(|cx| {
+            if let Poll::Ready(output) = future.as_mut().poll(cx) {
+                return Poll::Ready(Ok(output));
+            }
+            // A future that spends Tokio's cooperative budget makes a Tokio timer
+            // report Pending even after its deadline, so read the clock directly.
+            if self.expired() {
+                return Poll::Ready(Err(Elapsed));
+            }
+            let expiry = expiry.get_or_insert_with(|| self.clock.sleep_until(self.at));
+            expiry.as_mut().poll(cx).map(|()| Err(Elapsed))
+        })
+        .await
+    }
 }
 
 // Callers that run on Tokio can keep passing Tokio instants.
@@ -117,37 +149,13 @@ impl From<tokio::time::Instant> for PutDeadline {
 
 pub(crate) struct Elapsed;
 
-/// Polls `future` until it finishes or `clock` reaches `deadline`. Like
-/// `tokio::time::timeout_at`, the future is polled before the deadline.
-pub(crate) async fn timeout_at<F: Future>(
-    clock: &dyn PutClock,
-    deadline: SystemTime,
-    future: F,
-) -> Result<F::Output, Elapsed> {
-    let mut future = std::pin::pin!(future);
-    let mut expiry = None;
-    std::future::poll_fn(|cx| {
-        if let Poll::Ready(output) = future.as_mut().poll(cx) {
-            return Poll::Ready(Ok(output));
-        }
-        // A future that spends Tokio's cooperative budget makes a Tokio timer
-        // report Pending even after its deadline, so read the clock directly.
-        if clock.now() >= deadline {
-            return Poll::Ready(Err(Elapsed));
-        }
-        let expiry = expiry.get_or_insert_with(|| clock.sleep_until(deadline));
-        expiry.as_mut().poll(cx).map(|()| Err(Elapsed))
-    })
-    .await
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[tokio::test]
     async fn deadline_fires_after_the_future_spends_the_coop_budget() {
-        let clock = TokioClock::new();
+        let deadline = PutDeadline::after(Arc::new(TokioClock::new()), Duration::from_millis(10));
         // Every poll spends Tokio's cooperative budget, which makes a Tokio timer
         // polled afterwards return Pending.
         let busy = async {
@@ -155,11 +163,7 @@ mod tests {
                 tokio::task::consume_budget().await;
             }
         };
-        let result = tokio::time::timeout(
-            Duration::from_secs(1),
-            timeout_at(&clock, clock.now() + Duration::from_millis(10), busy),
-        )
-        .await;
+        let result = tokio::time::timeout(Duration::from_secs(1), deadline.timeout(busy)).await;
 
         assert!(matches!(result, Ok(Err(Elapsed))), "deadline did not fire");
     }

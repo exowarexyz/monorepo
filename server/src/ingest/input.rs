@@ -12,7 +12,7 @@ use futures::FutureExt;
 use http_body::Body;
 use http_body_util::BodyExt;
 
-use super::clock::{timeout_at, PutClock, PutDeadline};
+use super::clock::{PutClock, PutDeadline};
 use super::decode::{DecodeOutput, DecodeState, DecodeStep, WireBatch};
 use super::{
     Admission, ByteLease, DecodeBuffers, IngestEvent, IngestObserver, PutChunk, PutError,
@@ -498,7 +498,9 @@ impl PutInput {
         let started = self.clock().now();
         let previous = state.total();
         let job = self.executor.execute(state, buffers);
-        let output = timeout_at(self.clock(), self.deadline.at(), job)
+        let output = self
+            .deadline
+            .timeout(job)
             .await
             .map_err(|_| ConnectError::deadline_exceeded("ingest deadline exceeded"))??;
         let DecodeOutput { result, state } = output;

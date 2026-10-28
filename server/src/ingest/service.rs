@@ -10,7 +10,6 @@ use futures::future::BoxFuture;
 use http::{request::Parts, Request, Response};
 use tower::Service;
 
-use super::clock::timeout_at;
 use super::transport::{
     admission_rejection_response, terminate_rejected_response, terminate_unfinished_response,
     ConnectionControl,
@@ -361,12 +360,7 @@ async fn put<I: Ingest>(
 
     if rejection.is_none() {
         for middleware in &middleware {
-            let result = timeout_at(
-                request_deadline.clock(),
-                request_deadline.at(),
-                middleware.call(&mut parts),
-            )
-            .await;
+            let result = request_deadline.timeout(middleware.call(&mut parts)).await;
             match result {
                 Ok(Ok(())) => {}
                 Ok(Err(error)) => {
@@ -399,13 +393,7 @@ async fn put<I: Ingest>(
     }
     let mut result = match rejection {
         Some(error) => Err(error),
-        None => match timeout_at(
-            request_deadline.clock(),
-            request_deadline.at(),
-            state.ingest.put(&mut input),
-        )
-        .await
-        {
+        None => match request_deadline.timeout(state.ingest.put(&mut input)).await {
             Ok(Ok(sequence)) if input.is_finished() => Ok(sequence),
             Ok(Ok(_)) => Err(ConnectError::internal(
                 "backend published without checked Put finalization",
