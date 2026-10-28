@@ -614,6 +614,7 @@ fn client_error_to_connect(err: &exoware_sdk::ClientError) -> ConnectError {
 mod tests {
     use super::*;
     use crate::TableColumnConfig;
+    use axum::serve::ListenerExt;
     use buffa::Message;
     use datafusion::arrow::array::{
         Array, ArrayRef, BinaryViewArray, Date32Array, Date64Array, Decimal256Array,
@@ -780,6 +781,9 @@ mod tests {
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let address = listener.local_addr().unwrap();
             let app = axum::Router::new().fallback_service(sql_connect_stack(server));
+            let listener = listener.tap_io(|tcp| {
+                let _ = tcp.set_nodelay(true);
+            });
             let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
             let client = ServiceClient::new(
                 HttpClient::plaintext(),
@@ -856,6 +860,9 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let app = axum::Router::new().fallback_service(sql_connect_stack(server.clone()));
+        let listener = listener.tap_io(|tcp| {
+            let _ = tcp.set_nodelay(true);
+        });
         let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         let client = ServiceClient::new(
             HttpClient::plaintext(),
@@ -1072,6 +1079,9 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let app = axum::Router::new().fallback_service(sql_connect_stack(server));
+        let listener = listener.tap_io(|tcp| {
+            let _ = tcp.set_nodelay(true);
+        });
         let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         let client = ServiceClient::new(
             HttpClient::plaintext(),

@@ -62,7 +62,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
-    use axum::Router;
+    use axum::{serve::ListenerExt, Router};
     use bytes::Bytes;
     use connectrpc::{ConnectError, ConnectRpcService, RequestContext as Context, ServiceRequest};
     use exoware_sdk::common::kv::v1::Entry as ProtoEntry;
@@ -396,6 +396,9 @@ mod tests {
             .expect("bind mock server");
         let addr = listener.local_addr().expect("local addr");
         let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+        let listener = listener.tap_io(|tcp| {
+            let _ = tcp.set_nodelay(true);
+        });
         tokio::spawn(async move {
             axum::serve(listener, app)
                 .with_graceful_shutdown(async move {
@@ -6707,6 +6710,9 @@ mod tests {
             .await
             .expect("bind test listener");
         let url = format!("http://{}", listener.local_addr().expect("listener addr"));
+        let listener = listener.tap_io(|tcp| {
+            let _ = tcp.set_nodelay(true);
+        });
         tokio::spawn(async move {
             axum::serve(listener, app).await.expect("serve test app");
         });
@@ -6794,6 +6800,9 @@ mod tests {
             .await
             .expect("bind test listener");
         let url = format!("http://{}", listener.local_addr().expect("listener addr"));
+        let listener = listener.tap_io(|tcp| {
+            let _ = tcp.set_nodelay(true);
+        });
         tokio::spawn(async move {
             axum::serve(listener, app).await.expect("serve test app");
         });
@@ -7128,6 +7137,9 @@ mod tests {
             .await
             .expect("bind test listener");
         let url = format!("http://{}", listener.local_addr().expect("listener addr"));
+        let listener = listener.tap_io(|tcp| {
+            let _ = tcp.set_nodelay(true);
+        });
         tokio::spawn(async move {
             axum::serve(listener, app).await.expect("serve test app");
         });

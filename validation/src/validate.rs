@@ -1812,7 +1812,7 @@ fn build_range_subsection_checks(plan: RangePlan, sample_seed: u64) -> Vec<Range
 mod tests {
     use super::*;
     use crate::keyspace::DEFAULT_KEY_LEN;
-    use axum::Router;
+    use axum::{serve::ListenerExt, Router};
     use connectrpc::{ConnectError, ConnectRpcService, RequestContext, ServiceRequest};
     use exoware_sdk::common::kv::v1::Entry;
     use exoware_sdk::query::{
@@ -1932,6 +1932,9 @@ mod tests {
             "http://{}",
             listener.local_addr().expect("listener address")
         );
+        let listener = listener.tap_io(|tcp| {
+            let _ = tcp.set_nodelay(true);
+        });
         tokio::spawn(async move {
             axum::serve(listener, app).await.expect("serve test app");
         });

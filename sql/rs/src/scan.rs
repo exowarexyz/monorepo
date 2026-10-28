@@ -1048,7 +1048,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
 
-    use axum::Router;
+    use axum::{serve::ListenerExt, Router};
     use bytes::Bytes;
     use datafusion::arrow::array::{
         ArrayRef, Decimal128Array, FixedSizeBinaryArray, Float64Array, Int64Array, StringArray,
@@ -1229,6 +1229,9 @@ mod tests {
                 .fallback_service(exoware_server::query_service(QueryState::new(rows.clone())));
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let url = format!("http://{}", listener.local_addr().unwrap());
+            let listener = listener.tap_io(|tcp| {
+                let _ = tcp.set_nodelay(true);
+            });
             let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
             let prefix = StoreKeyPrefix::new(Bytes::from_static(b"scan-tests/")).unwrap();
             let schema = KvSchema::new(StoreClient::new(&url).prefixed(prefix.clone()))

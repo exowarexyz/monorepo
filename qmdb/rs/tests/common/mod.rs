@@ -6,7 +6,7 @@ use std::convert::Infallible;
 use std::num::NonZeroU64;
 use std::time::Duration;
 
-use axum::{routing::get, Router};
+use axum::{routing::get, serve::ListenerExt, Router};
 use commonware_cryptography::Digest;
 use commonware_parallel::Sequential;
 use commonware_runtime::buffer::paged::CacheRef;
@@ -268,6 +268,9 @@ where
         .expect("bind qmdb server");
     let port = listener.local_addr().expect("local addr").port();
     let url = format!("http://127.0.0.1:{port}");
+    let listener = listener.tap_io(|tcp| {
+        let _ = tcp.set_nodelay(true);
+    });
     let handle = tokio::spawn(async move {
         let _ =
             exoware_server::ingest::transport::serve(listener, app, std::future::pending()).await;

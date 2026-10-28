@@ -2,7 +2,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use axum::Router;
+use axum::{serve::ListenerExt, Router};
 use bytes::Bytes;
 use commonware_codec::Encode;
 use connectrpc::{ConnectError, ConnectRpcService, RequestContext, ServiceRequest};
@@ -99,6 +99,9 @@ impl MockStore {
             "http://{}",
             listener.local_addr().expect("mock Store address")
         );
+        let listener = listener.tap_io(|tcp| {
+            let _ = tcp.set_nodelay(true);
+        });
         let server = tokio::spawn(async move {
             axum::serve(listener, app).await.expect("serve mock Store");
         });
