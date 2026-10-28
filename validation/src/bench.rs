@@ -304,8 +304,10 @@ async fn run_workload(config: Config) -> anyhow::Result<BenchReport> {
     let errors = Arc::new(AtomicU64::new(0));
 
     // Latency is recorded for every SDK attempt, including failed backend
-    // calls, so error-heavy runs still explain where time was spent.
-    let latencies = Arc::new(LatencyHistogramsRecorder::default());
+    // calls, so error-heavy runs still explain where time was spent. Each
+    // worker records into its own recorder, merged into this one as workers
+    // finish, so recording takes no lock shared across workers.
+    let mut latencies = LatencyHistogramsRecorder::default();
 
     // Uniform and Zipfian reads sample the prepared fixture. Latest reads also
     // sample prior writes from the current worker's deterministic lane.
@@ -347,7 +349,6 @@ async fn run_workload(config: Config) -> anyhow::Result<BenchReport> {
         let scans_ok = scans_ok.clone();
         let scans_rows = scans_rows.clone();
         let errors = errors.clone();
-        let latencies = latencies.clone();
         let zipf_sampler = zipf_sampler.clone();
         let worker_ops = worker_operation_count(total_ops, concurrency, worker)?;
         let worker_workload = workload;
@@ -362,6 +363,7 @@ async fn run_workload(config: Config) -> anyhow::Result<BenchReport> {
                 batch_size,
             );
             let mut write_number = 0u64;
+            let mut latencies = LatencyHistogramsRecorder::default();
 
             for _ in 0..worker_ops {
                 match plan.next_operation(readable_key_count) {
@@ -438,7 +440,7 @@ async fn run_workload(config: Config) -> anyhow::Result<BenchReport> {
 
                 ops_done.fetch_add(1, Ordering::Relaxed);
             }
-            Ok::<(), anyhow::Error>(())
+            Ok::<_, anyhow::Error>(latencies)
         });
     }
 
@@ -459,7 +461,10 @@ async fn run_workload(config: Config) -> anyhow::Result<BenchReport> {
         },
     );
 
-    let workers_result = join_all_or_abort(&mut workers, "benchmark worker", |()| {}).await;
+    let workers_result = join_all_or_abort(&mut workers, "benchmark worker", |worker| {
+        latencies.merge(worker)
+    })
+    .await;
 
     stop_progress_task(progress_task).await;
     workers_result?;
