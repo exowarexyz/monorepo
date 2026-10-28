@@ -780,12 +780,13 @@ impl PrefixedStoreClient {
         };
         let mut out = Vec::with_capacity(owned.entries.len());
         for entry in owned.entries {
-            let key = Bytes::from(entry.key);
-            if !self.prefix.matches(&key) {
+            // `decode_key` fails only for keys outside this prefix, which
+            // belong to other namespaces.
+            let Ok(key) = self.prefix.decode_key(&Bytes::from(entry.key)) else {
                 continue;
-            }
+            };
             out.push(StoreBatchEntry {
-                key: self.decode_store_key(&key)?,
+                key,
                 value: entry.value,
             });
         }

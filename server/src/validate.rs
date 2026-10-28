@@ -8,7 +8,7 @@ use connectrpc::ConnectError;
 use exoware_proto::google::rpc::{bad_request::FieldViolation, BadRequest, ErrorInfo};
 use exoware_proto::{
     parse_range_traversal_direction, with_bad_request_detail, with_error_info_detail,
-    RangeTraversalModeError,
+    RangeTraversalDirection, RangeTraversalModeError,
 };
 use exoware_sdk as exoware_proto;
 use exoware_sdk::keys::{validate_key_size, MAX_KEY_LEN};
@@ -187,9 +187,10 @@ pub fn validate_get_request(
     validate_key_field("store.query", || "key".to_string(), request.key)
 }
 
+/// Validate a Range request and return its traversal direction.
 pub fn validate_range_request(
     request: &exoware_proto::store::query::v1::RangeRequestView<'_>,
-) -> Result<(), ConnectError> {
+) -> Result<RangeTraversalDirection, ConnectError> {
     // buf.validate: bytes.max_len = 254
     validate_key_field("store.query", || "start".to_string(), request.start)?;
     validate_key_field("store.query", || "end".to_string(), request.end)?;
@@ -205,19 +206,18 @@ pub fn validate_range_request(
         ));
     }
     // buf.validate: enum.defined_only = true
-    if let Err(RangeTraversalModeError::UnknownWireValue(v)) =
-        parse_range_traversal_direction(request.mode)
-    {
-        return Err(field_error(
-            "store.query",
-            "mode",
-            format!("unknown TraversalMode enum value {v}"),
-            "INVALID_TRAVERSAL_MODE",
-            "range mode must be TRAVERSAL_MODE_FORWARD (0) or TRAVERSAL_MODE_REVERSE (1)",
-            [],
-        ));
-    }
-    Ok(())
+    parse_range_traversal_direction(request.mode).map_err(
+        |RangeTraversalModeError::UnknownWireValue(v)| {
+            field_error(
+                "store.query",
+                "mode",
+                format!("unknown TraversalMode enum value {v}"),
+                "INVALID_TRAVERSAL_MODE",
+                "range mode must be TRAVERSAL_MODE_FORWARD (0) or TRAVERSAL_MODE_REVERSE (1)",
+                [],
+            )
+        },
+    )
 }
 
 /// Validate GetMany keys and batch size before opening a backend snapshot.
@@ -472,7 +472,18 @@ mod tests {
         let bytes = range_request_bytes(100, TraversalMode::TRAVERSAL_MODE_FORWARD);
         let view =
             exoware_proto::store::query::v1::RangeRequestView::decode_view(&bytes).expect("parse");
-        validate_range_request(&view).expect("should be valid");
+        assert_eq!(
+            validate_range_request(&view).expect("should be valid"),
+            RangeTraversalDirection::Forward
+        );
+
+        let bytes = range_request_bytes(100, TraversalMode::TRAVERSAL_MODE_REVERSE);
+        let view =
+            exoware_proto::store::query::v1::RangeRequestView::decode_view(&bytes).expect("parse");
+        assert_eq!(
+            validate_range_request(&view).expect("should be valid"),
+            RangeTraversalDirection::Reverse
+        );
     }
 
     fn prune_request_bytes(n_policies: usize) -> Vec<u8> {
