@@ -1129,13 +1129,15 @@ where
             }
             _ => None,
         };
+        // A cursor past the frontier starts live delivery at the cursor
+        // itself, so batches published below it in the meantime are skipped.
+        let live_start = match since {
+            Some(s) if s > replay_bound => Some(s),
+            _ => replay_bound.checked_add(1),
+        };
         let live = ordered_batch_stream(
             self.state.log.clone(),
-            live_sequence_stream(
-                self.state.notifier.clone(),
-                live_notify,
-                replay_bound.checked_add(1),
-            ),
+            live_sequence_stream(self.state.notifier.clone(), live_notify, live_start),
             None,
             matchers,
         );
@@ -4194,7 +4196,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn subscribe_past_end_reads_only_future_live_batches() {
+    async fn subscribe_past_end_starts_at_the_cursor() {
         let engine = Arc::new(FakeEngine::default());
         engine.set_current_sequence(5);
         for seq in 1..=5 {
@@ -4202,26 +4204,29 @@ mod tests {
         }
         let state = AppState::new(engine.clone());
         let connect = StreamConnect::new(state.clone());
-        let mut stream = subscribe_stream(&connect, Some(15))
+        let mut stream = subscribe_stream(&connect, Some(8))
             .await
             .expect("subscribe");
 
-        assert!(
-            tokio::time::timeout(Duration::from_millis(200), stream.next())
+        // Every batch from the frontier through and past the cursor matches,
+        // so only the cursor keeps 6 and 7 off the stream.
+        for seq in 6..=9 {
+            engine.publish_live(
+                state.stream.clone(),
+                seq,
+                vec![matching_kv(b"live", &[seq as u8])],
+            );
+        }
+        for expected in 8..=9 {
+            let frame = tokio::time::timeout(Duration::from_secs(1), stream.next())
                 .await
-                .is_err(),
-            "past-end cursor should not replay synthetic or historical frames",
-        );
-
-        engine.publish_live(state.stream.clone(), 6, vec![matching_kv(b"live", b"n")]);
-        let frame = tokio::time::timeout(Duration::from_secs(1), stream.next())
-            .await
-            .expect("stream should yield")
-            .expect("frame should exist")
-            .expect("frame should be ok");
-        assert_eq!(frame.sequence_number, 6);
-        assert_eq!(frame.entries.len(), 1);
-        assert_eq!(frame.entries[0].value.as_ref(), b"n");
+                .expect("stream should yield")
+                .expect("frame should exist")
+                .expect("frame should be ok");
+            assert_eq!(frame.sequence_number, expected);
+            assert_eq!(frame.entries.len(), 1);
+            assert_eq!(frame.entries[0].value.as_ref(), &[expected as u8]);
+        }
     }
 
     #[tokio::test]
