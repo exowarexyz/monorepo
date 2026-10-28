@@ -1,8 +1,10 @@
 import { create, toBinary } from '@bufbuild/protobuf';
+import { Code, createClient } from '@connectrpc/connect';
 import { encodeEnvelope } from '@connectrpc/connect/protocol';
-import { Client } from '../src/client';
+import { Client, createTransport } from '../src/client';
 import { HttpError } from '../src/error';
 import { SubscribeResponseSchema } from '../src/gen/ts/log/v1/stream_pb';
+import * as query from '../src/gen/ts/store/v1/query_pb';
 import { GetManyFrameSchema, RangeFrameSchema } from '../src/gen/ts/store/v1/query_pb';
 import { StoreClient, type StoreBatch } from '../src/store';
 
@@ -39,12 +41,24 @@ function streamResponse(frames: Uint8Array[], code?: string): Response {
     }), { headers: { 'content-type': 'application/connect+proto' } });
 }
 
-function storeClient(maxAttempts: number): StoreClient {
-    return new StoreClient(new Client('http://stream-retry.test', {
+const url = 'http://stream-retry.test';
+
+function options(maxAttempts: number, backoffMs = 0) {
+    return {
         token: '',
         useBinaryFormat: true,
-        retry: { maxAttempts, initialBackoffMs: 0, maxBackoffMs: 0 },
-    }));
+        retry: { maxAttempts, initialBackoffMs: backoffMs, maxBackoffMs: backoffMs },
+    };
+}
+
+function storeClient(maxAttempts: number): StoreClient {
+    return new StoreClient(new Client(url, options(maxAttempts)));
+}
+
+async function drain<T>(stream: AsyncIterable<T>): Promise<T[]> {
+    const received: T[] = [];
+    for await (const item of stream) received.push(item);
+    return received;
 }
 
 function read(method: Method, maxAttempts = 2) {
@@ -86,6 +100,12 @@ describe.each(methods)('%s', (method) => {
         await expect(read(method)).resolves.toEqual(rows);
         expect(fetch).toHaveBeenCalledTimes(2);
         expect(bodies[1]).toEqual(bodies[0]);
+    });
+
+    test('stops after maxAttempts', async () => {
+        const { fetch } = mockFetch(() => streamResponse([], 'aborted'));
+        await expect(read(method, 3)).rejects.toBeInstanceOf(HttpError);
+        expect(fetch).toHaveBeenCalledTimes(3);
     });
 
     test('does not retry invalid_argument', async () => {
@@ -132,6 +152,62 @@ describe('subscribe', () => {
     test('does not retry an error in the stream body', async () => {
         const { fetch } = mockFetch(() => streamResponse([], 'unavailable'));
         await expect(subscribe()).rejects.toBeInstanceOf(HttpError);
+        expect(fetch).toHaveBeenCalledTimes(1);
+    });
+});
+
+// A custom client passes its own generated descriptors to `createTransport`. A separate module
+// instance of the generated code stands in for them.
+describe('a client with its own descriptors', () => {
+    let own!: typeof query;
+    jest.isolateModules(() => {
+        own = require('../src/gen/ts/store/v1/query_pb');
+    });
+    // Built after mockFetch, because the cookie jar captures `fetch` when the transport is made.
+    const client = () => createClient(own.Service, createTransport(url, options(2)));
+
+    test('uses separate descriptor objects', () => {
+        expect(own.Service.method.range).not.toBe(query.Service.method.range);
+    });
+
+    test('retries before the first frame', async () => {
+        const { fetch } = mockFetch(
+            () => streamResponse([], 'aborted'),
+            () => streamResponse(frames.range),
+        );
+        const received = await drain(client().range({}));
+        const results = received.flatMap((frame) => frame.results.map(({ key, value }) => ({ key, value })));
+        expect(results).toEqual(rows);
+        expect(fetch).toHaveBeenCalledTimes(2);
+    });
+
+    test('rejects a Reduce stream that ends without a frame', async () => {
+        mockFetch(() => streamResponse([]));
+        await expect(drain(client().reduce({}))).rejects.toMatchObject({ code: Code.Internal });
+    });
+});
+
+describe('retry backoff', () => {
+    // The backoff is long enough that a call waiting it out would fail the elapsed-time check.
+    const client = () => new Client(url, options(2, 10_000));
+
+    test('ends when the caller aborts', async () => {
+        const { fetch } = mockFetch(() => streamResponse([], 'aborted'));
+        const controller = new AbortController();
+        const started = performance.now();
+        setTimeout(() => controller.abort(), 20);
+        await expect(drain(client().query.range({}, { signal: controller.signal })))
+            .rejects.toMatchObject({ code: Code.Canceled });
+        expect(performance.now() - started).toBeLessThan(1_000);
+        expect(fetch).toHaveBeenCalledTimes(1);
+    });
+
+    test('ends when the call times out', async () => {
+        const { fetch } = mockFetch(() => streamResponse([], 'aborted'));
+        const started = performance.now();
+        await expect(drain(client().query.range({}, { timeoutMs: 50 })))
+            .rejects.toMatchObject({ code: Code.DeadlineExceeded });
+        expect(performance.now() - started).toBeLessThan(1_000);
         expect(fetch).toHaveBeenCalledTimes(1);
     });
 });
