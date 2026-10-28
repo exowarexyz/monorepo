@@ -61,9 +61,9 @@ use exoware_server::{
 use parking_lot::Mutex;
 use regex::bytes::Regex;
 use rocksdb::{
-    ColumnFamily, ColumnFamilyDescriptor, DBCompactionStyle, DBCompressionType, DBIterator,
-    Direction, IngestExternalFileOptions, IteratorMode, Options, Snapshot, SstFileWriter,
-    WriteOptions, DB,
+    BlockBasedOptions, ColumnFamily, ColumnFamilyDescriptor, DBCompactionStyle, DBCompressionType,
+    DBIterator, Direction, IngestExternalFileOptions, IteratorMode, Options, Snapshot,
+    SstFileWriter, WriteOptions, DB,
 };
 use tokio::sync::oneshot;
 use tracing::debug;
@@ -820,17 +820,16 @@ fn stage_log_file(path: &Path, sequence: u64, rows: &[(Bytes, Bytes)]) -> Result
 }
 
 /// Stages the current-state SST: the group's rows sorted by key, with the last write per key
-/// winning (in arrival order across coalesced requests). Uncompressed: compressing on the
-/// ingest path would trade ack latency for bytes, and the state CF keeps compression off at
-/// every level per [`state_cf_options`].
+/// winning (in arrival order across coalesced requests). Built with the state CF's own
+/// [`state_cf_options`], so it is uncompressed (compressing on the ingest path would trade ack
+/// latency for bytes) and carries the same bloom filter as the files compaction writes.
 fn stage_state_file(path: &Path, rows: &[(Bytes, Bytes)]) -> Result<usize, String> {
     let mut order: Vec<usize> = (0..rows.len()).collect();
 
     // Arrival indices preserve the newest duplicate without a sorting workspace.
     order.sort_unstable_by(|a, b| rows[*a].0.cmp(&rows[*b].0).then_with(|| a.cmp(b)));
 
-    let mut options = Options::default();
-    options.set_compression_type(DBCompressionType::None);
+    let options = state_cf_options();
     let mut writer = SstFileWriter::create(&options);
     writer.open(path).map_err(|e| e.to_string())?;
     let mut bytes = 0;
@@ -1094,12 +1093,14 @@ pub struct RocksConfig {
 
 /// Options for the state column family, tuned to the store's write path.
 ///
-/// Ingested state SSTs overlap (store keys are uniformly distributed), so this family bears
-/// all compaction: universal compaction merges whole sorted runs instead of rewriting every
-/// overlapping level, compression stays off (staged SSTs arrive uncompressed; recompressing
-/// them buys nothing on ingest-bound stores), and the level-zero slowdown/stop triggers are
-/// raised because `IngestExternalFile` waits on stop-writes conditions (stock triggers stall
-/// ingest whenever compaction lags).
+/// Ingested state SSTs overlap (store keys are uniformly distributed), so compaction here
+/// rewrites overlapping rows: universal compaction merges whole sorted runs instead of
+/// rewriting every overlapping level, compression stays off (staged SSTs arrive uncompressed;
+/// recompressing them buys nothing on ingest-bound stores), and the level-zero slowdown/stop
+/// triggers are raised because `IngestExternalFile` waits on stop-writes conditions (stock
+/// triggers stall ingest whenever compaction lags). A point read probes every sorted run whose
+/// key range covers the key, which with uniform keys is all of them, so a bloom filter lets it
+/// skip the runs that lack the key without reading a data block.
 fn state_cf_options() -> Options {
     let mut opts = Options::default();
     opts.set_compression_type(DBCompressionType::None);
@@ -1108,17 +1109,32 @@ fn state_cf_options() -> Options {
     opts.set_level_zero_file_num_compaction_trigger(16);
     opts.set_level_zero_slowdown_writes_trigger(1024);
     opts.set_level_zero_stop_writes_trigger(2048);
+    let mut table = BlockBasedOptions::default();
+    table.set_bloom_filter(10.0, false);
+    opts.set_block_based_table_factory(&table);
     opts
 }
 
 /// Options for the log column family.
 ///
-/// Log rows are keyed by a monotonic sequence, so ingested log SSTs never overlap and settle
-/// without rewrites; compression stays off to match the uncompressed staged files.
+/// Log rows are keyed by a monotonic sequence, so an ingested log SST never overlaps the rows
+/// already stored, and RocksDB places it in the lowest level it fits. With several levels
+/// that is the bottommost one, where no compaction ever merges files, so the family would
+/// keep one file per commit group forever. A single level keeps every ingested file in level
+/// zero as its own sorted run, and universal compaction merges the runs as they accumulate.
+/// Waiting for 16 runs instead of the stock 4 makes each merge wider, so every log byte is
+/// rewritten fewer times on its way into the oldest run. The stop triggers are raised for the
+/// same reason as in [`state_cf_options`], and compression stays off to match the
+/// uncompressed staged files.
 fn log_cf_options() -> Options {
     let mut opts = Options::default();
     opts.set_compression_type(DBCompressionType::None);
     opts.set_bottommost_compression_type(DBCompressionType::None);
+    opts.set_compaction_style(DBCompactionStyle::Universal);
+    opts.set_num_levels(1);
+    opts.set_level_zero_file_num_compaction_trigger(16);
+    opts.set_level_zero_slowdown_writes_trigger(1024);
+    opts.set_level_zero_stop_writes_trigger(2048);
     opts
 }
 
@@ -3107,6 +3123,84 @@ mod tests {
             .next()
             .expect("log CF body");
         assert!(log.contains("compression=kNoCompression"));
+    }
+
+    /// Every commit ingests a log SST whose rows sort after every stored row. Compaction must
+    /// still merge those files, or the log family keeps one open file per commit forever.
+    #[tokio::test]
+    async fn log_column_family_merges_ingested_files() {
+        const GROUPS: u64 = 64;
+        let dir = tempdir().expect("tempdir");
+        let store = RocksStore::open(dir.path(), None).expect("open db");
+        for index in 0..GROUPS {
+            let sequence = store
+                .put_batch(vec![(
+                    Bytes::copy_from_slice(&index.to_be_bytes()),
+                    Bytes::from_static(b"value"),
+                )])
+                .await
+                .expect("put");
+            assert_eq!(sequence, index + 1);
+        }
+
+        // Compaction runs in the background, so give it time to catch up. Once it has, the
+        // family holds fewer files than its compaction trigger of 16.
+        let log_files = || {
+            store
+                .db
+                .live_files()
+                .expect("live files")
+                .iter()
+                .filter(|file| file.column_family_name == LOG_CF)
+                .count()
+        };
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while log_files() >= 16 && std::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert!(
+            log_files() < 16,
+            "log CF holds {} files after {GROUPS} commits",
+            log_files()
+        );
+        for sequence in 1..=GROUPS {
+            assert!(store
+                .get_batch(sequence)
+                .await
+                .expect("get batch")
+                .is_some());
+        }
+    }
+
+    /// Ingested state SSTs serve reads before compaction rewrites them, so they must be
+    /// staged with the bloom filter rather than gain one only once compacted.
+    #[test]
+    fn staged_state_file_carries_bloom_filter() {
+        let dir = tempdir().expect("tempdir");
+        let store = RocksStore::open(dir.path(), None).expect("open db");
+        let group = prepared_write(
+            &store,
+            0,
+            vec![(Bytes::from_static(b"a"), Bytes::from_static(b"value"))],
+        );
+        assert_eq!(commit_and_apply(&store, group), 1);
+
+        // The state CF holds only the one ingested file: no flush or compaction has run.
+        let properties = store
+            .db
+            .property_value_cf(
+                store.db.cf_handle(STATE_CF).expect("state CF"),
+                "rocksdb.aggregated-table-properties",
+            )
+            .expect("read table properties")
+            .expect("table properties exist");
+        let filter_bytes: u64 = properties
+            .split("; ")
+            .find_map(|property| property.strip_prefix("filter block size="))
+            .expect("filter block size property")
+            .parse()
+            .expect("filter block size is a number");
+        assert!(filter_bytes > 0, "{properties}");
     }
 
     #[tokio::test]
