@@ -1,3 +1,4 @@
+import type { DescMethod } from '@bufbuild/protobuf';
 import { createClient, type Client as ConnectClient, type Interceptor, Code, ConnectError } from '@connectrpc/connect';
 import { createConnectTransport } from '@connectrpc/connect-web';
 import { CookieJar, fetchWithCookieJar } from './cookies.js';
@@ -27,6 +28,15 @@ const RETRYABLE_CODES = new Set<Code>([
     Code.Aborted,
     Code.Unavailable,
     Code.ResourceExhausted,
+]);
+
+// Connect reports an error raised while opening a stream inside the HTTP 200 body, after `next`
+// resolves, so these reads wait for their first frame before returning. Subscribe is left out
+// because its first frame may not arrive for a long time.
+const PREFETCHED_STREAMS = new Set<DescMethod>([
+    QueryService.method.getMany,
+    QueryService.method.range,
+    QueryService.method.reduce,
 ]);
 
 function retryBackoffDelay(attempt: number, config: RetryConfig): number {
@@ -127,7 +137,8 @@ function makeRetryInterceptor(config: RetryConfig): Interceptor {
     return (next) => async (req) => {
         const isPut = req.service.typeName === IngestService.typeName && req.method.name === IngestService.method.put.name;
         const deadline = isPut ? putDeadline(req.header) : undefined;
-        if (req.stream && req.method === QueryService.method.reduce) {
+        const prefetch = PREFETCHED_STREAMS.has(req.method);
+        if (prefetch && req.stream) {
             // Each retry must serialize the same input after Connect consumes its request iterator.
             const input = await req.message[Symbol.asyncIterator]().next();
             req = {
@@ -152,14 +163,17 @@ function makeRetryInterceptor(config: RetryConfig): Interceptor {
             if (req.signal.aborted) throw ConnectError.from(req.signal.reason, Code.Canceled);
             try {
                 const response = await next(req);
-                if (response.stream && response.method === QueryService.method.reduce) {
-                    // Before any result is exposed, a retry cannot duplicate delivered groups.
+                if (prefetch && response.stream) {
+                    // Before any result is exposed, a retry cannot duplicate delivered rows or groups.
                     const iterator = response.message[Symbol.asyncIterator]();
                     const first = await iterator.next();
-                    if (first.done) throw new ConnectError('reduction stream returned no frames', Code.Internal);
+                    if (first.done && response.method === QueryService.method.reduce) {
+                        throw new ConnectError('reduction stream returned no frames', Code.Internal);
+                    }
                     return {
                         ...response,
                         message: (async function* () {
+                            if (first.done) return;
                             yield first.value;
                             yield* { [Symbol.asyncIterator]: () => iterator };
                         })(),
