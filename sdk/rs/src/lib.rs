@@ -2829,7 +2829,8 @@ impl<'a> Stream<'a> {
     /// `log.stream.v1.Service.Subscribe` — see `StreamSubscription::next`
     /// for consuming delivered frames. `since_sequence_number = None` starts
     /// live from the next Put; `Some(N)` replays retained batches before
-    /// transitioning to live. An evicted `since` returns a
+    /// transitioning to live, and never delivers a batch below `N`, even when
+    /// `N` is past the latest published batch. An evicted `since` returns a
     /// `ConnectError::out_of_range` carrying `ErrorInfo.reason = "BATCH_EVICTED"`.
     pub async fn subscribe(
         &self,
