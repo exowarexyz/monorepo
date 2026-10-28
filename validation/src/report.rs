@@ -1,7 +1,6 @@
 use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use anyhow::{ensure, Context};
@@ -16,7 +15,8 @@ const BENCH_REPORT_SCHEMA_VERSION: u16 = 1;
 const LATENCY_UNIT: &str = "microseconds";
 
 // Fixed buckets keep benchmark reports comparable across runs without needing
-// to replay raw per-operation samples.
+// to replay raw per-operation samples. The percentiles do not come from these
+// buckets. They are exact, computed from every recorded sample.
 const LATENCY_BUCKET_UPPER_BOUNDS_US: [u64; 15] = [
     100, 250, 500, 1_000, 2_500, 5_000, 10_000, 25_000, 50_000, 100_000, 250_000, 500_000,
     1_000_000, 2_500_000, 5_000_000,
@@ -122,10 +122,12 @@ pub struct LatencyHistogramsRecorder {
     scan: LatencyHistogramRecorder,
 }
 
+/// Keeps every sample so the report's percentiles are exact rather than
+/// bucket estimates. A run records one sample per operation, so this costs 8
+/// bytes per operation, well under a megabyte at the sizes CI and kv-mk1 run.
+#[derive(Default)]
 struct LatencyHistogramRecorder {
-    counts: Vec<AtomicU64>,
-    min_us: AtomicU64,
-    max_us: AtomicU64,
+    samples_us: Vec<u64>,
 }
 
 // The run metadata lives here; every measured field flattens in from
@@ -161,19 +163,26 @@ impl BenchManifest {
 }
 
 impl LatencyHistogramsRecorder {
-    pub fn record_read(&self, duration: Duration) {
+    pub fn record_read(&mut self, duration: Duration) {
         self.read.record(duration);
     }
 
-    pub fn record_write(&self, duration: Duration) {
+    pub fn record_write(&mut self, duration: Duration) {
         self.write.record(duration);
     }
 
-    pub fn record_scan(&self, duration: Duration) {
+    pub fn record_scan(&mut self, duration: Duration) {
         self.scan.record(duration);
     }
 
-    pub fn snapshot(&self) -> LatencyHistograms {
+    /// Adds another recorder's samples, such as one benchmark worker's.
+    pub fn merge(&mut self, other: Self) {
+        self.read.samples_us.extend(other.read.samples_us);
+        self.write.samples_us.extend(other.write.samples_us);
+        self.scan.samples_us.extend(other.scan.samples_us);
+    }
+
+    pub fn snapshot(&mut self) -> LatencyHistograms {
         LatencyHistograms {
             read: self.read.snapshot(),
             write: self.write.snapshot(),
@@ -183,58 +192,40 @@ impl LatencyHistogramsRecorder {
 }
 
 impl LatencyHistogramRecorder {
-    fn record(&self, duration: Duration) {
-        let micros = duration_to_micros(duration);
-        let bucket = LATENCY_BUCKET_UPPER_BOUNDS_US
-            .iter()
-            .position(|bound| micros <= *bound)
-            .unwrap_or(LATENCY_BUCKET_UPPER_BOUNDS_US.len());
-        self.counts[bucket].fetch_add(1, Ordering::Relaxed);
-        self.min_us.fetch_min(micros, Ordering::Relaxed);
-        self.max_us.fetch_max(micros, Ordering::Relaxed);
+    fn record(&mut self, duration: Duration) {
+        self.samples_us.push(duration_to_micros(duration));
     }
 
-    fn snapshot(&self) -> LatencyHistogram {
-        let counts = self
-            .counts
-            .iter()
-            .map(|count| count.load(Ordering::Relaxed))
-            .collect::<Vec<_>>();
-        let count = counts.iter().sum();
-        let max_us = self.max_us.load(Ordering::Relaxed);
-        let min_us = self.min_us.load(Ordering::Relaxed);
-        let max_us = if count == 0 { None } else { Some(max_us) };
-        let min_us = if count == 0 { None } else { Some(min_us) };
-        let buckets = counts
-            .iter()
-            .enumerate()
-            .map(|(idx, count)| LatencyBucket {
-                upper_bound_us: LATENCY_BUCKET_UPPER_BOUNDS_US.get(idx).copied(),
-                count: *count,
-            })
-            .collect();
+    fn snapshot(&mut self) -> LatencyHistogram {
+        self.samples_us.sort_unstable();
+        let samples = self.samples_us.as_slice();
+
+        // A sample equal to a bound belongs to that bound's bucket, and the
+        // final bucket (no upper bound) holds everything above the last bound.
+        let mut below = 0;
+        let mut buckets = Vec::with_capacity(LATENCY_BUCKET_UPPER_BOUNDS_US.len() + 1);
+        for bound in LATENCY_BUCKET_UPPER_BOUNDS_US {
+            let through_bound = samples.partition_point(|sample| *sample <= bound);
+            buckets.push(LatencyBucket {
+                upper_bound_us: Some(bound),
+                count: (through_bound - below) as u64,
+            });
+            below = through_bound;
+        }
+        buckets.push(LatencyBucket {
+            upper_bound_us: None,
+            count: (samples.len() - below) as u64,
+        });
 
         LatencyHistogram {
             unit: LATENCY_UNIT.to_string(),
-            count,
-            min_us,
-            max_us,
-            p50_us: percentile_upper_bound_us(&counts, 0.50, max_us),
-            p95_us: percentile_upper_bound_us(&counts, 0.95, max_us),
-            p99_us: percentile_upper_bound_us(&counts, 0.99, max_us),
+            count: samples.len() as u64,
+            min_us: samples.first().copied(),
+            max_us: samples.last().copied(),
+            p50_us: percentile_us(samples, 50),
+            p95_us: percentile_us(samples, 95),
+            p99_us: percentile_us(samples, 99),
             buckets,
-        }
-    }
-}
-
-impl Default for LatencyHistogramRecorder {
-    fn default() -> Self {
-        Self {
-            counts: (0..=LATENCY_BUCKET_UPPER_BOUNDS_US.len())
-                .map(|_| AtomicU64::new(0))
-                .collect(),
-            min_us: AtomicU64::new(u64::MAX),
-            max_us: AtomicU64::new(0),
         }
     }
 }
@@ -416,20 +407,17 @@ fn duration_to_micros(duration: Duration) -> u64 {
     duration.as_micros().min(u128::from(u64::MAX)) as u64
 }
 
-fn percentile_upper_bound_us(counts: &[u64], percentile: f64, max_us: Option<u64>) -> Option<u64> {
-    let total = counts.iter().sum::<u64>();
-    if total == 0 {
+/// Returns the nearest-rank percentile of `sorted`, which is the smallest
+/// sample with at least `percent` percent of all samples at or below it. It is
+/// always one of the samples, so it never falls outside the observed min and
+/// max.
+fn percentile_us(sorted: &[u64], percent: usize) -> Option<u64> {
+    debug_assert!(percent <= 100);
+    if sorted.is_empty() {
         return None;
     }
-    let target = ((total as f64) * percentile).ceil().max(1.0) as u64;
-    let mut cumulative = 0u64;
-    for (idx, count) in counts.iter().enumerate() {
-        cumulative += *count;
-        if cumulative >= target {
-            return LATENCY_BUCKET_UPPER_BOUNDS_US.get(idx).copied().or(max_us);
-        }
-    }
-    max_us
+    let rank = (sorted.len() * percent).div_ceil(100).max(1);
+    Some(sorted[rank - 1])
 }
 
 fn temporary_output_path(path: &Path) -> PathBuf {
@@ -458,7 +446,7 @@ mod tests {
     }
 
     fn sample_report() -> BenchReport {
-        let latencies = LatencyHistogramsRecorder::default();
+        let mut latencies = LatencyHistogramsRecorder::default();
         latencies.record_read(Duration::from_micros(100));
         latencies.record_read(Duration::from_micros(2_000));
         latencies.record_write(Duration::from_micros(500));
@@ -546,8 +534,8 @@ mod tests {
     }
 
     #[test]
-    fn latency_histogram_uses_fixed_buckets_and_bucket_percentiles() {
-        let latencies = LatencyHistogramsRecorder::default();
+    fn latency_histogram_uses_fixed_buckets_and_exact_percentiles() {
+        let mut latencies = LatencyHistogramsRecorder::default();
         latencies.record_read(Duration::from_micros(100));
         latencies.record_read(Duration::from_micros(2_000));
         latencies.record_read(Duration::from_micros(6_000_000));
@@ -556,12 +544,143 @@ mod tests {
         assert_eq!(histogram.count, 3);
         assert_eq!(histogram.min_us, Some(100));
         assert_eq!(histogram.max_us, Some(6_000_000));
-        assert_eq!(histogram.p50_us, Some(2_500));
+        assert_eq!(histogram.p50_us, Some(2_000));
         assert_eq!(histogram.p95_us, Some(6_000_000));
         assert_eq!(histogram.buckets[0].upper_bound_us, Some(100));
         assert_eq!(histogram.buckets[0].count, 1);
         assert_eq!(histogram.buckets.last().unwrap().upper_bound_us, None);
         assert_eq!(histogram.buckets.last().unwrap().count, 1);
+    }
+
+    #[test]
+    fn latency_histogram_without_samples_has_no_percentiles() {
+        let histogram = LatencyHistogramsRecorder::default().snapshot().scan;
+        assert_eq!(histogram.count, 0);
+        assert_eq!(histogram.min_us, None);
+        assert_eq!(histogram.max_us, None);
+        assert_eq!(histogram.p50_us, None);
+        assert_eq!(histogram.p95_us, None);
+        assert_eq!(histogram.p99_us, None);
+        assert_eq!(
+            histogram.buckets.len(),
+            LATENCY_BUCKET_UPPER_BOUNDS_US.len() + 1
+        );
+        assert!(histogram.buckets.iter().all(|bucket| bucket.count == 0));
+    }
+
+    #[test]
+    fn percentiles_of_a_single_sample_are_that_sample() {
+        let mut latencies = LatencyHistogramsRecorder::default();
+        latencies.record_write(Duration::from_micros(110));
+
+        let histogram = latencies.snapshot().write;
+        assert_eq!(histogram.min_us, Some(110));
+        assert_eq!(histogram.max_us, Some(110));
+        assert_eq!(histogram.p50_us, Some(110));
+        assert_eq!(histogram.p95_us, Some(110));
+        assert_eq!(histogram.p99_us, Some(110));
+    }
+
+    #[test]
+    fn percentiles_of_equal_samples_never_exceed_the_max() {
+        let mut latencies = LatencyHistogramsRecorder::default();
+        for _ in 0..3 {
+            latencies.record_write(Duration::from_micros(110));
+        }
+
+        let histogram = latencies.snapshot().write;
+        assert_eq!(histogram.max_us, Some(110));
+        assert_eq!(histogram.p50_us, Some(110));
+        assert_eq!(histogram.p95_us, Some(110));
+        assert_eq!(histogram.p99_us, Some(110));
+    }
+
+    #[test]
+    fn percentiles_are_exact_across_bucket_edges() {
+        // One sample per millisecond from 1 ms through 100 ms.
+        let mut latencies = LatencyHistogramsRecorder::default();
+        for ms in 1..=100 {
+            latencies.record_write(Duration::from_millis(ms));
+        }
+
+        let histogram = latencies.snapshot().write;
+        assert_eq!(histogram.p50_us, Some(50_000));
+        assert_eq!(histogram.p95_us, Some(95_000));
+        assert_eq!(histogram.p99_us, Some(99_000));
+        // Bucket counts still follow the fixed bounds, with a sample equal to a
+        // bound counted in that bound's bucket.
+        let counts = histogram
+            .buckets
+            .iter()
+            .map(|bucket| bucket.count)
+            .collect::<Vec<_>>();
+        assert_eq!(counts, [0, 0, 0, 1, 1, 3, 5, 15, 25, 50, 0, 0, 0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn p95_just_over_100ms_reports_its_true_value() {
+        // kv-mk1 judges its PUT goal by p95 at or below 100 ms, and the next
+        // fixed bucket bound above 100 ms is 250 ms.
+        let mut latencies = LatencyHistogramsRecorder::default();
+        for _ in 0..94 {
+            latencies.record_write(Duration::from_millis(50));
+        }
+        for _ in 0..6 {
+            latencies.record_write(Duration::from_millis(101));
+        }
+
+        let histogram = latencies.snapshot().write;
+        assert_eq!(histogram.p50_us, Some(50_000));
+        assert_eq!(histogram.p95_us, Some(101_000));
+        assert_eq!(histogram.p99_us, Some(101_000));
+    }
+
+    #[test]
+    fn merged_worker_recorders_report_the_combined_samples() {
+        let mut first = LatencyHistogramsRecorder::default();
+        let mut second = LatencyHistogramsRecorder::default();
+        for ms in 1..=50 {
+            first.record_write(Duration::from_millis(ms));
+            second.record_write(Duration::from_millis(ms + 50));
+        }
+        second.record_read(Duration::from_micros(7));
+
+        first.merge(second);
+        let histograms = first.snapshot();
+        assert_eq!(histograms.write.count, 100);
+        assert_eq!(histograms.write.min_us, Some(1_000));
+        assert_eq!(histograms.write.max_us, Some(100_000));
+        assert_eq!(histograms.write.p95_us, Some(95_000));
+        assert_eq!(histograms.read.count, 1);
+        assert_eq!(histograms.read.p50_us, Some(7));
+        assert_eq!(histograms.scan.count, 0);
+    }
+
+    #[test]
+    fn percentile_us_stays_within_min_and_max() {
+        assert_eq!(percentile_us(&[], 50), None);
+        let sorted = [7, 20, 300];
+        assert_eq!(percentile_us(&sorted, 0), Some(7));
+        assert_eq!(percentile_us(&sorted, 1), Some(7));
+        assert_eq!(percentile_us(&sorted, 100), Some(300));
+
+        for len in 1..=200u64 {
+            let sorted = (1..=len).map(|sample| sample * 10).collect::<Vec<_>>();
+            let mut previous = 0;
+            for percent in 0..=100 {
+                let value = percentile_us(&sorted, percent).unwrap();
+                assert!(value >= sorted[0] && value <= sorted[sorted.len() - 1]);
+                assert!(value >= previous, "percentiles must not decrease");
+                // Nearest rank: at least `percent` percent of samples are at or
+                // below the value, and fewer are strictly below it.
+                let at_or_below = sorted.iter().filter(|sample| **sample <= value).count();
+                let below = sorted.iter().filter(|sample| **sample < value).count();
+                assert!(at_or_below * 100 >= sorted.len() * percent);
+                assert!(below * 100 < (sorted.len() * percent).max(1));
+                previous = value;
+            }
+            assert_eq!(percentile_us(&sorted, 100), sorted.last().copied());
+        }
     }
 
     #[test]

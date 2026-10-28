@@ -1063,18 +1063,23 @@ async fn wait_for_reduce_count_match(
                         ));
                     }
                 };
-                if actual >= expected_count {
+                // The window holds only this writer's keys. Validation-layout
+                // keys sort by namespace and then index, so other runs' keys
+                // fall outside it, and anything this writer wrote after the
+                // ledger's last record has a higher index and sorts after
+                // `last`. A larger count is an over-count, not a later write.
+                if actual == expected_count {
                     tracing::info!(
                         query_url = %ctx.query_url,
                         attempts = attempt,
                         actual_count = actual,
                         expected_count,
-                        "Range reduction reached expected distinct-key floor"
+                        "Range reduction matched the ledger's distinct-key count"
                     );
                     PollOutcome::Complete(())
                 } else {
                     PollOutcome::Permanent(anyhow!(
-                        "confirmed range reduce count on {} returned {}, expected at least {} at sequence floor {}",
+                        "confirmed range reduce count on {} returned {}, expected exactly {} at sequence floor {}",
                         ctx.query_url,
                         actual,
                         expected_count,
@@ -1820,11 +1825,13 @@ mod tests {
         RangeRequest, ReduceRequest, ReduceResponse, Service as QueryService,
         ServiceServer as QueryServiceServer,
     };
+    use exoware_sdk::{to_proto_reduce_response, RangeReduceResponse, RangeReduceResult};
     use futures::stream;
     use std::collections::HashSet;
 
     #[derive(Clone)]
     enum RangeHarness {
+        Count(u64),
         Duplicate { key: Key, value: Vec<u8> },
         Empty,
         MissingGet,
@@ -1892,7 +1899,9 @@ mod tests {
                 Self::Empty => Ok(connectrpc::Response::stream(stream::iter([Ok(
                     RangeFrame::default(),
                 )]))),
-                Self::MissingGet => Err(ConnectError::unimplemented("test harness")),
+                Self::Count(_) | Self::MissingGet => {
+                    Err(ConnectError::unimplemented("test harness"))
+                }
                 Self::PermanentError => Err(ConnectError::invalid_argument("range rejected")),
                 Self::Delayed { delay } => {
                     tokio::time::sleep(*delay).await;
@@ -1908,7 +1917,23 @@ mod tests {
             _ctx: RequestContext,
             _request: ServiceRequest<'_, ReduceRequest>,
         ) -> connectrpc::ServiceResult<connectrpc::ServiceStream<ReduceResponse>> {
-            Err(ConnectError::unimplemented("test harness"))
+            match self {
+                Self::Count(count) => {
+                    let (results, groups) = to_proto_reduce_response(RangeReduceResponse {
+                        results: vec![RangeReduceResult {
+                            value: Some(KvReducedValue::UInt64(*count)),
+                        }],
+                        groups: Vec::new(),
+                    });
+                    let response = ReduceResponse {
+                        results,
+                        groups,
+                        ..Default::default()
+                    };
+                    Ok(connectrpc::Response::stream(stream::iter([Ok(response)])))
+                }
+                _ => Err(ConnectError::unimplemented("test harness")),
+            }
         }
     }
 
@@ -2043,6 +2068,48 @@ mod tests {
         assert!(
             !err.to_string().contains("visibility timeout"),
             "a permanent missing-key result was retried until timeout: {err:#}"
+        );
+    }
+
+    #[tokio::test]
+    async fn reduce_count_must_equal_the_ledger_size() {
+        let namespace = 42;
+        let keyspace = Keyspace::validation_from_u64_namespace(namespace, DEFAULT_KEY_LEN).unwrap();
+        let records = (0..2)
+            .map(|index| Record {
+                key: keyspace.inserted_key(index),
+                value: overlap_value_for_index(namespace, index),
+            })
+            .collect::<Vec<_>>();
+        let expected = records.iter().collect::<Vec<_>>();
+        let timings = test_timings(Duration::from_secs(2), Duration::from_millis(100));
+
+        let client = spawn_range_harness(RangeHarness::Count(2)).await;
+        let ctx = ValidationCtx::new(&client, "test", 1, timings);
+        wait_for_reduce_count_match(&ctx, &expected)
+            .await
+            .expect("a count equal to the ledger size must pass");
+
+        // An over-count, such as a store counting a key's older version or a
+        // duplicate row, must fail rather than clear a lower bound.
+        let client = spawn_range_harness(RangeHarness::Count(3)).await;
+        let ctx = ValidationCtx::new(&client, "test", 1, timings);
+        let err = wait_for_reduce_count_match(&ctx, &expected)
+            .await
+            .expect_err("a count above the ledger size must fail");
+        assert!(
+            err.to_string().contains("returned 3, expected exactly 2"),
+            "unexpected error: {err:#}"
+        );
+
+        let client = spawn_range_harness(RangeHarness::Count(1)).await;
+        let ctx = ValidationCtx::new(&client, "test", 1, timings);
+        let err = wait_for_reduce_count_match(&ctx, &expected)
+            .await
+            .expect_err("a count below the ledger size must fail");
+        assert!(
+            err.to_string().contains("returned 1, expected exactly 2"),
+            "unexpected error: {err:#}"
         );
     }
 

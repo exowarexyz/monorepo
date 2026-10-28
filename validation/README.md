@@ -65,7 +65,7 @@ Exit codes follow each command's purpose:
 
 ## Benchmark Reports
 
-Benchmark JSON reports include the normalized config, seed, counters, and per-operation latency histograms for reads, writes, and scans. Histograms use fixed microsecond buckets; stdout and GitHub summaries show p50/p95/p99/max latency lines for readability.
+Benchmark JSON reports include the normalized config, seed, counters, and per-operation latency histograms for reads, writes, and scans. Histograms use fixed microsecond buckets. The p50/p95/p99 values are exact nearest-rank percentiles over every recorded sample, not bucket estimates. stdout and GitHub summaries show p50/p95/p99/max latency lines for readability.
 
 `load` and `bench` use run-specific namespaces by default so independent runs do not reuse the same physical keys on persistent stores. Pass the same `--namespace` and `--keys` value to both commands when a benchmark should read from a keyspace written by `load`.
 
