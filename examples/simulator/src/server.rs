@@ -5,10 +5,10 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use axum::{routing::get, Router};
+use axum::{routing::get, serve::ListenerExt, Router};
 use exoware_server::{connect_stack, AppState};
 use tower_http::cors::CorsLayer;
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::RocksStore;
 
@@ -35,7 +35,11 @@ pub async fn run(
 
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
     info!(%addr, directory = %directory.display(), "store simulator listening");
-    let listener = tokio::net::TcpListener::bind(addr).await?;
+    let listener = tokio::net::TcpListener::bind(addr).await?.tap_io(|tcp| {
+        if let Err(error) = tcp.set_nodelay(true) {
+            warn!(%error, "failed to set TCP_NODELAY");
+        }
+    });
     exoware_server::ingest::transport::serve(listener, app, std::future::pending()).await?;
     Ok(())
 }
@@ -57,6 +61,9 @@ pub async fn open_temp(
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let port = listener.local_addr()?.port();
     let url = format!("http://127.0.0.1:{port}");
+    let listener = listener.tap_io(|tcp| {
+        let _ = tcp.set_nodelay(true);
+    });
     let handle = tokio::spawn(async move {
         let _ =
             exoware_server::ingest::transport::serve(listener, app, std::future::pending()).await;

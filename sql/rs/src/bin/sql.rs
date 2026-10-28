@@ -1,12 +1,12 @@
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 
-use axum::{routing::get, Router};
+use axum::{routing::get, serve::ListenerExt, Router};
 use clap::{Parser, Subcommand};
 use exoware_sdk::{StoreClient, StoreKeyPrefix};
 use exoware_sql::{default_orders_index_specs, sql_connect_stack, KvSchema, SqlServer};
 use tower_http::cors::CorsLayer;
-use tracing::info;
+use tracing::{info, warn};
 
 const TABLE_NAME: &str = "orders_kv";
 
@@ -63,7 +63,11 @@ async fn run(
 
     let addr = SocketAddr::from((host, port));
     info!(%addr, store_url, "sql server listening");
-    let listener = tokio::net::TcpListener::bind(addr).await?;
+    let listener = tokio::net::TcpListener::bind(addr).await?.tap_io(|tcp| {
+        if let Err(error) = tcp.set_nodelay(true) {
+            warn!(%error, "failed to set TCP_NODELAY");
+        }
+    });
     axum::serve(listener, app).await?;
     Ok(())
 }

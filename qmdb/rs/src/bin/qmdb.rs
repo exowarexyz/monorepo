@@ -4,7 +4,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::num::NonZeroU64;
 use std::path::PathBuf;
 
-use axum::{routing::get, Router};
+use axum::{routing::get, serve::ListenerExt, Router};
 use clap::{Parser, Subcommand};
 use commonware_codec::Encode;
 use commonware_cryptography::Sha256;
@@ -29,7 +29,7 @@ use exoware_qmdb::{
 };
 use exoware_sdk::{PrefixedStoreClient, StoreClient, StoreKeyPrefix, StoreWriteBatch};
 use tower_http::cors::CorsLayer;
-use tracing::info;
+use tracing::{info, warn};
 
 const N: usize = 32;
 type Family = mmb::Family;
@@ -223,7 +223,11 @@ async fn run(
 
     let addr = SocketAddr::from((host, port));
     info!(%addr, store_url, "ordered qmdb server listening");
-    let listener = tokio::net::TcpListener::bind(addr).await?;
+    let listener = tokio::net::TcpListener::bind(addr).await?.tap_io(|tcp| {
+        if let Err(error) = tcp.set_nodelay(true) {
+            warn!(%error, "failed to set TCP_NODELAY");
+        }
+    });
     axum::serve(listener, app).await?;
     Ok(())
 }
@@ -515,6 +519,9 @@ mod tests {
                 );
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let url = format!("http://{}", listener.local_addr().unwrap());
+            let listener = listener.tap_io(|tcp| {
+                let _ = tcp.set_nodelay(true);
+            });
             let server = tokio::spawn(async move {
                 axum::serve(listener, Router::new().fallback_service(service))
                     .await

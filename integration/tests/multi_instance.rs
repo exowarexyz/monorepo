@@ -4,7 +4,7 @@ mod qmdb;
 use std::sync::Arc;
 use std::time::Duration;
 
-use axum::{routing::get, Router};
+use axum::{routing::get, serve::ListenerExt, Router};
 use bytes::Bytes;
 use commonware_cryptography::Sha256;
 use commonware_storage::merkle::{mmr, Location};
@@ -90,6 +90,9 @@ async fn spawn_sql_service(schema: KvSchema) -> (tokio::task::JoinHandle<()>, St
         .expect("bind sql service");
     let port = listener.local_addr().expect("sql addr").port();
     let url = format!("http://127.0.0.1:{port}");
+    let listener = listener.tap_io(|tcp| {
+        let _ = tcp.set_nodelay(true);
+    });
     let handle = tokio::spawn(async move {
         let _ = axum::serve(listener, app).await;
     });
@@ -113,6 +116,9 @@ async fn spawn_qmdb_service(client: PrefixedStoreClient) -> (tokio::task::JoinHa
         .expect("bind qmdb service");
     let port = listener.local_addr().expect("qmdb addr").port();
     let url = format!("http://127.0.0.1:{port}");
+    let listener = listener.tap_io(|tcp| {
+        let _ = tcp.set_nodelay(true);
+    });
     let handle = tokio::spawn(async move {
         let _ = axum::serve(listener, app).await;
     });

@@ -1963,7 +1963,9 @@ mod tests {
         Mutex,
     };
 
-    use axum::{extract::Request, middleware::Next, response::Response, Router};
+    use axum::{
+        extract::Request, middleware::Next, response::Response, serve::ListenerExt, Router,
+    };
     use bytes::Bytes;
     use datafusion::arrow::array::{
         ArrayRef, Decimal128Array, FixedSizeBinaryBuilder, Float64Array, Int64Array, StringArray,
@@ -2120,6 +2122,9 @@ mod tests {
                 ));
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let url = format!("http://{}", listener.local_addr().unwrap());
+            let listener = listener.tap_io(|tcp| {
+                let _ = tcp.set_nodelay(true);
+            });
             let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
             let client = PrefixedStoreClient::empty(StoreClient::new(&url));
             let store = crate::SqlContext::new(client.clone());

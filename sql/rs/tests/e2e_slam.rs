@@ -4,7 +4,7 @@ mod common;
 
 use std::sync::Arc;
 
-use axum::Router;
+use axum::{serve::ListenerExt, Router};
 use connectrpc::client::ClientConfig;
 use connectrpc::ErrorCode;
 use datafusion::arrow::array::{ArrayRef, Int64Array};
@@ -262,6 +262,9 @@ async fn serve_sql(
         .expect("bind SQL server");
     let base = format!("http://{}", listener.local_addr().expect("SQL address"));
     let app = Router::new().fallback_service(sql_connect_stack(server));
+    let listener = listener.tap_io(|tcp| {
+        let _ = tcp.set_nodelay(true);
+    });
     let handle = tokio::spawn(async move {
         axum::serve(listener, app).await.expect("serve SQL");
     });
