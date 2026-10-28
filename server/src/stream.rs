@@ -223,7 +223,7 @@ mod tests {
 
     fn kv(family: u8, payload: &[u8], value: &'static [u8]) -> Entry {
         Entry {
-            key: key(family, payload).to_vec(),
+            key: key(family, payload),
             value: Bytes::from_static(value),
             ..Default::default()
         }

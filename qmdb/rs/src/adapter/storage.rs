@@ -711,7 +711,7 @@ mod tests {
                 .filter(|(key, _)| key.as_ref() >= request.start && key.as_ref() <= request.end)
                 .take(1)
                 .map(|(key, value)| Entry {
-                    key: key.to_vec(),
+                    key: key.clone(),
                     value: value.clone(),
                     ..Default::default()
                 })

@@ -1762,7 +1762,7 @@ mod tests {
         Bytes::from(
             PutRequest {
                 kvs: vec![Entry {
-                    key: key.to_vec(),
+                    key: Bytes::copy_from_slice(key),
                     value: Bytes::copy_from_slice(value),
                     ..Default::default()
                 }],
@@ -2329,7 +2329,7 @@ mod tests {
         response
             .entries
             .into_iter()
-            .map(|entry| (Bytes::from(entry.key), entry.value))
+            .map(|entry| (entry.key, entry.value))
             .collect()
     }
 
@@ -2341,7 +2341,7 @@ mod tests {
         StreamGetResponse {
             sequence_number: sequence,
             entries: vec![Entry {
-                key: key.to_vec(),
+                key: Bytes::from_static(key),
                 value: Bytes::from_static(value),
                 ..Default::default()
             }],
@@ -2750,7 +2750,7 @@ mod tests {
             kvs: kvs
                 .iter()
                 .map(|(key, value)| Entry {
-                    key: key.to_vec(),
+                    key: key.clone(),
                     value: value.clone(),
                     ..Default::default()
                 })
@@ -2974,17 +2974,17 @@ mod tests {
                 sequence_number: 2,
                 entries: vec![
                     Entry {
-                        key: b"k2".to_vec(),
+                        key: Bytes::from_static(b"k2"),
                         value: Bytes::from_static(b"v2-stale"),
                         ..Default::default()
                     },
                     Entry {
-                        key: b"k2".to_vec(),
+                        key: Bytes::from_static(b"k2"),
                         value: Bytes::from_static(b"v2"),
                         ..Default::default()
                     },
                     Entry {
-                        key: b"k3".to_vec(),
+                        key: Bytes::from_static(b"k3"),
                         value: Bytes::from_static(b"v3"),
                         ..Default::default()
                     },

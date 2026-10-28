@@ -1879,7 +1879,7 @@ mod tests {
             match self {
                 Self::Duplicate { key, value } => {
                     let entry = Entry {
-                        key: key.to_vec(),
+                        key: key.clone(),
                         value: value.clone().into(),
                         ..Default::default()
                     };

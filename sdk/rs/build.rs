@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 const SDK_BYTES_FIELDS: &[&str] = &[
+    ".common.kv.v1.Entry.key",
     ".common.kv.v1.Entry.value",
     ".common.kv.v1.Filter.exact",
     ".common.kv.v1.Filter.prefix",

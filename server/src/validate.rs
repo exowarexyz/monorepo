@@ -312,7 +312,7 @@ mod tests {
         use buffa::Message;
         let req = exoware_proto::ingest::PutRequest {
             kvs: vec![exoware_proto::common::Entry {
-                key: vec![0u8; 255],
+                key: Bytes::from(vec![0u8; 255]),
                 value: Bytes::from_static(&[1]),
                 ..Default::default()
             }],
@@ -325,7 +325,7 @@ mod tests {
         use buffa::Message;
         let req = exoware_proto::ingest::PutRequest {
             kvs: vec![exoware_proto::common::Entry {
-                key: vec![0u8; 10],
+                key: Bytes::from(vec![0u8; 10]),
                 value: Bytes::from(vec![1u8; MAX_VALUE_LEN + 1]),
                 ..Default::default()
             }],
@@ -338,7 +338,7 @@ mod tests {
         use buffa::Message;
         let req = exoware_proto::ingest::PutRequest {
             kvs: vec![exoware_proto::common::Entry {
-                key: vec![0u8; 10],
+                key: Bytes::from(vec![0u8; 10]),
                 value: Bytes::from(vec![1u8; value_len]),
                 ..Default::default()
             }],

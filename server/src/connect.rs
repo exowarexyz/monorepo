@@ -160,7 +160,7 @@ where
             let mut chunk = Vec::with_capacity(batch.rows.len());
             for (key, value) in batch.rows {
                 chunk.push(Entry {
-                    key: key.into(),
+                    key,
                     value,
                     ..Default::default()
                 });
@@ -1998,7 +1998,7 @@ mod tests {
             } else {
                 let (key, value) = matching_kv(b"filtered", b"selected");
                 vec![Entry {
-                    key: key.to_vec(),
+                    key,
                     value,
                     ..Default::default()
                 }]
@@ -2227,7 +2227,7 @@ mod tests {
     fn put_request(value_len: usize) -> Bytes {
         exoware_proto::ingest::PutRequest {
             kvs: vec![exoware_proto::common::Entry {
-                key: b"k".to_vec(),
+                key: Bytes::from_static(b"k"),
                 value: Bytes::from(vec![1u8; value_len]),
                 ..Default::default()
             }],

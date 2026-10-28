@@ -236,7 +236,7 @@ impl Service for Store {
                         && (request.end.is_empty() || key.as_slice() <= request.end.as_slice())
                 })
                 .map(|(key, value)| Entry {
-                    key: key.clone(),
+                    key: Bytes::copy_from_slice(key),
                     value: value.clone(),
                     ..Default::default()
                 })

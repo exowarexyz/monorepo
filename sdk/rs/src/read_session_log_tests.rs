@@ -107,7 +107,7 @@ impl connectrpc::client::ClientTransport for LogTransport {
 
 fn entry(key: &'static [u8], value: &'static [u8]) -> exoware_proto::common::kv::v1::Entry {
     exoware_proto::common::kv::v1::Entry {
-        key: key.to_vec(),
+        key: Bytes::from_static(key),
         value: Bytes::from_static(value),
         ..Default::default()
     }

@@ -63,7 +63,7 @@ async fn generated_zstd_put_uses_the_shared_streaming_path() {
     let response = ingest
         .put(PutRequest {
             kvs: vec![Entry {
-                key: key.to_vec(),
+                key: key.clone(),
                 value: value.clone(),
                 ..Default::default()
             }],

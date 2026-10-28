@@ -91,7 +91,7 @@ mod tests {
         let request = PutRequest {
             kvs: (0..802)
                 .map(|index| Entry {
-                    key: b"key".to_vec(),
+                    key: Bytes::from_static(b"key"),
                     value: if index == 0 {
                         Bytes::from(vec![7; 2 * 1024 * 1024])
                     } else {

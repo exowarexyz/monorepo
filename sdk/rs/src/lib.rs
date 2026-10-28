@@ -780,12 +780,11 @@ impl PrefixedStoreClient {
         };
         let mut out = Vec::with_capacity(owned.entries.len());
         for entry in owned.entries {
-            let key = Bytes::from(entry.key);
-            if !self.prefix.matches(&key) {
+            if !self.prefix.matches(&entry.key) {
                 continue;
             }
             out.push(StoreBatchEntry {
-                key: self.decode_store_key(&key)?,
+                key: self.decode_store_key(&entry.key)?,
                 value: entry.value,
             });
         }
@@ -1185,10 +1184,9 @@ impl RangeStream {
 
             let mut out = Vec::with_capacity(n);
             for entry in frame.results {
-                let key = Bytes::from(entry.key);
                 let key = match &self.key_prefix {
-                    Some(prefix) => prefix.decode_key(&key)?,
-                    None => key,
+                    Some(prefix) => prefix.decode_key(&entry.key)?,
+                    None => entry.key,
                 };
                 out.push((key, entry.value));
             }
@@ -1393,10 +1391,9 @@ impl StreamSubscription {
                     let owned = view.to_owned_message();
                     let mut entries = Vec::with_capacity(owned.entries.len());
                     for entry in owned.entries {
-                        let key = Bytes::from(entry.key);
                         let key = match &self.key_prefix {
-                            Some(prefix) => prefix.decode_key(&key)?,
-                            None => key,
+                            Some(prefix) => prefix.decode_key(&entry.key)?,
+                            None => entry.key,
                         };
                         entries.push(StoreBatchEntry {
                             key,
@@ -1947,7 +1944,7 @@ impl StoreClient {
                 )));
             }
             proto_kvs.push(exoware_proto::common::Entry {
-                key: key.to_vec(),
+                key: (*key).clone(),
                 value: Bytes::copy_from_slice(value),
                 ..Default::default()
             });
@@ -1967,7 +1964,7 @@ impl StoreClient {
                 )));
             }
             proto_kvs.push(exoware_proto::common::Entry {
-                key: key.to_vec(),
+                key: key.clone(),
                 value: value.clone(),
                 ..Default::default()
             });
@@ -1999,7 +1996,7 @@ impl StoreClient {
                 );
                 let client = IngestServiceClient::new(self.connect_http.clone(), config);
 
-                // The final attempt cannot retry, so transfer its keys instead of cloning them.
+                // The final attempt cannot retry, so move the request instead of cloning it.
                 let attempt_request = if attempt == self.retry_config.max_attempts {
                     std::mem::take(&mut request)
                 } else {
@@ -3808,7 +3805,7 @@ mod tests {
             .collect::<Vec<_>>();
         let encoded = ProtoPutRequest {
             kvs: vec![exoware_proto::common::Entry {
-                key: key.to_vec(),
+                key: key.clone(),
                 value: Bytes::copy_from_slice(&value),
                 ..Default::default()
             }],
@@ -3894,7 +3891,7 @@ mod tests {
             let value = vec![b'a'; value_len];
             let encoded = ProtoPutRequest {
                 kvs: vec![exoware_proto::common::Entry {
-                    key: key.to_vec(),
+                    key: key.clone(),
                     value: Bytes::copy_from_slice(&value),
                     ..Default::default()
                 }],
@@ -5271,7 +5268,7 @@ mod tests {
                 .entries()
                 .iter()
                 .map(|(key, value)| exoware_proto::common::Entry {
-                    key: key.to_vec(),
+                    key: key.clone(),
                     value: value.clone(),
                     ..Default::default()
                 })

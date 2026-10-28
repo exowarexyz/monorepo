@@ -64,7 +64,7 @@ fn request(entries: usize) -> PutRequest {
     PutRequest {
         kvs: (0..entries)
             .map(|_| Entry {
-                key: b"key".to_vec(),
+                key: Bytes::from_static(b"key"),
                 value: Bytes::from_static(b"value"),
                 ..Default::default()
             })
@@ -118,7 +118,7 @@ fn assert_overcount(error: &ConnectError) {
 #[tokio::test]
 async fn overcount_precedes_entry_errors() {
     let mut request = request(2);
-    request.kvs[0].key = vec![1; MAX_KEY_LEN + 1];
+    request.kvs[0].key = Bytes::from(vec![1; MAX_KEY_LEN + 1]);
 
     // Both entry envelopes are complete. Their key fields have truncated lengths.
     let malformed = Bytes::from_static(&[0x0a, 1, 0x0a, 0x0a, 1, 0x0a]);
@@ -201,7 +201,7 @@ async fn malformed_entry_is_rejected_before_publication() {
 async fn malformed_inner_entry_precedes_business_validation() {
     let ingest = Arc::new(TestIngest::default());
     let mut request = request(1);
-    request.kvs[0].key = vec![1; MAX_KEY_LEN + 1];
+    request.kvs[0].key = Bytes::from(vec![1; MAX_KEY_LEN + 1]);
     let mut body = request.encode_to_vec();
     body.extend_from_slice(&[0x0a, 1, 0x0a]);
     let error = dispatch(
