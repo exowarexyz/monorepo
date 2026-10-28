@@ -10,7 +10,7 @@ use exoware_server::{connect_stack, AppState};
 use tower_http::cors::CorsLayer;
 use tracing::info;
 
-use crate::RocksStore;
+use crate::{RocksConfig, RocksStore};
 
 pub const CMD: &str = "server";
 pub const RUN_CMD: &str = "run";
@@ -19,12 +19,25 @@ async fn health() -> &'static str {
     "ok"
 }
 
+/// Store options for the served simulator. Every commit ingests new SST files, and they pile
+/// up while compaction catches up. Stock RocksDB sets `max_background_jobs` to 2, which runs
+/// one compaction at a time across both column families. Four jobs let it run up to three
+/// once level zero backs up. Stock RocksDB also keeps every table file open, so a backlog of
+/// a thousand files exhausts the default descriptor limit of 1024. Capping open tables keeps
+/// the simulator well below that limit.
+fn store_config() -> RocksConfig {
+    let mut config = RocksConfig::default();
+    config.db_options.set_max_background_jobs(4);
+    config.db_options.set_max_open_files(512);
+    config
+}
+
 /// Run the store simulator until the process is interrupted.
 pub async fn run(
     directory: &Path,
     port: u16,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let engine = Arc::new(RocksStore::open(directory, None)?);
+    let engine = Arc::new(RocksStore::open(directory, Some(store_config()))?);
     let state = AppState::new(engine);
     let connect = connect_stack(state);
 
@@ -47,7 +60,7 @@ pub async fn run(
 pub async fn open_temp(
 ) -> Result<(tokio::task::JoinHandle<()>, String), Box<dyn std::error::Error + Send + Sync>> {
     let data_dir = tempfile::tempdir()?;
-    let engine = Arc::new(RocksStore::open_owned(data_dir, None)?);
+    let engine = Arc::new(RocksStore::open_owned(data_dir, Some(store_config()))?);
     let state = AppState::new(engine);
     let connect = connect_stack(state);
     let app = Router::new()
