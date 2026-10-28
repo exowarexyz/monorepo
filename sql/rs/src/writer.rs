@@ -46,14 +46,12 @@ impl TableWriter {
             ));
         }
         let base_key = encode_primary_key_from_row(self.model.table_prefix, &row, &self.model)?;
-        let base_value = encode_base_row_value(&row, &self.model).map_err(|e| format!("{e}"))?;
-        let mut out = vec![(base_key, base_value)];
+        let mut stored = stored_row_from_cells(&row, &self.model).map_err(|e| format!("{e}"))?;
+        let pk_payload = base_key.slice(self.model.primary_key_prefix.len()..);
+        let mut out = vec![(base_key, stored.encode().to_vec())];
         for spec in self.index_specs.iter() {
-            let idx_key =
-                encode_secondary_index_key(self.model.table_prefix, spec, &self.model, &row)?;
-            let idx_value = encode_secondary_index_value(&row, &self.model, spec)
-                .map_err(|e| format!("{e}"))?;
-            out.push((idx_key, idx_value));
+            let idx_key = encode_secondary_index_key_with_pk(spec, &self.model, &row, &pk_payload)?;
+            out.push((idx_key, encode_index_value(&mut stored, spec)));
         }
         Ok(out)
     }
@@ -346,31 +344,48 @@ pub(crate) fn encode_insert_entries(
     index_specs: &[ResolvedIndexSpec],
 ) -> DataFusionResult<Vec<(Key, Vec<u8>)>> {
     let mut out = Vec::with_capacity(batch.num_rows() * (1 + index_specs.len()));
+    let columns = insert_columns(batch, model);
     for row_idx in 0..batch.num_rows() {
-        let row = extract_row_from_batch(batch, row_idx, model)?;
+        let row = extract_row(&columns, row_idx, model)?;
         let base_key = encode_primary_key_from_row(model.table_prefix, &row, model)
             .map_err(DataFusionError::Execution)?;
-        let base_value = encode_base_row_value(&row, model)?;
-        out.push((base_key, base_value));
+        let mut stored = stored_row_from_cells(&row, model)?;
+        let pk_payload = base_key.slice(model.primary_key_prefix.len()..);
+        out.push((base_key, stored.encode().to_vec()));
 
         for spec in index_specs {
-            let secondary_key = encode_secondary_index_key(model.table_prefix, spec, model, &row)
+            let secondary_key = encode_secondary_index_key_with_pk(spec, model, &row, &pk_payload)
                 .map_err(DataFusionError::Execution)?;
-            let secondary_value = encode_secondary_index_value(&row, model, spec)?;
-            out.push((secondary_key, secondary_value));
+            out.push((secondary_key, encode_index_value(&mut stored, spec)));
         }
     }
     Ok(out)
 }
 
-pub(crate) fn extract_row_from_batch(
-    batch: &RecordBatch,
+/// Look up the batch's array for each model column once per batch. A missing
+/// column stays `None` and only fails when a row reads it, as it did when
+/// each row looked the column up by name.
+fn insert_columns<'a>(batch: &'a RecordBatch, model: &TableModel) -> Vec<Option<&'a ArrayRef>> {
+    model
+        .columns
+        .iter()
+        .map(|col| batch.column_by_name(&col.name))
+        .collect()
+}
+
+fn extract_row(
+    columns: &[Option<&ArrayRef>],
     row_idx: usize,
     model: &TableModel,
 ) -> DataFusionResult<KvRow> {
     let mut values = Vec::with_capacity(model.columns.len());
-    for col in &model.columns {
-        let array = required_column(batch, &col.name)?;
+    for (col, array) in model.columns.iter().zip(columns) {
+        let array = array.ok_or_else(|| {
+            DataFusionError::Execution(format!(
+                "insert batch is missing required column '{}'",
+                col.name
+            ))
+        })?;
         if array.is_null(row_idx) {
             if !col.nullable {
                 return Err(DataFusionError::Execution(format!(
@@ -419,7 +434,12 @@ pub(crate) fn extract_row_from_batch(
     Ok(KvRow { values })
 }
 
-pub(crate) fn encode_base_row_value(row: &KvRow, model: &TableModel) -> DataFusionResult<Vec<u8>> {
+/// Convert a row's non-key cells to stored values. Primary key columns stay
+/// `None` because the key bytes already carry them.
+pub(crate) fn stored_row_from_cells(
+    row: &KvRow,
+    model: &TableModel,
+) -> DataFusionResult<StoredRow> {
     let mut values = Vec::with_capacity(model.columns.len());
     for (idx, col) in model.columns.iter().enumerate() {
         if model.is_pk_column(idx) {
@@ -428,25 +448,45 @@ pub(crate) fn encode_base_row_value(row: &KvRow, model: &TableModel) -> DataFusi
         }
         values.push(encode_non_pk_cell_value(row.value_at(idx), col)?);
     }
-    let stored_row = StoredRow { values };
-    Ok(stored_row.encode().to_vec())
+    Ok(StoredRow { values })
 }
 
+#[cfg(test)]
+pub(crate) fn encode_base_row_value(row: &KvRow, model: &TableModel) -> DataFusionResult<Vec<u8>> {
+    Ok(stored_row_from_cells(row, model)?.encode().to_vec())
+}
+
+/// Encode the value of an index entry: `base` with every column the index
+/// doesn't cover set to `None`. The covered values move out of `base` for the
+/// encode and back afterwards, so no string or byte value is cloned.
+pub(crate) fn encode_index_value(base: &mut StoredRow, spec: &ResolvedIndexSpec) -> Vec<u8> {
+    let mut covered = StoredRow {
+        values: vec![None; base.values.len()],
+    };
+    let covered_columns = || {
+        spec.value_column_mask
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, &keep)| keep.then_some(idx))
+    };
+    for idx in covered_columns() {
+        covered.values[idx] = base.values[idx].take();
+    }
+    let encoded = covered.encode().to_vec();
+    for idx in covered_columns() {
+        base.values[idx] = covered.values[idx].take();
+    }
+    encoded
+}
+
+#[cfg(test)]
 pub(crate) fn encode_secondary_index_value(
     row: &KvRow,
     model: &TableModel,
     spec: &ResolvedIndexSpec,
 ) -> DataFusionResult<Vec<u8>> {
-    let mut values = Vec::with_capacity(model.columns.len());
-    for (idx, col) in model.columns.iter().enumerate() {
-        if model.is_pk_column(idx) || !spec.value_column_mask[idx] {
-            values.push(None);
-            continue;
-        }
-        values.push(encode_non_pk_cell_value(row.value_at(idx), col)?);
-    }
-    let stored_row = StoredRow { values };
-    Ok(stored_row.encode().to_vec())
+    let mut stored = stored_row_from_cells(row, model)?;
+    Ok(encode_index_value(&mut stored, spec))
 }
 
 pub(crate) fn encode_secondary_index_value_from_archived(
@@ -618,12 +658,6 @@ pub(crate) fn decode_list_element_archived(
         (ListElementKind::Boolean, StoredValue::Boolean(v)) => CellValue::Boolean(*v),
         (ListElementKind::Utf8, StoredValue::Utf8(v)) => CellValue::Utf8(v.as_str().to_string()),
         _ => return None,
-    })
-}
-
-fn required_column<'a>(batch: &'a RecordBatch, name: &str) -> DataFusionResult<&'a ArrayRef> {
-    batch.column_by_name(name).ok_or_else(|| {
-        DataFusionError::Execution(format!("insert batch is missing required column '{name}'"))
     })
 }
 
@@ -817,6 +851,14 @@ mod tests {
     };
     use datafusion::arrow::datatypes::{DataType, Field, Schema};
     use exoware_sdk::kv_codec::decode_stored_row;
+
+    fn extract_row_from_batch(
+        batch: &RecordBatch,
+        row_idx: usize,
+        model: &TableModel,
+    ) -> DataFusionResult<KvRow> {
+        extract_row(&insert_columns(batch, model), row_idx, model)
+    }
 
     /// Variable-length Binary values survive the encode -> store -> arrow
     /// round trip with their exact lengths.
@@ -1082,4 +1124,121 @@ mod tests {
         StoreBatchUpload::stage_upload(&writer, &mut retry, &mut retry_batch).expect("stage retry");
         assert_eq!(retry_batch.len(), 2);
     }
+
+    /// Pins the bytes `encode_insert_entries` writes for base rows and for
+    /// lexicographic, z-order and primary-key-led indexes, across every key
+    /// kind, string escapes, nulls and covered columns.
+    #[test]
+    fn insert_entries_match_golden_bytes() {
+        use datafusion::arrow::array::{
+            BooleanArray, Date32Array, Date64Array, Decimal128Array, Decimal256Array,
+            FixedSizeBinaryArray, Float64Array, TimestampMicrosecondArray,
+        };
+        use datafusion::arrow::datatypes::TimeUnit;
+
+        let list_type = DataType::List(Arc::new(Field::new("item", DataType::Int64, true)));
+        let config = KvTableConfig::new(
+            3,
+            vec![
+                TableColumnConfig::new("id", DataType::Utf8, false),
+                TableColumnConfig::new("seq", DataType::Int64, false),
+                TableColumnConfig::new("status", DataType::Utf8, false),
+                TableColumnConfig::new("amount", DataType::Float64, false),
+                TableColumnConfig::new("flag", DataType::Boolean, false),
+                TableColumnConfig::new("day", DataType::Date32, false),
+                TableColumnConfig::new("at", DataType::Date64, false),
+                TableColumnConfig::new(
+                    "ts",
+                    DataType::Timestamp(TimeUnit::Microsecond, None),
+                    false,
+                ),
+                TableColumnConfig::new("price", DataType::Decimal128(20, 2), false),
+                TableColumnConfig::new("big", DataType::Decimal256(40, 0), false),
+                TableColumnConfig::new("tag", DataType::FixedSizeBinary(2), false),
+                TableColumnConfig::new("qty", DataType::UInt64, false),
+                TableColumnConfig::new("note", DataType::Utf8, true),
+                TableColumnConfig::new("body", DataType::Binary, true),
+                TableColumnConfig::new("scores", list_type, true),
+            ],
+            vec!["id".into(), "seq".into()],
+            vec![
+                IndexSpec::lexicographic(
+                    "wide",
+                    [
+                        "status", "flag", "day", "at", "ts", "price", "big", "tag", "qty", "amount",
+                    ]
+                    .map(String::from)
+                    .to_vec(),
+                )
+                .unwrap()
+                .with_cover_columns(vec![
+                    "note".into(),
+                    "body".into(),
+                    "scores".into(),
+                ]),
+                IndexSpec::z_order("z", vec!["qty".into(), "day".into()]).unwrap(),
+                IndexSpec::lexicographic("by_seq", vec!["seq".into()])
+                    .unwrap()
+                    .with_cover_columns(vec!["note".into()]),
+            ],
+        )
+        .unwrap();
+        let model = TableModel::from_config(&config).unwrap();
+        let specs = model.resolve_index_specs(&config.index_specs).unwrap();
+
+        let mut scores = ListBuilder::new(Int64Builder::new());
+        scores.values().append_value(1);
+        scores.values().append_value(-2);
+        scores.append(true);
+        scores.append(false);
+        let arrays: Vec<ArrayRef> = vec![
+            Arc::new(StringArray::from(vec!["a\0b\u{1}é", ""])),
+            Arc::new(Int64Array::from(vec![-5, i64::MAX])),
+            Arc::new(StringArray::from(vec!["open", ""])),
+            Arc::new(Float64Array::from(vec![-1.5, 0.0])),
+            Arc::new(BooleanArray::from(vec![true, false])),
+            Arc::new(Date32Array::from(vec![-3, 0])),
+            Arc::new(Date64Array::from(vec![1_700_000_000_000, 0])),
+            Arc::new(TimestampMicrosecondArray::from(vec![-1, 42])),
+            Arc::new(
+                Decimal128Array::from(vec![-12345, 0])
+                    .with_precision_and_scale(20, 2)
+                    .unwrap(),
+            ),
+            Arc::new(
+                Decimal256Array::from(vec![i256::from_i128(-7), i256::from_i128(1)])
+                    .with_precision_and_scale(40, 0)
+                    .unwrap(),
+            ),
+            Arc::new(
+                FixedSizeBinaryArray::try_from_iter([[0xFF, 0x00], [1, 2]].into_iter()).unwrap(),
+            ),
+            Arc::new(UInt64Array::from(vec![u64::MAX, 0])),
+            Arc::new(StringArray::from(vec![Some("hi\u{ff}"), None])),
+            Arc::new(BinaryArray::from(vec![Some(&[0, 1, 0xFF][..]), None])),
+            Arc::new(scores.finish()),
+        ];
+        let batch = RecordBatch::try_new(model.schema.clone(), arrays).unwrap();
+
+        let actual: Vec<String> = encode_insert_entries(&batch, &model, &specs)
+            .unwrap()
+            .into_iter()
+            .map(|(key, value)| format!("{} {}", hex::encode(key), hex::encode(value)))
+            .collect();
+        assert_eq!(actual, GOLDEN_INSERT_ENTRIES);
+    }
+
+    /// Entries for `insert_entries_match_golden_bytes`, one `key value` hex
+    /// pair per line: each row's base entry, then its `wide`, `z` and `by_seq`
+    /// index entries.
+    const GOLDEN_INSERT_ENTRIES: &[&str] = &[
+        "30610100620101c3a9007ffffffffffffffb 0f00000104046f70656e0102bff80000000000000103010100fffffffffffffffd01000000018bcfe568000100ffffffffffffffff010510c7cfffffffffffffffffffffffffffff010520f9ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff010502ff000101ffffffffffffffff0104046869c3bf0105030001ff01060200000000000000000100fffffffffffffffe",
+        "316f70656e00017ffffffd8000018bcfe568007fffffffffffffff7fffffffffffffffffffffffffffcfc77ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff9ff00ffffffffffffffff4007ffffffffffff610100620101c3a9007ffffffffffffffb 0f00000104046f70656e0102bff80000000000000103010100fffffffffffffffd01000000018bcfe568000100ffffffffffffffff010510c7cfffffffffffffffffffffffffffff010520f9ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff010502ff000101ffffffffffffffff0104046869c3bf0105030001ff01060200000000000000000100fffffffffffffffe",
+        "32bffffffffffffffbffffffff610100620101c3a9007ffffffffffffffb 0f00000000000100fffffffffffffffd00000000000101ffffffffffffffff000000",
+        "337ffffffffffffffb610100620101c3a9007ffffffffffffffb 0f0000000000000000000000000104046869c3bf0000",
+        "3000ffffffffffffffff 0f00000104000102000000000000000001030001000000000000000000010000000000000000000100000000000000002a010510000000000000000000000000000000000105200100000000000000000000000000000000000000000000000000000000000000010502010201010000000000000000000000",
+        "310000800000008000000000000000800000000000002a80000000000000000000000000000000800000000000000000000000000000000000000000000000000000000000000101020000000000000000800000000000000000ffffffffffffffff 0f00000104000102000000000000000001030001000000000000000000010000000000000000000100000000000000002a010510000000000000000000000000000000000105200100000000000000000000000000000000000000000000000000000000000000010502010201010000000000000000000000",
+        "3240000000000000000000000000ffffffffffffffff 0f000000000001000000000000000000000000000001010000000000000000000000",
+        "33ffffffffffffffff00ffffffffffffffff 0f000000000000000000000000000000",
+    ];
 }
