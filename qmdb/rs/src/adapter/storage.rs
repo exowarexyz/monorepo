@@ -676,7 +676,7 @@ mod tests {
                 .map(|key| {
                     Ok(GetManyFrame {
                         results: vec![GetManyEntry {
-                            key: key.to_vec(),
+                            key: Bytes::copy_from_slice(key),
                             value: self.rows.get(*key).cloned(),
                             ..Default::default()
                         }],

@@ -1856,7 +1856,7 @@ mod tests {
                         .keys
                         .iter()
                         .map(|key| GetManyEntry {
-                            key: key.to_vec(),
+                            key: key.to_vec().into(),
                             ..Default::default()
                         })
                         .collect();

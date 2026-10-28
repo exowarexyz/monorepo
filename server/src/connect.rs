@@ -576,7 +576,7 @@ where
         let mut chunk = Vec::new();
         for (key, value) in result.value {
             chunk.push(GetManyEntry {
-                key: key.to_vec(),
+                key,
                 value,
                 ..Default::default()
             });
@@ -2536,7 +2536,7 @@ mod tests {
             .sequence_number;
 
         let bytes = exoware_proto::query::GetManyRequest {
-            keys: vec![b"k".to_vec()],
+            keys: vec![Bytes::from_static(b"k")],
             min_sequence_number,
             batch_size: 1,
             ..Default::default()
@@ -2657,7 +2657,7 @@ mod tests {
             .expect_err("reject before returning the value");
 
         let bytes = exoware_proto::query::GetManyRequest {
-            keys: vec![b"k".to_vec()],
+            keys: vec![Bytes::from_static(b"k")],
             min_sequence_number: Some(8),
             batch_size: 1,
             ..Default::default()
@@ -3502,7 +3502,11 @@ mod tests {
         engine.set_current_sequence(11);
         let connect = QueryConnect::new(AppState::new(engine));
         let bytes = exoware_proto::query::GetManyRequest {
-            keys: vec![b"a".to_vec(), b"bb".to_vec(), b"ccc".to_vec()],
+            keys: vec![
+                Bytes::from_static(b"a"),
+                Bytes::from_static(b"bb"),
+                Bytes::from_static(b"ccc"),
+            ],
             batch_size: 2,
             ..Default::default()
         }

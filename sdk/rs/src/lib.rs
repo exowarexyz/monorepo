@@ -543,7 +543,7 @@ impl PrefixedStoreClient {
         min_sequence_number: Option<u64>,
         observed_sequence: Option<Arc<ObservedSequence>>,
     ) -> Result<GetManyStream, ClientError> {
-        let mut proto_keys: Vec<Vec<u8>> = Vec::with_capacity(keys.len());
+        let mut proto_keys: Vec<Key> = Vec::with_capacity(keys.len());
         for key in keys {
             let encoded = self.encode_store_key(key)?;
             if !is_valid_key_size(encoded.len()) {
@@ -554,7 +554,7 @@ impl PrefixedStoreClient {
                     MAX_KEY_LEN
                 )));
             }
-            proto_keys.push(encoded.to_vec());
+            proto_keys.push(encoded);
         }
         let mut stream = self
             .client
@@ -1309,10 +1309,9 @@ impl GetManyStream {
 
             let mut out = Vec::with_capacity(n);
             for entry in frame.results {
-                let key = Bytes::from(entry.key);
                 let key = match &self.key_prefix {
-                    Some(prefix) => prefix.decode_key(&key)?,
-                    None => key,
+                    Some(prefix) => prefix.decode_key(&entry.key)?,
+                    None => entry.key,
                 };
                 out.push((key, entry.value));
             }
@@ -2059,7 +2058,7 @@ impl StoreClient {
     /// prefix to the returned stream for decoding.
     pub(crate) async fn get_many_internal(
         &self,
-        proto_keys: Vec<Vec<u8>>,
+        proto_keys: Vec<Key>,
         batch_size: u32,
         min_sequence_number: Option<u64>,
         observed_sequence: Option<Arc<ObservedSequence>>,

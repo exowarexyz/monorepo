@@ -532,7 +532,7 @@ mod tests {
     fn get_many_request_bytes(keys: &[&[u8]], batch_size: u32) -> Vec<u8> {
         use buffa::Message;
         exoware_proto::query::GetManyRequest {
-            keys: keys.iter().map(|k| (*k).to_vec()).collect(),
+            keys: keys.iter().map(|k| Bytes::copy_from_slice(k)).collect(),
             batch_size,
             ..Default::default()
         }

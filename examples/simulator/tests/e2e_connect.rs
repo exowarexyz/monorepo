@@ -124,7 +124,7 @@ async fn generated_stream_preserves_compression_capabilities() {
         );
         let mut stream = query
             .get_many(GetManyRequest {
-                keys: vec![key.to_vec()],
+                keys: vec![key.clone()],
                 min_sequence_number: Some(sequence),
                 batch_size: 1,
                 ..Default::default()

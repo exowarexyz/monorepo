@@ -180,7 +180,7 @@ impl Service for Store {
                 .rev()
                 .map(|key| GetManyEntry {
                     key: key.clone(),
-                    value: state.rows.get(key.as_slice()).cloned(),
+                    value: state.rows.get(&key[..]).cloned(),
                     ..Default::default()
                 })
                 .collect::<Vec<_>>();
@@ -925,7 +925,7 @@ async fn operations_multi_proof_reads_rows_and_nodes_in_one_batch() {
     publication_range(&calls);
     let batch = boundary_batch(&calls, 14);
     for location in locations {
-        assert!(batch.keys.contains(&key(4, location)));
+        assert!(batch.keys.contains(&Bytes::from(key(4, location))));
     }
     assert!(batch.keys.len() > locations.len());
 
@@ -1141,7 +1141,7 @@ async fn ordered_and_immutable_overlap_wire_reads_and_verify_typed_proofs() {
         assert_eq!(range.start.as_ref(), key(4, 2));
         assert_eq!(range.end.as_ref(), key(4, 10));
         assert_eq!(
-            batch.keys.contains(&key(9, 14)),
+            batch.keys.contains(&Bytes::from(key(9, 14))),
             matches!(variant, HistoricalVariant::Ordered)
         );
         assert!(batch.keys.iter().any(|key| key[0] == NODE_FAMILY));
@@ -1251,9 +1251,9 @@ async fn ordered_and_immutable_clones_reuse_publication_and_proof_caches() {
             .collect::<Vec<_>>();
         assert_eq!(batches.len(), 2);
         let batch = batches[0];
-        assert!(batch.keys.contains(&key(4, 1)));
+        assert!(batch.keys.contains(&Bytes::from(key(4, 1))));
         assert_eq!(
-            batch.keys.contains(&key(9, 14)),
+            batch.keys.contains(&Bytes::from(key(9, 14))),
             matches!(variant, HistoricalVariant::Ordered)
         );
         assert!(batch.keys.iter().all(|key| key[0] != NODE_FAMILY));
@@ -1482,7 +1482,9 @@ async fn missing_witness_is_reloaded_after_a_successful_cached_proof() {
     assert_eq!(error.code, ErrorCode::Internal);
     assert!(error.message.unwrap().contains("witness"));
     let calls = fixture.store.calls();
-    assert!(boundary_batch(&calls, 0).keys.contains(&key(9, 0)));
+    assert!(boundary_batch(&calls, 0)
+        .keys
+        .contains(&Bytes::from(key(9, 0))));
 }
 
 #[tokio::test]
