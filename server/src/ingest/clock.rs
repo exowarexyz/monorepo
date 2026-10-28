@@ -95,7 +95,7 @@ impl PutClock for TokioClock {
 }
 
 /// The error for a Put that ran past its request deadline.
-pub(crate) fn deadline_exceeded() -> ConnectError {
+pub(crate) fn deadline_error() -> ConnectError {
     ConnectError::deadline_exceeded("ingest deadline exceeded")
 }
 
@@ -138,7 +138,7 @@ impl PutDeadline {
         let expiry = Expiry::new(self.clock(), self.at);
         match futures::future::select(std::pin::pin!(future), expiry).await {
             Either::Left((output, _)) => Ok(output),
-            Either::Right(((), _)) => Err(deadline_exceeded()),
+            Either::Right(((), _)) => Err(deadline_error()),
         }
     }
 }

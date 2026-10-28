@@ -12,7 +12,7 @@ use futures::{future::Either, FutureExt};
 use http_body::Body;
 use http_body_util::BodyExt;
 
-use super::clock::{deadline_exceeded, Expiry, PutClock, PutDeadline};
+use super::clock::{deadline_error, Expiry, PutClock, PutDeadline};
 use super::decode::{DecodeOutput, DecodeState, DecodeStep, WireBatch};
 use super::{
     Admission, ByteLease, DecodeBuffers, IngestEvent, IngestObserver, PutChunk, PutError,
@@ -168,6 +168,10 @@ fn wire_limit_error() -> ConnectError {
 
 fn length_mismatch_error() -> ConnectError {
     ConnectError::invalid_argument("request body differs from content length")
+}
+
+fn idle_timeout_error() -> ConnectError {
+    ConnectError::deadline_exceeded("ingest body idle timeout exceeded")
 }
 
 pub trait DecodeExecutor: Send + Sync + 'static {
@@ -373,12 +377,10 @@ impl PutInput {
 
     pub fn check_deadline(&self) -> Result<(), PutError> {
         if self.idle_timed_out() {
-            return Err(
-                ConnectError::deadline_exceeded("ingest body idle timeout exceeded").into(),
-            );
+            return Err(idle_timeout_error().into());
         }
         if self.deadline.expired() {
-            return Err(deadline_exceeded().into());
+            return Err(deadline_error().into());
         }
         Ok(())
     }
@@ -406,10 +408,10 @@ impl PutInput {
         });
         let idle_deadline = idle_wait.as_ref().map(IdleWait::deadline);
         let deadline = idle_deadline.map_or(request_deadline, |idle| idle.min(request_deadline));
-        let timeout_message = if idle_deadline.is_some_and(|idle| idle <= request_deadline) {
-            "ingest body idle timeout exceeded"
+        let timeout_error = if idle_deadline.is_some_and(|idle| idle <= request_deadline) {
+            idle_timeout_error
         } else {
-            "ingest deadline exceeded"
+            deadline_error
         };
         // The deadline is fixed, so one timer serves every frame read below.
         let mut expiry = Expiry::new(clock, deadline);
@@ -424,15 +426,13 @@ impl PutInput {
             // An expired deadline wins over a frame that is already buffered.
             let read = futures::future::poll_fn(|cx| {
                 if clock.now() >= deadline {
-                    return Poll::Ready(Err(ConnectError::deadline_exceeded(timeout_message)));
+                    return Poll::Ready(Err(timeout_error()));
                 }
                 body.as_mut().poll_frame(cx).map(Ok)
             });
             let frame = match futures::future::select(read, &mut expiry).await {
                 Either::Left((frame, _)) => frame?,
-                Either::Right(((), _)) => {
-                    return Err(ConnectError::deadline_exceeded(timeout_message).into())
-                }
+                Either::Right(((), _)) => return Err(timeout_error().into()),
             };
             match frame {
                 Some(Ok(frame)) => {
