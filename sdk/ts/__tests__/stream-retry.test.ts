@@ -2,8 +2,9 @@ import { create, toBinary } from '@bufbuild/protobuf';
 import { encodeEnvelope } from '@connectrpc/connect/protocol';
 import { Client } from '../src/client';
 import { HttpError } from '../src/error';
+import { SubscribeResponseSchema } from '../src/gen/ts/log/v1/stream_pb';
 import { GetManyFrameSchema, RangeFrameSchema } from '../src/gen/ts/store/v1/query_pb';
-import { StoreClient } from '../src/store';
+import { StoreClient, type StoreBatch } from '../src/store';
 
 const rows = [
     { key: new Uint8Array([1]), value: new Uint8Array([10]) },
@@ -38,12 +39,16 @@ function streamResponse(frames: Uint8Array[], code?: string): Response {
     }), { headers: { 'content-type': 'application/connect+proto' } });
 }
 
-function read(method: Method, maxAttempts = 2) {
-    const store = new StoreClient(new Client('http://query-retry.test', {
+function storeClient(maxAttempts: number): StoreClient {
+    return new StoreClient(new Client('http://stream-retry.test', {
         token: '',
         useBinaryFormat: true,
         retry: { maxAttempts, initialBackoffMs: 0, maxBackoffMs: 0 },
     }));
+}
+
+function read(method: Method, maxAttempts = 2) {
+    const store = storeClient(maxAttempts);
     return method === 'range'
         ? store.query(new Uint8Array([0]), new Uint8Array([9])).then((result) => result.results)
         : store.getMany(rows.map((row) => row.key));
@@ -98,6 +103,35 @@ describe.each(methods)('%s', (method) => {
     test('accepts a stream that ends without a frame', async () => {
         const { fetch } = mockFetch(() => streamResponse([]));
         await expect(read(method)).resolves.toEqual([]);
+        expect(fetch).toHaveBeenCalledTimes(1);
+    });
+});
+
+describe('subscribe', () => {
+    const batch = { sequenceNumber: 7n, entries: [rows[0]] };
+    const frame = toBinary(SubscribeResponseSchema, create(SubscribeResponseSchema, batch));
+
+    async function subscribe() {
+        const batches: StoreBatch[] = [];
+        for await (const received of storeClient(2).subscribe({ selectors: [] })) batches.push(received);
+        return batches;
+    }
+
+    test('retries an HTTP error status with the same request', async () => {
+        const { fetch, bodies } = mockFetch(
+            () => new Response(null, { status: 503 }),
+            () => streamResponse([frame]),
+        );
+        await expect(subscribe()).resolves.toEqual([batch]);
+        expect(fetch).toHaveBeenCalledTimes(2);
+        expect(bodies[1]).toEqual(bodies[0]);
+    });
+
+    // Subscribe does not wait for its first frame, which may not arrive for a long time, so an
+    // error inside the HTTP 200 body reaches the caller.
+    test('does not retry an error in the stream body', async () => {
+        const { fetch } = mockFetch(() => streamResponse([], 'unavailable'));
+        await expect(subscribe()).rejects.toBeInstanceOf(HttpError);
         expect(fetch).toHaveBeenCalledTimes(1);
     });
 });

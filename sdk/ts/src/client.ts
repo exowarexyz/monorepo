@@ -138,8 +138,9 @@ function makeRetryInterceptor(config: RetryConfig): Interceptor {
         const isPut = req.service.typeName === IngestService.typeName && req.method.name === IngestService.method.put.name;
         const deadline = isPut ? putDeadline(req.header) : undefined;
         const prefetch = PREFETCHED_STREAMS.has(req.method);
-        if (prefetch && req.stream) {
+        if (req.stream) {
             // Each retry must serialize the same input after Connect consumes its request iterator.
+            // Every streaming RPC here is server streaming, so the input is a single message.
             const input = await req.message[Symbol.asyncIterator]().next();
             req = {
                 ...req,
