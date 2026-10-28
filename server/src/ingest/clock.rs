@@ -1,10 +1,11 @@
 use std::{
     future::Future,
     sync::Arc,
+    task::Poll,
     time::{Duration, SystemTime},
 };
 
-use futures::future::{BoxFuture, Either};
+use futures::future::BoxFuture;
 
 /// Source of time for Put deadlines and timings.
 ///
@@ -123,9 +124,43 @@ pub(crate) async fn timeout_at<F: Future>(
     deadline: SystemTime,
     future: F,
 ) -> Result<F::Output, Elapsed> {
-    let future = std::pin::pin!(future);
-    match futures::future::select(future, clock.sleep_until(deadline)).await {
-        Either::Left((output, _)) => Ok(output),
-        Either::Right(((), _)) => Err(Elapsed),
+    let mut future = std::pin::pin!(future);
+    let mut expiry = None;
+    std::future::poll_fn(|cx| {
+        if let Poll::Ready(output) = future.as_mut().poll(cx) {
+            return Poll::Ready(Ok(output));
+        }
+        // A future that spends Tokio's cooperative budget makes a Tokio timer
+        // report Pending even after its deadline, so read the clock directly.
+        if clock.now() >= deadline {
+            return Poll::Ready(Err(Elapsed));
+        }
+        let expiry = expiry.get_or_insert_with(|| clock.sleep_until(deadline));
+        expiry.as_mut().poll(cx).map(|()| Err(Elapsed))
+    })
+    .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn deadline_fires_after_the_future_spends_the_coop_budget() {
+        let clock = TokioClock::new();
+        // Every poll spends Tokio's cooperative budget, which makes a Tokio timer
+        // polled afterwards return Pending.
+        let busy = async {
+            loop {
+                tokio::task::consume_budget().await;
+            }
+        };
+        let result = tokio::time::timeout(
+            Duration::from_secs(1),
+            timeout_at(&clock, clock.now() + Duration::from_millis(10), busy),
+        )
+        .await;
+
+        assert!(matches!(result, Ok(Err(Elapsed))), "deadline did not fire");
     }
 }
