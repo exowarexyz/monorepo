@@ -65,6 +65,7 @@ pub(crate) fn build_scan_access_path_diagnostics(
     index_specs: &[ResolvedIndexSpec],
     predicate: &QueryPredicate,
     access_plan: &ScanAccessPlan,
+    index_plan: Option<&IndexPlan>,
     complete_ranges: bool,
 ) -> DataFusionResult<AccessPathDiagnostics> {
     if predicate.contradiction {
@@ -79,7 +80,7 @@ pub(crate) fn build_scan_access_path_diagnostics(
         });
     }
 
-    if let Some(index_plan) = predicate.choose_index_plan(model, index_specs, access_plan)? {
+    if let Some(index_plan) = index_plan {
         let spec = &index_specs[index_plan.spec_idx];
         let exact =
             complete_ranges && access_plan.predicate_fully_enforced_by_index_key(model, spec);

@@ -15,7 +15,6 @@ use exoware_sdk::kv_codec::decode_stored_row;
 use exoware_sdk::PrefixedStoreClient;
 
 use crate::codec::*;
-use crate::predicate::*;
 use crate::scan::*;
 use crate::types::*;
 use crate::writer::*;
@@ -430,22 +429,9 @@ impl TableProvider for KvTable {
         filters: &[Expr],
         limit: Option<usize>,
     ) -> DataFusionResult<Arc<dyn ExecutionPlan>> {
-        let predicate = QueryPredicate::from_filters(filters, &self.model);
-        let projected_schema = match projection {
-            Some(proj) => Arc::new(self.model.schema.project(proj)?),
-            None => self.model.schema.clone(),
-        };
-        let mut scan = KvScanExec::new(
-            self.client.clone(),
-            self.model.clone(),
-            self.index_specs.clone(),
-            predicate,
-            limit,
-            projected_schema,
-            projection.cloned(),
-        );
-        scan.set_filters(state, filters)?;
-        Ok(Arc::new(scan))
+        Ok(Arc::new(KvScanExec::try_new(
+            self, state, projection, filters, limit,
+        )?))
     }
 
     async fn insert_into(

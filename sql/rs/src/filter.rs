@@ -98,7 +98,7 @@ pub(crate) enum EncodedConstraintCompile {
     Impossible,
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub(crate) struct ScanAccessPlan {
     pub(crate) required_pk_mask: Vec<bool>,
     pub(crate) required_non_pk_columns: Vec<bool>,

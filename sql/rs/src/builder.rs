@@ -336,7 +336,7 @@ pub(crate) fn append_archived_non_pk_value(
     Ok(())
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub(crate) enum ProjectionSource {
     Pk { col_idx: usize, pk_pos: usize },
     NonPk { col_idx: usize, col: ResolvedColumn },
