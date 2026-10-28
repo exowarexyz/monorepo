@@ -174,10 +174,9 @@ where
                     Some(current_key_lookup_result::Result::Miss(proof)) => {
                         verify_key_exclusion_from_proto::<F, H, K, V, N, E>(
                             proof,
-                            requested_key.as_slice(),
+                            &decoded_requested_key,
                             root,
                             &self.update_cfg,
-                            &self.key_cfg,
                             &self.value_cfg,
                         )?;
                         Ok(VerifiedKeyLookup::Miss {

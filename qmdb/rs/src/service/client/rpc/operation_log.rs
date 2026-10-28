@@ -15,7 +15,6 @@ use commonware_storage::{
         sync::{
             source, Request as SyncRequest, Response as SyncResponse, Source, Target as SyncTarget,
         },
-        verify::{verify_multi_proof, verify_proof_and_pinned_nodes},
     },
 };
 use commonware_utils::range::NonEmptyRange;
@@ -489,7 +488,23 @@ where
         .collect::<Result<Vec<_>, QmdbError>>()?;
     let target_root =
         historical_target_root::<F, H>(&proto.ops_root, &proto.ops_root_witness, root)?;
-    if !verify_multi_proof::<H, _, _>(proof, &operations, &target_root) {
+    // Hash the operation bytes as received, so the proof authenticates exactly
+    // the bytes decoded above.
+    let elements = proto
+        .operations
+        .iter()
+        .map(|op| {
+            (
+                op.encoded_operation.as_ref(),
+                Location::<F>::new(op.location),
+            )
+        })
+        .collect::<Vec<_>>();
+    if !proof.verify_multi_inclusion(
+        &commonware_storage::qmdb::hasher::<H>(),
+        &elements,
+        &target_root,
+    ) {
         return Err(QmdbError::ProofVerification {
             kind: crate::ProofKind::BatchMulti,
         });
@@ -548,10 +563,10 @@ where
             decode_digest::<H::Digest>(bytes.as_ref(), "historical operation range pinned node")
         })
         .collect::<Result<Vec<_>, QmdbError>>()?;
-    if !verify_proof_and_pinned_nodes::<H, _, _>(
-        &proof,
+    if !proof.verify_proof_and_pinned_nodes(
+        &commonware_storage::qmdb::hasher::<H>(),
+        &proto.encoded_operations,
         start,
-        &decoded_operations,
         &pinned_nodes,
         &target_root,
     ) {
