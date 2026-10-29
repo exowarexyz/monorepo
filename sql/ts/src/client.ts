@@ -112,8 +112,7 @@ function decodeColumn(column: SqlColumn): DecodedColumn {
   };
 }
 
-function decodeIndex(index: SqlIndex, columnNames: string[]): DecodedIndex {
-  const lookup = (idx: number) => columnNames[idx] ?? `#${idx}`;
+function decodeIndex(index: SqlIndex, lookup: (idx: number) => string): DecodedIndex {
   return {
     name: index.name,
     layout: decodeLayout(index.layout),
@@ -130,7 +129,7 @@ function decodeTable(table: SqlTable): DecodedTable {
     name: table.name,
     columns,
     primaryKeyColumns: table.primaryKeyColumns.map(lookup),
-    indexes: table.indexes.map((index) => decodeIndex(index, columnNames)),
+    indexes: table.indexes.map((index) => decodeIndex(index, lookup)),
   };
 }
 

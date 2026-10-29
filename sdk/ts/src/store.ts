@@ -44,7 +44,7 @@ import {
     SubscribeRequestSchema,
 } from './gen/ts/log/v1/stream_pb.js';
 
-type DetailObserver = (detail: Detail) => void;
+type SequenceObserver = (sequenceNumber: bigint) => void;
 
 export { TraversalMode };
 
@@ -169,12 +169,8 @@ export class StoreKeyPrefix {
     }
 }
 
-function toUint8Array(value: Uint8Array | Buffer): Uint8Array {
-    return value instanceof Uint8Array ? value : new Uint8Array(value);
-}
-
 function copyBytes(value: Uint8Array | Buffer): Uint8Array {
-    return new Uint8Array(toUint8Array(value));
+    return new Uint8Array(value);
 }
 
 function encodeStoreKey(prefix: StoreKeyPrefix | undefined, key: Uint8Array): Uint8Array {
@@ -515,7 +511,7 @@ async function performGet(
     client: Client,
     key: Uint8Array,
     minSequenceNumber?: bigint,
-    detailObserver?: DetailObserver,
+    sequenceObserver?: SequenceObserver,
     prefix?: StoreKeyPrefix,
     options?: CallOptions,
 ): Promise<GetResult | null> {
@@ -527,7 +523,7 @@ async function performGet(
     try {
         const res = await client.query.get(req, options);
         if (res.detail) {
-            detailObserver?.(res.detail);
+            sequenceObserver?.(res.detail.sequenceNumber);
         }
         if (res.value === undefined) {
             return null;
@@ -544,7 +540,7 @@ async function performGetMany(
     batchSize?: number,
     onChunk?: (entries: GetManyResultItem[]) => void,
     minSequenceNumber?: bigint,
-    detailObserver?: DetailObserver,
+    sequenceObserver?: SequenceObserver,
     prefix?: StoreKeyPrefix,
 ): Promise<GetManyResultItem[]> {
     const effective = normalizeMinSequenceNumber(minSequenceNumber);
@@ -558,7 +554,7 @@ async function performGetMany(
         const stream = client.query.getMany(req);
         for await (const frame of stream) {
             if (frame.detail) {
-                detailObserver?.(frame.detail);
+                sequenceObserver?.(frame.detail.sequenceNumber);
             }
             const chunk: GetManyResultItem[] = [];
             for (const entry of frame.results) {
@@ -586,7 +582,7 @@ async function performQuery(
     batchSize: number = 4096,
     mode: TraversalMode = TraversalMode.FORWARD,
     minSequenceNumber?: bigint,
-    detailObserver?: DetailObserver,
+    sequenceObserver?: SequenceObserver,
     prefix?: StoreKeyPrefix,
     options?: CallOptions,
 ): Promise<QueryResult> {
@@ -610,7 +606,7 @@ async function performQuery(
             }
             if (frame.detail) {
                 sequenceNumber = frame.detail.sequenceNumber;
-                detailObserver?.(frame.detail);
+                sequenceObserver?.(frame.detail.sequenceNumber);
             }
         }
         return { sequenceNumber, results };
@@ -625,7 +621,7 @@ async function* performReduce(
     end: Uint8Array,
     params: ReduceParams,
     minSequenceNumber?: bigint,
-    detailObserver?: DetailObserver,
+    sequenceObserver?: SequenceObserver,
     prefix?: StoreKeyPrefix,
 ): AsyncIterable<ReduceResponse> {
     const effective = normalizeMinSequenceNumber(minSequenceNumber);
@@ -640,7 +636,7 @@ async function* performReduce(
     try {
         for await (const frame of client.query.reduce(req, { signal: controller.signal })) {
             if (frame.detail) {
-                detailObserver?.(frame.detail);
+                sequenceObserver?.(frame.detail.sequenceNumber);
             }
             yield frame;
         }
@@ -817,10 +813,6 @@ export class ReadSession {
         return session;
     }
 
-    private observe(detail: Detail): void {
-        this.observeSequence(detail.sequenceNumber);
-    }
-
     private observeSequence(sequenceNumber: bigint): void {
         if (this.state.sequence === undefined || sequenceNumber > this.state.sequence) {
             this.state.sequence = sequenceNumber;
@@ -832,7 +824,7 @@ export class ReadSession {
             this.client,
             key,
             this.minSequenceNumber(),
-            (detail) => this.observe(detail),
+            (sequence) => this.observeSequence(sequence),
             this.keyPrefix,
             options,
         );
@@ -849,7 +841,7 @@ export class ReadSession {
             batchSize,
             onChunk,
             this.minSequenceNumber(),
-            (detail) => this.observe(detail),
+            (sequence) => this.observeSequence(sequence),
             this.keyPrefix,
         );
     }
@@ -870,7 +862,7 @@ export class ReadSession {
             batchSize,
             mode,
             this.minSequenceNumber(),
-            (detail) => this.observe(detail),
+            (sequence) => this.observeSequence(sequence),
             this.keyPrefix,
             options,
         );
@@ -887,7 +879,7 @@ export class ReadSession {
             end,
             params,
             this.minSequenceNumber(),
-            (detail) => this.observe(detail),
+            (sequence) => this.observeSequence(sequence),
             this.keyPrefix,
         );
     }
@@ -962,7 +954,7 @@ export class StoreClient {
     async setMany(kvs: { key: Uint8Array; value: Uint8Array | Buffer }[]): Promise<bigint> {
         return this.putEntries(kvs.map((kv) => create(EntrySchema, {
             key: this.encodeStoreKey(kv.key),
-            value: toUint8Array(kv.value),
+            value: kv.value,
         })));
     }
 
