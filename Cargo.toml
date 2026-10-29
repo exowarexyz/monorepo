@@ -24,9 +24,7 @@ crossbeam-utils = "0.8.22"
 exoware-qmdb = { version = "2026.9.0", path = "qmdb/rs" }
 exoware-sdk = { version = "2026.9.0", path = "sdk/rs" }
 exoware-server = { version = "2026.9.0", path = "server" }
-exoware-simplex = { version = "2026.9.0", path = "simplex/rs" }
 exoware-sql = { version = "2026.9.0", path = "sql/rs" }
-exoware-validation = { version = "2026.9.0", path = "validation" }
 tokio = "1.43.0"
 clap = "4.5.18"
 tracing = "0.1.41"
@@ -82,10 +80,6 @@ overflow-checks = true
 
 [profile.release]
 overflow-checks = true
-
-[profile.release-with-debug]
-inherits = "release"
-debug = true
 
 [profile.test]
 overflow-checks = true

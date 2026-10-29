@@ -28,8 +28,6 @@ http-body = "1"
 regex = { workspace = true }
 commonware-codec = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
-serde_json = "1"
-thiserror = { workspace = true }
 tokio = { workspace = true }
 tower-http = { workspace = true, features = ["cors"] }
 tracing = { workspace = true }
@@ -43,9 +41,7 @@ connectrpc-build = { workspace = true }
 criterion = { workspace = true }
 exoware-simulator = { path = "../../examples/simulator" }
 exoware-server = { workspace = true }
-futures = { workspace = true }
-reqwest = { workspace = true }
-serde = { workspace = true }
+serde_json = "1"
 
 [[bench]]
 name = "read_path_perf"
