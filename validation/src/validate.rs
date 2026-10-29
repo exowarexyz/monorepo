@@ -2187,8 +2187,7 @@ mod tests {
         };
         assert!(detail.contains("range page exceeded its 10ms bound"));
         assert!(detail.contains("matched 0 of 1 expected rows"));
-        // The observed page latency is what makes the next CI occurrence data
-        // rather than another argument about the bound.
+        // Include the observed page latency so timeout failures can be diagnosed.
         assert!(
             detail.contains("slowest page"),
             "a stall must report the page latency it observed: {detail}"
