@@ -385,10 +385,7 @@ async fn publication_cache_hits_bypass_blocked_miss_and_refresh() {
 
     let (session, permits, mut starts, _) = gated_session(&url);
     let cache = PublicationCache::<mmr::Family>::default();
-    {
-        let _gate = cache.refresh_gate.lock().await;
-        cache.remember(Some(covered), sequence);
-    }
+    cache.remember(Some(covered), sequence);
 
     let miss = cache.require(&session, Location::new(10));
     tokio::pin!(miss);
@@ -481,10 +478,7 @@ async fn publication_cache_failed_lookup_preserves_evidence_and_allows_retry() {
 
     let (session, permits, mut starts, origin) = gated_session(&bad_url);
     let cache = PublicationCache::<mmr::Family>::default();
-    {
-        let _gate = cache.refresh_gate.lock().await;
-        cache.remember(Some(covered), covered_sequence);
-    }
+    cache.remember(Some(covered), covered_sequence);
 
     let failed = cache.require(&session, requested);
     tokio::pin!(failed);
@@ -536,14 +530,14 @@ async fn publication_lookups_respect_sdk_retry_budget() {
         assert!(matches!(error, QmdbError::Client(ref error)
             if error.rpc_code() == Some(connectrpc::ErrorCode::Aborted)));
         assert_eq!(calls.load(Ordering::SeqCst), attempts);
-        assert!(cache.published.load().is_none());
+        assert!(cache.published().is_none());
 
         calls.store(0, Ordering::SeqCst);
         let error = cache.require(&session, Location::new(0)).await.unwrap_err();
         assert!(matches!(error, QmdbError::Client(ref error)
             if error.rpc_code() == Some(connectrpc::ErrorCode::Aborted)));
         assert_eq!(calls.load(Ordering::SeqCst), attempts);
-        assert!(cache.published.load().is_none());
+        assert!(cache.published().is_none());
     }
 }
 
@@ -568,19 +562,17 @@ async fn publication_cache_observations_answer_requires_without_store_reads() {
         "observed watermarks need no lookup"
     );
 
-    // A refresh in progress keeps its gate; the observation is skipped.
+    // A lookup in progress holds the gate, and the observation still lands.
     {
         let _gate = cache.refresh_gate.lock().await;
         cache.observe(Location::new(12), 60);
     }
-    let published = cache.published.load();
-    assert_eq!(published.as_ref().unwrap().location.as_u64(), 8);
+    assert_eq!(cache.published_sequence(Location::new(12)), Some(60));
 }
 
-#[tokio::test]
-async fn publication_cache_keeps_sequence_paired_with_greatest_watermark() {
+#[test]
+fn publication_cache_keeps_sequence_paired_with_greatest_watermark() {
     let cache = PublicationCache::<mmr::Family>::default();
-    let _gate = cache.refresh_gate.lock().await;
     for (location, sequence, expected_location, expected_sequence) in [
         (Some(5), 100, 5, 100),
         (Some(3), 200, 5, 100),
@@ -590,8 +582,7 @@ async fn publication_cache_keeps_sequence_paired_with_greatest_watermark() {
         (Some(8), 110, 8, 110),
     ] {
         cache.remember(location.map(Location::new), sequence);
-        let published = cache.published.load();
-        let known = published.as_ref().unwrap();
+        let known = cache.published().unwrap();
         assert_eq!(known.location.as_u64(), expected_location);
         assert_eq!(known.sequence_number, expected_sequence);
     }
