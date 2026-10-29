@@ -79,13 +79,14 @@ where
         request: ServiceRequest<'_, GetRangeRequest>,
     ) -> impl Future<Output = connectrpc::ServiceResult<PreEncoded<GetRangeResponse>>> + Send {
         let reader = self.reader.clone();
-        let key_cfg = self.key_cfg.clone();
+        let start_key = decode_key::<R::Key>(request.start_key, &self.key_cfg);
+        let end_key = request
+            .end_key
+            .map(|key| decode_key::<R::Key>(key, &self.key_cfg))
+            .transpose();
         async move {
-            let start_key = decode_key::<R::Key>(request.start_key, &key_cfg)?;
-            let end_key = request
-                .end_key
-                .map(|key| decode_key::<R::Key>(key, &key_cfg))
-                .transpose()?;
+            let start_key = start_key?;
+            let end_key = end_key?;
             let proof = reader
                 .key_range_proof(
                     Location::new(request.tip),

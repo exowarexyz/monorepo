@@ -82,9 +82,9 @@ impl<R: KeyLookupReader<N>, const N: usize> KeyLookupService for KeyLookupServer
         request: ServiceRequest<'_, GetRequest>,
     ) -> impl Future<Output = connectrpc::ServiceResult<PreEncoded<GetResponse>>> + Send {
         let reader = self.reader.clone();
-        let key_cfg = self.key_cfg.clone();
+        let key = decode_key::<R::Key>(request.key, &self.key_cfg);
         async move {
-            let key = decode_key::<R::Key>(request.key, &key_cfg)?;
+            let key = key?;
             let proof = reader
                 .key_value_proof(
                     Location::new(request.tip),
@@ -103,13 +103,13 @@ impl<R: KeyLookupReader<N>, const N: usize> KeyLookupService for KeyLookupServer
         request: ServiceRequest<'_, GetManyRequest>,
     ) -> impl Future<Output = connectrpc::ServiceResult<PreEncoded<GetManyResponse>>> + Send {
         let reader = self.reader.clone();
-        let key_cfg = self.key_cfg.clone();
+        let keys = request
+            .keys
+            .iter()
+            .map(|key| decode_key::<R::Key>(key, &self.key_cfg))
+            .collect::<Result<Vec<_>, _>>();
         async move {
-            let keys = request
-                .keys
-                .iter()
-                .map(|key| decode_key::<R::Key>(key, &key_cfg))
-                .collect::<Result<Vec<_>, _>>()?;
+            let keys = keys?;
             let proofs = reader
                 .key_lookup_proofs(
                     Location::new(request.tip),
