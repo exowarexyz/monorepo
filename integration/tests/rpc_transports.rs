@@ -36,7 +36,10 @@ fn all_keys_filter() -> StreamFilter {
 fn store_app() -> Router {
     let data_dir = tempfile::tempdir().unwrap();
     let engine = Arc::new(RocksStore::open_owned(data_dir, None).unwrap());
-    Router::new().fallback_service(connect_stack(AppState::new(engine)))
+    Router::new().fallback_service(connect_stack(AppState::new(
+        exoware_server::runtime::TokioRuntime::current(),
+        engine,
+    )))
 }
 
 async fn tls_store_with_protocol(

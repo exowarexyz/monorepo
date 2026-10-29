@@ -269,8 +269,13 @@ where
     let port = listener.local_addr().expect("local addr").port();
     let url = format!("http://127.0.0.1:{port}");
     let handle = tokio::spawn(async move {
-        let _ =
-            exoware_server::ingest::transport::serve(listener, app, std::future::pending()).await;
+        let _ = exoware_server::ingest::transport::serve(
+            exoware_server::runtime::TokioRuntime::current(),
+            listener,
+            app,
+            std::future::pending(),
+        )
+        .await;
     });
     wait_for_health(&url).await;
     (handle, url)
@@ -474,7 +479,7 @@ pub async fn counting_store() -> (
         overlap: Default::default(),
     });
     let (store_server, store_url) = spawn_connect_service(exoware_server::connect_stack(
-        exoware_server::AppState::new(store),
+        exoware_server::AppState::new(exoware_server::runtime::TokioRuntime::current(), store),
     ))
     .await;
     let (query_server, query_url) = spawn_connect_service(exoware_server::query_service(

@@ -23,7 +23,8 @@ use exoware_sdk::log::ingest::v1::PutRequest;
 use exoware_server::ingest::{
     box_body, BudgetConfig, IngestBudget, IngestEvent, IngestObserver, PutLimits, PutMetadata,
 };
-use exoware_server::{Ingest, PutDeadline, PutInput, TokioClock};
+use exoware_server::runtime::{Runtime, TokioRuntime};
+use exoware_server::{Deadline, Ingest, PutInput};
 use exoware_simulator::RocksStore;
 
 // Track Rust allocations across decode tasks and writer threads, including spare
@@ -171,6 +172,10 @@ async fn run(
     fragment_bytes: usize,
     observed: Arc<Observed>,
 ) -> (f64, usize, usize) {
+    let runtime = TokioRuntime::current();
+    let decode = Arc::new(exoware_server::ingest::RuntimeDecodeExecutor(
+        runtime.clone(),
+    ));
     let mut queues: Vec<Vec<Batch>> = (0..writers).map(|_| Vec::new()).collect();
     for (index, batch) in batches.into_iter().enumerate() {
         queues[index % writers].push(batch);
@@ -183,6 +188,8 @@ async fn run(
     for queue in queues {
         let store = store.clone();
         let observed = observed.clone();
+        let runtime = runtime.clone();
+        let decode = decode.clone();
         tasks.push(tokio::spawn(async move {
             for batch in queue {
                 match batch {
@@ -211,11 +218,9 @@ async fn run(
                                 ..Default::default()
                             },
                             PutLimits::default(),
-                            PutDeadline::after(
-                                Arc::new(TokioClock::new()),
-                                Duration::from_secs(300),
-                            ),
+                            Deadline::after(runtime.clock(), Duration::from_secs(300)),
                             admission,
+                            decode.clone(),
                         )
                         .with_observer(observed.clone());
                         store.put(&mut input).await.expect("streaming put");

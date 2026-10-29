@@ -185,6 +185,7 @@ pub struct AppState<E> {
     /// Limits enforced by the ingest service before writing.
     pub ingest_limits: IngestLimits,
     pub put_config: crate::ingest::service::PutConfig,
+    pub runtime: Arc<dyn crate::runtime::Runtime>,
     /// Gates ingest (writes) only. The read and administrative services remain available during
     /// drains so that in-flight reads can complete while the worker sheds write traffic.
     pub ready: Arc<AtomicBool>,
@@ -198,6 +199,7 @@ impl<E> Clone for AppState<E> {
             engine: self.engine.clone(),
             ingest_limits: self.ingest_limits,
             put_config: self.put_config.clone(),
+            runtime: self.runtime.clone(),
             ready: self.ready.clone(),
             stream: self.stream.clone(),
         }
@@ -208,12 +210,13 @@ impl<E> AppState<E>
 where
     E: StoreEngine,
 {
-    pub fn new(engine: Arc<E>) -> Self {
+    pub fn new(runtime: Arc<dyn crate::runtime::Runtime>, engine: Arc<E>) -> Self {
         let current_sequence = engine.current_sequence();
         Self {
             engine,
             ingest_limits: IngestLimits::default(),
             put_config: crate::ingest::service::PutConfig::default(),
+            runtime,
             ready: Arc::new(AtomicBool::new(true)),
             stream: Arc::new(StreamHub::new(current_sequence)),
         }
@@ -236,6 +239,7 @@ pub struct IngestState<I> {
     /// Limits enforced before writes reach the backend.
     pub limits: IngestLimits,
     pub put_config: crate::ingest::service::PutConfig,
+    pub runtime: Arc<dyn crate::runtime::Runtime>,
     /// Gates ingest writes only.
     pub ready: Arc<AtomicBool>,
     /// Optional live-stream notifier.
@@ -248,6 +252,7 @@ impl<I> Clone for IngestState<I> {
             ingest: self.ingest.clone(),
             limits: self.limits,
             put_config: self.put_config.clone(),
+            runtime: self.runtime.clone(),
             ready: self.ready.clone(),
             notifier: self.notifier.clone(),
         }
@@ -258,21 +263,27 @@ impl<I> IngestState<I>
 where
     I: Ingest,
 {
-    pub fn new(ingest: Arc<I>) -> Self {
+    pub fn new(runtime: Arc<dyn crate::runtime::Runtime>, ingest: Arc<I>) -> Self {
         Self {
             ingest,
             limits: IngestLimits::default(),
             put_config: crate::ingest::service::PutConfig::default(),
+            runtime,
             ready: Arc::new(AtomicBool::new(true)),
             notifier: None,
         }
     }
 
-    pub fn with_notifier(ingest: Arc<I>, notifier: Arc<dyn StreamNotifier>) -> Self {
+    pub fn with_notifier(
+        runtime: Arc<dyn crate::runtime::Runtime>,
+        ingest: Arc<I>,
+        notifier: Arc<dyn StreamNotifier>,
+    ) -> Self {
         Self {
             ingest,
             limits: IngestLimits::default(),
             put_config: crate::ingest::service::PutConfig::default(),
+            runtime,
             ready: Arc::new(AtomicBool::new(true)),
             notifier: Some(notifier),
         }
@@ -294,6 +305,7 @@ impl<E> From<AppState<E>> for IngestState<E> {
             ingest: state.engine,
             limits: state.ingest_limits,
             put_config: state.put_config,
+            runtime: state.runtime,
             ready: state.ready,
             notifier: Some(state.stream),
         }
@@ -2483,7 +2495,10 @@ mod tests {
             "scanned_bytes".to_string(),
             buffa_types::google::protobuf::Value::from(123.0),
         )]));
-        let connect = QueryConnect::new(AppState::new(engine));
+        let connect = QueryConnect::new(AppState::new(
+            crate::runtime::TokioRuntime::current(),
+            engine,
+        ));
         let bytes = exoware_proto::query::GetRequest {
             key: b"k".to_vec(),
             ..Default::default()
@@ -2630,7 +2645,10 @@ mod tests {
         let engine = Arc::new(FakeEngine::default());
         engine.set_current_sequence(100);
         engine.set_query_sequence(7);
-        let connect = QueryConnect::new(AppState::new(engine.clone()));
+        let connect = QueryConnect::new(AppState::new(
+            crate::runtime::TokioRuntime::current(),
+            engine.clone(),
+        ));
         assert_eq!(query_rpc_sequences(&connect, None).await, [7; 4]);
 
         assert_eq!(query_rpc_sequences(&connect, Some(5)).await, [7; 4]);
@@ -2780,7 +2798,10 @@ mod tests {
         let engine = Arc::new(FakeEngine::default());
         engine.set_current_sequence(7);
         engine.set_query_sequence(7);
-        let connect = QueryConnect::new(AppState::new(engine.clone()));
+        let connect = QueryConnect::new(AppState::new(
+            crate::runtime::TokioRuntime::current(),
+            engine.clone(),
+        ));
 
         let bytes = exoware_proto::query::RangeRequest {
             start: Vec::new(),
@@ -2838,10 +2859,10 @@ mod tests {
         assert!(reduce.next().await.is_none());
     }
 
-    #[test]
-    fn split_service_constructors_build_independent_process_surfaces() {
+    #[tokio::test]
+    async fn split_service_constructors_build_independent_process_surfaces() {
         let engine = Arc::new(FakeEngine::default());
-        let state = AppState::new(engine);
+        let state = AppState::new(crate::runtime::TokioRuntime::current(), engine);
 
         let _ingest = ingest_service(state.clone().into());
         let _query = query_service(state.clone().into());
@@ -2854,10 +2875,12 @@ mod tests {
     #[tokio::test]
     async fn ingest_uses_configured_value_limit() {
         let engine = Arc::new(FakeEngine::default());
-        let state = IngestState::new(engine).with_limits(IngestLimits {
-            max_value_len: 4,
-            ..IngestLimits::default()
-        });
+        let state = IngestState::new(crate::runtime::TokioRuntime::current(), engine).with_limits(
+            IngestLimits {
+                max_value_len: 4,
+                ..IngestLimits::default()
+            },
+        );
         let connect = state;
 
         let request = put_request(5);
@@ -2878,10 +2901,11 @@ mod tests {
     #[tokio::test]
     async fn put_limits_round_trip_through_sdk() {
         let engine = Arc::new(FakeEngine::default());
-        let state = AppState::new(engine.clone()).with_ingest_limits(IngestLimits {
-            max_entries: 2,
-            ..IngestLimits::default()
-        });
+        let state = AppState::new(crate::runtime::TokioRuntime::current(), engine.clone())
+            .with_ingest_limits(IngestLimits {
+                max_entries: 2,
+                ..IngestLimits::default()
+            });
         let client = StoreClient::builder()
             .url("http://store.test")
             .client_transport(ServiceTransport::new(connect_stack(state)))
@@ -2926,6 +2950,7 @@ mod tests {
         let client = StoreClient::builder()
             .url("http://store.test")
             .client_transport(ServiceTransport::new(connect_stack(AppState::new(
+                crate::runtime::TokioRuntime::current(),
                 engine.clone(),
             ))))
             .build()
@@ -2957,7 +2982,10 @@ mod tests {
         }
         drop(entries);
         let json_client = exoware_proto::log::stream::v1::ServiceClient::new(
-            ServiceTransport::new(connect_stack(AppState::new(engine))),
+            ServiceTransport::new(connect_stack(AppState::new(
+                crate::runtime::TokioRuntime::current(),
+                engine,
+            ))),
             connectrpc::client::ClientConfig::new("http://store.test".parse().unwrap())
                 .json()
                 .with_default_max_message_size(MAX_RESPONSE_MESSAGE_BYTES)
@@ -3007,6 +3035,7 @@ mod tests {
         let client = StoreClient::builder()
             .url("http://store.test")
             .client_transport(ServiceTransport::new(connect_stack(AppState::new(
+                crate::runtime::TokioRuntime::current(),
                 engine.clone(),
             ))))
             .build()
@@ -3074,7 +3103,7 @@ mod tests {
         engine.set_put_error(IngestError::ResourceExhausted {
             message: "backend capacity exceeded".to_string(),
         });
-        let connect = IngestState::new(engine);
+        let connect = IngestState::new(crate::runtime::TokioRuntime::current(), engine);
         let request = put_request(1);
         let error = dispatch_put(&connect, request).await.unwrap_err();
         assert_eq!(error.code, connectrpc::ErrorCode::ResourceExhausted);
@@ -3089,7 +3118,7 @@ mod tests {
             max_entries: 2,
         };
         engine.set_put_error(error.into());
-        let connect = IngestState::new(engine);
+        let connect = IngestState::new(crate::runtime::TokioRuntime::current(), engine);
         let request = put_request(1);
         let actual = dispatch_put(&connect, request).await.unwrap_err();
         let expected = validate::put_too_large_error(error);
@@ -3105,7 +3134,7 @@ mod tests {
         engine.set_put_error(IngestError::Unavailable {
             message: "backend bouncing".to_string(),
         });
-        let connect = IngestState::new(engine);
+        let connect = IngestState::new(crate::runtime::TokioRuntime::current(), engine);
 
         let request = put_request(1);
         let err = dispatch_put(&connect, request)
@@ -3129,7 +3158,7 @@ mod tests {
         engine.set_put_error(IngestError::Internal {
             message: "invariant violated".to_string(),
         });
-        let connect = IngestState::new(engine);
+        let connect = IngestState::new(crate::runtime::TokioRuntime::current(), engine);
 
         let request = put_request(1);
         let err = dispatch_put(&connect, request)
@@ -3144,7 +3173,7 @@ mod tests {
     #[tokio::test]
     async fn put_when_not_ready_keeps_worker_not_ready_reason() {
         let engine = Arc::new(FakeEngine::default());
-        let state = IngestState::new(engine);
+        let state = IngestState::new(crate::runtime::TokioRuntime::current(), engine);
         state.ready.store(false, Ordering::SeqCst);
         let connect = state;
 
@@ -3192,7 +3221,10 @@ mod tests {
             (Bytes::from_static(b"a"), Bytes::from_static(b"xx")),
             (Bytes::from_static(b"bb"), Bytes::from_static(b"yyy")),
         ]);
-        let connect = QueryConnect::new(AppState::new(engine.clone()));
+        let connect = QueryConnect::new(AppState::new(
+            crate::runtime::TokioRuntime::current(),
+            engine.clone(),
+        ));
         let bytes = exoware_proto::query::ReduceRequest {
             start: b"a".to_vec(),
             end: b"z".to_vec(),
@@ -3244,7 +3276,10 @@ mod tests {
             (Bytes::from_static(b"bb"), Bytes::from_static(b"yyy")),
         ]);
         engine.set_range_eof_extra(numeric_query_extra("final_rows", 2.0));
-        let connect = QueryConnect::new(AppState::new(engine));
+        let connect = QueryConnect::new(AppState::new(
+            crate::runtime::TokioRuntime::current(),
+            engine,
+        ));
         let bytes = exoware_proto::query::ReduceRequest {
             start: b"a".to_vec(),
             end: b"z".to_vec(),
@@ -3500,7 +3535,10 @@ mod tests {
     async fn get_many_populates_detail_on_each_frame() {
         let engine = Arc::new(FakeEngine::default());
         engine.set_current_sequence(11);
-        let connect = QueryConnect::new(AppState::new(engine));
+        let connect = QueryConnect::new(AppState::new(
+            crate::runtime::TokioRuntime::current(),
+            engine,
+        ));
         let bytes = exoware_proto::query::GetManyRequest {
             keys: vec![b"a".to_vec(), b"bb".to_vec(), b"ccc".to_vec()],
             batch_size: 2,
@@ -3546,7 +3584,10 @@ mod tests {
                 })
                 .collect(),
         );
-        let connect = QueryConnect::new(AppState::new(engine.clone()));
+        let connect = QueryConnect::new(AppState::new(
+            crate::runtime::TokioRuntime::current(),
+            engine.clone(),
+        ));
         let bytes = exoware_proto::query::RangeRequest {
             start: b"a".to_vec(),
             end: b"z".to_vec(),
@@ -3601,7 +3642,10 @@ mod tests {
             (Bytes::from_static(b"b"), Bytes::from_static(b"2")),
         ]);
         engine.set_range_eof_extra(numeric_query_extra("final_rows", 2.0));
-        let connect = QueryConnect::new(AppState::new(engine));
+        let connect = QueryConnect::new(AppState::new(
+            crate::runtime::TokioRuntime::current(),
+            engine,
+        ));
         let bytes = exoware_proto::query::RangeRequest {
             start: b"a".to_vec(),
             end: b"z".to_vec(),
@@ -3645,7 +3689,7 @@ mod tests {
     #[tokio::test]
     async fn subscribe_without_replay_reads_the_next_live_batch() {
         let engine = Arc::new(FakeEngine::default());
-        let state = AppState::new(engine.clone());
+        let state = AppState::new(crate::runtime::TokioRuntime::current(), engine.clone());
         let connect = StreamConnect::new(state.clone());
         let mut stream = subscribe_stream(&connect, None).await.expect("subscribe");
         engine.publish_live(state.stream.clone(), 1, vec![matching_kv(b"hit", b"v1")]);
@@ -3745,7 +3789,10 @@ mod tests {
         engine.set_batch(2, Some(vec![matching_kv(b"replay", b"v2")]));
         engine.set_batch(3, Some(vec![matching_kv(b"replay", b"v3")]));
 
-        let connect = StreamConnect::new(AppState::new(engine));
+        let connect = StreamConnect::new(AppState::new(
+            crate::runtime::TokioRuntime::current(),
+            engine,
+        ));
         let Err(err) = subscribe_stream(&connect, Some(1)).await else {
             panic!("evicted cursor must fail subscription setup");
         };
@@ -3813,7 +3860,7 @@ mod tests {
             engine.set_batch(seq, Some(vec![nonmatching_kv(b"skip", &[seq as u8])]));
         }
 
-        let state = AppState::new(engine.clone());
+        let state = AppState::new(crate::runtime::TokioRuntime::current(), engine.clone());
         let connect = StreamConnect::new(state.clone());
         let mut stream = subscribe_stream(&connect, Some(1))
             .await
@@ -4200,7 +4247,7 @@ mod tests {
         for seq in 1..=5 {
             engine.set_batch(seq, Some(vec![matching_kv(b"seed", b"v")]));
         }
-        let state = AppState::new(engine.clone());
+        let state = AppState::new(crate::runtime::TokioRuntime::current(), engine.clone());
         let connect = StreamConnect::new(state.clone());
         let mut stream = subscribe_stream(&connect, Some(15))
             .await
@@ -4231,7 +4278,7 @@ mod tests {
         engine.set_oldest_retained(Some(2));
         engine.set_batch(2, Some(vec![matching_kv(b"replay", b"v2")]));
 
-        let state = AppState::new(engine);
+        let state = AppState::new(crate::runtime::TokioRuntime::current(), engine);
         let connect = StreamConnect::new(state);
         let mut stream = subscribe_stream(&connect, Some(2))
             .await
@@ -4275,7 +4322,7 @@ mod tests {
             engine.set_batch(seq, Some(vec![matching_kv(b"replay", b"v")]));
         }
 
-        let state = AppState::new(engine.clone());
+        let state = AppState::new(crate::runtime::TokioRuntime::current(), engine.clone());
         engine.publish_on_every_get_batch(
             state.stream.clone(),
             REPLAY_BATCHES,
@@ -4311,7 +4358,7 @@ mod tests {
             engine.set_batch(seq, Some(vec![matching_kv(b"replay", b"v")]));
         }
 
-        let state = AppState::new(engine.clone());
+        let state = AppState::new(crate::runtime::TokioRuntime::current(), engine.clone());
         engine.publish_on_every_get_batch(
             state.stream.clone(),
             REPLAY_BATCHES,

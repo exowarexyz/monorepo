@@ -7,23 +7,13 @@ use std::{
     time::{Duration, SystemTime},
 };
 
-use connectrpc::ConnectError;
 use futures::future::{BoxFuture, Either};
 
-/// Clock used for Put deadlines and elapsed-time measurements.
+/// A monotonic timeline shared by deadlines and elapsed-time measurements.
 ///
-/// `now` and `sleep_until` must use the same timeline. A sleep completes when
-/// `now() >= deadline`, including when the deadline has already passed. Dropping
-/// the sleep future cancels the wait.
-///
-/// `now` should not move backward. Use a monotonic clock in production so wall
-/// clock adjustments cannot move request deadlines relative to Tokio's
-/// connection deadlines.
-///
-/// Running without Tokio also requires a custom [`DecodeExecutor`](super::DecodeExecutor);
-/// the default [`BlockingDecodeExecutor`](super::BlockingDecodeExecutor) uses
-/// Tokio's blocking pool.
-pub trait PutClock: Send + Sync + 'static {
+/// `now` and `sleep_until` must use the same timeline. Sleeps at or before
+/// `now` complete immediately. Dropping a sleep cancels the wait.
+pub trait Clock: Send + Sync + 'static {
     fn now(&self) -> SystemTime;
 
     fn sleep_until(&self, deadline: SystemTime) -> BoxFuture<'static, ()>;
@@ -76,7 +66,7 @@ impl Default for TokioClock {
     }
 }
 
-impl PutClock for TokioClock {
+impl Clock for TokioClock {
     fn now(&self) -> SystemTime {
         self.to_system(tokio::time::Instant::now())
     }
@@ -86,32 +76,42 @@ impl PutClock for TokioClock {
     }
 }
 
-pub(crate) fn deadline_error() -> ConnectError {
-    ConnectError::deadline_exceeded("ingest deadline exceeded")
-}
+/// A deadline elapsed before the operation completed.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+#[error("deadline exceeded")]
+pub struct Elapsed;
 
-/// An absolute Put deadline and the clock that measures it.
+/// An absolute deadline and the clock that measures it.
 #[derive(Clone)]
-pub struct PutDeadline {
-    clock: Arc<dyn PutClock>,
+pub struct Deadline {
+    clock: Arc<dyn Clock>,
     at: SystemTime,
 }
 
-impl PutDeadline {
-    pub fn new(clock: Arc<dyn PutClock>, at: SystemTime) -> Self {
+impl Deadline {
+    pub fn new(clock: Arc<dyn Clock>, at: SystemTime) -> Self {
         Self { clock, at }
     }
 
-    pub fn after(clock: Arc<dyn PutClock>, timeout: Duration) -> Self {
+    pub fn after(clock: Arc<dyn Clock>, timeout: Duration) -> Self {
         let at = clock.now() + timeout;
         Self { clock, at }
+    }
+
+    /// Shorten this deadline without changing its clock.
+    pub fn capped(&self, duration: Duration) -> Self {
+        Self::new(self.clock.clone(), self.at.min(self.clock.now() + duration))
+    }
+
+    pub async fn wait(&self) {
+        Expiry::new(self.clock(), self.at).await;
     }
 
     pub fn at(&self) -> SystemTime {
         self.at
     }
 
-    pub fn clock(&self) -> &dyn PutClock {
+    pub fn clock(&self) -> &dyn Clock {
         &*self.clock
     }
 
@@ -124,18 +124,18 @@ impl PutDeadline {
     }
 
     /// A ready result wins over an expired deadline, matching `tokio::time::timeout_at`.
-    pub(crate) async fn timeout<F: Future>(&self, future: F) -> Result<F::Output, ConnectError> {
+    pub async fn timeout<F: Future>(&self, future: F) -> Result<F::Output, Elapsed> {
         let expiry = Expiry::new(self.clock(), self.at);
         match futures::future::select(std::pin::pin!(future), expiry).await {
             Either::Left((output, _)) => Ok(output),
-            Either::Right(((), _)) => Err(deadline_error()),
+            Either::Right(((), _)) => Err(Elapsed),
         }
     }
 }
 
-impl fmt::Debug for PutDeadline {
+impl fmt::Debug for Deadline {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("PutDeadline")
+        f.debug_struct("Deadline")
             .field("at", &self.at)
             .finish_non_exhaustive()
     }
@@ -143,13 +143,13 @@ impl fmt::Debug for PutDeadline {
 
 /// Waits for a deadline, creating the timer only when needed.
 pub(crate) struct Expiry<'a> {
-    clock: &'a dyn PutClock,
+    clock: &'a dyn Clock,
     at: SystemTime,
     sleep: Option<BoxFuture<'static, ()>>,
 }
 
 impl<'a> Expiry<'a> {
-    pub(crate) fn new(clock: &'a dyn PutClock, at: SystemTime) -> Self {
+    pub(crate) fn new(clock: &'a dyn Clock, at: SystemTime) -> Self {
         Self {
             clock,
             at,
@@ -181,13 +181,53 @@ pub(crate) mod testing {
 
     use commonware_runtime::{deterministic, Clock as _};
 
-    pub(crate) fn tokio_deadline(timeout: Duration) -> PutDeadline {
-        PutDeadline::after(Arc::new(TokioClock::new()), timeout)
+    pub(crate) fn tokio_deadline(timeout: Duration) -> Deadline {
+        Deadline::after(Arc::new(TokioClock::new()), timeout)
+    }
+
+    pub(crate) struct SimulatedRuntime(pub(crate) deterministic::Context);
+
+    impl crate::runtime::Runtime for SimulatedRuntime {
+        fn clock(&self) -> Arc<dyn Clock> {
+            use commonware_runtime::Supervisor as _;
+            Arc::new(SimulatedClock(self.0.child("clock")))
+        }
+        fn spawn(&self, name: &'static str, task: crate::runtime::TaskFn) -> crate::runtime::Task {
+            use commonware_runtime::{Spawner as _, Supervisor as _};
+            let handle = self
+                .0
+                .child(name)
+                .spawn(move |context| task(Arc::new(Self(context))));
+            let handle = Arc::new(std::sync::Mutex::new(handle));
+            let abort = handle.clone();
+            crate::runtime::Task::new(
+                Box::pin(std::future::poll_fn(move |cx| {
+                    Pin::new(&mut *handle.lock().unwrap())
+                        .poll(cx)
+                        .map_err(|e| crate::runtime::TaskError(e.to_string()))
+                })),
+                move || abort.lock().unwrap().abort(),
+            )
+        }
+        fn execute_cpu(
+            &self,
+            job: Box<dyn FnOnce() + Send>,
+        ) -> BoxFuture<'static, Result<(), crate::runtime::TaskError>> {
+            use commonware_runtime::{Spawner as _, Supervisor as _};
+            let context = self.0.child("cpu");
+            Box::pin(async move {
+                context
+                    .shared(true)
+                    .spawn(move |_| async move { job() })
+                    .await
+                    .map_err(|e| crate::runtime::TaskError(e.to_string()))
+            })
+        }
     }
 
     pub(crate) struct SimulatedClock(pub(crate) deterministic::Context);
 
-    impl PutClock for SimulatedClock {
+    impl Clock for SimulatedClock {
         fn now(&self) -> SystemTime {
             self.0.current()
         }
@@ -205,11 +245,54 @@ mod tests {
     use super::testing::{tokio_deadline, SimulatedClock};
     use super::*;
 
-    async fn assert_contract(clock: &dyn PutClock) {
+    #[test]
+    fn deadline_allocates_only_when_waiting_and_cancels_its_sleep() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct ClockProbe(Arc<AtomicUsize>);
+        struct PendingSleep(Arc<AtomicUsize>);
+
+        impl Future for PendingSleep {
+            type Output = ();
+            fn poll(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<()> {
+                Poll::Pending
+            }
+        }
+        impl Drop for PendingSleep {
+            fn drop(&mut self) {
+                self.0.fetch_sub(1, Ordering::SeqCst);
+            }
+        }
+        impl Clock for ClockProbe {
+            fn now(&self) -> SystemTime {
+                SystemTime::UNIX_EPOCH
+            }
+            fn sleep_until(&self, _: SystemTime) -> BoxFuture<'static, ()> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Box::pin(PendingSleep(self.0.clone()))
+            }
+        }
+
+        let active = Arc::new(AtomicUsize::new(0));
+        let deadline =
+            Deadline::after(Arc::new(ClockProbe(active.clone())), Duration::from_secs(1));
+        assert_eq!(
+            futures::executor::block_on(deadline.timeout(std::future::ready(42))).unwrap(),
+            42
+        );
+        assert_eq!(active.load(Ordering::SeqCst), 0);
+        let mut wait = Box::pin(deadline.timeout(std::future::pending::<()>()));
+        let mut cx = Context::from_waker(futures::task::noop_waker_ref());
+        assert!(wait.as_mut().poll(&mut cx).is_pending());
+        assert_eq!(active.load(Ordering::SeqCst), 1);
+        drop(wait);
+        assert_eq!(active.load(Ordering::SeqCst), 0);
+    }
+
+    async fn assert_contract(clock: &dyn Clock) {
         // Include a deadline from before the clock was created.
         let started = clock.now();
         clock.sleep_until(started - Duration::from_secs(1)).await;
-        assert!(clock.elapsed(started) < Duration::from_millis(100));
 
         let deadline = clock.now() + Duration::from_millis(50);
         clock.sleep_until(deadline).await;
@@ -260,6 +343,6 @@ mod tests {
             .expect("deadline did not fire")
             .expect_err("the busy work never finishes");
 
-        assert_eq!(error.code, connectrpc::ErrorCode::DeadlineExceeded);
+        assert_eq!(error, Elapsed);
     }
 }

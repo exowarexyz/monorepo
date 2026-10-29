@@ -8,6 +8,7 @@ mod connect;
 mod engine;
 pub mod ingest;
 mod reduce;
+pub mod runtime;
 mod stream;
 mod validate;
 
@@ -45,4 +46,4 @@ pub use ingest::parser::{
     decode_entry_with_budget, Field, PutEntryCursor, PutParseError, UnknownBudget,
 };
 pub use ingest::service::{PutConfig, PutMiddleware, PutService};
-pub use ingest::{PutClock, PutDeadline, PutError, PutInput, TokioClock};
+pub use ingest::{Clock, Deadline, PutError, PutInput, TokioClock};

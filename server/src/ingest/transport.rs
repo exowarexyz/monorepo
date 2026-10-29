@@ -3,22 +3,27 @@ use std::{
     future::Future,
     io,
     pin::Pin,
+    sync::Arc,
     task::{Context, Poll},
 };
 
+use crate::runtime::{Deadline, Runtime, TaskSet, TaskSpawner, Timer};
 use axum::{body::Body, serve::Listener};
 use http::{Request, Response, Version};
 use http_body::Body as _;
 use hyper_util::{rt::TokioIo, server::conn::auto::Builder, service::TowerToHyperService};
-use tokio::{sync::watch, task::JoinSet, time::Instant};
+use tokio::sync::watch;
 use tower::{service_fn, Service, ServiceExt};
 
 tokio::task_local! {
-    static STREAM_DEADLINE: watch::Sender<Option<Instant>>;
+    static STREAM_DEADLINE: watch::Sender<Option<Deadline>>;
 }
 
-#[derive(Clone, Copy)]
-struct StreamExecutor;
+#[derive(Clone)]
+struct StreamExecutor {
+    runtime: Arc<dyn Runtime>,
+    tasks: TaskSpawner,
+}
 
 // Release the upload timer before backend work can reach the same deadline.
 struct UploadBody {
@@ -94,30 +99,35 @@ where
 {
     fn execute(&self, future: F) {
         let (deadline, mut changes) = watch::channel(None);
-        tokio::spawn(STREAM_DEADLINE.scope(deadline, async move {
-            tokio::pin!(future);
-            loop {
-                let deadline = *changes.borrow_and_update();
-                tokio::select! {
-                    biased;
-                    _ = async {
-                        match deadline {
-                            Some(deadline) => tokio::time::sleep_until(deadline).await,
-                            None => std::future::pending().await,
+        self.tasks.push(self.runtime.spawn(
+            "http_stream",
+            Box::new(move |_| {
+                Box::pin(STREAM_DEADLINE.scope(deadline, async move {
+                    tokio::pin!(future);
+                    loop {
+                        let deadline = changes.borrow_and_update().clone();
+                        tokio::select! {
+                            biased;
+                            _ = async {
+                                match deadline {
+                                    Some(deadline) => deadline.wait().await,
+                                    None => std::future::pending().await,
+                                }
+                            } => return,
+                            _ = &mut future => return,
+                            _ = changes.changed() => {}
                         }
-                    } => return,
-                    _ = &mut future => return,
-                    _ = changes.changed() => {}
-                }
-            }
-        }));
+                    }
+                }))
+            }),
+        ));
     }
 }
 
 // Rejected uploads keep their writer only briefly, even when the request
 // deadline is much longer.
-fn rejection_deadline(deadline: Instant) -> Instant {
-    deadline.min(Instant::now() + std::time::Duration::from_secs(1))
+fn rejection_deadline(deadline: Deadline) -> Deadline {
+    deadline.capped(std::time::Duration::from_secs(1))
 }
 
 // Hyper does not poll response bodies while DATA capacity is unavailable. The
@@ -125,14 +135,14 @@ fn rejection_deadline(deadline: Instant) -> Instant {
 pub(super) fn admission_rejection_response(
     version: Version,
     response: Response<Body>,
-    deadline: Instant,
+    deadline: Deadline,
     control: Option<&ConnectionControl>,
     generation: Option<u64>,
 ) -> Response<Body> {
     let deadline = rejection_deadline(deadline);
     if version == Version::HTTP_2
         && STREAM_DEADLINE
-            .try_with(|sender| sender.send_replace(Some(deadline)))
+            .try_with(|sender| sender.send_replace(Some(deadline.clone())))
             .is_ok()
     {
         // Hyper can queue a whole DATA frame after obtaining one byte of
@@ -150,7 +160,7 @@ pub(super) fn admission_rejection_response(
 pub(super) fn terminate_rejected_response(
     version: Version,
     response: Response<Body>,
-    deadline: Instant,
+    deadline: Deadline,
     control: Option<&ConnectionControl>,
     generation: Option<u64>,
 ) -> Response<Body> {
@@ -194,13 +204,13 @@ pub fn terminate_unfinished_response(
     response
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 struct Arm {
     id: u64,
-    deadline: Instant,
+    deadline: Deadline,
 }
 
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Debug, Default)]
 struct State {
     next: u64,
     active: Option<Arm>,
@@ -219,7 +229,7 @@ impl ConnectionControl {
     }
 
     /// Arms an HTTP/1 connection with an absolute request deadline.
-    pub fn arm_http1(&self, version: Version, deadline: Instant) -> Option<u64> {
+    pub fn arm_http1(&self, version: Version, deadline: Deadline) -> Option<u64> {
         if !matches!(version, Version::HTTP_10 | Version::HTTP_11) {
             return None;
         }
@@ -252,7 +262,7 @@ impl ConnectionControl {
     /// Disarms only the matching request generation after body reception or cleanup.
     pub fn disarm(&self, id: u64) -> bool {
         self.state.send_if_modified(|state| {
-            if state.active.is_some_and(|arm| arm.id == id) {
+            if state.active.as_ref().is_some_and(|arm| arm.id == id) {
                 state.active = None;
                 true
             } else {
@@ -263,13 +273,20 @@ impl ConnectionControl {
 
     /// Expires only the matching unfinished HTTP/1 request.
     pub fn expire(&self, id: u64) -> bool {
-        self.shorten(id, Instant::now())
+        self.state.send_if_modified(|state| {
+            if let Some(arm) = state.active.as_mut().filter(|arm| arm.id == id) {
+                arm.deadline = arm.deadline.capped(std::time::Duration::ZERO);
+                true
+            } else {
+                false
+            }
+        })
     }
 
-    fn shorten(&self, id: u64, deadline: Instant) -> bool {
+    fn shorten(&self, id: u64, deadline: Deadline) -> bool {
         self.state.send_if_modified(|state| {
             if let Some(arm) = &mut state.active {
-                if arm.id == id && deadline < arm.deadline {
+                if arm.id == id && deadline.at() < arm.deadline.at() {
                     arm.deadline = deadline;
                     return true;
                 }
@@ -281,12 +298,13 @@ impl ConnectionControl {
     async fn cancelled(&self) {
         let mut receiver = self.state.subscribe();
         loop {
-            let active = receiver.borrow_and_update().active;
+            let active = receiver.borrow_and_update().active.clone();
             if let Some(arm) = active {
                 tokio::select! {
-                    _ = tokio::time::sleep_until(arm.deadline) => {
-                        if receiver.borrow().active.is_some_and(|current| {
-                            current.id == arm.id && current.deadline <= Instant::now()
+                    biased;
+                    _ = arm.deadline.wait() => {
+                        if receiver.borrow().active.as_ref().is_some_and(|current| {
+                            current.id == arm.id && current.deadline.expired()
                         }) {
                             return;
                         }
@@ -301,7 +319,12 @@ impl ConnectionControl {
 }
 
 /// Serves requests with connection control in their extensions and drains connections on shutdown.
-pub async fn serve<L, S, B, F>(mut listener: L, service: S, shutdown: F) -> io::Result<()>
+pub async fn serve<L, S, B, F>(
+    runtime: Arc<dyn Runtime>,
+    mut listener: L,
+    service: S,
+    shutdown: F,
+) -> io::Result<()>
 where
     L: Listener,
     L::Io: Send + Unpin + 'static,
@@ -313,14 +336,14 @@ where
     F: Future<Output = ()> + Send,
 {
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
-    let mut connections = JoinSet::new();
+    let connections = TaskSet::default();
     tokio::pin!(shutdown);
 
     loop {
         tokio::select! {
             biased;
             _ = &mut shutdown => break,
-            _ = connections.join_next(), if !connections.is_empty() => {}
+            _ = connections.next(), if !connections.is_empty() => {}
             (io, _) = listener.accept() => {
                 let control = ConnectionControl::new();
                 let requests = control.clone();
@@ -337,33 +360,45 @@ where
                 let mut shutdown = shutdown_rx.clone();
 
                 // Cancellation stays outside Hyper so stalled output cannot hold the socket.
-                connections.spawn(async move {
-                    let mut builder = Builder::new(StreamExecutor);
-                    builder.http2().enable_connect_protocol();
-                    let connection = builder.serve_connection_with_upgrades(
-                        TokioIo::new(io),
-                        TowerToHyperService::new(service),
-                    );
-                    tokio::pin!(connection);
-                    tokio::select! {
-                        _ = control.cancelled() => {}
-                        _ = &mut connection => {}
-                        _ = shutdown.changed() => {
-                            connection.as_mut().graceful_shutdown();
+                connections.spawner().push(runtime.spawn(
+                    "http_connection",
+                    Box::new(move |runtime| Box::pin(async move {
+                        let streams = TaskSet::default();
+                        let timer = Timer::new(runtime.clock());
+                        let mut builder = Builder::new(StreamExecutor {
+                            runtime,
+                            tasks: streams.spawner(),
+                        });
+                        builder.http1().timer(timer.clone());
+                        builder.http2().timer(timer);
+                        builder.http2().enable_connect_protocol();
+                        let connection = builder.serve_connection_with_upgrades(
+                            TokioIo::new(io),
+                            TowerToHyperService::new(service),
+                        );
+                        tokio::pin!(connection);
+                        let mut draining = false;
+                        loop {
                             tokio::select! {
-                                _ = control.cancelled() => {}
-                                _ = &mut connection => {}
+                                biased;
+                                _ = control.cancelled() => break,
+                                _ = &mut connection => break,
+                                _ = shutdown.changed(), if !draining => {
+                                    draining = true;
+                                    connection.as_mut().graceful_shutdown();
+                                }
+                                _ = streams.next(), if !streams.is_empty() => {}
                             }
                         }
-                    }
-                });
+                    })),
+                ));
             }
         }
     }
 
     drop(listener);
     shutdown_tx.send_replace(true);
-    while connections.join_next().await.is_some() {}
+    while connections.next().await.is_some() {}
     Ok(())
 }
 
@@ -387,7 +422,10 @@ mod tests {
         for (body, polls) in bodies {
             let control = ConnectionControl::new();
             let generation = control
-                .arm_http1(Version::HTTP_11, Instant::now() + Duration::from_secs(1))
+                .arm_http1(
+                    Version::HTTP_11,
+                    crate::runtime::testing::tokio_deadline(Duration::from_secs(1)),
+                )
                 .unwrap();
             let mut body = control.disarm_on_eof(body, generation);
             for _ in 0..polls {
@@ -411,7 +449,10 @@ mod tests {
             .chain(stream::pending());
         let control = ConnectionControl::new();
         let generation = control
-            .arm_http1(Version::HTTP_11, Instant::now() + Duration::from_secs(1))
+            .arm_http1(
+                Version::HTTP_11,
+                crate::runtime::testing::tokio_deadline(Duration::from_secs(1)),
+            )
             .unwrap();
         let mut body = control.disarm_on_eof(Body::new(StreamBody::new(frames)), generation);
         assert_eq!(
