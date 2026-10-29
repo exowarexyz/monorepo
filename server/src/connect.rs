@@ -914,23 +914,25 @@ fn live_sequence_stream(
     notify: Arc<Notify>,
     start: Option<u64>,
 ) -> impl Stream<Item = u64> + Send {
-    stream_util::unfold(start, move |next| {
-        let notifier = notifier.clone();
-        let notify = notify.clone();
-        async move {
+    stream_util::unfold(
+        (start, notifier, notify),
+        |(next, notifier, notify)| async move {
             let sequence_number = next?;
             // Re-check the frontier after arming the notifier so a publish
             // racing this pull is not lost.
             while sequence_number > notifier.current_sequence() {
-                let notified = notify.clone().notified_owned();
+                let notified = notify.notified();
                 if sequence_number <= notifier.current_sequence() {
                     break;
                 }
                 notified.await;
             }
-            Some((sequence_number, sequence_number.checked_add(1)))
-        }
-    })
+            Some((
+                sequence_number,
+                (sequence_number.checked_add(1), notifier, notify),
+            ))
+        },
+    )
 }
 
 struct ReplayState {
