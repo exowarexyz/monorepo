@@ -37,7 +37,7 @@ pub trait LookupVerifier {
     /// Verify `GetMany` results for distinct `requested_keys` against `root`.
     fn verify_get_many(
         &self,
-        requested_keys: &[Vec<u8>],
+        requested_keys: &[Bytes],
         results: &[CurrentKeyLookupResult],
         root: &Self::Digest,
     ) -> Result<Vec<Self::Lookup>, QmdbError>;
@@ -106,7 +106,7 @@ where
         let mut requested = BTreeSet::<&[u8]>::new();
         for key in &requested_keys {
             if !requested.insert(key.as_ref()) {
-                return Err(QmdbError::DuplicateRequestedKey { key: key.clone() });
+                return Err(QmdbError::DuplicateRequestedKey { key: key.to_vec() });
             }
         }
         let response = self

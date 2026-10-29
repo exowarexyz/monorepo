@@ -6,6 +6,7 @@ mod common;
 use std::num::NonZeroU64;
 use std::time::Duration;
 
+use bytes::Bytes;
 use commonware_cryptography::Sha256;
 use commonware_runtime::tokio as cw_tokio;
 use commonware_runtime::Runner as _;
@@ -524,7 +525,7 @@ async fn test_unordered_range_stack_does_not_expose_key_lookup_or_ordered_range_
 
     let err = key_lookup_rpc_client(&qmdb_url)
         .get_many(ProtoGetManyRequest {
-            keys: vec![b"alpha".to_vec()],
+            keys: vec![Bytes::from_static(b"alpha")],
             tip: 0,
             ..Default::default()
         })
@@ -534,7 +535,7 @@ async fn test_unordered_range_stack_does_not_expose_key_lookup_or_ordered_range_
 
     let err = ordered_range_rpc_client(&qmdb_url)
         .get_range(ProtoGetRangeRequest {
-            start_key: b"a".to_vec(),
+            start_key: Bytes::from_static(b"a"),
             limit: 1,
             tip: 0,
             ..Default::default()
@@ -756,7 +757,7 @@ async fn test_unordered_current_endpoints_enforce_optional_sequence_minimum() {
 
     let cold_get = lookup
         .get(ProtoGetRequest {
-            key: source.alpha.as_ref().to_vec(),
+            key: Bytes::copy_from_slice(source.alpha.as_ref()),
             tip: source.latest_location.as_u64() + 1,
             min_sequence_number: Some(u64::MAX),
             ..Default::default()
@@ -765,7 +766,10 @@ async fn test_unordered_current_endpoints_enforce_optional_sequence_minimum() {
         .expect_err("cold unordered get must enforce the sequence minimum");
     let cold_many = lookup
         .get_many(ProtoGetManyRequest {
-            keys: vec![source.alpha.as_ref().to_vec(), missing.as_ref().to_vec()],
+            keys: vec![
+                Bytes::copy_from_slice(source.alpha.as_ref()),
+                Bytes::copy_from_slice(missing.as_ref()),
+            ],
             tip: source.latest_location.as_u64() + 1,
             min_sequence_number: Some(u64::MAX),
             ..Default::default()
@@ -794,7 +798,7 @@ async fn test_unordered_current_endpoints_enforce_optional_sequence_minimum() {
     for min_sequence_number in [None, Some(0)] {
         lookup
             .get(ProtoGetRequest {
-                key: source.alpha.as_ref().to_vec(),
+                key: Bytes::copy_from_slice(source.alpha.as_ref()),
                 tip: source.latest_location.as_u64(),
                 min_sequence_number,
                 ..Default::default()
@@ -803,7 +807,10 @@ async fn test_unordered_current_endpoints_enforce_optional_sequence_minimum() {
             .expect("unordered get at available sequence");
         lookup
             .get_many(ProtoGetManyRequest {
-                keys: vec![source.alpha.as_ref().to_vec(), missing.as_ref().to_vec()],
+                keys: vec![
+                    Bytes::copy_from_slice(source.alpha.as_ref()),
+                    Bytes::copy_from_slice(missing.as_ref()),
+                ],
                 tip: source.latest_location.as_u64(),
                 min_sequence_number,
                 ..Default::default()
@@ -827,7 +834,7 @@ async fn test_unordered_current_endpoints_enforce_optional_sequence_minimum() {
 
     lookup
         .get(ProtoGetRequest {
-            key: source.alpha.as_ref().to_vec(),
+            key: Bytes::copy_from_slice(source.alpha.as_ref()),
             tip: source.latest_location.as_u64(),
             min_sequence_number: Some(u64::MAX),
             ..Default::default()
@@ -836,7 +843,10 @@ async fn test_unordered_current_endpoints_enforce_optional_sequence_minimum() {
         .expect("cached unordered get uses the publication floor");
     lookup
         .get_many(ProtoGetManyRequest {
-            keys: vec![source.alpha.as_ref().to_vec(), missing.as_ref().to_vec()],
+            keys: vec![
+                Bytes::copy_from_slice(source.alpha.as_ref()),
+                Bytes::copy_from_slice(missing.as_ref()),
+            ],
             tip: source.latest_location.as_u64(),
             min_sequence_number: Some(u64::MAX),
             ..Default::default()
@@ -1287,8 +1297,8 @@ async fn test_unordered_connect_omits_missing_and_rejects_duplicate_range_and_st
     let err = key_lookup_rpc_client(&qmdb_url)
         .get_many(ProtoGetManyRequest {
             keys: vec![
-                source.alpha.as_ref().to_vec(),
-                source.alpha.as_ref().to_vec(),
+                Bytes::copy_from_slice(source.alpha.as_ref()),
+                Bytes::copy_from_slice(source.alpha.as_ref()),
             ],
             tip: source.latest_location.as_u64(),
             ..Default::default()
@@ -1299,7 +1309,7 @@ async fn test_unordered_connect_omits_missing_and_rejects_duplicate_range_and_st
 
     let err = ordered_range_rpc_client(&qmdb_url)
         .get_range(ProtoGetRangeRequest {
-            start_key: source.alpha.as_ref().to_vec(),
+            start_key: Bytes::copy_from_slice(source.alpha.as_ref()),
             limit: 1,
             tip: source.latest_location.as_u64(),
             ..Default::default()
@@ -1356,8 +1366,8 @@ async fn test_current_unordered_variable_fixed_keys_variable_values_mmr_get_many
     let (server, url) = spawn_qmdb_full_server(PrefixedStoreClient::empty(store)).await;
     let request = ProtoGetManyRequest {
         keys: vec![
-            source.alpha.as_ref().to_vec(),
-            source.beta.as_ref().to_vec(),
+            Bytes::copy_from_slice(source.alpha.as_ref()),
+            Bytes::copy_from_slice(source.beta.as_ref()),
         ],
         tip: *source.latest_location,
         ..Default::default()

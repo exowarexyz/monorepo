@@ -457,7 +457,7 @@ async fn verify_snapshots<F, K, V, E>(
                     }
                 };
                 let request = GetRequest {
-                    key: all_keys[0].encode().to_vec(),
+                    key: all_keys[0].encode(),
                     tip: *tip,
                     ..Default::default()
                 };
@@ -478,9 +478,7 @@ async fn verify_snapshots<F, K, V, E>(
 
                 let indices = [3, 1, 0];
                 let request = GetManyRequest {
-                    keys: indices
-                        .map(|index| all_keys[index].encode().to_vec())
-                        .to_vec(),
+                    keys: indices.map(|index| all_keys[index].encode()).to_vec(),
                     tip: *tip,
                     ..Default::default()
                 };
@@ -505,8 +503,8 @@ async fn verify_snapshots<F, K, V, E>(
                     ("range_empty", 1, Some(2), 2),
                 ] {
                     let request = GetRangeRequest {
-                        start_key: all_keys[start].encode().to_vec(),
-                        end_key: end.map(|index| all_keys[index].encode().to_vec()),
+                        start_key: all_keys[start].encode(),
+                        end_key: end.map(|index| all_keys[index].encode()),
                         limit,
                         tip: *tip,
                         ..Default::default()

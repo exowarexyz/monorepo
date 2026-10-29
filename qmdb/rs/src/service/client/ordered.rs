@@ -148,7 +148,7 @@ where
 
     fn verify_get_many(
         &self,
-        requested_keys: &[Vec<u8>],
+        requested_keys: &[Bytes],
         results: &[CurrentKeyLookupResult],
         root: &H::Digest,
     ) -> Result<Vec<Self::Lookup>, QmdbError> {
@@ -174,7 +174,7 @@ where
                     Some(current_key_lookup_result::Result::Miss(proof)) => {
                         verify_key_exclusion_from_proto::<F, H, K, V, N, E>(
                             proof,
-                            requested_key.as_slice(),
+                            requested_key.as_ref(),
                             root,
                             &self.update_cfg,
                             &self.key_cfg,
@@ -307,7 +307,7 @@ where
         self.key_lookup
             .get(
                 GetRequest {
-                    key: key.encode().to_vec(),
+                    key: key.encode(),
                     tip: tip.as_u64(),
                     min_sequence_number,
                     ..Default::default()
@@ -329,7 +329,7 @@ where
         self.key_lookup
             .get_many(
                 GetManyRequest {
-                    keys: keys.iter().map(|key| key.encode().to_vec()).collect(),
+                    keys: keys.iter().map(|key| key.encode()).collect(),
                     tip: tip.as_u64(),
                     min_sequence_number,
                     ..Default::default()
@@ -353,8 +353,8 @@ where
         self.key_range
             .get_range(
                 GetRangeRequest {
-                    start_key: start_key.encode().to_vec(),
-                    end_key: end_key.map(|key| key.encode().to_vec()),
+                    start_key: start_key.encode(),
+                    end_key: end_key.map(|key| key.encode()),
                     limit,
                     tip: tip.as_u64(),
                     min_sequence_number,
