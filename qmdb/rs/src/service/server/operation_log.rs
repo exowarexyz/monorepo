@@ -24,7 +24,7 @@ use crate::service::proto::qmdb::v1::{
     GetOperationRangeRequest, GetOperationRangeResponse, GetOperationsRequest,
     GetOperationsResponse, OperationLogService, SubscribeRequest, SubscribeResponse,
 };
-use crate::{OperationKv, PublishedWatermark, QmdbError};
+use crate::{PublishedWatermark, QmdbError};
 
 use super::{encode, qmdb_error_to_connect};
 
@@ -36,11 +36,15 @@ pub(crate) trait OperationLogReader: Send + Sync + 'static {
     /// ops have no logical key).
     const REJECTS_KEY_FILTERS: bool = false;
 
-    fn extract_operation_kv(
+    /// Decode the operation at `location` and pass its logical key and value
+    /// to `inspect`. Either is `None` when the operation has no key or value
+    /// (e.g. keyless ops).
+    fn inspect_operation_kv<T>(
         &self,
         location: Location<Self::Family>,
         bytes: &[u8],
-    ) -> Result<OperationKv, QmdbError>;
+        inspect: impl FnOnce(Option<&[u8]>, Option<&[u8]>) -> T,
+    ) -> Result<T, QmdbError>;
     fn resolve_watermark(
         &self,
         watermark: Location<Self::Family>,
@@ -278,12 +282,12 @@ impl<R: OperationLogReader> BatchSubscribeStream<R> {
                 sub::RowFamily::Op => {
                     latest = latest.max(Some(location));
                     let include = if needs_decode {
-                        let OperationKv { key, value } = self
-                            .reader
-                            .extract_operation_kv(location, entry.value.as_ref())
-                            .map_err(qmdb_error_to_connect)?;
-                        matcher_passes(&self.key_matcher, key.as_deref())
-                            && matcher_passes(&self.value_matcher, value.as_deref())
+                        self.reader
+                            .inspect_operation_kv(location, entry.value.as_ref(), |key, value| {
+                                matcher_passes(&self.key_matcher, key)
+                                    && matcher_passes(&self.value_matcher, value)
+                            })
+                            .map_err(qmdb_error_to_connect)?
                     } else {
                         true
                     };
@@ -748,15 +752,13 @@ mod authenticated_upload_subscription_tests {
         type Family = F;
         type Digest = Digest;
 
-        fn extract_operation_kv(
+        fn inspect_operation_kv<T>(
             &self,
             _location: Location<F>,
             bytes: &[u8],
-        ) -> Result<OperationKv, QmdbError> {
-            Ok(OperationKv {
-                key: None,
-                value: Some(bytes.to_vec()),
-            })
+            inspect: impl FnOnce(Option<&[u8]>, Option<&[u8]>) -> T,
+        ) -> Result<T, QmdbError> {
+            Ok(inspect(None, Some(bytes)))
         }
 
         async fn resolve_watermark(
