@@ -445,11 +445,13 @@ struct WriteLease {
 }
 
 struct WriteRequest {
+    /// Moved into the wave's rows by `coalesce_queued_write`, so staging can free them.
     kvs: Vec<(Bytes, Bytes)>,
     encoded_len: usize,
     response: oneshot::Sender<Result<u64, IngestError>>,
     notifier: Option<Arc<dyn StreamNotifier>>,
-    lease: Arc<WriteLease>,
+    /// Declared last so the reservation is released after everything else the request holds.
+    _lease: WriteLease,
 }
 
 /// One coalesced wave awaiting SST staging: every request shares a single sequence number,
@@ -458,7 +460,6 @@ struct QueuedWave {
     sequence: u64,
     rows: Vec<(Bytes, Bytes)>,
     requests: Vec<WriteRequest>,
-    _leases: Vec<Arc<WriteLease>>,
 }
 
 /// One staged commit group: every coalesced request shares a single sequence number, whose log
@@ -472,7 +473,6 @@ struct PreparedWrite {
     /// Combined payload bytes staged, for debug logging.
     staged_bytes: usize,
     requests: Vec<WriteRequest>,
-    _leases: Vec<Arc<WriteLease>>,
 }
 
 struct Writer {
@@ -615,10 +615,10 @@ impl Writer {
                 encoded_len,
                 response,
                 notifier,
-                lease: Arc::new(WriteLease {
+                _lease: WriteLease {
                     _memory: memory,
                     _request: request,
-                }),
+                },
             })
             .map_err(|_| IngestError::Internal {
                 message: "rocks writer stopped".to_string(),
@@ -720,9 +720,8 @@ fn coalesce_queued_write(
     let sequence = from
         .checked_add(1)
         .expect("rocks sequence number overflowed");
-    let mut leases = Vec::new();
     let mut requests = Vec::with_capacity(1);
-    let mut rows: Vec<(Bytes, Bytes)> = Vec::with_capacity(first.kvs.len());
+    let mut rows: Vec<(Bytes, Bytes)> = Vec::new();
     let mut staged_bytes = 0usize;
     let mut encoded_bytes = 0;
     let mut request = first;
@@ -744,8 +743,14 @@ fn coalesce_queued_write(
             .iter()
             .map(|(k, v)| k.len() + v.len())
             .sum::<usize>();
-        leases.push(request.lease.clone());
-        rows.extend(request.kvs.iter().cloned());
+
+        // Moving the rows leaves the wave as their only owner, so staging frees the payload
+        // instead of the request holding it until commit.
+        if rows.is_empty() {
+            rows = std::mem::take(&mut request.kvs);
+        } else {
+            rows.extend(std::mem::take(&mut request.kvs));
+        }
         requests.push(request);
         if staged_bytes >= max_batch_bytes {
             break;
@@ -762,7 +767,6 @@ fn coalesce_queued_write(
             sequence,
             requests,
             rows,
-            _leases: leases,
         },
         carried,
     )
@@ -791,11 +795,13 @@ fn stage_wave(ingest_dir: &Path, wave: QueuedWave) -> PreparedWrite {
     let log_bytes = log_result.unwrap_or_else(|error| panic!("failed to stage log SST: {error}"));
     let state_bytes =
         state_result.unwrap_or_else(|error| panic!("failed to stage state SST: {error}"));
+
+    // The wave is the rows' only owner, so this frees the payload before commit ingests and
+    // syncs both files.
     drop(wave.rows);
     PreparedWrite {
         sequence,
         requests: wave.requests,
-        _leases: wave._leases,
         log,
         state,
         staged_bytes: log_bytes + state_bytes,
@@ -886,9 +892,18 @@ fn commit_group(db: &DB, frontiers: &Frontiers, group: PreparedWrite) {
         sequence,
         "committed write batch"
     );
-    for request in &group.requests {
-        if let Some(notifier) = &request.notifier {
+
+    // Every Put through one server carries the same stream hub, so a wave usually has one
+    // notifier. Advancing it again would only wake its subscribers again.
+    let mut advanced: Option<&Arc<dyn StreamNotifier>> = None;
+    for notifier in group
+        .requests
+        .iter()
+        .filter_map(|request| request.notifier.as_ref())
+    {
+        if !advanced.is_some_and(|previous| Arc::ptr_eq(previous, notifier)) {
             notifier.advance(sequence);
+            advanced = Some(notifier);
         }
     }
     for request in group.requests {
@@ -1685,11 +1700,12 @@ impl Log for RocksStore {
         // The read runs on the blocking pool so this future yields. An inline read
         // holds a Tokio worker for the whole RocksDB lookup, which serializes the
         // subscribe lookahead and stalls unrelated tasks on cold reads.
-        let store = self.clone();
+        let db = self.db.clone();
         let value = tokio::task::spawn_blocking(move || {
-            store
-                .db
-                .get_cf(store.log_cf(), sequence_log_key(sequence_number))
+            let log_cf = db
+                .cf_handle(LOG_CF)
+                .expect("log CF must exist (created on open)");
+            db.get_cf(log_cf, sequence_log_key(sequence_number))
                 .map_err(|e| e.to_string())
         })
         .await
@@ -1823,21 +1839,32 @@ mod tests {
 
     #[tokio::test]
     async fn published_receipt_can_precede_writer_admission_release() {
-        struct PausedOwner {
+        // Staging already freed the payload, so pause the notifier's drop, which comes after
+        // the reply and before the request's writer lease.
+        struct PausedNotifier {
+            hub: exoware_server::StreamHub,
             started: Option<oneshot::Sender<()>>,
-            release: mpsc::Receiver<()>,
+            release: Mutex<mpsc::Receiver<()>>,
         }
 
-        impl AsRef<[u8]> for PausedOwner {
-            fn as_ref(&self) -> &[u8] {
-                b"v"
+        impl StreamNotifier for PausedNotifier {
+            fn subscribe(&self) -> exoware_server::StreamNotification {
+                self.hub.subscribe()
+            }
+
+            fn current_sequence(&self) -> u64 {
+                self.hub.current_sequence()
+            }
+
+            fn advance(&self, sequence: u64) {
+                self.hub.advance(sequence);
             }
         }
 
-        impl Drop for PausedOwner {
+        impl Drop for PausedNotifier {
             fn drop(&mut self) {
                 let _ = self.started.take().unwrap().send(());
-                let _ = self.release.recv();
+                let _ = self.release.get_mut().recv();
             }
         }
 
@@ -1855,19 +1882,19 @@ mod tests {
         memory.reserve(&request, reserved_bytes).unwrap();
         drop(admission);
 
-        // Pausing the final payload drop makes the reply and cleanup ordering deterministic.
         let (started, dropping) = oneshot::channel();
         let (release, resume) = mpsc::channel();
-        let value = Bytes::from_owner(PausedOwner {
+        let notifier = Arc::new(PausedNotifier {
+            hub: exoware_server::StreamHub::new(0),
             started: Some(started),
-            release: resume,
+            release: Mutex::new(resume),
         });
         let sequence = tokio::time::timeout(
             std::time::Duration::from_secs(5),
             store.writer.submit(
-                vec![(Bytes::from_static(b"k"), value); 128],
+                vec![(Bytes::from_static(b"k"), Bytes::from_static(b"v")); 128],
                 encoded_len,
-                None,
+                Some(notifier),
                 memory,
                 request,
             ),
@@ -1894,6 +1921,92 @@ mod tests {
         .await
         .unwrap();
         assert!(budget.try_admit(0).is_ok());
+    }
+
+    // Keep publication blocked while the staged rows drop.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn staged_rows_drop_before_publication() {
+        struct CheckedOwner {
+            budget: Arc<IngestBudget>,
+            dropped: Arc<std::sync::atomic::AtomicBool>,
+        }
+
+        impl AsRef<[u8]> for CheckedOwner {
+            fn as_ref(&self) -> &[u8] {
+                b"v"
+            }
+        }
+
+        impl Drop for CheckedOwner {
+            fn drop(&mut self) {
+                // The payload goes first. Its writer reservation stays until commit.
+                assert_eq!(self.budget.usage().0, 1);
+                assert!(self.budget.usage().1 > 0);
+                self.dropped.store(true, Ordering::Release);
+            }
+        }
+
+        let dir = tempdir().unwrap();
+        let store = RocksStore::open(dir.path(), None).unwrap();
+        let budget = IngestBudget::new(BudgetConfig {
+            max_requests: 1,
+            max_bytes: 1024 * 1024,
+        });
+        let admission = budget.try_admit(0).unwrap();
+        let request = admission.request_lease();
+        let encoded_len = put_encoded_len([(b"k".as_slice(), b"v".as_slice())]);
+        let mut memory = WriterMemory::default();
+        memory
+            .reserve(&request, writer_memory(1, encoded_len, 1))
+            .unwrap();
+        drop(admission);
+        let dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let value = Bytes::from_owner(CheckedOwner {
+            budget: budget.clone(),
+            dropped: dropped.clone(),
+        });
+
+        // Commit waits on this lock before state ingestion, so nothing publishes meanwhile.
+        let publish_guard = store.frontiers.persist.lock();
+        let put_store = store.clone();
+        let write = tokio::spawn(async move {
+            put_store
+                .writer
+                .submit(
+                    vec![(Bytes::from_static(b"k"), value)],
+                    encoded_len,
+                    None,
+                    memory,
+                    request,
+                )
+                .await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while !dropped.load(Ordering::Acquire) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("staging frees the rows before publication");
+        assert_eq!(store.current_sequence(), 0);
+        assert_eq!(budget.usage().0, 1);
+
+        drop(publish_guard);
+        let sequence = tokio::time::timeout(std::time::Duration::from_secs(5), write)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(sequence, 1);
+        assert_eq!(store.db.get(b"k").unwrap().unwrap(), b"v");
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while budget.usage() != (0, 0) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
     }
 
     #[tokio::test]
@@ -2275,7 +2388,6 @@ mod tests {
         assert_eq!(budget.usage().0, 1);
         assert!(budget.try_admit(0).is_err());
         assert_eq!(notifier.current_sequence(), 0);
-        assert!(!dropped.load(Ordering::Acquire));
         drop(publish_guard);
         tokio::time::timeout(std::time::Duration::from_secs(5), &mut notified)
             .await
@@ -2318,10 +2430,10 @@ mod tests {
             encoded_len,
             response,
             notifier: None,
-            lease: Arc::new(WriteLease {
+            _lease: WriteLease {
                 _memory: memory,
                 _request: request,
-            }),
+            },
         }
     }
 
@@ -2568,7 +2680,7 @@ mod tests {
         let (wave, carried) = coalesce_queued_write(&receiver, first, 0, 1);
 
         assert_eq!(wave.requests.len(), 1);
-        assert_eq!(wave.requests[0].kvs[0].0.as_ref(), b"a");
+        assert_eq!(wave.rows[0].0.as_ref(), b"a");
         assert!(carried.is_none());
         assert_eq!(
             receiver
@@ -2652,13 +2764,18 @@ mod tests {
             assert_eq!(second.rows.len(), if second_len == 1 { 1 } else { 3 });
             assert_eq!(first.rows[0].0.as_ref(), b"a");
             assert_eq!(second.rows.last().expect("last row").0.as_ref(), b"c");
-            let request_keys: Vec<_> = first
-                .requests
+            assert_eq!(
+                (first.requests.len(), second.requests.len()),
+                if second_len == 1 { (2, 1) } else { (1, 2) }
+            );
+            let mut keys: Vec<_> = first
+                .rows
                 .iter()
-                .chain(&second.requests)
-                .map(|request| request.kvs[0].0.as_ref())
+                .chain(&second.rows)
+                .map(|(key, _)| key.as_ref())
                 .collect();
-            assert_eq!(request_keys, [b"a", b"b", b"c"]);
+            keys.dedup();
+            assert_eq!(keys, [b"a", b"b", b"c"]);
             assert!(prepared.recv().is_err());
         }
     }
