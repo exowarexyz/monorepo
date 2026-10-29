@@ -854,11 +854,19 @@ pub(crate) async fn stream_index_lookup_scan(
             }
 
             if let Some(filter) = cover_filter {
-                pk_batch = filter
+                // `select` returns ascending indices into `cover_rows`, which
+                // line up with `pk_batch`, so one in-place pass keeps the matches.
+                let mut selected = filter
                     .select(ctx.model, &cover_rows)?
                     .into_iter()
-                    .map(|i| pk_batch[i].clone())
-                    .collect();
+                    .peekable();
+                let mut idx = 0;
+                pk_batch.retain(|_| {
+                    let keep = selected.next_if_eq(&idx).is_some();
+                    idx += 1;
+                    keep
+                });
+                debug_assert!(selected.next().is_none());
             }
             if !pk_batch.is_empty() {
                 let rows = get_rows(ctx, &pk_batch).await?;
@@ -1935,6 +1943,18 @@ mod tests {
             matches!(requests.first(), Some(Request::Range { start, .. }) if fixture.index_matches(0, start)),
             "{requests:?}"
         );
+
+        // Keeps the first and last open rows but not the one between them.
+        let requests = fixture.check("SELECT payload FROM orders WHERE status = 'open' AND abs(amount - 20) > 5 ORDER BY payload").await;
+        let lookup_keys: Vec<_> = requests
+            .iter()
+            .filter_map(|request| match request {
+                Request::GetMany(keys) => Some(keys),
+                _ => None,
+            })
+            .flatten()
+            .collect();
+        assert_eq!(lookup_keys.len(), 2, "{requests:?}");
     }
 
     #[tokio::test]

@@ -146,8 +146,8 @@ pub(crate) struct CombinedAggregateJob {
 pub(crate) struct AggregatePushdownSpec {
     pub(crate) client: PrefixedStoreClient,
     pub(crate) group_count: usize,
-    pub(crate) seed_job: Option<AggregateReduceJob>,
-    pub(crate) aggregate_jobs: Vec<CombinedAggregateJob>,
+    pub(crate) seed_job: Option<Arc<CombinedAggregateJob>>,
+    pub(crate) aggregate_jobs: Vec<Arc<CombinedAggregateJob>>,
     pub(crate) diagnostics: AggregatePushdownDiagnostics,
     pub(crate) schema: SchemaRef,
 }
@@ -559,17 +559,12 @@ impl ExecutionPlan for KvAggregateExec {
         let jobs = self
             .spec
             .seed_job
-            .clone()
-            .into_iter()
-            .map(|job| CombinedAggregateJob {
-                job,
-                expr_plans: Vec::new(),
-            })
-            .chain(self.spec.aggregate_jobs.clone());
+            .iter()
+            .chain(&self.spec.aggregate_jobs)
+            .cloned()
+            .collect::<Vec<_>>();
         let batches = futures::stream::iter(jobs)
-            .map(move |job| {
-                execute_reduce_job(session.clone(), Arc::new(job), source.clone(), concurrency)
-            })
+            .map(move |job| execute_reduce_job(session.clone(), job, source.clone(), concurrency))
             .flatten();
         Ok(Box::pin(RecordBatchStreamAdapter::new(
             self.schema(),
@@ -656,8 +651,10 @@ fn execute_reduce_job(
     source: Arc<KvAggregateExec>,
     concurrency: usize,
 ) -> impl futures::Stream<Item = DataFusionResult<RecordBatch>> {
-    futures::stream::iter(job.job.ranges.clone())
-        .map(move |range| execute_reduce_range(session.clone(), job.clone(), source.clone(), range))
+    futures::stream::iter(0..job.job.ranges.len())
+        .map(move |range_idx| {
+            execute_reduce_range(session.clone(), job.clone(), source.clone(), range_idx)
+        })
         .buffered(concurrency)
         .try_flatten()
 }
@@ -666,8 +663,9 @@ async fn execute_reduce_range(
     session: ReadSession,
     job: Arc<CombinedAggregateJob>,
     source: Arc<KvAggregateExec>,
-    range: KeyRange,
+    range_idx: usize,
 ) -> DataFusionResult<BoxStream<'static, DataFusionResult<RecordBatch>>> {
+    let range = &job.job.ranges[range_idx];
     let responses = session
         .range_reduce_stream(&range.start, &range.end, &job.job.request)
         .await
@@ -961,6 +959,7 @@ pub(crate) fn try_build_aggregate_pushdown_spec(
         None
     };
 
+    let (seed_job, seed_diagnostics) = seed_job.unzip();
     let aggregate_jobs = combine_aggregate_jobs(aggregate_exprs);
     let aggregate_diagnostics = aggregate_jobs
         .iter()
@@ -969,11 +968,16 @@ pub(crate) fn try_build_aggregate_pushdown_spec(
     Ok(Some(AggregatePushdownSpec {
         client: table.client.clone(),
         group_count: compiled_group_exprs.len(),
-        seed_job: seed_job.as_ref().map(|(job, _)| job.clone()),
-        aggregate_jobs,
+        seed_job: seed_job.map(|job| {
+            Arc::new(CombinedAggregateJob {
+                job,
+                expr_plans: Vec::new(),
+            })
+        }),
+        aggregate_jobs: aggregate_jobs.into_iter().map(Arc::new).collect(),
         diagnostics: AggregatePushdownDiagnostics {
             grouped: !compiled_group_exprs.is_empty(),
-            seed_job: seed_job.map(|(_, diagnostics)| diagnostics),
+            seed_job: seed_diagnostics,
             aggregate_jobs: aggregate_diagnostics,
         },
         schema: Arc::new(schema.as_arrow().clone()),

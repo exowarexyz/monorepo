@@ -125,7 +125,7 @@ impl TableStream {
 /// Construct with [`SqlServer::new`], pass to [`sql_connect_stack`] to mount
 /// on an axum router.
 pub struct SqlServer {
-    ctx: Arc<SqlContext>,
+    ctx: SqlContext,
     streams: HashMap<String, TableStream>,
     // Registration order, preserved for the `Tables` RPC so clients see
     // tables in the same order the operator declared them.
@@ -151,7 +151,7 @@ impl SqlServer {
         let ctx = SqlContext::new(store.clone());
         ctx.register_schema(schema)?;
         Ok(Self {
-            ctx: Arc::new(ctx),
+            ctx,
             streams,
             table_names,
             store,
@@ -1067,7 +1067,7 @@ mod tests {
             server.session().table_provider("counts").await.unwrap(),
         )
         .unwrap();
-        server.ctx = Arc::new(ctx);
+        server.ctx = ctx;
         let server = Arc::new(server);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
