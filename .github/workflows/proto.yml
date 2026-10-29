@@ -27,8 +27,6 @@ jobs:
           github_token: ${{ github.token }}
       - name: Run setup (Rust + Node)
         uses: ./.github/actions/setup
-      - name: Buf build
-        run: buf build proto
       - name: Buf lint
         run: buf lint proto
       - name: Verify generated code is up to date
