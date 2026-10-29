@@ -623,7 +623,7 @@ where
         let result = self
             .state
             .query
-            .range_scan(start_key.clone(), end_key.clone(), limit, forward)
+            .range_scan(start_key, end_key, limit, forward)
             .await
             .map_err(ConnectError::internal)?;
         ensure_min_sequence_number(request.min_sequence_number, result.sequence_number)?;
@@ -941,7 +941,6 @@ struct SubscriptionState<B> {
     // failure boundary instead of when the client tears the stream down.
     replay: Option<ReplayState>,
     live: Option<OrderedBatchStream>,
-    terminated: bool,
 }
 
 impl<B> SubscriptionState<B>
@@ -953,7 +952,6 @@ where
             state,
             replay,
             live: Some(live),
-            terminated: false,
         }
     }
 
@@ -962,10 +960,6 @@ where
     ) -> Pin<Box<dyn Stream<Item = Result<SubscribeResponse, ConnectError>> + Send>> {
         Box::pin(stream_util::unfold(self, |mut state| async move {
             loop {
-                if state.terminated {
-                    return None;
-                }
-
                 if state.replay.is_some() {
                     match state.next_replay_frame().await {
                         Ok(ReplayProgress::Frame(frame)) => return Some((Ok(frame), state)),
@@ -975,8 +969,9 @@ where
                     }
                 }
 
-                // The live sequence source only ends past u64::MAX, so an
-                // exhausted live stream ends the subscription.
+                // `terminate` clears `live`, and the live sequence source only
+                // ends past u64::MAX, so a missing or exhausted live stream
+                // ends the subscription.
                 let (sequence_number, batch) = state.live.as_mut()?.next().await?;
                 match state.resolve_batch(sequence_number, batch).await {
                     Ok(Some(frame)) => return Some((Ok(frame), state)),
@@ -988,7 +983,6 @@ where
     }
 
     fn terminate(&mut self, err: ConnectError) -> Result<SubscribeResponse, ConnectError> {
-        self.terminated = true;
         self.replay = None;
         self.live = None;
         Err(err)
