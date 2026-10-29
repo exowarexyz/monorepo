@@ -81,9 +81,9 @@ mod tests {
     use buffa::Message as _;
     use exoware_sdk::{common::Entry, ingest::PutRequest};
     use http_body_util::Full;
-    use tokio::time::Instant;
 
     use super::*;
+    use crate::ingest::testing::tokio_deadline;
     use crate::ingest::{box_body, BudgetConfig, IngestBudget, PutEncoding, PutInput, PutMetadata};
 
     #[tokio::test]
@@ -141,7 +141,7 @@ mod tests {
                         content_length: Some(wire.len()),
                     },
                     limits,
-                    Instant::now() + Duration::from_secs(10),
+                    tokio_deadline(Duration::from_secs(10)),
                     budget.try_admit(wire.len()).unwrap(),
                 );
                 let (mut previous, mut count, mut peak) = (None, 0, 0);

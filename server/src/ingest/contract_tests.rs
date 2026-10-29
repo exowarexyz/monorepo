@@ -1,5 +1,11 @@
 use std::{convert::Infallible, sync::Arc, time::Duration};
 
+use super::testing::tokio_deadline;
+use super::{
+    box_body, BudgetConfig, DecodeBuffers, DecodeExecutor, DecodeOutput, DecodeState, IngestBudget,
+    PutEncoding, PutError, PutInput, PutLimits, PutMetadata,
+};
+use crate::validate::IngestLimits;
 use buffa::{
     encoding::{Tag, WireType},
     MessageView as _,
@@ -9,13 +15,6 @@ use connectrpc::ConnectError;
 use exoware_sdk::log::ingest::v1::PutRequestView;
 use http_body::Frame;
 use http_body_util::StreamBody;
-use tokio::time::Instant;
-
-use super::{
-    box_body, BudgetConfig, DecodeBuffers, DecodeExecutor, DecodeOutput, DecodeState, IngestBudget,
-    PutEncoding, PutError, PutInput, PutLimits, PutMetadata,
-};
-use crate::validate::IngestLimits;
 
 // Running the production decoder inline keeps the short corpus independent of thread scheduling.
 struct InlineExecutor;
@@ -70,7 +69,7 @@ async fn parse_fragmented(
             ingest: limits,
             ..PutLimits::default()
         },
-        Instant::now() + Duration::from_secs(30),
+        tokio_deadline(Duration::from_secs(30)),
         admission,
     );
     input.set_executor(Arc::new(InlineExecutor));
@@ -420,7 +419,7 @@ async fn declared_field_length_beyond_the_decoded_bound_does_not_reserve_the_mes
                 content_length: Some(body.len()),
             },
             PutLimits::default(),
-            Instant::now() + Duration::from_secs(30),
+            tokio_deadline(Duration::from_secs(30)),
             admission,
         );
         input.set_executor(Arc::new(InlineExecutor));

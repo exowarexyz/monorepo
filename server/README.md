@@ -86,13 +86,20 @@ time, and rejection cleanup cannot restart an expired timer. Set it to `None`
 to use only the absolute deadline. Clients that continually trickle bytes are
 still bounded by the absolute deadline.
 
+`PutConfig.clock` controls request deadlines, idle timeouts and elapsed-time
+measurements. It defaults to `TokioClock`; deterministic tests can supply a
+`PutClock` backed by their runtime. Use a monotonic clock in production.
+Connection timers stay on Tokio. To run Put without a Tokio runtime, also replace
+the default blocking decoder through `PutInput::set_executor`.
+
 `AppState::with_put_config` and `IngestState::with_put_config` configure the host
-budget, admitted wire bound, timeout, and observer. Memory upgrades fail immediately
-while bootstrap admission is held. Known request lengths reserve their enforced
-wire bound. Unknown lengths reserve the configured wire maximum before the first
-body poll. Requests rejected from metadata retain only a request slot during raw
-cleanup, which still enforces the wire bound and deadline. Hosts must leave room for decoder and backend reservations in addition
-to transport admission. The byte budget accounts for admitted request allocations.
+budget, admitted wire bound, timeout, clock, and observer. Memory upgrades fail
+immediately while bootstrap admission is held. Known request lengths reserve
+their enforced wire bound. Unknown lengths reserve the configured wire maximum
+before the first body poll. Requests rejected from metadata retain only a request
+slot during raw cleanup, which still enforces the wire bound and deadline. Hosts
+must leave room for decoder and backend reservations in addition to transport
+admission. The byte budget accounts for admitted request allocations.
 Fixed listener overhead and storage-engine memory have separate bounds.
 
 Temporary initial-admission failures include a typed backoff hint. See the

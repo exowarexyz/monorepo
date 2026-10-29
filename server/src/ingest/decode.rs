@@ -689,9 +689,9 @@ mod tests {
     use std::time::Duration;
 
     use http_body_util::Full;
-    use tokio::time::Instant;
 
     use super::*;
+    use crate::ingest::testing::tokio_deadline;
     use crate::ingest::{box_body, BudgetConfig, IngestBudget, PutInput, PutMetadata};
 
     fn field(tag: u8, bytes: &[u8]) -> Vec<u8> {
@@ -769,7 +769,7 @@ mod tests {
             box_body(Full::new(Bytes::from(wire.clone()))),
             PutMetadata::default(),
             PutLimits::default(),
-            Instant::now() + Duration::from_secs(1),
+            tokio_deadline(Duration::from_secs(1)),
             budget.try_admit(wire.len()).unwrap(),
         );
         let chunk = input
@@ -824,7 +824,7 @@ mod tests {
             box_body(Full::new(Bytes::from(wire.clone()))),
             PutMetadata::default(),
             PutLimits::default(),
-            Instant::now() + Duration::from_secs(1),
+            tokio_deadline(Duration::from_secs(1)),
             budget.try_admit(wire.len()).unwrap(),
         );
         let allocations = Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -862,7 +862,7 @@ mod tests {
             box_body(Full::new(Bytes::from(wire.clone()))),
             PutMetadata::default(),
             PutLimits::default(),
-            Instant::now() + Duration::from_secs(1),
+            tokio_deadline(Duration::from_secs(1)),
             budget.try_admit(wire.len()).unwrap(),
         );
         let chunk = input
