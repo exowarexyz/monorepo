@@ -36,8 +36,7 @@ pub struct PutConfig {
     /// Limits waits for upload progress without charging backend processing time.
     pub idle_timeout: Option<std::time::Duration>,
     pub observer: Option<Arc<dyn super::IngestObserver>>,
-    /// Measures Put deadlines and timings. The HTTP connection layer keeps
-    /// Tokio deadlines of its own.
+    /// Clock for Put deadlines and timings; defaults to [`TokioClock`].
     pub clock: Arc<dyn PutClock>,
 }
 
@@ -238,7 +237,7 @@ async fn put<I: Ingest>(
         .unwrap_or(state.put_config.timeout)
         .min(state.put_config.max_timeout);
     let request_deadline = PutDeadline::after(state.put_config.clock.clone(), timeout);
-    // The connection layer runs on Tokio, so it measures the same timeout there.
+    // The transport's timer must use Tokio time, regardless of the request clock.
     let connection_deadline = tokio::time::Instant::now() + timeout;
     let control = parts.extensions.get::<ConnectionControl>().cloned();
     let generation = control
