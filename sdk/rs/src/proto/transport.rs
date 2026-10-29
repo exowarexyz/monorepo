@@ -2,9 +2,10 @@
 //!
 //! ## Registry
 //!
-//! Servers register **gzip** and **zstd** via [`connect_compression_registry`] (same as
-//! [`connectrpc::compression::CompressionRegistry::default`]) so callers without zstd
-//! (including typical browsers) can still negotiate gzip.
+//! Servers register **gzip** and **zstd** via [`connect_compression_registry`] (the codecs of
+//! [`connectrpc::compression::CompressionRegistry::default`], with zstd decompression sized
+//! from the frame header) so callers without zstd (including typical browsers) can still
+//! negotiate gzip.
 //!
 //! ## Rust client transport
 //!
@@ -39,7 +40,7 @@ pub use bytes::Bytes;
 pub use connectrpc::client::{
     BoxFuture, ClientBody, ClientTransport, HttpClient, ServiceTransport,
 };
-use connectrpc::compression::CompressionRegistry;
+use connectrpc::compression::{CompressionRegistry, ZstdProvider};
 pub use connectrpc::rustls::{self, ClientConfig};
 use connectrpc::{ConnectError, Protocol};
 use cookie_store::{Cookie, CookieDomain, CookieStore};
@@ -57,6 +58,8 @@ use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
 use reqwest::Url;
 use tower::util::BoxCloneSyncService;
 use tower::ServiceExt;
+
+use super::zstd_codec::ZstdCodec;
 
 const DEFAULT_CONNECTIONS_PER_ORIGIN: usize = 4;
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
@@ -548,7 +551,7 @@ impl ClientTransport for BalancedHttp2Transport {
 /// [`connectrpc::client::ClientConfig::compression`].
 #[must_use]
 pub fn connect_compression_registry() -> CompressionRegistry {
-    CompressionRegistry::default()
+    CompressionRegistry::default().register(ZstdCodec::new(ZstdProvider::default()))
 }
 
 /// Wraps [`HttpClient`] with zstd first for the default response codecs (see module docs).
