@@ -255,7 +255,7 @@ where
             .enumerate()
             .map(|(offset, bytes)| {
                 let location = checkpoint.start_location + offset as u64;
-                keyless::Operation::<F, E>::decode_cfg(Copying(bytes.as_slice()), &self.op_cfg)
+                keyless::Operation::<F, E>::decode_cfg(Copying(bytes.as_ref()), &self.op_cfg)
                     .map_err(|e| {
                         QmdbError::CorruptData(format!(
                             "failed to decode authenticated operation at location {location}: {e}"

@@ -88,7 +88,7 @@ impl<R: OperationLogReader> OperationLogServer<R> {
 struct PendingBatch<F: Family> {
     latest: Location<F>,
     sequence_number: u64,
-    matched: Vec<(Location<F>, Vec<u8>)>,
+    matched: Vec<(Location<F>, Bytes)>,
 }
 
 struct PendingBatches<F: Family> {
@@ -166,7 +166,7 @@ struct ReadyBatch<F: Family> {
     /// per-batch sequence here or the reconnect cursor would jump past
     /// unread siblings.
     batch_sequence: u64,
-    matched: Vec<(Location<F>, Vec<u8>)>,
+    matched: Vec<(Location<F>, Bytes)>,
 }
 
 fn parse_filters<'a, 'b, I>(filters: I, label: &str) -> Result<Option<CompiledFilters>, String>
@@ -266,7 +266,7 @@ impl<R: OperationLogReader> BatchSubscribeStream<R> {
 
     fn ingest_frame(&mut self, frame: &exoware_sdk::StoreBatch) -> Result<(), Box<ConnectError>> {
         let mut latest: Option<Location<R::Family>> = None;
-        let mut matched: Vec<(Location<R::Family>, Vec<u8>)> = Vec::new();
+        let mut matched: Vec<(Location<R::Family>, Bytes)> = Vec::new();
         let needs_decode = self.key_matcher.is_some() || self.value_matcher.is_some();
 
         for entry in &frame.entries {
@@ -288,7 +288,7 @@ impl<R: OperationLogReader> BatchSubscribeStream<R> {
                         true
                     };
                     if include {
-                        matched.push((location, entry.value.to_vec()));
+                        matched.push((location, entry.value.clone()));
                     }
                 }
                 sub::RowFamily::Watermark => {
@@ -539,7 +539,7 @@ mod tests {
             sequence_number,
             matched: vec![(
                 Location::<commonware_storage::merkle::mmr::Family>::new(sequence_number),
-                vec![sequence_number as u8],
+                Bytes::from(vec![sequence_number as u8]),
             )],
         }
     }
@@ -562,7 +562,7 @@ mod tests {
                 inactive_peaks: 0,
                 digests: Vec::new(),
             },
-            operations: vec![(Location::new(0), vec![0xAA])],
+            operations: vec![(Location::new(0), Bytes::from_static(&[0xAA]))],
         };
 
         let encoded = encode::subscribe_response(0, &raw)
@@ -893,15 +893,15 @@ mod authenticated_upload_subscription_tests {
         assert_eq!(
             stream.ready[0].matched,
             [
-                (Location::new(4), b"four".to_vec()),
-                (Location::new(5), b"five".to_vec())
+                (Location::new(4), Bytes::from_static(b"four")),
+                (Location::new(5), Bytes::from_static(b"five"))
             ]
         );
         assert_eq!(
             stream.ready[1].matched,
             [
-                (Location::new(0), b"zero".to_vec()),
-                (Location::new(1), b"one".to_vec())
+                (Location::new(0), Bytes::from_static(b"zero")),
+                (Location::new(1), Bytes::from_static(b"one"))
             ]
         );
     }
@@ -936,7 +936,7 @@ mod authenticated_upload_subscription_tests {
         assert_eq!(stream.ready.len(), 1);
         assert_eq!(
             stream.ready[0].matched,
-            [(Location::new(4), b"keep".to_vec())]
+            [(Location::new(4), Bytes::from_static(b"keep"))]
         );
         assert_eq!(stream.ready[0].watermark.sequence_number, 12);
     }
@@ -959,8 +959,8 @@ mod authenticated_upload_subscription_tests {
         assert_eq!(
             stream.ready[0].matched,
             [
-                (Location::new(0), b"zero".to_vec()),
-                (Location::new(1), b"one".to_vec())
+                (Location::new(0), Bytes::from_static(b"zero")),
+                (Location::new(1), Bytes::from_static(b"one"))
             ]
         );
     }

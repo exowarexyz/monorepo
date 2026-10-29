@@ -276,7 +276,7 @@ where
             .map(|(offset, bytes)| {
                 let location = checkpoint.start_location + offset as u64;
                 immutable::Operation::<F, K, E>::decode_cfg(
-                    Copying(bytes.as_slice()),
+                    Copying(bytes.as_ref()),
                     &self.operation_cfg,
                 )
                 .map_err(|e| {

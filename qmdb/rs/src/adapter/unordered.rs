@@ -326,15 +326,13 @@ where
         let mut operations = Vec::with_capacity(checkpoint.encoded_operations.len());
         for (offset, value) in checkpoint.encoded_operations.iter().enumerate() {
             let location = checkpoint.start_location + offset as u64;
-            let op = unordered::Operation::<F, K, E>::decode_cfg(
-                Copying(value.as_slice()),
-                &self.op_cfg,
-            )
-            .map_err(|e| {
-                QmdbError::CorruptData(format!(
-                    "failed to decode unordered operation at location {location}: {e}"
-                ))
-            })?;
+            let op =
+                unordered::Operation::<F, K, E>::decode_cfg(Copying(value.as_ref()), &self.op_cfg)
+                    .map_err(|e| {
+                        QmdbError::CorruptData(format!(
+                            "failed to decode unordered operation at location {location}: {e}"
+                        ))
+                    })?;
             operations.push(op);
         }
         Ok(VerifiedOperationRange {
