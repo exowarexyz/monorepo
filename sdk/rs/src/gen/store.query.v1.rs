@@ -7106,7 +7106,7 @@ pub struct GetRequest {
         with = "::buffa::json_helpers::bytes",
         skip_serializing_if = "::buffa::json_helpers::skip_if::is_empty_bytes"
     )]
-    pub key: ::buffa::alloc::vec::Vec<u8>,
+    pub key: ::buffa::bytes::Bytes,
     /// Optional freshness gate. See service-level comment.
     ///
     /// Field 2: `min_sequence_number`
@@ -7205,7 +7205,7 @@ impl ::buffa::Message for GetRequest {
                     tag,
                     ::buffa::encoding::WireType::LengthDelimited,
                 )?;
-                ::buffa::types::merge_bytes(&mut self.key, buf)?;
+                self.key = ::buffa::types::decode_bytes_to_bytes(buf)?;
             }
             2u32 => {
                 ::buffa::encoding::check_wire_type(
@@ -7224,7 +7224,7 @@ impl ::buffa::Message for GetRequest {
         ::core::result::Result::Ok(())
     }
     fn clear(&mut self) {
-        self.key.clear();
+        self.key = ::core::default::Default::default();
         self.min_sequence_number = ::core::option::Option::None;
         self.__buffa_unknown_fields.clear();
     }
@@ -7987,7 +7987,7 @@ pub struct RangeRequest {
         with = "::buffa::json_helpers::bytes",
         skip_serializing_if = "::buffa::json_helpers::skip_if::is_empty_bytes"
     )]
-    pub start: ::buffa::alloc::vec::Vec<u8>,
+    pub start: ::buffa::bytes::Bytes,
     /// Empty means unbounded above.
     ///
     /// Field 2: `end`
@@ -7996,7 +7996,7 @@ pub struct RangeRequest {
         with = "::buffa::json_helpers::bytes",
         skip_serializing_if = "::buffa::json_helpers::skip_if::is_empty_bytes"
     )]
-    pub end: ::buffa::alloc::vec::Vec<u8>,
+    pub end: ::buffa::bytes::Bytes,
     /// Field 3: `limit`
     #[serde(
         rename = "limit",
@@ -8156,14 +8156,14 @@ impl ::buffa::Message for RangeRequest {
                     tag,
                     ::buffa::encoding::WireType::LengthDelimited,
                 )?;
-                ::buffa::types::merge_bytes(&mut self.start, buf)?;
+                self.start = ::buffa::types::decode_bytes_to_bytes(buf)?;
             }
             2u32 => {
                 ::buffa::encoding::check_wire_type(
                     tag,
                     ::buffa::encoding::WireType::LengthDelimited,
                 )?;
-                ::buffa::types::merge_bytes(&mut self.end, buf)?;
+                self.end = ::buffa::types::decode_bytes_to_bytes(buf)?;
             }
             3u32 => {
                 ::buffa::encoding::check_wire_type(
@@ -8205,8 +8205,8 @@ impl ::buffa::Message for RangeRequest {
         ::core::result::Result::Ok(())
     }
     fn clear(&mut self) {
-        self.start.clear();
-        self.end.clear();
+        self.start = ::core::default::Default::default();
+        self.end = ::core::default::Default::default();
         self.limit = ::core::option::Option::None;
         self.batch_size = 0u32;
         self.mode = ::buffa::EnumValue::from(0);
@@ -8438,7 +8438,7 @@ pub struct ReduceRequest {
         with = "::buffa::json_helpers::bytes",
         skip_serializing_if = "::buffa::json_helpers::skip_if::is_empty_bytes"
     )]
-    pub start: ::buffa::alloc::vec::Vec<u8>,
+    pub start: ::buffa::bytes::Bytes,
     /// Empty means unbounded above.
     ///
     /// Field 2: `end`
@@ -8447,7 +8447,7 @@ pub struct ReduceRequest {
         with = "::buffa::json_helpers::bytes",
         skip_serializing_if = "::buffa::json_helpers::skip_if::is_empty_bytes"
     )]
-    pub end: ::buffa::alloc::vec::Vec<u8>,
+    pub end: ::buffa::bytes::Bytes,
     /// Field 3: `params`
     #[serde(
         rename = "params",
@@ -8574,14 +8574,14 @@ impl ::buffa::Message for ReduceRequest {
                     tag,
                     ::buffa::encoding::WireType::LengthDelimited,
                 )?;
-                ::buffa::types::merge_bytes(&mut self.start, buf)?;
+                self.start = ::buffa::types::decode_bytes_to_bytes(buf)?;
             }
             2u32 => {
                 ::buffa::encoding::check_wire_type(
                     tag,
                     ::buffa::encoding::WireType::LengthDelimited,
                 )?;
-                ::buffa::types::merge_bytes(&mut self.end, buf)?;
+                self.end = ::buffa::types::decode_bytes_to_bytes(buf)?;
             }
             3u32 => {
                 ::buffa::encoding::check_wire_type(
@@ -8611,8 +8611,8 @@ impl ::buffa::Message for ReduceRequest {
         ::core::result::Result::Ok(())
     }
     fn clear(&mut self) {
-        self.start.clear();
-        self.end.clear();
+        self.start = ::core::default::Default::default();
+        self.end = ::core::default::Default::default();
         self.params = ::buffa::MessageField::none();
         self.min_sequence_number = ::core::option::Option::None;
         self.__buffa_unknown_fields.clear();
@@ -19365,7 +19365,7 @@ pub mod __buffa {
                 use ::buffa::alloc::string::ToString as _;
                 let _ = __buffa_src;
                 ::core::result::Result::Ok(super::super::GetRequest {
-                    key: (self.key).to_vec(),
+                    key: ::buffa::view::bytes_from_source(__buffa_src, self.key),
                     min_sequence_number: self.min_sequence_number,
                     __buffa_unknown_fields: self
                         .__buffa_unknown_fields
@@ -21060,8 +21060,8 @@ pub mod __buffa {
                 use ::buffa::alloc::string::ToString as _;
                 let _ = __buffa_src;
                 ::core::result::Result::Ok(super::super::RangeRequest {
-                    start: (self.start).to_vec(),
-                    end: (self.end).to_vec(),
+                    start: ::buffa::view::bytes_from_source(__buffa_src, self.start),
+                    end: ::buffa::view::bytes_from_source(__buffa_src, self.end),
                     limit: self.limit,
                     batch_size: self.batch_size,
                     mode: self.mode,
@@ -21848,8 +21848,8 @@ pub mod __buffa {
                 use ::buffa::alloc::string::ToString as _;
                 let _ = __buffa_src;
                 ::core::result::Result::Ok(super::super::ReduceRequest {
-                    start: (self.start).to_vec(),
-                    end: (self.end).to_vec(),
+                    start: ::buffa::view::bytes_from_source(__buffa_src, self.start),
+                    end: ::buffa::view::bytes_from_source(__buffa_src, self.end),
                     params: match self.params.as_option() {
                         Some(v) => {
                             ::buffa::MessageField::<

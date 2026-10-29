@@ -158,7 +158,7 @@ impl Service for Store {
         self.changed.notify_one();
         require_floor(request.min_sequence_number, state.get_sequence)?;
         connectrpc::Response::ok(GetResponse {
-            value: state.rows.get(request.key.as_slice()).cloned(),
+            value: state.rows.get(&request.key[..]).cloned(),
             detail: detail(state.get_sequence).into(),
             ..Default::default()
         })
@@ -232,8 +232,8 @@ impl Service for Store {
                 .rows
                 .iter()
                 .filter(|(key, _)| {
-                    key.as_slice() >= request.start.as_slice()
-                        && (request.end.is_empty() || key.as_slice() <= request.end.as_slice())
+                    key.as_slice() >= &request.start[..]
+                        && (request.end.is_empty() || key.as_slice() <= &request.end[..])
                 })
                 .map(|(key, value)| Entry {
                     key: Bytes::copy_from_slice(key),

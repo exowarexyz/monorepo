@@ -2276,7 +2276,7 @@ impl StoreClient {
             .send_with_retry(|| async {
                 client
                     .get(ProtoGetRequest {
-                        key: key.clone().into(),
+                        key: key.clone(),
                         min_sequence_number,
                         ..Default::default()
                     })
@@ -2337,8 +2337,8 @@ impl StoreClient {
                 .with_streaming_timeout(async {
                     let response = client
                         .range(ProtoRangeRequest {
-                            start: start.clone().into(),
-                            end: end.clone().into(),
+                            start: start.clone(),
+                            end: end.clone(),
                             limit: (limit != usize::MAX)
                                 .then(|| u32::try_from(limit).unwrap_or(u32::MAX)),
                             batch_size: u32::try_from(batch_size).unwrap_or(u32::MAX),
@@ -2395,8 +2395,8 @@ impl StoreClient {
                 self.with_streaming_timeout(async {
                     let mut stream = client
                         .reduce(ProtoWireReduceRequest {
-                            start: start.clone().into(),
-                            end: end.clone().into(),
+                            start: start.clone(),
+                            end: end.clone(),
                             params: Some(proto_params.clone()).into(),
                             min_sequence_number,
                             ..Default::default()
@@ -3501,8 +3501,8 @@ mod tests {
         assert_eq!(requests[0].min_sequence_number, None);
         assert_eq!(requests[1].min_sequence_number, None);
         assert_eq!(requests[2].min_sequence_number, Some(47));
-        assert_eq!(requests[2].start.as_slice(), b"tenant/a");
-        assert_eq!(requests[2].end.as_slice(), b"tenant/z");
+        assert_eq!(requests[2].start.as_ref(), b"tenant/a");
+        assert_eq!(requests[2].end.as_ref(), b"tenant/z");
     }
 
     #[tokio::test]

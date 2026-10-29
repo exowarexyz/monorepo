@@ -408,7 +408,7 @@ mod tests {
     fn get_request_bytes(key: &[u8]) -> Vec<u8> {
         use buffa::Message;
         exoware_proto::query::GetRequest {
-            key: key.to_vec(),
+            key: Bytes::copy_from_slice(key),
             ..Default::default()
         }
         .encode_to_vec()
@@ -436,7 +436,7 @@ mod tests {
     ) -> Vec<u8> {
         use buffa::Message;
         exoware_proto::query::RangeRequest {
-            start: vec![0],
+            start: Bytes::from_static(&[0]),
             batch_size,
             mode: mode.into(),
             ..Default::default()
@@ -580,8 +580,8 @@ mod tests {
     fn reduce_request_bytes(n_reducers: usize) -> Vec<u8> {
         use buffa::Message;
         exoware_proto::query::ReduceRequest {
-            start: vec![0],
-            end: vec![0],
+            start: Bytes::from_static(&[0]),
+            end: Bytes::from_static(&[0]),
             params: Some(exoware_proto::query::ReduceParams {
                 reducers: (0..n_reducers)
                     .map(|_| exoware_proto::query::RangeReducerSpec {
@@ -610,8 +610,8 @@ mod tests {
     fn reduce_rejects_oversized_key() {
         use buffa::Message;
         let bytes = exoware_proto::query::ReduceRequest {
-            start: vec![0u8; 255],
-            end: vec![0],
+            start: Bytes::from(vec![0u8; 255]),
+            end: Bytes::from_static(&[0]),
             params: Some(exoware_proto::query::ReduceParams {
                 reducers: vec![exoware_proto::query::RangeReducerSpec {
                     op: exoware_proto::query::RangeReduceOp::RANGE_REDUCE_OP_COUNT_ALL.into(),
