@@ -369,7 +369,9 @@ test('deadline during a later upload uses the original budget', async () => {
 test.each(['unavailable', 'aborted', 'resource_exhausted'])('Get retains retries for generic %s', async (code) => {
     const fetch = jest.spyOn(globalThis, 'fetch')
         .mockResolvedValueOnce(rejected([], code))
-        .mockResolvedValueOnce(new Response(JSON.stringify({}), { headers: { 'content-type': 'application/json' } }));
+        .mockResolvedValueOnce(new Response(toBinary(GetResponseSchema, create(GetResponseSchema)), {
+            headers: { 'content-type': 'application/proto' },
+        }));
     const pending = client().query.get(create(GetRequestSchema));
     await jest.advanceTimersByTimeAsync(5);
     await expect(pending).resolves.toEqual(create(GetResponseSchema));

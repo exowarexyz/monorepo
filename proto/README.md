@@ -129,6 +129,6 @@ admission policy above, concurrency, and publication barriers across chunks.
 The TypeScript SDK exports the same constants. Its `StoreWriteBatch` provides
 `encodedLen()`, `validate(options)`, and `split(options)` for protobuf.
 All TypeScript Put requests use protobuf. `ClientOptions.useBinaryFormat` controls
-only non-ingest services. Pass `store.putOptions` to validation and splitting to
-use the client's configured limits. Store writes validate before sending and
-remain one atomic Put. Splitting is explicit.
+only non-ingest services, which also default to protobuf. Pass `store.putOptions`
+to validation and splitting to use the client's configured limits. Store writes
+validate before sending and remain one atomic Put. Splitting is explicit.
