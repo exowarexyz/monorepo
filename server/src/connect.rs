@@ -85,10 +85,9 @@ fn query_detail(sequence_number: u64, extra: QueryExtra) -> Detail {
 
 /// Build a consistency rejection for an observed snapshot with the standard retry hint.
 pub fn consistency_not_ready_error(required: u64, current: u64) -> ConnectError {
-    let err = with_retry_hint(
-        ConnectError::aborted("minimum consistency token is not yet visible"),
-        RETRY_HINT_DELAY,
-    );
+    let err = with_retry_hint(ConnectError::aborted(
+        "minimum consistency token is not yet visible",
+    ));
     with_query_detail(
         with_error_info_detail(
             err,
@@ -453,25 +452,25 @@ const REASON_WORKER_NOT_READY: &str = "WORKER_NOT_READY";
 const REASON_INGEST_UNAVAILABLE: &str = "INGEST_UNAVAILABLE";
 
 pub fn worker_not_ready_error() -> ConnectError {
-    with_retry_hint(
-        with_error_info_detail(
-            ConnectError::unavailable("ingest is not ready"),
-            ErrorInfo {
-                reason: REASON_WORKER_NOT_READY.to_string(),
-                domain: INGEST_ERROR_DOMAIN.to_string(),
-                ..Default::default()
-            },
-        ),
-        RETRY_HINT_DELAY,
-    )
+    with_retry_hint(with_error_info_detail(
+        ConnectError::unavailable("ingest is not ready"),
+        ErrorInfo {
+            reason: REASON_WORKER_NOT_READY.to_string(),
+            domain: INGEST_ERROR_DOMAIN.to_string(),
+            ..Default::default()
+        },
+    ))
 }
 
 /// Attaches an explicit retry hint for "come back soon" responses.
-fn with_retry_hint(err: ConnectError, retry_delay: std::time::Duration) -> ConnectError {
+fn with_retry_hint(err: ConnectError) -> ConnectError {
     with_retry_info_detail(
         err,
         RetryInfo {
-            retry_delay: Some(buffa_types::google::protobuf::Duration::from(retry_delay)).into(),
+            retry_delay: Some(buffa_types::google::protobuf::Duration::from(
+                RETRY_HINT_DELAY,
+            ))
+            .into(),
             ..Default::default()
         },
     )
@@ -481,17 +480,14 @@ pub fn ingest_error_to_connect(err: IngestError) -> ConnectError {
     match err {
         IngestError::PutTooLarge(error) => validate::put_too_large_error(error),
         IngestError::ResourceExhausted { message } => ConnectError::resource_exhausted(message),
-        IngestError::Unavailable { message } => with_retry_hint(
-            with_error_info_detail(
-                ConnectError::unavailable(message),
-                ErrorInfo {
-                    reason: REASON_INGEST_UNAVAILABLE.to_string(),
-                    domain: INGEST_ERROR_DOMAIN.to_string(),
-                    ..Default::default()
-                },
-            ),
-            RETRY_HINT_DELAY,
-        ),
+        IngestError::Unavailable { message } => with_retry_hint(with_error_info_detail(
+            ConnectError::unavailable(message),
+            ErrorInfo {
+                reason: REASON_INGEST_UNAVAILABLE.to_string(),
+                domain: INGEST_ERROR_DOMAIN.to_string(),
+                ..Default::default()
+            },
+        )),
         IngestError::Internal { message } => ConnectError::internal(message),
     }
 }
@@ -627,7 +623,7 @@ where
         let result = self
             .state
             .query
-            .range_scan(start_key.clone(), end_key.clone(), limit, forward)
+            .range_scan(start_key, end_key, limit, forward)
             .await
             .map_err(ConnectError::internal)?;
         ensure_min_sequence_number(request.min_sequence_number, result.sequence_number)?;
@@ -848,10 +844,6 @@ where
         )
     }
 
-    fn batch_evicted_error(&self, oldest_retained: Option<u64>) -> ConnectError {
-        Self::batch_evicted_connect_error(oldest_retained)
-    }
-
     fn batch_not_found_error(&self) -> ConnectError {
         with_error_info_detail(
             ConnectError::not_found("batch not found"),
@@ -949,7 +941,6 @@ struct SubscriptionState<B> {
     // failure boundary instead of when the client tears the stream down.
     replay: Option<ReplayState>,
     live: Option<OrderedBatchStream>,
-    terminated: bool,
 }
 
 impl<B> SubscriptionState<B>
@@ -961,7 +952,6 @@ where
             state,
             replay,
             live: Some(live),
-            terminated: false,
         }
     }
 
@@ -970,10 +960,6 @@ where
     ) -> Pin<Box<dyn Stream<Item = Result<SubscribeResponse, ConnectError>> + Send>> {
         Box::pin(stream_util::unfold(self, |mut state| async move {
             loop {
-                if state.terminated {
-                    return None;
-                }
-
                 if state.replay.is_some() {
                     match state.next_replay_frame().await {
                         Ok(ReplayProgress::Frame(frame)) => return Some((Ok(frame), state)),
@@ -983,8 +969,9 @@ where
                     }
                 }
 
-                // The live sequence source only ends past u64::MAX, so an
-                // exhausted live stream ends the subscription.
+                // `terminate` clears `live`, and the live sequence source only
+                // ends past u64::MAX, so a missing or exhausted live stream
+                // ends the subscription.
                 let (sequence_number, batch) = state.live.as_mut()?.next().await?;
                 match state.resolve_batch(sequence_number, batch).await {
                     Ok(Some(frame)) => return Some((Ok(frame), state)),
@@ -996,7 +983,6 @@ where
     }
 
     fn terminate(&mut self, err: ConnectError) -> Result<SubscribeResponse, ConnectError> {
-        self.terminated = true;
         self.replay = None;
         self.live = None;
         Err(err)
@@ -1116,7 +1102,7 @@ where
                         .oldest_retained_batch()
                         .await
                         .map_err(ConnectError::internal)?;
-                    return Err(self.batch_evicted_error(oldest));
+                    return Err(Self::batch_evicted_connect_error(oldest));
                 };
                 Some(ReplayState {
                     batches: ordered_batch_stream(
@@ -1171,7 +1157,7 @@ where
                         .oldest_retained_batch()
                         .await
                         .map_err(ConnectError::internal)?;
-                    Err(self.batch_evicted_error(oldest))
+                    Err(Self::batch_evicted_connect_error(oldest))
                 }
             }
         }
