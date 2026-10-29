@@ -57,7 +57,7 @@ use crate::stream::{StreamHub, StreamNotifier};
 use crate::validate::{self, IngestLimits};
 use crate::{
     FilteredBatch, Ingest, IngestError, Log, LogBatch, Prune, Query, QueryExtra, RangeScan,
-    RangeScanResult, Retention, StoreEngine,
+    RangeScanResult, Retention, Sequence, StoreEngine,
 };
 
 #[cfg(test)]
@@ -121,6 +121,17 @@ fn ensure_min_sequence_number(
         }
     }
     Ok(())
+}
+
+/// Reject a read before it starts when the request's floor is above the
+/// engine's current sequence. The engine is asked only when the request sends a
+/// floor, because some engines capture a read snapshot to answer
+/// `current_sequence`.
+fn ensure_floor_visible(required: Option<u64>, engine: &impl Sequence) -> Result<(), ConnectError> {
+    if required.is_none() {
+        return Ok(());
+    }
+    ensure_min_sequence_number(required, engine.current_sequence())
 }
 
 fn range_stream<S>(
@@ -529,10 +540,7 @@ where
         request: ServiceRequest<'_, exoware_proto::store::query::v1::GetRequest>,
     ) -> connectrpc::ServiceResult<GetResponse> {
         validate::validate_get_request(request.view())?;
-        ensure_min_sequence_number(
-            request.min_sequence_number,
-            self.state.query.current_sequence(),
-        )?;
+        ensure_floor_visible(request.min_sequence_number, self.state.query.as_ref())?;
         let wire = request.bytes();
         let key: Key = wire.slice_ref(request.key);
         let result = self
@@ -556,10 +564,7 @@ where
         request: ServiceRequest<'_, exoware_proto::store::query::v1::GetManyRequest>,
     ) -> connectrpc::ServiceResult<connectrpc::ServiceStream<GetManyFrame>> {
         validate::validate_get_many_request(request.view())?;
-        ensure_min_sequence_number(
-            request.min_sequence_number,
-            self.state.query.current_sequence(),
-        )?;
+        ensure_floor_visible(request.min_sequence_number, self.state.query.as_ref())?;
 
         let wire = request.bytes();
         let keys: Vec<Key> = request.keys.iter().map(|key| wire.slice_ref(key)).collect();
@@ -610,10 +615,7 @@ where
         request: ServiceRequest<'_, exoware_proto::store::query::v1::RangeRequest>,
     ) -> connectrpc::ServiceResult<connectrpc::ServiceStream<RangeFrame>> {
         validate::validate_range_request(request.view())?;
-        ensure_min_sequence_number(
-            request.min_sequence_number,
-            self.state.query.current_sequence(),
-        )?;
+        ensure_floor_visible(request.min_sequence_number, self.state.query.as_ref())?;
         let wire = request.bytes();
         let start_key: Key = wire.slice_ref(request.start);
         let end_key: Key = wire.slice_ref(request.end);
@@ -642,10 +644,7 @@ where
         request: ServiceRequest<'_, exoware_proto::store::query::v1::ReduceRequest>,
     ) -> connectrpc::ServiceResult<connectrpc::ServiceStream<ReduceResponse>> {
         validate::validate_reduce_request(request.view())?;
-        ensure_min_sequence_number(
-            request.min_sequence_number,
-            self.state.query.current_sequence(),
-        )?;
+        ensure_floor_visible(request.min_sequence_number, self.state.query.as_ref())?;
         let wire = request.bytes();
         let start_key: Key = wire.slice_ref(request.start);
         let end_key: Key = wire.slice_ref(request.end);
@@ -1427,6 +1426,7 @@ mod tests {
     #[derive(Default)]
     struct FakeEngineState {
         current_sequence: u64,
+        current_sequence_calls: usize,
         query_sequence: Option<u64>,
         query_calls: [usize; 3],
         batches: BTreeMap<u64, Option<Vec<(Bytes, Bytes)>>>,
@@ -1571,7 +1571,9 @@ mod tests {
 
     impl Sequence for FakeEngine {
         fn current_sequence(&self) -> u64 {
-            self.state.lock().expect("lock").current_sequence
+            let mut state = self.state.lock().expect("lock");
+            state.current_sequence_calls += 1;
+            state.current_sequence
         }
     }
 
@@ -2635,6 +2637,20 @@ mod tests {
 
         assert_eq!(query_rpc_sequences(&connect, Some(5)).await, [7; 4]);
         assert_eq!(query_rpc_sequences(&connect, Some(7)).await, [7; 4]);
+    }
+
+    #[tokio::test]
+    async fn query_rpcs_read_the_frontier_only_when_a_floor_is_sent() {
+        let engine = Arc::new(FakeEngine::default());
+        engine.set_current_sequence(7);
+        engine.set_query_sequence(7);
+        let connect = QueryConnect::new(QueryState::new(engine.clone()));
+
+        assert_eq!(query_rpc_sequences(&connect, None).await, [7; 4]);
+        assert_eq!(engine.state.lock().unwrap().current_sequence_calls, 0);
+
+        assert_eq!(query_rpc_sequences(&connect, Some(7)).await, [7; 4]);
+        assert_eq!(engine.state.lock().unwrap().current_sequence_calls, 4);
     }
 
     async fn query_rpc_errors(
