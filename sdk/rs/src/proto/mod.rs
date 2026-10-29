@@ -113,6 +113,7 @@ pub mod stream {
 
 mod range_traversal;
 pub mod transport;
+pub(crate) mod zstd_codec;
 
 pub use range_traversal::{
     parse_range_traversal_direction, RangeTraversalDirection, RangeTraversalModeError,

@@ -72,6 +72,7 @@ use crate::proto::transport::{
     ErasedClientTransport as ProtoErasedClientTransport,
     ErasedResponseBody as ProtoErasedResponseBody,
 };
+use crate::proto::zstd_codec::ZstdCodec;
 
 const DEFAULT_RETRY_MAX_ATTEMPTS: usize = 3;
 const DEFAULT_RETRY_INITIAL_BACKOFF_MS: u64 = 100;
@@ -160,7 +161,7 @@ fn store_connect_client_config(
 ) -> ClientConfig {
     let mut compression = proto_connect_compression_registry();
     if let ConnectRequestCompression::Zstd { level } = request_compression {
-        compression = compression.register(ZstdProvider::with_level(level));
+        compression = compression.register(ZstdCodec::new(ZstdProvider::with_level(level)));
     }
 
     let config = ClientConfig::new(base_uri)
@@ -3868,6 +3869,14 @@ mod tests {
             let stream_config = client.streaming_client_config(client.stream_uri.clone());
             assert!(stream_config.compression().supports("zstd"));
             assert!(stream_config.compression().supports("gzip"));
+            // Registering a request level must keep the SDK's zstd decompression, which returns
+            // responses with no spare capacity.
+            let response = stream_config
+                .compression()
+                .decompress_with_limit("zstd", fast.clone(), MAX_RESPONSE_MESSAGE_BYTES)
+                .unwrap();
+            assert_eq!(response, encoded);
+            assert_eq!(response.try_into_mut().unwrap().capacity(), encoded.len());
             if let Some(name) = compression.wire_name() {
                 assert_eq!(
                     stream_config

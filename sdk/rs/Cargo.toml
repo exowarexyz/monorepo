@@ -37,6 +37,7 @@ tokio = { workspace = true, features = ["full"] }
 tower = { workspace = true }
 cookie_store = { version = "0.22.1", default-features = false }
 psl = "2.1.212"
+zstd = "0.13"
 
 [build-dependencies]
 buffa-codegen = { workspace = true }
