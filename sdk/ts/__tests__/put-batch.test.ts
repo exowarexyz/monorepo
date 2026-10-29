@@ -1,14 +1,15 @@
 import { create, toBinary, toJsonString } from '@bufbuild/protobuf';
+import { createClient } from '@connectrpc/connect';
 
 jest.mock('../src/credential', () => ({
     ...jest.requireActual('../src/credential'),
     environmentApiKey: () => undefined,
 }));
 
-import { Client } from '../src/client';
+import { Client, createTransport } from '../src/client';
 import { EntrySchema } from '../src/gen/ts/common/v1/kv_pb';
 import { PutRequestSchema, PutResponseSchema } from '../src/gen/ts/log/v1/ingest_pb';
-import { GetRequestSchema, GetResponseSchema } from '../src/gen/ts/store/v1/query_pb';
+import { GetRequestSchema, GetResponseSchema, Service as QueryService } from '../src/gen/ts/store/v1/query_pb';
 import { ErrorInfoSchema, RetryInfoSchema } from '../src/gen/ts/google/rpc/error_details_pb';
 import {
     StoreKeyPrefix,
@@ -228,6 +229,8 @@ test('validates the prefixed request at its exact serialized-byte budget', async
 });
 
 test.each([undefined, false, true])('Put is protobuf while Query follows binary option %s', async (useBinaryFormat) => {
+    // Binary is the default, so only an explicit false selects JSON.
+    const binary = useBinaryFormat !== false;
     const sent: Array<{ path: string; contentType: string | null; body: Uint8Array }> = [];
     const fetch = jest.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
         const path = new URL(String(input)).pathname;
@@ -238,10 +241,10 @@ test.each([undefined, false, true])('Put is protobuf while Query follows binary 
             });
         }
         const response = create(GetResponseSchema, { value: filled(3, 2) });
-        return new Response(useBinaryFormat
+        return new Response(binary
             ? toBinary(GetResponseSchema, response)
             : toJsonString(GetResponseSchema, response), {
-            headers: { 'content-type': useBinaryFormat ? 'application/proto' : 'application/json' },
+            headers: { 'content-type': binary ? 'application/proto' : 'application/json' },
         });
     });
 
@@ -263,11 +266,34 @@ test.each([undefined, false, true])('Put is protobuf while Query follows binary 
         expect(sent[0].contentType).toBe('application/proto');
         expect(sent[0].body).toEqual(toBinary(PutRequestSchema, request(entries)));
         expect(batch(entries, store).encodedLen()).toBe(sent[0].body.byteLength);
-        expect(sent[1].contentType).toBe(useBinaryFormat ? 'application/proto' : 'application/json');
+        expect(sent[1].contentType).toBe(binary ? 'application/proto' : 'application/json');
         const get = create(GetRequestSchema, { key });
-        expect(sent[1].body).toEqual(useBinaryFormat
+        expect(sent[1].body).toEqual(binary
             ? toBinary(GetRequestSchema, get)
             : new TextEncoder().encode(toJsonString(GetRequestSchema, get)));
+    } finally {
+        fetch.mockRestore();
+    }
+});
+
+test.each([undefined, false, true])('createTransport follows binary option %s', async (useBinaryFormat) => {
+    const binary = useBinaryFormat !== false;
+    const contentTypes: Array<string | null> = [];
+    const fetch = jest.spyOn(globalThis, 'fetch').mockImplementation(async (_input, init) => {
+        contentTypes.push(new Headers(init?.headers).get('content-type'));
+        const response = create(GetResponseSchema, { value: filled(3, 2) });
+        return new Response(binary
+            ? toBinary(GetResponseSchema, response)
+            : toJsonString(GetResponseSchema, response), {
+            headers: { 'content-type': binary ? 'application/proto' : 'application/json' },
+        });
+    });
+
+    try {
+        const options = useBinaryFormat === undefined ? { token: '' } : { token: '', useBinaryFormat };
+        const query = createClient(QueryService, createTransport('http://put-batch.test', options));
+        await expect(query.get({ key: filled(2, 1) })).resolves.toMatchObject({ value: filled(3, 2) });
+        expect(contentTypes).toEqual([binary ? 'application/proto' : 'application/json']);
     } finally {
         fetch.mockRestore();
     }
@@ -315,8 +341,8 @@ test('ingest and query share authentication, retries, and cookies in both direct
                 headers: { 'content-type': 'application/proto' },
             });
         } else {
-            response = new Response(toJsonString(GetResponseSchema, create(GetResponseSchema, { value: filled(1, 2) })), {
-                headers: { 'content-type': 'application/json' },
+            response = new Response(toBinary(GetResponseSchema, create(GetResponseSchema, { value: filled(1, 2) })), {
+                headers: { 'content-type': 'application/proto' },
             });
         }
         Object.defineProperty(response, 'url', { value: url });
