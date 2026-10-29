@@ -3930,7 +3930,7 @@ mod tests {
 
         #[derive(Clone)]
         struct ControlledReduceTransport {
-            bodies: Arc<Mutex<BTreeMap<Vec<u8>, BodyReceiver>>>,
+            bodies: Arc<Mutex<BTreeMap<Bytes, BodyReceiver>>>,
             requests: Arc<Mutex<Vec<exoware_sdk::query::ReduceRequest>>>,
         }
 
@@ -4015,8 +4015,8 @@ mod tests {
                 .bodies
                 .lock()
                 .unwrap()
-                .insert(start.to_vec(), receiver);
-            starts.push(start.to_vec());
+                .insert(start.clone(), receiver);
+            starts.push(start);
             senders.push(sender);
         }
         let frame = |keys: std::ops::Range<i64>, sequence_number| {

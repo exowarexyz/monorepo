@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 const SDK_BYTES_FIELDS: &[&str] = &[
+    ".common.kv.v1.Entry.key",
     ".common.kv.v1.Entry.value",
     ".common.kv.v1.Filter.exact",
     ".common.kv.v1.Filter.prefix",
@@ -15,8 +16,15 @@ const SDK_BYTES_FIELDS: &[&str] = &[
     ".store.query.v1.KvPredicateConstraint.Decimal256Range.min",
     ".store.query.v1.KvPredicateConstraint.Decimal256Range.max",
     ".store.query.v1.KvPredicateConstraint.FixedSizeBinaryIn.values",
+    ".store.query.v1.GetRequest.key",
     ".store.query.v1.GetResponse.value",
+    ".store.query.v1.GetManyRequest.keys",
+    ".store.query.v1.GetManyEntry.key",
     ".store.query.v1.GetManyEntry.value",
+    ".store.query.v1.RangeRequest.start",
+    ".store.query.v1.RangeRequest.end",
+    ".store.query.v1.ReduceRequest.start",
+    ".store.query.v1.ReduceRequest.end",
 ];
 
 fn main() {

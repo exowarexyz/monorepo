@@ -676,7 +676,7 @@ mod tests {
                 .map(|key| {
                     Ok(GetManyFrame {
                         results: vec![GetManyEntry {
-                            key: key.to_vec(),
+                            key: Bytes::copy_from_slice(key),
                             value: self.rows.get(*key).cloned(),
                             ..Default::default()
                         }],
@@ -711,7 +711,7 @@ mod tests {
                 .filter(|(key, _)| key.as_ref() >= request.start && key.as_ref() <= request.end)
                 .take(1)
                 .map(|(key, value)| Entry {
-                    key: key.to_vec(),
+                    key: key.clone(),
                     value: value.clone(),
                     ..Default::default()
                 })

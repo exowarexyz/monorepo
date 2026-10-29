@@ -111,7 +111,7 @@ fn encode_batch(kvs: Vec<(Bytes, Bytes)>) -> Bytes {
             kvs: kvs
                 .into_iter()
                 .map(|(key, value)| Entry {
-                    key: key.to_vec(),
+                    key,
                     value,
                     ..Default::default()
                 })

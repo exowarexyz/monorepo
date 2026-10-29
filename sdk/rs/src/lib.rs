@@ -543,7 +543,7 @@ impl PrefixedStoreClient {
         min_sequence_number: Option<u64>,
         observed_sequence: Option<Arc<ObservedSequence>>,
     ) -> Result<GetManyStream, ClientError> {
-        let mut proto_keys: Vec<Vec<u8>> = Vec::with_capacity(keys.len());
+        let mut proto_keys: Vec<Key> = Vec::with_capacity(keys.len());
         for key in keys {
             let encoded = self.encode_store_key(key)?;
             if !is_valid_key_size(encoded.len()) {
@@ -554,7 +554,7 @@ impl PrefixedStoreClient {
                     MAX_KEY_LEN
                 )));
             }
-            proto_keys.push(encoded.to_vec());
+            proto_keys.push(encoded);
         }
         let mut stream = self
             .client
@@ -780,12 +780,11 @@ impl PrefixedStoreClient {
         };
         let mut out = Vec::with_capacity(owned.entries.len());
         for entry in owned.entries {
-            let key = Bytes::from(entry.key);
-            if !self.prefix.matches(&key) {
+            if !self.prefix.matches(&entry.key) {
                 continue;
             }
             out.push(StoreBatchEntry {
-                key: self.decode_store_key(&key)?,
+                key: self.decode_store_key(&entry.key)?,
                 value: entry.value,
             });
         }
@@ -1185,10 +1184,9 @@ impl RangeStream {
 
             let mut out = Vec::with_capacity(n);
             for entry in frame.results {
-                let key = Bytes::from(entry.key);
                 let key = match &self.key_prefix {
-                    Some(prefix) => prefix.decode_key(&key)?,
-                    None => key,
+                    Some(prefix) => prefix.decode_key(&entry.key)?,
+                    None => entry.key,
                 };
                 out.push((key, entry.value));
             }
@@ -1311,10 +1309,9 @@ impl GetManyStream {
 
             let mut out = Vec::with_capacity(n);
             for entry in frame.results {
-                let key = Bytes::from(entry.key);
                 let key = match &self.key_prefix {
-                    Some(prefix) => prefix.decode_key(&key)?,
-                    None => key,
+                    Some(prefix) => prefix.decode_key(&entry.key)?,
+                    None => entry.key,
                 };
                 out.push((key, entry.value));
             }
@@ -1393,10 +1390,9 @@ impl StreamSubscription {
                     let owned = view.to_owned_message();
                     let mut entries = Vec::with_capacity(owned.entries.len());
                     for entry in owned.entries {
-                        let key = Bytes::from(entry.key);
                         let key = match &self.key_prefix {
-                            Some(prefix) => prefix.decode_key(&key)?,
-                            None => key,
+                            Some(prefix) => prefix.decode_key(&entry.key)?,
+                            None => entry.key,
                         };
                         entries.push(StoreBatchEntry {
                             key,
@@ -1947,7 +1943,7 @@ impl StoreClient {
                 )));
             }
             proto_kvs.push(exoware_proto::common::Entry {
-                key: key.to_vec(),
+                key: (*key).clone(),
                 value: Bytes::copy_from_slice(value),
                 ..Default::default()
             });
@@ -1967,7 +1963,7 @@ impl StoreClient {
                 )));
             }
             proto_kvs.push(exoware_proto::common::Entry {
-                key: key.to_vec(),
+                key: key.clone(),
                 value: value.clone(),
                 ..Default::default()
             });
@@ -1999,7 +1995,7 @@ impl StoreClient {
                 );
                 let client = IngestServiceClient::new(self.connect_http.clone(), config);
 
-                // The final attempt cannot retry, so transfer its keys instead of cloning them.
+                // The final attempt cannot retry, so move the request instead of cloning it.
                 let attempt_request = if attempt == self.retry_config.max_attempts {
                     std::mem::take(&mut request)
                 } else {
@@ -2062,7 +2058,7 @@ impl StoreClient {
     /// prefix to the returned stream for decoding.
     pub(crate) async fn get_many_internal(
         &self,
-        proto_keys: Vec<Vec<u8>>,
+        proto_keys: Vec<Key>,
         batch_size: u32,
         min_sequence_number: Option<u64>,
         observed_sequence: Option<Arc<ObservedSequence>>,
@@ -2280,7 +2276,7 @@ impl StoreClient {
             .send_with_retry(|| async {
                 client
                     .get(ProtoGetRequest {
-                        key: key.clone().into(),
+                        key: key.clone(),
                         min_sequence_number,
                         ..Default::default()
                     })
@@ -2341,8 +2337,8 @@ impl StoreClient {
                 .with_streaming_timeout(async {
                     let response = client
                         .range(ProtoRangeRequest {
-                            start: start.clone().into(),
-                            end: end.clone().into(),
+                            start: start.clone(),
+                            end: end.clone(),
                             limit: (limit != usize::MAX)
                                 .then(|| u32::try_from(limit).unwrap_or(u32::MAX)),
                             batch_size: u32::try_from(batch_size).unwrap_or(u32::MAX),
@@ -2399,8 +2395,8 @@ impl StoreClient {
                 self.with_streaming_timeout(async {
                     let mut stream = client
                         .reduce(ProtoWireReduceRequest {
-                            start: start.clone().into(),
-                            end: end.clone().into(),
+                            start: start.clone(),
+                            end: end.clone(),
                             params: Some(proto_params.clone()).into(),
                             min_sequence_number,
                             ..Default::default()
@@ -3505,8 +3501,8 @@ mod tests {
         assert_eq!(requests[0].min_sequence_number, None);
         assert_eq!(requests[1].min_sequence_number, None);
         assert_eq!(requests[2].min_sequence_number, Some(47));
-        assert_eq!(requests[2].start.as_slice(), b"tenant/a");
-        assert_eq!(requests[2].end.as_slice(), b"tenant/z");
+        assert_eq!(requests[2].start.as_ref(), b"tenant/a");
+        assert_eq!(requests[2].end.as_ref(), b"tenant/z");
     }
 
     #[tokio::test]
@@ -3808,7 +3804,7 @@ mod tests {
             .collect::<Vec<_>>();
         let encoded = ProtoPutRequest {
             kvs: vec![exoware_proto::common::Entry {
-                key: key.to_vec(),
+                key: key.clone(),
                 value: Bytes::copy_from_slice(&value),
                 ..Default::default()
             }],
@@ -3894,7 +3890,7 @@ mod tests {
             let value = vec![b'a'; value_len];
             let encoded = ProtoPutRequest {
                 kvs: vec![exoware_proto::common::Entry {
-                    key: key.to_vec(),
+                    key: key.clone(),
                     value: Bytes::copy_from_slice(&value),
                     ..Default::default()
                 }],
@@ -5271,7 +5267,7 @@ mod tests {
                 .entries()
                 .iter()
                 .map(|(key, value)| exoware_proto::common::Entry {
-                    key: key.to_vec(),
+                    key: key.clone(),
                     value: value.clone(),
                     ..Default::default()
                 })

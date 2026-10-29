@@ -1515,7 +1515,7 @@ async fn http2_completed_rejections_preserve_connect_errors() -> Result<(), Erro
                     vec![]
                 } else {
                     vec![Entry {
-                        key: b"k".to_vec(),
+                        key: Bytes::from_static(b"k"),
                         value: Bytes::from_static(b"v"),
                         ..Default::default()
                     }]

@@ -130,7 +130,7 @@ fn batch() -> Vec<proto::common::Entry> {
     ]
     .into_iter()
     .map(|(key, value)| proto::common::Entry {
-        key: key.to_vec(),
+        key: Bytes::copy_from_slice(key),
         value: Bytes::copy_from_slice(value),
         ..Default::default()
     })

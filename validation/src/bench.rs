@@ -629,7 +629,7 @@ mod tests {
                     limit: request.limit,
                 });
             let entry = Entry {
-                key: request.start.to_vec(),
+                key: request.start.to_vec().into(),
                 value: vec![1].into(),
                 ..Default::default()
             };
