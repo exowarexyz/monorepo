@@ -717,9 +717,8 @@ mod tests {
             else_expr: Some(Box::new(Expr::Literal(ScalarValue::Utf8(None), None))),
         });
 
-        let (func, argument, filter) =
+        let (argument, filter) =
             normalize_count_aggregate_argument(&case_expr, &model).expect("normalize");
-        assert_eq!(func, AggregatePushdownFunction::Count);
         assert_eq!(argument, AggregatePushdownArgument::CountAll);
         assert!(filter.is_some());
     }
