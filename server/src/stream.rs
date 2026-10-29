@@ -9,7 +9,7 @@
 //! need a separate remote notification path that advances a local notifier after
 //! the query worker can serve the announced batches.
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use connectrpc::ConnectError;
@@ -153,16 +153,27 @@ pub trait StreamNotifier: Send + Sync + 'static {
     fn advance(&self, seq: u64);
 }
 
+/// How many `Notify`s a [`StreamHub`] spreads its subscribers across.
+///
+/// A `Notify` keeps its waiters in one list behind one mutex. Every caught-up
+/// subscriber takes that mutex to re-register after each wakeup, while
+/// `notify_waiters` takes it to drain the list. Splitting subscribers over
+/// several `Notify`s splits that mutex. An advance then takes 16 mostly
+/// uncontended locks, which costs well under a microsecond.
+const NOTIFY_SHARDS: usize = 16;
+
 pub struct StreamHub {
     published_sequence: AtomicU64,
-    notify: Arc<Notify>,
+    notify: [Arc<Notify>; NOTIFY_SHARDS],
+    next_shard: AtomicUsize,
 }
 
 impl StreamHub {
     pub fn new(initial_sequence: u64) -> Self {
         Self {
             published_sequence: AtomicU64::new(initial_sequence),
-            notify: Arc::new(Notify::new()),
+            notify: std::array::from_fn(|_| Arc::new(Notify::new())),
+            next_shard: AtomicUsize::new(0),
         }
     }
 
@@ -174,9 +185,10 @@ impl StreamHub {
 
 impl StreamNotifier for StreamHub {
     fn subscribe(&self) -> StreamNotification {
+        let shard = self.next_shard.fetch_add(1, Ordering::Relaxed) % NOTIFY_SHARDS;
         StreamNotification {
             current_sequence: self.published_sequence.load(Ordering::Acquire),
-            notify: self.notify.clone(),
+            notify: self.notify[shard].clone(),
         }
     }
 
@@ -185,8 +197,13 @@ impl StreamNotifier for StreamHub {
     }
 
     fn advance(&self, seq: u64) {
+        // Raise the frontier before waking any shard. A subscriber arms its
+        // shard's `Notified` and then re-reads the frontier, so it either sees
+        // the new value or is woken by its shard's `notify_waiters` below.
         self.published_sequence.fetch_max(seq, Ordering::SeqCst);
-        self.notify.notify_waiters();
+        for notify in &self.notify {
+            notify.notify_waiters();
+        }
     }
 }
 
@@ -244,6 +261,29 @@ mod tests {
         let hub = StreamHub::new(11);
         let subscription = hub.subscribe();
         assert_eq!(subscription.current_sequence, 11);
+    }
+
+    #[tokio::test]
+    async fn advance_wakes_subscribers_on_every_shard() {
+        let hub = StreamHub::new(0);
+        let subscriptions: Vec<_> = (0..2 * NOTIFY_SHARDS).map(|_| hub.subscribe()).collect();
+        for shard in &hub.notify {
+            let on_shard = subscriptions
+                .iter()
+                .filter(|s| Arc::ptr_eq(&s.notify, shard))
+                .count();
+            assert_eq!(on_shard, 2);
+        }
+
+        // A `Notified` created before `notify_waiters` receives it even if it
+        // has not been polled yet.
+        let waits: Vec<_> = subscriptions.iter().map(|s| s.notify.notified()).collect();
+        hub.advance(1);
+        for wait in waits {
+            tokio::time::timeout(std::time::Duration::from_secs(5), wait)
+                .await
+                .expect("advance wakes every shard");
+        }
     }
 
     #[test]
