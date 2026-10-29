@@ -1038,7 +1038,6 @@ pub(crate) fn build_aggregate_reduce_job(
             &table.model,
             &table.index_specs,
             &access_path,
-            0,
             data_type,
             reducer_filter,
         ) {
@@ -1158,7 +1157,6 @@ pub(crate) fn compile_aggregate_expr(
     model: &TableModel,
     index_specs: &[ResolvedIndexSpec],
     access_path: &AggregateAccessPath,
-    next_reducer_idx: usize,
     data_type: DataType,
     filter: Option<KvPredicate>,
 ) -> DataFusionResult<(Vec<RangeReducerSpec>, AggregateOutputPlan)> {
@@ -1192,8 +1190,8 @@ pub(crate) fn compile_aggregate_expr(
                 },
             ],
             AggregateOutputPlan::Avg {
-                sum_idx: next_reducer_idx,
-                count_idx: next_reducer_idx + 1,
+                sum_idx: 0,
+                count_idx: 1,
             },
         ));
     }
@@ -1207,9 +1205,7 @@ pub(crate) fn compile_aggregate_expr(
     };
     Ok((
         vec![RangeReducerSpec { op, expr, filter }],
-        AggregateOutputPlan::Direct {
-            reducer_idx: next_reducer_idx,
-        },
+        AggregateOutputPlan::Direct { reducer_idx: 0 },
     ))
 }
 
