@@ -110,6 +110,13 @@ pub(crate) fn decode_i256_ordered(mut bytes: [u8; 32]) -> i256 {
 
 pub(crate) fn encode_string_variable(value: &str) -> Result<Vec<u8>, String> {
     let mut out = Vec::with_capacity(value.len() + 1);
+    append_string_variable(value, &mut out)?;
+    Ok(out)
+}
+
+fn append_string_variable(value: &str, out: &mut Vec<u8>) -> Result<(), String> {
+    let start = out.len();
+    out.reserve(value.len() + 1);
     for byte in value.as_bytes() {
         match *byte {
             STRING_KEY_TERMINATOR => {
@@ -128,14 +135,14 @@ pub(crate) fn encode_string_variable(value: &str) -> Result<Vec<u8>, String> {
         }
     }
     out.push(STRING_KEY_TERMINATOR);
-    if out.len() > exoware_sdk::keys::MAX_KEY_LEN {
+    if out.len() - start > exoware_sdk::keys::MAX_KEY_LEN {
         return Err(format!(
             "indexed string value '{}' exceeds max encoded key length {}",
             value,
             exoware_sdk::keys::MAX_KEY_LEN
         ));
     }
-    Ok(out)
+    Ok(())
 }
 
 pub(crate) fn decode_variable_text(bytes: &[u8]) -> Option<String> {
@@ -177,46 +184,39 @@ pub(crate) fn encode_cell_into_ordered_key_bytes(
     cell: &CellValue,
     kind: ColumnKind,
 ) -> Result<Vec<u8>, String> {
-    if let (ColumnKind::Utf8, CellValue::Utf8(v)) = (kind, cell) {
-        return encode_string_variable(v);
-    }
-    let mut out = vec![0u8; kind.key_width()];
+    let mut out = Vec::with_capacity(kind.key_width());
+    append_ordered_key_bytes(cell, kind, &mut out)?;
+    Ok(out)
+}
+
+/// Append the ordered key encoding of `cell` to `out`.
+pub(crate) fn append_ordered_key_bytes(
+    cell: &CellValue,
+    kind: ColumnKind,
+    out: &mut Vec<u8>,
+) -> Result<(), String> {
     match (kind, cell) {
-        (ColumnKind::Int64, CellValue::Int64(v)) => {
-            out.copy_from_slice(&encode_i64_ordered(*v));
-            Ok(out)
-        }
-        (ColumnKind::UInt64, CellValue::UInt64(v)) => {
-            out.copy_from_slice(&v.to_be_bytes());
-            Ok(out)
-        }
+        (ColumnKind::Utf8, CellValue::Utf8(v)) => return append_string_variable(v, out),
+        (ColumnKind::Int64, CellValue::Int64(v)) => out.extend_from_slice(&encode_i64_ordered(*v)),
+        (ColumnKind::UInt64, CellValue::UInt64(v)) => out.extend_from_slice(&v.to_be_bytes()),
         (ColumnKind::Float64, CellValue::Float64(v)) => {
-            out.copy_from_slice(&encode_f64_ordered(*v));
-            Ok(out)
+            out.extend_from_slice(&encode_f64_ordered(*v))
         }
-        (ColumnKind::Boolean, CellValue::Boolean(v)) => {
-            out[0] = u8::from(*v);
-            Ok(out)
-        }
+        (ColumnKind::Boolean, CellValue::Boolean(v)) => out.push(u8::from(*v)),
         (ColumnKind::Date32, CellValue::Date32(v)) => {
-            out.copy_from_slice(&encode_i32_ordered(*v));
-            Ok(out)
+            out.extend_from_slice(&encode_i32_ordered(*v))
         }
         (ColumnKind::Date64, CellValue::Date64(v)) => {
-            out.copy_from_slice(&encode_i64_ordered(*v));
-            Ok(out)
+            out.extend_from_slice(&encode_i64_ordered(*v))
         }
         (ColumnKind::Timestamp, CellValue::Timestamp(v)) => {
-            out.copy_from_slice(&encode_i64_ordered(*v));
-            Ok(out)
+            out.extend_from_slice(&encode_i64_ordered(*v))
         }
         (ColumnKind::Decimal128, CellValue::Decimal128(v)) => {
-            out.copy_from_slice(&encode_i128_ordered(*v));
-            Ok(out)
+            out.extend_from_slice(&encode_i128_ordered(*v))
         }
         (ColumnKind::Decimal256, CellValue::Decimal256(v)) => {
-            out.copy_from_slice(&encode_i256_ordered(*v));
-            Ok(out)
+            out.extend_from_slice(&encode_i256_ordered(*v))
         }
         (ColumnKind::FixedSizeBinary(n), CellValue::FixedBinary(v)) => {
             if v.len() != n {
@@ -225,13 +225,15 @@ pub(crate) fn encode_cell_into_ordered_key_bytes(
                     v.len()
                 ));
             }
-            out.copy_from_slice(v);
-            Ok(out)
+            out.extend_from_slice(v);
         }
-        _ => Err(format!(
-            "type mismatch while encoding key value (expected {kind:?}, got {cell:?})"
-        )),
+        _ => {
+            return Err(format!(
+                "type mismatch while encoding key value (expected {kind:?}, got {cell:?})"
+            ))
+        }
     }
+    Ok(())
 }
 
 pub(crate) fn decode_cell_from_ordered_key_bytes(
@@ -317,8 +319,7 @@ pub(crate) fn encode_primary_key(
     let prefix = &model.primary_key_prefix;
     let mut payload = Vec::with_capacity(model.primary_key_width);
     for (val, kind) in pk_values.iter().zip(model.primary_key_kinds.iter()) {
-        let encoded = encode_cell_into_ordered_key_bytes(val, *kind)?;
-        payload.extend_from_slice(&encoded);
+        append_ordered_key_bytes(val, *kind, &mut payload)?;
     }
     prefix
         .encode(&payload)
@@ -419,41 +420,58 @@ fn decode_primary_key_payload(
     (offset == payload.len()).then_some(values)
 }
 
+/// Encode a secondary index key for `row`. `pk_payload` is the row's primary
+/// key with its family prefix stripped, which is exactly the suffix every
+/// index key ends with, so callers that already built the primary key pass
+/// it in rather than encoding the key columns again.
+pub(crate) fn encode_secondary_index_key_with_pk(
+    spec: &ResolvedIndexSpec,
+    model: &TableModel,
+    row: &KvRow,
+    pk_payload: &[u8],
+) -> Result<Key, String> {
+    let index_field_error = |col: &ResolvedColumn, e: String| {
+        format!("index '{}' column '{}': {e}", spec.name, col.name)
+    };
+    let mut payload = Vec::with_capacity(spec.key_columns_width + pk_payload.len());
+    match spec.layout {
+        IndexLayout::Lexicographic => {
+            for &col_idx in &spec.key_columns {
+                let col = model.column(col_idx);
+                append_ordered_key_bytes(row.value_at(col_idx), col.kind, &mut payload)
+                    .map_err(|e| index_field_error(col, e))?;
+            }
+        }
+        IndexLayout::ZOrder => {
+            let fields = spec
+                .key_columns
+                .iter()
+                .map(|&col_idx| {
+                    let col = model.column(col_idx);
+                    encode_cell_into_ordered_key_bytes(row.value_at(col_idx), col.kind)
+                        .map_err(|e| index_field_error(col, e))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            payload.extend_from_slice(&interleave_ordered_key_fields(&fields));
+        }
+    }
+    payload.extend_from_slice(pk_payload);
+    spec.prefix
+        .encode(&payload)
+        .map_err(|e| format!("failed to encode index '{}' key: {e}", spec.name))
+}
+
+/// Encode a secondary index key for `row`, encoding its primary key first.
+#[cfg(test)]
 pub(crate) fn encode_secondary_index_key(
     table_prefix: u8,
     spec: &ResolvedIndexSpec,
     model: &TableModel,
     row: &KvRow,
 ) -> Result<Key, String> {
-    if table_prefix != model.table_prefix {
-        return Err("table prefix does not match model".to_string());
-    }
-    let prefix = &spec.prefix;
-    let encoded_index_fields = spec
-        .key_columns
-        .iter()
-        .map(|col_idx| {
-            let col = model.column(*col_idx);
-            encode_cell_into_ordered_key_bytes(row.value_at(*col_idx), col.kind)
-                .map_err(|e| format!("index '{}' column '{}': {e}", spec.name, col.name))
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    let mut payload = match spec.layout {
-        IndexLayout::Lexicographic => encoded_index_fields.concat(),
-        IndexLayout::ZOrder => interleave_ordered_key_fields(&encoded_index_fields),
-    };
-    payload.reserve(model.primary_key_width);
-    for (&pk_idx, &pk_kind) in model
-        .primary_key_indices
-        .iter()
-        .zip(model.primary_key_kinds.iter())
-    {
-        let encoded = encode_cell_into_ordered_key_bytes(row.value_at(pk_idx), pk_kind)?;
-        payload.extend_from_slice(&encoded);
-    }
-    prefix
-        .encode(&payload)
-        .map_err(|e| format!("failed to encode index '{}' key: {e}", spec.name))
+    let primary_key = encode_primary_key_from_row(table_prefix, row, model)?;
+    let pk_payload = &primary_key[model.primary_key_prefix.len()..];
+    encode_secondary_index_key_with_pk(spec, model, row, pk_payload)
 }
 
 pub(crate) fn encode_secondary_index_key_from_parts(
