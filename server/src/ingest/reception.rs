@@ -143,6 +143,9 @@ mod tests {
                     limits,
                     tokio_deadline(Duration::from_secs(10)),
                     budget.try_admit(wire.len()).unwrap(),
+                    std::sync::Arc::new(crate::ingest::RuntimeDecodeExecutor(
+                        crate::runtime::TokioRuntime::current(),
+                    )),
                 );
                 let (mut previous, mut count, mut peak) = (None, 0, 0);
                 while let Some(chunk) = input.next_batch(buffers).await.unwrap() {

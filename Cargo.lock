@@ -2650,6 +2650,7 @@ dependencies = [
  "datafusion",
  "exoware-qmdb",
  "exoware-sdk",
+ "exoware-server",
  "exoware-simulator",
  "exoware-sql",
  "futures",

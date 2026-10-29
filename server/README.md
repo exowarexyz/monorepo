@@ -86,14 +86,27 @@ time, and rejection cleanup cannot restart an expired timer. Set it to `None`
 to use only the absolute deadline. Clients that continually trickle bytes are
 still bounded by the absolute deadline.
 
-`PutConfig.clock` controls request deadlines, idle timeouts and elapsed-time
-measurements. It defaults to `TokioClock`; deterministic tests can supply a
-`PutClock` backed by their runtime. Use a monotonic clock in production.
-Connection timers stay on Tokio. To run Put without a Tokio runtime, also replace
-the default blocking decoder through `PutInput::set_executor`.
+Pass the same `Arc<dyn runtime::Runtime>` to `AppState::new`,
+`IngestState::new`, and `ingest::transport::serve`. The runtime supplies the
+shared clock, scoped asynchronous tasks, and CPU execution. Production Tokio
+applications select `runtime::TokioRuntime::current()` at construction. Other
+applications implement `runtime::Runtime` with their executor and clock.
+There is no implicit runtime selection in Put configuration.
+
+Request and connection deadlines, idle timeouts, and Hyper timers all use the
+selected clock. `TokioClock` follows monotonic Tokio time, including paused time.
+A deterministic adapter can run the same transport and ingestion code without
+entering Tokio. The `runtime::simulated` module provides bounded byte streams
+with fragmentation, read/write gates, reset, EOF, and half-close controls.
+
+Direct `PutInput` callers supply a `runtime::Deadline` and a decode executor.
+`RuntimeDecodeExecutor` delegates to the selected runtime. CPU work owns its
+captures until completion after cancellation. Dropping an asynchronous `Task`
+requests cancellation, while graceful server shutdown stops accepting and drains
+existing connections.
 
 `AppState::with_put_config` and `IngestState::with_put_config` configure the host
-budget, admitted wire bound, timeout, clock, and observer. Memory upgrades fail
+budget, admitted wire bound, timeouts, and observer. Memory upgrades fail
 immediately while bootstrap admission is held. Known request lengths reserve
 their enforced wire bound. Unknown lengths reserve the configured wire maximum
 before the first body poll. Requests rejected from metadata retain only a request

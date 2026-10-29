@@ -5,9 +5,7 @@ use std::sync::atomic::AtomicUsize;
 use std::sync::Mutex;
 use std::task::Poll;
 
-use crate::ingest::{
-    DecodeBuffers, IngestBudget, PutClock, PutError, PutInput, PutMiddleware, TokioClock,
-};
+use crate::ingest::{Clock, DecodeBuffers, IngestBudget, PutError, PutInput, PutMiddleware};
 use futures::future::BoxFuture;
 
 use connectrpc::client::{full_body, ClientConfig, ClientTransport};
@@ -126,10 +124,11 @@ async fn overcount_precedes_entry_errors() {
     let malformed = Bytes::from_static(&[0x0a, 1, 0x0a, 0x0a, 1, 0x0a]);
     for body in [request.encode_to_vec().into(), malformed] {
         let ingest = Arc::new(TestIngest::default());
-        let state = IngestState::new(ingest.clone()).with_limits(IngestLimits {
-            max_entries: 1,
-            ..Default::default()
-        });
+        let state = IngestState::new(crate::runtime::TokioRuntime::current(), ingest.clone())
+            .with_limits(IngestLimits {
+                max_entries: 1,
+                ..Default::default()
+            });
         let error = dispatch(state, body, CodecFormat::Proto).await.unwrap_err();
 
         assert_overcount(&error);
@@ -144,7 +143,7 @@ async fn readiness_precedes_malformed_body() {
         (CodecFormat::Json, Bytes::from_static(b"{")),
     ] {
         let ingest = Arc::new(TestIngest::default());
-        let state = IngestState::new(ingest.clone());
+        let state = IngestState::new(crate::runtime::TokioRuntime::current(), ingest.clone());
         state.ready.store(false, Ordering::SeqCst);
         let error = dispatch(state, body, format).await.unwrap_err();
 
@@ -160,7 +159,7 @@ async fn readiness_precedes_malformed_body() {
 async fn empty_batch_is_rejected_before_publication() {
     let ingest = Arc::new(TestIngest::default());
     let error = dispatch(
-        IngestState::new(ingest.clone()),
+        IngestState::new(crate::runtime::TokioRuntime::current(), ingest.clone()),
         Bytes::new(),
         CodecFormat::Proto,
     )
@@ -184,7 +183,7 @@ async fn empty_batch_is_rejected_before_publication() {
 async fn malformed_entry_is_rejected_before_publication() {
     let ingest = Arc::new(TestIngest::default());
     let error = dispatch(
-        IngestState::new(ingest.clone()),
+        IngestState::new(crate::runtime::TokioRuntime::current(), ingest.clone()),
         Bytes::from_static(&[0x0a, 1, 0x0a]),
         CodecFormat::Proto,
     )
@@ -207,7 +206,7 @@ async fn malformed_inner_entry_precedes_business_validation() {
     let mut body = request.encode_to_vec();
     body.extend_from_slice(&[0x0a, 1, 0x0a]);
     let error = dispatch(
-        IngestState::new(ingest.clone()),
+        IngestState::new(crate::runtime::TokioRuntime::current(), ingest.clone()),
         body.into(),
         CodecFormat::Proto,
     )
@@ -234,7 +233,7 @@ async fn malformed_tail_prevents_publication() {
         let mut body = request(1).encode_to_vec();
         body.extend_from_slice(tail);
         let error = dispatch(
-            IngestState::new(ingest.clone()),
+            IngestState::new(crate::runtime::TokioRuntime::current(), ingest.clone()),
             body.into(),
             CodecFormat::Proto,
         )
@@ -255,7 +254,7 @@ async fn backend_unavailable_preserves_retry_details() {
         ..Default::default()
     });
     let error = dispatch(
-        IngestState::new(ingest.clone()),
+        IngestState::new(crate::runtime::TokioRuntime::current(), ingest.clone()),
         request(1).encode_to_vec().into(),
         CodecFormat::Proto,
     )
@@ -348,10 +347,13 @@ async fn metadata_middleware_preserves_extensions_before_body_poll() {
         check_metadata: true,
         ..Default::default()
     });
-    let service =
-        ingest_service(IngestState::new(ingest.clone())).with_put_middleware(PreserveMetadata {
-            polls: polls.clone(),
-        });
+    let service = ingest_service(IngestState::new(
+        crate::runtime::TokioRuntime::current(),
+        ingest.clone(),
+    ))
+    .with_put_middleware(PreserveMetadata {
+        polls: polls.clone(),
+    });
     let mut incoming = http::Request::post(format!("http://store.test/{PUT_PATH}"))
         .header(http::header::CONTENT_TYPE, "application/proto")
         .header("connect-protocol-version", "1")
@@ -376,7 +378,10 @@ async fn put_get_and_head_preserve_method_rejection_headers() {
         (http::Method::HEAD, ""),
     ] {
         let ingest = Arc::new(TestIngest::default());
-        let transport = ServiceTransport::new(ingest_service(IngestState::new(ingest.clone())));
+        let transport = ServiceTransport::new(ingest_service(IngestState::new(
+            crate::runtime::TokioRuntime::current(),
+            ingest.clone(),
+        )));
         let request = http::Request::builder()
             .method(method)
             .uri(format!("http://store.test/{PUT_PATH}{query}"))
@@ -398,9 +403,13 @@ async fn json_put_is_rejected_before_decoding() {
         Bytes::from_static(br#"{"kvs":["#),
     ] {
         let ingest = Arc::new(TestIngest::default());
-        let error = dispatch(IngestState::new(ingest.clone()), body, CodecFormat::Json)
-            .await
-            .unwrap_err();
+        let error = dispatch(
+            IngestState::new(crate::runtime::TokioRuntime::current(), ingest.clone()),
+            body,
+            CodecFormat::Json,
+        )
+        .await
+        .unwrap_err();
 
         assert_eq!(error.code, ErrorCode::Unimplemented);
         assert_eq!(error.message.as_deref(), Some("Put requires protobuf"));
@@ -412,7 +421,10 @@ async fn json_put_is_rejected_before_decoding() {
 async fn json_generated_client_is_rejected() {
     let ingest = Arc::new(TestIngest::default());
     let client = ServiceClient::new(
-        ServiceTransport::new(ingest_service(IngestState::new(ingest.clone()))),
+        ServiceTransport::new(ingest_service(IngestState::new(
+            crate::runtime::TokioRuntime::current(),
+            ingest.clone(),
+        ))),
         ClientConfig::new("http://store.test".parse().unwrap()).json(),
     );
     let error = client.put(request(1)).await.unwrap_err();
@@ -427,10 +439,13 @@ async fn cancellation_while_middleware_is_pending_never_polls_body_or_writes() {
     let ingest = Arc::new(TestIngest::default());
     let entered = Arc::new(AtomicBool::new(false));
     let polls = Arc::new(AtomicUsize::new(0));
-    let service =
-        ingest_service(IngestState::new(ingest.clone())).with_put_middleware(PendingMiddleware {
-            entered: entered.clone(),
-        });
+    let service = ingest_service(IngestState::new(
+        crate::runtime::TokioRuntime::current(),
+        ingest.clone(),
+    ))
+    .with_put_middleware(PendingMiddleware {
+        entered: entered.clone(),
+    });
     let incoming = http::Request::post(format!("http://store.test/{PUT_PATH}"))
         .header(http::header::CONTENT_TYPE, "application/proto")
         .header("connect-protocol-version", "1")
@@ -454,10 +469,13 @@ async fn deadline_while_middleware_is_pending_never_polls_body_or_writes() {
     let ingest = Arc::new(TestIngest::default());
     let entered = Arc::new(AtomicBool::new(false));
     let polls = Arc::new(AtomicUsize::new(0));
-    let service =
-        ingest_service(IngestState::new(ingest.clone())).with_put_middleware(PendingMiddleware {
-            entered: entered.clone(),
-        });
+    let service = ingest_service(IngestState::new(
+        crate::runtime::TokioRuntime::current(),
+        ingest.clone(),
+    ))
+    .with_put_middleware(PendingMiddleware {
+        entered: entered.clone(),
+    });
     let incoming = http::Request::post(format!("http://store.test/{PUT_PATH}"))
         .header(http::header::CONTENT_TYPE, "application/proto")
         .header("connect-protocol-version", "1")
@@ -491,10 +509,11 @@ async fn exhausted_admission_never_polls_body_or_writes() {
         max_requests: 0,
         max_bytes: 1024,
     });
-    let state = IngestState::new(ingest.clone()).with_put_config(crate::ingest::PutConfig {
-        budget: budget.clone(),
-        ..Default::default()
-    });
+    let state = IngestState::new(crate::runtime::TokioRuntime::current(), ingest.clone())
+        .with_put_config(crate::ingest::PutConfig {
+            budget: budget.clone(),
+            ..Default::default()
+        });
     let incoming = http::Request::post(format!("http://store.test/{PUT_PATH}"))
         .header(http::header::CONTENT_TYPE, "application/proto")
         .header("connect-protocol-version", "1")
@@ -554,12 +573,15 @@ async fn backend_rejection_drains_only_the_admitted_wire_bound() {
         max_requests: 1,
         max_bytes: 1024,
     });
-    let state =
-        IngestState::new(Arc::new(RejectBeforeRead)).with_put_config(crate::ingest::PutConfig {
-            budget: budget.clone(),
-            max_wire_bytes: 16,
-            ..Default::default()
-        });
+    let state = IngestState::new(
+        crate::runtime::TokioRuntime::current(),
+        Arc::new(RejectBeforeRead),
+    )
+    .with_put_config(crate::ingest::PutConfig {
+        budget: budget.clone(),
+        max_wire_bytes: 16,
+        ..Default::default()
+    });
     let incoming = http::Request::post(format!("http://store.test/{PUT_PATH}"))
         .header(http::header::CONTENT_TYPE, "application/proto")
         .header("connect-protocol-version", "1")
@@ -586,7 +608,7 @@ async fn backend_rejection_drains_only_the_admitted_wire_bound() {
 struct LatestDeadline(std::time::SystemTime);
 
 struct DelayedMiddleware {
-    clock: TokioClock,
+    clock: Arc<dyn Clock>,
 }
 
 impl PutMiddleware for DelayedMiddleware {
@@ -653,11 +675,10 @@ async fn middleware_and_rejection_drain_share_the_original_deadline() {
         entered: AtomicBool::new(false),
     });
     // The middleware reads the same clock so its deadline is comparable.
-    let clock = TokioClock::new();
-    let state = IngestState::new(ingest.clone()).with_put_config(crate::ingest::PutConfig {
-        clock: Arc::new(clock),
-        ..Default::default()
-    });
+    use crate::runtime::Runtime as _;
+    let runtime = crate::runtime::TokioRuntime::current();
+    let clock = runtime.clock();
+    let state = IngestState::new(runtime, ingest.clone());
     let service = ingest_service(state).with_put_middleware(DelayedMiddleware { clock });
     let incoming = http::Request::post(format!("http://store.test/{PUT_PATH}"))
         .header(http::header::CONTENT_TYPE, "application/proto")
@@ -732,13 +753,15 @@ async fn rejected_content_lengths_drain_under_admission_without_ingest() {
             max_requests: 1,
             max_bytes: 0,
         });
-        let state = IngestState::new(Arc::new(UnreachableIngest)).with_put_config(
-            crate::ingest::PutConfig {
-                budget: budget.clone(),
-                max_wire_bytes: 16,
-                ..Default::default()
-            },
-        );
+        let state = IngestState::new(
+            crate::runtime::TokioRuntime::current(),
+            Arc::new(UnreachableIngest),
+        )
+        .with_put_config(crate::ingest::PutConfig {
+            budget: budget.clone(),
+            max_wire_bytes: 16,
+            ..Default::default()
+        });
         let incoming = http::Request::post(format!("http://store.test/{PUT_PATH}"))
             .header(http::header::CONTENT_TYPE, "application/proto")
             .header(http::header::CONTENT_LENGTH, declared)
@@ -786,10 +809,15 @@ async fn review_client_timeout_longer_than_server_default_is_honored() {
         .header("connect-timeout-ms", "90000")
         .body(full_body(request(1).encode_to_vec().into()))
         .unwrap();
-    let response =
-        tower::ServiceExt::oneshot(ingest_service(IngestState::new(ingest.clone())), incoming)
-            .await
-            .unwrap();
+    let response = tower::ServiceExt::oneshot(
+        ingest_service(IngestState::new(
+            crate::runtime::TokioRuntime::current(),
+            ingest.clone(),
+        )),
+        incoming,
+    )
+    .await
+    .unwrap();
     assert_eq!(response.status(), http::StatusCode::OK);
     let remaining = ingest.remaining.lock().unwrap().unwrap();
     assert!(
@@ -803,12 +831,14 @@ async fn upload_can_complete_after_server_fallback_before_client_deadline() {
     let ingest = Arc::new(RecordDeadline {
         remaining: Mutex::new(None),
     });
-    let service = ingest_service(IngestState::new(ingest).with_put_config(
-        crate::ingest::PutConfig {
-            timeout: std::time::Duration::from_millis(25),
-            ..Default::default()
-        },
-    ));
+    let service = ingest_service(
+        IngestState::new(crate::runtime::TokioRuntime::current(), ingest).with_put_config(
+            crate::ingest::PutConfig {
+                timeout: std::time::Duration::from_millis(25),
+                ..Default::default()
+            },
+        ),
+    );
     let body = http_body_util::StreamBody::new(futures::stream::once(async {
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         Ok::<_, ConnectError>(http_body::Frame::data(request(1).encode_to_vec().into()))
@@ -840,13 +870,14 @@ async fn put_timeouts_respect_the_host_ceiling() {
         let ingest = Arc::new(RecordDeadline {
             remaining: Mutex::new(None),
         });
-        let service = ingest_service(IngestState::new(ingest.clone()).with_put_config(
-            crate::ingest::PutConfig {
-                timeout: Duration::from_secs(fallback),
-                max_timeout: Duration::from_secs(maximum),
-                ..Default::default()
-            },
-        ));
+        let service = ingest_service(
+            IngestState::new(crate::runtime::TokioRuntime::current(), ingest.clone())
+                .with_put_config(crate::ingest::PutConfig {
+                    timeout: Duration::from_secs(fallback),
+                    max_timeout: Duration::from_secs(maximum),
+                    ..Default::default()
+                }),
+        );
         let mut incoming = http::Request::post(format!("http://store.test/{PUT_PATH}"))
             .header(http::header::CONTENT_TYPE, "application/proto");
         if let Some(header) = header {
@@ -876,17 +907,14 @@ mod simulated_clock {
 
     use commonware_runtime::{deterministic, Clock as _, Runner as _, Supervisor as _};
 
-    use crate::ingest::testing::SimulatedClock;
-    use crate::ingest::{DecodeExecutor, DecodeOutput, DecodeState, PutConfig};
+    use crate::ingest::testing::SimulatedRuntime;
+    use crate::ingest::{DecodeExecutor, DecodeOutput, DecodeState};
 
     fn simulated_state<I: Ingest>(
         context: &deterministic::Context,
         ingest: Arc<I>,
     ) -> IngestState<I> {
-        IngestState::new(ingest).with_put_config(PutConfig {
-            clock: Arc::new(SimulatedClock(context.child("put_clock"))),
-            ..Default::default()
-        })
+        IngestState::new(Arc::new(SimulatedRuntime(context.child("put"))), ingest)
     }
 
     fn put_request<B>(timeout_ms: Option<&str>, body: B) -> http::Request<B> {
@@ -928,19 +956,6 @@ mod simulated_clock {
         );
     }
 
-    // Decode here because these tests have no Tokio blocking pool.
-    struct InlineDecode;
-
-    impl DecodeExecutor for InlineDecode {
-        fn execute(
-            &self,
-            state: DecodeState,
-            buffers: DecodeBuffers,
-        ) -> BoxFuture<'static, Result<DecodeOutput, PutError>> {
-            Box::pin(std::future::ready(Ok(state.run(buffers))))
-        }
-    }
-
     struct DelayedDecode(deterministic::Context);
 
     impl DecodeExecutor for DelayedDecode {
@@ -972,10 +987,7 @@ mod simulated_clock {
     #[test]
     fn put_succeeds_without_tokio() {
         deterministic::Runner::default().start(|context| async move {
-            let ingest = Arc::new(IngestWithExecutor {
-                inner: TestIngest::default(),
-                executor: Arc::new(InlineDecode),
-            });
+            let ingest = Arc::new(TestIngest::default());
             let request = put_request(None, full_body(request(2).encode_to_vec().into()));
             let response = tower::ServiceExt::oneshot(
                 ingest_service(simulated_state(&context, ingest.clone())),
@@ -985,7 +997,7 @@ mod simulated_clock {
             .unwrap();
 
             assert_eq!(response.status(), http::StatusCode::OK);
-            assert_eq!(ingest.inner.batches.lock().unwrap()[0].len(), 2);
+            assert_eq!(ingest.batches.lock().unwrap()[0].len(), 2);
         });
     }
 
@@ -1059,10 +1071,7 @@ mod simulated_clock {
     #[test]
     fn idle_body_timeout_fires_before_a_longer_deadline() {
         deterministic::Runner::default().start(|context| async move {
-            let ingest = Arc::new(IngestWithExecutor {
-                inner: TestIngest::default(),
-                executor: Arc::new(InlineDecode),
-            });
+            let ingest = Arc::new(TestIngest::default());
             let polls = Arc::new(AtomicUsize::new(0));
             let request = put_request(
                 Some("300000"),
@@ -1080,7 +1089,7 @@ mod simulated_clock {
                 Duration::from_secs(30),
             );
             assert!(polls.load(Ordering::SeqCst) > 0);
-            assert_no_writes(&ingest.inner);
+            assert_no_writes(&ingest);
         });
     }
 

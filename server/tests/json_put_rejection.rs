@@ -47,7 +47,10 @@ impl Ingest for RejectIngest {
 
 #[tokio::test]
 async fn json_rejection_does_not_materialize_entries() {
-    let transport = ServiceTransport::new(ingest_service(IngestState::new(Arc::new(RejectIngest))));
+    let transport = ServiceTransport::new(ingest_service(IngestState::new(
+        exoware_server::runtime::TokioRuntime::current(),
+        Arc::new(RejectIngest),
+    )));
     for tail in [
         b"]}".as_slice(),
         b"],\"kvs\":[]}",

@@ -1,6 +1,5 @@
 mod admission;
 mod buffer;
-mod clock;
 mod decode;
 mod input;
 mod observe;
@@ -11,15 +10,15 @@ pub mod transport;
 mod zstd;
 pub use service::{PutConfig, PutMiddleware, PutService};
 
+#[cfg(test)]
+pub(crate) use crate::runtime::testing;
+pub use crate::runtime::{Clock, Deadline, TokioClock};
 pub use admission::{Admission, BudgetConfig, ByteLease, IngestBudget, RequestLease};
 pub use buffer::{DecodeBuffers, EntryRanges, PutChunk};
-#[cfg(test)]
-pub(crate) use clock::testing;
-pub use clock::{PutClock, PutDeadline, TokioClock};
 pub use decode::{DecodeOutput, DecodeState};
 pub use input::{
-    box_body, BlockingDecodeExecutor, DecodeExecutor, DrainOutcome, PutBody, PutEncoding, PutInput,
-    PutLimits, PutMetadata,
+    box_body, DecodeExecutor, DrainOutcome, PutBody, PutEncoding, PutInput, PutLimits, PutMetadata,
+    RuntimeDecodeExecutor,
 };
 pub use observe::{IngestEvent, IngestObserver};
 pub use reception::maximum_reception_bytes;

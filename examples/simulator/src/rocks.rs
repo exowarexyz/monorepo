@@ -1755,11 +1755,11 @@ mod tests {
     use buffa::encoding::varint_len;
     use exoware_sdk::limits::{put_entry_encoded_len, MAX_VALUE_LEN};
     use exoware_sdk::log::ingest::v1::PutRequest;
-    use exoware_server::{Ingest, Log, PutDeadline, Sequence, TokioClock};
+    use exoware_server::{Deadline, Ingest, Log, Sequence, TokioClock};
     use tempfile::tempdir;
 
-    fn deadline() -> PutDeadline {
-        PutDeadline::after(
+    fn deadline() -> Deadline {
+        Deadline::after(
             Arc::new(TokioClock::new()),
             std::time::Duration::from_secs(5),
         )
@@ -1808,6 +1808,9 @@ mod tests {
                 exoware_server::ingest::PutLimits::default(),
                 deadline(),
                 admission,
+                std::sync::Arc::new(exoware_server::ingest::RuntimeDecodeExecutor(
+                    exoware_server::runtime::TokioRuntime::current(),
+                )),
             );
             assert_eq!(store.put(&mut input).await.unwrap(), 1, "{frames} frames");
             assert_eq!(store.db.get(b"k").unwrap().unwrap(), b"v");
@@ -1917,6 +1920,9 @@ mod tests {
             exoware_server::ingest::PutLimits::default(),
             deadline(),
             admission,
+            std::sync::Arc::new(exoware_server::ingest::RuntimeDecodeExecutor(
+                exoware_server::runtime::TokioRuntime::current(),
+            )),
         );
         let mut batch = AdmittedBatch {
             kvs: Vec::new(),
@@ -2017,6 +2023,9 @@ mod tests {
             exoware_server::ingest::PutLimits::default(),
             deadline(),
             admission,
+            std::sync::Arc::new(exoware_server::ingest::RuntimeDecodeExecutor(
+                exoware_server::runtime::TokioRuntime::current(),
+            )),
         )
         .with_observer(Arc::new(SeenBatch(seen.clone())));
         let put_store = store.clone();
@@ -2060,6 +2069,9 @@ mod tests {
             exoware_server::ingest::PutLimits::default(),
             deadline(),
             admission,
+            std::sync::Arc::new(exoware_server::ingest::RuntimeDecodeExecutor(
+                exoware_server::runtime::TokioRuntime::current(),
+            )),
         );
         assert!(store.put(&mut input).await.is_err());
         assert_eq!(store.current_sequence(), 0);
@@ -2119,6 +2131,9 @@ mod tests {
             exoware_server::ingest::PutLimits::default(),
             deadline(),
             admission,
+            std::sync::Arc::new(exoware_server::ingest::RuntimeDecodeExecutor(
+                exoware_server::runtime::TokioRuntime::current(),
+            )),
         )
         .with_observer(observer);
         let error = store.put(&mut input).await.unwrap_err().into_connect();
@@ -2157,6 +2172,9 @@ mod tests {
             exoware_server::ingest::PutLimits::default(),
             deadline(),
             admission,
+            std::sync::Arc::new(exoware_server::ingest::RuntimeDecodeExecutor(
+                exoware_server::runtime::TokioRuntime::current(),
+            )),
         )
         .with_notifier(Some(hub.clone()));
         let publish_guard = store.frontiers.persist.lock();

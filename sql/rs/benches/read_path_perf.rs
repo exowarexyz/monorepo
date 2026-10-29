@@ -372,7 +372,10 @@ impl Fixture {
         let app = Router::new()
             .route_service(
                 "/log.ingest.v1.Service/Put",
-                exoware_server::ingest_service(IngestState::new(backend.clone())),
+                exoware_server::ingest_service(IngestState::new(
+                    exoware_server::runtime::TokioRuntime::current(),
+                    backend.clone(),
+                )),
             )
             .fallback_service(exoware_server::query_service(QueryState::new(backend)))
             .layer(axum::middleware::from_fn_with_state(

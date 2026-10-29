@@ -12,7 +12,11 @@ use futures::{future::Either, FutureExt};
 use http_body::Body;
 use http_body_util::BodyExt;
 
-use super::clock::{deadline_error, Expiry, PutClock, PutDeadline};
+use crate::runtime::{Clock, Deadline, Expiry};
+
+pub(crate) fn deadline_error() -> ConnectError {
+    ConnectError::deadline_exceeded("ingest deadline exceeded")
+}
 use super::decode::{DecodeOutput, DecodeState, DecodeStep, WireBatch};
 use super::{
     Admission, ByteLease, DecodeBuffers, IngestEvent, IngestObserver, PutChunk, PutError,
@@ -39,7 +43,7 @@ struct IdleTimeout {
 
 struct IdleWait<'a> {
     idle: &'a mut IdleTimeout,
-    clock: &'a dyn PutClock,
+    clock: &'a dyn Clock,
     started: SystemTime,
 }
 
@@ -182,16 +186,17 @@ pub trait DecodeExecutor: Send + Sync + 'static {
     ) -> futures::future::BoxFuture<'static, Result<DecodeOutput, PutError>>;
 }
 
-pub struct BlockingDecodeExecutor;
+pub struct RuntimeDecodeExecutor(pub Arc<dyn crate::runtime::Runtime>);
 
-impl DecodeExecutor for BlockingDecodeExecutor {
+impl DecodeExecutor for RuntimeDecodeExecutor {
     fn execute(
         &self,
         state: DecodeState,
         buffers: DecodeBuffers,
     ) -> futures::future::BoxFuture<'static, Result<DecodeOutput, PutError>> {
+        let runtime = self.0.clone();
         Box::pin(async move {
-            tokio::task::spawn_blocking(move || state.run(buffers))
+            crate::runtime::run_cpu(runtime, move || state.run(buffers))
                 .await
                 .map_err(|error| {
                     ConnectError::internal(format!("ingest CPU worker failed: {error}")).into()
@@ -208,7 +213,7 @@ pub struct PutInput {
     admission: Admission,
     metadata: PutMetadata,
     limits: PutLimits,
-    deadline: PutDeadline,
+    deadline: Deadline,
     idle: Option<IdleTimeout>,
     observer: Arc<dyn IngestObserver>,
     notifier: Option<Arc<dyn crate::stream::StreamNotifier>>,
@@ -224,8 +229,9 @@ impl PutInput {
         body: PutBody,
         metadata: PutMetadata,
         mut limits: PutLimits,
-        deadline: PutDeadline,
+        deadline: Deadline,
         admission: Admission,
+        executor: Arc<dyn DecodeExecutor>,
     ) -> Self {
         limits.wire_bytes = limits.wire_bytes.min(admission.wire_bound());
         let state = DecodeState::new(
@@ -245,7 +251,7 @@ impl PutInput {
             idle: None,
             observer: Arc::new(()),
             notifier: None,
-            executor: Arc::new(BlockingDecodeExecutor),
+            executor,
             wire_bytes: 0,
             reception: Reception::Reading,
             rejection_observed: false,
@@ -330,10 +336,10 @@ impl PutInput {
             }
         }
     }
-    pub fn deadline(&self) -> &PutDeadline {
+    pub fn deadline(&self) -> &Deadline {
         &self.deadline
     }
-    fn clock(&self) -> &dyn PutClock {
+    fn clock(&self) -> &dyn Clock {
         self.deadline.clock()
     }
     pub fn wire_bytes(&self) -> usize {
@@ -418,7 +424,7 @@ impl PutInput {
         let mut frames = 0;
         loop {
             if frames == FRAME_WORK_BUDGET {
-                tokio::task::yield_now().await;
+                crate::runtime::yield_now().await;
                 frames = 0;
             }
             frames += 1;
@@ -495,7 +501,11 @@ impl PutInput {
         let started = self.clock().now();
         let previous = state.total();
         let job = self.executor.execute(state, buffers);
-        let output = self.deadline.timeout(job).await??;
+        let output = self
+            .deadline
+            .timeout(job)
+            .await
+            .map_err(|_| deadline_error())??;
         let DecodeOutput { result, state } = output;
         if !state.belongs_to(&self.admission.request) {
             return Err(
@@ -545,7 +555,7 @@ impl PutInput {
                 let next = match self.raw_next(true).now_or_never() {
                     Some(next) => next,
                     None => {
-                        tokio::task::yield_now().await;
+                        crate::runtime::yield_now().await;
                         let Some(next) = self.raw_next(true).now_or_never() else {
                             break;
                         };
@@ -653,7 +663,7 @@ impl PutInput {
             if frames == FRAME_WORK_BUDGET
                 || self.wire_bytes.saturating_sub(bytes) >= DRAIN_BYTE_BUDGET
             {
-                tokio::task::yield_now().await;
+                crate::runtime::yield_now().await;
                 frames = 0;
                 bytes = self.wire_bytes;
             }
@@ -741,6 +751,9 @@ mod tests {
                 limits,
                 tokio_deadline(Duration::from_secs(5)),
                 admission,
+                std::sync::Arc::new(crate::ingest::RuntimeDecodeExecutor(
+                    crate::runtime::TokioRuntime::current(),
+                )),
             ),
             budget,
         )
@@ -774,6 +787,9 @@ mod tests {
             PutLimits::default(),
             tokio_deadline(Duration::from_secs(5)),
             budget.try_admit(wire_len).unwrap(),
+            std::sync::Arc::new(crate::ingest::RuntimeDecodeExecutor(
+                crate::runtime::TokioRuntime::current(),
+            )),
         );
         (input, budget, sender)
     }
@@ -786,7 +802,7 @@ mod tests {
             buffers: DecodeBuffers,
         ) -> futures::future::BoxFuture<'static, Result<DecodeOutput, PutError>> {
             self.0.fetch_add(1, Ordering::Relaxed);
-            BlockingDecodeExecutor.execute(state, buffers)
+            RuntimeDecodeExecutor(crate::runtime::TokioRuntime::current()).execute(state, buffers)
         }
     }
 
@@ -967,6 +983,9 @@ mod tests {
                 },
                 tokio_deadline(Duration::from_secs(1)),
                 budget.try_admit(wire_bound).unwrap(),
+                std::sync::Arc::new(crate::ingest::RuntimeDecodeExecutor(
+                    crate::runtime::TokioRuntime::current(),
+                )),
             );
             assert_eq!(input.message_bound().await.unwrap(), expected);
             assert_eq!(input.message_bound().await.unwrap(), expected);
@@ -1096,6 +1115,9 @@ mod tests {
                     PutLimits::default(),
                     tokio_deadline(Duration::from_secs(1)),
                     budget.try_admit(wire.len()).unwrap(),
+                    std::sync::Arc::new(crate::ingest::RuntimeDecodeExecutor(
+                        crate::runtime::TokioRuntime::current(),
+                    )),
                 );
                 assert_eq!(input.message_bound().await.unwrap(), payload.len());
                 assert_eq!(input.message_bound().await.unwrap(), payload.len());
@@ -1240,6 +1262,9 @@ mod tests {
             PutLimits::default(),
             deadline,
             admission,
+            std::sync::Arc::new(crate::ingest::RuntimeDecodeExecutor(
+                crate::runtime::TokioRuntime::current(),
+            )),
         );
         input.set_executor(Arc::new(InlineExecutor));
         sender
@@ -1475,7 +1500,7 @@ mod tests {
     #[tokio::test]
     async fn late_cpu_output_is_rejected_before_batch_observation() {
         struct Late {
-            deadline: PutDeadline,
+            deadline: Deadline,
             calls: AtomicUsize,
         }
         impl DecodeExecutor for Late {
@@ -1893,6 +1918,9 @@ mod tests {
             PutLimits::default(),
             tokio_deadline(Duration::from_secs(1)),
             admission,
+            std::sync::Arc::new(crate::ingest::RuntimeDecodeExecutor(
+                crate::runtime::TokioRuntime::current(),
+            )),
         );
         assert_eq!(polls.load(Ordering::SeqCst), 0);
         assert_eq!(budget.usage(), (1, 8));
@@ -1915,6 +1943,9 @@ mod tests {
             PutLimits::default(),
             tokio_deadline(Duration::from_secs(1)),
             budget.try_admit(4).unwrap(),
+            std::sync::Arc::new(crate::ingest::RuntimeDecodeExecutor(
+                crate::runtime::TokioRuntime::current(),
+            )),
         );
         assert_eq!(input.drain_rejected().await, DrainOutcome::WireLimit);
         assert_eq!(input.wire_bytes(), 0);
@@ -1925,6 +1956,9 @@ mod tests {
             PutLimits::default(),
             tokio_deadline(Duration::ZERO),
             budget.try_admit(4).unwrap(),
+            std::sync::Arc::new(crate::ingest::RuntimeDecodeExecutor(
+                crate::runtime::TokioRuntime::current(),
+            )),
         );
         assert_eq!(input.drain_rejected().await, DrainOutcome::Deadline);
         drop(input);
@@ -2125,6 +2159,9 @@ mod tests {
             PutLimits::default(),
             tokio_deadline(Duration::from_secs(1)),
             budget.try_admit(wire.len()).unwrap(),
+            std::sync::Arc::new(crate::ingest::RuntimeDecodeExecutor(
+                crate::runtime::TokioRuntime::current(),
+            )),
         );
         assert!(input.raw_next(false).await.unwrap().is_some());
         for _ in 0..2 {
@@ -2153,6 +2190,9 @@ mod tests {
             PutLimits::default(),
             tokio_deadline(Duration::from_secs(1)),
             admission,
+            std::sync::Arc::new(crate::ingest::RuntimeDecodeExecutor(
+                crate::runtime::TokioRuntime::current(),
+            )),
         );
         input.reject(
             crate::engine::IngestError::ResourceExhausted {
@@ -2215,6 +2255,9 @@ mod tests {
             PutLimits::default(),
             tokio_deadline(Duration::from_secs(1)),
             budget.try_admit(wire.len()).unwrap(),
+            std::sync::Arc::new(crate::ingest::RuntimeDecodeExecutor(
+                crate::runtime::TokioRuntime::current(),
+            )),
         );
         let error = input
             .next_batch(DecodeBuffers::new(8, 4096))
@@ -2241,6 +2284,9 @@ mod tests {
             PutLimits::default(),
             tokio_deadline(Duration::from_secs(1)),
             budget.try_admit(wire.len()).unwrap(),
+            std::sync::Arc::new(crate::ingest::RuntimeDecodeExecutor(
+                crate::runtime::TokioRuntime::current(),
+            )),
         );
         let error = input
             .next_batch(DecodeBuffers::new(8, 2))
@@ -2271,6 +2317,9 @@ mod tests {
             PutLimits::default(),
             tokio_deadline(Duration::from_secs(1)),
             budget.try_admit(wire.len()).unwrap(),
+            std::sync::Arc::new(crate::ingest::RuntimeDecodeExecutor(
+                crate::runtime::TokioRuntime::current(),
+            )),
         );
         input.reject(
             crate::engine::IngestError::ResourceExhausted {
@@ -2304,6 +2353,9 @@ mod tests {
             PutLimits::default(),
             tokio_deadline(Duration::from_secs(1)),
             budget.try_admit(wire.len()).unwrap(),
+            std::sync::Arc::new(crate::ingest::RuntimeDecodeExecutor(
+                crate::runtime::TokioRuntime::current(),
+            )),
         );
         let error = input
             .next_batch(DecodeBuffers::new(16, 4))
@@ -2338,6 +2390,9 @@ mod tests {
                 PutLimits::default(),
                 deadline.clone(),
                 budget.try_admit(16).unwrap(),
+                std::sync::Arc::new(crate::ingest::RuntimeDecodeExecutor(
+                    crate::runtime::TokioRuntime::current(),
+                )),
             );
             let progressed = Arc::new(AtomicUsize::new(0));
             let neighbor = progressed.clone();
@@ -2368,6 +2423,9 @@ mod tests {
             PutLimits::default(),
             tokio_deadline(Duration::from_secs(1)),
             budget.try_admit(4096).unwrap(),
+            std::sync::Arc::new(crate::ingest::RuntimeDecodeExecutor(
+                crate::runtime::TokioRuntime::current(),
+            )),
         );
         let progressed = Arc::new(AtomicUsize::new(0));
         let neighbor = progressed.clone();

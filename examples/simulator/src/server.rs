@@ -25,7 +25,8 @@ pub async fn run(
     port: u16,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let engine = Arc::new(RocksStore::open(directory, None)?);
-    let state = AppState::new(engine);
+    let runtime = exoware_server::runtime::TokioRuntime::current();
+    let state = AppState::new(runtime.clone(), engine);
     let connect = connect_stack(state);
 
     let app = Router::new()
@@ -36,7 +37,8 @@ pub async fn run(
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
     info!(%addr, directory = %directory.display(), "store simulator listening");
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    exoware_server::ingest::transport::serve(listener, app, std::future::pending()).await?;
+    exoware_server::ingest::transport::serve(runtime, listener, app, std::future::pending())
+        .await?;
     Ok(())
 }
 
@@ -48,7 +50,8 @@ pub async fn open_temp(
 ) -> Result<(tokio::task::JoinHandle<()>, String), Box<dyn std::error::Error + Send + Sync>> {
     let data_dir = tempfile::tempdir()?;
     let engine = Arc::new(RocksStore::open_owned(data_dir, None)?);
-    let state = AppState::new(engine);
+    let runtime = exoware_server::runtime::TokioRuntime::current();
+    let state = AppState::new(runtime.clone(), engine);
     let connect = connect_stack(state);
     let app = Router::new()
         .route("/health", get(health))
@@ -58,8 +61,13 @@ pub async fn open_temp(
     let port = listener.local_addr()?.port();
     let url = format!("http://127.0.0.1:{port}");
     let handle = tokio::spawn(async move {
-        let _ =
-            exoware_server::ingest::transport::serve(listener, app, std::future::pending()).await;
+        let _ = exoware_server::ingest::transport::serve(
+            runtime,
+            listener,
+            app,
+            std::future::pending(),
+        )
+        .await;
     });
     wait_for_health(&url).await?;
     Ok((handle, url))
