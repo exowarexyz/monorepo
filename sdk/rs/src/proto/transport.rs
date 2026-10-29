@@ -546,17 +546,10 @@ impl ClientTransport for BalancedHttp2Transport {
 
 /// zstd level for bodies this registry compresses, which are mostly query and stream
 /// responses.
-///
-/// connectrpc defaults to level 3. On Constantinople-shaped Range frames and stream
-/// batches, level -1 compresses roughly 2 to 4 times faster and the output is about the
-/// same size. Decoders accept any level, so clients need no change.
 const ZSTD_LEVEL: i32 = -1;
 
 /// gzip + zstd - used for [`connectrpc::ConnectRpcService::with_compression`] and
 /// [`connectrpc::client::ClientConfig::compression`].
-///
-/// gzip keeps connectrpc's default level (1). zstd uses level -1 instead of connectrpc's
-/// default of 3.
 #[must_use]
 pub fn connect_compression_registry() -> CompressionRegistry {
     CompressionRegistry::default().register(ZstdProvider::with_level(ZSTD_LEVEL))
