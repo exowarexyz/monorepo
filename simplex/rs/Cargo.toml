@@ -36,6 +36,5 @@ tracing-subscriber = { workspace = true, features = ["env-filter"] }
 commonware-actor = { workspace = true }
 commonware-consensus = { workspace = true, features = ["mocks"] }
 commonware-cryptography = { workspace = true, features = ["mocks"] }
-commonware-p2p = { workspace = true }
 commonware-storage = { workspace = true }
 exoware-simulator = { path = "../../examples/simulator" }
