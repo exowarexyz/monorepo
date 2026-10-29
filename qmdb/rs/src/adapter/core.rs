@@ -7,9 +7,9 @@ use commonware_parallel::Strategy;
 use commonware_storage::merkle::{
     hasher::Hasher as MerkleHasher, mem::Mem, Family, Location, Position,
 };
-use crossbeam_utils::atomic::AtomicCell;
 use exoware_sdk::keys::Key;
 use exoware_sdk::{RangeMode, ReadSession};
+use std::sync::Mutex;
 
 use crate::adapter::codec::{
     decode_operation_location_key, decode_update_location, decode_watermark_location,
@@ -64,52 +64,52 @@ pub(crate) trait LatestValueResolver<F: Family, K: Codec, V: Codec> {
 /// Share a cache only between clients for the same store and namespace.
 #[derive(Debug)]
 pub(crate) struct PublicationCache<F: Family> {
-    published: AtomicCell<Option<PublishedWatermark<F>>>,
+    published: Mutex<Option<PublishedWatermark<F>>>,
+    // Serializes publication lookups, so a `require` that waits here can use
+    // the result of the lookup it waited on.
     refresh_gate: tokio::sync::Mutex<()>,
 }
 
 impl<F: Family> Default for PublicationCache<F> {
     fn default() -> Self {
         Self {
-            published: AtomicCell::new(None),
+            published: Mutex::new(None),
             refresh_gate: tokio::sync::Mutex::new(()),
         }
     }
 }
 
 impl<F: Family> PublicationCache<F> {
-    // Callers must hold refresh_gate so concurrent refreshes cannot overwrite newer evidence.
     fn remember(&self, available: Option<Location<F>>, sequence: u64) {
         let Some(location) = available else {
             return;
         };
-        let published = self.published.load();
+        let mut published = self.published.lock().unwrap();
         if published.as_ref().is_none_or(|known| {
             location > known.location
                 || (location == known.location && sequence < known.sequence_number)
         }) {
-            self.published.store(Some(PublishedWatermark {
+            *published = Some(PublishedWatermark {
                 location,
                 sequence_number: sequence,
-            }));
+            });
         }
     }
 
+    fn published(&self) -> Option<PublishedWatermark<F>> {
+        *self.published.lock().unwrap()
+    }
+
     fn published_sequence(&self, watermark: Location<F>) -> Option<u64> {
-        self.published
-            .load()
+        self.published()
             .filter(|known| known.location >= watermark)
             .map(|known| known.sequence_number)
     }
 
     /// Record a watermark row seen in the Store batch log, at the sequence of
-    /// the batch that committed it. Skips the update while a refresh holds the
-    /// gate; that only leaves the cache colder, since both sources record
-    /// published watermarks.
+    /// the batch that committed it.
     pub(crate) fn observe(&self, location: Location<F>, sequence: u64) {
-        if let Ok(_gate) = self.refresh_gate.try_lock() {
-            self.remember(Some(location), sequence);
-        }
+        self.remember(Some(location), sequence);
     }
 
     pub(crate) async fn refresh(
@@ -119,7 +119,7 @@ impl<F: Family> PublicationCache<F> {
         let _gate = self.refresh_gate.lock().await;
         let (available, sequence) = read_latest_watermark_with_sequence(session).await?;
         self.remember(available, sequence);
-        Ok(self.published.load().map(|known| known.location))
+        Ok(self.published().map(|known| known.location))
     }
 
     pub(crate) async fn require(
@@ -144,7 +144,7 @@ impl<F: Family> PublicationCache<F> {
 
         let (available, sequence) = read_latest_watermark_with_sequence(session).await?;
         self.remember(available, sequence);
-        let published = self.published.load();
+        let published = self.published();
         match published.as_ref() {
             Some(known) if known.location >= watermark => Ok(PublishedWatermark {
                 location: watermark,

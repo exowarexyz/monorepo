@@ -117,6 +117,8 @@ pub(crate) type ErasedTransportError = std::io::Error;
 /// Response body used by the type-erased Store client transport.
 pub(crate) type ErasedResponseBody = BoxBody<Bytes, ErasedTransportError>;
 
+// The Mutex only makes the body Sync, as `BoxBody` requires. `poll_frame` has
+// exclusive access and skips it.
 struct SyncResponseBody<B> {
     inner: Mutex<Pin<Box<B>>>,
 }
@@ -140,7 +142,12 @@ where
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
     ) -> Poll<Option<Result<http_body::Frame<Self::Data>, Self::Error>>> {
-        self.inner.lock().unwrap().as_mut().poll_frame(cx)
+        self.get_mut()
+            .inner
+            .get_mut()
+            .unwrap()
+            .as_mut()
+            .poll_frame(cx)
     }
 
     fn is_end_stream(&self) -> bool {
@@ -293,6 +300,9 @@ impl ClientMetadata {
     }
 
     fn store_set_cookies(&self, url: &Url, headers: &http::HeaderMap) {
+        if !headers.contains_key(SET_COOKIE) {
+            return;
+        }
         let Ok(mut jar) = self.cookies.lock() else {
             return;
         };
