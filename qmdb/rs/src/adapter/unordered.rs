@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 use std::marker::PhantomData;
 use std::sync::Arc;
 
-use commonware_codec::{Codec, Copying, Decode, DecodeExt, Encode};
+use commonware_codec::{Codec, Copying, Decode, Encode};
 use commonware_cryptography::Hasher;
 use commonware_storage::merkle::{Graftable, Location};
 use commonware_storage::qmdb::{
@@ -10,15 +10,10 @@ use commonware_storage::qmdb::{
         unordered,
         value::{ValueEncoding, VariableEncoding},
     },
-    current::proof::OpsRootWitness,
     operation::{Key as QmdbKey, Operation as _},
 };
 use exoware_sdk::{PrefixedStoreClient, ReadSession};
 
-use crate::adapter::codec::{
-    decode_current_boundary_metadata, encode_current_meta_key, encode_ops_root_witness_key,
-    CurrentBoundaryMetadata,
-};
 use crate::adapter::core;
 use crate::adapter::current::{self, CurrentTip, ProofReads};
 use crate::adapter::operation_range::{
@@ -201,11 +196,11 @@ where
     pub async fn root_at(&self, watermark: Location<F>) -> Result<H::Digest, QmdbError> {
         let watermark = self.resolve_watermark(watermark, None).await?;
         let session = ReadSession::fixed(self.store.clone(), Some(watermark.sequence_number));
-        if load_ops_root_witness::<F, H>(&session, watermark.location)
+        if current::load_ops_root_witness::<F, H>(&session, watermark.location)
             .await?
             .is_some()
         {
-            return load_current_boundary_root::<F, H>(&session, watermark.location).await;
+            return current::load_current_boundary_root::<F, H>(&session, watermark.location).await;
         }
         compute_ops_root::<F, H, K, V, E>(&self.op_cfg, &session, watermark.location).await
     }
@@ -498,7 +493,7 @@ where
         min_sequence_number: Option<u64>,
     ) -> Result<VerifiedKeyValue<H::Digest, unordered::Operation<F, K, E>, F>, QmdbError> {
         let raw = self.get_raw(tip, key.as_ref(), min_sequence_number).await?;
-        Ok(verified_key_value(raw))
+        Ok(current::verified_key_value(raw))
     }
 
     /// Verified current-state hits for `keys`, in request order. Missing or
@@ -510,7 +505,7 @@ where
         min_sequence_number: Option<u64>,
     ) -> Result<Vec<VerifiedKeyValue<H::Digest, unordered::Operation<F, K, E>, F>>, QmdbError> {
         let raw = self.get_many_raw(tip, keys, min_sequence_number).await?;
-        Ok(raw.into_iter().map(verified_key_value).collect())
+        Ok(raw.into_iter().map(current::verified_key_value).collect())
     }
 
     /// Verified contiguous range from the current-state variant (with bitmap chunks).
@@ -590,46 +585,6 @@ where
             "failed to decode unordered operation at location {location}: {e}"
         ))
     })
-}
-
-async fn load_current_boundary_metadata<F: Graftable, H: Hasher>(
-    session: &ReadSession,
-    location: Location<F>,
-) -> Result<CurrentBoundaryMetadata<H::Digest>, QmdbError> {
-    let Some(bytes) = session.get(&encode_current_meta_key(location)).await? else {
-        return Err(QmdbError::CurrentBoundaryStateMissing {
-            location: location.as_u64(),
-        });
-    };
-    decode_current_boundary_metadata::<H::Digest>(
-        bytes.as_ref(),
-        format!("current boundary metadata at {location}"),
-    )
-}
-
-async fn load_current_boundary_root<F: Graftable, H: Hasher>(
-    session: &ReadSession,
-    location: Location<F>,
-) -> Result<H::Digest, QmdbError> {
-    Ok(load_current_boundary_metadata::<F, H>(session, location)
-        .await?
-        .root)
-}
-
-async fn load_ops_root_witness<F: Graftable, H: Hasher>(
-    session: &ReadSession,
-    location: Location<F>,
-) -> Result<Option<OpsRootWitness<F, H::Digest>>, QmdbError> {
-    let Some(bytes) = session.get(&encode_ops_root_witness_key(location)).await? else {
-        return Ok(None);
-    };
-    OpsRootWitness::<F, H::Digest>::decode(Copying(bytes.as_ref()))
-        .map(Some)
-        .map_err(|e| {
-            QmdbError::CorruptData(format!(
-                "current ops-root witness at {location} decode error: {e}"
-            ))
-        })
 }
 
 async fn load_ops_inactivity_floor_at<F, K, V, E>(
@@ -747,14 +702,4 @@ where
             decode_operation::<F, K, V, E>(op_cfg, start_location + offset as u64, &bytes)
         })
         .collect()
-}
-
-fn verified_key_value<D: commonware_cryptography::Digest, Op, F: Graftable, const N: usize>(
-    raw: RawKeyValueProof<D, Op, N, F>,
-) -> VerifiedKeyValue<D, Op, F> {
-    VerifiedKeyValue {
-        root: raw.root,
-        location: raw.proof.loc,
-        operation: raw.operation,
-    }
 }

@@ -7,14 +7,17 @@ use bytes::Bytes;
 use commonware_codec::{Copying, DecodeExt};
 use commonware_cryptography::{Digest, Hasher};
 use commonware_storage::merkle::{ElementPlan, Family, Graftable, Location, Position, RangePlan};
-use commonware_storage::qmdb::current::proof::{constant::OperationProof, RangeProof};
+use commonware_storage::qmdb::current::proof::{
+    constant::OperationProof, OpsRootWitness, RangeProof,
+};
 use exoware_sdk::{RangeMode, ReadSession};
 
 use crate::adapter::codec::{
     chunk_index_for_location, clear_below_floor, decode_current_boundary_metadata,
     decode_update_index_value_present, decode_update_location, encode_chunk_key,
-    encode_current_meta_key, encode_node_key, encode_operation_key, encode_presence_key,
-    merkle_size_for_watermark, op_count_for_watermark,
+    encode_current_meta_key, encode_node_key, encode_operation_key, encode_ops_root_witness_key,
+    encode_presence_key, merkle_size_for_watermark, op_count_for_watermark,
+    CurrentBoundaryMetadata,
 };
 use crate::adapter::core;
 use crate::adapter::operation_range::root;
@@ -22,6 +25,7 @@ use crate::adapter::read_cache::{ReadCache, RootContext};
 use crate::adapter::storage::{
     load_proof_nodes, tail_chunk, BitmapTail, ProofBitmap, ProofNodes, TailIndices,
 };
+use crate::proof::{RawKeyValueProof, VerifiedKeyValue};
 use crate::QmdbError;
 
 /// Current-state values fixed by one published batch boundary.
@@ -375,4 +379,54 @@ pub(crate) fn range_proof<F: Graftable, H: Hasher, const N: usize>(
         tip.ops.root,
     )
     .map_err(crate::error::current_proof_error)
+}
+
+async fn load_current_boundary_metadata<F: Graftable, H: Hasher>(
+    session: &ReadSession,
+    location: Location<F>,
+) -> Result<CurrentBoundaryMetadata<H::Digest>, QmdbError> {
+    let Some(bytes) = session.get(&encode_current_meta_key(location)).await? else {
+        return Err(QmdbError::CurrentBoundaryStateMissing {
+            location: location.as_u64(),
+        });
+    };
+    decode_current_boundary_metadata::<H::Digest>(
+        bytes.as_ref(),
+        format!("current boundary metadata at {location}"),
+    )
+}
+
+pub(crate) async fn load_current_boundary_root<F: Graftable, H: Hasher>(
+    session: &ReadSession,
+    location: Location<F>,
+) -> Result<H::Digest, QmdbError> {
+    Ok(load_current_boundary_metadata::<F, H>(session, location)
+        .await?
+        .root)
+}
+
+pub(crate) async fn load_ops_root_witness<F: Graftable, H: Hasher>(
+    session: &ReadSession,
+    location: Location<F>,
+) -> Result<Option<OpsRootWitness<F, H::Digest>>, QmdbError> {
+    let Some(bytes) = session.get(&encode_ops_root_witness_key(location)).await? else {
+        return Ok(None);
+    };
+    OpsRootWitness::<F, H::Digest>::decode(Copying(bytes.as_ref()))
+        .map(Some)
+        .map_err(|e| {
+            QmdbError::CorruptData(format!(
+                "current ops-root witness at {location} decode error: {e}"
+            ))
+        })
+}
+
+pub(crate) fn verified_key_value<D: Digest, Op, F: Graftable, const N: usize>(
+    raw: RawKeyValueProof<D, Op, N, F>,
+) -> VerifiedKeyValue<D, Op, F> {
+    VerifiedKeyValue {
+        root: raw.root,
+        location: raw.proof.loc,
+        operation: raw.operation,
+    }
 }
