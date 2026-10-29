@@ -1,5 +1,3 @@
-#![allow(clippy::type_complexity)]
-
 use std::net::{IpAddr, SocketAddr};
 use std::num::NonZeroU64;
 use std::path::PathBuf;

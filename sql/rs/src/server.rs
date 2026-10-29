@@ -163,7 +163,6 @@ impl SqlServer {
         &self.ctx
     }
 
-    #[allow(clippy::result_large_err)]
     fn stream(&self, table: &str) -> Result<&TableStream, ConnectError> {
         self.streams
             .get(table)

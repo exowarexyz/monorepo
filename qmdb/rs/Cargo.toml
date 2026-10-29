@@ -19,7 +19,6 @@ bytes = { workspace = true }
 buffa = { workspace = true }
 clap = { workspace = true, features = ["derive"] }
 commonware-codec = { workspace = true }
-commonware-macros = { workspace = true }
 commonware-parallel = { workspace = true }
 commonware-runtime = { workspace = true }
 futures = { workspace = true }
@@ -44,14 +43,10 @@ connectrpc-build = { workspace = true }
 
 [dev-dependencies]
 exoware-qmdb = { path = ".", features = ["test-utils"] }
-axum = { workspace = true }
-bytes = { workspace = true }
 commonware-glue = { workspace = true }
-commonware-runtime = { workspace = true }
 criterion = { workspace = true }
 exoware-simulator = { path = "../../examples/simulator" }
 exoware-server = { workspace = true }
-hex = { workspace = true }
 reqwest = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
