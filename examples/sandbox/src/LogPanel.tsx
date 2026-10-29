@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { type StoreBatch, type StoreClient } from '@exowarexyz/sdk';
+import { hexToBytes } from '@simplex-ts';
 import { isNetworkError } from './clientErrors';
 import { formatBytesValue, formatKeyPreview } from './format';
 
@@ -23,15 +24,7 @@ const textEncoder = new TextEncoder();
 // cannot express, so a `0x` prefix switches the input to hex.
 function parsePrefixInput(input: string): Uint8Array {
   if (input.startsWith('0x') || input.startsWith('0X')) {
-    const hex = input.slice(2);
-    if (hex.length % 2 !== 0 || !/^[0-9a-fA-F]*$/.test(hex)) {
-      throw new Error('Hex prefix must be an even number of hex digits after 0x');
-    }
-    const out = new Uint8Array(hex.length / 2);
-    for (let i = 0; i < out.length; i++) {
-      out[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16);
-    }
-    return out;
+    return hexToBytes(input);
   }
   return textEncoder.encode(input);
 }

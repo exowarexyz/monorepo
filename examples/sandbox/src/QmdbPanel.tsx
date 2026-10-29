@@ -11,45 +11,28 @@ import {
   type VerifiedCurrentKeyValueProof,
   type VerifiedHistoricalMultiProof,
 } from '@qmdb-ts';
+import { bytesToHex, hexToBytes } from '@simplex-ts';
 
 const MAX_EVENTS = 10;
 
 function parseHexRoot(value: string): Uint8Array {
-  const trimmed = value.trim();
-  if (!trimmed) {
+  const root = hexToBytes(value);
+  if (root.length === 0) {
     throw new Error('Expected Root is required');
   }
-  const body = trimmed.startsWith('0x') || trimmed.startsWith('0X') ? trimmed.slice(2) : trimmed;
-  if (body.length === 0 || body.length % 2 !== 0 || !/^[0-9a-fA-F]+$/.test(body)) {
-    throw new Error('Expected Root must be a hex string (optionally 0x-prefixed)');
-  }
-  const out = new Uint8Array(body.length / 2);
-  for (let i = 0; i < out.length; i++) {
-    out[i] = parseInt(body.slice(i * 2, i * 2 + 2), 16);
-  }
-  return out;
+  return root;
 }
 
 interface NotificationFn {
   (type: 'success' | 'error', title: string, message: string): void;
 }
 
-function decodeUtf8(bytes: Uint8Array): string {
-  try {
-    return new TextDecoder('utf-8', { fatal: false }).decode(bytes);
-  } catch {
-    return '';
-  }
-}
-
 function formatBytes(bytes: Uint8Array): string {
-  const text = decodeUtf8(bytes);
+  const text = new TextDecoder('utf-8', { fatal: false }).decode(bytes);
   if (text && /^[\x20-\x7E]*$/.test(text)) {
     return text;
   }
-  return `0x${Array.from(bytes)
-    .map((byte) => byte.toString(16).padStart(2, '0'))
-    .join('')}`;
+  return `0x${bytesToHex(bytes)}`;
 }
 
 function formatProofSize(bytes: number): string {
