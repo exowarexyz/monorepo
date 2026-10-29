@@ -1514,11 +1514,7 @@ mod tests {
         let table = &schema.tables()[0].1;
         let state = TableStream::new(table.model.clone(), table.index_specs.clone());
         let entries =
-            crate::writer::encode_insert_entries(&batch, &table.model, &table.index_specs)
-                .unwrap()
-                .into_iter()
-                .map(|(key, value)| (key, Bytes::from(value)))
-                .collect();
+            crate::writer::encode_insert_entries(&batch, &table.model, &table.index_specs).unwrap();
         let predicate = compile_subscription_predicate(
             &ctx,
             &batch.schema(),

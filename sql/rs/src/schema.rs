@@ -329,7 +329,7 @@ impl KvSchema {
                     let index_value =
                         encode_secondary_index_value_from_archived(&archived, model, spec)?;
                     pending_keys.push(index_key);
-                    pending_values.push(index_value.into());
+                    pending_values.push(index_value);
                     report.index_entries_written += 1;
                 }
 

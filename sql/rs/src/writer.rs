@@ -36,7 +36,7 @@ pub struct TableWriter {
 }
 
 impl TableWriter {
-    pub fn encode_row(&self, values: Vec<CellValue>) -> Result<Vec<(Key, Vec<u8>)>, String> {
+    pub fn encode_row(&self, values: Vec<CellValue>) -> Result<Vec<(Key, Bytes)>, String> {
         let row = KvRow { values };
         if row.values.len() != self.model.columns.len() {
             return Err(format!(
@@ -48,7 +48,7 @@ impl TableWriter {
         let base_key = encode_primary_key_from_row(self.model.table_prefix, &row, &self.model)?;
         let mut stored = stored_row_from_cells(&row, &self.model).map_err(|e| format!("{e}"))?;
         let pk_payload = base_key.slice(self.model.primary_key_prefix.len()..);
-        let mut out = vec![(base_key, stored.encode().to_vec())];
+        let mut out = vec![(base_key, stored.encode())];
         for spec in self.index_specs.iter() {
             let idx_key = encode_secondary_index_key_with_pk(spec, &self.model, &row, &pk_payload)?;
             out.push((idx_key, encode_index_value(&mut stored, spec)));
@@ -133,7 +133,7 @@ impl BatchWriter {
         let entries = writer.encode_row(values)?;
         for (key, value) in entries {
             self.pending_keys.push(key);
-            self.pending_values.push(value.into());
+            self.pending_values.push(value);
         }
         Ok(self)
     }
@@ -327,7 +327,7 @@ impl DataSink for KvIngestSink {
             logical_rows_written += batch.num_rows() as u64;
             for (key, value) in encoded_entries {
                 pending_keys.push(key);
-                pending_values.push(value.into());
+                pending_values.push(value);
             }
         }
 
@@ -342,7 +342,7 @@ pub(crate) fn encode_insert_entries(
     batch: &RecordBatch,
     model: &TableModel,
     index_specs: &[ResolvedIndexSpec],
-) -> DataFusionResult<Vec<(Key, Vec<u8>)>> {
+) -> DataFusionResult<Vec<(Key, Bytes)>> {
     let mut out = Vec::with_capacity(batch.num_rows() * (1 + index_specs.len()));
     let columns = insert_columns(batch, model);
     for row_idx in 0..batch.num_rows() {
@@ -351,7 +351,7 @@ pub(crate) fn encode_insert_entries(
             .map_err(DataFusionError::Execution)?;
         let mut stored = stored_row_from_cells(&row, model)?;
         let pk_payload = base_key.slice(model.primary_key_prefix.len()..);
-        out.push((base_key, stored.encode().to_vec()));
+        out.push((base_key, stored.encode()));
 
         for spec in index_specs {
             let secondary_key = encode_secondary_index_key_with_pk(spec, model, &row, &pk_payload)
@@ -452,14 +452,14 @@ pub(crate) fn stored_row_from_cells(
 }
 
 #[cfg(test)]
-pub(crate) fn encode_base_row_value(row: &KvRow, model: &TableModel) -> DataFusionResult<Vec<u8>> {
-    Ok(stored_row_from_cells(row, model)?.encode().to_vec())
+pub(crate) fn encode_base_row_value(row: &KvRow, model: &TableModel) -> DataFusionResult<Bytes> {
+    Ok(stored_row_from_cells(row, model)?.encode())
 }
 
 /// Encode the value of an index entry: `base` with every column the index
 /// doesn't cover set to `None`. The covered values move out of `base` for the
 /// encode and back afterwards, so no string or byte value is cloned.
-pub(crate) fn encode_index_value(base: &mut StoredRow, spec: &ResolvedIndexSpec) -> Vec<u8> {
+pub(crate) fn encode_index_value(base: &mut StoredRow, spec: &ResolvedIndexSpec) -> Bytes {
     let mut covered = StoredRow {
         values: vec![None; base.values.len()],
     };
@@ -472,7 +472,7 @@ pub(crate) fn encode_index_value(base: &mut StoredRow, spec: &ResolvedIndexSpec)
     for idx in covered_columns() {
         covered.values[idx] = base.values[idx].take();
     }
-    let encoded = covered.encode().to_vec();
+    let encoded = covered.encode();
     for idx in covered_columns() {
         base.values[idx] = covered.values[idx].take();
     }
@@ -484,7 +484,7 @@ pub(crate) fn encode_secondary_index_value(
     row: &KvRow,
     model: &TableModel,
     spec: &ResolvedIndexSpec,
-) -> DataFusionResult<Vec<u8>> {
+) -> DataFusionResult<Bytes> {
     let mut stored = stored_row_from_cells(row, model)?;
     Ok(encode_index_value(&mut stored, spec))
 }
@@ -493,7 +493,7 @@ pub(crate) fn encode_secondary_index_value_from_archived(
     archived: &StoredRow,
     model: &TableModel,
     spec: &ResolvedIndexSpec,
-) -> DataFusionResult<Vec<u8>> {
+) -> DataFusionResult<Bytes> {
     if archived.values.len() != model.columns.len() {
         return Err(DataFusionError::Execution(
             "archived row column count mismatch".to_string(),
@@ -514,8 +514,7 @@ pub(crate) fn encode_secondary_index_value_from_archived(
         }
         values.push(stored_opt.cloned());
     }
-    let stored_row = StoredRow { values };
-    Ok(stored_row.encode().to_vec())
+    Ok(StoredRow { values }.encode())
 }
 
 pub(crate) fn encode_non_pk_cell_value(
