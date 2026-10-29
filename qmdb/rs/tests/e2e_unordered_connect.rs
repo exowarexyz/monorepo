@@ -233,7 +233,7 @@ async fn build_any_source_batch() -> AnySourceBatch {
     tokio::task::spawn_blocking(|| {
         cw_tokio::Runner::default().start(|context| async move {
             use commonware_runtime::{buffer::paged::CacheRef, Supervisor as _};
-            let page_cache = CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(8));
+            let page_cache = CacheRef::new(NZU16!(64), NZUsize!(8));
             let cfg = common::any_variable_config(
                 "any_unordered_variable_mmr_connect_source",
                 page_cache,
@@ -271,7 +271,7 @@ async fn build_any_source_batch() -> AnySourceBatch {
                         .await
                         .expect("merkleize")
                 };
-                (db, _) = db.apply_batch(finalized).await.expect("apply");
+                db = db.apply_batch(finalized).await.expect("apply");
 
                 let latest = db.bounds().end - 1;
                 let n = NonZeroU64::new(*latest + 1).unwrap();
@@ -320,7 +320,7 @@ async fn build_mmb_any_source_batch() -> MmbAnySourceBatch {
     tokio::task::spawn_blocking(|| {
         cw_tokio::Runner::default().start(|context| async move {
             use commonware_runtime::{buffer::paged::CacheRef, Supervisor as _};
-            let page_cache = CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(8));
+            let page_cache = CacheRef::new(NZU16!(64), NZUsize!(8));
             let cfg = common::any_variable_config(
                 "any_unordered_variable_mmb_connect_source",
                 page_cache,
@@ -358,7 +358,7 @@ async fn build_mmb_any_source_batch() -> MmbAnySourceBatch {
                         .await
                         .expect("merkleize")
                 };
-                (db, _) = db.apply_batch(finalized).await.expect("apply");
+                db = db.apply_batch(finalized).await.expect("apply");
 
                 let latest = db.bounds().end - 1;
                 let n = NonZeroU64::new(*latest + 1).unwrap();
@@ -407,7 +407,7 @@ async fn build_current_source_batch() -> CurrentSourceBatch {
     tokio::task::spawn_blocking(|| {
         cw_tokio::Runner::default().start(|context| async move {
             use commonware_runtime::{buffer::paged::CacheRef, Supervisor as _};
-            let page_cache = CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(8));
+            let page_cache = CacheRef::new(NZU16!(64), NZUsize!(8));
             let cfg = common::current_variable_config(
                 "current_unordered_variable_mmr_connect_source",
                 page_cache,
@@ -438,7 +438,7 @@ async fn build_current_source_batch() -> CurrentSourceBatch {
                     .await
                     .expect("merkleize")
             };
-            (db, _) = db.apply_batch(finalized).await.expect("apply");
+            db = db.apply_batch(finalized).await.expect("apply");
 
             let latest = db.bounds().end - 1;
             let n = NonZeroU64::new(*latest + 1).unwrap();
@@ -882,7 +882,7 @@ async fn aligned_commit_boundary<F: commonware_storage::merkle::Graftable + Part
     let snapshots = tokio::task::spawn_blocking(move || {
         cw_tokio::Runner::default().start(|context| async move {
             use commonware_runtime::{buffer::paged::CacheRef, Supervisor as _};
-            let cache = CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(8));
+            let cache = CacheRef::new(NZU16!(64), NZUsize!(8));
             let cfg = common::current_variable_config(
                 case_name,
                 cache,
@@ -910,7 +910,7 @@ async fn aligned_commit_boundary<F: commonware_storage::merkle::Graftable + Part
                     )
                     .await
                     .expect("source merkleize");
-                (db, _) = db.apply_batch(batch).await.expect("source apply");
+                db = db.apply_batch(batch).await.expect("source apply");
                 assert_eq!(*db.bounds().end, if round == 0 { 512 } else { 514 });
                 let (_, operations): (_, Vec<Operation<F>>) = db
                     .ops_historical_proof(
@@ -1040,7 +1040,7 @@ async fn current_boundary_nodes<F: commonware_storage::merkle::Graftable + Parti
     let snapshots = tokio::task::spawn_blocking(move || {
         cw_tokio::Runner::default().start(|context| async move {
             use commonware_runtime::{buffer::paged::CacheRef, Supervisor as _};
-            let cache = CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(8));
+            let cache = CacheRef::new(NZU16!(64), NZUsize!(8));
             let cfg = common::current_variable_config(
                 case_name,
                 cache,
@@ -1067,7 +1067,7 @@ async fn current_boundary_nodes<F: commonware_storage::merkle::Graftable + Parti
                     .merkleize(&db, None::<Vec<u8>>, &mut commonware_storage::qmdb::floor::Proportional)
                     .await
                     .expect("source merkleize");
-                (db, _) = db.apply_batch(batch).await.expect("source apply");
+                db = db.apply_batch(batch).await.expect("source apply");
                 if round < empty_batches {
                     continue;
                 }

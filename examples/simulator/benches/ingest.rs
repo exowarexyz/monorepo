@@ -18,6 +18,7 @@ use std::time::{Duration, Instant};
 
 use buffa::Message;
 use bytes::Bytes;
+use commonware_allocator::mimalloc::{Config, MiMalloc, Purge, Reserve};
 use exoware_sdk::common::kv::v1::Entry;
 use exoware_sdk::log::ingest::v1::PutRequest;
 use exoware_server::ingest::{
@@ -30,6 +31,12 @@ use exoware_simulator::RocksStore;
 // vector capacity and simultaneous old and replacement backing allocations.
 struct MeasuredAllocator;
 
+static INNER_ALLOC: MiMalloc = MiMalloc::new(Config {
+    purge: Purge::After(Duration::from_secs(10)),
+    reserve: Some(Reserve::pinned(2 << 30)),
+    ..Config::DEFAULT
+});
+
 static LIVE_BYTES: AtomicUsize = AtomicUsize::new(0);
 static PEAK_BYTES: AtomicUsize = AtomicUsize::new(0);
 
@@ -40,7 +47,7 @@ fn allocated(bytes: usize) {
 
 unsafe impl GlobalAlloc for MeasuredAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        let pointer = mimalloc::MiMalloc.alloc(layout);
+        let pointer = INNER_ALLOC.alloc(layout);
         if !pointer.is_null() {
             allocated(layout.size());
         }
@@ -48,7 +55,7 @@ unsafe impl GlobalAlloc for MeasuredAllocator {
     }
 
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-        let pointer = mimalloc::MiMalloc.alloc_zeroed(layout);
+        let pointer = INNER_ALLOC.alloc_zeroed(layout);
         if !pointer.is_null() {
             allocated(layout.size());
         }
@@ -56,12 +63,12 @@ unsafe impl GlobalAlloc for MeasuredAllocator {
     }
 
     unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
-        mimalloc::MiMalloc.dealloc(pointer, layout);
+        INNER_ALLOC.dealloc(pointer, layout);
         LIVE_BYTES.fetch_sub(layout.size(), Ordering::Relaxed);
     }
 
     unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, size: usize) -> *mut u8 {
-        let pointer = mimalloc::MiMalloc.realloc(pointer, layout, size);
+        let pointer = INNER_ALLOC.realloc(pointer, layout, size);
         if !pointer.is_null() {
             if size >= layout.size() {
                 allocated(size - layout.size());

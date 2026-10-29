@@ -408,7 +408,7 @@ where
         })
         .collect::<Result<Vec<_>, QmdbError>>()?;
     let root = batch
-        .root(&mem, &hasher, inactive_peaks)
+        .root(&hasher, inactive_peaks)
         .map_err(|e| QmdbError::CommonwareMerkle(e.to_string()))?;
     Ok(MerkleExtension {
         size,

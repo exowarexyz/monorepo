@@ -253,7 +253,7 @@ async fn seed(
         cw_tokio::Runner::new(runner_cfg).start(|context| async move {
             use commonware_runtime::{buffer::paged::CacheRef, Supervisor as _};
 
-            let page_cache = CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(8));
+            let page_cache = CacheRef::new(NZU16!(64), NZUsize!(8));
             let cfg = VariableConfig {
                 merkle_config: MerkleConfig {
                     journal_partition: "current-ordered-variable-mmb-seed-merkle-journal".into(),
@@ -354,7 +354,7 @@ async fn seed(
                         .await
                         .expect("merkleize")
                 };
-                (source_db, _) = source_db.apply_batch(finalized).await.expect("apply batch");
+                source_db = source_db.apply_batch(finalized).await.expect("apply batch");
                 source_db = source_db.sync().await.expect("sync local ordered db");
 
                 let latest = source_db.bounds().end - 1;

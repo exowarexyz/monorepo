@@ -1,14 +1,20 @@
 //! Store simulator CLI (RocksDB).
 
 use clap::{Arg, ArgAction, Command};
+use commonware_allocator::mimalloc::{Config, MiMalloc, Purge, Reserve};
 use std::path::PathBuf;
+use std::time::Duration;
 use tracing::error;
 
 use exoware_simulator::rocks::WRITER_THREAD_PREFIX;
 use exoware_simulator::server;
 
 #[global_allocator]
-static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
+static ALLOC: MiMalloc = MiMalloc::new(Config {
+    purge: Purge::After(Duration::from_secs(10)),
+    reserve: Some(Reserve::pinned(2 << 30)),
+    ..Config::DEFAULT
+});
 
 pub fn crate_version() -> &'static str {
     env!("CARGO_PKG_VERSION")

@@ -523,7 +523,7 @@ macro_rules! case {
             let snapshots = tokio::task::spawn_blocking(move || {
                 cw_tokio::Runner::default().start(|context| async move {
                     use commonware_runtime::{buffer::paged::CacheRef, Supervisor as _};
-                    let cache = CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(8));
+                    let cache = CacheRef::new(NZU16!(64), NZUsize!(8));
                     let cfg = source_config!(
                         $state,
                         $encoding,
@@ -576,7 +576,7 @@ macro_rules! case {
                         let batch_root = batch.root();
                         let captured: Option<(Proof<F, Digest>, Vec<Digest>)> =
                             capture_batch_proof!($state, batch, db);
-                        (db, _) = db.apply_batch(batch).await.expect("source apply");
+                        db = db.apply_batch(batch).await.expect("source apply");
                         assert_eq!(db.root(), batch_root);
                         let count = NonZeroU64::new(*db.bounds().end).expect("nonempty source");
                         let (_, operations): (_, Vec<Op>) = source_proof!($state, db, count);

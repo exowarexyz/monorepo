@@ -1032,7 +1032,7 @@ macro_rules! variant_case {
             type Op = Operation<$family, $fixture::Key, $fixture::Encoding>;
             let snapshots = tokio::task::spawn_blocking(|| {
                 cw_tokio::Runner::default().start(|context| async move {
-                    let cache = CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(8));
+                    let cache = CacheRef::new(NZU16!(64), NZUsize!(8));
                     let cfg = source_config!(
                         $state,
                         $encoding,
@@ -1081,7 +1081,7 @@ macro_rules! variant_case {
                             .expect("source merkleize");
                         let captured = capture_source_batch!($state, $family, db, finalized);
                         let batch_root = finalized.root();
-                        (db, _) = db.apply_batch(finalized).await.expect("source apply");
+                        db = db.apply_batch(finalized).await.expect("source apply");
                         assert_eq!(db.root(), batch_root);
                         for index in 0..KEY_BYTES.len() {
                             let key = $fixture::key(index);

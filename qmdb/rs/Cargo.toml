@@ -44,6 +44,7 @@ connectrpc-build = { workspace = true }
 
 [dev-dependencies]
 exoware-qmdb = { path = ".", features = ["test-utils"] }
+commonware-parallel = { workspace = true, features = ["test-utils"] }
 axum = { workspace = true }
 bytes = { workspace = true }
 commonware-glue = { workspace = true }
