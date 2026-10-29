@@ -3,12 +3,9 @@ import { type StoreBatch, type StoreClient } from '@exowarexyz/sdk';
 import { hexToBytes } from '@simplex-ts';
 import { isNetworkError } from './clientErrors';
 import { formatBytesValue, formatKeyPreview } from './format';
+import { type NotificationFn } from './panel';
 
 const MAX_LOG_EVENTS = 10;
-
-interface NotificationFn {
-  (type: 'success' | 'error', title: string, message: string): void;
-}
 
 function parseOptionalBigInt(value: string) {
   const trimmed = value.trim();

@@ -15,6 +15,7 @@ import {
   type VerifiedSimplexCertificateStreamEntry,
 } from '@simplex-ts';
 import { createWasmSimplexVerifier } from '@simplex-ts/wasm';
+import { type NotificationFn, useHealth } from './panel';
 
 const MAX_EVENTS = 10;
 const SIMPLEX_DEMO_SCHEME: SimplexScheme = 'bls12381-threshold-vrf-min-sig';
@@ -33,10 +34,6 @@ const SIMPLEX_SCHEMES: SimplexScheme[] = [
   'bls12381-threshold-vrf-min-pk',
   'bls12381-threshold-vrf-min-sig',
 ];
-
-interface NotificationFn {
-  (type: 'success' | 'error', title: string, message: string): void;
-}
 
 type VerifiedSimplexEntry = VerifiedSimplexCertificateStreamEntry<
   VerifiedSimplexCertificate,
@@ -170,7 +167,7 @@ export function SimplexPanel({
     [store, verifier],
   );
 
-  const [isConnected, setIsConnected] = useState(false);
+  const isConnected = useHealth(simplexUrl);
   const [isReadingBlock, setIsReadingBlock] = useState(false);
   const [isReadingNotarization, setIsReadingNotarization] = useState(false);
   const [isReadingLatest, setIsReadingLatest] = useState(false);
@@ -235,23 +232,7 @@ export function SimplexPanel({
     };
   }, [appliedVerifierConfig]);
 
-  useEffect(() => {
-    const controller = new AbortController();
-    void (async () => {
-      try {
-        const response = await fetch(`${simplexUrl.replace(/\/$/, '')}/health`, {
-          signal: controller.signal,
-        });
-        setIsConnected(response.ok);
-      } catch {
-        setIsConnected(false);
-      }
-    })();
-    return () => {
-      controller.abort();
-      subscribeAbortRef.current?.abort();
-    };
-  }, [simplexUrl]);
+  useEffect(() => () => subscribeAbortRef.current?.abort(), [simplexUrl]);
 
   const applyVerifier = () => {
     try {

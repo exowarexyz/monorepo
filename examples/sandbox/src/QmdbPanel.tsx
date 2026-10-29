@@ -12,6 +12,7 @@ import {
   type VerifiedHistoricalMultiProof,
 } from '@qmdb-ts';
 import { bytesToHex, hexToBytes } from '@simplex-ts';
+import { type NotificationFn, useHealth } from './panel';
 
 const MAX_EVENTS = 10;
 
@@ -21,10 +22,6 @@ function parseHexRoot(value: string): Uint8Array {
     throw new Error('Expected Root is required');
   }
   return root;
-}
-
-interface NotificationFn {
-  (type: 'success' | 'error', title: string, message: string): void;
 }
 
 function formatBytes(bytes: Uint8Array): string {
@@ -100,7 +97,7 @@ export function QmdbPanel({
   );
   const subscribeAbortRef = useRef<AbortController | null>(null);
 
-  const [isConnected, setIsConnected] = useState(false);
+  const isConnected = useHealth(qmdbUrl);
   const [tip, setTip] = useState('');
   const [expectedCurrentRoot, setExpectedCurrentRoot] = useState('');
 
@@ -135,24 +132,7 @@ export function QmdbPanel({
   const [events, setEvents] = useState<OrderedSubscribeProof[]>([]);
   const [isSubscribing, setIsSubscribing] = useState(false);
 
-  useEffect(() => {
-    const controller = new AbortController();
-    void (async () => {
-      try {
-        const response = await fetch(`${qmdbUrl.replace(/\/$/, '')}/health`, {
-          signal: controller.signal,
-        });
-        setIsConnected(response.ok);
-      } catch {
-        setIsConnected(false);
-      }
-    })();
-
-    return () => {
-      controller.abort();
-      subscribeAbortRef.current?.abort();
-    };
-  }, [qmdbUrl]);
+  useEffect(() => () => subscribeAbortRef.current?.abort(), [qmdbUrl]);
 
   const handleGet = async () => {
     setIsGetting(true);

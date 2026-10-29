@@ -12,6 +12,7 @@ import {
   type DecodedSubscribeFrame,
   type DecodedTable,
 } from '@sql-ts';
+import { type NotificationFn, useHealth } from './panel';
 
 const MAX_EVENTS = 10;
 const DEFAULT_TABLE = 'orders_kv';
@@ -19,10 +20,6 @@ const DEFAULT_WHERE = "region = 'us-east' AND amount_cents >= 2000";
 const DEFAULT_QUERY = `SELECT region, COUNT(*) AS order_count, SUM(amount_cents) AS total_cents
 FROM ${DEFAULT_TABLE}
 GROUP BY region`;
-
-interface NotificationFn {
-  (type: 'success' | 'error', title: string, message: string): void;
-}
 
 function formatCell(value: unknown): string {
   if (value === null) return 'NULL';
@@ -124,7 +121,7 @@ export function SqlPanel({
   const client = useMemo(() => new SqlClient(sqlUrl), [sqlUrl]);
   const subscribeAbortRef = useRef<AbortController | null>(null);
 
-  const [isConnected, setIsConnected] = useState(false);
+  const isConnected = useHealth(sqlUrl);
   const [table, setTable] = useState(DEFAULT_TABLE);
   const [whereSql, setWhereSql] = useState(DEFAULT_WHERE);
   const [sinceSequenceNumber, setSinceSequenceNumber] = useState('');
@@ -138,24 +135,7 @@ export function SqlPanel({
   const [queryResult, setQueryResult] = useState<Table | null>(null);
   const [isQuerying, setIsQuerying] = useState(false);
 
-  useEffect(() => {
-    const controller = new AbortController();
-    void (async () => {
-      try {
-        const response = await fetch(`${sqlUrl.replace(/\/$/, '')}/health`, {
-          signal: controller.signal,
-        });
-        setIsConnected(response.ok);
-      } catch {
-        setIsConnected(false);
-      }
-    })();
-
-    return () => {
-      controller.abort();
-      subscribeAbortRef.current?.abort();
-    };
-  }, [sqlUrl]);
+  useEffect(() => () => subscribeAbortRef.current?.abort(), [sqlUrl]);
 
   useEffect(() => {
     const controller = new AbortController();

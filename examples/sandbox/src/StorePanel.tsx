@@ -7,10 +7,7 @@ import {
 } from '@exowarexyz/sdk';
 import { isNetworkError } from './clientErrors';
 import { formatBytesValue, formatKeyPreview } from './format';
-
-interface NotificationFn {
-  (type: 'success' | 'error', title: string, message: string): void;
-}
+import { type NotificationFn } from './panel';
 
 export function StorePanel({
   client,
