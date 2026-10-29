@@ -28,10 +28,11 @@ pub trait Clock: Send + Sync + 'static {
 /// Anchored to system time at construction, then advanced by Tokio time. This
 /// follows paused Tokio time and ignores later wall clock adjustments. Compare
 /// timestamps only with others from the same clock.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct TokioClock {
     system_origin: SystemTime,
     tokio_origin: tokio::time::Instant,
+    handle: Option<tokio::runtime::Handle>,
 }
 
 impl TokioClock {
@@ -39,17 +40,18 @@ impl TokioClock {
         Self {
             system_origin: SystemTime::now(),
             tokio_origin: tokio::time::Instant::now(),
+            handle: tokio::runtime::Handle::try_current().ok(),
         }
     }
 
-    fn to_system(self, instant: tokio::time::Instant) -> SystemTime {
+    fn to_system(&self, instant: tokio::time::Instant) -> SystemTime {
         match instant.checked_duration_since(self.tokio_origin) {
             Some(after) => self.system_origin + after,
             None => self.system_origin - self.tokio_origin.duration_since(instant),
         }
     }
 
-    fn to_tokio(self, time: SystemTime) -> tokio::time::Instant {
+    fn to_tokio(&self, time: SystemTime) -> tokio::time::Instant {
         match time.duration_since(self.system_origin) {
             Ok(after) => self.tokio_origin + after,
             Err(error) => self
@@ -68,10 +70,14 @@ impl Default for TokioClock {
 
 impl Clock for TokioClock {
     fn now(&self) -> SystemTime {
+        // CPU workers may run outside Tokio's context. Keep them on this clock's
+        // paused timeline instead of the calling thread's clock.
+        let _entered = self.handle.as_ref().map(tokio::runtime::Handle::enter);
         self.to_system(tokio::time::Instant::now())
     }
 
     fn sleep_until(&self, deadline: SystemTime) -> BoxFuture<'static, ()> {
+        let _entered = self.handle.as_ref().map(tokio::runtime::Handle::enter);
         Box::pin(tokio::time::sleep_until(self.to_tokio(deadline)))
     }
 }
@@ -312,6 +318,30 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn tokio_clock_meets_the_contract_on_paused_time() {
         assert_contract(&TokioClock::new()).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn tokio_clock_keeps_its_timeline_on_cpu_threads() {
+        let tokio_start = tokio::time::Instant::now();
+        let clock = TokioClock::new();
+        let started = clock.now();
+        tokio::time::advance(Duration::from_secs(60)).await;
+        let (observed, sleep) = std::thread::spawn(move || {
+            assert!(tokio::runtime::Handle::try_current().is_err());
+            (
+                clock.now(),
+                clock.sleep_until(started + Duration::from_secs(61)),
+            )
+        })
+        .join()
+        .unwrap();
+        assert_eq!(
+            observed.duration_since(started).unwrap(),
+            Duration::from_secs(60)
+        );
+        sleep.await;
+        let elapsed = tokio_start.elapsed();
+        assert!((Duration::from_secs(61)..Duration::from_secs(62)).contains(&elapsed));
     }
 
     #[test]
