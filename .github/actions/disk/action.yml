@@ -17,44 +17,6 @@ runs:
         docker-images: true
         swap-storage: true
 
-    - name: Cleanup (macOS)
-      if: runner.os == 'macOS'
-      shell: bash
-      run: |
-        set -euxo pipefail
-        docker system prune -af || true
-        brew cleanup -s || true
-        rm -rf "$(brew --cache)" || true
-        sudo rm -rf /usr/local/lib/android || true
-        sudo rm -rf /usr/share/dotnet || true
-        sudo rm -rf /usr/local/.ghcup || true
-        sudo rm -rf ~/Library/Android/sdk || true
-        sudo rm -rf ~/Library/Caches || true
-
-    - name: Cleanup (Windows)
-      if: runner.os == 'Windows'
-      shell: pwsh
-      run: |
-        if (Get-Command docker -ErrorAction SilentlyContinue) {
-          Write-Host "docker available; running docker cleanup."
-          docker system prune -af
-          if ($LASTEXITCODE -ne 0) {
-            Write-Host "docker system prune failed with exit code $LASTEXITCODE; continuing."
-            $global:LASTEXITCODE = 0
-          } else {
-            Write-Host "docker cleanup completed successfully."
-          }
-        } else {
-          Write-Host "docker not available; skipping docker cleanup."
-        }
-        Remove-Item -Recurse -Force "$env:TEMP\*" -ErrorAction SilentlyContinue
-        Remove-Item -Recurse -Force "$env:LOCALAPPDATA\Android" -ErrorAction SilentlyContinue
-        Remove-Item -Recurse -Force "$env:ProgramFiles\dotnet" -ErrorAction SilentlyContinue
-        Remove-Item -Recurse -Force "$env:USERPROFILE\.ghcup" -ErrorAction SilentlyContinue
-        echo "TEMP=D:\Temp" >> $env:GITHUB_ENV
-        echo "TMP=D:\Temp" >> $env:GITHUB_ENV
-        New-Item -ItemType Directory -Path "D:\Temp" -Force | Out-Null
-
     - name: Configure swap (Linux)
       if: runner.os == 'Linux'
       shell: bash
@@ -65,25 +27,6 @@ runs:
         sudo mkswap /swapfile
         sudo swapon /swapfile
         sudo swapon --show
-
-    - name: Configure swap (macOS)
-      if: runner.os == 'macOS'
-      shell: bash
-      run: |
-        set -euxo pipefail
-        sudo mkdir -p /private/var/vm
-        if ! pgrep -x dynamic_pager >/dev/null; then
-          sudo launchctl load -w /System/Library/LaunchDaemons/com.apple.dynamic_pager.plist || true
-        fi
-        sysctl vm.swapusage || true
-
-    - name: Log pagefile (Windows)
-      if: runner.os == 'Windows'
-      shell: pwsh
-      run: |
-        $ErrorActionPreference = 'Continue'
-        Get-CimInstance -ClassName Win32_PageFileUsage   | Format-List Name, AllocatedBaseSize, CurrentUsage, PeakUsage
-        Get-CimInstance -ClassName Win32_PageFileSetting | Format-List Name, InitialSize, MaximumSize
 
     - name: Show disk free (after)
       shell: bash
