@@ -94,7 +94,7 @@ struct ExtractedReductionRow {
 
 #[derive(Debug)]
 struct ReducePlan {
-    request: Arc<RangeReduceRequest>,
+    request: RangeReduceRequest,
     needs_value: bool,
     fields: Vec<KvFieldRef>,
     field_copies: Vec<usize>,
@@ -114,7 +114,7 @@ pub(crate) enum ResultKind {
 }
 
 impl ReducePlan {
-    fn new(request: Arc<RangeReduceRequest>, context: &TaskContext) -> Result<Self, RangeError> {
+    fn new(request: RangeReduceRequest, context: &TaskContext) -> Result<Self, RangeError> {
         validate_reduce_request(&request)?;
         let mut fields = Vec::new();
         let mut columns = HashMap::new();
@@ -386,7 +386,7 @@ pub(crate) async fn execute_reduce<Q: Query>(
     request: RangeReduceRequest,
     context: Arc<TaskContext>,
 ) -> Result<ReduceExecution, RangeError> {
-    let plan = Arc::new(ReducePlan::new(Arc::new(request), &context)?);
+    let plan = Arc::new(ReducePlan::new(request, &context)?);
     let RangeScanResult {
         scan,
         sequence_number,
@@ -1032,7 +1032,7 @@ mod tests {
         request: &RangeReduceRequest,
     ) -> Result<RangeReduceResponse, RangeError> {
         futures::executor::block_on(async {
-            let plan = ReducePlan::new(Arc::new(request.clone()), &TaskContext::default())?;
+            let plan = ReducePlan::new(request.clone(), &TaskContext::default())?;
             let batches = rows
                 .chunks(REDUCE_BATCH_ROWS)
                 .map(|rows| plan.batch(rows))
@@ -1299,7 +1299,7 @@ mod tests {
                 .map(|(expr, _)| reducer(RangeReduceOp::MinField, Some(expr.clone())))
                 .collect(),
         );
-        let plan = ReducePlan::new(Arc::new(request.clone()), &TaskContext::default()).unwrap();
+        let plan = ReducePlan::new(request.clone(), &TaskContext::default()).unwrap();
         assert_eq!(plan.fields.len(), 7);
         let response = reduce(&rows, &request).unwrap();
         let context = SessionContext::new();
@@ -1445,7 +1445,7 @@ mod tests {
             ],
             filter: None,
         };
-        let plan = ReducePlan::new(Arc::new(request.clone()), &TaskContext::default()).unwrap();
+        let plan = ReducePlan::new(request.clone(), &TaskContext::default()).unwrap();
         assert_eq!(plan.fields.len(), 1);
         assert!(!plan.needs_value);
         let key = ((3_i64 as u64) ^ (1 << 63)).to_be_bytes().to_vec();
@@ -1489,7 +1489,7 @@ mod tests {
             )))),
         )]);
         let context = Arc::new(TaskContext::default());
-        let plan = ReducePlan::new(Arc::new(request), &context).unwrap();
+        let plan = ReducePlan::new(request, &context).unwrap();
         let batch = plan
             .batch(&[make_row(b"a", vec![Some(StoredValue::Int64(i64::MIN))])])
             .unwrap();
@@ -1691,7 +1691,7 @@ mod tests {
             make_row(b"b", vec![None]),
             make_row(b"c", vec![Some(StoredValue::Int64(3))]),
         ];
-        let plan = ReducePlan::new(Arc::new(request.clone()), &TaskContext::default()).unwrap();
+        let plan = ReducePlan::new(request.clone(), &TaskContext::default()).unwrap();
         assert!(plan.needs_value);
         assert!(plan.fields.is_empty());
         let batch = plan.batch(&rows).unwrap();
@@ -1742,7 +1742,7 @@ mod tests {
             contradiction: false,
         });
         let request = scalar_request(vec![filtered, reducer(RangeReduceOp::CountAll, None)]);
-        let plan = ReducePlan::new(Arc::new(request.clone()), &TaskContext::default()).unwrap();
+        let plan = ReducePlan::new(request.clone(), &TaskContext::default()).unwrap();
         assert!(!plan.needs_value);
         let rows = [1_i64, 2]
             .into_iter()
@@ -1825,7 +1825,7 @@ mod tests {
             cases.push((request, count / 8, budget, context.clone()));
         }
         for (request, bytes_per_row, budget, context) in cases {
-            let plan = Arc::new(ReducePlan::new(Arc::new(request), &context).unwrap());
+            let plan = Arc::new(ReducePlan::new(request, &context).unwrap());
             let partition = ReducePartition {
                 scan: Mutex::new(Some(Rows(vec![
                     (Bytes::new(), Bytes::new());
@@ -2441,7 +2441,7 @@ mod tests {
                 })
             })
             .collect::<Vec<_>>();
-        let plan = ReducePlan::new(Arc::new(request), &TaskContext::default()).unwrap();
+        let plan = ReducePlan::new(request, &TaskContext::default()).unwrap();
         let batches = rows
             .chunks(128)
             .map(|rows| plan.batch(rows).unwrap())
