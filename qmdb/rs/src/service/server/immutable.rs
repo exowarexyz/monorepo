@@ -17,7 +17,7 @@ use super::{OperationLogReader, OperationLogServer};
 use crate::adapter::Immutable;
 use crate::proof::{MultiProofOperations, OperationRangeCheckpoint, RawBatchMultiProof};
 use crate::service::proto::qmdb::v1::OperationLogServiceServer;
-use crate::{OperationKv, PublishedWatermark, QmdbError};
+use crate::{PublishedWatermark, QmdbError};
 
 impl<F, H, K, V, E> OperationLogReader for Immutable<F, H, K, V, E>
 where
@@ -31,12 +31,13 @@ where
     type Family = F;
     type Digest = H::Digest;
 
-    fn extract_operation_kv(
+    fn inspect_operation_kv<T>(
         &self,
         location: Location<F>,
         bytes: &[u8],
-    ) -> Result<OperationKv, QmdbError> {
-        Immutable::extract_operation_kv(self, location, bytes)
+        inspect: impl FnOnce(Option<&[u8]>, Option<&[u8]>) -> T,
+    ) -> Result<T, QmdbError> {
+        Immutable::inspect_operation_kv(self, location, bytes, inspect)
     }
 
     fn resolve_watermark(

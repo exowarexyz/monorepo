@@ -1431,7 +1431,7 @@ pub struct GetRequest {
         with = "::buffa::json_helpers::bytes",
         skip_serializing_if = "::buffa::json_helpers::skip_if::is_empty_bytes"
     )]
-    pub key: ::buffa::alloc::vec::Vec<u8>,
+    pub key: ::buffa::bytes::Bytes,
     /// Published QMDB batch-boundary to prove against. The client must
     /// already know the trusted current/global root for this tip.
     ///
@@ -1547,7 +1547,7 @@ impl ::buffa::Message for GetRequest {
                     tag,
                     ::buffa::encoding::WireType::LengthDelimited,
                 )?;
-                ::buffa::types::merge_bytes(&mut self.key, buf)?;
+                self.key = ::buffa::types::decode_bytes_to_bytes(buf)?;
             }
             2u32 => {
                 ::buffa::encoding::check_wire_type(
@@ -1573,7 +1573,7 @@ impl ::buffa::Message for GetRequest {
         ::core::result::Result::Ok(())
     }
     fn clear(&mut self) {
-        self.key.clear();
+        self.key = ::core::default::Default::default();
         self.tip = 0u64;
         self.min_sequence_number = ::core::option::Option::None;
         self.__buffa_unknown_fields.clear();
@@ -1621,7 +1621,7 @@ pub struct GetManyRequest {
         with = "::buffa::json_helpers::proto_seq",
         skip_serializing_if = "::buffa::json_helpers::skip_if::is_empty_vec"
     )]
-    pub keys: ::buffa::alloc::vec::Vec<::buffa::alloc::vec::Vec<u8>>,
+    pub keys: ::buffa::alloc::vec::Vec<::buffa::bytes::Bytes>,
     /// Published QMDB batch-boundary to prove against. The client must already
     /// know the trusted current/global root for this tip.
     ///
@@ -1737,7 +1737,7 @@ impl ::buffa::Message for GetManyRequest {
                     tag,
                     ::buffa::encoding::WireType::LengthDelimited,
                 )?;
-                let __elem = ::buffa::types::decode_bytes(buf)?;
+                let __elem = ::buffa::types::decode_bytes_to_bytes(buf)?;
                 ctx.register_element_memory(
                     ::buffa::__private::element_footprint(&__elem),
                 )?;
@@ -2099,7 +2099,7 @@ pub struct GetRangeRequest {
         with = "::buffa::json_helpers::bytes",
         skip_serializing_if = "::buffa::json_helpers::skip_if::is_empty_bytes"
     )]
-    pub start_key: ::buffa::alloc::vec::Vec<u8>,
+    pub start_key: ::buffa::bytes::Bytes,
     /// Field 2: `end_key`
     #[serde(
         rename = "endKey",
@@ -2107,7 +2107,7 @@ pub struct GetRangeRequest {
         with = "::buffa::json_helpers::opt_bytes",
         skip_serializing_if = "::core::option::Option::is_none"
     )]
-    pub end_key: ::core::option::Option<::buffa::alloc::vec::Vec<u8>>,
+    pub end_key: ::core::option::Option<::buffa::bytes::Bytes>,
     /// Field 3: `limit`
     #[serde(
         rename = "limit",
@@ -2158,10 +2158,7 @@ impl GetRangeRequest {
     #[must_use = "with_* setters return `self` by value; assign or chain the result"]
     #[inline]
     ///Sets [`Self::end_key`] to `Some(value)`, consuming and returning `self`.
-    pub fn with_end_key(
-        mut self,
-        value: impl Into<::buffa::alloc::vec::Vec<u8>>,
-    ) -> Self {
+    pub fn with_end_key(mut self, value: impl Into<::buffa::bytes::Bytes>) -> Self {
         self.end_key = Some(value.into());
         self
     }
@@ -2251,17 +2248,16 @@ impl ::buffa::Message for GetRangeRequest {
                     tag,
                     ::buffa::encoding::WireType::LengthDelimited,
                 )?;
-                ::buffa::types::merge_bytes(&mut self.start_key, buf)?;
+                self.start_key = ::buffa::types::decode_bytes_to_bytes(buf)?;
             }
             2u32 => {
                 ::buffa::encoding::check_wire_type(
                     tag,
                     ::buffa::encoding::WireType::LengthDelimited,
                 )?;
-                ::buffa::types::merge_bytes(
-                    self.end_key.get_or_insert_with(::buffa::alloc::vec::Vec::new),
-                    buf,
-                )?;
+                self.end_key = ::core::option::Option::Some(
+                    ::buffa::types::decode_bytes_to_bytes(buf)?,
+                );
             }
             3u32 => {
                 ::buffa::encoding::check_wire_type(
@@ -2294,7 +2290,7 @@ impl ::buffa::Message for GetRangeRequest {
         ::core::result::Result::Ok(())
     }
     fn clear(&mut self) {
-        self.start_key.clear();
+        self.start_key = ::core::default::Default::default();
         self.end_key = ::core::option::Option::None;
         self.limit = 0u32;
         self.tip = 0u64;
@@ -6719,7 +6715,7 @@ pub mod __buffa {
                 use ::buffa::alloc::string::ToString as _;
                 let _ = __buffa_src;
                 ::core::result::Result::Ok(super::super::GetRequest {
-                    key: (self.key).to_vec(),
+                    key: ::buffa::view::bytes_from_source(__buffa_src, self.key),
                     tip: self.tip,
                     min_sequence_number: self.min_sequence_number,
                     __buffa_unknown_fields: self
@@ -7059,7 +7055,11 @@ pub mod __buffa {
                 use ::buffa::alloc::string::ToString as _;
                 let _ = __buffa_src;
                 ::core::result::Result::Ok(super::super::GetManyRequest {
-                    keys: self.keys.iter().map(|b| (b).to_vec()).collect(),
+                    keys: self
+                        .keys
+                        .iter()
+                        .map(|b| ::buffa::view::bytes_from_source(__buffa_src, b))
+                        .collect(),
                     tip: self.tip,
                     min_sequence_number: self.min_sequence_number,
                     __buffa_unknown_fields: self
@@ -8015,8 +8015,13 @@ pub mod __buffa {
                 use ::buffa::alloc::string::ToString as _;
                 let _ = __buffa_src;
                 ::core::result::Result::Ok(super::super::GetRangeRequest {
-                    start_key: (self.start_key).to_vec(),
-                    end_key: self.end_key.map(|b| (b).to_vec()),
+                    start_key: ::buffa::view::bytes_from_source(
+                        __buffa_src,
+                        self.start_key,
+                    ),
+                    end_key: self
+                        .end_key
+                        .map(|b| ::buffa::view::bytes_from_source(__buffa_src, b)),
                     limit: self.limit,
                     tip: self.tip,
                     min_sequence_number: self.min_sequence_number,

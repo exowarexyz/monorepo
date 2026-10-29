@@ -10,6 +10,10 @@ const QMDB_PROTO_FILES: &[&str] = &[
 ];
 
 const QMDB_BYTES_FIELDS: &[&str] = &[
+    ".qmdb.v1.GetRequest.key",
+    ".qmdb.v1.GetManyRequest.keys",
+    ".qmdb.v1.GetRangeRequest.start_key",
+    ".qmdb.v1.GetRangeRequest.end_key",
     ".qmdb.v1.MultiProofOperation.encoded_operation",
     ".qmdb.v1.HistoricalMultiProof.proof",
     ".qmdb.v1.HistoricalMultiProof.ops_root",

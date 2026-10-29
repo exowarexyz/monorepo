@@ -36,7 +36,6 @@ use crate::proof::{
     VerifiedOperationRange,
 };
 use crate::request::{span_contains, validate_key_range};
-use crate::OperationKv;
 use crate::PublishedWatermark;
 use crate::VersionedValue;
 
@@ -260,22 +259,23 @@ where
         Self::decode_operation(&self.op_cfg, location, bytes)
     }
 
-    pub(crate) fn extract_operation_kv(
+    pub(crate) fn inspect_operation_kv<T>(
         &self,
         location: Location<F>,
         bytes: &[u8],
-    ) -> Result<OperationKv, QmdbError>
+        inspect: impl FnOnce(Option<&[u8]>, Option<&[u8]>) -> T,
+    ) -> Result<T, QmdbError>
     where
         V: AsRef<[u8]>,
     {
         let op = Self::decode_operation(&self.op_cfg, location, bytes)?;
-        let key = op.key().map(|k| <K as AsRef<[u8]>>::as_ref(k).to_vec());
-        let value = match &op {
-            ordered::Operation::Update(update) => Some(update.value.as_ref().to_vec()),
-            ordered::Operation::CommitFloor(Some(value), _) => Some(value.as_ref().to_vec()),
+        let key = op.key().map(<K as AsRef<[u8]>>::as_ref);
+        let value: Option<&[u8]> = match &op {
+            ordered::Operation::Update(update) => Some(update.value.as_ref()),
+            ordered::Operation::CommitFloor(Some(value), _) => Some(value.as_ref()),
             ordered::Operation::Delete(_) | ordered::Operation::CommitFloor(None, _) => None,
         };
-        Ok(OperationKv { key, value })
+        Ok(inspect(key, value))
     }
 
     /// Verified contiguous range of operations.

@@ -73,8 +73,8 @@ type Db = LocalQmdbDb<
     commonware_parallel::Sequential,
 >;
 
-fn encoded_key(key: &[u8]) -> Vec<u8> {
-    key.to_vec().encode().to_vec()
+fn encoded_key(key: &[u8]) -> Bytes {
+    key.to_vec().encode()
 }
 
 async fn spawn_qmdb_server(
@@ -677,7 +677,7 @@ async fn test_ordered_connect_rejects_malformed_request_keys() {
     let lookup = rpc_client(&url);
     let ranges = range_rpc_client(&url);
     // A one-byte value length without its payload is invalid Vec key encoding
-    let malformed = vec![1];
+    let malformed = Bytes::from_static(&[1]);
     let errors = [
         lookup
             .get(ProtoGetRequest {

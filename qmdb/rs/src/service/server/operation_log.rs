@@ -24,7 +24,7 @@ use crate::service::proto::qmdb::v1::{
     GetOperationRangeRequest, GetOperationRangeResponse, GetOperationsRequest,
     GetOperationsResponse, OperationLogService, SubscribeRequest, SubscribeResponse,
 };
-use crate::{OperationKv, PublishedWatermark, QmdbError};
+use crate::{PublishedWatermark, QmdbError};
 
 use super::{encode, qmdb_error_to_connect};
 
@@ -36,11 +36,15 @@ pub(crate) trait OperationLogReader: Send + Sync + 'static {
     /// ops have no logical key).
     const REJECTS_KEY_FILTERS: bool = false;
 
-    fn extract_operation_kv(
+    /// Decode the operation at `location` and pass its logical key and value
+    /// to `inspect`. Either is `None` when the operation has no key or value
+    /// (e.g. keyless ops).
+    fn inspect_operation_kv<T>(
         &self,
         location: Location<Self::Family>,
         bytes: &[u8],
-    ) -> Result<OperationKv, QmdbError>;
+        inspect: impl FnOnce(Option<&[u8]>, Option<&[u8]>) -> T,
+    ) -> Result<T, QmdbError>;
     fn resolve_watermark(
         &self,
         watermark: Location<Self::Family>,
@@ -88,7 +92,7 @@ impl<R: OperationLogReader> OperationLogServer<R> {
 struct PendingBatch<F: Family> {
     latest: Location<F>,
     sequence_number: u64,
-    matched: Vec<(Location<F>, Vec<u8>)>,
+    matched: Vec<(Location<F>, Bytes)>,
 }
 
 struct PendingBatches<F: Family> {
@@ -166,7 +170,7 @@ struct ReadyBatch<F: Family> {
     /// per-batch sequence here or the reconnect cursor would jump past
     /// unread siblings.
     batch_sequence: u64,
-    matched: Vec<(Location<F>, Vec<u8>)>,
+    matched: Vec<(Location<F>, Bytes)>,
 }
 
 fn parse_filters<'a, 'b, I>(filters: I, label: &str) -> Result<Option<CompiledFilters>, String>
@@ -266,7 +270,7 @@ impl<R: OperationLogReader> BatchSubscribeStream<R> {
 
     fn ingest_frame(&mut self, frame: &exoware_sdk::StoreBatch) -> Result<(), Box<ConnectError>> {
         let mut latest: Option<Location<R::Family>> = None;
-        let mut matched: Vec<(Location<R::Family>, Vec<u8>)> = Vec::new();
+        let mut matched: Vec<(Location<R::Family>, Bytes)> = Vec::new();
         let needs_decode = self.key_matcher.is_some() || self.value_matcher.is_some();
 
         for entry in &frame.entries {
@@ -278,17 +282,17 @@ impl<R: OperationLogReader> BatchSubscribeStream<R> {
                 sub::RowFamily::Op => {
                     latest = latest.max(Some(location));
                     let include = if needs_decode {
-                        let OperationKv { key, value } = self
-                            .reader
-                            .extract_operation_kv(location, entry.value.as_ref())
-                            .map_err(qmdb_error_to_connect)?;
-                        matcher_passes(&self.key_matcher, key.as_deref())
-                            && matcher_passes(&self.value_matcher, value.as_deref())
+                        self.reader
+                            .inspect_operation_kv(location, entry.value.as_ref(), |key, value| {
+                                matcher_passes(&self.key_matcher, key)
+                                    && matcher_passes(&self.value_matcher, value)
+                            })
+                            .map_err(qmdb_error_to_connect)?
                     } else {
                         true
                     };
                     if include {
-                        matched.push((location, entry.value.to_vec()));
+                        matched.push((location, entry.value.clone()));
                     }
                 }
                 sub::RowFamily::Watermark => {
@@ -539,7 +543,7 @@ mod tests {
             sequence_number,
             matched: vec![(
                 Location::<commonware_storage::merkle::mmr::Family>::new(sequence_number),
-                vec![sequence_number as u8],
+                Bytes::from(vec![sequence_number as u8]),
             )],
         }
     }
@@ -562,7 +566,7 @@ mod tests {
                 inactive_peaks: 0,
                 digests: Vec::new(),
             },
-            operations: vec![(Location::new(0), vec![0xAA])],
+            operations: vec![(Location::new(0), Bytes::from_static(&[0xAA]))],
         };
 
         let encoded = encode::subscribe_response(0, &raw)
@@ -748,15 +752,13 @@ mod authenticated_upload_subscription_tests {
         type Family = F;
         type Digest = Digest;
 
-        fn extract_operation_kv(
+        fn inspect_operation_kv<T>(
             &self,
             _location: Location<F>,
             bytes: &[u8],
-        ) -> Result<OperationKv, QmdbError> {
-            Ok(OperationKv {
-                key: None,
-                value: Some(bytes.to_vec()),
-            })
+            inspect: impl FnOnce(Option<&[u8]>, Option<&[u8]>) -> T,
+        ) -> Result<T, QmdbError> {
+            Ok(inspect(None, Some(bytes)))
         }
 
         async fn resolve_watermark(
@@ -893,15 +895,15 @@ mod authenticated_upload_subscription_tests {
         assert_eq!(
             stream.ready[0].matched,
             [
-                (Location::new(4), b"four".to_vec()),
-                (Location::new(5), b"five".to_vec())
+                (Location::new(4), Bytes::from_static(b"four")),
+                (Location::new(5), Bytes::from_static(b"five"))
             ]
         );
         assert_eq!(
             stream.ready[1].matched,
             [
-                (Location::new(0), b"zero".to_vec()),
-                (Location::new(1), b"one".to_vec())
+                (Location::new(0), Bytes::from_static(b"zero")),
+                (Location::new(1), Bytes::from_static(b"one"))
             ]
         );
     }
@@ -936,7 +938,7 @@ mod authenticated_upload_subscription_tests {
         assert_eq!(stream.ready.len(), 1);
         assert_eq!(
             stream.ready[0].matched,
-            [(Location::new(4), b"keep".to_vec())]
+            [(Location::new(4), Bytes::from_static(b"keep"))]
         );
         assert_eq!(stream.ready[0].watermark.sequence_number, 12);
     }
@@ -959,8 +961,8 @@ mod authenticated_upload_subscription_tests {
         assert_eq!(
             stream.ready[0].matched,
             [
-                (Location::new(0), b"zero".to_vec()),
-                (Location::new(1), b"one".to_vec())
+                (Location::new(0), Bytes::from_static(b"zero")),
+                (Location::new(1), Bytes::from_static(b"one"))
             ]
         );
     }

@@ -1,6 +1,7 @@
 #[cfg(test)]
 mod tests;
 
+use bytes::Bytes;
 use commonware_codec::{Codec, Copying, Decode};
 use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::Strategy;
@@ -301,7 +302,7 @@ pub(crate) async fn load_operation_bytes_range<F: Family>(
     session: &ReadSession,
     start_location: Location<F>,
     end_location_exclusive: Location<F>,
-) -> Result<Vec<Vec<u8>>, QmdbError> {
+) -> Result<Vec<Bytes>, QmdbError> {
     if start_location >= end_location_exclusive {
         return Ok(Vec::new());
     }
@@ -330,7 +331,7 @@ pub(crate) async fn load_operation_bytes_range<F: Family>(
                 "operation row order mismatch: expected {expected_location}, got {location}"
             )));
         }
-        encoded.push(value.to_vec());
+        encoded.push(value);
     }
     Ok(encoded)
 }

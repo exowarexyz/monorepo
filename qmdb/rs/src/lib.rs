@@ -98,13 +98,6 @@ pub struct CurrentBoundaryState<D: Digest, const N: usize, F: Graftable> {
     pub grafted_nodes: Vec<(merkle::Position<F>, D)>,
 }
 
-/// Decoded (key, value) payload for a QMDB operation. Either element is `None`
-/// when the operation's logical key or value is absent (e.g. keyless ops).
-pub(crate) struct OperationKv {
-    pub(crate) key: Option<Vec<u8>>,
-    pub(crate) value: Option<Vec<u8>>,
-}
-
 /// A requested watermark and the minimum Store sequence that makes it readable.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct PublishedWatermark<F: Family> {

@@ -18,7 +18,7 @@ use super::{OperationLogReader, OperationLogServer};
 use crate::adapter::Keyless;
 use crate::proof::{MultiProofOperations, OperationRangeCheckpoint, RawBatchMultiProof};
 use crate::service::proto::qmdb::v1::OperationLogServiceServer;
-use crate::{OperationKv, PublishedWatermark, QmdbError};
+use crate::{PublishedWatermark, QmdbError};
 
 impl<F, H, V, E> OperationLogReader for Keyless<F, H, V, E>
 where
@@ -32,12 +32,13 @@ where
     type Digest = H::Digest;
     const REJECTS_KEY_FILTERS: bool = true;
 
-    fn extract_operation_kv(
+    fn inspect_operation_kv<T>(
         &self,
         location: Location<F>,
         bytes: &[u8],
-    ) -> Result<OperationKv, QmdbError> {
-        Keyless::extract_operation_kv(self, location, bytes)
+        inspect: impl FnOnce(Option<&[u8]>, Option<&[u8]>) -> T,
+    ) -> Result<T, QmdbError> {
+        Keyless::inspect_operation_kv(self, location, bytes, inspect)
     }
 
     fn resolve_watermark(
