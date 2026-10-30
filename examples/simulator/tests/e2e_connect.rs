@@ -149,6 +149,57 @@ async fn generated_stream_preserves_compression_capabilities() {
 }
 
 #[tokio::test]
+async fn server_answers_in_zstd_when_the_client_accepts_it() {
+    use connectrpc::client::HttpClient;
+    use connectrpc::compression::{CompressionRegistry, GzipProvider};
+    use exoware_sdk::query::{GetManyRequest, GetRequest, ServiceClient};
+
+    let (client, url) = spawn_client().await;
+    let key = key(b"negotiated");
+    let value = vec![b'x'; 4096];
+    let sequence = client.ingest().put(&[(&key, &value)]).await.unwrap();
+    // A plain connectrpc client lists gzip before zstd, as browsers do.
+    for (registry, encoding) in [
+        (connect_compression_registry(), "zstd"),
+        (
+            CompressionRegistry::new().register(GzipProvider::default()),
+            "gzip",
+        ),
+    ] {
+        let query = ServiceClient::new(
+            HttpClient::plaintext(),
+            ClientConfig::new(url.parse().unwrap()).with_compression(registry),
+        );
+        let response = query
+            .get(GetRequest {
+                key: key.to_vec(),
+                min_sequence_number: Some(sequence),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(response.headers()[http::header::CONTENT_ENCODING], encoding);
+        assert_eq!(response.view().value, Some(value.as_slice()));
+
+        let mut stream = query
+            .get_many(GetManyRequest {
+                keys: vec![key.to_vec()],
+                min_sequence_number: Some(sequence),
+                batch_size: 1,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            stream.headers()[connectrpc::Protocol::Connect.content_encoding_header()],
+            encoding,
+        );
+        let frame = stream.message().await.unwrap().unwrap();
+        assert_eq!(frame.view().results[0].value, Some(value.as_slice()));
+    }
+}
+
+#[tokio::test]
 async fn get_many_returns_found_and_missing() {
     let (client, _url) = spawn_client().await;
     let ka = key(b"a");

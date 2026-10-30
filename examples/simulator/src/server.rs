@@ -6,6 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::{routing::get, Router};
+use exoware_sdk::PreferZstdLayer;
 use exoware_server::{connect_stack, AppState};
 use tower_http::cors::CorsLayer;
 use tracing::info;
@@ -31,6 +32,7 @@ pub async fn run(
     let app = Router::new()
         .route("/health", get(health))
         .fallback_service(connect)
+        .layer(PreferZstdLayer)
         .layer(CorsLayer::very_permissive());
 
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
@@ -53,6 +55,7 @@ pub async fn open_temp(
     let app = Router::new()
         .route("/health", get(health))
         .fallback_service(connect)
+        .layer(PreferZstdLayer)
         .layer(CorsLayer::very_permissive());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let port = listener.local_addr()?.port();

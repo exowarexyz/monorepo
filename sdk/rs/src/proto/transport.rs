@@ -3,8 +3,13 @@
 //! ## Registry
 //!
 //! Servers register **gzip** and **zstd** via [`connect_compression_registry`] (same as
-//! [`connectrpc::compression::CompressionRegistry::default`]) so callers without zstd
-//! (including typical browsers) can still negotiate gzip.
+//! [`connectrpc::compression::CompressionRegistry::default`]) so callers without zstd,
+//! such as Safari, can still negotiate gzip.
+//!
+//! ## Server negotiation
+//!
+//! connectrpc answers in the first supported encoding the client lists. Browsers list gzip
+//! before zstd, so [`PreferZstdLayer`] puts zstd first for any client that accepts it.
 //!
 //! ## Rust client transport
 //!
@@ -551,6 +556,100 @@ pub fn connect_compression_registry() -> CompressionRegistry {
     CompressionRegistry::default()
 }
 
+/// Makes a Connect server answer in zstd whenever the client accepts it.
+///
+/// connectrpc picks the first encoding in a request's `Accept-Encoding` (unary) or
+/// `Connect-Accept-Encoding` (streaming) that the server supports. Browsers list gzip first, in
+/// an order HTTP gives no meaning to and page scripts can't change, so they would get gzip even
+/// when they also accept zstd. zstd is as small or smaller on our responses and far cheaper to
+/// compress and decompress. This layer moves a bare `zstd` to the front of both headers so the
+/// server's preference wins among the encodings the client accepts. The Connect protocol says
+/// servers should follow the client's order, so this is a deliberate exception.
+///
+/// Requests that don't accept zstd, or already list it first, pass through unchanged.
+///
+/// Browsers decode zstd only with windows up to 8 MiB (RFC 9659). The zstd level in
+/// [`connect_compression_registry`] keeps the window at or below 2 MiB for any response size.
+/// Very high levels or long-distance matching would exceed it.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PreferZstdLayer;
+
+impl<S> tower::Layer<S> for PreferZstdLayer {
+    type Service = PreferZstd<S>;
+
+    fn layer(&self, inner: S) -> Self::Service {
+        PreferZstd { inner }
+    }
+}
+
+/// Service produced by [`PreferZstdLayer`].
+#[derive(Clone, Debug)]
+pub struct PreferZstd<S> {
+    inner: S,
+}
+
+impl<S, B> tower::Service<Request<B>> for PreferZstd<S>
+where
+    S: tower::Service<Request<B>>,
+{
+    type Response = S::Response;
+    type Error = S::Error;
+    type Future = S::Future;
+
+    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        self.inner.poll_ready(cx)
+    }
+
+    fn call(&mut self, mut request: Request<B>) -> Self::Future {
+        for name in [&ACCEPT_ENCODING, Protocol::Connect.accept_encoding_header()] {
+            // connectrpc negotiates from the first value of each header.
+            if let Some(value) = request.headers_mut().get_mut(name) {
+                if let Some(reordered) = prefer_zstd(value) {
+                    *value = reordered;
+                }
+            }
+        }
+        self.inner.call(request)
+    }
+}
+
+/// `encodings` with a bare `zstd` first, or `None` when it already starts with one or doesn't
+/// accept zstd. The other entries keep their order and parameters.
+fn prefer_zstd(encodings: &http::HeaderValue) -> Option<http::HeaderValue> {
+    let entries: Vec<&str> = encodings
+        .to_str()
+        .ok()?
+        .split(',')
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+        .collect();
+    if entries.first() == Some(&"zstd") || !entries.iter().any(|entry| accepts_zstd(entry)) {
+        return None;
+    }
+    let others = entries
+        .into_iter()
+        .filter(|entry| !coding(entry).eq_ignore_ascii_case("zstd"));
+    let reordered = std::iter::once("zstd").chain(others).collect::<Vec<_>>();
+    http::HeaderValue::from_str(&reordered.join(", ")).ok()
+}
+
+/// Whether one `Accept-Encoding` entry accepts zstd, at any weight except `q=0`.
+fn accepts_zstd(entry: &str) -> bool {
+    coding(entry).eq_ignore_ascii_case("zstd") && !entry.split(';').skip(1).any(is_zero_weight)
+}
+
+/// Whether an `Accept-Encoding` parameter is `q=0`, which refuses its coding.
+fn is_zero_weight(param: &str) -> bool {
+    param.split_once('=').is_some_and(|(key, weight)| {
+        key.trim().eq_ignore_ascii_case("q") && weight.trim().parse() == Ok(0.0_f32)
+    })
+}
+
+/// The coding name of one `Accept-Encoding` entry, without its parameters.
+fn coding(entry: &str) -> &str {
+    entry.split(';').next().unwrap_or_default().trim()
+}
+
 /// Wraps [`HttpClient`] with zstd first for the default response codecs (see module docs).
 ///
 /// Also persists HTTP cookies: every `Set-Cookie` response header is stored in an RFC6265 jar and
@@ -874,6 +973,57 @@ mod tests {
             headers.append(SET_COOKIE, v.parse().unwrap());
         }
         headers
+    }
+
+    #[test]
+    fn prefer_zstd_puts_accepted_zstd_first() {
+        let cases = [
+            // Chrome and Firefox over HTTPS.
+            ("gzip, deflate, br, zstd", Some("zstd, gzip, deflate, br")),
+            // connectrpc's default client registry.
+            ("gzip, zstd", Some("zstd, gzip")),
+            // connectrpc matches entries verbatim, so zstd goes first without parameters.
+            ("gzip;q=1.0, zstd;q=0.5", Some("zstd, gzip;q=1.0")),
+            ("zstd;q=1, gzip", Some("zstd, gzip")),
+            ("GZIP,ZSTD", Some("zstd, GZIP")),
+            // Already first, refused, or not offered.
+            ("zstd, gzip", None),
+            ("gzip, zstd;q=0", None),
+            ("gzip, zstd; q=0.000", None),
+            ("gzip, deflate, br", None),
+            ("identity", None),
+            ("", None),
+        ];
+        for (header, expected) in cases {
+            let reordered = prefer_zstd(&http::HeaderValue::from_static(header));
+            assert_eq!(
+                reordered.as_ref().map(|value| value.to_str().unwrap()),
+                expected,
+                "{header:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn prefer_zstd_layer_rewrites_only_the_negotiated_headers() {
+        use tower::Layer;
+
+        let service = PreferZstdLayer.layer(tower::service_fn(|request: Request<()>| async move {
+            Ok::<_, std::convert::Infallible>(request.headers().clone())
+        }));
+        let streaming = Protocol::Connect.accept_encoding_header();
+        let request = Request::builder()
+            .header(ACCEPT_ENCODING, "gzip, deflate, br, zstd")
+            .header(ACCEPT_ENCODING, "gzip")
+            .header(streaming, "gzip, zstd")
+            .header("grpc-accept-encoding", "gzip, zstd")
+            .body(())
+            .unwrap();
+        let headers = service.oneshot(request).await.unwrap();
+        let unary: Vec<_> = headers.get_all(ACCEPT_ENCODING).iter().collect();
+        assert_eq!(unary, ["zstd, gzip, deflate, br", "gzip"]);
+        assert_eq!(headers[streaming], "zstd, gzip");
+        assert_eq!(headers["grpc-accept-encoding"], "gzip, zstd");
     }
 
     #[test]

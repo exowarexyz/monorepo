@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use axum::{routing::get, Router};
 use clap::{Parser, Subcommand};
-use exoware_sdk::{StoreClient, StoreKeyPrefix};
+use exoware_sdk::{PreferZstdLayer, StoreClient, StoreKeyPrefix};
 use exoware_sql::{default_orders_index_specs, sql_connect_stack, KvSchema, SqlServer};
 use tower_http::cors::CorsLayer;
 use tracing::info;
@@ -59,6 +59,7 @@ async fn run(
     let app = Router::new()
         .route("/health", get(health))
         .fallback_service(sql_connect_stack(server))
+        .layer(PreferZstdLayer)
         .layer(CorsLayer::very_permissive());
 
     let addr = SocketAddr::from((host, port));
