@@ -30,7 +30,6 @@ extern crate self as exoware_proto;
 
 use bytes::Bytes;
 use connectrpc::client::{ClientConfig, ServerStream as ConnectServerStream};
-use connectrpc::compression::ZstdProvider;
 pub use connectrpc::{ConnectError, ErrorCode};
 use credential::{client_error_from_connect, ApiKey, Credential, UnusableEnvKey};
 use crossbeam_utils::atomic::AtomicCell;
@@ -161,7 +160,7 @@ fn store_connect_client_config(
 ) -> ClientConfig {
     let mut compression = proto_connect_compression_registry();
     if let ConnectRequestCompression::Zstd { level } = request_compression {
-        compression = compression.register(ZstdCodec::new(ZstdProvider::with_level(level)));
+        compression = compression.register(ZstdCodec::with_level(level));
     }
 
     let config = ClientConfig::new(base_uri)
@@ -3172,7 +3171,7 @@ mod tests {
     use crate::kv_codec::{KvFieldKind, KvPredicate, KvPredicateCheck, KvPredicateConstraint};
     use buffa::Message as _;
     use buffa_types::google::protobuf::Duration as ProtoDuration;
-    use connectrpc::compression::{CompressionProvider, GzipProvider};
+    use connectrpc::compression::{CompressionProvider, GzipProvider, ZstdProvider};
     use connectrpc::error::ErrorDetail;
     use exoware_proto::query::TraversalMode as ProtoTraversalMode;
     use http::header::{ACCEPT_ENCODING, AUTHORIZATION, CONTENT_ENCODING};
@@ -3786,11 +3785,11 @@ mod tests {
     fn assert_single_zstd_put_frame(body: &[u8], protobuf: &[u8]) {
         assert!(body.starts_with(&[0x28, 0xb5, 0x2f, 0xfd]));
         assert_eq!(
-            zstd_safe::get_frame_content_size(body).unwrap(),
+            zstd::zstd_safe::get_frame_content_size(body).unwrap(),
             Some(protobuf.len() as u64)
         );
         assert_eq!(
-            zstd_safe::find_frame_compressed_size(body).unwrap(),
+            zstd::zstd_safe::find_frame_compressed_size(body).unwrap(),
             body.len()
         );
         let decoded = proto_connect_compression_registry()

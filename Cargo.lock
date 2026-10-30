@@ -2751,7 +2751,6 @@ dependencies = [
  "tower",
  "tracing",
  "zstd",
- "zstd-safe",
 ]
 
 [[package]]

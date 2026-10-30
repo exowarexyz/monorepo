@@ -40,7 +40,7 @@ pub use bytes::Bytes;
 pub use connectrpc::client::{
     BoxFuture, ClientBody, ClientTransport, HttpClient, ServiceTransport,
 };
-use connectrpc::compression::{CompressionRegistry, ZstdProvider};
+use connectrpc::compression::CompressionRegistry;
 pub use connectrpc::rustls::{self, ClientConfig};
 use connectrpc::{ConnectError, Protocol};
 use cookie_store::{Cookie, CookieDomain, CookieStore};
@@ -551,7 +551,7 @@ impl ClientTransport for BalancedHttp2Transport {
 /// [`connectrpc::client::ClientConfig::compression`].
 #[must_use]
 pub fn connect_compression_registry() -> CompressionRegistry {
-    CompressionRegistry::default().register(ZstdCodec::new(ZstdProvider::default()))
+    CompressionRegistry::default().register(ZstdCodec::default())
 }
 
 /// Wraps [`HttpClient`] with zstd first for the default response codecs (see module docs).
