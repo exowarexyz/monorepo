@@ -27,7 +27,9 @@ use exoware_qmdb::{
     adapter::upload::stage_authenticated_range, adapter::upload::stage_watermark,
     adapter::upload::AuthenticatedOperationRange, CurrentBoundaryState, MAX_OPERATION_SIZE,
 };
-use exoware_sdk::{PrefixedStoreClient, StoreClient, StoreKeyPrefix, StoreWriteBatch};
+use exoware_sdk::{
+    PreferZstdLayer, PrefixedStoreClient, StoreClient, StoreKeyPrefix, StoreWriteBatch,
+};
 use tower_http::cors::CorsLayer;
 use tracing::info;
 
@@ -219,6 +221,7 @@ async fn run(
             N,
             VariableEncoding<Vec<u8>>,
         >(store, op_cfg(), key_cfg()))
+        .layer(PreferZstdLayer)
         .layer(CorsLayer::very_permissive());
 
     let addr = SocketAddr::from((host, port));
