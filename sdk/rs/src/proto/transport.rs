@@ -16,9 +16,10 @@
 //! HTTP and HTTPS transport that prefers zstd for the default response codecs.
 //!
 //! [`connectrpc::compression::CompressionRegistry::default`] builds the header value in sorted
-//! order (`gzip, zstd`), so servers negotiate **gzip** first. `Accept-Encoding` prefers zstd
-//! over gzip. Streaming calls reorder the native `gzip, zstd` declaration; custom codec lists
-//! retain their configured ordering and capabilities.
+//! order (`gzip, zstd`), so servers without [`PreferZstdLayer`] would negotiate **gzip** first.
+//! [`PreferZstdHttpClient`] applies the same reordering as the layer to its own requests. Like
+//! the layer, it only reorders encodings the client's registry listed, so a registry without
+//! zstd never receives a zstd response.
 //!
 //! **Request bodies** (client -> server) use a single codec from connectrpc `compress_requests`.
 //!
@@ -268,18 +269,7 @@ impl ClientMetadata {
             }
         }
 
-        request.headers_mut().insert(
-            ACCEPT_ENCODING,
-            http::HeaderValue::from_static("zstd, gzip"),
-        );
-        let streaming_encoding = Protocol::Connect.accept_encoding_header();
-        if let Some(encoding) = request
-            .headers_mut()
-            .get_mut(streaming_encoding)
-            .filter(|encoding| encoding.as_bytes() == b"gzip, zstd")
-        {
-            *encoding = http::HeaderValue::from_static("zstd, gzip");
-        }
+        prefer_zstd_headers(request.headers_mut());
 
         if let Some(ref authorization) = self.authorization {
             apply_authorization(request.headers_mut(), authorization);
@@ -566,11 +556,14 @@ pub fn connect_compression_registry() -> CompressionRegistry {
 /// server's preference wins among the encodings the client accepts. The Connect protocol says
 /// servers should follow the client's order, so this is a deliberate exception.
 ///
-/// Requests that don't accept zstd, or already list it first, pass through unchanged.
+/// Requests that don't accept zstd, or already list a bare `zstd` first, pass through
+/// unchanged. `Grpc-Accept-Encoding` is left alone: gRPC clients set it in code, so its order
+/// is a real preference, and browsers can't speak plain gRPC.
 ///
-/// Browsers decode zstd only with windows up to 8 MiB (RFC 9659). The zstd level in
-/// [`connect_compression_registry`] keeps the window at or below 2 MiB for any response size.
-/// Very high levels or long-distance matching would exceed it.
+/// Browsers decode zstd only with windows up to 8 MiB (RFC 9659).
+/// [`connect_compression_registry`] uses connectrpc's default zstd level, 3, which keeps the
+/// window at or below 2 MiB for any response size. Very high levels or long-distance matching
+/// would exceed 8 MiB, and a test fails if the registry ever does.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct PreferZstdLayer;
 
@@ -601,41 +594,53 @@ where
     }
 
     fn call(&mut self, mut request: Request<B>) -> Self::Future {
-        for name in [&ACCEPT_ENCODING, Protocol::Connect.accept_encoding_header()] {
-            // connectrpc negotiates from the first value of each header.
-            if let Some(value) = request.headers_mut().get_mut(name) {
-                if let Some(reordered) = prefer_zstd(value) {
-                    *value = reordered;
-                }
+        prefer_zstd_headers(request.headers_mut());
+        self.inner.call(request)
+    }
+}
+
+/// Puts an accepted zstd first in `Accept-Encoding` (unary) and `Connect-Accept-Encoding`
+/// (streaming). Shared by [`PreferZstdLayer`] and [`PreferZstdHttpClient`].
+fn prefer_zstd_headers(headers: &mut http::HeaderMap) {
+    for name in [&ACCEPT_ENCODING, Protocol::Connect.accept_encoding_header()] {
+        // connectrpc negotiates from the first value of each header.
+        if let Some(value) = headers.get_mut(name) {
+            if let Some(reordered) = prefer_zstd(value) {
+                *value = reordered;
             }
         }
-        self.inner.call(request)
     }
 }
 
 /// `encodings` with a bare `zstd` first, or `None` when it already starts with one or doesn't
 /// accept zstd. The other entries keep their order and parameters.
 fn prefer_zstd(encodings: &http::HeaderValue) -> Option<http::HeaderValue> {
-    let entries: Vec<&str> = encodings
-        .to_str()
-        .ok()?
+    let encodings = encodings.to_str().ok()?;
+    let entries = encodings
         .split(',')
         .map(str::trim)
-        .filter(|entry| !entry.is_empty())
-        .collect();
-    if entries.first() == Some(&"zstd") || !entries.iter().any(|entry| accepts_zstd(entry)) {
+        .filter(|entry| !entry.is_empty());
+    // Most requests need no change, so check before allocating.
+    if entries.clone().next() == Some("zstd") || !entries.clone().any(accepts_zstd) {
         return None;
     }
-    let others = entries
-        .into_iter()
-        .filter(|entry| !coding(entry).eq_ignore_ascii_case("zstd"));
-    let reordered = std::iter::once("zstd").chain(others).collect::<Vec<_>>();
-    http::HeaderValue::from_str(&reordered.join(", ")).ok()
+    let mut reordered = String::with_capacity(encodings.len() + ", zstd".len());
+    reordered.push_str("zstd");
+    for entry in entries.filter(|entry| !is_zstd(entry)) {
+        reordered.push_str(", ");
+        reordered.push_str(entry);
+    }
+    http::HeaderValue::try_from(reordered).ok()
 }
 
 /// Whether one `Accept-Encoding` entry accepts zstd, at any weight except `q=0`.
 fn accepts_zstd(entry: &str) -> bool {
-    coding(entry).eq_ignore_ascii_case("zstd") && !entry.split(';').skip(1).any(is_zero_weight)
+    is_zstd(entry) && !entry.split(';').skip(1).any(is_zero_weight)
+}
+
+/// Whether one `Accept-Encoding` entry names zstd, whatever its parameters.
+fn is_zstd(entry: &str) -> bool {
+    coding(entry).eq_ignore_ascii_case("zstd")
 }
 
 /// Whether an `Accept-Encoding` parameter is `q=0`, which refuses its coding.
@@ -955,8 +960,10 @@ mod tests {
         }
     }
 
+    /// A unary request carrying the header connectrpc's default client registry sends.
     fn request(uri: &str) -> Request<ClientBody> {
         Request::post(uri)
+            .header(ACCEPT_ENCODING, "gzip, zstd")
             .body(connectrpc::client::full_body(Bytes::new()))
             .unwrap()
     }
@@ -990,7 +997,10 @@ mod tests {
             ("zstd, gzip", None),
             ("gzip, zstd;q=0", None),
             ("gzip, zstd; q=0.000", None),
+            ("zstd;q=0, gzip", None),
             ("gzip, deflate, br", None),
+            // Wildcards aren't expanded, and connectrpc doesn't expand them either.
+            ("gzip, *", None),
             ("identity", None),
             ("", None),
         ];
@@ -1002,6 +1012,46 @@ mod tests {
                 "{header:?}"
             );
         }
+        // connectrpc ignores headers that aren't visible ASCII, so they stay as they are.
+        let opaque = http::HeaderValue::from_bytes(b"gzip, zstd\xff").unwrap();
+        assert_eq!(prefer_zstd(&opaque), None);
+    }
+
+    #[test]
+    fn zstd_responses_fit_the_browser_window_limit() {
+        // RFC 9659 lets browsers refuse zstd windows over 8 MiB (window log 23). The body is
+        // pseudorandom and larger than that, so the window is as large as the level allows.
+        let mut body = vec![0u8; 32 << 20];
+        let mut state = 0x9e37_79b9_7f4a_7c15_u64;
+        for chunk in body.chunks_mut(8) {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            chunk.copy_from_slice(&state.to_le_bytes()[..chunk.len()]);
+        }
+        let compressed = connect_compression_registry()
+            .compress("zstd", &body)
+            .unwrap();
+
+        let mut decoder = zstd_safe::DCtx::create();
+        decoder
+            .set_parameter(zstd_safe::DParameter::WindowLogMax(23))
+            .unwrap();
+        // zstd checks the window only when it decodes in pieces, as browsers do. One-shot
+        // decoding, or an output buffer that holds the whole frame, skips the check.
+        let mut input = zstd_safe::InBuffer::around(&compressed);
+        let mut chunk = [0u8; 64 << 10];
+        let mut decoded = Vec::with_capacity(body.len());
+        loop {
+            let mut output = zstd_safe::OutBuffer::around(&mut chunk[..]);
+            let remaining = decoder.decompress_stream(&mut output, &mut input).unwrap();
+            let written = output.pos();
+            decoded.extend_from_slice(&chunk[..written]);
+            if remaining == 0 {
+                break;
+            }
+        }
+        assert!(decoded == body);
     }
 
     #[tokio::test]

@@ -100,65 +100,70 @@ async fn put_overwrites_value() {
     assert_eq!(got.as_deref(), Some(b"v2".as_slice()));
 }
 
-// -- get_many --
+// -- response compression --
+
+/// Asserts that a unary Get and a streaming GetMany through `query` both come back in
+/// `encoding` and decode to `value`.
+async fn assert_responses_in<T>(
+    query: &exoware_sdk::query::ServiceClient<T>,
+    key: &Key,
+    value: &[u8],
+    sequence: u64,
+    encoding: &str,
+) where
+    T: connectrpc::client::ClientTransport,
+    T::ResponseBody: Unpin,
+    <T::ResponseBody as connectrpc::http_body::Body>::Error: std::fmt::Display,
+{
+    use exoware_sdk::query::{GetManyRequest, GetRequest};
+
+    let response = query
+        .get(GetRequest {
+            key: key.to_vec(),
+            min_sequence_number: Some(sequence),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(response.headers()[http::header::CONTENT_ENCODING], encoding);
+    assert_eq!(response.view().value, Some(value));
+
+    let mut stream = query
+        .get_many(GetManyRequest {
+            keys: vec![key.to_vec()],
+            min_sequence_number: Some(sequence),
+            batch_size: 1,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        stream.headers()[connectrpc::Protocol::Connect.content_encoding_header()],
+        encoding,
+    );
+    let frame = stream.message().await.unwrap().unwrap();
+    let entries = &frame.view().results;
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].key, key.as_ref());
+    assert_eq!(entries[0].value, Some(value));
+    assert!(stream.message().await.unwrap().is_none());
+}
 
 #[tokio::test]
-async fn generated_stream_preserves_compression_capabilities() {
+async fn responses_use_zstd_only_when_the_client_accepts_it() {
+    use connectrpc::client::HttpClient;
     use connectrpc::compression::{CompressionRegistry, GzipProvider};
-    use exoware_sdk::query::{GetManyRequest, ServiceClient};
+    use exoware_sdk::query::ServiceClient;
 
     let (client, url) = spawn_client().await;
     let key = key(b"compressed");
     let value = vec![b'x'; 4096];
     let sequence = client.ingest().put(&[(&key, &value)]).await.unwrap();
-    for (registry, encoding) in [
-        (
-            CompressionRegistry::new().register(GzipProvider::default()),
-            "gzip",
-        ),
-        (connect_compression_registry(), "zstd"),
-    ] {
-        let query = ServiceClient::new(
-            PreferZstdHttpClient::plaintext(),
-            ClientConfig::new(url.parse().unwrap()).with_compression(registry),
-        );
-        let mut stream = query
-            .get_many(GetManyRequest {
-                keys: vec![key.to_vec()],
-                min_sequence_number: Some(sequence),
-                batch_size: 1,
-                ..Default::default()
-            })
-            .await
-            .unwrap();
-        let frame = stream.message().await.unwrap().unwrap();
-        let entries = &frame.view().results;
-        assert_eq!(entries.len(), 1);
-        let entry = entries.first().unwrap();
-        assert_eq!(entry.key, key.as_ref());
-        assert_eq!(entry.value, Some(value.as_slice()));
-        assert_eq!(
-            stream
-                .headers()
-                .get(connectrpc::Protocol::Connect.content_encoding_header())
-                .unwrap(),
-            encoding,
-        );
-        assert!(stream.message().await.unwrap().is_none());
-    }
-}
-
-#[tokio::test]
-async fn server_answers_in_zstd_when_the_client_accepts_it() {
-    use connectrpc::client::HttpClient;
-    use connectrpc::compression::{CompressionRegistry, GzipProvider};
-    use exoware_sdk::query::{GetManyRequest, GetRequest, ServiceClient};
-
-    let (client, url) = spawn_client().await;
-    let key = key(b"negotiated");
-    let value = vec![b'x'; 4096];
-    let sequence = client.ingest().put(&[(&key, &value)]).await.unwrap();
-    // A plain connectrpc client lists gzip before zstd, as browsers do.
+    let config = |registry: CompressionRegistry| {
+        ClientConfig::new(url.parse().unwrap()).with_compression(registry)
+    };
+    // A plain connectrpc client lists gzip before zstd, as browsers do, so zstd comes from
+    // the server's PreferZstdLayer. PreferZstdHttpClient must not add zstd to a gzip-only list.
     for (registry, encoding) in [
         (connect_compression_registry(), "zstd"),
         (
@@ -166,38 +171,14 @@ async fn server_answers_in_zstd_when_the_client_accepts_it() {
             "gzip",
         ),
     ] {
-        let query = ServiceClient::new(
-            HttpClient::plaintext(),
-            ClientConfig::new(url.parse().unwrap()).with_compression(registry),
-        );
-        let response = query
-            .get(GetRequest {
-                key: key.to_vec(),
-                min_sequence_number: Some(sequence),
-                ..Default::default()
-            })
-            .await
-            .unwrap();
-        assert_eq!(response.headers()[http::header::CONTENT_ENCODING], encoding);
-        assert_eq!(response.view().value, Some(value.as_slice()));
-
-        let mut stream = query
-            .get_many(GetManyRequest {
-                keys: vec![key.to_vec()],
-                min_sequence_number: Some(sequence),
-                batch_size: 1,
-                ..Default::default()
-            })
-            .await
-            .unwrap();
-        assert_eq!(
-            stream.headers()[connectrpc::Protocol::Connect.content_encoding_header()],
-            encoding,
-        );
-        let frame = stream.message().await.unwrap().unwrap();
-        assert_eq!(frame.view().results[0].value, Some(value.as_slice()));
+        let plain = ServiceClient::new(HttpClient::plaintext(), config(registry.clone()));
+        assert_responses_in(&plain, &key, &value, sequence, encoding).await;
+        let sdk = ServiceClient::new(PreferZstdHttpClient::plaintext(), config(registry));
+        assert_responses_in(&sdk, &key, &value, sequence, encoding).await;
     }
 }
+
+// -- get_many --
 
 #[tokio::test]
 async fn get_many_returns_found_and_missing() {

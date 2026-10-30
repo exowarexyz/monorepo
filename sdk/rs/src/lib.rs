@@ -148,7 +148,7 @@ impl ConnectRequestCompression {
 }
 
 /// Store client defaults: [`connect_compression_registry`] for codecs;
-/// [`PreferZstdHttpClient`] sets `Accept-Encoding: zstd, gzip` on responses.
+/// [`PreferZstdHttpClient`] reorders the request's accepted encodings to `zstd, gzip`.
 ///
 /// Request body compression uses [`ConnectRequestCompression`] (default none);
 /// connectrpc only supports one request encoding per config (see
@@ -4052,7 +4052,9 @@ mod tests {
             headers.get("content-type").unwrap(),
             "application/connect+proto"
         );
-        assert_eq!(headers.get(ACCEPT_ENCODING).unwrap(), "zstd, gzip");
+        // Streams negotiate only through Connect-Accept-Encoding, and the transport adds no
+        // encodings the client didn't list.
+        assert!(headers.get(ACCEPT_ENCODING).is_none());
         let stream_encoding = connectrpc::Protocol::Connect.accept_encoding_header();
         assert_eq!(headers.get(stream_encoding).unwrap(), "zstd, gzip");
         assert_eq!(headers.get_all(stream_encoding).iter().count(), 1);
