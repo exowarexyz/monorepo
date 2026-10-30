@@ -151,11 +151,11 @@ pub(crate) fn encode_ordered_key_bytes(raw_key: &[u8]) -> Vec<u8> {
     out
 }
 
-pub(crate) fn validate_ordered_key_bytes(bytes: &[u8], label: &str) -> Result<(), QmdbError> {
+pub(crate) fn validate_ordered_key_bytes(bytes: &[u8]) -> Result<(), QmdbError> {
     if bytes.len() < ORDERED_KEY_TERMINATOR_LEN {
-        return Err(QmdbError::CorruptData(format!(
-            "{label} shorter than ordered-key terminator"
-        )));
+        return Err(QmdbError::CorruptData(
+            "update key shorter than ordered-key terminator".to_string(),
+        ));
     }
     let mut idx = 0usize;
     let end = bytes.len() - ORDERED_KEY_TERMINATOR_LEN;
@@ -164,14 +164,14 @@ pub(crate) fn validate_ordered_key_bytes(bytes: &[u8], label: &str) -> Result<()
             match bytes.get(idx + 1) {
                 Some(&ORDERED_KEY_ZERO_ESCAPE) => idx += 2,
                 Some(_) => {
-                    return Err(QmdbError::CorruptData(format!(
-                        "{label} contains invalid ordered-key escape"
-                    )))
+                    return Err(QmdbError::CorruptData(
+                        "update key contains invalid ordered-key escape".to_string(),
+                    ))
                 }
                 None => {
-                    return Err(QmdbError::CorruptData(format!(
-                        "{label} truncated in ordered-key escape"
-                    )))
+                    return Err(QmdbError::CorruptData(
+                        "update key truncated in ordered-key escape".to_string(),
+                    ))
                 }
             }
         } else {
@@ -179,15 +179,15 @@ pub(crate) fn validate_ordered_key_bytes(bytes: &[u8], label: &str) -> Result<()
         }
     }
     if bytes[end] != ORDERED_KEY_ESCAPE_BYTE || bytes[end + 1] != ORDERED_KEY_ESCAPE_BYTE {
-        return Err(QmdbError::CorruptData(format!(
-            "{label} missing ordered-key terminator"
-        )));
+        return Err(QmdbError::CorruptData(
+            "update key missing ordered-key terminator".to_string(),
+        ));
     }
     Ok(())
 }
 
 pub(crate) fn decode_ordered_key_bytes(bytes: &[u8]) -> Result<Vec<u8>, QmdbError> {
-    validate_ordered_key_bytes(bytes, "update key")?;
+    validate_ordered_key_bytes(bytes)?;
     let mut out = Vec::with_capacity(bytes.len().saturating_sub(ORDERED_KEY_TERMINATOR_LEN));
     let end = bytes.len() - ORDERED_KEY_TERMINATOR_LEN;
     let mut idx = 0usize;
@@ -241,7 +241,7 @@ fn split_update_payload(key: &Key) -> Result<(Key, usize), QmdbError> {
 
 pub(crate) fn decode_update_location<F: Family>(key: &Key) -> Result<Location<F>, QmdbError> {
     let (payload, ordered_len) = split_update_payload(key)?;
-    validate_ordered_key_bytes(&payload[..ordered_len], "update key")?;
+    validate_ordered_key_bytes(&payload[..ordered_len])?;
     Ok(Location::new(decode_location_bytes(
         &payload[ordered_len..],
         "update location",
