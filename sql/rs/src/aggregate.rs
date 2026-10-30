@@ -933,8 +933,7 @@ pub(crate) fn try_build_aggregate_pushdown_spec(
             table,
             &filters,
             &compiled_group_exprs,
-            Some(&normalized),
-            Some(data_type),
+            Some((&normalized, data_type)),
         )?
         else {
             return Ok(None);
@@ -952,7 +951,7 @@ pub(crate) fn try_build_aggregate_pushdown_spec(
 
     let seed_job = if !compiled_group_exprs.is_empty() && !has_unguarded_aggregate {
         let Some((job, diagnostics, _)) =
-            build_aggregate_reduce_job(table, &scan.filters, &compiled_group_exprs, None, None)?
+            build_aggregate_reduce_job(table, &scan.filters, &compiled_group_exprs, None)?
         else {
             return Ok(None);
         };
@@ -984,8 +983,7 @@ pub(crate) fn build_aggregate_reduce_job(
     table: &KvTable,
     filters: &[Expr],
     group_exprs: &[PushdownValueExpr],
-    aggr_expr: Option<&NormalizedAggregateExpr>,
-    data_type: Option<DataType>,
+    aggregate: Option<(&NormalizedAggregateExpr, DataType)>,
 ) -> DataFusionResult<
     Option<(
         AggregateReduceJob,
@@ -1000,6 +998,7 @@ pub(crate) fn build_aggregate_reduce_job(
         return Ok(None);
     }
     let predicate = QueryPredicate::from_filters(filters, &table.model);
+    let aggr_expr = aggregate.as_ref().map(|(expr, _)| *expr);
     let reducer_predicate = if let Some(filter) = aggr_expr.and_then(|expr| expr.filter.as_ref()) {
         if !QueryPredicate::supports_filter(filter, &table.model) {
             return Ok(None);
@@ -1032,25 +1031,19 @@ pub(crate) fn build_aggregate_reduce_job(
     } else {
         None
     };
-    let (reducers, output) = match (aggr_expr, data_type) {
-        (Some(expr), Some(data_type)) => match compile_aggregate_expr(
+    let (reducers, output) = match aggregate {
+        Some((expr, data_type)) => match compile_aggregate_expr(
             expr,
             &table.model,
             &table.index_specs,
             &access_path,
-            0,
             data_type,
             reducer_filter,
         ) {
             Ok((reducers, output)) => (reducers, Some(output)),
             Err(_) => return Ok(None),
         },
-        (None, None) => (Vec::new(), None),
-        _ => {
-            return Err(DataFusionError::Execution(
-                "aggregate reduction job configuration mismatch".to_string(),
-            ))
-        }
+        None => (Vec::new(), None),
     };
     let filter = if filters.is_empty() {
         None
@@ -1158,7 +1151,6 @@ pub(crate) fn compile_aggregate_expr(
     model: &TableModel,
     index_specs: &[ResolvedIndexSpec],
     access_path: &AggregateAccessPath,
-    next_reducer_idx: usize,
     data_type: DataType,
     filter: Option<KvPredicate>,
 ) -> DataFusionResult<(Vec<RangeReducerSpec>, AggregateOutputPlan)> {
@@ -1192,8 +1184,8 @@ pub(crate) fn compile_aggregate_expr(
                 },
             ],
             AggregateOutputPlan::Avg {
-                sum_idx: next_reducer_idx,
-                count_idx: next_reducer_idx + 1,
+                sum_idx: 0,
+                count_idx: 1,
             },
         ));
     }
@@ -1207,9 +1199,7 @@ pub(crate) fn compile_aggregate_expr(
     };
     Ok((
         vec![RangeReducerSpec { op, expr, filter }],
-        AggregateOutputPlan::Direct {
-            reducer_idx: next_reducer_idx,
-        },
+        AggregateOutputPlan::Direct { reducer_idx: 0 },
     ))
 }
 
@@ -1572,7 +1562,7 @@ pub(crate) fn normalize_aggregate_expr(
             agg.func.name()
         )));
     };
-    let (func, argument, case_filter) = if func == AggregatePushdownFunction::Count {
+    let (argument, case_filter) = if func == AggregatePushdownFunction::Count {
         normalize_count_aggregate_argument(&agg.params.args[0], model)?
     } else {
         normalize_column_or_case_aggregate(func, &agg.params.args[0], model)?
@@ -1589,25 +1579,16 @@ pub(crate) fn normalize_aggregate_expr(
 pub(crate) fn normalize_count_aggregate_argument(
     arg: &Expr,
     model: &TableModel,
-) -> DataFusionResult<(
-    AggregatePushdownFunction,
-    AggregatePushdownArgument,
-    Option<Expr>,
-)> {
+) -> DataFusionResult<(AggregatePushdownArgument, Option<Expr>)> {
     if is_count_rows_arg(arg) {
-        return Ok((
-            AggregatePushdownFunction::Count,
-            AggregatePushdownArgument::CountAll,
-            None,
-        ));
+        return Ok((AggregatePushdownArgument::CountAll, None));
     }
     if let Some((argument, filter)) =
         normalize_case_aggregate_argument(AggregatePushdownFunction::Count, arg, model)?
     {
-        return Ok((AggregatePushdownFunction::Count, argument, Some(filter)));
+        return Ok((argument, Some(filter)));
     }
     Ok((
-        AggregatePushdownFunction::Count,
         AggregatePushdownArgument::Expr(compile_pushdown_value_expr(arg, model)?.0),
         None,
     ))
@@ -1617,16 +1598,11 @@ pub(crate) fn normalize_column_or_case_aggregate(
     func: AggregatePushdownFunction,
     arg: &Expr,
     model: &TableModel,
-) -> DataFusionResult<(
-    AggregatePushdownFunction,
-    AggregatePushdownArgument,
-    Option<Expr>,
-)> {
+) -> DataFusionResult<(AggregatePushdownArgument, Option<Expr>)> {
     if let Some((argument, filter)) = normalize_case_aggregate_argument(func, arg, model)? {
-        return Ok((func, argument, Some(filter)));
+        return Ok((argument, Some(filter)));
     }
     Ok((
-        func,
         AggregatePushdownArgument::Expr(compile_pushdown_value_expr(arg, model)?.0),
         None,
     ))

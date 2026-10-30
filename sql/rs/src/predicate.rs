@@ -702,7 +702,7 @@ impl QueryPredicate {
                     Some(PredicateConstraint::IntRange { min, max }) => {
                         let filtered = vals
                             .into_iter()
-                            .filter(|v| in_i64_bounds(*v, *min, *max))
+                            .filter(|v| in_bounds(*v, *min, *max))
                             .collect();
                         self.set_int_values_constraint(col_idx, filtered);
                     }
@@ -729,7 +729,7 @@ impl QueryPredicate {
                     Some(PredicateConstraint::UInt64Range { min, max }) => {
                         let filtered = vals
                             .into_iter()
-                            .filter(|v| in_u64_bounds(*v, *min, *max))
+                            .filter(|v| in_bounds(*v, *min, *max))
                             .collect();
                         self.set_u64_values_constraint(col_idx, filtered);
                     }
@@ -873,12 +873,8 @@ impl QueryPredicate {
                     if constrained_prefix_len == 0 {
                         continue;
                     }
-                    let ranges = match self.expand_index_ranges(
-                        model.table_prefix,
-                        model,
-                        spec,
-                        constrained_prefix_len,
-                    ) {
+                    let ranges = match self.expand_index_ranges(model, spec, constrained_prefix_len)
+                    {
                         Ok(r) if !r.is_empty() => r,
                         _ => continue,
                     };
@@ -894,11 +890,10 @@ impl QueryPredicate {
                     if constrained_column_count == 0 {
                         continue;
                     }
-                    let ranges =
-                        match self.expand_zorder_index_ranges(model.table_prefix, model, spec) {
-                            Ok(r) if !r.is_empty() => r,
-                            _ => continue,
-                        };
+                    let ranges = match self.expand_zorder_index_ranges(model, spec) {
+                        Ok(r) if !r.is_empty() => r,
+                        _ => continue,
+                    };
                     (ranges, constrained_column_count, constrained_column_count)
                 }
             };
@@ -941,7 +936,6 @@ impl QueryPredicate {
 
     pub(crate) fn expand_index_ranges(
         &self,
-        table_prefix: u8,
         model: &TableModel,
         spec: &ResolvedIndexSpec,
         constrained_prefix_len: usize,
@@ -1006,10 +1000,8 @@ impl QueryPredicate {
                 constraints: tmp_constraints,
                 contradiction: self.contradiction,
             };
-            let start =
-                tmp.encode_index_bound_key(table_prefix, model, spec, col_values.len(), false)?;
-            let end =
-                tmp.encode_index_bound_key(table_prefix, model, spec, col_values.len(), true)?;
+            let start = tmp.encode_index_bound_key(model, spec, col_values.len(), false)?;
+            let end = tmp.encode_index_bound_key(model, spec, col_values.len(), true)?;
             if start <= end {
                 ranges.push(KeyRange { start, end });
             }
@@ -1170,7 +1162,6 @@ impl QueryPredicate {
 
     pub(crate) fn expand_zorder_index_ranges(
         &self,
-        table_prefix: u8,
         model: &TableModel,
         spec: &ResolvedIndexSpec,
     ) -> Result<Vec<KeyRange>, String> {
@@ -1232,8 +1223,8 @@ impl QueryPredicate {
             for (col_idx, constraint) in combo {
                 tmp.constraints.insert(*col_idx, constraint.clone());
             }
-            let start = tmp.encode_zorder_index_bound_key(table_prefix, model, spec, false)?;
-            let end = tmp.encode_zorder_index_bound_key(table_prefix, model, spec, true)?;
+            let start = tmp.encode_zorder_index_bound_key(model, spec, false)?;
+            let end = tmp.encode_zorder_index_bound_key(model, spec, true)?;
             if start <= end {
                 ranges.push(KeyRange { start, end });
             }
@@ -1243,7 +1234,6 @@ impl QueryPredicate {
 
     pub(crate) fn encode_index_bound_key(
         &self,
-        _table_prefix: u8,
         model: &TableModel,
         spec: &ResolvedIndexSpec,
         constrained_prefix_len: usize,
@@ -1276,7 +1266,6 @@ impl QueryPredicate {
 
     pub(crate) fn encode_zorder_index_bound_key(
         &self,
-        _table_prefix: u8,
         model: &TableModel,
         spec: &ResolvedIndexSpec,
         upper: bool,
@@ -1868,16 +1857,16 @@ pub(crate) fn matches_constraint(value: &CellValue, constraint: &PredicateConstr
         (CellValue::Utf8(v), PredicateConstraint::StringEq(expected)) => v == expected,
         (CellValue::Boolean(v), PredicateConstraint::BoolEq(expected)) => v == expected,
         (CellValue::Int64(v), PredicateConstraint::IntRange { min, max }) => {
-            in_i64_bounds(*v, *min, *max)
+            in_bounds(*v, *min, *max)
         }
         (CellValue::Date32(v), PredicateConstraint::IntRange { min, max }) => {
-            in_i64_bounds(*v as i64, *min, *max)
+            in_bounds(*v as i64, *min, *max)
         }
         (CellValue::Date64(v), PredicateConstraint::IntRange { min, max }) => {
-            in_i64_bounds(*v, *min, *max)
+            in_bounds(*v, *min, *max)
         }
         (CellValue::Timestamp(v), PredicateConstraint::IntRange { min, max }) => {
-            in_i64_bounds(*v, *min, *max)
+            in_bounds(*v, *min, *max)
         }
         (CellValue::Float64(v), PredicateConstraint::FloatRange { .. }) => {
             match crate::filter::compile_encoded_constraint(ColumnKind::Float64, constraint) {
@@ -1888,7 +1877,7 @@ pub(crate) fn matches_constraint(value: &CellValue, constraint: &PredicateConstr
             }
         }
         (CellValue::Decimal128(v), PredicateConstraint::Decimal128Range { min, max }) => {
-            in_i128_bounds(*v, *min, *max)
+            in_bounds(*v, *min, *max)
         }
         (CellValue::Utf8(v), PredicateConstraint::StringIn(values)) => {
             values.binary_search(v).is_ok()
@@ -1897,7 +1886,7 @@ pub(crate) fn matches_constraint(value: &CellValue, constraint: &PredicateConstr
             values.binary_search(v).is_ok()
         }
         (CellValue::UInt64(v), PredicateConstraint::UInt64Range { min, max }) => {
-            in_u64_bounds(*v, *min, *max)
+            in_bounds(*v, *min, *max)
         }
         (CellValue::UInt64(v), PredicateConstraint::UInt64In(values)) => {
             values.binary_search(v).is_ok()
@@ -1923,21 +1912,7 @@ pub(crate) fn matches_constraint(value: &CellValue, constraint: &PredicateConstr
     }
 }
 
-pub(crate) fn in_i64_bounds(value: i64, min: Option<i64>, max: Option<i64>) -> bool {
-    if let Some(min) = min {
-        if value < min {
-            return false;
-        }
-    }
-    if let Some(max) = max {
-        if value > max {
-            return false;
-        }
-    }
-    true
-}
-
-pub(crate) fn in_u64_bounds(value: u64, min: Option<u64>, max: Option<u64>) -> bool {
+pub(crate) fn in_bounds<T: Ord>(value: T, min: Option<T>, max: Option<T>) -> bool {
     if let Some(min) = min {
         if value < min {
             return false;
@@ -2060,21 +2035,6 @@ pub(crate) fn merge_float_upper(current: &mut Option<(f64, bool)>, value: f64, i
         }
         None => (value, inclusive),
     });
-}
-
-#[cfg(test)]
-pub(crate) fn in_i128_bounds(value: i128, min: Option<i128>, max: Option<i128>) -> bool {
-    if let Some(min) = min {
-        if value < min {
-            return false;
-        }
-    }
-    if let Some(max) = max {
-        if value > max {
-            return false;
-        }
-    }
-    true
 }
 
 pub(crate) fn extract_or_in_column(

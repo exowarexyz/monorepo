@@ -188,11 +188,11 @@ impl ScanAccessPlan {
                 impossible: false,
             });
         }
-        let mut index_column_offsets: HashMap<usize, (usize, ColumnKind)> = HashMap::new();
+        let mut index_column_offsets: HashMap<usize, usize> = HashMap::new();
         let mut payload_offset = 0usize;
         for col_idx in &spec.key_columns {
             let kind = model.column(*col_idx).kind;
-            index_column_offsets.insert(*col_idx, (payload_offset, kind));
+            index_column_offsets.insert(*col_idx, payload_offset);
             payload_offset += kind.key_width();
         }
 
@@ -233,7 +233,7 @@ impl ScanAccessPlan {
                     col,
                     constraint,
                 } => {
-                    let Some((offset, _kind)) = index_column_offsets.get(col_idx).copied() else {
+                    let Some(offset) = index_column_offsets.get(col_idx).copied() else {
                         continue;
                     };
                     let compile = compile_encoded_constraint(col.kind, constraint);

@@ -717,9 +717,8 @@ mod tests {
             else_expr: Some(Box::new(Expr::Literal(ScalarValue::Utf8(None), None))),
         });
 
-        let (func, argument, filter) =
+        let (argument, filter) =
             normalize_count_aggregate_argument(&case_expr, &model).expect("normalize");
-        assert_eq!(func, AggregatePushdownFunction::Count);
         assert_eq!(argument, AggregatePushdownArgument::CountAll);
         assert!(filter.is_some());
     }
@@ -2039,9 +2038,9 @@ mod tests {
         assert!(!contradiction);
         assert_eq!(min, Some(100));
         assert_eq!(max, Some(200));
-        assert!(in_i128_bounds(150, min, max));
-        assert!(!in_i128_bounds(99, min, max));
-        assert!(!in_i128_bounds(201, min, max));
+        assert!(in_bounds(150, min, max));
+        assert!(!in_bounds(99, min, max));
+        assert!(!in_bounds(201, min, max));
     }
 
     #[test]
@@ -2070,10 +2069,10 @@ mod tests {
         );
 
         let start = pred
-            .encode_index_bound_key(model.table_prefix, &model, &specs[0], 1, false)
+            .encode_index_bound_key(&model, &specs[0], 1, false)
             .unwrap();
         let end = pred
-            .encode_index_bound_key(model.table_prefix, &model, &specs[0], 1, true)
+            .encode_index_bound_key(&model, &specs[0], 1, true)
             .unwrap();
 
         assert!(
@@ -2116,10 +2115,10 @@ mod tests {
         pred.constraints
             .insert(s_idx, PredicateConstraint::StringEq("a".repeat(245)));
         assert!(pred
-            .encode_index_bound_key(model.table_prefix, &model, &specs[0], 1, true)
+            .encode_index_bound_key(&model, &specs[0], 1, true)
             .is_err());
         assert!(pred
-            .encode_index_bound_key(model.table_prefix, &model, &specs[0], 1, false)
+            .encode_index_bound_key(&model, &specs[0], 1, false)
             .is_err());
     }
 
@@ -2146,7 +2145,7 @@ mod tests {
         pred.constraints
             .insert(s_idx, PredicateConstraint::StringEq("a".repeat(245)));
         assert!(pred
-            .encode_index_bound_key(model.table_prefix, &model, &specs[0], 1, true)
+            .encode_index_bound_key(&model, &specs[0], 1, true)
             .is_err());
     }
 
@@ -2173,10 +2172,10 @@ mod tests {
         pred.constraints
             .insert(s_idx, PredicateConstraint::StringEq("hello".to_string()));
         let start = pred
-            .encode_index_bound_key(model.table_prefix, &model, &specs[0], 1, false)
+            .encode_index_bound_key(&model, &specs[0], 1, false)
             .expect("lower bound should encode");
         let end = pred
-            .encode_index_bound_key(model.table_prefix, &model, &specs[0], 1, true)
+            .encode_index_bound_key(&model, &specs[0], 1, true)
             .expect("upper bound should encode");
         assert!(start <= end, "lower bound must not exceed upper bound");
     }
@@ -2216,10 +2215,10 @@ mod tests {
             },
         );
         let start = pred
-            .encode_index_bound_key(model.table_prefix, &model, &specs[0], 1, false)
+            .encode_index_bound_key(&model, &specs[0], 1, false)
             .expect("lower bound");
         let end = pred
-            .encode_index_bound_key(model.table_prefix, &model, &specs[0], 1, true)
+            .encode_index_bound_key(&model, &specs[0], 1, true)
             .expect("upper bound");
 
         // Index row for exactly (s = 'a', id = 5), as encode_secondary_index_key
@@ -2260,10 +2259,10 @@ mod tests {
         pred.constraints
             .insert(s_idx, PredicateConstraint::StringEq(needle.clone()));
         let start = pred
-            .encode_index_bound_key(model.table_prefix, &model, &specs[0], 1, false)
+            .encode_index_bound_key(&model, &specs[0], 1, false)
             .expect("lower bound");
         let end = pred
-            .encode_index_bound_key(model.table_prefix, &model, &specs[0], 1, true)
+            .encode_index_bound_key(&model, &specs[0], 1, true)
             .expect("upper bound");
 
         let mut payload = Vec::new();
@@ -2302,10 +2301,10 @@ mod tests {
             },
         );
         let start = pred
-            .encode_index_bound_key(model.table_prefix, &model, &specs[0], 1, false)
+            .encode_index_bound_key(&model, &specs[0], 1, false)
             .expect("lower bound");
         let end = pred
-            .encode_index_bound_key(model.table_prefix, &model, &specs[0], 1, true)
+            .encode_index_bound_key(&model, &specs[0], 1, true)
             .expect("upper bound");
 
         let mut payload = Vec::new();
@@ -2363,7 +2362,7 @@ mod tests {
             },
         );
         let ranges = pred
-            .expand_zorder_index_ranges(model.table_prefix, &model, &specs[0])
+            .expand_zorder_index_ranges(&model, &specs[0])
             .expect("ranges");
         assert_eq!(ranges.len(), 1);
 
@@ -2416,10 +2415,10 @@ mod tests {
             },
         );
         let start = pred
-            .encode_index_bound_key(model.table_prefix, &model, &specs[0], 1, false)
+            .encode_index_bound_key(&model, &specs[0], 1, false)
             .unwrap();
         let end = pred
-            .encode_index_bound_key(model.table_prefix, &model, &specs[0], 1, true)
+            .encode_index_bound_key(&model, &specs[0], 1, true)
             .unwrap();
 
         for name in ["", "bob"] {
@@ -2459,10 +2458,10 @@ mod tests {
         pred.constraints
             .insert(a_idx, PredicateConstraint::StringEq("x".to_string()));
         let start = pred
-            .encode_index_bound_key(model.table_prefix, &model, &specs[0], 1, false)
+            .encode_index_bound_key(&model, &specs[0], 1, false)
             .unwrap();
         let end = pred
-            .encode_index_bound_key(model.table_prefix, &model, &specs[0], 1, true)
+            .encode_index_bound_key(&model, &specs[0], 1, true)
             .unwrap();
 
         for (b, id) in [(i64::MIN, i64::MIN), (0, 0), (i64::MAX, i64::MAX)] {
@@ -2677,10 +2676,10 @@ mod tests {
         pred.constraints
             .insert(region_idx, PredicateConstraint::StringEq("us".to_string()));
         let start = pred
-            .encode_index_bound_key(model.table_prefix, &model, &specs[0], 1, false)
+            .encode_index_bound_key(&model, &specs[0], 1, false)
             .unwrap();
         let end = pred
-            .encode_index_bound_key(model.table_prefix, &model, &specs[0], 1, true)
+            .encode_index_bound_key(&model, &specs[0], 1, true)
             .unwrap();
 
         for id in [i64::MIN, 0, i64::MAX] {
@@ -2892,10 +2891,10 @@ mod tests {
 
         let pred = QueryPredicate::default();
         let start = pred
-            .encode_index_bound_key(model.table_prefix, &model, &specs[0], 0, false)
+            .encode_index_bound_key(&model, &specs[0], 0, false)
             .unwrap();
         let end = pred
-            .encode_index_bound_key(model.table_prefix, &model, &specs[0], 0, true)
+            .encode_index_bound_key(&model, &specs[0], 0, true)
             .unwrap();
 
         let neg_inf_row = KvRow {
