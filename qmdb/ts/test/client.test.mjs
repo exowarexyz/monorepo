@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { create, fromBinary, fromJsonString, toJsonString } from '@bufbuild/protobuf';
+import { create, fromBinary, fromJsonString, toBinary, toJsonString } from '@bufbuild/protobuf';
 import {
   GetOperationRangeRequestSchema,
   GetOperationRangeResponseSchema,
@@ -11,6 +11,13 @@ import { HistoricalMultiProofSchema, HistoricalOperationRangeProofSchema } from 
 import { readFileSync } from 'node:fs';
 import { OrderedQmdbClient, QmdbOperationLogClient } from '../dist/client.js';
 import { initSync, verify_historical_raw_operation_range_proof } from '../dist/generated/wasm/exoware_qmdb_wasm.js';
+
+// Answers in the format the request used, as a Connect server does.
+function reply(sent, schema, message) {
+  return sent.headers.get('content-type') === 'application/proto'
+    ? new Response(toBinary(schema, message), { headers: { 'content-type': 'application/proto' } })
+    : new Response(toJsonString(schema, message), { headers: { 'content-type': 'application/json' } });
+}
 
 test('test_size_arguments_reject_narrowing_before_initialization', async () => {
   for (const currentChunkSize of [0, -1, 1.5, 2 ** 32, Number.MAX_SAFE_INTEGER]) {
@@ -118,9 +125,7 @@ for (const { name, fixture, Client, read } of readFloorCases) {
         assert.equal(decoded.minSequenceNumber, request.minSequenceNumber);
         assert.equal(sent.headers.get('x-test-floor'), 'forwarded');
         assert.ok(Number(sent.headers.get('connect-timeout-ms')) > 0);
-        return new Response(toJsonString(GetOperationRangeResponseSchema, response), {
-          headers: { 'content-type': 'application/json' },
-        });
+        return reply(sent, GetOperationRangeResponseSchema, response);
       });
       const client = new Client('http://qmdb.test', { merkleFamily });
       const options = { timeoutMs: 1000, headers: { 'x-test-floor': 'forwarded' } };
@@ -186,9 +191,7 @@ function mockOperationsService(t, fixture, minSequenceNumber, checkRequest = tru
     const sent = new Request(input, init);
     assert.ok(sent.url.endsWith('/qmdb.v1.OperationLogService/GetOperations'));
     if (!checkRequest) {
-      return new Response(toJsonString(GetOperationsResponseSchema, response), {
-        headers: { 'content-type': 'application/json' },
-      });
+      return reply(sent, GetOperationsResponseSchema, response);
     }
     const bytes = new Uint8Array(await sent.arrayBuffer());
     const decoded = sent.headers.get('content-type') === 'application/proto'
@@ -197,9 +200,7 @@ function mockOperationsService(t, fixture, minSequenceNumber, checkRequest = tru
     assert.equal(decoded.tip, fixture.tip);
     assert.deepEqual(decoded.locations, fixture.locations);
     assert.equal(decoded.minSequenceNumber, minSequenceNumber);
-    return new Response(toJsonString(GetOperationsResponseSchema, response), {
-      headers: { 'content-type': 'application/json' },
-    });
+    return reply(sent, GetOperationsResponseSchema, response);
   });
 }
 
