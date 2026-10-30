@@ -28,6 +28,10 @@ use `bigint`. Batch limits and WASM byte-size arguments must fit their unsigned
 All unary proof requests accept an optional `minSequenceNumber`: the minimum
 Store sequence for checking publication of the requested watermark.
 
+The clients always talk binary protobuf and ignore `useBinaryFormat`. Each proof
+goes to WASM as the bytes the server sent, without being decoded in JS first,
+and JSON can't carry it that way.
+
 Subscription decoding checks internal proof consistency. Compare the returned
 root with an independently trusted root for the frame tip before using its
 operations. A server-provided root is not a trust anchor. `sha256` and `blake3`

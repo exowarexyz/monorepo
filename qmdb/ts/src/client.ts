@@ -9,32 +9,22 @@ import {
   type ClientOptions as SdkClientOptions,
 } from '@exowarexyz/sdk';
 import {
-  CurrentKeyValueProofSchema,
-  CurrentOperationRangeProofSchema,
-  HistoricalMultiProofSchema,
-  HistoricalOperationRangeProofSchema,
-} from './generated/proto/qmdb/v1/proof_pb.js';
-import {
-  KeyLookupService,
   GetManyRequestSchema,
-  GetManyResponseSchema,
   GetRequestSchema,
 } from './generated/proto/qmdb/v1/key_lookup_pb.js';
+import { GetRangeRequestSchema } from './generated/proto/qmdb/v1/key_range_pb.js';
 import {
-  OrderedKeyRangeService,
-  GetRangeRequestSchema,
-  GetRangeResponseSchema,
-} from './generated/proto/qmdb/v1/key_range_pb.js';
-import {
-  OperationLogService,
   GetOperationRangeRequestSchema,
   GetOperationsRequestSchema,
   SubscribeRequestSchema,
 } from './generated/proto/qmdb/v1/operation_log_pb.js';
+import { GetCurrentOperationRangeRequestSchema } from './generated/proto/qmdb/v1/current_operation_pb.js';
 import {
-  CurrentOperationService,
-  GetCurrentOperationRangeRequestSchema,
-} from './generated/proto/qmdb/v1/current_operation_pb.js';
+  RawCurrentOperationService,
+  RawKeyLookupService,
+  RawOperationLogService,
+  RawOrderedKeyRangeService,
+} from './raw-proofs.js';
 import {
   FilterSchema,
   type Filter,
@@ -234,12 +224,18 @@ export interface OrderedSubscribeProof {
   proof: DecodedHistoricalMultiProof;
 }
 
+/**
+ * The qmdb clients always use binary protobuf and ignore `useBinaryFormat`.
+ * They hand each proof to wasm as the bytes that arrived, which JSON can't
+ * carry (see `raw-proofs.ts`).
+ */
 export type OrderedQmdbClientOptions = SdkClientOptions & {
   merkleFamily?: MerkleFamily;
   hashFamily?: HashFamily;
   currentChunkSize?: number;
 };
 
+/** Always uses binary protobuf, like {@link OrderedQmdbClientOptions}. */
 export type QmdbOperationLogClientOptions = SdkClientOptions & {
   merkleFamily?: MerkleFamily;
   hashFamily?: HashFamily;
@@ -249,6 +245,21 @@ let wasmReady: Promise<unknown> | undefined;
 
 function ensureWasm(): Promise<unknown> {
   return (wasmReady ??= initWasm());
+}
+
+function binaryTransport(baseUrl: string, options: SdkClientOptions) {
+  return createTransport(baseUrl, { ...options, useBinaryFormat: true });
+}
+
+/**
+ * A proof arrives as a `bytes` field, so a missing one reads as empty rather
+ * than undefined. No real proof encodes to zero bytes.
+ */
+function requireProof(proof: Uint8Array, rpc: string): Uint8Array {
+  if (proof.length === 0) {
+    throw new Error(`qmdb ${rpc} response missing proof`);
+  }
+  return proof;
 }
 
 function toBytes(value: BytesLike): Uint8Array {
@@ -375,7 +386,7 @@ export function matchRegex(regex: string): Filter {
 }
 
 async function operationRangeProofBytes(
-  operationLog: ConnectClient<typeof OperationLogService>,
+  operationLog: ConnectClient<typeof RawOperationLogService>,
   request: OperationRangeRequest,
   options?: CallOptions,
 ): Promise<Uint8Array> {
@@ -383,14 +394,11 @@ async function operationRangeProofBytes(
     create(GetOperationRangeRequestSchema, request),
     options,
   );
-  if (!response.proof) {
-    throw new Error('qmdb getOperationRange response missing proof');
-  }
-  return toBinary(HistoricalOperationRangeProofSchema, response.proof);
+  return requireProof(response.proof, 'getOperationRange');
 }
 
 async function operationsProofBytes(
-  operationLog: ConnectClient<typeof OperationLogService>,
+  operationLog: ConnectClient<typeof RawOperationLogService>,
   request: OperationsRequest,
   options?: CallOptions,
 ): Promise<Uint8Array> {
@@ -402,14 +410,11 @@ async function operationsProofBytes(
     }),
     options,
   );
-  if (!response.proof) {
-    throw new Error('qmdb getOperations response missing proof');
-  }
-  return toBinary(HistoricalMultiProofSchema, response.proof);
+  return requireProof(response.proof, 'getOperations');
 }
 
 export class QmdbOperationLogClient {
-  private readonly operationLog: ConnectClient<typeof OperationLogService>;
+  private readonly operationLog: ConnectClient<typeof RawOperationLogService>;
   private readonly merkleFamily: MerkleFamily;
   private readonly hashFamily: HashFamily;
 
@@ -424,8 +429,8 @@ export class QmdbOperationLogClient {
     this.merkleFamily = merkleFamily;
     this.hashFamily = hashFamily;
     this.operationLog = createClient(
-      OperationLogService,
-      createTransport(baseUrl, transportOptions),
+      RawOperationLogService,
+      binaryTransport(baseUrl, transportOptions),
     );
   }
 
@@ -595,10 +600,10 @@ export class QmdbOperationLogClient {
 }
 
 export class OrderedQmdbClient {
-  private readonly lookup: ConnectClient<typeof KeyLookupService>;
-  private readonly orderedRange: ConnectClient<typeof OrderedKeyRangeService>;
-  private readonly operationLog: ConnectClient<typeof OperationLogService>;
-  private readonly currentOperation: ConnectClient<typeof CurrentOperationService>;
+  private readonly lookup: ConnectClient<typeof RawKeyLookupService>;
+  private readonly orderedRange: ConnectClient<typeof RawOrderedKeyRangeService>;
+  private readonly operationLog: ConnectClient<typeof RawOperationLogService>;
+  private readonly currentOperation: ConnectClient<typeof RawCurrentOperationService>;
   private readonly merkleFamily: MerkleFamily;
   private readonly hashFamily: HashFamily;
   private readonly currentChunkSize: number;
@@ -616,11 +621,11 @@ export class OrderedQmdbClient {
     this.merkleFamily = merkleFamily;
     this.hashFamily = hashFamily;
     this.currentChunkSize = currentChunkSize;
-    const transport = createTransport(baseUrl, transportOptions);
-    this.lookup = createClient(KeyLookupService, transport);
-    this.orderedRange = createClient(OrderedKeyRangeService, transport);
-    this.operationLog = createClient(OperationLogService, transport);
-    this.currentOperation = createClient(CurrentOperationService, transport);
+    const transport = binaryTransport(baseUrl, transportOptions);
+    this.lookup = createClient(RawKeyLookupService, transport);
+    this.orderedRange = createClient(RawOrderedKeyRangeService, transport);
+    this.operationLog = createClient(RawOperationLogService, transport);
+    this.currentOperation = createClient(RawCurrentOperationService, transport);
   }
 
   async get(
@@ -641,10 +646,7 @@ export class OrderedQmdbClient {
       }),
       options,
     );
-    if (!response.proof) {
-      throw new Error('qmdb get response missing proof');
-    }
-    const proofBytes = toBinary(CurrentKeyValueProofSchema, response.proof);
+    const proofBytes = requireProof(response.proof, 'get');
     const verified = verify_current_key_value_proof(
       proofBytes,
       toBytes(expectedRoot),
@@ -675,7 +677,9 @@ export class OrderedQmdbClient {
       }),
       options,
     );
-    const proofBytes = toBinary(GetManyResponseSchema, response);
+    // The results arrive as views into the response, so this is one flat copy.
+    // Encoding them from decoded objects, as before, copied each proof 3 times.
+    const proofBytes = toBinary(RawKeyLookupService.method.getMany.output, response);
     const verified = verify_get_many_response(
       proofBytes,
       toBytes(expectedRoot),
@@ -718,7 +722,7 @@ export class OrderedQmdbClient {
       }),
       options,
     );
-    const proofBytes = toBinary(GetRangeResponseSchema, response);
+    const proofBytes = toBinary(RawOrderedKeyRangeService.method.getRange.output, response);
     const verified = verify_get_range_response(
       proofBytes,
       toBytes(expectedRoot),
@@ -753,10 +757,7 @@ export class OrderedQmdbClient {
       options,
     );
     for await (const frame of stream) {
-      if (!frame.proof) {
-        throw new Error('qmdb subscribe response missing proof');
-      }
-      const proofBytes = toBinary(HistoricalMultiProofSchema, frame.proof);
+      const proofBytes = requireProof(frame.proof, 'subscribe');
       const { tip, ...proof } = decode_historical_multi_proof_operations(
         proofBytes,
         this.merkleFamily,
@@ -805,10 +806,7 @@ export class OrderedQmdbClient {
       create(GetCurrentOperationRangeRequestSchema, request),
       options,
     );
-    if (!response.proof) {
-      throw new Error('qmdb getCurrentOperationRange response missing proof');
-    }
-    const proofBytes = toBinary(CurrentOperationRangeProofSchema, response.proof);
+    const proofBytes = requireProof(response.proof, 'getCurrentOperationRange');
     const verified = verify_current_operation_range_proof(
       proofBytes,
       toBytes(expectedRoot),

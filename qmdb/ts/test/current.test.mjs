@@ -141,6 +141,7 @@ for (const family of ['mmr', 'mmb']) {
     const get = fixture(family, 'get', GetRequestSchema, GetResponseSchema);
     const many = fixture(family, 'get_many', GetManyRequestSchema, GetManyResponseSchema);
     const range = fixture(family, 'range_first', GetRangeRequestSchema, GetRangeResponseSchema);
+    // An empty proof encodes to zero bytes, which the client reads as missing.
     const currentOperationResponse = create(GetCurrentOperationRangeResponseSchema, {
       proof: create(CurrentOperationRangeProofSchema, {}),
     });
@@ -235,7 +236,7 @@ for (const family of ['mmr', 'mmb']) {
         startLocation: 0n,
         maxLocations: 1,
         minSequenceNumber: minimum,
-      }, range.root, options), /current operation range proof has no operations/);
+      }, range.root, options), /getCurrentOperationRange response missing proof/);
       assertForwarded('GetCurrentOperationRange', minimum);
     }
 
