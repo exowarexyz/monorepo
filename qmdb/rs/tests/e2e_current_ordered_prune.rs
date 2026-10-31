@@ -85,7 +85,7 @@ async fn test_mirror_ordered_prune_past_chunk_zero() {
     let (batches, chunk_zero_pruned, expired_key_snapshot) =
         tokio::task::spawn_blocking(move || {
             cw_tokio::Runner::default().start(move |context| async move {
-                let page_cache = CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(8));
+                let page_cache = CacheRef::new(NZU16!(64), NZUsize!(8));
                 let cfg = common::current_variable_config(
                     "current_ordered_variable_mmr_pruned_source",
                     page_cache,
@@ -134,7 +134,7 @@ async fn test_mirror_ordered_prune_past_chunk_zero() {
                             .await
                             .expect("merkleize")
                     };
-                    (db, _) = db.apply_batch(finalized).await.expect("apply");
+                    db = db.apply_batch(finalized).await.expect("apply");
                     // Current pruning is now explicit in Commonware. Keep the
                     // historical operation log intact for this mirror test while
                     // allowing the current bitmap/grafted overlay to prune as far

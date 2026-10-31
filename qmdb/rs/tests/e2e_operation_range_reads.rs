@@ -1375,7 +1375,7 @@ fn prefix_root(operations: &[UnorderedOp], floor: u64) -> Digest {
     base.new_batch()
         .add_leaf_digests(digests)
         .merkleize(&base, &hasher)
-        .root(&base, &hasher, inactive)
+        .root(&hasher, inactive)
         .unwrap()
 }
 

@@ -469,7 +469,7 @@ async fn marshal_resolver_sinks_finalized_chain_from_simplex_api() {
         move || {
             cw_tokio::Runner::default().start(|context| async move {
                 let partition_prefix = "simplex-marshal-resolver-sink";
-                let page_cache = CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(8));
+                let page_cache = CacheRef::new(NZU16!(64), NZUsize!(8));
                 let config: MarshalConfig<_, _, _, TestBlock, Digested<TestBlock>> = MarshalConfig {
                     provider: ConstantProvider::new(schemes[0].clone()),
                     epocher: FixedEpocher::new(NZU64!(100)),

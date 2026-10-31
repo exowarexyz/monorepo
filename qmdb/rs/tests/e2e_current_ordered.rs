@@ -156,7 +156,7 @@ where
     tokio::task::spawn_blocking(|| {
         cw_tokio::Runner::default().start(|context| async move {
             use commonware_runtime::{buffer::paged::CacheRef, Supervisor as _};
-            let page_cache = CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(8));
+            let page_cache = CacheRef::new(NZU16!(64), NZUsize!(8));
             let cfg = common::current_variable_config(
                 "current_ordered_variable_source",
                 page_cache,
@@ -182,7 +182,7 @@ where
                     .await
                     .expect("merkleize")
             };
-            (db, _) = db.apply_batch(finalized).await.expect("apply");
+            db = db.apply_batch(finalized).await.expect("apply");
 
             let latest = db.bounds().end - 1;
             let n = NonZeroU64::new(*latest + 1).unwrap();
@@ -260,7 +260,7 @@ where
     tokio::task::spawn_blocking(move || {
         cw_tokio::Runner::default().start(|context| async move {
             use commonware_runtime::{buffer::paged::CacheRef, Supervisor as _};
-            let page_cache = CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(8));
+            let page_cache = CacheRef::new(NZU16!(64), NZUsize!(8));
             let cfg = common::current_variable_config(
                 partition_prefix,
                 page_cache,
@@ -297,7 +297,7 @@ where
                     .await
                     .expect("merkleize")
             };
-            (db, _) = db.apply_batch(finalized).await.expect("apply");
+            db = db.apply_batch(finalized).await.expect("apply");
 
             let latest = db.bounds().end - 1;
             let n = NonZeroU64::new(*latest + 1).unwrap();
@@ -330,7 +330,7 @@ where
     tokio::task::spawn_blocking(|| {
         cw_tokio::Runner::default().start(|context| async move {
             use commonware_runtime::{buffer::paged::CacheRef, Supervisor as _};
-            let page_cache = CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(8));
+            let page_cache = CacheRef::new(NZU16!(64), NZUsize!(8));
             let cfg = commonware_storage::qmdb::current::Config {
                 merkle_config: common::merkle_config(
                     "current_ordered_fixed_source",
@@ -373,7 +373,7 @@ where
                     .await
                     .expect("fixed merkleize")
             };
-            (db, _) = db.apply_batch(finalized).await.expect("apply fixed");
+            db = db.apply_batch(finalized).await.expect("apply fixed");
 
             let latest = db.bounds().end - 1;
             let n = NonZeroU64::new(*latest + 1).unwrap();
@@ -575,7 +575,7 @@ async fn assert_incremental_seed_batches_keep_current_proofs_verifiable<F>(
         tokio::task::spawn_blocking(move || {
             cw_tokio::Runner::default().start(|context| async move {
                 use commonware_runtime::{buffer::paged::CacheRef, Supervisor as _};
-                let page_cache = CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(8));
+                let page_cache = CacheRef::new(NZU16!(64), NZUsize!(8));
                 let cfg = common::current_variable_config(
                     partition_prefix,
                     page_cache,
@@ -623,7 +623,7 @@ async fn assert_incremental_seed_batches_keep_current_proofs_verifiable<F>(
                             .await
                             .expect("merkleize")
                     };
-                    (db, _) = db.apply_batch(finalized).await.expect("apply");
+                    db = db.apply_batch(finalized).await.expect("apply");
 
                     let latest = db.bounds().end - 1;
                     let count = NonZeroU64::new(*latest + 1).expect("non-zero op count");
@@ -747,7 +747,7 @@ async fn test_ordered_mmb_persistent_interleaved_seed_batches_keep_current_proof
             cw_tokio::Runner::new(cw_tokio::Config::new().with_storage_directory(storage_path))
                 .start(|context| async move {
                     use commonware_runtime::{buffer::paged::CacheRef, Supervisor as _};
-                    let page_cache = CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(8));
+                    let page_cache = CacheRef::new(NZU16!(64), NZUsize!(8));
                     let cfg = common::current_variable_config(
                         "current_ordered_variable_mmb_persistent_seed_source",
                         page_cache,
@@ -788,7 +788,7 @@ async fn test_ordered_mmb_persistent_interleaved_seed_batches_keep_current_proof
                                 .await
                                 .expect("merkleize")
                         };
-                        (db, _) = db.apply_batch(finalized).await.expect("apply");
+                        db = db.apply_batch(finalized).await.expect("apply");
                         db = db.sync().await.expect("sync");
 
                         let latest = db.bounds().end - 1;
@@ -1128,7 +1128,7 @@ where
         cw_tokio::Runner::default().start(|context| async move {
             use commonware_runtime::{buffer::paged::CacheRef, Supervisor as _};
 
-            let page_cache = CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(8));
+            let page_cache = CacheRef::new(NZU16!(64), NZUsize!(8));
             let cfg = common::current_variable_config(
                 "current_ordered_variable_coalesced_source",
                 page_cache,
@@ -1168,7 +1168,7 @@ where
                     )
                     .await
                     .expect("merkleize source batch");
-                (db, _) = db.apply_batch(batch).await.expect("apply source batch");
+                db = db.apply_batch(batch).await.expect("apply source batch");
                 let end = db.bounds().end;
                 let latest = end - 1;
                 let expected_root = db.root();

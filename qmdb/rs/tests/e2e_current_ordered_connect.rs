@@ -186,7 +186,7 @@ async fn build_source_tips(
     tokio::task::spawn_blocking(move || {
         cw_tokio::Runner::default().start(|context| async move {
             use commonware_runtime::{buffer::paged::CacheRef, Supervisor as _};
-            let page_cache = CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(8));
+            let page_cache = CacheRef::new(NZU16!(64), NZUsize!(8));
             let cfg = common::current_variable_config(
                 partition_prefix,
                 page_cache,
@@ -216,7 +216,7 @@ async fn build_source_tips(
                         .await
                         .expect("merkleize")
                 };
-                (db, _) = db.apply_batch(finalized).await.expect("apply");
+                db = db.apply_batch(finalized).await.expect("apply");
 
                 let latest = db.bounds().end - 1;
                 let n = NonZeroU64::new(*latest + 1).unwrap();

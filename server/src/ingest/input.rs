@@ -675,7 +675,7 @@ mod tests {
         time::Duration,
     };
 
-    use commonware_parallel::{Rayon, Strategy};
+    use commonware_parallel::{mocks::Explorer, Rayon, Strategy};
     use futures::StreamExt;
     use http_body::Frame;
     use http_body_util::{Full, StreamBody};
@@ -1937,7 +1937,7 @@ mod tests {
                 None
             };
             let dropped = self.dropped.clone();
-            let future = self.pool.manual().spawn(1, move |_| {
+            let future = Explorer::parallel(&self.pool).spawn(1, move |_| {
                 let output = state.run(buffers);
                 if let Some(started) = started {
                     started.send(()).unwrap();
