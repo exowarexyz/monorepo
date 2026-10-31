@@ -40,9 +40,27 @@ Exoware data is immutable. Applications own publication coordination across chun
 Put retries use `RetryConfig` only for an explicit temporary admission rejection
 that guarantees the backend has not received the batch. They honor the server's
 minimum retry delay and retain the same atomic batch. `RetryConfig::disabled()`
-disables these retries. When configured, `request_timeout` covers all attempts
-and backoff together. Generic errors, timeouts, and lost responses are not
+disables these retries. Generic errors, timeouts, and lost responses are not
 automatically retried. See the [admission retry contract](../../proto/README.md#admission-retries).
+
+## Errors
+
+Every RPC failure surfaces as `ClientError::Rpc` with a Connect code, including
+transport failures. There is no separate HTTP or transport variant. The
+[`ClientError` documentation](https://docs.rs/exoware-sdk/latest/exoware_sdk/enum.ClientError.html)
+describes how transport failures map to codes.
+
+`ClientError::is_transient` reports whether a failure is the kind that may clear
+on retry. It describes the failure only, not whether attempts or time remain.
+The SDK's own retries are bounded by `RetryConfig` attempts and by
+`request_timeout`. When configured, `request_timeout` covers all attempts and
+backoff together for every call. Applications that run their own retry loops
+must bound them as well. A transient error does not prove that a failed Put had
+no effect.
+
+The `health()` and `ready()` probes are plain `GET /health` and `GET /ready`
+requests rather than RPCs. They fail with `ProbeError` when the request cannot
+complete, and return `false` for a non-success status.
 
 ## Request compression
 

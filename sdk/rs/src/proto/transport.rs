@@ -85,7 +85,7 @@ impl BalancedHttp2Config {
         self
     }
 
-    /// Sets the unary RPC deadline and the maximum wait for streaming response headers.
+    /// Sets the default for [`crate::StoreClientBuilder::request_timeout`].
     #[must_use]
     pub const fn with_request_timeout(mut self, timeout: Duration) -> Self {
         self.request_timeout = timeout;
