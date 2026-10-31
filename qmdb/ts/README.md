@@ -10,6 +10,7 @@ This package:
   `getCurrentOperationRange`, and `subscribe` proofs for MMR or MMB through a small WASM module
 - exposes `QmdbOperationLogClient` for backend-agnostic historical operation-log proofs,
   including fixed keyless appends and fixed unordered updates, singly or many per proof
+- exposes `QmdbProofVerifier` for the same checks on proofs received through another transport
 - supports `exact`, `prefix`, and `regex` subscription matchers
 
 Proof verification is root-driven: callers supply the current/global root for
@@ -33,3 +34,38 @@ root with an independently trusted root for the frame tip before using its
 operations. A server-provided root is not a trust anchor. `sha256` and `blake3`
 provide cryptographic hashing. `crc32c` is a checksum mode for accidental
 corruption and is unsuitable for authenticating an untrusted proof provider.
+
+To verify proofs from an aggregate response, pass the raw `HistoricalOperationRangeProof`
+or `HistoricalMultiProof` protobuf bytes, without the RPC response envelope:
+
+```ts
+import { initQmdbWasm, QmdbProofVerifier } from '@exowarexyz/qmdb';
+
+const ready = initQmdbWasm();
+const response = await fetchAggregate();
+await ready;
+const verifier = new QmdbProofVerifier({ merkleFamily: 'mmr', hashFamily: 'sha256' });
+const account = await verifier.verifyFixedUnorderedUpdate(
+  response.accountProof,
+  { tip: stateTip, startLocation: accountLocation, maxLocations: 1 },
+  stateRoot,
+  accountLocation,
+  accountKey,
+  accountValueSize,
+);
+const transactions = await verifier.verifyFixedKeylessAppendMany(
+  response.transactionProof,
+  { tip: transactionTip },
+  transactionRoot,
+  expectedTransactions, // { location: bigint, value: Uint8Array }[]
+);
+```
+
+Obtain roots and tips from authenticated application data, and bind the expected
+keys, locations, and values to the requested account or transactions. An unordered
+update proves historical membership; it does not prove that this is the latest
+update for its key. `account.value` contains the authenticated value to decode.
+The verifier has no Store freshness floor or transport options. The initializer
+is shared with network clients and may also take WASM bytes or a compiled module.
+Supply a custom module on the first initialization call; subsequent calls share
+that initialization, including any failure.

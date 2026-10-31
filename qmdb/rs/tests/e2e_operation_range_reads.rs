@@ -10,7 +10,9 @@ use std::time::Duration;
 use bytes::Bytes;
 use commonware_codec::Encode;
 use commonware_cryptography::{sha256::Digest, Sha256};
-use commonware_storage::merkle::{hasher::Hasher as _, mem::Mem, mmr, Family, Location, Position};
+use commonware_storage::merkle::{
+    hasher::Hasher as _, mem::Mem, mmb, mmr, Family, Graftable, Location, Position,
+};
 use commonware_storage::qmdb::any::ordered::{
     variable::Operation as OrderedOperation, Update as OrderedUpdate,
 };
@@ -941,6 +943,147 @@ async fn operations_multi_proof_reads_rows_and_nodes_in_one_batch() {
             .map(|location| Bytes::from(key(4, location)))
             .to_vec()
     );
+}
+
+async fn reject_invalid_native_multi_proof_requests<F: Graftable>() {
+    let fixture = Fixture::new().await;
+    let store = fixture.prefixed(&[]);
+    let keyless = exoware_qmdb::adapter::Keyless::<F, Sha256, Vec<u8>>::new(
+        store.clone(),
+        ((0..=10000).into(), ()),
+    );
+    let unordered = exoware_qmdb::adapter::Unordered::<F, Sha256, Vec<u8>, Vec<u8>, 32>::new(
+        store,
+        ordered_cfg(),
+    );
+    let maximum = F::MAX_LEAVES.as_u64();
+    for (tip, locations, overflow) in [
+        (14, vec![], false),
+        (14, vec![3, 3], false),
+        (14, vec![7, 3], false),
+        (14, vec![0, 15], false),
+        (14, vec![maximum], false),
+        (2048, (0..=1024).collect(), false),
+        (maximum, vec![0], true),
+        (maximum.saturating_add(1), vec![0], true),
+        (u64::MAX, vec![0], true),
+    ] {
+        let locations = locations.into_iter().map(Location::new).collect::<Vec<_>>();
+        let errors = [
+            keyless
+                .operation_multi_proof(Location::new(tip), &locations, Some(99))
+                .await
+                .unwrap_err(),
+            unordered
+                .operation_multi_proof(Location::new(tip), &locations, Some(99))
+                .await
+                .unwrap_err(),
+        ];
+        for error in errors {
+            assert!(matches!(
+                (overflow, error),
+                (true, exoware_qmdb::QmdbError::TipOverflow)
+                    | (false, exoware_qmdb::QmdbError::InvalidRequestedLocations(_))
+            ));
+        }
+        assert!(fixture.store.calls().is_empty());
+    }
+
+    for (tip, locations) in [
+        (maximum - 1, vec![maximum - 1]),
+        (1023, (0..1024).collect()),
+    ] {
+        fixture.store.state.lock().unwrap().calls.clear();
+        let locations = locations.into_iter().map(Location::new).collect::<Vec<_>>();
+        let errors = [
+            keyless
+                .operation_multi_proof(Location::new(tip), &locations, None)
+                .await
+                .unwrap_err(),
+            unordered
+                .operation_multi_proof(Location::new(tip), &locations, None)
+                .await
+                .unwrap_err(),
+        ];
+        for error in errors {
+            assert!(matches!(
+                error,
+                exoware_qmdb::QmdbError::WatermarkTooLow { .. }
+            ));
+        }
+        assert_eq!(fixture.store.calls().len(), 2);
+    }
+}
+
+#[tokio::test]
+async fn native_multi_proofs_reject_invalid_requests_before_store_access() {
+    reject_invalid_native_multi_proof_requests::<mmr::Family>().await;
+    reject_invalid_native_multi_proof_requests::<mmb::Family>().await;
+}
+
+#[tokio::test]
+async fn native_multi_proofs_preserve_publication_floors_and_authenticate_operations() {
+    for unordered in [false, true] {
+        let fixture = Fixture::new().await;
+        let store = fixture.prefixed(&[]);
+        let (root, encoded) = if unordered {
+            let operations = (0..15)
+                .map(|index| {
+                    if index == 14 {
+                        UnorderedOp::CommitFloor(None, Location::new(4))
+                    } else {
+                        UnorderedOp::Delete(vec![index])
+                    }
+                })
+                .collect::<Vec<_>>();
+            (
+                fixture.stage(&store, &operations, &ordered_cfg()),
+                operations
+                    .iter()
+                    .map(|op| op.encode().to_vec())
+                    .collect::<Vec<_>>(),
+            )
+        } else {
+            let operations = operations();
+            (
+                fixture.stage(&store, &operations, &((0..=10000).into(), ())),
+                operations
+                    .iter()
+                    .map(|op| op.encode().to_vec())
+                    .collect::<Vec<_>>(),
+            )
+        };
+        {
+            let mut state = fixture.store.state.lock().unwrap();
+            state.publication_sequence = 23;
+            state.batch_sequences = vec![31, 47];
+        }
+        let locations = [Location::new(0), Location::new(7), Location::new(14)];
+        let mut proof = if unordered {
+            Unordered::new(store, ordered_cfg())
+                .operation_multi_proof(Location::new(14), &locations, Some(17))
+                .await
+                .unwrap()
+        } else {
+            Keyless::new(store, ((0..=10000).into(), ()))
+                .operation_multi_proof(Location::new(14), &locations, Some(17))
+                .await
+                .unwrap()
+        };
+        assert_eq!(proof.watermark, Location::new(14));
+        assert_eq!(proof.ops_root, root);
+        assert!(proof.verify::<Sha256>());
+        assert_eq!(
+            proof.operations,
+            locations.map(|location| (location, encoded[location.as_u64() as usize].clone()))
+        );
+        let calls = fixture.store.calls();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(publication_range(&calls).min_sequence_number, Some(17));
+        assert_eq!(boundary_batch(&calls, 14).min_sequence_number, Some(23));
+        proof.operations[1].1[0] ^= 1;
+        assert!(!proof.verify::<Sha256>());
+    }
 }
 
 #[tokio::test]

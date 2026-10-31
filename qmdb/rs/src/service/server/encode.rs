@@ -218,6 +218,26 @@ fn write_operation_range_checkpoint<D: Digest, F: Graftable>(
     }
 }
 
+/// Encode the bare `qmdb.v1.HistoricalOperationRangeProof` protobuf message.
+pub fn encode_historical_operation_range_proof<D: Digest, F: Graftable>(
+    proof: &OperationRangeCheckpoint<D, F>,
+) -> Vec<u8> {
+    message_bytes(operation_range_checkpoint_len(proof), |buf| {
+        write_operation_range_checkpoint(buf, proof);
+    })
+    .to_vec()
+}
+
+/// Encode the bare `qmdb.v1.HistoricalMultiProof` protobuf message.
+pub fn encode_historical_multi_proof<D: Digest, F: Graftable>(
+    proof: &RawBatchMultiProof<D, F>,
+) -> Vec<u8> {
+    message_bytes(historical_multi_proof_len(proof), |buf| {
+        write_historical_multi_proof(buf, proof);
+    })
+    .to_vec()
+}
+
 fn current_operation_range_proof_len<D: Digest, Op: Encode, const N: usize, F: Graftable>(
     proof: &CurrentOperationRangeProofResult<D, Op, N, F>,
 ) -> usize {

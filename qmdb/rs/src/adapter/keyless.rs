@@ -21,6 +21,7 @@ use crate::error::QmdbError;
 use crate::proof::{
     MultiProofOperations, OperationRangeCheckpoint, RawBatchMultiProof, VerifiedOperationRange,
 };
+use crate::request::OperationLocations;
 use crate::OperationKv;
 use crate::PublishedWatermark;
 
@@ -209,6 +210,23 @@ where
         )
         .await?;
         Ok(proof)
+    }
+
+    /// Prove 1–1024 strictly ascending operation locations at `tip`.
+    pub async fn operation_multi_proof(
+        &self,
+        tip: Location<F>,
+        locations: &[Location<F>],
+        min_sequence_number: Option<u64>,
+    ) -> Result<RawBatchMultiProof<H::Digest, F>, QmdbError> {
+        let requested = locations
+            .iter()
+            .map(|location| location.as_u64())
+            .collect::<Vec<_>>();
+        OperationLocations::with_max_leaves(tip.as_u64(), &requested, F::MAX_LEAVES.as_u64())?;
+        let watermark = self.resolve_watermark(tip, min_sequence_number).await?;
+        self.multi_proof_at(watermark, MultiProofOperations::Read(locations))
+            .await
     }
 
     /// Multi-proof at a published watermark, built from the same cached reads

@@ -46,8 +46,7 @@ pub enum ProofKind {
     CurrentKeyValue,
     /// Current ordered proof that a key is inactive.
     CurrentKeyExclusion,
-    /// Subscribe-time multi-proof covering matched operations in one batch
-    /// (`OperationLogService.Subscribe`).
+    /// Historical multi-proof over selected operations.
     BatchMulti,
     /// Contiguous historical range proof (sync checkpoint).
     RangeCheckpoint,
@@ -123,7 +122,7 @@ pub enum QmdbError {
     RangeStartOutOfBounds { start: u64, count: u64 },
     #[error("invalid requested locations: {0}")]
     InvalidRequestedLocations(String),
-    #[error("requested tip {} exceeds the operation location domain", u64::MAX)]
+    #[error("requested tip exceeds the operation location domain")]
     TipOverflow,
     #[error("encoded value exceeds store value limit ({len} > {max})")]
     EncodedValueTooLarge { len: usize, max: usize },

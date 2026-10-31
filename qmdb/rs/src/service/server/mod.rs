@@ -7,7 +7,7 @@
 //! only the operation log.
 
 mod current_operation;
-mod encode;
+pub(crate) mod encode;
 mod key_lookup;
 mod key_range;
 mod operation_log;

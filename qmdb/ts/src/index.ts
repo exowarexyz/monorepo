@@ -33,3 +33,12 @@ export {
   type VerifiedRawOperationRangeProof,
   type VerifiedRawOperationsProof,
 } from './client.js';
+
+export {
+  initQmdbWasm,
+  QmdbProofVerifier,
+  type OperationRangeContext,
+  type OperationsContext,
+  type OperationsTipContext,
+  type QmdbProofVerifierOptions,
+} from './verification.js';
