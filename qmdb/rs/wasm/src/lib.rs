@@ -9,20 +9,29 @@ use crate::proto::qmdb::v1::{
 };
 use buffa::MessageView;
 use commonware_codec::{
-    Copying, Decode, DecodeExt, DecodeRangeExt, Encode, FixedSize, RangeCfg, Read, ReadExt,
+    Copying, Decode, DecodeExt, DecodeRangeExt, Encode, FixedSize, RangeCfg, Read,
 };
 use commonware_cryptography::{Blake3, Crc32, Digest, Sha256};
 use commonware_storage::{
-    merkle::{self, hasher::Hasher as MerkleHasher, Location, PendingChunk},
+    merkle::{self, Location},
     mmb, mmr,
     qmdb::{
         any::{
+            operation::{
+                COMMIT_CONTEXT as FIXED_UNORDERED_COMMIT_CONTEXT,
+                DELETE_CONTEXT as FIXED_UNORDERED_DELETE_CONTEXT,
+                UPDATE_CONTEXT as FIXED_UNORDERED_UPDATE_CONTEXT,
+            },
             ordered::{variable::Operation as OrderedOperation, Update},
             value::VariableEncoding,
         },
         current::{
-            grafting::{graftable_chunks, Verifier as GraftingVerifier},
-            proof::{OpsRootWitness, RangeProof},
+            ordered::proof::dynamic::{ExclusionProof, KeyValueProof},
+            proof::{dynamic::OperationProof, OpsRootWitness, RangeProof},
+        },
+        keyless::{
+            APPEND_CONTEXT as FIXED_KEYLESS_APPEND_CONTEXT,
+            COMMIT_CONTEXT as FIXED_KEYLESS_COMMIT_CONTEXT,
         },
         verify::{verify_multi_proof, verify_proof_and_pinned_nodes},
     },
@@ -36,18 +45,9 @@ pub mod proto;
 
 #[path = "../../src/request.rs"]
 mod request;
-use request::{span_contains, validate_key_range, OperationLocations, OperationWindow};
+use request::{validate_key_range, OperationLocations, OperationWindow};
 
 const MAX_OPERATION_SIZE: usize = u16::MAX as usize;
-
-// The WASM API receives raw fixed-operation bytes plus runtime key/value sizes.
-// Mirror Commonware's fixed-operation wire tags so verification is not tied to
-// one concrete Rust value type.
-const FIXED_KEYLESS_COMMIT_CONTEXT: u8 = 0;
-const FIXED_KEYLESS_APPEND_CONTEXT: u8 = 1;
-const FIXED_UNORDERED_DELETE_CONTEXT: u8 = 0xD1;
-const FIXED_UNORDERED_UPDATE_CONTEXT: u8 = 0xD2;
-const FIXED_UNORDERED_COMMIT_CONTEXT: u8 = 0xD3;
 
 fn decode_vec_key_wire(encoded_key: &[u8]) -> Result<Vec<u8>, String> {
     Vec::<u8>::decode_range(Copying(encoded_key), 0..=MAX_OPERATION_SIZE)
@@ -57,22 +57,6 @@ fn decode_vec_key_wire(encoded_key: &[u8]) -> Result<Vec<u8>, String> {
 #[derive(Debug)]
 struct CurrentProofConfig {
     chunk_size: usize,
-    chunk_bits: u64,
-    grafting_height: u32,
-}
-
-struct OperationProof<F: merkle::Graftable, D: Digest> {
-    loc: Location<F>,
-    chunk: Vec<u8>,
-    range_proof: RangeProof<F, D>,
-}
-
-enum ExclusionProof<F: merkle::Graftable, D: Digest> {
-    KeyValue(
-        OperationProof<F, D>,
-        Update<Vec<u8>, VariableEncoding<Vec<u8>>>,
-    ),
-    Commit(OperationProof<F, D>, Option<Vec<u8>>),
 }
 
 fn op_cfg<F>() -> <OrderedOperation<F, Vec<u8>, Vec<u8>> as Read>::Cfg
@@ -136,134 +120,10 @@ fn current_proof_config<D: Digest>(
         .checked_mul(8)
         .and_then(|bits| u64::try_from(bits).ok())
         .ok_or_else(|| format!("{label} current chunk size is too large"))?;
-    Ok(CurrentProofConfig {
-        chunk_size,
-        chunk_bits,
-        grafting_height: chunk_bits.trailing_zeros(),
-    })
-}
-
-fn get_bit_from_chunk(chunk: &[u8], bit: u64, chunk_bits: u64) -> bool {
-    let bit = bit % chunk_bits;
-    let byte = (bit / 8) as usize;
-    let offset = bit % 8;
-    chunk
-        .get(byte)
-        .map(|byte| (byte & (1 << offset)) != 0)
-        .unwrap_or(false)
-}
-
-fn verify_current_range<F, H, O>(
-    proof: &RangeProof<F, H::Digest>,
-    config: &CurrentProofConfig,
-    start_loc: Location<F>,
-    ops: &[O],
-    chunks: &[Vec<u8>],
-    root: &H::Digest,
-) -> Result<(), String>
-where
-    F: merkle::Graftable,
-    H: commonware_cryptography::Hasher,
-    O: Encode,
-{
-    if ops.is_empty() || chunks.is_empty() {
-        return Err("current proof has empty operations or chunks".to_string());
+    if chunk_bits.trailing_zeros() >= 63 {
+        return Err(format!("{label} current chunk size is too large"));
     }
-    let end_loc = start_loc
-        .checked_add(ops.len() as u64)
-        .ok_or_else(|| "current proof end location overflow".to_string())?;
-    let leaves = proof.proof.leaves;
-    if end_loc > leaves {
-        return Err("current proof range exceeds proof leaves".to_string());
-    }
-    let start_chunk = *start_loc / config.chunk_bits;
-    let end_chunk = (*end_loc - 1) / config.chunk_bits;
-    let complete_chunks = *leaves / config.chunk_bits;
-    if (end_chunk - start_chunk + 1) != chunks.len() as u64 {
-        return Err("current proof chunk metadata length mismatch".to_string());
-    }
-    for (index, chunk) in chunks.iter().enumerate() {
-        if chunk.len() != config.chunk_size {
-            return Err(format!(
-                "current proof chunk {index} has {} bytes, expected {}",
-                chunk.len(),
-                config.chunk_size
-            ));
-        }
-    }
-
-    let next_bit = *leaves % config.chunk_bits;
-    let has_partial_chunk = next_bit != 0;
-    let graftable_chunks =
-        graftable_chunks::<F>(*leaves, config.grafting_height).min(complete_chunks);
-    let pending_chunks = complete_chunks
-        .checked_sub(graftable_chunks)
-        .ok_or_else(|| "current proof graftable chunk window underflow".to_string())?;
-    if pending_chunks > 1 {
-        return Err("current proof has multiple pending chunks".to_string());
-    }
-    let has_pending_chunk = pending_chunks == 1;
-    if proof.pending_chunk_digest.as_ref().is_some() != has_pending_chunk {
-        return Err("current proof pending chunk presence mismatch".to_string());
-    }
-
-    let chunk_refs = chunks.iter().map(Vec::as_slice).collect::<Vec<_>>();
-    let grafting_verifier = GraftingVerifier::<F, H>::new(
-        config.grafting_height,
-        start_chunk,
-        chunk_refs,
-        graftable_chunks,
-    );
-
-    if has_partial_chunk {
-        let Some(last_chunk_digest) = proof.partial_chunk_digest.as_ref() else {
-            return Err("current proof missing partial chunk digest".to_string());
-        };
-        if end_chunk == complete_chunks {
-            let last_chunk = chunks.last().expect("chunks non-empty");
-            if *last_chunk_digest != grafting_verifier.hash(&[last_chunk.as_slice()]) {
-                return Err("current proof partial chunk digest mismatch".to_string());
-            }
-        }
-    } else if proof.partial_chunk_digest.is_some() {
-        return Err("current proof has unexpected partial chunk digest".to_string());
-    }
-
-    if let Some(pending_digest) = proof.pending_chunk_digest.as_ref() {
-        let pending_idx = graftable_chunks;
-        if pending_idx >= start_chunk && pending_idx <= end_chunk {
-            let local = usize::try_from(pending_idx - start_chunk)
-                .map_err(|_| "current proof pending chunk index overflow".to_string())?;
-            let Some(pending_chunk) = chunks.get(local) else {
-                return Err("current proof pending chunk index out of range".to_string());
-            };
-            if *pending_digest != grafting_verifier.hash(&[pending_chunk.as_slice()]) {
-                return Err("current proof pending chunk digest mismatch".to_string());
-            }
-        }
-    }
-
-    let encoded_ops = ops.iter().map(Encode::encode).collect::<Vec<_>>();
-    let merkle_root = proof
-        .proof
-        .reconstruct_root(&grafting_verifier, &encoded_ops, start_loc)
-        .map_err(|_| "current proof failed root reconstruction".to_string())?;
-    let partial_chunk = has_partial_chunk.then(|| {
-        (
-            next_bit,
-            *proof.partial_chunk_digest.as_ref().expect("checked above"),
-        )
-    });
-    let witness = OpsRootWitness::<F, H::Digest> {
-        grafted_root: merkle_root,
-        pending_chunk_digest: proof.pending_chunk_digest.clone(),
-        partial_chunk,
-    };
-    let reconstructed = witness.root::<H>(&proof.ops_root);
-    if reconstructed != *root {
-        return Err("current proof failed verification".to_string());
-    }
-    Ok(())
+    Ok(CurrentProofConfig { chunk_size })
 }
 
 macro_rules! with_hash_family {
@@ -628,106 +488,16 @@ where
         .iter()
         .map(|(_, operation)| operation.clone())
         .collect::<Vec<_>>();
-    let chunks = proto
-        .chunks
-        .iter()
-        .map(|bytes| bytes.to_vec())
-        .collect::<Vec<_>>();
-    verify_current_range::<F, H, _>(&proof, config, start, &ordered_operations, &chunks, root)?;
-    Ok(operations)
-}
-
-fn read_operation_proof<F, D>(
-    buf: &mut Copying<'_>,
-    max_digests: usize,
-    config: &CurrentProofConfig,
-) -> Result<OperationProof<F, D>, String>
-where
-    F: merkle::Graftable,
-    D: Digest + DecodeExt<()>,
-{
-    let loc = Location::<F>::read(buf)
-        .map_err(|err| format!("failed to decode current operation proof location: {err}"))?;
-    if buf.0.len() < config.chunk_size {
-        return Err("current operation proof chunk is truncated".to_string());
-    }
-    let chunk = buf.0[..config.chunk_size].to_vec();
-    buf.0 = &buf.0[config.chunk_size..];
-    let range_proof = RangeProof::<F, D>::read_cfg(buf, &max_digests)
-        .map_err(|err| format!("failed to decode current operation range proof: {err}"))?;
-    Ok(OperationProof {
-        loc,
-        chunk,
-        range_proof,
-    })
-}
-
-fn read_exclusion_proof<F, D>(
-    bytes: &[u8],
-    max_digests: usize,
-    config: &CurrentProofConfig,
-) -> Result<ExclusionProof<F, D>, String>
-where
-    F: merkle::Graftable,
-    D: Digest + DecodeExt<()>,
-{
-    const KEY_VALUE_CONTEXT: u8 = 0;
-    const COMMIT_CONTEXT: u8 = 1;
-
-    let mut buf = Copying(bytes);
-    let tag = u8::read(&mut buf)
-        .map_err(|err| format!("failed to decode current key-exclusion proof tag: {err}"))?;
-    let proof = read_operation_proof::<F, D>(&mut buf, max_digests, config)?;
-    match tag {
-        KEY_VALUE_CONTEXT => {
-            let update =
-                Update::<Vec<u8>, VariableEncoding<Vec<u8>>>::read_cfg(&mut buf, &op_cfg::<F>())
-                    .map_err(|err| {
-                        format!("failed to decode current key-exclusion update: {err}")
-                    })?;
-            if !buf.0.is_empty() {
-                return Err("current key-exclusion proof has trailing bytes".to_string());
-            }
-            Ok(ExclusionProof::KeyValue(proof, update))
-        }
-        COMMIT_CONTEXT => {
-            let value =
-                Option::<Vec<u8>>::read_cfg(&mut buf, &((0..=MAX_OPERATION_SIZE).into(), ()))
-                    .map_err(|err| {
-                        format!("failed to decode current key-exclusion commit value: {err}")
-                    })?;
-            if !buf.0.is_empty() {
-                return Err("current key-exclusion proof has trailing bytes".to_string());
-            }
-            Ok(ExclusionProof::Commit(proof, value))
-        }
-        other => Err(format!(
-            "current key-exclusion proof uses invalid tag {other}"
-        )),
-    }
-}
-
-fn verify_operation_proof<F, H>(
-    proof: &OperationProof<F, H::Digest>,
-    operation: &OrderedOperation<F, Vec<u8>, Vec<u8>>,
-    root: &H::Digest,
-    config: &CurrentProofConfig,
-) -> Result<(), String>
-where
-    F: merkle::Graftable,
-    H: commonware_cryptography::Hasher,
-{
-    if !get_bit_from_chunk(&proof.chunk, *proof.loc, config.chunk_bits) {
-        return Err("current operation proof is inactive".to_string());
-    }
-    verify_current_range::<F, H, _>(
-        &proof.range_proof,
-        config,
-        proof.loc,
-        std::slice::from_ref(operation),
-        std::slice::from_ref(&proof.chunk),
+    if !proof.verify_with_chunk_size::<H, _>(
+        start,
+        &ordered_operations,
+        &proto.chunks,
+        config.chunk_size,
         root,
-    )
+    ) {
+        return Err("current operation range proof failed verification".to_string());
+    }
+    Ok(operations)
 }
 
 fn verify_key_value_from_proto<F, H>(
@@ -747,17 +517,27 @@ where
         &op_cfg::<F>(),
     )
     .map_err(|err| format!("failed to decode current key-value operation: {err}"))?;
+    let OrderedOperation::Update(update) = operation else {
+        return Err("current key-value proof operation must be an update".to_string());
+    };
     let max_digests = proof_digest_cap::<H::Digest>(&proto.proof);
-    let mut buf = Copying(proto.proof.as_ref());
-    let proof = read_operation_proof::<F, H::Digest>(&mut buf, max_digests, config)?;
-    if !buf.0.is_empty() {
-        return Err("current key-value proof has trailing bytes".to_string());
+
+    // The wire carries an operation proof; the update supplies the authenticated successor key.
+    let proof = OperationProof::<F, H::Digest>::decode_cfg(
+        Copying(proto.proof.as_ref()),
+        &(config.chunk_size, max_digests),
+    )
+    .map_err(|err| format!("failed to decode current key-value proof: {err}"))?;
+    let location = proof.loc;
+    let proof = KeyValueProof {
+        proof,
+        next_key: update.next_key.clone(),
+    };
+    if !proof.verify::<H, VariableEncoding<Vec<u8>>>(update.key.clone(), update.value.clone(), root)
+    {
+        return Err("current key-value proof failed verification".to_string());
     }
-    verify_operation_proof::<F, H>(&proof, &operation, root, config)?;
-    match operation {
-        OrderedOperation::Update(update) => Ok((proof.loc, update)),
-        _ => Err("current key-value proof operation must be an update".to_string()),
-    }
+    Ok((location, update))
 }
 
 fn verify_key_value_for_key_from_proto<F, H>(
@@ -795,28 +575,23 @@ where
         Decode + Encode + Read<Cfg = ((RangeCfg<usize>, ()), (RangeCfg<usize>, ()))>,
 {
     let max_digests = proof_digest_cap::<H::Digest>(&proto.proof);
-    let proof = read_exclusion_proof::<F, H::Digest>(&proto.proof, max_digests, config)?;
+    let proof = ExclusionProof::<F, Vec<u8>, VariableEncoding<Vec<u8>>, H::Digest>::decode_cfg(
+        Copying(proto.proof.as_ref()),
+        &(
+            (config.chunk_size, max_digests),
+            op_cfg::<F>(),
+            ((0..=MAX_OPERATION_SIZE).into(), ()),
+        ),
+    )
+    .map_err(|err| format!("failed to decode current key-exclusion proof: {err}"))?;
     let requested_key = decode_vec_key_wire(requested_key)?;
-    match proof {
-        ExclusionProof::KeyValue(proof, update) => {
-            if update.key == requested_key {
-                return Err("current key-exclusion proof proves requested key exists".to_string());
-            }
-            if !span_contains(&update.key, &update.next_key, &requested_key) {
-                return Err(
-                    "current key-exclusion proof span does not contain requested key".to_string(),
-                );
-            }
-            let operation = OrderedOperation::Update(update.clone());
-            verify_operation_proof::<F, H>(&proof, &operation, current_root, config)?;
-            Ok(Some(update.next_key))
-        }
-        ExclusionProof::Commit(proof, value) => {
-            let operation = OrderedOperation::CommitFloor(value, proof.loc);
-            verify_operation_proof::<F, H>(&proof, &operation, current_root, config)?;
-            Ok(None)
-        }
+    if !proof.verify::<H>(&requested_key, current_root) {
+        return Err("current key-exclusion proof failed verification".to_string());
     }
+    Ok(match proof {
+        ExclusionProof::KeyValue(_, update) => Some(update.next_key),
+        ExclusionProof::Commit(..) => None,
+    })
 }
 
 fn set_field(target: &Object, key: &str, value: &JsValue) -> Result<(), JsValue> {
@@ -2038,11 +1813,14 @@ mod tests {
             value::FixedEncoding,
         },
         current::{
+            grafting::{graftable_chunks, Verifier as GraftingVerifier},
             ordered::proof::constant::ExclusionProof as UpstreamExclusionProof,
             proof::constant::OperationProof as UpstreamOperationProof,
         },
         keyless,
     };
+
+    use commonware_utils::bitmap::Prunable;
 
     type OrderedVariableOperation<F> = OrderedOperation<F, Vec<u8>, Vec<u8>>;
 
@@ -2322,8 +2100,6 @@ mod tests {
         let config = current_proof_config::<Sha256Digest>(64, "test proof").unwrap();
 
         assert_eq!(config.chunk_size, 64);
-        assert_eq!(config.chunk_bits, 512);
-        assert_eq!(config.grafting_height, 9);
         assert_eq!(
             current_proof_config::<Sha256Digest>(48, "test proof").unwrap_err(),
             "test proof current chunk size must be a power of two"
@@ -2334,109 +2110,508 @@ mod tests {
         );
     }
 
-    fn synthetic_operation_proof<F, const N: usize>(
-        pending_chunk_digest: F::PendingChunk<Sha256Digest>,
-    ) -> UpstreamOperationProof<F, Sha256Digest, N>
-    where
-        F: merkle::Graftable,
-    {
-        UpstreamOperationProof {
-            loc: Location::new(9),
-            chunk: core::array::from_fn(|index| index as u8),
-            range_proof: RangeProof {
-                proof: merkle::Proof {
-                    leaves: Location::new(21),
-                    inactive_peaks: 1,
-                    digests: vec![Sha256::fill(0xA1), Sha256::fill(0xA2)],
-                },
-                pending_chunk_digest,
-                partial_chunk_digest: Some(Sha256::fill(0xB3)),
-                ops_root: Sha256::fill(0xC4),
-            },
+    struct CurrentFixture<F: merkle::Graftable, const N: usize> {
+        operations: Vec<OrderedVariableOperation<F>>,
+        status: Prunable<N>,
+        grafted: Mem<F, Sha256Digest>,
+        ops_root: Sha256Digest,
+        root: Sha256Digest,
+    }
+
+    impl<F: merkle::Graftable, const N: usize> CurrentFixture<F, N> {
+        fn new(leaves: usize) -> Self {
+            let key = |index: usize| (index as u32).to_be_bytes().to_vec();
+            let mut operations = (0..leaves - 1)
+                .map(|index| {
+                    OrderedOperation::Update(Update {
+                        key: key(index.max(1)),
+                        value: vec![index as u8; 7],
+                        next_key: key(if index + 1 == leaves - 1 {
+                            1
+                        } else {
+                            index + 1
+                        }),
+                    })
+                })
+                .collect::<Vec<_>>();
+            operations.push(OrderedOperation::CommitFloor(None, Location::new(1)));
+            Self::from_operations(operations, true)
+        }
+
+        fn from_operations(
+            operations: Vec<OrderedVariableOperation<F>>,
+            inactive_first: bool,
+        ) -> Self {
+            let leaves = operations.len();
+            let mut status = Prunable::<N>::new();
+            for index in 0..leaves {
+                status.push(index != 0 || !inactive_first);
+            }
+            let chunks = (0..leaves.div_ceil(N * 8))
+                .map(|index| status.get_chunk(index).as_slice())
+                .collect::<Vec<_>>();
+            let complete = leaves as u64 / (N as u64 * 8);
+            let graftable =
+                graftable_chunks::<F>(leaves as u64, (N * 8).trailing_zeros()).min(complete);
+            let grafting =
+                GraftingVerifier::<F, Sha256>::new((N * 8).trailing_zeros(), 0, chunks, graftable);
+            let hasher = commonware_storage::qmdb::hasher::<Sha256>();
+            let mut ops_tree = Mem::<F, Sha256Digest>::new();
+            let mut grafted = Mem::<F, Sha256Digest>::new();
+            let mut ops_batch = ops_tree.new_batch();
+            let mut grafted_batch = grafted.new_batch();
+            for operation in &operations {
+                let encoded = operation.encode();
+                ops_batch = ops_batch.add(&hasher, &encoded);
+                grafted_batch = grafted_batch.add(&grafting, &encoded);
+            }
+            ops_tree
+                .apply_batch(&ops_batch.merkleize(&ops_tree, &hasher))
+                .unwrap();
+            grafted
+                .apply_batch(&grafted_batch.merkleize(&grafted, &grafting))
+                .unwrap();
+            let ops_root = ops_tree.root(&hasher, 0).unwrap();
+            let proof = RangeProof::build::<Sha256, N>(
+                &status,
+                merkle::RangePlan::new(
+                    Location::new(leaves as u64),
+                    Location::new(0)..Location::new(leaves as u64),
+                )
+                .unwrap(),
+                |position| grafted.get_node(position),
+                Location::new(0),
+                ops_root,
+            )
+            .unwrap();
+            let root = OpsRootWitness::<F, _> {
+                grafted_root: grafted.root(&grafting, 0).unwrap(),
+                pending_chunk_digest: proof.pending_chunk_digest,
+                partial_chunk: proof
+                    .partial_chunk_digest
+                    .map(|digest| (leaves as u64 % (N as u64 * 8), digest)),
+            }
+            .root::<Sha256>(&ops_root);
+            Self {
+                operations,
+                status,
+                grafted,
+                ops_root,
+                root,
+            }
+        }
+
+        fn operation_proof(&self, index: usize) -> UpstreamOperationProof<F, Sha256Digest, N> {
+            UpstreamOperationProof::build::<Sha256>(
+                &self.status,
+                merkle::ElementPlan::new(
+                    Location::new(self.operations.len() as u64),
+                    Location::new(index as u64),
+                )
+                .unwrap(),
+                |position| self.grafted.get_node(position),
+                Location::new(0),
+                self.ops_root,
+            )
+            .unwrap()
+        }
+
+        fn key_value(&self, index: usize) -> CurrentKeyValueProof {
+            CurrentKeyValueProof {
+                proof: self.operation_proof(index).encode(),
+                encoded_operation: self.operations[index].encode(),
+                ..Default::default()
+            }
+        }
+
+        fn exclusion(&self, index: usize) -> CurrentKeyExclusionProof {
+            let proof = match &self.operations[index] {
+                OrderedOperation::Update(update) => {
+                    UpstreamExclusionProof::KeyValue(self.operation_proof(index), update.clone())
+                }
+                OrderedOperation::CommitFloor(metadata, _) => UpstreamExclusionProof::<
+                    F,
+                    Vec<u8>,
+                    VariableEncoding<Vec<u8>>,
+                    Sha256Digest,
+                    N,
+                >::Commit(
+                    self.operation_proof(index),
+                    metadata.clone(),
+                ),
+                _ => unreachable!(),
+            };
+            CurrentKeyExclusionProof {
+                proof: proof.encode(),
+                ..Default::default()
+            }
+        }
+
+        fn range(&self, start: usize, end: usize) -> CurrentOperationRangeProof {
+            let proof = RangeProof::build::<Sha256, N>(
+                &self.status,
+                merkle::RangePlan::new(
+                    Location::new(self.operations.len() as u64),
+                    Location::new(start as u64)..Location::new(end as u64),
+                )
+                .unwrap(),
+                |position| self.grafted.get_node(position),
+                Location::new(0),
+                self.ops_root,
+            )
+            .unwrap();
+            CurrentOperationRangeProof {
+                proof: proof.encode(),
+                start_location: start as u64,
+                encoded_operations: self.operations[start..end]
+                    .iter()
+                    .map(Encode::encode)
+                    .collect(),
+                chunks: (start / (N * 8)..=(end - 1) / (N * 8))
+                    .map(|index| self.status.get_chunk(index).to_vec().into())
+                    .collect(),
+                ..Default::default()
+            }
         }
     }
 
-    // The WASM readers mirror Commonware's proof encodings with a runtime chunk size, so an
-    // upstream layout or tag change must fail here rather than in the browser
-    fn assert_current_proofs_decode<F, const N: usize>(
-        pending_chunk_digest: F::PendingChunk<Sha256Digest>,
-    ) where
-        F: merkle::Graftable + PartialEq,
-    {
+    fn assert_current_interoperability<F: merkle::Graftable + PartialEq, const N: usize>() {
         let config = current_proof_config::<Sha256Digest>(N, "test").unwrap();
-        let expected = synthetic_operation_proof::<F, N>(pending_chunk_digest);
-        let update = Update::<Vec<u8>, VariableEncoding<Vec<u8>>> {
-            key: b"k1".to_vec(),
-            value: b"v1".to_vec(),
-            next_key: b"k2".to_vec(),
-        };
-        let assert_proof = |decoded: &OperationProof<F, Sha256Digest>| {
-            assert_eq!(decoded.loc, expected.loc);
-            assert_eq!(decoded.chunk, expected.chunk.to_vec());
-            assert_eq!(decoded.range_proof, expected.range_proof);
-        };
-
-        let key_value = UpstreamExclusionProof::<
-            F,
-            Vec<u8>,
-            VariableEncoding<Vec<u8>>,
-            Sha256Digest,
-            N,
-        >::KeyValue(expected.clone(), update.clone())
-        .encode();
-        match read_exclusion_proof::<F, Sha256Digest>(
-            &key_value,
-            proof_digest_cap::<Sha256Digest>(&key_value),
-            &config,
-        )
-        .unwrap()
-        {
-            ExclusionProof::KeyValue(decoded, decoded_update) => {
-                assert_proof(&decoded);
-                assert_eq!(decoded_update, update);
+        for leaves in [N * 8 - 1, N * 8, N * 8 + 1, N * 8 + 2, N * 16 + 3] {
+            let fixture = CurrentFixture::<F, N>::new(leaves);
+            let start = N * 8 - 2;
+            let proto = fixture.range(start, leaves);
+            let window =
+                OperationWindow::new(leaves as u64 - 1, start as u64, (leaves - start) as u32)
+                    .unwrap();
+            let verified = verify_current_operation_range_from_proto::<F, Sha256>(
+                &proto,
+                &fixture.root,
+                &config,
+                window,
+            )
+            .unwrap();
+            assert_eq!(verified.len(), leaves - start);
+            assert_eq!(verified[0].1, fixture.operations[start]);
+            for index in [1, leaves - 2] {
+                let requested_key = match &fixture.operations[index] {
+                    OrderedOperation::Update(update) => update.key.encode(),
+                    _ => unreachable!(),
+                };
+                let (location, operation) = verify_key_value_for_key_from_proto::<F, Sha256>(
+                    &fixture.key_value(index),
+                    &requested_key,
+                    &fixture.root,
+                    &config,
+                )
+                .unwrap();
+                assert_eq!(location, Location::new(index as u64));
+                assert_eq!(operation, fixture.operations[index]);
             }
-            ExclusionProof::Commit(..) => panic!("key-value exclusion proof decoded as a commit"),
         }
+    }
 
-        let commit = UpstreamExclusionProof::<F, Vec<u8>, VariableEncoding<Vec<u8>>, Sha256Digest, N>::Commit(
-            expected.clone(),
-            Some(b"meta".to_vec()),
+    #[test]
+    fn test_current_proofs_interoperate_with_commonware_runtime_chunk_sizes() {
+        assert_current_interoperability::<mmr::Family, 32>();
+        assert_current_interoperability::<mmb::Family, 32>();
+        assert_current_interoperability::<mmr::Family, 128>();
+        assert_current_interoperability::<mmb::Family, 128>();
+    }
+
+    fn assert_current_request_binding<F: merkle::Graftable + PartialEq>() {
+        let fixture = CurrentFixture::<F, 64>::new(515);
+        let config = current_proof_config::<Sha256Digest>(64, "test").unwrap();
+        let hit = fixture.key_value(1);
+        let key = 1u32.to_be_bytes().to_vec().encode();
+        assert!(verify_key_value_for_key_from_proto::<F, Sha256>(
+            &hit,
+            &2u32.to_be_bytes().to_vec().encode(),
+            &fixture.root,
+            &config
         )
-        .encode();
-        match read_exclusion_proof::<F, Sha256Digest>(
+        .unwrap_err()
+        .contains("key mismatch"));
+        assert!(verify_key_value_for_key_from_proto::<F, Sha256>(
+            &hit,
+            &key,
+            &fixture.ops_root,
+            &config
+        )
+        .is_err());
+        let inactive = fixture.key_value(0);
+        assert!(verify_key_value_for_key_from_proto::<F, Sha256>(
+            &inactive,
+            &key,
+            &fixture.root,
+            &config
+        )
+        .is_err());
+        let range = fixture.range(0, 2);
+        let window = OperationWindow::new(514, 0, 2).unwrap();
+        assert!(verify_current_operation_range_from_proto::<F, Sha256>(
+            &range,
+            &fixture.root,
+            &config,
+            window
+        )
+        .is_ok());
+        for window in [
+            OperationWindow::new(513, 0, 2),
+            OperationWindow::new(514, 1, 2),
+            OperationWindow::new(514, 0, 3),
+        ] {
+            assert!(verify_current_operation_range_from_proto::<F, Sha256>(
+                &range,
+                &fixture.root,
+                &config,
+                window.unwrap()
+            )
+            .is_err());
+        }
+        let span = fixture.exclusion(1);
+        let between = vec![0u8, 0, 0, 1, 1].encode();
+        assert_eq!(
+            verify_key_exclusion_from_proto::<F, Sha256>(&span, &between, &fixture.root, &config)
+                .unwrap(),
+            Some(2u32.to_be_bytes().to_vec())
+        );
+        for key in [1u32, 2, 3] {
+            assert!(verify_key_exclusion_from_proto::<F, Sha256>(
+                &span,
+                &key.to_be_bytes().to_vec().encode(),
+                &fixture.root,
+                &config
+            )
+            .is_err());
+        }
+        let wrap = fixture.exclusion(513);
+        assert!(verify_key_exclusion_from_proto::<F, Sha256>(
+            &wrap,
+            &0u32.to_be_bytes().to_vec().encode(),
+            &fixture.root,
+            &config
+        )
+        .is_ok());
+        let commit = fixture.exclusion(514);
+        assert!(verify_key_exclusion_from_proto::<F, Sha256>(
             &commit,
-            proof_digest_cap::<Sha256Digest>(&commit),
+            &key,
+            &fixture.root,
+            &config
+        )
+        .is_err());
+        let empty = CurrentFixture::<F, 64>::from_operations(
+            vec![OrderedOperation::CommitFloor(
+                Some(vec![7]),
+                Location::new(0),
+            )],
+            false,
+        );
+        assert_eq!(
+            verify_key_exclusion_from_proto::<F, Sha256>(
+                &empty.exclusion(0),
+                &key,
+                &empty.root,
+                &config
+            )
+            .unwrap(),
+            None
+        );
+        let singleton = CurrentFixture::<F, 64>::from_operations(
+            vec![
+                OrderedOperation::Update(Update {
+                    key: Vec::new(),
+                    value: Vec::new(),
+                    next_key: Vec::new(),
+                }),
+                OrderedOperation::CommitFloor(None, Location::new(0)),
+            ],
+            false,
+        );
+        assert!(verify_key_value_for_key_from_proto::<F, Sha256>(
+            &singleton.key_value(0),
+            &Vec::<u8>::new().encode(),
+            &singleton.root,
             &config,
         )
-        .unwrap()
-        {
-            ExclusionProof::Commit(decoded, value) => {
-                assert_proof(&decoded);
-                assert_eq!(value, Some(b"meta".to_vec()));
-            }
-            ExclusionProof::KeyValue(..) => panic!("commit exclusion proof decoded as a key-value"),
+        .is_ok());
+        let exclusion = singleton.exclusion(0);
+        assert!(verify_key_exclusion_from_proto::<F, Sha256>(
+            &exclusion,
+            &Vec::<u8>::new().encode(),
+            &singleton.root,
+            &config,
+        )
+        .is_err());
+        assert_eq!(
+            verify_key_exclusion_from_proto::<F, Sha256>(
+                &exclusion,
+                &b"absent".to_vec().encode(),
+                &singleton.root,
+                &config,
+            )
+            .unwrap(),
+            Some(Vec::new())
+        );
+    }
+
+    #[test]
+    fn test_current_proofs_bind_requested_keys_roots_activity_and_windows() {
+        assert_current_request_binding::<mmr::Family>();
+        assert_current_request_binding::<mmb::Family>();
+    }
+
+    fn assert_current_malformed_proofs<F: merkle::Graftable>() {
+        let fixture = CurrentFixture::<F, 64>::new(515);
+        let config = current_proof_config::<Sha256Digest>(64, "test").unwrap();
+        let hit = fixture.key_value(1);
+        for end in 0..hit.proof.len() {
+            let mut truncated = hit.clone();
+            truncated.proof = hit.proof.slice(..end);
+            assert!(
+                verify_key_value_from_proto::<F, Sha256>(&truncated, &fixture.root, &config)
+                    .is_err()
+            );
         }
-
-        let encoded = expected.encode();
-        let mut buf = Copying(encoded.as_ref());
-        let decoded = read_operation_proof::<F, Sha256Digest>(
-            &mut buf,
-            proof_digest_cap::<Sha256Digest>(&encoded),
-            &config,
+        for end in 0..hit.encoded_operation.len() {
+            let mut truncated = hit.clone();
+            truncated.encoded_operation = hit.encoded_operation.slice(..end);
+            assert!(
+                verify_key_value_from_proto::<F, Sha256>(&truncated, &fixture.root, &config)
+                    .is_err()
+            );
+        }
+        let exclusion = fixture.exclusion(1);
+        let key = vec![0u8, 0, 0, 1, 1].encode();
+        for end in 0..exclusion.proof.len() {
+            let mut truncated = exclusion.clone();
+            truncated.proof = exclusion.proof.slice(..end);
+            assert!(verify_key_exclusion_from_proto::<F, Sha256>(
+                &truncated,
+                &key,
+                &fixture.root,
+                &config
+            )
+            .is_err());
+        }
+        let commit = CurrentFixture::<F, 64>::from_operations(
+            vec![OrderedOperation::CommitFloor(None, Location::new(0))],
+            false,
+        );
+        let commit_proof = commit.exclusion(0);
+        for end in 0..commit_proof.proof.len() {
+            let mut truncated = commit_proof.clone();
+            truncated.proof = commit_proof.proof.slice(..end);
+            assert!(verify_key_exclusion_from_proto::<F, Sha256>(
+                &truncated,
+                &key,
+                &commit.root,
+                &config
+            )
+            .is_err());
+        }
+        let mut trailing_exclusion = exclusion.clone();
+        trailing_exclusion.proof = [exclusion.proof.as_ref(), &[0]].concat().into();
+        assert!(verify_key_exclusion_from_proto::<F, Sha256>(
+            &trailing_exclusion,
+            &key,
+            &fixture.root,
+            &config
         )
-        .unwrap();
-        assert!(buf.0.is_empty());
-        assert_proof(&decoded);
+        .is_err());
+        let mut tampered = hit.clone();
+        let mut operation = tampered.encoded_operation.to_vec();
+        *operation.last_mut().unwrap() ^= 1;
+        tampered.encoded_operation = operation.into();
+        assert!(
+            verify_key_value_from_proto::<F, Sha256>(&tampered, &fixture.root, &config).is_err()
+        );
+        let mut trailing = hit.clone();
+        trailing.proof = [hit.proof.as_ref(), &[0]].concat().into();
+        assert!(
+            verify_key_value_from_proto::<F, Sha256>(&trailing, &fixture.root, &config).is_err()
+        );
+        let mut invalid_tag = exclusion.clone();
+        let mut bytes = invalid_tag.proof.to_vec();
+        bytes[0] = 255;
+        invalid_tag.proof = bytes.into();
+        assert!(verify_key_exclusion_from_proto::<F, Sha256>(
+            &invalid_tag,
+            &key,
+            &fixture.root,
+            &config
+        )
+        .is_err());
+        for size in [32, 128, 1usize << (usize::BITS - 1)] {
+            let wrong = CurrentProofConfig { chunk_size: size };
+            assert!(verify_key_value_from_proto::<F, Sha256>(&hit, &fixture.root, &wrong).is_err());
+            assert!(verify_key_exclusion_from_proto::<F, Sha256>(
+                &exclusion,
+                &key,
+                &fixture.root,
+                &wrong
+            )
+            .is_err());
+        }
+        let range = fixture.range(510, 515);
+        let window = OperationWindow::new(514, 510, 5).unwrap();
+        for end in 0..range.proof.len() {
+            let mut truncated = range.clone();
+            truncated.proof = range.proof.slice(..end);
+            assert!(verify_current_operation_range_from_proto::<F, Sha256>(
+                &truncated,
+                &fixture.root,
+                &config,
+                window
+            )
+            .is_err());
+        }
+        let mut short_chunk = range.clone();
+        short_chunk.chunks[0] = short_chunk.chunks[0].slice(..63);
+        assert!(verify_current_operation_range_from_proto::<F, Sha256>(
+            &short_chunk,
+            &fixture.root,
+            &config,
+            window
+        )
+        .is_err());
+        for size in [32, 128] {
+            let wrong = CurrentProofConfig { chunk_size: size };
+            assert!(verify_current_operation_range_from_proto::<F, Sha256>(
+                &range,
+                &fixture.root,
+                &wrong,
+                window
+            )
+            .is_err());
+        }
+        let mut invalid_chunks = range.clone();
+        invalid_chunks.chunks[0] = vec![0; 64].into();
+        assert!(verify_current_operation_range_from_proto::<F, Sha256>(
+            &invalid_chunks,
+            &fixture.root,
+            &config,
+            window
+        )
+        .is_err());
+        invalid_chunks.chunks.clear();
+        assert!(verify_current_operation_range_from_proto::<F, Sha256>(
+            &invalid_chunks,
+            &fixture.root,
+            &config,
+            window
+        )
+        .is_err());
     }
 
     #[test]
-    fn test_decodes_commonware_current_proofs_for_mmr() {
-        assert_current_proofs_decode::<mmr::Family, 32>(merkle::Unused);
-    }
-
-    #[test]
-    fn test_decodes_commonware_current_proofs_for_mmb() {
-        assert_current_proofs_decode::<mmb::Family, 32>(Some(Sha256::fill(0xD5)));
+    fn test_current_proofs_reject_malformed_wire_and_wrong_chunk_sizes() {
+        assert_current_malformed_proofs::<mmr::Family>();
+        assert_current_malformed_proofs::<mmb::Family>();
+        for size in [0, 48, 16, 1usize << (usize::BITS - 1)] {
+            assert!(current_proof_config::<Sha256Digest>(size, "test").is_err());
+        }
     }
 
     #[test]

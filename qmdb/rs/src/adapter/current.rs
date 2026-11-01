@@ -7,7 +7,9 @@ use bytes::Bytes;
 use commonware_codec::{Copying, DecodeExt};
 use commonware_cryptography::{Digest, Hasher};
 use commonware_storage::merkle::{ElementPlan, Family, Graftable, Location, Position, RangePlan};
-use commonware_storage::qmdb::current::proof::{constant::OperationProof, RangeProof};
+use commonware_storage::qmdb::current::proof::{
+    constant::OperationProof, required_chunks, RangeProof,
+};
 use exoware_sdk::{RangeMode, ReadSession};
 
 use crate::adapter::codec::{
@@ -19,9 +21,7 @@ use crate::adapter::codec::{
 use crate::adapter::core;
 use crate::adapter::operation_range::root;
 use crate::adapter::read_cache::{ReadCache, RootContext};
-use crate::adapter::storage::{
-    load_proof_nodes, tail_chunk, BitmapTail, ProofBitmap, ProofNodes, TailIndices,
-};
+use crate::adapter::storage::{load_proof_nodes, tail_chunk, BitmapTail, ProofBitmap, ProofNodes};
 use crate::QmdbError;
 
 /// Current-state values fixed by one published batch boundary.
@@ -86,18 +86,19 @@ async fn load_current_tip<F: Graftable, H: Hasher, const N: usize>(
         .chain(&peak_keys)
         .collect::<Vec<_>>();
     let batch_size = u32::try_from(keys.len()).expect("peak count fits u32");
-    let indices = TailIndices::at::<F, N>(watermark)?;
-    let load_tail = |index: Option<u64>| async move {
-        let Some(index) = index else {
-            return Ok(None);
-        };
+
+    // Tail chunks lie beyond the graftable prefix, so pruning cannot change
+    // their indices. Their reads can run alongside the metadata read.
+    let leaves = op_count_for_watermark(watermark)?;
+    let indices = required_chunks::<F, N>(leaves, leaves.as_u64(), 0, None)
+        .map_err(crate::error::current_proof_error)?;
+    let load_tail = futures::future::try_join_all(indices.map(|index| async move {
         let chunk = load_chunk_row::<F, N>(session, watermark, index).await?;
-        Ok::<_, QmdbError>(Some(chunk))
-    };
-    let (mut rows, pending_chunk, last_chunk) = futures::try_join!(
+        Ok::<_, QmdbError>((index, chunk))
+    }));
+    let (mut rows, tail) = futures::try_join!(
         async { Ok::<_, QmdbError>(session.get_many(&keys, batch_size).await?.collect().await?) },
-        load_tail(indices.pending),
-        load_tail(indices.last),
+        load_tail,
     )?;
 
     if !rows.contains_key(&presence_key) {
@@ -135,22 +136,20 @@ async fn load_current_tip<F: Graftable, H: Hasher, const N: usize>(
             }
         }
     };
-    let keep = |index: Option<u64>, chunk: Option<[u8; N]>| {
-        index.zip(chunk).map(|(index, mut chunk)| {
+    let tail = tail
+        .into_iter()
+        .map(|(index, mut chunk)| {
             clear_below_floor::<F, N>(&mut chunk, index, inactivity_floor);
-            Bytes::copy_from_slice(&chunk)
+            (index, Bytes::copy_from_slice(&chunk))
         })
-    };
+        .collect();
     Ok(CurrentTip {
         watermark,
         root: meta.root,
         pruned_chunks: meta.pruned_chunks,
         inactivity_floor,
         ops,
-        tail: BitmapTail {
-            pending: keep(indices.pending, pending_chunk),
-            last: keep(indices.last, last_chunk),
-        },
+        tail,
     })
 }
 
@@ -162,15 +161,7 @@ async fn load_chunk<F: Graftable, D: Digest, const N: usize>(
     tip: &CurrentTip<F, D>,
     index: u64,
 ) -> Result<[u8; N], QmdbError> {
-    let indices = TailIndices::at::<F, N>(tip.watermark)?;
-    let cached = if indices.pending == Some(index) {
-        tip.tail.pending.as_ref()
-    } else if indices.last == Some(index) {
-        tip.tail.last.as_ref()
-    } else {
-        None
-    };
-    if let Some(chunk) = cached {
+    if let Some(chunk) = tip.tail.get(&index) {
         return tail_chunk(chunk);
     }
     let mut chunk = load_chunk_row::<F, N>(session, tip.watermark, index).await?;
@@ -212,15 +203,14 @@ pub(crate) async fn load_chunks<F: Graftable, D: Digest, const N: usize>(
     .await
 }
 
-/// The operation row, bitmap chunk and proof nodes for a current proof of one
+/// The operation row, bitmap chunks and proof nodes for a current proof of one
 /// operation, read together by [`load_proof_reads`].
 pub(crate) struct ProofReads<F: Family, const N: usize> {
     /// The proof's plan, which the reads cover and its build consumes.
     plan: ElementPlan<F>,
     /// The encoded operation at the plan's location.
     pub(crate) operation: Bytes,
-    /// The operation's bitmap chunk, unless the chunk is pruned.
-    chunk: Option<[u8; N]>,
+    bitmap: ProofBitmap<N>,
     nodes: ProofNodes<F>,
 }
 
@@ -258,7 +248,7 @@ pub(crate) async fn locate_active_key<F: Family, D: Digest>(
 
 /// Read everything a current proof of the operation at `location` needs in one
 /// phase: its proof nodes as planned by commonware, with the operation row in
-/// the first node batch, alongside its bitmap chunk (unless a tail chunk).
+/// the first node batch, alongside any uncached bitmap chunk.
 pub(crate) async fn load_proof_reads<F: Graftable, H: Hasher, const N: usize>(
     session: &ReadSession,
     cache: &Arc<ReadCache<F, H::Digest>>,
@@ -268,7 +258,8 @@ pub(crate) async fn load_proof_reads<F: Graftable, H: Hasher, const N: usize>(
     let leaves = op_count_for_watermark(tip.watermark)?;
     let plan = ElementPlan::new(leaves, location).map_err(crate::error::merkle_error)?;
     let positions = plan.positions();
-    let chunk_index = chunk_index_for_location::<F, N>(location);
+    let mut bitmap = ProofBitmap::new(tip.watermark, tip.pruned_chunks, &tip.tail)?;
+    let chunk_index = bitmap.chunk_to_prove(location)?;
     let operation_key = encode_operation_key(location);
     let ((mut rows, nodes), chunk) = futures::try_join!(
         load_proof_nodes::<F, H::Digest, N>(
@@ -280,10 +271,10 @@ pub(crate) async fn load_proof_reads<F: Graftable, H: Hasher, const N: usize>(
             BTreeSet::from([operation_key.clone()]),
         ),
         async {
-            if chunk_index < tip.pruned_chunks {
+            let Some(index) = chunk_index else {
                 return Ok(None);
-            }
-            load_chunk::<F, H::Digest, N>(session, tip, chunk_index)
+            };
+            load_chunk::<F, H::Digest, N>(session, tip, index)
                 .await
                 .map(Some)
         },
@@ -293,10 +284,13 @@ pub(crate) async fn load_proof_reads<F: Graftable, H: Hasher, const N: usize>(
             "missing operation row at location {location}"
         )));
     };
+    if let Some((index, chunk)) = chunk_index.zip(chunk) {
+        bitmap.insert(index, chunk)?;
+    }
     Ok(ProofReads {
         plan,
         operation,
-        chunk,
+        bitmap,
         nodes,
     })
 }
@@ -336,19 +330,12 @@ pub(crate) fn operation_proof<F: Graftable, H: Hasher, const N: usize>(
     tip: &CurrentTip<F, H::Digest>,
     reads: ProofReads<F, N>,
 ) -> Result<OperationProof<F, H::Digest, N>, QmdbError> {
-    let mut status = ProofBitmap::new(tip.watermark, tip.pruned_chunks, &tip.tail)?;
-    if let Some(index) = status.chunk_to_prove(reads.plan.location())? {
-        let chunk = reads.chunk.ok_or_else(|| {
-            QmdbError::CorruptData(format!("current proof chunk {index} was not read"))
-        })?;
-        status.insert(index, chunk)?;
-    }
     let digests = reads
         .nodes
         .digests::<H, N>(tip.pruned_chunks, &reads.plan.positions())
         .map_err(crate::error::merkle_error)?;
     OperationProof::build::<H>(
-        &status,
+        &reads.bitmap,
         reads.plan,
         |position| digests.get(&position).copied(),
         tip.inactivity_floor,

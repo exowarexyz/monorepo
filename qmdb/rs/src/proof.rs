@@ -310,21 +310,6 @@ pub struct RawKeyValueProof<D: Digest, Op, const N: usize, F: Graftable> {
     pub operation: Op,
 }
 
-pub(crate) fn verify_ordered_exclusion_proof<F, H, K, E, const N: usize>(
-    key: &K,
-    proof: &ExclusionProof<F, K, E, H::Digest, N>,
-    root: &H::Digest,
-) -> bool
-where
-    F: Graftable,
-    H: Hasher,
-    K: QmdbKey + Codec,
-    E: ValueEncoding,
-    ordered::Operation<F, K, E>: Codec,
-{
-    proof.verify::<H>(key, root)
-}
-
 impl<D: Digest, Op, const N: usize, F: Graftable> RawKeyValueProof<D, Op, N, F>
 where
     Op: Codec + Clone + Operation<F>,
@@ -366,11 +351,7 @@ where
     ordered::Operation<F, K, E>: Codec + Clone,
 {
     pub fn verify<H: Hasher<Digest = D>>(&self) -> bool {
-        verify_ordered_exclusion_proof::<F, H, K, E, N>(
-            &self.requested_key,
-            &self.proof,
-            &self.root,
-        )
+        self.proof.verify::<H>(&self.requested_key, &self.root)
     }
 }
 

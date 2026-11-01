@@ -124,22 +124,9 @@ pub(crate) fn decode_digest<D: Digest>(
 #[cfg(test)]
 mod tests {
     use crate::request::{
-        span_contains, validate_key_range, InvalidLocations, InvalidWindow, OperationLocations,
-        OperationWindow, MAX_REQUESTED_LOCATIONS,
+        validate_key_range, InvalidLocations, InvalidWindow, OperationLocations, OperationWindow,
+        MAX_REQUESTED_LOCATIONS,
     };
-
-    #[test]
-    fn test_spans_wrap_past_the_greatest_key() {
-        assert!(span_contains(&2, &6, &2));
-        assert!(span_contains(&2, &6, &5));
-        assert!(!span_contains(&2, &6, &6));
-        assert!(!span_contains(&2, &6, &1));
-        assert!(span_contains(&6, &2, &7));
-        assert!(span_contains(&6, &2, &1));
-        assert!(!span_contains(&6, &2, &2));
-        assert!(!span_contains(&6, &2, &4));
-        assert!(span_contains(&3, &3, &9));
-    }
 
     #[test]
     fn test_operation_windows_preserve_large_absolute_positions() {

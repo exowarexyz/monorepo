@@ -158,15 +158,6 @@ impl<'a> OperationLocations<'a> {
     }
 }
 
-/// Whether `key` lies in the cyclic span from an active key to its successor
-pub(crate) fn span_contains<K: Ord>(start: &K, end: &K, key: &K) -> bool {
-    if start >= end {
-        key >= start || key < end
-    } else {
-        key >= start && key < end
-    }
-}
-
 /// Entries and the start exclusion's successor must already be authenticated
 pub(crate) fn validate_key_range<'a, K: Ord>(
     start: &K,

@@ -2737,6 +2737,7 @@ dependencies = [
  "commonware-codec",
  "commonware-cryptography",
  "commonware-storage",
+ "commonware-utils",
  "connectrpc",
  "futures",
  "http-body",

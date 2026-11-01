@@ -9,7 +9,7 @@ use commonware_storage::merkle::{
     self, hasher::Hasher as _, storage::Storage as MerkleStorage, Family, Graftable, Location,
     Position,
 };
-use commonware_storage::qmdb::current::grafting;
+use commonware_storage::qmdb::current::{grafting, proof::required_chunks};
 use exoware_sdk::{keys::Key, RangeMode, ReadSession};
 
 use crate::adapter::codec::{chunk_index_for_location, encode_grafted_node_key, encode_node_key};
@@ -318,36 +318,9 @@ impl<F: Graftable> ProofNodes<F> {
     }
 }
 
-/// Indices of the [`BitmapTail`] chunks at a watermark.
-pub(crate) struct TailIndices {
-    pub(crate) pending: Option<u64>,
-    pub(crate) last: Option<u64>,
-}
-
-impl TailIndices {
-    pub(crate) fn at<F: Graftable, const N: usize>(
-        watermark: Location<F>,
-    ) -> Result<Self, crate::QmdbError> {
-        let len = crate::adapter::codec::op_count_for_watermark(watermark)?.as_u64();
-        let chunk_bits = crate::adapter::codec::bitmap_chunk_bits::<N>();
-        let complete = len / chunk_bits;
-        let graftable = grafting::graftable_chunks::<F>(len, grafting::height::<N>()).min(complete);
-        Ok(Self {
-            pending: (complete > graftable).then_some(graftable),
-            last: (len % chunk_bits != 0).then(|| chunk_index_for_location::<F, N>(watermark)),
-        })
-    }
-}
-
 /// The bitmap chunks at a watermark that no grafted node covers, which every
 /// current proof reads, cleared below the inactivity floor.
-#[derive(Clone, Default)]
-pub(crate) struct BitmapTail {
-    /// The complete chunk not yet grafted, if any.
-    pub(crate) pending: Option<Bytes>,
-    /// The partial last chunk, when the length is not chunk-aligned.
-    pub(crate) last: Option<Bytes>,
-}
+pub(crate) type BitmapTail = BTreeMap<u64, Bytes>;
 
 /// Decode a [`BitmapTail`] chunk.
 pub(crate) fn tail_chunk<const N: usize>(bytes: &Bytes) -> Result<[u8; N], crate::QmdbError> {
@@ -374,19 +347,13 @@ impl<const N: usize> ProofBitmap<N> {
         pruned_chunks: u64,
         tail: &BitmapTail,
     ) -> Result<Self, crate::QmdbError> {
-        let len = crate::adapter::codec::op_count_for_watermark(watermark)?.as_u64();
+        let leaves = crate::adapter::codec::op_count_for_watermark(watermark)?;
+        let len = leaves.as_u64();
         let chunk_bits = crate::adapter::codec::bitmap_chunk_bits::<N>();
         let complete = len / chunk_bits;
-        let graftable = grafting::graftable_chunks::<F>(len, grafting::height::<N>()).min(complete);
-        if pruned_chunks > graftable || complete - graftable > 1 {
-            return Err(crate::QmdbError::CorruptData(
-                "invalid current bitmap window".into(),
-            ));
-        }
-        let indices = TailIndices::at::<F, N>(watermark)?;
-        if indices.pending.is_some() != tail.pending.is_some()
-            || indices.last.is_some() != tail.last.is_some()
-        {
+        let indices = required_chunks::<F, N>(leaves, len, pruned_chunks, None)
+            .map_err(crate::error::current_proof_error)?;
+        if !indices.eq(tail.keys().copied()) {
             return Err(crate::QmdbError::CorruptData(
                 "current bitmap tail does not match its watermark".into(),
             ));
@@ -398,31 +365,31 @@ impl<const N: usize> ProofBitmap<N> {
             pruned_chunks: chunk_slot(pruned_chunks)?,
             chunks: std::collections::BTreeMap::new(),
         };
-        for (index, chunk) in indices
-            .pending
-            .zip(tail.pending.as_ref())
-            .into_iter()
-            .chain(indices.last.zip(tail.last.as_ref()))
-        {
+        for (&index, chunk) in tail {
             bitmap.insert(index, tail_chunk(chunk)?)?;
         }
         Ok(bitmap)
     }
 
-    /// The chunk a proof of `location` reads that the bitmap lacks. Upstream
-    /// rejects a location in a pruned chunk before reading it.
+    /// The uncached chunk needed for one operation. [`Self::new`] loads the
+    /// chunks shared by all proofs at this tip.
     pub(crate) fn chunk_to_prove<F: Graftable>(
         &self,
         location: Location<F>,
     ) -> Result<Option<u64>, crate::QmdbError> {
-        if location.as_u64() >= self.len {
-            return Err(crate::QmdbError::CorruptData(
-                "current proof location exceeds watermark".into(),
-            ));
+        let indices = required_chunks::<F, N>(
+            Location::new(self.len),
+            self.len,
+            self.pruned_chunks as u64,
+            Some(location),
+        )
+        .map_err(crate::error::current_proof_error)?;
+        for index in indices {
+            if !self.chunks.contains_key(&chunk_slot(index)?) {
+                return Ok(Some(index));
+            }
         }
-        let index = chunk_index_for_location::<F, N>(location);
-        let slot = chunk_slot(index)?;
-        Ok((slot >= self.pruned_chunks && !self.chunks.contains_key(&slot)).then_some(index))
+        Ok(None)
     }
 
     pub(crate) fn insert(&mut self, index: u64, chunk: [u8; N]) -> Result<(), crate::QmdbError> {
@@ -493,17 +460,14 @@ mod tests {
         location: Option<u64>,
     ) -> Result<(ProofBitmap<1>, Vec<u64>), crate::QmdbError> {
         let watermark = Location::<F>::new(watermark);
-        let indices = TailIndices::at::<F, 1>(watermark)?;
-        let mut requested = indices
-            .pending
-            .into_iter()
-            .chain(indices.last)
+        let leaves = crate::adapter::codec::op_count_for_watermark(watermark)?;
+        let mut requested = required_chunks::<F, 1>(leaves, leaves.as_u64(), pruned_chunks, None)
+            .map_err(crate::error::current_proof_error)?
             .collect::<Vec<_>>();
-        let chunk = |index: Option<u64>| index.map(|index| Bytes::from(vec![index as u8]));
-        let tail = BitmapTail {
-            pending: chunk(indices.pending),
-            last: chunk(indices.last),
-        };
+        let tail = requested
+            .iter()
+            .map(|&index| (index, Bytes::from(vec![index as u8])))
+            .collect();
         let mut bitmap = ProofBitmap::<1>::new(watermark, pruned_chunks, &tail)?;
         if let Some(location) = location {
             if let Some(index) = bitmap.chunk_to_prove(Location::<F>::new(location))? {
@@ -535,16 +499,13 @@ mod tests {
     }
 
     #[test]
-    fn test_loads_queried_chunk_and_skips_pruned_locations() {
+    fn test_loads_queried_chunk_and_rejects_pruned_locations() {
         let (bitmap, requested) = load::<mmr::Family>(20, 0, Some(3)).unwrap();
         assert_eq!(requested, [0, 2]);
         assert_eq!(bitmap.get_chunk(0), [0]);
         assert_eq!(bitmap.get_chunk(2), [2]);
 
-        // Upstream rejects a pruned location before reading its chunk
-        let (bitmap, requested) = load::<mmr::Family>(20, 1, Some(3)).unwrap();
-        assert_eq!(requested, [2]);
-        assert_eq!(bitmap.pruned_chunks(), 1);
+        assert!(load::<mmr::Family>(20, 1, Some(3)).is_err());
 
         // The queried chunk and the partial chunk coincide
         let (_, requested) = load::<mmr::Family>(20, 0, Some(19)).unwrap();
@@ -573,20 +534,21 @@ mod tests {
     fn test_rejects_a_tail_that_does_not_match_the_watermark() {
         // 17 MMB leaves have a pending chunk and a partial last chunk
         let watermark = Location::<mmb::Family>::new(16);
-        let chunk = |byte: u8| Some(Bytes::from(vec![byte]));
-        let tail = |pending, last| BitmapTail { pending, last };
+        let chunk = |byte: u8| Bytes::from(vec![byte]);
         for wrong in [
-            tail(None, chunk(2)),
-            tail(chunk(1), None),
-            tail(None, None),
-            tail(chunk(1), Some(Bytes::from(vec![2, 2]))),
+            BTreeMap::from([(2, chunk(2))]),
+            BTreeMap::from([(1, chunk(1))]),
+            BTreeMap::new(),
+            BTreeMap::from([(1, chunk(1)), (2, Bytes::from(vec![2, 2]))]),
+            BTreeMap::from([(0, chunk(0)), (1, chunk(1)), (2, chunk(2))]),
         ] {
             assert!(matches!(
                 ProofBitmap::<1>::new(watermark, 0, &wrong),
                 Err(crate::QmdbError::CorruptData(_))
             ));
         }
-        assert!(ProofBitmap::<1>::new(watermark, 0, &tail(chunk(1), chunk(2))).is_ok());
+        let tail = BTreeMap::from([(1, chunk(1)), (2, chunk(2))]);
+        assert!(ProofBitmap::<1>::new(watermark, 0, &tail).is_ok());
     }
 
     #[test]
