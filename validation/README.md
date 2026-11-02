@@ -117,14 +117,6 @@ Stop the writer to save its final checkpoint, then run the verifier. The
 [ledger verification](src/validate.rs) checks visibility, forward and reverse
 ranges, and a reduction count against the recorded writes.
 
-List all flags and defaults with:
-
-```bash
-cargo run -p exoware-validation -- --help
-cargo run -p exoware-validation -- bench --help
-cargo run -p exoware-validation -- validate --help
-```
-
 ## Status
 
 `exoware-validation` is **ALPHA** software and is not yet recommended for production use.
