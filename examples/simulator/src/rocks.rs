@@ -2520,7 +2520,7 @@ mod tests {
         // the closer would fail against the still-held lock.
         drop(Database {
             db,
-            _closer: Some(Box::new(ReopenOnDrop { path: path.clone() })),
+            _closer: Some(Box::new(ReopenOnDrop { path })),
         });
     }
 

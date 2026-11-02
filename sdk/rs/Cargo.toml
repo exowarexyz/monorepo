@@ -10,6 +10,9 @@ homepage.workspace = true
 repository = "https://github.com/exowarexyz/monorepo/tree/main/sdk/rs"
 documentation = "https://docs.rs/exoware-sdk"
 
+[lints]
+workspace = true
+
 [dependencies]
 crossbeam-utils = { workspace = true }
 anyhow = { workspace = true }

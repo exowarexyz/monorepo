@@ -12,6 +12,7 @@ pub mod qmdb {
         #![allow(unused_imports)]
         #![allow(clippy::derivable_impls)]
         #![allow(clippy::match_single_binding)]
+        #![allow(elided_lifetimes_in_paths)]
         include!("../gen/qmdb.v1.rs");
     }
 }
