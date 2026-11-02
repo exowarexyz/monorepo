@@ -3,13 +3,13 @@ import {
   matchExact,
   matchPrefix,
   matchRegex,
-  OrderedQmdbClient,
+  QmdbOrderedClient,
   type OrderedOperation,
   type OrderedSubscribeProof,
   type VerifiedCurrentKeyLookupProof,
   type VerifiedCurrentKeyRangeProof,
   type VerifiedCurrentKeyValueProof,
-  type VerifiedHistoricalMultiProof,
+  type VerifiedOperationMultiProof,
 } from '@qmdb-ts';
 
 const MAX_EVENTS = 10;
@@ -112,7 +112,7 @@ export function QmdbPanel({
   showNotification: NotificationFn;
 }) {
   const client = useMemo(
-    () => new OrderedQmdbClient(qmdbUrl, { merkleFamily: 'mmb' }),
+    () => new QmdbOrderedClient(qmdbUrl, { merkleFamily: 'mmb' }),
     [qmdbUrl],
   );
   const subscribeAbortRef = useRef<AbortController | null>(null);
@@ -137,7 +137,7 @@ export function QmdbPanel({
 
   const [historyStartLocation, setHistoryStartLocation] = useState('0');
   const [historyMaxLocations, setHistoryMaxLocations] = useState('5');
-  const [historyProof, setHistoryProof] = useState<VerifiedHistoricalMultiProof | null>(null);
+  const [historyProof, setHistoryProof] = useState<VerifiedOperationMultiProof | null>(null);
   const [isGettingHistory, setIsGettingHistory] = useState(false);
 
   const [keyMatcherKind, setKeyMatcherKind] = useState<'exact' | 'prefix' | 'regex' | 'none'>(
@@ -272,11 +272,11 @@ export function QmdbPanel({
       setHistoryProof(proof);
       showNotification(
         'success',
-        'QMDB Historical Range',
-        `Verified ${proof.operations.length} historical operations against expected root (${formatProofSize(proof.proofSizeBytes)})`,
+        'QMDB Operation Range',
+        `Verified ${proof.operations.length} operations against expected root (${formatProofSize(proof.proofSizeBytes)})`,
       );
     } catch (error) {
-      showNotification('error', 'QMDB Historical Range Failed', String(error));
+      showNotification('error', 'QMDB Operation Range Failed', String(error));
     } finally {
       setIsGettingHistory(false);
     }
@@ -347,8 +347,8 @@ export function QmdbPanel({
         <p className="section-note">
           Proofs are anchored to roots the writer emits per batch. Run `qmdb run`
           locally and `qmdb seed` to stream fresh tips; each line prints
-          `tip=N root=0x..`. Get Proof, Get Many, Get Range, and historical
-          operation ranges verify against that current root. Subscribe streams
+          `tip=N root=0x..`. Get Proof, Get Many, Get Range, and Get Operation Range
+          verify against that current root. Subscribe streams
           each proof with its tip and included operations.
         </p>
         <p><strong>Server:</strong> {qmdbUrl}</p>
@@ -684,9 +684,9 @@ export function QmdbPanel({
       </div>
 
       <div className="form-section">
-        <h3>Get Historical Operation Range</h3>
+        <h3>Get Operation Range</h3>
         <p className="section-note">
-          Fetches a contiguous historical operation proof for the operation log and verifies it
+          Fetches and verifies a contiguous range of operations
           against the expected root for the selected tip.
         </p>
         <div className="form-row">
@@ -722,11 +722,11 @@ export function QmdbPanel({
             !expectedCurrentRoot.trim()
           }
         >
-          {isGettingHistory ? 'Verifying...' : 'Get Historical Range'}
+          {isGettingHistory ? 'Verifying...' : 'Get Operation Range'}
         </button>
         {historyProof && (
           <div className="result fade-in">
-            <h4>Verified Historical Operations</h4>
+            <h4>Verified Operations</h4>
             <p><strong>Proof Size:</strong> {formatProofSize(historyProof.proofSizeBytes)}</p>
             <p><strong>Operations:</strong> {historyProof.operations.length}</p>
             <div className="result-list">

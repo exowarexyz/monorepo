@@ -1,49 +1,102 @@
 # @exowarexyz/sql
 
-SQL client backed by the Exoware API.
+Use `SqlClient` to query an Exoware SQL server and subscribe to rows as they are
+written. It connects to the `sql.v1` ConnectRPC API served by the Rust crate's
+[`SqlServer`](../rs/README.md#serving-sql), returning query results and matching
+rows as native [Apache Arrow](https://arrow.apache.org/docs/js/) `Table` objects.
+The client works in Node and browsers and shares credentials, retry settings,
+and other transport options with [`@exowarexyz/sdk`](../../sdk/ts/README.md).
 
-This package exposes a TypeScript client for `sql.v1.Service` over Connect-Web.
-It reuses `@exowarexyz/sdk` transport setup and owns its generated `sql.v1`
-protobuf bindings.
+## Getting started
 
-Queries return `DecodedQueryResult` objects containing a native Apache Arrow
-`table` and the highest Store `sequenceNumber` observed by the query. The
-sequence number is `undefined` when the query does not read Store; a requested
-minimum is not an observation. Subscription frames always contain a sequence
-number. Arrow IPC preserves the result schema, field order,
-nulls, nested values, decimal scale, and timestamp units/timezones. The client uses
-binary Connect encoding by default.
+```sh
+npm install @exowarexyz/sql
+```
 
-Client reads are monotonic by default: each query requires the highest
-Store sequence observed by earlier completed RPCs. `SqlClient.monotonic(url, initialFloor, options)` seeds
-that minimum; `SqlClient.fixed(url, floor, options)` keeps it fixed across queries.
-Neither policy pins an exact snapshot. The server uses monotonic reads within each query.
-
-`minSequenceNumber()` reports the minimum for the next query, and
-`evaluatedSequence()` reports the highest observation. An explicit minimum passed
-to `query` can strengthen that request without changing the configured floor.
-Queries without Store reads leave observations unchanged. Subscription frames
-do not update query observations.
-
-*Duplicate column names retain their positional types and values. Arrow JS 21.2
-can reject `Table.slice` and `Table.selectAt` when duplicate names have different
-types ([upstream issue](https://github.com/apache/arrow-js/issues/288)). Use unique
-SQL aliases when applying those transformations.*
+Start the [simulator](../../examples/simulator/README.md) on port 8080, then
+[run the SQL service and seed its demo table](../../examples/sandbox/README.md#sql-panel). This
+example queries the demo `orders_kv` table on the SQL service's default port,
+8082, and lists the available tables:
 
 ```ts
 import { SqlClient } from '@exowarexyz/sql';
 
-const client = new SqlClient('http://localhost:8080');
-const result = await client.query('SELECT region, COUNT(*) FROM orders GROUP BY region');
-console.log(result.sequenceNumber, result.table.schema.fields, result.table.numRows);
-console.log(result.table.getChildAt(0)?.toArray());
+const client = new SqlClient('http://localhost:8082');
 
-const next = await client.query('SELECT * FROM orders', undefined, {
-  timeoutMs: 5000,
-});
-console.log(next.sequenceNumber, next.table.numRows);
+const { sequenceNumber, table } = await client.query(
+  'SELECT status, SUM(amount_cents) AS total FROM orders_kv GROUP BY status',
+);
+console.log(sequenceNumber, table.schema.fields.map((field) => field.name));
+for (const row of table) console.log(row.toJSON());
 
-for await (const { sequenceNumber, table } of client.subscribe({ table: 'orders' })) {
-  console.log(sequenceNumber, table.numRows);
+for (const info of await client.tables()) {
+  console.log(info.name, info.primaryKeyColumns, info.indexes);
 }
 ```
+
+Pass the SDK's client options to the constructor, such as `{ token }` for a
+deployment that requires a credential or `useBinaryFormat: false` to use JSON
+instead of the default binary Connect encoding. Each method also accepts
+Connect `CallOptions` for a request timeout or abort `signal`.
+
+## Query results
+
+`query` returns a `table` and a `sequenceNumber`. The Arrow table preserves the
+result schema, column order, nulls, nested values, decimal scale, and timestamp
+units and timezones.
+
+Duplicate column names keep their positions, types, and values. Arrow JS 21.2 can
+reject `Table.slice` and `Table.selectAt` when duplicate names have different types
+([apache/arrow-js#288](https://github.com/apache/arrow-js/issues/288)), so give
+columns unique SQL aliases before using those methods.
+
+The accompanying `sequenceNumber` is the highest Store sequence observed by any
+read in the query, represented as a `bigint`. It is `undefined` when the statement
+read nothing from the Store. A requested minimum does not count as an
+observation.
+
+## Read consistency
+
+Store replicas can lag, so queries can specify a minimum Store sequence and
+require the server to read at or above it. Choose how the client sets that
+minimum across queries:
+
+- `new SqlClient(url, options)` and `SqlClient.monotonic(url, initialFloor, options)`
+  raise the minimum to the highest sequence observed by completed queries,
+  starting from the optional initial floor.
+- `SqlClient.fixed(url, floor, options)` sends the same minimum with every query.
+
+To read your own writes, use the sequence returned by the write as the floor.
+You can also pass a minimum as `query`'s second argument to strengthen one query
+without replacing the configured floor. Its response still advances a monotonic
+client's observations. Inspect those observations with `evaluatedSequence()`, or
+use `minSequenceNumber()` to see the minimum for the next query. Queries that
+read nothing from the Store leave both unchanged.
+
+Each query uses the minimum known when it starts. Neither policy pins a snapshot,
+so reads within one query can observe different sequences at or above that
+minimum.
+
+## Subscriptions
+
+To follow new writes, call `subscribe` with a table name and an optional `whereSql`
+predicate. Each Store batch containing a matching row produces one frame with
+the batch's `sequenceNumber` and an Arrow `table` of the matching rows:
+
+```ts
+for await (const frame of client.subscribe({ table: 'orders_kv', whereSql: "status = 'paid'" })) {
+  console.log(frame.sequenceNumber, frame.table.numRows);
+}
+```
+
+`whereSql` is a scalar boolean expression over the table's columns, written without
+`WHERE`. An empty predicate matches every row. Subqueries, aggregates, window
+functions, and row-expanding expressions are not supported. Stable time functions
+such as `now()` use the subscription's start time, and volatile functions run for
+each batch.
+
+Omit `sinceSequenceNumber` to start with the next batch. To resume after a
+disconnect, pass the last frame's `sequenceNumber + 1n`. The server replays
+retained batches from that sequence and then continues live, or fails if the
+requested batch has been evicted. Subscription frames do not change the client's
+query floor or observations.

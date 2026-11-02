@@ -1,23 +1,25 @@
 #![allow(refining_impl_trait)]
 
-use std::sync::{Arc, Mutex};
-
 use axum::{serve::ListenerExt, Router};
 use bytes::Bytes;
 use commonware_codec::Encode;
 use connectrpc::{ConnectError, ConnectRpcService, RequestContext, ServiceRequest};
-use datafusion::arrow::array::Int64Array;
-use datafusion::arrow::datatypes::DataType;
-use datafusion::prelude::SessionConfig;
-use exoware_sdk::common::kv::v1::Entry;
-use exoware_sdk::kv_codec::StoredRow;
-use exoware_sdk::store::query::v1::{
-    Detail, GetManyFrame, GetManyRequest, GetRequest, GetResponse, RangeFrame, RangeRequest,
-    ReduceRequest, ReduceResponse, Service, ServiceServer,
+use datafusion::{
+    arrow::{array::Int64Array, datatypes::DataType},
+    prelude::SessionConfig,
 };
-use exoware_sdk::{PrefixedStoreClient, ReadSession, StoreClient};
+use exoware_sdk::{
+    common::kv::v1::Entry,
+    kv_codec::StoredRow,
+    store::query::v1::{
+        Detail, GetManyFrame, GetManyRequest, GetRequest, GetResponse, RangeFrame, RangeRequest,
+        ReduceRequest, ReduceResponse, Service, ServiceServer,
+    },
+    PrefixedStoreClient, ReadSession, StoreClient,
+};
 use exoware_sql::{KvSchema, SqlContext, TableColumnConfig};
 use futures::stream;
+use std::sync::{Arc, Mutex};
 
 #[derive(Clone)]
 struct RangeHarness {
@@ -304,7 +306,7 @@ async fn store_free_sql_does_not_create_an_observation() {
 
 #[test]
 fn context_override_preserves_optional_store_sequence_floor() {
-    let store = PrefixedStoreClient::empty(StoreClient::new("http://localhost:10000"));
+    let store = PrefixedStoreClient::empty(StoreClient::new("http://localhost:8080"));
     let ctx = SqlContext::new(store.clone());
     for floor in [None, Some(0), Some(41)] {
         let query_ctx = ctx.with_read_session(ReadSession::monotonic(store.clone(), floor));
