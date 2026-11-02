@@ -124,10 +124,13 @@ pub(crate) fn decode_digest<D: Digest>(
 // The native crate owns tests for request constraints shared with the WASM verifier.
 #[cfg(test)]
 mod tests {
-    use crate::request::{
-        validate_key_range, InvalidLocations, InvalidWindow, OperationLocations, OperationWindow,
+    use crate::{
+        request::{
+            validate_key_range, InvalidLocations, InvalidWindow, OperationLocations,
+            OperationWindow,
+        },
+        service::{validate_operations_request, MAX_REQUESTED_LOCATIONS},
     };
-    use crate::service::{validate_operations_request, MAX_REQUESTED_LOCATIONS};
 
     #[test]
     fn test_operation_windows_preserve_large_absolute_positions() {
