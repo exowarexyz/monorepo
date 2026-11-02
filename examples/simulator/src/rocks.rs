@@ -761,6 +761,8 @@ fn prepare_wave(db: &DB, wave: QueuedWave) -> PreparedWrite {
 fn commit_group(db: &DB, frontiers: &Frontiers, group: PreparedWrite) {
     assert!(!group.requests.is_empty(), "groups are never empty");
     let sequence = group.sequence;
+
+    // Snapshot capture shares this lock to observe matching state and sequence.
     let publish_guard = frontiers.persist.lock();
     write_synced_batch(db, group.batch)
         .unwrap_or_else(|error| panic!("failed to commit synchronous WAL batch: {error}"));
@@ -896,6 +898,11 @@ pub struct RocksConfig {
     pub write_pipeline: RocksWritePipelineConfig,
 }
 
+/// Options for the state column family.
+///
+/// State keys can span overlapping ranges, so universal compaction merges whole sorted
+/// runs. Raised level-zero slowdown and stop thresholds let compaction lag during ingest
+/// bursts. Compression stays off to avoid its CPU cost during flushes and compaction.
 fn state_cf_options() -> Options {
     let mut opts = Options::default();
     opts.set_compression_type(DBCompressionType::None);
@@ -907,6 +914,11 @@ fn state_cf_options() -> Options {
     opts
 }
 
+/// Options for the log column family.
+///
+/// Log keys increase with the sequence, so successive batches occupy separate key ranges.
+/// This family keeps the default compaction policy. Compression stays off to avoid its
+/// CPU cost during flushes and compaction.
 fn log_cf_options() -> Options {
     let mut opts = Options::default();
     opts.set_compression_type(DBCompressionType::None);
@@ -930,13 +942,13 @@ pub struct RocksStore {
 
 impl RocksStore {
     /// Open the store with default options, unless `config` overrides the database or
-    /// write-pipeline options. Column families run options tuned to the store's write path
-    /// (see `state_cf_options` and `log_cf_options`).
-    /// Reads the durable sequence after RocksDB recovers its WAL.
+    /// write-pipeline options. Column families run options tuned to the store's write
+    /// path (see `state_cf_options` and `log_cf_options`). Reads the durable sequence
+    /// after RocksDB recovers its WAL.
     ///
-    /// The caller keeps the directory at `path` alive until every handle to the store (clones,
-    /// open cursors, in-flight operations) has dropped. [`RocksStore::open_owned`] hands that
-    /// ordering to the store instead.
+    /// The caller keeps the directory at `path` alive until every handle to the store
+    /// (clones, open cursors, in-flight operations) has dropped.
+    /// [`RocksStore::open_owned`] hands that ordering to the store instead.
     pub fn open(path: &Path, config: Option<RocksConfig>) -> Result<Self, String> {
         Self::open_database(path, config, None)
     }
@@ -981,11 +993,15 @@ impl RocksStore {
             _closer: closer,
         });
 
+        // WAL recovery restores the sequence committed atomically with state and log
+        // rows. This metadata remains authoritative after the rows themselves are pruned.
         let seq = read_committed_sequence(&db)?;
 
         // Restore the retention rule so the ingest path keeps enforcing it after a reopen.
         let retention = Arc::new(Mutex::new(read_retention_policy(&db)?));
 
+        // Publication and sequence allocation start at the same recovered sequence so
+        // new batches continue after the durable prefix.
         let frontiers = Arc::new(Frontiers::new(seq));
         let writer = Arc::new(Writer::start(db.clone(), frontiers.clone(), write_pipeline));
         let store = Self {
@@ -994,6 +1010,7 @@ impl RocksStore {
             writer,
             retention,
         };
+
         // Re-apply the rule against the reopened log before serving reads: a crash can
         // lose the last (unsynced) trim, and a batch observed as evicted must never
         // become readable again.
@@ -1048,9 +1065,10 @@ impl RocksStore {
         {
             return Ok(());
         }
-        let _guard = self.frontiers.persist.lock();
+
         // Recheck under the lock: a concurrent trim from the same ingest wave may have
         // covered this cutoff while we waited.
+        let _guard = self.frontiers.persist.lock();
         if self.frontiers.trimmed.load(Ordering::Acquire) >= cutoff_exclusive {
             return Ok(());
         }
@@ -1137,6 +1155,8 @@ impl RocksStore {
             return Ok(());
         }
 
+        // The final delete chunk syncs all selected removals before this call returns.
+        // Key pruning leaves the committed sequence and stream history intact.
         self.delete_keys(&all_deletes)
     }
 
@@ -1150,7 +1170,8 @@ impl RocksStore {
                 let (key, _) = item.map_err(|e| e.to_string())?;
                 let sequence = sequence_from_log_key(key.as_ref())?;
 
-                // The native batch may complete before its application publication.
+                // A native commit can finish before publication. Match `get_batch` so
+                // this lookup never advertises a row readers cannot fetch.
                 if sequence > self.frontiers.published.load(Ordering::Acquire) {
                     return Ok(None);
                 }
@@ -1908,8 +1929,9 @@ mod tests {
         let publish_guard = store.frontiers.persist.lock();
         let put_store = store.clone();
         let task = tokio::spawn(async move { put_store.put(&mut input).await });
-        // On this current-thread runtime, validation and enqueue finish in one poll;
-        // the put task next yields while awaiting its writer response.
+
+        // On this current-thread runtime, validation and enqueue finish in one poll.
+        // The put task next yields while awaiting its writer response.
         tokio::time::timeout(std::time::Duration::from_secs(5), validated.0.notified())
             .await
             .unwrap();
@@ -1920,6 +1942,9 @@ mod tests {
         assert_eq!(budget.usage().0, 1);
         assert!(budget.usage().1 > 0);
         assert!(budget.try_admit(0).is_err());
+
+        // Cancellation leaves the accepted write with the writer. Once unblocked, it
+        // must publish, notify subscribers, and release the admission budget.
         drop(publish_guard);
         tokio::time::timeout(std::time::Duration::from_secs(5), &mut notified)
             .await
@@ -2105,6 +2130,9 @@ mod tests {
     fn snapshot_capture_waits_for_state_publication() {
         let dir = tempdir().expect("tempdir");
         let store = RocksStore::open(dir.path(), None).expect("open db");
+
+        // Keep the publication lock held after the write makes the new state durable.
+        // Snapshot capture must wait until that state's sequence is published.
         let group = prepared_write(
             &store,
             0,
@@ -2536,6 +2564,8 @@ mod tests {
             (Bytes::from_static(b"k"), Bytes::from_static(b"old")),
             (Bytes::from_static(b"k"), Bytes::from_static(b"new")),
         ];
+
+        // Close with a durable batch whose sequence was never published in memory.
         {
             let store = RocksStore::open(dir.path(), None).expect("open db");
             let group = prepared_write(&store, 0, rows.clone());
@@ -2895,6 +2925,8 @@ mod tests {
         let dir = tempdir().expect("tempdir");
         let store = RocksStore::open(dir.path(), None).expect("open db");
 
+        // Make the batch durable without publishing its sequence. Retention must spare
+        // its log row while it is above the published frontier.
         let group = prepared_write(
             &store,
             0,
@@ -2917,6 +2949,9 @@ mod tests {
     async fn oldest_retained_batch_hides_rows_above_published_frontier() {
         let dir = tempdir().expect("tempdir");
         let store = RocksStore::open(dir.path(), None).expect("open db");
+
+        // Make the batch durable without publishing its sequence. Both the point read
+        // and the oldest retained batch lookup must hide its log row.
         let group = prepared_write(
             &store,
             0,
@@ -2924,7 +2959,6 @@ mod tests {
         );
         write_synced_batch(&store.db, group.batch).expect("native durable commit");
 
-        // Unpublished rows stay invisible to both point reads and the oldest probe.
         assert!(store.get_batch(1).await.expect("get").is_none());
         assert_eq!(store.oldest_retained_batch().await.expect("oldest"), None);
     }
