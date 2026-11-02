@@ -3,40 +3,52 @@
 #[allow(dead_code)]
 mod common;
 
-use std::collections::{BTreeMap, BTreeSet};
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
-
 use bytes::Bytes;
 use commonware_codec::Encode;
 use commonware_cryptography::{sha256::Digest, Sha256};
-use commonware_storage::merkle::{hasher::Hasher as _, mem::Mem, mmr, Family, Location, Position};
-use commonware_storage::qmdb::any::ordered::{
-    variable::Operation as OrderedOperation, Update as OrderedUpdate,
+use commonware_storage::{
+    merkle::{hasher::Hasher as _, mem::Mem, mmb, mmr, Family, Graftable, Location, Position},
+    qmdb::{
+        any::{
+            ordered::{variable::Operation as OrderedOperation, Update as OrderedUpdate},
+            unordered::variable::Operation as UnorderedOperation,
+            value::VariableEncoding,
+        },
+        immutable::variable::Operation as ImmutableOperation,
+        keyless::variable::Operation as KeylessOperation,
+    },
 };
-use commonware_storage::qmdb::any::unordered::variable::Operation as UnorderedOperation;
-use commonware_storage::qmdb::any::value::VariableEncoding;
-use commonware_storage::qmdb::immutable::variable::Operation as ImmutableOperation;
-use commonware_storage::qmdb::keyless::variable::Operation as KeylessOperation;
 use connectrpc::{ConnectError, ConnectRpcService, ErrorCode, RequestContext, ServiceRequest};
-use exoware_qmdb::service::proto::qmdb::v1::{GetOperationRangeRequest, GetOperationsRequest};
 use exoware_qmdb::{
-    adapter::upload::stage_authenticated_range, adapter::upload::stage_watermark,
-    adapter::upload::UploadOperation, service::client::rpc::OperationLogClient, NODE_FAMILY,
+    adapter::upload::{stage_authenticated_range, stage_watermark, UploadOperation},
+    service::{
+        client::rpc::OperationLogClient,
+        proto::qmdb::v1::{GetOperationRangeRequest, GetOperationsRequest},
+    },
+    NODE_FAMILY,
 };
-use exoware_sdk::common::kv::v1::Entry;
-use exoware_sdk::google::rpc::{ErrorInfo, RetryInfo};
-use exoware_sdk::proto::PreferZstdHttpClient;
-use exoware_sdk::proto::{
-    decode_connect_error, with_error_info_detail, with_query_detail, with_retry_info_detail,
+use exoware_sdk::{
+    common::kv::v1::Entry,
+    google::rpc::{ErrorInfo, RetryInfo},
+    proto::{
+        decode_connect_error, with_error_info_detail, with_query_detail, with_retry_info_detail,
+        PreferZstdHttpClient,
+    },
+    query::{
+        Detail, GetManyEntry, GetManyFrame, GetManyRequest, GetRequest, GetResponse, RangeFrame,
+        RangeRequest, ReduceRequest, ReduceResponse, Service, ServiceServer, TraversalMode,
+    },
+    PrefixedStoreClient, RetryConfig, StoreClient, StoreKeyPrefix, StoreWriteBatch,
 };
-use exoware_sdk::query::{
-    Detail, GetManyEntry, GetManyFrame, GetManyRequest, GetRequest, GetResponse, RangeFrame,
-    RangeRequest, ReduceRequest, ReduceResponse, Service, ServiceServer, TraversalMode,
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::{Arc, Mutex},
+    time::Duration,
 };
-use exoware_sdk::{PrefixedStoreClient, RetryConfig, StoreClient, StoreKeyPrefix, StoreWriteBatch};
-use tokio::sync::{Notify, Semaphore};
-use tokio::task::JoinHandle;
+use tokio::{
+    sync::{Notify, Semaphore},
+    task::JoinHandle,
+};
 
 type Operation = KeylessOperation<mmr::Family, Vec<u8>>;
 type OrderedOp = OrderedOperation<mmr::Family, Vec<u8>, Vec<u8>>;
@@ -943,6 +955,244 @@ async fn operations_multi_proof_reads_rows_and_nodes_in_one_batch() {
     );
 }
 
+async fn reject_invalid_native_multi_proof_requests<F: Graftable>() {
+    // The empty Store records whether invalid requests reach it.
+    let fixture = Fixture::new().await;
+    let store = fixture.prefixed(&[]);
+    let keyless = exoware_qmdb::adapter::Keyless::<F, Sha256, Vec<u8>>::new(
+        store.clone(),
+        ((0..=10000).into(), ()),
+    );
+    let unordered = exoware_qmdb::adapter::Unordered::<F, Sha256, Vec<u8>, Vec<u8>, 32>::new(
+        store,
+        ordered_cfg(),
+    );
+    let maximum = F::MAX_LEAVES.as_u64();
+
+    // Malformed locations and tips outside the family's domain fail before Store access.
+    for (tip, locations, overflow) in [
+        (14, vec![], false),
+        (14, vec![3, 3], false),
+        (14, vec![7, 3], false),
+        (14, vec![0, 15], false),
+        (14, vec![maximum], false),
+        (maximum, vec![0], true),
+        (maximum.saturating_add(1), vec![0], true),
+        (u64::MAX, vec![0], true),
+    ] {
+        let locations = locations.into_iter().map(Location::new).collect::<Vec<_>>();
+        let errors = [
+            keyless
+                .operation_multi_proof(Location::new(tip), &locations, Some(99))
+                .await
+                .unwrap_err(),
+            unordered
+                .operation_multi_proof(Location::new(tip), &locations, Some(99))
+                .await
+                .unwrap_err(),
+        ];
+        for error in errors {
+            assert!(matches!(
+                (overflow, error),
+                (true, exoware_qmdb::QmdbError::TipOverflow)
+                    | (false, exoware_qmdb::QmdbError::InvalidRequestedLocations(_))
+            ));
+        }
+        assert!(fixture.store.calls().is_empty());
+    }
+
+    // Valid requests reach publication lookup, including those above the RPC count limit.
+    for (tip, locations) in [
+        (maximum - 1, vec![maximum - 1]),
+        (1024, (0..=1024).collect()),
+    ] {
+        fixture.store.state.lock().unwrap().calls.clear();
+        let locations = locations.into_iter().map(Location::new).collect::<Vec<_>>();
+        let errors = [
+            keyless
+                .operation_multi_proof(Location::new(tip), &locations, None)
+                .await
+                .unwrap_err(),
+            unordered
+                .operation_multi_proof(Location::new(tip), &locations, None)
+                .await
+                .unwrap_err(),
+        ];
+        for error in errors {
+            assert!(matches!(
+                error,
+                exoware_qmdb::QmdbError::WatermarkTooLow { .. }
+            ));
+        }
+        assert_eq!(fixture.store.calls().len(), 2);
+    }
+}
+
+#[tokio::test]
+async fn native_multi_proofs_reject_invalid_requests_before_store_access() {
+    reject_invalid_native_multi_proof_requests::<mmr::Family>().await;
+    reject_invalid_native_multi_proof_requests::<mmb::Family>().await;
+}
+
+#[tokio::test]
+async fn native_multi_proofs_authenticate_large_requests_and_preserve_publication_floors() {
+    for (unordered, count) in [false, true]
+        .into_iter()
+        .flat_map(|unordered| [15u64, 2051].map(|count| (unordered, count)))
+    {
+        // Stage a complete operation log ending in a commit at the proof tip.
+        let tip = count - 1;
+        let fixture = Fixture::new().await;
+        let store = fixture.prefixed(&[]);
+        let (root, encoded) = if unordered {
+            let operations = (0..count)
+                .map(|index| {
+                    if index == tip {
+                        UnorderedOp::CommitFloor(None, Location::new(4))
+                    } else {
+                        UnorderedOp::Delete(index.to_be_bytes().to_vec())
+                    }
+                })
+                .collect::<Vec<_>>();
+            (
+                fixture.stage(&store, &operations, &ordered_cfg()),
+                operations
+                    .iter()
+                    .map(|op| op.encode().to_vec())
+                    .collect::<Vec<_>>(),
+            )
+        } else {
+            let operations = (0..count)
+                .map(|index| {
+                    if index == tip {
+                        Operation::Commit(None, Location::new(0))
+                    } else {
+                        Operation::Append(index.to_be_bytes().to_vec())
+                    }
+                })
+                .collect::<Vec<_>>();
+            (
+                fixture.stage(&store, &operations, &((0..=10000).into(), ())),
+                operations
+                    .iter()
+                    .map(|op| op.encode().to_vec())
+                    .collect::<Vec<_>>(),
+            )
+        };
+
+        // Publication is visible above the requested floor, and proof reads see later sequences.
+        {
+            let mut state = fixture.store.state.lock().unwrap();
+            state.publication_sequence = 23;
+            state.batch_sequences = vec![31, 47];
+        }
+
+        // The larger request proves 1026 noncontiguous locations, including the tip.
+        let locations = if count == 15 {
+            vec![Location::new(0), Location::new(7), Location::new(tip)]
+        } else {
+            (0..count).step_by(2).map(Location::new).collect()
+        };
+        assert_eq!(locations.len(), if count == 15 { 3 } else { 1026 });
+        let mut proof = if unordered {
+            Unordered::new(store, ordered_cfg())
+                .operation_multi_proof(Location::new(tip), &locations, Some(17))
+                .await
+                .unwrap()
+        } else {
+            Keyless::new(store, ((0..=10000).into(), ()))
+                .operation_multi_proof(Location::new(tip), &locations, Some(17))
+                .await
+                .unwrap()
+        };
+
+        // Authenticate every requested operation against the independently staged root.
+        assert_eq!(proof.watermark, Location::new(tip));
+        assert_eq!(proof.ops_root, root);
+        assert!(proof.verify::<Sha256>());
+        assert_eq!(
+            proof.operations,
+            locations
+                .iter()
+                .map(|&location| (location, encoded[location.as_u64() as usize].clone()))
+                .collect::<Vec<_>>()
+        );
+
+        // Proof reads require at least the sequence that made publication visible.
+        let calls = fixture.store.calls();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(publication_range(&calls).min_sequence_number, Some(17));
+        assert_eq!(boundary_batch(&calls, tip).min_sequence_number, Some(23));
+
+        // Tampering with an operation must fail verification.
+        proof.operations[1].1[0] ^= 1;
+        assert!(!proof.verify::<Sha256>());
+    }
+}
+
+#[tokio::test]
+async fn native_fixed_keyless_large_multi_proof_matches_browser_fixture() {
+    use commonware_storage::qmdb::{any::value::FixedEncoding, keyless::fixed};
+    use commonware_utils::sequence::FixedBytes;
+    use exoware_qmdb::proof::encode_operation_multi_proof;
+
+    type Value = FixedBytes<16>;
+    type FixedOperation = fixed::Operation<mmr::Family, Value>;
+    let fixture = Fixture::new().await;
+    let store = fixture.prefixed(&[]);
+    let tip = 1025;
+    let mut operations = (0..tip)
+        .map(|index: u64| FixedOperation::Append(Value::new(u128::from(index).to_be_bytes())))
+        .collect::<Vec<_>>();
+    operations.push(FixedOperation::Commit(None, Location::new(0)));
+    let root = fixture.stage(&store, &operations, &());
+    let locations = (0..tip).map(Location::new).collect::<Vec<_>>();
+    let proof =
+        exoware_qmdb::adapter::Keyless::<mmr::Family, Sha256, Value, FixedEncoding<Value>>::new(
+            store,
+            (),
+        )
+        .operation_multi_proof(Location::new(tip), &locations, None)
+        .await
+        .unwrap();
+    assert_eq!(proof.operations.len(), 1025);
+    assert_eq!(proof.ops_root, root);
+    assert!(proof.verify::<Sha256>());
+    assert_eq!(
+        proof.operations,
+        locations
+            .iter()
+            .map(|&location| (
+                location,
+                operations[location.as_u64() as usize].encode().to_vec()
+            ))
+            .collect::<Vec<_>>()
+    );
+
+    let contents = format!(
+        "{}\n{tip} {}\n{}\n{}\n",
+        hex::encode(root),
+        locations
+            .iter()
+            .map(|location| location.as_u64().to_string())
+            .collect::<Vec<_>>()
+            .join(","),
+        hex::encode(encode_operation_multi_proof(&proof)),
+        proof
+            .operations
+            .iter()
+            .map(|(_, operation)| hex::encode(operation))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    );
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../ts/test/fixtures/operations/keyless_large_mmr.txt");
+    if std::env::var_os("UPDATE_FIXTURES").is_some() {
+        std::fs::write(&path, &contents).unwrap();
+    }
+    assert_eq!(std::fs::read_to_string(path).unwrap(), contents);
+}
+
 #[tokio::test]
 async fn eleven_concurrent_singletons_fetch_each_node_once() {
     let mut fixture = Fixture::new().await;
@@ -1375,7 +1625,7 @@ fn prefix_root(operations: &[UnorderedOp], floor: u64) -> Digest {
     base.new_batch()
         .add_leaf_digests(digests)
         .merkleize(&base, &hasher)
-        .root(&base, &hasher, inactive)
+        .root(&hasher, inactive)
         .unwrap()
 }
 

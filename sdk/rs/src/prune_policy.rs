@@ -1,3 +1,8 @@
+use crate::{
+    keys::Prefix,
+    kv_codec::Utf8,
+    selector::{compile_payload_regex, Selector},
+};
 use anyhow::{ensure, Context};
 use bytes::BufMut;
 use commonware_codec::{
@@ -5,10 +10,6 @@ use commonware_codec::{
     Write,
 };
 use std::collections::HashSet;
-
-use crate::keys::Prefix;
-use crate::kv_codec::Utf8;
-use crate::selector::{compile_payload_regex, Selector};
 
 pub const PRUNE_POLICY_CONTROL_KEY: &str = "manifest/control/compaction-prune-policies";
 /// Wire version of the persisted prune-policy document. A prune document

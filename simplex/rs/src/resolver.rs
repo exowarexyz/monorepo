@@ -1,12 +1,10 @@
-use std::{marker::PhantomData, num::NonZeroUsize, time::Duration};
-
+use crate::SimplexReader;
 use bytes::Bytes;
 use commonware_consensus::marshal::resolver::handler::{self, Annotation, Key as MarshalKey};
 use commonware_cryptography::{Digest, PublicKey};
 use commonware_resolver::opaque;
 use commonware_runtime::{Clock, Metrics, Spawner};
-
-use crate::SimplexReader;
+use std::{marker::PhantomData, num::NonZeroUsize, time::Duration};
 
 const RETRY_DELAY: Duration = Duration::from_millis(50);
 
