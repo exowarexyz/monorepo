@@ -1129,12 +1129,12 @@ where
             }
             _ => None,
         };
-        // A cursor past the frontier starts live delivery at the cursor
-        // itself, so batches published below it in the meantime are skipped.
-        let live_start = match since {
-            Some(s) if s > replay_bound => Some(s),
-            _ => replay_bound.checked_add(1),
-        };
+        // Live delivery starts after the replayed range and never below the
+        // cursor. A cursor past the frontier waits for that batch, and the
+        // batches published before it are never read.
+        let live_start = replay_bound
+            .checked_add(1)
+            .map(|next| next.max(since.unwrap_or(0)));
         let live = ordered_batch_stream(
             self.state.log.clone(),
             live_sequence_stream(self.state.notifier.clone(), live_notify, live_start),
@@ -4208,15 +4208,20 @@ mod tests {
             .await
             .expect("subscribe");
 
-        // Every batch from the frontier through and past the cursor matches,
-        // so only the cursor keeps 6 and 7 off the stream.
-        for seq in 6..=9 {
+        // Every published batch matches, so only the cursor keeps 6 and 7 off
+        // the stream. It stays silent until the frontier reaches the cursor.
+        let publish = |seq: u64| {
             engine.publish_live(
                 state.stream.clone(),
                 seq,
                 vec![matching_kv(b"live", &[seq as u8])],
-            );
-        }
+            )
+        };
+        publish(6);
+        publish(7);
+        assert!(futures::poll!(stream.next()).is_pending());
+        publish(8);
+        publish(9);
         for expected in 8..=9 {
             let frame = tokio::time::timeout(Duration::from_secs(1), stream.next())
                 .await
