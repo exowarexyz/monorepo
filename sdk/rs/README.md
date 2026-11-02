@@ -86,12 +86,6 @@ chunks within those limits. Each chunk is a separate write, so your
 application must handle partial completion and coordinate publication.
 Concurrent commits can be sequenced out of order.
 
-The [Put contract](../../proto/README.md) defines limits, errors, and
-splitting constraints. Rust exposes the published limits in
-`exoware_sdk::limits`, but commits do not apply those size limits locally.
-Compare the batch size with your deployment's limits before sending or use
-those limits when splitting the batch.
-
 ## Read consistency
 
 Query replicas may lag behind writes. A [`ReadSession`](https://docs.rs/exoware-sdk/latest/exoware_sdk/struct.ReadSession.html)

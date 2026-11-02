@@ -182,9 +182,7 @@ the application coordinates publication after all required writes succeed.
 Repeated rows from the same history have identical keys and values, so the same
 packet can be retried. To make retries and recovery possible, persist operations,
 proof material, trusted roots, and any current-boundary material before allowing
-the source to discard them. See the
-[SDK batching guide](../../sdk/rs/README.md#namespaces-and-atomic-writes) for Put
-limits and splitting.
+the source to discard them.
 
 ### Current-state boundaries
 

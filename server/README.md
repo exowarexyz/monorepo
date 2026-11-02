@@ -41,8 +41,6 @@ during shutdown.
 
 To serve capabilities in separate components, construct the relevant
 `IngestState`, `QueryState`, `PruneState`, `RetentionState`, or `StreamState`.
-The [API reference](https://docs.rs/exoware-server) lists the corresponding
-service constructors and `query_stack`.
 
 A query worker must be able to serve batches before announcing them, as required
 by the [stream coordination contract](src/stream.rs). `AppState` shares a local
@@ -89,11 +87,8 @@ to return the standard details and retry hint.
 Use `AppState::with_ingest_limits` to set validation limits and
 `AppState::with_put_config` to configure transport admission, wire size, deadlines,
 and observation. Ingest-only services expose the same controls through
-`IngestState`. The [protocol contract](../proto/README.md) defines portable Put
-limits and error details. Requests above that baseline depend on the deployment.
-Custom clients must follow the [Put compatibility rules](../proto/README.md#put-client-compatibility)
-and send Connect unary protobuf with identity or bounded single-frame zstd
-encoding.
+`IngestState`. Custom clients must send Connect unary protobuf with identity or
+bounded single-frame zstd encoding.
 
 [PutConfig](src/ingest/service.rs) sets the absolute request deadline and upload
 idle timeout, both of which default to 30 seconds. The absolute deadline covers

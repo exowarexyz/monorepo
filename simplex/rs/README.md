@@ -38,8 +38,7 @@ where
 The upload writes the header and both finalization indices in one Store Put,
 where readers using the same Store prefix can find them. To combine artifacts
 with other writes, call the writer's `prepare_*` methods and stage the result in
-a `StoreWriteBatch` through the SDK's `StoreBatchUpload` trait. The
-[SDK guide](../../sdk/rs/README.md) covers batching and Store limits.
+a `StoreWriteBatch` through the SDK's `StoreBatchUpload` trait.
 
 ## Read and validate
 
@@ -54,8 +53,7 @@ Typed reads take the decoded type's `Read::Cfg`. `get_header` and `get_block`
 check the requested digest, while certificate reads check the requested round
 or height. Use `latest_finalized` to select the highest stored finalization
 height. Missing records return `None`, and decoding or index mismatches return
-an error. To read stored bytes without these checks, use the `*_raw` methods. See
-[`SimplexReader`](./src/reader.rs) for signatures and decoding configuration.
+an error. To read stored bytes without these checks, use the `*_raw` methods.
 
 `Notarized` and `Finalized` check that the proof's payload equals the paired
 header's `Block::digest()` during construction and decoding. To authenticate the

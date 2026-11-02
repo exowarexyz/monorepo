@@ -281,12 +281,11 @@ a custom DataFusion query planner, include `KvAggregateExtensionPlanner`.
 
 ## Query plans
 
-Run `EXPLAIN` to see how a query reaches the Store. Its physical plan uses
-`KvScanExec` for row scans and `KvAggregateExec` for aggregates computed in the
-Store. The plan identifies the chosen primary-key or index access path, any
-remaining row checks, and whether the scan resembles a full table scan. The
-[query planning guide](../docs/query-planning.md) describes predicate and aggregate
-pushdown and how to read these plans.
+Run [`EXPLAIN`](../docs/query-planning.md) to see how a query reaches the Store.
+Its physical plan uses `KvScanExec` for row scans and `KvAggregateExec` for
+aggregates computed in the Store. The plan identifies the chosen primary-key or
+index access path, any remaining row checks, and whether the scan resembles a
+full table scan.
 
 ## Serving SQL
 

@@ -85,8 +85,7 @@ for (const chunk of batch.split(base.putOptions)) {
 
 Each chunk is a separate write, so your application must handle partial
 completion and coordinate publication. Concurrent commits can be sequenced out
-of order. The [Put contract](../../proto/README.md) defines the limits,
-errors, and splitting constraints for these writes.
+of order.
 
 ## Read consistency
 
@@ -120,10 +119,6 @@ Put retries are limited to server rejections that confirm the batch was never
 admitted. Generic errors, timeouts, and lost responses are not automatically
 retried. Direct `client.ingest.put(request, options)` calls accept a `timeoutMs`
 or abort `signal` covering attempts and backoff.
-
-The [client options](src/client.ts) and [Store API](src/store.ts) describe the
-available calls. Generated protobuf types live in `src/gen/ts`. Regenerate them
-with `./gen.sh` from the repository root after changing the schemas.
 
 ## Status
 

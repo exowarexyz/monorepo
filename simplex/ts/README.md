@@ -41,8 +41,7 @@ For a single artifact, use the corresponding `upload*` method. Both approaches
 validate Store limits before sending and throw `RangeError` if they exceed
 them. For a custom batch, use `validate` to check these limits or `split` to
 divide the writes into separate atomic Puts. Splitting can separate an
-artifact's rows. Readers and writers must use the same Store prefix. See the
-[SDK guide](../../sdk/ts/README.md) for prefixes, limits and batching.
+artifact's rows. Readers and writers must use the same Store prefix.
 
 ## Read verified certificates
 
@@ -88,10 +87,7 @@ A certificate's reported epoch does not establish trust in its validator keys,
 and the signing namespace is separate from the Store prefix. For
 `verificationMaterial`, supply Commonware-encoded public key data: a
 participant set for Ed25519, an identity-to-signing-key map for Secp256r1 or BLS
-multisig, or a threshold public identity for threshold schemes. The
-[`SimplexVerifierOptions`](./src/verification.ts) type lists supported schemes,
-payload types and identity types, and the [WASM decoder](../rs/wasm/src/lib.rs)
-defines their key encodings.
+multisig, or a threshold public identity for threshold schemes.
 
 For an application-specific certificate format, implement
 `SimplexCertificateVerifier` with signature, epoch, view, height and header
@@ -101,9 +97,8 @@ fails and return `null` if the record is missing.
 ### Build the WASM verifier
 
 Building the bundled verifier from source requires Rust's
-`wasm32-unknown-unknown` target, `wasm-pack`, and `wasm-bindgen-cli`. The
-[TypeScript CI workflow](../../.github/workflows/typescript.yml) lists compatible
-tool versions. Generate the WASM module from the repository root:
+`wasm32-unknown-unknown` target, `wasm-pack`, and `wasm-bindgen-cli`. Generate the
+WASM module from the repository root:
 
 ```bash
 npm --prefix simplex/ts run build:wasm
@@ -127,6 +122,4 @@ fixed session sets a minimum, not a historical snapshot.
 [`SimplexSubscriptions`](./src/subscriptions.ts) streams Store updates.
 `subscribeCertificates` uses the same verifier contract as certificate reads.
 `subscribeCertificatesRaw`, `subscribeHeaders` and `subscribeBlocks` return
-unverified artifacts. See the [reader](./src/reader.ts),
-[writer](./src/writer.ts) and [verification types](./src/verification.ts) for
-method signatures and result types.
+unverified artifacts.

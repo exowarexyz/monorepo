@@ -130,5 +130,3 @@ before using its operations.
 Resume with `sinceSequenceNumber: frame.resumeSequenceNumber + 1n`. A frame may
 contain only part of an uploaded range, and later frames can repeat operations
 after upload retries. Consumers must tolerate at-least-once delivery.
-
-See the [client methods](src/client.ts) for signatures and result types.
