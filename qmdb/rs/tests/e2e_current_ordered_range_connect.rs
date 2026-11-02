@@ -3,38 +3,47 @@
 
 mod common;
 
-use std::num::NonZeroU64;
-use std::time::Duration;
-
 use bytes::Bytes;
 use commonware_codec::Encode as _;
 use commonware_cryptography::Sha256;
-use commonware_runtime::tokio as cw_tokio;
-use commonware_runtime::Runner as _;
-use commonware_storage::merkle::{mmb, mmr, Location, Proof};
-use commonware_storage::qmdb::any::{
-    ordered::variable::Operation as QmdbOperation, value::VariableEncoding,
+use commonware_runtime::{tokio as cw_tokio, Runner as _};
+use commonware_storage::{
+    merkle::{mmb, mmr, Location, Proof},
+    qmdb::{
+        any::{
+            ordered::{
+                variable::{Db as AnyOrderedQmdbDb, Operation as QmdbOperation},
+                Update,
+            },
+            value::VariableEncoding,
+        },
+        current::ordered::variable::Db as LocalQmdbDb,
+        sync::{self as qmdb_sync, Request, Response, Source as _},
+    },
+    translator::TwoCap,
 };
-use commonware_storage::qmdb::{
-    any::ordered::{variable::Db as AnyOrderedQmdbDb, Update},
-    current::ordered::variable::Db as LocalQmdbDb,
-    sync::{self as qmdb_sync, Request, Response, Source as _},
-};
-use commonware_storage::translator::TwoCap;
-use commonware_utils::{channel::mpsc, NZUsize, NZU16, NZU64};
-use exoware_qmdb::service::proto::qmdb::v1::{
-    GetCurrentOperationRangeRequest as ProtoGetCurrentOperationRangeRequest,
-    GetOperationRangeRequest as ProtoGetOperationRangeRequest,
-    SubscribeRequest as ProtoSubscribeRequest,
+use commonware_utils::{
+    channel::{mpsc, ring},
+    NZUsize, NZU16, NZU64,
 };
 use exoware_qmdb::{
-    adapter::upload::recover_boundary_state, service::client::rpc::CurrentOperationClient,
-    service::client::rpc::OperationLogClient, service::client::rpc::OperationLogSubscribeProof,
+    adapter::upload::recover_boundary_state,
+    service::{
+        client::rpc::{CurrentOperationClient, OperationLogClient, OperationLogSubscribeProof},
+        proto::qmdb::v1::{
+            GetCurrentOperationRangeRequest as ProtoGetCurrentOperationRangeRequest,
+            GetOperationRangeRequest as ProtoGetOperationRangeRequest,
+            SubscribeRequest as ProtoSubscribeRequest,
+        },
+    },
     CurrentBoundaryState, QmdbError, MAX_OPERATION_SIZE,
 };
-use exoware_sdk::common::kv::v1::{filter as proto_filter, Filter as ProtoFilter};
-use exoware_sdk::proto::PreferZstdHttpClient;
-use exoware_sdk::{PrefixedStoreClient, StoreClient};
+use exoware_sdk::{
+    common::kv::v1::{filter as proto_filter, Filter as ProtoFilter},
+    proto::PreferZstdHttpClient,
+    PrefixedStoreClient, StoreClient,
+};
+use std::{num::NonZeroU64, time::Duration};
 
 const N: usize = 32;
 const MIN_MMB_OPERATIONS: usize = 10;
@@ -181,7 +190,7 @@ async fn build_source_batch() -> SourceBatch {
     tokio::task::spawn_blocking(|| {
         cw_tokio::Runner::default().start(|context| async move {
             use commonware_runtime::{buffer::paged::CacheRef, Supervisor as _};
-            let page_cache = CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(8));
+            let page_cache = CacheRef::new(NZU16!(64), NZUsize!(8));
             let cfg = common::current_variable_config(
                 "current_ordered_variable_mmr_connect_source",
                 page_cache,
@@ -216,7 +225,7 @@ async fn build_source_batch() -> SourceBatch {
                         .await
                         .expect("merkleize")
                 };
-                (db, _) = db.apply_batch(finalized).await.expect("apply");
+                db = db.apply_batch(finalized).await.expect("apply");
 
                 let latest = db.bounds().end - 1;
                 let n = NonZeroU64::new(*latest + 1).unwrap();
@@ -281,7 +290,7 @@ async fn build_mmb_source_batch() -> MmbSourceBatch {
     tokio::task::spawn_blocking(|| {
         cw_tokio::Runner::default().start(|context| async move {
             use commonware_runtime::{buffer::paged::CacheRef, Supervisor as _};
-            let page_cache = CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(8));
+            let page_cache = CacheRef::new(NZU16!(64), NZUsize!(8));
             let cfg = common::current_variable_config(
                 "current_ordered_variable_mmb_connect_source",
                 page_cache,
@@ -319,7 +328,7 @@ async fn build_mmb_source_batch() -> MmbSourceBatch {
                         .await
                         .expect("merkleize")
                 };
-                (db, _) = db.apply_batch(finalized).await.expect("apply");
+                db = db.apply_batch(finalized).await.expect("apply");
 
                 let latest = db.bounds().end - 1;
                 let n = NonZeroU64::new(*latest + 1).unwrap();
@@ -358,7 +367,7 @@ async fn build_mmb_growing_source_batch() -> MmbGrowingSourceBatch {
     tokio::task::spawn_blocking(|| {
         cw_tokio::Runner::default().start(|context| async move {
             use commonware_runtime::{buffer::paged::CacheRef, Supervisor as _};
-            let page_cache = CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(8));
+            let page_cache = CacheRef::new(NZU16!(64), NZUsize!(8));
             let cfg = common::current_variable_config(
                 "current_ordered_variable_mmb_growing_connect_source",
                 page_cache,
@@ -398,7 +407,7 @@ async fn build_mmb_growing_source_batch() -> MmbGrowingSourceBatch {
                         .await
                         .expect("merkleize")
                 };
-                (db, _) = db.apply_batch(finalized).await.expect("apply");
+                db = db.apply_batch(finalized).await.expect("apply");
 
                 let latest = db.bounds().end - 1;
                 let n = NonZeroU64::new(*latest + 1).unwrap();
@@ -543,7 +552,7 @@ async fn test_ordered_current_state_sync_from_connect_api_reconstructs_current_d
         cw_tokio::Runner::default().start(|context| async move {
             use commonware_runtime::{buffer::paged::CacheRef, Supervisor as _};
 
-            let page_cache = CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(8));
+            let page_cache = CacheRef::new(NZU16!(64), NZUsize!(8));
             let cfg = common::current_variable_config(
                 "current_ordered_variable_mmr_sync_target",
                 page_cache,
@@ -626,7 +635,7 @@ async fn test_ordered_mmb_current_state_sync_from_nonzero_connect_api_reconstruc
         cw_tokio::Runner::default().start(|context| async move {
             use commonware_runtime::{buffer::paged::CacheRef, Supervisor as _};
 
-            let page_cache = CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(8));
+            let page_cache = CacheRef::new(NZU16!(64), NZUsize!(8));
             let cfg = common::current_variable_config(
                 "current_ordered_variable_mmb_nonzero_sync_target",
                 page_cache,
@@ -1238,7 +1247,7 @@ async fn test_ordered_mmb_operation_log_any_sync_from_connect_api_reconstructs_a
         cw_tokio::Runner::default().start(|context| async move {
             use commonware_runtime::{buffer::paged::CacheRef, Supervisor as _};
 
-            let page_cache = CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(8));
+            let page_cache = CacheRef::new(NZU16!(64), NZUsize!(8));
             let cfg = common::any_variable_config(
                 "any_ordered_variable_mmb_sync_target",
                 page_cache,
@@ -1309,7 +1318,7 @@ async fn test_ordered_mmb_operation_log_any_sync_from_nonzero_connect_api_recons
         cw_tokio::Runner::default().start(|context| async move {
             use commonware_runtime::{buffer::paged::CacheRef, Supervisor as _};
 
-            let page_cache = CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(8));
+            let page_cache = CacheRef::new(NZU16!(64), NZUsize!(8));
             let cfg = common::any_variable_config(
                 "any_ordered_variable_mmb_nonzero_sync_target",
                 page_cache,
@@ -1392,15 +1401,15 @@ async fn test_ordered_mmb_operation_log_any_sync_accepts_target_update_from_grow
     );
     let expected_initial_target = initial_target.clone();
 
-    let (update_tx, update_rx) = mpsc::channel(1);
+    let (update_tx, update_rx) = ring::channel(NZUsize!(1));
     let (finish_tx, finish_rx) = mpsc::channel(1);
-    let (reached_tx, mut reached_rx) = mpsc::channel(2);
+    let (reached_tx, mut reached_rx) = ring::channel(NZUsize!(2));
     let sync_expected_alpha = expected_alpha;
     let sync_handle = tokio::task::spawn_blocking(move || {
         cw_tokio::Runner::default().start(|context| async move {
             use commonware_runtime::{buffer::paged::CacheRef, Supervisor as _};
 
-            let page_cache = CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(8));
+            let page_cache = CacheRef::new(NZU16!(64), NZUsize!(8));
             let cfg = common::any_variable_config(
                 "any_ordered_variable_mmb_growing_sync_target",
                 page_cache,
@@ -1445,10 +1454,7 @@ async fn test_ordered_mmb_operation_log_any_sync_accepts_target_update_from_grow
         commonware_utils::non_empty_range!(start, updated_op_count),
     );
     assert_ne!(updated_target, expected_initial_target);
-    update_tx
-        .send(updated_target.clone())
-        .await
-        .expect("send updated sync target");
+    assert!(update_tx.send_lossy(updated_target.clone()));
 
     let reached_updated = tokio::time::timeout(Duration::from_secs(30), reached_rx.recv())
         .await

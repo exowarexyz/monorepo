@@ -11,8 +11,8 @@ import {
 import {
   CurrentKeyValueProofSchema,
   CurrentOperationRangeProofSchema,
-  HistoricalMultiProofSchema,
-  HistoricalOperationRangeProofSchema,
+  OperationMultiProofSchema,
+  OperationRangeProofSchema,
 } from './generated/proto/qmdb/v1/proof_pb.js';
 import {
   KeyLookupService,
@@ -39,143 +39,74 @@ import {
   FilterSchema,
   type Filter,
 } from './generated/proto/common/v1/kv_pb.js';
-import initWasm, {
-  decode_historical_multi_proof_operations,
+import {
+  decode_operation_multi_proof_operations,
   encode_vec_key,
   verify_current_operation_range_proof,
   verify_current_key_value_proof,
   verify_get_many_response,
   verify_get_range_response,
-  verify_historical_fixed_keyless_append_operations_proof,
-  verify_historical_fixed_keyless_append_proof,
-  verify_historical_fixed_unordered_update_operations_proof,
-  verify_historical_fixed_unordered_update_proof,
-  verify_historical_operation_range_proof,
-  verify_historical_operations_proof,
-  verify_historical_raw_operation_range_proof,
 } from './generated/wasm/exoware_qmdb_wasm.js';
 
-export type BytesLike = Uint8Array | string;
-export type MerkleFamily = 'mmr' | 'mmb';
-export type HashFamily = 'sha256' | 'blake3' | 'crc32c';
+import {
+  initQmdbWasm,
+  QmdbProofVerifier,
+  toBytes,
+  assertMerkleFamily,
+  assertHashFamily,
+  assertU32,
+  assertU64,
+  assertOperationWindow,
+  assertOperationLocations,
+  fixedOperationExpectations,
+  type BytesLike,
+  type MerkleFamily,
+  type HashFamily,
+  type OrderedOperation,
+  type LocatedOrderedOperation,
+  type VerifiedOperationMultiProof,
+  type VerifiedRawOperationRangeProof,
+  type VerifiedRawOperationsProof,
+  type VerifiedFixedKeylessAppendsProof,
+  type VerifiedFixedUnorderedUpdatesProof,
+  type VerifiedFixedKeylessAppendProof,
+  type VerifiedFixedUnorderedUpdateProof,
+  type OperationRangeContext,
+  type OperationsContext,
+  type OperationsTipContext,
+} from './verification.js';
 
-export type OrderedOperation =
-  | {
-      type: 'update';
-      key: Uint8Array;
-      value: Uint8Array;
-      nextKey: Uint8Array;
-    }
-  | {
-      type: 'delete';
-      key: Uint8Array;
-    }
-  | {
-      type: 'commit_floor';
-      value?: Uint8Array;
-      floorLocation: bigint;
-    };
+export type {
+  BytesLike,
+  MerkleFamily,
+  HashFamily,
+  OrderedOperation,
+  LocatedOrderedOperation,
+  VerifiedOperationMultiProof,
+  LocatedRawOperation,
+  VerifiedRawOperationRangeProof,
+  VerifiedRawOperationsProof,
+  VerifiedFixedKeylessAppend,
+  VerifiedFixedKeylessAppendsProof,
+  VerifiedFixedUnorderedUpdate,
+  VerifiedFixedUnorderedUpdatesProof,
+  VerifiedFixedKeylessAppendProof,
+  VerifiedFixedUnorderedUpdateProof,
+} from './verification.js';
 
-export interface LocatedOrderedOperation {
-  location: bigint;
-  operation: OrderedOperation;
-}
-
-export interface VerifiedHistoricalMultiProof {
-  /**
-   * The trusted root supplied to verification. For current-boundary-backed
-   * proofs this is the current/global root; for operation-log-only proofs this
-   * is the operation-log root.
-   */
-  root: Uint8Array;
-  operations: LocatedOrderedOperation[];
-  proofSizeBytes: number;
-}
-
-export interface OperationRangeRequest {
-  tip: bigint;
-  startLocation: bigint;
-  maxLocations: number;
+export interface OperationRangeRequest extends OperationRangeContext {
   minSequenceNumber?: bigint;
 }
 
-/** Operations at `locations`, strictly ascending and each at most `tip`. */
-export interface OperationsRequest {
-  tip: bigint;
-  locations: readonly bigint[];
+export interface OperationsRequest extends OperationsContext {
   minSequenceNumber?: bigint;
 }
 
-export interface OperationsTipRequest {
-  tip: bigint;
+export interface OperationsTipRequest extends OperationsTipContext {
   minSequenceNumber?: bigint;
 }
 
-export interface LocatedRawOperation {
-  location: bigint;
-  encodedOperation: Uint8Array;
-}
-
-export interface VerifiedRawOperationRangeProof {
-  root: Uint8Array;
-  operations: LocatedRawOperation[];
-  proofSizeBytes: number;
-}
-
-/**
- * Operations in request order. `root` is the trusted root supplied to
- * verification; for current-boundary endpoints an ops-root witness binds the
- * proven operation-log root to it.
- */
-export interface VerifiedRawOperationsProof {
-  root: Uint8Array;
-  operations: LocatedRawOperation[];
-  proofSizeBytes: number;
-}
-
-export interface VerifiedFixedKeylessAppend {
-  location: bigint;
-  value: Uint8Array;
-}
-
-/** Appends in ascending location order. `root` is as in {@link VerifiedRawOperationsProof}. */
-export interface VerifiedFixedKeylessAppendsProof {
-  root: Uint8Array;
-  operations: VerifiedFixedKeylessAppend[];
-  proofSizeBytes: number;
-}
-
-export interface VerifiedFixedUnorderedUpdate {
-  location: bigint;
-  key: Uint8Array;
-  value: Uint8Array;
-}
-
-/** Updates in ascending location order. `root` is as in {@link VerifiedRawOperationsProof}. */
-export interface VerifiedFixedUnorderedUpdatesProof {
-  root: Uint8Array;
-  operations: VerifiedFixedUnorderedUpdate[];
-  proofSizeBytes: number;
-}
-
-export interface VerifiedFixedKeylessAppendProof {
-  location: bigint;
-  value: Uint8Array;
-  root: Uint8Array;
-  proofSizeBytes: number;
-  operationCount: number;
-}
-
-export interface VerifiedFixedUnorderedUpdateProof {
-  location: bigint;
-  key: Uint8Array;
-  value: Uint8Array;
-  root: Uint8Array;
-  proofSizeBytes: number;
-  operationCount: number;
-}
-
-export interface DecodedHistoricalMultiProof {
+export interface DecodedOperationMultiProof {
   /**
    * The root decoded from a subscribe proof. When the proof includes an
    * ops-root witness this is the current/global root reconstructed from that
@@ -231,29 +162,19 @@ export interface VerifiedCurrentKeyRangeProof {
 export interface OrderedSubscribeProof {
   resumeSequenceNumber: bigint;
   tip: bigint;
-  proof: DecodedHistoricalMultiProof;
+  proof: DecodedOperationMultiProof;
 }
 
-export type OrderedQmdbClientOptions = SdkClientOptions & {
+export type QmdbOrderedClientOptions = SdkClientOptions & {
   merkleFamily?: MerkleFamily;
   hashFamily?: HashFamily;
   currentChunkSize?: number;
 };
 
-export type QmdbOperationLogClientOptions = SdkClientOptions & {
+export type QmdbLogClientOptions = SdkClientOptions & {
   merkleFamily?: MerkleFamily;
   hashFamily?: HashFamily;
 };
-
-let wasmReady: Promise<unknown> | undefined;
-
-function ensureWasm(): Promise<unknown> {
-  return (wasmReady ??= initWasm());
-}
-
-function toBytes(value: BytesLike): Uint8Array {
-  return typeof value === 'string' ? new TextEncoder().encode(value) : value;
-}
 
 function keyId(key: Uint8Array): string {
   return Array.from(key).join(',');
@@ -270,81 +191,19 @@ function assertDistinctKeys(keys: readonly Uint8Array[]): void {
   }
 }
 
-function assertMerkleFamily(value: MerkleFamily, label: string): void {
-  if (value !== 'mmr' && value !== 'mmb') {
-    throw new Error(`${label} unsupported Merkle family ${String(value)}`);
-  }
-}
-
-function assertHashFamily(value: HashFamily, label: string): void {
-  if (value !== 'sha256' && value !== 'blake3' && value !== 'crc32c') {
-    throw new Error(`${label} unsupported hash family ${String(value)}`);
-  }
-}
-
-function assertU32(value: number, label: string, nonzero = false): void {
-  if (!Number.isInteger(value) || value < (nonzero ? 1 : 0) || value > 0xffff_ffff) {
-    throw new Error(`${label} must fit in ${nonzero ? 'a positive' : 'an unsigned'} 32-bit integer`);
-  }
-}
-
-function assertU64(value: bigint, label: string): void {
-  if (typeof value !== 'bigint' || value < 0n || value > 0xffff_ffff_ffff_ffffn) {
-    throw new Error(`${label} must be an unsigned 64-bit bigint`);
-  }
-}
-
 function assertOptionalMinSequenceNumber(minSequenceNumber?: bigint): void {
   if (minSequenceNumber !== undefined) {
     assertU64(minSequenceNumber, 'minSequenceNumber');
   }
 }
 
-function assertOperationWindow(request: OperationRangeRequest): void {
-  assertU64(request.tip, 'tip');
-  assertU64(request.startLocation, 'startLocation');
-  assertOptionalMinSequenceNumber(request.minSequenceNumber);
-  assertU32(request.maxLocations, 'maxLocations', true);
-  if (request.startLocation > request.tip) {
-    throw new Error('invalid operation window');
-  }
-}
-
+/** Maximum number of locations in a `GetOperations` RPC. */
 const MAX_REQUESTED_LOCATIONS = 1024;
 
-function assertOperationsRequest(request: OperationsRequest): void {
-  assertU64(request.tip, 'tip');
-  assertOptionalMinSequenceNumber(request.minSequenceNumber);
-  const { locations } = request;
-  if (locations.length === 0 || locations.length > MAX_REQUESTED_LOCATIONS) {
-    throw new Error(`operations request must have 1 to ${MAX_REQUESTED_LOCATIONS} locations`);
+function assertOperationsRequestSize(locationCount: number): void {
+  if (locationCount > MAX_REQUESTED_LOCATIONS) {
+    throw new Error(`operations request must have at most ${MAX_REQUESTED_LOCATIONS} locations`);
   }
-  locations.forEach((location, index) => {
-    assertU64(location, 'location');
-    if (index > 0 && location <= locations[index - 1]) {
-      throw new Error('operations request locations must be strictly ascending');
-    }
-  });
-  if (locations[locations.length - 1] > request.tip) {
-    throw new Error('operations request location is above tip');
-  }
-}
-
-/** Sort expectations by location and concatenate their equal-size bytes. */
-function fixedOperationExpectations(
-  expected: readonly { location: bigint; bytes: Uint8Array }[],
-  label: string,
-): { locations: bigint[]; bytes: Uint8Array; size: number } {
-  const sorted = [...expected].sort((a, b) =>
-    a.location < b.location ? -1 : a.location > b.location ? 1 : 0,
-  );
-  const size = sorted[0]?.bytes.length ?? 0;
-  if (size === 0 || sorted.some(({ bytes }) => bytes.length !== size)) {
-    throw new Error(`expected ${label}s must be non-empty and equal in size`);
-  }
-  const bytes = new Uint8Array(size * sorted.length);
-  sorted.forEach((entry, index) => bytes.set(entry.bytes, index * size));
-  return { locations: sorted.map(({ location }) => location), bytes, size };
 }
 
 export function matchExact(bytes: BytesLike): Filter {
@@ -386,7 +245,7 @@ async function operationRangeProofBytes(
   if (!response.proof) {
     throw new Error('qmdb getOperationRange response missing proof');
   }
-  return toBinary(HistoricalOperationRangeProofSchema, response.proof);
+  return toBinary(OperationRangeProofSchema, response.proof);
 }
 
 async function operationsProofBytes(
@@ -405,24 +264,20 @@ async function operationsProofBytes(
   if (!response.proof) {
     throw new Error('qmdb getOperations response missing proof');
   }
-  return toBinary(HistoricalMultiProofSchema, response.proof);
+  return toBinary(OperationMultiProofSchema, response.proof);
 }
 
-export class QmdbOperationLogClient {
+export class QmdbLogClient {
   private readonly operationLog: ConnectClient<typeof OperationLogService>;
-  private readonly merkleFamily: MerkleFamily;
-  private readonly hashFamily: HashFamily;
+  private readonly verifier: QmdbProofVerifier;
 
-  constructor(baseUrl: string, options: QmdbOperationLogClientOptions = {}) {
+  constructor(baseUrl: string, options: QmdbLogClientOptions = {}) {
     const {
       merkleFamily = 'mmr',
       hashFamily = 'sha256',
       ...transportOptions
     } = options;
-    assertMerkleFamily(merkleFamily, 'qmdb operation log client');
-    assertHashFamily(hashFamily, 'qmdb operation log client');
-    this.merkleFamily = merkleFamily;
-    this.hashFamily = hashFamily;
+    this.verifier = new QmdbProofVerifier({ merkleFamily, hashFamily });
     this.operationLog = createClient(
       OperationLogService,
       createTransport(baseUrl, transportOptions),
@@ -435,22 +290,12 @@ export class QmdbOperationLogClient {
     options?: CallOptions,
   ): Promise<VerifiedRawOperationRangeProof> {
     assertOperationWindow(request);
-    await ensureWasm();
-    const proofBytes = await operationRangeProofBytes(
-      this.operationLog,
-      request,
-      options,
-    );
-    const verified = verify_historical_raw_operation_range_proof(
-      proofBytes,
-      toBytes(expectedRoot),
-      this.merkleFamily,
-      this.hashFamily,
-      request.tip,
-      request.startLocation,
-      request.maxLocations,
-    ) as Omit<VerifiedRawOperationRangeProof, 'proofSizeBytes'>;
-    return { ...verified, proofSizeBytes: proofBytes.length };
+    assertOptionalMinSequenceNumber(request.minSequenceNumber);
+    const [, proofBytes] = await Promise.all([
+      initQmdbWasm(),
+      operationRangeProofBytes(this.operationLog, request, options),
+    ]);
+    return this.verifier.verifyOperationRange(proofBytes, request, expectedRoot);
   }
 
   async getFixedKeylessAppend(
@@ -462,24 +307,18 @@ export class QmdbOperationLogClient {
   ): Promise<VerifiedFixedKeylessAppendProof> {
     assertU64(expectedLocation, 'expectedLocation');
     assertOperationWindow(request);
-    await ensureWasm();
-    const proofBytes = await operationRangeProofBytes(
-      this.operationLog,
-      request,
-      options,
-    );
-    const verified = verify_historical_fixed_keyless_append_proof(
+    assertOptionalMinSequenceNumber(request.minSequenceNumber);
+    const [, proofBytes] = await Promise.all([
+      initQmdbWasm(),
+      operationRangeProofBytes(this.operationLog, request, options),
+    ]);
+    return this.verifier.verifyFixedKeylessAppend(
       proofBytes,
-      toBytes(expectedRoot),
-      this.merkleFamily,
-      this.hashFamily,
+      request,
+      expectedRoot,
       expectedLocation,
-      toBytes(expectedValue),
-      request.tip,
-      request.startLocation,
-      request.maxLocations,
-    ) as Omit<VerifiedFixedKeylessAppendProof, 'proofSizeBytes'>;
-    return { ...verified, proofSizeBytes: proofBytes.length };
+      expectedValue,
+    );
   }
 
   async getFixedUnorderedUpdate(
@@ -493,25 +332,19 @@ export class QmdbOperationLogClient {
     assertU64(expectedLocation, 'expectedLocation');
     assertU32(valueSize, 'valueSize');
     assertOperationWindow(request);
-    await ensureWasm();
-    const proofBytes = await operationRangeProofBytes(
-      this.operationLog,
-      request,
-      options,
-    );
-    const verified = verify_historical_fixed_unordered_update_proof(
+    assertOptionalMinSequenceNumber(request.minSequenceNumber);
+    const [, proofBytes] = await Promise.all([
+      initQmdbWasm(),
+      operationRangeProofBytes(this.operationLog, request, options),
+    ]);
+    return this.verifier.verifyFixedUnorderedUpdate(
       proofBytes,
-      toBytes(expectedRoot),
-      this.merkleFamily,
-      this.hashFamily,
+      request,
+      expectedRoot,
       expectedLocation,
-      toBytes(expectedKey),
+      expectedKey,
       valueSize,
-      request.tip,
-      request.startLocation,
-      request.maxLocations,
-    ) as Omit<VerifiedFixedUnorderedUpdateProof, 'proofSizeBytes'>;
-    return { ...verified, proofSizeBytes: proofBytes.length };
+    );
   }
 
   /** Fetch and verify the raw operations at `request.locations` of one tip. */
@@ -520,18 +353,14 @@ export class QmdbOperationLogClient {
     expectedRoot: BytesLike,
     options?: CallOptions,
   ): Promise<VerifiedRawOperationsProof> {
-    assertOperationsRequest(request);
-    await ensureWasm();
-    const proofBytes = await operationsProofBytes(this.operationLog, request, options);
-    const verified = verify_historical_operations_proof(
-      proofBytes,
-      toBytes(expectedRoot),
-      this.merkleFamily,
-      this.hashFamily,
-      request.tip,
-      BigUint64Array.from(request.locations),
-    ) as Omit<VerifiedRawOperationsProof, 'proofSizeBytes'>;
-    return { ...verified, proofSizeBytes: proofBytes.length };
+    assertOperationsRequestSize(request.locations.length);
+    assertOperationLocations(request);
+    assertOptionalMinSequenceNumber(request.minSequenceNumber);
+    const [, proofBytes] = await Promise.all([
+      initQmdbWasm(),
+      operationsProofBytes(this.operationLog, request, options),
+    ]);
+    return this.verifier.verifyOperations(proofBytes, request, expectedRoot);
   }
 
   /** Verify that each expected value was appended at its location, in one proof. */
@@ -541,25 +370,24 @@ export class QmdbOperationLogClient {
     expected: readonly { location: bigint; value: BytesLike }[],
     options?: CallOptions,
   ): Promise<VerifiedFixedKeylessAppendsProof> {
-    const { locations, bytes, size } = fixedOperationExpectations(
+    assertOperationsRequestSize(expected.length);
+    const { locations } = fixedOperationExpectations(
       expected.map(({ location, value }) => ({ location, bytes: toBytes(value) })),
       'value',
+      request.tip,
     );
     const operations = { ...request, locations };
-    assertOperationsRequest(operations);
-    await ensureWasm();
-    const proofBytes = await operationsProofBytes(this.operationLog, operations, options);
-    const verified = verify_historical_fixed_keyless_append_operations_proof(
+    assertOptionalMinSequenceNumber(request.minSequenceNumber);
+    const [, proofBytes] = await Promise.all([
+      initQmdbWasm(),
+      operationsProofBytes(this.operationLog, operations, options),
+    ]);
+    return this.verifier.verifyFixedKeylessAppendMany(
       proofBytes,
-      toBytes(expectedRoot),
-      this.merkleFamily,
-      this.hashFamily,
-      request.tip,
-      BigUint64Array.from(locations),
-      bytes,
-      size,
-    ) as Omit<VerifiedFixedKeylessAppendsProof, 'proofSizeBytes'>;
-    return { ...verified, proofSizeBytes: proofBytes.length };
+      request,
+      expectedRoot,
+      expected,
+    );
   }
 
   /** Verify that each expected key was updated at its location, in one proof. */
@@ -570,31 +398,30 @@ export class QmdbOperationLogClient {
     valueSize: number,
     options?: CallOptions,
   ): Promise<VerifiedFixedUnorderedUpdatesProof> {
+    assertOperationsRequestSize(expected.length);
     assertU32(valueSize, 'valueSize');
-    const { locations, bytes, size } = fixedOperationExpectations(
+    const { locations } = fixedOperationExpectations(
       expected.map(({ location, key }) => ({ location, bytes: toBytes(key) })),
       'key',
+      request.tip,
     );
     const operations = { ...request, locations };
-    assertOperationsRequest(operations);
-    await ensureWasm();
-    const proofBytes = await operationsProofBytes(this.operationLog, operations, options);
-    const verified = verify_historical_fixed_unordered_update_operations_proof(
+    assertOptionalMinSequenceNumber(request.minSequenceNumber);
+    const [, proofBytes] = await Promise.all([
+      initQmdbWasm(),
+      operationsProofBytes(this.operationLog, operations, options),
+    ]);
+    return this.verifier.verifyFixedUnorderedUpdateMany(
       proofBytes,
-      toBytes(expectedRoot),
-      this.merkleFamily,
-      this.hashFamily,
-      request.tip,
-      BigUint64Array.from(locations),
-      bytes,
-      size,
+      request,
+      expectedRoot,
+      expected,
       valueSize,
-    ) as Omit<VerifiedFixedUnorderedUpdatesProof, 'proofSizeBytes'>;
-    return { ...verified, proofSizeBytes: proofBytes.length };
+    );
   }
 }
 
-export class OrderedQmdbClient {
+export class QmdbOrderedClient {
   private readonly lookup: ConnectClient<typeof KeyLookupService>;
   private readonly orderedRange: ConnectClient<typeof OrderedKeyRangeService>;
   private readonly operationLog: ConnectClient<typeof OperationLogService>;
@@ -602,8 +429,9 @@ export class OrderedQmdbClient {
   private readonly merkleFamily: MerkleFamily;
   private readonly hashFamily: HashFamily;
   private readonly currentChunkSize: number;
+  private readonly verifier: QmdbProofVerifier;
 
-  constructor(baseUrl: string, options: OrderedQmdbClientOptions = {}) {
+  constructor(baseUrl: string, options: QmdbOrderedClientOptions = {}) {
     const {
       merkleFamily = 'mmr',
       hashFamily = 'sha256',
@@ -616,6 +444,7 @@ export class OrderedQmdbClient {
     this.merkleFamily = merkleFamily;
     this.hashFamily = hashFamily;
     this.currentChunkSize = currentChunkSize;
+    this.verifier = new QmdbProofVerifier({ merkleFamily, hashFamily });
     const transport = createTransport(baseUrl, transportOptions);
     this.lookup = createClient(KeyLookupService, transport);
     this.orderedRange = createClient(OrderedKeyRangeService, transport);
@@ -631,7 +460,7 @@ export class OrderedQmdbClient {
     options?: CallOptions,
   ): Promise<VerifiedCurrentKeyValueProof> {
     assertOptionalMinSequenceNumber(minSequenceNumber);
-    await ensureWasm();
+    await initQmdbWasm();
     const requestedKey = encode_vec_key(toBytes(key));
     const response = await this.lookup.get(
       create(GetRequestSchema, {
@@ -664,7 +493,7 @@ export class OrderedQmdbClient {
     options?: CallOptions,
   ): Promise<VerifiedCurrentKeyLookupProof> {
     assertOptionalMinSequenceNumber(minSequenceNumber);
-    await ensureWasm();
+    await initQmdbWasm();
     const requestedKeys = keys.map((key) => encode_vec_key(toBytes(key)));
     assertDistinctKeys(requestedKeys);
     const response = await this.lookup.getMany(
@@ -700,7 +529,7 @@ export class OrderedQmdbClient {
   ): Promise<VerifiedCurrentKeyRangeProof> {
     assertU32(request.limit, 'limit', true);
     assertOptionalMinSequenceNumber(request.minSequenceNumber);
-    await ensureWasm();
+    await initQmdbWasm();
     const startKey = encode_vec_key(toBytes(request.startKey));
     const endKey =
       request.endKey === undefined
@@ -741,7 +570,7 @@ export class OrderedQmdbClient {
     },
     options?: CallOptions,
   ): AsyncIterable<OrderedSubscribeProof> {
-    await ensureWasm();
+    await initQmdbWasm();
     const stream = this.operationLog.subscribe(
       create(SubscribeRequestSchema, {
         keyFilters: filters.keyFilters ?? [],
@@ -756,12 +585,12 @@ export class OrderedQmdbClient {
       if (!frame.proof) {
         throw new Error('qmdb subscribe response missing proof');
       }
-      const proofBytes = toBinary(HistoricalMultiProofSchema, frame.proof);
-      const { tip, ...proof } = decode_historical_multi_proof_operations(
+      const proofBytes = toBinary(OperationMultiProofSchema, frame.proof);
+      const { tip, ...proof } = decode_operation_multi_proof_operations(
         proofBytes,
         this.merkleFamily,
         this.hashFamily,
-      ) as Omit<DecodedHistoricalMultiProof, 'proofSizeBytes'> & { tip: bigint };
+      ) as Omit<DecodedOperationMultiProof, 'proofSizeBytes'> & { tip: bigint };
       yield {
         resumeSequenceNumber: frame.resumeSequenceNumber,
         tip,
@@ -774,24 +603,14 @@ export class OrderedQmdbClient {
     request: OperationRangeRequest,
     expectedRoot: BytesLike,
     options?: CallOptions,
-  ): Promise<VerifiedHistoricalMultiProof> {
+  ): Promise<VerifiedOperationMultiProof> {
     assertOperationWindow(request);
-    await ensureWasm();
-    const proofBytes = await operationRangeProofBytes(
-      this.operationLog,
-      request,
-      options,
-    );
-    const verified = verify_historical_operation_range_proof(
-      proofBytes,
-      toBytes(expectedRoot),
-      this.merkleFamily,
-      this.hashFamily,
-      request.tip,
-      request.startLocation,
-      request.maxLocations,
-    ) as Omit<VerifiedHistoricalMultiProof, 'proofSizeBytes'>;
-    return { ...verified, proofSizeBytes: proofBytes.length };
+    assertOptionalMinSequenceNumber(request.minSequenceNumber);
+    const [, proofBytes] = await Promise.all([
+      initQmdbWasm(),
+      operationRangeProofBytes(this.operationLog, request, options),
+    ]);
+    return this.verifier.verifyOrderedOperationRange(proofBytes, request, expectedRoot);
   }
 
   async getCurrentOperationRange(
@@ -800,7 +619,8 @@ export class OrderedQmdbClient {
     options?: CallOptions,
   ): Promise<VerifiedCurrentOperationRangeProof> {
     assertOperationWindow(request);
-    await ensureWasm();
+    assertOptionalMinSequenceNumber(request.minSequenceNumber);
+    await initQmdbWasm();
     const response = await this.currentOperation.getCurrentOperationRange(
       create(GetCurrentOperationRangeRequestSchema, request),
       options,

@@ -1,11 +1,9 @@
-use std::cmp::Ordering;
-
+use crate::keys::{read_bit_be, read_bits_to_bytes, write_bit_be, Key};
 use bytes::{BufMut, Bytes};
 use commonware_codec::{
     Buf, Copying, EncodeSize, Error as CodecError, FixedSize, RangeCfg, Read, ReadExt, Write,
 };
-
-use crate::keys::{read_bit_be, read_bits_to_bytes, write_bit_be, Key};
+use std::cmp::Ordering;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Utf8(pub String);

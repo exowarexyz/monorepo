@@ -26,14 +26,6 @@
 //! rolled back (its sequence number must never be re-issued), so the writer panics and the next
 //! open rolls the store forward instead of any in-process recovery.
 
-use std::cmp::Ordering as CmpOrdering;
-use std::collections::BTreeMap;
-use std::num::NonZeroUsize;
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{mpsc, Arc};
-use std::thread;
-
 #[cfg(test)]
 use buffa::Message;
 use buffa::{DecodeOptions, ViewEncode};
@@ -41,20 +33,22 @@ use bytes::Bytes;
 use commonware_codec::{Copying, DecodeExt, Encode};
 #[cfg(test)]
 use exoware_sdk::common::kv::v1::Entry;
-use exoware_sdk::common::kv::v1::EntryView;
-use exoware_sdk::keys::Prefix;
-use exoware_sdk::limits::{
-    put_encoded_len, PutTooLarge, MAX_PUT_ENTRIES, MAX_REQUEST_MESSAGE_BYTES,
-    MAX_RESPONSE_ELEMENT_MEMORY_BYTES, MAX_RESPONSE_MESSAGE_BYTES,
-};
 #[cfg(test)]
 use exoware_sdk::log::stream::v1::GetResponse as StreamGetResponse;
-use exoware_sdk::log::stream::v1::GetResponseView as StreamGetResponseView;
-use exoware_sdk::prune_policy::{KeysScope, OrderEncoding, PrunePolicyDocument, RetainPolicy};
-use exoware_sdk::retention::{validate_retention_policy, RetentionPolicy};
-use exoware_sdk::selector::compile_payload_regex;
-use exoware_server::ingest::{BudgetConfig, ByteLease, DecodeBuffers, IngestBudget, RequestLease};
+use exoware_sdk::{
+    common::kv::v1::EntryView,
+    keys::Prefix,
+    limits::{
+        put_encoded_len, PutTooLarge, MAX_PUT_ENTRIES, MAX_REQUEST_MESSAGE_BYTES,
+        MAX_RESPONSE_ELEMENT_MEMORY_BYTES, MAX_RESPONSE_MESSAGE_BYTES,
+    },
+    log::stream::v1::GetResponseView as StreamGetResponseView,
+    prune_policy::{KeysScope, OrderEncoding, PrunePolicyDocument, RetainPolicy},
+    retention::{validate_retention_policy, RetentionPolicy},
+    selector::compile_payload_regex,
+};
 use exoware_server::{
+    ingest::{BudgetConfig, ByteLease, DecodeBuffers, IngestBudget, RequestLease},
     Ingest, IngestError, Log, LogBatch, Prune, PutError, PutInput, Query, QueryExtra, QueryResult,
     RangeScan, RangeScanBatch, RangeScanResult, Retention, Sequence, StreamNotifier,
 };
@@ -64,6 +58,17 @@ use rocksdb::{
     ColumnFamily, ColumnFamilyDescriptor, DBCompactionStyle, DBCompressionType, DBIterator,
     Direction, IngestExternalFileOptions, IteratorMode, Options, Snapshot, SstFileWriter,
     WriteOptions, DB,
+};
+use std::{
+    cmp::Ordering as CmpOrdering,
+    collections::BTreeMap,
+    num::NonZeroUsize,
+    path::{Path, PathBuf},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        mpsc, Arc,
+    },
+    thread,
 };
 use tokio::sync::oneshot;
 use tracing::debug;
@@ -1750,12 +1755,13 @@ fn encode_log_value(sequence: u64, kvs: &[(Bytes, Bytes)]) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::BTreeSet;
-
     use buffa::encoding::varint_len;
-    use exoware_sdk::limits::{put_entry_encoded_len, MAX_VALUE_LEN};
-    use exoware_sdk::log::ingest::v1::PutRequest;
+    use exoware_sdk::{
+        limits::{put_entry_encoded_len, MAX_VALUE_LEN},
+        log::ingest::v1::PutRequest,
+    };
     use exoware_server::{Ingest, Log, Sequence};
+    use std::collections::BTreeSet;
     use tempfile::tempdir;
 
     fn wire_request(key: &[u8], value: &[u8]) -> Bytes {
