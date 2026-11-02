@@ -395,15 +395,15 @@ async fn test_keyless_connect_get_operations_rejects_invalid_requests() {
     let connect_client = operation_log_client(&qmdb_url);
     let tip = u64::try_from(source.operations.len() - 1).expect("tip fits");
 
-    for locations in [
-        vec![],
-        vec![2, 1],
-        vec![1, 1],
-        vec![0, tip + 1],
-        vec![0; 1025],
+    for (request_tip, locations) in [
+        (tip, vec![]),
+        (tip, vec![2, 1]),
+        (tip, vec![1, 1]),
+        (tip, vec![0, tip + 1]),
+        (1024, (0..=1024).collect()),
     ] {
         let request = ProtoGetOperationsRequest {
-            tip,
+            tip: request_tip,
             locations,
             ..Default::default()
         };
