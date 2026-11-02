@@ -8,9 +8,7 @@ through `SqlServer` for the [TypeScript client](../ts/README.md).
 
 ## Getting started
 
-Add the crate and SDK along with Tokio and DataFusion. Match the `datafusion`
-major version in [`exoware-sql`](Cargo.toml), because the example uses schema
-types such as `DataType` from DataFusion's Arrow re-export.
+Add the crate and SDK along with DataFusion and Tokio:
 
 ```sh
 cargo add exoware-sql exoware-sdk datafusion@55
