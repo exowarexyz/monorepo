@@ -549,6 +549,9 @@ impl ClientTransport for BalancedHttp2Transport {
 
 /// gzip + zstd - used for [`connectrpc::ConnectRpcService::with_compression`] and
 /// [`connectrpc::client::ClientConfig::compression`].
+///
+/// Its zstd codec decompresses into an exactly sized buffer. Registering connectrpc's own
+/// `ZstdProvider` on top (to change the level, say) replaces that codec and its decompression.
 #[must_use]
 pub fn connect_compression_registry() -> CompressionRegistry {
     CompressionRegistry::default().register(ZstdCodec::default())

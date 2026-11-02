@@ -48,26 +48,36 @@ impl CompressionProvider for ZstdCodec {
     fn decompress_with_limit(&self, data: &[u8], max_size: usize) -> Result<Bytes, ConnectError> {
         match lone_frame_size(data) {
             Some(size) if size <= max_size => decompress_exact(data, size),
-            // This includes a header that claims more than the limit. connectrpc's decoder
-            // rejects it once its output passes the limit, or earlier if the frame's window is
-            // too large.
+            // This includes a header that claims more than the limit, which connectrpc decodes
+            // only as far as the limit (or refuses earlier, if the frame's window is too large).
             _ => self.0.decompress_with_limit(data, max_size),
         }
     }
 }
 
-/// The content size `data` records, if `data` is exactly one frame and its header records one.
+/// The most bytes a zstd block decompresses to.
+const MAX_BLOCK_SIZE: usize = 128 * 1024;
+
+/// The content size `data` records, if `data` is exactly one frame, its header records a size,
+/// and the frame could hold that much.
+///
+/// Every block takes at least 3 bytes and holds at most [`MAX_BLOCK_SIZE`], so a header that
+/// claims more than that bound is lying. Leaving such a frame to connectrpc keeps a small body
+/// from making this codec reserve a large buffer.
 fn lone_frame_size(data: &[u8]) -> Option<usize> {
-    let size = get_frame_content_size(data).ok().flatten()?;
-    let lone = find_frame_compressed_size(data).is_ok_and(|len| len == data.len());
-    lone.then(|| usize::try_from(size).ok()).flatten()
+    let size = usize::try_from(get_frame_content_size(data).ok().flatten()?).ok()?;
+    let possible = data.len().div_ceil(3).saturating_mul(MAX_BLOCK_SIZE);
+    let lone = || find_frame_compressed_size(data).is_ok_and(|len| len == data.len());
+    (size <= possible && lone()).then_some(size)
 }
 
 /// Decompresses a lone frame into a buffer of exactly the `size` its header records.
 ///
 /// A frame that holds more than it claims fails when the buffer is full, and one that holds less
-/// fails zstd's own check of the claimed size. One-shot decoding writes straight into the output,
-/// so unlike connectrpc's streaming decoder it needs no window buffer and has no window cap.
+/// fails zstd's own check of the claimed size. connectrpc's streaming decoder skips that second
+/// check when the frame ends in an empty block, so it returns such a frame's short content where
+/// this fails it. One-shot decoding writes straight into the output, so unlike the streaming
+/// decoder it needs no window buffer and isn't held to its 128 MiB window limit.
 fn decompress_exact(data: &[u8], size: usize) -> Result<Bytes, ConnectError> {
     let mut output = Vec::new();
     output.try_reserve_exact(size).map_err(|_| {
@@ -142,6 +152,14 @@ mod tests {
         ours
     }
 
+    /// A 16-byte single-segment frame that claims `size` bytes and holds an empty last block.
+    fn empty_frame_claiming(size: u64) -> Vec<u8> {
+        let mut frame = vec![0x28, 0xb5, 0x2f, 0xfd, 0xe0];
+        frame.extend_from_slice(&size.to_le_bytes());
+        frame.extend_from_slice(&[0x01, 0x00, 0x00]);
+        frame
+    }
+
     /// Rewrites the content size in a frame header whose size field is 4 or 8 bytes long.
     fn with_content_size(frame: &[u8], size: u64) -> Vec<u8> {
         let descriptor = frame[4];
@@ -214,29 +232,113 @@ mod tests {
     }
 
     #[test]
-    fn rejects_frames_whose_content_size_lies() {
-        let codec = ZstdCodec::default();
-        let payload = compressible(100_000);
-        let frame = codec.compress(&payload).unwrap();
+    fn lying_content_sizes_fail_like_connectrpc() {
+        let frame = ZstdCodec::default()
+            .compress(&compressible(100_000))
+            .unwrap();
 
         // Holds more than it claims, and more than the limit. Decoding stops when the claimed
         // 50,000 bytes are full.
         let short = with_content_size(&frame, 50_000);
+        assert!(lone_frame_size(&short).is_some());
         assert_eq!(
-            error_code(codec.decompress_with_limit(&short, 60_000)),
+            error_code(decode_like_connectrpc(&short, 60_000)),
             ErrorCode::InvalidArgument
         );
         // Holds less than it claims.
         let long = with_content_size(&frame, 150_000);
+        assert!(lone_frame_size(&long).is_some());
         assert_eq!(
-            error_code(codec.decompress_with_limit(&long, LIMIT)),
+            error_code(decode_like_connectrpc(&long, LIMIT)),
             ErrorCode::InvalidArgument
         );
     }
 
     #[test]
+    fn rejects_some_lies_connectrpc_misses() {
+        use std::io::Write;
+
+        // zstd's streaming encoder ends a flushed frame with an empty block. connectrpc's
+        // streaming decoder doesn't check the claimed size after an empty last block, so it
+        // returns the 100,000 bytes this frame holds instead of the 150,000 it claims.
+        let payload = compressible(100_000);
+        let mut encoder = zstd::stream::write::Encoder::new(Vec::new(), 3).unwrap();
+        encoder
+            .set_pledged_src_size(Some(payload.len() as u64))
+            .unwrap();
+        encoder.include_contentsize(true).unwrap();
+        encoder.write_all(&payload).unwrap();
+        encoder.flush().unwrap();
+        let frame = encoder.finish().unwrap();
+        assert_eq!(decode_like_connectrpc(&frame, LIMIT).unwrap(), payload);
+        let long = with_content_size(&frame, 150_000);
+        assert_eq!(
+            ZstdProvider::default()
+                .decompress_with_limit(&long, LIMIT)
+                .unwrap(),
+            payload
+        );
+        let error = ZstdCodec::default()
+            .decompress_with_limit(&long, LIMIT)
+            .unwrap_err();
+        assert_eq!(error.code, ErrorCode::InvalidArgument);
+        assert_eq!(
+            error.message.as_deref(),
+            Some("zstd decompression failed: Data corruption detected")
+        );
+
+        // A frame that claims 0 bytes but holds 5 fails with the same code as in connectrpc,
+        // and a different message.
+        let mut hello = ZstdCodec::default().compress(b"hello").unwrap().to_vec();
+        assert_eq!(hello[4], 0x20, "single segment, 1-byte content size");
+        hello[5] = 0;
+        assert!(lone_frame_size(&hello).is_some());
+        let ours = ZstdCodec::default()
+            .decompress_with_limit(&hello, LIMIT)
+            .unwrap_err();
+        let stock = ZstdProvider::default()
+            .decompress_with_limit(&hello, LIMIT)
+            .unwrap_err();
+        assert_eq!(ours.code, ErrorCode::InvalidArgument);
+        assert_eq!(ours.code, stock.code);
+        assert_eq!(
+            ours.message.as_deref(),
+            Some("zstd decompression failed: Destination buffer is too small")
+        );
+        assert_eq!(
+            stock.message.as_deref(),
+            Some("zstd decompression failed: Data corruption detected")
+        );
+    }
+
+    #[test]
+    fn claims_a_frame_could_not_hold_go_to_connectrpc() {
+        // 16 bytes hold at most 6 blocks of 128 KiB.
+        let possible = 6 * MAX_BLOCK_SIZE as u64;
+        assert!(lone_frame_size(&empty_frame_claiming(possible)).is_some());
+        assert!(lone_frame_size(&empty_frame_claiming(possible + 1)).is_none());
+
+        // Without the bound, these would reserve 100 MiB and 200 MiB before failing.
+        // connectrpc returns nothing for the first (its window fits) and refuses the window of
+        // the second.
+        let limit = 256 * 1024 * 1024;
+        assert!(
+            decode_like_connectrpc(&empty_frame_claiming(100 << 20), limit)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            decode_like_connectrpc(&empty_frame_claiming(200 << 20), limit)
+                .unwrap_err()
+                .message
+                .as_deref(),
+            Some("zstd decompression failed: Frame requires too much memory for decoding")
+        );
+    }
+
+    #[test]
     fn claims_over_the_limit_fail_like_connectrpc() {
-        // Claims 2 GiB. connectrpc refuses its window before reserving anything.
+        // Claims 2 GiB. connectrpc refuses its window before decoding anything.
         let frame = ZstdCodec::default()
             .compress(&compressible(100_000))
             .unwrap();
@@ -248,10 +350,7 @@ mod tests {
 
         // An empty frame that claims 256 MiB + 1 bytes. kv-mk1's ingest tests expect this exact
         // error from the registry at the request limit.
-        let pledge = [
-            0x28, 0xb5, 0x2f, 0xfd, 0xe0, 0x01, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00, 0x00, 0x01,
-            0x00, 0x00,
-        ];
+        let pledge = empty_frame_claiming((256 << 20) + 1);
         let error =
             decode_like_connectrpc(&pledge, crate::limits::MAX_REQUEST_MESSAGE_BYTES).unwrap_err();
         assert_eq!(error.code, ErrorCode::InvalidArgument);
@@ -331,12 +430,39 @@ mod tests {
         let frame = ZstdCodec::default()
             .compress(&compressible(100_000))
             .unwrap();
+
+        // Input that isn't one whole frame goes to connectrpc.
         let truncated = &frame[..frame.len() - 3];
         let trailing = [&frame[..], &[0xaa; 8]].concat();
         for input in [&b"not zstd"[..], truncated, &trailing] {
+            assert!(lone_frame_size(input).is_none());
             assert_eq!(
                 error_code(decode_like_connectrpc(input, LIMIT)),
                 ErrorCode::InvalidArgument
+            );
+        }
+
+        // A whole frame with a size is decoded here, and fails the way connectrpc fails it.
+        let mut corrupt = frame.to_vec();
+        let middle = corrupt.len() / 2;
+        corrupt[middle] ^= 0xff;
+        let mut compressor = zstd::bulk::Compressor::new(3).unwrap();
+        compressor.include_checksum(true).unwrap();
+        let mut bad_checksum = compressor.compress(&compressible(10_000)).unwrap();
+        *bad_checksum.last_mut().unwrap() ^= 1;
+        // One raw byte, compressed with dictionary 1.
+        let dictionary = [
+            0x28, 0xb5, 0x2f, 0xfd, 0x21, 0x01, 0x01, 0x09, 0x00, 0x00, b'x',
+        ];
+        for (input, message) in [
+            (&corrupt[..], "Data corruption detected"),
+            (&bad_checksum, "Restored data doesn't match checksum"),
+            (&dictionary, "Dictionary mismatch"),
+        ] {
+            assert!(lone_frame_size(input).is_some());
+            assert_eq!(
+                decode_like_connectrpc(input, LIMIT).unwrap_err().message,
+                Some(format!("zstd decompression failed: {message}"))
             );
         }
     }
