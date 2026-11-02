@@ -1,17 +1,25 @@
-//! RocksDB reference storage with synchronous, atomic WAL commits.
+//! RocksDB reference storage with atomic, durable writes.
 //!
-//! Each group commits current values, its exact stream response, and its application
-//! sequence in one cross-column-family WriteBatch. The writer publishes the sequence
-//! only after the WAL sync succeeds. Snapshot capture shares that publication lock,
-//! so a query's values and sequence describe the same committed prefix.
+//! ```text
+//!                parallel encoders       commit worker (sequence order)
+//!                +-----------------+     +------------------------+
+//! write groups ->| WriteBatch      |---->| lock publication       |
+//!                | state values    |     | write batch + sync WAL |
+//!                | stream response |     | publish sequence       |
+//!                | sequence        |     | unlock                 |--> notify + reply
+//!                +-----------------+     +------------------------+
+//! ```
 //!
-//! Preparation workers encode groups concurrently; one commit worker writes them in
-//! sequence order. Requests retain admission and notification ownership through commit
-//! even when their callers disappear. A write error stops the writer: an error does
-//! not establish whether the group will be present after recovery.
+//! Each batch spans the state, log, and metadata column families. The stream
+//! preserves each group's rows in arrival order. Snapshot capture takes the
+//! same lock so values and sequence describe the same committed prefix.
 //!
-//! Reopening reads the committed sequence after RocksDB recovers its WAL. Key pruning
-//! and log retention leave that sequence intact.
+//! Queued requests keep their admission leases and notifiers through commit,
+//! even if their callers cancel. A write error stops the writer because the
+//! batch may still appear after recovery.
+//!
+//! Reopening restores the sequence from metadata after WAL recovery. Pruning
+//! keys or stream rows leaves that sequence intact.
 
 #[cfg(test)]
 use buffa::Message;

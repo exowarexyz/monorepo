@@ -110,8 +110,7 @@ prevent its delivery.
 
 Use [`maximum_reception_bytes`](src/ingest/reception.rs) with the enforced
 `PutLimits` and largest backend `DecodeBuffers` capacities to estimate reception
-memory for one request. Add preparation storage, extra retained chunks, listener
-overhead, and storage-engine memory separately.
+memory for one request.
 
 ### Reduce memory
 
