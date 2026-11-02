@@ -75,6 +75,15 @@ fn js_err(message: impl Into<String>) -> JsValue {
     JsValue::from_str(&message.into())
 }
 
+/// Decode a message from the bytes JS handed over. Decoding from `Bytes`
+/// makes each `bytes` field a slice of that buffer instead of a copy.
+///
+/// `Message::decode` applies buffa's default 32 MiB budget for decoded list
+/// elements, the same one the native client decodes responses under.
+fn decode_proto<M: Message>(bytes: Vec<u8>, label: &str) -> Result<M, JsValue> {
+    M::decode(&mut Bytes::from(bytes)).map_err(|err| js_err(format!("decode {label}: {err}")))
+}
+
 fn decode_digest<D: Digest + DecodeExt<()>>(bytes: &[u8], label: &str) -> Result<D, String> {
     D::decode(Copying(bytes)).map_err(|err| format!("failed to decode {label}: {err}"))
 }
@@ -910,18 +919,13 @@ where
     ) {
         return Err("operations multi proof failed verification".to_string());
     }
-    // Same pairs, location first. Collecting from `into_iter` reuses the allocation.
+    // Same pairs, location first. Both tuples have the same size and
+    // alignment, so std collects from `into_iter` into the same allocation.
     let operations = elements
         .into_iter()
         .map(|(operation, location)| (location, operation))
         .collect();
     Ok((*root, operations))
-}
-
-/// Decode a message from the bytes JS handed over. Decoding from `Bytes`
-/// makes each `bytes` field a slice of that buffer instead of a copy.
-fn decode_proto<M: Message>(bytes: Vec<u8>, label: &str) -> Result<M, JsValue> {
-    M::decode(&mut Bytes::from(bytes)).map_err(|err| js_err(format!("decode {label}: {err}")))
 }
 
 /// Split concatenated fixed-size expectations into one slice per location.
@@ -2037,32 +2041,60 @@ mod tests {
 
     #[test]
     fn test_decode_proto_slices_bytes_fields_from_input() {
-        let (range, _, _, _) = operation_range_fixture::<mmb::Family>();
+        // The fixtures carry no witness. Decoding doesn't check it, so any
+        // non-empty bytes will do.
+        let witness = Bytes::from(vec![7u8; 16]);
+
+        let (mut range, _, _, _) = operation_range_fixture::<mmb::Family>();
+        range.ops_root_witness = witness.clone();
         let bytes = range.encode_to_vec();
         let input = bytes.as_ptr_range();
         let decoded = decode_proto::<OperationRangeProof>(bytes, "operation range").unwrap();
         assert_eq!(decoded, range);
         assert_fields_slice_input(
             input,
-            [&decoded.proof, &decoded.ops_root]
+            [&decoded.proof, &decoded.ops_root, &decoded.ops_root_witness]
                 .into_iter()
                 .chain(&decoded.encoded_operations)
                 .chain(&decoded.pinned_nodes),
         );
 
-        let (multi, _, _) = operation_multi_fixture::<mmr::Family>();
+        let (mut multi, _, _) = operation_multi_fixture::<mmr::Family>();
+        multi.ops_root_witness = witness;
         let bytes = multi.encode_to_vec();
         let input = bytes.as_ptr_range();
         let decoded = decode_proto::<OperationMultiProof>(bytes, "multi proof").unwrap();
         assert_eq!(decoded, multi);
         assert_fields_slice_input(
             input,
-            [&decoded.proof, &decoded.ops_root].into_iter().chain(
-                decoded
-                    .operations
-                    .iter()
-                    .map(|operation| &operation.encoded_operation),
-            ),
+            [&decoded.proof, &decoded.ops_root, &decoded.ops_root_witness]
+                .into_iter()
+                .chain(
+                    decoded
+                        .operations
+                        .iter()
+                        .map(|operation| &operation.encoded_operation),
+                ),
+        );
+
+        let current = CurrentOperationRangeProof {
+            proof: Bytes::from(vec![1u8; 40]),
+            start_location: 3,
+            encoded_operations: vec![Bytes::from(vec![2u8; 12]), Bytes::from(vec![3u8; 12])],
+            chunks: vec![Bytes::from(vec![4u8; 32])],
+            ..Default::default()
+        };
+        let bytes = current.encode_to_vec();
+        let input = bytes.as_ptr_range();
+        let decoded =
+            decode_proto::<CurrentOperationRangeProof>(bytes, "current operation range").unwrap();
+        assert_eq!(decoded, current);
+        assert_fields_slice_input(
+            input,
+            [&decoded.proof]
+                .into_iter()
+                .chain(&decoded.encoded_operations)
+                .chain(&decoded.chunks),
         );
     }
 
@@ -3068,15 +3100,14 @@ mod tests {
         let (root, verified) =
             verify_raw_operations::<F, Sha256>(&proto, &ops_root, &locations).unwrap();
         assert_eq!(root, ops_root);
-        let expected = expected
-            .into_iter()
-            .map(|(location, operation)| (location, operation.encode().to_vec()))
-            .collect::<Vec<_>>();
         assert_eq!(
-            verified,
-            expected
+            verified
                 .iter()
-                .map(|(location, operation)| (*location, operation.as_slice()))
+                .map(|(location, operation)| (*location, operation.to_vec()))
+                .collect::<Vec<_>>(),
+            expected
+                .into_iter()
+                .map(|(location, operation)| (location, operation.encode().to_vec()))
                 .collect::<Vec<_>>()
         );
     }
