@@ -1251,12 +1251,12 @@ impl QueryPredicate {
     ) -> Result<Key, String> {
         let prefix = &spec.prefix;
         // Bounds are appended field by field, mirroring how
-        // encode_secondary_index_key lays rows out; prefix.encode enforces the
-        // only real limit (MAX_KEY_LEN) at the end. Pre-sizing from schema
-        // width estimates breaks on Utf8 fields, whose constraint encodings
-        // are wider or narrower than the estimate: wider overflowed the slot,
-        // and narrower left zero padding that sorted the lower bound above
-        // rows sitting exactly on it.
+        // encode_secondary_index_key_with_pk lays rows out; prefix.encode
+        // enforces the only real limit (MAX_KEY_LEN) at the end. Pre-sizing
+        // from schema width estimates breaks on Utf8 fields, whose constraint
+        // encodings are wider or narrower than the estimate: wider overflowed
+        // the slot, and narrower left zero padding that sorted the lower bound
+        // above rows sitting exactly on it.
         let mut key = Vec::with_capacity(prefix.max_payload_len());
         let unconstrained = Self::default();
         for (idx, col_idx) in spec.key_columns.iter().copied().enumerate() {
@@ -1283,12 +1283,12 @@ impl QueryPredicate {
     ) -> Result<Key, String> {
         let prefix = &spec.prefix;
         // Bounds are appended field by field, mirroring how
-        // encode_secondary_index_key lays rows out; prefix.encode enforces the
-        // only real limit (MAX_KEY_LEN) at the end. Pre-sizing from schema
-        // width estimates breaks on Utf8 fields, whose constraint encodings
-        // are wider or narrower than the estimate: wider overflowed the slot,
-        // and narrower left zero padding that sorted the lower bound above
-        // rows sitting exactly on it.
+        // encode_secondary_index_key_with_pk lays rows out; prefix.encode
+        // enforces the only real limit (MAX_KEY_LEN) at the end. Pre-sizing
+        // from schema width estimates breaks on Utf8 fields, whose constraint
+        // encodings are wider or narrower than the estimate: wider overflowed
+        // the slot, and narrower left zero padding that sorted the lower bound
+        // above rows sitting exactly on it.
         let mut key = Vec::with_capacity(prefix.max_payload_len());
         let mut encoded_fields = Vec::with_capacity(spec.key_columns.len());
         for &col_idx in &spec.key_columns {

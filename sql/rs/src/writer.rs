@@ -48,7 +48,8 @@ impl TableWriter {
         let base_key = encode_primary_key_from_row(self.model.table_prefix, &row, &self.model)?;
         let mut stored = stored_row_from_cells(&row, &self.model).map_err(|e| format!("{e}"))?;
         let pk_payload = base_key.slice(self.model.primary_key_prefix.len()..);
-        let mut out = vec![(base_key, stored.encode())];
+        let mut out = Vec::with_capacity(1 + self.index_specs.len());
+        out.push((base_key, stored.encode()));
         for spec in self.index_specs.iter() {
             let idx_key = encode_secondary_index_key_with_pk(spec, &self.model, &row, &pk_payload)?;
             out.push((idx_key, encode_index_value(&mut stored, spec)));
