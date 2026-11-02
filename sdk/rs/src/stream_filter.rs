@@ -87,7 +87,18 @@ impl CompiledFilters {
 /// Shape-only validation: bounds, family validity, non-empty regex string.
 /// Does NOT compile the regex — the server compiles once per subscribe.
 pub fn validate_filter(filter: &StreamFilter) -> anyhow::Result<()> {
-    validate_filter_counts(filter)?;
+    ensure!(
+        !filter.selectors.is_empty(),
+        "stream filter must contain at least one selector"
+    );
+    ensure!(
+        filter.selectors.len() <= MAX_SELECTORS_PER_FILTER,
+        "stream filter capped at {MAX_SELECTORS_PER_FILTER} selectors"
+    );
+    ensure!(
+        filter.value_filters.len() <= MAX_VALUE_FILTERS_PER_FILTER,
+        "stream filter capped at {MAX_VALUE_FILTERS_PER_FILTER} value_filters"
+    );
     for selector in &filter.selectors {
         Prefix::new(selector.prefix.clone())
             .map_err(|e| anyhow::anyhow!("invalid selector prefix: {e}"))?;
@@ -104,27 +115,6 @@ pub fn validate_filter(filter: &StreamFilter) -> anyhow::Result<()> {
             Filter::Exact(_) | Filter::Prefix(_) => {}
         }
     }
-    Ok(())
-}
-
-/// The count checks from [`validate_filter`]: at least one selector, and at
-/// most [`MAX_SELECTORS_PER_FILTER`] selectors and
-/// [`MAX_VALUE_FILTERS_PER_FILTER`] value filters. For callers that compile
-/// every selector and value filter next, since compiling repeats the other
-/// checks.
-pub fn validate_filter_counts(filter: &StreamFilter) -> anyhow::Result<()> {
-    ensure!(
-        !filter.selectors.is_empty(),
-        "stream filter must contain at least one selector"
-    );
-    ensure!(
-        filter.selectors.len() <= MAX_SELECTORS_PER_FILTER,
-        "stream filter capped at {MAX_SELECTORS_PER_FILTER} selectors"
-    );
-    ensure!(
-        filter.value_filters.len() <= MAX_VALUE_FILTERS_PER_FILTER,
-        "stream filter capped at {MAX_VALUE_FILTERS_PER_FILTER} value_filters"
-    );
     Ok(())
 }
 

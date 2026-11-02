@@ -14,7 +14,7 @@ use exoware_sdk::{
     common::Entry,
     keys::Prefix,
     selector::compile_payload_regex,
-    stream_filter::{validate_filter_counts, CompiledFilters, StreamFilter},
+    stream_filter::{validate_filter, CompiledFilters, StreamFilter},
 };
 use regex::bytes::Regex;
 use std::sync::{
@@ -72,20 +72,16 @@ pub struct CompiledMatchers {
 
 impl CompiledMatchers {
     /// Validate and compile a `StreamFilter`.
-    ///
-    /// Accepts exactly the filters `validate_filter` accepts. Only the count
-    /// checks run up front, because building each prefix and regex already
-    /// checks it.
     pub fn compile(filter: &StreamFilter) -> Result<Self, InvalidFilter> {
-        validate_filter_counts(filter).map_err(|e| InvalidFilter(e.to_string()))?;
+        validate_filter(filter).map_err(|e| InvalidFilter(e.to_string()))?;
         let keys = filter
             .selectors
             .iter()
             .map(|mk| {
-                let prefix = Prefix::new(mk.prefix.clone())
-                    .map_err(|e| InvalidFilter(format!("invalid selector prefix: {e}")))?;
                 let regex = compile_payload_regex(&mk.payload_regex)
                     .map_err(|e| InvalidFilter(e.to_string()))?;
+                let prefix =
+                    Prefix::new(mk.prefix.clone()).map_err(|e| InvalidFilter(e.to_string()))?;
                 Ok(CompiledSelector { prefix, regex })
             })
             .collect::<Result<Vec<_>, InvalidFilter>>()?;
@@ -395,8 +391,8 @@ mod tests {
         assert!(!matchers.matches(key(1, b"miss").as_ref(), b"v"));
         assert!(!matchers.matches(key(1, b"hit").as_ref(), b"other"));
 
-        // `compile` runs only the count checks from `validate_filter`, so
-        // every filter that `validate_filter` rejects must still fail here.
+        // Subscribe handlers validate filters only through `compile`, so it
+        // must reject each kind of filter that `validate_filter` rejects.
         let selector = filter(1, "^hit$").selectors.remove(0);
         let invalid = [
             StreamFilter {
