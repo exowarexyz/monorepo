@@ -211,3 +211,20 @@ describe('retry backoff', () => {
         expect(fetch).toHaveBeenCalledTimes(1);
     });
 });
+
+describe('retry timeout', () => {
+    // The first attempt takes 200 ms, so the retry has about 4.8 s of the 5 s timeout left.
+    test('sends the time left to the server', async () => {
+        const timeouts: number[] = [];
+        jest.spyOn(globalThis, 'fetch').mockImplementation(async (_input, init) => {
+            timeouts.push(Number(new Headers(init?.headers).get('connect-timeout-ms')));
+            if (timeouts.length > 1) return streamResponse(frames.range);
+            await new Promise((resolve) => setTimeout(resolve, 200));
+            return streamResponse([], 'aborted');
+        });
+        await drain(new Client(url, options(2)).query.range({}, { timeoutMs: 5_000 }));
+        expect(timeouts[0]).toBe(5_000);
+        expect(timeouts[1]).toBeLessThanOrEqual(4_800);
+        expect(timeouts[1]).toBeGreaterThan(0);
+    });
+});
