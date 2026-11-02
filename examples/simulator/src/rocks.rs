@@ -1,34 +1,21 @@
-//! Naive reference storage for local development: user keys and values are written as-is to
-//! RocksDB. A `meta` column family holds the state-floor row, and a `log` column family keeps
-//! one row per commit group: the exact `log.stream.v1.GetResponse` bytes the stream service
-//! serves for that sequence, loaded on demand. Everything is addressed by key: recovery and
-//! pruning never assume which SST files rows live in, so RocksDB is free to place and compact
-//! them however it likes.
+//! RocksDB reference storage with synchronous, atomic WAL commits.
 //!
-//! Writes bypass the WAL and the memtables: `prepare` coalesces queued requests into commit
-//! groups that each share one sequence number and queues them for a pool of stage workers,
-//! which build each group's log row and sorted state rows as two SST files (concurrently
-//! across groups), while `commit` reorders staged groups back into sequence order and ingests
-//! each: the log file first (the durable row alone defines the group; `open` derives the
-//! frontier from the highest retained row and the state-floor meta row), then the state file,
-//! then publish and ack. Several groups can be queued, staging, or buffered awaiting their
-//! predecessors at once (the queue and worker count bound staged memory), but ingestion stays
-//! atomic and strictly ordered, so a crash never leaves a partial batch and at most the
-//! newest ingested group can be missing its state ingestion; `open` repairs that by
-//! re-applying the newest retained log row (idempotent: its rows are the newest writes for
-//! their keys). The floor meta row is written by key pruning and by sequence-log retention
-//! enforcement, and is durable by the time either acks: it marks state the replay must never
-//! touch (re-applying key-pruned rows would resurrect them) and keeps a fully-evicted log from
-//! regressing the frontier. A separate meta row persists the active retention rule (see the
-//! [`Retention`] impl), which the ingest path re-enforces continuously as the log grows.
+//! Each group commits current values, its exact stream response, and its application
+//! sequence in one cross-column-family WriteBatch. The writer publishes the sequence
+//! only after the WAL sync succeeds. Snapshot capture shares that publication lock,
+//! so a query's values and sequence describe the same committed prefix.
 //!
-//! Any write failure in the pipeline is fatal: once a group's log row is durable it cannot be
-//! rolled back (its sequence number must never be re-issued), so the writer panics and the next
-//! open rolls the store forward instead of any in-process recovery.
+//! Preparation workers encode groups concurrently; one commit worker writes them in
+//! sequence order. Requests retain admission and notification ownership through commit
+//! even when their callers disappear. A write error stops the writer: an error does
+//! not establish whether the group will be present after recovery.
+//!
+//! Reopening reads the committed sequence after RocksDB recovers its WAL. Key pruning
+//! and log retention leave that sequence intact.
 
 #[cfg(test)]
 use buffa::Message;
-use buffa::{DecodeOptions, ViewEncode};
+use buffa::ViewEncode;
 use bytes::Bytes;
 use commonware_codec::{Copying, DecodeExt, Encode};
 #[cfg(test)]
@@ -38,11 +25,7 @@ use exoware_sdk::log::stream::v1::GetResponse as StreamGetResponse;
 use exoware_sdk::{
     common::kv::v1::EntryView,
     keys::Prefix,
-    limits::{
-        put_encoded_len, PutTooLarge, MAX_PUT_ENTRIES, MAX_REQUEST_MESSAGE_BYTES,
-        MAX_RESPONSE_ELEMENT_MEMORY_BYTES, MAX_RESPONSE_MESSAGE_BYTES,
-    },
-    log::stream::v1::GetResponseView as StreamGetResponseView,
+    limits::{put_encoded_len, PutTooLarge, MAX_PUT_ENTRIES, MAX_REQUEST_MESSAGE_BYTES},
     prune_policy::{KeysScope, OrderEncoding, PrunePolicyDocument, RetainPolicy},
     retention::{validate_retention_policy, RetentionPolicy},
     selector::compile_payload_regex,
@@ -56,14 +39,13 @@ use parking_lot::Mutex;
 use regex::bytes::Regex;
 use rocksdb::{
     ColumnFamily, ColumnFamilyDescriptor, DBCompactionStyle, DBCompressionType, DBIterator,
-    Direction, IngestExternalFileOptions, IteratorMode, Options, Snapshot, SstFileWriter,
-    WriteOptions, DB,
+    Direction, IteratorMode, Options, Snapshot, WriteOptions, DB,
 };
 use std::{
     cmp::Ordering as CmpOrdering,
     collections::BTreeMap,
     num::NonZeroUsize,
-    path::{Path, PathBuf},
+    path::Path,
     sync::{
         atomic::{AtomicU64, Ordering},
         mpsc, Arc,
@@ -83,7 +65,6 @@ const PRUNE_SCAN_BATCH_SIZE: usize = 4096;
 const PRUNE_DELETE_CHUNK_KEYS: usize = 4096;
 const DEFAULT_COMMIT_COALESCE_MAX_BATCH_BYTES: usize = 16 * 1024 * 1024;
 const MAX_SEQUENCE_ENTRIES: usize = MAX_PUT_ENTRIES;
-const LOG_INGEST_DIR: &str = "ingest";
 const LOG_CF: &str = "log";
 const LOG_BATCH_KEY_LEN: usize = 8;
 pub const WRITER_THREAD_PREFIX: &str = "simulator-rocks-";
@@ -390,8 +371,7 @@ fn keys_to_delete(
 struct Frontiers {
     /// Highest sequence whose log and state rows are durably committed.
     published: AtomicU64,
-    /// Serializes state ingestion, publication, and snapshot capture.
-    /// Also serializes floor persists so the durable floor cannot regress.
+    /// Serializes atomic commits, publication, snapshot capture, and log trimming.
     persist: Mutex<()>,
     /// Highest `cutoff_exclusive` already applied by `prune_log` in this process. Lets the
     /// per-append retention hook skip the write entirely when the floor has not advanced
@@ -411,14 +391,13 @@ impl Frontiers {
     }
 }
 
-// Row backing is charged separately. These charges cover later coalescing,
-// indexed sorting, compact payload owners, and encoded log output.
+// Cover owned row bytes, the encoded native batch, and the temporary stream payload.
+// RocksDB memtables and its WAL buffer remain engine-owned allocations.
 fn writer_growth(entries: usize, encoded_len: usize) -> usize {
     let row = std::mem::size_of::<(Bytes, Bytes)>();
-    let sort_row = std::mem::size_of::<usize>();
     encoded_len
-        .saturating_mul(2)
-        .saturating_add(entries.saturating_mul(2 * row + sort_row + 128))
+        .saturating_mul(3)
+        .saturating_add(entries.saturating_mul(2 * row + 128))
 }
 
 fn writer_memory(entries: usize, encoded_len: usize, capacity: usize) -> usize {
@@ -457,7 +436,7 @@ struct WriteRequest {
     lease: Arc<WriteLease>,
 }
 
-/// One coalesced wave awaiting SST staging: every request shares a single sequence number,
+/// One coalesced wave awaiting batch encoding: every request shares a single sequence number,
 /// whose log row carries all their rows in arrival order.
 struct QueuedWave {
     sequence: u64,
@@ -466,16 +445,11 @@ struct QueuedWave {
     _leases: Vec<Arc<WriteLease>>,
 }
 
-/// One staged commit group: every coalesced request shares a single sequence number, whose log
-/// row carries all their rows in arrival order.
+/// One encoded atomic commit with all requests and admission leases still owned.
 struct PreparedWrite {
     sequence: u64,
-    /// Staged single-row log SST (the group's encoded batch), ready for ingestion.
-    log: PathBuf,
-    /// Staged current-state SST (sorted by key, last write per key), ready for ingestion.
-    state: PathBuf,
-    /// Combined payload bytes staged, for debug logging.
-    staged_bytes: usize,
+    batch: rocksdb::WriteBatch,
+    encoded_bytes: usize,
     requests: Vec<WriteRequest>,
     _leases: Vec<Arc<WriteLease>>,
 }
@@ -488,20 +462,9 @@ struct Writer {
 }
 
 impl Writer {
-    /// Starts the write pipeline. `prepare` drains queued requests up to the configured byte
-    /// cap into commit groups that each share one sequence number (continuing from the
-    /// published frontier, which is exactly the frontier derived at open since nothing has
-    /// committed yet) and queues them for the stage workers, any of which takes the next
-    /// group and builds its log and state SSTs concurrently with the other workers;
-    /// `commit` reorders staged groups back into sequence order, ingests each log file, then
-    /// its state file, publishes the frontier, and resolves the requests. `commit` still
-    /// ingests strictly in order, so a crash leaves at most the newest ingested group without
-    /// its state. Any write failure in any stage is fatal (the worker panics): the durable
-    /// log row alone defines the group, so the next open re-derives the frontier and replays
-    /// the rows above the floor. Sequence numbers never need to be reclaimed in-process.
+    /// Starts bounded parallel batch encoding and one ordered synchronous commit worker.
     fn start(
         db: Arc<Database>,
-        ingest_dir: PathBuf,
         frontiers: Arc<Frontiers>,
         write_pipeline: RocksWritePipelineConfig,
     ) -> Self {
@@ -511,28 +474,29 @@ impl Writer {
         let stage_workers = write_pipeline.stage_workers.get();
         let max_queued_waves = write_pipeline.max_queued_waves.get();
 
-        // Staged groups queue shallowly toward `commit`, which reorders them by sequence.
+        // Encoded groups queue toward the single ordered commit worker.
         let (staged_sender, staged_receiver) = mpsc::sync_channel(stage_workers);
 
         let commit = thread::Builder::new()
             .name(format!("{WRITER_THREAD_PREFIX}commit"))
-            .spawn(move || run_commit(db, frontiers, staged_receiver, next))
+            .spawn({
+                let db = db.clone();
+                move || run_commit(db, frontiers, staged_receiver, next)
+            })
             .expect("failed to spawn RocksDB commit worker");
 
-        // One shared bounded queue, so `prepare` cannot run away from staging and any idle
-        // worker takes the next wave (a slow wave never blocks the others); the queue plus
-        // in-progress waves bound staged memory.
+        // Queue capacity and retained admission leases bound preparation memory.
         let (wave_sender, wave_receiver) = mpsc::sync_channel::<QueuedWave>(max_queued_waves);
         let wave_receiver = Arc::new(Mutex::new(wave_receiver));
         let mut handles = Vec::with_capacity(stage_workers + 2);
         for worker in 0..stage_workers {
-            let ingest_dir = ingest_dir.clone();
+            let db = db.clone();
             let staged_sender = staged_sender.clone();
             let wave_receiver = wave_receiver.clone();
             handles.push(
                 thread::Builder::new()
                     .name(format!("{WRITER_THREAD_PREFIX}stage-{worker}"))
-                    .spawn(move || run_stage(ingest_dir, wave_receiver, staged_sender))
+                    .spawn(move || run_stage(db, wave_receiver, staged_sender))
                     .expect("failed to spawn RocksDB stage worker"),
             );
         }
@@ -665,12 +629,9 @@ fn run_prepare(
     }
 }
 
-/// Stages waves pulled from the queue shared with the other workers and hands each group to
-/// `commit`. The lock is held only while waiting on the channel, never while staging. Exits
-/// when the wave channel closes (store drop); panics if `commit` died, since that only
-/// happens on a fatal write error.
+/// Encodes groups from the shared queue without holding its lock during preparation.
 fn run_stage(
-    ingest_dir: PathBuf,
+    db: Arc<Database>,
     receiver: Arc<Mutex<mpsc::Receiver<QueuedWave>>>,
     sender: mpsc::SyncSender<PreparedWrite>,
 ) {
@@ -678,16 +639,14 @@ fn run_stage(
         let Ok(wave) = receiver.lock().recv() else {
             break;
         };
-        let group = stage_wave(&ingest_dir, wave);
+        let group = prepare_wave(&db, wave);
         if sender.send(group).is_err() {
             panic!("rocks commit worker died");
         }
     }
 }
 
-/// Commits staged groups strictly in sequence order (log ingestion, state ingestion, publish,
-/// ack), buffering groups whose predecessors are still staging, until the group channel closes
-/// (store drop). Any write failure panics inside `commit_group`.
+/// Commits complete batches in sequence order, then publishes and acknowledges them.
 fn run_commit(
     db: Arc<Database>,
     frontiers: Arc<Frontiers>,
@@ -706,9 +665,8 @@ fn run_commit(
         commit_ready(&mut committed, &mut pending);
     }
 
-    // The channel closes only once every stage worker has exited, after handing over every
-    // staged group, so a clean shutdown leaves nothing buffered.
-    assert!(pending.is_empty(), "staged groups lost at shutdown");
+    // Every preparation worker has handed over its groups before the channel closes.
+    assert!(pending.is_empty(), "prepared groups lost at shutdown");
 }
 
 /// Coalesces one wave from requests already queued behind `first` without waiting for new
@@ -773,123 +731,46 @@ fn coalesce_queued_write(
     )
 }
 
-/// Stages one wave's two SST files in parallel: the single-row log SST on this thread, the
-/// sorted state SST on a scoped thread. Ingestion later links them into their column
-/// families, so each payload byte reaches the disk exactly once, in its final resting place.
-/// A staging failure is fatal; leftover staged files are removed by the next open.
-fn stage_wave(ingest_dir: &Path, wave: QueuedWave) -> PreparedWrite {
-    let sequence = wave.sequence;
-    let rows = &wave.rows;
-    let log = ingest_dir.join(format!("log-{sequence:020}.sst"));
-    let state = ingest_dir.join(format!("state-{sequence:020}.sst"));
-    let (log_result, state_result) = thread::scope(|scope| {
-        let state_task = thread::Builder::new()
-            .name(format!("{WRITER_THREAD_PREFIX}stage"))
-            .spawn_scoped(scope, || stage_state_file(&state, rows))
-            .expect("failed to spawn SST staging thread");
-        let log_result = stage_log_file(&log, sequence, rows);
-        (
-            log_result,
-            state_task.join().expect("state staging thread panicked"),
-        )
-    });
-    let log_bytes = log_result.unwrap_or_else(|error| panic!("failed to stage log SST: {error}"));
-    let state_bytes =
-        state_result.unwrap_or_else(|error| panic!("failed to stage state SST: {error}"));
-    drop(wave.rows);
+/// Encodes the original stream rows and their current-state updates in one batch.
+/// Ordered puts make the last duplicate win while the stream retains every entry.
+fn prepare_wave(db: &DB, wave: QueuedWave) -> PreparedWrite {
+    let log_cf = db.cf_handle(LOG_CF).expect("log CF exists");
+    let meta_cf = db.cf_handle(META_CF).expect("meta CF exists");
+    let mut batch = rocksdb::WriteBatch::default();
+    batch.put_cf(
+        log_cf,
+        sequence_log_key(wave.sequence),
+        encode_log_value(wave.sequence, &wave.rows),
+    );
+    for (key, value) in &wave.rows {
+        batch.put(key, value);
+    }
+    batch.put_cf(meta_cf, SEQ_META_KEY, wave.sequence.to_le_bytes());
+    let encoded_bytes = batch.size_in_bytes();
     PreparedWrite {
-        sequence,
+        sequence: wave.sequence,
+        batch,
+        encoded_bytes,
         requests: wave.requests,
         _leases: wave._leases,
-        log,
-        state,
-        staged_bytes: log_bytes + state_bytes,
     }
 }
 
-/// Stages the single-row log SST: the group's sequence mapped to the exact encoded batch the
-/// stream service serves. Uncompressed, like the state SST.
-fn stage_log_file(path: &Path, sequence: u64, rows: &[(Bytes, Bytes)]) -> Result<usize, String> {
-    let payload = encode_log_value(sequence, rows);
-    let mut options = Options::default();
-    options.set_compression_type(DBCompressionType::None);
-    let mut writer = SstFileWriter::create(&options);
-    writer.open(path).map_err(|e| e.to_string())?;
-    writer
-        .put(sequence_log_key(sequence), &payload)
-        .map_err(|e| e.to_string())?;
-
-    // `finish` syncs the file before it is linked into the DB.
-    writer.finish().map_err(|e| e.to_string())?;
-    Ok(LOG_BATCH_KEY_LEN + payload.len())
-}
-
-/// Stages the current-state SST: the group's rows sorted by key, with the last write per key
-/// winning (in arrival order across coalesced requests). Uncompressed: compressing on the
-/// ingest path would trade ack latency for bytes, and the state CF keeps compression off at
-/// every level per [`state_cf_options`].
-fn stage_state_file(path: &Path, rows: &[(Bytes, Bytes)]) -> Result<usize, String> {
-    let mut order: Vec<usize> = (0..rows.len()).collect();
-
-    // Arrival indices preserve the newest duplicate without a sorting workspace.
-    order.sort_unstable_by(|a, b| rows[*a].0.cmp(&rows[*b].0).then_with(|| a.cmp(b)));
-
-    let mut options = Options::default();
-    options.set_compression_type(DBCompressionType::None);
-    let mut writer = SstFileWriter::create(&options);
-    writer.open(path).map_err(|e| e.to_string())?;
-    let mut bytes = 0;
-    for (index, row) in order.iter().enumerate() {
-        let (key, value) = &rows[*row];
-        if order
-            .get(index + 1)
-            .is_some_and(|next| rows[*next].0 == *key)
-        {
-            continue;
-        }
-        bytes += key.len() + value.len();
-        writer
-            .put(key.as_ref(), value.as_ref())
-            .map_err(|e| e.to_string())?;
-    }
-
-    // `finish` syncs the file before it is linked into the DB.
-    writer.finish().map_err(|e| e.to_string())?;
-    Ok(bytes)
-}
-
-/// Commits one group: ingests its log row (durability), then its state file (visibility), then
-/// publishes the frontier and resolves the requests. Any write failure is fatal (panic): once
-/// the log row is durable the group cannot be rolled back (its sequence must not be
-/// re-issued), and the next open rolls it forward by replaying the row, so nothing is ever
-/// reclaimed or retried in-process. The panic drops the group's response channels, so waiting
-/// callers observe an error even though the group may resurface after the restart repair, an
-/// accepted at-least-once ambiguity of this severe error path.
+/// Makes the native batch durable before exposing its sequence to snapshots or streams.
+/// A failed write can have an ambiguous durable outcome, so this worker stops on error.
 fn commit_group(db: &DB, frontiers: &Frontiers, group: PreparedWrite) {
     assert!(!group.requests.is_empty(), "groups are never empty");
     let sequence = group.sequence;
-
-    // Log first: the durable row alone defines the group (an ingested state file without its
-    // log row could leave keys in the store that were never part of a sequenced batch). Safe
-    // against a concurrent prune without a lock: a prune only deletes rows below a published
-    // frontier it loaded earlier, and this sequence sits above every published frontier until
-    // publish.
-    ingest_staged_file(db, LOG_CF, &group.log);
-
-    // Ingest and publish under the floor lock: a prune loads the published frontier as its
-    // state floor under the same lock, so no scan-visible state row can outrun the frontier
-    // covering it (a key prune must never delete a row the floor does not cover).
     let publish_guard = frontiers.persist.lock();
-    ingest_staged_file(db, STATE_CF, &group.state);
-
-    // Release so `current_sequence` readers only observe frontiers whose rows are readable.
+    write_synced_batch(db, group.batch)
+        .unwrap_or_else(|error| panic!("failed to commit synchronous WAL batch: {error}"));
     frontiers.published.store(sequence, Ordering::Release);
     drop(publish_guard);
     debug!(
         requests = group.requests.len(),
-        staged_bytes = group.staged_bytes,
+        encoded_bytes = group.encoded_bytes,
         sequence,
-        "committed write batch"
+        "committed synchronous WAL batch"
     );
     for request in &group.requests {
         if let Some(notifier) = &request.notifier {
@@ -901,49 +782,13 @@ fn commit_group(db: &DB, frontiers: &Frontiers, group: PreparedWrite) {
     }
 }
 
-/// Ingests one staged SST file into `cf`. Ingestion links the file into the column family and
-/// syncs the manifest, so the rows are durable and readable once this returns. Failure is fatal:
-/// see `commit_group`.
-fn ingest_staged_file(db: &DB, cf: &str, path: &Path) {
-    let handle = db.cf_handle(cf).expect("CFs exist (created on open)");
-    let mut ingest_options = IngestExternalFileOptions::default();
-    ingest_options.set_move_files(true);
-    ingest_options.set_snapshot_consistency(true);
-    db.ingest_external_file_cf_opts(handle, &ingest_options, vec![path])
-        .unwrap_or_else(|error| {
-            panic!(
-                "failed to ingest staged SST {} into {cf}: {error}",
-                path.display()
-            )
-        });
-}
-
-/// Writes a batch with sync enabled, used for the meta row that defines the durable floor.
+/// Syncs the WAL for the complete batch before returning success.
 fn write_synced_batch(db: &DB, batch: rocksdb::WriteBatch) -> Result<(), String> {
     let mut write_options = WriteOptions::default();
     write_options.set_sync(true);
+    write_options.disable_wal(false);
     db.write_opt(batch, &write_options)
         .map_err(|e| e.to_string())
-}
-
-/// Creates the SST staging directory and deletes files a crashed writer left behind. A
-/// leftover can exist even for an ingested group: move-ingestion hard-links the staged file
-/// into the database and unlinks the original afterward, so a crash in between leaves the
-/// original behind while its rows are already visible. Deleting leftovers is safe either way
-/// because the database owns its own link to every ingested file. Nothing here decides
-/// whether a group committed: the retained log rows alone do.
-fn prepare_ingest_dir(store_path: &Path) -> Result<PathBuf, String> {
-    let ingest_dir = store_path.join(LOG_INGEST_DIR);
-    std::fs::create_dir_all(&ingest_dir)
-        .map_err(|e| format!("failed to create staging directory: {e}"))?;
-    for entry in std::fs::read_dir(&ingest_dir)
-        .map_err(|e| format!("failed to read staging directory: {e}"))?
-    {
-        let entry = entry.map_err(|e| format!("failed to read staging directory: {e}"))?;
-        std::fs::remove_file(entry.path())
-            .map_err(|e| format!("failed to remove staged file: {e}"))?;
-    }
-    Ok(ingest_dir)
 }
 
 /// Encodes a sequence number as a log-CF key that preserves numeric order in RocksDB.
@@ -961,10 +806,8 @@ fn sequence_from_log_key(key: &[u8]) -> Result<u64, String> {
     Ok(u64::from_be_bytes(raw))
 }
 
-/// Reads the state-floor meta row, defaulting to zero when no prune has written it yet. A
-/// malformed row is corruption and fails the open: silently treating it as zero would let the
-/// replay resurrect key-pruned rows.
-fn read_state_floor(db: &DB) -> Result<u64, String> {
+/// Reads the durable frontier independently of the retained stream history.
+fn read_committed_sequence(db: &DB) -> Result<u64, String> {
     let meta_cf = db
         .cf_handle(META_CF)
         .expect("meta CF must exist (created on open)");
@@ -975,7 +818,7 @@ fn read_state_floor(db: &DB) -> Result<u64, String> {
         Some(bytes) => {
             let bytes: [u8; 8] = bytes
                 .try_into()
-                .map_err(|_| "corrupt state-floor meta row".to_string())?;
+                .map_err(|_| "corrupt committed-sequence meta row".to_string())?;
             Ok(u64::from_le_bytes(bytes))
         }
         None => Ok(0),
@@ -1017,57 +860,16 @@ fn retention_floor(policy: &RetentionPolicy, frontier: u64) -> u64 {
     }
 }
 
-/// Re-applies the newest retained log row to the state column family and returns its sequence
-/// (zero when the log is empty). Rows are only ever ingested by sequential, atomic commits, so
-/// the returned sequence is a lower bound on the durable frontier. `commit` ingests strictly
-/// in order (a group's log row lands before its state, and the next group's row only after
-/// that state), so every older group's state is already durably ingested and at most the
-/// newest group can be missing it; re-applying is idempotent because the row's entries are the
-/// newest writes for their keys. A row at or below `floor` is never replayed: its state is
-/// authoritative, and key pruning may have deleted rows a replay would resurrect. Ingestion is
-/// atomic, so no partial row can exist; a row that fails to decode is real corruption and
-/// fails the open.
-fn replay_newest_log_row(db: &DB, floor: u64) -> Result<u64, String> {
-    let log_cf = db
-        .cf_handle(LOG_CF)
-        .expect("log CF must exist (created on open)");
-    let Some(item) = db.iterator_cf(log_cf, IteratorMode::End).next() else {
-        return Ok(0);
-    };
-    let (key, value) = item.map_err(|e| e.to_string())?;
-    let sequence = sequence_from_log_key(key.as_ref())?;
-    if sequence <= floor {
-        return Ok(sequence);
-    }
-    let response: StreamGetResponseView<'_> = DecodeOptions::new()
-        .with_max_message_size(MAX_RESPONSE_MESSAGE_BYTES)
-        .with_element_memory_limit(MAX_RESPONSE_ELEMENT_MEMORY_BYTES)
-        .decode_view(value.as_ref())
-        .map_err(|e| format!("corrupt log row for sequence {sequence}: {e}"))?;
-    let mut batch = rocksdb::WriteBatch::default();
-    for entry in response.entries.iter() {
-        batch.put(entry.key, entry.value);
-    }
-
-    // Synced: once a later commit moves the newest row past this group, a repair lost to power
-    // loss would never be re-run.
-    write_synced_batch(db, batch)?;
-    Ok(sequence)
-}
-
 /// Application-level write pipeline options used by [`RocksStore::open`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RocksWritePipelineConfig {
-    /// Soft maximum combined size (state rows plus encoded log rows) before cutting a prepared
+    /// Soft maximum combined size (state rows plus encoded log rows) before cutting a
     /// commit group.
     pub max_commit_batch_bytes: NonZeroUsize,
-    /// Stage workers building wave SSTs concurrently. Each worker stages one wave at a time
-    /// across two threads (log and state SSTs in parallel).
+    /// Workers encoding atomic batches concurrently.
     pub stage_workers: NonZeroUsize,
-    /// Coalesced waves that may queue ahead of the stage workers before `prepare` blocks.
-    /// Together with `stage_workers` this bounds staged memory: every queued or staging wave
-    /// holds up to `max_commit_batch_bytes` of payload. Defaults to one queued wave per
-    /// default worker.
+    /// Coalesced waves that may queue ahead of the encoding workers. Admission leases
+    /// remain held until commit; a single request may exceed the soft byte cap.
     pub max_queued_waves: NonZeroUsize,
 }
 
@@ -1087,24 +889,13 @@ impl Default for RocksWritePipelineConfig {
 /// RocksDB engine and application-level write pipeline options used by [`RocksStore::open`].
 #[derive(Default)]
 pub struct RocksConfig {
-    /// Database-wide options, applied as-is (stock defaults). Two knobs matter under sustained
-    /// ingest: `max_background_jobs` (stock RocksDB fixes it at 2, and compactions must keep
-    /// merging the overlapping ingested state SSTs) and `max_open_files` (stock RocksDB keeps
-    /// every touched table file open forever, and ingest creates one log and one state SST per
-    /// commit group).
+    /// Database-wide options. Ordered writes and automatic WAL flushing are required
+    /// for the snapshot and durable-commit contract and are pinned during open.
     pub db_options: Options,
     /// Options for the application-level ingest write pipeline.
     pub write_pipeline: RocksWritePipelineConfig,
 }
 
-/// Options for the state column family, tuned to the store's write path.
-///
-/// Ingested state SSTs overlap (store keys are uniformly distributed), so this family bears
-/// all compaction: universal compaction merges whole sorted runs instead of rewriting every
-/// overlapping level, compression stays off (staged SSTs arrive uncompressed; recompressing
-/// them buys nothing on ingest-bound stores), and the level-zero slowdown/stop triggers are
-/// raised because `IngestExternalFile` waits on stop-writes conditions (stock triggers stall
-/// ingest whenever compaction lags).
 fn state_cf_options() -> Options {
     let mut opts = Options::default();
     opts.set_compression_type(DBCompressionType::None);
@@ -1116,10 +907,6 @@ fn state_cf_options() -> Options {
     opts
 }
 
-/// Options for the log column family.
-///
-/// Log rows are keyed by a monotonic sequence, so ingested log SSTs never overlap and settle
-/// without rewrites; compression stays off to match the uncompressed staged files.
 fn log_cf_options() -> Options {
     let mut opts = Options::default();
     opts.set_compression_type(DBCompressionType::None);
@@ -1131,10 +918,7 @@ fn log_cf_options() -> Options {
 /// plus a per-sequence log.
 #[derive(Clone)]
 pub struct RocksStore {
-    /// Declared before `db` so the last store drop joins the writer threads before releasing
-    /// its database handle: the prepare thread stages files inside the data directory without
-    /// holding [`Database`], so it must never outlive the handles that keep the directory
-    /// alive.
+    /// The last store drains its writer before releasing the database handle.
     writer: Arc<Writer>,
     db: Arc<Database>,
     frontiers: Arc<Frontiers>,
@@ -1148,9 +932,7 @@ impl RocksStore {
     /// Open the store with default options, unless `config` overrides the database or
     /// write-pipeline options. Column families run options tuned to the store's write path
     /// (see `state_cf_options` and `log_cf_options`).
-    /// Re-derives the durable frontier from the retained log rows and the state-floor meta row,
-    /// then re-applies the newest log row to the state column family so the current state is
-    /// complete below the durable sequence even after a crash mid-commit.
+    /// Reads the durable sequence after RocksDB recovers its WAL.
     ///
     /// The caller keeps the directory at `path` alive until every handle to the store (clones,
     /// open cursors, in-flight operations) has dropped. [`RocksStore::open_owned`] hands that
@@ -1186,6 +968,8 @@ impl RocksStore {
 
         db_options.create_if_missing(true);
         db_options.create_missing_column_families(true);
+        db_options.set_unordered_write(false);
+        db_options.set_manual_wal_flush(false);
 
         let cf_state = ColumnFamilyDescriptor::new(STATE_CF, state_cf_options());
         let cf_meta = ColumnFamilyDescriptor::new(META_CF, Options::default());
@@ -1197,22 +981,13 @@ impl RocksStore {
             _closer: closer,
         });
 
-        let ingest_dir = prepare_ingest_dir(path)?;
-
-        // Commits do not write the state-floor meta row; the log rows are the durable record.
-        let floor = read_state_floor(&db)?;
-        let seq = floor.max(replay_newest_log_row(&db, floor)?);
+        let seq = read_committed_sequence(&db)?;
 
         // Restore the retention rule so the ingest path keeps enforcing it after a reopen.
         let retention = Arc::new(Mutex::new(read_retention_policy(&db)?));
 
         let frontiers = Arc::new(Frontiers::new(seq));
-        let writer = Arc::new(Writer::start(
-            db.clone(),
-            ingest_dir,
-            frontiers.clone(),
-            write_pipeline,
-        ));
+        let writer = Arc::new(Writer::start(db.clone(), frontiers.clone(), write_pipeline));
         let store = Self {
             db,
             frontiers,
@@ -1248,26 +1023,6 @@ impl RocksStore {
         self.db.get(key)
     }
 
-    /// Raises the durable state floor to the published frontier, marking every published row
-    /// as state the open-time replay must never re-apply. Loaded and written under the
-    /// publish lock, so the floor covers every row a prune's scan could have observed (a
-    /// group's state becomes scan-visible only under the same lock hold that publishes it)
-    /// and concurrent raises never regress it. Unsynced: the floor only has to be durable by
-    /// the time the prune acks, and the caller's final synced write flushes it.
-    fn raise_state_floor(&self) -> Result<(), String> {
-        let _guard = self.frontiers.persist.lock();
-        let mut batch = rocksdb::WriteBatch::default();
-        batch.put_cf(
-            self.meta_cf(),
-            SEQ_META_KEY,
-            self.frontiers
-                .published
-                .load(Ordering::Acquire)
-                .to_le_bytes(),
-        );
-        self.db.write(batch).map_err(|e| e.to_string())
-    }
-
     /// Deletes keys in bounded chunks. The final synced write makes every deletion durable.
     fn delete_keys(&self, keys: &[Bytes]) -> Result<(), String> {
         let mut chunks = keys.chunks(PRUNE_DELETE_CHUNK_KEYS).peekable();
@@ -1285,7 +1040,7 @@ impl RocksStore {
         Ok(())
     }
 
-    /// Deletes replay-log rows with sequence numbers below `cutoff_exclusive`. A no-op when
+    /// Deletes stream-log rows with sequence numbers below `cutoff_exclusive`. A no-op when
     /// the cutoff does not advance past what this process already trimmed.
     fn prune_log(&self, cutoff_exclusive: u64) -> Result<(), String> {
         if cutoff_exclusive == 0
@@ -1300,22 +1055,9 @@ impl RocksStore {
             return Ok(());
         }
 
-        // One atomic batch: the range tombstone that deletes the rows, and the state floor
-        // that keeps `open` from re-deriving a regressed frontier once they are gone.
-        // The published frontier covers every pruned row (the cutoff is capped at
-        // published + 1), and everything at or below it is durable and applied to the state.
-        // That also makes this safe against the writer's concurrent, lock-free log ingestion:
-        // an in-flight group's row sits above every published frontier this prune could have
-        // loaded. Space is reclaimed by ordinary compaction; nothing assumes which SST files
-        // hold the rows.
-        //
-        // Unsynced: batch atomicity means a crash loses the tombstone and the floor raise
-        // together, leaving the rows intact and open's re-derivation consistent; the next
-        // enforcement reapplies the trim. This keeps the per-append retention hook from
-        // adding a second fsync to every ingest.
-        let published = self.frontiers.published.load(Ordering::Acquire);
+        // The committed sequence survives log collection independently of these rows.
+        // A lost unsynced tombstone can only delay GC; open reapplies the durable rule.
         let mut batch = rocksdb::WriteBatch::default();
-        batch.put_cf(self.meta_cf(), SEQ_META_KEY, published.to_le_bytes());
         batch.delete_range_cf(
             self.log_cf(),
             sequence_log_key(0),
@@ -1395,9 +1137,6 @@ impl RocksStore {
             return Ok(());
         }
 
-        // The floor is raised before the deletes so the final synced chunk makes it durable
-        // by ack: an acked prune must never be undone by the newest-log-row replay at reopen.
-        self.raise_state_floor()?;
         self.delete_keys(&all_deletes)
     }
 
@@ -1411,9 +1150,7 @@ impl RocksStore {
                 let (key, _) = item.map_err(|e| e.to_string())?;
                 let sequence = sequence_from_log_key(key.as_ref())?;
 
-                // Gate on the published frontier: never advertise an oldest batch that
-                // `get_batch` would then hide (a log row can outrun the published frontier while
-                // its group's state ingestion is in flight or has failed).
+                // The native batch may complete before its application publication.
                 if sequence > self.frontiers.published.load(Ordering::Acquire) {
                     return Ok(None);
                 }
@@ -1447,9 +1184,7 @@ impl RocksStore {
         if let Some(policy) = policy {
             let frontier = self.frontiers.published.load(Ordering::Acquire);
 
-            // Never delete log rows above the published frontier: a group whose log ingestion
-            // committed but whose state ingestion did not still needs its rows for the repair
-            // replay at the next open.
+            // Collection is capped by the published prefix.
             let cutoff_exclusive =
                 retention_floor(&policy, frontier).min(frontier.saturating_add(1));
             self.prune_log(cutoff_exclusive)?;
@@ -1576,7 +1311,7 @@ impl Ingest for RocksStore {
 
 // Ingest uses dedicated writer threads so blocking storage writes do not occupy Tokio workers.
 // The writer folds already-queued requests into one commit group that shares a single sequence
-// number and replay-log batch.
+// number and stream-log batch.
 impl RocksStore {
     /// Direct writes use a separate budget of 256 requests and 1 GiB.
     /// Mixed direct and HTTP traffic can consume this and the configured HTTP budget.
@@ -1757,11 +1492,11 @@ mod tests {
     use super::*;
     use buffa::encoding::varint_len;
     use exoware_sdk::{
-        limits::{put_entry_encoded_len, MAX_VALUE_LEN},
+        limits::{put_entry_encoded_len, MAX_RESPONSE_MESSAGE_BYTES, MAX_VALUE_LEN},
         log::ingest::v1::PutRequest,
     };
     use exoware_server::{Ingest, Log, Sequence};
-    use std::collections::BTreeSet;
+    use std::{collections::BTreeSet, path::PathBuf};
     use tempfile::tempdir;
 
     fn wire_request(key: &[u8], value: &[u8]) -> Bytes {
@@ -2135,8 +1870,19 @@ mod tests {
 
     // Keep publication blocked while cancelling an accepted request.
     #[allow(clippy::await_holding_lock)]
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     async fn cancelled_streamed_put_after_enqueue_keeps_writer_and_notifier_alive() {
+        struct Validated(tokio::sync::Notify);
+
+        impl exoware_server::ingest::IngestObserver for Validated {
+            fn observe(&self, event: exoware_server::ingest::IngestEvent) {
+                if matches!(event, exoware_server::ingest::IngestEvent::Validated) {
+                    self.0.notify_one();
+                }
+            }
+        }
+
+        let validated = Arc::new(Validated(tokio::sync::Notify::new()));
         let dir = tempdir().unwrap();
         let store = RocksStore::open(dir.path(), None).unwrap();
         let budget = IngestBudget::new(BudgetConfig {
@@ -2157,22 +1903,16 @@ mod tests {
             tokio::time::Instant::now() + std::time::Duration::from_secs(5),
             admission,
         )
-        .with_notifier(Some(hub.clone()));
+        .with_notifier(Some(hub.clone()))
+        .with_observer(validated.clone());
         let publish_guard = store.frontiers.persist.lock();
         let put_store = store.clone();
         let task = tokio::spawn(async move { put_store.put(&mut input).await });
-        tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            while store
-                .db
-                .get_cf(store.log_cf(), sequence_log_key(1))
-                .unwrap()
-                .is_none()
-            {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .unwrap();
+        // On this current-thread runtime, validation and enqueue finish in one poll;
+        // the put task next yields while awaiting its writer response.
+        tokio::time::timeout(std::time::Duration::from_secs(5), validated.0.notified())
+            .await
+            .unwrap();
         task.abort();
         assert!(task.await.unwrap_err().is_cancelled());
         assert_eq!(store.current_sequence(), 0);
@@ -2343,44 +2083,22 @@ mod tests {
         response_entries(batch.decode_response().expect("decode batch response"))
     }
 
-    fn encoded_log_entry(sequence: u64, key: &'static [u8], value: &'static [u8]) -> Vec<u8> {
-        StreamGetResponse {
-            sequence_number: sequence,
-            entries: vec![Entry {
-                key: key.to_vec(),
-                value: Bytes::from_static(value),
-                ..Default::default()
-            }],
-            ..Default::default()
-        }
-        .encode_to_vec()
-    }
-
     /// Commits one group through the commit stage, returning the published frontier afterwards.
     fn commit_and_apply(store: &RocksStore, group: PreparedWrite) -> u64 {
         commit_group(&store.db, &store.frontiers, group);
         store.frontiers.published.load(Ordering::Acquire)
     }
 
-    /// Writes one log row directly, bypassing the write pipeline and the floor advance.
-    fn seed_log_row(store: &RocksStore, sequence: u64, payload: &[u8]) {
-        store
-            .db
-            .put_cf(store.log_cf(), sequence_log_key(sequence), payload)
-            .expect("seed log row");
-    }
-
-    /// Stages one commit group carrying `kvs` under the sequence after `from`.
+    /// Encodes one commit group carrying `kvs` under the sequence after `from`.
     fn prepared_write(store: &RocksStore, from: u64, kvs: Vec<(Bytes, Bytes)>) -> PreparedWrite {
         let (_sender, receiver) = mpsc::channel::<WriteRequest>();
-        let ingest_dir = store.db.path().join(LOG_INGEST_DIR);
         let (wave, _) = coalesce_queued_write(
             &receiver,
             write_request_with_kvs(kvs),
             from,
             DEFAULT_COMMIT_COALESCE_MAX_BATCH_BYTES,
         );
-        stage_wave(&ingest_dir, wave)
+        prepare_wave(&store.db, wave)
     }
 
     #[test]
@@ -2392,9 +2110,8 @@ mod tests {
             0,
             vec![(Bytes::from_static(b"a"), Bytes::from_static(b"value"))],
         );
-        ingest_staged_file(&store.db, LOG_CF, &group.log);
         let guard = store.frontiers.persist.lock();
-        ingest_staged_file(&store.db, STATE_CF, &group.state);
+        write_synced_batch(&store.db, group.batch).expect("native durable commit");
         assert_eq!(store.current_sequence(), 0);
         assert_eq!(
             store.db.get(b"a").expect("visible state"),
@@ -2448,7 +2165,6 @@ mod tests {
                 ],
             ),
         );
-        store.raise_state_floor().expect("floor");
         store
             .delete_keys(&[Bytes::from_static(b"b")])
             .expect("prune");
@@ -2554,12 +2270,12 @@ mod tests {
             receiver.try_recv(),
             Err(mpsc::TryRecvError::Disconnected)
         ));
-        let group = stage_wave(dir.path(), wave);
+        let store = RocksStore::open(dir.path(), None).expect("open db");
+        let group = prepare_wave(&store.db, wave);
         assert_eq!(group.sequence, 1);
         assert_eq!(group.requests.len(), 3);
-        assert!(group.log.exists());
-        assert!(group.state.exists());
-        assert!(group.staged_bytes > 0);
+        assert_eq!(group.batch.len(), 5);
+        assert!(group.encoded_bytes > 0);
     }
 
     #[test]
@@ -2812,47 +2528,58 @@ mod tests {
         );
     }
 
-    #[test]
-    fn reopen_decodes_sequence_above_default_element_budget() {
+    #[tokio::test]
+    async fn wal_commit_recovers_before_application_publication() {
         let dir = tempdir().expect("tempdir");
-        let entries = 32 * 1024 * 1024 / std::mem::size_of::<EntryView<'_>>() + 1;
-        let kvs = vec![(Bytes::from_static(b"a"), Bytes::from_static(b"value")); entries];
-        let payload = encode_log_value(1, &kvs);
-        drop(kvs);
-        assert!(DecodeOptions::new()
-            .decode_view::<StreamGetResponseView<'_>>(&payload)
-            .is_err());
+        let rows = vec![
+            (Bytes::new(), Bytes::new()),
+            (Bytes::from_static(b"k"), Bytes::from_static(b"old")),
+            (Bytes::from_static(b"k"), Bytes::from_static(b"new")),
+        ];
         {
             let store = RocksStore::open(dir.path(), None).expect("open db");
-            seed_log_row(&store, 1, &payload);
+            let group = prepared_write(&store, 0, rows.clone());
+            write_synced_batch(&store.db, group.batch).expect("native durable commit");
+            assert_eq!(store.current_sequence(), 0);
+            assert!(store.get_batch(1).await.expect("unpublished log").is_none());
         }
-
-        let store = RocksStore::open(dir.path(), None).expect("reopen large log row");
+        let store = RocksStore::open(dir.path(), None).expect("reopen");
         assert_eq!(store.current_sequence(), 1);
+        assert_eq!(store.get_raw(b"k").unwrap(), Some(b"new".to_vec()));
+        assert_eq!(store.get_raw(b"").unwrap(), Some(Vec::new()));
         assert_eq!(
-            store.get_raw(b"a").expect("get replayed value"),
-            Some(b"value".to_vec())
+            batch_entries(store.get_batch(1).await.unwrap().unwrap()),
+            rows
         );
+        store.delete_keys(&[Bytes::from_static(b"k")]).unwrap();
+        store.set_retention(Some(RetentionPolicy::DropAll)).unwrap();
+        drop(store);
+        let store = RocksStore::open(dir.path(), None).expect("reopen after GC");
+        assert_eq!(store.current_sequence(), 1);
+        assert_eq!(store.get_raw(b"k").unwrap(), None);
+        assert!(store.get_batch(1).await.unwrap().is_none());
     }
 
-    /// A missing staged file makes ingestion fail, which is fatal: the group cannot be rolled
-    /// back once any of it is durable, and the next open repairs whatever the dead writer left.
-    #[test]
-    #[should_panic(expected = "failed to ingest staged SST")]
-    fn write_errors_are_fatal() {
+    #[tokio::test]
+    async fn wal_sequence_survives_gc_before_first_reopen() {
         let dir = tempdir().expect("tempdir");
-        let store = RocksStore::open(dir.path(), None).expect("open db");
-
-        let group = prepared_write(
-            &store,
-            0,
-            vec![(Bytes::from_static(b"a"), Bytes::from_static(b"1"))],
-        );
-        std::fs::remove_file(&group.state).expect("sabotage staged state file");
-        commit_and_apply(&store, group);
+        {
+            let store = RocksStore::open(dir.path(), None).expect("open db");
+            let sequence = store
+                .put_batch(vec![(Bytes::from_static(b"k"), Bytes::from_static(b"v"))])
+                .await
+                .expect("put");
+            assert_eq!(sequence, 1);
+            store.delete_keys(&[Bytes::from_static(b"k")]).unwrap();
+            store.set_retention(Some(RetentionPolicy::DropAll)).unwrap();
+        }
+        let store = RocksStore::open(dir.path(), None).expect("reopen after GC");
+        assert_eq!(store.current_sequence(), 1);
+        assert_eq!(store.get_raw(b"k").unwrap(), None);
+        assert!(store.get_batch(1).await.unwrap().is_none());
     }
 
-    /// One multi-megabyte batch, sized to exercise multi-block ingested log rows.
+    /// One multi-megabyte batch with a large stream record.
     fn large_batch(tag: u8) -> Vec<(Bytes, Bytes)> {
         (0..1040)
             .map(|i| {
@@ -2864,7 +2591,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn batches_commit_through_ingestion_and_survive_reopen() {
+    async fn batches_commit_through_wal_and_survive_reopen() {
         let dir = tempdir().expect("tempdir");
         let (first, second) = {
             let store = RocksStore::open(dir.path(), None).expect("open db");
@@ -2962,72 +2689,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reopen_replays_newest_log_batch_missing_from_state() {
-        let dir = tempdir().expect("tempdir");
-        {
-            let store = RocksStore::open(dir.path(), None).expect("open db");
-            store
-                .put_batch(vec![(Bytes::from_static(b"k1"), Bytes::from_static(b"v1"))])
-                .await
-                .expect("put");
-
-            // Simulate a crash that lost the WAL-less state rows for sequence 2 (the group
-            // whose commit was interrupted) but kept its durable log row: write it directly,
-            // bypassing the state apply stage and the floor advance. The reopened store must
-            // re-derive the durable frontier from the retained rows alone, exactly as after a
-            // crash that also lost the unsynced floor advance.
-            let payload = StreamGetResponse {
-                sequence_number: 2,
-                entries: vec![
-                    Entry {
-                        key: b"k2".to_vec(),
-                        value: Bytes::from_static(b"v2-stale"),
-                        ..Default::default()
-                    },
-                    Entry {
-                        key: b"k2".to_vec(),
-                        value: Bytes::from_static(b"v2"),
-                        ..Default::default()
-                    },
-                    Entry {
-                        key: b"k3".to_vec(),
-                        value: Bytes::from_static(b"v3"),
-                        ..Default::default()
-                    },
-                ],
-                ..Default::default()
-            }
-            .encode_to_vec();
-            seed_log_row(&store, 2, &payload);
-        }
-
-        let store = RocksStore::open(dir.path(), None).expect("reopen db");
-        assert_eq!(store.current_sequence(), 2);
-
-        // Replay applied the missing rows in arrival order: last writer wins for k2.
-        for (key, value) in [
-            (b"k1" as &[u8], b"v1" as &[u8]),
-            (b"k2", b"v2"),
-            (b"k3", b"v3"),
-        ] {
-            assert_eq!(
-                store.get_raw(key).expect("get").as_deref(),
-                Some(value),
-                "key {key:?}"
-            );
-        }
-
-        // A second reopen replays again (the floor only advances on prune); idempotent.
-        drop(store);
-        let store = RocksStore::open(dir.path(), None).expect("reopen db again");
-        assert_eq!(store.current_sequence(), 2);
-        assert_eq!(
-            store.get_raw(b"k2").expect("get").as_deref(),
-            Some(b"v2" as &[u8])
-        );
-    }
-
-    #[tokio::test]
     async fn empty_batches_are_rejected() {
         let dir = tempdir().expect("tempdir");
         let store = RocksStore::open(dir.path(), None).expect("open db");
@@ -3041,7 +2702,7 @@ mod tests {
         assert_eq!(store.current_sequence(), 0);
     }
 
-    /// Concurrent puts staged by parallel workers must still commit in
+    /// Concurrent puts prepared by parallel workers must still commit in
     /// contiguous sequence order and survive reopen.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn concurrent_puts_commit_in_sequence_order() {
@@ -3234,9 +2895,12 @@ mod tests {
         let dir = tempdir().expect("tempdir");
         let store = RocksStore::open(dir.path(), None).expect("open db");
 
-        // A durable log row whose group never published (its state ingestion was in flight at
-        // a crash): retention must spare it. It is the repair replay's input at the next open.
-        seed_log_row(&store, 1, &encoded_log_entry(1, b"k", b"v"));
+        let group = prepared_write(
+            &store,
+            0,
+            vec![(Bytes::from_static(b"k"), Bytes::from_static(b"v"))],
+        );
+        write_synced_batch(&store.db, group.batch).expect("native durable commit");
 
         store
             .set_retention(Some(RetentionPolicy::DropAll))
@@ -3253,10 +2917,14 @@ mod tests {
     async fn oldest_retained_batch_hides_rows_above_published_frontier() {
         let dir = tempdir().expect("tempdir");
         let store = RocksStore::open(dir.path(), None).expect("open db");
-        seed_log_row(&store, 1, &encoded_log_entry(1, b"k", b"v"));
+        let group = prepared_write(
+            &store,
+            0,
+            vec![(Bytes::from_static(b"k"), Bytes::from_static(b"v"))],
+        );
+        write_synced_batch(&store.db, group.batch).expect("native durable commit");
 
-        // The row's group never published (e.g. its state ingestion is still in flight), so it
-        // must stay invisible to both the point read and the oldest-retained probe.
+        // Unpublished rows stay invisible to both point reads and the oldest probe.
         assert!(store.get_batch(1).await.expect("get").is_none());
         assert_eq!(store.oldest_retained_batch().await.expect("oldest"), None);
     }

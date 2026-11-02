@@ -111,7 +111,7 @@ prevent its delivery.
 Use [`maximum_reception_bytes`](src/ingest/reception.rs) with the enforced
 `PutLimits` and largest backend `DecodeBuffers` capacities to estimate reception
 memory for one request. Add preparation storage, extra retained chunks, listener
-overhead, and storage-engine memory separately. The simulator's native SST staging
+overhead, and storage-engine memory separately. The simulator's batch preparation
 and direct `put_batch` calls have separate resource needs and budgets defined
 by [its backend configuration](../examples/simulator/src/rocks.rs).
 

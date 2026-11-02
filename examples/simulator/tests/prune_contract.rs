@@ -398,8 +398,7 @@ fn keys_prune_and_retention_compose() {
         (v1, v2, v3, last)
     };
 
-    // Reopening replays retained log rows above the state floor; it must resurrect neither the
-    // key-pruned rows nor the retention-evicted log rows, and must not regress the frontier.
+    // Reopening preserves both pruning decisions and the committed frontier.
     let store = RocksStore::open(dir.path(), None).expect("reopen db");
     assert_eq!(store.current_sequence(), last);
     assert!(get_value(&store, &v1).is_none());
@@ -429,8 +428,7 @@ fn retention_drop_all_survives_reopen() {
         last
     };
 
-    // Every log row is gone, so the floor written atomically with the tombstone is the only
-    // record of the frontier; without it a reopen would re-issue acked sequence numbers.
+    // The committed sequence survives log retention, so new writes continue after it.
     let store = RocksStore::open(dir.path(), None).expect("reopen db");
     assert_eq!(store.current_sequence(), last);
     let next = put_batch(
@@ -470,8 +468,7 @@ fn key_pruned_state_survives_reopen_when_versions_share_a_batch() {
         (v1, v2, v3)
     };
 
-    // Reopening replays retained log rows; that replay must not resurrect key-pruned rows
-    // whose log entries are still retained.
+    // Pruned keys stay absent after reopening, even while their stream entries remain.
     let store = RocksStore::open(dir.path(), None).expect("reopen db");
     assert!(get_value(&store, &v1).is_none());
     assert!(get_value(&store, &v2).is_none());
