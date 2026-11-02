@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import { create, fromBinary, toBinary } from '@bufbuild/protobuf';
+import { FieldDescriptorProto_Type } from '@bufbuild/protobuf/wkt';
 import { GetCurrentOperationRangeResponseSchema } from '../dist/generated/proto/qmdb/v1/current_operation_pb.js';
 import { GetManyResponseSchema, GetRequestSchema, GetResponseSchema } from '../dist/generated/proto/qmdb/v1/key_lookup_pb.js';
 import { GetRangeRequestSchema, GetRangeResponseSchema } from '../dist/generated/proto/qmdb/v1/key_range_pb.js';
@@ -102,8 +103,28 @@ test('test_proof_bytes_get_many_and_get_range_reencode_to_the_received_bytes', (
       const asBytes = fromBinary(rangeOutput, wire);
       const asMessages = fromBinary(GetRangeResponseSchema, wire);
       assert.equal(asBytes.entries.length, asMessages.entries.length);
+      asBytes.entries.forEach((entry) => assertViewOf(entry, wire));
       assert.equal(asBytes.startProof.length, asMessages.startProof === undefined ? 0 : 1, `${family} ${suffix}`);
       assert.deepEqual(toBinary(rangeOutput, asBytes), wire, `${family} ${suffix}`);
+    }
+  }
+});
+
+test('test_proof_bytes_leave_the_generated_descriptors_unchanged', () => {
+  // Each service is rebuilt from a copy of its file descriptor.
+  const cases = [
+    [GetResponseSchema, ['proof']],
+    [GetManyResponseSchema, ['results']],
+    [GetRangeResponseSchema, ['entries', 'start_proof']],
+    [GetOperationRangeResponseSchema, ['proof']],
+    [GetOperationsResponseSchema, ['proof']],
+    [SubscribeResponseSchema, ['proof']],
+    [GetCurrentOperationRangeResponseSchema, ['proof']],
+  ];
+  for (const [schema, names] of cases) {
+    for (const name of names) {
+      const field = schema.proto.field.find((field) => field.name === name);
+      assert.equal(field.type, FieldDescriptorProto_Type.MESSAGE, `${schema.typeName}.${name}`);
     }
   }
 });

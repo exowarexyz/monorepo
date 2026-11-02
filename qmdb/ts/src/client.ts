@@ -158,7 +158,7 @@ export interface OrderedSubscribeProof {
 /**
  * The qmdb clients always use binary protobuf and ignore `useBinaryFormat`.
  * They hand each proof to wasm as the bytes that arrived, which JSON can't
- * carry (see `proof-bytes.ts`).
+ * carry.
  */
 export type QmdbOrderedClientOptions = SdkClientOptions & {
   merkleFamily?: MerkleFamily;

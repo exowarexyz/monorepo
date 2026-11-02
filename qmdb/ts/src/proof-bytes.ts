@@ -96,7 +96,8 @@ function proofBytesService<S extends GenService<GenServiceMethods>, const F exte
       field.type = FieldDescriptorProto_Type.BYTES;
       field.typeName = '';
       field.label = FieldDescriptorProto_Label.REPEATED;
-      // An `optional` field's synthetic oneof is dropped once no field is in it.
+      // A repeated field can't be `optional` or in a oneof. protobuf-es ignores
+      // both for a repeated field anyway, but this keeps the descriptor valid.
       field.proto3Optional = false;
       clearField(field, FieldDescriptorProtoSchema.field.oneofIndex);
     }
