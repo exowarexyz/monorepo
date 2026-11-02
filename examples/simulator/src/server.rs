@@ -1,16 +1,11 @@
 //! HTTP server entrypoints.
 
-use std::net::SocketAddr;
-use std::path::Path;
-use std::sync::Arc;
-use std::time::Duration;
-
+use crate::RocksStore;
 use axum::{routing::get, Router};
 use exoware_server::{connect_stack, AppState};
+use std::{net::SocketAddr, path::Path, sync::Arc, time::Duration};
 use tower_http::cors::CorsLayer;
 use tracing::info;
-
-use crate::RocksStore;
 
 pub const CMD: &str = "server";
 pub const RUN_CMD: &str = "run";

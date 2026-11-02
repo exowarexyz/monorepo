@@ -1,29 +1,36 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::future::Future;
-use std::sync::Arc;
-
+use crate::{
+    adapter::{
+        codec::{
+            encode_node_key, encode_operation_key, encode_ops_root_witness_key,
+            merkle_size_for_watermark, op_count_for_watermark,
+        },
+        core::load_operation_bytes_range,
+        read_cache::{ReadCache, RootContext},
+    },
+    decode_digest,
+    error::merkle_error,
+    proof::{
+        build_batch_multi_proof, build_operation_range_checkpoint, MultiProofOperations,
+        OperationRangeCheckpoint, RawBatchMultiProof,
+    },
+    QmdbError,
+};
 use bytes::Bytes;
 use commonware_codec::{Copying, DecodeExt};
 use commonware_cryptography::{Digest, Hasher};
-use commonware_storage::merkle::{
-    self, hasher::Hasher as _, multi_proof_positions, Family, Graftable, Location, Position,
-    RangePlan,
+use commonware_storage::{
+    merkle::{
+        self, hasher::Hasher as _, multi_proof_positions, Family, Graftable, Location, Position,
+        RangePlan,
+    },
+    qmdb::current::proof::OpsRootWitness,
 };
-use commonware_storage::qmdb::current::proof::OpsRootWitness;
 use exoware_sdk::{keys::Key, ReadSession};
-
-use crate::adapter::codec::{
-    encode_node_key, encode_operation_key, encode_ops_root_witness_key, merkle_size_for_watermark,
-    op_count_for_watermark,
+use std::{
+    collections::{BTreeMap, BTreeSet, HashMap},
+    future::Future,
+    sync::Arc,
 };
-use crate::adapter::core::load_operation_bytes_range;
-use crate::adapter::read_cache::{ReadCache, RootContext};
-use crate::error::merkle_error;
-use crate::proof::{
-    build_batch_multi_proof, build_operation_range_checkpoint, MultiProofOperations,
-    OperationRangeCheckpoint, RawBatchMultiProof,
-};
-use crate::{decode_digest, QmdbError};
 
 pub(crate) async fn load_operation_range_checkpoint<F, H, Fut>(
     session: &ReadSession,
