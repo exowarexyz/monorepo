@@ -26,8 +26,6 @@ jobs:
         version: 1.67.0
     - name: Publish proto
       run: buf push
-      env:
-        BUF_TOKEN: ${{ secrets.BUF_TOKEN }}
     - name: Publish exoware-sdk
       run: cargo publish --manifest-path sdk/rs/Cargo.toml
       continue-on-error: true
