@@ -5,7 +5,6 @@ import { Client, createTransport } from '../src/client';
 import { HttpError } from '../src/error';
 import { SubscribeResponseSchema } from '../src/gen/ts/log/v1/stream_pb';
 import * as query from '../src/gen/ts/store/v1/query_pb';
-import { GetManyFrameSchema, RangeFrameSchema } from '../src/gen/ts/store/v1/query_pb';
 import { StoreClient, type StoreBatch } from '../src/store';
 
 const rows = [
@@ -15,11 +14,11 @@ const rows = [
 
 // Two frames, so a passing read shows the frames after the prefetched one still arrive.
 const frames = {
-    range: rows.map((row) => toBinary(RangeFrameSchema, create(RangeFrameSchema, {
+    range: rows.map((row) => toBinary(query.RangeFrameSchema, create(query.RangeFrameSchema, {
         results: [row],
         detail: { sequenceNumber: 7n },
     }))),
-    getMany: rows.map((row) => toBinary(GetManyFrameSchema, create(GetManyFrameSchema, {
+    getMany: rows.map((row) => toBinary(query.GetManyFrameSchema, create(query.GetManyFrameSchema, {
         results: [row],
         detail: { sequenceNumber: 7n },
     }))),
@@ -68,6 +67,7 @@ function read(method: Method, maxAttempts = 2) {
         : store.getMany(rows.map((row) => row.key));
 }
 
+// Answers each call with the next response, repeating the last one once they run out.
 function mockFetch(...responses: Array<() => Response>) {
     const bodies: Array<BodyInit | null | undefined> = [];
     const fetch = jest.spyOn(globalThis, 'fetch').mockImplementation(async (_input, init) => {
@@ -89,6 +89,7 @@ describe.each(methods)('%s', (method) => {
         );
         await expect(read(method)).resolves.toEqual(rows);
         expect(fetch).toHaveBeenCalledTimes(2);
+        expect(bodies[0]).toBeInstanceOf(Uint8Array);
         expect(bodies[1]).toEqual(bodies[0]);
     });
 
@@ -99,6 +100,7 @@ describe.each(methods)('%s', (method) => {
         );
         await expect(read(method)).resolves.toEqual(rows);
         expect(fetch).toHaveBeenCalledTimes(2);
+        expect(bodies[0]).toBeInstanceOf(Uint8Array);
         expect(bodies[1]).toEqual(bodies[0]);
     });
 
@@ -144,6 +146,7 @@ describe('subscribe', () => {
         );
         await expect(subscribe()).resolves.toEqual([batch]);
         expect(fetch).toHaveBeenCalledTimes(2);
+        expect(bodies[0]).toBeInstanceOf(Uint8Array);
         expect(bodies[1]).toEqual(bodies[0]);
     });
 

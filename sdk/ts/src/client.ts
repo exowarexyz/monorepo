@@ -151,7 +151,7 @@ function makeRetryInterceptor(config: RetryConfig): Interceptor {
         const deadline = headerDeadline(req.header);
         if (req.stream) {
             // Each retry must serialize the same input after Connect consumes its request iterator.
-            // Every streaming RPC here is server streaming, so the input is a single message.
+            // The fetch transport sends only server-streaming calls, whose input is one message.
             const input = await req.message[Symbol.asyncIterator]().next();
             req = {
                 ...req,
