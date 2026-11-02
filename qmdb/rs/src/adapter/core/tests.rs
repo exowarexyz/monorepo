@@ -562,12 +562,24 @@ async fn publication_cache_observations_answer_requires_without_store_reads() {
         "observed watermarks need no lookup"
     );
 
-    // A lookup in progress holds the gate, and the observation still lands.
+    // A lookup in progress holds the gate. The observation still lands, and a
+    // require for it is answered without waiting for the gate.
     {
         let _gate = cache.refresh_gate.lock().await;
         cache.observe(Location::new(12), 60);
+        let published = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            cache.require(&session, Location::new(12)),
+        )
+        .await
+        .expect("require waited behind the held gate")
+        .unwrap();
+        assert_eq!(published.sequence_number, 60);
     }
-    assert_eq!(cache.published_sequence(Location::new(12)), Some(60));
+    assert!(
+        starts.try_recv().is_err(),
+        "observed watermarks need no lookup"
+    );
 }
 
 #[test]

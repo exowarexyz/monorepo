@@ -55,8 +55,9 @@ pub(crate) trait LatestValueResolver<F: Family, K: Codec, V: Codec> {
     ) -> Result<VersionedValue<K, V, F>, QmdbError>;
 }
 
-/// Caches the greatest published QMDB watermark and the store sequence returned
-/// by the publication lookup that observed it.
+/// Caches the greatest published QMDB watermark and the lowest Store sequence
+/// known to include it. That sequence comes from a publication lookup or from
+/// a subscription frame that carried the watermark row.
 ///
 /// Reads at that watermark or an earlier one can skip publication lookup, given
 /// their data and proof reads must require at least the cached sequence as `min_sequence_number`.
@@ -66,7 +67,8 @@ pub(crate) trait LatestValueResolver<F: Family, K: Codec, V: Codec> {
 pub(crate) struct PublicationCache<F: Family> {
     published: Mutex<Option<PublishedWatermark<F>>>,
     // Serializes publication lookups, so a `require` that waits here can use
-    // the result of the lookup it waited on.
+    // the result of the lookup it waited on. `published` has its own lock, so
+    // updating it doesn't need this gate.
     refresh_gate: tokio::sync::Mutex<()>,
 }
 

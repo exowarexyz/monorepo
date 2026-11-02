@@ -1829,7 +1829,7 @@ pub struct ReadSession {
     client: PrefixedStoreClient,
     policy: ReadPolicy,
     configured_floor: Option<u64>,
-    sequence: Arc<ObservedSequence>,
+    observed_sequence: Arc<ObservedSequence>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -2872,7 +2872,7 @@ impl ReadSession {
             client,
             policy,
             configured_floor,
-            sequence: Arc::new(ObservedSequence::default()),
+            observed_sequence: Arc::new(ObservedSequence::default()),
         }
     }
 
@@ -2882,7 +2882,7 @@ impl ReadSession {
     pub fn min_sequence_number(&self) -> Option<u64> {
         match self.policy {
             ReadPolicy::Fixed => self.configured_floor,
-            ReadPolicy::Monotonic => self.configured_floor.max(self.sequence.get()),
+            ReadPolicy::Monotonic => self.configured_floor.max(self.observed_sequence.get()),
         }
     }
 
@@ -2903,7 +2903,7 @@ impl ReadSession {
     ///
     /// Returns `None` until a response reports a sequence.
     pub fn evaluated_sequence(&self) -> Option<u64> {
-        self.sequence.get()
+        self.observed_sequence.get()
     }
 
     /// Share this session's freshness state with another client for the same Store.
@@ -2918,7 +2918,7 @@ impl ReadSession {
     pub async fn get_batch(&self, sequence_number: u64) -> Result<Option<StoreBatch>, ClientError> {
         let batch = self.client.get_batch(sequence_number).await?;
         if let Some(batch) = &batch {
-            self.sequence.observe(batch.sequence_number);
+            self.observed_sequence.observe(batch.sequence_number);
         }
         Ok(batch)
     }
@@ -2930,7 +2930,7 @@ impl ReadSession {
         since_sequence_number: Option<u64>,
     ) -> Result<StreamSubscription, ClientError> {
         let mut subscription = self.client.subscribe(filter, since_sequence_number).await?;
-        subscription.observed_sequence = Some(self.sequence.clone());
+        subscription.observed_sequence = Some(self.observed_sequence.clone());
         Ok(subscription)
     }
 
@@ -2940,7 +2940,7 @@ impl ReadSession {
             .send_get(key, self.min_sequence_number())
             .await?;
         if let Some(detail) = detail {
-            self.sequence.observe(detail.sequence_number);
+            self.observed_sequence.observe(detail.sequence_number);
         }
         Ok(response.value)
     }
@@ -2955,7 +2955,7 @@ impl ReadSession {
                 keys,
                 batch_size,
                 self.min_sequence_number(),
-                Some(self.sequence.clone()),
+                Some(self.observed_sequence.clone()),
             )
             .await
     }
@@ -3011,7 +3011,7 @@ impl ReadSession {
                 mode,
                 QueryStreamReadOptions {
                     min_sequence_number: self.min_sequence_number(),
-                    observed_sequence: Some(self.sequence.clone()),
+                    observed_sequence: Some(self.observed_sequence.clone()),
                 },
             )
             .await
@@ -3043,7 +3043,7 @@ impl ReadSession {
                 request,
                 QueryStreamReadOptions {
                     min_sequence_number: self.min_sequence_number(),
-                    observed_sequence: Some(self.sequence.clone()),
+                    observed_sequence: Some(self.observed_sequence.clone()),
                 },
             )
             .await
@@ -4755,6 +4755,17 @@ mod tests {
         for thread in threads {
             thread.join().unwrap();
         }
+        assert_eq!(observed.get(), Some(u64::MAX));
+    }
+
+    #[test]
+    fn observed_sequence_keeps_zero_apart_from_none() {
+        let observed = ObservedSequence::default();
+        assert_eq!(observed.get(), None);
+        observed.observe(0);
+        assert_eq!(observed.get(), Some(0));
+        observed.observe(u64::MAX);
+        observed.observe(3);
         assert_eq!(observed.get(), Some(u64::MAX));
     }
 
