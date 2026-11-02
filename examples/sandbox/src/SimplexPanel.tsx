@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Client, ReadSession } from '@exowarexyz/sdk';
+import { Client, ReadSession, StoreKeyPrefix } from '@exowarexyz/sdk';
 import {
   bytesToHex,
   hexToBytes,
@@ -131,9 +131,11 @@ function streamEventId({ sequenceNumber, entry }: VerifiedSimplexEvent): string 
 
 export function SimplexPanel({
   simplexUrl,
+  storePrefix,
   showNotification,
 }: {
   simplexUrl: string;
+  storePrefix: string;
   showNotification: NotificationFn;
 }) {
   const subscribeAbortRef = useRef<AbortController | null>(null);
@@ -155,7 +157,11 @@ export function SimplexPanel({
     >
   >();
   const [verifierStatus, setVerifierStatus] = useState<'loading' | 'ready' | 'error'>('loading');
-  const store = useMemo(() => new Client(simplexUrl).store(), [simplexUrl]);
+  const store = useMemo(
+    () =>
+      new Client(simplexUrl).store(new StoreKeyPrefix(new TextEncoder().encode(storePrefix))),
+    [simplexUrl, storePrefix],
+  );
   const session = useMemo(() => ReadSession.monotonic(store), [store]);
   const client = useMemo(
     () =>

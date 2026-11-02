@@ -1,9 +1,22 @@
 //! Ordered QMDB services: operation log, current operation ranges, key
 //! lookups (hits and misses), and ordered key ranges.
 
-use std::future::Future;
-use std::sync::Arc;
-
+use super::{
+    CurrentOperationReader, CurrentOperationServer, KeyLookupReader, KeyLookupServer,
+    KeyRangeReader, KeyRangeServer, OperationLogReader, OperationLogServer,
+};
+use crate::{
+    adapter::Ordered,
+    proof::{
+        CurrentOperationRangeProofResult, MultiProofOperations, OperationRangeCheckpoint,
+        RawBatchMultiProof, RawKeyLookupProof, RawKeyRangeProof, RawKeyValueProof,
+    },
+    service::proto::qmdb::v1::{
+        CurrentOperationServiceServer, KeyLookupServiceServer, OperationLogServiceServer,
+        OrderedKeyRangeServiceServer,
+    },
+    OperationKv, PublishedWatermark, QmdbError,
+};
 use commonware_codec::{Decode, Encode, Read};
 use commonware_cryptography::Hasher;
 use commonware_storage::{
@@ -16,21 +29,7 @@ use commonware_storage::{
 };
 use connectrpc::{Chain, ConnectRpcService};
 use exoware_sdk::PrefixedStoreClient;
-
-use super::{
-    CurrentOperationReader, CurrentOperationServer, KeyLookupReader, KeyLookupServer,
-    KeyRangeReader, KeyRangeServer, OperationLogReader, OperationLogServer,
-};
-use crate::adapter::Ordered;
-use crate::proof::{
-    CurrentOperationRangeProofResult, MultiProofOperations, OperationRangeCheckpoint,
-    RawBatchMultiProof, RawKeyLookupProof, RawKeyRangeProof, RawKeyValueProof,
-};
-use crate::service::proto::qmdb::v1::{
-    CurrentOperationServiceServer, KeyLookupServiceServer, OperationLogServiceServer,
-    OrderedKeyRangeServiceServer,
-};
-use crate::{OperationKv, PublishedWatermark, QmdbError};
+use std::{future::Future, sync::Arc};
 
 impl<F, H, K, V, const N: usize, E> OperationLogReader for Ordered<F, H, K, V, N, E>
 where

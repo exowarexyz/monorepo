@@ -1,43 +1,37 @@
 //! Verifying client for unordered QMDB.
 
-use std::collections::BTreeMap;
-use std::fmt::Display;
-
+use super::rpc::{
+    verify::verify_key_value_from_proto, CurrentOperationClient, KeyLookupClient,
+    OperationLogClient, OperationLogSubscription,
+};
+use crate::{
+    proof::{VerifiedCurrentRange, VerifiedKeyValue, VerifiedOperationRange},
+    service::proto::qmdb::v1::{
+        current_key_lookup_result, CurrentKeyLookupResult, CurrentKeyValueProof,
+        GetCurrentOperationRangeRequest, GetManyRequest, GetOperationRangeRequest, GetRequest,
+        SubscribeRequest,
+    },
+    QmdbError,
+};
 use bytes::Bytes;
 use commonware_codec::{Decode, DecodeExt, Encode, Read};
 use commonware_cryptography::Hasher;
-use commonware_storage::merkle::Location;
-use commonware_storage::qmdb::sync::Target as SyncTarget;
 use commonware_storage::{
-    merkle::Graftable,
+    merkle::{Graftable, Location},
     qmdb::{
         any::{
             unordered,
             value::{ValueEncoding, VariableEncoding},
         },
         operation::Key as QmdbKey,
+        sync::Target as SyncTarget,
     },
 };
 use commonware_utils::range::NonEmptyRange;
 use connectrpc::client::{ClientConfig, ClientTransport};
 use exoware_sdk::proto::PreferZstdHttpClient;
 use http_body::Body;
-
-use super::rpc::OperationLogSubscription;
-use crate::proof::{VerifiedCurrentRange, VerifiedOperationRange};
-use crate::service::proto::qmdb::v1::{
-    GetCurrentOperationRangeRequest, GetManyRequest, GetOperationRangeRequest, GetRequest,
-    SubscribeRequest,
-};
-
-use crate::proof::VerifiedKeyValue;
-use crate::service::proto::qmdb::v1::{
-    current_key_lookup_result, CurrentKeyLookupResult, CurrentKeyValueProof,
-};
-use crate::QmdbError;
-
-use super::rpc::verify::verify_key_value_from_proto;
-use super::rpc::{CurrentOperationClient, KeyLookupClient, OperationLogClient};
+use std::{collections::BTreeMap, fmt::Display};
 
 /// Verifies unordered `KeyLookupService` responses: hits only, in request
 /// order.

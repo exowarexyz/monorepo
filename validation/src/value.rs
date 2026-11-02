@@ -1,6 +1,5 @@
-use anyhow::ensure;
-
 use crate::deterministic::{mix64, FXHASH_MULTIPLIER_64};
+use anyhow::ensure;
 
 /// Default generated value size used by load and benchmark writes.
 pub const DEFAULT_VALUE_SIZE: usize = 160;
