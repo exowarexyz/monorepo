@@ -6,7 +6,7 @@ import "buf/validate/validate.proto";
 import "qmdb/v1/proof.proto";
 import "common/v1/kv.proto";
 
-// Historical operation-log proof service over a QMDB backend.
+// Operation-log proof service over a QMDB backend.
 //
 // Clients dial the endpoint bound to the backend variant they want to read
 // (ordered, unordered, immutable, or keyless). The wire protocol is identical
@@ -53,7 +53,7 @@ message SubscribeRequest {
 message SubscribeResponse {
   // Store sequence of the operation batch. A later watermark may publish it.
   uint64 resume_sequence_number = 1;
-  HistoricalMultiProof proof = 2;
+  OperationMultiProof proof = 2;
 }
 
 // Unary operation-log range proof request. The proof covers
@@ -71,7 +71,7 @@ message GetOperationRangeResponse {
   reserved 2;
   reserved "sequence_number";
 
-  HistoricalOperationRangeProof proof = 1;
+  OperationRangeProof proof = 1;
 }
 
 // Unary multi-proof request for operations at arbitrary locations of one
@@ -87,5 +87,5 @@ message GetOperationsRequest {
 // The proof carries exactly one operation per requested location, in request
 // order. Its embedded Merkle proof has `tip + 1` leaves.
 message GetOperationsResponse {
-  HistoricalMultiProof proof = 1;
+  OperationMultiProof proof = 1;
 }

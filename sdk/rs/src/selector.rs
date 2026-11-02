@@ -4,13 +4,11 @@
 //! service) so one domain type round-trips through the `common.kv.v1.Selector`
 //! proto message and one regex compiler handles validation everywhere.
 
+use crate::{keys::MAX_KEY_LEN, kv_codec::Utf8};
 use anyhow::{ensure, Context};
 use bytes::{BufMut, Bytes};
 use commonware_codec::{Buf, EncodeSize, Error as CodecError, RangeCfg, Read, ReadExt, Write};
 use regex::bytes::Regex;
-
-use crate::keys::MAX_KEY_LEN;
-use crate::kv_codec::Utf8;
 
 /// Identifies a subset of keys by a byte prefix + payload regex. Matches the
 /// `common.kv.v1.Selector` wire shape (see `proto/common/v1/kv.proto`). A key

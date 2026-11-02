@@ -2,8 +2,8 @@ import assert from 'node:assert/strict';
 import { readFileSync, readdirSync } from 'node:fs';
 import test from 'node:test';
 import { fromBinary, toBinary } from '@bufbuild/protobuf';
-import { HistoricalOperationRangeProofSchema } from '../dist/generated/proto/qmdb/v1/proof_pb.js';
-import { initSync, verify_historical_raw_operation_range_proof } from '../dist/generated/wasm/exoware_qmdb_wasm.js';
+import { OperationRangeProofSchema } from '../dist/generated/proto/qmdb/v1/proof_pb.js';
+import { initSync, verify_raw_operation_range_proof } from '../dist/generated/wasm/exoware_qmdb_wasm.js';
 
 const families = ['mmr', 'mmb'];
 const shapes = [
@@ -63,22 +63,22 @@ for (const name of cases) {
     assert.ok(operationHex.length > 0);
     assert.equal(start + BigInt(operationHex.length), tip + 1n);
 
-    const wire = fromBinary(HistoricalOperationRangeProofSchema, proof);
+    const wire = fromBinary(OperationRangeProofSchema, proof);
     assert.ok(wire.pinnedNodes.length > 0);
     assert.equal(wire.opsRootWitness.length > 0, name.startsWith('current_'));
-    const verified = verify_historical_raw_operation_range_proof(proof, root, family, 'sha256', tip, start, max);
+    const verified = verify_raw_operation_range_proof(proof, root, family, 'sha256', tip, start, max);
     assert.deepEqual(Buffer.from(verified.root), root);
     assert.deepEqual(verified.operations.map((operation) => operation.location), operationHex.map((_, offset) => start + BigInt(offset)));
     assert.deepEqual(verified.operations.map((operation) => Buffer.from(operation.encodedOperation).toString('hex')), operationHex);
 
     const wrongRoot = Buffer.from(root);
     wrongRoot[0] ^= 1;
-    assert.throws(() => verify_historical_raw_operation_range_proof(proof, wrongRoot, family, 'sha256', tip, start, max));
-    assert.throws(() => verify_historical_raw_operation_range_proof(proof, root, family, 'sha256', tip + 1n, start, max));
-    assert.throws(() => verify_historical_raw_operation_range_proof(proof, root, family, 'sha256', tip, start + 1n, max));
+    assert.throws(() => verify_raw_operation_range_proof(proof, wrongRoot, family, 'sha256', tip, start, max));
+    assert.throws(() => verify_raw_operation_range_proof(proof, root, family, 'sha256', tip + 1n, start, max));
+    assert.throws(() => verify_raw_operation_range_proof(proof, root, family, 'sha256', tip, start + 1n, max));
 
     wire.encodedOperations[0][0] ^= 1;
-    const tamperedProof = toBinary(HistoricalOperationRangeProofSchema, wire);
-    assert.throws(() => verify_historical_raw_operation_range_proof(tamperedProof, root, family, 'sha256', tip, start, max));
+    const tamperedProof = toBinary(OperationRangeProofSchema, wire);
+    assert.throws(() => verify_raw_operation_range_proof(tamperedProof, root, family, 'sha256', tip, start, max));
   });
 }

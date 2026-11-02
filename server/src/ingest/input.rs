@@ -1,3 +1,15 @@
+use super::{
+    clock::{deadline_error, Expiry, PutClock, PutDeadline},
+    decode::{DecodeOutput, DecodeState, DecodeStep, WireBatch},
+    Admission, ByteLease, DecodeBuffers, IngestEvent, IngestObserver, PutChunk, PutError,
+    RequestLease,
+};
+use crate::validate::IngestLimits;
+use bytes::Bytes;
+use connectrpc::ConnectError;
+use futures::{future::Either, FutureExt};
+use http_body::Body;
+use http_body_util::BodyExt;
 use std::{
     fmt::Display,
     pin::Pin,
@@ -5,20 +17,6 @@ use std::{
     task::Poll,
     time::{Duration, SystemTime},
 };
-
-use bytes::Bytes;
-use connectrpc::ConnectError;
-use futures::{future::Either, FutureExt};
-use http_body::Body;
-use http_body_util::BodyExt;
-
-use super::clock::{deadline_error, Expiry, PutClock, PutDeadline};
-use super::decode::{DecodeOutput, DecodeState, DecodeStep, WireBatch};
-use super::{
-    Admission, ByteLease, DecodeBuffers, IngestEvent, IngestObserver, PutChunk, PutError,
-    RequestLease,
-};
-use crate::validate::IngestLimits;
 
 pub(super) const FRAME_WORK_BUDGET: usize = 64;
 const DRAIN_BYTE_BUDGET: usize = 64 * 1024;
@@ -684,6 +682,14 @@ impl PutInput {
 
 #[cfg(test)]
 mod tests {
+    use super::{
+        super::{testing::tokio_deadline, BudgetConfig, IngestBudget},
+        *,
+    };
+    use commonware_parallel::{mocks::Explorer, Rayon, Strategy};
+    use futures::StreamExt;
+    use http_body::Frame;
+    use http_body_util::{Full, StreamBody};
     use std::{
         convert::Infallible,
         num::NonZeroUsize,
@@ -693,17 +699,7 @@ mod tests {
         },
         time::Duration,
     };
-
-    use commonware_parallel::{Rayon, Strategy};
-    use futures::StreamExt;
-    use http_body::Frame;
-    use http_body_util::{Full, StreamBody};
-
     use tokio::time::{timeout_at, Instant};
-
-    use super::super::testing::tokio_deadline;
-    use super::super::{BudgetConfig, IngestBudget};
-    use super::*;
 
     fn entry(key: &[u8], value: &[u8]) -> Vec<u8> {
         fn field(tag: u8, bytes: &[u8]) -> Vec<u8> {
@@ -1958,7 +1954,7 @@ mod tests {
                 None
             };
             let dropped = self.dropped.clone();
-            let future = self.pool.manual().spawn(1, move |_| {
+            let future = Explorer::parallel(&self.pool).spawn(1, move |_| {
                 let output = state.run(buffers);
                 if let Some(started) = started {
                     started.send(()).unwrap();

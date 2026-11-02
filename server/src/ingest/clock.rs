@@ -1,3 +1,5 @@
+use connectrpc::ConnectError;
+use futures::future::{BoxFuture, Either};
 use std::{
     fmt,
     future::Future,
@@ -6,9 +8,6 @@ use std::{
     task::{Context, Poll},
     time::{Duration, SystemTime},
 };
-
-use connectrpc::ConnectError;
-use futures::future::{BoxFuture, Either};
 
 /// Clock used for Put deadlines and elapsed-time measurements.
 ///
@@ -178,7 +177,6 @@ impl Future for Expiry<'_> {
 #[cfg(test)]
 pub(crate) mod testing {
     use super::*;
-
     use commonware_runtime::{deterministic, Clock as _};
 
     pub(crate) fn tokio_deadline(timeout: Duration) -> PutDeadline {
@@ -200,10 +198,11 @@ pub(crate) mod testing {
 
 #[cfg(test)]
 mod tests {
+    use super::{
+        testing::{tokio_deadline, SimulatedClock},
+        *,
+    };
     use commonware_runtime::{deterministic, Runner as _, Supervisor as _};
-
-    use super::testing::{tokio_deadline, SimulatedClock};
-    use super::*;
 
     async fn assert_contract(clock: &dyn PutClock) {
         // Include a deadline from before the clock was created.

@@ -1,24 +1,24 @@
-use std::convert::Infallible;
-use std::future::Future;
-use std::pin::Pin;
-use std::sync::Arc;
-use std::task::{Context, Poll};
-
+use super::{
+    box_body,
+    transport::{
+        admission_rejection_response, terminate_rejected_response, terminate_unfinished_response,
+        ConnectionControl,
+    },
+    DrainOutcome, PutClock, PutDeadline, PutEncoding, PutInput, PutLimits, PutMetadata, TokioClock,
+};
+use crate::{Ingest, IngestState};
 use axum::body::Body;
 use connectrpc::{ConnectError, ConnectRpcService, Dispatcher};
 use futures::future::BoxFuture;
 use http::{request::Parts, Request, Response};
+use std::{
+    convert::Infallible,
+    future::Future,
+    pin::Pin,
+    sync::Arc,
+    task::{Context, Poll},
+};
 use tower::Service;
-
-use super::transport::{
-    admission_rejection_response, terminate_rejected_response, terminate_unfinished_response,
-    ConnectionControl,
-};
-use super::{
-    box_body, DrainOutcome, PutClock, PutDeadline, PutEncoding, PutInput, PutLimits, PutMetadata,
-    TokioClock,
-};
-use crate::{Ingest, IngestState};
 
 const PUT_PATH: &str = exoware_sdk::ingest::SERVICE_PUT_SPEC.procedure;
 

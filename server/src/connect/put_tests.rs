@@ -1,23 +1,25 @@
 use super::*;
-
-use std::pin::Pin;
-use std::sync::atomic::AtomicUsize;
-use std::sync::Mutex;
-use std::task::Poll;
-
 use crate::ingest::{
     DecodeBuffers, IngestBudget, PutClock, PutError, PutInput, PutMiddleware, TokioClock,
 };
+use connectrpc::{
+    client::{full_body, ClientConfig, ClientTransport},
+    CodecFormat, ErrorCode,
+};
+use exoware_sdk::{
+    decode_connect_error,
+    ingest::{PutRequest, ServiceClient},
+    keys::MAX_KEY_LEN,
+    limits::PutTooLarge,
+    transport::ServiceTransport,
+};
 use futures::future::BoxFuture;
-
-use connectrpc::client::{full_body, ClientConfig, ClientTransport};
-use connectrpc::{CodecFormat, ErrorCode};
-use exoware_sdk::decode_connect_error;
-use exoware_sdk::ingest::{PutRequest, ServiceClient};
-use exoware_sdk::keys::MAX_KEY_LEN;
-use exoware_sdk::limits::PutTooLarge;
-use exoware_sdk::transport::ServiceTransport;
 use http_body_util::BodyExt;
+use std::{
+    pin::Pin,
+    sync::{atomic::AtomicUsize, Mutex},
+    task::Poll,
+};
 
 const PUT_PATH: &str = "log.ingest.v1.Service/Put";
 
@@ -871,13 +873,11 @@ async fn put_timeouts_respect_the_host_ceiling() {
 // These tests run without a Tokio runtime.
 mod simulated_clock {
     use super::*;
-
-    use std::time::Duration;
-
+    use crate::ingest::{
+        testing::SimulatedClock, DecodeExecutor, DecodeOutput, DecodeState, PutConfig,
+    };
     use commonware_runtime::{deterministic, Clock as _, Runner as _, Supervisor as _};
-
-    use crate::ingest::testing::SimulatedClock;
-    use crate::ingest::{DecodeExecutor, DecodeOutput, DecodeState, PutConfig};
+    use std::time::Duration;
 
     fn simulated_state<I: Ingest>(
         context: &deterministic::Context,
