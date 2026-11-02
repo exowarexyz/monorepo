@@ -1,20 +1,18 @@
 //! `qmdb.v1.KeyLookupService`: current-state proofs for explicit keys.
 
-use std::future::Future;
-use std::sync::Arc;
-
+pub(crate) use super::encode::LookupResult;
+use super::{encode, qmdb_error_to_connect};
+use crate::{
+    proof::RawKeyValueProof,
+    service::proto::qmdb::v1::{
+        GetManyRequest, GetManyResponse, GetRequest, GetResponse, KeyLookupService,
+    },
+    QmdbError,
+};
 use commonware_codec::{Copying, Decode, Encode, Read};
 use commonware_storage::merkle::{Graftable, Location};
 use connectrpc::{ConnectError, PreEncoded, RequestContext as Context, ServiceRequest};
-
-use crate::proof::RawKeyValueProof;
-use crate::service::proto::qmdb::v1::{
-    GetManyRequest, GetManyResponse, GetRequest, GetResponse, KeyLookupService,
-};
-use crate::QmdbError;
-
-pub(crate) use super::encode::LookupResult;
-use super::{encode, qmdb_error_to_connect};
+use std::{future::Future, sync::Arc};
 
 /// Read capabilities needed by [`KeyLookupServer`].
 pub(crate) trait KeyLookupReader<const N: usize>: Send + Sync + 'static {

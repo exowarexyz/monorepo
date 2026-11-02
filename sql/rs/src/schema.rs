@@ -1,25 +1,16 @@
-use std::sync::Arc;
-
+use crate::{codec::*, predicate::*, scan::*, types::*, writer::*, SqlContext};
 use async_trait::async_trait;
 use bytes::Bytes;
-use datafusion::arrow::datatypes::{DataType, SchemaRef};
-use datafusion::catalog::Session;
-use datafusion::common::tree_node::TreeNode;
-use datafusion::common::{DataFusionError, Result as DataFusionResult, SchemaExt};
-use datafusion::datasource::sink::DataSinkExec;
-use datafusion::datasource::TableProvider;
-use datafusion::logical_expr::dml::InsertOp;
-use datafusion::logical_expr::{Expr, TableProviderFilterPushDown, TableType};
-use datafusion::physical_plan::ExecutionPlan;
-use exoware_sdk::kv_codec::decode_stored_row;
-use exoware_sdk::PrefixedStoreClient;
-
-use crate::codec::*;
-use crate::predicate::*;
-use crate::scan::*;
-use crate::types::*;
-use crate::writer::*;
-use crate::SqlContext;
+use datafusion::{
+    arrow::datatypes::{DataType, SchemaRef},
+    catalog::Session,
+    common::{tree_node::TreeNode, DataFusionError, Result as DataFusionResult, SchemaExt},
+    datasource::{sink::DataSinkExec, TableProvider},
+    logical_expr::{dml::InsertOp, Expr, TableProviderFilterPushDown, TableType},
+    physical_plan::ExecutionPlan,
+};
+use exoware_sdk::{kv_codec::decode_stored_row, PrefixedStoreClient};
+use std::sync::Arc;
 
 pub struct KvSchema {
     client: PrefixedStoreClient,

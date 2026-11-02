@@ -1,74 +1,72 @@
 # exoware-simplex
 
-Store-backed read and upload helpers for Commonware Simplex artifacts.
+Store and retrieve typed Commonware Simplex artifacts through Exoware Store.
+`SimplexWriter` publishes headers and full blocks by digest, notarizations and
+finalizations by round (epoch and view), and finalizations by height.
+`SimplexReader` decodes those records and checks that they match the requested
+digest, round, or height.
 
-The crate stores encoded artifacts in Exoware Store rows:
+## Publish a finalization
 
-- header bytes by digest
-- full `{ header, body }` block data by digest
-- notarized `{ proof, header }` by Simplex round (epoch and view)
-- finalized `{ proof, header }` by Simplex round (epoch and view)
-- finalized `{ proof, header }` by block height
+Given a Commonware finalization and its matching header, construct a `Finalized`
+record and upload it through a prefixed Store client:
 
 ```rust
+use commonware_consensus::{simplex::types::Finalization, Block};
+use commonware_cryptography::{certificate::Scheme, Digest};
 use exoware_sdk::{StoreClient, StoreKeyPrefix};
-use exoware_simplex::{Finalized, SimplexReader, SimplexWriter};
+use exoware_simplex::{Finalized, SimplexError, SimplexWriter, UploadReceipt};
 
-# async fn example<B, S, D>(
-#   store_url: &str,
-#   proof: commonware_consensus::simplex::types::Finalization<S, D>,
-#   header: B,
-# ) -> Result<(), Box<dyn std::error::Error>>
-# where
-#   B: commonware_consensus::Block<Digest = D>,
-#   S: commonware_cryptography::certificate::Scheme,
-#   D: commonware_cryptography::Digest,
-# {
-let store = StoreClient::new(store_url).prefixed(StoreKeyPrefix::identity());
-let writer = SimplexWriter::new(store.clone());
-let finalized = Finalized::new(proof, header)?;
-let receipt = writer.upload_finalized(&finalized).await?;
-println!("stored at sequence {}", receipt.store_sequence_number);
-
-let reader = SimplexReader::new(store);
-# let _ = reader;
-# Ok(())
-# }
+async fn publish<B, S, D>(
+    store_url: &str,
+    prefix: StoreKeyPrefix,
+    proof: Finalization<S, D>,
+    header: B,
+) -> Result<UploadReceipt, SimplexError>
+where
+    B: Block<Digest = D>,
+    S: Scheme,
+    D: Digest,
+{
+    let store = StoreClient::new(store_url).prefixed(prefix);
+    let writer = SimplexWriter::new(store);
+    let finalized = Finalized::new(proof, header)?;
+    writer.upload_finalized(&finalized).await
+}
 ```
 
-Use `prepare_header`, `prepare_block`, `prepare_notarized`, and
-`prepare_finalized` when multiple Simplex artifacts should be staged into a
-shared `StoreWriteBatch`.
+The upload writes the header and both finalization indices in one Store Put,
+where readers using the same Store prefix can find them. To combine artifacts
+with other writes, call the writer's `prepare_*` methods and stage the result in
+a `StoreWriteBatch` through the SDK's `StoreBatchUpload` trait.
 
-`SimplexReader::new(store)` creates an independent monotonic read session with no
-initial minimum. Clones share observations. Use `SimplexReader::with_session(session)`
-to supply an existing session or choose a fixed minimum.
-Finalized records can be read back by round, by height, or as the latest
-finalized height index. Header bytes can be read independently with
-`get_header`, and the full `{ header, body }` envelope with `get_block`. The
-certificate wrappers validate that the certificate payload
-digest matches the paired header's `Block::digest()` during construction and
-decoding. If the body must be authenticated, make that commitment part of the
-header format and store the full block separately with `upload_block` or
-`prepare_block`.
+## Read and validate
 
-For the sandbox, the `simplex` binary can seed deterministic threshold-VRF
-MinSig finalizations into a running simulator:
+Use `SimplexReader::new(store)` to start a monotonic read session with no initial
+minimum. Clones share observed Store sequences, so the session's minimum
+advances with their reads. To reuse an existing SDK `ReadSession`, call
+`with_session`. To require reads at or after a publication receipt's sequence,
+use `with_min_sequence_number`. A fixed session sets a minimum sequence, not a
+historical snapshot.
 
-```bash
-cargo run --package exoware-simplex --bin simplex -- \
-  seed --store-url http://127.0.0.1:8080 --interval-secs 2
-```
+Typed reads take the decoded type's `Read::Cfg`. `get_header` and `get_block`
+check the requested digest, while certificate reads check the requested round
+or height. Use `latest_finalized` to select the highest stored finalization
+height. Missing records return `None`, and decoding or index mismatches return
+an error. To read stored bytes without these checks, use the `*_raw` methods.
 
-The seeder prints the scheme, namespace, and encoded threshold verification
-material used by the emitted certificates. Paste those values into the sandbox
-Simplex panel before fetching or subscribing to verified certificates. By
-default, seeding starts at a time-based height so restarting against a reused
-simulator still advances the latest finalized height index. Pass
-`--start-height` to override it.
+`Notarized` and `Finalized` check that the proof's payload equals the paired
+header's `Block::digest()` during construction and decoding. To authenticate the
+certificate's signatures as well, verify the proof with Commonware using the
+application's trusted scheme, signing namespace and validator keys for the
+certificate's epoch. The Store prefix selects where records are stored, while
+the signing namespace is part of what validators sign. Both must match the
+intended application.
 
-Round indices encode epoch and view as two big-endian u64 fields. Typed reads
-reject a record whose digest, height, or round does not match the requested
-index.
-Signature verification remains the caller's or Commonware Marshal's
-responsibility.
+A certificate record contains a proof and header. If the application also needs
+a body, store it with `upload_block` and fetch it with `get_block`. The
+application defines and checks any body commitment in the header. For
+Commonware Marshal integrations, the
+[`init_marshal_resolver`](./src/resolver.rs) adapter supplies stored artifacts to
+Marshal's verification flow. The [TypeScript package](../ts/README.md) provides
+browser certificate verification.

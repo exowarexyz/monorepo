@@ -4,9 +4,8 @@
 //! a deployment behind a load balancer authenticates every RPC and one without authenticates
 //! none. It sends whatever it has and explains itself when a call is rejected.
 
-use std::fmt;
-
 use crate::{ClientBuildError, ClientError, ConnectError, ErrorCode};
+use std::fmt;
 
 /// Environment variable read for the API key when none is set on the builder.
 pub const API_KEY_ENV: &str = "EXOWARE_API_KEY";

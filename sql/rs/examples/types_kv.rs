@@ -1,12 +1,11 @@
-use datafusion::arrow::datatypes::DataType;
-use datafusion::arrow::util::pretty::print_batches;
+use datafusion::arrow::{datatypes::DataType, util::pretty::print_batches};
 use exoware_sdk::{StoreClient, StoreKeyPrefix};
 use exoware_sql::{CellValue, IndexSpec, KvSchema, SqlContext, TableColumnConfig};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let base_url =
-        std::env::var("EXOWARE_URL").unwrap_or_else(|_| "http://localhost:10000".to_string());
+        std::env::var("EXOWARE_URL").unwrap_or_else(|_| "http://localhost:8080".to_string());
     let client = StoreClient::new(&base_url);
     let ctx = SqlContext::new(client.prefixed(StoreKeyPrefix::identity()));
 
@@ -54,7 +53,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 async fn demo_batch_writer_insert() {
     println!("\n== BatchWriter: programmatic insert with FixedSizeBinary ==");
 
-    let client = StoreClient::new("http://localhost:10000");
+    let client = StoreClient::new("http://localhost:8080");
     let schema = KvSchema::new(client.prefixed(StoreKeyPrefix::identity()))
         .table(
             "wallets",

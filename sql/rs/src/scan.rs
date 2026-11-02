@@ -1,42 +1,40 @@
-use std::collections::{HashMap, HashSet};
-use std::fmt;
-use std::sync::Arc;
-
-use datafusion::arrow::array::{as_boolean_array, Array};
-use datafusion::arrow::datatypes::SchemaRef;
-use datafusion::arrow::record_batch::RecordBatch;
-use datafusion::catalog::Session;
-use datafusion::common::tree_node::TreeNodeRecursion;
-use datafusion::common::DFSchema;
-use datafusion::common::{DataFusionError, Result as DataFusionResult};
-use datafusion::execution::context::TaskContext;
-use datafusion::logical_expr::{
-    utils::{conjunction, iter_conjunction},
-    Expr,
+use crate::{
+    builder::*, codec::*, diagnostics::*, filter::*, predicate::*, session::read_session, types::*,
 };
-use datafusion::physical_expr::expressions::Column;
-use datafusion::physical_expr::{
-    EquivalenceProperties, LexOrdering, Partitioning, PhysicalExpr, PhysicalSortExpr,
+use datafusion::{
+    arrow::{
+        array::{as_boolean_array, Array},
+        datatypes::SchemaRef,
+        record_batch::RecordBatch,
+    },
+    catalog::Session,
+    common::{tree_node::TreeNodeRecursion, DFSchema, DataFusionError, Result as DataFusionResult},
+    execution::context::TaskContext,
+    logical_expr::{
+        utils::{conjunction, iter_conjunction},
+        Expr,
+    },
+    physical_expr::{
+        expressions::Column, EquivalenceProperties, LexOrdering, Partitioning, PhysicalExpr,
+        PhysicalSortExpr,
+    },
+    physical_plan::{
+        execution_plan::{apply_expression_roots, Boundedness, EmissionType},
+        stream::RecordBatchReceiverStreamBuilder,
+        DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties, SendableRecordBatchStream,
+        SortOrderPushdownResult,
+    },
 };
-use datafusion::physical_plan::execution_plan::{
-    apply_expression_roots, Boundedness, EmissionType,
+use exoware_sdk::{
+    keys::Key,
+    kv_codec::{decode_stored_row, StoredRow},
+    PrefixedStoreClient, RangeMode, RangeStream, ReadSession, StoreKeyPrefix,
 };
-use datafusion::physical_plan::{
-    stream::RecordBatchReceiverStreamBuilder, DisplayAs, DisplayFormatType, ExecutionPlan,
-    PlanProperties, SendableRecordBatchStream, SortOrderPushdownResult,
+use std::{
+    collections::{HashMap, HashSet},
+    fmt,
+    sync::Arc,
 };
-use exoware_sdk::keys::Key;
-use exoware_sdk::kv_codec::{decode_stored_row, StoredRow};
-use exoware_sdk::PrefixedStoreClient;
-use exoware_sdk::{RangeMode, RangeStream, ReadSession, StoreKeyPrefix};
-
-use crate::builder::*;
-use crate::codec::*;
-use crate::diagnostics::*;
-use crate::filter::*;
-use crate::predicate::*;
-use crate::session::read_session;
-use crate::types::*;
 
 // Amortize RPC framing and native predicate evaluation even with a small output limit
 const MIN_FETCH_BATCH_ROWS: usize = 64;
@@ -1044,29 +1042,34 @@ async fn range_stream_with_direction(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::{Arc, Mutex};
-
+    use crate::{types::KvTable, IndexSpec, KvSchema, TableColumnConfig};
     use axum::Router;
     use bytes::Bytes;
-    use datafusion::arrow::array::{
-        ArrayRef, Decimal128Array, FixedSizeBinaryArray, Float64Array, Int64Array, StringArray,
-        TimestampMicrosecondArray, UInt64Array,
+    use datafusion::{
+        arrow::{
+            array::{
+                ArrayRef, Decimal128Array, FixedSizeBinaryArray, Float64Array, Int64Array,
+                StringArray, TimestampMicrosecondArray, UInt64Array,
+            },
+            datatypes::{DataType, TimeUnit},
+            record_batch::RecordBatch,
+        },
+        common::{Result as DataFusionResult, ScalarValue},
+        datasource::MemTable,
+        prelude::SessionContext as DataFusionSessionContext,
     };
-    use datafusion::arrow::datatypes::{DataType, TimeUnit};
-    use datafusion::arrow::record_batch::RecordBatch;
-    use datafusion::common::{Result as DataFusionResult, ScalarValue};
-    use datafusion::datasource::MemTable;
-    use datafusion::prelude::SessionContext as DataFusionSessionContext;
     use exoware_sdk::{StoreClient, StoreKeyPrefix};
     use exoware_server::{
         Query, QueryExtra, QueryResult, QueryState, RangeScan, RangeScanBatch, RangeScanResult,
         Sequence,
     };
-
-    use crate::types::KvTable;
-    use crate::{IndexSpec, KvSchema, TableColumnConfig};
+    use std::{
+        collections::BTreeMap,
+        sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc, Mutex,
+        },
+    };
 
     #[derive(Clone, Debug)]
     enum Request {

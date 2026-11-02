@@ -18,46 +18,52 @@
 
 #![allow(refining_impl_trait)]
 
-use std::collections::HashMap;
-use std::future::Future;
-use std::panic::AssertUnwindSafe;
-use std::pin::Pin;
-use std::sync::Arc;
-
-use crate::proto::sql::v1::{
-    Column as ProtoColumn, Index as ProtoIndex, IndexLayout as ProtoIndexLayout, QueryRequest,
-    QueryResponse, Service, ServiceServer, SubscribeRequest, SubscribeResponse,
-    Table as ProtoTable, TablesRequest, TablesResponse,
+use crate::{
+    builder::ProjectedBatchBuilder,
+    codec::decode_primary_key_selected,
+    filter::ScanAccessPlan,
+    predicate::QueryPredicate,
+    proto::sql::v1::{
+        Column as ProtoColumn, Index as ProtoIndex, IndexLayout as ProtoIndexLayout, QueryRequest,
+        QueryResponse, Service, ServiceServer, SubscribeRequest, SubscribeResponse,
+        Table as ProtoTable, TablesRequest, TablesResponse,
+    },
+    schema::KvSchema,
+    types::{IndexLayout, ResolvedIndexSpec, TableModel},
+    SqlContext,
 };
 use bytes::Bytes;
 use connectrpc::{ConnectError, ConnectRpcService, RequestContext as Context, ServiceRequest};
-use datafusion::arrow::datatypes::{DataType, SchemaRef};
-use datafusion::arrow::ipc::writer::StreamWriter;
-use datafusion::arrow::record_batch::RecordBatch;
-use datafusion::common::tree_node::{TreeNode, TreeNodeRecursion};
-use datafusion::common::{DFSchema, DataFusionError, Result as DataFusionResult, TableReference};
-use datafusion::logical_expr::{
-    simplify::SimplifyContext, DdlStatement, Expr, ExprSchemable, LogicalPlan, Statement,
+use datafusion::{
+    arrow::{
+        datatypes::{DataType, SchemaRef},
+        ipc::writer::StreamWriter,
+        record_batch::RecordBatch,
+    },
+    common::{
+        tree_node::{TreeNode, TreeNodeRecursion},
+        DFSchema, DataFusionError, Result as DataFusionResult, TableReference,
+    },
+    logical_expr::{
+        simplify::SimplifyContext, DdlStatement, Expr, ExprSchemable, LogicalPlan, Statement,
+    },
+    optimizer::simplify_expressions::ExprSimplifier,
+    physical_expr::PhysicalExpr,
+    physical_plan::filter::batch_filter,
+    prelude::SessionContext as DataFusionContext,
 };
-use datafusion::optimizer::simplify_expressions::ExprSimplifier;
-use datafusion::physical_expr::PhysicalExpr;
-use datafusion::physical_plan::filter::batch_filter;
-use datafusion::prelude::SessionContext as DataFusionContext;
-use exoware_sdk::keys::Key;
-use exoware_sdk::kv_codec::{decode_stored_row, Utf8};
-use exoware_sdk::selector::Selector;
-use exoware_sdk::stream_filter::StreamFilter;
-use exoware_sdk::{PrefixedStoreClient, ReadSession, StoreBatch, StreamSubscription};
-use futures::stream::{self, Stream};
-use futures::{FutureExt, TryStreamExt};
-
-use crate::builder::ProjectedBatchBuilder;
-use crate::codec::decode_primary_key_selected;
-use crate::filter::ScanAccessPlan;
-use crate::predicate::QueryPredicate;
-use crate::schema::KvSchema;
-use crate::types::{IndexLayout, ResolvedIndexSpec, TableModel};
-use crate::SqlContext;
+use exoware_sdk::{
+    keys::Key,
+    kv_codec::{decode_stored_row, Utf8},
+    selector::Selector,
+    stream_filter::StreamFilter,
+    PrefixedStoreClient, ReadSession, StoreBatch, StreamSubscription,
+};
+use futures::{
+    stream::{self, Stream},
+    FutureExt, TryStreamExt,
+};
+use std::{collections::HashMap, future::Future, panic::AssertUnwindSafe, pin::Pin, sync::Arc};
 
 const MAX_CONNECTRPC_BODY_BYTES: usize = 256 * 1024 * 1024;
 
@@ -615,22 +621,29 @@ mod tests {
     use super::*;
     use crate::TableColumnConfig;
     use buffa::Message;
-    use datafusion::arrow::array::{
-        Array, ArrayRef, BinaryViewArray, Date32Array, Date64Array, Decimal256Array,
-        FixedSizeBinaryBuilder, Int64Array, LargeListArray, StringArray, StringViewArray,
+    use datafusion::{
+        arrow::{
+            array::{
+                Array, ArrayRef, BinaryViewArray, Date32Array, Date64Array, Decimal256Array,
+                FixedSizeBinaryBuilder, Int64Array, LargeListArray, StringArray, StringViewArray,
+            },
+            compute::concat_batches,
+            datatypes::{i256, Int64Type, Schema},
+            ipc::reader::StreamReader,
+            record_batch::RecordBatchOptions,
+        },
+        datasource::MemTable,
+        logical_expr::{create_udf, ColumnarValue, Volatility},
     };
-    use datafusion::arrow::compute::concat_batches;
-    use datafusion::arrow::datatypes::{i256, Int64Type, Schema};
-    use datafusion::arrow::ipc::reader::StreamReader;
-    use datafusion::arrow::record_batch::RecordBatchOptions;
-    use datafusion::datasource::MemTable;
-    use datafusion::logical_expr::{create_udf, ColumnarValue, Volatility};
     use exoware_sdk::StoreClient;
-    use std::collections::VecDeque;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::Mutex;
-
     use futures::{FutureExt, StreamExt};
+    use std::{
+        collections::VecDeque,
+        sync::{
+            atomic::{AtomicUsize, Ordering},
+            Mutex,
+        },
+    };
 
     #[derive(Clone)]
     struct ObservedRangeTransport {
@@ -920,14 +933,17 @@ mod tests {
 
     #[tokio::test]
     async fn query_rpc_returns_internal_on_count_overflow_and_remains_usable() {
-        use crate::proto::sql::v1::ServiceClient;
-        use crate::TableColumnConfig;
+        use crate::{proto::sql::v1::ServiceClient, TableColumnConfig};
         use buffa::Message;
         use connectrpc::client::{ClientConfig, HttpClient};
-        use datafusion::execution::memory_pool::{FairSpillPool, MemoryPool, PeakRecordingPool};
-        use datafusion::execution::runtime_env::RuntimeEnvBuilder;
-        use exoware_sdk::kv_codec::KvReducedValue;
-        use exoware_sdk::{RangeReduceGroup, RangeReduceResponse, RangeReduceResult, StoreClient};
+        use datafusion::execution::{
+            memory_pool::{FairSpillPool, MemoryPool, PeakRecordingPool},
+            runtime_env::RuntimeEnvBuilder,
+        };
+        use exoware_sdk::{
+            kv_codec::KvReducedValue, RangeReduceGroup, RangeReduceResponse, RangeReduceResult,
+            StoreClient,
+        };
 
         #[derive(Clone, Default)]
         struct OverflowReduceTransport {
