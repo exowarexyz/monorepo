@@ -4,8 +4,7 @@ use crate::proto::qmdb::v1::{
     current_key_lookup_result, CurrentKeyExclusionProof, CurrentKeyValueProof,
     CurrentKeyValueProofView, CurrentOperationRangeProof, CurrentOperationRangeProofView,
     GetManyResponse, GetManyResponseView, GetRangeResponse, GetRangeResponseView,
-    HistoricalMultiProof, HistoricalMultiProofView, HistoricalOperationRangeProof,
-    HistoricalOperationRangeProofView,
+    OperationMultiProof, OperationMultiProofView, OperationRangeProof, OperationRangeProofView,
 };
 use buffa::MessageView;
 use commonware_codec::{
@@ -142,7 +141,7 @@ macro_rules! with_hash_family {
     }};
 }
 
-fn historical_target_root<F, H>(
+fn operation_target_root<F, H>(
     ops_root: &[u8],
     ops_root_witness: &[u8],
     expected_root: &H::Digest,
@@ -153,28 +152,28 @@ where
     H::Digest: DecodeExt<()>,
 {
     if ops_root.is_empty() {
-        return Err("historical proof missing ops_root".to_string());
+        return Err("operation proof missing ops_root".to_string());
     }
     let ops_root = decode_digest::<<H as commonware_cryptography::Hasher>::Digest>(
         ops_root,
-        "historical ops root",
+        "operation-log root",
     )?;
     if ops_root_witness.is_empty() {
         if ops_root != *expected_root {
-            return Err("historical ops root did not match expected root".to_string());
+            return Err("operation-log root did not match expected root".to_string());
         }
         return Ok(ops_root);
     }
     let witness = OpsRootWitness::<F, H::Digest>::decode(Copying(ops_root_witness))
-        .map_err(|err| format!("failed to decode historical ops-root witness: {err}"))?;
+        .map_err(|err| format!("failed to decode operation-log root witness: {err}"))?;
     if !witness.verify::<H>(&ops_root, expected_root) {
-        return Err("historical ops-root witness failed verification".to_string());
+        return Err("operation-log root witness failed verification".to_string());
     }
     Ok(ops_root)
 }
 
 fn verify_multi_from_proto<F, H>(
-    proto: &HistoricalMultiProof,
+    proto: &OperationMultiProof,
     root: &H::Digest,
 ) -> Result<
     (
@@ -192,19 +191,19 @@ where
 {
     let operations = decode_multi_operations_from_proto::<F>(proto)?;
     let target_root =
-        historical_target_root::<F, H>(&proto.ops_root, &proto.ops_root_witness, root)?;
+        operation_target_root::<F, H>(&proto.ops_root, &proto.ops_root_witness, root)?;
     let max_digests = proof_digest_cap::<H::Digest>(&proto.proof);
     let proof =
         merkle::Proof::<F, H::Digest>::decode_cfg(Copying(proto.proof.as_ref()), &max_digests)
-            .map_err(|err| format!("failed to decode historical multi proof: {err}"))?;
+            .map_err(|err| format!("failed to decode operation multi proof: {err}"))?;
     if !verify_multi_proof::<H, _, _>(&proof, &operations, &target_root) {
-        return Err("historical multi proof failed verification".to_string());
+        return Err("operation multi proof failed verification".to_string());
     }
     Ok((*root, operations))
 }
 
 fn decode_multi_with_embedded_root_from_proto<F, H>(
-    proto: &HistoricalMultiProof,
+    proto: &OperationMultiProof,
 ) -> Result<
     (
         Location<F>,
@@ -222,35 +221,33 @@ where
 {
     let operations = decode_multi_operations_from_proto::<F>(proto)?;
     if proto.ops_root.is_empty() {
-        return Err("historical multi proof missing embedded ops_root".to_string());
+        return Err("operation multi proof missing embedded ops_root".to_string());
     }
     let ops_root = decode_digest::<<H as commonware_cryptography::Hasher>::Digest>(
         &proto.ops_root,
-        "historical multi proof ops root",
+        "operation multi proof ops root",
     )?;
     let max_digests = proof_digest_cap::<H::Digest>(&proto.proof);
     let proof =
         merkle::Proof::<F, H::Digest>::decode_cfg(Copying(proto.proof.as_ref()), &max_digests)
-            .map_err(|err| format!("failed to decode historical multi proof: {err}"))?;
+            .map_err(|err| format!("failed to decode operation multi proof: {err}"))?;
     let tip = proof
         .leaves
         .checked_sub(1)
         .ok_or_else(|| "subscription proof has no leaves".to_string())?;
     if !verify_multi_proof::<H, _, _>(&proof, &operations, &ops_root) {
-        return Err("historical multi proof failed verification".to_string());
+        return Err("operation multi proof failed verification".to_string());
     }
     if proto.ops_root_witness.is_empty() {
         return Ok((tip, ops_root, operations));
     }
     let witness = OpsRootWitness::<F, H::Digest>::decode(Copying(proto.ops_root_witness.as_ref()))
-        .map_err(|err| {
-            format!("failed to decode historical multi proof ops-root witness: {err}")
-        })?;
+        .map_err(|err| format!("failed to decode operation multi proof ops-root witness: {err}"))?;
     Ok((tip, witness.root::<H>(&ops_root), operations))
 }
 
 fn decode_multi_operations_from_proto<F>(
-    proto: &HistoricalMultiProof,
+    proto: &OperationMultiProof,
 ) -> Result<Vec<(Location<F>, OrderedOperation<F, Vec<u8>, Vec<u8>>)>, String>
 where
     F: merkle::Graftable,
@@ -279,7 +276,7 @@ where
 }
 
 fn verify_operation_range_from_proto<F, H>(
-    proto: &HistoricalOperationRangeProof,
+    proto: &OperationRangeProof,
     root: &H::Digest,
     window: OperationWindow,
 ) -> Result<
@@ -297,14 +294,14 @@ where
         Decode + Encode + Read<Cfg = ((RangeCfg<usize>, ()), (RangeCfg<usize>, ()))>,
 {
     if proto.encoded_operations.is_empty() {
-        return Err("historical operation range proof has no operations".to_string());
+        return Err("operation range proof has no operations".to_string());
     }
     let target_root =
-        historical_target_root::<F, H>(&proto.ops_root, &proto.ops_root_witness, root)?;
+        operation_target_root::<F, H>(&proto.ops_root, &proto.ops_root_witness, root)?;
     let max_digests = proof_digest_cap::<H::Digest>(&proto.proof);
     let proof =
         merkle::Proof::<F, H::Digest>::decode_cfg(Copying(proto.proof.as_ref()), &max_digests)
-            .map_err(|err| format!("failed to decode historical operation range proof: {err}"))?;
+            .map_err(|err| format!("failed to decode operation range proof: {err}"))?;
     window.validate(
         proto.start_location,
         proto.encoded_operations.len(),
@@ -347,7 +344,7 @@ where
         .map(|bytes| {
             decode_digest::<<H as commonware_cryptography::Hasher>::Digest>(
                 bytes.as_ref(),
-                "historical operation range pinned node",
+                "operation range pinned node",
             )
         })
         .collect::<Result<Vec<_>, String>>()?;
@@ -358,13 +355,13 @@ where
         &pinned_nodes,
         &target_root,
     ) {
-        return Err("historical operation range proof failed verification".to_string());
+        return Err("operation range proof failed verification".to_string());
     }
     Ok((*root, operations))
 }
 
 fn verify_raw_operation_range<F, H>(
-    proto: &HistoricalOperationRangeProof,
+    proto: &OperationRangeProof,
     root: &H::Digest,
     window: OperationWindow,
 ) -> Result<(H::Digest, Vec<(Location<F>, Vec<u8>)>), String>
@@ -374,14 +371,14 @@ where
     H::Digest: DecodeExt<()>,
 {
     if proto.encoded_operations.is_empty() {
-        return Err("historical operation range proof has no operations".to_string());
+        return Err("operation range proof has no operations".to_string());
     }
     let target_root =
-        historical_target_root::<F, H>(&proto.ops_root, &proto.ops_root_witness, root)?;
+        operation_target_root::<F, H>(&proto.ops_root, &proto.ops_root_witness, root)?;
     let max_digests = proof_digest_cap::<H::Digest>(&proto.proof);
     let proof =
         merkle::Proof::<F, H::Digest>::decode_cfg(Copying(proto.proof.as_ref()), &max_digests)
-            .map_err(|err| format!("failed to decode historical operation range proof: {err}"))?;
+            .map_err(|err| format!("failed to decode operation range proof: {err}"))?;
     window.validate(
         proto.start_location,
         proto.encoded_operations.len(),
@@ -410,7 +407,7 @@ where
         .map(|bytes| {
             decode_digest::<<H as commonware_cryptography::Hasher>::Digest>(
                 bytes.as_ref(),
-                "historical operation range pinned node",
+                "operation range pinned node",
             )
         })
         .collect::<Result<Vec<_>, String>>()?;
@@ -421,7 +418,7 @@ where
         &pinned_nodes,
         &target_root,
     ) {
-        return Err("historical operation range proof failed verification".to_string());
+        return Err("operation range proof failed verification".to_string());
     }
     Ok((*root, operations))
 }
@@ -684,7 +681,7 @@ fn to_js_operation<F: merkle::Family>(
     Ok(object.into())
 }
 
-fn historical_to_js<F, D>(
+fn operation_proof_to_js<F, D>(
     root: D,
     decoded_operations: Vec<(Location<F>, OrderedOperation<F, Vec<u8>, Vec<u8>>)>,
 ) -> Result<JsValue, JsValue>
@@ -879,7 +876,7 @@ fn fixed_unordered_update_value(
 }
 
 fn verify_raw_operations<F, H>(
-    proto: &HistoricalMultiProof,
+    proto: &OperationMultiProof,
     root: &H::Digest,
     locations: &OperationLocations<'_>,
 ) -> Result<(H::Digest, Vec<(Location<F>, Vec<u8>)>), String>
@@ -889,7 +886,7 @@ where
     H::Digest: DecodeExt<()>,
 {
     let target_root =
-        historical_target_root::<F, H>(&proto.ops_root, &proto.ops_root_witness, root)?;
+        operation_target_root::<F, H>(&proto.ops_root, &proto.ops_root_witness, root)?;
     let max_digests = proof_digest_cap::<H::Digest>(&proto.proof);
     let proof =
         merkle::Proof::<F, H::Digest>::decode_cfg(Copying(proto.proof.as_ref()), &max_digests)
@@ -928,8 +925,8 @@ where
     Ok((*root, operations))
 }
 
-fn decode_operations_proof(bytes: &[u8]) -> Result<HistoricalMultiProof, JsValue> {
-    HistoricalMultiProofView::decode_view(bytes)
+fn decode_operations_proof(bytes: &[u8]) -> Result<OperationMultiProof, JsValue> {
+    OperationMultiProofView::decode_view(bytes)
         .map_err(|err| js_err(format!("decode operations multi proof: {err}")))?
         .to_owned_message()
         .map_err(|err| js_err(format!("materialize operations multi proof: {err}")))
@@ -1188,22 +1185,22 @@ where
 }
 
 #[wasm_bindgen]
-pub fn decode_historical_multi_proof_operations(
+pub fn decode_operation_multi_proof_operations(
     bytes: &[u8],
     merkle_family: &str,
     hash_family: &str,
 ) -> Result<JsValue, JsValue> {
-    let proto = HistoricalMultiProofView::decode_view(bytes)
-        .map_err(|err| js_err(format!("decode historical multi proof: {err}")))?
+    let proto = OperationMultiProofView::decode_view(bytes)
+        .map_err(|err| js_err(format!("decode operation multi proof: {err}")))?
         .to_owned_message()
-        .map_err(|err| js_err(format!("materialize historical multi proof: {err}")))?;
-    with_hash_family!(hash_family, "historical multi proof", {
-        match normalize_family(merkle_family, "historical multi proof").map_err(js_err)? {
+        .map_err(|err| js_err(format!("materialize operation multi proof: {err}")))?;
+    with_hash_family!(hash_family, "operation multi proof", {
+        match normalize_family(merkle_family, "operation multi proof").map_err(js_err)? {
             "mmr" => {
                 let (tip, root, operations) =
                     decode_multi_with_embedded_root_from_proto::<mmr::Family, H>(&proto)
                         .map_err(js_err)?;
-                let decoded = Object::from(historical_to_js(root, operations)?);
+                let decoded = Object::from(operation_proof_to_js(root, operations)?);
                 set_field(&decoded, "tip", &location_to_bigint(tip))?;
                 Ok(decoded.into())
             }
@@ -1211,7 +1208,7 @@ pub fn decode_historical_multi_proof_operations(
                 let (tip, root, operations) =
                     decode_multi_with_embedded_root_from_proto::<mmb::Family, H>(&proto)
                         .map_err(js_err)?;
-                let decoded = Object::from(historical_to_js(root, operations)?);
+                let decoded = Object::from(operation_proof_to_js(root, operations)?);
                 set_field(&decoded, "tip", &location_to_bigint(tip))?;
                 Ok(decoded.into())
             }
@@ -1221,32 +1218,32 @@ pub fn decode_historical_multi_proof_operations(
 }
 
 #[wasm_bindgen]
-pub fn verify_historical_multi_proof(
+pub fn verify_operation_multi_proof(
     bytes: &[u8],
     root: &[u8],
     merkle_family: &str,
     hash_family: &str,
 ) -> Result<JsValue, JsValue> {
-    let proto = HistoricalMultiProofView::decode_view(bytes)
-        .map_err(|err| js_err(format!("decode historical multi proof: {err}")))?
+    let proto = OperationMultiProofView::decode_view(bytes)
+        .map_err(|err| js_err(format!("decode operation multi proof: {err}")))?
         .to_owned_message()
-        .map_err(|err| js_err(format!("materialize historical multi proof: {err}")))?;
-    with_hash_family!(hash_family, "historical multi proof", {
+        .map_err(|err| js_err(format!("materialize operation multi proof: {err}")))?;
+    with_hash_family!(hash_family, "operation multi proof", {
         let root = decode_digest::<<H as commonware_cryptography::Hasher>::Digest>(
             root,
-            "historical proof root",
+            "operation proof root",
         )
         .map_err(js_err)?;
-        match normalize_family(merkle_family, "historical multi proof").map_err(js_err)? {
+        match normalize_family(merkle_family, "operation multi proof").map_err(js_err)? {
             "mmr" => {
                 let (root, operations) =
                     verify_multi_from_proto::<mmr::Family, H>(&proto, &root).map_err(js_err)?;
-                historical_to_js(root, operations)
+                operation_proof_to_js(root, operations)
             }
             "mmb" => {
                 let (root, operations) =
                     verify_multi_from_proto::<mmb::Family, H>(&proto, &root).map_err(js_err)?;
-                historical_to_js(root, operations)
+                operation_proof_to_js(root, operations)
             }
             _ => unreachable!("normalize_family only returns supported values"),
         }
@@ -1254,7 +1251,7 @@ pub fn verify_historical_multi_proof(
 }
 
 #[wasm_bindgen]
-pub fn verify_historical_operation_range_proof(
+pub fn verify_operation_range_proof(
     bytes: &[u8],
     root: &[u8],
     merkle_family: &str,
@@ -1265,32 +1262,28 @@ pub fn verify_historical_operation_range_proof(
 ) -> Result<JsValue, JsValue> {
     let window = OperationWindow::new(expected_tip, expected_start, max_locations)
         .map_err(|err| js_err(err.to_string()))?;
-    let proto = HistoricalOperationRangeProofView::decode_view(bytes)
-        .map_err(|err| js_err(format!("decode historical operation range proof: {err}")))?
+    let proto = OperationRangeProofView::decode_view(bytes)
+        .map_err(|err| js_err(format!("decode operation range proof: {err}")))?
         .to_owned_message()
-        .map_err(|err| {
-            js_err(format!(
-                "materialize historical operation range proof: {err}"
-            ))
-        })?;
-    with_hash_family!(hash_family, "historical operation range proof", {
+        .map_err(|err| js_err(format!("materialize operation range proof: {err}")))?;
+    with_hash_family!(hash_family, "operation range proof", {
         let root = decode_digest::<<H as commonware_cryptography::Hasher>::Digest>(
             root,
-            "historical operation range root",
+            "operation range root",
         )
         .map_err(js_err)?;
-        match normalize_family(merkle_family, "historical operation range proof").map_err(js_err)? {
+        match normalize_family(merkle_family, "operation range proof").map_err(js_err)? {
             "mmr" => {
                 let (root, operations) =
                     verify_operation_range_from_proto::<mmr::Family, H>(&proto, &root, window)
                         .map_err(js_err)?;
-                historical_to_js(root, operations)
+                operation_proof_to_js(root, operations)
             }
             "mmb" => {
                 let (root, operations) =
                     verify_operation_range_from_proto::<mmb::Family, H>(&proto, &root, window)
                         .map_err(js_err)?;
-                historical_to_js(root, operations)
+                operation_proof_to_js(root, operations)
             }
             _ => unreachable!("normalize_family only returns supported values"),
         }
@@ -1298,7 +1291,7 @@ pub fn verify_historical_operation_range_proof(
 }
 
 #[wasm_bindgen]
-pub fn verify_historical_raw_operation_range_proof(
+pub fn verify_raw_operation_range_proof(
     bytes: &[u8],
     root: &[u8],
     merkle_family: &str,
@@ -1309,21 +1302,17 @@ pub fn verify_historical_raw_operation_range_proof(
 ) -> Result<JsValue, JsValue> {
     let window = OperationWindow::new(expected_tip, expected_start, max_locations)
         .map_err(|err| js_err(err.to_string()))?;
-    let proto = HistoricalOperationRangeProofView::decode_view(bytes)
-        .map_err(|err| js_err(format!("decode historical operation range proof: {err}")))?
+    let proto = OperationRangeProofView::decode_view(bytes)
+        .map_err(|err| js_err(format!("decode operation range proof: {err}")))?
         .to_owned_message()
-        .map_err(|err| {
-            js_err(format!(
-                "materialize historical operation range proof: {err}"
-            ))
-        })?;
-    with_hash_family!(hash_family, "historical operation range proof", {
+        .map_err(|err| js_err(format!("materialize operation range proof: {err}")))?;
+    with_hash_family!(hash_family, "operation range proof", {
         let root = decode_digest::<<H as commonware_cryptography::Hasher>::Digest>(
             root,
-            "historical operation range root",
+            "operation range root",
         )
         .map_err(js_err)?;
-        match normalize_family(merkle_family, "historical operation range proof").map_err(js_err)? {
+        match normalize_family(merkle_family, "operation range proof").map_err(js_err)? {
             "mmr" => {
                 let (root, operations) =
                     verify_raw_operation_range::<mmr::Family, H>(&proto, &root, window)
@@ -1343,7 +1332,7 @@ pub fn verify_historical_raw_operation_range_proof(
 
 #[wasm_bindgen]
 #[allow(clippy::too_many_arguments)]
-pub fn verify_historical_fixed_keyless_append_proof(
+pub fn verify_fixed_keyless_append_proof(
     bytes: &[u8],
     root: &[u8],
     merkle_family: &str,
@@ -1356,21 +1345,17 @@ pub fn verify_historical_fixed_keyless_append_proof(
 ) -> Result<JsValue, JsValue> {
     let window = OperationWindow::new(expected_tip, expected_start, max_locations)
         .map_err(|err| js_err(err.to_string()))?;
-    let proto = HistoricalOperationRangeProofView::decode_view(bytes)
-        .map_err(|err| js_err(format!("decode historical operation range proof: {err}")))?
+    let proto = OperationRangeProofView::decode_view(bytes)
+        .map_err(|err| js_err(format!("decode operation range proof: {err}")))?
         .to_owned_message()
-        .map_err(|err| {
-            js_err(format!(
-                "materialize historical operation range proof: {err}"
-            ))
-        })?;
-    with_hash_family!(hash_family, "historical operation range proof", {
+        .map_err(|err| js_err(format!("materialize operation range proof: {err}")))?;
+    with_hash_family!(hash_family, "operation range proof", {
         let root = decode_digest::<<H as commonware_cryptography::Hasher>::Digest>(
             root,
-            "historical operation range root",
+            "operation range root",
         )
         .map_err(js_err)?;
-        match normalize_family(merkle_family, "historical operation range proof").map_err(js_err)? {
+        match normalize_family(merkle_family, "operation range proof").map_err(js_err)? {
             "mmr" => {
                 let (root, operations) =
                     verify_raw_operation_range::<mmr::Family, H>(&proto, &root, window)
@@ -1418,7 +1403,7 @@ pub fn verify_historical_fixed_keyless_append_proof(
 
 #[wasm_bindgen]
 #[allow(clippy::too_many_arguments)]
-pub fn verify_historical_fixed_unordered_update_proof(
+pub fn verify_fixed_unordered_update_proof(
     bytes: &[u8],
     root: &[u8],
     merkle_family: &str,
@@ -1432,21 +1417,17 @@ pub fn verify_historical_fixed_unordered_update_proof(
 ) -> Result<JsValue, JsValue> {
     let window = OperationWindow::new(expected_tip, expected_start, max_locations)
         .map_err(|err| js_err(err.to_string()))?;
-    let proto = HistoricalOperationRangeProofView::decode_view(bytes)
-        .map_err(|err| js_err(format!("decode historical operation range proof: {err}")))?
+    let proto = OperationRangeProofView::decode_view(bytes)
+        .map_err(|err| js_err(format!("decode operation range proof: {err}")))?
         .to_owned_message()
-        .map_err(|err| {
-            js_err(format!(
-                "materialize historical operation range proof: {err}"
-            ))
-        })?;
-    with_hash_family!(hash_family, "historical operation range proof", {
+        .map_err(|err| js_err(format!("materialize operation range proof: {err}")))?;
+    with_hash_family!(hash_family, "operation range proof", {
         let root = decode_digest::<<H as commonware_cryptography::Hasher>::Digest>(
             root,
-            "historical operation range root",
+            "operation range root",
         )
         .map_err(js_err)?;
-        match normalize_family(merkle_family, "historical operation range proof").map_err(js_err)? {
+        match normalize_family(merkle_family, "operation range proof").map_err(js_err)? {
             "mmr" => {
                 let (root, operations) =
                     verify_raw_operation_range::<mmr::Family, H>(&proto, &root, window)
@@ -1494,11 +1475,11 @@ pub fn verify_historical_fixed_unordered_update_proof(
     })
 }
 
-/// Verify a serialized `qmdb.v1.HistoricalMultiProof` against `root`, `expected_tip`, and
+/// Verify a serialized `qmdb.v1.OperationMultiProof` against `root`, `expected_tip`, and
 /// `expected_locations`. Return encoded operations in location order. Locations must be
 /// nonempty, strictly ascending, and at most `expected_tip`.
 #[wasm_bindgen]
-pub fn verify_historical_operations_proof(
+pub fn verify_operations_proof(
     bytes: &[u8],
     root: &[u8],
     merkle_family: &str,
@@ -1534,12 +1515,12 @@ pub fn verify_historical_operations_proof(
 }
 
 /// Verify fixed keyless appends against `root` at the expected tip and locations.
-/// `bytes` encodes a `qmdb.v1.HistoricalMultiProof`. Locations must be nonempty,
+/// `bytes` encodes a `qmdb.v1.OperationMultiProof`. Locations must be nonempty,
 /// strictly ascending, and at most `expected_tip`. `expected_values` concatenates one
 /// `value_size`-byte value per location.
 #[wasm_bindgen]
 #[allow(clippy::too_many_arguments)]
-pub fn verify_historical_fixed_keyless_append_operations_proof(
+pub fn verify_fixed_keyless_append_operations_proof(
     bytes: &[u8],
     root: &[u8],
     merkle_family: &str,
@@ -1584,12 +1565,12 @@ pub fn verify_historical_fixed_keyless_append_operations_proof(
 }
 
 /// Verify fixed unordered updates against `root` at the expected tip and locations.
-/// `bytes` encodes a `qmdb.v1.HistoricalMultiProof`. Locations must be nonempty,
+/// `bytes` encodes a `qmdb.v1.OperationMultiProof`. Locations must be nonempty,
 /// strictly ascending, and at most `expected_tip`. `expected_keys` concatenates one
 /// `key_size`-byte key per location.
 #[wasm_bindgen]
 #[allow(clippy::too_many_arguments)]
-pub fn verify_historical_fixed_unordered_update_operations_proof(
+pub fn verify_fixed_unordered_update_operations_proof(
     bytes: &[u8],
     root: &[u8],
     merkle_family: &str,
@@ -1880,8 +1861,8 @@ mod tests {
         .collect()
     }
 
-    fn historical_range_fixture<F>() -> (
-        HistoricalOperationRangeProof,
+    fn operation_range_fixture<F>() -> (
+        OperationRangeProof,
         Sha256Digest,
         Vec<(Location<F>, OrderedVariableOperation<F>)>,
         OperationWindow,
@@ -1891,14 +1872,14 @@ mod tests {
         OrderedVariableOperation<F>:
             Decode + Encode + Read<Cfg = ((RangeCfg<usize>, ()), (RangeCfg<usize>, ()))>,
     {
-        historical_range_fixture_at::<F>(1, 4)
+        operation_range_fixture_at::<F>(1, 4)
     }
 
-    fn historical_range_fixture_at<F>(
+    fn operation_range_fixture_at<F>(
         start_offset: u64,
         end_offset: u64,
     ) -> (
-        HistoricalOperationRangeProof,
+        OperationRangeProof,
         Sha256Digest,
         Vec<(Location<F>, OrderedVariableOperation<F>)>,
         OperationWindow,
@@ -1908,14 +1889,14 @@ mod tests {
         OrderedVariableOperation<F>:
             Decode + Encode + Read<Cfg = ((RangeCfg<usize>, ()), (RangeCfg<usize>, ()))>,
     {
-        historical_range_fixture_at_with_hash::<F, Sha256>(start_offset, end_offset)
+        operation_range_fixture_at_with_hash::<F, Sha256>(start_offset, end_offset)
     }
 
-    fn historical_range_fixture_at_with_hash<F, H>(
+    fn operation_range_fixture_at_with_hash<F, H>(
         start_offset: u64,
         end_offset: u64,
     ) -> (
-        HistoricalOperationRangeProof,
+        OperationRangeProof,
         H::Digest,
         Vec<(Location<F>, OrderedVariableOperation<F>)>,
         OperationWindow,
@@ -1933,7 +1914,7 @@ mod tests {
             .map(|operation| operation.encode().to_vec())
             .collect::<Vec<_>>();
         let (proto, root, expected, window) =
-            historical_raw_range_fixture_at::<F, H>(&encoded, start_offset, end_offset);
+            raw_operation_range_fixture_at::<F, H>(&encoded, start_offset, end_offset);
         let expected = expected
             .into_iter()
             .map(|(location, _)| (location, operations[*location as usize].clone()))
@@ -1941,12 +1922,12 @@ mod tests {
         (proto, root, expected, window)
     }
 
-    fn historical_raw_range_fixture_at<F, H>(
+    fn raw_operation_range_fixture_at<F, H>(
         encoded_operations: &[Vec<u8>],
         start_offset: u64,
         end_offset: u64,
     ) -> (
-        HistoricalOperationRangeProof,
+        OperationRangeProof,
         H::Digest,
         Vec<(Location<F>, Vec<u8>)>,
         OperationWindow,
@@ -1993,7 +1974,7 @@ mod tests {
             .collect();
 
         (
-            HistoricalOperationRangeProof {
+            OperationRangeProof {
                 proof: proof.encode(),
                 start_location: start_offset,
                 encoded_operations: proven_operations.into_iter().map(Into::into).collect(),
@@ -2012,8 +1993,8 @@ mod tests {
         )
     }
 
-    fn historical_multi_fixture<F>() -> (
-        HistoricalMultiProof,
+    fn operation_multi_fixture<F>() -> (
+        OperationMultiProof,
         Sha256Digest,
         Vec<(Location<F>, OrderedVariableOperation<F>)>,
     )
@@ -2050,7 +2031,7 @@ mod tests {
             .collect::<Vec<_>>();
 
         (
-            HistoricalMultiProof {
+            OperationMultiProof {
                 proof: proof.encode(),
                 operations: expected
                     .iter()
@@ -2071,8 +2052,8 @@ mod tests {
     }
 
     #[test]
-    fn test_verifies_historical_operation_range_mmr() {
-        let (proto, root, expected, window) = historical_range_fixture::<mmr::Family>();
+    fn test_verifies_operation_range_mmr() {
+        let (proto, root, expected, window) = operation_range_fixture::<mmr::Family>();
 
         let (verified_root, verified) =
             verify_operation_range_from_proto::<mmr::Family, Sha256>(&proto, &root, window)
@@ -2083,8 +2064,8 @@ mod tests {
     }
 
     #[test]
-    fn test_verifies_historical_operation_range_mmb() {
-        let (proto, root, expected, window) = historical_range_fixture::<mmb::Family>();
+    fn test_verifies_operation_range_mmb() {
+        let (proto, root, expected, window) = operation_range_fixture::<mmb::Family>();
 
         let (verified_root, verified) =
             verify_operation_range_from_proto::<mmb::Family, Sha256>(&proto, &root, window)
@@ -2095,8 +2076,8 @@ mod tests {
     }
 
     #[test]
-    fn test_verifies_raw_historical_operation_range_without_decoding() {
-        let (proto, root, expected, window) = historical_range_fixture::<mmr::Family>();
+    fn test_verifies_raw_operation_range_without_decoding() {
+        let (proto, root, expected, window) = operation_range_fixture::<mmr::Family>();
         let expected = expected
             .into_iter()
             .map(|(location, operation)| (location, operation.encode().to_vec()))
@@ -2110,9 +2091,9 @@ mod tests {
     }
 
     #[test]
-    fn test_verifies_historical_operation_range_with_blake3() {
+    fn test_verifies_operation_range_with_blake3() {
         let (proto, root, expected, window) =
-            historical_range_fixture_at_with_hash::<mmr::Family, Blake3>(1, 4);
+            operation_range_fixture_at_with_hash::<mmr::Family, Blake3>(1, 4);
 
         let (verified_root, verified) =
             verify_operation_range_from_proto::<mmr::Family, Blake3>(&proto, &root, window)
@@ -2330,6 +2311,8 @@ mod tests {
         }
     }
 
+    /// Checks that proofs built with Commonware's const chunk size `N` verify with the
+    /// same chunk size supplied at runtime.
     fn assert_current_interoperability<F: merkle::Graftable + PartialEq, const N: usize>() {
         let config = current_proof_config::<Sha256Digest>(N, "test").unwrap();
 
@@ -2759,7 +2742,7 @@ mod tests {
                 .to_vec(),
         ];
         let (proto, root, _, window) =
-            historical_raw_range_fixture_at::<mmr::Family, Sha256>(&operations, 0, 3);
+            raw_operation_range_fixture_at::<mmr::Family, Sha256>(&operations, 0, 3);
         let (_, verified) =
             verify_raw_operation_range::<mmr::Family, Sha256>(&proto, &root, window).unwrap();
         let operation =
@@ -2787,7 +2770,7 @@ mod tests {
                 .to_vec(),
         ];
         let (proto, root, _, window) =
-            historical_raw_range_fixture_at::<mmr::Family, Sha256>(&operations, 0, 3);
+            raw_operation_range_fixture_at::<mmr::Family, Sha256>(&operations, 0, 3);
         let (_, verified) =
             verify_raw_operation_range::<mmr::Family, Sha256>(&proto, &root, window).unwrap();
         let operation =
@@ -2816,7 +2799,7 @@ mod tests {
                 .to_vec(),
         ];
         let (proto, root, _, window) =
-            historical_raw_range_fixture_at::<mmr::Family, Sha256>(&operations, 0, 3);
+            raw_operation_range_fixture_at::<mmr::Family, Sha256>(&operations, 0, 3);
         let (_, verified) =
             verify_raw_operation_range::<mmr::Family, Sha256>(&proto, &root, window).unwrap();
         let operation =
@@ -2846,7 +2829,7 @@ mod tests {
                 .to_vec(),
         ];
         let (proto, root, _, window) =
-            historical_raw_range_fixture_at::<mmr::Family, Sha256>(&operations, 0, 3);
+            raw_operation_range_fixture_at::<mmr::Family, Sha256>(&operations, 0, 3);
         let (_, verified) =
             verify_raw_operation_range::<mmr::Family, Sha256>(&proto, &root, window).unwrap();
         let operation =
@@ -2860,9 +2843,9 @@ mod tests {
     }
 
     #[test]
-    fn test_historical_operation_range_pinned_nodes_match_mmr_start_location() {
+    fn test_operation_range_pinned_nodes_match_mmr_start_location() {
         let (zero_start, zero_root, zero_expected, window) =
-            historical_range_fixture_at::<mmr::Family>(0, 3);
+            operation_range_fixture_at::<mmr::Family>(0, 3);
         assert!(
             zero_start.pinned_nodes.is_empty(),
             "zero-start MMR ranges must not carry pinned nodes"
@@ -2876,7 +2859,7 @@ mod tests {
         assert_eq!(zero_verified, zero_expected);
 
         let (nonzero_start, nonzero_root, nonzero_expected, window) =
-            historical_range_fixture_at::<mmr::Family>(1, 4);
+            operation_range_fixture_at::<mmr::Family>(1, 4);
         assert!(
             !nonzero_start.pinned_nodes.is_empty(),
             "nonzero-start MMR ranges must carry pinned nodes"
@@ -2891,9 +2874,9 @@ mod tests {
     }
 
     #[test]
-    fn test_historical_operation_range_pinned_nodes_match_mmb_start_location() {
+    fn test_operation_range_pinned_nodes_match_mmb_start_location() {
         let (zero_start, zero_root, zero_expected, window) =
-            historical_range_fixture_at::<mmb::Family>(0, 3);
+            operation_range_fixture_at::<mmb::Family>(0, 3);
         assert!(
             zero_start.pinned_nodes.is_empty(),
             "zero-start MMB ranges must not carry pinned nodes"
@@ -2907,7 +2890,7 @@ mod tests {
         assert_eq!(zero_verified, zero_expected);
 
         let (nonzero_start, nonzero_root, nonzero_expected, window) =
-            historical_range_fixture_at::<mmb::Family>(1, 4);
+            operation_range_fixture_at::<mmb::Family>(1, 4);
         assert!(
             !nonzero_start.pinned_nodes.is_empty(),
             "nonzero-start MMB ranges must carry pinned nodes"
@@ -2922,52 +2905,52 @@ mod tests {
     }
 
     #[test]
-    fn test_rejects_historical_operation_range_mmr_without_nonzero_pinned_nodes() {
-        let (mut proto, root, _, window) = historical_range_fixture::<mmr::Family>();
+    fn test_rejects_operation_range_mmr_without_nonzero_pinned_nodes() {
+        let (mut proto, root, _, window) = operation_range_fixture::<mmr::Family>();
         proto.pinned_nodes.clear();
 
         let err = verify_operation_range_from_proto::<mmr::Family, Sha256>(&proto, &root, window)
             .unwrap_err();
 
-        assert_eq!(err, "historical operation range proof failed verification");
+        assert_eq!(err, "operation range proof failed verification");
     }
 
     #[test]
-    fn test_rejects_historical_operation_range_mmb_without_nonzero_pinned_nodes() {
-        let (mut proto, root, _, window) = historical_range_fixture::<mmb::Family>();
+    fn test_rejects_operation_range_mmb_without_nonzero_pinned_nodes() {
+        let (mut proto, root, _, window) = operation_range_fixture::<mmb::Family>();
         proto.pinned_nodes.clear();
 
         let err = verify_operation_range_from_proto::<mmb::Family, Sha256>(&proto, &root, window)
             .unwrap_err();
 
-        assert_eq!(err, "historical operation range proof failed verification");
+        assert_eq!(err, "operation range proof failed verification");
     }
 
     #[test]
-    fn test_rejects_historical_operation_range_mmr_with_zero_start_pinned_nodes() {
-        let (mut proto, root, _, window) = historical_range_fixture_at::<mmr::Family>(0, 3);
+    fn test_rejects_operation_range_mmr_with_zero_start_pinned_nodes() {
+        let (mut proto, root, _, window) = operation_range_fixture_at::<mmr::Family>(0, 3);
         proto.pinned_nodes.push(root.encode());
 
         let err = verify_operation_range_from_proto::<mmr::Family, Sha256>(&proto, &root, window)
             .unwrap_err();
 
-        assert_eq!(err, "historical operation range proof failed verification");
+        assert_eq!(err, "operation range proof failed verification");
     }
 
     #[test]
-    fn test_rejects_historical_operation_range_mmb_with_zero_start_pinned_nodes() {
-        let (mut proto, root, _, window) = historical_range_fixture_at::<mmb::Family>(0, 3);
+    fn test_rejects_operation_range_mmb_with_zero_start_pinned_nodes() {
+        let (mut proto, root, _, window) = operation_range_fixture_at::<mmb::Family>(0, 3);
         proto.pinned_nodes.push(root.encode());
 
         let err = verify_operation_range_from_proto::<mmb::Family, Sha256>(&proto, &root, window)
             .unwrap_err();
 
-        assert_eq!(err, "historical operation range proof failed verification");
+        assert_eq!(err, "operation range proof failed verification");
     }
 
     #[test]
-    fn test_rejects_historical_operation_range_mmb_with_tampered_pinned_node() {
-        let (mut proto, root, _, window) = historical_range_fixture::<mmb::Family>();
+    fn test_rejects_operation_range_mmb_with_tampered_pinned_node() {
+        let (mut proto, root, _, window) = operation_range_fixture::<mmb::Family>();
         let mut pinned_node = proto.pinned_nodes[0].to_vec();
         pinned_node[0] ^= 0x01;
         proto.pinned_nodes[0] = pinned_node.into();
@@ -2975,18 +2958,18 @@ mod tests {
         let err = verify_operation_range_from_proto::<mmb::Family, Sha256>(&proto, &root, window)
             .unwrap_err();
 
-        assert_eq!(err, "historical operation range proof failed verification");
+        assert_eq!(err, "operation range proof failed verification");
     }
 
     #[test]
-    fn test_rejects_historical_operation_range_mmb_with_extra_pinned_node() {
-        let (mut proto, root, _, window) = historical_range_fixture::<mmb::Family>();
+    fn test_rejects_operation_range_mmb_with_extra_pinned_node() {
+        let (mut proto, root, _, window) = operation_range_fixture::<mmb::Family>();
         proto.pinned_nodes.push(proto.pinned_nodes[0].clone());
 
         let err = verify_operation_range_from_proto::<mmb::Family, Sha256>(&proto, &root, window)
             .unwrap_err();
 
-        assert_eq!(err, "historical operation range proof failed verification");
+        assert_eq!(err, "operation range proof failed verification");
     }
 
     fn assert_operations_proof_verifies<F>()
@@ -2995,7 +2978,7 @@ mod tests {
         OrderedVariableOperation<F>:
             Decode + Encode + Read<Cfg = ((RangeCfg<usize>, ()), (RangeCfg<usize>, ()))>,
     {
-        let (proto, ops_root, expected) = historical_multi_fixture::<F>();
+        let (proto, ops_root, expected) = operation_multi_fixture::<F>();
         let locations = OperationLocations::new(4, &[0, 2]).unwrap();
         let (root, verified) =
             verify_raw_operations::<F, Sha256>(&proto, &ops_root, &locations).unwrap();
@@ -3017,8 +3000,8 @@ mod tests {
 
     #[test]
     fn test_operations_proof_rejects_mismatched_requests_and_tampering() {
-        let (proto, ops_root, _) = historical_multi_fixture::<mmr::Family>();
-        let verify = |proto: &HistoricalMultiProof, tip: u64, locations: &[u64], root| {
+        let (proto, ops_root, _) = operation_multi_fixture::<mmr::Family>();
+        let verify = |proto: &OperationMultiProof, tip: u64, locations: &[u64], root| {
             let locations = OperationLocations::new(tip, locations).unwrap();
             verify_raw_operations::<mmr::Family, Sha256>(proto, root, &locations)
         };
@@ -3055,7 +3038,7 @@ mod tests {
 
     #[test]
     fn test_operations_proof_binds_ops_root_through_witness() {
-        let (mut proto, ops_root, _) = historical_multi_fixture::<mmb::Family>();
+        let (mut proto, ops_root, _) = operation_multi_fixture::<mmb::Family>();
         let witness = OpsRootWitness::<mmb::Family, Sha256Digest> {
             grafted_root: Sha256::fill(0x11),
             pending_chunk_digest: Some(Sha256::fill(0x22)),
@@ -3091,7 +3074,7 @@ mod tests {
 
     #[test]
     fn test_decodes_subscribe_multi_proof_without_ops_root_witness() {
-        let (proto, ops_root, expected) = historical_multi_fixture::<mmr::Family>();
+        let (proto, ops_root, expected) = operation_multi_fixture::<mmr::Family>();
 
         let (tip, root, verified) =
             decode_multi_with_embedded_root_from_proto::<mmr::Family, Sha256>(&proto).unwrap();
@@ -3103,7 +3086,7 @@ mod tests {
 
     #[test]
     fn test_decodes_subscribe_multi_proof_with_ops_root_witness() {
-        let (mut proto, ops_root, expected) = historical_multi_fixture::<mmb::Family>();
+        let (mut proto, ops_root, expected) = operation_multi_fixture::<mmb::Family>();
         let witness = OpsRootWitness::<mmb::Family, Sha256Digest> {
             grafted_root: Sha256::fill(0x11),
             pending_chunk_digest: Some(Sha256::fill(0x22)),
@@ -3129,7 +3112,7 @@ mod tests {
             inactive_peaks: 0,
             digests: Vec::new(),
         };
-        let proto = HistoricalMultiProof {
+        let proto = OperationMultiProof {
             proof: proof.encode(),
             ops_root: root.encode(),
             ..Default::default()
@@ -3152,29 +3135,29 @@ mod tests {
 
     #[test]
     fn test_rejects_subscribe_multi_proof_missing_ops_root() {
-        let (mut proto, _, _) = historical_multi_fixture::<mmr::Family>();
+        let (mut proto, _, _) = operation_multi_fixture::<mmr::Family>();
         proto.ops_root.clear();
 
         let err =
             decode_multi_with_embedded_root_from_proto::<mmr::Family, Sha256>(&proto).unwrap_err();
 
-        assert_eq!(err, "historical multi proof missing embedded ops_root");
+        assert_eq!(err, "operation multi proof missing embedded ops_root");
     }
 
     #[test]
-    fn test_rejects_historical_operation_range_without_ops_root() {
-        let (mut proto, root, _, window) = historical_range_fixture::<mmr::Family>();
+    fn test_rejects_operation_range_without_ops_root() {
+        let (mut proto, root, _, window) = operation_range_fixture::<mmr::Family>();
         proto.ops_root.clear();
 
         let err = verify_operation_range_from_proto::<mmr::Family, Sha256>(&proto, &root, window)
             .unwrap_err();
 
-        assert_eq!(err, "historical proof missing ops_root");
+        assert_eq!(err, "operation proof missing ops_root");
     }
 
     #[test]
-    fn test_rejects_historical_operation_range_root_mismatch() {
-        let (proto, root, _, window) = historical_range_fixture::<mmb::Family>();
+    fn test_rejects_operation_range_root_mismatch() {
+        let (proto, root, _, window) = operation_range_fixture::<mmb::Family>();
         let wrong_root = Sha256::fill(0x42);
         assert_ne!(wrong_root, root);
 
@@ -3182,6 +3165,6 @@ mod tests {
             verify_operation_range_from_proto::<mmb::Family, Sha256>(&proto, &wrong_root, window)
                 .unwrap_err();
 
-        assert_eq!(err, "historical ops root did not match expected root");
+        assert_eq!(err, "operation-log root did not match expected root");
     }
 }

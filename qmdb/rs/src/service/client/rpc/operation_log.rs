@@ -7,9 +7,8 @@ use crate::{
     request::OperationWindow,
     service::{
         proto::qmdb::v1::{
-            GetOperationRangeRequest, GetOperationsRequest, HistoricalMultiProof,
-            HistoricalOperationRangeProof, OperationLogServiceClient, SubscribeRequest,
-            SubscribeResponseView,
+            GetOperationRangeRequest, GetOperationsRequest, OperationLogServiceClient,
+            OperationMultiProof, OperationRangeProof, SubscribeRequest, SubscribeResponseView,
         },
         validate_operations_request,
     },
@@ -99,9 +98,7 @@ where
         let merkle_proof =
             Proof::<F, H::Digest>::decode_cfg(Copying(proof.proof.as_ref()), &max_digests)
                 .map_err(|err| {
-                    QmdbError::CorruptData(format!(
-                        "failed to decode historical multi proof: {err}"
-                    ))
+                    QmdbError::CorruptData(format!("failed to decode operation multi proof: {err}"))
                 })?;
         let tip = merkle_proof.leaves.checked_sub(1).ok_or_else(|| {
             QmdbError::CorruptData("subscription proof has no leaves".to_string())
@@ -297,7 +294,7 @@ where
         op_count: Location<F>,
         start_loc: Location<F>,
         max_ops: NonZeroU64,
-    ) -> Result<HistoricalOperationRangeProof, QmdbError> {
+    ) -> Result<OperationRangeProof, QmdbError> {
         let count = op_count.as_u64();
         let Some(tip) = count.checked_sub(1) else {
             return Err(QmdbError::CorruptData(
@@ -322,7 +319,7 @@ where
 
     fn decode_sync_response(
         &self,
-        proto: HistoricalOperationRangeProof,
+        proto: OperationRangeProof,
         request: SyncRequest<F>,
     ) -> Result<SyncResponse<F, Op, H::Digest>, QmdbError> {
         let max_digests = proof_digest_cap::<H::Digest>(&proto.proof);
@@ -371,7 +368,7 @@ async fn fetch_operation_range_proof<T>(
     rpc: &OperationLogServiceClient<T>,
     request: GetOperationRangeRequest,
     missing_proof_message: &'static str,
-) -> Result<HistoricalOperationRangeProof, QmdbError>
+) -> Result<OperationRangeProof, QmdbError>
 where
     T: ClientTransport,
     T::ResponseBody: Body<Data = Bytes> + Unpin,
@@ -423,7 +420,7 @@ where
     Ok(SyncTarget::new(ops_root, range))
 }
 
-fn historical_target_root<F, H>(
+fn operation_target_root<F, H>(
     ops_root: &[u8],
     ops_root_witness: &[u8],
     expected_root: &H::Digest,
@@ -435,10 +432,10 @@ where
 {
     if ops_root.is_empty() {
         return Err(QmdbError::CorruptData(
-            "historical proof missing ops_root".to_string(),
+            "operation proof missing ops_root".to_string(),
         ));
     }
-    let ops_root = decode_digest::<H::Digest>(ops_root, "historical ops root")?;
+    let ops_root = decode_digest::<H::Digest>(ops_root, "operation-log root")?;
     if ops_root_witness.is_empty() {
         if ops_root != *expected_root {
             return Err(QmdbError::ProofVerification {
@@ -450,7 +447,7 @@ where
     let witness =
         OpsRootWitness::<F, H::Digest>::decode(Copying(ops_root_witness)).map_err(|err| {
             QmdbError::CorruptData(format!(
-                "failed to decode historical ops-root witness: {err}"
+                "failed to decode operation-log root witness: {err}"
             ))
         })?;
     if !witness.verify::<H>(&ops_root, expected_root) {
@@ -462,7 +459,7 @@ where
 }
 
 fn verify_multi_from_proto<F, H, Op>(
-    proto: &HistoricalMultiProof,
+    proto: &OperationMultiProof,
     proof: &Proof<F, H::Digest>,
     op_cfg: &Op::Cfg,
     root: &H::Digest,
@@ -488,7 +485,7 @@ where
         })
         .collect::<Result<Vec<_>, QmdbError>>()?;
     let target_root =
-        historical_target_root::<F, H>(&proto.ops_root, &proto.ops_root_witness, root)?;
+        operation_target_root::<F, H>(&proto.ops_root, &proto.ops_root_witness, root)?;
     if !verify_multi_proof::<H, _, _>(proof, &operations, &target_root) {
         return Err(QmdbError::ProofVerification {
             kind: crate::ProofKind::BatchMulti,
@@ -498,7 +495,7 @@ where
 }
 
 fn verify_operation_range_from_proto<F, H, Op>(
-    proto: &HistoricalOperationRangeProof,
+    proto: &OperationRangeProof,
     op_cfg: &Op::Cfg,
     root: &H::Digest,
     window: OperationWindow,
@@ -511,17 +508,15 @@ where
 {
     if proto.encoded_operations.is_empty() {
         return Err(QmdbError::CorruptData(
-            "historical operation range proof has no operations".to_string(),
+            "operation range proof has no operations".to_string(),
         ));
     }
     let target_root =
-        historical_target_root::<F, H>(&proto.ops_root, &proto.ops_root_witness, root)?;
+        operation_target_root::<F, H>(&proto.ops_root, &proto.ops_root_witness, root)?;
     let max_digests = proof_digest_cap::<H::Digest>(&proto.proof);
     let proof = Proof::<F, H::Digest>::decode_cfg(Copying(proto.proof.as_ref()), &max_digests)
         .map_err(|err| {
-            QmdbError::CorruptData(format!(
-                "failed to decode historical operation range proof: {err}"
-            ))
+            QmdbError::CorruptData(format!("failed to decode operation range proof: {err}"))
         })?;
     window
         .validate(
@@ -544,9 +539,7 @@ where
     let pinned_nodes = proto
         .pinned_nodes
         .iter()
-        .map(|bytes| {
-            decode_digest::<H::Digest>(bytes.as_ref(), "historical operation range pinned node")
-        })
+        .map(|bytes| decode_digest::<H::Digest>(bytes.as_ref(), "operation range pinned node"))
         .collect::<Result<Vec<_>, QmdbError>>()?;
     if !verify_proof_and_pinned_nodes::<H, _, _>(
         &proof,

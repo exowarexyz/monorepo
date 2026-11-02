@@ -46,9 +46,9 @@ pub enum ProofKind {
     CurrentKeyValue,
     /// Current ordered proof that a key is inactive.
     CurrentKeyExclusion,
-    /// Historical multi-proof over selected operations.
+    /// Operation-log membership proof over selected operations.
     BatchMulti,
-    /// Contiguous historical range proof (sync checkpoint).
+    /// Contiguous operation range proof (sync checkpoint).
     RangeCheckpoint,
     /// Contiguous current-state range proof.
     CurrentRange,

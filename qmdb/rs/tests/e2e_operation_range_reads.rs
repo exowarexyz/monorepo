@@ -1134,7 +1134,7 @@ async fn native_multi_proofs_authenticate_large_requests_and_preserve_publicatio
 async fn native_fixed_keyless_large_multi_proof_matches_browser_fixture() {
     use commonware_storage::qmdb::{any::value::FixedEncoding, keyless::fixed};
     use commonware_utils::sequence::FixedBytes;
-    use exoware_qmdb::proof::encode_historical_multi_proof;
+    use exoware_qmdb::proof::encode_operation_multi_proof;
 
     type Value = FixedBytes<16>;
     type FixedOperation = fixed::Operation<mmr::Family, Value>;
@@ -1177,7 +1177,7 @@ async fn native_fixed_keyless_large_multi_proof_matches_browser_fixture() {
             .map(|location| location.as_u64().to_string())
             .collect::<Vec<_>>()
             .join(","),
-        hex::encode(encode_historical_multi_proof(&proof)),
+        hex::encode(encode_operation_multi_proof(&proof)),
         proof
             .operations
             .iter()

@@ -4,8 +4,8 @@ import test from 'node:test';
 import { fromBinary, toBinary } from '@bufbuild/protobuf';
 import { initQmdbWasm, QmdbProofVerifier } from '../dist/index.js';
 import {
-  HistoricalMultiProofSchema,
-  HistoricalOperationRangeProofSchema,
+  OperationMultiProofSchema,
+  OperationRangeProofSchema,
 } from '../dist/generated/proto/qmdb/v1/proof_pb.js';
 
 const bytes = (hex) => Buffer.from(hex, 'hex');
@@ -79,9 +79,9 @@ for (const merkleFamily of ['mmr', 'mmb']) {
     await assert.rejects(verify(proof, request, root, location, flip(key)));
     await assert.rejects(verify(proof, request, root, location, key, 31));
     await assert.rejects(verify(proof.subarray(0, proof.length - 1)));
-    const changed = fromBinary(HistoricalOperationRangeProofSchema, proof);
+    const changed = fromBinary(OperationRangeProofSchema, proof);
     changed.encodedOperations[1] = flip(changed.encodedOperations[1]);
-    await assert.rejects(verify(toBinary(HistoricalOperationRangeProofSchema, changed)));
+    await assert.rejects(verify(toBinary(OperationRangeProofSchema, changed)));
   });
 }
 
@@ -107,9 +107,9 @@ test('keyless multiproof binds values to exact locations and tip', async () => {
   await assert.rejects(verify(data.proof, { tip: data.tip }, data.root, expected.slice(1)));
   await assert.rejects(verify(data.proof, { tip: data.tip }, data.root, expected.map((entry, i) => ({ ...entry, value: expected[expected.length - 1 - i].value }))));
   await assert.rejects(verify(data.proof.subarray(0, data.proof.length - 1)));
-  const changed = fromBinary(HistoricalMultiProofSchema, data.proof);
+  const changed = fromBinary(OperationMultiProofSchema, data.proof);
   changed.operations[0].encodedOperation = flip(changed.operations[0].encodedOperation);
-  await assert.rejects(verify(toBinary(HistoricalMultiProofSchema, changed)));
+  await assert.rejects(verify(toBinary(OperationMultiProofSchema, changed)));
 });
 
 test('standalone multiproof verification accepts more than 1024 locations', async (t) => {
@@ -143,11 +143,11 @@ test('raw multiproof uses canonical current root and exact locations', async () 
 
   // The bare operations root, a proof without its witness, and a different location set are
   // rejected.
-  const proof = fromBinary(HistoricalMultiProofSchema, data.proof);
+  const proof = fromBinary(OperationMultiProofSchema, data.proof);
   assert.ok(proof.opsRootWitness.length > 0);
   await assert.rejects(verifier.verifyOperations(data.proof, request, proof.opsRoot));
   proof.opsRootWitness = new Uint8Array();
-  await assert.rejects(verifier.verifyOperations(toBinary(HistoricalMultiProofSchema, proof), request, data.root));
+  await assert.rejects(verifier.verifyOperations(toBinary(OperationMultiProofSchema, proof), request, data.root));
   await assert.rejects(verifier.verifyOperations(data.proof, { ...request, locations: data.locations.slice(1) }, data.root));
 });
 

@@ -2,132 +2,122 @@
 
 [![npm](https://img.shields.io/npm/v/@exowarexyz/sdk.svg)](https://www.npmjs.com/package/@exowarexyz/sdk)
 
-Interact with the Exoware API in TypeScript.
+Read and write Exoware's immutable key-value Store from TypeScript in Node or a
+browser. The SDK also provides range queries, reductions, log subscriptions,
+pruning, and log retention controls.
 
-## Status
+## Getting started
 
-`@exowarexyz/sdk` is **ALPHA** software and is not yet recommended for production use. Developers should expect breaking changes and occasional instability.
+```sh
+npm install @exowarexyz/sdk
+```
 
-## Put compatibility
-
-`Client` sends Put requests using uncompressed Connect unary protobuf in both
-Node and browsers. It always selects binary protobuf for Put, even when
-`ClientOptions.useBinaryFormat` is false for other services. Put rejects Connect
-JSON, gzip request compression, gRPC, and gRPC-Web. Browser clients must also use
-the Connect protocol. See the [Put compatibility table](../../proto/README.md#put-client-compatibility)
-for supported formats and the restrictions on custom zstd encoders.
-
-## Put limits
-
-`set`, `setMany`, and `StoreWriteBatch.commit` validate entry count, physical key
-length, value length, and encoded request size before sending. Invalid batches
-throw `RangeError`. Each call remains one atomic Put.
-
-`StoreWriteBatch` provides `encodedLen()`, `validate(options)`, and
-`split(options)`. Sizes include prefixed keys and use the protobuf wire format
-that Ingest always sends. `ClientOptions.useBinaryFormat` controls the other
-services. Pass `store.putOptions` to use a client's configured limits:
+For local development, start the
+[simulator](../../examples/simulator/README.md) on port 10000. This example writes
+a value and reads it at or after the returned sequence:
 
 ```ts
-const chunks = batch.split(store.putOptions);
-for (const chunk of chunks) {
-    await chunk.commit(store);
+import { Client, StoreKeyPrefix } from '@exowarexyz/sdk';
+
+const client = new Client('http://localhost:10000');
+const encode = (text: string) => new TextEncoder().encode(text);
+const store = client.store(new StoreKeyPrefix(encode('example/')));
+const key = encode('greeting');
+
+const sequence = await store.set(key, encode('hello'));
+const reader = store.createSessionWithSequence(sequence);
+const result = await reader.get(key);
+console.log(result === null ? null : new TextDecoder().decode(result.value));
+```
+
+Sequences use `bigint`. Keys and values use `Uint8Array`. In Node, the client reads
+`EXOWARE_API_KEY` unless you pass a token. Browser clients must receive a token
+explicitly when the deployment requires one:
+
+```ts
+const client = new Client('https://query.example.com', { token: 'your-token' });
+```
+
+Use a credential issued for the deployment with the scopes your operations need.
+`Client` uses one base URL for all services. Its service properties, such as
+`query` and `ingest`, expose the generated RPC clients. `store()` provides the
+higher-level key-value interface.
+
+## Namespaces and atomic writes
+
+`StoreKeyPrefix` adds a namespace to keys sent to the Store and removes it from
+returned keys. Choose non-overlapping prefixes for logical stores that should be
+independent. Prefix bytes count toward the physical key limit, so
+`maxLogicalKeyLen()` reports the remaining capacity. The same mechanism lets
+[QMDB](../../qmdb/README.md) and [SQL](../../sql/README.md) instances share a Store.
+
+To write across namespaces atomically, stage each row through its owning store
+and commit once:
+
+```ts
+import { StoreWriteBatch } from '@exowarexyz/sdk';
+
+const base = client.store();
+const orders = base.withKeyPrefix(new StoreKeyPrefix(encode('orders/')));
+const accounts = base.withKeyPrefix(new StoreKeyPrefix(encode('accounts/')));
+const batch = new StoreWriteBatch()
+    .push(orders, encode('42'), encode('created'))
+    .push(accounts, encode('7'), encode('active'));
+const batchSequence = await batch.commit(base);
+```
+
+`set`, `setMany`, and batch commits each send one atomic Put. They validate sizes
+before sending and throw `RangeError` for invalid batches. Set
+`ClientOptions.putLimits` to configure entry, value, and encoded message limits for
+your deployment.
+`encodedLen()` reports a batch's uncompressed protobuf size, including prefixes.
+
+For batches that need splitting, replace the single commit with:
+
+```ts
+for (const chunk of batch.split(base.putOptions)) {
+    await chunk.commit(base);
 }
 ```
 
-Splitting preserves order and shares payload buffers without changing the
-original batch. An empty batch produces no chunks. An entry that cannot fit
-alone throws. Each chunk is a separate write, so callers must handle partial
-completion and any publication ordering they require.
+Each chunk is a separate write. Handle partial completion and coordinate
+publication yourself. Concurrent commits can be sequenced out of order. See the
+[Put contract](../../proto/README.md) for limits, errors, and splitting constraints.
 
-Defaults use `MAX_PUT_ENTRIES`, `MAX_REQUEST_MESSAGE_BYTES`, `MAX_VALUE_LEN`, and
-`MAX_KEY_LEN`. Configure `ClientOptions.putLimits` with `maxEntries`,
-`maxEncodedBytes`, or `maxValueLen` to match a deployment. The same options can
-be passed to `validate` and `split`. The byte budget is the RPC message limit.
-See the [protocol contract](../../proto/README.md) for errors and portability.
+## Read consistency
 
-For a custom client, use your generated `IngestService` descriptor with an
-explicitly binary Connect transport. The SDK's `createTransport` selects Connect:
+A write's sequence is a minimum read position. Query replicas may lag, so pass
+that sequence to `createSessionWithSequence` when a read depends on the write.
+The resulting monotonic session raises its floor as it observes newer query
+responses or log batches. `createSession()` starts without a floor.
 
-```ts
-import { createClient } from '@connectrpc/connect';
-import { createTransport } from '@exowarexyz/sdk';
+`ReadSession.fixed(store, sequence)` keeps the configured floor unchanged. Neither
+policy pins a historical snapshot: reads may observe a later sequence. Clones
+share observations, and each request uses the floor known when it starts.
+`withMinSequenceNumber(sequence)` derives a stronger reader without changing the
+parent's configured floor. See [`ReadSession`](src/store.ts) for observation
+tracking and log reads.
 
-const ingest = createClient(IngestService, createTransport(url, { useBinaryFormat: true }));
-```
+## Request options
 
-Remove references to the former `PutEncoding` type, `PutBatchOptions.encoding`,
-the encoding argument to `StoreWriteBatch.encodedLen`, and the `encoding` property
-on `Client.putOptions` and `StoreClient.putOptions`. Put sizing and transport now
-always use protobuf.
+The SDK sends uncompressed Connect requests. Put always uses binary protobuf.
+`ClientOptions.useBinaryFormat` controls the other services. Custom ingest clients
+created with `createTransport` must pass `{ useBinaryFormat: true }`. See the
+[Put compatibility contract](../../proto/README.md#put-client-compatibility).
 
-## Put retries
+`ClientOptions.retry` controls retries. Put retries are limited to server
+rejections that confirm the batch was never admitted. Generic errors, timeouts,
+and lost responses are not automatically retried. Set `maxAttempts` to `1` to
+disable retries. Direct `client.ingest.put(request, options)` calls accept a
+`timeoutMs` or abort `signal` covering attempts and backoff. See the
+[admission retry contract](../../proto/README.md#admission-retries) before adding
+application retries.
 
-Put retries use `ClientOptions.retry` only for an explicit temporary admission
-rejection that guarantees the backend has not received the batch. They honor the
-server's minimum retry delay and retain the same atomic batch. Set `maxAttempts`
-to `1` to disable retries. Direct `client.ingest.put` calls can supply a timeout
-or abort signal covering attempts and backoff together. Generic errors,
-timeouts, and lost responses are not automatically retried. See the
-[admission retry contract](../../proto/README.md#admission-retries).
+The [client options](src/client.ts) and [Store API](src/store.ts) describe the
+available calls. Generated protobuf types live in `src/gen/ts`. Regenerate them
+with `./gen.sh` from the repository root after changing the schemas.
 
-## Credentials
+## Status
 
-An auth token can be provided when constructing the client:
-
-```ts
-const client = new Client('https://query.<deployment>.<domain>', '<token>');
-```
-
-Or under Node the token may come from the `EXOWARE_API_KEY` environment variable instead, read when no token is passed to the client constructor.
-Browsers have no environment, so a browser client must be given its token explicitly.
-
-## Store Key Prefixes
-
-Use `StoreKeyPrefix` when multiple logical QMDB, SQL, or raw KV instances share one Store database. The prefix is applied by the SDK, so higher-level clients keep using their normal logical keys:
-
-```ts
-import { Client, StoreKeyPrefix, StoreWriteBatch } from '@exowarexyz/sdk';
-
-const base = new Client('http://localhost:10000').store();
-const orders = base.withKeyPrefix(new StoreKeyPrefix(new Uint8Array([1])));
-const accounts = base.withKeyPrefix(new StoreKeyPrefix(new Uint8Array([2])));
-
-const batch = new StoreWriteBatch()
-    .push(orders, orderKey, orderValue)
-    .push(accounts, accountKey, accountValue);
-const sequence = await batch.commit(base);
-```
-
-## Read Sessions
-
-`ReadSession.monotonic(store, floor)` advances its minimum sequence as reads
-observe newer responses. `ReadSession.fixed(store, floor)` keeps that minimum
-unchanged. Both track the highest observed sequence; neither pins an exact snapshot.
-
-```ts
-import { ReadSession } from '@exowarexyz/sdk';
-
-const session = ReadSession.monotonic(orders);
-const reader = ReadSession.fixed(orders, publicationSequence);
-```
-
-`minSequenceNumber()` reports the effective read floor, and `evaluatedSequence()`
-reports the highest observed sequence. `clone()` shares observations.
-Each request uses the floor known when it starts; overlapping reads proceed independently.
-`undefined` means no requirement or observation; `0n` is an explicit sequence zero.
-`withMinSequenceNumber(sequence)` derives a reader with a stronger floor when
-needed, for either policy. It leaves the parent's configured floor unchanged and
-does not count the requirement as an observation.
-
-Successful `getBatch(...)` results and batches yielded by `subscribe(...)` are
-observations. They advance subsequent query floors for monotonic sessions; fixed
-sessions record them and retain their configured floor.
-
-`createSession()` and `createSessionWithSequence(...)` create monotonic sessions.
-
-## Generated TypeScript (`gen/ts`)
-
-Protobuf-ES output lives under **`src/gen/ts/`** (mirrors the repo [`proto/`](../../proto/) tree, e.g. `proto/store/v1/query.proto` → `src/gen/ts/store/v1/query_pb.ts`). To regenerate after proto changes, run `../../gen.sh` from the repo root.
-
-Integration tests spawn the Rust simulator via `jest.globalSetup.ts` (`cargo build --package exoware-simulator`).
+`@exowarexyz/sdk` is **ALPHA** software and is not yet recommended for production use.
+Developers should expect breaking changes and occasional instability.

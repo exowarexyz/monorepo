@@ -40,7 +40,7 @@ Explore the Exoware API.
 
 - **Log:** Order and stream arbitrary data.
 - **Store:** Query immutable data.
-- **Ordered QMDB** (optional, requires `VITE_QMDB_URL`): current/historical
+- **Ordered QMDB** (optional, requires `VITE_QMDB_URL`): current-state and operation-log
   proofs and live subscribe streaming.
 - **Simplex** (optional, requires `VITE_SIMPLEX_URL`): read and subscribe to
   seeded Commonware Simplex blocks, notarizations, and finalizations, with
@@ -105,9 +105,9 @@ In addition to the simulator running above:
    - **Get Many** verifies current hit/miss lookup proofs against the same root and reports proof size.
    - **Get Range** verifies an ordered current range plus its start boundary
      proof against the same root and reports proof size.
-   - **Get Historical Operation Range** verifies a contiguous historical
-     operation-log range against the same trusted root and reports proof size.
-   - **Subscribe** verifies each emitted historical proof from the trusted
+   - **Get Operation Range** verifies a contiguous operation-log range
+     against the same trusted root and reports proof size.
+   - **Subscribe** verifies each emitted operation-log proof from the trusted
      current root for that emitted tip and reports proof size. Paste seed
      output lines into Trusted Roots when replaying or following multiple tips.
 

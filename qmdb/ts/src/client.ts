@@ -11,8 +11,8 @@ import {
 import {
   CurrentKeyValueProofSchema,
   CurrentOperationRangeProofSchema,
-  HistoricalMultiProofSchema,
-  HistoricalOperationRangeProofSchema,
+  OperationMultiProofSchema,
+  OperationRangeProofSchema,
 } from './generated/proto/qmdb/v1/proof_pb.js';
 import {
   KeyLookupService,
@@ -40,7 +40,7 @@ import {
   type Filter,
 } from './generated/proto/common/v1/kv_pb.js';
 import {
-  decode_historical_multi_proof_operations,
+  decode_operation_multi_proof_operations,
   encode_vec_key,
   verify_current_operation_range_proof,
   verify_current_key_value_proof,
@@ -64,7 +64,7 @@ import {
   type HashFamily,
   type OrderedOperation,
   type LocatedOrderedOperation,
-  type VerifiedHistoricalMultiProof,
+  type VerifiedOperationMultiProof,
   type VerifiedRawOperationRangeProof,
   type VerifiedRawOperationsProof,
   type VerifiedFixedKeylessAppendsProof,
@@ -82,7 +82,7 @@ export type {
   HashFamily,
   OrderedOperation,
   LocatedOrderedOperation,
-  VerifiedHistoricalMultiProof,
+  VerifiedOperationMultiProof,
   LocatedRawOperation,
   VerifiedRawOperationRangeProof,
   VerifiedRawOperationsProof,
@@ -106,7 +106,7 @@ export interface OperationsTipRequest extends OperationsTipContext {
   minSequenceNumber?: bigint;
 }
 
-export interface DecodedHistoricalMultiProof {
+export interface DecodedOperationMultiProof {
   /**
    * The root decoded from a subscribe proof. When the proof includes an
    * ops-root witness this is the current/global root reconstructed from that
@@ -162,7 +162,7 @@ export interface VerifiedCurrentKeyRangeProof {
 export interface OrderedSubscribeProof {
   resumeSequenceNumber: bigint;
   tip: bigint;
-  proof: DecodedHistoricalMultiProof;
+  proof: DecodedOperationMultiProof;
 }
 
 export type OrderedQmdbClientOptions = SdkClientOptions & {
@@ -245,7 +245,7 @@ async function operationRangeProofBytes(
   if (!response.proof) {
     throw new Error('qmdb getOperationRange response missing proof');
   }
-  return toBinary(HistoricalOperationRangeProofSchema, response.proof);
+  return toBinary(OperationRangeProofSchema, response.proof);
 }
 
 async function operationsProofBytes(
@@ -264,7 +264,7 @@ async function operationsProofBytes(
   if (!response.proof) {
     throw new Error('qmdb getOperations response missing proof');
   }
-  return toBinary(HistoricalMultiProofSchema, response.proof);
+  return toBinary(OperationMultiProofSchema, response.proof);
 }
 
 export class QmdbOperationLogClient {
@@ -585,12 +585,12 @@ export class OrderedQmdbClient {
       if (!frame.proof) {
         throw new Error('qmdb subscribe response missing proof');
       }
-      const proofBytes = toBinary(HistoricalMultiProofSchema, frame.proof);
-      const { tip, ...proof } = decode_historical_multi_proof_operations(
+      const proofBytes = toBinary(OperationMultiProofSchema, frame.proof);
+      const { tip, ...proof } = decode_operation_multi_proof_operations(
         proofBytes,
         this.merkleFamily,
         this.hashFamily,
-      ) as Omit<DecodedHistoricalMultiProof, 'proofSizeBytes'> & { tip: bigint };
+      ) as Omit<DecodedOperationMultiProof, 'proofSizeBytes'> & { tip: bigint };
       yield {
         resumeSequenceNumber: frame.resumeSequenceNumber,
         tip,
@@ -603,7 +603,7 @@ export class OrderedQmdbClient {
     request: OperationRangeRequest,
     expectedRoot: BytesLike,
     options?: CallOptions,
-  ): Promise<VerifiedHistoricalMultiProof> {
+  ): Promise<VerifiedOperationMultiProof> {
     assertOperationWindow(request);
     assertOptionalMinSequenceNumber(request.minSequenceNumber);
     const [, proofBytes] = await Promise.all([

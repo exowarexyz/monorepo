@@ -3,154 +3,126 @@
 [![Crates.io](https://img.shields.io/crates/v/exoware-sdk.svg)](https://crates.io/crates/exoware-sdk)
 [![Docs.rs](https://docs.rs/exoware-sdk/badge.svg)](https://docs.rs/exoware-sdk)
 
-Interact with the Exoware API in Rust.
+Read and write Exoware's immutable key-value Store from Rust. The SDK also provides
+range queries, reductions, log subscriptions, pruning, and log retention controls.
 
-`StoreClient` supports HTTP and HTTPS endpoints. HTTPS connections verify certificates using the
-platform trust configuration.
+## Getting started
 
-## Status
+Add the SDK and the dependencies used by this example:
 
-`exoware-sdk` is **ALPHA** software and is not yet recommended for production use. Developers should expect breaking changes and occasional instability.
-
-## Put compatibility
-
-`StoreClient` sends Put requests using Connect unary protobuf, uncompressed by
-default or with the zstd option below. Put rejects Connect JSON, gzip request
-compression, gRPC, and gRPC-Web. Custom clients must select Connect unary with
-binary protobuf. See the [Put compatibility table](../../proto/README.md#put-client-compatibility)
-for supported formats and the restrictions on custom zstd encoders.
-
-## Put limits and batching
-
-The published limits are available under `exoware_sdk::limits`. See the
-[language-independent protocol contract](../../proto/README.md) for the
-application limits, transport byte limits, and size errors. The [server documentation](../../server/README.md#protocol-limits)
-describes transport and response decode budgets.
-
-`StoreWriteBatch::encoded_len` reports the exact uncompressed protobuf size of
-the staged `PutRequest`. `StoreWriteBatch::split` creates ordered batches that
-fit positive row and byte limits without copying or re-prefixing staged rows.
-An empty batch produces no chunks. An entry that cannot fit alone returns an
-error. Each chunk is atomic as one write, but splitting creates several writes.
-Concurrent commits may be sequenced in a different order from the returned batches.
-Exoware data is immutable. Applications own publication coordination across chunks.
-
-## Put retries
-
-Put retries use `RetryConfig` only for an explicit temporary admission rejection
-that guarantees the backend has not received the batch. They honor the server's
-minimum retry delay and retain the same atomic batch. `RetryConfig::disabled()`
-disables these retries. When configured, `request_timeout` covers all attempts
-and backoff together. Generic errors, timeouts, and lost responses are not
-automatically retried. See the [admission retry contract](../../proto/README.md#admission-retries).
-
-## Request compression
-
-Outgoing requests support `ConnectRequestCompression::None` (the default) and
-`ConnectRequestCompression::Zstd { level }`. The SDK still decodes gzip responses.
-Select zstd and its compression level on the client builder.
-
-`ConnectRequestCompression::Gzip` has been removed. Replace it with `None` or
-`Zstd { level }` because Put accepts only identity and zstd request bodies.
-
-```rust
-use exoware_sdk::{ConnectRequestCompression, StoreClient};
-
-let client = StoreClient::builder()
-    .url("http://localhost:10000")
-    .connect_request_compression(ConnectRequestCompression::Zstd { level: -1 })
-    .build()?;
+```sh
+cargo add exoware-sdk bytes
+cargo add tokio --features macros,rt-multi-thread
 ```
 
-## Store Key Prefixes
-
-Use `StoreKeyPrefix` when multiple logical QMDB, SQL, or raw KV instances share one Store database. The prefix is applied by the SDK, so higher-level clients keep using their normal logical keys:
+For local development, start the
+[simulator](../../examples/simulator/README.md) on port 10000. This example writes
+a batch and reads it at or after the returned sequence:
 
 ```rust
+use bytes::Bytes;
 use exoware_sdk::{StoreClient, StoreKeyPrefix};
 
-let base = StoreClient::new("http://localhost:10000");
-let orders = base.prefixed(StoreKeyPrefix::new(vec![1])?);
-let accounts = base.prefixed(StoreKeyPrefix::new(vec![2])?);
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let client = StoreClient::builder()
+        .url("http://localhost:10000")
+        .build()?;
+    let store = client.prefixed(StoreKeyPrefix::new(Bytes::from_static(b"example/"))?);
+    let key = Bytes::from_static(b"greeting");
+
+    let sequence = store.ingest().put(&[(&key, b"hello".as_slice())]).await?;
+    let reader = store.create_session_with_sequence(sequence);
+    let value = reader.get(&key).await?;
+    assert_eq!(value.as_deref(), Some(b"hello".as_slice()));
+    Ok(())
+}
 ```
 
-For an atomic write spanning multiple prefixed clients, add each logical row through the client that owns it and commit once:
+The builder reads `EXOWARE_API_KEY` unless you supply `.api_key(token)`. Use a
+credential issued for the deployment with the scopes your operations need.
+HTTP and HTTPS endpoints are supported. HTTPS uses platform certificate trust.
+For separate read and write origins, set the service URLs on
+[`StoreClientBuilder`](https://docs.rs/exoware-sdk/latest/exoware_sdk/struct.StoreClientBuilder.html).
+The [remote example](examples/remote.rs) shows this configuration and a range scan:
+
+```sh
+EXOWARE_URL=https://query.example.com \
+    EXOWARE_WRITE_URL=https://write.example.com \
+    EXOWARE_API_KEY=your-token \
+    cargo run -p exoware-sdk --example remote
+```
+
+Run that command from this repository, using your deployment's URLs and token.
+
+## Namespaces and atomic writes
+
+`StoreKeyPrefix` adds a namespace to keys sent to the Store and removes it from
+returned keys. Choose non-overlapping prefixes for logical stores that should be
+independent. Prefix bytes count toward the physical key limit, so
+`max_logical_key_len()` reports the remaining capacity. The same mechanism lets
+[QMDB](../../qmdb/README.md) and [SQL](../../sql/README.md) instances share a Store.
+
+To write across namespaces atomically, stage each row through its owning client
+and commit the batch through the underlying `StoreClient`:
 
 ```rust
 use exoware_sdk::StoreWriteBatch;
 
+let orders = client.prefixed(StoreKeyPrefix::new(Bytes::from_static(b"orders/"))?);
+let accounts = client.prefixed(StoreKeyPrefix::new(Bytes::from_static(b"accounts/"))?);
 let mut batch = StoreWriteBatch::new();
-batch.push(&orders, &order_key, order_value)?;
-batch.push(&accounts, &account_key, account_value)?;
-let sequence = batch.commit(&base).await?;
+batch.push(&orders, &Bytes::from_static(b"42"), b"created")?;
+batch.push(&accounts, &Bytes::from_static(b"7"), b"active")?;
+let sequence = batch.commit(&client).await?;
 ```
 
-## Read Sessions
+A commit is one atomic Put. For larger uploads, `encoded_len()` reports the
+uncompressed protobuf size, including prefixes. `split(max_rows, max_encoded_bytes)`
+consumes the batch and returns ordered chunks within those limits. Committing
+chunks creates separate writes. Handle partial completion and coordinate publication
+yourself. Concurrent commits can be sequenced out of order.
+See the [Put contract](../../proto/README.md) for limits, errors, and splitting
+constraints. Rust exposes the published limits in `exoware_sdk::limits`. Commits
+do not apply those size limits locally.
 
-`ReadSession::monotonic(client, floor)` advances its minimum sequence as reads
-observe newer responses. `ReadSession::fixed(client, floor)` keeps that minimum
-unchanged. Query responses will still be at the server's current sequence; neither session mode pins a historical snapshot.
+## Read consistency
 
-```rust
-use exoware_sdk::ReadSession;
+A write's sequence is a minimum read position. Query replicas may lag, so pass
+that sequence to `create_session_with_sequence` when a read depends on the write.
+The resulting monotonic session raises its floor as it observes newer query
+responses or log batches. `create_session()` starts without a floor.
 
-let session = ReadSession::monotonic(orders.clone(), None);
-let reader = ReadSession::fixed(orders.clone(), Some(publication_sequence));
-```
+`ReadSession::fixed(store, Some(sequence))` keeps the configured floor unchanged.
+Neither policy pins a historical snapshot: reads may observe a later sequence.
+Clones share observations, and each request uses the floor known when it starts.
+`with_min_sequence_number(sequence)` derives a stronger reader without changing
+the parent's configured floor. See
+[`ReadSession`](https://docs.rs/exoware-sdk/latest/exoware_sdk/struct.ReadSession.html)
+for observation tracking and log reads.
 
-`min_sequence_number()` reports the effective read floor, and `evaluated_sequence()`
-reports the highest observed sequence. Clones share observations.
-Each request uses the floor known when it starts; overlapping reads proceed independently.
-`None` means no requirement or observation; `Some(0)` is an explicit sequence zero.
-`with_min_sequence_number(sequence)` derives a reader with a stronger floor when
-needed, for either policy. It leaves the parent's configured floor unchanged and
-does not count the requirement as an observation.
+## Request options
 
-`create_session()` and `create_session_with_sequence(...)` create monotonic sessions.
+Requests are uncompressed by default. To enable zstd, set
+`.connect_request_compression(ConnectRequestCompression::Zstd { level: 3 })` on
+the builder. Response decompression supports zstd and gzip.
 
-`get_batch(sequence)` and `subscribe(filter, cursor)` also record the sequence of
-each returned log batch. Subsequent queries in a monotonic session require at least
-that sequence; fixed sessions record the observations and retain their configured floor.
+`RetryConfig` controls retries. Put retries are limited to server rejections that
+confirm the batch was never admitted. Generic errors, timeouts, and lost responses
+are not automatically retried. `RetryConfig::disabled()` disables retries.
+A configured `request_timeout` covers all Put attempts and backoff. See the
+[admission retry contract](../../proto/README.md#admission-retries) before adding
+application retries.
 
-## Examples
+The builder also accepts a custom transport or independent HTTP/2 connection
+pools through `balanced_http2_transport`. The latter requires prior-knowledge h2c
+for HTTP and HTTP/2 through ALPN for HTTPS. Request timeouts bound unary calls and
+stream opening, not the lifetime of an opened stream. See the
+[builder reference](https://docs.rs/exoware-sdk/latest/exoware_sdk/struct.StoreClientBuilder.html)
+and [transport types](https://docs.rs/exoware-sdk/latest/exoware_sdk/transport/index.html)
+for configuration.
 
-`remote` writes a batch to a deployed endpoint and reads it back, pinning each read to the sequence it just committed:
+## Status
 
-```bash
-EXOWARE_URL=https://query.<deployment>.<domain> \
-    EXOWARE_API_KEY=<token> \
-    cargo run -p exoware-sdk --example remote
-```
-
-`EXOWARE_API_KEY` is the credential a public deployment requires, and the builder reads it from
-the environment when `.api_key(...)` is not set. This example needs one covering both scopes.
-
-Add `EXOWARE_WRITE_URL` to reach a deployment that serves its write path on a separate origin.
-
-## RPC Transports
-
-High-throughput writers can opt into independent HTTP clients per RPC origin.
-
-```rust
-use std::num::NonZeroUsize;
-use exoware_sdk::{transport::BalancedHttp2Config, StoreClient};
-
-let client = StoreClient::builder()
-    .url("http://localhost:10000")
-    .balanced_http2_transport(
-        BalancedHttp2Config::default()
-            .with_connections_per_origin(NonZeroUsize::new(4).unwrap()),
-    )
-    .build()?;
-```
-
-HTTP uses prior-knowledge h2c. HTTPS requires HTTP/2 through ALPN and uses platform trust by
-default. `with_tls_config` accepts custom roots and client certificates but replaces configured
-ALPN protocols with HTTP/2. HTTP/2 PINGs detect dead peers on open and idle connections. The request
-timeout bounds complete unary calls. It also bounds query streams through their first frame and
-subscriptions through their response headers without stopping the streaming body after the call
-returns.
-
-`StoreClientBuilder::client_transport` accepts types re-exported under `exoware_sdk::transport`.
-The SDK still owns authentication, cookies, and compression preferences. Tower services can use
-`ServiceTransport`. A `tower::BoxError` must first be mapped into a concrete `std::error::Error`.
+`exoware-sdk` is **ALPHA** software and is not yet recommended for production use.
+Developers should expect breaking changes and occasional instability.

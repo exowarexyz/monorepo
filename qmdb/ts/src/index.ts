@@ -5,7 +5,7 @@ export {
   OrderedQmdbClient,
   QmdbOperationLogClient,
   type BytesLike,
-  type DecodedHistoricalMultiProof,
+  type DecodedOperationMultiProof,
   type HashFamily,
   type LocatedRawOperation,
   type LocatedOrderedOperation,
@@ -29,7 +29,7 @@ export {
   type VerifiedFixedUnorderedUpdate,
   type VerifiedFixedUnorderedUpdateProof,
   type VerifiedFixedUnorderedUpdatesProof,
-  type VerifiedHistoricalMultiProof,
+  type VerifiedOperationMultiProof,
   type VerifiedRawOperationRangeProof,
   type VerifiedRawOperationsProof,
 } from './client.js';

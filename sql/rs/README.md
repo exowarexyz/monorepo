@@ -1,132 +1,131 @@
 # exoware-sql
 
-SQL engine backed by the Exoware API.
+Run SQL over tables stored in an Exoware Store. `exoware-sql` maps each table's rows
+and secondary indexes onto ordered Store keys, plans queries with
+[DataFusion](https://datafusion.apache.org/), and pushes key-range filters and
+supported aggregates down to the Store. `SqlServer` exposes the same tables over the
+`sql.v1` ConnectRPC API for the [TypeScript client](../ts/README.md).
 
-## Status
+## Getting started
 
-`exoware-sql` is **ALPHA** software and is not yet recommended for production use. Developers should expect breaking changes and occasional instability.
+Add the crate, the SDK, and the dependencies used by this example. Use the same
+`datafusion` major version as [`exoware-sql`](Cargo.toml), because schema types such as
+`DataType` come from DataFusion's Arrow re-export.
 
-## Library usage
+```sh
+cargo add exoware-sql exoware-sdk datafusion@55
+cargo add tokio --features macros,rt-multi-thread
+```
 
-`exoware-sql` is library-first: register `KvSchema` tables against a [`StoreClient`](https://docs.rs/exoware-sdk), then run SQL.
+For local development, start the [simulator](../../examples/simulator/README.md) on
+the port the examples expect:
 
-All table registration goes through `KvSchema`, which auto-assigns each table
-a one-byte key prefix (table id in the high nibble, key family in the low
-nibble) so multiple tables can coexist on a single KV store. DataFusion
-handles JOINs natively once tables are registered.
+```sh
+cargo run -p exoware-simulator -- server run --port 10000
+```
 
-To run multiple independent SQL schemas, or SQL alongside QMDB, on one Store,
-give each instance a distinct SDK `StoreKeyPrefix` and pass that prefixed
-`StoreClient` to `KvSchema`.
+Describe a table, write two rows, and query them:
 
 ```rust
-use exoware_sdk::{StoreClient, StoreKeyPrefix};
-use exoware_sql::{IndexSpec, KvSchema, SqlContext, TableColumnConfig};
 use datafusion::arrow::datatypes::DataType;
+use exoware_sdk::{ReadSession, StoreClient, StoreKeyPrefix};
+use exoware_sql::{CellValue, IndexSpec, KvSchema, SqlContext, TableColumnConfig};
 
-let client = StoreClient::new("http://localhost:10000").prefixed(StoreKeyPrefix::identity());
-let ctx = SqlContext::new(client.clone());
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let client = StoreClient::new("http://localhost:10000").prefixed(StoreKeyPrefix::identity());
+    let schema = KvSchema::new(client.clone()).table(
+        "orders",
+        vec![
+            TableColumnConfig::new("order_id", DataType::Int64, false),
+            TableColumnConfig::new("status", DataType::Utf8, false),
+            TableColumnConfig::new("amount_cents", DataType::Int64, false),
+        ],
+        vec!["order_id".to_string()],
+        vec![IndexSpec::lexicographic("status_idx", vec!["status".to_string()])?
+            .with_cover_columns(vec!["amount_cents".to_string()])],
+    )?;
 
-let schema = KvSchema::new(client)
-    .table("customers", vec![
-        TableColumnConfig::new("customer_id", DataType::Int64, false),
-        TableColumnConfig::new("name", DataType::Utf8, false),
-    ], vec!["customer_id".to_string()], vec![])?
-    .table("orders", vec![
-        TableColumnConfig::new("order_id", DataType::Int64, false),
-        TableColumnConfig::new("customer_id", DataType::Int64, false),
-        TableColumnConfig::new("amount", DataType::Int64, false),
-    ], vec!["order_id".to_string()], vec![
-        IndexSpec::lexicographic("cust_idx", vec!["customer_id".to_string()])?
-            .with_cover_columns(vec!["amount".to_string()]),
-    ])?;
-ctx.register_schema(schema)?;
+    let mut writer = schema.batch_writer();
+    for (id, status, cents) in [(1, "open", 1250), (2, "paid", 800)] {
+        writer.insert(
+            "orders",
+            vec![CellValue::Int64(id), CellValue::Utf8(status.into()), CellValue::Int64(cents)],
+        )?;
+    }
+    let sequence = writer.flush().await?;
 
-// Standard SQL JOINs are supported:
-// SELECT c.name, o.amount FROM orders o JOIN customers c ON ...
+    // Require the write's sequence so a lagging replica cannot answer the query.
+    let ctx = SqlContext::builder(client.clone())
+        .with_read_session(ReadSession::monotonic(client, Some(sequence)))
+        .build();
+    ctx.register_schema(schema)?;
+    ctx.sql("SELECT status, SUM(amount_cents) AS total FROM orders GROUP BY status")
+        .await?
+        .show()
+        .await?;
+    Ok(())
+}
 ```
 
-A convenience method `.orders_table(name, index_specs)` registers the
-pre-defined orders schema (region, customer_id, order_id, amount_cents, status).
+`SqlContext` wraps a DataFusion session, so JOINs, views, and other DataFusion SQL work
+once tables are registered. Use `ctx.datafusion()` for DataFusion APIs that the
+context does not forward. The [examples](#examples) cover joins, more column types,
+and versioned keys.
 
-## SQL service results
+## Designing tables
 
-`SqlServer` returns Query results and matching Subscribe batches as native Arrow
-IPC streams. Each payload includes its result schema, including computed column
-types, decimal scales and timestamp units. Query serializes DataFusion batches as
-they arrive. Each subscription frame contains an independent IPC stream and the
-underlying atomic ingest sequence number.
+A `KvSchema` is an ordered list of tables over one `PrefixedStoreClient`. It assigns
+each table a key prefix in registration order, so every reader and writer must build
+the schema with the same tables in the same order. One schema holds at most 16
+tables, and each table holds at most 15 secondary indexes. The
+[key layout](../docs/query-planning.md#key-layout) explains these limits.
 
-Rust consumers can decode the payload with Arrow `StreamReader`. The TypeScript
-SQL client returns native Arrow `Table` objects. Schema-only empty results and
-zero-column row counts are preserved. The Tables RPC separately describes the
-Store-specific primary keys and indexes.
+To keep several SQL schemas, or SQL and [QMDB](../../qmdb/README.md), on one Store,
+give each a distinct SDK `StoreKeyPrefix` that does not overlap another tenant's
+prefix. SQL scans are bounded by the schema's prefix, so an overlapping tenant's keys
+can appear in its tables.
 
-## Versioned tables (composite primary keys)
+### Columns and keys
 
-Tables can have composite primary keys for versioned entity patterns.
-`table_versioned()` is a convenience for `(entity, version)` primary keys where:
+Every supported column type can be stored as a value. Primary keys and index keys
+accept a subset:
 
-- the entity column may be `Utf8`, `FixedSizeBinary`, `Int64`, or `UInt64`
-- the version column is `UInt64`
+| Arrow type | Primary key | Index key | Encoded key width |
+|---|---|---|---|
+| `Int64`, `UInt64` | yes | yes | 8 bytes |
+| `Utf8`, `LargeUtf8`, `Utf8View` | yes | yes | variable |
+| `FixedSizeBinary(n)` | yes | yes | `n` bytes |
+| `Float64`, `Date64`, `Timestamp` | no | yes | 8 bytes |
+| `Date32` | no | yes | 4 bytes |
+| `Boolean` | no | yes | 1 byte |
+| `Decimal128(p, s)` | no | yes | 16 bytes |
+| `Decimal256(p, s)` | no | yes | 32 bytes |
+| `Binary`, `LargeBinary`, `BinaryView` | no | no | |
+| `List<T>`, `LargeList<T>` of `Int64`, `Float64`, `Boolean`, or `Utf8` | no | no | |
 
-The encoded primary-key payload is still ordered as `[entity bytes][version_be]`,
-so the version lives in the trailing 8 bytes of the logical primary key even
-when the entity value is variable-length:
+Text keys use an escaped, terminated encoding that preserves sort order, including
+embedded NUL characters. The complete encoded key, with its prefixes, must fit the
+Store key-length limit. Index key columns must be non-nullable. Timestamp columns are
+exposed with microsecond units and keep their timezone, and `LargeList` columns are
+exposed as `List`.
+
+### Primary keys
+
+A primary key identifies one immutable row. Writing the same primary key twice has
+undefined results, and neither write path checks for it. To record changes to a
+logical entity, add a version column to its primary key.
+
+Pass several column names to `KvSchema::table` for a composite primary key. Keys sort
+by their columns in order, so put the columns that queries constrain by equality
+first. A range constraint on a later column narrows the scan only when every earlier
+column has an equality constraint.
+
+`KvSchema::table_versioned` declares an `(entity, version)` primary key. Use a
+`UInt64` column for the version. Versions sort numerically within each entity, so
+the latest version at or below `V` is a short reverse range scan:
 
 ```rust
-let schema = KvSchema::new(client).table_versioned(
-    "documents",
-    vec![
-        TableColumnConfig::new("doc_id", DataType::FixedSizeBinary(16), false),
-        TableColumnConfig::new("version", DataType::UInt64, false),
-        TableColumnConfig::new("title", DataType::Utf8, false),
-        TableColumnConfig::new("body", DataType::Utf8, true),
-    ],
-    "doc_id",   // entity column
-    "version",  // version column (UInt64)
-    vec![],
-)?;
-```
-
-UInt64 is encoded big-endian, so versions sort numerically. "Latest version
-<= V" maps to a reverse range scan:
-
-```sql
-SELECT * FROM documents
-WHERE doc_id = X'AA..AA' AND version <= 42
-ORDER BY version DESC LIMIT 1
-```
-
-For compaction pruning of an unindexed versioned table, the schema builds the
-policy from the table's assigned prefix and entity encoding:
-
-```rust
-let policy = schema.keep_latest_versions_policy("documents", 1)?;
-```
-
-The constructor requires exactly two primary key columns, `(entity, UInt64
-version)`, and rejects tables with secondary indexes. Apply the returned SDK
-`PrunePolicy` through the same `PrefixedStoreClient` used to create the schema.
-Store pruning does not cascade to secondary indexes, so disable primary-row
-retention before adding indexes. The constructor cannot validate policies
-created directly through the SDK or later schema changes.
-
-Any composite PK (not just versioned) can be created via `table()` with
-multiple column names:
-
-```rust
-.table("events", columns, vec!["tenant_id".to_string(), "event_id".to_string()], specs)?
-```
-
-`BatchWriter` works with versioned tables too. A versioned table is still just
-a table with a composite primary key, so programmatic inserts can write rows
-directly without going through Arrow:
-
-```rust
-use exoware_sql::{CellValue, KvSchema, TableColumnConfig};
-use datafusion::arrow::datatypes::DataType;
-
 let schema = KvSchema::new(client).table_versioned(
     "documents",
     vec![
@@ -138,655 +137,196 @@ let schema = KvSchema::new(client).table_versioned(
     "version",
     vec![],
 )?;
-
-let mut batch = schema.batch_writer();
-batch.insert(
-    "documents",
-    vec![
-        CellValue::FixedBinary(vec![
-            0xAA, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
-        ]),
-        CellValue::UInt64(1),
-        CellValue::Utf8("Draft".to_string()),
-    ],
-)?;
- let _sequence_number = batch.flush().await?;
 ```
 
-See `examples/versioned_kv.rs` for a larger versioned insert/query example.
-
-## Example programs
-
-```bash
-cargo run -p exoware-sql --example orders_kv      # single-table demo
-cargo run -p exoware-sql --example join_kv         # multi-table JOIN demo
-cargo run -p exoware-sql --example types_kv        # FixedSizeBinary, UInt64, BatchWriter
-cargo run -p exoware-sql --example versioned_kv    # versioned composite PK demo
+```sql
+SELECT * FROM documents
+WHERE doc_id = X'AA000000000000000000000000000001' AND version <= 42
+ORDER BY version DESC LIMIT 1
 ```
 
-## Scan consistency
-
-Store reads within one `Query` RPC share a `ReadSession`.
-The request can supply an initial minimum sequence. Each observed response
-advances the floor for subsequent reads, including pagination, index lookups,
-and aggregate reductions. This preserves monotonic freshness across query
-workers behind a load balancer. It does not provide snapshot isolation.
-Queries without Store reads do not report an observed sequence.
-
-`SqlContext::new(client)` installs a monotonic read session by default.
-Reusing the context carries observations across SQL statements, including scans
-and aggregate reductions. Independently constructed contexts start with
-independent sessions.
-
-Use `SqlContext::builder(client)` to supply a read session or customize
-DataFusion settings. The builder installs the read session after applying the
-DataFusion configuration:
+To prune old versions, build a Store prune policy from the schema and apply it
+through the same `PrefixedStoreClient` that created the schema:
 
 ```rust
-use exoware_sdk::ReadSession;
-use exoware_sql::SqlContext;
-use datafusion::prelude::SessionConfig;
-
-let session = ReadSession::monotonic(client.clone(), None);
-let ctx = SqlContext::builder(client)
-    .with_read_session(session)
-    .with_config(SessionConfig::new().with_batch_size(8192))
-    .build();
-
-ctx.sql("SELECT * FROM customers").await?.collect().await?;
-ctx.sql("SELECT * FROM orders").await?.collect().await?;
-
-let observed_sequence = ctx.read_session().evaluated_sequence();
+let policy = schema.keep_latest_versions_policy("documents", 1)?;
 ```
 
-`ctx.with_read_session(session)` returns a context that shares the registered
-catalogs but uses the supplied session. The context and session clones share
-observations. A monotonic session applies the highest observed sequence to later
-statements; a fixed session keeps its configured minimum. Store scans and
-aggregates require a configured read session. Use `ctx.read_session()` to inspect
-the active session, and use
-`ctx.datafusion()` for DataFusion APIs that the SQL context does not expose
-directly.
+The policy requires a table whose primary key is exactly `(entity, UInt64 version)`
+and that has no secondary indexes. Store pruning removes base rows but never their
+index entries, so remove the policy before adding an index to the table. The schema
+cannot check policies built directly with the SDK or schema changes made after the
+policy was applied.
 
-Primary keys identify immutable rows. Inserting the same primary key more than
-once has undefined behavior. The write path does not enforce uniqueness. Use a
-version column in the primary key to represent changes to a logical entity.
-Base rows and their secondary index entries are written in one atomic batch.
+### Secondary indexes
 
-## Aggregate pushdown
+Without a usable index, a filter on a non-key column scans the whole table. An
+`IndexSpec` names its key columns and two optional properties:
 
-`exoware-sql` sends supported single-table aggregates to Store's `Reduce` RPC.
-Workers return aggregate states or distinct group keys instead of full input
-rows. Supported built-in aggregates are `COUNT`, `SUM`, `MIN`, `MAX`, and numeric
-`AVG` returning double (a pushed sum and count). Group-only queries and
-`SELECT DISTINCT` use the same grouping path. A finite limit directly above a
-group-only aggregate keeps it in DataFusion so its streaming and DISTINCT limit
-optimizations remain available. `DISTINCT` inside an aggregate, such as
-`COUNT(DISTINCT x)`, uses DataFusion's normal execution. Grouped `Float64` `MIN`
-and `MAX` use Reduce, with native DataFusion aggregation at both the worker and
-the SQL coordinator.
-
-The adapter resolves column aliases and transparent projection chains. Supported
-inputs include columns, literals, numeric `+`, `-`, `*`, `/`, `lower`, and
-`date_trunc('day', ...)` for timestamps without timezone metadata. Tagged
-timestamps retain DataFusion's checked calendar path. Casts retain their
-semantics: identity casts, compatible string representations,
-decimal precision widening without rescaling, and integer-to-double conversion
-can be pushed. Integer-to-double `CAST` and `TRY_CAST` execute as native Store
-casts. Narrowing casts, unsupported functions, and intervening row limits
-stay in DataFusion.
-
-Aggregate `FILTER` and equivalent `CASE` expressions can be pushed when every
-original filter is exactly representable by the Store predicate compiler.
-Grouped aggregates pass explicit `FILTER` predicates to native DataFusion
-aggregates at the worker. Scalar aggregates filter before evaluating their
-arguments, so their predicates also narrow the Store access path. `CASE` guards
-filter input rows before evaluating their guarded expressions. Precomputed
-arguments beneath scalar `FILTER` or `CASE` stay in DataFusion to preserve their
-position before the guard. Grouped `FILTER` keeps computed projections eligible
-for Reduce because native grouped aggregation evaluates arguments first. Every request applies its complete row predicate at
-the worker, because raw range bounds can include rows that scan-time key checks
-would exclude. A covering index reduces the scanned range when available. Primary-key ranges can
-also use worker-side filtering on stored values, so unindexed predicates do not
-require returning full rows. All filter, group, and aggregate inputs must be
-available from the selected access path. Store key-field expressions use fixed
-byte offsets. Variable-width SQL key fields and fields following them therefore
-use stored index values when available, or fall back to native decoding.
-
-Aggregates sharing ranges, grouping expressions, and a row filter share one
-Reduce request, including grouped aggregates with different native filters.
-Output columns retain their original order. Native filters retain every group,
-even when none of its rows contribute to an aggregate. If every aggregate has a
-`CASE` guard, a group-only request preserves groups outside those guards. A
-group-only query itself uses one request per range.
-
-Workers evaluate expressions with native DataFusion and Arrow. Integer addition,
-subtraction, multiplication, and sums use the wrapping behavior of ordinary SQL
-expressions. Integer division truncates and reports zero or overflow errors;
-floating division follows IEEE behavior, including zero divisors. AVG converts
-each integer input to double before accumulation.
-NULLs retain SQL aggregate semantics. Floating-point results, including NaN
-extrema, follow native partial/final execution and can depend on range partitioning
-and merge order. Reduce returns query errors when required
-payload decoding or expression evaluation fails. Requests without value-dependent
-expressions do not decode payloads. Native base-row scans skip undecodable
-payloads, so queries over corrupt data can behave differently across plans.
-Requests use one read session with a shared minimum sequence number.
-That freshness floor does not pin a snapshot.
-Jobs execute in order, and range results merge in order. Range requests overlap
-up to the query's DataFusion `target_partitions` setting from the outset. Each
-request uses the read session's current minimum sequence.
-
-Unsupported shapes use the normal streaming scan and DataFusion execution.
-Reduce avoids transferring full input rows. Workers aggregate with DataFusion
-and stream completed groups in batches. The SQL coordinator feeds those states
-into DataFusion's final aggregate using the query's memory pool and spill
-configuration. Both stages keep groups in memory by default. Workers configure
-their native memory pool and spilling through `QueryState::with_runtime`.
-Transport buffers and materialized query results have separate memory ownership.
-A covering index is most useful when it contains the aggregate inputs and all
-filter/group columns.
-
-## Z-Order secondary indexes
-
-`exoware-sql` now supports a Z-Order (Morton-order) secondary-index layout for
-multi-column predicate boxes.
-
-Declare one with `IndexSpec::z_order(...)`:
+- **Cover columns** copy non-key values into each index entry. A query whose
+  projected and filtered columns are all available from the index reads only the
+  index. Otherwise each matching entry needs a lookup of its base row. Primary-key
+  columns are always available from the index key and cannot be listed as cover
+  columns.
+- **Layout** is lexicographic by default. A lexicographic index serves equality on
+  leading key columns followed by a range on the next one. `IndexSpec::z_order`
+  interleaves fixed-width key columns so a box such as
+  `x BETWEEN 100 AND 200 AND y BETWEEN 400 AND 500` maps to key ranges. Z-order
+  ranges include false positives, and a residual check removes them.
 
 ```rust
-let schema = KvSchema::new(client).table(
-    "points",
-    vec![
-        TableColumnConfig::new("x", DataType::Int64, false),
-        TableColumnConfig::new("y", DataType::Int64, false),
-        TableColumnConfig::new("id", DataType::Int64, false),
-        TableColumnConfig::new("value", DataType::Int64, false),
-    ],
-    vec!["id".to_string()],
-    vec![
-        IndexSpec::z_order("xy_z", vec!["x".to_string(), "y".to_string()])?
-            .with_cover_columns(vec!["value".to_string()]),
-    ],
-)?;
+let by_customer = IndexSpec::lexicographic(
+    "customer_time",
+    vec!["customer_id".to_string(), "created_at".to_string()],
+)?
+.with_cover_columns(vec!["total".to_string()]);
+let by_point = IndexSpec::z_order("xy", vec!["x".to_string(), "y".to_string()])?;
 ```
 
-Use Z-Order when your hot queries look like:
+Every cover column adds storage, write bandwidth, and compaction work to each index
+entry. Choose the columns that hot queries read. An index that covers an aggregate's
+filter, group, and input columns also lets the Store
+compute that aggregate over the index's narrower key range, as described in the
+[query planning guide](../docs/query-planning.md#aggregate-pushdown).
 
-```sql
-SELECT id, value
-FROM points
-WHERE x BETWEEN 100 AND 200
-  AND y BETWEEN 400 AND 500;
-```
+A covering index entry with a missing or undecodable payload fails the query. Reads
+never repair an index entry from its base row, so index results are only as complete
+as the entries that writers and backfills emit.
 
-Behavior notes:
+## Writing rows
 
-- use `IndexSpec::lexicographic(...)` for normal concatenated secondary indexes
-- Z-Order scans use Morton bounding spans, so they may read false positives and
-  then filter them locally
-- `EXPLAIN` reports the layout in the access path, for example:
-  - `mode=secondary_index(xy_z, z_order)`
-- aggregate pushdown can also use Z-Order indexes now, but it relies on the
-  coordinated shared reduction protocol / worker support in the query worker:
-  - Z-Order-aware key extraction
-  - worker-side residual predicate enforcement before reduction
-- if an aggregate/filter/group expression cannot be represented safely in that
-  pushed reduction protocol, exoware-sql falls back to the normal non-pushdown path
+`KvSchema::batch_writer` returns a `BatchWriter` that encodes rows as `CellValue`
+vectors in column order and writes each row's base entry and all of its index entries.
+`flush` uploads the pending rows, across tables, as one atomic Store batch and returns
+its sequence number, or `0` when nothing was pending. If a flush fails, the writer
+keeps its rows, and the next flush retries that batch alone before later rows are
+uploaded. To commit SQL rows atomically with other Store writes, stage them into an
+SDK `StoreWriteBatch` with `prepare_flush` and `stage_flush`, then report the commit
+result with `mark_flush_persisted` or `mark_flush_failed`.
 
-## Plan inspection
+SQL `INSERT` writes through the same schema, and each statement becomes one atomic
+batch. It materializes Arrow batches first, so `BatchWriter` is the more efficient
+path for application ingest. The Store's request-size limit bounds a single batch,
+and an oversized statement or flush returns the ingest error.
 
-Use `EXPLAIN` (or `EXPLAIN ANALYZE`) to inspect exoware-sql's custom physical-plan
-nodes before running an expensive query.
+## Adding indexes to existing tables
 
-- `KvScanExec` now reports:
-  - chosen access path (`primary_key` or `secondary_index(<name>, <layout>)`)
-  - pushed predicate summary
-  - whether the predicate is fully enforced by the chosen key/index path
-  - whether a residual row recheck is still required
-  - range count
-  - whether the path is effectively `full_scan_like`
-- `KvAggregateExec` reports the same access-path diagnostics for pushed
-  reduction jobs
+New writes include every index in the current schema, but rows written earlier need a
+backfill. Index lists may only grow at the end: existing indexes must keep their
+position, name, key columns, cover columns, and layout. Then:
 
-This is useful for spotting queries that lost pushdown or degenerated into a
-full-row scan before you execute them.
+1. Deploy every writer with the new index list.
+2. Run the backfill, passing the index list that earlier rows were written with.
+3. Enable the new indexes for reads after the backfill finishes.
 
-Typical workflow:
+Rows written by an old writer during or after the backfill are missing from the new
+index.
 
-```sql
-EXPLAIN
-SELECT id, status, amount_cents
-FROM orders
-WHERE status = 'open' AND amount_cents >= 5;
-```
-
-DataFusion returns `plan_type` / `plan` rows. The most useful row is usually
-the `physical_plan` row containing the `KvScanExec` or `KvAggregateExec` text.
-
-Things to look for in `KvScanExec`:
-
-- `mode=primary_key`
-  - the scan is using the table's primary-key space
-- `mode=secondary_index(<name>, lexicographic)`
-  - the scan is using a normal lexicographic secondary index
-- `mode=secondary_index(<name>, z_order)`
-  - the scan is using a Z-Order secondary index
-- `exact=true`
-  - the pushed predicate is fully enforced by the chosen key/index path
-- `row_recheck=true`
-  - exoware-sql still needs to decode candidate rows and apply residual filtering
-- `full_scan_like=true`
-  - the chosen path is effectively broad enough to resemble a full table scan
-- `ranges=<N>`
-  - how many key ranges are being scanned
-
-### Example: broad / full-scan-like query
-
-```sql
-EXPLAIN
-SELECT id, status
-FROM orders;
-```
-
-Representative physical-plan output:
-
-```text
- KvScanExec: fetch=None, direction=None, mode=primary_key, predicate=<none>, exact=true, row_recheck=false, ranges=1, full_scan_like=true, query_stats=streamed_range(detail.extra: server-defined metadata)
-```
-
-Interpretation:
-
-- no predicate was pushed (`predicate=<none>`)
-- exoware-sql is scanning the primary-key space directly
-- there is no residual row filter, but the path is still broad
-- `full_scan_like=true` is the warning sign that this is effectively a full row scan
-
-### Example: indexed query with residual row filtering
-
-```sql
-EXPLAIN
-SELECT id, status, amount_cents
-FROM orders
-WHERE status = 'open' AND amount_cents >= 5;
-```
-
-Representative physical-plan output:
-
-```text
- KvScanExec: fetch=None, direction=None, mode=secondary_index(status_idx, lexicographic), predicate=status = 'open' AND amount_cents >= 5, exact=false, row_recheck=true, ranges=1, full_scan_like=false, constrained_prefix=1, query_stats=streamed_range(detail.extra: server-defined metadata)
-```
-
-Interpretation:
-
-- exoware-sql chose `status_idx`
-- the index narrowed the keyspace (`full_scan_like=false`)
-- `status = 'open'` is enforced by the index key
-- `amount_cents >= 5` still requires candidate-row rechecking
-- `exact=false` plus `row_recheck=true` means pushdown helped, but not all filtering happened at the key/index level
-
-### Example: indexed aggregate pushdown
-
-```sql
-EXPLAIN
-SELECT status, SUM(amount_cents) AS total_cents
-FROM orders
-WHERE status = 'open'
-GROUP BY status;
-```
-
-The Reduce source beneath DataFusion's final aggregate:
-
-```text
- KvAggregateExec: grouped=true, seed_job=none, aggregate_jobs=[job0{mode=secondary_index(status_idx, lexicographic), predicate=status = 'open', exact=false, row_recheck=true, ranges=1, full_scan_like=false, constrained_prefix=1}], query_stats=range_reduce(detail.extra: server-defined metadata)
-```
-
-Interpretation:
-
-- the aggregate stayed on the pushed reduction path (`KvAggregateExec`)
-- DataFusion's final aggregate merges the returned states across ranges
-- the worker-side reduction job is using `status_idx`
-- the index narrows the scanned range
-- the worker checks the complete predicate before updating aggregate states
-- this is the kind of plan you usually want for selective grouped aggregates
-
-### Example: what to do with the output
-
-As a rough rule of thumb:
-
-- good signs:
-  - `mode=secondary_index(...)`
-  - `exact=true`
-  - `row_recheck=false`
-  - `full_scan_like=false`
-- warning signs:
-  - `mode=primary_key` with `predicate=<none>`
-  - `full_scan_like=true`
-  - unexpectedly large `ranges=<N>`
-
-If you see a warning-sign plan, consider:
-
-- adding or using a more selective secondary index
-- extending cover columns so the chosen index can satisfy the query exactly
-- rewriting the predicate so more of it lands on PK/index-key columns
-- using `EXPLAIN ANALYZE` to confirm the runtime behavior matches the expected plan
-
-## Column type support
-
-| Type | PK | Index key | Value | Key width |
-|---|---|---|---|---|
-| `Int64` | yes | yes | yes | 8 bytes |
-| `UInt64` | yes | yes | yes | 8 bytes |
-| `Float64` | -- | yes | yes | 8 bytes |
-| `Boolean` | -- | yes | yes | 1 byte |
-| `Utf8` / `LargeUtf8` / `Utf8View` | yes | yes | yes | escaped variable-width UTF-8 |
-| `Date32` | -- | yes | yes | 4 bytes |
-| `Date64` | -- | yes | yes | 8 bytes |
-| `Timestamp` | -- | yes | yes | 8 bytes |
-| `Decimal128(p, s)` | -- | yes | yes | 16 bytes |
-| `Decimal256(p, s)` | -- | yes | yes | 32 bytes |
-| `FixedSizeBinary(n)` | yes | yes | yes | n bytes |
-| `Binary` / `LargeBinary` / `BinaryView` | -- | -- | yes | -- |
-| `List<T>` / `LargeList<T>` | -- | -- | yes | -- |
-
-PK-eligible types: `Int64`, `UInt64`, `Utf8`, `FixedSizeBinary`.
-Composite PKs may combine any PK-eligible types. Text keys use escaped UTF-8
-with a terminator, including embedded NUL characters. The complete encoded key
-must fit the Store key-length limit. SQL keys must use this canonical encoding.
-
-## Filter pushdown
-
-DataFusion compiles and evaluates scalar predicates, including casts, functions,
-and null handling. The adapter extracts supported constraints to prune Store key
-ranges. The table below describes this range-pruning subset. Other predicates
-still execute through DataFusion. Residuals are evaluated in batches before
-projected payload columns are materialized.
-
-| Column type | `=` | `<` `<=` `>` `>=` | `IN (...)` | `IS NULL` / `IS NOT NULL` |
-|---|---|---|---|---|
-| `Int64` | yes | yes | yes | yes |
-| `UInt64` | yes | yes | yes | yes |
-| `Float64` | yes | yes | -- | yes |
-| `Boolean` | yes | -- | -- | yes |
-| `Utf8` | yes | -- | yes | yes |
-| `Date32` | yes | yes | -- | yes |
-| `Date64` | yes | yes | -- | yes |
-| `Timestamp` | yes | yes | -- | yes |
-| `Decimal128` | yes | yes | -- | yes |
-| `Decimal256` | yes | yes | -- | yes |
-| `FixedSizeBinary` | yes | -- | yes | yes |
-| `Binary` | -- | -- | -- | -- |
-| `List` | -- | -- | -- | -- |
-
-**Composite PK pushdown**: For composite primary keys, predicates are
-evaluated left-to-right across PK columns. Equality constraints on leading
-columns narrow the key range prefix; the first column with a range constraint
-(or no constraint) determines the scan bounds. For example, with
-PK = `(entity, version)`:
-
-| Query pattern | Range produced |
-|---|---|
-| `entity = X AND version <= V` | `[entity, 0]` to `[entity, V]` |
-| `entity = X` | `[entity, 0]` to `[entity, MAX]` |
-| `entity IN (X, Y)` | two ranges: `[X, 0]..[X, MAX]`, `[Y, 0]..[Y, MAX]` |
-| no PK constraint | full table scan |
-
-**OR-to-IN folding**: Chains of `OR` equalities on the same column
-(e.g., `region = 'us' OR region = 'eu'`) are automatically folded into
-an `IN` list.
-
-## Key layout
-
-`exoware-sql` packs key kind metadata into a single bit-packed leading
-byte.
-
-Layout:
-
-- Base row / primary key:
-  - reserved prefix bits: `[table_id(4)][discriminator=0(4)]`
-  - remaining bits: ordered primary-key payload bytes
-- Secondary index:
-  - reserved prefix bits: `[table_id(4)][index_id(4)]`
-  - remaining bits: ordered index payload bytes, then ordered primary-key bytes
-
-Logical structure:
-
-- Base row: `[prefix_bits][pk_col_1][pk_col_2]...`
-- Secondary index: `[prefix_bits][idx_cols...][pk_cols...]`
-
-### Current codec limits
-
-The current bit budget is intentionally compact and supports:
-
-- up to 16 tables per `KvSchema`
-- up to 15 secondary indexes per table
-
-If you need a larger table or index budget, adjust the codec bit allocation in
-`exoware-sql` rather than depending on the current raw prefix shape.
-
-## Covering indexes (performance-critical)
-
-`exoware-sql` supports per-index covered columns via:
+With `schema` built from the new index list and `previous_indexes` containing the
+original `IndexSpec` values:
 
 ```rust
-IndexSpec::lexicographic("status_idx", vec!["status".to_string()])?
-    .with_cover_columns(vec!["amount_cents".to_string(), "created_at".to_string()])
-```
-
-### Exact semantics of `cover_columns`
-
-- `key_columns` are always covered by the index key.
-- Primary key columns are always available from key bytes (implicit coverage).
-- `cover_columns` are additional non-PK columns stored in the secondary index value.
-- Covering a PK column is rejected at schema resolution time.
-- Duplicate coverage is deduplicated (for example if a column appears in both key and cover lists).
-
-### Planner behavior
-
-Complete primary-key point sets use bounded GetMany requests, with results
-restored to key order. Other candidates are ranked by constrained key columns,
-coverage of all projected and predicate columns, layout, and range count.
-
-A covering index returns rows without base lookups. A noncovering index first
-checks available predicates and then fetches surviving primary keys in bounded
-batches. The complete predicate is checked against each base row. Compatible
-lexicographic covering indexes support native DataFusion sort and LIMIT pushdown,
-including reverse traversal after a fixed equality prefix.
-
-### No-fallback invariant
-
-- Index scans require covering payloads in secondary index values.
-- Missing/empty covering payload in an index entry is treated as execution error.
-- In other words, index read correctness depends on index writer emitting covering values consistently.
-
-### Performance vs storage/write tradeoff
-
-- More covered columns:
-  - faster index-only reads (fewer scanned base rows / no lookup fanout),
-  - larger index values (more storage, write bandwidth, and compaction I/O).
-- Fewer covered columns:
-  - leaner writes and index footprint,
-  - more queries require base-row lookups.
-
-Tune `cover_columns` per index to match hot query shapes, not full table width.
-
-### Practical design recipes
-
-1. `WHERE status = 'open' SELECT id, amount_cents ...`
-   - index key: `status`
-   - cover: `amount_cents` (and any other selected/filter-only non-PK columns)
-2. `WHERE customer_id = ? AND created_at >= ? SELECT total`
-   - index key: `customer_id`, `created_at`
-   - cover: `total`
-3. Keep low-selectivity, rarely-read columns out of cover lists.
-4. Start narrow, benchmark, then add only fields needed for index-only plans.
-
-## Adding indexes after data already exists
-
-`exoware-sql` now supports explicit index backfill for existing rows:
-
-```rust
-let previous_indexes = vec![]; // index list used when rows were originally written
 let report = schema
     .backfill_added_indexes("orders", &previous_indexes)
     .await?;
-println!(
-    "backfilled {} rows into {} new indexes ({} entries)",
-    report.scanned_rows, report.indexes_backfilled, report.index_entries_written
-);
 ```
 
-You can also tune the full-scan row page size:
+The backfill scans the table's primary keys and writes only the added indexes'
+entries. With no added indexes, it writes nothing and reports zero counts.
+
+For resumable backfills, use `backfill_added_indexes_with_options_and_progress`.
+Each `Progress` event is sent after the writes it covers are flushed. Persist its
+`next_cursor` and pass that as `IndexBackfillOptions::start_from_primary_key` when
+resuming. The options also control the scan's response batch size.
+
+## Read consistency
+
+Store replicas can lag, and each Store response reports the sequence it reflects. A
+read session sends a minimum sequence with each read and records the highest sequence
+observed:
+
+- A **monotonic** session raises its minimum to the highest observed sequence, so a
+  later read never reflects an older Store state than an earlier one.
+- A **fixed** session keeps its configured minimum.
+
+Neither policy pins a snapshot. Reads within one statement can observe different
+sequences at or above the minimum.
+
+`SqlContext::new` starts a monotonic session with no minimum, shared by every
+statement run through the context and its clones. To read your own writes, start the
+session at the sequence returned by `flush`, as in [Getting started](#getting-started).
+To strengthen a single query, derive a context that shares the catalog and
+observations:
 
 ```rust
-use exoware_sql::IndexBackfillOptions;
-
-let report = schema
-    .backfill_added_indexes_with_options(
-        "orders",
-        &previous_indexes,
-        IndexBackfillOptions {
-            row_batch_size: 500,
-            start_from_primary_key: None,
-        },
-    )
-    .await?;
+let fresh = ctx.with_read_session(ctx.read_session().with_min_sequence_number(sequence));
+fresh.sql("SELECT COUNT(*) FROM orders").await?.collect().await?;
+let observed = ctx.read_session().evaluated_sequence();
 ```
 
-To monitor progress or resume later, subscribe to progress events via a channel:
+All Store-backed tables in one context must read the same Store as its session. Use
+`SqlContext::builder` to supply a `ReadSession`, a DataFusion `SessionConfig` or
+`RuntimeEnv`, or other session state. A custom DataFusion query planner must include
+`KvAggregateExtensionPlanner`.
+
+## Query plans
+
+Run `EXPLAIN` to see how a query reaches the Store. The physical plan shows a
+`KvScanExec` for row scans or a `KvAggregateExec` for aggregates computed in the Store,
+with the chosen primary-key or index access path, whether a residual row check
+remains, and whether the scan resembles a full table scan. The
+[query planning guide](../docs/query-planning.md) describes predicate and aggregate
+pushdown and how to read these plans.
+
+## Serving SQL
+
+`SqlServer` registers a schema in its own `SqlContext` and implements the `sql.v1`
+service. `sql_connect_stack` returns a Connect service to mount on an axum router:
 
 ```rust
-use exoware_sql::{IndexBackfillEvent, IndexBackfillOptions};
+use std::sync::Arc;
+use exoware_sql::{sql_connect_stack, SqlServer};
 
-let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel();
-let report = schema
-    .backfill_added_indexes_with_options_and_progress(
-        "orders",
-        &previous_indexes,
-        IndexBackfillOptions {
-            row_batch_size: 500,
-            start_from_primary_key: None,
-        },
-        Some(&progress_tx),
-    )
-    .await?;
-drop(progress_tx);
-
-while let Some(event) = progress_rx.recv().await {
-    match event {
-        IndexBackfillEvent::Progress { next_cursor, .. } => {
-            // Store next_cursor somewhere durable if you want resumable backfill.
-        }
-        IndexBackfillEvent::Completed { report } => {
-            println!("{report:?}");
-        }
-        _ => {}
-    }
-}
+let server = Arc::new(SqlServer::new(schema)?);
+let app = axum::Router::new().fallback_service(sql_connect_stack(server));
 ```
 
-Behavior:
+The service has three RPCs:
 
-- Critical ordering: deploy writers that emit new index entries before starting
-  backfill. Otherwise, rows written during the backfill window can be missed by
-  the new index.
-- Backfill performs a full primary-key scan for the table and writes only the newly added index entries.
-- Default response batch size is 1000 (`backfill_added_indexes` wrapper).
-- `backfill_added_indexes_with_options_and_progress(...)` emits `Started`,
-  `Progress`, and `Completed` events to a caller-provided channel.
-- To resume later, persist `Progress.next_cursor` and pass it back as
-  `start_from_primary_key`.
-- Index evolution must be append-only:
-  - previously existing indexes must keep the same order and layout,
-  - new indexes must be added only at the end of the index list.
-- If there are no new indexes, backfill is a no-op and returns zero counts.
+- **Query** runs one SQL statement. Its reads share a new monotonic session that
+  starts at the request's optional minimum sequence. The response holds the result as
+  an Arrow IPC stream, decodable in Rust with Arrow's `StreamReader`. It also holds the
+  highest Store sequence observed, absent when the statement read nothing from the
+  Store. Session commands such as `SET`, `PREPARE`, and `CREATE FUNCTION` apply to
+  the server's shared context and affect later requests.
+- **Subscribe** streams rows from each Store batch that writes to a table and matches
+  a scalar SQL predicate. Predicates cannot use subqueries, aggregates, window
+  functions, or row-expanding expressions. Each frame is an independent Arrow IPC
+  stream with the batch's sequence number, and `since_sequence_number` set to the last
+  frame's sequence plus one resumes after a disconnect.
+- **Tables** lists each table's columns, primary key, and indexes with their layout
+  and cover columns.
 
-For large tables, run backfill as an operational task after deploying schema changes.
+The `sql` binary serves a demo `orders_kv` table on port 8082 and can seed it with
+rows. The [sandbox](../../examples/sandbox/README.md#sql-panel) uses it:
 
-## Insert recommendations
-
-For robust and efficient application writes, prefer:
-
-- typed application row structs for each table
-- conversion from those row structs into `Vec<CellValue>`
-- `KvSchema::batch_writer()` / `BatchWriter::insert(...)` for ingestion
-
-Why this is the recommended path:
-
-- `BatchWriter` writes the base row and all registered secondary index rows for
-  the target table automatically
-- it supports atomic multi-row and multi-table ingest batches
-- it avoids the SQL/DataFusion insert path's Arrow `RecordBatch` materialization
-  and the extra row-to-owned-value copying that follows
-- typed row structs reduce column-order mistakes and make nullable fields explicit
-
-Typical pattern:
-
-```rust
-use exoware_sql::CellValue;
-
-struct UserRow {
-    user_id: u64,
-    name: String,
-    age: Option<u64>,
-}
-
-impl From<UserRow> for Vec<CellValue> {
-    fn from(row: UserRow) -> Self {
-        vec![
-            CellValue::UInt64(row.user_id),
-            CellValue::Utf8(row.name),
-            match row.age {
-                Some(v) => CellValue::UInt64(v),
-                None => CellValue::Null,
-            },
-        ]
-    }
-}
+```sh
+cargo run -p exoware-sql --bin sql -- run --store-url http://127.0.0.1:10000
+cargo run -p exoware-sql --bin sql -- seed --store-url http://127.0.0.1:10000
 ```
 
-Then write with:
+## Examples
 
-```rust
-let mut batch = schema.batch_writer();
-batch.insert(
-    "users",
-    UserRow {
-        user_id: 1,
-        name: "Alice".to_string(),
-        age: Some(30),
-    }
-    .into(),
-)?;
- let _sequence_number = batch.flush().await?;
+The examples connect to `EXOWARE_URL` (default `http://localhost:10000`):
+
+```bash
+cargo run -p exoware-sql --example orders_kv      # single-table inserts and queries
+cargo run -p exoware-sql --example join_kv        # JOINs across tables
+cargo run -p exoware-sql --example types_kv       # FixedSizeBinary and UInt64 keys
+cargo run -p exoware-sql --example versioned_kv   # versioned primary keys
 ```
 
-Use SQL `INSERT` when convenience matters more than raw write-path efficiency,
-for example ad hoc loading, tests, demos, or when your input data already lives
-in DataFusion.
+## Status
 
-`BatchWriter` and SQL `INSERT` share the same schema metadata, so both paths
-write all secondary indexes registered on the table. If you add new index specs
-after older rows already exist, new writes pick them up automatically, while
-older rows still require backfill.
-
-## Generic model (library)
-
-- configure table schema via `KvSchema::table()` (`TableColumnConfig` list +
-  primary key column names)
-- configure secondary indexes via `IndexSpec`
-- table key prefixes are auto-assigned by `KvSchema` (no manual tracking)
-- insert model:
-  - one SQL `INSERT` statement writes base + all index rows in one atomic ingest
-    batch
-  - `BatchWriter` enables programmatic multi-table atomic inserts without
-    DataFusion/Arrow conversion
-- oversized single-statement inserts rely on ingest API request-size enforcement
-  and surface the upstream client error (for example HTTP 413)
-- query model:
-  - bounded primary-key point lookups or selective range/index scans
-  - covering index reads avoid base-row lookups
-  - noncovering indexes batch lookups after available predicate checks
-- value serialization uses `commonware_codec`; `decode_base_row` uses
-  `exoware_sdk::kv_codec::decode_stored_row`
+`exoware-sql` is **ALPHA** software and is not yet recommended for production use.
+Developers should expect breaking changes and occasional instability.

@@ -7,10 +7,10 @@ import {
   GetOperationsRequestSchema,
   GetOperationsResponseSchema,
 } from '../dist/generated/proto/qmdb/v1/operation_log_pb.js';
-import { HistoricalMultiProofSchema, HistoricalOperationRangeProofSchema } from '../dist/generated/proto/qmdb/v1/proof_pb.js';
+import { OperationMultiProofSchema, OperationRangeProofSchema } from '../dist/generated/proto/qmdb/v1/proof_pb.js';
 import { readFileSync } from 'node:fs';
 import { OrderedQmdbClient, QmdbOperationLogClient } from '../dist/client.js';
-import { initSync, verify_historical_raw_operation_range_proof } from '../dist/generated/wasm/exoware_qmdb_wasm.js';
+import { initSync, verify_raw_operation_range_proof } from '../dist/generated/wasm/exoware_qmdb_wasm.js';
 
 test('test_size_arguments_reject_narrowing_before_initialization', async () => {
   for (const currentChunkSize of [0, -1, 1.5, 2 ** 32, Number.MAX_SAFE_INTEGER]) {
@@ -50,11 +50,11 @@ test('test_keyless_variable_variable_values_large_locations', () => {
       const [rootHex, proofHex] = readFileSync(new URL(`fixtures/keyless_variable_variable_values_${family}_start_${start}.txt`, import.meta.url), 'utf8').trim().split('\n');
       const root = Buffer.from(rootHex, 'hex');
       const proof = Buffer.from(proofHex, 'hex');
-      const verified = verify_historical_raw_operation_range_proof(proof, root, family, 'sha256', start + 2n, start, 10);
+      const verified = verify_raw_operation_range_proof(proof, root, family, 'sha256', start + 2n, start, 10);
       assert.deepEqual(Array.from(verified.root), Array.from(root));
       assert.deepEqual(verified.operations.map((operation) => operation.location), [start, start + 1n, start + 2n]);
       assert.ok(verified.operations.every((operation) => operation.encodedOperation.length > 0));
-      assert.throws(() => verify_historical_raw_operation_range_proof(proof, root, family, 'sha256', start + 2n, start + 1n, 10), /request/);
+      assert.throws(() => verify_raw_operation_range_proof(proof, root, family, 'sha256', start + 2n, start + 1n, 10), /request/);
     }
   }
 });
@@ -107,7 +107,7 @@ for (const { name, fixture, Client, read } of readFloorCases) {
         minSequenceNumber,
       };
       const response = create(GetOperationRangeResponseSchema, {
-        proof: fromBinary(HistoricalOperationRangeProofSchema, Buffer.from(proofHex, 'hex')),
+        proof: fromBinary(OperationRangeProofSchema, Buffer.from(proofHex, 'hex')),
       });
       t.mock.method(globalThis, 'fetch', async (input, init) => {
         const sent = new Request(input, init);
@@ -183,7 +183,7 @@ function operationsFixture(name) {
     root: Buffer.from(rootHex, 'hex'),
     tip: BigInt(tip),
     locations: locations.split(',').map(BigInt),
-    proof: fromBinary(HistoricalMultiProofSchema, Buffer.from(proofHex, 'hex')),
+    proof: fromBinary(OperationMultiProofSchema, Buffer.from(proofHex, 'hex')),
     operations: operationHex.map((hex) => Buffer.from(hex, 'hex')),
   };
 }

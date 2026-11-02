@@ -1,12 +1,12 @@
 import initWasm, {
   type InitInput,
-  verify_historical_fixed_keyless_append_operations_proof,
-  verify_historical_fixed_keyless_append_proof,
-  verify_historical_fixed_unordered_update_operations_proof,
-  verify_historical_fixed_unordered_update_proof,
-  verify_historical_operation_range_proof,
-  verify_historical_operations_proof,
-  verify_historical_raw_operation_range_proof,
+  verify_fixed_keyless_append_operations_proof,
+  verify_fixed_keyless_append_proof,
+  verify_fixed_unordered_update_operations_proof,
+  verify_fixed_unordered_update_proof,
+  verify_operation_range_proof,
+  verify_operations_proof,
+  verify_raw_operation_range_proof,
 } from './generated/wasm/exoware_qmdb_wasm.js';
 
 export type BytesLike = Uint8Array | string;
@@ -35,7 +35,7 @@ export interface LocatedOrderedOperation {
   operation: OrderedOperation;
 }
 
-export interface VerifiedHistoricalMultiProof {
+export interface VerifiedOperationMultiProof {
   /** The trusted root supplied to verification. */
   root: Uint8Array;
   operations: LocatedOrderedOperation[];
@@ -234,13 +234,13 @@ export function fixedOperationExpectations(
 }
 
 /**
- * Verify historical operations against a trusted root and expected request context.
+ * Verify operation-log membership against a trusted root and expected request context.
  *
- * Range and single-operation methods accept serialized `HistoricalOperationRangeProof` protobuf
- * messages. `verifyOperations` and the `*Many` methods accept serialized `HistoricalMultiProof`
+ * Range and single-operation methods accept serialized `OperationRangeProof` protobuf
+ * messages. `verifyOperations` and the `*Many` methods accept serialized `OperationMultiProof`
  * protobuf messages.
  *
- * Unordered updates prove historical membership, not that a value is the latest for its key.
+ * Unordered updates prove log membership, not that a value is the latest for its key.
  */
 export class QmdbProofVerifier {
   private readonly merkleFamily: MerkleFamily;
@@ -263,7 +263,7 @@ export class QmdbProofVerifier {
     assertOperationWindow(request);
     await initQmdbWasm();
 
-    const verified = verify_historical_raw_operation_range_proof(
+    const verified = verify_raw_operation_range_proof(
       proofBytes,
       toBytes(expectedRoot),
       this.merkleFamily,
@@ -280,11 +280,11 @@ export class QmdbProofVerifier {
     proofBytes: Uint8Array,
     request: OperationRangeContext,
     expectedRoot: BytesLike,
-  ): Promise<VerifiedHistoricalMultiProof> {
+  ): Promise<VerifiedOperationMultiProof> {
     assertOperationWindow(request);
     await initQmdbWasm();
 
-    const verified = verify_historical_operation_range_proof(
+    const verified = verify_operation_range_proof(
       proofBytes,
       toBytes(expectedRoot),
       this.merkleFamily,
@@ -292,7 +292,7 @@ export class QmdbProofVerifier {
       request.tip,
       request.startLocation,
       request.maxLocations,
-    ) as Omit<VerifiedHistoricalMultiProof, 'proofSizeBytes'>;
+    ) as Omit<VerifiedOperationMultiProof, 'proofSizeBytes'>;
     return { ...verified, proofSizeBytes: proofBytes.length };
   }
 
@@ -308,7 +308,7 @@ export class QmdbProofVerifier {
     assertOperationWindow(request);
     await initQmdbWasm();
 
-    const verified = verify_historical_fixed_keyless_append_proof(
+    const verified = verify_fixed_keyless_append_proof(
       proofBytes,
       toBytes(expectedRoot),
       this.merkleFamily,
@@ -336,7 +336,7 @@ export class QmdbProofVerifier {
     assertOperationWindow(request);
     await initQmdbWasm();
 
-    const verified = verify_historical_fixed_unordered_update_proof(
+    const verified = verify_fixed_unordered_update_proof(
       proofBytes,
       toBytes(expectedRoot),
       this.merkleFamily,
@@ -360,7 +360,7 @@ export class QmdbProofVerifier {
     assertOperationLocations(request);
     await initQmdbWasm();
 
-    const verified = verify_historical_operations_proof(
+    const verified = verify_operations_proof(
       proofBytes,
       toBytes(expectedRoot),
       this.merkleFamily,
@@ -385,7 +385,7 @@ export class QmdbProofVerifier {
     );
     await initQmdbWasm();
 
-    const verified = verify_historical_fixed_keyless_append_operations_proof(
+    const verified = verify_fixed_keyless_append_operations_proof(
       proofBytes,
       toBytes(expectedRoot),
       this.merkleFamily,
@@ -414,7 +414,7 @@ export class QmdbProofVerifier {
     );
     await initQmdbWasm();
 
-    const verified = verify_historical_fixed_unordered_update_operations_proof(
+    const verified = verify_fixed_unordered_update_operations_proof(
       proofBytes,
       toBytes(expectedRoot),
       this.merkleFamily,

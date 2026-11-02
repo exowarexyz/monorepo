@@ -6,10 +6,10 @@ import { GetRequestSchema, GetResponseSchema, GetManyRequestSchema, GetManyRespo
 import { GetRangeRequestSchema, GetRangeResponseSchema } from '../dist/generated/proto/qmdb/v1/key_range_pb.js';
 import { GetCurrentOperationRangeRequestSchema, GetCurrentOperationRangeResponseSchema } from '../dist/generated/proto/qmdb/v1/current_operation_pb.js';
 import { SubscribeRequestSchema, SubscribeResponseSchema } from '../dist/generated/proto/qmdb/v1/operation_log_pb.js';
-import { CurrentKeyValueProofSchema, CurrentOperationRangeProofSchema, HistoricalMultiProofSchema } from '../dist/generated/proto/qmdb/v1/proof_pb.js';
+import { CurrentKeyValueProofSchema, CurrentOperationRangeProofSchema, OperationMultiProofSchema } from '../dist/generated/proto/qmdb/v1/proof_pb.js';
 import { OrderedQmdbClient } from '../dist/client.js';
 import {
-  decode_historical_multi_proof_operations, encode_vec_key, initSync, verify_current_key_value_proof,
+  decode_operation_multi_proof_operations, encode_vec_key, initSync, verify_current_key_value_proof,
   verify_get_many_response, verify_get_range_response,
 } from '../dist/generated/wasm/exoware_qmdb_wasm.js';
 
@@ -111,8 +111,8 @@ for (const family of ['mmr', 'mmb']) {
       'sha256', many.chunkSize, [many.request.keys[0], many.request.keys[0], many.request.keys[2]]));
 
     const subscribe = fixture(family, 'subscribe', SubscribeRequestSchema, SubscribeResponseSchema);
-    const decoded = decode_historical_multi_proof_operations(
-      toBinary(HistoricalMultiProofSchema, subscribe.response.proof), family, 'sha256');
+    const decoded = decode_operation_multi_proof_operations(
+      toBinary(OperationMultiProofSchema, subscribe.response.proof), family, 'sha256');
     assert.equal(typeof decoded.tip, 'bigint');
     assert.equal(decoded.tip, BigInt(subscribe.expected[0]));
     assert.deepEqual(Buffer.from(decoded.root), subscribe.root);

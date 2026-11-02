@@ -1,5 +1,5 @@
 pub use crate::service::server::encode::{
-    encode_historical_multi_proof, encode_historical_operation_range_proof,
+    encode_operation_multi_proof, encode_operation_range_proof,
 };
 use crate::{adapter::codec::op_count_for_watermark, QmdbError};
 use commonware_codec::Codec;
@@ -21,7 +21,7 @@ use commonware_storage::{
 };
 use std::collections::HashMap;
 
-/// Historical operation range plus the raw Merkle proof material used to verify
+/// Operation range plus the raw Merkle proof material used to verify
 /// it. This is suitable for checkpointing and local Merkle continuation.
 #[derive(Clone, Debug, PartialEq)]
 #[must_use]
@@ -135,7 +135,7 @@ impl<D: Digest, F: Graftable> OperationRangeCheckpoint<D, F> {
     }
 }
 
-/// Historical membership proof for encoded operations at selected locations.
+/// Operation-log membership proof for encoded operations at selected locations.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[must_use]
 pub struct RawBatchMultiProof<D: Digest, F: Graftable> {
@@ -487,15 +487,15 @@ where
 mod tests {
     use super::*;
     use crate::service::proto::qmdb::v1::{
-        HistoricalMultiProof, HistoricalOperationRangeProof, MultiProofOperation,
+        MultiProofOperation, OperationMultiProof, OperationRangeProof,
     };
     use buffa::Message;
     use commonware_codec::{Copying, Decode, DecodeExt, Encode};
     use commonware_cryptography::{sha256, Sha256};
     use commonware_storage::merkle::{mmb, mmr};
 
-    fn historical_encodings_roundtrip<F: Graftable + PartialEq>() {
-        let digest = Sha256::hash(&[b"historical proof encoding"]);
+    fn operation_encodings_roundtrip<F: Graftable + PartialEq>() {
+        let digest = Sha256::hash(&[b"operation proof encoding"]);
 
         // Exercise locations beyond JavaScript's exact integer range and optional witnesses.
         // Operation payloads include empty values and bytes with the high bit set.
@@ -522,7 +522,7 @@ mod tests {
 
                 // Encoding must match the generated protobuf and preserve every field.
                 let encoded_witness = witness.as_ref().map(Encode::encode).unwrap_or_default();
-                let expected = HistoricalOperationRangeProof {
+                let expected = OperationRangeProof {
                     proof: range.proof.encode(),
                     start_location: start,
                     encoded_operations: range
@@ -536,8 +536,8 @@ mod tests {
                     pinned_nodes: range.pinned_nodes.iter().map(Encode::encode).collect(),
                     ..Default::default()
                 };
-                let encoded = encode_historical_operation_range_proof(&range);
-                let decoded = HistoricalOperationRangeProof::decode_from_slice(&encoded).unwrap();
+                let encoded = encode_operation_range_proof(&range);
+                let decoded = OperationRangeProof::decode_from_slice(&encoded).unwrap();
                 assert_eq!(encoded, expected.encode_to_vec());
                 assert_eq!(decoded, expected);
                 assert_eq!(
@@ -568,7 +568,7 @@ mod tests {
                         .map(|(offset, bytes)| (Location::new(start + offset as u64), bytes))
                         .collect(),
                 };
-                let expected = HistoricalMultiProof {
+                let expected = OperationMultiProof {
                     proof: multi.proof.encode(),
                     operations: multi
                         .operations
@@ -583,8 +583,8 @@ mod tests {
                     ops_root_witness: encoded_witness,
                     ..Default::default()
                 };
-                let encoded = encode_historical_multi_proof(&multi);
-                let decoded = HistoricalMultiProof::decode_from_slice(&encoded).unwrap();
+                let encoded = encode_operation_multi_proof(&multi);
+                let decoded = OperationMultiProof::decode_from_slice(&encoded).unwrap();
                 assert_eq!(encoded, expected.encode_to_vec());
                 assert_eq!(decoded, expected);
             }
@@ -592,8 +592,8 @@ mod tests {
     }
 
     #[test]
-    fn historical_proof_encodings_roundtrip_without_response_envelopes() {
-        historical_encodings_roundtrip::<mmr::Family>();
-        historical_encodings_roundtrip::<mmb::Family>();
+    fn operation_proof_encodings_roundtrip_without_response_envelopes() {
+        operation_encodings_roundtrip::<mmr::Family>();
+        operation_encodings_roundtrip::<mmb::Family>();
     }
 }

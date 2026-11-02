@@ -1,154 +1,123 @@
 # @exowarexyz/simplex
 
-TypeScript helpers for uploading Commonware Simplex artifacts into Exoware
-Store. The package mirrors the Rust `exoware-simplex` key layout:
+Upload, read and subscribe to Commonware Simplex artifacts in Exoware Store.
+The package shares the [Rust package's](../rs/README.md) key layout and provides
+a browser WASM verifier for Commonware certificates.
 
-- header bytes by digest
-- full `{ header, body }` block data by digest
-- notarized `{ proof, header }` bytes by Simplex epoch and view
-- finalized `{ proof, header }` bytes by Simplex epoch and view
-- finalized `{ proof, header }` bytes by block height
+## Upload artifacts
 
-`SimplexWriter` uploads raw encoded bytes. `new SimplexReader(store)` starts an
-independent monotonic session with no initial minimum. Clones share observations.
-Use `SimplexReader.withSession(session)` to supply an existing session or choose
-a fixed minimum.
-Certificate reads verify bytes before returning. Use the `*Raw` methods only
-when unverified bytes are required.
+`SimplexWriter` accepts encoded bytes. Headers and full `{ header, body }`
+blocks are indexed by digest, notarizations and finalizations by epoch and view,
+and finalizations also by height. Supply a certificate record encoded as the
+Commonware proof followed by its application header. The writer trusts the
+supplied indices, so they must match the encoded artifact.
+
+This function publishes a full block and its finalization in one Store Put:
 
 ```ts
 import { Client, StoreWriteBatch } from '@exowarexyz/sdk';
-import { SimplexWriter } from '@exowarexyz/simplex';
+import {
+  SimplexWriter,
+  type BlockUpload,
+  type FinalizationUpload,
+} from '@exowarexyz/simplex';
 
-const store = new Client('http://localhost:10000').store();
-const simplex = new SimplexWriter(store);
-const batch = new StoreWriteBatch();
-simplex.stageUpload(simplex.prepareBlock({
-  digest: '0x...',
-  header: '0x...',
-  body: '0x...',
-}), batch);
-simplex.stageUpload(simplex.prepareFinalization({
-  epoch: 0n,
-  view: 42n,
-  height: 42n,
-  finalized: '0x...',
-}), batch);
-await batch.commit(store);
+async function publish(
+  storeUrl: string,
+  block: BlockUpload,
+  finalization: FinalizationUpload,
+) {
+  const store = new Client(storeUrl).store();
+  const writer = new SimplexWriter(store);
+  const batch = new StoreWriteBatch();
+  writer.stageUpload(writer.prepareBlock(block), batch);
+  writer.stageUpload(writer.prepareFinalization(finalization), batch);
+  return batch.commit(store);
+}
 ```
 
-Use `prepareHeader`, `prepareBlock`, `prepareNotarization`, and
-`prepareFinalization` to stage multiple Simplex rows into one
-`StoreWriteBatch`. Raw uploads must provide the encoded certificate's `epoch`
-and `view`. The writer does not decode certificate bytes, so a wrong value
-mis-keys the round row.
+For a single artifact, use the corresponding `upload*` method. Uploads validate
+Store limits before sending and throw `RangeError` if they exceed them. A custom
+batch can use `validate` or `split`, but splitting creates separate atomic Puts
+and can separate an artifact's rows. See the [SDK guide](../../sdk/ts/README.md)
+for Store prefixes, limits and batching. Readers and writers must use the same
+Store prefix.
 
-Upload helpers validate Store limits before sending and keep all rows in one
-atomic Put. Oversized uploads throw `RangeError`. Caller-assembled batches can
-use `batch.validate(store.putOptions)` or `batch.split(store.putOptions)`, but
-splitting can separate an artifact's rows across writes. Only split when the
-application can safely handle partial completion and publication ordering.
+## Read verified certificates
 
-Use `SimplexReader.getHeader` when only header bytes are needed and
-`SimplexReader.getBlock` when the full `{ header, body }` block data is needed.
-Store-backed streams remain separate on `SimplexSubscriptions`.
-
-## Verification
-
-Pass a `SimplexCertificateVerifier` to verify opaque certificate records before
-`getNotarizationByRound`, `getFinalizationByRound`, `getFinalizationByHeight`,
-`latestFinalization`, or `subscribeCertificates` returns them:
-
-```ts
-import { Client } from '@exowarexyz/sdk';
-import { SimplexReader, type SimplexCertificateVerifier } from '@exowarexyz/simplex';
-
-const verifier: SimplexCertificateVerifier = {
-  verifyNotarization: async (bytes, context) => verifyMyNotarization(bytes, context.epoch, context.view),
-  verifyFinalization: async (bytes, context) => verifyMyFinalization(bytes, context),
-};
-
-const store = new Client('http://localhost:10000').store();
-const reader = new SimplexReader(store, { verifier });
-const latest = await reader.latestFinalization();
-```
-
-For upstream Commonware Simplex certificate types, build the optional WASM
-module and use `@exowarexyz/simplex/wasm`:
+Certificate reads require a `SimplexCertificateVerifier` and return its result.
+Use the bundled verifier for Commonware certificates. Source builds require
+Rust's `wasm32-unknown-unknown` target, `wasm-pack`, and `wasm-bindgen-cli`. The
+[TypeScript CI workflow](../../.github/workflows/typescript.yml) lists compatible
+tool versions. Generate the WASM module from the repository root:
 
 ```bash
 npm --prefix simplex/ts run build:wasm
 ```
 
-```ts
-import { createWasmSimplexVerifier } from '@exowarexyz/simplex/wasm';
-import { Client, ReadSession } from '@exowarexyz/sdk';
-import { SimplexReader, hexToBytes } from '@exowarexyz/simplex';
-
-const verifier = await createWasmSimplexVerifier({
-  scheme: 'bls12381-threshold-vrf-min-sig',
-  payload: 'sha256',
-  identity: 'ed25519',
-  namespace: new TextEncoder().encode('_MY_SIMPLEX_NAMESPACE'),
-  verificationMaterial: hexToBytes('...'),
-  verifyHeader: ({ payload, header }) => verifyHeaderPayload(payload, header),
-});
-
-const store = new Client('http://localhost:10000').store();
-const reader = SimplexReader.withSession(ReadSession.fixed(store, publicationSequence), { verifier });
-```
-
-Supported schemes are `ed25519`, `secp256r1`,
-`bls12381-multisig-min-pk`, `bls12381-multisig-min-sig`,
-`bls12381-threshold-standard-min-pk`,
-`bls12381-threshold-standard-min-sig`, `bls12381-threshold-vrf-min-pk`, and
-`bls12381-threshold-vrf-min-sig`. Supported payloads are `sha256`, `blake3`,
-`transcript-summary`, and `coding-commitment`. Supported identity key types are
-`ed25519` and `secp256r1`. Verification material is encoded key material: an
-Ed25519 participant set, a Secp256r1/BLS multisig identity-to-signing-key map,
-or a threshold identity depending on the scheme.
-The WASM verifier treats certificates as opaque proof-plus-header records and
-verifies the configured certificate key material. Pass `verifyHeader` to
-validate the application-specific relationship between the certificate payload
-and header. Bodies are not embedded in streamed certificate records. Fetch full
-`{ header, body }` block data separately with `getBlock` or `subscribeBlocks`
-when needed. The package does not hardcode SHA or trust a server body-presence
-flag. The caller-selected verifier defines the required payload/header
-relationship before a reader or subscription returns a certificate.
-
-Header and block integrity can also live in caller-owned WASM. Implement the
-ABI you need:
-
-```rust
-#[wasm_bindgen]
-pub fn verify_header(payload: Vec<u8>, header: Vec<u8>) -> bool {
-    // Verify payload/header according to the application's header format.
-}
-
-#[wasm_bindgen]
-pub fn verify_block(payload: Vec<u8>, header: Vec<u8>, body: Vec<u8>) -> bool {
-    // Verify payload/header/body according to the application's header format.
-}
-```
-
-Then adapt the module in TS:
+Supply trusted verifier options and an application-specific `verifyHeader`
+callback. The callback authenticates your header format as described below:
 
 ```ts
-import { createWasmSimplexVerifier } from '@exowarexyz/simplex/wasm';
+import { Client } from '@exowarexyz/sdk';
 import {
-  createWasmSimplexHeaderVerifier,
+  SimplexReader,
+  type SimplexHeaderVerifier,
+  type SimplexVerifierOptions,
 } from '@exowarexyz/simplex';
+import { createWasmSimplexVerifier } from '@exowarexyz/simplex/wasm';
 
-const verifier = await createWasmSimplexVerifier({
-  scheme,
-  payload,
-  identity,
-  namespace,
-  verificationMaterial,
-  verifyHeader: createWasmSimplexHeaderVerifier(myBlockVerifierWasm),
-});
+async function readLatest(
+  storeUrl: string,
+  options: SimplexVerifierOptions & { verifyHeader: SimplexHeaderVerifier },
+) {
+  const verifier = await createWasmSimplexVerifier(options);
+  const store = new Client(storeUrl).store();
+  return new SimplexReader(store, { verifier }).latestFinalization();
+}
 ```
 
-The built-in verifier returns the signed `epoch` and checks any requested epoch
-and view before application header verification. Custom verifiers receive the
-same context and own those checks, including height/header binding.
+Choose `scheme`, `payload`, `identity`, `namespace` and `verificationMaterial`
+from trusted application configuration for the expected network and epoch.
+The signing namespace is separate from the Store prefix. Verification material
+is Commonware-encoded public key data: a participant set for Ed25519, an
+identity-to-signing-key map for Secp256r1 or BLS multisig, or a threshold public
+identity for threshold schemes. See [`SimplexVerifierOptions`](./src/verification.ts)
+for supported schemes, payload types and identity types, and the
+[WASM decoder](../rs/wasm/src/lib.rs) for the corresponding key encodings.
+
+The WASM verifier checks certificate signatures and returns the signed epoch,
+view and payload with the attached header. Round reads also require the signed
+epoch and view to match the requested index. `verifyHeader` must authenticate
+the header against that payload and, for height or latest reads, match the
+header's height to `context.height`. It also enforces any application-specific
+epoch or header rules. Select validator keys from trusted configuration, even
+when a certificate reports its epoch.
+
+`verifyHeader` is optional in the API. Without it, a successful result certifies
+the payload but leaves the attached header and height index unauthenticated.
+Applications with their own certificate format can implement
+`SimplexCertificateVerifier`. They own signature, epoch, view, height and header
+checks against the supplied context. Failed verification throws. A missing
+record returns `null`.
+
+## Raw reads and subscriptions
+
+Use certificate methods ending in `Raw` for unverified bytes. `getHeader`
+returns header bytes and `getBlock` decodes the `{ header, body }` envelope.
+Neither authenticates its contents. Certificate records contain no body. Fetch
+the block separately and check its body against the application's header
+commitment. The `createWasmSimplexHeaderVerifier` and
+`createWasmSimplexBlockVerifier` adapters wrap application-owned WASM checks.
+
+`new SimplexReader(store)` starts a monotonic session with no initial minimum,
+and clones share observed Store sequences. `SimplexReader.withSession` accepts
+an SDK `ReadSession`. `withMinSequenceNumber` requires reads at or after a
+publication sequence. A fixed session sets a minimum, not a historical snapshot.
+
+[`SimplexSubscriptions`](./src/subscriptions.ts) streams Store updates.
+`subscribeCertificates` uses the same verifier contract as certificate reads.
+`subscribeCertificatesRaw`, `subscribeHeaders` and `subscribeBlocks` return
+unverified artifacts. See the [reader](./src/reader.ts),
+[writer](./src/writer.ts) and [verification types](./src/verification.ts) for
+method signatures and result types.

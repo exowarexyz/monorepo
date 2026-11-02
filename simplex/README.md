@@ -1,6 +1,14 @@
 # simplex
 
-Store-backed upload helpers for Commonware Simplex blocks and certificates.
+Store and retrieve Commonware Simplex blocks and certificates through Exoware
+Store. Headers and full blocks are indexed by digest, certificates by epoch and
+view, and finalizations also by block height.
 
-- [rs](./rs/README.md): typed Rust client for Commonware `Block`, notarization, and finalization values.
-- [ts](./ts/README.md): browser/client-side helpers for raw and verified Simplex artifact bytes.
+- [Rust](./rs/README.md): typed reads and writes for Commonware blocks and
+  certificates, with a Store-backed resolver for Commonware Marshal.
+- [TypeScript](./ts/README.md): byte-oriented uploads, reads and subscriptions,
+  with a browser WASM verifier for Commonware certificates.
+
+Applications supply the trusted Simplex configuration and define how a certified
+payload authenticates their header and body formats. Each package documents
+which checks it performs and which checks belong to the application.
