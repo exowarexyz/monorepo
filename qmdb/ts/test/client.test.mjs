@@ -162,6 +162,15 @@ test('test_operations_requests_reject_invalid_locations_before_dispatch', async 
     client.getFixedUnorderedUpdateMany({ tip: 10n }, '', [{ location: 1n, key: 'a' }, { location: 1n, key: 'b' }], 8),
     /ascending/,
   );
+  const locations = Array.from({ length: 1025 }, (_, index) => BigInt(index));
+  await assert.rejects(
+    client.getFixedKeylessAppendMany({ tip: 2000n }, '', locations.map((location) => ({ location, value: 'a' }))),
+    /1024 locations/,
+  );
+  await assert.rejects(
+    client.getFixedUnorderedUpdateMany({ tip: 2000n }, '', locations.map((location) => ({ location, key: 'a' })), 8),
+    /1024 locations/,
+  );
   assert.equal(fetch.mock.callCount(), 0);
 });
 

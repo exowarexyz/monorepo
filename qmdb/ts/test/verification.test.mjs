@@ -112,6 +112,25 @@ test('keyless multiproof binds values to exact locations and tip', async () => {
   await assert.rejects(verify(toBinary(HistoricalMultiProofSchema, changed)));
 });
 
+test('standalone multiproof verification accepts more than 1024 locations', async (t) => {
+  const fetch = t.mock.method(globalThis, 'fetch', () => { throw new Error('unexpected transport'); });
+  await initQmdbWasm(wasm);
+  const data = multiFixture('keyless_large_mmr');
+  const verifier = new QmdbProofVerifier();
+  const request = { tip: data.tip, locations: data.locations };
+  assert.equal(data.locations.length, 1025);
+
+  const raw = await verifier.verifyOperations(data.proof, request, data.root);
+  assert.deepEqual(raw.operations.map(({ location }) => location), data.locations);
+  assert.deepEqual(raw.operations.map(({ encodedOperation }) => Buffer.from(encodedOperation)), data.operations);
+
+  const expected = data.locations.map((location, i) => ({ location, value: data.operations[i].subarray(1, 17) }));
+  const fixed = await verifier.verifyFixedKeylessAppendMany(data.proof, { tip: data.tip }, data.root, expected);
+  assert.deepEqual(fixed.operations.map(({ location }) => location), data.locations);
+  assert.deepEqual(fixed.operations.map(({ value }) => Buffer.from(value)), expected.map(({ value }) => value));
+  assert.equal(fetch.mock.callCount(), 0);
+});
+
 test('raw multiproof uses canonical current root and exact locations', async () => {
   // The proof verifies against the current root, which its ops-root witness binds to the
   // operations root.
@@ -133,8 +152,8 @@ test('raw multiproof uses canonical current root and exact locations', async () 
 });
 
 test('public verifier rejects invalid location domains and numeric narrowing', async () => {
-  // Empty, duplicate, descending, above-tip, negative, tip-overflowing, and oversized location
-  // sets fail request validation.
+  // Empty, duplicate, descending, above-tip, negative, and tip-overflowing location sets fail
+  // request validation.
   const verifier = new QmdbProofVerifier();
   const proof = new Uint8Array();
   for (const request of [
@@ -144,7 +163,6 @@ test('public verifier rejects invalid location domains and numeric narrowing', a
     { tip: 10n, locations: [11n] },
     { tip: 10n, locations: [-1n] },
     { tip: (1n << 64n) - 1n, locations: [0n] },
-    { tip: 2000n, locations: Array.from({ length: 1025 }, (_, i) => BigInt(i)) },
   ]) {
     await assert.rejects(verifier.verifyOperations(proof, request, ''), /location|ascending|tip/);
   }

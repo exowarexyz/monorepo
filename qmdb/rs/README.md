@@ -282,11 +282,13 @@ Adapter `root_at` returns the canonical root and `ops_root_at` the operation-log
 root.
 
 Unary range verification binds the exact requested
-`[start, min(start + max_locations, tip + 1))` interval. `get_operations`
+`[start, min(start + max_locations, tip + 1))` interval. The `get_operations` RPC
 proves up to 1024 strictly ascending locations at one tip in a single
-multi-proof and binds exactly that tip and those locations. Ordered key ranges
-verify a linear interval and forward pagination over authenticated successor
-links. Ordered keys order by `K::Ord`, which must match their byte order.
+multi-proof and binds exactly that tip and those locations. Native
+`operation_multi_proof` accepts any nonempty, strictly ascending set of locations
+at or below the tip. Ordered key ranges verify a linear interval and forward
+pagination over authenticated successor links. Ordered keys order by `K::Ord`,
+which must match their byte order.
 
 Rust subscriptions use `message_with_root` to obtain an independently trusted
 root for each frame tip; each frame's `root` is that canonical root.
@@ -378,9 +380,10 @@ npm run build:ts
 npm run test:client
 ```
 
-After intentional fixture changes, regenerate the variant and large-location
-fixtures, then run the browser matrix again:
+After intentional fixture changes, regenerate the browser fixtures, then run
+the browser matrix again:
 
 ```sh
 UPDATE_FIXTURES=1 cargo test -p exoware-qmdb --test e2e_variants --test e2e_keyless_large_locations
+UPDATE_FIXTURES=1 cargo test -p exoware-qmdb --test e2e_operation_range_reads native_fixed_keyless_large_multi_proof_matches_browser_fixture
 ```

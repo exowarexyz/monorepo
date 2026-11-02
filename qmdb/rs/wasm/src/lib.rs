@@ -101,13 +101,12 @@ fn normalize_hash_family<'a>(family: &'a str, label: &str) -> Result<&'a str, St
     }
 }
 
-/// Validates the database's chunk-size constraints for digest `D`.
-///
-/// Commonware's proof decoders and range verifier enforce bitmap geometry bounds.
+/// Validate the database's chunk size against digest `D`.
 fn current_proof_config<D: Digest>(
     chunk_size: usize,
     label: &str,
 ) -> Result<CurrentProofConfig, String> {
+    // Enforce Commonware's `current::Db` chunk constraints for this runtime size.
     if chunk_size == 0 {
         return Err(format!("{label} current chunk size must be non-zero"));
     }
@@ -427,8 +426,7 @@ where
     Ok((*root, operations))
 }
 
-/// Verifies the operations in `proto` against the current `root` and the requested `window`,
-/// returning each decoded operation at its location.
+/// Verify operations against the current `root` and the exact requested `window`.
 fn verify_current_operation_range_from_proto<F, H>(
     proto: &CurrentOperationRangeProof,
     root: &H::Digest,
@@ -508,8 +506,7 @@ where
     Ok(operations)
 }
 
-/// Verifies that `proto` proves an active update under the current `root`, returning its
-/// location and update.
+/// Verify an active update against the current `root`.
 fn verify_key_value_from_proto<F, H>(
     proto: &CurrentKeyValueProof,
     root: &H::Digest,
@@ -532,7 +529,7 @@ where
         return Err("current key-value proof operation must be an update".to_string());
     };
 
-    // Decode the operation proof with the configured chunk size. The wire does not carry the size.
+    // Decode with the source database's chunk size, which the proof does not encode.
     let max_digests = proof_digest_cap::<H::Digest>(&proto.proof);
     let proof = OperationProof::<F, H::Digest>::decode_cfg(
         Copying(proto.proof.as_ref()),
@@ -541,9 +538,7 @@ where
     .map_err(|err| format!("failed to decode current key-value proof: {err}"))?;
     let location = proof.loc;
 
-    // The wire carries only the operation proof, so the decoded update supplies the successor key.
-    // Commonware checks the operation's activity bit and authenticates the key, value, and
-    // successor against `root`.
+    // The operation supplies the successor key authenticated with its key, value, and activity bit.
     let proof = KeyValueProof {
         proof,
         next_key: update.next_key.clone(),
@@ -576,7 +571,7 @@ where
     Ok((location, OrderedOperation::Update(update)))
 }
 
-/// Verifies that `proto` proves `requested_key` has no active value under `current_root`.
+/// Verify that `requested_key` has no active value under `current_root`.
 ///
 /// Returns the successor key that closes the excluding span, or `None` when the proof shows the
 /// database has no active keys.
@@ -593,7 +588,7 @@ where
     OrderedOperation<F, Vec<u8>, Vec<u8>>:
         Decode + Encode + Read<Cfg = ((RangeCfg<usize>, ()), (RangeCfg<usize>, ()))>,
 {
-    // Decode the exclusion proof with the configured chunk size. The wire does not carry the size.
+    // Decode with the source database's chunk size, which the proof does not encode.
     let max_digests = proof_digest_cap::<H::Digest>(&proto.proof);
     let proof = ExclusionProof::<F, Vec<u8>, VariableEncoding<Vec<u8>>, H::Digest>::decode_cfg(
         Copying(proto.proof.as_ref()),
@@ -769,9 +764,7 @@ where
     Ok(operation.clone())
 }
 
-// Fixed operations arrive as raw bytes with key and value sizes supplied at runtime. The helpers
-// below parse Commonware's fixed wire layout and context tags directly, so verification works for
-// any key and value width.
+// Runtime key and value sizes determine the offsets in Commonware's fixed operation encoding.
 struct FixedUnorderedOperationSizes {
     update: usize,
     total: usize,
@@ -1501,8 +1494,9 @@ pub fn verify_historical_fixed_unordered_update_proof(
     })
 }
 
-/// Verify a `GetOperations` multi-proof and return the raw operations, in
-/// request order, with the trusted root they were verified against.
+/// Verify a serialized `qmdb.v1.HistoricalMultiProof` against `root`, `expected_tip`, and
+/// `expected_locations`. Return encoded operations in location order. Locations must be
+/// nonempty, strictly ascending, and at most `expected_tip`.
 #[wasm_bindgen]
 pub fn verify_historical_operations_proof(
     bytes: &[u8],
@@ -1539,8 +1533,10 @@ pub fn verify_historical_operations_proof(
     })
 }
 
-/// Verify a `GetOperations` multi-proof over fixed keyless appends.
-/// `expected_values` concatenates one `value_size`-byte value per location.
+/// Verify fixed keyless appends against `root` at the expected tip and locations.
+/// `bytes` encodes a `qmdb.v1.HistoricalMultiProof`. Locations must be nonempty,
+/// strictly ascending, and at most `expected_tip`. `expected_values` concatenates one
+/// `value_size`-byte value per location.
 #[wasm_bindgen]
 #[allow(clippy::too_many_arguments)]
 pub fn verify_historical_fixed_keyless_append_operations_proof(
@@ -1587,8 +1583,10 @@ pub fn verify_historical_fixed_keyless_append_operations_proof(
     })
 }
 
-/// Verify a `GetOperations` multi-proof over fixed unordered updates.
-/// `expected_keys` concatenates one `key_size`-byte key per location.
+/// Verify fixed unordered updates against `root` at the expected tip and locations.
+/// `bytes` encodes a `qmdb.v1.HistoricalMultiProof`. Locations must be nonempty,
+/// strictly ascending, and at most `expected_tip`. `expected_keys` concatenates one
+/// `key_size`-byte key per location.
 #[wasm_bindgen]
 #[allow(clippy::too_many_arguments)]
 pub fn verify_historical_fixed_unordered_update_operations_proof(
@@ -2139,10 +2137,7 @@ mod tests {
         );
     }
 
-    /// An ordered `current` database built in memory with Commonware's fixed-size proof builders.
-    ///
-    /// The verifiers under test take the chunk size at runtime, so proofs built here with const
-    /// `N` check that the two chunk representations interoperate.
+    /// Commonware proofs with const chunk size `N` for testing runtime-sized verification.
     struct CurrentFixture<F: merkle::Graftable, const N: usize> {
         /// Operations in location order.
         operations: Vec<OrderedVariableOperation<F>>,
@@ -2189,7 +2184,6 @@ mod tests {
             operations: Vec<OrderedVariableOperation<F>>,
             inactive_first: bool,
         ) -> Self {
-            // Record each operation's activity bit.
             let leaves = operations.len();
             let mut status = Prunable::<N>::new();
             for index in 0..leaves {
@@ -2336,8 +2330,6 @@ mod tests {
         }
     }
 
-    /// Checks that proofs built with Commonware's const chunk size `N` verify through the
-    /// runtime-sized verifiers.
     fn assert_current_interoperability<F: merkle::Graftable + PartialEq, const N: usize>() {
         let config = current_proof_config::<Sha256Digest>(N, "test").unwrap();
 

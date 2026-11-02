@@ -279,23 +279,23 @@ where
         Ok(checkpoint)
     }
 
-    /// Prove between 1 and 1024 strictly ascending operation locations at `tip`.
+    /// Prove a nonempty set of strictly ascending operation locations at or below `tip`.
+    /// `min_sequence_number` is the minimum Store sequence for the publication lookup.
     pub async fn operation_multi_proof(
         &self,
         tip: Location<F>,
         locations: &[Location<F>],
         min_sequence_number: Option<u64>,
     ) -> Result<RawBatchMultiProof<H::Digest, F>, QmdbError> {
-        // Reject a malformed request, or a tip beyond the Merkle family's
-        // location domain, before any store read.
+        // Validate the request and Merkle family bounds before reading the Store.
         let requested = locations
             .iter()
             .map(|location| location.as_u64())
             .collect::<Vec<_>>();
         OperationLocations::with_max_leaves(tip.as_u64(), &requested, F::MAX_LEAVES.as_u64())?;
 
-        // `min_sequence_number` bounds the publication lookup, and the proof
-        // reads the store at the sequence number the publication was found at.
+        // `min_sequence_number` bounds the publication lookup. Proof reads use
+        // the observed publication sequence as their minimum.
         let watermark = self.resolve_watermark(tip, min_sequence_number).await?;
         self.multi_proof_at(watermark, MultiProofOperations::Read(locations))
             .await

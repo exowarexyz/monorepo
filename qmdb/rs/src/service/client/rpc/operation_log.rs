@@ -4,11 +4,14 @@ use super::{connect_error_to_qmdb, proof_digest_cap};
 use crate::{
     decode_digest,
     proof::{VerifiedOperationRange, VerifiedOperations},
-    request::{OperationLocations, OperationWindow},
-    service::proto::qmdb::v1::{
-        GetOperationRangeRequest, GetOperationsRequest, HistoricalMultiProof,
-        HistoricalOperationRangeProof, OperationLogServiceClient, SubscribeRequest,
-        SubscribeResponseView,
+    request::OperationWindow,
+    service::{
+        proto::qmdb::v1::{
+            GetOperationRangeRequest, GetOperationsRequest, HistoricalMultiProof,
+            HistoricalOperationRangeProof, OperationLogServiceClient, SubscribeRequest,
+            SubscribeResponseView,
+        },
+        validate_operations_request,
     },
     QmdbError,
 };
@@ -218,7 +221,7 @@ where
     ) -> Result<VerifiedOperations<H::Digest, Op, F>, QmdbError> {
         let tip = Location::<F>::new(request.tip);
         let requested = request.locations.clone();
-        let locations = OperationLocations::new(request.tip, &requested)?;
+        let locations = validate_operations_request(request.tip, &requested)?;
         let response = self
             .rpc
             .get_operations(request)

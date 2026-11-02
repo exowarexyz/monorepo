@@ -63,15 +63,11 @@ impl OperationWindow {
     }
 }
 
-/// Maximum number of locations in one operations multi-proof request
-pub(crate) const MAX_REQUESTED_LOCATIONS: usize = 1024;
-
 /// Requested operation locations that cannot be served regardless of the response
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum InvalidLocations {
     TipOverflow,
     Empty,
-    TooMany { count: usize },
     NotAscending { location: u64 },
     OutOfBounds { location: u64, count: u64 },
 }
@@ -81,10 +77,6 @@ impl core::fmt::Display for InvalidLocations {
         match self {
             Self::TipOverflow => f.write_str("operation tip overflow"),
             Self::Empty => f.write_str("operations request must contain at least one location"),
-            Self::TooMany { count } => write!(
-                f,
-                "operations request has {count} locations, maximum is {MAX_REQUESTED_LOCATIONS}"
-            ),
             Self::NotAscending { location } => write!(
                 f,
                 "operations request locations must be strictly ascending at {location}"
@@ -108,8 +100,7 @@ impl<'a> OperationLocations<'a> {
         Self::with_max_leaves(tip, locations, u64::MAX)
     }
 
-    /// Validate `locations` at `tip`, also rejecting a tip whose leaf count
-    /// exceeds `max_leaves` as [`InvalidLocations::TipOverflow`].
+    /// Validate `locations` at `tip` with a maximum leaf count of `max_leaves`.
     pub(crate) fn with_max_leaves(
         tip: u64,
         locations: &'a [u64],
@@ -121,14 +112,9 @@ impl<'a> OperationLocations<'a> {
             return Err(InvalidLocations::TipOverflow);
         }
 
-        // Locations must be a bounded, strictly ascending set below the leaf count.
+        // Locations must be a nonempty, strictly ascending set below the leaf count.
         if locations.is_empty() {
             return Err(InvalidLocations::Empty);
-        }
-        if locations.len() > MAX_REQUESTED_LOCATIONS {
-            return Err(InvalidLocations::TooMany {
-                count: locations.len(),
-            });
         }
         for pair in locations.windows(2) {
             if pair[0] >= pair[1] {

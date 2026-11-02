@@ -57,7 +57,7 @@ import {
   assertU32,
   assertU64,
   assertOperationWindow,
-  assertOperationsRequest,
+  assertOperationLocations,
   fixedOperationExpectations,
   type BytesLike,
   type MerkleFamily,
@@ -194,6 +194,15 @@ function assertDistinctKeys(keys: readonly Uint8Array[]): void {
 function assertOptionalMinSequenceNumber(minSequenceNumber?: bigint): void {
   if (minSequenceNumber !== undefined) {
     assertU64(minSequenceNumber, 'minSequenceNumber');
+  }
+}
+
+/** Maximum number of locations in a `GetOperations` RPC. */
+const MAX_REQUESTED_LOCATIONS = 1024;
+
+function assertOperationsRequestSize(locationCount: number): void {
+  if (locationCount > MAX_REQUESTED_LOCATIONS) {
+    throw new Error(`operations request must have at most ${MAX_REQUESTED_LOCATIONS} locations`);
   }
 }
 
@@ -344,7 +353,8 @@ export class QmdbOperationLogClient {
     expectedRoot: BytesLike,
     options?: CallOptions,
   ): Promise<VerifiedRawOperationsProof> {
-    assertOperationsRequest(request);
+    assertOperationsRequestSize(request.locations.length);
+    assertOperationLocations(request);
     assertOptionalMinSequenceNumber(request.minSequenceNumber);
     const [, proofBytes] = await Promise.all([
       initQmdbWasm(),
@@ -360,6 +370,7 @@ export class QmdbOperationLogClient {
     expected: readonly { location: bigint; value: BytesLike }[],
     options?: CallOptions,
   ): Promise<VerifiedFixedKeylessAppendsProof> {
+    assertOperationsRequestSize(expected.length);
     const { locations } = fixedOperationExpectations(
       expected.map(({ location, value }) => ({ location, bytes: toBytes(value) })),
       'value',
@@ -387,6 +398,7 @@ export class QmdbOperationLogClient {
     valueSize: number,
     options?: CallOptions,
   ): Promise<VerifiedFixedUnorderedUpdatesProof> {
+    assertOperationsRequestSize(expected.length);
     assertU32(valueSize, 'valueSize');
     const { locations } = fixedOperationExpectations(
       expected.map(({ location, key }) => ({ location, bytes: toBytes(key) })),

@@ -219,8 +219,7 @@ fn write_operation_range_checkpoint<D: Digest, F: Graftable>(
     }
 }
 
-/// Encode `proof` as a standalone `qmdb.v1.HistoricalOperationRangeProof`
-/// protobuf message.
+/// Encode `proof` as a `qmdb.v1.HistoricalOperationRangeProof` protobuf message.
 pub fn encode_historical_operation_range_proof<D: Digest, F: Graftable>(
     proof: &OperationRangeCheckpoint<D, F>,
 ) -> Vec<u8> {
@@ -230,8 +229,7 @@ pub fn encode_historical_operation_range_proof<D: Digest, F: Graftable>(
     .to_vec()
 }
 
-/// Encode `proof` as a standalone `qmdb.v1.HistoricalMultiProof` protobuf
-/// message.
+/// Encode `proof` as a `qmdb.v1.HistoricalMultiProof` protobuf message.
 pub fn encode_historical_multi_proof<D: Digest, F: Graftable>(
     proof: &RawBatchMultiProof<D, F>,
 ) -> Vec<u8> {

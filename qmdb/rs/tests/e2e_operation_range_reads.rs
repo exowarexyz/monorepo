@@ -956,7 +956,7 @@ async fn operations_multi_proof_reads_rows_and_nodes_in_one_batch() {
 }
 
 async fn reject_invalid_native_multi_proof_requests<F: Graftable>() {
-    // Serve both native adapters from an empty store that records every call
+    // The empty Store records whether invalid requests reach it.
     let fixture = Fixture::new().await;
     let store = fixture.prefixed(&[]);
     let keyless = exoware_qmdb::adapter::Keyless::<F, Sha256, Vec<u8>>::new(
@@ -969,14 +969,13 @@ async fn reject_invalid_native_multi_proof_requests<F: Graftable>() {
     );
     let maximum = F::MAX_LEAVES.as_u64();
 
-    // Malformed locations and tips past the family's domain fail before any store call
+    // Malformed locations and tips outside the family's domain fail before Store access.
     for (tip, locations, overflow) in [
         (14, vec![], false),
         (14, vec![3, 3], false),
         (14, vec![7, 3], false),
         (14, vec![0, 15], false),
         (14, vec![maximum], false),
-        (2048, (0..=1024).collect(), false),
         (maximum, vec![0], true),
         (maximum.saturating_add(1), vec![0], true),
         (u64::MAX, vec![0], true),
@@ -1002,11 +1001,10 @@ async fn reject_invalid_native_multi_proof_requests<F: Graftable>() {
         assert!(fixture.store.calls().is_empty());
     }
 
-    // Requests at the location and count limits pass validation and reach the
-    // store. The empty store has no publication at the tip
+    // Valid requests reach publication lookup, including those above the RPC count limit.
     for (tip, locations) in [
         (maximum - 1, vec![maximum - 1]),
-        (1023, (0..1024).collect()),
+        (1024, (0..=1024).collect()),
     ] {
         fixture.store.state.lock().unwrap().calls.clear();
         let locations = locations.into_iter().map(Location::new).collect::<Vec<_>>();
@@ -1037,18 +1035,22 @@ async fn native_multi_proofs_reject_invalid_requests_before_store_access() {
 }
 
 #[tokio::test]
-async fn native_multi_proofs_preserve_publication_floors_and_authenticate_operations() {
-    for unordered in [false, true] {
-        // Stage 15 keyless or unordered operations ending in a commit
+async fn native_multi_proofs_authenticate_large_requests_and_preserve_publication_floors() {
+    for (unordered, count) in [false, true]
+        .into_iter()
+        .flat_map(|unordered| [15u64, 2051].map(|count| (unordered, count)))
+    {
+        // Stage a complete operation log ending in a commit at the proof tip.
+        let tip = count - 1;
         let fixture = Fixture::new().await;
         let store = fixture.prefixed(&[]);
         let (root, encoded) = if unordered {
-            let operations = (0..15)
+            let operations = (0..count)
                 .map(|index| {
-                    if index == 14 {
+                    if index == tip {
                         UnorderedOp::CommitFloor(None, Location::new(4))
                     } else {
-                        UnorderedOp::Delete(vec![index])
+                        UnorderedOp::Delete(index.to_be_bytes().to_vec())
                     }
                 })
                 .collect::<Vec<_>>();
@@ -1060,7 +1062,15 @@ async fn native_multi_proofs_preserve_publication_floors_and_authenticate_operat
                     .collect::<Vec<_>>(),
             )
         } else {
-            let operations = operations();
+            let operations = (0..count)
+                .map(|index| {
+                    if index == tip {
+                        Operation::Commit(None, Location::new(0))
+                    } else {
+                        Operation::Append(index.to_be_bytes().to_vec())
+                    }
+                })
+                .collect::<Vec<_>>();
             (
                 fixture.stage(&store, &operations, &((0..=10000).into(), ())),
                 operations
@@ -1070,47 +1080,117 @@ async fn native_multi_proofs_preserve_publication_floors_and_authenticate_operat
             )
         };
 
-        // The store serves the publication at sequence 23, above the client's floor of 17
+        // Publication is visible above the requested floor, and proof reads see later sequences.
         {
             let mut state = fixture.store.state.lock().unwrap();
             state.publication_sequence = 23;
             state.batch_sequences = vec![31, 47];
         }
 
-        // Prove three locations, including the commit at the tip
-        let locations = [Location::new(0), Location::new(7), Location::new(14)];
+        // The larger request proves 1026 noncontiguous locations, including the tip.
+        let locations = if count == 15 {
+            vec![Location::new(0), Location::new(7), Location::new(tip)]
+        } else {
+            (0..count).step_by(2).map(Location::new).collect()
+        };
+        assert_eq!(locations.len(), if count == 15 { 3 } else { 1026 });
         let mut proof = if unordered {
             Unordered::new(store, ordered_cfg())
-                .operation_multi_proof(Location::new(14), &locations, Some(17))
+                .operation_multi_proof(Location::new(tip), &locations, Some(17))
                 .await
                 .unwrap()
         } else {
             Keyless::new(store, ((0..=10000).into(), ()))
-                .operation_multi_proof(Location::new(14), &locations, Some(17))
+                .operation_multi_proof(Location::new(tip), &locations, Some(17))
                 .await
                 .unwrap()
         };
 
-        // The proof authenticates the requested operations against the staged root
-        assert_eq!(proof.watermark, Location::new(14));
+        // Authenticate every requested operation against the independently staged root.
+        assert_eq!(proof.watermark, Location::new(tip));
         assert_eq!(proof.ops_root, root);
         assert!(proof.verify::<Sha256>());
         assert_eq!(
             proof.operations,
-            locations.map(|location| (location, encoded[location.as_u64() as usize].clone()))
+            locations
+                .iter()
+                .map(|&location| (location, encoded[location.as_u64() as usize].clone()))
+                .collect::<Vec<_>>()
         );
 
-        // The client floor bounds the publication lookup, and the proof reads
-        // pin the sequence number the publication was found at
+        // Proof reads require at least the sequence that made publication visible.
         let calls = fixture.store.calls();
         assert_eq!(calls.len(), 2);
         assert_eq!(publication_range(&calls).min_sequence_number, Some(17));
-        assert_eq!(boundary_batch(&calls, 14).min_sequence_number, Some(23));
+        assert_eq!(boundary_batch(&calls, tip).min_sequence_number, Some(23));
 
-        // Tampering with an operation fails verification
+        // Tampering with an operation must fail verification.
         proof.operations[1].1[0] ^= 1;
         assert!(!proof.verify::<Sha256>());
     }
+}
+
+#[tokio::test]
+async fn native_fixed_keyless_large_multi_proof_matches_browser_fixture() {
+    use commonware_storage::qmdb::{any::value::FixedEncoding, keyless::fixed};
+    use commonware_utils::sequence::FixedBytes;
+    use exoware_qmdb::proof::encode_historical_multi_proof;
+
+    type Value = FixedBytes<16>;
+    type FixedOperation = fixed::Operation<mmr::Family, Value>;
+    let fixture = Fixture::new().await;
+    let store = fixture.prefixed(&[]);
+    let tip = 1025;
+    let mut operations = (0..tip)
+        .map(|index: u64| FixedOperation::Append(Value::new(u128::from(index).to_be_bytes())))
+        .collect::<Vec<_>>();
+    operations.push(FixedOperation::Commit(None, Location::new(0)));
+    let root = fixture.stage(&store, &operations, &());
+    let locations = (0..tip).map(Location::new).collect::<Vec<_>>();
+    let proof =
+        exoware_qmdb::adapter::Keyless::<mmr::Family, Sha256, Value, FixedEncoding<Value>>::new(
+            store,
+            (),
+        )
+        .operation_multi_proof(Location::new(tip), &locations, None)
+        .await
+        .unwrap();
+    assert_eq!(proof.operations.len(), 1025);
+    assert_eq!(proof.ops_root, root);
+    assert!(proof.verify::<Sha256>());
+    assert_eq!(
+        proof.operations,
+        locations
+            .iter()
+            .map(|&location| (
+                location,
+                operations[location.as_u64() as usize].encode().to_vec()
+            ))
+            .collect::<Vec<_>>()
+    );
+
+    let contents = format!(
+        "{}\n{tip} {}\n{}\n{}\n",
+        hex::encode(root),
+        locations
+            .iter()
+            .map(|location| location.as_u64().to_string())
+            .collect::<Vec<_>>()
+            .join(","),
+        hex::encode(encode_historical_multi_proof(&proof)),
+        proof
+            .operations
+            .iter()
+            .map(|(_, operation)| hex::encode(operation))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    );
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../ts/test/fixtures/operations/keyless_large_mmr.txt");
+    if std::env::var_os("UPDATE_FIXTURES").is_some() {
+        std::fs::write(&path, &contents).unwrap();
+    }
+    assert_eq!(std::fs::read_to_string(path).unwrap(), contents);
 }
 
 #[tokio::test]

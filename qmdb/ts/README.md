@@ -10,7 +10,7 @@ This package:
   `getCurrentOperationRange`, and `subscribe` proofs for MMR or MMB through a small WASM module
 - exposes `QmdbOperationLogClient` for backend-agnostic historical operation-log proofs,
   including fixed keyless appends and fixed unordered updates, singly or many per proof
-- exposes `QmdbProofVerifier` for the same checks on proofs received through another transport
+- exposes `QmdbProofVerifier` for historical range and multi-proofs from custom transports
 - supports `exact`, `prefix`, and `regex` subscription matchers
 
 Proof verification is root-driven: callers supply the current/global root for
@@ -21,10 +21,10 @@ verification.
 
 Operation range verification binds the exact requested start, count, and tip.
 Operations multi-proofs bind the exact requested tip and strictly ascending
-locations.
-Key ranges enforce linear ordering, bounds, and pagination. Absolute positions
-use `bigint`. Batch limits and WASM byte-size arguments must fit their unsigned
-32-bit representation.
+locations. The `GetOperations` RPC accepts at most 1,024 locations. Key ranges
+enforce linear ordering, bounds, and pagination. Absolute positions use `bigint`.
+Batch limits and WASM byte-size arguments must fit their unsigned 32-bit
+representation.
 
 All unary proof requests accept an optional `minSequenceNumber`: the minimum
 Store sequence for checking publication of the requested watermark.
@@ -35,15 +35,13 @@ operations. A server-provided root is not a trust anchor. `sha256` and `blake3`
 provide cryptographic hashing. `crc32c` is a checksum mode for accidental
 corruption and is unsuitable for authenticating an untrusted proof provider.
 
-To verify proofs from an aggregate response, pass the raw `HistoricalOperationRangeProof`
-or `HistoricalMultiProof` protobuf bytes, without the RPC response envelope:
+Use [`QmdbProofVerifier`](src/verification.ts) for proofs received through your
+own transport:
 
 ```ts
-import { initQmdbWasm, QmdbProofVerifier } from '@exowarexyz/qmdb';
+import { QmdbProofVerifier } from '@exowarexyz/qmdb';
 
-const ready = initQmdbWasm();
-const response = await fetchAggregate();
-await ready;
+const response = await fetchProofs();
 const verifier = new QmdbProofVerifier({ merkleFamily: 'mmr', hashFamily: 'sha256' });
 const account = await verifier.verifyFixedUnorderedUpdate(
   response.accountProof,
@@ -61,11 +59,8 @@ const transactions = await verifier.verifyFixedKeylessAppendMany(
 );
 ```
 
-Obtain roots and tips from authenticated application data, and bind the expected
-keys, locations, and values to the requested account or transactions. An unordered
-update proves historical membership, not that it is the latest update for its key.
-`account.value` contains the authenticated value to decode. The verifier has no
-Store freshness floor or transport options. The initializer is shared with network
-clients and may also take WASM bytes or a compiled module. Supply a custom module
-on the first initialization call. Later calls share that initialization, including
-any failure.
+Take roots and tips from authenticated application data, and pass the keys,
+locations, and values you expect. An unordered update proves historical
+membership, not that it is the latest update for its key.
+
+To preload WASM or provide a custom module, call `initQmdbWasm` before verification.

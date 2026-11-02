@@ -126,8 +126,8 @@ pub(crate) fn decode_digest<D: Digest>(
 mod tests {
     use crate::request::{
         validate_key_range, InvalidLocations, InvalidWindow, OperationLocations, OperationWindow,
-        MAX_REQUESTED_LOCATIONS,
     };
+    use crate::service::{validate_operations_request, MAX_REQUESTED_LOCATIONS};
 
     #[test]
     fn test_operation_windows_preserve_large_absolute_positions() {
@@ -182,11 +182,19 @@ mod tests {
             })
         ));
         let many = (0..=MAX_REQUESTED_LOCATIONS as u64).collect::<Vec<_>>();
+        assert!(OperationLocations::new(u64::MAX - 1, &many).is_ok());
+    }
+
+    #[test]
+    fn test_operations_rpc_limits_locations() {
+        let many = (0..=MAX_REQUESTED_LOCATIONS as u64).collect::<Vec<_>>();
         assert!(matches!(
-            OperationLocations::new(u64::MAX - 1, &many),
-            Err(InvalidLocations::TooMany { count }) if count == MAX_REQUESTED_LOCATIONS + 1
+            validate_operations_request(u64::MAX - 1, &many),
+            Err(crate::QmdbError::InvalidRequestedLocations(_))
         ));
-        assert!(OperationLocations::new(u64::MAX - 1, &many[..MAX_REQUESTED_LOCATIONS]).is_ok());
+        assert!(
+            validate_operations_request(u64::MAX - 1, &many[..MAX_REQUESTED_LOCATIONS]).is_ok()
+        );
     }
 
     #[test]

@@ -36,27 +36,20 @@ export interface LocatedOrderedOperation {
 }
 
 export interface VerifiedHistoricalMultiProof {
-  /**
-   * The trusted root supplied to verification. It is the current/global root for
-   * current-boundary-backed proofs and the operation-log root for operation-log-only
-   * proofs.
-   */
+  /** The trusted root supplied to verification. */
   root: Uint8Array;
   operations: LocatedOrderedOperation[];
   proofSizeBytes: number;
 }
 
-/**
- * The `min(maxLocations, tip - startLocation + 1)` operations from `startLocation`,
- * proven at tip location `tip`.
- */
+/** The `min(maxLocations, tip - startLocation + 1)` operations from `startLocation` at `tip`. */
 export interface OperationRangeContext {
   tip: bigint;
   startLocation: bigint;
   maxLocations: number;
 }
 
-/** Operations at `locations`, strictly ascending and each at most `tip`. */
+/** A nonempty set of `locations`, strictly ascending and each at most `tip`. */
 export interface OperationsContext {
   tip: bigint;
   locations: readonly bigint[];
@@ -78,11 +71,7 @@ export interface VerifiedRawOperationRangeProof {
   proofSizeBytes: number;
 }
 
-/**
- * Operations in request order. `root` is the trusted root supplied to verification.
- * For current-boundary endpoints, an ops-root witness binds the proven operation-log
- * root to it.
- */
+/** Operations in request order. `root` is the trusted root supplied to verification. */
 export interface VerifiedRawOperationsProof {
   root: Uint8Array;
   operations: LocatedRawOperation[];
@@ -131,7 +120,7 @@ export interface VerifiedFixedUnorderedUpdateProof {
   operationCount: number;
 }
 
-/** Proof encodings of the source database. Proofs do not carry them. */
+/** Merkle and hash families used by the source database. */
 export interface QmdbProofVerifierOptions {
   /** Merkle family of the source database. Defaults to `mmr`. */
   merkleFamily?: MerkleFamily;
@@ -141,9 +130,8 @@ export interface QmdbProofVerifierOptions {
 }
 
 /**
- * Initialize the shared WASM module. Callers may start it while fetching proofs.
- * Every call returns the first call's promise, so only the first module input is used
- * and a failed initialization is not retried.
+ * Initialize the shared WASM module with the first call's input.
+ * All calls share its promise, including initialization failures.
  */
 export function initQmdbWasm(moduleOrPath?: InitInput | Promise<InitInput>): Promise<void> {
   return (wasmReady ??= initWasm(
@@ -198,21 +186,18 @@ export function assertOperationWindow(request: OperationRangeContext): void {
   }
 }
 
-/** Maximum locations in one operations multi-proof request, as in the Rust request module. */
-const MAX_REQUESTED_LOCATIONS = 1024;
-
 /** Reject a location set that no response can serve, before any proof is decoded. */
-export function assertOperationsRequest(request: OperationsContext): void {
+export function assertOperationLocations(request: OperationsContext): void {
   // The proven log holds `tip + 1` operations, so that count must fit in 64 bits.
   assertU64(request.tip, 'tip');
   if (request.tip === 0xffff_ffff_ffff_ffffn) {
     throw new Error('operation tip overflow');
   }
 
-  // Locations must be a bounded, strictly ascending set at or below the tip.
+  // Locations must be a nonempty, strictly ascending set at or below the tip.
   const { locations } = request;
-  if (locations.length === 0 || locations.length > MAX_REQUESTED_LOCATIONS) {
-    throw new Error(`operations request must have 1 to ${MAX_REQUESTED_LOCATIONS} locations`);
+  if (locations.length === 0) {
+    throw new Error('operations request must contain at least one location');
   }
   locations.forEach((location, index) => {
     assertU64(location, 'location');
@@ -225,21 +210,18 @@ export function assertOperationsRequest(request: OperationsContext): void {
   }
 }
 
-/**
- * Sort expectations by location, validate them as an operations request at `tip`, and
- * concatenate their equal-size bytes.
- */
+/** Pack equal-size expectations by ascending location after validating them at `tip`. */
 export function fixedOperationExpectations(
   expected: readonly { location: bigint; bytes: Uint8Array }[],
   label: string,
   tip: bigint,
 ): { locations: bigint[]; bytes: Uint8Array; size: number } {
-  // Operations requests list strictly ascending locations, so sort before validating.
+  // Multi-proof locations must be strictly ascending, so sort before validation.
   const sorted = [...expected].sort((a, b) =>
     a.location < b.location ? -1 : a.location > b.location ? 1 : 0,
   );
   const locations = sorted.map(({ location }) => location);
-  assertOperationsRequest({ tip, locations });
+  assertOperationLocations({ tip, locations });
 
   // WASM receives every expectation in one buffer of equal-size entries.
   const size = sorted[0]?.bytes.length ?? 0;
@@ -252,11 +234,13 @@ export function fixedOperationExpectations(
 }
 
 /**
- * Verifies raw HistoricalOperationRangeProof and HistoricalMultiProof protobufs.
- * Roots and request context must come from an authenticated source. Unordered
- * updates prove historical membership, not that a value is the latest for its key.
- * The Merkle and hash families are verifier configuration that proofs do not carry.
- * `proofSizeBytes` reports the length of the supplied proof bytes.
+ * Verify historical operations against a trusted root and expected request context.
+ *
+ * Range and single-operation methods accept serialized `HistoricalOperationRangeProof` protobuf
+ * messages. `verifyOperations` and the `*Many` methods accept serialized `HistoricalMultiProof`
+ * protobuf messages.
+ *
+ * Unordered updates prove historical membership, not that a value is the latest for its key.
  */
 export class QmdbProofVerifier {
   private readonly merkleFamily: MerkleFamily;
@@ -270,7 +254,7 @@ export class QmdbProofVerifier {
     this.hashFamily = hashFamily;
   }
 
-  /** Verify raw operations in a HistoricalOperationRangeProof. */
+  /** Verify the requested window of encoded operations. */
   async verifyOperationRange(
     proofBytes: Uint8Array,
     request: OperationRangeContext,
@@ -279,7 +263,6 @@ export class QmdbProofVerifier {
     assertOperationWindow(request);
     await initQmdbWasm();
 
-    // Authenticate exactly the requested window of raw operations against `expectedRoot`.
     const verified = verify_historical_raw_operation_range_proof(
       proofBytes,
       toBytes(expectedRoot),
@@ -292,7 +275,7 @@ export class QmdbProofVerifier {
     return { ...verified, proofSizeBytes: proofBytes.length };
   }
 
-  /** Verify and decode a range of variable-length ordered operations. */
+  /** Verify and decode the requested window of variable-length ordered operations. */
   async verifyOrderedOperationRange(
     proofBytes: Uint8Array,
     request: OperationRangeContext,
@@ -301,7 +284,6 @@ export class QmdbProofVerifier {
     assertOperationWindow(request);
     await initQmdbWasm();
 
-    // Authenticate the window, then decode each operation as a variable ordered operation.
     const verified = verify_historical_operation_range_proof(
       proofBytes,
       toBytes(expectedRoot),
@@ -314,10 +296,7 @@ export class QmdbProofVerifier {
     return { ...verified, proofSizeBytes: proofBytes.length };
   }
 
-  /**
-   * Verify that `expectedValue` was appended at `expectedLocation` in a
-   * HistoricalOperationRangeProof.
-   */
+  /** Verify an append of `expectedValue` at `expectedLocation`. */
   async verifyFixedKeylessAppend(
     proofBytes: Uint8Array,
     request: OperationRangeContext,
@@ -329,7 +308,6 @@ export class QmdbProofVerifier {
     assertOperationWindow(request);
     await initQmdbWasm();
 
-    // Authenticate the window, then require an append of `expectedValue` at `expectedLocation`.
     const verified = verify_historical_fixed_keyless_append_proof(
       proofBytes,
       toBytes(expectedRoot),
@@ -344,10 +322,7 @@ export class QmdbProofVerifier {
     return { ...verified, proofSizeBytes: proofBytes.length };
   }
 
-  /**
-   * Verify that `expectedKey` was updated at `expectedLocation` in a
-   * HistoricalOperationRangeProof, returning its value.
-   */
+  /** Verify an update of `expectedKey` at `expectedLocation` and return its value. */
   async verifyFixedUnorderedUpdate(
     proofBytes: Uint8Array,
     request: OperationRangeContext,
@@ -361,8 +336,6 @@ export class QmdbProofVerifier {
     assertOperationWindow(request);
     await initQmdbWasm();
 
-    // Authenticate the window, then require an update of `expectedKey` with a
-    // `valueSize`-byte value at `expectedLocation`.
     const verified = verify_historical_fixed_unordered_update_proof(
       proofBytes,
       toBytes(expectedRoot),
@@ -378,16 +351,15 @@ export class QmdbProofVerifier {
     return { ...verified, proofSizeBytes: proofBytes.length };
   }
 
-  /** Verify exactly the requested locations in a HistoricalMultiProof. */
+  /** Verify exactly the requested operation locations. */
   async verifyOperations(
     proofBytes: Uint8Array,
     request: OperationsContext,
     expectedRoot: BytesLike,
   ): Promise<VerifiedRawOperationsProof> {
-    assertOperationsRequest(request);
+    assertOperationLocations(request);
     await initQmdbWasm();
 
-    // Authenticate exactly the requested locations against `expectedRoot`.
     const verified = verify_historical_operations_proof(
       proofBytes,
       toBytes(expectedRoot),
@@ -399,7 +371,7 @@ export class QmdbProofVerifier {
     return { ...verified, proofSizeBytes: proofBytes.length };
   }
 
-  /** Verify that each expected value was appended at its location, in one HistoricalMultiProof. */
+  /** Verify that each expected value was appended at its location. */
   async verifyFixedKeylessAppendMany(
     proofBytes: Uint8Array,
     request: OperationsTipContext,
@@ -413,7 +385,6 @@ export class QmdbProofVerifier {
     );
     await initQmdbWasm();
 
-    // Authenticate the expected locations, then require an append of each value at its location.
     const verified = verify_historical_fixed_keyless_append_operations_proof(
       proofBytes,
       toBytes(expectedRoot),
@@ -427,7 +398,7 @@ export class QmdbProofVerifier {
     return { ...verified, proofSizeBytes: proofBytes.length };
   }
 
-  /** Verify that each expected key was updated at its location, in one HistoricalMultiProof. */
+  /** Verify that each expected key was updated at its location. */
   async verifyFixedUnorderedUpdateMany(
     proofBytes: Uint8Array,
     request: OperationsTipContext,
@@ -443,7 +414,6 @@ export class QmdbProofVerifier {
     );
     await initQmdbWasm();
 
-    // Authenticate the expected locations, then require an update of each key at its location.
     const verified = verify_historical_fixed_unordered_update_operations_proof(
       proofBytes,
       toBytes(expectedRoot),

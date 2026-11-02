@@ -135,9 +135,7 @@ impl<D: Digest, F: Graftable> OperationRangeCheckpoint<D, F> {
     }
 }
 
-/// Historical multi-proof over selected operation locations. The
-/// operations are stored as encoded bytes so this type is shared across
-/// ordered, unordered, immutable, and keyless backends.
+/// Historical membership proof for encoded operations at selected locations.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[must_use]
 pub struct RawBatchMultiProof<D: Digest, F: Graftable> {
@@ -499,10 +497,10 @@ mod tests {
     fn historical_encodings_roundtrip<F: Graftable + PartialEq>() {
         let digest = Sha256::hash(&[b"historical proof encoding"]);
 
-        // Cover locations beyond 2^53 and ranges with and without a root witness
+        // Exercise locations beyond JavaScript's exact integer range and optional witnesses.
+        // Operation payloads include empty values and bytes with the high bit set.
         for start in [0, (1u64 << 53) + 1] {
             for with_witness in [false, true] {
-                // Build a range checkpoint with empty and high-byte operations
                 let witness = with_witness.then(|| OpsRootWitness::<F, sha256::Digest> {
                     grafted_root: digest,
                     pending_chunk_digest: None.try_into().unwrap(),
@@ -522,8 +520,7 @@ mod tests {
                     encoded_operations: vec![vec![], vec![0, 127, 128, 255]],
                 };
 
-                // The range proof matches the generated protobuf encoding field
-                // for field, and its proof and witness decode back to the source
+                // Encoding must match the generated protobuf and preserve every field.
                 let encoded_witness = witness.as_ref().map(Encode::encode).unwrap_or_default();
                 let expected = HistoricalOperationRangeProof {
                     proof: range.proof.encode(),
@@ -558,8 +555,7 @@ mod tests {
                     );
                 }
 
-                // The same material as a multi-proof over consecutive locations
-                // matches the generated multi-proof encoding
+                // Multi-proof encoding must preserve each operation's location and bytes.
                 let multi = RawBatchMultiProof {
                     watermark: range.watermark,
                     ops_root: digest,
