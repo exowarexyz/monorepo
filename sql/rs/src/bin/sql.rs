@@ -43,7 +43,8 @@ async fn health() -> &'static str {
 fn build_server(
     store_url: &str,
 ) -> Result<Arc<SqlServer>, Box<dyn std::error::Error + Send + Sync>> {
-    let client = StoreClient::new(store_url).prefixed(StoreKeyPrefix::identity());
+    let client = StoreClient::new(store_url)
+        .prefixed(StoreKeyPrefix::new(b"sql/".as_slice()).expect("valid demo prefix"));
     let schema = KvSchema::new(client)
         .orders_table(TABLE_NAME, default_orders_index_specs())
         .map_err(|e| format!("configure schema: {e}"))?;
@@ -83,10 +84,13 @@ async fn seed(
         .as_secs() as i64;
     let mut offset: i64 = run_nonce.saturating_mul(10);
 
+    // Keep the signal listener registered while each batch is written and uploaded.
+    let shutdown = tokio::signal::ctrl_c();
+    tokio::pin!(shutdown);
     loop {
         tokio::select! {
             biased;
-            _ = tokio::signal::ctrl_c() => {
+            _ = &mut shutdown => {
                 info!("ctrl-c received, shutting down");
                 break;
             }

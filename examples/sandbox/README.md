@@ -8,7 +8,16 @@ the simulator, while QMDB and SQL use their own servers backed by that Store.
 ## Prerequisites
 
 - Node.js and npm
-- Rust and Cargo
+- Rust and Cargo, with the `wasm32-unknown-unknown` target installed
+- wasm-pack
+
+On macOS, use Homebrew LLVM for the WASM builds:
+
+```bash
+brew install llvm
+export CC_wasm32_unknown_unknown="$(brew --prefix llvm)/bin/clang"
+export AR_wasm32_unknown_unknown="$(brew --prefix llvm)/bin/llvm-ar"
+```
 
 ## Run locally
 
@@ -55,11 +64,10 @@ the simulator, while QMDB and SQL use their own servers backed by that Store.
 
 ## Store namespace
 
-The panels share one unpartitioned simulator Store. QMDB, Simplex, and SQL
-each use their own internal key families, but the demo binaries do not assign
-distinct SDK `StoreKeyPrefix` values. Raw KV can write arbitrary Store keys,
-including keys used by those demos. To isolate instances, assign non-overlapping
-prefixes as described in the [SDK guide](../../sdk/ts/README.md#namespaces-and-atomic-writes).
+The demos share one simulator Store, with separate key prefixes: `qmdb/`,
+`simplex/`, and `sql/`. Each server or panel uses the same prefix as its seeder.
+The Log and Store panels access raw Store keys, so use other prefixes for
+manual writes.
 
 ## Ordered QMDB panel
 

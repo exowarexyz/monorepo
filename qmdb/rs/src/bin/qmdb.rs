@@ -5,7 +5,9 @@ use clap::{Parser, Subcommand};
 use commonware_codec::Encode;
 use commonware_cryptography::Sha256;
 use commonware_parallel::Sequential;
-use commonware_runtime::{tokio as cw_tokio, Runner as _};
+use commonware_runtime::{
+    buffer::paged::CacheRef, tokio as cw_tokio, Runner as _, Supervisor as _,
+};
 use commonware_storage::{
     journal::contiguous::variable::Config as JournalConfig,
     merkle::{full::Config as MerkleConfig, mmb, Location},
@@ -82,6 +84,11 @@ enum Command {
 
 async fn health() -> &'static str {
     "ok"
+}
+
+fn demo_store_client(store_url: &str) -> PrefixedStoreClient {
+    StoreClient::new(store_url)
+        .prefixed(StoreKeyPrefix::new(b"qmdb/".as_slice()).expect("valid demo prefix"))
 }
 
 async fn publish_source_range(
@@ -209,7 +216,7 @@ async fn run(
     host: IpAddr,
     port: u16,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let store = StoreClient::new(store_url).prefixed(StoreKeyPrefix::identity());
+    let store = demo_store_client(store_url);
     let app = Router::new()
         .route("/health", get(health))
         .fallback_service(exoware_qmdb::service::server::ordered_stack::<
@@ -247,13 +254,11 @@ async fn seed(
         "starting seed"
     );
 
-    let store_client = StoreClient::new(store_url).prefixed(StoreKeyPrefix::identity());
+    let store_client = demo_store_client(store_url);
 
     tokio::task::spawn_blocking(move || {
         let runner_cfg = cw_tokio::Config::new().with_storage_directory(directory);
         cw_tokio::Runner::new(runner_cfg).start(|context| async move {
-            use commonware_runtime::{buffer::paged::CacheRef, Supervisor as _};
-
             let page_cache = CacheRef::new(NZU16!(64), NZUsize!(8));
             let cfg = VariableConfig {
                 merkle_config: MerkleConfig {
@@ -319,10 +324,13 @@ async fn seed(
             let mut ticker = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
             ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
+            // Keep the signal listener registered while each batch is written and uploaded.
+            let shutdown = tokio::signal::ctrl_c();
+            tokio::pin!(shutdown);
             loop {
                 tokio::select! {
                     biased;
-                    _ = tokio::signal::ctrl_c() => {
+                    _ = &mut shutdown => {
                         info!("ctrl-c received, shutting down");
                         break;
                     }
@@ -423,7 +431,9 @@ async fn main() -> std::process::ExitCode {
 mod tests {
     use super::*;
     use bytes::Bytes;
+    use commonware_storage::merkle::{hasher::Hasher as _, mem::Mem, Position};
     use connectrpc::{ConnectError, ConnectRpcService, Limits, RequestContext, ServiceRequest};
+    use exoware_qmdb::adapter::Ordered;
     use exoware_sdk::{
         ingest::{PutRequest, PutResponse, Service, ServiceServer},
         keys::Key,
@@ -432,6 +442,202 @@ mod tests {
         collections::BTreeMap,
         sync::{Arc, Mutex},
     };
+    #[cfg(unix)]
+    use std::{process::Stdio, time::Duration};
+    #[cfg(unix)]
+    use tokio::{
+        io::AsyncBufReadExt,
+        process::Command,
+        signal::unix::{signal, SignalKind},
+        sync::{mpsc, oneshot},
+    };
+
+    /// Reports each upload and waits for its release before replying.
+    #[cfg(unix)]
+    #[derive(Clone)]
+    struct PausedIngest(mpsc::UnboundedSender<oneshot::Sender<()>>);
+
+    #[cfg(unix)]
+    impl Service for PausedIngest {
+        async fn put(
+            &self,
+            _: RequestContext,
+            _: ServiceRequest<'_, PutRequest>,
+        ) -> connectrpc::ServiceResult<PutResponse> {
+            let (release, released) = oneshot::channel();
+            self.0.send(release).unwrap();
+            released.await.unwrap();
+            connectrpc::Response::ok(PutResponse {
+                sequence_number: 1,
+                ..Default::default()
+            })
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn seed_keeps_sigint_during_upload() {
+        const CHILD_URL: &str = "QMDB_SHUTDOWN_TEST_URL";
+        const CHILD_DIRECTORY: &str = "QMDB_SHUTDOWN_TEST_DIRECTORY";
+        const SIGNAL_OBSERVED: &str = "test observed SIGINT";
+        if let Ok(url) = std::env::var(CHILD_URL) {
+            // A separate listener acknowledges delivery while the seed's upload is pending.
+            let mut interrupt = signal(SignalKind::interrupt()).unwrap();
+            let observer = tokio::spawn(async move {
+                interrupt.recv().await.unwrap();
+                println!("{SIGNAL_OBSERVED}");
+            });
+            seed(
+                &url,
+                1,
+                Some(std::env::var_os(CHILD_DIRECTORY).unwrap().into()),
+            )
+            .await
+            .unwrap();
+            observer.await.unwrap();
+            return;
+        }
+
+        let (uploads, mut requests) = mpsc::unbounded_channel();
+        let service = ConnectRpcService::new(ServiceServer::new(PausedIngest(uploads)));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            axum::serve(listener, Router::new().fallback_service(service))
+                .await
+                .unwrap();
+        });
+        let directory = tempfile::tempdir().unwrap();
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "tests::seed_keeps_sigint_during_upload",
+                "--nocapture",
+            ])
+            .env(CHILD_URL, url)
+            .env(CHILD_DIRECTORY, directory.path())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let mut lines = tokio::io::BufReader::new(child.stdout.take().unwrap()).lines();
+
+        // Complete startup replay, then hold the first batch inside its upload.
+        tokio::time::timeout(Duration::from_secs(5), requests.recv())
+            .await
+            .unwrap()
+            .unwrap()
+            .send(())
+            .unwrap();
+        let release = tokio::time::timeout(Duration::from_secs(5), requests.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(Command::new("kill")
+            .args(["-INT", &child.id().unwrap().to_string()])
+            .status()
+            .await
+            .unwrap()
+            .success());
+
+        // Confirm delivery before allowing the seeder to listen for another tick.
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while lines.next_line().await.unwrap().unwrap() != SIGNAL_OBSERVED {}
+        })
+        .await
+        .unwrap();
+        release.send(()).unwrap();
+        let stopped = tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::select! {
+                status = child.wait() => Some(status.unwrap()),
+                request = requests.recv() => {
+                    request.unwrap().send(()).unwrap();
+                    None
+                },
+            }
+        })
+        .await;
+        if !matches!(&stopped, Ok(Some(status)) if status.success()) {
+            child.kill().await.unwrap();
+        }
+        server.abort();
+        let _ = server.await;
+        assert!(stopped
+            .expect("seed must stop after SIGINT")
+            .expect("seed started another upload after SIGINT")
+            .success());
+    }
+
+    #[tokio::test]
+    async fn operation_range_excludes_other_demo_rows() {
+        let (_server, url) = exoware_simulator::open_temp().await.unwrap();
+        let store = demo_store_client(&url);
+        let operations = vec![Operation::CommitFloor(None, Location::new(0)); 3];
+        let encoded = operations
+            .iter()
+            .map(|op| op.encode().to_vec())
+            .collect::<Vec<_>>();
+        let hasher = commonware_storage::qmdb::hasher::<Sha256>();
+        let base = Mem::<Family, _>::new();
+        let merkle = base
+            .new_batch()
+            .add_leaf_digests(encoded.iter().enumerate().map(|(index, operation)| {
+                hasher.leaf_digest(
+                    Position::try_from(Location::<Family>::new(index as u64)).unwrap(),
+                    operation,
+                )
+            }))
+            .merkleize(&base, &hasher);
+        let root = merkle.root(&hasher, 0).unwrap();
+        let range = AuthenticatedOperationRange {
+            start_location: Location::new(0),
+            end_location: Location::new(3),
+            inactive_peaks: 0,
+            pinned_nodes: &[],
+            encoded_operations: &encoded,
+        };
+        let prepared = prepare_authenticated_range::<Family, Sha256, Operation, Sequential>(
+            &range,
+            &root,
+            &op_cfg(),
+            &Sequential,
+        )
+        .unwrap();
+        let mut batch = StoreWriteBatch::new();
+        stage_authenticated_range(&store, prepared, &mut batch).unwrap();
+        publish_source_rows(&store, batch, Location::new(2))
+            .await
+            .unwrap();
+
+        // A Simplex epoch-zero finalization sorts between raw QMDB operation keys 0 and 1.
+        let mut finalization_key = vec![4];
+        finalization_key.extend(0u64.to_be_bytes());
+        finalization_key.extend(1000u64.to_be_bytes());
+        let raw = store.client().prefixed(StoreKeyPrefix::identity());
+        let mut foreign = StoreWriteBatch::new();
+        foreign
+            .push(
+                &raw,
+                &Bytes::from(finalization_key),
+                b"finalization".to_vec(),
+            )
+            .unwrap();
+        foreign.commit(store.client()).await.unwrap();
+
+        let reader = Ordered::<Family, Sha256, Vec<u8>, Vec<u8>, N>::new(
+            demo_store_client(&url),
+            op_cfg(),
+            key_cfg(),
+        );
+        let proof = reader
+            .operation_range_checkpoint(Location::new(2), Location::new(0), 3, None)
+            .await
+            .unwrap();
+        assert_eq!(proof.encoded_operations, encoded);
+        assert_eq!(proof.canonical_root::<Sha256>(), root);
+        assert!(proof.verify::<Sha256>());
+    }
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     enum Failure {

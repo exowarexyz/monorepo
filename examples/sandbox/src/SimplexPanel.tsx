@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Client, ReadSession } from '@exowarexyz/sdk';
+import { Client, ReadSession, StoreKeyPrefix } from '@exowarexyz/sdk';
 import {
   bytesToHex,
   hexToBytes,
@@ -155,7 +155,11 @@ export function SimplexPanel({
     >
   >();
   const [verifierStatus, setVerifierStatus] = useState<'loading' | 'ready' | 'error'>('loading');
-  const store = useMemo(() => new Client(simplexUrl).store(), [simplexUrl]);
+  const store = useMemo(
+    () =>
+      new Client(simplexUrl).store(new StoreKeyPrefix(new TextEncoder().encode('simplex/'))),
+    [simplexUrl],
+  );
   const session = useMemo(() => ReadSession.monotonic(store), [store]);
   const client = useMemo(
     () =>

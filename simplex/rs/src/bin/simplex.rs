@@ -258,8 +258,10 @@ async fn seed(
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     info!(store_url, interval_secs, "starting simplex seed");
 
-    let client =
-        SimplexWriter::new(StoreClient::new(store_url).prefixed(StoreKeyPrefix::identity()));
+    let client = SimplexWriter::new(
+        StoreClient::new(store_url)
+            .prefixed(StoreKeyPrefix::new(b"simplex/".as_slice()).expect("valid demo prefix")),
+    );
     let schemes = demo_schemes();
     let verification_material = schemes[0].identity().encode().to_vec();
     let leader = schemes
@@ -292,10 +294,13 @@ async fn seed(
     let mut parent_view = View::new(height.saturating_sub(1));
     let mut parent_digest = Sha256Digest::EMPTY;
 
+    // Keep the signal listener registered while each batch is written and uploaded.
+    let shutdown = tokio::signal::ctrl_c();
+    tokio::pin!(shutdown);
     loop {
         tokio::select! {
             biased;
-            _ = tokio::signal::ctrl_c() => {
+            _ = &mut shutdown => {
                 info!("ctrl-c received, shutting down");
                 break;
             }
