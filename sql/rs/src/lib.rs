@@ -18,10 +18,9 @@ pub use aggregate::KvAggregateExtensionPlanner;
 pub use schema::KvSchema;
 pub use server::{sql_connect_stack, SqlConnect, SqlServer};
 pub use session::{SqlContext, SqlContextBuilder};
-pub use types::default_orders_index_specs;
 pub use types::{
-    CellValue, IndexBackfillEvent, IndexBackfillOptions, IndexBackfillReport, IndexLayout,
-    IndexSpec, TableColumnConfig,
+    default_orders_index_specs, CellValue, IndexBackfillEvent, IndexBackfillOptions,
+    IndexBackfillReport, IndexLayout, IndexSpec, TableColumnConfig,
 };
 pub use writer::{BatchReceipt, BatchWriter, PreparedBatch, TableWriter};
 
@@ -29,62 +28,70 @@ pub use writer::{BatchReceipt, BatchWriter, PreparedBatch, TableWriter};
 mod tests {
     #![allow(refining_impl_trait)]
 
-    use super::aggregate::*;
-    use super::builder::*;
-    use super::codec::*;
-    use super::diagnostics::*;
-    use super::filter::*;
-    use super::predicate::*;
-    use super::scan::*;
-    use super::types::*;
-    use super::writer::*;
-    use super::*;
-    use commonware_codec::Encode;
-    use datafusion::arrow::array::{
-        BinaryViewArray, Float64Array, Int64Array, LargeBinaryArray, LargeStringArray,
-        StringViewArray,
+    use super::{
+        aggregate::*, builder::*, codec::*, diagnostics::*, filter::*, predicate::*, scan::*,
+        types::*, writer::*, *,
     };
-    use datafusion::arrow::datatypes::{i256, DataType, TimeUnit};
-    use datafusion::arrow::record_batch::RecordBatch;
-    use datafusion::common::{config::ConfigOptions, ScalarValue};
-    use datafusion::logical_expr::{Expr, Operator};
-    use datafusion::physical_optimizer::limit_pushdown::LimitPushdown;
-    use datafusion::physical_optimizer::PhysicalOptimizerRule;
-    use datafusion::physical_plan::limit::GlobalLimitExec;
-    use datafusion::physical_plan::ExecutionPlan;
-    use datafusion::prelude::{SessionConfig, SessionContext as DataFusionSessionContext};
-    use exoware_sdk::keys::{Key, Prefix};
-    use exoware_sdk::kv_codec::{decode_stored_row, KvReducedValue, StoredRow};
-    use exoware_sdk::{PrefixedStoreClient, StoreBatchUpload, StoreClient};
-    use std::collections::{BTreeMap, HashSet};
-    use std::ops::Bound::{Included, Unbounded};
-    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering as AtomicOrdering};
-    use std::sync::{Arc, Mutex};
-    use std::time::Duration;
-
     use axum::Router;
+    use buffa::Message;
     use bytes::Bytes;
+    use commonware_codec::Encode;
     use connectrpc::{ConnectError, ConnectRpcService, RequestContext as Context, ServiceRequest};
-    use exoware_sdk::common::kv::v1::Entry as ProtoEntry;
-    use exoware_sdk::connect_compression_registry;
-    use exoware_sdk::log::ingest::v1::{
-        PutRequest as ProtoPutRequest, PutResponse as ProtoPutResponse, Service as IngestService,
-        ServiceServer as IngestServiceServer,
+    use datafusion::{
+        arrow::{
+            array::{
+                BinaryViewArray, Float64Array, Int64Array, LargeBinaryArray, LargeStringArray,
+                StringViewArray,
+            },
+            compute::SortOptions,
+            datatypes::{i256, DataType, Field, TimeUnit},
+            record_batch::RecordBatch,
+        },
+        common::{config::ConfigOptions, ScalarValue},
+        functions_aggregate::expr_fn::sum,
+        logical_expr::{col, in_list, Expr, Operator},
+        physical_expr::{expressions::Column, LexOrdering, PhysicalSortExpr},
+        physical_optimizer::{
+            limit_pushdown::LimitPushdown, pushdown_sort::PushdownSort, PhysicalOptimizerRule,
+        },
+        physical_plan::{
+            limit::GlobalLimitExec, sorts::sort::SortExec, ExecutionPlan, SortOrderPushdownResult,
+        },
+        prelude::{SessionConfig, SessionContext as DataFusionSessionContext},
     };
-    use exoware_sdk::store::query::v1::{
-        GetManyFrame as ProtoGetManyFrame, GetManyRequest as ProtoGetManyRequest,
-        GetRequest as ProtoGetRequest, GetResponse as ProtoGetResponse,
-        RangeFrame as ProtoRangeFrame, RangeRequest as ProtoRangeRequest,
-        ReduceRequest as ProtoReduceRequest, ReduceResponse as ProtoReduceResponse,
-        Service as QueryService, ServiceServer as QueryServiceServer,
+    use exoware_sdk::{
+        common::kv::v1::Entry as ProtoEntry,
+        connect_compression_registry,
+        keys::{Key, Prefix},
+        kv_codec::{decode_stored_row, KvReducedValue, StoredRow},
+        log::ingest::v1::{
+            PutRequest as ProtoPutRequest, PutResponse as ProtoPutResponse,
+            Service as IngestService, ServiceServer as IngestServiceServer,
+        },
+        parse_range_traversal_direction,
+        store::query::v1::{
+            GetManyFrame as ProtoGetManyFrame, GetManyRequest as ProtoGetManyRequest,
+            GetRequest as ProtoGetRequest, GetResponse as ProtoGetResponse,
+            RangeFrame as ProtoRangeFrame, RangeRequest as ProtoRangeRequest,
+            ReduceRequest as ProtoReduceRequest, ReduceResponse as ProtoReduceResponse,
+            Service as QueryService, ServiceServer as QueryServiceServer,
+        },
+        PrefixedStoreClient, RangeMode, RangeTraversalDirection, StoreBatchUpload, StoreClient,
     };
-    use exoware_sdk::RangeMode;
-    use exoware_sdk::{parse_range_traversal_direction, RangeTraversalDirection};
     use exoware_server::{
         Query, QueryExtra, QueryResult, QueryState, RangeScan, RangeScanBatch, RangeScanResult,
         Sequence,
     };
     use futures::{stream, TryStreamExt};
+    use std::{
+        collections::{BTreeMap, HashSet},
+        ops::Bound::{Included, Unbounded},
+        sync::{
+            atomic::{AtomicU64, AtomicUsize, Ordering as AtomicOrdering},
+            Arc, Mutex,
+        },
+        time::Duration,
+    };
     use tokio::sync::{mpsc, oneshot, Notify};
 
     /// Assert EXPLAIN text includes the same `query_stats=...` suffix as [`format_query_stats_explain`].
@@ -209,8 +216,6 @@ mod tests {
     }
 
     pub(super) fn decode_reduce_request(body: &[u8]) -> exoware_sdk::query::ReduceRequest {
-        use buffa::Message;
-
         let envelope = connectrpc::envelope::Envelope::decode(&mut bytes::BytesMut::from(body))
             .unwrap()
             .unwrap();
@@ -713,8 +718,6 @@ mod tests {
 
     #[test]
     fn normalize_count_case_then_literal_uses_countall_optimization() {
-        use datafusion::logical_expr::col;
-
         let (model, _) = test_model();
         let case_expr = Expr::Case(datafusion::logical_expr::expr::Case {
             expr: None,
@@ -1171,7 +1174,6 @@ mod tests {
         .unwrap();
         let model = TableModel::from_config(&config).unwrap();
 
-        use datafusion::logical_expr::col;
         let filter = col("body").eq(Expr::Literal(
             ScalarValue::Binary(Some(vec![0xAB, 0xCD])),
             None,
@@ -1449,7 +1451,6 @@ mod tests {
 
     #[test]
     fn null_predicate_merges_are_order_independent() {
-        use datafusion::logical_expr::col;
         let config = KvTableConfig::new(
             0,
             vec![
@@ -1494,7 +1495,6 @@ mod tests {
 
     #[test]
     fn non_nullable_null_predicates_simplify() {
-        use datafusion::logical_expr::col;
         let config = KvTableConfig::new(
             0,
             vec![
@@ -1520,7 +1520,6 @@ mod tests {
 
     #[test]
     fn null_literal_comparisons_are_contradictions() {
-        use datafusion::logical_expr::col;
         let config = KvTableConfig::new(
             0,
             vec![
@@ -1544,7 +1543,6 @@ mod tests {
 
     #[test]
     fn in_predicate_merges_with_comparisons_order_independent() {
-        use datafusion::logical_expr::{col, in_list};
         let config = KvTableConfig::new(
             0,
             vec![
@@ -1666,7 +1664,6 @@ mod tests {
 
     #[test]
     fn empty_and_null_in_lists_are_exact() {
-        use datafusion::logical_expr::{col, in_list};
         let config = KvTableConfig::new(
             0,
             vec![
@@ -1813,8 +1810,6 @@ mod tests {
 
     #[test]
     fn table_config_accepts_list_column() {
-        use datafusion::arrow::datatypes::Field;
-
         let config = KvTableConfig::new(
             0,
             vec![
@@ -1834,8 +1829,6 @@ mod tests {
 
     #[test]
     fn list_column_rejected_in_index() {
-        use datafusion::arrow::datatypes::Field;
-
         let result = KvTableConfig::new(
             0,
             vec![
@@ -1989,8 +1982,6 @@ mod tests {
 
     #[test]
     fn base_row_round_trip_with_list() {
-        use datafusion::arrow::datatypes::Field;
-
         let config = KvTableConfig::new(
             0,
             vec![
@@ -3096,7 +3087,7 @@ mod tests {
 
     #[test]
     fn kv_schema_auto_assigns_sequential_prefixes() {
-        let client = StoreClient::new("http://localhost:10000");
+        let client = StoreClient::new("http://localhost:8080");
         let schema = KvSchema::new(PrefixedStoreClient::empty(client))
             .table(
                 "alpha",
@@ -3128,7 +3119,7 @@ mod tests {
 
     #[test]
     fn kv_schema_allows_max_codec_table_count_and_rejects_overflow() {
-        let client = StoreClient::new("http://localhost:10000");
+        let client = StoreClient::new("http://localhost:8080");
         let mut schema = KvSchema::new(PrefixedStoreClient::empty(client));
         for idx in 0..MAX_TABLES {
             schema = schema
@@ -3227,7 +3218,7 @@ mod tests {
 
     #[tokio::test]
     async fn kv_schema_register_all_enables_join() {
-        let client = PrefixedStoreClient::empty(StoreClient::new("http://localhost:10000"));
+        let client = PrefixedStoreClient::empty(StoreClient::new("http://localhost:8080"));
         let ctx = SqlContext::new(client.clone());
 
         let result = KvSchema::new(client)
@@ -3276,7 +3267,7 @@ mod tests {
 
     #[tokio::test]
     async fn kv_schema_three_way_join() {
-        let client = StoreClient::new("http://localhost:10000");
+        let client = StoreClient::new("http://localhost:8080");
         let ctx = SqlContext::new(PrefixedStoreClient::empty(client.clone()));
 
         let schema = KvSchema::new(PrefixedStoreClient::empty(client))
@@ -3331,7 +3322,7 @@ mod tests {
 
     #[test]
     fn kv_schema_orders_table_convenience() {
-        let client = StoreClient::new("http://localhost:10000");
+        let client = StoreClient::new("http://localhost:8080");
         let schema = KvSchema::new(PrefixedStoreClient::empty(client))
             .orders_table(
                 "my_orders",
@@ -3709,7 +3700,6 @@ mod tests {
         .unwrap();
         let model = TableModel::from_config(&config).unwrap();
 
-        use datafusion::logical_expr::col;
         let filter = col("score")
             .eq(Expr::Literal(ScalarValue::Float64(Some(1.0)), None))
             .or(col("score").eq(Expr::Literal(ScalarValue::Float64(Some(2.0)), None)));
@@ -3729,7 +3719,7 @@ mod tests {
 
     #[test]
     fn batch_writer_encodes_rows_across_tables() {
-        let client = StoreClient::new("http://localhost:10000");
+        let client = StoreClient::new("http://localhost:8080");
         let schema = KvSchema::new(PrefixedStoreClient::empty(client))
             .table(
                 "customers",
@@ -3787,7 +3777,7 @@ mod tests {
 
     #[test]
     fn batch_writer_rejects_unknown_table() {
-        let client = StoreClient::new("http://localhost:10000");
+        let client = StoreClient::new("http://localhost:8080");
         let schema = KvSchema::new(PrefixedStoreClient::empty(client))
             .table(
                 "t1",
@@ -3805,7 +3795,7 @@ mod tests {
 
     #[test]
     fn batch_writer_rejects_wrong_column_count() {
-        let client = StoreClient::new("http://localhost:10000");
+        let client = StoreClient::new("http://localhost:8080");
         let schema = KvSchema::new(PrefixedStoreClient::empty(client))
             .table(
                 "t1",
@@ -3826,7 +3816,7 @@ mod tests {
 
     #[test]
     fn batch_writer_rejects_non_pk_type_mismatch() {
-        let client = StoreClient::new("http://localhost:10000");
+        let client = StoreClient::new("http://localhost:8080");
         let schema = KvSchema::new(PrefixedStoreClient::empty(client))
             .table(
                 "t1",
@@ -3853,7 +3843,7 @@ mod tests {
 
     #[test]
     fn batch_writer_entries_use_distinct_table_prefixes() {
-        let client = StoreClient::new("http://localhost:10000");
+        let client = StoreClient::new("http://localhost:8080");
         let schema = KvSchema::new(PrefixedStoreClient::empty(client))
             .table(
                 "a",
@@ -3887,7 +3877,7 @@ mod tests {
 
     #[tokio::test]
     async fn batch_writer_trait_failure_requeues_prepared_before_new_pending() {
-        let client = StoreClient::new("http://localhost:10000");
+        let client = StoreClient::new("http://localhost:8080");
         let schema = KvSchema::new(PrefixedStoreClient::empty(client))
             .table(
                 "t",
@@ -3917,7 +3907,7 @@ mod tests {
 
     #[test]
     fn batch_writer_supports_nullable_columns() {
-        let client = StoreClient::new("http://localhost:10000");
+        let client = StoreClient::new("http://localhost:8080");
         let schema = KvSchema::new(PrefixedStoreClient::empty(client))
             .table(
                 "t",
@@ -3939,7 +3929,7 @@ mod tests {
 
     #[test]
     fn non_nullable_column_rejects_null_in_batch_writer() {
-        let client = StoreClient::new("http://localhost:10000");
+        let client = StoreClient::new("http://localhost:8080");
         let schema = KvSchema::new(PrefixedStoreClient::empty(client))
             .table(
                 "t",
@@ -4522,7 +4512,7 @@ mod tests {
 
     #[test]
     fn table_versioned_convenience() {
-        let client = StoreClient::new("http://localhost:10000");
+        let client = StoreClient::new("http://localhost:8080");
         let schema = KvSchema::new(PrefixedStoreClient::empty(client))
             .table_versioned(
                 "documents",
@@ -4772,7 +4762,6 @@ mod tests {
         let model = TableModel::from_config(&config).unwrap();
 
         // Build an equality expression: entity = X'AA..AA'
-        use datafusion::logical_expr::col;
         let entity_literal =
             Expr::Literal(ScalarValue::FixedSizeBinary(16, Some(vec![0xAA; 16])), None);
         let filter = col("entity").eq(entity_literal);
@@ -4806,7 +4795,6 @@ mod tests {
         .unwrap();
         let model = TableModel::from_config(&config).unwrap();
 
-        use datafusion::logical_expr::col;
         let filter = col("version").lt_eq(Expr::Literal(ScalarValue::UInt64(Some(42)), None));
 
         assert!(
@@ -4842,7 +4830,6 @@ mod tests {
         let model = TableModel::from_config(&config).unwrap();
 
         let threshold = (1u64 << 63) + 5;
-        use datafusion::logical_expr::col;
         let filter =
             col("version").gt_eq(Expr::Literal(ScalarValue::UInt64(Some(threshold)), None));
 
@@ -4872,7 +4859,6 @@ mod tests {
         .unwrap();
         let model = TableModel::from_config(&config).unwrap();
 
-        use datafusion::logical_expr::col;
         let unsupported = col("version").gt(Expr::Literal(ScalarValue::Int64(Some(-1)), None));
 
         assert!(
@@ -4905,7 +4891,6 @@ mod tests {
         .unwrap();
         let model = TableModel::from_config(&config).unwrap();
 
-        use datafusion::logical_expr::col;
         let supported = col("version").gt_eq(Expr::Literal(ScalarValue::UInt64(Some(10)), None));
         let unsupported = col("version").gt(Expr::Literal(ScalarValue::Int64(Some(-1)), None));
         let filter = supported.and(unsupported);
@@ -4942,7 +4927,6 @@ mod tests {
         .unwrap();
         let model = TableModel::from_config(&config).unwrap();
 
-        use datafusion::logical_expr::{col, in_list};
         let filter = in_list(
             col("version"),
             vec![
@@ -4976,7 +4960,6 @@ mod tests {
         let model = TableModel::from_config(&config).unwrap();
 
         let huge = 1u64 << 63;
-        use datafusion::logical_expr::{col, in_list};
         let filter = in_list(
             col("version"),
             vec![
@@ -5008,7 +4991,6 @@ mod tests {
         .unwrap();
         let model = TableModel::from_config(&config).unwrap();
 
-        use datafusion::logical_expr::{col, in_list};
         let filter = in_list(
             col("entity"),
             vec![
@@ -5049,7 +5031,6 @@ mod tests {
         .unwrap();
         let model = TableModel::from_config(&config).unwrap();
 
-        use datafusion::logical_expr::col;
         let filter = col("big_val").gt_eq(Expr::Literal(
             ScalarValue::Decimal256(Some(i256::from(100i64)), 76, 0),
             None,
@@ -5395,7 +5376,6 @@ mod tests {
         let model = TableModel::from_config(&config).unwrap();
         let specs = model.resolve_index_specs(&config.index_specs).unwrap();
 
-        use datafusion::logical_expr::col;
         let filter = col("entity").eq(Expr::Literal(
             ScalarValue::FixedSizeBinary(16, Some(vec![0xAB; 16])),
             None,
@@ -5432,7 +5412,6 @@ mod tests {
         let model = TableModel::from_config(&config).unwrap();
         let specs = model.resolve_index_specs(&config.index_specs).unwrap();
 
-        use datafusion::logical_expr::col;
         let filter = col("big_val").gt_eq(Expr::Literal(
             ScalarValue::Decimal256(Some(i256::from(100i64)), 76, 0),
             None,
@@ -6867,12 +6846,6 @@ mod tests {
 
     #[test]
     fn kv_scan_sort_pushdown_preserves_limit() {
-        use datafusion::arrow::compute::SortOptions;
-        use datafusion::physical_expr::expressions::Column;
-        use datafusion::physical_expr::{LexOrdering, PhysicalSortExpr};
-        use datafusion::physical_optimizer::pushdown_sort::PushdownSort;
-        use datafusion::physical_plan::sorts::sort::SortExec;
-
         let model = Arc::new(simple_int64_model(0));
         let scan = Arc::new(unfiltered_scan(
             StoreClient::new("http://127.0.0.1:0"),
@@ -6901,11 +6874,6 @@ mod tests {
 
     #[test]
     fn kv_scan_sort_pushdown_respects_ordering_strength() {
-        use datafusion::arrow::compute::SortOptions;
-        use datafusion::physical_expr::expressions::Column;
-        use datafusion::physical_expr::{LexOrdering, PhysicalSortExpr};
-        use datafusion::physical_plan::SortOrderPushdownResult;
-
         let config = KvTableConfig::new(
             0,
             vec![
@@ -6996,9 +6964,6 @@ mod tests {
 
     #[tokio::test]
     async fn kv_scan_reverse_sort_pushdown_survives_limit_pushdown_first() {
-        use datafusion::physical_optimizer::pushdown_sort::PushdownSort;
-        use datafusion::physical_plan::sorts::sort::SortExec;
-
         // Control the pass order that exposed the lost reverse pushdown.
         let schema = KvSchema::new(PrefixedStoreClient::empty(StoreClient::new(
             "http://127.0.0.1:0",
@@ -7513,8 +7478,6 @@ mod tests {
 
     #[tokio::test]
     async fn kv_scan_sort_pushdown_preserves_nested_limits() {
-        use datafusion::physical_optimizer::pushdown_sort::PushdownSort;
-
         let state = MockState {
             kv: Arc::new(Mutex::new(BTreeMap::new())),
             range_calls: Arc::new(AtomicUsize::new(0)),
@@ -9189,9 +9152,6 @@ mod tests {
 
     #[tokio::test]
     async fn aggregate_pushdown_preserves_dotted_aliases() {
-        use datafusion::functions_aggregate::expr_fn::sum;
-        use datafusion::prelude::col;
-
         let (ctx, state, shutdown_tx) = aggregate_test_context().await;
         let rows = ctx
             .sql("SELECT * FROM orders")

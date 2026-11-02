@@ -1,10 +1,9 @@
 //! Contract tests for store capabilities (RocksDB simulator).
 
-use std::future::Future;
-
 use bytes::Bytes;
 use exoware_server::{Query, RangeScan, Sequence};
 use exoware_simulator::RocksStore;
+use std::future::Future;
 use tempfile::tempdir;
 
 fn block_on<T>(future: impl Future<Output = T>) -> T {

@@ -2,9 +2,21 @@
 //! key lookups. Lookups prove hits only: unordered QMDB has no exclusion proofs,
 //! so missing keys are omitted from `GetMany`.
 
-use std::future::Future;
-use std::sync::Arc;
-
+use super::{
+    CurrentOperationReader, CurrentOperationServer, KeyLookupReader, KeyLookupServer,
+    OperationLogReader, OperationLogServer,
+};
+use crate::{
+    adapter::Unordered,
+    proof::{
+        CurrentOperationRangeProofResult, MultiProofOperations, OperationRangeCheckpoint,
+        RawBatchMultiProof, RawKeyValueProof,
+    },
+    service::proto::qmdb::v1::{
+        CurrentOperationServiceServer, KeyLookupServiceServer, OperationLogServiceServer,
+    },
+    OperationKv, PublishedWatermark, QmdbError,
+};
 use commonware_codec::{Decode, Encode, Read};
 use commonware_cryptography::Hasher;
 use commonware_storage::{
@@ -16,20 +28,7 @@ use commonware_storage::{
 };
 use connectrpc::{Chain, ConnectRpcService};
 use exoware_sdk::PrefixedStoreClient;
-
-use super::{
-    CurrentOperationReader, CurrentOperationServer, KeyLookupReader, KeyLookupServer,
-    OperationLogReader, OperationLogServer,
-};
-use crate::adapter::Unordered;
-use crate::proof::{
-    CurrentOperationRangeProofResult, MultiProofOperations, OperationRangeCheckpoint,
-    RawBatchMultiProof, RawKeyValueProof,
-};
-use crate::service::proto::qmdb::v1::{
-    CurrentOperationServiceServer, KeyLookupServiceServer, OperationLogServiceServer,
-};
-use crate::{OperationKv, PublishedWatermark, QmdbError};
+use std::{future::Future, sync::Arc};
 
 impl<F, H, K, V, const N: usize, E> OperationLogReader for Unordered<F, H, K, V, N, E>
 where

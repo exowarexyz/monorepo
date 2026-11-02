@@ -1,9 +1,7 @@
-use std::time::{SystemTime, UNIX_EPOCH};
-
+use crate::deterministic::{mix64, GOLDEN_RATIO_64};
 use anyhow::ensure;
 use exoware_sdk::keys::{validate_key_size, Key};
-
-use crate::deterministic::{mix64, GOLDEN_RATIO_64};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Default physical key length used by the validation commands.
 pub const DEFAULT_KEY_LEN: usize = 48;
@@ -250,9 +248,8 @@ fn namespace_hash(namespace: &[u8]) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashSet;
-
     use super::*;
+    use std::collections::HashSet;
 
     #[test]
     fn rejects_key_len_too_small_for_namespace() {
