@@ -114,16 +114,15 @@ pub mod stream {
 mod range_traversal;
 pub mod transport;
 
-pub use range_traversal::{
-    parse_range_traversal_direction, RangeTraversalDirection, RangeTraversalModeError,
-};
-pub use transport::{connect_compression_registry, PreferZstdHttpClient};
-
 use crate::kv_codec::{
     KvExpr, KvFieldKind, KvFieldRef, KvPredicate, KvPredicateCheck, KvPredicateConstraint,
     KvReducedValue,
 };
 use bytes::Bytes;
+pub use range_traversal::{
+    parse_range_traversal_direction, RangeTraversalDirection, RangeTraversalModeError,
+};
+pub use transport::{connect_compression_registry, PreferZstdHttpClient};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RangeReduceOp {
@@ -1190,10 +1189,8 @@ pub use error_details::{
 
 #[cfg(test)]
 mod reduce_params_view_tests {
-    use buffa::Message;
-    use buffa::MessageView as _;
-
     use super::*;
+    use buffa::{Message, MessageView as _};
 
     #[test]
     fn cast_float64_round_trips_through_owned_and_borrowed_expressions() {

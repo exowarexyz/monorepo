@@ -1,13 +1,13 @@
+use crate::{
+    error::SimplexError,
+    keys::{self, RecordKind},
+    types::{BlockData, Finalized, Notarized},
+};
 use bytes::Bytes;
 use commonware_codec::{Decode, Read};
 use commonware_consensus::Block;
 use commonware_cryptography::{certificate, Digest};
-use exoware_sdk::keys::Key;
-use exoware_sdk::{PrefixedStoreClient, RangeMode, ReadSession};
-
-use crate::error::SimplexError;
-use crate::keys::{self, RecordKind};
-use crate::types::{BlockData, Finalized, Notarized};
+use exoware_sdk::{keys::Key, PrefixedStoreClient, RangeMode, ReadSession};
 
 /// Session-backed reader for Commonware Simplex blocks and certificates.
 ///

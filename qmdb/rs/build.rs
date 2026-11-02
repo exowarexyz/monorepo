@@ -1,5 +1,7 @@
-use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::{
+    path::{Path, PathBuf},
+    process::Command,
+};
 
 const QMDB_PROTO_FILES: &[&str] = &[
     "qmdb/v1/proof.proto",
@@ -11,14 +13,14 @@ const QMDB_PROTO_FILES: &[&str] = &[
 
 const QMDB_BYTES_FIELDS: &[&str] = &[
     ".qmdb.v1.MultiProofOperation.encoded_operation",
-    ".qmdb.v1.HistoricalMultiProof.proof",
-    ".qmdb.v1.HistoricalMultiProof.ops_root",
-    ".qmdb.v1.HistoricalMultiProof.ops_root_witness",
-    ".qmdb.v1.HistoricalOperationRangeProof.proof",
-    ".qmdb.v1.HistoricalOperationRangeProof.encoded_operations",
-    ".qmdb.v1.HistoricalOperationRangeProof.ops_root",
-    ".qmdb.v1.HistoricalOperationRangeProof.ops_root_witness",
-    ".qmdb.v1.HistoricalOperationRangeProof.pinned_nodes",
+    ".qmdb.v1.OperationMultiProof.proof",
+    ".qmdb.v1.OperationMultiProof.ops_root",
+    ".qmdb.v1.OperationMultiProof.ops_root_witness",
+    ".qmdb.v1.OperationRangeProof.proof",
+    ".qmdb.v1.OperationRangeProof.encoded_operations",
+    ".qmdb.v1.OperationRangeProof.ops_root",
+    ".qmdb.v1.OperationRangeProof.ops_root_witness",
+    ".qmdb.v1.OperationRangeProof.pinned_nodes",
     ".qmdb.v1.CurrentOperationRangeProof.proof",
     ".qmdb.v1.CurrentOperationRangeProof.encoded_operations",
     ".qmdb.v1.CurrentOperationRangeProof.chunks",
