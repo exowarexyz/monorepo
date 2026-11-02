@@ -44,6 +44,9 @@ enum Command {
     Seed {
         #[arg(long)]
         store_url: String,
+        /// UTF-8 prefix prepended to this instance's Store keys.
+        #[arg(long, default_value = "")]
+        store_prefix: String,
         #[arg(long, default_value_t = 2)]
         interval_secs: u64,
         #[arg(long)]
@@ -253,14 +256,14 @@ async fn upload_certificates(
 
 async fn seed(
     store_url: &str,
+    store_prefix: String,
     interval_secs: u64,
     start_height: Option<u64>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     info!(store_url, interval_secs, "starting simplex seed");
 
     let client = SimplexWriter::new(
-        StoreClient::new(store_url)
-            .prefixed(StoreKeyPrefix::new(b"simplex/".as_slice()).expect("valid demo prefix")),
+        StoreClient::new(store_url).prefixed(StoreKeyPrefix::new(store_prefix)?),
     );
     let schemes = demo_schemes();
     let verification_material = schemes[0].identity().encode().to_vec();
@@ -352,9 +355,10 @@ async fn main() -> std::process::ExitCode {
     let result = match cli.command {
         Command::Seed {
             store_url,
+            store_prefix,
             interval_secs,
             start_height,
-        } => seed(&store_url, interval_secs, start_height).await,
+        } => seed(&store_url, store_prefix, interval_secs, start_height).await,
     };
 
     match result {

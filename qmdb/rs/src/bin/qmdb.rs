@@ -64,6 +64,9 @@ enum Command {
     Run {
         #[arg(long)]
         store_url: String,
+        /// UTF-8 prefix prepended to this instance's Store keys.
+        #[arg(long, default_value = "")]
+        store_prefix: String,
         #[arg(long, default_value = "0.0.0.0")]
         host: IpAddr,
         #[arg(long, default_value_t = 8081)]
@@ -72,6 +75,9 @@ enum Command {
     Seed {
         #[arg(long)]
         store_url: String,
+        /// UTF-8 prefix prepended to this instance's Store keys.
+        #[arg(long, default_value = "")]
+        store_prefix: String,
         #[arg(long, default_value_t = 2)]
         interval_secs: u64,
         /// Persistent directory for the local ordered-QMDB state. Reusing the
@@ -84,11 +90,6 @@ enum Command {
 
 async fn health() -> &'static str {
     "ok"
-}
-
-fn demo_store_client(store_url: &str) -> PrefixedStoreClient {
-    StoreClient::new(store_url)
-        .prefixed(StoreKeyPrefix::new(b"qmdb/".as_slice()).expect("valid demo prefix"))
 }
 
 async fn publish_source_range(
@@ -213,10 +214,11 @@ async fn boundary_from_source_db(
 
 async fn run(
     store_url: &str,
+    store_prefix: String,
     host: IpAddr,
     port: u16,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let store = demo_store_client(store_url);
+    let store = StoreClient::new(store_url).prefixed(StoreKeyPrefix::new(store_prefix)?);
     let app = Router::new()
         .route("/health", get(health))
         .fallback_service(exoware_qmdb::service::server::ordered_stack::<
@@ -243,6 +245,7 @@ fn default_seed_directory() -> PathBuf {
 
 async fn seed(
     store_url: &str,
+    store_prefix: String,
     interval_secs: u64,
     directory: Option<PathBuf>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -254,7 +257,7 @@ async fn seed(
         "starting seed"
     );
 
-    let store_client = demo_store_client(store_url);
+    let store_client = StoreClient::new(store_url).prefixed(StoreKeyPrefix::new(store_prefix)?);
 
     tokio::task::spawn_blocking(move || {
         let runner_cfg = cw_tokio::Config::new().with_storage_directory(directory);
@@ -407,14 +410,16 @@ async fn main() -> std::process::ExitCode {
     let result = match cli.command {
         Command::Run {
             store_url,
+            store_prefix,
             host,
             port,
-        } => run(&store_url, host, port).await,
+        } => run(&store_url, store_prefix, host, port).await,
         Command::Seed {
             store_url,
+            store_prefix,
             interval_secs,
             directory,
-        } => seed(&store_url, interval_secs, directory).await,
+        } => seed(&store_url, store_prefix, interval_secs, directory).await,
     };
 
     match result {
@@ -489,6 +494,7 @@ mod tests {
             });
             seed(
                 &url,
+                String::new(),
                 1,
                 Some(std::env::var_os(CHILD_DIRECTORY).unwrap().into()),
             )
@@ -570,73 +576,64 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn operation_range_excludes_other_demo_rows() {
+    async fn operation_ranges_use_each_store_prefix() {
         let (_server, url) = exoware_simulator::open_temp().await.unwrap();
-        let store = demo_store_client(&url);
-        let operations = vec![Operation::CommitFloor(None, Location::new(0)); 3];
-        let encoded = operations
-            .iter()
-            .map(|op| op.encode().to_vec())
-            .collect::<Vec<_>>();
-        let hasher = commonware_storage::qmdb::hasher::<Sha256>();
-        let base = Mem::<Family, _>::new();
-        let merkle = base
-            .new_batch()
-            .add_leaf_digests(encoded.iter().enumerate().map(|(index, operation)| {
-                hasher.leaf_digest(
-                    Position::try_from(Location::<Family>::new(index as u64)).unwrap(),
-                    operation,
-                )
-            }))
-            .merkleize(&base, &hasher);
-        let root = merkle.root(&hasher, 0).unwrap();
-        let range = AuthenticatedOperationRange {
-            start_location: Location::new(0),
-            end_location: Location::new(3),
-            inactive_peaks: 0,
-            pinned_nodes: &[],
-            encoded_operations: &encoded,
-        };
-        let prepared = prepare_authenticated_range::<Family, Sha256, Operation, Sequential>(
-            &range,
-            &root,
-            &op_cfg(),
-            &Sequential,
-        )
-        .unwrap();
-        let mut batch = StoreWriteBatch::new();
-        stage_authenticated_range(&store, prepared, &mut batch).unwrap();
-        publish_source_rows(&store, batch, Location::new(2))
-            .await
-            .unwrap();
-
-        // A Simplex epoch-zero finalization sorts between raw QMDB operation keys 0 and 1.
-        let mut finalization_key = vec![4];
-        finalization_key.extend(0u64.to_be_bytes());
-        finalization_key.extend(1000u64.to_be_bytes());
-        let raw = store.client().prefixed(StoreKeyPrefix::identity());
-        let mut foreign = StoreWriteBatch::new();
-        foreign
-            .push(
-                &raw,
-                &Bytes::from(finalization_key),
-                b"finalization".to_vec(),
+        let mut histories = Vec::new();
+        for prefix in ["tenant-a/", "tenant-b/"] {
+            let store = StoreClient::new(&url).prefixed(StoreKeyPrefix::new(prefix).unwrap());
+            let operations =
+                vec![Operation::CommitFloor(Some(prefix.as_bytes().to_vec()), Location::new(0)); 3];
+            let encoded = operations
+                .iter()
+                .map(|op| op.encode().to_vec())
+                .collect::<Vec<_>>();
+            let hasher = commonware_storage::qmdb::hasher::<Sha256>();
+            let base = Mem::<Family, _>::new();
+            let merkle = base
+                .new_batch()
+                .add_leaf_digests(encoded.iter().enumerate().map(|(index, operation)| {
+                    hasher.leaf_digest(
+                        Position::try_from(Location::<Family>::new(index as u64)).unwrap(),
+                        operation,
+                    )
+                }))
+                .merkleize(&base, &hasher);
+            let root = merkle.root(&hasher, 0).unwrap();
+            let range = AuthenticatedOperationRange {
+                start_location: Location::new(0),
+                end_location: Location::new(3),
+                inactive_peaks: 0,
+                pinned_nodes: &[],
+                encoded_operations: &encoded,
+            };
+            let prepared = prepare_authenticated_range::<Family, Sha256, Operation, Sequential>(
+                &range,
+                &root,
+                &op_cfg(),
+                &Sequential,
             )
             .unwrap();
-        foreign.commit(store.client()).await.unwrap();
+            let mut batch = StoreWriteBatch::new();
+            stage_authenticated_range(&store, prepared, &mut batch).unwrap();
+            publish_source_rows(&store, batch, Location::new(2))
+                .await
+                .unwrap();
+            histories.push((store, encoded, root));
+        }
+        assert_ne!(histories[0].1, histories[1].1);
+        assert_ne!(histories[0].2, histories[1].2);
 
-        let reader = Ordered::<Family, Sha256, Vec<u8>, Vec<u8>, N>::new(
-            demo_store_client(&url),
-            op_cfg(),
-            key_cfg(),
-        );
-        let proof = reader
-            .operation_range_checkpoint(Location::new(2), Location::new(0), 3, None)
-            .await
-            .unwrap();
-        assert_eq!(proof.encoded_operations, encoded);
-        assert_eq!(proof.canonical_root::<Sha256>(), root);
-        assert!(proof.verify::<Sha256>());
+        for (store, encoded, root) in histories {
+            let reader =
+                Ordered::<Family, Sha256, Vec<u8>, Vec<u8>, N>::new(store, op_cfg(), key_cfg());
+            let proof = reader
+                .operation_range_checkpoint(Location::new(2), Location::new(0), 3, None)
+                .await
+                .unwrap();
+            assert_eq!(proof.encoded_operations, encoded);
+            assert_eq!(proof.canonical_root::<Sha256>(), root);
+            assert!(proof.verify::<Sha256>());
+        }
     }
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]

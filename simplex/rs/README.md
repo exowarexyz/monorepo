@@ -78,10 +78,11 @@ certificates from the repository root:
 
 ```bash
 cargo run --package exoware-simplex --bin simplex -- \
-  seed --store-url http://127.0.0.1:8080 --interval-secs 2
+  seed --store-url http://127.0.0.1:8080 --store-prefix simplex --interval-secs 2
 ```
 
 The command prints its signing scheme, namespace and encoded verification
 material for the [sandbox Simplex panel](../../examples/sandbox/README.md#simplex-panel).
-It uses a time-based starting height unless you select one with `--start-height`.
+Set the panel's `VITE_SIMPLEX_STORE_PREFIX` to `simplex` to read these artifacts.
+The seeder uses a time-based starting height unless you select one with `--start-height`.
 The deterministic demo keys are for local examples.

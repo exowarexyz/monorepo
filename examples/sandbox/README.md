@@ -62,12 +62,16 @@ export AR_wasm32_unknown_unknown="$(brew --prefix llvm)/bin/llvm-ar"
 - **SQL** (optional, requires `VITE_SQL_URL`): run ad-hoc SQL queries and
   subscribe to a SQL WHERE predicate evaluated per ingested batch.
 
-## Store namespace
+## Store namespaces
 
-The demos share one simulator Store, with separate key prefixes: `qmdb/`,
-`simplex/`, and `sql/`. Each server or panel uses the same prefix as its seeder.
-The Log and Store panels access raw Store keys, so use other prefixes for
-manual writes.
+Use `--store-prefix` to give each instance a non-overlapping namespace in the
+shared Store. A server and its seeder must use the same prefix. The examples
+below use `qmdb`, `simplex`, and `sql`; choose another prefix for each
+additional instance. Omitting the option leaves keys unprefixed.
+
+The Simplex panel reads the Store directly, so set `VITE_SIMPLEX_STORE_PREFIX`
+to its seeder's prefix. The Log and Store panels access raw Store keys; use
+other prefixes for manual writes.
 
 ## Ordered QMDB panel
 
@@ -87,14 +91,14 @@ With the simulator running:
 
    ```bash
    cargo run --package exoware-qmdb --bin qmdb -- \
-     run --store-url http://127.0.0.1:8080
+     run --store-url http://127.0.0.1:8080 --store-prefix qmdb
    ```
 
 2. **Stream fresh batches.** Start the seeder in another terminal:
 
    ```bash
    cargo run --package exoware-qmdb --bin qmdb -- \
-     seed --store-url http://127.0.0.1:8080 --interval-secs 2
+     seed --store-url http://127.0.0.1:8080 --store-prefix qmdb --interval-secs 2
    ```
 
    The seeder keeps running and prints a tip and root every few seconds:
@@ -104,8 +108,8 @@ With the simulator running:
    ```
 
    Its local ordered-QMDB MMB state persists under
-   `$HOME/.exoware_qmdb_mmb_seed`, so it resumes after a restart. Delete that
-   directory to reset the demo, or use `--directory` to choose another location.
+   `$HOME/.exoware_qmdb_mmb_seed`, so it resumes after a restart. Use
+   `--directory` to give each additional instance its own local state directory.
 
 3. **Point the web app at the QMDB server**:
 
@@ -142,7 +146,7 @@ With the simulator running:
 
    ```bash
    cargo run --package exoware-simplex --bin simplex -- \
-     seed --store-url http://127.0.0.1:8080 --interval-secs 2
+     seed --store-url http://127.0.0.1:8080 --store-prefix simplex --interval-secs 2
    ```
 
    The seeder first prints the threshold verifier material to paste into the
@@ -154,7 +158,7 @@ With the simulator running:
 2. **Point the web app at the simulator**:
 
    ```bash
-   VITE_SIMPLEX_URL=http://127.0.0.1:8080 npm run dev
+   VITE_SIMPLEX_URL=http://127.0.0.1:8080 VITE_SIMPLEX_STORE_PREFIX=simplex npm run dev
    ```
 
 3. **Read and verify artifacts in the UI:**
@@ -182,14 +186,14 @@ With the simulator running:
 
    ```bash
    cargo run --package exoware-sql --bin sql -- \
-     run --store-url http://127.0.0.1:8080
+     run --store-url http://127.0.0.1:8080 --store-prefix sql
    ```
 
 2. **Seed rows.** Start the seeder in another terminal:
 
    ```bash
    cargo run --package exoware-sql --bin sql -- \
-     seed --store-url http://127.0.0.1:8080 --interval-secs 2
+     seed --store-url http://127.0.0.1:8080 --store-prefix sql --interval-secs 2
    ```
 
    At each `--interval-secs`, the seeder inserts five orders into `orders_kv`

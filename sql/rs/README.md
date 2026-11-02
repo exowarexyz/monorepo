@@ -321,8 +321,8 @@ The `sql` binary serves a demo `orders_kv` table on port 8082 and can seed it wi
 rows. The [sandbox](../../examples/sandbox/README.md#sql-panel) uses it:
 
 ```sh
-cargo run -p exoware-sql --bin sql -- run --store-url http://127.0.0.1:8080
-cargo run -p exoware-sql --bin sql -- seed --store-url http://127.0.0.1:8080
+cargo run -p exoware-sql --bin sql -- run --store-url http://127.0.0.1:8080 --store-prefix sql
+cargo run -p exoware-sql --bin sql -- seed --store-url http://127.0.0.1:8080 --store-prefix sql
 ```
 
 ## Examples

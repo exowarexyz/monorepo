@@ -131,9 +131,11 @@ function streamEventId({ sequenceNumber, entry }: VerifiedSimplexEvent): string 
 
 export function SimplexPanel({
   simplexUrl,
+  storePrefix,
   showNotification,
 }: {
   simplexUrl: string;
+  storePrefix: string;
   showNotification: NotificationFn;
 }) {
   const subscribeAbortRef = useRef<AbortController | null>(null);
@@ -157,8 +159,8 @@ export function SimplexPanel({
   const [verifierStatus, setVerifierStatus] = useState<'loading' | 'ready' | 'error'>('loading');
   const store = useMemo(
     () =>
-      new Client(simplexUrl).store(new StoreKeyPrefix(new TextEncoder().encode('simplex/'))),
-    [simplexUrl],
+      new Client(simplexUrl).store(new StoreKeyPrefix(new TextEncoder().encode(storePrefix))),
+    [simplexUrl, storePrefix],
   );
   const session = useMemo(() => ReadSession.monotonic(store), [store]);
   const client = useMemo(

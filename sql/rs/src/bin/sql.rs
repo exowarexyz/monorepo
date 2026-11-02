@@ -23,6 +23,9 @@ enum Command {
     Run {
         #[arg(long)]
         store_url: String,
+        /// UTF-8 prefix prepended to this instance's Store keys.
+        #[arg(long, default_value = "")]
+        store_prefix: String,
         #[arg(long, default_value = "0.0.0.0")]
         host: IpAddr,
         #[arg(long, default_value_t = 8082)]
@@ -31,6 +34,9 @@ enum Command {
     Seed {
         #[arg(long)]
         store_url: String,
+        /// UTF-8 prefix prepended to this instance's Store keys.
+        #[arg(long, default_value = "")]
+        store_prefix: String,
         #[arg(long, default_value_t = 2)]
         interval_secs: u64,
     },
@@ -42,9 +48,9 @@ async fn health() -> &'static str {
 
 fn build_server(
     store_url: &str,
+    store_prefix: String,
 ) -> Result<Arc<SqlServer>, Box<dyn std::error::Error + Send + Sync>> {
-    let client = StoreClient::new(store_url)
-        .prefixed(StoreKeyPrefix::new(b"sql/".as_slice()).expect("valid demo prefix"));
+    let client = StoreClient::new(store_url).prefixed(StoreKeyPrefix::new(store_prefix)?);
     let schema = KvSchema::new(client)
         .orders_table(TABLE_NAME, default_orders_index_specs())
         .map_err(|e| format!("configure schema: {e}"))?;
@@ -54,10 +60,11 @@ fn build_server(
 
 async fn run(
     store_url: &str,
+    store_prefix: String,
     host: IpAddr,
     port: u16,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let server = build_server(store_url)?;
+    let server = build_server(store_url, store_prefix)?;
     let app = Router::new()
         .route("/health", get(health))
         .fallback_service(sql_connect_stack(server))
@@ -72,9 +79,10 @@ async fn run(
 
 async fn seed(
     store_url: &str,
+    store_prefix: String,
     interval_secs: u64,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let server = build_server(store_url)?;
+    let server = build_server(store_url, store_prefix)?;
     info!(store_url, interval_secs, "starting sql seed");
     let mut ticker = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -136,13 +144,15 @@ async fn main() -> std::process::ExitCode {
     let result = match cli.command {
         Command::Run {
             store_url,
+            store_prefix,
             host,
             port,
-        } => run(&store_url, host, port).await,
+        } => run(&store_url, store_prefix, host, port).await,
         Command::Seed {
             store_url,
+            store_prefix,
             interval_secs,
-        } => seed(&store_url, interval_secs).await,
+        } => seed(&store_url, store_prefix, interval_secs).await,
     };
 
     match result {
