@@ -577,7 +577,6 @@ impl ScanCtx<'_> {
         &self,
         key: &Key,
         value: &[u8],
-        covering: bool,
     ) -> DataFusionResult<Option<(Vec<CellValue>, StoredRow)>> {
         let Some(pk) = decode_primary_key_selected(
             self.model.table_prefix,
@@ -587,7 +586,7 @@ impl ScanCtx<'_> {
         ) else {
             return Ok(None);
         };
-        self.decode_value(pk, value, covering)
+        self.decode_value(pk, value, false)
     }
 
     fn decode_value(
@@ -746,7 +745,7 @@ async fn get_rows(
     let mut rows = Vec::with_capacity(keys.len());
     for key in keys {
         if let Some(value) = values.remove(key).flatten() {
-            if let Some(row) = ctx.decode_row(key, &value, false)? {
+            if let Some(row) = ctx.decode_row(key, &value)? {
                 rows.push(row);
             }
         }
@@ -963,7 +962,7 @@ async fn stream_range_scan(
                         }
                         ctx.decode_value(decoded.primary_key_values, value, true)?
                     } else {
-                        ctx.decode_row(key, value, false)?
+                        ctx.decode_row(key, value)?
                     };
                     let Some(row) = row else { continue };
                     if ctx.filter.is_some() {
