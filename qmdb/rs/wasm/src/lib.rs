@@ -2676,7 +2676,7 @@ mod tests {
         .is_err());
 
         // Chunks that differ from the authenticated bitmap, or are missing, are rejected.
-        let mut invalid_chunks = range.clone();
+        let mut invalid_chunks = range;
         invalid_chunks.chunks[0] = vec![0; 64].into();
         assert!(verify_current_operation_range_from_proto::<F, Sha256>(
             &invalid_chunks,
