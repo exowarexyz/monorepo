@@ -20,11 +20,11 @@ import {
 } from './generated/proto/qmdb/v1/operation_log_pb.js';
 import { GetCurrentOperationRangeRequestSchema } from './generated/proto/qmdb/v1/current_operation_pb.js';
 import {
-  RawCurrentOperationService,
-  RawKeyLookupService,
-  RawOperationLogService,
-  RawOrderedKeyRangeService,
-} from './raw-proofs.js';
+  ProofBytesCurrentOperationService,
+  ProofBytesKeyLookupService,
+  ProofBytesOperationLogService,
+  ProofBytesOrderedKeyRangeService,
+} from './proof-bytes.js';
 import {
   FilterSchema,
   type Filter,
@@ -227,7 +227,7 @@ export interface OrderedSubscribeProof {
 /**
  * The qmdb clients always use binary protobuf and ignore `useBinaryFormat`.
  * They hand each proof to wasm as the bytes that arrived, which JSON can't
- * carry (see `raw-proofs.ts`).
+ * carry (see `proof-bytes.ts`).
  */
 export type OrderedQmdbClientOptions = SdkClientOptions & {
   merkleFamily?: MerkleFamily;
@@ -254,7 +254,7 @@ function binaryTransport(baseUrl: string, options: SdkClientOptions) {
 /**
  * A proof arrives as one entry per occurrence of its field. Protobuf merges the
  * occurrences into one message, which is the same as parsing their bytes joined
- * (see `raw-proofs.ts`), so this joins them. A missing proof has no entries. No
+ * (see `proof-bytes.ts`), so this joins them. A missing proof has no entries. No
  * real proof encodes to zero bytes, because every proof message carries a
  * non-empty inner `proof` field.
  */
@@ -400,7 +400,7 @@ export function matchRegex(regex: string): Filter {
 }
 
 async function operationRangeProofBytes(
-  operationLog: ConnectClient<typeof RawOperationLogService>,
+  operationLog: ConnectClient<typeof ProofBytesOperationLogService>,
   request: OperationRangeRequest,
   options?: CallOptions,
 ): Promise<Uint8Array> {
@@ -412,7 +412,7 @@ async function operationRangeProofBytes(
 }
 
 async function operationsProofBytes(
-  operationLog: ConnectClient<typeof RawOperationLogService>,
+  operationLog: ConnectClient<typeof ProofBytesOperationLogService>,
   request: OperationsRequest,
   options?: CallOptions,
 ): Promise<Uint8Array> {
@@ -428,7 +428,7 @@ async function operationsProofBytes(
 }
 
 export class QmdbOperationLogClient {
-  private readonly operationLog: ConnectClient<typeof RawOperationLogService>;
+  private readonly operationLog: ConnectClient<typeof ProofBytesOperationLogService>;
   private readonly merkleFamily: MerkleFamily;
   private readonly hashFamily: HashFamily;
 
@@ -443,7 +443,7 @@ export class QmdbOperationLogClient {
     this.merkleFamily = merkleFamily;
     this.hashFamily = hashFamily;
     this.operationLog = createClient(
-      RawOperationLogService,
+      ProofBytesOperationLogService,
       binaryTransport(baseUrl, transportOptions),
     );
   }
@@ -614,10 +614,10 @@ export class QmdbOperationLogClient {
 }
 
 export class OrderedQmdbClient {
-  private readonly lookup: ConnectClient<typeof RawKeyLookupService>;
-  private readonly orderedRange: ConnectClient<typeof RawOrderedKeyRangeService>;
-  private readonly operationLog: ConnectClient<typeof RawOperationLogService>;
-  private readonly currentOperation: ConnectClient<typeof RawCurrentOperationService>;
+  private readonly lookup: ConnectClient<typeof ProofBytesKeyLookupService>;
+  private readonly orderedRange: ConnectClient<typeof ProofBytesOrderedKeyRangeService>;
+  private readonly operationLog: ConnectClient<typeof ProofBytesOperationLogService>;
+  private readonly currentOperation: ConnectClient<typeof ProofBytesCurrentOperationService>;
   private readonly merkleFamily: MerkleFamily;
   private readonly hashFamily: HashFamily;
   private readonly currentChunkSize: number;
@@ -636,10 +636,10 @@ export class OrderedQmdbClient {
     this.hashFamily = hashFamily;
     this.currentChunkSize = currentChunkSize;
     const transport = binaryTransport(baseUrl, transportOptions);
-    this.lookup = createClient(RawKeyLookupService, transport);
-    this.orderedRange = createClient(RawOrderedKeyRangeService, transport);
-    this.operationLog = createClient(RawOperationLogService, transport);
-    this.currentOperation = createClient(RawCurrentOperationService, transport);
+    this.lookup = createClient(ProofBytesKeyLookupService, transport);
+    this.orderedRange = createClient(ProofBytesOrderedKeyRangeService, transport);
+    this.operationLog = createClient(ProofBytesOperationLogService, transport);
+    this.currentOperation = createClient(ProofBytesCurrentOperationService, transport);
   }
 
   async get(
@@ -692,7 +692,7 @@ export class OrderedQmdbClient {
       options,
     );
     // The results arrive as views into the response, so this is one flat copy.
-    const proofBytes = toBinary(RawKeyLookupService.method.getMany.output, response);
+    const proofBytes = toBinary(ProofBytesKeyLookupService.method.getMany.output, response);
     const verified = verify_get_many_response(
       proofBytes,
       toBytes(expectedRoot),
@@ -736,7 +736,7 @@ export class OrderedQmdbClient {
       options,
     );
     // As in getMany, the entries and start proof arrive as views, so this is one flat copy.
-    const proofBytes = toBinary(RawOrderedKeyRangeService.method.getRange.output, response);
+    const proofBytes = toBinary(ProofBytesOrderedKeyRangeService.method.getRange.output, response);
     const verified = verify_get_range_response(
       proofBytes,
       toBytes(expectedRoot),
