@@ -16,7 +16,7 @@ use crate::{
         RawKeyValueProof, VerifiedCurrentRange, VerifiedKeyLookup, VerifiedKeyRange,
         VerifiedKeyValue, VerifiedOperationRange,
     },
-    request::{span_contains, validate_key_range},
+    request::validate_key_range,
     OperationKv, PublishedWatermark, VersionedValue,
 };
 use commonware_codec::{Codec, Copying, Decode, Encode};
@@ -32,6 +32,7 @@ use commonware_storage::{
         operation::{Key as QmdbKey, Operation as _},
     },
 };
+use commonware_utils::range::contains_cyclic;
 use exoware_sdk::{keys::Key, PrefixedStoreClient, RangeMode, ReadSession};
 use std::{collections::BTreeSet, marker::PhantomData, sync::Arc};
 
@@ -882,7 +883,7 @@ where
         } = target
         {
             let update = Self::active_update(op_cfg, &reads, &active_key, location)?;
-            if !span_contains(&update.key, &update.next_key, key) {
+            if !contains_cyclic(&update.key..&update.next_key, key) {
                 return Err(QmdbError::CorruptData(format!(
                     "no ordered active-key span contains requested key {key:?}"
                 )));

@@ -14,7 +14,7 @@ use commonware_storage::{
         sync::{Request, Response, Source as _, Target},
     },
 };
-use commonware_utils::{channel::mpsc, NZUsize, NZU16, NZU64};
+use commonware_utils::{channel::ring, NZUsize, NZU16, NZU64};
 use connectrpc::client::{BoxFuture, ClientBody, ClientTransport};
 use exoware_qmdb::{
     service::{
@@ -142,7 +142,7 @@ async fn build_source_batch() -> SourceBatch {
     tokio::task::spawn_blocking(|| {
         deterministic::Runner::default().start(|context| async move {
             use commonware_runtime::{buffer::paged::CacheRef, Supervisor as _};
-            let page_cache = CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(8));
+            let page_cache = CacheRef::new(NZU16!(64), NZUsize!(8));
             let cfg = common::keyless_variable_config(
                 "keyless_variable_full_mmr_connect_source",
                 page_cache,
@@ -167,7 +167,7 @@ async fn build_source_batch() -> SourceBatch {
                     .await
                     .expect("merkleize")
             };
-            (db, _) = db.apply_batch(finalized).await.expect("apply");
+            db = db.apply_batch(finalized).await.expect("apply");
             let finalized = {
                 let batch = db.new_batch().append(b"third-value".to_vec());
                 batch
@@ -175,7 +175,7 @@ async fn build_source_batch() -> SourceBatch {
                     .await
                     .expect("merkleize")
             };
-            (db, _) = db.apply_batch(finalized).await.expect("apply second");
+            db = db.apply_batch(finalized).await.expect("apply second");
 
             let latest = db.bounds().end - 1;
             let n = NonZeroU64::new(*latest + 1).unwrap();
@@ -395,15 +395,15 @@ async fn test_keyless_connect_get_operations_rejects_invalid_requests() {
     let connect_client = operation_log_client(&qmdb_url);
     let tip = u64::try_from(source.operations.len() - 1).expect("tip fits");
 
-    for locations in [
-        vec![],
-        vec![2, 1],
-        vec![1, 1],
-        vec![0, tip + 1],
-        vec![0; 1025],
+    for (request_tip, locations) in [
+        (tip, vec![]),
+        (tip, vec![2, 1]),
+        (tip, vec![1, 1]),
+        (tip, vec![0, tip + 1]),
+        (1024, (0..=1024).collect()),
     ] {
         let request = ProtoGetOperationsRequest {
-            tip,
+            tip: request_tip,
             locations,
             ..Default::default()
         };
@@ -827,14 +827,14 @@ async fn test_keyless_commonware_glue_state_sync_uses_operation_log_client() {
         cw_tokio::Runner::default().start(move |context| async move {
             use commonware_runtime::{buffer::paged::CacheRef, Supervisor as _};
 
-            let page_cache = CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(8));
+            let page_cache = CacheRef::new(NZU16!(64), NZUsize!(8));
             let cfg = common::keyless_variable_config(
                 "keyless_variable_full_mmr_sync_target",
                 page_cache,
                 ((0..=10000).into(), ()),
                 NZU64!(7),
             );
-            let (_update_tx, update_rx) = mpsc::channel(1);
+            let (_update_tx, update_rx) = ring::channel(NZUsize!(1));
             let synced: SyncDb = <SyncDb as StateSyncDb<_, _>>::sync_db(
                 context.child("keyless_variable_full_mmr_sync_target"),
                 cfg,
@@ -847,7 +847,6 @@ async fn test_keyless_commonware_glue_state_sync_uses_operation_log_client() {
                     fetch_batch_size: NZU64!(1),
                     apply_batch_size: NZU64!(1),
                     max_outstanding_requests: NZUsize!(2),
-                    update_channel_size: NZUsize!(1),
                 },
             )
             .await

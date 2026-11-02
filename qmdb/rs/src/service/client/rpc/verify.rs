@@ -2,7 +2,7 @@
 
 use super::proof_digest_cap;
 use crate::{
-    proof::{verify_ordered_exclusion_proof, VerifiedKeyValue},
+    proof::VerifiedKeyValue,
     service::proto::qmdb::v1::{
         CurrentKeyExclusionProof as ProtoCurrentKeyExclusionProof,
         CurrentKeyValueProof as ProtoCurrentKeyValueProof,
@@ -95,7 +95,7 @@ where
     let requested_key = K::decode_cfg(Copying(requested_key), key_cfg).map_err(|err| {
         QmdbError::CorruptData(format!("failed to decode requested exclusion key: {err}"))
     })?;
-    if !verify_ordered_exclusion_proof::<F, H, K, E, N>(&requested_key, &proof, root) {
+    if !proof.verify::<H>(&requested_key, root) {
         return Err(QmdbError::ProofVerification {
             kind: crate::ProofKind::CurrentKeyExclusion,
         });

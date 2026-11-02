@@ -303,7 +303,7 @@ async fn store_free_sql_does_not_create_an_observation() {
 
 #[test]
 fn context_override_preserves_optional_store_sequence_floor() {
-    let store = PrefixedStoreClient::empty(StoreClient::new("http://localhost:10000"));
+    let store = PrefixedStoreClient::empty(StoreClient::new("http://localhost:8080"));
     let ctx = SqlContext::new(store.clone());
     for floor in [None, Some(0), Some(41)] {
         let query_ctx = ctx.with_read_session(ReadSession::monotonic(store.clone(), floor));

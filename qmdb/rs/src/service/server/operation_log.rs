@@ -2,14 +2,15 @@
 //! operation proofs, and proof-carrying subscriptions.
 
 use super::{encode, qmdb_error_to_connect};
-// The subscribe stream still classifies raw Store rows itself.
-use crate::adapter::subscription as sub;
 use crate::{
+    adapter::subscription as sub,
     proof::{MultiProofOperations, OperationRangeCheckpoint, RawBatchMultiProof},
-    request::OperationLocations,
-    service::proto::qmdb::v1::{
-        GetOperationRangeRequest, GetOperationRangeResponse, GetOperationsRequest,
-        GetOperationsResponse, OperationLogService, SubscribeRequest, SubscribeResponse,
+    service::{
+        proto::qmdb::v1::{
+            GetOperationRangeRequest, GetOperationRangeResponse, GetOperationsRequest,
+            GetOperationsResponse, OperationLogService, SubscribeRequest, SubscribeResponse,
+        },
+        validate_operations_request,
     },
     OperationKv, PublishedWatermark, QmdbError,
 };
@@ -440,8 +441,7 @@ impl<R: OperationLogReader> OperationLogService for OperationLogServer<R> {
         let reader = self.reader.clone();
         async move {
             let requested = request.locations.iter().copied().collect::<Vec<u64>>();
-            OperationLocations::new(request.tip, &requested)
-                .map_err(|err| qmdb_error_to_connect(err.into()))?;
+            validate_operations_request(request.tip, &requested).map_err(qmdb_error_to_connect)?;
             let watermark = reader
                 .resolve_watermark(Location::new(request.tip), request.min_sequence_number)
                 .await

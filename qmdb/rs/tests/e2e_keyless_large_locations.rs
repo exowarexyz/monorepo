@@ -56,7 +56,7 @@ async fn check_large_locations<F: Graftable + PartialEq>(family: &str, start: u6
         .merkleize(&reference, &hasher);
     let end = start + operations.len() as u64;
     let expected_root = reference_batch
-        .root(&reference, &hasher, F::inactive_peaks(end, start))
+        .root(&hasher, F::inactive_peaks(end, start))
         .unwrap();
     let encoded_operations = operations
         .iter()

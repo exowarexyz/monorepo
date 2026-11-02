@@ -18,7 +18,7 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-      - name: Clear disk space
+      - name: Check disk space and configure swap
         uses: ./.github/actions/disk
       - name: Install Buf CLI
         uses: bufbuild/buf-setup-action@v1
@@ -27,8 +27,6 @@ jobs:
           github_token: ${{ github.token }}
       - name: Run setup (Rust + Node)
         uses: ./.github/actions/setup
-      - name: Buf build
-        run: buf build proto
       - name: Buf lint
         run: buf lint proto
       - name: Verify generated code is up to date

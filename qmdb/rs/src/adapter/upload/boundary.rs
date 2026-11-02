@@ -58,7 +58,7 @@ where
             "missing operation at location {location} in current boundary input"
         ))
     })?;
-    let digests = verify_proof_and_extract_digests::<_, _, H, _, N>(
+    let digests = verify_proof_and_extract_digests::<_, _, H, N>(
         &proof,
         location,
         std::slice::from_ref(operation),

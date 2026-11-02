@@ -345,7 +345,7 @@ mod tests {
     use bytes::BufMut;
     use commonware_codec::{Buf, DecodeExt, FixedSize, Read, Write};
     use commonware_cryptography::{sha256::Digest as Sha256Digest, Sha256};
-    use commonware_parallel::{Rayon, Sequential};
+    use commonware_parallel::{mocks::Explorer, Rayon, Sequential};
     use commonware_storage::{
         merkle::{mem::Mem, mmb, mmr},
         qmdb::{
@@ -941,9 +941,8 @@ mod tests {
 
     fn assert_parallel_preparation<F: Family + PartialEq>() {
         // Force parallel work even for this small fixture
-        let strategy = Rayon::new(NonZeroUsize::new(2).unwrap())
-            .expect("Rayon strategy")
-            .manual();
+        let strategy =
+            Explorer::parallel(&Rayon::new(NonZeroUsize::new(2).unwrap()).expect("Rayon strategy"));
         for floor in [0, 512] {
             let mut operations = vec![FixedKeylessOperation::<F>::Commit(None, Location::new(0))];
             operations.extend(

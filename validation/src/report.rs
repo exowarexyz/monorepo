@@ -466,7 +466,7 @@ mod tests {
 
         BenchReport {
             config: BenchConfig {
-                endpoint: "http://localhost:10000".to_string(),
+                endpoint: "http://localhost:8080".to_string(),
                 namespace: 42,
                 key_space: 1_000,
                 total_ops: 10_000,

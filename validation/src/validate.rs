@@ -12,7 +12,7 @@
 //!
 //! Example:
 //!   cargo run --release -p exoware-validation -- validate \
-//!     --url http://localhost:10000 \
+//!     --url http://localhost:8080 \
 //!     --keys 100
 
 use crate::{
@@ -2190,8 +2190,7 @@ mod tests {
         };
         assert!(detail.contains("range page exceeded its 10ms bound"));
         assert!(detail.contains("matched 0 of 1 expected rows"));
-        // The observed page latency is what makes the next CI occurrence data
-        // rather than another argument about the bound.
+        // Include the observed page latency so timeout failures can be diagnosed.
         assert!(
             detail.contains("slowest page"),
             "a stall must report the page latency it observed: {detail}"
@@ -2391,7 +2390,7 @@ mod tests {
     fn sample_config(value_size: usize) -> Config {
         Config {
             mode: ValidateMode::Standard,
-            client: ClientConfig::new("http://localhost:10000", 3).unwrap(),
+            client: ClientConfig::new("http://localhost:8080", 3).unwrap(),
             keys: 100,
             batch_size: 25,
             lookup_samples: 25,

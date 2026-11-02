@@ -86,7 +86,7 @@ where
     tokio::task::spawn_blocking(|| {
         deterministic::Runner::default().start(|context| async move {
             use commonware_runtime::{buffer::paged::CacheRef, Supervisor as _};
-            let page_cache = CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(8));
+            let page_cache = CacheRef::new(NZU16!(64), NZUsize!(8));
             let cfg = common::keyless_variable_config(
                 "keyless_variable_full_source",
                 page_cache,
@@ -117,7 +117,7 @@ where
                     .await
                     .expect("merkleize")
             };
-            (db, _) = db.apply_batch(finalized).await.expect("apply");
+            db = db.apply_batch(finalized).await.expect("apply");
 
             let finalized = {
                 let batch = db.new_batch().append(b"eighth-value".to_vec());
@@ -126,7 +126,7 @@ where
                     .await
                     .expect("merkleize")
             };
-            (db, _) = db.apply_batch(finalized).await.expect("apply second");
+            db = db.apply_batch(finalized).await.expect("apply second");
 
             let latest = db.bounds().end - 1;
             let n = NonZeroU64::new(*latest + 1).unwrap();
@@ -143,7 +143,7 @@ where
                     .await
                     .expect("merkleize")
             };
-            (db, _) = db.apply_batch(finalized).await.expect("apply third");
+            db = db.apply_batch(finalized).await.expect("apply third");
 
             let continued_latest_location = db.bounds().end - 1;
             let n = NonZeroU64::new(*continued_latest_location + 1).unwrap();
@@ -186,7 +186,7 @@ where
     tokio::task::spawn_blocking(|| {
         deterministic::Runner::default().start(|context| async move {
             use commonware_runtime::{buffer::paged::CacheRef, Supervisor as _};
-            let page_cache = CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(8));
+            let page_cache = CacheRef::new(NZU16!(64), NZUsize!(8));
             let cfg = commonware_storage::qmdb::keyless::Config {
                 merkle: common::merkle_config("keyless_fixed_full_source", page_cache.clone()),
                 log: FixedJournalConfig {
@@ -211,7 +211,7 @@ where
                     .await
                     .expect("merkleize")
             };
-            (db, _) = db.apply_batch(finalized).await.expect("apply fixed");
+            db = db.apply_batch(finalized).await.expect("apply fixed");
 
             let latest = db.bounds().end - 1;
             let n = NonZeroU64::new(*latest + 1).unwrap();

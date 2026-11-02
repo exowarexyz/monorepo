@@ -73,7 +73,6 @@ type SubscribeStream = Pin<Box<dyn Stream<Item = Result<SubscribeResponse, Conne
 #[derive(Clone)]
 struct TableStream {
     model: Arc<TableModel>,
-    schema: SchemaRef,
     access_plan: Arc<ScanAccessPlan>,
     selector: Selector,
     indexes: Arc<Vec<ResolvedIndexSpec>>,
@@ -92,7 +91,6 @@ impl TableStream {
             payload_regex: Utf8::from("(?s-u).*"),
         };
         Self {
-            schema: model.schema.clone(),
             access_plan,
             model,
             selector,
@@ -122,7 +120,7 @@ impl TableStream {
             }
             let _ = builder.append_archived_row(&pk_values, &archived)?;
         }
-        builder.finish(&self.schema)
+        builder.finish(&self.model.schema)
     }
 }
 
@@ -182,6 +180,7 @@ impl SqlServer {
             .filter_map(|name| {
                 let stream = self.streams.get(name)?;
                 let columns = stream
+                    .model
                     .schema
                     .fields()
                     .iter()
@@ -280,7 +279,7 @@ impl Service for SqlConnect {
             let stream = server.stream(&table_name)?.clone();
             let predicate = compile_subscription_predicate(
                 server.ctx.datafusion(),
-                &stream.schema,
+                &stream.model.schema,
                 &table_name,
                 &where_sql,
             )
@@ -1547,7 +1546,7 @@ mod tests {
             .unwrap();
         assert_eq!(response.sequence_number, 42);
         let reader = StreamReader::try_new(response.results.as_ref(), None).unwrap();
-        assert_eq!(reader.schema(), state.schema);
+        assert_eq!(reader.schema(), state.model.schema);
         let batches = reader.collect::<Result<Vec<_>, _>>().unwrap();
         assert_eq!(batches.len(), 1);
         let ids = batches[0]

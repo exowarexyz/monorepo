@@ -8,6 +8,7 @@ use crate::{
     proof::{
         MultiProofOperations, OperationRangeCheckpoint, RawBatchMultiProof, VerifiedOperationRange,
     },
+    request::OperationLocations,
     OperationKv, PublishedWatermark,
 };
 use commonware_codec::{Codec, Copying, Decode, Encode, Read as CodecRead};
@@ -207,6 +208,28 @@ where
         )
         .await?;
         Ok(proof)
+    }
+
+    /// Prove a nonempty set of strictly ascending operation locations at or below `tip`.
+    /// `min_sequence_number` is the minimum Store sequence for the publication lookup.
+    pub async fn operation_multi_proof(
+        &self,
+        tip: Location<F>,
+        locations: &[Location<F>],
+        min_sequence_number: Option<u64>,
+    ) -> Result<RawBatchMultiProof<H::Digest, F>, QmdbError> {
+        // Validate the request and Merkle family bounds before reading the Store.
+        let requested = locations
+            .iter()
+            .map(|location| location.as_u64())
+            .collect::<Vec<_>>();
+        OperationLocations::with_max_leaves(tip.as_u64(), &requested, F::MAX_LEAVES.as_u64())?;
+
+        // `min_sequence_number` bounds the publication lookup. Proof reads use
+        // the observed publication sequence as their minimum.
+        let watermark = self.resolve_watermark(tip, min_sequence_number).await?;
+        self.multi_proof_at(watermark, MultiProofOperations::Read(locations))
+            .await
     }
 
     /// Multi-proof at a published watermark, built from the same cached reads

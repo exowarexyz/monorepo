@@ -34,7 +34,7 @@ impl From<RequestCompression> for ConnectRequestCompression {
 /// Shared SDK client CLI flags for validation commands.
 #[derive(clap::Args, Clone, Debug)]
 pub struct ClientArgs {
-    #[arg(long, default_value = "http://localhost:10000")]
+    #[arg(long, default_value = "http://localhost:8080")]
     pub url: String,
     /// Max client read retry attempts for lookup/range calls.
     #[arg(long, default_value_t = 3)]
@@ -203,20 +203,20 @@ mod tests {
     #[test]
     fn config_normalizes_endpoint() {
         let config =
-            ClientConfig::new("http://localhost:10000/", 3).expect("client config should parse");
-        assert_eq!(config.endpoint(), "http://localhost:10000");
+            ClientConfig::new("http://localhost:8080/", 3).expect("client config should parse");
+        assert_eq!(config.endpoint(), "http://localhost:8080");
     }
 
     #[test]
     fn config_preserves_endpoint_without_trailing_slash() {
         let config =
-            ClientConfig::new("http://localhost:10000", 3).expect("client config should parse");
-        assert_eq!(config.endpoint(), "http://localhost:10000");
+            ClientConfig::new("http://localhost:8080", 3).expect("client config should parse");
+        assert_eq!(config.endpoint(), "http://localhost:8080");
     }
 
     #[test]
     fn config_rejects_zero_read_retry_attempts() {
-        assert!(ClientConfig::new("http://localhost:10000", 0).is_err());
+        assert!(ClientConfig::new("http://localhost:8080", 0).is_err());
     }
 
     #[test]

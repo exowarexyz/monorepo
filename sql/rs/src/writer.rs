@@ -284,7 +284,6 @@ impl StoreBatchUpload for BatchWriter {
 #[derive(Debug)]
 pub(crate) struct KvIngestSink {
     pub(crate) client: PrefixedStoreClient,
-    pub(crate) schema: SchemaRef,
     pub(crate) model: Arc<TableModel>,
     pub(crate) index_specs: Arc<Vec<ResolvedIndexSpec>>,
 }
@@ -292,13 +291,11 @@ pub(crate) struct KvIngestSink {
 impl KvIngestSink {
     pub(crate) fn new(
         client: PrefixedStoreClient,
-        schema: SchemaRef,
         model: Arc<TableModel>,
         index_specs: Arc<Vec<ResolvedIndexSpec>>,
     ) -> Self {
         Self {
             client,
-            schema,
             model,
             index_specs,
         }
@@ -314,7 +311,7 @@ impl DisplayAs for KvIngestSink {
 #[async_trait]
 impl DataSink for KvIngestSink {
     fn schema(&self) -> &SchemaRef {
-        &self.schema
+        &self.model.schema
     }
 
     async fn write_all(

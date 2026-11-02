@@ -1,7 +1,7 @@
 //! Exoware load generator.
 //!
 //! Usage:
-//!   validation load --url http://localhost:10000 --keys 10000
+//!   validation load --url http://localhost:8080 --keys 10000
 
 use crate::{
     client::{build_client, ClientArgs, ClientConfig},
@@ -305,7 +305,7 @@ mod tests {
     fn sample_args() -> Args {
         Args {
             client: ClientArgs {
-                url: "http://localhost:10000/".to_string(),
+                url: "http://localhost:8080/".to_string(),
                 read_retry_attempts: 3,
                 request_compression: RequestCompression::default(),
             },
@@ -328,7 +328,7 @@ mod tests {
     #[test]
     fn config_normalizes_url() {
         let config = Config::try_from(sample_args()).expect("load args should be valid");
-        assert_eq!(config.client.endpoint(), "http://localhost:10000");
+        assert_eq!(config.client.endpoint(), "http://localhost:8080");
     }
 
     #[test]

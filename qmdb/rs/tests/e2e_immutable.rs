@@ -86,7 +86,7 @@ async fn build_variable_source() -> VariableSource {
     tokio::task::spawn_blocking(|| {
         deterministic::Runner::default().start(|context| async move {
             use commonware_runtime::{buffer::paged::CacheRef, Supervisor as _};
-            let page_cache = CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(8));
+            let page_cache = CacheRef::new(NZU16!(64), NZUsize!(8));
             let cfg = common::immutable_variable_config(
                 "immutable_variable_full_mmr_source",
                 page_cache,
@@ -116,7 +116,7 @@ async fn build_variable_source() -> VariableSource {
                     .await
                     .expect("merkleize")
             };
-            (db, _) = db.apply_batch(finalized).await.expect("apply");
+            db = db.apply_batch(finalized).await.expect("apply");
 
             let latest = db.bounds().end - 1;
             let n = NonZeroU64::new(*latest + 1).unwrap();
@@ -144,7 +144,7 @@ async fn build_fixed_source() -> FixedSource {
     tokio::task::spawn_blocking(|| {
         deterministic::Runner::default().start(|context| async move {
             use commonware_runtime::{buffer::paged::CacheRef, Supervisor as _};
-            let page_cache = CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(8));
+            let page_cache = CacheRef::new(NZU16!(64), NZUsize!(8));
             let cfg = commonware_storage::qmdb::immutable::Config {
                 merkle_config: common::merkle_config(
                     "immutable_fixed_full_mmr_source",
@@ -177,7 +177,7 @@ async fn build_fixed_source() -> FixedSource {
                     .await
                     .expect("merkleize")
             };
-            (db, _) = db.apply_batch(finalized).await.expect("apply fixed");
+            db = db.apply_batch(finalized).await.expect("apply fixed");
 
             let latest = db.bounds().end - 1;
             let n = NonZeroU64::new(*latest + 1).unwrap();
