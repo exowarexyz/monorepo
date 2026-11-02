@@ -14,7 +14,7 @@ npm install @exowarexyz/sql
 ```
 
 Start the [simulator](../../examples/simulator/README.md) on port 8080, then
-[run the SQL service and seed its demo table](../rs/README.md#serving-sql). This
+[run the SQL service and seed its demo table](../../examples/sandbox/README.md#sql-panel). This
 example queries the demo `orders_kv` table on the SQL service's default port,
 8082, and lists the available tables:
 

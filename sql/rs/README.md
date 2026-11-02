@@ -317,14 +317,6 @@ stream with the batch's sequence number. To resume after a disconnect, set
 To discover the schema, use `Tables`. It lists each table's columns, primary key,
 and indexes with their layout and cover columns.
 
-The `sql` binary serves a demo `orders_kv` table on port 8082 and can seed it with
-rows. The [sandbox](../../examples/sandbox/README.md#sql-panel) uses it:
-
-```sh
-cargo run -p exoware-sql --bin sql -- run --store-url http://127.0.0.1:8080 --store-prefix sql
-cargo run -p exoware-sql --bin sql -- seed --store-url http://127.0.0.1:8080 --store-prefix sql
-```
-
 ## Examples
 
 The examples connect to `EXOWARE_URL` (default `http://localhost:8080`):
