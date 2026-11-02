@@ -14,10 +14,10 @@ import {
   CurrentKeyExclusionProofSchema,
   CurrentKeyValueProofSchema,
   CurrentOperationRangeProofSchema,
-  HistoricalMultiProofSchema,
-  HistoricalOperationRangeProofSchema,
+  OperationMultiProofSchema,
+  OperationRangeProofSchema,
 } from '../dist/generated/proto/qmdb/v1/proof_pb.js';
-import { OrderedQmdbClient, QmdbOperationLogClient } from '../dist/client.js';
+import { QmdbOrderedClient, QmdbLogClient } from '../dist/client.js';
 import {
   ProofBytesCurrentOperationService,
   ProofBytesKeyLookupService,
@@ -51,11 +51,11 @@ const fill = (length, seed) => Uint8Array.from({ length }, (_, i) => (i + seed) 
 test('test_proof_bytes_proof_fields_are_views_of_the_encoded_proof', () => {
   const cases = [
     [ProofBytesOperationLogService.method.getOperationRange.output, GetOperationRangeResponseSchema,
-      HistoricalOperationRangeProofSchema, { proof: fill(40, 1), encodedOperations: [fill(9, 2)], startLocation: 3n }],
+      OperationRangeProofSchema, { proof: fill(40, 1), encodedOperations: [fill(9, 2)], startLocation: 3n }],
     [ProofBytesOperationLogService.method.getOperations.output, GetOperationsResponseSchema,
-      HistoricalMultiProofSchema, { proof: fill(40, 1), operations: [{ location: 4n, encodedOperation: fill(9, 2) }] }],
+      OperationMultiProofSchema, { proof: fill(40, 1), operations: [{ location: 4n, encodedOperation: fill(9, 2) }] }],
     [ProofBytesOperationLogService.method.subscribe.output, SubscribeResponseSchema,
-      HistoricalMultiProofSchema, { proof: fill(40, 1), opsRoot: fill(32, 5) }],
+      OperationMultiProofSchema, { proof: fill(40, 1), opsRoot: fill(32, 5) }],
     [ProofBytesKeyLookupService.method.get.output, GetResponseSchema,
       CurrentKeyValueProofSchema, { proof: fill(40, 1), encodedOperation: fill(9, 2) }],
     [ProofBytesCurrentOperationService.method.getCurrentOperationRange.output, GetCurrentOperationRangeResponseSchema,
@@ -74,7 +74,7 @@ test('test_proof_bytes_proof_fields_are_views_of_the_encoded_proof', () => {
 test('test_proof_bytes_proof_fields_match_server_fixtures', () => {
   const cases = [
     ['get', ProofBytesKeyLookupService.method.get.output, GetResponseSchema, CurrentKeyValueProofSchema],
-    ['subscribe', ProofBytesOperationLogService.method.subscribe.output, SubscribeResponseSchema, HistoricalMultiProofSchema],
+    ['subscribe', ProofBytesOperationLogService.method.subscribe.output, SubscribeResponseSchema, OperationMultiProofSchema],
   ];
   for (const family of families) {
     for (const [suffix, output, schema, proofSchema] of cases) {
@@ -152,7 +152,7 @@ test('test_clients_join_proofs_split_across_occurrences', async (t) => {
   for (const family of families) {
     const get = fixture(family, 'get');
     const { key, tip } = fromBinary(GetRequestSchema, get.request);
-    const client = new OrderedQmdbClient('http://qmdb.test', { merkleFamily: family, currentChunkSize: get.chunkSize });
+    const client = new QmdbOrderedClient('http://qmdb.test', { merkleFamily: family, currentChunkSize: get.chunkSize });
     const whole = fromBinary(GetResponseSchema, get.response).proof;
     // The server's proof split in two, and whole but followed by an empty
     // occurrence. Protobuf merges each into the server's proof.
@@ -183,9 +183,9 @@ test('test_clients_use_binary_even_when_json_is_requested', async (t) => {
     return new Response(new Uint8Array(), { headers: { 'content-type': 'application/proto' } });
   });
   const root = new Uint8Array(32);
-  const ordered = new OrderedQmdbClient('http://qmdb.test', { useBinaryFormat: false });
+  const ordered = new QmdbOrderedClient('http://qmdb.test', { useBinaryFormat: false });
   await assert.rejects(ordered.get('a', 1n, root), /get response missing proof/);
-  const log = new QmdbOperationLogClient('http://qmdb.test', { useBinaryFormat: false });
+  const log = new QmdbLogClient('http://qmdb.test', { useBinaryFormat: false });
   await assert.rejects(
     log.getOperationRange({ tip: 1n, startLocation: 0n, maxLocations: 1 }, root),
     /getOperationRange response missing proof/,
@@ -203,8 +203,8 @@ test('test_clients_report_missing_proofs', async (t) => {
     }
     return new Response(new Uint8Array(), { headers: { 'content-type': 'application/proto' } });
   });
-  const ordered = new OrderedQmdbClient('http://qmdb.test');
-  const log = new QmdbOperationLogClient('http://qmdb.test');
+  const ordered = new QmdbOrderedClient('http://qmdb.test');
+  const log = new QmdbLogClient('http://qmdb.test');
   const range = { tip: 1n, startLocation: 0n, maxLocations: 1 };
   const root = new Uint8Array(32);
   await assert.rejects(ordered.get('a', 1n, root), /qmdb get response missing proof/);

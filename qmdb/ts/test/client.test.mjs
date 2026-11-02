@@ -7,10 +7,10 @@ import {
   GetOperationsRequestSchema,
   GetOperationsResponseSchema,
 } from '../dist/generated/proto/qmdb/v1/operation_log_pb.js';
-import { HistoricalMultiProofSchema, HistoricalOperationRangeProofSchema } from '../dist/generated/proto/qmdb/v1/proof_pb.js';
+import { OperationMultiProofSchema, OperationRangeProofSchema } from '../dist/generated/proto/qmdb/v1/proof_pb.js';
 import { readFileSync } from 'node:fs';
-import { OrderedQmdbClient, QmdbOperationLogClient } from '../dist/client.js';
-import { initSync, verify_historical_raw_operation_range_proof } from '../dist/generated/wasm/exoware_qmdb_wasm.js';
+import { QmdbOrderedClient, QmdbLogClient } from '../dist/index.js';
+import { initSync, verify_raw_operation_range_proof } from '../dist/generated/wasm/exoware_qmdb_wasm.js';
 
 // Answers in the format the request used, as a Connect server does.
 function reply(sent, schema, message) {
@@ -21,18 +21,18 @@ function reply(sent, schema, message) {
 
 test('test_size_arguments_reject_narrowing_before_initialization', async () => {
   for (const currentChunkSize of [0, -1, 1.5, 2 ** 32, Number.MAX_SAFE_INTEGER]) {
-    assert.throws(() => new OrderedQmdbClient('http://127.0.0.1:1', { currentChunkSize }), /32-bit/);
+    assert.throws(() => new QmdbOrderedClient('http://127.0.0.1:1', { currentChunkSize }), /32-bit/);
   }
-  const client = new QmdbOperationLogClient('http://127.0.0.1:1');
+  const client = new QmdbLogClient('http://127.0.0.1:1');
   const request = { tip: 2n, startLocation: 1n, maxLocations: 1 };
   await assert.rejects(client.getFixedUnorderedUpdate(request, '', 1n, '', 2 ** 32), /32-bit/);
   await assert.rejects(client.getFixedKeylessAppend(request, '', 1n << 64n, ''), /64-bit/);
-  const ordered = new OrderedQmdbClient('http://127.0.0.1:1');
+  const ordered = new QmdbOrderedClient('http://127.0.0.1:1');
   await assert.rejects(ordered.getRange({ startKey: '', limit: 0, tip: 1n }, ''), /32-bit/);
 });
 
 test('test_operation_windows_reject_invalid_bounds_before_initialization', async () => {
-  const clients = [new QmdbOperationLogClient('http://127.0.0.1:1'), new OrderedQmdbClient('http://127.0.0.1:1')];
+  const clients = [new QmdbLogClient('http://127.0.0.1:1'), new QmdbOrderedClient('http://127.0.0.1:1')];
   const valid = { tip: (1n << 53n) + 2n, startLocation: (1n << 53n) + 1n, maxLocations: 1 };
   for (const client of clients) {
     for (const request of [
@@ -57,11 +57,11 @@ test('test_keyless_variable_variable_values_large_locations', () => {
       const [rootHex, proofHex] = readFileSync(new URL(`fixtures/keyless_variable_variable_values_${family}_start_${start}.txt`, import.meta.url), 'utf8').trim().split('\n');
       const root = Buffer.from(rootHex, 'hex');
       const proof = Buffer.from(proofHex, 'hex');
-      const verified = verify_historical_raw_operation_range_proof(proof, root, family, 'sha256', start + 2n, start, 10);
+      const verified = verify_raw_operation_range_proof(proof, root, family, 'sha256', start + 2n, start, 10);
       assert.deepEqual(Array.from(verified.root), Array.from(root));
       assert.deepEqual(verified.operations.map((operation) => operation.location), [start, start + 1n, start + 2n]);
       assert.ok(verified.operations.every((operation) => operation.encodedOperation.length > 0));
-      assert.throws(() => verify_historical_raw_operation_range_proof(proof, root, family, 'sha256', start + 2n, start + 1n, 10), /request/);
+      assert.throws(() => verify_raw_operation_range_proof(proof, root, family, 'sha256', start + 2n, start + 1n, 10), /request/);
     }
   }
 });
@@ -70,19 +70,19 @@ const readFloorCases = [
   {
     name: 'raw',
     fixture: 'any_unordered_variable_variable_keys_variable_values',
-    Client: QmdbOperationLogClient,
+    Client: QmdbLogClient,
     read: (client, request, root, options) => client.getOperationRange(request, root, options),
   },
   {
     name: 'ordered',
     fixture: 'any_ordered_variable_variable_keys_variable_values',
-    Client: OrderedQmdbClient,
+    Client: QmdbOrderedClient,
     read: (client, request, root, options) => client.getOperationRange(request, root, options),
   },
   {
     name: 'fixed_keyless',
     fixture: 'keyless_fixed_full_fixed_values',
-    Client: QmdbOperationLogClient,
+    Client: QmdbLogClient,
     read: (client, request, root, options) => client.getFixedKeylessAppend(
       request, root, request.startLocation, Buffer.alloc(16, 8), options,
     ),
@@ -90,7 +90,7 @@ const readFloorCases = [
   {
     name: 'fixed_unordered',
     fixture: 'any_unordered_fixed_fixed_keys_fixed_values',
-    Client: QmdbOperationLogClient,
+    Client: QmdbLogClient,
     read: (client, request, root, options) => client.getFixedUnorderedUpdate(
       request, root, request.startLocation + 1n, Buffer.alloc(32, 0x11), 32, options,
     ),
@@ -114,7 +114,7 @@ for (const { name, fixture, Client, read } of readFloorCases) {
         minSequenceNumber,
       };
       const response = create(GetOperationRangeResponseSchema, {
-        proof: fromBinary(HistoricalOperationRangeProofSchema, Buffer.from(proofHex, 'hex')),
+        proof: fromBinary(OperationRangeProofSchema, Buffer.from(proofHex, 'hex')),
       });
       t.mock.method(globalThis, 'fetch', async (input, init) => {
         const sent = new Request(input, init);
@@ -146,7 +146,7 @@ test('test_operations_requests_reject_invalid_locations_before_dispatch', async 
   const fetch = t.mock.method(globalThis, 'fetch', async () => {
     throw new Error('request must not be sent');
   });
-  const client = new QmdbOperationLogClient('http://127.0.0.1:1');
+  const client = new QmdbLogClient('http://127.0.0.1:1');
   for (const request of [
     { tip: 10n, locations: [] },
     { tip: 10n, locations: [2n, 1n] },
@@ -167,6 +167,15 @@ test('test_operations_requests_reject_invalid_locations_before_dispatch', async 
     client.getFixedUnorderedUpdateMany({ tip: 10n }, '', [{ location: 1n, key: 'a' }, { location: 1n, key: 'b' }], 8),
     /ascending/,
   );
+  const locations = Array.from({ length: 1025 }, (_, index) => BigInt(index));
+  await assert.rejects(
+    client.getFixedKeylessAppendMany({ tip: 2000n }, '', locations.map((location) => ({ location, value: 'a' }))),
+    /1024 locations/,
+  );
+  await assert.rejects(
+    client.getFixedUnorderedUpdateMany({ tip: 2000n }, '', locations.map((location) => ({ location, key: 'a' })), 8),
+    /1024 locations/,
+  );
   assert.equal(fetch.mock.callCount(), 0);
 });
 
@@ -179,7 +188,7 @@ function operationsFixture(name) {
     root: Buffer.from(rootHex, 'hex'),
     tip: BigInt(tip),
     locations: locations.split(',').map(BigInt),
-    proof: fromBinary(HistoricalMultiProofSchema, Buffer.from(proofHex, 'hex')),
+    proof: fromBinary(OperationMultiProofSchema, Buffer.from(proofHex, 'hex')),
     operations: operationHex.map((hex) => Buffer.from(hex, 'hex')),
   };
 }
@@ -217,7 +226,7 @@ for (const [fixtureName, merkleFamily, current] of [
     const fixture = operationsFixture(fixtureName);
     const minSequenceNumber = (1n << 53n) + 100n;
     mockOperationsService(t, fixture, minSequenceNumber);
-    const client = new QmdbOperationLogClient('http://qmdb.test', { merkleFamily });
+    const client = new QmdbLogClient('http://qmdb.test', { merkleFamily });
     const request = { tip: fixture.tip, locations: fixture.locations, minSequenceNumber };
 
     const verified = await client.getOperations(request, fixture.root);
@@ -236,7 +245,7 @@ for (const [fixtureName, merkleFamily, current] of [
     // The transport captures `fetch` at construction, so use a fresh client.
     t.mock.restoreAll();
     mockOperationsService(t, fixture, undefined, false);
-    const mismatched = new QmdbOperationLogClient('http://qmdb.test', { merkleFamily });
+    const mismatched = new QmdbLogClient('http://qmdb.test', { merkleFamily });
     await assert.rejects(mismatched.getOperations({ ...request, locations: fixture.locations.slice(1) }, fixture.root), /locations/);
   });
 }
@@ -245,7 +254,7 @@ test('test_fixed_keyless_append_many_verifies_values', async (t) => {
   initWasm();
   const fixture = operationsFixture('keyless_fixed_full_fixed_values_mmr');
   mockOperationsService(t, fixture, undefined);
-  const client = new QmdbOperationLogClient('http://qmdb.test');
+  const client = new QmdbLogClient('http://qmdb.test');
   // Fixed keyless appends encode a context byte followed by the value.
   const values = fixture.operations.map((operation) => operation.subarray(1, 17));
   const expected = fixture.locations.map((location, index) => ({ location, value: values[index] }));
@@ -263,7 +272,7 @@ test('test_fixed_unordered_update_many_verifies_keys', async (t) => {
   initWasm();
   const fixture = operationsFixture('any_unordered_fixed_fixed_keys_fixed_values_mmr');
   mockOperationsService(t, fixture, undefined);
-  const client = new QmdbOperationLogClient('http://qmdb.test');
+  const client = new QmdbLogClient('http://qmdb.test');
   // Fixed unordered updates encode a context byte, the 32-byte key, then the 32-byte value.
   const keys = fixture.operations.map((operation) => operation.subarray(1, 33));
   const expected = fixture.locations.map((location, index) => ({ location, key: keys[index] }));
