@@ -1,10 +1,17 @@
 //! Verifying client for `qmdb.v1.OperationLogService`.
 
-use std::fmt::Display;
-use std::marker::PhantomData;
-use std::num::NonZeroU64;
-use std::sync::Arc;
-
+use super::{connect_error_to_qmdb, proof_digest_cap};
+use crate::{
+    decode_digest,
+    proof::{VerifiedOperationRange, VerifiedOperations},
+    request::{OperationLocations, OperationWindow},
+    service::proto::qmdb::v1::{
+        GetOperationRangeRequest, GetOperationsRequest, HistoricalMultiProof,
+        HistoricalOperationRangeProof, OperationLogServiceClient, SubscribeRequest,
+        SubscribeResponseView,
+    },
+    QmdbError,
+};
 use bytes::Bytes;
 use commonware_codec::{Copying, Decode, DecodeExt, Encode, Read};
 use commonware_cryptography::{Digest, Hasher};
@@ -22,17 +29,7 @@ use commonware_utils::range::NonEmptyRange;
 use connectrpc::client::{ClientConfig, ClientTransport, ServerStream};
 use exoware_sdk::proto::PreferZstdHttpClient;
 use http_body::Body;
-
-use crate::proof::{VerifiedOperationRange, VerifiedOperations};
-use crate::request::{OperationLocations, OperationWindow};
-use crate::service::proto::qmdb::v1::{
-    GetOperationRangeRequest, GetOperationsRequest, HistoricalMultiProof,
-    HistoricalOperationRangeProof, OperationLogServiceClient, SubscribeRequest,
-    SubscribeResponseView,
-};
-use crate::{decode_digest, QmdbError};
-
-use super::{connect_error_to_qmdb, proof_digest_cap};
+use std::{fmt::Display, marker::PhantomData, num::NonZeroU64, sync::Arc};
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct OperationLogSubscribeProof<D: Digest, Op, F: Family> {

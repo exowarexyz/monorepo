@@ -3,9 +3,6 @@
 //! Full and compact append-only QMDB sources share the same Store and Connect adapters
 
 use crate::common;
-
-use std::{fmt::Debug, sync::Arc};
-
 use commonware_codec::{Codec, Read};
 use commonware_cryptography::{sha256::Digest, Sha256};
 use commonware_parallel::Sequential;
@@ -23,13 +20,15 @@ use commonware_storage::{
 };
 use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16, NZU64};
 use exoware_qmdb::{
-    adapter::upload::prepare_authenticated_range, adapter::upload::stage_authenticated_range,
-    adapter::upload::stage_watermark, adapter::upload::AuthenticatedOperationRange,
-    adapter::upload::PreparedAuthenticatedRange, adapter::upload::UploadOperation,
-    service::client::rpc::OperationLogClient, service::proto::qmdb::v1::GetOperationRangeRequest,
+    adapter::upload::{
+        prepare_authenticated_range, stage_authenticated_range, stage_watermark,
+        AuthenticatedOperationRange, PreparedAuthenticatedRange, UploadOperation,
+    },
+    service::{client::rpc::OperationLogClient, proto::qmdb::v1::GetOperationRangeRequest},
     QmdbError,
 };
 use exoware_sdk::{PrefixedStoreClient, StoreWriteBatch};
+use std::{fmt::Debug, sync::Arc};
 
 type FixedKey = FixedBytes<32>;
 type FixedValue = FixedBytes<16>;

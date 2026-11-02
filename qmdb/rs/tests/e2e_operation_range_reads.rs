@@ -3,42 +3,52 @@
 #[allow(dead_code)]
 mod common;
 
-use std::collections::{BTreeMap, BTreeSet};
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
-
 use bytes::Bytes;
 use commonware_codec::Encode;
 use commonware_cryptography::{sha256::Digest, Sha256};
-use commonware_storage::merkle::{
-    hasher::Hasher as _, mem::Mem, mmb, mmr, Family, Graftable, Location, Position,
+use commonware_storage::{
+    merkle::{hasher::Hasher as _, mem::Mem, mmb, mmr, Family, Graftable, Location, Position},
+    qmdb::{
+        any::{
+            ordered::{variable::Operation as OrderedOperation, Update as OrderedUpdate},
+            unordered::variable::Operation as UnorderedOperation,
+            value::VariableEncoding,
+        },
+        immutable::variable::Operation as ImmutableOperation,
+        keyless::variable::Operation as KeylessOperation,
+    },
 };
-use commonware_storage::qmdb::any::ordered::{
-    variable::Operation as OrderedOperation, Update as OrderedUpdate,
-};
-use commonware_storage::qmdb::any::unordered::variable::Operation as UnorderedOperation;
-use commonware_storage::qmdb::any::value::VariableEncoding;
-use commonware_storage::qmdb::immutable::variable::Operation as ImmutableOperation;
-use commonware_storage::qmdb::keyless::variable::Operation as KeylessOperation;
 use connectrpc::{ConnectError, ConnectRpcService, ErrorCode, RequestContext, ServiceRequest};
-use exoware_qmdb::service::proto::qmdb::v1::{GetOperationRangeRequest, GetOperationsRequest};
 use exoware_qmdb::{
-    adapter::upload::stage_authenticated_range, adapter::upload::stage_watermark,
-    adapter::upload::UploadOperation, service::client::rpc::OperationLogClient, NODE_FAMILY,
+    adapter::upload::{stage_authenticated_range, stage_watermark, UploadOperation},
+    service::{
+        client::rpc::OperationLogClient,
+        proto::qmdb::v1::{GetOperationRangeRequest, GetOperationsRequest},
+    },
+    NODE_FAMILY,
 };
-use exoware_sdk::common::kv::v1::Entry;
-use exoware_sdk::google::rpc::{ErrorInfo, RetryInfo};
-use exoware_sdk::proto::PreferZstdHttpClient;
-use exoware_sdk::proto::{
-    decode_connect_error, with_error_info_detail, with_query_detail, with_retry_info_detail,
+use exoware_sdk::{
+    common::kv::v1::Entry,
+    google::rpc::{ErrorInfo, RetryInfo},
+    proto::{
+        decode_connect_error, with_error_info_detail, with_query_detail, with_retry_info_detail,
+        PreferZstdHttpClient,
+    },
+    query::{
+        Detail, GetManyEntry, GetManyFrame, GetManyRequest, GetRequest, GetResponse, RangeFrame,
+        RangeRequest, ReduceRequest, ReduceResponse, Service, ServiceServer, TraversalMode,
+    },
+    PrefixedStoreClient, RetryConfig, StoreClient, StoreKeyPrefix, StoreWriteBatch,
 };
-use exoware_sdk::query::{
-    Detail, GetManyEntry, GetManyFrame, GetManyRequest, GetRequest, GetResponse, RangeFrame,
-    RangeRequest, ReduceRequest, ReduceResponse, Service, ServiceServer, TraversalMode,
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::{Arc, Mutex},
+    time::Duration,
 };
-use exoware_sdk::{PrefixedStoreClient, RetryConfig, StoreClient, StoreKeyPrefix, StoreWriteBatch};
-use tokio::sync::{Notify, Semaphore};
-use tokio::task::JoinHandle;
+use tokio::{
+    sync::{Notify, Semaphore},
+    task::JoinHandle,
+};
 
 type Operation = KeylessOperation<mmr::Family, Vec<u8>>;
 type OrderedOp = OrderedOperation<mmr::Family, Vec<u8>, Vec<u8>>;
@@ -946,6 +956,7 @@ async fn operations_multi_proof_reads_rows_and_nodes_in_one_batch() {
 }
 
 async fn reject_invalid_native_multi_proof_requests<F: Graftable>() {
+    // Serve both native adapters from an empty store that records every call
     let fixture = Fixture::new().await;
     let store = fixture.prefixed(&[]);
     let keyless = exoware_qmdb::adapter::Keyless::<F, Sha256, Vec<u8>>::new(
@@ -957,6 +968,8 @@ async fn reject_invalid_native_multi_proof_requests<F: Graftable>() {
         ordered_cfg(),
     );
     let maximum = F::MAX_LEAVES.as_u64();
+
+    // Malformed locations and tips past the family's domain fail before any store call
     for (tip, locations, overflow) in [
         (14, vec![], false),
         (14, vec![3, 3], false),
@@ -989,6 +1002,8 @@ async fn reject_invalid_native_multi_proof_requests<F: Graftable>() {
         assert!(fixture.store.calls().is_empty());
     }
 
+    // Requests at the location and count limits pass validation and reach the
+    // store. The empty store has no publication at the tip
     for (tip, locations) in [
         (maximum - 1, vec![maximum - 1]),
         (1023, (0..1024).collect()),
@@ -1024,6 +1039,7 @@ async fn native_multi_proofs_reject_invalid_requests_before_store_access() {
 #[tokio::test]
 async fn native_multi_proofs_preserve_publication_floors_and_authenticate_operations() {
     for unordered in [false, true] {
+        // Stage 15 keyless or unordered operations ending in a commit
         let fixture = Fixture::new().await;
         let store = fixture.prefixed(&[]);
         let (root, encoded) = if unordered {
@@ -1053,11 +1069,15 @@ async fn native_multi_proofs_preserve_publication_floors_and_authenticate_operat
                     .collect::<Vec<_>>(),
             )
         };
+
+        // The store serves the publication at sequence 23, above the client's floor of 17
         {
             let mut state = fixture.store.state.lock().unwrap();
             state.publication_sequence = 23;
             state.batch_sequences = vec![31, 47];
         }
+
+        // Prove three locations, including the commit at the tip
         let locations = [Location::new(0), Location::new(7), Location::new(14)];
         let mut proof = if unordered {
             Unordered::new(store, ordered_cfg())
@@ -1070,6 +1090,8 @@ async fn native_multi_proofs_preserve_publication_floors_and_authenticate_operat
                 .await
                 .unwrap()
         };
+
+        // The proof authenticates the requested operations against the staged root
         assert_eq!(proof.watermark, Location::new(14));
         assert_eq!(proof.ops_root, root);
         assert!(proof.verify::<Sha256>());
@@ -1077,10 +1099,15 @@ async fn native_multi_proofs_preserve_publication_floors_and_authenticate_operat
             proof.operations,
             locations.map(|location| (location, encoded[location.as_u64() as usize].clone()))
         );
+
+        // The client floor bounds the publication lookup, and the proof reads
+        // pin the sequence number the publication was found at
         let calls = fixture.store.calls();
         assert_eq!(calls.len(), 2);
         assert_eq!(publication_range(&calls).min_sequence_number, Some(17));
         assert_eq!(boundary_batch(&calls, 14).min_sequence_number, Some(23));
+
+        // Tampering with an operation fails verification
         proof.operations[1].1[0] ^= 1;
         assert!(!proof.verify::<Sha256>());
     }

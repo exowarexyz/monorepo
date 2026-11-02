@@ -1,3 +1,13 @@
+use crate::{
+    proof::{
+        CurrentOperationRangeProofResult, OperationRangeCheckpoint, RawBatchMultiProof,
+        RawKeyExclusionProof, RawKeyLookupProof, RawKeyRangeProof, RawKeyValueProof,
+    },
+    service::proto::qmdb::v1::{
+        GetCurrentOperationRangeResponse, GetManyResponse, GetOperationRangeResponse,
+        GetOperationsResponse, GetRangeResponse, GetResponse, SubscribeResponse,
+    },
+};
 use bytes::{BufMut, Bytes, BytesMut};
 use commonware_codec::{Encode, EncodeSize, Write as CodecWrite};
 use commonware_cryptography::Digest;
@@ -9,15 +19,6 @@ use commonware_storage::{
     },
 };
 use connectrpc::PreEncoded;
-
-use crate::proof::{
-    CurrentOperationRangeProofResult, OperationRangeCheckpoint, RawBatchMultiProof,
-    RawKeyExclusionProof, RawKeyLookupProof, RawKeyRangeProof, RawKeyValueProof,
-};
-use crate::service::proto::qmdb::v1::{
-    GetCurrentOperationRangeResponse, GetManyResponse, GetOperationRangeResponse,
-    GetOperationsResponse, GetRangeResponse, GetResponse, SubscribeResponse,
-};
 
 const WIRE_VARINT: u64 = buffa::encoding::WireType::Varint as u64;
 const WIRE_LENGTH_DELIMITED: u64 = buffa::encoding::WireType::LengthDelimited as u64;
@@ -218,7 +219,8 @@ fn write_operation_range_checkpoint<D: Digest, F: Graftable>(
     }
 }
 
-/// Encode the bare `qmdb.v1.HistoricalOperationRangeProof` protobuf message.
+/// Encode `proof` as a standalone `qmdb.v1.HistoricalOperationRangeProof`
+/// protobuf message.
 pub fn encode_historical_operation_range_proof<D: Digest, F: Graftable>(
     proof: &OperationRangeCheckpoint<D, F>,
 ) -> Vec<u8> {
@@ -228,7 +230,8 @@ pub fn encode_historical_operation_range_proof<D: Digest, F: Graftable>(
     .to_vec()
 }
 
-/// Encode the bare `qmdb.v1.HistoricalMultiProof` protobuf message.
+/// Encode `proof` as a standalone `qmdb.v1.HistoricalMultiProof` protobuf
+/// message.
 pub fn encode_historical_multi_proof<D: Digest, F: Graftable>(
     proof: &RawBatchMultiProof<D, F>,
 ) -> Vec<u8> {

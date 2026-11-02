@@ -38,8 +38,7 @@ use commonware_storage::{
 };
 use js_sys::{Array, Object, Reflect, Uint8Array};
 use std::collections::BTreeSet;
-use wasm_bindgen::prelude::*;
-use wasm_bindgen::JsCast;
+use wasm_bindgen::{prelude::*, JsCast};
 
 pub mod proto;
 
@@ -54,8 +53,11 @@ fn decode_vec_key_wire(encoded_key: &[u8]) -> Result<Vec<u8>, String> {
         .map_err(|err| format!("failed to decode QMDB key: {err}"))
 }
 
+/// Bitmap chunk geometry shared by every `current` proof checked against one database.
 #[derive(Debug)]
 struct CurrentProofConfig {
+    /// Bytes per activity bitmap chunk. Proofs do not encode it, so it must match the source
+    /// database.
     chunk_size: usize,
 }
 
@@ -99,6 +101,9 @@ fn normalize_hash_family<'a>(family: &'a str, label: &str) -> Result<&'a str, St
     }
 }
 
+/// Validates the database's chunk-size constraints for digest `D`.
+///
+/// Commonware's proof decoders and range verifier enforce bitmap geometry bounds.
 fn current_proof_config<D: Digest>(
     chunk_size: usize,
     label: &str,
@@ -106,7 +111,6 @@ fn current_proof_config<D: Digest>(
     if chunk_size == 0 {
         return Err(format!("{label} current chunk size must be non-zero"));
     }
-    // These mirror Commonware's `current::Db` const-generic chunk invariants at the WASM boundary.
     if !chunk_size.is_power_of_two() {
         return Err(format!("{label} current chunk size must be a power of two"));
     }
@@ -115,13 +119,6 @@ fn current_proof_config<D: Digest>(
             "{label} current chunk size must be a multiple of digest size {}",
             D::SIZE
         ));
-    }
-    let chunk_bits = chunk_size
-        .checked_mul(8)
-        .and_then(|bits| u64::try_from(bits).ok())
-        .ok_or_else(|| format!("{label} current chunk size is too large"))?;
-    if chunk_bits.trailing_zeros() >= 63 {
-        return Err(format!("{label} current chunk size is too large"));
     }
     Ok(CurrentProofConfig { chunk_size })
 }
@@ -430,6 +427,8 @@ where
     Ok((*root, operations))
 }
 
+/// Verifies the operations in `proto` against the current `root` and the requested `window`,
+/// returning each decoded operation at its location.
 fn verify_current_operation_range_from_proto<F, H>(
     proto: &CurrentOperationRangeProof,
     root: &H::Digest,
@@ -443,12 +442,16 @@ where
     OrderedOperation<F, Vec<u8>, Vec<u8>>:
         Decode + Encode + Read<Cfg = ((RangeCfg<usize>, ()), (RangeCfg<usize>, ()))>,
 {
+    // A range proof covers at least one operation and the bitmap chunk holding its activity bit.
     if proto.encoded_operations.is_empty() {
         return Err("current operation range proof has no operations".to_string());
     }
     if proto.chunks.is_empty() {
         return Err("current operation range proof has no chunks".to_string());
     }
+
+    // Bind the proof to the requested window. Its claimed leaf count is authenticated when the
+    // root is reconstructed below.
     let max_digests = proof_digest_cap::<H::Digest>(&proto.proof);
     let proof = RangeProof::<F, H::Digest>::decode_cfg(Copying(proto.proof.as_ref()), &max_digests)
         .map_err(|err| format!("failed to decode current operation range proof: {err}"))?;
@@ -457,6 +460,8 @@ where
         proto.encoded_operations.len(),
         proof.proof.leaves.as_u64(),
     )?;
+
+    // Decode each operation at its absolute location, rejecting locations that overflow `u64`.
     let start = Location::new(proto.start_location);
     let operations = proto
         .encoded_operations
@@ -484,6 +489,9 @@ where
             Ok((location, operation))
         })
         .collect::<Result<Vec<_>, String>>()?;
+
+    // Commonware checks the chunk count and sizes, then authenticates the operations and their
+    // activity chunks against `root`.
     let ordered_operations = operations
         .iter()
         .map(|(_, operation)| operation.clone())
@@ -500,6 +508,8 @@ where
     Ok(operations)
 }
 
+/// Verifies that `proto` proves an active update under the current `root`, returning its
+/// location and update.
 fn verify_key_value_from_proto<F, H>(
     proto: &CurrentKeyValueProof,
     root: &H::Digest,
@@ -512,6 +522,7 @@ where
     OrderedOperation<F, Vec<u8>, Vec<u8>>:
         Decode + Encode + Read<Cfg = ((RangeCfg<usize>, ()), (RangeCfg<usize>, ()))>,
 {
+    // Only an update operation can prove that a key has a value.
     let operation = OrderedOperation::<F, Vec<u8>, Vec<u8>>::decode_cfg(
         Copying(proto.encoded_operation.as_ref()),
         &op_cfg::<F>(),
@@ -520,15 +531,19 @@ where
     let OrderedOperation::Update(update) = operation else {
         return Err("current key-value proof operation must be an update".to_string());
     };
-    let max_digests = proof_digest_cap::<H::Digest>(&proto.proof);
 
-    // The wire carries an operation proof; the update supplies the authenticated successor key.
+    // Decode the operation proof with the configured chunk size. The wire does not carry the size.
+    let max_digests = proof_digest_cap::<H::Digest>(&proto.proof);
     let proof = OperationProof::<F, H::Digest>::decode_cfg(
         Copying(proto.proof.as_ref()),
         &(config.chunk_size, max_digests),
     )
     .map_err(|err| format!("failed to decode current key-value proof: {err}"))?;
     let location = proof.loc;
+
+    // The wire carries only the operation proof, so the decoded update supplies the successor key.
+    // Commonware checks the operation's activity bit and authenticates the key, value, and
+    // successor against `root`.
     let proof = KeyValueProof {
         proof,
         next_key: update.next_key.clone(),
@@ -561,6 +576,10 @@ where
     Ok((location, OrderedOperation::Update(update)))
 }
 
+/// Verifies that `proto` proves `requested_key` has no active value under `current_root`.
+///
+/// Returns the successor key that closes the excluding span, or `None` when the proof shows the
+/// database has no active keys.
 fn verify_key_exclusion_from_proto<F, H>(
     proto: &CurrentKeyExclusionProof,
     requested_key: &[u8],
@@ -574,6 +593,7 @@ where
     OrderedOperation<F, Vec<u8>, Vec<u8>>:
         Decode + Encode + Read<Cfg = ((RangeCfg<usize>, ()), (RangeCfg<usize>, ()))>,
 {
+    // Decode the exclusion proof with the configured chunk size. The wire does not carry the size.
     let max_digests = proof_digest_cap::<H::Digest>(&proto.proof);
     let proof = ExclusionProof::<F, Vec<u8>, VariableEncoding<Vec<u8>>, H::Digest>::decode_cfg(
         Copying(proto.proof.as_ref()),
@@ -584,10 +604,15 @@ where
         ),
     )
     .map_err(|err| format!("failed to decode current key-exclusion proof: {err}"))?;
+
+    // A span proof must strictly contain the requested key, and a commit proof must show an empty
+    // database. Commonware checks either case and authenticates the anchoring operation.
     let requested_key = decode_vec_key_wire(requested_key)?;
     if !proof.verify::<H>(&requested_key, current_root) {
         return Err("current key-exclusion proof failed verification".to_string());
     }
+
+    // Only a span proof names a successor key.
     Ok(match proof {
         ExclusionProof::KeyValue(_, update) => Some(update.next_key),
         ExclusionProof::Commit(..) => None,
@@ -744,6 +769,9 @@ where
     Ok(operation.clone())
 }
 
+// Fixed operations arrive as raw bytes with key and value sizes supplied at runtime. The helpers
+// below parse Commonware's fixed wire layout and context tags directly, so verification works for
+// any key and value width.
 struct FixedUnorderedOperationSizes {
     update: usize,
     total: usize,
@@ -1806,20 +1834,21 @@ pub fn verify_get_range_response(
 mod tests {
     use super::*;
     use commonware_cryptography::sha256::Digest as Sha256Digest;
-    use commonware_storage::merkle::mem::Mem;
-    use commonware_storage::qmdb::{
-        any::{
-            unordered::{Operation as UnorderedOperation, Update as UnorderedUpdate},
-            value::FixedEncoding,
+    use commonware_storage::{
+        merkle::mem::Mem,
+        qmdb::{
+            any::{
+                unordered::{Operation as UnorderedOperation, Update as UnorderedUpdate},
+                value::FixedEncoding,
+            },
+            current::{
+                grafting::{graftable_chunks, Verifier as GraftingVerifier},
+                ordered::proof::constant::ExclusionProof as UpstreamExclusionProof,
+                proof::constant::OperationProof as UpstreamOperationProof,
+            },
+            keyless,
         },
-        current::{
-            grafting::{graftable_chunks, Verifier as GraftingVerifier},
-            ordered::proof::constant::ExclusionProof as UpstreamExclusionProof,
-            proof::constant::OperationProof as UpstreamOperationProof,
-        },
-        keyless,
     };
-
     use commonware_utils::bitmap::Prunable;
 
     type OrderedVariableOperation<F> = OrderedOperation<F, Vec<u8>, Vec<u8>>;
@@ -2110,16 +2139,32 @@ mod tests {
         );
     }
 
+    /// An ordered `current` database built in memory with Commonware's fixed-size proof builders.
+    ///
+    /// The verifiers under test take the chunk size at runtime, so proofs built here with const
+    /// `N` check that the two chunk representations interoperate.
     struct CurrentFixture<F: merkle::Graftable, const N: usize> {
+        /// Operations in location order.
         operations: Vec<OrderedVariableOperation<F>>,
+
+        /// Activity bitmap with one bit per operation.
         status: Prunable<N>,
+
+        /// Operations tree hashed with bitmap chunks grafted in. Proof nodes come from this tree.
         grafted: Mem<F, Sha256Digest>,
+
+        /// Root of the operations tree without activity status.
         ops_root: Sha256Digest,
+
+        /// Current root that binds `ops_root` to the grafted root and trailing chunk digests.
         root: Sha256Digest,
     }
 
     impl<F: merkle::Graftable, const N: usize> CurrentFixture<F, N> {
+        /// Builds `leaves` operations: an inactive update, active updates of keys 1 through
+        /// `leaves - 2` whose successors wrap back to key 1, and a final commit.
         fn new(leaves: usize) -> Self {
+            // Location 0 holds a superseded update of key 1, so its activity bit is clear.
             let key = |index: usize| (index as u32).to_be_bytes().to_vec();
             let mut operations = (0..leaves - 1)
                 .map(|index| {
@@ -2138,15 +2183,20 @@ mod tests {
             Self::from_operations(operations, true)
         }
 
+        /// Builds the database from `operations`, all active except location 0 when
+        /// `inactive_first` is set.
         fn from_operations(
             operations: Vec<OrderedVariableOperation<F>>,
             inactive_first: bool,
         ) -> Self {
+            // Record each operation's activity bit.
             let leaves = operations.len();
             let mut status = Prunable::<N>::new();
             for index in 0..leaves {
                 status.push(index != 0 || !inactive_first);
             }
+
+            // Graft every chunk that Commonware grafts at this size into the operations tree.
             let chunks = (0..leaves.div_ceil(N * 8))
                 .map(|index| status.get_chunk(index).as_slice())
                 .collect::<Vec<_>>();
@@ -2155,6 +2205,8 @@ mod tests {
                 graftable_chunks::<F>(leaves as u64, (N * 8).trailing_zeros()).min(complete);
             let grafting =
                 GraftingVerifier::<F, Sha256>::new((N * 8).trailing_zeros(), 0, chunks, graftable);
+
+            // Build the plain and grafted trees over the same encoded operations.
             let hasher = commonware_storage::qmdb::hasher::<Sha256>();
             let mut ops_tree = Mem::<F, Sha256Digest>::new();
             let mut grafted = Mem::<F, Sha256Digest>::new();
@@ -2172,6 +2224,9 @@ mod tests {
                 .apply_batch(&grafted_batch.merkleize(&grafted, &grafting))
                 .unwrap();
             let ops_root = ops_tree.root(&hasher, 0).unwrap();
+
+            // A full-range proof carries the pending and partial chunk digests that the current
+            // root commits to.
             let proof = RangeProof::build::<Sha256, N>(
                 &status,
                 merkle::RangePlan::new(
@@ -2201,6 +2256,7 @@ mod tests {
             }
         }
 
+        /// Builds Commonware's fixed-size operation proof for the operation at `index`.
         fn operation_proof(&self, index: usize) -> UpstreamOperationProof<F, Sha256Digest, N> {
             UpstreamOperationProof::build::<Sha256>(
                 &self.status,
@@ -2216,6 +2272,7 @@ mod tests {
             .unwrap()
         }
 
+        /// Wraps the operation proof for `index` and its encoded operation in the wire message.
         fn key_value(&self, index: usize) -> CurrentKeyValueProof {
             CurrentKeyValueProof {
                 proof: self.operation_proof(index).encode(),
@@ -2224,6 +2281,8 @@ mod tests {
             }
         }
 
+        /// Wraps an exclusion proof anchored at the update or commit at `index` in the wire
+        /// message.
         fn exclusion(&self, index: usize) -> CurrentKeyExclusionProof {
             let proof = match &self.operations[index] {
                 OrderedOperation::Update(update) => {
@@ -2247,6 +2306,8 @@ mod tests {
             }
         }
 
+        /// Wraps a range proof over `start..end` and the bitmap chunks covering it in the wire
+        /// message.
         fn range(&self, start: usize, end: usize) -> CurrentOperationRangeProof {
             let proof = RangeProof::build::<Sha256, N>(
                 &self.status,
@@ -2275,9 +2336,15 @@ mod tests {
         }
     }
 
+    /// Checks that proofs built with Commonware's const chunk size `N` verify through the
+    /// runtime-sized verifiers.
     fn assert_current_interoperability<F: merkle::Graftable + PartialEq, const N: usize>() {
         let config = current_proof_config::<Sha256Digest>(N, "test").unwrap();
+
+        // Leaf counts straddle the first chunk boundary and pass the second, so the trailing chunk
+        // is partial in some databases and complete in others.
         for leaves in [N * 8 - 1, N * 8, N * 8 + 1, N * 8 + 2, N * 16 + 3] {
+            // A range starting just before the first chunk boundary verifies through the tip.
             let fixture = CurrentFixture::<F, N>::new(leaves);
             let start = N * 8 - 2;
             let proto = fixture.range(start, leaves);
@@ -2293,6 +2360,8 @@ mod tests {
             .unwrap();
             assert_eq!(verified.len(), leaves - start);
             assert_eq!(verified[0].1, fixture.operations[start]);
+
+            // Key-value proofs verify for the first active update and the last update.
             for index in [1, leaves - 2] {
                 let requested_key = match &fixture.operations[index] {
                     OrderedOperation::Update(update) => update.key.encode(),
@@ -2319,9 +2388,15 @@ mod tests {
         assert_current_interoperability::<mmb::Family, 128>();
     }
 
+    /// Checks that the current verifiers bind each result to the requested key, root, activity
+    /// bit, and window.
     fn assert_current_request_binding<F: merkle::Graftable + PartialEq>() {
+        // 515 operations fill one 512-bit chunk and spill into a partial chunk.
         let fixture = CurrentFixture::<F, 64>::new(515);
         let config = current_proof_config::<Sha256Digest>(64, "test").unwrap();
+
+        // A key-value proof fails for another key, for the operations root, and for an inactive
+        // operation.
         let hit = fixture.key_value(1);
         let key = 1u32.to_be_bytes().to_vec().encode();
         assert!(verify_key_value_for_key_from_proto::<F, Sha256>(
@@ -2347,6 +2422,8 @@ mod tests {
             &config
         )
         .is_err());
+
+        // A range proof verifies only for its exact tip, start, and count.
         let range = fixture.range(0, 2);
         let window = OperationWindow::new(514, 0, 2).unwrap();
         assert!(verify_current_operation_range_from_proto::<F, Sha256>(
@@ -2369,6 +2446,9 @@ mod tests {
             )
             .is_err());
         }
+
+        // A span excludes keys strictly between its key and successor and returns the successor.
+        // The span's own key, its successor, and keys outside the span are rejected.
         let span = fixture.exclusion(1);
         let between = vec![0u8, 0, 0, 1, 1].encode();
         assert_eq!(
@@ -2385,6 +2465,8 @@ mod tests {
             )
             .is_err());
         }
+
+        // The last update's span wraps from the largest key around to the smallest.
         let wrap = fixture.exclusion(513);
         assert!(verify_key_exclusion_from_proto::<F, Sha256>(
             &wrap,
@@ -2393,6 +2475,9 @@ mod tests {
             &config
         )
         .is_ok());
+
+        // A commit proves exclusion only when its floor equals its own location, as it does in a
+        // database with no active keys.
         let commit = fixture.exclusion(514);
         assert!(verify_key_exclusion_from_proto::<F, Sha256>(
             &commit,
@@ -2418,6 +2503,8 @@ mod tests {
             .unwrap(),
             None
         );
+
+        // A lone empty key is its own successor, so its span excludes every other key.
         let singleton = CurrentFixture::<F, 64>::from_operations(
             vec![
                 OrderedOperation::Update(Update {
@@ -2462,9 +2549,12 @@ mod tests {
         assert_current_request_binding::<mmb::Family>();
     }
 
+    /// Checks that malformed wire input and mismatched chunk sizes return errors.
     fn assert_current_malformed_proofs<F: merkle::Graftable>() {
         let fixture = CurrentFixture::<F, 64>::new(515);
         let config = current_proof_config::<Sha256Digest>(64, "test").unwrap();
+
+        // Every strict prefix of a key-value proof or its operation is rejected.
         let hit = fixture.key_value(1);
         for end in 0..hit.proof.len() {
             let mut truncated = hit.clone();
@@ -2482,6 +2572,8 @@ mod tests {
                     .is_err()
             );
         }
+
+        // Every strict prefix of a span or commit exclusion proof is rejected.
         let exclusion = fixture.exclusion(1);
         let key = vec![0u8, 0, 0, 1, 1].encode();
         for end in 0..exclusion.proof.len() {
@@ -2511,6 +2603,8 @@ mod tests {
             )
             .is_err());
         }
+
+        // Trailing bytes, a tampered operation, and an unknown exclusion tag are rejected.
         let mut trailing_exclusion = exclusion.clone();
         trailing_exclusion.proof = [exclusion.proof.as_ref(), &[0]].concat().into();
         assert!(verify_key_exclusion_from_proto::<F, Sha256>(
@@ -2543,7 +2637,16 @@ mod tests {
             &config
         )
         .is_err());
-        for size in [32, 128, 1usize << (usize::BITS - 1)] {
+
+        // Every proof path rejects mismatched chunks, overflowing bit widths, and bit widths
+        // that reach u64's top bit.
+        let range = fixture.range(510, 515);
+        let window = OperationWindow::new(514, 510, 5).unwrap();
+        let mut wrong_sizes = vec![32, 128, 1usize << (usize::BITS - 1)];
+        if let Ok(size) = usize::try_from((1u64 << (u64::BITS - 1)) / u64::from(u8::BITS)) {
+            wrong_sizes.push(size);
+        }
+        for size in wrong_sizes {
             let wrong = CurrentProofConfig { chunk_size: size };
             assert!(verify_key_value_from_proto::<F, Sha256>(&hit, &fixture.root, &wrong).is_err());
             assert!(verify_key_exclusion_from_proto::<F, Sha256>(
@@ -2553,9 +2656,23 @@ mod tests {
                 &wrong
             )
             .is_err());
+            assert!(verify_key_exclusion_from_proto::<F, Sha256>(
+                &commit_proof,
+                &key,
+                &commit.root,
+                &wrong
+            )
+            .is_err());
+            assert!(verify_current_operation_range_from_proto::<F, Sha256>(
+                &range,
+                &fixture.root,
+                &wrong,
+                window
+            )
+            .is_err());
         }
-        let range = fixture.range(510, 515);
-        let window = OperationWindow::new(514, 510, 5).unwrap();
+
+        // Range proofs reject truncation and a short chunk.
         for end in 0..range.proof.len() {
             let mut truncated = range.clone();
             truncated.proof = range.proof.slice(..end);
@@ -2576,16 +2693,8 @@ mod tests {
             window
         )
         .is_err());
-        for size in [32, 128] {
-            let wrong = CurrentProofConfig { chunk_size: size };
-            assert!(verify_current_operation_range_from_proto::<F, Sha256>(
-                &range,
-                &fixture.root,
-                &wrong,
-                window
-            )
-            .is_err());
-        }
+
+        // Chunks that differ from the authenticated bitmap, or are missing, are rejected.
         let mut invalid_chunks = range.clone();
         invalid_chunks.chunks[0] = vec![0; 64].into();
         assert!(verify_current_operation_range_from_proto::<F, Sha256>(
@@ -2609,7 +2718,9 @@ mod tests {
     fn test_current_proofs_reject_malformed_wire_and_wrong_chunk_sizes() {
         assert_current_malformed_proofs::<mmr::Family>();
         assert_current_malformed_proofs::<mmb::Family>();
-        for size in [0, 48, 16, 1usize << (usize::BITS - 1)] {
+
+        // Zero, non-power-of-two, and smaller-than-digest sizes fail before proof verification.
+        for size in [0, 48, 16] {
             assert!(current_proof_config::<Sha256Digest>(size, "test").is_err());
         }
     }

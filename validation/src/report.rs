@@ -1,15 +1,16 @@
-use std::fmt;
-use std::fs;
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
-
+use crate::{
+    client::RequestCompression,
+    workload::{Scenario, WorkloadSpec},
+};
 use anyhow::{ensure, Context};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-
-use crate::client::RequestCompression;
-use crate::workload::{Scenario, WorkloadSpec};
+use std::{
+    fmt, fs,
+    path::{Path, PathBuf},
+    sync::atomic::{AtomicU64, Ordering},
+    time::Duration,
+};
 
 const BENCH_MANIFEST_SCHEMA_VERSION: u16 = 1;
 const BENCH_REPORT_SCHEMA_VERSION: u16 = 1;

@@ -1,21 +1,20 @@
 use bytes::Bytes;
 use commonware_codec::Encode;
 use connectrpc::client::ClientConfig;
-use exoware_sdk::common::Selector as ProtoSelector;
-use exoware_sdk::keys::{Key, Prefix};
-use exoware_sdk::kv_codec::{
-    KvExpr, KvFieldKind, KvFieldRef, KvReducedValue, StoredRow, StoredValue,
-};
-use exoware_sdk::prune::{
-    policy_retain, KeysScope as ProtoKeysScope, Policy, PolicyGroupBy, PolicyOrderBy,
-    PolicyOrderEncoding, PolicyRetain, PruneRequest, RetainGreaterThan, RetainKeepLatest,
-    ServiceClient as PruneServiceClient,
-};
-use exoware_sdk::prune_policy;
-use exoware_sdk::selector::Selector as DomainSelector;
 use exoware_sdk::{
-    connect_compression_registry, PreferZstdHttpClient, PrefixedStoreClient, RangeMode,
-    RangeReduceOp, RangeReduceRequest, RangeReducerSpec, RetryConfig, StoreClient,
+    common::Selector as ProtoSelector,
+    connect_compression_registry,
+    keys::{Key, Prefix},
+    kv_codec::{KvExpr, KvFieldKind, KvFieldRef, KvReducedValue, StoredRow, StoredValue},
+    prune::{
+        policy_retain, KeysScope as ProtoKeysScope, Policy, PolicyGroupBy, PolicyOrderBy,
+        PolicyOrderEncoding, PolicyRetain, PruneRequest, RetainGreaterThan, RetainKeepLatest,
+        ServiceClient as PruneServiceClient,
+    },
+    prune_policy,
+    selector::Selector as DomainSelector,
+    PreferZstdHttpClient, PrefixedStoreClient, RangeMode, RangeReduceOp, RangeReduceRequest,
+    RangeReducerSpec, RetryConfig, StoreClient,
 };
 use futures::StreamExt;
 
@@ -50,8 +49,10 @@ async fn put_and_get_round_trip() {
 
 #[tokio::test]
 async fn generated_zstd_put_uses_the_shared_streaming_path() {
-    use exoware_sdk::common::Entry;
-    use exoware_sdk::ingest::{PutRequest, ServiceClient};
+    use exoware_sdk::{
+        common::Entry,
+        ingest::{PutRequest, ServiceClient},
+    };
 
     let (client, url) = spawn_client().await;
     let key = key(b"compressed-put");

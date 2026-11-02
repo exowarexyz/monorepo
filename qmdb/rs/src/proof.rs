@@ -1,5 +1,7 @@
-use std::collections::HashMap;
-
+pub use crate::service::server::encode::{
+    encode_historical_multi_proof, encode_historical_operation_range_proof,
+};
+use crate::{adapter::codec::op_count_for_watermark, QmdbError};
 use commonware_codec::Codec;
 use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::{Sequential, Strategy};
@@ -17,13 +19,7 @@ use commonware_storage::{
         operation::{Key as QmdbKey, Operation},
     },
 };
-
-use crate::adapter::codec::op_count_for_watermark;
-use crate::QmdbError;
-
-pub use crate::service::server::encode::{
-    encode_historical_multi_proof, encode_historical_operation_range_proof,
-};
+use std::collections::HashMap;
 
 /// Historical operation range plus the raw Merkle proof material used to verify
 /// it. This is suitable for checkpointing and local Merkle continuation.
@@ -492,19 +488,21 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::service::proto::qmdb::v1::{
+        HistoricalMultiProof, HistoricalOperationRangeProof, MultiProofOperation,
+    };
     use buffa::Message;
     use commonware_codec::{Copying, Decode, DecodeExt, Encode};
     use commonware_cryptography::{sha256, Sha256};
     use commonware_storage::merkle::{mmb, mmr};
 
-    use crate::service::proto::qmdb::v1::{
-        HistoricalMultiProof, HistoricalOperationRangeProof, MultiProofOperation,
-    };
-
     fn historical_encodings_roundtrip<F: Graftable + PartialEq>() {
         let digest = Sha256::hash(&[b"historical proof encoding"]);
+
+        // Cover locations beyond 2^53 and ranges with and without a root witness
         for start in [0, (1u64 << 53) + 1] {
             for with_witness in [false, true] {
+                // Build a range checkpoint with empty and high-byte operations
                 let witness = with_witness.then(|| OpsRootWitness::<F, sha256::Digest> {
                     grafted_root: digest,
                     pending_chunk_digest: None.try_into().unwrap(),
@@ -523,6 +521,9 @@ mod tests {
                     },
                     encoded_operations: vec![vec![], vec![0, 127, 128, 255]],
                 };
+
+                // The range proof matches the generated protobuf encoding field
+                // for field, and its proof and witness decode back to the source
                 let encoded_witness = witness.as_ref().map(Encode::encode).unwrap_or_default();
                 let expected = HistoricalOperationRangeProof {
                     proof: range.proof.encode(),
@@ -556,6 +557,9 @@ mod tests {
                         witness
                     );
                 }
+
+                // The same material as a multi-proof over consecutive locations
+                // matches the generated multi-proof encoding
                 let multi = RawBatchMultiProof {
                     watermark: range.watermark,
                     ops_root: digest,

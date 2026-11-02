@@ -1,20 +1,24 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::marker::PhantomData;
-use std::sync::Arc;
-
+use crate::adapter::{
+    codec::{chunk_index_for_location, encode_grafted_node_key, encode_node_key},
+    operation_range::fetch_rows,
+    read_cache::ReadCache,
+};
 use bytes::Bytes;
 use commonware_codec::{Copying, DecodeExt, FixedSize};
 use commonware_cryptography::{Digest, Hasher};
-use commonware_storage::merkle::{
-    self, hasher::Hasher as _, storage::Storage as MerkleStorage, Family, Graftable, Location,
-    Position,
+use commonware_storage::{
+    merkle::{
+        self, hasher::Hasher as _, storage::Storage as MerkleStorage, Family, Graftable, Location,
+        Position,
+    },
+    qmdb::current::{grafting, proof::required_chunks},
 };
-use commonware_storage::qmdb::current::{grafting, proof::required_chunks};
 use exoware_sdk::{keys::Key, RangeMode, ReadSession};
-
-use crate::adapter::codec::{chunk_index_for_location, encode_grafted_node_key, encode_node_key};
-use crate::adapter::operation_range::fetch_rows;
-use crate::adapter::read_cache::ReadCache;
+use std::{
+    collections::{BTreeMap, BTreeSet, HashMap},
+    marker::PhantomData,
+    sync::Arc,
+};
 
 pub(crate) struct KvMerkleStorage<'a, F: Family, D: Digest> {
     pub(crate) session: &'a ReadSession,
@@ -319,7 +323,8 @@ impl<F: Graftable> ProofNodes<F> {
 }
 
 /// The bitmap chunks at a watermark that no grafted node covers, which every
-/// current proof reads, cleared below the inactivity floor.
+/// current proof reads, keyed by chunk index and cleared below the inactivity
+/// floor.
 pub(crate) type BitmapTail = BTreeMap<u64, Bytes>;
 
 /// Decode a [`BitmapTail`] chunk.
@@ -351,6 +356,9 @@ impl<const N: usize> ProofBitmap<N> {
         let len = leaves.as_u64();
         let chunk_bits = crate::adapter::codec::bitmap_chunk_bits::<N>();
         let complete = len / chunk_bits;
+
+        // A tail with missing or extra chunks would make a later `get_chunk`
+        // panic, so it is rejected as corrupt before any proof uses it.
         let indices = required_chunks::<F, N>(leaves, len, pruned_chunks, None)
             .map_err(crate::error::current_proof_error)?;
         if !indices.eq(tail.keys().copied()) {
@@ -358,6 +366,9 @@ impl<const N: usize> ProofBitmap<N> {
                 "current bitmap tail does not match its watermark".into(),
             ));
         }
+
+        // Every proof at this watermark reads the tail chunks, so they are
+        // loaded up front.
         let mut bitmap = Self {
             len,
             complete_chunks: chunk_slot(complete)?,
@@ -371,12 +382,13 @@ impl<const N: usize> ProofBitmap<N> {
         Ok(bitmap)
     }
 
-    /// The uncached chunk needed for one operation. [`Self::new`] loads the
-    /// chunks shared by all proofs at this tip.
+    /// The chunk a proof of `location` needs that the bitmap lacks, if any.
+    /// Fails when `location` is outside the bitmap or in a pruned chunk.
     pub(crate) fn chunk_to_prove<F: Graftable>(
         &self,
         location: Location<F>,
     ) -> Result<Option<u64>, crate::QmdbError> {
+        // [`Self::new`] loaded the tail, so at most the queried chunk is missing.
         let indices = required_chunks::<F, N>(
             Location::new(self.len),
             self.len,
@@ -436,6 +448,7 @@ mod tests {
     use bytes::Bytes;
     use commonware_cryptography::{sha256::Digest, Sha256};
     use commonware_storage::merkle::{mem::Mem, mmb, mmr, verification};
+    use commonware_utils::bitmap::Readable as _;
     use connectrpc::{ConnectError, ConnectRpcService, RequestContext, ServiceRequest};
     use exoware_sdk::{
         common::kv::v1::Entry,
@@ -451,14 +464,13 @@ mod tests {
         sync::{Arc, Mutex},
     };
 
-    use commonware_utils::bitmap::Readable as _;
-
     // N = 1 gives eight-bit chunks (grafting height 3). Each chunk's byte is its index.
     fn load<F: Graftable>(
         watermark: u64,
         pruned_chunks: u64,
         location: Option<u64>,
     ) -> Result<(ProofBitmap<1>, Vec<u64>), crate::QmdbError> {
+        // Build the tail the adapter caches for this watermark and pruning.
         let watermark = Location::<F>::new(watermark);
         let leaves = crate::adapter::codec::op_count_for_watermark(watermark)?;
         let mut requested = required_chunks::<F, 1>(leaves, leaves.as_u64(), pruned_chunks, None)
@@ -469,6 +481,8 @@ mod tests {
             .map(|&index| (index, Bytes::from(vec![index as u8])))
             .collect();
         let mut bitmap = ProofBitmap::<1>::new(watermark, pruned_chunks, &tail)?;
+
+        // A proof of `location` reads at most one chunk beyond the tail.
         if let Some(location) = location {
             if let Some(index) = bitmap.chunk_to_prove(Location::<F>::new(location))? {
                 bitmap.insert(index, [index as u8])?;
@@ -481,6 +495,7 @@ mod tests {
 
     #[test]
     fn test_loads_last_chunk_only_for_partial_lengths() {
+        // 13 MMR leaves fill grafted chunk 0 and leave 5 bits in partial chunk 1
         let (bitmap, requested) = load::<mmr::Family>(12, 0, None).unwrap();
         assert_eq!(requested, [1]);
         assert_eq!(bitmap.last_chunk(), ([1], 5));
@@ -500,11 +515,13 @@ mod tests {
 
     #[test]
     fn test_loads_queried_chunk_and_rejects_pruned_locations() {
+        // A location in chunk 0 reads that chunk alongside partial chunk 2
         let (bitmap, requested) = load::<mmr::Family>(20, 0, Some(3)).unwrap();
         assert_eq!(requested, [0, 2]);
         assert_eq!(bitmap.get_chunk(0), [0]);
         assert_eq!(bitmap.get_chunk(2), [2]);
 
+        // A location in a pruned chunk cannot be proven
         assert!(load::<mmr::Family>(20, 1, Some(3)).is_err());
 
         // The queried chunk and the partial chunk coincide
@@ -535,6 +552,8 @@ mod tests {
         // 17 MMB leaves have a pending chunk and a partial last chunk
         let watermark = Location::<mmb::Family>::new(16);
         let chunk = |byte: u8| Bytes::from(vec![byte]);
+
+        // Missing, malformed or extra chunks do not match the watermark
         for wrong in [
             BTreeMap::from([(2, chunk(2))]),
             BTreeMap::from([(1, chunk(1))]),
@@ -547,6 +566,8 @@ mod tests {
                 Err(crate::QmdbError::CorruptData(_))
             ));
         }
+
+        // Exactly the pending and partial chunks match
         let tail = BTreeMap::from([(1, chunk(1)), (2, chunk(2))]);
         assert!(ProofBitmap::<1>::new(watermark, 0, &tail).is_ok());
     }

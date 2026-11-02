@@ -3,31 +3,33 @@
 
 mod common;
 
-use std::num::NonZeroU64;
-use std::sync::{
-    atomic::{AtomicUsize, Ordering},
-    Arc,
-};
-use std::time::Duration;
-
 use commonware_runtime::{deterministic, Runner as _};
-use commonware_storage::merkle::{mmr, Location};
-use commonware_storage::qmdb::immutable::variable::{
-    Db as Immutable, Operation as ImmutableOperation,
+use commonware_storage::{
+    merkle::{mmr, Location},
+    qmdb::immutable::variable::{Db as Immutable, Operation as ImmutableOperation},
+    translator::TwoCap,
 };
-use commonware_storage::translator::TwoCap;
 use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16, NZU64};
 use connectrpc::client::{BoxFuture, ClientBody, ClientTransport};
-use exoware_qmdb::service::proto::qmdb::v1::{
-    GetOperationRangeRequest as ProtoGetOperationRangeRequest,
-    SubscribeRequest as ProtoSubscribeRequest,
-};
 use exoware_qmdb::{
-    service::client::rpc::OperationLogClient, service::client::rpc::OperationLogSubscribeProof,
+    service::{
+        client::rpc::{OperationLogClient, OperationLogSubscribeProof},
+        proto::qmdb::v1::{
+            GetOperationRangeRequest as ProtoGetOperationRangeRequest,
+            SubscribeRequest as ProtoSubscribeRequest,
+        },
+    },
     QmdbError,
 };
-use exoware_sdk::proto::PreferZstdHttpClient;
-use exoware_sdk::{PrefixedStoreClient, StoreClient};
+use exoware_sdk::{proto::PreferZstdHttpClient, PrefixedStoreClient, StoreClient};
+use std::{
+    num::NonZeroU64,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    },
+    time::Duration,
+};
 
 type Digest = commonware_cryptography::sha256::Digest;
 type Db = Immutable<

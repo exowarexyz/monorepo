@@ -18,10 +18,9 @@ pub use aggregate::KvAggregateExtensionPlanner;
 pub use schema::KvSchema;
 pub use server::{sql_connect_stack, SqlConnect, SqlServer};
 pub use session::{SqlContext, SqlContextBuilder};
-pub use types::default_orders_index_specs;
 pub use types::{
-    CellValue, IndexBackfillEvent, IndexBackfillOptions, IndexBackfillReport, IndexLayout,
-    IndexSpec, TableColumnConfig,
+    default_orders_index_specs, CellValue, IndexBackfillEvent, IndexBackfillOptions,
+    IndexBackfillReport, IndexLayout, IndexSpec, TableColumnConfig,
 };
 pub use writer::{BatchReceipt, BatchWriter, PreparedBatch, TableWriter};
 
@@ -29,62 +28,62 @@ pub use writer::{BatchReceipt, BatchWriter, PreparedBatch, TableWriter};
 mod tests {
     #![allow(refining_impl_trait)]
 
-    use super::aggregate::*;
-    use super::builder::*;
-    use super::codec::*;
-    use super::diagnostics::*;
-    use super::filter::*;
-    use super::predicate::*;
-    use super::scan::*;
-    use super::types::*;
-    use super::writer::*;
-    use super::*;
-    use commonware_codec::Encode;
-    use datafusion::arrow::array::{
-        BinaryViewArray, Float64Array, Int64Array, LargeBinaryArray, LargeStringArray,
-        StringViewArray,
+    use super::{
+        aggregate::*, builder::*, codec::*, diagnostics::*, filter::*, predicate::*, scan::*,
+        types::*, writer::*, *,
     };
-    use datafusion::arrow::datatypes::{i256, DataType, TimeUnit};
-    use datafusion::arrow::record_batch::RecordBatch;
-    use datafusion::common::{config::ConfigOptions, ScalarValue};
-    use datafusion::logical_expr::{Expr, Operator};
-    use datafusion::physical_optimizer::limit_pushdown::LimitPushdown;
-    use datafusion::physical_optimizer::PhysicalOptimizerRule;
-    use datafusion::physical_plan::limit::GlobalLimitExec;
-    use datafusion::physical_plan::ExecutionPlan;
-    use datafusion::prelude::{SessionConfig, SessionContext as DataFusionSessionContext};
-    use exoware_sdk::keys::{Key, Prefix};
-    use exoware_sdk::kv_codec::{decode_stored_row, KvReducedValue, StoredRow};
-    use exoware_sdk::{PrefixedStoreClient, StoreBatchUpload, StoreClient};
-    use std::collections::{BTreeMap, HashSet};
-    use std::ops::Bound::{Included, Unbounded};
-    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering as AtomicOrdering};
-    use std::sync::{Arc, Mutex};
-    use std::time::Duration;
-
     use axum::Router;
     use bytes::Bytes;
+    use commonware_codec::Encode;
     use connectrpc::{ConnectError, ConnectRpcService, RequestContext as Context, ServiceRequest};
-    use exoware_sdk::common::kv::v1::Entry as ProtoEntry;
-    use exoware_sdk::connect_compression_registry;
-    use exoware_sdk::log::ingest::v1::{
-        PutRequest as ProtoPutRequest, PutResponse as ProtoPutResponse, Service as IngestService,
-        ServiceServer as IngestServiceServer,
+    use datafusion::{
+        arrow::{
+            array::{
+                BinaryViewArray, Float64Array, Int64Array, LargeBinaryArray, LargeStringArray,
+                StringViewArray,
+            },
+            datatypes::{i256, DataType, TimeUnit},
+            record_batch::RecordBatch,
+        },
+        common::{config::ConfigOptions, ScalarValue},
+        logical_expr::{Expr, Operator},
+        physical_optimizer::{limit_pushdown::LimitPushdown, PhysicalOptimizerRule},
+        physical_plan::{limit::GlobalLimitExec, ExecutionPlan},
+        prelude::{SessionConfig, SessionContext as DataFusionSessionContext},
     };
-    use exoware_sdk::store::query::v1::{
-        GetManyFrame as ProtoGetManyFrame, GetManyRequest as ProtoGetManyRequest,
-        GetRequest as ProtoGetRequest, GetResponse as ProtoGetResponse,
-        RangeFrame as ProtoRangeFrame, RangeRequest as ProtoRangeRequest,
-        ReduceRequest as ProtoReduceRequest, ReduceResponse as ProtoReduceResponse,
-        Service as QueryService, ServiceServer as QueryServiceServer,
+    use exoware_sdk::{
+        common::kv::v1::Entry as ProtoEntry,
+        connect_compression_registry,
+        keys::{Key, Prefix},
+        kv_codec::{decode_stored_row, KvReducedValue, StoredRow},
+        log::ingest::v1::{
+            PutRequest as ProtoPutRequest, PutResponse as ProtoPutResponse,
+            Service as IngestService, ServiceServer as IngestServiceServer,
+        },
+        parse_range_traversal_direction,
+        store::query::v1::{
+            GetManyFrame as ProtoGetManyFrame, GetManyRequest as ProtoGetManyRequest,
+            GetRequest as ProtoGetRequest, GetResponse as ProtoGetResponse,
+            RangeFrame as ProtoRangeFrame, RangeRequest as ProtoRangeRequest,
+            ReduceRequest as ProtoReduceRequest, ReduceResponse as ProtoReduceResponse,
+            Service as QueryService, ServiceServer as QueryServiceServer,
+        },
+        PrefixedStoreClient, RangeMode, RangeTraversalDirection, StoreBatchUpload, StoreClient,
     };
-    use exoware_sdk::RangeMode;
-    use exoware_sdk::{parse_range_traversal_direction, RangeTraversalDirection};
     use exoware_server::{
         Query, QueryExtra, QueryResult, QueryState, RangeScan, RangeScanBatch, RangeScanResult,
         Sequence,
     };
     use futures::{stream, TryStreamExt};
+    use std::{
+        collections::{BTreeMap, HashSet},
+        ops::Bound::{Included, Unbounded},
+        sync::{
+            atomic::{AtomicU64, AtomicUsize, Ordering as AtomicOrdering},
+            Arc, Mutex,
+        },
+        time::Duration,
+    };
     use tokio::sync::{mpsc, oneshot, Notify};
 
     /// Assert EXPLAIN text includes the same `query_stats=...` suffix as [`format_query_stats_explain`].
@@ -6865,11 +6864,12 @@ mod tests {
 
     #[test]
     fn kv_scan_sort_pushdown_preserves_limit() {
-        use datafusion::arrow::compute::SortOptions;
-        use datafusion::physical_expr::expressions::Column;
-        use datafusion::physical_expr::{LexOrdering, PhysicalSortExpr};
-        use datafusion::physical_optimizer::pushdown_sort::PushdownSort;
-        use datafusion::physical_plan::sorts::sort::SortExec;
+        use datafusion::{
+            arrow::compute::SortOptions,
+            physical_expr::{expressions::Column, LexOrdering, PhysicalSortExpr},
+            physical_optimizer::pushdown_sort::PushdownSort,
+            physical_plan::sorts::sort::SortExec,
+        };
 
         let model = Arc::new(simple_int64_model(0));
         let scan = Arc::new(KvScanExec::new(
@@ -6903,10 +6903,11 @@ mod tests {
 
     #[test]
     fn kv_scan_sort_pushdown_respects_ordering_strength() {
-        use datafusion::arrow::compute::SortOptions;
-        use datafusion::physical_expr::expressions::Column;
-        use datafusion::physical_expr::{LexOrdering, PhysicalSortExpr};
-        use datafusion::physical_plan::SortOrderPushdownResult;
+        use datafusion::{
+            arrow::compute::SortOptions,
+            physical_expr::{expressions::Column, LexOrdering, PhysicalSortExpr},
+            physical_plan::SortOrderPushdownResult,
+        };
 
         let config = KvTableConfig::new(
             0,
@@ -7002,8 +7003,9 @@ mod tests {
 
     #[tokio::test]
     async fn kv_scan_reverse_sort_pushdown_survives_limit_pushdown_first() {
-        use datafusion::physical_optimizer::pushdown_sort::PushdownSort;
-        use datafusion::physical_plan::sorts::sort::SortExec;
+        use datafusion::{
+            physical_optimizer::pushdown_sort::PushdownSort, physical_plan::sorts::sort::SortExec,
+        };
 
         // Control the pass order that exposed the lost reverse pushdown.
         let schema = KvSchema::new(PrefixedStoreClient::empty(StoreClient::new(
@@ -9195,8 +9197,7 @@ mod tests {
 
     #[tokio::test]
     async fn aggregate_pushdown_preserves_dotted_aliases() {
-        use datafusion::functions_aggregate::expr_fn::sum;
-        use datafusion::prelude::col;
+        use datafusion::{functions_aggregate::expr_fn::sum, prelude::col};
 
         let (ctx, state, shutdown_tx) = aggregate_test_context().await;
         let rows = ctx

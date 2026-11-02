@@ -108,15 +108,20 @@ impl<'a> OperationLocations<'a> {
         Self::with_max_leaves(tip, locations, u64::MAX)
     }
 
+    /// Validate `locations` at `tip`, also rejecting a tip whose leaf count
+    /// exceeds `max_leaves` as [`InvalidLocations::TipOverflow`].
     pub(crate) fn with_max_leaves(
         tip: u64,
         locations: &'a [u64],
         max_leaves: u64,
     ) -> Result<Self, InvalidLocations> {
+        // The leaf count must fit both `u64` and the caller's location domain.
         let leaves = tip.checked_add(1).ok_or(InvalidLocations::TipOverflow)?;
         if leaves > max_leaves {
             return Err(InvalidLocations::TipOverflow);
         }
+
+        // Locations must be a bounded, strictly ascending set below the leaf count.
         if locations.is_empty() {
             return Err(InvalidLocations::Empty);
         }

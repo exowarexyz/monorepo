@@ -3,20 +3,24 @@
 //! Usage:
 //!   validation load --url http://localhost:10000 --keys 10000
 
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
-use std::time::Instant;
-
+use crate::{
+    client::{build_client, ClientArgs, ClientConfig},
+    exec::{join_all_or_abort, spawn_progress_task, stop_progress_task},
+    ingest::{ingest_with_retry, IngestRetryArgs, DEFAULT_INGEST_BATCH_SIZE},
+    keyspace::{default_run_namespace, Keyspace, KeyspaceArgs},
+    record::Record,
+    value::{value_for_index, DEFAULT_VALUE_SIZE},
+    workload::worker_index_range,
+};
 use anyhow::ensure;
+use std::{
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
+    time::Instant,
+};
 use tokio::task::JoinSet;
-
-use crate::client::{build_client, ClientArgs, ClientConfig};
-use crate::exec::{join_all_or_abort, spawn_progress_task, stop_progress_task};
-use crate::ingest::{ingest_with_retry, IngestRetryArgs, DEFAULT_INGEST_BATCH_SIZE};
-use crate::keyspace::{default_run_namespace, Keyspace, KeyspaceArgs};
-use crate::record::Record;
-use crate::value::{value_for_index, DEFAULT_VALUE_SIZE};
-use crate::workload::worker_index_range;
 
 /// Load phase: insert keys via ingest API.
 #[derive(clap::Args, Debug)]
@@ -228,16 +232,16 @@ async fn run_load(config: Config) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    use std::sync::Arc;
-
     use super::*;
-    use crate::client::RequestCompression;
-    use crate::keyspace::DEFAULT_KEY_LEN;
+    use crate::{client::RequestCompression, keyspace::DEFAULT_KEY_LEN};
     use axum::Router;
     use connectrpc::{ConnectError, ConnectRpcService, RequestContext, ServiceRequest};
     use exoware_sdk::ingest::{
         PutRequest, PutResponse, Service as IngestService, ServiceServer as IngestServiceServer,
+    };
+    use std::sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
     };
 
     #[derive(Clone, Copy)]

@@ -1,35 +1,34 @@
 //! Unordered QMDB codecs and proof families through native and Connect adapters
 
 use crate::common;
-
-use std::fmt::Debug;
-use std::num::NonZeroU64;
-use std::sync::Arc;
-
 use commonware_codec::{Codec, Encode, Read};
 use commonware_cryptography::Sha256;
 use commonware_parallel::Sequential;
 use commonware_runtime::{tokio as cw_tokio, Runner as _};
-use commonware_storage::merkle::{mmb, mmr, Graftable, Location, Proof};
-use commonware_storage::qmdb::{
-    any::{
-        unordered,
-        value::{FixedEncoding, ValueEncoding, VariableEncoding},
+use commonware_storage::{
+    merkle::{mmb, mmr, Graftable, Location, Proof},
+    qmdb::{
+        any::{
+            unordered,
+            value::{FixedEncoding, ValueEncoding, VariableEncoding},
+        },
+        operation::Key as QmdbKey,
     },
-    operation::Key as QmdbKey,
 };
 use commonware_utils::{iter::zip_eq, NZUsize, NZU16, NZU64};
-use exoware_qmdb::service::proto::qmdb::v1::{
-    GetCurrentOperationRangeRequest, GetOperationRangeRequest,
-};
 use exoware_qmdb::{
-    adapter::upload::prepare_authenticated_range, adapter::upload::recover_boundary_state,
-    adapter::upload::stage_authenticated_range, adapter::upload::stage_watermark,
-    adapter::upload::AuthenticatedOperationRange, adapter::upload::UploadOperation,
-    service::client::rpc::CurrentOperationClient, service::client::rpc::OperationLogClient,
+    adapter::upload::{
+        prepare_authenticated_range, recover_boundary_state, stage_authenticated_range,
+        stage_watermark, AuthenticatedOperationRange, UploadOperation,
+    },
+    service::{
+        client::rpc::{CurrentOperationClient, OperationLogClient},
+        proto::qmdb::v1::{GetCurrentOperationRangeRequest, GetOperationRangeRequest},
+    },
     CurrentBoundaryState, MAX_OPERATION_SIZE,
 };
 use exoware_sdk::{PrefixedStoreClient, StoreWriteBatch};
+use std::{fmt::Debug, num::NonZeroU64, sync::Arc};
 
 const N: usize = 32;
 type Digest = commonware_cryptography::sha256::Digest;

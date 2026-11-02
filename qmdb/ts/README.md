@@ -63,9 +63,9 @@ const transactions = await verifier.verifyFixedKeylessAppendMany(
 
 Obtain roots and tips from authenticated application data, and bind the expected
 keys, locations, and values to the requested account or transactions. An unordered
-update proves historical membership; it does not prove that this is the latest
-update for its key. `account.value` contains the authenticated value to decode.
-The verifier has no Store freshness floor or transport options. The initializer
-is shared with network clients and may also take WASM bytes or a compiled module.
-Supply a custom module on the first initialization call; subsequent calls share
-that initialization, including any failure.
+update proves historical membership, not that it is the latest update for its key.
+`account.value` contains the authenticated value to decode. The verifier has no
+Store freshness floor or transport options. The initializer is shared with network
+clients and may also take WASM bytes or a compiled module. Supply a custom module
+on the first initialization call. Later calls share that initialization, including
+any failure.

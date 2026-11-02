@@ -1,39 +1,38 @@
-use std::collections::BTreeSet;
-use std::marker::PhantomData;
-use std::sync::Arc;
-
+use crate::{
+    adapter::{
+        codec::{
+            decode_current_boundary_metadata, encode_current_meta_key, encode_ops_root_witness_key,
+            CurrentBoundaryMetadata,
+        },
+        core,
+        current::{self, CurrentTip, ProofReads},
+        operation_range::{load_operation_range_checkpoint, load_operations_multi_proof},
+        read_cache::ReadCache,
+    },
+    error::{error_key, QmdbError},
+    proof::{
+        CurrentOperationRangeProofResult, MultiProofOperations, OperationRangeCheckpoint,
+        RawBatchMultiProof, RawKeyValueProof, VerifiedCurrentRange, VerifiedKeyValue,
+        VerifiedOperationRange,
+    },
+    request::OperationLocations,
+    OperationKv, PublishedWatermark, VersionedValue,
+};
 use commonware_codec::{Codec, Copying, Decode, DecodeExt, Encode};
 use commonware_cryptography::Hasher;
-use commonware_storage::merkle::{Graftable, Location};
-use commonware_storage::qmdb::{
-    any::{
-        unordered,
-        value::{ValueEncoding, VariableEncoding},
+use commonware_storage::{
+    merkle::{Graftable, Location},
+    qmdb::{
+        any::{
+            unordered,
+            value::{ValueEncoding, VariableEncoding},
+        },
+        current::proof::OpsRootWitness,
+        operation::{Key as QmdbKey, Operation as _},
     },
-    current::proof::OpsRootWitness,
-    operation::{Key as QmdbKey, Operation as _},
 };
 use exoware_sdk::{PrefixedStoreClient, ReadSession};
-
-use crate::adapter::codec::{
-    decode_current_boundary_metadata, encode_current_meta_key, encode_ops_root_witness_key,
-    CurrentBoundaryMetadata,
-};
-use crate::adapter::core;
-use crate::adapter::current::{self, CurrentTip, ProofReads};
-use crate::adapter::operation_range::{
-    load_operation_range_checkpoint, load_operations_multi_proof,
-};
-use crate::adapter::read_cache::ReadCache;
-use crate::error::{error_key, QmdbError};
-use crate::proof::{
-    CurrentOperationRangeProofResult, MultiProofOperations, OperationRangeCheckpoint,
-    RawBatchMultiProof, RawKeyValueProof, VerifiedCurrentRange, VerifiedKeyValue,
-    VerifiedOperationRange,
-};
-use crate::request::OperationLocations;
-use crate::VersionedValue;
-use crate::{OperationKv, PublishedWatermark};
+use std::{collections::BTreeSet, marker::PhantomData, sync::Arc};
 
 pub struct Unordered<
     F: Graftable,
@@ -280,18 +279,23 @@ where
         Ok(checkpoint)
     }
 
-    /// Prove 1–1024 strictly ascending operation locations at `tip`.
+    /// Prove between 1 and 1024 strictly ascending operation locations at `tip`.
     pub async fn operation_multi_proof(
         &self,
         tip: Location<F>,
         locations: &[Location<F>],
         min_sequence_number: Option<u64>,
     ) -> Result<RawBatchMultiProof<H::Digest, F>, QmdbError> {
+        // Reject a malformed request, or a tip beyond the Merkle family's
+        // location domain, before any store read.
         let requested = locations
             .iter()
             .map(|location| location.as_u64())
             .collect::<Vec<_>>();
         OperationLocations::with_max_leaves(tip.as_u64(), &requested, F::MAX_LEAVES.as_u64())?;
+
+        // `min_sequence_number` bounds the publication lookup, and the proof
+        // reads the store at the sequence number the publication was found at.
         let watermark = self.resolve_watermark(tip, min_sequence_number).await?;
         self.multi_proof_at(watermark, MultiProofOperations::Read(locations))
             .await

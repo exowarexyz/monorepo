@@ -1,6 +1,16 @@
 #[cfg(test)]
 mod tests;
 
+use crate::{
+    adapter::codec::{
+        decode_operation_location_key, decode_update_location, decode_watermark_location,
+        encode_node_key, encode_operation_key, encode_update_key, ensure_encoded_value_size,
+        merkle_size_for_watermark, op_count_for_watermark, WATERMARK_PREFIX,
+    },
+    decode_digest,
+    error::QmdbError,
+    PublishedWatermark, VersionedValue,
+};
 use commonware_codec::{Codec, Copying, Decode};
 use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::Strategy;
@@ -8,16 +18,7 @@ use commonware_storage::merkle::{
     hasher::Hasher as MerkleHasher, mem::Mem, Family, Location, Position,
 };
 use crossbeam_utils::atomic::AtomicCell;
-use exoware_sdk::keys::Key;
-use exoware_sdk::{RangeMode, ReadSession};
-
-use crate::adapter::codec::{
-    decode_operation_location_key, decode_update_location, decode_watermark_location,
-    encode_node_key, encode_operation_key, encode_update_key, ensure_encoded_value_size,
-    merkle_size_for_watermark, op_count_for_watermark, WATERMARK_PREFIX,
-};
-use crate::error::QmdbError;
-use crate::{decode_digest, PublishedWatermark, VersionedValue};
+use exoware_sdk::{keys::Key, RangeMode, ReadSession};
 
 pub(crate) async fn read_latest_watermark_with_sequence<F: Family>(
     session: &ReadSession,

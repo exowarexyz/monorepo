@@ -28,32 +28,41 @@ pub use keys::{Key, KeyMut, KeyValidationError, Prefix, PrefixError, Value, MAX_
 pub use proto::*;
 extern crate self as exoware_proto;
 
+use crate::proto::transport::{
+    BalancedHttp2Config as ProtoBalancedHttp2Config,
+    BalancedHttp2Transport as ProtoBalancedHttp2Transport,
+    ErasedClientTransport as ProtoErasedClientTransport,
+    ErasedResponseBody as ProtoErasedResponseBody,
+};
 use bytes::Bytes;
-use connectrpc::client::{ClientConfig, ServerStream as ConnectServerStream};
-use connectrpc::compression::ZstdProvider;
+use connectrpc::{
+    client::{ClientConfig, ServerStream as ConnectServerStream},
+    compression::ZstdProvider,
+};
 pub use connectrpc::{ConnectError, ErrorCode};
 use credential::{client_error_from_connect, ApiKey, Credential, UnusableEnvKey};
 use crossbeam_utils::atomic::AtomicCell;
-use exoware_proto::ingest::ServiceClient as IngestServiceClient;
-use exoware_proto::log::ingest::v1::PutRequest as ProtoPutRequest;
-use exoware_proto::prune::ServiceClient as PruneServiceClient;
-use exoware_proto::query as proto_query;
-use exoware_proto::query::ServiceClient as QueryServiceClient;
-use exoware_proto::store::prune::v1::PruneRequest as ProtoPruneRequest;
-use exoware_proto::store::query::v1::{
-    GetManyRequest as ProtoGetManyRequest, GetRequest as ProtoGetRequest,
-    RangeRequest as ProtoRangeRequest, ReduceRequest as ProtoWireReduceRequest,
-};
-use exoware_proto::RangeReduceRequest as DomainRangeReduceRequest;
 use exoware_proto::{
     connect_compression_registry as proto_connect_compression_registry,
     decode_connect_error as proto_decode_connect_error,
+    ingest::ServiceClient as IngestServiceClient,
+    log::ingest::v1::PutRequest as ProtoPutRequest,
+    prune::ServiceClient as PruneServiceClient,
+    query as proto_query,
+    query::ServiceClient as QueryServiceClient,
+    store::{
+        prune::v1::PruneRequest as ProtoPruneRequest,
+        query::v1::{
+            GetManyRequest as ProtoGetManyRequest, GetRequest as ProtoGetRequest,
+            RangeRequest as ProtoRangeRequest, ReduceRequest as ProtoWireReduceRequest,
+        },
+    },
     to_domain_reduce_response as proto_to_domain_reduce_response,
     to_proto_reduce_params as proto_to_proto_reduce_params,
     PreferZstdHttpClient as ProtoPreferZstdHttpClient,
+    RangeReduceRequest as DomainRangeReduceRequest,
 };
-use futures::future::BoxFuture;
-use futures::{stream::BoxStream, StreamExt};
+use futures::{future::BoxFuture, stream::BoxStream, StreamExt};
 use keys::is_valid_key_size;
 use kv_codec::{KvExpr, KvFieldRef, KvReducedValue};
 use limits::{
@@ -62,16 +71,7 @@ use limits::{
 };
 use rand::RngExt as _;
 use rustls_platform_verifier::ConfigVerifierExt;
-use std::collections::HashMap;
-use std::sync::Arc;
-use std::time::Duration;
-
-use crate::proto::transport::{
-    BalancedHttp2Config as ProtoBalancedHttp2Config,
-    BalancedHttp2Transport as ProtoBalancedHttp2Transport,
-    ErasedClientTransport as ProtoErasedClientTransport,
-    ErasedResponseBody as ProtoErasedResponseBody,
-};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
 const DEFAULT_RETRY_MAX_ATTEMPTS: usize = 3;
 const DEFAULT_RETRY_INITIAL_BACKOFF_MS: u64 = 100;
@@ -3171,8 +3171,10 @@ mod tests {
     use crate::kv_codec::{KvFieldKind, KvPredicate, KvPredicateCheck, KvPredicateConstraint};
     use buffa::Message as _;
     use buffa_types::google::protobuf::Duration as ProtoDuration;
-    use connectrpc::compression::{CompressionProvider, GzipProvider};
-    use connectrpc::error::ErrorDetail;
+    use connectrpc::{
+        compression::{CompressionProvider, GzipProvider},
+        error::ErrorDetail,
+    };
     use exoware_proto::query::TraversalMode as ProtoTraversalMode;
     use http::header::{ACCEPT_ENCODING, AUTHORIZATION, CONTENT_ENCODING};
     use http_body_util::BodyExt;

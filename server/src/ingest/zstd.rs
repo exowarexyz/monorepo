@@ -1,5 +1,7 @@
-use zstd::stream::raw::{InBuffer, OutBuffer, WriteBuf};
-use zstd::zstd_safe::{get_frame_content_size, DCtx};
+use zstd::{
+    stream::raw::{InBuffer, OutBuffer, WriteBuf},
+    zstd_safe::{get_frame_content_size, DCtx},
+};
 
 pub(super) const WINDOW_LOG_MAX: u32 = 27;
 
@@ -243,9 +245,8 @@ unsafe impl WriteBuf for CappedOutput<'_> {
 
 #[cfg(test)]
 mod arena_tests {
-    use std::io::Write;
-
     use super::*;
+    use std::io::Write;
 
     fn decode_with(
         decoder: &mut ArenaDecoder,

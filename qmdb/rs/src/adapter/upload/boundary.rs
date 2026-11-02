@@ -1,23 +1,27 @@
-use std::collections::{BTreeMap, BTreeSet};
-use std::future::Future;
-
+use crate::{
+    adapter::codec::{bitmap_chunk_bits, chunk_index_for_location},
+    error::QmdbError,
+    CurrentBoundaryState,
+};
 use commonware_codec::{Codec, Encode};
 use commonware_cryptography::Hasher;
-use commonware_storage::merkle::{
-    hasher::{Hasher as MerkleHasher, Standard as StandardHasher},
-    path, Family, Graftable, Location, Position,
-};
-use commonware_storage::qmdb::{
-    current::{
-        grafting,
-        proof::{verify_proof_and_extract_digests, OpsRootWitness, RangeProof},
+use commonware_storage::{
+    merkle::{
+        hasher::{Hasher as MerkleHasher, Standard as StandardHasher},
+        path, Family, Graftable, Location, Position,
     },
-    operation::Operation as QmdbOperation,
+    qmdb::{
+        current::{
+            grafting,
+            proof::{verify_proof_and_extract_digests, OpsRootWitness, RangeProof},
+        },
+        operation::Operation as QmdbOperation,
+    },
 };
-
-use crate::adapter::codec::{bitmap_chunk_bits, chunk_index_for_location};
-use crate::error::QmdbError;
-use crate::CurrentBoundaryState;
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    future::Future,
+};
 
 fn merge_authenticated_digest<F: Family, D: Copy + PartialEq>(
     authenticated_digests: &mut BTreeMap<Position<F>, D>,
@@ -580,9 +584,9 @@ fn containing_peak<F: Graftable>(
 #[cfg(test)]
 mod tests {
     use super::changed_chunk_representatives;
-    use commonware_storage::merkle::{mmr, Location};
-    use commonware_storage::qmdb::any::ordered::{
-        variable::Operation as TestOperation, Update as OrderedUpdate,
+    use commonware_storage::{
+        merkle::{mmr, Location},
+        qmdb::any::ordered::{variable::Operation as TestOperation, Update as OrderedUpdate},
     };
     use std::collections::BTreeMap;
 

@@ -1,11 +1,10 @@
-use std::time::Duration;
-
 use anyhow::{ensure, Context};
 use connectrpc::ErrorCode;
 use exoware_sdk::{
     ClientError, ConnectRequestCompression, PrefixedStoreClient, RetryConfig, StoreClient,
 };
 use serde::{Deserialize, Serialize};
+use std::time::Duration;
 
 const DEFAULT_INITIAL_BACKOFF_MS: u64 = 50;
 const DEFAULT_MAX_BACKOFF_MS: u64 = 1_000;

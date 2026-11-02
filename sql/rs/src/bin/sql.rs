@@ -1,10 +1,11 @@
-use std::net::{IpAddr, SocketAddr};
-use std::sync::Arc;
-
 use axum::{routing::get, Router};
 use clap::{Parser, Subcommand};
 use exoware_sdk::{StoreClient, StoreKeyPrefix};
 use exoware_sql::{default_orders_index_specs, sql_connect_stack, KvSchema, SqlServer};
+use std::{
+    net::{IpAddr, SocketAddr},
+    sync::Arc,
+};
 use tower_http::cors::CorsLayer;
 use tracing::info;
 
