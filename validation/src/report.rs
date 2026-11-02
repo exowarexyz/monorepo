@@ -1,14 +1,15 @@
-use std::fmt;
-use std::fs;
-use std::path::{Path, PathBuf};
-use std::time::Duration;
-
+use crate::{
+    client::RequestCompression,
+    workload::{Scenario, WorkloadSpec},
+};
 use anyhow::{ensure, Context};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-
-use crate::client::RequestCompression;
-use crate::workload::{Scenario, WorkloadSpec};
+use std::{
+    fmt, fs,
+    path::{Path, PathBuf},
+    time::Duration,
+};
 
 const BENCH_MANIFEST_SCHEMA_VERSION: u16 = 1;
 const BENCH_REPORT_SCHEMA_VERSION: u16 = 1;
@@ -470,7 +471,7 @@ mod tests {
 
         BenchReport {
             config: BenchConfig {
-                endpoint: "http://localhost:10000".to_string(),
+                endpoint: "http://localhost:8080".to_string(),
                 namespace: 42,
                 key_space: 1_000,
                 total_ops: 10_000,

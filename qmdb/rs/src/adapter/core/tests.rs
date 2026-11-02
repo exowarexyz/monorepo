@@ -1,19 +1,20 @@
 use super::*;
-use std::sync::{
-    atomic::{AtomicUsize, Ordering},
-    Arc,
+use crate::{
+    adapter::{Immutable, Keyless, Ordered, Unordered},
+    MAX_OPERATION_SIZE,
 };
-
 use commonware_cryptography::Sha256;
 use commonware_storage::merkle::mmr;
 use commonware_utils::sequence::FixedBytes;
 use connectrpc::client::{BoxFuture, ClientBody, ClientTransport};
-use exoware_sdk::proto::PreferZstdHttpClient;
-use exoware_sdk::{PrefixedStoreClient, RetryConfig, StoreClient, StoreWriteBatch};
+use exoware_sdk::{
+    proto::PreferZstdHttpClient, PrefixedStoreClient, RetryConfig, StoreClient, StoreWriteBatch,
+};
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc,
+};
 use tokio::sync::{mpsc, Semaphore};
-
-use crate::adapter::{Immutable, Keyless, Ordered, Unordered};
-use crate::MAX_OPERATION_SIZE;
 
 #[derive(Clone)]
 struct CountRequests {

@@ -1,5 +1,8 @@
-use std::{convert::Infallible, sync::Arc, time::Duration};
-
+use super::{
+    box_body, BudgetConfig, DecodeBuffers, DecodeExecutor, DecodeOutput, DecodeState, IngestBudget,
+    PutEncoding, PutError, PutInput, PutLimits, PutMetadata,
+};
+use crate::validate::IngestLimits;
 use buffa::{
     encoding::{Tag, WireType},
     MessageView as _,
@@ -9,13 +12,8 @@ use connectrpc::ConnectError;
 use exoware_sdk::log::ingest::v1::PutRequestView;
 use http_body::Frame;
 use http_body_util::StreamBody;
+use std::{convert::Infallible, sync::Arc, time::Duration};
 use tokio::time::Instant;
-
-use super::{
-    box_body, BudgetConfig, DecodeBuffers, DecodeExecutor, DecodeOutput, DecodeState, IngestBudget,
-    PutEncoding, PutError, PutInput, PutLimits, PutMetadata,
-};
-use crate::validate::IngestLimits;
 
 // Running the production decoder inline keeps the short corpus independent of thread scheduling.
 struct InlineExecutor;

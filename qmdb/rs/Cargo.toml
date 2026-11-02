@@ -46,6 +46,7 @@ exoware-qmdb = { path = ".", features = ["test-utils"] }
 axum = { workspace = true }
 bytes = { workspace = true }
 commonware-glue = { workspace = true }
+commonware-parallel = { workspace = true, features = ["test-utils"] }
 commonware-runtime = { workspace = true }
 criterion = { workspace = true }
 exoware-simulator = { path = "../../examples/simulator" }

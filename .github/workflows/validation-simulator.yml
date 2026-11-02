@@ -53,7 +53,7 @@ jobs:
           simulator_dir="$RUNNER_TEMP/exoware-simulator"
           simulator_log="$RUNNER_TEMP/simulator.log"
           mkdir -p "$simulator_dir"
-          "$SIMULATOR" server run --directory "$simulator_dir" --port 10000 >"$simulator_log" 2>&1 &
+          "$SIMULATOR" server run --directory "$simulator_dir" --port 8080 >"$simulator_log" 2>&1 &
           simulator_pid="$!"
           echo "pid=$simulator_pid" >> "$GITHUB_OUTPUT"
           echo "log=$simulator_log" >> "$GITHUB_OUTPUT"
@@ -63,18 +63,18 @@ jobs:
         run: |
           set -euo pipefail
           for _ in {1..60}; do
-            if curl --fail --silent --show-error http://127.0.0.1:10000/health >/dev/null; then
+            if curl --fail --silent --show-error http://127.0.0.1:8080/health >/dev/null; then
               exit 0
             fi
             sleep 1
           done
-          echo "simulator did not become healthy at http://127.0.0.1:10000/health" >&2
+          echo "simulator did not become healthy at http://127.0.0.1:8080/health" >&2
           exit 1
 
       - name: Run validation
         uses: ./.github/actions/run-validation
         with:
-          endpoint: http://127.0.0.1:10000
+          endpoint: http://127.0.0.1:8080
           validation-bin: ${{ steps.bins.outputs.validation }}
           # Uses the default `balanced` scenario, which now mixes reads, writes, and scans.
           # Stamp the PR head commit (not the ephemeral merge SHA) into the report, summary, and
