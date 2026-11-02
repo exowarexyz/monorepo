@@ -51,7 +51,9 @@ fn maximum_decoder_bytes() -> Result<usize, ConnectError> {
     let window = 1usize.checked_shl(WINDOW_LOG_MAX).ok_or_else(overflow)?;
 
     // Accepted frames can request the maximum window even with a tiny size pledge.
+    // SAFETY: `ZSTD_estimateDStreamSize` takes and returns plain integers and reads no memory.
     let estimate = unsafe { zstd::zstd_safe::zstd_sys::ZSTD_estimateDStreamSize(window) };
+    // SAFETY: `ZSTD_isError` only inspects the integer it is given.
     if unsafe { zstd::zstd_safe::zstd_sys::ZSTD_isError(estimate) } != 0 {
         return Err(ConnectError::internal(format!(
             "cannot estimate Put zstd workspace. {}",

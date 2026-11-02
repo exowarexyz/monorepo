@@ -16,23 +16,29 @@ static LARGEST_ALLOCATION: AtomicUsize = AtomicUsize::new(0);
 #[global_allocator]
 static ALLOCATOR: TrackingAllocator = TrackingAllocator;
 
+// SAFETY: Every method passes its arguments unchanged to `System`, which upholds the
+// `GlobalAlloc` contract. The bookkeeping only updates atomics and never allocates.
 unsafe impl GlobalAlloc for TrackingAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         LARGEST_ALLOCATION.fetch_max(layout.size(), Ordering::Relaxed);
+        // SAFETY: The caller's guarantees for `layout` pass straight through.
         unsafe { System.alloc(layout) }
     }
 
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
         LARGEST_ALLOCATION.fetch_max(layout.size(), Ordering::Relaxed);
+        // SAFETY: The caller's guarantees for `layout` pass straight through.
         unsafe { System.alloc_zeroed(layout) }
     }
 
     unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
+        // SAFETY: The caller's guarantees for `pointer` and `layout` pass straight through.
         unsafe { System.dealloc(pointer, layout) }
     }
 
     unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, size: usize) -> *mut u8 {
         LARGEST_ALLOCATION.fetch_max(size, Ordering::Relaxed);
+        // SAFETY: The caller's guarantees for `pointer`, `layout` and `size` pass straight through.
         unsafe { System.realloc(pointer, layout, size) }
     }
 }

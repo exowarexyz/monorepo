@@ -25,6 +25,7 @@ unused_must_use = "deny"
 
 [workspace.lints.clippy]
 redundant_clone = "warn"
+undocumented_unsafe_blocks = "deny"
 
 [workspace.dependencies]
 crossbeam-utils = "0.8.22"

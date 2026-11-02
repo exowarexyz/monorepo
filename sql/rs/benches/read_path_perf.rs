@@ -43,23 +43,29 @@ struct CountingAllocator;
 #[global_allocator]
 static GLOBAL_ALLOCATOR: CountingAllocator = CountingAllocator;
 
+// SAFETY: Every method passes its arguments unchanged to `System`, which upholds the
+// `GlobalAlloc` contract. The bookkeeping only updates atomics and never allocates.
 unsafe impl GlobalAlloc for CountingAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         ALLOC_CALLS.fetch_add(1, Ordering::Relaxed);
         ALLOC_BYTES.fetch_add(layout.size() as u64, Ordering::Relaxed);
+        // SAFETY: The caller's guarantees for `layout` pass straight through.
         unsafe { System.alloc(layout) }
     }
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
         ALLOC_CALLS.fetch_add(1, Ordering::Relaxed);
         ALLOC_BYTES.fetch_add(layout.size() as u64, Ordering::Relaxed);
+        // SAFETY: The caller's guarantees for `layout` pass straight through.
         unsafe { System.alloc_zeroed(layout) }
     }
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        // SAFETY: The caller's guarantees for `ptr` and `layout` pass straight through.
         unsafe { System.dealloc(ptr, layout) }
     }
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
         ALLOC_CALLS.fetch_add(1, Ordering::Relaxed);
         ALLOC_BYTES.fetch_add(new_size as u64, Ordering::Relaxed);
+        // SAFETY: The caller's guarantees for `ptr`, `layout` and `new_size` pass straight through.
         unsafe { System.realloc(ptr, layout, new_size) }
     }
 }

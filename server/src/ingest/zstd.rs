@@ -148,6 +148,7 @@ pub(super) fn frame_decoder_memory_bytes(header: &[u8]) -> Result<u64, connectrp
             header.len(),
         )
     };
+    // SAFETY: `ZSTD_isError` only inspects the integer it is given.
     if unsafe { zstd::zstd_safe::zstd_sys::ZSTD_isError(result) } != 0 {
         return Err(zstd_error(result));
     }
@@ -167,15 +168,18 @@ pub(super) fn frame_decoder_memory_bytes(header: &[u8]) -> Result<u64, connectrp
 
     // Match zstd's cold streaming allocation. The pledge caps output storage,
     // while the advertised window still determines the input block size.
+    // SAFETY: `ZSTD_decodingBufferSize_min` takes two integers by value and reads no memory.
     let output = unsafe {
         zstd::zstd_safe::zstd_sys::ZSTD_decodingBufferSize_min(
             frame.windowSize.max(1024),
             frame.frameContentSize,
         )
     };
+    // SAFETY: `ZSTD_isError` only inspects the integer it is given.
     if unsafe { zstd::zstd_safe::zstd_sys::ZSTD_isError(output) } != 0 {
         return Err(zstd_error(output));
     }
+    // SAFETY: `ZSTD_estimateDCtxSize` takes no arguments and only computes a size.
     let context = unsafe { zstd::zstd_safe::zstd_sys::ZSTD_estimateDCtxSize() };
     context
         .checked_add(frame.blockSizeMax.max(4) as usize)
@@ -357,6 +361,8 @@ mod arena_tests {
 
         for (wire, payload, fragment) in cases {
             let header = &wire[..wire.len().min(18)];
+            // SAFETY: The pointer and length come from `header`, a live slice, and zstd reads at most
+            // that many bytes from it.
             let native_estimate = unsafe {
                 zstd::zstd_safe::zstd_sys::ZSTD_estimateDStreamSize_fromFrame(
                     header.as_ptr().cast(),
@@ -364,6 +370,7 @@ mod arena_tests {
                 )
             };
             assert_eq!(
+                // SAFETY: `ZSTD_isError` only inspects the integer it is given.
                 unsafe { zstd::zstd_safe::zstd_sys::ZSTD_isError(native_estimate) },
                 0
             );
