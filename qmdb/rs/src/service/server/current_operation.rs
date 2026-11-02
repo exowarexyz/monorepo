@@ -1,19 +1,17 @@
 //! `qmdb.v1.CurrentOperationService`: current-state operation ranges.
 
-use std::future::Future;
-use std::sync::Arc;
-
+use super::{encode, qmdb_error_to_connect};
+use crate::{
+    proof::CurrentOperationRangeProofResult,
+    service::proto::qmdb::v1::{
+        CurrentOperationService, GetCurrentOperationRangeRequest, GetCurrentOperationRangeResponse,
+    },
+    QmdbError,
+};
 use commonware_codec::Encode;
 use commonware_storage::merkle::{Graftable, Location};
 use connectrpc::{PreEncoded, RequestContext as Context, ServiceRequest};
-
-use crate::proof::CurrentOperationRangeProofResult;
-use crate::service::proto::qmdb::v1::{
-    CurrentOperationService, GetCurrentOperationRangeRequest, GetCurrentOperationRangeResponse,
-};
-use crate::QmdbError;
-
-use super::{encode, qmdb_error_to_connect};
+use std::{future::Future, sync::Arc};
 
 /// Read capabilities needed by [`CurrentOperationServer`].
 pub(crate) trait CurrentOperationReader<const N: usize>: Send + Sync + 'static {

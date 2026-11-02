@@ -1,11 +1,13 @@
-use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
-
-use datafusion::arrow::datatypes::{i256, DataType, Field, Schema, SchemaRef, TimeUnit};
-use exoware_sdk::keys::{Key, Prefix};
-use exoware_sdk::PrefixedStoreClient;
-
 use crate::codec::{primary_key_prefix, secondary_index_prefix};
+use datafusion::arrow::datatypes::{i256, DataType, Field, Schema, SchemaRef, TimeUnit};
+use exoware_sdk::{
+    keys::{Key, Prefix},
+    PrefixedStoreClient,
+};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 /// Every table/index family is named by a single packed byte
 /// `(table_prefix << 4) | discriminator`: the high nibble is the table prefix

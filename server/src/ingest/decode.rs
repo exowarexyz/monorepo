@@ -1,15 +1,14 @@
-use std::sync::Arc;
-
+use super::{
+    parser::{
+        decode_entry_with_budget, field_size, Field, PutEntryCursor, PutParseError, UnknownBudget,
+    },
+    zstd::{frame_decoder_memory_bytes, validate_window_header, ArenaDecoder},
+    ByteLease, DecodeBuffers, EntryRanges, PutChunk, PutEncoding, PutError, PutLimits,
+    RequestLease,
+};
 use bytes::Bytes;
 use connectrpc::ConnectError;
-
-use super::parser::{
-    decode_entry_with_budget, field_size, Field, PutEntryCursor, PutParseError, UnknownBudget,
-};
-use super::zstd::{frame_decoder_memory_bytes, validate_window_header, ArenaDecoder};
-use super::{
-    ByteLease, DecodeBuffers, EntryRanges, PutChunk, PutEncoding, PutError, PutLimits, RequestLease,
-};
+use std::sync::Arc;
 
 const OUTPUT_QUANTUM: usize = 64 * 1024;
 
@@ -686,13 +685,11 @@ impl DecodeState {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
-
-    use http_body_util::Full;
-    use tokio::time::Instant;
-
     use super::*;
     use crate::ingest::{box_body, BudgetConfig, IngestBudget, PutInput, PutMetadata};
+    use http_body_util::Full;
+    use std::time::Duration;
+    use tokio::time::Instant;
 
     fn field(tag: u8, bytes: &[u8]) -> Vec<u8> {
         let mut output = vec![tag];

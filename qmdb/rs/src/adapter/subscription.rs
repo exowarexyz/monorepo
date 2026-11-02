@@ -1,15 +1,16 @@
-use std::sync::Arc;
-
-use commonware_storage::merkle::{Family, Location};
-use exoware_sdk::keys::Key;
-use exoware_sdk::selector::Selector;
-use exoware_sdk::stream_filter::StreamFilter;
-use exoware_sdk::{PrefixedStoreClient, StreamSubscription};
-
-use crate::adapter::codec::{
-    decode_operation_location_key, decode_watermark_location, OPERATION_PREFIX, WATERMARK_PREFIX,
+use crate::{
+    adapter::codec::{
+        decode_operation_location_key, decode_watermark_location, OPERATION_PREFIX,
+        WATERMARK_PREFIX,
+    },
+    QmdbError,
 };
-use crate::QmdbError;
+use commonware_storage::merkle::{Family, Location};
+use exoware_sdk::{
+    keys::Key, selector::Selector, stream_filter::StreamFilter, PrefixedStoreClient,
+    StreamSubscription,
+};
+use std::sync::Arc;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum RowFamily {
@@ -50,8 +51,10 @@ pub(crate) async fn open_store_subscription(
 
 /// Select operation and publication rows from a QMDB historical log.
 pub(crate) fn classify_and_filter<F: Family>() -> (RowClassifier<F>, StreamFilter) {
-    use exoware_sdk::keys::{Key as StoreKey, Prefix};
-    use exoware_sdk::kv_codec::Utf8;
+    use exoware_sdk::{
+        keys::{Key as StoreKey, Prefix},
+        kv_codec::Utf8,
+    };
 
     struct RowRule<F: Family> {
         prefix: Prefix,
@@ -103,12 +106,10 @@ pub(crate) fn classify_and_filter<F: Family>() -> (RowClassifier<F>, StreamFilte
 
 #[cfg(test)]
 mod tests {
-    use commonware_storage::merkle::{mmr, Location};
-    use exoware_sdk::keys::Key;
-    use exoware_sdk::selector::compile_payload_regex;
-
     use super::{classify_and_filter, RowFamily};
     use crate::adapter::codec::{encode_operation_key, encode_watermark_key};
+    use commonware_storage::merkle::{mmr, Location};
+    use exoware_sdk::{keys::Key, selector::compile_payload_regex};
 
     const LOCATIONS: [u64; 4] = [0, 1, 0x0102_0304_0506_0708, u64::MAX];
 
