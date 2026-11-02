@@ -12,19 +12,17 @@ try the [browser sandbox](../sandbox/README.md), or run the
 From the repository root:
 
 ```sh
-cargo run -p exoware-simulator -- server run --port 10000
+cargo run -p exoware-simulator -- server run --port 8080
 ```
 
 The server listens on all interfaces and stores data in
 `$HOME/.exoware_store_simulator`. Pass `--directory /path/to/data` to use a different
-RocksDB directory. Data persists between runs. The default port is 8080. The
-command above selects 10000 to match the SDK and validation examples.
+RocksDB directory. Data persists between runs.
 `GET /health` returns `ok` when the server is running.
 
 Connect with the [Rust SDK](../../sdk/rs/README.md) or
 [TypeScript SDK](../../sdk/ts/README.md). The simulator accepts requests without
-credentials and enables permissive CORS for local browser development. Its
-performance does not represent a deployed Exoware service.
+credentials and enables permissive CORS for local browser development.
 
 See the [server guide](../../server/README.md) for implementing a backend and
 [`RocksStore`](src/rocks.rs) for this implementation.

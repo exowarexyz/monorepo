@@ -24,7 +24,7 @@ use tokio::net::TcpListener;
 
 async fn serve<E: StoreEngine>(engine: Arc<E>) -> std::io::Result<()> {
     let service = connect_stack(AppState::new(engine));
-    let listener = TcpListener::bind("127.0.0.1:10000").await?;
+    let listener = TcpListener::bind("127.0.0.1:8080").await?;
     transport::serve(listener, service, std::future::pending()).await
 }
 ```

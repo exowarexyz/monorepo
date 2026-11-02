@@ -13,13 +13,13 @@ npm install @exowarexyz/sdk
 ```
 
 For local development, start the
-[simulator](../../examples/simulator/README.md) on port 10000. This example writes
+[simulator](../../examples/simulator/README.md) on port 8080. This example writes
 a value and reads it at or after the returned sequence:
 
 ```ts
 import { Client, StoreKeyPrefix } from '@exowarexyz/sdk';
 
-const client = new Client('http://localhost:10000');
+const client = new Client('http://localhost:8080');
 const encode = (text: string) => new TextEncoder().encode(text);
 const store = client.store(new StoreKeyPrefix(encode('example/')));
 const key = encode('greeting');

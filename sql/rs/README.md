@@ -17,11 +17,10 @@ cargo add exoware-sql exoware-sdk datafusion@55
 cargo add tokio --features macros,rt-multi-thread
 ```
 
-For local development, start the [simulator](../../examples/simulator/README.md) on
-the port the examples expect:
+For local development, start the [simulator](../../examples/simulator/README.md):
 
 ```sh
-cargo run -p exoware-simulator -- server run --port 10000
+cargo run -p exoware-simulator -- server run --port 8080
 ```
 
 Describe a table, write two rows, and query them:
@@ -33,7 +32,7 @@ use exoware_sql::{CellValue, IndexSpec, KvSchema, SqlContext, TableColumnConfig}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let client = StoreClient::new("http://localhost:10000").prefixed(StoreKeyPrefix::identity());
+    let client = StoreClient::new("http://localhost:8080").prefixed(StoreKeyPrefix::identity());
     let schema = KvSchema::new(client.clone()).table(
         "orders",
         vec![
@@ -311,13 +310,13 @@ The `sql` binary serves a demo `orders_kv` table on port 8082 and can seed it wi
 rows. The [sandbox](../../examples/sandbox/README.md#sql-panel) uses it:
 
 ```sh
-cargo run -p exoware-sql --bin sql -- run --store-url http://127.0.0.1:10000
-cargo run -p exoware-sql --bin sql -- seed --store-url http://127.0.0.1:10000
+cargo run -p exoware-sql --bin sql -- run --store-url http://127.0.0.1:8080
+cargo run -p exoware-sql --bin sql -- seed --store-url http://127.0.0.1:8080
 ```
 
 ## Examples
 
-The examples connect to `EXOWARE_URL` (default `http://localhost:10000`):
+The examples connect to `EXOWARE_URL` (default `http://localhost:8080`):
 
 ```bash
 cargo run -p exoware-sql --example orders_kv      # single-table inserts and queries

@@ -234,31 +234,6 @@ from a trusted operation-log root and retention range. For a current database,
 `current_sync_target` derives the operation-log root from a witness checked
 against the trusted current root.
 
-## Development
-
-From the repository root, run the Rust integration tests and the browser suite.
-The latter requires installed package dependencies, a built TypeScript SDK,
-Rust's `wasm32-unknown-unknown` target, `wasm-pack`, and `wasm-bindgen-cli`.
-Use compatible tool versions from the
-[TypeScript CI workflow](../../.github/workflows/typescript.yml):
-
-```sh
-cargo test -p exoware-qmdb --tests
-npm --prefix qmdb/ts test
-```
-
-The [variant tests](tests/e2e_variants.rs) exercise Commonware source databases,
-uploads, readers, and ConnectRPC clients across Merkle families and operation
-encodings. Their fixtures are also verified by the browser WASM tests. The
-[TypeScript guide](../ts/README.md) describes which codecs its typed APIs support.
-
-After intentional fixture changes, regenerate all browser fixtures with one
-command, then rerun the browser suite:
-
-```sh
-UPDATE_FIXTURES=1 cargo test -p exoware-qmdb --tests
-```
-
 ## Status
 
 `exoware-qmdb` is **ALPHA** software and is not yet recommended for production

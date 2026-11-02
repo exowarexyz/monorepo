@@ -3734,11 +3734,11 @@ mod tests {
 
     #[test]
     fn client_creation() {
-        let client = StoreClient::new("http://localhost:10000");
-        assert_eq!(client.health_url, "http://localhost:10000");
-        assert_eq!(client.ingest_uri.to_string(), "http://localhost:10000/");
-        assert_eq!(client.query_uri.to_string(), "http://localhost:10000/");
-        assert_eq!(client.stream_uri.to_string(), "http://localhost:10000/");
+        let client = StoreClient::new("http://localhost:8080");
+        assert_eq!(client.health_url, "http://localhost:8080");
+        assert_eq!(client.ingest_uri.to_string(), "http://localhost:8080/");
+        assert_eq!(client.query_uri.to_string(), "http://localhost:8080/");
+        assert_eq!(client.stream_uri.to_string(), "http://localhost:8080/");
     }
 
     #[test]
@@ -4715,13 +4715,13 @@ mod tests {
 
     #[test]
     fn client_trims_trailing_slash() {
-        let client = StoreClient::new("http://localhost:10000/");
-        assert_eq!(client.health_url, "http://localhost:10000");
+        let client = StoreClient::new("http://localhost:8080/");
+        assert_eq!(client.health_url, "http://localhost:8080");
     }
 
     #[test]
     fn create_session_starts_unseeded() {
-        let client = PrefixedStoreClient::empty(StoreClient::new("http://localhost:10000/"));
+        let client = PrefixedStoreClient::empty(StoreClient::new("http://localhost:8080/"));
         let session = client.create_session();
         assert_eq!(session.min_sequence_number(), None);
         assert_eq!(session.evaluated_sequence(), None);
@@ -4729,7 +4729,7 @@ mod tests {
 
     #[test]
     fn deriving_zero_strengthens_absence_without_lowering_or_mutating_the_parent() {
-        let client = PrefixedStoreClient::empty(StoreClient::new("http://localhost:10000/"));
+        let client = PrefixedStoreClient::empty(StoreClient::new("http://localhost:8080/"));
         for parent in [
             ReadSession::monotonic(client.clone(), None),
             ReadSession::fixed(client.clone(), None),
@@ -4880,7 +4880,7 @@ mod tests {
 
     #[test]
     fn create_session_with_sequence_preserves_the_full_u64_floor_domain() {
-        let client = PrefixedStoreClient::empty(StoreClient::new("http://localhost:10000/"));
+        let client = PrefixedStoreClient::empty(StoreClient::new("http://localhost:8080/"));
         for sequence in [0, 27, u64::MAX] {
             let session = client.create_session_with_sequence(sequence);
             assert_eq!(session.min_sequence_number(), Some(sequence));
@@ -5073,7 +5073,7 @@ mod tests {
         // payloads let the server apply the caller's real regex to the
         // post-prefix payload, so it must pass through unchanged.
         let client = StoreClient::builder()
-            .url("http://localhost:10000")
+            .url("http://localhost:8080")
             .build()
             .unwrap()
             .prefixed(StoreKeyPrefix::new(vec![0x05]).unwrap());
@@ -5095,7 +5095,7 @@ mod tests {
     #[test]
     fn prefixed_reduce_request_shifts_nested_cast_fields() {
         let client = StoreClient::builder()
-            .url("http://localhost:10000")
+            .url("http://localhost:8080")
             .build()
             .unwrap()
             .prefixed(StoreKeyPrefix::new(vec![1, 2, 3]).unwrap());
@@ -5138,7 +5138,7 @@ mod tests {
     #[test]
     fn prefixed_reduce_request_shifts_key_field_offsets() {
         let client = StoreClient::builder()
-            .url("http://localhost:10000")
+            .url("http://localhost:8080")
             .build()
             .unwrap()
             .prefixed(StoreKeyPrefix::new(vec![0x01, 0x02, 0x03]).unwrap());
@@ -5247,7 +5247,7 @@ mod tests {
 
     #[test]
     fn store_write_batch_uses_each_clients_prefix() {
-        let base = StoreClient::new("http://localhost:10000");
+        let base = StoreClient::new("http://localhost:8080");
         let a = base.prefixed(StoreKeyPrefix::new(vec![1]).unwrap());
         let b = base.prefixed(StoreKeyPrefix::new(vec![2]).unwrap());
         let key_a = Bytes::from_static(b"a");
@@ -5287,7 +5287,7 @@ mod tests {
     #[test]
     fn batch_encoded_len_matches_protobuf_at_varint_boundaries() {
         for prefix in [vec![], vec![1, 2, 3]] {
-            let client = StoreClient::new("http://localhost:10000")
+            let client = StoreClient::new("http://localhost:8080")
                 .prefixed(StoreKeyPrefix::new(prefix).unwrap());
             for key_len in [0, 1, 123, 124, 127, 128, 251] {
                 let key = Key::from(vec![7; key_len]);
@@ -5305,7 +5305,7 @@ mod tests {
 
     #[test]
     fn batch_encoded_len_survives_mutations() {
-        let client = StoreClient::new("http://localhost:10000")
+        let client = StoreClient::new("http://localhost:8080")
             .prefixed(StoreKeyPrefix::new(vec![1]).unwrap());
         let mut batch = StoreWriteBatch::default();
         assert_eq!(batch.encoded_len(), 0);
@@ -5329,7 +5329,7 @@ mod tests {
 
     #[test]
     fn batch_split_preserves_bounds_order_prefixes_and_shared_storage() {
-        let base = StoreClient::new("http://localhost:10000");
+        let base = StoreClient::new("http://localhost:8080");
         let clients = [
             base.prefixed(StoreKeyPrefix::new(vec![1]).unwrap()),
             base.prefixed(StoreKeyPrefix::new(vec![2]).unwrap()),
@@ -5387,7 +5387,7 @@ mod tests {
             SplitError::ZeroRows
         );
 
-        let client = PrefixedStoreClient::empty(StoreClient::new("http://localhost:10000"));
+        let client = PrefixedStoreClient::empty(StoreClient::new("http://localhost:8080"));
         let mut batch = StoreWriteBatch::new();
         batch.push(&client, &Key::new(), b"").unwrap();
         batch
@@ -5491,7 +5491,7 @@ mod tests {
     #[test]
     fn client_response_decode_budgets_match_shared_limits() {
         let config = store_connect_client_config(
-            "http://localhost:10000".parse().unwrap(),
+            "http://localhost:8080".parse().unwrap(),
             ConnectRequestCompression::None,
             None,
         );
@@ -5507,7 +5507,7 @@ mod tests {
 
     #[test]
     fn pushed_rows_round_trip_only_through_their_own_client() {
-        let base = StoreClient::new("http://localhost:10000");
+        let base = StoreClient::new("http://localhost:8080");
         let a = base.prefixed(StoreKeyPrefix::new(vec![1]).unwrap());
         let b = base.prefixed(StoreKeyPrefix::new(vec![2]).unwrap());
         let key = Bytes::from_static(b"shared-logical-key");
@@ -5532,7 +5532,7 @@ mod tests {
 
     #[test]
     fn identity_prefix_stages_keys_verbatim() {
-        let base = StoreClient::new("http://localhost:10000");
+        let base = StoreClient::new("http://localhost:8080");
         let plain = PrefixedStoreClient::empty(base);
         let key = Bytes::from_static(b"raw-key");
 
@@ -5544,7 +5544,7 @@ mod tests {
 
     #[test]
     fn push_rejects_keys_exceeding_prefixed_capacity() {
-        let base = StoreClient::new("http://localhost:10000");
+        let base = StoreClient::new("http://localhost:8080");
         let a = base.prefixed(StoreKeyPrefix::new(vec![1]).unwrap());
         let max = a.key_prefix().max_logical_key_len();
 

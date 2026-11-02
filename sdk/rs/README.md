@@ -16,7 +16,7 @@ cargo add tokio --features macros,rt-multi-thread
 ```
 
 For local development, start the
-[simulator](../../examples/simulator/README.md) on port 10000. This example writes
+[simulator](../../examples/simulator/README.md) on port 8080. This example writes
 a batch and reads it at or after the returned sequence:
 
 ```rust
@@ -26,7 +26,7 @@ use exoware_sdk::{StoreClient, StoreKeyPrefix};
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let client = StoreClient::builder()
-        .url("http://localhost:10000")
+        .url("http://localhost:8080")
         .build()?;
     let store = client.prefixed(StoreKeyPrefix::new(Bytes::from_static(b"example/"))?);
     let key = Bytes::from_static(b"greeting");

@@ -1,7 +1,7 @@
 //! Exoware benchmark workload runner.
 //!
 //! Usage:
-//!   validation bench --url http://localhost:10000 --keys 10000 --ops 50000 --batch-size 100 --scenario balanced
+//!   validation bench --url http://localhost:8080 --keys 10000 --ops 50000 --batch-size 100 --scenario balanced
 //!
 //! Progress: `bench` emits `Benchmark progress` every `--progress-interval-secs` (default 10; 0 disables).
 
@@ -792,7 +792,7 @@ mod tests {
     fn sample_manifest() -> BenchManifest {
         BenchManifest::new(
             BenchConfig {
-                endpoint: "http://localhost:10000/".to_string(),
+                endpoint: "http://localhost:8080/".to_string(),
                 key_space: 1_000,
                 namespace: 42,
                 total_ops: 10_000,
@@ -827,7 +827,7 @@ mod tests {
     fn sample_args() -> Args {
         Args {
             client: ClientArgs {
-                url: "http://localhost:10000/".to_string(),
+                url: "http://localhost:8080/".to_string(),
                 read_retry_attempts: 3,
                 request_compression: RequestCompression::default(),
             },
@@ -859,7 +859,7 @@ mod tests {
     #[test]
     fn config_normalizes_url() {
         let config = Config::try_from(sample_args()).expect("bench args should be valid");
-        assert_eq!(config.client.endpoint(), "http://localhost:10000");
+        assert_eq!(config.client.endpoint(), "http://localhost:8080");
     }
 
     #[test]
@@ -1177,7 +1177,7 @@ mod tests {
         let config = Config::try_from_manifest(sample_manifest(), output.clone(), 0)
             .expect("manifest should parse");
 
-        assert_eq!(config.client.endpoint(), "http://localhost:10000");
+        assert_eq!(config.client.endpoint(), "http://localhost:8080");
         assert_eq!(config.namespace, 42);
         assert_eq!(config.initial_keys, 1_000);
         assert_eq!(config.total_ops, 10_000);

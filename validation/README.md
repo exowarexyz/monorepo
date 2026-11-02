@@ -12,18 +12,18 @@ store. Run commands from the repository root against a development deployment.
 For a local store, start the [simulator](../examples/simulator) in one terminal:
 
 ```bash
-cargo run -p exoware-simulator --bin simulator -- server run --port 10000
+cargo run -p exoware-simulator --bin simulator -- server run --port 8080
 ```
 
 In another terminal, write a small fixture and check its visibility, point reads,
 missing keys, and sampled forward and reverse ranges:
 
 ```bash
-cargo run -p exoware-validation -- validate --url http://localhost:10000 \
+cargo run -p exoware-validation -- validate --url http://localhost:8080 \
   --keys 100 --lookup-samples 25 --missing-samples 10 --range-samples 10
 ```
 
-All commands default to `http://localhost:10000`. Use `--url` to select another
+All commands default to `http://localhost:8080`. Use `--url` to select another
 deployment. Requests use zstd compression by default. Pass
 `--request-compression none` to disable it.
 

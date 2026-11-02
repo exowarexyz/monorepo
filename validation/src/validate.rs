@@ -12,7 +12,7 @@
 //!
 //! Example:
 //!   cargo run --release -p exoware-validation -- validate \
-//!     --url http://localhost:10000 \
+//!     --url http://localhost:8080 \
 //!     --keys 100
 
 use crate::{
@@ -2391,7 +2391,7 @@ mod tests {
     fn sample_config(value_size: usize) -> Config {
         Config {
             mode: ValidateMode::Standard,
-            client: ClientConfig::new("http://localhost:10000", 3).unwrap(),
+            client: ClientConfig::new("http://localhost:8080", 3).unwrap(),
             keys: 100,
             batch_size: 25,
             lookup_samples: 25,

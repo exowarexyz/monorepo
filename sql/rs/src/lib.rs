@@ -3081,7 +3081,7 @@ mod tests {
 
     #[test]
     fn kv_schema_auto_assigns_sequential_prefixes() {
-        let client = StoreClient::new("http://localhost:10000");
+        let client = StoreClient::new("http://localhost:8080");
         let schema = KvSchema::new(PrefixedStoreClient::empty(client))
             .table(
                 "alpha",
@@ -3113,7 +3113,7 @@ mod tests {
 
     #[test]
     fn kv_schema_allows_max_codec_table_count_and_rejects_overflow() {
-        let client = StoreClient::new("http://localhost:10000");
+        let client = StoreClient::new("http://localhost:8080");
         let mut schema = KvSchema::new(PrefixedStoreClient::empty(client));
         for idx in 0..MAX_TABLES {
             schema = schema
@@ -3212,7 +3212,7 @@ mod tests {
 
     #[tokio::test]
     async fn kv_schema_register_all_enables_join() {
-        let client = PrefixedStoreClient::empty(StoreClient::new("http://localhost:10000"));
+        let client = PrefixedStoreClient::empty(StoreClient::new("http://localhost:8080"));
         let ctx = SqlContext::new(client.clone());
 
         let result = KvSchema::new(client)
@@ -3261,7 +3261,7 @@ mod tests {
 
     #[tokio::test]
     async fn kv_schema_three_way_join() {
-        let client = StoreClient::new("http://localhost:10000");
+        let client = StoreClient::new("http://localhost:8080");
         let ctx = SqlContext::new(PrefixedStoreClient::empty(client.clone()));
 
         let schema = KvSchema::new(PrefixedStoreClient::empty(client))
@@ -3316,7 +3316,7 @@ mod tests {
 
     #[test]
     fn kv_schema_orders_table_convenience() {
-        let client = StoreClient::new("http://localhost:10000");
+        let client = StoreClient::new("http://localhost:8080");
         let schema = KvSchema::new(PrefixedStoreClient::empty(client))
             .orders_table(
                 "my_orders",
@@ -3714,7 +3714,7 @@ mod tests {
 
     #[test]
     fn batch_writer_encodes_rows_across_tables() {
-        let client = StoreClient::new("http://localhost:10000");
+        let client = StoreClient::new("http://localhost:8080");
         let schema = KvSchema::new(PrefixedStoreClient::empty(client))
             .table(
                 "customers",
@@ -3772,7 +3772,7 @@ mod tests {
 
     #[test]
     fn batch_writer_rejects_unknown_table() {
-        let client = StoreClient::new("http://localhost:10000");
+        let client = StoreClient::new("http://localhost:8080");
         let schema = KvSchema::new(PrefixedStoreClient::empty(client))
             .table(
                 "t1",
@@ -3790,7 +3790,7 @@ mod tests {
 
     #[test]
     fn batch_writer_rejects_wrong_column_count() {
-        let client = StoreClient::new("http://localhost:10000");
+        let client = StoreClient::new("http://localhost:8080");
         let schema = KvSchema::new(PrefixedStoreClient::empty(client))
             .table(
                 "t1",
@@ -3811,7 +3811,7 @@ mod tests {
 
     #[test]
     fn batch_writer_rejects_non_pk_type_mismatch() {
-        let client = StoreClient::new("http://localhost:10000");
+        let client = StoreClient::new("http://localhost:8080");
         let schema = KvSchema::new(PrefixedStoreClient::empty(client))
             .table(
                 "t1",
@@ -3838,7 +3838,7 @@ mod tests {
 
     #[test]
     fn batch_writer_entries_use_distinct_table_prefixes() {
-        let client = StoreClient::new("http://localhost:10000");
+        let client = StoreClient::new("http://localhost:8080");
         let schema = KvSchema::new(PrefixedStoreClient::empty(client))
             .table(
                 "a",
@@ -3872,7 +3872,7 @@ mod tests {
 
     #[tokio::test]
     async fn batch_writer_trait_failure_requeues_prepared_before_new_pending() {
-        let client = StoreClient::new("http://localhost:10000");
+        let client = StoreClient::new("http://localhost:8080");
         let schema = KvSchema::new(PrefixedStoreClient::empty(client))
             .table(
                 "t",
@@ -3902,7 +3902,7 @@ mod tests {
 
     #[test]
     fn batch_writer_supports_nullable_columns() {
-        let client = StoreClient::new("http://localhost:10000");
+        let client = StoreClient::new("http://localhost:8080");
         let schema = KvSchema::new(PrefixedStoreClient::empty(client))
             .table(
                 "t",
@@ -3924,7 +3924,7 @@ mod tests {
 
     #[test]
     fn non_nullable_column_rejects_null_in_batch_writer() {
-        let client = StoreClient::new("http://localhost:10000");
+        let client = StoreClient::new("http://localhost:8080");
         let schema = KvSchema::new(PrefixedStoreClient::empty(client))
             .table(
                 "t",
@@ -4507,7 +4507,7 @@ mod tests {
 
     #[test]
     fn table_versioned_convenience() {
-        let client = StoreClient::new("http://localhost:10000");
+        let client = StoreClient::new("http://localhost:8080");
         let schema = KvSchema::new(PrefixedStoreClient::empty(client))
             .table_versioned(
                 "documents",
