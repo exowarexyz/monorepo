@@ -10,7 +10,7 @@ use buffa::MessageView;
 use commonware_codec::{
     Copying, Decode, DecodeExt, DecodeRangeExt, Encode, FixedSize, RangeCfg, Read,
 };
-use commonware_cryptography::{Blake3, Crc32, Digest, Sha256};
+use commonware_cryptography::{Blake3, Digest, Sha256};
 use commonware_storage::{
     merkle::{self, Location},
     mmb, mmr,
@@ -94,7 +94,7 @@ fn normalize_family<'a>(family: &'a str, label: &str) -> Result<&'a str, String>
 
 fn normalize_hash_family<'a>(family: &'a str, label: &str) -> Result<&'a str, String> {
     match family {
-        "sha256" | "blake3" | "crc32c" => Ok(family),
+        "sha256" | "blake3" => Ok(family),
         "" => Err(format!("{label} missing hash family")),
         other => Err(format!("{label} uses unsupported hash family {other}")),
     }
@@ -130,10 +130,6 @@ macro_rules! with_hash_family {
             }
             "blake3" => {
                 type H = Blake3;
-                $body
-            }
-            "crc32c" => {
-                type H = Crc32;
                 $body
             }
             _ => unreachable!("normalize_hash_family only returns supported values"),
@@ -1831,6 +1827,16 @@ mod tests {
     use commonware_utils::bitmap::Prunable;
 
     type OrderedVariableOperation<F> = OrderedOperation<F, Vec<u8>, Vec<u8>>;
+
+    #[test]
+    fn test_hash_family_validation() {
+        assert_eq!(normalize_hash_family("sha256", "proof"), Ok("sha256"));
+        assert_eq!(normalize_hash_family("blake3", "proof"), Ok("blake3"));
+        assert_eq!(
+            normalize_hash_family("crc32c", "proof"),
+            Err("proof uses unsupported hash family crc32c".into())
+        );
+    }
 
     #[test]
     fn test_vec_key_wire_bytes_use_commonware_codec_frame() {

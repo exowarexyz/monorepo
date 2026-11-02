@@ -13,8 +13,10 @@ npm install @exowarexyz/sdk
 ```
 
 For local development, start the
-[simulator](../../examples/simulator/README.md) on port 8080. This example writes
-a value and reads it at or after the returned sequence:
+[simulator](../../examples/simulator/README.md) on port 8080. Each Store write
+returns a sequence number identifying its position in the Store's write order.
+This example writes a value, then uses that sequence to read data at least as
+recent as the write:
 
 ```ts
 import { Client, StoreKeyPrefix } from '@exowarexyz/sdk';
@@ -30,18 +32,18 @@ const result = await reader.get(key);
 console.log(result === null ? null : new TextDecoder().decode(result.value));
 ```
 
-Sequences use `bigint`. Keys and values use `Uint8Array`. In Node, the client reads
-`EXOWARE_API_KEY` unless you pass a token. Browser clients must receive a token
-explicitly when the deployment requires one:
+The SDK represents sequences as `bigint` and keys and values as `Uint8Array`.
+To connect to a deployment that requires authentication, use a credential with
+the scopes your operations need. In Node, the client reads `EXOWARE_API_KEY`
+unless you pass a token. Browser clients must receive the token explicitly:
 
 ```ts
 const client = new Client('https://query.example.com', { token: 'your-token' });
 ```
 
-Use a credential issued for the deployment with the scopes your operations need.
-`Client` uses one base URL for all services. Its service properties, such as
-`query` and `ingest`, expose the generated RPC clients. `store()` provides the
-higher-level key-value interface.
+`Client` uses one base URL for all services. Use `store()` for the
+higher-level key-value interface shown above, or access the generated RPC
+clients through service properties such as `query` and `ingest`.
 
 ## Namespaces and atomic writes
 
@@ -66,13 +68,14 @@ const batch = new StoreWriteBatch()
 const batchSequence = await batch.commit(base);
 ```
 
-`set`, `setMany`, and batch commits each send one atomic Put. They validate sizes
-before sending and throw `RangeError` for invalid batches. Set
-`ClientOptions.putLimits` to configure entry, value, and encoded message limits for
-your deployment.
-`encodedLen()` reports a batch's uncompressed protobuf size, including prefixes.
+`set`, `setMany`, and batch commits each send one atomic Put. They validate
+sizes before sending and throw `RangeError` for invalid batches. Configure
+entry, value, and encoded message limits for your deployment with
+`ClientOptions.putLimits`.
 
-For batches that need splitting, replace the single commit with:
+To plan a larger upload, use `encodedLen()` to find the batch's uncompressed
+protobuf size, including prefixes. If it needs splitting, replace the single
+commit with:
 
 ```ts
 for (const chunk of batch.split(base.putOptions)) {
@@ -80,38 +83,43 @@ for (const chunk of batch.split(base.putOptions)) {
 }
 ```
 
-Each chunk is a separate write. Handle partial completion and coordinate
-publication yourself. Concurrent commits can be sequenced out of order. See the
-[Put contract](../../proto/README.md) for limits, errors, and splitting constraints.
+Each chunk is a separate write, so your application must handle partial
+completion and coordinate publication. Concurrent commits can be sequenced out
+of order. The [Put contract](../../proto/README.md) defines the limits,
+errors, and splitting constraints for these writes.
 
 ## Read consistency
 
-A write's sequence is a minimum read position. Query replicas may lag, so pass
-that sequence to `createSessionWithSequence` when a read depends on the write.
-The resulting monotonic session raises its floor as it observes newer query
-responses or log batches. `createSession()` starts without a floor.
+Query replicas may lag behind writes. A [`ReadSession`](src/store.ts)
+sets a minimum sequence, or floor, that each query must satisfy. Pass a write's
+sequence to `createSessionWithSequence` when a read depends on that write.
+The session is monotonic: as it observes newer query responses or log batches,
+it raises the floor for subsequent requests. `createSession()` starts
+without a floor.
 
-`ReadSession.fixed(store, sequence)` keeps the configured floor unchanged. Neither
-policy pins a historical snapshot: reads may observe a later sequence. Clones
-share observations, and each request uses the floor known when it starts.
-`withMinSequenceNumber(sequence)` derives a stronger reader without changing the
-parent's configured floor. See [`ReadSession`](src/store.ts) for observation
-tracking and log reads.
+`ReadSession.fixed(store, sequence)` keeps the configured floor fixed as
+responses arrive. A replica may already be ahead of the floor, so either
+policy can return a later sequence. Neither pins a historical snapshot.
+
+Clones share observations, and each query uses the floor known when it starts.
+To require a higher minimum for one reader, use
+`withMinSequenceNumber(sequence)`. The derived reader shares observations
+with its parent but leaves the parent's configured floor unchanged.
 
 ## Request options
 
-The SDK sends uncompressed Connect requests. Put always uses binary protobuf.
-`ClientOptions.useBinaryFormat` controls the other services. Custom ingest clients
-created with `createTransport` must pass `{ useBinaryFormat: true }`. See the
-[Put compatibility contract](../../proto/README.md#put-client-compatibility).
+The SDK sends uncompressed Connect requests. The server accepts Put only in
+binary protobuf format, so the SDK always uses that format for Put while
+`ClientOptions.useBinaryFormat` controls the other services. Custom ingest
+clients created with `createTransport` must pass `{ useBinaryFormat: true }`
+to satisfy the [Put compatibility contract](../../proto/README.md#put-client-compatibility).
 
-`ClientOptions.retry` controls retries. Put retries are limited to server
-rejections that confirm the batch was never admitted. Generic errors, timeouts,
-and lost responses are not automatically retried. Set `maxAttempts` to `1` to
-disable retries. Direct `client.ingest.put(request, options)` calls accept a
-`timeoutMs` or abort `signal` covering attempts and backoff. See the
-[admission retry contract](../../proto/README.md#admission-retries) before adding
-application retries.
+`ClientOptions.retry` controls retries, and setting `maxAttempts` to `1`
+disables them. Under the [admission retry contract](../../proto/README.md#admission-retries),
+Put retries are limited to server rejections that confirm the batch was never
+admitted. Generic errors, timeouts, and lost responses are not automatically
+retried. Direct `client.ingest.put(request, options)` calls accept a `timeoutMs`
+or abort `signal` covering attempts and backoff.
 
 The [client options](src/client.ts) and [Store API](src/store.ts) describe the
 available calls. Generated protobuf types live in `src/gen/ts`. Regenerate them

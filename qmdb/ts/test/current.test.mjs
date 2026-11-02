@@ -7,7 +7,7 @@ import { GetRangeRequestSchema, GetRangeResponseSchema } from '../dist/generated
 import { GetCurrentOperationRangeRequestSchema, GetCurrentOperationRangeResponseSchema } from '../dist/generated/proto/qmdb/v1/current_operation_pb.js';
 import { SubscribeRequestSchema, SubscribeResponseSchema } from '../dist/generated/proto/qmdb/v1/operation_log_pb.js';
 import { CurrentKeyValueProofSchema, CurrentOperationRangeProofSchema, OperationMultiProofSchema } from '../dist/generated/proto/qmdb/v1/proof_pb.js';
-import { OrderedQmdbClient } from '../dist/client.js';
+import { QmdbOrderedClient } from '../dist/client.js';
 import {
   decode_operation_multi_proof_operations, encode_vec_key, initSync, verify_current_key_value_proof,
   verify_get_many_response, verify_get_range_response,
@@ -194,7 +194,7 @@ for (const family of ['mmr', 'mmb']) {
       assert.ok(request.timeoutMs > 0);
     }
 
-    const client = new OrderedQmdbClient('http://qmdb.test', {
+    const client = new QmdbOrderedClient('http://qmdb.test', {
       merkleFamily: family,
       currentChunkSize: get.chunkSize,
     });
@@ -267,7 +267,7 @@ test('test_current_clients_reject_invalid_read_floors_before_dispatch', async (t
     requests += 1;
     throw new Error('unexpected request');
   });
-  const client = new OrderedQmdbClient('http://qmdb.test');
+  const client = new QmdbOrderedClient('http://qmdb.test');
   for (const minimum of [-1n, 1n << 64n, 1]) {
     await assert.rejects(client.get('', 1n, '', minimum), /64-bit/);
     await assert.rejects(client.getMany([''], 1n, '', minimum), /64-bit/);

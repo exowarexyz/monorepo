@@ -9,7 +9,8 @@ can verify against a trusted root.
 - [TypeScript](./ts/README.md): ConnectRPC clients and WASM proof verification,
   including a standalone verifier for application transports.
 
-Operation proofs authenticate entries in the log. Current-state proofs also
-authenticate activity at a chosen database boundary. Both packages support
-Merkle Mountain Range (MMR) and Merkle Mountain Belt (MMB) trees. Applications
-supply the trusted roots and matching database configuration.
+Both packages support Merkle Mountain Range (MMR) and Merkle Mountain Belt (MMB)
+trees. Operation proofs authenticate entries in the log, while current-state
+proofs also authenticate which operations remain active at a chosen batch
+boundary. To verify either kind, applications supply trusted roots and matching
+database configuration.

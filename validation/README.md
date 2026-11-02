@@ -3,13 +3,15 @@
 [![Crates.io](https://img.shields.io/crates/v/exoware-validation.svg)](https://crates.io/crates/exoware-validation)
 [![Docs.rs](https://docs.rs/exoware-validation/badge.svg)](https://docs.rs/exoware-validation)
 
-Validate an Exoware deployment.
+Check an Exoware deployment for correctness and measure it with reproducible
+workloads.
 
 ## Run a correctness check
 
-This workspace CLI writes deterministic records and exercises an Exoware-compatible
-store. Run commands from the repository root against a development deployment.
-For a local store, start the [simulator](../examples/simulator) in one terminal:
+The CLI writes deterministic records and checks that an Exoware-compatible
+Store returns them correctly. Run it from the repository root against a
+development deployment. To check a local Store, start the
+[simulator](../examples/simulator) in one terminal:
 
 ```bash
 cargo run -p exoware-simulator --bin simulator -- server run --port 8080
@@ -41,12 +43,13 @@ cargo run --release -p exoware-validation -- bench --namespace 42 \
   --ops 50000 --scenario balanced --output bench-report.json
 ```
 
-Choose a fresh namespace for each independent fixture. By default, commands
-choose separate run-specific namespaces, so an unconfigured `bench` will not
-read the keys from an earlier `load`. To share a fixture, pass the same
-`--namespace`, `--keys`, and `--key-len` to both commands. Match `--value-size`
-so benchmark writes have the same size as loaded values. The key length and
-value size defaults match between commands.
+The shared `--namespace 42` lets these commands use the same fixture. Commands
+choose separate run-specific namespaces by default, so an unconfigured `bench`
+will not read keys from an earlier `load`. When sharing a fixture, match
+`--namespace`, `--keys`, and `--key-len` across both commands. Match
+`--value-size` as well so benchmark writes have the same size as loaded
+values. Key length and value size have matching defaults. Choose a fresh
+namespace for each independent fixture.
 
 `--ops` counts benchmark operations, and `--batch-size` controls the number of
 key/value pairs in each write. Use `bench --help` to select a workload scenario, key
@@ -66,19 +69,21 @@ The commands use different success criteria:
   reads with absent values increment `read_misses`. Both can occur with a zero
   exit status. Inspect them before accepting a result.
 
-Benchmark reports contain the normalized configuration, seed, operation counters,
-and separate read/write/scan latency histograms. Latencies include failed calls
-and use fixed microsecond buckets. The text summary reports p50, p95, p99, and
-maximum latency. See the [report types](src/report.rs) for the JSON fields.
+[Benchmark reports](src/report.rs) contain the normalized configuration,
+seed, operation counters, and separate read/write/scan latency histograms.
+Latencies include failed calls and use fixed microsecond buckets. The text
+summary reports p50, p95, p99, and maximum latency.
 
-Load and benchmark keys spread across the physical key range. Benchmark scans
-start at a sampled key and stay within its leading-byte range, returning at most
-`--scan-length` rows. They can return fewer rows at the end of that range, or
-include rows from other namespaces. `scan_rows` counts all returned physical rows.
-Compare scan latency and row counts against the same controlled fixture.
-Standard validation uses a separate, contiguous key layout to bound its checks.
+Interpret scan results in the context of the fixture. Load and benchmark keys
+spread across the physical key range, and benchmark scans start at a sampled
+key and stay within its leading-byte range. A scan returns at most
+`--scan-length` rows, but may return fewer at the end of the range or include
+rows from other namespaces. Because `scan_rows` counts all returned physical
+rows, compare scan latency and row counts against the same controlled fixture.
+Standard validation uses a separate, contiguous key layout to bound its
+checks.
 
-## Replay and extended validation
+## Replay a benchmark
 
 A saved benchmark report can supply the configuration and seed for another run:
 
@@ -92,22 +97,25 @@ Workload flags cannot override a manifest. The CLI rejects incompatible key,
 value, or workload-generator versions. Keep generated reports with the binary
 revision used to produce them.
 
-With the same manifest and acknowledged write outcomes, each worker repeats its
-logical operations and appended-key allocation independently of task scheduling.
-Replay does not restore the store. Start from the same store snapshot and
-control other traffic when comparing results. Server state, write visibility,
-hardware, and load affect observed latency and outcomes. Simulator reports are
-useful for checking functionality, not for comparing deployment performance.
+With the same manifest and acknowledged write outcomes, each worker repeats
+its logical operations and appended-key allocation independently of task
+scheduling. Replay operates on the Store's existing state, so start from the
+same snapshot and control other traffic when comparing results. Server state,
+write visibility, hardware, and load affect observed latency and outcomes.
 
-For larger correctness fixtures, `validate --full-range-verify` replaces sampled
-checks with a paginated verification of every inserted record. The
-`overlap-ledger-write` and `overlap-ledger-verify` modes split writing and checking
-across processes for restart or outage tests. Select them with `validate --mode`
-and supply `--ledger-path`. The writer records acknowledged writes and continues
-appending until interrupted, retrying transient append failures. Stop it before
-verification to include its final checkpoint. The verifier checks visibility,
-forward and reverse ranges, and a reduction count against the ledger. See the
-[validation implementation](src/validate.rs) for those checks and timing rules.
+## Extended validation
+
+For larger correctness fixtures, `validate --full-range-verify` replaces
+sampled checks with a paginated verification of every inserted record.
+
+For restart or outage tests, use `overlap-ledger-write` and
+`overlap-ledger-verify` to split writing and checking across processes. Select
+each mode with `validate --mode` and supply `--ledger-path`. The writer also
+requires `--namespace` to select its records. It records acknowledged writes
+and continues appending until interrupted, retrying transient append failures.
+Stop the writer to save its final checkpoint, then run the verifier. The
+[ledger verification](src/validate.rs) checks visibility, forward and reverse
+ranges, and a reduction count against the recorded writes.
 
 List all flags and defaults with:
 

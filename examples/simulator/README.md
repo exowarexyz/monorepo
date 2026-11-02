@@ -15,17 +15,16 @@ From the repository root:
 cargo run -p exoware-simulator -- server run --port 8080
 ```
 
-The server listens on all interfaces and stores data in
-`$HOME/.exoware_store_simulator`. Pass `--directory /path/to/data` to use a different
-RocksDB directory. Data persists between runs.
-`GET /health` returns `ok` when the server is running.
+The server listens on all interfaces, and `GET /health` returns `ok` while it
+is running. It stores data in `$HOME/.exoware_store_simulator` and preserves
+it between runs. Pass `--directory /path/to/data` to use a different RocksDB
+directory.
 
-Connect with the [Rust SDK](../../sdk/rs/README.md) or
-[TypeScript SDK](../../sdk/ts/README.md). The simulator accepts requests without
-credentials and enables permissive CORS for local browser development.
-
-See the [server guide](../../server/README.md) for implementing a backend and
-[`RocksStore`](src/rocks.rs) for this implementation.
+Connect with the [Rust SDK](../../sdk/rs/README.md) or [TypeScript
+SDK](../../sdk/ts/README.md). The simulator accepts requests without
+credentials and enables permissive CORS for local browser development. To
+build your own backend, start with the [server guide](../../server/README.md)
+and use [`RocksStore`](src/rocks.rs) as an implementation reference.
 
 ## Status
 

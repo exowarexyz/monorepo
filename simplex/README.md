@@ -9,6 +9,6 @@ view, and finalizations also by block height.
 - [TypeScript](./ts/README.md): byte-oriented uploads, reads and subscriptions,
   with a browser WASM verifier for Commonware certificates.
 
-Applications supply the trusted Simplex configuration and define how a certified
-payload authenticates their header and body formats. Each package documents
-which checks it performs and which checks belong to the application.
+To authenticate retrieved artifacts, applications supply trusted Simplex
+configuration and define how a certified payload authenticates their header and
+body formats.

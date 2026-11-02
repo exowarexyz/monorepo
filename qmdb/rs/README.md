@@ -4,13 +4,19 @@ Upload Commonware QMDB data to an Exoware Store, serve proof queries, and verify
 responses against trusted roots. The crate supports ordered, unordered,
 immutable, and keyless databases with MMR or MMB Merkle trees.
 
+The application captures operations from its Commonware database and uses
+`adapter::upload` to prepare Store rows. After writing those rows, the application
+publishes a watermark identifying the durable prefix it is ready to serve.
+`adapter` readers query that data directly, while `service::server` exposes it
+through ConnectRPC and `service::client` verifies the responses.
+
 ## Read and verify
 
-Use an `adapter` reader to query uploaded data directly through a Store client.
-Use a `service::client` to query a QMDB ConnectRPC endpoint and verify its
-responses against roots supplied by your application.
-
-This example reads a keyless operation log with variable-length byte values:
+Queries identify a database state by its tip, the inclusive final operation
+location, and its root, a hash commitment to that state. The following example
+reads an already published keyless operation log through ConnectRPC. It uses
+variable-length byte values and verifies the response against an
+application-supplied root:
 
 ```rust
 use commonware_cryptography::{sha256::Digest, Sha256};
@@ -49,38 +55,41 @@ async fn read_prefix(
 }
 ```
 
-The endpoint must serve that database and codec. The example allows values up to
-4,096 bytes and returns up to the first 100 operations at `tip`. Use `new` with a
-configured transport for HTTPS or authentication. Obtain the root and its tip
-from authenticated application state before making the request.
+The endpoint must serve that database and codec, and the root and tip must come
+from authenticated application state. The example allows values up to 4,096
+bytes and returns up to the first 100 operations at `tip`. For HTTPS or
+authentication, use `new` with a configured transport.
 
 ### Proofs and roots
 
-`OperationRangeProof` authenticates consecutive log entries.
-`OperationMultiProof` authenticates entries at selected locations. These proofs
-establish log membership. An included update need not still be active.
-`Current*` proofs also authenticate the activity bitmap. Current key proofs
-establish active values, and ordered key proofs can establish absence.
-"Current" refers to state at the requested batch boundary, which may be older
-than the latest published boundary.
+`OperationRangeProof` authenticates consecutive log entries, and
+`OperationMultiProof` authenticates entries at selected locations. Both establish
+log membership, so an included update need not still be active.
+
+For queries about active state, `Current*` proofs also authenticate the activity
+bitmap at a batch boundary, the final commit location of an applied batch.
+Current key proofs establish active values, and ordered key proofs can establish
+absence. "Current" refers to that requested boundary, which may be older than
+the latest published boundary.
 
 For a database with current state, pass its trusted current root. The proof's
 operation-root witness binds the operation log to that root. For an
-operation-log-only database, pass its trusted operation-log root. A root received
-with an untrusted response is not a trust anchor. Native adapter readers check
-proofs against stored roots. Service clients check against caller-supplied roots.
+operation-log-only database, pass its trusted operation-log root. Native adapter
+readers check proofs against stored roots, while service clients check against
+caller-supplied roots. A root received with an untrusted response is not a trust
+anchor.
 
 Range verification binds the tip and the exact interval
 `[start, min(start + max_locations, tip + 1))`. Multi-proof verification binds the
-tip and the requested locations. `GetOperations` requires a nonempty, strictly
+tip and the requested locations. The `GetOperations` RPC requires a nonempty, strictly
 ascending list of at most 1,024 locations. The native
 `Unordered::operation_multi_proof` and `Keyless::operation_multi_proof` helpers
-support larger valid sets. The request cap belongs to the RPC API.
+accept larger valid sets.
 
 ## Choose a reader and service
 
-All four `adapter` readers expose operation roots and range proofs. Their
-additional queries depend on the source database:
+Choose the `adapter` reader that matches your source database. All four expose
+operation roots and range proofs, with additional queries for each kind:
 
 | Reader | Additional queries |
 | --- | --- |
@@ -89,15 +98,16 @@ additional queries depend on the source database:
 | `Immutable` | `get_at` by key |
 | `Keyless` | `get_at` by operation location |
 
-Current queries require uploaded current-boundary material. Unordered `get_many`
-omits missing or inactive keys because unordered QMDB has no exclusion proofs.
-Ordered keys must have the same `K::Ord` ordering as their raw bytes.
+Current queries require uploaded current-boundary material. For unordered QMDB,
+`get_many` omits missing or inactive keys because it has no exclusion proofs.
+For ordered QMDB, keys must have the same `K::Ord` ordering as their raw bytes.
 
-Readers take a `PrefixedStoreClient` and the source's codec configuration. Fixed
-and variable encodings are supported. The default is `VariableEncoding<V>`.
+Readers take a `PrefixedStoreClient` and the source's codec configuration. They
+support fixed and variable encodings, with `VariableEncoding<V>` as the default.
 Source index partitioning and full or compact storage do not change the upload
-format. Keep each namespace to one operation history, Merkle family, hasher, and
-codec. Use distinct SDK prefixes or Stores for separate instances.
+format. Keep each namespace to a single operation history, Merkle family,
+hasher, and codec by using distinct SDK prefixes or Stores for separate
+instances.
 
 [`service::server`](src/service/server/mod.rs) provides an
 `*_operation_log_stack` for each kind, exposing operation queries and
@@ -112,18 +122,19 @@ share query names and `Verified*` results where they support the same operation.
 Immutable and keyless logical `get_at` reads are native helpers. Their ConnectRPC
 services expose the operation log.
 
-`latest_published_watermark` reports the greatest published location observed by
-a native reader. `root_at` returns the canonical root at a tip. Ordered and
-unordered readers also expose the underlying log root through `ops_root_at`.
-An optional `min_sequence_number` on proof requests sets the minimum Store
-sequence for the publication lookup. The proof reads inherit that observed
-sequence floor.
+To inspect publication state, use `latest_published_watermark` for the greatest
+published location observed by a native reader and `root_at` for the canonical
+root at a tip. Ordered and unordered readers also expose the underlying log root
+through `ops_root_at`. On proof requests, an optional `min_sequence_number` sets
+the minimum Store sequence for the publication lookup. Proof reads use the
+sequence observed by that lookup as their minimum.
 
 ## Upload and publish
 
 The [`adapter::upload`](src/adapter/upload/mod.rs) functions prepare Store rows
-from captured Commonware operations and proof material. They are stateless: the
-application owns capture, durable queuing, retries, and publication.
+from captured Commonware operations and proof material. The application owns
+capture, durable queuing, retries, and publication around these stateless
+functions.
 
 An `AuthenticatedOperationRange` contains every canonical encoded operation in
 `[start_location, end_location)`, the prefix pins in `Family::nodes_to_pin` order,
@@ -132,12 +143,12 @@ must end at a commit. It may contain earlier commits, overlap earlier uploads,
 or begin at zero, where no pins are needed. Preserve the source's exact operation
 order, including ordered QMDB's predecessor repairs and successor links.
 
-`prepare_authenticated_range` checks the operations and pins against an
-independently trusted operation-log root, then prepares operation, index, and
-Merkle rows. Its codec configuration must match the source. For an
-operation-log-only database with a complete prefix that fits in one atomic Store
-Put, data and publication can be staged together. Here `F`, `H`, and `Op` are the
-source's family, hasher, and operation type:
+Pass this range to `prepare_authenticated_range` with the source's codec
+configuration and an independently trusted operation-log root. It checks the
+operations and pins against that root, then prepares operation, index, and
+Merkle rows. For an operation-log-only database with a complete prefix that fits
+in one atomic Store Put, data and publication can be staged together. Here `F`,
+`H`, and `Op` are the source's family, hasher, and operation type:
 
 ```rust,ignore
 use commonware_parallel::Sequential;
@@ -166,11 +177,12 @@ and any current-boundary rows inherited from earlier batches. If `[0, 100)` and
 `[100, 200)` is durable, publication can advance to 299 without publishing each
 intermediate commit.
 
-Persist operations, proof material, trusted roots, and any current-boundary
-material before allowing the source to discard them. Workers can prepare and
-upload ranges independently and out of order. Repeated rows from the same
-history have identical keys and values, so the same packet can be retried.
-Coordinate publication after all required writes succeed. See the
+Workers can prepare and upload ranges independently and out of order, provided
+the application coordinates publication after all required writes succeed.
+Repeated rows from the same history have identical keys and values, so the same
+packet can be retried. To make retries and recovery possible, persist operations,
+proof material, trusted roots, and any current-boundary material before allowing
+the source to discard them. See the
 [SDK batching guide](../../sdk/rs/README.md#namespaces-and-atomic-writes) for Put
 limits and splitting.
 
@@ -184,10 +196,10 @@ let prepared = prepared.with_current_boundary::<H, N>(&boundary)?;
 ```
 
 The boundary's root, operation-root witness, bitmap chunks, grafted nodes, and
-`pruned_chunks` count must describe the range's final location. The family,
-hasher, and chunk size `N` must match the source. `with_current_boundary` checks
-the witness's binding to the prepared operation-log root. It does not authenticate
-the supplied chunks, nodes, or pruning count.
+`pruned_chunks` count must describe the range's final location, using the source's
+family, hasher, and chunk size `N`. `with_current_boundary` checks the witness's
+binding to the prepared operation-log root, but it does not authenticate the
+supplied chunks, nodes, or pruning count.
 
 Use [`recover_boundary_state`](src/adapter/upload/boundary.rs) to derive and
 authenticate chunks and nodes from current range proofs. For an incremental
@@ -205,6 +217,9 @@ retention separately.
 
 ### Pin omission
 
+Successive or overlapping uploads can share prefix pins, the Merkle digests
+needed to authenticate the log before a range starts. When another upload
+supplies those pins, you can avoid writing them again.
 `stage_authenticated_range` includes all supplied prefix pins by default.
 `prepared.without_pins_at(&positions)` omits supplied pins at exactly those
 `BTreeSet<Position<F>>` positions. Preparation still authenticates every pin,
@@ -212,25 +227,27 @@ and reconstructed nodes and all other prepared rows are always staged.
 
 Omit a pin only when the same authenticated digest in the same namespace and
 history will be durable before publication and retained for serving proofs.
-It may already be durable or depend on a pending predecessor upload. The
-application must preserve that dependency through failures, retries, and
-restarts. The library does not inspect Store or infer durability from range
-bounds. Keep all pins for a nonzero bootstrap or restart when their availability
-is not guaranteed.
+The pin may already be durable or depend on a pending predecessor upload. In
+the latter case, the application must preserve that dependency through failures,
+retries, and restarts. The library does not inspect Store or infer durability
+from range bounds, so keep all pins for a nonzero bootstrap or restart when
+their availability is not guaranteed.
 
 ## Subscriptions and synchronization
 
-Rust subscriptions require `message_with_root` to obtain an independently trusted
-root for each frame's tip. Filters match exact bytes, prefixes, or regexes over
-logical keys and values. Reconnect from `resume_sequence_number + 1`.
+Read subscription frames with `message_with_root`, supplying a callback that
+returns an independently trusted root for each frame's tip. Filters select
+logical keys and values by exact bytes, prefixes, or regexes. To reconnect,
+resume from `resume_sequence_number + 1`.
 
 Delivery follows Store write frames and waits for publication to cover each
 frame's operations. A frame can contain only part of an uploaded range.
 Overlapping locations within a frame are deduplicated, but retries in later
 frames can repeat operations. Consumers must tolerate at-least-once delivery.
 
-`OperationLogClient` implements Commonware's sync `Source`. Build its sync target
-from a trusted operation-log root and retention range. For a current database,
+To synchronize a local Commonware database from the uploaded log, use
+`OperationLogClient` as a sync `Source`. Build its sync target from a trusted
+operation-log root and retention range. For a current database,
 `current_sync_target` derives the operation-log root from a witness checked
 against the trusted current root.
 

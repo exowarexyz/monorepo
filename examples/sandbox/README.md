@@ -1,13 +1,16 @@
 # exoware-sandbox
 
-Explore the Exoware API.
+Explore the Exoware API in a browser. The Log and Store panels connect to a
+local Store simulator. Optional panels let you inspect QMDB proofs, verify
+Simplex certificates, and run SQL queries. Simplex also reads directly from
+the simulator, while QMDB and SQL use their own servers backed by that Store.
 
 ## Prerequisites
 
 - Node.js and npm
 - Rust and Cargo
 
-## How to Run
+## Run locally
 
 1. **Start the simulator**
 
@@ -17,7 +20,10 @@ Explore the Exoware API.
    cargo run --package exoware-simulator -- --verbose server run --port 8080
    ```
 
-   Point the web app at this URL via `VITE_SIMULATOR_URL` (see below). The simulator does not require a bearer token. The optional `VITE_TOKEN` is only used if your SDK client is configured with one.
+   Set `VITE_SIMULATOR_URL=http://localhost:8080` in
+   `examples/sandbox/.env.local` to point the web app at the simulator. The
+   simulator accepts requests without a bearer token. For a deployment that
+   requires one, set `VITE_TOKEN` to pass it to the SDK client.
 
 2. **Install dependencies and run the web app**
 
@@ -27,10 +33,9 @@ Explore the Exoware API.
    npm run dev
    ```
 
-   The app and local package build steps use dev dependencies (`vite`,
-   `typescript`, and `wasm-pack`-driven build tooling). `--include=dev` keeps
-   this working even if your shell or npm config omits dev dependencies by
-   default.
+   The app and local packages use development dependencies for Vite, TypeScript,
+   and WASM builds. `--include=dev` installs them even when your shell or npm
+   configuration omits development dependencies by default.
 
 3. **Open the web UI**
 
@@ -50,24 +55,25 @@ Explore the Exoware API.
 
 ## Store namespace
 
-The sandbox currently runs raw Store KV, Ordered QMDB, Simplex, and SQL against
-the same unpartitioned simulator Store. QMDB, Simplex, and SQL each use their
-own internal key families, but the demo binaries do not assign distinct SDK
-`StoreKeyPrefix` values, and raw KV can write arbitrary Store keys. This means
-the sandbox is useful for exercising the individual panels, but it should not be
-treated as an example of isolated multi-instance Store partitioning.
+The panels share one unpartitioned simulator Store. QMDB, Simplex, and SQL
+each use their own internal key families, but the demo binaries do not assign
+distinct SDK `StoreKeyPrefix` values. Raw KV can write arbitrary Store keys,
+including keys used by those demos. To isolate instances, assign non-overlapping
+prefixes as described in the [SDK guide](../../sdk/ts/README.md#namespaces-and-atomic-writes).
 
 ## Ordered QMDB panel
 
-The QMDB panel is only rendered when `VITE_QMDB_URL` is set, since it requires
-a separate ConnectRPC server (not the simulator) running alongside the
-simulator. The demo uses ordered QMDB over MMB. It verifies every `Get` /
-`GetMany` proof against a **user-supplied
-expected root**. Without the root the UI cannot anchor trust, because the
-server could return an internally-consistent but fabricated proof. Paste both the tip
-(location) and the matching root (hex) into the UI per query.
+The QMDB panel connects to a separate ConnectRPC server running alongside the
+simulator. Set `VITE_QMDB_URL` to display it. The demo uses ordered QMDB over
+MMB to prove operation-log ranges and current-state lookups.
 
-In addition to the simulator running above:
+For the Get actions, supply a tip (location) and its matching expected root in
+hex. The verifier rejects a proof whose recomputed root does not match, so the
+root must come from a source you trust independently of the query server. A
+server can produce an internally consistent proof for fabricated data. The
+local seeder below prints the tip and root pairs for this demo.
+
+With the simulator running:
 
 1. **Start the QMDB server** on port 8081
 
@@ -76,22 +82,22 @@ In addition to the simulator running above:
      run --store-url http://127.0.0.1:8080
    ```
 
-2. **Stream fresh batches** (keeps running and prints a `tip=N root=0x..` line
-   every few seconds). Local ordered-QMDB MMB state
-   persists under `$HOME/.exoware_qmdb_mmb_seed` so ctrl-c / restart resumes where
-   the previous run left off. Delete the directory to reset, or override the
-   location with `--directory`.
+2. **Stream fresh batches.** Start the seeder in another terminal:
 
    ```bash
    cargo run --package exoware-qmdb --bin qmdb -- \
      seed --store-url http://127.0.0.1:8080 --interval-secs 2
    ```
 
-   Each line looks like:
+   The seeder keeps running and prints a tip and root every few seconds:
 
    ```
    tip=14 root=0xb777..1064
    ```
+
+   Its local ordered-QMDB MMB state persists under
+   `$HOME/.exoware_qmdb_mmb_seed`, so it resumes after a restart. Delete that
+   directory to reset the demo, or use `--directory` to choose another location.
 
 3. **Point the web app at the QMDB server**:
 
@@ -99,41 +105,43 @@ In addition to the simulator running above:
    VITE_QMDB_URL=http://127.0.0.1:8081 npm run dev
    ```
 
-4. **In the UI**, paste a `tip` + matching root pair from the `seed` stream,
-   then pick a key (e.g. `k-00000000`):
-   - **Get Proof** verifies against the pasted current root and reports proof size.
-   - **Get Many** verifies current hit/miss lookup proofs against the same root and reports proof size.
-   - **Get Range** verifies an ordered current range plus its start boundary
-     proof against the same root and reports proof size.
-   - **Get Operation Range** verifies a contiguous operation-log range
-     against the same trusted root and reports proof size.
-   - **Subscribe** verifies each emitted operation-log proof from the trusted
-     current root for that emitted tip and reports proof size. Paste seed
-     output lines into Trusted Roots when replaying or following multiple tips.
+4. **Try a proof in the UI.** Paste a tip and matching root from the `seed`
+   output, then choose an operation range or a key such as `k-00000000`:
 
-The client-side verifier rejects any proof whose recomputed root doesn't
-match the pasted anchor.
+   - **Get Operation Range** verifies a contiguous operation-log range against
+     the supplied root.
+   - **Subscribe** displays each streamed operation-log proof with its tip and
+     decoded operations. These streamed proofs are not verified against a
+     trusted root.
+   - **Get Proof** verifies a current key/value proof against the supplied root.
+   - **Get Many** verifies current hit/miss lookup proofs against that root.
+   - **Get Range** verifies an ordered current range and its start boundary
+     proof against that root.
+
+   Each action also displays the proof size.
 
 ## Simplex panel
 
-The Simplex panel is only rendered when `VITE_SIMPLEX_URL` is set. It reads
-Commonware Simplex artifacts written by the `simplex seed` process using the
-same key layout as the Rust `exoware-simplex` crate. The panel configures the
-Simplex WASM verifier from caller-supplied scheme, namespace, key material, and
-artifact bytes.
+Set `VITE_SIMPLEX_URL` to display the Simplex panel. It reads Commonware
+Simplex artifacts written by `simplex seed`, using the same key layout as the
+Rust `exoware-simplex` crate. Supply the scheme, namespace, and key material
+printed by the seeder below to configure the Simplex WASM verifier for those
+artifacts.
 
-With the simulator running above:
+With the simulator running:
 
-1. **Seed finalized Simplex blocks** (keeps running, and every `--interval-secs` it
-   uploads a dummy block plus notarization/finalization records that include
-   only the certified header). The first lines print the threshold verifier
-   material to paste into the Simplex panel. The default start height is
-   time-based so restarts still advance the latest finalized height index.
+1. **Seed finalized Simplex blocks.** Start the seeder in another terminal:
 
    ```bash
    cargo run --package exoware-simplex --bin simplex -- \
      seed --store-url http://127.0.0.1:8080 --interval-secs 2
    ```
+
+   The seeder first prints the threshold verifier material to paste into the
+   panel. At each `--interval-secs`, it uploads a dummy block and separate
+   notarization/finalization records carrying the certified header. Its default
+   start height is based on the current time so restarts can advance the latest
+   finalized height index.
 
 2. **Point the web app at the simulator**:
 
@@ -141,7 +149,8 @@ With the simulator running above:
    VITE_SIMPLEX_URL=http://127.0.0.1:8080 npm run dev
    ```
 
-3. **In the UI**:
+3. **Read and verify artifacts in the UI:**
+
    - **Connection** accepts the scheme, namespace, and verifier material printed
      by `simplex seed`.
    - **Read** fetches a block by digest, a notarization by round, a finalization
@@ -156,11 +165,10 @@ With the simulator running above:
 
 ## SQL panel
 
-The SQL panel is only rendered when `VITE_SQL_URL` is set. It hosts a thin
-Connect client for `sql.v1.Service` served by a separate binary that
-owns a `KvSchema` + DataFusion session.
+Set `VITE_SQL_URL` to display the SQL panel. It connects to a separate SQL
+server that uses a `KvSchema` and DataFusion session to query Store data.
 
-In addition to the simulator running above:
+With the simulator running:
 
 1. **Start the SQL server** on port 8082
 
@@ -169,15 +177,17 @@ In addition to the simulator running above:
      run --store-url http://127.0.0.1:8080
    ```
 
-2. **Seed rows** (keeps running, and every `--interval-secs` it inserts 5 orders
-   into `orders_kv` via `INSERT ... VALUES`). The server decodes each ingest
-   batch and re-runs the subscriber's SQL WHERE predicate against just those
-   rows, emitting one frame per matching batch.
+2. **Seed rows.** Start the seeder in another terminal:
 
    ```bash
    cargo run --package exoware-sql --bin sql -- \
      seed --store-url http://127.0.0.1:8080 --interval-secs 2
    ```
+
+   At each `--interval-secs`, the seeder inserts five orders into `orders_kv`
+   with `INSERT ... VALUES`. For subscriptions, the server decodes each ingest
+   batch and evaluates the subscriber's SQL WHERE predicate against those rows.
+   Each matching batch produces one frame.
 
 3. **Point the web app at the SQL server**:
 
@@ -185,7 +195,8 @@ In addition to the simulator running above:
    VITE_SQL_URL=http://127.0.0.1:8082 npm run dev
    ```
 
-4. **In the UI**:
+4. **Query or subscribe in the UI:**
+
    - **Run Query** executes arbitrary SQL against the server's DataFusion
      session (e.g. aggregates over `orders_kv`).
    - **Start Subscribe** streams rows per ingest batch that satisfy the

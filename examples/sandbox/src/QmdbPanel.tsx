@@ -3,7 +3,7 @@ import {
   matchExact,
   matchPrefix,
   matchRegex,
-  OrderedQmdbClient,
+  QmdbOrderedClient,
   type OrderedOperation,
   type OrderedSubscribeProof,
   type VerifiedCurrentKeyLookupProof,
@@ -112,7 +112,7 @@ export function QmdbPanel({
   showNotification: NotificationFn;
 }) {
   const client = useMemo(
-    () => new OrderedQmdbClient(qmdbUrl, { merkleFamily: 'mmb' }),
+    () => new QmdbOrderedClient(qmdbUrl, { merkleFamily: 'mmb' }),
     [qmdbUrl],
   );
   const subscribeAbortRef = useRef<AbortController | null>(null);

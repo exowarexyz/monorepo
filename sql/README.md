@@ -1,8 +1,8 @@
 # exoware-sql
 
-SQL engine backed by the Exoware API.
+Define tables in Exoware Store and query them with SQL.
 
-- [Rust](./rs/README.md): define tables and indexes over a Store, write rows, and
-  run DataFusion SQL. Includes the server for the `sql.v1` ConnectRPC API.
-- [TypeScript](./ts/README.md): query a `sql.v1` server and subscribe to matching
-  rows, with results as Apache Arrow tables.
+The [Rust crate](./rs/README.md) manages rows and indexes, runs queries with
+DataFusion, and serves the `sql.v1` ConnectRPC API. The
+[TypeScript client](./ts/README.md) queries that service and subscribes to new
+rows, returning results as Apache Arrow tables.

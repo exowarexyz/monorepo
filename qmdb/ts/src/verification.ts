@@ -11,7 +11,7 @@ import initWasm, {
 
 export type BytesLike = Uint8Array | string;
 export type MerkleFamily = 'mmr' | 'mmb';
-export type HashFamily = 'sha256' | 'blake3' | 'crc32c';
+export type HashFamily = 'sha256' | 'blake3';
 
 export type OrderedOperation =
   | {
@@ -153,7 +153,7 @@ export function assertMerkleFamily(value: MerkleFamily, label: string): void {
 }
 
 export function assertHashFamily(value: HashFamily, label: string): void {
-  if (value !== 'sha256' && value !== 'blake3' && value !== 'crc32c') {
+  if (value !== 'sha256' && value !== 'blake3') {
     throw new Error(`${label} unsupported hash family ${String(value)}`);
   }
 }

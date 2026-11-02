@@ -165,13 +165,13 @@ export interface OrderedSubscribeProof {
   proof: DecodedOperationMultiProof;
 }
 
-export type OrderedQmdbClientOptions = SdkClientOptions & {
+export type QmdbOrderedClientOptions = SdkClientOptions & {
   merkleFamily?: MerkleFamily;
   hashFamily?: HashFamily;
   currentChunkSize?: number;
 };
 
-export type QmdbOperationLogClientOptions = SdkClientOptions & {
+export type QmdbLogClientOptions = SdkClientOptions & {
   merkleFamily?: MerkleFamily;
   hashFamily?: HashFamily;
 };
@@ -267,11 +267,11 @@ async function operationsProofBytes(
   return toBinary(OperationMultiProofSchema, response.proof);
 }
 
-export class QmdbOperationLogClient {
+export class QmdbLogClient {
   private readonly operationLog: ConnectClient<typeof OperationLogService>;
   private readonly verifier: QmdbProofVerifier;
 
-  constructor(baseUrl: string, options: QmdbOperationLogClientOptions = {}) {
+  constructor(baseUrl: string, options: QmdbLogClientOptions = {}) {
     const {
       merkleFamily = 'mmr',
       hashFamily = 'sha256',
@@ -421,7 +421,7 @@ export class QmdbOperationLogClient {
   }
 }
 
-export class OrderedQmdbClient {
+export class QmdbOrderedClient {
   private readonly lookup: ConnectClient<typeof KeyLookupService>;
   private readonly orderedRange: ConnectClient<typeof OrderedKeyRangeService>;
   private readonly operationLog: ConnectClient<typeof OperationLogService>;
@@ -431,7 +431,7 @@ export class OrderedQmdbClient {
   private readonly currentChunkSize: number;
   private readonly verifier: QmdbProofVerifier;
 
-  constructor(baseUrl: string, options: OrderedQmdbClientOptions = {}) {
+  constructor(baseUrl: string, options: QmdbOrderedClientOptions = {}) {
     const {
       merkleFamily = 'mmr',
       hashFamily = 'sha256',

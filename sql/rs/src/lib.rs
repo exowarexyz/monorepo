@@ -33,6 +33,7 @@ mod tests {
         types::*, writer::*, *,
     };
     use axum::Router;
+    use buffa::Message;
     use bytes::Bytes;
     use commonware_codec::Encode;
     use connectrpc::{ConnectError, ConnectRpcService, RequestContext as Context, ServiceRequest};
@@ -42,13 +43,20 @@ mod tests {
                 BinaryViewArray, Float64Array, Int64Array, LargeBinaryArray, LargeStringArray,
                 StringViewArray,
             },
-            datatypes::{i256, DataType, TimeUnit},
+            compute::SortOptions,
+            datatypes::{i256, DataType, Field, TimeUnit},
             record_batch::RecordBatch,
         },
         common::{config::ConfigOptions, ScalarValue},
-        logical_expr::{Expr, Operator},
-        physical_optimizer::{limit_pushdown::LimitPushdown, PhysicalOptimizerRule},
-        physical_plan::{limit::GlobalLimitExec, ExecutionPlan},
+        functions_aggregate::expr_fn::sum,
+        logical_expr::{col, in_list, Expr, Operator},
+        physical_expr::{expressions::Column, LexOrdering, PhysicalSortExpr},
+        physical_optimizer::{
+            limit_pushdown::LimitPushdown, pushdown_sort::PushdownSort, PhysicalOptimizerRule,
+        },
+        physical_plan::{
+            limit::GlobalLimitExec, sorts::sort::SortExec, ExecutionPlan, SortOrderPushdownResult,
+        },
         prelude::{SessionConfig, SessionContext as DataFusionSessionContext},
     };
     use exoware_sdk::{
@@ -194,8 +202,6 @@ mod tests {
     }
 
     pub(super) fn decode_reduce_request(body: &[u8]) -> exoware_sdk::query::ReduceRequest {
-        use buffa::Message;
-
         let envelope = connectrpc::envelope::Envelope::decode(&mut bytes::BytesMut::from(body))
             .unwrap()
             .unwrap();
@@ -698,8 +704,6 @@ mod tests {
 
     #[test]
     fn normalize_count_case_then_literal_uses_countall_optimization() {
-        use datafusion::logical_expr::col;
-
         let (model, _) = test_model();
         let case_expr = Expr::Case(datafusion::logical_expr::expr::Case {
             expr: None,
@@ -1156,7 +1160,6 @@ mod tests {
         .unwrap();
         let model = TableModel::from_config(&config).unwrap();
 
-        use datafusion::logical_expr::col;
         let filter = col("body").eq(Expr::Literal(
             ScalarValue::Binary(Some(vec![0xAB, 0xCD])),
             None,
@@ -1434,7 +1437,6 @@ mod tests {
 
     #[test]
     fn null_predicate_merges_are_order_independent() {
-        use datafusion::logical_expr::col;
         let config = KvTableConfig::new(
             0,
             vec![
@@ -1479,7 +1481,6 @@ mod tests {
 
     #[test]
     fn non_nullable_null_predicates_simplify() {
-        use datafusion::logical_expr::col;
         let config = KvTableConfig::new(
             0,
             vec![
@@ -1505,7 +1506,6 @@ mod tests {
 
     #[test]
     fn null_literal_comparisons_are_contradictions() {
-        use datafusion::logical_expr::col;
         let config = KvTableConfig::new(
             0,
             vec![
@@ -1529,7 +1529,6 @@ mod tests {
 
     #[test]
     fn in_predicate_merges_with_comparisons_order_independent() {
-        use datafusion::logical_expr::{col, in_list};
         let config = KvTableConfig::new(
             0,
             vec![
@@ -1651,7 +1650,6 @@ mod tests {
 
     #[test]
     fn empty_and_null_in_lists_are_exact() {
-        use datafusion::logical_expr::{col, in_list};
         let config = KvTableConfig::new(
             0,
             vec![
@@ -1798,8 +1796,6 @@ mod tests {
 
     #[test]
     fn table_config_accepts_list_column() {
-        use datafusion::arrow::datatypes::Field;
-
         let config = KvTableConfig::new(
             0,
             vec![
@@ -1819,8 +1815,6 @@ mod tests {
 
     #[test]
     fn list_column_rejected_in_index() {
-        use datafusion::arrow::datatypes::Field;
-
         let result = KvTableConfig::new(
             0,
             vec![
@@ -1974,8 +1968,6 @@ mod tests {
 
     #[test]
     fn base_row_round_trip_with_list() {
-        use datafusion::arrow::datatypes::Field;
-
         let config = KvTableConfig::new(
             0,
             vec![
@@ -3694,7 +3686,6 @@ mod tests {
         .unwrap();
         let model = TableModel::from_config(&config).unwrap();
 
-        use datafusion::logical_expr::col;
         let filter = col("score")
             .eq(Expr::Literal(ScalarValue::Float64(Some(1.0)), None))
             .or(col("score").eq(Expr::Literal(ScalarValue::Float64(Some(2.0)), None)));
@@ -4757,7 +4748,6 @@ mod tests {
         let model = TableModel::from_config(&config).unwrap();
 
         // Build an equality expression: entity = X'AA..AA'
-        use datafusion::logical_expr::col;
         let entity_literal =
             Expr::Literal(ScalarValue::FixedSizeBinary(16, Some(vec![0xAA; 16])), None);
         let filter = col("entity").eq(entity_literal);
@@ -4791,7 +4781,6 @@ mod tests {
         .unwrap();
         let model = TableModel::from_config(&config).unwrap();
 
-        use datafusion::logical_expr::col;
         let filter = col("version").lt_eq(Expr::Literal(ScalarValue::UInt64(Some(42)), None));
 
         assert!(
@@ -4827,7 +4816,6 @@ mod tests {
         let model = TableModel::from_config(&config).unwrap();
 
         let threshold = (1u64 << 63) + 5;
-        use datafusion::logical_expr::col;
         let filter =
             col("version").gt_eq(Expr::Literal(ScalarValue::UInt64(Some(threshold)), None));
 
@@ -4857,7 +4845,6 @@ mod tests {
         .unwrap();
         let model = TableModel::from_config(&config).unwrap();
 
-        use datafusion::logical_expr::col;
         let unsupported = col("version").gt(Expr::Literal(ScalarValue::Int64(Some(-1)), None));
 
         assert!(
@@ -4890,7 +4877,6 @@ mod tests {
         .unwrap();
         let model = TableModel::from_config(&config).unwrap();
 
-        use datafusion::logical_expr::col;
         let supported = col("version").gt_eq(Expr::Literal(ScalarValue::UInt64(Some(10)), None));
         let unsupported = col("version").gt(Expr::Literal(ScalarValue::Int64(Some(-1)), None));
         let filter = supported.and(unsupported);
@@ -4927,7 +4913,6 @@ mod tests {
         .unwrap();
         let model = TableModel::from_config(&config).unwrap();
 
-        use datafusion::logical_expr::{col, in_list};
         let filter = in_list(
             col("version"),
             vec![
@@ -4961,7 +4946,6 @@ mod tests {
         let model = TableModel::from_config(&config).unwrap();
 
         let huge = 1u64 << 63;
-        use datafusion::logical_expr::{col, in_list};
         let filter = in_list(
             col("version"),
             vec![
@@ -4993,7 +4977,6 @@ mod tests {
         .unwrap();
         let model = TableModel::from_config(&config).unwrap();
 
-        use datafusion::logical_expr::{col, in_list};
         let filter = in_list(
             col("entity"),
             vec![
@@ -5034,7 +5017,6 @@ mod tests {
         .unwrap();
         let model = TableModel::from_config(&config).unwrap();
 
-        use datafusion::logical_expr::col;
         let filter = col("big_val").gt_eq(Expr::Literal(
             ScalarValue::Decimal256(Some(i256::from(100i64)), 76, 0),
             None,
@@ -5380,7 +5362,6 @@ mod tests {
         let model = TableModel::from_config(&config).unwrap();
         let specs = model.resolve_index_specs(&config.index_specs).unwrap();
 
-        use datafusion::logical_expr::col;
         let filter = col("entity").eq(Expr::Literal(
             ScalarValue::FixedSizeBinary(16, Some(vec![0xAB; 16])),
             None,
@@ -5417,7 +5398,6 @@ mod tests {
         let model = TableModel::from_config(&config).unwrap();
         let specs = model.resolve_index_specs(&config.index_specs).unwrap();
 
-        use datafusion::logical_expr::col;
         let filter = col("big_val").gt_eq(Expr::Literal(
             ScalarValue::Decimal256(Some(i256::from(100i64)), 76, 0),
             None,
@@ -6864,13 +6844,6 @@ mod tests {
 
     #[test]
     fn kv_scan_sort_pushdown_preserves_limit() {
-        use datafusion::{
-            arrow::compute::SortOptions,
-            physical_expr::{expressions::Column, LexOrdering, PhysicalSortExpr},
-            physical_optimizer::pushdown_sort::PushdownSort,
-            physical_plan::sorts::sort::SortExec,
-        };
-
         let model = Arc::new(simple_int64_model(0));
         let scan = Arc::new(KvScanExec::new(
             PrefixedStoreClient::empty(StoreClient::new("http://127.0.0.1:0")),
@@ -6903,12 +6876,6 @@ mod tests {
 
     #[test]
     fn kv_scan_sort_pushdown_respects_ordering_strength() {
-        use datafusion::{
-            arrow::compute::SortOptions,
-            physical_expr::{expressions::Column, LexOrdering, PhysicalSortExpr},
-            physical_plan::SortOrderPushdownResult,
-        };
-
         let config = KvTableConfig::new(
             0,
             vec![
@@ -7003,10 +6970,6 @@ mod tests {
 
     #[tokio::test]
     async fn kv_scan_reverse_sort_pushdown_survives_limit_pushdown_first() {
-        use datafusion::{
-            physical_optimizer::pushdown_sort::PushdownSort, physical_plan::sorts::sort::SortExec,
-        };
-
         // Control the pass order that exposed the lost reverse pushdown.
         let schema = KvSchema::new(PrefixedStoreClient::empty(StoreClient::new(
             "http://127.0.0.1:0",
@@ -7521,8 +7484,6 @@ mod tests {
 
     #[tokio::test]
     async fn kv_scan_sort_pushdown_preserves_nested_limits() {
-        use datafusion::physical_optimizer::pushdown_sort::PushdownSort;
-
         let state = MockState {
             kv: Arc::new(Mutex::new(BTreeMap::new())),
             range_calls: Arc::new(AtomicUsize::new(0)),
@@ -9197,8 +9158,6 @@ mod tests {
 
     #[tokio::test]
     async fn aggregate_pushdown_preserves_dotted_aliases() {
-        use datafusion::{functions_aggregate::expr_fn::sum, prelude::col};
-
         let (ctx, state, shutdown_tx) = aggregate_test_context().await;
         let rows = ctx
             .sql("SELECT * FROM orders")
