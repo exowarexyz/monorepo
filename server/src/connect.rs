@@ -1131,7 +1131,7 @@ where
         };
         // Live delivery starts after the replayed range and never below the
         // cursor. A cursor past the frontier waits for that batch, and the
-        // batches published before it are never read.
+        // batches between the frontier and the cursor are never read.
         let live_start = replay_bound
             .checked_add(1)
             .map(|next| next.max(since.unwrap_or(0)));
