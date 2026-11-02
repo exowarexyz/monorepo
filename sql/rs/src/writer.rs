@@ -1132,11 +1132,13 @@ mod tests {
     /// kind, string escapes, nulls and covered columns.
     #[test]
     fn insert_entries_match_golden_bytes() {
-        use datafusion::arrow::array::{
-            BooleanArray, Date32Array, Date64Array, Decimal128Array, Decimal256Array,
-            FixedSizeBinaryArray, Float64Array, TimestampMicrosecondArray,
+        use datafusion::arrow::{
+            array::{
+                BooleanArray, Date32Array, Date64Array, Decimal128Array, Decimal256Array,
+                FixedSizeBinaryArray, Float64Array, TimestampMicrosecondArray,
+            },
+            datatypes::TimeUnit,
         };
-        use datafusion::arrow::datatypes::TimeUnit;
 
         let list_type = DataType::List(Arc::new(Field::new("item", DataType::Int64, true)));
         let config = KvTableConfig::new(

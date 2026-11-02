@@ -7,21 +7,28 @@
 //! in-process store that decodes and discards them. Before measuring, each case prints one
 //! `INGEST_PROFILE` line with the allocation calls and bytes of a single run.
 
-use std::alloc::{GlobalAlloc, Layout, System};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
-
 use axum::Router;
 use criterion::{criterion_group, criterion_main, BatchSize, Criterion};
-use datafusion::arrow::array::{
-    ArrayRef, BinaryArray, BooleanArray, Date32Array, Decimal128Array, Float64Array, Int64Array,
-    RecordBatch, StringArray, TimestampMicrosecondArray, UInt64Array,
+use datafusion::{
+    arrow::{
+        array::{
+            ArrayRef, BinaryArray, BooleanArray, Date32Array, Decimal128Array, Float64Array,
+            Int64Array, RecordBatch, StringArray, TimestampMicrosecondArray, UInt64Array,
+        },
+        datatypes::{DataType, Field, Schema, TimeUnit},
+    },
+    datasource::MemTable,
 };
-use datafusion::arrow::datatypes::{DataType, Field, Schema, TimeUnit};
-use datafusion::datasource::MemTable;
 use exoware_sdk::{StoreClient, StoreKeyPrefix};
 use exoware_server::{Ingest, IngestState, PutError, PutInput};
 use exoware_sql::{CellValue, IndexSpec, KvSchema, SqlContext, TableColumnConfig};
+use std::{
+    alloc::{GlobalAlloc, Layout, System},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
+};
 
 const ROWS: usize = 100_000;
 const BATCH_ROWS: usize = 8192;
