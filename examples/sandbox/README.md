@@ -40,8 +40,8 @@ Explore the Exoware API.
 
 - **Log:** Order and stream arbitrary data.
 - **Store:** Query immutable data.
-- **Ordered QMDB** (optional, requires `VITE_QMDB_URL`): current-state and operation-log
-  proofs and live subscribe streaming.
+- **Ordered QMDB** (optional, requires `VITE_QMDB_URL`): operation-log and current-state
+  proofs and live subscriptions.
 - **Simplex** (optional, requires `VITE_SIMPLEX_URL`): read and subscribe to
   seeded Commonware Simplex blocks, notarizations, and finalizations, with
   latest-finalization verification through the Simplex WASM verifier.
