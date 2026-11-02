@@ -141,9 +141,10 @@ for (const family of ['mmr', 'mmb']) {
     const get = fixture(family, 'get', GetRequestSchema, GetResponseSchema);
     const many = fixture(family, 'get_many', GetManyRequestSchema, GetManyResponseSchema);
     const range = fixture(family, 'range_first', GetRangeRequestSchema, GetRangeResponseSchema);
-    // An empty proof encodes to zero bytes, which the client reads as missing.
+    // A proof with a chunk but no operations. An empty proof would encode to zero
+    // bytes, which the client reads as missing before reaching wasm.
     const currentOperationResponse = create(GetCurrentOperationRangeResponseSchema, {
-      proof: create(CurrentOperationRangeProofSchema, {}),
+      proof: create(CurrentOperationRangeProofSchema, { chunks: [new Uint8Array(32)] }),
     });
     const large = (1n << 53n) + 100n;
     let abortFetch = false;
@@ -236,7 +237,7 @@ for (const family of ['mmr', 'mmb']) {
         startLocation: 0n,
         maxLocations: 1,
         minSequenceNumber: minimum,
-      }, range.root, options), /getCurrentOperationRange response missing proof/);
+      }, range.root, options), /current operation range proof has no operations/);
       assertForwarded('GetCurrentOperationRange', minimum);
     }
 

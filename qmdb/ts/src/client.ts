@@ -253,7 +253,8 @@ function binaryTransport(baseUrl: string, options: SdkClientOptions) {
 
 /**
  * A proof arrives as a `bytes` field, so a missing one reads as empty rather
- * than undefined. No real proof encodes to zero bytes.
+ * than undefined. No real proof encodes to zero bytes, because every proof
+ * message carries a non-empty inner `proof` field.
  */
 function requireProof(proof: Uint8Array, rpc: string): Uint8Array {
   if (proof.length === 0) {
@@ -678,7 +679,6 @@ export class OrderedQmdbClient {
       options,
     );
     // The results arrive as views into the response, so this is one flat copy.
-    // Encoding them from decoded objects, as before, copied each proof 3 times.
     const proofBytes = toBinary(RawKeyLookupService.method.getMany.output, response);
     const verified = verify_get_many_response(
       proofBytes,
@@ -722,6 +722,7 @@ export class OrderedQmdbClient {
       }),
       options,
     );
+    // As in getMany, the entries and start proof arrive as views, so this is one flat copy.
     const proofBytes = toBinary(RawOrderedKeyRangeService.method.getRange.output, response);
     const verified = verify_get_range_response(
       proofBytes,

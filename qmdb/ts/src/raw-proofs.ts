@@ -11,24 +11,30 @@
 //
 // This only works in binary format. In JSON a proof is a JSON object, not
 // base64 text, so the qmdb clients always use binary.
-import { clone, createFileRegistry, type DescFile, type DescService, type Message } from '@bufbuild/protobuf';
-import type { GenMessage, GenService } from '@bufbuild/protobuf/codegenv1';
+//
+// Two differences from the generated services. If a proof's field appears more
+// than once in a response, protobuf merges the parts of a message but keeps only
+// the last `bytes` value. No encoder splits a message that way, and wasm rejects
+// the partial proof. And these messages keep their generated `$typeName`, so
+// `isMessage` can't tell them apart from the generated ones.
+import { clone, createFileRegistry, type DescService, type Message } from '@bufbuild/protobuf';
+import type { GenMessage, GenService, GenServiceMethods } from '@bufbuild/protobuf/codegenv1';
 import { FieldDescriptorProto_Type, FileDescriptorProtoSchema } from '@bufbuild/protobuf/wkt';
 import {
   CurrentOperationService,
-  GetCurrentOperationRangeRequestSchema,
+  type GetCurrentOperationRangeResponse,
 } from './generated/proto/qmdb/v1/current_operation_pb.js';
 import {
-  GetManyRequestSchema,
-  GetRequestSchema,
   KeyLookupService,
+  type GetManyResponse,
+  type GetResponse,
 } from './generated/proto/qmdb/v1/key_lookup_pb.js';
-import { GetRangeRequestSchema, OrderedKeyRangeService } from './generated/proto/qmdb/v1/key_range_pb.js';
+import { OrderedKeyRangeService, type GetRangeResponse } from './generated/proto/qmdb/v1/key_range_pb.js';
 import {
-  GetOperationRangeRequestSchema,
-  GetOperationsRequestSchema,
   OperationLogService,
-  SubscribeRequestSchema,
+  type GetOperationRangeResponse,
+  type GetOperationsResponse,
+  type SubscribeResponse,
 } from './generated/proto/qmdb/v1/operation_log_pb.js';
 
 /**
@@ -47,85 +53,64 @@ function rawService<S extends DescService>(
     for (const fieldName of fieldNames) {
       const field = message?.field.find(({ name }) => name === fieldName);
       if (field?.type !== FieldDescriptorProto_Type.MESSAGE) {
-        throw new Error(`qmdb ${messageName}.${fieldName} is not a message field`);
+        throw new Error(`qmdb ${messageName}.${fieldName} is missing or not a message field`);
       }
       field.type = FieldDescriptorProto_Type.BYTES;
       field.typeName = '';
     }
   }
-  const imports = new Map<string, DescFile>();
-  const collect = (from: DescFile) => {
-    for (const dependency of from.dependencies) {
-      imports.set(dependency.proto.name, dependency);
-      collect(dependency);
-    }
-  };
-  collect(service.file);
-  const registry = createFileRegistry(file, (name) => imports.get(name));
+  // The registry also adds the imports of each file it resolves, so resolving
+  // direct imports is enough.
+  const registry = createFileRegistry(file, (name) =>
+    service.file.dependencies.find((dependency) => dependency.proto.name === name));
   return registry.getService(service.typeName) as S;
 }
 
-/** A response whose proof arrives as its encoded bytes. */
-type ProofBytes<TypeName extends string> = GenMessage<Message<TypeName> & { proof: Uint8Array }>;
+/** Message `M` with the fields in `Fields` retyped. A field `M` lacks is a type error. */
+type Raw<M extends Message, Fields extends { [K in keyof Fields]: K extends keyof M ? unknown : never }> =
+  Message<M['$typeName']> & Omit<M, keyof Fields> & Fields;
 
-export const RawOperationLogService: GenService<{
-  getOperationRange: {
-    methodKind: 'unary';
-    input: typeof GetOperationRangeRequestSchema;
-    output: ProofBytes<'qmdb.v1.GetOperationRangeResponse'>;
-  };
-  getOperations: {
-    methodKind: 'unary';
-    input: typeof GetOperationsRequestSchema;
-    output: ProofBytes<'qmdb.v1.GetOperationsResponse'>;
-  };
-  subscribe: {
-    methodKind: 'server_streaming';
-    input: typeof SubscribeRequestSchema;
-    output: GenMessage<
-      Message<'qmdb.v1.SubscribeResponse'> & { resumeSequenceNumber: bigint; proof: Uint8Array }
-    >;
-  };
-}> = rawService(OperationLogService, {
+type Methods<S> = S extends GenService<infer M> ? M : never;
+
+/**
+ * Generated service type `S`, with the outputs of the methods in `Outputs`
+ * replaced. A method `S` lacks is a type error.
+ */
+type WithOutputs<
+  S extends GenService<GenServiceMethods>,
+  Outputs extends { [K in keyof Outputs]: K extends keyof Methods<S> ? Message : never },
+> = GenService<{
+  [K in keyof Methods<S>]: K extends keyof Outputs
+    ? Omit<Methods<S>[K], 'output'> & { output: GenMessage<Outputs[K]> }
+    : Methods<S>[K];
+}>;
+
+export const RawOperationLogService: WithOutputs<typeof OperationLogService, {
+  getOperationRange: Raw<GetOperationRangeResponse, { proof: Uint8Array }>;
+  getOperations: Raw<GetOperationsResponse, { proof: Uint8Array }>;
+  subscribe: Raw<SubscribeResponse, { proof: Uint8Array }>;
+}> = /*@__PURE__*/ rawService(OperationLogService, {
   GetOperationRangeResponse: ['proof'],
   GetOperationsResponse: ['proof'],
   SubscribeResponse: ['proof'],
 });
 
-export const RawKeyLookupService: GenService<{
-  get: {
-    methodKind: 'unary';
-    input: typeof GetRequestSchema;
-    output: ProofBytes<'qmdb.v1.GetResponse'>;
-  };
-  getMany: {
-    methodKind: 'unary';
-    input: typeof GetManyRequestSchema;
-    output: GenMessage<Message<'qmdb.v1.GetManyResponse'> & { results: Uint8Array[] }>;
-  };
-}> = rawService(KeyLookupService, {
+export const RawKeyLookupService: WithOutputs<typeof KeyLookupService, {
+  get: Raw<GetResponse, { proof: Uint8Array }>;
+  getMany: Raw<GetManyResponse, { results: Uint8Array[] }>;
+}> = /*@__PURE__*/ rawService(KeyLookupService, {
   GetResponse: ['proof'],
   GetManyResponse: ['results'],
 });
 
-export const RawOrderedKeyRangeService: GenService<{
-  getRange: {
-    methodKind: 'unary';
-    input: typeof GetRangeRequestSchema;
-    output: GenMessage<
-      Message<'qmdb.v1.GetRangeResponse'> & { entries: Uint8Array[]; startProof?: Uint8Array }
-    >;
-  };
-}> = rawService(OrderedKeyRangeService, {
+export const RawOrderedKeyRangeService: WithOutputs<typeof OrderedKeyRangeService, {
+  getRange: Raw<GetRangeResponse, { entries: Uint8Array[]; startProof?: Uint8Array }>;
+}> = /*@__PURE__*/ rawService(OrderedKeyRangeService, {
   GetRangeResponse: ['entries', 'start_proof'],
 });
 
-export const RawCurrentOperationService: GenService<{
-  getCurrentOperationRange: {
-    methodKind: 'unary';
-    input: typeof GetCurrentOperationRangeRequestSchema;
-    output: ProofBytes<'qmdb.v1.GetCurrentOperationRangeResponse'>;
-  };
-}> = rawService(CurrentOperationService, {
+export const RawCurrentOperationService: WithOutputs<typeof CurrentOperationService, {
+  getCurrentOperationRange: Raw<GetCurrentOperationRangeResponse, { proof: Uint8Array }>;
+}> = /*@__PURE__*/ rawService(CurrentOperationService, {
   GetCurrentOperationRangeResponse: ['proof'],
 });
