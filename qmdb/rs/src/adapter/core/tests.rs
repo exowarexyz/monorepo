@@ -562,25 +562,46 @@ async fn publication_cache_observations_answer_requires_without_store_reads() {
         starts.try_recv().is_err(),
         "observed watermarks need no lookup"
     );
+}
 
-    // A lookup in progress holds the gate. The observation still lands, and a
-    // require for it is answered without waiting for the gate.
-    {
-        let _gate = cache.refresh_gate.lock().await;
-        cache.observe(Location::new(12), 60);
-        let published = tokio::time::timeout(
-            std::time::Duration::from_secs(2),
-            cache.require(&session, Location::new(12)),
-        )
-        .await
-        .expect("require waited behind the held gate")
+#[tokio::test]
+async fn publication_cache_keeps_observations_made_during_a_lookup() {
+    let (_server, url) = exoware_simulator::open_temp().await.unwrap();
+    let raw = StoreClient::new(&url);
+    let store = PrefixedStoreClient::empty(raw.clone());
+    let mut batch = StoreWriteBatch::new();
+    crate::adapter::upload::stage_watermark(&store, Location::<mmr::Family>::new(5), &mut batch)
         .unwrap();
-        assert_eq!(published.sequence_number, 60);
-    }
-    assert!(
-        starts.try_recv().is_err(),
-        "observed watermarks need no lookup"
+    batch.commit(&raw).await.unwrap();
+
+    let (session, permits, mut starts, _) = gated_session(&url);
+    let cache = PublicationCache::<mmr::Family>::default();
+
+    // The lookup holds the gate while it waits for a permit.
+    let refresh = cache.refresh(&session);
+    tokio::pin!(refresh);
+    assert_pending(futures::poll!(&mut refresh));
+    assert_eq!(starts.try_recv().unwrap(), 1);
+
+    // An observation made meanwhile lands, and a require for it is answered
+    // without waiting for the lookup.
+    cache.observe(Location::new(12), 60);
+    let hit = cache.require(&session, Location::new(12));
+    tokio::pin!(hit);
+    let hit = futures::poll!(&mut hit);
+    assert_eq!(
+        hit.map(|result| result.unwrap().sequence_number),
+        std::task::Poll::Ready(60)
     );
+
+    // The lookup finds only watermark 5, which doesn't replace the newer
+    // observation.
+    permits.add_permits(1);
+    assert_eq!(refresh.await.unwrap(), Some(Location::new(12)));
+    let published = cache.published().unwrap();
+    assert_eq!(published.location.as_u64(), 12);
+    assert_eq!(published.sequence_number, 60);
+    assert!(starts.try_recv().is_err(), "only one lookup ran");
 }
 
 #[test]
