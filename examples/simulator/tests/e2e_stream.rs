@@ -1,12 +1,13 @@
-use std::time::Duration;
-
 use bytes::Bytes;
-use exoware_sdk::keys::{Key, Prefix};
-use exoware_sdk::kv_codec::Utf8;
-use exoware_sdk::retention::RetentionPolicy;
-use exoware_sdk::selector::Selector;
-use exoware_sdk::stream_filter::StreamFilter;
-use exoware_sdk::{PrefixedStoreClient, RetryConfig, StoreClient};
+use exoware_sdk::{
+    keys::{Key, Prefix},
+    kv_codec::Utf8,
+    retention::RetentionPolicy,
+    selector::Selector,
+    stream_filter::StreamFilter,
+    PrefixedStoreClient, RetryConfig, StoreClient,
+};
+use std::time::Duration;
 
 /// Spawns a local simulator and returns a client for it.
 async fn spawn_client() -> PrefixedStoreClient {

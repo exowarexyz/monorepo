@@ -8,14 +8,11 @@
 //! `Filter` in the value list (OR within the value list; AND between key
 //! and value filters).
 
-use std::collections::BTreeSet;
-
+use crate::{keys::Prefix, selector::Selector};
 use anyhow::ensure;
 use bytes::Bytes;
 use regex::bytes::Regex;
-
-use crate::keys::Prefix;
-use crate::selector::Selector;
+use std::collections::BTreeSet;
 
 pub const MAX_SELECTORS_PER_FILTER: usize = 16;
 pub const MAX_VALUE_FILTERS_PER_FILTER: usize = 16;

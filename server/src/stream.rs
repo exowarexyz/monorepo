@@ -9,15 +9,18 @@
 //! need a separate remote notification path that advances a local notifier after
 //! the query worker can serve the announced batches.
 
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
-
 use connectrpc::ConnectError;
-use exoware_sdk::common::Entry;
-use exoware_sdk::keys::Prefix;
-use exoware_sdk::selector::compile_payload_regex;
-use exoware_sdk::stream_filter::{validate_filter_counts, CompiledFilters, StreamFilter};
+use exoware_sdk::{
+    common::Entry,
+    keys::Prefix,
+    selector::compile_payload_regex,
+    stream_filter::{validate_filter_counts, CompiledFilters, StreamFilter},
+};
 use regex::bytes::Regex;
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc,
+};
 use tokio::sync::Notify;
 
 /// `ErrorInfo.domain` used for all stream-service errors.
@@ -199,9 +202,9 @@ mod tests {
     use super::*;
     use crate::{Filter, Selector, StreamFilter, Utf8};
     use bytes::Bytes;
-    use exoware_sdk::keys::{Key, MAX_KEY_LEN};
-    use exoware_sdk::stream_filter::{
-        validate_filter, MAX_SELECTORS_PER_FILTER, MAX_VALUE_FILTERS_PER_FILTER,
+    use exoware_sdk::{
+        keys::{Key, MAX_KEY_LEN},
+        stream_filter::{validate_filter, MAX_SELECTORS_PER_FILTER, MAX_VALUE_FILTERS_PER_FILTER},
     };
 
     fn filter(prefix: u8, regex: &str) -> StreamFilter {

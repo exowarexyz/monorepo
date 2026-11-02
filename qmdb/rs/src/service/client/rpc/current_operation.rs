@@ -1,9 +1,15 @@
 //! Verifying client for `qmdb.v1.CurrentOperationService`.
 
-use std::fmt::Display;
-use std::marker::PhantomData;
-use std::sync::Arc;
-
+use super::{connect_error_to_qmdb, proof_digest_cap};
+use crate::{
+    proof::VerifiedCurrentRange,
+    request::OperationWindow,
+    service::proto::qmdb::v1::{
+        CurrentOperationRangeProof as ProtoCurrentOperationRangeProof,
+        CurrentOperationServiceClient, GetCurrentOperationRangeRequest,
+    },
+    QmdbError,
+};
 use bytes::Bytes;
 use commonware_codec::{Copying, Decode, DecodeExt, Encode, Read};
 use commonware_cryptography::Hasher;
@@ -14,16 +20,7 @@ use commonware_storage::{
 use connectrpc::client::{ClientConfig, ClientTransport};
 use exoware_sdk::proto::PreferZstdHttpClient;
 use http_body::Body;
-
-use crate::proof::VerifiedCurrentRange;
-use crate::request::OperationWindow;
-use crate::service::proto::qmdb::v1::{
-    CurrentOperationRangeProof as ProtoCurrentOperationRangeProof, CurrentOperationServiceClient,
-    GetCurrentOperationRangeRequest,
-};
-use crate::QmdbError;
-
-use super::{connect_error_to_qmdb, proof_digest_cap};
+use std::{fmt::Display, marker::PhantomData, sync::Arc};
 
 /// Client for `qmdb.v1.CurrentOperationService`, parameterized on the Merkle
 /// family and current-state operation type.
