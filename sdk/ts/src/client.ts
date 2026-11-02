@@ -36,8 +36,8 @@ function methodKey(method: DescMethod): string {
 
 // Methods are keyed by name, because a custom client passes its own generated descriptors to
 // `createTransport`.
-const PUT = methodKey(IngestService.method.put);
-const REDUCE = methodKey(QueryService.method.reduce);
+const PUT_KEY = methodKey(IngestService.method.put);
+const REDUCE_KEY = methodKey(QueryService.method.reduce);
 
 // Connect reports an error raised while opening a stream inside the HTTP 200 body, after `next`
 // resolves, so these reads wait for their first frame before returning. Subscribe is left out
@@ -45,7 +45,7 @@ const REDUCE = methodKey(QueryService.method.reduce);
 const PREFETCHED_STREAMS = new Set([
     methodKey(QueryService.method.getMany),
     methodKey(QueryService.method.range),
-    REDUCE,
+    REDUCE_KEY,
 ]);
 
 function cappedBackoff(attempt: number, config: RetryConfig): number {
@@ -146,8 +146,10 @@ function makeRetryInterceptor(config: RetryConfig): Interceptor {
     const maxAttempts = Math.max(config.maxAttempts, 1);
     return (next) => async (req) => {
         const key = methodKey(req.method);
-        const isPut = key === PUT;
+        const isPut = key === PUT_KEY;
         const prefetch = PREFETCHED_STREAMS.has(key);
+        // Connect's own timer also aborts `req.signal` at this deadline. Reading the header lets each
+        // retry send the time left, and covers a caller who sets `connect-timeout-ms` directly.
         const deadline = headerDeadline(req.header);
         if (req.stream) {
             // Each retry must serialize the same input after Connect consumes its request iterator.
@@ -175,7 +177,7 @@ function makeRetryInterceptor(config: RetryConfig): Interceptor {
                     // Before any result is exposed, a retry cannot duplicate delivered rows or groups.
                     const iterator = response.message[Symbol.asyncIterator]();
                     const first = await iterator.next();
-                    if (first.done && key === REDUCE) {
+                    if (first.done && key === REDUCE_KEY) {
                         throw new ConnectError('reduction stream returned no frames', Code.Internal);
                     }
                     return {
