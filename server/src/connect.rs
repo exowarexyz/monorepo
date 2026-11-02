@@ -622,7 +622,7 @@ where
         let result = self
             .state
             .query
-            .range_scan(start_key.clone(), end_key.clone(), limit, forward)
+            .range_scan(start_key, end_key, limit, forward)
             .await
             .map_err(ConnectError::internal)?;
         ensure_min_sequence_number(request.min_sequence_number, result.sequence_number)?;

@@ -16,7 +16,7 @@ use connectrpc::ConnectError;
 use exoware_sdk::common::Entry;
 use exoware_sdk::keys::Prefix;
 use exoware_sdk::selector::compile_payload_regex;
-use exoware_sdk::stream_filter::{validate_filter, CompiledFilters, StreamFilter};
+use exoware_sdk::stream_filter::{validate_filter_counts, CompiledFilters, StreamFilter};
 use regex::bytes::Regex;
 use tokio::sync::Notify;
 
@@ -69,16 +69,20 @@ pub struct CompiledMatchers {
 
 impl CompiledMatchers {
     /// Validate and compile a `StreamFilter`.
+    ///
+    /// Accepts exactly the filters `validate_filter` accepts. Only the count
+    /// checks run up front, because building each prefix and regex already
+    /// checks it.
     pub fn compile(filter: &StreamFilter) -> Result<Self, InvalidFilter> {
-        validate_filter(filter).map_err(|e| InvalidFilter(e.to_string()))?;
+        validate_filter_counts(filter).map_err(|e| InvalidFilter(e.to_string()))?;
         let keys = filter
             .selectors
             .iter()
             .map(|mk| {
+                let prefix = Prefix::new(mk.prefix.clone())
+                    .map_err(|e| InvalidFilter(format!("invalid selector prefix: {e}")))?;
                 let regex = compile_payload_regex(&mk.payload_regex)
                     .map_err(|e| InvalidFilter(e.to_string()))?;
-                let prefix =
-                    Prefix::new(mk.prefix.clone()).map_err(|e| InvalidFilter(e.to_string()))?;
                 Ok(CompiledSelector { prefix, regex })
             })
             .collect::<Result<Vec<_>, InvalidFilter>>()?;
@@ -195,7 +199,10 @@ mod tests {
     use super::*;
     use crate::{Filter, Selector, StreamFilter, Utf8};
     use bytes::Bytes;
-    use exoware_sdk::keys::Key;
+    use exoware_sdk::keys::{Key, MAX_KEY_LEN};
+    use exoware_sdk::stream_filter::{
+        validate_filter, MAX_SELECTORS_PER_FILTER, MAX_VALUE_FILTERS_PER_FILTER,
+    };
 
     fn filter(prefix: u8, regex: &str) -> StreamFilter {
         StreamFilter {
@@ -385,11 +392,37 @@ mod tests {
         assert!(!matchers.matches(key(1, b"miss").as_ref(), b"v"));
         assert!(!matchers.matches(key(1, b"hit").as_ref(), b"other"));
 
-        let invalid = StreamFilter {
-            selectors: vec![],
-            value_filters: vec![],
-        };
-        assert!(CompiledMatchers::compile(&invalid).is_err());
+        // `compile` runs only the count checks from `validate_filter`, so
+        // every filter that `validate_filter` rejects must still fail here.
+        let selector = filter(1, "^hit$").selectors.remove(0);
+        let invalid = [
+            StreamFilter {
+                selectors: vec![],
+                value_filters: vec![],
+            },
+            StreamFilter {
+                selectors: vec![selector; MAX_SELECTORS_PER_FILTER + 1],
+                value_filters: vec![],
+            },
+            filter_with_values(
+                1,
+                "^hit$",
+                vec![Filter::Exact(Bytes::from_static(b"v")); MAX_VALUE_FILTERS_PER_FILTER + 1],
+            ),
+            StreamFilter {
+                selectors: vec![Selector {
+                    prefix: Bytes::from(vec![1; MAX_KEY_LEN + 1]),
+                    payload_regex: Utf8::from("^hit$"),
+                }],
+                value_filters: vec![],
+            },
+            filter(1, " "),
+            filter_with_values(1, "^hit$", vec![Filter::Regex(" ".into())]),
+        ];
+        for filter in invalid {
+            assert!(validate_filter(&filter).is_err(), "{filter:?}");
+            assert!(CompiledMatchers::compile(&filter).is_err(), "{filter:?}");
+        }
     }
 
     #[test]

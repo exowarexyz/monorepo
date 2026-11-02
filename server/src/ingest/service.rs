@@ -252,10 +252,8 @@ async fn put<I: Ingest>(
         .size_hint()
         .exact()
         .and_then(|length| usize::try_from(length).ok());
-    let known_bound = match (
-        declared_length.as_ref().ok().copied().flatten(),
-        exact_length,
-    ) {
+    let declared = declared_length.as_ref().ok().copied().flatten();
+    let known_bound = match (declared, exact_length) {
         (Some(declared), Some(exact)) => Some(declared.min(exact)),
         (declared, exact) => declared.or(exact),
     };
@@ -266,12 +264,7 @@ async fn put<I: Ingest>(
         } else {
             PutEncoding::Identity
         },
-        content_length: declared_length
-            .as_ref()
-            .ok()
-            .copied()
-            .flatten()
-            .or(exact_length),
+        content_length: declared.or(exact_length),
     };
     let mut rejection = if let Err(error) = parsed_timeout {
         Some(error)
