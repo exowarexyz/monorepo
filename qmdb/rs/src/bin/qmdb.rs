@@ -64,7 +64,6 @@ enum Command {
     Run {
         #[arg(long)]
         store_url: String,
-        /// UTF-8 prefix prepended to this instance's Store keys.
         #[arg(long, default_value = "")]
         store_prefix: String,
         #[arg(long, default_value = "0.0.0.0")]
@@ -75,7 +74,6 @@ enum Command {
     Seed {
         #[arg(long)]
         store_url: String,
-        /// UTF-8 prefix prepended to this instance's Store keys.
         #[arg(long, default_value = "")]
         store_prefix: String,
         #[arg(long, default_value_t = 2)]
