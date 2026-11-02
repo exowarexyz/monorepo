@@ -252,15 +252,28 @@ function binaryTransport(baseUrl: string, options: SdkClientOptions) {
 }
 
 /**
- * A proof arrives as a `bytes` field, so a missing one reads as empty rather
- * than undefined. No real proof encodes to zero bytes, because every proof
- * message carries a non-empty inner `proof` field.
+ * A proof arrives as one entry per occurrence of its field. Protobuf merges the
+ * occurrences into one message, which is the same as parsing their bytes joined
+ * (see `raw-proofs.ts`), so this joins them. A missing proof has no entries. No
+ * real proof encodes to zero bytes, because every proof message carries a
+ * non-empty inner `proof` field.
  */
-function requireProof(proof: Uint8Array, rpc: string): Uint8Array {
+function requireProof(parts: Uint8Array[], rpc: string): Uint8Array {
+  const proof = parts.length === 1 ? parts[0] : joinBytes(parts);
   if (proof.length === 0) {
     throw new Error(`qmdb ${rpc} response missing proof`);
   }
   return proof;
+}
+
+function joinBytes(parts: Uint8Array[]): Uint8Array {
+  const joined = new Uint8Array(parts.reduce((length, part) => length + part.length, 0));
+  let offset = 0;
+  for (const part of parts) {
+    joined.set(part, offset);
+    offset += part.length;
+  }
+  return joined;
 }
 
 function toBytes(value: BytesLike): Uint8Array {

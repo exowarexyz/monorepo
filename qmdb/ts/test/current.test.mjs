@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
-import { create, fromBinary, fromJsonString, toBinary, toJsonString } from '@bufbuild/protobuf';
+import { create, fromBinary, toBinary } from '@bufbuild/protobuf';
 import { GetRequestSchema, GetResponseSchema, GetManyRequestSchema, GetManyResponseSchema } from '../dist/generated/proto/qmdb/v1/key_lookup_pb.js';
 import { GetRangeRequestSchema, GetRangeResponseSchema } from '../dist/generated/proto/qmdb/v1/key_range_pb.js';
 import { GetCurrentOperationRangeRequestSchema, GetCurrentOperationRangeResponseSchema } from '../dist/generated/proto/qmdb/v1/current_operation_pb.js';
@@ -56,24 +56,14 @@ function decodeFixtureKey(key) {
   return decoded;
 }
 
-function decodeRequest(schema, body, contentType) {
-  return contentType === 'application/proto'
-    ? fromBinary(schema, body)
-    : fromJsonString(schema, new TextDecoder().decode(body));
-}
-
 async function requestBody(request) {
   return new Uint8Array(await request.arrayBuffer());
 }
 
-function rpcResponse(request, schema, message) {
-  if (request.headers.get('content-type') === 'application/proto') {
-    return new Response(toBinary(schema, message), {
-      headers: { 'content-type': 'application/proto' },
-    });
-  }
-  return new Response(toJsonString(schema, message), {
-    headers: { 'content-type': 'application/json' },
+// The qmdb clients always send binary protobuf, so the mocks only speak it.
+function rpcResponse(schema, message) {
+  return new Response(toBinary(schema, message), {
+    headers: { 'content-type': 'application/proto' },
   });
 }
 
@@ -141,10 +131,13 @@ for (const family of ['mmr', 'mmb']) {
     const get = fixture(family, 'get', GetRequestSchema, GetResponseSchema);
     const many = fixture(family, 'get_many', GetManyRequestSchema, GetManyResponseSchema);
     const range = fixture(family, 'range_first', GetRangeRequestSchema, GetRangeResponseSchema);
-    // A proof with a chunk but no operations. An empty proof would encode to zero
-    // bytes, which the client reads as missing before reaching wasm.
+    // A proof with one malformed operation. wasm can only fail to decode it if the
+    // bytes reach it, which an empty proof (zero bytes, read as missing) wouldn't.
     const currentOperationResponse = create(GetCurrentOperationRangeResponseSchema, {
-      proof: create(CurrentOperationRangeProofSchema, { chunks: [new Uint8Array(32)] }),
+      proof: create(CurrentOperationRangeProofSchema, {
+        encodedOperations: [new Uint8Array([0xff])],
+        chunks: [new Uint8Array(32)],
+      }),
     });
     const large = (1n << 53n) + 100n;
     let abortFetch = false;
@@ -171,7 +164,8 @@ for (const family of ['mmr', 'mmb']) {
       } else {
         throw new Error(`unexpected QMDB RPC path ${path}`);
       }
-      const decoded = decodeRequest(cases[0], body, request.headers.get('content-type'));
+      assert.equal(request.headers.get('content-type'), 'application/proto');
+      const decoded = fromBinary(cases[0], body);
       forwarded.push({
         path,
         minSequenceNumber: decoded.minSequenceNumber,
@@ -185,7 +179,7 @@ for (const family of ['mmr', 'mmb']) {
           init.signal.addEventListener('abort', () => reject(init.signal.reason), { once: true });
         });
       }
-      return rpcResponse(request, cases[1], cases[2]);
+      return rpcResponse(cases[1], cases[2]);
     });
 
     function assertForwarded(method, minSequenceNumber) {
@@ -237,7 +231,7 @@ for (const family of ['mmr', 'mmb']) {
         startLocation: 0n,
         maxLocations: 1,
         minSequenceNumber: minimum,
-      }, range.root, options), /current operation range proof has no operations/);
+      }, range.root, options), /failed to decode current operation range proof/);
       assertForwarded('GetCurrentOperationRange', minimum);
     }
 

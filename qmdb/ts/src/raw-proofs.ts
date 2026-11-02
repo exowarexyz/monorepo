@@ -1,5 +1,5 @@
-// Copies of the qmdb services whose responses declare each proof as `bytes`
-// instead of a message.
+// Copies of the qmdb services whose responses declare each proof as `repeated
+// bytes` instead of a message.
 //
 // A message field and a `bytes` field are encoded the same way on the wire (a
 // tag, a length, then the bytes), so these copies read the same responses as
@@ -12,105 +12,115 @@
 // This only works in binary format. In JSON a proof is a JSON object, not
 // base64 text, so the qmdb clients always use binary.
 //
-// Two differences from the generated services. If a proof's field appears more
-// than once in a response, protobuf merges the parts of a message but keeps only
-// the last `bytes` value. No encoder splits a message that way, and wasm rejects
-// the partial proof. And these messages keep their generated `$typeName`, so
-// `isMessage` can't tell them apart from the generated ones.
-import { clone, createFileRegistry, type DescService, type Message } from '@bufbuild/protobuf';
+// A proof field declared once can still appear several times in a response.
+// Protobuf parses the occurrences as one message, merged in order, which is the
+// same as parsing their bytes joined end to end. So each proof field is
+// rewritten as `repeated bytes`, which keeps every occurrence, and the client
+// joins them before calling wasm. A response from the qmdb server has one
+// occurrence, which goes to wasm without a copy.
+//
+// These messages keep their generated `$typeName`, so `isMessage` can't tell
+// them apart from the generated ones.
+import { clearField, clone, createFileRegistry, type DescService, type Message } from '@bufbuild/protobuf';
 import type { GenMessage, GenService, GenServiceMethods } from '@bufbuild/protobuf/codegenv1';
-import { FieldDescriptorProto_Type, FileDescriptorProtoSchema } from '@bufbuild/protobuf/wkt';
 import {
-  CurrentOperationService,
-  type GetCurrentOperationRangeResponse,
-} from './generated/proto/qmdb/v1/current_operation_pb.js';
-import {
-  KeyLookupService,
-  type GetManyResponse,
-  type GetResponse,
-} from './generated/proto/qmdb/v1/key_lookup_pb.js';
-import { OrderedKeyRangeService, type GetRangeResponse } from './generated/proto/qmdb/v1/key_range_pb.js';
-import {
-  OperationLogService,
-  type GetOperationRangeResponse,
-  type GetOperationsResponse,
-  type SubscribeResponse,
-} from './generated/proto/qmdb/v1/operation_log_pb.js';
+  FieldDescriptorProto_Label,
+  FieldDescriptorProto_Type,
+  FieldDescriptorProtoSchema,
+  FileDescriptorProtoSchema,
+} from '@bufbuild/protobuf/wkt';
+import { CurrentOperationService } from './generated/proto/qmdb/v1/current_operation_pb.js';
+import { KeyLookupService } from './generated/proto/qmdb/v1/key_lookup_pb.js';
+import { OrderedKeyRangeService } from './generated/proto/qmdb/v1/key_range_pb.js';
+import { OperationLogService } from './generated/proto/qmdb/v1/operation_log_pb.js';
+
+/** How a retyped field is declared: plain, `optional` or `repeated`. */
+type Kind = 'singular' | 'optional' | 'repeated';
+
+type Methods<S> = S extends GenService<infer M> ? M : never;
+type Output<Method> = Method extends { output: GenMessage<infer M> } ? M : never;
 
 /**
- * Rebuild `service` from its file descriptor, with the named fields of the
- * named response messages changed from message fields to `bytes` fields.
- * Throws if a named message or field is missing or is not a message field, so a
- * proto change can't silently leave a proof decoded as objects.
+ * For each method of service `S`, the response fields to retype, by their
+ * TypeScript names. A method or field `S` doesn't have is a type error.
  */
-function rawService<S extends DescService>(
-  service: DescService,
-  fields: Readonly<Record<string, readonly string[]>>,
-): S {
+type Fields<S, F> = {
+  [M in keyof F]: M extends keyof Methods<S>
+    ? { [K in keyof F[M]]: K extends keyof Output<Methods<S>[M]> ? Kind : never }
+    : never;
+};
+
+/**
+ * Message `M` with the fields in `F` holding their encoded bytes, one entry per
+ * occurrence on the wire.
+ */
+type RawMessage<M extends Message, F> = Message<M['$typeName']> &
+  Omit<M, keyof F> & { [K in keyof F]: Uint8Array[] };
+
+/** Service `S` with the outputs of the methods in `F` retyped. */
+type RawService<S, F> = GenService<{
+  [M in keyof Methods<S>]: M extends keyof F
+    ? Omit<Methods<S>[M], 'output'> & { output: GenMessage<RawMessage<Output<Methods<S>[M]>, F[M]>> }
+    : Methods<S>[M];
+}>;
+
+/**
+ * Rebuild `service` from its file descriptor, with the named response fields
+ * changed from message fields to `repeated bytes` fields. Throws if a named
+ * method is missing or a named field is not a message field declared the way
+ * `fields` says, so a proto change can't silently leave a proof decoded as
+ * objects or typed wrong.
+ */
+function rawService<S extends GenService<GenServiceMethods>, const F extends Fields<S, F>>(
+  service: S,
+  fields: F,
+): RawService<S, F> {
   const file = clone(FileDescriptorProtoSchema, service.file.proto);
-  for (const [messageName, fieldNames] of Object.entries(fields)) {
-    const message = file.messageType.find(({ name }) => name === messageName);
-    for (const fieldName of fieldNames) {
-      const field = message?.field.find(({ name }) => name === fieldName);
-      if (field?.type !== FieldDescriptorProto_Type.MESSAGE) {
-        throw new Error(`qmdb ${messageName}.${fieldName} is missing or not a message field`);
+  for (const [methodName, outputFields] of Object.entries(fields as Record<string, Record<string, Kind>>)) {
+    const output = (service as DescService).method[methodName]?.output;
+    if (output === undefined) {
+      throw new Error(`qmdb ${service.name} has no method ${methodName}`);
+    }
+    const message = file.messageType.find(({ name }) => name === output.name);
+    for (const [fieldName, kind] of Object.entries(outputFields)) {
+      const name = output.field[fieldName]?.name;
+      const field = message?.field.find((field) => field.name === name);
+      const declared = field?.label === FieldDescriptorProto_Label.REPEATED
+        ? 'repeated'
+        : field?.proto3Optional ? 'optional' : 'singular';
+      if (field?.type !== FieldDescriptorProto_Type.MESSAGE || declared !== kind) {
+        throw new Error(`qmdb ${output.name}.${fieldName} is not a ${kind} message field`);
       }
       field.type = FieldDescriptorProto_Type.BYTES;
       field.typeName = '';
+      field.label = FieldDescriptorProto_Label.REPEATED;
+      // An `optional` field's synthetic oneof is dropped once no field is in it.
+      field.proto3Optional = false;
+      clearField(field, FieldDescriptorProtoSchema.field.oneofIndex);
     }
   }
   // The registry also adds the imports of each file it resolves, so resolving
   // direct imports is enough.
   const registry = createFileRegistry(file, (name) =>
     service.file.dependencies.find((dependency) => dependency.proto.name === name));
-  return registry.getService(service.typeName) as S;
+  return registry.getService(service.typeName) as RawService<S, F>;
 }
 
-/** Message `M` with the fields in `Fields` retyped. A field `M` lacks is a type error. */
-type Raw<M extends Message, Fields extends { [K in keyof Fields]: K extends keyof M ? unknown : never }> =
-  Message<M['$typeName']> & Omit<M, keyof Fields> & Fields;
-
-type Methods<S> = S extends GenService<infer M> ? M : never;
-
-/**
- * Generated service type `S`, with the outputs of the methods in `Outputs`
- * replaced. A method `S` lacks is a type error.
- */
-type WithOutputs<
-  S extends GenService<GenServiceMethods>,
-  Outputs extends { [K in keyof Outputs]: K extends keyof Methods<S> ? Message : never },
-> = GenService<{
-  [K in keyof Methods<S>]: K extends keyof Outputs
-    ? Omit<Methods<S>[K], 'output'> & { output: GenMessage<Outputs[K]> }
-    : Methods<S>[K];
-}>;
-
-export const RawOperationLogService: WithOutputs<typeof OperationLogService, {
-  getOperationRange: Raw<GetOperationRangeResponse, { proof: Uint8Array }>;
-  getOperations: Raw<GetOperationsResponse, { proof: Uint8Array }>;
-  subscribe: Raw<SubscribeResponse, { proof: Uint8Array }>;
-}> = /*@__PURE__*/ rawService(OperationLogService, {
-  GetOperationRangeResponse: ['proof'],
-  GetOperationsResponse: ['proof'],
-  SubscribeResponse: ['proof'],
+export const RawOperationLogService = /*@__PURE__*/ rawService(OperationLogService, {
+  getOperationRange: { proof: 'singular' },
+  getOperations: { proof: 'singular' },
+  subscribe: { proof: 'singular' },
 });
 
-export const RawKeyLookupService: WithOutputs<typeof KeyLookupService, {
-  get: Raw<GetResponse, { proof: Uint8Array }>;
-  getMany: Raw<GetManyResponse, { results: Uint8Array[] }>;
-}> = /*@__PURE__*/ rawService(KeyLookupService, {
-  GetResponse: ['proof'],
-  GetManyResponse: ['results'],
+export const RawKeyLookupService = /*@__PURE__*/ rawService(KeyLookupService, {
+  get: { proof: 'singular' },
+  getMany: { results: 'repeated' },
 });
 
-export const RawOrderedKeyRangeService: WithOutputs<typeof OrderedKeyRangeService, {
-  getRange: Raw<GetRangeResponse, { entries: Uint8Array[]; startProof?: Uint8Array }>;
-}> = /*@__PURE__*/ rawService(OrderedKeyRangeService, {
-  GetRangeResponse: ['entries', 'start_proof'],
+export const RawOrderedKeyRangeService = /*@__PURE__*/ rawService(OrderedKeyRangeService, {
+  getRange: { entries: 'repeated', startProof: 'optional' },
 });
 
-export const RawCurrentOperationService: WithOutputs<typeof CurrentOperationService, {
-  getCurrentOperationRange: Raw<GetCurrentOperationRangeResponse, { proof: Uint8Array }>;
-}> = /*@__PURE__*/ rawService(CurrentOperationService, {
-  GetCurrentOperationRangeResponse: ['proof'],
+export const RawCurrentOperationService = /*@__PURE__*/ rawService(CurrentOperationService, {
+  getCurrentOperationRange: { proof: 'singular' },
 });

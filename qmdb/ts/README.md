@@ -29,8 +29,8 @@ All unary proof requests accept an optional `minSequenceNumber`: the minimum
 Store sequence for checking publication of the requested watermark.
 
 The clients always talk binary protobuf and ignore `useBinaryFormat`. Each proof
-goes to WASM as the bytes the server sent, without being decoded in JS first,
-and JSON can't carry it that way.
+goes to WASM as the bytes the server sent for it, without being decoded in JS
+first, and JSON can't carry it that way.
 
 Subscription decoding checks internal proof consistency. Compare the returned
 root with an independently trusted root for the frame tip before using its

@@ -3,8 +3,8 @@ import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import { create, fromBinary, toBinary } from '@bufbuild/protobuf';
 import { GetCurrentOperationRangeResponseSchema } from '../dist/generated/proto/qmdb/v1/current_operation_pb.js';
-import { GetManyResponseSchema, GetResponseSchema } from '../dist/generated/proto/qmdb/v1/key_lookup_pb.js';
-import { GetRangeResponseSchema } from '../dist/generated/proto/qmdb/v1/key_range_pb.js';
+import { GetManyResponseSchema, GetRequestSchema, GetResponseSchema } from '../dist/generated/proto/qmdb/v1/key_lookup_pb.js';
+import { GetRangeRequestSchema, GetRangeResponseSchema } from '../dist/generated/proto/qmdb/v1/key_range_pb.js';
 import {
   GetOperationRangeResponseSchema,
   GetOperationsResponseSchema,
@@ -62,9 +62,10 @@ test('test_raw_proof_fields_are_views_of_the_encoded_proof', () => {
   for (const [raw, schema, proofSchema, proofInit] of cases) {
     const proof = create(proofSchema, proofInit);
     const wire = toBinary(schema, create(schema, { proof }));
-    const decoded = fromBinary(raw, wire);
-    assertViewOf(decoded.proof, wire);
-    assert.deepEqual(decoded.proof, toBinary(proofSchema, proof), raw.typeName);
+    const [part, ...rest] = fromBinary(raw, wire).proof;
+    assert.equal(rest.length, 0, raw.typeName);
+    assertViewOf(part, wire);
+    assert.deepEqual(part, toBinary(proofSchema, proof), raw.typeName);
   }
 });
 
@@ -76,9 +77,10 @@ test('test_raw_proof_fields_match_server_fixtures', () => {
   for (const family of families) {
     for (const [suffix, raw, schema, proofSchema] of cases) {
       const wire = fixtureResponse(family, suffix);
-      const decoded = fromBinary(raw, wire);
-      assertViewOf(decoded.proof, wire);
-      assert.deepEqual(decoded.proof, toBinary(proofSchema, fromBinary(schema, wire).proof), `${family} ${suffix}`);
+      const [part, ...rest] = fromBinary(raw, wire).proof;
+      assert.equal(rest.length, 0, `${family} ${suffix}`);
+      assertViewOf(part, wire);
+      assert.deepEqual(part, toBinary(proofSchema, fromBinary(schema, wire).proof), `${family} ${suffix}`);
     }
   }
 });
@@ -98,7 +100,7 @@ test('test_raw_get_many_and_get_range_reencode_to_the_received_bytes', () => {
       const raw = fromBinary(rangeOutput, wire);
       const decoded = fromBinary(GetRangeResponseSchema, wire);
       assert.equal(raw.entries.length, decoded.entries.length);
-      assert.equal(raw.startProof === undefined, decoded.startProof === undefined, `${family} ${suffix}`);
+      assert.equal(raw.startProof.length, decoded.startProof === undefined ? 0 : 1, `${family} ${suffix}`);
       assert.deepEqual(toBinary(rangeOutput, raw), wire, `${family} ${suffix}`);
     }
   }
@@ -108,7 +110,7 @@ test('test_raw_get_range_keeps_start_proof_presence', () => {
   const output = RawOrderedKeyRangeService.method.getRange.output;
   const entries = [create(CurrentKeyValueProofSchema, { proof: fill(40, 1), encodedOperation: fill(9, 2) })];
   const absent = toBinary(GetRangeResponseSchema, create(GetRangeResponseSchema, { entries }));
-  assert.equal(fromBinary(output, absent).startProof, undefined);
+  assert.deepEqual(fromBinary(output, absent).startProof, []);
 
   // An empty start proof is still a start proof, and must survive the round trip.
   const empty = toBinary(GetRangeResponseSchema, create(GetRangeResponseSchema, {
@@ -117,8 +119,52 @@ test('test_raw_get_range_keeps_start_proof_presence', () => {
   }));
   assert.notDeepEqual(empty, absent);
   const raw = fromBinary(output, empty);
-  assert.deepEqual(raw.startProof, new Uint8Array());
+  assert.deepEqual(raw.startProof, [new Uint8Array()]);
   assert.deepEqual(toBinary(output, raw), empty);
+});
+
+test('test_split_proofs_are_joined_like_protobuf_merges_them', () => {
+  const output = RawKeyLookupService.method.get.output;
+  const first = create(CurrentKeyValueProofSchema, { proof: fill(40, 1) });
+  const second = create(CurrentKeyValueProofSchema, { encodedOperation: fill(9, 2) });
+  // Two occurrences of the proof field, which protobuf parses as one merged proof.
+  const wire = new Uint8Array([
+    ...toBinary(GetResponseSchema, create(GetResponseSchema, { proof: first })),
+    ...toBinary(GetResponseSchema, create(GetResponseSchema, { proof: second })),
+  ]);
+  const parts = fromBinary(output, wire).proof;
+  assert.equal(parts.length, 2);
+  const joined = new Uint8Array(Buffer.concat(parts));
+  assert.deepEqual(
+    fromBinary(CurrentKeyValueProofSchema, joined),
+    fromBinary(GetResponseSchema, wire).proof,
+  );
+});
+
+test('test_clients_accept_proofs_split_across_occurrences', async (t) => {
+  let body;
+  t.mock.method(globalThis, 'fetch', async () => new Response(body, { headers: { 'content-type': 'application/proto' } }));
+  for (const family of families) {
+    const name = `current_ordered_variable_variable_keys_variable_values_${family}`;
+    const read = (suffix) => readFileSync(new URL(`fixtures/current/${name}_${suffix}.txt`, import.meta.url), 'utf8').trim().split('\n');
+    const [root, chunkSize, request] = read('get');
+    const client = new OrderedQmdbClient('http://qmdb.test', { merkleFamily: family, currentChunkSize: Number(chunkSize) });
+    const { key, tip } = fromBinary(GetRequestSchema, Buffer.from(request, 'hex'));
+    // A valid response, then an empty second occurrence of its proof field.
+    body = new Uint8Array([...fixtureResponse(family, 'get'), 0x0a, 0x00]);
+    await client.get(key.subarray(1), tip, Buffer.from(root, 'hex'));
+
+    const [rangeRoot, , rangeRequest] = read('range_first');
+    const range = fromBinary(GetRangeRequestSchema, Buffer.from(rangeRequest, 'hex'));
+    // The same for the optional start proof.
+    body = new Uint8Array([...fixtureResponse(family, 'range_first'), 0x12, 0x00]);
+    await client.getRange({
+      startKey: range.startKey.subarray(1),
+      endKey: range.endKey?.subarray(1),
+      limit: range.limit,
+      tip: range.tip,
+    }, Buffer.from(rangeRoot, 'hex'));
+  }
 });
 
 test('test_clients_use_binary_even_when_json_is_requested', async (t) => {
