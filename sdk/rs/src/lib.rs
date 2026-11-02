@@ -3169,13 +3169,12 @@ fn retry_backoff_delay(attempt: usize, retry_config: RetryConfig) -> Duration {
 }
 
 #[cfg(test)]
-// These futures hold whole servers inline. Boxing them in tests would only add noise.
-#[allow(clippy::large_futures)]
 mod tests {
     use super::*;
     use crate::kv_codec::{KvFieldKind, KvPredicate, KvPredicateCheck, KvPredicateConstraint};
     use buffa::Message as _;
     use buffa_types::google::protobuf::Duration as ProtoDuration;
+    use commonware_macros::boxed;
     use connectrpc::compression::{CompressionProvider, GzipProvider};
     use connectrpc::error::ErrorDetail;
     use exoware_proto::query::TraversalMode as ProtoTraversalMode;
@@ -3714,6 +3713,7 @@ mod tests {
         }
     }
 
+    #[boxed]
     async fn assert_streaming_deadline<T>(
         future: impl std::future::Future<Output = Result<T, ClientError>>,
     ) {

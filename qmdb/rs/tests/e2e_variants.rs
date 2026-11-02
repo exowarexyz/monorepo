@@ -1,8 +1,5 @@
 //! Authenticated Commonware QMDB interfaces through Store and Connect
 
-// These futures hold whole servers and stores inline. Boxing them in tests would only add noise.
-#![allow(clippy::large_futures)]
-
 #[macro_use]
 #[path = "variants/source.rs"]
 mod source;

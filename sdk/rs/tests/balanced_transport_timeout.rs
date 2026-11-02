@@ -1,12 +1,11 @@
-// These futures hold whole servers and stores inline. Boxing them in tests would only add noise.
-#![allow(clippy::large_futures)]
-
 use std::future::Future;
 use std::time::Duration;
 
+use commonware_macros::boxed;
 use exoware_sdk::transport::BalancedHttp2Config;
 use exoware_sdk::{ClientError, ErrorCode, Key, RetryConfig, StoreClient, StoreKeyPrefix};
 
+#[boxed]
 async fn timeout_code<T>(future: impl Future<Output = Result<T, ClientError>>) -> ErrorCode {
     match tokio::time::timeout(Duration::from_millis(400), future)
         .await

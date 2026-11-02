@@ -2,15 +2,13 @@
 //! operations + current boundary state to a live store stack, then
 //! verify roots and proofs match.
 
-// These futures hold whole servers and stores inline. Boxing them in tests would only add noise.
-#![allow(clippy::large_futures)]
-
 mod common;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroU64;
 
 use commonware_cryptography::Sha256;
+use commonware_macros::boxed;
 use commonware_runtime::tokio as cw_tokio;
 use commonware_runtime::Runner as _;
 use commonware_storage::journal::contiguous::fixed::Config as FixedJournalConfig;
@@ -1311,6 +1309,7 @@ async fn test_ordered_mmb_current_boundaries_survive_coalesced_publication() {
 }
 
 /// Store requests `operation` makes.
+#[boxed]
 async fn store_calls<T>(
     query: &common::CountingQuery,
     operation: impl std::future::Future<Output = Result<T, exoware_qmdb::QmdbError>>,

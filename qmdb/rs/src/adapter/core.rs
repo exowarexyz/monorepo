@@ -3,6 +3,7 @@ mod tests;
 
 use commonware_codec::{Codec, Copying, Decode};
 use commonware_cryptography::{Digest, Hasher};
+use commonware_macros::boxed;
 use commonware_parallel::Strategy;
 use commonware_storage::merkle::{
     hasher::Hasher as MerkleHasher, mem::Mem, Family, Location, Position,
@@ -297,6 +298,7 @@ pub(crate) async fn load_operation_bytes_at<F: Family>(
     Ok(bytes.to_vec())
 }
 
+#[boxed]
 pub(crate) async fn load_operation_bytes_range<F: Family>(
     session: &ReadSession,
     start_location: Location<F>,
