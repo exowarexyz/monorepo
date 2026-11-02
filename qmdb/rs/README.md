@@ -1,386 +1,255 @@
 # exoware-qmdb
 
-Mirror authenticated Commonware QMDB operation ranges into an Exoware Store and
-serve historical reads, proofs, and ConnectRPC APIs.
+Upload Commonware QMDB data to an Exoware Store, serve proof queries, and verify
+responses against trusted roots. The crate supports ordered, unordered,
+immutable, and keyless databases with MMR or MMB Merkle trees.
 
-## Status
+The application captures operations from its Commonware database and uses
+`adapter::upload` to prepare Store rows. After writing those rows, the application
+publishes a watermark identifying the durable prefix it is ready to serve.
+`adapter` readers query that data directly, while `service::server` exposes it
+through ConnectRPC and `service::client` verifies the responses.
 
-`exoware-qmdb` is **ALPHA** software and is not yet recommended for production
-use. Developers should expect breaking changes and occasional instability.
+## Read and verify
 
-## Crate layout
+Queries identify a database state by its tip, the inclusive final operation
+location, and its root, a hash commitment to that state. The following example
+reads an already published keyless operation log through ConnectRPC. It uses
+variable-length byte values and verifies the response against an
+application-supplied root:
 
-| Module | Contents |
-|---|---|
-| `adapter` | Store-backed readers (`Ordered`, `Unordered`, `Immutable`, `Keyless`), upload staging (`adapter::upload`), and prune policies |
-| `service::proto` | Generated `qmdb.v1` types |
-| `service::server` | One Connect stack function per kind (`service::server::ordered_stack`, ...) |
-| `service::client` | One verifying client per kind (`service::client::Ordered`, ...), built from the per-service clients in `service::client::rpc` |
+```rust
+use commonware_cryptography::{sha256::Digest, Sha256};
+use commonware_storage::{
+    merkle::{mmr, Location},
+    qmdb::keyless::variable::Operation,
+};
+use exoware_qmdb::{
+    service::{client::rpc::OperationLogClient, proto::qmdb::v1::GetOperationRangeRequest},
+    QmdbError,
+};
 
-## Native backends
+type Op = Operation<mmr::Family, Vec<u8>>;
 
-All backends use the same stateless upload functions. Rust readers and proof
-clients are generic over the Commonware Merkle family and operation codec.
-Both MMR and MMB are supported.
+async fn read_prefix(
+    endpoint: &str,
+    tip: Location<mmr::Family>,
+    trusted_root: &Digest,
+) -> Result<Vec<Op>, QmdbError> {
+    let client = OperationLogClient::<_, mmr::Family, Sha256, Op>::plaintext(
+        endpoint,
+        ((0..=4096).into(), ()),
+    );
+    let result = client
+        .get_operation_range(
+            GetOperationRangeRequest {
+                tip: tip.as_u64(),
+                start_location: 0,
+                max_locations: 100,
+                ..Default::default()
+            },
+            trusted_root,
+        )
+        .await?;
+    Ok(result.operations)
+}
+```
 
-| Commonware source | Rust reader | Operation encodings and keys | Source storage/index variants |
-|---|---|---|---|
-| `any::ordered`, `current::ordered` | `adapter::Ordered` | Fixed encoding with fixed keys, or variable encoding with fixed or `Vec<u8>` keys | Plain and partitioned |
-| `any::unordered`, `current::unordered` | `adapter::Unordered` | Fixed encoding with fixed keys, or variable encoding with fixed or `Vec<u8>` keys | Plain and partitioned |
-| `immutable` | `adapter::Immutable` | Fixed encoding with fixed keys, or variable encoding with fixed or `Vec<u8>` keys | Full and compact |
-| `keyless` | `adapter::Keyless` | Fixed or variable encoding | Full and compact |
+The endpoint must serve that database and codec, and the root and tip must come
+from authenticated application state. The example allows values up to 4,096
+bytes and returns up to the first 100 operations at `tip`. For HTTPS or
+authentication, use `new` with a configured transport.
 
-Readers default to `VariableEncoding<V>`. Select `FixedEncoding<V>` for fixed
-operation codecs. Source indexing and compactness control how Commonware retains
-local state. All variants use the same Exoware upload functions and row format.
-The `any` modules provide named `partitioned::p256` and `partitioned::p64k`
-aliases. Both `any` and `current` expose `partitioned::Db` with a const-generic
-partition prefix width.
+### Proofs and roots
 
-Each Store namespace must contain one consistent QMDB operation history with
-one family, hasher, and codec configuration. Use the SDK `StoreKeyPrefix` or a
-separate Store to isolate instances. The row-family prefixes do not identify
-QMDB instances or Merkle families.
+`OperationRangeProof` authenticates consecutive log entries, and
+`OperationMultiProof` authenticates entries at selected locations. Both establish
+log membership, so an included update need not still be active.
 
-Reader constructors take a `PrefixedStoreClient` over the QMDB namespace. Call
-`latest_published_watermark` to check the greatest published watermark observed
-by the client.
+For queries about active state, `Current*` proofs also authenticate the activity
+bitmap at a batch boundary, the final commit location of an applied batch.
+Current key proofs establish active values, and ordered key proofs can establish
+absence. "Current" refers to that requested boundary, which may be older than
+the latest published boundary.
 
-## Authenticated upload contract
+For a database with current state, pass its trusted current root. The proof's
+operation-root witness binds the operation log to that root. For an
+operation-log-only database, pass its trusted operation-log root. Native adapter
+readers check proofs against stored roots, while service clients check against
+caller-supplied roots. A root received with an untrusted response is not a trust
+anchor.
 
-`AuthenticatedOperationRange` describes the half-open interval
-`[start_location, end_location)` using:
+Range verification binds the tip and the exact interval
+`[start, min(start + max_locations, tip + 1))`. Multi-proof verification binds the
+tip and the requested locations. The `GetOperations` RPC requires a nonempty, strictly
+ascending list of at most 1,024 locations. The native
+`Unordered::operation_multi_proof` and `Keyless::operation_multi_proof` helpers
+accept larger valid sets.
 
-- the exclusive end location and canonical inactive peak count
-- pinned prefix nodes in `Family::nodes_to_pin(start_location)` order
-- the exact canonical encoded operations in location order
+## Choose a reader and service
 
-`prepare_authenticated_range` takes that packet, an independently trusted
-operation-log root, the originating operation codec configuration, and a
-parallel execution strategy (`commonware_parallel::Strategy`). It authenticates
-the range and pins, checks canonical operation encodings and commit floors, and
-prepares operation, keyed-index, and Merkle node rows, including a presence
-marker for the final location. Preparation is a pure function of those inputs.
+Choose the `adapter` reader that matches your source database. All four expose
+operation roots and range proofs, with additional queries for each kind:
 
-Preparation reconstructs the operation-log root from the pins and encoded operations
-before decoding operations.
+| Reader | Additional queries |
+| --- | --- |
+| `Ordered` | Indexed reads at a tip, current key hits, exclusions, and ordered key ranges |
+| `Unordered` | Indexed reads at a tip and current key hits |
+| `Immutable` | `get_at` by key |
+| `Keyless` | `get_at` by operation location |
 
-The packet must contain every operation in its declared interval. Its final
-operation must be a commit whose inactivity floor determines the canonical
-inactive-peak count. Earlier commits are allowed,
-so the same API accepts bootstrap packets, complete prefixes, incremental
-suffixes, and overlapping ranges. A packet beginning at zero has no pinned
-prefix nodes.
+Current queries require uploaded current-boundary material. For unordered QMDB,
+`get_many` omits missing or inactive keys because it has no exclusion proofs.
+For ordered QMDB, keys must have the same `K::Ord` ordering as their raw bytes.
 
-Use the source's exact operations. In particular, ordered operations include
-Commonware's predecessor repairs and successor links. Upload those operations
-in their original order.
+Readers take a `PrefixedStoreClient` and the source's codec configuration. They
+support fixed and variable encodings, with `VariableEncoding<V>` as the default.
+Source index partitioning and full or compact storage do not change the upload
+format. Keep each namespace to a single operation history, Merkle family,
+hasher, and codec by using distinct SDK prefixes or Stores for separate
+instances.
 
-`UploadOperation<F>` supplies the shared codec, commit-floor, and keyed-index
-contract. Commonware ordered, unordered, immutable, and keyless operations
-implement it and share the same preparation and staging functions.
+[`service::server`](src/service/server/mod.rs) provides an
+`*_operation_log_stack` for each kind, exposing operation queries and
+subscriptions. `ordered_stack` adds current key queries, ordered key ranges, and
+current operation ranges. `unordered_stack` adds current key queries and current
+operation ranges. Each stack takes the same Store client and codec configuration
+as its native reader.
 
-Here `F`, `H`, and `Op` are the originating Commonware family, hasher, and
-operation type:
+The matching [`service::client`](src/service/client/mod.rs) types compose the
+per-service clients in `service::client::rpc`. Native readers and service clients
+share query names and `Verified*` results where they support the same operation.
+Immutable and keyless logical `get_at` reads are native helpers. Their ConnectRPC
+services expose the operation log.
+
+To inspect publication state, use `latest_published_watermark` for the greatest
+published location observed by a native reader and `root_at` for the canonical
+root at a tip. Ordered and unordered readers also expose the underlying log root
+through `ops_root_at`. On proof requests, an optional `min_sequence_number` sets
+the minimum Store sequence for the publication lookup. Proof reads use the
+sequence observed by that lookup as their minimum.
+
+## Upload and publish
+
+The [`adapter::upload`](src/adapter/upload/mod.rs) functions prepare Store rows
+from captured Commonware operations and proof material. The application owns
+capture, durable queuing, retries, and publication around these stateless
+functions.
+
+An `AuthenticatedOperationRange` contains every canonical encoded operation in
+`[start_location, end_location)`, the prefix pins in `Family::nodes_to_pin` order,
+and the inactive-peak count determined by the final commit's floor. The range
+must end at a commit. It may contain earlier commits, overlap earlier uploads,
+or begin at zero, where no pins are needed. Preserve the source's exact operation
+order, including ordered QMDB's predecessor repairs and successor links.
+
+Pass this range to `prepare_authenticated_range` with the source's codec
+configuration and an independently trusted operation-log root. It checks the
+operations and pins against that root, then prepares operation, index, and
+Merkle rows. For an operation-log-only database with a complete prefix that fits
+in one atomic Store Put, data and publication can be staged together. Here `F`,
+`H`, and `Op` are the source's family, hasher, and operation type:
 
 ```rust,ignore
 use commonware_parallel::Sequential;
 use exoware_qmdb::adapter::upload::{
     prepare_authenticated_range, stage_authenticated_range, stage_watermark,
-    AuthenticatedOperationRange,
 };
-use exoware_sdk::{PrefixedStoreClient, StoreClient, StoreWriteBatch};
+use exoware_sdk::StoreWriteBatch;
 
-let client = PrefixedStoreClient::empty(StoreClient::new(store_url));
-
-let range = AuthenticatedOperationRange {
-    start_location,
-    end_location,
-    inactive_peaks,
-    pinned_nodes: &pinned_nodes,
-    encoded_operations: &encoded_operations,
-};
 let prepared = prepare_authenticated_range::<F, H, Op, Sequential>(
     &range,
-    &expected_ops_root,
+    &trusted_ops_root,
     &operation_cfg,
     &Sequential,
 )?;
 let latest = prepared.latest_location();
-
-let mut data = StoreWriteBatch::new();
-stage_authenticated_range(&client, prepared, &mut data)?;
-data.commit(client.client()).await?;
-
-// The caller's durable queue confirms that every required row through latest is durable
-let mut publication = StoreWriteBatch::new();
-stage_watermark::<F>(&client, latest, &mut publication)?;
-publication.commit(client.client()).await?;
+let mut batch = StoreWriteBatch::new();
+stage_authenticated_range(&store, prepared, &mut batch)?;
+stage_watermark::<F>(&store, latest, &mut batch)?;
+let sequence = batch.commit(store.client()).await?;
 ```
 
-The expected root is a trust input, not a root accepted merely because it was
-included in the proof response.
+For incremental or split uploads, publish location `W` only after every required
+row in the contiguous prefix through `W` is durable. This includes pins, indices,
+and any current-boundary rows inherited from earlier batches. If `[0, 100)` and
+`[200, 300)` are durable, only the prefix through 99 can be published. Once
+`[100, 200)` is durable, publication can advance to 299 without publishing each
+intermediate commit.
 
-### Pin omission
+Workers can prepare and upload ranges independently and out of order, provided
+the application coordinates publication after all required writes succeed.
+Repeated rows from the same history have identical keys and values, so the same
+packet can be retried. To make retries and recovery possible, persist operations,
+proof material, trusted roots, and any current-boundary material before allowing
+the source to discard them.
 
-By default, `stage_authenticated_range` includes the supplied prefix pins. To avoid
-rewriting selected pins, call `prepared.without_pins_at(&positions)` before staging,
-using a `BTreeSet<Position<F>>` of exact positions. Only supplied pins at those
-positions are omitted. Reconstructed nodes, including delayed MMB parents, are
-always staged. Operation and index rows, presence markers, and attached current
-boundary rows are also always staged. Preparation still authenticates every
-supplied pin.
+### Current-state boundaries
 
-The caller must guarantee that omitted nodes have the authenticated digest in
-the same namespace and operation history, become durable before a watermark
-covering the range is published, and remain retained for serving proofs. The
-set can describe already durable nodes or nodes promised by pending predecessor
-uploads. For pending uploads, publication must wait for every required data
-write in the contiguous prefix, even when uploads finish out of order. Tracking
-these dependencies through failures, retries, and restarts belongs to the
-caller. The library does not infer them from operation bounds or inspect Store.
-
-Keep all supplied pins for the first nonzero bootstrap or restart
-packet when prior pins are not guaranteed to be available. Later packets can
-omit exactly the pins covered by the caller's retention and publication
-guarantees. An empty set preserves the default behavior.
-
-## Durable queue and publication
-
-The application's durable queue owns packet retention, upload scheduling,
-retries, and publication. Persist the source operations and proof material,
-together with their trusted roots and any current-boundary material, before
-allowing the source to discard what a retry needs. Workers can then prepare
-packets independently of source DB mutation and independently of other packets.
-
-Uploads may overlap and arrive concurrently or out of order. Repeating rows
-from the same operation history produces the same keys and values, so workers
-can retry the same packet directly.
-
-`stage_watermark` adds a publication row to a `StoreWriteBatch`. Publish location
-`W` only when every required operation, index, and Merkle row in the contiguous
-prefix through `W` is durable. For current QMDB, this includes the boundary rows
-and any inherited sparse rows. The queue advances publication after successful
-Store commits, or stages the required rows and publication in one atomic batch.
-
-For example, if ranges `[0, 100)` and `[200, 300)` are durable, the contiguous
-prefix ends at 99. After `[100, 200)` becomes durable, the caller may publish
-299. It need not publish every intermediate commit location.
-
-Readers fence requests at the latest published watermark. Historical roots and
-proofs use the operation log at the requested valid commit location. Current
-proofs additionally require boundary material for that location. Retaining
-older versioned rows preserves proofs at older boundaries after publication
-advances.
-
-## Current-state boundary material
-
-Current ordered and unordered QMDBs authenticate both an operation log and an
-activity bitmap. Attach the corresponding `CurrentBoundaryState` before staging:
+For a current ordered or unordered database, attach a `CurrentBoundaryState`
+before staging the prepared range:
 
 ```rust,ignore
 let prepared = prepared.with_current_boundary::<H, N>(&boundary)?;
 ```
 
-The boundary contains the trusted current root, an `OpsRootWitness`, bitmap
-chunk deltas, grafted-node deltas, and `pruned_chunks` for the packet's final
-location. Its family, hasher, and chunk size `N` must match the source DB.
+The boundary's root, operation-root witness, bitmap chunks, grafted nodes, and
+`pruned_chunks` count must describe the range's final location, using the source's
+family, hasher, and chunk size `N`. `with_current_boundary` checks the witness's
+binding to the prepared operation-log root, but it does not authenticate the
+supplied chunks, nodes, or pruning count.
 
-`with_current_boundary` checks that the witness binds the authenticated
-operation-log root to `boundary.root`. The caller must already have
-authenticated the boundary's bitmap chunks and grafted nodes against its trusted
-current root. The `pruned_chunks` count must also come from that trusted state.
-The attachment method does not verify chunks, nodes, or that count by itself.
+Use [`recover_boundary_state`](src/adapter/upload/boundary.rs) to derive and
+authenticate chunks and nodes from current range proofs. For an incremental
+boundary, supply cumulative operation logs before and after one finalized batch
+and proofs from that same applied state. With no previous log, it derives a
+complete boundary for bootstrap or restart. The root, witness, and pruning count
+must come from the same trusted source state.
 
-`recover_boundary_state` is the shared proof-based helper for deriving this
-material from a Commonware current DB. For an incremental boundary it takes the
-cumulative operation logs before and after one finalized batch, the trusted
-current root, `pruned_chunks`, the operation-root witness, and current range
-proofs from that same state. Passing no previous log derives a complete boundary
-from the retained operation prefix, including bootstrap or restart material.
-It verifies the supplied current proofs and derives the boundary rows without
-reading the remote Store. It works for ordered and unordered logs.
+Boundary rows are versioned by batch location. Unchanged chunks and nodes are
+inherited from earlier boundaries. Retain the rows needed for every historical
+tip you promise to serve. Source bitmap pruning does not delete Store rows or set
+backend retention. The [`adapter::prune`](src/adapter/prune.rs) helpers construct
+policies for update-index rows. Applications choose Store pruning and replay-log
+retention separately.
 
-Current rows are versioned by the final operation location of their batch.
-Changed chunks and grafted nodes get new rows. Unchanged rows are inherited
-from earlier boundaries. Current proof reads fetch those versioned rows and
-persisted operation Merkle nodes instead of replaying the complete log.
-Internal nodes absent from a sparse boundary can be reconstructed from their
-authenticated children, including parents created by delayed MMB merges.
+### Pin omission
 
-`pruned_chunks` counts the complete, all-zero bitmap chunks discarded from the
-start of the source bitmap. A parent spans the pruning boundary when it covers
-chunks on both sides of that boundary. This is expected during normal updates
-and pruning. For example:
+Successive or overlapping uploads can share prefix pins, the Merkle digests
+needed to authenticate the log before a range starts. When another upload
+supplies those pins, you can avoid writing them again.
+`stage_authenticated_range` includes all supplied prefix pins by default.
+`prepared.without_pins_at(&positions)` omits supplied pins at exactly those
+`BTreeSet<Position<F>>` positions. Preparation still authenticates every pin,
+and reconstructed nodes and all other prepared rows are always staged.
 
-1. A parent covers bitmap chunks 0 and 1.
-2. Updates make chunk 0 entirely inactive, so the source discards it.
-3. Chunk 1 still contains active operations.
-4. Their parent now spans the pruning boundary.
+Omit a pin only when the same authenticated digest in the same namespace and
+history will be durable before publication and retained for serving proofs.
+The pin may already be durable or depend on a pending predecessor upload. In
+the latter case, the application must preserve that dependency through failures,
+retries, and restarts. The library does not inspect Store or infer durability
+from range bounds, so keep all pins for a nonzero bootstrap or restart when
+their availability is not guaranteed.
 
-A proof for an active operation can still need that parent hash. The backend
-computes it from chunk 0's operation-tree hash and chunk 1's current hash, using
-the requested historical boundary. An all-zero bitmap chunk preserves its
-operation-tree hash, so the discarded bitmap data is not needed to compute it.
+## Subscriptions and synchronization
 
-The activity changes happen before pruning and can change the parent hash.
-Pruning itself preserves the root. Since boundary deltas omit discarded chunks,
-the backend recomputes parents spanning the boundary instead of relying on an
-older stored parent hash. The `pruned_chunks` count does not delete backend rows
-or configure retention.
+Read subscription frames with `message_with_root`, supplying a callback that
+returns an independently trusted root for each frame's tip. Filters select
+logical keys and values by exact bytes, prefixes, or regexes. To reconnect,
+resume from `resume_sequence_number + 1`.
 
-Proof capture timing belongs to the source producer. Commonware `any`,
-immutable, and keyless finalized batches expose operations, a root, a proof,
-and pinned nodes before application. Current sources can capture
-`ops_historical_proof`, pinned nodes, the operation-root witness, and current
-range proofs from the applied DB state. Both routes feed the same packet and
-preparation API. Upload workers consume the captured packet independently of
-the source DB.
+Delivery follows Store write frames and waits for publication to cover each
+frame's operations. A frame can contain only part of an uploaded range.
+Overlapping locations within a frame are deduplicated, but retries in later
+frames can repeat operations. Consumers must tolerate at-least-once delivery.
 
-## Reads and ConnectRPC
+To synchronize a local Commonware database from the uploaded log, use
+`OperationLogClient` as a sync `Source`. Build its sync target from a trusted
+operation-log root and retention range. For a current database,
+`current_sync_target` derives the operation-log root from a witness checked
+against the trusted current root.
 
-All four readers expose historical operation roots and range proofs. Ordered
-and unordered readers provide indexed historical key queries. Immutable provides
-indexed `get_at`, and keyless provides location-based `get_at`.
+## Status
 
-Each `service::server` stack function mounts the services one kind supports.
-The matching `service::client` kind type (`Ordered`, `Unordered`, `Immutable`,
-`Keyless`) composes the per-service clients from `service::client::rpc` for
-that stack.
-
-Adapter readers and service clients of the same kind share method names,
-arguments, and `Verified*` result types: `get`, `get_many`, `get_range`,
-`operation_range`, and `current_operation_range`, as each kind supports them.
-Service client methods also take the trusted root to verify against. Adapter
-readers verify against the root stored with the proof.
-
-| Connect stack | Services |
-|---|---|
-| `server::ordered_operation_log_stack`, `server::unordered_operation_log_stack` | Historical operation ranges and subscriptions |
-| `server::immutable_operation_log_stack`, `server::keyless_operation_log_stack` | Historical operation ranges and subscriptions |
-| `server::ordered_stack` | Historical operations, subscriptions, current operation ranges, current key hits and exclusions, ordered key ranges |
-| `server::unordered_stack` | Historical operations, subscriptions, current operation ranges, current key hits |
-
-Full ordered and unordered stacks require uploaded current-boundary material.
-Unordered QMDB omits missing keys from `GetMany` because it has no authenticated
-key-exclusion semantics. Immutable and keyless logical reads are Rust helpers.
-Their Connect stacks expose the operation log.
-
-Connect stacks take a `PrefixedStoreClient` and codec configuration. The services
-in each stack share one native client. All unary proof requests accept an optional
-`min_sequence_number`: the minimum Store sequence for checking publication of
-the requested watermark.
-
-`OperationLogClient` verifies historical ranges against a caller-supplied root.
-Without a current-root witness this is the operation-log root. When a response
-contains that witness, verification binds the operation log to the supplied
-current root.
-
-Every `Verified*` result reports the canonical root at its tip. Service clients return the trusted
-root they verified against; adapter readers derive it from the stored witness.
-Adapter `root_at` returns the canonical root and `ops_root_at` the operation-log
-root.
-
-Unary range verification binds the exact requested
-`[start, min(start + max_locations, tip + 1))` interval. `get_operations`
-proves up to 1024 strictly ascending locations at one tip in a single
-multi-proof and binds exactly that tip and those locations. Ordered key ranges
-verify a linear interval and forward pagination over authenticated successor
-links. Ordered keys order by `K::Ord`, which must match their byte order.
-
-Rust subscriptions use `message_with_root` to obtain an independently trusted
-root for each frame tip; each frame's `root` is that canonical root.
-Subscription filters support exact bytes, prefixes, and regexes over logical
-keys and values. Reconnect from `resume_sequence_number + 1`.
-
-Subscription delivery follows Store write frames and waits for the caller to
-publish a watermark covering each frame's operations. Data rows may span Store
-writes. Individual frames may contain only part of an uploaded range.
-Overlapping operation locations in one frame are deduplicated. Retries in
-separate frames can deliver operations again, so consumers must tolerate
-at-least-once delivery.
-
-`OperationLogClient` also implements Commonware's sync `Source`. Construct a
-sync target from a trusted operation-log root and retention range, or use
-`current_sync_target` to derive the operation-log root from a witness verified
-against a trusted current root.
-
-The update-row pruning helpers `prune::keep_latest_updates(count)` and
-`prune::keep_positions_gte(min_location)` return SDK prune policies using the
-actual prefix-free key layout. Applications explicitly choose Store-row pruning
-and replay-log retention policies. Source bitmap pruning only discards local
-bitmap chunks. Retain the rows needed to serve the application's promised
-historical reads and proofs.
-
-## Browser scope
-
-The TypeScript/WASM API supports both MMR and MMB. `QmdbOperationLogClient`
-authenticates historical operation ranges as raw bytes across backend and
-encoding variants, as contiguous ranges or as operations at chosen locations.
-It also exposes fixed keyless append and fixed unordered update helpers, for one
-location or many per proof, that check the requested operations' semantics.
-
-`OrderedQmdbClient` decodes variable-encoded ordered operations with `Vec<u8>`
-keys and values. Its typed historical ranges, subscriptions, current operation
-ranges, key lookups, and ordered key ranges use that codec. Raw historical range
-support does not imply typed browser API parity for fixed ordered, immutable,
-keyless, or unordered operations, or generic current proof support.
-
-TypeScript subscription decoding checks internal proof consistency. Callers
-must compare each returned root with an independently trusted root for that
-frame tip before using its operations. See the [TypeScript package](../ts/README.md)
-for its transport and verification API.
-
-## Variant tests
-
-The `e2e_variants` suite covers 72 named source combinations:
-
-| Module | Combinations |
-|---|---:|
-| `variants/ordered.rs` | 20: any/current × five encoding/key/value shapes × MMR/MMB |
-| `variants/unordered.rs` | 20: any/current × five encoding/key/value shapes × MMR/MMB |
-| `variants/append.rs` | 20 immutable + 12 keyless: encoding/key/value shapes × full/compact × MMR/MMB |
-
-Fixed encoding uses fixed keys and values. Variable encoding covers fixed and
-variable values with each supported key shape. Keyless variants omit keys.
-Names follow the Commonware hierarchy and identify each dimension, for example
-`test_current_ordered_variable_variable_keys_fixed_values_mmb`. Source
-partitions derive from that name and their role (`merkle`, `log`, or `grafted`).
-
-Partitioned indexes use the same operation codecs and proof types as plain
-indexes. For the same authenticated history, partitioning does not affect proof
-construction or verification. The matrix uses plain source indexes to cover
-these shared interfaces. Partitioned databases use those same interfaces and
-are not instantiated separately by the matrix.
-
-These tests build roots and proof packets with public Commonware DB aliases,
-then use the shared production preparation, Store staging, readers, and Connect
-clients. They cover successive batches, keyed updates/deletes where applicable,
-historical ranges, and independently trusted root checks. Current ordered cases
-also cover bitmap activity, hits, exclusions, and paginated key ranges. Separate
-current ordered tests exercise complete bitmap chunks, grafted nodes, pruning,
-and proofs at older boundaries.
-
-Every case checks its final Connect proof against a browser fixture. The browser
-matrix independently enumerates all 72 names and verifies those raw historical
-proofs with WASM, including current-root witnesses and rejection of tampered
-roots, requests, and operations.
-
-The current ordered variable-key/value MMR and MMB cases also produce current
-query fixtures. Browser tests verify key hits, authenticated misses, bounded
-empty ranges, and pagination against those source-backed responses.
-
-```sh
-cargo test -p exoware-qmdb --test e2e_variants
-cd qmdb/ts
-npm run build:wasm
-npm run build:ts
-npm run test:client
-```
-
-After intentional fixture changes, regenerate the variant and large-location
-fixtures, then run the browser matrix again:
-
-```sh
-UPDATE_FIXTURES=1 cargo test -p exoware-qmdb --test e2e_variants --test e2e_keyless_large_locations
-```
+`exoware-qmdb` is **ALPHA** software and is not yet recommended for production
+use. Developers should expect breaking changes and occasional instability.

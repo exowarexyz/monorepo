@@ -5,16 +5,8 @@
 //! and value bytes, while body counters measure encoded Connect traffic without HTTP headers.
 //! SQL RPC cases include protobuf response decoding, but not client-side result materialization.
 
-use std::alloc::{GlobalAlloc, Layout, System};
-use std::collections::BTreeMap;
-use std::ops::Bound::{Included, Unbounded};
-use std::pin::Pin;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
-use std::task::{Context, Poll};
-
-use axum::body::Body;
 use axum::{
+    body::Body,
     extract::{Request, State},
     middleware::Next,
     response::Response,
@@ -22,17 +14,31 @@ use axum::{
 };
 use bytes::Bytes;
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
-use datafusion::arrow::datatypes::DataType;
-use datafusion::physical_plan::execution_plan::reset_plan_states;
-use datafusion::physical_plan::{collect, ExecutionPlan};
+use datafusion::{
+    arrow::datatypes::DataType,
+    physical_plan::{collect, execution_plan::reset_plan_states, ExecutionPlan},
+};
 use exoware_sdk::{StoreClient, StoreKeyPrefix};
 use exoware_server::{
     Ingest, IngestState, PutError, PutInput, Query, QueryExtra, QueryResult, QueryState, RangeScan,
     RangeScanBatch, RangeScanResult, Sequence,
 };
-use exoware_sql::proto::sql::v1::{QueryRequest, ServiceClient};
-use exoware_sql::{CellValue, IndexSpec, KvSchema, SqlContext, TableColumnConfig};
+use exoware_sql::{
+    proto::sql::v1::{QueryRequest, ServiceClient},
+    CellValue, IndexSpec, KvSchema, SqlContext, TableColumnConfig,
+};
 use http_body::{Body as HttpBody, Frame, SizeHint};
+use std::{
+    alloc::{GlobalAlloc, Layout, System},
+    collections::BTreeMap,
+    ops::Bound::{Included, Unbounded},
+    pin::Pin,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc, Mutex,
+    },
+    task::{Context, Poll},
+};
 use tokio::runtime::Runtime;
 
 static ALLOC_CALLS: AtomicU64 = AtomicU64::new(0);

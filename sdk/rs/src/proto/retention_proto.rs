@@ -4,11 +4,13 @@
 //! output before applying retention effects (the handler is authoritative;
 //! `buf.validate` annotations on the proto are documentation).
 
-use crate::log::retention::v1::{
-    retention_policy, RetentionGreaterThan, RetentionGreaterThanOrEqual, RetentionKeepLatest,
-    RetentionPolicy as ProtoRetentionPolicy, SetRetentionRequestView,
+use crate::{
+    log::retention::v1::{
+        retention_policy, RetentionGreaterThan, RetentionGreaterThanOrEqual, RetentionKeepLatest,
+        RetentionPolicy as ProtoRetentionPolicy, SetRetentionRequestView,
+    },
+    retention::RetentionPolicy,
 };
-use crate::retention::RetentionPolicy;
 use buffa::MessageView;
 
 pub fn parse_retention_policy_from_proto(
