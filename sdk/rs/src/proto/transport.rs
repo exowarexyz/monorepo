@@ -24,6 +24,7 @@
 //! replays matching cookies on later requests. This covers edge affinity cookies as well as normal
 //! domain, path, expiry, and deletion semantics.
 
+use super::zstd_codec::ZstdCodec;
 pub use bytes::Bytes;
 pub use connectrpc::{
     client::{BoxFuture, ClientBody, ClientTransport, HttpClient, ServiceTransport},
@@ -58,8 +59,6 @@ use std::{
     time::Duration,
 };
 use tower::{util::BoxCloneSyncService, ServiceExt};
-
-use super::zstd_codec::ZstdCodec;
 
 const DEFAULT_CONNECTIONS_PER_ORIGIN: usize = 4;
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);

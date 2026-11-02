@@ -2,8 +2,10 @@
 //! [`connect_compression_registry`](super::connect_compression_registry) registers.
 
 use bytes::Bytes;
-use connectrpc::compression::{CompressionProvider, ZstdProvider};
-use connectrpc::ConnectError;
+use connectrpc::{
+    compression::{CompressionProvider, ZstdProvider},
+    ConnectError,
+};
 use zstd::zstd_safe::{
     decompress, find_frame_compressed_size, get_error_name, get_frame_content_size,
 };
