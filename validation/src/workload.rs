@@ -108,7 +108,7 @@ struct SuccessfulWriteWindow {
 
 impl Scenario {
     /// Returns the default operation mix for a named scenario.
-    pub fn mix(self) -> WorkloadMix {
+    pub const fn mix(self) -> WorkloadMix {
         match self {
             Self::ReadHeavy => WorkloadMix {
                 read_ratio: 0.95,
@@ -293,13 +293,13 @@ impl WorkerPlan {
             .and_then(|offset| initial_keys.checked_add(offset))
     }
 
-    fn write_batch_first_write_number(&self, batch_number: u64) -> u64 {
+    const fn write_batch_first_write_number(&self, batch_number: u64) -> u64 {
         batch_number
             .checked_mul(self.write_batch_size)
             .expect("acknowledged write batch should be representable")
     }
 
-    fn write_batch_last_write_number(&self, batch_number: u64) -> u64 {
+    const fn write_batch_last_write_number(&self, batch_number: u64) -> u64 {
         self.write_batch_first_write_number(batch_number)
             .checked_add(self.write_batch_size - 1)
             .expect("acknowledged write batch should be representable")

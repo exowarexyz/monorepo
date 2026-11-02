@@ -195,7 +195,7 @@ fn prune_policy_to_proto(p: &PrunePolicy) -> crate::store::prune::v1::Policy {
     }
 }
 
-fn order_encoding_to_proto(enc: &OrderEncoding) -> PolicyOrderEncoding {
+const fn order_encoding_to_proto(enc: &OrderEncoding) -> PolicyOrderEncoding {
     match enc {
         OrderEncoding::BytesAsc => PolicyOrderEncoding::POLICY_ORDER_ENCODING_BYTES_ASC,
         OrderEncoding::U64Be => PolicyOrderEncoding::POLICY_ORDER_ENCODING_U64_BE,

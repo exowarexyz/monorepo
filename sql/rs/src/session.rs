@@ -36,7 +36,7 @@ impl SqlContext {
     }
 
     /// Accesses DataFusion functionality beyond the SQL context's convenience methods.
-    pub fn datafusion(&self) -> &DataFusionContext {
+    pub const fn datafusion(&self) -> &DataFusionContext {
         &self.inner
     }
 

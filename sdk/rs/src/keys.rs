@@ -80,25 +80,25 @@ impl Prefix {
 
     /// The raw prefix bytes.
     #[inline]
-    pub fn as_bytes(&self) -> &Bytes {
+    pub const fn as_bytes(&self) -> &Bytes {
         &self.0
     }
 
     /// Length of the prefix in bytes.
     #[inline]
-    pub fn len(&self) -> usize {
+    pub const fn len(&self) -> usize {
         self.0.len()
     }
 
     /// True when this is the empty (identity) prefix.
     #[inline]
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
 
     /// Maximum payload length that still yields a key within [`MAX_KEY_LEN`].
     #[inline]
-    pub fn max_payload_len(&self) -> usize {
+    pub const fn max_payload_len(&self) -> usize {
         MAX_KEY_LEN - self.0.len()
     }
 

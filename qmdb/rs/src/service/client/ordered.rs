@@ -71,7 +71,7 @@ where
     ExclusionProof<F, K, E, H::Digest, N>:
         Read<Cfg = (usize, <ordered::Update<K, E> as Read>::Cfg, V::Cfg)>,
 {
-    pub fn new(
+    pub const fn new(
         op_cfg: <ordered::Operation<F, K, E> as Read>::Cfg,
         update_cfg: <ordered::Update<K, E> as Read>::Cfg,
         key_cfg: K::Cfg,

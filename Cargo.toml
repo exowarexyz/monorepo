@@ -27,6 +27,7 @@ unused_must_use = "deny"
 redundant_clone = "warn"
 undocumented_unsafe_blocks = "deny"
 use_self = "warn"
+missing_const_for_fn = "warn"
 
 [workspace.dependencies]
 crossbeam-utils = "0.8.22"

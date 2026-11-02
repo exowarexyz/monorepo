@@ -22,7 +22,7 @@ use crate::service::proto::qmdb::v1::{
 const WIRE_VARINT: u64 = buffa::encoding::WireType::Varint as u64;
 const WIRE_LENGTH_DELIMITED: u64 = buffa::encoding::WireType::LengthDelimited as u64;
 
-fn tag_len(field: u32, wire: u64) -> usize {
+const fn tag_len(field: u32, wire: u64) -> usize {
     buffa::encoding::varint_len(((field as u64) << 3) | wire)
 }
 
@@ -37,7 +37,7 @@ fn message_bytes(len: usize, write: impl FnOnce(&mut BytesMut)) -> Bytes {
     buf.freeze()
 }
 
-fn varint_field_len(field: u32, value: u64) -> usize {
+const fn varint_field_len(field: u32, value: u64) -> usize {
     if value == 0 {
         0
     } else {
@@ -52,11 +52,11 @@ fn write_u64_field(buf: &mut impl BufMut, field: u32, value: u64) {
     }
 }
 
-fn length_delimited_len(field: u32, len: usize) -> usize {
+const fn length_delimited_len(field: u32, len: usize) -> usize {
     tag_len(field, WIRE_LENGTH_DELIMITED) + buffa::encoding::varint_len(len as u64) + len
 }
 
-fn bytes_field_len(field: u32, bytes: &[u8]) -> usize {
+const fn bytes_field_len(field: u32, bytes: &[u8]) -> usize {
     if bytes.is_empty() {
         0
     } else {
@@ -64,7 +64,7 @@ fn bytes_field_len(field: u32, bytes: &[u8]) -> usize {
     }
 }
 
-fn repeated_bytes_field_len(field: u32, bytes: &[u8]) -> usize {
+const fn repeated_bytes_field_len(field: u32, bytes: &[u8]) -> usize {
     length_delimited_len(field, bytes.len())
 }
 
@@ -126,7 +126,7 @@ fn write_repeated_codec_field<T: CodecWrite + EncodeSize>(
     write_codec_body(buf, value);
 }
 
-fn message_field_len(field: u32, inner_len: usize) -> usize {
+const fn message_field_len(field: u32, inner_len: usize) -> usize {
     length_delimited_len(field, inner_len)
 }
 
@@ -135,7 +135,7 @@ fn write_message_field(buf: &mut impl BufMut, field: u32, inner_len: usize) {
     buffa::encoding::encode_varint(inner_len as u64, buf);
 }
 
-fn multi_proof_operation_len(location: u64, encoded_operation: &[u8]) -> usize {
+const fn multi_proof_operation_len(location: u64, encoded_operation: &[u8]) -> usize {
     varint_field_len(1, location) + bytes_field_len(2, encoded_operation)
 }
 

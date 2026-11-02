@@ -30,15 +30,15 @@ impl PreparedUpload {
         Self::default()
     }
 
-    pub fn len(&self) -> usize {
+    pub const fn len(&self) -> usize {
         self.entries.len()
     }
 
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
 
-    pub fn summary(&self) -> UploadSummary {
+    pub const fn summary(&self) -> UploadSummary {
         self.summary
     }
 

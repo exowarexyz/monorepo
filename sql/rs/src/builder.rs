@@ -407,7 +407,7 @@ impl ProjectedBatchBuilder {
         Ok(true)
     }
 
-    pub(crate) fn row_count(&self) -> usize {
+    pub(crate) const fn row_count(&self) -> usize {
         self.row_count
     }
 

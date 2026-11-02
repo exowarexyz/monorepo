@@ -30,7 +30,7 @@ impl IngestRetryArgs {
         Ok(())
     }
 
-    pub fn backoff(&self) -> Duration {
+    pub const fn backoff(&self) -> Duration {
         Duration::from_millis(self.backoff_ms)
     }
 }

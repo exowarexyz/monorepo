@@ -31,7 +31,7 @@ impl KvSchema {
     /// Build a schema over `client`'s namespace prefix. When the Store is
     /// co-tenanted, the caller must pick a prefix disjoint from every co-tenant
     /// so SQL's prefix-bounded scans can't observe another's keys.
-    pub fn new(client: PrefixedStoreClient) -> Self {
+    pub const fn new(client: PrefixedStoreClient) -> Self {
         Self {
             client,
             tables: Vec::new(),
@@ -106,11 +106,11 @@ impl KvSchema {
         self.table(name, columns, vec![entity, version], index_specs)
     }
 
-    pub fn table_count(&self) -> usize {
+    pub const fn table_count(&self) -> usize {
         self.tables.len()
     }
 
-    pub(crate) fn client(&self) -> &PrefixedStoreClient {
+    pub(crate) const fn client(&self) -> &PrefixedStoreClient {
         &self.client
     }
 

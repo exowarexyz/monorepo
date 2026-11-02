@@ -73,7 +73,7 @@ impl ClientConfig {
     }
 
     /// Overrides the request-body compression (see [`RequestCompression`]).
-    pub fn with_request_compression(mut self, compression: RequestCompression) -> Self {
+    pub const fn with_request_compression(mut self, compression: RequestCompression) -> Self {
         self.request_compression = compression;
         self
     }
@@ -84,12 +84,12 @@ impl ClientConfig {
     }
 
     /// Returns the maximum number of attempts for SDK reads.
-    pub fn read_retry_attempts(&self) -> usize {
+    pub const fn read_retry_attempts(&self) -> usize {
         self.read_retry_attempts
     }
 
     /// Returns the request-body compression used by the SDK client.
-    pub fn request_compression(&self) -> RequestCompression {
+    pub const fn request_compression(&self) -> RequestCompression {
         self.request_compression
     }
 }
@@ -118,7 +118,7 @@ pub fn build_client(config: &ClientConfig) -> anyhow::Result<PrefixedStoreClient
 /// Deliberately broader than the query list below: validation writes are
 /// deterministic and idempotent, so replaying a batch whose first attempt may
 /// have landed is safe.
-pub(crate) fn is_transient_ingest_code(code: ErrorCode) -> bool {
+pub(crate) const fn is_transient_ingest_code(code: ErrorCode) -> bool {
     matches!(
         code,
         ErrorCode::ResourceExhausted
@@ -136,7 +136,7 @@ pub(crate) fn is_transient_ingest_error(err: &ClientError) -> bool {
 
 /// Query error codes worth re-polling; anything else fails validation fast so
 /// store bugs are not retried into a timeout.
-pub(crate) fn is_transient_query_code(code: ErrorCode) -> bool {
+pub(crate) const fn is_transient_query_code(code: ErrorCode) -> bool {
     matches!(
         code,
         ErrorCode::Aborted | ErrorCode::ResourceExhausted | ErrorCode::Unavailable

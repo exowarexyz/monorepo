@@ -10,7 +10,7 @@ use exoware_simulator::server;
 #[global_allocator]
 static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-pub fn crate_version() -> &'static str {
+pub const fn crate_version() -> &'static str {
     env!("CARGO_PKG_VERSION")
 }
 

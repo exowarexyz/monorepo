@@ -24,20 +24,20 @@ const LATENCY_BUCKET_UPPER_BOUNDS_US: [u64; 15] = [
 
 // Reports and manifests written before `value_size` existed omit the field;
 // default it to the generator default so they still parse and replay.
-fn default_value_size() -> usize {
+const fn default_value_size() -> usize {
     crate::value::DEFAULT_VALUE_SIZE
 }
 
 // Older reports used the operation stream before Zipf sampling consumed one
 // random draw per operation. Parse them so replay can reject the mismatch.
-fn default_workload_generator_version() -> u16 {
+const fn default_workload_generator_version() -> u16 {
     1
 }
 
 // Reports from before bench supported batched writes did not record this
 // setting. Parse them with the shared command default; replay still rejects
 // their older generator version before execution.
-fn default_batch_size() -> usize {
+const fn default_batch_size() -> usize {
     crate::ingest::DEFAULT_INGEST_BATCH_SIZE
 }
 
@@ -151,7 +151,7 @@ impl BenchReport {
 }
 
 impl BenchManifest {
-    pub fn new(config: BenchConfig, seed: u64) -> Self {
+    pub const fn new(config: BenchConfig, seed: u64) -> Self {
         Self {
             schema_version: BENCH_MANIFEST_SCHEMA_VERSION,
             config,

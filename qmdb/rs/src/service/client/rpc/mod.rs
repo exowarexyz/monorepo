@@ -26,6 +26,6 @@ pub(crate) fn connect_error_to_qmdb(err: ConnectError) -> QmdbError {
     QmdbError::Client(ClientError::Rpc(Box::new(err)))
 }
 
-pub(crate) fn proof_digest_cap<D: Digest>(encoded_proof: &[u8]) -> usize {
+pub(crate) const fn proof_digest_cap<D: Digest>(encoded_proof: &[u8]) -> usize {
     encoded_proof.len() / D::SIZE + 1
 }

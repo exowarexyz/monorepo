@@ -161,7 +161,7 @@ pub(crate) struct KvAggregateExec {
 }
 
 impl KvAggregatePushdownRule {
-    pub(crate) fn new() -> Self {
+    pub(crate) const fn new() -> Self {
         Self
     }
 
@@ -847,7 +847,7 @@ impl KvAggregateExec {
     }
 }
 
-pub(crate) fn rebase_output_plan(
+pub(crate) const fn rebase_output_plan(
     output: AggregateOutputPlan,
     offset: usize,
 ) -> AggregateOutputPlan {

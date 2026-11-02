@@ -105,7 +105,7 @@ pub(crate) fn op_count_for_watermark<F: Family>(
         .ok_or_else(|| QmdbError::CorruptData("watermark overflow".to_string()))
 }
 
-pub(crate) fn ensure_encoded_value_size(len: usize) -> Result<(), QmdbError> {
+pub(crate) const fn ensure_encoded_value_size(len: usize) -> Result<(), QmdbError> {
     if len <= MAX_OPERATION_SIZE {
         Ok(())
     } else {
