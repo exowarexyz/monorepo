@@ -2794,6 +2794,7 @@ dependencies = [
  "bytes",
  "commonware-codec",
  "commonware-parallel",
+ "commonware-runtime",
  "connectrpc",
  "datafusion",
  "exoware-sdk",

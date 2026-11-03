@@ -1,5 +1,6 @@
 mod admission;
 mod buffer;
+mod clock;
 mod decode;
 mod input;
 mod observe;
@@ -11,6 +12,9 @@ mod zstd;
 use crate::engine::IngestError;
 pub use admission::{Admission, BudgetConfig, ByteLease, IngestBudget, RequestLease};
 pub use buffer::{DecodeBuffers, EntryRanges, PutChunk};
+#[cfg(test)]
+pub(crate) use clock::testing;
+pub use clock::{PutClock, PutDeadline, TokioClock};
 use connectrpc::ConnectError;
 pub use decode::{DecodeOutput, DecodeState};
 pub use input::{

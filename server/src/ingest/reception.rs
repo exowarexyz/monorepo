@@ -77,12 +77,14 @@ fn overflow() -> ConnectError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ingest::{box_body, BudgetConfig, IngestBudget, PutEncoding, PutInput, PutMetadata};
+    use crate::ingest::{
+        box_body, testing::tokio_deadline, BudgetConfig, IngestBudget, PutEncoding, PutInput,
+        PutMetadata,
+    };
     use buffa::Message as _;
     use exoware_sdk::{common::Entry, ingest::PutRequest};
     use http_body_util::Full;
     use std::time::Duration;
-    use tokio::time::Instant;
 
     #[tokio::test]
     async fn allowance_admits_growth_and_overlapping_chunks() {
@@ -139,7 +141,7 @@ mod tests {
                         content_length: Some(wire.len()),
                     },
                     limits,
-                    Instant::now() + Duration::from_secs(10),
+                    tokio_deadline(Duration::from_secs(10)),
                     budget.try_admit(wire.len()).unwrap(),
                 );
                 let (mut previous, mut count, mut peak) = (None, 0, 0);

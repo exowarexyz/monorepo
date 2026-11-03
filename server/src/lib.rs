@@ -33,7 +33,7 @@ pub use exoware_sdk::{
 pub use ingest::{
     parser::{decode_entry_with_budget, Field, PutEntryCursor, PutParseError, UnknownBudget},
     service::{PutConfig, PutMiddleware, PutService},
-    PutError, PutInput,
+    PutClock, PutDeadline, PutError, PutInput, TokioClock,
 };
 pub use reduce::RangeError;
 pub use stream::{
