@@ -267,8 +267,14 @@ where
         return Ok(());
     };
 
+    let mut expected_bytes = Vec::new();
+    let mut actual_bytes = Vec::new();
     for (index, (expected, actual)) in previous.iter().zip(operations.iter()).enumerate() {
-        if expected.encode() != actual.encode() {
+        expected_bytes.clear();
+        expected.write(&mut expected_bytes);
+        actual_bytes.clear();
+        actual.write(&mut actual_bytes);
+        if expected_bytes != actual_bytes {
             return Err(QmdbError::CorruptData(format!(
                 "recover_boundary_state requires previous_operations to be an exact prefix of operations; mismatch at location {index}"
             )));
@@ -752,6 +758,46 @@ mod tests {
             super::validate_recovery_input(Some(&previous), &operations).expect_err("must reject");
         assert!(
             err.to_string().contains("exact prefix"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_non_prefix_error_names_first_mismatch_location() {
+        // Replacements with the same and with a different encoded length, at
+        // the first, a middle and the last location of the previous log.
+        let cases = [
+            (0, commit(1)),
+            (3, update(b"mutated", b"value")),
+            (8, update(b"target", b"olD")),
+            (15, update(b"fill-15", b"value-15-longer")),
+        ];
+        for (index, replacement) in cases {
+            let previous = previous_ops();
+            let mut operations = previous.clone();
+            operations[index] = replacement;
+            operations.push(commit(16));
+
+            let err = super::validate_recovery_input(Some(&previous), &operations)
+                .expect_err("must reject");
+            assert_eq!(
+                err.to_string(),
+                format!(
+                    "corrupt qmdb data: recover_boundary_state requires previous_operations to be an exact prefix of operations; mismatch at location {index}"
+                )
+            );
+        }
+
+        // With two mismatches the first one is reported
+        let previous = previous_ops();
+        let mut operations = previous.clone();
+        operations[3] = update(b"mutated", b"value");
+        operations[8] = update(b"target", b"olD");
+        operations.push(commit(16));
+        let err =
+            super::validate_recovery_input(Some(&previous), &operations).expect_err("must reject");
+        assert!(
+            err.to_string().ends_with("mismatch at location 3"),
             "unexpected error: {err}"
         );
     }
