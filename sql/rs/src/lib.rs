@@ -6832,7 +6832,7 @@ mod tests {
         let model = Arc::new(simple_int64_model(0));
         let scan = Arc::new(unfiltered_scan(
             StoreClient::new("http://127.0.0.1:0"),
-            model.clone(),
+            model,
             None,
         ));
         let limited: Arc<dyn ExecutionPlan> = Arc::new(GlobalLimitExec::new(scan, 0, Some(1)));
@@ -6852,7 +6852,7 @@ mod tests {
         let model = Arc::new(simple_int64_model(0));
         let scan = Arc::new(unfiltered_scan(
             StoreClient::new("http://127.0.0.1:0"),
-            model.clone(),
+            model,
             None,
         ));
         let ordering = LexOrdering::new([PhysicalSortExpr {
@@ -6888,11 +6888,7 @@ mod tests {
         )
         .expect("config");
         let model = Arc::new(TableModel::from_config(&config).expect("model"));
-        let scan = unfiltered_scan(
-            StoreClient::new("http://127.0.0.1:0"),
-            model.clone(),
-            Some(2),
-        );
+        let scan = unfiltered_scan(StoreClient::new("http://127.0.0.1:0"), model, Some(2));
         let ordering = LexOrdering::new([
             PhysicalSortExpr {
                 expr: Arc::new(Column::new("account", 0)),
