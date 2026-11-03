@@ -1,17 +1,15 @@
-use std::{
-    collections::HashMap,
-    num::NonZeroUsize,
-    sync::{Arc, Mutex, Weak},
-};
-
+use crate::adapter::current::CurrentTip;
 use bytes::Bytes;
 use commonware_codec::{Copying, DecodeExt};
 use commonware_cryptography::Digest;
 use commonware_storage::merkle::{Family, Location, Position};
 use commonware_utils::cache::Cache;
+use std::{
+    collections::HashMap,
+    num::NonZeroUsize,
+    sync::{Arc, Mutex, Weak},
+};
 use tokio::sync::{watch, Mutex as AsyncMutex, OwnedMutexGuard};
-
-use crate::adapter::current::CurrentTip;
 
 const NODE_CAPACITY: usize = 16_384;
 const CONTEXT_CAPACITY: usize = 128;
@@ -252,14 +250,14 @@ impl<F: Family, D: Digest> Drop for NodeReservation<F, D> {
 
 #[cfg(test)]
 mod tests {
-    use std::panic::{catch_unwind, AssertUnwindSafe};
-    use std::time::Duration;
-
+    use super::*;
     use commonware_cryptography::sha256::Digest;
     use commonware_storage::mmr;
+    use std::{
+        panic::{catch_unwind, AssertUnwindSafe},
+        time::Duration,
+    };
     use tokio::{sync::Barrier, task::JoinSet, time::timeout};
-
-    use super::*;
 
     type Cache = ReadCache<mmr::Family, Digest>;
     type Node = Position<mmr::Family>;

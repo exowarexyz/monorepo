@@ -1,3 +1,15 @@
+use axum::{body::Body, serve::Listener};
+use bytes::Bytes;
+use exoware_server::{
+    ingest::{
+        transport::{serve, terminate_unfinished_response, ConnectionControl},
+        DecodeBuffers, PutConfig, PutMiddleware,
+    },
+    ingest_service, Ingest, IngestState, PutError, PutInput,
+};
+use http::{header, Request, Response, StatusCode, Version};
+use http_body_util::BodyExt;
+use socket2::SockRef;
 use std::{
     convert::Infallible,
     future::{poll_fn, Future},
@@ -11,19 +23,6 @@ use std::{
     task::{Context, Poll, Waker},
     time::Duration,
 };
-
-use axum::{body::Body, serve::Listener};
-use bytes::Bytes;
-use exoware_server::{
-    ingest::{
-        transport::{serve, terminate_unfinished_response, ConnectionControl},
-        DecodeBuffers, PutConfig, PutMiddleware,
-    },
-    ingest_service, Ingest, IngestState, PutError, PutInput,
-};
-use http::{header, Request, Response, StatusCode, Version};
-use http_body_util::BodyExt;
-use socket2::SockRef;
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf},
     net::{TcpListener, TcpStream},
@@ -468,6 +467,66 @@ impl Server {
         self.shutdown.take().unwrap().send(()).unwrap();
         timeout(Duration::from_secs(2), &mut self.task).await??;
         Ok(())
+    }
+
+    async fn configured<I: Ingest>(
+        config: PutConfig,
+        backend: Arc<I>,
+        blocked: bool,
+    ) -> Result<Self, Error> {
+        use tower::ServiceExt;
+
+        let tcp = TcpListener::bind("127.0.0.1:0").await?;
+        let addr = tcp.local_addr()?;
+        let stats = Arc::new(Stats::default());
+        let gate = Arc::new(Gate::default());
+        gate.blocked.store(blocked, Ordering::SeqCst);
+        let listener = MeasuredListener {
+            tcp,
+            stats: stats.clone(),
+            gate,
+        };
+        let service = ingest_service(IngestState::new(backend).with_put_config(config));
+        let requests = stats.clone();
+        let service = service_fn(move |request: Request<Body>| {
+            let service = service.clone();
+            let stats = requests.clone();
+            async move {
+                if request.uri().path() == "/health" {
+                    return Ok(Response::new(Body::empty()));
+                }
+                *stats.request_started.lock().unwrap() = Some(Instant::now());
+                let request = request.map(|inner| {
+                    Body::new(CountBody {
+                        inner,
+                        stats: stats.clone(),
+                        response: false,
+                    })
+                });
+                let response = service.oneshot(request).await?;
+                Ok::<_, Infallible>(response.map(|inner| {
+                    Body::new(CountBody {
+                        inner,
+                        stats,
+                        response: true,
+                    })
+                }))
+            }
+        });
+        let (shutdown, receive) = oneshot::channel();
+        let task = tokio::spawn(async move {
+            serve(listener, service, async {
+                let _ = receive.await;
+            })
+            .await
+            .unwrap();
+        });
+        Ok(Self {
+            addr,
+            stats,
+            shutdown: Some(shutdown),
+            task,
+        })
     }
 }
 
@@ -1481,8 +1540,10 @@ async fn production_http1_fragmented_upload_amortizes_cpu_handoffs() -> Result<(
 #[tokio::test]
 async fn http2_completed_rejections_preserve_connect_errors() -> Result<(), Error> {
     use connectrpc::client::ClientConfig;
-    use exoware_sdk::common::Entry;
-    use exoware_sdk::ingest::{PutRequest, ServiceClient};
+    use exoware_sdk::{
+        common::Entry,
+        ingest::{PutRequest, ServiceClient},
+    };
 
     for admission_exhausted in [true, false] {
         let listener = TcpListener::bind("127.0.0.1:0").await?;
@@ -1763,68 +1824,6 @@ async fn http2_host_timeout_releases_a_stalled_upload() -> Result<(), Error> {
     shutdown.send(()).unwrap();
     timeout(Duration::from_secs(2), server).await???;
     Ok(())
-}
-
-impl Server {
-    async fn configured<I: Ingest>(
-        config: PutConfig,
-        backend: Arc<I>,
-        blocked: bool,
-    ) -> Result<Self, Error> {
-        use tower::ServiceExt;
-
-        let tcp = TcpListener::bind("127.0.0.1:0").await?;
-        let addr = tcp.local_addr()?;
-        let stats = Arc::new(Stats::default());
-        let gate = Arc::new(Gate::default());
-        gate.blocked.store(blocked, Ordering::SeqCst);
-        let listener = MeasuredListener {
-            tcp,
-            stats: stats.clone(),
-            gate,
-        };
-        let service = ingest_service(IngestState::new(backend).with_put_config(config));
-        let requests = stats.clone();
-        let service = service_fn(move |request: Request<Body>| {
-            let service = service.clone();
-            let stats = requests.clone();
-            async move {
-                if request.uri().path() == "/health" {
-                    return Ok(Response::new(Body::empty()));
-                }
-                *stats.request_started.lock().unwrap() = Some(Instant::now());
-                let request = request.map(|inner| {
-                    Body::new(CountBody {
-                        inner,
-                        stats: stats.clone(),
-                        response: false,
-                    })
-                });
-                let response = service.oneshot(request).await?;
-                Ok::<_, Infallible>(response.map(|inner| {
-                    Body::new(CountBody {
-                        inner,
-                        stats,
-                        response: true,
-                    })
-                }))
-            }
-        });
-        let (shutdown, receive) = oneshot::channel();
-        let task = tokio::spawn(async move {
-            serve(listener, service, async {
-                let _ = receive.await;
-            })
-            .await
-            .unwrap();
-        });
-        Ok(Self {
-            addr,
-            stats,
-            shutdown: Some(shutdown),
-            task,
-        })
-    }
 }
 
 struct CountCalls(AtomicUsize);

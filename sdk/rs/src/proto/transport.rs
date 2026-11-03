@@ -29,40 +29,42 @@
 //! replays matching cookies on later requests. This covers edge affinity cookies as well as normal
 //! domain, path, expiry, and deletion semantics.
 
-use std::collections::hash_map::Entry;
-use std::collections::{BTreeSet, HashMap};
-use std::error::Error;
-use std::fmt;
-use std::num::NonZeroUsize;
-use std::pin::Pin;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
-use std::sync::Mutex;
-use std::task::{Context, Poll};
-use std::time::Duration;
-
 pub use bytes::Bytes;
-pub use connectrpc::client::{
-    BoxFuture, ClientBody, ClientTransport, HttpClient, ServiceTransport,
+pub use connectrpc::{
+    client::{BoxFuture, ClientBody, ClientTransport, HttpClient, ServiceTransport},
+    rustls::{self, ClientConfig},
 };
-use connectrpc::compression::CompressionRegistry;
-pub use connectrpc::rustls::{self, ClientConfig};
-use connectrpc::{ConnectError, Protocol};
+use connectrpc::{compression::CompressionRegistry, ConnectError, Protocol};
 use cookie_store::{Cookie, CookieDomain, CookieStore};
 use http::header::{ACCEPT_ENCODING, AUTHORIZATION, COOKIE, SET_COOKIE};
 pub use http::{Request, Response};
 pub use http_body::Body;
-use http_body_util::combinators::BoxBody;
-use http_body_util::BodyExt;
+use http_body_util::{combinators::BoxBody, BodyExt};
 use hyper::body::Incoming;
 use hyper_rustls::{HttpsConnectorBuilder, MaybeHttpsStream};
-use hyper_util::client::legacy::connect::HttpConnector;
-use hyper_util::client::legacy::Builder as HyperClientBuilder;
-use hyper_util::client::legacy::Client as HyperClient;
-use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
+use hyper_util::{
+    client::legacy::{
+        connect::HttpConnector, Builder as HyperClientBuilder, Client as HyperClient,
+    },
+    rt::{TokioExecutor, TokioIo, TokioTimer},
+};
 use reqwest::Url;
-use tower::util::BoxCloneSyncService;
-use tower::ServiceExt;
+use std::{
+    collections::{hash_map::Entry, BTreeSet, HashMap},
+    error::Error,
+    fmt,
+    num::NonZeroUsize,
+    pin::Pin,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc, Mutex,
+    },
+    task::{Context, Poll},
+    time::Duration,
+};
+use tokio::net::TcpStream;
+use tower::{util::BoxCloneSyncService, ServiceExt};
+use tracing::warn;
 
 const DEFAULT_CONNECTIONS_PER_ORIGIN: usize = 4;
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
@@ -536,6 +538,13 @@ impl ClientTransport for BalancedHttp2Transport {
                 .map_err(http_error)?;
             Ok(response.map(|body| PendingResponseBody::new(body, pending)))
         })
+    }
+}
+
+/// Enables `TCP_NODELAY`, logging a warning if the socket option cannot be set.
+pub fn set_tcp_nodelay(tcp: &mut TcpStream) {
+    if let Err(error) = tcp.set_nodelay(true) {
+        warn!(%error, "failed to set TCP_NODELAY");
     }
 }
 

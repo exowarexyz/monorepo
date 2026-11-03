@@ -9,15 +9,18 @@
 //! need a separate remote notification path that advances a local notifier after
 //! the query worker can serve the announced batches.
 
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
-
 use connectrpc::ConnectError;
-use exoware_sdk::common::Entry;
-use exoware_sdk::keys::Prefix;
-use exoware_sdk::selector::compile_payload_regex;
-use exoware_sdk::stream_filter::{validate_filter, CompiledFilters, StreamFilter};
+use exoware_sdk::{
+    common::Entry,
+    keys::Prefix,
+    selector::compile_payload_regex,
+    stream_filter::{validate_filter, CompiledFilters, StreamFilter},
+};
 use regex::bytes::Regex;
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc,
+};
 use tokio::sync::Notify;
 
 /// `ErrorInfo.domain` used for all stream-service errors.

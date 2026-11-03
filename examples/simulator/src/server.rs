@@ -1,17 +1,16 @@
 //! HTTP server entrypoints.
 
-use std::net::SocketAddr;
-use std::path::Path;
-use std::sync::Arc;
-use std::time::Duration;
-
-use axum::{routing::get, Router};
-use exoware_sdk::PreferZstdLayer;
+use crate::RocksStore;
+use axum::{
+    routing::get,
+    serve::{Listener, ListenerExt},
+    Router,
+};
+use exoware_sdk::{transport::set_tcp_nodelay, PreferZstdLayer};
 use exoware_server::{connect_stack, AppState};
+use std::{net::SocketAddr, path::Path, sync::Arc, time::Duration};
 use tower_http::cors::CorsLayer;
 use tracing::info;
-
-use crate::RocksStore;
 
 pub const CMD: &str = "server";
 pub const RUN_CMD: &str = "run";
@@ -38,7 +37,9 @@ pub async fn run(
 
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
     info!(%addr, directory = %directory.display(), "store simulator listening");
-    let listener = tokio::net::TcpListener::bind(addr).await?;
+    let listener = tokio::net::TcpListener::bind(addr)
+        .await?
+        .tap_io(set_tcp_nodelay);
     exoware_server::ingest::transport::serve(listener, app, std::future::pending()).await?;
     Ok(())
 }
@@ -51,7 +52,9 @@ pub async fn open_temp(
 ) -> Result<(tokio::task::JoinHandle<()>, String), Box<dyn std::error::Error + Send + Sync>> {
     let data_dir = tempfile::tempdir()?;
     let app = app(RocksStore::open_owned(data_dir, None)?);
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await?
+        .tap_io(set_tcp_nodelay);
     let port = listener.local_addr()?.port();
     let url = format!("http://127.0.0.1:{port}");
     let handle = tokio::spawn(async move {

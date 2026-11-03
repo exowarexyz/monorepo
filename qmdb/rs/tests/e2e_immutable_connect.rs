@@ -3,31 +3,33 @@
 
 mod common;
 
-use std::num::NonZeroU64;
-use std::sync::{
-    atomic::{AtomicUsize, Ordering},
-    Arc,
-};
-use std::time::Duration;
-
 use commonware_runtime::{deterministic, Runner as _};
-use commonware_storage::merkle::{mmr, Location};
-use commonware_storage::qmdb::immutable::variable::{
-    Db as Immutable, Operation as ImmutableOperation,
+use commonware_storage::{
+    merkle::{mmr, Location},
+    qmdb::immutable::variable::{Db as Immutable, Operation as ImmutableOperation},
+    translator::TwoCap,
 };
-use commonware_storage::translator::TwoCap;
 use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16, NZU64};
 use connectrpc::client::{BoxFuture, ClientBody, ClientTransport};
-use exoware_qmdb::service::proto::qmdb::v1::{
-    GetOperationRangeRequest as ProtoGetOperationRangeRequest,
-    SubscribeRequest as ProtoSubscribeRequest,
-};
 use exoware_qmdb::{
-    service::client::rpc::OperationLogClient, service::client::rpc::OperationLogSubscribeProof,
+    service::{
+        client::rpc::{OperationLogClient, OperationLogSubscribeProof},
+        proto::qmdb::v1::{
+            GetOperationRangeRequest as ProtoGetOperationRangeRequest,
+            SubscribeRequest as ProtoSubscribeRequest,
+        },
+    },
     QmdbError,
 };
-use exoware_sdk::proto::PreferZstdHttpClient;
-use exoware_sdk::{PrefixedStoreClient, StoreClient};
+use exoware_sdk::{proto::PreferZstdHttpClient, PrefixedStoreClient, StoreClient};
+use std::{
+    num::NonZeroU64,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    },
+    time::Duration,
+};
 
 type Digest = commonware_cryptography::sha256::Digest;
 type Db = Immutable<
@@ -77,7 +79,7 @@ async fn build_source_batch() -> SourceBatch {
     tokio::task::spawn_blocking(|| {
         deterministic::Runner::default().start(|context| async move {
             use commonware_runtime::{buffer::paged::CacheRef, Supervisor as _};
-            let page_cache = CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(8));
+            let page_cache = CacheRef::new(NZU16!(64), NZUsize!(8));
             let cfg = common::immutable_variable_config(
                 "immutable_variable_full_mmr_connect_source",
                 page_cache,
@@ -105,7 +107,7 @@ async fn build_source_batch() -> SourceBatch {
                     .await
                     .expect("merkleize")
             };
-            (db, _) = db.apply_batch(finalized).await.expect("apply");
+            db = db.apply_batch(finalized).await.expect("apply");
             let finalized = {
                 let batch = db.new_batch().set(key_c, b"gamma".to_vec());
                 batch
@@ -113,7 +115,7 @@ async fn build_source_batch() -> SourceBatch {
                     .await
                     .expect("merkleize")
             };
-            (db, _) = db.apply_batch(finalized).await.expect("apply second");
+            db = db.apply_batch(finalized).await.expect("apply second");
 
             let latest = db.bounds().end - 1;
             let n = NonZeroU64::new(*latest + 1).unwrap();

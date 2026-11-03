@@ -1,15 +1,14 @@
-use std::sync::Arc;
-
+use super::{
+    parser::{
+        decode_entry_with_budget, field_size, Field, PutEntryCursor, PutParseError, UnknownBudget,
+    },
+    zstd::{frame_decoder_memory_bytes, validate_window_header, ArenaDecoder},
+    ByteLease, DecodeBuffers, EntryRanges, PutChunk, PutEncoding, PutError, PutLimits,
+    RequestLease,
+};
 use bytes::Bytes;
 use connectrpc::ConnectError;
-
-use super::parser::{
-    decode_entry_with_budget, field_size, Field, PutEntryCursor, PutParseError, UnknownBudget,
-};
-use super::zstd::{frame_decoder_memory_bytes, validate_window_header, ArenaDecoder};
-use super::{
-    ByteLease, DecodeBuffers, EntryRanges, PutChunk, PutEncoding, PutError, PutLimits, RequestLease,
-};
+use std::sync::Arc;
 
 const OUTPUT_QUANTUM: usize = 64 * 1024;
 
@@ -73,7 +72,7 @@ pub struct DecodeOutput {
 }
 
 impl DecodeState {
-    fn suppressed(&self) -> bool {
+    const fn suppressed(&self) -> bool {
         self.rejection.is_some()
             || self.entry_error.is_some()
             || self.inner_error.is_some()
@@ -151,7 +150,7 @@ impl DecodeState {
             .push_back(pending);
     }
 
-    pub(super) fn finish_wire(&mut self) {
+    pub(super) const fn finish_wire(&mut self) {
         self.eof = true;
     }
 
@@ -679,20 +678,18 @@ impl DecodeState {
             && self.parsed == self.arena.len()
     }
 
-    pub(super) fn total(&self) -> usize {
+    pub(super) const fn total(&self) -> usize {
         self.total
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
-
-    use http_body_util::Full;
-    use tokio::time::Instant;
-
     use super::*;
     use crate::ingest::{box_body, BudgetConfig, IngestBudget, PutInput, PutMetadata};
+    use http_body_util::Full;
+    use std::time::Duration;
+    use tokio::time::Instant;
 
     fn field(tag: u8, bytes: &[u8]) -> Vec<u8> {
         let mut output = vec![tag];
@@ -718,7 +715,7 @@ mod tests {
                 ..PutLimits::default()
             },
             admission.transport.clone(),
-            admission.request.clone(),
+            admission.request,
         );
         (state, budget)
     }
@@ -1000,7 +997,7 @@ mod tests {
     fn large_unknown_field_does_not_pin_its_backing_in_the_next_chunk() {
         let unknown = field(26, &vec![9; 2 * 1024 * 1024]);
         let suffix = entry(b"key", b"value");
-        let wire = [unknown.clone(), suffix].concat();
+        let wire = [unknown, suffix].concat();
         let (mut state, _) = state(PutEncoding::Identity, wire.len() + 64);
         state.feed(Bytes::from(wire), true);
         let output = state.run(DecodeBuffers::new(8192, 16));
