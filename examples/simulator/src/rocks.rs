@@ -1449,29 +1449,30 @@ impl RocksStore {
     /// Lowest retained log sequence at or below the published frontier, or `None` when the log
     /// holds no such row. Shared by `oldest_retained_batch` and retention enforcement.
     fn oldest_retained_sequence(&self) -> Result<Option<u64>, String> {
-        // Skip the sentinel rows that bracket each log row.
-        let mut it = self
-            .db
-            .iterator_cf(self.log_cf(), IteratorMode::Start)
-            .filter(|item| {
-                item.as_ref()
-                    .map_or(true, |(key, _)| key.len() == LOG_BATCH_KEY_LEN)
-            });
-        match it.next() {
-            None => Ok(None),
-            Some(item) => {
-                let (key, _) = item.map_err(|e| e.to_string())?;
-                let sequence = sequence_from_log_key(key.as_ref())?;
-
-                // Gate on the published frontier: never advertise an oldest batch that
-                // `get_batch` would then hide (a log row can outrun the published frontier while
-                // its group's state ingestion is in flight or has failed).
-                if sequence > self.frontiers.published.load(Ordering::Acquire) {
-                    return Ok(None);
-                }
-                Ok(Some(sequence))
+        // The oldest file's head sentinel is the first live key and names the sequence by
+        // itself, so the row's block stays unread. A raw iterator keeps it that way, since the
+        // wrapping iterator steps onto the row when it yields the sentinel. A bare row key
+        // belongs to a row written without sentinels.
+        let mut it = self.db.raw_iterator_cf(self.log_cf());
+        it.seek_to_first();
+        let Some(key) = it.key() else {
+            it.status().map_err(|e| e.to_string())?;
+            return Ok(None);
+        };
+        let sequence = match key {
+            [below @ .., 1] if below.len() == LOG_BATCH_KEY_LEN => {
+                sequence_from_log_key(below)? + 1
             }
+            key => sequence_from_log_key(key)?,
+        };
+
+        // Gate on the published frontier, so this never advertises an oldest batch that
+        // `get_batch` would then hide. A log row can outrun the published frontier while its
+        // group's state ingestion is in flight or has failed.
+        if sequence > self.frontiers.published.load(Ordering::Acquire) {
+            return Ok(None);
         }
+        Ok(Some(sequence))
     }
 
     /// Persists the retention rule durably, or deletes the row when clearing. A single-admin
@@ -3072,6 +3073,30 @@ mod tests {
         assert!(
             before.contains(&after[0]),
             "the retained log file must survive compaction unchanged"
+        );
+    }
+
+    #[tokio::test]
+    async fn oldest_retained_lookup_reads_only_the_head_sentinel() {
+        let dir = tempdir().expect("tempdir");
+        let store = RocksStore::open(dir.path(), None).expect("open db");
+        for tag in 1..=2u8 {
+            store.put_batch(large_batch(tag)).await.expect("put");
+        }
+
+        // Retention enforcement runs this lookup after every commit, so it must not load the
+        // oldest row's payload block. Ingestion leaves that block out of every cache, so
+        // loading it would hit the disk on every commit.
+        rocksdb::perf::set_perf_stats(rocksdb::perf::PerfStatsLevel::EnableCount);
+        let mut perf = rocksdb::perf::PerfContext::default();
+        perf.reset();
+        let oldest = store.oldest_retained_sequence();
+        let read = perf.metric(rocksdb::perf::PerfMetric::BlockReadByte);
+        rocksdb::perf::set_perf_stats(rocksdb::perf::PerfStatsLevel::Disable);
+        assert_eq!(oldest.expect("oldest"), Some(1));
+        assert!(
+            read < 4096,
+            "the oldest-retained lookup must read only sentinel blocks, read {read} bytes"
         );
     }
 
