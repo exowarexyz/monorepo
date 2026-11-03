@@ -82,15 +82,15 @@ pub struct PreparedBatch {
 }
 
 impl PreparedBatch {
-    pub fn request_id(&self) -> u64 {
+    pub const fn request_id(&self) -> u64 {
         self.request_id
     }
 
-    pub fn entry_count(&self) -> usize {
+    pub const fn entry_count(&self) -> usize {
         self.entry_count
     }
 
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.keys.is_empty()
     }
 }
@@ -284,21 +284,18 @@ impl StoreBatchUpload for BatchWriter {
 #[derive(Debug)]
 pub(crate) struct KvIngestSink {
     pub(crate) client: PrefixedStoreClient,
-    pub(crate) schema: SchemaRef,
     pub(crate) model: Arc<TableModel>,
     pub(crate) index_specs: Arc<Vec<ResolvedIndexSpec>>,
 }
 
 impl KvIngestSink {
-    pub(crate) fn new(
+    pub(crate) const fn new(
         client: PrefixedStoreClient,
-        schema: SchemaRef,
         model: Arc<TableModel>,
         index_specs: Arc<Vec<ResolvedIndexSpec>>,
     ) -> Self {
         Self {
             client,
-            schema,
             model,
             index_specs,
         }
@@ -314,7 +311,7 @@ impl DisplayAs for KvIngestSink {
 #[async_trait]
 impl DataSink for KvIngestSink {
     fn schema(&self) -> &SchemaRef {
-        &self.schema
+        &self.model.schema
     }
 
     async fn write_all(

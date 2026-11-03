@@ -1,7 +1,11 @@
 #[path = "../../qmdb/rs/tests/common/operations.rs"]
 mod qmdb;
 
-use axum::{routing::get, Router};
+use axum::{
+    routing::get,
+    serve::{Listener, ListenerExt},
+    Router,
+};
 use bytes::Bytes;
 use commonware_cryptography::Sha256;
 use commonware_storage::{
@@ -25,6 +29,7 @@ use exoware_sdk::{
     prune_policy::{GroupBy, KeysScope, OrderBy, OrderEncoding, PrunePolicy, RetainPolicy},
     selector::Selector,
     stream_filter::StreamFilter,
+    transport::set_tcp_nodelay,
     PrefixedStoreClient, RetryConfig, StoreBatch, StoreBatchUpload, StoreClient, StoreKeyPrefix,
     StoreWriteBatch, StreamSubscription,
 };
@@ -84,7 +89,8 @@ async fn spawn_sql_service(schema: KvSchema) -> (tokio::task::JoinHandle<()>, St
         .fallback_service(sql_connect_stack(server));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
-        .expect("bind sql service");
+        .expect("bind sql service")
+        .tap_io(set_tcp_nodelay);
     let port = listener.local_addr().expect("sql addr").port();
     let url = format!("http://127.0.0.1:{port}");
     let handle = tokio::spawn(async move {
@@ -107,7 +113,8 @@ async fn spawn_qmdb_service(client: PrefixedStoreClient) -> (tokio::task::JoinHa
         );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
-        .expect("bind qmdb service");
+        .expect("bind qmdb service")
+        .tap_io(set_tcp_nodelay);
     let port = listener.local_addr().expect("qmdb addr").port();
     let url = format!("http://127.0.0.1:{port}");
     let handle = tokio::spawn(async move {

@@ -3,7 +3,7 @@
 
 use super::{encode, qmdb_error_to_connect};
 use crate::{
-    adapter::subscription::{self as sub, RowClassifier},
+    adapter::subscription as sub,
     proof::{MultiProofOperations, OperationRangeCheckpoint, RawBatchMultiProof},
     service::{
         proto::qmdb::v1::{
@@ -82,7 +82,7 @@ impl<R: OperationLogReader> Clone for OperationLogServer<R> {
 }
 
 impl<R: OperationLogReader> OperationLogServer<R> {
-    pub(crate) fn new(reader: Arc<R>, raw_store: PrefixedStoreClient) -> Self {
+    pub(crate) const fn new(reader: Arc<R>, raw_store: PrefixedStoreClient) -> Self {
         Self { reader, raw_store }
     }
 }
@@ -104,7 +104,7 @@ struct PendingBatches<F: Family> {
 }
 
 impl<F: Family> PendingBatches<F> {
-    fn new() -> Self {
+    const fn new() -> Self {
         Self {
             batches: VecDeque::new(),
             minimums: VecDeque::new(),
@@ -205,7 +205,6 @@ fn matcher_passes(matcher: &Option<CompiledFilters>, bytes: Option<&[u8]>) -> bo
 struct BatchSubscribeStream<R: OperationLogReader> {
     key_matcher: Option<CompiledFilters>,
     value_matcher: Option<CompiledFilters>,
-    classify: RowClassifier<R::Family>,
     reader: Arc<R>,
     sub: exoware_sdk::StreamSubscription,
     pending: PendingBatches<R::Family>,
@@ -234,14 +233,12 @@ impl<R: OperationLogReader> BatchSubscribeStream<R> {
     fn new(
         key_matcher: Option<CompiledFilters>,
         value_matcher: Option<CompiledFilters>,
-        classify: RowClassifier<R::Family>,
         reader: Arc<R>,
         sub: exoware_sdk::StreamSubscription,
     ) -> Self {
         Self {
             key_matcher,
             value_matcher,
-            classify,
             reader,
             sub,
             pending: PendingBatches::new(),
@@ -273,8 +270,7 @@ impl<R: OperationLogReader> BatchSubscribeStream<R> {
         let needs_decode = self.key_matcher.is_some() || self.value_matcher.is_some();
 
         for entry in &frame.entries {
-            let Some((family, location)) = self.classify.classify(&entry.key, entry.value.as_ref())
-            else {
+            let Some((family, location)) = sub::classify_row::<R::Family>(&entry.key) else {
                 continue;
             };
             match family {
@@ -404,7 +400,7 @@ impl<R: OperationLogReader> Stream for BatchSubscribeStream<R> {
     }
 }
 
-fn decode_since(since: Option<u64>) -> Option<u64> {
+const fn decode_since(since: Option<u64>) -> Option<u64> {
     match since {
         Some(0) | None => None,
         Some(value) => Some(value),
@@ -484,8 +480,7 @@ impl<R: OperationLogReader> OperationLogService for OperationLogServer<R> {
             let value_matcher = parse_filters(request.value_filters.iter(), "value")
                 .map_err(ConnectError::invalid_argument)?;
             let since = decode_since(request.since_sequence_number);
-            let (classify, filter) = sub::classify_and_filter::<R::Family>();
-            let sub = sub::open_store_subscription(&raw_store, filter, since)
+            let sub = sub::open_store_subscription(&raw_store, sub::row_filter(), since)
                 .await
                 .map_err(qmdb_error_to_connect)?;
             let stream: Pin<
@@ -493,7 +488,6 @@ impl<R: OperationLogReader> OperationLogService for OperationLogServer<R> {
             > = Box::pin(BatchSubscribeStream::new(
                 key_matcher,
                 value_matcher,
-                classify,
                 reader,
                 sub,
             ));
@@ -797,15 +791,12 @@ mod authenticated_upload_subscription_tests {
     async fn stream() -> BatchSubscribeStream<IngestReader> {
         let (_task, url) = exoware_simulator::open_temp().await.expect("simulator");
         let client = exoware_sdk::PrefixedStoreClient::empty(exoware_sdk::StoreClient::new(&url));
-        let (classifier, filter) = sub::classify_and_filter::<F>();
-        let subscription = client.stream().subscribe(filter, None).await.unwrap();
-        BatchSubscribeStream::new(
-            None,
-            None,
-            classifier,
-            Arc::new(IngestReader::default()),
-            subscription,
-        )
+        let subscription = client
+            .stream()
+            .subscribe(sub::row_filter(), None)
+            .await
+            .unwrap();
+        BatchSubscribeStream::new(None, None, Arc::new(IngestReader::default()), subscription)
     }
 
     fn operation(location: u64, value: &'static [u8]) -> StoreBatchEntry {

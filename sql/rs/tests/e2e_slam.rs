@@ -2,7 +2,10 @@
 
 mod common;
 
-use axum::Router;
+use axum::{
+    serve::{Listener, ListenerExt},
+    Router,
+};
 use connectrpc::{client::ClientConfig, ErrorCode};
 use datafusion::{
     arrow::{
@@ -14,7 +17,9 @@ use datafusion::{
     common::ScalarValue,
     datasource::{MemTable, ViewTable},
 };
-use exoware_sdk::{proto::PreferZstdHttpClient, PrefixedStoreClient, StoreKeyPrefix};
+use exoware_sdk::{
+    proto::PreferZstdHttpClient, transport::set_tcp_nodelay, PrefixedStoreClient, StoreKeyPrefix,
+};
 use exoware_sql::{
     proto::sql::v1::{QueryRequest, ServiceClient},
     sql_connect_stack, CellValue, IndexSpec, KvSchema, SqlServer, TableColumnConfig,
@@ -260,7 +265,8 @@ async fn serve_sql(
 ) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
-        .expect("bind SQL server");
+        .expect("bind SQL server")
+        .tap_io(set_tcp_nodelay);
     let base = format!("http://{}", listener.local_addr().expect("SQL address"));
     let app = Router::new().fallback_service(sql_connect_stack(server));
     let handle = tokio::spawn(async move {

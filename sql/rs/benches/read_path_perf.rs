@@ -10,6 +10,7 @@ use axum::{
     extract::{Request, State},
     middleware::Next,
     response::Response,
+    serve::{Listener, ListenerExt},
     Router,
 };
 use bytes::Bytes;
@@ -18,7 +19,7 @@ use datafusion::{
     arrow::datatypes::DataType,
     physical_plan::{collect, execution_plan::reset_plan_states, ExecutionPlan},
 };
-use exoware_sdk::{StoreClient, StoreKeyPrefix};
+use exoware_sdk::{transport::set_tcp_nodelay, StoreClient, StoreKeyPrefix};
 use exoware_server::{
     Ingest, IngestState, PutError, PutInput, Query, QueryExtra, QueryResult, QueryState, RangeScan,
     RangeScanBatch, RangeScanResult, Sequence,
@@ -49,23 +50,29 @@ struct CountingAllocator;
 #[global_allocator]
 static GLOBAL_ALLOCATOR: CountingAllocator = CountingAllocator;
 
+// SAFETY: Every method passes its arguments unchanged to `System`, which upholds the
+// `GlobalAlloc` contract. The bookkeeping only updates atomics and never allocates.
 unsafe impl GlobalAlloc for CountingAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         ALLOC_CALLS.fetch_add(1, Ordering::Relaxed);
         ALLOC_BYTES.fetch_add(layout.size() as u64, Ordering::Relaxed);
+        // SAFETY: The caller's guarantees for `layout` pass straight through.
         unsafe { System.alloc(layout) }
     }
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
         ALLOC_CALLS.fetch_add(1, Ordering::Relaxed);
         ALLOC_BYTES.fetch_add(layout.size() as u64, Ordering::Relaxed);
+        // SAFETY: The caller's guarantees for `layout` pass straight through.
         unsafe { System.alloc_zeroed(layout) }
     }
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        // SAFETY: The caller's guarantees for `ptr` and `layout` pass straight through.
         unsafe { System.dealloc(ptr, layout) }
     }
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
         ALLOC_CALLS.fetch_add(1, Ordering::Relaxed);
         ALLOC_BYTES.fetch_add(new_size as u64, Ordering::Relaxed);
+        // SAFETY: The caller's guarantees for `ptr`, `layout` and `new_size` pass straight through.
         unsafe { System.realloc(ptr, layout, new_size) }
     }
 }
@@ -387,7 +394,8 @@ impl Fixture {
             ));
         let listener = runtime
             .block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
-            .unwrap();
+            .unwrap()
+            .tap_io(set_tcp_nodelay);
         let url = format!("http://{}", listener.local_addr().unwrap());
         let server = runtime.spawn(async move { axum::serve(listener, app).await.unwrap() });
         let client = StoreClient::builder()
@@ -467,7 +475,8 @@ impl Fixture {
             ));
         let listener = runtime
             .block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
-            .unwrap();
+            .unwrap()
+            .tap_io(set_tcp_nodelay);
         let sql_uri = format!("http://{}", listener.local_addr().unwrap());
         let sql_server = runtime.spawn(async move { axum::serve(listener, app).await.unwrap() });
         let sql_client = ServiceClient::new(
