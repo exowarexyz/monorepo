@@ -813,15 +813,43 @@ fn stage_log_file(path: &Path, sequence: u64, rows: &[(Bytes, Bytes)]) -> Result
     let payload = encode_log_value(sequence, rows);
     let mut options = Options::default();
     options.set_compression_type(DBCompressionType::None);
+
+    // Ingestion reads a file's first and last data blocks to learn its key range. With one
+    // block per key, those reads hit the two empty sentinel rows instead of the payload block.
+    let mut table = rocksdb::BlockBasedOptions::default();
+    table.set_block_size(1);
+    options.set_block_based_table_factory(&table);
     let mut writer = SstFileWriter::create(&options);
     writer.open(path).map_err(|e| e.to_string())?;
     writer
+        .put(log_head_sentinel(sequence), b"")
+        .map_err(|e| e.to_string())?;
+    writer
         .put(sequence_log_key(sequence), &payload)
+        .map_err(|e| e.to_string())?;
+    writer
+        .put(log_tail_sentinel(sequence), b"")
         .map_err(|e| e.to_string())?;
 
     // `finish` syncs the file before it is linked into the DB.
     writer.finish().map_err(|e| e.to_string())?;
     Ok(LOG_BATCH_KEY_LEN + payload.len())
+}
+
+/// Empty rows bracketing one log row inside its file. They sort strictly between neighbouring
+/// sequence keys, so files of consecutive sequences still occupy disjoint key ranges:
+/// `be64(s-1) < head(s) < be64(s) < tail(s) < head(s+1)`. Readers skip keys of this length.
+fn log_head_sentinel(sequence: u64) -> [u8; LOG_BATCH_KEY_LEN + 1] {
+    let mut key = [0u8; LOG_BATCH_KEY_LEN + 1];
+    key[..LOG_BATCH_KEY_LEN].copy_from_slice(&sequence_log_key(sequence - 1));
+    key[LOG_BATCH_KEY_LEN] = 1;
+    key
+}
+
+fn log_tail_sentinel(sequence: u64) -> [u8; LOG_BATCH_KEY_LEN + 1] {
+    let mut key = [0u8; LOG_BATCH_KEY_LEN + 1];
+    key[..LOG_BATCH_KEY_LEN].copy_from_slice(&sequence_log_key(sequence));
+    key
 }
 
 /// Stages the current-state SST: the group's rows sorted by key, with the last write per key
@@ -1031,7 +1059,12 @@ fn replay_newest_log_row(db: &DB, floor: u64) -> Result<u64, String> {
     let log_cf = db
         .cf_handle(LOG_CF)
         .expect("log CF must exist (created on open)");
-    let Some(item) = db.iterator_cf(log_cf, IteratorMode::End).next() else {
+    // Skip the sentinel rows that bracket each log row.
+    let mut newest = db.iterator_cf(log_cf, IteratorMode::End).filter(|item| {
+        item.as_ref()
+            .map_or(true, |(key, _)| key.len() == LOG_BATCH_KEY_LEN)
+    });
+    let Some(item) = newest.next() else {
         return Ok(0);
     };
     let (key, value) = item.map_err(|e| e.to_string())?;
@@ -1404,7 +1437,14 @@ impl RocksStore {
     /// Lowest retained log sequence at or below the published frontier, or `None` when the log
     /// holds no such row. Shared by `oldest_retained_batch` and retention enforcement.
     fn oldest_retained_sequence(&self) -> Result<Option<u64>, String> {
-        let mut it = self.db.iterator_cf(self.log_cf(), IteratorMode::Start);
+        // Skip the sentinel rows that bracket each log row.
+        let mut it = self
+            .db
+            .iterator_cf(self.log_cf(), IteratorMode::Start)
+            .filter(|item| {
+                item.as_ref()
+                    .map_or(true, |(key, _)| key.len() == LOG_BATCH_KEY_LEN)
+            });
         match it.next() {
             None => Ok(None),
             Some(item) => {
@@ -2953,6 +2993,10 @@ mod tests {
         store
             .db
             .iterator_cf(store.log_cf(), IteratorMode::Start)
+            .filter(|item| {
+                item.as_ref()
+                    .map_or(true, |(key, _)| key.len() == LOG_BATCH_KEY_LEN)
+            })
             .count()
     }
 
