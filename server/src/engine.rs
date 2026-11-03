@@ -185,7 +185,7 @@ impl LogBatch {
     }
 
     /// Sequence number under which this batch was loaded.
-    pub fn sequence_number(&self) -> u64 {
+    pub const fn sequence_number(&self) -> u64 {
         self.sequence_number
     }
 
@@ -230,7 +230,7 @@ impl FilteredBatch {
     /// Build a filtered batch from owned caller-visible entries.
     ///
     /// Values must contain resolved payload bytes.
-    pub fn from_entries(entries: Vec<Entry>) -> Self {
+    pub const fn from_entries(entries: Vec<Entry>) -> Self {
         Self { entries }
     }
 
@@ -261,8 +261,10 @@ pub trait Log: Sequence {
     /// available from this log.
     ///
     /// Engines that don't retain a log return `Ok(None)` unconditionally,
-    /// which disables `GetBatch` and since-cursored `Subscribe` for that
-    /// deployment.
+    /// which disables the stream service's `Get` and `Subscribe` RPCs for that
+    /// deployment. That includes a live `Subscribe` with no
+    /// `since_sequence_number`, because it also reads each new batch through
+    /// this log and fails with `BATCH_EVICTED` at the first one.
     ///
     /// The stream service maps unavailable batches to `BATCH_NOT_FOUND` when
     /// they are beyond the visible sequence frontier and `BATCH_EVICTED`

@@ -62,7 +62,7 @@ pub(crate) enum PrimaryKeyRangeConstraint {
     NotEnforced,
 }
 
-fn primary_key_point(value: CellValue, encoded_width: usize) -> PrimaryKeyRangeConstraint {
+const fn primary_key_point(value: CellValue, encoded_width: usize) -> PrimaryKeyRangeConstraint {
     PrimaryKeyRangeConstraint::Point(PrimaryKeyPointConstraint {
         value,
         encoded_width,
@@ -995,7 +995,7 @@ impl QueryPredicate {
             for (col_idx, constraint) in combo {
                 tmp_constraints.insert(*col_idx, constraint.clone());
             }
-            let tmp = QueryPredicate {
+            let tmp = Self {
                 constraints: tmp_constraints,
                 contradiction: self.contradiction,
             };
@@ -1123,7 +1123,7 @@ impl QueryPredicate {
         }
     }
 
-    pub(crate) fn constraint_supported_for_zorder(
+    pub(crate) const fn constraint_supported_for_zorder(
         kind: ColumnKind,
         constraint: &PredicateConstraint,
     ) -> bool {
@@ -2150,7 +2150,7 @@ pub(crate) fn scalar_to_u64(value: &ScalarValue) -> Option<u64> {
     }
 }
 
-pub(crate) fn scalar_to_f64(value: &ScalarValue) -> Option<f64> {
+pub(crate) const fn scalar_to_f64(value: &ScalarValue) -> Option<f64> {
     match value {
         ScalarValue::Float32(Some(v)) => Some(*v as f64),
         ScalarValue::Float64(Some(v)) => Some(*v),
@@ -2158,35 +2158,35 @@ pub(crate) fn scalar_to_f64(value: &ScalarValue) -> Option<f64> {
     }
 }
 
-pub(crate) fn scalar_to_bool(value: &ScalarValue) -> Option<bool> {
+pub(crate) const fn scalar_to_bool(value: &ScalarValue) -> Option<bool> {
     match value {
         ScalarValue::Boolean(Some(v)) => Some(*v),
         _ => None,
     }
 }
 
-pub(crate) fn scalar_to_date32_i64(value: &ScalarValue) -> Option<i64> {
+pub(crate) const fn scalar_to_date32_i64(value: &ScalarValue) -> Option<i64> {
     match value {
         ScalarValue::Date32(Some(v)) => Some(*v as i64),
         _ => None,
     }
 }
 
-pub(crate) fn scalar_to_date64(value: &ScalarValue) -> Option<i64> {
+pub(crate) const fn scalar_to_date64(value: &ScalarValue) -> Option<i64> {
     match value {
         ScalarValue::Date64(Some(v)) => Some(*v),
         _ => None,
     }
 }
 
-pub(crate) fn scalar_to_timestamp_micros(value: &ScalarValue) -> Option<i64> {
+pub(crate) const fn scalar_to_timestamp_micros(value: &ScalarValue) -> Option<i64> {
     match value {
         ScalarValue::TimestampMicrosecond(Some(v), _) => Some(*v),
         _ => None,
     }
 }
 
-pub(crate) fn scalar_to_i128(value: &ScalarValue) -> Option<i128> {
+pub(crate) const fn scalar_to_i128(value: &ScalarValue) -> Option<i128> {
     match value {
         ScalarValue::Decimal128(Some(v), _, _) => Some(*v),
         _ => None,
@@ -2202,7 +2202,7 @@ pub(crate) fn scalar_to_fixed_binary(value: &ScalarValue) -> Option<Vec<u8>> {
     }
 }
 
-pub(crate) fn scalar_to_i256(value: &ScalarValue) -> Option<i256> {
+pub(crate) const fn scalar_to_i256(value: &ScalarValue) -> Option<i256> {
     match value {
         ScalarValue::Decimal256(Some(v), _, _) => Some(*v),
         _ => None,

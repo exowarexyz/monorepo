@@ -87,13 +87,13 @@ pub(crate) enum AggregatePushdownFunction {
 pub(crate) enum PushdownValueExpr {
     Column(usize),
     Literal(KvReducedValue),
-    Add(Box<PushdownValueExpr>, Box<PushdownValueExpr>),
-    Sub(Box<PushdownValueExpr>, Box<PushdownValueExpr>),
-    Mul(Box<PushdownValueExpr>, Box<PushdownValueExpr>),
-    Div(Box<PushdownValueExpr>, Box<PushdownValueExpr>),
-    CastFloat64(Box<PushdownValueExpr>),
-    Lower(Box<PushdownValueExpr>),
-    DateTruncDay(Box<PushdownValueExpr>),
+    Add(Box<Self>, Box<Self>),
+    Sub(Box<Self>, Box<Self>),
+    Mul(Box<Self>, Box<Self>),
+    Div(Box<Self>, Box<Self>),
+    CastFloat64(Box<Self>),
+    Lower(Box<Self>),
+    DateTruncDay(Box<Self>),
 }
 
 impl PushdownValueExpr {
@@ -166,7 +166,7 @@ pub(crate) struct KvAggregateExec {
 }
 
 impl KvAggregatePushdownRule {
-    pub(crate) fn new() -> Self {
+    pub(crate) const fn new() -> Self {
         Self
     }
 
@@ -852,7 +852,7 @@ impl KvAggregateExec {
     }
 }
 
-pub(crate) fn rebase_output_plan(
+pub(crate) const fn rebase_output_plan(
     output: AggregateOutputPlan,
     offset: usize,
 ) -> AggregateOutputPlan {

@@ -221,7 +221,7 @@ where
         }
     }
 
-    pub fn with_ingest_limits(mut self, limits: IngestLimits) -> Self {
+    pub const fn with_ingest_limits(mut self, limits: IngestLimits) -> Self {
         self.ingest_limits = limits;
         self
     }
@@ -280,7 +280,7 @@ where
         }
     }
 
-    pub fn with_limits(mut self, limits: IngestLimits) -> Self {
+    pub const fn with_limits(mut self, limits: IngestLimits) -> Self {
         self.limits = limits;
         self
     }
@@ -368,7 +368,7 @@ impl<P> PruneState<P>
 where
     P: Prune,
 {
-    pub fn new(prune: Arc<P>) -> Self {
+    pub const fn new(prune: Arc<P>) -> Self {
         Self { prune }
     }
 }
@@ -399,7 +399,7 @@ impl<R> RetentionState<R>
 where
     R: Retention,
 {
-    pub fn new(retention: Arc<R>) -> Self {
+    pub const fn new(retention: Arc<R>) -> Self {
         Self { retention }
     }
 }
@@ -795,7 +795,7 @@ where
     ) -> connectrpc::ServiceResult<PruneResponse> {
         validate::validate_prune_request(request.view())?;
         let document = exoware_proto::parse_and_validate_policy_document(request.view())
-            .map_err(|e| ConnectError::invalid_argument(e.to_string()))?;
+            .map_err(ConnectError::invalid_argument)?;
 
         self.state
             .prune
@@ -1520,7 +1520,7 @@ mod tests {
         ) {
             let mut state = self.state.lock().expect("lock");
             state.current_sequence = state.current_sequence.max(sequence_number);
-            state.batches.insert(sequence_number, Some(kvs.clone()));
+            state.batches.insert(sequence_number, Some(kvs));
             drop(state);
             hub.publish(sequence_number);
         }
