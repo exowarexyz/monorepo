@@ -742,9 +742,106 @@ mod tests {
         });
 
         let (argument, filter) =
-            normalize_count_aggregate_argument(&case_expr, &model).expect("normalize");
+            normalize_aggregate_argument(AggregatePushdownFunction::Count, &case_expr, &model)
+                .expect("normalize");
         assert_eq!(argument, AggregatePushdownArgument::CountAll);
         assert!(filter.is_some());
+    }
+
+    #[test]
+    fn cast_case_normalization_preserves_casts_and_eligibility() {
+        use datafusion::logical_expr::{expr::Case, Cast, TryCast};
+
+        let (model, _) = test_model();
+        let guard = col("status").eq(Expr::Literal(
+            ScalarValue::Utf8(Some("open".to_string())),
+            None,
+        ));
+        let make_case = |then_expr: Expr, else_expr: Option<Expr>| {
+            Expr::Case(Case {
+                expr: None,
+                when_then_expr: vec![(Box::new(guard.clone()), Box::new(then_expr))],
+                else_expr: else_expr.map(Box::new),
+            })
+        };
+        let normalize = |func, expr: &Expr| normalize_case_aggregate_argument(func, expr, &model);
+        let null = Expr::Literal(ScalarValue::Int64(None), None);
+
+        for try_cast in [false, true] {
+            let cast = |expr| {
+                if try_cast {
+                    Expr::TryCast(TryCast::new(Box::new(expr), DataType::Float64))
+                } else {
+                    Expr::Cast(Cast::new(Box::new(expr), DataType::Float64))
+                }
+            };
+
+            // A null ELSE can be discarded, but the cast on each value must survive.
+            for else_expr in [
+                None,
+                Some(null.clone()),
+                Some(null.clone().alias("missing")),
+            ] {
+                let case = make_case(col("amount_cents"), else_expr);
+                for expr in [
+                    cast(case.clone()),
+                    cast(case.alias("value")).alias("cast_value"),
+                ] {
+                    assert_eq!(
+                        normalize(AggregatePushdownFunction::Sum, &expr),
+                        Some((
+                            AggregatePushdownArgument::Expr(PushdownValueExpr::CastFloat64(
+                                Box::new(PushdownValueExpr::Column(3)),
+                            )),
+                            guard.clone(),
+                        )),
+                        "{expr:?}",
+                    );
+                }
+            }
+
+            // Eligibility is syntactic: neither nested casts nor computed ELSE values
+            // establish the null-only fallback required by this pushdown.
+            let mut unequal = make_case(col("amount_cents"), None);
+            let Expr::Case(case) = &mut unequal else {
+                unreachable!()
+            };
+            case.when_then_expr.push((
+                Box::new(col("customer_id").eq(Expr::Literal(ScalarValue::Int64(Some(1)), None))),
+                Box::new(col("order_id")),
+            ));
+            for expr in [
+                cast(make_case(
+                    col("amount_cents"),
+                    Some(Expr::Literal(ScalarValue::Int64(Some(0)), None)),
+                )),
+                cast(make_case(col("amount_cents"), Some(cast(null.clone())))),
+                cast(cast(make_case(col("amount_cents"), None))),
+                cast(unequal),
+            ] {
+                assert_eq!(
+                    normalize(AggregatePushdownFunction::Sum, &expr),
+                    None,
+                    "{expr:?}"
+                );
+            }
+
+            // A casted literal is a value expression even when COUNT could count an
+            // uncast non-null literal without evaluating it.
+            let expr = cast(make_case(
+                Expr::Literal(ScalarValue::Int64(Some(1)), None),
+                None,
+            ));
+            assert_eq!(
+                normalize(AggregatePushdownFunction::Count, &expr),
+                Some((
+                    AggregatePushdownArgument::Expr(PushdownValueExpr::CastFloat64(Box::new(
+                        PushdownValueExpr::Literal(KvReducedValue::Int64(1)),
+                    ))),
+                    guard.clone(),
+                )),
+            );
+        }
     }
 
     #[test]
@@ -900,6 +997,57 @@ mod tests {
         assert_eq!(specs[plan.spec_idx].name, "xy_z");
         assert_eq!(specs[plan.spec_idx].layout, IndexLayout::ZOrder);
         assert_eq!(plan.constrained_column_count, 2);
+    }
+
+    #[test]
+    fn index_range_budget_counts_distinct_combinations_and_keeps_fallbacks() {
+        let (model, _) = zorder_test_model();
+        for layout in [IndexLayout::Lexicographic, IndexLayout::ZOrder] {
+            let specs = model
+                .resolve_index_specs(&[
+                    IndexSpec::new("xy", vec!["x".into(), "y".into()])
+                        .unwrap()
+                        .with_layout(layout),
+                    IndexSpec::new("x", vec!["x".into()]).unwrap(),
+                ])
+                .unwrap();
+            for y_count in [64, 65] {
+                // Duplicate SQL literals do not consume additional range budget.
+                let filters = [("x", 64), ("y", y_count)].map(|(name, count)| {
+                    in_list(
+                        col(name),
+                        (0..count)
+                            .chain(0..count)
+                            .map(|n| Expr::Literal(ScalarValue::Int64(Some(n)), None))
+                            .collect(),
+                        false,
+                    )
+                });
+                let predicate = QueryPredicate::from_filters(&filters, &model);
+                let ranges = match layout {
+                    IndexLayout::Lexicographic => {
+                        predicate.expand_index_ranges(&model, &specs[0], 2)
+                    }
+                    IndexLayout::ZOrder => predicate.expand_zorder_index_ranges(&model, &specs[0]),
+                };
+                let access = ScanAccessPlan::new(&model, &Some(vec![]), &predicate);
+                let plan = predicate
+                    .choose_index_plan(&model, &specs, &access)
+                    .unwrap();
+                if y_count == 64 {
+                    assert_eq!(ranges.unwrap().len(), 4096);
+                    assert_eq!(plan.spec_idx, 0);
+                } else {
+                    // An oversized product disqualifies only that index. Another
+                    // index, or primary-key access, must remain available.
+                    assert_eq!(ranges.unwrap_err(), "index range budget exceeded");
+                    assert_eq!(plan.spec_idx, 1);
+                    assert!(predicate
+                        .choose_index_plan(&model, &specs[..1], &access)
+                        .is_none());
+                }
+            }
+        }
     }
 
     #[test]
@@ -3867,11 +4015,11 @@ mod tests {
 
         assert_eq!(batch.pending_count(), 2);
         assert_ne!(
-            batch.pending_keys[0], batch.pending_keys[1],
+            batch.pending_entries[0].0, batch.pending_entries[1].0,
             "same PK in different tables must produce different keys"
         );
         assert_ne!(
-            batch.pending_keys[0][0], batch.pending_keys[1][0],
+            batch.pending_entries[0].0[0], batch.pending_entries[1].0[0],
             "table prefix byte must differ"
         );
     }
@@ -5689,11 +5837,30 @@ mod tests {
             )
             .expect("schema");
 
+        let (progress_tx, mut progress_rx) = mpsc::unbounded_channel();
         let report = schema
-            .backfill_added_indexes("orders", &[existing])
+            .backfill_added_indexes_with_options_and_progress(
+                "orders",
+                &[existing],
+                IndexBackfillOptions::default(),
+                Some(&progress_tx),
+            )
             .await
             .expect("no-op backfill should succeed");
         assert_eq!(report, IndexBackfillReport::default());
+        assert!(matches!(
+            progress_rx.try_recv().unwrap(),
+            IndexBackfillEvent::Started { table_name, indexes_backfilled: 0, .. }
+                if table_name == "orders"
+        ));
+        assert_eq!(
+            progress_rx.try_recv().unwrap(),
+            IndexBackfillEvent::Completed { report }
+        );
+        assert!(matches!(
+            progress_rx.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
     }
 
     #[tokio::test]

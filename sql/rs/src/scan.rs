@@ -227,7 +227,7 @@ impl KvScanExec {
 
         // Residual-filter columns determine whether an index covers the scan.
         let filter_access = ScanFilter::access_plan(&self.model, filters);
-        let access = self.access_plan_with_filter(&filter_access.1);
+        let access = self.access_plan(&filter_access.1);
         let index_plan = self
             .predicate
             .choose_index_plan(&self.model, &self.index_specs, &access);
@@ -276,7 +276,7 @@ impl KvScanExec {
     }
 
     /// Extends required-column masks with the physical filter's input columns.
-    fn access_plan_with_filter(&self, filter_access: &ScanAccessPlan) -> ScanAccessPlan {
+    fn access_plan(&self, filter_access: &ScanAccessPlan) -> ScanAccessPlan {
         let mut access = ScanAccessPlan::clone(&self.access_plan);
         for (required, filter_required) in access
             .required_pk_mask
@@ -666,26 +666,25 @@ impl ScanCtx<'_> {
     fn append_rows(
         &self,
         rows: &[(Vec<CellValue>, StoredRow)],
-        output: &mut ProjectedBatchBuilder,
-        remaining: usize,
+        output: &mut ProjectedBatchBuilder<'_>,
+        remaining: &mut usize,
     ) -> DataFusionResult<()> {
-        let mut accepted = 0;
         if let Some(filter) = self.filter {
             for i in filter.select(self.model, rows)? {
-                if accepted == remaining {
+                if *remaining == 0 {
                     break;
                 }
                 if output.append_archived_row(&rows[i].0, &rows[i].1)? {
-                    accepted += 1;
+                    *remaining -= 1;
                 }
             }
         } else {
             for (pk, row) in rows {
-                if accepted == remaining {
+                if *remaining == 0 {
                     break;
                 }
                 if output.append_archived_row(pk, row)? {
-                    accepted += 1;
+                    *remaining -= 1;
                 }
             }
         }
@@ -694,11 +693,10 @@ impl ScanCtx<'_> {
 }
 
 /// Sends a nonempty batch and resets its builder. Returns false if the receiver closed.
-pub(crate) async fn flush_projected_batch(
+pub(crate) async fn flush_projected_batch<'a>(
     tx: &tokio::sync::mpsc::Sender<DataFusionResult<RecordBatch>>,
-    ctx: &ScanCtx<'_>,
-    batch_builder: &mut ProjectedBatchBuilder,
-    emitted: &mut usize,
+    ctx: &ScanCtx<'a>,
+    batch_builder: &mut ProjectedBatchBuilder<'a>,
 ) -> DataFusionResult<bool> {
     let batch_size = batch_builder.row_count();
     if batch_size == 0 {
@@ -708,7 +706,6 @@ pub(crate) async fn flush_projected_batch(
         batch_builder,
         ProjectedBatchBuilder::from_access_plan(ctx.model, ctx.access_plan),
     );
-    *emitted += batch_size;
     let batch = ready.finish(ctx.projected_schema)?;
     if tx.send(Ok(batch)).await.is_err() {
         return Ok(false);
@@ -822,7 +819,7 @@ async fn stream_point_scan(
     flush_threshold: usize,
     target_rows: usize,
 ) -> DataFusionResult<()> {
-    let mut emitted = 0;
+    let mut remaining = target_rows;
     let mut output = ProjectedBatchBuilder::from_access_plan(ctx.model, ctx.access_plan);
     let exact = ctx.filter.is_none_or(|filter| filter.complete_ranges)
         && ctx
@@ -835,18 +832,18 @@ async fn stream_point_scan(
     };
     for keys in keys.chunks(lookup_batch) {
         let rows = get_rows(ctx, keys).await?;
-        let remaining = target_rows.saturating_sub(emitted + output.row_count());
-        ctx.append_rows(&rows, &mut output, remaining)?;
+
+        ctx.append_rows(&rows, &mut output, &mut remaining)?;
         if output.row_count() >= flush_threshold
-            && !flush_projected_batch(tx, ctx, &mut output, &mut emitted).await?
+            && !flush_projected_batch(tx, ctx, &mut output).await?
         {
             return Ok(());
         }
-        if emitted + output.row_count() >= target_rows {
+        if remaining == 0 {
             break;
         }
     }
-    let _ = flush_projected_batch(tx, ctx, &mut output, &mut emitted).await?;
+    let _ = flush_projected_batch(tx, ctx, &mut output).await?;
     Ok(())
 }
 
@@ -866,7 +863,7 @@ pub(crate) async fn stream_index_lookup_scan(
     if key_predicate_plan.is_impossible() {
         return Ok(());
     }
-    let mut emitted = 0usize;
+    let mut remaining = target_rows;
     let mut batch_builder = ProjectedBatchBuilder::from_access_plan(ctx.model, ctx.access_plan);
 
     'ranges: for range in &plan.ranges {
@@ -922,20 +919,20 @@ pub(crate) async fn stream_index_lookup_scan(
             }
             if !pk_batch.is_empty() {
                 let rows = get_rows(ctx, &pk_batch).await?;
-                let remaining = target_rows.saturating_sub(emitted + batch_builder.row_count());
-                ctx.append_rows(&rows, &mut batch_builder, remaining)?;
-                if emitted + batch_builder.row_count() >= target_rows {
+
+                ctx.append_rows(&rows, &mut batch_builder, &mut remaining)?;
+                if remaining == 0 {
                     break 'ranges;
                 }
                 if batch_builder.row_count() >= flush_threshold
-                    && !flush_projected_batch(tx, ctx, &mut batch_builder, &mut emitted).await?
+                    && !flush_projected_batch(tx, ctx, &mut batch_builder).await?
                 {
                     return Ok(());
                 }
             }
         }
     }
-    let _ = flush_projected_batch(tx, ctx, &mut batch_builder, &mut emitted).await?;
+    let _ = flush_projected_batch(tx, ctx, &mut batch_builder).await?;
     Ok(())
 }
 
@@ -970,12 +967,11 @@ async fn stream_range_scan(
                     .predicate_fully_enforced_by_index_key(ctx.model, spec)
             },
         );
-    let mut emitted = 0;
+    let mut remaining = target_rows;
     let mut output = ProjectedBatchBuilder::from_access_plan(ctx.model, ctx.access_plan);
     for range in ordered_ranges(ranges, direction) {
         let mut range = range.clone();
         loop {
-            let remaining = target_rows.saturating_sub(emitted + output.row_count());
             if remaining == 0 || range.start > range.end {
                 break;
             }
@@ -1031,24 +1027,23 @@ async fn stream_range_scan(
                     let Some(row) = row else { continue };
                     if ctx.filter.is_some() {
                         rows.push(row);
-                    } else if emitted + output.row_count() < target_rows {
-                        output.append_archived_row(&row.0, &row.1)?;
+                    } else if remaining > 0 && output.append_archived_row(&row.0, &row.1)? {
+                        remaining -= 1;
                     }
                 }
                 if ctx.filter.is_some() {
-                    let remaining = target_rows.saturating_sub(emitted + output.row_count());
-                    ctx.append_rows(&rows, &mut output, remaining)?;
+                    ctx.append_rows(&rows, &mut output, &mut remaining)?;
                 }
                 if output.row_count() >= flush_threshold
-                    && !flush_projected_batch(tx, ctx, &mut output, &mut emitted).await?
+                    && !flush_projected_batch(tx, ctx, &mut output).await?
                 {
                     return Ok(());
                 }
-                if emitted + output.row_count() >= target_rows {
+                if remaining == 0 {
                     break;
                 }
             }
-            if emitted + output.row_count() >= target_rows || scanned < raw_limit {
+            if remaining == 0 || scanned < raw_limit {
                 break;
             }
             // Raw limits count entries rejected by decoding or residual validation too
@@ -1072,11 +1067,11 @@ async fn stream_range_scan(
                 }
             }
         }
-        if emitted + output.row_count() >= target_rows {
+        if remaining == 0 {
             break;
         }
     }
-    let _ = flush_projected_batch(tx, ctx, &mut output, &mut emitted).await?;
+    let _ = flush_projected_batch(tx, ctx, &mut output).await?;
     Ok(())
 }
 
@@ -1420,6 +1415,153 @@ mod tests {
         IndexSpec::lexicographic(name, keys.iter().map(|name| name.to_string()).collect())
             .unwrap()
             .with_cover_columns(cover.iter().map(|name| name.to_string()).collect())
+    }
+
+    #[tokio::test]
+    async fn limit_counts_only_rows_with_valid_projected_values() {
+        use commonware_codec::Encode;
+        use exoware_sdk::kv_codec::{StoredRow, StoredValue};
+
+        let fixture = Fixture::new(
+            vec![
+                column("id", DataType::Int64, false),
+                column("tag", DataType::Int64, false),
+                column("amount", DataType::Int64, false),
+            ],
+            &["id"],
+            vec![index("tag", &["tag"], &[])],
+            vec![
+                Arc::new(Int64Array::from(vec![2])),
+                Arc::new(Int64Array::from(vec![7])),
+                Arc::new(Int64Array::from(vec![42])),
+            ],
+        )
+        .await;
+
+        // This row decodes successfully, but its nonnullable projection is invalid.
+        // It precedes the valid row in both the primary and secondary key order.
+        let invalid = RecordBatch::try_new(
+            fixture.table.model.schema.clone(),
+            vec![
+                Arc::new(Int64Array::from(vec![0])),
+                Arc::new(Int64Array::from(vec![7])),
+                Arc::new(Int64Array::from(vec![999])),
+            ],
+        )
+        .unwrap();
+        let entries = crate::writer::encode_insert_entries(
+            &invalid,
+            &fixture.table.model,
+            &fixture.table.index_specs,
+        )
+        .unwrap();
+        fixture
+            .rows
+            .values
+            .lock()
+            .unwrap()
+            .extend(entries.into_iter().map(|(key, value)| {
+                let value = if fixture.table.model.primary_key_prefix.matches(&key) {
+                    StoredRow {
+                        values: vec![None, Some(StoredValue::Int64(7)), None],
+                    }
+                    .encode()
+                } else {
+                    Bytes::from(value)
+                };
+                (fixture.prefix.encode_key(&key).unwrap(), value)
+            }));
+
+        // Range retries, residual filtering, point reads, and index lookups all
+        // count accepted output rows rather than decoded or fetched entries.
+        for sql in [
+            "SELECT amount FROM orders LIMIT 1",
+            "SELECT amount FROM orders WHERE id % 2 = 0 LIMIT 1",
+            "SELECT amount FROM orders WHERE id IN (0, 2) LIMIT 1",
+            "SELECT amount FROM orders WHERE tag = 7 LIMIT 1",
+        ] {
+            let requests = fixture.check(sql).await;
+            assert!(
+                fixture.rows.returned_rows.load(Ordering::SeqCst) >= 2,
+                "{sql}"
+            );
+            if sql.contains("IN") {
+                assert!(requests.iter().all(|r| matches!(r, Request::GetMany(_))));
+            } else if sql.contains("tag") {
+                assert!(requests.iter().any(|r| matches!(r, Request::GetMany(_))));
+                assert!(requests.iter().any(|r| matches!(
+                    r, Request::Range { start, .. } if fixture.index_matches(0, start)
+                )));
+            } else {
+                assert!(requests.iter().all(|r| matches!(r, Request::Range { .. })));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn limit_spans_output_batches_without_resetting_the_budget() {
+        use datafusion::{
+            logical_expr::{col, in_list, lit},
+            physical_plan::ExecutionPlan,
+        };
+        use futures::TryStreamExt;
+
+        let limit = super::BATCH_FLUSH_ROWS + 1;
+        let count = limit + 5;
+        let fixture = Fixture::new(
+            vec![
+                column("id", DataType::Int64, false),
+                column("tag", DataType::Int64, false),
+                column("amount", DataType::Int64, false),
+            ],
+            &["id"],
+            vec![index("tag", &["tag"], &[])],
+            vec![
+                Arc::new(Int64Array::from_iter_values(0..count as i64)),
+                Arc::new(Int64Array::from(vec![7; count])),
+                Arc::new(Int64Array::from_iter_values(0..count as i64)),
+            ],
+        )
+        .await;
+        let points = (0..count as i64).map(lit).collect();
+        for filters in [
+            vec![],
+            vec![in_list(col("id"), points, false)],
+            vec![col("tag").eq(lit(7i64))],
+        ] {
+            let scan = KvScanExec::try_new(
+                &fixture.table,
+                &fixture.store.datafusion().state(),
+                Some(&vec![2]),
+                &filters,
+                Some(limit),
+            )
+            .unwrap();
+            let batches = scan
+                .execute(0, fixture.store.datafusion().task_ctx())
+                .unwrap()
+                .try_collect::<Vec<_>>()
+                .await
+                .unwrap();
+            assert_eq!(
+                batches
+                    .iter()
+                    .map(RecordBatch::num_rows)
+                    .collect::<Vec<_>>(),
+                [super::BATCH_FLUSH_ROWS, 1]
+            );
+            let amounts = batches.iter().flat_map(|batch| {
+                batch
+                    .column(0)
+                    .as_any()
+                    .downcast_ref::<Int64Array>()
+                    .unwrap()
+                    .values()
+                    .iter()
+                    .copied()
+            });
+            assert!(amounts.eq(0..limit as i64));
+        }
     }
 
     #[tokio::test]

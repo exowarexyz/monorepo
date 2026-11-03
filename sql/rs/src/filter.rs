@@ -184,20 +184,18 @@ impl ScanAccessPlan {
             }
         }
 
-        let mut required_pk_mask = vec![false; model.primary_key_kinds.len()];
-        let mut required_non_pk_columns = vec![false; model.columns.len()];
-        for (pk_pos, col_idx) in model.primary_key_indices.iter().copied().enumerate() {
-            required_pk_mask[pk_pos] = required_columns[col_idx];
-        }
-        for (col_idx, required) in required_columns.iter().copied().enumerate() {
-            if required && model.pk_position(col_idx).is_none() {
-                required_non_pk_columns[col_idx] = true;
-            }
+        let required_pk_mask = model
+            .primary_key_indices
+            .iter()
+            .map(|&col_idx| required_columns[col_idx])
+            .collect();
+        for &col_idx in &model.primary_key_indices {
+            required_columns[col_idx] = false;
         }
 
         Self {
             required_pk_mask,
-            required_non_pk_columns,
+            required_non_pk_columns: required_columns,
             projection_sources,
             predicate_checks,
         }
@@ -244,25 +242,12 @@ impl ScanAccessPlan {
             impossible: false,
         };
         for check in &self.predicate_checks {
-            match check {
-                PredicateAccess::Pk { pk_pos, constraint } => {
-                    let kind = model.primary_key_kinds[*pk_pos];
-                    let compile = compile_encoded_constraint(kind, constraint);
-                    match compile {
-                        EncodedConstraintCompile::Encoded(compiled) => {
-                            plan.checks.push(EncodedIndexPredicateCheck {
-                                payload_offset: pk_offsets[*pk_pos],
-                                width: kind.key_width(),
-                                constraint: compiled,
-                            });
-                        }
-                        EncodedConstraintCompile::Unsupported => {}
-                        EncodedConstraintCompile::Impossible => {
-                            plan.impossible = true;
-                            return IndexPredicatePlan::Encoded(plan);
-                        }
-                    }
-                }
+            let (payload_offset, kind, constraint) = match check {
+                PredicateAccess::Pk { pk_pos, constraint } => (
+                    pk_offsets[*pk_pos],
+                    model.primary_key_kinds[*pk_pos],
+                    constraint,
+                ),
                 PredicateAccess::NonPk {
                     col_idx,
                     col,
@@ -271,21 +256,21 @@ impl ScanAccessPlan {
                     let Some(offset) = index_column_offsets.get(col_idx).copied() else {
                         continue;
                     };
-                    let compile = compile_encoded_constraint(col.kind, constraint);
-                    match compile {
-                        EncodedConstraintCompile::Encoded(compiled) => {
-                            plan.checks.push(EncodedIndexPredicateCheck {
-                                payload_offset: offset,
-                                width: col.kind.key_width(),
-                                constraint: compiled,
-                            });
-                        }
-                        EncodedConstraintCompile::Unsupported => {}
-                        EncodedConstraintCompile::Impossible => {
-                            plan.impossible = true;
-                            return IndexPredicatePlan::Encoded(plan);
-                        }
-                    }
+                    (offset, col.kind, constraint)
+                }
+            };
+            match compile_encoded_constraint(kind, constraint) {
+                EncodedConstraintCompile::Encoded(compiled) => {
+                    plan.checks.push(EncodedIndexPredicateCheck {
+                        payload_offset,
+                        width: kind.key_width(),
+                        constraint: compiled,
+                    });
+                }
+                EncodedConstraintCompile::Unsupported => {}
+                EncodedConstraintCompile::Impossible => {
+                    plan.impossible = true;
+                    return IndexPredicatePlan::Encoded(plan);
                 }
             }
         }
@@ -300,42 +285,29 @@ impl ScanAccessPlan {
     ) -> KvPredicate {
         let mut checks = Vec::with_capacity(self.predicate_checks.len());
         for check in &self.predicate_checks {
-            match check {
-                PredicateAccess::Pk { pk_pos, constraint } => {
-                    let Some(compiled_constraint) = compile_kv_predicate_constraint(constraint)
-                    else {
-                        continue;
-                    };
-                    let Some(field) = pk_field_ref_for_secondary_index(*pk_pos, model, spec) else {
-                        continue;
-                    };
-                    checks.push(KvPredicateCheck {
-                        field,
-                        constraint: compiled_constraint,
-                    });
-                }
+            let (field, constraint) = match check {
+                PredicateAccess::Pk { pk_pos, constraint } => (
+                    pk_field_ref_for_secondary_index(*pk_pos, model, spec),
+                    constraint,
+                ),
                 PredicateAccess::NonPk {
                     col_idx,
-                    col: _,
                     constraint,
+                    ..
                 } => {
                     if !spec.key_columns.contains(col_idx) {
                         continue;
                     }
-                    let Some(compiled_constraint) = compile_kv_predicate_constraint(constraint)
-                    else {
-                        continue;
-                    };
-                    let Some(field) = index_row_field_ref(*col_idx, model, spec) else {
-                        continue;
-                    };
-                    checks.push(KvPredicateCheck {
-                        field,
-                        constraint: compiled_constraint,
-                    });
+                    (index_row_field_ref(*col_idx, model, spec), constraint)
                 }
-            }
+            };
+            let Some(field) = field else { continue };
+            checks.push(KvPredicateCheck {
+                field,
+                constraint: compile_kv_predicate_constraint(constraint),
+            });
         }
+
         KvPredicate {
             checks,
             contradiction: false,
@@ -431,17 +403,7 @@ impl ScanAccessPlan {
                         EncodedConstraintCompile::Unsupported
                     )
             }
-            PredicateAccess::NonPk {
-                col_idx,
-                col,
-                constraint,
-            } => {
-                spec.key_columns.contains(col_idx)
-                    && !matches!(
-                        compile_encoded_constraint(col.kind, constraint),
-                        EncodedConstraintCompile::Unsupported
-                    )
-            }
+            PredicateAccess::NonPk { col_idx, .. } => spec.key_columns.contains(col_idx),
         })
     }
 }
@@ -505,7 +467,10 @@ pub(crate) fn compile_encoded_constraint(
         (ColumnKind::Boolean, PredicateConstraint::BoolEq(value)) => {
             EncodedConstraintCompile::Encoded(EncodedIndexConstraint::Eq(vec![u8::from(*value)]))
         }
-        (ColumnKind::Int64, PredicateConstraint::IntRange { min, max }) => {
+        (
+            ColumnKind::Int64 | ColumnKind::Date64 | ColumnKind::Timestamp,
+            PredicateConstraint::IntRange { min, max },
+        ) => {
             let min = min.map(|v| (encode_i64_ordered(v).to_vec(), true));
             let max = max.map(|v| (encode_i64_ordered(v).to_vec(), true));
             EncodedConstraintCompile::Encoded(EncodedIndexConstraint::Range { min, max })
@@ -555,12 +520,6 @@ pub(crate) fn compile_encoded_constraint(
             }
             let min = Some((encode_i32_ordered(min_i32).to_vec(), true));
             let max = Some((encode_i32_ordered(max_i32).to_vec(), true));
-            EncodedConstraintCompile::Encoded(EncodedIndexConstraint::Range { min, max })
-        }
-        (ColumnKind::Date64, PredicateConstraint::IntRange { min, max })
-        | (ColumnKind::Timestamp, PredicateConstraint::IntRange { min, max }) => {
-            let min = min.map(|v| (encode_i64_ordered(v).to_vec(), true));
-            let max = max.map(|v| (encode_i64_ordered(v).to_vec(), true));
             EncodedConstraintCompile::Encoded(EncodedIndexConstraint::Range { min, max })
         }
         (ColumnKind::Float64, PredicateConstraint::FloatRange { min, max }) => {

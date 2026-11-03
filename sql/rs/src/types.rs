@@ -434,7 +434,7 @@ pub(crate) struct ResolvedColumn {
 }
 
 /// Secondary-index layout resolved to positions in the table's column vector.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct ResolvedIndexSpec {
     /// One-based index position, in `1..=15`, used as the family discriminator.
     pub(crate) id: u8,

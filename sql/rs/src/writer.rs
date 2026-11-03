@@ -80,11 +80,9 @@ pub struct BatchWriter {
     /// Batches whose upload failed, awaiting retry by `prepare_flush` in request ID order.
     /// The mutex lets upload outcomes be reported through a shared reference.
     failed_prepared: Mutex<Vec<PreparedBatch>>,
-    /// Keys of encoded entries not yet taken into a batch, in insert order. Each row adds its
+    /// Encoded entries not yet taken into a batch, in insert order. Each row adds its
     /// base entry and then its index entries.
-    pub(crate) pending_keys: Vec<Key>,
-    /// Values for `pending_keys`, matched by position.
-    pub(crate) pending_values: Vec<Bytes>,
+    pub(crate) pending_entries: Vec<(Key, Bytes)>,
 }
 
 /// Entries taken from a `BatchWriter` for one upload attempt.
@@ -96,12 +94,8 @@ pub struct BatchWriter {
 pub struct PreparedBatch {
     /// Writer-assigned ID retained across retries.
     request_id: u64,
-    /// Number of key-value entries, counting index entries separately from base rows.
-    entry_count: usize,
-    /// Entry keys in insert order.
-    keys: Vec<Key>,
-    /// Values for `keys`, matched by position.
-    values: Vec<Bytes>,
+    /// Encoded entries in insert order, retained until the upload outcome is reported.
+    entries: Vec<(Key, Bytes)>,
 }
 
 impl PreparedBatch {
@@ -110,11 +104,11 @@ impl PreparedBatch {
     }
 
     pub const fn entry_count(&self) -> usize {
-        self.entry_count
+        self.entries.len()
     }
 
     pub const fn is_empty(&self) -> bool {
-        self.keys.is_empty()
+        self.entries.is_empty()
     }
 }
 
@@ -148,8 +142,7 @@ impl BatchWriter {
             tables,
             next_request_id: 0,
             failed_prepared: Mutex::new(Vec::new()),
-            pending_keys: Vec::new(),
-            pending_values: Vec::new(),
+            pending_entries: Vec::new(),
         }
     }
 
@@ -163,15 +156,13 @@ impl BatchWriter {
             .get(table_name)
             .ok_or_else(|| format!("unknown table '{table_name}'"))?;
         let entries = writer.encode_row(values)?;
-        for (key, value) in entries {
-            self.pending_keys.push(key);
-            self.pending_values.push(value.into());
-        }
+        self.pending_entries
+            .extend(entries.into_iter().map(|(key, value)| (key, value.into())));
         Ok(self)
     }
 
     pub fn pending_count(&self) -> usize {
-        self.pending_keys.len()
+        self.pending_entries.len()
             + self
                 .failed_prepared
                 .lock()
@@ -204,16 +195,14 @@ impl BatchWriter {
         if let Some(prepared) = self.take_failed_prepared() {
             return Ok(Some(prepared));
         }
-        if self.pending_keys.is_empty() {
+        if self.pending_entries.is_empty() {
             return Ok(None);
         }
         let request_id = self.next_request_id;
         self.next_request_id += 1;
         Ok(Some(PreparedBatch {
             request_id,
-            entry_count: self.pending_keys.len(),
-            keys: std::mem::take(&mut self.pending_keys),
-            values: std::mem::take(&mut self.pending_values),
+            entries: std::mem::take(&mut self.pending_entries),
         }))
     }
 
@@ -222,7 +211,7 @@ impl BatchWriter {
         prepared: &PreparedBatch,
         batch: &mut StoreWriteBatch,
     ) -> DataFusionResult<()> {
-        for (key, value) in prepared.keys.iter().zip(prepared.values.iter()) {
+        for (key, value) in &prepared.entries {
             batch
                 .push(&self.client, key, value)
                 .map_err(|e| DataFusionError::External(Box::new(e)))?;
@@ -316,26 +305,8 @@ impl StoreBatchUpload for BatchWriter {
 /// after the input ends. Reports the number of input rows written.
 #[derive(Debug)]
 pub(crate) struct KvIngestSink {
-    /// Store client whose namespace prefixes the written keys.
-    pub(crate) client: PrefixedStoreClient,
-    /// Table layout that determines the sink schema and row encodings.
-    pub(crate) model: Arc<TableModel>,
-    /// Secondary indexes. Each row produces one index entry per spec.
-    pub(crate) index_specs: Arc<Vec<ResolvedIndexSpec>>,
-}
-
-impl KvIngestSink {
-    pub(crate) const fn new(
-        client: PrefixedStoreClient,
-        model: Arc<TableModel>,
-        index_specs: Arc<Vec<ResolvedIndexSpec>>,
-    ) -> Self {
-        Self {
-            client,
-            model,
-            index_specs,
-        }
-    }
+    /// Table provider supplying the sink's schema, row encodings, and Store namespace.
+    pub(crate) table: KvTable,
 }
 
 impl DisplayAs for KvIngestSink {
@@ -347,7 +318,7 @@ impl DisplayAs for KvIngestSink {
 #[async_trait]
 impl DataSink for KvIngestSink {
     fn schema(&self) -> &SchemaRef {
-        &self.model.schema
+        &self.table.model.schema
     }
 
     async fn write_all(
@@ -356,22 +327,21 @@ impl DataSink for KvIngestSink {
         _context: &Arc<TaskContext>,
     ) -> DataFusionResult<u64> {
         let mut data = data;
-        let mut pending_keys: Vec<Key> = Vec::new();
-        let mut pending_values: Vec<Bytes> = Vec::new();
+        let mut pending_entries = Vec::new();
         let mut logical_rows_written = 0u64;
 
         while let Some(batch) = data.try_next().await? {
-            let encoded_entries = encode_insert_entries(&batch, &self.model, &self.index_specs)?;
+            let encoded_entries =
+                encode_insert_entries(&batch, &self.table.model, &self.table.index_specs)?;
             logical_rows_written += batch.num_rows() as u64;
-            for (key, value) in encoded_entries {
-                pending_keys.push(key);
-                pending_values.push(value.into());
-            }
+            pending_entries.extend(
+                encoded_entries
+                    .into_iter()
+                    .map(|(key, value)| (key, value.into())),
+            );
         }
 
-        if !pending_keys.is_empty() {
-            flush_ingest_batch(&self.client, &mut pending_keys, &mut pending_values).await?;
-        }
+        flush_ingest_batch(&self.table.client, &mut pending_entries).await?;
         Ok(logical_rows_written)
     }
 }
@@ -456,16 +426,13 @@ pub(crate) fn extract_row_from_batch(
 }
 
 pub(crate) fn encode_base_row_value(row: &KvRow, model: &TableModel) -> DataFusionResult<Vec<u8>> {
-    let mut values = Vec::with_capacity(model.columns.len());
-    for (idx, col) in model.columns.iter().enumerate() {
+    encode_selected_values(model, |idx, col| {
         if model.is_pk_column(idx) {
-            values.push(None);
-            continue;
+            Ok(None)
+        } else {
+            encode_non_pk_cell_value(row.value_at(idx), col)
         }
-        values.push(encode_non_pk_cell_value(row.value_at(idx), col)?);
-    }
-    let stored_row = StoredRow { values };
-    Ok(stored_row.encode().to_vec())
+    })
 }
 
 pub(crate) fn encode_secondary_index_value(
@@ -473,16 +440,13 @@ pub(crate) fn encode_secondary_index_value(
     model: &TableModel,
     spec: &ResolvedIndexSpec,
 ) -> DataFusionResult<Vec<u8>> {
-    let mut values = Vec::with_capacity(model.columns.len());
-    for (idx, col) in model.columns.iter().enumerate() {
-        if model.is_pk_column(idx) || !spec.value_column_mask[idx] {
-            values.push(None);
-            continue;
+    encode_selected_values(model, |idx, col| {
+        if spec.value_column_mask[idx] {
+            encode_non_pk_cell_value(row.value_at(idx), col)
+        } else {
+            Ok(None)
         }
-        values.push(encode_non_pk_cell_value(row.value_at(idx), col)?);
-    }
-    let stored_row = StoredRow { values };
-    Ok(stored_row.encode().to_vec())
+    })
 }
 
 pub(crate) fn encode_secondary_index_value_from_archived(
@@ -495,11 +459,9 @@ pub(crate) fn encode_secondary_index_value_from_archived(
             "archived row column count mismatch".to_string(),
         ));
     }
-    let mut values = Vec::with_capacity(model.columns.len());
-    for (idx, col) in model.columns.iter().enumerate() {
-        if model.is_pk_column(idx) || !spec.value_column_mask[idx] {
-            values.push(None);
-            continue;
+    encode_selected_values(model, |idx, col| {
+        if !spec.value_column_mask[idx] {
+            return Ok(None);
         }
         let stored_opt = archived.values.get(idx).and_then(|value| value.as_ref());
         if !archived_non_pk_value_is_valid(col, stored_opt) {
@@ -508,10 +470,20 @@ pub(crate) fn encode_secondary_index_value_from_archived(
                 col.name
             )));
         }
-        values.push(stored_opt.cloned());
+        Ok(stored_opt.cloned())
+    })
+}
+
+/// Stored rows retain a slot for every table column. Unselected values occupy null slots.
+fn encode_selected_values(
+    model: &TableModel,
+    mut value_at: impl FnMut(usize, &ResolvedColumn) -> DataFusionResult<Option<StoredValue>>,
+) -> DataFusionResult<Vec<u8>> {
+    let mut values = Vec::with_capacity(model.columns.len());
+    for (idx, col) in model.columns.iter().enumerate() {
+        values.push(value_at(idx, col)?);
     }
-    let stored_row = StoredRow { values };
-    Ok(stored_row.encode().to_vec())
+    Ok(StoredRow { values }.encode().to_vec())
 }
 
 pub(crate) fn encode_non_pk_cell_value(
@@ -818,14 +790,13 @@ fn collect_list<A: ArrayAccessor>(
 
 pub(crate) async fn flush_ingest_batch(
     client: &PrefixedStoreClient,
-    keys: &mut Vec<Key>,
-    values: &mut Vec<Bytes>,
+    entries: &mut Vec<(Key, Bytes)>,
 ) -> DataFusionResult<u64> {
-    if keys.is_empty() {
+    if entries.is_empty() {
         return Ok(0);
     }
     let mut batch = StoreWriteBatch::new();
-    for (key, value) in keys.iter().zip(values.iter()) {
+    for (key, value) in entries.iter() {
         batch
             .push(client, key, value)
             .map_err(|e| DataFusionError::External(Box::new(e)))?;
@@ -834,8 +805,7 @@ pub(crate) async fn flush_ingest_batch(
         .commit(client.client())
         .await
         .map_err(|e| DataFusionError::External(Box::new(e)))?;
-    keys.clear();
-    values.clear();
+    entries.clear();
     Ok(token)
 }
 
@@ -852,6 +822,138 @@ mod tests {
         datatypes::{DataType, Field, Schema},
     };
     use exoware_sdk::{kv_codec::decode_stored_row, StoreClient};
+
+    #[test]
+    fn secondary_index_storage_encoding_is_stable() {
+        for (layout, expected_key) in [
+            (
+                IndexLayout::Lexicographic,
+                "217ffffffe12fe000000000000000912fe",
+            ),
+            (IndexLayout::ZOrder, "212baefffefffe000000000000000912fe"),
+        ] {
+            // Mixed-width index fields precede a composite primary key. Stored
+            // values retain table-column positions, including unselected slots.
+            let config = KvTableConfig::new(
+                2,
+                vec![
+                    TableColumnConfig::new("day", DataType::Date32, false),
+                    TableColumnConfig::new("id", DataType::UInt64, false),
+                    TableColumnConfig::new("note", DataType::Utf8, true),
+                    TableColumnConfig::new("tag", DataType::FixedSizeBinary(2), false),
+                    TableColumnConfig::new("unused", DataType::Int64, false),
+                ],
+                vec!["id".into(), "tag".into()],
+                vec![IndexSpec::new("by_stamp", vec!["day".into(), "tag".into()])
+                    .unwrap()
+                    .with_layout(layout)
+                    .with_cover_columns(vec!["note".into()])],
+            )
+            .unwrap();
+            let model = TableModel::from_config(&config).unwrap();
+            let specs = model.resolve_index_specs(&config.index_specs).unwrap();
+            let spec = &specs[0];
+            for (note, expected_base, expected_index) in [
+                (
+                    CellValue::Null,
+                    "050100fffffffffffffffe0000000100fffffffffffffff9",
+                    "050100fffffffffffffffe00000000",
+                ),
+                (
+                    CellValue::Utf8("é\0x".into()),
+                    "050100fffffffffffffffe00010404c3a90078000100fffffffffffffff9",
+                    "050100fffffffffffffffe00010404c3a900780000",
+                ),
+            ] {
+                let row = KvRow {
+                    values: vec![
+                        CellValue::Date32(-2),
+                        CellValue::UInt64(9),
+                        note,
+                        CellValue::FixedBinary(vec![0x12, 0xfe]),
+                        CellValue::Int64(-7),
+                    ],
+                };
+                let base = encode_base_row_value(&row, &model).unwrap();
+                assert_eq!(hex::encode(&base), expected_base);
+                assert_eq!(
+                    hex::encode(encode_secondary_index_key(2, spec, &model, &row).unwrap()),
+                    expected_key
+                );
+                assert_eq!(
+                    hex::encode(encode_secondary_index_value(&row, &model, spec).unwrap()),
+                    expected_index
+                );
+
+                // Backfill reconstructs the same entry from the stored base value
+                // and primary key, without access to the original row.
+                let stored = decode_stored_row(&base).unwrap();
+                let pk = [
+                    CellValue::UInt64(9),
+                    CellValue::FixedBinary(vec![0x12, 0xfe]),
+                ];
+                assert_eq!(
+                    hex::encode(
+                        encode_secondary_index_key_from_parts(2, spec, &model, &pk, &stored)
+                            .unwrap()
+                    ),
+                    expected_key
+                );
+                assert_eq!(
+                    hex::encode(
+                        encode_secondary_index_value_from_archived(&stored, &model, spec).unwrap()
+                    ),
+                    expected_index
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn oversized_index_keys_preserve_writer_and_backfill_errors() {
+        let schema = crate::KvSchema::new(PrefixedStoreClient::empty(StoreClient::new(
+            "http://127.0.0.1:1",
+        )))
+        .table(
+            "orders",
+            vec![
+                TableColumnConfig::new("id", DataType::Utf8, false),
+                TableColumnConfig::new("tag", DataType::Utf8, false),
+            ],
+            vec!["id".into()],
+            vec![IndexSpec::new("tag_idx", vec!["tag".into()]).unwrap()],
+        )
+        .unwrap();
+        let row = KvRow {
+            values: vec![
+                CellValue::Utf8("i".repeat(251)),
+                CellValue::Utf8("t".into()),
+            ],
+        };
+        let expected = "failed to encode index 'tag_idx' key: key length 255 exceeds max 254";
+
+        // The base key fits, but its secondary entry exceeds the Store key limit.
+        // A failed insert must not leave the base entry pending on its own.
+        let mut writer = schema.batch_writer();
+        assert_eq!(
+            writer.insert("orders", row.values.clone()).unwrap_err(),
+            expected
+        );
+        assert_eq!(writer.pending_count(), 0);
+
+        let table = &schema.tables()[0].1;
+        let base = encode_base_row_value(&row, &table.model).unwrap();
+        let stored = decode_stored_row(&base).unwrap();
+        let error = encode_secondary_index_key_from_parts(
+            table.model.table_prefix,
+            &table.index_specs[0],
+            &table.model,
+            &row.values[..1],
+            &stored,
+        )
+        .unwrap_err();
+        assert!(matches!(error, DataFusionError::Execution(message) if message == expected));
+    }
 
     /// Variable-length Binary values survive the encode -> store -> arrow
     /// round trip with their exact lengths.
@@ -881,12 +983,8 @@ mod tests {
             };
             let encoded = encode_base_row_value(&row, &model).expect("encode row");
             let stored = decode_stored_row(&encoded).expect("decode stored row");
-            append_archived_non_pk_value(
-                &mut builder,
-                &model.columns[body_idx],
-                stored.values[body_idx].as_ref(),
-            )
-            .expect("append archived binary");
+            append_archived_non_pk_value(&mut builder, stored.values[body_idx].as_ref())
+                .expect("append archived binary");
         }
         let array = builder
             .finish(&DataType::Binary)
@@ -1070,12 +1168,7 @@ mod tests {
                 let encoded = encode_base_row_value(&row, &model).unwrap();
                 let stored = decode_stored_row(&encoded).unwrap();
                 let mut builder = make_column_builder(&model, 1);
-                append_archived_non_pk_value(
-                    &mut builder,
-                    &model.columns[1],
-                    stored.values[1].as_ref(),
-                )
-                .unwrap();
+                append_archived_non_pk_value(&mut builder, stored.values[1].as_ref()).unwrap();
                 let array = builder.finish(model.schema.field(1).data_type()).unwrap();
                 let batch = RecordBatch::try_new(
                     model.schema.clone(),
@@ -1096,18 +1189,19 @@ mod tests {
         );
         let mut prepared = PreparedBatch {
             request_id: 7,
-            entry_count: 2,
-            keys: vec![Bytes::from_static(b"a"), Bytes::from_static(b"b")],
-            values: vec![Bytes::from_static(&[1]), Bytes::from_static(&[2, 3])],
+            entries: vec![
+                (Bytes::from_static(b"a"), Bytes::from_static(&[1])),
+                (Bytes::from_static(b"b"), Bytes::from_static(&[2, 3])),
+            ],
         };
+        let entries = prepared.entries.clone();
         let mut batch = StoreWriteBatch::new();
 
         StoreBatchUpload::stage_upload(&writer, &mut prepared, &mut batch).expect("stage flush");
 
         assert_eq!(batch.len(), 2);
         assert_eq!(prepared.entry_count(), 2);
-        assert_eq!(prepared.keys.len(), 2);
-        assert_eq!(prepared.values.len(), 2);
+        assert_eq!(prepared.entries, entries);
 
         writer.mark_flush_failed(prepared);
         let mut retry = writer.take_failed_prepared().expect("failed batch queued");
@@ -1116,5 +1210,6 @@ mod tests {
         let mut retry_batch = StoreWriteBatch::new();
         StoreBatchUpload::stage_upload(&writer, &mut retry, &mut retry_batch).expect("stage retry");
         assert_eq!(retry_batch.len(), 2);
+        assert_eq!(retry.entries, entries);
     }
 }

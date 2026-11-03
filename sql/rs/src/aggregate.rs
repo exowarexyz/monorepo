@@ -686,62 +686,40 @@ pub(crate) fn reduced_value_to_scalar(
     value: Option<KvReducedValue>,
     data_type: &DataType,
 ) -> DataFusionResult<ScalarValue> {
-    Ok(match (data_type, value) {
-        (_, Some(KvReducedValue::Int64(v))) => {
-            cast_scalar_value(ScalarValue::Int64(Some(v)), data_type)?
-        }
-        (_, Some(KvReducedValue::UInt64(v))) => {
-            cast_scalar_value(ScalarValue::UInt64(Some(v)), data_type)?
-        }
-        (_, Some(KvReducedValue::Float64(v))) => {
-            cast_scalar_value(ScalarValue::Float64(Some(v)), data_type)?
-        }
-        (_, Some(KvReducedValue::Boolean(v))) => {
-            cast_scalar_value(ScalarValue::Boolean(Some(v)), data_type)?
-        }
-        (_, Some(KvReducedValue::Utf8(v))) => {
-            cast_scalar_value(ScalarValue::Utf8(Some(v)), data_type)?
-        }
-        (_, Some(KvReducedValue::Date32(v))) => {
-            cast_scalar_value(ScalarValue::Date32(Some(v)), data_type)?
-        }
-        (_, Some(KvReducedValue::Date64(v))) => {
-            cast_scalar_value(ScalarValue::Date64(Some(v)), data_type)?
-        }
+    let scalar = match (data_type, value) {
+        (_, Some(KvReducedValue::Int64(v))) => ScalarValue::Int64(Some(v)),
+        (_, Some(KvReducedValue::UInt64(v))) => ScalarValue::UInt64(Some(v)),
+        (_, Some(KvReducedValue::Float64(v))) => ScalarValue::Float64(Some(v)),
+        (_, Some(KvReducedValue::Boolean(v))) => ScalarValue::Boolean(Some(v)),
+        (_, Some(KvReducedValue::Utf8(v))) => ScalarValue::Utf8(Some(v)),
+        (_, Some(KvReducedValue::Date32(v))) => ScalarValue::Date32(Some(v)),
+        (_, Some(KvReducedValue::Date64(v))) => ScalarValue::Date64(Some(v)),
         (DataType::Timestamp(TimeUnit::Microsecond, tz), Some(KvReducedValue::Timestamp(v))) => {
-            ScalarValue::TimestampMicrosecond(Some(v), tz.clone())
+            return Ok(ScalarValue::TimestampMicrosecond(Some(v), tz.clone()));
         }
-        (_, Some(KvReducedValue::Timestamp(v))) => {
-            cast_scalar_value(ScalarValue::TimestampMicrosecond(Some(v), None), data_type)?
+        (_, Some(KvReducedValue::Timestamp(v))) => ScalarValue::TimestampMicrosecond(Some(v), None),
+        (DataType::Decimal128(precision, scale), Some(KvReducedValue::Decimal128(v))) => {
+            return Ok(ScalarValue::Decimal128(Some(v), *precision, *scale));
         }
-        (_, Some(KvReducedValue::Decimal128(v))) => match data_type {
-            DataType::Decimal128(precision, scale) => {
-                ScalarValue::Decimal128(Some(v), *precision, *scale)
-            }
-            _ => {
-                return Err(DataFusionError::Execution(format!(
-                    "unsupported reduced scalar conversion to {:?}",
-                    data_type
-                )))
-            }
-        },
-        (_, Some(KvReducedValue::Decimal256(v))) => match data_type {
-            DataType::Decimal256(precision, scale) => {
-                ScalarValue::Decimal256(Some(i256::from_le_bytes(v)), *precision, *scale)
-            }
-            _ => {
-                return Err(DataFusionError::Execution(format!(
-                    "unsupported reduced scalar conversion to {:?}",
-                    data_type
-                )))
-            }
-        },
-        (_, Some(KvReducedValue::FixedSizeBinary(v))) => cast_scalar_value(
-            ScalarValue::FixedSizeBinary(v.len() as i32, Some(v.to_vec())),
-            data_type,
-        )?,
-        (_, None) => ScalarValue::try_new_null(data_type)?,
-    })
+        (DataType::Decimal256(precision, scale), Some(KvReducedValue::Decimal256(v))) => {
+            return Ok(ScalarValue::Decimal256(
+                Some(i256::from_le_bytes(v)),
+                *precision,
+                *scale,
+            ));
+        }
+        (_, Some(KvReducedValue::Decimal128(_) | KvReducedValue::Decimal256(_))) => {
+            return Err(DataFusionError::Execution(format!(
+                "unsupported reduced scalar conversion to {:?}",
+                data_type
+            )));
+        }
+        (_, Some(KvReducedValue::FixedSizeBinary(v))) => {
+            ScalarValue::FixedSizeBinary(v.len() as i32, Some(v.to_vec()))
+        }
+        (_, None) => return ScalarValue::try_new_null(data_type),
+    };
+    cast_scalar_value(scalar, data_type)
 }
 
 pub(crate) fn cast_scalar_value(
@@ -1222,14 +1200,10 @@ pub(crate) fn reduce_job_required_projection(
     aggr_expr: Option<&NormalizedAggregateExpr>,
     filter: Option<&QueryPredicate>,
 ) -> Vec<usize> {
-    let mut cols = group_exprs
-        .iter()
-        .flat_map(|group| {
-            let mut cols = Vec::new();
-            group.collect_columns(&mut cols);
-            cols
-        })
-        .collect::<Vec<_>>();
+    let mut cols = Vec::new();
+    for group in group_exprs {
+        group.collect_columns(&mut cols);
+    }
     if let Some(expr) = aggr_expr {
         if let AggregatePushdownArgument::Expr(argument) = &expr.argument {
             argument.collect_columns(&mut cols);
@@ -1337,7 +1311,7 @@ pub(crate) fn compile_reduce_filter(
     for col_idx in cols {
         checks.push(KvPredicateCheck {
             field: aggregate_field_ref(col_idx, model, index_specs, access_path)?,
-            constraint: compile_kv_predicate_constraint(predicate.constraints.get(&col_idx)?)?,
+            constraint: compile_kv_predicate_constraint(predicate.constraints.get(&col_idx)?),
         });
     }
     Some(KvPredicate {
@@ -1348,8 +1322,8 @@ pub(crate) fn compile_reduce_filter(
 
 pub(crate) fn compile_kv_predicate_constraint(
     constraint: &PredicateConstraint,
-) -> Option<KvPredicateConstraint> {
-    Some(match constraint {
+) -> KvPredicateConstraint {
+    match constraint {
         PredicateConstraint::StringEq(value) => KvPredicateConstraint::StringEq(value.clone()),
         PredicateConstraint::BoolEq(value) => KvPredicateConstraint::BoolEq(*value),
         PredicateConstraint::FixedBinaryEq(value) => {
@@ -1387,7 +1361,7 @@ pub(crate) fn compile_kv_predicate_constraint(
                 max: max.map(|v| v.to_le_bytes()),
             }
         }
-    })
+    }
 }
 
 #[allow(deprecated)]
@@ -1531,73 +1505,66 @@ pub(crate) fn compile_pushdown_scalar_function(
     func: &datafusion::logical_expr::expr::ScalarFunction,
     model: &TableModel,
 ) -> DataFusionResult<(PushdownValueExpr, KvFieldKind)> {
-    let func_name = func.name().to_ascii_lowercase();
-    match func_name.as_str() {
-        "lower"
-            if func
-                .func
-                .inner()
-                .downcast_ref::<datafusion::functions::string::lower::LowerFunc>()
-                .is_some() =>
-        {
-            if func.args.len() != 1 {
-                return Err(DataFusionError::Execution(
-                    "lower() pushdown requires exactly one argument".to_string(),
-                ));
-            }
-            let (inner, kind) = compile_pushdown_value_expr(&func.args[0], model)?;
-            if kind != KvFieldKind::Utf8 {
-                return Err(DataFusionError::Execution(
-                    "lower() pushdown requires Utf8 input".to_string(),
-                ));
-            }
-            Ok((PushdownValueExpr::Lower(Box::new(inner)), KvFieldKind::Utf8))
+    let function = func.func.inner();
+    if function
+        .downcast_ref::<datafusion::functions::string::lower::LowerFunc>()
+        .is_some()
+    {
+        if func.args.len() != 1 {
+            return Err(DataFusionError::Execution(
+                "lower() pushdown requires exactly one argument".to_string(),
+            ));
         }
-        "date_trunc"
-            if func
-                .func
-                .inner()
-                .downcast_ref::<datafusion::functions::datetime::date_trunc::DateTruncFunc>()
-                .is_some() =>
-        {
-            if func.args.len() != 2 {
-                return Err(DataFusionError::Execution(
-                    "date_trunc() pushdown requires exactly two arguments".to_string(),
-                ));
-            }
-            let unit = extract_pushdown_string_literal(&func.args[0]).ok_or_else(|| {
-                DataFusionError::Execution(
-                    "date_trunc() pushdown requires a string literal unit".to_string(),
-                )
-            })?;
-            if !unit.eq_ignore_ascii_case("day") {
-                return Err(DataFusionError::Execution(
-                    "date_trunc() pushdown only supports 'day'".to_string(),
-                ));
-            }
-            if matches!(
-                func.args[1].get_type(&AggregateExprSchema(model))?,
-                DataType::Timestamp(_, Some(_))
-            ) {
-                return Err(DataFusionError::Execution(
-                    "date_trunc pushdown requires timestamps without timezone metadata".to_string(),
-                ));
-            }
-            let (inner, kind) = compile_pushdown_value_expr(&func.args[1], model)?;
-            if !matches!(
-                kind,
-                KvFieldKind::Date32 | KvFieldKind::Date64 | KvFieldKind::Timestamp
-            ) {
-                return Err(DataFusionError::Execution(
-                    "date_trunc('day', ...) pushdown requires Date32/Date64/Timestamp input"
-                        .to_string(),
-                ));
-            }
-            Ok((PushdownValueExpr::DateTruncDay(Box::new(inner)), kind))
+        let (inner, kind) = compile_pushdown_value_expr(&func.args[0], model)?;
+        if kind != KvFieldKind::Utf8 {
+            return Err(DataFusionError::Execution(
+                "lower() pushdown requires Utf8 input".to_string(),
+            ));
         }
-        _ => Err(DataFusionError::Execution(format!(
-            "pushdown expression does not support function '{func_name}'"
-        ))),
+        Ok((PushdownValueExpr::Lower(Box::new(inner)), KvFieldKind::Utf8))
+    } else if function
+        .downcast_ref::<datafusion::functions::datetime::date_trunc::DateTruncFunc>()
+        .is_some()
+    {
+        if func.args.len() != 2 {
+            return Err(DataFusionError::Execution(
+                "date_trunc() pushdown requires exactly two arguments".to_string(),
+            ));
+        }
+        let unit = extract_pushdown_string_literal(&func.args[0]).ok_or_else(|| {
+            DataFusionError::Execution(
+                "date_trunc() pushdown requires a string literal unit".to_string(),
+            )
+        })?;
+        if !unit.eq_ignore_ascii_case("day") {
+            return Err(DataFusionError::Execution(
+                "date_trunc() pushdown only supports 'day'".to_string(),
+            ));
+        }
+        if matches!(
+            func.args[1].get_type(&AggregateExprSchema(model))?,
+            DataType::Timestamp(_, Some(_))
+        ) {
+            return Err(DataFusionError::Execution(
+                "date_trunc pushdown requires timestamps without timezone metadata".to_string(),
+            ));
+        }
+        let (inner, kind) = compile_pushdown_value_expr(&func.args[1], model)?;
+        if !matches!(
+            kind,
+            KvFieldKind::Date32 | KvFieldKind::Date64 | KvFieldKind::Timestamp
+        ) {
+            return Err(DataFusionError::Execution(
+                "date_trunc('day', ...) pushdown requires Date32/Date64/Timestamp input"
+                    .to_string(),
+            ));
+        }
+        Ok((PushdownValueExpr::DateTruncDay(Box::new(inner)), kind))
+    } else {
+        Err(DataFusionError::Execution(format!(
+            "pushdown expression does not support function '{}'",
+            func.name().to_ascii_lowercase()
+        )))
     }
 }
 
@@ -1672,11 +1639,7 @@ pub(crate) fn normalize_aggregate_expr(
             agg.func.name()
         )));
     };
-    let (argument, case_filter) = if func == AggregatePushdownFunction::Count {
-        normalize_count_aggregate_argument(&agg.params.args[0], model)?
-    } else {
-        normalize_column_or_case_aggregate(func, &agg.params.args[0], model)?
-    };
+    let (argument, case_filter) = normalize_aggregate_argument(func, &agg.params.args[0], model)?;
 
     Ok(NormalizedAggregateExpr {
         func,
@@ -1686,30 +1649,15 @@ pub(crate) fn normalize_aggregate_expr(
     })
 }
 
-pub(crate) fn normalize_count_aggregate_argument(
-    arg: &Expr,
-    model: &TableModel,
-) -> DataFusionResult<(AggregatePushdownArgument, Option<Expr>)> {
-    if is_count_rows_arg(arg) {
-        return Ok((AggregatePushdownArgument::CountAll, None));
-    }
-    if let Some((argument, filter)) =
-        normalize_case_aggregate_argument(AggregatePushdownFunction::Count, arg, model)?
-    {
-        return Ok((argument, Some(filter)));
-    }
-    Ok((
-        AggregatePushdownArgument::Expr(compile_pushdown_value_expr(arg, model)?.0),
-        None,
-    ))
-}
-
-pub(crate) fn normalize_column_or_case_aggregate(
+pub(crate) fn normalize_aggregate_argument(
     func: AggregatePushdownFunction,
     arg: &Expr,
     model: &TableModel,
 ) -> DataFusionResult<(AggregatePushdownArgument, Option<Expr>)> {
-    if let Some((argument, filter)) = normalize_case_aggregate_argument(func, arg, model)? {
+    if func == AggregatePushdownFunction::Count && is_count_rows_arg(arg) {
+        return Ok((AggregatePushdownArgument::CountAll, None));
+    }
+    if let Some((argument, filter)) = normalize_case_aggregate_argument(func, arg, model) {
         return Ok((argument, Some(filter)));
     }
     Ok((
@@ -1722,63 +1670,50 @@ pub(crate) fn normalize_case_aggregate_argument(
     func: AggregatePushdownFunction,
     arg: &Expr,
     model: &TableModel,
-) -> DataFusionResult<Option<(AggregatePushdownArgument, Expr)>> {
-    let cast_inner = match strip_alias_expr(arg) {
-        Expr::Cast(cast) => Some((&cast.expr, cast.field.data_type(), false)),
-        Expr::TryCast(cast) => Some((&cast.expr, cast.field.data_type(), true)),
-        _ => None,
+) -> Option<(AggregatePushdownArgument, Expr)> {
+    let (inner, cast) = match strip_alias_expr(arg) {
+        Expr::Cast(cast) => (cast.expr.as_ref(), Some((cast.field.data_type(), false))),
+        Expr::TryCast(cast) => (cast.expr.as_ref(), Some((cast.field.data_type(), true))),
+        expr => (expr, None),
     };
-    if let Some((inner, data_type, try_cast)) = cast_inner {
-        if let Expr::Case(case) = strip_alias_expr(inner) {
-            let mut case = case.clone();
-            let cast_branch = |expr: Expr| {
-                if try_cast {
-                    Expr::TryCast(datafusion::logical_expr::TryCast::new(
-                        Box::new(expr),
-                        data_type.clone(),
-                    ))
-                } else {
-                    Expr::Cast(datafusion::logical_expr::Cast::new(
-                        Box::new(expr),
-                        data_type.clone(),
-                    ))
-                }
-            };
-            case.when_then_expr = case
-                .when_then_expr
-                .into_iter()
-                .map(|(when, then)| (when, Box::new(cast_branch(*then))))
-                .collect();
-            // Null ELSE branches are unchanged by either cast
-            if case
-                .else_expr
-                .as_deref()
-                .is_some_and(|expr| aggregate_literal(expr).is_some_and(ScalarValue::is_null))
-            {
-                case.else_expr = None;
-            } else {
-                case.else_expr = case.else_expr.map(|expr| Box::new(cast_branch(*expr)));
-            }
-            return normalize_case_aggregate_argument(func, &Expr::Case(case), model);
-        }
-    }
-    let Expr::Case(case) = strip_alias_expr(arg) else {
-        return Ok(None);
+    let Expr::Case(case) = strip_alias_expr(inner) else {
+        return None;
     };
     if case.when_then_expr.is_empty() {
-        return Ok(None);
+        return None;
+    }
+
+    // A missing or literal-null ELSE contributes no aggregate value, including
+    // when the CASE result is cast. Other fallbacks need native evaluation.
+    if case
+        .else_expr
+        .as_deref()
+        .is_some_and(|expr| !aggregate_literal(expr).is_some_and(ScalarValue::is_null))
+    {
+        return None;
     }
 
     let mut argument = None;
     let mut filter = None;
     for (when_expr, then_expr) in &case.when_then_expr {
-        let branch_argument = match normalize_case_then_expr(func, then_expr.as_ref(), model) {
-            Ok(argument) => argument,
-            Err(_) => return Ok(None),
-        };
+        let casted = cast.map(|(data_type, try_cast)| {
+            if try_cast {
+                Expr::TryCast(datafusion::logical_expr::TryCast::new(
+                    then_expr.clone(),
+                    data_type.clone(),
+                ))
+            } else {
+                Expr::Cast(datafusion::logical_expr::Cast::new(
+                    then_expr.clone(),
+                    data_type.clone(),
+                ))
+            }
+        });
+        let branch_argument =
+            normalize_case_then_expr(func, casted.as_ref().unwrap_or(then_expr), model).ok()?;
         if let Some(ref current) = argument {
             if current != &branch_argument {
-                return Ok(None);
+                return None;
             }
         } else {
             argument = Some(branch_argument);
@@ -1787,18 +1722,7 @@ pub(crate) fn normalize_case_aggregate_argument(
         filter = disjunction(filter.into_iter().chain(Some(branch_filter)));
     }
 
-    if case
-        .else_expr
-        .as_deref()
-        .is_some_and(|expr| !aggregate_literal(expr).is_some_and(ScalarValue::is_null))
-    {
-        return Ok(None);
-    }
-
-    match (argument, filter) {
-        (Some(argument), Some(filter)) => Ok(Some((argument, filter))),
-        _ => Ok(None),
-    }
+    Some((argument?, filter?))
 }
 
 pub(crate) fn normalize_case_then_expr(

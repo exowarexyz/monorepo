@@ -431,7 +431,6 @@ pub(crate) fn encode_secondary_index_key(
     if table_prefix != model.table_prefix {
         return Err("table prefix does not match model".to_string());
     }
-    let prefix = &spec.prefix;
     let encoded_index_fields = spec
         .key_columns
         .iter()
@@ -441,22 +440,15 @@ pub(crate) fn encode_secondary_index_key(
                 .map_err(|e| format!("index '{}' column '{}': {e}", spec.name, col.name))
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let mut payload = match spec.layout {
-        IndexLayout::Lexicographic => encoded_index_fields.concat(),
-        IndexLayout::ZOrder => interleave_ordered_key_fields(&encoded_index_fields),
-    };
-    payload.reserve(model.primary_key_width);
-    for (&pk_idx, &pk_kind) in model
-        .primary_key_indices
-        .iter()
-        .zip(model.primary_key_kinds.iter())
-    {
-        let encoded = encode_cell_into_ordered_key_bytes(row.value_at(pk_idx), pk_kind)?;
-        payload.extend_from_slice(&encoded);
-    }
-    prefix
-        .encode(&payload)
-        .map_err(|e| format!("failed to encode index '{}' key: {e}", spec.name))
+    finish_secondary_index_key(
+        spec,
+        model,
+        encoded_index_fields,
+        model
+            .primary_key_indices
+            .iter()
+            .map(|&idx| row.value_at(idx)),
+    )
 }
 
 pub(crate) fn encode_secondary_index_key_from_parts(
@@ -482,29 +474,34 @@ pub(crate) fn encode_secondary_index_key_from_parts(
         ));
     }
 
-    let prefix = &spec.prefix;
-
     let encoded_index_fields = spec
         .key_columns
         .iter()
         .map(|&col_idx| encode_index_column_from_parts(spec, model, col_idx, pk_values, archived))
         .collect::<DataFusionResult<Vec<_>>>()?;
+    finish_secondary_index_key(spec, model, encoded_index_fields, pk_values.iter())
+        .map_err(DataFusionError::Execution)
+}
+
+/// Combines the ordered index fields and primary-key suffix in the index namespace.
+fn finish_secondary_index_key<'a>(
+    spec: &ResolvedIndexSpec,
+    model: &TableModel,
+    encoded_index_fields: Vec<Vec<u8>>,
+    pk_values: impl Iterator<Item = &'a CellValue>,
+) -> Result<Key, String> {
     let mut payload = match spec.layout {
         IndexLayout::Lexicographic => encoded_index_fields.concat(),
         IndexLayout::ZOrder => interleave_ordered_key_fields(&encoded_index_fields),
     };
     payload.reserve(model.primary_key_width);
-    for (pk_pos, &pk_kind) in model.primary_key_kinds.iter().enumerate() {
-        let value = pk_values.get(pk_pos).ok_or_else(|| {
-            DataFusionError::Execution("missing primary key value while encoding index".to_string())
-        })?;
-        let encoded = encode_cell_into_ordered_key_bytes(value, pk_kind)
-            .map_err(DataFusionError::Execution)?;
+    for (value, &pk_kind) in pk_values.zip(&model.primary_key_kinds) {
+        let encoded = encode_cell_into_ordered_key_bytes(value, pk_kind)?;
         payload.extend_from_slice(&encoded);
     }
-    prefix.encode(&payload).map_err(|e| {
-        DataFusionError::Execution(format!("failed to encode index '{}' key: {e}", spec.name))
-    })
+    spec.prefix
+        .encode(&payload)
+        .map_err(|e| format!("failed to encode index '{}' key: {e}", spec.name))
 }
 
 pub(crate) fn encode_index_column_from_parts(
