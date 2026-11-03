@@ -91,6 +91,10 @@ type Closer = Box<dyn std::any::Any + Send + Sync>;
 /// after the database (fields drop in declaration order).
 struct Database {
     db: DB,
+    /// Dropped only after `db`. The database opens on a native copy of these options (see
+    /// `RocksStore::open_database`), so this value is what keeps caller-supplied resources
+    /// such as a custom environment or logger callback alive while the database is open.
+    _options: Options,
     /// Dropped only after `db`: any resource that must outlive the open database. For a
     /// store opened with [`RocksStore::open_owned`], this is the owner whose drop deletes
     /// the data directory (for example a `tempfile::TempDir`).
@@ -899,8 +903,9 @@ impl Default for RocksWritePipelineConfig {
 /// RocksDB engine and application-level write pipeline options used by [`RocksStore::open`].
 #[derive(Default)]
 pub struct RocksConfig {
-    /// Database-wide options. Ordered writes and automatic WAL flushing are required
-    /// for the snapshot and durable-commit contract and are pinned during open.
+    /// Database-wide options. Ordered writes, WAL replay on open, and flushing during
+    /// recovery are required for the snapshot and durable-commit contract and are pinned
+    /// during open.
     pub db_options: Options,
     /// Options for the application-level ingest write pipeline.
     pub write_pipeline: RocksWritePipelineConfig,
@@ -986,18 +991,36 @@ impl RocksStore {
             write_pipeline,
         } = config.unwrap_or_default();
 
+        // Create the database and its column families on first open. Ordered writes finish
+        // each batch's memtable insert before the write returns, so a snapshot captured after
+        // publication always includes the published batch.
         db_options.create_if_missing(true);
         db_options.create_missing_column_families(true);
         db_options.set_unordered_write(false);
-        db_options.set_manual_wal_flush(false);
 
+        // Recovery must replay every WAL and flush what it recovers into synced SST files
+        // before open returns. Best-efforts recovery ignores WAL files entirely, and RocksDB
+        // never syncs a recovered WAL afterwards, so a sequence published from one could
+        // vanish in a later crash. The crate has no typed setters for these options, and the
+        // options-string parser yields a native copy of the caller's options that does not
+        // keep their Rust-side resources alive, which is why the original options stay with
+        // the database.
+        let pinned = db_options
+            .get_options_from_string(
+                "best_efforts_recovery=false;avoid_flush_during_recovery=false",
+            )
+            .map_err(|e| e.to_string())?;
+
+        // Open on the pinned copy. Each column family carries its own tuning, and the
+        // caller's options stay with the database for as long as it is open.
         let cf_state = ColumnFamilyDescriptor::new(STATE_CF, state_cf_options());
         let cf_meta = ColumnFamilyDescriptor::new(META_CF, Options::default());
         let cf_log = ColumnFamilyDescriptor::new(LOG_CF, log_cf_options());
-        let db = DB::open_cf_descriptors(&db_options, path, vec![cf_state, cf_meta, cf_log])
+        let db = DB::open_cf_descriptors(&pinned, path, vec![cf_state, cf_meta, cf_log])
             .map_err(|e| e.to_string())?;
         let db = Arc::new(Database {
             db,
+            _options: db_options,
             _closer: closer,
         });
 
@@ -2272,6 +2295,7 @@ mod tests {
         // the closer would fail against the still-held lock.
         drop(Database {
             db,
+            _options: options,
             _closer: Some(Box::new(ReopenOnDrop { path: path.clone() })),
         });
     }
@@ -2773,13 +2797,70 @@ mod tests {
         assert_eq!(store.current_sequence(), top);
     }
 
-    /// The tuned column-family options must reach RocksDB: assert against the
-    /// OPTIONS file the database persists on open.
+    /// A synced batch that still lives only in the WAL must survive a reopen, whatever
+    /// recovery options the caller supplies.
     #[tokio::test]
-    async fn column_family_options_apply() {
+    async fn reopen_replays_wal_under_best_efforts_recovery_request() {
         let dir = tempdir().expect("tempdir");
-        let _store = RocksStore::open(dir.path(), None).expect("open db");
 
+        // Request best-efforts recovery and skip the shutdown flush so the acknowledged
+        // batch exists only in the WAL when the store reopens.
+        let config = || RocksConfig {
+            db_options: Options::default()
+                .get_options_from_string(
+                    "best_efforts_recovery=true;avoid_flush_during_shutdown=true",
+                )
+                .expect("database options"),
+            ..Default::default()
+        };
+
+        // One acknowledged batch, then a clean close.
+        {
+            let store = RocksStore::open(dir.path(), Some(config())).expect("open db");
+            let sequence = store
+                .put_batch(vec![(Bytes::from_static(b"k"), Bytes::from_static(b"v"))])
+                .await
+                .expect("put");
+            assert_eq!(sequence, 1);
+        }
+
+        // Nothing was flushed, so the batch can only come back through WAL replay.
+        assert!(std::fs::read_dir(dir.path())
+            .expect("read db dir")
+            .filter_map(|entry| entry.ok())
+            .all(|entry| entry.path().extension().is_none_or(|ext| ext != "sst")));
+
+        // Reopening must replay the WAL despite the caller's recovery request.
+        let store = RocksStore::open(dir.path(), Some(config())).expect("reopen db");
+        assert_eq!(store.current_sequence(), 1);
+        assert_eq!(store.get_raw(b"k").expect("get"), Some(b"v".to_vec()));
+        assert!(store.get_batch(1).await.expect("get batch").is_some());
+    }
+
+    /// Required database settings and column-family tuning must reach RocksDB.
+    /// Inspect the OPTIONS file the database persists on open.
+    #[tokio::test]
+    async fn database_and_column_family_options_apply() {
+        let dir = tempdir().expect("tempdir");
+
+        // Request the opposite of every pinned setting so the persisted options show the
+        // pins winning.
+        let db_options = Options::default()
+            .get_options_from_string(
+                "unordered_write=true;best_efforts_recovery=true;avoid_flush_during_recovery=true",
+            )
+            .expect("database options");
+        let _store = RocksStore::open(
+            dir.path(),
+            Some(RocksConfig {
+                db_options,
+                ..Default::default()
+            }),
+        )
+        .expect("open db");
+
+        // RocksDB persists the effective options on every open, so the newest OPTIONS file
+        // shows which values won.
         let options_file = std::fs::read_dir(dir.path())
             .expect("read db dir")
             .filter_map(|entry| entry.ok())
@@ -2793,6 +2874,13 @@ mod tests {
             .expect("OPTIONS file exists");
         let options = std::fs::read_to_string(options_file).expect("read OPTIONS file");
 
+        // Each pin overrides the caller's value.
+        assert!(options.contains("unordered_write=false"));
+        assert!(options.contains("best_efforts_recovery=false"));
+        assert!(options.contains("avoid_flush_during_recovery=false"));
+
+        // The state family runs universal compaction with raised level-zero thresholds and
+        // no compression.
         let state = options
             .split("[CFOptions \"default\"]")
             .nth(1)
@@ -2804,6 +2892,7 @@ mod tests {
         assert!(state.contains("compression=kNoCompression"));
         assert!(state.contains("level0_slowdown_writes_trigger=1024"));
 
+        // The log family keeps the default compaction policy and no compression.
         let log = options
             .split("[CFOptions \"log\"]")
             .nth(1)
@@ -2817,25 +2906,49 @@ mod tests {
     #[tokio::test]
     async fn rocks_store_accepts_custom_config() {
         let dir = tempdir().expect("tempdir");
+
+        // A callback logger is a caller-supplied resource whose lifetime the database must
+        // own. The lease inside the closure makes that lifetime observable.
+        let logger_owner = Arc::new(());
+        let logger_lease = logger_owner.clone();
+        let mut db_options = Options::default();
+        db_options.set_info_logger(rocksdb::InfoLogger::new_callback_logger(
+            rocksdb::LogLevel::Info,
+            move |_, _| {
+                let _ = &logger_lease;
+            },
+        ));
+
+        // Opening the store transfers the callback's lifetime to the database.
         let store = RocksStore::open(
             dir.path(),
             Some(RocksConfig {
+                db_options,
                 write_pipeline: RocksWritePipelineConfig {
                     max_commit_batch_bytes: NonZeroUsize::new(1).expect("nonzero"),
                     stage_workers: NonZeroUsize::new(2).expect("nonzero"),
                     max_queued_waves: NonZeroUsize::new(1).expect("nonzero"),
                 },
-                ..Default::default()
             }),
         )
         .expect("open db");
+        assert_eq!(Arc::strong_count(&logger_owner), 2);
 
+        // Writes flow through the custom pipeline settings.
         let sequence = store
             .put_batch(vec![(Bytes::from_static(b"a"), Bytes::from_static(b"1"))])
             .await
             .expect("put");
         assert_eq!(sequence, 1);
         assert_eq!(store.current_sequence(), 1);
+
+        // The callback outlives every store handle and is released only when the database
+        // closes.
+        let db = store.db.clone();
+        drop(store);
+        assert_eq!(Arc::strong_count(&logger_owner), 2);
+        drop(db);
+        assert_eq!(Arc::strong_count(&logger_owner), 1);
     }
 
     #[tokio::test]
