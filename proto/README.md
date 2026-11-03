@@ -126,9 +126,12 @@ Each resulting batch remains atomic as one `Put`, but several chunks are
 several writes. Exoware data is immutable. Applications own retries beyond the
 admission policy above, concurrency, and publication barriers across chunks.
 
-The TypeScript SDK exports the same constants. Its `StoreWriteBatch` provides
-`encodedLen()`, `validate(options)`, and `split(options)` for protobuf.
-All TypeScript Put requests use protobuf. `ClientOptions.useBinaryFormat` controls
-only non-ingest services, which also default to protobuf. Pass `store.putOptions`
-to validation and splitting to use the client's configured limits. Store writes
-validate before sending and remain one atomic Put. Splitting is explicit.
+The TypeScript SDK exports the same limits and validates store writes before
+sending each batch as one atomic Put. For a `StoreWriteBatch`, `encodedLen()`
+returns the protobuf request size, and `validate(store.putOptions)` checks the
+batch against the client's configured limits. To send smaller writes, call
+`split(store.putOptions)` and commit each returned batch separately.
+
+TypeScript requests default to protobuf, and Put always requires it. Set
+`ClientOptions.useBinaryFormat` to `false` to use Connect JSON for other
+services.

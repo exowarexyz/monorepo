@@ -248,10 +248,11 @@ function transportFactory(opts: ClientOptions): {
 }
 
 /**
- * Takes the API key from `EXOWARE_API_KEY` when running under Node and no `token` is given, and
- * throws `InvalidApiKeyError` if either cannot be an HTTP header.
- * Uses binary protobuf unless `useBinaryFormat` is false. Custom ingest clients must keep binary
- * because Put requires protobuf.
+ * Uses `EXOWARE_API_KEY` in Node when no `token` is provided. Throws `InvalidApiKeyError` if the
+ * selected API key cannot be sent in an HTTP header.
+ *
+ * Requests use binary protobuf by default. Set `useBinaryFormat` to `false` for JSON. Put requires
+ * protobuf, so keep binary enabled when creating an ingest client.
  */
 export function createTransport(baseUrl: string, tokenOrOptions?: string | ClientOptions) {
     const opts = normalizeClientOptions(tokenOrOptions);

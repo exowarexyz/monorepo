@@ -229,8 +229,7 @@ test('validates the prefixed request at its exact serialized-byte budget', async
 });
 
 test.each([undefined, false, true])('Put is protobuf while Query follows binary option %s', async (useBinaryFormat) => {
-    // Binary is the default, so only an explicit false selects JSON.
-    const binary = useBinaryFormat !== false;
+    const binary = useBinaryFormat ?? true;
     const sent: Array<{ path: string; contentType: string | null; body: Uint8Array }> = [];
     const fetch = jest.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
         const path = new URL(String(input)).pathname;
@@ -277,7 +276,7 @@ test.each([undefined, false, true])('Put is protobuf while Query follows binary 
 });
 
 test.each([undefined, false, true])('createTransport follows binary option %s', async (useBinaryFormat) => {
-    const binary = useBinaryFormat !== false;
+    const binary = useBinaryFormat ?? true;
     const contentTypes: Array<string | null> = [];
     const fetch = jest.spyOn(globalThis, 'fetch').mockImplementation(async (_input, init) => {
         contentTypes.push(new Headers(init?.headers).get('content-type'));
