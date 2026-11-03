@@ -80,25 +80,25 @@ impl Prefix {
 
     /// The raw prefix bytes.
     #[inline]
-    pub fn as_bytes(&self) -> &Bytes {
+    pub const fn as_bytes(&self) -> &Bytes {
         &self.0
     }
 
     /// Length of the prefix in bytes.
     #[inline]
-    pub fn len(&self) -> usize {
+    pub const fn len(&self) -> usize {
         self.0.len()
     }
 
     /// True when this is the empty (identity) prefix.
     #[inline]
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
 
     /// Maximum payload length that still yields a key within [`MAX_KEY_LEN`].
     #[inline]
-    pub fn max_payload_len(&self) -> usize {
+    pub const fn max_payload_len(&self) -> usize {
         MAX_KEY_LEN - self.0.len()
     }
 
@@ -172,7 +172,7 @@ impl Prefix {
 
     /// Compose two prefixes by concatenation. Always valid and associative;
     /// fails only if the concatenation exceeds [`MAX_KEY_LEN`].
-    pub fn join(&self, other: &Prefix) -> Result<Prefix, PrefixError> {
+    pub fn join(&self, other: &Self) -> Result<Self, PrefixError> {
         let total = self.0.len() + other.0.len();
         if total > MAX_KEY_LEN {
             return Err(PrefixError::PrefixTooLong {
@@ -189,7 +189,7 @@ impl Prefix {
         let mut buf = BytesMut::with_capacity(total);
         buf.extend_from_slice(&self.0);
         buf.extend_from_slice(&other.0);
-        Ok(Prefix(buf.freeze()))
+        Ok(Self(buf.freeze()))
     }
 }
 

@@ -2757,6 +2757,7 @@ dependencies = [
  "buffa-types",
  "bytes",
  "commonware-codec",
+ "commonware-macros",
  "connectrpc",
  "connectrpc-build",
  "cookie_store",

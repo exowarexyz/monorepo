@@ -82,15 +82,15 @@ pub struct PreparedBatch {
 }
 
 impl PreparedBatch {
-    pub fn request_id(&self) -> u64 {
+    pub const fn request_id(&self) -> u64 {
         self.request_id
     }
 
-    pub fn entry_count(&self) -> usize {
+    pub const fn entry_count(&self) -> usize {
         self.entry_count
     }
 
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.keys.is_empty()
     }
 }
@@ -289,7 +289,7 @@ pub(crate) struct KvIngestSink {
 }
 
 impl KvIngestSink {
-    pub(crate) fn new(
+    pub(crate) const fn new(
         client: PrefixedStoreClient,
         model: Arc<TableModel>,
         index_specs: Arc<Vec<ResolvedIndexSpec>>,

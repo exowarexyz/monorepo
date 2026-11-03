@@ -185,7 +185,7 @@ impl LogBatch {
     }
 
     /// Sequence number under which this batch was loaded.
-    pub fn sequence_number(&self) -> u64 {
+    pub const fn sequence_number(&self) -> u64 {
         self.sequence_number
     }
 
@@ -230,7 +230,7 @@ impl FilteredBatch {
     /// Build a filtered batch from owned caller-visible entries.
     ///
     /// Values must contain resolved payload bytes.
-    pub fn from_entries(entries: Vec<Entry>) -> Self {
+    pub const fn from_entries(entries: Vec<Entry>) -> Self {
         Self { entries }
     }
 

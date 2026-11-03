@@ -80,7 +80,7 @@ fn decode_digest<D: Digest + DecodeExt<()>>(bytes: &[u8], label: &str) -> Result
     D::decode(Copying(bytes)).map_err(|err| format!("failed to decode {label}: {err}"))
 }
 
-fn proof_digest_cap<D: Digest>(encoded_proof: &[u8]) -> usize {
+const fn proof_digest_cap<D: Digest>(encoded_proof: &[u8]) -> usize {
     encoded_proof.len() / <D as FixedSize>::SIZE + 1
 }
 
@@ -2676,7 +2676,7 @@ mod tests {
         .is_err());
 
         // Chunks that differ from the authenticated bitmap, or are missing, are rejected.
-        let mut invalid_chunks = range.clone();
+        let mut invalid_chunks = range;
         invalid_chunks.chunks[0] = vec![0; 64].into();
         assert!(verify_current_operation_range_from_proto::<F, Sha256>(
             &invalid_chunks,
@@ -3035,7 +3035,7 @@ mod tests {
             .contains("failed verification"));
 
         // A relabeled location that matches the request still fails the proof.
-        let mut relabeled = proto.clone();
+        let mut relabeled = proto;
         relabeled.operations[1].location = 1;
         assert!(verify(&relabeled, 4, &[0, 1], &ops_root)
             .unwrap_err()

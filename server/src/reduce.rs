@@ -78,8 +78,8 @@ impl From<DataFusionError> for RangeError {
     fn from(error: DataFusionError) -> Self {
         match error.find_root() {
             DataFusionError::ResourcesExhausted(_) => Self::Resources(error.to_string()),
-            DataFusionError::External(source) if source.downcast_ref::<RangeError>().is_some() => {
-                match source.downcast_ref::<RangeError>().unwrap() {
+            DataFusionError::External(source) if source.downcast_ref::<Self>().is_some() => {
+                match source.downcast_ref::<Self>().unwrap() {
                     Self::Backend(s) => Self::Backend(s.clone()),
                     Self::Resources(s) => Self::Resources(s.clone()),
                     Self::Reduce(s) => Self::Reduce(s.clone()),
@@ -730,7 +730,7 @@ fn lower_expr(
     }
 }
 
-fn field_type(kind: KvFieldKind) -> DataType {
+const fn field_type(kind: KvFieldKind) -> DataType {
     match kind {
         KvFieldKind::Int64 => DataType::Int64,
         KvFieldKind::UInt64 => DataType::UInt64,
@@ -747,7 +747,7 @@ fn field_type(kind: KvFieldKind) -> DataType {
     }
 }
 
-fn reduced_size(value: Option<&KvReducedValue>) -> usize {
+const fn reduced_size(value: Option<&KvReducedValue>) -> usize {
     std::mem::size_of::<Option<KvReducedValue>>()
         + match value {
             Some(KvReducedValue::Utf8(s)) => s.len(),
@@ -1236,11 +1236,11 @@ mod tests {
                 Expr::Cast(Cast::new(Box::new(col("i")), DataType::Float64)),
             ),
             (
-                KvExpr::CastFloat64(Box::new(u.clone())),
+                KvExpr::CastFloat64(Box::new(u)),
                 Expr::Cast(Cast::new(Box::new(col("u")), DataType::Float64)),
             ),
             (
-                KvExpr::CastFloat64(Box::new(f.clone())),
+                KvExpr::CastFloat64(Box::new(f)),
                 Expr::Cast(Cast::new(Box::new(col("f")), DataType::Float64)),
             ),
             (
