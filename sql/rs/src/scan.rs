@@ -135,7 +135,7 @@ impl ScanFilter {
 /// A DataFusion leaf that reads a table through its primary key or a secondary index.
 ///
 /// Construction fixes column access and index selection. Limit and sort pushdown
-/// clone the scan and share these cached plans.
+/// clone the scan and share its cached plan.
 #[derive(Debug, Clone)]
 pub(crate) struct KvScanExec {
     /// Client for the Store namespace containing the table.
@@ -152,15 +152,22 @@ pub(crate) struct KvScanExec {
     filter: Option<ScanFilter>,
     /// Filter conjuncts evaluated from index entries before base-row lookups.
     cover_filter: Option<ScanFilter>,
-    /// Cached output projection and columns required for decoding and filtering.
-    access_plan: Arc<ScanAccessPlan>,
-    /// Selected secondary index and its key ranges, or `None` for primary-key access.
-    index_plan: Option<Arc<IndexPlan>>,
+    /// Column access and index selection, shared by every clone of the scan.
+    plan: Arc<ScanPlan>,
     /// Direction required by sort pushdown. `None` defaults to forward traversal
     /// without promising an output ordering.
     direction: Option<RangeMode>,
     /// Output schema, ordering guarantees, and single-partition execution metadata.
     pub(crate) properties: Arc<PlanProperties>,
+}
+
+/// Column access and index selection fixed when a scan is built.
+#[derive(Debug)]
+struct ScanPlan {
+    /// Output projection and the columns required for decoding and filtering.
+    access: ScanAccessPlan,
+    /// Selected secondary index and its key ranges, or `None` for primary-key access.
+    index: Option<IndexPlan>,
 }
 
 impl KvScanExec {
@@ -199,7 +206,10 @@ impl KvScanExec {
             None => model.schema.clone(),
         };
         let projection = projection.cloned();
-        let access_plan = Arc::new(ScanAccessPlan::new(&model, &projection, &predicate));
+        let plan = Arc::new(ScanPlan {
+            access: ScanAccessPlan::new(&model, &projection, &predicate),
+            index: None,
+        });
         let mut scan = Self {
             client: table.client.clone(),
             model,
@@ -208,20 +218,19 @@ impl KvScanExec {
             fetch,
             filter: None,
             cover_filter: None,
-            access_plan,
-            index_plan: None,
+            plan,
             direction: None,
             properties: Self::make_properties(projected_schema, None),
         };
 
-        // Finalize the plans with any columns needed only by row filters.
+        // Finalize the plan with any columns needed only by row filters.
         scan.set_filters(state, filters)?;
         Ok(scan)
     }
 
     /// Compiles filters and caches the column access and index choice they require.
     fn set_filters(&mut self, state: &dyn Session, filters: &[Expr]) -> DataFusionResult<()> {
-        // Without filters, the constructor's plans already describe a primary-key scan of
+        // Without filters, the constructor's plan already describes a primary-key scan of
         // the projected columns.
         if filters.is_empty() {
             return Ok(());
@@ -229,7 +238,7 @@ impl KvScanExec {
 
         // Residual-filter columns determine whether an index covers the scan.
         let filter_access = ScanFilter::access_plan(&self.model, filters);
-        let access = self.access_plan(&filter_access.1);
+        let access = self.access_with_filter(&filter_access.1);
         let index_plan = self
             .predicate
             .choose_index_plan(&self.model, &self.index_specs, &access);
@@ -269,17 +278,19 @@ impl KvScanExec {
         }
 
         // Keep the complete row filter even when some conjuncts can run on the index.
-        // Cache the plans with all columns that filter requires.
+        // Cache the plan with all columns that filter requires.
         self.filter = ScanFilter::compile(state, &self.model, filters, filter_access)?;
         self.cover_filter = cover_filter;
-        self.access_plan = Arc::new(access);
-        self.index_plan = index_plan.map(Arc::new);
+        self.plan = Arc::new(ScanPlan {
+            access,
+            index: index_plan,
+        });
         Ok(())
     }
 
     /// Extends required-column masks with the physical filter's input columns.
-    fn access_plan(&self, filter_access: &ScanAccessPlan) -> ScanAccessPlan {
-        let mut access = ScanAccessPlan::clone(&self.access_plan);
+    fn access_with_filter(&self, filter_access: &ScanAccessPlan) -> ScanAccessPlan {
+        let mut access = self.plan.access.clone();
         for (required, filter_required) in access
             .required_pk_mask
             .iter_mut()
@@ -306,11 +317,11 @@ impl KvScanExec {
         if self.predicate.contradiction {
             return None;
         }
-        let (key_columns, constant_prefix_len) = if let Some(plan) = &self.index_plan {
+        let (key_columns, constant_prefix_len) = if let Some(plan) = &self.plan.index {
             // Index ordering requires a covering lexicographic scan.
             let spec = &self.index_specs[plan.spec_idx];
             if spec.layout != IndexLayout::Lexicographic
-                || !self.access_plan.index_covers_required_non_pk(spec)
+                || !self.plan.access.index_covers_required_non_pk(spec)
             {
                 return None;
             }
@@ -374,7 +385,7 @@ impl KvScanExec {
 
         for sort_expr in order {
             let column = sort_expr.expr.downcast_ref::<Column>()?;
-            let actual_col_idx = match self.access_plan.projection_sources.get(column.index())? {
+            let actual_col_idx = match self.plan.access.projection_sources.get(column.index())? {
                 ProjectionSource::Pk { col_idx, .. } | ProjectionSource::NonPk { col_idx, .. } => {
                     *col_idx
                 }
@@ -437,8 +448,8 @@ impl KvScanExec {
             self.client.key_prefix().max_logical_key_len(),
             &self.index_specs,
             &self.predicate,
-            &self.access_plan,
-            self.index_plan.as_deref(),
+            &self.plan.access,
+            self.plan.index.as_ref(),
             self.filter
                 .as_ref()
                 .is_none_or(|filter| filter.complete_ranges),
@@ -515,7 +526,7 @@ impl ExecutionPlan for KvScanExec {
             )));
         }
 
-        // The stream task owns its read session and cloned plans so it can keep
+        // The stream task owns its read session and cloned plan so it can keep
         // reading after this method returns.
         let mut builder = RecordBatchReceiverStreamBuilder::new(self.schema(), 2);
         let tx = builder.tx();
@@ -527,8 +538,7 @@ impl ExecutionPlan for KvScanExec {
         let fetch = self.fetch;
         let direction = self.scan_direction();
         let projected_schema = self.schema();
-        let access_plan = self.access_plan.clone();
-        let index_plan = self.index_plan.clone();
+        let plan = self.plan.clone();
         let filter = self.filter.clone();
         let cover_filter = self.cover_filter.clone();
 
@@ -539,7 +549,7 @@ impl ExecutionPlan for KvScanExec {
                 model: &model,
                 predicate: &predicate,
                 projected_schema: &projected_schema,
-                access_plan: &access_plan,
+                access_plan: &plan.access,
                 filter: filter.as_ref(),
                 cover_filter: cover_filter.as_ref(),
             };
@@ -547,7 +557,7 @@ impl ExecutionPlan for KvScanExec {
                 &tx,
                 &ctx,
                 &index_specs,
-                index_plan.as_deref(),
+                plan.index.as_ref(),
                 fetch,
                 direction,
             )
@@ -2383,7 +2393,7 @@ mod tests {
             let scan = plan
                 .downcast_ref::<KvScanExec>()
                 .expect("optimized plan must end in a KV scan");
-            assert_eq!(scan.index_plan.is_some(), uses_index, "{sql}");
+            assert_eq!(scan.plan.index.is_some(), uses_index, "{sql}");
             assert_eq!(scan.filter.is_some(), filtered, "{sql}");
 
             // Required columns and index ranges must agree with the optimized scan
@@ -2412,18 +2422,19 @@ mod tests {
                 }
             }
             assert_eq!(
-                access.required_pk_mask, scan.access_plan.required_pk_mask,
+                access.required_pk_mask, scan.plan.access.required_pk_mask,
                 "{sql}"
             );
             assert_eq!(
-                access.required_non_pk_columns, scan.access_plan.required_non_pk_columns,
+                access.required_non_pk_columns, scan.plan.access.required_non_pk_columns,
                 "{sql}"
             );
             let fresh = scan
                 .predicate
                 .choose_index_plan(&scan.model, &scan.index_specs, &access);
             assert_eq!(
-                scan.index_plan
+                scan.plan
+                    .index
                     .as_ref()
                     .map(|plan| (plan.spec_idx, plan.ranges.clone())),
                 fresh.map(|plan| (plan.spec_idx, plan.ranges)),
@@ -2479,7 +2490,7 @@ mod tests {
             plan = (*child).clone();
         }
         let scan = plan.downcast_ref::<KvScanExec>().unwrap();
-        assert_eq!(scan.index_plan.as_ref().map(|plan| plan.spec_idx), Some(0));
+        assert_eq!(scan.plan.index.as_ref().map(|plan| plan.spec_idx), Some(0));
         assert_eq!(scan.direction, Some(RangeMode::Reverse));
         assert_eq!(scan.fetch, Some(2));
     }
@@ -2516,10 +2527,11 @@ mod tests {
                 Some(3),
             )
             .unwrap();
-            let plan = scan.index_plan.as_ref().unwrap();
+            let plan = scan.plan.index.as_ref().unwrap();
             assert_eq!(plan.ranges.len(), 2);
             assert_eq!(
-                scan.access_plan
+                scan.plan
+                    .access
                     .index_covers_required_non_pk(&scan.index_specs[plan.spec_idx]),
                 covering,
             );
@@ -2546,9 +2558,9 @@ mod tests {
         }
     }
 
-    /// Sort and limit pushdown share the cached plans.
+    /// Sort and limit pushdown share the cached plan.
     #[test]
-    fn sort_and_fetch_clones_share_cached_plans() {
+    fn sort_and_fetch_clones_share_cached_plan() {
         // The tag index covers amount so the scan can use its key order.
         let schema = KvSchema::new(PrefixedStoreClient::empty(StoreClient::new(
             "http://127.0.0.1:1",
@@ -2592,14 +2604,10 @@ mod tests {
         };
         let limited = sorted.with_fetch(Some(2)).unwrap();
 
-        // Both clones must share the original plans.
+        // Both clones must share the original plan.
         for clone in [sorted, limited] {
             let clone = clone.downcast_ref::<KvScanExec>().unwrap();
-            assert!(Arc::ptr_eq(&scan.access_plan, &clone.access_plan));
-            assert!(Arc::ptr_eq(
-                scan.index_plan.as_ref().unwrap(),
-                clone.index_plan.as_ref().unwrap(),
-            ));
+            assert!(Arc::ptr_eq(&scan.plan, &clone.plan));
         }
     }
 }
