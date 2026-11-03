@@ -1,5 +1,3 @@
-#![allow(clippy::type_complexity)]
-
 use axum::{routing::get, serve::ListenerExt, Router};
 use clap::{Parser, Subcommand};
 use commonware_codec::Encode;
