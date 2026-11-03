@@ -1955,7 +1955,7 @@ mod tests {
         prelude::SessionContext as DataFusionSessionContext,
     };
     use exoware_sdk::{
-        utils::set_tcp_nodelay, RangeReduceGroup, RangeReduceResponse, RangeReduceResult,
+        transport::set_tcp_nodelay, RangeReduceGroup, RangeReduceResponse, RangeReduceResult,
         StoreClient,
     };
     use exoware_server::{

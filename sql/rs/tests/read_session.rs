@@ -18,7 +18,7 @@ use exoware_sdk::{
         Detail, GetManyFrame, GetManyRequest, GetRequest, GetResponse, RangeFrame, RangeRequest,
         ReduceRequest, ReduceResponse, Service, ServiceServer,
     },
-    utils::set_tcp_nodelay,
+    transport::set_tcp_nodelay,
     PrefixedStoreClient, ReadSession, StoreClient,
 };
 use exoware_sql::{KvSchema, SqlContext, TableColumnConfig};

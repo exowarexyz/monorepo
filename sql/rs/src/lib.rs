@@ -79,7 +79,7 @@ mod tests {
             ReduceRequest as ProtoReduceRequest, ReduceResponse as ProtoReduceResponse,
             Service as QueryService, ServiceServer as QueryServiceServer,
         },
-        utils::set_tcp_nodelay,
+        transport::set_tcp_nodelay,
         PrefixedStoreClient, RangeMode, RangeTraversalDirection, StoreBatchUpload, StoreClient,
     };
     use exoware_server::{

@@ -1,6 +1,6 @@
 use axum::{routing::get, serve::ListenerExt, Router};
 use clap::{Parser, Subcommand};
-use exoware_sdk::{utils::set_tcp_nodelay, StoreClient, StoreKeyPrefix};
+use exoware_sdk::{transport::set_tcp_nodelay, StoreClient, StoreKeyPrefix};
 use exoware_sql::{default_orders_index_specs, sql_connect_stack, KvSchema, SqlServer};
 use std::{
     net::{IpAddr, SocketAddr},

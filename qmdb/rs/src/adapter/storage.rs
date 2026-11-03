@@ -458,7 +458,7 @@ mod tests {
             Detail, GetManyEntry, GetManyFrame, GetManyRequest, GetRequest, GetResponse,
             RangeFrame, RangeRequest, ReduceRequest, ReduceResponse, Service, ServiceServer,
         },
-        utils::set_tcp_nodelay,
+        transport::set_tcp_nodelay,
         PrefixedStoreClient, StoreClient, StoreKeyPrefix,
     };
     use std::{

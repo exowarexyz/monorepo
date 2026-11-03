@@ -635,7 +635,7 @@ mod tests {
         datasource::MemTable,
         logical_expr::{create_udf, ColumnarValue, Volatility},
     };
-    use exoware_sdk::{utils::set_tcp_nodelay, StoreClient};
+    use exoware_sdk::{transport::set_tcp_nodelay, StoreClient};
     use futures::{FutureExt, StreamExt};
     use std::{
         collections::VecDeque,

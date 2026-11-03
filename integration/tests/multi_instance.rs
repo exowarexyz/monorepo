@@ -29,7 +29,7 @@ use exoware_sdk::{
     prune_policy::{GroupBy, KeysScope, OrderBy, OrderEncoding, PrunePolicy, RetainPolicy},
     selector::Selector,
     stream_filter::StreamFilter,
-    utils::set_tcp_nodelay,
+    transport::set_tcp_nodelay,
     PrefixedStoreClient, RetryConfig, StoreBatch, StoreBatchUpload, StoreClient, StoreKeyPrefix,
     StoreWriteBatch, StreamSubscription,
 };

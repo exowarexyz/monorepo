@@ -546,7 +546,7 @@ mod tests {
             ReduceRequest, ReduceResponse, Service as QueryService,
             ServiceServer as QueryServiceServer,
         },
-        utils::set_tcp_nodelay,
+        transport::set_tcp_nodelay,
     };
     use futures::stream;
     use std::{

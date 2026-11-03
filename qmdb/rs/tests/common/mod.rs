@@ -33,7 +33,7 @@ use exoware_qmdb::{
     },
     CurrentBoundaryState, QmdbError,
 };
-use exoware_sdk::{proto::PreferZstdHttpClient, utils::set_tcp_nodelay, StoreClient};
+use exoware_sdk::{proto::PreferZstdHttpClient, transport::set_tcp_nodelay, StoreClient};
 use std::{convert::Infallible, num::NonZeroU64, time::Duration};
 
 #[allow(dead_code)]

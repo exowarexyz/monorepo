@@ -56,7 +56,9 @@ use std::{
     task::{Context, Poll},
     time::Duration,
 };
+use tokio::net::TcpStream;
 use tower::{util::BoxCloneSyncService, ServiceExt};
+use tracing::warn;
 
 const DEFAULT_CONNECTIONS_PER_ORIGIN: usize = 4;
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
@@ -541,6 +543,13 @@ impl ClientTransport for BalancedHttp2Transport {
                 .map_err(http_error)?;
             Ok(response.map(|body| PendingResponseBody::new(body, pending)))
         })
+    }
+}
+
+/// Enables `TCP_NODELAY`, logging a warning if the socket option cannot be set.
+pub fn set_tcp_nodelay(tcp: &mut TcpStream) {
+    if let Err(error) = tcp.set_nodelay(true) {
+        warn!(%error, "failed to set TCP_NODELAY");
     }
 }
 

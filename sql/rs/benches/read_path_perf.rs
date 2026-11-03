@@ -19,7 +19,7 @@ use datafusion::{
     arrow::datatypes::DataType,
     physical_plan::{collect, execution_plan::reset_plan_states, ExecutionPlan},
 };
-use exoware_sdk::{utils::set_tcp_nodelay, StoreClient, StoreKeyPrefix};
+use exoware_sdk::{transport::set_tcp_nodelay, StoreClient, StoreKeyPrefix};
 use exoware_server::{
     Ingest, IngestState, PutError, PutInput, Query, QueryExtra, QueryResult, QueryState, RangeScan,
     RangeScanBatch, RangeScanResult, Sequence,

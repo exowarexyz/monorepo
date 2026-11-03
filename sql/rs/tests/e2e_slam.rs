@@ -18,7 +18,7 @@ use datafusion::{
     datasource::{MemTable, ViewTable},
 };
 use exoware_sdk::{
-    proto::PreferZstdHttpClient, utils::set_tcp_nodelay, PrefixedStoreClient, StoreKeyPrefix,
+    proto::PreferZstdHttpClient, transport::set_tcp_nodelay, PrefixedStoreClient, StoreKeyPrefix,
 };
 use exoware_sql::{
     proto::sql::v1::{QueryRequest, ServiceClient},

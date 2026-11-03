@@ -26,7 +26,7 @@ use exoware_qmdb::{
     CurrentBoundaryState, MAX_OPERATION_SIZE,
 };
 use exoware_sdk::{
-    utils::set_tcp_nodelay, PrefixedStoreClient, StoreClient, StoreKeyPrefix, StoreWriteBatch,
+    transport::set_tcp_nodelay, PrefixedStoreClient, StoreClient, StoreKeyPrefix, StoreWriteBatch,
 };
 use std::{
     net::{IpAddr, SocketAddr},

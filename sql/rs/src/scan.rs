@@ -1060,7 +1060,7 @@ mod tests {
         datasource::MemTable,
         prelude::SessionContext as DataFusionSessionContext,
     };
-    use exoware_sdk::{utils::set_tcp_nodelay, StoreClient, StoreKeyPrefix};
+    use exoware_sdk::{transport::set_tcp_nodelay, StoreClient, StoreKeyPrefix};
     use exoware_server::{
         Query, QueryExtra, QueryResult, QueryState, RangeScan, RangeScanBatch, RangeScanResult,
         Sequence,

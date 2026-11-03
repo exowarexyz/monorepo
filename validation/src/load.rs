@@ -243,7 +243,7 @@ mod tests {
         ingest::{
             PutRequest, PutResponse, Service as IngestService, ServiceServer as IngestServiceServer,
         },
-        utils::set_tcp_nodelay,
+        transport::set_tcp_nodelay,
     };
     use std::sync::{
         atomic::{AtomicU64, Ordering},
