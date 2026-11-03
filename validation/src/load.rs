@@ -236,8 +236,11 @@ mod tests {
     use crate::{client::RequestCompression, keyspace::DEFAULT_KEY_LEN};
     use axum::{serve::ListenerExt, Router};
     use connectrpc::{ConnectError, ConnectRpcService, RequestContext, ServiceRequest};
-    use exoware_sdk::ingest::{
-        PutRequest, PutResponse, Service as IngestService, ServiceServer as IngestServiceServer,
+    use exoware_sdk::{
+        ingest::{
+            PutRequest, PutResponse, Service as IngestService, ServiceServer as IngestServiceServer,
+        },
+        utils::set_tcp_nodelay,
     };
     use std::sync::{
         atomic::{AtomicU64, Ordering},
@@ -296,9 +299,7 @@ mod tests {
             "http://{}",
             listener.local_addr().expect("listener address")
         );
-        let listener = listener.tap_io(|tcp| {
-            let _ = tcp.set_nodelay(true);
-        });
+        let listener = listener.tap_io(set_tcp_nodelay);
         tokio::spawn(async move {
             axum::serve(listener, app).await.expect("serve test app");
         });

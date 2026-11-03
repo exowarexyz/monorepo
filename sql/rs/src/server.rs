@@ -635,7 +635,7 @@ mod tests {
         datasource::MemTable,
         logical_expr::{create_udf, ColumnarValue, Volatility},
     };
-    use exoware_sdk::StoreClient;
+    use exoware_sdk::{utils::set_tcp_nodelay, StoreClient};
     use futures::{FutureExt, StreamExt};
     use std::{
         collections::VecDeque,
@@ -793,9 +793,7 @@ mod tests {
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let address = listener.local_addr().unwrap();
             let app = axum::Router::new().fallback_service(sql_connect_stack(server));
-            let listener = listener.tap_io(|tcp| {
-                let _ = tcp.set_nodelay(true);
-            });
+            let listener = listener.tap_io(set_tcp_nodelay);
             let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
             let client = ServiceClient::new(
                 HttpClient::plaintext(),
@@ -872,9 +870,7 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let app = axum::Router::new().fallback_service(sql_connect_stack(server.clone()));
-        let listener = listener.tap_io(|tcp| {
-            let _ = tcp.set_nodelay(true);
-        });
+        let listener = listener.tap_io(set_tcp_nodelay);
         let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         let client = ServiceClient::new(
             HttpClient::plaintext(),
@@ -1094,9 +1090,7 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let app = axum::Router::new().fallback_service(sql_connect_stack(server));
-        let listener = listener.tap_io(|tcp| {
-            let _ = tcp.set_nodelay(true);
-        });
+        let listener = listener.tap_io(set_tcp_nodelay);
         let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         let client = ServiceClient::new(
             HttpClient::plaintext(),

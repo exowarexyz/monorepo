@@ -14,7 +14,9 @@ use datafusion::{
     common::ScalarValue,
     datasource::{MemTable, ViewTable},
 };
-use exoware_sdk::{proto::PreferZstdHttpClient, PrefixedStoreClient, StoreKeyPrefix};
+use exoware_sdk::{
+    proto::PreferZstdHttpClient, utils::set_tcp_nodelay, PrefixedStoreClient, StoreKeyPrefix,
+};
 use exoware_sql::{
     proto::sql::v1::{QueryRequest, ServiceClient},
     sql_connect_stack, CellValue, IndexSpec, KvSchema, SqlServer, TableColumnConfig,
@@ -263,9 +265,7 @@ async fn serve_sql(
         .expect("bind SQL server");
     let base = format!("http://{}", listener.local_addr().expect("SQL address"));
     let app = Router::new().fallback_service(sql_connect_stack(server));
-    let listener = listener.tap_io(|tcp| {
-        let _ = tcp.set_nodelay(true);
-    });
+    let listener = listener.tap_io(set_tcp_nodelay);
     let handle = tokio::spawn(async move {
         axum::serve(listener, app).await.expect("serve SQL");
     });

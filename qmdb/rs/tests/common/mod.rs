@@ -29,7 +29,7 @@ use exoware_qmdb::{
     },
     CurrentBoundaryState, QmdbError,
 };
-use exoware_sdk::{proto::PreferZstdHttpClient, StoreClient};
+use exoware_sdk::{proto::PreferZstdHttpClient, utils::set_tcp_nodelay, StoreClient};
 use std::{convert::Infallible, num::NonZeroU64, time::Duration};
 
 #[allow(dead_code)]
@@ -266,9 +266,7 @@ where
         .expect("bind qmdb server");
     let port = listener.local_addr().expect("local addr").port();
     let url = format!("http://127.0.0.1:{port}");
-    let listener = listener.tap_io(|tcp| {
-        let _ = tcp.set_nodelay(true);
-    });
+    let listener = listener.tap_io(set_tcp_nodelay);
     let handle = tokio::spawn(async move {
         let _ =
             exoware_server::ingest::transport::serve(listener, app, std::future::pending()).await;

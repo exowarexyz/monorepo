@@ -25,14 +25,16 @@ use exoware_qmdb::{
     },
     CurrentBoundaryState, MAX_OPERATION_SIZE,
 };
-use exoware_sdk::{PrefixedStoreClient, StoreClient, StoreKeyPrefix, StoreWriteBatch};
+use exoware_sdk::{
+    utils::set_tcp_nodelay, PrefixedStoreClient, StoreClient, StoreKeyPrefix, StoreWriteBatch,
+};
 use std::{
     net::{IpAddr, SocketAddr},
     num::NonZeroU64,
     path::PathBuf,
 };
 use tower_http::cors::CorsLayer;
-use tracing::{info, warn};
+use tracing::info;
 
 const N: usize = 32;
 type Family = mmb::Family;
@@ -231,11 +233,9 @@ async fn run(
 
     let addr = SocketAddr::from((host, port));
     info!(%addr, store_url, "ordered qmdb server listening");
-    let listener = tokio::net::TcpListener::bind(addr).await?.tap_io(|tcp| {
-        if let Err(error) = tcp.set_nodelay(true) {
-            warn!(%error, "failed to set TCP_NODELAY");
-        }
-    });
+    let listener = tokio::net::TcpListener::bind(addr)
+        .await?
+        .tap_io(set_tcp_nodelay);
     axum::serve(listener, app).await?;
     Ok(())
 }
@@ -531,9 +531,7 @@ mod tests {
                 );
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let url = format!("http://{}", listener.local_addr().unwrap());
-            let listener = listener.tap_io(|tcp| {
-                let _ = tcp.set_nodelay(true);
-            });
+            let listener = listener.tap_io(set_tcp_nodelay);
             let server = tokio::spawn(async move {
                 axum::serve(listener, Router::new().fallback_service(service))
                     .await

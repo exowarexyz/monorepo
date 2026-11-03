@@ -25,6 +25,7 @@ use exoware_sdk::{
     prune_policy::{GroupBy, KeysScope, OrderBy, OrderEncoding, PrunePolicy, RetainPolicy},
     selector::Selector,
     stream_filter::StreamFilter,
+    utils::set_tcp_nodelay,
     PrefixedStoreClient, RetryConfig, StoreBatch, StoreBatchUpload, StoreClient, StoreKeyPrefix,
     StoreWriteBatch, StreamSubscription,
 };
@@ -87,9 +88,7 @@ async fn spawn_sql_service(schema: KvSchema) -> (tokio::task::JoinHandle<()>, St
         .expect("bind sql service");
     let port = listener.local_addr().expect("sql addr").port();
     let url = format!("http://127.0.0.1:{port}");
-    let listener = listener.tap_io(|tcp| {
-        let _ = tcp.set_nodelay(true);
-    });
+    let listener = listener.tap_io(set_tcp_nodelay);
     let handle = tokio::spawn(async move {
         let _ = axum::serve(listener, app).await;
     });
@@ -113,9 +112,7 @@ async fn spawn_qmdb_service(client: PrefixedStoreClient) -> (tokio::task::JoinHa
         .expect("bind qmdb service");
     let port = listener.local_addr().expect("qmdb addr").port();
     let url = format!("http://127.0.0.1:{port}");
-    let listener = listener.tap_io(|tcp| {
-        let _ = tcp.set_nodelay(true);
-    });
+    let listener = listener.tap_io(set_tcp_nodelay);
     let handle = tokio::spawn(async move {
         let _ = axum::serve(listener, app).await;
     });

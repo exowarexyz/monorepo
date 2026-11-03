@@ -15,6 +15,7 @@ use exoware_sdk::{
         Detail, GetManyFrame, GetManyRequest, GetRequest, GetResponse, RangeFrame, RangeRequest,
         ReduceRequest, ReduceResponse, Service, ServiceServer,
     },
+    utils::set_tcp_nodelay,
     PrefixedStoreClient, ReadSession, StoreClient,
 };
 use exoware_sql::{KvSchema, SqlContext, TableColumnConfig};
@@ -101,9 +102,7 @@ impl MockStore {
             "http://{}",
             listener.local_addr().expect("mock Store address")
         );
-        let listener = listener.tap_io(|tcp| {
-            let _ = tcp.set_nodelay(true);
-        });
+        let listener = listener.tap_io(set_tcp_nodelay);
         let server = tokio::spawn(async move {
             axum::serve(listener, app).await.expect("serve mock Store");
         });

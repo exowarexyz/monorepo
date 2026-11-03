@@ -76,6 +76,7 @@ mod tests {
             ReduceRequest as ProtoReduceRequest, ReduceResponse as ProtoReduceResponse,
             Service as QueryService, ServiceServer as QueryServiceServer,
         },
+        utils::set_tcp_nodelay,
         PrefixedStoreClient, RangeMode, RangeTraversalDirection, StoreBatchUpload, StoreClient,
     };
     use exoware_server::{
@@ -401,9 +402,7 @@ mod tests {
             .expect("bind mock server");
         let addr = listener.local_addr().expect("local addr");
         let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
-        let listener = listener.tap_io(|tcp| {
-            let _ = tcp.set_nodelay(true);
-        });
+        let listener = listener.tap_io(set_tcp_nodelay);
         tokio::spawn(async move {
             axum::serve(listener, app)
                 .with_graceful_shutdown(async move {
@@ -6685,9 +6684,7 @@ mod tests {
             .await
             .expect("bind test listener");
         let url = format!("http://{}", listener.local_addr().expect("listener addr"));
-        let listener = listener.tap_io(|tcp| {
-            let _ = tcp.set_nodelay(true);
-        });
+        let listener = listener.tap_io(set_tcp_nodelay);
         tokio::spawn(async move {
             axum::serve(listener, app).await.expect("serve test app");
         });
@@ -6775,9 +6772,7 @@ mod tests {
             .await
             .expect("bind test listener");
         let url = format!("http://{}", listener.local_addr().expect("listener addr"));
-        let listener = listener.tap_io(|tcp| {
-            let _ = tcp.set_nodelay(true);
-        });
+        let listener = listener.tap_io(set_tcp_nodelay);
         tokio::spawn(async move {
             axum::serve(listener, app).await.expect("serve test app");
         });
@@ -7098,9 +7093,7 @@ mod tests {
             .await
             .expect("bind test listener");
         let url = format!("http://{}", listener.local_addr().expect("listener addr"));
-        let listener = listener.tap_io(|tcp| {
-            let _ = tcp.set_nodelay(true);
-        });
+        let listener = listener.tap_io(set_tcp_nodelay);
         tokio::spawn(async move {
             axum::serve(listener, app).await.expect("serve test app");
         });

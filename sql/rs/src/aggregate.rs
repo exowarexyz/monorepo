@@ -1950,7 +1950,10 @@ mod tests {
         datasource::MemTable,
         prelude::SessionContext as DataFusionSessionContext,
     };
-    use exoware_sdk::{RangeReduceGroup, RangeReduceResponse, RangeReduceResult, StoreClient};
+    use exoware_sdk::{
+        utils::set_tcp_nodelay, RangeReduceGroup, RangeReduceResponse, RangeReduceResult,
+        StoreClient,
+    };
     use exoware_server::{
         Query, QueryExtra, QueryResult, QueryState, RangeScan, RangeScanBatch, RangeScanResult,
         Sequence,
@@ -2106,9 +2109,7 @@ mod tests {
                 ));
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let url = format!("http://{}", listener.local_addr().unwrap());
-            let listener = listener.tap_io(|tcp| {
-                let _ = tcp.set_nodelay(true);
-            });
+            let listener = listener.tap_io(set_tcp_nodelay);
             let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
             let client = PrefixedStoreClient::empty(StoreClient::new(&url));
             let store = crate::SqlContext::new(client.clone());

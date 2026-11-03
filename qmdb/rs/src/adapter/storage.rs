@@ -458,6 +458,7 @@ mod tests {
             Detail, GetManyEntry, GetManyFrame, GetManyRequest, GetRequest, GetResponse,
             RangeFrame, RangeRequest, ReduceRequest, ReduceResponse, Service, ServiceServer,
         },
+        utils::set_tcp_nodelay,
         PrefixedStoreClient, StoreClient, StoreKeyPrefix,
     };
     use std::{
@@ -726,9 +727,7 @@ mod tests {
         let service = ConnectRpcService::new(ServiceServer::new(queries));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
-        let listener = listener.tap_io(|tcp| {
-            let _ = tcp.set_nodelay(true);
-        });
+        let listener = listener.tap_io(set_tcp_nodelay);
         let task = tokio::spawn(async move {
             axum::serve(listener, axum::Router::new().fallback_service(service))
                 .await

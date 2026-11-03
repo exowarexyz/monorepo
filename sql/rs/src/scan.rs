@@ -1057,7 +1057,7 @@ mod tests {
         datasource::MemTable,
         prelude::SessionContext as DataFusionSessionContext,
     };
-    use exoware_sdk::{StoreClient, StoreKeyPrefix};
+    use exoware_sdk::{utils::set_tcp_nodelay, StoreClient, StoreKeyPrefix};
     use exoware_server::{
         Query, QueryExtra, QueryResult, QueryState, RangeScan, RangeScanBatch, RangeScanResult,
         Sequence,
@@ -1231,9 +1231,7 @@ mod tests {
                 .fallback_service(exoware_server::query_service(QueryState::new(rows.clone())));
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let url = format!("http://{}", listener.local_addr().unwrap());
-            let listener = listener.tap_io(|tcp| {
-                let _ = tcp.set_nodelay(true);
-            });
+            let listener = listener.tap_io(set_tcp_nodelay);
             let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
             let prefix = StoreKeyPrefix::new(Bytes::from_static(b"scan-tests/")).unwrap();
             let schema = KvSchema::new(StoreClient::new(&url).prefixed(prefix.clone()))

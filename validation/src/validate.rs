@@ -1822,6 +1822,7 @@ mod tests {
             RangeRequest, ReduceRequest, ReduceResponse, Service as QueryService,
             ServiceServer as QueryServiceServer,
         },
+        utils::set_tcp_nodelay,
     };
     use futures::stream;
     use std::collections::HashSet;
@@ -1935,9 +1936,7 @@ mod tests {
             "http://{}",
             listener.local_addr().expect("listener address")
         );
-        let listener = listener.tap_io(|tcp| {
-            let _ = tcp.set_nodelay(true);
-        });
+        let listener = listener.tap_io(set_tcp_nodelay);
         tokio::spawn(async move {
             axum::serve(listener, app).await.expect("serve test app");
         });

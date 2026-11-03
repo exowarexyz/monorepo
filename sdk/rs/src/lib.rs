@@ -23,6 +23,7 @@ mod read_session_log_tests;
 pub mod retention;
 pub mod selector;
 pub mod stream_filter;
+pub mod utils;
 pub use credential::API_KEY_ENV;
 pub use keys::{Key, KeyMut, KeyValidationError, Prefix, PrefixError, Value, MAX_KEY_LEN};
 pub use proto::*;
