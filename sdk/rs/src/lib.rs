@@ -4291,6 +4291,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stream_chunks_carry_their_frame_detail() {
+        let transport = SessionSequenceTransport::with_response_sequences([Some(7), Some(9)]);
+        let client = StoreClient::builder()
+            .url("http://query.internal")
+            .retry_config(RetryConfig::disabled())
+            .client_transport(transport)
+            .build()
+            .unwrap()
+            .prefixed(StoreKeyPrefix::identity());
+        let key = Key::from(b"key".to_vec());
+        let start = Key::from(b"a".to_vec());
+        let end = Key::from(b"z".to_vec());
+
+        let mut range = client
+            .query()
+            .range_stream(&start, &end, 1, 1)
+            .await
+            .unwrap();
+        let chunk = range.next_chunk().await.unwrap().unwrap();
+        assert_eq!(chunk.detail.unwrap().sequence_number, 7);
+        assert!(range.next_chunk().await.unwrap().is_none());
+
+        let mut get_many = client.query().get_many(&[&key], 1).await.unwrap();
+        let chunk = get_many.next_chunk().await.unwrap().unwrap();
+        assert_eq!(chunk.detail.unwrap().sequence_number, 9);
+        assert!(get_many.next_chunk().await.unwrap().is_none());
+    }
+
+    #[tokio::test]
     async fn zero_observation_is_shared_by_clones() {
         let transport = SessionSequenceTransport::with_response_sequences([Some(0), Some(5)]);
         let client = StoreClient::builder()
