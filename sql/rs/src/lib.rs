@@ -32,7 +32,10 @@ mod tests {
         aggregate::*, builder::*, codec::*, diagnostics::*, filter::*, predicate::*, scan::*,
         types::*, writer::*, *,
     };
-    use axum::Router;
+    use axum::{
+        serve::{Listener, ListenerExt},
+        Router,
+    };
     use buffa::Message;
     use bytes::Bytes;
     use commonware_codec::Encode;
@@ -76,6 +79,7 @@ mod tests {
             ReduceRequest as ProtoReduceRequest, ReduceResponse as ProtoReduceResponse,
             Service as QueryService, ServiceServer as QueryServiceServer,
         },
+        transport::set_tcp_nodelay,
         PrefixedStoreClient, RangeMode, RangeTraversalDirection, StoreBatchUpload, StoreClient,
     };
     use exoware_server::{
@@ -398,7 +402,8 @@ mod tests {
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
-            .expect("bind mock server");
+            .expect("bind mock server")
+            .tap_io(set_tcp_nodelay);
         let addr = listener.local_addr().expect("local addr");
         let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
         tokio::spawn(async move {
@@ -6680,7 +6685,8 @@ mod tests {
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
-            .expect("bind test listener");
+            .expect("bind test listener")
+            .tap_io(set_tcp_nodelay);
         let url = format!("http://{}", listener.local_addr().expect("listener addr"));
         tokio::spawn(async move {
             axum::serve(listener, app).await.expect("serve test app");
@@ -6767,7 +6773,8 @@ mod tests {
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
-            .expect("bind test listener");
+            .expect("bind test listener")
+            .tap_io(set_tcp_nodelay);
         let url = format!("http://{}", listener.local_addr().expect("listener addr"));
         tokio::spawn(async move {
             axum::serve(listener, app).await.expect("serve test app");
@@ -7087,7 +7094,8 @@ mod tests {
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
-            .expect("bind test listener");
+            .expect("bind test listener")
+            .tap_io(set_tcp_nodelay);
         let url = format!("http://{}", listener.local_addr().expect("listener addr"));
         tokio::spawn(async move {
             axum::serve(listener, app).await.expect("serve test app");

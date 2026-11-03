@@ -1937,7 +1937,13 @@ pub(crate) fn kv_field_kind(kind: ColumnKind) -> Option<KvFieldKind> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::{extract::Request, middleware::Next, response::Response, Router};
+    use axum::{
+        extract::Request,
+        middleware::Next,
+        response::Response,
+        serve::{Listener, ListenerExt},
+        Router,
+    };
     use buffa::Message;
     use bytes::Bytes;
     use datafusion::{
@@ -1948,7 +1954,10 @@ mod tests {
         datasource::MemTable,
         prelude::SessionContext as DataFusionSessionContext,
     };
-    use exoware_sdk::{RangeReduceGroup, RangeReduceResponse, RangeReduceResult, StoreClient};
+    use exoware_sdk::{
+        transport::set_tcp_nodelay, RangeReduceGroup, RangeReduceResponse, RangeReduceResult,
+        StoreClient,
+    };
     use exoware_server::{
         Query, QueryExtra, QueryResult, QueryState, RangeScan, RangeScanBatch, RangeScanResult,
         Sequence,
@@ -2102,7 +2111,10 @@ mod tests {
                         }
                     },
                 ));
-            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .unwrap()
+                .tap_io(set_tcp_nodelay);
             let url = format!("http://{}", listener.local_addr().unwrap());
             let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
             let client = PrefixedStoreClient::empty(StoreClient::new(&url));

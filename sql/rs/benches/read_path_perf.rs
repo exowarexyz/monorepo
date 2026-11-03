@@ -10,6 +10,7 @@ use axum::{
     extract::{Request, State},
     middleware::Next,
     response::Response,
+    serve::{Listener, ListenerExt},
     Router,
 };
 use bytes::Bytes;
@@ -18,7 +19,7 @@ use datafusion::{
     arrow::datatypes::DataType,
     physical_plan::{collect, execution_plan::reset_plan_states, ExecutionPlan},
 };
-use exoware_sdk::{StoreClient, StoreKeyPrefix};
+use exoware_sdk::{transport::set_tcp_nodelay, StoreClient, StoreKeyPrefix};
 use exoware_server::{
     Ingest, IngestState, PutError, PutInput, Query, QueryExtra, QueryResult, QueryState, RangeScan,
     RangeScanBatch, RangeScanResult, Sequence,
@@ -393,7 +394,8 @@ impl Fixture {
             ));
         let listener = runtime
             .block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
-            .unwrap();
+            .unwrap()
+            .tap_io(set_tcp_nodelay);
         let url = format!("http://{}", listener.local_addr().unwrap());
         let server = runtime.spawn(async move { axum::serve(listener, app).await.unwrap() });
         let client = StoreClient::builder()
@@ -473,7 +475,8 @@ impl Fixture {
             ));
         let listener = runtime
             .block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
-            .unwrap();
+            .unwrap()
+            .tap_io(set_tcp_nodelay);
         let sql_uri = format!("http://{}", listener.local_addr().unwrap());
         let sql_server = runtime.spawn(async move { axum::serve(listener, app).await.unwrap() });
         let sql_client = ServiceClient::new(
