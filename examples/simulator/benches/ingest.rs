@@ -179,6 +179,35 @@ impl KeyOrder {
     }
 }
 
+/// Row shapes the benchmark can generate, each carrying the settings only it reads.
+#[derive(Clone, Copy)]
+enum Workload {
+    /// Uniform rows: `keys_per_batch` keys of `value_len` bytes per batch, laid out by `key_order`.
+    Uniform {
+        keys_per_batch: usize,
+        value_len: usize,
+        key_order: KeyOrder,
+    },
+    /// One Constantinople block of `transactions` transactions per batch (see
+    /// [`build_constantinople_block`]), followed by the block's artifact as its own put.
+    Constantinople { transactions: usize },
+}
+
+impl Workload {
+    fn from_env() -> Self {
+        match std::env::var("BENCH_WORKLOAD").as_deref() {
+            Ok("constantinople") => Self::Constantinople {
+                transactions: env_usize("BENCH_TRANSACTIONS", 51_670).max(1),
+            },
+            _ => Self::Uniform {
+                keys_per_batch: env_usize("BENCH_KEYS_PER_BATCH", 250_000).max(1),
+                value_len: env_usize("BENCH_VALUE_LEN", 128),
+                key_order: KeyOrder::from_env(),
+            },
+        }
+    }
+}
+
 // Unique keys keep the writer workload stable across serial and concurrent runs.
 fn build_batch(
     batch_index: usize,
@@ -396,17 +425,16 @@ async fn run(
 
 fn main() {
     let batches = env_usize("BENCH_BATCHES", 16).max(1);
-    let keys_per_batch = env_usize("BENCH_KEYS_PER_BATCH", 250_000).max(1);
-    let value_len = env_usize("BENCH_VALUE_LEN", 128);
     let writers = env_usize("BENCH_WRITERS", 4).max(1);
     let fragment_bytes = env_usize("BENCH_FRAGMENT_BYTES", 16 * 1024).max(1);
     let memory_bytes = env_usize("BENCH_MEMORY_BYTES", 1024 * 1024 * 1024);
-    let key_order = KeyOrder::from_env();
-    let constantinople = std::env::var("BENCH_WORKLOAD").as_deref() == Ok("constantinople");
-    let transactions = env_usize("BENCH_TRANSACTIONS", 51_670).max(1);
+    let workload = Workload::from_env();
     let request_rows = env_usize(
         "BENCH_REQUEST_ROWS",
-        if constantinople { 65_536 } else { 0 },
+        match workload {
+            Workload::Uniform { .. } => 0,
+            Workload::Constantinople { .. } => 65_536,
+        },
     );
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -414,15 +442,18 @@ fn main() {
         .build()
         .expect("build runtime");
 
-    if constantinople {
-        println!(
-            "workload: {batches} blocks x {transactions} transactions (6 rows each) plus a {BLOCK_ARTIFACT_BYTES}B artifact, requests of {request_rows} rows, {writers} concurrent writers, {fragment_bytes}B frames"
-        );
-    } else {
-        println!(
+    match workload {
+        Workload::Uniform {
+            keys_per_batch,
+            value_len,
+            key_order,
+        } => println!(
             "workload: {batches} batches x {keys_per_batch} keys, {value_len}B values, {writers} concurrent writers, {fragment_bytes}B frames, {} keys",
             if key_order == KeyOrder::Random { "random" } else { "batch-ordered" }
-        );
+        ),
+        Workload::Constantinople { transactions } => println!(
+            "workload: {batches} blocks x {transactions} transactions (6 rows each) plus a {BLOCK_ARTIFACT_BYTES}B artifact, requests of {request_rows} rows, {writers} concurrent writers, {fragment_bytes}B frames"
+        ),
     }
 
     for (label, streaming, concurrency) in [
@@ -444,12 +475,20 @@ fn main() {
         let mut keys = 0usize;
         let mut data = Vec::with_capacity(batches);
         for batch in 0..batches {
-            let rows = if constantinople {
-                build_constantinople_block(batch, transactions)
-            } else {
-                build_batch(batch, keys_per_batch, value_len, key_order)
+            let (rows, artifact) = match workload {
+                Workload::Uniform {
+                    keys_per_batch,
+                    value_len,
+                    key_order,
+                } => (
+                    build_batch(batch, keys_per_batch, value_len, key_order),
+                    None,
+                ),
+                Workload::Constantinople { transactions } => (
+                    build_constantinople_block(batch, transactions),
+                    Some(build_block_artifact(batch)),
+                ),
             };
-            let artifact = constantinople.then(|| build_block_artifact(batch));
             payload += rows_bytes(&rows);
             keys += rows.len();
             if let Some(artifact) = &artifact {
