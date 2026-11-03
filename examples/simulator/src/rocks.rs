@@ -1,5 +1,9 @@
 //! RocksDB reference storage with atomic, durable writes.
 //!
+//! Parallel encoders prepare each write group as one batch spanning the state,
+//! log, and metadata column families. A single commit worker writes these
+//! batches durably and publishes their sequences in order.
+//!
 //! ```text
 //!                parallel encoders       commit worker (sequence order)
 //!                +-----------------+     +------------------------+
@@ -10,9 +14,9 @@
 //!                +-----------------+     +------------------------+
 //! ```
 //!
-//! Each batch spans the state, log, and metadata column families. The stream
-//! preserves each group's rows in arrival order. Snapshot capture takes the
-//! same lock so values and sequence describe the same committed prefix.
+//! The stream preserves each group's rows in arrival order. Snapshot capture
+//! takes the same publication lock so values and sequence describe the same
+//! committed prefix.
 //!
 //! Queued requests keep their admission leases and notifiers through commit,
 //! even if their callers cancel. A write error stops the writer because the
@@ -494,9 +498,9 @@ impl Writer {
         let stage_workers = write_pipeline.stage_workers.get();
         let max_queued_waves = write_pipeline.max_queued_waves.get();
 
-        // Encoded groups queue toward the single ordered commit worker.
+        // Encoders may finish out of order. One commit worker restores sequence
+        // order and owns durable publication, notifications, and replies.
         let (staged_sender, staged_receiver) = mpsc::sync_channel(stage_workers);
-
         let commit = thread::Builder::new()
             .name(format!("{WRITER_THREAD_PREFIX}commit"))
             .spawn({
@@ -912,7 +916,7 @@ pub struct RocksWritePipelineConfig {
     /// Workers encoding atomic batches concurrently.
     pub stage_workers: NonZeroUsize,
     /// Coalesced waves that may queue ahead of the encoding workers. Admission leases
-    /// remain held until commit; a single request may exceed the soft byte cap.
+    /// remain held until commit, and a single request may exceed the soft byte cap.
     pub max_queued_waves: NonZeroUsize,
 }
 
@@ -1134,7 +1138,7 @@ impl RocksStore {
         }
 
         // The committed sequence survives log collection independently of these rows.
-        // A lost unsynced tombstone can only delay GC; open reapplies the durable rule.
+        // A lost unsynced tombstone can only delay GC, and open reapplies the durable rule.
         let mut batch = rocksdb::WriteBatch::default();
         batch.delete_range_cf(
             self.log_cf(),
