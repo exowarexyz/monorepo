@@ -221,7 +221,7 @@ where
         }
     }
 
-    pub fn with_ingest_limits(mut self, limits: IngestLimits) -> Self {
+    pub const fn with_ingest_limits(mut self, limits: IngestLimits) -> Self {
         self.ingest_limits = limits;
         self
     }
@@ -280,7 +280,7 @@ where
         }
     }
 
-    pub fn with_limits(mut self, limits: IngestLimits) -> Self {
+    pub const fn with_limits(mut self, limits: IngestLimits) -> Self {
         self.limits = limits;
         self
     }
@@ -368,7 +368,7 @@ impl<P> PruneState<P>
 where
     P: Prune,
 {
-    pub fn new(prune: Arc<P>) -> Self {
+    pub const fn new(prune: Arc<P>) -> Self {
         Self { prune }
     }
 }
@@ -399,7 +399,7 @@ impl<R> RetentionState<R>
 where
     R: Retention,
 {
-    pub fn new(retention: Arc<R>) -> Self {
+    pub const fn new(retention: Arc<R>) -> Self {
         Self { retention }
     }
 }

@@ -82,7 +82,7 @@ impl<R: OperationLogReader> Clone for OperationLogServer<R> {
 }
 
 impl<R: OperationLogReader> OperationLogServer<R> {
-    pub(crate) fn new(reader: Arc<R>, raw_store: PrefixedStoreClient) -> Self {
+    pub(crate) const fn new(reader: Arc<R>, raw_store: PrefixedStoreClient) -> Self {
         Self { reader, raw_store }
     }
 }
@@ -104,7 +104,7 @@ struct PendingBatches<F: Family> {
 }
 
 impl<F: Family> PendingBatches<F> {
-    fn new() -> Self {
+    const fn new() -> Self {
         Self {
             batches: VecDeque::new(),
             minimums: VecDeque::new(),
@@ -404,7 +404,7 @@ impl<R: OperationLogReader> Stream for BatchSubscribeStream<R> {
     }
 }
 
-fn decode_since(since: Option<u64>) -> Option<u64> {
+const fn decode_since(since: Option<u64>) -> Option<u64> {
     match since {
         Some(0) | None => None,
         Some(value) => Some(value),

@@ -72,7 +72,7 @@ pub struct DecodeOutput {
 }
 
 impl DecodeState {
-    fn suppressed(&self) -> bool {
+    const fn suppressed(&self) -> bool {
         self.rejection.is_some()
             || self.entry_error.is_some()
             || self.inner_error.is_some()
@@ -150,7 +150,7 @@ impl DecodeState {
             .push_back(pending);
     }
 
-    pub(super) fn finish_wire(&mut self) {
+    pub(super) const fn finish_wire(&mut self) {
         self.eof = true;
     }
 
@@ -678,7 +678,7 @@ impl DecodeState {
             && self.parsed == self.arena.len()
     }
 
-    pub(super) fn total(&self) -> usize {
+    pub(super) const fn total(&self) -> usize {
         self.total
     }
 }

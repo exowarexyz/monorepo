@@ -146,7 +146,7 @@ impl ColumnKind {
         }
     }
 
-    pub(crate) fn fixed_key_width(self) -> Option<usize> {
+    pub(crate) const fn fixed_key_width(self) -> Option<usize> {
         match self {
             Self::Int64 => Some(8),
             Self::UInt64 => Some(8),
@@ -169,7 +169,7 @@ impl ColumnKind {
             .unwrap_or(STRING_KEY_INLINE_LIMIT + 1)
     }
 
-    pub(crate) fn indexable(self) -> bool {
+    pub(crate) const fn indexable(self) -> bool {
         !matches!(self, Self::List(_) | Self::Binary)
     }
 }
@@ -239,7 +239,7 @@ impl IndexSpec {
         self
     }
 
-    pub fn with_layout(mut self, layout: IndexLayout) -> Self {
+    pub const fn with_layout(mut self, layout: IndexLayout) -> Self {
         self.layout = layout;
         self
     }
@@ -256,7 +256,7 @@ impl IndexSpec {
         &self.cover_columns
     }
 
-    pub fn layout(&self) -> &IndexLayout {
+    pub const fn layout(&self) -> &IndexLayout {
         &self.layout
     }
 }
@@ -567,7 +567,7 @@ pub enum CellValue {
     Utf8(String),
     FixedBinary(Vec<u8>),
     Binary(Vec<u8>),
-    List(Vec<CellValue>),
+    List(Vec<Self>),
 }
 
 #[derive(Debug, Clone)]

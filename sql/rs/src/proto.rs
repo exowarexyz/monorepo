@@ -5,6 +5,8 @@ pub mod sql {
         #![allow(clippy::derivable_impls)]
         #![allow(clippy::match_single_binding)]
         #![allow(elided_lifetimes_in_paths)]
+        #![allow(clippy::use_self)]
+        #![allow(clippy::missing_const_for_fn)]
         include!("gen/sql.v1.rs");
     }
 }

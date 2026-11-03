@@ -10,6 +10,8 @@ pub mod log {
             #![allow(clippy::derivable_impls)]
             #![allow(clippy::match_single_binding)]
             #![allow(elided_lifetimes_in_paths)]
+            #![allow(clippy::use_self)]
+            #![allow(clippy::missing_const_for_fn)]
             include!("../gen/log.ingest.v1.rs");
         }
     }
@@ -21,6 +23,8 @@ pub mod log {
             #![allow(clippy::derivable_impls)]
             #![allow(clippy::match_single_binding)]
             #![allow(elided_lifetimes_in_paths)]
+            #![allow(clippy::use_self)]
+            #![allow(clippy::missing_const_for_fn)]
             include!("../gen/log.retention.v1.rs");
         }
     }
@@ -32,6 +36,8 @@ pub mod log {
             #![allow(clippy::derivable_impls)]
             #![allow(clippy::match_single_binding)]
             #![allow(elided_lifetimes_in_paths)]
+            #![allow(clippy::use_self)]
+            #![allow(clippy::missing_const_for_fn)]
             include!("../gen/log.stream.v1.rs");
         }
     }
@@ -45,6 +51,8 @@ pub mod store {
             #![allow(clippy::derivable_impls)]
             #![allow(clippy::match_single_binding)]
             #![allow(elided_lifetimes_in_paths)]
+            #![allow(clippy::use_self)]
+            #![allow(clippy::missing_const_for_fn)]
             include!("../gen/store.prune.v1.rs");
         }
     }
@@ -56,6 +64,8 @@ pub mod store {
             #![allow(clippy::derivable_impls)]
             #![allow(clippy::match_single_binding)]
             #![allow(elided_lifetimes_in_paths)]
+            #![allow(clippy::use_self)]
+            #![allow(clippy::missing_const_for_fn)]
             include!("../gen/store.query.v1.rs");
         }
     }
@@ -68,6 +78,8 @@ pub mod google {
         #![allow(clippy::derivable_impls)]
         #![allow(clippy::match_single_binding)]
         #![allow(elided_lifetimes_in_paths)]
+        #![allow(clippy::use_self)]
+        #![allow(clippy::missing_const_for_fn)]
         include!("../gen/google.rpc.rs");
     }
 }
@@ -80,6 +92,8 @@ pub mod common {
             #![allow(clippy::derivable_impls)]
             #![allow(clippy::match_single_binding)]
             #![allow(elided_lifetimes_in_paths)]
+            #![allow(clippy::use_self)]
+            #![allow(clippy::missing_const_for_fn)]
             include!("../gen/common.kv.v1.rs");
         }
     }
@@ -92,6 +106,8 @@ pub mod ingest {
     #![allow(clippy::derivable_impls)]
     #![allow(clippy::match_single_binding)]
     #![allow(elided_lifetimes_in_paths)]
+    #![allow(clippy::use_self)]
+    #![allow(clippy::missing_const_for_fn)]
     pub use crate::log::ingest::v1::*;
 }
 
@@ -101,6 +117,8 @@ pub mod prune {
     #![allow(clippy::derivable_impls)]
     #![allow(clippy::match_single_binding)]
     #![allow(elided_lifetimes_in_paths)]
+    #![allow(clippy::use_self)]
+    #![allow(clippy::missing_const_for_fn)]
     pub use crate::store::prune::v1::*;
 }
 
@@ -110,6 +128,8 @@ pub mod query {
     #![allow(clippy::derivable_impls)]
     #![allow(clippy::match_single_binding)]
     #![allow(elided_lifetimes_in_paths)]
+    #![allow(clippy::use_self)]
+    #![allow(clippy::missing_const_for_fn)]
     pub use crate::store::query::v1::*;
 }
 
@@ -119,6 +139,8 @@ pub mod stream {
     #![allow(clippy::derivable_impls)]
     #![allow(clippy::match_single_binding)]
     #![allow(elided_lifetimes_in_paths)]
+    #![allow(clippy::use_self)]
+    #![allow(clippy::missing_const_for_fn)]
     pub use crate::log::stream::v1::*;
 }
 
@@ -182,7 +204,7 @@ fn fixed_size_binary_len(kind: &KvFieldKind) -> u32 {
     }
 }
 
-fn proto_field_kind(kind: &KvFieldKind) -> query::KvFieldKind {
+const fn proto_field_kind(kind: &KvFieldKind) -> query::KvFieldKind {
     match kind {
         KvFieldKind::Int64 => query::KvFieldKind::KV_FIELD_KIND_INT64,
         KvFieldKind::UInt64 => query::KvFieldKind::KV_FIELD_KIND_UINT64,
