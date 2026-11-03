@@ -1065,6 +1065,7 @@ mod tests {
                 .map(|i| format!("{label}{i:04}"))
                 .collect::<Vec<_>>()
         };
+
         // A full-budget IN list on the leading index column, a range on the second, an IN list
         // on a column outside the index, and a primary-key range that bounds the key suffix.
         let mut predicate = QueryPredicate::default();
@@ -1092,6 +1093,8 @@ mod tests {
                 },
             ),
         ]);
+
+        // Expanding the product must equal expanding each value on its own.
         let ranges = predicate.expand_index_ranges(&model, &specs[0], 2).unwrap();
         let mut single = predicate.clone();
         let expected = strings("region", 4096)
