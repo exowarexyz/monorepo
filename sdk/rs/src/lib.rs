@@ -492,13 +492,7 @@ impl PrefixedStoreClient {
         &self,
         key: &Key,
         min_sequence_number: Option<u64>,
-    ) -> Result<
-        (
-            exoware_proto::query::GetResponse,
-            Option<proto_query::Detail>,
-        ),
-        ClientError,
-    > {
+    ) -> Result<(Option<Bytes>, Option<u64>), ClientError> {
         self.client
             .send_get(&self.encode_store_key(key)?, min_sequence_number)
             .await
@@ -1150,7 +1144,7 @@ impl RangeStream {
                 return Ok(None);
             }
 
-            let frame = if let Some(frame) = self.pending_frame.take() {
+            let mut frame = if let Some(frame) = self.pending_frame.take() {
                 frame
             } else {
                 let Some(frame) = self
@@ -1175,7 +1169,7 @@ impl RangeStream {
                 frame
             };
 
-            let detail = frame.detail.as_option().cloned();
+            let detail = frame.detail.take();
             let n = frame.results.len();
 
             // Hide default/empty wire frames from the SDK's semantic chunk stream.
@@ -1277,7 +1271,7 @@ impl GetManyStream {
             if self.finished {
                 return Ok(None);
             }
-            let frame = if let Some(frame) = self.pending_frame.take() {
+            let mut frame = if let Some(frame) = self.pending_frame.take() {
                 frame
             } else {
                 let Some(frame) = self
@@ -1301,7 +1295,7 @@ impl GetManyStream {
                 frame
             };
 
-            let detail = frame.detail.as_option().cloned();
+            let detail = frame.detail.take();
             let n = frame.results.len();
 
             // Hide default/empty wire frames from the SDK's semantic chunk stream.
@@ -2056,8 +2050,8 @@ impl StoreClient {
         key: &Key,
         min_sequence_number: Option<u64>,
     ) -> Result<Option<Bytes>, ClientError> {
-        let (response, _detail) = self.send_get(key, min_sequence_number).await?;
-        Ok(response.value)
+        let (value, _) = self.send_get(key, min_sequence_number).await?;
+        Ok(value)
     }
 
     /// Physical `get_many` over already-encoded wire keys. The
@@ -2257,17 +2251,17 @@ impl StoreClient {
         Ok(resp.status().is_success())
     }
 
+    /// Sends a Get and returns the value and the response's sequence number, which is
+    /// `None` when the response has no `Detail`.
+    ///
+    /// Both are read from the decoded wire view. Converting the response to an owned
+    /// message would also build `Detail.extra`, a map with one `String` per entry, and no
+    /// caller reads it.
     async fn send_get(
         &self,
         key: &Key,
         min_sequence_number: Option<u64>,
-    ) -> Result<
-        (
-            exoware_proto::query::GetResponse,
-            Option<proto_query::Detail>,
-        ),
-        ClientError,
-    > {
+    ) -> Result<(Option<Bytes>, Option<u64>), ClientError> {
         if !is_valid_key_size(key.len()) {
             return Err(ClientError::WireFormat(format!(
                 "key length {} is outside valid store key range ({}..={})",
@@ -2290,9 +2284,13 @@ impl StoreClient {
                     .await
             })
             .await?;
-        let owned = response.into_owned();
-        let detail = owned.detail.as_option().cloned();
-        Ok((owned, detail))
+        // Every borrowed field of an `OwnedView` points into its `bytes()`, so
+        // `slice_ref` shares the value with the response buffer and can't panic.
+        let response = response.into_view();
+        let view = response.reborrow();
+        let value = view.value.map(|value| response.bytes().slice_ref(value));
+        let sequence_number = view.detail.as_option().map(|detail| detail.sequence_number);
+        Ok((value, sequence_number))
     }
 
     #[cfg(test)]
@@ -2300,13 +2298,7 @@ impl StoreClient {
         &self,
         key: &Key,
         min_sequence_number: Option<u64>,
-    ) -> Result<
-        (
-            exoware_proto::query::GetResponse,
-            Option<proto_query::Detail>,
-        ),
-        ClientError,
-    > {
+    ) -> Result<(Option<Bytes>, Option<u64>), ClientError> {
         self.send_get(key, min_sequence_number).await
     }
 
@@ -2948,14 +2940,14 @@ impl ReadSession {
     }
 
     pub async fn get(&self, key: &Key) -> Result<Option<Bytes>, ClientError> {
-        let (response, detail) = self
+        let (value, sequence_number) = self
             .client
             .send_get(key, self.min_sequence_number())
             .await?;
-        if let Some(detail) = detail {
-            self.state.sequence.observe(detail.sequence_number);
+        if let Some(sequence_number) = sequence_number {
+            self.state.sequence.observe(sequence_number);
         }
-        Ok(response.value)
+        Ok(value)
     }
 
     pub async fn get_many(
