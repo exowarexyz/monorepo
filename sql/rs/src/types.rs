@@ -42,7 +42,7 @@ pub(crate) const INDEX_BACKFILL_FLUSH_ENTRIES: usize = 4_096;
 /// Row and index-entry counts for one completed backfill invocation.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct IndexBackfillReport {
-    /// Primary rows decoded during this invocation, excluding rows before its start cursor.
+    /// Primary rows decoded during this invocation.
     pub scanned_rows: u64,
     /// Newly appended index specifications populated by this invocation.
     pub indexes_backfilled: usize,
@@ -254,8 +254,8 @@ pub struct IndexSpec {
     name: String,
     /// Nonempty ordered column names that determine the index key before its primary-key suffix.
     key_columns: Vec<String>,
-    /// Additional non-primary-key columns stored in the index value. An empty
-    /// list adds no coverage beyond the non-primary-key index-key columns.
+    /// Additional non-primary-key columns stored in the index value. The value always includes
+    /// the non-primary-key index-key columns.
     cover_columns: Vec<String>,
     /// Encoding used for the key columns, independent of the primary-key suffix.
     layout: IndexLayout,
@@ -672,7 +672,7 @@ pub enum CellValue {
     List(Vec<Self>),
 }
 
-/// Owned row values used by the table's encoders and predicate evaluation.
+/// Owned row values encoded into a table's primary row and index entries.
 #[derive(Debug, Clone)]
 pub(crate) struct KvRow {
     /// One cell per table column in schema order, including primary-key columns.
@@ -701,7 +701,7 @@ pub(crate) struct DecodedIndexEntry {
     /// Cells in primary-key order. Empty when none were requested, otherwise
     /// unselected positions contain `CellValue::Null` placeholders.
     pub(crate) primary_key_values: Vec<CellValue>,
-    /// Selected index-key cells keyed by table-column position, excluding unselected columns.
+    /// Selected index-key cells keyed by table-column position.
     pub(crate) values: HashMap<usize, CellValue>,
 }
 
@@ -715,7 +715,7 @@ pub(crate) struct KeyRange {
     pub(crate) end: Key,
 }
 
-/// Chosen secondary-index scan and the constraint counts used to rank it.
+/// Chosen secondary-index scan with its key ranges and constraint counts.
 #[derive(Debug, Clone)]
 pub(crate) struct IndexPlan {
     /// Zero-based position in the table's resolved index specifications.

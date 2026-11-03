@@ -172,7 +172,8 @@ impl BatchWriter {
                 .sum::<usize>()
     }
 
-    /// Flushes the next prepared batch and returns its Store sequence number, or zero if empty.
+    /// Flushes the next prepared batch and returns its Store sequence number, or zero when
+    /// nothing is pending.
     pub async fn flush(&mut self) -> DataFusionResult<u64> {
         Ok(self
             .flush_with_receipt()
@@ -181,7 +182,8 @@ impl BatchWriter {
             .unwrap_or(0))
     }
 
-    /// Flushes the next prepared batch and returns its receipt, or `None` if empty.
+    /// Flushes the next prepared batch and returns its receipt, or `None` when nothing is
+    /// pending.
     pub async fn flush_with_receipt(&mut self) -> DataFusionResult<Option<BatchReceipt>> {
         let Some(prepared) = self.prepare_flush()? else {
             return Ok(None);
@@ -474,7 +476,8 @@ pub(crate) fn encode_secondary_index_value_from_archived(
     })
 }
 
-/// Stored rows retain a slot for every table column. Unselected values occupy null slots.
+/// Encodes a stored row with one slot per table column. Columns for which `value_at` returns
+/// `None` occupy null slots.
 fn encode_selected_values(
     model: &TableModel,
     mut value_at: impl FnMut(usize, &ResolvedColumn) -> DataFusionResult<Option<StoredValue>>,
@@ -865,6 +868,7 @@ mod tests {
                     "050100fffffffffffffffe00010404c3a900780000",
                 ),
             ] {
+                // The write path must produce the pinned base value, index key, and index value.
                 let row = KvRow {
                     values: vec![
                         CellValue::Date32(-2),
@@ -911,6 +915,8 @@ mod tests {
 
     #[test]
     fn oversized_index_keys_preserve_writer_and_backfill_errors() {
+        // The 251-byte primary key fits in the base key, but the index key that appends it to
+        // the tag exceeds the Store key limit.
         let schema = crate::KvSchema::new(PrefixedStoreClient::empty(StoreClient::new(
             "http://127.0.0.1:1",
         )))
@@ -932,7 +938,6 @@ mod tests {
         };
         let expected = "failed to encode index 'tag_idx' key: key length 255 exceeds max 254";
 
-        // The base key fits, but its secondary entry exceeds the Store key limit.
         // A failed insert must not leave the base entry pending on its own.
         let mut writer = schema.batch_writer();
         assert_eq!(
@@ -941,6 +946,8 @@ mod tests {
         );
         assert_eq!(writer.pending_count(), 0);
 
+        // Backfill rebuilds the index key from the stored base row and must fail with the
+        // writer's error.
         let table = &schema.tables()[0].1;
         let base = encode_base_row_value(&row, &table.model).unwrap();
         let stored = decode_stored_row(&base).unwrap();

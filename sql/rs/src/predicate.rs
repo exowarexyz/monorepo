@@ -793,8 +793,8 @@ impl QueryPredicate {
         }
     }
 
-    /// Stores distinct sorted values, reducing a singleton to a point constraint
-    /// and marking an empty intersection as a contradiction.
+    /// Stores the values sorted and deduplicated. A single value becomes a point constraint,
+    /// and an empty set marks a contradiction.
     fn set_values_constraint<T: Ord>(
         &mut self,
         col_idx: usize,
@@ -878,8 +878,8 @@ impl QueryPredicate {
                 }
             }
 
-            // Prefer more constrained columns, then coverage, lexicographic layout,
-            // and fewer ranges. Equal ranks retain the earlier index.
+            // Prefer more constrained columns, then coverage of the required non-primary-key
+            // columns, lexicographic layout, and fewer ranges. Equal ranks keep the earlier index.
             let candidate = IndexPlan {
                 spec_idx,
                 ranges: disjoint,
@@ -924,13 +924,15 @@ impl QueryPredicate {
         })
     }
 
-    /// Expands membership constraints into bounded combinations. Each combination
-    /// replaces only the selected columns, retaining primary-key suffix constraints.
+    /// Encodes key ranges from combinations of membership values on `columns`, omitting
+    /// inverted bounds. More than 4096 combinations is an error.
     fn expand_index_range_product<'a>(
         &self,
         columns: impl Iterator<Item = (usize, &'a PredicateConstraint)>,
         encode_bound: impl Fn(&Self, usize, bool) -> Result<Key, String>,
     ) -> Result<Vec<KeyRange>, String> {
+        // Build the cross product one column at a time and stop before it exceeds the range
+        // budget. Constraints other than membership lists contribute a single choice.
         let mut combos: Vec<HashMap<usize, PredicateConstraint>> = vec![HashMap::new()];
         let mut column_count = 0;
         for (col_idx, constraint) in columns {
@@ -974,6 +976,8 @@ impl QueryPredicate {
             combos = next;
         }
 
+        // Overlay each combination on the whole predicate to retain primary-key suffix constraints.
+        // Inverted bounds match no keys and are dropped.
         let mut ranges = Vec::with_capacity(combos.len());
         for combo in combos {
             let mut predicate = self.clone();

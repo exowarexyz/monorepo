@@ -752,6 +752,8 @@ mod tests {
     fn cast_case_normalization_preserves_casts_and_eligibility() {
         use datafusion::logical_expr::{expr::Case, Cast, TryCast};
 
+        // `make_case` builds a CASE with one `status = 'open'` branch, and every accepted form
+        // must return that condition as its guard.
         let (model, _) = test_model();
         let guard = col("status").eq(Expr::Literal(
             ScalarValue::Utf8(Some("open".to_string())),
@@ -768,6 +770,7 @@ mod tests {
         let null = Expr::Literal(ScalarValue::Int64(None), None);
 
         for try_cast in [false, true] {
+            // Every form is checked under both CAST and TRY_CAST to Float64.
             let cast = |expr| {
                 if try_cast {
                     Expr::TryCast(TryCast::new(Box::new(expr), DataType::Float64))
@@ -800,8 +803,8 @@ mod tests {
                 }
             }
 
-            // Eligibility is syntactic: neither nested casts nor computed ELSE values
-            // establish the null-only fallback required by this pushdown.
+            // Eligibility is syntactic, so a cast null ELSE is rejected like a non-null ELSE.
+            // A nested cast or THEN branches with different arguments are also rejected.
             let mut unequal = make_case(col("amount_cents"), None);
             let Expr::Case(case) = &mut unequal else {
                 unreachable!()
@@ -826,8 +829,8 @@ mod tests {
                 );
             }
 
-            // A casted literal is a value expression even when COUNT could count an
-            // uncast non-null literal without evaluating it.
+            // COUNT counts every guarded row for an uncast non-null literal, but a cast literal
+            // compiles as a value expression.
             let expr = cast(make_case(
                 Expr::Literal(ScalarValue::Int64(Some(1)), None),
                 None,
@@ -1003,6 +1006,8 @@ mod tests {
     fn index_range_budget_counts_distinct_combinations_and_keeps_fallbacks() {
         let (model, _) = zorder_test_model();
         for layout in [IndexLayout::Lexicographic, IndexLayout::ZOrder] {
+            // The composite `xy` index takes each layout in turn, and the single-column `x`
+            // index offers a narrower fallback.
             let specs = model
                 .resolve_index_specs(&[
                     IndexSpec::new("xy", vec!["x".into(), "y".into()])
@@ -1035,6 +1040,7 @@ mod tests {
                     .choose_index_plan(&model, &specs, &access)
                     .unwrap();
                 if y_count == 64 {
+                    // 64 distinct values per column expand to exactly the 4096-range budget.
                     assert_eq!(ranges.unwrap().len(), 4096);
                     assert_eq!(plan.spec_idx, 0);
                 } else {
@@ -1623,7 +1629,7 @@ mod tests {
             values: vec![CellValue::Int64(1), CellValue::Utf8("foo".to_string())],
         };
 
-        // (label = 'foo') AND (label IS NOT NULL) — IS NOT NULL is implied;
+        // (label = 'foo') AND (label IS NOT NULL): IS NOT NULL is implied, so the
         // predicate must reduce to StringEq('foo') in either order.
         for filters in [[&eq_foo, &is_not_null], [&is_not_null, &eq_foo]] {
             let owned: Vec<Expr> = filters.iter().map(|e| (*e).clone()).collect();
@@ -1636,7 +1642,7 @@ mod tests {
             assert!(pred.matches_row(&row_foo));
         }
 
-        // (label = 'foo') AND (label IS NULL) — must contradict in either order.
+        // (label = 'foo') AND (label IS NULL): must contradict in either order.
         for filters in [[&eq_foo, &is_null], [&is_null, &eq_foo]] {
             let owned: Vec<Expr> = filters.iter().map(|e| (*e).clone()).collect();
             assert!(QueryPredicate::from_filters(&owned, &model).contradiction);
@@ -4258,7 +4264,7 @@ mod tests {
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("requires exactly 16 bytes"));
 
-        // Exact length (16 bytes) — must succeed
+        // Exact length (16 bytes) must succeed.
         let ok_row = KvRow {
             values: vec![CellValue::FixedBinary(vec![0xEF; 16]), CellValue::Int64(3)],
         };
@@ -5820,6 +5826,8 @@ mod tests {
 
     #[tokio::test]
     async fn backfill_added_indexes_is_noop_when_no_new_indexes() {
+        // `existing` is both the table's only index and the backfill's previous index, so
+        // nothing needs backfilling.
         let client = StoreClient::new("http://127.0.0.1:1");
         let existing = IndexSpec::new("status_idx", vec!["status".to_string()])
             .expect("valid")
@@ -5837,6 +5845,8 @@ mod tests {
             )
             .expect("schema");
 
+        // A no-op backfill still reports `Started` with zero indexes and then `Completed`, so
+        // progress consumers see the run start and finish.
         let (progress_tx, mut progress_rx) = mpsc::unbounded_channel();
         let report = schema
             .backfill_added_indexes_with_options_and_progress(

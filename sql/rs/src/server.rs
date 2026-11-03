@@ -141,8 +141,8 @@ pub struct SqlServer {
     /// read session, while session commands such as `SET` and `CREATE FUNCTION` run here and
     /// persist across requests.
     ctx: Arc<SqlContext>,
-    /// Unique table names and subscription state in schema declaration order.
-    /// The schema permits at most sixteen tables.
+    /// Unique table names and subscription state in schema declaration order. A linear lookup
+    /// suffices because a schema holds at most `MAX_TABLES` tables.
     streams: Vec<(String, TableStream)>,
     /// Store client for subscriptions and per-query read sessions.
     store: PrefixedStoreClient,
@@ -660,6 +660,8 @@ mod tests {
 
     #[test]
     fn table_metadata_and_subscription_lookup_preserve_schema_order() {
+        // Tables are declared out of name order, each with a column named after the table, so
+        // a lookup that returns the wrong table is detectable.
         let mut schema = KvSchema::new(PrefixedStoreClient::empty(StoreClient::new(
             "http://127.0.0.1:1",
         )));
@@ -674,6 +676,8 @@ mod tests {
                 )
                 .unwrap();
         }
+
+        // The `Tables` RPC lists tables in declaration order.
         let server = SqlServer::new(schema).unwrap();
         let tables = server.describe_tables();
         assert_eq!(
@@ -683,6 +687,9 @@ mod tests {
                 .collect::<Vec<_>>(),
             names
         );
+
+        // Each declared name resolves to its own table's metadata and subscription state, and
+        // an undeclared name does not resolve.
         for (table, name) in tables.iter().zip(names) {
             assert_eq!(table.columns[0].name, name);
             assert_eq!(table.primary_key_columns, [0]);

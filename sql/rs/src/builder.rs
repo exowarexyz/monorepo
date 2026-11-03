@@ -348,7 +348,8 @@ pub(crate) struct ProjectedBatchBuilder<'a> {
     sources: &'a [ProjectionSource],
     /// One array builder per output column, including repeated projections.
     builders: Vec<ColumnBuilder>,
-    /// Number of rows appended, retained even when the projection has no columns.
+    /// Number of rows appended, tracked separately so a projection with no columns still
+    /// reports its rows.
     row_count: usize,
 }
 

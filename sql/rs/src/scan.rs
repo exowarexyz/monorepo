@@ -221,6 +221,8 @@ impl KvScanExec {
 
     /// Compiles filters and caches the column access and index choice they require.
     fn set_filters(&mut self, state: &dyn Session, filters: &[Expr]) -> DataFusionResult<()> {
+        // Without filters, the constructor's plans already describe a primary-key scan of
+        // the projected columns.
         if filters.is_empty() {
             return Ok(());
         }
@@ -260,9 +262,9 @@ impl KvScanExec {
             .all(|filter| QueryPredicate::supports_filter(filter, &self.model))
             && access.predicate_fully_enforced_by_primary_key(&self.model)
         {
-            // Primary-key ranges enforce every filter, so no row filter is needed.
-            // Keep the projected and predicate columns. Column requirements affect
-            // index ranking but not eligibility, so `index_plan` stays `None`.
+            // Primary-key ranges enforce every filter, so the scan needs no row filter and
+            // only the projected and constrained columns. Column requirements only rank
+            // candidate indexes, so the narrower column set cannot make one eligible.
             return Ok(());
         }
 
@@ -722,6 +724,8 @@ pub(crate) async fn stream_kv_scan(
     limit: Option<usize>,
     direction: RangeMode,
 ) -> DataFusionResult<()> {
+    // A contradiction or a zero limit yields no rows. Otherwise output batches flush at
+    // the smaller of the limit and `BATCH_FLUSH_ROWS`.
     if ctx.predicate.contradiction {
         return Ok(());
     }
@@ -812,6 +816,8 @@ async fn get_rows(
     Ok(rows)
 }
 
+/// Streams primary-key points in batches sized to the output flush threshold. Filters that
+/// the keys cannot enforce raise the batch to at least `MIN_FETCH_BATCH_ROWS`.
 async fn stream_point_scan(
     tx: &tokio::sync::mpsc::Sender<DataFusionResult<RecordBatch>>,
     ctx: &ScanCtx<'_>,
@@ -1422,6 +1428,7 @@ mod tests {
         use commonware_codec::Encode;
         use exoware_sdk::kv_codec::{StoredRow, StoredValue};
 
+        // Both tables start with one valid row, and each limited query must return it.
         let fixture = Fixture::new(
             vec![
                 column("id", DataType::Int64, false),
@@ -1506,6 +1513,8 @@ mod tests {
         };
         use futures::TryStreamExt;
 
+        // One row past a full flush makes the limit span two output batches. Rows beyond
+        // the limit would surface a budget that resets after the first flush.
         let limit = super::BATCH_FLUSH_ROWS + 1;
         let count = limit + 5;
         let fixture = Fixture::new(
@@ -1523,12 +1532,15 @@ mod tests {
             ],
         )
         .await;
+
+        // Range scans, point reads, and index lookups must each stop at the limit.
         let points = (0..count as i64).map(lit).collect();
         for filters in [
             vec![],
             vec![in_list(col("id"), points, false)],
             vec![col("tag").eq(lit(7i64))],
         ] {
+            // Execute the scan node itself so the test sees the batches it emits.
             let scan = KvScanExec::try_new(
                 &fixture.table,
                 &fixture.store.datafusion().state(),
@@ -1543,6 +1555,9 @@ mod tests {
                 .try_collect::<Vec<_>>()
                 .await
                 .unwrap();
+
+            // The first batch must be full and the second must hold only the last row
+            // the limit allows, with the first `limit` amounts in key order.
             assert_eq!(
                 batches
                     .iter()
@@ -2349,6 +2364,8 @@ mod tests {
                 true,
             ),
         ] {
+            // Each query must match the reference results and plan the expected key path
+            // and row filter.
             fixture.check(sql).await;
             let mut plan = fixture
                 .store

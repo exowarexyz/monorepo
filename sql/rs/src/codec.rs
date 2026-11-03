@@ -483,7 +483,9 @@ pub(crate) fn encode_secondary_index_key_from_parts(
         .map_err(DataFusionError::Execution)
 }
 
-/// Combines the ordered index fields and primary-key suffix in the index namespace.
+/// Joins the encoded index fields by the spec's layout, appends the ordered primary-key
+/// encodings, and wraps the payload in the index prefix. `pk_values` must yield one value per
+/// primary-key column.
 fn finish_secondary_index_key<'a>(
     spec: &ResolvedIndexSpec,
     model: &TableModel,

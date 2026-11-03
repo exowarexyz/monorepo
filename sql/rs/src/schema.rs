@@ -16,8 +16,8 @@ use std::sync::Arc;
 pub struct KvSchema {
     /// Namespace-scoped client shared by every table built through this schema.
     client: PrefixedStoreClient,
-    /// Unique table names and shared providers in table-prefix order. Empty until
-    /// tables are added, with at most sixteen entries.
+    /// Unique table names and shared providers in table-prefix order, with at most
+    /// `MAX_TABLES` entries.
     tables: Vec<(String, Arc<KvTable>)>,
 }
 

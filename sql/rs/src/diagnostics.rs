@@ -8,7 +8,7 @@ pub(crate) struct AccessPathDiagnostics {
     pub(crate) mode: String,
     /// Human-readable description of the supported column constraints.
     pub(crate) predicate: String,
-    /// Whether the access path fully enforces the described predicate without a row recheck.
+    /// Whether the access path enforces every filter, so rows need no recheck.
     pub(crate) exact: bool,
     /// Whether the ranges comprise a single scan of the entire primary-key family.
     pub(crate) full_scan_like: bool,
