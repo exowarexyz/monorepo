@@ -78,6 +78,7 @@ pub(crate) fn build_scan_access_path_diagnostics(
     index_plan: Option<&IndexPlan>,
     complete_ranges: bool,
 ) -> DataFusionResult<AccessPathDiagnostics> {
+    // A contradiction proves the result is empty, so no ranges or row checks are needed.
     if predicate.contradiction {
         return Ok(AccessPathDiagnostics {
             mode: "empty".to_string(),
@@ -89,6 +90,9 @@ pub(crate) fn build_scan_access_path_diagnostics(
         });
     }
 
+    // Use the selected index plan so explain output matches execution. Its ranges
+    // are exact only when range extraction supports every filter and the index key
+    // enforces every extracted constraint.
     if let Some(index_plan) = index_plan {
         let spec = &index_specs[index_plan.spec_idx];
         let exact =
@@ -103,6 +107,8 @@ pub(crate) fn build_scan_access_path_diagnostics(
         });
     }
 
+    // Primary-key scans derive their ranges from the predicate. A single range
+    // spanning the entire primary-key family is reported as a full scan.
     let ranges = predicate.primary_key_ranges(model, max_logical_key_len)?;
     let exact = complete_ranges && access_plan.predicate_fully_enforced_by_primary_key(model);
     Ok(AccessPathDiagnostics {

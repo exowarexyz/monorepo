@@ -900,13 +900,18 @@ impl QueryPredicate {
         specs: &[ResolvedIndexSpec],
         access_plan: &ScanAccessPlan,
     ) -> Option<IndexPlan> {
+        // Skip index selection when no rows can match or primary-key point reads suffice.
         if self.contradiction || self.has_primary_key_points(model) {
             return None;
         }
+
+        // Try each index independently so an unusable range expansion leaves other
+        // indexes and primary-key access available.
         let mut best: Option<IndexPlan> = None;
         for (spec_idx, spec) in specs.iter().enumerate() {
             let (ranges, constrained_prefix_len, constrained_column_count) = match spec.layout {
                 IndexLayout::Lexicographic => {
+                    // Lexicographic bounds require constraints on a leading key prefix.
                     let constrained_prefix_len = self.leading_constrained_prefix(model, spec);
                     if constrained_prefix_len == 0 {
                         continue;
@@ -923,6 +928,7 @@ impl QueryPredicate {
                     )
                 }
                 IndexLayout::ZOrder => {
+                    // Z-order bounds can use constrained dimensions anywhere in the key.
                     let constrained_column_count =
                         self.zorder_constrained_column_count(model, spec);
                     if constrained_column_count == 0 {
@@ -935,6 +941,8 @@ impl QueryPredicate {
                     (ranges, constrained_column_count, constrained_column_count)
                 }
             };
+
+            // Keep ranges disjoint so overlapping bounds do not return the same row twice.
             let mut ranges = ranges;
             ranges.sort_by(|left, right| left.start.cmp(&right.start));
             let mut disjoint: Vec<KeyRange> = Vec::with_capacity(ranges.len());
@@ -948,6 +956,9 @@ impl QueryPredicate {
                     _ => disjoint.push(range),
                 }
             }
+
+            // Prefer more constrained columns, then coverage, lexicographic layout,
+            // and fewer ranges. Equal ranks retain the earlier index.
             let candidate = IndexPlan {
                 spec_idx,
                 ranges: disjoint,

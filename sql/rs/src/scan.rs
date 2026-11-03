@@ -190,6 +190,8 @@ impl KvScanExec {
         filters: &[Expr],
         fetch: Option<usize>,
     ) -> DataFusionResult<Self> {
+        // Keep the output schema limited to projected columns. The access plan also
+        // includes columns needed to check the extracted constraints.
         let model = table.model.clone();
         let predicate = QueryPredicate::from_filters(filters, &model);
         let projected_schema = match projection {
@@ -263,6 +265,9 @@ impl KvScanExec {
             // index ranking but not eligibility, so `index_plan` stays `None`.
             return Ok(());
         }
+
+        // Keep the complete row filter even when some conjuncts can run on the index.
+        // Cache the plans with all columns that filter requires.
         self.filter = ScanFilter::compile(state, &self.model, filters, filter_access)?;
         self.cover_filter = cover_filter;
         self.access_plan = Arc::new(access);
@@ -300,12 +305,15 @@ impl KvScanExec {
             return None;
         }
         let (key_columns, constant_prefix_len) = if let Some(plan) = &self.index_plan {
+            // Index ordering requires a covering lexicographic scan.
             let spec = &self.index_specs[plan.spec_idx];
             if spec.layout != IndexLayout::Lexicographic
                 || !self.access_plan.index_covers_required_non_pk(spec)
             {
                 return None;
             }
+
+            // Require non-null columns with encodings that preserve SQL value order.
             let columns = spec
                 .key_columns
                 .iter()
@@ -331,6 +339,9 @@ impl KvScanExec {
             }) {
                 return None;
             }
+
+            // Skip leading columns fixed to one value. An IN constraint can span
+            // several values, so it does not establish a constant prefix.
             let constant_prefix_len = columns
                 .iter()
                 .take_while(|&&i| {
@@ -352,6 +363,9 @@ impl KvScanExec {
                 self.primary_key_point_prefix_len(),
             )
         };
+
+        // Skip fixed columns and require the remaining requested sort keys to
+        // follow the stored key order in one consistent direction.
         let (constant_columns, ordered_columns) = key_columns.split_at(constant_prefix_len);
         let mut ordered_columns = ordered_columns.iter();
         let mut direction = None;
@@ -499,6 +513,8 @@ impl ExecutionPlan for KvScanExec {
             )));
         }
 
+        // The stream task owns its read session and cloned plans so it can keep
+        // reading after this method returns.
         let mut builder = RecordBatchReceiverStreamBuilder::new(self.schema(), 2);
         let tx = builder.tx();
         let session = read_session(context.session_config(), &self.client)?;
@@ -718,6 +734,8 @@ pub(crate) async fn stream_kv_scan(
     let target_rows = limit.unwrap_or(usize::MAX);
     let flush_threshold = limit.unwrap_or(BATCH_FLUSH_ROWS).min(BATCH_FLUSH_ROWS);
 
+    // Complete primary-key constraints permit direct reads. Keep their sorted
+    // order aligned with the requested traversal direction.
     if let Some(mut keys) = ctx.predicate.primary_key_points(ctx.model)? {
         keys.retain(|key| key.len() <= ctx.key_prefix.max_logical_key_len());
         if direction == RangeMode::Reverse {
@@ -726,6 +744,8 @@ pub(crate) async fn stream_kv_scan(
         return stream_point_scan(tx, ctx, &keys, flush_threshold, target_rows).await;
     }
 
+    // A covering index supplies the required values directly. Other index
+    // scans use its entries to fetch base rows.
     if let Some(plan) = index_plan {
         if plan.ranges.is_empty() {
             return Ok(());
@@ -749,6 +769,7 @@ pub(crate) async fn stream_kv_scan(
             .await;
     }
 
+    // Primary-key ranges handle scans without point keys or a selected secondary index.
     let ranges = ctx
         .predicate
         .primary_key_ranges(ctx.model, ctx.key_prefix.max_logical_key_len())?;
