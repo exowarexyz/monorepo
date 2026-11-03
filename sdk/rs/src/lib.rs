@@ -3174,6 +3174,7 @@ mod tests {
     use crate::kv_codec::{KvFieldKind, KvPredicate, KvPredicateCheck, KvPredicateConstraint};
     use buffa::Message as _;
     use buffa_types::google::protobuf::Duration as ProtoDuration;
+    use commonware_macros::boxed;
     use connectrpc::{
         compression::{CompressionProvider, GzipProvider},
         error::ErrorDetail,
@@ -3714,6 +3715,7 @@ mod tests {
         }
     }
 
+    #[boxed]
     async fn assert_streaming_deadline<T>(
         future: impl std::future::Future<Output = Result<T, ClientError>>,
     ) {

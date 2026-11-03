@@ -1466,6 +1466,38 @@ impl RocksStore {
         *self.retention.lock() = policy;
         self.enforce_retention()
     }
+
+    /// Commits a batch and returns its sequence number. Queued batches may share a sequence.
+    pub async fn put_batch(&self, kvs: Vec<(Bytes, Bytes)>) -> Result<u64, IngestError> {
+        // Dedicated writer threads keep blocking storage writes off Tokio workers.
+        let sequence = self.writer.put_batch(kvs).await?;
+
+        self.enforce_committed_retention(sequence).await;
+        Ok(sequence)
+    }
+
+    /// Applies the active retention rule after a durable commit and logs any failures.
+    async fn enforce_committed_retention(&self, sequence: u64) {
+        // Reporting a trim failure as a write failure could cause the caller to retry the
+        // durable batch under a new sequence number, duplicating it for subscribers. Trimming
+        // is idempotent, so a later append or retention update can retry it.
+        if self.retention.lock().is_some() {
+            let store = self.clone();
+            match tokio::task::spawn_blocking(move || store.enforce_retention()).await {
+                Ok(Ok(_)) => {}
+                Ok(Err(message)) => tracing::warn!(
+                    sequence,
+                    error = %message,
+                    "continuous retention trim failed after commit; batch is durable, retrying on the next append",
+                ),
+                Err(join_error) => tracing::warn!(
+                    sequence,
+                    error = %join_error,
+                    "retention enforcement task failed after commit; batch is durable, retrying on the next append",
+                ),
+            }
+        }
+    }
 }
 
 impl Sequence for RocksStore {
@@ -1571,43 +1603,6 @@ impl Ingest for RocksStore {
             .await?;
         self.enforce_committed_retention(sequence).await;
         Ok(sequence)
-    }
-}
-
-// Ingest uses dedicated writer threads so blocking storage writes do not occupy Tokio workers.
-// The writer folds already-queued requests into one commit group that shares a single sequence
-// number and replay-log batch.
-impl RocksStore {
-    /// Direct writes use a separate budget of 256 requests and 1 GiB.
-    /// Mixed direct and HTTP traffic can consume this and the configured HTTP budget.
-    pub async fn put_batch(&self, kvs: Vec<(Bytes, Bytes)>) -> Result<u64, IngestError> {
-        let sequence = self.writer.put_batch(kvs).await?;
-
-        self.enforce_committed_retention(sequence).await;
-        Ok(sequence)
-    }
-
-    async fn enforce_committed_retention(&self, sequence: u64) {
-        // Best-effort: the batch is already durably committed and acked above, so a trim failure
-        // must NOT fail the ingest. Failing here would make the caller re-ingest durable data
-        // under a fresh sequence, duplicating the batch for subscribers. The trim is idempotent,
-        // so the next append (or a `SetRetention`) reapplies it.
-        if self.retention.lock().is_some() {
-            let store = self.clone();
-            match tokio::task::spawn_blocking(move || store.enforce_retention()).await {
-                Ok(Ok(_)) => {}
-                Ok(Err(message)) => tracing::warn!(
-                    sequence,
-                    error = %message,
-                    "continuous retention trim failed after commit; batch is durable, retrying on the next append",
-                ),
-                Err(join_error) => tracing::warn!(
-                    sequence,
-                    error = %join_error,
-                    "retention enforcement task failed after commit; batch is durable, retrying on the next append",
-                ),
-            }
-        }
     }
 }
 
@@ -2916,9 +2911,9 @@ mod tests {
             let first = store.put_batch(large_batch(1)).await.expect("put");
             let second = store.put_batch(large_batch(2)).await.expect("put");
             let third = store.put_batch(large_batch(3)).await.expect("put");
-            // Persist the rule without running its enforcement, leaving rows below the
-            // rule's floor in the log — the state a crash that lost the last (unsynced)
-            // trim leaves behind.
+
+            // Persist the rule without enforcing it to model a crash that lost the last
+            // unsynced trim, leaving rows below the rule's floor in the log.
             store
                 .store_retention_policy(Some(&RetentionPolicy::KeepLatest { count: 1 }))
                 .expect("store policy");

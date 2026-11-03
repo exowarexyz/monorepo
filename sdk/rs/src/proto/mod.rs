@@ -12,6 +12,8 @@ pub mod log {
             #![allow(elided_lifetimes_in_paths)]
             #![allow(clippy::use_self)]
             #![allow(clippy::missing_const_for_fn)]
+            #![allow(clippy::multiple_inherent_impl)]
+            #![allow(clippy::unused_async)]
             include!("../gen/log.ingest.v1.rs");
         }
     }
@@ -25,6 +27,8 @@ pub mod log {
             #![allow(elided_lifetimes_in_paths)]
             #![allow(clippy::use_self)]
             #![allow(clippy::missing_const_for_fn)]
+            #![allow(clippy::multiple_inherent_impl)]
+            #![allow(clippy::unused_async)]
             include!("../gen/log.retention.v1.rs");
         }
     }
@@ -38,6 +42,8 @@ pub mod log {
             #![allow(elided_lifetimes_in_paths)]
             #![allow(clippy::use_self)]
             #![allow(clippy::missing_const_for_fn)]
+            #![allow(clippy::multiple_inherent_impl)]
+            #![allow(clippy::unused_async)]
             include!("../gen/log.stream.v1.rs");
         }
     }
@@ -53,6 +59,8 @@ pub mod store {
             #![allow(elided_lifetimes_in_paths)]
             #![allow(clippy::use_self)]
             #![allow(clippy::missing_const_for_fn)]
+            #![allow(clippy::multiple_inherent_impl)]
+            #![allow(clippy::unused_async)]
             include!("../gen/store.prune.v1.rs");
         }
     }
@@ -66,6 +74,8 @@ pub mod store {
             #![allow(elided_lifetimes_in_paths)]
             #![allow(clippy::use_self)]
             #![allow(clippy::missing_const_for_fn)]
+            #![allow(clippy::multiple_inherent_impl)]
+            #![allow(clippy::unused_async)]
             include!("../gen/store.query.v1.rs");
         }
     }
@@ -80,6 +90,8 @@ pub mod google {
         #![allow(elided_lifetimes_in_paths)]
         #![allow(clippy::use_self)]
         #![allow(clippy::missing_const_for_fn)]
+        #![allow(clippy::multiple_inherent_impl)]
+        #![allow(clippy::unused_async)]
         include!("../gen/google.rpc.rs");
     }
 }
@@ -94,6 +106,8 @@ pub mod common {
             #![allow(elided_lifetimes_in_paths)]
             #![allow(clippy::use_self)]
             #![allow(clippy::missing_const_for_fn)]
+            #![allow(clippy::multiple_inherent_impl)]
+            #![allow(clippy::unused_async)]
             include!("../gen/common.kv.v1.rs");
         }
     }
@@ -108,6 +122,8 @@ pub mod ingest {
     #![allow(elided_lifetimes_in_paths)]
     #![allow(clippy::use_self)]
     #![allow(clippy::missing_const_for_fn)]
+    #![allow(clippy::multiple_inherent_impl)]
+    #![allow(clippy::unused_async)]
     pub use crate::log::ingest::v1::*;
 }
 
@@ -119,6 +135,8 @@ pub mod prune {
     #![allow(elided_lifetimes_in_paths)]
     #![allow(clippy::use_self)]
     #![allow(clippy::missing_const_for_fn)]
+    #![allow(clippy::multiple_inherent_impl)]
+    #![allow(clippy::unused_async)]
     pub use crate::store::prune::v1::*;
 }
 
@@ -130,6 +148,8 @@ pub mod query {
     #![allow(elided_lifetimes_in_paths)]
     #![allow(clippy::use_self)]
     #![allow(clippy::missing_const_for_fn)]
+    #![allow(clippy::multiple_inherent_impl)]
+    #![allow(clippy::unused_async)]
     pub use crate::store::query::v1::*;
 }
 
@@ -141,6 +161,8 @@ pub mod stream {
     #![allow(elided_lifetimes_in_paths)]
     #![allow(clippy::use_self)]
     #![allow(clippy::missing_const_for_fn)]
+    #![allow(clippy::multiple_inherent_impl)]
+    #![allow(clippy::unused_async)]
     pub use crate::log::stream::v1::*;
 }
 
