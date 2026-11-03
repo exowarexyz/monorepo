@@ -1863,7 +1863,7 @@ mod tests {
                         .keys
                         .iter()
                         .map(|key| GetManyEntry {
-                            key: key.to_vec(),
+                            key: key.to_vec().into(),
                             ..Default::default()
                         })
                         .collect();
@@ -1886,7 +1886,7 @@ mod tests {
             match self {
                 Self::Duplicate { key, value } => {
                     let entry = Entry {
-                        key: key.to_vec(),
+                        key: key.clone(),
                         value: value.clone().into(),
                         ..Default::default()
                     };
