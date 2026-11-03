@@ -1,7 +1,12 @@
 //! HTTP server entrypoints.
 
 use crate::RocksStore;
-use axum::{routing::get, Router};
+use axum::{
+    routing::get,
+    serve::{Listener, ListenerExt},
+    Router,
+};
+use exoware_sdk::transport::set_tcp_nodelay;
 use exoware_server::{connect_stack, AppState};
 use std::{net::SocketAddr, path::Path, sync::Arc, time::Duration};
 use tower_http::cors::CorsLayer;
@@ -30,7 +35,9 @@ pub async fn run(
 
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
     info!(%addr, directory = %directory.display(), "store simulator listening");
-    let listener = tokio::net::TcpListener::bind(addr).await?;
+    let listener = tokio::net::TcpListener::bind(addr)
+        .await?
+        .tap_io(set_tcp_nodelay);
     exoware_server::ingest::transport::serve(listener, app, std::future::pending()).await?;
     Ok(())
 }
@@ -49,7 +56,9 @@ pub async fn open_temp(
         .route("/health", get(health))
         .fallback_service(connect)
         .layer(CorsLayer::very_permissive());
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await?
+        .tap_io(set_tcp_nodelay);
     let port = listener.local_addr()?.port();
     let url = format!("http://127.0.0.1:{port}");
     let handle = tokio::spawn(async move {
