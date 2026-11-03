@@ -233,7 +233,7 @@ impl SqlServer {
     }
 }
 
-fn proto_index_layout(layout: IndexLayout) -> ProtoIndexLayout {
+const fn proto_index_layout(layout: IndexLayout) -> ProtoIndexLayout {
     match layout {
         IndexLayout::Lexicographic => ProtoIndexLayout::INDEX_LAYOUT_LEXICOGRAPHIC,
         IndexLayout::ZOrder => ProtoIndexLayout::INDEX_LAYOUT_Z_ORDER,
@@ -259,7 +259,7 @@ pub struct SqlConnect {
 }
 
 impl SqlConnect {
-    pub fn new(server: Arc<SqlServer>) -> Self {
+    pub const fn new(server: Arc<SqlServer>) -> Self {
         Self { server }
     }
 }
@@ -618,6 +618,7 @@ fn client_error_to_connect(err: &exoware_sdk::ClientError) -> ConnectError {
 mod tests {
     use super::*;
     use crate::TableColumnConfig;
+    use axum::serve::{Listener, ListenerExt};
     use buffa::Message;
     use datafusion::{
         arrow::{
@@ -633,7 +634,7 @@ mod tests {
         datasource::MemTable,
         logical_expr::{create_udf, ColumnarValue, Volatility},
     };
-    use exoware_sdk::StoreClient;
+    use exoware_sdk::{transport::set_tcp_nodelay, StoreClient};
     use futures::{FutureExt, StreamExt};
     use std::{
         collections::VecDeque,
@@ -788,7 +789,10 @@ mod tests {
                 )
                 .unwrap();
             let server = Arc::new(SqlServer::new(schema).unwrap());
-            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .unwrap()
+                .tap_io(set_tcp_nodelay);
             let address = listener.local_addr().unwrap();
             let app = axum::Router::new().fallback_service(sql_connect_stack(server));
             let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
@@ -864,7 +868,10 @@ mod tests {
                 ),
             )
             .unwrap();
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .unwrap()
+            .tap_io(set_tcp_nodelay);
         let address = listener.local_addr().unwrap();
         let app = axum::Router::new().fallback_service(sql_connect_stack(server.clone()));
         let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
@@ -1083,7 +1090,10 @@ mod tests {
         .unwrap();
         server.ctx = Arc::new(ctx);
         let server = Arc::new(server);
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .unwrap()
+            .tap_io(set_tcp_nodelay);
         let address = listener.local_addr().unwrap();
         let app = axum::Router::new().fallback_service(sql_connect_stack(server));
         let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });

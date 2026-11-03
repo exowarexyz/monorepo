@@ -1,4 +1,4 @@
-use axum::{routing::get, Router};
+use axum::{routing::get, serve::ListenerExt, Router};
 use clap::{Parser, Subcommand};
 use commonware_codec::Encode;
 use commonware_cryptography::Sha256;
@@ -23,7 +23,9 @@ use exoware_qmdb::{
     },
     CurrentBoundaryState, MAX_OPERATION_SIZE,
 };
-use exoware_sdk::{PrefixedStoreClient, StoreClient, StoreKeyPrefix, StoreWriteBatch};
+use exoware_sdk::{
+    transport::set_tcp_nodelay, PrefixedStoreClient, StoreClient, StoreKeyPrefix, StoreWriteBatch,
+};
 use std::{
     net::{IpAddr, SocketAddr},
     num::NonZeroU64,
@@ -229,7 +231,9 @@ async fn run(
 
     let addr = SocketAddr::from((host, port));
     info!(%addr, store_url, "ordered qmdb server listening");
-    let listener = tokio::net::TcpListener::bind(addr).await?;
+    let listener = tokio::net::TcpListener::bind(addr)
+        .await?
+        .tap_io(set_tcp_nodelay);
     axum::serve(listener, app).await?;
     Ok(())
 }
@@ -431,6 +435,7 @@ async fn main() -> std::process::ExitCode {
 #[allow(refining_impl_trait)]
 mod tests {
     use super::*;
+    use axum::serve::Listener;
     use bytes::Bytes;
     use connectrpc::{ConnectError, ConnectRpcService, Limits, RequestContext, ServiceRequest};
     use exoware_sdk::{
@@ -523,7 +528,10 @@ mod tests {
                         .with_max_request_body_size(LIMIT)
                         .with_max_message_size(LIMIT),
                 );
-            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .unwrap()
+                .tap_io(set_tcp_nodelay);
             let url = format!("http://{}", listener.local_addr().unwrap());
             let server = tokio::spawn(async move {
                 axum::serve(listener, Router::new().fallback_service(service))

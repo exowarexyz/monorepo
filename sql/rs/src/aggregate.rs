@@ -87,13 +87,13 @@ pub(crate) enum AggregatePushdownFunction {
 pub(crate) enum PushdownValueExpr {
     Column(usize),
     Literal(KvReducedValue),
-    Add(Box<PushdownValueExpr>, Box<PushdownValueExpr>),
-    Sub(Box<PushdownValueExpr>, Box<PushdownValueExpr>),
-    Mul(Box<PushdownValueExpr>, Box<PushdownValueExpr>),
-    Div(Box<PushdownValueExpr>, Box<PushdownValueExpr>),
-    CastFloat64(Box<PushdownValueExpr>),
-    Lower(Box<PushdownValueExpr>),
-    DateTruncDay(Box<PushdownValueExpr>),
+    Add(Box<Self>, Box<Self>),
+    Sub(Box<Self>, Box<Self>),
+    Mul(Box<Self>, Box<Self>),
+    Div(Box<Self>, Box<Self>),
+    CastFloat64(Box<Self>),
+    Lower(Box<Self>),
+    DateTruncDay(Box<Self>),
 }
 
 impl PushdownValueExpr {
@@ -166,7 +166,7 @@ pub(crate) struct KvAggregateExec {
 }
 
 impl KvAggregatePushdownRule {
-    pub(crate) fn new() -> Self {
+    pub(crate) const fn new() -> Self {
         Self
     }
 
@@ -852,7 +852,7 @@ impl KvAggregateExec {
     }
 }
 
-pub(crate) fn rebase_output_plan(
+pub(crate) const fn rebase_output_plan(
     output: AggregateOutputPlan,
     offset: usize,
 ) -> AggregateOutputPlan {
@@ -1937,7 +1937,13 @@ pub(crate) fn kv_field_kind(kind: ColumnKind) -> Option<KvFieldKind> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::{extract::Request, middleware::Next, response::Response, Router};
+    use axum::{
+        extract::Request,
+        middleware::Next,
+        response::Response,
+        serve::{Listener, ListenerExt},
+        Router,
+    };
     use buffa::Message;
     use bytes::Bytes;
     use datafusion::{
@@ -1948,7 +1954,10 @@ mod tests {
         datasource::MemTable,
         prelude::SessionContext as DataFusionSessionContext,
     };
-    use exoware_sdk::{RangeReduceGroup, RangeReduceResponse, RangeReduceResult, StoreClient};
+    use exoware_sdk::{
+        transport::set_tcp_nodelay, RangeReduceGroup, RangeReduceResponse, RangeReduceResult,
+        StoreClient,
+    };
     use exoware_server::{
         Query, QueryExtra, QueryResult, QueryState, RangeScan, RangeScanBatch, RangeScanResult,
         Sequence,
@@ -2102,7 +2111,10 @@ mod tests {
                         }
                     },
                 ));
-            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .unwrap()
+                .tap_io(set_tcp_nodelay);
             let url = format!("http://{}", listener.local_addr().unwrap());
             let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
             let client = PrefixedStoreClient::empty(StoreClient::new(&url));

@@ -72,7 +72,7 @@ pub struct DecodeOutput {
 }
 
 impl DecodeState {
-    fn suppressed(&self) -> bool {
+    const fn suppressed(&self) -> bool {
         self.rejection.is_some()
             || self.entry_error.is_some()
             || self.inner_error.is_some()
@@ -150,7 +150,7 @@ impl DecodeState {
             .push_back(pending);
     }
 
-    pub(super) fn finish_wire(&mut self) {
+    pub(super) const fn finish_wire(&mut self) {
         self.eof = true;
     }
 
@@ -678,7 +678,7 @@ impl DecodeState {
             && self.parsed == self.arena.len()
     }
 
-    pub(super) fn total(&self) -> usize {
+    pub(super) const fn total(&self) -> usize {
         self.total
     }
 }
@@ -715,7 +715,7 @@ mod tests {
                 ..PutLimits::default()
             },
             admission.transport.clone(),
-            admission.request.clone(),
+            admission.request,
         );
         (state, budget)
     }
@@ -997,7 +997,7 @@ mod tests {
     fn large_unknown_field_does_not_pin_its_backing_in_the_next_chunk() {
         let unknown = field(26, &vec![9; 2 * 1024 * 1024]);
         let suffix = entry(b"key", b"value");
-        let wire = [unknown.clone(), suffix].concat();
+        let wire = [unknown, suffix].concat();
         let (mut state, _) = state(PutEncoding::Identity, wire.len() + 64);
         state.feed(Bytes::from(wire), true);
         let output = state.run(DecodeBuffers::new(8192, 16));

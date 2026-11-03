@@ -9,6 +9,9 @@ homepage.workspace = true
 repository = "https://github.com/exowarexyz/monorepo/tree/main/sql/rs"
 documentation = "https://docs.rs/exoware-sql"
 
+[lints]
+workspace = true
+
 [[bin]]
 name = "sql"
 path = "src/bin/sql.rs"

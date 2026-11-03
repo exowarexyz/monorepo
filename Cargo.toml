@@ -19,6 +19,19 @@ edition = "2021"
 license = "MIT OR Apache-2.0"
 homepage = "https://exoware.xyz"
 
+[workspace.lints.rust]
+rust_2018_idioms = { level = "deny", priority = -1 }
+unused_must_use = "deny"
+
+[workspace.lints.clippy]
+redundant_clone = "warn"
+undocumented_unsafe_blocks = "deny"
+use_self = "warn"
+missing_const_for_fn = "warn"
+multiple_inherent_impl = "deny"
+unused_async = "warn"
+large_futures = "warn"
+
 [workspace.dependencies]
 crossbeam-utils = "0.8.22"
 exoware-qmdb = { version = "2026.9.0", path = "qmdb/rs" }
@@ -41,6 +54,7 @@ commonware-allocator = "2026.10.0"
 commonware-consensus = "2026.10.0"
 commonware-cryptography = "2026.10.0"
 commonware-glue = "2026.10.0"
+commonware-macros = "2026.10.0"
 commonware-math = "2026.10.0"
 commonware-parallel = "2026.10.0"
 commonware-p2p = "2026.10.0"

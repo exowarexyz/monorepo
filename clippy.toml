@@ -1,0 +1,4 @@
+# Only flag a second inherent impl of a type when it is in the same module as the first.
+# Splitting impls across modules (like `KvSchema`'s pruning methods in sql/rs/src/prune.rs)
+# is fine.
+inherent-impl-lint-scope = "module"
