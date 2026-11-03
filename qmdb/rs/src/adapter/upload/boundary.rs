@@ -348,8 +348,8 @@ where
 
     let mut touched_keys = operations[previous_len..]
         .iter()
-        .filter_map(|operation| operation.key().map(|key| key.as_ref().to_vec()))
-        .collect::<BTreeSet<_>>();
+        .filter_map(|operation| operation.key().map(AsRef::as_ref))
+        .collect::<BTreeSet<&[u8]>>();
 
     for index in (0..previous.len()).rev() {
         if touched_keys.is_empty() {
