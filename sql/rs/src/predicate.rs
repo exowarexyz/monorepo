@@ -977,10 +977,12 @@ impl QueryPredicate {
         }
 
         // Overlay each combination on the whole predicate to retain primary-key suffix constraints.
-        // Inverted bounds match no keys and are dropped.
+        // Every combination sets the same columns, so each overlay fully replaces the previous one
+        // and one copy of the predicate serves them all. Inverted bounds match no keys and are
+        // dropped.
+        let mut predicate = self.clone();
         let mut ranges = Vec::with_capacity(combos.len());
         for combo in combos {
-            let mut predicate = self.clone();
             predicate.constraints.extend(combo);
             let start = encode_bound(&predicate, column_count, false)?;
             let end = encode_bound(&predicate, column_count, true)?;

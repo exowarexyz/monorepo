@@ -1096,6 +1096,98 @@ mod tests {
     }
 
     #[test]
+    fn index_range_expansion_matches_one_range_per_value() {
+        let (model, specs) = test_model();
+        let column = |name| *model.columns_by_name.get(name).unwrap();
+        let strings = |label: &str, count| {
+            (0..count)
+                .map(|i| format!("{label}{i:04}"))
+                .collect::<Vec<_>>()
+        };
+
+        // A full-budget IN list on the leading index column, a range on the second, an IN list
+        // on a column outside the index, and a primary-key range that bounds the key suffix.
+        let mut predicate = QueryPredicate::default();
+        predicate.constraints.extend([
+            (
+                column("region"),
+                PredicateConstraint::StringIn(strings("region", 4096)),
+            ),
+            (
+                column("customer_id"),
+                PredicateConstraint::IntRange {
+                    min: Some(10),
+                    max: Some(20),
+                },
+            ),
+            (
+                column("status"),
+                PredicateConstraint::StringIn(strings("status", 64)),
+            ),
+            (
+                column("order_id"),
+                PredicateConstraint::IntRange {
+                    min: Some(100),
+                    max: None,
+                },
+            ),
+        ]);
+
+        // Expanding the product must equal expanding each value on its own.
+        let ranges = predicate.expand_index_ranges(&model, &specs[0], 2).unwrap();
+        let mut single = predicate.clone();
+        let expected = strings("region", 4096)
+            .into_iter()
+            .flat_map(|region| {
+                single
+                    .constraints
+                    .insert(column("region"), PredicateConstraint::StringEq(region));
+                single.expand_index_ranges(&model, &specs[0], 2).unwrap()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(ranges.len(), 4096);
+        assert_eq!(ranges, expected);
+
+        // The z-order expansion shares the same overlay loop.
+        let (model, specs) = zorder_test_model();
+        let column = |name| *model.columns_by_name.get(name).unwrap();
+        let point = |v| PredicateConstraint::IntRange {
+            min: Some(v),
+            max: Some(v),
+        };
+        let mut predicate = QueryPredicate::default();
+        predicate.constraints.extend([
+            (column("x"), PredicateConstraint::IntIn((0..64).collect())),
+            (column("y"), PredicateConstraint::IntIn((0..64).collect())),
+            (
+                column("id"),
+                PredicateConstraint::IntRange {
+                    min: None,
+                    max: Some(500),
+                },
+            ),
+        ]);
+        let ranges = predicate
+            .expand_zorder_index_ranges(&model, &specs[1])
+            .unwrap();
+        let mut single = predicate.clone();
+        let mut expected = Vec::new();
+        for x in 0..64 {
+            for y in 0..64 {
+                single.constraints.insert(column("x"), point(x));
+                single.constraints.insert(column("y"), point(y));
+                expected.extend(
+                    single
+                        .expand_zorder_index_ranges(&model, &specs[1])
+                        .unwrap(),
+                );
+            }
+        }
+        assert_eq!(ranges.len(), 4096);
+        assert_eq!(ranges, expected);
+    }
+
+    #[test]
     fn secondary_index_key_round_trip() {
         let (model, specs) = test_model();
         let row = KvRow {
