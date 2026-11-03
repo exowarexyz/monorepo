@@ -1,9 +1,7 @@
-use std::time::{SystemTime, UNIX_EPOCH};
-
+use crate::deterministic::{mix64, GOLDEN_RATIO_64};
 use anyhow::ensure;
 use exoware_sdk::keys::{validate_key_size, Key};
-
-use crate::deterministic::{mix64, GOLDEN_RATIO_64};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Default physical key length used by the validation commands.
 pub const DEFAULT_KEY_LEN: usize = 48;
@@ -121,7 +119,7 @@ impl Keyspace {
     }
 
     /// Returns the configured physical key length.
-    pub fn key_len(&self) -> usize {
+    pub const fn key_len(&self) -> usize {
         self.key_len
     }
 
@@ -202,7 +200,7 @@ impl Keyspace {
         Key::from(key)
     }
 
-    fn namespace_start(&self) -> usize {
+    const fn namespace_start(&self) -> usize {
         match self.layout {
             KeyLayout::Spread => ENTROPY_BYTES + NAMESPACE_LEN_BYTES,
             KeyLayout::Validation => VALIDATION_PREFIX.len() + NAMESPACE_LEN_BYTES,
@@ -215,11 +213,11 @@ impl Keyspace {
 /// Deriving it from the logical index alone spreads keys uniformly across all
 /// leading-bit shards while keeping inserted and missing keys for the same
 /// index aligned and reproducible.
-fn entropy_byte(index: u64) -> u8 {
+const fn entropy_byte(index: u64) -> u8 {
     mix64(index) as u8
 }
 
-fn min_key_len(layout: KeyLayout, namespace_len: usize) -> usize {
+const fn min_key_len(layout: KeyLayout, namespace_len: usize) -> usize {
     let prefix_len = match layout {
         KeyLayout::Spread => ENTROPY_BYTES,
         KeyLayout::Validation => VALIDATION_PREFIX.len(),
@@ -250,9 +248,8 @@ fn namespace_hash(namespace: &[u8]) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashSet;
-
     use super::*;
+    use std::collections::HashSet;
 
     #[test]
     fn rejects_key_len_too_small_for_namespace() {

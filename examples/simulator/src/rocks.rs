@@ -26,14 +26,6 @@
 //! rolled back (its sequence number must never be re-issued), so the writer panics and the next
 //! open rolls the store forward instead of any in-process recovery.
 
-use std::cmp::Ordering as CmpOrdering;
-use std::collections::BTreeMap;
-use std::num::NonZeroUsize;
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{mpsc, Arc};
-use std::thread;
-
 #[cfg(test)]
 use buffa::Message;
 use buffa::{DecodeOptions, ViewEncode};
@@ -41,20 +33,22 @@ use bytes::Bytes;
 use commonware_codec::{Copying, DecodeExt, Encode};
 #[cfg(test)]
 use exoware_sdk::common::kv::v1::Entry;
-use exoware_sdk::common::kv::v1::EntryView;
-use exoware_sdk::keys::Prefix;
-use exoware_sdk::limits::{
-    put_encoded_len, PutTooLarge, MAX_PUT_ENTRIES, MAX_REQUEST_MESSAGE_BYTES,
-    MAX_RESPONSE_ELEMENT_MEMORY_BYTES, MAX_RESPONSE_MESSAGE_BYTES,
-};
 #[cfg(test)]
 use exoware_sdk::log::stream::v1::GetResponse as StreamGetResponse;
-use exoware_sdk::log::stream::v1::GetResponseView as StreamGetResponseView;
-use exoware_sdk::prune_policy::{KeysScope, OrderEncoding, PrunePolicyDocument, RetainPolicy};
-use exoware_sdk::retention::{validate_retention_policy, RetentionPolicy};
-use exoware_sdk::selector::compile_payload_regex;
-use exoware_server::ingest::{BudgetConfig, ByteLease, DecodeBuffers, IngestBudget, RequestLease};
+use exoware_sdk::{
+    common::kv::v1::EntryView,
+    keys::Prefix,
+    limits::{
+        put_encoded_len, PutTooLarge, MAX_PUT_ENTRIES, MAX_REQUEST_MESSAGE_BYTES,
+        MAX_RESPONSE_ELEMENT_MEMORY_BYTES, MAX_RESPONSE_MESSAGE_BYTES,
+    },
+    log::stream::v1::GetResponseView as StreamGetResponseView,
+    prune_policy::{KeysScope, OrderEncoding, PrunePolicyDocument, RetainPolicy},
+    retention::{validate_retention_policy, RetentionPolicy},
+    selector::compile_payload_regex,
+};
 use exoware_server::{
+    ingest::{BudgetConfig, ByteLease, DecodeBuffers, IngestBudget, RequestLease},
     Ingest, IngestError, Log, LogBatch, Prune, PutError, PutInput, Query, QueryExtra, QueryResult,
     RangeScan, RangeScanBatch, RangeScanResult, Retention, Sequence, StreamNotifier,
 };
@@ -64,6 +58,17 @@ use rocksdb::{
     ColumnFamily, ColumnFamilyDescriptor, DBCompactionStyle, DBCompressionType, DBIterator,
     Direction, IngestExternalFileOptions, IteratorMode, Options, Snapshot, SstFileWriter,
     WriteOptions, DB,
+};
+use std::{
+    cmp::Ordering as CmpOrdering,
+    collections::BTreeMap,
+    num::NonZeroUsize,
+    path::{Path, PathBuf},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        mpsc, Arc,
+    },
+    thread,
 };
 use tokio::sync::oneshot;
 use tracing::debug;
@@ -397,7 +402,7 @@ struct Frontiers {
 }
 
 impl Frontiers {
-    fn new(published: u64) -> Self {
+    const fn new(published: u64) -> Self {
         Self {
             published: AtomicU64::new(published),
             persist: Mutex::new(()),
@@ -408,7 +413,7 @@ impl Frontiers {
 
 // Row backing is charged separately. These charges cover later coalescing,
 // indexed sorting, compact payload owners, and encoded log output.
-fn writer_growth(entries: usize, encoded_len: usize) -> usize {
+const fn writer_growth(entries: usize, encoded_len: usize) -> usize {
     let row = std::mem::size_of::<(Bytes, Bytes)>();
     let sort_row = std::mem::size_of::<usize>();
     encoded_len
@@ -416,7 +421,7 @@ fn writer_growth(entries: usize, encoded_len: usize) -> usize {
         .saturating_add(entries.saturating_mul(2 * row + sort_row + 128))
 }
 
-fn writer_memory(entries: usize, encoded_len: usize, capacity: usize) -> usize {
+const fn writer_memory(entries: usize, encoded_len: usize, capacity: usize) -> usize {
     WRITER_OVERHEAD
         .saturating_add(writer_growth(entries, encoded_len))
         .saturating_add(capacity.saturating_mul(std::mem::size_of::<(Bytes, Bytes)>()))
@@ -942,7 +947,7 @@ fn prepare_ingest_dir(store_path: &Path) -> Result<PathBuf, String> {
 }
 
 /// Encodes a sequence number as a log-CF key that preserves numeric order in RocksDB.
-fn sequence_log_key(sequence: u64) -> [u8; LOG_BATCH_KEY_LEN] {
+const fn sequence_log_key(sequence: u64) -> [u8; LOG_BATCH_KEY_LEN] {
     sequence.to_be_bytes()
 }
 
@@ -1003,7 +1008,7 @@ fn read_retention_policy(db: &DB) -> Result<Option<RetentionPolicy>, String> {
 /// Lowest sequence a retention rule keeps against `frontier`: the exclusive cutoff for log
 /// trimming, so every row below it is evicted and the row at it (if any) is the oldest retained.
 /// Mirrors the floor math the stream service owns end to end.
-fn retention_floor(policy: &RetentionPolicy, frontier: u64) -> u64 {
+const fn retention_floor(policy: &RetentionPolicy, frontier: u64) -> u64 {
     match policy {
         RetentionPolicy::KeepLatest { count } => frontier.saturating_sub(*count).saturating_add(1),
         RetentionPolicy::GreaterThan { threshold } => threshold.saturating_add(1),
@@ -1461,6 +1466,38 @@ impl RocksStore {
         *self.retention.lock() = policy;
         self.enforce_retention()
     }
+
+    /// Commits a batch and returns its sequence number. Queued batches may share a sequence.
+    pub async fn put_batch(&self, kvs: Vec<(Bytes, Bytes)>) -> Result<u64, IngestError> {
+        // Dedicated writer threads keep blocking storage writes off Tokio workers.
+        let sequence = self.writer.put_batch(kvs).await?;
+
+        self.enforce_committed_retention(sequence).await;
+        Ok(sequence)
+    }
+
+    /// Applies the active retention rule after a durable commit and logs any failures.
+    async fn enforce_committed_retention(&self, sequence: u64) {
+        // Reporting a trim failure as a write failure could cause the caller to retry the
+        // durable batch under a new sequence number, duplicating it for subscribers. Trimming
+        // is idempotent, so a later append or retention update can retry it.
+        if self.retention.lock().is_some() {
+            let store = self.clone();
+            match tokio::task::spawn_blocking(move || store.enforce_retention()).await {
+                Ok(Ok(_)) => {}
+                Ok(Err(message)) => tracing::warn!(
+                    sequence,
+                    error = %message,
+                    "continuous retention trim failed after commit; batch is durable, retrying on the next append",
+                ),
+                Err(join_error) => tracing::warn!(
+                    sequence,
+                    error = %join_error,
+                    "retention enforcement task failed after commit; batch is durable, retrying on the next append",
+                ),
+            }
+        }
+    }
 }
 
 impl Sequence for RocksStore {
@@ -1566,43 +1603,6 @@ impl Ingest for RocksStore {
             .await?;
         self.enforce_committed_retention(sequence).await;
         Ok(sequence)
-    }
-}
-
-// Ingest uses dedicated writer threads so blocking storage writes do not occupy Tokio workers.
-// The writer folds already-queued requests into one commit group that shares a single sequence
-// number and replay-log batch.
-impl RocksStore {
-    /// Direct writes use a separate budget of 256 requests and 1 GiB.
-    /// Mixed direct and HTTP traffic can consume this and the configured HTTP budget.
-    pub async fn put_batch(&self, kvs: Vec<(Bytes, Bytes)>) -> Result<u64, IngestError> {
-        let sequence = self.writer.put_batch(kvs).await?;
-
-        self.enforce_committed_retention(sequence).await;
-        Ok(sequence)
-    }
-
-    async fn enforce_committed_retention(&self, sequence: u64) {
-        // Best-effort: the batch is already durably committed and acked above, so a trim failure
-        // must NOT fail the ingest. Failing here would make the caller re-ingest durable data
-        // under a fresh sequence, duplicating the batch for subscribers. The trim is idempotent,
-        // so the next append (or a `SetRetention`) reapplies it.
-        if self.retention.lock().is_some() {
-            let store = self.clone();
-            match tokio::task::spawn_blocking(move || store.enforce_retention()).await {
-                Ok(Ok(_)) => {}
-                Ok(Err(message)) => tracing::warn!(
-                    sequence,
-                    error = %message,
-                    "continuous retention trim failed after commit; batch is durable, retrying on the next append",
-                ),
-                Err(join_error) => tracing::warn!(
-                    sequence,
-                    error = %join_error,
-                    "retention enforcement task failed after commit; batch is durable, retrying on the next append",
-                ),
-            }
-        }
     }
 }
 
@@ -1750,12 +1750,13 @@ fn encode_log_value(sequence: u64, kvs: &[(Bytes, Bytes)]) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::BTreeSet;
-
     use buffa::encoding::varint_len;
-    use exoware_sdk::limits::{put_entry_encoded_len, MAX_VALUE_LEN};
-    use exoware_sdk::log::ingest::v1::PutRequest;
+    use exoware_sdk::{
+        limits::{put_entry_encoded_len, MAX_VALUE_LEN},
+        log::ingest::v1::PutRequest,
+    };
     use exoware_server::{Ingest, Log, Sequence};
+    use std::collections::BTreeSet;
     use tempfile::tempdir;
 
     fn wire_request(key: &[u8], value: &[u8]) -> Bytes {
@@ -2514,7 +2515,7 @@ mod tests {
         // the closer would fail against the still-held lock.
         drop(Database {
             db,
-            _closer: Some(Box::new(ReopenOnDrop { path: path.clone() })),
+            _closer: Some(Box::new(ReopenOnDrop { path })),
         });
     }
 
@@ -2910,9 +2911,9 @@ mod tests {
             let first = store.put_batch(large_batch(1)).await.expect("put");
             let second = store.put_batch(large_batch(2)).await.expect("put");
             let third = store.put_batch(large_batch(3)).await.expect("put");
-            // Persist the rule without running its enforcement, leaving rows below the
-            // rule's floor in the log — the state a crash that lost the last (unsynced)
-            // trim leaves behind.
+
+            // Persist the rule without enforcing it to model a crash that lost the last
+            // unsynced trim, leaving rows below the rule's floor in the log.
             store
                 .store_retention_policy(Some(&RetentionPolicy::KeepLatest { count: 1 }))
                 .expect("store policy");

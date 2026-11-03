@@ -28,32 +28,41 @@ pub use keys::{Key, KeyMut, KeyValidationError, Prefix, PrefixError, Value, MAX_
 pub use proto::*;
 extern crate self as exoware_proto;
 
+use crate::proto::transport::{
+    BalancedHttp2Config as ProtoBalancedHttp2Config,
+    BalancedHttp2Transport as ProtoBalancedHttp2Transport,
+    ErasedClientTransport as ProtoErasedClientTransport,
+    ErasedResponseBody as ProtoErasedResponseBody,
+};
 use bytes::Bytes;
-use connectrpc::client::{ClientConfig, ServerStream as ConnectServerStream};
-use connectrpc::compression::ZstdProvider;
+use connectrpc::{
+    client::{ClientConfig, ServerStream as ConnectServerStream},
+    compression::ZstdProvider,
+};
 pub use connectrpc::{ConnectError, ErrorCode};
 use credential::{client_error_from_connect, ApiKey, Credential, UnusableEnvKey};
 use crossbeam_utils::atomic::AtomicCell;
-use exoware_proto::ingest::ServiceClient as IngestServiceClient;
-use exoware_proto::log::ingest::v1::PutRequest as ProtoPutRequest;
-use exoware_proto::prune::ServiceClient as PruneServiceClient;
-use exoware_proto::query as proto_query;
-use exoware_proto::query::ServiceClient as QueryServiceClient;
-use exoware_proto::store::prune::v1::PruneRequest as ProtoPruneRequest;
-use exoware_proto::store::query::v1::{
-    GetManyRequest as ProtoGetManyRequest, GetRequest as ProtoGetRequest,
-    RangeRequest as ProtoRangeRequest, ReduceRequest as ProtoWireReduceRequest,
-};
-use exoware_proto::RangeReduceRequest as DomainRangeReduceRequest;
 use exoware_proto::{
     connect_compression_registry as proto_connect_compression_registry,
     decode_connect_error as proto_decode_connect_error,
+    ingest::ServiceClient as IngestServiceClient,
+    log::ingest::v1::PutRequest as ProtoPutRequest,
+    prune::ServiceClient as PruneServiceClient,
+    query as proto_query,
+    query::ServiceClient as QueryServiceClient,
+    store::{
+        prune::v1::PruneRequest as ProtoPruneRequest,
+        query::v1::{
+            GetManyRequest as ProtoGetManyRequest, GetRequest as ProtoGetRequest,
+            RangeRequest as ProtoRangeRequest, ReduceRequest as ProtoWireReduceRequest,
+        },
+    },
     to_domain_reduce_response as proto_to_domain_reduce_response,
     to_proto_reduce_params as proto_to_proto_reduce_params,
     PreferZstdHttpClient as ProtoPreferZstdHttpClient,
+    RangeReduceRequest as DomainRangeReduceRequest,
 };
-use futures::future::BoxFuture;
-use futures::{stream::BoxStream, StreamExt};
+use futures::{future::BoxFuture, stream::BoxStream, StreamExt};
 use keys::is_valid_key_size;
 use kv_codec::{KvExpr, KvFieldRef, KvReducedValue};
 use limits::{
@@ -62,16 +71,7 @@ use limits::{
 };
 use rand::RngExt as _;
 use rustls_platform_verifier::ConfigVerifierExt;
-use std::collections::HashMap;
-use std::sync::Arc;
-use std::time::Duration;
-
-use crate::proto::transport::{
-    BalancedHttp2Config as ProtoBalancedHttp2Config,
-    BalancedHttp2Transport as ProtoBalancedHttp2Transport,
-    ErasedClientTransport as ProtoErasedClientTransport,
-    ErasedResponseBody as ProtoErasedResponseBody,
-};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
 const DEFAULT_RETRY_MAX_ATTEMPTS: usize = 3;
 const DEFAULT_RETRY_INITIAL_BACKOFF_MS: u64 = 100;
@@ -139,7 +139,7 @@ pub enum ConnectRequestCompression {
 }
 
 impl ConnectRequestCompression {
-    fn wire_name(self) -> Option<&'static str> {
+    const fn wire_name(self) -> Option<&'static str> {
         match self {
             Self::None => None,
             Self::Zstd { .. } => Some("zstd"),
@@ -271,7 +271,7 @@ impl StoreKeyPrefix {
 
     /// The raw prefix bytes.
     #[inline]
-    pub fn prefix(&self) -> &Bytes {
+    pub const fn prefix(&self) -> &Bytes {
         self.inner.as_bytes()
     }
 
@@ -284,7 +284,7 @@ impl StoreKeyPrefix {
 
     /// Maximum logical key bytes available under this prefix.
     #[inline]
-    pub fn max_logical_key_len(&self) -> usize {
+    pub const fn max_logical_key_len(&self) -> usize {
         self.inner.max_payload_len()
     }
 
@@ -354,24 +354,24 @@ pub struct PrefixedStoreClient {
 
 impl PrefixedStoreClient {
     /// Pair a physical client with an explicit namespace prefix.
-    pub fn new(client: StoreClient, prefix: StoreKeyPrefix) -> Self {
+    pub const fn new(client: StoreClient, prefix: StoreKeyPrefix) -> Self {
         Self { client, prefix }
     }
 
     /// Pair a physical client with the zero-width [`StoreKeyPrefix::identity`],
     /// so keys pass through untranslated.
-    pub fn empty(client: StoreClient) -> Self {
+    pub const fn empty(client: StoreClient) -> Self {
         Self::new(client, StoreKeyPrefix::identity())
     }
 
     /// The configured key prefix.
-    pub fn key_prefix(&self) -> &StoreKeyPrefix {
+    pub const fn key_prefix(&self) -> &StoreKeyPrefix {
         &self.prefix
     }
 
     /// Borrow the underlying physical transport. Operations performed directly
     /// on it are *not* namespaced; prefer the methods on this type.
-    pub fn client(&self) -> &StoreClient {
+    pub const fn client(&self) -> &StoreClient {
         &self.client
     }
 
@@ -437,27 +437,27 @@ impl PrefixedStoreClient {
     // --- service-grouped accessors -------------------------------------------
 
     /// Typed access to the `log.ingest.v1` service.
-    pub fn ingest(&self) -> Ingest<'_> {
+    pub const fn ingest(&self) -> Ingest<'_> {
         Ingest { c: self }
     }
 
     /// Typed access to the `store.query.v1` service.
-    pub fn query(&self) -> Query<'_> {
+    pub const fn query(&self) -> Query<'_> {
         Query { c: self }
     }
 
     /// Typed access to the `store.prune.v1` service.
-    pub fn prune(&self) -> Prune<'_> {
+    pub const fn prune(&self) -> Prune<'_> {
         Prune { c: self }
     }
 
     /// Typed access to the `log.retention.v1` service.
-    pub fn retention(&self) -> Retention<'_> {
+    pub const fn retention(&self) -> Retention<'_> {
         Retention { c: self }
     }
 
     /// Typed access to the `log.stream.v1` service.
-    pub fn stream(&self) -> Stream<'_> {
+    pub const fn stream(&self) -> Stream<'_> {
         Stream { c: self }
     }
 
@@ -879,16 +879,16 @@ impl StoreWriteBatch {
         Self::default()
     }
 
-    pub fn len(&self) -> usize {
+    pub const fn len(&self) -> usize {
         self.entries.len()
     }
 
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
 
     /// Exact uncompressed protobuf `PutRequest` size, including physical key prefixes.
-    pub fn encoded_len(&self) -> usize {
+    pub const fn encoded_len(&self) -> usize {
         self.encoded_len
     }
 
@@ -1092,7 +1092,7 @@ pub struct RangeStream {
 }
 
 impl RangeStream {
-    fn from_connect_stream(
+    const fn from_connect_stream(
         stream: ConnectServerStream<
             ProtoErasedResponseBody,
             exoware_proto::query::RangeFrameView<'static>,
@@ -1113,7 +1113,7 @@ impl RangeStream {
         }
     }
 
-    pub fn final_count(&self) -> Option<usize> {
+    pub const fn final_count(&self) -> Option<usize> {
         self.final_count
     }
 
@@ -1227,7 +1227,7 @@ pub struct GetManyStream {
 }
 
 impl GetManyStream {
-    fn from_connect_stream(
+    const fn from_connect_stream(
         stream: ConnectServerStream<
             ProtoErasedResponseBody,
             exoware_proto::query::GetManyFrameView<'static>,
@@ -1339,7 +1339,7 @@ impl GetManyStream {
 }
 
 impl RangeMode {
-    fn to_proto(self) -> proto_query::TraversalMode {
+    const fn to_proto(self) -> proto_query::TraversalMode {
         match self {
             Self::Forward => proto_query::TraversalMode::TRAVERSAL_MODE_FORWARD,
             Self::Reverse => proto_query::TraversalMode::TRAVERSAL_MODE_REVERSE,
@@ -1448,7 +1448,7 @@ pub struct RetryConfig {
 }
 
 impl RetryConfig {
-    pub fn standard() -> Self {
+    pub const fn standard() -> Self {
         Self {
             max_attempts: DEFAULT_RETRY_MAX_ATTEMPTS,
             initial_backoff: Duration::from_millis(DEFAULT_RETRY_INITIAL_BACKOFF_MS),
@@ -1465,12 +1465,12 @@ impl RetryConfig {
         self
     }
 
-    pub fn with_initial_backoff(mut self, initial_backoff: Duration) -> Self {
+    pub const fn with_initial_backoff(mut self, initial_backoff: Duration) -> Self {
         self.initial_backoff = initial_backoff;
         self
     }
 
-    pub fn with_max_backoff(mut self, max_backoff: Duration) -> Self {
+    pub const fn with_max_backoff(mut self, max_backoff: Duration) -> Self {
         self.max_backoff = max_backoff;
         self
     }
@@ -1646,14 +1646,17 @@ impl StoreClientBuilder {
     }
 
     /// Codec for compressing **outgoing** RPC request bodies (default [`ConnectRequestCompression::None`]).
-    pub fn connect_request_compression(mut self, compression: ConnectRequestCompression) -> Self {
+    pub const fn connect_request_compression(
+        mut self,
+        compression: ConnectRequestCompression,
+    ) -> Self {
         self.connect_request_compression = compression;
         self
     }
 
     /// Bounds unary calls and the opening of streaming calls across RPC transports.
     /// Overrides the timeout supplied by [`Self::balanced_http2_transport`].
-    pub fn request_timeout(mut self, timeout: Duration) -> Self {
+    pub const fn request_timeout(mut self, timeout: Duration) -> Self {
         self.request_timeout = Some(timeout);
         self
     }
@@ -1899,7 +1902,7 @@ impl StoreClient {
     }
 
     /// Outgoing Connect request body compression (see [`ConnectRequestCompression`]).
-    pub fn connect_request_compression(&self) -> ConnectRequestCompression {
+    pub const fn connect_request_compression(&self) -> ConnectRequestCompression {
         self.connect_request_compression
     }
 
@@ -3120,7 +3123,7 @@ fn put_retry_delay_for_error(
     ))
 }
 
-fn is_retryable_error(err: &ConnectError) -> bool {
+const fn is_retryable_error(err: &ConnectError) -> bool {
     matches!(
         err.code,
         ErrorCode::Aborted
@@ -3171,8 +3174,11 @@ mod tests {
     use crate::kv_codec::{KvFieldKind, KvPredicate, KvPredicateCheck, KvPredicateConstraint};
     use buffa::Message as _;
     use buffa_types::google::protobuf::Duration as ProtoDuration;
-    use connectrpc::compression::{CompressionProvider, GzipProvider};
-    use connectrpc::error::ErrorDetail;
+    use commonware_macros::boxed;
+    use connectrpc::{
+        compression::{CompressionProvider, GzipProvider},
+        error::ErrorDetail,
+    };
     use exoware_proto::query::TraversalMode as ProtoTraversalMode;
     use http::header::{ACCEPT_ENCODING, AUTHORIZATION, CONTENT_ENCODING};
     use http_body_util::BodyExt;
@@ -3670,17 +3676,17 @@ mod tests {
                 });
                 let payload = match path {
                     "/store.query.v1.Service/Get" => proto_query::GetResponse {
-                        detail: detail.clone().into(),
+                        detail: detail.into(),
                         ..Default::default()
                     }
                     .encode_to_bytes(),
                     "/store.query.v1.Service/GetMany" => proto_query::GetManyFrame {
-                        detail: detail.clone().into(),
+                        detail: detail.into(),
                         ..Default::default()
                     }
                     .encode_to_bytes(),
                     "/store.query.v1.Service/Range" => proto_query::RangeFrame {
-                        detail: detail.clone().into(),
+                        detail: detail.into(),
                         ..Default::default()
                     }
                     .encode_to_bytes(),
@@ -3709,6 +3715,7 @@ mod tests {
         }
     }
 
+    #[boxed]
     async fn assert_streaming_deadline<T>(
         future: impl std::future::Future<Output = Result<T, ClientError>>,
     ) {
@@ -3732,11 +3739,11 @@ mod tests {
 
     #[test]
     fn client_creation() {
-        let client = StoreClient::new("http://localhost:10000");
-        assert_eq!(client.health_url, "http://localhost:10000");
-        assert_eq!(client.ingest_uri.to_string(), "http://localhost:10000/");
-        assert_eq!(client.query_uri.to_string(), "http://localhost:10000/");
-        assert_eq!(client.stream_uri.to_string(), "http://localhost:10000/");
+        let client = StoreClient::new("http://localhost:8080");
+        assert_eq!(client.health_url, "http://localhost:8080");
+        assert_eq!(client.ingest_uri.to_string(), "http://localhost:8080/");
+        assert_eq!(client.query_uri.to_string(), "http://localhost:8080/");
+        assert_eq!(client.stream_uri.to_string(), "http://localhost:8080/");
     }
 
     #[test]
@@ -4713,13 +4720,13 @@ mod tests {
 
     #[test]
     fn client_trims_trailing_slash() {
-        let client = StoreClient::new("http://localhost:10000/");
-        assert_eq!(client.health_url, "http://localhost:10000");
+        let client = StoreClient::new("http://localhost:8080/");
+        assert_eq!(client.health_url, "http://localhost:8080");
     }
 
     #[test]
     fn create_session_starts_unseeded() {
-        let client = PrefixedStoreClient::empty(StoreClient::new("http://localhost:10000/"));
+        let client = PrefixedStoreClient::empty(StoreClient::new("http://localhost:8080/"));
         let session = client.create_session();
         assert_eq!(session.min_sequence_number(), None);
         assert_eq!(session.evaluated_sequence(), None);
@@ -4727,10 +4734,10 @@ mod tests {
 
     #[test]
     fn deriving_zero_strengthens_absence_without_lowering_or_mutating_the_parent() {
-        let client = PrefixedStoreClient::empty(StoreClient::new("http://localhost:10000/"));
+        let client = PrefixedStoreClient::empty(StoreClient::new("http://localhost:8080/"));
         for parent in [
             ReadSession::monotonic(client.clone(), None),
-            ReadSession::fixed(client.clone(), None),
+            ReadSession::fixed(client, None),
         ] {
             let zero = parent.with_min_sequence_number(0);
             let stronger = zero.with_min_sequence_number(7);
@@ -4878,7 +4885,7 @@ mod tests {
 
     #[test]
     fn create_session_with_sequence_preserves_the_full_u64_floor_domain() {
-        let client = PrefixedStoreClient::empty(StoreClient::new("http://localhost:10000/"));
+        let client = PrefixedStoreClient::empty(StoreClient::new("http://localhost:8080/"));
         for sequence in [0, 27, u64::MAX] {
             let session = client.create_session_with_sequence(sequence);
             assert_eq!(session.min_sequence_number(), Some(sequence));
@@ -5038,7 +5045,7 @@ mod tests {
         assert_eq!(merged.prefix.as_ref(), &[0x05, 0x06, 0x07]);
 
         // Reconstruct the codec EXACTLY as apply_key_prune_policy does.
-        let codec = Prefix::new(merged.prefix.clone()).unwrap();
+        let codec = Prefix::new(merged.prefix).unwrap();
 
         // Round-trip a real key through the reconstructed codec.
         let payload = [0xAA, 0xBB, 0xCC];
@@ -5071,7 +5078,7 @@ mod tests {
         // payloads let the server apply the caller's real regex to the
         // post-prefix payload, so it must pass through unchanged.
         let client = StoreClient::builder()
-            .url("http://localhost:10000")
+            .url("http://localhost:8080")
             .build()
             .unwrap()
             .prefixed(StoreKeyPrefix::new(vec![0x05]).unwrap());
@@ -5093,7 +5100,7 @@ mod tests {
     #[test]
     fn prefixed_reduce_request_shifts_nested_cast_fields() {
         let client = StoreClient::builder()
-            .url("http://localhost:10000")
+            .url("http://localhost:8080")
             .build()
             .unwrap()
             .prefixed(StoreKeyPrefix::new(vec![1, 2, 3]).unwrap());
@@ -5136,7 +5143,7 @@ mod tests {
     #[test]
     fn prefixed_reduce_request_shifts_key_field_offsets() {
         let client = StoreClient::builder()
-            .url("http://localhost:10000")
+            .url("http://localhost:8080")
             .build()
             .unwrap()
             .prefixed(StoreKeyPrefix::new(vec![0x01, 0x02, 0x03]).unwrap());
@@ -5245,7 +5252,7 @@ mod tests {
 
     #[test]
     fn store_write_batch_uses_each_clients_prefix() {
-        let base = StoreClient::new("http://localhost:10000");
+        let base = StoreClient::new("http://localhost:8080");
         let a = base.prefixed(StoreKeyPrefix::new(vec![1]).unwrap());
         let b = base.prefixed(StoreKeyPrefix::new(vec![2]).unwrap());
         let key_a = Bytes::from_static(b"a");
@@ -5285,7 +5292,7 @@ mod tests {
     #[test]
     fn batch_encoded_len_matches_protobuf_at_varint_boundaries() {
         for prefix in [vec![], vec![1, 2, 3]] {
-            let client = StoreClient::new("http://localhost:10000")
+            let client = StoreClient::new("http://localhost:8080")
                 .prefixed(StoreKeyPrefix::new(prefix).unwrap());
             for key_len in [0, 1, 123, 124, 127, 128, 251] {
                 let key = Key::from(vec![7; key_len]);
@@ -5303,7 +5310,7 @@ mod tests {
 
     #[test]
     fn batch_encoded_len_survives_mutations() {
-        let client = StoreClient::new("http://localhost:10000")
+        let client = StoreClient::new("http://localhost:8080")
             .prefixed(StoreKeyPrefix::new(vec![1]).unwrap());
         let mut batch = StoreWriteBatch::default();
         assert_eq!(batch.encoded_len(), 0);
@@ -5327,7 +5334,7 @@ mod tests {
 
     #[test]
     fn batch_split_preserves_bounds_order_prefixes_and_shared_storage() {
-        let base = StoreClient::new("http://localhost:10000");
+        let base = StoreClient::new("http://localhost:8080");
         let clients = [
             base.prefixed(StoreKeyPrefix::new(vec![1]).unwrap()),
             base.prefixed(StoreKeyPrefix::new(vec![2]).unwrap()),
@@ -5385,7 +5392,7 @@ mod tests {
             SplitError::ZeroRows
         );
 
-        let client = PrefixedStoreClient::empty(StoreClient::new("http://localhost:10000"));
+        let client = PrefixedStoreClient::empty(StoreClient::new("http://localhost:8080"));
         let mut batch = StoreWriteBatch::new();
         batch.push(&client, &Key::new(), b"").unwrap();
         batch
@@ -5489,7 +5496,7 @@ mod tests {
     #[test]
     fn client_response_decode_budgets_match_shared_limits() {
         let config = store_connect_client_config(
-            "http://localhost:10000".parse().unwrap(),
+            "http://localhost:8080".parse().unwrap(),
             ConnectRequestCompression::None,
             None,
         );
@@ -5505,7 +5512,7 @@ mod tests {
 
     #[test]
     fn pushed_rows_round_trip_only_through_their_own_client() {
-        let base = StoreClient::new("http://localhost:10000");
+        let base = StoreClient::new("http://localhost:8080");
         let a = base.prefixed(StoreKeyPrefix::new(vec![1]).unwrap());
         let b = base.prefixed(StoreKeyPrefix::new(vec![2]).unwrap());
         let key = Bytes::from_static(b"shared-logical-key");
@@ -5530,7 +5537,7 @@ mod tests {
 
     #[test]
     fn identity_prefix_stages_keys_verbatim() {
-        let base = StoreClient::new("http://localhost:10000");
+        let base = StoreClient::new("http://localhost:8080");
         let plain = PrefixedStoreClient::empty(base);
         let key = Bytes::from_static(b"raw-key");
 
@@ -5542,7 +5549,7 @@ mod tests {
 
     #[test]
     fn push_rejects_keys_exceeding_prefixed_capacity() {
-        let base = StoreClient::new("http://localhost:10000");
+        let base = StoreClient::new("http://localhost:8080");
         let a = base.prefixed(StoreKeyPrefix::new(vec![1]).unwrap());
         let max = a.key_prefix().max_logical_key_len();
 

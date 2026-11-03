@@ -3,12 +3,18 @@ name: Validation Simulator
 on:
   workflow_dispatch:
   pull_request:
+  # Runs on main so the build cache gets saved (caches are only saved from main), which PR
+  # runs then restore. This also leaves a benchmark report for every main commit.
+  push:
+    branches: ["main"]
 
 # Cancel a PR's in-flight run when a new commit is pushed, so the visible result always
-# corresponds to the latest commit rather than a slower, superseded run.
+# corresponds to the latest commit rather than a slower, superseded run. Every other run gets
+# its own group: a shared group only keeps one pending run and cancels the one before it, so
+# rapid merges to main would drop runs (and their benchmark reports).
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
@@ -25,7 +31,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Clear disk space
+      - name: Check disk space and configure swap
         uses: ./.github/actions/disk
 
       - name: Run setup
@@ -53,7 +59,7 @@ jobs:
           simulator_dir="$RUNNER_TEMP/exoware-simulator"
           simulator_log="$RUNNER_TEMP/simulator.log"
           mkdir -p "$simulator_dir"
-          "$SIMULATOR" server run --directory "$simulator_dir" --port 10000 >"$simulator_log" 2>&1 &
+          "$SIMULATOR" server run --directory "$simulator_dir" --port 8080 >"$simulator_log" 2>&1 &
           simulator_pid="$!"
           echo "pid=$simulator_pid" >> "$GITHUB_OUTPUT"
           echo "log=$simulator_log" >> "$GITHUB_OUTPUT"
@@ -63,18 +69,18 @@ jobs:
         run: |
           set -euo pipefail
           for _ in {1..60}; do
-            if curl --fail --silent --show-error http://127.0.0.1:10000/health >/dev/null; then
+            if curl --fail --silent --show-error http://127.0.0.1:8080/health >/dev/null; then
               exit 0
             fi
             sleep 1
           done
-          echo "simulator did not become healthy at http://127.0.0.1:10000/health" >&2
+          echo "simulator did not become healthy at http://127.0.0.1:8080/health" >&2
           exit 1
 
       - name: Run validation
         uses: ./.github/actions/run-validation
         with:
-          endpoint: http://127.0.0.1:10000
+          endpoint: http://127.0.0.1:8080
           validation-bin: ${{ steps.bins.outputs.validation }}
           # Uses the default `balanced` scenario, which now mixes reads, writes, and scans.
           # Stamp the PR head commit (not the ephemeral merge SHA) into the report, summary, and

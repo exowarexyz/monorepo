@@ -126,26 +126,26 @@ describe('withoutHtmlBody', () => {
 
 describe('Client credential', () => {
     test('records whether a credential will be sent', () => {
-        expect(new Client('http://localhost:10000', 'token-abc').credential).toBe('sent');
-        expect(new Client('http://localhost:10000').credential).toBe('absent');
+        expect(new Client('http://localhost:8080', 'token-abc').credential).toBe('sent');
+        expect(new Client('http://localhost:8080').credential).toBe('absent');
     });
 
     test('a token from the environment counts as one that will be sent', () => {
         givenEnvironmentKey('from-env');
 
-        expect(new Client('http://localhost:10000').credential).toBe('sent');
+        expect(new Client('http://localhost:8080').credential).toBe('sent');
     });
 
     test('resolves an environment token once for both transports', () => {
         givenEnvironmentKey('from-env');
         jest.mocked(environmentApiKey).mockClear();
 
-        expect(new Client('http://localhost:10000').credential).toBe('sent');
+        expect(new Client('http://localhost:8080').credential).toBe('sent');
         expect(environmentApiKey).toHaveBeenCalledTimes(1);
     });
 
     test('an unusable token fails construction', () => {
-        expect(() => new Client('http://localhost:10000', UNUSABLE)).toThrow(InvalidApiKeyError);
+        expect(() => new Client('http://localhost:8080', UNUSABLE)).toThrow(InvalidApiKeyError);
     });
 });
 
@@ -184,7 +184,7 @@ describe('the Authorization header actually sent', () => {
 
     test("the client's token is sent when the caller supplies none", async () => {
         const sent = captureAuthorization();
-        await get(new Client('http://localhost:10000', 'client-token'));
+        await get(new Client('http://localhost:8080', 'client-token'));
 
         expect(sent()).toBe('Bearer client-token');
     });
@@ -192,7 +192,7 @@ describe('the Authorization header actually sent', () => {
     test('a caller-supplied credential is left alone', async () => {
         // What lets one client reach a deployment expecting a different credential on one call.
         const sent = captureAuthorization();
-        await get(new Client('http://localhost:10000', 'client-token'), {
+        await get(new Client('http://localhost:8080', 'client-token'), {
             Authorization: 'Bearer caller-token',
         });
 
@@ -202,7 +202,7 @@ describe('the Authorization header actually sent', () => {
     test('a token from the environment is sent when the caller supplies none', async () => {
         givenEnvironmentKey('from-env');
         const sent = captureAuthorization();
-        await get(new Client('http://localhost:10000'));
+        await get(new Client('http://localhost:8080'));
 
         expect(sent()).toBe('Bearer from-env');
     });
@@ -212,7 +212,7 @@ describe('the Authorization header actually sent', () => {
         // must not replace the credential they attached to this call.
         givenEnvironmentKey('from-env');
         const sent = captureAuthorization();
-        await get(new Client('http://localhost:10000'), {
+        await get(new Client('http://localhost:8080'), {
             Authorization: 'Bearer caller-token',
         });
 
@@ -221,7 +221,7 @@ describe('the Authorization header actually sent', () => {
 
     test('no credential anywhere sends no header', async () => {
         const sent = captureAuthorization();
-        await get(new Client('http://localhost:10000'));
+        await get(new Client('http://localhost:8080'));
 
         expect(sent()).toBeNull();
     });
@@ -245,7 +245,7 @@ describe('a rejected request', () => {
     }
 
     test('drops the proxy page and explains a missing credential', async () => {
-        const err = await rejectionFrom(new Client('http://localhost:10000'), PROXY_REJECTION);
+        const err = await rejectionFrom(new Client('http://localhost:8080'), PROXY_REJECTION);
 
         expect(err).toBeInstanceOf(HttpError);
         expect(err.connectCode).toBe(Code.Unauthenticated);
@@ -256,7 +256,7 @@ describe('a rejected request', () => {
 
     test('tells a client that sent one that it was refused', async () => {
         const err = await rejectionFrom(
-            new Client('http://localhost:10000', 'token-abc'),
+            new Client('http://localhost:8080', 'token-abc'),
             PROXY_REJECTION,
         );
 
@@ -265,7 +265,7 @@ describe('a rejected request', () => {
     });
 
     test('other codes carry no credential remedy', async () => {
-        const client = new Client('http://localhost:10000');
+        const client = new Client('http://localhost:8080');
         client.query.get = () => {
             throw new ConnectError('no such key', Code.NotFound);
         };

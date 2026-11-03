@@ -1,5 +1,4 @@
-use datafusion::arrow::datatypes::DataType;
-use datafusion::arrow::util::pretty::print_batches;
+use datafusion::arrow::{datatypes::DataType, util::pretty::print_batches};
 use exoware_sdk::{StoreClient, StoreKeyPrefix};
 use exoware_sql::{CellValue, KvSchema, SqlContext, TableColumnConfig};
 
@@ -12,7 +11,7 @@ const DOC_ID_HEX: &str = "d0c1aabbccddeeff0011223344556677";
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let base_url =
-        std::env::var("EXOWARE_URL").unwrap_or_else(|_| "http://localhost:10000".to_string());
+        std::env::var("EXOWARE_URL").unwrap_or_else(|_| "http://localhost:8080".to_string());
     let client = StoreClient::new(&base_url);
     let ctx = SqlContext::new(client.prefixed(StoreKeyPrefix::identity()));
 
@@ -22,7 +21,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     ctx.register_schema(schema)?;
 
     // -- Demonstrate programmatic inserts with BatchWriter --
-    demo_batch_writer_insert().await;
+    demo_batch_writer_insert();
 
     // -- Demonstrate SQL query patterns --
     demo_sql_queries(&ctx).await?;
@@ -48,10 +47,10 @@ fn build_schema(client: StoreClient) -> Result<KvSchema, String> {
     )
 }
 
-async fn demo_batch_writer_insert() {
+fn demo_batch_writer_insert() {
     println!("\n== BatchWriter: multiple document versions ==");
 
-    let client = StoreClient::new("http://localhost:10000");
+    let client = StoreClient::new("http://localhost:8080");
     let schema = build_schema(client).unwrap();
 
     let mut batch = schema.batch_writer();
@@ -113,7 +112,7 @@ async fn demo_batch_writer_insert() {
         .insert(
             "documents",
             vec![
-                CellValue::FixedBinary(doc_id.clone()),
+                CellValue::FixedBinary(doc_id),
                 CellValue::UInt64(3),
                 CellValue::Utf8("Approved".to_string()),
                 CellValue::Utf8("Approved content.".to_string()),

@@ -1,11 +1,9 @@
+use crate::{error::QmdbError, MAX_OPERATION_SIZE};
 use commonware_codec::{Buf, Copying, DecodeExt};
 use commonware_cryptography::Digest;
 use commonware_storage::merkle::{Family, Location, Position};
 use commonware_utils::bitmap::Prunable;
 use exoware_sdk::keys::{Key, KeyMut, Prefix};
-
-use crate::error::QmdbError;
-use crate::MAX_OPERATION_SIZE;
 
 // A family byte encodes *row semantics* (what kind of row this is), not which
 // instance or backend it belongs to. The same semantic row therefore uses the
@@ -74,7 +72,7 @@ impl<D: Digest> commonware_codec::Read for CurrentBoundaryMetadata<D> {
 
     fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
         let (root, pruned_chunks) = <(D, u64) as commonware_codec::Read>::read_cfg(buf, &((), ()))?;
-        Ok(CurrentBoundaryMetadata {
+        Ok(Self {
             root,
             pruned_chunks,
         })
@@ -105,7 +103,7 @@ pub(crate) fn op_count_for_watermark<F: Family>(
         .ok_or_else(|| QmdbError::CorruptData("watermark overflow".to_string()))
 }
 
-pub(crate) fn ensure_encoded_value_size(len: usize) -> Result<(), QmdbError> {
+pub(crate) const fn ensure_encoded_value_size(len: usize) -> Result<(), QmdbError> {
     if len <= MAX_OPERATION_SIZE {
         Ok(())
     } else {

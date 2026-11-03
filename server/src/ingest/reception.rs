@@ -1,11 +1,9 @@
-use std::mem::size_of;
-
+use super::{
+    input::FRAME_WORK_BUDGET, zstd::WINDOW_LOG_MAX, DecodeBuffers, EntryRanges, PutLimits,
+};
 use bytes::Bytes;
 use connectrpc::ConnectError;
-
-use super::input::FRAME_WORK_BUDGET;
-use super::zstd::WINDOW_LOG_MAX;
-use super::{DecodeBuffers, EntryRanges, PutLimits};
+use std::mem::size_of;
 
 // Allow room for request controls and allocation owners beyond their payload charges.
 const PROTOCOL_WORKSPACE_BYTES: usize = 1024 * 1024;
@@ -51,7 +49,9 @@ fn maximum_decoder_bytes() -> Result<usize, ConnectError> {
     let window = 1usize.checked_shl(WINDOW_LOG_MAX).ok_or_else(overflow)?;
 
     // Accepted frames can request the maximum window even with a tiny size pledge.
+    // SAFETY: `ZSTD_estimateDStreamSize` takes and returns plain integers and reads no memory.
     let estimate = unsafe { zstd::zstd_safe::zstd_sys::ZSTD_estimateDStreamSize(window) };
+    // SAFETY: `ZSTD_isError` only inspects the integer it is given.
     if unsafe { zstd::zstd_safe::zstd_sys::ZSTD_isError(estimate) } != 0 {
         return Err(ConnectError::internal(format!(
             "cannot estimate Put zstd workspace. {}",
@@ -76,15 +76,13 @@ fn overflow() -> ConnectError {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
-
+    use super::*;
+    use crate::ingest::{box_body, BudgetConfig, IngestBudget, PutEncoding, PutInput, PutMetadata};
     use buffa::Message as _;
     use exoware_sdk::{common::Entry, ingest::PutRequest};
     use http_body_util::Full;
+    use std::time::Duration;
     use tokio::time::Instant;
-
-    use super::*;
-    use crate::ingest::{box_body, BudgetConfig, IngestBudget, PutEncoding, PutInput, PutMetadata};
 
     #[tokio::test]
     async fn allowance_admits_growth_and_overlapping_chunks() {

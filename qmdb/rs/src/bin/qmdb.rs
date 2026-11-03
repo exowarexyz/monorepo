@@ -1,33 +1,38 @@
 #![allow(clippy::type_complexity)]
 
-use std::net::{IpAddr, SocketAddr};
-use std::num::NonZeroU64;
-use std::path::PathBuf;
-
-use axum::{routing::get, Router};
+use axum::{routing::get, serve::ListenerExt, Router};
 use clap::{Parser, Subcommand};
 use commonware_codec::Encode;
 use commonware_cryptography::Sha256;
 use commonware_parallel::Sequential;
-use commonware_runtime::tokio as cw_tokio;
-use commonware_runtime::Runner as _;
-use commonware_storage::qmdb::any::ordered::variable::Operation as VariableOperation;
-use commonware_storage::qmdb::any::value::VariableEncoding;
-use commonware_storage::qmdb::current::{
-    ordered::variable::Db as CurrentOrderedVariableDb, VariableConfig,
+use commonware_runtime::{
+    buffer::paged::CacheRef, tokio as cw_tokio, Runner as _, Supervisor as _,
 };
-use commonware_storage::translator::TwoCap;
 use commonware_storage::{
     journal::contiguous::variable::Config as JournalConfig,
     merkle::{full::Config as MerkleConfig, mmb, Location},
+    qmdb::{
+        any::{ordered::variable::Operation as VariableOperation, value::VariableEncoding},
+        current::{ordered::variable::Db as CurrentOrderedVariableDb, VariableConfig},
+    },
+    translator::TwoCap,
 };
 use commonware_utils::{NZUsize, NZU16, NZU64};
 use exoware_qmdb::{
-    adapter::upload::prepare_authenticated_range, adapter::upload::recover_boundary_state,
-    adapter::upload::stage_authenticated_range, adapter::upload::stage_watermark,
-    adapter::upload::AuthenticatedOperationRange, CurrentBoundaryState, MAX_OPERATION_SIZE,
+    adapter::upload::{
+        prepare_authenticated_range, recover_boundary_state, stage_authenticated_range,
+        stage_watermark, AuthenticatedOperationRange,
+    },
+    CurrentBoundaryState, MAX_OPERATION_SIZE,
 };
-use exoware_sdk::{PrefixedStoreClient, StoreClient, StoreKeyPrefix, StoreWriteBatch};
+use exoware_sdk::{
+    transport::set_tcp_nodelay, PrefixedStoreClient, StoreClient, StoreKeyPrefix, StoreWriteBatch,
+};
+use std::{
+    net::{IpAddr, SocketAddr},
+    num::NonZeroU64,
+    path::PathBuf,
+};
 use tower_http::cors::CorsLayer;
 use tracing::info;
 
@@ -61,6 +66,8 @@ enum Command {
     Run {
         #[arg(long)]
         store_url: String,
+        #[arg(long, default_value = "")]
+        store_prefix: String,
         #[arg(long, default_value = "0.0.0.0")]
         host: IpAddr,
         #[arg(long, default_value_t = 8081)]
@@ -69,6 +76,8 @@ enum Command {
     Seed {
         #[arg(long)]
         store_url: String,
+        #[arg(long, default_value = "")]
+        store_prefix: String,
         #[arg(long, default_value_t = 2)]
         interval_secs: u64,
         /// Persistent directory for the local ordered-QMDB state. Reusing the
@@ -205,10 +214,11 @@ async fn boundary_from_source_db(
 
 async fn run(
     store_url: &str,
+    store_prefix: String,
     host: IpAddr,
     port: u16,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let store = StoreClient::new(store_url).prefixed(StoreKeyPrefix::identity());
+    let store = StoreClient::new(store_url).prefixed(StoreKeyPrefix::new(store_prefix)?);
     let app = Router::new()
         .route("/health", get(health))
         .fallback_service(exoware_qmdb::service::server::ordered_stack::<
@@ -223,7 +233,9 @@ async fn run(
 
     let addr = SocketAddr::from((host, port));
     info!(%addr, store_url, "ordered qmdb server listening");
-    let listener = tokio::net::TcpListener::bind(addr).await?;
+    let listener = tokio::net::TcpListener::bind(addr)
+        .await?
+        .tap_io(set_tcp_nodelay);
     axum::serve(listener, app).await?;
     Ok(())
 }
@@ -235,6 +247,7 @@ fn default_seed_directory() -> PathBuf {
 
 async fn seed(
     store_url: &str,
+    store_prefix: String,
     interval_secs: u64,
     directory: Option<PathBuf>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -246,14 +259,12 @@ async fn seed(
         "starting seed"
     );
 
-    let store_client = StoreClient::new(store_url).prefixed(StoreKeyPrefix::identity());
+    let store_client = StoreClient::new(store_url).prefixed(StoreKeyPrefix::new(store_prefix)?);
 
     tokio::task::spawn_blocking(move || {
         let runner_cfg = cw_tokio::Config::new().with_storage_directory(directory);
         cw_tokio::Runner::new(runner_cfg).start(|context| async move {
-            use commonware_runtime::{buffer::paged::CacheRef, Supervisor as _};
-
-            let page_cache = CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(8));
+            let page_cache = CacheRef::new(NZU16!(64), NZUsize!(8));
             let cfg = VariableConfig {
                 merkle_config: MerkleConfig {
                     journal_partition: "current-ordered-variable-mmb-seed-merkle-journal".into(),
@@ -318,10 +329,13 @@ async fn seed(
             let mut ticker = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
             ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
+            // Keep the signal listener registered while each batch is written and uploaded.
+            let shutdown = tokio::signal::ctrl_c();
+            tokio::pin!(shutdown);
             loop {
                 tokio::select! {
                     biased;
-                    _ = tokio::signal::ctrl_c() => {
+                    _ = &mut shutdown => {
                         info!("ctrl-c received, shutting down");
                         break;
                     }
@@ -354,7 +368,7 @@ async fn seed(
                         .await
                         .expect("merkleize")
                 };
-                (source_db, _) = source_db.apply_batch(finalized).await.expect("apply batch");
+                source_db = source_db.apply_batch(finalized).await.expect("apply batch");
                 source_db = source_db.sync().await.expect("sync local ordered db");
 
                 let latest = source_db.bounds().end - 1;
@@ -398,14 +412,16 @@ async fn main() -> std::process::ExitCode {
     let result = match cli.command {
         Command::Run {
             store_url,
+            store_prefix,
             host,
             port,
-        } => run(&store_url, host, port).await,
+        } => run(&store_url, store_prefix, host, port).await,
         Command::Seed {
             store_url,
+            store_prefix,
             interval_secs,
             directory,
-        } => seed(&store_url, interval_secs, directory).await,
+        } => seed(&store_url, store_prefix, interval_secs, directory).await,
     };
 
     match result {
@@ -421,6 +437,7 @@ async fn main() -> std::process::ExitCode {
 #[allow(refining_impl_trait)]
 mod tests {
     use super::*;
+    use axum::serve::Listener;
     use bytes::Bytes;
     use connectrpc::{ConnectError, ConnectRpcService, Limits, RequestContext, ServiceRequest};
     use exoware_sdk::{
@@ -513,7 +530,10 @@ mod tests {
                         .with_max_request_body_size(LIMIT)
                         .with_max_message_size(LIMIT),
                 );
-            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .unwrap()
+                .tap_io(set_tcp_nodelay);
             let url = format!("http://{}", listener.local_addr().unwrap());
             let server = tokio::spawn(async move {
                 axum::serve(listener, Router::new().fallback_service(service))

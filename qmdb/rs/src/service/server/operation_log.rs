@@ -1,32 +1,35 @@
 //! `qmdb.v1.OperationLogService`: historical operation ranges, multi-location
 //! operation proofs, and proof-carrying subscriptions.
 
-use std::collections::{BTreeMap, VecDeque};
-use std::future::Future;
-use std::pin::Pin;
-use std::sync::Arc;
-use std::task::{Context as TaskContext, Poll};
-
+use super::{encode, qmdb_error_to_connect};
+use crate::{
+    adapter::subscription::{self as sub, RowClassifier},
+    proof::{MultiProofOperations, OperationRangeCheckpoint, RawBatchMultiProof},
+    service::{
+        proto::qmdb::v1::{
+            GetOperationRangeRequest, GetOperationRangeResponse, GetOperationsRequest,
+            GetOperationsResponse, OperationLogService, SubscribeRequest, SubscribeResponse,
+        },
+        validate_operations_request,
+    },
+    OperationKv, PublishedWatermark, QmdbError,
+};
 use bytes::Bytes;
 use commonware_storage::merkle::{Family, Graftable, Location};
 use connectrpc::{ConnectError, ErrorCode, PreEncoded, RequestContext as Context, ServiceRequest};
-use exoware_sdk::common::kv::v1::filter::KindView as ProtoFilterKindView;
-use exoware_sdk::stream_filter::{CompiledFilters, Filter};
-use exoware_sdk::PrefixedStoreClient;
-use futures::future::BoxFuture;
-use futures::{FutureExt, Stream};
-
-// The subscribe stream still classifies raw Store rows itself.
-use crate::adapter::subscription::{self as sub, RowClassifier};
-use crate::proof::{MultiProofOperations, OperationRangeCheckpoint, RawBatchMultiProof};
-use crate::request::OperationLocations;
-use crate::service::proto::qmdb::v1::{
-    GetOperationRangeRequest, GetOperationRangeResponse, GetOperationsRequest,
-    GetOperationsResponse, OperationLogService, SubscribeRequest, SubscribeResponse,
+use exoware_sdk::{
+    common::kv::v1::filter::KindView as ProtoFilterKindView,
+    stream_filter::{CompiledFilters, Filter},
+    PrefixedStoreClient,
 };
-use crate::{OperationKv, PublishedWatermark, QmdbError};
-
-use super::{encode, qmdb_error_to_connect};
+use futures::{future::BoxFuture, FutureExt, Stream};
+use std::{
+    collections::{BTreeMap, VecDeque},
+    future::Future,
+    pin::Pin,
+    sync::Arc,
+    task::{Context as TaskContext, Poll},
+};
 
 /// Read capabilities needed by [`OperationLogServer`].
 pub(crate) trait OperationLogReader: Send + Sync + 'static {
@@ -79,7 +82,7 @@ impl<R: OperationLogReader> Clone for OperationLogServer<R> {
 }
 
 impl<R: OperationLogReader> OperationLogServer<R> {
-    pub(crate) fn new(reader: Arc<R>, raw_store: PrefixedStoreClient) -> Self {
+    pub(crate) const fn new(reader: Arc<R>, raw_store: PrefixedStoreClient) -> Self {
         Self { reader, raw_store }
     }
 }
@@ -101,7 +104,7 @@ struct PendingBatches<F: Family> {
 }
 
 impl<F: Family> PendingBatches<F> {
-    fn new() -> Self {
+    const fn new() -> Self {
         Self {
             batches: VecDeque::new(),
             minimums: VecDeque::new(),
@@ -401,7 +404,7 @@ impl<R: OperationLogReader> Stream for BatchSubscribeStream<R> {
     }
 }
 
-fn decode_since(since: Option<u64>) -> Option<u64> {
+const fn decode_since(since: Option<u64>) -> Option<u64> {
     match since {
         Some(0) | None => None,
         Some(value) => Some(value),
@@ -442,8 +445,7 @@ impl<R: OperationLogReader> OperationLogService for OperationLogServer<R> {
         let reader = self.reader.clone();
         async move {
             let requested = request.locations.iter().copied().collect::<Vec<u64>>();
-            OperationLocations::new(request.tip, &requested)
-                .map_err(|err| qmdb_error_to_connect(err.into()))?;
+            validate_operations_request(request.tip, &requested).map_err(qmdb_error_to_connect)?;
             let watermark = reader
                 .resolve_watermark(Location::new(request.tip), request.min_sequence_number)
                 .await
