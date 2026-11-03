@@ -202,10 +202,13 @@ function makeRetryInterceptor(config: RetryConfig): Interceptor {
 }
 
 export type ClientOptions = {
+    /** API key. In Node, omission uses `EXOWARE_API_KEY`; an empty string disables that fallback. */
     token?: string;
+    /** Retry attempt and backoff limits for retryable RPC failures. */
     retry?: RetryConfig;
     /** Defaults to true (binary protobuf). Set false to use Connect JSON for services other than Put. */
     useBinaryFormat?: boolean;
+    /** Default limits on Put entry counts, encoded request size, and value size. */
     putLimits?: PutLimits;
 };
 
