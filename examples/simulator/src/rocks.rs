@@ -3029,8 +3029,22 @@ mod tests {
         ]
     }
 
+    /// Live SST files of the log column family as (name, level), sorted by name.
+    fn log_files(store: &RocksStore) -> Vec<(String, i32)> {
+        let mut files: Vec<_> = store
+            .db
+            .live_files()
+            .expect("live files")
+            .into_iter()
+            .filter(|file| file.column_family_name == LOG_CF)
+            .map(|file| (file.name, file.level))
+            .collect();
+        files.sort();
+        files
+    }
+
     #[tokio::test]
-    async fn log_prune_stops_short_of_the_oldest_retained_file() {
+    async fn log_prune_keeps_the_oldest_retained_file_out_of_compaction() {
         let dir = tempdir().expect("tempdir");
         let store = RocksStore::open(dir.path(), None).expect("open db");
         for tag in 1..=3u8 {
@@ -3039,31 +3053,54 @@ mod tests {
 
         // Cutoff 3 evicts sequence 2's whole file and must leave sequence 3's head sentinel in
         // place. That sentinel is the retained file's smallest key, so a tombstone reaching it
-        // overlaps the file and drags its payload into the compaction that consumes the
-        // tombstone.
+        // overlaps the file.
         store
             .set_retention(Some(RetentionPolicy::KeepLatest { count: 1 }))
             .expect("set retention");
         assert_eq!(log_file_keys_present(&store, 2), [false; 3]);
         assert_eq!(log_file_keys_present(&store, 3), [true; 3]);
 
-        // A drop-everything rule trims up to the published frontier plus one, so its tombstone
-        // ends at the head sentinel of the sequence that is not ingested yet. The next group's
-        // file must not overlap it, because ingesting a file that overlaps the memtable forces
-        // a flush first and places the file in L0 for a compaction to rewrite.
+        // The compaction that consumes the tombstone drops the evicted files. The retained file
+        // must not be one of its inputs, since an input is read and rewritten in full.
+        let before = log_files(&store);
+        store.db.flush_cf(store.log_cf()).expect("flush log");
+        store
+            .db
+            .compact_range_cf(store.log_cf(), None::<&[u8]>, None::<&[u8]>);
+        let after = log_files(&store);
+        assert_eq!(after.len(), 1, "only the retained file remains");
+        assert!(
+            before.contains(&after[0]),
+            "the retained log file must survive compaction unchanged"
+        );
+    }
+
+    #[tokio::test]
+    async fn drop_all_retention_ingests_log_files_straight_to_the_bottom_level() {
+        let dir = tempdir().expect("tempdir");
+        let store = RocksStore::open(dir.path(), None).expect("open db");
         store
             .set_retention(Some(RetentionPolicy::DropAll))
             .expect("set retention");
-        store.put_batch(large_batch(4)).await.expect("put");
-        let l0_files = store
-            .db
-            .property_int_value_cf(store.log_cf(), "rocksdb.num-files-at-level0")
-            .expect("read property")
-            .expect("level property exists");
-        assert_eq!(
-            l0_files, 0,
-            "log ingestion under a drop-all rule must not flush"
-        );
+
+        // Each trim ends at the head sentinel of the sequence that is not ingested yet, so the
+        // next group's file never overlaps the memtable. An overlap would force a flush before
+        // the ingestion, place the file in L0, and have compaction rewrite earlier files.
+        let mut seen = Vec::new();
+        for tag in 1..=4u8 {
+            store.put_batch(large_batch(tag)).await.expect("put");
+            let files = log_files(&store);
+            assert_eq!(files.len(), seen.len() + 1, "each put adds one log file");
+            assert!(
+                files.iter().all(|(_, level)| *level == 6),
+                "log files must land in the bottom level: {files:?}"
+            );
+            assert!(
+                seen.iter().all(|file| files.contains(file)),
+                "earlier log files must not be rewritten: {seen:?} vs {files:?}"
+            );
+            seen = files;
+        }
     }
 
     #[tokio::test]
