@@ -5,6 +5,7 @@
 mod common;
 
 use commonware_cryptography::Sha256;
+use commonware_macros::boxed;
 use commonware_runtime::{tokio as cw_tokio, Runner as _};
 use commonware_storage::{
     journal::contiguous::fixed::Config as FixedJournalConfig,
@@ -1316,6 +1317,7 @@ async fn test_ordered_mmb_current_boundaries_survive_coalesced_publication() {
 }
 
 /// Store requests `operation` makes.
+#[boxed]
 async fn store_calls<T>(
     query: &common::CountingQuery,
     operation: impl std::future::Future<Output = Result<T, exoware_qmdb::QmdbError>>,

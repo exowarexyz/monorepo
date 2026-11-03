@@ -18,6 +18,7 @@ use crate::{
 use bytes::Bytes;
 use commonware_codec::{Copying, DecodeExt};
 use commonware_cryptography::{Digest, Hasher};
+use commonware_macros::boxed;
 use commonware_storage::{
     merkle::{ElementPlan, Family, Graftable, Location, Position, RangePlan},
     qmdb::current::proof::{constant::OperationProof, required_chunks, RangeProof},
@@ -182,6 +183,7 @@ async fn load_chunk<F: Graftable, D: Digest, const N: usize>(
     Ok(chunk)
 }
 
+#[boxed]
 async fn load_chunk_row<F: Graftable, const N: usize>(
     session: &ReadSession,
     watermark: Location<F>,

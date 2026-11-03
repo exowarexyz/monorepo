@@ -32,7 +32,10 @@ mod tests {
         aggregate::*, builder::*, codec::*, diagnostics::*, filter::*, predicate::*, scan::*,
         types::*, writer::*, *,
     };
-    use axum::Router;
+    use axum::{
+        serve::{Listener, ListenerExt},
+        Router,
+    };
     use buffa::Message;
     use bytes::Bytes;
     use commonware_codec::Encode;
@@ -76,6 +79,7 @@ mod tests {
             ReduceRequest as ProtoReduceRequest, ReduceResponse as ProtoReduceResponse,
             Service as QueryService, ServiceServer as QueryServiceServer,
         },
+        transport::set_tcp_nodelay,
         PrefixedStoreClient, RangeMode, RangeTraversalDirection, StoreBatchUpload, StoreClient,
     };
     use exoware_server::{
@@ -412,7 +416,8 @@ mod tests {
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
-            .expect("bind mock server");
+            .expect("bind mock server")
+            .tap_io(set_tcp_nodelay);
         let addr = listener.local_addr().expect("local addr");
         let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
         tokio::spawn(async move {
@@ -734,9 +739,8 @@ mod tests {
             else_expr: Some(Box::new(Expr::Literal(ScalarValue::Utf8(None), None))),
         });
 
-        let (func, argument, filter) =
+        let (argument, filter) =
             normalize_count_aggregate_argument(&case_expr, &model).expect("normalize");
-        assert_eq!(func, AggregatePushdownFunction::Count);
         assert_eq!(argument, AggregatePushdownArgument::CountAll);
         assert!(filter.is_some());
     }
@@ -2044,9 +2048,9 @@ mod tests {
         assert!(!contradiction);
         assert_eq!(min, Some(100));
         assert_eq!(max, Some(200));
-        assert!(in_i128_bounds(150, min, max));
-        assert!(!in_i128_bounds(99, min, max));
-        assert!(!in_i128_bounds(201, min, max));
+        assert!(in_bounds(150, min, max));
+        assert!(!in_bounds(99, min, max));
+        assert!(!in_bounds(201, min, max));
     }
 
     #[test]
@@ -2075,10 +2079,10 @@ mod tests {
         );
 
         let start = pred
-            .encode_index_bound_key(model.table_prefix, &model, &specs[0], 1, false)
+            .encode_index_bound_key(&model, &specs[0], 1, false)
             .unwrap();
         let end = pred
-            .encode_index_bound_key(model.table_prefix, &model, &specs[0], 1, true)
+            .encode_index_bound_key(&model, &specs[0], 1, true)
             .unwrap();
 
         assert!(
@@ -2121,10 +2125,10 @@ mod tests {
         pred.constraints
             .insert(s_idx, PredicateConstraint::StringEq("a".repeat(245)));
         assert!(pred
-            .encode_index_bound_key(model.table_prefix, &model, &specs[0], 1, true)
+            .encode_index_bound_key(&model, &specs[0], 1, true)
             .is_err());
         assert!(pred
-            .encode_index_bound_key(model.table_prefix, &model, &specs[0], 1, false)
+            .encode_index_bound_key(&model, &specs[0], 1, false)
             .is_err());
     }
 
@@ -2151,7 +2155,7 @@ mod tests {
         pred.constraints
             .insert(s_idx, PredicateConstraint::StringEq("a".repeat(245)));
         assert!(pred
-            .encode_index_bound_key(model.table_prefix, &model, &specs[0], 1, true)
+            .encode_index_bound_key(&model, &specs[0], 1, true)
             .is_err());
     }
 
@@ -2178,10 +2182,10 @@ mod tests {
         pred.constraints
             .insert(s_idx, PredicateConstraint::StringEq("hello".to_string()));
         let start = pred
-            .encode_index_bound_key(model.table_prefix, &model, &specs[0], 1, false)
+            .encode_index_bound_key(&model, &specs[0], 1, false)
             .expect("lower bound should encode");
         let end = pred
-            .encode_index_bound_key(model.table_prefix, &model, &specs[0], 1, true)
+            .encode_index_bound_key(&model, &specs[0], 1, true)
             .expect("upper bound should encode");
         assert!(start <= end, "lower bound must not exceed upper bound");
     }
@@ -2221,10 +2225,10 @@ mod tests {
             },
         );
         let start = pred
-            .encode_index_bound_key(model.table_prefix, &model, &specs[0], 1, false)
+            .encode_index_bound_key(&model, &specs[0], 1, false)
             .expect("lower bound");
         let end = pred
-            .encode_index_bound_key(model.table_prefix, &model, &specs[0], 1, true)
+            .encode_index_bound_key(&model, &specs[0], 1, true)
             .expect("upper bound");
 
         // Index row for exactly (s = 'a', id = 5), as encode_secondary_index_key
@@ -2265,10 +2269,10 @@ mod tests {
         pred.constraints
             .insert(s_idx, PredicateConstraint::StringEq(needle.clone()));
         let start = pred
-            .encode_index_bound_key(model.table_prefix, &model, &specs[0], 1, false)
+            .encode_index_bound_key(&model, &specs[0], 1, false)
             .expect("lower bound");
         let end = pred
-            .encode_index_bound_key(model.table_prefix, &model, &specs[0], 1, true)
+            .encode_index_bound_key(&model, &specs[0], 1, true)
             .expect("upper bound");
 
         let mut payload = Vec::new();
@@ -2307,10 +2311,10 @@ mod tests {
             },
         );
         let start = pred
-            .encode_index_bound_key(model.table_prefix, &model, &specs[0], 1, false)
+            .encode_index_bound_key(&model, &specs[0], 1, false)
             .expect("lower bound");
         let end = pred
-            .encode_index_bound_key(model.table_prefix, &model, &specs[0], 1, true)
+            .encode_index_bound_key(&model, &specs[0], 1, true)
             .expect("upper bound");
 
         let mut payload = Vec::new();
@@ -2368,7 +2372,7 @@ mod tests {
             },
         );
         let ranges = pred
-            .expand_zorder_index_ranges(model.table_prefix, &model, &specs[0])
+            .expand_zorder_index_ranges(&model, &specs[0])
             .expect("ranges");
         assert_eq!(ranges.len(), 1);
 
@@ -2421,10 +2425,10 @@ mod tests {
             },
         );
         let start = pred
-            .encode_index_bound_key(model.table_prefix, &model, &specs[0], 1, false)
+            .encode_index_bound_key(&model, &specs[0], 1, false)
             .unwrap();
         let end = pred
-            .encode_index_bound_key(model.table_prefix, &model, &specs[0], 1, true)
+            .encode_index_bound_key(&model, &specs[0], 1, true)
             .unwrap();
 
         for name in ["", "bob"] {
@@ -2464,10 +2468,10 @@ mod tests {
         pred.constraints
             .insert(a_idx, PredicateConstraint::StringEq("x".to_string()));
         let start = pred
-            .encode_index_bound_key(model.table_prefix, &model, &specs[0], 1, false)
+            .encode_index_bound_key(&model, &specs[0], 1, false)
             .unwrap();
         let end = pred
-            .encode_index_bound_key(model.table_prefix, &model, &specs[0], 1, true)
+            .encode_index_bound_key(&model, &specs[0], 1, true)
             .unwrap();
 
         for (b, id) in [(i64::MIN, i64::MIN), (0, 0), (i64::MAX, i64::MAX)] {
@@ -2682,10 +2686,10 @@ mod tests {
         pred.constraints
             .insert(region_idx, PredicateConstraint::StringEq("us".to_string()));
         let start = pred
-            .encode_index_bound_key(model.table_prefix, &model, &specs[0], 1, false)
+            .encode_index_bound_key(&model, &specs[0], 1, false)
             .unwrap();
         let end = pred
-            .encode_index_bound_key(model.table_prefix, &model, &specs[0], 1, true)
+            .encode_index_bound_key(&model, &specs[0], 1, true)
             .unwrap();
 
         for id in [i64::MIN, 0, i64::MAX] {
@@ -2897,10 +2901,10 @@ mod tests {
 
         let pred = QueryPredicate::default();
         let start = pred
-            .encode_index_bound_key(model.table_prefix, &model, &specs[0], 0, false)
+            .encode_index_bound_key(&model, &specs[0], 0, false)
             .unwrap();
         let end = pred
-            .encode_index_bound_key(model.table_prefix, &model, &specs[0], 0, true)
+            .encode_index_bound_key(&model, &specs[0], 0, true)
             .unwrap();
 
         let neg_inf_row = KvRow {
@@ -4417,7 +4421,7 @@ mod tests {
         let model = TableModel::from_config(&config).unwrap();
 
         let entity = vec![0xBB; 32];
-        let pk_entity = CellValue::FixedBinary(entity.clone());
+        let pk_entity = CellValue::FixedBinary(entity);
 
         let key_v1 = encode_primary_key(0, &[&pk_entity, &CellValue::UInt64(1)], &model)
             .expect("pk key encodes");
@@ -5311,10 +5315,7 @@ mod tests {
         let max_id = "i".repeat(max_payload - encode_string_variable(&max_tag).unwrap().len() - 1);
         let overflow_id = format!("{max_id}x");
         let max_row = KvRow {
-            values: vec![
-                CellValue::Utf8(max_id.clone()),
-                CellValue::Utf8(max_tag.clone()),
-            ],
+            values: vec![CellValue::Utf8(max_id.clone()), CellValue::Utf8(max_tag)],
         };
         let encoded_row = encode_base_row_value(&max_row, &model).expect("encode row");
         let archived = decode_stored_row(&encoded_row).expect("archive row");
@@ -5323,7 +5324,7 @@ mod tests {
             model.table_prefix,
             spec,
             &model,
-            &[CellValue::Utf8(max_id.clone())],
+            &[CellValue::Utf8(max_id)],
             &archived,
         )
         .expect("backfill path should encode max payload");
@@ -6698,7 +6699,8 @@ mod tests {
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
-            .expect("bind test listener");
+            .expect("bind test listener")
+            .tap_io(set_tcp_nodelay);
         let url = format!("http://{}", listener.local_addr().expect("listener addr"));
         tokio::spawn(async move {
             axum::serve(listener, app).await.expect("serve test app");
@@ -6777,7 +6779,8 @@ mod tests {
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
-            .expect("bind test listener");
+            .expect("bind test listener")
+            .tap_io(set_tcp_nodelay);
         let url = format!("http://{}", listener.local_addr().expect("listener addr"));
         tokio::spawn(async move {
             axum::serve(listener, app).await.expect("serve test app");
@@ -7085,7 +7088,8 @@ mod tests {
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
-            .expect("bind test listener");
+            .expect("bind test listener")
+            .tap_io(set_tcp_nodelay);
         let url = format!("http://{}", listener.local_addr().expect("listener addr"));
         tokio::spawn(async move {
             axum::serve(listener, app).await.expect("serve test app");

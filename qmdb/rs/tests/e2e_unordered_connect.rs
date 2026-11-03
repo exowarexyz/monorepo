@@ -4,6 +4,7 @@
 mod common;
 
 use commonware_cryptography::Sha256;
+use commonware_macros::boxed;
 use commonware_runtime::{tokio as cw_tokio, Runner as _};
 use commonware_storage::{
     merkle::{mmb, mmr, Location, Proof},
@@ -1556,6 +1557,7 @@ async fn test_unordered_connect_client_rejects_invalid_streamed_proof() {
 }
 
 /// Store requests `operation` makes.
+#[boxed]
 async fn store_calls<T>(
     query: &common::CountingQuery,
     operation: impl std::future::Future<Output = Result<T, QmdbError>>,
