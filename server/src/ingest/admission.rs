@@ -1,11 +1,12 @@
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
-
 use buffa::MessageName;
 use connectrpc::{error::ErrorDetail, ConnectError};
 use exoware_sdk::{
     google::rpc::{ErrorInfo, RetryInfo},
     limits::{INGEST_ADMISSION_EXHAUSTED_REASON, INGEST_ERROR_DOMAIN},
+};
+use std::{
+    sync::{Arc, Mutex},
+    time::Duration,
 };
 
 const ADMISSION_RETRY_DELAY: Duration = Duration::from_millis(100);

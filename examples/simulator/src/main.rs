@@ -1,14 +1,19 @@
 //! Store simulator CLI (RocksDB).
 
 use clap::{Arg, ArgAction, Command};
-use std::path::PathBuf;
+use commonware_allocator::mimalloc::{Config, MiMalloc, Purge, Reserve};
+use exoware_simulator::{rocks::WRITER_THREAD_PREFIX, server};
+use std::{path::PathBuf, time::Duration};
 use tracing::error;
 
-use exoware_simulator::rocks::WRITER_THREAD_PREFIX;
-use exoware_simulator::server;
-
+// Pin a 2 GiB arena that mimalloc never purges, and purge other freed memory
+// after a ten-second delay.
 #[global_allocator]
-static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
+static ALLOC: MiMalloc = MiMalloc::new(Config {
+    purge: Purge::After(Duration::from_secs(10)),
+    reserve: Some(Reserve::pinned(2 << 30)),
+    ..Config::DEFAULT
+});
 
 pub const fn crate_version() -> &'static str {
     env!("CARGO_PKG_VERSION")

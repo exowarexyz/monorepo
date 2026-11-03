@@ -1,3 +1,13 @@
+use crate::{
+    proof::{
+        CurrentOperationRangeProofResult, OperationRangeCheckpoint, RawBatchMultiProof,
+        RawKeyExclusionProof, RawKeyLookupProof, RawKeyRangeProof, RawKeyValueProof,
+    },
+    service::proto::qmdb::v1::{
+        GetCurrentOperationRangeResponse, GetManyResponse, GetOperationRangeResponse,
+        GetOperationsResponse, GetRangeResponse, GetResponse, SubscribeResponse,
+    },
+};
 use bytes::{BufMut, Bytes, BytesMut};
 use commonware_codec::{Encode, EncodeSize, Write as CodecWrite};
 use commonware_cryptography::Digest;
@@ -9,15 +19,6 @@ use commonware_storage::{
     },
 };
 use connectrpc::PreEncoded;
-
-use crate::proof::{
-    CurrentOperationRangeProofResult, OperationRangeCheckpoint, RawBatchMultiProof,
-    RawKeyExclusionProof, RawKeyLookupProof, RawKeyRangeProof, RawKeyValueProof,
-};
-use crate::service::proto::qmdb::v1::{
-    GetCurrentOperationRangeResponse, GetManyResponse, GetOperationRangeResponse,
-    GetOperationsResponse, GetRangeResponse, GetResponse, SubscribeResponse,
-};
 
 const WIRE_VARINT: u64 = buffa::encoding::WireType::Varint as u64;
 const WIRE_LENGTH_DELIMITED: u64 = buffa::encoding::WireType::LengthDelimited as u64;
@@ -144,7 +145,7 @@ fn write_multi_proof_operation(buf: &mut impl BufMut, location: u64, encoded_ope
     write_bytes_field(buf, 2, encoded_operation);
 }
 
-fn historical_multi_proof_len<D: Digest, F: Graftable>(proof: &RawBatchMultiProof<D, F>) -> usize {
+fn operation_multi_proof_len<D: Digest, F: Graftable>(proof: &RawBatchMultiProof<D, F>) -> usize {
     codec_field_len(1, &proof.proof)
         + proof
             .operations
@@ -161,7 +162,7 @@ fn historical_multi_proof_len<D: Digest, F: Graftable>(proof: &RawBatchMultiProo
             .unwrap_or_default()
 }
 
-fn write_historical_multi_proof<D: Digest, F: Graftable>(
+fn write_operation_multi_proof<D: Digest, F: Graftable>(
     buf: &mut impl BufMut,
     proof: &RawBatchMultiProof<D, F>,
 ) {
@@ -216,6 +217,26 @@ fn write_operation_range_checkpoint<D: Digest, F: Graftable>(
     for node in &proof.pinned_nodes {
         write_repeated_codec_field(buf, 6, node);
     }
+}
+
+/// Encode `proof` as a `qmdb.v1.OperationRangeProof` protobuf message.
+pub fn encode_operation_range_proof<D: Digest, F: Graftable>(
+    proof: &OperationRangeCheckpoint<D, F>,
+) -> Vec<u8> {
+    message_bytes(operation_range_checkpoint_len(proof), |buf| {
+        write_operation_range_checkpoint(buf, proof);
+    })
+    .to_vec()
+}
+
+/// Encode `proof` as a `qmdb.v1.OperationMultiProof` protobuf message.
+pub fn encode_operation_multi_proof<D: Digest, F: Graftable>(
+    proof: &RawBatchMultiProof<D, F>,
+) -> Vec<u8> {
+    message_bytes(operation_multi_proof_len(proof), |buf| {
+        write_operation_multi_proof(buf, proof);
+    })
+    .to_vec()
 }
 
 fn current_operation_range_proof_len<D: Digest, Op: Encode, const N: usize, F: Graftable>(
@@ -454,10 +475,10 @@ pub(crate) fn get_operation_range_response<D: Digest, F: Graftable>(
 pub(crate) fn get_operations_response<D: Digest, F: Graftable>(
     proof: &RawBatchMultiProof<D, F>,
 ) -> PreEncoded<GetOperationsResponse> {
-    let proof_len = historical_multi_proof_len(proof);
+    let proof_len = operation_multi_proof_len(proof);
     PreEncoded::from_bytes_unchecked(message_bytes(message_field_len(1, proof_len), |buf| {
         write_message_field(buf, 1, proof_len);
-        write_historical_multi_proof(buf, proof);
+        write_operation_multi_proof(buf, proof);
     }))
 }
 
@@ -465,12 +486,12 @@ pub(crate) fn subscribe_response<D: Digest, F: Graftable>(
     resume_sequence_number: u64,
     proof: &RawBatchMultiProof<D, F>,
 ) -> PreEncoded<SubscribeResponse> {
-    let proof_len = historical_multi_proof_len(proof);
+    let proof_len = operation_multi_proof_len(proof);
     let len = varint_field_len(1, resume_sequence_number) + message_field_len(2, proof_len);
     PreEncoded::from_bytes_unchecked(message_bytes(len, |buf| {
         write_u64_field(buf, 1, resume_sequence_number);
         write_message_field(buf, 2, proof_len);
-        write_historical_multi_proof(buf, proof);
+        write_operation_multi_proof(buf, proof);
     }))
 }
 

@@ -3,27 +3,29 @@
 #[allow(dead_code)]
 mod common;
 
-use std::collections::{BTreeMap, VecDeque};
-use std::num::NonZeroU64;
-use std::sync::{
-    atomic::{AtomicBool, AtomicUsize, Ordering},
-    Arc, Mutex,
-};
-
 use bytes::Bytes;
 use commonware_runtime::{deterministic, Runner as _};
-use commonware_storage::merkle::{mmr, Location};
-use commonware_storage::qmdb::any::value::VariableEncoding;
-use commonware_storage::qmdb::immutable::variable::{
-    Db as Immutable, Operation as ImmutableOperation,
+use commonware_storage::{
+    merkle::{mmr, Location},
+    qmdb::{
+        any::value::VariableEncoding,
+        immutable::variable::{Db as Immutable, Operation as ImmutableOperation},
+    },
+    translator::TwoCap,
 };
-use commonware_storage::translator::TwoCap;
 use commonware_utils::{NZUsize, NZU16, NZU64};
-use exoware_qmdb::service::proto::qmdb::v1::GetOperationRangeRequest;
-use exoware_qmdb::QmdbError;
+use exoware_qmdb::{service::proto::qmdb::v1::GetOperationRangeRequest, QmdbError};
 use exoware_sdk::{PrefixedStoreClient, RetryConfig, StoreClient, StoreWriteBatch};
 use exoware_server::{
     Query, QueryExtra, QueryResult, RangeScan, RangeScanBatch, RangeScanResult, Sequence,
+};
+use std::{
+    collections::{BTreeMap, VecDeque},
+    num::NonZeroU64,
+    sync::{
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+        Arc, Mutex,
+    },
 };
 
 type Family = mmr::Family;
@@ -49,7 +51,7 @@ async fn build_two_publications() -> (Vec<Operation>, Vec<Operation>) {
         deterministic::Runner::default().start(|context| async move {
             use commonware_runtime::{buffer::paged::CacheRef, Supervisor as _};
 
-            let page_cache = CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(8));
+            let page_cache = CacheRef::new(NZU16!(64), NZUsize!(8));
             let config = common::immutable_variable_config(
                 "snapshot_sequence_source",
                 page_cache,
@@ -65,7 +67,7 @@ async fn build_two_publications() -> (Vec<Operation>, Vec<Operation>) {
                 .merkleize(&db, None::<Vec<u8>>, db.inactivity_floor_loc())
                 .await
                 .expect("merkleize");
-            (db, _) = db.apply_batch(first).await.expect("apply old value");
+            db = db.apply_batch(first).await.expect("apply old value");
             let first_end = db.bounds().end;
             let (_, first_operations) = db
                 .historical_proof(
@@ -81,7 +83,7 @@ async fn build_two_publications() -> (Vec<Operation>, Vec<Operation>) {
                 .merkleize(&db, None::<Vec<u8>>, db.inactivity_floor_loc())
                 .await
                 .expect("merkleize");
-            (db, _) = db.apply_batch(second).await.expect("apply new value");
+            db = db.apply_batch(second).await.expect("apply new value");
             let full_end = db.bounds().end;
             let (_, all_operations) = db
                 .historical_proof(

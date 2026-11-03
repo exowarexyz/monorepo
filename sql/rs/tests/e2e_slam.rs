@@ -2,23 +2,24 @@
 
 mod common;
 
-use std::sync::Arc;
-
 use axum::Router;
-use connectrpc::client::ClientConfig;
-use connectrpc::ErrorCode;
-use datafusion::arrow::array::{ArrayRef, Int64Array};
-use datafusion::arrow::datatypes::DataType;
-use datafusion::arrow::ipc::reader::StreamReader;
-use datafusion::arrow::record_batch::RecordBatch;
-use datafusion::common::ScalarValue;
-use datafusion::datasource::{MemTable, ViewTable};
-use exoware_sdk::proto::PreferZstdHttpClient;
-use exoware_sdk::{PrefixedStoreClient, StoreKeyPrefix};
-use exoware_sql::proto::sql::v1::{QueryRequest, ServiceClient};
+use connectrpc::{client::ClientConfig, ErrorCode};
+use datafusion::{
+    arrow::{
+        array::{ArrayRef, Int64Array},
+        datatypes::DataType,
+        ipc::reader::StreamReader,
+        record_batch::RecordBatch,
+    },
+    common::ScalarValue,
+    datasource::{MemTable, ViewTable},
+};
+use exoware_sdk::{proto::PreferZstdHttpClient, PrefixedStoreClient, StoreKeyPrefix};
 use exoware_sql::{
+    proto::sql::v1::{QueryRequest, ServiceClient},
     sql_connect_stack, CellValue, IndexSpec, KvSchema, SqlServer, TableColumnConfig,
 };
+use std::sync::Arc;
 
 fn result_row_count(results: &[u8]) -> usize {
     StreamReader::try_new(results, None)

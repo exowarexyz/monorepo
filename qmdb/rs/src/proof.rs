@@ -1,5 +1,7 @@
-use std::collections::HashMap;
-
+pub use crate::service::server::encode::{
+    encode_operation_multi_proof, encode_operation_range_proof,
+};
+use crate::{adapter::codec::op_count_for_watermark, QmdbError};
 use commonware_codec::Codec;
 use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::{Sequential, Strategy};
@@ -17,11 +19,9 @@ use commonware_storage::{
         operation::{Key as QmdbKey, Operation},
     },
 };
+use std::collections::HashMap;
 
-use crate::adapter::codec::op_count_for_watermark;
-use crate::QmdbError;
-
-/// Historical operation range plus the raw Merkle proof material used to verify
+/// Operation range plus the raw Merkle proof material used to verify
 /// it. This is suitable for checkpointing and local Merkle continuation.
 #[derive(Clone, Debug, PartialEq)]
 #[must_use]
@@ -135,9 +135,7 @@ impl<D: Digest, F: Graftable> OperationRangeCheckpoint<D, F> {
     }
 }
 
-/// Backend-agnostic historical multi-proof keyed to an authorized batch. The
-/// operations are stored as encoded bytes so this type is shared across
-/// ordered, unordered, immutable, and keyless backends.
+/// Operation-log membership proof for encoded operations at selected locations.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[must_use]
 pub struct RawBatchMultiProof<D: Digest, F: Graftable> {
@@ -306,21 +304,6 @@ pub struct RawKeyValueProof<D: Digest, Op, const N: usize, F: Graftable> {
     pub operation: Op,
 }
 
-pub(crate) fn verify_ordered_exclusion_proof<F, H, K, E, const N: usize>(
-    key: &K,
-    proof: &ExclusionProof<F, K, E, H::Digest, N>,
-    root: &H::Digest,
-) -> bool
-where
-    F: Graftable,
-    H: Hasher,
-    K: QmdbKey + Codec,
-    E: ValueEncoding,
-    ordered::Operation<F, K, E>: Codec,
-{
-    proof.verify::<H>(key, root)
-}
-
 impl<D: Digest, Op, const N: usize, F: Graftable> RawKeyValueProof<D, Op, N, F>
 where
     Op: Codec + Clone + Operation<F>,
@@ -362,11 +345,7 @@ where
     ordered::Operation<F, K, E>: Codec + Clone,
 {
     pub fn verify<H: Hasher<Digest = D>>(&self) -> bool {
-        verify_ordered_exclusion_proof::<F, H, K, E, N>(
-            &self.requested_key,
-            &self.proof,
-            &self.root,
-        )
+        self.proof.verify::<H>(&self.requested_key, &self.root)
     }
 }
 
@@ -501,5 +480,120 @@ where
             &self.chunks,
             &self.root,
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::service::proto::qmdb::v1::{
+        MultiProofOperation, OperationMultiProof, OperationRangeProof,
+    };
+    use buffa::Message;
+    use commonware_codec::{Copying, Decode, DecodeExt, Encode};
+    use commonware_cryptography::{sha256, Sha256};
+    use commonware_storage::merkle::{mmb, mmr};
+
+    fn operation_encodings_roundtrip<F: Graftable + PartialEq>() {
+        let digest = Sha256::hash(&[b"operation proof encoding"]);
+
+        // Exercise locations beyond JavaScript's exact integer range and optional witnesses.
+        // Operation payloads include empty values and bytes with the high bit set.
+        for start in [0, (1u64 << 53) + 1] {
+            for with_witness in [false, true] {
+                let witness = with_witness.then(|| OpsRootWitness::<F, sha256::Digest> {
+                    grafted_root: digest,
+                    pending_chunk_digest: None.try_into().unwrap(),
+                    partial_chunk: Some((start + 1, digest)),
+                });
+                let range = OperationRangeCheckpoint {
+                    watermark: Location::new(start + 1),
+                    ops_root: digest,
+                    ops_root_witness: witness.clone(),
+                    start_location: Location::new(start),
+                    pinned_nodes: vec![digest, digest],
+                    proof: Proof {
+                        leaves: Location::new(start + 2),
+                        inactive_peaks: 1,
+                        digests: vec![digest, digest],
+                    },
+                    encoded_operations: vec![vec![], vec![0, 127, 128, 255]],
+                };
+
+                // Encoding must match the generated protobuf and preserve every field.
+                let encoded_witness = witness.as_ref().map(Encode::encode).unwrap_or_default();
+                let expected = OperationRangeProof {
+                    proof: range.proof.encode(),
+                    start_location: start,
+                    encoded_operations: range
+                        .encoded_operations
+                        .iter()
+                        .cloned()
+                        .map(Into::into)
+                        .collect(),
+                    ops_root: digest.encode(),
+                    ops_root_witness: encoded_witness.clone(),
+                    pinned_nodes: range.pinned_nodes.iter().map(Encode::encode).collect(),
+                    ..Default::default()
+                };
+                let encoded = encode_operation_range_proof(&range);
+                let decoded = OperationRangeProof::decode_from_slice(&encoded).unwrap();
+                assert_eq!(encoded, expected.encode_to_vec());
+                assert_eq!(decoded, expected);
+                assert_eq!(
+                    Proof::<F, sha256::Digest>::decode_cfg(Copying(decoded.proof.as_ref()), &32)
+                        .unwrap(),
+                    range.proof
+                );
+                if let Some(witness) = witness {
+                    assert_eq!(
+                        OpsRootWitness::<F, sha256::Digest>::decode(Copying(
+                            decoded.ops_root_witness.as_ref()
+                        ))
+                        .unwrap(),
+                        witness
+                    );
+                }
+
+                // Multi-proof encoding must preserve each operation's location and bytes.
+                let multi = RawBatchMultiProof {
+                    watermark: range.watermark,
+                    ops_root: digest,
+                    ops_root_witness: range.ops_root_witness,
+                    proof: range.proof,
+                    operations: range
+                        .encoded_operations
+                        .into_iter()
+                        .enumerate()
+                        .map(|(offset, bytes)| (Location::new(start + offset as u64), bytes))
+                        .collect(),
+                };
+                let expected = OperationMultiProof {
+                    proof: multi.proof.encode(),
+                    operations: multi
+                        .operations
+                        .iter()
+                        .map(|(location, bytes)| MultiProofOperation {
+                            location: location.as_u64(),
+                            encoded_operation: bytes.clone().into(),
+                            ..Default::default()
+                        })
+                        .collect(),
+                    ops_root: digest.encode(),
+                    ops_root_witness: encoded_witness,
+                    ..Default::default()
+                };
+                let encoded = encode_operation_multi_proof(&multi);
+                let decoded = OperationMultiProof::decode_from_slice(&encoded).unwrap();
+                assert_eq!(encoded, expected.encode_to_vec());
+                assert_eq!(decoded, expected);
+            }
+        }
+    }
+
+    #[test]
+    fn operation_proof_encodings_roundtrip_without_response_envelopes() {
+        operation_encodings_roundtrip::<mmr::Family>();
+        operation_encodings_roundtrip::<mmb::Family>();
     }
 }

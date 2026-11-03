@@ -3,9 +3,6 @@
 //! Public ordered source variants through shared native and Connect adapters
 
 use crate::common;
-
-use std::{collections::BTreeMap, fmt::Debug, sync::Arc};
-
 use commonware_codec::{Codec, Encode, Read};
 use commonware_cryptography::Sha256;
 use commonware_parallel::Sequential;
@@ -26,18 +23,23 @@ use commonware_storage::{
 use commonware_utils::{
     bitmap::Readable as _, iter::zip_eq, sequence::FixedBytes, NZUsize, NZU16, NZU64,
 };
-use exoware_qmdb::service::proto::qmdb::v1::{
-    GetCurrentOperationRangeRequest, GetManyRequest, GetOperationRangeRequest, GetRangeRequest,
-    GetRequest, SubscribeRequest,
-};
 use exoware_qmdb::{
-    adapter::upload::prepare_authenticated_range, adapter::upload::recover_boundary_state,
-    adapter::upload::stage_authenticated_range, adapter::upload::stage_watermark,
-    adapter::upload::AuthenticatedOperationRange, adapter::upload::UploadOperation,
-    proof::VerifiedKeyLookup, service::client::rpc::CurrentOperationClient,
-    service::client::rpc::OperationLogClient, CurrentBoundaryState, MAX_OPERATION_SIZE,
+    adapter::upload::{
+        prepare_authenticated_range, recover_boundary_state, stage_authenticated_range,
+        stage_watermark, AuthenticatedOperationRange, UploadOperation,
+    },
+    proof::VerifiedKeyLookup,
+    service::{
+        client::rpc::{CurrentOperationClient, OperationLogClient},
+        proto::qmdb::v1::{
+            GetCurrentOperationRangeRequest, GetManyRequest, GetOperationRangeRequest,
+            GetRangeRequest, GetRequest, SubscribeRequest,
+        },
+    },
+    CurrentBoundaryState, MAX_OPERATION_SIZE,
 };
 use exoware_sdk::{proto::PreferZstdHttpClient, PrefixedStoreClient, StoreWriteBatch};
+use std::{collections::BTreeMap, fmt::Debug, sync::Arc};
 
 const N: usize = 32;
 type Digest = commonware_cryptography::sha256::Digest;
@@ -1032,7 +1034,7 @@ macro_rules! variant_case {
             type Op = Operation<$family, $fixture::Key, $fixture::Encoding>;
             let snapshots = tokio::task::spawn_blocking(|| {
                 cw_tokio::Runner::default().start(|context| async move {
-                    let cache = CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(8));
+                    let cache = CacheRef::new(NZU16!(64), NZUsize!(8));
                     let cfg = source_config!(
                         $state,
                         $encoding,
@@ -1081,7 +1083,7 @@ macro_rules! variant_case {
                             .expect("source merkleize");
                         let captured = capture_source_batch!($state, $family, db, finalized);
                         let batch_root = finalized.root();
-                        (db, _) = db.apply_batch(finalized).await.expect("source apply");
+                        db = db.apply_batch(finalized).await.expect("source apply");
                         assert_eq!(db.root(), batch_root);
                         for index in 0..KEY_BYTES.len() {
                             let key = $fixture::key(index);
