@@ -1,9 +1,11 @@
+use commonware_macros::boxed;
 use exoware_sdk::{
     transport::BalancedHttp2Config, ClientError, ErrorCode, Key, RetryConfig, StoreClient,
     StoreKeyPrefix,
 };
 use std::{future::Future, time::Duration};
 
+#[boxed]
 async fn timeout_code<T>(future: impl Future<Output = Result<T, ClientError>>) -> ErrorCode {
     match tokio::time::timeout(Duration::from_millis(400), future)
         .await

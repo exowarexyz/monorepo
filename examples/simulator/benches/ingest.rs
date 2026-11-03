@@ -51,6 +51,8 @@ fn allocated(bytes: usize) {
     PEAK_BYTES.fetch_max(live, Ordering::Relaxed);
 }
 
+// SAFETY: Every method passes its arguments unchanged to `MiMalloc`, which upholds the
+// `GlobalAlloc` contract. The bookkeeping only updates atomics and never allocates.
 unsafe impl GlobalAlloc for MeasuredAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         let pointer = INNER_ALLOC.alloc(layout);
