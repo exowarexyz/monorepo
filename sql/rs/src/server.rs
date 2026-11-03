@@ -619,7 +619,7 @@ fn client_error_to_connect(err: &exoware_sdk::ClientError) -> ConnectError {
 mod tests {
     use super::*;
     use crate::TableColumnConfig;
-    use axum::serve::ListenerExt;
+    use axum::serve::{Listener, ListenerExt};
     use buffa::Message;
     use datafusion::{
         arrow::{
@@ -790,10 +790,12 @@ mod tests {
                 )
                 .unwrap();
             let server = Arc::new(SqlServer::new(schema).unwrap());
-            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .unwrap()
+                .tap_io(set_tcp_nodelay);
             let address = listener.local_addr().unwrap();
             let app = axum::Router::new().fallback_service(sql_connect_stack(server));
-            let listener = listener.tap_io(set_tcp_nodelay);
             let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
             let client = ServiceClient::new(
                 HttpClient::plaintext(),
@@ -867,10 +869,12 @@ mod tests {
                 ),
             )
             .unwrap();
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .unwrap()
+            .tap_io(set_tcp_nodelay);
         let address = listener.local_addr().unwrap();
         let app = axum::Router::new().fallback_service(sql_connect_stack(server.clone()));
-        let listener = listener.tap_io(set_tcp_nodelay);
         let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         let client = ServiceClient::new(
             HttpClient::plaintext(),
@@ -1087,10 +1091,12 @@ mod tests {
         .unwrap();
         server.ctx = Arc::new(ctx);
         let server = Arc::new(server);
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .unwrap()
+            .tap_io(set_tcp_nodelay);
         let address = listener.local_addr().unwrap();
         let app = axum::Router::new().fallback_service(sql_connect_stack(server));
-        let listener = listener.tap_io(set_tcp_nodelay);
         let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         let client = ServiceClient::new(
             HttpClient::plaintext(),

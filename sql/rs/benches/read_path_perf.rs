@@ -10,7 +10,7 @@ use axum::{
     extract::{Request, State},
     middleware::Next,
     response::Response,
-    serve::ListenerExt,
+    serve::{Listener, ListenerExt},
     Router,
 };
 use bytes::Bytes;
@@ -394,9 +394,9 @@ impl Fixture {
             ));
         let listener = runtime
             .block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
-            .unwrap();
+            .unwrap()
+            .tap_io(set_tcp_nodelay);
         let url = format!("http://{}", listener.local_addr().unwrap());
-        let listener = listener.tap_io(set_tcp_nodelay);
         let server = runtime.spawn(async move { axum::serve(listener, app).await.unwrap() });
         let client = StoreClient::builder()
             .url(&url)
@@ -475,9 +475,9 @@ impl Fixture {
             ));
         let listener = runtime
             .block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
-            .unwrap();
+            .unwrap()
+            .tap_io(set_tcp_nodelay);
         let sql_uri = format!("http://{}", listener.local_addr().unwrap());
-        let listener = listener.tap_io(set_tcp_nodelay);
         let sql_server = runtime.spawn(async move { axum::serve(listener, app).await.unwrap() });
         let sql_client = ServiceClient::new(
             connectrpc::client::HttpClient::plaintext_http2_only(),

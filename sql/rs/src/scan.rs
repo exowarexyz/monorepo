@@ -1042,7 +1042,10 @@ async fn range_stream_with_direction(
 #[cfg(test)]
 mod tests {
     use crate::{types::KvTable, IndexSpec, KvSchema, TableColumnConfig};
-    use axum::{serve::ListenerExt, Router};
+    use axum::{
+        serve::{Listener, ListenerExt},
+        Router,
+    };
     use bytes::Bytes;
     use datafusion::{
         arrow::{
@@ -1229,9 +1232,11 @@ mod tests {
             let rows = Arc::new(Rows::default());
             let app = Router::new()
                 .fallback_service(exoware_server::query_service(QueryState::new(rows.clone())));
-            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .unwrap()
+                .tap_io(set_tcp_nodelay);
             let url = format!("http://{}", listener.local_addr().unwrap());
-            let listener = listener.tap_io(set_tcp_nodelay);
             let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
             let prefix = StoreKeyPrefix::new(Bytes::from_static(b"scan-tests/")).unwrap();
             let schema = KvSchema::new(StoreClient::new(&url).prefixed(prefix.clone()))

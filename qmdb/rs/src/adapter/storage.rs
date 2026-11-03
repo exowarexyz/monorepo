@@ -445,7 +445,7 @@ impl<const N: usize> commonware_utils::bitmap::Readable<N> for ProofBitmap<N> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::serve::ListenerExt;
+    use axum::serve::{Listener, ListenerExt};
     use bytes::Bytes;
     use commonware_cryptography::{sha256::Digest, Sha256};
     use commonware_storage::merkle::{mem::Mem, mmb, mmr, verification};
@@ -725,9 +725,11 @@ mod tests {
 
     async fn serve(queries: NodeQueries) -> (PrefixedStoreClient, tokio::task::JoinHandle<()>) {
         let service = ConnectRpcService::new(ServiceServer::new(queries));
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .unwrap()
+            .tap_io(set_tcp_nodelay);
         let url = format!("http://{}", listener.local_addr().unwrap());
-        let listener = listener.tap_io(set_tcp_nodelay);
         let task = tokio::spawn(async move {
             axum::serve(listener, axum::Router::new().fallback_service(service))
                 .await

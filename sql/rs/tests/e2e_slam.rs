@@ -2,7 +2,10 @@
 
 mod common;
 
-use axum::{serve::ListenerExt, Router};
+use axum::{
+    serve::{Listener, ListenerExt},
+    Router,
+};
 use connectrpc::{client::ClientConfig, ErrorCode};
 use datafusion::{
     arrow::{
@@ -262,10 +265,10 @@ async fn serve_sql(
 ) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
-        .expect("bind SQL server");
+        .expect("bind SQL server")
+        .tap_io(set_tcp_nodelay);
     let base = format!("http://{}", listener.local_addr().expect("SQL address"));
     let app = Router::new().fallback_service(sql_connect_stack(server));
-    let listener = listener.tap_io(set_tcp_nodelay);
     let handle = tokio::spawn(async move {
         axum::serve(listener, app).await.expect("serve SQL");
     });

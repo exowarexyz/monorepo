@@ -437,6 +437,7 @@ async fn main() -> std::process::ExitCode {
 #[allow(refining_impl_trait)]
 mod tests {
     use super::*;
+    use axum::serve::Listener;
     use bytes::Bytes;
     use connectrpc::{ConnectError, ConnectRpcService, Limits, RequestContext, ServiceRequest};
     use exoware_sdk::{
@@ -529,9 +530,11 @@ mod tests {
                         .with_max_request_body_size(LIMIT)
                         .with_max_message_size(LIMIT),
                 );
-            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .unwrap()
+                .tap_io(set_tcp_nodelay);
             let url = format!("http://{}", listener.local_addr().unwrap());
-            let listener = listener.tap_io(set_tcp_nodelay);
             let server = tokio::spawn(async move {
                 axum::serve(listener, Router::new().fallback_service(service))
                     .await

@@ -2,7 +2,11 @@
 
 #![allow(refining_impl_trait)]
 
-use axum::{routing::get, serve::ListenerExt, Router};
+use axum::{
+    routing::get,
+    serve::{Listener, ListenerExt},
+    Router,
+};
 use commonware_cryptography::Digest;
 use commonware_parallel::Sequential;
 use commonware_runtime::buffer::paged::CacheRef;
@@ -263,10 +267,10 @@ where
         .fallback_service(service);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
-        .expect("bind qmdb server");
+        .expect("bind qmdb server")
+        .tap_io(set_tcp_nodelay);
     let port = listener.local_addr().expect("local addr").port();
     let url = format!("http://127.0.0.1:{port}");
-    let listener = listener.tap_io(set_tcp_nodelay);
     let handle = tokio::spawn(async move {
         let _ =
             exoware_server::ingest::transport::serve(listener, app, std::future::pending()).await;
