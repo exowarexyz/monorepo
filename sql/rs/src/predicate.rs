@@ -860,9 +860,9 @@ impl QueryPredicate {
         model: &TableModel,
         specs: &[ResolvedIndexSpec],
         access_plan: &ScanAccessPlan,
-    ) -> DataFusionResult<Option<IndexPlan>> {
+    ) -> Option<IndexPlan> {
         if self.contradiction || self.has_primary_key_points(model) {
-            return Ok(None);
+            return None;
         }
         let mut best: Option<IndexPlan> = None;
         for (spec_idx, spec) in specs.iter().enumerate() {
@@ -930,7 +930,7 @@ impl QueryPredicate {
                 best = Some(candidate);
             }
         }
-        Ok(best)
+        best
     }
 
     pub(crate) fn expand_index_ranges(

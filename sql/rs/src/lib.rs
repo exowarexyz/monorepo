@@ -821,7 +821,6 @@ mod tests {
         let access_plan = ScanAccessPlan::new(&model, &Some(vec![]), &predicate);
         let plan = predicate
             .choose_index_plan(&model, &specs, &access_plan)
-            .expect("plan")
             .expect("exists");
         assert_eq!(plan.spec_idx, 0);
         assert_eq!(plan.constrained_prefix_len, 2);
@@ -867,7 +866,6 @@ mod tests {
         let access_plan = ScanAccessPlan::new(&model, &Some(vec![]), &predicate);
         let plan = predicate
             .choose_index_plan(&model, &specs, &access_plan)
-            .expect("plan")
             .expect("exists");
         assert_eq!(specs[plan.spec_idx].name, "status_covering");
     }
@@ -896,7 +894,6 @@ mod tests {
         let access_plan = ScanAccessPlan::new(&model, &Some(vec![]), &predicate);
         let plan = predicate
             .choose_index_plan(&model, &specs, &access_plan)
-            .expect("plan")
             .expect("exists");
         assert_eq!(specs[plan.spec_idx].name, "xy_z");
         assert_eq!(specs[plan.spec_idx].layout, IndexLayout::ZOrder);
@@ -1425,7 +1422,6 @@ mod tests {
         let access_plan = ScanAccessPlan::new(&model, &Some(vec![]), &pred);
         let plan = pred
             .choose_index_plan(&model, &specs, &access_plan)
-            .expect("plan")
             .expect("should find index");
         assert_eq!(plan.spec_idx, 0);
         assert_eq!(plan.constrained_prefix_len, 1);
@@ -3484,7 +3480,6 @@ mod tests {
         let access_plan = ScanAccessPlan::new(&model, &Some(vec![]), &pred);
         let plan = pred
             .choose_index_plan(&model, &specs, &access_plan)
-            .expect("plan")
             .expect("should find index");
         assert_eq!(plan.ranges.len(), 2);
     }
@@ -5385,7 +5380,6 @@ mod tests {
         let access_plan = ScanAccessPlan::new(&model, &Some(vec![]), &pred);
         let plan = pred
             .choose_index_plan(&model, &specs, &access_plan)
-            .unwrap()
             .expect("fixed-binary equality should choose an index");
 
         assert_eq!(plan.constrained_prefix_len, 1);
@@ -5421,7 +5415,6 @@ mod tests {
         let access_plan = ScanAccessPlan::new(&model, &Some(vec![]), &pred);
         let plan = pred
             .choose_index_plan(&model, &specs, &access_plan)
-            .unwrap()
             .expect("decimal256 range should choose an index");
 
         assert_eq!(plan.constrained_prefix_len, 1);
