@@ -10,55 +10,91 @@ use exoware_sdk::{
 };
 use std::collections::HashMap;
 
+/// A supported SQL condition on one column. Value comparisons exclude nulls.
 #[derive(Debug, Clone)]
 pub(crate) enum PredicateConstraint {
+    /// Equality with the supplied UTF-8 value.
     StringEq(String),
+    /// Equality with the supplied boolean value.
     BoolEq(bool),
+    /// Equality with the supplied fixed-size binary bytes.
     FixedBinaryEq(Vec<u8>),
+    /// Inclusive range of signed integers or temporal values. Dates use days (`Date32`)
+    /// or milliseconds (`Date64`) since the Unix epoch, and timestamps use microseconds.
     IntRange {
+        /// Inclusive lower bound, or `None` if unbounded.
         min: Option<i64>,
+        /// Inclusive upper bound, or `None` if unbounded.
         max: Option<i64>,
     },
+    /// Inclusive range of unsigned integers.
     UInt64Range {
+        /// Inclusive lower bound, or `None` if unbounded.
         min: Option<u64>,
+        /// Inclusive upper bound, or `None` if unbounded.
         max: Option<u64>,
     },
+    /// Floating-point range with independently inclusive or exclusive endpoints.
     FloatRange {
+        /// Lower value and whether equality is allowed, or `None` if unbounded.
         min: Option<(f64, bool)>,
+        /// Upper value and whether equality is allowed, or `None` if unbounded.
         max: Option<(f64, bool)>,
     },
+    /// Inclusive range of 128-bit decimal coefficients.
     Decimal128Range {
+        /// Inclusive lower coefficient, or `None` if unbounded.
         min: Option<i128>,
+        /// Inclusive upper coefficient, or `None` if unbounded.
         max: Option<i128>,
     },
+    /// Inclusive range of 256-bit decimal coefficients.
     Decimal256Range {
+        /// Inclusive lower coefficient, or `None` if unbounded.
         min: Option<i256>,
+        /// Inclusive upper coefficient, or `None` if unbounded.
         max: Option<i256>,
     },
+    /// Require a null value.
     IsNull,
+    /// Require a non-null value.
     IsNotNull,
+    /// Membership in the sorted, distinct UTF-8 values.
     StringIn(Vec<String>),
+    /// Membership in the sorted, distinct signed integers.
     IntIn(Vec<i64>),
+    /// Membership in the sorted, distinct unsigned integers.
     UInt64In(Vec<u64>),
+    /// Membership in the sorted, distinct fixed-size binary values.
     FixedBinaryIn(Vec<Vec<u8>>),
 }
 
+/// Inclusive bounds for one primary-key field, after any preceding point fields.
 #[derive(Debug, Clone)]
 pub(crate) struct PrimaryKeyTerminalRange {
+    /// First field value included in the scan range.
     lower: CellValue,
+    /// Last field value included in the scan range.
     upper: CellValue,
 }
 
+/// A single primary-key value that allows range planning to continue to the next field.
 #[derive(Debug, Clone)]
 pub(crate) struct PrimaryKeyPointConstraint {
+    /// Field value appended to the constrained primary-key prefix.
     pub(crate) value: CellValue,
+    /// Length in bytes of this value's ordered key encoding.
     pub(crate) encoded_width: usize,
 }
 
+/// How a column constraint narrows a lexicographic primary-key scan.
 #[derive(Debug, Clone)]
 pub(crate) enum PrimaryKeyRangeConstraint {
+    /// Extend the point prefix and consider the next primary-key field.
     Point(PrimaryKeyPointConstraint),
+    /// Emit these spans and stop extending the prefix. An empty list yields no ranges.
     Terminal(Vec<PrimaryKeyTerminalRange>),
+    /// Stop extending the prefix and leave this constraint for row evaluation.
     NotEnforced,
 }
 
@@ -224,9 +260,12 @@ pub(crate) fn primary_key_range_constraint_for_prefix(
     }
 }
 
+/// Conjunction of supported column constraints extracted from SQL filters.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct QueryPredicate {
+    /// Merged conditions indexed by table column. Missing columns are unconstrained.
     pub(crate) constraints: HashMap<usize, PredicateConstraint>,
+    /// A detected contradiction makes the whole predicate match no rows.
     pub(crate) contradiction: bool,
 }
 

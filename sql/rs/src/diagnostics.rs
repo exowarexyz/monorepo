@@ -1,27 +1,43 @@
 use crate::{aggregate::AggregateAccessPath, codec::*, filter::*, predicate::*, types::*};
 use datafusion::common::Result as DataFusionResult;
 
+/// Explain output describing the ranges and predicate coverage of one access path.
 #[derive(Debug, Clone)]
 pub(crate) struct AccessPathDiagnostics {
+    /// Display label for the primary key, a named secondary index, or an empty scan.
     pub(crate) mode: String,
+    /// Human-readable description of the supported column constraints.
     pub(crate) predicate: String,
+    /// Whether the access path fully enforces the described predicate without a row recheck.
     pub(crate) exact: bool,
+    /// Whether the ranges comprise a single scan of the entire primary-key family.
     pub(crate) full_scan_like: bool,
+    /// Number of key ranges selected for this access path.
     pub(crate) range_count: usize,
+    /// Constrained prefix length for lexicographic indexes or constrained column count
+    /// for Z-order indexes. `None` denotes primary-key access or an empty scan.
     pub(crate) constrained_prefix_len: Option<usize>,
 }
 
+/// Explain output for the reduce jobs that implement a pushed-down aggregation.
 #[derive(Debug, Clone)]
 pub(crate) struct AggregatePushdownDiagnostics {
+    /// Whether the aggregation has grouping expressions.
     pub(crate) grouped: bool,
+    /// Access path for the job that discovers groups, if a separate seed job is needed.
     pub(crate) seed_job: Option<AccessPathDiagnostics>,
+    /// Access paths in execution-job order after compatible aggregates are combined.
     pub(crate) aggregate_jobs: Vec<AccessPathDiagnostics>,
 }
 
+/// Selected ranges, access path, and optional index constraint count used in diagnostics.
 pub(crate) type ChosenAggregateAccessPath = (Vec<KeyRange>, AggregateAccessPath, Option<usize>);
 
+/// Store response surface whose metadata is described in explain output.
 pub(crate) enum QueryStatsExplainSurface {
+    /// Detail metadata attached to streamed range responses.
     StreamedRangeDetail,
+    /// Detail metadata attached to range-reduce responses.
     RangeReduceDetail,
 }
 

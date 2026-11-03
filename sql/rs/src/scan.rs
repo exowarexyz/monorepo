@@ -36,14 +36,20 @@ use std::{
     sync::Arc,
 };
 
-// Amortize RPC framing and native predicate evaluation even with a small output limit
+/// Minimum fetch batch size, in rows, to amortize RPC framing and filter evaluation.
 const MIN_FETCH_BATCH_ROWS: usize = 64;
 
+/// A physical predicate evaluated over the table columns it references.
 #[derive(Clone)]
 pub(crate) struct ScanFilter {
+    /// Predicate bound to column positions in `schema`.
     expression: Arc<dyn PhysicalExpr>,
+    /// Referenced columns in table order.
     schema: SchemaRef,
+    /// Decoding and projection needed to build the predicate's input batch.
     access: ScanAccessPlan,
+    /// Whether constraint extraction supports every source filter. Raw scan limits
+    /// also require the chosen key to enforce those constraints.
     complete_ranges: bool,
 }
 
@@ -54,6 +60,7 @@ impl fmt::Debug for ScanFilter {
 }
 
 impl ScanFilter {
+    /// Selects the columns needed to evaluate the filters as physical expressions.
     fn access_plan(model: &TableModel, filters: &[Expr]) -> (Vec<usize>, ScanAccessPlan) {
         let mut refs = HashSet::new();
         for expr in filters {
@@ -69,6 +76,7 @@ impl ScanFilter {
         (columns, access)
     }
 
+    /// Compiles nonempty filters against their selected input columns.
     fn compile(
         state: &dyn Session,
         model: &TableModel,
@@ -90,6 +98,7 @@ impl ScanFilter {
         }))
     }
 
+    /// Returns positions of decodable rows whose predicate evaluates to true.
     fn select(
         &self,
         model: &TableModel,
@@ -123,21 +132,34 @@ impl ScanFilter {
     }
 }
 
+/// A DataFusion leaf that reads a table through its primary key or a secondary index.
+///
+/// Construction fixes column access and index selection. Limit and sort pushdown
+/// clone the scan and share these cached plans.
 #[derive(Debug, Clone)]
 pub(crate) struct KvScanExec {
+    /// Client for the Store namespace containing the table.
     pub(crate) client: PrefixedStoreClient,
+    /// Column types, primary-key layout, and row schema for the table.
     model: Arc<TableModel>,
+    /// Resolved secondary indexes available to the scan.
     index_specs: Arc<Vec<ResolvedIndexSpec>>,
+    /// Extracted filter constraints used to bound reads and check index keys.
     predicate: QueryPredicate,
+    /// Maximum matching rows to emit, or `None` for no limit.
     pub(crate) fetch: Option<usize>,
+    /// Predicate evaluated on decoded rows, including conditions key ranges cannot enforce.
     filter: Option<ScanFilter>,
+    /// Filter conjuncts evaluated from index entries before base-row lookups.
     cover_filter: Option<ScanFilter>,
-    /// The columns each row needs and the index to read, if any. Planned once
-    /// in `try_new`, since nothing they depend on changes afterwards.
+    /// Cached output projection and columns required for decoding and filtering.
     access_plan: Arc<ScanAccessPlan>,
+    /// Selected secondary index and its key ranges, or `None` for primary-key access.
     index_plan: Option<Arc<IndexPlan>>,
-    /// Without a required ordering, traversal is unconstrained and defaults to forward.
+    /// Direction required by sort pushdown. `None` defaults to forward traversal
+    /// without promising an output ordering.
     direction: Option<RangeMode>,
+    /// Output schema, ordering guarantees, and single-partition execution metadata.
     pub(crate) properties: Arc<PlanProperties>,
 }
 
@@ -160,6 +182,7 @@ impl KvScanExec {
         ))
     }
 
+    /// Plans a scan for a projection, pushed-down filters, and an optional output limit.
     pub(crate) fn try_new(
         table: &KvTable,
         state: &dyn Session,
@@ -188,14 +211,19 @@ impl KvScanExec {
             direction: None,
             properties: Self::make_properties(projected_schema, None),
         };
+
+        // Finalize the plans with any columns needed only by row filters.
         scan.set_filters(state, filters)?;
         Ok(scan)
     }
 
+    /// Compiles filters and caches the column access and index choice they require.
     fn set_filters(&mut self, state: &dyn Session, filters: &[Expr]) -> DataFusionResult<()> {
         if filters.is_empty() {
             return Ok(());
         }
+
+        // Residual-filter columns determine whether an index covers the scan.
         let filter_access = ScanFilter::access_plan(&self.model, filters);
         let access = self.access_plan_with_filter(&filter_access.1);
         let index_plan = self
@@ -205,6 +233,7 @@ impl KvScanExec {
         if let Some(plan) = &index_plan {
             let spec = &self.index_specs[plan.spec_idx];
             if !access.index_covers_required_non_pk(spec) {
+                // Evaluate available conjuncts before fetching missing base-table values.
                 let available = filters
                     .iter()
                     .flat_map(iter_conjunction)
@@ -229,10 +258,9 @@ impl KvScanExec {
             .all(|filter| QueryPredicate::supports_filter(filter, &self.model))
             && access.predicate_fully_enforced_by_primary_key(&self.model)
         {
-            // No filter stays on the scan, so `access_plan` keeps only the
-            // projected and predicate columns. Fewer columns can change how
-            // `choose_index_plan` ranks indexes but not whether any qualifies,
-            // so `index_plan` stays `None`.
+            // Primary-key ranges enforce every filter, so no row filter is needed.
+            // Keep the projected and predicate columns. Column requirements affect
+            // index ranking but not eligibility, so `index_plan` stays `None`.
             return Ok(());
         }
         self.filter = ScanFilter::compile(state, &self.model, filters, filter_access)?;
@@ -242,6 +270,7 @@ impl KvScanExec {
         Ok(())
     }
 
+    /// Extends required-column masks with the physical filter's input columns.
     fn access_plan_with_filter(&self, filter_access: &ScanAccessPlan) -> ScanAccessPlan {
         let mut access = ScanAccessPlan::clone(&self.access_plan);
         for (required, filter_required) in access
@@ -265,6 +294,7 @@ impl KvScanExec {
         self.direction.unwrap_or(RangeMode::Forward)
     }
 
+    /// Finds a scan direction that satisfies the requested ordering on the selected key.
     fn order_direction_for_primary_key(&self, order: &LexOrdering) -> Option<RangeMode> {
         if self.predicate.contradiction {
             return None;
@@ -352,8 +382,8 @@ impl KvScanExec {
         Some(direction.unwrap_or(self.scan_direction()))
     }
 
-    // Leading point-constrained key columns are fixed by the scanned range, so any
-    // requested ordering over them is trivially satisfied.
+    /// Counts leading primary-key columns fixed to one value by the scanned ranges.
+    /// These columns place no restriction on the scan direction needed for ordering.
     fn primary_key_point_prefix_len(&self) -> usize {
         let mut prefix_encoded_width = 0usize;
 
@@ -562,14 +592,23 @@ impl ExecutionPlan for KvScanExec {
     }
 }
 
+/// Borrowed inputs shared by the streaming paths for one scan execution.
 pub(crate) struct ScanCtx<'a> {
+    /// Read session used by every Store request in the execution.
     pub(crate) session: &'a ReadSession,
+    /// Store namespace used to bound and advance logical scan keys.
     key_prefix: &'a StoreKeyPrefix,
+    /// Column types and key layout used to decode stored rows.
     pub(crate) model: &'a TableModel,
+    /// Extracted constraints for primary-key points and ranges.
     pub(crate) predicate: &'a QueryPredicate,
+    /// Arrow schema of each emitted record batch.
     pub(crate) projected_schema: &'a SchemaRef,
+    /// Required key and value columns, and their positions in the output.
     pub(crate) access_plan: &'a ScanAccessPlan,
+    /// Predicate applied to decoded rows before they enter output batches.
     filter: Option<&'a ScanFilter>,
+    /// Predicate applied to index entries before base-row lookups.
     cover_filter: Option<&'a ScanFilter>,
 }
 
@@ -638,6 +677,7 @@ impl ScanCtx<'_> {
     }
 }
 
+/// Sends a nonempty batch and resets its builder. Returns false if the receiver closed.
 pub(crate) async fn flush_projected_batch(
     tx: &tokio::sync::mpsc::Sender<DataFusionResult<RecordBatch>>,
     ctx: &ScanCtx<'_>,
@@ -660,6 +700,7 @@ pub(crate) async fn flush_projected_batch(
     Ok(true)
 }
 
+/// Streams matching rows through point reads, a secondary index, or primary-key ranges.
 pub(crate) async fn stream_kv_scan(
     tx: &tokio::sync::mpsc::Sender<DataFusionResult<RecordBatch>>,
     ctx: &ScanCtx<'_>,
@@ -723,6 +764,7 @@ pub(crate) async fn stream_kv_scan(
     .await
 }
 
+/// Fetches decodable base rows in request order, regardless of response order.
 async fn get_rows(
     ctx: &ScanCtx<'_>,
     keys: &[Key],
@@ -787,6 +829,7 @@ async fn stream_point_scan(
     Ok(())
 }
 
+/// Filters secondary-index entries before fetching and filtering their base rows.
 pub(crate) async fn stream_index_lookup_scan(
     tx: &tokio::sync::mpsc::Sender<DataFusionResult<RecordBatch>>,
     ctx: &ScanCtx<'_>,
@@ -875,6 +918,7 @@ pub(crate) async fn stream_index_lookup_scan(
     Ok(())
 }
 
+/// Streams primary-key or covering-index ranges up to the matching-row limit.
 async fn stream_range_scan(
     tx: &tokio::sync::mpsc::Sender<DataFusionResult<RecordBatch>>,
     ctx: &ScanCtx<'_>,
@@ -1073,23 +1117,36 @@ mod tests {
         },
     };
 
+    /// Store reads observed while executing a query.
     #[derive(Clone, Debug)]
     enum Request {
+        /// A point lookup by its physical Store key.
         Get(Bytes),
+        /// A batch of point lookups in request order.
         GetMany(Vec<Bytes>),
+        /// An inclusive range read over physical Store keys.
         Range {
+            /// Inclusive lower key bound.
             start: Bytes,
+            /// Inclusive upper key bound, or empty for no upper bound.
             end: Bytes,
+            /// Maximum stored entries the request may return.
             limit: usize,
+            /// Whether entries are returned in ascending key order.
             forward: bool,
         },
     }
 
+    /// Stored test data and observations shared with the query service.
     #[derive(Default)]
     struct Rows {
+        /// Encoded primary and secondary entries, indexed by physical Store key.
         values: Mutex<BTreeMap<Bytes, Bytes>>,
+        /// Reads recorded in arrival order.
         requests: Mutex<Vec<Request>>,
+        /// Entries returned by batch lookups and range cursors, including missing lookups.
         returned_rows: Arc<AtomicUsize>,
+        /// Key and value bytes returned by batch lookups and range cursors.
         returned_bytes: Arc<AtomicUsize>,
     }
 
@@ -1099,9 +1156,13 @@ mod tests {
         }
     }
 
+    /// A range snapshot that records data returned to the test's query client.
     struct Cursor {
+        /// Remaining entries in the requested traversal order.
         rows: std::vec::IntoIter<(Bytes, Bytes)>,
+        /// Shared count of entries returned by batch lookups and range cursors.
         returned_rows: Arc<AtomicUsize>,
+        /// Shared count of returned key and value bytes.
         returned_bytes: Arc<AtomicUsize>,
     }
 
@@ -1207,12 +1268,19 @@ mod tests {
         }
     }
 
+    /// Identical Store and in-memory tables for checking query results and Store reads.
     struct Fixture {
+        /// SQL context backed by the test's Store query service.
         store: crate::SqlContext,
+        /// DataFusion context backed by an in-memory reference table.
         native: DataFusionSessionContext,
+        /// Stored entries and observations for the current query.
         rows: Arc<Rows>,
+        /// Table model and indexes used to encode the test data.
         table: Arc<KvTable>,
+        /// Namespace prepended to each table and index key in the Store.
         prefix: StoreKeyPrefix,
+        /// Query-service task aborted when the fixture is dropped.
         server: tokio::task::JoinHandle<()>,
     }
 
@@ -1276,6 +1344,7 @@ mod tests {
             }
         }
 
+        /// Checks result parity and namespace isolation, then returns the observed reads.
         async fn check(&self, sql: &str) -> Vec<Request> {
             let expected = values(&self.native, sql).await.unwrap();
             self.rows.requests.lock().unwrap().clear();
@@ -2058,8 +2127,10 @@ mod tests {
         }
     }
 
+    /// Cached column requirements and index ranges agree with the optimized scan inputs.
     #[tokio::test]
     async fn optimized_scan_keeps_the_plan_its_inputs_give() {
+        // Both indexes cover amount, while payload requires a base-row lookup.
         let fixture = Fixture::new(
             vec![
                 column("id", DataType::Int64, false),
@@ -2084,7 +2155,8 @@ mod tests {
             ],
         )
         .await;
-        // Each query names whether it reads an index and whether a filter stays on the scan
+
+        // Exercise both key paths with residual filters, ordering, and limits.
         for (sql, uses_index, filtered) in [
             ("SELECT * FROM orders", false, false),
             (
@@ -2127,7 +2199,9 @@ mod tests {
             while let Some(child) = plan.children().first() {
                 plan = (*child).clone();
             }
-            let scan = plan.downcast_ref::<KvScanExec>().expect("scan");
+            let scan = plan
+                .downcast_ref::<KvScanExec>()
+                .expect("optimized plan must end in a KV scan");
             assert_eq!(scan.index_plan.is_some(), uses_index, "{sql}");
             assert_eq!(scan.filter.is_some(), filtered, "{sql}");
 

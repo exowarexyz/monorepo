@@ -65,16 +65,22 @@ use futures::{
 };
 use std::{collections::HashMap, future::Future, panic::AssertUnwindSafe, pin::Pin, sync::Arc};
 
+/// Size limit for Connect request bodies and messages on the SQL service.
 const MAX_CONNECTRPC_BODY_BYTES: usize = 256 * 1024 * 1024;
 
 type SubscribeStream = Pin<Box<dyn Stream<Item = Result<SubscribeResponse, ConnectError>> + Send>>;
 
-/// One registered table's streaming-decode state.
+/// Table metadata and column access for decoding subscription batches.
 #[derive(Clone)]
 struct TableStream {
+    /// Table layout used to decode base rows.
     model: Arc<TableModel>,
+    /// Decode plan that projects every column with no predicate.
     access_plan: Arc<ScanAccessPlan>,
+    /// Subscription selector matching every key under the table's primary-key prefix, so
+    /// secondary index entries are excluded.
     selector: Selector,
+    /// Secondary index specs reported by the `Tables` RPC.
     indexes: Arc<Vec<ResolvedIndexSpec>>,
 }
 
@@ -129,11 +135,16 @@ impl TableStream {
 /// Construct with [`SqlServer::new`], pass to [`sql_connect_stack`] to mount
 /// on an axum router.
 pub struct SqlServer {
+    /// Shared context for all requests. `Query` reads through a per-request copy with its own
+    /// read session, while session commands such as `SET` and `CREATE FUNCTION` run here and
+    /// persist across requests.
     ctx: Arc<SqlContext>,
+    /// Subscription decode state keyed by table name.
     streams: HashMap<String, TableStream>,
-    // Registration order, preserved for the `Tables` RPC so clients see
-    // tables in the same order the operator declared them.
+    /// Table names in registration order, so the `Tables` RPC lists tables in the order the
+    /// operator declared them.
     table_names: Vec<String>,
+    /// Store client for subscriptions and per-query read sessions.
     store: PrefixedStoreClient,
 }
 
@@ -256,6 +267,7 @@ pub fn sql_connect_stack(server: Arc<SqlServer>) -> ConnectRpcService<ServiceSer
 /// Connect handler implementing `sql.v1.Service`.
 #[derive(Clone)]
 pub struct SqlConnect {
+    /// Server state shared by every RPC.
     server: Arc<SqlServer>,
 }
 
@@ -389,12 +401,21 @@ type BatchEvaluator =
 type SubscriptionStream = Pin<Box<dyn Stream<Item = Result<StoreBatch, ConnectError>> + Send>>;
 type SubscriptionEvent = Option<Result<StoreBatch, ConnectError>>;
 
+/// Store batches a single poll may evaluate without producing a response before it yields.
 const MAX_FILTERED_FRAMES_PER_POLL: usize = 16;
 
+/// Subscription stream that yields one response for each Store batch with matching rows.
+///
+/// Batches without matching rows produce nothing. The stream ends after the first error.
 struct BatchPredicateStream {
+    /// Store batches from the subscription.
     upstream: SubscriptionStream,
+    /// Decodes and filters one batch, returning `None` when no rows match.
     evaluator: BatchEvaluator,
+    /// Event saved by the look-ahead poll that registers demand before evaluating the current
+    /// batch. `Some(None)` records the end of the upstream.
     staged: Option<SubscriptionEvent>,
+    /// Set once the stream has ended or yielded an error. Later polls return `None`.
     done: bool,
 }
 

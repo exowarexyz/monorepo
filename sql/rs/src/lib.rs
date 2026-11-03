@@ -121,6 +121,7 @@ mod tests {
         TableModel::from_config(&config).unwrap()
     }
 
+    /// Builds a primary-key scan over every column, without a row filter.
     fn unfiltered_scan(
         client: StoreClient,
         model: Arc<TableModel>,
@@ -132,7 +133,8 @@ mod tests {
             index_specs: Arc::new(Vec::new()),
         };
         let state = DataFusionSessionContext::new().state();
-        KvScanExec::try_new(&table, &state, None, &[], fetch).expect("scan")
+        KvScanExec::try_new(&table, &state, None, &[], fetch)
+            .expect("unfiltered scan must plan successfully")
     }
 
     fn key_payload(prefix: &Prefix, key: &Key, offset: usize, len: usize) -> Vec<u8> {

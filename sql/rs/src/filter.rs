@@ -13,40 +13,62 @@ use exoware_sdk::{
 };
 use std::{cmp::Ordering, collections::HashMap};
 
+/// A column constraint paired with the location of its value in a decoded row.
 #[derive(Debug, Clone)]
 pub(crate) enum PredicateAccess {
+    /// Read a value decoded from the primary key.
     Pk {
+        /// Position in the table's primary-key column order.
         pk_pos: usize,
+        /// Condition the decoded value must satisfy.
         constraint: PredicateConstraint,
     },
+    /// Read a value from the stored row or a covering index value.
     NonPk {
+        /// Position in the table's column order and stored value array.
         col_idx: usize,
+        /// Column type and nullability for interpreting the stored value.
         col: ResolvedColumn,
+        /// Condition the decoded value must satisfy.
         constraint: PredicateConstraint,
     },
 }
 
+/// A constraint on one field's ordered key encoding, compared bytewise.
 #[derive(Clone)]
 pub(crate) enum EncodedIndexConstraint {
+    /// Match these encoded bytes exactly.
     Eq(Vec<u8>),
+    /// Match any of these encoded values. An empty list matches nothing.
     In(Vec<Vec<u8>>),
+    /// Match the intersection of the lower and upper bounds.
     Range {
+        /// Lower encoded bound and whether equality is allowed, or `None` if unbounded.
         min: Option<(Vec<u8>, bool)>,
+        /// Upper encoded bound and whether equality is allowed, or `None` if unbounded.
         max: Option<(Vec<u8>, bool)>,
     },
 }
 
+/// A constraint on a fixed-width field in a secondary-index key payload.
 #[derive(Clone)]
 pub(crate) struct EncodedIndexPredicateCheck {
+    /// Byte offset from the end of the index prefix to the field's first byte.
     pub(crate) payload_offset: usize,
+    /// Number of encoded bytes occupied by the field.
     pub(crate) width: usize,
+    /// Condition applied to the field's encoded bytes.
     pub(crate) constraint: EncodedIndexConstraint,
 }
 
+/// Candidate filtering through encoded fields of a secondary-index key.
 #[derive(Clone)]
 pub(crate) struct EncodedIndexPredicatePlan {
+    /// Index prefix stripped before applying field offsets.
     pub(crate) prefix: Prefix,
+    /// Conditions that must all pass. An empty list imposes no field restrictions.
     pub(crate) checks: Vec<EncodedIndexPredicateCheck>,
+    /// Reject every key regardless of the prefix or checks.
     pub(crate) impossible: bool,
 }
 
@@ -71,9 +93,12 @@ impl EncodedIndexPredicatePlan {
     }
 }
 
+/// A candidate-key filter for the constraints supported by an index layout.
 #[derive(Clone)]
 pub(crate) enum IndexPredicatePlan {
+    /// Compare fixed-width fields directly in a lexicographic index payload.
     Encoded(EncodedIndexPredicatePlan),
+    /// Evaluate shared KV field references, including fields in a Z-order index.
     Shared(KvPredicate),
 }
 
@@ -93,17 +118,26 @@ impl IndexPredicatePlan {
     }
 }
 
+/// Result of translating a column constraint into ordered key comparisons.
 pub(crate) enum EncodedConstraintCompile {
+    /// Encoded comparison available for the column's key representation.
     Encoded(EncodedIndexConstraint),
+    /// This constraint requires evaluation outside the encoded comparison.
     Unsupported,
+    /// No value of the column's kind can satisfy the constraint.
     Impossible,
 }
 
+/// Values needed to project rows and evaluate the scan's column constraints.
 #[derive(Debug, Clone)]
 pub(crate) struct ScanAccessPlan {
+    /// Required key values, indexed by primary-key position.
     pub(crate) required_pk_mask: Vec<bool>,
+    /// Required stored values, indexed by table column. Primary-key entries are false.
     pub(crate) required_non_pk_columns: Vec<bool>,
+    /// Value sources in output column order, including repeated projections.
     pub(crate) projection_sources: Vec<ProjectionSource>,
+    /// Column constraints paired with their value sources, all of which must pass.
     pub(crate) predicate_checks: Vec<PredicateAccess>,
 }
 

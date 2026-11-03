@@ -32,13 +32,18 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+/// Encodes rows of one table into Store entries.
 #[derive(Debug)]
 pub struct TableWriter {
+    /// Table layout that determines the primary-key and row-value encodings.
     model: Arc<TableModel>,
+    /// Secondary indexes. Each row produces one index entry per spec, in this order.
     index_specs: Arc<Vec<ResolvedIndexSpec>>,
 }
 
 impl TableWriter {
+    /// Encodes `values`, given in table column order, as the base-row entry followed by one
+    /// entry per secondary index.
     pub fn encode_row(&self, values: Vec<CellValue>) -> Result<Vec<(Key, Vec<u8>)>, String> {
         let row = KvRow { values };
         if row.values.len() != self.model.columns.len() {
@@ -62,22 +67,40 @@ impl TableWriter {
     }
 }
 
+/// Buffers rows across a schema's tables for upload in atomic Store batches.
 #[derive(Debug)]
 pub struct BatchWriter {
+    /// Store client whose namespace prefixes staged keys and that commits each batch.
     client: PrefixedStoreClient,
+    /// Row encoders keyed by registered table name.
     tables: HashMap<String, TableWriter>,
+    /// Next ID assigned when pending entries are taken into a new batch. Retries reuse
+    /// their original ID.
     next_request_id: u64,
+    /// Batches whose upload failed, awaiting retry by `prepare_flush` in request ID order.
+    /// The mutex lets upload outcomes be reported through a shared reference.
     failed_prepared: Mutex<Vec<PreparedBatch>>,
+    /// Keys of encoded entries not yet taken into a batch, in insert order. Each row adds its
+    /// base entry and then its index entries.
     pub(crate) pending_keys: Vec<Key>,
+    /// Values for `pending_keys`, matched by position.
     pub(crate) pending_values: Vec<Bytes>,
 }
 
+/// Entries taken from a `BatchWriter` for one upload attempt.
+///
+/// Report the outcome with `mark_flush_persisted` or `mark_flush_failed`. The writer retains
+/// no copy until `mark_flush_failed` queues the batch for retry.
 #[derive(Debug)]
 #[must_use]
 pub struct PreparedBatch {
+    /// Writer-assigned ID retained across retries.
     request_id: u64,
+    /// Number of key-value entries, counting index entries separately from base rows.
     entry_count: usize,
+    /// Entry keys in insert order.
     keys: Vec<Key>,
+    /// Values for `keys`, matched by position.
     values: Vec<Bytes>,
 }
 
@@ -95,10 +118,14 @@ impl PreparedBatch {
     }
 }
 
+/// Outcome of a persisted `PreparedBatch`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BatchReceipt {
+    /// Request ID of the persisted batch.
     pub writer_request_id: u64,
+    /// Number of key-value entries written, counting index entries separately from base rows.
     pub entry_count: usize,
+    /// Store sequence number returned by the commit.
     pub store_sequence_number: u64,
 }
 
@@ -154,7 +181,7 @@ impl BatchWriter {
                 .sum::<usize>()
     }
 
-    /// Flush pending rows to ingest and return the post-ingest consistency token.
+    /// Flushes the next prepared batch and returns its Store sequence number, or zero if empty.
     pub async fn flush(&mut self) -> DataFusionResult<u64> {
         Ok(self
             .flush_with_receipt()
@@ -163,7 +190,7 @@ impl BatchWriter {
             .unwrap_or(0))
     }
 
-    /// Flush pending rows to ingest and return metadata for the persisted batch.
+    /// Flushes the next prepared batch and returns its receipt, or `None` if empty.
     pub async fn flush_with_receipt(&mut self) -> DataFusionResult<Option<BatchReceipt>> {
         let Some(prepared) = self.prepare_flush()? else {
             return Ok(None);
@@ -171,6 +198,8 @@ impl BatchWriter {
         Ok(Some(self.commit_upload(prepared).await?))
     }
 
+    /// Takes the failed batch with the lowest request ID, or else every pending entry as a new
+    /// batch. Returns `None` when neither exists.
     pub fn prepare_flush(&mut self) -> DataFusionResult<Option<PreparedBatch>> {
         if let Some(prepared) = self.take_failed_prepared() {
             return Ok(Some(prepared));
@@ -281,10 +310,17 @@ impl StoreBatchUpload for BatchWriter {
     }
 }
 
+/// DataFusion sink for `INSERT` into one table.
+///
+/// Encodes every input row with its index entries and commits them in one atomic Store write
+/// after the input ends. Reports the number of input rows written.
 #[derive(Debug)]
 pub(crate) struct KvIngestSink {
+    /// Store client whose namespace prefixes the written keys.
     pub(crate) client: PrefixedStoreClient,
+    /// Table layout that determines the sink schema and row encodings.
     pub(crate) model: Arc<TableModel>,
+    /// Secondary indexes. Each row produces one index entry per spec.
     pub(crate) index_specs: Arc<Vec<ResolvedIndexSpec>>,
 }
 

@@ -59,40 +59,84 @@ use std::{
     sync::Arc,
 };
 
+/// Optimizer rule that replaces a DataFusion `Aggregate` over a `KvTable` scan with a
+/// `KvAggregateNode` when every group and aggregate expression compiles to Store reductions.
+///
+/// The scan may sit beneath projections and subquery aliases, and plans the rule cannot
+/// compile are left unchanged.
 #[derive(Debug)]
 pub(crate) struct KvAggregatePushdownRule;
 
+/// Key space read by a Store reduction and used to locate each input column.
 #[derive(Debug, Clone)]
 pub(crate) enum AggregateAccessPath {
+    /// Base rows keyed by primary key. Columns come from the primary key bytes or the row value.
     PrimaryKey,
-    SecondaryIndex { spec_idx: usize },
+    /// Index entries supply columns from the index key, the trailing primary key, or
+    /// values the index stores.
+    SecondaryIndex {
+        /// Position in the table's resolved index specifications.
+        spec_idx: usize,
+    },
 }
 
+/// How one aggregate expression's DataFusion state columns are read from a job's reducer
+/// results. Indices point into the owning job's `request.reducers`.
 #[derive(Debug, Clone)]
 pub(crate) enum AggregateOutputPlan {
-    Direct { reducer_idx: usize },
-    Avg { sum_idx: usize, count_idx: usize },
+    /// One reducer result fills the expression's single state column.
+    Direct {
+        /// Reducer supplying the aggregate's only state value.
+        reducer_idx: usize,
+    },
+    /// Two reducer results fill the count and sum state columns of `AVG`.
+    Avg {
+        /// Sum reducer, mapped to the second state column.
+        sum_idx: usize,
+        /// Count reducer, mapped to the first state column.
+        count_idx: usize,
+    },
 }
 
+/// DataFusion aggregate function that can be pushed down to Store reductions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum AggregatePushdownFunction {
+    /// `COUNT`, reduced as a row count or a count of non-null argument values.
     Count,
+    /// Sum of non-null argument values.
     Sum,
+    /// Minimum non-null argument value.
     Min,
+    /// Maximum non-null argument value.
     Max,
+    /// `AVG`, reduced as a sum and a count of the argument. Pushdown requires a `Float64`
+    /// result type.
     Avg,
 }
 
+/// Scalar expression over table columns that Store reducers can evaluate per row.
+///
+/// The tree is independent of the access path. It becomes a `KvExpr` only once a job has
+/// chosen where each referenced column is decoded from.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum PushdownValueExpr {
+    /// Column at this index in the table model's columns.
     Column(usize),
+    /// Same value for every input row.
     Literal(KvReducedValue),
+    /// Sum of the operands.
     Add(Box<Self>, Box<Self>),
+    /// Left operand minus right operand.
     Sub(Box<Self>, Box<Self>),
+    /// Product of the operands.
     Mul(Box<Self>, Box<Self>),
+    /// Left operand divided by right operand.
     Div(Box<Self>, Box<Self>),
+    /// Conversion of an `Int64` or `UInt64` operand to `Float64`.
     CastFloat64(Box<Self>),
+    /// Lowercase form of a `Utf8` operand.
     Lower(Box<Self>),
+    /// `date_trunc('day', ...)` of a date or timezone-free timestamp operand.
     DateTruncDay(Box<Self>),
 }
 
@@ -115,53 +159,102 @@ impl PushdownValueExpr {
     }
 }
 
+/// Value an aggregate function consumes from each row.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum AggregatePushdownArgument {
+    /// Every row counts, as in `COUNT(*)` or `COUNT` of a non-null literal. Only `COUNT` uses it.
     CountAll,
+    /// Expression evaluated for each row.
     Expr(PushdownValueExpr),
 }
 
+/// Aggregate call rewritten into a pushdown function, a per-row argument, and the row
+/// conditions that limit which rows it reduces.
 #[derive(Debug, Clone)]
 pub(crate) struct NormalizedAggregateExpr {
+    /// Aggregate function to reduce with.
     pub(crate) func: AggregatePushdownFunction,
+    /// Value reduced from each selected row.
     pub(crate) argument: AggregatePushdownArgument,
+    /// Aggregate-local `FILTER (WHERE ...)`, evaluated by the reducer. Scalar plans fold it
+    /// into `guard`.
     pub(crate) filter: Option<Expr>,
+    /// Condition applied to the job's input, so it can narrow key ranges. Combines the
+    /// disjunction of `CASE WHEN` conditions with `filter` for scalar aggregates.
     pub(crate) guard: Option<Expr>,
 }
 
+/// One Store range reduction, issued once per key range on a single access path.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct AggregateReduceJob {
+    /// Reducers, group keys, and row filter, all compiled against the job's access path.
+    /// Each range returns partial results per group, or one scalar result when `group_by` is
+    /// empty.
     pub(crate) request: RangeReduceRequest,
+    /// Primary key or secondary index key ranges to reduce, each sent as its own request.
+    /// The ranges may cover more rows than the filters accept, and `request.filter` enforces
+    /// the rest. Empty when the predicate yields no range, so the job reduces nothing.
     pub(crate) ranges: Vec<KeyRange>,
 }
 
+/// Store job and output mapping compiled for one aggregate expression before jobs are merged.
 #[derive(Debug, Clone)]
 pub(crate) struct AggregateExprPlan {
+    /// Job that reduces only this expression.
     pub(crate) job: AggregateReduceJob,
+    /// State mapping whose indices point into `job.request.reducers`.
     pub(crate) output: AggregateOutputPlan,
 }
 
+/// Store job shared by aggregate expressions with identical ranges, group keys, and row filter.
 #[derive(Debug, Clone)]
 pub(crate) struct CombinedAggregateJob {
+    /// Job whose reducers are the concatenation of every member expression's reducers.
     pub(crate) job: AggregateReduceJob,
+    /// Members as pairs of the expression's position in the aggregate's `aggr_expr` and its
+    /// output mapping, rebased onto the combined reducer list. Empty for the seed job.
     pub(crate) expr_plans: Vec<(usize, AggregateOutputPlan)>,
 }
 
+/// Compiled Store reductions that produce partial aggregate states for one SQL aggregate.
+///
+/// Each job runs independently with its own access path and ranges. The same group can
+/// therefore appear in several rows, and DataFusion merges those rows in its final aggregate.
 #[derive(Debug, Clone)]
 pub(crate) struct AggregatePushdownSpec {
+    /// Store client for the table's key prefix.
     pub(crate) client: PrefixedStoreClient,
+    /// Number of `GROUP BY` expressions. They are the leading fields of `schema` and of the
+    /// state schema. Zero for a scalar aggregate.
     pub(crate) group_count: usize,
+    /// Reducer-free job that enumerates groups under the scan filters when all aggregates
+    /// are guarded, including grouping without aggregates. Preserves groups that none of
+    /// the aggregate jobs emit.
     pub(crate) seed_job: Option<AggregateReduceJob>,
+    /// Jobs that compute the aggregate expressions. Each expression belongs to exactly one job.
     pub(crate) aggregate_jobs: Vec<CombinedAggregateJob>,
+    /// `EXPLAIN` details for the seed job and each entry of `aggregate_jobs`.
     pub(crate) diagnostics: AggregatePushdownDiagnostics,
+    /// Final output schema of the original aggregate: group fields followed by one field per
+    /// aggregate expression.
     pub(crate) schema: SchemaRef,
 }
 
+/// Leaf execution plan that runs Store reduce jobs and emits partial aggregate states.
+///
+/// It feeds an `AggregateExec` in `AggregateMode::Final` mode. That operator merges rows
+/// with equal group keys and evaluates each DataFusion aggregate from the merged states.
 #[derive(Debug, Clone)]
 pub(crate) struct KvAggregateExec {
+    /// Jobs to run and the shapes needed to decode their responses.
     pub(crate) spec: Arc<AggregatePushdownSpec>,
+    /// Single-partition, bounded properties whose schema is the group fields followed by every
+    /// aggregate's state fields in expression order.
     pub(crate) properties: Arc<PlanProperties>,
+    /// For each aggregate expression, the schema index of its first state field.
     state_offsets: Vec<usize>,
+    /// State values for fields a job does not compute, excluding group fields.
+    /// Nullable fields start null, and non-nullable fields start at zero.
     empty_states: Vec<ScalarValue>,
 }
 
@@ -325,10 +418,15 @@ impl OptimizerRule for KvAggregatePushdownRule {
     }
 }
 
+/// Logical plan node that stands in for an aggregate whose input scan the Store reduces.
+///
+/// The node has no inputs because the Store jobs read the table directly.
 #[derive(Debug, Clone)]
 struct KvAggregateNode {
-    // The original aggregate owns the output schema and logical identity of the compiled Store job
+    /// Original aggregate. It owns the node's output schema and logical identity, and its
+    /// aggregate expressions plan the final DataFusion aggregation.
     aggregate: Aggregate,
+    /// Store jobs compiled from `aggregate`.
     spec: Arc<AggregatePushdownSpec>,
 }
 
@@ -474,6 +572,7 @@ impl ExtensionPlanner for KvAggregateExtensionPlanner {
     }
 }
 
+/// Query planner that adds `KvAggregateExtensionPlanner` to DataFusion's default planner.
 #[derive(Debug)]
 pub(crate) struct KvQueryPlanner;
 
@@ -1362,6 +1461,7 @@ pub(crate) fn compile_pushdown_value_expr(
     }
 }
 
+/// Resolves aggregate-expression columns against the table schema for type checking.
 #[derive(Debug)]
 struct AggregateExprSchema<'a>(&'a TableModel);
 

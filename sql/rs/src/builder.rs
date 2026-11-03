@@ -15,22 +15,39 @@ use datafusion::{
 use exoware_sdk::kv_codec::{StoredRow, StoredValue};
 use std::sync::Arc;
 
+/// Mutable Arrow array storage for one output column, selected from the table schema.
 pub(crate) enum ColumnBuilder {
+    /// Signed integer values.
     Int64(Int64Builder),
+    /// Unsigned integer values.
     UInt64(UInt64Builder),
+    /// Double-precision floating-point values.
     Float64(Float64Builder),
+    /// Boolean values.
     Boolean(BooleanBuilder),
+    /// Dates stored as days since the Unix epoch.
     Date32(Date32Builder),
+    /// Dates stored as milliseconds since the Unix epoch.
     Date64(Date64Builder),
+    /// Microsecond timestamps with the schema's timestamp data type.
     Timestamp(TimestampMicrosecondBuilder),
+    /// 128-bit decimal coefficients with the schema's precision and scale.
     Decimal128(Decimal128Builder),
+    /// 256-bit decimal coefficients with the schema's precision and scale.
     Decimal256(Decimal256Builder),
+    /// UTF-8 text values.
     Utf8(StringBuilder),
+    /// Byte strings with the schema's fixed width.
     FixedBinary(FixedSizeBinaryBuilder),
+    /// Variable-length byte strings.
     Binary(BinaryBuilder),
+    /// Lists of signed integer values.
     ListInt64(ListBuilder<Int64Builder>),
+    /// Lists of double-precision floating-point values.
     ListFloat64(ListBuilder<Float64Builder>),
+    /// Lists of boolean values.
     ListBoolean(ListBuilder<BooleanBuilder>),
+    /// Lists of UTF-8 text values.
     ListUtf8(ListBuilder<StringBuilder>),
 }
 
@@ -337,15 +354,32 @@ pub(crate) fn append_archived_non_pk_value(
     Ok(())
 }
 
+/// Location and schema information needed to append one projected column.
 #[derive(Debug, Clone)]
 pub(crate) enum ProjectionSource {
-    Pk { col_idx: usize, pk_pos: usize },
-    NonPk { col_idx: usize, col: ResolvedColumn },
+    /// Take the value from the decoded primary key.
+    Pk {
+        /// Position in the table's column order for selecting the output type.
+        col_idx: usize,
+        /// Position in the decoded primary-key values.
+        pk_pos: usize,
+    },
+    /// Take the value from the stored row or a covering index value.
+    NonPk {
+        /// Position in the table's column order and stored value array.
+        col_idx: usize,
+        /// Column type and nullability for validating and appending the value.
+        col: ResolvedColumn,
+    },
 }
 
+/// Accumulates projected rows in output column order for one Arrow record batch.
 pub(crate) struct ProjectedBatchBuilder {
+    /// Value source for each output column, in the same order as `builders`.
     pub(crate) sources: Vec<ProjectionSource>,
+    /// One array builder per output column, including repeated projections.
     pub(crate) builders: Vec<ColumnBuilder>,
+    /// Number of rows appended, retained even when the projection has no columns.
     pub(crate) row_count: usize,
 }
 

@@ -12,8 +12,13 @@ use datafusion::{
 use exoware_sdk::{kv_codec::decode_stored_row, PrefixedStoreClient};
 use std::sync::Arc;
 
+/// Named tables sharing one storage namespace. Table insertion order assigns family
+/// identifiers in persisted keys and must remain stable when reopening data.
 pub struct KvSchema {
+    /// Namespace-scoped client shared by every table built through this schema.
     client: PrefixedStoreClient,
+    /// Unique table names and shared providers in table-prefix order. Empty until
+    /// tables are added, with at most sixteen entries.
     tables: Vec<(String, Arc<KvTable>)>,
 }
 
