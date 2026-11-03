@@ -2,9 +2,9 @@
 //!
 //! ## Registry
 //!
-//! Servers register **gzip** and **zstd** via [`connect_compression_registry`] (same as
-//! [`connectrpc::compression::CompressionRegistry::default`]) so callers without zstd
-//! (including typical browsers) can still negotiate gzip.
+//! Servers register **gzip** and **zstd** via [`connect_compression_registry`] (the codecs
+//! of [`connectrpc::compression::CompressionRegistry::default`], with a faster zstd level)
+//! so callers without zstd (including typical browsers) can still negotiate gzip.
 //!
 //! ## Rust client transport
 //!
@@ -28,7 +28,10 @@ pub use connectrpc::{
     client::{BoxFuture, ClientBody, ClientTransport, HttpClient, ServiceTransport},
     rustls::{self, ClientConfig},
 };
-use connectrpc::{compression::CompressionRegistry, ConnectError, Protocol};
+use connectrpc::{
+    compression::{CompressionRegistry, ZstdProvider},
+    ConnectError, Protocol,
+};
 use cookie_store::{Cookie, CookieDomain, CookieStore};
 use http::header::{ACCEPT_ENCODING, AUTHORIZATION, COOKIE, SET_COOKIE};
 pub use http::{Request, Response};
@@ -553,11 +556,15 @@ pub fn set_tcp_nodelay(tcp: &mut TcpStream) {
     }
 }
 
+/// zstd level for bodies this registry compresses, which are mostly query and stream
+/// responses.
+const ZSTD_LEVEL: i32 = -1;
+
 /// gzip + zstd - used for [`connectrpc::ConnectRpcService::with_compression`] and
 /// [`connectrpc::client::ClientConfig::compression`].
 #[must_use]
 pub fn connect_compression_registry() -> CompressionRegistry {
-    CompressionRegistry::default()
+    CompressionRegistry::default().register(ZstdProvider::with_level(ZSTD_LEVEL))
 }
 
 /// Wraps [`HttpClient`] with zstd first for the default response codecs (see module docs).
@@ -883,6 +890,31 @@ mod tests {
             headers.append(SET_COOKIE, v.parse().unwrap());
         }
         headers
+    }
+
+    #[test]
+    fn registry_compresses_zstd_at_the_configured_level() {
+        use connectrpc::compression::CompressionProvider;
+
+        // Partly repetitive, so level -1 and the default level 3 produce different frames.
+        let body: Vec<u8> = (0..64 * 1024u32)
+            .flat_map(|i| (i.wrapping_mul(2_654_435_761) % 1_000).to_le_bytes())
+            .collect();
+        let registry = connect_compression_registry();
+        assert_eq!(registry.accept_encoding_header(), "gzip, zstd");
+
+        let compressed = registry.compress("zstd", &body).unwrap();
+        let expected = ZstdProvider::with_level(ZSTD_LEVEL)
+            .compress(&body)
+            .unwrap();
+        assert_eq!(compressed, expected);
+        assert_ne!(compressed, ZstdProvider::default().compress(&body).unwrap());
+        assert_eq!(
+            registry
+                .decompress_with_limit("zstd", compressed, body.len())
+                .unwrap(),
+            body
+        );
     }
 
     #[test]
