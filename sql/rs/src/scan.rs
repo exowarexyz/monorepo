@@ -1113,24 +1113,34 @@ mod tests {
         Router,
     };
     use bytes::Bytes;
+    use commonware_codec::Encode;
     use datafusion::{
         arrow::{
             array::{
                 ArrayRef, Decimal128Array, FixedSizeBinaryArray, Float64Array, Int64Array,
                 StringArray, TimestampMicrosecondArray, UInt64Array,
             },
+            compute::SortOptions,
             datatypes::{DataType, TimeUnit},
             record_batch::RecordBatch,
         },
         common::{Result as DataFusionResult, ScalarValue},
         datasource::MemTable,
+        logical_expr::{col, in_list, lit},
+        physical_expr::{expressions::Column, PhysicalSortExpr},
+        physical_plan::{ExecutionPlan, SortOrderPushdownResult},
         prelude::SessionContext as DataFusionSessionContext,
     };
-    use exoware_sdk::{transport::set_tcp_nodelay, StoreClient, StoreKeyPrefix};
+    use exoware_sdk::{
+        kv_codec::{StoredRow, StoredValue},
+        transport::set_tcp_nodelay,
+        PrefixedStoreClient, RangeMode, StoreClient, StoreKeyPrefix,
+    };
     use exoware_server::{
         Query, QueryExtra, QueryResult, QueryState, RangeScan, RangeScanBatch, RangeScanResult,
         Sequence,
     };
+    use futures::TryStreamExt;
     use std::{
         collections::BTreeMap,
         sync::{
@@ -1425,9 +1435,6 @@ mod tests {
 
     #[tokio::test]
     async fn limit_counts_only_rows_with_valid_projected_values() {
-        use commonware_codec::Encode;
-        use exoware_sdk::kv_codec::{StoredRow, StoredValue};
-
         // Both tables start with one valid row, and each limited query must return it.
         let fixture = Fixture::new(
             vec![
@@ -1507,12 +1514,6 @@ mod tests {
 
     #[tokio::test]
     async fn limit_spans_output_batches_without_resetting_the_budget() {
-        use datafusion::{
-            logical_expr::{col, in_list, lit},
-            physical_plan::ExecutionPlan,
-        };
-        use futures::TryStreamExt;
-
         // One row past a full flush makes the limit span two output batches. Rows beyond
         // the limit would surface a budget that resets after the first flush.
         let limit = super::BATCH_FLUSH_ROWS + 1;
@@ -2428,6 +2429,177 @@ mod tests {
                 fresh.map(|plan| (plan.spec_idx, plan.ranges)),
                 "{sql}"
             );
+        }
+    }
+
+    /// A primary-key prefix constraint keeps the qualifying index plan.
+    #[tokio::test]
+    async fn primary_key_prefix_keeps_qualifying_index_plan() {
+        // Fixing tenant leaves order_id unconstrained, so the index remains eligible. Within
+        // each tenant, the index orders by created and the primary key orders by order_id.
+        let fixture = Fixture::new(
+            vec![
+                column("tenant", DataType::Int64, false),
+                column("order_id", DataType::Int64, false),
+                column("created", DataType::Int64, false),
+                column("payload", DataType::Int64, false),
+            ],
+            &["tenant", "order_id"],
+            vec![index("tenant_created", &["tenant", "created"], &[])],
+            vec![
+                Arc::new(Int64Array::from(vec![5, 5, 5, 5, 6, 6])),
+                Arc::new(Int64Array::from(vec![1, 2, 3, 4, 1, 2])),
+                Arc::new(Int64Array::from(vec![40, 10, 30, 20, 50, 60])),
+                Arc::new(Int64Array::from(vec![100, 200, 300, 400, 500, 600])),
+            ],
+        )
+        .await;
+
+        // The covering index supplies both projected columns in the requested order. Results
+        // must match DataFusion with exactly one reverse index range read.
+        let sql =
+            "SELECT order_id, created FROM orders WHERE tenant = 5 ORDER BY created DESC LIMIT 2";
+        let requests = fixture.check(sql).await;
+        assert!(
+            matches!(requests.as_slice(), [Request::Range { start, forward: false, .. }] if fixture.index_matches(0, start)),
+            "the query must use exactly one reverse index range read, got {requests:?}"
+        );
+
+        // The leaf scan must keep the index plan with the reversed direction and the limit.
+        let mut plan = fixture
+            .store
+            .datafusion()
+            .sql(sql)
+            .await
+            .unwrap()
+            .create_physical_plan()
+            .await
+            .unwrap();
+        while let Some(child) = plan.children().first() {
+            plan = (*child).clone();
+        }
+        let scan = plan.downcast_ref::<KvScanExec>().unwrap();
+        assert_eq!(scan.index_plan.as_ref().map(|plan| plan.spec_idx), Some(0));
+        assert_eq!(scan.direction, Some(RangeMode::Reverse));
+        assert_eq!(scan.fetch, Some(2));
+    }
+
+    /// Index ranges share one budget for accepted rows.
+    #[tokio::test]
+    async fn limit_spans_distinct_index_ranges() {
+        // Varying the cover columns exercises both covering scans and base row lookups.
+        for covering in [false, true] {
+            // Two rows per tag let the query cross a range boundary before reaching the limit.
+            let cover: &[&str] = if covering { &["amount"] } else { &[] };
+            let fixture = Fixture::new(
+                vec![
+                    column("id", DataType::Int64, false),
+                    column("tag", DataType::Int64, false),
+                    column("amount", DataType::Int64, false),
+                ],
+                &["id"],
+                vec![index("tag", &["tag"], cover)],
+                vec![
+                    Arc::new(Int64Array::from(vec![0, 1, 2, 3])),
+                    Arc::new(Int64Array::from(vec![7, 7, 9, 9])),
+                    Arc::new(Int64Array::from(vec![10, 20, 30, 40])),
+                ],
+            )
+            .await;
+
+            // The IN list must yield two index ranges with the configured coverage.
+            let scan = KvScanExec::try_new(
+                &fixture.table,
+                &fixture.store.datafusion().state(),
+                Some(&vec![2]),
+                &[in_list(col("tag"), vec![lit(7i64), lit(9i64)], false)],
+                Some(3),
+            )
+            .unwrap();
+            let plan = scan.index_plan.as_ref().unwrap();
+            assert_eq!(plan.ranges.len(), 2);
+            assert_eq!(
+                scan.access_plan
+                    .index_covers_required_non_pk(&scan.index_specs[plan.spec_idx]),
+                covering,
+            );
+
+            // The scan itself must emit exactly three amounts. The second range must contribute
+            // only its first row.
+            let batches = scan
+                .execute(0, fixture.store.datafusion().task_ctx())
+                .unwrap()
+                .try_collect::<Vec<_>>()
+                .await
+                .unwrap();
+            let amounts = batches.iter().flat_map(|batch| {
+                batch
+                    .column(0)
+                    .as_any()
+                    .downcast_ref::<Int64Array>()
+                    .unwrap()
+                    .values()
+                    .iter()
+                    .copied()
+            });
+            assert!(amounts.eq([10, 20, 30]));
+        }
+    }
+
+    /// Sort and limit pushdown share the cached plans.
+    #[test]
+    fn sort_and_fetch_clones_share_cached_plans() {
+        // The tag index covers amount so the scan can use its key order.
+        let schema = KvSchema::new(PrefixedStoreClient::empty(StoreClient::new(
+            "http://127.0.0.1:1",
+        )))
+        .table(
+            "orders",
+            vec![
+                column("id", DataType::Int64, false),
+                column("tag", DataType::Int64, false),
+                column("amount", DataType::Int64, false),
+            ],
+            vec!["id".into()],
+            vec![index("tag", &["tag"], &["amount"])],
+        )
+        .unwrap();
+
+        // Fixing tag leaves the id suffix ordered. The projection puts id at output position 2.
+        let state = DataFusionSessionContext::new().state();
+        let scan = KvScanExec::try_new(
+            &schema.tables()[0].1,
+            &state,
+            Some(&vec![2, 1, 0]),
+            &[col("tag").eq(lit(7i64))],
+            None,
+        )
+        .unwrap();
+
+        // A descending id sort must push down exactly and clone the scan. Applying a limit
+        // creates another clone.
+        let SortOrderPushdownResult::Exact { inner: sorted } = scan
+            .try_pushdown_sort(&[PhysicalSortExpr {
+                expr: Arc::new(Column::new("id", 2)),
+                options: SortOptions {
+                    descending: true,
+                    ..Default::default()
+                },
+            }])
+            .unwrap()
+        else {
+            panic!("a fixed tag must leave the primary-key suffix ordered");
+        };
+        let limited = sorted.with_fetch(Some(2)).unwrap();
+
+        // Both clones must share the original plans.
+        for clone in [sorted, limited] {
+            let clone = clone.downcast_ref::<KvScanExec>().unwrap();
+            assert!(Arc::ptr_eq(&scan.access_plan, &clone.access_plan));
+            assert!(Arc::ptr_eq(
+                scan.index_plan.as_ref().unwrap(),
+                clone.index_plan.as_ref().unwrap(),
+            ));
         }
     }
 }

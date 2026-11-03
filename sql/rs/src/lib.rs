@@ -52,7 +52,7 @@ mod tests {
         },
         common::{config::ConfigOptions, ScalarValue},
         functions_aggregate::expr_fn::sum,
-        logical_expr::{col, in_list, Expr, Operator},
+        logical_expr::{col, expr::Case, in_list, Cast, Expr, Operator, TryCast},
         physical_expr::{expressions::Column, LexOrdering, PhysicalSortExpr},
         physical_optimizer::{
             limit_pushdown::LimitPushdown, pushdown_sort::PushdownSort, PhysicalOptimizerRule,
@@ -750,8 +750,6 @@ mod tests {
 
     #[test]
     fn cast_case_normalization_preserves_casts_and_eligibility() {
-        use datafusion::logical_expr::{expr::Case, Cast, TryCast};
-
         // `make_case` builds a CASE with one `status = 'open'` branch, and every accepted form
         // must return that condition as its guard.
         let (model, _) = test_model();
@@ -5822,6 +5820,64 @@ mod tests {
         assert!(err
             .to_string()
             .contains("index evolution must be append-only"));
+    }
+
+    /// Backfill rejects changes to an existing index's cover columns or layout.
+    #[tokio::test]
+    async fn backfill_added_indexes_rejects_cover_or_layout_changes() {
+        // Both cases use the same current indexes to isolate changes in the previous specs.
+        let table = |previous: Vec<IndexSpec>| {
+            // The current schema gives status_idx a cover column and amount_idx a ZOrder layout.
+            let client = StoreClient::new("http://127.0.0.1:1");
+            let schema = KvSchema::new(PrefixedStoreClient::empty(client))
+                .table(
+                    "orders",
+                    vec![
+                        TableColumnConfig::new("id", DataType::Int64, false),
+                        TableColumnConfig::new("status", DataType::Utf8, false),
+                        TableColumnConfig::new("amount_cents", DataType::Int64, false),
+                    ],
+                    vec!["id".to_string()],
+                    vec![
+                        IndexSpec::new("status_idx", vec!["status".to_string()])
+                            .expect("index spec must be valid")
+                            .with_cover_columns(vec!["amount_cents".to_string()]),
+                        IndexSpec::new("amount_idx", vec!["amount_cents".to_string()])
+                            .expect("index spec must be valid")
+                            .with_layout(IndexLayout::ZOrder),
+                    ],
+                )
+                .expect("schema must build");
+
+            // Existing index definitions must match before backfill reads stored rows.
+            async move { schema.backfill_added_indexes("orders", &previous).await }
+        };
+
+        // Each case changes only cover columns or layout while keeping names and key columns fixed.
+        for previous in [
+            vec![
+                IndexSpec::new("status_idx", vec!["status".to_string()])
+                    .expect("index spec must be valid"),
+                IndexSpec::new("amount_idx", vec!["amount_cents".to_string()])
+                    .expect("index spec must be valid")
+                    .with_layout(IndexLayout::ZOrder),
+            ],
+            vec![
+                IndexSpec::new("status_idx", vec!["status".to_string()])
+                    .expect("index spec must be valid")
+                    .with_cover_columns(vec!["amount_cents".to_string()]),
+                IndexSpec::new("amount_idx", vec!["amount_cents".to_string()])
+                    .expect("index spec must be valid"),
+            ],
+        ] {
+            // Backfill must reject both changes as modifications to an existing index.
+            let err = table(previous)
+                .await
+                .expect_err("changed cover columns or layout must be rejected");
+            assert!(err
+                .to_string()
+                .contains("index evolution must be append-only"));
+        }
     }
 
     #[tokio::test]
