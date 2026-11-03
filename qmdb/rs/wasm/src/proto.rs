@@ -4,6 +4,9 @@ pub mod qmdb {
         #![allow(unused_imports)]
         #![allow(clippy::derivable_impls)]
         #![allow(clippy::match_single_binding)]
+        #![allow(elided_lifetimes_in_paths)]
+        #![allow(clippy::use_self)]
+        #![allow(clippy::missing_const_for_fn)]
         include!(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/../src/gen/qmdb.v1.rs"
@@ -18,6 +21,9 @@ pub mod common {
             #![allow(unused_imports)]
             #![allow(clippy::derivable_impls)]
             #![allow(clippy::match_single_binding)]
+            #![allow(elided_lifetimes_in_paths)]
+            #![allow(clippy::use_self)]
+            #![allow(clippy::missing_const_for_fn)]
             include!(concat!(
                 env!("CARGO_MANIFEST_DIR"),
                 "/../../../sdk/rs/src/gen/common.kv.v1.rs"

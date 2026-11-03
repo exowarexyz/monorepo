@@ -10,6 +10,9 @@ homepage.workspace = true
 repository = "https://github.com/exowarexyz/monorepo/tree/main/examples/simulator"
 documentation = "https://docs.rs/exoware-simulator"
 
+[lints]
+workspace = true
+
 [dependencies]
 axum = { workspace = true }
 buffa = { workspace = true }

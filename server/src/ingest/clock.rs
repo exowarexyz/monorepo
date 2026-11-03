@@ -106,7 +106,7 @@ impl PutDeadline {
         Self { clock, at }
     }
 
-    pub fn at(&self) -> SystemTime {
+    pub const fn at(&self) -> SystemTime {
         self.at
     }
 
