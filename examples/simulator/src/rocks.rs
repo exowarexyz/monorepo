@@ -2,8 +2,9 @@
 //! RocksDB. A `meta` column family holds the state-floor row, and a `log` column family keeps
 //! one row per commit group: the exact `log.stream.v1.GetResponse` bytes the stream service
 //! serves for that sequence, loaded on demand. Everything is addressed by key: recovery and
-//! pruning never assume which SST files rows live in, so RocksDB is free to place and compact
-//! them however it likes.
+//! pruning never assume which SST files rows live in for their correctness, so RocksDB is free
+//! to place and compact them however it likes. Each log row does get its own file, bracketed
+//! by sentinel keys, so that ingestion and pruning never touch a row's payload.
 //!
 //! Writes bypass the WAL and the memtables: `prepare` coalesces queued requests into commit
 //! groups that each share one sequence number and queues them for a pool of stage workers,
@@ -470,7 +471,7 @@ struct QueuedWave {
 /// row carries all their rows in arrival order.
 struct PreparedWrite {
     sequence: u64,
-    /// Staged single-row log SST (the group's encoded batch), ready for ingestion.
+    /// Staged log SST (the group's encoded batch and its sentinel keys), ready for ingestion.
     log: PathBuf,
     /// Staged current-state SST (sorted by key, last write per key), ready for ingestion.
     state: PathBuf,
@@ -773,10 +774,10 @@ fn coalesce_queued_write(
     )
 }
 
-/// Stages one wave's two SST files in parallel: the single-row log SST on this thread, the
-/// sorted state SST on a scoped thread. Ingestion later links them into their column
-/// families, so each payload byte reaches the disk exactly once, in its final resting place.
-/// A staging failure is fatal; leftover staged files are removed by the next open.
+/// Stages one wave's two SST files in parallel, the log SST on this thread and the sorted
+/// state SST on a scoped thread. Ingestion later links them into their column families, so
+/// each payload byte reaches the disk exactly once, in its final resting place. A staging
+/// failure is fatal, and leftover staged files are removed by the next open.
 fn stage_wave(ingest_dir: &Path, wave: QueuedWave) -> PreparedWrite {
     let sequence = wave.sequence;
     let rows = &wave.rows;
@@ -807,8 +808,8 @@ fn stage_wave(ingest_dir: &Path, wave: QueuedWave) -> PreparedWrite {
     }
 }
 
-/// Stages the single-row log SST: the group's sequence mapped to the exact encoded batch the
-/// stream service serves. Uncompressed, like the state SST.
+/// Stages the log SST, one row mapping the group's sequence to the exact encoded batch the
+/// stream service serves, bracketed by the sentinel keys. Uncompressed, like the state SST.
 fn stage_log_file(path: &Path, sequence: u64, rows: &[(Bytes, Bytes)]) -> Result<usize, String> {
     let payload = encode_log_value(sequence, rows);
     let mut options = Options::default();
@@ -841,8 +842,12 @@ fn stage_log_file(path: &Path, sequence: u64, rows: &[(Bytes, Bytes)]) -> Result
 /// previous sequence's key with a trailing `1`. It sorts after that sequence's tail sentinel and
 /// before this sequence's row, so files of consecutive sequences stay disjoint, and it is where
 /// `prune_log` ends the tombstone for the sequences below, so the tombstone stays clear of this
-/// file. Readers skip keys of this length.
+/// file. Readers that iterate rows skip keys of this length, while the oldest-retained lookup
+/// reads the head sentinel on purpose.
 fn log_head_sentinel(sequence: u64) -> [u8; LOG_BATCH_KEY_LEN + 1] {
+    // Sequences start at 1. A wrapped subtraction here would make the prune tombstone end
+    // above every key and erase the whole log.
+    assert!(sequence > 0, "log sequences must start at 1");
     let mut key = [0u8; LOG_BATCH_KEY_LEN + 1];
     key[..LOG_BATCH_KEY_LEN].copy_from_slice(&sequence_log_key(sequence - 1));
     key[LOG_BATCH_KEY_LEN] = 1;
@@ -1345,8 +1350,8 @@ impl RocksStore {
         // published + 1), and everything at or below it is durable and applied to the state.
         // That also makes this safe against the writer's concurrent, lock-free log ingestion:
         // an in-flight group's row sits above every published frontier this prune could have
-        // loaded. Space is reclaimed by ordinary compaction; nothing assumes which SST files
-        // hold the rows.
+        // loaded. Space is reclaimed by ordinary compaction, and correctness never assumes
+        // which SST files hold the rows.
         //
         // The tombstone ends at the first retained sequence's head sentinel, the smallest key
         // of its file, so it never overlaps a retained file. An overlapping tombstone would
@@ -3084,20 +3089,30 @@ mod tests {
             store.put_batch(large_batch(tag)).await.expect("put");
         }
 
-        // Retention enforcement runs this lookup after every commit, so it must not load the
-        // oldest row's payload block. Ingestion leaves that block out of every cache, so
-        // loading it would hit the disk on every commit.
+        // Retention enforcement runs this lookup after every commit, so it must not load any
+        // row's payload block. Ingestion leaves those blocks out of every cache, so loading one
+        // would hit the disk on every commit.
         rocksdb::perf::set_perf_stats(rocksdb::perf::PerfStatsLevel::EnableCount);
         let mut perf = rocksdb::perf::PerfContext::default();
-        perf.reset();
-        let oldest = store.oldest_retained_sequence();
-        let read = perf.metric(rocksdb::perf::PerfMetric::BlockReadByte);
+        let mut measured_lookup = || {
+            perf.reset();
+            let oldest = store.oldest_retained_sequence().expect("oldest");
+            let read = perf.metric(rocksdb::perf::PerfMetric::BlockReadByte);
+            assert!(
+                read < 4096,
+                "the oldest-retained lookup must read only sentinel blocks, read {read} bytes"
+            );
+            oldest
+        };
+        assert_eq!(measured_lookup(), Some(1));
+
+        // With a rule installed, the evicted files below the cutoff sit under a tombstone. The
+        // lookup must skip them by their sentinels as well, never through their rows.
+        store
+            .set_retention(Some(RetentionPolicy::KeepLatest { count: 1 }))
+            .expect("set retention");
+        assert_eq!(measured_lookup(), Some(2));
         rocksdb::perf::set_perf_stats(rocksdb::perf::PerfStatsLevel::Disable);
-        assert_eq!(oldest.expect("oldest"), Some(1));
-        assert!(
-            read < 4096,
-            "the oldest-retained lookup must read only sentinel blocks, read {read} bytes"
-        );
     }
 
     #[tokio::test]

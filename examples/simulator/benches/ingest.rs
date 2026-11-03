@@ -1,27 +1,29 @@
 //! Ingest throughput benchmark for the RocksDB-backed simulator store.
 //!
-//! Compares the direct writer with streaming protobuf decode and batch assembly.
-//! Rust allocation peaks exclude native storage allocations. Reservation peaks
-//! are samples taken at streaming ingest observation events. Direct writes use
-//! the store's independent budget of 256 requests and 1 GiB, which is excluded
+//! Direct serial, direct concurrent, stream serial, and stream concurrent runs
+//! compare the direct writer against streaming protobuf decode plus batch
+//! assembly. Rust allocation peaks exclude native storage allocations.
+//! Reservation peaks are samples taken at streaming ingest observation events.
+//! Direct writes use the store's own budget of 256 requests and 1 GiB, excluded
 //! from those samples. `BENCH_MEMORY_BYTES` controls only the streaming budget.
 //!
-//! Run with `cargo bench -p exoware-simulator --bench ingest`. `BENCH_BATCHES`,
-//! `BENCH_WRITERS`, `BENCH_FRAGMENT_BYTES`, and `BENCH_MEMORY_BYTES` apply to
-//! every workload, and `BENCH_WORKLOAD` selects the row shape.
+//! Run with
+//! `BENCH_REQUEST_ROWS=<rows> cargo bench -p exoware-simulator --bench ingest`.
+//! `BENCH_REQUEST_ROWS` caps the rows per request, and all of a batch's requests
+//! are sent together. `BENCH_BATCHES`, `BENCH_WRITERS`, `BENCH_FRAGMENT_BYTES`,
+//! and `BENCH_MEMORY_BYTES` apply to every workload and default to 16, 4, 16384,
+//! and 1 GiB.
 //!
-//! The default workload, `uniform`, writes `BENCH_KEYS_PER_BATCH` keys with values
-//! of `BENCH_VALUE_LEN` bytes per batch. Under the default `BENCH_KEY_ORDER=batch`
-//! each batch owns its own key range, so ingested state files never overlap and
-//! the state column family never compacts. `BENCH_KEY_ORDER=random` spreads each
-//! batch's keys across the whole key space, so state files overlap and compaction
-//! runs.
-//!
-//! `BENCH_WORKLOAD=constantinople` makes each batch one block of
-//! `BENCH_TRANSACTIONS` transactions, 51,670 by default for about 310k rows, in
-//! six key families with mixed value sizes. The block is submitted as requests of
-//! at most `BENCH_REQUEST_ROWS` rows, 65,536 by default, all in flight together,
-//! and its 7.45 MB artifact follows as its own put.
+//! `BENCH_WORKLOAD` selects the row shape. The default `uniform` writes
+//! `BENCH_KEYS_PER_BATCH` keys with `BENCH_VALUE_LEN`-byte values per batch,
+//! 250,000 and 128 by default. The default `BENCH_KEY_ORDER=batch` gives each
+//! batch its own key range, so state files overlap only when concurrent writers'
+//! batches are committed together. `random` spreads each batch's keys over the
+//! whole key space, so every state file overlaps and compaction runs.
+//! `constantinople` makes each batch one block of `BENCH_TRANSACTIONS`
+//! transactions, 51,670 by default for about 310k rows in six key families with
+//! mixed value sizes. The block's 7.45 MB artifact follows as its own put.
+//! Unknown values and non-numeric settings are rejected.
 
 use buffa::Message;
 use bytes::Bytes;
@@ -157,10 +159,16 @@ fn encode_batch(kvs: Vec<(Bytes, Bytes)>) -> Bytes {
 }
 
 fn env_usize(name: &str, default: usize) -> usize {
-    std::env::var(name)
-        .ok()
-        .and_then(|raw| raw.parse().ok())
-        .unwrap_or(default)
+    parse_env_usize(name).unwrap_or(default)
+}
+
+/// Reads a numeric setting when it is set, rejecting a value that is not a number.
+fn parse_env_usize(name: &str) -> Option<usize> {
+    let raw = std::env::var(name).ok()?;
+    Some(
+        raw.parse()
+            .unwrap_or_else(|_| panic!("{name} must be a number, not {raw}")),
+    )
 }
 
 /// Key layouts the benchmark can generate. Keys are unique in both layouts.
@@ -437,13 +445,9 @@ fn main() {
     let fragment_bytes = env_usize("BENCH_FRAGMENT_BYTES", 16 * 1024).max(1);
     let memory_bytes = env_usize("BENCH_MEMORY_BYTES", 1024 * 1024 * 1024);
     let workload = Workload::from_env();
-    let request_rows = env_usize(
-        "BENCH_REQUEST_ROWS",
-        match workload {
-            Workload::Uniform { .. } => 0,
-            Workload::Constantinople { .. } => 65_536,
-        },
-    );
+    let request_rows = parse_env_usize("BENCH_REQUEST_ROWS")
+        .expect("BENCH_REQUEST_ROWS must be set to the rows per request");
+    assert!(request_rows > 0, "BENCH_REQUEST_ROWS must be at least 1");
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -456,7 +460,7 @@ fn main() {
             value_len,
             key_order,
         } => println!(
-            "workload: {batches} batches x {keys_per_batch} keys, {value_len}B values, {writers} concurrent writers, {fragment_bytes}B frames, {} keys",
+            "workload: {batches} batches x {keys_per_batch} keys, {value_len}B values, requests of {request_rows} rows, {writers} concurrent writers, {fragment_bytes}B frames, {} keys",
             if key_order == KeyOrder::Random { "random" } else { "batch-ordered" }
         ),
         Workload::Constantinople { transactions } => println!(
@@ -505,7 +509,7 @@ fn main() {
             }
 
             // Split the block into the requests a publisher would send, all in flight together.
-            let requests = if request_rows == 0 || rows.len() <= request_rows {
+            let requests = if rows.len() <= request_rows {
                 vec![encode(rows)]
             } else {
                 let mut rows = rows;
