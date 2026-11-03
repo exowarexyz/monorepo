@@ -15,22 +15,39 @@ use datafusion::{
 use exoware_sdk::kv_codec::{StoredRow, StoredValue};
 use std::sync::Arc;
 
+/// Mutable Arrow array storage for one output column, selected from the table schema.
 pub(crate) enum ColumnBuilder {
+    /// Signed integer values.
     Int64(Int64Builder),
+    /// Unsigned integer values.
     UInt64(UInt64Builder),
+    /// Double-precision floating-point values.
     Float64(Float64Builder),
+    /// Boolean values.
     Boolean(BooleanBuilder),
+    /// Dates stored as days since the Unix epoch.
     Date32(Date32Builder),
+    /// Dates stored as milliseconds since the Unix epoch.
     Date64(Date64Builder),
+    /// Microsecond timestamps with the schema's timestamp data type.
     Timestamp(TimestampMicrosecondBuilder),
+    /// 128-bit decimal coefficients with the schema's precision and scale.
     Decimal128(Decimal128Builder),
+    /// 256-bit decimal coefficients with the schema's precision and scale.
     Decimal256(Decimal256Builder),
+    /// UTF-8 text values.
     Utf8(StringBuilder),
+    /// Byte strings with the schema's fixed width.
     FixedBinary(FixedSizeBinaryBuilder),
+    /// Variable-length byte strings.
     Binary(BinaryBuilder),
+    /// Lists of signed integer values.
     ListInt64(ListBuilder<Int64Builder>),
+    /// Lists of double-precision floating-point values.
     ListFloat64(ListBuilder<Float64Builder>),
+    /// Lists of boolean values.
     ListBoolean(ListBuilder<BooleanBuilder>),
+    /// Lists of UTF-8 text values.
     ListUtf8(ListBuilder<StringBuilder>),
 }
 
@@ -217,59 +234,40 @@ pub(crate) fn archived_non_pk_value_is_valid(
 
 pub(crate) fn append_archived_non_pk_value(
     builder: &mut ColumnBuilder,
-    col: &ResolvedColumn,
     stored_opt: Option<&StoredValue>,
 ) -> DataFusionResult<()> {
     let Some(stored) = stored_opt else {
         return builder.append(&CellValue::Null);
     };
-    match (builder, col.kind, stored) {
-        (ColumnBuilder::Int64(b), ColumnKind::Int64, StoredValue::Int64(v)) => b.append_value(*v),
-        (ColumnBuilder::UInt64(b), ColumnKind::UInt64, StoredValue::UInt64(v)) => {
-            b.append_value(*v)
-        }
-        (ColumnBuilder::Float64(b), ColumnKind::Float64, StoredValue::Float64(v)) => {
-            b.append_value(*v)
-        }
-        (ColumnBuilder::Float64(b), ColumnKind::Float64, StoredValue::Int64(v)) => {
-            b.append_value(*v as f64)
-        }
-        (ColumnBuilder::Boolean(b), ColumnKind::Boolean, StoredValue::Boolean(v)) => {
-            b.append_value(*v)
-        }
-        (ColumnBuilder::Date32(b), ColumnKind::Date32, StoredValue::Int64(v)) => {
-            b.append_value(*v as i32)
-        }
-        (ColumnBuilder::Date64(b), ColumnKind::Date64, StoredValue::Int64(v)) => b.append_value(*v),
-        (ColumnBuilder::Timestamp(b), ColumnKind::Timestamp, StoredValue::Int64(v)) => {
-            b.append_value(*v)
-        }
-        (ColumnBuilder::Decimal128(b), ColumnKind::Decimal128, StoredValue::Bytes(bytes)) => {
+    match (builder, stored) {
+        (ColumnBuilder::Int64(b), StoredValue::Int64(v)) => b.append_value(*v),
+        (ColumnBuilder::UInt64(b), StoredValue::UInt64(v)) => b.append_value(*v),
+        (ColumnBuilder::Float64(b), StoredValue::Float64(v)) => b.append_value(*v),
+        (ColumnBuilder::Float64(b), StoredValue::Int64(v)) => b.append_value(*v as f64),
+        (ColumnBuilder::Boolean(b), StoredValue::Boolean(v)) => b.append_value(*v),
+        (ColumnBuilder::Date32(b), StoredValue::Int64(v)) => b.append_value(*v as i32),
+        (ColumnBuilder::Date64(b), StoredValue::Int64(v)) => b.append_value(*v),
+        (ColumnBuilder::Timestamp(b), StoredValue::Int64(v)) => b.append_value(*v),
+        (ColumnBuilder::Decimal128(b), StoredValue::Bytes(bytes)) => {
             let arr: [u8; 16] = bytes.as_slice().try_into().map_err(|_| {
                 DataFusionError::Execution("invalid Decimal128 byte width".to_string())
             })?;
             b.append_value(i128::from_le_bytes(arr))
         }
-        (ColumnBuilder::Decimal256(b), ColumnKind::Decimal256, StoredValue::Bytes(bytes)) => {
+        (ColumnBuilder::Decimal256(b), StoredValue::Bytes(bytes)) => {
             let arr: [u8; 32] = bytes.as_slice().try_into().map_err(|_| {
                 DataFusionError::Execution("invalid Decimal256 byte width".to_string())
             })?;
             b.append_value(i256::from_le_bytes(arr))
         }
-        (ColumnBuilder::Utf8(builder), ColumnKind::Utf8, StoredValue::Utf8(v)) => {
-            builder.append_value(v.as_str())
-        }
-        (ColumnBuilder::FixedBinary(b), ColumnKind::FixedSizeBinary(_), StoredValue::Bytes(v)) => b
+        (ColumnBuilder::Utf8(builder), StoredValue::Utf8(v)) => builder.append_value(v.as_str()),
+        (ColumnBuilder::FixedBinary(b), StoredValue::Bytes(v)) => b
             .append_value(v.as_slice())
             .map_err(|e| DataFusionError::Execution(format!("FixedBinary append error: {e}")))?,
-        (ColumnBuilder::Binary(builder), ColumnKind::Binary, StoredValue::Bytes(v)) => {
+        (ColumnBuilder::Binary(builder), StoredValue::Bytes(v)) => {
             builder.append_value(v.as_slice())
         }
-        (
-            ColumnBuilder::ListInt64(b),
-            ColumnKind::List(ListElementKind::Int64),
-            StoredValue::List(items),
-        ) => {
+        (ColumnBuilder::ListInt64(b), StoredValue::List(items)) => {
             for item in items.iter() {
                 let StoredValue::Int64(v) = item else {
                     return Err(DataFusionError::Execution(
@@ -280,11 +278,7 @@ pub(crate) fn append_archived_non_pk_value(
             }
             b.append(true);
         }
-        (
-            ColumnBuilder::ListFloat64(b),
-            ColumnKind::List(ListElementKind::Float64),
-            StoredValue::List(items),
-        ) => {
+        (ColumnBuilder::ListFloat64(b), StoredValue::List(items)) => {
             for item in items.iter() {
                 match item {
                     StoredValue::Float64(v) => b.values().append_value(*v),
@@ -298,11 +292,7 @@ pub(crate) fn append_archived_non_pk_value(
             }
             b.append(true);
         }
-        (
-            ColumnBuilder::ListBoolean(b),
-            ColumnKind::List(ListElementKind::Boolean),
-            StoredValue::List(items),
-        ) => {
+        (ColumnBuilder::ListBoolean(b), StoredValue::List(items)) => {
             for item in items.iter() {
                 let StoredValue::Boolean(v) = item else {
                     return Err(DataFusionError::Execution(
@@ -313,11 +303,7 @@ pub(crate) fn append_archived_non_pk_value(
             }
             b.append(true);
         }
-        (
-            ColumnBuilder::ListUtf8(b),
-            ColumnKind::List(ListElementKind::Utf8),
-            StoredValue::List(items),
-        ) => {
+        (ColumnBuilder::ListUtf8(b), StoredValue::List(items)) => {
             for item in items.iter() {
                 let StoredValue::Utf8(v) = item else {
                     return Err(DataFusionError::Execution(
@@ -337,34 +323,51 @@ pub(crate) fn append_archived_non_pk_value(
     Ok(())
 }
 
-#[derive(Clone)]
+/// Location and schema information needed to append one projected column.
+#[derive(Debug, Clone)]
 pub(crate) enum ProjectionSource {
-    Pk { col_idx: usize, pk_pos: usize },
-    NonPk { col_idx: usize, col: ResolvedColumn },
+    /// Take the value from the decoded primary key.
+    Pk {
+        /// Position in the table's column order for selecting the output type.
+        col_idx: usize,
+        /// Position in the decoded primary-key values.
+        pk_pos: usize,
+    },
+    /// Take the value from the stored row or a covering index value.
+    NonPk {
+        /// Position in the table's column order and stored value array.
+        col_idx: usize,
+        /// Column type and nullability for validating the stored value.
+        col: ResolvedColumn,
+    },
 }
 
-pub(crate) struct ProjectedBatchBuilder {
-    pub(crate) sources: Vec<ProjectionSource>,
-    pub(crate) builders: Vec<ColumnBuilder>,
-    pub(crate) row_count: usize,
+/// Accumulates projected rows in output column order for one Arrow record batch.
+pub(crate) struct ProjectedBatchBuilder<'a> {
+    /// Value source for each output column, in the same order as `builders`.
+    sources: &'a [ProjectionSource],
+    /// One array builder per output column, including repeated projections.
+    builders: Vec<ColumnBuilder>,
+    /// Number of rows appended, tracked separately so a projection with no columns still
+    /// reports its rows.
+    row_count: usize,
 }
 
-impl ProjectedBatchBuilder {
-    pub(crate) fn from_access_plan(model: &TableModel, access_plan: &ScanAccessPlan) -> Self {
-        let col_indices: Vec<usize> = access_plan
+impl<'a> ProjectedBatchBuilder<'a> {
+    pub(crate) fn from_access_plan(model: &TableModel, access_plan: &'a ScanAccessPlan) -> Self {
+        let builders = access_plan
             .projection_sources
             .iter()
-            .map(|source| match source {
-                ProjectionSource::Pk { col_idx, .. } => *col_idx,
-                ProjectionSource::NonPk { col_idx, .. } => *col_idx,
+            .map(|source| {
+                let col_idx = match source {
+                    ProjectionSource::Pk { col_idx, .. }
+                    | ProjectionSource::NonPk { col_idx, .. } => *col_idx,
+                };
+                make_column_builder(model, col_idx)
             })
             .collect();
-        let builders = col_indices
-            .iter()
-            .map(|&idx| make_column_builder(model, idx))
-            .collect();
         Self {
-            sources: access_plan.projection_sources.clone(),
+            sources: &access_plan.projection_sources,
             builders,
             row_count: 0,
         }
@@ -375,7 +378,7 @@ impl ProjectedBatchBuilder {
         pk_values: &[CellValue],
         archived: &StoredRow,
     ) -> DataFusionResult<bool> {
-        for source in &self.sources {
+        for source in self.sources {
             match source {
                 ProjectionSource::Pk { pk_pos, .. } => {
                     if pk_values.get(*pk_pos).is_none() {
@@ -398,9 +401,9 @@ impl ProjectedBatchBuilder {
                     })?;
                     builder.append(value)?;
                 }
-                ProjectionSource::NonPk { col_idx, col } => {
+                ProjectionSource::NonPk { col_idx, .. } => {
                     let stored_opt = archived.values.get(*col_idx).and_then(|v| v.as_ref());
-                    append_archived_non_pk_value(builder, col, stored_opt)?;
+                    append_archived_non_pk_value(builder, stored_opt)?;
                 }
             }
         }
