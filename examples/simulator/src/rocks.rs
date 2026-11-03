@@ -839,8 +839,9 @@ fn stage_log_file(path: &Path, sequence: u64, rows: &[(Bytes, Bytes)]) -> Result
 /// Empty rows bracket each log row inside its file. Ingestion reads a file's first and last data
 /// blocks, so with the sentinels it never reads the payload block. The head sentinel is the
 /// previous sequence's key with a trailing `1`. It sorts after that sequence's tail sentinel and
-/// before this sequence's row, so files of consecutive sequences stay disjoint. Readers skip
-/// keys of this length.
+/// before this sequence's row, so files of consecutive sequences stay disjoint, and it is where
+/// `prune_log` ends the tombstone for the sequences below, so the tombstone stays clear of this
+/// file. Readers skip keys of this length.
 fn log_head_sentinel(sequence: u64) -> [u8; LOG_BATCH_KEY_LEN + 1] {
     let mut key = [0u8; LOG_BATCH_KEY_LEN + 1];
     key[..LOG_BATCH_KEY_LEN].copy_from_slice(&sequence_log_key(sequence - 1));
@@ -1347,6 +1348,12 @@ impl RocksStore {
         // loaded. Space is reclaimed by ordinary compaction; nothing assumes which SST files
         // hold the rows.
         //
+        // The tombstone ends at the first retained sequence's head sentinel, the smallest key
+        // of its file, so it never overlaps a retained file. An overlapping tombstone would
+        // pull that file's payload into the compaction that consumes the tombstone, and at a
+        // cutoff of published + 1 it would overlap the next group's file, forcing a memtable
+        // flush before that ingestion and placing the file in L0 for a compaction to rewrite.
+        //
         // Unsynced: batch atomicity means a crash loses the tombstone and the floor raise
         // together, leaving the rows intact and open's re-derivation consistent; the next
         // enforcement reapplies the trim. This keeps the per-append retention hook from
@@ -1356,8 +1363,8 @@ impl RocksStore {
         batch.put_cf(self.meta_cf(), SEQ_META_KEY, published.to_le_bytes());
         batch.delete_range_cf(
             self.log_cf(),
-            sequence_log_key(0),
-            sequence_log_key(cutoff_exclusive),
+            &sequence_log_key(0)[..],
+            &log_head_sentinel(cutoff_exclusive)[..],
         );
         self.db.write(batch).map_err(|e| e.to_string())?;
         self.frontiers
@@ -3003,6 +3010,60 @@ mod tests {
                     .map_or(true, |(key, _)| key.len() == LOG_BATCH_KEY_LEN)
             })
             .count()
+    }
+
+    /// Readability of each key of `sequence`'s log file in file order (head sentinel, row,
+    /// tail sentinel).
+    fn log_file_keys_present(store: &RocksStore, sequence: u64) -> [bool; 3] {
+        let present = |key: &[u8]| {
+            store
+                .db
+                .get_cf(store.log_cf(), key)
+                .expect("get log key")
+                .is_some()
+        };
+        [
+            present(&log_head_sentinel(sequence)),
+            present(&sequence_log_key(sequence)),
+            present(&log_tail_sentinel(sequence)),
+        ]
+    }
+
+    #[tokio::test]
+    async fn log_prune_stops_short_of_the_oldest_retained_file() {
+        let dir = tempdir().expect("tempdir");
+        let store = RocksStore::open(dir.path(), None).expect("open db");
+        for tag in 1..=3u8 {
+            store.put_batch(large_batch(tag)).await.expect("put");
+        }
+
+        // Cutoff 3 evicts sequence 2's whole file and must leave sequence 3's head sentinel in
+        // place. That sentinel is the retained file's smallest key, so a tombstone reaching it
+        // overlaps the file and drags its payload into the compaction that consumes the
+        // tombstone.
+        store
+            .set_retention(Some(RetentionPolicy::KeepLatest { count: 1 }))
+            .expect("set retention");
+        assert_eq!(log_file_keys_present(&store, 2), [false; 3]);
+        assert_eq!(log_file_keys_present(&store, 3), [true; 3]);
+
+        // A drop-everything rule trims up to the published frontier plus one, so its tombstone
+        // ends at the head sentinel of the sequence that is not ingested yet. The next group's
+        // file must not overlap it, because ingesting a file that overlaps the memtable forces
+        // a flush first and places the file in L0 for a compaction to rewrite.
+        store
+            .set_retention(Some(RetentionPolicy::DropAll))
+            .expect("set retention");
+        store.put_batch(large_batch(4)).await.expect("put");
+        let l0_files = store
+            .db
+            .property_int_value_cf(store.log_cf(), "rocksdb.num-files-at-level0")
+            .expect("read property")
+            .expect("level property exists");
+        assert_eq!(
+            l0_files, 0,
+            "log ingestion under a drop-all rule must not flush"
+        );
     }
 
     #[tokio::test]
