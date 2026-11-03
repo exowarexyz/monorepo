@@ -102,10 +102,6 @@ type Closer = Box<dyn std::any::Any + Send + Sync>;
 /// after the database (fields drop in declaration order).
 struct Database {
     db: DB,
-    /// Dropped only after `db`. The database opens on a native copy of these options (see
-    /// `RocksStore::open_database`), so this value is what keeps caller-supplied resources
-    /// such as a custom environment or logger callback alive while the database is open.
-    _options: Options,
     /// Dropped only after `db`: any resource that must outlive the open database. For a
     /// store opened with [`RocksStore::open_owned`], this is the owner whose drop deletes
     /// the data directory (for example a `tempfile::TempDir`).
@@ -396,11 +392,10 @@ struct Frontiers {
     published: AtomicU64,
     /// Serializes atomic commits, publication, snapshot capture, and log trimming.
     persist: Mutex<()>,
-    /// Highest `cutoff_exclusive` already applied by `prune_log` in this process. Lets the
-    /// per-append retention hook skip the write entirely when the floor has not advanced
-    /// (static thresholds, coalesced ingest waves), so redundant range tombstones never pile
-    /// up ahead of compaction. Starts at zero; open's one-shot enforcement re-seeds it
-    /// when a rule is installed.
+    /// Highest `cutoff_exclusive` already applied by `trim_log` in this process. Lets the
+    /// per-commit trim skip the write entirely when the floor has not advanced (static
+    /// thresholds), so redundant range tombstones never pile up ahead of compaction. Starts at
+    /// zero. Open's one-shot enforcement re-seeds it when a rule is installed.
     trimmed: AtomicU64,
 }
 
@@ -490,6 +485,7 @@ impl Writer {
     fn start(
         db: Arc<Database>,
         frontiers: Arc<Frontiers>,
+        retention: Arc<Mutex<Option<RetentionPolicy>>>,
         write_pipeline: RocksWritePipelineConfig,
     ) -> Self {
         let next = frontiers.published.load(Ordering::Acquire);
@@ -505,11 +501,12 @@ impl Writer {
             .name(format!("{WRITER_THREAD_PREFIX}commit"))
             .spawn({
                 let db = db.clone();
-                move || run_commit(db, frontiers, staged_receiver, next)
+                move || run_commit(db, frontiers, retention, staged_receiver, next)
             })
             .expect("failed to spawn RocksDB commit worker");
 
-        // Queue capacity and retained admission leases bound preparation memory.
+        // Admission leases held until commit bound preparation memory. This queue only limits
+        // how far coalescing runs ahead of encoding.
         let (wave_sender, wave_receiver) = mpsc::sync_channel::<QueuedWave>(max_queued_waves);
         let wave_receiver = Arc::new(Mutex::new(wave_receiver));
         let mut handles = Vec::with_capacity(stage_workers + 2);
@@ -674,6 +671,7 @@ fn run_stage(
 fn run_commit(
     db: Arc<Database>,
     frontiers: Arc<Frontiers>,
+    retention: Arc<Mutex<Option<RetentionPolicy>>>,
     receiver: mpsc::Receiver<PreparedWrite>,
     mut committed: u64,
 ) {
@@ -681,7 +679,7 @@ fn run_commit(
     let commit_ready = |committed: &mut u64, pending: &mut BTreeMap<u64, PreparedWrite>| {
         while let Some(group) = pending.remove(&(*committed + 1)) {
             *committed = group.sequence;
-            commit_group(&db, &frontiers, group);
+            commit_group(&db, &frontiers, &retention, group);
         }
     };
     while let Ok(group) = receiver.recv() {
@@ -690,7 +688,10 @@ fn run_commit(
     }
 
     // Every preparation worker has handed over its groups before the channel closes.
-    assert!(pending.is_empty(), "prepared groups lost at shutdown");
+    assert!(
+        pending.is_empty(),
+        "every prepared group must commit before shutdown"
+    );
 }
 
 /// Coalesces one wave from requests already queued behind `first` without waiting for new
@@ -779,8 +780,12 @@ fn prepare_wave(db: &DB, wave: QueuedWave) -> PreparedWrite {
     let mut batch = rocksdb::WriteBatch::with_capacity_bytes(reserved);
 
     // The stream row, the state rows in the same order, and the sequence commit together.
-    let log_cf = db.cf_handle(LOG_CF).expect("log CF exists");
-    let meta_cf = db.cf_handle(META_CF).expect("meta CF exists");
+    let log_cf = db
+        .cf_handle(LOG_CF)
+        .expect("log CF must exist (created on open)");
+    let meta_cf = db
+        .cf_handle(META_CF)
+        .expect("meta CF must exist (created on open)");
     batch.put_cf(log_cf, sequence_log_key(wave.sequence), payload);
     for (key, value) in rows {
         batch.put(key, value);
@@ -801,16 +806,36 @@ fn prepare_wave(db: &DB, wave: QueuedWave) -> PreparedWrite {
     }
 }
 
-/// Makes the native batch durable before exposing its sequence to snapshots or streams.
-/// A failed write can have an ambiguous durable outcome, so this worker stops on error.
-fn commit_group(db: &DB, frontiers: &Frontiers, group: PreparedWrite) {
+/// Makes the native batch durable and trims the log to the retention rule before exposing the
+/// batch's sequence to snapshots or streams. A failed write can have an ambiguous durable
+/// outcome, so this worker stops on error.
+fn commit_group(
+    db: &DB,
+    frontiers: &Frontiers,
+    retention: &Mutex<Option<RetentionPolicy>>,
+    group: PreparedWrite,
+) {
     assert!(!group.requests.is_empty(), "groups are never empty");
     let sequence = group.sequence;
 
-    // Snapshot capture shares this lock to observe matching state and sequence.
+    // Snapshot capture shares this lock to observe matching state and sequence. The Release
+    // store lets lock-free readers that load the sequence read its rows.
     let publish_guard = frontiers.persist.lock();
     write_synced_batch(db, group.batch)
-        .unwrap_or_else(|error| panic!("failed to commit synchronous WAL batch: {error}"));
+        .unwrap_or_else(|error| panic!("synchronous WAL batch must commit: {error}"));
+
+    // Trimming before publication means an acknowledged batch already obeys the retention rule,
+    // even when its caller has cancelled. A failed trim leaves the batch durable and the next
+    // commit retries it.
+    if let Some(policy) = retention.lock().as_ref() {
+        if let Err(error) = trim_log(db, frontiers, policy, sequence) {
+            tracing::warn!(
+                sequence,
+                error = %error,
+                "retention trim failed after commit; batch is durable, retrying on the next commit",
+            );
+        }
+    }
     frontiers.published.store(sequence, Ordering::Release);
     drop(publish_guard);
     debug!(
@@ -833,9 +858,39 @@ fn commit_group(db: &DB, frontiers: &Frontiers, group: PreparedWrite) {
 fn write_synced_batch(db: &DB, batch: rocksdb::WriteBatch) -> Result<(), String> {
     let mut write_options = WriteOptions::default();
     write_options.set_sync(true);
-    write_options.disable_wal(false);
     db.write_opt(batch, &write_options)
         .map_err(|e| e.to_string())
+}
+
+/// Trims stream-log rows below `policy`'s cutoff at `frontier`. The caller holds the publication
+/// lock, so the rule and the frontier cannot change under the trim. A no-op when the cutoff does
+/// not advance past what this process already trimmed.
+fn trim_log(
+    db: &DB,
+    frontiers: &Frontiers,
+    policy: &RetentionPolicy,
+    frontier: u64,
+) -> Result<(), String> {
+    // Trim no further than the published frontier. A range delete removes only rows that
+    // already exist, so recording a higher cutoff would let the trimmed check skip later
+    // batches that the rule still evicts.
+    let cutoff_exclusive = retention_floor(policy, frontier).min(frontier.saturating_add(1));
+    if cutoff_exclusive == 0 || frontiers.trimmed.load(Ordering::Acquire) >= cutoff_exclusive {
+        return Ok(());
+    }
+
+    // The committed sequence survives log collection independently of these rows.
+    // A lost unsynced tombstone can only delay GC, and open reapplies the durable rule.
+    let mut batch = rocksdb::WriteBatch::default();
+    batch.delete_range_cf(
+        db.cf_handle(LOG_CF)
+            .expect("log CF must exist (created on open)"),
+        sequence_log_key(0),
+        sequence_log_key(cutoff_exclusive),
+    );
+    db.write(batch).map_err(|e| e.to_string())?;
+    frontiers.trimmed.store(cutoff_exclusive, Ordering::Release);
+    Ok(())
 }
 
 /// Encodes a sequence number as a log-CF key that preserves numeric order in RocksDB.
@@ -910,8 +965,8 @@ const fn retention_floor(policy: &RetentionPolicy, frontier: u64) -> u64 {
 /// Application-level write pipeline options used by [`RocksStore::open`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RocksWritePipelineConfig {
-    /// Soft maximum combined size (state rows plus encoded log rows) before cutting a
-    /// commit group.
+    /// Soft maximum combined size (key and value bytes, counted once for the state rows and
+    /// once for the log row) before cutting a commit group.
     pub max_commit_batch_bytes: NonZeroUsize,
     /// Workers encoding atomic batches concurrently.
     pub stage_workers: NonZeroUsize,
@@ -936,9 +991,9 @@ impl Default for RocksWritePipelineConfig {
 /// RocksDB engine and application-level write pipeline options used by [`RocksStore::open`].
 #[derive(Default)]
 pub struct RocksConfig {
-    /// Database-wide options. Ordered writes, WAL replay on open, and flushing during
-    /// recovery are required for the snapshot and durable-commit contract and are pinned
-    /// during open.
+    /// Database-wide options, applied as is. Ordered writes, WAL recovery, flushing during
+    /// recovery, and paranoid checks must stay at their defaults, since the snapshot and
+    /// durable-commit contracts depend on them.
     pub db_options: Options,
     /// Options for the application-level ingest write pipeline.
     pub write_pipeline: RocksWritePipelineConfig,
@@ -1024,36 +1079,18 @@ impl RocksStore {
             write_pipeline,
         } = config.unwrap_or_default();
 
-        // Create the database and its column families on first open. Ordered writes finish
-        // each batch's memtable insert before the write returns, so a snapshot captured after
-        // publication always includes the published batch.
+        // Create the database and its column families on first open.
         db_options.create_if_missing(true);
         db_options.create_missing_column_families(true);
-        db_options.set_unordered_write(false);
 
-        // Recovery must replay every WAL and flush what it recovers into synced SST files
-        // before open returns. Best-efforts recovery ignores WAL files entirely, and RocksDB
-        // never syncs a recovered WAL afterwards, so a sequence published from one could
-        // vanish in a later crash. The crate has no typed setters for these options, and the
-        // options-string parser yields a native copy of the caller's options that does not
-        // keep their Rust-side resources alive, which is why the original options stay with
-        // the database.
-        let pinned = db_options
-            .get_options_from_string(
-                "best_efforts_recovery=false;avoid_flush_during_recovery=false",
-            )
-            .map_err(|e| e.to_string())?;
-
-        // Open on the pinned copy. Each column family carries its own tuning, and the
-        // caller's options stay with the database for as long as it is open.
+        // Each column family carries its own tuning.
         let cf_state = ColumnFamilyDescriptor::new(STATE_CF, state_cf_options());
         let cf_meta = ColumnFamilyDescriptor::new(META_CF, Options::default());
         let cf_log = ColumnFamilyDescriptor::new(LOG_CF, log_cf_options());
-        let db = DB::open_cf_descriptors(&pinned, path, vec![cf_state, cf_meta, cf_log])
+        let db = DB::open_cf_descriptors(&db_options, path, vec![cf_state, cf_meta, cf_log])
             .map_err(|e| e.to_string())?;
         let db = Arc::new(Database {
             db,
-            _options: db_options,
             _closer: closer,
         });
 
@@ -1067,7 +1104,12 @@ impl RocksStore {
         // Publication and sequence allocation start at the same recovered sequence so
         // new batches continue after the durable prefix.
         let frontiers = Arc::new(Frontiers::new(seq));
-        let writer = Arc::new(Writer::start(db.clone(), frontiers.clone(), write_pipeline));
+        let writer = Arc::new(Writer::start(
+            db.clone(),
+            frontiers.clone(),
+            retention.clone(),
+            write_pipeline,
+        ));
         let store = Self {
             db,
             frontiers,
@@ -1118,37 +1160,6 @@ impl RocksStore {
                 self.db.write(batch).map_err(|e| e.to_string())?;
             }
         }
-        Ok(())
-    }
-
-    /// Deletes stream-log rows with sequence numbers below `cutoff_exclusive`. A no-op when
-    /// the cutoff does not advance past what this process already trimmed.
-    fn prune_log(&self, cutoff_exclusive: u64) -> Result<(), String> {
-        if cutoff_exclusive == 0
-            || self.frontiers.trimmed.load(Ordering::Acquire) >= cutoff_exclusive
-        {
-            return Ok(());
-        }
-
-        // Recheck under the lock: a concurrent trim from the same ingest wave may have
-        // covered this cutoff while we waited.
-        let _guard = self.frontiers.persist.lock();
-        if self.frontiers.trimmed.load(Ordering::Acquire) >= cutoff_exclusive {
-            return Ok(());
-        }
-
-        // The committed sequence survives log collection independently of these rows.
-        // A lost unsynced tombstone can only delay GC, and open reapplies the durable rule.
-        let mut batch = rocksdb::WriteBatch::default();
-        batch.delete_range_cf(
-            self.log_cf(),
-            sequence_log_key(0),
-            sequence_log_key(cutoff_exclusive),
-        );
-        self.db.write(batch).map_err(|e| e.to_string())?;
-        self.frontiers
-            .trimmed
-            .store(cutoff_exclusive, Ordering::Release);
         Ok(())
     }
 
@@ -1260,63 +1271,38 @@ impl RocksStore {
     /// resulting oldest retained sequence (`None` when the log is empty / no floor exists). With
     /// no rule installed this only reports the current oldest batch, leaving the log untouched.
     fn enforce_retention(&self) -> Result<Option<u64>, String> {
-        // Clone the rule out in its own statement so the cache lock drops before trimming:
-        // an `if let self.retention.lock().clone()` scrutinee would (edition 2021) hold the
-        // guard for the whole block. `prune_log` takes the persist lock and issues a range
-        // delete; holding the retention mutex across that disk write would block every
-        // `put_batch` rule check on a Tokio worker.
-        let policy = self.retention.lock().clone();
-        if let Some(policy) = policy {
-            let frontier = self.frontiers.published.load(Ordering::Acquire);
-
-            // Collection is capped by the published prefix.
-            let cutoff_exclusive =
-                retention_floor(&policy, frontier).min(frontier.saturating_add(1));
-            self.prune_log(cutoff_exclusive)?;
+        // The rule is read and applied under the publication lock, so a rule change cannot
+        // interleave with a trim computed from the rule it replaced.
+        {
+            let _guard = self.frontiers.persist.lock();
+            let policy = self.retention.lock().clone();
+            if let Some(policy) = policy {
+                let frontier = self.frontiers.published.load(Ordering::Acquire);
+                trim_log(&self.db, &self.frontiers, &policy, frontier)?;
+            }
         }
         self.oldest_retained_sequence()
     }
 
     /// Installs (`Some`) or clears (`None`) the retention rule, then enforces it once. The rule
-    /// is persisted durably and mirrored into the cache the ingest path reads, so it keeps
-    /// tracking the frontier continuously; clearing stops enforcement but leaves already-evicted
+    /// is persisted durably and mirrored into the cache the commit worker reads, so it keeps
+    /// tracking the frontier continuously. Clearing stops enforcement but leaves already-evicted
     /// rows evicted. Returns the oldest retained sequence after this enforcement.
     fn set_retention(&self, policy: Option<RetentionPolicy>) -> Result<Option<u64>, String> {
-        self.store_retention_policy(policy.as_ref())?;
-        *self.retention.lock() = policy;
+        // Change the rule under the publication lock so a trim computed from the previous rule
+        // cannot land after the new rule is durable.
+        {
+            let _guard = self.frontiers.persist.lock();
+            self.store_retention_policy(policy.as_ref())?;
+            *self.retention.lock() = policy;
+        }
         self.enforce_retention()
     }
 
     /// Commits a batch and returns its sequence number. Queued batches may share a sequence.
     pub async fn put_batch(&self, kvs: Vec<(Bytes, Bytes)>) -> Result<u64, IngestError> {
         // Dedicated writer threads keep blocking storage writes off Tokio workers.
-        let sequence = self.writer.put_batch(kvs).await?;
-
-        self.enforce_committed_retention(sequence).await;
-        Ok(sequence)
-    }
-
-    /// Applies the active retention rule after a durable commit and logs any failures.
-    async fn enforce_committed_retention(&self, sequence: u64) {
-        // Reporting a trim failure as a write failure could cause the caller to retry the
-        // durable batch under a new sequence number, duplicating it for subscribers. Trimming
-        // is idempotent, so a later append or retention update can retry it.
-        if self.retention.lock().is_some() {
-            let store = self.clone();
-            match tokio::task::spawn_blocking(move || store.enforce_retention()).await {
-                Ok(Ok(_)) => {}
-                Ok(Err(message)) => tracing::warn!(
-                    sequence,
-                    error = %message,
-                    "continuous retention trim failed after commit; batch is durable, retrying on the next append",
-                ),
-                Err(join_error) => tracing::warn!(
-                    sequence,
-                    error = %join_error,
-                    "retention enforcement task failed after commit; batch is durable, retrying on the next append",
-                ),
-            }
-        }
+        self.writer.put_batch(kvs).await
     }
 }
 
@@ -1421,7 +1407,6 @@ impl Ingest for RocksStore {
                 batch.request,
             )
             .await?;
-        self.enforce_committed_retention(sequence).await;
         Ok(sequence)
     }
 }
@@ -1527,8 +1512,8 @@ impl Log for RocksStore {
 }
 
 // Retention persists a rule (a synced write) and trims the sequence log, so it runs on the
-// blocking pool instead of occupying a Tokio worker. The ingest path enforces the same rule
-// continuously as the log grows (see `RocksStore::put_batch`).
+// blocking pool instead of occupying a Tokio worker. The commit worker enforces the same rule
+// after every later commit (see `run_commit`).
 impl Retention for RocksStore {
     async fn set_retention(&self, policy: Option<RetentionPolicy>) -> Result<Option<u64>, String> {
         let store = self.clone();
@@ -2180,7 +2165,7 @@ mod tests {
 
     /// Commits one group through the commit stage, returning the published frontier afterwards.
     fn commit_and_apply(store: &RocksStore, group: PreparedWrite) -> u64 {
-        commit_group(&store.db, &store.frontiers, group);
+        commit_group(&store.db, &store.frontiers, &store.retention, group);
         store.frontiers.published.load(Ordering::Acquire)
     }
 
@@ -2334,7 +2319,6 @@ mod tests {
         // the closer would fail against the still-held lock.
         drop(Database {
             db,
-            _options: options,
             _closer: Some(Box::new(ReopenOnDrop { path })),
         });
     }
@@ -2704,6 +2688,9 @@ mod tests {
             assert_eq!(store.current_sequence(), 0);
             assert!(store.get_batch(1).await.expect("unpublished log").is_none());
         }
+
+        // Reopening recovers the batch from the WAL and publishes its sequence, final state,
+        // and every stream entry.
         let store = RocksStore::open(dir.path(), None).expect("reopen");
         assert_eq!(store.current_sequence(), 1);
         assert_eq!(store.get_raw(b"k").unwrap(), Some(b"new".to_vec()));
@@ -2712,32 +2699,40 @@ mod tests {
             batch_entries(store.get_batch(1).await.unwrap().unwrap()),
             rows
         );
-        store.delete_keys(&[Bytes::from_static(b"k")]).unwrap();
-        store.set_retention(Some(RetentionPolicy::DropAll)).unwrap();
-        drop(store);
-        let store = RocksStore::open(dir.path(), None).expect("reopen after GC");
-        assert_eq!(store.current_sequence(), 1);
-        assert_eq!(store.get_raw(b"k").unwrap(), None);
-        assert!(store.get_batch(1).await.unwrap().is_none());
     }
 
-    #[tokio::test]
-    async fn wal_sequence_survives_gc_before_first_reopen() {
+    /// A failed synchronous write must stop the commit before it publishes the group's
+    /// sequence.
+    #[test]
+    fn write_errors_are_fatal_before_publication() {
         let dir = tempdir().expect("tempdir");
-        {
-            let store = RocksStore::open(dir.path(), None).expect("open db");
-            let sequence = store
-                .put_batch(vec![(Bytes::from_static(b"k"), Bytes::from_static(b"v"))])
-                .await
-                .expect("put");
-            assert_eq!(sequence, 1);
-            store.delete_keys(&[Bytes::from_static(b"k")]).unwrap();
-            store.set_retention(Some(RetentionPolicy::DropAll)).unwrap();
-        }
-        let store = RocksStore::open(dir.path(), None).expect("reopen after GC");
-        assert_eq!(store.current_sequence(), 1);
-        assert_eq!(store.get_raw(b"k").unwrap(), None);
-        assert!(store.get_batch(1).await.unwrap().is_none());
+        let store = RocksStore::open(dir.path(), None).expect("open db");
+
+        // Open a read-only handle to the same database so the commit's write fails, and encode a
+        // group through the writable store.
+        let read_only = DB::open_cf_for_read_only(
+            &Options::default(),
+            dir.path(),
+            [STATE_CF, META_CF, LOG_CF],
+            false,
+        )
+        .expect("open read-only handle");
+        let group = prepared_write(
+            &store,
+            0,
+            vec![(Bytes::from_static(b"a"), Bytes::from_static(b"1"))],
+        );
+
+        // The write error must panic the commit before its sequence is published.
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            commit_group(&read_only, &store.frontiers, &store.retention, group);
+        }))
+        .expect_err("a failed commit must panic");
+        let message = panic
+            .downcast::<String>()
+            .expect("commit panic must carry a formatted message");
+        assert!(message.contains("synchronous WAL batch must commit"));
+        assert_eq!(store.current_sequence(), 0);
     }
 
     /// One multi-megabyte batch with a large stream record.
@@ -2841,14 +2836,6 @@ mod tests {
         assert!(error.contains("keep_latest count must be > 0"), "{error}");
     }
 
-    /// Number of retained rows in the log column family.
-    fn live_log_rows(store: &RocksStore) -> usize {
-        store
-            .db
-            .iterator_cf(store.log_cf(), IteratorMode::Start)
-            .count()
-    }
-
     #[tokio::test]
     async fn empty_batches_are_rejected() {
         let dir = tempdir().expect("tempdir");
@@ -2896,70 +2883,13 @@ mod tests {
         assert_eq!(store.current_sequence(), top);
     }
 
-    /// A synced batch that still lives only in the WAL must survive a reopen, whatever
-    /// recovery options the caller supplies.
+    /// The tuned column-family options must reach RocksDB: assert against the
+    /// OPTIONS file the database persists on open.
     #[tokio::test]
-    async fn reopen_replays_wal_under_best_efforts_recovery_request() {
+    async fn column_family_options_apply() {
         let dir = tempdir().expect("tempdir");
+        let _store = RocksStore::open(dir.path(), None).expect("open db");
 
-        // Request best-efforts recovery and skip the shutdown flush so the acknowledged
-        // batch exists only in the WAL when the store reopens.
-        let config = || RocksConfig {
-            db_options: Options::default()
-                .get_options_from_string(
-                    "best_efforts_recovery=true;avoid_flush_during_shutdown=true",
-                )
-                .expect("database options"),
-            ..Default::default()
-        };
-
-        // One acknowledged batch, then a clean close.
-        {
-            let store = RocksStore::open(dir.path(), Some(config())).expect("open db");
-            let sequence = store
-                .put_batch(vec![(Bytes::from_static(b"k"), Bytes::from_static(b"v"))])
-                .await
-                .expect("put");
-            assert_eq!(sequence, 1);
-        }
-
-        // Nothing was flushed, so the batch can only come back through WAL replay.
-        assert!(std::fs::read_dir(dir.path())
-            .expect("read db dir")
-            .filter_map(|entry| entry.ok())
-            .all(|entry| entry.path().extension().is_none_or(|ext| ext != "sst")));
-
-        // Reopening must replay the WAL despite the caller's recovery request.
-        let store = RocksStore::open(dir.path(), Some(config())).expect("reopen db");
-        assert_eq!(store.current_sequence(), 1);
-        assert_eq!(store.get_raw(b"k").expect("get"), Some(b"v".to_vec()));
-        assert!(store.get_batch(1).await.expect("get batch").is_some());
-    }
-
-    /// Required database settings and column-family tuning must reach RocksDB.
-    /// Inspect the OPTIONS file the database persists on open.
-    #[tokio::test]
-    async fn database_and_column_family_options_apply() {
-        let dir = tempdir().expect("tempdir");
-
-        // Request the opposite of every pinned setting so the persisted options show the
-        // pins winning.
-        let db_options = Options::default()
-            .get_options_from_string(
-                "unordered_write=true;best_efforts_recovery=true;avoid_flush_during_recovery=true",
-            )
-            .expect("database options");
-        let _store = RocksStore::open(
-            dir.path(),
-            Some(RocksConfig {
-                db_options,
-                ..Default::default()
-            }),
-        )
-        .expect("open db");
-
-        // RocksDB persists the effective options on every open, so the newest OPTIONS file
-        // shows which values won.
         let options_file = std::fs::read_dir(dir.path())
             .expect("read db dir")
             .filter_map(|entry| entry.ok())
@@ -2973,13 +2903,6 @@ mod tests {
             .expect("OPTIONS file exists");
         let options = std::fs::read_to_string(options_file).expect("read OPTIONS file");
 
-        // Each pin overrides the caller's value.
-        assert!(options.contains("unordered_write=false"));
-        assert!(options.contains("best_efforts_recovery=false"));
-        assert!(options.contains("avoid_flush_during_recovery=false"));
-
-        // The state family runs universal compaction with raised level-zero thresholds and
-        // no compression.
         let state = options
             .split("[CFOptions \"default\"]")
             .nth(1)
@@ -2991,7 +2914,6 @@ mod tests {
         assert!(state.contains("compression=kNoCompression"));
         assert!(state.contains("level0_slowdown_writes_trigger=1024"));
 
-        // The log family keeps the default compaction policy and no compression.
         let log = options
             .split("[CFOptions \"log\"]")
             .nth(1)
@@ -3002,52 +2924,102 @@ mod tests {
         assert!(log.contains("compression=kNoCompression"));
     }
 
+    /// Every acknowledged commit must have synced the WAL, not only written it.
     #[tokio::test]
-    async fn rocks_store_accepts_custom_config() {
+    async fn commit_syncs_the_wal() {
         let dir = tempdir().expect("tempdir");
-
-        // A callback logger is a caller-supplied resource whose lifetime the database must
-        // own. The lease inside the closure makes that lifetime observable.
-        let logger_owner = Arc::new(());
-        let logger_lease = logger_owner.clone();
         let mut db_options = Options::default();
-        db_options.set_info_logger(rocksdb::InfoLogger::new_callback_logger(
-            rocksdb::LogLevel::Info,
-            move |_, _| {
-                let _ = &logger_lease;
-            },
-        ));
+        db_options.enable_statistics();
 
-        // Opening the store transfers the callback's lifetime to the database.
+        // A copy of the options shares the statistics object the database records into, and
+        // RocksDB counts one WAL sync per synchronous write group.
+        let statistics = db_options.clone();
         let store = RocksStore::open(
             dir.path(),
             Some(RocksConfig {
                 db_options,
+                ..Default::default()
+            }),
+        )
+        .expect("open db");
+
+        // Count only the WAL syncs caused by the acknowledged write.
+        let synced = || statistics.get_ticker_count(rocksdb::statistics::Ticker::WalFileSynced);
+        let before = synced();
+        store
+            .put_batch(vec![(Bytes::from_static(b"k"), Bytes::from_static(b"v"))])
+            .await
+            .expect("put");
+        assert!(
+            synced() > before,
+            "an acknowledged commit must have synced the WAL"
+        );
+    }
+
+    /// A caller cancelled after its write is queued does not exempt the write from the
+    /// retention rule. The commit trims it before publishing, without any later append.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn cancelled_put_is_still_trimmed_after_commit() {
+        let dir = tempdir().expect("tempdir");
+        let store = RocksStore::open(dir.path(), None).expect("open db");
+        assert_eq!(
+            store
+                .set_retention(Some(RetentionPolicy::DropAll))
+                .expect("install rule"),
+            None
+        );
+
+        // Hold the publication lock so the queued write cannot commit, then cancel its caller.
+        // On this current-thread runtime the put is queued by its first poll.
+        let guard = store.frontiers.persist.lock();
+        let put = tokio::spawn({
+            let store = store.clone();
+            async move {
+                store
+                    .put_batch(vec![(Bytes::from_static(b"k"), Bytes::from_static(b"v"))])
+                    .await
+            }
+        });
+        tokio::task::yield_now().await;
+        put.abort();
+        assert!(put.await.unwrap_err().is_cancelled());
+        assert_eq!(store.current_sequence(), 0);
+
+        // Once the commit publishes, its row is already evicted.
+        drop(guard);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while store.current_sequence() < 1 {
+            assert!(std::time::Instant::now() < deadline, "commit must publish");
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        }
+        assert!(store.get_batch(1).await.expect("get").is_none());
+        assert_eq!(store.oldest_retained_batch().await.expect("oldest"), None);
+        assert_eq!(store.get_raw(b"k").expect("state"), Some(b"v".to_vec()));
+    }
+
+    #[tokio::test]
+    async fn rocks_store_accepts_custom_config() {
+        let dir = tempdir().expect("tempdir");
+        let store = RocksStore::open(
+            dir.path(),
+            Some(RocksConfig {
                 write_pipeline: RocksWritePipelineConfig {
                     max_commit_batch_bytes: NonZeroUsize::new(1).expect("nonzero"),
                     stage_workers: NonZeroUsize::new(2).expect("nonzero"),
                     max_queued_waves: NonZeroUsize::new(1).expect("nonzero"),
                 },
+                ..Default::default()
             }),
         )
         .expect("open db");
-        assert_eq!(Arc::strong_count(&logger_owner), 2);
 
-        // Writes flow through the custom pipeline settings.
         let sequence = store
             .put_batch(vec![(Bytes::from_static(b"a"), Bytes::from_static(b"1"))])
             .await
             .expect("put");
         assert_eq!(sequence, 1);
         assert_eq!(store.current_sequence(), 1);
-
-        // The callback outlives every store handle and is released only when the database
-        // closes.
-        let db = store.db.clone();
-        drop(store);
-        assert_eq!(Arc::strong_count(&logger_owner), 2);
-        drop(db);
-        assert_eq!(Arc::strong_count(&logger_owner), 1);
     }
 
     #[tokio::test]
@@ -3138,31 +3110,6 @@ mod tests {
             }
         }
         assert_eq!(logged_keys, (0u8..32).collect::<BTreeSet<_>>());
-    }
-
-    #[tokio::test]
-    async fn retention_spares_log_rows_above_published_frontier() {
-        let dir = tempdir().expect("tempdir");
-        let store = RocksStore::open(dir.path(), None).expect("open db");
-
-        // Make the batch durable without publishing its sequence. Retention must spare
-        // its log row while it is above the published frontier.
-        let group = prepared_write(
-            &store,
-            0,
-            vec![(Bytes::from_static(b"k"), Bytes::from_static(b"v"))],
-        );
-        write_synced_batch(&store.db, group.batch).expect("native durable commit");
-
-        store
-            .set_retention(Some(RetentionPolicy::DropAll))
-            .expect("set retention");
-
-        assert_eq!(
-            live_log_rows(&store),
-            1,
-            "unpublished log row must survive retention enforcement"
-        );
     }
 
     #[tokio::test]
