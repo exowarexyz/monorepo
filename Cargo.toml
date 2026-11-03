@@ -19,6 +19,19 @@ edition = "2021"
 license = "MIT OR Apache-2.0"
 homepage = "https://exoware.xyz"
 
+[workspace.lints.rust]
+rust_2018_idioms = { level = "deny", priority = -1 }
+unused_must_use = "deny"
+
+[workspace.lints.clippy]
+redundant_clone = "warn"
+undocumented_unsafe_blocks = "deny"
+use_self = "warn"
+missing_const_for_fn = "warn"
+multiple_inherent_impl = "deny"
+unused_async = "warn"
+large_futures = "warn"
+
 [workspace.dependencies]
 crossbeam-utils = "0.8.22"
 exoware-qmdb = { version = "2026.9.0", path = "qmdb/rs" }
@@ -36,33 +49,28 @@ axum = "0.8.1"
 base64 = "0.22.1"
 hex = "0.4"
 regex = "1"
-commonware-codec = { git = "https://github.com/commonwarexyz/monorepo", rev = "2fd3af88f2cdeb6424d82f45961f803d812d6c99" }
-commonware-coding = { git = "https://github.com/commonwarexyz/monorepo", rev = "2fd3af88f2cdeb6424d82f45961f803d812d6c99" }
-commonware-actor = { git = "https://github.com/commonwarexyz/monorepo", rev = "2fd3af88f2cdeb6424d82f45961f803d812d6c99" }
-commonware-consensus = { git = "https://github.com/commonwarexyz/monorepo", rev = "2fd3af88f2cdeb6424d82f45961f803d812d6c99" }
-commonware-cryptography = { git = "https://github.com/commonwarexyz/monorepo", rev = "2fd3af88f2cdeb6424d82f45961f803d812d6c99" }
-commonware-glue = { git = "https://github.com/commonwarexyz/monorepo", rev = "2fd3af88f2cdeb6424d82f45961f803d812d6c99" }
-commonware-macros = { git = "https://github.com/commonwarexyz/monorepo", rev = "2fd3af88f2cdeb6424d82f45961f803d812d6c99" }
-commonware-math = { git = "https://github.com/commonwarexyz/monorepo", rev = "2fd3af88f2cdeb6424d82f45961f803d812d6c99" }
-commonware-parallel = { git = "https://github.com/commonwarexyz/monorepo", rev = "2fd3af88f2cdeb6424d82f45961f803d812d6c99" }
-commonware-p2p = { git = "https://github.com/commonwarexyz/monorepo", rev = "2fd3af88f2cdeb6424d82f45961f803d812d6c99" }
-commonware-resolver = { git = "https://github.com/commonwarexyz/monorepo", rev = "2fd3af88f2cdeb6424d82f45961f803d812d6c99" }
-commonware-runtime = { git = "https://github.com/commonwarexyz/monorepo", rev = "2fd3af88f2cdeb6424d82f45961f803d812d6c99" }
-commonware-storage = { git = "https://github.com/commonwarexyz/monorepo", rev = "2fd3af88f2cdeb6424d82f45961f803d812d6c99" }
-commonware-utils = { git = "https://github.com/commonwarexyz/monorepo", rev = "2fd3af88f2cdeb6424d82f45961f803d812d6c99" }
+commonware-codec = "2026.10.0"
+commonware-coding = "2026.10.0"
+commonware-actor = "2026.10.0"
+commonware-allocator = "2026.10.0"
+commonware-consensus = "2026.10.0"
+commonware-cryptography = "2026.10.0"
+commonware-glue = "2026.10.0"
+commonware-macros = "2026.10.0"
+commonware-math = "2026.10.0"
+commonware-parallel = "2026.10.0"
+commonware-p2p = "2026.10.0"
+commonware-resolver = "2026.10.0"
+commonware-runtime = "2026.10.0"
+commonware-storage = "2026.10.0"
+commonware-utils = "2026.10.0"
 rocksdb = "0.24.0"
-mimalloc = "0.1.52"
 rand = "0.10.2"
 parking_lot = "0.12.5"
-bincode = "1.3.3"
-dashmap = "5.5.3"
-tokio-stream = "0.1.15"
 futures = "0.3.30"
 reqwest = "0.13.4"
 serde = "1.0.219"
-serde_with = { version = "3.14.0" }
 tempfile = "3.10.1"
-portpicker = "0.1.1"
 http = "1.3.1"
 tower-http = { version = "0.5.2", features = ["cors"] }
 bytes = "1"

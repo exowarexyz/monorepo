@@ -2,9 +2,9 @@
 //!
 //! ## Registry
 //!
-//! Servers register **gzip** and **zstd** via [`connect_compression_registry`] (same as
-//! [`connectrpc::compression::CompressionRegistry::default`]) so callers without zstd
-//! (including typical browsers) can still negotiate gzip.
+//! Servers register **gzip** and **zstd** via [`connect_compression_registry`] (the codecs
+//! of [`connectrpc::compression::CompressionRegistry::default`], with a faster zstd level)
+//! so callers without zstd (including typical browsers) can still negotiate gzip.
 //!
 //! ## Rust client transport
 //!
@@ -23,40 +23,45 @@
 //! replays matching cookies on later requests. This covers edge affinity cookies as well as normal
 //! domain, path, expiry, and deletion semantics.
 
-use std::collections::hash_map::Entry;
-use std::collections::{BTreeSet, HashMap};
-use std::error::Error;
-use std::fmt;
-use std::num::NonZeroUsize;
-use std::pin::Pin;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
-use std::sync::Mutex;
-use std::task::{Context, Poll};
-use std::time::Duration;
-
 pub use bytes::Bytes;
-pub use connectrpc::client::{
-    BoxFuture, ClientBody, ClientTransport, HttpClient, ServiceTransport,
+pub use connectrpc::{
+    client::{BoxFuture, ClientBody, ClientTransport, HttpClient, ServiceTransport},
+    rustls::{self, ClientConfig},
 };
-use connectrpc::compression::CompressionRegistry;
-pub use connectrpc::rustls::{self, ClientConfig};
-use connectrpc::{ConnectError, Protocol};
+use connectrpc::{
+    compression::{CompressionRegistry, ZstdProvider},
+    ConnectError, Protocol,
+};
 use cookie_store::{Cookie, CookieDomain, CookieStore};
 use http::header::{ACCEPT_ENCODING, AUTHORIZATION, COOKIE, SET_COOKIE};
 pub use http::{Request, Response};
 pub use http_body::Body;
-use http_body_util::combinators::BoxBody;
-use http_body_util::BodyExt;
+use http_body_util::{combinators::BoxBody, BodyExt};
 use hyper::body::Incoming;
 use hyper_rustls::{HttpsConnectorBuilder, MaybeHttpsStream};
-use hyper_util::client::legacy::connect::HttpConnector;
-use hyper_util::client::legacy::Builder as HyperClientBuilder;
-use hyper_util::client::legacy::Client as HyperClient;
-use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
+use hyper_util::{
+    client::legacy::{
+        connect::HttpConnector, Builder as HyperClientBuilder, Client as HyperClient,
+    },
+    rt::{TokioExecutor, TokioIo, TokioTimer},
+};
 use reqwest::Url;
-use tower::util::BoxCloneSyncService;
-use tower::ServiceExt;
+use std::{
+    collections::{hash_map::Entry, BTreeSet, HashMap},
+    error::Error,
+    fmt,
+    num::NonZeroUsize,
+    pin::Pin,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc, Mutex,
+    },
+    task::{Context, Poll},
+    time::Duration,
+};
+use tokio::net::TcpStream;
+use tower::{util::BoxCloneSyncService, ServiceExt};
+use tracing::warn;
 
 const DEFAULT_CONNECTIONS_PER_ORIGIN: usize = 4;
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
@@ -544,11 +549,22 @@ impl ClientTransport for BalancedHttp2Transport {
     }
 }
 
+/// Enables `TCP_NODELAY`, logging a warning if the socket option cannot be set.
+pub fn set_tcp_nodelay(tcp: &mut TcpStream) {
+    if let Err(error) = tcp.set_nodelay(true) {
+        warn!(%error, "failed to set TCP_NODELAY");
+    }
+}
+
+/// zstd level for bodies this registry compresses, which are mostly query and stream
+/// responses.
+const ZSTD_LEVEL: i32 = -1;
+
 /// gzip + zstd - used for [`connectrpc::ConnectRpcService::with_compression`] and
 /// [`connectrpc::client::ClientConfig::compression`].
 #[must_use]
 pub fn connect_compression_registry() -> CompressionRegistry {
-    CompressionRegistry::default()
+    CompressionRegistry::default().register(ZstdProvider::with_level(ZSTD_LEVEL))
 }
 
 /// Wraps [`HttpClient`] with zstd first for the default response codecs (see module docs).
@@ -874,6 +890,31 @@ mod tests {
             headers.append(SET_COOKIE, v.parse().unwrap());
         }
         headers
+    }
+
+    #[test]
+    fn registry_compresses_zstd_at_the_configured_level() {
+        use connectrpc::compression::CompressionProvider;
+
+        // Partly repetitive, so level -1 and the default level 3 produce different frames.
+        let body: Vec<u8> = (0..64 * 1024u32)
+            .flat_map(|i| (i.wrapping_mul(2_654_435_761) % 1_000).to_le_bytes())
+            .collect();
+        let registry = connect_compression_registry();
+        assert_eq!(registry.accept_encoding_header(), "gzip, zstd");
+
+        let compressed = registry.compress("zstd", &body).unwrap();
+        let expected = ZstdProvider::with_level(ZSTD_LEVEL)
+            .compress(&body)
+            .unwrap();
+        assert_eq!(compressed, expected);
+        assert_ne!(compressed, ZstdProvider::default().compress(&body).unwrap());
+        assert_eq!(
+            registry
+                .decompress_with_limit("zstd", compressed, body.len())
+                .unwrap(),
+            body
+        );
     }
 
     #[test]

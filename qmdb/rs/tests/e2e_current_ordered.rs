@@ -4,28 +4,37 @@
 
 mod common;
 
-use std::collections::{BTreeMap, BTreeSet};
-use std::num::NonZeroU64;
-
 use commonware_cryptography::Sha256;
-use commonware_runtime::tokio as cw_tokio;
-use commonware_runtime::Runner as _;
-use commonware_storage::journal::contiguous::fixed::Config as FixedJournalConfig;
-use commonware_storage::merkle::{mmb, mmr, Family, Graftable, Location, Proof};
-use commonware_storage::qmdb::any::ordered::fixed::Operation as FixedQmdbOperation;
-use commonware_storage::qmdb::any::ordered::variable::Operation as QmdbOperation;
-use commonware_storage::qmdb::any::value::FixedEncoding;
-use commonware_storage::qmdb::current::ordered::fixed::Db as LocalFixedQmdbDb;
-use commonware_storage::qmdb::current::ordered::proof::constant::ExclusionProof;
-use commonware_storage::qmdb::current::ordered::variable::Db as LocalQmdbDb;
-use commonware_storage::qmdb::operation::Operation as _;
-use commonware_storage::translator::TwoCap;
+use commonware_macros::boxed;
+use commonware_runtime::{tokio as cw_tokio, Runner as _};
+use commonware_storage::{
+    journal::contiguous::fixed::Config as FixedJournalConfig,
+    merkle::{mmb, mmr, Family, Graftable, Location, Proof},
+    qmdb::{
+        any::{
+            ordered::{
+                fixed::Operation as FixedQmdbOperation, variable::Operation as QmdbOperation,
+            },
+            value::FixedEncoding,
+        },
+        current::ordered::{
+            fixed::Db as LocalFixedQmdbDb, proof::constant::ExclusionProof,
+            variable::Db as LocalQmdbDb,
+        },
+        operation::Operation as _,
+    },
+    translator::TwoCap,
+};
 use commonware_utils::{NZUsize, NZU16, NZU64};
-use exoware_qmdb::MAX_OPERATION_SIZE;
 use exoware_qmdb::{
     adapter::upload::recover_boundary_state, proof::RawKeyLookupProof, CurrentBoundaryState,
+    MAX_OPERATION_SIZE,
 };
 use exoware_sdk::{PrefixedStoreClient, StoreClient};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    num::NonZeroU64,
+};
 
 const N: usize = 32;
 type Digest = commonware_cryptography::sha256::Digest;
@@ -156,7 +165,7 @@ where
     tokio::task::spawn_blocking(|| {
         cw_tokio::Runner::default().start(|context| async move {
             use commonware_runtime::{buffer::paged::CacheRef, Supervisor as _};
-            let page_cache = CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(8));
+            let page_cache = CacheRef::new(NZU16!(64), NZUsize!(8));
             let cfg = common::current_variable_config(
                 "current_ordered_variable_source",
                 page_cache,
@@ -182,7 +191,7 @@ where
                     .await
                     .expect("merkleize")
             };
-            (db, _) = db.apply_batch(finalized).await.expect("apply");
+            db = db.apply_batch(finalized).await.expect("apply");
 
             let latest = db.bounds().end - 1;
             let n = NonZeroU64::new(*latest + 1).unwrap();
@@ -260,7 +269,7 @@ where
     tokio::task::spawn_blocking(move || {
         cw_tokio::Runner::default().start(|context| async move {
             use commonware_runtime::{buffer::paged::CacheRef, Supervisor as _};
-            let page_cache = CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(8));
+            let page_cache = CacheRef::new(NZU16!(64), NZUsize!(8));
             let cfg = common::current_variable_config(
                 partition_prefix,
                 page_cache,
@@ -297,7 +306,7 @@ where
                     .await
                     .expect("merkleize")
             };
-            (db, _) = db.apply_batch(finalized).await.expect("apply");
+            db = db.apply_batch(finalized).await.expect("apply");
 
             let latest = db.bounds().end - 1;
             let n = NonZeroU64::new(*latest + 1).unwrap();
@@ -330,7 +339,7 @@ where
     tokio::task::spawn_blocking(|| {
         cw_tokio::Runner::default().start(|context| async move {
             use commonware_runtime::{buffer::paged::CacheRef, Supervisor as _};
-            let page_cache = CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(8));
+            let page_cache = CacheRef::new(NZU16!(64), NZUsize!(8));
             let cfg = commonware_storage::qmdb::current::Config {
                 merkle_config: common::merkle_config(
                     "current_ordered_fixed_source",
@@ -373,7 +382,7 @@ where
                     .await
                     .expect("fixed merkleize")
             };
-            (db, _) = db.apply_batch(finalized).await.expect("apply fixed");
+            db = db.apply_batch(finalized).await.expect("apply fixed");
 
             let latest = db.bounds().end - 1;
             let n = NonZeroU64::new(*latest + 1).unwrap();
@@ -575,7 +584,7 @@ async fn assert_incremental_seed_batches_keep_current_proofs_verifiable<F>(
         tokio::task::spawn_blocking(move || {
             cw_tokio::Runner::default().start(|context| async move {
                 use commonware_runtime::{buffer::paged::CacheRef, Supervisor as _};
-                let page_cache = CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(8));
+                let page_cache = CacheRef::new(NZU16!(64), NZUsize!(8));
                 let cfg = common::current_variable_config(
                     partition_prefix,
                     page_cache,
@@ -623,7 +632,7 @@ async fn assert_incremental_seed_batches_keep_current_proofs_verifiable<F>(
                             .await
                             .expect("merkleize")
                     };
-                    (db, _) = db.apply_batch(finalized).await.expect("apply");
+                    db = db.apply_batch(finalized).await.expect("apply");
 
                     let latest = db.bounds().end - 1;
                     let count = NonZeroU64::new(*latest + 1).expect("non-zero op count");
@@ -747,7 +756,7 @@ async fn test_ordered_mmb_persistent_interleaved_seed_batches_keep_current_proof
             cw_tokio::Runner::new(cw_tokio::Config::new().with_storage_directory(storage_path))
                 .start(|context| async move {
                     use commonware_runtime::{buffer::paged::CacheRef, Supervisor as _};
-                    let page_cache = CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(8));
+                    let page_cache = CacheRef::new(NZU16!(64), NZUsize!(8));
                     let cfg = common::current_variable_config(
                         "current_ordered_variable_mmb_persistent_seed_source",
                         page_cache,
@@ -788,7 +797,7 @@ async fn test_ordered_mmb_persistent_interleaved_seed_batches_keep_current_proof
                                 .await
                                 .expect("merkleize")
                         };
-                        (db, _) = db.apply_batch(finalized).await.expect("apply");
+                        db = db.apply_batch(finalized).await.expect("apply");
                         db = db.sync().await.expect("sync");
 
                         let latest = db.bounds().end - 1;
@@ -1118,9 +1127,9 @@ where
 {
     use commonware_codec::Encode as _;
     use commonware_parallel::Sequential;
-    use exoware_qmdb::{
-        adapter::upload::prepare_authenticated_range, adapter::upload::stage_authenticated_range,
-        adapter::upload::stage_watermark, adapter::upload::AuthenticatedOperationRange,
+    use exoware_qmdb::adapter::upload::{
+        prepare_authenticated_range, stage_authenticated_range, stage_watermark,
+        AuthenticatedOperationRange,
     };
     use exoware_sdk::StoreWriteBatch;
 
@@ -1128,7 +1137,7 @@ where
         cw_tokio::Runner::default().start(|context| async move {
             use commonware_runtime::{buffer::paged::CacheRef, Supervisor as _};
 
-            let page_cache = CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(8));
+            let page_cache = CacheRef::new(NZU16!(64), NZUsize!(8));
             let cfg = common::current_variable_config(
                 "current_ordered_variable_coalesced_source",
                 page_cache,
@@ -1168,7 +1177,7 @@ where
                     )
                     .await
                     .expect("merkleize source batch");
-                (db, _) = db.apply_batch(batch).await.expect("apply source batch");
+                db = db.apply_batch(batch).await.expect("apply source batch");
                 let end = db.bounds().end;
                 let latest = end - 1;
                 let expected_root = db.root();
@@ -1308,6 +1317,7 @@ async fn test_ordered_mmb_current_boundaries_survive_coalesced_publication() {
 }
 
 /// Store requests `operation` makes.
+#[boxed]
 async fn store_calls<T>(
     query: &common::CountingQuery,
     operation: impl std::future::Future<Output = Result<T, exoware_qmdb::QmdbError>>,

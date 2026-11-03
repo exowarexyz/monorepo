@@ -1,41 +1,30 @@
-use std::sync::Arc;
-
+use crate::{codec::*, predicate::*, scan::*, types::*, writer::*, SqlContext};
 use async_trait::async_trait;
 use bytes::Bytes;
-use datafusion::arrow::datatypes::{DataType, SchemaRef};
-use datafusion::catalog::Session;
-use datafusion::common::tree_node::TreeNode;
-use datafusion::common::{DataFusionError, Result as DataFusionResult, SchemaExt};
-use datafusion::datasource::sink::DataSinkExec;
-use datafusion::datasource::TableProvider;
-use datafusion::logical_expr::dml::InsertOp;
-use datafusion::logical_expr::{Expr, TableProviderFilterPushDown, TableType};
-use datafusion::physical_plan::ExecutionPlan;
-use exoware_sdk::kv_codec::decode_stored_row;
-use exoware_sdk::PrefixedStoreClient;
-
-use crate::codec::*;
-use crate::predicate::*;
-use crate::scan::*;
-use crate::types::*;
-use crate::writer::*;
-use crate::SqlContext;
+use datafusion::{
+    arrow::datatypes::{DataType, SchemaRef},
+    catalog::Session,
+    common::{tree_node::TreeNode, DataFusionError, Result as DataFusionResult, SchemaExt},
+    datasource::{sink::DataSinkExec, TableProvider},
+    logical_expr::{dml::InsertOp, Expr, TableProviderFilterPushDown, TableType},
+    physical_plan::ExecutionPlan,
+};
+use exoware_sdk::{kv_codec::decode_stored_row, PrefixedStoreClient};
+use std::sync::Arc;
 
 pub struct KvSchema {
     client: PrefixedStoreClient,
     tables: Vec<(String, Arc<KvTable>)>,
-    next_prefix: u8,
 }
 
 impl KvSchema {
     /// Build a schema over `client`'s namespace prefix. When the Store is
     /// co-tenanted, the caller must pick a prefix disjoint from every co-tenant
     /// so SQL's prefix-bounded scans can't observe another's keys.
-    pub fn new(client: PrefixedStoreClient) -> Self {
+    pub const fn new(client: PrefixedStoreClient) -> Self {
         Self {
             client,
             tables: Vec::new(),
-            next_prefix: 0,
         }
     }
 
@@ -53,11 +42,11 @@ impl KvSchema {
         if self.tables.len() >= MAX_TABLES {
             return Err(format!("too many tables for key layout (max {MAX_TABLES})"));
         }
-        let prefix = self.next_prefix;
+        // Tables are only ever appended, so the next free prefix is the count.
+        let prefix = self.tables.len() as u8;
         let config = KvTableConfig::new(prefix, columns, primary_key_columns, index_specs)?;
         let table = Arc::new(KvTable::new(self.client.clone(), config)?);
         self.tables.push((name, table));
-        self.next_prefix = self.next_prefix.wrapping_add(1);
         Ok(self)
     }
 
@@ -106,11 +95,11 @@ impl KvSchema {
         self.table(name, columns, vec![entity, version], index_specs)
     }
 
-    pub fn table_count(&self) -> usize {
+    pub const fn table_count(&self) -> usize {
         self.tables.len()
     }
 
-    pub(crate) fn client(&self) -> &PrefixedStoreClient {
+    pub(crate) const fn client(&self) -> &PrefixedStoreClient {
         &self.client
     }
 
@@ -464,7 +453,6 @@ impl TableProvider for KvTable {
 
         let sink = KvIngestSink::new(
             self.client.clone(),
-            self.model.schema.clone(),
             self.model.clone(),
             self.index_specs.clone(),
         );

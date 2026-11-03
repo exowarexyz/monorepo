@@ -1,8 +1,7 @@
 //! Put validation limits and shared transport budgets.
 
-use buffa::{encoding::varint_len, types::bytes_encoded_len};
-
 pub use crate::keys::MAX_KEY_LEN;
+use buffa::{encoding::varint_len, types::bytes_encoded_len};
 
 pub const MAX_PUT_ENTRIES: usize = 2_000_000;
 pub const MAX_REQUEST_MESSAGE_BYTES: usize = 256 * 1024 * 1024;

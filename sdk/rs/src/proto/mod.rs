@@ -9,6 +9,11 @@ pub mod log {
             #![allow(unused_imports)]
             #![allow(clippy::derivable_impls)]
             #![allow(clippy::match_single_binding)]
+            #![allow(elided_lifetimes_in_paths)]
+            #![allow(clippy::use_self)]
+            #![allow(clippy::missing_const_for_fn)]
+            #![allow(clippy::multiple_inherent_impl)]
+            #![allow(clippy::unused_async)]
             include!("../gen/log.ingest.v1.rs");
         }
     }
@@ -19,6 +24,11 @@ pub mod log {
             #![allow(unused_imports)]
             #![allow(clippy::derivable_impls)]
             #![allow(clippy::match_single_binding)]
+            #![allow(elided_lifetimes_in_paths)]
+            #![allow(clippy::use_self)]
+            #![allow(clippy::missing_const_for_fn)]
+            #![allow(clippy::multiple_inherent_impl)]
+            #![allow(clippy::unused_async)]
             include!("../gen/log.retention.v1.rs");
         }
     }
@@ -29,6 +39,11 @@ pub mod log {
             #![allow(unused_imports)]
             #![allow(clippy::derivable_impls)]
             #![allow(clippy::match_single_binding)]
+            #![allow(elided_lifetimes_in_paths)]
+            #![allow(clippy::use_self)]
+            #![allow(clippy::missing_const_for_fn)]
+            #![allow(clippy::multiple_inherent_impl)]
+            #![allow(clippy::unused_async)]
             include!("../gen/log.stream.v1.rs");
         }
     }
@@ -41,6 +56,11 @@ pub mod store {
             #![allow(unused_imports)]
             #![allow(clippy::derivable_impls)]
             #![allow(clippy::match_single_binding)]
+            #![allow(elided_lifetimes_in_paths)]
+            #![allow(clippy::use_self)]
+            #![allow(clippy::missing_const_for_fn)]
+            #![allow(clippy::multiple_inherent_impl)]
+            #![allow(clippy::unused_async)]
             include!("../gen/store.prune.v1.rs");
         }
     }
@@ -51,6 +71,11 @@ pub mod store {
             #![allow(unused_imports)]
             #![allow(clippy::derivable_impls)]
             #![allow(clippy::match_single_binding)]
+            #![allow(elided_lifetimes_in_paths)]
+            #![allow(clippy::use_self)]
+            #![allow(clippy::missing_const_for_fn)]
+            #![allow(clippy::multiple_inherent_impl)]
+            #![allow(clippy::unused_async)]
             include!("../gen/store.query.v1.rs");
         }
     }
@@ -62,6 +87,11 @@ pub mod google {
         #![allow(unused_imports)]
         #![allow(clippy::derivable_impls)]
         #![allow(clippy::match_single_binding)]
+        #![allow(elided_lifetimes_in_paths)]
+        #![allow(clippy::use_self)]
+        #![allow(clippy::missing_const_for_fn)]
+        #![allow(clippy::multiple_inherent_impl)]
+        #![allow(clippy::unused_async)]
         include!("../gen/google.rpc.rs");
     }
 }
@@ -73,6 +103,11 @@ pub mod common {
             #![allow(unused_imports)]
             #![allow(clippy::derivable_impls)]
             #![allow(clippy::match_single_binding)]
+            #![allow(elided_lifetimes_in_paths)]
+            #![allow(clippy::use_self)]
+            #![allow(clippy::missing_const_for_fn)]
+            #![allow(clippy::multiple_inherent_impl)]
+            #![allow(clippy::unused_async)]
             include!("../gen/common.kv.v1.rs");
         }
     }
@@ -84,6 +119,11 @@ pub mod ingest {
     #![allow(unused_imports)]
     #![allow(clippy::derivable_impls)]
     #![allow(clippy::match_single_binding)]
+    #![allow(elided_lifetimes_in_paths)]
+    #![allow(clippy::use_self)]
+    #![allow(clippy::missing_const_for_fn)]
+    #![allow(clippy::multiple_inherent_impl)]
+    #![allow(clippy::unused_async)]
     pub use crate::log::ingest::v1::*;
 }
 
@@ -92,6 +132,11 @@ pub mod prune {
     #![allow(unused_imports)]
     #![allow(clippy::derivable_impls)]
     #![allow(clippy::match_single_binding)]
+    #![allow(elided_lifetimes_in_paths)]
+    #![allow(clippy::use_self)]
+    #![allow(clippy::missing_const_for_fn)]
+    #![allow(clippy::multiple_inherent_impl)]
+    #![allow(clippy::unused_async)]
     pub use crate::store::prune::v1::*;
 }
 
@@ -100,6 +145,11 @@ pub mod query {
     #![allow(unused_imports)]
     #![allow(clippy::derivable_impls)]
     #![allow(clippy::match_single_binding)]
+    #![allow(elided_lifetimes_in_paths)]
+    #![allow(clippy::use_self)]
+    #![allow(clippy::missing_const_for_fn)]
+    #![allow(clippy::multiple_inherent_impl)]
+    #![allow(clippy::unused_async)]
     pub use crate::store::query::v1::*;
 }
 
@@ -108,22 +158,26 @@ pub mod stream {
     #![allow(unused_imports)]
     #![allow(clippy::derivable_impls)]
     #![allow(clippy::match_single_binding)]
+    #![allow(elided_lifetimes_in_paths)]
+    #![allow(clippy::use_self)]
+    #![allow(clippy::missing_const_for_fn)]
+    #![allow(clippy::multiple_inherent_impl)]
+    #![allow(clippy::unused_async)]
     pub use crate::log::stream::v1::*;
 }
 
 mod range_traversal;
 pub mod transport;
 
-pub use range_traversal::{
-    parse_range_traversal_direction, RangeTraversalDirection, RangeTraversalModeError,
-};
-pub use transport::{connect_compression_registry, PreferZstdHttpClient};
-
 use crate::kv_codec::{
     KvExpr, KvFieldKind, KvFieldRef, KvPredicate, KvPredicateCheck, KvPredicateConstraint,
     KvReducedValue,
 };
 use bytes::Bytes;
+pub use range_traversal::{
+    parse_range_traversal_direction, RangeTraversalDirection, RangeTraversalModeError,
+};
+pub use transport::{connect_compression_registry, PreferZstdHttpClient};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RangeReduceOp {
@@ -172,7 +226,7 @@ fn fixed_size_binary_len(kind: &KvFieldKind) -> u32 {
     }
 }
 
-fn proto_field_kind(kind: &KvFieldKind) -> query::KvFieldKind {
+const fn proto_field_kind(kind: &KvFieldKind) -> query::KvFieldKind {
     match kind {
         KvFieldKind::Int64 => query::KvFieldKind::KV_FIELD_KIND_INT64,
         KvFieldKind::UInt64 => query::KvFieldKind::KV_FIELD_KIND_UINT64,
@@ -1190,10 +1244,8 @@ pub use error_details::{
 
 #[cfg(test)]
 mod reduce_params_view_tests {
-    use buffa::Message;
-    use buffa::MessageView as _;
-
     use super::*;
+    use buffa::{Message, MessageView as _};
 
     #[test]
     fn cast_float64_round_trips_through_owned_and_borrowed_expressions() {

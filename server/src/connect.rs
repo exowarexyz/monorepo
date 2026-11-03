@@ -3,62 +3,65 @@
 
 #![allow(refining_impl_trait)]
 
-use std::collections::HashMap;
-use std::pin::Pin;
-use std::sync::atomic::AtomicBool;
-#[cfg(test)]
-use std::sync::atomic::Ordering;
-use std::sync::Arc;
-
+use crate::{
+    reduce::{decode_group, execute_reduce, RangeError, ReduceExecution, REDUCE_BATCH_ROWS},
+    stream::{StreamHub, StreamNotifier},
+    validate::{self, IngestLimits},
+    FilteredBatch, Ingest, IngestError, Log, LogBatch, Prune, Query, QueryExtra, RangeScan,
+    RangeScanResult, Retention, StoreEngine,
+};
 use buffa::Message;
 use bytes::Bytes;
 use connectrpc::{
     Chain, ConnectError, ConnectRpcService, Limits, RequestContext as Context, ServiceRequest,
 };
-use datafusion::arrow::record_batch::RecordBatch;
-use datafusion::execution::context::TaskContext;
-use datafusion::execution::runtime_env::RuntimeEnv;
-use exoware_proto::common::Entry;
-use exoware_proto::google::rpc::{ErrorInfo, RetryInfo};
+use datafusion::{
+    arrow::record_batch::RecordBatch,
+    execution::{context::TaskContext, runtime_env::RuntimeEnv},
+};
 #[cfg(test)]
 use exoware_proto::log::retention::v1::SetRetentionRequestView;
-use exoware_proto::log::retention::v1::{
-    Service as RetentionApi, ServiceServer as RetentionServiceServer, SetRetentionResponse,
-};
 #[cfg(test)]
 use exoware_proto::log::stream::v1::GetRequestView;
-use exoware_proto::log::stream::v1::{
-    Service as StreamApi, ServiceServer as StreamServiceServer, SubscribeRequestView,
-    SubscribeResponse,
-};
-use exoware_proto::prune::{
-    PruneResponse, Service as PruneApi, ServiceServer as PruneServiceServer,
-};
-use exoware_proto::query::{
-    Detail, GetManyEntry, GetManyFrame, GetResponse, RangeFrame, ReduceResponse,
-    Service as QueryApi, ServiceServer as QueryServiceServer,
-};
-use exoware_proto::stream_filter::{Filter, StreamFilter};
 use exoware_proto::{
-    connect_compression_registry, parse_range_traversal_direction,
+    common::Entry,
+    connect_compression_registry,
+    google::rpc::{ErrorInfo, RetryInfo},
+    log::{
+        retention::v1::{
+            Service as RetentionApi, ServiceServer as RetentionServiceServer, SetRetentionResponse,
+        },
+        stream::v1::{
+            Service as StreamApi, ServiceServer as StreamServiceServer, SubscribeRequestView,
+            SubscribeResponse,
+        },
+    },
+    parse_range_traversal_direction,
+    prune::{PruneResponse, Service as PruneApi, ServiceServer as PruneServiceServer},
+    query::{
+        Detail, GetManyEntry, GetManyFrame, GetResponse, RangeFrame, ReduceResponse,
+        Service as QueryApi, ServiceServer as QueryServiceServer,
+    },
+    stream_filter::{Filter, StreamFilter},
     to_domain_reduce_request_from_view, with_error_info_detail, with_query_detail,
     with_retry_info_detail, RangeTraversalDirection,
 };
 use exoware_sdk as exoware_proto;
-use exoware_sdk::common::kv::v1::filter::KindView as ProtoFilterKindView;
-use exoware_sdk::keys::Key;
-use exoware_sdk::limits::{INGEST_ERROR_DOMAIN, MAX_REQUEST_MESSAGE_BYTES};
-use exoware_sdk::selector::Selector;
-use futures::{stream as stream_util, Stream, StreamExt};
-use tokio::sync::Notify;
-
-use crate::reduce::{decode_group, execute_reduce, RangeError, ReduceExecution, REDUCE_BATCH_ROWS};
-use crate::stream::{StreamHub, StreamNotifier};
-use crate::validate::{self, IngestLimits};
-use crate::{
-    FilteredBatch, Ingest, IngestError, Log, LogBatch, Prune, Query, QueryExtra, RangeScan,
-    RangeScanResult, Retention, StoreEngine,
+use exoware_sdk::{
+    common::kv::v1::filter::KindView as ProtoFilterKindView,
+    keys::Key,
+    limits::{INGEST_ERROR_DOMAIN, MAX_REQUEST_MESSAGE_BYTES},
+    selector::Selector,
 };
+use futures::{stream as stream_util, Stream, StreamExt};
+#[cfg(test)]
+use std::sync::atomic::Ordering;
+use std::{
+    collections::HashMap,
+    pin::Pin,
+    sync::{atomic::AtomicBool, Arc},
+};
+use tokio::sync::Notify;
 
 #[cfg(test)]
 mod put_tests;
@@ -89,10 +92,9 @@ fn query_detail(sequence_number: u64, extra: QueryExtra) -> Detail {
 
 /// Build a consistency rejection for an observed snapshot with the standard retry hint.
 pub fn consistency_not_ready_error(required: u64, current: u64) -> ConnectError {
-    let err = with_retry_hint(
-        ConnectError::aborted("minimum consistency token is not yet visible"),
-        RETRY_HINT_DELAY,
-    );
+    let err = with_retry_hint(ConnectError::aborted(
+        "minimum consistency token is not yet visible",
+    ));
     with_query_detail(
         with_error_info_detail(
             err,
@@ -219,7 +221,7 @@ struct RangeFrameState<S> {
 
 /// Upper bound on what one key/value pair adds to an encoded frame: its bytes,
 /// plus field tags and length prefixes, which take well under 16 bytes.
-fn frame_entry_bytes(key: &[u8], value: &[u8]) -> usize {
+const fn frame_entry_bytes(key: &[u8], value: &[u8]) -> usize {
     key.len() + value.len() + 16
 }
 
@@ -265,7 +267,7 @@ where
         }
     }
 
-    pub fn with_ingest_limits(mut self, limits: IngestLimits) -> Self {
+    pub const fn with_ingest_limits(mut self, limits: IngestLimits) -> Self {
         self.ingest_limits = limits;
         self
     }
@@ -324,7 +326,7 @@ where
         }
     }
 
-    pub fn with_limits(mut self, limits: IngestLimits) -> Self {
+    pub const fn with_limits(mut self, limits: IngestLimits) -> Self {
         self.limits = limits;
         self
     }
@@ -412,7 +414,7 @@ impl<P> PruneState<P>
 where
     P: Prune,
 {
-    pub fn new(prune: Arc<P>) -> Self {
+    pub const fn new(prune: Arc<P>) -> Self {
         Self { prune }
     }
 }
@@ -443,7 +445,7 @@ impl<R> RetentionState<R>
 where
     R: Retention,
 {
-    pub fn new(retention: Arc<R>) -> Self {
+    pub const fn new(retention: Arc<R>) -> Self {
         Self { retention }
     }
 }
@@ -499,25 +501,25 @@ const REASON_WORKER_NOT_READY: &str = "WORKER_NOT_READY";
 const REASON_INGEST_UNAVAILABLE: &str = "INGEST_UNAVAILABLE";
 
 pub fn worker_not_ready_error() -> ConnectError {
-    with_retry_hint(
-        with_error_info_detail(
-            ConnectError::unavailable("ingest is not ready"),
-            ErrorInfo {
-                reason: REASON_WORKER_NOT_READY.to_string(),
-                domain: INGEST_ERROR_DOMAIN.to_string(),
-                ..Default::default()
-            },
-        ),
-        RETRY_HINT_DELAY,
-    )
+    with_retry_hint(with_error_info_detail(
+        ConnectError::unavailable("ingest is not ready"),
+        ErrorInfo {
+            reason: REASON_WORKER_NOT_READY.to_string(),
+            domain: INGEST_ERROR_DOMAIN.to_string(),
+            ..Default::default()
+        },
+    ))
 }
 
 /// Attaches an explicit retry hint for "come back soon" responses.
-fn with_retry_hint(err: ConnectError, retry_delay: std::time::Duration) -> ConnectError {
+fn with_retry_hint(err: ConnectError) -> ConnectError {
     with_retry_info_detail(
         err,
         RetryInfo {
-            retry_delay: Some(buffa_types::google::protobuf::Duration::from(retry_delay)).into(),
+            retry_delay: Some(buffa_types::google::protobuf::Duration::from(
+                RETRY_HINT_DELAY,
+            ))
+            .into(),
             ..Default::default()
         },
     )
@@ -527,17 +529,14 @@ pub fn ingest_error_to_connect(err: IngestError) -> ConnectError {
     match err {
         IngestError::PutTooLarge(error) => validate::put_too_large_error(error),
         IngestError::ResourceExhausted { message } => ConnectError::resource_exhausted(message),
-        IngestError::Unavailable { message } => with_retry_hint(
-            with_error_info_detail(
-                ConnectError::unavailable(message),
-                ErrorInfo {
-                    reason: REASON_INGEST_UNAVAILABLE.to_string(),
-                    domain: INGEST_ERROR_DOMAIN.to_string(),
-                    ..Default::default()
-                },
-            ),
-            RETRY_HINT_DELAY,
-        ),
+        IngestError::Unavailable { message } => with_retry_hint(with_error_info_detail(
+            ConnectError::unavailable(message),
+            ErrorInfo {
+                reason: REASON_INGEST_UNAVAILABLE.to_string(),
+                domain: INGEST_ERROR_DOMAIN.to_string(),
+                ..Default::default()
+            },
+        )),
         IngestError::Internal { message } => ConnectError::internal(message),
     }
 }
@@ -680,7 +679,7 @@ where
         let result = self
             .state
             .query
-            .range_scan(start_key.clone(), end_key.clone(), limit, forward)
+            .range_scan(start_key, end_key, limit, forward)
             .await
             .map_err(ConnectError::internal)?;
         ensure_min_sequence_number(request.min_sequence_number, result.sequence_number)?;
@@ -849,7 +848,7 @@ where
     ) -> connectrpc::ServiceResult<PruneResponse> {
         validate::validate_prune_request(request.view())?;
         let document = exoware_proto::parse_and_validate_policy_document(request.view())
-            .map_err(|e| ConnectError::invalid_argument(e.to_string()))?;
+            .map_err(ConnectError::invalid_argument)?;
 
         self.state
             .prune
@@ -899,10 +898,6 @@ where
                 ..Default::default()
             },
         )
-    }
-
-    fn batch_evicted_error(&self, oldest_retained: Option<u64>) -> ConnectError {
-        Self::batch_evicted_connect_error(oldest_retained)
     }
 
     fn batch_not_found_error(&self) -> ConnectError {
@@ -1002,7 +997,6 @@ struct SubscriptionState<B> {
     // failure boundary instead of when the client tears the stream down.
     replay: Option<ReplayState>,
     live: Option<OrderedBatchStream>,
-    terminated: bool,
 }
 
 impl<B> SubscriptionState<B>
@@ -1014,7 +1008,6 @@ where
             state,
             replay,
             live: Some(live),
-            terminated: false,
         }
     }
 
@@ -1023,10 +1016,6 @@ where
     ) -> Pin<Box<dyn Stream<Item = Result<SubscribeResponse, ConnectError>> + Send>> {
         Box::pin(stream_util::unfold(self, |mut state| async move {
             loop {
-                if state.terminated {
-                    return None;
-                }
-
                 if state.replay.is_some() {
                     match state.next_replay_frame().await {
                         Ok(ReplayProgress::Frame(frame)) => return Some((Ok(frame), state)),
@@ -1036,8 +1025,9 @@ where
                     }
                 }
 
-                // The live sequence source only ends past u64::MAX, so an
-                // exhausted live stream ends the subscription.
+                // `terminate` clears `live`, and the live sequence source only
+                // ends past u64::MAX, so a missing or exhausted live stream
+                // ends the subscription.
                 let (sequence_number, batch) = state.live.as_mut()?.next().await?;
                 match state.resolve_batch(sequence_number, batch).await {
                     Ok(Some(frame)) => return Some((Ok(frame), state)),
@@ -1049,7 +1039,6 @@ where
     }
 
     fn terminate(&mut self, err: ConnectError) -> Result<SubscribeResponse, ConnectError> {
-        self.terminated = true;
         self.replay = None;
         self.live = None;
         Err(err)
@@ -1169,7 +1158,7 @@ where
                         .oldest_retained_batch()
                         .await
                         .map_err(ConnectError::internal)?;
-                    return Err(self.batch_evicted_error(oldest));
+                    return Err(Self::batch_evicted_connect_error(oldest));
                 };
                 Some(ReplayState {
                     batches: ordered_batch_stream(
@@ -1224,7 +1213,7 @@ where
                         .oldest_retained_batch()
                         .await
                         .map_err(ConnectError::internal)?;
-                    Err(self.batch_evicted_error(oldest))
+                    Err(Self::batch_evicted_connect_error(oldest))
                 }
             }
         }
@@ -1433,39 +1422,44 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::{BTreeMap, HashMap};
-    use std::sync::atomic::{AtomicU64, AtomicUsize};
-    use std::sync::Mutex;
-    use std::time::Duration;
-
-    use buffa::Message;
-    use exoware_proto::common::kv::v1::Selector as ProtoSelector;
-    use exoware_proto::log::retention::v1::SetRetentionRequest;
-    use exoware_proto::log::stream::v1::{
-        GetRequest as StreamGetRequest, SubscribeRequest, SubscribeRequestView,
-    };
-    use exoware_proto::store::prune::v1::{
-        policy_retain, KeysScope, Policy as ProtoPolicy, PolicyRetain, PruneRequest,
-        PruneRequestView, RetainKeepLatest,
-    };
-    use exoware_sdk::keys::Prefix;
-    use exoware_sdk::kv_codec::KvReducedValue;
-    use exoware_sdk::limits::{
-        put_entry_encoded_len, PutTooLarge, MAX_PUT_ENTRIES, MAX_RESPONSE_ELEMENT_MEMORY_BYTES,
-        MAX_RESPONSE_MESSAGE_BYTES, MAX_VALUE_LEN,
-    };
-    use exoware_sdk::prune_policy::{PrunePolicyDocument, PRUNE_POLICY_DOCUMENT_VERSION};
-    use exoware_sdk::retention::RetentionPolicy;
-    use exoware_sdk::transport::ServiceTransport;
-    use exoware_sdk::{
-        decode_connect_error, to_domain_reduce_response, PrefixedStoreClient, StoreClient,
-        StoreWriteBatch,
-    };
-    use futures::StreamExt;
-
     use crate::{
         Ingest, IngestError, Log, LogBatch, Prune, Query, QueryExtra, QueryResult, RangeScan,
         RangeScanBatch, Retention, Sequence, StreamNotification, StreamNotifier,
+    };
+    use buffa::Message;
+    use exoware_proto::{
+        common::kv::v1::Selector as ProtoSelector,
+        log::{
+            retention::v1::SetRetentionRequest,
+            stream::v1::{GetRequest as StreamGetRequest, SubscribeRequest, SubscribeRequestView},
+        },
+        store::prune::v1::{
+            policy_retain, KeysScope, Policy as ProtoPolicy, PolicyRetain, PruneRequest,
+            PruneRequestView, RetainKeepLatest,
+        },
+    };
+    use exoware_sdk::{
+        decode_connect_error,
+        keys::Prefix,
+        kv_codec::KvReducedValue,
+        limits::{
+            put_entry_encoded_len, PutTooLarge, MAX_PUT_ENTRIES, MAX_RESPONSE_ELEMENT_MEMORY_BYTES,
+            MAX_RESPONSE_MESSAGE_BYTES, MAX_VALUE_LEN,
+        },
+        prune_policy::{PrunePolicyDocument, PRUNE_POLICY_DOCUMENT_VERSION},
+        retention::RetentionPolicy,
+        to_domain_reduce_response,
+        transport::ServiceTransport,
+        PrefixedStoreClient, StoreClient, StoreWriteBatch,
+    };
+    use futures::StreamExt;
+    use std::{
+        collections::{BTreeMap, HashMap},
+        sync::{
+            atomic::{AtomicU64, AtomicUsize},
+            Mutex,
+        },
+        time::Duration,
     };
 
     const TEST_PREFIX: u8 = 1;
@@ -1580,7 +1574,7 @@ mod tests {
         ) {
             let mut state = self.state.lock().expect("lock");
             state.current_sequence = state.current_sequence.max(sequence_number);
-            state.batches.insert(sequence_number, Some(kvs.clone()));
+            state.batches.insert(sequence_number, Some(kvs));
             drop(state);
             hub.publish(sequence_number);
         }
@@ -3510,8 +3504,7 @@ mod tests {
 
     #[tokio::test]
     async fn concurrent_reduce_cancellation_releases_shared_pool() {
-        use datafusion::execution::memory_pool::FairSpillPool;
-        use datafusion::execution::runtime_env::RuntimeEnvBuilder;
+        use datafusion::execution::{memory_pool::FairSpillPool, runtime_env::RuntimeEnvBuilder};
         let (engine, request) = grouped_reduce_fixture(5000, 0);
         engine.state.lock().unwrap().range_batch_limit = Some(1);
         let runtime = RuntimeEnvBuilder::new()
