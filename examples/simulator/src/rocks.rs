@@ -836,9 +836,11 @@ fn stage_log_file(path: &Path, sequence: u64, rows: &[(Bytes, Bytes)]) -> Result
     Ok(LOG_BATCH_KEY_LEN + payload.len())
 }
 
-/// Empty rows bracketing one log row inside its file. They sort strictly between neighbouring
-/// sequence keys, so files of consecutive sequences still occupy disjoint key ranges:
-/// `be64(s-1) < head(s) < be64(s) < tail(s) < head(s+1)`. Readers skip keys of this length.
+/// Empty rows bracket each log row inside its file. Ingestion reads a file's first and last data
+/// blocks, so with the sentinels it never reads the payload block. The head sentinel is the
+/// previous sequence's key with a trailing `1`. It sorts after that sequence's tail sentinel and
+/// before this sequence's row, so files of consecutive sequences stay disjoint. Readers skip
+/// keys of this length.
 fn log_head_sentinel(sequence: u64) -> [u8; LOG_BATCH_KEY_LEN + 1] {
     let mut key = [0u8; LOG_BATCH_KEY_LEN + 1];
     key[..LOG_BATCH_KEY_LEN].copy_from_slice(&sequence_log_key(sequence - 1));
@@ -846,6 +848,8 @@ fn log_head_sentinel(sequence: u64) -> [u8; LOG_BATCH_KEY_LEN + 1] {
     key
 }
 
+/// The tail sentinel is this sequence's key with a trailing `0`. It sorts after the row and
+/// before the next sequence's head sentinel.
 fn log_tail_sentinel(sequence: u64) -> [u8; LOG_BATCH_KEY_LEN + 1] {
     let mut key = [0u8; LOG_BATCH_KEY_LEN + 1];
     key[..LOG_BATCH_KEY_LEN].copy_from_slice(&sequence_log_key(sequence));
@@ -1059,6 +1063,7 @@ fn replay_newest_log_row(db: &DB, floor: u64) -> Result<u64, String> {
     let log_cf = db
         .cf_handle(LOG_CF)
         .expect("log CF must exist (created on open)");
+
     // Skip the sentinel rows that bracket each log row.
     let mut newest = db.iterator_cf(log_cf, IteratorMode::End).filter(|item| {
         item.as_ref()
