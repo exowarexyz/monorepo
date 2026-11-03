@@ -6,18 +6,22 @@
 //! the store's independent budget of 256 requests and 1 GiB, which is excluded
 //! from those samples. `BENCH_MEMORY_BYTES` controls only the streaming budget.
 //!
-//! Run with `cargo bench -p exoware-simulator --bench ingest`.
-//! Environment overrides are `BENCH_BATCHES`, `BENCH_KEYS_PER_BATCH`,
-//! `BENCH_VALUE_LEN`, `BENCH_WRITERS`, `BENCH_FRAGMENT_BYTES`,
-//! `BENCH_MEMORY_BYTES`, and `BENCH_KEY_ORDER` (`batch`, the default, gives
-//! every batch its own key range; `random` spreads each batch's keys across the
-//! whole key space, so ingested state files overlap and compaction runs).
+//! Run with `cargo bench -p exoware-simulator --bench ingest`. `BENCH_BATCHES`,
+//! `BENCH_WRITERS`, `BENCH_FRAGMENT_BYTES`, and `BENCH_MEMORY_BYTES` apply to
+//! every workload, and `BENCH_WORKLOAD` selects the row shape.
 //!
-//! `BENCH_WORKLOAD=constantinople` replaces the uniform rows with a block-shaped
-//! workload: each batch is one block of `BENCH_TRANSACTIONS` transactions (default
-//! 51,670, about 310k rows) in six key families with mixed value sizes, submitted
-//! as requests of at most `BENCH_REQUEST_ROWS` rows (default 65,536) in flight
-//! together, followed by the block's 7.45 MB artifact as its own put.
+//! The default workload, `uniform`, writes `BENCH_KEYS_PER_BATCH` keys with values
+//! of `BENCH_VALUE_LEN` bytes per batch. Under the default `BENCH_KEY_ORDER=batch`
+//! each batch owns its own key range, so ingested state files never overlap and
+//! the state column family never compacts. `BENCH_KEY_ORDER=random` spreads each
+//! batch's keys across the whole key space, so state files overlap and compaction
+//! runs.
+//!
+//! `BENCH_WORKLOAD=constantinople` makes each batch one block of
+//! `BENCH_TRANSACTIONS` transactions, 51,670 by default for about 310k rows, in
+//! six key families with mixed value sizes. The block is submitted as requests of
+//! at most `BENCH_REQUEST_ROWS` rows, 65,536 by default, all in flight together,
+//! and its 7.45 MB artifact follows as its own put.
 
 use buffa::Message;
 use bytes::Bytes;
@@ -128,8 +132,8 @@ enum Batch {
     Stream(Bytes),
 }
 
-/// One unit of a writer's queue: the requests of a block, submitted together, then an
-/// optional artifact put once they are all acknowledged.
+/// One unit of a writer's queue. A block's requests are submitted together, then its
+/// optional artifact is put once they are all acknowledged.
 struct Block {
     requests: Vec<Batch>,
     artifact: Option<Batch>,
@@ -162,19 +166,20 @@ fn env_usize(name: &str, default: usize) -> usize {
 /// Key layouts the benchmark can generate. Keys are unique in both layouts.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum KeyOrder {
-    /// `bench/` + batch index + row index + mixed tail: each batch occupies its own key
-    /// range, so its state file never overlaps earlier ones.
+    /// Keys of `bench/`, batch index, row index, and a mixed tail, so each batch occupies
+    /// its own key range and its state file never overlaps earlier ones. The default.
     Batch,
-    /// `bench/` + a 192-bit mix of batch and row index: every batch spans the whole key
-    /// space, as fresh versioned keys do in production.
+    /// Keys of `bench/` and a 192-bit mix of batch and row index, so every batch spans
+    /// the whole key space as fresh versioned keys do in production.
     Random,
 }
 
 impl KeyOrder {
     fn from_env() -> Self {
         match std::env::var("BENCH_KEY_ORDER").as_deref() {
+            Err(_) | Ok("batch") => Self::Batch,
             Ok("random") => Self::Random,
-            _ => Self::Batch,
+            Ok(other) => panic!("BENCH_KEY_ORDER must be batch or random, not {other}"),
         }
     }
 }
@@ -182,28 +187,31 @@ impl KeyOrder {
 /// Row shapes the benchmark can generate, each carrying the settings only it reads.
 #[derive(Clone, Copy)]
 enum Workload {
-    /// Uniform rows: `keys_per_batch` keys of `value_len` bytes per batch, laid out by `key_order`.
+    /// `keys_per_batch` rows of `value_len` bytes per batch, laid out by `key_order`. The
+    /// default.
     Uniform {
         keys_per_batch: usize,
         value_len: usize,
         key_order: KeyOrder,
     },
-    /// One Constantinople block of `transactions` transactions per batch (see
-    /// [`build_constantinople_block`]), followed by the block's artifact as its own put.
+    /// One Constantinople block of `transactions` transactions per batch, as
+    /// [`build_constantinople_block`] shapes it, followed by the block's artifact as its
+    /// own put.
     Constantinople { transactions: usize },
 }
 
 impl Workload {
     fn from_env() -> Self {
         match std::env::var("BENCH_WORKLOAD").as_deref() {
-            Ok("constantinople") => Self::Constantinople {
-                transactions: env_usize("BENCH_TRANSACTIONS", 51_670).max(1),
-            },
-            _ => Self::Uniform {
+            Err(_) | Ok("uniform") => Self::Uniform {
                 keys_per_batch: env_usize("BENCH_KEYS_PER_BATCH", 250_000).max(1),
                 value_len: env_usize("BENCH_VALUE_LEN", 128),
                 key_order: KeyOrder::from_env(),
             },
+            Ok("constantinople") => Self::Constantinople {
+                transactions: env_usize("BENCH_TRANSACTIONS", 51_670).max(1),
+            },
+            Ok(other) => panic!("BENCH_WORKLOAD must be uniform or constantinople, not {other}"),
         }
     }
 }
@@ -254,7 +262,7 @@ fn build_batch(
     kvs
 }
 
-/// SplitMix64 finalizer: a bijective mix, so distinct seeds give distinct outputs.
+/// The SplitMix64 finalizer, a bijective mix, so distinct seeds give distinct outputs.
 const fn splitmix64(mut z: u64) -> u64 {
     z = z.wrapping_add(0x9E37_79B9_7F4A_7C15);
     z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
@@ -288,10 +296,10 @@ fn digest(seed: u64, salt: u64) -> [u8; 32] {
 /// Encoded bytes of the block artifact in the 310k-row profile.
 const BLOCK_ARTIFACT_BYTES: usize = 7_450_286;
 
-/// The rows one block of `transactions` transactions publishes, in the shape of the
-/// Constantinople indexer: six Store rows per transaction across families that are
-/// either ordered by block position or keyed by a digest, so successive blocks interleave
-/// within the digest-keyed families and append within the ordered ones.
+/// The rows one block of `transactions` transactions publishes, shaped like the
+/// Constantinople indexer's. Each transaction writes six Store rows across families that
+/// are either ordered by block position or keyed by a digest, so successive blocks
+/// interleave within the digest-keyed families and append within the ordered ones.
 fn build_constantinople_block(block: usize, transactions: usize) -> Vec<(Bytes, Bytes)> {
     let mut rows = Vec::with_capacity(6 * transactions);
     for t in 0..transactions {
@@ -321,7 +329,7 @@ fn build_constantinople_block(block: usize, transactions: usize) -> Vec<(Bytes, 
     rows
 }
 
-/// The block artifact: one row keyed by height with the encoded block as its value.
+/// The block artifact, one row keyed by height with the encoded block as its value.
 fn build_block_artifact(block: usize) -> Vec<(Bytes, Bytes)> {
     let mut key = Vec::with_capacity(9);
     key.push(7);
