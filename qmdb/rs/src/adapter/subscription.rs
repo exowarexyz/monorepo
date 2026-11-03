@@ -7,34 +7,14 @@ use crate::{
 };
 use commonware_storage::merkle::{Family, Location};
 use exoware_sdk::{
-    keys::Key, selector::Selector, stream_filter::StreamFilter, PrefixedStoreClient,
-    StreamSubscription,
+    keys::Key, kv_codec::Utf8, selector::Selector, stream_filter::StreamFilter,
+    PrefixedStoreClient, StreamSubscription,
 };
-use std::sync::Arc;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum RowFamily {
     Op,
     Watermark,
-}
-
-#[derive(Clone)]
-pub(crate) struct RowClassifier<F: Family> {
-    classify: Arc<dyn Fn(&Key, &[u8]) -> Option<(RowFamily, Location<F>)> + Send + Sync + 'static>,
-}
-
-impl<F: Family> RowClassifier<F> {
-    fn new(
-        classify: impl Fn(&Key, &[u8]) -> Option<(RowFamily, Location<F>)> + Send + Sync + 'static,
-    ) -> Self {
-        Self {
-            classify: Arc::new(classify),
-        }
-    }
-
-    pub(crate) fn classify(&self, key: &Key, value: &[u8]) -> Option<(RowFamily, Location<F>)> {
-        (self.classify)(key, value)
-    }
 }
 
 pub(crate) async fn open_store_subscription(
@@ -49,64 +29,43 @@ pub(crate) async fn open_store_subscription(
         .map_err(|err| QmdbError::Stream(err.to_string()))
 }
 
-/// Select operation and publication rows from a QMDB historical log.
-pub(crate) fn classify_and_filter<F: Family>() -> (RowClassifier<F>, StreamFilter) {
-    use exoware_sdk::{
-        keys::{Key as StoreKey, Prefix},
-        kv_codec::Utf8,
-    };
-
-    struct RowRule<F: Family> {
-        prefix: Prefix,
-        family: RowFamily,
-        decode: Arc<dyn Fn(&StoreKey) -> Option<Location<F>> + Send + Sync>,
+/// The family and location of a QMDB historical-log row, or `None` for any
+/// other row.
+pub(crate) fn classify_row<F: Family>(key: &Key) -> Option<(RowFamily, Location<F>)> {
+    if OPERATION_PREFIX.matches(key) {
+        return decode_operation_location_key::<F>(key)
+            .ok()
+            .map(|location| (RowFamily::Op, location));
     }
+    if WATERMARK_PREFIX.matches(key) {
+        return decode_watermark_location::<F>(key)
+            .ok()
+            .map(|location| (RowFamily::Watermark, location));
+    }
+    None
+}
 
-    let op_prefix = OPERATION_PREFIX.as_bytes().clone();
-    let watermark_prefix = WATERMARK_PREFIX.as_bytes().clone();
-
-    let compiled: [RowRule<F>; 2] = [
-        RowRule {
-            prefix: OPERATION_PREFIX,
-            family: RowFamily::Op,
-            decode: Arc::new(|key| decode_operation_location_key::<F>(key).ok()),
-        },
-        RowRule {
-            prefix: WATERMARK_PREFIX,
-            family: RowFamily::Watermark,
-            decode: Arc::new(|key| decode_watermark_location::<F>(key).ok()),
-        },
-    ];
-    let payload_regex = "(?s-u)^.{8}$".to_string();
-
-    let classify = RowClassifier::new(move |key: &StoreKey, _value: &[u8]| {
-        for rule in &compiled {
-            if rule.prefix.matches(key) {
-                return (rule.decode)(key).map(|location| (rule.family, location));
-            }
-        }
-        None
-    });
-
-    let filter = StreamFilter {
+/// Select operation and publication rows from a QMDB historical log.
+pub(crate) fn row_filter() -> StreamFilter {
+    let payload_regex = Utf8::from("(?s-u)^.{8}$");
+    StreamFilter {
         selectors: vec![
             Selector {
-                prefix: op_prefix,
-                payload_regex: Utf8::from(payload_regex.as_str()),
+                prefix: OPERATION_PREFIX.as_bytes().clone(),
+                payload_regex: payload_regex.clone(),
             },
             Selector {
-                prefix: watermark_prefix,
-                payload_regex: Utf8::from(payload_regex.as_str()),
+                prefix: WATERMARK_PREFIX.as_bytes().clone(),
+                payload_regex,
             },
         ],
         value_filters: vec![],
-    };
-    (classify, filter)
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{classify_and_filter, RowFamily};
+    use super::{classify_row, row_filter, RowFamily};
     use crate::adapter::codec::{encode_operation_key, encode_watermark_key};
     use commonware_storage::merkle::{mmr, Location};
     use exoware_sdk::{keys::Key, selector::compile_payload_regex};
@@ -119,7 +78,7 @@ mod tests {
     // selector's regex in full and classify to the same family and location.
     #[test]
     fn test_backend_selectors_match_their_row_payloads() {
-        let (classifier, filter) = classify_and_filter::<mmr::Family>();
+        let filter = row_filter();
         for location in LOCATIONS {
             let loc = Location::new(location);
             let rows: [(RowFamily, Key); 2] = [
@@ -138,7 +97,7 @@ mod tests {
                     panic!("regex must match {family:?} payload {payload:02X?}")
                 });
                 assert_eq!(captures.get(0).expect("full match").as_bytes(), payload);
-                assert_eq!(classifier.classify(&key, &[]), Some((family, loc)));
+                assert_eq!(classify_row::<mmr::Family>(&key), Some((family, loc)));
             }
         }
     }

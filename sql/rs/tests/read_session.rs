@@ -1,6 +1,9 @@
 #![allow(refining_impl_trait)]
 
-use axum::Router;
+use axum::{
+    serve::{Listener, ListenerExt},
+    Router,
+};
 use bytes::Bytes;
 use commonware_codec::Encode;
 use connectrpc::{ConnectError, ConnectRpcService, RequestContext, ServiceRequest};
@@ -15,6 +18,7 @@ use exoware_sdk::{
         Detail, GetManyFrame, GetManyRequest, GetRequest, GetResponse, RangeFrame, RangeRequest,
         ReduceRequest, ReduceResponse, Service, ServiceServer,
     },
+    transport::set_tcp_nodelay,
     PrefixedStoreClient, ReadSession, StoreClient,
 };
 use exoware_sql::{KvSchema, SqlContext, TableColumnConfig};
@@ -96,7 +100,8 @@ impl MockStore {
         let app = Router::new().fallback_service(service);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
-            .expect("bind mock Store");
+            .expect("bind mock Store")
+            .tap_io(set_tcp_nodelay);
         let url = format!(
             "http://{}",
             listener.local_addr().expect("mock Store address")

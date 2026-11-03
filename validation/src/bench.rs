@@ -539,7 +539,10 @@ fn worker_batch_write_index(
 mod tests {
     use super::*;
     use crate::{client::RequestCompression, keyspace::DEFAULT_KEY_LEN};
-    use axum::Router;
+    use axum::{
+        serve::{Listener, ListenerExt},
+        Router,
+    };
     use clap::Parser;
     use connectrpc::{Chain, ConnectError, ConnectRpcService, RequestContext, ServiceRequest};
     use exoware_sdk::{
@@ -552,6 +555,7 @@ mod tests {
             ReduceRequest, ReduceResponse, Service as QueryService,
             ServiceServer as QueryServiceServer,
         },
+        transport::set_tcp_nodelay,
     };
     use futures::stream;
     use std::{
@@ -744,7 +748,8 @@ mod tests {
         let app = Router::new().fallback_service(connect);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
-            .expect("bind test listener");
+            .expect("bind test listener")
+            .tap_io(set_tcp_nodelay);
         let url = format!(
             "http://{}",
             listener.local_addr().expect("listener address")
@@ -764,7 +769,8 @@ mod tests {
         let app = Router::new().fallback_service(connect);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
-            .expect("bind test listener");
+            .expect("bind test listener")
+            .tap_io(set_tcp_nodelay);
         let url = format!(
             "http://{}",
             listener.local_addr().expect("listener address")
@@ -787,7 +793,8 @@ mod tests {
         let app = Router::new().fallback_service(connect);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
-            .expect("bind test listener");
+            .expect("bind test listener")
+            .tap_io(set_tcp_nodelay);
         let url = format!(
             "http://{}",
             listener.local_addr().expect("listener address")

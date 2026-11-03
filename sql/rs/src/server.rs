@@ -73,7 +73,6 @@ type SubscribeStream = Pin<Box<dyn Stream<Item = Result<SubscribeResponse, Conne
 #[derive(Clone)]
 struct TableStream {
     model: Arc<TableModel>,
-    schema: SchemaRef,
     access_plan: Arc<ScanAccessPlan>,
     selector: Selector,
     indexes: Arc<Vec<ResolvedIndexSpec>>,
@@ -92,7 +91,6 @@ impl TableStream {
             payload_regex: Utf8::from("(?s-u).*"),
         };
         Self {
-            schema: model.schema.clone(),
             access_plan,
             model,
             selector,
@@ -122,7 +120,7 @@ impl TableStream {
             }
             let _ = builder.append_archived_row(&pk_values, &archived)?;
         }
-        builder.finish(&self.schema)
+        builder.finish(&self.model.schema)
     }
 }
 
@@ -182,6 +180,7 @@ impl SqlServer {
             .filter_map(|name| {
                 let stream = self.streams.get(name)?;
                 let columns = stream
+                    .model
                     .schema
                     .fields()
                     .iter()
@@ -235,7 +234,7 @@ impl SqlServer {
     }
 }
 
-fn proto_index_layout(layout: IndexLayout) -> ProtoIndexLayout {
+const fn proto_index_layout(layout: IndexLayout) -> ProtoIndexLayout {
     match layout {
         IndexLayout::Lexicographic => ProtoIndexLayout::INDEX_LAYOUT_LEXICOGRAPHIC,
         IndexLayout::ZOrder => ProtoIndexLayout::INDEX_LAYOUT_Z_ORDER,
@@ -261,7 +260,7 @@ pub struct SqlConnect {
 }
 
 impl SqlConnect {
-    pub fn new(server: Arc<SqlServer>) -> Self {
+    pub const fn new(server: Arc<SqlServer>) -> Self {
         Self { server }
     }
 }
@@ -280,7 +279,7 @@ impl Service for SqlConnect {
             let stream = server.stream(&table_name)?.clone();
             let predicate = compile_subscription_predicate(
                 server.ctx.datafusion(),
-                &stream.schema,
+                &stream.model.schema,
                 &table_name,
                 &where_sql,
             )
@@ -620,6 +619,7 @@ fn client_error_to_connect(err: &exoware_sdk::ClientError) -> ConnectError {
 mod tests {
     use super::*;
     use crate::TableColumnConfig;
+    use axum::serve::{Listener, ListenerExt};
     use buffa::Message;
     use datafusion::{
         arrow::{
@@ -635,7 +635,7 @@ mod tests {
         datasource::MemTable,
         logical_expr::{create_udf, ColumnarValue, Volatility},
     };
-    use exoware_sdk::StoreClient;
+    use exoware_sdk::{transport::set_tcp_nodelay, StoreClient};
     use futures::{FutureExt, StreamExt};
     use std::{
         collections::VecDeque,
@@ -790,7 +790,10 @@ mod tests {
                 )
                 .unwrap();
             let server = Arc::new(SqlServer::new(schema).unwrap());
-            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .unwrap()
+                .tap_io(set_tcp_nodelay);
             let address = listener.local_addr().unwrap();
             let app = axum::Router::new().fallback_service(sql_connect_stack(server));
             let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
@@ -866,7 +869,10 @@ mod tests {
                 ),
             )
             .unwrap();
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .unwrap()
+            .tap_io(set_tcp_nodelay);
         let address = listener.local_addr().unwrap();
         let app = axum::Router::new().fallback_service(sql_connect_stack(server.clone()));
         let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
@@ -1085,7 +1091,10 @@ mod tests {
         .unwrap();
         server.ctx = Arc::new(ctx);
         let server = Arc::new(server);
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .unwrap()
+            .tap_io(set_tcp_nodelay);
         let address = listener.local_addr().unwrap();
         let app = axum::Router::new().fallback_service(sql_connect_stack(server));
         let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
@@ -1547,7 +1556,7 @@ mod tests {
             .unwrap();
         assert_eq!(response.sequence_number, 42);
         let reader = StreamReader::try_new(response.results.as_ref(), None).unwrap();
-        assert_eq!(reader.schema(), state.schema);
+        assert_eq!(reader.schema(), state.model.schema);
         let batches = reader.collect::<Result<Vec<_>, _>>().unwrap();
         assert_eq!(batches.len(), 1);
         let ids = batches[0]

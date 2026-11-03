@@ -6,7 +6,6 @@ pub(crate) struct AccessPathDiagnostics {
     pub(crate) mode: String,
     pub(crate) predicate: String,
     pub(crate) exact: bool,
-    pub(crate) row_recheck: bool,
     pub(crate) full_scan_like: bool,
     pub(crate) range_count: usize,
     pub(crate) constrained_prefix_len: Option<usize>,
@@ -26,7 +25,7 @@ pub(crate) enum QueryStatsExplainSurface {
     RangeReduceDetail,
 }
 
-pub(crate) fn format_query_stats_explain(surface: QueryStatsExplainSurface) -> &'static str {
+pub(crate) const fn format_query_stats_explain(surface: QueryStatsExplainSurface) -> &'static str {
     match surface {
         QueryStatsExplainSurface::StreamedRangeDetail => {
             "streamed_range(detail.extra: server-defined metadata)"
@@ -47,7 +46,7 @@ pub(crate) fn format_access_path_diagnostics(diag: &AccessPathDiagnostics) -> St
         diag.mode,
         diag.predicate,
         diag.exact,
-        diag.row_recheck,
+        !diag.exact,
         diag.range_count,
         diag.full_scan_like,
         constrained_prefix
@@ -67,7 +66,6 @@ pub(crate) fn build_scan_access_path_diagnostics(
             mode: "empty".to_string(),
             predicate: "FALSE".to_string(),
             exact: true,
-            row_recheck: false,
             full_scan_like: false,
             range_count: 0,
             constrained_prefix_len: None,
@@ -79,17 +77,9 @@ pub(crate) fn build_scan_access_path_diagnostics(
         let exact =
             complete_ranges && access_plan.predicate_fully_enforced_by_index_key(model, spec);
         return Ok(AccessPathDiagnostics {
-            mode: format!(
-                "secondary_index({}, {})",
-                spec.name,
-                match spec.layout {
-                    IndexLayout::Lexicographic => "lexicographic",
-                    IndexLayout::ZOrder => "z_order",
-                }
-            ),
+            mode: secondary_index_mode(spec),
             predicate: predicate.describe(model),
             exact,
-            row_recheck: !exact,
             full_scan_like: false,
             range_count: index_plan.ranges.len(),
             constrained_prefix_len: Some(index_plan.constrained_prefix_len),
@@ -102,7 +92,6 @@ pub(crate) fn build_scan_access_path_diagnostics(
         mode: "primary_key".to_string(),
         predicate: predicate.describe(model),
         exact,
-        row_recheck: !exact,
         full_scan_like: is_primary_key_full_scan_like(model, &ranges),
         range_count: ranges.len(),
         constrained_prefix_len: None,
@@ -122,25 +111,24 @@ pub(crate) fn build_aggregate_access_path_diagnostics(
         mode: match access_path {
             AggregateAccessPath::PrimaryKey => "primary_key".to_string(),
             AggregateAccessPath::SecondaryIndex { spec_idx } => {
-                let spec = &index_specs[*spec_idx];
-                format!(
-                    "secondary_index({}, {})",
-                    spec.name,
-                    match spec.layout {
-                        IndexLayout::Lexicographic => "lexicographic",
-                        IndexLayout::ZOrder => "z_order",
-                    }
-                )
+                secondary_index_mode(&index_specs[*spec_idx])
             }
         },
         predicate: predicate.describe(model),
         exact,
-        row_recheck: !exact,
         full_scan_like: matches!(access_path, AggregateAccessPath::PrimaryKey)
             && is_primary_key_full_scan_like(model, ranges),
         range_count: ranges.len(),
         constrained_prefix_len,
     }
+}
+
+fn secondary_index_mode(spec: &ResolvedIndexSpec) -> String {
+    let layout = match spec.layout {
+        IndexLayout::Lexicographic => "lexicographic",
+        IndexLayout::ZOrder => "z_order",
+    };
+    format!("secondary_index({}, {layout})", spec.name)
 }
 
 pub(crate) fn is_primary_key_full_scan_like(model: &TableModel, ranges: &[KeyRange]) -> bool {
