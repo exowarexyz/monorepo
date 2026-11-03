@@ -75,6 +75,13 @@ const DEFAULT_COMMIT_COALESCE_MAX_BATCH_BYTES: usize = 16 * 1024 * 1024;
 const MAX_SEQUENCE_ENTRIES: usize = MAX_PUT_ENTRIES;
 const LOG_CF: &str = "log";
 const LOG_BATCH_KEY_LEN: usize = 8;
+/// Upper bound on the native framing of one batch record beyond its key and value. A record
+/// carries a type byte, a varint32 column-family id, and varint32 key and value lengths.
+const BATCH_RECORD_FRAMING: usize = 16;
+/// Native bytes of one commit batch that do not depend on its rows. They cover the header
+/// (sequence and count) plus the framed log-row key and meta-row key and value.
+const BATCH_FIXED_BYTES: usize =
+    8 + 4 + 2 * BATCH_RECORD_FRAMING + LOG_BATCH_KEY_LEN + SEQ_META_KEY.len() + 8;
 pub const WRITER_THREAD_PREFIX: &str = "simulator-rocks-";
 const DEFAULT_STAGE_WORKERS: usize = 4;
 const WRITER_OVERHEAD: usize = 16 * 1024;
@@ -403,12 +410,13 @@ impl Frontiers {
     }
 }
 
-// Cover owned row bytes, the encoded native batch, and the temporary stream payload.
+// Cover encoding's peak, when the owned row bytes, the temporary stream payload, and the
+// native batch reserved for both the stream row and the state rows all exist at once.
 // RocksDB memtables and its WAL buffer remain engine-owned allocations.
 fn writer_growth(entries: usize, encoded_len: usize) -> usize {
     let row = std::mem::size_of::<(Bytes, Bytes)>();
     encoded_len
-        .saturating_mul(3)
+        .saturating_mul(4)
         .saturating_add(entries.saturating_mul(2 * row + 128))
 }
 
@@ -445,25 +453,25 @@ struct WriteRequest {
     encoded_len: usize,
     response: oneshot::Sender<Result<u64, IngestError>>,
     notifier: Option<Arc<dyn StreamNotifier>>,
-    lease: Arc<WriteLease>,
+    /// Fields drop in declaration order, so this charge is released only after the rows
+    /// it covers.
+    _lease: WriteLease,
 }
 
-/// One coalesced wave awaiting batch encoding: every request shares a single sequence number,
+/// One coalesced wave awaiting batch encoding. Every request shares a single sequence number,
 /// whose log row carries all their rows in arrival order.
 struct QueuedWave {
     sequence: u64,
-    rows: Vec<(Bytes, Bytes)>,
     requests: Vec<WriteRequest>,
-    _leases: Vec<Arc<WriteLease>>,
 }
 
 /// One encoded atomic commit with all requests and admission leases still owned.
 struct PreparedWrite {
     sequence: u64,
+    /// Dropped before `requests`, whose leases charge for it.
     batch: rocksdb::WriteBatch,
     encoded_bytes: usize,
     requests: Vec<WriteRequest>,
-    _leases: Vec<Arc<WriteLease>>,
 }
 
 struct Writer {
@@ -596,10 +604,10 @@ impl Writer {
                 encoded_len,
                 response,
                 notifier,
-                lease: Arc::new(WriteLease {
+                _lease: WriteLease {
                     _memory: memory,
                     _request: request,
-                }),
+                },
             })
             .map_err(|_| IngestError::Internal {
                 message: "rocks writer stopped".to_string(),
@@ -695,76 +703,97 @@ fn coalesce_queued_write(
     let sequence = from
         .checked_add(1)
         .expect("rocks sequence number overflowed");
-    let mut leases = Vec::new();
     let mut requests = Vec::with_capacity(1);
-    let mut rows: Vec<(Bytes, Bytes)> = Vec::with_capacity(first.kvs.len());
+    let mut entries = 0usize;
     let mut staged_bytes = 0usize;
     let mut encoded_bytes = 0;
     let mut request = first;
     let mut carried = None;
 
     loop {
-        if !rows.is_empty()
-            && (request.kvs.len() > MAX_SEQUENCE_ENTRIES.saturating_sub(rows.len())
+        // The entry and encoded-size caps are hard per-sequence limits, so a request that
+        // would exceed them starts the next wave. The first request always joins.
+        if entries > 0
+            && (request.kvs.len() > MAX_SEQUENCE_ENTRIES.saturating_sub(entries)
                 || request.encoded_len > MAX_REQUEST_MESSAGE_BYTES.saturating_sub(encoded_bytes))
         {
             carried = Some(request);
             break;
         }
 
+        // Admit the request and advance the totals the caps compare against. Payload is
+        // staged twice, once as state rows and once inside the encoded log batch.
         encoded_bytes += request.encoded_len;
-        // Payload counted twice: once as state rows and once inside the encoded log batch.
+        entries += request.kvs.len();
         staged_bytes += 2 * request
             .kvs
             .iter()
             .map(|(k, v)| k.len() + v.len())
             .sum::<usize>();
-        leases.push(request.lease.clone());
-        rows.extend(request.kvs.iter().cloned());
         requests.push(request);
+
+        // The staged-byte cap is soft, so the wave closes after the request that reaches it
+        // or once nothing more is queued.
         if staged_bytes >= max_batch_bytes {
             break;
         }
-
         match receiver.try_recv() {
             Ok(next_request) => request = next_request,
             Err(_) => break,
         }
     }
 
-    (
-        QueuedWave {
-            sequence,
-            requests,
-            rows,
-            _leases: leases,
-        },
-        carried,
-    )
+    (QueuedWave { sequence, requests }, carried)
+}
+
+/// Native capacity reserved for one commit batch, an upper bound on its final size. It covers
+/// the stream payload, every state row with its framing, and the fixed header and sequence
+/// rows.
+fn batch_reservation<'a>(
+    payload_len: usize,
+    rows: impl Iterator<Item = &'a (Bytes, Bytes)>,
+) -> usize {
+    payload_len
+        + rows
+            .map(|(key, value)| BATCH_RECORD_FRAMING + key.len() + value.len())
+            .sum::<usize>()
+        + BATCH_FIXED_BYTES
 }
 
 /// Encodes the original stream rows and their current-state updates in one batch.
 /// Ordered puts make the last duplicate win while the stream retains every entry.
 fn prepare_wave(db: &DB, wave: QueuedWave) -> PreparedWrite {
+    // The stream row carries every request's rows in arrival order. It is encoded first so
+    // the batch can be reserved for everything it will hold.
+    let rows = wave.requests.iter().flat_map(|request| &request.kvs);
+    let payload = encode_log_value(wave.sequence, rows.clone());
+
+    // The batch is reserved for an upper bound of its final size so its native buffer
+    // never grows. Growth would copy every record while holding both the old and the
+    // replacement buffer.
+    let reserved = batch_reservation(payload.len(), rows.clone());
+    let mut batch = rocksdb::WriteBatch::with_capacity_bytes(reserved);
+
+    // The stream row, the state rows in the same order, and the sequence commit together.
     let log_cf = db.cf_handle(LOG_CF).expect("log CF exists");
     let meta_cf = db.cf_handle(META_CF).expect("meta CF exists");
-    let mut batch = rocksdb::WriteBatch::default();
-    batch.put_cf(
-        log_cf,
-        sequence_log_key(wave.sequence),
-        encode_log_value(wave.sequence, &wave.rows),
-    );
-    for (key, value) in &wave.rows {
+    batch.put_cf(log_cf, sequence_log_key(wave.sequence), payload);
+    for (key, value) in rows {
         batch.put(key, value);
     }
     batch.put_cf(meta_cf, SEQ_META_KEY, wave.sequence.to_le_bytes());
+
+    // The reservation bound must hold for every record this batch can contain.
     let encoded_bytes = batch.size_in_bytes();
+    assert!(
+        encoded_bytes <= reserved,
+        "batch reservation must cover every record"
+    );
     PreparedWrite {
         sequence: wave.sequence,
         batch,
         encoded_bytes,
         requests: wave.requests,
-        _leases: wave._leases,
     }
 }
 
@@ -1511,14 +1540,17 @@ impl Retention for RocksStore {
 }
 
 /// Encodes the batch payload served for one sequence's key/value rows.
-fn encode_log_value(sequence: u64, kvs: &[(Bytes, Bytes)]) -> Vec<u8> {
+fn encode_log_value<'a>(
+    sequence: u64,
+    kvs: impl Iterator<Item = &'a (Bytes, Bytes)> + Clone,
+) -> Vec<u8> {
     let sequence_len = if sequence == 0 {
         0
     } else {
         1 + buffa::encoding::varint_len(sequence)
     };
     let encoded_len = put_encoded_len(
-        kvs.iter()
+        kvs.clone()
             .map(|(key, value)| (key.as_ref(), value.as_ref())),
     );
     let mut payload = Vec::with_capacity(sequence_len + encoded_len);
@@ -2120,11 +2152,19 @@ mod tests {
             encoded_len,
             response,
             notifier: None,
-            lease: Arc::new(WriteLease {
+            _lease: WriteLease {
                 _memory: memory,
                 _request: request,
-            }),
+            },
         }
+    }
+
+    /// The rows a wave's log row carries, in arrival order.
+    fn wave_rows(wave: &QueuedWave) -> Vec<(Bytes, Bytes)> {
+        wave.requests
+            .iter()
+            .flat_map(|request| request.kvs.iter().cloned())
+            .collect()
     }
 
     fn response_entries(response: StreamGetResponse) -> Vec<(Bytes, Bytes)> {
@@ -2311,15 +2351,28 @@ mod tests {
         );
     }
 
-    #[test]
-    fn coalesce_queued_write_collects_all_pending_below_byte_cap() {
+    #[tokio::test]
+    async fn coalesce_queued_write_collects_all_pending_below_byte_cap() {
         let dir = tempdir().expect("tempdir");
         let (sender, receiver) = mpsc::channel();
-        sender.send(write_request(b"a")).expect("send");
-        sender.send(write_request(b"b")).expect("send");
-        sender.send(write_request(b"c")).expect("send");
+
+        // Three queued requests whose rows all fit one wave. A key repeated across requests
+        // must keep every row in the stream while state keeps the last value.
+        let requests = [
+            vec![(Bytes::from_static(b"a"), Bytes::from_static(b"first"))],
+            vec![
+                (Bytes::from_static(b"k"), Bytes::from_static(b"old")),
+                (Bytes::from_static(b"b"), Bytes::from_static(b"second")),
+            ],
+            vec![(Bytes::from_static(b"k"), Bytes::from_static(b"new"))],
+        ];
+        let expected: Vec<_> = requests.iter().flatten().cloned().collect();
+        for kvs in requests {
+            sender.send(write_request_with_kvs(kvs)).expect("send");
+        }
         drop(sender);
 
+        // Coalescing drains everything already queued into one wave with one sequence.
         let first = receiver.recv().expect("first request");
         let (wave, carried) =
             coalesce_queued_write(&receiver, first, 0, DEFAULT_COMMIT_COALESCE_MAX_BATCH_BYTES);
@@ -2330,12 +2383,32 @@ mod tests {
             receiver.try_recv(),
             Err(mpsc::TryRecvError::Disconnected)
         ));
+
+        // Encoding produces one batch holding the stream row, the four state rows, and the
+        // sequence row.
         let store = RocksStore::open(dir.path(), None).expect("open db");
         let group = prepare_wave(&store.db, wave);
         assert_eq!(group.sequence, 1);
         assert_eq!(group.requests.len(), 3);
-        assert_eq!(group.batch.len(), 5);
+        assert_eq!(group.batch.len(), 6);
         assert!(group.encoded_bytes > 0);
+
+        // Committing publishes the stream row in arrival order and the final state.
+        assert_eq!(commit_and_apply(&store, group), 1);
+        assert_eq!(
+            batch_entries(
+                store
+                    .get_batch(1)
+                    .await
+                    .expect("read batch")
+                    .expect("batch")
+            ),
+            expected
+        );
+        assert_eq!(
+            store.get_raw(b"k").expect("read key"),
+            Some(b"new".to_vec())
+        );
     }
 
     #[test]
@@ -2385,14 +2458,14 @@ mod tests {
 
             let (wave, carried) = coalesce_queued_write(&receiver, first, 0, usize::MAX);
             assert_eq!(wave.sequence, 1);
-            assert_eq!(wave.rows.len(), first_len);
+            assert_eq!(wave_rows(&wave).len(), first_len);
             assert_eq!(wave.requests.len(), 1);
             let next = carried.unwrap();
             assert_eq!(next.kvs[0].0.as_ref(), b"next");
 
             let (wave, carried) = coalesce_queued_write(&receiver, next, wave.sequence, usize::MAX);
             assert_eq!(wave.sequence, 2);
-            assert_eq!(wave.rows.len(), 1);
+            assert_eq!(wave_rows(&wave).len(), 1);
             assert_eq!(wave.requests.len(), 1);
             assert!(carried.is_none());
             assert!(matches!(
@@ -2427,13 +2500,14 @@ mod tests {
             let first = prepared.recv().expect("first wave");
             let second = prepared.recv().expect("second wave");
             assert_eq!((first.sequence, second.sequence), (1, 2));
+            let (first_rows, second_rows) = (wave_rows(&first), wave_rows(&second));
             assert_eq!(
-                first.rows.len(),
+                first_rows.len(),
                 MAX_SEQUENCE_ENTRIES - usize::from(second_len == 2)
             );
-            assert_eq!(second.rows.len(), if second_len == 1 { 1 } else { 3 });
-            assert_eq!(first.rows[0].0.as_ref(), b"a");
-            assert_eq!(second.rows.last().expect("last row").0.as_ref(), b"c");
+            assert_eq!(second_rows.len(), if second_len == 1 { 1 } else { 3 });
+            assert_eq!(first_rows[0].0.as_ref(), b"a");
+            assert_eq!(second_rows.last().expect("last row").0.as_ref(), b"c");
             let request_keys: Vec<_> = first
                 .requests
                 .iter()
@@ -2463,13 +2537,12 @@ mod tests {
         assert_eq!((first.requests.len(), second.requests.len()), (2, 1));
         assert!(
             put_encoded_len(
-                first
-                    .rows
+                wave_rows(&first)
                     .iter()
                     .map(|(key, value)| (key.as_ref(), value.as_ref()))
             ) <= MAX_REQUEST_MESSAGE_BYTES
         );
-        assert_eq!(second.rows[0].0.as_ref(), b"c");
+        assert_eq!(wave_rows(&second)[0].0.as_ref(), b"c");
         assert!(prepared.recv().is_err());
     }
 
@@ -2498,19 +2571,19 @@ mod tests {
         let first = prepared.recv().unwrap();
         let second = prepared.recv().unwrap();
         assert_eq!((first.sequence, second.sequence), (u64::MAX - 1, u64::MAX));
-        assert_eq!((first.rows.len(), second.rows.len()), (8, 1));
+        let (first_rows, second_rows) = (wave_rows(&first), wave_rows(&second));
+        assert_eq!((first_rows.len(), second_rows.len()), (8, 1));
         assert_eq!((first.requests.len(), second.requests.len()), (1, 1));
         assert!(
             put_encoded_len(
-                first
-                    .rows
+                first_rows
                     .iter()
                     .map(|(key, value)| (key.as_ref(), value.as_ref()))
             ) + 1
                 + varint_len(first.sequence)
                 <= MAX_RESPONSE_MESSAGE_BYTES
         );
-        assert_eq!(second.rows[0].0.as_ref(), b"next");
+        assert_eq!(second_rows[0].0.as_ref(), b"next");
         assert!(prepared.recv().is_err());
     }
 
@@ -2550,7 +2623,34 @@ mod tests {
                 entries: request.kvs.clone(),
                 ..Default::default()
             };
-            assert_eq!(encode_log_value(sequence, &kvs), response.encode_to_vec());
+            assert_eq!(
+                encode_log_value(sequence, kvs.iter()),
+                response.encode_to_vec()
+            );
+        }
+    }
+
+    /// The writer charge must cover encoding's peak, when the owned rows, the stream
+    /// payload, and the reserved native batch all exist at once.
+    #[test]
+    fn writer_charge_covers_encoding_peak() {
+        let value = Bytes::from(vec![1; MAX_VALUE_LEN]);
+        for kvs in [
+            vec![(Bytes::from_static(b"k"), value.clone())],
+            vec![(Bytes::from_static(b"k"), value); 8],
+            vec![(Bytes::from_static(b"k"), Bytes::new()); 1024],
+        ] {
+            let encoded_len = put_encoded_len(
+                kvs.iter()
+                    .map(|(key, value)| (key.as_ref(), value.as_ref())),
+            );
+            let rows: usize = kvs.iter().map(|(key, value)| key.len() + value.len()).sum();
+            let payload = encode_log_value(1, kvs.iter()).len();
+            let peak = rows + payload + batch_reservation(payload, kvs.iter());
+            assert!(
+                writer_growth(kvs.len(), encoded_len) >= peak,
+                "charge must cover the encoding peak"
+            );
         }
     }
 
