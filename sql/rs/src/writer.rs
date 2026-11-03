@@ -146,6 +146,9 @@ impl BatchWriter {
         }
     }
 
+    /// Buffers one row's base and index entries. A row whose keys would exceed the Store
+    /// key limit under the client's namespace is rejected before anything is buffered, so
+    /// every prepared batch can be staged.
     pub fn insert(
         &mut self,
         table_name: &str,
@@ -156,6 +159,11 @@ impl BatchWriter {
             .get(table_name)
             .ok_or_else(|| format!("unknown table '{table_name}'"))?;
         let entries = writer.encode_row(values)?;
+        for (key, _) in &entries {
+            self.client
+                .encode_store_key(key)
+                .map_err(|e| e.to_string())?;
+        }
         self.pending_entries
             .extend(entries.into_iter().map(|(key, value)| (key, value.into())));
         Ok(self)
@@ -824,7 +832,7 @@ mod tests {
         },
         datatypes::{DataType, Field, Schema},
     };
-    use exoware_sdk::{kv_codec::decode_stored_row, StoreClient};
+    use exoware_sdk::{kv_codec::decode_stored_row, StoreClient, StoreKeyPrefix};
 
     #[test]
     fn secondary_index_storage_encoding_is_stable() {
@@ -960,6 +968,30 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(error, DataFusionError::Execution(message) if message == expected));
+    }
+
+    #[test]
+    fn insert_rejects_keys_that_exceed_the_namespace_limit() {
+        // The namespace leaves 251 bytes for logical keys, so this row's 253-byte base key
+        // fits the Store limit on its own but not inside the namespace.
+        let prefix = StoreKeyPrefix::new(Bytes::from_static(b"ns/")).unwrap();
+        let schema = crate::KvSchema::new(StoreClient::new("http://127.0.0.1:1").prefixed(prefix))
+            .table(
+                "orders",
+                vec![TableColumnConfig::new("id", DataType::Utf8, false)],
+                vec!["id".into()],
+                vec![],
+            )
+            .unwrap();
+        let mut writer = schema.batch_writer();
+
+        // The row must be rejected before it is buffered, so no later flush can fail
+        // while staging it.
+        let err = writer
+            .insert("orders", vec![CellValue::Utf8("i".repeat(251))])
+            .unwrap_err();
+        assert!(err.contains("exceeds max"), "{err}");
+        assert_eq!(writer.pending_count(), 0);
     }
 
     /// Variable-length Binary values survive the encode -> store -> arrow

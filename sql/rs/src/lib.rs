@@ -492,6 +492,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn explain_reports_primary_key_point_reads() {
+        let state = MockState {
+            kv: Arc::new(Mutex::new(BTreeMap::new())),
+            range_calls: Arc::new(AtomicUsize::new(0)),
+            range_reduce_calls: Arc::new(AtomicUsize::new(0)),
+            sequence_number: Arc::new(AtomicU64::new(0)),
+        };
+        let (base_url, shutdown_tx) = spawn_mock_server(state).await;
+        let client = StoreClient::new(&base_url);
+
+        let schema = KvSchema::new(PrefixedStoreClient::empty(client))
+            .table(
+                "orders",
+                vec![
+                    TableColumnConfig::new("id", DataType::Int64, false),
+                    TableColumnConfig::new("status", DataType::Utf8, false),
+                ],
+                vec!["id".to_string()],
+                vec![],
+            )
+            .expect("schema must build");
+        let ctx = SqlContext::new(schema.client().clone());
+        ctx.register_schema(schema).expect("schema must register");
+
+        // Complete primary-key points are read directly, so the plan reports the key
+        // count and needs no row recheck.
+        let explain = physical_plan_text(
+            &explain_plan_rows(
+                &ctx,
+                "SELECT id, status FROM orders WHERE id IN (3, 20, 1, 10)",
+            )
+            .await,
+        );
+        assert!(explain.contains("mode=primary_key_points"), "{explain}");
+        assert!(explain.contains("ranges=4"), "{explain}");
+        assert!(explain.contains("row_recheck=false"), "{explain}");
+        assert!(explain.contains("full_scan_like=false"), "{explain}");
+        let _ = shutdown_tx.send(());
+    }
+
+    #[tokio::test]
     async fn explain_reports_full_scan_like_primary_key_scan() {
         let state = MockState {
             kv: Arc::new(Mutex::new(BTreeMap::new())),

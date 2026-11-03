@@ -4,7 +4,8 @@ use datafusion::common::Result as DataFusionResult;
 /// Explain output describing the ranges and predicate coverage of one access path.
 #[derive(Debug, Clone)]
 pub(crate) struct AccessPathDiagnostics {
-    /// Display label for the primary key, a named secondary index, or an empty scan.
+    /// Display label for primary-key ranges, primary-key point reads, a named secondary
+    /// index, or an empty scan.
     pub(crate) mode: String,
     /// Human-readable description of the supported column constraints.
     pub(crate) predicate: String,
@@ -12,7 +13,7 @@ pub(crate) struct AccessPathDiagnostics {
     pub(crate) exact: bool,
     /// Whether the ranges comprise a single scan of the entire primary-key family.
     pub(crate) full_scan_like: bool,
-    /// Number of key ranges selected for this access path.
+    /// Number of key ranges selected for this access path, or of keys for point reads.
     pub(crate) range_count: usize,
     /// Constrained prefix length for lexicographic indexes or constrained column count
     /// for Z-order indexes. `None` denotes primary-key access or an empty scan.
@@ -86,6 +87,21 @@ pub(crate) fn build_scan_access_path_diagnostics(
             exact: true,
             full_scan_like: false,
             range_count: 0,
+            constrained_prefix_len: None,
+        });
+    }
+
+    // Complete primary-key constraints are read directly. Keys too long for the
+    // namespace are dropped, as in execution.
+    if let Some(mut keys) = predicate.primary_key_points(model)? {
+        keys.retain(|key| key.len() <= max_logical_key_len);
+        let exact = complete_ranges && access_plan.predicate_fully_enforced_by_primary_key(model);
+        return Ok(AccessPathDiagnostics {
+            mode: "primary_key_points".to_string(),
+            predicate: predicate.describe(model),
+            exact,
+            full_scan_like: false,
+            range_count: keys.len(),
             constrained_prefix_len: None,
         });
     }

@@ -2443,7 +2443,7 @@ mod tests {
         }
     }
 
-    /// A primary-key prefix constraint keeps the qualifying index plan.
+    /// A primary-key prefix constraint keeps the qualifying index plan and is enforced by its key.
     #[tokio::test]
     async fn primary_key_prefix_keeps_qualifying_index_plan() {
         // Fixing tenant leaves order_id unconstrained, so the index remains eligible. Within
@@ -2466,15 +2466,17 @@ mod tests {
         )
         .await;
 
-        // The covering index supplies both projected columns in the requested order. Results
-        // must match DataFusion with exactly one reverse index range read.
+        // The covering index supplies both projected columns in the requested order, and
+        // its leading key column enforces the tenant constraint. Results must match
+        // DataFusion with exactly one reverse index range read limited to the two rows.
         let sql =
             "SELECT order_id, created FROM orders WHERE tenant = 5 ORDER BY created DESC LIMIT 2";
         let requests = fixture.check(sql).await;
         assert!(
-            matches!(requests.as_slice(), [Request::Range { start, forward: false, .. }] if fixture.index_matches(0, start)),
-            "the query must use exactly one reverse index range read, got {requests:?}"
+            matches!(requests.as_slice(), [Request::Range { start, forward: false, limit: 2, .. }] if fixture.index_matches(0, start)),
+            "the query must use exactly one reverse index range read of two rows, got {requests:?}"
         );
+        assert_eq!(fixture.rows.returned_rows.load(Ordering::SeqCst), 2);
 
         // The leaf scan must keep the index plan with the reversed direction and the limit.
         let mut plan = fixture

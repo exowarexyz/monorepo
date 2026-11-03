@@ -368,9 +368,17 @@ impl ScanAccessPlan {
         if spec.layout == IndexLayout::ZOrder {
             return false;
         }
+
+        // Key columns bound the scan in order, whether they come from the row value or
+        // the primary key, until the first column without a point constraint.
         let mut open_tail = false;
         for col_idx in &spec.key_columns {
+            let pk_pos = model.pk_position(*col_idx);
             let Some(constraint) = self.predicate_checks.iter().find_map(|check| match check {
+                PredicateAccess::Pk {
+                    pk_pos: check_pos,
+                    constraint,
+                } if Some(*check_pos) == pk_pos => Some(constraint),
                 PredicateAccess::NonPk {
                     col_idx: check_col_idx,
                     constraint,
@@ -395,13 +403,21 @@ impl ScanAccessPlan {
                 open_tail = true;
             }
         }
+
+        // Remaining primary-key constraints are enforced by the appended key suffix only
+        // while every key column is fixed to one value.
         self.predicate_checks.iter().all(|check| match check {
             PredicateAccess::Pk { pk_pos, constraint } => {
-                !open_tail
-                    && !matches!(
-                        compile_encoded_constraint(model.primary_key_kinds[*pk_pos], constraint),
-                        EncodedConstraintCompile::Unsupported
-                    )
+                spec.key_columns
+                    .contains(&model.primary_key_indices[*pk_pos])
+                    || (!open_tail
+                        && !matches!(
+                            compile_encoded_constraint(
+                                model.primary_key_kinds[*pk_pos],
+                                constraint
+                            ),
+                            EncodedConstraintCompile::Unsupported
+                        ))
             }
             PredicateAccess::NonPk { col_idx, .. } => spec.key_columns.contains(col_idx),
         })
