@@ -1,3 +1,8 @@
+use crate::{
+    keys::Prefix,
+    kv_codec::Utf8,
+    selector::{compile_payload_regex, Selector},
+};
 use anyhow::{ensure, Context};
 use bytes::BufMut;
 use commonware_codec::{
@@ -5,10 +10,6 @@ use commonware_codec::{
     Write,
 };
 use std::collections::HashSet;
-
-use crate::keys::Prefix;
-use crate::kv_codec::Utf8;
-use crate::selector::{compile_payload_regex, Selector};
 
 pub const PRUNE_POLICY_CONTROL_KEY: &str = "manifest/control/compaction-prune-policies";
 /// Wire version of the persisted prune-policy document. A prune document
@@ -69,9 +70,9 @@ pub struct PrunePolicyDocument {
 impl Write for OrderEncoding {
     fn write(&self, buf: &mut impl BufMut) {
         match self {
-            OrderEncoding::BytesAsc => 0u8.write(buf),
-            OrderEncoding::U64Be => 1u8.write(buf),
-            OrderEncoding::I64Be => 2u8.write(buf),
+            Self::BytesAsc => 0u8.write(buf),
+            Self::U64Be => 1u8.write(buf),
+            Self::I64Be => 2u8.write(buf),
         }
     }
 }
@@ -84,9 +85,9 @@ impl Read for OrderEncoding {
     type Cfg = ();
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         match u8::read(buf)? {
-            0 => Ok(OrderEncoding::BytesAsc),
-            1 => Ok(OrderEncoding::U64Be),
-            2 => Ok(OrderEncoding::I64Be),
+            0 => Ok(Self::BytesAsc),
+            1 => Ok(Self::U64Be),
+            2 => Ok(Self::I64Be),
             v => Err(CodecError::InvalidEnum(v)),
         }
     }
@@ -95,19 +96,19 @@ impl Read for OrderEncoding {
 impl Write for RetainPolicy {
     fn write(&self, buf: &mut impl BufMut) {
         match self {
-            RetainPolicy::KeepLatest { count } => {
+            Self::KeepLatest { count } => {
                 0u8.write(buf);
                 (*count as u64).write(buf);
             }
-            RetainPolicy::GreaterThan { threshold } => {
+            Self::GreaterThan { threshold } => {
                 1u8.write(buf);
                 threshold.write(buf);
             }
-            RetainPolicy::GreaterThanOrEqual { threshold } => {
+            Self::GreaterThanOrEqual { threshold } => {
                 2u8.write(buf);
                 threshold.write(buf);
             }
-            RetainPolicy::DropAll => {
+            Self::DropAll => {
                 3u8.write(buf);
             }
         }
@@ -117,10 +118,10 @@ impl Write for RetainPolicy {
 impl EncodeSize for RetainPolicy {
     fn encode_size(&self) -> usize {
         1 + match self {
-            RetainPolicy::KeepLatest { .. }
-            | RetainPolicy::GreaterThan { .. }
-            | RetainPolicy::GreaterThanOrEqual { .. } => u64::SIZE,
-            RetainPolicy::DropAll => 0,
+            Self::KeepLatest { .. }
+            | Self::GreaterThan { .. }
+            | Self::GreaterThanOrEqual { .. } => u64::SIZE,
+            Self::DropAll => 0,
         }
     }
 }
@@ -129,16 +130,16 @@ impl Read for RetainPolicy {
     type Cfg = ();
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         match u8::read(buf)? {
-            0 => Ok(RetainPolicy::KeepLatest {
+            0 => Ok(Self::KeepLatest {
                 count: u64::read(buf)? as usize,
             }),
-            1 => Ok(RetainPolicy::GreaterThan {
+            1 => Ok(Self::GreaterThan {
                 threshold: u64::read(buf)?,
             }),
-            2 => Ok(RetainPolicy::GreaterThanOrEqual {
+            2 => Ok(Self::GreaterThanOrEqual {
                 threshold: u64::read(buf)?,
             }),
-            3 => Ok(RetainPolicy::DropAll),
+            3 => Ok(Self::DropAll),
             v => Err(CodecError::InvalidEnum(v)),
         }
     }
@@ -161,7 +162,7 @@ impl Read for GroupBy {
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let range: RangeCfg<usize> = (..).into();
         let capture_groups = Vec::<Utf8>::read_cfg(buf, &(range, ()))?;
-        Ok(GroupBy { capture_groups })
+        Ok(Self { capture_groups })
     }
 }
 
@@ -181,7 +182,7 @@ impl EncodeSize for OrderBy {
 impl Read for OrderBy {
     type Cfg = ();
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
-        Ok(OrderBy {
+        Ok(Self {
             capture_group: Utf8::read(buf)?,
             encoding: OrderEncoding::read(buf)?,
         })
@@ -205,7 +206,7 @@ impl EncodeSize for KeysScope {
 impl Read for KeysScope {
     type Cfg = ();
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
-        Ok(KeysScope {
+        Ok(Self {
             selector: Selector::read(buf)?,
             group_by: GroupBy::read(buf)?,
             order_by: Option::<OrderBy>::read(buf)?,
@@ -229,7 +230,7 @@ impl EncodeSize for PrunePolicy {
 impl Read for PrunePolicy {
     type Cfg = ();
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
-        Ok(PrunePolicy {
+        Ok(Self {
             scope: KeysScope::read(buf)?,
             retain: RetainPolicy::read(buf)?,
         })
@@ -255,7 +256,7 @@ impl Read for PrunePolicyDocument {
         let version = u32::read(buf)?;
         let range: RangeCfg<usize> = (..).into();
         let policies = Vec::<PrunePolicy>::read_cfg(buf, &(range, ()))?;
-        Ok(PrunePolicyDocument { version, policies })
+        Ok(Self { version, policies })
     }
 }
 

@@ -9,6 +9,9 @@ homepage.workspace = true
 repository = "https://github.com/exowarexyz/monorepo/tree/main/qmdb/rs"
 documentation = "https://docs.rs/exoware-qmdb"
 
+[lints]
+workspace = true
+
 [features]
 test-utils = []
 
@@ -44,14 +47,11 @@ connectrpc-build = { workspace = true }
 
 [dev-dependencies]
 exoware-qmdb = { path = ".", features = ["test-utils"] }
-axum = { workspace = true }
-bytes = { workspace = true }
 commonware-glue = { workspace = true }
-commonware-runtime = { workspace = true }
+commonware-parallel = { workspace = true, features = ["test-utils"] }
 criterion = { workspace = true }
 exoware-simulator = { path = "../../examples/simulator" }
 exoware-server = { workspace = true }
-hex = { workspace = true }
 reqwest = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }

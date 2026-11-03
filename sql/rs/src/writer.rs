@@ -1,33 +1,36 @@
-use std::collections::HashMap;
-use std::fmt;
-use std::sync::Arc;
-use std::sync::Mutex;
-
+use crate::{builder::archived_non_pk_value_is_valid, codec::*, types::*};
 use async_trait::async_trait;
 use bytes::Bytes;
 use commonware_codec::Encode;
-use datafusion::arrow::array::{ArrayAccessor, ArrayRef, AsArray};
 #[cfg(test)]
 use datafusion::arrow::datatypes::i256;
-use datafusion::arrow::datatypes::{
-    ArrowPrimitiveType, Date32Type, Date64Type, Decimal128Type, Decimal256Type, Float64Type,
-    Int64Type, SchemaRef, TimestampMicrosecondType, UInt64Type,
+use datafusion::{
+    arrow::{
+        array::{ArrayAccessor, ArrayRef, AsArray},
+        datatypes::{
+            ArrowPrimitiveType, Date32Type, Date64Type, Decimal128Type, Decimal256Type,
+            Float64Type, Int64Type, SchemaRef, TimestampMicrosecondType, UInt64Type,
+        },
+        record_batch::RecordBatch,
+    },
+    common::{DataFusionError, Result as DataFusionResult},
+    datasource::sink::DataSink,
+    execution::context::TaskContext,
+    physical_plan::{DisplayAs, DisplayFormatType, SendableRecordBatchStream},
 };
-use datafusion::arrow::record_batch::RecordBatch;
-use datafusion::common::{DataFusionError, Result as DataFusionResult};
-use datafusion::datasource::sink::DataSink;
-use datafusion::execution::context::TaskContext;
-use datafusion::physical_plan::{DisplayAs, DisplayFormatType, SendableRecordBatchStream};
-use exoware_sdk::keys::Key;
 #[cfg(test)]
 use exoware_sdk::kv_codec::decode_stored_row;
-use exoware_sdk::kv_codec::{StoredRow, StoredValue};
-use exoware_sdk::{PrefixedStoreClient, StoreBatchUpload, StoreWriteBatch};
+use exoware_sdk::{
+    keys::Key,
+    kv_codec::{StoredRow, StoredValue},
+    PrefixedStoreClient, StoreBatchUpload, StoreWriteBatch,
+};
 use futures::{future::BoxFuture, TryStreamExt};
-
-use crate::builder::archived_non_pk_value_is_valid;
-use crate::codec::*;
-use crate::types::*;
+use std::{
+    collections::HashMap,
+    fmt,
+    sync::{Arc, Mutex},
+};
 
 #[derive(Debug)]
 pub struct TableWriter {
@@ -79,15 +82,15 @@ pub struct PreparedBatch {
 }
 
 impl PreparedBatch {
-    pub fn request_id(&self) -> u64 {
+    pub const fn request_id(&self) -> u64 {
         self.request_id
     }
 
-    pub fn entry_count(&self) -> usize {
+    pub const fn entry_count(&self) -> usize {
         self.entry_count
     }
 
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.keys.is_empty()
     }
 }
@@ -281,21 +284,18 @@ impl StoreBatchUpload for BatchWriter {
 #[derive(Debug)]
 pub(crate) struct KvIngestSink {
     pub(crate) client: PrefixedStoreClient,
-    pub(crate) schema: SchemaRef,
     pub(crate) model: Arc<TableModel>,
     pub(crate) index_specs: Arc<Vec<ResolvedIndexSpec>>,
 }
 
 impl KvIngestSink {
-    pub(crate) fn new(
+    pub(crate) const fn new(
         client: PrefixedStoreClient,
-        schema: SchemaRef,
         model: Arc<TableModel>,
         index_specs: Arc<Vec<ResolvedIndexSpec>>,
     ) -> Self {
         Self {
             client,
-            schema,
             model,
             index_specs,
         }
@@ -311,7 +311,7 @@ impl DisplayAs for KvIngestSink {
 #[async_trait]
 impl DataSink for KvIngestSink {
     fn schema(&self) -> &SchemaRef {
-        &self.schema
+        &self.model.schema
     }
 
     async fn write_all(
@@ -805,18 +805,17 @@ pub(crate) async fn flush_ingest_batch(
 
 #[cfg(test)]
 mod tests {
-    use bytes::Bytes;
-    use exoware_sdk::StoreClient;
-
     use super::*;
     use crate::builder::{append_archived_non_pk_value, make_column_builder};
-    use datafusion::arrow::array::builder::Int64Builder;
-    use datafusion::arrow::array::{
-        BinaryArray, BinaryViewArray, Int64Array, LargeBinaryArray, ListBuilder, StringArray,
-        UInt64Array,
+    use bytes::Bytes;
+    use datafusion::arrow::{
+        array::{
+            builder::Int64Builder, BinaryArray, BinaryViewArray, Int64Array, LargeBinaryArray,
+            ListBuilder, StringArray, UInt64Array,
+        },
+        datatypes::{DataType, Field, Schema},
     };
-    use datafusion::arrow::datatypes::{DataType, Field, Schema};
-    use exoware_sdk::kv_codec::decode_stored_row;
+    use exoware_sdk::{kv_codec::decode_stored_row, StoreClient};
 
     /// Variable-length Binary values survive the encode -> store -> arrow
     /// round trip with their exact lengths.

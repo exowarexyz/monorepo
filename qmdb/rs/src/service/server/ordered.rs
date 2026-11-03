@@ -1,9 +1,22 @@
 //! Ordered QMDB services: operation log, current operation ranges, key
 //! lookups (hits and misses), and ordered key ranges.
 
-use std::future::Future;
-use std::sync::Arc;
-
+use super::{
+    CurrentOperationReader, CurrentOperationServer, KeyLookupReader, KeyLookupServer,
+    KeyRangeReader, KeyRangeServer, OperationLogReader, OperationLogServer,
+};
+use crate::{
+    adapter::Ordered,
+    proof::{
+        CurrentOperationRangeProofResult, MultiProofOperations, OperationRangeCheckpoint,
+        RawBatchMultiProof, RawKeyLookupProof, RawKeyRangeProof, RawKeyValueProof,
+    },
+    service::proto::qmdb::v1::{
+        CurrentOperationServiceServer, KeyLookupServiceServer, OperationLogServiceServer,
+        OrderedKeyRangeServiceServer,
+    },
+    PublishedWatermark, QmdbError,
+};
 use commonware_codec::{Decode, Encode, Read};
 use commonware_cryptography::Hasher;
 use commonware_storage::{
@@ -16,21 +29,7 @@ use commonware_storage::{
 };
 use connectrpc::{Chain, ConnectRpcService};
 use exoware_sdk::PrefixedStoreClient;
-
-use super::{
-    CurrentOperationReader, CurrentOperationServer, KeyLookupReader, KeyLookupServer,
-    KeyRangeReader, KeyRangeServer, OperationLogReader, OperationLogServer,
-};
-use crate::adapter::Ordered;
-use crate::proof::{
-    CurrentOperationRangeProofResult, MultiProofOperations, OperationRangeCheckpoint,
-    RawBatchMultiProof, RawKeyLookupProof, RawKeyRangeProof, RawKeyValueProof,
-};
-use crate::service::proto::qmdb::v1::{
-    CurrentOperationServiceServer, KeyLookupServiceServer, OperationLogServiceServer,
-    OrderedKeyRangeServiceServer,
-};
-use crate::{PublishedWatermark, QmdbError};
+use std::{future::Future, sync::Arc};
 
 impl<F, H, K, V, const N: usize, E> OperationLogReader for Ordered<F, H, K, V, N, E>
 where
@@ -50,7 +49,7 @@ where
         bytes: &[u8],
         inspect: impl FnOnce(Option<&[u8]>, Option<&[u8]>) -> T,
     ) -> Result<T, QmdbError> {
-        Ordered::inspect_operation_kv(self, location, bytes, inspect)
+        Self::inspect_operation_kv(self, location, bytes, inspect)
     }
 
     fn resolve_watermark(
@@ -58,11 +57,11 @@ where
         watermark: Location<F>,
         min_sequence_number: Option<u64>,
     ) -> impl Future<Output = Result<PublishedWatermark<F>, QmdbError>> + Send {
-        Ordered::resolve_watermark(self, watermark, min_sequence_number)
+        Self::resolve_watermark(self, watermark, min_sequence_number)
     }
 
     fn observe_published(&self, location: Location<F>, sequence: u64) {
-        Ordered::observe_published(self, location, sequence)
+        Self::observe_published(self, location, sequence)
     }
 
     fn operation_range_checkpoint_at(
@@ -72,7 +71,7 @@ where
         max_locations: u32,
     ) -> impl Future<Output = Result<OperationRangeCheckpoint<Self::Digest, F>, QmdbError>> + Send
     {
-        Ordered::operation_range_checkpoint_at(self, watermark, start_location, max_locations)
+        Self::operation_range_checkpoint_at(self, watermark, start_location, max_locations)
     }
 
     fn multi_proof_at(
@@ -80,7 +79,7 @@ where
         watermark: PublishedWatermark<F>,
         operations: MultiProofOperations<'_, F>,
     ) -> impl Future<Output = Result<RawBatchMultiProof<Self::Digest, F>, QmdbError>> + Send {
-        Ordered::multi_proof_at(self, watermark, operations)
+        Self::multi_proof_at(self, watermark, operations)
     }
 }
 
@@ -109,7 +108,7 @@ where
             QmdbError,
         >,
     > + Send {
-        Ordered::current_operation_range_raw(
+        Self::current_operation_range_raw(
             self,
             watermark,
             start_location,
@@ -142,7 +141,7 @@ where
         min_sequence_number: Option<u64>,
     ) -> impl Future<Output = Result<RawKeyValueProof<Self::Digest, Self::Operation, N, F>, QmdbError>>
            + Send {
-        Ordered::get_raw(self, tip, key.as_ref(), min_sequence_number)
+        Self::get_raw(self, tip, key.as_ref(), min_sequence_number)
     }
 
     fn key_lookup_proofs(
@@ -151,7 +150,7 @@ where
         keys: &[K],
         min_sequence_number: Option<u64>,
     ) -> impl Future<Output = Result<Vec<Self::Lookup>, QmdbError>> + Send {
-        Ordered::get_many_raw(self, tip, keys, min_sequence_number)
+        Self::get_many_raw(self, tip, keys, min_sequence_number)
     }
 }
 
@@ -180,7 +179,7 @@ where
         min_sequence_number: Option<u64>,
     ) -> impl Future<Output = Result<RawKeyRangeProof<H::Digest, K, V, N, F, E>, QmdbError>> + Send
     {
-        Ordered::get_range_raw(self, tip, start_key, end_key, limit, min_sequence_number)
+        Self::get_range_raw(self, tip, start_key, end_key, limit, min_sequence_number)
     }
 }
 

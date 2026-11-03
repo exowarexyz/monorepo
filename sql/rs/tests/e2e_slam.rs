@@ -2,23 +2,29 @@
 
 mod common;
 
-use std::sync::Arc;
-
-use axum::Router;
-use connectrpc::client::ClientConfig;
-use connectrpc::ErrorCode;
-use datafusion::arrow::array::{ArrayRef, Int64Array};
-use datafusion::arrow::datatypes::DataType;
-use datafusion::arrow::ipc::reader::StreamReader;
-use datafusion::arrow::record_batch::RecordBatch;
-use datafusion::common::ScalarValue;
-use datafusion::datasource::{MemTable, ViewTable};
-use exoware_sdk::proto::PreferZstdHttpClient;
-use exoware_sdk::{PrefixedStoreClient, StoreKeyPrefix};
-use exoware_sql::proto::sql::v1::{QueryRequest, ServiceClient};
+use axum::{
+    serve::{Listener, ListenerExt},
+    Router,
+};
+use connectrpc::{client::ClientConfig, ErrorCode};
+use datafusion::{
+    arrow::{
+        array::{ArrayRef, Int64Array},
+        datatypes::DataType,
+        ipc::reader::StreamReader,
+        record_batch::RecordBatch,
+    },
+    common::ScalarValue,
+    datasource::{MemTable, ViewTable},
+};
+use exoware_sdk::{
+    proto::PreferZstdHttpClient, transport::set_tcp_nodelay, PrefixedStoreClient, StoreKeyPrefix,
+};
 use exoware_sql::{
+    proto::sql::v1::{QueryRequest, ServiceClient},
     sql_connect_stack, CellValue, IndexSpec, KvSchema, SqlServer, TableColumnConfig,
 };
+use std::sync::Arc;
 
 fn result_row_count(results: &[u8]) -> usize {
     StreamReader::try_new(results, None)
@@ -259,7 +265,8 @@ async fn serve_sql(
 ) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
-        .expect("bind SQL server");
+        .expect("bind SQL server")
+        .tap_io(set_tcp_nodelay);
     let base = format!("http://{}", listener.local_addr().expect("SQL address"));
     let app = Router::new().fallback_service(sql_connect_stack(server));
     let handle = tokio::spawn(async move {

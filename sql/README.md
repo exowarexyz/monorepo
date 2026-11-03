@@ -1,6 +1,8 @@
 # exoware-sql
 
-SQL engine backed by the Exoware API.
+Define tables in Exoware Store and query them with SQL.
 
-* [sql/rs](./rs/README.md): SQL engine backed by the Exoware API.
-* [sql/ts](./ts/README.md): SQL client backed by the Exoware API.
+The [Rust crate](./rs/README.md) manages rows and indexes, runs queries with
+DataFusion, and serves the `sql.v1` ConnectRPC API. The
+[TypeScript client](./ts/README.md) queries that service and subscribes to new
+rows, returning results as Apache Arrow tables.

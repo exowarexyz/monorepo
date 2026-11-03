@@ -1,12 +1,13 @@
-use std::time::Duration;
-
 use bytes::Bytes;
-use exoware_sdk::keys::{Key, Prefix};
-use exoware_sdk::kv_codec::Utf8;
-use exoware_sdk::retention::RetentionPolicy;
-use exoware_sdk::selector::Selector;
-use exoware_sdk::stream_filter::StreamFilter;
-use exoware_sdk::{PrefixedStoreClient, RetryConfig, StoreClient};
+use exoware_sdk::{
+    keys::{Key, Prefix},
+    kv_codec::Utf8,
+    retention::RetentionPolicy,
+    selector::Selector,
+    stream_filter::StreamFilter,
+    PrefixedStoreClient, RetryConfig, StoreClient,
+};
+use std::time::Duration;
 
 /// Spawns a local simulator and returns a client for it.
 async fn spawn_client() -> PrefixedStoreClient {
@@ -203,7 +204,7 @@ async fn replay_since_delivers_retained_batches_then_live() {
 }
 
 #[tokio::test]
-async fn replay_past_end_delivers_only_live() {
+async fn replay_past_end_starts_at_the_cursor() {
     let client = spawn_client().await;
     let current = client
         .ingest()
@@ -213,20 +214,25 @@ async fn replay_past_end_delivers_only_live() {
 
     let mut sub = client
         .stream()
-        .subscribe(filter(1), Some(current + 10))
+        .subscribe(filter(1), Some(current + 2))
         .await
         .expect("subscribe");
 
-    // No replay — should not receive a frame for current+10 since it doesn't
-    // exist and since > current triggers the unset-cursor path.
-    assert!(next_with_timeout(&mut sub, 200).await.is_none());
-
-    // Next live PUT lands with its actual seq (no synthetic gaps).
+    // The batch between the frontier and the cursor matches the filter but
+    // sits below the cursor, so it is not delivered.
+    let skipped_seq = client
+        .ingest()
+        .put(&[(&key(1, b"skipped"), b"s")])
+        .await
+        .expect("put skipped");
     let live_seq = client
         .ingest()
         .put(&[(&key(1, b"next"), b"n")])
         .await
         .expect("put next");
+    assert_eq!(skipped_seq, current + 1);
+    assert_eq!(live_seq, current + 2);
+
     let frame = next_with_timeout(&mut sub, 1_000)
         .await
         .expect("live frame");

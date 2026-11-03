@@ -1,16 +1,14 @@
+use crate::{
+    error::SimplexError,
+    keys,
+    types::{encode_block_data, BlockData, Finalized, Notarized, UploadReceipt, UploadSummary},
+};
 use bytes::Bytes;
 use commonware_codec::Encode;
 use commonware_consensus::Block;
 use commonware_cryptography::{certificate, Digest};
-use exoware_sdk::keys::Key;
-use exoware_sdk::{ClientError, PrefixedStoreClient, StoreBatchUpload, StoreWriteBatch};
+use exoware_sdk::{keys::Key, ClientError, PrefixedStoreClient, StoreBatchUpload, StoreWriteBatch};
 use futures::future::BoxFuture;
-
-use crate::error::SimplexError;
-use crate::keys;
-use crate::types::{
-    encode_block_data, BlockData, Finalized, Notarized, UploadReceipt, UploadSummary,
-};
 
 #[derive(Clone, Debug)]
 pub struct PreparedEntry {
@@ -30,15 +28,15 @@ impl PreparedUpload {
         Self::default()
     }
 
-    pub fn len(&self) -> usize {
+    pub const fn len(&self) -> usize {
         self.entries.len()
     }
 
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
 
-    pub fn summary(&self) -> UploadSummary {
+    pub const fn summary(&self) -> UploadSummary {
         self.summary
     }
 
@@ -46,7 +44,7 @@ impl PreparedUpload {
         &self.entries
     }
 
-    pub fn extend(&mut self, other: PreparedUpload) {
+    pub fn extend(&mut self, other: Self) {
         self.summary.headers += other.summary.headers;
         self.summary.blocks += other.summary.blocks;
         self.summary.notarizations += other.summary.notarizations;

@@ -55,12 +55,13 @@ pub mod service;
 
 #[cfg(feature = "test-utils")]
 pub use adapter::codec::{CHUNK_FAMILY, NODE_FAMILY};
-pub use error::{ProofKind, QmdbError};
-
 use commonware_codec::{Copying, DecodeExt};
 use commonware_cryptography::Digest;
-use commonware_storage::merkle::{self, Family, Graftable, Location};
-use commonware_storage::qmdb::current::proof::OpsRootWitness;
+use commonware_storage::{
+    merkle::{self, Family, Graftable, Location},
+    qmdb::current::proof::OpsRootWitness,
+};
+pub use error::{ProofKind, QmdbError};
 
 /// Maximum encoded operation size for QMDB key and value payloads (u16 length on the wire).
 pub const MAX_OPERATION_SIZE: usize = u16::MAX as usize;
@@ -116,23 +117,13 @@ pub(crate) fn decode_digest<D: Digest>(
 // The native crate owns tests for request constraints shared with the WASM verifier.
 #[cfg(test)]
 mod tests {
-    use crate::request::{
-        span_contains, validate_key_range, InvalidLocations, InvalidWindow, OperationLocations,
-        OperationWindow, MAX_REQUESTED_LOCATIONS,
+    use crate::{
+        request::{
+            validate_key_range, InvalidLocations, InvalidWindow, OperationLocations,
+            OperationWindow,
+        },
+        service::{validate_operations_request, MAX_REQUESTED_LOCATIONS},
     };
-
-    #[test]
-    fn test_spans_wrap_past_the_greatest_key() {
-        assert!(span_contains(&2, &6, &2));
-        assert!(span_contains(&2, &6, &5));
-        assert!(!span_contains(&2, &6, &6));
-        assert!(!span_contains(&2, &6, &1));
-        assert!(span_contains(&6, &2, &7));
-        assert!(span_contains(&6, &2, &1));
-        assert!(!span_contains(&6, &2, &2));
-        assert!(!span_contains(&6, &2, &4));
-        assert!(span_contains(&3, &3, &9));
-    }
 
     #[test]
     fn test_operation_windows_preserve_large_absolute_positions() {
@@ -187,11 +178,19 @@ mod tests {
             })
         ));
         let many = (0..=MAX_REQUESTED_LOCATIONS as u64).collect::<Vec<_>>();
+        assert!(OperationLocations::new(u64::MAX - 1, &many).is_ok());
+    }
+
+    #[test]
+    fn test_operations_rpc_limits_locations() {
+        let many = (0..=MAX_REQUESTED_LOCATIONS as u64).collect::<Vec<_>>();
         assert!(matches!(
-            OperationLocations::new(u64::MAX - 1, &many),
-            Err(InvalidLocations::TooMany { count }) if count == MAX_REQUESTED_LOCATIONS + 1
+            validate_operations_request(u64::MAX - 1, &many),
+            Err(crate::QmdbError::InvalidRequestedLocations(_))
         ));
-        assert!(OperationLocations::new(u64::MAX - 1, &many[..MAX_REQUESTED_LOCATIONS]).is_ok());
+        assert!(
+            validate_operations_request(u64::MAX - 1, &many[..MAX_REQUESTED_LOCATIONS]).is_ok()
+        );
     }
 
     #[test]

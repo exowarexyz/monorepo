@@ -4,21 +4,18 @@
 //! internal RPC failures (message only; keep messages safe to expose if you rely on that). `Ingest`
 //! additionally lets a backend mark a write failure transient via [`IngestError`].
 
-use std::collections::HashMap;
-use std::future::Future;
-
+use crate::stream::{apply_filter, CompiledMatchers};
 use buffa::Message;
 use bytes::Bytes;
 use connectrpc::{CodecFormat, ConnectError, Encodable};
-use exoware_sdk::common::kv::v1::Entry;
-use exoware_sdk::limits::{
-    PutTooLarge, MAX_RESPONSE_ELEMENT_MEMORY_BYTES, MAX_RESPONSE_MESSAGE_BYTES,
+use exoware_sdk::{
+    common::kv::v1::Entry,
+    limits::{PutTooLarge, MAX_RESPONSE_ELEMENT_MEMORY_BYTES, MAX_RESPONSE_MESSAGE_BYTES},
+    log::stream::v1::GetResponse as StreamGetResponse,
+    prune_policy::PrunePolicyDocument,
+    retention::RetentionPolicy,
 };
-use exoware_sdk::log::stream::v1::GetResponse as StreamGetResponse;
-use exoware_sdk::prune_policy::PrunePolicyDocument;
-use exoware_sdk::retention::RetentionPolicy;
-
-use crate::stream::{apply_filter, CompiledMatchers};
+use std::{collections::HashMap, future::Future};
 
 /// Backend-defined query metadata.
 ///
@@ -188,7 +185,7 @@ impl LogBatch {
     }
 
     /// Sequence number under which this batch was loaded.
-    pub fn sequence_number(&self) -> u64 {
+    pub const fn sequence_number(&self) -> u64 {
         self.sequence_number
     }
 
@@ -233,7 +230,7 @@ impl FilteredBatch {
     /// Build a filtered batch from owned caller-visible entries.
     ///
     /// Values must contain resolved payload bytes.
-    pub fn from_entries(entries: Vec<Entry>) -> Self {
+    pub const fn from_entries(entries: Vec<Entry>) -> Self {
         Self { entries }
     }
 
@@ -264,8 +261,10 @@ pub trait Log: Sequence {
     /// available from this log.
     ///
     /// Engines that don't retain a log return `Ok(None)` unconditionally,
-    /// which disables `GetBatch` and since-cursored `Subscribe` for that
-    /// deployment.
+    /// which disables the stream service's `Get` and `Subscribe` RPCs for that
+    /// deployment. That includes a live `Subscribe` with no
+    /// `since_sequence_number`, because it also reads each new batch through
+    /// this log and fails with `BATCH_EVICTED` at the first one.
     ///
     /// The stream service maps unavailable batches to `BATCH_NOT_FOUND` when
     /// they are beyond the visible sequence frontier and `BATCH_EVICTED`
@@ -330,12 +329,9 @@ impl<T: Ingest + Query + Prune + Log + Retention> StoreEngine for T {}
 
 #[cfg(test)]
 mod tests {
-    use std::future::ready;
-
     use super::*;
-    use exoware_sdk::kv_codec::Utf8;
-    use exoware_sdk::selector::Selector;
-    use exoware_sdk::stream_filter::StreamFilter;
+    use exoware_sdk::{kv_codec::Utf8, selector::Selector, stream_filter::StreamFilter};
+    use std::future::ready;
 
     #[test]
     fn log_response_preserves_binary_buffer() {

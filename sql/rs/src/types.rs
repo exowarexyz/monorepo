@@ -1,11 +1,13 @@
-use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
-
-use datafusion::arrow::datatypes::{i256, DataType, Field, Schema, SchemaRef, TimeUnit};
-use exoware_sdk::keys::{Key, Prefix};
-use exoware_sdk::PrefixedStoreClient;
-
 use crate::codec::{primary_key_prefix, secondary_index_prefix};
+use datafusion::arrow::datatypes::{i256, DataType, Field, Schema, SchemaRef, TimeUnit};
+use exoware_sdk::{
+    keys::{Key, Prefix},
+    PrefixedStoreClient,
+};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 /// Every table/index family is named by a single packed byte
 /// `(table_prefix << 4) | discriminator`: the high nibble is the table prefix
@@ -144,7 +146,7 @@ impl ColumnKind {
         }
     }
 
-    pub(crate) fn fixed_key_width(self) -> Option<usize> {
+    pub(crate) const fn fixed_key_width(self) -> Option<usize> {
         match self {
             Self::Int64 => Some(8),
             Self::UInt64 => Some(8),
@@ -167,7 +169,7 @@ impl ColumnKind {
             .unwrap_or(STRING_KEY_INLINE_LIMIT + 1)
     }
 
-    pub(crate) fn indexable(self) -> bool {
+    pub(crate) const fn indexable(self) -> bool {
         !matches!(self, Self::List(_) | Self::Binary)
     }
 }
@@ -237,7 +239,7 @@ impl IndexSpec {
         self
     }
 
-    pub fn with_layout(mut self, layout: IndexLayout) -> Self {
+    pub const fn with_layout(mut self, layout: IndexLayout) -> Self {
         self.layout = layout;
         self
     }
@@ -254,7 +256,7 @@ impl IndexSpec {
         &self.cover_columns
     }
 
-    pub fn layout(&self) -> &IndexLayout {
+    pub const fn layout(&self) -> &IndexLayout {
         &self.layout
     }
 }
@@ -565,7 +567,7 @@ pub enum CellValue {
     Utf8(String),
     FixedBinary(Vec<u8>),
     Binary(Vec<u8>),
-    List(Vec<CellValue>),
+    List(Vec<Self>),
 }
 
 #[derive(Debug, Clone)]

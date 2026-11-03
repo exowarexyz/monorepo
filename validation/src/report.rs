@@ -1,15 +1,16 @@
-use std::fmt;
-use std::fs;
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
-
+use crate::{
+    client::RequestCompression,
+    workload::{Scenario, WorkloadSpec},
+};
 use anyhow::{ensure, Context};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-
-use crate::client::RequestCompression;
-use crate::workload::{Scenario, WorkloadSpec};
+use std::{
+    fmt, fs,
+    path::{Path, PathBuf},
+    sync::atomic::{AtomicU64, Ordering},
+    time::Duration,
+};
 
 const BENCH_MANIFEST_SCHEMA_VERSION: u16 = 1;
 const BENCH_REPORT_SCHEMA_VERSION: u16 = 1;
@@ -24,20 +25,20 @@ const LATENCY_BUCKET_UPPER_BOUNDS_US: [u64; 15] = [
 
 // Reports and manifests written before `value_size` existed omit the field;
 // default it to the generator default so they still parse and replay.
-fn default_value_size() -> usize {
+const fn default_value_size() -> usize {
     crate::value::DEFAULT_VALUE_SIZE
 }
 
 // Older reports used the operation stream before Zipf sampling consumed one
 // random draw per operation. Parse them so replay can reject the mismatch.
-fn default_workload_generator_version() -> u16 {
+const fn default_workload_generator_version() -> u16 {
     1
 }
 
 // Reports from before bench supported batched writes did not record this
 // setting. Parse them with the shared command default; replay still rejects
 // their older generator version before execution.
-fn default_batch_size() -> usize {
+const fn default_batch_size() -> usize {
     crate::ingest::DEFAULT_INGEST_BATCH_SIZE
 }
 
@@ -151,7 +152,7 @@ impl BenchReport {
 }
 
 impl BenchManifest {
-    pub fn new(config: BenchConfig, seed: u64) -> Self {
+    pub const fn new(config: BenchConfig, seed: u64) -> Self {
         Self {
             schema_version: BENCH_MANIFEST_SCHEMA_VERSION,
             config,
@@ -465,7 +466,7 @@ mod tests {
 
         BenchReport {
             config: BenchConfig {
-                endpoint: "http://localhost:10000".to_string(),
+                endpoint: "http://localhost:8080".to_string(),
                 namespace: 42,
                 key_space: 1_000,
                 total_ops: 10_000,
