@@ -151,7 +151,7 @@ export class SqlClient {
 
   /** Create a monotonic client with no initial minimum. */
   constructor(baseUrl: string, options: SqlClientOptions = {}) {
-    const transport = createTransport(baseUrl, { useBinaryFormat: true, ...options });
+    const transport = createTransport(baseUrl, options);
     this.rpc = createClient(SqlService, transport);
   }
 
