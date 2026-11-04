@@ -65,7 +65,7 @@ async fn boundary_from_db(
 ) -> CurrentBoundaryState<Digest, N, mmr::Family> {
     let ops_root_witness = db.ops_root_witness().await.expect("ops root witness");
     recover_boundary_state::<mmr::Family, Sha256, _, N, _, _>(
-        previous_ops,
+        previous_ops.map(<[_]>::len),
         operations,
         db.root(),
         *db.sync_boundary() / ((N as u64) * 8),

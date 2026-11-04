@@ -962,11 +962,7 @@ macro_rules! source_snapshot {
             .collect();
         assert!($captured.is_none());
         let boundary = recover_boundary_state::<$family, Sha256, _, N, _, _>(
-            if $previous.is_empty() {
-                None
-            } else {
-                Some($previous.as_slice())
-            },
+            (!$previous.is_empty()).then_some($previous.len()),
             &operations,
             root,
             0,

@@ -172,7 +172,7 @@ fn key_cfg() -> <Vec<u8> as commonware_codec::Read>::Cfg {
 
 async fn boundary_from_source_db(
     source_db: &Db,
-    previous_operations: Option<&[Operation]>,
+    previous_len: Option<usize>,
     operations: &[Operation],
 ) -> CurrentBoundaryState<commonware_cryptography::sha256::Digest, N, Family> {
     let ops_root_witness = source_db
@@ -180,7 +180,7 @@ async fn boundary_from_source_db(
         .await
         .expect("ops root witness");
     recover_boundary_state::<Family, Sha256, _, N, _, _>(
-        previous_operations,
+        previous_len,
         operations,
         source_db.root(),
         0,
@@ -303,7 +303,7 @@ async fn seed(
             .expect("init local ordered db");
 
             let end = source_db.bounds().end;
-            let (_, mut previous_operations) = source_db
+            let (_, history) = source_db
                 .ops_historical_proof(
                     end,
                     Location::new(0),
@@ -311,14 +311,17 @@ async fn seed(
                 )
                 .await
                 .expect("read local operation history");
-            let committed_batches = previous_operations
+            let committed_batches = history
                 .iter()
                 .filter(|operation| matches!(operation, Operation::CommitFloor(_, _)))
                 .count()
                 .saturating_sub(1) as u64;
             let mut counter = committed_batches * 3;
             // Replay the local durable prefix so a restart repairs any interrupted upload
-            let boundary = boundary_from_source_db(&source_db, None, &previous_operations).await;
+            let boundary = boundary_from_source_db(&source_db, None, &history).await;
+            // Each later batch needs only the length of the log before it
+            let mut previous_len = history.len();
+            drop(history);
             publish_source_range(&store_client, &source_db, Location::new(0), &boundary).await;
             info!(
                 tip = *end - 1,
@@ -378,15 +381,14 @@ async fn seed(
                     .await
                     .expect("historical proof");
                 let boundary =
-                    boundary_from_source_db(&source_db, Some(&previous_operations), &operations)
-                        .await;
-                let start = Location::new(previous_operations.len() as u64);
+                    boundary_from_source_db(&source_db, Some(previous_len), &operations).await;
+                let start = Location::new(previous_len as u64);
                 publish_source_range(&store_client, &source_db, start, &boundary).await;
 
                 let root = boundary.root;
                 println!("tip={} root=0x{}", *latest, hex::encode(root.encode()),);
 
-                previous_operations = operations;
+                previous_len = operations.len();
             }
 
             source_db.sync().await.expect("sync local ordered db");

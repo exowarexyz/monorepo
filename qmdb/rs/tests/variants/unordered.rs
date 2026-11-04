@@ -464,7 +464,7 @@ macro_rules! current_boundary {
         let source = &$db;
         Some(
             recover_boundary_state::<$f, Sha256, _, N, _, _>(
-                $previous,
+                ($previous).map(<[_]>::len),
                 &$ops,
                 $db.root(),
                 0,
