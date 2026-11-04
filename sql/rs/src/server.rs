@@ -1594,10 +1594,7 @@ mod tests {
             crate::writer::encode_insert_entries(&batch, &table.model, &table.index_specs)
                 .unwrap()
                 .into_iter()
-                .map(|(key, value)| StoreBatchEntry {
-                    key,
-                    value: value.into(),
-                })
+                .map(|(key, value)| StoreBatchEntry { key, value })
                 .collect();
         let predicate = compile_subscription_predicate(
             &ctx,

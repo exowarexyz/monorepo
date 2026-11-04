@@ -470,6 +470,8 @@ pub(crate) struct TableModel {
     pub(crate) columns_by_name: HashMap<String, usize>,
     /// Table-column positions in composite primary-key order, not schema order.
     pub(crate) primary_key_indices: Vec<usize>,
+    /// `pk_column_mask[i]` is true when column `i` is part of the primary key.
+    pub(crate) pk_column_mask: Vec<bool>,
     /// Storage kinds in the same order as `primary_key_indices`.
     pub(crate) primary_key_kinds: Vec<ColumnKind>,
     /// Sum of reserved primary-key component widths in bytes, excluding the family byte.
@@ -495,6 +497,7 @@ impl TableModel {
 
         let mut primary_key_indices = Vec::with_capacity(config.primary_key_columns.len());
         let mut primary_key_kinds = Vec::with_capacity(config.primary_key_columns.len());
+        let mut pk_column_mask = vec![false; columns.len()];
         let mut primary_key_width = 0usize;
         for pk_col in &config.primary_key_columns {
             let idx = *columns_by_name
@@ -502,6 +505,7 @@ impl TableModel {
                 .ok_or_else(|| format!("primary key column '{pk_col}' not found"))?;
             let kind = columns[idx].kind;
             primary_key_indices.push(idx);
+            pk_column_mask[idx] = true;
             primary_key_kinds.push(kind);
             primary_key_width += kind.key_width();
         }
@@ -513,6 +517,7 @@ impl TableModel {
             columns,
             columns_by_name,
             primary_key_indices,
+            pk_column_mask,
             primary_key_kinds,
             primary_key_width,
         })
@@ -520,7 +525,7 @@ impl TableModel {
 
     /// Whether a column index is part of the primary key.
     pub(crate) fn is_pk_column(&self, col_idx: usize) -> bool {
-        self.primary_key_indices.contains(&col_idx)
+        self.pk_column_mask[col_idx]
     }
 
     pub(crate) fn pk_position(&self, col_idx: usize) -> Option<usize> {

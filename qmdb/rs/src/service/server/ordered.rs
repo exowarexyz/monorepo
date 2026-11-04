@@ -15,7 +15,7 @@ use crate::{
         CurrentOperationServiceServer, KeyLookupServiceServer, OperationLogServiceServer,
         OrderedKeyRangeServiceServer,
     },
-    OperationKv, PublishedWatermark, QmdbError,
+    PublishedWatermark, QmdbError,
 };
 use commonware_codec::{Decode, Encode, Read};
 use commonware_cryptography::Hasher;
@@ -43,12 +43,13 @@ where
     type Family = F;
     type Digest = H::Digest;
 
-    fn extract_operation_kv(
+    fn inspect_operation_kv<T>(
         &self,
         location: Location<F>,
         bytes: &[u8],
-    ) -> Result<OperationKv, QmdbError> {
-        Self::extract_operation_kv(self, location, bytes)
+        inspect: impl FnOnce(Option<&[u8]>, Option<&[u8]>) -> T,
+    ) -> Result<T, QmdbError> {
+        Self::inspect_operation_kv(self, location, bytes, inspect)
     }
 
     fn resolve_watermark(

@@ -86,8 +86,7 @@ where
             .remove(&encode_operation_key(start))
             .ok_or_else(|| {
                 QmdbError::CorruptData(format!("missing operation row at location {start}"))
-            })?
-            .to_vec()]
+            })?]
     } else {
         operations?
     };
@@ -202,7 +201,7 @@ where
                             "missing operation row at location {location}"
                         ))
                     })?;
-                Ok((location, bytes.to_vec()))
+                Ok((location, bytes))
             })
             .collect::<Result<Vec<_>, QmdbError>>()?,
         MultiProofOperations::Given(operations) => operations,

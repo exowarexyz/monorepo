@@ -168,6 +168,7 @@ pub mod stream {
 
 mod range_traversal;
 pub mod transport;
+pub(crate) mod zstd_codec;
 
 use crate::kv_codec::{
     KvExpr, KvFieldKind, KvFieldRef, KvPredicate, KvPredicateCheck, KvPredicateConstraint,
@@ -177,7 +178,9 @@ use bytes::Bytes;
 pub use range_traversal::{
     parse_range_traversal_direction, RangeTraversalDirection, RangeTraversalModeError,
 };
-pub use transport::{connect_compression_registry, PreferZstdHttpClient};
+pub use transport::{
+    connect_compression_registry, PreferZstd, PreferZstdHttpClient, PreferZstdLayer,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RangeReduceOp {

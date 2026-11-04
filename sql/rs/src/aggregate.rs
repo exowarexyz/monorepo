@@ -2181,7 +2181,7 @@ mod tests {
                 };
                 let key = crate::codec::encode_primary_key_from_row(0, &row, model).unwrap();
                 let value = crate::writer::encode_base_row_value(&row, model).unwrap();
-                rows.values.lock().unwrap().insert(key, value.into());
+                rows.values.lock().unwrap().insert(key, value);
             }
             let batch = RecordBatch::try_new(
                 model.schema.clone(),
@@ -2236,17 +2236,14 @@ mod tests {
             for row in rows {
                 stored.insert(
                     crate::codec::encode_primary_key_from_row(0, &row, &table.model).unwrap(),
-                    crate::writer::encode_base_row_value(&row, &table.model)
-                        .unwrap()
-                        .into(),
+                    crate::writer::encode_base_row_value(&row, &table.model).unwrap(),
                 );
                 for spec in table.index_specs.iter() {
                     stored.insert(
                         crate::codec::encode_secondary_index_key(0, spec, &table.model, &row)
                             .unwrap(),
                         crate::writer::encode_secondary_index_value(&row, &table.model, spec)
-                            .unwrap()
-                            .into(),
+                            .unwrap(),
                     );
                 }
             }
@@ -2290,9 +2287,7 @@ mod tests {
                 };
                 stored.insert(
                     crate::codec::encode_primary_key_from_row(0, &row, model).unwrap(),
-                    crate::writer::encode_base_row_value(&row, model)
-                        .unwrap()
-                        .into(),
+                    crate::writer::encode_base_row_value(&row, model).unwrap(),
                 );
             }
             let batch = RecordBatch::try_new(
@@ -3722,16 +3717,12 @@ mod tests {
                 };
                 stored.insert(
                     crate::codec::encode_primary_key_from_row(0, &row, &table.model).unwrap(),
-                    crate::writer::encode_base_row_value(&row, &table.model)
-                        .unwrap()
-                        .into(),
+                    crate::writer::encode_base_row_value(&row, &table.model).unwrap(),
                 );
                 let spec = &table.index_specs[0];
                 stored.insert(
                     crate::codec::encode_secondary_index_key(0, spec, &table.model, &row).unwrap(),
-                    crate::writer::encode_secondary_index_value(&row, &table.model, spec)
-                        .unwrap()
-                        .into(),
+                    crate::writer::encode_secondary_index_value(&row, &table.model, spec).unwrap(),
                 );
             }
         }
@@ -4339,16 +4330,12 @@ mod tests {
                 };
                 stored.insert(
                     crate::codec::encode_primary_key_from_row(0, &row, &table.model).unwrap(),
-                    crate::writer::encode_base_row_value(&row, &table.model)
-                        .unwrap()
-                        .into(),
+                    crate::writer::encode_base_row_value(&row, &table.model).unwrap(),
                 );
                 let spec = &table.index_specs[0];
                 stored.insert(
                     crate::codec::encode_secondary_index_key(0, spec, &table.model, &row).unwrap(),
-                    crate::writer::encode_secondary_index_value(&row, &table.model, spec)
-                        .unwrap()
-                        .into(),
+                    crate::writer::encode_secondary_index_value(&row, &table.model, spec).unwrap(),
                 );
             }
         }

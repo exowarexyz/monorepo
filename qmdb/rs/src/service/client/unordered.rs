@@ -102,14 +102,14 @@ where
 
     fn verify_get_many(
         &self,
-        requested_keys: &[Vec<u8>],
+        requested_keys: &[Bytes],
         results: &[CurrentKeyLookupResult],
         root: &H::Digest,
     ) -> Result<Vec<Self::Lookup>, QmdbError> {
         let requested = requested_keys
             .iter()
             .enumerate()
-            .map(|(index, key)| (key.as_slice(), index))
+            .map(|(index, key)| (key.as_ref(), index))
             .collect::<BTreeMap<&[u8], usize>>();
         let mut last_index = None;
         results
@@ -238,7 +238,7 @@ where
         self.key_lookup
             .get(
                 GetRequest {
-                    key: key.encode().to_vec(),
+                    key: key.encode(),
                     tip: tip.as_u64(),
                     min_sequence_number,
                     ..Default::default()
@@ -260,7 +260,7 @@ where
         self.key_lookup
             .get_many(
                 GetManyRequest {
-                    keys: keys.iter().map(|key| key.encode().to_vec()).collect(),
+                    keys: keys.iter().map(|key| key.encode()).collect(),
                     tip: tip.as_u64(),
                     min_sequence_number,
                     ..Default::default()

@@ -5813,6 +5813,134 @@ mod tests {
         let _ = shutdown_tx.send(());
     }
 
+    /// Backfill builds index entries from stored rows with its own encoders,
+    /// separate from the insert path. Both must write the same bytes, or a
+    /// backfilled index returns different rows than one maintained on insert.
+    #[tokio::test]
+    async fn backfilled_index_entries_match_inserted_ones() {
+        fn columns() -> Vec<TableColumnConfig> {
+            let list = DataType::List(Arc::new(Field::new("item", DataType::Int64, true)));
+            vec![
+                TableColumnConfig::new("id", DataType::Utf8, false),
+                TableColumnConfig::new("seq", DataType::Int64, false),
+                TableColumnConfig::new("status", DataType::Utf8, false),
+                TableColumnConfig::new("amount", DataType::Float64, false),
+                TableColumnConfig::new("flag", DataType::Boolean, false),
+                TableColumnConfig::new("day", DataType::Date32, false),
+                TableColumnConfig::new("at", DataType::Date64, false),
+                TableColumnConfig::new(
+                    "ts",
+                    DataType::Timestamp(TimeUnit::Microsecond, None),
+                    false,
+                ),
+                TableColumnConfig::new("price", DataType::Decimal128(20, 2), false),
+                TableColumnConfig::new("big", DataType::Decimal256(40, 0), false),
+                TableColumnConfig::new("tag", DataType::FixedSizeBinary(2), false),
+                TableColumnConfig::new("qty", DataType::UInt64, false),
+                TableColumnConfig::new("note", DataType::Utf8, true),
+                TableColumnConfig::new("body", DataType::Binary, true),
+                TableColumnConfig::new("scores", list, true),
+            ]
+        }
+        fn indexes() -> Vec<IndexSpec> {
+            let names = |cols: &[&str]| cols.iter().map(|c| c.to_string()).collect();
+            vec![
+                IndexSpec::lexicographic(
+                    "wide",
+                    names(&[
+                        "status", "flag", "day", "at", "ts", "price", "big", "tag", "qty", "amount",
+                    ]),
+                )
+                .unwrap()
+                .with_cover_columns(names(&["note", "body", "scores"])),
+                IndexSpec::z_order("z", names(&["qty", "day"])).unwrap(),
+                IndexSpec::lexicographic("by_seq", names(&["seq"]))
+                    .unwrap()
+                    .with_cover_columns(names(&["note"])),
+            ]
+        }
+        fn row(i: i64) -> Vec<CellValue> {
+            let odd = i % 2 == 1;
+            vec![
+                CellValue::Utf8(format!("a\0b\u{1}é{i}")),
+                CellValue::Int64(if odd { i64::MIN + i } else { i64::MAX - i }),
+                CellValue::Utf8(if odd {
+                    String::new()
+                } else {
+                    format!("open{i}")
+                }),
+                CellValue::Float64(if odd { -0.0 } else { -1.5 * i as f64 }),
+                CellValue::Boolean(odd),
+                CellValue::Date32(-3 + i as i32),
+                CellValue::Date64(1_700_000_000_000 - i),
+                CellValue::Timestamp(-1 - i),
+                CellValue::Decimal128(-12_345 * i as i128),
+                CellValue::Decimal256(i256::from_i128(7 - i as i128)),
+                CellValue::FixedBinary(vec![0xFF, i as u8]),
+                CellValue::UInt64(if odd { u64::MAX } else { i as u64 }),
+                if odd {
+                    CellValue::Null
+                } else {
+                    CellValue::Utf8(format!("hi\u{ff}{i}"))
+                },
+                if odd {
+                    CellValue::Null
+                } else {
+                    CellValue::Binary(vec![0, 1, 0xFF, i as u8])
+                },
+                if odd {
+                    CellValue::Null
+                } else {
+                    CellValue::List(vec![CellValue::Int64(i), CellValue::Int64(-2)])
+                },
+            ]
+        }
+        // Insert six rows into a fresh store, with the indexes either declared
+        // up front or added afterwards by backfill, and return everything stored.
+        async fn store_contents(backfill: bool) -> BTreeMap<Key, Bytes> {
+            let state = MockState {
+                kv: Arc::new(Mutex::new(BTreeMap::new())),
+                range_calls: Arc::new(AtomicUsize::new(0)),
+                range_reduce_calls: Arc::new(AtomicUsize::new(0)),
+                sequence_number: Arc::new(AtomicU64::new(0)),
+            };
+            let (base_url, shutdown_tx) = spawn_mock_server(state.clone()).await;
+            let client = StoreClient::new(&base_url);
+            let schema = |indexes| {
+                KvSchema::new(PrefixedStoreClient::empty(client.clone()))
+                    .table("t", columns(), vec!["id".into(), "seq".into()], indexes)
+                    .unwrap()
+            };
+            let insert_schema = schema(if backfill { vec![] } else { indexes() });
+            let mut writer = insert_schema.batch_writer();
+            for i in 0..6 {
+                writer.insert("t", row(i)).unwrap();
+            }
+            writer.flush().await.unwrap();
+            if backfill {
+                let report = schema(indexes())
+                    .backfill_added_indexes_with_options(
+                        "t",
+                        &[],
+                        IndexBackfillOptions {
+                            row_batch_size: 4,
+                            start_from_primary_key: None,
+                        },
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(report.index_entries_written, 18);
+            }
+            let _ = shutdown_tx.send(());
+            let contents = state.kv.lock().unwrap().clone();
+            contents
+        }
+
+        let inserted = store_contents(false).await;
+        assert_eq!(inserted.len(), 24);
+        assert_eq!(store_contents(true).await, inserted);
+    }
+
     #[tokio::test]
     async fn backfill_added_indexes_writes_zorder_entries_for_existing_rows() {
         let state = MockState {

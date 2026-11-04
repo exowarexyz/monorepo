@@ -24,7 +24,8 @@ use exoware_qmdb::{
     CurrentBoundaryState, MAX_OPERATION_SIZE,
 };
 use exoware_sdk::{
-    transport::set_tcp_nodelay, PrefixedStoreClient, StoreClient, StoreKeyPrefix, StoreWriteBatch,
+    transport::set_tcp_nodelay, PreferZstdLayer, PrefixedStoreClient, StoreClient, StoreKeyPrefix,
+    StoreWriteBatch,
 };
 use std::{
     net::{IpAddr, SocketAddr},
@@ -227,6 +228,7 @@ async fn run(
             N,
             VariableEncoding<Vec<u8>>,
         >(store, op_cfg(), key_cfg()))
+        .layer(PreferZstdLayer)
         .layer(CorsLayer::very_permissive());
 
     let addr = SocketAddr::from((host, port));

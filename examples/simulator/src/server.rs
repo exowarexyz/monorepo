@@ -6,7 +6,7 @@ use axum::{
     serve::{Listener, ListenerExt},
     Router,
 };
-use exoware_sdk::transport::set_tcp_nodelay;
+use exoware_sdk::{transport::set_tcp_nodelay, PreferZstdLayer};
 use exoware_server::{connect_stack, AppState};
 use std::{net::SocketAddr, path::Path, sync::Arc, time::Duration};
 use tower_http::cors::CorsLayer;
@@ -44,23 +44,25 @@ fn store_config(max_open_files: i32) -> RocksConfig {
     config
 }
 
+/// The simulator's routes, shared by [`run`] and [`open_temp`] so tests serve the same stack.
+fn app(engine: RocksStore) -> Router {
+    Router::new()
+        .route("/health", get(health))
+        .fallback_service(connect_stack(AppState::new(Arc::new(engine))))
+        .layer(PreferZstdLayer)
+        .layer(CorsLayer::very_permissive())
+}
+
 /// Run the store simulator until the process is interrupted.
 pub async fn run(
     directory: &Path,
     port: u16,
     max_open_files: i32,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let engine = Arc::new(RocksStore::open(
+    let app = app(RocksStore::open(
         directory,
         Some(store_config(max_open_files)),
     )?);
-    let state = AppState::new(engine);
-    let connect = connect_stack(state);
-
-    let app = Router::new()
-        .route("/health", get(health))
-        .fallback_service(connect)
-        .layer(CorsLayer::very_permissive());
 
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
     info!(%addr, directory = %directory.display(), "store simulator listening");
@@ -78,16 +80,10 @@ pub async fn run(
 pub async fn open_temp(
 ) -> Result<(tokio::task::JoinHandle<()>, String), Box<dyn std::error::Error + Send + Sync>> {
     let data_dir = tempfile::tempdir()?;
-    let engine = Arc::new(RocksStore::open_owned(
+    let app = app(RocksStore::open_owned(
         data_dir,
         Some(store_config(DEFAULT_MAX_OPEN_FILES)),
     )?);
-    let state = AppState::new(engine);
-    let connect = connect_stack(state);
-    let app = Router::new()
-        .route("/health", get(health))
-        .fallback_service(connect)
-        .layer(CorsLayer::very_permissive());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await?
         .tap_io(set_tcp_nodelay);

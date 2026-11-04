@@ -2708,7 +2708,6 @@ dependencies = [
  "connectrpc",
  "connectrpc-build",
  "criterion 0.5.1",
- "crossbeam-utils",
  "exoware-qmdb",
  "exoware-sdk",
  "exoware-server",
@@ -2761,7 +2760,6 @@ dependencies = [
  "connectrpc-build",
  "cookie_store",
  "criterion 0.5.1",
- "crossbeam-utils",
  "futures",
  "hex",
  "http",
@@ -2780,7 +2778,7 @@ dependencies = [
  "tokio",
  "tower",
  "tracing",
- "zstd-safe",
+ "zstd",
 ]
 
 [[package]]

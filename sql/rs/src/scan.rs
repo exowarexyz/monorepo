@@ -1365,7 +1365,7 @@ mod tests {
             rows.values.lock().unwrap().extend(
                 entries
                     .into_iter()
-                    .map(|(key, value)| (prefix.encode_key(&key).unwrap(), Bytes::from(value))),
+                    .map(|(key, value)| (prefix.encode_key(&key).unwrap(), value)),
             );
             let store = crate::SqlContext::new(schema.client().clone());
             store.register_schema(schema).unwrap();
@@ -1491,7 +1491,7 @@ mod tests {
                     }
                     .encode()
                 } else {
-                    Bytes::from(value)
+                    value
                 };
                 (fixture.prefix.encode_key(&key).unwrap(), value)
             }));

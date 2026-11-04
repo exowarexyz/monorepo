@@ -16,7 +16,6 @@ workspace = true
 test-utils = []
 
 [dependencies]
-crossbeam-utils = { workspace = true }
 axum = { workspace = true }
 bytes = { workspace = true }
 buffa = { workspace = true }
