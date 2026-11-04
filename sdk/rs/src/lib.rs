@@ -1057,6 +1057,42 @@ pub enum RangeMode {
     Reverse,
 }
 
+/// Records a stream frame's sequence number in the session, if there is one.
+fn observe_frame_detail(
+    observed_sequence: Option<&ObservedSequence>,
+    detail: Option<&proto_query::DetailView<'_>>,
+) {
+    if let (Some(sequence_store), Some(detail)) = (observed_sequence, detail) {
+        sequence_store.observe(detail.sequence_number);
+    }
+}
+
+/// Builds the owned `Detail` a chunk exposes. Converting just the detail, not the whole
+/// frame, leaves `Detail.extra` as the only allocation.
+fn owned_frame_detail(detail: Option<&proto_query::DetailView<'_>>) -> Option<proto_query::Detail> {
+    detail.map(|detail| {
+        buffa::MessageView::to_owned_message(detail)
+            .expect("a wire-decoded view always converts to its owned message")
+    })
+}
+
+/// Slices a stream row's key out of its frame buffer and strips the client's prefix.
+fn decode_frame_key(
+    key_prefix: Option<&StoreKeyPrefix>,
+    wire: &Bytes,
+    key: &[u8],
+) -> Result<Key, ClientError> {
+    let key = match key_prefix {
+        Some(prefix) => prefix
+            .inner
+            .strip_slice(key)
+            .ok_or(StoreKeyPrefixError::PrefixMismatch)?,
+        None => key,
+    };
+    // Every borrowed field of a decoded frame points into `wire`.
+    Ok(wire.slice_ref(key))
+}
+
 #[derive(Clone, Debug)]
 pub struct RangeChunk {
     /// Rows returned in this stream frame.
@@ -1077,7 +1113,7 @@ pub struct GetManyChunk {
 pub struct RangeStream {
     stream:
         ConnectServerStream<ProtoErasedResponseBody, exoware_proto::query::RangeFrameView<'static>>,
-    pending_frame: Option<exoware_proto::query::RangeFrame>,
+    pending_frame: Option<connectrpc::StreamMessage<exoware_proto::query::RangeFrame>>,
     rows_seen: usize,
     final_count: Option<usize>,
     finished: bool,
@@ -1118,12 +1154,10 @@ impl RangeStream {
         }
         match self.stream.message().await? {
             Some(frame) => {
-                let frame = frame.to_owned_message();
-                if let (Some(sequence_store), Some(detail)) =
-                    (&self.observed_sequence, frame.detail.as_option())
-                {
-                    sequence_store.observe(detail.sequence_number);
-                }
+                observe_frame_detail(
+                    self.observed_sequence.as_deref(),
+                    frame.view().detail.as_option(),
+                );
                 self.pending_frame = Some(frame);
                 Ok(())
             }
@@ -1145,7 +1179,7 @@ impl RangeStream {
                 return Ok(None);
             }
 
-            let mut frame = if let Some(frame) = self.pending_frame.take() {
+            let frame = if let Some(frame) = self.pending_frame.take() {
                 frame
             } else {
                 let Some(frame) = self
@@ -1161,34 +1195,32 @@ impl RangeStream {
                     self.final_count = Some(self.rows_seen);
                     return Ok(None);
                 };
-                let frame = frame.to_owned_message();
-                if let (Some(sequence_store), Some(detail)) =
-                    (&self.observed_sequence, frame.detail.as_option())
-                {
-                    sequence_store.observe(detail.sequence_number);
-                }
+                observe_frame_detail(
+                    self.observed_sequence.as_deref(),
+                    frame.view().detail.as_option(),
+                );
                 frame
             };
 
-            let detail = frame.detail.take();
-            let n = frame.results.len();
+            let view = frame.view();
+            let n = view.results.len();
 
             // Hide default/empty wire frames from the SDK's semantic chunk stream.
-            if n == 0 && detail.is_none() {
+            if n == 0 && view.detail.as_option().is_none() {
                 continue;
             }
 
+            let wire = frame.bytes();
             let mut out = Vec::with_capacity(n);
-            for entry in frame.results {
-                let key = Bytes::from(entry.key);
-                let key = match &self.key_prefix {
-                    Some(prefix) => prefix.decode_key(&key)?,
-                    None => key,
-                };
-                out.push((key, entry.value));
+            for entry in view.results.iter() {
+                let key = decode_frame_key(self.key_prefix.as_ref(), wire, entry.key)?;
+                out.push((key, wire.slice_ref(entry.value)));
             }
             self.rows_seen += n;
-            return Ok(Some(RangeChunk { rows: out, detail }));
+            return Ok(Some(RangeChunk {
+                rows: out,
+                detail: owned_frame_detail(view.detail.as_option()),
+            }));
         }
     }
 
@@ -1214,7 +1246,7 @@ pub struct GetManyStream {
         ProtoErasedResponseBody,
         exoware_proto::query::GetManyFrameView<'static>,
     >,
-    pending_frame: Option<exoware_proto::query::GetManyFrame>,
+    pending_frame: Option<connectrpc::StreamMessage<exoware_proto::query::GetManyFrame>>,
     finished: bool,
     observed_sequence: Option<Arc<ObservedSequence>>,
     key_prefix: Option<StoreKeyPrefix>,
@@ -1247,12 +1279,10 @@ impl GetManyStream {
         }
         match self.stream.message().await? {
             Some(frame) => {
-                let frame = frame.to_owned_message();
-                if let (Some(sequence_store), Some(detail)) =
-                    (&self.observed_sequence, frame.detail.as_option())
-                {
-                    sequence_store.observe(detail.sequence_number);
-                }
+                observe_frame_detail(
+                    self.observed_sequence.as_deref(),
+                    frame.view().detail.as_option(),
+                );
                 self.pending_frame = Some(frame);
                 Ok(())
             }
@@ -1272,7 +1302,7 @@ impl GetManyStream {
             if self.finished {
                 return Ok(None);
             }
-            let mut frame = if let Some(frame) = self.pending_frame.take() {
+            let frame = if let Some(frame) = self.pending_frame.take() {
                 frame
             } else {
                 let Some(frame) = self
@@ -1287,35 +1317,30 @@ impl GetManyStream {
                     }
                     return Ok(None);
                 };
-                let frame = frame.to_owned_message();
-                if let (Some(sequence_store), Some(detail)) =
-                    (&self.observed_sequence, frame.detail.as_option())
-                {
-                    sequence_store.observe(detail.sequence_number);
-                }
+                observe_frame_detail(
+                    self.observed_sequence.as_deref(),
+                    frame.view().detail.as_option(),
+                );
                 frame
             };
 
-            let detail = frame.detail.take();
-            let n = frame.results.len();
+            let view = frame.view();
+            let n = view.results.len();
 
             // Hide default/empty wire frames from the SDK's semantic chunk stream.
-            if n == 0 && detail.is_none() {
+            if n == 0 && view.detail.as_option().is_none() {
                 continue;
             }
 
+            let wire = frame.bytes();
             let mut out = Vec::with_capacity(n);
-            for entry in frame.results {
-                let key = Bytes::from(entry.key);
-                let key = match &self.key_prefix {
-                    Some(prefix) => prefix.decode_key(&key)?,
-                    None => key,
-                };
-                out.push((key, entry.value));
+            for entry in view.results.iter() {
+                let key = decode_frame_key(self.key_prefix.as_ref(), wire, entry.key)?;
+                out.push((key, entry.value.map(|value| wire.slice_ref(value))));
             }
             return Ok(Some(GetManyChunk {
                 entries: out,
-                detail,
+                detail: owned_frame_detail(view.detail.as_option()),
             }));
         }
     }
