@@ -2,9 +2,10 @@
 //!
 //! ## Registry
 //!
-//! Servers register **gzip** and **zstd** via [`connect_compression_registry`] (the codecs
-//! of [`connectrpc::compression::CompressionRegistry::default`], with a faster zstd level)
-//! so callers without zstd, such as Safari, can still negotiate gzip.
+//! Servers register **gzip** and **zstd** via [`connect_compression_registry`] (the codecs of
+//! [`connectrpc::compression::CompressionRegistry::default`], with a faster zstd level and zstd
+//! decompression sized from the frame header) so callers without zstd, such as Safari, can
+//! still negotiate gzip.
 //!
 //! ## Server negotiation
 //!
@@ -29,15 +30,13 @@
 //! replays matching cookies on later requests. This covers edge affinity cookies as well as normal
 //! domain, path, expiry, and deletion semantics.
 
+use super::zstd_codec::ZstdCodec;
 pub use bytes::Bytes;
 pub use connectrpc::{
     client::{BoxFuture, ClientBody, ClientTransport, HttpClient, ServiceTransport},
     rustls::{self, ClientConfig},
 };
-use connectrpc::{
-    compression::{CompressionRegistry, ZstdProvider},
-    ConnectError, Protocol,
-};
+use connectrpc::{compression::CompressionRegistry, ConnectError, Protocol};
 use cookie_store::{Cookie, CookieDomain, CookieStore};
 use http::header::{ACCEPT_ENCODING, AUTHORIZATION, COOKIE, SET_COOKIE};
 pub use http::{Request, Response};
@@ -567,9 +566,12 @@ const ZSTD_LEVEL: i32 = -1;
 
 /// gzip + zstd - used for [`connectrpc::ConnectRpcService::with_compression`] and
 /// [`connectrpc::client::ClientConfig::compression`].
+///
+/// Its zstd codec decompresses into an exactly sized buffer. Registering connectrpc's own
+/// `ZstdProvider` on top (to change the level, say) replaces that codec and its decompression.
 #[must_use]
 pub fn connect_compression_registry() -> CompressionRegistry {
-    CompressionRegistry::default().register(ZstdProvider::with_level(ZSTD_LEVEL))
+    CompressionRegistry::default().register(ZstdCodec::with_level(ZSTD_LEVEL))
 }
 
 /// Makes a Connect server answer in zstd whenever the client accepts it.
@@ -1059,17 +1061,17 @@ mod tests {
             .compress("zstd", &body)
             .unwrap();
 
-        let mut decoder = zstd_safe::DCtx::create();
+        let mut decoder = zstd::zstd_safe::DCtx::create();
         decoder
-            .set_parameter(zstd_safe::DParameter::WindowLogMax(23))
+            .set_parameter(zstd::zstd_safe::DParameter::WindowLogMax(23))
             .unwrap();
         // zstd checks the window only when it decodes in pieces, as browsers do. One-shot
         // decoding, or an output buffer that holds the whole frame, skips the check.
-        let mut input = zstd_safe::InBuffer::around(&compressed);
+        let mut input = zstd::zstd_safe::InBuffer::around(&compressed);
         let mut chunk = [0u8; 64 << 10];
         let mut decoded = Vec::with_capacity(body.len());
         loop {
-            let mut output = zstd_safe::OutBuffer::around(&mut chunk[..]);
+            let mut output = zstd::zstd_safe::OutBuffer::around(&mut chunk[..]);
             let remaining = decoder.decompress_stream(&mut output, &mut input).unwrap();
             let written = output.pos();
             decoded.extend_from_slice(&chunk[..written]);
@@ -1104,7 +1106,7 @@ mod tests {
 
     #[test]
     fn registry_compresses_zstd_at_the_configured_level() {
-        use connectrpc::compression::CompressionProvider;
+        use connectrpc::compression::{CompressionProvider, ZstdProvider};
 
         // Partly repetitive, so level -1 and the default level 3 produce different frames.
         let body: Vec<u8> = (0..64 * 1024u32)

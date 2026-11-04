@@ -2778,7 +2778,7 @@ dependencies = [
  "tokio",
  "tower",
  "tracing",
- "zstd-safe",
+ "zstd",
 ]
 
 [[package]]

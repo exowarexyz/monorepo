@@ -168,6 +168,7 @@ pub mod stream {
 
 mod range_traversal;
 pub mod transport;
+pub(crate) mod zstd_codec;
 
 use crate::kv_codec::{
     KvExpr, KvFieldKind, KvFieldRef, KvPredicate, KvPredicateCheck, KvPredicateConstraint,

@@ -28,17 +28,17 @@ pub use keys::{Key, KeyMut, KeyValidationError, Prefix, PrefixError, Value, MAX_
 pub use proto::*;
 extern crate self as exoware_proto;
 
-use crate::proto::transport::{
-    BalancedHttp2Config as ProtoBalancedHttp2Config,
-    BalancedHttp2Transport as ProtoBalancedHttp2Transport,
-    ErasedClientTransport as ProtoErasedClientTransport,
-    ErasedResponseBody as ProtoErasedResponseBody,
+use crate::proto::{
+    transport::{
+        BalancedHttp2Config as ProtoBalancedHttp2Config,
+        BalancedHttp2Transport as ProtoBalancedHttp2Transport,
+        ErasedClientTransport as ProtoErasedClientTransport,
+        ErasedResponseBody as ProtoErasedResponseBody,
+    },
+    zstd_codec::ZstdCodec,
 };
 use bytes::Bytes;
-use connectrpc::{
-    client::{ClientConfig, ServerStream as ConnectServerStream},
-    compression::ZstdProvider,
-};
+use connectrpc::client::{ClientConfig, ServerStream as ConnectServerStream};
 pub use connectrpc::{ConnectError, ErrorCode};
 use credential::{client_error_from_connect, ApiKey, Credential, UnusableEnvKey};
 use exoware_proto::{
@@ -166,7 +166,7 @@ fn store_connect_client_config(
 ) -> ClientConfig {
     let mut compression = proto_connect_compression_registry();
     if let ConnectRequestCompression::Zstd { level } = request_compression {
-        compression = compression.register(ZstdProvider::with_level(level));
+        compression = compression.register(ZstdCodec::with_level(level));
     }
 
     let config = ClientConfig::new(base_uri)
@@ -3167,7 +3167,7 @@ mod tests {
     use buffa_types::google::protobuf::Duration as ProtoDuration;
     use commonware_macros::boxed;
     use connectrpc::{
-        compression::{CompressionProvider, GzipProvider},
+        compression::{CompressionProvider, GzipProvider, ZstdProvider},
         error::ErrorDetail,
     };
     use exoware_proto::query::TraversalMode as ProtoTraversalMode;
@@ -3783,11 +3783,11 @@ mod tests {
     fn assert_single_zstd_put_frame(body: &[u8], protobuf: &[u8]) {
         assert!(body.starts_with(&[0x28, 0xb5, 0x2f, 0xfd]));
         assert_eq!(
-            zstd_safe::get_frame_content_size(body).unwrap(),
+            zstd::zstd_safe::get_frame_content_size(body).unwrap(),
             Some(protobuf.len() as u64)
         );
         assert_eq!(
-            zstd_safe::find_frame_compressed_size(body).unwrap(),
+            zstd::zstd_safe::find_frame_compressed_size(body).unwrap(),
             body.len()
         );
         let decoded = proto_connect_compression_registry()
@@ -3866,6 +3866,14 @@ mod tests {
             let stream_config = client.streaming_client_config(client.stream_uri.clone());
             assert!(stream_config.compression().supports("zstd"));
             assert!(stream_config.compression().supports("gzip"));
+            // Registering a request level must keep the SDK's zstd decompression, which returns
+            // responses with no spare capacity.
+            let response = stream_config
+                .compression()
+                .decompress_with_limit("zstd", fast.clone(), MAX_RESPONSE_MESSAGE_BYTES)
+                .unwrap();
+            assert_eq!(response, encoded);
+            assert_eq!(response.try_into_mut().unwrap().capacity(), encoded.len());
             if let Some(name) = compression.wire_name() {
                 assert_eq!(
                     stream_config
