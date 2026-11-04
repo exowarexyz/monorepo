@@ -121,6 +121,16 @@ admitted. Generic errors, timeouts, and lost responses are not automatically
 retried. Direct `client.ingest.put(request, options)` calls accept a `timeoutMs`
 or abort `signal` covering attempts and backoff.
 
+Other calls retry `aborted`, `unavailable`, and `resource_exhausted` errors,
+including those mapped from an HTTP status such as 503. Range, GetMany, and
+Reduce also retry such an error when it arrives before their first frame, so
+these calls resolve, and Connect's `onHeader` callback runs, only once that
+frame arrives. An error after the first
+frame, or inside a Subscribe stream, goes to the caller, so a retry never
+repeats results the caller has seen. Network failures are not retried. A call's
+`timeoutMs` or abort `signal` covers every attempt and backoff, and each retry
+sends the server only the time left.
+
 ## Status
 
 `@exowarexyz/sdk` is **ALPHA** software and is not yet recommended for production use.

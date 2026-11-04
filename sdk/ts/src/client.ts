@@ -1,3 +1,4 @@
+import type { DescMethod } from '@bufbuild/protobuf';
 import { createClient, type Client as ConnectClient, type Interceptor, Code, ConnectError } from '@connectrpc/connect';
 import { createConnectTransport } from '@connectrpc/connect-web';
 import { CookieJar, fetchWithCookieJar } from './cookies.js';
@@ -29,12 +30,31 @@ const RETRYABLE_CODES = new Set<Code>([
     Code.ResourceExhausted,
 ]);
 
-function retryBackoffDelay(attempt: number, config: RetryConfig): number {
+function methodKey(method: DescMethod): string {
+    return `${method.parent.typeName}/${method.name}`;
+}
+
+// Methods are keyed by name, because a custom client passes its own generated descriptors to
+// `createTransport`.
+const PUT_KEY = methodKey(IngestService.method.put);
+const REDUCE_KEY = methodKey(QueryService.method.reduce);
+
+// Connect reports an error raised while opening a stream inside the HTTP 200 body, after `next`
+// resolves, so these reads wait for their first frame before returning. Subscribe is left out
+// because its first frame may not arrive for a long time.
+const PREFETCHED_STREAMS = new Set([
+    methodKey(QueryService.method.getMany),
+    methodKey(QueryService.method.range),
+    REDUCE_KEY,
+]);
+
+function cappedBackoff(attempt: number, config: RetryConfig): number {
     const exponent = Math.min(Math.max(attempt - 1, 0), 20);
-    const baseMs = config.initialBackoffMs * (1 << exponent);
-    const cappedMs = Math.min(baseMs, config.maxBackoffMs);
-    const jitter = cappedMs * (0.5 + 0.5 * Math.random());
-    return Math.round(jitter);
+    return Math.min(config.initialBackoffMs * (1 << exponent), config.maxBackoffMs);
+}
+
+function retryBackoffDelay(attempt: number, config: RetryConfig): number {
+    return Math.round(cappedBackoff(attempt, config) * (0.5 + 0.5 * Math.random()));
 }
 
 function putRetryHint(err: unknown): number | undefined {
@@ -74,21 +94,21 @@ function putRetryHint(err: unknown): number | undefined {
     return Number(duration.seconds * 1000n) + Math.ceil(duration.nanos / 1_000_000);
 }
 
-function putDeadline(header: Headers): number | undefined {
+function headerDeadline(header: Headers): number | undefined {
     const timeout = header.get('connect-timeout-ms');
     if (timeout === null || !/^\d+$/.test(timeout)) return undefined;
     const timeoutMs = Number(timeout);
     return Number.isFinite(timeoutMs) && timeoutMs >= 0 ? performance.now() + timeoutMs : undefined;
 }
 
-function checkPutCancellation(signal: AbortSignal, deadline: number | undefined): void {
+function checkCancellation(signal: AbortSignal, deadline: number | undefined): void {
     if (signal.aborted) throw ConnectError.from(signal.reason, Code.Canceled);
     if (deadline !== undefined && performance.now() >= deadline) {
         throw new ConnectError('the operation timed out', Code.DeadlineExceeded);
     }
 }
 
-function waitForPutRetry(delay: number, signal: AbortSignal, deadline: number | undefined): Promise<void> {
+function waitForRetry(delay: number, signal: AbortSignal, deadline: number | undefined): Promise<void> {
     return new Promise((resolve, reject) => {
         const retryAt = performance.now() + delay;
         let timer: ReturnType<typeof setTimeout>;
@@ -98,7 +118,7 @@ function waitForPutRetry(delay: number, signal: AbortSignal, deadline: number | 
         };
         const wake = () => {
             try {
-                checkPutCancellation(signal, deadline);
+                checkCancellation(signal, deadline);
                 const remaining = retryAt - performance.now();
                 if (remaining > 0) {
                     // Timers can fire early or overflow for long hints. Recheck before retrying.
@@ -125,10 +145,15 @@ function waitForPutRetry(delay: number, signal: AbortSignal, deadline: number | 
 function makeRetryInterceptor(config: RetryConfig): Interceptor {
     const maxAttempts = Math.max(config.maxAttempts, 1);
     return (next) => async (req) => {
-        const isPut = req.service.typeName === IngestService.typeName && req.method.name === IngestService.method.put.name;
-        const deadline = isPut ? putDeadline(req.header) : undefined;
-        if (req.stream && req.method === QueryService.method.reduce) {
+        const key = methodKey(req.method);
+        const isPut = key === PUT_KEY;
+        const prefetch = PREFETCHED_STREAMS.has(key);
+        // Connect's own timer also aborts `req.signal` at this deadline. Reading the header lets each
+        // retry send the time left, and covers a caller who sets `connect-timeout-ms` directly.
+        const deadline = headerDeadline(req.header);
+        if (req.stream) {
             // Each retry must serialize the same input after Connect consumes its request iterator.
+            // The fetch transport sends only server-streaming calls, whose input is one message.
             const input = await req.message[Symbol.asyncIterator]().next();
             req = {
                 ...req,
@@ -141,25 +166,24 @@ function makeRetryInterceptor(config: RetryConfig): Interceptor {
         }
         let attempt = 1;
         for (;;) {
-            if (isPut) {
-                checkPutCancellation(req.signal, deadline);
-                if (deadline !== undefined) {
-                    const remaining = deadline - performance.now();
-                    if (remaining <= 0) throw new ConnectError('the operation timed out', Code.DeadlineExceeded);
-                    req.header.set('connect-timeout-ms', String(Math.ceil(remaining)));
-                }
+            checkCancellation(req.signal, deadline);
+            if (deadline !== undefined) {
+                // A retry tells the server only the time left, not the caller's original timeout.
+                req.header.set('connect-timeout-ms', String(Math.max(Math.ceil(deadline - performance.now()), 1)));
             }
-            if (req.signal.aborted) throw ConnectError.from(req.signal.reason, Code.Canceled);
             try {
                 const response = await next(req);
-                if (response.stream && response.method === QueryService.method.reduce) {
-                    // Before any result is exposed, a retry cannot duplicate delivered groups.
+                if (prefetch && response.stream) {
+                    // Before any result is exposed, a retry cannot duplicate delivered rows or groups.
                     const iterator = response.message[Symbol.asyncIterator]();
                     const first = await iterator.next();
-                    if (first.done) throw new ConnectError('reduction stream returned no frames', Code.Internal);
+                    if (first.done && key === REDUCE_KEY) {
+                        throw new ConnectError('reduction stream returned no frames', Code.Internal);
+                    }
                     return {
                         ...response,
                         message: (async function* () {
+                            if (first.done) return;
                             yield first.value;
                             yield* { [Symbol.asyncIterator]: () => iterator };
                         })(),
@@ -167,13 +191,12 @@ function makeRetryInterceptor(config: RetryConfig): Interceptor {
                 }
                 return response;
             } catch (err) {
+                checkCancellation(req.signal, deadline);
                 if (isPut) {
-                    checkPutCancellation(req.signal, deadline);
                     const hint = putRetryHint(err);
                     if (!(attempt < maxAttempts) || hint === undefined || !(hint <= config.maxBackoffMs)) throw err;
 
-                    const exponent = Math.min(Math.max(attempt - 1, 0), 20);
-                    const backoff = Math.min(config.initialBackoffMs * (1 << exponent), config.maxBackoffMs);
+                    const backoff = cappedBackoff(attempt, config);
                     if (!Number.isFinite(backoff) || backoff < 0) throw err;
 
                     const minimum = Math.max(hint, backoff);
@@ -181,7 +204,7 @@ function makeRetryInterceptor(config: RetryConfig): Interceptor {
                     const delay = minimum + (maximum - minimum) * Math.random();
                     if (!Number.isFinite(delay)) throw err;
 
-                    await waitForPutRetry(delay, req.signal, deadline);
+                    await waitForRetry(delay, req.signal, deadline);
                     attempt++;
                     continue;
                 }
@@ -190,8 +213,7 @@ function makeRetryInterceptor(config: RetryConfig): Interceptor {
                     err instanceof ConnectError &&
                     RETRYABLE_CODES.has(err.code)
                 ) {
-                    const delay = retryBackoffDelay(attempt, config);
-                    await new Promise((resolve) => setTimeout(resolve, delay));
+                    await waitForRetry(retryBackoffDelay(attempt, config), req.signal, deadline);
                     attempt++;
                     continue;
                 }
