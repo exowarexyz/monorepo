@@ -1,6 +1,6 @@
 //! HTTP server entrypoints.
 
-use crate::RocksStore;
+use crate::{RocksConfig, RocksStore};
 use axum::{
     routing::get,
     serve::{Listener, ListenerExt},
@@ -10,13 +10,34 @@ use exoware_sdk::{transport::set_tcp_nodelay, PreferZstdLayer};
 use exoware_server::{connect_stack, AppState};
 use std::{net::SocketAddr, path::Path, sync::Arc, time::Duration};
 use tower_http::cors::CorsLayer;
-use tracing::info;
+use tracing::{info, warn};
 
 pub const CMD: &str = "server";
 pub const RUN_CMD: &str = "run";
 
 async fn health() -> &'static str {
     "ok"
+}
+
+/// Default for `--max-open-files`.
+pub const DEFAULT_MAX_OPEN_FILES: i32 = 16_384;
+
+/// Store options for the served simulator. Every commit group adds a log and a state SST and
+/// log files are never merged, so RocksDB's open tables are capped at `max_open_files`. Under
+/// pressure the table cache closes the log files, which nothing reads, and keeps the state
+/// files every point read probes. The process open-file limit must cover the cap.
+fn store_config(max_open_files: i32) -> RocksConfig {
+    if let Ok(limit) = rlimit::Resource::NOFILE.get_soft() {
+        if limit <= max_open_files as u64 {
+            warn!(
+                limit,
+                max_open_files, "open-file limit is below the open-table cap, raise ulimit -n"
+            );
+        }
+    }
+    let mut config = RocksConfig::default();
+    config.db_options.set_max_open_files(max_open_files);
+    config
 }
 
 /// The simulator's routes, shared by [`run`] and [`open_temp`] so tests serve the same stack.
@@ -32,8 +53,12 @@ fn app(engine: RocksStore) -> Router {
 pub async fn run(
     directory: &Path,
     port: u16,
+    max_open_files: i32,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let app = app(RocksStore::open(directory, None)?);
+    let app = app(RocksStore::open(
+        directory,
+        Some(store_config(max_open_files)),
+    )?);
 
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
     info!(%addr, directory = %directory.display(), "store simulator listening");
@@ -51,7 +76,10 @@ pub async fn run(
 pub async fn open_temp(
 ) -> Result<(tokio::task::JoinHandle<()>, String), Box<dyn std::error::Error + Send + Sync>> {
     let data_dir = tempfile::tempdir()?;
-    let app = app(RocksStore::open_owned(data_dir, None)?);
+    let app = app(RocksStore::open_owned(
+        data_dir,
+        Some(store_config(DEFAULT_MAX_OPEN_FILES)),
+    )?);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await?
         .tap_io(set_tcp_nodelay);
