@@ -330,7 +330,15 @@ where
         .filter_map(|operation| operation.key().map(AsRef::as_ref))
         .collect::<BTreeSet<&[u8]>>();
 
-    for (index, operation) in previous.iter().enumerate().rev() {
+    // A key's active update is never below the inactivity floor, so the scan
+    // can stop there. Keys inserted by this batch are never found, so without
+    // that bound any insert would walk back to location 0.
+    for (index, operation) in previous
+        .iter()
+        .enumerate()
+        .skip(*previous_floor as usize)
+        .rev()
+    {
         if touched_keys.is_empty() {
             break;
         }
@@ -768,5 +776,24 @@ mod tests {
             err.to_string().contains("must exceed previous length"),
             "unexpected error: {err}"
         );
+    }
+
+    #[test]
+    fn test_key_scan_stops_at_previous_floor() {
+        // Everything below the previous floor 9 is inactive, so rewriting
+        // "target" does not pull in the chunk of its old update at location 8.
+        let mut previous = previous_ops();
+        previous.push(commit(9));
+        let mut operations = previous.clone();
+        operations.push(update(b"target", b"new"));
+        operations.push(commit(9));
+
+        let changed = changed_chunk_representatives::<mmr::Family, TestOperation<_, _, _>, 1>(
+            &operations,
+            previous.len(),
+            0,
+        );
+
+        assert_eq!(changed, BTreeMap::from([(2u64, Location::new(17))]));
     }
 }
