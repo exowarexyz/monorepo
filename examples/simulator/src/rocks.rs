@@ -1132,9 +1132,10 @@ impl Default for RocksWritePipelineConfig {
 /// RocksDB engine and application-level write pipeline options used by [`RocksStore::open`].
 #[derive(Default)]
 pub struct RocksConfig {
-    /// Database-wide options, applied as-is. `max_background_jobs` bounds concurrent
-    /// compaction. `max_open_files` must exceed the state files a point read probes and may
-    /// sit below the total file count, since the table cache then closes only log files.
+    /// Database-wide options. `max_background_jobs` sets how many compactions can run at
+    /// once. `max_open_files` can be lower than the number of SST files, because the log
+    /// files are never read back and are the ones RocksDB closes first, but it has to stay
+    /// above the number of state files in level zero, which every point read consults.
     pub db_options: Options,
     /// Options for the application-level ingest write pipeline.
     pub write_pipeline: RocksWritePipelineConfig,
