@@ -22,17 +22,13 @@ async fn health() -> &'static str {
 /// Default for `--max-open-files`.
 pub const DEFAULT_MAX_OPEN_FILES: i32 = 16_384;
 
-/// Descriptors the server needs besides open tables, such as sockets, the manifest, the
-/// log, and files being staged.
-const OPEN_FILE_HEADROOM: u64 = 256;
-
 /// Store options for the served simulator. Every commit group adds a log and a state SST and
 /// log files are never merged, so RocksDB's open tables are capped at `max_open_files`. Under
 /// pressure the table cache closes the log files, which nothing reads, and keeps the state
 /// files every point read probes. The process open-file limit must cover the cap.
 fn store_config(max_open_files: i32) -> RocksConfig {
     if let Ok(limit) = rlimit::Resource::NOFILE.get_soft() {
-        if limit < max_open_files as u64 + OPEN_FILE_HEADROOM {
+        if limit <= max_open_files as u64 {
             warn!(
                 limit,
                 max_open_files, "open-file limit is below the open-table cap, raise ulimit -n"
