@@ -7,7 +7,7 @@ use crate::{
     adapter::Keyless,
     proof::{MultiProofOperations, OperationRangeCheckpoint, RawBatchMultiProof},
     service::proto::qmdb::v1::OperationLogServiceServer,
-    OperationKv, PublishedWatermark, QmdbError,
+    PublishedWatermark, QmdbError,
 };
 use commonware_codec::{Decode, Encode, Read};
 use commonware_cryptography::Hasher;
@@ -31,12 +31,13 @@ where
     type Digest = H::Digest;
     const REJECTS_KEY_FILTERS: bool = true;
 
-    fn extract_operation_kv(
+    fn inspect_operation_kv<T>(
         &self,
         location: Location<F>,
         bytes: &[u8],
-    ) -> Result<OperationKv, QmdbError> {
-        Keyless::extract_operation_kv(self, location, bytes)
+        inspect: impl FnOnce(Option<&[u8]>, Option<&[u8]>) -> T,
+    ) -> Result<T, QmdbError> {
+        Self::inspect_operation_kv(self, location, bytes, inspect)
     }
 
     fn resolve_watermark(
@@ -44,11 +45,11 @@ where
         watermark: Location<F>,
         min_sequence_number: Option<u64>,
     ) -> impl Future<Output = Result<PublishedWatermark<F>, QmdbError>> + Send {
-        Keyless::resolve_watermark(self, watermark, min_sequence_number)
+        Self::resolve_watermark(self, watermark, min_sequence_number)
     }
 
     fn observe_published(&self, location: Location<F>, sequence: u64) {
-        Keyless::observe_published(self, location, sequence)
+        Self::observe_published(self, location, sequence)
     }
 
     fn operation_range_checkpoint_at(
@@ -58,7 +59,7 @@ where
         max_locations: u32,
     ) -> impl Future<Output = Result<OperationRangeCheckpoint<Self::Digest, F>, QmdbError>> + Send
     {
-        Keyless::operation_range_checkpoint_at(self, watermark, start_location, max_locations)
+        Self::operation_range_checkpoint_at(self, watermark, start_location, max_locations)
     }
 
     fn multi_proof_at(
@@ -66,7 +67,7 @@ where
         watermark: PublishedWatermark<F>,
         operations: MultiProofOperations<'_, F>,
     ) -> impl Future<Output = Result<RawBatchMultiProof<Self::Digest, F>, QmdbError>> + Send {
-        Keyless::multi_proof_at(self, watermark, operations)
+        Self::multi_proof_at(self, watermark, operations)
     }
 }
 

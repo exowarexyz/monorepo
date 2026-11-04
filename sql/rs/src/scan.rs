@@ -36,14 +36,20 @@ use std::{
     sync::Arc,
 };
 
-// Amortize RPC framing and native predicate evaluation even with a small output limit
+/// Minimum fetch batch size, in rows, to amortize RPC framing and filter evaluation.
 const MIN_FETCH_BATCH_ROWS: usize = 64;
 
+/// A physical predicate evaluated over the table columns it references.
 #[derive(Clone)]
 pub(crate) struct ScanFilter {
+    /// Predicate bound to column positions in `schema`.
     expression: Arc<dyn PhysicalExpr>,
+    /// Referenced columns in table order.
     schema: SchemaRef,
+    /// Decoding and projection needed to build the predicate's input batch.
     access: ScanAccessPlan,
+    /// Whether constraint extraction supports every source filter. Raw scan limits
+    /// also require the chosen key to enforce those constraints.
     complete_ranges: bool,
 }
 
@@ -54,6 +60,7 @@ impl fmt::Debug for ScanFilter {
 }
 
 impl ScanFilter {
+    /// Selects the columns needed to evaluate the filters as physical expressions.
     fn access_plan(model: &TableModel, filters: &[Expr]) -> (Vec<usize>, ScanAccessPlan) {
         let mut refs = HashSet::new();
         for expr in filters {
@@ -69,6 +76,7 @@ impl ScanFilter {
         (columns, access)
     }
 
+    /// Compiles nonempty filters against their selected input columns.
     fn compile(
         state: &dyn Session,
         model: &TableModel,
@@ -90,6 +98,7 @@ impl ScanFilter {
         }))
     }
 
+    /// Returns positions of decodable rows whose predicate evaluates to true.
     fn select(
         &self,
         model: &TableModel,
@@ -123,19 +132,42 @@ impl ScanFilter {
     }
 }
 
+/// A DataFusion leaf that reads a table through its primary key or a secondary index.
+///
+/// Construction fixes column access and index selection. Limit and sort pushdown
+/// clone the scan and share its cached plan.
 #[derive(Debug, Clone)]
 pub(crate) struct KvScanExec {
+    /// Client for the Store namespace containing the table.
     pub(crate) client: PrefixedStoreClient,
-    pub(crate) model: Arc<TableModel>,
-    pub(crate) index_specs: Arc<Vec<ResolvedIndexSpec>>,
-    pub(crate) predicate: QueryPredicate,
+    /// Column types, primary-key layout, and row schema for the table.
+    model: Arc<TableModel>,
+    /// Resolved secondary indexes available to the scan.
+    index_specs: Arc<Vec<ResolvedIndexSpec>>,
+    /// Extracted filter constraints used to bound reads and check index keys.
+    predicate: QueryPredicate,
+    /// Maximum matching rows to emit, or `None` for no limit.
     pub(crate) fetch: Option<usize>,
-    pub(crate) filter: Option<ScanFilter>,
+    /// Predicate evaluated on decoded rows, including conditions key ranges cannot enforce.
+    filter: Option<ScanFilter>,
+    /// Filter conjuncts evaluated from index entries before base-row lookups.
     cover_filter: Option<ScanFilter>,
-    /// Without a required ordering, traversal is unconstrained and defaults to forward.
+    /// Column access and index selection, shared by every clone of the scan.
+    plan: Arc<ScanPlan>,
+    /// Direction required by sort pushdown. `None` defaults to forward traversal
+    /// without promising an output ordering.
     direction: Option<RangeMode>,
-    pub(crate) projection: Option<Vec<usize>>,
+    /// Output schema, ordering guarantees, and single-partition execution metadata.
     pub(crate) properties: Arc<PlanProperties>,
+}
+
+/// Column access and index selection fixed when a scan is built.
+#[derive(Debug)]
+struct ScanPlan {
+    /// Output projection and the columns required for decoding and filtering.
+    access: ScanAccessPlan,
+    /// Selected secondary index and its key ranges, or `None` for primary-key access.
+    index: Option<IndexPlan>,
 }
 
 impl KvScanExec {
@@ -157,49 +189,64 @@ impl KvScanExec {
         ))
     }
 
-    pub(crate) fn new(
-        client: PrefixedStoreClient,
-        model: Arc<TableModel>,
-        index_specs: Arc<Vec<ResolvedIndexSpec>>,
-        predicate: QueryPredicate,
+    /// Plans a scan for a projection, pushed-down filters, and an optional output limit.
+    pub(crate) fn try_new(
+        table: &KvTable,
+        state: &dyn Session,
+        projection: Option<&Vec<usize>>,
+        filters: &[Expr],
         fetch: Option<usize>,
-        projected_schema: SchemaRef,
-        projection: Option<Vec<usize>>,
-    ) -> Self {
-        let properties = Self::make_properties(projected_schema, None);
-        Self {
-            client,
+    ) -> DataFusionResult<Self> {
+        // Keep the output schema limited to projected columns. The access plan also
+        // includes columns needed to check the extracted constraints.
+        let model = table.model.clone();
+        let predicate = QueryPredicate::from_filters(filters, &model);
+        let projected_schema = match projection {
+            Some(proj) => Arc::new(model.schema.project(proj)?),
+            None => model.schema.clone(),
+        };
+        let projection = projection.cloned();
+        let plan = Arc::new(ScanPlan {
+            access: ScanAccessPlan::new(&model, &projection, &predicate),
+            index: None,
+        });
+        let mut scan = Self {
+            client: table.client.clone(),
             model,
-            index_specs,
+            index_specs: table.index_specs.clone(),
             predicate,
             fetch,
             filter: None,
             cover_filter: None,
+            plan,
             direction: None,
-            projection,
-            properties,
-        }
+            properties: Self::make_properties(projected_schema, None),
+        };
+
+        // Finalize the plan with any columns needed only by row filters.
+        scan.set_filters(state, filters)?;
+        Ok(scan)
     }
 
-    pub(crate) fn set_filters(
-        &mut self,
-        state: &dyn Session,
-        filters: &[Expr],
-    ) -> DataFusionResult<()> {
+    /// Compiles filters and caches the column access and index choice they require.
+    fn set_filters(&mut self, state: &dyn Session, filters: &[Expr]) -> DataFusionResult<()> {
+        // Without filters, the constructor's plan already describes a primary-key scan of
+        // the projected columns.
         if filters.is_empty() {
-            self.filter = None;
-            self.cover_filter = None;
             return Ok(());
         }
+
+        // Residual-filter columns determine whether an index covers the scan.
         let filter_access = ScanFilter::access_plan(&self.model, filters);
-        let access = self.access_plan_with_filter(Some(&filter_access.1));
+        let access = self.access_with_filter(&filter_access.1);
+        let index_plan = self
+            .predicate
+            .choose_index_plan(&self.model, &self.index_specs, &access);
         let mut cover_filter = None;
-        if let Some(plan) =
-            self.predicate
-                .choose_index_plan(&self.model, &self.index_specs, &access)?
-        {
+        if let Some(plan) = &index_plan {
             let spec = &self.index_specs[plan.spec_idx];
             if !access.index_covers_required_non_pk(spec) {
+                // Evaluate available conjuncts before fetching missing base-table values.
                 let available = filters
                     .iter()
                     .flat_map(iter_conjunction)
@@ -224,36 +271,39 @@ impl KvScanExec {
             .all(|filter| QueryPredicate::supports_filter(filter, &self.model))
             && access.predicate_fully_enforced_by_primary_key(&self.model)
         {
-            self.filter = None;
-            self.cover_filter = None;
+            // Primary-key ranges enforce every filter, so the scan needs no row filter and
+            // only the projected and constrained columns. Column requirements only rank
+            // candidate indexes, so the narrower column set cannot make one eligible.
             return Ok(());
         }
+
+        // Keep the complete row filter even when some conjuncts can run on the index.
+        // Cache the plan with all columns that filter requires.
         self.filter = ScanFilter::compile(state, &self.model, filters, filter_access)?;
         self.cover_filter = cover_filter;
+        self.plan = Arc::new(ScanPlan {
+            access,
+            index: index_plan,
+        });
         Ok(())
     }
 
-    fn access_plan(&self) -> ScanAccessPlan {
-        self.access_plan_with_filter(self.filter.as_ref().map(|filter| &filter.access))
-    }
-
-    fn access_plan_with_filter(&self, filter_access: Option<&ScanAccessPlan>) -> ScanAccessPlan {
-        let mut access = ScanAccessPlan::new(&self.model, &self.projection, &self.predicate);
-        if let Some(filter_access) = filter_access {
-            for (required, filter_required) in access
-                .required_pk_mask
-                .iter_mut()
-                .zip(&filter_access.required_pk_mask)
-            {
-                *required |= filter_required;
-            }
-            for (required, filter_required) in access
-                .required_non_pk_columns
-                .iter_mut()
-                .zip(&filter_access.required_non_pk_columns)
-            {
-                *required |= filter_required;
-            }
+    /// Extends required-column masks with the physical filter's input columns.
+    fn access_with_filter(&self, filter_access: &ScanAccessPlan) -> ScanAccessPlan {
+        let mut access = self.plan.access.clone();
+        for (required, filter_required) in access
+            .required_pk_mask
+            .iter_mut()
+            .zip(&filter_access.required_pk_mask)
+        {
+            *required |= filter_required;
+        }
+        for (required, filter_required) in access
+            .required_non_pk_columns
+            .iter_mut()
+            .zip(&filter_access.required_non_pk_columns)
+        {
+            *required |= filter_required;
         }
         access
     }
@@ -262,24 +312,21 @@ impl KvScanExec {
         self.direction.unwrap_or(RangeMode::Forward)
     }
 
-    fn order_direction_for_primary_key(
-        &self,
-        order: &LexOrdering,
-    ) -> DataFusionResult<Option<RangeMode>> {
+    /// Finds a scan direction that satisfies the requested ordering on the selected key.
+    fn order_direction_for_primary_key(&self, order: &LexOrdering) -> Option<RangeMode> {
         if self.predicate.contradiction {
-            return Ok(None);
+            return None;
         }
-        let access_plan = self.access_plan();
-        let index_plan =
-            self.predicate
-                .choose_index_plan(&self.model, &self.index_specs, &access_plan)?;
-        let (key_columns, constant_prefix_len) = if let Some(plan) = index_plan {
+        let (key_columns, constant_prefix_len) = if let Some(plan) = &self.plan.index {
+            // Index ordering requires a covering lexicographic scan.
             let spec = &self.index_specs[plan.spec_idx];
             if spec.layout != IndexLayout::Lexicographic
-                || !access_plan.index_covers_required_non_pk(spec)
+                || !self.plan.access.index_covers_required_non_pk(spec)
             {
-                return Ok(None);
+                return None;
             }
+
+            // Require non-null columns with encodings that preserve SQL value order.
             let columns = spec
                 .key_columns
                 .iter()
@@ -303,8 +350,11 @@ impl KvScanExec {
                             | ColumnKind::Decimal256
                     )
             }) {
-                return Ok(None);
+                return None;
             }
+
+            // Skip leading columns fixed to one value. An IN constraint can span
+            // several values, so it does not establish a constant prefix.
             let constant_prefix_len = columns
                 .iter()
                 .take_while(|&&i| {
@@ -326,22 +376,19 @@ impl KvScanExec {
                 self.primary_key_point_prefix_len(),
             )
         };
+
+        // Skip fixed columns and require the remaining requested sort keys to
+        // follow the stored key order in one consistent direction.
         let (constant_columns, ordered_columns) = key_columns.split_at(constant_prefix_len);
         let mut ordered_columns = ordered_columns.iter();
         let mut direction = None;
 
         for sort_expr in order {
-            let Some(column) = sort_expr.expr.downcast_ref::<Column>() else {
-                return Ok(None);
-            };
-            let Some(actual_col_idx) = self
-                .projection
-                .as_ref()
-                .map_or(Some(column.index()), |proj| {
-                    proj.get(column.index()).copied()
-                })
-            else {
-                return Ok(None);
+            let column = sort_expr.expr.downcast_ref::<Column>()?;
+            let actual_col_idx = match self.plan.access.projection_sources.get(column.index())? {
+                ProjectionSource::Pk { col_idx, .. } | ProjectionSource::NonPk { col_idx, .. } => {
+                    *col_idx
+                }
             };
             if constant_columns.contains(&actual_col_idx) {
                 continue;
@@ -354,16 +401,16 @@ impl KvScanExec {
             if ordered_columns.next() != Some(&actual_col_idx)
                 || direction.is_some_and(|current| current != requested_direction)
             {
-                return Ok(None);
+                return None;
             }
             direction = Some(requested_direction);
         }
 
-        Ok(Some(direction.unwrap_or(self.scan_direction())))
+        Some(direction.unwrap_or(self.scan_direction()))
     }
 
-    // Leading point-constrained key columns are fixed by the scanned range, so any
-    // requested ordering over them is trivially satisfied.
+    /// Counts leading primary-key columns fixed to one value by the scanned ranges.
+    /// These columns place no restriction on the scan direction needed for ordering.
     fn primary_key_point_prefix_len(&self) -> usize {
         let mut prefix_encoded_width = 0usize;
 
@@ -401,7 +448,8 @@ impl KvScanExec {
             self.client.key_prefix().max_logical_key_len(),
             &self.index_specs,
             &self.predicate,
-            &self.access_plan(),
+            &self.plan.access,
+            self.plan.index.as_ref(),
             self.filter
                 .as_ref()
                 .is_none_or(|filter| filter.complete_ranges),
@@ -478,6 +526,8 @@ impl ExecutionPlan for KvScanExec {
             )));
         }
 
+        // The stream task owns its read session and cloned plan so it can keep
+        // reading after this method returns.
         let mut builder = RecordBatchReceiverStreamBuilder::new(self.schema(), 2);
         let tx = builder.tx();
         let session = read_session(context.session_config(), &self.client)?;
@@ -488,7 +538,7 @@ impl ExecutionPlan for KvScanExec {
         let fetch = self.fetch;
         let direction = self.scan_direction();
         let projected_schema = self.schema();
-        let access_plan = self.access_plan();
+        let plan = self.plan.clone();
         let filter = self.filter.clone();
         let cover_filter = self.cover_filter.clone();
 
@@ -499,11 +549,20 @@ impl ExecutionPlan for KvScanExec {
                 model: &model,
                 predicate: &predicate,
                 projected_schema: &projected_schema,
-                access_plan: &access_plan,
+                access_plan: &plan.access,
                 filter: filter.as_ref(),
                 cover_filter: cover_filter.as_ref(),
             };
-            if let Err(e) = stream_kv_scan(&tx, &ctx, &index_specs, fetch, direction).await {
+            if let Err(e) = stream_kv_scan(
+                &tx,
+                &ctx,
+                &index_specs,
+                plan.index.as_ref(),
+                fetch,
+                direction,
+            )
+            .await
+            {
                 let _ = tx.send(Err(e)).await;
             }
             Ok(())
@@ -544,7 +603,7 @@ impl ExecutionPlan for KvScanExec {
                 inner: Arc::new(self.clone()),
             });
         }
-        let Some(direction) = self.order_direction_for_primary_key(&expressions)? else {
+        let Some(direction) = self.order_direction_for_primary_key(&expressions) else {
             return Ok(SortOrderPushdownResult::Unsupported);
         };
         // Reversing under a fetch would change which rows the limit selects.
@@ -561,14 +620,23 @@ impl ExecutionPlan for KvScanExec {
     }
 }
 
+/// Borrowed inputs shared by the streaming paths for one scan execution.
 pub(crate) struct ScanCtx<'a> {
+    /// Read session used by every Store request in the execution.
     pub(crate) session: &'a ReadSession,
+    /// Store namespace used to bound and advance logical scan keys.
     key_prefix: &'a StoreKeyPrefix,
+    /// Column types and key layout used to decode stored rows.
     pub(crate) model: &'a TableModel,
+    /// Extracted constraints for primary-key points and ranges.
     pub(crate) predicate: &'a QueryPredicate,
+    /// Arrow schema of each emitted record batch.
     pub(crate) projected_schema: &'a SchemaRef,
+    /// Required key and value columns, and their positions in the output.
     pub(crate) access_plan: &'a ScanAccessPlan,
+    /// Predicate applied to decoded rows before they enter output batches.
     filter: Option<&'a ScanFilter>,
+    /// Predicate applied to index entries before base-row lookups.
     cover_filter: Option<&'a ScanFilter>,
 }
 
@@ -577,7 +645,6 @@ impl ScanCtx<'_> {
         &self,
         key: &Key,
         value: &[u8],
-        covering: bool,
     ) -> DataFusionResult<Option<(Vec<CellValue>, StoredRow)>> {
         let Some(pk) = decode_primary_key_selected(
             self.model.table_prefix,
@@ -587,7 +654,7 @@ impl ScanCtx<'_> {
         ) else {
             return Ok(None);
         };
-        self.decode_value(pk, value, covering)
+        self.decode_value(pk, value, false)
     }
 
     fn decode_value(
@@ -611,26 +678,25 @@ impl ScanCtx<'_> {
     fn append_rows(
         &self,
         rows: &[(Vec<CellValue>, StoredRow)],
-        output: &mut ProjectedBatchBuilder,
-        remaining: usize,
+        output: &mut ProjectedBatchBuilder<'_>,
+        remaining: &mut usize,
     ) -> DataFusionResult<()> {
-        let mut accepted = 0;
         if let Some(filter) = self.filter {
             for i in filter.select(self.model, rows)? {
-                if accepted == remaining {
+                if *remaining == 0 {
                     break;
                 }
                 if output.append_archived_row(&rows[i].0, &rows[i].1)? {
-                    accepted += 1;
+                    *remaining -= 1;
                 }
             }
         } else {
             for (pk, row) in rows {
-                if accepted == remaining {
+                if *remaining == 0 {
                     break;
                 }
                 if output.append_archived_row(pk, row)? {
-                    accepted += 1;
+                    *remaining -= 1;
                 }
             }
         }
@@ -638,11 +704,11 @@ impl ScanCtx<'_> {
     }
 }
 
-pub(crate) async fn flush_projected_batch(
+/// Sends a nonempty batch and resets its builder. Returns false if the receiver closed.
+pub(crate) async fn flush_projected_batch<'a>(
     tx: &tokio::sync::mpsc::Sender<DataFusionResult<RecordBatch>>,
-    ctx: &ScanCtx<'_>,
-    batch_builder: &mut ProjectedBatchBuilder,
-    emitted: &mut usize,
+    ctx: &ScanCtx<'a>,
+    batch_builder: &mut ProjectedBatchBuilder<'a>,
 ) -> DataFusionResult<bool> {
     let batch_size = batch_builder.row_count();
     if batch_size == 0 {
@@ -652,7 +718,6 @@ pub(crate) async fn flush_projected_batch(
         batch_builder,
         ProjectedBatchBuilder::from_access_plan(ctx.model, ctx.access_plan),
     );
-    *emitted += batch_size;
     let batch = ready.finish(ctx.projected_schema)?;
     if tx.send(Ok(batch)).await.is_err() {
         return Ok(false);
@@ -660,13 +725,17 @@ pub(crate) async fn flush_projected_batch(
     Ok(true)
 }
 
+/// Streams matching rows through point reads, a secondary index, or primary-key ranges.
 pub(crate) async fn stream_kv_scan(
     tx: &tokio::sync::mpsc::Sender<DataFusionResult<RecordBatch>>,
     ctx: &ScanCtx<'_>,
     index_specs: &[ResolvedIndexSpec],
+    index_plan: Option<&IndexPlan>,
     limit: Option<usize>,
     direction: RangeMode,
 ) -> DataFusionResult<()> {
+    // A contradiction or a zero limit yields no rows. Otherwise output batches flush at
+    // the smaller of the limit and `BATCH_FLUSH_ROWS`.
     if ctx.predicate.contradiction {
         return Ok(());
     }
@@ -676,6 +745,8 @@ pub(crate) async fn stream_kv_scan(
     let target_rows = limit.unwrap_or(usize::MAX);
     let flush_threshold = limit.unwrap_or(BATCH_FLUSH_ROWS).min(BATCH_FLUSH_ROWS);
 
+    // Complete primary-key constraints permit direct reads. Keep their sorted
+    // order aligned with the requested traversal direction.
     if let Some(mut keys) = ctx.predicate.primary_key_points(ctx.model)? {
         keys.retain(|key| key.len() <= ctx.key_prefix.max_logical_key_len());
         if direction == RangeMode::Reverse {
@@ -684,10 +755,9 @@ pub(crate) async fn stream_kv_scan(
         return stream_point_scan(tx, ctx, &keys, flush_threshold, target_rows).await;
     }
 
-    if let Some(plan) = ctx
-        .predicate
-        .choose_index_plan(ctx.model, index_specs, ctx.access_plan)?
-    {
+    // A covering index supplies the required values directly. Other index
+    // scans use its entries to fetch base rows.
+    if let Some(plan) = index_plan {
         if plan.ranges.is_empty() {
             return Ok(());
         }
@@ -706,10 +776,11 @@ pub(crate) async fn stream_kv_scan(
             )
             .await;
         }
-        return stream_index_lookup_scan(tx, ctx, index_specs, &plan, flush_threshold, target_rows)
+        return stream_index_lookup_scan(tx, ctx, index_specs, plan, flush_threshold, target_rows)
             .await;
     }
 
+    // Primary-key ranges handle scans without point keys or a selected secondary index.
     let ranges = ctx
         .predicate
         .primary_key_ranges(ctx.model, ctx.key_prefix.max_logical_key_len())?;
@@ -725,6 +796,7 @@ pub(crate) async fn stream_kv_scan(
     .await
 }
 
+/// Fetches decodable base rows in request order, regardless of response order.
 async fn get_rows(
     ctx: &ScanCtx<'_>,
     keys: &[Key],
@@ -746,7 +818,7 @@ async fn get_rows(
     let mut rows = Vec::with_capacity(keys.len());
     for key in keys {
         if let Some(value) = values.remove(key).flatten() {
-            if let Some(row) = ctx.decode_row(key, &value, false)? {
+            if let Some(row) = ctx.decode_row(key, &value)? {
                 rows.push(row);
             }
         }
@@ -754,6 +826,8 @@ async fn get_rows(
     Ok(rows)
 }
 
+/// Streams primary-key points in batches sized to the output flush threshold. Filters that
+/// the keys cannot enforce raise the batch to at least `MIN_FETCH_BATCH_ROWS`.
 async fn stream_point_scan(
     tx: &tokio::sync::mpsc::Sender<DataFusionResult<RecordBatch>>,
     ctx: &ScanCtx<'_>,
@@ -761,7 +835,7 @@ async fn stream_point_scan(
     flush_threshold: usize,
     target_rows: usize,
 ) -> DataFusionResult<()> {
-    let mut emitted = 0;
+    let mut remaining = target_rows;
     let mut output = ProjectedBatchBuilder::from_access_plan(ctx.model, ctx.access_plan);
     let exact = ctx.filter.is_none_or(|filter| filter.complete_ranges)
         && ctx
@@ -774,21 +848,22 @@ async fn stream_point_scan(
     };
     for keys in keys.chunks(lookup_batch) {
         let rows = get_rows(ctx, keys).await?;
-        let remaining = target_rows.saturating_sub(emitted + output.row_count());
-        ctx.append_rows(&rows, &mut output, remaining)?;
+
+        ctx.append_rows(&rows, &mut output, &mut remaining)?;
         if output.row_count() >= flush_threshold
-            && !flush_projected_batch(tx, ctx, &mut output, &mut emitted).await?
+            && !flush_projected_batch(tx, ctx, &mut output).await?
         {
             return Ok(());
         }
-        if emitted + output.row_count() >= target_rows {
+        if remaining == 0 {
             break;
         }
     }
-    let _ = flush_projected_batch(tx, ctx, &mut output, &mut emitted).await?;
+    let _ = flush_projected_batch(tx, ctx, &mut output).await?;
     Ok(())
 }
 
+/// Filters secondary-index entries before fetching and filtering their base rows.
 pub(crate) async fn stream_index_lookup_scan(
     tx: &tokio::sync::mpsc::Sender<DataFusionResult<RecordBatch>>,
     ctx: &ScanCtx<'_>,
@@ -804,7 +879,7 @@ pub(crate) async fn stream_index_lookup_scan(
     if key_predicate_plan.is_impossible() {
         return Ok(());
     }
-    let mut emitted = 0usize;
+    let mut remaining = target_rows;
     let mut batch_builder = ProjectedBatchBuilder::from_access_plan(ctx.model, ctx.access_plan);
 
     'ranges: for range in &plan.ranges {
@@ -860,23 +935,24 @@ pub(crate) async fn stream_index_lookup_scan(
             }
             if !pk_batch.is_empty() {
                 let rows = get_rows(ctx, &pk_batch).await?;
-                let remaining = target_rows.saturating_sub(emitted + batch_builder.row_count());
-                ctx.append_rows(&rows, &mut batch_builder, remaining)?;
-                if emitted + batch_builder.row_count() >= target_rows {
+
+                ctx.append_rows(&rows, &mut batch_builder, &mut remaining)?;
+                if remaining == 0 {
                     break 'ranges;
                 }
                 if batch_builder.row_count() >= flush_threshold
-                    && !flush_projected_batch(tx, ctx, &mut batch_builder, &mut emitted).await?
+                    && !flush_projected_batch(tx, ctx, &mut batch_builder).await?
                 {
                     return Ok(());
                 }
             }
         }
     }
-    let _ = flush_projected_batch(tx, ctx, &mut batch_builder, &mut emitted).await?;
+    let _ = flush_projected_batch(tx, ctx, &mut batch_builder).await?;
     Ok(())
 }
 
+/// Streams primary-key or covering-index ranges up to the matching-row limit.
 async fn stream_range_scan(
     tx: &tokio::sync::mpsc::Sender<DataFusionResult<RecordBatch>>,
     ctx: &ScanCtx<'_>,
@@ -907,12 +983,11 @@ async fn stream_range_scan(
                     .predicate_fully_enforced_by_index_key(ctx.model, spec)
             },
         );
-    let mut emitted = 0;
+    let mut remaining = target_rows;
     let mut output = ProjectedBatchBuilder::from_access_plan(ctx.model, ctx.access_plan);
     for range in ordered_ranges(ranges, direction) {
         let mut range = range.clone();
         loop {
-            let remaining = target_rows.saturating_sub(emitted + output.row_count());
             if remaining == 0 || range.start > range.end {
                 break;
             }
@@ -963,29 +1038,28 @@ async fn stream_range_scan(
                         }
                         ctx.decode_value(decoded.primary_key_values, value, true)?
                     } else {
-                        ctx.decode_row(key, value, false)?
+                        ctx.decode_row(key, value)?
                     };
                     let Some(row) = row else { continue };
                     if ctx.filter.is_some() {
                         rows.push(row);
-                    } else if emitted + output.row_count() < target_rows {
-                        output.append_archived_row(&row.0, &row.1)?;
+                    } else if remaining > 0 && output.append_archived_row(&row.0, &row.1)? {
+                        remaining -= 1;
                     }
                 }
                 if ctx.filter.is_some() {
-                    let remaining = target_rows.saturating_sub(emitted + output.row_count());
-                    ctx.append_rows(&rows, &mut output, remaining)?;
+                    ctx.append_rows(&rows, &mut output, &mut remaining)?;
                 }
                 if output.row_count() >= flush_threshold
-                    && !flush_projected_batch(tx, ctx, &mut output, &mut emitted).await?
+                    && !flush_projected_batch(tx, ctx, &mut output).await?
                 {
                     return Ok(());
                 }
-                if emitted + output.row_count() >= target_rows {
+                if remaining == 0 {
                     break;
                 }
             }
-            if emitted + output.row_count() >= target_rows || scanned < raw_limit {
+            if remaining == 0 || scanned < raw_limit {
                 break;
             }
             // Raw limits count entries rejected by decoding or residual validation too
@@ -1009,11 +1083,11 @@ async fn stream_range_scan(
                 }
             }
         }
-        if emitted + output.row_count() >= target_rows {
+        if remaining == 0 {
             break;
         }
     }
-    let _ = flush_projected_batch(tx, ctx, &mut output, &mut emitted).await?;
+    let _ = flush_projected_batch(tx, ctx, &mut output).await?;
     Ok(())
 }
 
@@ -1042,27 +1116,41 @@ async fn range_stream_with_direction(
 
 #[cfg(test)]
 mod tests {
-    use crate::{types::KvTable, IndexSpec, KvSchema, TableColumnConfig};
-    use axum::Router;
+    use super::KvScanExec;
+    use crate::{filter::ScanAccessPlan, types::KvTable, IndexSpec, KvSchema, TableColumnConfig};
+    use axum::{
+        serve::{Listener, ListenerExt},
+        Router,
+    };
     use bytes::Bytes;
+    use commonware_codec::Encode;
     use datafusion::{
         arrow::{
             array::{
                 ArrayRef, Decimal128Array, FixedSizeBinaryArray, Float64Array, Int64Array,
                 StringArray, TimestampMicrosecondArray, UInt64Array,
             },
+            compute::SortOptions,
             datatypes::{DataType, TimeUnit},
             record_batch::RecordBatch,
         },
         common::{Result as DataFusionResult, ScalarValue},
         datasource::MemTable,
+        logical_expr::{col, in_list, lit},
+        physical_expr::{expressions::Column, PhysicalSortExpr},
+        physical_plan::{ExecutionPlan, SortOrderPushdownResult},
         prelude::SessionContext as DataFusionSessionContext,
     };
-    use exoware_sdk::{StoreClient, StoreKeyPrefix};
+    use exoware_sdk::{
+        kv_codec::{StoredRow, StoredValue},
+        transport::set_tcp_nodelay,
+        PrefixedStoreClient, RangeMode, StoreClient, StoreKeyPrefix,
+    };
     use exoware_server::{
         Query, QueryExtra, QueryResult, QueryState, RangeScan, RangeScanBatch, RangeScanResult,
         Sequence,
     };
+    use futures::TryStreamExt;
     use std::{
         collections::BTreeMap,
         sync::{
@@ -1071,23 +1159,36 @@ mod tests {
         },
     };
 
+    /// Store reads observed while executing a query.
     #[derive(Clone, Debug)]
     enum Request {
+        /// A point lookup by its physical Store key.
         Get(Bytes),
+        /// A batch of point lookups in request order.
         GetMany(Vec<Bytes>),
+        /// An inclusive range read over physical Store keys.
         Range {
+            /// Inclusive lower key bound.
             start: Bytes,
+            /// Inclusive upper key bound, or empty for no upper bound.
             end: Bytes,
+            /// Maximum stored entries the request may return.
             limit: usize,
+            /// Whether entries are returned in ascending key order.
             forward: bool,
         },
     }
 
+    /// Stored test data and observations shared with the query service.
     #[derive(Default)]
     struct Rows {
+        /// Encoded primary and secondary entries, indexed by physical Store key.
         values: Mutex<BTreeMap<Bytes, Bytes>>,
+        /// Reads recorded in arrival order.
         requests: Mutex<Vec<Request>>,
+        /// Entries returned by batch lookups and range cursors, including missing lookups.
         returned_rows: Arc<AtomicUsize>,
+        /// Key and value bytes returned by batch lookups and range cursors.
         returned_bytes: Arc<AtomicUsize>,
     }
 
@@ -1097,9 +1198,13 @@ mod tests {
         }
     }
 
+    /// A range snapshot that records data returned to the test's query client.
     struct Cursor {
+        /// Remaining entries in the requested traversal order.
         rows: std::vec::IntoIter<(Bytes, Bytes)>,
+        /// Shared count of entries returned by batch lookups and range cursors.
         returned_rows: Arc<AtomicUsize>,
+        /// Shared count of returned key and value bytes.
         returned_bytes: Arc<AtomicUsize>,
     }
 
@@ -1205,12 +1310,19 @@ mod tests {
         }
     }
 
+    /// Identical Store and in-memory tables for checking query results and Store reads.
     struct Fixture {
+        /// SQL context backed by the test's Store query service.
         store: crate::SqlContext,
+        /// DataFusion context backed by an in-memory reference table.
         native: DataFusionSessionContext,
+        /// Stored entries and observations for the current query.
         rows: Arc<Rows>,
+        /// Table model and indexes used to encode the test data.
         table: Arc<KvTable>,
+        /// Namespace prepended to each table and index key in the Store.
         prefix: StoreKeyPrefix,
+        /// Query-service task aborted when the fixture is dropped.
         server: tokio::task::JoinHandle<()>,
     }
 
@@ -1230,7 +1342,10 @@ mod tests {
             let rows = Arc::new(Rows::default());
             let app = Router::new()
                 .fallback_service(exoware_server::query_service(QueryState::new(rows.clone())));
-            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .unwrap()
+                .tap_io(set_tcp_nodelay);
             let url = format!("http://{}", listener.local_addr().unwrap());
             let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
             let prefix = StoreKeyPrefix::new(Bytes::from_static(b"scan-tests/")).unwrap();
@@ -1271,6 +1386,7 @@ mod tests {
             }
         }
 
+        /// Checks result parity and namespace isolation, then returns the observed reads.
         async fn check(&self, sql: &str) -> Vec<Request> {
             let expected = values(&self.native, sql).await.unwrap();
             self.rows.requests.lock().unwrap().clear();
@@ -1325,6 +1441,153 @@ mod tests {
         IndexSpec::lexicographic(name, keys.iter().map(|name| name.to_string()).collect())
             .unwrap()
             .with_cover_columns(cover.iter().map(|name| name.to_string()).collect())
+    }
+
+    #[tokio::test]
+    async fn limit_counts_only_rows_with_valid_projected_values() {
+        // Both tables start with one valid row, and each limited query must return it.
+        let fixture = Fixture::new(
+            vec![
+                column("id", DataType::Int64, false),
+                column("tag", DataType::Int64, false),
+                column("amount", DataType::Int64, false),
+            ],
+            &["id"],
+            vec![index("tag", &["tag"], &[])],
+            vec![
+                Arc::new(Int64Array::from(vec![2])),
+                Arc::new(Int64Array::from(vec![7])),
+                Arc::new(Int64Array::from(vec![42])),
+            ],
+        )
+        .await;
+
+        // This row decodes successfully, but its nonnullable projection is invalid.
+        // It precedes the valid row in both the primary and secondary key order.
+        let invalid = RecordBatch::try_new(
+            fixture.table.model.schema.clone(),
+            vec![
+                Arc::new(Int64Array::from(vec![0])),
+                Arc::new(Int64Array::from(vec![7])),
+                Arc::new(Int64Array::from(vec![999])),
+            ],
+        )
+        .unwrap();
+        let entries = crate::writer::encode_insert_entries(
+            &invalid,
+            &fixture.table.model,
+            &fixture.table.index_specs,
+        )
+        .unwrap();
+        fixture
+            .rows
+            .values
+            .lock()
+            .unwrap()
+            .extend(entries.into_iter().map(|(key, value)| {
+                let value = if fixture.table.model.primary_key_prefix.matches(&key) {
+                    StoredRow {
+                        values: vec![None, Some(StoredValue::Int64(7)), None],
+                    }
+                    .encode()
+                } else {
+                    value
+                };
+                (fixture.prefix.encode_key(&key).unwrap(), value)
+            }));
+
+        // Range retries, residual filtering, point reads, and index lookups all
+        // count accepted output rows rather than decoded or fetched entries.
+        for sql in [
+            "SELECT amount FROM orders LIMIT 1",
+            "SELECT amount FROM orders WHERE id % 2 = 0 LIMIT 1",
+            "SELECT amount FROM orders WHERE id IN (0, 2) LIMIT 1",
+            "SELECT amount FROM orders WHERE tag = 7 LIMIT 1",
+        ] {
+            let requests = fixture.check(sql).await;
+            assert!(
+                fixture.rows.returned_rows.load(Ordering::SeqCst) >= 2,
+                "{sql}"
+            );
+            if sql.contains("IN") {
+                assert!(requests.iter().all(|r| matches!(r, Request::GetMany(_))));
+            } else if sql.contains("tag") {
+                assert!(requests.iter().any(|r| matches!(r, Request::GetMany(_))));
+                assert!(requests.iter().any(|r| matches!(
+                    r, Request::Range { start, .. } if fixture.index_matches(0, start)
+                )));
+            } else {
+                assert!(requests.iter().all(|r| matches!(r, Request::Range { .. })));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn limit_spans_output_batches_without_resetting_the_budget() {
+        // One row past a full flush makes the limit span two output batches. Rows beyond
+        // the limit would surface a budget that resets after the first flush.
+        let limit = super::BATCH_FLUSH_ROWS + 1;
+        let count = limit + 5;
+        let fixture = Fixture::new(
+            vec![
+                column("id", DataType::Int64, false),
+                column("tag", DataType::Int64, false),
+                column("amount", DataType::Int64, false),
+            ],
+            &["id"],
+            vec![index("tag", &["tag"], &[])],
+            vec![
+                Arc::new(Int64Array::from_iter_values(0..count as i64)),
+                Arc::new(Int64Array::from(vec![7; count])),
+                Arc::new(Int64Array::from_iter_values(0..count as i64)),
+            ],
+        )
+        .await;
+
+        // Range scans, point reads, and index lookups must each stop at the limit.
+        let points = (0..count as i64).map(lit).collect();
+        for filters in [
+            vec![],
+            vec![in_list(col("id"), points, false)],
+            vec![col("tag").eq(lit(7i64))],
+        ] {
+            // Execute the scan node itself so the test sees the batches it emits.
+            let scan = KvScanExec::try_new(
+                &fixture.table,
+                &fixture.store.datafusion().state(),
+                Some(&vec![2]),
+                &filters,
+                Some(limit),
+            )
+            .unwrap();
+            let batches = scan
+                .execute(0, fixture.store.datafusion().task_ctx())
+                .unwrap()
+                .try_collect::<Vec<_>>()
+                .await
+                .unwrap();
+
+            // The first batch must be full and the second must hold only the last row
+            // the limit allows, with the first `limit` amounts in key order.
+            assert_eq!(
+                batches
+                    .iter()
+                    .map(RecordBatch::num_rows)
+                    .collect::<Vec<_>>(),
+                [super::BATCH_FLUSH_ROWS, 1]
+            );
+            let amounts = batches.iter().flat_map(|batch| {
+                batch
+                    .column(0)
+                    .as_any()
+                    .downcast_ref::<Int64Array>()
+                    .unwrap()
+                    .values()
+                    .iter()
+                    .copied()
+            });
+            assert!(amounts.eq(0..limit as i64));
+        }
     }
 
     #[tokio::test]
@@ -2050,6 +2313,303 @@ mod tests {
                 "SELECT tenant, COUNT(*) FROM orders WHERE {predicate} GROUP BY tenant ORDER BY tenant"
             ))
             .await;
+        }
+    }
+
+    /// Cached column requirements and index ranges agree with the optimized scan inputs.
+    #[tokio::test]
+    async fn optimized_scan_keeps_the_plan_its_inputs_give() {
+        // Both indexes cover amount, while payload requires a base-row lookup.
+        let fixture = Fixture::new(
+            vec![
+                column("id", DataType::Int64, false),
+                column("status", DataType::Utf8, false),
+                column("amount", DataType::Int64, false),
+                column("payload", DataType::Utf8, false),
+            ],
+            &["id"],
+            vec![
+                index("status_idx", &["status"], &["amount"]),
+                index("status_amount_idx", &["status", "amount"], &[]),
+            ],
+            vec![
+                Arc::new(Int64Array::from((0..8).collect::<Vec<i64>>())),
+                Arc::new(StringArray::from(vec![
+                    "a", "b", "c", "a", "b", "c", "a", "b",
+                ])),
+                Arc::new(Int64Array::from(vec![5, 3, 8, 1, 9, 2, 7, 4])),
+                Arc::new(StringArray::from(
+                    (0..8).map(|i| format!("p{i}")).collect::<Vec<_>>(),
+                )),
+            ],
+        )
+        .await;
+
+        // Exercise both key paths with residual filters, ordering, and limits.
+        for (sql, uses_index, filtered) in [
+            ("SELECT * FROM orders", false, false),
+            (
+                "SELECT id, amount FROM orders WHERE status IN ('a', 'b') AND amount > 2 ORDER BY id",
+                true,
+                true,
+            ),
+            (
+                "SELECT payload FROM orders WHERE status IN ('a', 'c') AND amount % 2 = 1 ORDER BY id",
+                true,
+                true,
+            ),
+            (
+                "SELECT id, amount FROM orders WHERE status = 'a' AND payload <> 'p0' ORDER BY id",
+                true,
+                true,
+            ),
+            (
+                "SELECT id, amount FROM orders WHERE status = 'a' ORDER BY amount DESC LIMIT 2",
+                true,
+                true,
+            ),
+            ("SELECT payload FROM orders WHERE id >= 2 AND id < 6", false, false),
+            (
+                "SELECT payload FROM orders WHERE id >= 2 AND payload <> 'p3' ORDER BY id LIMIT 3",
+                false,
+                true,
+            ),
+        ] {
+            // Each query must match the reference results and plan the expected key path
+            // and row filter.
+            fixture.check(sql).await;
+            let mut plan = fixture
+                .store
+                .datafusion()
+                .sql(sql)
+                .await
+                .unwrap()
+                .create_physical_plan()
+                .await
+                .unwrap();
+            while let Some(child) = plan.children().first() {
+                plan = (*child).clone();
+            }
+            let scan = plan
+                .downcast_ref::<KvScanExec>()
+                .expect("optimized plan must end in a KV scan");
+            assert_eq!(scan.plan.index.is_some(), uses_index, "{sql}");
+            assert_eq!(scan.filter.is_some(), filtered, "{sql}");
+
+            // Required columns and index ranges must agree with the optimized scan
+            // schema and residual filter.
+            let projection = plan
+                .schema()
+                .fields()
+                .iter()
+                .map(|field| scan.model.columns_by_name[field.name()])
+                .collect();
+            let mut access = ScanAccessPlan::new(&scan.model, &Some(projection), &scan.predicate);
+            if let Some(filter) = &scan.filter {
+                for (required, filter_required) in access
+                    .required_pk_mask
+                    .iter_mut()
+                    .zip(&filter.access.required_pk_mask)
+                {
+                    *required |= filter_required;
+                }
+                for (required, filter_required) in access
+                    .required_non_pk_columns
+                    .iter_mut()
+                    .zip(&filter.access.required_non_pk_columns)
+                {
+                    *required |= filter_required;
+                }
+            }
+            assert_eq!(
+                access.required_pk_mask, scan.plan.access.required_pk_mask,
+                "{sql}"
+            );
+            assert_eq!(
+                access.required_non_pk_columns, scan.plan.access.required_non_pk_columns,
+                "{sql}"
+            );
+            let fresh = scan
+                .predicate
+                .choose_index_plan(&scan.model, &scan.index_specs, &access);
+            assert_eq!(
+                scan.plan
+                    .index
+                    .as_ref()
+                    .map(|plan| (plan.spec_idx, plan.ranges.clone())),
+                fresh.map(|plan| (plan.spec_idx, plan.ranges)),
+                "{sql}"
+            );
+        }
+    }
+
+    /// A primary-key prefix constraint keeps the qualifying index plan and is enforced by its key.
+    #[tokio::test]
+    async fn primary_key_prefix_keeps_qualifying_index_plan() {
+        // Fixing tenant leaves order_id unconstrained, so the index remains eligible. Within
+        // each tenant, the index orders by created and the primary key orders by order_id.
+        let fixture = Fixture::new(
+            vec![
+                column("tenant", DataType::Int64, false),
+                column("order_id", DataType::Int64, false),
+                column("created", DataType::Int64, false),
+                column("payload", DataType::Int64, false),
+            ],
+            &["tenant", "order_id"],
+            vec![index("tenant_created", &["tenant", "created"], &[])],
+            vec![
+                Arc::new(Int64Array::from(vec![5, 5, 5, 5, 6, 6])),
+                Arc::new(Int64Array::from(vec![1, 2, 3, 4, 1, 2])),
+                Arc::new(Int64Array::from(vec![40, 10, 30, 20, 50, 60])),
+                Arc::new(Int64Array::from(vec![100, 200, 300, 400, 500, 600])),
+            ],
+        )
+        .await;
+
+        // The covering index supplies both projected columns in the requested order, and
+        // its leading key column enforces the tenant constraint. Results must match
+        // DataFusion with exactly one reverse index range read limited to the two rows.
+        let sql =
+            "SELECT order_id, created FROM orders WHERE tenant = 5 ORDER BY created DESC LIMIT 2";
+        let requests = fixture.check(sql).await;
+        assert!(
+            matches!(requests.as_slice(), [Request::Range { start, forward: false, limit: 2, .. }] if fixture.index_matches(0, start)),
+            "the query must use exactly one reverse index range read of two rows, got {requests:?}"
+        );
+        assert_eq!(fixture.rows.returned_rows.load(Ordering::SeqCst), 2);
+
+        // The leaf scan must keep the index plan with the reversed direction and the limit.
+        let mut plan = fixture
+            .store
+            .datafusion()
+            .sql(sql)
+            .await
+            .unwrap()
+            .create_physical_plan()
+            .await
+            .unwrap();
+        while let Some(child) = plan.children().first() {
+            plan = (*child).clone();
+        }
+        let scan = plan.downcast_ref::<KvScanExec>().unwrap();
+        assert_eq!(scan.plan.index.as_ref().map(|plan| plan.spec_idx), Some(0));
+        assert_eq!(scan.direction, Some(RangeMode::Reverse));
+        assert_eq!(scan.fetch, Some(2));
+    }
+
+    /// Index ranges share one budget for accepted rows.
+    #[tokio::test]
+    async fn limit_spans_distinct_index_ranges() {
+        // Varying the cover columns exercises both covering scans and base row lookups.
+        for covering in [false, true] {
+            // Two rows per tag let the query cross a range boundary before reaching the limit.
+            let cover: &[&str] = if covering { &["amount"] } else { &[] };
+            let fixture = Fixture::new(
+                vec![
+                    column("id", DataType::Int64, false),
+                    column("tag", DataType::Int64, false),
+                    column("amount", DataType::Int64, false),
+                ],
+                &["id"],
+                vec![index("tag", &["tag"], cover)],
+                vec![
+                    Arc::new(Int64Array::from(vec![0, 1, 2, 3])),
+                    Arc::new(Int64Array::from(vec![7, 7, 9, 9])),
+                    Arc::new(Int64Array::from(vec![10, 20, 30, 40])),
+                ],
+            )
+            .await;
+
+            // The IN list must yield two index ranges with the configured coverage.
+            let scan = KvScanExec::try_new(
+                &fixture.table,
+                &fixture.store.datafusion().state(),
+                Some(&vec![2]),
+                &[in_list(col("tag"), vec![lit(7i64), lit(9i64)], false)],
+                Some(3),
+            )
+            .unwrap();
+            let plan = scan.plan.index.as_ref().unwrap();
+            assert_eq!(plan.ranges.len(), 2);
+            assert_eq!(
+                scan.plan
+                    .access
+                    .index_covers_required_non_pk(&scan.index_specs[plan.spec_idx]),
+                covering,
+            );
+
+            // The scan itself must emit exactly three amounts. The second range must contribute
+            // only its first row.
+            let batches = scan
+                .execute(0, fixture.store.datafusion().task_ctx())
+                .unwrap()
+                .try_collect::<Vec<_>>()
+                .await
+                .unwrap();
+            let amounts = batches.iter().flat_map(|batch| {
+                batch
+                    .column(0)
+                    .as_any()
+                    .downcast_ref::<Int64Array>()
+                    .unwrap()
+                    .values()
+                    .iter()
+                    .copied()
+            });
+            assert!(amounts.eq([10, 20, 30]));
+        }
+    }
+
+    /// Sort and limit pushdown share the cached plan.
+    #[test]
+    fn sort_and_fetch_clones_share_cached_plan() {
+        // The tag index covers amount so the scan can use its key order.
+        let schema = KvSchema::new(PrefixedStoreClient::empty(StoreClient::new(
+            "http://127.0.0.1:1",
+        )))
+        .table(
+            "orders",
+            vec![
+                column("id", DataType::Int64, false),
+                column("tag", DataType::Int64, false),
+                column("amount", DataType::Int64, false),
+            ],
+            vec!["id".into()],
+            vec![index("tag", &["tag"], &["amount"])],
+        )
+        .unwrap();
+
+        // Fixing tag leaves the id suffix ordered. The projection puts id at output position 2.
+        let state = DataFusionSessionContext::new().state();
+        let scan = KvScanExec::try_new(
+            &schema.tables()[0].1,
+            &state,
+            Some(&vec![2, 1, 0]),
+            &[col("tag").eq(lit(7i64))],
+            None,
+        )
+        .unwrap();
+
+        // A descending id sort must push down exactly and clone the scan. Applying a limit
+        // creates another clone.
+        let SortOrderPushdownResult::Exact { inner: sorted } = scan
+            .try_pushdown_sort(&[PhysicalSortExpr {
+                expr: Arc::new(Column::new("id", 2)),
+                options: SortOptions {
+                    descending: true,
+                    ..Default::default()
+                },
+            }])
+            .unwrap()
+        else {
+            panic!("a fixed tag must leave the primary-key suffix ordered");
+        };
+        let limited = sorted.with_fetch(Some(2)).unwrap();
+
+        // Both clones must share the original plan.
+        for clone in [sorted, limited] {
+            let clone = clone.downcast_ref::<KvScanExec>().unwrap();
+            assert!(Arc::ptr_eq(&scan.plan, &clone.plan));
         }
     }
 }

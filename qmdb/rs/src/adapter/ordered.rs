@@ -1,9 +1,8 @@
 use crate::{
     adapter::{
         codec::{
-            decode_current_boundary_metadata, decode_update_index_value_present,
-            decode_update_location, decode_update_raw_key, encode_current_meta_key,
-            encode_ops_root_witness_key, encode_update_key, CurrentBoundaryMetadata, UPDATE_PREFIX,
+            decode_update_index_value_present, decode_update_location, decode_update_raw_key,
+            encode_update_key, UPDATE_PREFIX,
         },
         core,
         current::{self, CurrentTip, ProofReads},
@@ -18,9 +17,9 @@ use crate::{
         VerifiedKeyValue, VerifiedOperationRange,
     },
     request::validate_key_range,
-    OperationKv, PublishedWatermark, VersionedValue,
+    PublishedWatermark, VersionedValue,
 };
-use commonware_codec::{Codec, Copying, Decode, DecodeExt, Encode};
+use commonware_codec::{Codec, Copying, Decode, Encode};
 use commonware_cryptography::Hasher;
 use commonware_storage::{
     merkle::{Graftable, Location},
@@ -29,7 +28,7 @@ use commonware_storage::{
             ordered,
             value::{ValueEncoding, VariableEncoding},
         },
-        current::{ordered::proof::constant::ExclusionProof, proof::OpsRootWitness},
+        current::ordered::proof::constant::ExclusionProof,
         operation::{Key as QmdbKey, Operation as _},
     },
 };
@@ -210,11 +209,11 @@ where
     pub async fn root_at(&self, watermark: Location<F>) -> Result<H::Digest, QmdbError> {
         let watermark = self.resolve_watermark(watermark, None).await?;
         let session = ReadSession::fixed(self.store.clone(), Some(watermark.sequence_number));
-        if Self::load_ops_root_witness(&session, watermark.location)
+        if current::load_ops_root_witness::<F, H>(&session, watermark.location)
             .await?
             .is_some()
         {
-            return Self::load_current_boundary_root(&session, watermark.location).await;
+            return current::load_current_boundary_root::<F, H>(&session, watermark.location).await;
         }
         Self::compute_ops_root(&session, &self.op_cfg, watermark.location).await
     }
@@ -257,22 +256,23 @@ where
         Self::decode_operation(&self.op_cfg, location, bytes)
     }
 
-    pub(crate) fn extract_operation_kv(
+    pub(crate) fn inspect_operation_kv<T>(
         &self,
         location: Location<F>,
         bytes: &[u8],
-    ) -> Result<OperationKv, QmdbError>
+        inspect: impl FnOnce(Option<&[u8]>, Option<&[u8]>) -> T,
+    ) -> Result<T, QmdbError>
     where
         V: AsRef<[u8]>,
     {
         let op = Self::decode_operation(&self.op_cfg, location, bytes)?;
-        let key = op.key().map(|k| <K as AsRef<[u8]>>::as_ref(k).to_vec());
-        let value = match &op {
-            ordered::Operation::Update(update) => Some(update.value.as_ref().to_vec()),
-            ordered::Operation::CommitFloor(Some(value), _) => Some(value.as_ref().to_vec()),
+        let key = op.key().map(<K as AsRef<[u8]>>::as_ref);
+        let value: Option<&[u8]> = match &op {
+            ordered::Operation::Update(update) => Some(update.value.as_ref()),
+            ordered::Operation::CommitFloor(Some(value), _) => Some(value.as_ref()),
             ordered::Operation::Delete(_) | ordered::Operation::CommitFloor(None, _) => None,
         };
-        Ok(OperationKv { key, value })
+        Ok(inspect(key, value))
     }
 
     /// Verified contiguous range of operations.
@@ -558,7 +558,7 @@ where
         min_sequence_number: Option<u64>,
     ) -> Result<VerifiedKeyValue<H::Digest, ordered::Operation<F, K, E>, F>, QmdbError> {
         let raw = self.get_raw(tip, key.as_ref(), min_sequence_number).await?;
-        Ok(verified_key_value(raw))
+        Ok(current::verified_key_value(raw))
     }
 
     /// Verified current-state lookups for `keys`: a hit with its value proof,
@@ -573,7 +573,9 @@ where
         Ok(raw
             .into_iter()
             .map(|lookup| match lookup {
-                RawKeyLookupProof::Hit(proof) => VerifiedKeyLookup::Hit(verified_key_value(proof)),
+                RawKeyLookupProof::Hit(proof) => {
+                    VerifiedKeyLookup::Hit(current::verified_key_value(proof))
+                }
                 RawKeyLookupProof::Miss(proof) => VerifiedKeyLookup::Miss {
                     key: proof.requested_key,
                 },
@@ -607,7 +609,7 @@ where
         let entries = raw
             .entries
             .into_iter()
-            .map(verified_key_value)
+            .map(current::verified_key_value)
             .collect::<Vec<_>>();
         let keys = entries
             .iter()
@@ -1043,46 +1045,6 @@ where
         })
     }
 
-    async fn load_current_boundary_metadata(
-        session: &ReadSession,
-        location: Location<F>,
-    ) -> Result<CurrentBoundaryMetadata<H::Digest>, QmdbError> {
-        let Some(bytes) = session.get(&encode_current_meta_key(location)).await? else {
-            return Err(QmdbError::CurrentBoundaryStateMissing {
-                location: location.as_u64(),
-            });
-        };
-        decode_current_boundary_metadata::<H::Digest>(
-            bytes.as_ref(),
-            format!("current boundary metadata at {location}"),
-        )
-    }
-
-    async fn load_current_boundary_root(
-        session: &ReadSession,
-        location: Location<F>,
-    ) -> Result<H::Digest, QmdbError> {
-        Ok(Self::load_current_boundary_metadata(session, location)
-            .await?
-            .root)
-    }
-
-    async fn load_ops_root_witness(
-        session: &ReadSession,
-        location: Location<F>,
-    ) -> Result<Option<OpsRootWitness<F, H::Digest>>, QmdbError> {
-        let Some(bytes) = session.get(&encode_ops_root_witness_key(location)).await? else {
-            return Ok(None);
-        };
-        OpsRootWitness::<F, H::Digest>::decode(Copying(bytes.as_ref()))
-            .map(Some)
-            .map_err(|e| {
-                QmdbError::CorruptData(format!(
-                    "current ops-root witness at {location} decode error: {e}"
-                ))
-            })
-    }
-
     async fn compute_ops_root(
         session: &ReadSession,
         op_cfg: &<ordered::Operation<F, K, E> as commonware_codec::Read>::Cfg,
@@ -1158,16 +1120,6 @@ where
     }
 }
 
-fn verified_key_value<D: commonware_cryptography::Digest, Op, F: Graftable, const N: usize>(
-    raw: RawKeyValueProof<D, Op, N, F>,
-) -> VerifiedKeyValue<D, Op, F> {
-    VerifiedKeyValue {
-        root: raw.root,
-        location: raw.proof.loc,
-        operation: raw.operation,
-    }
-}
-
 /// The operation an ordered exclusion proof proves.
 enum ExclusionTarget<F: Graftable> {
     /// The active key whose span covers the excluded key.
@@ -1177,7 +1129,7 @@ enum ExclusionTarget<F: Graftable> {
 }
 
 impl<F: Graftable> ExclusionTarget<F> {
-    fn location(&self) -> Location<F> {
+    const fn location(&self) -> Location<F> {
         match self {
             Self::Covering { location, .. } => *location,
             Self::Commit(location) => *location,

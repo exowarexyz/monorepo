@@ -2,6 +2,7 @@ pub use crate::service::server::encode::{
     encode_operation_multi_proof, encode_operation_range_proof,
 };
 use crate::{adapter::codec::op_count_for_watermark, QmdbError};
+use bytes::Bytes;
 use commonware_codec::Codec;
 use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::{Sequential, Strategy};
@@ -34,7 +35,7 @@ pub struct OperationRangeCheckpoint<D: Digest, F: Graftable> {
     pub start_location: Location<F>,
     pub pinned_nodes: Vec<D>,
     pub proof: Proof<F, D>,
-    pub encoded_operations: Vec<Vec<u8>>,
+    pub encoded_operations: Vec<Bytes>,
 }
 
 /// Canonical root committing to `ops_root`: the current root when `witness` is
@@ -115,7 +116,7 @@ impl<D: Digest, F: Graftable> OperationRangeCheckpoint<D, F> {
         let extension = crate::adapter::core::extend_merkle_from_pinned_nodes::<F, H, S, _>(
             self.pinned_nodes.clone(),
             self.start_location,
-            self.encoded_operations.iter().map(Vec::as_slice),
+            self.encoded_operations.iter().map(Bytes::as_ref),
             self.proof.inactive_peaks,
             strategy,
         )?;
@@ -145,7 +146,7 @@ pub struct RawBatchMultiProof<D: Digest, F: Graftable> {
     /// Links `ops_root` to the canonical root of a database with current state.
     pub ops_root_witness: Option<OpsRootWitness<F, D>>,
     pub proof: Proof<F, D>,
-    pub operations: Vec<(Location<F>, Vec<u8>)>,
+    pub operations: Vec<(Location<F>, Bytes)>,
 }
 
 impl<D: Digest, F: Graftable> RawBatchMultiProof<D, F> {
@@ -154,7 +155,7 @@ impl<D: Digest, F: Graftable> RawBatchMultiProof<D, F> {
         let elements: Vec<_> = self
             .operations
             .iter()
-            .map(|(loc, bytes)| (bytes.as_slice(), *loc))
+            .map(|(loc, bytes)| (bytes.as_ref(), *loc))
             .collect();
         self.proof
             .verify_multi_inclusion(&hasher, &elements, &self.ops_root)
@@ -191,7 +192,7 @@ pub(crate) fn resolve_range_bounds<F: Family>(
 /// Locations are strictly ascending and at most the proof's watermark.
 pub(crate) enum MultiProofOperations<'a, F: Family> {
     Read(&'a [Location<F>]),
-    Given(Vec<(Location<F>, Vec<u8>)>),
+    Given(Vec<(Location<F>, Bytes)>),
 }
 
 /// Build and self-verify a `RawBatchMultiProof` over the given operations from
@@ -203,7 +204,7 @@ pub(crate) fn build_batch_multi_proof<F, H>(
     watermark: Location<F>,
     root: H::Digest,
     inactive_peaks: usize,
-    operations: Vec<(Location<F>, Vec<u8>)>,
+    operations: Vec<(Location<F>, Bytes)>,
 ) -> Result<RawBatchMultiProof<H::Digest, F>, crate::QmdbError>
 where
     F: Graftable,
@@ -256,7 +257,7 @@ pub(crate) fn build_operation_range_checkpoint<F, H>(
     start_location: Location<F>,
     root: H::Digest,
     inactive_peaks: usize,
-    encoded_operations: Vec<Vec<u8>>,
+    encoded_operations: Vec<Bytes>,
 ) -> Result<OperationRangeCheckpoint<H::Digest, F>, crate::QmdbError>
 where
     F: Graftable,
@@ -517,7 +518,7 @@ mod tests {
                         inactive_peaks: 1,
                         digests: vec![digest, digest],
                     },
-                    encoded_operations: vec![vec![], vec![0, 127, 128, 255]],
+                    encoded_operations: vec![Bytes::new(), Bytes::from_static(&[0, 127, 128, 255])],
                 };
 
                 // Encoding must match the generated protobuf and preserve every field.
@@ -525,12 +526,7 @@ mod tests {
                 let expected = OperationRangeProof {
                     proof: range.proof.encode(),
                     start_location: start,
-                    encoded_operations: range
-                        .encoded_operations
-                        .iter()
-                        .cloned()
-                        .map(Into::into)
-                        .collect(),
+                    encoded_operations: range.encoded_operations.clone(),
                     ops_root: digest.encode(),
                     ops_root_witness: encoded_witness.clone(),
                     pinned_nodes: range.pinned_nodes.iter().map(Encode::encode).collect(),
@@ -575,7 +571,7 @@ mod tests {
                         .iter()
                         .map(|(location, bytes)| MultiProofOperation {
                             location: location.as_u64(),
-                            encoded_operation: bytes.clone().into(),
+                            encoded_operation: bytes.clone(),
                             ..Default::default()
                         })
                         .collect(),

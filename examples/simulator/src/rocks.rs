@@ -2,8 +2,9 @@
 //! RocksDB. A `meta` column family holds the state-floor row, and a `log` column family keeps
 //! one row per commit group: the exact `log.stream.v1.GetResponse` bytes the stream service
 //! serves for that sequence, loaded on demand. Everything is addressed by key: recovery and
-//! pruning never assume which SST files rows live in, so RocksDB is free to place and compact
-//! them however it likes.
+//! pruning never assume which SST files rows live in for their correctness, so RocksDB is free
+//! to place and compact them however it likes. Each log row does get its own file, bracketed
+//! by sentinel keys, so that ingestion and pruning never touch a row's payload.
 //!
 //! Writes bypass the WAL and the memtables: `prepare` coalesces queued requests into commit
 //! groups that each share one sequence number and queues them for a pool of stage workers,
@@ -402,7 +403,7 @@ struct Frontiers {
 }
 
 impl Frontiers {
-    fn new(published: u64) -> Self {
+    const fn new(published: u64) -> Self {
         Self {
             published: AtomicU64::new(published),
             persist: Mutex::new(()),
@@ -413,7 +414,7 @@ impl Frontiers {
 
 // Row backing is charged separately. These charges cover later coalescing,
 // indexed sorting, compact payload owners, and encoded log output.
-fn writer_growth(entries: usize, encoded_len: usize) -> usize {
+const fn writer_growth(entries: usize, encoded_len: usize) -> usize {
     let row = std::mem::size_of::<(Bytes, Bytes)>();
     let sort_row = std::mem::size_of::<usize>();
     encoded_len
@@ -421,7 +422,7 @@ fn writer_growth(entries: usize, encoded_len: usize) -> usize {
         .saturating_add(entries.saturating_mul(2 * row + sort_row + 128))
 }
 
-fn writer_memory(entries: usize, encoded_len: usize, capacity: usize) -> usize {
+const fn writer_memory(entries: usize, encoded_len: usize, capacity: usize) -> usize {
     WRITER_OVERHEAD
         .saturating_add(writer_growth(entries, encoded_len))
         .saturating_add(capacity.saturating_mul(std::mem::size_of::<(Bytes, Bytes)>()))
@@ -470,7 +471,7 @@ struct QueuedWave {
 /// row carries all their rows in arrival order.
 struct PreparedWrite {
     sequence: u64,
-    /// Staged single-row log SST (the group's encoded batch), ready for ingestion.
+    /// Staged log SST (the group's encoded batch and its sentinel keys), ready for ingestion.
     log: PathBuf,
     /// Staged current-state SST (sorted by key, last write per key), ready for ingestion.
     state: PathBuf,
@@ -773,10 +774,10 @@ fn coalesce_queued_write(
     )
 }
 
-/// Stages one wave's two SST files in parallel: the single-row log SST on this thread, the
-/// sorted state SST on a scoped thread. Ingestion later links them into their column
-/// families, so each payload byte reaches the disk exactly once, in its final resting place.
-/// A staging failure is fatal; leftover staged files are removed by the next open.
+/// Stages one wave's two SST files in parallel, the log SST on this thread and the sorted
+/// state SST on a scoped thread. Ingestion later links them into their column families, so
+/// each payload byte reaches the disk exactly once, in its final resting place. A staging
+/// failure is fatal, and leftover staged files are removed by the next open.
 fn stage_wave(ingest_dir: &Path, wave: QueuedWave) -> PreparedWrite {
     let sequence = wave.sequence;
     let rows = &wave.rows;
@@ -807,21 +808,58 @@ fn stage_wave(ingest_dir: &Path, wave: QueuedWave) -> PreparedWrite {
     }
 }
 
-/// Stages the single-row log SST: the group's sequence mapped to the exact encoded batch the
-/// stream service serves. Uncompressed, like the state SST.
+/// Stages the log SST, one row mapping the group's sequence to the exact encoded batch the
+/// stream service serves, bracketed by the sentinel keys. Uncompressed, like the state SST.
 fn stage_log_file(path: &Path, sequence: u64, rows: &[(Bytes, Bytes)]) -> Result<usize, String> {
     let payload = encode_log_value(sequence, rows);
     let mut options = Options::default();
     options.set_compression_type(DBCompressionType::None);
+
+    // Ingestion reads a file's first and last data blocks to learn its key range. With one
+    // block per key, those reads hit the two empty sentinel rows instead of the payload block.
+    let mut table = rocksdb::BlockBasedOptions::default();
+    table.set_block_size(1);
+    options.set_block_based_table_factory(&table);
     let mut writer = SstFileWriter::create(&options);
     writer.open(path).map_err(|e| e.to_string())?;
     writer
+        .put(log_head_sentinel(sequence), b"")
+        .map_err(|e| e.to_string())?;
+    writer
         .put(sequence_log_key(sequence), &payload)
+        .map_err(|e| e.to_string())?;
+    writer
+        .put(log_tail_sentinel(sequence), b"")
         .map_err(|e| e.to_string())?;
 
     // `finish` syncs the file before it is linked into the DB.
     writer.finish().map_err(|e| e.to_string())?;
     Ok(LOG_BATCH_KEY_LEN + payload.len())
+}
+
+/// Empty rows bracket each log row inside its file. Ingestion reads a file's first and last data
+/// blocks, so with the sentinels it never reads the payload block. The head sentinel is the
+/// previous sequence's key with a trailing `1`. It sorts after that sequence's tail sentinel and
+/// before this sequence's row, so files of consecutive sequences stay disjoint, and it is where
+/// `prune_log` ends the tombstone for the sequences below, so the tombstone stays clear of this
+/// file. Readers that iterate rows skip keys of this length, while the oldest-retained lookup
+/// reads the head sentinel on purpose.
+fn log_head_sentinel(sequence: u64) -> [u8; LOG_BATCH_KEY_LEN + 1] {
+    // Sequences start at 1. A wrapped subtraction here would make the prune tombstone end
+    // above every key and erase the whole log.
+    assert!(sequence > 0, "log sequences must start at 1");
+    let mut key = [0u8; LOG_BATCH_KEY_LEN + 1];
+    key[..LOG_BATCH_KEY_LEN].copy_from_slice(&sequence_log_key(sequence - 1));
+    key[LOG_BATCH_KEY_LEN] = 1;
+    key
+}
+
+/// The tail sentinel is this sequence's key with a trailing `0`. It sorts after the row and
+/// before the next sequence's head sentinel.
+fn log_tail_sentinel(sequence: u64) -> [u8; LOG_BATCH_KEY_LEN + 1] {
+    let mut key = [0u8; LOG_BATCH_KEY_LEN + 1];
+    key[..LOG_BATCH_KEY_LEN].copy_from_slice(&sequence_log_key(sequence));
+    key
 }
 
 /// Stages the current-state SST: the group's rows sorted by key, with the last write per key
@@ -947,7 +985,7 @@ fn prepare_ingest_dir(store_path: &Path) -> Result<PathBuf, String> {
 }
 
 /// Encodes a sequence number as a log-CF key that preserves numeric order in RocksDB.
-fn sequence_log_key(sequence: u64) -> [u8; LOG_BATCH_KEY_LEN] {
+const fn sequence_log_key(sequence: u64) -> [u8; LOG_BATCH_KEY_LEN] {
     sequence.to_be_bytes()
 }
 
@@ -1008,7 +1046,7 @@ fn read_retention_policy(db: &DB) -> Result<Option<RetentionPolicy>, String> {
 /// Lowest sequence a retention rule keeps against `frontier`: the exclusive cutoff for log
 /// trimming, so every row below it is evicted and the row at it (if any) is the oldest retained.
 /// Mirrors the floor math the stream service owns end to end.
-fn retention_floor(policy: &RetentionPolicy, frontier: u64) -> u64 {
+const fn retention_floor(policy: &RetentionPolicy, frontier: u64) -> u64 {
     match policy {
         RetentionPolicy::KeepLatest { count } => frontier.saturating_sub(*count).saturating_add(1),
         RetentionPolicy::GreaterThan { threshold } => threshold.saturating_add(1),
@@ -1031,7 +1069,13 @@ fn replay_newest_log_row(db: &DB, floor: u64) -> Result<u64, String> {
     let log_cf = db
         .cf_handle(LOG_CF)
         .expect("log CF must exist (created on open)");
-    let Some(item) = db.iterator_cf(log_cf, IteratorMode::End).next() else {
+
+    // Skip the sentinel rows that bracket each log row.
+    let mut newest = db.iterator_cf(log_cf, IteratorMode::End).filter(|item| {
+        item.as_ref()
+            .map_or(true, |(key, _)| key.len() == LOG_BATCH_KEY_LEN)
+    });
+    let Some(item) = newest.next() else {
         return Ok(0);
     };
     let (key, value) = item.map_err(|e| e.to_string())?;
@@ -1306,8 +1350,14 @@ impl RocksStore {
         // published + 1), and everything at or below it is durable and applied to the state.
         // That also makes this safe against the writer's concurrent, lock-free log ingestion:
         // an in-flight group's row sits above every published frontier this prune could have
-        // loaded. Space is reclaimed by ordinary compaction; nothing assumes which SST files
-        // hold the rows.
+        // loaded. Space is reclaimed by ordinary compaction, and correctness never assumes
+        // which SST files hold the rows.
+        //
+        // The tombstone ends at the first retained sequence's head sentinel, the smallest key
+        // of its file, so it never overlaps a retained file. An overlapping tombstone would
+        // pull that file's payload into the compaction that consumes the tombstone, and at a
+        // cutoff of published + 1 it would overlap the next group's file, forcing a memtable
+        // flush before that ingestion and placing the file in L0 for a compaction to rewrite.
         //
         // Unsynced: batch atomicity means a crash loses the tombstone and the floor raise
         // together, leaving the rows intact and open's re-derivation consistent; the next
@@ -1318,8 +1368,8 @@ impl RocksStore {
         batch.put_cf(self.meta_cf(), SEQ_META_KEY, published.to_le_bytes());
         batch.delete_range_cf(
             self.log_cf(),
-            sequence_log_key(0),
-            sequence_log_key(cutoff_exclusive),
+            &sequence_log_key(0)[..],
+            &log_head_sentinel(cutoff_exclusive)[..],
         );
         self.db.write(batch).map_err(|e| e.to_string())?;
         self.frontiers
@@ -1404,22 +1454,30 @@ impl RocksStore {
     /// Lowest retained log sequence at or below the published frontier, or `None` when the log
     /// holds no such row. Shared by `oldest_retained_batch` and retention enforcement.
     fn oldest_retained_sequence(&self) -> Result<Option<u64>, String> {
-        let mut it = self.db.iterator_cf(self.log_cf(), IteratorMode::Start);
-        match it.next() {
-            None => Ok(None),
-            Some(item) => {
-                let (key, _) = item.map_err(|e| e.to_string())?;
-                let sequence = sequence_from_log_key(key.as_ref())?;
-
-                // Gate on the published frontier: never advertise an oldest batch that
-                // `get_batch` would then hide (a log row can outrun the published frontier while
-                // its group's state ingestion is in flight or has failed).
-                if sequence > self.frontiers.published.load(Ordering::Acquire) {
-                    return Ok(None);
-                }
-                Ok(Some(sequence))
+        // The oldest file's head sentinel is the first live key and names the sequence by
+        // itself, so the row's block stays unread. A raw iterator keeps it that way, since the
+        // wrapping iterator steps onto the row when it yields the sentinel. A bare row key
+        // belongs to a row written without sentinels.
+        let mut it = self.db.raw_iterator_cf(self.log_cf());
+        it.seek_to_first();
+        let Some(key) = it.key() else {
+            it.status().map_err(|e| e.to_string())?;
+            return Ok(None);
+        };
+        let sequence = match key {
+            [below @ .., 1] if below.len() == LOG_BATCH_KEY_LEN => {
+                sequence_from_log_key(below)? + 1
             }
+            key => sequence_from_log_key(key)?,
+        };
+
+        // Gate on the published frontier, so this never advertises an oldest batch that
+        // `get_batch` would then hide. A log row can outrun the published frontier while its
+        // group's state ingestion is in flight or has failed.
+        if sequence > self.frontiers.published.load(Ordering::Acquire) {
+            return Ok(None);
         }
+        Ok(Some(sequence))
     }
 
     /// Persists the retention rule durably, or deletes the row when clearing. A single-admin
@@ -1465,6 +1523,38 @@ impl RocksStore {
         self.store_retention_policy(policy.as_ref())?;
         *self.retention.lock() = policy;
         self.enforce_retention()
+    }
+
+    /// Commits a batch and returns its sequence number. Queued batches may share a sequence.
+    pub async fn put_batch(&self, kvs: Vec<(Bytes, Bytes)>) -> Result<u64, IngestError> {
+        // Dedicated writer threads keep blocking storage writes off Tokio workers.
+        let sequence = self.writer.put_batch(kvs).await?;
+
+        self.enforce_committed_retention(sequence).await;
+        Ok(sequence)
+    }
+
+    /// Applies the active retention rule after a durable commit and logs any failures.
+    async fn enforce_committed_retention(&self, sequence: u64) {
+        // Reporting a trim failure as a write failure could cause the caller to retry the
+        // durable batch under a new sequence number, duplicating it for subscribers. Trimming
+        // is idempotent, so a later append or retention update can retry it.
+        if self.retention.lock().is_some() {
+            let store = self.clone();
+            match tokio::task::spawn_blocking(move || store.enforce_retention()).await {
+                Ok(Ok(_)) => {}
+                Ok(Err(message)) => tracing::warn!(
+                    sequence,
+                    error = %message,
+                    "continuous retention trim failed after commit; batch is durable, retrying on the next append",
+                ),
+                Err(join_error) => tracing::warn!(
+                    sequence,
+                    error = %join_error,
+                    "retention enforcement task failed after commit; batch is durable, retrying on the next append",
+                ),
+            }
+        }
     }
 }
 
@@ -1571,43 +1661,6 @@ impl Ingest for RocksStore {
             .await?;
         self.enforce_committed_retention(sequence).await;
         Ok(sequence)
-    }
-}
-
-// Ingest uses dedicated writer threads so blocking storage writes do not occupy Tokio workers.
-// The writer folds already-queued requests into one commit group that shares a single sequence
-// number and replay-log batch.
-impl RocksStore {
-    /// Direct writes use a separate budget of 256 requests and 1 GiB.
-    /// Mixed direct and HTTP traffic can consume this and the configured HTTP budget.
-    pub async fn put_batch(&self, kvs: Vec<(Bytes, Bytes)>) -> Result<u64, IngestError> {
-        let sequence = self.writer.put_batch(kvs).await?;
-
-        self.enforce_committed_retention(sequence).await;
-        Ok(sequence)
-    }
-
-    async fn enforce_committed_retention(&self, sequence: u64) {
-        // Best-effort: the batch is already durably committed and acked above, so a trim failure
-        // must NOT fail the ingest. Failing here would make the caller re-ingest durable data
-        // under a fresh sequence, duplicating the batch for subscribers. The trim is idempotent,
-        // so the next append (or a `SetRetention`) reapplies it.
-        if self.retention.lock().is_some() {
-            let store = self.clone();
-            match tokio::task::spawn_blocking(move || store.enforce_retention()).await {
-                Ok(Ok(_)) => {}
-                Ok(Err(message)) => tracing::warn!(
-                    sequence,
-                    error = %message,
-                    "continuous retention trim failed after commit; batch is durable, retrying on the next append",
-                ),
-                Err(join_error) => tracing::warn!(
-                    sequence,
-                    error = %join_error,
-                    "retention enforcement task failed after commit; batch is durable, retrying on the next append",
-                ),
-            }
-        }
     }
 }
 
@@ -2520,7 +2573,7 @@ mod tests {
         // the closer would fail against the still-held lock.
         drop(Database {
             db,
-            _closer: Some(Box::new(ReopenOnDrop { path: path.clone() })),
+            _closer: Some(Box::new(ReopenOnDrop { path })),
         });
     }
 
@@ -2916,9 +2969,9 @@ mod tests {
             let first = store.put_batch(large_batch(1)).await.expect("put");
             let second = store.put_batch(large_batch(2)).await.expect("put");
             let third = store.put_batch(large_batch(3)).await.expect("put");
-            // Persist the rule without running its enforcement, leaving rows below the
-            // rule's floor in the log — the state a crash that lost the last (unsynced)
-            // trim leaves behind.
+
+            // Persist the rule without enforcing it to model a crash that lost the last
+            // unsynced trim, leaving rows below the rule's floor in the log.
             store
                 .store_retention_policy(Some(&RetentionPolicy::KeepLatest { count: 1 }))
                 .expect("store policy");
@@ -2958,7 +3011,136 @@ mod tests {
         store
             .db
             .iterator_cf(store.log_cf(), IteratorMode::Start)
+            .filter(|item| {
+                item.as_ref()
+                    .map_or(true, |(key, _)| key.len() == LOG_BATCH_KEY_LEN)
+            })
             .count()
+    }
+
+    /// Readability of each key of `sequence`'s log file in file order (head sentinel, row,
+    /// tail sentinel).
+    fn log_file_keys_present(store: &RocksStore, sequence: u64) -> [bool; 3] {
+        let present = |key: &[u8]| {
+            store
+                .db
+                .get_cf(store.log_cf(), key)
+                .expect("get log key")
+                .is_some()
+        };
+        [
+            present(&log_head_sentinel(sequence)),
+            present(&sequence_log_key(sequence)),
+            present(&log_tail_sentinel(sequence)),
+        ]
+    }
+
+    /// Live SST files of the log column family as (name, level), sorted by name.
+    fn log_files(store: &RocksStore) -> Vec<(String, i32)> {
+        let mut files: Vec<_> = store
+            .db
+            .live_files()
+            .expect("live files")
+            .into_iter()
+            .filter(|file| file.column_family_name == LOG_CF)
+            .map(|file| (file.name, file.level))
+            .collect();
+        files.sort();
+        files
+    }
+
+    #[tokio::test]
+    async fn log_prune_keeps_the_oldest_retained_file_out_of_compaction() {
+        let dir = tempdir().expect("tempdir");
+        let store = RocksStore::open(dir.path(), None).expect("open db");
+        for tag in 1..=3u8 {
+            store.put_batch(large_batch(tag)).await.expect("put");
+        }
+
+        // Cutoff 3 evicts sequence 2's whole file and must leave sequence 3's head sentinel in
+        // place. That sentinel is the retained file's smallest key, so a tombstone reaching it
+        // overlaps the file.
+        store
+            .set_retention(Some(RetentionPolicy::KeepLatest { count: 1 }))
+            .expect("set retention");
+        assert_eq!(log_file_keys_present(&store, 2), [false; 3]);
+        assert_eq!(log_file_keys_present(&store, 3), [true; 3]);
+
+        // The compaction that consumes the tombstone drops the evicted files. The retained file
+        // must not be one of its inputs, since an input is read and rewritten in full.
+        let before = log_files(&store);
+        store.db.flush_cf(store.log_cf()).expect("flush log");
+        store
+            .db
+            .compact_range_cf(store.log_cf(), None::<&[u8]>, None::<&[u8]>);
+        let after = log_files(&store);
+        assert_eq!(after.len(), 1, "only the retained file remains");
+        assert!(
+            before.contains(&after[0]),
+            "the retained log file must survive compaction unchanged"
+        );
+    }
+
+    #[tokio::test]
+    async fn oldest_retained_lookup_reads_only_the_head_sentinel() {
+        let dir = tempdir().expect("tempdir");
+        let store = RocksStore::open(dir.path(), None).expect("open db");
+        for tag in 1..=2u8 {
+            store.put_batch(large_batch(tag)).await.expect("put");
+        }
+
+        // Retention enforcement runs this lookup after every commit, so it must not load any
+        // row's payload block. Ingestion leaves those blocks out of every cache, so loading one
+        // would hit the disk on every commit.
+        rocksdb::perf::set_perf_stats(rocksdb::perf::PerfStatsLevel::EnableCount);
+        let mut perf = rocksdb::perf::PerfContext::default();
+        let mut measured_lookup = || {
+            perf.reset();
+            let oldest = store.oldest_retained_sequence().expect("oldest");
+            let read = perf.metric(rocksdb::perf::PerfMetric::BlockReadByte);
+            assert!(
+                read < 4096,
+                "the oldest-retained lookup must read only sentinel blocks, read {read} bytes"
+            );
+            oldest
+        };
+        assert_eq!(measured_lookup(), Some(1));
+
+        // With a rule installed, the evicted files below the cutoff sit under a tombstone. The
+        // lookup must skip them by their sentinels as well, never through their rows.
+        store
+            .set_retention(Some(RetentionPolicy::KeepLatest { count: 1 }))
+            .expect("set retention");
+        assert_eq!(measured_lookup(), Some(2));
+        rocksdb::perf::set_perf_stats(rocksdb::perf::PerfStatsLevel::Disable);
+    }
+
+    #[tokio::test]
+    async fn drop_all_retention_ingests_log_files_straight_to_the_bottom_level() {
+        let dir = tempdir().expect("tempdir");
+        let store = RocksStore::open(dir.path(), None).expect("open db");
+        store
+            .set_retention(Some(RetentionPolicy::DropAll))
+            .expect("set retention");
+
+        // Each trim ends at the head sentinel of the sequence that is not ingested yet, so the
+        // next group's file never overlaps the memtable. An overlap would force a flush before
+        // the ingestion, place the file in L0, and have compaction rewrite earlier files.
+        let mut seen = Vec::new();
+        for tag in 1..=4u8 {
+            store.put_batch(large_batch(tag)).await.expect("put");
+            let files = log_files(&store);
+            assert_eq!(files.len(), seen.len() + 1, "each put adds one log file");
+            assert!(
+                files.iter().all(|(_, level)| *level == 6),
+                "log files must land in the bottom level: {files:?}"
+            );
+            assert!(
+                seen.iter().all(|file| files.contains(file)),
+                "earlier log files must not be rewritten: {seen:?} vs {files:?}"
+            );
+            seen = files;
+        }
     }
 
     #[tokio::test]

@@ -1813,7 +1813,10 @@ fn build_range_subsection_checks(plan: RangePlan, sample_seed: u64) -> Vec<Range
 mod tests {
     use super::*;
     use crate::keyspace::DEFAULT_KEY_LEN;
-    use axum::Router;
+    use axum::{
+        serve::{Listener, ListenerExt},
+        Router,
+    };
     use connectrpc::{ConnectError, ConnectRpcService, RequestContext, ServiceRequest};
     use exoware_sdk::{
         common::kv::v1::Entry,
@@ -1822,6 +1825,7 @@ mod tests {
             RangeRequest, ReduceRequest, ReduceResponse, Service as QueryService,
             ServiceServer as QueryServiceServer,
         },
+        transport::set_tcp_nodelay,
     };
     use futures::stream;
     use std::collections::HashSet;
@@ -1930,7 +1934,8 @@ mod tests {
         let app = Router::new().fallback_service(connect);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
-            .expect("bind test listener");
+            .expect("bind test listener")
+            .tap_io(set_tcp_nodelay);
         let url = format!(
             "http://{}",
             listener.local_addr().expect("listener address")
@@ -2190,8 +2195,7 @@ mod tests {
         };
         assert!(detail.contains("range page exceeded its 10ms bound"));
         assert!(detail.contains("matched 0 of 1 expected rows"));
-        // The observed page latency is what makes the next CI occurrence data
-        // rather than another argument about the bound.
+        // Include the observed page latency so timeout failures can be diagnosed.
         assert!(
             detail.contains("slowest page"),
             "a stall must report the page latency it observed: {detail}"

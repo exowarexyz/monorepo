@@ -46,7 +46,9 @@ export type SubscribeRequest = Message<"log.stream.v1.SubscribeRequest"> & {
    *
    * Set to N -> the server first replays every retained batch with
    * `sequence_number >= N` in ascending order, then transitions seamlessly
-   * into the live stream. If `N` references a sequence number that has been
+   * into the live stream. No batch below N is delivered, even when N is past
+   * the latest published batch. In that case the stream stays silent until
+   * batch N is published. If `N` references a sequence number that has been
    * evicted from the log, the server returns OUT_OF_RANGE with an
    * `ErrorInfo { reason: "BATCH_EVICTED", metadata: { "oldest_retained": ... } }`
    * detail so callers can decide how to proceed.

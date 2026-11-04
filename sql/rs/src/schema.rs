@@ -1,6 +1,5 @@
-use crate::{codec::*, predicate::*, scan::*, types::*, writer::*, SqlContext};
+use crate::{codec::*, scan::*, types::*, writer::*, SqlContext};
 use async_trait::async_trait;
-use bytes::Bytes;
 use datafusion::{
     arrow::datatypes::{DataType, SchemaRef},
     catalog::Session,
@@ -12,21 +11,24 @@ use datafusion::{
 use exoware_sdk::{kv_codec::decode_stored_row, PrefixedStoreClient};
 use std::sync::Arc;
 
+/// Named tables sharing one storage namespace. Table insertion order assigns family
+/// identifiers in persisted keys and must remain stable when reopening data.
 pub struct KvSchema {
+    /// Namespace-scoped client shared by every table built through this schema.
     client: PrefixedStoreClient,
+    /// Unique table names and shared providers in table-prefix order, with at most
+    /// `MAX_TABLES` entries.
     tables: Vec<(String, Arc<KvTable>)>,
-    next_prefix: u8,
 }
 
 impl KvSchema {
     /// Build a schema over `client`'s namespace prefix. When the Store is
     /// co-tenanted, the caller must pick a prefix disjoint from every co-tenant
     /// so SQL's prefix-bounded scans can't observe another's keys.
-    pub fn new(client: PrefixedStoreClient) -> Self {
+    pub const fn new(client: PrefixedStoreClient) -> Self {
         Self {
             client,
             tables: Vec::new(),
-            next_prefix: 0,
         }
     }
 
@@ -44,11 +46,11 @@ impl KvSchema {
         if self.tables.len() >= MAX_TABLES {
             return Err(format!("too many tables for key layout (max {MAX_TABLES})"));
         }
-        let prefix = self.next_prefix;
+        // Tables are only ever appended, so the next free prefix is the count.
+        let prefix = self.tables.len() as u8;
         let config = KvTableConfig::new(prefix, columns, primary_key_columns, index_specs)?;
         let table = Arc::new(KvTable::new(self.client.clone(), config)?);
         self.tables.push((name, table));
-        self.next_prefix = self.next_prefix.wrapping_add(1);
         Ok(self)
     }
 
@@ -97,11 +99,11 @@ impl KvSchema {
         self.table(name, columns, vec![entity, version], index_specs)
     }
 
-    pub fn table_count(&self) -> usize {
+    pub const fn table_count(&self) -> usize {
         self.tables.len()
     }
 
-    pub(crate) fn client(&self) -> &PrefixedStoreClient {
+    pub(crate) const fn client(&self) -> &PrefixedStoreClient {
         &self.client
     }
 
@@ -212,7 +214,7 @@ impl KvSchema {
         }
         for (idx, previous) in previous_specs.iter().enumerate() {
             let current = &current_specs[idx];
-            if !resolved_index_layout_matches(previous, current) {
+            if previous != current {
                 return Err(DataFusionError::Execution(format!(
                     "table '{table_name}' index evolution must be append-only; index at position {} changed",
                     idx + 1
@@ -237,30 +239,6 @@ impl KvSchema {
         }
 
         let new_specs = &current_specs[previous_specs.len()..];
-        if new_specs.is_empty() {
-            let report = IndexBackfillReport::default();
-            send_backfill_event(
-                progress_tx,
-                IndexBackfillEvent::Started {
-                    table_name: table_name.to_string(),
-                    indexes_backfilled: 0,
-                    row_batch_size: options.row_batch_size,
-                    start_cursor: cursor.clone(),
-                },
-            );
-            send_backfill_event(progress_tx, IndexBackfillEvent::Completed { report });
-            return Ok(report);
-        }
-
-        let mut report = IndexBackfillReport {
-            scanned_rows: 0,
-            indexes_backfilled: new_specs.len(),
-            index_entries_written: 0,
-        };
-        let mut pending_keys = Vec::new();
-        let mut pending_values: Vec<Bytes> = Vec::new();
-        let session = self.client.create_session();
-        let decode_pk_mask = vec![true; model.primary_key_kinds.len()];
         send_backfill_event(
             progress_tx,
             IndexBackfillEvent::Started {
@@ -270,6 +248,20 @@ impl KvSchema {
                 start_cursor: cursor.clone(),
             },
         );
+        if new_specs.is_empty() {
+            let report = IndexBackfillReport::default();
+            send_backfill_event(progress_tx, IndexBackfillEvent::Completed { report });
+            return Ok(report);
+        }
+
+        let mut report = IndexBackfillReport {
+            scanned_rows: 0,
+            indexes_backfilled: new_specs.len(),
+            index_entries_written: 0,
+        };
+        let mut pending_entries = Vec::new();
+        let session = self.client.create_session();
+        let decode_pk_mask = vec![true; model.primary_key_kinds.len()];
 
         let mut stream = session
             .range_stream(&cursor, &full_range.end, usize::MAX, options.row_batch_size)
@@ -319,14 +311,12 @@ impl KvSchema {
                     )?;
                     let index_value =
                         encode_secondary_index_value_from_archived(&archived, model, spec)?;
-                    pending_keys.push(index_key);
-                    pending_values.push(index_value);
+                    pending_entries.push((index_key, index_value));
                     report.index_entries_written += 1;
                 }
 
-                if pending_keys.len() >= INDEX_BACKFILL_FLUSH_ENTRIES {
-                    flush_ingest_batch(&self.client, &mut pending_keys, &mut pending_values)
-                        .await?;
+                if pending_entries.len() >= INDEX_BACKFILL_FLUSH_ENTRIES {
+                    flush_ingest_batch(&self.client, &mut pending_entries).await?;
                 }
             }
             let next_cursor = self
@@ -335,7 +325,7 @@ impl KvSchema {
                 .next_key(last_key)
                 .map_err(|e| DataFusionError::External(Box::new(e)))?
                 .filter(|key| key <= &full_range.end);
-            flush_ingest_batch(&self.client, &mut pending_keys, &mut pending_values).await?;
+            flush_ingest_batch(&self.client, &mut pending_entries).await?;
             send_backfill_event(
                 progress_tx,
                 IndexBackfillEvent::Progress {
@@ -363,18 +353,6 @@ pub(crate) fn send_backfill_event(
     if let Some(tx) = progress_tx {
         let _ = tx.send(event);
     }
-}
-
-pub(crate) fn resolved_index_layout_matches(
-    previous: &ResolvedIndexSpec,
-    current: &ResolvedIndexSpec,
-) -> bool {
-    previous.id == current.id
-        && previous.name == current.name
-        && previous.layout == current.layout
-        && previous.key_columns == current.key_columns
-        && previous.value_column_mask == current.value_column_mask
-        && previous.key_columns_width == current.key_columns_width
 }
 
 #[async_trait]
@@ -421,22 +399,9 @@ impl TableProvider for KvTable {
         filters: &[Expr],
         limit: Option<usize>,
     ) -> DataFusionResult<Arc<dyn ExecutionPlan>> {
-        let predicate = QueryPredicate::from_filters(filters, &self.model);
-        let projected_schema = match projection {
-            Some(proj) => Arc::new(self.model.schema.project(proj)?),
-            None => self.model.schema.clone(),
-        };
-        let mut scan = KvScanExec::new(
-            self.client.clone(),
-            self.model.clone(),
-            self.index_specs.clone(),
-            predicate,
-            limit,
-            projected_schema,
-            projection.cloned(),
-        );
-        scan.set_filters(state, filters)?;
-        Ok(Arc::new(scan))
+        Ok(Arc::new(KvScanExec::try_new(
+            self, state, projection, filters, limit,
+        )?))
     }
 
     async fn insert_into(
@@ -453,12 +418,9 @@ impl TableProvider for KvTable {
             )));
         }
 
-        let sink = KvIngestSink::new(
-            self.client.clone(),
-            self.model.schema.clone(),
-            self.model.clone(),
-            self.index_specs.clone(),
-        );
+        let sink = KvIngestSink {
+            table: self.clone(),
+        };
         Ok(Arc::new(DataSinkExec::new(input, Arc::new(sink), None)))
     }
 }

@@ -139,7 +139,7 @@ pub enum ConnectRequestCompression {
 }
 
 impl ConnectRequestCompression {
-    fn wire_name(self) -> Option<&'static str> {
+    const fn wire_name(self) -> Option<&'static str> {
         match self {
             Self::None => None,
             Self::Zstd { .. } => Some("zstd"),
@@ -148,7 +148,7 @@ impl ConnectRequestCompression {
 }
 
 /// Store client defaults: [`connect_compression_registry`] for codecs;
-/// [`PreferZstdHttpClient`] sets `Accept-Encoding: zstd, gzip` on responses.
+/// [`PreferZstdHttpClient`] reorders the request's accepted encodings to `zstd, gzip`.
 ///
 /// Request body compression uses [`ConnectRequestCompression`] (default none);
 /// connectrpc only supports one request encoding per config (see
@@ -271,7 +271,7 @@ impl StoreKeyPrefix {
 
     /// The raw prefix bytes.
     #[inline]
-    pub fn prefix(&self) -> &Bytes {
+    pub const fn prefix(&self) -> &Bytes {
         self.inner.as_bytes()
     }
 
@@ -284,7 +284,7 @@ impl StoreKeyPrefix {
 
     /// Maximum logical key bytes available under this prefix.
     #[inline]
-    pub fn max_logical_key_len(&self) -> usize {
+    pub const fn max_logical_key_len(&self) -> usize {
         self.inner.max_payload_len()
     }
 
@@ -354,24 +354,24 @@ pub struct PrefixedStoreClient {
 
 impl PrefixedStoreClient {
     /// Pair a physical client with an explicit namespace prefix.
-    pub fn new(client: StoreClient, prefix: StoreKeyPrefix) -> Self {
+    pub const fn new(client: StoreClient, prefix: StoreKeyPrefix) -> Self {
         Self { client, prefix }
     }
 
     /// Pair a physical client with the zero-width [`StoreKeyPrefix::identity`],
     /// so keys pass through untranslated.
-    pub fn empty(client: StoreClient) -> Self {
+    pub const fn empty(client: StoreClient) -> Self {
         Self::new(client, StoreKeyPrefix::identity())
     }
 
     /// The configured key prefix.
-    pub fn key_prefix(&self) -> &StoreKeyPrefix {
+    pub const fn key_prefix(&self) -> &StoreKeyPrefix {
         &self.prefix
     }
 
     /// Borrow the underlying physical transport. Operations performed directly
     /// on it are *not* namespaced; prefer the methods on this type.
-    pub fn client(&self) -> &StoreClient {
+    pub const fn client(&self) -> &StoreClient {
         &self.client
     }
 
@@ -437,27 +437,27 @@ impl PrefixedStoreClient {
     // --- service-grouped accessors -------------------------------------------
 
     /// Typed access to the `log.ingest.v1` service.
-    pub fn ingest(&self) -> Ingest<'_> {
+    pub const fn ingest(&self) -> Ingest<'_> {
         Ingest { c: self }
     }
 
     /// Typed access to the `store.query.v1` service.
-    pub fn query(&self) -> Query<'_> {
+    pub const fn query(&self) -> Query<'_> {
         Query { c: self }
     }
 
     /// Typed access to the `store.prune.v1` service.
-    pub fn prune(&self) -> Prune<'_> {
+    pub const fn prune(&self) -> Prune<'_> {
         Prune { c: self }
     }
 
     /// Typed access to the `log.retention.v1` service.
-    pub fn retention(&self) -> Retention<'_> {
+    pub const fn retention(&self) -> Retention<'_> {
         Retention { c: self }
     }
 
     /// Typed access to the `log.stream.v1` service.
-    pub fn stream(&self) -> Stream<'_> {
+    pub const fn stream(&self) -> Stream<'_> {
         Stream { c: self }
     }
 
@@ -545,16 +545,9 @@ impl PrefixedStoreClient {
     ) -> Result<GetManyStream, ClientError> {
         let mut proto_keys: Vec<Vec<u8>> = Vec::with_capacity(keys.len());
         for key in keys {
-            let encoded = self.encode_store_key(key)?;
-            if !is_valid_key_size(encoded.len()) {
-                return Err(ClientError::WireFormat(format!(
-                    "key length {} is outside valid store key range ({}..={})",
-                    encoded.len(),
-                    keys::MIN_KEY_LEN,
-                    MAX_KEY_LEN
-                )));
-            }
-            proto_keys.push(encoded.to_vec());
+            // `encode_store_key` already rejects keys over `MAX_KEY_LEN`, and
+            // `MIN_KEY_LEN` is 0, so the encoded key is a valid size.
+            proto_keys.push(self.encode_store_key(key)?.to_vec());
         }
         let mut stream = self
             .client
@@ -780,12 +773,14 @@ impl PrefixedStoreClient {
         };
         let mut out = Vec::with_capacity(owned.entries.len());
         for entry in owned.entries {
-            let key = Bytes::from(entry.key);
-            if !self.prefix.matches(&key) {
-                continue;
-            }
+            let key = match self.prefix.decode_key(&Bytes::from(entry.key)) {
+                Ok(key) => key,
+                // Keys outside this prefix belong to other namespaces.
+                Err(StoreKeyPrefixError::PrefixMismatch) => continue,
+                Err(err) => return Err(err.into()),
+            };
             out.push(StoreBatchEntry {
-                key: self.decode_store_key(&key)?,
+                key,
                 value: entry.value,
             });
         }
@@ -879,16 +874,16 @@ impl StoreWriteBatch {
         Self::default()
     }
 
-    pub fn len(&self) -> usize {
+    pub const fn len(&self) -> usize {
         self.entries.len()
     }
 
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
 
     /// Exact uncompressed protobuf `PutRequest` size, including physical key prefixes.
-    pub fn encoded_len(&self) -> usize {
+    pub const fn encoded_len(&self) -> usize {
         self.encoded_len
     }
 
@@ -1092,7 +1087,7 @@ pub struct RangeStream {
 }
 
 impl RangeStream {
-    fn from_connect_stream(
+    const fn from_connect_stream(
         stream: ConnectServerStream<
             ProtoErasedResponseBody,
             exoware_proto::query::RangeFrameView<'static>,
@@ -1113,7 +1108,7 @@ impl RangeStream {
         }
     }
 
-    pub fn final_count(&self) -> Option<usize> {
+    pub const fn final_count(&self) -> Option<usize> {
         self.final_count
     }
 
@@ -1227,7 +1222,7 @@ pub struct GetManyStream {
 }
 
 impl GetManyStream {
-    fn from_connect_stream(
+    const fn from_connect_stream(
         stream: ConnectServerStream<
             ProtoErasedResponseBody,
             exoware_proto::query::GetManyFrameView<'static>,
@@ -1339,7 +1334,7 @@ impl GetManyStream {
 }
 
 impl RangeMode {
-    fn to_proto(self) -> proto_query::TraversalMode {
+    const fn to_proto(self) -> proto_query::TraversalMode {
         match self {
             Self::Forward => proto_query::TraversalMode::TRAVERSAL_MODE_FORWARD,
             Self::Reverse => proto_query::TraversalMode::TRAVERSAL_MODE_REVERSE,
@@ -1442,13 +1437,14 @@ fn is_batch_missing_error(err: &ConnectError) -> bool {
 /// Retry policy for idempotent reads and puts rejected before admission.
 #[derive(Clone, Copy, Debug)]
 pub struct RetryConfig {
+    /// At least 1. The field is private and `with_max_attempts` clamps it.
     max_attempts: usize,
     initial_backoff: Duration,
     max_backoff: Duration,
 }
 
 impl RetryConfig {
-    pub fn standard() -> Self {
+    pub const fn standard() -> Self {
         Self {
             max_attempts: DEFAULT_RETRY_MAX_ATTEMPTS,
             initial_backoff: Duration::from_millis(DEFAULT_RETRY_INITIAL_BACKOFF_MS),
@@ -1465,23 +1461,20 @@ impl RetryConfig {
         self
     }
 
-    pub fn with_initial_backoff(mut self, initial_backoff: Duration) -> Self {
+    pub const fn with_initial_backoff(mut self, initial_backoff: Duration) -> Self {
         self.initial_backoff = initial_backoff;
         self
     }
 
-    pub fn with_max_backoff(mut self, max_backoff: Duration) -> Self {
+    pub const fn with_max_backoff(mut self, max_backoff: Duration) -> Self {
         self.max_backoff = max_backoff;
         self
     }
 
     pub(crate) fn sanitized(self) -> Self {
-        let max_attempts = self.max_attempts.max(1);
-        let max_backoff = self.max_backoff.max(self.initial_backoff);
         Self {
-            max_attempts,
-            initial_backoff: self.initial_backoff,
-            max_backoff,
+            max_backoff: self.max_backoff.max(self.initial_backoff),
+            ..self
         }
     }
 }
@@ -1646,14 +1639,17 @@ impl StoreClientBuilder {
     }
 
     /// Codec for compressing **outgoing** RPC request bodies (default [`ConnectRequestCompression::None`]).
-    pub fn connect_request_compression(mut self, compression: ConnectRequestCompression) -> Self {
+    pub const fn connect_request_compression(
+        mut self,
+        compression: ConnectRequestCompression,
+    ) -> Self {
         self.connect_request_compression = compression;
         self
     }
 
     /// Bounds unary calls and the opening of streaming calls across RPC transports.
     /// Overrides the timeout supplied by [`Self::balanced_http2_transport`].
-    pub fn request_timeout(mut self, timeout: Duration) -> Self {
+    pub const fn request_timeout(mut self, timeout: Duration) -> Self {
         self.request_timeout = Some(timeout);
         self
     }
@@ -1899,7 +1895,7 @@ impl StoreClient {
     }
 
     /// Outgoing Connect request body compression (see [`ConnectRequestCompression`]).
-    pub fn connect_request_compression(&self) -> ConnectRequestCompression {
+    pub const fn connect_request_compression(&self) -> ConnectRequestCompression {
         self.connect_request_compression
     }
 
@@ -2069,7 +2065,7 @@ impl StoreClient {
     ) -> Result<GetManyStream, ClientError> {
         let config = self.streaming_client_config(self.query_uri.clone());
         let client = QueryServiceClient::new(self.connect_http.clone(), config);
-        let max_attempts = self.retry_config.max_attempts.max(1);
+        let max_attempts = self.retry_config.max_attempts;
         let mut attempt = 1usize;
         loop {
             let result = self
@@ -2330,7 +2326,7 @@ impl StoreClient {
         let config = self.streaming_client_config(self.query_uri.clone());
         let client = QueryServiceClient::new(self.connect_http.clone(), config);
         let min_sequence_number = options.min_sequence_number;
-        let max_attempts = self.retry_config.max_attempts.max(1);
+        let max_attempts = self.retry_config.max_attempts;
         let mut attempt = 1usize;
         loop {
             // Server-streaming RPCs cannot transparently recover mid-stream failures,
@@ -2461,7 +2457,7 @@ impl StoreClient {
         F: FnMut() -> Fut,
         Fut: std::future::Future<Output = Result<T, ConnectError>>,
     {
-        let max_attempts = self.retry_config.max_attempts.max(1);
+        let max_attempts = self.retry_config.max_attempts;
         let mut attempt = 1usize;
         loop {
             match make_request().await {
@@ -2829,7 +2825,8 @@ impl<'a> Stream<'a> {
     /// `log.stream.v1.Service.Subscribe` — see `StreamSubscription::next`
     /// for consuming delivered frames. `since_sequence_number = None` starts
     /// live from the next Put; `Some(N)` replays retained batches before
-    /// transitioning to live. An evicted `since` returns a
+    /// transitioning to live, and never delivers a batch below `N`, even when
+    /// `N` is past the latest published batch. An evicted `since` returns a
     /// `ConnectError::out_of_range` carrying `ErrorInfo.reason = "BATCH_EVICTED"`.
     pub async fn subscribe(
         &self,
@@ -3120,7 +3117,7 @@ fn put_retry_delay_for_error(
     ))
 }
 
-fn is_retryable_error(err: &ConnectError) -> bool {
+const fn is_retryable_error(err: &ConnectError) -> bool {
     matches!(
         err.code,
         ErrorCode::Aborted
@@ -3171,6 +3168,7 @@ mod tests {
     use crate::kv_codec::{KvFieldKind, KvPredicate, KvPredicateCheck, KvPredicateConstraint};
     use buffa::Message as _;
     use buffa_types::google::protobuf::Duration as ProtoDuration;
+    use commonware_macros::boxed;
     use connectrpc::{
         compression::{CompressionProvider, GzipProvider},
         error::ErrorDetail,
@@ -3672,17 +3670,17 @@ mod tests {
                 });
                 let payload = match path {
                     "/store.query.v1.Service/Get" => proto_query::GetResponse {
-                        detail: detail.clone().into(),
+                        detail: detail.into(),
                         ..Default::default()
                     }
                     .encode_to_bytes(),
                     "/store.query.v1.Service/GetMany" => proto_query::GetManyFrame {
-                        detail: detail.clone().into(),
+                        detail: detail.into(),
                         ..Default::default()
                     }
                     .encode_to_bytes(),
                     "/store.query.v1.Service/Range" => proto_query::RangeFrame {
-                        detail: detail.clone().into(),
+                        detail: detail.into(),
                         ..Default::default()
                     }
                     .encode_to_bytes(),
@@ -3711,6 +3709,7 @@ mod tests {
         }
     }
 
+    #[boxed]
     async fn assert_streaming_deadline<T>(
         future: impl std::future::Future<Output = Result<T, ClientError>>,
     ) {
@@ -4054,7 +4053,9 @@ mod tests {
             headers.get("content-type").unwrap(),
             "application/connect+proto"
         );
-        assert_eq!(headers.get(ACCEPT_ENCODING).unwrap(), "zstd, gzip");
+        // Streams negotiate only through Connect-Accept-Encoding, and the transport adds no
+        // encodings the client didn't list.
+        assert!(headers.get(ACCEPT_ENCODING).is_none());
         let stream_encoding = connectrpc::Protocol::Connect.accept_encoding_header();
         assert_eq!(headers.get(stream_encoding).unwrap(), "zstd, gzip");
         assert_eq!(headers.get_all(stream_encoding).iter().count(), 1);
@@ -4732,7 +4733,7 @@ mod tests {
         let client = PrefixedStoreClient::empty(StoreClient::new("http://localhost:8080/"));
         for parent in [
             ReadSession::monotonic(client.clone(), None),
-            ReadSession::fixed(client.clone(), None),
+            ReadSession::fixed(client, None),
         ] {
             let zero = parent.with_min_sequence_number(0);
             let stronger = zero.with_min_sequence_number(7);
@@ -5040,7 +5041,7 @@ mod tests {
         assert_eq!(merged.prefix.as_ref(), &[0x05, 0x06, 0x07]);
 
         // Reconstruct the codec EXACTLY as apply_key_prune_policy does.
-        let codec = Prefix::new(merged.prefix.clone()).unwrap();
+        let codec = Prefix::new(merged.prefix).unwrap();
 
         // Round-trip a real key through the reconstructed codec.
         let payload = [0xAA, 0xBB, 0xCC];

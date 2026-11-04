@@ -32,6 +32,7 @@ use crate::{
     types::{IndexLayout, ResolvedIndexSpec, TableModel},
     SqlContext,
 };
+#[cfg(test)]
 use bytes::Bytes;
 use connectrpc::{ConnectError, ConnectRpcService, RequestContext as Context, ServiceRequest};
 use datafusion::{
@@ -53,29 +54,35 @@ use datafusion::{
     prelude::SessionContext as DataFusionContext,
 };
 use exoware_sdk::{
-    keys::Key,
     kv_codec::{decode_stored_row, Utf8},
     selector::Selector,
     stream_filter::StreamFilter,
-    PrefixedStoreClient, ReadSession, StoreBatch, StreamSubscription,
+    PrefixedStoreClient, ReadSession, StoreBatch, StoreBatchEntry, StreamSubscription,
 };
 use futures::{
     stream::{self, Stream},
     FutureExt, TryStreamExt,
 };
-use std::{collections::HashMap, future::Future, panic::AssertUnwindSafe, pin::Pin, sync::Arc};
+#[cfg(test)]
+use std::collections::HashMap;
+use std::{future::Future, panic::AssertUnwindSafe, pin::Pin, sync::Arc};
 
+/// Size limit for Connect request bodies and messages on the SQL service.
 const MAX_CONNECTRPC_BODY_BYTES: usize = 256 * 1024 * 1024;
 
 type SubscribeStream = Pin<Box<dyn Stream<Item = Result<SubscribeResponse, ConnectError>> + Send>>;
 
-/// One registered table's streaming-decode state.
+/// Table metadata and column access for decoding subscription batches.
 #[derive(Clone)]
 struct TableStream {
+    /// Table layout used to decode base rows.
     model: Arc<TableModel>,
-    schema: SchemaRef,
+    /// Decode plan that projects every column with no predicate.
     access_plan: Arc<ScanAccessPlan>,
+    /// Subscription selector matching every key under the table's primary-key prefix, so
+    /// secondary index entries are excluded.
     selector: Selector,
+    /// Secondary index specs reported by the `Tables` RPC.
     indexes: Arc<Vec<ResolvedIndexSpec>>,
 }
 
@@ -92,7 +99,6 @@ impl TableStream {
             payload_regex: Utf8::from("(?s-u).*"),
         };
         Self {
-            schema: model.schema.clone(),
             access_plan,
             model,
             selector,
@@ -100,9 +106,9 @@ impl TableStream {
         }
     }
 
-    fn decode_batch(&self, entries: &[(Key, Bytes)]) -> DataFusionResult<RecordBatch> {
+    fn decode_batch(&self, entries: &[StoreBatchEntry]) -> DataFusionResult<RecordBatch> {
         let mut builder = ProjectedBatchBuilder::from_access_plan(&self.model, &self.access_plan);
-        for (key, value) in entries {
+        for StoreBatchEntry { key, value } in entries {
             if !self.model.primary_key_prefix.matches(key) {
                 continue;
             }
@@ -122,7 +128,7 @@ impl TableStream {
             }
             let _ = builder.append_archived_row(&pk_values, &archived)?;
         }
-        builder.finish(&self.schema)
+        builder.finish(&self.model.schema)
     }
 }
 
@@ -131,11 +137,14 @@ impl TableStream {
 /// Construct with [`SqlServer::new`], pass to [`sql_connect_stack`] to mount
 /// on an axum router.
 pub struct SqlServer {
+    /// Shared context for all requests. `Query` reads through a per-request copy with its own
+    /// read session, while session commands such as `SET` and `CREATE FUNCTION` run here and
+    /// persist across requests.
     ctx: Arc<SqlContext>,
-    streams: HashMap<String, TableStream>,
-    // Registration order, preserved for the `Tables` RPC so clients see
-    // tables in the same order the operator declared them.
-    table_names: Vec<String>,
+    /// Unique table names and subscription state in schema declaration order. A linear lookup
+    /// suffices because a schema holds at most `MAX_TABLES` tables.
+    streams: Vec<(String, TableStream)>,
+    /// Store client for subscriptions and per-query read sessions.
     store: PrefixedStoreClient,
 }
 
@@ -145,21 +154,21 @@ impl SqlServer {
     /// scalar predicate compilation on `Subscribe`.
     pub fn new(schema: KvSchema) -> DataFusionResult<Self> {
         let store = schema.client().clone();
-        let mut streams = HashMap::with_capacity(schema.tables().len());
-        let mut table_names = Vec::with_capacity(schema.tables().len());
-        for (name, table) in schema.tables() {
-            streams.insert(
-                name.clone(),
-                TableStream::new(table.model.clone(), table.index_specs.clone()),
-            );
-            table_names.push(name.clone());
-        }
+        let streams = schema
+            .tables()
+            .iter()
+            .map(|(name, table)| {
+                (
+                    name.clone(),
+                    TableStream::new(table.model.clone(), table.index_specs.clone()),
+                )
+            })
+            .collect();
         let ctx = SqlContext::new(store.clone());
         ctx.register_schema(schema)?;
         Ok(Self {
             ctx: Arc::new(ctx),
             streams,
-            table_names,
             store,
         })
     }
@@ -169,19 +178,20 @@ impl SqlServer {
         &self.ctx
     }
 
-    #[allow(clippy::result_large_err)]
     fn stream(&self, table: &str) -> Result<&TableStream, ConnectError> {
         self.streams
-            .get(table)
+            .iter()
+            .find(|(name, _)| name == table)
+            .map(|(_, stream)| stream)
             .ok_or_else(|| ConnectError::not_found(format!("unknown table '{table}'")))
     }
 
     fn describe_tables(&self) -> Vec<ProtoTable> {
-        self.table_names
+        self.streams
             .iter()
-            .filter_map(|name| {
-                let stream = self.streams.get(name)?;
+            .map(|(name, stream)| {
                 let columns = stream
+                    .model
                     .schema
                     .fields()
                     .iter()
@@ -223,19 +233,19 @@ impl SqlServer {
                         }
                     })
                     .collect();
-                Some(ProtoTable {
+                ProtoTable {
                     name: name.clone(),
                     columns,
                     primary_key_columns,
                     indexes,
                     ..Default::default()
-                })
+                }
             })
             .collect()
     }
 }
 
-fn proto_index_layout(layout: IndexLayout) -> ProtoIndexLayout {
+const fn proto_index_layout(layout: IndexLayout) -> ProtoIndexLayout {
     match layout {
         IndexLayout::Lexicographic => ProtoIndexLayout::INDEX_LAYOUT_LEXICOGRAPHIC,
         IndexLayout::ZOrder => ProtoIndexLayout::INDEX_LAYOUT_Z_ORDER,
@@ -257,11 +267,12 @@ pub fn sql_connect_stack(server: Arc<SqlServer>) -> ConnectRpcService<ServiceSer
 /// Connect handler implementing `sql.v1.Service`.
 #[derive(Clone)]
 pub struct SqlConnect {
+    /// Server state shared by every RPC.
     server: Arc<SqlServer>,
 }
 
 impl SqlConnect {
-    pub fn new(server: Arc<SqlServer>) -> Self {
+    pub const fn new(server: Arc<SqlServer>) -> Self {
         Self { server }
     }
 }
@@ -280,7 +291,7 @@ impl Service for SqlConnect {
             let stream = server.stream(&table_name)?.clone();
             let predicate = compile_subscription_predicate(
                 server.ctx.datafusion(),
-                &stream.schema,
+                &stream.model.schema,
                 &table_name,
                 &where_sql,
             )
@@ -390,12 +401,21 @@ type BatchEvaluator =
 type SubscriptionStream = Pin<Box<dyn Stream<Item = Result<StoreBatch, ConnectError>> + Send>>;
 type SubscriptionEvent = Option<Result<StoreBatch, ConnectError>>;
 
+/// Store batches a single poll may evaluate without producing a response before it yields.
 const MAX_FILTERED_FRAMES_PER_POLL: usize = 16;
 
+/// Subscription stream that yields one response for each Store batch with matching rows.
+///
+/// Batches without matching rows produce nothing. The stream ends after the first error.
 struct BatchPredicateStream {
+    /// Store batches from the subscription.
     upstream: SubscriptionStream,
+    /// Decodes and filters one batch, returning `None` when no rows match.
     evaluator: BatchEvaluator,
+    /// Event saved by the look-ahead poll that registers demand before evaluating the current
+    /// batch. `Some(None)` records the end of the upstream.
     staged: Option<SubscriptionEvent>,
+    /// Set once the stream has ended or yielded an error. Later polls return `None`.
     done: bool,
 }
 
@@ -406,15 +426,7 @@ impl BatchPredicateStream {
         predicate: Option<Arc<dyn PhysicalExpr>>,
     ) -> Self {
         let upstream = subscription_stream(sub);
-        let evaluator = move |frame: StoreBatch| {
-            let sequence_number = frame.sequence_number;
-            let entries = frame
-                .entries
-                .into_iter()
-                .map(|entry| (entry.key, entry.value))
-                .collect();
-            evaluate_batch(&state, predicate.as_ref(), sequence_number, entries)
-        };
+        let evaluator = move |frame| evaluate_batch(&state, predicate.as_ref(), frame);
         Self::with_evaluator(upstream, evaluator)
     }
 
@@ -498,11 +510,10 @@ impl Stream for BatchPredicateStream {
 fn evaluate_batch(
     state: &TableStream,
     predicate: Option<&Arc<dyn PhysicalExpr>>,
-    sequence_number: u64,
-    entries: Vec<(Key, Bytes)>,
+    frame: StoreBatch,
 ) -> Result<Option<SubscribeResponse>, ConnectError> {
     let batch = state
-        .decode_batch(&entries)
+        .decode_batch(&frame.entries)
         .map_err(datafusion_error_to_connect)?;
     if batch.num_rows() == 0 {
         return Ok(None);
@@ -526,7 +537,7 @@ fn evaluate_batch(
         .map_err(|error| datafusion_error_to_connect(error.into()))?
         .into();
     Ok(Some(SubscribeResponse {
-        sequence_number,
+        sequence_number: frame.sequence_number,
         results,
         ..Default::default()
     }))
@@ -620,6 +631,7 @@ fn client_error_to_connect(err: &exoware_sdk::ClientError) -> ConnectError {
 mod tests {
     use super::*;
     use crate::TableColumnConfig;
+    use axum::serve::{Listener, ListenerExt};
     use buffa::Message;
     use datafusion::{
         arrow::{
@@ -635,7 +647,7 @@ mod tests {
         datasource::MemTable,
         logical_expr::{create_udf, ColumnarValue, Volatility},
     };
-    use exoware_sdk::StoreClient;
+    use exoware_sdk::{transport::set_tcp_nodelay, StoreClient};
     use futures::{FutureExt, StreamExt};
     use std::{
         collections::VecDeque,
@@ -644,6 +656,46 @@ mod tests {
             Mutex,
         },
     };
+
+    #[test]
+    fn table_metadata_and_subscription_lookup_preserve_schema_order() {
+        // Tables are declared out of name order, each with a column named after the table, so
+        // a lookup that returns the wrong table is detectable.
+        let mut schema = KvSchema::new(PrefixedStoreClient::empty(StoreClient::new(
+            "http://127.0.0.1:1",
+        )));
+        let names = ["zeta", "alpha", "middle"];
+        for name in names {
+            schema = schema
+                .table(
+                    name,
+                    vec![TableColumnConfig::new(name, DataType::Int64, false)],
+                    vec![name.into()],
+                    vec![],
+                )
+                .unwrap();
+        }
+
+        // The `Tables` RPC lists tables in declaration order.
+        let server = SqlServer::new(schema).unwrap();
+        let tables = server.describe_tables();
+        assert_eq!(
+            tables
+                .iter()
+                .map(|table| table.name.as_str())
+                .collect::<Vec<_>>(),
+            names
+        );
+
+        // Each declared name resolves to its own table's metadata and subscription state, and
+        // an undeclared name does not resolve.
+        for (table, name) in tables.iter().zip(names) {
+            assert_eq!(table.columns[0].name, name);
+            assert_eq!(table.primary_key_columns, [0]);
+            assert_eq!(server.stream(name).unwrap().model.columns[0].name, name);
+        }
+        assert!(server.stream("unknown").is_err());
+    }
 
     #[derive(Clone)]
     struct ObservedRangeTransport {
@@ -790,7 +842,10 @@ mod tests {
                 )
                 .unwrap();
             let server = Arc::new(SqlServer::new(schema).unwrap());
-            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .unwrap()
+                .tap_io(set_tcp_nodelay);
             let address = listener.local_addr().unwrap();
             let app = axum::Router::new().fallback_service(sql_connect_stack(server));
             let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
@@ -866,7 +921,10 @@ mod tests {
                 ),
             )
             .unwrap();
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .unwrap()
+            .tap_io(set_tcp_nodelay);
         let address = listener.local_addr().unwrap();
         let app = axum::Router::new().fallback_service(sql_connect_stack(server.clone()));
         let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
@@ -1085,7 +1143,10 @@ mod tests {
         .unwrap();
         server.ctx = Arc::new(ctx);
         let server = Arc::new(server);
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .unwrap()
+            .tap_io(set_tcp_nodelay);
         let address = listener.local_addr().unwrap();
         let app = axum::Router::new().fallback_service(sql_connect_stack(server));
         let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
@@ -1530,7 +1591,11 @@ mod tests {
         let table = &schema.tables()[0].1;
         let state = TableStream::new(table.model.clone(), table.index_specs.clone());
         let entries =
-            crate::writer::encode_insert_entries(&batch, &table.model, &table.index_specs).unwrap();
+            crate::writer::encode_insert_entries(&batch, &table.model, &table.index_specs)
+                .unwrap()
+                .into_iter()
+                .map(|(key, value)| StoreBatchEntry { key, value })
+                .collect();
         let predicate = compile_subscription_predicate(
             &ctx,
             &batch.schema(),
@@ -1538,12 +1603,19 @@ mod tests {
             "TRY_CAST(status AS BIGINT) IS NULL",
         )
         .unwrap();
-        let response = evaluate_batch(&state, predicate.as_ref(), 42, entries)
-            .unwrap()
-            .unwrap();
+        let response = evaluate_batch(
+            &state,
+            predicate.as_ref(),
+            StoreBatch {
+                sequence_number: 42,
+                entries,
+            },
+        )
+        .unwrap()
+        .unwrap();
         assert_eq!(response.sequence_number, 42);
         let reader = StreamReader::try_new(response.results.as_ref(), None).unwrap();
-        assert_eq!(reader.schema(), state.schema);
+        assert_eq!(reader.schema(), state.model.schema);
         let batches = reader.collect::<Result<Vec<_>, _>>().unwrap();
         assert_eq!(batches.len(), 1);
         let ids = batches[0]

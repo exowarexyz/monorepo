@@ -103,7 +103,7 @@ mod variable_fixed_keys_variable_values {
     pub fn value(index: u8) -> Value {
         variable_variable_keys_variable_values::value(index)
     }
-    pub fn key_cfg() -> <Key as Read>::Cfg {}
+    pub const fn key_cfg() -> <Key as Read>::Cfg {}
     pub fn value_cfg() -> <Value as Read>::Cfg {
         byte_cfg()
     }
@@ -123,13 +123,13 @@ mod fixed_fixed_keys_fixed_values {
     pub fn key(index: usize) -> Key {
         fixed_key(index)
     }
-    pub fn value(index: u8) -> Value {
+    pub const fn value(index: u8) -> Value {
         FixedBytes::new([index; 32])
     }
-    pub fn key_cfg() -> <Key as Read>::Cfg {}
-    pub fn value_cfg() -> <Value as Read>::Cfg {}
-    pub fn op_cfg<F: Graftable>() -> <Operation<F, Key, Encoding> as Read>::Cfg {}
-    pub fn update_cfg() -> <ordered::Update<Key, Encoding> as Read>::Cfg {}
+    pub const fn key_cfg() -> <Key as Read>::Cfg {}
+    pub const fn value_cfg() -> <Value as Read>::Cfg {}
+    pub const fn op_cfg<F: Graftable>() -> <Operation<F, Key, Encoding> as Read>::Cfg {}
+    pub const fn update_cfg() -> <ordered::Update<Key, Encoding> as Read>::Cfg {}
 }
 
 mod variable_variable_keys_fixed_values {
@@ -140,13 +140,13 @@ mod variable_variable_keys_fixed_values {
     pub fn key(index: usize) -> Key {
         KEY_BYTES[index].to_vec()
     }
-    pub fn value(index: u8) -> Value {
+    pub const fn value(index: u8) -> Value {
         FixedBytes::new([index; 32])
     }
     pub fn key_cfg() -> <Key as Read>::Cfg {
         byte_cfg()
     }
-    pub fn value_cfg() -> <Value as Read>::Cfg {}
+    pub const fn value_cfg() -> <Value as Read>::Cfg {}
     pub fn op_cfg<F: Graftable>() -> <Operation<F, Key, Encoding> as Read>::Cfg {
         (key_cfg(), value_cfg())
     }
@@ -163,15 +163,15 @@ mod variable_fixed_keys_fixed_values {
     pub fn key(index: usize) -> Key {
         fixed_key(index)
     }
-    pub fn value(index: u8) -> Value {
+    pub const fn value(index: u8) -> Value {
         FixedBytes::new([index; 32])
     }
-    pub fn key_cfg() -> <Key as Read>::Cfg {}
-    pub fn value_cfg() -> <Value as Read>::Cfg {}
-    pub fn op_cfg<F: Graftable>() -> <Operation<F, Key, Encoding> as Read>::Cfg {
+    pub const fn key_cfg() -> <Key as Read>::Cfg {}
+    pub const fn value_cfg() -> <Value as Read>::Cfg {}
+    pub const fn op_cfg<F: Graftable>() -> <Operation<F, Key, Encoding> as Read>::Cfg {
         (key_cfg(), value_cfg())
     }
-    pub fn update_cfg() -> <ordered::Update<Key, Encoding> as Read>::Cfg {
+    pub const fn update_cfg() -> <ordered::Update<Key, Encoding> as Read>::Cfg {
         (key_cfg(), value_cfg())
     }
 }
@@ -459,7 +459,7 @@ async fn verify_snapshots<F, K, V, E>(
                     }
                 };
                 let request = GetRequest {
-                    key: all_keys[0].encode().to_vec(),
+                    key: all_keys[0].encode(),
                     tip: *tip,
                     ..Default::default()
                 };
@@ -480,9 +480,7 @@ async fn verify_snapshots<F, K, V, E>(
 
                 let indices = [3, 1, 0];
                 let request = GetManyRequest {
-                    keys: indices
-                        .map(|index| all_keys[index].encode().to_vec())
-                        .to_vec(),
+                    keys: indices.map(|index| all_keys[index].encode()).to_vec(),
                     tip: *tip,
                     ..Default::default()
                 };
@@ -507,8 +505,8 @@ async fn verify_snapshots<F, K, V, E>(
                     ("range_empty", 1, Some(2), 2),
                 ] {
                     let request = GetRangeRequest {
-                        start_key: all_keys[start].encode().to_vec(),
-                        end_key: end.map(|index| all_keys[index].encode().to_vec()),
+                        start_key: all_keys[start].encode(),
+                        end_key: end.map(|index| all_keys[index].encode()),
                         limit,
                         tip: *tip,
                         ..Default::default()

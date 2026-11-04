@@ -9,6 +9,9 @@ homepage.workspace = true
 repository = "https://github.com/exowarexyz/monorepo/tree/main/server"
 documentation = "https://docs.rs/exoware-server"
 
+[lints]
+workspace = true
+
 [dependencies]
 axum = { workspace = true }
 bytes = { workspace = true }

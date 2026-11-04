@@ -36,7 +36,6 @@ use exoware_proto::{
             SubscribeResponse,
         },
     },
-    parse_range_traversal_direction,
     prune::{PruneResponse, Service as PruneApi, ServiceServer as PruneServiceServer},
     query::{
         Detail, GetManyEntry, GetManyFrame, GetResponse, RangeFrame, ReduceResponse,
@@ -221,7 +220,7 @@ where
         }
     }
 
-    pub fn with_ingest_limits(mut self, limits: IngestLimits) -> Self {
+    pub const fn with_ingest_limits(mut self, limits: IngestLimits) -> Self {
         self.ingest_limits = limits;
         self
     }
@@ -280,7 +279,7 @@ where
         }
     }
 
-    pub fn with_limits(mut self, limits: IngestLimits) -> Self {
+    pub const fn with_limits(mut self, limits: IngestLimits) -> Self {
         self.limits = limits;
         self
     }
@@ -368,7 +367,7 @@ impl<P> PruneState<P>
 where
     P: Prune,
 {
-    pub fn new(prune: Arc<P>) -> Self {
+    pub const fn new(prune: Arc<P>) -> Self {
         Self { prune }
     }
 }
@@ -399,7 +398,7 @@ impl<R> RetentionState<R>
 where
     R: Retention,
 {
-    pub fn new(retention: Arc<R>) -> Self {
+    pub const fn new(retention: Arc<R>) -> Self {
         Self { retention }
     }
 }
@@ -608,7 +607,7 @@ where
         _ctx: Context,
         request: ServiceRequest<'_, exoware_proto::store::query::v1::RangeRequest>,
     ) -> connectrpc::ServiceResult<connectrpc::ServiceStream<RangeFrame>> {
-        validate::validate_range_request(request.view())?;
+        let direction = validate::validate_range_request(request.view())?;
         ensure_min_sequence_number(
             request.min_sequence_number,
             self.state.query.current_sequence(),
@@ -618,11 +617,7 @@ where
         let end_key: Key = wire.slice_ref(request.end);
         let limit = request.limit.map(|v| v as usize).unwrap_or(usize::MAX);
         let batch_size = (request.batch_size as usize).min(RANGE_STREAM_MAX_FRAME_ROWS);
-        let forward = match parse_range_traversal_direction(request.mode) {
-            Ok(RangeTraversalDirection::Forward) => true,
-            Ok(RangeTraversalDirection::Reverse) => false,
-            Err(e) => return Err(ConnectError::internal(format!("traversal mode: {e:?}"))),
-        };
+        let forward = direction == RangeTraversalDirection::Forward;
         let result = self
             .state
             .query
@@ -795,7 +790,7 @@ where
     ) -> connectrpc::ServiceResult<PruneResponse> {
         validate::validate_prune_request(request.view())?;
         let document = exoware_proto::parse_and_validate_policy_document(request.view())
-            .map_err(|e| ConnectError::invalid_argument(e.to_string()))?;
+            .map_err(ConnectError::invalid_argument)?;
 
         self.state
             .prune
@@ -1118,13 +1113,15 @@ where
             }
             _ => None,
         };
+        // Live delivery starts after the replayed range and never below the
+        // cursor. A cursor past the frontier waits for that batch, and the
+        // batches between the frontier and the cursor are never read.
+        let live_start = replay_bound
+            .checked_add(1)
+            .map(|next| next.max(since.unwrap_or(0)));
         let live = ordered_batch_stream(
             self.state.log.clone(),
-            live_sequence_stream(
-                self.state.notifier.clone(),
-                live_notify,
-                replay_bound.checked_add(1),
-            ),
+            live_sequence_stream(self.state.notifier.clone(), live_notify, live_start),
             None,
             matchers,
         );
@@ -1520,7 +1517,7 @@ mod tests {
         ) {
             let mut state = self.state.lock().expect("lock");
             state.current_sequence = state.current_sequence.max(sequence_number);
-            state.batches.insert(sequence_number, Some(kvs.clone()));
+            state.batches.insert(sequence_number, Some(kvs));
             drop(state);
             hub.publish(sequence_number);
         }
@@ -4187,7 +4184,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn subscribe_past_end_reads_only_future_live_batches() {
+    async fn subscribe_past_end_starts_at_the_cursor() {
         let engine = Arc::new(FakeEngine::default());
         engine.set_current_sequence(5);
         for seq in 1..=5 {
@@ -4195,26 +4192,34 @@ mod tests {
         }
         let state = AppState::new(engine.clone());
         let connect = StreamConnect::new(state.clone());
-        let mut stream = subscribe_stream(&connect, Some(15))
+        let mut stream = subscribe_stream(&connect, Some(8))
             .await
             .expect("subscribe");
 
-        assert!(
-            tokio::time::timeout(Duration::from_millis(200), stream.next())
+        // Every published batch matches, so only the cursor keeps 6 and 7 off
+        // the stream. It stays silent until the frontier reaches the cursor.
+        let publish = |seq: u64| {
+            engine.publish_live(
+                state.stream.clone(),
+                seq,
+                vec![matching_kv(b"live", &[seq as u8])],
+            )
+        };
+        publish(6);
+        publish(7);
+        assert!(futures::poll!(stream.next()).is_pending());
+        publish(8);
+        publish(9);
+        for expected in 8..=9 {
+            let frame = tokio::time::timeout(Duration::from_secs(1), stream.next())
                 .await
-                .is_err(),
-            "past-end cursor should not replay synthetic or historical frames",
-        );
-
-        engine.publish_live(state.stream.clone(), 6, vec![matching_kv(b"live", b"n")]);
-        let frame = tokio::time::timeout(Duration::from_secs(1), stream.next())
-            .await
-            .expect("stream should yield")
-            .expect("frame should exist")
-            .expect("frame should be ok");
-        assert_eq!(frame.sequence_number, 6);
-        assert_eq!(frame.entries.len(), 1);
-        assert_eq!(frame.entries[0].value.as_ref(), b"n");
+                .expect("stream should yield")
+                .expect("frame should exist")
+                .expect("frame should be ok");
+            assert_eq!(frame.sequence_number, expected);
+            assert_eq!(frame.entries.len(), 1);
+            assert_eq!(frame.entries[0].value.as_ref(), &[expected as u8]);
+        }
     }
 
     #[tokio::test]

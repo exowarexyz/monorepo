@@ -28,15 +28,15 @@ impl PreparedUpload {
         Self::default()
     }
 
-    pub fn len(&self) -> usize {
+    pub const fn len(&self) -> usize {
         self.entries.len()
     }
 
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
 
-    pub fn summary(&self) -> UploadSummary {
+    pub const fn summary(&self) -> UploadSummary {
         self.summary
     }
 
@@ -44,7 +44,7 @@ impl PreparedUpload {
         &self.entries
     }
 
-    pub fn extend(&mut self, other: PreparedUpload) {
+    pub fn extend(&mut self, other: Self) {
         self.summary.headers += other.summary.headers;
         self.summary.blocks += other.summary.blocks;
         self.summary.notarizations += other.summary.notarizations;

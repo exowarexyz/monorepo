@@ -18,6 +18,7 @@ use std::sync::Arc;
 /// A SQL context whose Store reads share a read session across statements.
 #[derive(Clone)]
 pub struct SqlContext {
+    /// DataFusion context whose session config holds the shared `ReadSession` as an extension.
     inner: DataFusionContext,
 }
 
@@ -37,10 +38,11 @@ impl SqlContext {
     }
 
     /// Accesses DataFusion functionality beyond the SQL context's convenience methods.
-    pub fn datafusion(&self) -> &DataFusionContext {
+    pub const fn datafusion(&self) -> &DataFusionContext {
         &self.inner
     }
 
+    /// Returns the read session that Store-backed tables in this context read through.
     pub fn read_session(&self) -> Arc<ReadSession> {
         self.inner
             .copied_config()
@@ -115,7 +117,11 @@ impl SqlContext {
 
 /// Configures a SQL context, installing its read session when built.
 pub struct SqlContextBuilder {
+    /// DataFusion state being configured, starting with the Store aggregate pushdown rule and
+    /// query planner.
     state: SessionStateBuilder,
+    /// Read session installed when the context is built. Defaults to a monotonic session with
+    /// no initial floor.
     session: ReadSession,
 }
 

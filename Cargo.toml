@@ -19,14 +19,25 @@ edition = "2021"
 license = "MIT OR Apache-2.0"
 homepage = "https://exoware.xyz"
 
+[workspace.lints.rust]
+rust_2018_idioms = { level = "deny", priority = -1 }
+unused_must_use = "deny"
+
+[workspace.lints.clippy]
+redundant_clone = "warn"
+undocumented_unsafe_blocks = "deny"
+use_self = "warn"
+missing_const_for_fn = "warn"
+multiple_inherent_impl = "deny"
+unused_async = "warn"
+large_futures = "warn"
+
 [workspace.dependencies]
 crossbeam-utils = "0.8.22"
 exoware-qmdb = { version = "2026.9.0", path = "qmdb/rs" }
 exoware-sdk = { version = "2026.9.0", path = "sdk/rs" }
 exoware-server = { version = "2026.9.0", path = "server" }
-exoware-simplex = { version = "2026.9.0", path = "simplex/rs" }
 exoware-sql = { version = "2026.9.0", path = "sql/rs" }
-exoware-validation = { version = "2026.9.0", path = "validation" }
 tokio = "1.43.0"
 clap = "4.5.18"
 tracing = "0.1.41"
@@ -74,18 +85,5 @@ anyhow = "1"
 async-trait = "0.1"
 criterion = { version = "0.5", features = ["html_reports"] }
 
-[profile.bench]
-overflow-checks = true
-
-[profile.dev]
-overflow-checks = true
-
 [profile.release]
-overflow-checks = true
-
-[profile.release-with-debug]
-inherits = "release"
-debug = true
-
-[profile.test]
 overflow-checks = true

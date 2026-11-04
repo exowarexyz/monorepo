@@ -3,12 +3,18 @@ name: Validation Simulator
 on:
   workflow_dispatch:
   pull_request:
+  # Runs on main so the build cache gets saved (caches are only saved from main), which PR
+  # runs then restore. This also leaves a benchmark report for every main commit.
+  push:
+    branches: ["main"]
 
 # Cancel a PR's in-flight run when a new commit is pushed, so the visible result always
-# corresponds to the latest commit rather than a slower, superseded run.
+# corresponds to the latest commit rather than a slower, superseded run. Every other run gets
+# its own group: a shared group only keeps one pending run and cancels the one before it, so
+# rapid merges to main would drop runs (and their benchmark reports).
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
@@ -25,7 +31,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Clear disk space
+      - name: Check disk space and configure swap
         uses: ./.github/actions/disk
 
       - name: Run setup
