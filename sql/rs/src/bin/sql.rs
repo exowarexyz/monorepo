@@ -1,6 +1,6 @@
 use axum::{routing::get, serve::ListenerExt, Router};
 use clap::{Parser, Subcommand};
-use exoware_sdk::{transport::set_tcp_nodelay, StoreClient, StoreKeyPrefix};
+use exoware_sdk::{transport::set_tcp_nodelay, PreferZstdLayer, StoreClient, StoreKeyPrefix};
 use exoware_sql::{default_orders_index_specs, sql_connect_stack, KvSchema, SqlServer};
 use std::{
     net::{IpAddr, SocketAddr},
@@ -66,6 +66,7 @@ async fn run(
     let app = Router::new()
         .route("/health", get(health))
         .fallback_service(sql_connect_stack(server))
+        .layer(PreferZstdLayer)
         .layer(CorsLayer::very_permissive());
 
     let addr = SocketAddr::from((host, port));

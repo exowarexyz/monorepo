@@ -148,7 +148,7 @@ impl ConnectRequestCompression {
 }
 
 /// Store client defaults: [`connect_compression_registry`] for codecs;
-/// [`PreferZstdHttpClient`] sets `Accept-Encoding: zstd, gzip` on responses.
+/// [`PreferZstdHttpClient`] reorders the request's accepted encodings to `zstd, gzip`.
 ///
 /// Request body compression uses [`ConnectRequestCompression`] (default none);
 /// connectrpc only supports one request encoding per config (see
@@ -545,16 +545,9 @@ impl PrefixedStoreClient {
     ) -> Result<GetManyStream, ClientError> {
         let mut proto_keys: Vec<Vec<u8>> = Vec::with_capacity(keys.len());
         for key in keys {
-            let encoded = self.encode_store_key(key)?;
-            if !is_valid_key_size(encoded.len()) {
-                return Err(ClientError::WireFormat(format!(
-                    "key length {} is outside valid store key range ({}..={})",
-                    encoded.len(),
-                    keys::MIN_KEY_LEN,
-                    MAX_KEY_LEN
-                )));
-            }
-            proto_keys.push(encoded.to_vec());
+            // `encode_store_key` already rejects keys over `MAX_KEY_LEN`, and
+            // `MIN_KEY_LEN` is 0, so the encoded key is a valid size.
+            proto_keys.push(self.encode_store_key(key)?.to_vec());
         }
         let mut stream = self
             .client
@@ -780,12 +773,14 @@ impl PrefixedStoreClient {
         };
         let mut out = Vec::with_capacity(owned.entries.len());
         for entry in owned.entries {
-            let key = Bytes::from(entry.key);
-            if !self.prefix.matches(&key) {
-                continue;
-            }
+            let key = match self.prefix.decode_key(&Bytes::from(entry.key)) {
+                Ok(key) => key,
+                // Keys outside this prefix belong to other namespaces.
+                Err(StoreKeyPrefixError::PrefixMismatch) => continue,
+                Err(err) => return Err(err.into()),
+            };
             out.push(StoreBatchEntry {
-                key: self.decode_store_key(&key)?,
+                key,
                 value: entry.value,
             });
         }
@@ -1442,6 +1437,7 @@ fn is_batch_missing_error(err: &ConnectError) -> bool {
 /// Retry policy for idempotent reads and puts rejected before admission.
 #[derive(Clone, Copy, Debug)]
 pub struct RetryConfig {
+    /// At least 1. The field is private and `with_max_attempts` clamps it.
     max_attempts: usize,
     initial_backoff: Duration,
     max_backoff: Duration,
@@ -1476,12 +1472,9 @@ impl RetryConfig {
     }
 
     pub(crate) fn sanitized(self) -> Self {
-        let max_attempts = self.max_attempts.max(1);
-        let max_backoff = self.max_backoff.max(self.initial_backoff);
         Self {
-            max_attempts,
-            initial_backoff: self.initial_backoff,
-            max_backoff,
+            max_backoff: self.max_backoff.max(self.initial_backoff),
+            ..self
         }
     }
 }
@@ -2072,7 +2065,7 @@ impl StoreClient {
     ) -> Result<GetManyStream, ClientError> {
         let config = self.streaming_client_config(self.query_uri.clone());
         let client = QueryServiceClient::new(self.connect_http.clone(), config);
-        let max_attempts = self.retry_config.max_attempts.max(1);
+        let max_attempts = self.retry_config.max_attempts;
         let mut attempt = 1usize;
         loop {
             let result = self
@@ -2333,7 +2326,7 @@ impl StoreClient {
         let config = self.streaming_client_config(self.query_uri.clone());
         let client = QueryServiceClient::new(self.connect_http.clone(), config);
         let min_sequence_number = options.min_sequence_number;
-        let max_attempts = self.retry_config.max_attempts.max(1);
+        let max_attempts = self.retry_config.max_attempts;
         let mut attempt = 1usize;
         loop {
             // Server-streaming RPCs cannot transparently recover mid-stream failures,
@@ -2464,7 +2457,7 @@ impl StoreClient {
         F: FnMut() -> Fut,
         Fut: std::future::Future<Output = Result<T, ConnectError>>,
     {
-        let max_attempts = self.retry_config.max_attempts.max(1);
+        let max_attempts = self.retry_config.max_attempts;
         let mut attempt = 1usize;
         loop {
             match make_request().await {
@@ -2832,7 +2825,8 @@ impl<'a> Stream<'a> {
     /// `log.stream.v1.Service.Subscribe` — see `StreamSubscription::next`
     /// for consuming delivered frames. `since_sequence_number = None` starts
     /// live from the next Put; `Some(N)` replays retained batches before
-    /// transitioning to live. An evicted `since` returns a
+    /// transitioning to live, and never delivers a batch below `N`, even when
+    /// `N` is past the latest published batch. An evicted `since` returns a
     /// `ConnectError::out_of_range` carrying `ErrorInfo.reason = "BATCH_EVICTED"`.
     pub async fn subscribe(
         &self,
@@ -4067,7 +4061,9 @@ mod tests {
             headers.get("content-type").unwrap(),
             "application/connect+proto"
         );
-        assert_eq!(headers.get(ACCEPT_ENCODING).unwrap(), "zstd, gzip");
+        // Streams negotiate only through Connect-Accept-Encoding, and the transport adds no
+        // encodings the client didn't list.
+        assert!(headers.get(ACCEPT_ENCODING).is_none());
         let stream_encoding = connectrpc::Protocol::Connect.accept_encoding_header();
         assert_eq!(headers.get(stream_encoding).unwrap(), "zstd, gzip");
         assert_eq!(headers.get_all(stream_encoding).iter().count(), 1);

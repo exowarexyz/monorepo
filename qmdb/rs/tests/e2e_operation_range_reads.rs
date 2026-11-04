@@ -1056,10 +1056,7 @@ async fn native_multi_proofs_authenticate_large_requests_and_preserve_publicatio
                 .collect::<Vec<_>>();
             (
                 fixture.stage(&store, &operations, &ordered_cfg()),
-                operations
-                    .iter()
-                    .map(|op| op.encode().to_vec())
-                    .collect::<Vec<_>>(),
+                operations.iter().map(|op| op.encode()).collect::<Vec<_>>(),
             )
         } else {
             let operations = (0..count)
@@ -1073,10 +1070,7 @@ async fn native_multi_proofs_authenticate_large_requests_and_preserve_publicatio
                 .collect::<Vec<_>>();
             (
                 fixture.stage(&store, &operations, &((0..=10000).into(), ())),
-                operations
-                    .iter()
-                    .map(|op| op.encode().to_vec())
-                    .collect::<Vec<_>>(),
+                operations.iter().map(|op| op.encode()).collect::<Vec<_>>(),
             )
         };
 
@@ -1125,7 +1119,9 @@ async fn native_multi_proofs_authenticate_large_requests_and_preserve_publicatio
         assert_eq!(boundary_batch(&calls, tip).min_sequence_number, Some(23));
 
         // Tampering with an operation must fail verification.
-        proof.operations[1].1[0] ^= 1;
+        let mut tampered = proof.operations[1].1.to_vec();
+        tampered[0] ^= 1;
+        proof.operations[1].1 = tampered.into();
         assert!(!proof.verify::<Sha256>());
     }
 }
@@ -1162,10 +1158,7 @@ async fn native_fixed_keyless_large_multi_proof_matches_browser_fixture() {
         proof.operations,
         locations
             .iter()
-            .map(|&location| (
-                location,
-                operations[location.as_u64() as usize].encode().to_vec()
-            ))
+            .map(|&location| (location, operations[location.as_u64() as usize].encode()))
             .collect::<Vec<_>>()
     );
 

@@ -52,9 +52,11 @@ consecutive entries, use `getOperationRange` with `tip`, `startLocation`, and
 `[startLocation, min(startLocation + maxLocations, tip + 1))`.
 
 `QmdbLogClient` and `QmdbOrderedClient` accept the
-[SDK transport options](../../sdk/ts/README.md), including credentials. Unary
-proof requests also accept `minSequenceNumber` to set the minimum Store sequence
-for checking publication of the requested tip.
+[SDK transport options](../../sdk/ts/README.md), including credentials. They
+always use binary protobuf and ignore `useBinaryFormat`, because each proof goes
+to WASM as the bytes the server sent for it, and JSON can't carry it that way.
+Unary proof requests also accept `minSequenceNumber` to set the minimum Store
+sequence for checking publication of the requested tip.
 
 Locations and sequences use `bigint`, while request counts and WASM byte sizes
 use unsigned 32-bit numbers. Pass roots as digest bytes. For byte arguments that

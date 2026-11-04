@@ -39,17 +39,24 @@ pub(crate) const PAGE_SIZE: usize = 1_000;
 pub(crate) const BATCH_FLUSH_ROWS: usize = 2_048;
 pub(crate) const INDEX_BACKFILL_FLUSH_ENTRIES: usize = 4_096;
 
+/// Row and index-entry counts for one completed backfill invocation.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct IndexBackfillReport {
+    /// Primary rows decoded during this invocation.
     pub scanned_rows: u64,
+    /// Newly appended index specifications populated by this invocation.
     pub indexes_backfilled: usize,
+    /// Secondary entries submitted for ingestion across all newly appended indexes.
     pub index_entries_written: u64,
 }
 
+/// Streaming and resume settings for a secondary-index backfill.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IndexBackfillOptions {
-    /// Requested maximum rows per streaming response batch
+    /// Requested maximum rows per response batch. Backfill rejects zero.
     pub row_batch_size: usize,
+    /// Inclusive encoded primary-key cursor, including the table family byte and
+    /// excluding the client's namespace prefix. `None` starts at the family lower bound.
     pub start_from_primary_key: Option<Key>,
 }
 
@@ -62,47 +69,80 @@ impl Default for IndexBackfillOptions {
     }
 }
 
+/// Backfill progress with cursors in the client's namespace-relative key space.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IndexBackfillEvent {
+    /// Emitted after options and index evolution have been validated.
     Started {
+        /// Registered name of the table being scanned.
         table_name: String,
+        /// Number of newly appended indexes to populate, possibly zero.
         indexes_backfilled: usize,
+        /// Requested maximum rows per streaming response batch.
         row_batch_size: usize,
+        /// Inclusive first scan key, including the primary-row family byte.
         start_cursor: Key,
     },
+    /// Emitted after entries for a response batch have been flushed to ingestion.
     Progress {
+        /// Cumulative primary rows decoded during this invocation.
         scanned_rows: u64,
+        /// Cumulative secondary entries submitted for ingestion during this invocation.
         index_entries_written: u64,
+        /// Encoded primary key of the final row in this response batch.
         last_scanned_primary_key: Key,
+        /// Inclusive resume key after the last scanned key. `None` means no successor
+        /// remains within the table's primary-key range.
         next_cursor: Option<Key>,
     },
+    /// Emitted when the invocation finishes successfully, including a no-op backfill.
     Completed {
+        /// Counts for this invocation.
         report: IndexBackfillReport,
     },
 }
 
+/// Scalar element representations supported in stored lists. Elements cannot be null.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ListElementKind {
+    /// Signed 64-bit integers.
     Int64,
+    /// Double-precision floating-point values.
     Float64,
+    /// Boolean values.
     Boolean,
+    /// UTF-8 strings.
     Utf8,
 }
 
+/// Storage representation of a column, independent of Arrow metadata such as decimal scale.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ColumnKind {
+    /// Signed 64-bit integer.
     Int64,
+    /// Unsigned 64-bit integer.
     UInt64,
+    /// Double-precision floating-point value.
     Float64,
+    /// Boolean value.
     Boolean,
+    /// UTF-8 string, including Arrow's large and view string types.
     Utf8,
+    /// Days since the Unix epoch.
     Date32,
+    /// Milliseconds since the Unix epoch.
     Date64,
+    /// Microseconds since the Unix epoch. Timezone metadata remains in the schema.
     Timestamp,
+    /// Signed 128-bit unscaled decimal integer.
     Decimal128,
+    /// Signed 256-bit unscaled decimal integer.
     Decimal256,
+    /// Binary value with the declared width in bytes.
     FixedSizeBinary(usize),
+    /// Variable-length bytes, supported as values but not index keys.
     Binary,
+    /// List of the specified scalar kind, supported as values but not index keys.
     List(ListElementKind),
 }
 
@@ -174,10 +214,16 @@ impl ColumnKind {
     }
 }
 
+/// Declared column schema. Table construction validates names and supported storage types.
 #[derive(Debug, Clone)]
 pub struct TableColumnConfig {
+    /// Column name used for schema lookup and primary-key or index references.
     pub name: String,
+    /// Arrow type. The table schema normalizes timestamps to microseconds and
+    /// large lists to lists while preserving their element field.
     pub data_type: DataType,
+    /// Whether row values may be null. Index-key columns must be non-nullable,
+    /// and primary-key encoding requires a non-null value even if this is true.
     pub nullable: bool,
 }
 
@@ -191,17 +237,27 @@ impl TableColumnConfig {
     }
 }
 
+/// Encoding of secondary-index key columns before the appended primary key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IndexLayout {
+    /// Concatenate ordered column encodings in the declared key-column order.
     Lexicographic,
+    /// Interleave bits of ordered column encodings. Index resolution requires
+    /// each key column to have a fixed encoded width.
     ZOrder,
 }
 
+/// Named secondary-index definition, resolved against the table when it is built.
 #[derive(Debug, Clone)]
 pub struct IndexSpec {
+    /// Nonempty index name, unique within the table after resolution.
     name: String,
+    /// Nonempty ordered column names that determine the index key before its primary-key suffix.
     key_columns: Vec<String>,
+    /// Additional non-primary-key columns stored in the index value. The value always includes
+    /// the non-primary-key index-key columns.
     cover_columns: Vec<String>,
+    /// Encoding used for the key columns, independent of the primary-key suffix.
     layout: IndexLayout,
 }
 
@@ -269,11 +325,16 @@ pub fn default_orders_index_specs() -> Vec<IndexSpec> {
     .expect("default orders index must be valid")]
 }
 
+/// Table declaration after column and primary-key validation, before index resolution.
 #[derive(Debug, Clone)]
 pub(crate) struct KvTableConfig {
+    /// Table identifier in the high nibble of every family byte, in `0..16`.
     pub(crate) table_prefix: u8,
+    /// Nonempty column declarations in schema and row-value order, with unique names.
     pub(crate) columns: Vec<TableColumnConfig>,
+    /// Nonempty column names in composite primary-key encoding order.
     pub(crate) primary_key_columns: Vec<String>,
+    /// Index declarations in family-discriminator order. Empty disables secondary indexes.
     pub(crate) index_specs: Vec<IndexSpec>,
 }
 
@@ -361,33 +422,58 @@ impl KvTableConfig {
     }
 }
 
+/// Column metadata used by row encoders and decoders.
 #[derive(Debug, Clone)]
 pub(crate) struct ResolvedColumn {
+    /// Column name from the table declaration.
     pub(crate) name: String,
+    /// Storage representation corresponding to the declared Arrow type.
     pub(crate) kind: ColumnKind,
+    /// Whether the column permits SQL null values.
     pub(crate) nullable: bool,
 }
 
-#[derive(Debug, Clone)]
+/// Secondary-index layout resolved to positions in the table's column vector.
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct ResolvedIndexSpec {
+    /// One-based index position, in `1..=15`, used as the family discriminator.
     pub(crate) id: u8,
+    /// Packed table and index family byte, excluding the client's namespace prefix.
     pub(crate) prefix: Prefix,
+    /// Unique name used to identify the index within its table.
     pub(crate) name: String,
+    /// Encoding of key columns before the primary-key suffix.
     pub(crate) layout: IndexLayout,
+    /// Table-column positions in index-key order. Resolution rejects nullable
+    /// columns and kinds that cannot be indexed.
     pub(crate) key_columns: Vec<usize>,
+    /// Mask in table-column order selecting non-primary-key values stored in the
+    /// index payload, including index-key columns and requested cover columns.
     pub(crate) value_column_mask: Vec<bool>,
+    /// Sum of reserved key widths in bytes, excluding the family byte and primary key.
+    /// This is the encoded length when all key columns have fixed-width kinds.
     pub(crate) key_columns_width: usize,
 }
 
+/// Shared schema and key layout for encoding, planning, and reading a table.
 #[derive(Debug, Clone)]
 pub(crate) struct TableModel {
+    /// Table identifier in the high nibble of its family bytes.
     pub(crate) table_prefix: u8,
+    /// Primary-row family byte, excluding the client's namespace prefix.
     pub(crate) primary_key_prefix: Prefix,
+    /// Arrow schema in table-column order, with normalized timestamp and list types.
     pub(crate) schema: SchemaRef,
+    /// Storage metadata in schema and row-value order.
     pub(crate) columns: Vec<ResolvedColumn>,
+    /// Column-name lookup yielding zero-based positions in `columns`.
     pub(crate) columns_by_name: HashMap<String, usize>,
+    /// Table-column positions in composite primary-key order, not schema order.
     pub(crate) primary_key_indices: Vec<usize>,
+    /// Storage kinds in the same order as `primary_key_indices`.
     pub(crate) primary_key_kinds: Vec<ColumnKind>,
+    /// Sum of reserved primary-key component widths in bytes, excluding the family byte.
+    /// Variable-length string encodings can differ from this reservation.
     pub(crate) primary_key_width: usize,
 }
 
@@ -552,26 +638,44 @@ impl TableModel {
     }
 }
 
+/// Owned logical cell value. Column metadata supplies nullability, decimal scale,
+/// timezone, and fixed binary width when the value is encoded or decoded.
 #[derive(Debug, Clone)]
 pub enum CellValue {
+    /// SQL null, also used as a placeholder for an unselected decoded key component.
     Null,
+    /// Signed 64-bit integer.
     Int64(i64),
+    /// Unsigned 64-bit integer.
     UInt64(u64),
+    /// Double-precision floating-point value.
     Float64(f64),
+    /// Boolean value.
     Boolean(bool),
+    /// Days since the Unix epoch.
     Date32(i32),
+    /// Milliseconds since the Unix epoch.
     Date64(i64),
+    /// Microseconds since the Unix epoch.
     Timestamp(i64),
+    /// Unscaled decimal integer with precision and scale from the schema.
     Decimal128(i128),
+    /// Unscaled decimal integer with precision and scale from the schema.
     Decimal256(i256),
+    /// UTF-8 string.
     Utf8(String),
+    /// Bytes whose length must match the column's declared fixed width when encoded.
     FixedBinary(Vec<u8>),
+    /// Variable-length bytes.
     Binary(Vec<u8>),
+    /// Ordered elements. Storage requires non-null elements of the column's scalar list kind.
     List(Vec<Self>),
 }
 
+/// Owned row values encoded into a table's primary row and index entries.
 #[derive(Debug, Clone)]
 pub(crate) struct KvRow {
+    /// One cell per table column in schema order, including primary-key columns.
     pub(crate) values: Vec<CellValue>,
 }
 
@@ -589,32 +693,53 @@ impl KvRow {
     }
 }
 
+/// Selected column values and primary-row locator decoded from a secondary-index key.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct DecodedIndexEntry {
+    /// Encoded primary-row key with its family byte, excluding the client's namespace prefix.
     pub(crate) primary_key: Key,
+    /// Cells in primary-key order. Empty when none were requested, otherwise
+    /// unselected positions contain `CellValue::Null` placeholders.
     pub(crate) primary_key_values: Vec<CellValue>,
+    /// Selected index-key cells keyed by table-column position.
     pub(crate) values: HashMap<usize, CellValue>,
 }
 
+/// Inclusive bounds in encoded key order, including the family byte and excluding
+/// the client's namespace prefix. `start > end` represents an empty range.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct KeyRange {
+    /// Inclusive lower encoded key.
     pub(crate) start: Key,
+    /// Inclusive upper encoded key.
     pub(crate) end: Key,
 }
 
+/// Chosen secondary-index scan with its key ranges and constraint counts.
 #[derive(Debug, Clone)]
 pub(crate) struct IndexPlan {
+    /// Zero-based position in the table's resolved index specifications.
     pub(crate) spec_idx: usize,
-    // Sorted, disjoint inclusive ranges visit each stored entry once
+    /// Inclusive ranges sorted by start key with overlaps merged, so a scan
+    /// visits each stored entry at most once.
     pub(crate) ranges: Vec<KeyRange>,
+    /// Leading constrained key-column count for lexicographic bounds. For
+    /// z-order, the count of constrained dimensions, including non-leading ones.
     pub(crate) constrained_prefix_len: usize,
+    /// Ranking score in columns. Lexicographic scoring counts leading point
+    /// constraints and at most one following non-point constraint. Z-order scoring
+    /// counts all dimensions with supported constraints.
     pub(crate) constrained_column_count: usize,
 }
 
+/// DataFusion table provider sharing a resolved schema and its storage namespace.
 #[derive(Debug, Clone)]
 pub(crate) struct KvTable {
+    /// Client whose namespace contains this table's primary rows and index entries.
     pub(crate) client: PrefixedStoreClient,
+    /// Shared schema and primary-key layout used by scans and writes.
     pub(crate) model: Arc<TableModel>,
+    /// Shared index layouts in family-discriminator order. Empty means no secondary indexes.
     pub(crate) index_specs: Arc<Vec<ResolvedIndexSpec>>,
 }
 

@@ -9,7 +9,7 @@ use crate::{
         MultiProofOperations, OperationRangeCheckpoint, RawBatchMultiProof, VerifiedOperationRange,
     },
     request::OperationLocations,
-    OperationKv, PublishedWatermark,
+    PublishedWatermark,
 };
 use commonware_codec::{Codec, Copying, Decode, Encode, Read as CodecRead};
 use commonware_cryptography::Hasher;
@@ -92,11 +92,12 @@ where
         }
     }
 
-    pub(crate) fn extract_operation_kv(
+    pub(crate) fn inspect_operation_kv<T>(
         &self,
         location: Location<F>,
         bytes: &[u8],
-    ) -> Result<OperationKv, QmdbError>
+        inspect: impl FnOnce(Option<&[u8]>, Option<&[u8]>) -> T,
+    ) -> Result<T, QmdbError>
     where
         V: AsRef<[u8]>,
     {
@@ -106,12 +107,12 @@ where
                     "failed to decode keyless operation at location {location}: {e}"
                 ))
             })?;
-        let value = match &op {
-            keyless::Operation::Append(value) => Some(value.as_ref().to_vec()),
-            keyless::Operation::Commit(Some(value), _) => Some(value.as_ref().to_vec()),
+        let value: Option<&[u8]> = match &op {
+            keyless::Operation::Append(value) => Some(value.as_ref()),
+            keyless::Operation::Commit(Some(value), _) => Some(value.as_ref()),
             keyless::Operation::Commit(None, _) => None,
         };
-        Ok(OperationKv { key: None, value })
+        Ok(inspect(None, value))
     }
 
     /// Refresh publication evidence and return the greatest watermark observed by this client.
@@ -276,7 +277,7 @@ where
             .enumerate()
             .map(|(offset, bytes)| {
                 let location = checkpoint.start_location + offset as u64;
-                keyless::Operation::<F, E>::decode_cfg(Copying(bytes.as_slice()), &self.op_cfg)
+                keyless::Operation::<F, E>::decode_cfg(Copying(bytes.as_ref()), &self.op_cfg)
                     .map_err(|e| {
                         QmdbError::CorruptData(format!(
                             "failed to decode authenticated operation at location {location}: {e}"

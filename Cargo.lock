@@ -2669,7 +2669,6 @@ name = "exoware-integration"
 version = "2026.9.0"
 dependencies = [
  "axum",
- "buffa",
  "bytes",
  "commonware-cryptography",
  "commonware-parallel",
@@ -2824,7 +2823,6 @@ dependencies = [
  "commonware-consensus",
  "commonware-cryptography",
  "commonware-math",
- "commonware-p2p",
  "commonware-parallel",
  "commonware-resolver",
  "commonware-runtime",
@@ -2905,11 +2903,8 @@ dependencies = [
  "futures",
  "hex",
  "http-body",
- "regex",
- "reqwest",
  "serde",
  "serde_json",
- "thiserror",
  "tokio",
  "tower-http 0.5.2",
  "tracing",
