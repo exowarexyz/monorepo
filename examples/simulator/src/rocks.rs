@@ -56,9 +56,9 @@ use exoware_server::{
 use parking_lot::Mutex;
 use regex::bytes::Regex;
 use rocksdb::{
-    ColumnFamily, ColumnFamilyDescriptor, DBCompactionStyle, DBCompressionType, DBIterator,
-    Direction, IngestExternalFileOptions, IteratorMode, Options, Snapshot, SstFileWriter,
-    WriteOptions, DB,
+    BlockBasedOptions, ColumnFamily, ColumnFamilyDescriptor, DBCompactionStyle, DBCompressionType,
+    DBIterator, Direction, IngestExternalFileOptions, IteratorMode, Options, Snapshot,
+    SstFileWriter, WriteOptions, DB,
 };
 use std::{
     cmp::Ordering as CmpOrdering,
@@ -863,17 +863,18 @@ fn log_tail_sentinel(sequence: u64) -> [u8; LOG_BATCH_KEY_LEN + 1] {
 }
 
 /// Stages the current-state SST: the group's rows sorted by key, with the last write per key
-/// winning (in arrival order across coalesced requests). Uncompressed: compressing on the
-/// ingest path would trade ack latency for bytes, and the state CF keeps compression off at
-/// every level per [`state_cf_options`].
+/// winning (in arrival order across coalesced requests). Built with [`state_cf_options`], so
+/// it is uncompressed and carries the key filter that compaction writes.
 fn stage_state_file(path: &Path, rows: &[(Bytes, Bytes)]) -> Result<usize, String> {
     let mut order: Vec<usize> = (0..rows.len()).collect();
 
     // Arrival indices preserve the newest duplicate without a sorting workspace.
     order.sort_unstable_by(|a, b| rows[*a].0.cmp(&rows[*b].0).then_with(|| a.cmp(b)));
 
-    let mut options = Options::default();
-    options.set_compression_type(DBCompressionType::None);
+    // The writer requires strictly increasing keys. Sorting by key with arrival order as the
+    // tiebreak places each key's newest write last in its run, so writing only the final row
+    // of every run both collapses the duplicates and keeps the write that wins.
+    let options = state_cf_options();
     let mut writer = SstFileWriter::create(&options);
     writer.open(path).map_err(|e| e.to_string())?;
     let mut bytes = 0;
@@ -1131,24 +1132,19 @@ impl Default for RocksWritePipelineConfig {
 /// RocksDB engine and application-level write pipeline options used by [`RocksStore::open`].
 #[derive(Default)]
 pub struct RocksConfig {
-    /// Database-wide options, applied as-is (stock defaults). Two knobs matter under sustained
-    /// ingest: `max_background_jobs` (stock RocksDB fixes it at 2, and compactions must keep
-    /// merging the overlapping ingested state SSTs) and `max_open_files` (stock RocksDB keeps
-    /// every touched table file open forever, and ingest creates one log and one state SST per
-    /// commit group).
+    /// Database-wide options, applied as-is. `max_background_jobs` bounds concurrent
+    /// compaction. `max_open_files` must exceed the state files a point read probes and may
+    /// sit below the total file count, since the table cache then closes only log files.
     pub db_options: Options,
     /// Options for the application-level ingest write pipeline.
     pub write_pipeline: RocksWritePipelineConfig,
 }
 
-/// Options for the state column family, tuned to the store's write path.
-///
-/// Ingested state SSTs overlap (store keys are uniformly distributed), so this family bears
-/// all compaction: universal compaction merges whole sorted runs instead of rewriting every
-/// overlapping level, compression stays off (staged SSTs arrive uncompressed; recompressing
-/// them buys nothing on ingest-bound stores), and the level-zero slowdown/stop triggers are
-/// raised because `IngestExternalFile` waits on stop-writes conditions (stock triggers stall
-/// ingest whenever compaction lags).
+/// Options for the state column family. Ingested state SSTs overlap one another, so this
+/// family bears all compaction. Universal compaction merges whole sorted runs, compression
+/// stays off to match the staged files, and the raised level-zero triggers keep a compaction
+/// backlog from throttling ingest. A ribbon filter lets a point read skip the runs that lack
+/// its key in fewer bytes than a bloom filter.
 fn state_cf_options() -> Options {
     let mut opts = Options::default();
     opts.set_compression_type(DBCompressionType::None);
@@ -1157,6 +1153,9 @@ fn state_cf_options() -> Options {
     opts.set_level_zero_file_num_compaction_trigger(16);
     opts.set_level_zero_slowdown_writes_trigger(1024);
     opts.set_level_zero_stop_writes_trigger(2048);
+    let mut table = BlockBasedOptions::default();
+    table.set_ribbon_filter(10.0);
+    opts.set_block_based_table_factory(&table);
     opts
 }
 
@@ -3295,6 +3294,37 @@ mod tests {
             .next()
             .expect("log CF body");
         assert!(log.contains("compression=kNoCompression"));
+    }
+
+    /// Ingested state SSTs serve reads before compaction rewrites them, so they must be
+    /// staged with the key filter rather than gain one only once compacted.
+    #[test]
+    fn staged_state_file_carries_key_filter() {
+        let dir = tempdir().expect("tempdir");
+        let store = RocksStore::open(dir.path(), None).expect("open db");
+        let group = prepared_write(
+            &store,
+            0,
+            vec![(Bytes::from_static(b"a"), Bytes::from_static(b"value"))],
+        );
+        assert_eq!(commit_and_apply(&store, group), 1);
+
+        // The state CF holds only the one ingested file, since nothing has flushed or compacted.
+        let properties = store
+            .db
+            .property_value_cf(
+                store.db.cf_handle(STATE_CF).expect("state CF"),
+                "rocksdb.aggregated-table-properties",
+            )
+            .expect("read table properties")
+            .expect("table properties exist");
+        let filter_bytes: u64 = properties
+            .split("; ")
+            .find_map(|property| property.strip_prefix("filter block size="))
+            .expect("filter block size property")
+            .parse()
+            .expect("filter block size is a number");
+        assert!(filter_bytes > 0, "{properties}");
     }
 
     #[tokio::test]
