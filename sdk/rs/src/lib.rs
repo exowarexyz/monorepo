@@ -2303,20 +2303,11 @@ impl StoreClient {
             .await?;
         // Every borrowed field of an `OwnedView` points into its `bytes()`, so
         // `slice_ref` shares the value with the response buffer and can't panic.
-        let response = response.into_view();
-        let view = response.reborrow();
-        let value = view.value.map(|value| response.bytes().slice_ref(value));
+        let body = response.into_view();
+        let view = body.reborrow();
+        let value = view.value.map(|value| body.bytes().slice_ref(value));
         let sequence_number = view.detail.as_option().map(|detail| detail.sequence_number);
         Ok((value, sequence_number))
-    }
-
-    #[cfg(test)]
-    pub async fn send_get_for_tests(
-        &self,
-        key: &Key,
-        min_sequence_number: Option<u64>,
-    ) -> Result<(Option<Bytes>, Option<u64>), ClientError> {
-        self.send_get(key, min_sequence_number).await
     }
 
     async fn range_stream_internal(
