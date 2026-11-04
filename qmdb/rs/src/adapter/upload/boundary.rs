@@ -90,15 +90,13 @@ where
 /// - `grafted_nodes`: only the complete-chunk grafted nodes whose digests
 ///   changed at this boundary
 ///
-/// `previous_operations` and `operations` are the cumulative operation logs
-/// before and after one finalized local batch respectively, not just the delta
-/// batch itself. In the intended flow `operations` therefore includes the
-/// new batch's appended `CommitFloor`, and `previous_operations` is the exact
-/// cumulative prefix immediately before that batch was applied.
+/// `operations` is the cumulative operation log after one finalized local
+/// batch, not just the batch itself, so it ends with that batch's `CommitFloor`.
+/// `previous_len` is the length of the log before that batch was applied.
 ///
-/// With a previous log, the inputs must differ by exactly one finalized batch.
-/// With no previous log, the function recovers a complete boundary from the
-/// retained prefix, including bootstrap and restart material.
+/// With a previous length, `operations[previous_len..]` must be exactly one
+/// finalized batch. With no previous length, the function recovers a complete
+/// boundary from the retained prefix, including bootstrap and restart material.
 ///
 /// `prove_at(location)` must return a current range proof plus the bitmap
 /// chunk for that exact `location`, taken from the same local DB state as
@@ -109,7 +107,7 @@ where
 /// against `root`. It does not independently authenticate the pruned chunk count.
 /// Attach the result with [`crate::adapter::upload::PreparedAuthenticatedRange::with_current_boundary`].
 pub async fn recover_boundary_state<M, H, Op, const N: usize, Prove, Fut>(
-    previous_operations: Option<&[Op]>,
+    previous_len: Option<usize>,
     operations: &[Op],
     root: H::Digest,
     pruned_chunks: u64,
@@ -124,24 +122,12 @@ where
     Prove: FnMut(Location<M>) -> Fut,
     Fut: Future<Output = Result<(RangeProof<M, H::Digest>, [u8; N]), QmdbError>>,
 {
-    if operations.is_empty() {
-        return Err(QmdbError::EmptyBatch);
-    }
-
-    let previous_len = previous_operations.map_or(0usize, |ops| ops.len());
-    if previous_len >= operations.len() {
-        return Err(QmdbError::CorruptData(format!(
-            "current operations length {} must exceed previous length {}",
-            operations.len(),
-            previous_len
-        )));
-    }
-    validate_recovery_input::<M, Op>(previous_operations, operations)?;
+    validate_recovery_input::<M, Op>(previous_len, operations)?;
+    let previous_len = previous_len.unwrap_or(0);
 
     let grafting_height = grafting::height::<N>();
-    let ops_leaves = u64::try_from(operations.len())
-        .map_err(|_| QmdbError::CorruptData("operation count does not fit in u64".into()))?;
-    let previous_ops_leaves = previous_operations.map_or(0u64, |ops| ops.len() as u64);
+    let ops_leaves = operations.len() as u64;
+    let previous_ops_leaves = previous_len as u64;
     let complete_chunks = ops_leaves / bitmap_chunk_bits::<N>();
     let graftable_chunks =
         grafting::graftable_chunks::<M>(ops_leaves, grafting_height).min(complete_chunks);
@@ -151,7 +137,7 @@ where
         )));
     }
     let changed_chunks =
-        changed_chunk_representatives::<M, Op, N>(previous_operations, operations, pruned_chunks);
+        changed_chunk_representatives::<M, Op, N>(operations, previous_len, pruned_chunks);
     let previous_complete_chunks = previous_ops_leaves / bitmap_chunk_bits::<N>();
     let previous_graftable_chunks =
         grafting::graftable_chunks::<M>(previous_ops_leaves, grafting_height)
@@ -250,39 +236,43 @@ where
     })
 }
 
-fn validate_recovery_input<F: Family, Op>(
-    previous_operations: Option<&[Op]>,
+fn validate_recovery_input<F: Family, Op: QmdbOperation<F>>(
+    previous_len: Option<usize>,
     operations: &[Op],
-) -> Result<(), QmdbError>
-where
-    Op: QmdbOperation<F> + Encode,
-{
-    if operations.last().is_none_or(|op| op.has_floor().is_none()) {
+) -> Result<(), QmdbError> {
+    let Some(last) = operations.last() else {
+        return Err(QmdbError::EmptyBatch);
+    };
+    if last.has_floor().is_none() {
         return Err(QmdbError::CorruptData(
             "recover_boundary_state requires operations to end with a commit floor".into(),
         ));
     }
 
-    let Some(previous) = previous_operations else {
+    let Some(previous_len) = previous_len else {
         return Ok(());
     };
-
-    let mut expected_bytes = Vec::new();
-    let mut actual_bytes = Vec::new();
-    for (index, (expected, actual)) in previous.iter().zip(operations.iter()).enumerate() {
-        expected_bytes.clear();
-        expected.write(&mut expected_bytes);
-        actual_bytes.clear();
-        actual.write(&mut actual_bytes);
-        if expected_bytes != actual_bytes {
-            return Err(QmdbError::CorruptData(format!(
-                "recover_boundary_state requires previous_operations to be an exact prefix of operations; mismatch at location {index}"
-            )));
-        }
+    if previous_len >= operations.len() {
+        return Err(QmdbError::CorruptData(format!(
+            "current operations length {} must exceed previous length {previous_len}",
+            operations.len()
+        )));
     }
 
-    let delta = &operations[previous.len()..];
-    let commit_count = delta
+    // Together with the last-operation check above, these two checks pin
+    // previous_len to the start of the final batch. A length inside a batch
+    // leaves the previous log ending without a commit, and a length one or more
+    // batches too early leaves two or more commits in the delta.
+    if previous_len
+        .checked_sub(1)
+        .is_some_and(|index| operations[index].has_floor().is_none())
+    {
+        return Err(QmdbError::CorruptData(format!(
+            "recover_boundary_state requires the previous log to end with a commit floor; location {} is not one",
+            previous_len - 1
+        )));
+    }
+    let commit_count = operations[previous_len..]
         .iter()
         .filter(|operation| operation.has_floor().is_some())
         .count();
@@ -292,27 +282,21 @@ where
         )));
     }
 
-    if delta.last().is_none_or(|op| op.has_floor().is_none()) {
-        return Err(QmdbError::CorruptData(
-            "recover_boundary_state requires the appended batch delta to end with a commit floor"
-                .into(),
-        ));
-    }
-
     Ok(())
 }
 
 fn changed_chunk_representatives<F: Family, Op, const N: usize>(
-    previous_operations: Option<&[Op]>,
     operations: &[Op],
+    previous_len: usize,
     pruned_chunks: u64,
 ) -> BTreeMap<u64, Location<F>>
 where
     Op: QmdbOperation<F>,
     Op::Key: AsRef<[u8]>,
 {
-    let previous_floor = previous_operations
-        .and_then(|ops| ops.last())
+    let previous = &operations[..previous_len];
+    let previous_floor = previous
+        .last()
         .and_then(|operation| operation.has_floor())
         .unwrap_or(Location::new(0));
     let floor = operations
@@ -321,7 +305,6 @@ where
         .unwrap_or(Location::new(0));
     let chunk_bits = bitmap_chunk_bits::<N>();
 
-    let previous_len = previous_operations.map_or(0usize, |ops| ops.len());
     let mut changed = BTreeMap::<u64, Location<F>>::new();
 
     for raw_location in previous_len..operations.len() {
@@ -342,22 +325,18 @@ where
         }
     }
 
-    let Some(previous) = previous_operations else {
-        return changed;
-    };
-
     let mut touched_keys = operations[previous_len..]
         .iter()
         .filter_map(|operation| operation.key().map(AsRef::as_ref))
         .collect::<BTreeSet<&[u8]>>();
 
-    for index in (0..previous.len()).rev() {
+    for (index, operation) in previous.iter().enumerate().rev() {
         if touched_keys.is_empty() {
             break;
         }
         let location = Location::new(index as u64);
-        if let Some(key) = previous[index].key() {
-            if touched_keys.remove(key.as_ref()) && previous[index].is_update() {
+        if let Some(key) = operation.key() {
+            if touched_keys.remove(key.as_ref()) && operation.is_update() {
                 let chunk_index = chunk_index_for_location::<F, N>(location);
                 if chunk_index >= pruned_chunks {
                     changed.entry(chunk_index).or_insert(location);
@@ -367,7 +346,7 @@ where
     }
 
     // Each batch clears the previous commit bit even when no key in that chunk changes
-    if let Some(index) = previous.len().checked_sub(1) {
+    if let Some(index) = previous_len.checked_sub(1) {
         let location = Location::new(index as u64);
         let chunk_index = chunk_index_for_location::<F, N>(location);
         if chunk_index >= pruned_chunks {
@@ -635,8 +614,8 @@ mod tests {
         operations.push(update(b"target", b"new"));
 
         let changed = changed_chunk_representatives::<mmr::Family, TestOperation<_, _, _>, 1>(
-            Some(&previous),
             &operations,
+            previous.len(),
             0,
         );
 
@@ -658,8 +637,8 @@ mod tests {
         operations.push(commit(16));
 
         let changed = changed_chunk_representatives::<mmr::Family, TestOperation<_, _, _>, 1>(
-            Some(&previous),
             &operations,
+            previous.len(),
             0,
         );
 
@@ -687,8 +666,8 @@ mod tests {
         operations.push(commit(18));
 
         let changed = changed_chunk_representatives::<mmr::Family, TestOperation<_, _, _>, 1>(
-            Some(&previous),
             &operations,
+            previous.len(),
             0,
         );
 
@@ -710,8 +689,8 @@ mod tests {
         operations.push(commit(16));
 
         let changed = changed_chunk_representatives::<mmr::Family, TestOperation<_, _, _>, 1>(
-            Some(&previous),
             &operations,
+            previous.len(),
             2,
         );
 
@@ -724,8 +703,8 @@ mod tests {
         let mut operations = previous.clone();
         operations.push(update(b"target", b"new"));
 
-        let err =
-            super::validate_recovery_input(Some(&previous), &operations).expect_err("must reject");
+        let err = super::validate_recovery_input(Some(previous.len()), &operations)
+            .expect_err("must reject");
         assert!(
             err.to_string().contains("end with a commit floor"),
             "unexpected error: {err}"
@@ -734,13 +713,14 @@ mod tests {
 
     #[test]
     fn test_rejects_delta_with_multiple_commit_floors() {
-        let previous = previous_ops();
+        let mut previous = previous_ops();
+        previous.push(commit(16));
         let mut operations = previous.clone();
-        operations.push(commit(16));
         operations.push(commit(17));
+        operations.push(commit(18));
 
-        let err =
-            super::validate_recovery_input(Some(&previous), &operations).expect_err("must reject");
+        let err = super::validate_recovery_input(Some(previous.len()), &operations)
+            .expect_err("must reject");
         assert!(
             err.to_string().contains("exactly one commit floor"),
             "unexpected error: {err}"
@@ -748,56 +728,44 @@ mod tests {
     }
 
     #[test]
-    fn test_rejects_non_prefix_previous_operations() {
-        let previous = previous_ops();
+    fn test_previous_len_must_be_a_batch_boundary() {
+        let mut previous = previous_ops();
+        previous.push(commit(16));
         let mut operations = previous.clone();
-        operations[3] = update(b"mutated", b"value");
-        operations.push(commit(16));
+        operations.push(update(b"target", b"new"));
+        operations.push(commit(17));
 
-        let err =
-            super::validate_recovery_input(Some(&previous), &operations).expect_err("must reject");
+        super::validate_recovery_input(Some(previous.len()), &operations).expect("valid batch");
+
+        // Inside the previous batch: the previous log would end with an update
+        let err = super::validate_recovery_input(Some(previous.len() - 1), &operations)
+            .expect_err("must reject");
         assert!(
-            err.to_string().contains("exact prefix"),
+            err.to_string()
+                .contains("previous log to end with a commit floor"),
             "unexpected error: {err}"
         );
-    }
 
-    #[test]
-    fn test_non_prefix_error_names_first_mismatch_location() {
-        // Replacements with the same and with a different encoded length, at
-        // the first, a middle and the last location of the previous log.
-        let cases = [
-            (0, commit(1)),
-            (3, update(b"mutated", b"value")),
-            (8, update(b"target", b"olD")),
-            (15, update(b"fill-15", b"value-15-longer")),
-        ];
-        for (index, replacement) in cases {
-            let previous = previous_ops();
-            let mut operations = previous.clone();
-            operations[index] = replacement;
-            operations.push(commit(16));
-
-            let err = super::validate_recovery_input(Some(&previous), &operations)
-                .expect_err("must reject");
-            assert_eq!(
-                err.to_string(),
-                format!(
-                    "corrupt qmdb data: recover_boundary_state requires previous_operations to be an exact prefix of operations; mismatch at location {index}"
-                )
-            );
-        }
-
-        // With two mismatches the first one is reported
-        let previous = previous_ops();
-        let mut operations = previous.clone();
-        operations[3] = update(b"mutated", b"value");
-        operations[8] = update(b"target", b"olD");
-        operations.push(commit(16));
-        let err =
-            super::validate_recovery_input(Some(&previous), &operations).expect_err("must reject");
+        // Inside the new batch: the previous log would end with the new update
+        let err = super::validate_recovery_input(Some(previous.len() + 1), &operations)
+            .expect_err("must reject");
         assert!(
-            err.to_string().ends_with("mismatch at location 3"),
+            err.to_string()
+                .contains("previous log to end with a commit floor"),
+            "unexpected error: {err}"
+        );
+
+        // A batch too early: the delta holds two commits
+        let err = super::validate_recovery_input(Some(0), &operations).expect_err("must reject");
+        assert!(
+            err.to_string().contains("exactly one commit floor"),
+            "unexpected error: {err}"
+        );
+
+        let err = super::validate_recovery_input(Some(operations.len()), &operations)
+            .expect_err("must reject");
+        assert!(
+            err.to_string().contains("must exceed previous length"),
             "unexpected error: {err}"
         );
     }

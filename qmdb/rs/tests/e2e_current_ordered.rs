@@ -76,7 +76,7 @@ where
 {
     let ops_root_witness = db.ops_root_witness().await.expect("ops root witness");
     recover_boundary_state::<F, Sha256, _, N, _, _>(
-        previous_operations,
+        previous_operations.map(<[_]>::len),
         operations,
         db.root(),
         0,
@@ -115,7 +115,7 @@ where
 {
     let ops_root_witness = db.ops_root_witness().await.expect("fixed ops root witness");
     recover_boundary_state::<F, Sha256, _, N, _, _>(
-        previous_operations,
+        previous_operations.map(<[_]>::len),
         operations,
         db.root(),
         0,
@@ -247,7 +247,7 @@ where
 {
     let ops_root_witness = db.ops_root_witness().await.expect("ops root witness");
     recover_boundary_state::<F, Sha256, _, M, _, _>(
-        previous_operations,
+        previous_operations.map(<[_]>::len),
         operations,
         db.root(),
         0,

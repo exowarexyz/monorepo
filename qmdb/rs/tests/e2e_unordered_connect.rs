@@ -942,7 +942,7 @@ async fn aligned_commit_boundary<F: commonware_storage::merkle::Graftable + Part
                 assert_eq!(chunks[0][N - 1] & 0x80 != 0, round == 0);
                 let source = &db;
                 let boundary = recover_boundary_state::<F, Sha256, _, N, _, _>(
-                    (!previous.is_empty()).then_some(previous.as_slice()),
+                    (!previous.is_empty()).then_some(previous.len()),
                     &operations,
                     db.root(),
                     0,
@@ -1131,7 +1131,7 @@ async fn current_boundary_nodes<F: commonware_storage::merkle::Graftable + Parti
 
                 let source = &db;
                 let boundary = recover_boundary_state::<F, Sha256, _, N, _, _>(
-                    (!previous.is_empty()).then_some(previous.as_slice()),
+                    (!previous.is_empty()).then_some(previous.len()),
                     &operations,
                     db.root(),
                     pruned_chunks,
