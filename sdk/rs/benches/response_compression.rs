@@ -2,10 +2,12 @@
 //!
 //! `connect_compression_registry()` compresses responses of 1 KiB or more with
 //! zstd. This bench compresses and decompresses protobuf response bodies through
-//! connectrpc's `ZstdProvider` (the pooled compressor servers use, and the decoder
-//! Rust clients use) at levels 3 (connectrpc's default), 1, -1 and -3. A faster
-//! level can produce a bigger frame, so before timing it prints each body's
-//! compressed size at every level.
+//! connectrpc's `ZstdProvider` (the pooled compressor servers use) at levels 3
+//! (connectrpc's default), 1, -1 and -3. Rust clients decode with the SDK's own
+//! codec, which decodes these frames in one call into an exactly sized buffer, so
+//! the decompress timings here are an upper bound for them. A faster level can
+//! produce a bigger frame, so before timing it prints each body's compressed size
+//! at every level.
 //!
 //! Every body is synthetic and seeded, so each run compresses the same bytes:
 //! - `range_26_58` and `get_many_26_58` hold 4096 rows with 26 B keys (an 8-byte

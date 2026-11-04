@@ -33,7 +33,6 @@ unused_async = "warn"
 large_futures = "warn"
 
 [workspace.dependencies]
-crossbeam-utils = "0.8.22"
 exoware-qmdb = { version = "2026.9.0", path = "qmdb/rs" }
 exoware-sdk = { version = "2026.9.0", path = "sdk/rs" }
 exoware-server = { version = "2026.9.0", path = "server" }
@@ -63,6 +62,7 @@ commonware-runtime = "2026.10.0"
 commonware-storage = "2026.10.0"
 commonware-utils = "2026.10.0"
 rocksdb = "0.24.0"
+rlimit = "0.11.0"
 rand = "0.10.2"
 parking_lot = "0.12.5"
 futures = "0.3.30"

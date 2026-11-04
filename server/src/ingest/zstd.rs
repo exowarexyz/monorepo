@@ -3,9 +3,13 @@ use zstd::{
     zstd_safe::{get_frame_content_size, DCtx},
 };
 
+/// The largest window Put accepts (128 MiB), zstd's default limit for streaming decoders.
+/// Put decodes as the body arrives, so it has to hold the window in memory.
 pub(super) const WINDOW_LOG_MAX: u32 = 27;
 
-// A small protobuf payload with a 256 MiB window exercises streaming-limit parity.
+// A small protobuf payload with a 256 MiB window. Put and connectrpc's streaming decoder both
+// refuse it. The SDK's zstd codec decodes a lone frame with a known size in one call, which needs
+// no window buffer, so the other services accept this frame when its size fits their limit.
 #[cfg(test)]
 pub(super) const OVERSIZED_WINDOW_FRAME: &[u8] = &[
     0x28, 0xb5, 0x2f, 0xfd, 0x40, 0x90, 0x00, 0x03, 0x7d, 0x00, 0x00, 0x40, 0x0a, 0x06, 0x0a, 0x01,

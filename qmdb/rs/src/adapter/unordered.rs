@@ -12,7 +12,7 @@ use crate::{
         VerifiedOperationRange,
     },
     request::OperationLocations,
-    OperationKv, PublishedWatermark, VersionedValue,
+    PublishedWatermark, VersionedValue,
 };
 use commonware_codec::{Codec, Copying, Decode, Encode};
 use commonware_cryptography::Hasher;
@@ -156,22 +156,23 @@ where
     E: ValueEncoding<Value = V>,
     unordered::Operation<F, K, E>: Encode + Decode,
 {
-    pub(crate) fn extract_operation_kv(
+    pub(crate) fn inspect_operation_kv<T>(
         &self,
         location: Location<F>,
         bytes: &[u8],
-    ) -> Result<OperationKv, QmdbError>
+        inspect: impl FnOnce(Option<&[u8]>, Option<&[u8]>) -> T,
+    ) -> Result<T, QmdbError>
     where
         V: AsRef<[u8]>,
     {
         let op = decode_operation::<F, K, V, E>(&self.op_cfg, location, bytes)?;
-        let key = op.key().map(|k| <K as AsRef<[u8]>>::as_ref(k).to_vec());
-        let value = match &op {
-            unordered::Operation::Update(update) => Some(update.1.as_ref().to_vec()),
-            unordered::Operation::CommitFloor(Some(value), _) => Some(value.as_ref().to_vec()),
+        let key = op.key().map(<K as AsRef<[u8]>>::as_ref);
+        let value: Option<&[u8]> = match &op {
+            unordered::Operation::Update(update) => Some(update.1.as_ref()),
+            unordered::Operation::CommitFloor(Some(value), _) => Some(value.as_ref()),
             unordered::Operation::Delete(_) | unordered::Operation::CommitFloor(None, _) => None,
         };
-        Ok(OperationKv { key, value })
+        Ok(inspect(key, value))
     }
 
     /// Refresh publication evidence and return the greatest watermark observed by this client.
@@ -343,15 +344,13 @@ where
         let mut operations = Vec::with_capacity(checkpoint.encoded_operations.len());
         for (offset, value) in checkpoint.encoded_operations.iter().enumerate() {
             let location = checkpoint.start_location + offset as u64;
-            let op = unordered::Operation::<F, K, E>::decode_cfg(
-                Copying(value.as_slice()),
-                &self.op_cfg,
-            )
-            .map_err(|e| {
-                QmdbError::CorruptData(format!(
-                    "failed to decode unordered operation at location {location}: {e}"
-                ))
-            })?;
+            let op =
+                unordered::Operation::<F, K, E>::decode_cfg(Copying(value.as_ref()), &self.op_cfg)
+                    .map_err(|e| {
+                        QmdbError::CorruptData(format!(
+                            "failed to decode unordered operation at location {location}: {e}"
+                        ))
+                    })?;
             operations.push(op);
         }
         Ok(VerifiedOperationRange {
