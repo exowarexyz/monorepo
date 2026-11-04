@@ -311,7 +311,7 @@ impl KvSchema {
                     )?;
                     let index_value =
                         encode_secondary_index_value_from_archived(&archived, model, spec)?;
-                    pending_entries.push((index_key, index_value.into()));
+                    pending_entries.push((index_key, index_value));
                     report.index_entries_written += 1;
                 }
 

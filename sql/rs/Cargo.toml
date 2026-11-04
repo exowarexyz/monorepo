@@ -48,3 +48,7 @@ serde_json = "1"
 [[bench]]
 name = "read_path_perf"
 harness = false
+
+[[bench]]
+name = "ingest_perf"
+harness = false
