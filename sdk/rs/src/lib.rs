@@ -3399,9 +3399,7 @@ mod tests {
         assert!(sender.is_closed());
     }
 
-    fn reduce_body(frames: &[proto_query::ReduceResponse], final_status: &[u8]) -> Bytes {
-        use buffa::Message;
-
+    fn stream_body<M: buffa::Message>(frames: &[M], final_status: &[u8]) -> Bytes {
         let mut body = Vec::new();
         for frame in frames {
             body.extend_from_slice(
@@ -3460,12 +3458,12 @@ mod tests {
     #[tokio::test]
     async fn reduce_retries_before_first_frame_and_observes_response_details() {
         let transport = ReduceTransport::new([
-            reduce_body(
+            stream_body::<proto_query::ReduceResponse>(
                 &[],
                 br#"{"error":{"code":"unavailable","message":"retry open"}}"#,
             ),
-            reduce_body(&[count_frame(None), count_frame(Some(47))], b"{}"),
-            reduce_body(&[count_frame(Some(50))], b"{}"),
+            stream_body(&[count_frame(None), count_frame(Some(47))], b"{}"),
+            stream_body(&[count_frame(Some(50))], b"{}"),
         ]);
         let session = reduce_test_client(transport.clone()).create_session();
         let start = Bytes::from_static(b"a");
@@ -3516,7 +3514,7 @@ mod tests {
 
     #[tokio::test]
     async fn reduce_never_retries_after_a_result_frame() {
-        let transport = ReduceTransport::new([reduce_body(
+        let transport = ReduceTransport::new([stream_body(
             &[count_frame(None)],
             br#"{"error":{"code":"unavailable","message":"failed after results"}}"#,
         )]);
@@ -3712,6 +3710,66 @@ mod tests {
                     .unwrap())
             })
         }
+    }
+
+    /// Answers Get, Range and GetMany with fixed messages. Each stream sends one frame.
+    #[derive(Clone, Default)]
+    struct FixedQueryTransport {
+        get: proto_query::GetResponse,
+        range: proto_query::RangeFrame,
+        get_many: proto_query::GetManyFrame,
+    }
+
+    impl connectrpc::client::ClientTransport for FixedQueryTransport {
+        type ResponseBody =
+            http_body_util::combinators::UnsyncBoxBody<Bytes, std::convert::Infallible>;
+        type Error = ConnectError;
+
+        fn send(
+            &self,
+            request: http::Request<connectrpc::client::ClientBody>,
+        ) -> connectrpc::client::BoxFuture<
+            'static,
+            Result<http::Response<Self::ResponseBody>, Self::Error>,
+        > {
+            let response = match request.uri().path() {
+                "/store.query.v1.Service/Get" => {
+                    Ok((self.get.encode_to_bytes(), "application/proto"))
+                }
+                "/store.query.v1.Service/Range" => Ok((
+                    stream_body(std::slice::from_ref(&self.range), b"{}"),
+                    "application/connect+proto",
+                )),
+                "/store.query.v1.Service/GetMany" => Ok((
+                    stream_body(std::slice::from_ref(&self.get_many), b"{}"),
+                    "application/connect+proto",
+                )),
+                path => Err(ConnectError::unimplemented(format!(
+                    "unexpected test request path {path}"
+                ))),
+            };
+            Box::pin(async move {
+                let (body, content_type) = response?;
+                let body = http_body_util::BodyExt::boxed_unsync(http_body_util::Full::new(body));
+                Ok(http::Response::builder()
+                    .header(http::header::CONTENT_TYPE, content_type)
+                    .body(body)
+                    .unwrap())
+            })
+        }
+    }
+
+    fn fixed_query_client(
+        transport: FixedQueryTransport,
+        prefix: StoreKeyPrefix,
+    ) -> PrefixedStoreClient {
+        StoreClient::builder()
+            .url("http://query.internal")
+            .retry_config(RetryConfig::disabled())
+            .client_transport(transport)
+            .build()
+            .unwrap()
+            .prefixed(prefix)
     }
 
     #[boxed]
@@ -4306,33 +4364,144 @@ mod tests {
         }
     }
 
+    fn detail_with_extra(sequence_number: u64) -> proto_query::Detail {
+        proto_query::Detail {
+            sequence_number,
+            extra: [(
+                "store_read_ops".to_string(),
+                buffa_types::google::protobuf::Value::from(3.0),
+            )]
+            .into_iter()
+            .collect(),
+            ..Default::default()
+        }
+    }
+
     #[tokio::test]
-    async fn stream_chunks_carry_their_frame_detail() {
-        let transport = SessionSequenceTransport::with_response_sequences([Some(7), Some(9)]);
-        let client = StoreClient::builder()
-            .url("http://query.internal")
-            .retry_config(RetryConfig::disabled())
-            .client_transport(transport)
-            .build()
-            .unwrap()
-            .prefixed(StoreKeyPrefix::identity());
-        let key = Key::from(b"key".to_vec());
-        let start = Key::from(b"a".to_vec());
-        let end = Key::from(b"z".to_vec());
+    async fn stream_chunks_slice_rows_and_keep_their_frame_detail() {
+        let prefix = StoreKeyPrefix::new("tenant/").unwrap();
+        let physical = |key: &'static [u8]| prefix.encode_key(&Bytes::from_static(key)).unwrap();
+        let entry = |key, value: &'static [u8]| exoware_proto::common::Entry {
+            key: physical(key).to_vec(),
+            value: Bytes::from_static(value),
+            ..Default::default()
+        };
+        let get_many_entry = |key, value: Option<&'static [u8]>| proto_query::GetManyEntry {
+            key: physical(key).to_vec(),
+            value: value.map(Bytes::from_static),
+            ..Default::default()
+        };
+        let client = fixed_query_client(
+            FixedQueryTransport {
+                range: proto_query::RangeFrame {
+                    results: vec![entry(b"a", b"1"), entry(b"b", b"")],
+                    detail: detail_with_extra(7).into(),
+                    ..Default::default()
+                },
+                get_many: proto_query::GetManyFrame {
+                    results: vec![
+                        get_many_entry(b"a", Some(b"1")),
+                        get_many_entry(b"b", None),
+                        get_many_entry(b"c", Some(b"")),
+                    ],
+                    detail: detail_with_extra(9).into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            prefix.clone(),
+        );
+        let key = |key: &'static [u8]| Bytes::from_static(key);
 
         let mut range = client
             .query()
-            .range_stream(&start, &end, 1, 1)
+            .range_stream(&key(b"a"), &key(b"z"), 10, 10)
             .await
             .unwrap();
         let chunk = range.next_chunk().await.unwrap().unwrap();
-        assert_eq!(chunk.detail.unwrap().sequence_number, 7);
+        assert_eq!(
+            chunk.rows,
+            vec![(key(b"a"), key(b"1")), (key(b"b"), key(b""))]
+        );
+        assert_eq!(chunk.detail, Some(detail_with_extra(7)));
         assert!(range.next_chunk().await.unwrap().is_none());
+        assert_eq!(range.final_count(), Some(2));
 
-        let mut get_many = client.query().get_many(&[&key], 1).await.unwrap();
+        let mut get_many = client
+            .query()
+            .get_many(&[&key(b"a"), &key(b"b"), &key(b"c")], 10)
+            .await
+            .unwrap();
         let chunk = get_many.next_chunk().await.unwrap().unwrap();
-        assert_eq!(chunk.detail.unwrap().sequence_number, 9);
+        assert_eq!(
+            chunk.entries,
+            vec![
+                (key(b"a"), Some(key(b"1"))),
+                (key(b"b"), None),
+                (key(b"c"), Some(key(b""))),
+            ]
+        );
+        assert_eq!(chunk.detail, Some(detail_with_extra(9)));
         assert!(get_many.next_chunk().await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn stream_rows_outside_the_client_prefix_are_rejected() {
+        let foreign = b"other/key".to_vec();
+        let client = fixed_query_client(
+            FixedQueryTransport {
+                range: proto_query::RangeFrame {
+                    results: vec![exoware_proto::common::Entry {
+                        key: foreign.clone(),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                },
+                get_many: proto_query::GetManyFrame {
+                    results: vec![proto_query::GetManyEntry {
+                        key: foreign,
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            StoreKeyPrefix::new("tenant/").unwrap(),
+        );
+        let key = Bytes::from_static(b"key");
+
+        let mut range = client.query().range_stream(&key, &key, 1, 1).await.unwrap();
+        assert!(matches!(
+            range.next_chunk().await,
+            Err(ClientError::Prefix(StoreKeyPrefixError::PrefixMismatch))
+        ));
+        let mut get_many = client.query().get_many(&[&key], 1).await.unwrap();
+        assert!(matches!(
+            get_many.next_chunk().await,
+            Err(ClientError::Prefix(StoreKeyPrefixError::PrefixMismatch))
+        ));
+    }
+
+    #[tokio::test]
+    async fn get_keeps_empty_values_apart_from_missing_ones() {
+        let key = Bytes::from_static(b"key");
+        for value in [None, Some(Bytes::new()), Some(Bytes::from_static(b"value"))] {
+            let client = fixed_query_client(
+                FixedQueryTransport {
+                    get: proto_query::GetResponse {
+                        value: value.clone(),
+                        detail: detail_with_extra(5).into(),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+                StoreKeyPrefix::identity(),
+            );
+            assert_eq!(client.query().get(&key).await.unwrap(), value);
+            let session = client.create_session();
+            assert_eq!(session.get(&key).await.unwrap(), value);
+            assert_eq!(session.evaluated_sequence(), Some(5));
+        }
     }
 
     #[tokio::test]
@@ -4510,9 +4679,9 @@ mod tests {
     async fn session_policies_observe_stream_frames_without_changing_in_flight_floors() {
         for monotonic in [false, true] {
             let transport = ReduceTransport::new([
-                reduce_body(&[count_frame(Some(47)), count_frame(Some(50))], b"{}"),
-                reduce_body(&[count_frame(Some(48))], b"{}"),
-                reduce_body(&[count_frame(Some(51))], b"{}"),
+                stream_body(&[count_frame(Some(47)), count_frame(Some(50))], b"{}"),
+                stream_body(&[count_frame(Some(48))], b"{}"),
+                stream_body(&[count_frame(Some(51))], b"{}"),
             ]);
             let client = reduce_test_client(transport.clone());
             let session = if monotonic {
