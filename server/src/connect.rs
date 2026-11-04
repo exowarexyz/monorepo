@@ -36,7 +36,6 @@ use exoware_proto::{
             SubscribeResponse,
         },
     },
-    parse_range_traversal_direction,
     prune::{PruneResponse, Service as PruneApi, ServiceServer as PruneServiceServer},
     query::{
         Detail, GetManyEntry, GetManyFrame, GetResponse, RangeFrame, ReduceResponse,
@@ -608,7 +607,7 @@ where
         _ctx: Context,
         request: ServiceRequest<'_, exoware_proto::store::query::v1::RangeRequest>,
     ) -> connectrpc::ServiceResult<connectrpc::ServiceStream<RangeFrame>> {
-        validate::validate_range_request(request.view())?;
+        let direction = validate::validate_range_request(request.view())?;
         ensure_min_sequence_number(
             request.min_sequence_number,
             self.state.query.current_sequence(),
@@ -618,11 +617,7 @@ where
         let end_key: Key = wire.slice_ref(request.end);
         let limit = request.limit.map(|v| v as usize).unwrap_or(usize::MAX);
         let batch_size = (request.batch_size as usize).min(RANGE_STREAM_MAX_FRAME_ROWS);
-        let forward = match parse_range_traversal_direction(request.mode) {
-            Ok(RangeTraversalDirection::Forward) => true,
-            Ok(RangeTraversalDirection::Reverse) => false,
-            Err(e) => return Err(ConnectError::internal(format!("traversal mode: {e:?}"))),
-        };
+        let forward = direction == RangeTraversalDirection::Forward;
         let result = self
             .state
             .query

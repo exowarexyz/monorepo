@@ -19,15 +19,10 @@ pub enum RangeTraversalModeError {
 pub fn parse_range_traversal_direction(
     mode: EnumValue<TraversalMode>,
 ) -> Result<RangeTraversalDirection, RangeTraversalModeError> {
-    if mode.is_unknown() {
-        return Err(RangeTraversalModeError::UnknownWireValue(mode.to_i32()));
-    }
-    match mode
-        .as_known()
-        .expect("known enum variant after is_unknown check")
-    {
-        TraversalMode::TRAVERSAL_MODE_FORWARD => Ok(RangeTraversalDirection::Forward),
-        TraversalMode::TRAVERSAL_MODE_REVERSE => Ok(RangeTraversalDirection::Reverse),
+    match mode.as_known() {
+        Some(TraversalMode::TRAVERSAL_MODE_FORWARD) => Ok(RangeTraversalDirection::Forward),
+        Some(TraversalMode::TRAVERSAL_MODE_REVERSE) => Ok(RangeTraversalDirection::Reverse),
+        None => Err(RangeTraversalModeError::UnknownWireValue(mode.to_i32())),
     }
 }
 
