@@ -3,7 +3,7 @@ use crate::{
     error::QmdbError,
     CurrentBoundaryState,
 };
-use commonware_codec::{Codec, Encode};
+use commonware_codec::Encode;
 use commonware_cryptography::Hasher;
 use commonware_storage::{
     merkle::{
@@ -48,7 +48,7 @@ async fn authenticate_location<M, H, Op, const N: usize, Prove, Fut>(
 where
     M: Graftable,
     H: Hasher,
-    Op: QmdbOperation<M> + Codec,
+    Op: QmdbOperation<M> + Encode,
     Prove: FnMut(Location<M>) -> Fut,
     Fut: Future<Output = Result<(RangeProof<M, H::Digest>, [u8; N]), QmdbError>>,
 {
@@ -117,8 +117,7 @@ pub async fn recover_boundary_state<M, H, Op, const N: usize, Prove, Fut>(
 where
     M: Graftable,
     H: Hasher,
-    Op: QmdbOperation<M> + Codec,
-    Op::Key: AsRef<[u8]>,
+    Op: QmdbOperation<M> + Encode,
     Prove: FnMut(Location<M>) -> Fut,
     Fut: Future<Output = Result<(RangeProof<M, H::Digest>, [u8; N]), QmdbError>>,
 {
@@ -285,15 +284,11 @@ fn validate_recovery_input<F: Family, Op: QmdbOperation<F>>(
     Ok(())
 }
 
-fn changed_chunk_representatives<F: Family, Op, const N: usize>(
+fn changed_chunk_representatives<F: Family, Op: QmdbOperation<F>, const N: usize>(
     operations: &[Op],
     previous_len: usize,
     pruned_chunks: u64,
-) -> BTreeMap<u64, Location<F>>
-where
-    Op: QmdbOperation<F>,
-    Op::Key: AsRef<[u8]>,
-{
+) -> BTreeMap<u64, Location<F>> {
     let previous = &operations[..previous_len];
     let previous_floor = previous
         .last()
@@ -455,7 +450,7 @@ async fn ensure_authenticated_grafted_digest<F, H, Op, const N: usize, Prove, Fu
 where
     F: Graftable,
     H: Hasher,
-    Op: QmdbOperation<F> + Codec,
+    Op: QmdbOperation<F> + Encode,
     Prove: FnMut(Location<F>) -> Fut,
     Fut: Future<Output = Result<(RangeProof<F, H::Digest>, [u8; N]), QmdbError>>,
 {
@@ -501,7 +496,7 @@ async fn changed_grafted_ancestor_digests_for_chunk<F, H, Op, const N: usize, Pr
 where
     F: Graftable,
     H: Hasher,
-    Op: QmdbOperation<F> + Codec,
+    Op: QmdbOperation<F> + Encode,
     Prove: FnMut(Location<F>) -> Fut,
     Fut: Future<Output = Result<(RangeProof<F, H::Digest>, [u8; N]), QmdbError>>,
 {
