@@ -6,7 +6,7 @@ use datafusion::{
     common::{DataFusionError, Result as DataFusionResult},
 };
 use exoware_sdk::{
-    keys::{Key, Prefix},
+    keys::{Key, Prefix, PrefixError, MAX_KEY_LEN},
     kv_codec::{interleave_ordered_key_fields, StoredRow, StoredValue},
 };
 
@@ -311,6 +311,7 @@ fn decode_key_cell(
     Some((value, width))
 }
 
+#[cfg(test)]
 pub(crate) fn encode_primary_key(
     table_prefix: u8,
     pk_values: &[&CellValue],
@@ -334,8 +335,54 @@ pub(crate) fn encode_primary_key_from_row(
     row: &KvRow,
     model: &TableModel,
 ) -> Result<Key, String> {
-    let vals: Vec<&CellValue> = row.primary_key_values(model);
-    encode_primary_key(table_prefix, &vals, model)
+    if table_prefix != model.table_prefix {
+        return Err("table prefix does not match model".to_string());
+    }
+    encode_namespaced_primary_key(&[], row, model)
+}
+
+/// Encode `row`'s primary key behind `namespace`, the Store namespace bytes the key carries on
+/// the wire, or nothing for a logical key. The key is built in one buffer, and the length
+/// limit applies to the whole key including the namespace.
+pub(crate) fn encode_namespaced_primary_key(
+    namespace: &[u8],
+    row: &KvRow,
+    model: &TableModel,
+) -> Result<Key, String> {
+    let mut key = key_buffer(
+        namespace,
+        &model.primary_key_prefix,
+        model.primary_key_width,
+    );
+    for (&idx, &kind) in model
+        .primary_key_indices
+        .iter()
+        .zip(&model.primary_key_kinds)
+    {
+        append_ordered_key_bytes(row.value_at(idx), kind, &mut key)?;
+    }
+    finish_key(key).map_err(|e| format!("failed to encode primary key: {e}"))
+}
+
+/// Start a key buffer with `namespace` and then `family`, with room for `payload_capacity`
+/// more bytes.
+fn key_buffer(namespace: &[u8], family: &Prefix, payload_capacity: usize) -> Vec<u8> {
+    let mut key = Vec::with_capacity(namespace.len() + family.len() + payload_capacity);
+    key.extend_from_slice(namespace);
+    key.extend_from_slice(family.as_bytes());
+    key
+}
+
+/// Check a key built by [`key_buffer`] against the Store key limit, with the same error
+/// [`Prefix::encode`] gives.
+fn finish_key(key: Vec<u8>) -> Result<Key, PrefixError> {
+    if key.len() > MAX_KEY_LEN {
+        return Err(PrefixError::KeyTooLong {
+            len: key.len(),
+            max: MAX_KEY_LEN,
+        });
+    }
+    Ok(Key::from(key))
 }
 
 pub(crate) fn encode_primary_key_bound(
@@ -423,11 +470,14 @@ fn decode_primary_key_payload(
     (offset == payload.len()).then_some(values)
 }
 
-/// Encode a secondary index key for `row`. `pk_payload` is the row's primary
-/// key with its family prefix stripped, which is exactly the suffix every
-/// index key ends with, so callers that already built the primary key pass
-/// it in rather than encoding the key columns again.
+/// Encode a secondary index key for `row` behind `namespace`, as
+/// [`encode_namespaced_primary_key`] does for primary keys. `pk_payload` is
+/// the row's primary key with its namespace and family prefix stripped,
+/// which is exactly the suffix every index key ends with, so callers that
+/// already built the primary key pass it in rather than encoding the key
+/// columns again.
 pub(crate) fn encode_secondary_index_key_with_pk(
+    namespace: &[u8],
     spec: &ResolvedIndexSpec,
     model: &TableModel,
     row: &KvRow,
@@ -436,12 +486,16 @@ pub(crate) fn encode_secondary_index_key_with_pk(
     let index_field_error = |col: &ResolvedColumn, e: String| {
         format!("index '{}' column '{}': {e}", spec.name, col.name)
     };
-    let mut payload = Vec::with_capacity(spec.key_columns_width + pk_payload.len());
+    let mut key = key_buffer(
+        namespace,
+        &spec.prefix,
+        spec.key_columns_width + pk_payload.len(),
+    );
     match spec.layout {
         IndexLayout::Lexicographic => {
             for &col_idx in &spec.key_columns {
                 let col = model.column(col_idx);
-                append_ordered_key_bytes(row.value_at(col_idx), col.kind, &mut payload)
+                append_ordered_key_bytes(row.value_at(col_idx), col.kind, &mut key)
                     .map_err(|e| index_field_error(col, e))?;
             }
         }
@@ -455,13 +509,11 @@ pub(crate) fn encode_secondary_index_key_with_pk(
                         .map_err(|e| index_field_error(col, e))
                 })
                 .collect::<Result<Vec<_>, _>>()?;
-            payload.extend_from_slice(&interleave_ordered_key_fields(&fields));
+            key.extend_from_slice(&interleave_ordered_key_fields(&fields));
         }
     }
-    payload.extend_from_slice(pk_payload);
-    spec.prefix
-        .encode(&payload)
-        .map_err(|e| format!("failed to encode index '{}' key: {e}", spec.name))
+    key.extend_from_slice(pk_payload);
+    finish_key(key).map_err(|e| format!("failed to encode index '{}' key: {e}", spec.name))
 }
 
 /// Encode a secondary index key for `row`, encoding its primary key first.
@@ -474,7 +526,7 @@ pub(crate) fn encode_secondary_index_key(
 ) -> Result<Key, String> {
     let primary_key = encode_primary_key_from_row(table_prefix, row, model)?;
     let pk_payload = &primary_key[model.primary_key_prefix.len()..];
-    encode_secondary_index_key_with_pk(spec, model, row, pk_payload)
+    encode_secondary_index_key_with_pk(&[], spec, model, row, pk_payload)
 }
 
 pub(crate) fn encode_secondary_index_key_from_parts(

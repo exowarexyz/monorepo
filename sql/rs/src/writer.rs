@@ -45,6 +45,19 @@ impl TableWriter {
     /// Encodes `values`, given in table column order, as the base-row entry followed by one
     /// entry per secondary index.
     pub fn encode_row(&self, values: Vec<CellValue>) -> Result<Vec<(Key, Bytes)>, String> {
+        let mut out = Vec::with_capacity(1 + self.index_specs.len());
+        self.encode_row_into(&[], values, &mut out)?;
+        Ok(out)
+    }
+
+    /// Like [`Self::encode_row`], but every key starts with `namespace` and the entries are
+    /// appended to `out`. On error, `out` may hold some of the row's entries.
+    fn encode_row_into(
+        &self,
+        namespace: &[u8],
+        values: Vec<CellValue>,
+        out: &mut Vec<(Key, Bytes)>,
+    ) -> Result<(), String> {
         let row = KvRow { values };
         if row.values.len() != self.model.columns.len() {
             return Err(format!(
@@ -53,16 +66,21 @@ impl TableWriter {
                 row.values.len()
             ));
         }
-        let base_key = encode_primary_key_from_row(self.model.table_prefix, &row, &self.model)?;
+        let base_key = encode_namespaced_primary_key(namespace, &row, &self.model)?;
         let mut stored = stored_row_from_cells(&row, &self.model).map_err(|e| format!("{e}"))?;
-        let pk_payload = base_key.slice(self.model.primary_key_prefix.len()..);
-        let mut out = Vec::with_capacity(1 + self.index_specs.len());
+        let pk_payload = base_key.slice(namespace.len() + self.model.primary_key_prefix.len()..);
         out.push((base_key, stored.encode()));
         for spec in self.index_specs.iter() {
-            let idx_key = encode_secondary_index_key_with_pk(spec, &self.model, &row, &pk_payload)?;
+            let idx_key = encode_secondary_index_key_with_pk(
+                namespace,
+                spec,
+                &self.model,
+                &row,
+                &pk_payload,
+            )?;
             out.push((idx_key, encode_index_value(&mut stored, spec)));
         }
-        Ok(out)
+        Ok(())
     }
 }
 
@@ -80,7 +98,8 @@ pub struct BatchWriter {
     /// The mutex lets upload outcomes be reported through a shared reference.
     failed_prepared: Mutex<Vec<PreparedBatch>>,
     /// Encoded entries not yet taken into a batch, in insert order. Each row adds its
-    /// base entry and then its index entries.
+    /// base entry and then its index entries. Keys are physical: they already start with
+    /// the client's namespace, so staging adds them to a batch without copying their bytes.
     pub(crate) pending_entries: Vec<(Key, Bytes)>,
 }
 
@@ -93,7 +112,8 @@ pub struct BatchWriter {
 pub struct PreparedBatch {
     /// Writer-assigned ID retained across retries.
     request_id: u64,
-    /// Encoded entries in insert order, retained until the upload outcome is reported.
+    /// Encoded entries in insert order, with physical keys, retained until the upload
+    /// outcome is reported.
     entries: Vec<(Key, Bytes)>,
 }
 
@@ -157,13 +177,17 @@ impl BatchWriter {
             .tables
             .get(table_name)
             .ok_or_else(|| format!("unknown table '{table_name}'"))?;
-        let entries = writer.encode_row(values)?;
-        for (key, _) in &entries {
-            self.client
-                .encode_store_key(key)
-                .map_err(|e| e.to_string())?;
+        // Keys are built with the client's namespace in place, which also enforces the Store
+        // key limit under the namespace. A row that fails leaves nothing buffered.
+        let start = self.pending_entries.len();
+        if let Err(e) = writer.encode_row_into(
+            self.client.key_prefix().prefix(),
+            values,
+            &mut self.pending_entries,
+        ) {
+            self.pending_entries.truncate(start);
+            return Err(e);
         }
-        self.pending_entries.extend(entries);
         Ok(self)
     }
 
@@ -219,9 +243,10 @@ impl BatchWriter {
         prepared: &PreparedBatch,
         batch: &mut StoreWriteBatch,
     ) -> DataFusionResult<()> {
+        batch.reserve(prepared.entries.len());
         for (key, value) in &prepared.entries {
             batch
-                .push(&self.client, key, value)
+                .push_physical(&self.client, key.clone(), value)
                 .map_err(|e| DataFusionError::External(Box::new(e)))?;
         }
         Ok(())
@@ -366,8 +391,9 @@ pub(crate) fn encode_insert_entries(
         out.push((base_key, stored.encode()));
 
         for spec in index_specs {
-            let secondary_key = encode_secondary_index_key_with_pk(spec, model, &row, &pk_payload)
-                .map_err(DataFusionError::Execution)?;
+            let secondary_key =
+                encode_secondary_index_key_with_pk(&[], spec, model, &row, &pk_payload)
+                    .map_err(DataFusionError::Execution)?;
             out.push((secondary_key, encode_index_value(&mut stored, spec)));
         }
     }
@@ -1028,6 +1054,87 @@ mod tests {
             .unwrap_err();
         assert!(err.contains("exceeds max"), "{err}");
         assert_eq!(writer.pending_count(), 0);
+    }
+
+    fn namespaced_orders_schema(client: PrefixedStoreClient) -> crate::KvSchema {
+        crate::KvSchema::new(client)
+            .table(
+                "orders",
+                vec![
+                    TableColumnConfig::new("id", DataType::UInt64, false),
+                    TableColumnConfig::new("status", DataType::Utf8, false),
+                    TableColumnConfig::new("amount", DataType::Int64, false),
+                ],
+                vec!["id".into()],
+                vec![IndexSpec::new("by_status", vec!["status".into()]).unwrap()],
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn staged_namespaced_entries_match_pushed_logical_entries() {
+        let client = StoreClient::new("http://127.0.0.1:1")
+            .prefixed(StoreKeyPrefix::new(Bytes::from_static(b"ns/")).unwrap());
+        let mut writer = namespaced_orders_schema(client.clone()).batch_writer();
+        let rows = || {
+            (0..3u64).map(|i| {
+                vec![
+                    CellValue::UInt64(i),
+                    CellValue::Utf8(format!("status-{i}")),
+                    CellValue::Int64(i as i64 * 10),
+                ]
+            })
+        };
+        for row in rows() {
+            writer.insert("orders", row).unwrap();
+        }
+        let prepared = writer.prepare_flush().unwrap().expect("rows pending");
+        let mut staged = StoreWriteBatch::new();
+        writer.stage_flush(&prepared, &mut staged).unwrap();
+
+        // Building keys with the namespace in place stages the same rows as encoding logical
+        // keys and letting `push` add the namespace.
+        let mut pushed = StoreWriteBatch::new();
+        for row in rows() {
+            for (key, value) in writer.tables["orders"].encode_row(row).unwrap() {
+                pushed.push(&client, &key, value).unwrap();
+            }
+        }
+        assert_eq!(staged.len(), 6);
+        assert_eq!(staged.entries(), pushed.entries());
+        assert_eq!(staged.encoded_len(), pushed.encoded_len());
+    }
+
+    #[test]
+    fn insert_rejecting_an_index_key_buffers_nothing_from_the_row() {
+        let client = StoreClient::new("http://127.0.0.1:1")
+            .prefixed(StoreKeyPrefix::new(Bytes::from_static(b"ns/")).unwrap());
+        let mut writer = namespaced_orders_schema(client).batch_writer();
+        writer
+            .insert(
+                "orders",
+                vec![
+                    CellValue::UInt64(1),
+                    CellValue::Utf8("open".into()),
+                    CellValue::Int64(1),
+                ],
+            )
+            .unwrap();
+
+        // The base key fits. The index key (3-byte namespace, family byte, 246-byte status,
+        // 8-byte id) does not, and it is built after the base entry was appended.
+        let err = writer
+            .insert(
+                "orders",
+                vec![
+                    CellValue::UInt64(2),
+                    CellValue::Utf8("s".repeat(245)),
+                    CellValue::Int64(2),
+                ],
+            )
+            .unwrap_err();
+        assert!(err.contains("exceeds max"), "{err}");
+        assert_eq!(writer.pending_count(), 2);
     }
 
     fn extract_row_from_batch(
