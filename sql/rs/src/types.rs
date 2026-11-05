@@ -685,6 +685,7 @@ pub(crate) struct KvRow {
 }
 
 impl KvRow {
+    #[cfg(test)]
     pub(crate) fn primary_key_values(&self, model: &TableModel) -> Vec<&CellValue> {
         model
             .primary_key_indices
