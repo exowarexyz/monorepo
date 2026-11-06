@@ -126,7 +126,7 @@ async fn boundary_from_source_db(
     previous_operations: Option<&[BatchOperation]>,
     operations: &[BatchOperation],
 ) -> CurrentBoundaryState<Digest, N, mmr::Family> {
-    let ops_root_witness = db.ops_root_witness().await.expect("ops root witness");
+    let ops_root_witness = db.ops_root_witness().clone();
     recover_boundary_state::<mmr::Family, Sha256, _, N, _, _>(
         previous_operations,
         operations,
@@ -211,14 +211,7 @@ async fn build_source_tips(
                     for (key, value) in writes {
                         batch = batch.write(key, value);
                     }
-                    batch
-                        .merkleize(
-                            &db,
-                            None::<Vec<u8>>,
-                            &mut commonware_storage::qmdb::floor::Proportional,
-                        )
-                        .await
-                        .expect("merkleize")
+                    batch.merkleize(&db).await.expect("merkleize")
                 };
                 db = db.apply_batch(finalized).await.expect("apply");
 

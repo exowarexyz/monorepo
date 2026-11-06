@@ -14,7 +14,7 @@ use commonware_storage::{
         any::value::{FixedEncoding, ValueEncoding, VariableEncoding},
         immutable, keyless,
         operation::Key as QmdbKey,
-        verify_proof_and_pinned_nodes,
+        verify::ProofExt as _,
     },
     translator::TwoCap,
 };
@@ -93,7 +93,7 @@ fn keyless_fixed_full_config(prefix: &str) -> keyless::fixed::Config<Sequential>
 fn immutable_fixed_full_config(prefix: &str) -> immutable::fixed::Config<TwoCap, Sequential> {
     let cache = page_cache();
     immutable::Config {
-        merkle_config: common::merkle_config(prefix, cache.clone()),
+        merkle: common::merkle_config(prefix, cache.clone()),
         log: fixed_journal_config(prefix, cache),
         translator: TwoCap,
         init_buffer: NZUsize!(1024),
@@ -148,7 +148,9 @@ macro_rules! source {
                         index += 1;
                     }
                     let batch = batch
-                        .merkleize(&db, Some($value(200 + batch_index as u8)), floor)
+                        .with_metadata($value(200 + batch_index as u8))
+                        .with_inactivity_floor(floor)
+                        .merkleize(&db)
                         .await
                         .expect("merkleize source batch");
                     let (start, operations) = batch.operations();
@@ -169,8 +171,7 @@ macro_rules! source {
                     // Capture and authenticate the source suffix before compact history is discarded
                     let proof = batch.proof(&db).expect("source batch proof");
                     let pinned_nodes = batch.pinned_nodes(&db).expect("source pinned frontier");
-                    assert!(verify_proof_and_pinned_nodes::<Sha256, _, _>(
-                        &proof,
+                    assert!(proof.verify_with_pinned_nodes::<Sha256, _>(
                         start,
                         &operations,
                         &pinned_nodes,

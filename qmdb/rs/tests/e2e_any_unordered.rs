@@ -96,14 +96,7 @@ async fn build_variable_source() -> VariableSource {
                     .new_batch()
                     .write(b"alpha".to_vec(), Some(b"one".to_vec()))
                     .write(b"beta".to_vec(), Some(b"two".to_vec()));
-                batch
-                    .merkleize(
-                        &db,
-                        None::<Vec<u8>>,
-                        &mut commonware_storage::qmdb::floor::Proportional,
-                    )
-                    .await
-                    .expect("merkleize")
+                batch.merkleize(&db).await.expect("merkleize")
             };
             db = db.apply_batch(finalized).await.expect("apply");
 
@@ -144,11 +137,8 @@ async fn build_fixed_source() -> FixedSource {
             use commonware_runtime::{buffer::paged::CacheRef, Supervisor as _};
             let page_cache = CacheRef::new(NZU16!(64), NZUsize!(8));
             let cfg = commonware_storage::qmdb::any::Config {
-                merkle_config: common::merkle_config(
-                    "any_unordered_fixed_mmr_source",
-                    page_cache.clone(),
-                ),
-                journal_config: FixedJournalConfig {
+                merkle: common::merkle_config("any_unordered_fixed_mmr_source", page_cache.clone()),
+                log: FixedJournalConfig {
                     partition: "any_unordered_fixed_mmr_source-log".to_string(),
                     items_per_blob: NZU64!(8),
                     page_cache,
@@ -174,14 +164,7 @@ async fn build_fixed_source() -> FixedSource {
                     .new_batch()
                     .write(alpha, Some(one))
                     .write(beta, Some(two));
-                batch
-                    .merkleize(
-                        &db,
-                        None::<Digest>,
-                        &mut commonware_storage::qmdb::floor::Proportional,
-                    )
-                    .await
-                    .expect("merkleize fixed")
+                batch.merkleize(&db).await.expect("merkleize fixed")
             };
             db = db.apply_batch(finalized).await.expect("apply fixed");
 

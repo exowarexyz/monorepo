@@ -133,7 +133,7 @@ async fn boundary_from_source_db(
     previous_operations: Option<&[BatchOperation]>,
     operations: &[BatchOperation],
 ) -> CurrentBoundaryState<Digest, N, mmr::Family> {
-    let ops_root_witness = db.ops_root_witness().await.expect("ops root witness");
+    let ops_root_witness = db.ops_root_witness().clone();
     recover_boundary_state::<mmr::Family, Sha256, _, N, _, _>(
         previous_operations,
         operations,
@@ -216,14 +216,7 @@ async fn build_source_batch() -> SourceBatch {
                         .new_batch()
                         .write(b"alpha".to_vec(), Some(b"one".to_vec()))
                         .write(b"beta".to_vec(), Some(b"two".to_vec()));
-                    batch
-                        .merkleize(
-                            &db,
-                            None::<Vec<u8>>,
-                            &mut commonware_storage::qmdb::floor::Proportional,
-                        )
-                        .await
-                        .expect("merkleize")
+                    batch.merkleize(&db).await.expect("merkleize")
                 };
                 db = db.apply_batch(finalized).await.expect("apply");
 
@@ -262,7 +255,7 @@ async fn boundary_from_mmb_source_db(
     db: &MmbCurrentDb,
     operations: &[MmbBatchOperation],
 ) -> CurrentBoundaryState<Digest, N, mmb::Family> {
-    let ops_root_witness = db.ops_root_witness().await.expect("ops root witness");
+    let ops_root_witness = db.ops_root_witness().clone();
     recover_boundary_state::<mmb::Family, Sha256, _, N, _, _>(
         None,
         operations,
@@ -319,14 +312,7 @@ async fn build_mmb_source_batch() -> MmbSourceBatch {
                         .new_batch()
                         .write(b"alpha".to_vec(), Some(alpha_value))
                         .write(key, Some(value));
-                    batch
-                        .merkleize(
-                            &db,
-                            None::<Vec<u8>>,
-                            &mut commonware_storage::qmdb::floor::Proportional,
-                        )
-                        .await
-                        .expect("merkleize")
+                    batch.merkleize(&db).await.expect("merkleize")
                 };
                 db = db.apply_batch(finalized).await.expect("apply");
 
@@ -398,14 +384,7 @@ async fn build_mmb_growing_source_batch() -> MmbGrowingSourceBatch {
                         .new_batch()
                         .write(b"alpha".to_vec(), Some(alpha_value))
                         .write(key, Some(value));
-                    batch
-                        .merkleize(
-                            &db,
-                            None::<Vec<u8>>,
-                            &mut commonware_storage::qmdb::floor::Proportional,
-                        )
-                        .await
-                        .expect("merkleize")
+                    batch.merkleize(&db).await.expect("merkleize")
                 };
                 db = db.apply_batch(finalized).await.expect("apply");
 
@@ -559,7 +538,7 @@ async fn test_ordered_current_state_sync_from_connect_api_reconstructs_current_d
                 op_cfg(),
                 NZU64!(8),
             );
-            let db: CurrentDb = qmdb_sync::sync(qmdb_sync::engine::Config {
+            let db: CurrentDb = qmdb_sync::sync(qmdb_sync::Config {
                 context: context.child("current_ordered_variable_mmr_sync_target"),
                 source: resolver,
                 target,
@@ -642,7 +621,7 @@ async fn test_ordered_mmb_current_state_sync_from_nonzero_connect_api_reconstruc
                 op_cfg(),
                 NZU64!(8),
             );
-            let db: MmbCurrentDb = qmdb_sync::sync(qmdb_sync::engine::Config {
+            let db: MmbCurrentDb = qmdb_sync::sync(qmdb_sync::Config {
                 context: context.child("current_ordered_variable_mmb_nonzero_sync_target"),
                 source: resolver,
                 target,
@@ -710,10 +689,10 @@ async fn test_ordered_mmb_sync_source_returns_pinned_nodes_for_nonzero_fetches()
     };
     assert!(!pinned_nodes.is_empty());
     let elements = [op.encode()];
-    assert!(proof.verify_proof_and_pinned_nodes(
+    assert!(proof.verify_range_inclusion_with_pinned_nodes(
         &hasher,
-        &elements,
         start,
+        &elements,
         &pinned_nodes,
         &source.ops_root,
     ));
@@ -725,10 +704,10 @@ async fn test_ordered_mmb_sync_source_returns_pinned_nodes_for_nonzero_fetches()
         )
         .await
         .expect("current nonzero sync target");
-    assert!(proof.verify_proof_and_pinned_nodes(
+    assert!(proof.verify_range_inclusion_with_pinned_nodes(
         &hasher,
-        &elements,
         start,
+        &elements,
         &pinned_nodes,
         &current_target.root,
     ));
@@ -1254,7 +1233,7 @@ async fn test_ordered_mmb_operation_log_any_sync_from_connect_api_reconstructs_a
                 op_cfg(),
                 NZU64!(8),
             );
-            let db: MmbAnyDb = qmdb_sync::sync(qmdb_sync::engine::Config {
+            let db: MmbAnyDb = qmdb_sync::sync(qmdb_sync::Config {
                 context: context.child("any_ordered_variable_mmb_sync_target"),
                 source: resolver,
                 target,
@@ -1325,7 +1304,7 @@ async fn test_ordered_mmb_operation_log_any_sync_from_nonzero_connect_api_recons
                 op_cfg(),
                 NZU64!(8),
             );
-            let db: MmbAnyDb = qmdb_sync::sync(qmdb_sync::engine::Config {
+            let db: MmbAnyDb = qmdb_sync::sync(qmdb_sync::Config {
                 context: context.child("any_ordered_variable_mmb_nonzero_sync_target"),
                 source: resolver,
                 target,
@@ -1416,7 +1395,7 @@ async fn test_ordered_mmb_operation_log_any_sync_accepts_target_update_from_grow
                 op_cfg(),
                 NZU64!(8),
             );
-            let db: MmbAnyDb = qmdb_sync::sync(qmdb_sync::engine::Config {
+            let db: MmbAnyDb = qmdb_sync::sync(qmdb_sync::Config {
                 context: context.child("any_ordered_variable_mmb_growing_sync_target"),
                 source: resolver,
                 target: initial_target,

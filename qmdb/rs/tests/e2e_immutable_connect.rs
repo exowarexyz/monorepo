@@ -102,16 +102,14 @@ async fn build_source_batch() -> SourceBatch {
                     .new_batch()
                     .set(key_a, b"alpha".to_vec())
                     .set(key_b, b"beta".to_vec());
-                batch
-                    .merkleize(&db, None::<Vec<u8>>, db.inactivity_floor_loc())
-                    .await
-                    .expect("merkleize")
+                batch.merkleize(&db).await.expect("merkleize")
             };
             db = db.apply_batch(finalized).await.expect("apply");
             let finalized = {
                 let batch = db.new_batch().set(key_c, b"gamma".to_vec());
                 batch
-                    .merkleize(&db, None::<Vec<u8>>, db.bounds().end - 1)
+                    .with_inactivity_floor(db.bounds().end - 1)
+                    .merkleize(&db)
                     .await
                     .expect("merkleize")
             };

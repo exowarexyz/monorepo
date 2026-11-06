@@ -112,17 +112,15 @@ where
                     .append(b"fifth-value".to_vec())
                     .append(b"sixth-value".to_vec())
                     .append(b"seventh-value".to_vec());
-                batch
-                    .merkleize(&db, None::<Vec<u8>>, db.inactivity_floor_loc())
-                    .await
-                    .expect("merkleize")
+                batch.merkleize(&db).await.expect("merkleize")
             };
             db = db.apply_batch(finalized).await.expect("apply");
 
             let finalized = {
                 let batch = db.new_batch().append(b"eighth-value".to_vec());
                 batch
-                    .merkleize(&db, None::<Vec<u8>>, db.bounds().end - 1)
+                    .with_inactivity_floor(db.bounds().end - 1)
+                    .merkleize(&db)
                     .await
                     .expect("merkleize")
             };
@@ -139,7 +137,8 @@ where
             let finalized = {
                 let batch = db.new_batch().append(b"ninth-value".to_vec());
                 batch
-                    .merkleize(&db, None::<Vec<u8>>, db.bounds().end - 1)
+                    .with_inactivity_floor(db.bounds().end - 1)
+                    .merkleize(&db)
                     .await
                     .expect("merkleize")
             };
@@ -206,10 +205,7 @@ where
             let second = commonware_cryptography::Sha256::fill(0x22);
             let finalized = {
                 let batch = db.new_batch().append(first).append(second);
-                batch
-                    .merkleize(&db, None::<Digest>, db.inactivity_floor_loc())
-                    .await
-                    .expect("merkleize")
+                batch.merkleize(&db).await.expect("merkleize")
             };
             db = db.apply_batch(finalized).await.expect("apply fixed");
 
@@ -339,8 +335,8 @@ where
         .proof
         .verify_range_inclusion_and_extract_digests(
             &hasher,
-            &suffix_checkpoint.encoded_operations,
             suffix_checkpoint.start_location,
+            &suffix_checkpoint.encoded_operations,
             &suffix_checkpoint.ops_root,
         )
         .expect("verify suffix range");

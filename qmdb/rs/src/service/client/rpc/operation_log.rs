@@ -24,7 +24,7 @@ use commonware_storage::{
         sync::{
             source, Request as SyncRequest, Response as SyncResponse, Source, Target as SyncTarget,
         },
-        verify::{verify_multi_proof, verify_proof_and_pinned_nodes},
+        verify::ProofExt,
     },
 };
 use commonware_utils::range::NonEmptyRange;
@@ -486,7 +486,7 @@ where
         .collect::<Result<Vec<_>, QmdbError>>()?;
     let target_root =
         operation_target_root::<F, H>(&proto.ops_root, &proto.ops_root_witness, root)?;
-    if !verify_multi_proof::<H, _, _>(proof, &operations, &target_root) {
+    if !proof.verify_multi::<H, _>(&operations, &target_root) {
         return Err(QmdbError::ProofVerification {
             kind: crate::ProofKind::BatchMulti,
         });
@@ -541,8 +541,7 @@ where
         .iter()
         .map(|bytes| decode_digest::<H::Digest>(bytes.as_ref(), "operation range pinned node"))
         .collect::<Result<Vec<_>, QmdbError>>()?;
-    if !verify_proof_and_pinned_nodes::<H, _, _>(
-        &proof,
+    if !proof.verify_with_pinned_nodes::<H, _>(
         start,
         &decoded_operations,
         &pinned_nodes,

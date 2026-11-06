@@ -468,9 +468,7 @@ macro_rules! current_boundary {
                 &$ops,
                 $db.root(),
                 0,
-                $db.ops_root_witness()
-                    .await
-                    .expect("source ops root witness"),
+                $db.ops_root_witness().clone(),
                 |location| common::current_proof_chunk(source.range_proof(location, NZU64!(1))),
             )
             .await
@@ -563,14 +561,7 @@ macro_rules! case {
                                 .write(source_keys[1].clone(), None)
                                 .write(source_keys[2].clone(), Some(values[1].clone()))
                         };
-                        let batch = batch
-                            .merkleize(
-                                &db,
-                                None::<V>,
-                                &mut commonware_storage::qmdb::floor::Proportional,
-                            )
-                            .await
-                            .expect("source merkleize");
+                        let batch = batch.merkleize(&db).await.expect("source merkleize");
                         let (start, appended) = batch.operations();
                         let batch_root = batch.root();
                         let captured: Option<(Proof<F, Digest>, Vec<Digest>)> =

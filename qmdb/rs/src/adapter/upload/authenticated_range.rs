@@ -345,7 +345,7 @@ mod tests {
     use bytes::BufMut;
     use commonware_codec::{Buf, DecodeExt, FixedSize, Read, Write};
     use commonware_cryptography::{sha256::Digest as Sha256Digest, Sha256};
-    use commonware_parallel::{mocks::Explorer, Rayon, Sequential};
+    use commonware_parallel::{mocks::Explorer, rayon::ThreadPoolBuilder, Rayon, Sequential};
     use commonware_storage::{
         merkle::{mem::Mem, mmb, mmr},
         qmdb::{
@@ -876,10 +876,10 @@ mod tests {
             let proof = memory
                 .range_proof(&hasher, bootstrap.start_location..end, 0)
                 .expect("served proof");
-            assert!(proof.verify_proof_and_pinned_nodes(
+            assert!(proof.verify_range_inclusion_with_pinned_nodes(
                 &hasher,
-                &encoded[*bootstrap.start_location as usize..],
                 bootstrap.start_location,
+                &encoded[*bootstrap.start_location as usize..],
                 &bootstrap.pinned_nodes,
                 &ranges[2].root,
             ));
@@ -941,8 +941,10 @@ mod tests {
 
     fn assert_parallel_preparation<F: Family + PartialEq>() {
         // Force parallel work even for this small fixture
-        let strategy =
-            Explorer::parallel(&Rayon::new(NonZeroUsize::new(2).unwrap()).expect("Rayon strategy"));
+        let strategy = Explorer::parallel(
+            &Rayon::new(ThreadPoolBuilder::new(NonZeroUsize::new(2).unwrap()))
+                .expect("Rayon strategy"),
+        );
         for floor in [0, 512] {
             let mut operations = vec![FixedKeylessOperation::<F>::Commit(None, Location::new(0))];
             operations.extend(
@@ -1083,8 +1085,8 @@ mod tests {
         let extracted = proof
             .verify_range_inclusion_and_extract_digests(
                 &commonware_storage::qmdb::hasher::<Sha256>(),
-                &authenticated.encoded_operations,
                 authenticated.start_location,
+                &authenticated.encoded_operations,
                 &authenticated.root,
             )
             .expect("verify source proof");

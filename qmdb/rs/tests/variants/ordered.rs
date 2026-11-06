@@ -18,6 +18,7 @@ use commonware_storage::{
         },
         current::ordered::proof::constant::ExclusionProof,
         operation::Key as QmdbKey,
+        verify::ProofExt as _,
     },
 };
 use commonware_utils::{
@@ -868,15 +869,12 @@ macro_rules! capture_source_batch {
         let pinned_nodes = $batch
             .pinned_nodes(&$db)
             .expect("source batch pins before apply");
-        assert!(
-            commonware_storage::qmdb::verify::verify_proof_and_pinned_nodes::<Sha256, _, _>(
-                &proof,
-                start_location,
-                operations.as_slice(),
-                &pinned_nodes,
-                &root,
-            )
-        );
+        assert!(proof.verify_with_pinned_nodes::<Sha256, _>(
+            start_location,
+            operations.as_slice(),
+            &pinned_nodes,
+            &root,
+        ));
         Some(SourcePacket::<$family> {
             start_location,
             proof,
@@ -904,14 +902,7 @@ macro_rules! source_snapshot {
             )
             .await
             .expect("source historical proof");
-        assert!(
-            commonware_storage::qmdb::verify::verify_proof::<Sha256, _, _>(
-                &proof,
-                Location::new(0),
-                &operations,
-                &root,
-            )
-        );
+        assert!(proof.verify::<Sha256, _>(Location::new(0), &operations, &root,));
         let captured = $captured.expect("captured any batch proof");
         assert_eq!(
             captured.encoded_operations,
@@ -949,14 +940,7 @@ macro_rules! source_snapshot {
             )
             .await
             .expect("source historical proof");
-        assert!(
-            commonware_storage::qmdb::verify::verify_proof::<Sha256, _, _>(
-                &proof,
-                Location::new(0),
-                &operations,
-                &ops_root,
-            )
-        );
+        assert!(proof.verify::<Sha256, _>(Location::new(0), &operations, &ops_root,));
         let activity = (0..*end)
             .map(|location| $db.bitmap().get_bit(location))
             .collect();
@@ -970,7 +954,7 @@ macro_rules! source_snapshot {
             &operations,
             root,
             0,
-            $db.ops_root_witness().await.expect("source root witness"),
+            $db.ops_root_witness().clone(),
             |location| common::current_proof_chunk($db.range_proof(location, NZU64!(1))),
         )
         .await
@@ -988,15 +972,12 @@ macro_rules! source_snapshot {
             .pinned_nodes_at(start)
             .await
             .expect("source current batch pins");
-        assert!(
-            commonware_storage::qmdb::verify::verify_proof_and_pinned_nodes::<Sha256, _, _>(
-                &proof,
-                start,
-                &packet_ops,
-                &pinned_nodes,
-                &ops_root,
-            )
-        );
+        assert!(proof.verify_with_pinned_nodes::<Sha256, _>(
+            start,
+            &packet_ops,
+            &pinned_nodes,
+            &ops_root,
+        ));
         let packet = SourcePacket {
             start_location: start,
             proof,
@@ -1071,14 +1052,7 @@ macro_rules! variant_case {
                                 values.remove(&key);
                             }
                         }
-                        let finalized = batch
-                            .merkleize(
-                                &db,
-                                None::<$fixture::Value>,
-                                &mut commonware_storage::qmdb::floor::Proportional,
-                            )
-                            .await
-                            .expect("source merkleize");
+                        let finalized = batch.merkleize(&db).await.expect("source merkleize");
                         let captured = capture_source_batch!($state, $family, db, finalized);
                         let batch_root = finalized.root();
                         db = db.apply_batch(finalized).await.expect("source apply");
