@@ -3,7 +3,7 @@
 //! Public ordered source variants through shared native and Connect adapters
 
 use crate::common;
-use commonware_codec::{Codec, Decode as _, Encode, Read};
+use commonware_codec::{Codec, Encode, Read};
 use commonware_cryptography::Sha256;
 use commonware_parallel::Sequential;
 use commonware_runtime::{
@@ -25,7 +25,7 @@ use commonware_utils::{bitmap::Readable as _, iter::zip_eq, sequence::FixedBytes
 use exoware_qmdb::{
     adapter::upload::{
         prepare_authenticated_range, prepare_publication, stage_authenticated_range,
-        stage_watermark, AuthenticatedOperationRange, Publication, PublicationCfg, UploadOperation,
+        stage_watermark, AuthenticatedOperationRange, Publication, UploadOperation,
     },
     proof::VerifiedKeyLookup,
     service::{
@@ -43,9 +43,6 @@ use std::{collections::BTreeMap, fmt::Debug, sync::Arc};
 const N: usize = 32;
 type Digest = commonware_cryptography::sha256::Digest;
 type Operation<F, K, E> = ordered::Operation<F, K, E>;
-
-/// Upper bound on each decoded publication's operations, bitmap chunks, and grafted nodes.
-const PUBLICATION_LIMIT: usize = 64;
 
 const KEY_BYTES: [&[u8]; 7] = [
     b"\x10\x20\x30",
@@ -189,9 +186,10 @@ struct Snapshot<F: Graftable, Op, K, V, P> {
     root: Digest,
     ops_root: Digest,
     operations: Vec<Op>,
-    packet: SourcePacket<F>,
-    /// Current publications covering the packet, starting with the initial one in the first
-    /// snapshot.
+    /// Operation range that uploads a database without current state.
+    packet: Option<SourcePacket<F>>,
+    /// Current publications covering the new operations, starting with the initial one in the
+    /// first snapshot.
     publications: Option<Vec<P>>,
     activity: Option<Vec<bool>>,
     values: BTreeMap<K, V>,
@@ -308,49 +306,18 @@ async fn verify_snapshots<F, K, V, E>(
         assert!(count > previous_count);
         let tip = Location::<F>::new(count as u64 - 1);
         let delta = snapshot.operations[previous_count..].to_vec();
-        let packet = &snapshot.packet;
-        assert_eq!(*packet.start_location, previous_count as u64);
-        assert_eq!(
-            packet.encoded_operations,
-            delta
-                .iter()
-                .map(|operation| operation.encode().to_vec())
-                .collect::<Vec<_>>()
-        );
-        let range = AuthenticatedOperationRange {
-            start_location: packet.start_location,
-            end_location: packet.proof.leaves,
-            inactive_peaks: packet.proof.inactive_peaks,
-            pinned_nodes: &packet.pinned_nodes,
-            encoded_operations: &packet.encoded_operations,
-        };
-        assert!(
-            prepare_authenticated_range::<F, Sha256, Operation<F, K, E>, Sequential>(
-                &range,
-                &wrong_root,
-                &op_cfg,
-                &Sequential,
-            )
-            .is_err()
-        );
+        let encoded_delta = delta
+            .iter()
+            .map(|operation| operation.encode().to_vec())
+            .collect::<Vec<_>>();
         let mut data = StoreWriteBatch::new();
         match &snapshot.publications {
-            // Current batches travel as encoded publications that tile the packet and are
-            // verified after decoding against their own trusted roots
+            // Current batches travel as encoded publications that tile the new operations and
+            // are verified after decoding against their own trusted roots
             Some(publications) => {
-                let publication_cfg = PublicationCfg {
-                    operation: op_cfg.clone(),
-                    operations: (0..=PUBLICATION_LIMIT).into(),
-                    chunks: (0..=PUBLICATION_LIMIT).into(),
-                    grafted_nodes: (0..=PUBLICATION_LIMIT).into(),
-                };
-                let mut next = packet.start_location;
+                let mut next = Location::new(previous_count as u64);
                 for publication in publications {
-                    let decoded = Publication::<F, Digest, ordered::Update<K, E>, N>::decode_cfg(
-                        publication.encode(),
-                        &publication_cfg,
-                    )
-                    .expect("publication must decode");
+                    let decoded = common::decode_publication(publication, op_cfg.clone());
                     assert_eq!(decoded.start, next);
                     let end = *decoded.start as usize + decoded.operations.len();
                     assert_eq!(
@@ -383,6 +350,28 @@ async fn verify_snapshots<F, K, V, E>(
                 );
             }
             None => {
+                let packet = snapshot
+                    .packet
+                    .as_ref()
+                    .expect("operation-log snapshot must carry a packet");
+                assert_eq!(*packet.start_location, previous_count as u64);
+                assert_eq!(packet.encoded_operations, encoded_delta);
+                let range = AuthenticatedOperationRange {
+                    start_location: packet.start_location,
+                    end_location: packet.proof.leaves,
+                    inactive_peaks: packet.proof.inactive_peaks,
+                    pinned_nodes: &packet.pinned_nodes,
+                    encoded_operations: &packet.encoded_operations,
+                };
+                assert!(
+                    prepare_authenticated_range::<F, Sha256, Operation<F, K, E>, Sequential>(
+                        &range,
+                        &wrong_root,
+                        &op_cfg,
+                        &Sequential
+                    )
+                    .is_err()
+                );
                 let prepared = prepare_authenticated_range::<
                     F,
                     Sha256,
@@ -417,8 +406,8 @@ async fn verify_snapshots<F, K, V, E>(
         if count == snapshots.last().unwrap().operations.len() {
             let request = GetOperationRangeRequest {
                 tip: *tip,
-                start_location: *packet.start_location,
-                max_locations: packet.encoded_operations.len() as u32,
+                start_location: previous_count as u64,
+                max_locations: encoded_delta.len() as u32,
                 ..Default::default()
             };
             let response = common::operation_log_rpc_client(&url)
@@ -432,7 +421,7 @@ async fn verify_snapshots<F, K, V, E>(
                 &snapshot.root,
                 &request,
                 &response,
-                &packet.encoded_operations,
+                &encoded_delta,
             );
 
             if case_name.starts_with("test_current_ordered_variable_variable_keys_variable_values_")
@@ -912,7 +901,7 @@ async fn verify_snapshots<F, K, V, E>(
 }
 
 macro_rules! capture_source_batch {
-    (any, $family:ty, $db:ident, $batch:ident, $previous:ident) => {{
+    (any, $family:ty, $db:ident, $batch:ident) => {{
         let (start_location, operations) = $batch.operations();
         let root = $batch.root();
         let proof = $batch.proof(&$db).expect("source batch proof before apply");
@@ -935,10 +924,10 @@ macro_rules! capture_source_batch {
                 .collect(),
         })
     }};
-    (current, $family:ty, $db:ident, $batch:ident, $previous:ident) => {{
+    (current, $family:ty, $db:ident, $batch:ident) => {{
         // A new database's initial commit precedes its first batch
         let mut publications = Vec::new();
-        if $previous.is_empty() {
+        if $db.bounds().end == Location::new(1) {
             publications
                 .push(Publication::initial(&$db).expect("initial publication must be readable"));
         }
@@ -984,7 +973,7 @@ macro_rules! source_snapshot {
             assert_eq!(*captured.start_location, $previous.len() as u64);
             captured
         };
-        (root, root, operations, packet, None, None)
+        (root, root, operations, Some(packet), None, None)
     }};
     (current, $family:ty, $db:ident, $previous:ident, $captured:ident) => {{
         let root = $db.root();
@@ -1002,39 +991,11 @@ macro_rules! source_snapshot {
         let activity = (0..*end)
             .map(|location| $db.bitmap().get_bit(location))
             .collect();
-        let start = Location::new($previous.len() as u64);
-        let (proof, packet_ops) = $db
-            .ops_historical_proof(
-                end,
-                start,
-                std::num::NonZeroU64::new(*end - *start).unwrap(),
-            )
-            .await
-            .expect("source current batch ops proof");
-        let pinned_nodes = $db
-            .pinned_nodes_at(start)
-            .await
-            .expect("source current batch pins");
-        assert!(proof.verify_with_pinned_nodes::<Sha256, _>(
-            start,
-            &packet_ops,
-            &pinned_nodes,
-            &ops_root,
-        ));
-        let packet = SourcePacket {
-            start_location: start,
-            proof,
-            pinned_nodes,
-            encoded_operations: packet_ops
-                .iter()
-                .map(|operation| operation.encode().to_vec())
-                .collect(),
-        };
         (
             root,
             ops_root,
             operations,
-            packet,
+            None,
             Some($captured),
             Some(activity),
         )
@@ -1096,8 +1057,7 @@ macro_rules! variant_case {
                             }
                         }
                         let finalized = batch.merkleize(&db).await.expect("source merkleize");
-                        let captured =
-                            capture_source_batch!($state, $family, db, finalized, previous);
+                        let captured = capture_source_batch!($state, $family, db, finalized);
                         let batch_root = finalized.root();
                         db = db.apply_batch(finalized).await.expect("source apply");
                         assert_eq!(db.root(), batch_root);

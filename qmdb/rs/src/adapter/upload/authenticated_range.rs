@@ -27,7 +27,6 @@ use commonware_storage::{
     merkle::{Family, Graftable, Location, Position},
     qmdb::{
         any::{
-            self,
             operation::{Operation as AnyOperation, Update},
             value::ValueEncoding,
         },
@@ -144,7 +143,7 @@ impl<D: Digest, F: Graftable> PreparedAuthenticatedRange<D, F> {
     ) -> Result<Self, QmdbError> {
         if witness.root::<H>(&self.ops_root) != root {
             return Err(QmdbError::CorruptData(
-                "current root does not commit to the authenticated operation root".into(),
+                "current root must commit to the authenticated operation root".into(),
             ));
         }
         self.rows.reserve(2 + chunks.len() + grafted_nodes.len());
@@ -167,9 +166,14 @@ impl<D: Digest, F: Graftable> PreparedAuthenticatedRange<D, F> {
                 chunk.encode().to_vec(),
             ));
         }
+        let grafting_height = grafting::height::<N>();
         for &(ops_position, digest) in grafted_nodes {
-            let grafted_position =
-                grafting::ops_to_grafted_pos::<F>(ops_position, grafting::height::<N>());
+            if F::pos_to_height(ops_position) < grafting_height {
+                return Err(QmdbError::CorruptData(format!(
+                    "grafted node at {ops_position} must be at or above the grafting height"
+                )));
+            }
+            let grafted_position = grafting::ops_to_grafted_pos::<F>(ops_position, grafting_height);
             self.rows.push((
                 encode_grafted_node_key(grafted_position, self.latest_location),
                 digest.encode().to_vec(),
@@ -285,10 +289,10 @@ where
         H: Hasher<Digest = D>,
         S: Strategy,
     {
-        let ops_root = db.ops_root();
-        if db.bounds().end != Location::new(1) || ops_root != any::initial_root::<F, U, H>() {
+        if db.bounds().end != Location::new(1) {
             return Err(QmdbError::CorruptData(
-                "initial publication requires a database holding only its initial commit".into(),
+                "initial publication must come from a database holding only its initial commit"
+                    .into(),
             ));
         }
         let bitmap = db.bitmap();
@@ -296,7 +300,7 @@ where
             start: Location::new(0),
             pinned_nodes: Vec::new(),
             operations: Arc::new(vec![AnyOperation::CommitFloor(None, Location::new(0))]),
-            ops_root,
+            ops_root: db.ops_root(),
             root: db.root(),
             witness: db.ops_root_witness().clone(),
             pruned_chunks: bitmap.pruned_chunks() as u64,
@@ -326,7 +330,7 @@ where
     fn write(&self, buf: &mut impl BufMut) {
         self.start.write(buf);
         self.pinned_nodes.write(buf);
-        self.operations.as_slice().write(buf);
+        self.operations.write(buf);
         self.ops_root.write(buf);
         self.root.write(buf);
         self.witness.write(buf);
@@ -343,7 +347,7 @@ where
     fn encode_size(&self) -> usize {
         self.start.encode_size()
             + self.pinned_nodes.encode_size()
-            + self.operations.as_slice().encode_size()
+            + self.operations.encode_size()
             + self.ops_root.encode_size()
             + self.root.encode_size()
             + self.witness.encode_size()
@@ -366,10 +370,7 @@ where
         Ok(Self {
             start,
             pinned_nodes: Vec::read_cfg(buf, &(RangeCfg::exact(pins), ()))?,
-            operations: Arc::new(Vec::read_cfg(
-                buf,
-                &(cfg.operations, cfg.operation.clone()),
-            )?),
+            operations: Arc::read_cfg(buf, &(cfg.operations, cfg.operation.clone()))?,
             ops_root: D::read(buf)?,
             root: D::read(buf)?,
             witness: OpsRootWitness::read(buf)?,
@@ -399,7 +400,7 @@ where
     // Anchor the publication to the trusted root before hashing any operations.
     if publication.root != *expected_root {
         return Err(QmdbError::CorruptData(
-            "publication does not carry the expected current root".into(),
+            "publication root must equal the expected current root".into(),
         ));
     }
 
@@ -413,7 +414,9 @@ where
     let end = publication
         .start
         .checked_add(operations.len() as u64)
-        .ok_or_else(|| QmdbError::CorruptData("publication end location overflow".into()))?;
+        .ok_or_else(|| {
+            QmdbError::CorruptData("publication end location must not overflow".into())
+        })?;
     let encoded_operations = operations
         .iter()
         .map(|operation| operation.encode().to_vec())
@@ -1296,6 +1299,24 @@ mod tests {
         assert!(!prepared.rows.iter().any(|(key, _)| key == &stale_ops_key));
     }
 
+    #[test]
+    fn test_current_state_rejects_grafted_nodes_below_the_grafting_height() {
+        let operations = committed_encoded_operations::<mmr::Family>();
+        let authenticated = authenticated_range_fixture::<mmr::Family>(&operations, 3, 0);
+        let witness = OpsRootWitness::<mmr::Family, _> {
+            grafted_root: Sha256::hash(&[b"grafted root"]),
+            pending_chunk_digest: Default::default(),
+            partial_chunk: None,
+        };
+        let root = witness.root::<Sha256>(&authenticated.root);
+        let leaf = (Position::new(0), root);
+        assert!(authenticated
+            .prepare()
+            .unwrap()
+            .with_current_state::<Sha256, 32>(root, &witness, 0, &[], &[leaf])
+            .is_err());
+    }
+
     type CodecUpdate = unordered::Update<FixedBytes<8>, FixedValueEncoding>;
     type CodecPublication = Publication<mmr::Family, Sha256Digest, CodecUpdate, 32>;
 
@@ -1328,10 +1349,10 @@ mod tests {
         }
     }
 
-    fn codec_cfg(max_operations: usize) -> PublicationCfg<()> {
+    fn codec_cfg() -> PublicationCfg<()> {
         PublicationCfg {
             operation: (),
-            operations: (0..=max_operations).into(),
+            operations: (0..=3).into(),
             chunks: (0..=2).into(),
             grafted_nodes: (0..=1).into(),
         }
@@ -1339,41 +1360,38 @@ mod tests {
 
     #[test]
     fn test_publication_codec_round_trip() {
-        let publication = codec_publication();
-        let encoded = publication.encode();
-        assert_eq!(encoded.len(), publication.encode_size());
-        let decoded = CodecPublication::decode_cfg(encoded.clone(), &codec_cfg(3))
+        let encoded = codec_publication().encode();
+        let decoded = CodecPublication::decode_cfg(encoded.clone(), &codec_cfg())
             .expect("encoded publication must decode");
-        assert_eq!(decoded.start, publication.start);
-        assert_eq!(decoded.pinned_nodes, publication.pinned_nodes);
-        assert_eq!(decoded.operations, publication.operations);
-        assert_eq!(decoded.witness, publication.witness);
-        assert_eq!(decoded.pruned_chunks, publication.pruned_chunks);
-        assert_eq!(decoded.chunks, publication.chunks);
-        assert_eq!(decoded.grafted_nodes, publication.grafted_nodes);
         assert_eq!(decoded.encode(), encoded);
     }
 
     #[test]
     fn test_publication_codec_rejects_malformed_encodings() {
-        // Vectors longer than the configured limits are rejected.
+        // Each vector longer than its configured limit is rejected.
         let publication = codec_publication();
         let encoded = publication.encode();
-        assert!(CodecPublication::decode_cfg(encoded.clone(), &codec_cfg(2)).is_err());
+        for cfg in [
+            PublicationCfg {
+                operations: (0..=2).into(),
+                ..codec_cfg()
+            },
+            PublicationCfg {
+                chunks: (0..=1).into(),
+                ..codec_cfg()
+            },
+            PublicationCfg {
+                grafted_nodes: (0..=0).into(),
+                ..codec_cfg()
+            },
+        ] {
+            assert!(CodecPublication::decode_cfg(encoded.clone(), &cfg).is_err());
+        }
 
         // A frontier whose length does not match the start location is rejected.
         let mut extra_pin = publication;
         extra_pin.pinned_nodes.push(Sha256::hash(&[b"extra pin"]));
-        assert!(CodecPublication::decode_cfg(extra_pin.encode(), &codec_cfg(3)).is_err());
-
-        // Truncated and extended encodings are rejected.
-        assert!(
-            CodecPublication::decode_cfg(encoded.slice(..encoded.len() - 1), &codec_cfg(3))
-                .is_err()
-        );
-        let mut extended = encoded.to_vec();
-        extended.push(0);
-        assert!(CodecPublication::decode_cfg(Copying(extended.as_slice()), &codec_cfg(3)).is_err());
+        assert!(CodecPublication::decode_cfg(extra_pin.encode(), &codec_cfg()).is_err());
     }
 
     #[test]

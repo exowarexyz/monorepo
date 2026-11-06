@@ -189,11 +189,11 @@ the source to discard them.
 For a current ordered or unordered database, upload a `Publication` at every
 batch boundary. Upload `Publication::initial` once for a new database's commit
 at location 0, then read each batch's publication with `Publication::read`
-before applying the batch, while the source still holds the batch's bitmap
-chunks and grafted nodes. To upload later, persist the publication with its
-codec and decode it with a `PublicationCfg`. Once a publication is persisted or
-uploaded, the source must apply that same batch, rebuilding it identically after
-a restart.
+before applying the batch, because the batch's operations-tree frontier is
+readable only until its changes are flushed. To upload later, persist the
+publication with its codec and decode it with a `PublicationCfg`. Once a
+publication is persisted or uploaded, the source must apply that same batch,
+rebuilding it identically after a restart.
 
 ```rust,ignore
 use exoware_qmdb::adapter::upload::{prepare_publication, Publication};
@@ -208,9 +208,7 @@ let prepared =
 authenticates its operations and prefix frontier against its operation-log root,
 and checks that its witness binds that root to the trusted root. The bitmap
 chunks, grafted nodes, and `pruned_chunks` count are not authenticated and must
-come from the source that produced the batch. Each publication holds only
-what its batch wrote, so upload every publication since the database was
-created.
+come from the source that produced the batch.
 
 Boundary rows are versioned by batch location. Unchanged chunks and nodes are
 inherited from earlier boundaries. Retain the rows needed for every historical
