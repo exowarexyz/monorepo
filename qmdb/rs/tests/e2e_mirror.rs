@@ -114,9 +114,7 @@ async fn build_keyless_source(
                     for v in batch {
                         b = b.append(v);
                     }
-                    b.merkleize(&db, None::<Vec<u8>>, db.inactivity_floor_loc())
-                        .await
-                        .expect("merkleize")
+                    b.merkleize(&db).await.expect("merkleize")
                 };
                 db = db.apply_batch(finalized).await.expect("apply");
             }
@@ -240,13 +238,7 @@ async fn build_any_unordered_source(
                     for (k, v) in batch {
                         b = b.write(k, v);
                     }
-                    b.merkleize(
-                        &db,
-                        None::<Vec<u8>>,
-                        &mut commonware_storage::qmdb::floor::Proportional,
-                    )
-                    .await
-                    .expect("merkleize")
+                    b.merkleize(&db).await.expect("merkleize")
                 };
                 db = db.apply_batch(finalized).await.expect("apply");
             }
@@ -356,9 +348,7 @@ async fn build_immutable_source(
                     for (k, v) in batch {
                         b = b.set(k, v);
                     }
-                    b.merkleize(&db, None::<Vec<u8>>, db.inactivity_floor_loc())
-                        .await
-                        .expect("merkleize")
+                    b.merkleize(&db).await.expect("merkleize")
                 };
                 db = db.apply_batch(finalized).await.expect("apply");
             }
@@ -397,7 +387,7 @@ async fn boundary_from_current_ordered_source(
     previous_operations: Option<&[OrderedOp]>,
     operations: &[OrderedOp],
 ) -> CurrentBoundaryState<Digest, N, mmr::Family> {
-    let ops_root_witness = db.ops_root_witness().await.expect("ops root witness");
+    let ops_root_witness = db.ops_root_witness().clone();
     recover_boundary_state::<mmr::Family, Sha256, _, N, _, _>(
         previous_operations,
         operations,
@@ -526,13 +516,7 @@ async fn build_current_ordered_source(
                     for (k, v) in batch {
                         b = b.write(k, v);
                     }
-                    b.merkleize(
-                        &db,
-                        None::<Vec<u8>>,
-                        &mut commonware_storage::qmdb::floor::Proportional,
-                    )
-                    .await
-                    .expect("merkleize")
+                    b.merkleize(&db).await.expect("merkleize")
                 };
                 db = db.apply_batch(finalized).await.expect("apply");
             }

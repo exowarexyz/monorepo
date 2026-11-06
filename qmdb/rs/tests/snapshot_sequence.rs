@@ -63,10 +63,7 @@ async fn build_two_publications() -> (Vec<Operation>, Vec<Operation>) {
                 .expect("initialize source QMDB");
 
             let first = db.new_batch().set(b"key".to_vec(), b"old".to_vec());
-            let first = first
-                .merkleize(&db, None::<Vec<u8>>, db.inactivity_floor_loc())
-                .await
-                .expect("merkleize");
+            let first = first.merkleize(&db).await.expect("merkleize");
             db = db.apply_batch(first).await.expect("apply old value");
             let first_end = db.bounds().end;
             let (_, first_operations) = db
@@ -79,10 +76,7 @@ async fn build_two_publications() -> (Vec<Operation>, Vec<Operation>) {
                 .expect("read first publication");
 
             let second = db.new_batch().set(b"new-key".to_vec(), b"new".to_vec());
-            let second = second
-                .merkleize(&db, None::<Vec<u8>>, db.inactivity_floor_loc())
-                .await
-                .expect("merkleize");
+            let second = second.merkleize(&db).await.expect("merkleize");
             db = db.apply_batch(second).await.expect("apply new value");
             let full_end = db.bounds().end;
             let (_, all_operations) = db

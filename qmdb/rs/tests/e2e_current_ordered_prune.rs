@@ -62,7 +62,7 @@ async fn boundary_from_db(
     previous_ops: Option<&[BatchOp]>,
     operations: &[BatchOp],
 ) -> CurrentBoundaryState<Digest, N, mmr::Family> {
-    let ops_root_witness = db.ops_root_witness().await.expect("ops root witness");
+    let ops_root_witness = db.ops_root_witness().clone();
     recover_boundary_state::<mmr::Family, Sha256, _, N, _, _>(
         previous_ops,
         operations,
@@ -125,14 +125,7 @@ async fn test_mirror_ordered_prune_past_chunk_zero() {
                             batch = batch.write(b"k-00000006".to_vec(), None);
                         }
                         counter += 3;
-                        batch
-                            .merkleize(
-                                &db,
-                                None::<Vec<u8>>,
-                                &mut commonware_storage::qmdb::floor::Proportional,
-                            )
-                            .await
-                            .expect("merkleize")
+                        batch.merkleize(&db).await.expect("merkleize")
                     };
                     db = db.apply_batch(finalized).await.expect("apply");
                     // Current pruning is now explicit in Commonware. Keep the

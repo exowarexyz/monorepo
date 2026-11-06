@@ -13,7 +13,7 @@ use commonware_storage::{
     qmdb::{
         current::{
             grafting,
-            proof::{verify_proof_and_extract_digests, OpsRootWitness, RangeProof},
+            proof::{OpsRootWitness, RangeProof},
         },
         operation::Operation as QmdbOperation,
     },
@@ -58,16 +58,16 @@ where
             "missing operation at location {location} in current boundary input"
         ))
     })?;
-    let digests = verify_proof_and_extract_digests::<_, _, H, N>(
-        &proof,
-        location,
-        std::slice::from_ref(operation),
-        std::slice::from_ref(&chunk),
-        &root,
-    )
-    .map_err(|_| QmdbError::ProofVerification {
-        kind: crate::ProofKind::CurrentRange,
-    })?;
+    let digests = proof
+        .verify_and_extract_digests::<H, _, N>(
+            location,
+            std::slice::from_ref(operation),
+            std::slice::from_ref(&chunk),
+            &root,
+        )
+        .map_err(|_| QmdbError::ProofVerification {
+            kind: crate::ProofKind::CurrentRange,
+        })?;
     for (position, digest) in digests {
         merge_authenticated_digest(authenticated_digests, position, digest)?;
     }

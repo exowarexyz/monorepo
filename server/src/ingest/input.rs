@@ -663,7 +663,7 @@ mod tests {
         super::{BudgetConfig, IngestBudget},
         *,
     };
-    use commonware_parallel::{mocks::Explorer, Rayon, Strategy};
+    use commonware_parallel::{mocks::Explorer, rayon::ThreadPoolBuilder, Rayon, Strategy};
     use futures::StreamExt;
     use http_body::Frame;
     use http_body_util::{Full, StreamBody};
@@ -1258,7 +1258,7 @@ mod tests {
             let (release_tx, release_rx) = std::sync::mpsc::channel();
             let dropped = Arc::new(tokio::sync::Notify::new());
             input.set_executor(Arc::new(PoolExecutor {
-                pool: Rayon::new(NonZeroUsize::new(2).unwrap()).unwrap(),
+                pool: Rayon::new(ThreadPoolBuilder::new(NonZeroUsize::new(2).unwrap())).unwrap(),
                 calls: AtomicUsize::new(0),
                 started: Mutex::new(Some(started_tx)),
                 release: Mutex::new(Some(release_rx)),
@@ -1534,7 +1534,7 @@ mod tests {
         let (release_tx, release_rx) = std::sync::mpsc::channel();
         let dropped = Arc::new(tokio::sync::Notify::new());
         input.set_executor(Arc::new(PoolExecutor {
-            pool: Rayon::new(NonZeroUsize::new(2).unwrap()).unwrap(),
+            pool: Rayon::new(ThreadPoolBuilder::new(NonZeroUsize::new(2).unwrap())).unwrap(),
             calls: AtomicUsize::new(0),
             started: Mutex::new(Some(started_tx)),
             release: Mutex::new(Some(release_rx)),
@@ -1967,7 +1967,7 @@ mod tests {
         let (release_tx, release_rx) = std::sync::mpsc::channel();
         let dropped = Arc::new(tokio::sync::Notify::new());
         input.set_executor(Arc::new(PoolExecutor {
-            pool: Rayon::new(NonZeroUsize::new(2).unwrap()).unwrap(),
+            pool: Rayon::new(ThreadPoolBuilder::new(NonZeroUsize::new(2).unwrap())).unwrap(),
             calls: AtomicUsize::new(0),
             started: Mutex::new(Some(started_tx)),
             release: Mutex::new(Some(release_rx)),

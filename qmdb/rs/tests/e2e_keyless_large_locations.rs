@@ -153,7 +153,7 @@ async fn check_large_locations<F: Graftable + PartialEq>(family: &str, start: u6
         panic!("expected operation batch")
     };
     let encoded = received.iter().map(Encode::encode).collect::<Vec<_>>();
-    assert!(proof.verify_range_inclusion(&hasher, &encoded, start, &expected_root));
+    assert!(proof.verify_range_inclusion(&hasher, start, &encoded, &expected_root));
     assert_eq!(received, operations);
     server.abort();
 }

@@ -11,7 +11,9 @@ use commonware_storage::{
     merkle::{full::Config as MerkleConfig, mmb, Location},
     qmdb::{
         any::{ordered::variable::Operation as VariableOperation, value::VariableEncoding},
-        current::{ordered::variable::Db as CurrentOrderedVariableDb, VariableConfig},
+        current::ordered::variable::{
+            Config as CurrentOrderedVariableConfig, Db as CurrentOrderedVariableDb,
+        },
     },
     translator::TwoCap,
 };
@@ -175,10 +177,7 @@ async fn boundary_from_source_db(
     previous_operations: Option<&[Operation]>,
     operations: &[Operation],
 ) -> CurrentBoundaryState<commonware_cryptography::sha256::Digest, N, Family> {
-    let ops_root_witness = source_db
-        .ops_root_witness()
-        .await
-        .expect("ops root witness");
+    let ops_root_witness = source_db.ops_root_witness().clone();
     recover_boundary_state::<Family, Sha256, _, N, _, _>(
         previous_operations,
         operations,
@@ -265,8 +264,8 @@ async fn seed(
         let runner_cfg = cw_tokio::Config::new().with_storage_directory(directory);
         cw_tokio::Runner::new(runner_cfg).start(|context| async move {
             let page_cache = CacheRef::new(NZU16!(64), NZUsize!(8));
-            let cfg = VariableConfig {
-                merkle_config: MerkleConfig {
+            let cfg = CurrentOrderedVariableConfig {
+                merkle: MerkleConfig {
                     journal_partition: "current-ordered-variable-mmb-seed-merkle-journal".into(),
                     metadata_partition: "current-ordered-variable-mmb-seed-merkle-metadata".into(),
                     items_per_blob: NZU64!(8),
@@ -275,7 +274,7 @@ async fn seed(
                     strategy: Sequential,
                     page_cache: page_cache.clone(),
                 },
-                journal_config: JournalConfig {
+                log: JournalConfig {
                     partition: "current-ordered-variable-mmb-seed-log".into(),
                     write_buffer: NZUsize!(1024),
                     replay_buffer: NZUsize!(1024),
@@ -359,14 +358,7 @@ async fn seed(
                         batch = batch.write(delete_key, None);
                     }
                     counter += 3;
-                    batch
-                        .merkleize(
-                            &source_db,
-                            None::<Vec<u8>>,
-                            &mut commonware_storage::qmdb::floor::Proportional,
-                        )
-                        .await
-                        .expect("merkleize")
+                    batch.merkleize(&source_db).await.expect("merkleize")
                 };
                 source_db = source_db.apply_batch(finalized).await.expect("apply batch");
                 source_db = source_db.sync().await.expect("sync local ordered db");

@@ -111,10 +111,7 @@ async fn build_variable_source() -> VariableSource {
                     .new_batch()
                     .set(key_a, val_a)
                     .set(key_b.clone(), val_b.clone());
-                batch
-                    .merkleize(&db, None::<Vec<u8>>, db.inactivity_floor_loc())
-                    .await
-                    .expect("merkleize")
+                batch.merkleize(&db).await.expect("merkleize")
             };
             db = db.apply_batch(finalized).await.expect("apply");
 
@@ -146,7 +143,7 @@ async fn build_fixed_source() -> FixedSource {
             use commonware_runtime::{buffer::paged::CacheRef, Supervisor as _};
             let page_cache = CacheRef::new(NZU16!(64), NZUsize!(8));
             let cfg = commonware_storage::qmdb::immutable::Config {
-                merkle_config: common::merkle_config(
+                merkle: common::merkle_config(
                     "immutable_fixed_full_mmr_source",
                     page_cache.clone(),
                 ),
@@ -172,10 +169,7 @@ async fn build_fixed_source() -> FixedSource {
 
             let finalized = {
                 let batch = db.new_batch().set(key_a, val_a).set(key_b.clone(), val_b);
-                batch
-                    .merkleize(&db, None::<Digest>, db.inactivity_floor_loc())
-                    .await
-                    .expect("merkleize")
+                batch.merkleize(&db).await.expect("merkleize")
             };
             db = db.apply_batch(finalized).await.expect("apply fixed");
 

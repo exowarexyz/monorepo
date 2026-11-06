@@ -86,15 +86,10 @@ pub fn any_variable_config<C>(
     page_cache: CacheRef,
     codec_config: C,
     items_per_section: NonZeroU64,
-) -> any::VariableConfig<TwoCap, C, Sequential> {
+) -> any::Config<TwoCap, VariableJournalConfig<C>, Sequential> {
     any::Config {
-        merkle_config: merkle_config(prefix, page_cache.clone()),
-        journal_config: variable_journal_config(
-            prefix,
-            page_cache,
-            codec_config,
-            items_per_section,
-        ),
+        merkle: merkle_config(prefix, page_cache.clone()),
+        log: variable_journal_config(prefix, page_cache, codec_config, items_per_section),
         translator: TwoCap,
         init_cache: None,
         init_buffer: NZUsize!(1 << 21),
@@ -108,15 +103,10 @@ pub fn current_variable_config<C>(
     page_cache: CacheRef,
     codec_config: C,
     items_per_section: NonZeroU64,
-) -> current::VariableConfig<TwoCap, C, Sequential> {
+) -> current::Config<TwoCap, VariableJournalConfig<C>, Sequential> {
     current::Config {
-        merkle_config: merkle_config(prefix, page_cache.clone()),
-        journal_config: variable_journal_config(
-            prefix,
-            page_cache,
-            codec_config,
-            items_per_section,
-        ),
+        merkle: merkle_config(prefix, page_cache.clone()),
+        log: variable_journal_config(prefix, page_cache, codec_config, items_per_section),
         grafted_metadata_partition: format!("{prefix}-grafted-metadata"),
         translator: TwoCap,
         init_cache: None,
@@ -133,7 +123,7 @@ pub fn immutable_variable_config<C>(
     items_per_section: NonZeroU64,
 ) -> immutable::variable::Config<TwoCap, C, Sequential> {
     immutable::Config {
-        merkle_config: merkle_config(prefix, page_cache.clone()),
+        merkle: merkle_config(prefix, page_cache.clone()),
         log: variable_journal_config(prefix, page_cache, codec_config, items_per_section),
         translator: TwoCap,
         init_buffer: NZUsize!(1 << 21),

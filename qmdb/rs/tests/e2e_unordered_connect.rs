@@ -219,7 +219,7 @@ async fn boundary_from_current_source_db(
     db: &CurrentDb,
     operations: &[FixedKeyOperation],
 ) -> CurrentBoundaryState<Digest, N, mmr::Family> {
-    let ops_root_witness = db.ops_root_witness().await.expect("ops root witness");
+    let ops_root_witness = db.ops_root_witness().clone();
     recover_boundary_state::<mmr::Family, Sha256, _, N, _, _>(
         None,
         operations,
@@ -265,14 +265,7 @@ async fn build_any_source_batch() -> AnySourceBatch {
                             format!("k-{batch_index:08}").into_bytes(),
                             Some(b"two".to_vec()),
                         );
-                    batch
-                        .merkleize(
-                            &db,
-                            None::<Vec<u8>>,
-                            &mut commonware_storage::qmdb::floor::Proportional,
-                        )
-                        .await
-                        .expect("merkleize")
+                    batch.merkleize(&db).await.expect("merkleize")
                 };
                 db = db.apply_batch(finalized).await.expect("apply");
 
@@ -352,14 +345,7 @@ async fn build_mmb_any_source_batch() -> MmbAnySourceBatch {
                             format!("k-{batch_index:08}").into_bytes(),
                             Some(b"two".to_vec()),
                         );
-                    batch
-                        .merkleize(
-                            &db,
-                            None::<Vec<u8>>,
-                            &mut commonware_storage::qmdb::floor::Proportional,
-                        )
-                        .await
-                        .expect("merkleize")
+                    batch.merkleize(&db).await.expect("merkleize")
                 };
                 db = db.apply_batch(finalized).await.expect("apply");
 
@@ -432,14 +418,7 @@ async fn build_current_source_batch() -> CurrentSourceBatch {
                     .new_batch()
                     .write(alpha, Some(b"one".to_vec()))
                     .write(beta, Some(b"two".to_vec()));
-                batch
-                    .merkleize(
-                        &db,
-                        None::<Vec<u8>>,
-                        &mut commonware_storage::qmdb::floor::Proportional,
-                    )
-                    .await
-                    .expect("merkleize")
+                batch.merkleize(&db).await.expect("merkleize")
             };
             db = db.apply_batch(finalized).await.expect("apply");
 
@@ -907,14 +886,7 @@ async fn aligned_commit_boundary<F: commonware_storage::merkle::Graftable + Part
                         batch = batch.write(key(index), Some(index.to_be_bytes().to_vec()));
                     }
                 }
-                let batch = batch
-                    .merkleize(
-                        &db,
-                        None::<Vec<u8>>,
-                        &mut commonware_storage::qmdb::floor::Proportional,
-                    )
-                    .await
-                    .expect("source merkleize");
+                let batch = batch.merkleize(&db).await.expect("source merkleize");
                 db = db.apply_batch(batch).await.expect("source apply");
                 assert_eq!(*db.bounds().end, if round == 0 { 512 } else { 514 });
                 let (_, operations): (_, Vec<Operation<F>>) = db
@@ -949,9 +921,7 @@ async fn aligned_commit_boundary<F: commonware_storage::merkle::Graftable + Part
                     &operations,
                     db.root(),
                     0,
-                    db.ops_root_witness()
-                        .await
-                        .expect("source ops root witness"),
+                    db.ops_root_witness().clone(),
                     |location| common::current_proof_chunk(source.range_proof(location, NZU64!(1))),
                 )
                 .await
@@ -1069,7 +1039,7 @@ async fn current_boundary_nodes<F: commonware_storage::merkle::Graftable + Parti
                     }
                 }
                 let batch = batch
-                    .merkleize(&db, None::<Vec<u8>>, &mut commonware_storage::qmdb::floor::Proportional)
+                    .merkleize(&db)
                     .await
                     .expect("source merkleize");
                 db = db.apply_batch(batch).await.expect("source apply");
@@ -1138,9 +1108,7 @@ async fn current_boundary_nodes<F: commonware_storage::merkle::Graftable + Parti
                     &operations,
                     db.root(),
                     pruned_chunks,
-                    db.ops_root_witness()
-                        .await
-                        .expect("source ops root witness"),
+                    db.ops_root_witness().clone(),
                     |location| common::current_proof_chunk(source.range_proof(location, NZU64!(1))),
                 )
                 .await

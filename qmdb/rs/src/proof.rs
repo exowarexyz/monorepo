@@ -56,10 +56,10 @@ impl<D: Digest, F: Graftable> OperationRangeCheckpoint<D, F> {
 
     pub fn verify<H: Hasher<Digest = D>>(&self) -> bool {
         let hasher = commonware_storage::qmdb::hasher::<H>();
-        self.proof.verify_proof_and_pinned_nodes(
+        self.proof.verify_range_inclusion_with_pinned_nodes(
             &hasher,
-            &self.encoded_operations,
             self.start_location,
+            &self.encoded_operations,
             &self.pinned_nodes,
             &self.ops_root,
         )
@@ -155,7 +155,7 @@ impl<D: Digest, F: Graftable> RawBatchMultiProof<D, F> {
         let elements: Vec<_> = self
             .operations
             .iter()
-            .map(|(loc, bytes)| (bytes.as_ref(), *loc))
+            .map(|(loc, bytes)| (*loc, bytes.as_ref()))
             .collect();
         self.proof
             .verify_multi_inclusion(&hasher, &elements, &self.ops_root)

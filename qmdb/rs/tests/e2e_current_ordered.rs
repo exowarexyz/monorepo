@@ -22,6 +22,7 @@ use commonware_storage::{
             variable::Db as LocalQmdbDb,
         },
         operation::Operation as _,
+        verify::ProofExt as _,
     },
     translator::TwoCap,
 };
@@ -74,7 +75,7 @@ where
     F: Graftable,
     BatchOperation<F>: commonware_codec::Codec,
 {
-    let ops_root_witness = db.ops_root_witness().await.expect("ops root witness");
+    let ops_root_witness = db.ops_root_witness().clone();
     recover_boundary_state::<F, Sha256, _, N, _, _>(
         previous_operations,
         operations,
@@ -113,7 +114,7 @@ where
     F: Graftable,
     FixedBatchOperation<F>: commonware_codec::CodecFixed<Cfg = ()> + Send + Sync,
 {
-    let ops_root_witness = db.ops_root_witness().await.expect("fixed ops root witness");
+    let ops_root_witness = db.ops_root_witness().clone();
     recover_boundary_state::<F, Sha256, _, N, _, _>(
         previous_operations,
         operations,
@@ -182,14 +183,7 @@ where
                     .new_batch()
                     .write(b"alpha".to_vec(), Some(b"one".to_vec()))
                     .write(b"beta".to_vec(), Some(b"two".to_vec()));
-                batch
-                    .merkleize(
-                        &db,
-                        None::<Vec<u8>>,
-                        &mut commonware_storage::qmdb::floor::Proportional,
-                    )
-                    .await
-                    .expect("merkleize")
+                batch.merkleize(&db).await.expect("merkleize")
             };
             db = db.apply_batch(finalized).await.expect("apply");
 
@@ -245,7 +239,7 @@ where
     F: Graftable,
     BatchOperation<F>: commonware_codec::Codec,
 {
-    let ops_root_witness = db.ops_root_witness().await.expect("ops root witness");
+    let ops_root_witness = db.ops_root_witness().clone();
     recover_boundary_state::<F, Sha256, _, M, _, _>(
         previous_operations,
         operations,
@@ -297,14 +291,7 @@ where
                         Some(format!("v-{index:08}").into_bytes()),
                     );
                 }
-                batch
-                    .merkleize(
-                        &db,
-                        None::<Vec<u8>>,
-                        &mut commonware_storage::qmdb::floor::Proportional,
-                    )
-                    .await
-                    .expect("merkleize")
+                batch.merkleize(&db).await.expect("merkleize")
             };
             db = db.apply_batch(finalized).await.expect("apply");
 
@@ -341,11 +328,8 @@ where
             use commonware_runtime::{buffer::paged::CacheRef, Supervisor as _};
             let page_cache = CacheRef::new(NZU16!(64), NZUsize!(8));
             let cfg = commonware_storage::qmdb::current::Config {
-                merkle_config: common::merkle_config(
-                    "current_ordered_fixed_source",
-                    page_cache.clone(),
-                ),
-                journal_config: FixedJournalConfig {
+                merkle: common::merkle_config("current_ordered_fixed_source", page_cache.clone()),
+                log: FixedJournalConfig {
                     partition: "current_ordered_fixed_source-log".to_string(),
                     items_per_blob: NZU64!(8),
                     page_cache,
@@ -373,14 +357,7 @@ where
                     .new_batch()
                     .write(alpha, Some(one))
                     .write(beta, Some(two));
-                batch
-                    .merkleize(
-                        &db,
-                        None::<Digest>,
-                        &mut commonware_storage::qmdb::floor::Proportional,
-                    )
-                    .await
-                    .expect("fixed merkleize")
+                batch.merkleize(&db).await.expect("fixed merkleize")
             };
             db = db.apply_batch(finalized).await.expect("apply fixed");
 
@@ -623,14 +600,7 @@ async fn assert_incremental_seed_batches_keep_current_proofs_verifiable<F>(
                             batch = batch.write(delete_key, None);
                         }
                         counter += 3;
-                        batch
-                            .merkleize(
-                                &db,
-                                None::<Vec<u8>>,
-                                &mut commonware_storage::qmdb::floor::Proportional,
-                            )
-                            .await
-                            .expect("merkleize")
+                        batch.merkleize(&db).await.expect("merkleize")
                     };
                     db = db.apply_batch(finalized).await.expect("apply");
 
@@ -785,14 +755,7 @@ async fn test_ordered_mmb_persistent_interleaved_seed_batches_keep_current_proof
                                 batch = batch.write(rewrite_key, Some(rewrite_value));
                             }
                             counter += 3;
-                            batch
-                                .merkleize(
-                                    &db,
-                                    None::<Vec<u8>>,
-                                    &mut commonware_storage::qmdb::floor::Proportional,
-                                )
-                                .await
-                                .expect("merkleize")
+                            batch.merkleize(&db).await.expect("merkleize")
                         };
                         db = db.apply_batch(finalized).await.expect("apply");
                         db = db.sync().await.expect("sync");
@@ -807,8 +770,7 @@ async fn test_ordered_mmb_persistent_interleaved_seed_batches_keep_current_proof
                             )
                             .await
                             .expect("historical proof");
-                        assert!(commonware_storage::qmdb::verify_proof::<Sha256, _, _>(
-                            &proof,
+                        assert!(proof.verify::<Sha256, _>(
                             Location::<mmb::Family>::new(0),
                             &cumulative_ops,
                             &db.ops_root()
@@ -1162,14 +1124,7 @@ where
                         Some(format!("v-{index:08}").into_bytes()),
                     );
                 }
-                let batch = batch
-                    .merkleize(
-                        &db,
-                        None::<Vec<u8>>,
-                        &mut commonware_storage::qmdb::floor::Proportional,
-                    )
-                    .await
-                    .expect("merkleize source batch");
+                let batch = batch.merkleize(&db).await.expect("merkleize source batch");
                 db = db.apply_batch(batch).await.expect("apply source batch");
                 let end = db.bounds().end;
                 let latest = end - 1;
