@@ -4,7 +4,7 @@ mod authenticated_range;
 mod boundary;
 
 pub use authenticated_range::{
-    prepare_authenticated_range, stage_authenticated_range, stage_watermark,
+    prepare_authenticated_range, prepare_publication, stage_authenticated_range, stage_watermark,
     AuthenticatedOperationRange, PreparedAuthenticatedRange, UploadOperation,
 };
 pub use boundary::recover_boundary_state;

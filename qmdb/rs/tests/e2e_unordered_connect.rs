@@ -31,7 +31,7 @@ use exoware_qmdb::{
             SubscribeRequest as ProtoSubscribeRequest,
         },
     },
-    CurrentBoundaryState, QmdbError, MAX_OPERATION_SIZE,
+    Delta, QmdbError, MAX_OPERATION_SIZE,
 };
 use exoware_sdk::{proto::PreferZstdHttpClient, PrefixedStoreClient, StoreClient};
 use std::{num::NonZeroU64, time::Duration};
@@ -212,13 +212,13 @@ struct CurrentSourceBatch {
     beta: Digest,
     root: Digest,
     operations: Vec<FixedKeyOperation>,
-    current_boundary: CurrentBoundaryState<Digest, N, mmr::Family>,
+    current_boundary: Delta<mmr::Family, Digest, N>,
 }
 
 async fn boundary_from_current_source_db(
     db: &CurrentDb,
     operations: &[FixedKeyOperation],
-) -> CurrentBoundaryState<Digest, N, mmr::Family> {
+) -> Delta<mmr::Family, Digest, N> {
     let ops_root_witness = db.ops_root_witness().clone();
     recover_boundary_state::<mmr::Family, Sha256, _, N, _, _>(
         None,

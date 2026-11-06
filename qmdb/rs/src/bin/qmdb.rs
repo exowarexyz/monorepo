@@ -23,7 +23,7 @@ use exoware_qmdb::{
         prepare_authenticated_range, recover_boundary_state, stage_authenticated_range,
         stage_watermark, AuthenticatedOperationRange,
     },
-    CurrentBoundaryState, MAX_OPERATION_SIZE,
+    Delta, MAX_OPERATION_SIZE,
 };
 use exoware_sdk::{
     transport::set_tcp_nodelay, PreferZstdLayer, PrefixedStoreClient, StoreClient, StoreKeyPrefix,
@@ -97,7 +97,7 @@ async fn publish_source_range(
     store_client: &PrefixedStoreClient,
     source_db: &Db,
     start: Location<Family>,
-    boundary: &CurrentBoundaryState<commonware_cryptography::sha256::Digest, N, Family>,
+    boundary: &Delta<Family, commonware_cryptography::sha256::Digest, N>,
 ) {
     let end = source_db.bounds().end;
     let (proof, operations) = source_db
@@ -176,7 +176,7 @@ async fn boundary_from_source_db(
     source_db: &Db,
     previous_operations: Option<&[Operation]>,
     operations: &[Operation],
-) -> CurrentBoundaryState<commonware_cryptography::sha256::Digest, N, Family> {
+) -> Delta<Family, commonware_cryptography::sha256::Digest, N> {
     let ops_root_witness = source_db.ops_root_witness().clone();
     recover_boundary_state::<Family, Sha256, _, N, _, _>(
         previous_operations,

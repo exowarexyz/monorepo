@@ -18,9 +18,7 @@ use commonware_storage::{
     translator::TwoCap,
 };
 use commonware_utils::{NZUsize, NZU16, NZU64};
-use exoware_qmdb::{
-    adapter::upload::recover_boundary_state, CurrentBoundaryState, MAX_OPERATION_SIZE,
-};
+use exoware_qmdb::{adapter::upload::recover_boundary_state, Delta, MAX_OPERATION_SIZE};
 use exoware_sdk::PrefixedStoreClient;
 use std::num::NonZeroU64;
 
@@ -48,7 +46,7 @@ struct BatchOutcome {
     watermark: Location<mmr::Family>,
     root: Digest,
     delta_ops: Vec<BatchOp>,
-    boundary: CurrentBoundaryState<Digest, N, mmr::Family>,
+    boundary: Delta<mmr::Family, Digest, N>,
 }
 
 struct ExpiredKeySnapshot {
@@ -62,7 +60,7 @@ async fn boundary_from_db(
     db: &Db,
     previous_ops: Option<&[BatchOp]>,
     operations: &[BatchOp],
-) -> CurrentBoundaryState<Digest, N, mmr::Family> {
+) -> Delta<mmr::Family, Digest, N> {
     let ops_root_witness = db.ops_root_witness().clone();
     recover_boundary_state::<mmr::Family, Sha256, _, N, _, _>(
         previous_ops,

@@ -31,7 +31,7 @@ use exoware_qmdb::{
         GetOperationsResponse, OperationLogService, OperationLogServiceClient,
         OperationLogServiceServer, SubscribeRequest, SubscribeResponse,
     },
-    CurrentBoundaryState, QmdbError,
+    Delta, QmdbError,
 };
 use exoware_sdk::{proto::PreferZstdHttpClient, transport::set_tcp_nodelay, StoreClient};
 use std::{convert::Infallible, num::NonZeroU64, time::Duration};
@@ -202,7 +202,7 @@ pub async fn commit_current_operations<F, Op, const N: usize>(
     client: &exoware_sdk::PrefixedStoreClient,
     operations: &[Op],
     cfg: &Op::Cfg,
-    boundary: &CurrentBoundaryState<commonware_cryptography::sha256::Digest, N, F>,
+    boundary: &Delta<F, commonware_cryptography::sha256::Digest, N>,
 ) -> Result<(), QmdbError>
 where
     F: Graftable,

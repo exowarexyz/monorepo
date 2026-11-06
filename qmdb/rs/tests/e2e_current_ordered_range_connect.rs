@@ -36,7 +36,7 @@ use exoware_qmdb::{
             SubscribeRequest as ProtoSubscribeRequest,
         },
     },
-    CurrentBoundaryState, QmdbError, MAX_OPERATION_SIZE,
+    Delta, QmdbError, MAX_OPERATION_SIZE,
 };
 use exoware_sdk::{
     common::kv::v1::{filter as proto_filter, Filter as ProtoFilter},
@@ -132,7 +132,7 @@ async fn boundary_from_source_db(
     db: &CurrentDb,
     previous_operations: Option<&[BatchOperation]>,
     operations: &[BatchOperation],
-) -> CurrentBoundaryState<Digest, N, mmr::Family> {
+) -> Delta<mmr::Family, Digest, N> {
     let ops_root_witness = db.ops_root_witness().clone();
     recover_boundary_state::<mmr::Family, Sha256, _, N, _, _>(
         previous_operations,
@@ -159,14 +159,14 @@ fn key_cfg() -> <Vec<u8> as commonware_codec::Read>::Cfg {
 
 struct SourceBatch {
     operations: Vec<BatchOperation>,
-    current_boundary: CurrentBoundaryState<Digest, N, mmr::Family>,
+    current_boundary: Delta<mmr::Family, Digest, N>,
     inactivity_floor: Location<mmr::Family>,
 }
 
 struct MmbSourceBatch {
     ops_root: Digest,
     operations: Vec<MmbBatchOperation>,
-    current_boundary: CurrentBoundaryState<Digest, N, mmb::Family>,
+    current_boundary: Delta<mmb::Family, Digest, N>,
     inactivity_floor: Location<mmb::Family>,
 }
 
@@ -254,7 +254,7 @@ async fn build_source_batch() -> SourceBatch {
 async fn boundary_from_mmb_source_db(
     db: &MmbCurrentDb,
     operations: &[MmbBatchOperation],
-) -> CurrentBoundaryState<Digest, N, mmb::Family> {
+) -> Delta<mmb::Family, Digest, N> {
     let ops_root_witness = db.ops_root_witness().clone();
     recover_boundary_state::<mmb::Family, Sha256, _, N, _, _>(
         None,

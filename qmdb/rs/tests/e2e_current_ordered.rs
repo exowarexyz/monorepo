@@ -28,8 +28,7 @@ use commonware_storage::{
 };
 use commonware_utils::{NZUsize, NZU16, NZU64};
 use exoware_qmdb::{
-    adapter::upload::recover_boundary_state, proof::RawKeyLookupProof, CurrentBoundaryState,
-    MAX_OPERATION_SIZE,
+    adapter::upload::recover_boundary_state, proof::RawKeyLookupProof, Delta, MAX_OPERATION_SIZE,
 };
 use exoware_sdk::{PrefixedStoreClient, StoreClient};
 use std::{
@@ -70,7 +69,7 @@ async fn boundary_from_source_db<F>(
     db: &VariableDb<F>,
     previous_operations: Option<&[BatchOperation<F>]>,
     operations: &[BatchOperation<F>],
-) -> CurrentBoundaryState<Digest, N, F>
+) -> Delta<F, Digest, N>
 where
     F: Graftable,
     BatchOperation<F>: commonware_codec::Codec,
@@ -109,7 +108,7 @@ async fn boundary_from_fixed_source_db<F>(
     db: &FixedDb<F>,
     previous_operations: Option<&[FixedBatchOperation<F>]>,
     operations: &[FixedBatchOperation<F>],
-) -> CurrentBoundaryState<Digest, N, F>
+) -> Delta<F, Digest, N>
 where
     F: Graftable,
     FixedBatchOperation<F>: commonware_codec::CodecFixed<Cfg = ()> + Send + Sync,
@@ -141,20 +140,20 @@ fn key_cfg() -> <Vec<u8> as commonware_codec::Read>::Cfg {
 struct VariableSource<F: Graftable> {
     latest_location: Location<F>,
     operations: Vec<BatchOperation<F>>,
-    current_boundary: CurrentBoundaryState<Digest, N, F>,
+    current_boundary: Delta<F, Digest, N>,
     values: std::collections::BTreeMap<Vec<u8>, Option<Vec<u8>>>,
 }
 
 struct ChunkSizedVariableSource<F: Graftable, const M: usize> {
     latest_location: Location<F>,
     operations: Vec<BatchOperation<F>>,
-    current_boundary: CurrentBoundaryState<Digest, M, F>,
+    current_boundary: Delta<F, Digest, M>,
 }
 
 struct FixedSource<F: Graftable> {
     latest_location: Location<F>,
     operations: Vec<FixedBatchOperation<F>>,
-    current_boundary: CurrentBoundaryState<Digest, N, F>,
+    current_boundary: Delta<F, Digest, N>,
     values: std::collections::BTreeMap<Vec<u8>, Option<Digest>>,
 }
 
@@ -234,7 +233,7 @@ async fn boundary_from_source_db_with_chunk_size<F, const M: usize>(
     >,
     previous_operations: Option<&[BatchOperation<F>]>,
     operations: &[BatchOperation<F>],
-) -> CurrentBoundaryState<Digest, M, F>
+) -> Delta<F, Digest, M>
 where
     F: Graftable,
     BatchOperation<F>: commonware_codec::Codec,
@@ -574,8 +573,7 @@ async fn assert_incremental_seed_batches_keep_current_proofs_verifiable<F>(
                         .expect("init");
 
                 let mut previous_ops = Vec::<BatchOperation<F>>::new();
-                let mut uploads =
-                    Vec::<(Vec<BatchOperation<F>>, CurrentBoundaryState<Digest, N, F>)>::new();
+                let mut uploads = Vec::<(Vec<BatchOperation<F>>, Delta<F, Digest, N>)>::new();
                 let mut expected_active = BTreeMap::<Vec<u8>, Vec<u8>>::new();
                 let mut counter = 0u64;
 
