@@ -64,9 +64,9 @@ async fn test_mirror_ordered_prune_past_chunk_zero() {
     let store_client = common::local_store_client().await;
 
     // Phase 1 (blocking tokio runtime): drive the local QMDB through BATCHES
-    // batches, capturing each batch's publication and root, including after
-    // chunk 0 has been pruned.
-    let (batches, chunk_zero_pruned, expired_key_snapshot) =
+    // batches, capturing the initial publication and each batch's publication
+    // and root, including after chunk 0 has been pruned.
+    let (initial, batches, chunk_zero_pruned, expired_key_snapshot) =
         tokio::task::spawn_blocking(move || {
             cw_tokio::Runner::default().start(move |context| async move {
                 let page_cache = CacheRef::new(NZU16!(64), NZUsize!(8));
@@ -86,6 +86,8 @@ async fn test_mirror_ordered_prune_past_chunk_zero() {
                 )
                 .await
                 .expect("init");
+                let initial =
+                    Publication::initial(&db).expect("initial publication must be readable");
 
                 let mut counter: u64 = 0;
                 let mut batches: Vec<BatchOutcome> = Vec::with_capacity(BATCHES as usize);
@@ -152,6 +154,7 @@ async fn test_mirror_ordered_prune_past_chunk_zero() {
                 db = db.sync().await.expect("sync");
                 db.destroy().await.expect("destroy");
                 (
+                    initial,
                     batches,
                     chunk_zero_pruned,
                     expired_key_snapshot.expect("expired key snapshot"),
@@ -186,17 +189,22 @@ async fn test_mirror_ordered_prune_past_chunk_zero() {
             ((0..=MAX_OPERATION_SIZE).into(), ()),
         );
 
-    for outcome in &batches {
-        common::commit_publications(
-            &upload_client,
-            std::slice::from_ref(&outcome.publication),
-            &(
-                ((0..=MAX_OPERATION_SIZE).into(), ()),
-                ((0..=MAX_OPERATION_SIZE).into(), ()),
-            ),
-        )
+    // The initial publication serves current reads at location 0 before any batch.
+    common::commit_publications(&upload_client, std::slice::from_ref(&initial))
         .await
-        .expect("upload");
+        .expect("initial upload must succeed");
+    assert_eq!(
+        qmdb_client
+            .root_at(Location::new(0))
+            .await
+            .expect("root at the initial commit must load"),
+        initial.root
+    );
+
+    for outcome in &batches {
+        common::commit_publications(&upload_client, std::slice::from_ref(&outcome.publication))
+            .await
+            .expect("upload");
         let remote_root = qmdb_client
             .root_at(outcome.watermark)
             .await

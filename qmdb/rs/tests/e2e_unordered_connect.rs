@@ -4,24 +4,25 @@
 mod common;
 
 use bytes::Bytes;
+use commonware_codec::{Decode as _, Encode as _};
 use commonware_cryptography::Sha256;
 use commonware_macros::boxed;
 use commonware_runtime::{tokio as cw_tokio, Runner as _};
 use commonware_storage::{
     merkle::{mmb, mmr, Location, Proof},
     qmdb::{
-        any::unordered::variable::{Db as LocalUnorderedDb, Operation as UnorderedQmdbOperation},
-        current::{
-            batch::Grafts, proof::OpsRootWitness,
-            unordered::variable::Db as LocalCurrentUnorderedDb,
+        any::unordered::variable::{
+            Db as LocalUnorderedDb, Operation as UnorderedQmdbOperation,
+            Update as UnorderedQmdbUpdate,
         },
+        current::unordered::variable::Db as LocalCurrentUnorderedDb,
     },
     translator::TwoCap,
 };
 use commonware_utils::{NZUsize, NZU16, NZU64};
 use connectrpc::{client::ClientConfig, ErrorCode};
 use exoware_qmdb::{
-    adapter::upload::Publication,
+    adapter::upload::{Publication, PublicationCfg},
     service::{
         client::rpc::{CurrentOperationClient, OperationLogClient, OperationLogSubscribeProof},
         proto::qmdb::v1::{
@@ -46,6 +47,8 @@ type BatchOperation = UnorderedQmdbOperation<mmr::Family, Vec<u8>, Vec<u8>>;
 type MmbBatchProof = Proof<mmb::Family, Digest>;
 type MmbBatchOperation = UnorderedQmdbOperation<mmb::Family, Vec<u8>, Vec<u8>>;
 type FixedKeyOperation = UnorderedQmdbOperation<mmr::Family, Digest, Vec<u8>>;
+type FixedKeyPublication =
+    Publication<mmr::Family, Digest, UnorderedQmdbUpdate<Digest, Vec<u8>>, N>;
 type AnyDb = LocalUnorderedDb<
     mmr::Family,
     cw_tokio::Context,
@@ -214,9 +217,8 @@ struct CurrentSourceBatch {
     alpha: Digest,
     beta: Digest,
     root: Digest,
-    witness: OpsRootWitness<mmr::Family, Digest>,
     operations: Vec<FixedKeyOperation>,
-    grafts: Grafts<mmr::Family, Digest, N>,
+    publications: Vec<FixedKeyPublication>,
 }
 
 async fn build_any_source_batch() -> AnySourceBatch {
@@ -397,6 +399,7 @@ async fn build_current_source_batch() -> CurrentSourceBatch {
             )
             .await
             .expect("init");
+            let initial = Publication::initial(&db).expect("initial publication must be readable");
 
             let alpha = Sha256::fill(0xA1);
             let beta = Sha256::fill(0xB2);
@@ -408,8 +411,8 @@ async fn build_current_source_batch() -> CurrentSourceBatch {
                 batch.merkleize(&db).await.expect("merkleize")
             };
             let root = finalized.root();
-            let witness = finalized.ops_root_witness().clone();
-            let grafts = finalized.grafts();
+            let publication =
+                Publication::read(&finalized, &db).expect("publication must be readable");
             db = db.apply_batch(finalized).await.expect("apply");
 
             let latest = db.bounds().end - 1;
@@ -427,9 +430,8 @@ async fn build_current_source_batch() -> CurrentSourceBatch {
                 alpha,
                 beta,
                 root,
-                witness,
                 operations: ops,
-                grafts,
+                publications: vec![initial, publication],
             }
         })
     })
@@ -458,13 +460,9 @@ async fn commit_mmb_upload(store_client: &StoreClient, batch: &MmbAnySourceBatch
 }
 
 async fn commit_current_upload(store_client: &StoreClient, batch: &CurrentSourceBatch) {
-    common::commit_current_operations::<mmr::Family, FixedKeyOperation, N>(
+    common::commit_publications(
         &PrefixedStoreClient::empty(store_client.clone()),
-        &batch.operations,
-        &fixed_key_op_cfg(),
-        batch.root,
-        &batch.witness,
-        &batch.grafts,
+        &batch.publications,
     )
     .await
     .expect("commit current upload");
@@ -847,6 +845,7 @@ async fn aligned_commit_boundary<F: commonware_storage::merkle::Graftable + Part
     F::PendingChunk<Digest>: 'static,
 {
     type Operation<F> = UnorderedQmdbOperation<F, Digest, Vec<u8>>;
+    type SourcePublication<F> = Publication<F, Digest, UnorderedQmdbUpdate<Digest, Vec<u8>>, N>;
     type Db<F> = LocalCurrentUnorderedDb<
         F,
         cw_tokio::Context,
@@ -875,6 +874,8 @@ async fn aligned_commit_boundary<F: commonware_storage::merkle::Graftable + Part
             let mut db = Db::<F>::init(context.child(case_name), cfg, None)
                 .await
                 .expect("source init");
+            let mut publications =
+                vec![Publication::initial(&db).expect("initial publication must be readable")];
             let mut snapshots = Vec::new();
             for round in 0..2 {
                 let mut batch = db.new_batch();
@@ -885,9 +886,9 @@ async fn aligned_commit_boundary<F: commonware_storage::merkle::Graftable + Part
                     }
                 }
                 let batch = batch.merkleize(&db).await.expect("source merkleize");
-                let root = batch.root();
-                let witness = batch.ops_root_witness().clone();
-                let boundary = batch.grafts();
+                publications.push(
+                    Publication::read(&batch, &db).expect("source publication must be readable"),
+                );
                 db = db.apply_batch(batch).await.expect("source apply");
                 assert_eq!(*db.bounds().end, if round == 0 { 512 } else { 514 });
                 let (_, operations): (_, Vec<Operation<F>>) = db
@@ -916,7 +917,7 @@ async fn aligned_commit_boundary<F: commonware_storage::merkle::Graftable + Part
                     &db.root(),
                 ));
                 assert_eq!(chunks[0][N - 1] & 0x80 != 0, round == 0);
-                snapshots.push((operations, root, witness, boundary));
+                snapshots.push((operations, std::mem::take(&mut publications)));
             }
             db.destroy().await.expect("destroy source");
             snapshots
@@ -942,17 +943,28 @@ async fn aligned_commit_boundary<F: commonware_storage::merkle::Graftable + Part
         exoware_qmdb::service::client::Unordered::<_, F, Sha256, Digest, Vec<u8>, N>::plaintext(
             &url, op_cfg,
         );
-    for (operations, root, witness, boundary) in snapshots {
-        common::commit_current_operations(
-            &prefixed,
-            &operations,
-            &op_cfg,
-            root,
-            &witness,
-            &boundary,
-        )
-        .await
-        .expect("publish current boundary");
+    let publication_cfg = PublicationCfg {
+        operation: op_cfg,
+        operations: (0..=MAX_OPERATION_SIZE).into(),
+        chunks: (0..=MAX_OPERATION_SIZE).into(),
+        grafted_nodes: (0..=MAX_OPERATION_SIZE).into(),
+    };
+    for (operations, publications) in snapshots {
+        // Upload each boundary from its publications' encodings.
+        let decoded = publications
+            .iter()
+            .map(|publication| {
+                SourcePublication::<F>::decode_cfg(publication.encode(), &publication_cfg)
+                    .expect("publication must decode")
+            })
+            .collect::<Vec<_>>();
+        common::commit_publications(&prefixed, &decoded)
+            .await
+            .expect("publish current boundary");
+        let root = publications
+            .last()
+            .expect("source publications must not be empty")
+            .root;
         let proof = connect_client
             .get(
                 Location::new(operations.len() as u64 - 1),
@@ -1021,8 +1033,9 @@ async fn current_boundary_nodes<F: commonware_storage::merkle::Graftable + Parti
             let mut db = Db::<F>::init(context.child(case_name), cfg, None)
                 .await
                 .expect("source init");
-            let mut operations = vec![Operation::<F>::CommitFloor(None, Location::new(0))];
-            let mut publications = Vec::new();
+            let initial = Publication::initial(&db).expect("initial publication must be readable");
+            let mut operations = initial.operations.to_vec();
+            let mut publications = vec![initial];
             let mut snapshots = Vec::new();
             for round in 0..=empty_batches + 1 {
                 let mut batch = db.new_batch();
@@ -1045,8 +1058,8 @@ async fn current_boundary_nodes<F: commonware_storage::merkle::Graftable + Parti
                 publications.push(publication);
                 db = db.apply_batch(batch).await.expect("source apply");
 
-                // Prune the source at its sync boundary every round. The next batch's grafts
-                // record this prune in their pruned_chunks count.
+                // Prune the source at its sync boundary every round. The next batch's publication
+                // records this prune in its pruned_chunks count.
                 let prune_boundary = db.sync_boundary();
                 db = db.prune(prune_boundary).await.expect("source prune");
                 if round < empty_batches {
@@ -1073,7 +1086,6 @@ async fn current_boundary_nodes<F: commonware_storage::merkle::Graftable + Parti
                     publications
                         .last()
                         .expect("source publications must not be empty")
-                        .grafts
                         .pruned_chunks,
                     (round + 1) / (N as u64 * 8)
                 );
@@ -1143,7 +1155,7 @@ async fn current_boundary_nodes<F: commonware_storage::merkle::Graftable + Parti
     for (pass, index) in [0, 1, 0].into_iter().enumerate() {
         let (operations, publications, root, queries) = &snapshots[index];
         if pass < 2 {
-            common::commit_publications(&prefixed, publications, &op_cfg)
+            common::commit_publications(&prefixed, publications)
                 .await
                 .expect("publish current boundary");
         }

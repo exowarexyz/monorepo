@@ -186,45 +186,31 @@ the source to discard them.
 
 ### Current-state boundaries
 
-For a current ordered or unordered database, each uploaded batch also carries
-its current root, the witness binding the operation-log root to that root, and
-its `Grafts`. The grafts hold the bitmap chunks and grafted nodes the batch
-wrote and the `pruned_chunks` count captured when the batch was merkleized.
-`Publication::read` collects these, with the batch's operations and prefix
-frontier, before the batch is applied. Prepare the publication against the
-trusted current root:
+For a current ordered or unordered database, upload a `Publication` at every
+batch boundary. Upload `Publication::initial` once for a new database's commit
+at location 0, then read each batch's publication with `Publication::read`
+before applying the batch, while the source still holds the batch's bitmap
+chunks and grafted nodes. To upload later, persist the publication with its
+codec and decode it with a `PublicationCfg`. Once a publication is persisted or
+uploaded, the source must apply that same batch, rebuilding it identically after
+a restart.
 
 ```rust,ignore
 use exoware_qmdb::adapter::upload::{prepare_publication, Publication};
 
+let initial = Publication::initial(&db)?;
 let publication = Publication::read(&batch, &db)?;
 let prepared =
     prepare_publication::<F, H, U, Sequential, N>(&publication, &trusted_root, &Sequential)?;
 ```
 
-A source database keeps no grafts after applying a batch, so upload or durably
-persist each publication first. Once a publication is persisted or uploaded, the
-source must apply that same batch, rebuilding it identically after a restart.
-
-A new database starts with a commit at location 0 that no batch publication
-includes. Upload it once with `prepare_authenticated_range`, as a range that
-begins at zero, but publish no watermark before the first batch.
-
-To upload a batch whose operations were persisted in encoded form, prepare a
-range that ends at that batch's commit with `prepare_authenticated_range` and
-attach that batch's root, witness, and grafts:
-
-```rust,ignore
-let prepared = prepared.with_current_boundary::<H, N>(root, &witness, &grafts)?;
-```
-
-The grafts must come from the source that produced the batch and describe the
-range's final location, using the source's family, hasher, and chunk size `N`.
-`with_current_boundary` checks only that the witness binds the prepared
-operation-log root to `root`. Neither it nor `prepare_publication`
-authenticates the grafts' chunks, nodes, or `pruned_chunks` count. Grafts hold
-only what their batch wrote, so upload every batch's grafts since the source was
-created, each attached to a range that ends at that batch's commit.
+`prepare_publication` requires the publication's root to equal the trusted root,
+authenticates its operations and prefix frontier against its operation-log root,
+and checks that its witness binds that root to the trusted root. The bitmap
+chunks, grafted nodes, and `pruned_chunks` count are not authenticated and must
+come from the source that produced the batch. Each publication holds only
+what its batch wrote, so upload every publication since the database was
+created.
 
 Boundary rows are versioned by batch location. Unchanged chunks and nodes are
 inherited from earlier boundaries. Retain the rows needed for every historical

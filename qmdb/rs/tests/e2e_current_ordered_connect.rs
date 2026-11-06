@@ -5,7 +5,7 @@
 mod common;
 
 use bytes::Bytes;
-use commonware_codec::Encode;
+use commonware_codec::{Decode as _, Encode};
 use commonware_cryptography::Sha256;
 use commonware_runtime::{tokio as cw_tokio, Runner as _};
 use commonware_storage::{
@@ -15,11 +15,7 @@ use commonware_storage::{
             ordered::{variable::Operation as QmdbOperation, Update},
             value::VariableEncoding,
         },
-        current::{
-            batch::Grafts,
-            ordered::{proof::constant::ExclusionProof, variable::Db as LocalQmdbDb},
-            proof::OpsRootWitness,
-        },
+        current::ordered::{proof::constant::ExclusionProof, variable::Db as LocalQmdbDb},
         operation::Operation as _,
     },
     translator::TwoCap,
@@ -29,6 +25,7 @@ use connectrpc::{
     client::ClientConfig, Chain, ConnectRpcService, RequestContext as Context, ServiceRequest,
 };
 use exoware_qmdb::{
+    adapter::upload::{prepare_publication, Publication, PublicationCfg},
     proof::{RawKeyExclusionProof, RawKeyLookupProof, VerifiedKeyLookup},
     service::proto::qmdb::v1::{
         current_key_lookup_result, CurrentOperationServiceClient,
@@ -57,6 +54,8 @@ const N: usize = 32;
 type Digest = commonware_cryptography::sha256::Digest;
 type BatchProof = Proof<mmr::Family, Digest>;
 type BatchOperation = QmdbOperation<mmr::Family, Vec<u8>, Vec<u8>>;
+type BatchPublication =
+    Publication<mmr::Family, Digest, Update<Vec<u8>, VariableEncoding<Vec<u8>>>, N>;
 type TestOrderedClient = exoware_qmdb::adapter::Ordered<mmr::Family, Sha256, Vec<u8>, Vec<u8>, N>;
 type ConnectClient = exoware_qmdb::service::client::Ordered<
     PreferZstdHttpClient,
@@ -139,8 +138,9 @@ struct SourceBatch {
     latest_location: Location<mmr::Family>,
     operations: Vec<BatchOperation>,
     root: Digest,
-    witness: OpsRootWitness<mmr::Family, Digest>,
-    grafts: Grafts<mmr::Family, Digest, N>,
+    /// Publications extending the uploaded log from the previous tip to this one, starting with
+    /// the initial commit's publication for the first tip.
+    publications: Vec<BatchPublication>,
 }
 
 async fn build_source_batch() -> SourceBatch {
@@ -169,8 +169,8 @@ async fn build_source_batch_with_writes(
 }
 
 /// Apply each batch of writes as its own commit, returning each tip's operations from location 0
-/// with its batch's root, witness, and grafts. Grafts hold only their batch's writes, so upload
-/// tips in order.
+/// with its batch's root and publications. Publications hold only their batch's changes, so
+/// upload tips in order.
 async fn build_source_tips(
     partition_prefix: &'static str,
     batches: Vec<TipWrites>,
@@ -191,6 +191,8 @@ async fn build_source_tips(
             let mut db: Db = Db::init(context.child(partition_prefix), cfg, None)
                 .await
                 .expect("init");
+            let mut publications =
+                vec![Publication::initial(&db).expect("initial publication must be readable")];
 
             let mut tips = Vec::<SourceBatch>::new();
             for writes in batches {
@@ -202,8 +204,9 @@ async fn build_source_tips(
                     batch.merkleize(&db).await.expect("merkleize")
                 };
                 let root = finalized.root();
-                let witness = finalized.ops_root_witness().clone();
-                let grafts = finalized.grafts();
+                publications.push(
+                    Publication::read(&finalized, &db).expect("publication must be readable"),
+                );
                 db = db.apply_batch(finalized).await.expect("apply");
 
                 let latest = db.bounds().end - 1;
@@ -216,8 +219,7 @@ async fn build_source_tips(
                     latest_location: latest,
                     operations: ops,
                     root,
-                    witness,
-                    grafts,
+                    publications: std::mem::take(&mut publications),
                 });
             }
 
@@ -248,28 +250,33 @@ async fn build_grafted_boundary_source_batch() -> SourceBatch {
 
 async fn commit_upload(store_client: &StoreClient, batch: &SourceBatch) {
     let upload_client = PrefixedStoreClient::empty(store_client.clone());
-    common::commit_current_operations(
-        &upload_client,
-        &batch.operations,
-        &op_cfg(),
-        batch.root,
-        &batch.witness,
-        &batch.grafts,
-    )
-    .await
-    .expect("commit upload");
+    common::commit_publications(&upload_client, &batch.publications)
+        .await
+        .expect("commit upload");
 }
 
+/// Stage the rows a writer stores for `source`, preparing each publication from its encoding.
 fn current_snapshot_rows(source: &SourceBatch) -> BTreeMap<Bytes, Bytes> {
     let staging = PrefixedStoreClient::empty(StoreClient::new("http://127.0.0.1:1"));
-    let (_, prepared) =
-        common::prepare_operations::<mmr::Family, BatchOperation>(&source.operations, &op_cfg());
-    let prepared = prepared
-        .with_current_boundary::<Sha256, N>(source.root, &source.witness, &source.grafts)
-        .expect("attach current boundary");
+    let cfg = PublicationCfg {
+        operation: op_cfg(),
+        operations: (0..=MAX_OPERATION_SIZE).into(),
+        chunks: (0..=MAX_OPERATION_SIZE).into(),
+        grafted_nodes: (0..=MAX_OPERATION_SIZE).into(),
+    };
     let mut batch = StoreWriteBatch::new();
-    exoware_qmdb::adapter::upload::stage_authenticated_range(&staging, prepared, &mut batch)
-        .expect("stage authenticated range");
+    for publication in &source.publications {
+        let decoded = BatchPublication::decode_cfg(publication.encode(), &cfg)
+            .expect("publication must decode");
+        let prepared = prepare_publication::<mmr::Family, Sha256, _, _, N>(
+            &decoded,
+            &publication.root,
+            &commonware_parallel::Sequential,
+        )
+        .expect("publication must prepare");
+        exoware_qmdb::adapter::upload::stage_authenticated_range(&staging, prepared, &mut batch)
+            .expect("stage authenticated range");
+    }
     exoware_qmdb::adapter::upload::stage_watermark(&staging, source.latest_location, &mut batch)
         .expect("stage watermark");
     batch.entries().iter().cloned().collect()
@@ -761,16 +768,9 @@ async fn test_ordered_get_after_grafted_boundary_returns_current_key_value_proof
         key_cfg(),
     );
     let upload_client = PrefixedStoreClient::empty(store_client.clone());
-    common::commit_current_operations(
-        &upload_client,
-        &source.operations,
-        &op_cfg(),
-        source.root,
-        &source.witness,
-        &source.grafts,
-    )
-    .await
-    .expect("commit upload");
+    common::commit_publications(&upload_client, &source.publications)
+        .await
+        .expect("commit upload");
 
     let key = b"k-00000400".to_vec();
     let proof = ordered_client

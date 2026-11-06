@@ -12,14 +12,13 @@ use commonware_parallel::Sequential;
 use commonware_runtime::buffer::paged::CacheRef;
 use commonware_storage::{
     journal::contiguous::variable::Config as VariableJournalConfig,
-    merkle::{full::Config as MerkleConfig, Family, Graftable, Location},
+    merkle::{full::Config as MerkleConfig, Family, Graftable},
     qmdb::{
         any::{
             self,
             operation::{Operation as AnyOperation, Update},
         },
-        current::{self, batch::Grafts, proof::OpsRootWitness},
-        immutable, keyless,
+        current, immutable, keyless,
     },
     translator::TwoCap,
 };
@@ -185,56 +184,19 @@ where
     Ok(())
 }
 
-#[allow(dead_code)]
-pub async fn commit_current_operations<F, Op, const N: usize>(
-    client: &exoware_sdk::PrefixedStoreClient,
-    operations: &[Op],
-    cfg: &Op::Cfg,
-    root: commonware_cryptography::sha256::Digest,
-    witness: &OpsRootWitness<F, commonware_cryptography::sha256::Digest>,
-    grafts: &Grafts<F, commonware_cryptography::sha256::Digest, N>,
-) -> Result<(), QmdbError>
-where
-    F: Graftable,
-    Op: exoware_qmdb::adapter::upload::UploadOperation<F>,
-{
-    let (_, prepared) = prepare_operations::<F, Op>(operations, cfg);
-    let prepared = prepared
-        .with_current_boundary::<commonware_cryptography::Sha256, N>(root, witness, grafts)?;
-    let latest = prepared.latest_location();
-    let mut batch = exoware_sdk::StoreWriteBatch::new();
-    exoware_qmdb::adapter::upload::stage_authenticated_range(client, prepared, &mut batch)?;
-    exoware_qmdb::adapter::upload::stage_watermark(client, latest, &mut batch)?;
-    batch.commit(client.client()).await?;
-    Ok(())
-}
-
 /// Upload consecutive current batch publications and publish the last one's final location.
 #[allow(dead_code)]
 pub async fn commit_publications<F, U, const N: usize>(
     client: &exoware_sdk::PrefixedStoreClient,
     publications: &[Publication<F, commonware_cryptography::sha256::Digest, U, N>],
-    cfg: &<AnyOperation<F, U> as commonware_codec::Read>::Cfg,
 ) -> Result<(), QmdbError>
 where
     F: Graftable,
     U: Update,
     AnyOperation<F, U>: UploadOperation<F>,
 {
-    let mut batch = exoware_sdk::StoreWriteBatch::new();
-
-    // A source's first publication starts at location 1, after the initial commit that no
-    // publication includes, so stage that commit first.
-    if publications
-        .first()
-        .is_some_and(|publication| publication.start == Location::new(1))
-    {
-        let initial = AnyOperation::<F, U>::CommitFloor(None, Location::new(0));
-        let (_, prepared) = prepare_operations::<F, _>(std::slice::from_ref(&initial), cfg);
-        stage_authenticated_range(client, prepared, &mut batch)?;
-    }
-
     // Stage each publication, trusting its own root as the expected current root.
+    let mut batch = exoware_sdk::StoreWriteBatch::new();
     let mut latest = None;
     for publication in publications {
         let prepared = prepare_publication::<F, commonware_cryptography::Sha256, U, _, N>(
