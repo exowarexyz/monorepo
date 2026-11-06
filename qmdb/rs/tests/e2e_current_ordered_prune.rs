@@ -1,4 +1,5 @@
 //! Ordered current-batch publications across local bitmap-chunk pruning.
+//!
 //! Remote current roots and proofs must match the source at every batch boundary,
 //! including historical watermarks and keys below the latest inactivity floor.
 
@@ -109,7 +110,9 @@ async fn test_mirror_ordered_prune_past_chunk_zero() {
                         counter += 3;
                         batch.merkleize(&db).await.expect("merkleize")
                     };
-                    let publication = finalized.publication(&db).expect("publication");
+                    let publication = finalized
+                        .publication(&db)
+                        .expect("publication must be readable");
                     db = db.apply_batch(finalized).await.expect("apply");
                     // Current pruning is now explicit in Commonware. Keep the
                     // historical operation log intact for this mirror test while

@@ -14,7 +14,7 @@ use crate::{
         },
         core::extend_merkle_from_pinned_nodes,
     },
-    Delta, ProofKind, QmdbError,
+    ProofKind, QmdbError,
 };
 use commonware_codec::{Codec, Copying, Encode};
 use commonware_cryptography::{Digest, Hasher};
@@ -26,7 +26,10 @@ use commonware_storage::{
             operation::{Operation as AnyOperation, Update},
             value::ValueEncoding,
         },
-        current::{batch::Publication, grafting},
+        current::{
+            batch::{Delta, Publication},
+            grafting,
+        },
         immutable, keyless,
         operation::{Floored, Key as QmdbKey},
     },
@@ -125,12 +128,11 @@ impl<D: Digest, F: Family> PreparedAuthenticatedRange<D, F> {
 }
 
 impl<D: Digest, F: Graftable> PreparedAuthenticatedRange<D, F> {
-    /// Add a current QMDB batch's [`Delta`] as the current-state rows at this range's final
-    /// location.
+    /// Add a current batch's [`Delta`] as the current-state rows at this range's final location.
     ///
-    /// The delta must come from the trusted producer of the batch that ends at this range's final
-    /// location. This method checks only that its witness binds the verified operation root to its
-    /// current root. It does not authenticate the supplied chunks, nodes, or pruned chunk count.
+    /// This checks only that the delta's witness binds the verified operation root to the delta's
+    /// root. The delta's chunks, grafted nodes, and pruned chunk count are not authenticated and
+    /// must come from the source that produced the batch ending at this location.
     pub fn with_current_boundary<H: Hasher<Digest = D>, const N: usize>(
         mut self,
         delta: &Delta<F, D, N>,
@@ -212,14 +214,9 @@ where
     )
 }
 
-/// Verify a current QMDB batch's [`Publication`] and prepare its operation, index, Merkle node,
-/// and current-state rows.
-///
-/// `expected_root` is the batch's canonical current root and must be trusted independently of the
-/// publication. The publication's delta must carry that root, its witness must bind the
-/// publication's operation root to it, and its operations and pins must reconstruct that
-/// operation root. Read the publication before applying its batch, while its frontier is still
-/// available.
+/// Verify a current QMDB batch's [`Publication`] against `expected_root` and prepare its rows.
+/// The root must be trusted independently of the publication. The delta's chunks, grafted nodes,
+/// and pruned chunk count are not authenticated and must come from the source of the batch.
 pub fn prepare_publication<F, H, U, S, const N: usize>(
     publication: &Publication<F, H::Digest, U, N>,
     expected_root: &H::Digest,
@@ -232,11 +229,15 @@ where
     AnyOperation<F, U>: UploadOperation<F>,
     S: Strategy,
 {
+    // Anchor the delta to the trusted root before hashing any operations.
     if publication.delta.root != *expected_root {
         return Err(QmdbError::CorruptData(
             "publication does not carry the expected current root".into(),
         ));
     }
+
+    // Rebuild the authenticated range from the publication. The floor of its final commit fixes
+    // the canonical inactive peak count.
     let operations = publication.operations.as_slice();
     let floor = operations
         .last()
@@ -257,6 +258,9 @@ where
         pinned_nodes: &publication.pinned_nodes,
         encoded_operations: &encoded_operations,
     };
+
+    // The operations are already decoded, so preparation borrows them and skips decoding. Attaching
+    // the delta checks that its witness binds the rebuilt operation root.
     prepare_range::<F, H, AnyOperation<F, U>, _, S>(
         &authenticated,
         &publication.ops_root,
@@ -266,8 +270,8 @@ where
     .with_current_boundary::<H, N>(&publication.delta)
 }
 
-/// Verify a range and prepare its rows, obtaining each operation from `operation_at` with its
-/// offset, location, and canonical encoding.
+/// Verify a range and prepare its rows. `operation_at` supplies the operation at each offset,
+/// location, and canonical encoding, so a caller holding decoded operations can skip decoding.
 fn prepare_range<F, H, Op, O, S>(
     authenticated: &AuthenticatedOperationRange<'_, H::Digest, F>,
     expected_root: &H::Digest,
@@ -404,7 +408,7 @@ pub fn stage_authenticated_range<D: Digest, F: Family>(
 ///
 /// The caller must only advance this location after every required row in the contiguous prefix
 /// is durable, or when those rows are staged in the same atomic Store batch. For current QMDBs,
-/// the corresponding authenticated current boundary rows must also be available.
+/// the current-state rows of every batch through this location must also be durable or staged.
 pub fn stage_watermark<F: Family>(
     client: &PrefixedStoreClient,
     watermark: Location<F>,

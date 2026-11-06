@@ -201,18 +201,29 @@ let prepared =
     prepare_publication::<F, H, U, Sequential, N>(&publication, &trusted_root, &Sequential)?;
 ```
 
-To upload a range that was persisted as encoded operations, prepare it with
-`prepare_authenticated_range` and attach the delta of the batch that ends it:
+The source keeps no deltas, so upload or durably persist each publication before
+applying its batch. Once a publication is persisted or uploaded, the source must
+apply that same batch, rebuilding it identically after a restart.
+
+A new database starts with a commit at location 0 that no batch publication
+includes. Upload it once with `prepare_authenticated_range`, as a range that
+begins at zero, but publish no watermark before the first batch.
+
+To upload a batch whose operations were persisted in encoded form, prepare a
+range that ends at that batch's commit with `prepare_authenticated_range` and
+attach that batch's delta:
 
 ```rust,ignore
 let prepared = prepared.with_current_boundary::<H, N>(&delta)?;
 ```
 
-The delta must describe the range's final location, using the source's family,
-hasher, and chunk size `N`. `with_current_boundary` checks the witness's binding
-to the prepared operation-log root, but it does not authenticate the supplied
-chunks, nodes, or pruning count. A delta holds only what its batch wrote, so
-upload one for every batch since the source was created.
+The delta must come from the source that produced the batch and describe the
+range's final location, using the source's family, hasher, and chunk size `N`.
+`with_current_boundary` checks only the witness's binding to the prepared
+operation-log root. Neither it nor `prepare_publication` authenticates the
+delta's chunks, grafted nodes, or `pruned_chunks` count. A delta holds only
+what its batch wrote, so upload every batch's delta since the source was
+created, each attached to a range that ends at that batch's commit.
 
 Boundary rows are versioned by batch location. Unchanged chunks and nodes are
 inherited from earlier boundaries. Retain the rows needed for every historical

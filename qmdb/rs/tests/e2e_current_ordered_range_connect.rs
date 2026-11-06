@@ -203,7 +203,11 @@ async fn build_source_batch() -> SourceBatch {
                         .write(b"beta".to_vec(), Some(b"two".to_vec()));
                     batch.merkleize(&db).await.expect("merkleize")
                 };
-                publications.push(finalized.publication(&db).expect("publication"));
+                publications.push(
+                    finalized
+                        .publication(&db)
+                        .expect("publication must be readable"),
+                );
                 db = db.apply_batch(finalized).await.expect("apply");
 
                 let latest = db.bounds().end - 1;
@@ -285,7 +289,11 @@ async fn build_mmb_source_batch() -> MmbSourceBatch {
                         .write(key, Some(value));
                     batch.merkleize(&db).await.expect("merkleize")
                 };
-                publications.push(finalized.publication(&db).expect("publication"));
+                publications.push(
+                    finalized
+                        .publication(&db)
+                        .expect("publication must be readable"),
+                );
                 db = db.apply_batch(finalized).await.expect("apply");
 
                 let latest = db.bounds().end - 1;
@@ -360,7 +368,11 @@ async fn build_mmb_growing_source_batch() -> MmbGrowingSourceBatch {
                         .write(key, Some(value));
                     batch.merkleize(&db).await.expect("merkleize")
                 };
-                publications.push(finalized.publication(&db).expect("publication"));
+                publications.push(
+                    finalized
+                        .publication(&db)
+                        .expect("publication must be readable"),
+                );
                 db = db.apply_batch(finalized).await.expect("apply");
 
                 let latest = db.bounds().end - 1;
@@ -404,7 +416,7 @@ async fn build_mmb_growing_source_batch() -> MmbGrowingSourceBatch {
 
             MmbGrowingSourceBatch {
                 initial,
-                // The updated source continues the initial one, so it holds only later publications
+                // The updated source continues the initial one and holds only later publications.
                 updated: MmbSourceBatch {
                     ops_root,
                     operations: ops,

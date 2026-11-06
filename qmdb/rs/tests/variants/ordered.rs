@@ -16,7 +16,7 @@ use commonware_storage::{
             ordered,
             value::{FixedEncoding, ValueEncoding, VariableEncoding},
         },
-        current::ordered::proof::constant::ExclusionProof,
+        current::{batch::Delta, ordered::proof::constant::ExclusionProof},
         operation::Key as QmdbKey,
         verify::ProofExt as _,
     },
@@ -35,7 +35,7 @@ use exoware_qmdb::{
             GetRangeRequest, GetRequest, SubscribeRequest,
         },
     },
-    Delta, MAX_OPERATION_SIZE,
+    MAX_OPERATION_SIZE,
 };
 use exoware_sdk::{proto::PreferZstdHttpClient, PrefixedStoreClient, StoreWriteBatch};
 use std::{collections::BTreeMap, fmt::Debug, sync::Arc};
@@ -900,7 +900,7 @@ macro_rules! source_snapshot {
             )
             .await
             .expect("source historical proof");
-        assert!(proof.verify::<Sha256, _>(Location::new(0), &operations, &root,));
+        assert!(proof.verify::<Sha256, _>(Location::new(0), &operations, &root));
         let captured = $captured.expect("captured any batch proof");
         assert_eq!(
             captured.encoded_operations,
@@ -938,7 +938,7 @@ macro_rules! source_snapshot {
             )
             .await
             .expect("source historical proof");
-        assert!(proof.verify::<Sha256, _>(Location::new(0), &operations, &ops_root,));
+        assert!(proof.verify::<Sha256, _>(Location::new(0), &operations, &ops_root));
         let activity = (0..*end)
             .map(|location| $db.bitmap().get_bit(location))
             .collect();

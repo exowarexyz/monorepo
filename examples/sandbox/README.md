@@ -108,7 +108,8 @@ With the simulator running:
    ```
 
    Its local ordered-QMDB MMB state persists under
-   `$HOME/.exoware_qmdb_mmb_seed`, so it resumes after a restart. Use
+   `$HOME/.exoware_qmdb_mmb_seed`, so it resumes after a restart. Delete that
+   directory before seeding a reset Store or a different `--store-prefix`. Use
    `--directory` to give each additional instance its own local state directory.
 
 3. **Point the web app at the QMDB server**:

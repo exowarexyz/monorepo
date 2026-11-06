@@ -13,14 +13,14 @@ use commonware_storage::{
     merkle::{mmr, Location},
     qmdb::{
         any::unordered::variable::Db as LocalUnorderedDb,
-        current::ordered::variable::Db as LocalOrderedDb,
+        current::{batch::Delta, ordered::variable::Db as LocalOrderedDb},
         immutable::variable::{Db as Immutable, Operation as ImmutableOperation},
         keyless::variable::{Db as Keyless, Operation as KeylessOperation},
     },
     translator::TwoCap,
 };
 use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16, NZU64};
-use exoware_qmdb::{Delta, MAX_OPERATION_SIZE};
+use exoware_qmdb::MAX_OPERATION_SIZE;
 use exoware_sdk::PrefixedStoreClient;
 use std::num::NonZeroU64;
 
@@ -409,7 +409,8 @@ async fn test_mirror_ordered_from_local() {
         "remote root must match local (after batch 1)"
     );
 
-    // Rebuild the same history plus one batch and upload only the new batch's delta
+    // Rebuild the same history plus one batch, then upload the full operation log with only the
+    // new batch's delta.
     let (ops_total, latest2, root2, boundary_delta) = build_current_ordered_source(vec![
         vec![
             (b"alpha".to_vec(), Some(b"one".to_vec())),
@@ -494,7 +495,7 @@ async fn build_current_ordered_source(
                 .ops_historical_proof(latest + 1, Location::<mmr::Family>::new(0), n)
                 .await
                 .expect("ops_historical_proof");
-            let boundary = boundary.expect("at least one batch");
+            let boundary = boundary.expect("batches must not be empty");
             let root = db.root();
             db = db.sync().await.expect("sync");
             db.destroy().await.expect("destroy");

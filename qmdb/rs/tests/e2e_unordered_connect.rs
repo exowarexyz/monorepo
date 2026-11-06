@@ -11,7 +11,7 @@ use commonware_storage::{
     merkle::{mmb, mmr, Location, Proof},
     qmdb::{
         any::unordered::variable::{Db as LocalUnorderedDb, Operation as UnorderedQmdbOperation},
-        current::unordered::variable::Db as LocalCurrentUnorderedDb,
+        current::{batch::Delta, unordered::variable::Db as LocalCurrentUnorderedDb},
     },
     translator::TwoCap,
 };
@@ -30,7 +30,7 @@ use exoware_qmdb::{
             SubscribeRequest as ProtoSubscribeRequest,
         },
     },
-    Delta, QmdbError, MAX_OPERATION_SIZE,
+    QmdbError, MAX_OPERATION_SIZE,
 };
 use exoware_sdk::{proto::PreferZstdHttpClient, PrefixedStoreClient, StoreClient};
 use std::{num::NonZeroU64, time::Duration};
@@ -1002,6 +1002,7 @@ async fn current_boundary_nodes<F: commonware_storage::merkle::Graftable + Parti
             let mut db = Db::<F>::init(context.child(case_name), cfg, None)
                 .await
                 .expect("source init");
+            let mut operations = vec![Operation::<F>::CommitFloor(None, Location::new(0))];
             let mut publications = Vec::new();
             let mut snapshots = Vec::new();
             for round in 0..=empty_batches + 1 {
@@ -1019,22 +1020,22 @@ async fn current_boundary_nodes<F: commonware_storage::merkle::Graftable + Parti
                     .merkleize(&db)
                     .await
                     .expect("source merkleize");
-                publications.push(batch.publication(&db).expect("source publication"));
+                let publication = batch
+                    .publication(&db)
+                    .expect("source publication must be readable");
+                operations.extend(publication.operations.iter().cloned());
+                publications.push(publication);
                 db = db.apply_batch(batch).await.expect("source apply");
+
+                // Prune the source at its sync boundary every round. The next batch's delta
+                // records this prune in its pruned_chunks count.
+                let prune_boundary = db.sync_boundary();
+                db = db.prune(prune_boundary).await.expect("source prune");
                 if round < empty_batches {
                     continue;
                 }
 
-                // Capture the boundaries before and after the final batch, retaining the operation log
-                db = db.prune(Location::new(0)).await.expect("source prune");
-                let (_, operations): (_, Vec<Operation<F>>) = db
-                    .ops_historical_proof(
-                        db.bounds().end,
-                        Location::new(0),
-                        NonZeroU64::new(*db.bounds().end).unwrap(),
-                    )
-                    .await
-                    .expect("source operations");
+                // Capture the boundaries before and after the final batch.
                 assert_eq!(
                     operations.len() as u64,
                     u64::from(key_count)
@@ -1050,11 +1051,17 @@ async fn current_boundary_nodes<F: commonware_storage::merkle::Graftable + Parti
                     operations.last(),
                     Some(Operation::CommitFloor(_, floor)) if floor.as_u64() == round + 2
                 ));
-                let pruned_chunks = *db.sync_boundary() / (N as u64 * 8);
-                assert_eq!(pruned_chunks, (round + 2) / (N as u64 * 8));
+                assert_eq!(
+                    publications
+                        .last()
+                        .expect("source publications must not be empty")
+                        .delta
+                        .pruned_chunks,
+                    (round + 1) / (N as u64 * 8)
+                );
 
                 // Keys straddling chunk boundaries exercise mixed ancestors and delayed parent creation
-                let queries = [255, 256, 512]
+                let queries = [255, 256, 257, 512]
                     .into_iter()
                     .filter(|index| *index <= key_count)
                     .map(|index| {
@@ -1081,7 +1088,7 @@ async fn current_boundary_nodes<F: commonware_storage::merkle::Graftable + Parti
                 }
 
                 snapshots.push((
-                    operations,
+                    operations.clone(),
                     std::mem::take(&mut publications),
                     db.root(),
                     queries,
@@ -1153,7 +1160,7 @@ async fn test_current_unordered_variable_fixed_keys_variable_values_mmr_pruned_p
     current_boundary_nodes::<mmr::Family>(
         "current_unordered_variable_fixed_keys_variable_values_mmr_pruned_peak",
         500,
-        253,
+        254,
         0,
     )
     .await;
@@ -1164,7 +1171,7 @@ async fn test_current_unordered_variable_fixed_keys_variable_values_mmb_pruned_p
     current_boundary_nodes::<mmb::Family>(
         "current_unordered_variable_fixed_keys_variable_values_mmb_pruned_peak",
         500,
-        253,
+        254,
         0,
     )
     .await;
@@ -1175,7 +1182,7 @@ async fn test_current_unordered_variable_fixed_keys_variable_values_mmr_pruned_n
     current_boundary_nodes::<mmr::Family>(
         "current_unordered_variable_fixed_keys_variable_values_mmr_pruned_nested_peak",
         1040,
-        253,
+        254,
         0,
     )
     .await;
@@ -1186,7 +1193,7 @@ async fn test_current_unordered_variable_fixed_keys_variable_values_mmb_pruned_n
     current_boundary_nodes::<mmb::Family>(
         "current_unordered_variable_fixed_keys_variable_values_mmb_pruned_nested_peak",
         1040,
-        253,
+        254,
         0,
     )
     .await;
