@@ -12,10 +12,11 @@ use commonware_storage::{
             unordered,
             value::{FixedEncoding, ValueEncoding, VariableEncoding},
         },
+        current::batch::Delta,
         operation::Key as QmdbKey,
     },
 };
-use commonware_utils::{iter::zip_eq, NZUsize, NZU16, NZU64};
+use commonware_utils::{bitmap::Readable as _, iter::zip_eq, NZUsize, NZU16};
 use exoware_qmdb::{
     adapter::upload::{
         prepare_authenticated_range, stage_authenticated_range, stage_watermark,
@@ -25,7 +26,7 @@ use exoware_qmdb::{
         client::rpc::{CurrentOperationClient, OperationLogClient},
         proto::qmdb::v1::{GetCurrentOperationRangeRequest, GetOperationRangeRequest},
     },
-    Delta, MAX_OPERATION_SIZE,
+    MAX_OPERATION_SIZE,
 };
 use exoware_sdk::StoreWriteBatch;
 use std::{fmt::Debug, num::NonZeroU64, sync::Arc};
@@ -460,15 +461,17 @@ macro_rules! initial_boundary {
     (any, $db:ident) => {
         None
     };
+
+    // A new database's initial commit belongs to no batch, so its delta is the database's whole
+    // current state. That state is the bitmap's first chunk, with no grafted nodes.
     (current, $db:ident) => {
-        Some(
-            common::initial_delta(
-                $db.root(),
-                $db.ops_root_witness().clone(),
-                $db.range_proof(Location::new(0), NZU64!(1)),
-            )
-            .await,
-        )
+        Some(Delta {
+            root: $db.root(),
+            witness: $db.ops_root_witness().clone(),
+            pruned_chunks: 0,
+            chunks: vec![(0, $db.bitmap().get_chunk(0))],
+            grafted_nodes: Vec::new(),
+        })
     };
 }
 

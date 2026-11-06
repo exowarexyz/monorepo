@@ -58,15 +58,6 @@ pub use adapter::codec::{CHUNK_FAMILY, NODE_FAMILY};
 use commonware_codec::{Copying, DecodeExt};
 use commonware_cryptography::Digest;
 use commonware_storage::merkle::{Family, Location};
-/// Current-state rows for one uploaded current batch boundary.
-///
-/// Current QMDB uploads carry more than the historical op log: each published batch boundary also
-/// stores the current-state root, op-root witness, and the bitmap chunks and grafted nodes the
-/// batch changed. Obtain it from a local Commonware current batch with `MerkleizedBatch::delta` or
-/// as part of its `MerkleizedBatch::publication`, then attach it with
-/// [`adapter::upload::PreparedAuthenticatedRange::with_current_boundary`] or upload the whole
-/// publication with [`adapter::upload::prepare_publication`].
-pub use commonware_storage::qmdb::current::batch::Delta;
 pub use error::{ProofKind, QmdbError};
 
 /// Maximum encoded operation size for QMDB key and value payloads (u16 length on the wire).

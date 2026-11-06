@@ -17,9 +17,12 @@ use commonware_storage::{
             },
             value::FixedEncoding,
         },
-        current::ordered::{
-            fixed::Db as LocalFixedQmdbDb, proof::constant::ExclusionProof,
-            variable::Db as LocalQmdbDb,
+        current::{
+            batch::Delta,
+            ordered::{
+                fixed::Db as LocalFixedQmdbDb, proof::constant::ExclusionProof,
+                variable::Db as LocalQmdbDb,
+            },
         },
         operation::Operation as _,
     },
@@ -27,7 +30,7 @@ use commonware_storage::{
 };
 use commonware_utils::{NZUsize, NZU16, NZU64};
 use exoware_qmdb::{
-    adapter::upload::prepare_publication, proof::RawKeyLookupProof, Delta, ProofKind, QmdbError,
+    adapter::upload::prepare_publication, proof::RawKeyLookupProof, ProofKind, QmdbError,
     MAX_OPERATION_SIZE,
 };
 use exoware_sdk::{PrefixedStoreClient, StoreClient};
@@ -521,7 +524,11 @@ async fn assert_incremental_seed_batches_keep_current_proofs_verifiable<F>(
                         counter += 3;
                         batch.merkleize(&db).await.expect("merkleize")
                     };
-                    publications.push(finalized.publication(&db).expect("publication"));
+                    publications.push(
+                        finalized
+                            .publication(&db)
+                            .expect("publication must be readable"),
+                    );
                     db = db.apply_batch(finalized).await.expect("apply");
                 }
 
@@ -664,7 +671,9 @@ async fn test_ordered_mmb_persistent_interleaved_seed_batches_keep_current_proof
                             counter += 3;
                             batch.merkleize(&db).await.expect("merkleize")
                         };
-                        let publication = finalized.publication(&db).expect("publication");
+                        let publication = finalized
+                            .publication(&db)
+                            .expect("publication must be readable");
                         db = db.apply_batch(finalized).await.expect("apply");
                         db = db.sync().await.expect("sync");
                         common::commit_publications(
@@ -1298,6 +1307,7 @@ async fn test_ordered_current_proof_reads_overlap() {
 
 #[tokio::test]
 async fn test_prepare_publication_rejects_unbound_publications() {
+    // Read the publication of one source batch that is never applied.
     let publication = tokio::task::spawn_blocking(|| {
         cw_tokio::Runner::default().start(|context| async move {
             use commonware_runtime::{buffer::paged::CacheRef, Supervisor as _};
@@ -1314,22 +1324,26 @@ async fn test_prepare_publication_rejects_unbound_publications() {
                 None,
             )
             .await
-            .expect("init");
+            .expect("source database must initialize");
             let batch = db
                 .new_batch()
                 .write(b"alpha".to_vec(), Some(b"one".to_vec()))
                 .write(b"beta".to_vec(), Some(b"two".to_vec()))
                 .merkleize(&db)
                 .await
-                .expect("merkleize");
-            let publication = batch.publication(&db).expect("publication");
+                .expect("source batch must merkleize");
+            let publication = batch
+                .publication(&db)
+                .expect("publication must be readable");
             drop(batch);
-            db.destroy().await.expect("destroy");
+            db.destroy().await.expect("source destroy must succeed");
             publication
         })
     })
     .await
-    .expect("join");
+    .expect("source task must complete");
+
+    // The source's own publication prepares the batch's operation range.
     let root = publication.delta.root;
     let prepare = |publication: &_, root: &Digest| {
         prepare_publication::<mmr::Family, Sha256, _, _, N>(
@@ -1338,18 +1352,20 @@ async fn test_prepare_publication_rejects_unbound_publications() {
             &commonware_parallel::Sequential,
         )
     };
-    let prepared = prepare(&publication, &root).expect("prepare publication");
+    let prepared = prepare(&publication, &root).expect("source publication must verify");
     assert_eq!(prepared.start_location(), publication.start);
     assert_eq!(
         prepared.latest_location(),
         publication.start + (publication.operations.len() as u64 - 1)
     );
 
+    // A root other than the delta's is rejected.
     assert!(matches!(
         prepare(&publication, &Sha256::fill(0xEE)),
         Err(QmdbError::CorruptData(_))
     ));
 
+    // Reordered operations rebuild a different operation root and fail range verification.
     let mut reordered = publication.clone();
     let mut operations = reordered.operations.as_ref().clone();
     operations.swap(0, 1);
@@ -1361,6 +1377,7 @@ async fn test_prepare_publication_rejects_unbound_publications() {
         })
     ));
 
+    // A witness that does not bind the operation root to the delta's root is rejected.
     let mut unbound = publication;
     unbound.delta.witness.grafted_root = Sha256::fill(0xEE);
     assert!(matches!(

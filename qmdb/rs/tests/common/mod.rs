@@ -20,8 +20,7 @@ use commonware_storage::{
         },
         current::{
             self,
-            batch::Publication,
-            proof::{OpsRootWitness, RangeProof},
+            batch::{Delta, Publication},
         },
         immutable, keyless,
     },
@@ -39,7 +38,7 @@ use exoware_qmdb::{
         GetOperationsResponse, OperationLogService, OperationLogServiceClient,
         OperationLogServiceServer, SubscribeRequest, SubscribeResponse,
     },
-    Delta, QmdbError,
+    QmdbError,
 };
 use exoware_sdk::{proto::PreferZstdHttpClient, transport::set_tcp_nodelay, StoreClient};
 use std::{convert::Infallible, num::NonZeroU64, time::Duration};
@@ -168,24 +167,6 @@ where
 mod operations;
 pub use operations::prepare_operations;
 
-/// Extract the one operation's bitmap chunk from a native current range proof
-#[allow(dead_code)]
-pub async fn current_proof_chunk<F, D, Op, E, const N: usize>(
-    proof: impl std::future::Future<Output = Result<(RangeProof<F, D>, Vec<Op>, Vec<[u8; N]>), E>>,
-) -> Result<(RangeProof<F, D>, [u8; N]), QmdbError>
-where
-    F: Graftable,
-    D: Digest,
-    E: std::fmt::Display,
-{
-    let (proof, operations, chunks) = proof
-        .await
-        .map_err(|error| QmdbError::CorruptData(error.to_string()))?;
-    assert_eq!(operations.len(), 1, "one source operation");
-    assert_eq!(chunks.len(), 1, "one source bitmap chunk");
-    Ok((proof, chunks[0]))
-}
-
 #[allow(dead_code)]
 pub async fn commit_operations<F, Op>(
     client: &exoware_sdk::PrefixedStoreClient,
@@ -227,10 +208,9 @@ where
     Ok(())
 }
 
-/// Upload consecutive current batch publications and publish the last one's final location.
-///
-/// A publication that starts at location 1 follows a new database's initial commit, which no
-/// publication covers, so that commit is uploaded with it.
+/// Upload consecutive current batch publications and publish the last one's final location. The
+/// initial commit at location 0 belongs to no publication, so it is also uploaded when the first
+/// publication starts at location 1.
 #[allow(dead_code)]
 pub async fn commit_publications<F, U, const N: usize>(
     client: &exoware_sdk::PrefixedStoreClient,
@@ -261,34 +241,12 @@ where
         latest = Some(prepared.latest_location());
         stage_authenticated_range(client, prepared, &mut batch)?;
     }
-    let latest = latest.expect("at least one publication");
+
+    // Publish the watermark atomically with the rows staged above.
+    let latest = latest.expect("publications must not be empty");
     exoware_qmdb::adapter::upload::stage_watermark(client, latest, &mut batch)?;
     batch.commit(client.client()).await?;
     Ok(())
-}
-
-/// The current-state rows of a new database, which holds only its initial commit.
-#[allow(dead_code)]
-pub async fn initial_delta<F, D, Op, E, const N: usize>(
-    root: D,
-    witness: OpsRootWitness<F, D>,
-    proof: impl std::future::Future<Output = Result<(RangeProof<F, D>, Vec<Op>, Vec<[u8; N]>), E>>,
-) -> Delta<F, D, N>
-where
-    F: Graftable,
-    D: Digest,
-    E: std::fmt::Display,
-{
-    let (_, chunk) = current_proof_chunk(proof)
-        .await
-        .expect("initial commit chunk");
-    Delta {
-        root,
-        witness,
-        pruned_chunks: 0,
-        chunks: vec![(0, chunk)],
-        grafted_nodes: Vec::new(),
-    }
 }
 
 #[allow(dead_code)]

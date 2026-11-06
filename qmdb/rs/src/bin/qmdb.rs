@@ -81,11 +81,9 @@ enum Command {
         store_prefix: String,
         #[arg(long, default_value_t = 2)]
         interval_secs: u64,
-        /// Persistent directory for the local ordered-QMDB state. Reusing the
-        /// same directory across restarts continues the history already
-        /// uploaded under the store prefix, so delete it whenever that prefix
-        /// is reset. Deleting it resets the demo. Defaults to
-        /// `$HOME/.exoware_qmdb_mmb_seed`.
+        /// Directory that keeps the local ordered-QMDB state across restarts.
+        /// Delete it to reset the demo and before seeding a reset Store or a
+        /// different `--store-prefix`. Defaults to `$HOME/.exoware_qmdb_mmb_seed`.
         #[arg(long)]
         directory: Option<PathBuf>,
     },
@@ -95,7 +93,7 @@ async fn health() -> &'static str {
     "ok"
 }
 
-/// Upload a new source database's initial commit, which precedes every batch publication.
+/// Upload a new source database's initial commit at location 0 without publishing a watermark.
 async fn publish_initial_commit(
     store_client: &PrefixedStoreClient,
     source_db: &Db,
@@ -119,13 +117,14 @@ async fn publish_initial_commit(
         &op_cfg(),
         &Sequential,
     )
-    .expect("prepare initial commit");
+    .expect("initial commit must match the source operation root");
     let mut batch = StoreWriteBatch::new();
-    stage_authenticated_range(store_client, prepared, &mut batch).expect("stage initial commit");
+    stage_authenticated_range(store_client, prepared, &mut batch)
+        .expect("staging the initial commit must succeed");
     batch
         .commit(store_client.client())
         .await
-        .expect("commit initial commit");
+        .expect("initial commit upload must succeed");
 }
 
 fn op_cfg() -> <Operation as commonware_codec::Read>::Cfg {
@@ -230,6 +229,8 @@ async fn seed(
             .await
             .expect("init local ordered db");
 
+            // Resume the key counter from the number of applied batches. A new database's initial
+            // commit belongs to no batch publication, so upload it here before the first batch.
             let end = source_db.bounds().end;
             let (proof, operations) = source_db
                 .ops_historical_proof(
@@ -291,21 +292,23 @@ async fn seed(
                 };
 
                 // Upload each batch before applying it, so every applied batch is already
-                // published. A batch depends only on how many batches were applied before it, so
-                // one uploaded before an interrupted apply is rebuilt identically after a restart.
+                // published. A batch depends only on how many batches came before it, so a batch
+                // uploaded before an interrupted apply is rebuilt identically after a restart.
                 let publication = finalized
                     .publication(&source_db)
-                    .expect("read batch publication");
+                    .expect("batch publication must be readable before apply");
                 let prepared = prepare_publication::<Family, Sha256, _, _, N>(
                     &publication,
                     &finalized.root(),
                     &Sequential,
                 )
-                .expect("prepare batch publication");
+                .expect("batch publication must verify against its root");
                 let latest = prepared.latest_location();
                 let mut rows = StoreWriteBatch::new();
-                stage_authenticated_range(&store_client, prepared, &mut rows).expect("stage batch");
-                stage_watermark(&store_client, latest, &mut rows).expect("stage watermark");
+                stage_authenticated_range(&store_client, prepared, &mut rows)
+                    .expect("staging the batch must succeed");
+                stage_watermark(&store_client, latest, &mut rows)
+                    .expect("staging the watermark must succeed");
                 rows.commit(store_client.client())
                     .await
                     .expect("commit upload");

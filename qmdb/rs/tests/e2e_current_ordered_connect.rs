@@ -15,7 +15,10 @@ use commonware_storage::{
             ordered::{variable::Operation as QmdbOperation, Update},
             value::VariableEncoding,
         },
-        current::ordered::{proof::constant::ExclusionProof, variable::Db as LocalQmdbDb},
+        current::{
+            batch::Delta,
+            ordered::{proof::constant::ExclusionProof, variable::Db as LocalQmdbDb},
+        },
         operation::Operation as _,
     },
     translator::TwoCap,
@@ -35,7 +38,7 @@ use exoware_qmdb::{
         KeyLookupServiceClient, KeyLookupServiceServer, OrderedKeyRangeService,
         OrderedKeyRangeServiceClient, OrderedKeyRangeServiceServer,
     },
-    Delta, QmdbError, MAX_OPERATION_SIZE,
+    QmdbError, MAX_OPERATION_SIZE,
 };
 use exoware_sdk::{
     proto::PreferZstdHttpClient, PrefixedStoreClient, RetryConfig, StoreClient, StoreWriteBatch,
@@ -162,8 +165,8 @@ async fn build_source_batch_with_writes(
         .expect("one tip")
 }
 
-/// Apply each batch of writes as its own commit, returning the
-/// cumulative source state at every tip.
+/// Apply each batch of writes as its own commit, returning each tip's operations from location 0
+/// and its batch's delta. A delta holds only its batch's writes, so upload tips in order.
 async fn build_source_tips(
     partition_prefix: &'static str,
     batches: Vec<TipWrites>,

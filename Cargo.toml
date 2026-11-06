@@ -88,8 +88,8 @@ criterion = { version = "0.5", features = ["html_reports"] }
 [profile.release]
 overflow-checks = true
 
-# Temporary: commonwarexyz/monorepo#5562 adds the current QMDB publication API.
-# Drop this table once a release ships it.
+# Pin commonware to a revision with the current QMDB publication API from
+# commonwarexyz/monorepo#5562. Remove this table once a release ships that API.
 [patch.crates-io]
 commonware-actor = { git = "https://github.com/commonwarexyz/monorepo.git", rev = "c1bdb3a883f922e5eed45c7fb2ca140e1d2acb45" }
 commonware-allocator = { git = "https://github.com/commonwarexyz/monorepo.git", rev = "c1bdb3a883f922e5eed45c7fb2ca140e1d2acb45" }
