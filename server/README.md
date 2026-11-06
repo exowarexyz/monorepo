@@ -30,10 +30,13 @@ async fn serve<E: StoreEngine>(engine: Arc<E>) -> std::io::Result<()> {
 
 Call this function from a Tokio runtime. Replace `std::future::pending()` with
 your shutdown future to stop accepting connections and drain active requests.
-Shutdown ends open subscriptions with a resumable `UNAVAILABLE` error, and a
-connection that carried a subscription is closed a short grace period after
-nothing else is in flight on it, so a peer that stopped reading cannot hold
-the drain open.
+Shutdown signals open subscriptions at once, so a client that is reading sees
+a resumable `UNAVAILABLE` error, and returns as soon as every connection has
+closed. Connections still open 30 seconds after shutdown began are closed,
+cutting off any response still in progress, so a client cannot hold the
+process open. To choose a different limit for a deployment, call
+`transport::serve_with_config` with a `ServeConfig` whose `shutdown_timeout`
+you set.
 The [simulator](../examples/simulator/src/server.rs) shows a concrete backend
 and an Axum router with a health endpoint.
 

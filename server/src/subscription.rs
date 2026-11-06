@@ -201,11 +201,10 @@ where
 /// bound cannot reach a stalled peer through the stream alone. Under
 /// [transport::serve], a response whose peer stopped granting credit is reset
 /// a short grace period after its lifetime, as long as the transport is still
-/// producing it. Once its final frame has been handed over, only server
-/// shutdown bounds the remaining output, by closing a connection that carried
-/// a bounded subscription once nothing else is in flight, after the same grace
-/// period. Call this from the request handler, before returning the response,
-/// so the transport can associate the subscription with its request.
+/// producing it. Once its final frame has been handed over, only the shutdown
+/// timeout of [transport::serve_with_config] bounds the remaining output. Call
+/// this from the request handler, before returning the response, so the
+/// transport can associate the lifetime with its request.
 ///
 /// Built-in `log.stream.v1.Subscribe` handlers use this with
 /// [transport::ShutdownSignal::closed] as `close`. Backends that implement
@@ -221,7 +220,9 @@ where
     let deadline = lifetime
         .sample()
         .and_then(|lifetime| Instant::now().checked_add(lifetime));
-    transport::register_subscription(deadline);
+    if let Some(deadline) = deadline {
+        transport::arm_subscription_cutoff(deadline);
+    }
 
     BoundedSubscription {
         inner: Some(Box::pin(stream)),

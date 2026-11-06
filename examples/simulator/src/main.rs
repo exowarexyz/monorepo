@@ -1,8 +1,11 @@
 //! Store simulator CLI (RocksDB).
 
-use clap::{Arg, ArgAction, Command};
+use clap::{Arg, ArgAction, ArgMatches, Command};
 use commonware_allocator::mimalloc::{Config, MiMalloc, Purge, Reserve};
-use exoware_server::SubscriptionLifetime;
+use exoware_server::{
+    ingest::transport::{ServeConfig, DEFAULT_SHUTDOWN_TIMEOUT},
+    SubscriptionLifetime,
+};
 use exoware_simulator::{rocks::WRITER_THREAD_PREFIX, server};
 use std::{path::PathBuf, time::Duration};
 use tracing::error;
@@ -25,15 +28,11 @@ const PORT_FLAG: &str = "port";
 const MAX_OPEN_FILES_FLAG: &str = "max-open-files";
 const SUBSCRIPTION_MAX_DURATION_FLAG: &str = "subscription-max-duration-ms";
 const SUBSCRIPTION_JITTER_FLAG: &str = "subscription-lifetime-jitter";
+const SHUTDOWN_TIMEOUT_FLAG: &str = "shutdown-timeout-secs";
 const VERBOSE_FLAG: &str = "verbose";
 
-#[tokio::main]
-async fn main() -> std::process::ExitCode {
-    let home_directory = std::env::var("HOME").expect("$HOME is not configured");
-    let default_directory = PathBuf::from(format!("{home_directory}/.exoware_store_simulator"));
-    let default_directory: &'static str = default_directory.to_str().unwrap().to_string().leak();
-
-    let matches = Command::new("simulator")
+fn command(default_directory: &'static str) -> Command {
+    Command::new("simulator")
         .version(crate_version())
         .about("Store API simulator (RocksDB).")
         .arg_required_else_help(true)
@@ -89,10 +88,34 @@ async fn main() -> std::process::ExitCode {
                                 .default_value("0.2")
                                 .value_parser(clap::value_parser!(f64))
                                 .action(ArgAction::Set),
+                        )
+                        .arg(
+                            Arg::new(SHUTDOWN_TIMEOUT_FLAG)
+                                .long(SHUTDOWN_TIMEOUT_FLAG)
+                                .help("Seconds that shutdown lets open requests finish before closing their connections.")
+                                .default_value(DEFAULT_SHUTDOWN_TIMEOUT.as_secs().to_string().leak() as &str)
+                                .value_parser(clap::value_parser!(u64))
+                                .action(ArgAction::Set),
                         ),
                 ),
         )
-        .get_matches();
+}
+
+fn serve_config(matches: &ArgMatches) -> ServeConfig {
+    ServeConfig {
+        shutdown_timeout: Duration::from_secs(
+            *matches.get_one::<u64>(SHUTDOWN_TIMEOUT_FLAG).unwrap(),
+        ),
+    }
+}
+
+#[tokio::main]
+async fn main() -> std::process::ExitCode {
+    let home_directory = std::env::var("HOME").expect("$HOME is not configured");
+    let default_directory = PathBuf::from(format!("{home_directory}/.exoware_store_simulator"));
+    let default_directory: &'static str = default_directory.to_str().unwrap().to_string().leak();
+
+    let matches = command(default_directory).get_matches();
 
     let level = if matches.get_flag(VERBOSE_FLAG) {
         tracing::Level::DEBUG
@@ -130,7 +153,9 @@ async fn main() -> std::process::ExitCode {
                         .with_jitter(*m.get_one::<f64>(SUBSCRIPTION_JITTER_FLAG).unwrap()),
                     None => SubscriptionLifetime::unbounded(),
                 };
-                match server::run(directory, *port, *max_open_files, lifetime).await {
+                match server::run(directory, *port, *max_open_files, lifetime, serve_config(m))
+                    .await
+                {
                     Ok(()) => return std::process::ExitCode::SUCCESS,
                     Err(e) => {
                         error!(error = ?e, "server failed");
@@ -142,4 +167,31 @@ async fn main() -> std::process::ExitCode {
     }
 
     std::process::ExitCode::FAILURE
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn run_config(args: &[&str]) -> ServeConfig {
+        let matches = command("/tmp/simulator")
+            .try_get_matches_from(
+                ["simulator", server::CMD, server::RUN_CMD]
+                    .iter()
+                    .chain(args),
+            )
+            .unwrap();
+        let (_, server) = matches.subcommand().unwrap();
+        let (_, run) = server.subcommand().unwrap();
+        serve_config(run)
+    }
+
+    #[test]
+    fn shutdown_timeout_defaults_to_thirty_seconds_and_can_be_overridden() {
+        assert_eq!(run_config(&[]).shutdown_timeout, Duration::from_secs(30));
+        assert_eq!(
+            run_config(&["--shutdown-timeout-secs", "5"]).shutdown_timeout,
+            Duration::from_secs(5)
+        );
+    }
 }

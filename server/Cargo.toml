@@ -33,6 +33,7 @@ zstd = { version = "0.13", features = ["experimental"] }
 regex = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["sync", "time", "net", "rt", "macros"] }
+tokio-util = { version = "0.7", features = ["rt"] }
 exoware-sdk = { workspace = true }
 
 [dev-dependencies]

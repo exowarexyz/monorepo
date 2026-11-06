@@ -14,7 +14,7 @@ use exoware_sdk::{
 };
 use exoware_server::{
     bound_subscription,
-    ingest::transport::{serve, ShutdownSignal},
+    ingest::transport::{serve_with_config, ServeConfig, ShutdownSignal},
     stream_service, Log, LogBatch, Sequence, StreamHub, StreamState, SubscriptionLifetime,
     REASON_SERVER_SHUTDOWN,
 };
@@ -42,9 +42,14 @@ use tokio::{
 
 type Error = Box<dyn std::error::Error + Send + Sync>;
 
-// The transport cuts off a stalled response this long after its bound.
+// The transport cuts off a stalled response this long after its lifetime.
 const GRACE: Duration = Duration::from_secs(2);
 const SLACK: Duration = Duration::from_millis(1_500);
+
+// Longer than the lifetime cutoff grace, so a close at the shutdown timeout
+// cannot be mistaken for one at the grace, and still short enough to keep
+// forced closes fast.
+const SHUTDOWN: Duration = Duration::from_secs(3);
 const SUBSCRIBE: &str = "/log.stream.v1.Service/Subscribe";
 
 struct Served {
@@ -55,12 +60,21 @@ struct Served {
 
 impl Served {
     async fn start(app: axum::Router) -> Result<Self, Error> {
+        Self::start_with(app, ServeConfig::default()).await
+    }
+
+    async fn start_with(app: axum::Router, config: ServeConfig) -> Result<Self, Error> {
         let listener = TcpListener::bind("127.0.0.1:0").await?;
         let addr = listener.local_addr()?;
         let (shutdown, signal) = oneshot::channel::<()>();
-        let task = tokio::spawn(serve(listener, app, async move {
-            let _ = signal.await;
-        }));
+        let task = tokio::spawn(serve_with_config(
+            listener,
+            app,
+            async move {
+                let _ = signal.await;
+            },
+            config,
+        ));
         Ok(Self {
             addr,
             shutdown: Some(shutdown),
@@ -72,10 +86,16 @@ impl Served {
     async fn shut_down(mut self) -> Result<Duration, Error> {
         let started = Instant::now();
         let _ = self.shutdown.take().unwrap().send(());
-        timeout(Duration::from_secs(30), &mut self.task)
+        timeout(Duration::from_secs(40), &mut self.task)
             .await
             .map_err(|_| "serve did not finish after shutdown")???;
         Ok(started.elapsed())
+    }
+}
+
+const fn short_shutdown() -> ServeConfig {
+    ServeConfig {
+        shutdown_timeout: SHUTDOWN,
     }
 }
 
@@ -182,7 +202,11 @@ async fn released(
         lifetime,
         released,
     }));
-    Served::start(axum::Router::new().fallback_service(service)).await
+    Served::start_with(
+        axum::Router::new().fallback_service(service),
+        short_shutdown(),
+    )
+    .await
 }
 
 fn subscribe_body() -> Bytes {
@@ -194,17 +218,17 @@ fn subscribe_body() -> Bytes {
     body.into()
 }
 
-// An HTTP/2 client that never grants stream flow-control credit, so the
-// server cannot send any response DATA.
-struct StalledHttp2 {
+// An HTTP/2 client whose streams start with `window` bytes of flow-control
+// credit. With none, the server cannot send any response DATA.
+struct Http2Client {
     connection: h2::client::SendRequest<Bytes>,
     driver: JoinHandle<Result<(), h2::Error>>,
 }
 
-impl StalledHttp2 {
-    async fn open(addr: SocketAddr) -> Result<Self, Error> {
+impl Http2Client {
+    async fn open(addr: SocketAddr, window: u32) -> Result<Self, Error> {
         let (connection, driver) = h2::client::Builder::new()
-            .initial_window_size(0)
+            .initial_window_size(window)
             .handshake(TcpStream::connect(addr).await?)
             .await?;
         Ok(Self {
@@ -235,7 +259,7 @@ impl StalledHttp2 {
     }
 }
 
-impl Drop for StalledHttp2 {
+impl Drop for Http2Client {
     fn drop(&mut self) {
         self.driver.abort();
     }
@@ -304,7 +328,13 @@ async fn shutdown_ends_a_healthy_subscription_with_unavailable() -> Result<(), E
     assert_eq!(rpc.code, ErrorCode::Unavailable);
     let decoded = error.decoded_rpc_error().unwrap().unwrap();
     assert_eq!(decoded.error_info.unwrap().reason, REASON_SERVER_SHUTDOWN);
-    assert!(shutdown.await?? < GRACE);
+
+    // The drain ends as soon as the subscription has, well before the default timeout.
+    let elapsed = shutdown.await??;
+    assert!(
+        elapsed < Duration::from_secs(1),
+        "shutdown took {elapsed:?}"
+    );
     Ok(())
 }
 
@@ -316,7 +346,7 @@ async fn http2_stalled_subscription_is_reset_after_its_lifetime() -> Result<(), 
         SubscriptionLifetime::new(lifetime).with_jitter(0.0),
     )
     .await?;
-    let mut client = StalledHttp2::open(served.addr).await?;
+    let mut client = Http2Client::open(served.addr, 0).await?;
     let started = Instant::now();
     let mut body = client.subscribe(served.addr).await?;
 
@@ -331,17 +361,29 @@ async fn http2_stalled_subscription_is_reset_after_its_lifetime() -> Result<(), 
     Ok(())
 }
 
+// A peer that grants no credit cannot receive the shutdown error, so the
+// subscription and its backend stream last until the shutdown timeout.
 #[tokio::test]
-async fn http2_stalled_subscriptions_do_not_hold_shutdown_open() -> Result<(), Error> {
-    for kind in [Frames::Idle, Frames::Finite, Frames::Failing] {
-        let served = custom(kind, SubscriptionLifetime::unbounded()).await?;
-        let mut client = StalledHttp2::open(served.addr).await?;
+async fn http2_stalled_subscriptions_are_closed_at_the_shutdown_timeout() -> Result<(), Error> {
+    let closes = [Frames::Idle, Frames::Finite, Frames::Failing].map(|kind| async move {
+        let flag = Arc::new(AtomicBool::new(false));
+        let served = released(kind, SubscriptionLifetime::unbounded(), flag.clone()).await?;
+        let mut client = Http2Client::open(served.addr, 0).await?;
         let _body = client.subscribe(served.addr).await?;
         sleep(Duration::from_millis(100)).await;
 
         let elapsed = served.shut_down().await?;
-        assert!(elapsed < GRACE + SLACK, "shutdown took {elapsed:?}");
-    }
+        assert!(
+            elapsed >= SHUTDOWN && elapsed < SHUTDOWN + SLACK,
+            "shutdown took {elapsed:?}"
+        );
+        assert!(
+            flag.load(Ordering::SeqCst),
+            "serve returned before releasing the subscription"
+        );
+        Ok::<_, Error>(())
+    });
+    futures::future::try_join_all(closes).await?;
     Ok(())
 }
 
@@ -370,22 +412,37 @@ async fn http1_stalled_subscription_is_released_after_its_lifetime() -> Result<(
 }
 
 #[tokio::test]
-async fn http1_stalled_subscription_does_not_hold_shutdown_open() -> Result<(), Error> {
-    let served = custom(Frames::Endless, SubscriptionLifetime::unbounded()).await?;
+async fn http1_stalled_subscription_is_closed_at_the_shutdown_timeout() -> Result<(), Error> {
+    let flag = Arc::new(AtomicBool::new(false));
+    let served = released(
+        Frames::Endless,
+        SubscriptionLifetime::unbounded(),
+        flag.clone(),
+    )
+    .await?;
     let _tcp = stalled_http1(served.addr).await?;
     sleep(Duration::from_millis(300)).await;
 
     let elapsed = served.shut_down().await?;
-    assert!(elapsed < GRACE + SLACK, "shutdown took {elapsed:?}");
+    assert!(
+        elapsed >= SHUTDOWN && elapsed < SHUTDOWN + SLACK,
+        "shutdown took {elapsed:?}"
+    );
+    assert!(
+        flag.load(Ordering::SeqCst),
+        "serve returned before releasing the subscription"
+    );
     Ok(())
 }
 
-// Only the stalled subscription may be given up on. An ordinary request that
-// shares its connection finishes first, however long it takes.
+// A stalled subscription does not shorten the time an ordinary request on
+// the same connection has to finish, so one that outlasts the lifetime
+// cutoff grace still completes.
 #[tokio::test]
-async fn shutdown_waits_for_an_ordinary_request_beside_a_stalled_subscription() -> Result<(), Error>
-{
-    const SLOW: Duration = Duration::from_secs(4);
+async fn an_ordinary_request_beside_a_stalled_subscription_gets_the_whole_timeout(
+) -> Result<(), Error> {
+    const SLOW: Duration = Duration::from_secs(3);
+    const TIMEOUT: Duration = Duration::from_secs(4);
 
     let service = ConnectRpcService::new(StreamServer::new(Custom {
         kind: Frames::Idle,
@@ -401,8 +458,14 @@ async fn shutdown_waits_for_an_ordinary_request_beside_a_stalled_subscription() 
             }),
         )
         .fallback_service(service);
-    let served = Served::start(router).await?;
-    let mut client = StalledHttp2::open(served.addr).await?;
+    let served = Served::start_with(
+        router,
+        ServeConfig {
+            shutdown_timeout: TIMEOUT,
+        },
+    )
+    .await?;
+    let mut client = Http2Client::open(served.addr, 0).await?;
     let _body = client.subscribe(served.addr).await?;
 
     poll_fn(|cx| client.connection.poll_ready(cx)).await?;
@@ -411,31 +474,37 @@ async fn shutdown_waits_for_an_ordinary_request_beside_a_stalled_subscription() 
     sleep(Duration::from_millis(100)).await;
 
     let shutdown = tokio::spawn(served.shut_down());
-    let response = timeout(SLOW + GRACE, response).await??;
+    let response = timeout(TIMEOUT, response).await??;
     assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+    // The stalled subscription still holds the connection until the timeout.
     let elapsed = shutdown.await??;
-    assert!(elapsed >= SLOW - SLACK, "shutdown took {elapsed:?}");
+    assert!(
+        elapsed >= TIMEOUT && elapsed < TIMEOUT + SLACK,
+        "shutdown took {elapsed:?}"
+    );
     Ok(())
+}
+
+const RESPONSE_LEN: usize = 256 * 1024;
+const WINDOW: u32 = 1024;
+
+fn large(router: axum::Router) -> axum::Router {
+    router.route(
+        "/large",
+        axum::routing::get(|| async { vec![7_u8; RESPONSE_LEN] }),
+    )
 }
 
 // Hyper hands a whole response chunk to h2 as soon as the peer grants any
 // credit, so an ordinary response can be fully released by its handler while
-// most of it still waits for the peer. Shutdown must keep draining it.
-#[tokio::test]
-async fn shutdown_drains_an_ordinary_response_a_slow_peer_is_still_reading() -> Result<(), Error> {
-    const RESPONSE_LEN: usize = 256 * 1024;
-    const WINDOW: u32 = 1024;
-
-    let router = axum::Router::new().route(
-        "/large",
-        axum::routing::get(|| async { vec![7_u8; RESPONSE_LEN] }),
-    );
-    let served = Served::start(router).await?;
-    let (mut connection, driver) = h2::client::Builder::new()
-        .initial_window_size(WINDOW)
-        .handshake::<_, Bytes>(TcpStream::connect(served.addr).await?)
-        .await?;
-    let driver = tokio::spawn(driver);
+// most of it still waits for the peer. Shutdown keeps draining it for longer
+// than the subscription cutoff grace, and returns once it is done rather
+// than at the default timeout.
+async fn assert_slow_read_completes(
+    served: Served,
+    connection: &mut h2::client::SendRequest<Bytes>,
+) -> Result<(), Error> {
     poll_fn(|cx| connection.poll_ready(cx)).await?;
     let request = Request::get(format!("http://{}/large", served.addr)).body(())?;
     let (response, _) = connection.send_request(request, true)?;
@@ -444,8 +513,6 @@ async fn shutdown_drains_an_ordinary_response_a_slow_peer_is_still_reading() -> 
         .into_body();
 
     let mut received = read_chunk(&mut body).await?.expect("first chunk");
-
-    // The peer keeps reading, slowly, for longer than the grace period.
     let shutdown = tokio::spawn(served.shut_down());
     let started = Instant::now();
     while started.elapsed() < GRACE + SLACK {
@@ -462,9 +529,53 @@ async fn shutdown_drains_an_ordinary_response_a_slow_peer_is_still_reading() -> 
         received += len;
     }
     assert_eq!(received, RESPONSE_LEN);
-    shutdown.await??;
-    driver.abort();
+    let elapsed = shutdown.await??;
+    assert!(
+        elapsed < ServeConfig::default().shutdown_timeout,
+        "shutdown took {elapsed:?}"
+    );
     Ok(())
+}
+
+#[tokio::test]
+async fn shutdown_drains_an_ordinary_response_a_slow_peer_is_still_reading() -> Result<(), Error> {
+    let served = Served::start(large(axum::Router::new())).await?;
+    let mut client = Http2Client::open(served.addr, WINDOW).await?;
+    assert_slow_read_completes(served, &mut client.connection).await
+}
+
+// A subscription that already ended on the connection does not shorten the
+// time a later ordinary response has to drain.
+#[tokio::test]
+async fn shutdown_drains_an_ordinary_response_after_a_completed_subscription() -> Result<(), Error>
+{
+    let flag = Arc::new(AtomicBool::new(false));
+    let service = ConnectRpcService::new(StreamServer::new(Custom {
+        kind: Frames::Finite,
+        lifetime: SubscriptionLifetime::new(Duration::from_secs(60)).with_jitter(0.0),
+        released: flag.clone(),
+    }));
+    let served = Served::start(large(axum::Router::new()).fallback_service(service)).await?;
+    let mut client = Http2Client::open(served.addr, WINDOW).await?;
+
+    let request = Request::post(format!("http://{}{SUBSCRIBE}", served.addr))
+        .header(http::header::CONTENT_TYPE, "application/connect+proto")
+        .header("connect-protocol-version", "1")
+        .body(())?;
+    poll_fn(|cx| client.connection.poll_ready(cx)).await?;
+    let (response, mut send) = client.connection.send_request(request, false)?;
+    send.send_data(subscribe_body(), true)?;
+    let response = timeout(Duration::from_secs(2), response).await??;
+    assert_eq!(response.status(), StatusCode::OK);
+    let mut subscription = response.into_body();
+    while timeout(Duration::from_secs(2), read_chunk(&mut subscription))
+        .await??
+        .is_some()
+    {}
+    drop(subscription);
+    assert!(flag.load(Ordering::SeqCst));
+
+    assert_slow_read_completes(served, &mut client.connection).await
 }
 
 // Reads one chunk and grants the peer credit for the next.

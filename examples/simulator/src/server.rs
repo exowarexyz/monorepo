@@ -7,7 +7,9 @@ use axum::{
     Router,
 };
 use exoware_sdk::{transport::set_tcp_nodelay, PreferZstdLayer};
-use exoware_server::{connect_stack, AppState, SubscriptionLifetime};
+use exoware_server::{
+    connect_stack, ingest::transport::ServeConfig, AppState, SubscriptionLifetime,
+};
 use std::{net::SocketAddr, path::Path, sync::Arc, time::Duration};
 use tower_http::cors::CorsLayer;
 use tracing::{info, warn};
@@ -77,7 +79,7 @@ async fn stop_signal() {
 
 // The first signal drains gracefully. Listening replaces the default signal
 // disposition for the rest of the process, so a second signal has to stop the
-// process itself in case a request that never finishes holds the drain open.
+// process itself for an operator who will not wait for the shutdown timeout.
 async fn shutdown_signal() {
     stop_signal().await;
     tokio::spawn(async {
@@ -90,13 +92,14 @@ async fn shutdown_signal() {
 /// Run the store simulator until it receives SIGINT or SIGTERM.
 ///
 /// Shutdown ends open subscriptions with a resumable `UNAVAILABLE` error and
-/// waits for in-flight requests to finish. A second signal stops the process
-/// at once.
+/// gives other requests until `config.shutdown_timeout` to finish before
+/// closing their connections. A second signal stops the process at once.
 pub async fn run(
     directory: &Path,
     port: u16,
     max_open_files: i32,
     lifetime: SubscriptionLifetime,
+    config: ServeConfig,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let app = app(
         RocksStore::open(directory, Some(store_config(max_open_files)))?,
@@ -108,7 +111,8 @@ pub async fn run(
     let listener = tokio::net::TcpListener::bind(addr)
         .await?
         .tap_io(set_tcp_nodelay);
-    exoware_server::ingest::transport::serve(listener, app, shutdown_signal()).await?;
+    exoware_server::ingest::transport::serve_with_config(listener, app, shutdown_signal(), config)
+        .await?;
     info!("store simulator stopped");
     Ok(())
 }

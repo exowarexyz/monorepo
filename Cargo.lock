@@ -2808,6 +2808,7 @@ dependencies = [
  "socket2",
  "thiserror",
  "tokio",
+ "tokio-util",
  "tower",
  "zstd",
 ]
@@ -5805,6 +5806,7 @@ dependencies = [
  "bytes",
  "futures-core",
  "futures-sink",
+ "futures-util",
  "libc",
  "pin-project-lite",
  "tokio",
