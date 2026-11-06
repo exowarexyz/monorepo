@@ -21,7 +21,7 @@ use commonware_utils::{NZUsize, NZU16, NZU64};
 use exoware_qmdb::{
     adapter::upload::{
         prepare_authenticated_range, prepare_publication, stage_authenticated_range,
-        stage_watermark, AuthenticatedOperationRange,
+        stage_watermark, AuthenticatedOperationRange, Publication,
     },
     MAX_OPERATION_SIZE,
 };
@@ -294,8 +294,7 @@ async fn seed(
                 // Upload each batch before applying it, so every applied batch is already
                 // published. A batch depends only on how many batches came before it, so a batch
                 // uploaded before an interrupted apply is rebuilt identically after a restart.
-                let publication = finalized
-                    .publication(&source_db)
+                let publication = Publication::read(&finalized, &source_db)
                     .expect("batch publication must be readable before apply");
                 let prepared = prepare_publication::<Family, Sha256, _, _, N>(
                     &publication,
@@ -318,7 +317,7 @@ async fn seed(
                 println!(
                     "tip={} root=0x{}",
                     *latest,
-                    hex::encode(publication.delta.root.encode())
+                    hex::encode(publication.root.encode())
                 );
             }
 

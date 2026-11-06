@@ -187,21 +187,21 @@ the source to discard them.
 ### Current-state boundaries
 
 For a current ordered or unordered database, each uploaded batch also carries
-its `Delta`: the batch's current root, the witness binding the operation-log
-root to it, the bitmap chunks and grafted nodes the batch wrote, and the
-source's `pruned_chunks` count. Read the batch's `Publication` before applying
-the batch, then prepare its operations and delta against the trusted current
-root:
+its current root, the witness binding the operation-log root to it, and its
+`Grafts`: the bitmap chunks and grafted nodes the batch wrote and the source's
+`pruned_chunks` count. `Publication::read` collects these, with the batch's
+operations and prefix frontier, from the batch before it is applied. Prepare
+the publication against the trusted current root:
 
 ```rust,ignore
-use exoware_qmdb::adapter::upload::prepare_publication;
+use exoware_qmdb::adapter::upload::{prepare_publication, Publication};
 
-let publication = batch.publication(&db)?;
+let publication = Publication::read(&batch, &db)?;
 let prepared =
     prepare_publication::<F, H, U, Sequential, N>(&publication, &trusted_root, &Sequential)?;
 ```
 
-The source keeps no deltas, so upload or durably persist each publication before
+The source keeps no grafts, so upload or durably persist each publication before
 applying its batch. Once a publication is persisted or uploaded, the source must
 apply that same batch, rebuilding it identically after a restart.
 
@@ -211,18 +211,18 @@ begins at zero, but publish no watermark before the first batch.
 
 To upload a batch whose operations were persisted in encoded form, prepare a
 range that ends at that batch's commit with `prepare_authenticated_range` and
-attach that batch's delta:
+attach that batch's root, witness, and grafts:
 
 ```rust,ignore
-let prepared = prepared.with_current_boundary::<H, N>(&delta)?;
+let prepared = prepared.with_current_boundary::<H, N>(root, &witness, &grafts)?;
 ```
 
-The delta must come from the source that produced the batch and describe the
+The grafts must come from the source that produced the batch and describe the
 range's final location, using the source's family, hasher, and chunk size `N`.
-`with_current_boundary` checks only the witness's binding to the prepared
-operation-log root. Neither it nor `prepare_publication` authenticates the
-delta's chunks, grafted nodes, or `pruned_chunks` count. A delta holds only
-what its batch wrote, so upload every batch's delta since the source was
+`with_current_boundary` checks only that the witness binds the prepared
+operation-log root to `root`. Neither it nor `prepare_publication`
+authenticates the grafts' chunks, nodes, or `pruned_chunks` count. Grafts hold
+only what their batch wrote, so upload every batch's grafts since the source was
 created, each attached to a range that ends at that batch's commit.
 
 Boundary rows are versioned by batch location. Unchanged chunks and nodes are

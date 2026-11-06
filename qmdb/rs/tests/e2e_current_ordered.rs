@@ -18,11 +18,12 @@ use commonware_storage::{
             value::FixedEncoding,
         },
         current::{
-            batch::Delta,
+            batch::Grafts,
             ordered::{
                 fixed::Db as LocalFixedQmdbDb, proof::constant::ExclusionProof,
                 variable::Db as LocalQmdbDb,
             },
+            proof::OpsRootWitness,
         },
         operation::Operation as _,
     },
@@ -30,8 +31,9 @@ use commonware_storage::{
 };
 use commonware_utils::{NZUsize, NZU16, NZU64};
 use exoware_qmdb::{
-    adapter::upload::prepare_publication, proof::RawKeyLookupProof, ProofKind, QmdbError,
-    MAX_OPERATION_SIZE,
+    adapter::upload::{prepare_publication, Publication},
+    proof::RawKeyLookupProof,
+    ProofKind, QmdbError, MAX_OPERATION_SIZE,
 };
 use exoware_sdk::{PrefixedStoreClient, StoreClient};
 use std::{
@@ -79,7 +81,9 @@ where
         &upload_client,
         &source.operations,
         &op_cfg::<F>(),
-        &source.current_boundary,
+        source.root,
+        &source.witness,
+        &source.grafts,
     )
     .await
     .expect("commit upload");
@@ -99,20 +103,26 @@ fn key_cfg() -> <Vec<u8> as commonware_codec::Read>::Cfg {
 struct VariableSource<F: Graftable> {
     latest_location: Location<F>,
     operations: Vec<BatchOperation<F>>,
-    current_boundary: Delta<F, Digest, N>,
+    root: Digest,
+    witness: OpsRootWitness<F, Digest>,
+    grafts: Grafts<F, Digest, N>,
     values: std::collections::BTreeMap<Vec<u8>, Option<Vec<u8>>>,
 }
 
 struct ChunkSizedVariableSource<F: Graftable, const M: usize> {
     latest_location: Location<F>,
     operations: Vec<BatchOperation<F>>,
-    current_boundary: Delta<F, Digest, M>,
+    root: Digest,
+    witness: OpsRootWitness<F, Digest>,
+    grafts: Grafts<F, Digest, M>,
 }
 
 struct FixedSource<F: Graftable> {
     latest_location: Location<F>,
     operations: Vec<FixedBatchOperation<F>>,
-    current_boundary: Delta<F, Digest, N>,
+    root: Digest,
+    witness: OpsRootWitness<F, Digest>,
+    grafts: Grafts<F, Digest, N>,
     values: std::collections::BTreeMap<Vec<u8>, Option<Digest>>,
 }
 
@@ -143,7 +153,9 @@ where
                     .write(b"beta".to_vec(), Some(b"two".to_vec()));
                 batch.merkleize(&db).await.expect("merkleize")
             };
-            let boundary = finalized.delta();
+            let root = finalized.root();
+            let witness = finalized.ops_root_witness().clone();
+            let grafts = finalized.grafts();
             db = db.apply_batch(finalized).await.expect("apply");
 
             let latest = db.bounds().end - 1;
@@ -169,7 +181,9 @@ where
             VariableSource {
                 latest_location: latest,
                 operations: ops,
-                current_boundary: boundary,
+                root,
+                witness,
+                grafts,
                 values,
             }
         })
@@ -219,7 +233,9 @@ where
                 }
                 batch.merkleize(&db).await.expect("merkleize")
             };
-            let boundary = finalized.delta();
+            let root = finalized.root();
+            let witness = finalized.ops_root_witness().clone();
+            let grafts = finalized.grafts();
             db = db.apply_batch(finalized).await.expect("apply");
 
             let latest = db.bounds().end - 1;
@@ -235,7 +251,9 @@ where
             ChunkSizedVariableSource {
                 latest_location: latest,
                 operations: ops,
-                current_boundary: boundary,
+                root,
+                witness,
+                grafts,
             }
         })
     })
@@ -284,7 +302,9 @@ where
                     .write(beta, Some(two));
                 batch.merkleize(&db).await.expect("fixed merkleize")
             };
-            let boundary = finalized.delta();
+            let root = finalized.root();
+            let witness = finalized.ops_root_witness().clone();
+            let grafts = finalized.grafts();
             db = db.apply_batch(finalized).await.expect("apply fixed");
 
             let latest = db.bounds().end - 1;
@@ -310,7 +330,9 @@ where
             FixedSource {
                 latest_location: latest,
                 operations: ops,
-                current_boundary: boundary,
+                root,
+                witness,
+                grafts,
                 values,
             }
         })
@@ -427,7 +449,7 @@ async fn test_ordered_mmb_multi_peak_grafted_chunk_round_trip() {
     )
     .await;
     assert!(
-        source.current_boundary.grafted_nodes.len() >= 2,
+        source.grafts.nodes.len() >= 2,
         "test must cross a grafted chunk boundary"
     );
 
@@ -436,7 +458,9 @@ async fn test_ordered_mmb_multi_peak_grafted_chunk_round_trip() {
         &upload_client,
         &source.operations,
         &op_cfg::<mmb::Family>(),
-        &source.current_boundary,
+        source.root,
+        &source.witness,
+        &source.grafts,
     )
     .await
     .expect("commit upload");
@@ -463,7 +487,7 @@ async fn test_ordered_mmb_multi_peak_grafted_chunk_round_trip() {
         .get(source.latest_location, &key, None)
         .await
         .expect("get");
-    assert_eq!(key_proof.root, source.current_boundary.root);
+    assert_eq!(key_proof.root, source.root);
     match &key_proof.operation {
         QmdbOperation::Update(update) => {
             assert_eq!(update.key, key);
@@ -525,9 +549,7 @@ async fn assert_incremental_seed_batches_keep_current_proofs_verifiable<F>(
                         batch.merkleize(&db).await.expect("merkleize")
                     };
                     publications.push(
-                        finalized
-                            .publication(&db)
-                            .expect("publication must be readable"),
+                        Publication::read(&finalized, &db).expect("publication must be readable"),
                     );
                     db = db.apply_batch(finalized).await.expect("apply");
                 }
@@ -671,8 +693,7 @@ async fn test_ordered_mmb_persistent_interleaved_seed_batches_keep_current_proof
                             counter += 3;
                             batch.merkleize(&db).await.expect("merkleize")
                         };
-                        let publication = finalized
-                            .publication(&db)
+                        let publication = Publication::read(&finalized, &db)
                             .expect("publication must be readable");
                         db = db.apply_batch(finalized).await.expect("apply");
                         db = db.sync().await.expect("sync");
@@ -739,7 +760,9 @@ async fn test_ordered_fixed_round_trip() {
         &upload_client,
         &source.operations,
         &(),
-        &source.current_boundary,
+        source.root,
+        &source.witness,
+        &source.grafts,
     )
     .await
     .expect("commit fixed upload");
@@ -882,7 +905,9 @@ async fn assert_point_proof_reads_bounded_bitmap_chunks<F: Graftable>() {
         &upload_client,
         &source.operations,
         &op_cfg::<F>(),
-        &source.current_boundary,
+        source.root,
+        &source.witness,
+        &source.grafts,
     )
     .await
     .unwrap();
@@ -896,7 +921,7 @@ async fn assert_point_proof_reads_bounded_bitmap_chunks<F: Graftable>() {
         .get(source.latest_location, &b"k-00000007".to_vec(), None)
         .await
         .unwrap();
-    assert_eq!(proof.root, source.current_boundary.root);
+    assert_eq!(proof.root, source.root);
     let chunks = query.bitmap_chunks.lock().unwrap().clone();
     assert!(
         chunks.len() <= 3,
@@ -931,7 +956,9 @@ async fn test_ordered_mmr_exclusion_proof_reads_one_update_page() {
         &upload_client,
         &source.operations,
         &op_cfg::<mmr::Family>(),
-        &source.current_boundary,
+        source.root,
+        &source.witness,
+        &source.grafts,
     )
     .await
     .unwrap();
@@ -953,7 +980,7 @@ async fn test_ordered_mmr_exclusion_proof_reads_one_update_page() {
     let Some(RawKeyLookupProof::Miss(proof)) = lookups.pop() else {
         panic!("missing key should be a miss");
     };
-    assert_eq!(proof.root, source.current_boundary.root);
+    assert_eq!(proof.root, source.root);
     assert!(proof.verify::<Sha256>());
     let ExclusionProof::KeyValue(_, update) = &proof.proof else {
         panic!("missing key should be covered by an active key");
@@ -1020,7 +1047,8 @@ where
                     );
                 }
                 let batch = batch.merkleize(&db).await.expect("merkleize source batch");
-                let boundary = batch.delta();
+                let witness = batch.ops_root_witness().clone();
+                let boundary = batch.grafts();
                 db = db.apply_batch(batch).await.expect("apply source batch");
                 let end = db.bounds().end;
                 let latest = end - 1;
@@ -1046,7 +1074,7 @@ where
                 if batch_index == 1 {
                     assert!(start > Location::new(0));
                     assert!(!pinned_nodes.is_empty());
-                    assert!(!boundary.grafted_nodes.is_empty());
+                    assert!(!boundary.nodes.is_empty());
                 }
 
                 // Include bootstrap in the first range and use the native proof and pins for the continuation
@@ -1068,7 +1096,7 @@ where
                     &Sequential,
                 )
                 .expect("authenticate source operation range")
-                .with_current_boundary::<Sha256, N>(&boundary)
+                .with_current_boundary::<Sha256, N>(expected_root, &witness, &boundary)
                 .expect("attach authenticated source current boundary");
                 prepared_boundaries.push((latest, expected_root, value, prepared));
                 start = end;
@@ -1175,7 +1203,9 @@ async fn test_ordered_current_proofs_store_calls() {
         &store_client.unprefixed(),
         &source.operations,
         &op_cfg::<mmr::Family>(),
-        &source.current_boundary,
+        source.root,
+        &source.witness,
+        &source.grafts,
     )
     .await
     .unwrap();
@@ -1266,7 +1296,9 @@ async fn test_ordered_current_proof_reads_overlap() {
         &store_client.unprefixed(),
         &source.operations,
         &op_cfg::<mmr::Family>(),
-        &source.current_boundary,
+        source.root,
+        &source.witness,
+        &source.grafts,
     )
     .await
     .unwrap();
@@ -1279,7 +1311,7 @@ async fn test_ordered_current_proof_reads_overlap() {
     let key = b"k-00000007".to_vec();
     // Load the tip first, so the gated reads are the proof's own
     let warm = client.get_raw(tip, &key, None).await.unwrap();
-    assert_eq!(warm.root, source.current_boundary.root);
+    assert_eq!(warm.root, source.root);
     let deadline = std::time::Duration::from_secs(10);
 
     // A key proof reads its operation row and nodes while reading its chunk
@@ -1332,9 +1364,7 @@ async fn test_prepare_publication_rejects_unbound_publications() {
                 .merkleize(&db)
                 .await
                 .expect("source batch must merkleize");
-            let publication = batch
-                .publication(&db)
-                .expect("publication must be readable");
+            let publication = Publication::read(&batch, &db).expect("publication must be readable");
             drop(batch);
             db.destroy().await.expect("source destroy must succeed");
             publication
@@ -1344,7 +1374,7 @@ async fn test_prepare_publication_rejects_unbound_publications() {
     .expect("source task must complete");
 
     // The source's own publication prepares the batch's operation range.
-    let root = publication.delta.root;
+    let root = publication.root;
     let prepare = |publication: &_, root: &Digest| {
         prepare_publication::<mmr::Family, Sha256, _, _, N>(
             publication,
@@ -1359,7 +1389,7 @@ async fn test_prepare_publication_rejects_unbound_publications() {
         publication.start + (publication.operations.len() as u64 - 1)
     );
 
-    // A root other than the delta's is rejected.
+    // A root other than the publication's is rejected.
     assert!(matches!(
         prepare(&publication, &Sha256::fill(0xEE)),
         Err(QmdbError::CorruptData(_))
@@ -1377,9 +1407,9 @@ async fn test_prepare_publication_rejects_unbound_publications() {
         })
     ));
 
-    // A witness that does not bind the operation root to the delta's root is rejected.
+    // A witness that does not bind the operation root to the publication's root is rejected.
     let mut unbound = publication;
-    unbound.delta.witness.grafted_root = Sha256::fill(0xEE);
+    unbound.witness.grafted_root = Sha256::fill(0xEE);
     assert!(matches!(
         prepare(&unbound, &root),
         Err(QmdbError::CorruptData(_))

@@ -16,13 +16,13 @@ use commonware_storage::{
             ordered::{variable::Operation as OrderedOp, Update},
             value::VariableEncoding,
         },
-        current::{batch::Publication, ordered::variable::Db as LocalOrderedDb},
+        current::ordered::variable::Db as LocalOrderedDb,
         operation::Operation as _,
     },
     translator::TwoCap,
 };
 use commonware_utils::{NZUsize, NZU16, NZU64};
-use exoware_qmdb::MAX_OPERATION_SIZE;
+use exoware_qmdb::{adapter::upload::Publication, MAX_OPERATION_SIZE};
 use exoware_sdk::PrefixedStoreClient;
 
 const N: usize = 32;
@@ -110,9 +110,8 @@ async fn test_mirror_ordered_prune_past_chunk_zero() {
                         counter += 3;
                         batch.merkleize(&db).await.expect("merkleize")
                     };
-                    let publication = finalized
-                        .publication(&db)
-                        .expect("publication must be readable");
+                    let publication =
+                        Publication::read(&finalized, &db).expect("publication must be readable");
                     db = db.apply_batch(finalized).await.expect("apply");
                     // Current pruning is now explicit in Commonware. Keep the
                     // historical operation log intact for this mirror test while

@@ -18,10 +18,7 @@ use commonware_storage::{
             self,
             operation::{Operation as AnyOperation, Update},
         },
-        current::{
-            self,
-            batch::{Delta, Publication},
-        },
+        current::{self, batch::Grafts, proof::OpsRootWitness},
         immutable, keyless,
     },
     translator::TwoCap,
@@ -32,7 +29,9 @@ use connectrpc::{
     ServiceRequest,
 };
 use exoware_qmdb::{
-    adapter::upload::{prepare_publication, stage_authenticated_range, UploadOperation},
+    adapter::upload::{
+        prepare_publication, stage_authenticated_range, Publication, UploadOperation,
+    },
     service::proto::qmdb::v1::{
         GetOperationRangeRequest, GetOperationRangeResponse, GetOperationsRequest,
         GetOperationsResponse, OperationLogService, OperationLogServiceClient,
@@ -191,15 +190,17 @@ pub async fn commit_current_operations<F, Op, const N: usize>(
     client: &exoware_sdk::PrefixedStoreClient,
     operations: &[Op],
     cfg: &Op::Cfg,
-    boundary: &Delta<F, commonware_cryptography::sha256::Digest, N>,
+    root: commonware_cryptography::sha256::Digest,
+    witness: &OpsRootWitness<F, commonware_cryptography::sha256::Digest>,
+    grafts: &Grafts<F, commonware_cryptography::sha256::Digest, N>,
 ) -> Result<(), QmdbError>
 where
     F: Graftable,
     Op: exoware_qmdb::adapter::upload::UploadOperation<F>,
 {
     let (_, prepared) = prepare_operations::<F, Op>(operations, cfg);
-    let prepared =
-        prepared.with_current_boundary::<commonware_cryptography::Sha256, N>(boundary)?;
+    let prepared = prepared
+        .with_current_boundary::<commonware_cryptography::Sha256, N>(root, witness, grafts)?;
     let latest = prepared.latest_location();
     let mut batch = exoware_sdk::StoreWriteBatch::new();
     exoware_qmdb::adapter::upload::stage_authenticated_range(client, prepared, &mut batch)?;
@@ -235,7 +236,7 @@ where
     for publication in publications {
         let prepared = prepare_publication::<F, commonware_cryptography::Sha256, U, _, N>(
             publication,
-            &publication.delta.root,
+            &publication.root,
             &Sequential,
         )?;
         latest = Some(prepared.latest_location());

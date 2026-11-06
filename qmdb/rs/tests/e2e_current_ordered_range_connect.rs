@@ -17,7 +17,7 @@ use commonware_storage::{
             },
             value::VariableEncoding,
         },
-        current::{batch::Publication, ordered::variable::Db as LocalQmdbDb},
+        current::ordered::variable::Db as LocalQmdbDb,
         sync::{self as qmdb_sync, Request, Response, Source as _},
     },
     translator::TwoCap,
@@ -27,6 +27,7 @@ use commonware_utils::{
     NZUsize, NZU16, NZU64,
 };
 use exoware_qmdb::{
+    adapter::upload::Publication,
     service::{
         client::rpc::{CurrentOperationClient, OperationLogClient, OperationLogSubscribeProof},
         proto::qmdb::v1::{
@@ -204,9 +205,7 @@ async fn build_source_batch() -> SourceBatch {
                     batch.merkleize(&db).await.expect("merkleize")
                 };
                 publications.push(
-                    finalized
-                        .publication(&db)
-                        .expect("publication must be readable"),
+                    Publication::read(&finalized, &db).expect("publication must be readable"),
                 );
                 db = db.apply_batch(finalized).await.expect("apply");
 
@@ -290,9 +289,7 @@ async fn build_mmb_source_batch() -> MmbSourceBatch {
                     batch.merkleize(&db).await.expect("merkleize")
                 };
                 publications.push(
-                    finalized
-                        .publication(&db)
-                        .expect("publication must be readable"),
+                    Publication::read(&finalized, &db).expect("publication must be readable"),
                 );
                 db = db.apply_batch(finalized).await.expect("apply");
 
@@ -369,9 +366,7 @@ async fn build_mmb_growing_source_batch() -> MmbGrowingSourceBatch {
                     batch.merkleize(&db).await.expect("merkleize")
                 };
                 publications.push(
-                    finalized
-                        .publication(&db)
-                        .expect("publication must be readable"),
+                    Publication::read(&finalized, &db).expect("publication must be readable"),
                 );
                 db = db.apply_batch(finalized).await.expect("apply");
 

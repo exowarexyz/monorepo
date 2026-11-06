@@ -16,8 +16,9 @@ use commonware_storage::{
             value::VariableEncoding,
         },
         current::{
-            batch::Delta,
+            batch::Grafts,
             ordered::{proof::constant::ExclusionProof, variable::Db as LocalQmdbDb},
+            proof::OpsRootWitness,
         },
         operation::Operation as _,
     },
@@ -137,7 +138,9 @@ fn key_cfg() -> <Vec<u8> as commonware_codec::Read>::Cfg {
 struct SourceBatch {
     latest_location: Location<mmr::Family>,
     operations: Vec<BatchOperation>,
-    current_boundary: Delta<mmr::Family, Digest, N>,
+    root: Digest,
+    witness: OpsRootWitness<mmr::Family, Digest>,
+    grafts: Grafts<mmr::Family, Digest, N>,
 }
 
 async fn build_source_batch() -> SourceBatch {
@@ -166,7 +169,7 @@ async fn build_source_batch_with_writes(
 }
 
 /// Apply each batch of writes as its own commit, returning each tip's operations from location 0
-/// and its batch's delta. A delta holds only its batch's writes, so upload tips in order.
+/// and its batch's grafts. Grafts hold only their batch's writes, so upload tips in order.
 async fn build_source_tips(
     partition_prefix: &'static str,
     batches: Vec<TipWrites>,
@@ -197,7 +200,9 @@ async fn build_source_tips(
                     }
                     batch.merkleize(&db).await.expect("merkleize")
                 };
-                let boundary = finalized.delta();
+                let root = finalized.root();
+                let witness = finalized.ops_root_witness().clone();
+                let grafts = finalized.grafts();
                 db = db.apply_batch(finalized).await.expect("apply");
 
                 let latest = db.bounds().end - 1;
@@ -209,7 +214,9 @@ async fn build_source_tips(
                 tips.push(SourceBatch {
                     latest_location: latest,
                     operations: ops,
-                    current_boundary: boundary,
+                    root,
+                    witness,
+                    grafts,
                 });
             }
 
@@ -244,7 +251,9 @@ async fn commit_upload(store_client: &StoreClient, batch: &SourceBatch) {
         &upload_client,
         &batch.operations,
         &op_cfg(),
-        &batch.current_boundary,
+        batch.root,
+        &batch.witness,
+        &batch.grafts,
     )
     .await
     .expect("commit upload");
@@ -255,7 +264,7 @@ fn current_snapshot_rows(source: &SourceBatch) -> BTreeMap<Bytes, Bytes> {
     let (_, prepared) =
         common::prepare_operations::<mmr::Family, BatchOperation>(&source.operations, &op_cfg());
     let prepared = prepared
-        .with_current_boundary::<Sha256, N>(&source.current_boundary)
+        .with_current_boundary::<Sha256, N>(source.root, &source.witness, &source.grafts)
         .expect("attach current boundary");
     let mut batch = StoreWriteBatch::new();
     exoware_qmdb::adapter::upload::stage_authenticated_range(&staging, prepared, &mut batch)
@@ -481,7 +490,7 @@ async fn miss_proof(
         panic!("{} should be a miss", text(&key));
     };
     assert_eq!(proof.watermark, tip.latest_location);
-    assert_eq!(proof.root, tip.current_boundary.root);
+    assert_eq!(proof.root, tip.root);
     assert_eq!(proof.requested_key, key);
     assert!(proof.verify::<Sha256>());
 
@@ -490,7 +499,7 @@ async fn miss_proof(
             tip.latest_location,
             std::slice::from_ref(&key),
             None,
-            &tip.current_boundary.root,
+            &tip.root,
         )
         .await
         .expect("connect get_many");
@@ -534,11 +543,11 @@ async fn range_page(
         .await
         .expect("get_range_raw");
     for entry in &raw.entries {
-        assert_eq!(entry.root, tip.current_boundary.root);
+        assert_eq!(entry.root, tip.root);
         assert!(entry.verify::<Sha256>());
     }
     if let Some(proof) = &raw.start_proof {
-        assert_eq!(proof.root, tip.current_boundary.root);
+        assert_eq!(proof.root, tip.root);
         assert_eq!(proof.requested_key, start);
         assert!(proof.verify::<Sha256>());
     }
@@ -549,14 +558,7 @@ async fn range_page(
         .collect::<Vec<_>>();
 
     let verified = connect
-        .get_range(
-            tip.latest_location,
-            start,
-            end,
-            limit,
-            None,
-            &tip.current_boundary.root,
-        )
+        .get_range(tip.latest_location, start, end, limit, None, &tip.root)
         .await
         .expect("connect get_range");
     let verified_keys = verified
@@ -736,13 +738,13 @@ async fn test_ordered_connect_get_returns_current_key_value_proof() {
             source.latest_location,
             &b"alpha".to_vec(),
             None,
-            &source.current_boundary.root,
+            &source.root,
         )
         .await
         .expect("get");
 
     let expected = latest_operation_for_key(&source.operations, b"alpha");
-    assert_eq!(proof.root, source.current_boundary.root);
+    assert_eq!(proof.root, source.root);
     assert_eq!(proof.location, expected.0);
     assert_eq!(proof.operation, expected.1);
 }
@@ -757,7 +759,9 @@ async fn test_ordered_get_after_grafted_boundary_returns_current_key_value_proof
         &upload_client,
         &source.operations,
         &op_cfg(),
-        &source.current_boundary,
+        source.root,
+        &source.witness,
+        &source.grafts,
     )
     .await
     .expect("commit upload");
@@ -768,7 +772,7 @@ async fn test_ordered_get_after_grafted_boundary_returns_current_key_value_proof
         .await
         .expect("get after grafted boundary");
     let expected = latest_operation_for_key(&source.operations, &key);
-    assert_eq!(proof.root, source.current_boundary.root);
+    assert_eq!(proof.root, source.root);
     assert_eq!(proof.location, expected.0);
     assert_eq!(proof.operation, expected.1);
 }
@@ -786,7 +790,7 @@ async fn test_ordered_connect_get_many_returns_current_key_lookup_proofs() {
             source.latest_location,
             &[b"alpha".to_vec(), b"beta".to_vec()],
             None,
-            &source.current_boundary.root,
+            &source.root,
         )
         .await
         .expect("get_many");
@@ -796,7 +800,7 @@ async fn test_ordered_connect_get_many_returns_current_key_lookup_proofs() {
     assert_eq!(proof.len(), 2);
     match &proof[0] {
         VerifiedKeyLookup::Hit(hit) => {
-            assert_eq!(hit.root, source.current_boundary.root);
+            assert_eq!(hit.root, source.root);
             assert_eq!(hit.location, alpha.0);
             assert_eq!(hit.operation, alpha.1);
         }
@@ -804,7 +808,7 @@ async fn test_ordered_connect_get_many_returns_current_key_lookup_proofs() {
     }
     match &proof[1] {
         VerifiedKeyLookup::Hit(hit) => {
-            assert_eq!(hit.root, source.current_boundary.root);
+            assert_eq!(hit.root, source.root);
             assert_eq!(hit.location, beta.0);
             assert_eq!(hit.operation, beta.1);
         }
@@ -825,7 +829,7 @@ async fn test_ordered_connect_get_many_returns_miss_proofs_and_rejects_duplicate
             source.latest_location,
             &[b"alpha".to_vec(), b"aardvark".to_vec()],
             None,
-            &source.current_boundary.root,
+            &source.root,
         )
         .await
         .expect("get_many");
@@ -842,7 +846,7 @@ async fn test_ordered_connect_get_many_returns_miss_proofs_and_rejects_duplicate
             source.latest_location,
             &[b"alpha".to_vec(), b"alpha".to_vec()],
             None,
-            &source.current_boundary.root,
+            &source.root,
         )
         .await
         .expect_err("duplicate get_many keys should fail");
@@ -864,7 +868,7 @@ async fn test_ordered_connect_get_range_verifies_complete_empty_and_partial_page
             Some(b"c".to_vec()),
             10,
             None,
-            &source.current_boundary.root,
+            &source.root,
         )
         .await
         .expect("complete get_range");
@@ -886,7 +890,7 @@ async fn test_ordered_connect_get_range_verifies_complete_empty_and_partial_page
             Some(b"z".to_vec()),
             1,
             None,
-            &source.current_boundary.root,
+            &source.root,
         )
         .await
         .expect("partial get_range");
@@ -900,7 +904,7 @@ async fn test_ordered_connect_get_range_verifies_complete_empty_and_partial_page
             Some(b"alpha".to_vec()),
             10,
             None,
-            &source.current_boundary.root,
+            &source.root,
         )
         .await
         .expect("empty get_range");
@@ -1000,7 +1004,7 @@ async fn test_ordered_connect_miss_proofs_ignore_versions_above_tip() {
         ],
     )
     .await;
-    assert_ne!(tips[0].current_boundary.root, tips[1].current_boundary.root);
+    assert_ne!(tips[0].root, tips[1].root);
     upload_tips(&store_client, &tips).await;
     let ordered = TestOrderedClient::new(store_client.unprefixed(), op_cfg(), key_cfg());
     let (_qmdb_server, qmdb_url) = spawn_qmdb_server(store_client.unprefixed()).await;
@@ -1734,7 +1738,7 @@ async fn test_ordered_connect_client_rejects_get_range_boundary_omission() {
             Some(b"c".to_vec()),
             10,
             None,
-            &source.current_boundary.root,
+            &source.root,
         )
         .await
         .expect_err("omitted get_range start boundary should fail");
@@ -1800,7 +1804,7 @@ async fn test_ordered_connect_client_rejects_empty_unbounded_get_range_before_ne
             None,
             10,
             None,
-            &source.current_boundary.root,
+            &source.root,
         )
         .await
         .expect_err("bounded empty proof must not verify an unbounded range");
@@ -1850,7 +1854,7 @@ async fn test_ordered_connect_client_rejects_invalid_get_proof() {
             source.latest_location,
             &b"alpha".to_vec(),
             None,
-            &source.current_boundary.root,
+            &source.root,
         )
         .await
         .expect_err("tampered get proof should fail");
@@ -1905,7 +1909,7 @@ async fn test_ordered_connect_client_rejects_invalid_get_many_proof() {
             source.latest_location,
             &[b"alpha".to_vec(), b"beta".to_vec()],
             None,
-            &source.current_boundary.root,
+            &source.root,
         )
         .await
         .expect_err("tampered get_many proof should fail");
@@ -1950,7 +1954,7 @@ async fn test_ordered_connect_client_rejects_get_many_proof_for_different_key() 
             source.latest_location,
             &[b"alpha".to_vec()],
             None,
-            &source.current_boundary.root,
+            &source.root,
         )
         .await
         .expect_err("get_many proof for a different key should fail");
@@ -2021,7 +2025,7 @@ async fn test_ordered_connect_client_rejects_get_range_page_shorter_than_limit()
             None,
             2,
             None,
-            &source.current_boundary.root,
+            &source.root,
         )
         .await
         .expect_err("a short page must not omit an in-range successor");

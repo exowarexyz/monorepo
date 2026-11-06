@@ -12,7 +12,7 @@ use commonware_storage::{
             unordered,
             value::{FixedEncoding, ValueEncoding, VariableEncoding},
         },
-        current::batch::Delta,
+        current::{batch::Grafts, proof::OpsRootWitness},
         operation::Key as QmdbKey,
     },
 };
@@ -34,13 +34,16 @@ use std::{fmt::Debug, num::NonZeroU64, sync::Arc};
 const N: usize = 32;
 type Digest = commonware_cryptography::sha256::Digest;
 
+/// Current root, witness, and grafts at a snapshot's tip.
+type CurrentBoundary<F> = (Digest, OpsRootWitness<F, Digest>, Grafts<F, Digest, N>);
+
 struct Snapshot<F: Graftable, K: QmdbKey, E: ValueEncoding> {
     start: Location<F>,
     proof: Proof<F, Digest>,
     pinned_nodes: Vec<Digest>,
     operations: Vec<unordered::Operation<F, K, E>>,
     ops_root: Digest,
-    current: Option<Delta<F, Digest, N>>,
+    current: Option<CurrentBoundary<F>>,
     values: Vec<Option<E::Value>>,
 }
 
@@ -129,9 +132,9 @@ async fn check_mirror<F, K, V, E>(
             Sequential,
         >(&authenticated, &snapshot.ops_root, &op_cfg, &Sequential)
         .expect("prepare source batch");
-        if let Some(boundary) = &snapshot.current {
+        if let Some((root, witness, grafts)) = &snapshot.current {
             prepared = prepared
-                .with_current_boundary::<Sha256, N>(boundary)
+                .with_current_boundary::<Sha256, N>(*root, witness, grafts)
                 .expect("attach current boundary");
         }
         let mut data = StoreWriteBatch::new();
@@ -167,7 +170,7 @@ async fn check_mirror<F, K, V, E>(
         let trusted_root = snapshot
             .current
             .as_ref()
-            .map_or(snapshot.ops_root, |b| b.root);
+            .map_or(snapshot.ops_root, |(root, _, _)| *root);
         assert_eq!(native_range.root, trusted_root);
         assert_eq!(native_range.operations, snapshot.operations);
         assert_eq!(local.root_at(tip).await.expect("root"), trusted_root);
@@ -367,7 +370,10 @@ async fn check_mirror<F, K, V, E>(
 
     // Publishing a later batch must preserve proofs at the earlier trusted tip
     let first = &snapshots[0];
-    let trusted_root = first.current.as_ref().map_or(first.ops_root, |b| b.root);
+    let trusted_root = first
+        .current
+        .as_ref()
+        .map_or(first.ops_root, |(root, _, _)| *root);
     let proof = remote
         .get_operation_range(
             GetOperationRangeRequest {
@@ -462,16 +468,18 @@ macro_rules! initial_boundary {
         None
     };
 
-    // A new database's initial commit belongs to no batch, so its delta is the database's whole
+    // A new database's initial commit belongs to no batch, so its grafts are the database's whole
     // current state. That state is the bitmap's first chunk, with no grafted nodes.
     (current, $db:ident) => {
-        Some(Delta {
-            root: $db.root(),
-            witness: $db.ops_root_witness().clone(),
-            pruned_chunks: 0,
-            chunks: vec![(0, $db.bitmap().get_chunk(0))],
-            grafted_nodes: Vec::new(),
-        })
+        Some((
+            $db.root(),
+            $db.ops_root_witness().clone(),
+            Grafts {
+                pruned_chunks: 0,
+                chunks: vec![(0, $db.bitmap().get_chunk(0))],
+                nodes: Vec::new(),
+            },
+        ))
     };
 }
 
@@ -480,7 +488,11 @@ macro_rules! batch_boundary {
         None
     };
     (current, $batch:ident) => {
-        Some($batch.delta())
+        Some((
+            $batch.root(),
+            $batch.ops_root_witness().clone(),
+            $batch.grafts(),
+        ))
     };
 }
 

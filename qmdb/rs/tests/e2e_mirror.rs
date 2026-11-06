@@ -13,7 +13,7 @@ use commonware_storage::{
     merkle::{mmr, Location},
     qmdb::{
         any::unordered::variable::Db as LocalUnorderedDb,
-        current::{batch::Delta, ordered::variable::Db as LocalOrderedDb},
+        current::{batch::Grafts, ordered::variable::Db as LocalOrderedDb, proof::OpsRootWitness},
         immutable::variable::{Db as Immutable, Operation as ImmutableOperation},
         keyless::variable::{Db as Keyless, Operation as KeylessOperation},
     },
@@ -61,7 +61,7 @@ async fn test_mirror_keyless_from_local() {
     // Upload the complete operation prefix after a second local batch
     let (ops_total, latest2, root2) = build_keyless_source(vec![
         vec![b"alpha".to_vec(), b"beta".to_vec(), b"gamma".to_vec()],
-        vec![b"delta".to_vec(), b"epsilon".to_vec()],
+        vec![b"grafts".to_vec(), b"epsilon".to_vec()],
     ])
     .await;
     common::commit_operations::<mmr::Family, _>(
@@ -376,7 +376,7 @@ type OrderedOp =
 async fn test_mirror_ordered_from_local() {
     let store_client = common::local_store_client().await;
 
-    let (ops1, latest1, root1, boundary1) = build_current_ordered_source(vec![vec![
+    let (ops1, latest1, root1, witness1, boundary1) = build_current_ordered_source(vec![vec![
         (b"alpha".to_vec(), Some(b"one".to_vec())),
         (b"beta".to_vec(), Some(b"two".to_vec())),
     ]])
@@ -389,6 +389,8 @@ async fn test_mirror_ordered_from_local() {
             ((0..=MAX_OPERATION_SIZE).into(), ()),
             ((0..=MAX_OPERATION_SIZE).into(), ()),
         ),
+        root1,
+        &witness1,
         &boundary1,
     )
     .await
@@ -410,8 +412,8 @@ async fn test_mirror_ordered_from_local() {
     );
 
     // Rebuild the same history plus one batch, then upload the full operation log with only the
-    // new batch's delta.
-    let (ops_total, latest2, root2, boundary_delta) = build_current_ordered_source(vec![
+    // new batch's grafts.
+    let (ops_total, latest2, root2, witness2, boundary_delta) = build_current_ordered_source(vec![
         vec![
             (b"alpha".to_vec(), Some(b"one".to_vec())),
             (b"beta".to_vec(), Some(b"two".to_vec())),
@@ -427,6 +429,8 @@ async fn test_mirror_ordered_from_local() {
             ((0..=MAX_OPERATION_SIZE).into(), ()),
             ((0..=MAX_OPERATION_SIZE).into(), ()),
         ),
+        root2,
+        &witness2,
         &boundary_delta,
     )
     .await
@@ -440,14 +444,16 @@ async fn test_mirror_ordered_from_local() {
 
 type OrderedBatch = Vec<(Vec<u8>, Option<Vec<u8>>)>;
 
-/// Apply `batches` to a new source, returning its operations, tip, root, and last batch's delta.
+/// Apply `batches` to a new source, returning its operations, tip, root, witness, and last batch's
+/// grafts.
 async fn build_current_ordered_source(
     batches: Vec<OrderedBatch>,
 ) -> (
     Vec<OrderedOp>,
     Location<mmr::Family>,
     Digest,
-    Delta<mmr::Family, Digest, N>,
+    OpsRootWitness<mmr::Family, Digest>,
+    Grafts<mmr::Family, Digest, N>,
 ) {
     tokio::task::spawn_blocking(move || {
         cw_tokio::Runner::default().start(|context| async move {
@@ -486,7 +492,7 @@ async fn build_current_ordered_source(
                     }
                     b.merkleize(&db).await.expect("merkleize")
                 };
-                boundary = Some(finalized.delta());
+                boundary = Some(finalized.grafts());
                 db = db.apply_batch(finalized).await.expect("apply");
             }
             let latest = db.bounds().end - 1;
@@ -497,9 +503,10 @@ async fn build_current_ordered_source(
                 .expect("ops_historical_proof");
             let boundary = boundary.expect("batches must not be empty");
             let root = db.root();
+            let witness = db.ops_root_witness().clone();
             db = db.sync().await.expect("sync");
             db.destroy().await.expect("destroy");
-            (ops, latest, root, boundary)
+            (ops, latest, root, witness, boundary)
         })
     })
     .await
