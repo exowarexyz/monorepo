@@ -23,9 +23,13 @@ mod read_session_log_tests;
 pub mod retention;
 pub mod selector;
 pub mod stream_filter;
+mod subscription;
+#[cfg(test)]
+mod subscription_tests;
 pub use credential::API_KEY_ENV;
 pub use keys::{Key, KeyMut, KeyValidationError, Prefix, PrefixError, Value, MAX_KEY_LEN};
 pub use proto::*;
+pub use subscription::{StreamSubscription, SubscriptionRetryConfig};
 extern crate self as exoware_proto;
 
 use crate::proto::{
@@ -1362,72 +1366,6 @@ pub struct StoreBatch {
     pub entries: Vec<StoreBatchEntry>,
 }
 
-/// Async stream of `StoreBatch`. Backed by the generated
-/// connectrpc server stream.
-pub struct StreamSubscription {
-    stream: ConnectServerStream<
-        ProtoErasedResponseBody,
-        exoware_proto::log::stream::v1::SubscribeResponseView<'static>,
-    >,
-    key_prefix: Option<StoreKeyPrefix>,
-    credential: Credential,
-    observed_sequence: Option<Arc<ObservedSequence>>,
-}
-
-impl std::fmt::Debug for StreamSubscription {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("StreamSubscription").finish_non_exhaustive()
-    }
-}
-
-impl StreamSubscription {
-    /// Pull the next frame. `Ok(None)` = server closed the stream cleanly.
-    pub async fn next(&mut self) -> Result<Option<StoreBatch>, ClientError> {
-        loop {
-            match self
-                .stream
-                .message()
-                .await
-                .map_err(|err| client_error_from_connect(err, self.credential))?
-            {
-                Some(view) => {
-                    let owned = view.to_owned_message();
-                    let mut entries = Vec::with_capacity(owned.entries.len());
-                    for entry in owned.entries {
-                        let key = Bytes::from(entry.key);
-                        let key = match &self.key_prefix {
-                            Some(prefix) => prefix.decode_key(&key)?,
-                            None => key,
-                        };
-                        entries.push(StoreBatchEntry {
-                            key,
-                            value: entry.value,
-                        });
-                    }
-                    if entries.is_empty() {
-                        continue;
-                    }
-                    let frame = StoreBatch {
-                        sequence_number: owned.sequence_number,
-                        entries,
-                    };
-                    if let Some(observed) = &self.observed_sequence {
-                        observed.observe(frame.sequence_number);
-                    }
-                    return Ok(Some(frame));
-                }
-                None => {
-                    if let Some(err) = self.stream.error() {
-                        return Err(client_error_from_connect(err.clone(), self.credential));
-                    } else {
-                        return Ok(None);
-                    }
-                }
-            }
-        }
-    }
-}
-
 /// Inspect a Connect error for `log.stream.BATCH_EVICTED` / `BATCH_NOT_FOUND`
 /// `ErrorInfo` details. Used by `get_batch` to collapse both into `Ok(None)`.
 fn is_batch_missing_error(err: &ConnectError) -> bool {
@@ -1576,6 +1514,7 @@ pub struct StoreClientBuilder {
     api_key: Option<ApiKey>,
     rpc_transport: Option<RpcTransportChoice>,
     request_timeout: Option<Duration>,
+    subscription_retry: SubscriptionRetryConfig,
 }
 
 impl StoreClientBuilder {
@@ -1644,6 +1583,12 @@ impl StoreClientBuilder {
         self
     }
 
+    /// Reconnect policy for log subscriptions. Defaults to [`SubscriptionRetryConfig::standard`].
+    pub const fn subscription_retry(mut self, config: SubscriptionRetryConfig) -> Self {
+        self.subscription_retry = config;
+        self
+    }
+
     /// Codec for compressing **outgoing** RPC request bodies (default [`ConnectRequestCompression::None`]).
     pub const fn connect_request_compression(
         mut self,
@@ -1653,8 +1598,9 @@ impl StoreClientBuilder {
         self
     }
 
-    /// Bounds unary calls and the opening of streaming calls across RPC transports.
+    /// Bounds unary calls and the opening of query streams across RPC transports.
     /// Overrides the timeout supplied by [`Self::balanced_http2_transport`].
+    /// Log subscriptions are bounded by [`Self::subscription_retry`] instead.
     pub const fn request_timeout(mut self, timeout: Duration) -> Self {
         self.request_timeout = Some(timeout);
         self
@@ -1683,8 +1629,8 @@ impl StoreClientBuilder {
     ///
     /// HTTP origins must accept prior-knowledge h2c. HTTPS origins require HTTP/2 through ALPN.
     /// The configured request timeout bounds complete unary calls. It also bounds query streams
-    /// through their first frame and subscriptions through their response headers. It does not stop
-    /// a streaming response after the call returns.
+    /// through their first frame. It does not stop a streaming response after the call returns,
+    /// and log subscriptions are bounded by [`Self::subscription_retry`] instead.
     pub fn balanced_http2_transport(mut self, config: ProtoBalancedHttp2Config) -> Self {
         self.rpc_transport = Some(RpcTransportChoice::BalancedHttp2(config));
         self
@@ -1783,6 +1729,7 @@ impl StoreClientBuilder {
             connect_http,
             rpc_timeout,
             retry_config: self.retry_config,
+            subscription_retry: self.subscription_retry,
             connect_request_compression: self.connect_request_compression,
             credential,
         })
@@ -1803,6 +1750,7 @@ pub struct StoreClient {
     connect_http: ProtoErasedClientTransport,
     rpc_timeout: Option<Duration>,
     retry_config: RetryConfig,
+    subscription_retry: SubscriptionRetryConfig,
     connect_request_compression: ConnectRequestCompression,
     credential: Credential,
 }
@@ -2160,19 +2108,18 @@ impl StoreClient {
             since_sequence_number,
             ..Default::default()
         };
+        StreamSubscription::open(self.clone(), request, self.subscription_retry).await
+    }
+
+    /// Opens one `Subscribe` call. Resumption decides when to call this again.
+    async fn open_subscribe_stream(
+        &self,
+        request: exoware_proto::log::stream::v1::SubscribeRequest,
+    ) -> Result<subscription::SubscribeStream, ConnectError> {
         let config = self.streaming_client_config(self.stream_uri.clone());
         let client =
             exoware_proto::log::stream::v1::ServiceClient::new(self.connect_http.clone(), config);
-        let stream = self
-            .with_streaming_timeout(client.subscribe(request))
-            .await
-            .map_err(|err| client_error_from_connect(err, self.credential))?;
-        Ok(StreamSubscription {
-            stream,
-            key_prefix: None,
-            credential: self.credential,
-            observed_sequence: None,
-        })
+        client.subscribe(request).await
     }
 
     /// Fetch a batch by sequence number, returning the raw owned response
@@ -2827,6 +2774,11 @@ impl<'a> Stream<'a> {
     /// transitioning to live, and never delivers a batch below `N`, even when
     /// `N` is past the latest published batch. An evicted `since` returns a
     /// `ConnectError::out_of_range` carrying `ErrorInfo.reason = "BATCH_EVICTED"`.
+    ///
+    /// The subscription resumes after disconnects according to
+    /// [`StoreClientBuilder::subscription_retry`]. A subscription opened
+    /// without a positive `since_sequence_number` cannot resume until it
+    /// receives its first frame, so an earlier failure is returned.
     pub async fn subscribe(
         &self,
         filter: crate::stream_filter::StreamFilter,

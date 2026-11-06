@@ -7,7 +7,9 @@ use axum::{
     Router,
 };
 use exoware_sdk::{transport::set_tcp_nodelay, PreferZstdLayer};
-use exoware_server::{connect_stack, AppState};
+use exoware_server::{
+    connect_stack, ingest::transport::ServeConfig, AppState, SubscriptionLifetime,
+};
 use std::{net::SocketAddr, path::Path, sync::Arc, time::Duration};
 use tower_http::cors::CorsLayer;
 use tracing::{info, warn};
@@ -41,31 +43,95 @@ fn store_config(max_open_files: i32) -> RocksConfig {
 }
 
 /// The simulator's routes, shared by [`run`] and [`open_temp`] so tests serve the same stack.
-fn app(engine: RocksStore) -> Router {
+fn app(engine: RocksStore, lifetime: SubscriptionLifetime) -> Router {
     Router::new()
         .route("/health", get(health))
-        .fallback_service(connect_stack(AppState::new(Arc::new(engine))))
+        .fallback_service(connect_stack(
+            AppState::new(Arc::new(engine)).with_subscription_lifetime(lifetime),
+        ))
         .layer(PreferZstdLayer)
         .layer(CorsLayer::very_permissive())
 }
 
-/// Run the store simulator until the process is interrupted.
+// Completes on SIGINT or SIGTERM.
+async fn stop_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        match signal(SignalKind::terminate()) {
+            Ok(mut terminate) => {
+                tokio::select! {
+                    _ = tokio::signal::ctrl_c() => {}
+                    _ = terminate.recv() => {}
+                }
+            }
+            Err(error) => {
+                warn!(%error, "cannot listen for SIGTERM, only SIGINT stops the server");
+                let _ = tokio::signal::ctrl_c().await;
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
+}
+
+// The first signal drains gracefully. Listening replaces the default signal
+// disposition for the rest of the process, so a second signal has to stop the
+// process itself for an operator who will not wait for the shutdown timeout.
+async fn shutdown_signal() {
+    stop_signal().await;
+    tokio::spawn(async {
+        stop_signal().await;
+        warn!("received a second signal, stopping without draining");
+        std::process::exit(130);
+    });
+}
+
+/// Run the store simulator until it receives SIGINT or SIGTERM.
+///
+/// Shutdown ends open subscriptions with a resumable `UNAVAILABLE` error and
+/// gives other requests until `config.shutdown_timeout` to finish before
+/// closing their connections. A second signal stops the process at once.
 pub async fn run(
     directory: &Path,
     port: u16,
     max_open_files: i32,
+    lifetime: SubscriptionLifetime,
+    config: ServeConfig,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let app = app(RocksStore::open(
-        directory,
-        Some(store_config(max_open_files)),
-    )?);
+    let app = app(
+        RocksStore::open(directory, Some(store_config(max_open_files)))?,
+        lifetime,
+    );
 
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
     info!(%addr, directory = %directory.display(), "store simulator listening");
     let listener = tokio::net::TcpListener::bind(addr)
         .await?
         .tap_io(set_tcp_nodelay);
-    exoware_server::ingest::transport::serve(listener, app, std::future::pending()).await?;
+    exoware_server::ingest::transport::serve_with_config(listener, app, shutdown_signal(), config)
+        .await?;
+    info!("store simulator stopped");
+    Ok(())
+}
+
+/// Serve the store in `directory` on `listener` until `shutdown` completes.
+///
+/// Used by integration tests that stop and restart a server over the same store.
+pub async fn serve_until(
+    directory: &Path,
+    listener: tokio::net::TcpListener,
+    lifetime: SubscriptionLifetime,
+    shutdown: impl std::future::Future<Output = ()> + Send,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let app = app(
+        RocksStore::open(directory, Some(store_config(DEFAULT_MAX_OPEN_FILES)))?,
+        lifetime,
+    );
+    exoware_server::ingest::transport::serve(listener.tap_io(set_tcp_nodelay), app, shutdown)
+        .await?;
     Ok(())
 }
 
@@ -76,10 +142,10 @@ pub async fn run(
 pub async fn open_temp(
 ) -> Result<(tokio::task::JoinHandle<()>, String), Box<dyn std::error::Error + Send + Sync>> {
     let data_dir = tempfile::tempdir()?;
-    let app = app(RocksStore::open_owned(
-        data_dir,
-        Some(store_config(DEFAULT_MAX_OPEN_FILES)),
-    )?);
+    let app = app(
+        RocksStore::open_owned(data_dir, Some(store_config(DEFAULT_MAX_OPEN_FILES)))?,
+        SubscriptionLifetime::unbounded(),
+    );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await?
         .tap_io(set_tcp_nodelay);
