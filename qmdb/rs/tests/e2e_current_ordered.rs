@@ -22,13 +22,13 @@ use commonware_storage::{
             variable::Db as LocalQmdbDb,
         },
         operation::Operation as _,
-        verify::ProofExt as _,
     },
     translator::TwoCap,
 };
 use commonware_utils::{NZUsize, NZU16, NZU64};
 use exoware_qmdb::{
-    adapter::upload::recover_boundary_state, proof::RawKeyLookupProof, Delta, MAX_OPERATION_SIZE,
+    adapter::upload::prepare_publication, proof::RawKeyLookupProof, Delta, ProofKind, QmdbError,
+    MAX_OPERATION_SIZE,
 };
 use exoware_sdk::{PrefixedStoreClient, StoreClient};
 use std::{
@@ -65,28 +65,6 @@ type FixedDb<F> = LocalFixedQmdbDb<
     commonware_parallel::Sequential,
 >;
 
-async fn boundary_from_source_db<F>(
-    db: &VariableDb<F>,
-    previous_operations: Option<&[BatchOperation<F>]>,
-    operations: &[BatchOperation<F>],
-) -> Delta<F, Digest, N>
-where
-    F: Graftable,
-    BatchOperation<F>: commonware_codec::Codec,
-{
-    let ops_root_witness = db.ops_root_witness().clone();
-    recover_boundary_state::<F, Sha256, _, N, _, _>(
-        previous_operations,
-        operations,
-        db.root(),
-        0,
-        ops_root_witness,
-        |location| common::current_proof_chunk(db.range_proof(location, NZU64!(1))),
-    )
-    .await
-    .expect("recover_boundary_state")
-}
-
 async fn upload_source<F>(store_client: &StoreClient, source: &VariableSource<F>)
 where
     F: Graftable,
@@ -102,28 +80,6 @@ where
     )
     .await
     .expect("commit upload");
-}
-
-async fn boundary_from_fixed_source_db<F>(
-    db: &FixedDb<F>,
-    previous_operations: Option<&[FixedBatchOperation<F>]>,
-    operations: &[FixedBatchOperation<F>],
-) -> Delta<F, Digest, N>
-where
-    F: Graftable,
-    FixedBatchOperation<F>: commonware_codec::CodecFixed<Cfg = ()> + Send + Sync,
-{
-    let ops_root_witness = db.ops_root_witness().clone();
-    recover_boundary_state::<F, Sha256, _, N, _, _>(
-        previous_operations,
-        operations,
-        db.root(),
-        0,
-        ops_root_witness,
-        |location| common::current_proof_chunk(db.range_proof(location, NZU64!(1))),
-    )
-    .await
-    .expect("recover fixed boundary state")
 }
 
 fn op_cfg<F: Family>() -> <BatchOperation<F> as commonware_codec::Read>::Cfg {
@@ -184,6 +140,7 @@ where
                     .write(b"beta".to_vec(), Some(b"two".to_vec()));
                 batch.merkleize(&db).await.expect("merkleize")
             };
+            let boundary = finalized.delta();
             db = db.apply_batch(finalized).await.expect("apply");
 
             let latest = db.bounds().end - 1;
@@ -192,8 +149,6 @@ where
                 .ops_historical_proof(latest + 1, Location::<F>::new(0), n)
                 .await
                 .expect("proof");
-
-            let boundary = boundary_from_source_db(&db, None, &ops).await;
 
             let mut values = std::collections::BTreeMap::new();
             values.insert(
@@ -218,37 +173,6 @@ where
     })
     .await
     .expect("join")
-}
-
-async fn boundary_from_source_db_with_chunk_size<F, const M: usize>(
-    db: &LocalQmdbDb<
-        F,
-        cw_tokio::Context,
-        Vec<u8>,
-        Vec<u8>,
-        Sha256,
-        TwoCap,
-        M,
-        commonware_parallel::Sequential,
-    >,
-    previous_operations: Option<&[BatchOperation<F>]>,
-    operations: &[BatchOperation<F>],
-) -> Delta<F, Digest, M>
-where
-    F: Graftable,
-    BatchOperation<F>: commonware_codec::Codec,
-{
-    let ops_root_witness = db.ops_root_witness().clone();
-    recover_boundary_state::<F, Sha256, _, M, _, _>(
-        previous_operations,
-        operations,
-        db.root(),
-        0,
-        ops_root_witness,
-        |location| common::current_proof_chunk(db.range_proof(location, NZU64!(1))),
-    )
-    .await
-    .expect("recover boundary state")
 }
 
 async fn build_variable_source_with_write_count<F, const M: usize>(
@@ -292,6 +216,7 @@ where
                 }
                 batch.merkleize(&db).await.expect("merkleize")
             };
+            let boundary = finalized.delta();
             db = db.apply_batch(finalized).await.expect("apply");
 
             let latest = db.bounds().end - 1;
@@ -300,8 +225,6 @@ where
                 .ops_historical_proof(latest + 1, Location::<F>::new(0), n)
                 .await
                 .expect("proof");
-
-            let boundary = boundary_from_source_db_with_chunk_size::<F, M>(&db, None, &ops).await;
 
             db = db.sync().await.expect("sync");
             db.destroy().await.expect("destroy");
@@ -358,6 +281,7 @@ where
                     .write(beta, Some(two));
                 batch.merkleize(&db).await.expect("fixed merkleize")
             };
+            let boundary = finalized.delta();
             db = db.apply_batch(finalized).await.expect("apply fixed");
 
             let latest = db.bounds().end - 1;
@@ -366,8 +290,6 @@ where
                 .ops_historical_proof(latest + 1, Location::<F>::new(0), n)
                 .await
                 .expect("fixed proof");
-
-            let boundary = boundary_from_fixed_source_db(&db, None, &ops).await;
 
             let mut values = std::collections::BTreeMap::new();
             values.insert(
@@ -556,7 +478,7 @@ async fn assert_incremental_seed_batches_keep_current_proofs_verifiable<F>(
         commonware_codec::Codec + commonware_codec::Encode + commonware_codec::Decode + Clone,
 {
     let store_client = common::local_store_client().await;
-    let (uploads, latest_location, latest_key, expected_root, expected_active) =
+    let (publications, latest_location, latest_key, expected_root, expected_active) =
         tokio::task::spawn_blocking(move || {
             cw_tokio::Runner::default().start(|context| async move {
                 use commonware_runtime::{buffer::paged::CacheRef, Supervisor as _};
@@ -572,8 +494,7 @@ async fn assert_incremental_seed_batches_keep_current_proofs_verifiable<F>(
                         .await
                         .expect("init");
 
-                let mut previous_ops = Vec::<BatchOperation<F>>::new();
-                let mut uploads = Vec::<(Vec<BatchOperation<F>>, Delta<F, Digest, N>)>::new();
+                let mut publications = Vec::new();
                 let mut expected_active = BTreeMap::<Vec<u8>, Vec<u8>>::new();
                 let mut counter = 0u64;
 
@@ -600,24 +521,8 @@ async fn assert_incremental_seed_batches_keep_current_proofs_verifiable<F>(
                         counter += 3;
                         batch.merkleize(&db).await.expect("merkleize")
                     };
+                    publications.push(finalized.publication(&db).expect("publication"));
                     db = db.apply_batch(finalized).await.expect("apply");
-
-                    let latest = db.bounds().end - 1;
-                    let count = NonZeroU64::new(*latest + 1).expect("non-zero op count");
-                    let (_proof, cumulative_ops) = db
-                        .ops_historical_proof(latest + 1, Location::<F>::new(0), count)
-                        .await
-                        .expect("historical proof");
-                    let previous_slice = if previous_ops.is_empty() {
-                        None
-                    } else {
-                        Some(previous_ops.as_slice())
-                    };
-                    let boundary =
-                        boundary_from_source_db(&db, previous_slice, &cumulative_ops).await;
-                    let delta = cumulative_ops[previous_ops.len()..].to_vec();
-                    uploads.push((delta, boundary));
-                    previous_ops = cumulative_ops;
                 }
 
                 let latest_location = db.bounds().end - 1;
@@ -625,7 +530,7 @@ async fn assert_incremental_seed_batches_keep_current_proofs_verifiable<F>(
                 let expected_root = db.root();
                 db.destroy().await.expect("destroy");
                 (
-                    uploads,
+                    publications,
                     latest_location,
                     latest_key,
                     expected_root,
@@ -637,12 +542,14 @@ async fn assert_incremental_seed_batches_keep_current_proofs_verifiable<F>(
         .expect("join");
 
     let upload_client = PrefixedStoreClient::empty(store_client.clone());
-    let mut operations = Vec::new();
-    for (delta, boundary) in &uploads {
-        operations.extend_from_slice(delta);
-        common::commit_current_operations(&upload_client, &operations, &op_cfg::<F>(), boundary)
-            .await
-            .expect("commit upload");
+    for publication in &publications {
+        common::commit_publications(
+            &upload_client,
+            std::slice::from_ref(publication),
+            &op_cfg::<F>(),
+        )
+        .await
+        .expect("commit upload");
     }
 
     let qmdb_client: VariableClient<F> = exoware_qmdb::adapter::Ordered::new(
@@ -739,7 +646,6 @@ async fn test_ordered_mmb_persistent_interleaved_seed_batches_keep_current_proof
                     .await
                     .expect("init");
                     let upload_client = PrefixedStoreClient::empty(store.clone());
-                    let mut previous_ops = Vec::<BatchOperation<mmb::Family>>::new();
                     let mut counter = 0u64;
 
                     for _ in 0..2 {
@@ -758,40 +664,16 @@ async fn test_ordered_mmb_persistent_interleaved_seed_batches_keep_current_proof
                             counter += 3;
                             batch.merkleize(&db).await.expect("merkleize")
                         };
+                        let publication = finalized.publication(&db).expect("publication");
                         db = db.apply_batch(finalized).await.expect("apply");
                         db = db.sync().await.expect("sync");
-
-                        let latest = db.bounds().end - 1;
-                        let count = NonZeroU64::new(*latest + 1).expect("non-zero op count");
-                        let (proof, cumulative_ops) = db
-                            .ops_historical_proof(
-                                latest + 1,
-                                Location::<mmb::Family>::new(0),
-                                count,
-                            )
-                            .await
-                            .expect("historical proof");
-                        assert!(proof.verify::<Sha256, _>(
-                            Location::<mmb::Family>::new(0),
-                            &cumulative_ops,
-                            &db.ops_root()
-                        ));
-                        let previous_slice = if previous_ops.is_empty() {
-                            None
-                        } else {
-                            Some(previous_ops.as_slice())
-                        };
-                        let boundary =
-                            boundary_from_source_db(&db, previous_slice, &cumulative_ops).await;
-                        common::commit_current_operations(
+                        common::commit_publications(
                             &upload_client,
-                            &cumulative_ops,
+                            std::slice::from_ref(&publication),
                             &op_cfg::<mmb::Family>(),
-                            &boundary,
                         )
                         .await
                         .expect("commit upload");
-                        previous_ops = cumulative_ops;
                     }
 
                     let latest_location = db.bounds().end - 1;
@@ -1111,13 +993,12 @@ where
             )
             .await
             .expect("init source current DB");
-            let mut previous_operations = Vec::<BatchOperation<F>>::new();
+            let mut start = Location::new(0);
             let mut prepared_boundaries = Vec::new();
             for (batch_index, value) in [b"one".to_vec(), b"updated".to_vec()]
                 .into_iter()
                 .enumerate()
             {
-                let start = Location::new(previous_operations.len() as u64);
                 let mut batch = db
                     .new_batch()
                     .write(b"alpha".to_vec(), Some(value.clone()))
@@ -1130,6 +1011,7 @@ where
                     );
                 }
                 let batch = batch.merkleize(&db).await.expect("merkleize source batch");
+                let boundary = batch.delta();
                 db = db.apply_batch(batch).await.expect("apply source batch");
                 let end = db.bounds().end;
                 let latest = end - 1;
@@ -1152,14 +1034,6 @@ where
                     .pinned_nodes_at(start)
                     .await
                     .expect("source pinned nodes");
-                let mut cumulative_operations = previous_operations.clone();
-                cumulative_operations.extend(operations.iter().cloned());
-                let previous = if previous_operations.is_empty() {
-                    None
-                } else {
-                    Some(previous_operations.as_slice())
-                };
-                let boundary = boundary_from_source_db(&db, previous, &cumulative_operations).await;
                 if batch_index == 1 {
                     assert!(start > Location::new(0));
                     assert!(!pinned_nodes.is_empty());
@@ -1188,7 +1062,7 @@ where
                 .with_current_boundary::<Sha256, N>(&boundary)
                 .expect("attach authenticated source current boundary");
                 prepared_boundaries.push((latest, expected_root, value, prepared));
-                previous_operations = cumulative_operations;
+                start = end;
             }
             db.destroy().await.expect("destroy source DB");
             prepared_boundaries
@@ -1420,4 +1294,77 @@ async fn test_ordered_current_proof_reads_overlap() {
     for server in servers {
         server.abort();
     }
+}
+
+#[tokio::test]
+async fn test_prepare_publication_rejects_unbound_publications() {
+    let publication = tokio::task::spawn_blocking(|| {
+        cw_tokio::Runner::default().start(|context| async move {
+            use commonware_runtime::{buffer::paged::CacheRef, Supervisor as _};
+            let page_cache = CacheRef::new(NZU16!(64), NZUsize!(8));
+            let cfg = common::current_variable_config(
+                "current_ordered_variable_publication_source",
+                page_cache,
+                op_cfg::<mmr::Family>(),
+                NZU64!(8),
+            );
+            let db: VariableDb<mmr::Family> = VariableDb::init(
+                context.child("current_ordered_variable_publication_source"),
+                cfg,
+                None,
+            )
+            .await
+            .expect("init");
+            let batch = db
+                .new_batch()
+                .write(b"alpha".to_vec(), Some(b"one".to_vec()))
+                .write(b"beta".to_vec(), Some(b"two".to_vec()))
+                .merkleize(&db)
+                .await
+                .expect("merkleize");
+            let publication = batch.publication(&db).expect("publication");
+            drop(batch);
+            db.destroy().await.expect("destroy");
+            publication
+        })
+    })
+    .await
+    .expect("join");
+    let root = publication.delta.root;
+    let prepare = |publication: &_, root: &Digest| {
+        prepare_publication::<mmr::Family, Sha256, _, _, N>(
+            publication,
+            root,
+            &commonware_parallel::Sequential,
+        )
+    };
+    let prepared = prepare(&publication, &root).expect("prepare publication");
+    assert_eq!(prepared.start_location(), publication.start);
+    assert_eq!(
+        prepared.latest_location(),
+        publication.start + (publication.operations.len() as u64 - 1)
+    );
+
+    assert!(matches!(
+        prepare(&publication, &Sha256::fill(0xEE)),
+        Err(QmdbError::CorruptData(_))
+    ));
+
+    let mut reordered = publication.clone();
+    let mut operations = reordered.operations.as_ref().clone();
+    operations.swap(0, 1);
+    reordered.operations = std::sync::Arc::new(operations);
+    assert!(matches!(
+        prepare(&reordered, &root),
+        Err(QmdbError::ProofVerification {
+            kind: ProofKind::RangeCheckpoint
+        })
+    ));
+
+    let mut unbound = publication;
+    unbound.delta.witness.grafted_root = Sha256::fill(0xEE);
+    assert!(matches!(
+        prepare(&unbound, &root),
+        Err(QmdbError::CorruptData(_))
+    ));
 }

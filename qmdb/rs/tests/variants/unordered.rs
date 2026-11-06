@@ -18,8 +18,8 @@ use commonware_storage::{
 use commonware_utils::{iter::zip_eq, NZUsize, NZU16, NZU64};
 use exoware_qmdb::{
     adapter::upload::{
-        prepare_authenticated_range, recover_boundary_state, stage_authenticated_range,
-        stage_watermark, AuthenticatedOperationRange, UploadOperation,
+        prepare_authenticated_range, stage_authenticated_range, stage_watermark,
+        AuthenticatedOperationRange, UploadOperation,
     },
     service::{
         client::rpc::{CurrentOperationClient, OperationLogClient},
@@ -456,25 +456,29 @@ macro_rules! ops_root {
     };
 }
 
-macro_rules! current_boundary {
-    (any, $f:ty, $db:ident, $ops:ident, $previous:expr) => {
+macro_rules! initial_boundary {
+    (any, $db:ident) => {
         None
     };
-    (current, $f:ty, $db:ident, $ops:ident, $previous:expr) => {{
-        let source = &$db;
+    (current, $db:ident) => {
         Some(
-            recover_boundary_state::<$f, Sha256, _, N, _, _>(
-                $previous,
-                &$ops,
+            common::initial_delta(
                 $db.root(),
-                0,
                 $db.ops_root_witness().clone(),
-                |location| common::current_proof_chunk(source.range_proof(location, NZU64!(1))),
+                $db.range_proof(Location::new(0), NZU64!(1)),
             )
-            .await
-            .expect("recover source current boundary"),
+            .await,
         )
-    }};
+    };
+}
+
+macro_rules! batch_boundary {
+    (any, $batch:ident) => {
+        None
+    };
+    (current, $batch:ident) => {
+        Some($batch.delta())
+    };
 }
 
 macro_rules! capture_batch_proof {
@@ -538,8 +542,7 @@ macro_rules! case {
                     let initial_count = NonZeroU64::new(*db.bounds().end).expect("initial commit");
                     let (proof, operations): (_, Vec<Op>) =
                         source_proof!($state, db, initial_count);
-                    let initial_boundary =
-                        current_boundary!($state, F, db, operations, None::<&[Op]>);
+                    let initial_boundary = initial_boundary!($state, db);
                     snapshots.push(Snapshot {
                         start: Location::new(0),
                         proof,
@@ -566,6 +569,7 @@ macro_rules! case {
                         let batch_root = batch.root();
                         let captured: Option<(Proof<F, Digest>, Vec<Digest>)> =
                             capture_batch_proof!($state, batch, db);
+                        let boundary = batch_boundary!($state, batch);
                         db = db.apply_batch(batch).await.expect("source apply");
                         assert_eq!(db.root(), batch_root);
                         let count = NonZeroU64::new(*db.bounds().end).expect("nonempty source");
@@ -597,15 +601,6 @@ macro_rules! case {
                         for (key, value) in source_keys.iter().zip(&expected) {
                             assert_eq!(db.get(key).await.expect("source get"), *value);
                         }
-                        let boundary = current_boundary!(
-                            $state,
-                            F,
-                            db,
-                            operations,
-                            snapshots
-                                .last()
-                                .map(|previous| previous.operations.as_slice())
-                        );
                         snapshots.push(Snapshot {
                             start,
                             proof,

@@ -18,7 +18,6 @@ use commonware_storage::{
 use commonware_utils::{NZUsize, NZU16, NZU64};
 use connectrpc::{client::ClientConfig, ErrorCode};
 use exoware_qmdb::{
-    adapter::upload::recover_boundary_state,
     service::{
         client::rpc::{CurrentOperationClient, OperationLogClient, OperationLogSubscribeProof},
         proto::qmdb::v1::{
@@ -215,23 +214,6 @@ struct CurrentSourceBatch {
     current_boundary: Delta<mmr::Family, Digest, N>,
 }
 
-async fn boundary_from_current_source_db(
-    db: &CurrentDb,
-    operations: &[FixedKeyOperation],
-) -> Delta<mmr::Family, Digest, N> {
-    let ops_root_witness = db.ops_root_witness().clone();
-    recover_boundary_state::<mmr::Family, Sha256, _, N, _, _>(
-        None,
-        operations,
-        db.root(),
-        0,
-        ops_root_witness,
-        |location| common::current_proof_chunk(db.range_proof(location, NZU64!(1))),
-    )
-    .await
-    .expect("recover unordered current boundary")
-}
-
 async fn build_any_source_batch() -> AnySourceBatch {
     tokio::task::spawn_blocking(|| {
         cw_tokio::Runner::default().start(|context| async move {
@@ -420,6 +402,7 @@ async fn build_current_source_batch() -> CurrentSourceBatch {
                     .write(beta, Some(b"two".to_vec()));
                 batch.merkleize(&db).await.expect("merkleize")
             };
+            let boundary = finalized.delta();
             db = db.apply_batch(finalized).await.expect("apply");
 
             let latest = db.bounds().end - 1;
@@ -428,7 +411,6 @@ async fn build_current_source_batch() -> CurrentSourceBatch {
                 .ops_historical_proof(latest + 1, Location::new(0), n)
                 .await
                 .expect("proof");
-            let boundary = boundary_from_current_source_db(&db, &ops).await;
 
             db = db.sync().await.expect("sync");
             db.destroy().await.expect("destroy");
@@ -883,7 +865,6 @@ async fn aligned_commit_boundary<F: commonware_storage::merkle::Graftable + Part
             let mut db = Db::<F>::init(context.child(case_name), cfg, None)
                 .await
                 .expect("source init");
-            let mut previous: Vec<Operation<F>> = Vec::new();
             let mut snapshots = Vec::new();
             for round in 0..2 {
                 let mut batch = db.new_batch();
@@ -894,6 +875,7 @@ async fn aligned_commit_boundary<F: commonware_storage::merkle::Graftable + Part
                     }
                 }
                 let batch = batch.merkleize(&db).await.expect("source merkleize");
+                let boundary = batch.delta();
                 db = db.apply_batch(batch).await.expect("source apply");
                 assert_eq!(*db.bounds().end, if round == 0 { 512 } else { 514 });
                 let (_, operations): (_, Vec<Operation<F>>) = db
@@ -922,18 +904,6 @@ async fn aligned_commit_boundary<F: commonware_storage::merkle::Graftable + Part
                     &db.root(),
                 ));
                 assert_eq!(chunks[0][N - 1] & 0x80 != 0, round == 0);
-                let source = &db;
-                let boundary = recover_boundary_state::<F, Sha256, _, N, _, _>(
-                    (!previous.is_empty()).then_some(previous.as_slice()),
-                    &operations,
-                    db.root(),
-                    0,
-                    db.ops_root_witness().clone(),
-                    |location| common::current_proof_chunk(source.range_proof(location, NZU64!(1))),
-                )
-                .await
-                .expect("recover current boundary");
-                previous = operations.clone();
                 snapshots.push((operations, boundary));
             }
             db.destroy().await.expect("destroy source");
@@ -1032,7 +1002,7 @@ async fn current_boundary_nodes<F: commonware_storage::merkle::Graftable + Parti
             let mut db = Db::<F>::init(context.child(case_name), cfg, None)
                 .await
                 .expect("source init");
-            let mut previous: Vec<Operation<F>> = Vec::new();
+            let mut publications = Vec::new();
             let mut snapshots = Vec::new();
             for round in 0..=empty_batches + 1 {
                 let mut batch = db.new_batch();
@@ -1049,6 +1019,7 @@ async fn current_boundary_nodes<F: commonware_storage::merkle::Graftable + Parti
                     .merkleize(&db)
                     .await
                     .expect("source merkleize");
+                publications.push(batch.publication(&db).expect("source publication"));
                 db = db.apply_batch(batch).await.expect("source apply");
                 if round < empty_batches {
                     continue;
@@ -1109,19 +1080,12 @@ async fn current_boundary_nodes<F: commonware_storage::merkle::Graftable + Parti
                     ));
                 }
 
-                let source = &db;
-                let boundary = recover_boundary_state::<F, Sha256, _, N, _, _>(
-                    (!previous.is_empty()).then_some(previous.as_slice()),
-                    &operations,
+                snapshots.push((
+                    operations,
+                    std::mem::take(&mut publications),
                     db.root(),
-                    pruned_chunks,
-                    db.ops_root_witness().clone(),
-                    |location| common::current_proof_chunk(source.range_proof(location, NZU64!(1))),
-                )
-                .await
-                .expect("recover current boundary");
-                previous = operations.clone();
-                snapshots.push((operations, boundary, queries));
+                    queries,
+                ));
             }
             db.destroy().await.expect("destroy source");
             snapshots
@@ -1152,16 +1116,16 @@ async fn current_boundary_nodes<F: commonware_storage::merkle::Graftable + Parti
 
     // Re-query the older boundary after publication advances to preserve its bitmap and node versions
     for (pass, index) in [0, 1, 0].into_iter().enumerate() {
-        let (operations, boundary, queries) = &snapshots[index];
+        let (operations, publications, root, queries) = &snapshots[index];
         if pass < 2 {
-            common::commit_current_operations(&prefixed, operations, &op_cfg, boundary)
+            common::commit_publications(&prefixed, publications, &op_cfg)
                 .await
                 .expect("publish current boundary");
         }
         let tip = operations.len() as u64 - 1;
         for (key_index, location) in queries {
             let proof = key_client
-                .get(Location::new(tip), &key(*key_index), None, &boundary.root)
+                .get(Location::new(tip), &key(*key_index), None, root)
                 .await
                 .expect("current key proof across boundary transition");
             assert_eq!(proof.location, *location);
@@ -1174,7 +1138,7 @@ async fn current_boundary_nodes<F: commonware_storage::merkle::Graftable + Parti
                         max_locations: 1,
                         ..Default::default()
                     },
-                    &boundary.root,
+                    root,
                 )
                 .await
                 .expect("current range proof across boundary transition");

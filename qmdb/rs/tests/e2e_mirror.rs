@@ -20,7 +20,7 @@ use commonware_storage::{
     translator::TwoCap,
 };
 use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16, NZU64};
-use exoware_qmdb::{adapter::upload::recover_boundary_state, Delta, MAX_OPERATION_SIZE};
+use exoware_qmdb::{Delta, MAX_OPERATION_SIZE};
 use exoware_sdk::PrefixedStoreClient;
 use std::num::NonZeroU64;
 
@@ -372,44 +372,14 @@ const N: usize = 32;
 type OrderedOp =
     commonware_storage::qmdb::any::ordered::variable::Operation<mmr::Family, Vec<u8>, Vec<u8>>;
 
-async fn boundary_from_current_ordered_source(
-    db: &LocalOrderedDb<
-        mmr::Family,
-        cw_tokio::Context,
-        Vec<u8>,
-        Vec<u8>,
-        Sha256,
-        TwoCap,
-        N,
-        commonware_parallel::Sequential,
-    >,
-    previous_operations: Option<&[OrderedOp]>,
-    operations: &[OrderedOp],
-) -> Delta<mmr::Family, Digest, N> {
-    let ops_root_witness = db.ops_root_witness().clone();
-    recover_boundary_state::<mmr::Family, Sha256, _, N, _, _>(
-        previous_operations,
-        operations,
-        db.root(),
-        0,
-        ops_root_witness,
-        |location| common::current_proof_chunk(db.range_proof(location, NZU64!(1))),
-    )
-    .await
-    .expect("recover_boundary_state")
-}
-
 #[tokio::test]
 async fn test_mirror_ordered_from_local() {
     let store_client = common::local_store_client().await;
 
-    let (ops1, latest1, root1, boundary1) = build_current_ordered_source(
-        vec![vec![
-            (b"alpha".to_vec(), Some(b"one".to_vec())),
-            (b"beta".to_vec(), Some(b"two".to_vec())),
-        ]],
-        None,
-    )
+    let (ops1, latest1, root1, boundary1) = build_current_ordered_source(vec![vec![
+        (b"alpha".to_vec(), Some(b"one".to_vec())),
+        (b"beta".to_vec(), Some(b"two".to_vec())),
+    ]])
     .await;
     let upload_client = PrefixedStoreClient::empty(store_client.clone());
     common::commit_current_operations::<mmr::Family, _, N>(
@@ -439,17 +409,14 @@ async fn test_mirror_ordered_from_local() {
         "remote root must match local (after batch 1)"
     );
 
-    // Compute the per-batch boundary delta for the new batch
-    let (ops_total, latest2, root2, boundary_delta) = build_current_ordered_source(
+    // Rebuild the same history plus one batch and upload only the new batch's delta
+    let (ops_total, latest2, root2, boundary_delta) = build_current_ordered_source(vec![
         vec![
-            vec![
-                (b"alpha".to_vec(), Some(b"one".to_vec())),
-                (b"beta".to_vec(), Some(b"two".to_vec())),
-            ],
-            vec![(b"alpha".to_vec(), Some(b"one-updated".to_vec()))],
+            (b"alpha".to_vec(), Some(b"one".to_vec())),
+            (b"beta".to_vec(), Some(b"two".to_vec())),
         ],
-        Some(ops1.clone()),
-    )
+        vec![(b"alpha".to_vec(), Some(b"one-updated".to_vec()))],
+    ])
     .await;
 
     common::commit_current_operations::<mmr::Family, _, N>(
@@ -472,9 +439,9 @@ async fn test_mirror_ordered_from_local() {
 
 type OrderedBatch = Vec<(Vec<u8>, Option<Vec<u8>>)>;
 
+/// Apply `batches` to a new source, returning its operations, tip, root, and last batch's delta.
 async fn build_current_ordered_source(
     batches: Vec<OrderedBatch>,
-    previous_operations: Option<Vec<OrderedOp>>,
 ) -> (
     Vec<OrderedOp>,
     Location<mmr::Family>,
@@ -509,6 +476,7 @@ async fn build_current_ordered_source(
             )
             .await
             .expect("init");
+            let mut boundary = None;
             for batch in batches {
                 let finalized = {
                     let mut b = db.new_batch();
@@ -517,6 +485,7 @@ async fn build_current_ordered_source(
                     }
                     b.merkleize(&db).await.expect("merkleize")
                 };
+                boundary = Some(finalized.delta());
                 db = db.apply_batch(finalized).await.expect("apply");
             }
             let latest = db.bounds().end - 1;
@@ -525,9 +494,7 @@ async fn build_current_ordered_source(
                 .ops_historical_proof(latest + 1, Location::<mmr::Family>::new(0), n)
                 .await
                 .expect("ops_historical_proof");
-            let boundary =
-                boundary_from_current_ordered_source(&db, previous_operations.as_deref(), &ops)
-                    .await;
+            let boundary = boundary.expect("at least one batch");
             let root = db.root();
             db = db.sync().await.expect("sync");
             db.destroy().await.expect("destroy");
