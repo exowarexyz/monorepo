@@ -81,11 +81,11 @@ enum Command {
         store_prefix: String,
         #[arg(long, default_value_t = 2)]
         interval_secs: u64,
-        /// Directory that keeps the local ordered-QMDB state across restarts.
-        /// Delete it when resetting the demo or the Store, or when changing
-        /// `--store-prefix`. Defaults to `$HOME/.exoware_qmdb_mmb_seed`.
+        /// Directory for the local ordered-QMDB state. Reuse it to resume the
+        /// same Store prefix after a restart, and use a fresh one for a reset
+        /// Store or a different `--store-prefix`.
         #[arg(long)]
-        directory: Option<PathBuf>,
+        directory: PathBuf,
     },
 }
 
@@ -167,18 +167,12 @@ async fn run(
     Ok(())
 }
 
-fn default_seed_directory() -> PathBuf {
-    let home = std::env::var("HOME").expect("$HOME is not configured");
-    PathBuf::from(format!("{home}/.exoware_qmdb_mmb_seed"))
-}
-
 async fn seed(
     store_url: &str,
     store_prefix: String,
     interval_secs: u64,
-    directory: Option<PathBuf>,
+    directory: PathBuf,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let directory = directory.unwrap_or_else(default_seed_directory);
     info!(
         directory = %directory.display(),
         store_url,
