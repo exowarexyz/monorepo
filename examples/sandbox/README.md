@@ -98,7 +98,8 @@ With the simulator running:
 
    ```bash
    cargo run --package exoware-qmdb --bin qmdb -- \
-     seed --store-url http://127.0.0.1:8080 --store-prefix qmdb --interval-secs 2
+     seed --store-url http://127.0.0.1:8080 --store-prefix qmdb \
+     --directory /tmp/exoware-qmdb-seed --interval-secs 2
    ```
 
    The seeder keeps running and prints a tip and root every few seconds:
@@ -107,10 +108,9 @@ With the simulator running:
    tip=14 root=0xb777..1064
    ```
 
-   Its local ordered-QMDB MMB state persists under
-   `$HOME/.exoware_qmdb_mmb_seed`, so it resumes after a restart. Delete that
-   directory before seeding a reset Store or a different `--store-prefix`. Use
-   `--directory` to give each additional instance its own local state directory.
+   Its local ordered-QMDB MMB state persists under `--directory`, so restarting
+   with the same directory resumes the same Store prefix. Use a fresh directory
+   for a reset Store, a different `--store-prefix`, or another instance.
 
 3. **Point the web app at the QMDB server**:
 
