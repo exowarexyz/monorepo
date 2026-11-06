@@ -186,25 +186,33 @@ the source to discard them.
 
 ### Current-state boundaries
 
-For a current ordered or unordered database, attach a `CurrentBoundaryState`
-before staging the prepared range:
+For a current ordered or unordered database, each uploaded batch also carries
+its `Delta`: the batch's current root, the witness binding the operation-log
+root to it, the bitmap chunks and grafted nodes the batch wrote, and the
+source's `pruned_chunks` count. Read the batch's `Publication` before applying
+the batch, then prepare its operations and delta against the trusted current
+root:
 
 ```rust,ignore
-let prepared = prepared.with_current_boundary::<H, N>(&boundary)?;
+use exoware_qmdb::adapter::upload::prepare_publication;
+
+let publication = batch.publication(&db)?;
+let prepared =
+    prepare_publication::<F, H, U, Sequential, N>(&publication, &trusted_root, &Sequential)?;
 ```
 
-The boundary's root, operation-root witness, bitmap chunks, grafted nodes, and
-`pruned_chunks` count must describe the range's final location, using the source's
-family, hasher, and chunk size `N`. `with_current_boundary` checks the witness's
-binding to the prepared operation-log root, but it does not authenticate the
-supplied chunks, nodes, or pruning count.
+To upload a range that was persisted as encoded operations, prepare it with
+`prepare_authenticated_range` and attach the delta of the batch that ends it:
 
-Use [`recover_boundary_state`](src/adapter/upload/boundary.rs) to derive and
-authenticate chunks and nodes from current range proofs. For an incremental
-boundary, supply cumulative operation logs before and after one finalized batch
-and proofs from that same applied state. With no previous log, it derives a
-complete boundary for bootstrap or restart. The root, witness, and pruning count
-must come from the same trusted source state.
+```rust,ignore
+let prepared = prepared.with_current_boundary::<H, N>(&delta)?;
+```
+
+The delta must describe the range's final location, using the source's family,
+hasher, and chunk size `N`. `with_current_boundary` checks the witness's binding
+to the prepared operation-log root, but it does not authenticate the supplied
+chunks, nodes, or pruning count. A delta holds only what its batch wrote, so
+upload one for every batch since the source was created.
 
 Boundary rows are versioned by batch location. Unchanged chunks and nodes are
 inherited from earlier boundaries. Retain the rows needed for every historical

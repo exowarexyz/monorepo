@@ -20,9 +20,8 @@ use commonware_storage::{
     translator::TwoCap,
 };
 use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16, NZU64};
-use exoware_qmdb::{
-    adapter::upload::recover_boundary_state, CurrentBoundaryState, MAX_OPERATION_SIZE,
-};
+use exoware_qmdb::{adapter::upload::recover_boundary_state, Delta, MAX_OPERATION_SIZE};
+use exoware_sdk::PrefixedStoreClient;
 use std::num::NonZeroU64;
 
 type Digest = commonware_cryptography::sha256::Digest;
@@ -386,7 +385,7 @@ async fn boundary_from_current_ordered_source(
     >,
     previous_operations: Option<&[OrderedOp]>,
     operations: &[OrderedOp],
-) -> CurrentBoundaryState<Digest, N, mmr::Family> {
+) -> Delta<mmr::Family, Digest, N> {
     let ops_root_witness = db.ops_root_witness().clone();
     recover_boundary_state::<mmr::Family, Sha256, _, N, _, _>(
         previous_operations,
@@ -480,7 +479,7 @@ async fn build_current_ordered_source(
     Vec<OrderedOp>,
     Location<mmr::Family>,
     Digest,
-    CurrentBoundaryState<Digest, N, mmr::Family>,
+    Delta<mmr::Family, Digest, N>,
 ) {
     tokio::task::spawn_blocking(move || {
         cw_tokio::Runner::default().start(|context| async move {

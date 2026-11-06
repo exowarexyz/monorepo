@@ -37,7 +37,7 @@ use exoware_qmdb::{
             GetRangeRequest, GetRequest, SubscribeRequest,
         },
     },
-    CurrentBoundaryState, MAX_OPERATION_SIZE,
+    Delta, MAX_OPERATION_SIZE,
 };
 use exoware_sdk::{proto::PreferZstdHttpClient, StoreWriteBatch};
 use std::{collections::BTreeMap, fmt::Debug, sync::Arc};
@@ -189,7 +189,7 @@ struct Snapshot<F: Graftable, Op, K, V> {
     ops_root: Digest,
     operations: Vec<Op>,
     packet: SourcePacket<F>,
-    boundary: Option<CurrentBoundaryState<Digest, N, F>>,
+    boundary: Option<Delta<F, Digest, N>>,
     activity: Option<Vec<bool>>,
     values: BTreeMap<K, V>,
 }

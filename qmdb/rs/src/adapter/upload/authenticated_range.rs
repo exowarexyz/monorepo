@@ -14,7 +14,7 @@ use crate::{
         },
         core::extend_merkle_from_pinned_nodes,
     },
-    CurrentBoundaryState, ProofKind, QmdbError,
+    Delta, ProofKind, QmdbError,
 };
 use commonware_codec::{Codec, Copying, Encode};
 use commonware_cryptography::{Digest, Hasher};
@@ -26,13 +26,13 @@ use commonware_storage::{
             operation::{Operation as AnyOperation, Update},
             value::ValueEncoding,
         },
-        current::grafting,
+        current::{batch::Publication, grafting},
         immutable, keyless,
         operation::{Floored, Key as QmdbKey},
     },
 };
 use exoware_sdk::{keys::Key, PrefixedStoreClient, StoreWriteBatch};
-use std::collections::BTreeSet;
+use std::{borrow::Borrow, collections::BTreeSet};
 
 /// An operation range and prefix frontier for authentication against a trusted root.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -125,43 +125,43 @@ impl<D: Digest, F: Family> PreparedAuthenticatedRange<D, F> {
 }
 
 impl<D: Digest, F: Graftable> PreparedAuthenticatedRange<D, F> {
-    /// Add caller-authenticated current-state boundary rows for this operation root.
+    /// Add a current QMDB batch's [`Delta`] as the current-state rows at this range's final
+    /// location.
     ///
-    /// The boundary, including its `pruned_chunks` count, must come from the same trusted producer.
-    /// Use `recover_boundary_state` to authenticate recovered chunks and nodes against that
-    /// producer's current root. This method checks only the binding to the verified operation
-    /// root. It does not authenticate the supplied chunks, nodes, or pruned chunk count.
+    /// The delta must come from the trusted producer of the batch that ends at this range's final
+    /// location. This method checks only that its witness binds the verified operation root to its
+    /// current root. It does not authenticate the supplied chunks, nodes, or pruned chunk count.
     pub fn with_current_boundary<H: Hasher<Digest = D>, const N: usize>(
         mut self,
-        boundary: &CurrentBoundaryState<D, N, F>,
+        delta: &Delta<F, D, N>,
     ) -> Result<Self, QmdbError> {
-        if boundary.ops_root_witness.root::<H>(&self.ops_root) != boundary.root {
+        if delta.witness.root::<H>(&self.ops_root) != delta.root {
             return Err(QmdbError::CorruptData(
                 "current boundary does not commit to the authenticated operation root".into(),
             ));
         }
         self.rows
-            .reserve(2 + boundary.chunks.len() + boundary.grafted_nodes.len());
+            .reserve(2 + delta.chunks.len() + delta.grafted_nodes.len());
         self.rows.push((
             encode_current_meta_key(self.latest_location),
             CurrentBoundaryMetadata {
-                root: boundary.root,
-                pruned_chunks: boundary.pruned_chunks,
+                root: delta.root,
+                pruned_chunks: delta.pruned_chunks,
             }
             .encode()
             .to_vec(),
         ));
         self.rows.push((
             encode_ops_root_witness_key(self.latest_location),
-            boundary.ops_root_witness.encode().to_vec(),
+            delta.witness.encode().to_vec(),
         ));
-        for &(chunk_index, chunk) in &boundary.chunks {
+        for &(chunk_index, chunk) in &delta.chunks {
             self.rows.push((
                 encode_chunk_key(chunk_index, self.latest_location),
                 chunk.encode().to_vec(),
             ));
         }
-        for &(ops_position, digest) in &boundary.grafted_nodes {
+        for &(ops_position, digest) in &delta.grafted_nodes {
             let grafted_position =
                 grafting::ops_to_grafted_pos::<F>(ops_position, grafting::height::<N>());
             self.rows.push((
@@ -190,6 +190,95 @@ where
     F: Family,
     H: Hasher,
     Op: UploadOperation<F>,
+    S: Strategy,
+{
+    prepare_range::<F, H, Op, Op, S>(
+        authenticated,
+        expected_root,
+        strategy,
+        |_, location, encoded| {
+            let operation = Op::decode_cfg(Copying(encoded), operation_cfg).map_err(|error| {
+                QmdbError::CorruptData(format!(
+                    "failed to decode authenticated operation at {location}: {error}"
+                ))
+            })?;
+            if operation.encode().as_ref() != encoded {
+                return Err(QmdbError::CorruptData(format!(
+                    "authenticated operation at {location} is not canonically encoded"
+                )));
+            }
+            Ok(operation)
+        },
+    )
+}
+
+/// Verify a current QMDB batch's [`Publication`] and prepare its operation, index, Merkle node,
+/// and current-state rows.
+///
+/// `expected_root` is the batch's canonical current root and must be trusted independently of the
+/// publication. The publication's delta must carry that root, its witness must bind the
+/// publication's operation root to it, and its operations and pins must reconstruct that
+/// operation root. Read the publication before applying its batch, while its frontier is still
+/// available.
+pub fn prepare_publication<F, H, U, S, const N: usize>(
+    publication: &Publication<F, H::Digest, U, N>,
+    expected_root: &H::Digest,
+    strategy: &S,
+) -> Result<PreparedAuthenticatedRange<H::Digest, F>, QmdbError>
+where
+    F: Graftable,
+    H: Hasher,
+    U: Update,
+    AnyOperation<F, U>: UploadOperation<F>,
+    S: Strategy,
+{
+    if publication.delta.root != *expected_root {
+        return Err(QmdbError::CorruptData(
+            "publication does not carry the expected current root".into(),
+        ));
+    }
+    let operations = publication.operations.as_slice();
+    let floor = operations
+        .last()
+        .and_then(Floored::has_floor)
+        .ok_or_else(|| QmdbError::CorruptData("publication must end at a commit".into()))?;
+    let end = publication
+        .start
+        .checked_add(operations.len() as u64)
+        .ok_or_else(|| QmdbError::CorruptData("publication end location overflow".into()))?;
+    let encoded_operations = operations
+        .iter()
+        .map(|operation| operation.encode().to_vec())
+        .collect::<Vec<_>>();
+    let authenticated = AuthenticatedOperationRange {
+        start_location: publication.start,
+        end_location: end,
+        inactive_peaks: F::inactive_peaks(end, floor),
+        pinned_nodes: &publication.pinned_nodes,
+        encoded_operations: &encoded_operations,
+    };
+    prepare_range::<F, H, AnyOperation<F, U>, _, S>(
+        &authenticated,
+        &publication.ops_root,
+        strategy,
+        |offset, _, _| Ok(&operations[offset]),
+    )?
+    .with_current_boundary::<H, N>(&publication.delta)
+}
+
+/// Verify a range and prepare its rows, obtaining each operation from `operation_at` with its
+/// offset, location, and canonical encoding.
+fn prepare_range<F, H, Op, O, S>(
+    authenticated: &AuthenticatedOperationRange<'_, H::Digest, F>,
+    expected_root: &H::Digest,
+    strategy: &S,
+    mut operation_at: impl FnMut(usize, Location<F>, &[u8]) -> Result<O, QmdbError>,
+) -> Result<PreparedAuthenticatedRange<H::Digest, F>, QmdbError>
+where
+    F: Family,
+    H: Hasher,
+    Op: UploadOperation<F>,
+    O: Borrow<Op>,
     S: Strategy,
 {
     let start = authenticated.start_location;
@@ -247,17 +336,8 @@ where
         let location = start.checked_add(offset as u64).ok_or_else(|| {
             QmdbError::CorruptData("authenticated operation location overflow".into())
         })?;
-        let operation =
-            Op::decode_cfg(Copying(encoded.as_slice()), operation_cfg).map_err(|error| {
-                QmdbError::CorruptData(format!(
-                    "failed to decode authenticated operation at {location}: {error}"
-                ))
-            })?;
-        if operation.encode().as_ref() != encoded.as_slice() {
-            return Err(QmdbError::CorruptData(format!(
-                "authenticated operation at {location} is not canonically encoded"
-            )));
-        }
+        let operation = operation_at(offset, location, encoded)?;
+        let operation = operation.borrow();
         final_floor = operation.has_floor();
         if let Some(floor) = final_floor {
             if !floor.is_valid() || floor > location {
@@ -990,10 +1070,10 @@ mod tests {
             pending_chunk_digest: Default::default(),
             partial_chunk: None,
         };
-        let mut boundary = CurrentBoundaryState::<_, 32, mmr::Family> {
+        let mut boundary = Delta::<mmr::Family, _, 32> {
             root: witness.root::<Sha256>(&authenticated.root),
             pruned_chunks: 0,
-            ops_root_witness: witness,
+            witness,
             chunks: Vec::new(),
             grafted_nodes: Vec::new(),
         };
@@ -1030,10 +1110,10 @@ mod tests {
             pending_chunk_digest: Default::default(),
             partial_chunk: None,
         };
-        let boundary = CurrentBoundaryState::<_, 32, mmr::Family> {
+        let boundary = Delta::<mmr::Family, _, 32> {
             root: witness.root::<Sha256>(&digest),
             pruned_chunks: 0,
-            ops_root_witness: witness,
+            witness,
             chunks: Vec::new(),
             grafted_nodes: vec![(ops_position, digest)],
         };

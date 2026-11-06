@@ -25,7 +25,7 @@ use exoware_qmdb::{
         client::rpc::{CurrentOperationClient, OperationLogClient},
         proto::qmdb::v1::{GetCurrentOperationRangeRequest, GetOperationRangeRequest},
     },
-    CurrentBoundaryState, MAX_OPERATION_SIZE,
+    Delta, MAX_OPERATION_SIZE,
 };
 use exoware_sdk::StoreWriteBatch;
 use std::{fmt::Debug, num::NonZeroU64, sync::Arc};
@@ -39,7 +39,7 @@ struct Snapshot<F: Graftable, K: QmdbKey, E: ValueEncoding> {
     pinned_nodes: Vec<Digest>,
     operations: Vec<unordered::Operation<F, K, E>>,
     ops_root: Digest,
-    current: Option<CurrentBoundaryState<Digest, N, F>>,
+    current: Option<Delta<F, Digest, N>>,
     values: Vec<Option<E::Value>>,
 }
 

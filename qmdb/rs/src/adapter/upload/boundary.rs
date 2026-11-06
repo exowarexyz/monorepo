@@ -1,7 +1,7 @@
 use crate::{
     adapter::codec::{bitmap_chunk_bits, chunk_index_for_location},
     error::QmdbError,
-    CurrentBoundaryState,
+    Delta,
 };
 use commonware_codec::{Codec, Encode};
 use commonware_cryptography::Hasher;
@@ -115,7 +115,7 @@ pub async fn recover_boundary_state<M, H, Op, const N: usize, Prove, Fut>(
     pruned_chunks: u64,
     ops_root_witness: OpsRootWitness<M, H::Digest>,
     mut prove_at: Prove,
-) -> Result<CurrentBoundaryState<H::Digest, N, M>, QmdbError>
+) -> Result<Delta<M, H::Digest, N>, QmdbError>
 where
     M: Graftable,
     H: Hasher,
@@ -233,10 +233,10 @@ where
         }
     }
 
-    Ok(CurrentBoundaryState {
+    Ok(Delta {
         root,
+        witness: ops_root_witness,
         pruned_chunks,
-        ops_root_witness,
         chunks: chunks.into_iter().collect(),
         grafted_nodes: grafted_digests
             .into_iter()
