@@ -8,7 +8,7 @@ use commonware_runtime::{
 };
 use commonware_storage::{
     journal::contiguous::variable::Config as JournalConfig,
-    merkle::{full::Config as MerkleConfig, mmb, Location},
+    merkle::{full::Config as MerkleConfig, mmb, Location, Proof},
     qmdb::{
         any::{ordered::variable::Operation as VariableOperation, value::VariableEncoding},
         current::ordered::variable::{
@@ -20,10 +20,10 @@ use commonware_storage::{
 use commonware_utils::{NZUsize, NZU16, NZU64};
 use exoware_qmdb::{
     adapter::upload::{
-        prepare_authenticated_range, recover_boundary_state, stage_authenticated_range,
+        prepare_authenticated_range, prepare_publication, stage_authenticated_range,
         stage_watermark, AuthenticatedOperationRange,
     },
-    Delta, MAX_OPERATION_SIZE,
+    MAX_OPERATION_SIZE,
 };
 use exoware_sdk::{
     transport::set_tcp_nodelay, PreferZstdLayer, PrefixedStoreClient, StoreClient, StoreKeyPrefix,
@@ -82,8 +82,10 @@ enum Command {
         #[arg(long, default_value_t = 2)]
         interval_secs: u64,
         /// Persistent directory for the local ordered-QMDB state. Reusing the
-        /// same directory across restarts preserves the write log. Deleting it
-        /// resets the demo. Defaults to `$HOME/.exoware_qmdb_mmb_seed`.
+        /// same directory across restarts continues the history already
+        /// uploaded under the store prefix, so delete it whenever that prefix
+        /// is reset. Deleting it resets the demo. Defaults to
+        /// `$HOME/.exoware_qmdb_mmb_seed`.
         #[arg(long)]
         directory: Option<PathBuf>,
     },
@@ -93,34 +95,22 @@ async fn health() -> &'static str {
     "ok"
 }
 
-async fn publish_source_range(
+/// Upload a new source database's initial commit, which precedes every batch publication.
+async fn publish_initial_commit(
     store_client: &PrefixedStoreClient,
     source_db: &Db,
-    start: Location<Family>,
-    boundary: &Delta<Family, commonware_cryptography::sha256::Digest, N>,
+    proof: &Proof<Family, commonware_cryptography::sha256::Digest>,
+    operations: &[Operation],
 ) {
-    let end = source_db.bounds().end;
-    let (proof, operations) = source_db
-        .ops_historical_proof(
-            end,
-            start,
-            NonZeroU64::new(*end - *start).expect("nonempty range"),
-        )
-        .await
-        .expect("operation proof");
-    let pinned_nodes = source_db
-        .pinned_nodes_at(start)
-        .await
-        .expect("pinned nodes");
     let encoded_operations = operations
         .iter()
         .map(|operation| operation.encode().to_vec())
         .collect::<Vec<_>>();
     let range = AuthenticatedOperationRange {
-        start_location: start,
+        start_location: Location::new(0),
         end_location: proof.leaves,
         inactive_peaks: proof.inactive_peaks,
-        pinned_nodes: &pinned_nodes,
+        pinned_nodes: &[],
         encoded_operations: &encoded_operations,
     };
     let prepared = prepare_authenticated_range::<Family, Sha256, Operation, Sequential>(
@@ -129,36 +119,13 @@ async fn publish_source_range(
         &op_cfg(),
         &Sequential,
     )
-    .expect("prepare authenticated range")
-    .with_current_boundary::<Sha256, N>(boundary)
-    .expect("current boundary");
+    .expect("prepare initial commit");
     let mut batch = StoreWriteBatch::new();
-    stage_authenticated_range(store_client, prepared, &mut batch).expect("stage range");
-    publish_source_rows(store_client, batch, end - 1)
+    stage_authenticated_range(store_client, prepared, &mut batch).expect("stage initial commit");
+    batch
+        .commit(store_client.client())
         .await
-        .expect("commit upload");
-}
-
-async fn publish_source_rows(
-    store_client: &PrefixedStoreClient,
-    rows: StoreWriteBatch,
-    tip: Location<Family>,
-) -> Result<(), exoware_qmdb::QmdbError> {
-    // Operation rows are capped at 64 KiB and this seed's boundary rows are smaller;
-    // 1024 rows fit below Store's 256 MiB request limit, including keys and framing.
-    let physical = store_client.client().unprefixed();
-    let mut batch = StoreWriteBatch::new();
-    for (key, value) in rows.entries() {
-        if batch.len() == 1024 {
-            batch.commit(store_client.client()).await?;
-            batch.clear();
-        }
-        batch.push(&physical, key, value.clone())?;
-    }
-
-    stage_watermark(store_client, tip, &mut batch)?;
-    batch.commit(store_client.client()).await?;
-    Ok(())
+        .expect("commit initial commit");
 }
 
 fn op_cfg() -> <Operation as commonware_codec::Read>::Cfg {
@@ -170,44 +137,6 @@ fn op_cfg() -> <Operation as commonware_codec::Read>::Cfg {
 
 fn key_cfg() -> <Vec<u8> as commonware_codec::Read>::Cfg {
     ((0..=MAX_OPERATION_SIZE).into(), ())
-}
-
-async fn boundary_from_source_db(
-    source_db: &Db,
-    previous_operations: Option<&[Operation]>,
-    operations: &[Operation],
-) -> Delta<Family, commonware_cryptography::sha256::Digest, N> {
-    let ops_root_witness = source_db.ops_root_witness().clone();
-    recover_boundary_state::<Family, Sha256, _, N, _, _>(
-        previous_operations,
-        operations,
-        source_db.root(),
-        0,
-        ops_root_witness,
-        |location| async move {
-            let (proof, mut proof_ops, mut chunks) = source_db
-                .range_proof(location, NZU64!(1))
-                .await
-                .map_err(|error| {
-                    exoware_qmdb::QmdbError::CorruptData(format!(
-                        "local current range proof at {location}: {error}"
-                    ))
-                })?;
-            proof_ops.pop().ok_or_else(|| {
-                exoware_qmdb::QmdbError::CorruptData(format!(
-                    "local current range proof at {location} returned no operations"
-                ))
-            })?;
-            let chunk = chunks.pop().ok_or_else(|| {
-                exoware_qmdb::QmdbError::CorruptData(format!(
-                    "local current range proof at {location} returned no chunks"
-                ))
-            })?;
-            Ok((proof, chunk))
-        },
-    )
-    .await
-    .expect("recover boundary state")
 }
 
 async fn run(
@@ -302,7 +231,7 @@ async fn seed(
             .expect("init local ordered db");
 
             let end = source_db.bounds().end;
-            let (_, mut previous_operations) = source_db
+            let (proof, operations) = source_db
                 .ops_historical_proof(
                     end,
                     Location::new(0),
@@ -310,19 +239,19 @@ async fn seed(
                 )
                 .await
                 .expect("read local operation history");
-            let committed_batches = previous_operations
+            let committed_batches = operations
                 .iter()
                 .filter(|operation| matches!(operation, Operation::CommitFloor(_, _)))
                 .count()
                 .saturating_sub(1) as u64;
             let mut counter = committed_batches * 3;
-            // Replay the local durable prefix so a restart repairs any interrupted upload
-            let boundary = boundary_from_source_db(&source_db, None, &previous_operations).await;
-            publish_source_range(&store_client, &source_db, Location::new(0), &boundary).await;
+            if committed_batches == 0 {
+                publish_initial_commit(&store_client, &source_db, &proof, &operations).await;
+            }
             info!(
                 tip = *end - 1,
                 batches = committed_batches,
-                "local prefix published"
+                "local source opened"
             );
 
             let mut ticker = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
@@ -360,25 +289,34 @@ async fn seed(
                     counter += 3;
                     batch.merkleize(&source_db).await.expect("merkleize")
                 };
+
+                // Upload each batch before applying it, so every applied batch is already
+                // published. A batch depends only on how many batches were applied before it, so
+                // one uploaded before an interrupted apply is rebuilt identically after a restart.
+                let publication = finalized
+                    .publication(&source_db)
+                    .expect("read batch publication");
+                let prepared = prepare_publication::<Family, Sha256, _, _, N>(
+                    &publication,
+                    &finalized.root(),
+                    &Sequential,
+                )
+                .expect("prepare batch publication");
+                let latest = prepared.latest_location();
+                let mut rows = StoreWriteBatch::new();
+                stage_authenticated_range(&store_client, prepared, &mut rows).expect("stage batch");
+                stage_watermark(&store_client, latest, &mut rows).expect("stage watermark");
+                rows.commit(store_client.client())
+                    .await
+                    .expect("commit upload");
+
                 source_db = source_db.apply_batch(finalized).await.expect("apply batch");
                 source_db = source_db.sync().await.expect("sync local ordered db");
-
-                let latest = source_db.bounds().end - 1;
-                let count = NonZeroU64::new(*latest + 1).expect("non-zero op count");
-                let (_proof, operations) = source_db
-                    .ops_historical_proof(latest + 1, Location::<Family>::new(0), count)
-                    .await
-                    .expect("historical proof");
-                let boundary =
-                    boundary_from_source_db(&source_db, Some(&previous_operations), &operations)
-                        .await;
-                let start = Location::new(previous_operations.len() as u64);
-                publish_source_range(&store_client, &source_db, start, &boundary).await;
-
-                let root = boundary.root;
-                println!("tip={} root=0x{}", *latest, hex::encode(root.encode()),);
-
-                previous_operations = operations;
+                println!(
+                    "tip={} root=0x{}",
+                    *latest,
+                    hex::encode(publication.delta.root.encode())
+                );
             }
 
             source_db.sync().await.expect("sync local ordered db");
@@ -421,187 +359,6 @@ async fn main() -> std::process::ExitCode {
         Err(err) => {
             eprintln!("qmdb failed: {err}");
             std::process::ExitCode::FAILURE
-        }
-    }
-}
-
-#[cfg(test)]
-#[allow(refining_impl_trait)]
-mod tests {
-    use super::*;
-    use axum::serve::Listener;
-    use bytes::Bytes;
-    use connectrpc::{ConnectError, ConnectRpcService, Limits, RequestContext, ServiceRequest};
-    use exoware_sdk::{
-        ingest::{PutRequest, PutResponse, Service, ServiceServer},
-        keys::Key,
-    };
-    use std::{
-        collections::BTreeMap,
-        sync::{Arc, Mutex},
-    };
-
-    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-    enum Failure {
-        BeforeData,
-        AfterData,
-        AfterPublication,
-    }
-
-    #[derive(Default)]
-    struct Uploads {
-        rows: BTreeMap<Key, Bytes>,
-        expected: BTreeMap<Key, Bytes>,
-        watermark: Key,
-        sizes: Vec<usize>,
-        publications: usize,
-        failure: Option<Failure>,
-    }
-
-    #[derive(Clone)]
-    struct Ingest(Arc<Mutex<Uploads>>);
-
-    impl Service for Ingest {
-        async fn put(
-            &self,
-            _: RequestContext,
-            request: ServiceRequest<'_, PutRequest>,
-        ) -> connectrpc::ServiceResult<PutResponse> {
-            let mut state = self.0.lock().unwrap();
-            state.sizes.push(request.bytes().len());
-            let publishes = request.kvs.iter().any(|entry| entry.key == state.watermark);
-            let fails = match state.failure {
-                Some(Failure::BeforeData | Failure::AfterData) => state.sizes.len() == 2,
-                Some(Failure::AfterPublication) => publishes,
-                None => false,
-            };
-            if fails && state.failure == Some(Failure::BeforeData) {
-                return Err(ConnectError::unavailable("data write not accepted"));
-            }
-            for entry in request.kvs.iter() {
-                state.rows.insert(
-                    Bytes::copy_from_slice(entry.key),
-                    Bytes::copy_from_slice(entry.value),
-                );
-            }
-            if publishes {
-                state.publications += 1;
-                for (key, value) in &state.expected {
-                    assert_eq!(
-                        state.rows.get(key),
-                        Some(value),
-                        "publication before complete data"
-                    );
-                }
-            }
-            if fails {
-                return Err(ConnectError::unavailable(
-                    "accepted write lost its response",
-                ));
-            }
-            connectrpc::Response::ok(PutResponse {
-                sequence_number: state.sizes.len() as u64,
-                ..Default::default()
-            })
-        }
-    }
-
-    #[tokio::test]
-    async fn startup_replay_is_bounded_and_publishes_only_complete_data() {
-        const LIMIT: usize = 256 * 1024;
-        for failure in [
-            None,
-            Some(Failure::BeforeData),
-            Some(Failure::AfterData),
-            Some(Failure::AfterPublication),
-        ] {
-            let state = Arc::new(Mutex::new(Uploads::default()));
-            let service = ConnectRpcService::new(ServiceServer::new(Ingest(state.clone())))
-                .with_limits(
-                    Limits::default()
-                        .with_max_request_body_size(LIMIT)
-                        .with_max_message_size(LIMIT),
-                );
-            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-                .await
-                .unwrap()
-                .tap_io(set_tcp_nodelay);
-            let url = format!("http://{}", listener.local_addr().unwrap());
-            let server = tokio::spawn(async move {
-                axum::serve(listener, Router::new().fallback_service(service))
-                    .await
-                    .unwrap();
-            });
-            let client = StoreClient::new(&url).prefixed(StoreKeyPrefix::new(vec![0xaa]).unwrap());
-            let physical = client.client().unprefixed();
-            let mut data = StoreWriteBatch::new();
-            for index in 0..4097u64 {
-                let mut key = vec![0xf0];
-                key.extend(index.to_be_bytes());
-                data.push(&client, &Bytes::from(key), vec![index as u8; 128])
-                    .unwrap();
-            }
-            assert!(
-                data.entries()
-                    .iter()
-                    .map(|(key, value)| key.len() + value.len())
-                    .sum::<usize>()
-                    > LIMIT
-            );
-            let tip = Location::new(4096);
-            let mut publication = StoreWriteBatch::new();
-            stage_watermark(&client, tip, &mut publication).unwrap();
-            let watermark = publication.entries()[0].0.clone();
-
-            // Normal small writes can build a history too large for one startup request.
-            let existing = if failure.is_none() { data.len() } else { 256 };
-            for (index, rows) in data.entries()[..existing].chunks(256).enumerate() {
-                let mut batch = StoreWriteBatch::new();
-                for (key, value) in rows {
-                    batch.push(&physical, key, value.clone()).unwrap();
-                }
-                publish_source_rows(
-                    &client,
-                    batch,
-                    Location::new(((index * 256 + rows.len()) - 1) as u64),
-                )
-                .await
-                .unwrap();
-            }
-            {
-                let mut state = state.lock().unwrap();
-                state.sizes.clear();
-                state.expected = data.entries().iter().cloned().collect();
-                state.watermark = watermark.clone();
-                state.failure = failure;
-            }
-
-            let result = publish_source_rows(&client, data.clone(), tip).await;
-            if let Some(failure) = failure {
-                assert!(result.is_err(), "{failure:?}");
-                let mut state = state.lock().unwrap();
-                assert_eq!(
-                    state.rows.contains_key(&watermark),
-                    failure == Failure::AfterPublication
-                );
-                assert_eq!(
-                    state.publications,
-                    usize::from(failure == Failure::AfterPublication)
-                );
-                state.failure = None;
-            } else {
-                result.expect(
-                    "restart replays a history accumulated through successful small writes",
-                );
-            }
-            publish_source_rows(&client, data, tip).await.unwrap();
-            let state = state.lock().unwrap();
-            assert!(state.rows.contains_key(&watermark));
-            assert!(state.sizes.iter().all(|size| *size <= LIMIT));
-            for (key, value) in &state.expected {
-                assert_eq!(state.rows.get(key), Some(value));
-            }
-            server.abort();
         }
     }
 }

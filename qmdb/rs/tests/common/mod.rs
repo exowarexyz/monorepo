@@ -12,10 +12,17 @@ use commonware_parallel::Sequential;
 use commonware_runtime::buffer::paged::CacheRef;
 use commonware_storage::{
     journal::contiguous::variable::Config as VariableJournalConfig,
-    merkle::{full::Config as MerkleConfig, Family, Graftable},
+    merkle::{full::Config as MerkleConfig, Family, Graftable, Location},
     qmdb::{
-        any,
-        current::{self, proof::RangeProof},
+        any::{
+            self,
+            operation::{Operation as AnyOperation, Update},
+        },
+        current::{
+            self,
+            batch::Publication,
+            proof::{OpsRootWitness, RangeProof},
+        },
         immutable, keyless,
     },
     translator::TwoCap,
@@ -26,6 +33,7 @@ use connectrpc::{
     ServiceRequest,
 };
 use exoware_qmdb::{
+    adapter::upload::{prepare_publication, stage_authenticated_range, UploadOperation},
     service::proto::qmdb::v1::{
         GetOperationRangeRequest, GetOperationRangeResponse, GetOperationsRequest,
         GetOperationsResponse, OperationLogService, OperationLogServiceClient,
@@ -217,6 +225,70 @@ where
     exoware_qmdb::adapter::upload::stage_watermark(client, latest, &mut batch)?;
     batch.commit(client.client()).await?;
     Ok(())
+}
+
+/// Upload consecutive current batch publications and publish the last one's final location.
+///
+/// A publication that starts at location 1 follows a new database's initial commit, which no
+/// publication covers, so that commit is uploaded with it.
+#[allow(dead_code)]
+pub async fn commit_publications<F, U, const N: usize>(
+    client: &exoware_sdk::PrefixedStoreClient,
+    publications: &[Publication<F, commonware_cryptography::sha256::Digest, U, N>],
+    cfg: &<AnyOperation<F, U> as commonware_codec::Read>::Cfg,
+) -> Result<(), QmdbError>
+where
+    F: Graftable,
+    U: Update,
+    AnyOperation<F, U>: UploadOperation<F>,
+{
+    let mut batch = exoware_sdk::StoreWriteBatch::new();
+    if publications
+        .first()
+        .is_some_and(|publication| publication.start == Location::new(1))
+    {
+        let initial = AnyOperation::<F, U>::CommitFloor(None, Location::new(0));
+        let (_, prepared) = prepare_operations::<F, _>(std::slice::from_ref(&initial), cfg);
+        stage_authenticated_range(client, prepared, &mut batch)?;
+    }
+    let mut latest = None;
+    for publication in publications {
+        let prepared = prepare_publication::<F, commonware_cryptography::Sha256, U, _, N>(
+            publication,
+            &publication.delta.root,
+            &Sequential,
+        )?;
+        latest = Some(prepared.latest_location());
+        stage_authenticated_range(client, prepared, &mut batch)?;
+    }
+    let latest = latest.expect("at least one publication");
+    exoware_qmdb::adapter::upload::stage_watermark(client, latest, &mut batch)?;
+    batch.commit(client.client()).await?;
+    Ok(())
+}
+
+/// The current-state rows of a new database, which holds only its initial commit.
+#[allow(dead_code)]
+pub async fn initial_delta<F, D, Op, E, const N: usize>(
+    root: D,
+    witness: OpsRootWitness<F, D>,
+    proof: impl std::future::Future<Output = Result<(RangeProof<F, D>, Vec<Op>, Vec<[u8; N]>), E>>,
+) -> Delta<F, D, N>
+where
+    F: Graftable,
+    D: Digest,
+    E: std::fmt::Display,
+{
+    let (_, chunk) = current_proof_chunk(proof)
+        .await
+        .expect("initial commit chunk");
+    Delta {
+        root,
+        witness,
+        pruned_chunks: 0,
+        chunks: vec![(0, chunk)],
+        grafted_nodes: Vec::new(),
+    }
 }
 
 #[allow(dead_code)]

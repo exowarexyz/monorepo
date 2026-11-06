@@ -25,7 +25,6 @@ use connectrpc::{
     client::ClientConfig, Chain, ConnectRpcService, RequestContext as Context, ServiceRequest,
 };
 use exoware_qmdb::{
-    adapter::upload::recover_boundary_state,
     proof::{RawKeyExclusionProof, RawKeyLookupProof, VerifiedKeyLookup},
     service::proto::qmdb::v1::{
         current_key_lookup_result, CurrentOperationServiceClient,
@@ -121,24 +120,6 @@ fn key_lookup_client(base: &str) -> ConnectClient {
     exoware_qmdb::service::client::Ordered::plaintext(base, op_cfg(), op_cfg(), key_cfg, value_cfg)
 }
 
-async fn boundary_from_source_db(
-    db: &Db,
-    previous_operations: Option<&[BatchOperation]>,
-    operations: &[BatchOperation],
-) -> Delta<mmr::Family, Digest, N> {
-    let ops_root_witness = db.ops_root_witness().clone();
-    recover_boundary_state::<mmr::Family, Sha256, _, N, _, _>(
-        previous_operations,
-        operations,
-        db.root(),
-        0,
-        ops_root_witness,
-        |location| common::current_proof_chunk(db.range_proof(location, NZU64!(1))),
-    )
-    .await
-    .expect("recover_boundary_state")
-}
-
 fn op_cfg() -> <BatchOperation as commonware_codec::Read>::Cfg {
     (
         ((0..=MAX_OPERATION_SIZE).into(), ()),
@@ -213,6 +194,7 @@ async fn build_source_tips(
                     }
                     batch.merkleize(&db).await.expect("merkleize")
                 };
+                let boundary = finalized.delta();
                 db = db.apply_batch(finalized).await.expect("apply");
 
                 let latest = db.bounds().end - 1;
@@ -221,8 +203,6 @@ async fn build_source_tips(
                     .ops_historical_proof(latest + 1, Location::new(0), n)
                     .await
                     .expect("proof");
-                let previous = tips.last().map(|tip| tip.operations.as_slice());
-                let boundary = boundary_from_source_db(&db, previous, &ops).await;
                 tips.push(SourceBatch {
                     latest_location: latest,
                     operations: ops,

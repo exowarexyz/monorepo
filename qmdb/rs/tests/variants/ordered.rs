@@ -21,13 +21,11 @@ use commonware_storage::{
         verify::ProofExt as _,
     },
 };
-use commonware_utils::{
-    bitmap::Readable as _, iter::zip_eq, sequence::FixedBytes, NZUsize, NZU16, NZU64,
-};
+use commonware_utils::{bitmap::Readable as _, iter::zip_eq, sequence::FixedBytes, NZUsize, NZU16};
 use exoware_qmdb::{
     adapter::upload::{
-        prepare_authenticated_range, recover_boundary_state, stage_authenticated_range,
-        stage_watermark, AuthenticatedOperationRange, UploadOperation,
+        prepare_authenticated_range, stage_authenticated_range, stage_watermark,
+        AuthenticatedOperationRange, UploadOperation,
     },
     proof::VerifiedKeyLookup,
     service::{
@@ -886,7 +884,7 @@ macro_rules! capture_source_batch {
         })
     }};
     (current, $family:ty, $db:ident, $batch:ident) => {
-        None::<SourcePacket<$family>>
+        $batch.delta()
     };
 }
 
@@ -944,21 +942,6 @@ macro_rules! source_snapshot {
         let activity = (0..*end)
             .map(|location| $db.bitmap().get_bit(location))
             .collect();
-        assert!($captured.is_none());
-        let boundary = recover_boundary_state::<$family, Sha256, _, N, _, _>(
-            if $previous.is_empty() {
-                None
-            } else {
-                Some($previous.as_slice())
-            },
-            &operations,
-            root,
-            0,
-            $db.ops_root_witness().clone(),
-            |location| common::current_proof_chunk($db.range_proof(location, NZU64!(1))),
-        )
-        .await
-        .expect("recover source current boundary");
         let start = Location::new($previous.len() as u64);
         let (proof, packet_ops) = $db
             .ops_historical_proof(
@@ -992,7 +975,7 @@ macro_rules! source_snapshot {
             ops_root,
             operations,
             packet,
-            Some(boundary),
+            Some($captured),
             Some(activity),
         )
     }};
