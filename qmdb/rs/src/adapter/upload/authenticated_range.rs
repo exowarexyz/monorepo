@@ -14,12 +14,15 @@ use crate::{
         },
         core::extend_merkle_from_pinned_nodes,
     },
+    error::current_proof_error,
     ProofKind, QmdbError,
 };
 use commonware_codec::{Codec, Copying, Encode};
 use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::Strategy;
 use commonware_storage::{
+    index::Unordered as UnorderedIndex,
+    journal::contiguous::Contiguous,
     merkle::{Family, Graftable, Location, Position},
     qmdb::{
         any::{
@@ -27,15 +30,18 @@ use commonware_storage::{
             value::ValueEncoding,
         },
         current::{
-            batch::{Delta, Publication},
+            batch::{Grafts, MerkleizedBatch},
+            db::Db,
             grafting,
+            proof::OpsRootWitness,
         },
         immutable, keyless,
         operation::{Floored, Key as QmdbKey},
     },
+    Context,
 };
 use exoware_sdk::{keys::Key, PrefixedStoreClient, StoreWriteBatch};
-use std::{borrow::Borrow, collections::BTreeSet};
+use std::{borrow::Borrow, collections::BTreeSet, sync::Arc};
 
 /// An operation range and prefix frontier for authentication against a trusted root.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -128,42 +134,45 @@ impl<D: Digest, F: Family> PreparedAuthenticatedRange<D, F> {
 }
 
 impl<D: Digest, F: Graftable> PreparedAuthenticatedRange<D, F> {
-    /// Add a current batch's [`Delta`] as the current-state rows at this range's final location.
+    /// Add a current batch's root, witness, and [`Grafts`] as the current-state rows at this
+    /// range's final location.
     ///
-    /// This checks only that the delta's witness binds the verified operation root to the delta's
-    /// root. The delta's chunks, grafted nodes, and pruned chunk count are not authenticated and
-    /// must come from the source that produced the batch ending at this location.
+    /// This checks only that `witness` binds the verified operation root to `root`. The grafts'
+    /// chunks, nodes, and pruned chunk count are not authenticated and must come from the source
+    /// that produced the batch ending at this location.
     pub fn with_current_boundary<H: Hasher<Digest = D>, const N: usize>(
         mut self,
-        delta: &Delta<F, D, N>,
+        root: D,
+        witness: &OpsRootWitness<F, D>,
+        grafts: &Grafts<F, D, N>,
     ) -> Result<Self, QmdbError> {
-        if delta.witness.root::<H>(&self.ops_root) != delta.root {
+        if witness.root::<H>(&self.ops_root) != root {
             return Err(QmdbError::CorruptData(
                 "current boundary does not commit to the authenticated operation root".into(),
             ));
         }
         self.rows
-            .reserve(2 + delta.chunks.len() + delta.grafted_nodes.len());
+            .reserve(2 + grafts.chunks.len() + grafts.nodes.len());
         self.rows.push((
             encode_current_meta_key(self.latest_location),
             CurrentBoundaryMetadata {
-                root: delta.root,
-                pruned_chunks: delta.pruned_chunks,
+                root,
+                pruned_chunks: grafts.pruned_chunks,
             }
             .encode()
             .to_vec(),
         ));
         self.rows.push((
             encode_ops_root_witness_key(self.latest_location),
-            delta.witness.encode().to_vec(),
+            witness.encode().to_vec(),
         ));
-        for &(chunk_index, chunk) in &delta.chunks {
+        for &(chunk_index, chunk) in &grafts.chunks {
             self.rows.push((
                 encode_chunk_key(chunk_index, self.latest_location),
                 chunk.encode().to_vec(),
             ));
         }
-        for &(ops_position, digest) in &delta.grafted_nodes {
+        for &(ops_position, digest) in &grafts.nodes {
             let grafted_position =
                 grafting::ops_to_grafted_pos::<F>(ops_position, grafting::height::<N>());
             self.rows.push((
@@ -214,9 +223,62 @@ where
     )
 }
 
+/// What an Exoware writer stores for one current QMDB batch.
+///
+/// Replaying `operations` onto `pinned_nodes` recomputes `ops_root`, and `witness` binds that
+/// root to `root`.
+#[derive(Clone)]
+pub struct Publication<F: Graftable, D: Digest, U: Update, const N: usize> {
+    /// Location of the first operation.
+    pub start: Location<F>,
+    /// Operations-tree frontier at `start`, in [`Family::nodes_to_pin`] order.
+    pub pinned_nodes: Vec<D>,
+    /// Operations the batch appends from `start`, ending with its commit.
+    pub operations: Arc<Vec<AnyOperation<F, U>>>,
+    /// Operations-tree root after the batch.
+    pub ops_root: D,
+    /// Canonical current root after the batch.
+    pub root: D,
+    /// Witness binding `ops_root` to `root`.
+    pub witness: OpsRootWitness<F, D>,
+    /// Bitmap chunks and grafted nodes the batch wrote.
+    pub grafts: Grafts<F, D, N>,
+}
+
+impl<F: Graftable, D: Digest, U: Update, const N: usize> Publication<F, D, U, N>
+where
+    AnyOperation<F, U>: Codec,
+{
+    /// Read `batch`'s publication. Call this before `batch` is applied: its frontier is
+    /// readable only until the batch's changes are flushed.
+    pub fn read<E, C, I, H, S>(
+        batch: &MerkleizedBatch<F, D, U, N, S>,
+        db: &Db<F, E, C, I, H, U, N, S>,
+    ) -> Result<Self, QmdbError>
+    where
+        E: Context,
+        C: Contiguous<Item = AnyOperation<F, U>>,
+        I: UnorderedIndex<Value = Location<F>>,
+        H: Hasher<Digest = D>,
+        S: Strategy,
+    {
+        let pinned_nodes = batch.ops_pinned_nodes(db).map_err(current_proof_error)?;
+        let (start, operations) = batch.operations();
+        Ok(Self {
+            start,
+            pinned_nodes,
+            operations,
+            ops_root: batch.ops_root(),
+            root: batch.root(),
+            witness: batch.ops_root_witness().clone(),
+            grafts: batch.grafts(),
+        })
+    }
+}
+
 /// Verify a current QMDB batch's [`Publication`] against `expected_root` and prepare its rows.
-/// The root must be trusted independently of the publication. The delta's chunks, grafted nodes,
-/// and pruned chunk count are not authenticated and must come from the source of the batch.
+/// The root must be trusted independently of the publication. The grafts' chunks, nodes, and
+/// pruned chunk count are not authenticated and must come from the source of the batch.
 pub fn prepare_publication<F, H, U, S, const N: usize>(
     publication: &Publication<F, H::Digest, U, N>,
     expected_root: &H::Digest,
@@ -229,8 +291,8 @@ where
     AnyOperation<F, U>: UploadOperation<F>,
     S: Strategy,
 {
-    // Anchor the delta to the trusted root before hashing any operations.
-    if publication.delta.root != *expected_root {
+    // Anchor the publication to the trusted root before hashing any operations.
+    if publication.root != *expected_root {
         return Err(QmdbError::CorruptData(
             "publication does not carry the expected current root".into(),
         ));
@@ -260,14 +322,18 @@ where
     };
 
     // The operations are already decoded, so preparation borrows them and skips decoding. Attaching
-    // the delta checks that its witness binds the rebuilt operation root.
+    // the current boundary checks that the witness binds the rebuilt operation root to `root`.
     prepare_range::<F, H, AnyOperation<F, U>, _, S>(
         &authenticated,
         &publication.ops_root,
         strategy,
         |offset, _, _| Ok(&operations[offset]),
     )?
-    .with_current_boundary::<H, N>(&publication.delta)
+    .with_current_boundary::<H, N>(
+        publication.root,
+        &publication.witness,
+        &publication.grafts,
+    )
 }
 
 /// Verify a range and prepare its rows. `operation_at` supplies the operation at each offset,
@@ -1074,18 +1140,17 @@ mod tests {
             pending_chunk_digest: Default::default(),
             partial_chunk: None,
         };
-        let mut boundary = Delta::<mmr::Family, _, 32> {
-            root: witness.root::<Sha256>(&authenticated.root),
+        let root = witness.root::<Sha256>(&authenticated.root);
+        let boundary = Grafts::<mmr::Family, _, 32> {
             pruned_chunks: 0,
-            witness,
             chunks: Vec::new(),
-            grafted_nodes: Vec::new(),
+            nodes: Vec::new(),
         };
         let prepared = authenticated.prepare().expect("prepare operation range");
         let initial_rows = prepared.rows.len();
         let pins = prepared.pinned_nodes.clone();
         let prepared = prepared
-            .with_current_boundary::<Sha256, 32>(&boundary)
+            .with_current_boundary::<Sha256, 32>(root, &witness, &boundary)
             .expect("matching binding");
         assert_eq!(prepared.rows.len(), initial_rows + 2);
         assert_eq!(prepared.pinned_nodes, pins);
@@ -1096,11 +1161,11 @@ mod tests {
             mandatory
         );
 
-        boundary.root = Sha256::hash(&[b"unrelated current root"]);
+        let unrelated_root = Sha256::hash(&[b"unrelated current root"]);
         assert!(authenticated
             .prepare()
             .unwrap()
-            .with_current_boundary::<Sha256, 32>(&boundary)
+            .with_current_boundary::<Sha256, 32>(unrelated_root, &witness, &boundary)
             .is_err());
     }
 
@@ -1114,12 +1179,11 @@ mod tests {
             pending_chunk_digest: Default::default(),
             partial_chunk: None,
         };
-        let boundary = Delta::<mmr::Family, _, 32> {
-            root: witness.root::<Sha256>(&digest),
+        let root = witness.root::<Sha256>(&digest);
+        let boundary = Grafts::<mmr::Family, _, 32> {
             pruned_chunks: 0,
-            witness,
             chunks: Vec::new(),
-            grafted_nodes: vec![(ops_position, digest)],
+            nodes: vec![(ops_position, digest)],
         };
         let prepared = PreparedAuthenticatedRange {
             rows: Vec::new(),
@@ -1128,7 +1192,7 @@ mod tests {
             latest_location,
             ops_root: digest,
         }
-        .with_current_boundary::<Sha256, 32>(&boundary)
+        .with_current_boundary::<Sha256, 32>(root, &witness, &boundary)
         .expect("matching binding");
         let grafted_position = grafting::ops_to_grafted_pos(ops_position, grafting::height::<32>());
         let expected_key = encode_grafted_node_key(grafted_position, latest_location);

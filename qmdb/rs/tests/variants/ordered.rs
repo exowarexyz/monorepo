@@ -16,7 +16,7 @@ use commonware_storage::{
             ordered,
             value::{FixedEncoding, ValueEncoding, VariableEncoding},
         },
-        current::{batch::Delta, ordered::proof::constant::ExclusionProof},
+        current::{batch::Grafts, ordered::proof::constant::ExclusionProof, proof::OpsRootWitness},
         operation::Key as QmdbKey,
         verify::ProofExt as _,
     },
@@ -187,7 +187,7 @@ struct Snapshot<F: Graftable, Op, K, V> {
     ops_root: Digest,
     operations: Vec<Op>,
     packet: SourcePacket<F>,
-    boundary: Option<Delta<F, Digest, N>>,
+    boundary: Option<(OpsRootWitness<F, Digest>, Grafts<F, Digest, N>)>,
     activity: Option<Vec<bool>>,
     values: BTreeMap<K, V>,
 }
@@ -300,12 +300,12 @@ async fn verify_snapshots<F, K, V, E>(
         let count = snapshot.operations.len();
         assert!(count > previous_count);
         let tip = Location::<F>::new(count as u64 - 1);
-        let delta = snapshot.operations[previous_count..].to_vec();
+        let grafts = snapshot.operations[previous_count..].to_vec();
         let packet = &snapshot.packet;
         assert_eq!(*packet.start_location, previous_count as u64);
         assert_eq!(
             packet.encoded_operations,
-            delta
+            grafts
                 .iter()
                 .map(|operation| operation.encode().to_vec())
                 .collect::<Vec<_>>()
@@ -334,9 +334,9 @@ async fn verify_snapshots<F, K, V, E>(
                 &Sequential,
             )
             .expect("prepare authenticated source range");
-        if let Some(boundary) = &snapshot.boundary {
+        if let Some((witness, grafts)) = &snapshot.boundary {
             prepared = prepared
-                .with_current_boundary::<Sha256, N>(boundary)
+                .with_current_boundary::<Sha256, N>(snapshot.root, witness, grafts)
                 .expect("attach authenticated current boundary");
         }
         let mut data = StoreWriteBatch::new();
@@ -417,7 +417,7 @@ async fn verify_snapshots<F, K, V, E>(
                 assert_eq!(response.resume_sequence_number, data_sequence);
                 let expected = std::iter::once(tip.as_u64().to_string())
                     .chain(
-                        delta
+                        grafts
                             .iter()
                             .enumerate()
                             .filter_map(|(offset, op)| match op {
@@ -573,7 +573,7 @@ async fn verify_snapshots<F, K, V, E>(
         assert_eq!(frame.root, snapshot.root);
         assert_eq!(
             frame.operations,
-            delta
+            grafts
                 .iter()
                 .cloned()
                 .enumerate()
@@ -884,7 +884,7 @@ macro_rules! capture_source_batch {
         })
     }};
     (current, $family:ty, $db:ident, $batch:ident) => {
-        $batch.delta()
+        ($batch.ops_root_witness().clone(), $batch.grafts())
     };
 }
 

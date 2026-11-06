@@ -11,13 +11,17 @@ use commonware_storage::{
     merkle::{mmb, mmr, Location, Proof},
     qmdb::{
         any::unordered::variable::{Db as LocalUnorderedDb, Operation as UnorderedQmdbOperation},
-        current::{batch::Delta, unordered::variable::Db as LocalCurrentUnorderedDb},
+        current::{
+            batch::Grafts, proof::OpsRootWitness,
+            unordered::variable::Db as LocalCurrentUnorderedDb,
+        },
     },
     translator::TwoCap,
 };
 use commonware_utils::{NZUsize, NZU16, NZU64};
 use connectrpc::{client::ClientConfig, ErrorCode};
 use exoware_qmdb::{
+    adapter::upload::Publication,
     service::{
         client::rpc::{CurrentOperationClient, OperationLogClient, OperationLogSubscribeProof},
         proto::qmdb::v1::{
@@ -210,8 +214,9 @@ struct CurrentSourceBatch {
     alpha: Digest,
     beta: Digest,
     root: Digest,
+    witness: OpsRootWitness<mmr::Family, Digest>,
     operations: Vec<FixedKeyOperation>,
-    current_boundary: Delta<mmr::Family, Digest, N>,
+    grafts: Grafts<mmr::Family, Digest, N>,
 }
 
 async fn build_any_source_batch() -> AnySourceBatch {
@@ -402,7 +407,9 @@ async fn build_current_source_batch() -> CurrentSourceBatch {
                     .write(beta, Some(b"two".to_vec()));
                 batch.merkleize(&db).await.expect("merkleize")
             };
-            let boundary = finalized.delta();
+            let root = finalized.root();
+            let witness = finalized.ops_root_witness().clone();
+            let grafts = finalized.grafts();
             db = db.apply_batch(finalized).await.expect("apply");
 
             let latest = db.bounds().end - 1;
@@ -419,9 +426,10 @@ async fn build_current_source_batch() -> CurrentSourceBatch {
                 latest_location: latest,
                 alpha,
                 beta,
-                root: boundary.root,
+                root,
+                witness,
                 operations: ops,
-                current_boundary: boundary,
+                grafts,
             }
         })
     })
@@ -454,7 +462,9 @@ async fn commit_current_upload(store_client: &StoreClient, batch: &CurrentSource
         &PrefixedStoreClient::empty(store_client.clone()),
         &batch.operations,
         &fixed_key_op_cfg(),
-        &batch.current_boundary,
+        batch.root,
+        &batch.witness,
+        &batch.grafts,
     )
     .await
     .expect("commit current upload");
@@ -875,7 +885,9 @@ async fn aligned_commit_boundary<F: commonware_storage::merkle::Graftable + Part
                     }
                 }
                 let batch = batch.merkleize(&db).await.expect("source merkleize");
-                let boundary = batch.delta();
+                let root = batch.root();
+                let witness = batch.ops_root_witness().clone();
+                let boundary = batch.grafts();
                 db = db.apply_batch(batch).await.expect("source apply");
                 assert_eq!(*db.bounds().end, if round == 0 { 512 } else { 514 });
                 let (_, operations): (_, Vec<Operation<F>>) = db
@@ -904,7 +916,7 @@ async fn aligned_commit_boundary<F: commonware_storage::merkle::Graftable + Part
                     &db.root(),
                 ));
                 assert_eq!(chunks[0][N - 1] & 0x80 != 0, round == 0);
-                snapshots.push((operations, boundary));
+                snapshots.push((operations, root, witness, boundary));
             }
             db.destroy().await.expect("destroy source");
             snapshots
@@ -930,16 +942,23 @@ async fn aligned_commit_boundary<F: commonware_storage::merkle::Graftable + Part
         exoware_qmdb::service::client::Unordered::<_, F, Sha256, Digest, Vec<u8>, N>::plaintext(
             &url, op_cfg,
         );
-    for (operations, boundary) in snapshots {
-        common::commit_current_operations(&prefixed, &operations, &op_cfg, &boundary)
-            .await
-            .expect("publish current boundary");
+    for (operations, root, witness, boundary) in snapshots {
+        common::commit_current_operations(
+            &prefixed,
+            &operations,
+            &op_cfg,
+            root,
+            &witness,
+            &boundary,
+        )
+        .await
+        .expect("publish current boundary");
         let proof = connect_client
             .get(
                 Location::new(operations.len() as u64 - 1),
                 &key(257),
                 None,
-                &boundary.root,
+                &root,
             )
             .await
             .expect("current proof after aligned commit boundary");
@@ -1020,15 +1039,14 @@ async fn current_boundary_nodes<F: commonware_storage::merkle::Graftable + Parti
                     .merkleize(&db)
                     .await
                     .expect("source merkleize");
-                let publication = batch
-                    .publication(&db)
+                let publication = Publication::read(&batch, &db)
                     .expect("source publication must be readable");
                 operations.extend(publication.operations.iter().cloned());
                 publications.push(publication);
                 db = db.apply_batch(batch).await.expect("source apply");
 
-                // Prune the source at its sync boundary every round. The next batch's delta
-                // records this prune in its pruned_chunks count.
+                // Prune the source at its sync boundary every round. The next batch's grafts
+                // record this prune in their pruned_chunks count.
                 let prune_boundary = db.sync_boundary();
                 db = db.prune(prune_boundary).await.expect("source prune");
                 if round < empty_batches {
@@ -1055,7 +1073,7 @@ async fn current_boundary_nodes<F: commonware_storage::merkle::Graftable + Parti
                     publications
                         .last()
                         .expect("source publications must not be empty")
-                        .delta
+                        .grafts
                         .pruned_chunks,
                     (round + 1) / (N as u64 * 8)
                 );
