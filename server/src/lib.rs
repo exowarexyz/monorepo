@@ -9,6 +9,7 @@ mod engine;
 pub mod ingest;
 mod reduce;
 mod stream;
+mod subscription;
 mod validate;
 
 pub use connect::{
@@ -39,6 +40,10 @@ pub use reduce::RangeError;
 pub use stream::{
     CompiledMatchers, CompiledSelector, InvalidFilter, StreamHub, StreamNotification,
     StreamNotifier,
+};
+pub use subscription::{
+    bound_subscription, BoundedSubscription, SubscriptionLifetime, REASON_SERVER_SHUTDOWN,
+    REASON_SUBSCRIPTION_EXPIRED,
 };
 pub use validate::{
     put_too_large_error, validate_get_many_request, validate_put_count, validate_put_entry,

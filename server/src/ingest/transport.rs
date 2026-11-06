@@ -1,20 +1,30 @@
 use axum::{body::Body, serve::Listener};
 use http::{Request, Response, Version};
 use http_body::Body as _;
-use hyper_util::{rt::TokioIo, server::conn::auto::Builder, service::TowerToHyperService};
+use hyper_util::{rt::TokioIo, server::conn::auto::Builder};
 use std::{
     convert::Infallible,
     future::Future,
     io,
     pin::Pin,
+    sync::{
+        atomic::{AtomicBool, AtomicU64, Ordering},
+        Arc,
+    },
     task::{Context, Poll},
+    time::Duration,
 };
 use tokio::{sync::watch, task::JoinSet, time::Instant};
-use tower::{service_fn, Service, ServiceExt};
+use tower::{Service, ServiceExt};
 
 tokio::task_local! {
     static STREAM_DEADLINE: watch::Sender<Option<Instant>>;
+    static REQUEST: Arc<RequestActivity>;
 }
+
+// A responsive peer drains a terminal frame well within this window. A peer
+// that withholds flow-control credit or stops reading is cut off once it ends.
+const STALLED_RESPONSE_GRACE: Duration = Duration::from_secs(2);
 
 #[derive(Clone, Copy)]
 struct StreamExecutor;
@@ -205,16 +215,161 @@ struct State {
     active: Option<Arm>,
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+struct Activity {
+    in_flight: usize,
+    subscriptions: usize,
+    // Whether a bounded subscription ever ran on the connection. Its output
+    // can outlive its request, so this never clears.
+    subscribed: bool,
+}
+
+// One request's share of its connection's activity. The handler scope and
+// the response body each hold a reference, so the request stays in flight
+// until Hyper has finished with both.
+struct RequestActivity {
+    connection: ConnectionControl,
+    version: Version,
+    subscription: AtomicBool,
+    // Generation of an HTTP/1 subscription cutoff, or zero. Generations start at one.
+    cutoff: AtomicU64,
+}
+
+impl RequestActivity {
+    fn begin(connection: &ConnectionControl, version: Version) -> Arc<Self> {
+        connection
+            .activity
+            .send_modify(|activity| activity.in_flight += 1);
+        Arc::new(Self {
+            connection: connection.clone(),
+            version,
+            subscription: AtomicBool::new(false),
+            cutoff: AtomicU64::new(0),
+        })
+    }
+}
+
+impl Drop for RequestActivity {
+    fn drop(&mut self) {
+        let subscription = *self.subscription.get_mut();
+        self.connection.activity.send_modify(|activity| {
+            activity.in_flight -= 1;
+            if subscription {
+                activity.subscriptions -= 1;
+            }
+        });
+
+        // The response is complete, so a later request on this HTTP/1
+        // connection must not inherit the subscription's cutoff.
+        let cutoff = *self.cutoff.get_mut();
+        if cutoff != 0 {
+            self.connection.disarm(cutoff);
+        }
+    }
+}
+
+pin_project_lite::pin_project! {
+    struct TrackedBody<B> {
+        #[pin]
+        inner: B,
+        activity: Arc<RequestActivity>,
+    }
+}
+
+impl<B> http_body::Body for TrackedBody<B>
+where
+    B: http_body::Body,
+{
+    type Data = B::Data;
+    type Error = B::Error;
+
+    fn poll_frame(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<http_body::Frame<Self::Data>, Self::Error>>> {
+        self.project().inner.poll_frame(cx)
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.inner.is_end_stream()
+    }
+
+    fn size_hint(&self) -> http_body::SizeHint {
+        self.inner.size_hint()
+    }
+}
+
+/// Marks the current request as a bounded subscription.
+///
+/// Shutdown no longer waits for it to finish, and a lifetime `deadline` cuts
+/// off its response after the stalled-response grace period. Outside
+/// [serve], or off the handler's task, this does nothing.
+pub(crate) fn register_subscription(deadline: Option<Instant>) {
+    let _ = REQUEST.try_with(|request| {
+        if !request.subscription.swap(true, Ordering::AcqRel) {
+            request.connection.activity.send_modify(|activity| {
+                activity.subscriptions += 1;
+                activity.subscribed = true;
+            });
+        }
+
+        let Some(cutoff) =
+            deadline.and_then(|deadline| deadline.checked_add(STALLED_RESPONSE_GRACE))
+        else {
+            return;
+        };
+        if request.version == Version::HTTP_2 {
+            // The per-stream executor task owns this deadline, so it fires
+            // even while Hyper is not polling the response body.
+            let _ = STREAM_DEADLINE.try_with(|sender| {
+                sender.send_if_modified(|current| {
+                    if current.is_some_and(|current| current <= cutoff) {
+                        return false;
+                    }
+                    *current = Some(cutoff);
+                    true
+                })
+            });
+        } else if let Some(generation) = request.connection.arm_http1(request.version, cutoff) {
+            request.cutoff.store(generation, Ordering::Release);
+        }
+    });
+}
+
+/// Reports that [serve] has begun shutting down.
+///
+/// [serve] inserts one into the extensions of every request. Long-lived
+/// handlers wait on [Self::closed] so they end instead of holding the graceful
+/// drain open.
+#[derive(Clone, Debug)]
+pub struct ShutdownSignal(watch::Receiver<bool>);
+
+impl ShutdownSignal {
+    /// Whether shutdown has started.
+    pub fn is_shutting_down(&self) -> bool {
+        *self.0.borrow()
+    }
+
+    /// Completes once shutdown has started, or immediately if it already has.
+    ///
+    /// A server that no longer exists counts as shut down.
+    pub async fn closed(mut self) {
+        let _ = self.0.wait_for(|started| *started).await;
+    }
+}
+
 /// Controls termination of the connection that carried a request.
 #[derive(Clone, Debug)]
 pub struct ConnectionControl {
     state: watch::Sender<State>,
+    activity: watch::Sender<Activity>,
 }
 
 impl ConnectionControl {
     fn new() -> Self {
         let (state, _) = watch::channel(State::default());
-        Self { state }
+        let (activity, _) = watch::channel(Activity::default());
+        Self { state, activity }
     }
 
     /// Arms an HTTP/1 connection with an absolute request deadline.
@@ -297,9 +452,47 @@ impl ConnectionControl {
             }
         }
     }
+
+    // Hyper releases a response once its last frame is queued, not once the
+    // peer has read it. After shutdown, a connection that carried a bounded
+    // subscription and has no other request in flight may therefore only be
+    // waiting on output its peer stopped reading. This completes once that
+    // has lasted for `grace`. A connection that never carried one keeps
+    // draining for as long as its peer needs.
+    async fn drained(&self, grace: Duration) {
+        let mut activity = self.activity.subscribe();
+        let mut idle_since = None;
+        loop {
+            let idle = {
+                let activity = activity.borrow_and_update();
+                activity.subscribed && activity.in_flight == activity.subscriptions
+            };
+            idle_since = idle.then(|| idle_since.unwrap_or_else(Instant::now));
+            match idle_since {
+                Some(since) => {
+                    tokio::select! {
+                        _ = tokio::time::sleep_until(since + grace) => return,
+                        _ = activity.changed() => {}
+                    }
+                }
+                None => {
+                    let _ = activity.changed().await;
+                }
+            }
+        }
+    }
 }
 
-/// Serves requests with connection control in their extensions and drains connections on shutdown.
+/// Serves requests with connection control and a [ShutdownSignal] in their extensions.
+///
+/// Shutdown stops accepting connections, signals every request through
+/// [ShutdownSignal], and lets connections finish gracefully. Ordinary requests
+/// may take as long as they need. Once a connection that carried a bounded
+/// subscription has nothing else in flight, it is closed if it has not
+/// finished within a short grace period, so a peer that stopped reading
+/// cannot hold the process open. Output already handed to the transport on
+/// such a connection, including that of a completed ordinary request, is cut
+/// with it.
 pub async fn serve<L, S, B, F>(mut listener: L, service: S, shutdown: F) -> io::Result<()>
 where
     L: Listener,
@@ -324,13 +517,21 @@ where
                 let control = ConnectionControl::new();
                 let requests = control.clone();
                 let service = service.clone();
-                let service = service_fn(move |request: Request<hyper::body::Incoming>| {
+                let signal = ShutdownSignal(shutdown_rx.clone());
+
+                // Hyper calls this closure as each request arrives, so a request
+                // counts as in flight before its stream task first runs.
+                let service = hyper::service::service_fn(move |request: Request<hyper::body::Incoming>| {
                     let service = service.clone();
                     let control = requests.clone();
+                    let signal = signal.clone();
+                    let activity = RequestActivity::begin(&control, request.version());
                     async move {
                         let mut request = request.map(Body::new);
                         request.extensions_mut().insert(control);
-                        service.oneshot(request).await
+                        request.extensions_mut().insert(signal);
+                        let Ok(response) = REQUEST.scope(activity.clone(), service.oneshot(request)).await;
+                        Ok::<_, Infallible>(response.map(|inner| TrackedBody { inner, activity }))
                     }
                 });
                 let mut shutdown = shutdown_rx.clone();
@@ -339,10 +540,7 @@ where
                 connections.spawn(async move {
                     let mut builder = Builder::new(StreamExecutor);
                     builder.http2().enable_connect_protocol();
-                    let connection = builder.serve_connection_with_upgrades(
-                        TokioIo::new(io),
-                        TowerToHyperService::new(service),
-                    );
+                    let connection = builder.serve_connection_with_upgrades(TokioIo::new(io), service);
                     tokio::pin!(connection);
                     tokio::select! {
                         _ = control.cancelled() => {}
@@ -352,6 +550,7 @@ where
                             tokio::select! {
                                 _ = control.cancelled() => {}
                                 _ = &mut connection => {}
+                                _ = control.drained(STALLED_RESPONSE_GRACE) => {}
                             }
                         }
                     }

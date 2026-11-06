@@ -120,8 +120,28 @@ The builder accepts a [custom transport](https://docs.rs/exoware-sdk/latest/exow
 or independent HTTP/2 connection pools through `balanced_http2_transport`.
 Those pools require prior-knowledge h2c for HTTP, where the connection starts
 with HTTP/2 without an upgrade, or HTTP/2 negotiated through ALPN for HTTPS.
-Request timeouts bound unary calls and stream opening, not the lifetime of an
-opened stream.
+Request timeouts bound unary calls and query stream opening, not the lifetime of
+an opened stream.
+
+## Subscriptions
+
+A log subscription reconnects on its own after a server restart, a reset
+connection, or a transient error. It resubscribes with the same filters from
+the sequence after the last frame it received, so the caller sees one stream
+with no gap and no duplicate. Authentication and permission failures, invalid
+filters, and `BATCH_EVICTED` are returned instead of retried.
+
+`SubscriptionRetryConfig` sets the policy through the builder's
+`subscription_retry`. By default each outage may last 60 seconds, including
+backoff and stalled reconnects. A received frame ends the outage, and an idle
+healthy stream is never cut. Backoff keeps growing until a new batch arrives.
+Use `with_outage_budget` for a different bound,
+`unlimited()` to keep trying, or `disabled()` to end the subscription when its
+stream ends. This policy is separate from `RetryConfig` and `request_timeout`.
+
+A subscription opened without a positive `since_sequence_number` has no cursor
+until its first frame arrives. If it fails before then, the error is returned,
+because subscribing again without a cursor could skip batches.
 
 ## Status
 

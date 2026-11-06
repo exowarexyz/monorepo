@@ -140,6 +140,8 @@ fn stream_body(
     body.into()
 }
 
+// Resumption is disabled because these scripts end each subscription after its
+// recorded frames. Resumption has its own tests.
 fn client<T>(transport: T) -> PrefixedStoreClient
 where
     T: connectrpc::client::ClientTransport<Error = ConnectError> + Clone + 'static,
@@ -149,6 +151,7 @@ where
     StoreClient::builder()
         .url("http://store.internal")
         .retry_config(RetryConfig::disabled())
+        .subscription_retry(SubscriptionRetryConfig::disabled())
         .client_transport(transport)
         .build()
         .unwrap()

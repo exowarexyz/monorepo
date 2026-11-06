@@ -2801,6 +2801,8 @@ dependencies = [
  "http-body-util",
  "hyper",
  "hyper-util",
+ "pin-project-lite",
+ "rand 0.10.2",
  "regex",
  "serde_json",
  "socket2",
