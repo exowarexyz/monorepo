@@ -1373,7 +1373,7 @@ async fn test_prepare_publication_rejects_unbound_publications() {
     .await
     .expect("source task must complete");
 
-    // The source's own publication prepares the batch's operation range.
+    // The unmodified publication prepares rows spanning exactly the batch's operations.
     let root = publication.root;
     let prepare = |publication: &_, root: &Digest| {
         prepare_publication::<mmr::Family, Sha256, _, _, N>(

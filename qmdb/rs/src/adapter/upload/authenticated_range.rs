@@ -134,12 +134,9 @@ impl<D: Digest, F: Family> PreparedAuthenticatedRange<D, F> {
 }
 
 impl<D: Digest, F: Graftable> PreparedAuthenticatedRange<D, F> {
-    /// Add a current batch's root, witness, and [`Grafts`] as the current-state rows at this
-    /// range's final location.
-    ///
-    /// This checks only that `witness` binds the verified operation root to `root`. The grafts'
-    /// chunks, nodes, and pruned chunk count are not authenticated and must come from the source
-    /// that produced the batch ending at this location.
+    /// Attach a current batch's `root`, `witness`, and `grafts` as current-state rows at this
+    /// range's final location. Only the witness's binding of the operation root to `root` is
+    /// checked, so the grafts must come from the source of the batch that ends at this location.
     pub fn with_current_boundary<H: Hasher<Digest = D>, const N: usize>(
         mut self,
         root: D,
@@ -223,9 +220,8 @@ where
     )
 }
 
-/// What an Exoware writer stores for one current QMDB batch.
-///
-/// Replaying `operations` onto `pinned_nodes` recomputes `ops_root`, and `witness` binds that
+/// What an Exoware writer stores for one current QMDB batch. Replaying `operations` onto
+/// `pinned_nodes` under the final commit's floor recomputes `ops_root`, and `witness` binds that
 /// root to `root`.
 #[derive(Clone)]
 pub struct Publication<F: Graftable, D: Digest, U: Update, const N: usize> {
@@ -241,7 +237,7 @@ pub struct Publication<F: Graftable, D: Digest, U: Update, const N: usize> {
     pub root: D,
     /// Witness binding `ops_root` to `root`.
     pub witness: OpsRootWitness<F, D>,
-    /// Bitmap chunks and grafted nodes the batch wrote.
+    /// Bitmap chunks and grafted nodes the batch wrote, and its pruned chunk count.
     pub grafts: Grafts<F, D, N>,
 }
 
@@ -249,8 +245,8 @@ impl<F: Graftable, D: Digest, U: Update, const N: usize> Publication<F, D, U, N>
 where
     AnyOperation<F, U>: Codec,
 {
-    /// Read `batch`'s publication. Call this before `batch` is applied: its frontier is
-    /// readable only until the batch's changes are flushed.
+    /// Read `batch`'s publication from `db`. Call this before applying `batch`, because its
+    /// frontier is readable only until the batch's changes are flushed.
     pub fn read<E, C, I, H, S>(
         batch: &MerkleizedBatch<F, D, U, N, S>,
         db: &Db<F, E, C, I, H, U, N, S>,
@@ -336,8 +332,9 @@ where
     )
 }
 
-/// Verify a range and prepare its rows. `operation_at` supplies the operation at each offset,
-/// location, and canonical encoding, so a caller holding decoded operations can skip decoding.
+/// Verify a range and prepare its rows. After the range authenticates, `operation_at` maps each
+/// operation's offset, location, and canonical encoding to the operation, so a caller holding
+/// decoded operations can skip decoding.
 fn prepare_range<F, H, Op, O, S>(
     authenticated: &AuthenticatedOperationRange<'_, H::Digest, F>,
     expected_root: &H::Digest,

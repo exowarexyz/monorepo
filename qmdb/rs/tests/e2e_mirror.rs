@@ -61,7 +61,7 @@ async fn test_mirror_keyless_from_local() {
     // Upload the complete operation prefix after a second local batch
     let (ops_total, latest2, root2) = build_keyless_source(vec![
         vec![b"alpha".to_vec(), b"beta".to_vec(), b"gamma".to_vec()],
-        vec![b"grafts".to_vec(), b"epsilon".to_vec()],
+        vec![b"delta".to_vec(), b"epsilon".to_vec()],
     ])
     .await;
     common::commit_operations::<mmr::Family, _>(

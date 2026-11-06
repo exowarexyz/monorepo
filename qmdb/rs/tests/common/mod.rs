@@ -209,9 +209,7 @@ where
     Ok(())
 }
 
-/// Upload consecutive current batch publications and publish the last one's final location. The
-/// initial commit at location 0 belongs to no publication, so it is also uploaded when the first
-/// publication starts at location 1.
+/// Upload consecutive current batch publications and publish the last one's final location.
 #[allow(dead_code)]
 pub async fn commit_publications<F, U, const N: usize>(
     client: &exoware_sdk::PrefixedStoreClient,
@@ -224,6 +222,9 @@ where
     AnyOperation<F, U>: UploadOperation<F>,
 {
     let mut batch = exoware_sdk::StoreWriteBatch::new();
+
+    // A source's first publication starts at location 1, after the initial commit that no
+    // publication includes, so stage that commit first.
     if publications
         .first()
         .is_some_and(|publication| publication.start == Location::new(1))
@@ -232,6 +233,8 @@ where
         let (_, prepared) = prepare_operations::<F, _>(std::slice::from_ref(&initial), cfg);
         stage_authenticated_range(client, prepared, &mut batch)?;
     }
+
+    // Stage each publication, trusting its own root as the expected current root.
     let mut latest = None;
     for publication in publications {
         let prepared = prepare_publication::<F, commonware_cryptography::Sha256, U, _, N>(

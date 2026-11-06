@@ -169,7 +169,8 @@ async fn build_source_batch_with_writes(
 }
 
 /// Apply each batch of writes as its own commit, returning each tip's operations from location 0
-/// and its batch's grafts. Grafts hold only their batch's writes, so upload tips in order.
+/// with its batch's root, witness, and grafts. Grafts hold only their batch's writes, so upload
+/// tips in order.
 async fn build_source_tips(
     partition_prefix: &'static str,
     batches: Vec<TipWrites>,
