@@ -300,12 +300,12 @@ async fn verify_snapshots<F, K, V, E>(
         let count = snapshot.operations.len();
         assert!(count > previous_count);
         let tip = Location::<F>::new(count as u64 - 1);
-        let grafts = snapshot.operations[previous_count..].to_vec();
+        let delta = snapshot.operations[previous_count..].to_vec();
         let packet = &snapshot.packet;
         assert_eq!(*packet.start_location, previous_count as u64);
         assert_eq!(
             packet.encoded_operations,
-            grafts
+            delta
                 .iter()
                 .map(|operation| operation.encode().to_vec())
                 .collect::<Vec<_>>()
@@ -417,7 +417,7 @@ async fn verify_snapshots<F, K, V, E>(
                 assert_eq!(response.resume_sequence_number, data_sequence);
                 let expected = std::iter::once(tip.as_u64().to_string())
                     .chain(
-                        grafts
+                        delta
                             .iter()
                             .enumerate()
                             .filter_map(|(offset, op)| match op {
@@ -573,7 +573,7 @@ async fn verify_snapshots<F, K, V, E>(
         assert_eq!(frame.root, snapshot.root);
         assert_eq!(
             frame.operations,
-            grafts
+            delta
                 .iter()
                 .cloned()
                 .enumerate()

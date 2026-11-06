@@ -82,8 +82,8 @@ enum Command {
         #[arg(long, default_value_t = 2)]
         interval_secs: u64,
         /// Directory that keeps the local ordered-QMDB state across restarts.
-        /// Delete it to reset the demo and before seeding a reset Store or a
-        /// different `--store-prefix`. Defaults to `$HOME/.exoware_qmdb_mmb_seed`.
+        /// Delete it when resetting the demo or the Store, or when changing
+        /// `--store-prefix`. Defaults to `$HOME/.exoware_qmdb_mmb_seed`.
         #[arg(long)]
         directory: Option<PathBuf>,
     },

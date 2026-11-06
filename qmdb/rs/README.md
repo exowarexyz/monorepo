@@ -187,11 +187,12 @@ the source to discard them.
 ### Current-state boundaries
 
 For a current ordered or unordered database, each uploaded batch also carries
-its current root, the witness binding the operation-log root to it, and its
-`Grafts`: the bitmap chunks and grafted nodes the batch wrote and the source's
-`pruned_chunks` count. `Publication::read` collects these, with the batch's
-operations and prefix frontier, from the batch before it is applied. Prepare
-the publication against the trusted current root:
+its current root, the witness binding the operation-log root to that root, and
+its `Grafts`. The grafts hold the bitmap chunks and grafted nodes the batch
+wrote and the `pruned_chunks` count captured when the batch was merkleized.
+`Publication::read` collects these, with the batch's operations and prefix
+frontier, before the batch is applied. Prepare the publication against the
+trusted current root:
 
 ```rust,ignore
 use exoware_qmdb::adapter::upload::{prepare_publication, Publication};
@@ -201,9 +202,9 @@ let prepared =
     prepare_publication::<F, H, U, Sequential, N>(&publication, &trusted_root, &Sequential)?;
 ```
 
-The source keeps no grafts, so upload or durably persist each publication before
-applying its batch. Once a publication is persisted or uploaded, the source must
-apply that same batch, rebuilding it identically after a restart.
+A source database keeps no grafts after applying a batch, so upload or durably
+persist each publication first. Once a publication is persisted or uploaded, the
+source must apply that same batch, rebuilding it identically after a restart.
 
 A new database starts with a commit at location 0 that no batch publication
 includes. Upload it once with `prepare_authenticated_range`, as a range that

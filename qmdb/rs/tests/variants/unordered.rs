@@ -468,8 +468,8 @@ macro_rules! initial_boundary {
         None
     };
 
-    // A new database's initial commit belongs to no batch, so its grafts are the database's whole
-    // current state. That state is the bitmap's first chunk, with no grafted nodes.
+    // A new database's initial commit belongs to no batch, so build its grafts from the whole
+    // current state: the bitmap's first chunk and no grafted nodes.
     (current, $db:ident) => {
         Some((
             $db.root(),
