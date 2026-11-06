@@ -8,9 +8,12 @@ use commonware_runtime::{
 };
 use commonware_storage::{
     journal::contiguous::variable::Config as JournalConfig,
-    merkle::{full::Config as MerkleConfig, mmb, Location, Proof},
+    merkle::{full::Config as MerkleConfig, mmb, Location},
     qmdb::{
-        any::{ordered::variable::Operation as VariableOperation, value::VariableEncoding},
+        any::{
+            ordered::{variable::Operation as VariableOperation, Update},
+            value::VariableEncoding,
+        },
         current::ordered::variable::{
             Config as CurrentOrderedVariableConfig, Db as CurrentOrderedVariableDb,
         },
@@ -20,8 +23,7 @@ use commonware_storage::{
 use commonware_utils::{NZUsize, NZU16, NZU64};
 use exoware_qmdb::{
     adapter::upload::{
-        prepare_authenticated_range, prepare_publication, stage_authenticated_range,
-        stage_watermark, AuthenticatedOperationRange, Publication,
+        prepare_publication, stage_authenticated_range, stage_watermark, Publication,
     },
     MAX_OPERATION_SIZE,
 };
@@ -93,38 +95,32 @@ async fn health() -> &'static str {
     "ok"
 }
 
-/// Upload a new source database's initial commit at location 0 without publishing a watermark.
-async fn publish_initial_commit(
+/// A publication of the seed's source database.
+type SourcePublication = Publication<
+    Family,
+    commonware_cryptography::sha256::Digest,
+    Update<Vec<u8>, VariableEncoding<Vec<u8>>>,
+    N,
+>;
+
+/// Upload a publication of the source database and publish its final location.
+async fn upload(
     store_client: &PrefixedStoreClient,
-    source_db: &Db,
-    proof: &Proof<Family, commonware_cryptography::sha256::Digest>,
-    operations: &[Operation],
-) {
-    let encoded_operations = operations
-        .iter()
-        .map(|operation| operation.encode().to_vec())
-        .collect::<Vec<_>>();
-    let range = AuthenticatedOperationRange {
-        start_location: Location::new(0),
-        end_location: proof.leaves,
-        inactive_peaks: proof.inactive_peaks,
-        pinned_nodes: &[],
-        encoded_operations: &encoded_operations,
-    };
-    let prepared = prepare_authenticated_range::<Family, Sha256, Operation, Sequential>(
-        &range,
-        &source_db.ops_root(),
-        &op_cfg(),
-        &Sequential,
-    )
-    .expect("initial commit must match the source operation root");
-    let mut batch = StoreWriteBatch::new();
-    stage_authenticated_range(store_client, prepared, &mut batch)
-        .expect("staging the initial commit must succeed");
-    batch
-        .commit(store_client.client())
+    publication: &SourcePublication,
+    trusted_root: &commonware_cryptography::sha256::Digest,
+) -> Location<Family> {
+    let prepared =
+        prepare_publication::<Family, Sha256, _, _, N>(publication, trusted_root, &Sequential)
+            .expect("publication must verify against the source root");
+    let latest = prepared.latest_location();
+    let mut rows = StoreWriteBatch::new();
+    stage_authenticated_range(store_client, prepared, &mut rows)
+        .expect("staging the publication must succeed");
+    stage_watermark(store_client, latest, &mut rows).expect("staging the watermark must succeed");
+    rows.commit(store_client.client())
         .await
-        .expect("initial commit upload must succeed");
+        .expect("publication upload must succeed");
+    latest
 }
 
 fn op_cfg() -> <Operation as commonware_codec::Read>::Cfg {
@@ -223,10 +219,17 @@ async fn seed(
             .await
             .expect("init local ordered db");
 
-            // Resume the key counter from the number of applied batches. A new database's initial
-            // commit belongs to no batch publication, so upload it here before the first batch.
+            // A new database's initial commit belongs to no batch, so upload its publication
+            // before the first batch.
             let end = source_db.bounds().end;
-            let (proof, operations) = source_db
+            if end == Location::new(1) {
+                let initial = Publication::initial(&source_db)
+                    .expect("a new database must have an initial publication");
+                upload(&store_client, &initial, &source_db.root()).await;
+            }
+
+            // Resume the key counter from the number of applied batches.
+            let (_, operations) = source_db
                 .ops_historical_proof(
                     end,
                     Location::new(0),
@@ -240,9 +243,6 @@ async fn seed(
                 .count()
                 .saturating_sub(1) as u64;
             let mut counter = committed_batches * 3;
-            if committed_batches == 0 {
-                publish_initial_commit(&store_client, &source_db, &proof, &operations).await;
-            }
             info!(
                 tip = *end - 1,
                 batches = committed_batches,
@@ -290,21 +290,7 @@ async fn seed(
                 // uploaded before an interrupted apply is rebuilt identically after a restart.
                 let publication = Publication::read(&finalized, &source_db)
                     .expect("batch publication must be readable before apply");
-                let prepared = prepare_publication::<Family, Sha256, _, _, N>(
-                    &publication,
-                    &finalized.root(),
-                    &Sequential,
-                )
-                .expect("batch publication must verify against its root");
-                let latest = prepared.latest_location();
-                let mut rows = StoreWriteBatch::new();
-                stage_authenticated_range(&store_client, prepared, &mut rows)
-                    .expect("staging the batch must succeed");
-                stage_watermark(&store_client, latest, &mut rows)
-                    .expect("staging the watermark must succeed");
-                rows.commit(store_client.client())
-                    .await
-                    .expect("commit upload");
+                let latest = upload(&store_client, &publication, &finalized.root()).await;
 
                 source_db = source_db.apply_batch(finalized).await.expect("apply batch");
                 source_db = source_db.sync().await.expect("sync local ordered db");

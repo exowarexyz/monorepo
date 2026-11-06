@@ -1,7 +1,7 @@
 //! Unordered QMDB codecs and proof families through native and Connect adapters
 
 use crate::common;
-use commonware_codec::{Codec, Encode, Read};
+use commonware_codec::{Codec, Decode as _, Encode, Read};
 use commonware_cryptography::Sha256;
 use commonware_parallel::Sequential;
 use commonware_runtime::{tokio as cw_tokio, Runner as _};
@@ -12,15 +12,14 @@ use commonware_storage::{
             unordered,
             value::{FixedEncoding, ValueEncoding, VariableEncoding},
         },
-        current::{batch::Grafts, proof::OpsRootWitness},
         operation::Key as QmdbKey,
     },
 };
-use commonware_utils::{bitmap::Readable as _, iter::zip_eq, NZUsize, NZU16};
+use commonware_utils::{iter::zip_eq, NZUsize, NZU16};
 use exoware_qmdb::{
     adapter::upload::{
-        prepare_authenticated_range, stage_authenticated_range, stage_watermark,
-        AuthenticatedOperationRange, UploadOperation,
+        prepare_authenticated_range, prepare_publication, stage_authenticated_range,
+        stage_watermark, AuthenticatedOperationRange, Publication, PublicationCfg, UploadOperation,
     },
     service::{
         client::rpc::{CurrentOperationClient, OperationLogClient},
@@ -34,8 +33,8 @@ use std::{fmt::Debug, num::NonZeroU64, sync::Arc};
 const N: usize = 32;
 type Digest = commonware_cryptography::sha256::Digest;
 
-/// Current root, witness, and grafts at a snapshot's tip.
-type CurrentBoundary<F> = (Digest, OpsRootWitness<F, Digest>, Grafts<F, Digest, N>);
+/// Upper bound on each decoded publication's operations, bitmap chunks, and grafted nodes.
+const PUBLICATION_LIMIT: usize = 64;
 
 struct Snapshot<F: Graftable, K: QmdbKey, E: ValueEncoding> {
     start: Location<F>,
@@ -43,7 +42,7 @@ struct Snapshot<F: Graftable, K: QmdbKey, E: ValueEncoding> {
     pinned_nodes: Vec<Digest>,
     operations: Vec<unordered::Operation<F, K, E>>,
     ops_root: Digest,
-    current: Option<CurrentBoundary<F>>,
+    current: Option<Publication<F, Digest, unordered::Update<K, E>, N>>,
     values: Vec<Option<E::Value>>,
 }
 
@@ -125,18 +124,41 @@ async fn check_mirror<F, K, V, E>(
             .is_err()
         );
 
-        let mut prepared = prepare_authenticated_range::<
-            F,
-            Sha256,
-            unordered::Operation<F, K, E>,
-            Sequential,
-        >(&authenticated, &snapshot.ops_root, &op_cfg, &Sequential)
-        .expect("prepare source batch");
-        if let Some((root, witness, grafts)) = &snapshot.current {
-            prepared = prepared
-                .with_current_boundary::<Sha256, N>(*root, witness, grafts)
-                .expect("attach current boundary");
-        }
+        let prepared = match &snapshot.current {
+            // Current batches travel as encoded publications and are verified after decoding
+            Some(publication) => {
+                let decoded = Publication::<F, Digest, unordered::Update<K, E>, N>::decode_cfg(
+                    publication.encode(),
+                    &PublicationCfg {
+                        operation: op_cfg.clone(),
+                        operations: (0..=PUBLICATION_LIMIT).into(),
+                        chunks: (0..=PUBLICATION_LIMIT).into(),
+                        grafted_nodes: (0..=PUBLICATION_LIMIT).into(),
+                    },
+                )
+                .expect("publication must decode");
+                assert_eq!(decoded.start, snapshot.start);
+                assert_eq!(
+                    decoded.operations.as_slice(),
+                    &snapshot.operations[*snapshot.start as usize..]
+                );
+                assert!(prepare_publication::<F, Sha256, _, _, N>(
+                    &decoded,
+                    &wrong_root,
+                    &Sequential
+                )
+                .is_err());
+                prepare_publication::<F, Sha256, _, _, N>(&decoded, &publication.root, &Sequential)
+                    .expect("publication must prepare")
+            }
+            None => prepare_authenticated_range::<
+                F,
+                Sha256,
+                unordered::Operation<F, K, E>,
+                Sequential,
+            >(&authenticated, &snapshot.ops_root, &op_cfg, &Sequential)
+            .expect("prepare source batch"),
+        };
         let mut data = StoreWriteBatch::new();
         stage_authenticated_range(&prefixed, prepared, &mut data).expect("stage source batch");
         data.commit(&store).await.expect("persist source batch");
@@ -170,7 +192,7 @@ async fn check_mirror<F, K, V, E>(
         let trusted_root = snapshot
             .current
             .as_ref()
-            .map_or(snapshot.ops_root, |(root, _, _)| *root);
+            .map_or(snapshot.ops_root, |publication| publication.root);
         assert_eq!(native_range.root, trusted_root);
         assert_eq!(native_range.operations, snapshot.operations);
         assert_eq!(local.root_at(tip).await.expect("root"), trusted_root);
@@ -373,7 +395,7 @@ async fn check_mirror<F, K, V, E>(
     let trusted_root = first
         .current
         .as_ref()
-        .map_or(first.ops_root, |(root, _, _)| *root);
+        .map_or(first.ops_root, |publication| publication.root);
     let proof = remote
         .get_operation_range(
             GetOperationRangeRequest {
@@ -463,36 +485,15 @@ macro_rules! ops_root {
     };
 }
 
-macro_rules! initial_boundary {
-    (any, $db:ident) => {
+macro_rules! publication {
+    (any, $db:ident $(, $batch:ident)?) => {
         None
     };
-
-    // A new database's initial commit belongs to no batch, so build its grafts from the whole
-    // current state: the bitmap's first chunk and no grafted nodes.
     (current, $db:ident) => {
-        Some((
-            $db.root(),
-            $db.ops_root_witness().clone(),
-            Grafts {
-                pruned_chunks: 0,
-                chunks: vec![(0, $db.bitmap().get_chunk(0))],
-                nodes: Vec::new(),
-            },
-        ))
+        Some(Publication::initial(&$db).expect("initial publication must be readable"))
     };
-}
-
-macro_rules! batch_boundary {
-    (any, $batch:ident) => {
-        None
-    };
-    (current, $batch:ident) => {
-        Some((
-            $batch.root(),
-            $batch.ops_root_witness().clone(),
-            $batch.grafts(),
-        ))
+    (current, $db:ident, $batch:ident) => {
+        Some(Publication::read(&$batch, &$db).expect("batch publication must be readable"))
     };
 }
 
@@ -557,14 +558,14 @@ macro_rules! case {
                     let initial_count = NonZeroU64::new(*db.bounds().end).expect("initial commit");
                     let (proof, operations): (_, Vec<Op>) =
                         source_proof!($state, db, initial_count);
-                    let initial_boundary = initial_boundary!($state, db);
+                    let initial_publication = publication!($state, db);
                     snapshots.push(Snapshot {
                         start: Location::new(0),
                         proof,
                         pinned_nodes: Vec::new(),
                         operations,
                         ops_root: ops_root!($state, db),
-                        current: initial_boundary,
+                        current: initial_publication,
                         values: vec![None, None, None],
                     });
 
@@ -584,7 +585,7 @@ macro_rules! case {
                         let batch_root = batch.root();
                         let captured: Option<(Proof<F, Digest>, Vec<Digest>)> =
                             capture_batch_proof!($state, batch, db);
-                        let boundary = batch_boundary!($state, batch);
+                        let publication = publication!($state, db, batch);
                         db = db.apply_batch(batch).await.expect("source apply");
                         assert_eq!(db.root(), batch_root);
                         let count = NonZeroU64::new(*db.bounds().end).expect("nonempty source");
@@ -622,7 +623,7 @@ macro_rules! case {
                             pinned_nodes,
                             ops_root: ops_root!($state, db),
                             operations,
-                            current: boundary,
+                            current: publication,
                             values: expected,
                         });
                     }

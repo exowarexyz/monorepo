@@ -194,7 +194,8 @@ async fn build_source_batch() -> SourceBatch {
             .expect("init");
 
             let mut ops = Vec::new();
-            let mut publications = Vec::new();
+            let mut publications =
+                vec![Publication::initial(&db).expect("initial publication must be readable")];
             let mut inactivity_floor = Location::<mmr::Family>::new(0);
             for _ in 0..64u64 {
                 let finalized = {
@@ -275,7 +276,8 @@ async fn build_mmb_source_batch() -> MmbSourceBatch {
             .expect("init");
 
             let mut ops = Vec::new();
-            let mut publications = Vec::new();
+            let mut publications =
+                vec![Publication::initial(&db).expect("initial publication must be readable")];
             let mut inactivity_floor = Location::<mmb::Family>::new(0);
             for batch_index in 0..64u64 {
                 let finalized = {
@@ -350,7 +352,8 @@ async fn build_mmb_growing_source_batch() -> MmbGrowingSourceBatch {
             .expect("init");
 
             let mut ops = Vec::new();
-            let mut publications = Vec::new();
+            let mut publications =
+                vec![Publication::initial(&db).expect("initial publication must be readable")];
             let mut inactivity_floor = Location::<mmb::Family>::new(0);
             let mut initial = None;
             let mut initial_len = None;
@@ -428,14 +431,14 @@ async fn build_mmb_growing_source_batch() -> MmbGrowingSourceBatch {
 
 async fn commit_upload(store_client: &StoreClient, batch: &SourceBatch) {
     let upload_client = store_client.unprefixed();
-    common::commit_publications(&upload_client, &batch.publications, &op_cfg())
+    common::commit_publications(&upload_client, &batch.publications)
         .await
         .expect("commit upload");
 }
 
 async fn commit_mmb_upload(store_client: &StoreClient, batch: &MmbSourceBatch) {
     let upload_client = store_client.unprefixed();
-    common::commit_publications(&upload_client, &batch.publications, &op_cfg())
+    common::commit_publications(&upload_client, &batch.publications)
         .await
         .expect("commit upload");
 }

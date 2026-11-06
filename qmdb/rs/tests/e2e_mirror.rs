@@ -1,7 +1,7 @@
 //! Mirror local Commonware QMDB operations into an Exoware store and verify
 //! the remote roots against the independent local roots across two batches.
-//! Test fixtures authenticate each complete operation prefix and attach the
-//! proof-derived current boundary for ordered databases.
+//! Current ordered fixtures upload each batch's publication, and the other
+//! fixtures authenticate each complete operation prefix.
 
 mod common;
 
@@ -13,14 +13,14 @@ use commonware_storage::{
     merkle::{mmr, Location},
     qmdb::{
         any::unordered::variable::Db as LocalUnorderedDb,
-        current::{batch::Grafts, ordered::variable::Db as LocalOrderedDb, proof::OpsRootWitness},
+        current::ordered::variable::Db as LocalOrderedDb,
         immutable::variable::{Db as Immutable, Operation as ImmutableOperation},
         keyless::variable::{Db as Keyless, Operation as KeylessOperation},
     },
     translator::TwoCap,
 };
 use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16, NZU64};
-use exoware_qmdb::MAX_OPERATION_SIZE;
+use exoware_qmdb::{adapter::upload::Publication, MAX_OPERATION_SIZE};
 use exoware_sdk::PrefixedStoreClient;
 use std::num::NonZeroU64;
 
@@ -369,32 +369,26 @@ async fn build_immutable_source(
 // -------------------- Ordered (with current boundary) --------------------
 
 const N: usize = 32;
-type OrderedOp =
-    commonware_storage::qmdb::any::ordered::variable::Operation<mmr::Family, Vec<u8>, Vec<u8>>;
+type OrderedPublication = Publication<
+    mmr::Family,
+    Digest,
+    commonware_storage::qmdb::any::ordered::variable::Update<Vec<u8>, Vec<u8>>,
+    N,
+>;
 
 #[tokio::test]
 async fn test_mirror_ordered_from_local() {
     let store_client = common::local_store_client().await;
 
-    let (ops1, latest1, root1, witness1, boundary1) = build_current_ordered_source(vec![vec![
+    let (latest1, root1, publications1) = build_current_ordered_source(vec![vec![
         (b"alpha".to_vec(), Some(b"one".to_vec())),
         (b"beta".to_vec(), Some(b"two".to_vec())),
     ]])
     .await;
     let upload_client = store_client.unprefixed();
-    common::commit_current_operations::<mmr::Family, _, N>(
-        &upload_client,
-        &ops1,
-        &(
-            ((0..=MAX_OPERATION_SIZE).into(), ()),
-            ((0..=MAX_OPERATION_SIZE).into(), ()),
-        ),
-        root1,
-        &witness1,
-        &boundary1,
-    )
-    .await
-    .expect("upload 1");
+    common::commit_publications(&upload_client, &publications1)
+        .await
+        .expect("upload 1");
 
     let qmdb_client: exoware_qmdb::adapter::Ordered<mmr::Family, Sha256, Vec<u8>, Vec<u8>, N> =
         exoware_qmdb::adapter::Ordered::new(
@@ -411,9 +405,8 @@ async fn test_mirror_ordered_from_local() {
         "remote root must match local (after batch 1)"
     );
 
-    // Rebuild the same history plus one batch, then upload the full operation log with only the
-    // new batch's grafts.
-    let (ops_total, latest2, root2, witness2, boundary_delta) = build_current_ordered_source(vec![
+    // Rebuild the same history plus one batch, then upload only the new batch's publication.
+    let (latest2, root2, publications2) = build_current_ordered_source(vec![
         vec![
             (b"alpha".to_vec(), Some(b"one".to_vec())),
             (b"beta".to_vec(), Some(b"two".to_vec())),
@@ -421,20 +414,14 @@ async fn test_mirror_ordered_from_local() {
         vec![(b"alpha".to_vec(), Some(b"one-updated".to_vec()))],
     ])
     .await;
-
-    common::commit_current_operations::<mmr::Family, _, N>(
-        &upload_client,
-        &ops_total,
-        &(
-            ((0..=MAX_OPERATION_SIZE).into(), ()),
-            ((0..=MAX_OPERATION_SIZE).into(), ()),
-        ),
-        root2,
-        &witness2,
-        &boundary_delta,
-    )
-    .await
-    .expect("upload 2");
+    assert_eq!(
+        publications2[publications1.len() - 1].root,
+        root1,
+        "rebuilt history must match the uploaded one"
+    );
+    common::commit_publications(&upload_client, &publications2[publications1.len()..])
+        .await
+        .expect("upload 2");
     assert_eq!(
         qmdb_client.root_at(latest2).await.expect("root_at 2"),
         root2,
@@ -444,17 +431,11 @@ async fn test_mirror_ordered_from_local() {
 
 type OrderedBatch = Vec<(Vec<u8>, Option<Vec<u8>>)>;
 
-/// Apply `batches` to a new source, returning its operations, tip, root, witness, and last batch's
-/// grafts.
+/// Apply `batches` to a new source, returning its tip, root, and publications starting with the
+/// initial commit's.
 async fn build_current_ordered_source(
     batches: Vec<OrderedBatch>,
-) -> (
-    Vec<OrderedOp>,
-    Location<mmr::Family>,
-    Digest,
-    OpsRootWitness<mmr::Family, Digest>,
-    Grafts<mmr::Family, Digest, N>,
-) {
+) -> (Location<mmr::Family>, Digest, Vec<OrderedPublication>) {
     tokio::task::spawn_blocking(move || {
         cw_tokio::Runner::default().start(|context| async move {
             let page_cache = CacheRef::new(NZU16!(64), NZUsize!(8));
@@ -483,7 +464,8 @@ async fn build_current_ordered_source(
             )
             .await
             .expect("init");
-            let mut boundary = None;
+            let mut publications =
+                vec![Publication::initial(&db).expect("initial publication must be readable")];
             for batch in batches {
                 let finalized = {
                     let mut b = db.new_batch();
@@ -492,21 +474,16 @@ async fn build_current_ordered_source(
                     }
                     b.merkleize(&db).await.expect("merkleize")
                 };
-                boundary = Some(finalized.grafts());
+                publications.push(
+                    Publication::read(&finalized, &db).expect("publication must be readable"),
+                );
                 db = db.apply_batch(finalized).await.expect("apply");
             }
             let latest = db.bounds().end - 1;
-            let n = NonZeroU64::new(*latest + 1).unwrap();
-            let (_, ops) = db
-                .ops_historical_proof(latest + 1, Location::<mmr::Family>::new(0), n)
-                .await
-                .expect("ops_historical_proof");
-            let boundary = boundary.expect("batches must not be empty");
             let root = db.root();
-            let witness = db.ops_root_witness().clone();
             db = db.sync().await.expect("sync");
             db.destroy().await.expect("destroy");
-            (ops, latest, root, witness, boundary)
+            (latest, root, publications)
         })
     })
     .await
