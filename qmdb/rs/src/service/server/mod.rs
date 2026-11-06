@@ -54,8 +54,7 @@ fn qmdb_error_to_connect(err: QmdbError) -> ConnectError {
             rpc
         }
         QmdbError::Client(client_err) => ConnectError::internal(client_err.to_string()),
-        QmdbError::EmptyBatch
-        | QmdbError::EmptyProofRequest
+        QmdbError::EmptyProofRequest
         | QmdbError::InvalidRangeLength
         | QmdbError::RangeLimitTooLarge { .. }
         | QmdbError::InvalidKeyRange { .. }

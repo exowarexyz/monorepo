@@ -93,8 +93,6 @@ impl From<crate::request::InvalidLocations> for QmdbError {
 pub enum QmdbError {
     #[error(transparent)]
     Client(#[from] ClientError),
-    #[error("batch must contain at least one operation")]
-    EmptyBatch,
     #[error("proof request must contain at least one key")]
     EmptyProofRequest,
     #[error("range proof max_locations must be > 0")]
