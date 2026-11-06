@@ -1,7 +1,7 @@
 //! Unordered QMDB codecs and proof families through native and Connect adapters
 
 use crate::common;
-use commonware_codec::{Codec, Decode as _, Encode, Read};
+use commonware_codec::{Codec, Encode, Read};
 use commonware_cryptography::Sha256;
 use commonware_parallel::Sequential;
 use commonware_runtime::{tokio as cw_tokio, Runner as _};
@@ -19,7 +19,7 @@ use commonware_utils::{iter::zip_eq, NZUsize, NZU16};
 use exoware_qmdb::{
     adapter::upload::{
         prepare_authenticated_range, prepare_publication, stage_authenticated_range,
-        stage_watermark, AuthenticatedOperationRange, Publication, PublicationCfg, UploadOperation,
+        stage_watermark, AuthenticatedOperationRange, Publication, UploadOperation,
     },
     service::{
         client::rpc::{CurrentOperationClient, OperationLogClient},
@@ -33,13 +33,10 @@ use std::{fmt::Debug, num::NonZeroU64, sync::Arc};
 const N: usize = 32;
 type Digest = commonware_cryptography::sha256::Digest;
 
-/// Upper bound on each decoded publication's operations, bitmap chunks, and grafted nodes.
-const PUBLICATION_LIMIT: usize = 64;
-
 struct Snapshot<F: Graftable, K: QmdbKey, E: ValueEncoding> {
     start: Location<F>,
-    proof: Proof<F, Digest>,
-    pinned_nodes: Vec<Digest>,
+    /// Range proof and pins that upload a database without current state.
+    range: Option<(Proof<F, Digest>, Vec<Digest>)>,
     operations: Vec<unordered::Operation<F, K, E>>,
     ops_root: Digest,
     current: Option<Publication<F, Digest, unordered::Update<K, E>, N>>,
@@ -107,36 +104,10 @@ async fn check_mirror<F, K, V, E>(
             .iter()
             .map(|operation| operation.encode().to_vec())
             .collect::<Vec<_>>();
-        let authenticated = AuthenticatedOperationRange {
-            start_location: snapshot.start,
-            end_location: snapshot.proof.leaves,
-            inactive_peaks: snapshot.proof.inactive_peaks,
-            pinned_nodes: &snapshot.pinned_nodes,
-            encoded_operations: &encoded_operations,
-        };
-        assert!(
-            prepare_authenticated_range::<F, Sha256, unordered::Operation<F, K, E>, Sequential>(
-                &authenticated,
-                &wrong_root,
-                &op_cfg,
-                &Sequential
-            )
-            .is_err()
-        );
-
         let prepared = match &snapshot.current {
             // Current batches travel as encoded publications and are verified after decoding
             Some(publication) => {
-                let decoded = Publication::<F, Digest, unordered::Update<K, E>, N>::decode_cfg(
-                    publication.encode(),
-                    &PublicationCfg {
-                        operation: op_cfg.clone(),
-                        operations: (0..=PUBLICATION_LIMIT).into(),
-                        chunks: (0..=PUBLICATION_LIMIT).into(),
-                        grafted_nodes: (0..=PUBLICATION_LIMIT).into(),
-                    },
-                )
-                .expect("publication must decode");
+                let decoded = common::decode_publication(publication, op_cfg.clone());
                 assert_eq!(decoded.start, snapshot.start);
                 assert_eq!(
                     decoded.operations.as_slice(),
@@ -151,13 +122,33 @@ async fn check_mirror<F, K, V, E>(
                 prepare_publication::<F, Sha256, _, _, N>(&decoded, &publication.root, &Sequential)
                     .expect("publication must prepare")
             }
-            None => prepare_authenticated_range::<
-                F,
-                Sha256,
-                unordered::Operation<F, K, E>,
-                Sequential,
-            >(&authenticated, &snapshot.ops_root, &op_cfg, &Sequential)
-            .expect("prepare source batch"),
+            None => {
+                let (proof, pinned_nodes) = snapshot
+                    .range
+                    .as_ref()
+                    .expect("operation-log snapshot must carry a range proof");
+                let authenticated = AuthenticatedOperationRange {
+                    start_location: snapshot.start,
+                    end_location: proof.leaves,
+                    inactive_peaks: proof.inactive_peaks,
+                    pinned_nodes,
+                    encoded_operations: &encoded_operations,
+                };
+                assert!(prepare_authenticated_range::<
+                    F,
+                    Sha256,
+                    unordered::Operation<F, K, E>,
+                    Sequential,
+                >(&authenticated, &wrong_root, &op_cfg, &Sequential)
+                .is_err());
+                prepare_authenticated_range::<F, Sha256, unordered::Operation<F, K, E>, Sequential>(
+                    &authenticated,
+                    &snapshot.ops_root,
+                    &op_cfg,
+                    &Sequential,
+                )
+                .expect("prepare source batch")
+            }
         };
         let mut data = StoreWriteBatch::new();
         stage_authenticated_range(&prefixed, prepared, &mut data).expect("stage source batch");
@@ -511,19 +502,6 @@ macro_rules! capture_batch_proof {
     };
 }
 
-macro_rules! applied_batch_proof {
-    (any, $db:ident, $start:expr, $count:expr) => {
-        $db.historical_proof($db.bounds().end, $start, $count)
-            .await
-            .expect("source batch historical proof")
-    };
-    (current, $db:ident, $start:expr, $count:expr) => {
-        $db.ops_historical_proof($db.bounds().end, $start, $count)
-            .await
-            .expect("source batch historical proof")
-    };
-}
-
 macro_rules! case {
     ($name:ident, $state:ident, $family:ty, $encoding:ident, $key:ident, $value:ident) => {
         #[tokio::test]
@@ -558,14 +536,13 @@ macro_rules! case {
                     let initial_count = NonZeroU64::new(*db.bounds().end).expect("initial commit");
                     let (proof, operations): (_, Vec<Op>) =
                         source_proof!($state, db, initial_count);
-                    let initial_publication = publication!($state, db);
+                    let current = publication!($state, db);
                     snapshots.push(Snapshot {
                         start: Location::new(0),
-                        proof,
-                        pinned_nodes: Vec::new(),
+                        range: current.is_none().then_some((proof, Vec::new())),
                         operations,
                         ops_root: ops_root!($state, db),
-                        current: initial_publication,
+                        current,
                         values: vec![None, None, None],
                     });
 
@@ -597,18 +574,6 @@ macro_rules! case {
                                 previous.operations
                             );
                         }
-                        let (proof, pinned_nodes) = match captured {
-                            Some(proof) => proof,
-                            None => {
-                                let appended_count = NonZeroU64::new(appended.len() as u64)
-                                    .expect("batch has a commit");
-                                let (proof, proof_operations) =
-                                    applied_batch_proof!($state, db, start, appended_count);
-                                assert_eq!(proof_operations, *appended);
-                                let pins = db.pinned_nodes_at(start).await.expect("source pins");
-                                (proof, pins)
-                            }
-                        };
                         let expected = if round == 0 {
                             vec![Some(values[0].clone()), Some(values[1].clone()), None]
                         } else {
@@ -619,8 +584,7 @@ macro_rules! case {
                         }
                         snapshots.push(Snapshot {
                             start,
-                            proof,
-                            pinned_nodes,
+                            range: captured,
                             ops_root: ops_root!($state, db),
                             operations,
                             current: publication,

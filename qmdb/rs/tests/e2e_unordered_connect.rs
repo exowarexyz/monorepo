@@ -4,7 +4,6 @@
 mod common;
 
 use bytes::Bytes;
-use commonware_codec::{Decode as _, Encode as _};
 use commonware_cryptography::Sha256;
 use commonware_macros::boxed;
 use commonware_runtime::{tokio as cw_tokio, Runner as _};
@@ -22,7 +21,7 @@ use commonware_storage::{
 use commonware_utils::{NZUsize, NZU16, NZU64};
 use connectrpc::{client::ClientConfig, ErrorCode};
 use exoware_qmdb::{
-    adapter::upload::{Publication, PublicationCfg},
+    adapter::upload::Publication,
     service::{
         client::rpc::{CurrentOperationClient, OperationLogClient, OperationLogSubscribeProof},
         proto::qmdb::v1::{
@@ -845,7 +844,6 @@ async fn aligned_commit_boundary<F: commonware_storage::merkle::Graftable + Part
     F::PendingChunk<Digest>: 'static,
 {
     type Operation<F> = UnorderedQmdbOperation<F, Digest, Vec<u8>>;
-    type SourcePublication<F> = Publication<F, Digest, UnorderedQmdbUpdate<Digest, Vec<u8>>, N>;
     type Db<F> = LocalCurrentUnorderedDb<
         F,
         cw_tokio::Context,
@@ -943,20 +941,11 @@ async fn aligned_commit_boundary<F: commonware_storage::merkle::Graftable + Part
         exoware_qmdb::service::client::Unordered::<_, F, Sha256, Digest, Vec<u8>, N>::plaintext(
             &url, op_cfg,
         );
-    let publication_cfg = PublicationCfg {
-        operation: op_cfg,
-        operations: (0..=MAX_OPERATION_SIZE).into(),
-        chunks: (0..=MAX_OPERATION_SIZE).into(),
-        grafted_nodes: (0..=MAX_OPERATION_SIZE).into(),
-    };
     for (operations, publications) in snapshots {
         // Upload each boundary from its publications' encodings.
         let decoded = publications
             .iter()
-            .map(|publication| {
-                SourcePublication::<F>::decode_cfg(publication.encode(), &publication_cfg)
-                    .expect("publication must decode")
-            })
+            .map(|publication| common::decode_publication(publication, op_cfg))
             .collect::<Vec<_>>();
         common::commit_publications(&prefixed, &decoded)
             .await

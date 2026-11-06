@@ -28,7 +28,7 @@ use commonware_storage::{
 };
 use commonware_utils::{NZUsize, NZU16, NZU64};
 use exoware_qmdb::{
-    adapter::upload::{prepare_publication, Publication, PublicationCfg},
+    adapter::upload::{prepare_publication, Publication},
     proof::RawKeyLookupProof,
     ProofKind, QmdbError, MAX_OPERATION_SIZE,
 };
@@ -91,16 +91,6 @@ fn op_cfg<F: Family>() -> <BatchOperation<F> as commonware_codec::Read>::Cfg {
 
 fn key_cfg() -> <Vec<u8> as commonware_codec::Read>::Cfg {
     ((0..=MAX_OPERATION_SIZE).into(), ())
-}
-
-fn publication_cfg<F: Graftable>(
-) -> PublicationCfg<<BatchOperation<F> as commonware_codec::Read>::Cfg> {
-    PublicationCfg {
-        operation: op_cfg::<F>(),
-        operations: (1..=4096).into(),
-        chunks: (0..=1024).into(),
-        grafted_nodes: (0..=1024).into(),
-    }
 }
 
 struct VariableSource<F: Graftable> {
@@ -970,7 +960,6 @@ where
     F: Graftable,
     BatchOperation<F>: commonware_codec::Codec + Clone,
 {
-    use commonware_codec::{Decode as _, Encode as _};
     use commonware_parallel::Sequential;
     use exoware_qmdb::adapter::upload::{stage_authenticated_range, stage_watermark};
     use exoware_sdk::StoreWriteBatch;
@@ -981,11 +970,7 @@ where
 
             // Persist each publication in encoded form and prepare it after decoding.
             let prepare = |publication: &VariablePublication<F, N>| {
-                let decoded = VariablePublication::<F, N>::decode_cfg(
-                    publication.encode(),
-                    &publication_cfg::<F>(),
-                )
-                .expect("encoded publication must decode");
+                let decoded = common::decode_publication(publication, op_cfg::<F>());
                 prepare_publication::<F, Sha256, _, _, N>(&decoded, &publication.root, &Sequential)
                     .expect("decoded publication must verify")
             };

@@ -7,6 +7,7 @@ use axum::{
     serve::{Listener, ListenerExt},
     Router,
 };
+use commonware_codec::{Decode as _, Encode as _, Read};
 use commonware_cryptography::Digest;
 use commonware_parallel::Sequential;
 use commonware_runtime::buffer::paged::CacheRef;
@@ -29,7 +30,8 @@ use connectrpc::{
 };
 use exoware_qmdb::{
     adapter::upload::{
-        prepare_publication, stage_authenticated_range, Publication, UploadOperation,
+        prepare_publication, stage_authenticated_range, Publication, PublicationCfg,
+        UploadOperation,
     },
     service::proto::qmdb::v1::{
         GetOperationRangeRequest, GetOperationRangeResponse, GetOperationsRequest,
@@ -213,6 +215,26 @@ where
     exoware_qmdb::adapter::upload::stage_watermark(client, latest, &mut batch)?;
     batch.commit(client.client()).await?;
     Ok(())
+}
+
+/// Decode `publication` from its encoding, as a writer that deferred its upload would.
+#[allow(dead_code)]
+pub fn decode_publication<F, U, const N: usize>(
+    publication: &Publication<F, commonware_cryptography::sha256::Digest, U, N>,
+    operation: <AnyOperation<F, U> as Read>::Cfg,
+) -> Publication<F, commonware_cryptography::sha256::Digest, U, N>
+where
+    F: Graftable,
+    U: Update,
+    AnyOperation<F, U>: UploadOperation<F>,
+{
+    let cfg = PublicationCfg {
+        operation,
+        operations: (..).into(),
+        chunks: (..).into(),
+        grafted_nodes: (..).into(),
+    };
+    Publication::decode_cfg(publication.encode(), &cfg).expect("publication must decode")
 }
 
 #[allow(dead_code)]

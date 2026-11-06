@@ -5,7 +5,7 @@
 mod common;
 
 use bytes::Bytes;
-use commonware_codec::{Decode as _, Encode};
+use commonware_codec::Encode;
 use commonware_cryptography::Sha256;
 use commonware_runtime::{tokio as cw_tokio, Runner as _};
 use commonware_storage::{
@@ -25,7 +25,7 @@ use connectrpc::{
     client::ClientConfig, Chain, ConnectRpcService, RequestContext as Context, ServiceRequest,
 };
 use exoware_qmdb::{
-    adapter::upload::{prepare_publication, Publication, PublicationCfg},
+    adapter::upload::{prepare_publication, Publication},
     proof::{RawKeyExclusionProof, RawKeyLookupProof, VerifiedKeyLookup},
     service::proto::qmdb::v1::{
         current_key_lookup_result, CurrentOperationServiceClient,
@@ -258,16 +258,9 @@ async fn commit_upload(store_client: &StoreClient, batch: &SourceBatch) {
 /// Stage the rows a writer stores for `source`, preparing each publication from its encoding.
 fn current_snapshot_rows(source: &SourceBatch) -> BTreeMap<Bytes, Bytes> {
     let staging = PrefixedStoreClient::empty(StoreClient::new("http://127.0.0.1:1"));
-    let cfg = PublicationCfg {
-        operation: op_cfg(),
-        operations: (0..=MAX_OPERATION_SIZE).into(),
-        chunks: (0..=MAX_OPERATION_SIZE).into(),
-        grafted_nodes: (0..=MAX_OPERATION_SIZE).into(),
-    };
     let mut batch = StoreWriteBatch::new();
     for publication in &source.publications {
-        let decoded = BatchPublication::decode_cfg(publication.encode(), &cfg)
-            .expect("publication must decode");
+        let decoded = common::decode_publication(publication, op_cfg());
         let prepared = prepare_publication::<mmr::Family, Sha256, _, _, N>(
             &decoded,
             &publication.root,
