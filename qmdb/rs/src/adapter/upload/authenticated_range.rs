@@ -106,7 +106,6 @@ pub struct PreparedAuthenticatedRange<D: Digest, F: Family> {
     pinned_nodes: Vec<(Position<F>, D)>,
     start_location: Location<F>,
     latest_location: Location<F>,
-    ops_root: D,
 }
 
 impl<D: Digest, F: Family> PreparedAuthenticatedRange<D, F> {
@@ -131,9 +130,9 @@ impl<D: Digest, F: Family> PreparedAuthenticatedRange<D, F> {
 }
 
 impl<D: Digest, F: Graftable> PreparedAuthenticatedRange<D, F> {
-    /// Add a current batch's state rows at this range's final location, after checking that
-    /// `witness` binds the authenticated operation root to `root`.
-    fn with_current_state<H: Hasher<Digest = D>, const N: usize>(
+    /// Add a current batch's state rows at this range's final location. The caller has checked
+    /// that `witness` binds the authenticated operation root to `root`.
+    fn with_current_state<const N: usize>(
         mut self,
         root: D,
         witness: &OpsRootWitness<F, D>,
@@ -141,11 +140,6 @@ impl<D: Digest, F: Graftable> PreparedAuthenticatedRange<D, F> {
         chunks: &[(u64, [u8; N])],
         grafted_nodes: &[(Position<F>, D)],
     ) -> Result<Self, QmdbError> {
-        if witness.root::<H>(&self.ops_root) != root {
-            return Err(QmdbError::CorruptData(
-                "current root must commit to the authenticated operation root".into(),
-            ));
-        }
         self.rows.reserve(2 + chunks.len() + grafted_nodes.len());
         self.rows.push((
             encode_current_meta_key(self.latest_location),
@@ -429,15 +423,22 @@ where
         encoded_operations: &encoded_operations,
     };
 
-    // The operations are already decoded, so preparation borrows them and skips decoding. The
-    // current-state rows are added only if the witness binds the rebuilt operation root to `root`.
-    prepare_range::<F, H, AnyOperation<F, U>, _, S>(
+    // The operations are already decoded, so preparation borrows them and skips decoding.
+    let prepared = prepare_range::<F, H, AnyOperation<F, U>, _, S>(
         &authenticated,
         &publication.ops_root,
         strategy,
         |offset, _, _| Ok(&operations[offset]),
-    )?
-    .with_current_state::<H, N>(
+    )?;
+
+    // The current-state rows are added only if the witness binds the authenticated operation root
+    // to `root`.
+    if publication.witness.root::<H>(&publication.ops_root) != publication.root {
+        return Err(QmdbError::CorruptData(
+            "current root must commit to the authenticated operation root".into(),
+        ));
+    }
+    prepared.with_current_state::<N>(
         publication.root,
         &publication.witness,
         publication.pruned_chunks,
@@ -561,7 +562,6 @@ where
         pinned_nodes,
         start_location: start,
         latest_location,
-        ops_root: *expected_root,
     })
 }
 
@@ -1236,7 +1236,7 @@ mod tests {
     }
 
     #[test]
-    fn test_current_state_must_bind_to_the_authenticated_operation_root() {
+    fn test_current_state_adds_rows_at_the_final_location() {
         let operations = committed_encoded_operations::<mmr::Family>();
         let authenticated = authenticated_range_fixture::<mmr::Family>(&operations, 3, 0);
         let witness = OpsRootWitness::<mmr::Family, _> {
@@ -1249,7 +1249,7 @@ mod tests {
         let initial_rows = prepared.rows.len();
         let pins = prepared.pinned_nodes.clone();
         let prepared = prepared
-            .with_current_state::<Sha256, 32>(root, &witness, 0, &[], &[])
+            .with_current_state::<32>(root, &witness, 0, &[], &[])
             .expect("matching binding");
         assert_eq!(prepared.rows.len(), initial_rows + 2);
         assert_eq!(prepared.pinned_nodes, pins);
@@ -1259,13 +1259,6 @@ mod tests {
             staged_rows(prepared.without_pins_at(&existing_nodes)),
             mandatory
         );
-
-        let unrelated_root = Sha256::hash(&[b"unrelated current root"]);
-        assert!(authenticated
-            .prepare()
-            .unwrap()
-            .with_current_state::<Sha256, 32>(unrelated_root, &witness, 0, &[], &[])
-            .is_err());
     }
 
     #[test]
@@ -1284,9 +1277,8 @@ mod tests {
             pinned_nodes: Vec::new(),
             start_location: Location::new(0),
             latest_location,
-            ops_root: digest,
         }
-        .with_current_state::<Sha256, 32>(root, &witness, 0, &[], &[(ops_position, digest)])
+        .with_current_state::<32>(root, &witness, 0, &[], &[(ops_position, digest)])
         .expect("matching binding");
         let grafted_position = grafting::ops_to_grafted_pos(ops_position, grafting::height::<32>());
         let expected_key = encode_grafted_node_key(grafted_position, latest_location);
@@ -1313,7 +1305,7 @@ mod tests {
         assert!(authenticated
             .prepare()
             .unwrap()
-            .with_current_state::<Sha256, 32>(root, &witness, 0, &[], &[leaf])
+            .with_current_state::<32>(root, &witness, 0, &[], &[leaf])
             .is_err());
     }
 

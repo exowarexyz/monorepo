@@ -152,13 +152,8 @@ pub struct RawBatchMultiProof<D: Digest, F: Graftable> {
 impl<D: Digest, F: Graftable> RawBatchMultiProof<D, F> {
     pub fn verify<H: Hasher<Digest = D>>(&self) -> bool {
         let hasher = commonware_storage::qmdb::hasher::<H>();
-        let elements: Vec<_> = self
-            .operations
-            .iter()
-            .map(|(loc, bytes)| (*loc, bytes.as_ref()))
-            .collect();
         self.proof
-            .verify_multi_inclusion(&hasher, &elements, &self.ops_root)
+            .verify_multi_inclusion(&hasher, &self.operations, &self.ops_root)
     }
 }
 

@@ -229,15 +229,15 @@ async fn seed(
             }
 
             // Resume the key counter from the number of applied batches.
-            let (_, operations) = source_db
+            let committed_batches = source_db
                 .ops_historical_proof(
                     end,
                     Location::new(0),
                     NonZeroU64::new(*end).expect("initial commit"),
                 )
                 .await
-                .expect("read local operation history");
-            let committed_batches = operations
+                .expect("read local operation history")
+                .1
                 .iter()
                 .filter(|operation| matches!(operation, Operation::CommitFloor(_, _)))
                 .count()
