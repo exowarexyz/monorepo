@@ -15,17 +15,17 @@ use commonware_storage::{
         operation::Key as QmdbKey,
     },
 };
-use commonware_utils::{iter::zip_eq, NZUsize, NZU16, NZU64};
+use commonware_utils::{iter::zip_eq, NZUsize, NZU16};
 use exoware_qmdb::{
     adapter::upload::{
-        prepare_authenticated_range, recover_boundary_state, stage_authenticated_range,
-        stage_watermark, AuthenticatedOperationRange, UploadOperation,
+        prepare_authenticated_range, prepare_publication, stage_authenticated_range,
+        stage_watermark, AuthenticatedOperationRange, Publication, UploadOperation,
     },
     service::{
         client::rpc::{CurrentOperationClient, OperationLogClient},
         proto::qmdb::v1::{GetCurrentOperationRangeRequest, GetOperationRangeRequest},
     },
-    CurrentBoundaryState, MAX_OPERATION_SIZE,
+    MAX_OPERATION_SIZE,
 };
 use exoware_sdk::{PrefixedStoreClient, StoreWriteBatch};
 use std::{fmt::Debug, num::NonZeroU64, sync::Arc};
@@ -35,11 +35,11 @@ type Digest = commonware_cryptography::sha256::Digest;
 
 struct Snapshot<F: Graftable, K: QmdbKey, E: ValueEncoding> {
     start: Location<F>,
-    proof: Proof<F, Digest>,
-    pinned_nodes: Vec<Digest>,
+    /// Range proof and pins that upload a database without current state.
+    range: Option<(Proof<F, Digest>, Vec<Digest>)>,
     operations: Vec<unordered::Operation<F, K, E>>,
     ops_root: Digest,
-    current: Option<CurrentBoundaryState<Digest, N, F>>,
+    current: Option<Publication<F, Digest, unordered::Update<K, E>, N>>,
     values: Vec<Option<E::Value>>,
 }
 
@@ -104,35 +104,52 @@ async fn check_mirror<F, K, V, E>(
             .iter()
             .map(|operation| operation.encode().to_vec())
             .collect::<Vec<_>>();
-        let authenticated = AuthenticatedOperationRange {
-            start_location: snapshot.start,
-            end_location: snapshot.proof.leaves,
-            inactive_peaks: snapshot.proof.inactive_peaks,
-            pinned_nodes: &snapshot.pinned_nodes,
-            encoded_operations: &encoded_operations,
+        let prepared = match &snapshot.current {
+            // Current batches travel as encoded publications and are verified after decoding
+            Some(publication) => {
+                let decoded = common::decode_publication(publication, op_cfg.clone());
+                assert_eq!(decoded.start, snapshot.start);
+                assert_eq!(
+                    decoded.operations.as_slice(),
+                    &snapshot.operations[*snapshot.start as usize..]
+                );
+                assert!(prepare_publication::<F, Sha256, _, _, N>(
+                    &decoded,
+                    &wrong_root,
+                    &Sequential
+                )
+                .is_err());
+                prepare_publication::<F, Sha256, _, _, N>(&decoded, &publication.root, &Sequential)
+                    .expect("publication must prepare")
+            }
+            None => {
+                let (proof, pinned_nodes) = snapshot
+                    .range
+                    .as_ref()
+                    .expect("operation-log snapshot must carry a range proof");
+                let authenticated = AuthenticatedOperationRange {
+                    start_location: snapshot.start,
+                    end_location: proof.leaves,
+                    inactive_peaks: proof.inactive_peaks,
+                    pinned_nodes,
+                    encoded_operations: &encoded_operations,
+                };
+                assert!(prepare_authenticated_range::<
+                    F,
+                    Sha256,
+                    unordered::Operation<F, K, E>,
+                    Sequential,
+                >(&authenticated, &wrong_root, &op_cfg, &Sequential)
+                .is_err());
+                prepare_authenticated_range::<F, Sha256, unordered::Operation<F, K, E>, Sequential>(
+                    &authenticated,
+                    &snapshot.ops_root,
+                    &op_cfg,
+                    &Sequential,
+                )
+                .expect("prepare source batch")
+            }
         };
-        assert!(
-            prepare_authenticated_range::<F, Sha256, unordered::Operation<F, K, E>, Sequential>(
-                &authenticated,
-                &wrong_root,
-                &op_cfg,
-                &Sequential
-            )
-            .is_err()
-        );
-
-        let mut prepared = prepare_authenticated_range::<
-            F,
-            Sha256,
-            unordered::Operation<F, K, E>,
-            Sequential,
-        >(&authenticated, &snapshot.ops_root, &op_cfg, &Sequential)
-        .expect("prepare source batch");
-        if let Some(boundary) = &snapshot.current {
-            prepared = prepared
-                .with_current_boundary::<Sha256, N>(boundary)
-                .expect("attach current boundary");
-        }
         let mut data = StoreWriteBatch::new();
         stage_authenticated_range(&prefixed, prepared, &mut data).expect("stage source batch");
         data.commit(&store).await.expect("persist source batch");
@@ -166,7 +183,7 @@ async fn check_mirror<F, K, V, E>(
         let trusted_root = snapshot
             .current
             .as_ref()
-            .map_or(snapshot.ops_root, |b| b.root);
+            .map_or(snapshot.ops_root, |publication| publication.root);
         assert_eq!(native_range.root, trusted_root);
         assert_eq!(native_range.operations, snapshot.operations);
         assert_eq!(local.root_at(tip).await.expect("root"), trusted_root);
@@ -366,7 +383,10 @@ async fn check_mirror<F, K, V, E>(
 
     // Publishing a later batch must preserve proofs at the earlier trusted tip
     let first = &snapshots[0];
-    let trusted_root = first.current.as_ref().map_or(first.ops_root, |b| b.root);
+    let trusted_root = first
+        .current
+        .as_ref()
+        .map_or(first.ops_root, |publication| publication.root);
     let proof = remote
         .get_operation_range(
             GetOperationRangeRequest {
@@ -456,27 +476,16 @@ macro_rules! ops_root {
     };
 }
 
-macro_rules! current_boundary {
-    (any, $f:ty, $db:ident, $ops:ident, $previous:expr) => {
+macro_rules! publication {
+    (any, $db:ident $(, $batch:ident)?) => {
         None
     };
-    (current, $f:ty, $db:ident, $ops:ident, $previous:expr) => {{
-        let source = &$db;
-        Some(
-            recover_boundary_state::<$f, Sha256, _, N, _, _>(
-                $previous,
-                &$ops,
-                $db.root(),
-                0,
-                $db.ops_root_witness()
-                    .await
-                    .expect("source ops root witness"),
-                |location| common::current_proof_chunk(source.range_proof(location, NZU64!(1))),
-            )
-            .await
-            .expect("recover source current boundary"),
-        )
-    }};
+    (current, $db:ident) => {
+        Some(Publication::initial(&$db).expect("initial publication must be readable"))
+    };
+    (current, $db:ident, $batch:ident) => {
+        Some(Publication::read(&$batch, &$db).expect("batch publication must be readable"))
+    };
 }
 
 macro_rules! capture_batch_proof {
@@ -490,19 +499,6 @@ macro_rules! capture_batch_proof {
     };
     (current, $batch:ident, $db:ident) => {
         None
-    };
-}
-
-macro_rules! applied_batch_proof {
-    (any, $db:ident, $start:expr, $count:expr) => {
-        $db.historical_proof($db.bounds().end, $start, $count)
-            .await
-            .expect("source batch historical proof")
-    };
-    (current, $db:ident, $start:expr, $count:expr) => {
-        $db.ops_historical_proof($db.bounds().end, $start, $count)
-            .await
-            .expect("source batch historical proof")
     };
 }
 
@@ -540,15 +536,13 @@ macro_rules! case {
                     let initial_count = NonZeroU64::new(*db.bounds().end).expect("initial commit");
                     let (proof, operations): (_, Vec<Op>) =
                         source_proof!($state, db, initial_count);
-                    let initial_boundary =
-                        current_boundary!($state, F, db, operations, None::<&[Op]>);
+                    let current = publication!($state, db);
                     snapshots.push(Snapshot {
                         start: Location::new(0),
-                        proof,
-                        pinned_nodes: Vec::new(),
+                        range: current.is_none().then_some((proof, Vec::new())),
                         operations,
                         ops_root: ops_root!($state, db),
-                        current: initial_boundary,
+                        current,
                         values: vec![None, None, None],
                     });
 
@@ -563,18 +557,12 @@ macro_rules! case {
                                 .write(source_keys[1].clone(), None)
                                 .write(source_keys[2].clone(), Some(values[1].clone()))
                         };
-                        let batch = batch
-                            .merkleize(
-                                &db,
-                                None::<V>,
-                                &mut commonware_storage::qmdb::floor::Proportional,
-                            )
-                            .await
-                            .expect("source merkleize");
+                        let batch = batch.merkleize(&db).await.expect("source merkleize");
                         let (start, appended) = batch.operations();
                         let batch_root = batch.root();
                         let captured: Option<(Proof<F, Digest>, Vec<Digest>)> =
                             capture_batch_proof!($state, batch, db);
+                        let publication = publication!($state, db, batch);
                         db = db.apply_batch(batch).await.expect("source apply");
                         assert_eq!(db.root(), batch_root);
                         let count = NonZeroU64::new(*db.bounds().end).expect("nonempty source");
@@ -586,18 +574,6 @@ macro_rules! case {
                                 previous.operations
                             );
                         }
-                        let (proof, pinned_nodes) = match captured {
-                            Some(proof) => proof,
-                            None => {
-                                let appended_count = NonZeroU64::new(appended.len() as u64)
-                                    .expect("batch has a commit");
-                                let (proof, proof_operations) =
-                                    applied_batch_proof!($state, db, start, appended_count);
-                                assert_eq!(proof_operations, *appended);
-                                let pins = db.pinned_nodes_at(start).await.expect("source pins");
-                                (proof, pins)
-                            }
-                        };
                         let expected = if round == 0 {
                             vec![Some(values[0].clone()), Some(values[1].clone()), None]
                         } else {
@@ -606,22 +582,12 @@ macro_rules! case {
                         for (key, value) in source_keys.iter().zip(&expected) {
                             assert_eq!(db.get(key).await.expect("source get"), *value);
                         }
-                        let boundary = current_boundary!(
-                            $state,
-                            F,
-                            db,
-                            operations,
-                            snapshots
-                                .last()
-                                .map(|previous| previous.operations.as_slice())
-                        );
                         snapshots.push(Snapshot {
                             start,
-                            proof,
-                            pinned_nodes,
+                            range: captured,
                             ops_root: ops_root!($state, db),
                             operations,
-                            current: boundary,
+                            current: publication,
                             values: expected,
                         });
                     }

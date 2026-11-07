@@ -1,5 +1,5 @@
-//! Ordered current-boundary recovery across local bitmap-chunk pruning.
-//! Recovery must skip pruned chunks, including the previous commit's chunk.
+//! Ordered current-batch publications across local bitmap-chunk pruning.
+//!
 //! Remote current roots and proofs must match the source at every batch boundary,
 //! including historical watermarks and keys below the latest inactivity floor.
 
@@ -12,21 +12,21 @@ use commonware_runtime::{
 use commonware_storage::{
     merkle::{mmr, Location},
     qmdb::{
-        any::ordered::variable::Operation as OrderedOp,
-        current::ordered::variable::Db as LocalOrderedDb, operation::Operation as _,
+        any::{
+            ordered::{variable::Operation as OrderedOp, Update},
+            value::VariableEncoding,
+        },
+        current::ordered::variable::Db as LocalOrderedDb,
+        operation::Operation as _,
     },
     translator::TwoCap,
 };
 use commonware_utils::{NZUsize, NZU16, NZU64};
-use exoware_qmdb::{
-    adapter::upload::recover_boundary_state, CurrentBoundaryState, MAX_OPERATION_SIZE,
-};
+use exoware_qmdb::{adapter::upload::Publication, MAX_OPERATION_SIZE};
 use exoware_sdk::PrefixedStoreClient;
-use std::num::NonZeroU64;
 
 const N: usize = 32;
 type Digest = commonware_cryptography::sha256::Digest;
-type BatchOp = OrderedOp<mmr::Family, Vec<u8>, Vec<u8>>;
 type Db = LocalOrderedDb<
     mmr::Family,
     cw_tokio::Context,
@@ -37,6 +37,8 @@ type Db = LocalOrderedDb<
     N,
     commonware_parallel::Sequential,
 >;
+type SourcePublication =
+    Publication<mmr::Family, Digest, Update<Vec<u8>, VariableEncoding<Vec<u8>>>, N>;
 
 /// Each batch appends 3 fresh writes and rewrites the key 3 counter-positions
 /// behind. With `N = 32` the bitmap chunk spans 256 bits; the inactivity floor
@@ -47,8 +49,7 @@ const BATCHES: u64 = 150;
 struct BatchOutcome {
     watermark: Location<mmr::Family>,
     root: Digest,
-    delta_ops: Vec<BatchOp>,
-    boundary: CurrentBoundaryState<Digest, N, mmr::Family>,
+    publication: SourcePublication,
 }
 
 struct ExpiredKeySnapshot {
@@ -58,32 +59,14 @@ struct ExpiredKeySnapshot {
     value: Vec<u8>,
 }
 
-async fn boundary_from_db(
-    db: &Db,
-    previous_ops: Option<&[BatchOp]>,
-    operations: &[BatchOp],
-) -> CurrentBoundaryState<Digest, N, mmr::Family> {
-    let ops_root_witness = db.ops_root_witness().await.expect("ops root witness");
-    recover_boundary_state::<mmr::Family, Sha256, _, N, _, _>(
-        previous_ops,
-        operations,
-        db.root(),
-        *db.sync_boundary() / ((N as u64) * 8),
-        ops_root_witness,
-        |location| common::current_proof_chunk(db.range_proof(location, NZU64!(1))),
-    )
-    .await
-    .expect("recover_boundary_state")
-}
-
 #[tokio::test]
 async fn test_mirror_ordered_prune_past_chunk_zero() {
     let store_client = common::local_store_client().await;
 
     // Phase 1 (blocking tokio runtime): drive the local QMDB through BATCHES
-    // batches, capturing each batch's delta, root, and boundary delta. The
-    // boundary recovery must not panic even once chunk 0 has been pruned.
-    let (batches, chunk_zero_pruned, expired_key_snapshot) =
+    // batches, capturing the initial publication and each batch's publication
+    // and root, including after chunk 0 has been pruned.
+    let (initial, batches, chunk_zero_pruned, expired_key_snapshot) =
         tokio::task::spawn_blocking(move || {
             cw_tokio::Runner::default().start(move |context| async move {
                 let page_cache = CacheRef::new(NZU16!(64), NZUsize!(8));
@@ -103,8 +86,9 @@ async fn test_mirror_ordered_prune_past_chunk_zero() {
                 )
                 .await
                 .expect("init");
+                let initial =
+                    Publication::initial(&db).expect("initial publication must be readable");
 
-                let mut previous_ops: Vec<BatchOp> = Vec::new();
                 let mut counter: u64 = 0;
                 let mut batches: Vec<BatchOutcome> = Vec::with_capacity(BATCHES as usize);
                 let mut expired_key_snapshot = None;
@@ -126,15 +110,10 @@ async fn test_mirror_ordered_prune_past_chunk_zero() {
                             batch = batch.write(b"k-00000006".to_vec(), None);
                         }
                         counter += 3;
-                        batch
-                            .merkleize(
-                                &db,
-                                None::<Vec<u8>>,
-                                &mut commonware_storage::qmdb::floor::Proportional,
-                            )
-                            .await
-                            .expect("merkleize")
+                        batch.merkleize(&db).await.expect("merkleize")
                     };
+                    let publication =
+                        Publication::read(&finalized, &db).expect("publication must be readable");
                     db = db.apply_batch(finalized).await.expect("apply");
                     // Current pruning is now explicit in Commonware. Keep the
                     // historical operation log intact for this mirror test while
@@ -144,21 +123,6 @@ async fn test_mirror_ordered_prune_past_chunk_zero() {
                     db = db.prune(prune_boundary).await.expect("prune current");
 
                     let latest = db.bounds().end - 1;
-                    let start = Location::<mmr::Family>::new(previous_ops.len() as u64);
-                    let count = NonZeroU64::new(*latest + 1 - *start).expect("non-zero");
-                    let (_proof, delta) = db
-                        .ops_historical_proof(latest + 1, start, count)
-                        .await
-                        .expect("ops_historical_proof");
-                    let mut cumulative = previous_ops.clone();
-                    cumulative.extend(delta);
-                    let previous_slice = if previous_ops.is_empty() {
-                        None
-                    } else {
-                        Some(previous_ops.as_slice())
-                    };
-                    let boundary = boundary_from_db(&db, previous_slice, &cumulative).await;
-                    let delta_ops: Vec<BatchOp> = cumulative[previous_ops.len()..].to_vec();
                     if counter == 9 {
                         expired_key_snapshot = Some(ExpiredKeySnapshot {
                             watermark: latest,
@@ -170,10 +134,8 @@ async fn test_mirror_ordered_prune_past_chunk_zero() {
                     batches.push(BatchOutcome {
                         watermark: latest,
                         root: db.root(),
-                        delta_ops,
-                        boundary,
+                        publication,
                     });
-                    previous_ops = cumulative;
                 }
 
                 // Probe whether the bitmap-level chunk 0 has been pruned by
@@ -192,6 +154,7 @@ async fn test_mirror_ordered_prune_past_chunk_zero() {
                 db = db.sync().await.expect("sync");
                 db.destroy().await.expect("destroy");
                 (
+                    initial,
                     batches,
                     chunk_zero_pruned,
                     expired_key_snapshot.expect("expired key snapshot"),
@@ -226,20 +189,22 @@ async fn test_mirror_ordered_prune_past_chunk_zero() {
             ((0..=MAX_OPERATION_SIZE).into(), ()),
         );
 
-    let mut operations = Vec::new();
-    for outcome in &batches {
-        operations.extend_from_slice(&outcome.delta_ops);
-        common::commit_current_operations(
-            &upload_client,
-            &operations,
-            &(
-                ((0..=MAX_OPERATION_SIZE).into(), ()),
-                ((0..=MAX_OPERATION_SIZE).into(), ()),
-            ),
-            &outcome.boundary,
-        )
+    // The initial publication serves current reads at location 0 before any batch.
+    common::commit_publications(&upload_client, std::slice::from_ref(&initial))
         .await
-        .expect("upload");
+        .expect("initial upload must succeed");
+    assert_eq!(
+        qmdb_client
+            .root_at(Location::new(0))
+            .await
+            .expect("root at the initial commit must load"),
+        initial.root
+    );
+
+    for outcome in &batches {
+        common::commit_publications(&upload_client, std::slice::from_ref(&outcome.publication))
+            .await
+            .expect("upload");
         let remote_root = qmdb_client
             .root_at(outcome.watermark)
             .await

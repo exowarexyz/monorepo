@@ -31,7 +31,7 @@ use commonware_storage::{
             APPEND_CONTEXT as FIXED_KEYLESS_APPEND_CONTEXT,
             COMMIT_CONTEXT as FIXED_KEYLESS_COMMIT_CONTEXT,
         },
-        verify::{verify_multi_proof, verify_proof_and_pinned_nodes},
+        verify::ProofExt,
     },
 };
 use js_sys::{Array, Object, Reflect, Uint8Array};
@@ -200,7 +200,7 @@ where
     let proof =
         merkle::Proof::<F, H::Digest>::decode_cfg(Copying(proto.proof.as_ref()), &max_digests)
             .map_err(|err| format!("failed to decode operation multi proof: {err}"))?;
-    if !verify_multi_proof::<H, _, _>(&proof, &operations, &target_root) {
+    if !proof.verify_multi::<H, _>(&operations, &target_root) {
         return Err("operation multi proof failed verification".to_string());
     }
     Ok((*root, operations))
@@ -239,7 +239,7 @@ where
         .leaves
         .checked_sub(1)
         .ok_or_else(|| "subscription proof has no leaves".to_string())?;
-    if !verify_multi_proof::<H, _, _>(&proof, &operations, &ops_root) {
+    if !proof.verify_multi::<H, _>(&operations, &ops_root) {
         return Err("operation multi proof failed verification".to_string());
     }
     if proto.ops_root_witness.is_empty() {
@@ -352,8 +352,7 @@ where
             )
         })
         .collect::<Result<Vec<_>, String>>()?;
-    if !verify_proof_and_pinned_nodes::<H, _, _>(
-        &proof,
+    if !proof.verify_with_pinned_nodes::<H, _>(
         start,
         &ordered_operations,
         &pinned_nodes,
@@ -415,10 +414,10 @@ where
             )
         })
         .collect::<Result<Vec<_>, String>>()?;
-    if !proof.verify_proof_and_pinned_nodes(
+    if !proof.verify_range_inclusion_with_pinned_nodes(
         &commonware_storage::qmdb::hasher::<H>(),
-        &proto.encoded_operations,
         start,
+        &proto.encoded_operations,
         &pinned_nodes,
         &target_root,
     ) {
@@ -902,29 +901,23 @@ where
         proto.operations.iter().map(|operation| operation.location),
         proof.leaves.as_u64(),
     )?;
-    let elements = proto
+    let operations = proto
         .operations
         .iter()
         .map(|operation| {
             (
-                operation.encoded_operation.as_ref(),
                 Location::<F>::new(operation.location),
+                operation.encoded_operation.as_ref(),
             )
         })
         .collect::<Vec<_>>();
     if !proof.verify_multi_inclusion(
         &commonware_storage::qmdb::hasher::<H>(),
-        &elements,
+        &operations,
         &target_root,
     ) {
         return Err("operations multi proof failed verification".to_string());
     }
-    // Same pairs, location first. Both tuples have the same size and
-    // alignment, so std collects from `into_iter` into the same allocation.
-    let operations = elements
-        .into_iter()
-        .map(|(operation, location)| (location, operation))
-        .collect();
     Ok((*root, operations))
 }
 

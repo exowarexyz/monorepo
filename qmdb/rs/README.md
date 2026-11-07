@@ -186,25 +186,29 @@ the source to discard them.
 
 ### Current-state boundaries
 
-For a current ordered or unordered database, attach a `CurrentBoundaryState`
-before staging the prepared range:
+For a current ordered or unordered database, upload a `Publication` at every
+batch boundary. Upload `Publication::initial` once for a new database's commit
+at location 0, then read each batch's publication with `Publication::read`
+before applying the batch, because the batch's operations-tree frontier is
+readable only until its changes are flushed. To upload later, persist the
+publication with its codec and decode it with a `PublicationCfg`. Once a
+publication is persisted or uploaded, the source must apply that same batch,
+rebuilding it identically after a restart.
 
 ```rust,ignore
-let prepared = prepared.with_current_boundary::<H, N>(&boundary)?;
+use exoware_qmdb::adapter::upload::{prepare_publication, Publication};
+
+let initial = Publication::initial(&db)?;
+let publication = Publication::read(&batch, &db)?;
+let prepared =
+    prepare_publication::<F, H, U, Sequential, N>(&publication, &trusted_root, &Sequential)?;
 ```
 
-The boundary's root, operation-root witness, bitmap chunks, grafted nodes, and
-`pruned_chunks` count must describe the range's final location, using the source's
-family, hasher, and chunk size `N`. `with_current_boundary` checks the witness's
-binding to the prepared operation-log root, but it does not authenticate the
-supplied chunks, nodes, or pruning count.
-
-Use [`recover_boundary_state`](src/adapter/upload/boundary.rs) to derive and
-authenticate chunks and nodes from current range proofs. For an incremental
-boundary, supply cumulative operation logs before and after one finalized batch
-and proofs from that same applied state. With no previous log, it derives a
-complete boundary for bootstrap or restart. The root, witness, and pruning count
-must come from the same trusted source state.
+`prepare_publication` requires the publication's root to equal the trusted root,
+authenticates its operations and prefix frontier against its operation-log root,
+and checks that its witness binds that root to the trusted root. The bitmap
+chunks, grafted nodes, and `pruned_chunks` count are not authenticated and must
+come from the source that produced the batch.
 
 Boundary rows are versioned by batch location. Unchanged chunks and nodes are
 inherited from earlier boundaries. Retain the rows needed for every historical

@@ -57,10 +57,7 @@ pub mod service;
 pub use adapter::codec::{CHUNK_FAMILY, NODE_FAMILY};
 use commonware_codec::{Copying, DecodeExt};
 use commonware_cryptography::Digest;
-use commonware_storage::{
-    merkle::{self, Family, Graftable, Location},
-    qmdb::current::proof::OpsRootWitness,
-};
+use commonware_storage::merkle::{Family, Location};
 pub use error::{ProofKind, QmdbError};
 
 /// Maximum encoded operation size for QMDB key and value payloads (u16 length on the wire).
@@ -72,31 +69,6 @@ pub struct VersionedValue<K, V, F: Family> {
     pub key: K,
     pub location: Location<F>,
     pub value: Option<V>,
-}
-
-/// Current-state rows for one uploaded current batch boundary.
-///
-/// Current QMDB uploads carry more than the historical op log: each published
-/// batch boundary also stores the current-state root, op-root witness, and the
-/// subset of bitmap chunks and grafted nodes that changed at that boundary.
-/// This struct is that versioned delta payload.
-///
-/// Callers typically obtain it from [`adapter::upload::recover_boundary_state`], using a local
-/// Commonware current DB, then attach it with
-/// [`adapter::upload::PreparedAuthenticatedRange::with_current_boundary`].
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CurrentBoundaryState<D: Digest, const N: usize, F: Graftable> {
-    /// Canonical current-state root at this batch boundary.
-    pub root: D,
-    /// Number of complete, all-zero chunks discarded from the start of the source bitmap.
-    /// Source pruning preserves the root. This count does not delete backend rows.
-    pub pruned_chunks: u64,
-    /// Proof that the raw operation-log root is committed by `root`.
-    pub ops_root_witness: OpsRootWitness<F, D>,
-    /// Changed bitmap chunks keyed by chunk index.
-    pub chunks: Vec<(u64, [u8; N])>,
-    /// Changed grafted digests keyed by ops-space Merkle position.
-    pub grafted_nodes: Vec<(merkle::Position<F>, D)>,
 }
 
 /// A requested watermark and the minimum Store sequence that makes it readable.

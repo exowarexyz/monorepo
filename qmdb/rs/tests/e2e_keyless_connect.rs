@@ -162,16 +162,14 @@ async fn build_source_batch() -> SourceBatch {
                     .new_batch()
                     .append(b"first-value".to_vec())
                     .append(b"second-value".to_vec());
-                batch
-                    .merkleize(&db, None::<Vec<u8>>, db.inactivity_floor_loc())
-                    .await
-                    .expect("merkleize")
+                batch.merkleize(&db).await.expect("merkleize")
             };
             db = db.apply_batch(finalized).await.expect("apply");
             let finalized = {
                 let batch = db.new_batch().append(b"third-value".to_vec());
                 batch
-                    .merkleize(&db, None::<Vec<u8>>, db.bounds().end - 1)
+                    .with_inactivity_floor(db.bounds().end - 1)
+                    .merkleize(&db)
                     .await
                     .expect("merkleize")
             };
@@ -759,7 +757,7 @@ async fn test_keyless_operation_log_source_fetches_api_batches() {
         .iter()
         .map(|operation| operation.encode())
         .collect::<Vec<_>>();
-    assert!(proof.verify_range_inclusion(&hasher, &elements, Location::new(0), &source.root));
+    assert!(proof.verify_range_inclusion(&hasher, Location::new(0), &elements, &source.root));
     assert!(
         callback.is_none(),
         "direct sync source fetches do not allocate an unused validation callback"
