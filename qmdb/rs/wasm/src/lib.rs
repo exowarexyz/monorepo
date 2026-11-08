@@ -338,10 +338,6 @@ where
             Ok((location, operation))
         })
         .collect::<Result<Vec<_>, String>>()?;
-    let ordered_operations = operations
-        .iter()
-        .map(|(_, operation)| operation.clone())
-        .collect::<Vec<_>>();
     let pinned_nodes = proto
         .pinned_nodes
         .iter()
@@ -354,7 +350,7 @@ where
         .collect::<Result<Vec<_>, String>>()?;
     if !proof.verify_with_pinned_nodes::<H, _>(
         start,
-        &ordered_operations,
+        operations.iter().map(|(_, operation)| operation),
         &pinned_nodes,
         &target_root,
     ) {
@@ -490,13 +486,9 @@ where
 
     // Commonware checks the chunk count and sizes, then authenticates the operations and their
     // activity chunks against `root`.
-    let ordered_operations = operations
-        .iter()
-        .map(|(_, operation)| operation.clone())
-        .collect::<Vec<_>>();
     if !proof.verify_with_chunk_size::<H, _>(
         start,
-        &ordered_operations,
+        operations.iter().map(|(_, operation)| operation),
         &proto.chunks,
         config.chunk_size,
         root,

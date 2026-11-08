@@ -409,11 +409,11 @@ async fn build_current_source_batch() -> CurrentSourceBatch {
                     .write(beta, Some(b"two".to_vec()));
                 batch.merkleize(&db).await.expect("merkleize")
             };
-            let root = finalized.root();
             let publication =
-                Publication::read(&finalized, &db).expect("publication must be readable");
+                Publication::from_batch(&finalized, &db).expect("publication must be readable");
             db = db.apply_batch(finalized).await.expect("apply");
 
+            let root = db.root();
             let latest = db.bounds().end - 1;
             let n = NonZeroU64::new(*latest + 1).unwrap();
             let (_proof, ops): (BatchProof, Vec<FixedKeyOperation>) = db
@@ -459,12 +459,9 @@ async fn commit_mmb_upload(store_client: &StoreClient, batch: &MmbAnySourceBatch
 }
 
 async fn commit_current_upload(store_client: &StoreClient, batch: &CurrentSourceBatch) {
-    common::commit_publications(
-        &store_client.unprefixed(),
-        &batch.publications,
-    )
-    .await
-    .expect("commit current upload");
+    common::commit_publications(&store_client.unprefixed(), &batch.publications)
+        .await
+        .expect("commit current upload");
 }
 
 fn latest_operation_for_fixed_key(
@@ -490,8 +487,7 @@ fn latest_operation_for_fixed_key(
 #[tokio::test]
 async fn test_unordered_range_stack_does_not_expose_key_lookup_or_ordered_range_services() {
     let store_client = common::local_store_client().await;
-    let (_qmdb_server, qmdb_url) =
-        spawn_qmdb_range_server(store_client.unprefixed()).await;
+    let (_qmdb_server, qmdb_url) = spawn_qmdb_range_server(store_client.unprefixed()).await;
 
     let err = key_lookup_rpc_client(&qmdb_url)
         .get_many(ProtoGetManyRequest {
@@ -521,8 +517,7 @@ async fn test_unordered_connect_get_operation_range_returns_verifiable_proof() {
     let source = build_any_source_batch().await;
     commit_upload(&store_client, &source).await;
 
-    let (_qmdb_server, qmdb_url) =
-        spawn_qmdb_range_server(store_client.unprefixed()).await;
+    let (_qmdb_server, qmdb_url) = spawn_qmdb_range_server(store_client.unprefixed()).await;
     let connect_client = operation_log_client(&qmdb_url);
 
     let request = ProtoGetOperationRangeRequest {
@@ -572,8 +567,7 @@ async fn test_unordered_connect_get_operations_returns_verifiable_multi_proof() 
     let source = build_any_source_batch().await;
     commit_upload(&store_client, &source).await;
 
-    let (_qmdb_server, qmdb_url) =
-        spawn_qmdb_range_server(store_client.unprefixed()).await;
+    let (_qmdb_server, qmdb_url) = spawn_qmdb_range_server(store_client.unprefixed()).await;
     let tip = u64::try_from(source.operations.len() - 1).expect("tip fits");
     let locations = vec![0, tip / 2, tip];
     let verified = operation_log_client(&qmdb_url)
@@ -607,8 +601,7 @@ async fn test_unordered_current_get_operations_authenticates_ops_root_witness() 
     let source = build_current_source_batch().await;
     commit_current_upload(&store_client, &source).await;
 
-    let (_qmdb_server, qmdb_url) =
-        spawn_qmdb_full_server(store_client.unprefixed()).await;
+    let (_qmdb_server, qmdb_url) = spawn_qmdb_full_server(store_client.unprefixed()).await;
     let client = OperationLogClient::<PreferZstdHttpClient, mmr::Family, Sha256, FixedKeyOperation>::plaintext(
         &qmdb_url,
         fixed_key_op_cfg(),
@@ -652,8 +645,7 @@ async fn test_unordered_connect_get_many_returns_present_key_proofs() {
     let source = build_current_source_batch().await;
     commit_current_upload(&store_client, &source).await;
 
-    let (_qmdb_server, qmdb_url) =
-        spawn_qmdb_full_server(store_client.unprefixed()).await;
+    let (_qmdb_server, qmdb_url) = spawn_qmdb_full_server(store_client.unprefixed()).await;
     let connect_client = key_lookup_client(&qmdb_url);
 
     let results = connect_client
@@ -690,8 +682,7 @@ async fn test_unordered_current_operation_range_connect_returns_verifiable_proof
     let source = build_current_source_batch().await;
     commit_current_upload(&store_client, &source).await;
 
-    let (_qmdb_server, qmdb_url) =
-        spawn_qmdb_full_server(store_client.unprefixed()).await;
+    let (_qmdb_server, qmdb_url) = spawn_qmdb_full_server(store_client.unprefixed()).await;
     let connect_client = current_operation_client(&qmdb_url);
 
     let proof = connect_client
@@ -719,8 +710,7 @@ async fn test_unordered_current_endpoints_enforce_optional_sequence_minimum() {
     let source = build_current_source_batch().await;
     commit_current_upload(&store_client, &source).await;
 
-    let (_qmdb_server, qmdb_url) =
-        spawn_qmdb_full_server(store_client.unprefixed()).await;
+    let (_qmdb_server, qmdb_url) = spawn_qmdb_full_server(store_client.unprefixed()).await;
     let lookup = key_lookup_rpc_client(&qmdb_url);
     let current = current_operation_client(&qmdb_url);
     let missing = Sha256::fill(0xCC);
@@ -885,7 +875,7 @@ async fn aligned_commit_boundary<F: commonware_storage::merkle::Graftable + Part
                 }
                 let batch = batch.merkleize(&db).await.expect("source merkleize");
                 publications.push(
-                    Publication::read(&batch, &db).expect("source publication must be readable"),
+                    Publication::from_batch(&batch, &db).expect("publication must be readable"),
                 );
                 db = db.apply_batch(batch).await.expect("source apply");
                 assert_eq!(*db.bounds().end, if round == 0 { 512 } else { 514 });
@@ -915,7 +905,7 @@ async fn aligned_commit_boundary<F: commonware_storage::merkle::Graftable + Part
                     &db.root(),
                 ));
                 assert_eq!(chunks[0][N - 1] & 0x80 != 0, round == 0);
-                snapshots.push((operations, std::mem::take(&mut publications)));
+                snapshots.push((operations, std::mem::take(&mut publications), db.root()));
             }
             db.destroy().await.expect("destroy source");
             snapshots
@@ -941,19 +931,15 @@ async fn aligned_commit_boundary<F: commonware_storage::merkle::Graftable + Part
         exoware_qmdb::service::client::Unordered::<_, F, Sha256, Digest, Vec<u8>, N>::plaintext(
             &url, op_cfg,
         );
-    for (operations, publications) in snapshots {
+    for (operations, publications, root) in snapshots {
         // Round-trip each snapshot's publications through their encoding before uploading.
         let decoded = publications
             .iter()
-            .map(|publication| common::decode_publication(publication, op_cfg))
+            .map(|publication| common::round_trip_publication(publication, op_cfg))
             .collect::<Vec<_>>();
         common::commit_publications(&prefixed, &decoded)
             .await
-            .expect("publish current boundary");
-        let root = publications
-            .last()
-            .expect("source publications must not be empty")
-            .root;
+            .expect("commit publications");
         let proof = connect_client
             .get(
                 Location::new(operations.len() as u64 - 1),
@@ -1037,12 +1023,9 @@ async fn current_boundary_nodes<F: commonware_storage::merkle::Graftable + Parti
                         batch = batch.write(key(index), Some(index.to_be_bytes().to_vec()));
                     }
                 }
-                let batch = batch
-                    .merkleize(&db)
-                    .await
-                    .expect("source merkleize");
-                let publication = Publication::read(&batch, &db)
-                    .expect("source publication must be readable");
+                let batch = batch.merkleize(&db).await.expect("source merkleize");
+                let publication =
+                    Publication::from_batch(&batch, &db).expect("publication must be readable");
                 operations.extend(publication.operations.iter().cloned());
                 publications.push(publication);
                 db = db.apply_batch(batch).await.expect("source apply");
@@ -1087,7 +1070,10 @@ async fn current_boundary_nodes<F: commonware_storage::merkle::Graftable + Parti
                         let location = operations
                             .iter()
                             .rposition(|operation| {
-                                matches!(operation, Operation::Update(update) if update.0 == key(index))
+                                matches!(
+                                    operation,
+                                    Operation::Update(update) if update.0 == key(index)
+                                )
                             })
                             .expect("source key location");
                         (index, Location::new(location as u64))
@@ -1140,13 +1126,13 @@ async fn current_boundary_nodes<F: commonware_storage::merkle::Graftable + Parti
     let range_client =
         CurrentOperationClient::<_, F, Sha256, Operation<F>, N>::plaintext(&url, op_cfg);
 
-    // Re-query the older boundary after publication advances to preserve its bitmap and node versions
+    // Re-query the older batch after the watermark advances: its bitmap and node versions survive
     for (pass, index) in [0, 1, 0].into_iter().enumerate() {
         let (operations, publications, root, queries) = &snapshots[index];
         if pass < 2 {
             common::commit_publications(&prefixed, publications)
                 .await
-                .expect("publish current boundary");
+                .expect("commit publications");
         }
         let tip = operations.len() as u64 - 1;
         for (key_index, location) in queries {
@@ -1235,8 +1221,7 @@ async fn test_unordered_connect_omits_missing_and_rejects_duplicate_range_and_st
     let source = build_current_source_batch().await;
     commit_current_upload(&store_client, &source).await;
 
-    let (_qmdb_server, qmdb_url) =
-        spawn_qmdb_full_server(store_client.unprefixed()).await;
+    let (_qmdb_server, qmdb_url) = spawn_qmdb_full_server(store_client.unprefixed()).await;
 
     let missing = Sha256::fill(0xCC);
     let connect_client = key_lookup_client(&qmdb_url);
@@ -1406,8 +1391,7 @@ async fn test_unordered_connect_subscribe_emits_verifiable_range_proof() {
         *source.inactivity_floor > 0,
         "test must not rely on inactivity_floor = 0"
     );
-    let (_qmdb_server, qmdb_url) =
-        spawn_qmdb_range_server(store_client.unprefixed()).await;
+    let (_qmdb_server, qmdb_url) = spawn_qmdb_range_server(store_client.unprefixed()).await;
     let connect_client = operation_log_client(&qmdb_url);
 
     let mut stream = connect_client
@@ -1446,8 +1430,7 @@ async fn test_unordered_mmb_connect_subscribe_emits_verifiable_range_proof() {
         *source.inactivity_floor > 0,
         "test must not rely on inactivity_floor = 0"
     );
-    let (_qmdb_server, qmdb_url) =
-        spawn_mmb_qmdb_range_server(store_client.unprefixed()).await;
+    let (_qmdb_server, qmdb_url) = spawn_mmb_qmdb_range_server(store_client.unprefixed()).await;
     let connect_client = mmb_operation_log_client(&qmdb_url);
 
     let mut stream = connect_client
@@ -1484,8 +1467,7 @@ async fn test_unordered_connect_client_rejects_invalid_streamed_proof() {
     let source = build_any_source_batch().await;
     commit_upload(&store_client, &source).await;
 
-    let (_qmdb_server, qmdb_url) =
-        spawn_qmdb_range_server(store_client.unprefixed()).await;
+    let (_qmdb_server, qmdb_url) = spawn_qmdb_range_server(store_client.unprefixed()).await;
     let rpc = common::operation_log_rpc_client(&qmdb_url);
     let mut raw_stream = rpc
         .subscribe(ProtoSubscribeRequest {

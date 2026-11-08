@@ -23,7 +23,7 @@ use connectrpc::{
     client::ClientConfig, Chain, ConnectRpcService, RequestContext as Context, ServiceRequest,
 };
 use exoware_qmdb::{
-    adapter::upload::{prepare_publication, Publication},
+    adapter::upload::{stage_watermark, Publication},
     proof::{RawKeyExclusionProof, RawKeyLookupProof, VerifiedKeyLookup},
     service::proto::qmdb::v1::{
         current_key_lookup_result, CurrentOperationServiceClient,
@@ -201,12 +201,12 @@ async fn build_source_tips(
                     }
                     batch.merkleize(&db).await.expect("merkleize")
                 };
-                let root = finalized.root();
                 publications.push(
-                    Publication::read(&finalized, &db).expect("publication must be readable"),
+                    Publication::from_batch(&finalized, &db).expect("publication must be readable"),
                 );
                 db = db.apply_batch(finalized).await.expect("apply");
 
+                let root = db.root();
                 let latest = db.bounds().end - 1;
                 let n = NonZeroU64::new(*latest + 1).unwrap();
                 let (_proof, ops): (BatchProof, Vec<BatchOperation>) = db
@@ -256,32 +256,21 @@ async fn commit_upload(store_client: &StoreClient, batch: &SourceBatch) {
 /// Stage the rows a writer stores for `source`, preparing each publication from its encoding.
 fn current_snapshot_rows(source: &SourceBatch) -> BTreeMap<Bytes, Bytes> {
     let staging = StoreClient::new("http://127.0.0.1:1").unprefixed();
+    let publications = source
+        .publications
+        .iter()
+        .map(|publication| common::round_trip_publication(publication, op_cfg()))
+        .collect::<Vec<_>>();
     let mut batch = StoreWriteBatch::new();
-    for publication in &source.publications {
-        let decoded = common::decode_publication(publication, op_cfg());
-        let prepared = prepare_publication::<mmr::Family, Sha256, _, _, N>(
-            &decoded,
-            &publication.root,
-            &commonware_parallel::Sequential,
-        )
-        .expect("publication must prepare");
-        exoware_qmdb::adapter::upload::stage_authenticated_range(&staging, prepared, &mut batch)
-            .expect("stage authenticated range");
-    }
-    exoware_qmdb::adapter::upload::stage_watermark(&staging, source.latest_location, &mut batch)
-        .expect("stage watermark");
+    common::stage_publications(&staging, &publications, &mut batch).expect("stage publications");
     batch.entries().iter().cloned().collect()
 }
 
 fn publication_key() -> Bytes {
     let staging = StoreClient::new("http://127.0.0.1:1").unprefixed();
     let mut batch = StoreWriteBatch::new();
-    exoware_qmdb::adapter::upload::stage_watermark(
-        &staging,
-        Location::<mmr::Family>::new(0),
-        &mut batch,
-    )
-    .expect("stage watermark key");
+    stage_watermark(&staging, Location::<mmr::Family>::new(0), &mut batch)
+        .expect("stage watermark key");
     batch.entries()[0].0.clone()
 }
 
@@ -729,8 +718,7 @@ async fn test_ordered_connect_get_returns_current_key_value_proof() {
     let store_client = common::local_store_client().await;
     let source = build_source_batch().await;
     commit_upload(&store_client, &source).await;
-    let (_qmdb_server, qmdb_url) =
-        spawn_qmdb_server(store_client.unprefixed()).await;
+    let (_qmdb_server, qmdb_url) = spawn_qmdb_server(store_client.unprefixed()).await;
     let connect_client = key_lookup_client(&qmdb_url);
 
     let proof = connect_client
@@ -753,11 +741,7 @@ async fn test_ordered_connect_get_returns_current_key_value_proof() {
 async fn test_ordered_get_after_grafted_boundary_returns_current_key_value_proof() {
     let store_client = common::local_store_client().await;
     let source = build_grafted_boundary_source_batch().await;
-    let ordered_client = TestOrderedClient::new(
-        store_client.unprefixed(),
-        op_cfg(),
-        key_cfg(),
-    );
+    let ordered_client = TestOrderedClient::new(store_client.unprefixed(), op_cfg(), key_cfg());
     let upload_client = store_client.unprefixed();
     common::commit_publications(&upload_client, &source.publications)
         .await
@@ -779,8 +763,7 @@ async fn test_ordered_connect_get_many_returns_current_key_lookup_proofs() {
     let store_client = common::local_store_client().await;
     let source = build_source_batch().await;
     commit_upload(&store_client, &source).await;
-    let (_qmdb_server, qmdb_url) =
-        spawn_qmdb_server(store_client.unprefixed()).await;
+    let (_qmdb_server, qmdb_url) = spawn_qmdb_server(store_client.unprefixed()).await;
     let connect_client = key_lookup_client(&qmdb_url);
 
     let proof = connect_client
@@ -819,8 +802,7 @@ async fn test_ordered_connect_get_many_returns_miss_proofs_and_rejects_duplicate
     let store_client = common::local_store_client().await;
     let source = build_source_batch().await;
     commit_upload(&store_client, &source).await;
-    let (_qmdb_server, qmdb_url) =
-        spawn_qmdb_server(store_client.unprefixed()).await;
+    let (_qmdb_server, qmdb_url) = spawn_qmdb_server(store_client.unprefixed()).await;
     let connect_client = key_lookup_client(&qmdb_url);
 
     let proof = connect_client
@@ -857,8 +839,7 @@ async fn test_ordered_connect_get_range_verifies_complete_empty_and_partial_page
     let store_client = common::local_store_client().await;
     let source = build_source_batch().await;
     commit_upload(&store_client, &source).await;
-    let (_qmdb_server, qmdb_url) =
-        spawn_qmdb_server(store_client.unprefixed()).await;
+    let (_qmdb_server, qmdb_url) = spawn_qmdb_server(store_client.unprefixed()).await;
     let connect_client = key_lookup_client(&qmdb_url);
 
     let complete = connect_client
@@ -926,13 +907,8 @@ async fn test_ordered_connect_miss_proofs_cover_keys_below_between_and_above_act
     )
     .await;
     upload_tips(&store_client, &tips).await;
-    let ordered = TestOrderedClient::new(
-        store_client.unprefixed(),
-        op_cfg(),
-        key_cfg(),
-    );
-    let (_qmdb_server, qmdb_url) =
-        spawn_qmdb_server(store_client.unprefixed()).await;
+    let ordered = TestOrderedClient::new(store_client.unprefixed(), op_cfg(), key_cfg());
+    let (_qmdb_server, qmdb_url) = spawn_qmdb_server(store_client.unprefixed()).await;
     let connect = key_lookup_client(&qmdb_url);
     let tip = &tips[0];
 
@@ -964,13 +940,8 @@ async fn test_ordered_connect_miss_proofs_skip_deleted_keys() {
     )
     .await;
     upload_tips(&store_client, &tips).await;
-    let ordered = TestOrderedClient::new(
-        store_client.unprefixed(),
-        op_cfg(),
-        key_cfg(),
-    );
-    let (_qmdb_server, qmdb_url) =
-        spawn_qmdb_server(store_client.unprefixed()).await;
+    let ordered = TestOrderedClient::new(store_client.unprefixed(), op_cfg(), key_cfg());
+    let (_qmdb_server, qmdb_url) = spawn_qmdb_server(store_client.unprefixed()).await;
     let connect = key_lookup_client(&qmdb_url);
     let tip = &tips[1];
 
@@ -1016,13 +987,8 @@ async fn test_ordered_connect_miss_proofs_ignore_versions_above_tip() {
     .await;
     assert_ne!(tips[0].root, tips[1].root);
     upload_tips(&store_client, &tips).await;
-    let ordered = TestOrderedClient::new(
-        store_client.unprefixed(),
-        op_cfg(),
-        key_cfg(),
-    );
-    let (_qmdb_server, qmdb_url) =
-        spawn_qmdb_server(store_client.unprefixed()).await;
+    let ordered = TestOrderedClient::new(store_client.unprefixed(), op_cfg(), key_cfg());
+    let (_qmdb_server, qmdb_url) = spawn_qmdb_server(store_client.unprefixed()).await;
     let connect = key_lookup_client(&qmdb_url);
     let (earlier, later) = (&tips[0], &tips[1]);
 
@@ -1089,13 +1055,8 @@ async fn test_ordered_connect_miss_proofs_use_commit_when_every_key_is_deleted()
     )
     .await;
     upload_tips(&store_client, &tips).await;
-    let ordered = TestOrderedClient::new(
-        store_client.unprefixed(),
-        op_cfg(),
-        key_cfg(),
-    );
-    let (_qmdb_server, qmdb_url) =
-        spawn_qmdb_server(store_client.unprefixed()).await;
+    let ordered = TestOrderedClient::new(store_client.unprefixed(), op_cfg(), key_cfg());
+    let (_qmdb_server, qmdb_url) = spawn_qmdb_server(store_client.unprefixed()).await;
     let connect = key_lookup_client(&qmdb_url);
     let (earlier, empty) = (&tips[0], &tips[1]);
 
@@ -1128,13 +1089,8 @@ async fn test_ordered_connect_get_range_walks_past_deleted_keys() {
     )
     .await;
     upload_tips(&store_client, &tips).await;
-    let ordered = TestOrderedClient::new(
-        store_client.unprefixed(),
-        op_cfg(),
-        key_cfg(),
-    );
-    let (_qmdb_server, qmdb_url) =
-        spawn_qmdb_server(store_client.unprefixed()).await;
+    let ordered = TestOrderedClient::new(store_client.unprefixed(), op_cfg(), key_cfg());
+    let (_qmdb_server, qmdb_url) = spawn_qmdb_server(store_client.unprefixed()).await;
     let connect = key_lookup_client(&qmdb_url);
     let tip = &tips[1];
 
@@ -1198,11 +1154,7 @@ async fn test_historical_bounded_range_skips_future_suffix() {
     )
     .await;
     upload_tips(&store_client, &tips).await;
-    let ordered = TestOrderedClient::new(
-        store_client.unprefixed(),
-        op_cfg(),
-        key_cfg(),
-    );
+    let ordered = TestOrderedClient::new(store_client.unprefixed(), op_cfg(), key_cfg());
 
     query.reset_update_reads();
     let range = ordered
@@ -1255,13 +1207,8 @@ async fn test_ordered_connect_miss_proofs_walk_long_deleted_runs_in_growing_page
     )
     .await;
     upload_tips(&store_client, &tips).await;
-    let ordered = TestOrderedClient::new(
-        store_client.unprefixed(),
-        op_cfg(),
-        key_cfg(),
-    );
-    let (_qmdb_server, qmdb_url) =
-        spawn_qmdb_server(store_client.unprefixed()).await;
+    let ordered = TestOrderedClient::new(store_client.unprefixed(), op_cfg(), key_cfg());
+    let (_qmdb_server, qmdb_url) = spawn_qmdb_server(store_client.unprefixed()).await;
     let connect = key_lookup_client(&qmdb_url);
     let tip = &tips[1];
     let (first, last) = (long_run_key(0), long_run_key(LONG_RUN + 1));
@@ -1297,13 +1244,8 @@ async fn test_ordered_connect_get_range_spans_walk_pages() {
     )
     .await;
     upload_tips(&store_client, &tips).await;
-    let ordered = TestOrderedClient::new(
-        store_client.unprefixed(),
-        op_cfg(),
-        key_cfg(),
-    );
-    let (_qmdb_server, qmdb_url) =
-        spawn_qmdb_server(store_client.unprefixed()).await;
+    let ordered = TestOrderedClient::new(store_client.unprefixed(), op_cfg(), key_cfg());
+    let (_qmdb_server, qmdb_url) = spawn_qmdb_server(store_client.unprefixed()).await;
     let connect = key_lookup_client(&qmdb_url);
     let (first, last) = (long_run_key(0), long_run_key(LONG_RUN + 1));
 
@@ -1381,13 +1323,8 @@ async fn test_ordered_connect_walks_settle_hot_keys_without_reading_every_versio
     batches.push(tip_writes(&[("a", Some("a0")), ("b", None)]));
     let tips = build_source_tips("current_ordered_variable_mmr_connect_hot_key", batches).await;
     upload_tips(&store_client, &tips).await;
-    let ordered = TestOrderedClient::new(
-        store_client.unprefixed(),
-        op_cfg(),
-        key_cfg(),
-    );
-    let (_qmdb_server, qmdb_url) =
-        spawn_qmdb_server(store_client.unprefixed()).await;
+    let ordered = TestOrderedClient::new(store_client.unprefixed(), op_cfg(), key_cfg());
+    let (_qmdb_server, qmdb_url) = spawn_qmdb_server(store_client.unprefixed()).await;
     let connect = key_lookup_client(&qmdb_url);
     let (active, deleted) = (&tips[versions - 2], &tips[versions - 1]);
 
@@ -1437,8 +1374,7 @@ async fn test_current_endpoints_enforce_cold_minimum_and_use_cached_publication(
     let store_client = common::local_store_client().await;
     let source = build_source_batch().await;
     commit_upload(&store_client, &source).await;
-    let (_qmdb_server, qmdb_url) =
-        spawn_qmdb_server(store_client.unprefixed()).await;
+    let (_qmdb_server, qmdb_url) = spawn_qmdb_server(store_client.unprefixed()).await;
     let lookup = rpc_client(&qmdb_url);
     let ranges = range_rpc_client(&qmdb_url);
     let current_operations = current_operation_rpc_client(&qmdb_url);
@@ -1730,8 +1666,7 @@ async fn test_ordered_connect_client_rejects_get_range_boundary_omission() {
     let source = build_source_batch().await;
     commit_upload(&store_client, &source).await;
 
-    let (_qmdb_server, qmdb_url) =
-        spawn_qmdb_server(store_client.unprefixed()).await;
+    let (_qmdb_server, qmdb_url) = spawn_qmdb_server(store_client.unprefixed()).await;
     let rpc = rpc_client(&qmdb_url);
     let range_rpc = range_rpc_client(&qmdb_url);
 
@@ -1797,8 +1732,7 @@ async fn test_ordered_connect_client_rejects_empty_unbounded_get_range_before_ne
     let source = build_source_batch().await;
     commit_upload(&store_client, &source).await;
 
-    let (_qmdb_server, qmdb_url) =
-        spawn_qmdb_server(store_client.unprefixed()).await;
+    let (_qmdb_server, qmdb_url) = spawn_qmdb_server(store_client.unprefixed()).await;
     let rpc = rpc_client(&qmdb_url);
     let range_rpc = range_rpc_client(&qmdb_url);
 
@@ -1864,8 +1798,7 @@ async fn test_ordered_connect_client_rejects_invalid_get_proof() {
     let source = build_source_batch().await;
     commit_upload(&store_client, &source).await;
 
-    let (_qmdb_server, qmdb_url) =
-        spawn_qmdb_server(store_client.unprefixed()).await;
+    let (_qmdb_server, qmdb_url) = spawn_qmdb_server(store_client.unprefixed()).await;
     let rpc = rpc_client(&qmdb_url);
 
     let raw_get_response = rpc
@@ -1920,8 +1853,7 @@ async fn test_ordered_connect_client_rejects_invalid_get_many_proof() {
     let source = build_source_batch().await;
     commit_upload(&store_client, &source).await;
 
-    let (_qmdb_server, qmdb_url) =
-        spawn_qmdb_server(store_client.unprefixed()).await;
+    let (_qmdb_server, qmdb_url) = spawn_qmdb_server(store_client.unprefixed()).await;
     let rpc = rpc_client(&qmdb_url);
 
     let raw_get_response = rpc
@@ -1976,8 +1908,7 @@ async fn test_ordered_connect_client_rejects_get_many_proof_for_different_key() 
     let source = build_source_batch().await;
     commit_upload(&store_client, &source).await;
 
-    let (_qmdb_server, qmdb_url) =
-        spawn_qmdb_server(store_client.unprefixed()).await;
+    let (_qmdb_server, qmdb_url) = spawn_qmdb_server(store_client.unprefixed()).await;
     let rpc = rpc_client(&qmdb_url);
 
     let raw_get_many_response = rpc
@@ -2022,8 +1953,7 @@ async fn test_ordered_connect_client_rejects_get_range_page_shorter_than_limit()
     let source = build_source_batch().await;
     commit_upload(&store_client, &source).await;
 
-    let (_qmdb_server, qmdb_url) =
-        spawn_qmdb_server(store_client.unprefixed()).await;
+    let (_qmdb_server, qmdb_url) = spawn_qmdb_server(store_client.unprefixed()).await;
     let rpc = rpc_client(&qmdb_url);
     let range_rpc = range_rpc_client(&qmdb_url);
 

@@ -48,7 +48,7 @@ const MIN_MMB_OPERATIONS: usize = 10;
 type Digest = commonware_cryptography::sha256::Digest;
 type BatchProof = Proof<mmr::Family, Digest>;
 type BatchOperation = QmdbOperation<mmr::Family, Vec<u8>, Vec<u8>>;
-type SourcePublication<F> = Publication<F, Digest, Update<Vec<u8>, VariableEncoding<Vec<u8>>>, N>;
+type BatchPublication<F> = Publication<F, Digest, Update<Vec<u8>, VariableEncoding<Vec<u8>>>, N>;
 type CurrentDb = LocalQmdbDb<
     mmr::Family,
     cw_tokio::Context,
@@ -141,7 +141,7 @@ fn key_cfg() -> <Vec<u8> as commonware_codec::Read>::Cfg {
 struct SourceBatch {
     operations: Vec<BatchOperation>,
     root: Digest,
-    publications: Vec<SourcePublication<mmr::Family>>,
+    publications: Vec<BatchPublication<mmr::Family>>,
     inactivity_floor: Location<mmr::Family>,
 }
 
@@ -149,7 +149,7 @@ struct MmbSourceBatch {
     ops_root: Digest,
     operations: Vec<MmbBatchOperation>,
     root: Digest,
-    publications: Vec<SourcePublication<mmb::Family>>,
+    publications: Vec<BatchPublication<mmb::Family>>,
     inactivity_floor: Location<mmb::Family>,
 }
 
@@ -204,7 +204,7 @@ async fn build_source_batch() -> SourceBatch {
                     batch.merkleize(&db).await.expect("merkleize")
                 };
                 publications.push(
-                    Publication::read(&finalized, &db).expect("publication must be readable"),
+                    Publication::from_batch(&finalized, &db).expect("publication must be readable"),
                 );
                 db = db.apply_batch(finalized).await.expect("apply");
 
@@ -289,7 +289,7 @@ async fn build_mmb_source_batch() -> MmbSourceBatch {
                     batch.merkleize(&db).await.expect("merkleize")
                 };
                 publications.push(
-                    Publication::read(&finalized, &db).expect("publication must be readable"),
+                    Publication::from_batch(&finalized, &db).expect("publication must be readable"),
                 );
                 db = db.apply_batch(finalized).await.expect("apply");
 
@@ -367,7 +367,7 @@ async fn build_mmb_growing_source_batch() -> MmbGrowingSourceBatch {
                     batch.merkleize(&db).await.expect("merkleize")
                 };
                 publications.push(
-                    Publication::read(&finalized, &db).expect("publication must be readable"),
+                    Publication::from_batch(&finalized, &db).expect("publication must be readable"),
                 );
                 db = db.apply_batch(finalized).await.expect("apply");
 
@@ -447,8 +447,7 @@ async fn test_ordered_current_operation_range_connect_emits_verifiable_proof() {
     let source = build_source_batch().await;
     commit_upload(&store_client, &source).await;
 
-    let (_qmdb_server, qmdb_url) =
-        spawn_qmdb_server(store_client.unprefixed()).await;
+    let (_qmdb_server, qmdb_url) = spawn_qmdb_server(store_client.unprefixed()).await;
     let current = current_operation_client(&qmdb_url);
     let proof = current
         .get_current_operation_range(
@@ -474,8 +473,7 @@ async fn test_ordered_current_state_sync_from_connect_api_reconstructs_current_d
     let source = build_source_batch().await;
     commit_upload(&store_client, &source).await;
 
-    let (_qmdb_server, qmdb_url) =
-        spawn_qmdb_server(store_client.unprefixed()).await;
+    let (_qmdb_server, qmdb_url) = spawn_qmdb_server(store_client.unprefixed()).await;
     let resolver = OperationLogClient::<_, mmr::Family, Sha256, BatchOperation>::plaintext(
         &qmdb_url,
         op_cfg(),
@@ -569,8 +567,7 @@ async fn test_ordered_mmb_current_state_sync_from_nonzero_connect_api_reconstruc
     let expected_alpha = latest_mmb_value_for_key(&source.operations[start_index..], b"alpha");
     commit_mmb_upload(&store_client, &source).await;
 
-    let (_qmdb_server, qmdb_url) =
-        spawn_mmb_qmdb_server(store_client.unprefixed()).await;
+    let (_qmdb_server, qmdb_url) = spawn_mmb_qmdb_server(store_client.unprefixed()).await;
     let resolver = OperationLogClient::<_, mmb::Family, Sha256, MmbBatchOperation>::plaintext(
         &qmdb_url,
         op_cfg(),
@@ -638,8 +635,7 @@ async fn test_ordered_mmb_sync_source_returns_pinned_nodes_for_nonzero_fetches()
     );
     commit_mmb_upload(&store_client, &source).await;
 
-    let (_qmdb_server, qmdb_url) =
-        spawn_mmb_qmdb_server(store_client.unprefixed()).await;
+    let (_qmdb_server, qmdb_url) = spawn_mmb_qmdb_server(store_client.unprefixed()).await;
     let op_count = Location::new(source.operations.len() as u64);
     let hasher = commonware_storage::qmdb::hasher::<Sha256>();
 
@@ -699,8 +695,7 @@ async fn test_ordered_mmb_operation_range_client_rejects_missing_nonzero_pinned_
     );
     commit_mmb_upload(&store_client, &source).await;
 
-    let (_qmdb_server, qmdb_url) =
-        spawn_mmb_qmdb_server(store_client.unprefixed()).await;
+    let (_qmdb_server, qmdb_url) = spawn_mmb_qmdb_server(store_client.unprefixed()).await;
     let request = ProtoGetOperationRangeRequest {
         tip: (source.operations.len() - 1) as u64,
         start_location: start.as_u64(),
@@ -779,8 +774,7 @@ async fn test_ordered_mmb_operation_range_client_rejects_extra_nonzero_pinned_no
     );
     commit_mmb_upload(&store_client, &source).await;
 
-    let (_qmdb_server, qmdb_url) =
-        spawn_mmb_qmdb_server(store_client.unprefixed()).await;
+    let (_qmdb_server, qmdb_url) = spawn_mmb_qmdb_server(store_client.unprefixed()).await;
     let request = ProtoGetOperationRangeRequest {
         tip: (source.operations.len() - 1) as u64,
         start_location: start.as_u64(),
@@ -826,8 +820,7 @@ async fn test_ordered_mmb_operation_range_client_rejects_zero_start_pinned_nodes
     let source = build_mmb_source_batch().await;
     commit_mmb_upload(&store_client, &source).await;
 
-    let (_qmdb_server, qmdb_url) =
-        spawn_mmb_qmdb_server(store_client.unprefixed()).await;
+    let (_qmdb_server, qmdb_url) = spawn_mmb_qmdb_server(store_client.unprefixed()).await;
     let request = ProtoGetOperationRangeRequest {
         tip: (source.operations.len() - 1) as u64,
         start_location: 0,
@@ -873,8 +866,7 @@ async fn test_ordered_operation_range_connect_uses_current_root_witness() {
     let source = build_source_batch().await;
     commit_upload(&store_client, &source).await;
 
-    let (_qmdb_server, qmdb_url) =
-        spawn_qmdb_server(store_client.unprefixed()).await;
+    let (_qmdb_server, qmdb_url) = spawn_qmdb_server(store_client.unprefixed()).await;
     let request = ProtoGetOperationRangeRequest {
         tip: (source.operations.len() - 1) as u64,
         start_location: 0,
@@ -992,8 +984,7 @@ async fn test_ordered_range_connect_subscribe_emits_verifiable_range_proof() {
         *source.inactivity_floor > 0,
         "test must not rely on inactivity_floor = 0"
     );
-    let (_qmdb_server, qmdb_url) =
-        spawn_qmdb_server(store_client.unprefixed()).await;
+    let (_qmdb_server, qmdb_url) = spawn_qmdb_server(store_client.unprefixed()).await;
     let connect_client = operation_log_client(&qmdb_url);
 
     let mut stream = connect_client
@@ -1030,8 +1021,7 @@ async fn test_ordered_range_connect_client_rejects_invalid_streamed_proof() {
     let source = build_source_batch().await;
     commit_upload(&store_client, &source).await;
 
-    let (_qmdb_server, qmdb_url) =
-        spawn_qmdb_server(store_client.unprefixed()).await;
+    let (_qmdb_server, qmdb_url) = spawn_qmdb_server(store_client.unprefixed()).await;
     let rpc = common::operation_log_rpc_client(&qmdb_url);
     let mut raw_stream = rpc
         .subscribe(ProtoSubscribeRequest {
@@ -1074,8 +1064,7 @@ async fn test_ordered_range_connect_client_rejects_invalid_streamed_proof() {
 async fn test_ordered_range_connect_subscribe_emits_multi_proof_for_matching_keys() {
     let store_client = common::local_store_client().await;
     let source = build_source_batch().await;
-    let (_qmdb_server, qmdb_url) =
-        spawn_qmdb_server(store_client.unprefixed()).await;
+    let (_qmdb_server, qmdb_url) = spawn_qmdb_server(store_client.unprefixed()).await;
     let connect_client = operation_log_client(&qmdb_url);
 
     let mut stream = connect_client
@@ -1114,8 +1103,7 @@ async fn test_ordered_mmb_range_connect_subscribe_verifies_range_and_multi_proof
         *source.inactivity_floor > 0,
         "test must not rely on inactivity_floor = 0"
     );
-    let (_qmdb_server, qmdb_url) =
-        spawn_mmb_qmdb_server(store_client.unprefixed()).await;
+    let (_qmdb_server, qmdb_url) = spawn_mmb_qmdb_server(store_client.unprefixed()).await;
     let connect_client = mmb_operation_log_client(&qmdb_url);
 
     let mut range_stream = connect_client
@@ -1182,8 +1170,7 @@ async fn test_ordered_mmb_operation_log_any_sync_from_connect_api_reconstructs_a
     let expected_alpha = latest_mmb_value_for_key(&source.operations, b"alpha");
     commit_mmb_upload(&store_client, &source).await;
 
-    let (_qmdb_server, qmdb_url) =
-        spawn_mmb_qmdb_server(store_client.unprefixed()).await;
+    let (_qmdb_server, qmdb_url) = spawn_mmb_qmdb_server(store_client.unprefixed()).await;
     let resolver = OperationLogClient::<_, mmb::Family, Sha256, MmbBatchOperation>::plaintext(
         &qmdb_url,
         op_cfg(),
@@ -1253,8 +1240,7 @@ async fn test_ordered_mmb_operation_log_any_sync_from_nonzero_connect_api_recons
     let expected_alpha = latest_mmb_value_for_key(&source.operations[start_index..], b"alpha");
     commit_mmb_upload(&store_client, &source).await;
 
-    let (_qmdb_server, qmdb_url) =
-        spawn_mmb_qmdb_server(store_client.unprefixed()).await;
+    let (_qmdb_server, qmdb_url) = spawn_mmb_qmdb_server(store_client.unprefixed()).await;
     let resolver = OperationLogClient::<_, mmb::Family, Sha256, MmbBatchOperation>::plaintext(
         &qmdb_url,
         op_cfg(),
@@ -1339,8 +1325,7 @@ async fn test_ordered_mmb_operation_log_any_sync_accepts_target_update_from_grow
         latest_mmb_value_for_key(&source.updated.operations[start_index..], b"alpha");
     commit_mmb_upload(&store_client, &source.initial).await;
 
-    let (_qmdb_server, qmdb_url) =
-        spawn_mmb_qmdb_server(store_client.unprefixed()).await;
+    let (_qmdb_server, qmdb_url) = spawn_mmb_qmdb_server(store_client.unprefixed()).await;
     let resolver = OperationLogClient::<_, mmb::Family, Sha256, MmbBatchOperation>::plaintext(
         &qmdb_url,
         op_cfg(),
@@ -1422,8 +1407,7 @@ async fn test_ordered_mmb_operation_log_any_sync_accepts_target_update_from_grow
 async fn test_ordered_range_connect_subscribe_replays_since_cursor() {
     let store_client = common::local_store_client().await;
     let source = build_source_batch().await;
-    let (_qmdb_server, qmdb_url) =
-        spawn_qmdb_server(store_client.unprefixed()).await;
+    let (_qmdb_server, qmdb_url) = spawn_qmdb_server(store_client.unprefixed()).await;
     let connect_client = operation_log_client(&qmdb_url);
 
     commit_upload(&store_client, &source).await;
@@ -1455,8 +1439,7 @@ async fn test_ordered_range_connect_subscribe_replays_since_cursor() {
 async fn test_ordered_range_connect_subscribe_matches_prefix_and_regex_filters() {
     let store_client = common::local_store_client().await;
     let source = build_source_batch().await;
-    let (_qmdb_server, qmdb_url) =
-        spawn_qmdb_server(store_client.unprefixed()).await;
+    let (_qmdb_server, qmdb_url) = spawn_qmdb_server(store_client.unprefixed()).await;
     let connect_client = operation_log_client(&qmdb_url);
 
     let mut prefix_stream = connect_client
@@ -1507,8 +1490,7 @@ async fn test_ordered_range_connect_subscribe_matches_prefix_and_regex_filters()
 async fn test_ordered_range_connect_subscribe_filters_by_value_regex_without_key() {
     let store_client = common::local_store_client().await;
     let source = build_source_batch().await;
-    let (_qmdb_server, qmdb_url) =
-        spawn_qmdb_server(store_client.unprefixed()).await;
+    let (_qmdb_server, qmdb_url) = spawn_qmdb_server(store_client.unprefixed()).await;
     let connect_client = operation_log_client(&qmdb_url);
 
     // Regex matches the literal "one", the value written for key "alpha" but
@@ -1543,8 +1525,7 @@ async fn test_ordered_range_connect_subscribe_filters_by_value_regex_without_key
 async fn test_ordered_range_connect_subscribe_intersects_key_and_value_filters() {
     let store_client = common::local_store_client().await;
     let source = build_source_batch().await;
-    let (_qmdb_server, qmdb_url) =
-        spawn_qmdb_server(store_client.unprefixed()).await;
+    let (_qmdb_server, qmdb_url) = spawn_qmdb_server(store_client.unprefixed()).await;
     let connect_client = operation_log_client(&qmdb_url);
 
     // Key prefix matches alpha + beta; value regex excludes everything except

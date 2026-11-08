@@ -34,7 +34,7 @@ type Op = Operation<mmr::Family, Vec<u8>>;
 async fn read_prefix(
     endpoint: &str,
     tip: Location<mmr::Family>,
-    trusted_root: &Digest,
+    expected_root: &Digest,
 ) -> Result<Vec<Op>, QmdbError> {
     let client = OperationLogClient::<_, mmr::Family, Sha256, Op>::plaintext(
         endpoint,
@@ -48,7 +48,7 @@ async fn read_prefix(
                 max_locations: 100,
                 ..Default::default()
             },
-            trusted_root,
+            expected_root,
         )
         .await?;
     Ok(result.operations)
@@ -98,7 +98,7 @@ operation roots and range proofs, with additional queries for each kind:
 | `Immutable` | `get_at` by key |
 | `Keyless` | `get_at` by operation location |
 
-Current queries require uploaded current-boundary material. For unordered QMDB,
+Current queries require uploaded current-state publications. For unordered QMDB,
 `get_many` omits missing or inactive keys because it has no exclusion proofs.
 For ordered QMDB, keys must have the same `K::Ord` ordering as their raw bytes.
 
@@ -122,19 +122,19 @@ share query names and `Verified*` results where they support the same operation.
 Immutable and keyless logical `get_at` reads are native helpers. Their ConnectRPC
 services expose the operation log.
 
-To inspect publication state, use `latest_published_watermark` for the greatest
+To inspect the watermark, use `latest_published_watermark` for the greatest
 published location observed by a native reader and `root_at` for the canonical
 root at a tip. Ordered and unordered readers also expose the underlying log root
 through `ops_root_at`. On proof requests, an optional `min_sequence_number` sets
-the minimum Store sequence for the publication lookup. Proof reads use the
+the minimum Store sequence for the watermark lookup. Proof reads use the
 sequence observed by that lookup as their minimum.
 
 ## Upload and publish
 
 The [`adapter::upload`](src/adapter/upload.rs) functions prepare Store rows
 from captured Commonware operations and proof material. The application owns
-capture, durable queuing, retries, and publication around these stateless
-functions.
+capture, durable queuing, retries, and advancing the watermark around these
+stateless functions.
 
 An `AuthenticatedOperationRange` contains every canonical encoded operation in
 `[start_location, end_location)`, the prefix pins in `Family::nodes_to_pin` order,
@@ -147,7 +147,7 @@ Pass this range to `prepare_authenticated_range` with the source's codec
 configuration and an independently trusted operation-log root. It checks the
 operations and pins against that root, then prepares operation, index, and
 Merkle rows. For an operation-log-only database with a complete prefix that fits
-in one atomic Store Put, data and publication can be staged together. Here `F`,
+in one atomic Store Put, data and the watermark can be staged together. Here `F`,
 `H`, and `Op` are the source's family, hasher, and operation type:
 
 ```rust,ignore
@@ -159,7 +159,7 @@ use exoware_sdk::StoreWriteBatch;
 
 let prepared = prepare_authenticated_range::<F, H, Op, Sequential>(
     &range,
-    &trusted_ops_root,
+    &expected_root,
     &operation_cfg,
     &Sequential,
 )?;
@@ -170,48 +170,65 @@ stage_watermark::<F>(&store, latest, &mut batch)?;
 let sequence = batch.commit(store.client()).await?;
 ```
 
-For incremental or split uploads, publish location `W` only after every required
+For incremental or split uploads, publish watermark `W` only after every required
 row in the contiguous prefix through `W` is durable. This includes pins, indices,
-and any current-boundary rows inherited from earlier batches. If `[0, 100)` and
+and any current-state rows inherited from earlier batches. If `[0, 100)` and
 `[200, 300)` are durable, only the prefix through 99 can be published. Once
-`[100, 200)` is durable, publication can advance to 299 without publishing each
+`[100, 200)` is durable, the watermark can advance to 299 without publishing each
 intermediate commit.
 
 Workers can prepare and upload ranges independently and out of order, provided
-the application coordinates publication after all required writes succeed.
+the application advances the watermark only after all required writes succeed.
 Repeated rows from the same history have identical keys and values, so the same
 packet can be retried. To make retries and recovery possible, persist operations,
 proof material, trusted roots, and any current-state publications before
 allowing the source to discard them.
 
-### Current-state boundaries
+### Current-state publications
 
-For a current ordered or unordered database, upload a `Publication` at every
-batch boundary. Upload `Publication::initial` once for a new database's commit
-at location 0, then read each batch's publication with `Publication::read`
-before applying the batch, because the batch's operations-tree frontier is
-readable only until its changes are flushed. To upload later, persist the
-publication with its codec and decode it with a `PublicationCfg`. Once a
-publication is persisted or uploaded, the source must apply that same batch,
-rebuilding it identically after a restart.
+A current ordered or unordered database uploads a `Publication` for every batch:
+its operations and frontier plus the current-state rows (root, witness, bitmap
+chunks, and grafted nodes) that current queries need. `prepare_publication`
+checks the operations, frontier, and witness against an independently trusted
+current root and prepares all of those rows. The bitmap chunks, grafted nodes,
+and pruned chunk count are not authenticated and must come from the source of
+the batch. Stage the rows with `stage_authenticated_range` as above, and the
+same prefix rule governs when the watermark may advance past them.
+
+#### Initialization
+
+A new database's commit at location 0 belongs to no batch, so upload its
+publication once, before the first batch's; staging its rows and then watermark 0
+publishes location 0:
 
 ```rust,ignore
 use exoware_qmdb::adapter::upload::{prepare_publication, Publication};
 
 let initial = Publication::initial(&db)?;
-let publication = Publication::read(&batch, &db)?;
 let prepared =
-    prepare_publication::<F, H, _, _, N>(&publication, &trusted_root, &Sequential)?;
+    prepare_publication::<F, H, _, _, N>(&initial, &expected_root, &Sequential)?;
 ```
 
-`prepare_publication` requires the publication's root to equal the trusted root,
-authenticates its operations and prefix frontier against its operation-log root,
-and checks that its witness binds that root to the trusted root. The bitmap
-chunks, grafted nodes, and `pruned_chunks` count are not authenticated and must
-come from the source that produced the batch.
+#### Updates
 
-Boundary rows are versioned by batch location. Unchanged chunks and nodes are
-inherited from earlier boundaries. Retain the rows needed for every historical
+Build each batch's publication before applying the batch and while its
+unapplied ancestors are still held. Its frontier is readable only until the
+batch's changes are flushed:
+
+```rust,ignore
+let batch = batch.merkleize(&db).await?;
+let publication = Publication::from_batch(&batch, &db)?;
+let prepared =
+    prepare_publication::<F, H, _, _, N>(&publication, &expected_root, &Sequential)?;
+db = db.apply_batch(batch).await?;
+```
+
+To upload later, persist the publication with its codec and decode it with a
+`PublicationCfg`. A persisted or uploaded publication commits the source to that
+batch, so rebuild it identically after a restart.
+
+Current-state rows are versioned by batch location. Unchanged chunks and nodes
+are inherited from earlier batches. Retain the rows needed for every historical
 tip you promise to serve. Source bitmap pruning does not delete Store rows or set
 backend retention. The [`adapter::prune`](src/adapter/prune.rs) helpers construct
 policies for update-index rows. Applications choose Store pruning and replay-log

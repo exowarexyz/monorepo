@@ -37,6 +37,7 @@ struct Snapshot<F: Graftable, K: QmdbKey, E: ValueEncoding> {
     range: Option<(Proof<F, Digest>, Vec<Digest>)>,
     operations: Vec<unordered::Operation<F, K, E>>,
     ops_root: Digest,
+    /// Publication that uploads a current database, verified against its own root.
     publication: Option<Publication<F, Digest, unordered::Update<K, E>, N>>,
     values: Vec<Option<E::Value>>,
 }
@@ -105,8 +106,8 @@ async fn check_mirror<F, K, V, E>(
         let prepared = match &snapshot.publication {
             // Current batches travel as encoded publications and are verified after decoding
             Some(publication) => {
-                let decoded = common::decode_publication(publication, op_cfg.clone());
-                assert_eq!(decoded.start, snapshot.start);
+                let decoded = common::round_trip_publication(publication, op_cfg.clone());
+                assert_eq!(decoded.start_location, snapshot.start);
                 assert_eq!(
                     decoded.operations.as_slice(),
                     &snapshot.operations[*snapshot.start as usize..]
@@ -482,7 +483,7 @@ macro_rules! publication {
         Some(Publication::initial(&$db).expect("initial publication must be readable"))
     };
     (current, $db:ident, $batch:ident) => {
-        Some(Publication::read(&$batch, &$db).expect("batch publication must be readable"))
+        Some(Publication::from_batch(&$batch, &$db).expect("batch publication must be readable"))
     };
 }
 

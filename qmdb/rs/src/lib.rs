@@ -1,18 +1,21 @@
 #![allow(clippy::type_complexity)]
 
-//! Read and verify Commonware QMDB proofs from Exoware.
+//! Upload Commonware QMDB data to an Exoware Store, serve proof queries, and verify responses
+//! against trusted roots. Ordered, unordered, immutable, and keyless databases are supported,
+//! with MMR or MMB Merkle trees.
 //!
-//! Supports ordered, unordered, immutable, and keyless QMDB.
-//!
-//! Writes go directly to the store service, with this crate offering helpers such as
-//! [`adapter::upload::prepare_authenticated_range`], [`adapter::upload::stage_authenticated_range`]
-//! and [`adapter::upload::stage_watermark`]. Current QMDBs upload each batch as an
-//! [`adapter::upload::Publication`] prepared by [`adapter::upload::prepare_publication`].
+//! This crate prepares and stages upload rows; the application commits them to the Store.
+//! [`adapter::upload::prepare_authenticated_range`] verifies an operation range against a
+//! trusted root and prepares its rows, [`adapter::upload::stage_authenticated_range`] stages
+//! them in a Store write batch, and [`adapter::upload::stage_watermark`] stages the watermark
+//! that publishes the durable prefix. A current QMDB uploads each batch as an
+//! [`adapter::upload::Publication`], which also carries the batch's current-state changes and
+//! is prepared by [`adapter::upload::prepare_publication`].
 //!
 //! Reads take one of two paths. The adapters ([`adapter::Ordered`], [`adapter::Unordered`],
-//! [`adapter::Immutable`], and [`adapter::Keyless`]) query the store service directly. The
-//! clients under [`service::client`] query the QMDB ConnectRPC service and verify each
-//! response against a trusted root.
+//! [`adapter::Immutable`], and [`adapter::Keyless`]) query the Store directly. The clients
+//! under [`service::client`] query the `qmdb.v1` ConnectRPC service that [`service::server`]
+//! serves from the same rows, and verify each response against a trusted root.
 //!
 //! # Crate map
 //!
@@ -26,27 +29,17 @@
 //! - [`proof`]: raw and verified proof types shared by readers and clients.
 //! - [`error`]: [`QmdbError`] and [`ProofKind`].
 //!
-//! # Uploads and publication
+//! # Uploads and watermarks
 //!
-//! Callers provide authenticated Commonware operation ranges and stage their Store rows
-//! without constructing an uploader or reading remote state. An application-owned durable
-//! queue publishes the watermark after the whole contiguous prefix is durable.
+//! Preparation reads no remote state, so ranges may be uploaded concurrently and out of order,
+//! and a current batch's publication may be uploaded before the watermark reaches it. Only the
+//! watermark is monotonic: publishing watermark `W` means the whole contiguous prefix `[0, W]`
+//! is durable and may be trusted by readers, which fence historical queries against it.
+//! Historical proofs use the operation-log Merkle nodes, which are stored once by `Position`.
 //!
-//! Uploads may still happen concurrently and out of order. Current batch-boundary
-//! state may also be uploaded ahead of publication. Only watermark publication is
-//! monotonic: publishing watermark `W` means the whole contiguous prefix
-//! `[0, W]` is available and may now be trusted by readers.
-//!
-//! Readers fence historical queries against that low watermark. Historical proofs
-//! use the global ops Merkle nodes stored by `Position`.
-//!
-//! Current QMDB proofs use versioned current-state deltas:
-//! - bitmap chunk rows
-//! - grafted-node rows
-//!
-//! Those rows are versioned by uploaded batch boundary `Location`, not by the
-//! final published watermark. That is what preserves lower-boundary current
-//! proofs below a later published low watermark.
+//! A publication's current-state rows (metadata, witness, bitmap chunks, and grafted nodes)
+//! are versioned by the batch's final location rather than by the watermark, so current proofs
+//! at earlier batches stay available after a later watermark is published.
 
 pub mod adapter;
 pub mod error;

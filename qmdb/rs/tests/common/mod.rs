@@ -175,18 +175,45 @@ pub async fn commit_operations<F, Op>(
 ) -> Result<(), QmdbError>
 where
     F: Family,
-    Op: exoware_qmdb::adapter::upload::UploadOperation<F>,
+    Op: UploadOperation<F>,
 {
     let (_, prepared) = prepare_operations::<F, Op>(operations, cfg);
     let mut batch = exoware_sdk::StoreWriteBatch::new();
     let latest = prepared.latest_location();
-    exoware_qmdb::adapter::upload::stage_authenticated_range(client, prepared, &mut batch)?;
-    exoware_qmdb::adapter::upload::stage_watermark(client, latest, &mut batch)?;
+    stage_authenticated_range(client, prepared, &mut batch)?;
+    stage_watermark(client, latest, &mut batch)?;
     batch.commit(client.client()).await?;
     Ok(())
 }
 
-/// Upload consecutive current batch publications and publish the last one's final location.
+/// Stages consecutive current batch publications and the watermark at the last one's final
+/// location, trusting each publication's own root as the expected current root.
+#[allow(dead_code)]
+pub fn stage_publications<F, U, const N: usize>(
+    client: &exoware_sdk::PrefixedStoreClient,
+    publications: &[Publication<F, commonware_cryptography::sha256::Digest, U, N>],
+    batch: &mut exoware_sdk::StoreWriteBatch,
+) -> Result<(), QmdbError>
+where
+    F: Graftable,
+    U: Update,
+    AnyOperation<F, U>: UploadOperation<F>,
+{
+    let mut latest = None;
+    for publication in publications {
+        let prepared = prepare_publication::<F, commonware_cryptography::Sha256, U, _, N>(
+            publication,
+            &publication.root,
+            &Sequential,
+        )?;
+        latest = Some(prepared.latest_location());
+        stage_authenticated_range(client, prepared, batch)?;
+    }
+    let latest = latest.expect("publications must not be empty");
+    stage_watermark(client, latest, batch)
+}
+
+/// Uploads consecutive current batch publications and publishes the last one's final location.
 #[allow(dead_code)]
 pub async fn commit_publications<F, U, const N: usize>(
     client: &exoware_sdk::PrefixedStoreClient,
@@ -197,29 +224,15 @@ where
     U: Update,
     AnyOperation<F, U>: UploadOperation<F>,
 {
-    // Stage each publication, trusting its own root as the expected current root.
     let mut batch = exoware_sdk::StoreWriteBatch::new();
-    let mut latest = None;
-    for publication in publications {
-        let prepared = prepare_publication::<F, commonware_cryptography::Sha256, U, _, N>(
-            publication,
-            &publication.root,
-            &Sequential,
-        )?;
-        latest = Some(prepared.latest_location());
-        stage_authenticated_range(client, prepared, &mut batch)?;
-    }
-
-    // Publish the watermark atomically with the rows staged above.
-    let latest = latest.expect("publications must not be empty");
-    stage_watermark(client, latest, &mut batch)?;
+    stage_publications(client, publications, &mut batch)?;
     batch.commit(client.client()).await?;
     Ok(())
 }
 
-/// Decode `publication` from its encoding, as a writer that deferred its upload would.
+/// Re-decodes `publication` from its encoding, as a writer that deferred its upload would.
 #[allow(dead_code)]
-pub fn decode_publication<F, U, const N: usize>(
+pub fn round_trip_publication<F, U, const N: usize>(
     publication: &Publication<F, commonware_cryptography::sha256::Digest, U, N>,
     operation: <AnyOperation<F, U> as Read>::Cfg,
 ) -> Publication<F, commonware_cryptography::sha256::Digest, U, N>

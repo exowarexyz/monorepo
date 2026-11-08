@@ -1,7 +1,9 @@
 //! Ordered current-batch publications across local bitmap-chunk pruning.
 //!
-//! Remote current roots and proofs must match the source at every batch boundary,
-//! including historical watermarks and keys below the latest inactivity floor.
+//! Remote current roots must match the source at every batch's watermark. Remote proofs
+//! must match it at the initial commit, at the first watermark merkleized over pruned
+//! chunks, at the last watermark, and at historical watermarks for keys that later
+//! batches expire.
 
 mod common;
 
@@ -12,16 +14,14 @@ use commonware_runtime::{
 use commonware_storage::{
     merkle::{mmr, Location},
     qmdb::{
-        any::ordered::{variable::Operation as OrderedOp, Update},
+        any::ordered::variable::{Operation as OrderedOp, Update as OrderedUpdate},
         current::ordered::variable::Db as LocalOrderedDb,
         operation::Operation as _,
-        value::VariableEncoding,
     },
     translator::TwoCap,
 };
 use commonware_utils::{NZUsize, NZU16, NZU64};
 use exoware_qmdb::{adapter::upload::Publication, MAX_OPERATION_SIZE};
-use exoware_sdk::PrefixedStoreClient;
 
 const N: usize = 32;
 type Digest = commonware_cryptography::sha256::Digest;
@@ -35,19 +35,18 @@ type Db = LocalOrderedDb<
     N,
     commonware_parallel::Sequential,
 >;
-type SourcePublication =
-    Publication<mmr::Family, Digest, Update<Vec<u8>, VariableEncoding<Vec<u8>>>, N>;
+type OrderedPublication = Publication<mmr::Family, Digest, OrderedUpdate<Vec<u8>, Vec<u8>>, N>;
 
 /// Each batch appends 3 fresh writes and rewrites the key 3 counter-positions
-/// behind. With `N = 32` the bitmap chunk spans 256 bits; the inactivity floor
-/// crosses 256 after roughly ~85 batches, so 150 comfortably forces chunk 0 to
-/// be pruned (and then exercises several more post-prune batches).
+/// behind. With `N = 32` a bitmap chunk spans 256 bits, and the source prunes
+/// chunk 0 after roughly 55 batches, so 150 batches publish many more over a
+/// pruned bitmap.
 const BATCHES: u64 = 150;
 
 struct BatchOutcome {
     watermark: Location<mmr::Family>,
     root: Digest,
-    publication: SourcePublication,
+    publication: OrderedPublication,
 }
 
 struct ExpiredKeySnapshot {
@@ -64,7 +63,7 @@ async fn test_mirror_ordered_prune_past_chunk_zero() {
     // Phase 1 (blocking tokio runtime): drive the local QMDB through BATCHES
     // batches, capturing the initial publication and each batch's publication
     // and root, including after chunk 0 has been pruned.
-    let (initial, batches, chunk_zero_pruned, expired_key_snapshot) =
+    let (initial, batches, first_pruned, expired_key_snapshot) =
         tokio::task::spawn_blocking(move || {
             cw_tokio::Runner::default().start(move |context| async move {
                 let page_cache = CacheRef::new(NZU16!(64), NZUsize!(8));
@@ -110,13 +109,12 @@ async fn test_mirror_ordered_prune_past_chunk_zero() {
                         counter += 3;
                         batch.merkleize(&db).await.expect("merkleize")
                     };
-                    let publication =
-                        Publication::read(&finalized, &db).expect("publication must be readable");
+                    let publication = Publication::from_batch(&finalized, &db)
+                        .expect("publication must be readable");
                     db = db.apply_batch(finalized).await.expect("apply");
-                    // Current pruning is now explicit in Commonware. Keep the
-                    // historical operation log intact for this mirror test while
-                    // allowing the current bitmap/grafted overlay to prune as far
-                    // as the sync boundary permits.
+
+                    // Prune the operation log, bitmap, and grafted nodes as far as the sync
+                    // boundary permits.
                     let prune_boundary = db.sync_boundary();
                     db = db.prune(prune_boundary).await.expect("prune current");
 
@@ -136,25 +134,19 @@ async fn test_mirror_ordered_prune_past_chunk_zero() {
                     });
                 }
 
-                // Probe whether the bitmap-level chunk 0 has been pruned by
-                // asking for a range proof at Location(0); this is exactly the
-                // failure mode `current::Db` exhibits once the inactivity floor
-                // crosses the first chunk boundary.
-                let chunk_zero_pruned = {
-                    match db
-                        .range_proof(Location::<mmr::Family>::new(0), NZU64!(1))
-                        .await
-                    {
-                        Err(e) => e.to_string().contains("operation pruned"),
-                        Ok(_) => false,
-                    }
-                };
+                // The source must merkleize a batch over pruned bitmap chunks, or no
+                // publication comes from a pruned source.
+                let first_pruned = batches
+                    .iter()
+                    .position(|outcome| outcome.publication.pruned_chunks > 0)
+                    .expect("source must merkleize a batch over pruned bitmap chunks");
+
                 db = db.sync().await.expect("sync");
                 db.destroy().await.expect("destroy");
                 (
                     initial,
                     batches,
-                    chunk_zero_pruned,
+                    first_pruned,
                     expired_key_snapshot.expect("expired key snapshot"),
                 )
             })
@@ -162,20 +154,8 @@ async fn test_mirror_ordered_prune_past_chunk_zero() {
         .await
         .expect("join");
 
-    // The bitmap-level chunk 0 must be pruned by the time we stop, otherwise
-    // we are not exercising the failure mode this regression covers.
-    assert!(
-        chunk_zero_pruned,
-        "expected local DB to prune bitmap chunk 0; test did not exercise the failure mode"
-    );
-
-    // Phase 2: mirror each batch to the remote store and verify current_root
-    // agrees with the local root at THAT batch's watermark. For batches
-    // uploaded after chunk 0's last republish, the stored chunk 0 payload on
-    // the remote still carries the bit of the CommitFloor that was current
-    // when it was last published; the server-side masking in
-    // `load_bitmap_chunk` must fold that bit to 0 for the root recomputation
-    // to match.
+    // Phase 2: upload each publication to the remote store and read it back
+    // through an ordered reader.
     let upload_client = store_client.unprefixed();
     let qmdb_client: exoware_qmdb::adapter::Ordered<mmr::Family, Sha256, Vec<u8>, Vec<u8>, N> =
         exoware_qmdb::adapter::Ordered::new(
@@ -198,7 +178,14 @@ async fn test_mirror_ordered_prune_past_chunk_zero() {
             .expect("root at the initial commit must load"),
         initial.root
     );
+    let initial_range = qmdb_client
+        .current_operation_range(Location::new(0), Location::new(0), 1, None)
+        .await
+        .expect("operation range at the initial commit must verify");
+    assert_eq!(initial_range.root, initial.root);
+    assert_eq!(initial_range.operations, *initial.operations);
 
+    // The remote root at each batch's watermark must equal the source root.
     for outcome in &batches {
         common::commit_publications(&upload_client, std::slice::from_ref(&outcome.publication))
             .await
@@ -214,10 +201,41 @@ async fn test_mirror_ordered_prune_past_chunk_zero() {
         );
     }
 
-    // Spot-check that old watermarks still verify: re-query the very first
-    // batch's watermark after all later batches have been published. This
-    // hits `load_bitmap_chunk` for chunk 0 at an old watermark whose stored
-    // value predates every subsequent CommitFloor, forcing the mask path.
+    // At the first watermark merkleized over pruned chunks and at the last
+    // watermark, a key the batch wrote and the batch's own operations must
+    // verify against the source root.
+    for index in [first_pruned, batches.len() - 1] {
+        let outcome = &batches[index];
+        let key = format!("k-{:08x}", 3 * index).into_bytes();
+        let value = format!("v-{:08x}", 3 * index).into_bytes();
+        let key_proof = qmdb_client
+            .get(outcome.watermark, &key, None)
+            .await
+            .expect("key written at a pruned watermark must verify");
+        assert_eq!(key_proof.root, outcome.root);
+        match &key_proof.operation {
+            OrderedOp::Update(update) => {
+                assert_eq!(update.key, key);
+                assert_eq!(update.value, value);
+            }
+            _ => panic!("a key written at a pruned watermark must read as an Update operation"),
+        }
+        let publication = &outcome.publication;
+        let range = qmdb_client
+            .current_operation_range(
+                outcome.watermark,
+                publication.start_location,
+                publication.operations.len() as u32,
+                None,
+            )
+            .await
+            .expect("operations appended at a pruned watermark must verify");
+        assert_eq!(range.root, outcome.root);
+        assert_eq!(range.operations, *publication.operations);
+    }
+
+    // The first batch's watermark must keep its root after every later batch is
+    // published.
     let first = &batches[0];
     let remote_root_old = qmdb_client
         .root_at(first.watermark)
@@ -249,6 +267,7 @@ async fn test_mirror_ordered_prune_past_chunk_zero() {
         _ => panic!("expected Update operation for old expired-key proof"),
     }
 
+    // The expired key must be inactive at the final watermark.
     let final_watermark = batches.last().expect("at least one batch").watermark;
     let latest_err = qmdb_client
         .get(final_watermark, &expired_key_snapshot.key, None)
@@ -260,6 +279,7 @@ async fn test_mirror_ordered_prune_past_chunk_zero() {
         other => panic!("unexpected final expired-key error: {other:?}"),
     }
 
+    // A range read at the first watermark must verify against that watermark's root.
     let old_range = qmdb_client
         .get_range(
             first.watermark,

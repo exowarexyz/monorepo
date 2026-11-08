@@ -180,15 +180,15 @@ struct SourcePacket<F: Graftable> {
     encoded_operations: Vec<Vec<u8>>,
 }
 
-struct Snapshot<F: Graftable, Op, K, V, P> {
+struct Snapshot<F: Graftable, K: QmdbKey, V, E: ValueEncoding> {
     root: Digest,
     ops_root: Digest,
-    operations: Vec<Op>,
+    operations: Vec<Operation<F, K, E>>,
     /// Operation range that uploads a database without current state.
     packet: Option<SourcePacket<F>>,
     /// Current publications covering the new operations, starting with the initial one in the
     /// first snapshot.
-    publications: Option<Vec<P>>,
+    publications: Option<Vec<Publication<F, Digest, ordered::Update<K, E>, N>>>,
     activity: Option<Vec<bool>>,
     values: BTreeMap<K, V>,
 }
@@ -218,9 +218,7 @@ where
 
 async fn verify_snapshots<F, K, V, E>(
     case_name: &str,
-    snapshots: Vec<
-        Snapshot<F, Operation<F, K, E>, K, V, Publication<F, Digest, ordered::Update<K, E>, N>>,
-    >,
+    snapshots: Vec<Snapshot<F, K, V, E>>,
     all_keys: Vec<K>,
     op_cfg: <Operation<F, K, E> as Read>::Cfg,
     update_cfg: <ordered::Update<K, E> as Read>::Cfg,
@@ -315,12 +313,12 @@ async fn verify_snapshots<F, K, V, E>(
             Some(publications) => {
                 let mut next = Location::new(previous_count as u64);
                 for publication in publications {
-                    let decoded = common::decode_publication(publication, op_cfg.clone());
-                    assert_eq!(decoded.start, next);
-                    let end = *decoded.start as usize + decoded.operations.len();
+                    let decoded = common::round_trip_publication(publication, op_cfg.clone());
+                    assert_eq!(decoded.start_location, next);
+                    let end = *decoded.start_location as usize + decoded.operations.len();
                     assert_eq!(
                         decoded.operations.as_slice(),
-                        &snapshot.operations[*decoded.start as usize..end]
+                        &snapshot.operations[*decoded.start_location as usize..end]
                     );
                     next = Location::new(end as u64);
                     assert!(prepare_publication::<F, Sha256, _, _, N>(
@@ -385,10 +383,10 @@ async fn verify_snapshots<F, K, V, E>(
             .commit(prefixed.client())
             .await
             .expect("persist source proof rows");
-        let mut publication = StoreWriteBatch::new();
-        stage_watermark::<F>(&prefixed, tip, &mut publication)
+        let mut watermark = StoreWriteBatch::new();
+        stage_watermark::<F>(&prefixed, tip, &mut watermark)
             .expect("stage published source boundary");
-        publication
+        watermark
             .commit(prefixed.client())
             .await
             .expect("publish source boundary");
@@ -899,7 +897,7 @@ async fn verify_snapshots<F, K, V, E>(
 }
 
 macro_rules! capture_source_batch {
-    (any, $family:ty, $db:ident, $batch:ident) => {{
+    (any, $family:ty, $db:ident, $previous:ident, $batch:ident) => {{
         let (start_location, operations) = $batch.operations();
         let root = $batch.root();
         let proof = $batch.proof(&$db).expect("source batch proof before apply");
@@ -922,15 +920,16 @@ macro_rules! capture_source_batch {
                 .collect(),
         })
     }};
-    (current, $family:ty, $db:ident, $batch:ident) => {{
+    (current, $family:ty, $db:ident, $previous:ident, $batch:ident) => {{
         // A new database's initial commit precedes its first batch
         let mut publications = Vec::new();
-        if $db.bounds().end == Location::new(1) {
+        if $previous.is_empty() {
             publications
                 .push(Publication::initial(&$db).expect("initial publication must be readable"));
         }
-        publications
-            .push(Publication::read(&$batch, &$db).expect("batch publication must be readable"));
+        publications.push(
+            Publication::from_batch(&$batch, &$db).expect("batch publication must be readable"),
+        );
         publications
     }};
 }
@@ -1055,7 +1054,8 @@ macro_rules! variant_case {
                             }
                         }
                         let finalized = batch.merkleize(&db).await.expect("source merkleize");
-                        let captured = capture_source_batch!($state, $family, db, finalized);
+                        let captured =
+                            capture_source_batch!($state, $family, db, previous, finalized);
                         let batch_root = finalized.root();
                         db = db.apply_batch(finalized).await.expect("source apply");
                         assert_eq!(db.root(), batch_root);

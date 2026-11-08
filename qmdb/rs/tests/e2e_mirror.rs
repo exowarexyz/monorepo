@@ -12,7 +12,9 @@ use commonware_runtime::{
 use commonware_storage::{
     merkle::{mmr, Location},
     qmdb::{
-        any::unordered::variable::Db as LocalUnorderedDb,
+        any::{
+            ordered::variable::Update as OrderedUpdate, unordered::variable::Db as LocalUnorderedDb,
+        },
         current::ordered::variable::Db as LocalOrderedDb,
         immutable::variable::{Db as Immutable, Operation as ImmutableOperation},
         keyless::variable::{Db as Keyless, Operation as KeylessOperation},
@@ -21,7 +23,6 @@ use commonware_storage::{
 };
 use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16, NZU64};
 use exoware_qmdb::{adapter::upload::Publication, MAX_OPERATION_SIZE};
-use exoware_sdk::PrefixedStoreClient;
 use std::num::NonZeroU64;
 
 type Digest = commonware_cryptography::sha256::Digest;
@@ -369,12 +370,7 @@ async fn build_immutable_source(
 // -------------------- Current ordered (publications) --------------------
 
 const N: usize = 32;
-type OrderedPublication = Publication<
-    mmr::Family,
-    Digest,
-    commonware_storage::qmdb::any::ordered::variable::Update<Vec<u8>, Vec<u8>>,
-    N,
->;
+type OrderedPublication = Publication<mmr::Family, Digest, OrderedUpdate<Vec<u8>, Vec<u8>>, N>;
 
 #[tokio::test]
 async fn test_mirror_ordered_from_local() {
@@ -475,7 +471,7 @@ async fn build_current_ordered_source(
                     b.merkleize(&db).await.expect("merkleize")
                 };
                 publications.push(
-                    Publication::read(&finalized, &db).expect("publication must be readable"),
+                    Publication::from_batch(&finalized, &db).expect("publication must be readable"),
                 );
                 db = db.apply_batch(finalized).await.expect("apply");
             }

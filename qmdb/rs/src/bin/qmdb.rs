@@ -14,6 +14,7 @@ use commonware_storage::{
         current::ordered::variable::{
             Config as CurrentOrderedVariableConfig, Db as CurrentOrderedVariableDb,
         },
+        operation::Committable as _,
         value::VariableEncoding,
     },
     translator::TwoCap,
@@ -96,21 +97,21 @@ async fn health() -> &'static str {
     "ok"
 }
 
-/// Upload a publication of the source database and publish its final location.
+/// Upload a publication of the source database and publish its final location as the watermark.
 async fn upload(
-    store_client: &PrefixedStoreClient,
+    store: &PrefixedStoreClient,
     publication: &SourcePublication,
-    trusted_root: &Digest,
+    expected_root: &Digest,
 ) -> Location<Family> {
     let prepared =
-        prepare_publication::<Family, Sha256, _, _, N>(publication, trusted_root, &Sequential)
+        prepare_publication::<Family, Sha256, _, _, N>(publication, expected_root, &Sequential)
             .expect("publication must verify against the source root");
     let latest = prepared.latest_location();
     let mut rows = StoreWriteBatch::new();
-    stage_authenticated_range(store_client, prepared, &mut rows)
+    stage_authenticated_range(store, prepared, &mut rows)
         .expect("staging the publication must succeed");
-    stage_watermark(store_client, latest, &mut rows).expect("staging the watermark must succeed");
-    rows.commit(store_client.client())
+    stage_watermark(store, latest, &mut rows).expect("staging the watermark must succeed");
+    rows.commit(store.client())
         .await
         .expect("publication upload must succeed");
     latest
@@ -169,7 +170,7 @@ async fn seed(
         "starting seed"
     );
 
-    let store_client = StoreClient::new(store_url).prefixed(StoreKeyPrefix::new(store_prefix)?);
+    let store = StoreClient::new(store_url).prefixed(StoreKeyPrefix::new(store_prefix)?);
 
     tokio::task::spawn_blocking(move || {
         let runner_cfg = cw_tokio::Config::new().with_storage_directory(directory);
@@ -190,10 +191,7 @@ async fn seed(
                     write_buffer: NZUsize!(1024),
                     replay_buffer: NZUsize!(1024),
                     compression: None,
-                    codec_config: (
-                        ((0..=MAX_OPERATION_SIZE).into(), ()),
-                        ((0..=MAX_OPERATION_SIZE).into(), ()),
-                    ),
+                    codec_config: op_cfg(),
                     items_per_section: NZU64!(8),
                     page_cache,
                 },
@@ -218,23 +216,26 @@ async fn seed(
             if end == Location::new(1) {
                 let initial = Publication::initial(&source_db)
                     .expect("a new database must have an initial publication");
-                upload(&store_client, &initial, &source_db.root()).await;
+                upload(&store, &initial, &source_db.root()).await;
             }
 
-            // Resume the key counter from the number of applied batches.
-            let (_, operations) = source_db
-                .ops_historical_proof(
-                    end,
-                    Location::new(0),
-                    NonZeroU64::new(*end).expect("initial commit"),
-                )
-                .await
-                .expect("read local operation history");
-            let committed_batches = operations
-                .iter()
-                .filter(|operation| matches!(operation, Operation::CommitFloor(_, _)))
-                .count()
-                .saturating_sub(1) as u64;
+            // Resume the key counter from the number of applied batches. The decoded history is
+            // dropped once it is counted.
+            let committed_batches = {
+                let (_, operations) = source_db
+                    .ops_historical_proof(
+                        end,
+                        Location::new(0),
+                        NonZeroU64::new(*end).expect("initial commit"),
+                    )
+                    .await
+                    .expect("read local operation history");
+                operations
+                    .iter()
+                    .filter(|operation| operation.is_commit())
+                    .count()
+                    .saturating_sub(1) as u64
+            };
             let mut counter = committed_batches * 3;
             info!(
                 tip = *end - 1,
@@ -281,9 +282,9 @@ async fn seed(
                 // Upload each batch before applying it, so every applied batch is already
                 // published. A batch depends only on how many batches came before it, so a batch
                 // uploaded before an interrupted apply is rebuilt identically after a restart.
-                let publication = Publication::read(&finalized, &source_db)
+                let publication = Publication::from_batch(&finalized, &source_db)
                     .expect("batch publication must be readable before apply");
-                let latest = upload(&store_client, &publication, &finalized.root()).await;
+                let latest = upload(&store, &publication, &finalized.root()).await;
 
                 source_db = source_db.apply_batch(finalized).await.expect("apply batch");
                 source_db = source_db.sync().await.expect("sync local ordered db");
