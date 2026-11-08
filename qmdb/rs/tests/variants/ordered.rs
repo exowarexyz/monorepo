@@ -12,12 +12,10 @@ use commonware_runtime::{
 use commonware_storage::{
     merkle::{mmb, mmr, Graftable, Location, Proof},
     qmdb::{
-        any::{
-            ordered,
-            value::{FixedEncoding, ValueEncoding, VariableEncoding},
-        },
+        any::ordered,
         current::ordered::proof::constant::ExclusionProof,
         operation::Key as QmdbKey,
+        value::{FixedEncoding, ValueEncoding, VariableEncoding},
         verify::ProofExt as _,
     },
 };

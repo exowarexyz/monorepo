@@ -8,8 +8,8 @@ use commonware_runtime::{tokio as cw_tokio, Runner as _};
 use commonware_storage::{
     journal::contiguous::fixed::Config as FixedJournalConfig,
     merkle::{mmr, Location, Proof},
-    qmdb::any::{
-        unordered::{
+    qmdb::{
+        any::unordered::{
             fixed::{Db as LocalFixedUnorderedDb, Operation as FixedUnorderedOperation},
             variable::{Db as LocalUnorderedDb, Operation as UnorderedQmdbOperation},
         },

@@ -11,18 +11,15 @@ use commonware_storage::{
     journal::contiguous::fixed::Config as FixedJournalConfig,
     merkle::{mmb, mmr, Family, Graftable, Location, Proof},
     qmdb::{
-        any::{
-            ordered::{
-                fixed::Operation as FixedQmdbOperation, variable::Operation as QmdbOperation,
-                Update,
-            },
-            value::{FixedEncoding, VariableEncoding},
+        any::ordered::{
+            fixed::Operation as FixedQmdbOperation, variable::Operation as QmdbOperation, Update,
         },
         current::ordered::{
             fixed::Db as LocalFixedQmdbDb, proof::constant::ExclusionProof,
             variable::Db as LocalQmdbDb,
         },
         operation::Operation as _,
+        value::{FixedEncoding, VariableEncoding},
     },
     translator::TwoCap,
 };

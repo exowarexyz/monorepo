@@ -87,7 +87,7 @@ async fn spawn_qmdb_range_server(
             Vec<u8>,
             Vec<u8>,
             N,
-            commonware_storage::qmdb::any::value::VariableEncoding<Vec<u8>>,
+            commonware_storage::qmdb::value::VariableEncoding<Vec<u8>>,
         >(raw_store, op_cfg()),
     )
     .await
@@ -103,7 +103,7 @@ async fn spawn_mmb_qmdb_range_server(
             Vec<u8>,
             Vec<u8>,
             N,
-            commonware_storage::qmdb::any::value::VariableEncoding<Vec<u8>>,
+            commonware_storage::qmdb::value::VariableEncoding<Vec<u8>>,
         >(raw_store, op_cfg()),
     )
     .await
@@ -118,7 +118,7 @@ async fn spawn_qmdb_full_server(
         Digest,
         Vec<u8>,
         N,
-        commonware_storage::qmdb::any::value::VariableEncoding<Vec<u8>>,
+        commonware_storage::qmdb::value::VariableEncoding<Vec<u8>>,
     >(raw_store, fixed_key_op_cfg(), ()))
     .await
 }
@@ -141,7 +141,7 @@ type RpcLookupVerifier = exoware_qmdb::service::client::rpc::UnorderedLookupVeri
     Digest,
     Vec<u8>,
     N,
-    commonware_storage::qmdb::any::value::VariableEncoding<Vec<u8>>,
+    commonware_storage::qmdb::value::VariableEncoding<Vec<u8>>,
 >;
 
 /// Request-level verifying client, for responses the typed API cannot shape.
@@ -934,7 +934,7 @@ async fn aligned_commit_boundary<F: commonware_storage::merkle::Graftable + Part
             Digest,
             Vec<u8>,
             N,
-            commonware_storage::qmdb::any::value::VariableEncoding<Vec<u8>>,
+            commonware_storage::qmdb::value::VariableEncoding<Vec<u8>>,
         >(prefixed.clone(), op_cfg, ()))
         .await;
     let connect_client =
@@ -1130,7 +1130,7 @@ async fn current_boundary_nodes<F: commonware_storage::merkle::Graftable + Parti
             Digest,
             Vec<u8>,
             N,
-            commonware_storage::qmdb::any::value::VariableEncoding<Vec<u8>>,
+            commonware_storage::qmdb::value::VariableEncoding<Vec<u8>>,
         >(prefixed.clone(), op_cfg, ()))
         .await;
     let key_client =

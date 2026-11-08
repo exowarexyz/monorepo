@@ -9,11 +9,11 @@ use commonware_storage::{
     journal::contiguous::fixed::Config as FixedJournalConfig,
     merkle::{mmb, mmr, Family, Graftable, Location},
     qmdb::{
-        any::value::FixedEncoding,
         keyless::{
             fixed::{Db as FixedKeyless, Operation as FixedKeylessOperation},
             variable::{Db as Keyless, Operation as KeylessOperation},
         },
+        value::FixedEncoding,
     },
 };
 use commonware_utils::{NZUsize, NZU16, NZU64};

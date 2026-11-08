@@ -21,7 +21,6 @@ use commonware_storage::{
                 UPDATE_CONTEXT as FIXED_UNORDERED_UPDATE_CONTEXT,
             },
             ordered::{variable::Operation as OrderedOperation, Update},
-            value::VariableEncoding,
         },
         current::{
             ordered::proof::dynamic::{ExclusionProof, KeyValueProof},
@@ -31,6 +30,7 @@ use commonware_storage::{
             APPEND_CONTEXT as FIXED_KEYLESS_APPEND_CONTEXT,
             COMMIT_CONTEXT as FIXED_KEYLESS_COMMIT_CONTEXT,
         },
+        value::VariableEncoding,
         verify::ProofExt,
     },
 };
@@ -1776,16 +1776,14 @@ mod tests {
     use commonware_storage::{
         merkle::mem::Mem,
         qmdb::{
-            any::{
-                unordered::{Operation as UnorderedOperation, Update as UnorderedUpdate},
-                value::FixedEncoding,
-            },
+            any::unordered::{Operation as UnorderedOperation, Update as UnorderedUpdate},
             current::{
                 grafting::{graftable_chunks, Verifier as GraftingVerifier},
                 ordered::proof::constant::ExclusionProof as UpstreamExclusionProof,
                 proof::constant::OperationProof as UpstreamOperationProof,
             },
             keyless,
+            value::FixedEncoding,
         },
     };
     use commonware_utils::bitmap::Prunable;

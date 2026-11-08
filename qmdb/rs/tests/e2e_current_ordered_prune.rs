@@ -12,12 +12,10 @@ use commonware_runtime::{
 use commonware_storage::{
     merkle::{mmr, Location},
     qmdb::{
-        any::{
-            ordered::{variable::Operation as OrderedOp, Update},
-            value::VariableEncoding,
-        },
+        any::ordered::{variable::Operation as OrderedOp, Update},
         current::ordered::variable::Db as LocalOrderedDb,
         operation::Operation as _,
+        value::VariableEncoding,
     },
     translator::TwoCap,
 };

@@ -21,10 +21,7 @@ use commonware_codec::{Decode, Encode, Read};
 use commonware_cryptography::Hasher;
 use commonware_storage::{
     merkle::{Graftable, Location},
-    qmdb::{
-        any::{unordered, value::ValueEncoding},
-        operation::Key as QmdbKey,
-    },
+    qmdb::{any::unordered, operation::Key as QmdbKey, value::ValueEncoding},
 };
 use connectrpc::{Chain, ConnectRpcService};
 use exoware_sdk::PrefixedStoreClient;

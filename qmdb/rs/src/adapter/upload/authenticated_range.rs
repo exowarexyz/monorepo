@@ -26,13 +26,11 @@ use commonware_storage::{
     journal::contiguous::Contiguous,
     merkle::{Family, Graftable, Location, Position},
     qmdb::{
-        any::{
-            operation::{Operation as AnyOperation, Update},
-            value::ValueEncoding,
-        },
+        any::operation::{Operation as AnyOperation, Update},
         current::{batch::MerkleizedBatch, db::Db, grafting, proof::OpsRootWitness},
         immutable, keyless,
         operation::{Floored, Key as QmdbKey},
+        value::ValueEncoding,
     },
     Context,
 };
@@ -403,7 +401,7 @@ where
     let operations = publication.operations.as_slice();
     let floor = operations
         .last()
-        .and_then(Floored::has_floor)
+        .and_then(Floored::<F>::inactivity_floor)
         .ok_or_else(|| QmdbError::CorruptData("publication must end at a commit".into()))?;
     let end = publication
         .start
@@ -520,7 +518,7 @@ where
         })?;
         let operation = operation_at(offset, location, encoded)?;
         let operation = operation.borrow();
-        final_floor = operation.has_floor();
+        final_floor = operation.inactivity_floor();
         if let Some(floor) = final_floor {
             if !floor.is_valid() || floor > location {
                 return Err(QmdbError::CorruptData(format!(
@@ -608,8 +606,8 @@ mod tests {
     use commonware_parallel::{mocks::Explorer, rayon::ThreadPoolBuilder, Rayon, Sequential};
     use commonware_storage::{
         merkle::{mem::Mem, mmb, mmr},
-        qmdb::any::{
-            ordered, unordered,
+        qmdb::{
+            any::{ordered, unordered},
             value::{FixedEncoding, VariableEncoding},
         },
     };
@@ -875,7 +873,7 @@ mod tests {
     }
 
     impl<F: Family> Floored<F> for AliasedCommit {
-        fn has_floor(&self) -> Option<Location<F>> {
+        fn inactivity_floor(&self) -> Option<Location<F>> {
             Some(Location::new(0))
         }
     }

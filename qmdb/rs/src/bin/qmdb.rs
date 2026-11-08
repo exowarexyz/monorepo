@@ -10,13 +10,11 @@ use commonware_storage::{
     journal::contiguous::variable::Config as JournalConfig,
     merkle::{full::Config as MerkleConfig, mmb, Location},
     qmdb::{
-        any::{
-            ordered::{variable::Operation as VariableOperation, Update},
-            value::VariableEncoding,
-        },
+        any::ordered::{variable::Operation as VariableOperation, Update},
         current::ordered::variable::{
             Config as CurrentOrderedVariableConfig, Db as CurrentOrderedVariableDb,
         },
+        value::VariableEncoding,
     },
     translator::TwoCap,
 };

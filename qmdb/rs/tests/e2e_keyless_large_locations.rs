@@ -9,9 +9,9 @@ use commonware_parallel::Sequential;
 use commonware_storage::{
     merkle::{hasher::Hasher as _, mem::Mem, mmb, mmr, Graftable, Location, Position},
     qmdb::{
-        any::value::VariableEncoding,
         keyless::variable::Operation,
         sync::{Request, Response, Source as _},
+        value::VariableEncoding,
     },
 };
 use exoware_qmdb::{

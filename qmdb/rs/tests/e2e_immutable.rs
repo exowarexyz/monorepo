@@ -9,11 +9,11 @@ use commonware_storage::{
     journal::contiguous::fixed::Config as FixedJournalConfig,
     merkle::{mmr, Location},
     qmdb::{
-        any::value::FixedEncoding,
         immutable::{
             fixed::{Db as FixedImmutable, Operation as FixedImmutableOperation},
             variable::{Db as Immutable, Operation as ImmutableOperation},
         },
+        value::FixedEncoding,
     },
     translator::TwoCap,
 };

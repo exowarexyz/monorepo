@@ -22,9 +22,8 @@ use commonware_cryptography::Hasher;
 use commonware_storage::{
     merkle::{Graftable, Location},
     qmdb::{
-        any::{ordered, value::ValueEncoding},
-        current::ordered::proof::constant::ExclusionProof,
-        operation::Key as QmdbKey,
+        any::ordered, current::ordered::proof::constant::ExclusionProof, operation::Key as QmdbKey,
+        value::ValueEncoding,
     },
 };
 use connectrpc::{Chain, ConnectRpcService};

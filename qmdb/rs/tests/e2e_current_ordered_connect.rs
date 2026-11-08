@@ -11,12 +11,10 @@ use commonware_runtime::{tokio as cw_tokio, Runner as _};
 use commonware_storage::{
     merkle::{mmr, Location, Proof},
     qmdb::{
-        any::{
-            ordered::{variable::Operation as QmdbOperation, Update},
-            value::VariableEncoding,
-        },
+        any::ordered::{variable::Operation as QmdbOperation, Update},
         current::ordered::{proof::constant::ExclusionProof, variable::Db as LocalQmdbDb},
         operation::Operation as _,
+        value::VariableEncoding,
     },
     translator::TwoCap,
 };

@@ -8,8 +8,8 @@ use commonware_runtime::{deterministic, Runner as _};
 use commonware_storage::{
     merkle::{mmr, Location},
     qmdb::{
-        any::value::VariableEncoding,
         immutable::variable::{Db as Immutable, Operation as ImmutableOperation},
+        value::VariableEncoding,
     },
     translator::TwoCap,
 };

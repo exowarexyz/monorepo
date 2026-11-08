@@ -8,11 +8,9 @@ use commonware_runtime::{tokio as cw_tokio, Runner as _};
 use commonware_storage::{
     merkle::{mmb, mmr, Graftable, Location, Proof},
     qmdb::{
-        any::{
-            unordered,
-            value::{FixedEncoding, ValueEncoding, VariableEncoding},
-        },
+        any::unordered,
         operation::Key as QmdbKey,
+        value::{FixedEncoding, ValueEncoding, VariableEncoding},
     },
 };
 use commonware_utils::{iter::zip_eq, NZUsize, NZU16};

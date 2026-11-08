@@ -10,15 +10,13 @@ use commonware_runtime::{tokio as cw_tokio, Runner as _};
 use commonware_storage::{
     merkle::{mmb, mmr, Location, Proof},
     qmdb::{
-        any::{
-            ordered::{
-                variable::{Db as AnyOrderedQmdbDb, Operation as QmdbOperation},
-                Update,
-            },
-            value::VariableEncoding,
+        any::ordered::{
+            variable::{Db as AnyOrderedQmdbDb, Operation as QmdbOperation},
+            Update,
         },
         current::ordered::variable::Db as LocalQmdbDb,
         sync::{self as qmdb_sync, Request, Response, Source as _},
+        value::VariableEncoding,
     },
     translator::TwoCap,
 };

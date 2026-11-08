@@ -16,12 +16,10 @@ use commonware_cryptography::Hasher;
 use commonware_storage::{
     merkle::Graftable,
     qmdb::{
-        any::{
-            ordered,
-            value::{ValueEncoding, VariableEncoding},
-        },
+        any::ordered,
         current::ordered::proof::constant::ExclusionProof,
         operation::Key as QmdbKey,
+        value::{ValueEncoding, VariableEncoding},
     },
 };
 use connectrpc::client::{ClientConfig, ClientTransport};

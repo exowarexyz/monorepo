@@ -9,15 +9,13 @@ use commonware_parallel::{Sequential, Strategy};
 use commonware_storage::{
     merkle::{self, Family, Graftable, Location, Position, Proof, RangePlan},
     qmdb::{
-        any::{
-            ordered,
-            value::{ValueEncoding, VariableEncoding},
-        },
+        any::ordered,
         current::{
             ordered::proof::constant::ExclusionProof,
             proof::{constant::OperationProof, OpsRootWitness, RangeProof},
         },
         operation::{Key as QmdbKey, Operation},
+        value::{ValueEncoding, VariableEncoding},
     },
 };
 use std::collections::HashMap;

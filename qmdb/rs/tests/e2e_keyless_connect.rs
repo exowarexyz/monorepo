@@ -65,7 +65,7 @@ async fn spawn_qmdb_server(
             mmr::Family,
             commonware_cryptography::Sha256,
             Vec<u8>,
-            commonware_storage::qmdb::any::value::VariableEncoding<Vec<u8>>,
+            commonware_storage::qmdb::value::VariableEncoding<Vec<u8>>,
         >(raw_store, ((0..=10000).into(), ())),
     )
     .await

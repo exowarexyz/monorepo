@@ -40,7 +40,7 @@ where
     let floor = operations
         .last()
         .unwrap()
-        .has_floor()
+        .inactivity_floor()
         .expect("final commit");
     let inactive = F::inactive_peaks(end, floor);
     let root = merkle.root(&hasher, inactive).unwrap();

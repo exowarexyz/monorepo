@@ -11,9 +11,9 @@ use commonware_storage::{
     journal::contiguous::fixed::Config as FixedJournalConfig,
     merkle::{mmb, mmr, Family, Graftable, Location, Proof},
     qmdb::{
-        any::value::{FixedEncoding, ValueEncoding, VariableEncoding},
         immutable, keyless,
         operation::Key as QmdbKey,
+        value::{FixedEncoding, ValueEncoding, VariableEncoding},
         verify::ProofExt as _,
     },
     translator::TwoCap,
@@ -160,7 +160,7 @@ macro_rules! source {
                     assert_eq!(
                         operations
                             .last()
-                            .and_then(|operation| operation.has_floor()),
+                            .and_then(|operation| operation.inactivity_floor()),
                         Some(floor)
                     );
                     if batch_index > 0 {
@@ -173,7 +173,7 @@ macro_rules! source {
                     let pinned_nodes = batch.pinned_nodes(&db).expect("source pinned frontier");
                     assert!(proof.verify_with_pinned_nodes::<Sha256, _>(
                         start,
-                        &operations,
+                        operations.iter(),
                         &pinned_nodes,
                         &root,
                     ));
