@@ -1330,11 +1330,14 @@ async fn test_prepare_publication_rejects_unbound_publications() {
         })
     ));
 
-    // A witness that does not bind the operation root to the publication's root is rejected.
+    // A witness that does not bind the rebuilt operation root to the publication's root fails
+    // range verification.
     let mut unbound = publication;
     unbound.witness.grafted_root = Sha256::fill(0xEE);
     assert!(matches!(
         prepare(&unbound, &root),
-        Err(QmdbError::CorruptData(_))
+        Err(QmdbError::ProofVerification {
+            kind: ProofKind::RangeCheckpoint
+        })
     ));
 }

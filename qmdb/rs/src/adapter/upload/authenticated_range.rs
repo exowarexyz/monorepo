@@ -196,6 +196,7 @@ where
 {
     prepare_range::<F, H, Op, Op, S>(
         authenticated,
+        |root| *root,
         expected_root,
         strategy,
         |_, location, encoded| {
@@ -215,8 +216,8 @@ where
 }
 
 /// What an Exoware writer stores for one current QMDB batch. Replaying `operations` onto
-/// `pinned_nodes` under the final commit's floor recomputes `ops_root`, and `witness` binds that
-/// root to `root`.
+/// `pinned_nodes` under the final commit's floor rebuilds the operations-tree root, and `witness`
+/// binds that root to `root`.
 #[derive(Clone)]
 pub struct Publication<F: Graftable, D: Digest, U: Update, const N: usize> {
     /// Location of the first operation.
@@ -225,11 +226,9 @@ pub struct Publication<F: Graftable, D: Digest, U: Update, const N: usize> {
     pub pinned_nodes: Vec<D>,
     /// Operations the batch appends from `start`, ending with its commit.
     pub operations: Arc<Vec<AnyOperation<F, U>>>,
-    /// Operations-tree root after the batch.
-    pub ops_root: D,
     /// Canonical current root after the batch.
     pub root: D,
-    /// Witness binding `ops_root` to `root`.
+    /// Witness binding the operations-tree root after the batch to `root`.
     pub witness: OpsRootWitness<F, D>,
     /// Bitmap chunks below this index were pruned when the batch was merkleized.
     pub pruned_chunks: u64,
@@ -262,7 +261,6 @@ where
             start,
             pinned_nodes,
             operations,
-            ops_root: batch.ops_root(),
             root: batch.root(),
             witness: batch.ops_root_witness().clone(),
             pruned_chunks: batch.pruned_chunks(),
@@ -292,7 +290,6 @@ where
             start: Location::new(0),
             pinned_nodes: Vec::new(),
             operations: Arc::new(vec![AnyOperation::CommitFloor(None, Location::new(0))]),
-            ops_root: db.ops_root(),
             root: db.root(),
             witness: db.ops_root_witness().clone(),
             pruned_chunks: bitmap.pruned_chunks() as u64,
@@ -323,7 +320,6 @@ where
         self.start.write(buf);
         self.pinned_nodes.write(buf);
         self.operations.write(buf);
-        self.ops_root.write(buf);
         self.root.write(buf);
         self.witness.write(buf);
         self.pruned_chunks.write(buf);
@@ -340,7 +336,6 @@ where
         self.start.encode_size()
             + self.pinned_nodes.encode_size()
             + self.operations.encode_size()
-            + self.ops_root.encode_size()
             + self.root.encode_size()
             + self.witness.encode_size()
             + self.pruned_chunks.encode_size()
@@ -363,7 +358,6 @@ where
             start,
             pinned_nodes: Vec::read_cfg(buf, &(RangeCfg::exact(pins), ()))?,
             operations: Arc::read_cfg(buf, &(cfg.operations, cfg.operation.clone()))?,
-            ops_root: D::read(buf)?,
             root: D::read(buf)?,
             witness: OpsRootWitness::read(buf)?,
             pruned_chunks: u64::read(buf)?,
@@ -421,21 +415,15 @@ where
         encoded_operations: &encoded_operations,
     };
 
-    // The operations are already decoded, so preparation borrows them and skips decoding.
+    // The operations are already decoded, so preparation borrows them and skips decoding. The
+    // current-state rows are added only if the witness binds the rebuilt operation root to `root`.
     let prepared = prepare_range::<F, H, AnyOperation<F, U>, _, S>(
         &authenticated,
-        &publication.ops_root,
+        |ops_root| publication.witness.root::<H>(ops_root),
+        &publication.root,
         strategy,
         |offset, _, _| Ok(&operations[offset]),
     )?;
-
-    // The current-state rows are added only if the witness binds the authenticated operation root
-    // to `root`.
-    if publication.witness.root::<H>(&publication.ops_root) != publication.root {
-        return Err(QmdbError::CorruptData(
-            "current root must commit to the authenticated operation root".into(),
-        ));
-    }
     prepared.with_current_state::<N>(
         publication.root,
         &publication.witness,
@@ -445,11 +433,13 @@ where
     )
 }
 
-/// Verify a range and prepare its rows. After the range authenticates, `operation_at` maps each
-/// operation's offset, location, and canonical encoding to the operation, so a caller holding
-/// decoded operations can skip decoding.
+/// Verify a range and prepare its rows. The range authenticates when `commit` maps its rebuilt
+/// operation root to `expected_root`. After that, `operation_at` maps each operation's offset,
+/// location, and canonical encoding to the operation, so a caller holding decoded operations can
+/// skip decoding.
 fn prepare_range<F, H, Op, O, S>(
     authenticated: &AuthenticatedOperationRange<'_, H::Digest, F>,
+    commit: impl FnOnce(&H::Digest) -> H::Digest,
     expected_root: &H::Digest,
     strategy: &S,
     mut operation_at: impl FnMut(usize, Location<F>, &[u8]) -> Result<O, QmdbError>,
@@ -500,7 +490,7 @@ where
         authenticated.inactive_peaks,
         strategy,
     )?;
-    if extension.root != *expected_root {
+    if commit(&extension.root) != *expected_root {
         return Err(QmdbError::ProofVerification {
             kind: ProofKind::RangeCheckpoint,
         });
@@ -1326,7 +1316,6 @@ mod tests {
                 AnyOperation::Delete(FixedBytes::new([3; 8])),
                 AnyOperation::CommitFloor(Some(FixedBytes::new([4; 8])), Location::new(2)),
             ]),
-            ops_root: digest(b"ops root"),
             root: digest(b"root"),
             witness: OpsRootWitness {
                 grafted_root: digest(b"grafted root"),
