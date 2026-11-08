@@ -1,7 +1,7 @@
 use axum::{routing::get, serve::ListenerExt, Router};
 use clap::{Parser, Subcommand};
 use commonware_codec::Encode;
-use commonware_cryptography::Sha256;
+use commonware_cryptography::{sha256::Digest, Sha256};
 use commonware_parallel::Sequential;
 use commonware_runtime::{
     buffer::paged::CacheRef, tokio as cw_tokio, Runner as _, Supervisor as _,
@@ -51,6 +51,9 @@ type Db = CurrentOrderedVariableDb<
     Sequential,
 >;
 
+/// A publication of the seed's source database.
+type SourcePublication = Publication<Family, Digest, Update<Vec<u8>, VariableEncoding<Vec<u8>>>, N>;
+
 #[derive(Parser, Debug)]
 #[command(
     name = "qmdb",
@@ -93,19 +96,11 @@ async fn health() -> &'static str {
     "ok"
 }
 
-/// A publication of the seed's source database.
-type SourcePublication = Publication<
-    Family,
-    commonware_cryptography::sha256::Digest,
-    Update<Vec<u8>, VariableEncoding<Vec<u8>>>,
-    N,
->;
-
 /// Upload a publication of the source database and publish its final location.
 async fn upload(
     store_client: &PrefixedStoreClient,
     publication: &SourcePublication,
-    trusted_root: &commonware_cryptography::sha256::Digest,
+    trusted_root: &Digest,
 ) -> Location<Family> {
     let prepared =
         prepare_publication::<Family, Sha256, _, _, N>(publication, trusted_root, &Sequential)
@@ -227,15 +222,15 @@ async fn seed(
             }
 
             // Resume the key counter from the number of applied batches.
-            let committed_batches = source_db
+            let (_, operations) = source_db
                 .ops_historical_proof(
                     end,
                     Location::new(0),
                     NonZeroU64::new(*end).expect("initial commit"),
                 )
                 .await
-                .expect("read local operation history")
-                .1
+                .expect("read local operation history");
+            let committed_batches = operations
                 .iter()
                 .filter(|operation| matches!(operation, Operation::CommitFloor(_, _)))
                 .count()

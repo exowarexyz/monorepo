@@ -6,7 +6,8 @@
 //!
 //! Writes go directly to the store service, with this crate offering helpers such as
 //! [`adapter::upload::prepare_authenticated_range`], [`adapter::upload::stage_authenticated_range`]
-//! and [`adapter::upload::stage_watermark`].
+//! and [`adapter::upload::stage_watermark`]. Current QMDBs upload each batch as an
+//! [`adapter::upload::Publication`] prepared by [`adapter::upload::prepare_publication`].
 //!
 //! Reads take one of two paths. The adapters ([`adapter::Ordered`], [`adapter::Unordered`],
 //! [`adapter::Immutable`], and [`adapter::Keyless`]) query the store service directly. The

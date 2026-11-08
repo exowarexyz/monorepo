@@ -37,7 +37,7 @@ struct Snapshot<F: Graftable, K: QmdbKey, E: ValueEncoding> {
     range: Option<(Proof<F, Digest>, Vec<Digest>)>,
     operations: Vec<unordered::Operation<F, K, E>>,
     ops_root: Digest,
-    current: Option<Publication<F, Digest, unordered::Update<K, E>, N>>,
+    publication: Option<Publication<F, Digest, unordered::Update<K, E>, N>>,
     values: Vec<Option<E::Value>>,
 }
 
@@ -63,7 +63,7 @@ async fn check_mirror<F, K, V, E>(
             op_cfg.clone(),
         ),
     );
-    let (server, url) = if snapshots[0].current.is_some() {
+    let (server, url) = if snapshots[0].publication.is_some() {
         common::spawn_connect_service(exoware_qmdb::service::server::unordered_stack::<
             F,
             Sha256,
@@ -102,7 +102,7 @@ async fn check_mirror<F, K, V, E>(
             .iter()
             .map(|operation| operation.encode().to_vec())
             .collect::<Vec<_>>();
-        let prepared = match &snapshot.current {
+        let prepared = match &snapshot.publication {
             // Current batches travel as encoded publications and are verified after decoding
             Some(publication) => {
                 let decoded = common::decode_publication(publication, op_cfg.clone());
@@ -179,7 +179,7 @@ async fn check_mirror<F, K, V, E>(
             .expect("native historical proof");
         // Current RPCs authenticate historical ranges through the source's canonical root
         let trusted_root = snapshot
-            .current
+            .publication
             .as_ref()
             .map_or(snapshot.ops_root, |publication| publication.root);
         assert_eq!(native_range.root, trusted_root);
@@ -275,7 +275,7 @@ async fn check_mirror<F, K, V, E>(
             .is_err());
         bad_server.abort();
 
-        if snapshot.current.is_some() {
+        if snapshot.publication.is_some() {
             assert_eq!(
                 local.root_at(tip).await.expect("current root"),
                 trusted_root
@@ -382,7 +382,7 @@ async fn check_mirror<F, K, V, E>(
     // Publishing a later batch must preserve proofs at the earlier trusted tip
     let first = &snapshots[0];
     let trusted_root = first
-        .current
+        .publication
         .as_ref()
         .map_or(first.ops_root, |publication| publication.root);
     let proof = remote
@@ -534,13 +534,13 @@ macro_rules! case {
                     let initial_count = NonZeroU64::new(*db.bounds().end).expect("initial commit");
                     let (proof, operations): (_, Vec<Op>) =
                         source_proof!($state, db, initial_count);
-                    let current = publication!($state, db);
+                    let publication = publication!($state, db);
                     snapshots.push(Snapshot {
                         start: Location::new(0),
-                        range: current.is_none().then_some((proof, Vec::new())),
+                        range: publication.is_none().then_some((proof, Vec::new())),
                         operations,
                         ops_root: ops_root!($state, db),
-                        current,
+                        publication,
                         values: vec![None, None, None],
                     });
 
@@ -585,7 +585,7 @@ macro_rules! case {
                             range: captured,
                             ops_root: ops_root!($state, db),
                             operations,
-                            current: publication,
+                            publication,
                             values: expected,
                         });
                     }

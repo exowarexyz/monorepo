@@ -131,7 +131,7 @@ sequence observed by that lookup as their minimum.
 
 ## Upload and publish
 
-The [`adapter::upload`](src/adapter/upload/mod.rs) functions prepare Store rows
+The [`adapter::upload`](src/adapter/upload.rs) functions prepare Store rows
 from captured Commonware operations and proof material. The application owns
 capture, durable queuing, retries, and publication around these stateless
 functions.
@@ -181,8 +181,8 @@ Workers can prepare and upload ranges independently and out of order, provided
 the application coordinates publication after all required writes succeed.
 Repeated rows from the same history have identical keys and values, so the same
 packet can be retried. To make retries and recovery possible, persist operations,
-proof material, trusted roots, and any current-boundary material before allowing
-the source to discard them.
+proof material, trusted roots, and any current-state publications before
+allowing the source to discard them.
 
 ### Current-state boundaries
 
@@ -201,7 +201,7 @@ use exoware_qmdb::adapter::upload::{prepare_publication, Publication};
 let initial = Publication::initial(&db)?;
 let publication = Publication::read(&batch, &db)?;
 let prepared =
-    prepare_publication::<F, H, U, Sequential, N>(&publication, &trusted_root, &Sequential)?;
+    prepare_publication::<F, H, _, _, N>(&publication, &trusted_root, &Sequential)?;
 ```
 
 `prepare_publication` requires the publication's root to equal the trusted root,

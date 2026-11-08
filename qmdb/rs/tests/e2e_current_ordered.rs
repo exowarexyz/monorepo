@@ -1,15 +1,16 @@
-//! Ordered QMDB E2E: run a local Commonware ordered DB, upload its
-//! operations + current boundary state to a live store stack, then
-//! verify roots and proofs match.
+//! Current ordered QMDB E2E: run a local Commonware current ordered DB,
+//! upload each batch's publication to a live store stack, then verify
+//! roots and proofs match.
 
 mod common;
 
 use commonware_cryptography::Sha256;
 use commonware_macros::boxed;
+use commonware_parallel::Sequential;
 use commonware_runtime::{tokio as cw_tokio, Runner as _};
 use commonware_storage::{
     journal::contiguous::fixed::Config as FixedJournalConfig,
-    merkle::{mmb, mmr, Family, Graftable, Location, Proof},
+    merkle::{mmb, mmr, Family, Graftable, Location, Position, Proof},
     qmdb::{
         any::ordered::{
             fixed::Operation as FixedQmdbOperation, variable::Operation as QmdbOperation, Update,
@@ -25,7 +26,9 @@ use commonware_storage::{
 };
 use commonware_utils::{NZUsize, NZU16, NZU64};
 use exoware_qmdb::{
-    adapter::upload::{prepare_publication, Publication},
+    adapter::upload::{
+        prepare_publication, stage_authenticated_range, stage_watermark, Publication,
+    },
     proof::RawKeyLookupProof,
     ProofKind, QmdbError, MAX_OPERATION_SIZE,
 };
@@ -45,27 +48,11 @@ type FixedPublication<F> = Publication<F, Digest, Update<Digest, FixedEncoding<D
 type VariableClient<F> = exoware_qmdb::adapter::Ordered<F, Sha256, Vec<u8>, Vec<u8>, N>;
 type FixedClient<F> =
     exoware_qmdb::adapter::Ordered<F, Sha256, Digest, Digest, N, FixedEncoding<Digest>>;
-type VariableDb<F> = LocalQmdbDb<
-    F,
-    cw_tokio::Context,
-    Vec<u8>,
-    Vec<u8>,
-    Sha256,
-    TwoCap,
-    N,
-    commonware_parallel::Sequential,
->;
+type VariableDb<F> =
+    LocalQmdbDb<F, cw_tokio::Context, Vec<u8>, Vec<u8>, Sha256, TwoCap, N, Sequential>;
 
-type FixedDb<F> = LocalFixedQmdbDb<
-    F,
-    cw_tokio::Context,
-    Digest,
-    Digest,
-    Sha256,
-    TwoCap,
-    N,
-    commonware_parallel::Sequential,
->;
+type FixedDb<F> =
+    LocalFixedQmdbDb<F, cw_tokio::Context, Digest, Digest, Sha256, TwoCap, N, Sequential>;
 
 async fn upload_source<F>(store_client: &StoreClient, source: &VariableSource<F>)
 where
@@ -202,7 +189,7 @@ where
                 Sha256,
                 TwoCap,
                 M,
-                commonware_parallel::Sequential,
+                Sequential,
             > = LocalQmdbDb::init(context.child(partition_prefix), cfg, None)
                 .await
                 .expect("init");
@@ -433,7 +420,13 @@ async fn test_ordered_mmb_multi_peak_grafted_chunk_round_trip() {
     )
     .await;
     assert!(
-        source.publications[1].grafted_nodes.len() >= 2,
+        source
+            .publications
+            .last()
+            .expect("source must have publications")
+            .grafted_nodes
+            .len()
+            >= 2,
         "test must cross a grafted chunk boundary"
     );
 
@@ -957,11 +950,9 @@ where
     F: Graftable,
     BatchOperation<F>: commonware_codec::Codec + Clone,
 {
-    use commonware_parallel::Sequential;
-    use exoware_qmdb::adapter::upload::{stage_authenticated_range, stage_watermark};
     use exoware_sdk::StoreWriteBatch;
 
-    let (initial_root, prepared_initial, prepared_boundaries) = tokio::task::spawn_blocking(|| {
+    let (initial_root, prepared_initial, prepared) = tokio::task::spawn_blocking(|| {
         cw_tokio::Runner::default().start(|context| async move {
             use commonware_runtime::{buffer::paged::CacheRef, Supervisor as _};
 
@@ -988,7 +979,7 @@ where
             .expect("init source current DB");
             let initial = Publication::initial(&db).expect("initial publication must be readable");
             let prepared_initial = prepare(&initial);
-            let mut prepared_boundaries = Vec::new();
+            let mut prepared = Vec::new();
             for (batch_index, value) in [b"one".to_vec(), b"updated".to_vec()]
                 .into_iter()
                 .enumerate()
@@ -1019,10 +1010,10 @@ where
                     assert!(!publication.pinned_nodes.is_empty());
                     assert!(!publication.grafted_nodes.is_empty());
                 }
-                prepared_boundaries.push((end - 1, publication.root, value, prepare(&publication)));
+                prepared.push((end - 1, publication.root, value, prepare(&publication)));
             }
             db.destroy().await.expect("destroy source DB");
-            (initial.root, prepared_initial, prepared_boundaries)
+            (initial.root, prepared_initial, prepared)
         })
     })
     .await
@@ -1039,22 +1030,22 @@ where
         .commit(&store_client)
         .await
         .expect("initial publication must persist");
-    let mut expected_boundaries = Vec::new();
-    for (latest, root, value, prepared) in prepared_boundaries {
+    let mut expected = Vec::new();
+    for (latest, root, value, range) in prepared {
         let mut batch = StoreWriteBatch::new();
-        stage_authenticated_range(&upload_client, prepared, &mut batch)
+        stage_authenticated_range(&upload_client, range, &mut batch)
             .expect("stage current range without publishing");
         batch
             .commit(&store_client)
             .await
             .expect("persist current range");
-        expected_boundaries.push((latest, root, value));
+        expected.push((latest, root, value));
     }
     assert_eq!(
         qmdb_client.latest_published_watermark().await.unwrap(),
         None
     );
-    for (boundary, _, _) in &expected_boundaries {
+    for (boundary, _, _) in &expected {
         assert!(matches!(
             qmdb_client.root_at(*boundary).await,
             Err(exoware_qmdb::QmdbError::WatermarkTooLow { requested, available: 0 })
@@ -1062,8 +1053,8 @@ where
         ));
     }
 
-    // Publish once after both prefixes and their versioned current boundary rows are durable
-    let latest = expected_boundaries.last().unwrap().0;
+    // Publish once after both prefixes and their versioned current-state rows are durable.
+    let latest = expected.last().unwrap().0;
     let mut publication = StoreWriteBatch::new();
     stage_watermark(&upload_client, latest, &mut publication).expect("stage final watermark");
     publication
@@ -1079,7 +1070,7 @@ where
         initial_root
     );
 
-    for (boundary, expected_root, expected_value) in expected_boundaries {
+    for (boundary, expected_root, expected_value) in expected {
         let root = qmdb_client.root_at(boundary).await.unwrap_or_else(|error| {
             panic!("current root at uploaded boundary {boundary}: {error}")
         });
@@ -1288,7 +1279,6 @@ async fn test_prepare_publication_rejects_unbound_publications() {
                 .await
                 .expect("source batch must merkleize");
             let publication = Publication::read(&batch, &db).expect("publication must be readable");
-            drop(batch);
             db.destroy().await.expect("source destroy must succeed");
             publication
         })
@@ -1299,11 +1289,7 @@ async fn test_prepare_publication_rejects_unbound_publications() {
     // The unmodified publication prepares rows spanning exactly the batch's operations.
     let root = publication.root;
     let prepare = |publication: &_, root: &Digest| {
-        prepare_publication::<mmr::Family, Sha256, _, _, N>(
-            publication,
-            root,
-            &commonware_parallel::Sequential,
-        )
+        prepare_publication::<mmr::Family, Sha256, _, _, N>(publication, root, &Sequential)
     };
     let prepared = prepare(&publication, &root).expect("source publication must verify");
     assert_eq!(prepared.start_location(), publication.start);
@@ -1315,7 +1301,9 @@ async fn test_prepare_publication_rejects_unbound_publications() {
     // A root other than the publication's is rejected.
     assert!(matches!(
         prepare(&publication, &Sha256::fill(0xEE)),
-        Err(QmdbError::CorruptData(_))
+        Err(QmdbError::ProofVerification {
+            kind: ProofKind::RangeCheckpoint
+        })
     ));
 
     // Reordered operations rebuild a different operation root and fail range verification.
@@ -1328,6 +1316,14 @@ async fn test_prepare_publication_rejects_unbound_publications() {
         Err(QmdbError::ProofVerification {
             kind: ProofKind::RangeCheckpoint
         })
+    ));
+
+    // A grafted node below the grafting height is rejected.
+    let mut low_graft = publication.clone();
+    low_graft.grafted_nodes = vec![(Position::new(0), root)];
+    assert!(matches!(
+        prepare(&low_graft, &root),
+        Err(QmdbError::CorruptData(_))
     ));
 
     // A witness that does not bind the rebuilt operation root to the publication's root fails

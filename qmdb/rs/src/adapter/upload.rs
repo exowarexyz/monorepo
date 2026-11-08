@@ -1,4 +1,4 @@
-//! Stateless preparation of authenticated Commonware operation ranges.
+//! Stateless preparation and staging of authenticated Commonware operation ranges as Store rows.
 //!
 //! Ranges may overlap and contain several commits. All uploads to a namespace must belong to
 //! the same operation history, so repeated operation and Merkle node keys have identical values.
@@ -127,54 +127,6 @@ impl<D: Digest, F: Family> PreparedAuthenticatedRange<D, F> {
     }
 }
 
-impl<D: Digest, F: Graftable> PreparedAuthenticatedRange<D, F> {
-    /// Add a current batch's state rows at this range's final location. The caller has checked
-    /// that `witness` binds the authenticated operation root to `root`.
-    fn with_current_state<const N: usize>(
-        mut self,
-        root: D,
-        witness: &OpsRootWitness<F, D>,
-        pruned_chunks: u64,
-        chunks: &[(u64, [u8; N])],
-        grafted_nodes: &[(Position<F>, D)],
-    ) -> Result<Self, QmdbError> {
-        self.rows.reserve(2 + chunks.len() + grafted_nodes.len());
-        self.rows.push((
-            encode_current_meta_key(self.latest_location),
-            CurrentBoundaryMetadata {
-                root,
-                pruned_chunks,
-            }
-            .encode()
-            .to_vec(),
-        ));
-        self.rows.push((
-            encode_ops_root_witness_key(self.latest_location),
-            witness.encode().to_vec(),
-        ));
-        for &(chunk_index, chunk) in chunks {
-            self.rows.push((
-                encode_chunk_key(chunk_index, self.latest_location),
-                chunk.encode().to_vec(),
-            ));
-        }
-        let grafting_height = grafting::height::<N>();
-        for &(ops_position, digest) in grafted_nodes {
-            if F::pos_to_height(ops_position) < grafting_height {
-                return Err(QmdbError::CorruptData(format!(
-                    "grafted node at {ops_position} must be at or above the grafting height"
-                )));
-            }
-            let grafted_position = grafting::ops_to_grafted_pos::<F>(ops_position, grafting_height);
-            self.rows.push((
-                encode_grafted_node_key(grafted_position, self.latest_location),
-                digest.encode().to_vec(),
-            ));
-        }
-        Ok(self)
-    }
-}
-
 /// Verify an operation range and prepare its operation, index, and Merkle node rows.
 ///
 /// `expected_root` must be trusted independently of the supplied range and pins. The range
@@ -194,7 +146,7 @@ where
     Op: UploadOperation<F>,
     S: Strategy,
 {
-    prepare_range::<F, H, Op, Op, S>(
+    prepare_range::<F, H, Op, _, _>(
         authenticated,
         |root| *root,
         expected_root,
@@ -300,7 +252,7 @@ where
 }
 
 /// Decoding limits for a [`Publication`].
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct PublicationCfg<C> {
     /// Configuration of each operation.
     pub operation: C,
@@ -385,9 +337,9 @@ where
 {
     // Anchor the publication to the trusted root before hashing any operations.
     if publication.root != *expected_root {
-        return Err(QmdbError::CorruptData(
-            "publication root must equal the expected current root".into(),
-        ));
+        return Err(QmdbError::ProofVerification {
+            kind: ProofKind::RangeCheckpoint,
+        });
     }
 
     // Rebuild the authenticated range from the publication. The floor of its final commit fixes
@@ -416,30 +368,61 @@ where
     };
 
     // The operations are already decoded, so preparation borrows them and skips decoding. The
-    // current-state rows are added only if the witness binds the rebuilt operation root to `root`.
-    let prepared = prepare_range::<F, H, AnyOperation<F, U>, _, S>(
+    // range authenticates only if the witness binds the rebuilt operation root to `root`.
+    let mut prepared = prepare_range::<F, H, AnyOperation<F, U>, _, _>(
         &authenticated,
         |ops_root| publication.witness.root::<H>(ops_root),
         &publication.root,
         strategy,
         |offset, _, _| Ok(&operations[offset]),
     )?;
-    prepared.with_current_state::<N>(
-        publication.root,
-        &publication.witness,
-        publication.pruned_chunks,
-        &publication.chunks,
-        &publication.grafted_nodes,
-    )
+
+    // Add the current-state rows at the range's final location.
+    let latest_location = prepared.latest_location;
+    let rows = &mut prepared.rows;
+    rows.reserve(2 + publication.chunks.len() + publication.grafted_nodes.len());
+    rows.push((
+        encode_current_meta_key(latest_location),
+        CurrentBoundaryMetadata {
+            root: publication.root,
+            pruned_chunks: publication.pruned_chunks,
+        }
+        .encode()
+        .to_vec(),
+    ));
+    rows.push((
+        encode_ops_root_witness_key(latest_location),
+        publication.witness.encode().to_vec(),
+    ));
+    for (chunk_index, chunk) in &publication.chunks {
+        rows.push((
+            encode_chunk_key(*chunk_index, latest_location),
+            chunk.encode().to_vec(),
+        ));
+    }
+    let grafting_height = grafting::height::<N>();
+    for &(ops_position, digest) in &publication.grafted_nodes {
+        if F::pos_to_height(ops_position) < grafting_height {
+            return Err(QmdbError::CorruptData(format!(
+                "grafted node at {ops_position} must be at or above the grafting height"
+            )));
+        }
+        let grafted_position = grafting::ops_to_grafted_pos::<F>(ops_position, grafting_height);
+        rows.push((
+            encode_grafted_node_key(grafted_position, latest_location),
+            digest.encode().to_vec(),
+        ));
+    }
+    Ok(prepared)
 }
 
-/// Verify a range and prepare its rows. The range authenticates when `commit` maps its rebuilt
+/// Verify a range and prepare its rows. The range authenticates when `root_of` maps its rebuilt
 /// operation root to `expected_root`. After that, `operation_at` maps each operation's offset,
 /// location, and canonical encoding to the operation, so a caller holding decoded operations can
 /// skip decoding.
 fn prepare_range<F, H, Op, O, S>(
     authenticated: &AuthenticatedOperationRange<'_, H::Digest, F>,
-    commit: impl FnOnce(&H::Digest) -> H::Digest,
+    root_of: impl FnOnce(&H::Digest) -> H::Digest,
     expected_root: &H::Digest,
     strategy: &S,
     mut operation_at: impl FnMut(usize, Location<F>, &[u8]) -> Result<O, QmdbError>,
@@ -490,7 +473,7 @@ where
         authenticated.inactive_peaks,
         strategy,
     )?;
-    if commit(&extension.root) != *expected_root {
+    if root_of(&extension.root) != *expected_root {
         return Err(QmdbError::ProofVerification {
             kind: ProofKind::RangeCheckpoint,
         });
@@ -1223,80 +1206,6 @@ mod tests {
         assert_parallel_preparation::<mmb::Family>();
     }
 
-    #[test]
-    fn test_current_state_adds_rows_at_the_final_location() {
-        let operations = committed_encoded_operations::<mmr::Family>();
-        let authenticated = authenticated_range_fixture::<mmr::Family>(&operations, 3, 0);
-        let witness = OpsRootWitness::<mmr::Family, _> {
-            grafted_root: Sha256::hash(&[b"grafted root"]),
-            pending_chunk_digest: Default::default(),
-            partial_chunk: None,
-        };
-        let root = witness.root::<Sha256>(&authenticated.root);
-        let prepared = authenticated.prepare().expect("prepare operation range");
-        let initial_rows = prepared.rows.len();
-        let pins = prepared.pinned_nodes.clone();
-        let prepared = prepared
-            .with_current_state::<32>(root, &witness, 0, &[], &[])
-            .expect("matching binding");
-        assert_eq!(prepared.rows.len(), initial_rows + 2);
-        assert_eq!(prepared.pinned_nodes, pins);
-        let existing_nodes = pins.iter().map(|(position, _)| *position).collect();
-        let mandatory = prepared.rows.iter().cloned().collect::<BTreeMap<_, _>>();
-        assert_eq!(
-            staged_rows(prepared.without_pins_at(&existing_nodes)),
-            mandatory
-        );
-    }
-
-    #[test]
-    fn test_current_state_keys_grafted_nodes_by_grafted_space_position() {
-        let digest = Sha256::hash(&[b"grafted-node"]);
-        let ops_position = Position::new(2046);
-        let latest_location = Location::new(1024);
-        let witness = OpsRootWitness::<mmr::Family, _> {
-            grafted_root: digest,
-            pending_chunk_digest: Default::default(),
-            partial_chunk: None,
-        };
-        let root = witness.root::<Sha256>(&digest);
-        let prepared = PreparedAuthenticatedRange {
-            rows: Vec::new(),
-            pinned_nodes: Vec::new(),
-            start_location: Location::new(0),
-            latest_location,
-        }
-        .with_current_state::<32>(root, &witness, 0, &[], &[(ops_position, digest)])
-        .expect("matching binding");
-        let grafted_position = grafting::ops_to_grafted_pos(ops_position, grafting::height::<32>());
-        let expected_key = encode_grafted_node_key(grafted_position, latest_location);
-        let stale_ops_key = encode_grafted_node_key(ops_position, latest_location);
-
-        assert!(prepared
-            .rows
-            .iter()
-            .any(|(key, value)| key == &expected_key && value.as_slice() == digest.as_ref()));
-        assert!(!prepared.rows.iter().any(|(key, _)| key == &stale_ops_key));
-    }
-
-    #[test]
-    fn test_current_state_rejects_grafted_nodes_below_the_grafting_height() {
-        let operations = committed_encoded_operations::<mmr::Family>();
-        let authenticated = authenticated_range_fixture::<mmr::Family>(&operations, 3, 0);
-        let witness = OpsRootWitness::<mmr::Family, _> {
-            grafted_root: Sha256::hash(&[b"grafted root"]),
-            pending_chunk_digest: Default::default(),
-            partial_chunk: None,
-        };
-        let root = witness.root::<Sha256>(&authenticated.root);
-        let leaf = (Position::new(0), root);
-        assert!(authenticated
-            .prepare()
-            .unwrap()
-            .with_current_state::<32>(root, &witness, 0, &[], &[leaf])
-            .is_err());
-    }
-
     type CodecUpdate = unordered::Update<FixedBytes<8>, FixedValueEncoding>;
     type CodecPublication = Publication<mmr::Family, Sha256Digest, CodecUpdate, 32>;
 
@@ -1338,18 +1247,15 @@ mod tests {
     }
 
     #[test]
-    fn test_publication_codec_round_trip() {
-        let encoded = codec_publication().encode();
+    fn test_publication_codec_round_trips_and_enforces_limits() {
+        // A publication within the configured limits round-trips.
+        let publication = codec_publication();
+        let encoded = publication.encode();
         let decoded = CodecPublication::decode_cfg(encoded.clone(), &codec_cfg())
             .expect("encoded publication must decode");
         assert_eq!(decoded.encode(), encoded);
-    }
 
-    #[test]
-    fn test_publication_codec_rejects_malformed_encodings() {
         // Each vector longer than its configured limit is rejected.
-        let publication = codec_publication();
-        let encoded = publication.encode();
         for cfg in [
             PublicationCfg {
                 operations: (0..=2).into(),

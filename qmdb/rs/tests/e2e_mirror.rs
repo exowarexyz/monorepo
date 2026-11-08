@@ -366,7 +366,7 @@ async fn build_immutable_source(
     .expect("join")
 }
 
-// -------------------- Ordered (with current boundary) --------------------
+// -------------------- Current ordered (publications) --------------------
 
 const N: usize = 32;
 type OrderedPublication = Publication<

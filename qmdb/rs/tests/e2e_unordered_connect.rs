@@ -942,7 +942,7 @@ async fn aligned_commit_boundary<F: commonware_storage::merkle::Graftable + Part
             &url, op_cfg,
         );
     for (operations, publications) in snapshots {
-        // Upload each boundary from its publications' encodings.
+        // Round-trip each snapshot's publications through their encoding before uploading.
         let decoded = publications
             .iter()
             .map(|publication| common::decode_publication(publication, op_cfg))
@@ -1055,7 +1055,7 @@ async fn current_boundary_nodes<F: commonware_storage::merkle::Graftable + Parti
                     continue;
                 }
 
-                // Capture the boundaries before and after the final batch.
+                // Capture snapshots before and after the final batch.
                 assert_eq!(
                     operations.len() as u64,
                     u64::from(key_count)

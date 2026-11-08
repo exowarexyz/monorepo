@@ -30,8 +30,8 @@ use connectrpc::{
 };
 use exoware_qmdb::{
     adapter::upload::{
-        prepare_publication, stage_authenticated_range, Publication, PublicationCfg,
-        UploadOperation,
+        prepare_publication, stage_authenticated_range, stage_watermark, Publication,
+        PublicationCfg, UploadOperation,
     },
     service::proto::qmdb::v1::{
         GetOperationRangeRequest, GetOperationRangeResponse, GetOperationsRequest,
@@ -212,7 +212,7 @@ where
 
     // Publish the watermark atomically with the rows staged above.
     let latest = latest.expect("publications must not be empty");
-    exoware_qmdb::adapter::upload::stage_watermark(client, latest, &mut batch)?;
+    stage_watermark(client, latest, &mut batch)?;
     batch.commit(client.client()).await?;
     Ok(())
 }
