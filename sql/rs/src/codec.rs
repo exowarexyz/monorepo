@@ -448,7 +448,7 @@ fn decode_primary_key_payload(
 }
 
 /// Encode a secondary index key for `row` behind `namespace`, as
-/// [`encode_namespaced_primary_key`] does for primary keys. `pk_payload` is
+/// [`encode_primary_key`] does for primary keys. `pk_payload` is
 /// the row's primary key with its namespace and family prefix stripped,
 /// which is exactly the suffix every index key ends with, so callers that
 /// already built the primary key pass it in rather than encoding the key
