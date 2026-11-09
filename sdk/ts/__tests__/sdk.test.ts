@@ -13,8 +13,8 @@ jest.mock('../src/credential', () => ({
     environmentApiKey: () => undefined,
 }));
 
-import { Client } from '../src/client';
-import { StoreKeyPrefix, StoreWriteBatch, TraversalMode } from '../src/store';
+import { StoreClient } from '../src/client';
+import { StoreKeyPrefix, StoreWriteBatch, RangeMode } from '../src/store';
 import {
     ReduceParamsSchema,
     RangeReducerSpecSchema,
@@ -75,21 +75,21 @@ async function nextWithTimeout<T>(
 }
 
 describe('Exoware TS SDK', () => {
-    let client: Client;
+    let client: StoreClient;
 
     beforeAll(() => {
         const config = JSON.parse(fs.readFileSync(configFile, 'utf-8'));
         const baseUrl = `http://127.0.0.1:${config.port}`;
-        client = new Client(baseUrl);
+        client = new StoreClient(baseUrl);
     });
 
-    describe('StoreClient', () => {
-        it('should set and get a value', async () => {
-            const store = client.store();
+    describe('PrefixedStoreClient', () => {
+        it('should put and get a value', async () => {
+            const store = client.unprefixed();
             const key = new TextEncoder().encode('test-key');
             const value = Buffer.from('test-value');
 
-            await store.set(key, value);
+            await store.put(key, value);
             const result = await store.get(key);
 
             expect(result).not.toBeNull();
@@ -97,13 +97,13 @@ describe('Exoware TS SDK', () => {
         });
 
         it('should return null for a non-existent key', async () => {
-            const store = client.store();
+            const store = client.unprefixed();
             const result = await store.get(new TextEncoder().encode('non-existent-key'));
             expect(result).toBeNull();
         });
 
-        it('should query for key-value pairs', async () => {
-            const store = client.store();
+        it('should range over key-value pairs', async () => {
+            const store = client.unprefixed();
             const encoder = new TextEncoder();
             const prefix = 'query-test-';
             const pairs = [
@@ -114,29 +114,29 @@ describe('Exoware TS SDK', () => {
 
             let sequenceNumber = 0n;
             for (const pair of pairs) {
-                sequenceNumber = await store.set(pair.key, pair.value);
+                sequenceNumber = await store.put(pair.key, pair.value);
             }
 
-            const result = await store.query(encoder.encode(`${prefix}a`), encoder.encode(`${prefix}z`));
+            const result = await store.range(encoder.encode(`${prefix}a`), encoder.encode(`${prefix}z`));
             expect(result.sequenceNumber).toBeGreaterThan(0n);
             expect(result.results.length).toBe(3);
             expect(result.results.map(r => Buffer.from(r.value))).toEqual(pairs.map(p => p.value));
             expect(result.results.map(r => r.key).sort()).toEqual(pairs.map(p => p.key).sort());
 
-            const emptyResult = await store.query(
+            const emptyResult = await store.range(
                 encoder.encode(`${prefix}missing`),
                 encoder.encode(`${prefix}missing`),
                 undefined,
                 4096,
-                TraversalMode.FORWARD,
+                RangeMode.FORWARD,
                 sequenceNumber,
             );
             expect(emptyResult.results).toHaveLength(0);
             expect(emptyResult.sequenceNumber).toBeGreaterThanOrEqual(sequenceNumber);
         });
 
-        it('should setMany with multiple KVs', async () => {
-            const store = client.store();
+        it('should putMany with multiple KVs', async () => {
+            const store = client.unprefixed();
             const encoder = new TextEncoder();
             const prefix = 'setmany-test-';
             const kvs = [
@@ -145,7 +145,7 @@ describe('Exoware TS SDK', () => {
                 { key: encoder.encode(`${prefix}z`), value: Buffer.from('val-z') },
             ];
 
-            const sn = await store.setMany(kvs);
+            const sn = await store.putMany(kvs);
             expect(sn).toBeGreaterThan(0n);
 
             for (const kv of kvs) {
@@ -156,7 +156,7 @@ describe('Exoware TS SDK', () => {
         });
 
         it('should get a batch by sequence number', async () => {
-            const store = client.store();
+            const store = client.unprefixed();
             const encoder = new TextEncoder();
             const prefix = 'stream-getbatch-';
             const kvs = [
@@ -164,7 +164,7 @@ describe('Exoware TS SDK', () => {
                 { key: encoder.encode(`${prefix}b`), value: Buffer.from('bb') },
             ];
 
-            const sequenceNumber = await store.setMany(kvs);
+            const sequenceNumber = await store.putMany(kvs);
             const batch = await store.getBatch(sequenceNumber);
 
             expect(batch).not.toBeNull();
@@ -178,8 +178,8 @@ describe('Exoware TS SDK', () => {
         });
 
         it('should return null for a missing batch sequence number', async () => {
-            const store = client.store();
-            await store.set(new TextEncoder().encode('stream-missing-sentinel'), Buffer.from('x'));
+            const store = client.unprefixed();
+            await store.put(new TextEncoder().encode('stream-missing-sentinel'), Buffer.from('x'));
 
             const batch = await store.getBatch(10_000_000n);
 
@@ -187,7 +187,7 @@ describe('Exoware TS SDK', () => {
         });
 
         it('should subscribe to replayed matching batches', async () => {
-            const store = client.store();
+            const store = client.unprefixed();
             const encoder = new TextEncoder();
             const prefix = 'stream-subscribe-replay-';
             const kvs = [
@@ -195,7 +195,7 @@ describe('Exoware TS SDK', () => {
                 { key: encoder.encode(`${prefix}2`), value: Buffer.from('sb') },
             ];
 
-            const sequenceNumber = await store.setMany(kvs);
+            const sequenceNumber = await store.putMany(kvs);
             const batches = [];
 
             for await (const batch of store.subscribe({
@@ -217,16 +217,16 @@ describe('Exoware TS SDK', () => {
         });
 
         it('should isolate prefixed stores and commit a cross-prefix batch', async () => {
-            const base = client.store();
-            const a = client.store(new StoreKeyPrefix(new Uint8Array([1])));
-            const b = client.store(new StoreKeyPrefix(new Uint8Array([2])));
+            const base = client.unprefixed();
+            const a = client.prefixed(new StoreKeyPrefix(new Uint8Array([1])));
+            const b = client.prefixed(new StoreKeyPrefix(new Uint8Array([2])));
             const encoder = new TextEncoder();
             const key = encoder.encode('prefixed-store-shared-key');
 
             const batch = new StoreWriteBatch();
             batch.push(a, key, Buffer.from('value-a'));
             batch.push(b, key, Buffer.from('value-b'));
-            const sequenceNumber = await batch.commit(base);
+            const sequenceNumber = await batch.commit(client);
 
             const resultA = await a.get(key);
             const resultB = await b.get(key);
@@ -236,7 +236,7 @@ describe('Exoware TS SDK', () => {
             expect(Buffer.from(resultB!.value)).toEqual(Buffer.from('value-b'));
             expect(resultBase).toBeNull();
 
-            const rangeA = await a.query(key, key);
+            const rangeA = await a.range(key, key);
             expect(rangeA.results).toHaveLength(1);
             expect(Buffer.from(rangeA.results[0].key)).toEqual(Buffer.from(key));
             expect(Buffer.from(rangeA.results[0].value)).toEqual(Buffer.from('value-a'));
@@ -249,12 +249,12 @@ describe('Exoware TS SDK', () => {
         });
 
         it('should subscribe to logical regex matches under a byte store prefix', async () => {
-            const store = client.store(new StoreKeyPrefix(new Uint8Array([3])));
+            const store = client.prefixed(new StoreKeyPrefix(new Uint8Array([3])));
             const encoder = new TextEncoder();
             const missKey = encoder.encode('prefixed-stream-miss');
             const hitKey = encoder.encode('prefixed-stream-hit');
-            const missSequence = await store.set(missKey, Buffer.from('miss'));
-            const hitSequence = await store.set(hitKey, Buffer.from('hit'));
+            const missSequence = await store.put(missKey, Buffer.from('miss'));
+            const hitSequence = await store.put(hitKey, Buffer.from('hit'));
 
             const iterator = store
                 .subscribe({
@@ -286,7 +286,7 @@ describe('Exoware TS SDK', () => {
         });
 
         it('should getMany', async () => {
-            const store = client.store();
+            const store = client.unprefixed();
             const encoder = new TextEncoder();
             const prefix = 'getmany-test-';
             const kvs = [
@@ -294,7 +294,7 @@ describe('Exoware TS SDK', () => {
                 { key: encoder.encode(`${prefix}b`), value: Buffer.from('gb') },
             ];
 
-            await store.setMany(kvs);
+            await store.putMany(kvs);
 
             const missingKey = encoder.encode(`${prefix}missing`);
             const results = await store.getMany(
@@ -311,8 +311,8 @@ describe('Exoware TS SDK', () => {
             expect(byKey.get(`${prefix}missing`)).toBeUndefined();
         });
 
-        it('should query with reverse mode', async () => {
-            const store = client.store();
+        it('should range in reverse mode', async () => {
+            const store = client.unprefixed();
             const encoder = new TextEncoder();
             const prefix = 'reverse-test-';
             const pairs = [
@@ -322,22 +322,22 @@ describe('Exoware TS SDK', () => {
             ];
 
             for (const pair of pairs) {
-                await store.set(pair.key, pair.value);
+                await store.put(pair.key, pair.value);
             }
 
-            const forward = await store.query(
+            const forward = await store.range(
                 encoder.encode(`${prefix}a`),
                 encoder.encode(`${prefix}z`),
                 undefined,
                 4096,
-                TraversalMode.FORWARD,
+                RangeMode.FORWARD,
             );
-            const reverse = await store.query(
+            const reverse = await store.range(
                 encoder.encode(`${prefix}a`),
                 encoder.encode(`${prefix}z`),
                 undefined,
                 4096,
-                TraversalMode.REVERSE,
+                RangeMode.REVERSE,
             );
 
             expect(forward.results.length).toBe(3);
@@ -348,7 +348,7 @@ describe('Exoware TS SDK', () => {
         });
 
         it('should reduce with COUNT_ALL', async () => {
-            const store = client.store();
+            const store = client.unprefixed();
             const encoder = new TextEncoder();
             const prefix = 'reduce-count-';
             const kvs = [
@@ -357,7 +357,7 @@ describe('Exoware TS SDK', () => {
                 { key: encoder.encode(`${prefix}3`), value: Buffer.from('v3') },
             ];
 
-            await store.setMany(kvs);
+            await store.putMany(kvs);
 
             const params = create(ReduceParamsSchema, {
                 reducers: [
@@ -368,7 +368,7 @@ describe('Exoware TS SDK', () => {
             });
 
             const frames = [];
-            for await (const frame of store.reduce(
+            for await (const frame of store.rangeReduce(
                 encoder.encode(`${prefix}1`),
                 encoder.encode(`${prefix}z`),
                 params,
@@ -386,7 +386,7 @@ describe('Exoware TS SDK', () => {
         });
 
         it('should reduce with SUM on a value field', async () => {
-            const store = client.store();
+            const store = client.unprefixed();
             const encoder = new TextEncoder();
             const prefix = 'reduce-sum-';
 
@@ -395,7 +395,7 @@ describe('Exoware TS SDK', () => {
                 value: encodeStoredRowInt64(BigInt(n * 10)),
             }));
 
-            await store.setMany(kvs);
+            await store.putMany(kvs);
 
             const params = create(ReduceParamsSchema, {
                 reducers: [
@@ -420,7 +420,7 @@ describe('Exoware TS SDK', () => {
             });
 
             const frames = [];
-            for await (const frame of store.reduce(
+            for await (const frame of store.rangeReduce(
                 encoder.encode(`${prefix}1`),
                 encoder.encode(`${prefix}z`),
                 params,
@@ -438,12 +438,12 @@ describe('Exoware TS SDK', () => {
         });
 
         it('should advance a monotonic session after each successful read', async () => {
-            const store = client.store();
+            const store = client.unprefixed();
             const encoder = new TextEncoder();
             const firstKey = encoder.encode('serializable-session-1');
             const secondKey = encoder.encode('serializable-session-2');
 
-            const sn1 = await store.set(firstKey, Buffer.from('v1'));
+            const sn1 = await store.put(firstKey, Buffer.from('v1'));
             const session = store.createSession();
             expect(session.minSequenceNumber()).toBeUndefined();
 
@@ -452,7 +452,7 @@ describe('Exoware TS SDK', () => {
             expect(Buffer.from(first!.value)).toEqual(Buffer.from('v1'));
             expect(session.minSequenceNumber()).toBe(sn1);
 
-            const sn2 = await store.set(secondKey, Buffer.from('v2'));
+            const sn2 = await store.put(secondKey, Buffer.from('v2'));
             expect(sn2).toBeGreaterThan(sn1);
 
             const second = await session.get(secondKey);
@@ -462,8 +462,8 @@ describe('Exoware TS SDK', () => {
         });
 
         it('should honor an explicit monotonic session floor', async () => {
-            const store = client.store();
-            const session = store.createSessionWithSequence(10_000_000n);
+            const store = client.unprefixed();
+            const session = store.createSessionWithMinSequenceNumber(10_000_000n);
 
             expect(session.minSequenceNumber()).toBe(10_000_000n);
             await expect(
@@ -477,7 +477,7 @@ describe('Exoware TS SDK', () => {
 
         describe('retry config', () => {
             it('should accept retry config in client constructor', () => {
-                const c = new Client('http://localhost:1234', {
+                const c = new StoreClient('http://localhost:1234', {
                     retry: { maxAttempts: 5, initialBackoffMs: 200, maxBackoffMs: 5000 },
                 });
                 expect(c.retryConfig.maxAttempts).toBe(5);
@@ -486,7 +486,7 @@ describe('Exoware TS SDK', () => {
             });
 
             it('should use default retry config when not specified', () => {
-                const c = new Client('http://localhost:1234');
+                const c = new StoreClient('http://localhost:1234');
                 expect(c.retryConfig.maxAttempts).toBe(3);
                 expect(c.retryConfig.initialBackoffMs).toBe(100);
                 expect(c.retryConfig.maxBackoffMs).toBe(2000);
@@ -494,7 +494,7 @@ describe('Exoware TS SDK', () => {
         });
 
         it('should prune keys per KeepLatest policy', async () => {
-            const store = client.store();
+            const store = client.unprefixed();
             const encoder = new TextEncoder();
 
             function makePruneKey(group: string, version: bigint): Uint8Array {
@@ -517,7 +517,7 @@ describe('Exoware TS SDK', () => {
             const betaV1 = makePruneKey('beta', 1n);
             const betaV2 = makePruneKey('beta', 2n);
 
-            await store.setMany([
+            await store.putMany([
                 { key: alphaV1, value: Buffer.from('a1') },
                 { key: alphaV2, value: Buffer.from('a2') },
                 { key: alphaV3, value: Buffer.from('a3') },
@@ -568,11 +568,11 @@ describe('Exoware TS SDK', () => {
 
         describe('limits', () => {
             it('should handle key at size limit', async () => {
-                const store = client.store();
+                const store = client.unprefixed();
                 const key = new TextEncoder().encode('a'.repeat(MAX_KEY_LEN));
                 const value = Buffer.from('test-value');
 
-                await store.set(key, value);
+                await store.put(key, value);
                 const result = await store.get(key);
 
                 expect(result).not.toBeNull();
@@ -580,19 +580,19 @@ describe('Exoware TS SDK', () => {
             });
 
             it('should reject key over size limit', async () => {
-                const store = client.store();
+                const store = client.unprefixed();
                 const key = new TextEncoder().encode('a'.repeat(MAX_KEY_LEN + 1));
                 const value = Buffer.from('test-value');
 
-                await expect(store.set(key, value)).rejects.toThrow(RangeError);
+                await expect(store.put(key, value)).rejects.toThrow(RangeError);
             });
 
             it('should handle large values', async () => {
-                const store = client.store();
+                const store = client.unprefixed();
                 const key = new TextEncoder().encode('large_value');
                 const value = Buffer.alloc(128 * 1024);
 
-                await store.set(key, value);
+                await store.put(key, value);
                 const result = await store.get(key);
 
                 expect(result).not.toBeNull();

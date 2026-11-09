@@ -42,8 +42,8 @@ use exoware_proto::{
         Service as QueryApi, ServiceServer as QueryServiceServer,
     },
     stream_filter::{Filter, StreamFilter},
-    to_domain_reduce_request_from_view, with_error_info_detail, with_query_detail,
-    with_retry_info_detail, RangeTraversalDirection,
+    to_domain_reduce_params_from_view, with_error_info_detail, with_query_detail,
+    with_retry_info_detail, RangeMode,
 };
 use exoware_sdk as exoware_proto;
 use exoware_sdk::{
@@ -617,7 +617,7 @@ where
         let end_key: Key = wire.slice_ref(request.end);
         let limit = request.limit.map(|v| v as usize).unwrap_or(usize::MAX);
         let batch_size = (request.batch_size as usize).min(RANGE_STREAM_MAX_FRAME_ROWS);
-        let forward = direction == RangeTraversalDirection::Forward;
+        let forward = direction == RangeMode::Forward;
         let result = self
             .state
             .query
@@ -643,7 +643,7 @@ where
         let wire = request.bytes();
         let start_key: Key = wire.slice_ref(request.start);
         let end_key: Key = wire.slice_ref(request.end);
-        let domain = to_domain_reduce_request_from_view(&request.params)
+        let domain = to_domain_reduce_params_from_view(&request.params)
             .map_err(validate::reduce_params_error)?;
         let execution = execute_reduce(
             self.state.query.clone(),
@@ -789,7 +789,7 @@ where
         request: ServiceRequest<'_, exoware_proto::store::prune::v1::PruneRequest>,
     ) -> connectrpc::ServiceResult<PruneResponse> {
         validate::validate_prune_request(request.view())?;
-        let document = exoware_proto::parse_and_validate_policy_document(request.view())
+        let document = exoware_proto::parse_prune_request_view(request.view())
             .map_err(ConnectError::invalid_argument)?;
 
         self.state
@@ -1196,16 +1196,8 @@ where
         _ctx: Context,
         request: ServiceRequest<'_, exoware_proto::log::retention::v1::SetRetentionRequest>,
     ) -> connectrpc::ServiceResult<SetRetentionResponse> {
-        // Parse the wire shape, then authoritatively validate: buf.validate
-        // annotations on the proto are documentation, so the handler enforces
-        // the rule (e.g. keep_latest count > 0), mirroring the Prune handler.
         let policy = exoware_proto::parse_set_retention_request_view(request.view())
             .map_err(ConnectError::invalid_argument)?;
-        if let Some(policy) = policy.as_ref() {
-            exoware_proto::validate_retention_policy(policy)
-                .map_err(ConnectError::invalid_argument)?;
-        }
-
         let oldest_retained_sequence = self
             .state
             .retention
@@ -1394,7 +1386,7 @@ mod tests {
         retention::RetentionPolicy,
         to_domain_reduce_response,
         transport::ServiceTransport,
-        PrefixedStoreClient, StoreClient, StoreWriteBatch,
+        StoreClient, StoreWriteBatch,
     };
     use futures::StreamExt;
     use std::{
@@ -2320,7 +2312,7 @@ mod tests {
         let bytes = SetRetentionRequest {
             policy: policy
                 .as_ref()
-                .map(exoware_proto::retention_policy_to_proto)
+                .map(exoware_proto::to_proto_retention_policy)
                 .into(),
             ..Default::default()
         }
@@ -2878,7 +2870,7 @@ mod tests {
             .client_transport(ServiceTransport::new(connect_stack(state)))
             .build()
             .unwrap();
-        let client = PrefixedStoreClient::empty(client);
+        let client = client.unprefixed();
         let mut batch = StoreWriteBatch::new();
         batch
             .push(&client, &Bytes::from_static(b"a"), b"ab")
@@ -2921,7 +2913,7 @@ mod tests {
             ))))
             .build()
             .unwrap();
-        let client = PrefixedStoreClient::empty(client);
+        let client = client.unprefixed();
         let keys = [Bytes::from_static(b"a"), Bytes::from_static(b"b")];
         let mut batch = StoreWriteBatch::new();
         batch.reserve(MAX_PUT_ENTRIES);
@@ -2936,7 +2928,7 @@ mod tests {
         let error = batch.commit(client.client()).await.unwrap_err();
         assert_eq!(error.put_too_large().unwrap().entries, MAX_PUT_ENTRIES + 1);
         drop(batch);
-        let entries = client.stream().get(sequence).await.unwrap().unwrap();
+        let entries = client.stream().get_batch(sequence).await.unwrap().unwrap();
         assert_eq!(entries.sequence_number, sequence);
         assert_eq!(entries.entries.len(), MAX_PUT_ENTRIES);
         for (index, entry) in entries.entries.iter().enumerate() {
@@ -3002,7 +2994,7 @@ mod tests {
             ))))
             .build()
             .unwrap();
-        let client = PrefixedStoreClient::empty(client);
+        let client = client.unprefixed();
         let value = Bytes::from(vec![1; MAX_VALUE_LEN]);
         let overhead = 8 * put_entry_encoded_len(&[0], &value) - MAX_REQUEST_MESSAGE_BYTES;
         let mut batch = StoreWriteBatch::new();
@@ -3030,7 +3022,7 @@ mod tests {
             }
         }
         let sequence = batch.commit(client.client()).await.unwrap();
-        let entries = client.stream().get(sequence).await.unwrap().unwrap();
+        let entries = client.stream().get_batch(sequence).await.unwrap().unwrap();
         assert_eq!(entries.sequence_number, sequence);
         assert_eq!(entries.entries.len(), batch.len());
         for (actual, (key, value)) in entries.entries.iter().zip(batch.entries()) {
@@ -3278,7 +3270,7 @@ mod tests {
     fn grouped_reduce_fixture(
         groups: usize,
         width: usize,
-    ) -> (Arc<FakeEngine>, exoware_proto::RangeReduceRequest) {
+    ) -> (Arc<FakeEngine>, exoware_proto::RangeReduceParams) {
         use commonware_codec::Encode as _;
         use exoware_sdk::kv_codec::{KvExpr, KvFieldKind, KvFieldRef, StoredRow, StoredValue};
         let engine = Arc::new(FakeEngine::default());
@@ -3299,7 +3291,7 @@ mod tests {
                 })
                 .collect(),
         );
-        let request = exoware_proto::RangeReduceRequest {
+        let request = exoware_proto::RangeReduceParams {
             reducers: vec![exoware_proto::RangeReducerSpec {
                 op: exoware_proto::RangeReduceOp::CountAll,
                 expr: None,

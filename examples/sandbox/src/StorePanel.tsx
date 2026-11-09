@@ -1,9 +1,9 @@
 import { useState } from 'react';
 import {
   type GetResult,
-  type QueryResult,
-  type QueryResultItem,
-  type StoreClient,
+  type RangeResult,
+  type RangeResultItem,
+  type PrefixedStoreClient,
 } from '@exowarexyz/sdk';
 import { isNetworkError } from './clientErrors';
 import { formatBytesValue, formatKeyPreview } from './format';
@@ -13,11 +13,11 @@ interface NotificationFn {
 }
 
 export function StorePanel({
-  client,
+  store,
   showNotification,
   onConnectionLost,
 }: {
-  client: StoreClient | null;
+  store: PrefixedStoreClient | null;
   showNotification: NotificationFn;
   onConnectionLost: () => void;
 }) {
@@ -26,39 +26,39 @@ export function StorePanel({
   const [storeGetKey, setStoreGetKey] = useState('');
   const [storeGetValue, setStoreGetValue] = useState<GetResult | null>(null);
   const [keyNotFound, setKeyNotFound] = useState(false);
-  const [queryStart, setQueryStart] = useState('');
-  const [queryEnd, setQueryEnd] = useState('');
-  const [queryLimit, setQueryLimit] = useState('10');
-  const [queryResult, setQueryResult] = useState<QueryResult | null>(null);
-  const [isSettingValue, setIsSettingValue] = useState(false);
+  const [rangeStart, setRangeStart] = useState('');
+  const [rangeEnd, setRangeEnd] = useState('');
+  const [rangeLimit, setRangeLimit] = useState('10');
+  const [rangeResult, setRangeResult] = useState<RangeResult | null>(null);
+  const [isPuttingValue, setIsPuttingValue] = useState(false);
   const [isGettingValue, setIsGettingValue] = useState(false);
-  const [isQuerying, setIsQuerying] = useState(false);
+  const [isRanging, setIsRanging] = useState(false);
 
   const enc = new TextEncoder();
 
-  const handleSet = async () => {
-    if (!client || !storeKey) {
+  const handlePut = async () => {
+    if (!store || !storeKey) {
       return;
     }
 
-    setIsSettingValue(true);
+    setIsPuttingValue(true);
     try {
-      const sequenceNumber = await client.set(enc.encode(storeKey), enc.encode(storeValue));
-      showNotification('success', 'Store Write', `Key "${storeKey}" set at sequence ${sequenceNumber}`);
+      const sequenceNumber = await store.put(enc.encode(storeKey), enc.encode(storeValue));
+      showNotification('success', 'Store Write', `Key "${storeKey}" put at sequence ${sequenceNumber}`);
       setStoreKey('');
       setStoreValue('');
     } catch (error) {
-      showNotification('error', 'Store Write Failed', `Failed to set value: ${error}`);
+      showNotification('error', 'Store Write Failed', `Failed to put value: ${error}`);
       if (isNetworkError(error)) {
         onConnectionLost();
       }
     } finally {
-      setIsSettingValue(false);
+      setIsPuttingValue(false);
     }
   };
 
   const handleGet = async () => {
-    if (!client || !storeGetKey) {
+    if (!store || !storeGetKey) {
       return;
     }
 
@@ -66,7 +66,7 @@ export function StorePanel({
     setStoreGetValue(null);
     setKeyNotFound(false);
     try {
-      const result = await client.get(enc.encode(storeGetKey));
+      const result = await store.get(enc.encode(storeGetKey));
       setStoreGetValue(result);
       setKeyNotFound(result === null);
       showNotification('success', 'Store Read', `Read key "${storeGetKey}"`);
@@ -82,27 +82,27 @@ export function StorePanel({
     }
   };
 
-  const handleQuery = async () => {
-    if (!client) {
+  const handleRange = async () => {
+    if (!store) {
       return;
     }
 
-    setIsQuerying(true);
+    setIsRanging(true);
     try {
-      const result = await client.query(
-        queryStart ? enc.encode(queryStart) : undefined,
-        queryEnd ? enc.encode(queryEnd) : undefined,
-        queryLimit ? Number.parseInt(queryLimit, 10) : undefined,
+      const result = await store.range(
+        rangeStart ? enc.encode(rangeStart) : undefined,
+        rangeEnd ? enc.encode(rangeEnd) : undefined,
+        rangeLimit ? Number.parseInt(rangeLimit, 10) : undefined,
       );
-      setQueryResult(result);
-      showNotification('success', 'Store Range', `Query returned ${result.results.length} results`);
+      setRangeResult(result);
+      showNotification('success', 'Store Range', `Range returned ${result.results.length} results`);
     } catch (error) {
-      showNotification('error', 'Store Range Failed', `Query failed: ${error}`);
+      showNotification('error', 'Store Range Failed', `Range failed: ${error}`);
       if (isNetworkError(error)) {
         onConnectionLost();
       }
     } finally {
-      setIsQuerying(false);
+      setIsRanging(false);
     }
   };
 
@@ -119,7 +119,7 @@ export function StorePanel({
       <h2>Store</h2>
 
       <div className="form-section">
-        <h3>Set Value</h3>
+        <h3>Put Value</h3>
         <div className="form-row">
           <div className="form-group">
             <label htmlFor="store-key">Key</label>
@@ -143,11 +143,11 @@ export function StorePanel({
           </div>
         </div>
         <button
-          className={`btn-primary ${isSettingValue ? 'loading' : ''}`}
-          onClick={handleSet}
-          disabled={!client || isSettingValue || !storeKey}
+          className={`btn-primary ${isPuttingValue ? 'loading' : ''}`}
+          onClick={handlePut}
+          disabled={!store || isPuttingValue || !storeKey}
         >
-          {isSettingValue ? 'Setting...' : 'Set Value'}
+          {isPuttingValue ? 'Putting...' : 'Put Value'}
         </button>
       </div>
 
@@ -168,7 +168,7 @@ export function StorePanel({
         <button
           className={`btn-primary ${isGettingValue ? 'loading' : ''}`}
           onClick={handleGet}
-          disabled={!client || isGettingValue || !storeGetKey}
+          disabled={!store || isGettingValue || !storeGetKey}
         >
           {isGettingValue ? 'Getting...' : 'Get Value'}
         </button>
@@ -188,52 +188,52 @@ export function StorePanel({
       </div>
 
       <div className="form-section">
-        <h3>Query Range</h3>
+        <h3>Range</h3>
         <div className="form-row">
           <div className="form-group">
-            <label htmlFor="query-start">Start Key (optional)</label>
+            <label htmlFor="range-start">Start Key (optional)</label>
             <input
-              id="query-start"
+              id="range-start"
               type="text"
               placeholder="Start key"
-              value={queryStart}
-              onChange={(event) => setQueryStart(event.target.value)}
+              value={rangeStart}
+              onChange={(event) => setRangeStart(event.target.value)}
             />
           </div>
           <div className="form-group">
-            <label htmlFor="query-end">End Key (optional)</label>
+            <label htmlFor="range-end">End Key (optional)</label>
             <input
-              id="query-end"
+              id="range-end"
               type="text"
               placeholder="End key"
-              value={queryEnd}
-              onChange={(event) => setQueryEnd(event.target.value)}
+              value={rangeEnd}
+              onChange={(event) => setRangeEnd(event.target.value)}
             />
           </div>
           <div className="form-group">
-            <label htmlFor="query-limit">Limit</label>
+            <label htmlFor="range-limit">Limit</label>
             <input
-              id="query-limit"
+              id="range-limit"
               type="number"
               placeholder="10"
-              value={queryLimit}
-              onChange={(event) => setQueryLimit(event.target.value)}
+              value={rangeLimit}
+              onChange={(event) => setRangeLimit(event.target.value)}
             />
           </div>
         </div>
         <button
-          className={`btn-primary ${isQuerying ? 'loading' : ''}`}
-          onClick={handleQuery}
-          disabled={!client || isQuerying}
+          className={`btn-primary ${isRanging ? 'loading' : ''}`}
+          onClick={handleRange}
+          disabled={!store || isRanging}
         >
-          {isQuerying ? 'Querying...' : 'Query Range'}
+          {isRanging ? 'Reading...' : 'Range'}
         </button>
-        {queryResult && (
+        {rangeResult && (
           <div className="result fade-in">
-            <h4>Query Results ({queryResult.results.length} items)</h4>
-            {queryResult.results.length > 0 ? (
+            <h4>Range Results ({rangeResult.results.length} items)</h4>
+            {rangeResult.results.length > 0 ? (
               <ul>
-                {queryResult.results.map((item: QueryResultItem, index: number) => (
+                {rangeResult.results.map((item: RangeResultItem, index: number) => (
                   <li key={`${index}-${item.key.byteLength}`}>
                     <strong>{formatKeyPreview(item.key)}:</strong> {formatBytesValue(item.value)}
                   </li>

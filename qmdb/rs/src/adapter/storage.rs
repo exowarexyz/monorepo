@@ -96,7 +96,7 @@ async fn load_node_rows<F: Family>(
         .collect::<Vec<_>>();
     let refs = keys.iter().collect::<Vec<_>>();
     let rows = session
-        .get_many(&refs, u32::try_from(keys.len()).unwrap_or(u32::MAX))
+        .get_many(&refs, keys.len())
         .await
         .map_err(|error| crate::error::store_read_error(error, "exoware-qmdb node fetch failed"))?
         .collect()
@@ -735,7 +735,7 @@ mod tests {
                 .await
                 .unwrap();
         });
-        (PrefixedStoreClient::empty(StoreClient::new(&url)), task)
+        (StoreClient::new(&url).unprefixed(), task)
     }
 
     async fn assert_batched_proofs<F: Family + PartialEq>() {
@@ -764,7 +764,7 @@ mod tests {
         };
         let calls = queries.calls.clone();
         let (client, server) = serve(queries).await;
-        let session = client.create_session_with_sequence(1);
+        let session = client.create_session_with_min_sequence_number(1);
         let storage = KvMerkleStorage::<F, Digest> {
             session: &session,
             size: memory.size(),
@@ -847,7 +847,7 @@ mod tests {
         };
         let calls = queries.calls.clone();
         let (client, server) = serve(queries).await;
-        let session = client.create_session_with_sequence(1);
+        let session = client.create_session_with_min_sequence_number(1);
         // The watchdog reports a stalled sequential reader, without measuring request latency
         let (_, read) = tokio::time::timeout(
             std::time::Duration::from_secs(30),
@@ -910,7 +910,7 @@ mod tests {
         };
         let calls = queries.calls.clone();
         let (client, server) = serve(queries).await;
-        let session = client.create_session_with_sequence(1);
+        let session = client.create_session_with_min_sequence_number(1);
         let root = Position::<mmr::Family>::new(30);
         let (_, read) = load_proof_nodes::<mmr::Family, Digest, 1>(
             &session,
@@ -950,7 +950,7 @@ mod tests {
                 client
                     .client()
                     .prefixed(Self::prefix())
-                    .create_session_with_sequence(17),
+                    .create_session_with_min_sequence_number(17),
                 task,
             )
         }

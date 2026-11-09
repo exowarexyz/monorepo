@@ -21,12 +21,12 @@ use exoware_qmdb::{
     },
     service::{client::rpc::OperationLogClient, proto::qmdb::v1::GetOperationRangeRequest},
 };
-use exoware_sdk::{PrefixedStoreClient, StoreWriteBatch};
+use exoware_sdk::StoreWriteBatch;
 use std::sync::Arc;
 
 async fn check_large_locations<F: Graftable + PartialEq>(family: &str, start: u64) {
     let store_client = common::local_store_client().await;
-    let upload_client = PrefixedStoreClient::empty(store_client.clone());
+    let upload_client = store_client.unprefixed();
     let start = Location::<F>::new(start);
     let previous_size = Position::try_from(start).unwrap();
     // Opaque digests stand for a trusted pruned history, not four billion generated operations

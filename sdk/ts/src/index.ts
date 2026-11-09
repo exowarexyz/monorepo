@@ -1,20 +1,21 @@
-export { Client, createTransport, type ClientOptions, type RetryConfig } from './client.js';
+export { StoreClient, createTransport, type StoreClientOptions, type RetryConfig } from './client.js';
 export { API_KEY_ENV, InvalidApiKeyError, type Credential } from './credential.js';
 export { CookieJar, fetchWithCookieJar } from './cookies.js';
 export {
     ReadSession,
-    StoreClient,
+    PrefixedStoreClient,
     StoreKeyPrefix,
     StoreWriteBatch,
-    TraversalMode,
+    RangeMode,
     type GetResult,
     type GetManyResultItem,
-    type QueryResult,
-    type QueryResultItem,
+    type RangeResult,
+    type RangeResultItem,
     type ReduceParams,
     type ReduceResponse,
     type StoreBatch,
     type StoreBatchEntry,
+    type StreamFilter,
 } from './store.js';
 export { ExowareError, HttpError } from './error.js';
 export {
@@ -23,7 +24,6 @@ export {
     MAX_VALUE_LEN,
     MAX_KEY_LEN,
     type PutLimits,
-    type PutBatchOptions,
 } from './limits.js';
 export {
     RangeReduceOp,

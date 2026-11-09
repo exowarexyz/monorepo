@@ -2,8 +2,8 @@ import { createClient, type Client as ConnectClient, type Interceptor, Code, Con
 import { createConnectTransport } from '@connectrpc/connect-web';
 import { CookieJar, fetchWithCookieJar } from './cookies.js';
 import { environmentApiKey, resolveCredential, type Credential } from './credential.js';
-import { StoreClient, type StoreKeyPrefix } from './store.js';
-import { normalizePutOptions, type PutBatchOptions, type PutLimits } from './limits.js';
+import { PrefixedStoreClient, type StoreKeyPrefix } from './store.js';
+import { normalizePutLimits, type PutLimits } from './limits.js';
 import { Service as IngestService } from './gen/ts/log/v1/ingest_pb.js';
 import { Service as PruneService } from './gen/ts/store/v1/prune_pb.js';
 import { Service as QueryService } from './gen/ts/store/v1/query_pb.js';
@@ -201,7 +201,7 @@ function makeRetryInterceptor(config: RetryConfig): Interceptor {
     };
 }
 
-export type ClientOptions = {
+export type StoreClientOptions = {
     /** API key. In Node, omission uses `EXOWARE_API_KEY`; an empty string disables that fallback. */
     token?: string;
     /** Retry attempt and backoff limits for retryable RPC failures. */
@@ -212,12 +212,12 @@ export type ClientOptions = {
     putLimits?: PutLimits;
 };
 
-function normalizeClientOptions(tokenOrOptions?: string | ClientOptions): ClientOptions {
+function normalizeStoreClientOptions(tokenOrOptions?: string | StoreClientOptions): StoreClientOptions {
     return typeof tokenOrOptions === 'string' ? { token: tokenOrOptions } : tokenOrOptions ?? {};
 }
 
 // Both transports from one factory share credential resolution, retry policy, and cookies.
-function transportFactory(opts: ClientOptions): {
+function transportFactory(opts: StoreClientOptions): {
     create: (baseUrl: string, useBinaryFormat?: boolean) => ReturnType<typeof createConnectTransport>;
     credential: Credential;
 } {
@@ -254,12 +254,12 @@ function transportFactory(opts: ClientOptions): {
  * Requests use binary protobuf by default. Set `useBinaryFormat` to `false` for JSON. Put requires
  * protobuf, so keep binary enabled when creating an ingest client.
  */
-export function createTransport(baseUrl: string, tokenOrOptions?: string | ClientOptions) {
-    const opts = normalizeClientOptions(tokenOrOptions);
+export function createTransport(baseUrl: string, tokenOrOptions?: string | StoreClientOptions) {
+    const opts = normalizeStoreClientOptions(tokenOrOptions);
     return transportFactory(opts).create(baseUrl, opts.useBinaryFormat);
 }
 
-export class Client {
+export class StoreClient {
     public readonly baseUrl: string;
     public readonly ingest: ConnectClient<typeof IngestService>;
     public readonly prune: ConnectClient<typeof PruneService>;
@@ -267,15 +267,15 @@ export class Client {
     public readonly retention: ConnectClient<typeof RetentionService>;
     public readonly stream: ConnectClient<typeof StreamService>;
     public readonly retryConfig: RetryConfig;
-    public readonly putOptions: Readonly<Required<PutBatchOptions>>;
+    public readonly putLimits: Readonly<Required<PutLimits>>;
     /** Whether this client sends a credential, which is what makes a 401 explicable. */
     public readonly credential: Credential;
 
-    constructor(baseUrl: string, tokenOrOptions?: string | ClientOptions) {
-        const opts = normalizeClientOptions(tokenOrOptions);
+    constructor(baseUrl: string, tokenOrOptions?: string | StoreClientOptions) {
+        const opts = normalizeStoreClientOptions(tokenOrOptions);
         this.baseUrl = baseUrl.replace(/\/$/, '');
         this.retryConfig = opts.retry ?? DEFAULT_RETRY_CONFIG;
-        this.putOptions = Object.freeze(normalizePutOptions(opts.putLimits));
+        this.putLimits = Object.freeze(normalizePutLimits(opts.putLimits));
         const { create, credential } = transportFactory(opts);
         const transport = create(this.baseUrl, opts.useBinaryFormat);
         this.credential = credential;
@@ -286,7 +286,13 @@ export class Client {
         this.stream = createClient(StreamService, transport);
     }
 
-    public store(prefix?: StoreKeyPrefix): StoreClient {
-        return new StoreClient(this, prefix);
+    /** The Store client that namespaces every key under `prefix`. */
+    public prefixed(prefix: StoreKeyPrefix): PrefixedStoreClient {
+        return new PrefixedStoreClient(this, prefix);
+    }
+
+    /** The Store client with no key prefix, so keys pass through untranslated. */
+    public unprefixed(): PrefixedStoreClient {
+        return new PrefixedStoreClient(this);
     }
 }

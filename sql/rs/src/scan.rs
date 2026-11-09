@@ -804,7 +804,7 @@ async fn get_rows(
     let refs = keys.iter().collect::<Vec<_>>();
     let mut stream = ctx
         .session
-        .get_many(&refs, keys.len() as u32)
+        .get_many(&refs, keys.len())
         .await
         .map_err(|e| DataFusionError::External(Box::new(e)))?;
     let mut values = HashMap::with_capacity(keys.len());
@@ -1144,7 +1144,7 @@ mod tests {
     use exoware_sdk::{
         kv_codec::{StoredRow, StoredValue},
         transport::set_tcp_nodelay,
-        PrefixedStoreClient, RangeMode, StoreClient, StoreKeyPrefix,
+        RangeMode, StoreClient, StoreKeyPrefix,
     };
     use exoware_server::{
         Query, QueryExtra, QueryResult, QueryState, RangeScan, RangeScanBatch, RangeScanResult,
@@ -2564,20 +2564,18 @@ mod tests {
     #[test]
     fn sort_and_fetch_clones_share_cached_plan() {
         // The tag index covers amount so the scan can use its key order.
-        let schema = KvSchema::new(PrefixedStoreClient::empty(StoreClient::new(
-            "http://127.0.0.1:1",
-        )))
-        .table(
-            "orders",
-            vec![
-                column("id", DataType::Int64, false),
-                column("tag", DataType::Int64, false),
-                column("amount", DataType::Int64, false),
-            ],
-            vec!["id".into()],
-            vec![index("tag", &["tag"], &["amount"])],
-        )
-        .unwrap();
+        let schema = KvSchema::new(StoreClient::new("http://127.0.0.1:1").unprefixed())
+            .table(
+                "orders",
+                vec![
+                    column("id", DataType::Int64, false),
+                    column("tag", DataType::Int64, false),
+                    column("amount", DataType::Int64, false),
+                ],
+                vec!["id".into()],
+                vec![index("tag", &["tag"], &["amount"])],
+            )
+            .unwrap();
 
         // Fixing tag leaves the id suffix ordered. The projection puts id at output position 2.
         let state = DataFusionSessionContext::new().state();

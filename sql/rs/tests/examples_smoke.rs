@@ -7,7 +7,6 @@ use datafusion::{
     },
     common::ScalarValue,
 };
-use exoware_sdk::PrefixedStoreClient;
 use exoware_sql::{
     default_orders_index_specs, CellValue, IndexSpec, KvSchema, SqlContext, TableColumnConfig,
 };
@@ -105,9 +104,9 @@ fn collect_two_strings(
 #[tokio::test]
 async fn orders_example_queries_work_end_to_end() {
     let client = common::local_store_client().await;
-    let ctx = SqlContext::new(PrefixedStoreClient::empty(client.clone()));
+    let ctx = SqlContext::new(client.unprefixed());
 
-    let schema = KvSchema::new(PrefixedStoreClient::empty(client))
+    let schema = KvSchema::new(client.unprefixed())
         .orders_table("orders_kv", default_orders_index_specs())
         .expect("orders schema");
     ctx.register_schema(schema).expect("register");
@@ -185,9 +184,9 @@ async fn orders_example_queries_work_end_to_end() {
 #[tokio::test]
 async fn join_example_queries_work_end_to_end() {
     let client = common::local_store_client().await;
-    let ctx = SqlContext::new(PrefixedStoreClient::empty(client.clone()));
+    let ctx = SqlContext::new(client.unprefixed());
 
-    let schema = KvSchema::new(PrefixedStoreClient::empty(client))
+    let schema = KvSchema::new(client.unprefixed())
         .table(
             "customers",
             vec![
@@ -293,10 +292,10 @@ async fn join_example_queries_work_end_to_end() {
 #[tokio::test]
 async fn versioned_example_queries_work_end_to_end() {
     let client = common::local_store_client().await;
-    let ctx = SqlContext::new(PrefixedStoreClient::empty(client.clone()));
+    let ctx = SqlContext::new(client.unprefixed());
     let writer_client = client.clone();
 
-    let schema = KvSchema::new(PrefixedStoreClient::empty(client))
+    let schema = KvSchema::new(client.unprefixed())
         .table_versioned(
             "documents",
             vec![
@@ -316,7 +315,7 @@ async fn versioned_example_queries_work_end_to_end() {
     let doc_id_hex = "d0c1aabbccddeeff0011223344556677";
     let doc_id = hex::decode(doc_id_hex).expect("doc_id hex");
 
-    let mut batch = KvSchema::new(PrefixedStoreClient::empty(writer_client))
+    let mut batch = KvSchema::new(writer_client.unprefixed())
         .table_versioned(
             "documents",
             vec![
@@ -413,10 +412,10 @@ async fn versioned_example_queries_work_end_to_end() {
 #[tokio::test]
 async fn fixed_binary_example_filters_work_end_to_end() {
     let client = common::local_store_client().await;
-    let ctx = SqlContext::new(PrefixedStoreClient::empty(client.clone()));
+    let ctx = SqlContext::new(client.unprefixed());
     let writer_client = client.clone();
 
-    let schema = KvSchema::new(PrefixedStoreClient::empty(client))
+    let schema = KvSchema::new(client.unprefixed())
         .table(
             "wallets",
             vec![
@@ -447,7 +446,7 @@ async fn fixed_binary_example_filters_work_end_to_end() {
 
     ctx.register_schema(schema).expect("register");
 
-    let mut batch = KvSchema::new(PrefixedStoreClient::empty(writer_client))
+    let mut batch = KvSchema::new(writer_client.unprefixed())
         .table(
             "wallets",
             vec![

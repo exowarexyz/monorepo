@@ -1,7 +1,7 @@
 import { create, type MessageInitShape } from '@bufbuild/protobuf';
 import { Code, ConnectError } from '@connectrpc/connect';
 import type { CallOptions } from '@connectrpc/connect';
-import type { Client } from './client.js';
+import type { StoreClient } from './client.js';
 import { credentialRemedy, withoutHtmlBody, type Credential } from './credential.js';
 import { HttpError } from './error.js';
 import { PruneRequestSchema } from './gen/ts/store/v1/prune_pb.js';
@@ -16,19 +16,19 @@ import { ErrorInfoSchema } from './gen/ts/google/rpc/error_details_pb.js';
 import { PutRequestSchema } from './gen/ts/log/v1/ingest_pb.js';
 import {
     MAX_KEY_LEN,
-    normalizePutOptions,
+    normalizePutLimits,
     putEncodedLen,
     putEntryEncodedLen,
     validatePut,
     validatePutEntry,
-    type PutBatchOptions,
+    type PutLimits,
 } from './limits.js';
 import {
     GetManyRequestSchema,
     GetRequestSchema as QueryGetRequestSchema,
     RangeRequestSchema,
     ReduceRequestSchema,
-    TraversalMode,
+    TraversalMode as RangeMode,
 } from './gen/ts/store/v1/query_pb.js';
 import type {
     Detail,
@@ -46,7 +46,8 @@ import {
 
 type DetailObserver = (detail: Detail) => void;
 
-export { TraversalMode };
+// Range traversal direction: the generated `store.query.v1.TraversalMode` enum.
+export { RangeMode };
 
 export type { ReduceParams, ReduceResponse };
 
@@ -59,14 +60,14 @@ export interface GetManyResultItem {
     value: Uint8Array | undefined;
 }
 
-export interface QueryResultItem {
+export interface RangeResultItem {
     key: Uint8Array;
     value: Uint8Array;
 }
 
-export interface QueryResult {
+export interface RangeResult {
     sequenceNumber: bigint;
-    results: QueryResultItem[];
+    results: RangeResultItem[];
 }
 
 export interface StoreBatchEntry {
@@ -202,9 +203,9 @@ function encodeStoreRange(
 export class StoreWriteBatch {
     private readonly kvs: StoreBatchEntry[] = [];
 
-    push(client: StoreClient, key: Uint8Array, value: Uint8Array | Buffer): this {
+    push(store: PrefixedStoreClient, key: Uint8Array, value: Uint8Array | Buffer): this {
         this.kvs.push({
-            key: client.encodeStoreKey(key),
+            key: store.encodeStoreKey(key),
             value: copyBytes(value),
         });
         return this;
@@ -226,24 +227,24 @@ export class StoreWriteBatch {
         return putEncodedLen(this.kvs);
     }
 
-    validate(options: PutBatchOptions = {}): void {
-        validatePut(this.kvs, options);
+    validate(limits: PutLimits): void {
+        validatePut(this.kvs, limits);
     }
 
     /** Each returned batch is a separate atomic Put. Payload buffers remain shared. */
-    split(options: PutBatchOptions = {}): StoreWriteBatch[] {
-        const limits = normalizePutOptions(options);
+    split(limits: PutLimits): StoreWriteBatch[] {
+        const normalized = normalizePutLimits(limits);
         const batches: StoreWriteBatch[] = [];
         let batch = new StoreWriteBatch();
         let entryBytes = 0;
         for (const [index, entry] of this.kvs.entries()) {
-            validatePutEntry(entry, index, limits.maxValueLen);
+            validatePutEntry(entry, index, normalized.maxValueLen);
             const length = putEntryEncodedLen(entry);
-            if (length > limits.maxEncodedBytes) {
-                throw new RangeError(`Put entry ${index} encoded size ${length} exceeds ${limits.maxEncodedBytes}`);
+            if (length > normalized.maxEncodedBytes) {
+                throw new RangeError(`Put entry ${index} encoded size ${length} exceeds ${normalized.maxEncodedBytes}`);
             }
-            if (batch.length === limits.maxEntries
-                || entryBytes + length > limits.maxEncodedBytes) {
+            if (batch.length === normalized.maxEntries
+                || entryBytes + length > normalized.maxEncodedBytes) {
                 batches.push(batch);
                 batch = new StoreWriteBatch();
                 entryBytes = 0;
@@ -255,8 +256,29 @@ export class StoreWriteBatch {
         return batches;
     }
 
-    async commit(client: StoreClient): Promise<bigint> {
-        return client.putPrepared(this);
+    /**
+     * Send every staged entry in one atomic Put through the physical client. Keys were encoded
+     * under their owning store's prefix by {@link StoreWriteBatch.push}.
+     */
+    async commit(client: StoreClient, options?: CallOptions): Promise<bigint> {
+        return performPut(client, this.kvs, options);
+    }
+}
+
+async function performPut(
+    client: StoreClient,
+    entries: readonly StoreBatchEntry[],
+    options?: CallOptions,
+): Promise<bigint> {
+    validatePut(entries, client.putLimits);
+    const req = create(PutRequestSchema, {
+        kvs: entries.map((entry) => create(EntrySchema, entry)),
+    });
+    try {
+        const res = await client.ingest.put(req, options);
+        return res.sequenceNumber;
+    } catch (e) {
+        mapConnectToHttpError(e, client.credential);
     }
 }
 
@@ -386,14 +408,14 @@ function prefixPolicies(policies: Policy[], prefix?: StoreKeyPrefix): Policy[] {
     });
 }
 
-function prefixSubscribeFilters(
-    filters: SubscribeFilters,
+function prefixStreamFilter(
+    filter: StreamFilter,
     prefix?: StoreKeyPrefix,
-): SubscribeFilters {
-    if (!prefix) return filters;
+): StreamFilter {
+    if (!prefix) return filter;
     return {
-        ...filters,
-        selectors: filters.selectors.map((selector) => prefix.prefixSelector(selector)),
+        ...filter,
+        selectors: filter.selectors.map((selector) => prefix.prefixSelector(selector)),
     };
 }
 
@@ -512,7 +534,7 @@ function prefixReduceParams(params: ReduceParams, prefix?: StoreKeyPrefix): Redu
 }
 
 async function performGet(
-    client: Client,
+    client: StoreClient,
     key: Uint8Array,
     minSequenceNumber?: bigint,
     detailObserver?: DetailObserver,
@@ -539,13 +561,14 @@ async function performGet(
 }
 
 async function performGetMany(
-    client: Client,
+    client: StoreClient,
     keys: Uint8Array[],
     batchSize?: number,
     onChunk?: (entries: GetManyResultItem[]) => void,
     minSequenceNumber?: bigint,
     detailObserver?: DetailObserver,
     prefix?: StoreKeyPrefix,
+    options?: CallOptions,
 ): Promise<GetManyResultItem[]> {
     const effective = normalizeMinSequenceNumber(minSequenceNumber);
     const req = create(GetManyRequestSchema, {
@@ -555,7 +578,7 @@ async function performGetMany(
     });
     const results: GetManyResultItem[] = [];
     try {
-        const stream = client.query.getMany(req);
+        const stream = client.query.getMany(req, options);
         for await (const frame of stream) {
             if (frame.detail) {
                 detailObserver?.(frame.detail);
@@ -578,18 +601,18 @@ async function performGetMany(
     }
 }
 
-async function performQuery(
-    client: Client,
+async function performRange(
+    client: StoreClient,
     start?: Uint8Array,
     end?: Uint8Array,
     limit?: number,
     batchSize: number = 4096,
-    mode: TraversalMode = TraversalMode.FORWARD,
+    mode: RangeMode = RangeMode.FORWARD,
     minSequenceNumber?: bigint,
     detailObserver?: DetailObserver,
     prefix?: StoreKeyPrefix,
     options?: CallOptions,
-): Promise<QueryResult> {
+): Promise<RangeResult> {
     const effective = normalizeMinSequenceNumber(minSequenceNumber);
     const physicalRange = encodeStoreRange(prefix, start, end);
     const req = create(RangeRequestSchema, {
@@ -600,7 +623,7 @@ async function performQuery(
         ...(limit !== undefined ? { limit } : {}),
         ...(effective !== undefined ? { minSequenceNumber: effective } : {}),
     });
-    const results: QueryResultItem[] = [];
+    const results: RangeResultItem[] = [];
     let sequenceNumber = 0n;
     try {
         const stream = client.query.range(req, options);
@@ -620,13 +643,14 @@ async function performQuery(
 }
 
 async function* performReduce(
-    client: Client,
+    client: StoreClient,
     start: Uint8Array,
     end: Uint8Array,
     params: ReduceParams,
     minSequenceNumber?: bigint,
     detailObserver?: DetailObserver,
     prefix?: StoreKeyPrefix,
+    options?: CallOptions,
 ): AsyncIterable<ReduceResponse> {
     const effective = normalizeMinSequenceNumber(minSequenceNumber);
     const physicalRange = encodeStoreRange(prefix, start, end);
@@ -636,9 +660,18 @@ async function* performReduce(
         params: prefixReduceParams(params, prefix),
         ...(effective !== undefined ? { minSequenceNumber: effective } : {}),
     });
+    // The local controller ends the RPC when the consumer stops iterating; a
+    // caller-supplied signal aborts it as well.
     const controller = new AbortController();
+    const callerSignal = options?.signal;
+    const abortFromCaller = () => controller.abort(callerSignal?.reason);
+    if (callerSignal?.aborted) {
+        abortFromCaller();
+    } else {
+        callerSignal?.addEventListener('abort', abortFromCaller, { once: true });
+    }
     try {
-        for await (const frame of client.query.reduce(req, { signal: controller.signal })) {
+        for await (const frame of client.query.reduce(req, { ...options, signal: controller.signal })) {
             if (frame.detail) {
                 detailObserver?.(frame.detail);
             }
@@ -647,12 +680,13 @@ async function* performReduce(
     } catch (e) {
         mapConnectToHttpError(e, client.credential);
     } finally {
+        callerSignal?.removeEventListener('abort', abortFromCaller);
         controller.abort();
     }
 }
 
 async function performGetBatch(
-    client: Client,
+    client: StoreClient,
     sequenceNumber: bigint,
     prefix?: StoreKeyPrefix,
     options?: CallOptions,
@@ -672,19 +706,20 @@ async function performGetBatch(
     }
 }
 
-export interface SubscribeFilters {
+/** Selects the log batches a subscription delivers. */
+export interface StreamFilter {
     selectors: MessageInitShape<typeof SelectorSchema>[];
     valueFilters?: MessageInitShape<typeof FilterSchema>[];
     sinceSequenceNumber?: bigint;
 }
 
 async function* performSubscribe(
-    client: Client,
-    filters: SubscribeFilters,
+    client: StoreClient,
+    filter: StreamFilter,
     prefix?: StoreKeyPrefix,
     options?: CallOptions,
 ): AsyncIterable<StoreBatch> {
-    const prefixed = prefixSubscribeFilters(filters, prefix);
+    const prefixed = prefixStreamFilter(filter, prefix);
     const req = create(SubscribeRequestSchema, {
         selectors: prefixed.selectors,
         valueFilters: prefixed.valueFilters ?? [],
@@ -712,12 +747,12 @@ interface ReadSessionState {
     sequence: bigint | undefined;
 }
 
-interface StoreClientBinding {
-    client: Client;
+interface PrefixedClientBinding {
+    client: StoreClient;
     keyPrefix?: StoreKeyPrefix;
 }
 
-const storeClientBindings = new WeakMap<StoreClient, StoreClientBinding>();
+const prefixedClientBindings = new WeakMap<PrefixedStoreClient, PrefixedClientBinding>();
 
 /**
  * A read session with a fixed or monotonic minimum Store sequence.
@@ -733,33 +768,32 @@ export class ReadSession {
         sequence: undefined,
     };
 
-    /** Create a monotonic session from the low-level client. */
-    constructor(
-        private client: Client,
+    private constructor(
+        private client: StoreClient,
         private keyPrefix?: StoreKeyPrefix,
-        initialSequence?: bigint,
+        initialFloor?: bigint,
     ) {
-        this.configuredFloor = normalizeMinSequenceNumber(initialSequence);
+        this.configuredFloor = normalizeMinSequenceNumber(initialFloor);
     }
 
     /** Create a session whose floor advances to the highest observed read sequence. */
-    static monotonic(client: StoreClient, initialFloor?: bigint): ReadSession {
-        return ReadSession.fromStoreClient(client, initialFloor, 'monotonic');
+    static monotonic(store: PrefixedStoreClient, initialFloor?: bigint): ReadSession {
+        return ReadSession.fromStore(store, initialFloor, 'monotonic');
     }
 
     /** Create a session whose read floor stays fixed as responses are observed. */
-    static fixed(client: StoreClient, floor?: bigint): ReadSession {
-        return ReadSession.fromStoreClient(client, floor, 'fixed');
+    static fixed(store: PrefixedStoreClient, floor?: bigint): ReadSession {
+        return ReadSession.fromStore(store, floor, 'fixed');
     }
 
-    private static fromStoreClient(
-        storeClient: StoreClient,
+    private static fromStore(
+        store: PrefixedStoreClient,
         configuredFloor: bigint | undefined,
         policy: ReadPolicy,
     ): ReadSession {
-        const binding = storeClientBindings.get(storeClient);
+        const binding = prefixedClientBindings.get(store);
         if (!binding) {
-            throw new TypeError('invalid StoreClient');
+            throw new TypeError('invalid PrefixedStoreClient');
         }
         const session = new ReadSession(binding.client, binding.keyPrefix, configuredFloor);
         session.policy = policy;
@@ -789,12 +823,12 @@ export class ReadSession {
     /**
      * Derive a reader with at least the requested minimum sequence.
      *
-     * The derived handle's floor is at least `sequence`. The parent floor is unchanged, and the
-     * requirement does not count as an observation.
+     * The derived handle's floor is at least `minSequenceNumber`. The parent floor is unchanged,
+     * and the requirement does not count as an observation.
      */
-    withMinSequenceNumber(sequence: bigint): ReadSession {
+    withMinSequenceNumber(minSequenceNumber: bigint): ReadSession {
         const session = this.clone();
-        const requested = normalizeMinSequenceNumber(sequence);
+        const requested = normalizeMinSequenceNumber(minSequenceNumber);
         if (requested === undefined) {
             return session;
         }
@@ -805,11 +839,11 @@ export class ReadSession {
         return session;
     }
 
-    /** Share this session's observations with another logical client for the same Store. */
-    withClient(client: StoreClient): ReadSession {
-        const binding = storeClientBindings.get(client);
+    /** Share this session's observations with another store handle for the same Store. */
+    withStore(store: PrefixedStoreClient): ReadSession {
+        const binding = prefixedClientBindings.get(store);
         if (!binding) {
-            throw new TypeError('invalid StoreClient');
+            throw new TypeError('invalid PrefixedStoreClient');
         }
         const session = this.clone();
         session.client = binding.client;
@@ -842,6 +876,7 @@ export class ReadSession {
         keys: Uint8Array[],
         batchSize?: number,
         onChunk?: (entries: GetManyResultItem[]) => void,
+        options?: CallOptions,
     ): Promise<GetManyResultItem[]> {
         return performGetMany(
             this.client,
@@ -851,18 +886,19 @@ export class ReadSession {
             this.minSequenceNumber(),
             (detail) => this.observe(detail),
             this.keyPrefix,
+            options,
         );
     }
 
-    async query(
+    async range(
         start?: Uint8Array,
         end?: Uint8Array,
         limit?: number,
         batchSize: number = 4096,
-        mode: TraversalMode = TraversalMode.FORWARD,
+        mode: RangeMode = RangeMode.FORWARD,
         options?: CallOptions,
-    ): Promise<QueryResult> {
-        return performQuery(
+    ): Promise<RangeResult> {
+        return performRange(
             this.client,
             start,
             end,
@@ -876,10 +912,11 @@ export class ReadSession {
         );
     }
 
-    async *reduce(
+    async *rangeReduce(
         start: Uint8Array,
         end: Uint8Array,
         params: ReduceParams,
+        options?: CallOptions,
     ): AsyncIterable<ReduceResponse> {
         yield* performReduce(
             this.client,
@@ -889,6 +926,7 @@ export class ReadSession {
             this.minSequenceNumber(),
             (detail) => this.observe(detail),
             this.keyPrefix,
+            options,
         );
     }
 
@@ -903,12 +941,12 @@ export class ReadSession {
 
     /** Subscribe to log batches, recording each batch's sequence before delivery. */
     async *subscribe(
-        filters: SubscribeFilters,
+        filter: StreamFilter,
         options?: CallOptions,
     ): AsyncIterable<StoreBatch> {
         for await (const batch of performSubscribe(
             this.client,
-            filters,
+            filter,
             this.keyPrefix,
             options,
         )) {
@@ -918,20 +956,12 @@ export class ReadSession {
     }
 }
 
-export class StoreClient {
+export class PrefixedStoreClient {
     constructor(
-        private readonly client: Client,
+        private readonly client: StoreClient,
         private readonly keyPrefix?: StoreKeyPrefix,
     ) {
-        storeClientBindings.set(this, { client, keyPrefix });
-    }
-
-    withKeyPrefix(prefix: StoreKeyPrefix): StoreClient {
-        return new StoreClient(this.client, prefix);
-    }
-
-    withoutKeyPrefix(): StoreClient {
-        return new StoreClient(this.client);
+        prefixedClientBindings.set(this, { client, keyPrefix });
     }
 
     encodeStoreKey(key: Uint8Array): Uint8Array {
@@ -946,41 +976,31 @@ export class StoreClient {
         return ReadSession.monotonic(this);
     }
 
-    createSessionWithSequence(sequence: bigint): ReadSession {
-        return ReadSession.monotonic(this, sequence);
+    createSessionWithMinSequenceNumber(minSequenceNumber: bigint): ReadSession {
+        return ReadSession.monotonic(this, minSequenceNumber);
     }
 
     /** Limits used by this client's Put validation and batch splitting. */
-    get putOptions(): Readonly<Required<PutBatchOptions>> {
-        return this.client.putOptions;
+    get putLimits(): Readonly<Required<PutLimits>> {
+        return this.client.putLimits;
     }
 
-    async set(key: Uint8Array, value: Uint8Array | Buffer): Promise<bigint> {
-        return this.setMany([{ key, value }]);
+    async put(key: Uint8Array, value: Uint8Array | Buffer, options?: CallOptions): Promise<bigint> {
+        return this.putMany([{ key, value }], options);
     }
 
-    async setMany(kvs: { key: Uint8Array; value: Uint8Array | Buffer }[]): Promise<bigint> {
-        return this.putEntries(kvs.map((kv) => create(EntrySchema, {
+    async putMany(
+        kvs: { key: Uint8Array; value: Uint8Array | Buffer }[],
+        options?: CallOptions,
+    ): Promise<bigint> {
+        return performPut(this.client, kvs.map((kv) => create(EntrySchema, {
             key: this.encodeStoreKey(kv.key),
             value: toUint8Array(kv.value),
-        })));
+        })), options);
     }
 
-    async putPrepared(batch: StoreWriteBatch): Promise<bigint> {
-        return this.putEntries(batch.entries());
-    }
-
-    private async putEntries(entries: readonly StoreBatchEntry[]): Promise<bigint> {
-        validatePut(entries, this.putOptions);
-        const req = create(PutRequestSchema, {
-            kvs: entries.map((entry) => create(EntrySchema, entry)),
-        });
-        try {
-            const res = await this.client.ingest.put(req);
-            return res.sequenceNumber;
-        } catch (e) {
-            mapConnectToHttpError(e, this.client.credential);
-        }
+    async putPrepared(batch: StoreWriteBatch, options?: CallOptions): Promise<bigint> {
+        return performPut(this.client, batch.entries(), options);
     }
 
     async get(
@@ -996,6 +1016,7 @@ export class StoreClient {
         batchSize?: number,
         onChunk?: (entries: GetManyResultItem[]) => void,
         minSequenceNumber?: bigint,
+        options?: CallOptions,
     ): Promise<GetManyResultItem[]> {
         return performGetMany(
             this.client,
@@ -1005,19 +1026,20 @@ export class StoreClient {
             minSequenceNumber,
             undefined,
             this.keyPrefix,
+            options,
         );
     }
 
-    async query(
+    async range(
         start?: Uint8Array,
         end?: Uint8Array,
         limit?: number,
         batchSize: number = 4096,
-        mode: TraversalMode = TraversalMode.FORWARD,
+        mode: RangeMode = RangeMode.FORWARD,
         minSequenceNumber?: bigint,
         options?: CallOptions,
-    ): Promise<QueryResult> {
-        return performQuery(
+    ): Promise<RangeResult> {
+        return performRange(
             this.client,
             start,
             end,
@@ -1031,20 +1053,21 @@ export class StoreClient {
         );
     }
 
-    async prune(policies: Policy[]): Promise<void> {
+    async prune(policies: Policy[], options?: CallOptions): Promise<void> {
         const req = create(PruneRequestSchema, { policies: prefixPolicies(policies, this.keyPrefix) });
         try {
-            await this.client.prune.prune(req);
+            await this.client.prune.prune(req, options);
         } catch (e) {
             mapConnectToHttpError(e, this.client.credential);
         }
     }
 
-    reduce(
+    rangeReduce(
         start: Uint8Array,
         end: Uint8Array,
         params: ReduceParams,
         minSequenceNumber?: bigint,
+        options?: CallOptions,
     ): AsyncIterable<ReduceResponse> {
         return performReduce(
             this.client,
@@ -1054,6 +1077,7 @@ export class StoreClient {
             minSequenceNumber,
             undefined,
             this.keyPrefix,
+            options,
         );
     }
 
@@ -1062,9 +1086,9 @@ export class StoreClient {
     }
 
     async *subscribe(
-        filters: SubscribeFilters,
+        filter: StreamFilter,
         options?: CallOptions,
     ): AsyncIterable<StoreBatch> {
-        yield* performSubscribe(this.client, filters, this.keyPrefix, options);
+        yield* performSubscribe(this.client, filter, this.keyPrefix, options);
     }
 }

@@ -166,7 +166,7 @@ pub mod stream {
     pub use crate::log::stream::v1::*;
 }
 
-mod range_traversal;
+mod range_mode;
 pub mod transport;
 pub(crate) mod zstd_codec;
 
@@ -175,9 +175,7 @@ use crate::kv_codec::{
     KvReducedValue,
 };
 use bytes::Bytes;
-pub use range_traversal::{
-    parse_range_traversal_direction, RangeTraversalDirection, RangeTraversalModeError,
-};
+pub use range_mode::{parse_range_mode, RangeModeError};
 pub use transport::{
     connect_compression_registry, PreferZstd, PreferZstdHttpClient, PreferZstdLayer,
 };
@@ -198,8 +196,10 @@ pub struct RangeReducerSpec {
     pub filter: Option<KvPredicate>,
 }
 
+/// Reducers, grouping, and filter for a range reduction. The range bounds and
+/// minimum sequence number are passed separately.
 #[derive(Clone, Debug, PartialEq)]
-pub struct RangeReduceRequest {
+pub struct RangeReduceParams {
     pub reducers: Vec<RangeReducerSpec>,
     pub group_by: Vec<KvExpr>,
     pub filter: Option<KvPredicate>,
@@ -330,41 +330,6 @@ pub fn to_domain_reduced_value(value: &query::KvReducedValue) -> Result<KvReduce
             Ok(KvReducedValue::FixedSizeBinary(v.clone()))
         }
         None => Err("missing reduced value".to_string()),
-    }
-}
-
-/// Like [`to_domain_reduced_value`], but consumes the proto message so `String` / `Bytes` payloads
-/// are moved into the domain enum without an extra heap copy.
-pub fn to_domain_reduced_value_from_proto(
-    mut value: query::KvReducedValue,
-) -> Result<KvReducedValue, String> {
-    match value.value.take() {
-        None => Err("missing reduced value".to_string()),
-        Some(query::kv_reduced_value::Value::Int64Value(v)) => Ok(KvReducedValue::Int64(v)),
-        Some(query::kv_reduced_value::Value::Uint64Value(v)) => Ok(KvReducedValue::UInt64(v)),
-        Some(query::kv_reduced_value::Value::Float64Value(v)) => Ok(KvReducedValue::Float64(v)),
-        Some(query::kv_reduced_value::Value::BooleanValue(v)) => Ok(KvReducedValue::Boolean(v)),
-        Some(query::kv_reduced_value::Value::Utf8Value(v)) => Ok(KvReducedValue::Utf8(v)),
-        Some(query::kv_reduced_value::Value::Date32Value(v)) => Ok(KvReducedValue::Date32(v)),
-        Some(query::kv_reduced_value::Value::Date64Value(v)) => Ok(KvReducedValue::Date64(v)),
-        Some(query::kv_reduced_value::Value::TimestampValue(v)) => Ok(KvReducedValue::Timestamp(v)),
-        Some(query::kv_reduced_value::Value::Decimal128Value(bytes)) => {
-            let raw: [u8; 16] = bytes
-                .as_ref()
-                .try_into()
-                .map_err(|_| "decimal128 must be exactly 16 bytes".to_string())?;
-            Ok(KvReducedValue::Decimal128(i128::from_be_bytes(raw)))
-        }
-        Some(query::kv_reduced_value::Value::Decimal256Value(bytes)) => {
-            let raw: [u8; 32] = bytes
-                .as_ref()
-                .try_into()
-                .map_err(|_| "decimal256 must be exactly 32 bytes".to_string())?;
-            Ok(KvReducedValue::Decimal256(raw))
-        }
-        Some(query::kv_reduced_value::Value::FixedSizeBinaryValue(v)) => {
-            Ok(KvReducedValue::FixedSizeBinary(v))
-        }
     }
 }
 
@@ -778,9 +743,9 @@ fn to_proto_predicate(predicate: KvPredicate) -> query::KvPredicate {
     }
 }
 
-pub fn to_proto_reduce_params(request: RangeReduceRequest) -> query::ReduceParams {
+pub fn to_proto_reduce_params(params: RangeReduceParams) -> query::ReduceParams {
     query::ReduceParams {
-        reducers: request
+        reducers: params
             .reducers
             .into_iter()
             .map(|reducer| query::RangeReducerSpec {
@@ -797,8 +762,8 @@ pub fn to_proto_reduce_params(request: RangeReduceRequest) -> query::ReduceParam
                 ..Default::default()
             })
             .collect(),
-        group_by: request.group_by.into_iter().map(to_proto_expr).collect(),
-        filter: request.filter.map(to_proto_predicate).into(),
+        group_by: params.group_by.into_iter().map(to_proto_expr).collect(),
+        filter: params.filter.map(to_proto_predicate).into(),
         ..Default::default()
     }
 }
@@ -826,11 +791,9 @@ fn to_domain_predicate(predicate: &query::KvPredicate) -> Result<KvPredicate, St
     })
 }
 
-pub fn to_domain_reduce_request(
-    request: &query::ReduceParams,
-) -> Result<RangeReduceRequest, String> {
-    Ok(RangeReduceRequest {
-        reducers: request
+pub fn to_domain_reduce_params(params: &query::ReduceParams) -> Result<RangeReduceParams, String> {
+    Ok(RangeReduceParams {
+        reducers: params
             .reducers
             .iter()
             .map(|reducer| {
@@ -863,12 +826,12 @@ pub fn to_domain_reduce_request(
                 })
             })
             .collect::<Result<Vec<_>, String>>()?,
-        group_by: request
+        group_by: params
             .group_by
             .iter()
             .map(to_domain_expr)
             .collect::<Result<Vec<_>, _>>()?,
-        filter: request
+        filter: params
             .filter
             .as_option()
             .map(to_domain_predicate)
@@ -1133,13 +1096,13 @@ fn to_domain_predicate_from_view(
     })
 }
 
-/// Decode [`RangeReduceRequest`] from a buffa [`ReduceParamsView`](query::ReduceParamsView), without
+/// Decode [`RangeReduceParams`] from a buffa [`ReduceParamsView`](query::ReduceParamsView), without
 /// allocating an intermediate owned [`ReduceParams`](query::ReduceParams) via `to_owned_message`.
-pub fn to_domain_reduce_request_from_view(
-    request: &query::ReduceParamsView<'_>,
-) -> Result<RangeReduceRequest, String> {
-    Ok(RangeReduceRequest {
-        reducers: request
+pub fn to_domain_reduce_params_from_view(
+    params: &query::ReduceParamsView<'_>,
+) -> Result<RangeReduceParams, String> {
+    Ok(RangeReduceParams {
+        reducers: params
             .reducers
             .iter()
             .map(|reducer| {
@@ -1176,12 +1139,12 @@ pub fn to_domain_reduce_request_from_view(
                 })
             })
             .collect::<Result<Vec<_>, String>>()?,
-        group_by: request
+        group_by: params
             .group_by
             .iter()
             .map(to_domain_expr_from_view)
             .collect::<Result<Vec<_>, _>>()?,
-        filter: request
+        filter: params
             .filter
             .as_option()
             .map(to_domain_predicate_from_view)
@@ -1228,15 +1191,12 @@ pub use range_reduce_response::to_domain_reduce_response;
 
 mod prune_policy_proto;
 pub use prune_policy_proto::{
-    parse_and_validate_policy_document, parse_prune_policy_document_from_prune_request_view,
-    parse_prune_policy_from_proto, prune_policies_to_proto, validate_prune_policy,
-    validate_prune_policy_document,
+    parse_prune_request_view, to_domain_prune_policy, to_proto_prune_policies,
 };
 
 mod retention_proto;
 pub use retention_proto::{
-    parse_retention_policy_from_proto, parse_set_retention_request_view, retention_policy_to_proto,
-    validate_retention_policy,
+    parse_set_retention_request_view, to_domain_retention_policy, to_proto_retention_policy,
 };
 
 mod error_details;
@@ -1297,7 +1257,7 @@ mod reduce_params_view_tests {
             }],
             contradiction: false,
         };
-        let request = RangeReduceRequest {
+        let request = RangeReduceParams {
             reducers: vec![
                 RangeReducerSpec {
                     op: RangeReduceOp::CountAll,
@@ -1317,10 +1277,10 @@ mod reduce_params_view_tests {
             }),
         };
         let proto = to_proto_reduce_params(request.clone());
-        assert_eq!(to_domain_reduce_request(&proto).unwrap(), request);
+        assert_eq!(to_domain_reduce_params(&proto).unwrap(), request);
         let encoded = proto.encode_to_vec();
         let view = query::ReduceParamsView::decode_view(&encoded).unwrap();
-        assert_eq!(to_domain_reduce_request_from_view(&view).unwrap(), request);
+        assert_eq!(to_domain_reduce_params_from_view(&view).unwrap(), request);
     }
 
     #[test]
@@ -1337,19 +1297,19 @@ mod reduce_params_view_tests {
             ..Default::default()
         };
         assert_eq!(
-            to_domain_reduce_request(&proto).unwrap_err(),
+            to_domain_reduce_params(&proto).unwrap_err(),
             "missing predicate field"
         );
         let encoded = proto.encode_to_vec();
         let view = query::ReduceParamsView::decode_view(&encoded).unwrap();
         assert_eq!(
-            to_domain_reduce_request_from_view(&view).unwrap_err(),
+            to_domain_reduce_params_from_view(&view).unwrap_err(),
             "missing predicate field"
         );
     }
 
     #[test]
-    fn to_domain_reduce_request_from_view_matches_owned() {
+    fn to_domain_reduce_params_from_view_matches_owned() {
         let proto = query::ReduceParams {
             reducers: vec![query::RangeReducerSpec {
                 op: query::RangeReduceOp::RANGE_REDUCE_OP_COUNT_ALL.into(),
@@ -1359,8 +1319,8 @@ mod reduce_params_view_tests {
         };
         let encoded = proto.encode_to_vec();
         let view = query::ReduceParamsView::decode_view(&encoded).expect("decode view");
-        let from_view = to_domain_reduce_request_from_view(&view).expect("from view");
-        let from_owned = to_domain_reduce_request(&proto).expect("from owned");
+        let from_view = to_domain_reduce_params_from_view(&view).expect("from view");
+        let from_owned = to_domain_reduce_params(&proto).expect("from owned");
         assert_eq!(from_view, from_owned);
     }
 }

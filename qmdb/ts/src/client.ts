@@ -6,7 +6,7 @@ import {
 } from '@connectrpc/connect';
 import {
   createTransport,
-  type ClientOptions as SdkClientOptions,
+  type StoreClientOptions,
 } from '@exowarexyz/sdk';
 import {
   GetManyRequestSchema,
@@ -160,14 +160,14 @@ export interface OrderedSubscribeProof {
  * They hand each proof to wasm as the bytes that arrived, which JSON can't
  * carry.
  */
-export type QmdbOrderedClientOptions = SdkClientOptions & {
+export type QmdbOrderedClientOptions = StoreClientOptions & {
   merkleFamily?: MerkleFamily;
   hashFamily?: HashFamily;
   currentChunkSize?: number;
 };
 
 /** Always uses binary protobuf, like {@link QmdbOrderedClientOptions}. */
-export type QmdbLogClientOptions = SdkClientOptions & {
+export type QmdbLogClientOptions = StoreClientOptions & {
   merkleFamily?: MerkleFamily;
   hashFamily?: HashFamily;
 };
@@ -229,7 +229,7 @@ export function matchRegex(regex: string): Filter {
   });
 }
 
-function binaryTransport(baseUrl: string, options: SdkClientOptions) {
+function binaryTransport(baseUrl: string, options: StoreClientOptions) {
   return createTransport(baseUrl, { ...options, useBinaryFormat: true });
 }
 

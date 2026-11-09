@@ -59,9 +59,9 @@ impl Prefix {
         Ok(Self(prefix))
     }
 
-    /// The empty prefix: the composition identity. It matches every key and
-    /// passes payloads through unchanged.
-    pub const fn empty() -> Self {
+    /// The zero-width prefix: the composition identity. It matches every key
+    /// and passes payloads through unchanged.
+    pub const fn identity() -> Self {
         Self(Bytes::new())
     }
 
@@ -134,7 +134,7 @@ impl Prefix {
         self.encode(key)
     }
 
-    /// True when `key` belongs to this prefix. The empty prefix matches all.
+    /// True when `key` belongs to this prefix. The identity prefix matches all.
     #[inline]
     pub fn matches(&self, key: &[u8]) -> bool {
         key.starts_with(&self.0)
@@ -424,8 +424,8 @@ mod tests {
     }
 
     #[test]
-    fn empty_prefix_encode_key_rejects_oversized_key() {
-        let prefix = Prefix::empty();
+    fn identity_prefix_encode_key_rejects_oversized_key() {
+        let prefix = Prefix::identity();
         let key = Bytes::from(vec![0u8; MAX_KEY_LEN + 1]);
         let err = prefix.encode_key(&key).expect_err("key should not fit");
         assert!(matches!(err, PrefixError::KeyTooLong { .. }));

@@ -30,8 +30,8 @@ use exoware_sdk::{
     selector::Selector,
     stream_filter::StreamFilter,
     transport::set_tcp_nodelay,
-    PrefixedStoreClient, RetryConfig, StoreBatch, StoreBatchUpload, StoreClient, StoreKeyPrefix,
-    StoreWriteBatch, StreamSubscription,
+    PrefixedStoreClient, RetryConfig, StoreBatch, StoreClient, StoreKeyPrefix, StoreWriteBatch,
+    StoreWriteBatchUpload, StreamSubscription,
 };
 use exoware_sql::{
     proto::sql::v1::{ServiceClient as SqlServiceClient, SubscribeRequest as SqlSubscribeRequest},
@@ -287,7 +287,7 @@ async fn test_raw_prefixes_support_atomic_batch_fetch_range_and_stream() {
     let base = local_store_client().await;
     let a = base.prefixed(store_prefix(1));
     let b = base.prefixed(store_prefix(2));
-    let unprefixed = PrefixedStoreClient::empty(base.clone());
+    let unprefixed = base.unprefixed();
 
     let mut sub_a = a
         .stream()
@@ -345,7 +345,7 @@ async fn test_raw_prefixes_support_atomic_batch_fetch_range_and_stream() {
 
     let stream_batch_a = a
         .stream()
-        .get(sequence)
+        .get_batch(sequence)
         .await
         .expect("stream get a")
         .expect("batch a");
@@ -632,14 +632,15 @@ async fn test_prepared_sql_and_qmdb_batches_commit_atomically_with_sequence_rece
     );
 
     let mut batch = StoreWriteBatch::new();
-    StoreBatchUpload::stage_upload(&sql_writer, &mut prepared_sql, &mut batch).expect("stage sql");
+    StoreWriteBatchUpload::stage_upload(&sql_writer, &mut prepared_sql, &mut batch)
+        .expect("stage sql");
     stage_authenticated_range(&qmdb_client, prepared_qmdb_1, &mut batch).expect("stage qmdb 1");
     stage_authenticated_range(&qmdb_client, prepared_qmdb_2, &mut batch).expect("stage qmdb 2");
     stage_watermark(&qmdb_client, QmdbLocation::new(5), &mut batch).expect("stage qmdb watermark");
 
     let sequence = batch.commit(&base).await.expect("atomic Store commit");
     let sql_receipt =
-        StoreBatchUpload::mark_upload_persisted(&sql_writer, prepared_sql, sequence).await;
+        StoreWriteBatchUpload::mark_upload_persisted(&sql_writer, prepared_sql, sequence).await;
     assert_eq!(sql_receipt.writer_request_id, 0);
     assert_eq!(sql_receipt.store_sequence_number, sequence);
     assert_eq!(
@@ -651,7 +652,7 @@ async fn test_prepared_sql_and_qmdb_batches_commit_atomically_with_sequence_rece
     );
     let qmdb_stream_batch = qmdb_client
         .stream()
-        .get(sequence)
+        .get_batch(sequence)
         .await
         .expect("atomic qmdb stream")
         .expect("QMDB rows must share the SQL Store sequence");

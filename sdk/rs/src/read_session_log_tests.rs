@@ -174,7 +174,7 @@ async fn client_get_preserves_batch_sequence_and_filters_namespace() {
 
     let batch = client(transport.clone())
         .stream()
-        .get(0)
+        .get_batch(0)
         .await
         .unwrap()
         .unwrap();

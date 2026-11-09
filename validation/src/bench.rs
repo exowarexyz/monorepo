@@ -408,7 +408,7 @@ async fn run_workload(config: Config) -> anyhow::Result<BenchReport> {
                         let refs = record_refs(&records);
 
                         let request_start = Instant::now();
-                        let result = client.ingest().put(&refs).await;
+                        let result = client.ingest().put_many(&refs).await;
                         tally.latencies.record_write(request_start.elapsed());
                         plan.record_write_result(batch_number, result.is_ok())?;
                         match result {

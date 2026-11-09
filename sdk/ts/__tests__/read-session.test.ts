@@ -1,6 +1,6 @@
 import { create } from '@bufbuild/protobuf';
 import { Code, ConnectError } from '@connectrpc/connect';
-import { Client } from '../src/client';
+import { StoreClient } from '../src/client';
 import { SelectorSchema } from '../src/gen/ts/common/v1/kv_pb';
 import {
     GetResponseSchema as StreamGetResponseSchema,
@@ -19,13 +19,13 @@ import {
     type RangeRequest,
     type ReduceRequest,
 } from '../src/gen/ts/store/v1/query_pb';
-import { ReadSession, StoreClient, StoreKeyPrefix } from '../src/store';
+import { ReadSession, PrefixedStoreClient, StoreKeyPrefix } from '../src/store';
 
 function mockClient(
-    query: Partial<Client['query']>,
-    stream: Partial<Client['stream']> = {},
-): Client {
-    return { query, stream, credential: 'absent' } as unknown as Client;
+    query: Partial<StoreClient['query']>,
+    stream: Partial<StoreClient['stream']> = {},
+): StoreClient {
+    return { query, stream, credential: 'absent' } as unknown as StoreClient;
 }
 
 const key = new Uint8Array([3]);
@@ -44,7 +44,7 @@ test('monotonic sessions advance across point and range reads without treating t
             yield create(RangeFrameSchema, { detail: { sequenceNumber: 8n } });
         },
     });
-    const session = ReadSession.monotonic(new StoreClient(client), 5n);
+    const session = ReadSession.monotonic(new PrefixedStoreClient(client), 5n);
 
     expect(session.minSequenceNumber()).toBe(5n);
     expect(session.evaluatedSequence()).toBeUndefined();
@@ -52,7 +52,7 @@ test('monotonic sessions advance across point and range reads without treating t
     expect(session.evaluatedSequence()).toBe(7n);
     expect(session.minSequenceNumber()).toBe(7n);
 
-    await session.query();
+    await session.range();
     expect(session.evaluatedSequence()).toBe(9n);
     expect(session.minSequenceNumber()).toBe(9n);
     expect(getFloors).toEqual([5n]);
@@ -68,8 +68,8 @@ test('fixed floors are handle-local while observations are shared across clones 
             return create(GetResponseSchema, { detail: { sequenceNumber: sequence } });
         },
     });
-    const firstStore = new StoreClient(client, new StoreKeyPrefix(new Uint8Array([1])));
-    const secondStore = new StoreClient(client, new StoreKeyPrefix(new Uint8Array([2])));
+    const firstStore = new PrefixedStoreClient(client, new StoreKeyPrefix(new Uint8Array([1])));
+    const secondStore = new PrefixedStoreClient(client, new StoreKeyPrefix(new Uint8Array([2])));
     const fixed = ReadSession.fixed(firstStore, 4n);
     const clone = fixed.clone();
 
@@ -82,7 +82,7 @@ test('fixed floors are handle-local while observations are shared across clones 
     expect(fixed.minSequenceNumber()).toBe(4n);
 
     sequence = 12n;
-    const rebound = derived.withClient(secondStore);
+    const rebound = derived.withStore(secondStore);
     await rebound.get(key);
     expect(requests[1].minSequenceNumber).toBe(10n);
     expect(requests[1].key).toEqual(new Uint8Array([2, 3]));
@@ -90,7 +90,7 @@ test('fixed floors are handle-local while observations are shared across clones 
     expect(rebound.minSequenceNumber()).toBe(10n);
 });
 
-test('monotonic derivation strengthens only the derived handle and legacy factories remain monotonic', async () => {
+test('monotonic derivation strengthens only the derived handle and createSession sessions are monotonic', async () => {
     const floors: Array<bigint | undefined> = [];
     let sequence = 6n;
     const client = mockClient({
@@ -99,8 +99,8 @@ test('monotonic derivation strengthens only the derived handle and legacy factor
             return create(GetResponseSchema, { detail: { sequenceNumber: sequence }, value: key });
         },
     });
-    const store = new StoreClient(client);
-    const session = store.createSessionWithSequence(2n);
+    const store = new PrefixedStoreClient(client);
+    const session = store.createSessionWithMinSequenceNumber(2n);
 
     expect(session.evaluatedSequence()).toBeUndefined();
     await session.get(key);
@@ -117,17 +117,26 @@ test('monotonic derivation strengthens only the derived handle and legacy factor
     expect(floors).toEqual([2n, 10n]);
 });
 
-test('constructors distinguish an absent floor from an explicit zero floor', () => {
+test('constructors distinguish an absent floor from an explicit zero floor and reject an unbound store', () => {
     const client = mockClient({});
-    const store = new StoreClient(client);
+    const store = new PrefixedStoreClient(client);
+    const unbound = Object.create(PrefixedStoreClient.prototype) as PrefixedStoreClient;
 
-    expect(new ReadSession(client).minSequenceNumber()).toBeUndefined();
+    expect(ReadSession.monotonic(new PrefixedStoreClient(client)).minSequenceNumber()).toBeUndefined();
     expect(ReadSession.monotonic(store).minSequenceNumber()).toBeUndefined();
     expect(ReadSession.monotonic(store, 0n).minSequenceNumber()).toBe(0n);
     expect(ReadSession.fixed(store).minSequenceNumber()).toBeUndefined();
     expect(ReadSession.fixed(store, 0n).clone().minSequenceNumber()).toBe(0n);
     expect(store.createSession().minSequenceNumber()).toBeUndefined();
-    expect(store.createSessionWithSequence(0n).minSequenceNumber()).toBe(0n);
+    expect(store.createSessionWithMinSequenceNumber(0n).minSequenceNumber()).toBe(0n);
+    for (const build of [
+        () => ReadSession.monotonic(unbound),
+        () => ReadSession.fixed(unbound),
+        () => ReadSession.monotonic(store).withStore(unbound),
+    ]) {
+        expect(build).toThrow(TypeError);
+        expect(build).toThrow('invalid PrefixedStoreClient');
+    }
 });
 
 test.each([
@@ -136,7 +145,7 @@ test.each([
     { value: 1 as unknown as bigint, error: TypeError },
 ])('invalid minimum $value is rejected before a request is sent', async ({ value, error }) => {
     const get = jest.fn(async () => create(GetResponseSchema));
-    const store = new StoreClient(mockClient({ get }));
+    const store = new PrefixedStoreClient(mockClient({ get }));
 
     expect(() => ReadSession.fixed(store, value)).toThrow(error);
     expect(() => ReadSession.monotonic(store).withMinSequenceNumber(value)).toThrow(error);
@@ -169,14 +178,14 @@ test('direct read methods preserve omitted and explicit zero floors', async () =
             yield create(ReduceResponseSchema);
         },
     });
-    const store = new StoreClient(client);
+    const store = new PrefixedStoreClient(client);
     const params = create(ReduceParamsSchema);
 
     for (const floor of [undefined, 0n]) {
         await store.get(key, floor);
         await store.getMany([key], undefined, undefined, floor);
-        await store.query(undefined, undefined, undefined, undefined, undefined, floor);
-        for await (const _frame of store.reduce(key, key, params, floor)) {}
+        await store.range(undefined, undefined, undefined, undefined, undefined, floor);
+        for await (const _frame of store.rangeReduce(key, key, params, floor)) {}
     }
 
     expect(floors.get).toEqual([undefined, 0n]);
@@ -199,7 +208,7 @@ describe.each(['monotonic', 'fixed'] as const)('%s sessions observe zero details
                 yield create(ReduceResponseSchema, { detail: { sequenceNumber: 0n } });
             },
         });
-        const store = new StoreClient(client);
+        const store = new PrefixedStoreClient(client);
         const session = policy === 'monotonic'
             ? ReadSession.monotonic(store)
             : ReadSession.fixed(store);
@@ -216,10 +225,10 @@ describe.each(['monotonic', 'fixed'] as const)('%s sessions observe zero details
                 await session.getMany([key]);
                 break;
             case 'query':
-                await session.query();
+                await session.range();
                 break;
             case 'reduce': {
-                const stream = session.reduce(key, key, create(ReduceParamsSchema))[
+                const stream = session.rangeReduce(key, key, create(ReduceParamsSchema))[
                     Symbol.asyncIterator
                 ]();
                 const first = await stream.next();
@@ -252,7 +261,7 @@ test('a present zero detail is observed and prevents reinitialization across clo
                 : create(GetResponseSchema, { detail: { sequenceNumber: 0n } });
         },
     });
-    const session = ReadSession.monotonic(new StoreClient(client));
+    const session = ReadSession.monotonic(new PrefixedStoreClient(client));
     const clone = session.clone();
 
     await session.get(key);
@@ -276,7 +285,7 @@ test('deriving zero from an absent floor strengthens only the derived handle', a
             return create(GetResponseSchema);
         },
     });
-    const session = ReadSession.monotonic(new StoreClient(client));
+    const session = ReadSession.monotonic(new PrefixedStoreClient(client));
     const derived = session.withMinSequenceNumber(0n);
 
     expect(session.minSequenceNumber()).toBeUndefined();
@@ -303,7 +312,7 @@ test('getMany observes empty frames and publishes detail before onChunk', async 
             return create(GetResponseSchema, { detail: { sequenceNumber: 8n }, value: key });
         },
     });
-    const session = ReadSession.monotonic(new StoreClient(client));
+    const session = ReadSession.monotonic(new PrefixedStoreClient(client));
     let dependent: Promise<unknown> | undefined;
 
     await session.getMany([key], undefined, () => {
@@ -337,7 +346,7 @@ test('concurrent unseeded reads start together and observations only advance', a
             return create(GetResponseSchema, { detail: { sequenceNumber: 12n }, value: key });
         },
     });
-    const session = ReadSession.monotonic(new StoreClient(client));
+    const session = ReadSession.monotonic(new PrefixedStoreClient(client));
     const clone = session.clone();
     const lower = session.get(key);
     const higher = clone.get(key);
@@ -376,7 +385,7 @@ test('canceling one concurrent unseeded read does not cancel or delay another', 
             return create(GetResponseSchema, { detail: { sequenceNumber: 15n }, value: key });
         },
     });
-    const session = ReadSession.monotonic(new StoreClient(client));
+    const session = ReadSession.monotonic(new PrefixedStoreClient(client));
     const controller = new AbortController();
     const canceled = session.get(key, { signal: controller.signal });
     const successful = session.clone().get(key);
@@ -414,8 +423,8 @@ test('a pending first reduce frame does not block reads or prefetch later frames
             return create(GetResponseSchema, { detail: { sequenceNumber: 10n }, value: key });
         },
     });
-    const session = ReadSession.monotonic(new StoreClient(client));
-    const stream = session.reduce(key, key, create(ReduceParamsSchema))[Symbol.asyncIterator]();
+    const session = ReadSession.monotonic(new PrefixedStoreClient(client));
+    const stream = session.rangeReduce(key, key, create(ReduceParamsSchema))[Symbol.asyncIterator]();
     const first = stream.next();
 
     await expect(session.clone().get(key)).resolves.toEqual({ value: key });
@@ -456,7 +465,7 @@ test('getBatch observes successful replay without using the query floor as its c
             },
         },
     );
-    const session = ReadSession.monotonic(new StoreClient(client), 10n);
+    const session = ReadSession.monotonic(new PrefixedStoreClient(client), 10n);
     const clone = session.clone();
 
     const batch = await clone.getBatch(3n, options);
@@ -481,7 +490,7 @@ test.each(['monotonic', 'fixed'] as const)(
                 entries: [{ key, value: key }],
             }),
         });
-        const store = new StoreClient(client);
+        const store = new PrefixedStoreClient(client);
         const session = policy === 'monotonic'
             ? ReadSession.monotonic(store, 4n)
             : ReadSession.fixed(store, 4n);
@@ -509,7 +518,7 @@ test.each(['getBatch', 'subscribe'] as const)(
                 });
             })(),
         });
-        const session = ReadSession.monotonic(new StoreClient(client));
+        const session = ReadSession.monotonic(new PrefixedStoreClient(client));
 
         expect(session.evaluatedSequence()).toBeUndefined();
         expect(session.minSequenceNumber()).toBeUndefined();
@@ -539,7 +548,7 @@ test('getBatch does not observe missing batches or terminal errors', async () =>
                 : new ConnectError('failed', Code.Internal);
         },
     });
-    const session = ReadSession.monotonic(new StoreClient(client));
+    const session = ReadSession.monotonic(new PrefixedStoreClient(client));
 
     await expect(session.getBatch(1n)).resolves.toBeNull();
     expect(session.evaluatedSequence()).toBeUndefined();
@@ -577,7 +586,7 @@ test('log reads do not wait for query initialization', async () => {
             })(),
         },
     );
-    const session = ReadSession.monotonic(new StoreClient(client));
+    const session = ReadSession.monotonic(new PrefixedStoreClient(client));
     const pendingQuery = session.get(key);
     await started;
 
@@ -623,7 +632,7 @@ test('subscribe observes emitted batches before yielding and ignores omitted fra
             },
         },
     );
-    const store = new StoreClient(client, prefix);
+    const store = new PrefixedStoreClient(client, prefix);
     const session = ReadSession.monotonic(store, 7n);
     const clone = session.clone();
     const stream = session.subscribe({
@@ -665,7 +674,7 @@ test('subscribe forwards cancellation options and cleans up when the consumer st
             })();
         },
     });
-    const session = ReadSession.fixed(new StoreClient(client), 4n);
+    const session = ReadSession.fixed(new PrefixedStoreClient(client), 4n);
     const stream = session.subscribe({ selectors: [create(SelectorSchema)] }, options)[
         Symbol.asyncIterator
     ]();
@@ -693,7 +702,7 @@ test('subscribe preserves prior observations when the stream ends with an error'
             }
         })(),
     });
-    const session = ReadSession.monotonic(new StoreClient(client));
+    const session = ReadSession.monotonic(new PrefixedStoreClient(client));
     const stream = session.subscribe({ selectors: [create(SelectorSchema)] })[
         Symbol.asyncIterator
     ]();

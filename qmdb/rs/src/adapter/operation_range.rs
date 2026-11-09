@@ -353,13 +353,7 @@ pub(crate) async fn fetch_rows<F: Family, D: Digest>(
     let keys = keys.into_iter().collect::<Vec<_>>();
     if !keys.is_empty() {
         let refs = keys.iter().collect::<Vec<_>>();
-        rows.extend(
-            session
-                .get_many(&refs, u32::try_from(keys.len()).unwrap_or(u32::MAX))
-                .await?
-                .collect()
-                .await?,
-        );
+        rows.extend(session.get_many(&refs, keys.len()).await?.collect().await?);
     }
     let mut positive = Vec::new();
     for &position in &reservation.owned {
@@ -390,11 +384,7 @@ pub(crate) async fn fetch_rows<F: Family, D: Digest>(
             .map(|&position| encode_node_key(position))
             .collect::<Vec<_>>();
         let refs = keys.iter().collect::<Vec<_>>();
-        let mut fetched = session
-            .get_many(&refs, u32::try_from(keys.len()).unwrap_or(u32::MAX))
-            .await?
-            .collect()
-            .await?;
+        let mut fetched = session.get_many(&refs, keys.len()).await?.collect().await?;
         for (position, key) in remaining.into_iter().zip(keys) {
             nodes.insert(position, fetched.remove(&key));
         }

@@ -233,7 +233,7 @@ pub(crate) async fn compute_ops_root<F: Family, H: Hasher>(
             .collect();
         let peak_key_refs: Vec<&Key> = peak_keys.iter().collect();
         session
-            .get_many(&peak_key_refs, peak_key_refs.len() as u32)
+            .get_many(&peak_key_refs, peak_key_refs.len())
             .await?
             .collect()
             .await?

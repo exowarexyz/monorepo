@@ -88,7 +88,7 @@ async fn test_overlapping_atomic_uploads_emit_each_operation_once() {
     use exoware_sdk::StoreWriteBatch;
 
     let store_client = common::local_store_client().await;
-    let upload_client = PrefixedStoreClient::empty(store_client.clone());
+    let upload_client = store_client.unprefixed();
     let operations = vec![
         KeylessOperation::Append(b"first".to_vec()),
         KeylessOperation::Commit(None, Location::new(0)),
@@ -107,7 +107,7 @@ async fn test_overlapping_atomic_uploads_emit_each_operation_once() {
     stage_watermark::<mmr::Family>(&upload_client, Location::new(3), &mut batch).unwrap();
     let sequence = batch.commit(&store_client).await.unwrap();
 
-    let (server, url) = spawn_qmdb_server(PrefixedStoreClient::empty(store_client)).await;
+    let (server, url) = spawn_qmdb_server(store_client.unprefixed()).await;
     let mut stream = operation_log_client(&url)
         .subscribe(ProtoSubscribeRequest {
             since_sequence_number: Some(sequence),
@@ -207,7 +207,7 @@ fn latest_inactivity_floor(ops: &[BatchOperation]) -> Location<mmr::Family> {
 
 async fn commit_upload(store_client: &StoreClient, batch: &SourceBatch) {
     common::commit_operations::<mmr::Family, BatchOperation>(
-        &PrefixedStoreClient::empty(store_client.clone()),
+        &store_client.unprefixed(),
         &batch.operations,
         &((0..=10000).into(), ()),
     )
@@ -223,8 +223,7 @@ async fn test_keyless_connect_subscribe_emits_verifiable_multi_proof() {
         *source.inactivity_floor > 0,
         "test must not rely on inactivity_floor = 0"
     );
-    let (_qmdb_server, qmdb_url) =
-        spawn_qmdb_server(PrefixedStoreClient::empty(store_client.clone())).await;
+    let (_qmdb_server, qmdb_url) = spawn_qmdb_server(store_client.unprefixed()).await;
     let connect_client = operation_log_client(&qmdb_url);
 
     let mut stream = connect_client
@@ -266,8 +265,7 @@ async fn test_keyless_connect_get_operation_range_returns_verifiable_proof() {
     );
     commit_upload(&store_client, &source).await;
 
-    let (_qmdb_server, qmdb_url) =
-        spawn_qmdb_server(PrefixedStoreClient::empty(store_client.clone())).await;
+    let (_qmdb_server, qmdb_url) = spawn_qmdb_server(store_client.unprefixed()).await;
     let connect_client = operation_log_client(&qmdb_url);
 
     let request = ProtoGetOperationRangeRequest {
@@ -331,8 +329,7 @@ async fn test_keyless_connect_get_operations_returns_verifiable_multi_proof() {
     let store_client = common::local_store_client().await;
     let source = build_source_batch().await;
     commit_upload(&store_client, &source).await;
-    let (_qmdb_server, qmdb_url) =
-        spawn_qmdb_server(PrefixedStoreClient::empty(store_client.clone())).await;
+    let (_qmdb_server, qmdb_url) = spawn_qmdb_server(store_client.unprefixed()).await;
     let connect_client = operation_log_client(&qmdb_url);
     let tip = u64::try_from(source.operations.len() - 1).expect("tip fits");
 
@@ -389,8 +386,7 @@ async fn test_keyless_connect_get_operations_rejects_invalid_requests() {
     let store_client = common::local_store_client().await;
     let source = build_source_batch().await;
     commit_upload(&store_client, &source).await;
-    let (_qmdb_server, qmdb_url) =
-        spawn_qmdb_server(PrefixedStoreClient::empty(store_client.clone())).await;
+    let (_qmdb_server, qmdb_url) = spawn_qmdb_server(store_client.unprefixed()).await;
     let rpc = common::operation_log_rpc_client(&qmdb_url);
     let connect_client = operation_log_client(&qmdb_url);
     let tip = u64::try_from(source.operations.len() - 1).expect("tip fits");
@@ -471,8 +467,7 @@ async fn test_keyless_connect_client_rejects_mismatched_operations_proof() {
     let store_client = common::local_store_client().await;
     let source = build_source_batch().await;
     commit_upload(&store_client, &source).await;
-    let (_qmdb_server, qmdb_url) =
-        spawn_qmdb_server(PrefixedStoreClient::empty(store_client.clone())).await;
+    let (_qmdb_server, qmdb_url) = spawn_qmdb_server(store_client.unprefixed()).await;
     let tip = u64::try_from(source.operations.len() - 1).expect("tip fits");
     let honest = common::operation_log_rpc_client(&qmdb_url)
         .get_operations(ProtoGetOperationsRequest {
@@ -615,16 +610,13 @@ async fn test_operation_range_preserves_late_consistency_errors() {
     let mut replicas = Vec::new();
     for frontier in [200, 250, 150] {
         let (handle, url) = exoware_simulator::open_temp().await.unwrap();
-        let store = PrefixedStoreClient::empty(StoreClient::new(&url));
+        let store = StoreClient::new(&url).unprefixed();
         common::commit_operations::<mmr::Family, BatchOperation>(&store, &operations, &config)
             .await
             .unwrap();
         for sequence in 2u64..=frontier {
             let key = Bytes::from(format!("unrelated/{sequence}"));
-            assert_eq!(
-                store.ingest().put(&[(&key, b"value")]).await.unwrap(),
-                sequence
-            );
+            assert_eq!(store.ingest().put(&key, b"value").await.unwrap(), sequence);
         }
         origins.push(url.parse().unwrap());
         handles.push(handle);
@@ -644,7 +636,7 @@ async fn test_operation_range_preserves_late_consistency_errors() {
         .build()
         .unwrap();
     let (root, _) = common::prepare_operations::<mmr::Family, BatchOperation>(&operations, &config);
-    let (qmdb_handle, url) = spawn_qmdb_server(PrefixedStoreClient::empty(client)).await;
+    let (qmdb_handle, url) = spawn_qmdb_server(client.unprefixed()).await;
     let error = common::operation_log_rpc_client(&url)
         .get_operation_range(ProtoGetOperationRangeRequest {
             tip: 3,
@@ -699,7 +691,7 @@ async fn test_operation_range_preserves_late_consistency_errors() {
     for sequence in 151u64..=200 {
         let key = Bytes::from(format!("unrelated/{sequence}"));
         assert_eq!(
-            replicas[2].ingest().put(&[(&key, b"value")]).await.unwrap(),
+            replicas[2].ingest().put(&key, b"value").await.unwrap(),
             sequence
         );
     }
@@ -731,8 +723,7 @@ async fn test_keyless_operation_log_source_fetches_api_batches() {
     let source = build_source_batch().await;
     commit_upload(&store_client, &source).await;
 
-    let (_qmdb_server, qmdb_url) =
-        spawn_qmdb_server(PrefixedStoreClient::empty(store_client.clone())).await;
+    let (_qmdb_server, qmdb_url) = spawn_qmdb_server(store_client.unprefixed()).await;
     let resolver = OperationLogClient::<
         _,
         mmr::Family,
@@ -789,8 +780,7 @@ async fn test_keyless_commonware_glue_state_sync_uses_operation_log_client() {
     );
     commit_upload(&store_client, &source).await;
 
-    let (_qmdb_server, qmdb_url) =
-        spawn_qmdb_server(PrefixedStoreClient::empty(store_client.clone())).await;
+    let (_qmdb_server, qmdb_url) = spawn_qmdb_server(store_client.unprefixed()).await;
     let resolver = OperationLogClient::<
         _,
         mmr::Family,
@@ -879,8 +869,7 @@ async fn test_keyless_connect_client_rejects_invalid_streamed_proof() {
     );
     commit_upload(&store_client, &source).await;
 
-    let (_qmdb_server, qmdb_url) =
-        spawn_qmdb_server(PrefixedStoreClient::empty(store_client.clone())).await;
+    let (_qmdb_server, qmdb_url) = spawn_qmdb_server(store_client.unprefixed()).await;
     let rpc = common::operation_log_rpc_client(&qmdb_url);
     let mut raw_stream = rpc
         .subscribe(ProtoSubscribeRequest {
@@ -941,8 +930,7 @@ async fn test_keyless_connect_subscribe_filters_by_value_regex() {
         *source.inactivity_floor > 0,
         "test must not rely on inactivity_floor = 0"
     );
-    let (_qmdb_server, qmdb_url) =
-        spawn_qmdb_server(PrefixedStoreClient::empty(store_client.clone())).await;
+    let (_qmdb_server, qmdb_url) = spawn_qmdb_server(store_client.unprefixed()).await;
     let connect_client = operation_log_client(&qmdb_url);
 
     // Only include ops whose value begins with "second".
@@ -991,8 +979,7 @@ async fn test_keyless_connect_subscribe_rejects_key_filters() {
         *source.inactivity_floor > 0,
         "test must not rely on inactivity_floor = 0"
     );
-    let (_qmdb_server, qmdb_url) =
-        spawn_qmdb_server(PrefixedStoreClient::empty(store_client.clone())).await;
+    let (_qmdb_server, qmdb_url) = spawn_qmdb_server(store_client.unprefixed()).await;
 
     let rpc = common::operation_log_rpc_client(&qmdb_url);
     let mut stream = rpc
@@ -1030,7 +1017,7 @@ async fn test_keyless_data_only_frames_replay_in_store_order_after_delayed_publi
     use exoware_sdk::StoreWriteBatch;
 
     let store_client = common::local_store_client().await;
-    let upload_client = PrefixedStoreClient::empty(store_client.clone());
+    let upload_client = store_client.unprefixed();
     let operations: Vec<BatchOperation> = vec![
         KeylessOperation::Append(b"first".to_vec()),
         KeylessOperation::Append(b"second".to_vec()),

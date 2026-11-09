@@ -6,8 +6,9 @@
 //! ## Errors
 //!
 //! RPC failures surface as [`ClientError::Rpc`] carrying a native [`ConnectError`]. Use
-//! [`ClientError::decoded_rpc_error`] or [`StoreClient::decode_error_details`] to unpack
-//! protobuf `google.rpc` details (and `store.query.v1.Detail` on query RPC errors), not string parsing.
+//! [`ClientError::decoded_rpc_error`] (or [`decode_connect_error`] on a bare [`ConnectError`]) to
+//! unpack protobuf `google.rpc` details (and `store.query.v1.Detail` on query RPC errors), not
+//! string parsing.
 //! Idempotent reads honor `google.rpc.RetryInfo` when deciding backoff (see `retry_delay_for_error`).
 
 mod credential;
@@ -59,7 +60,7 @@ use exoware_proto::{
     to_domain_reduce_response as proto_to_domain_reduce_response,
     to_proto_reduce_params as proto_to_proto_reduce_params,
     PreferZstdHttpClient as ProtoPreferZstdHttpClient,
-    RangeReduceRequest as DomainRangeReduceRequest,
+    RangeReduceParams as DomainRangeReduceParams,
 };
 use futures::{future::BoxFuture, stream::BoxStream, StreamExt};
 use keys::is_valid_key_size;
@@ -252,8 +253,12 @@ pub enum StoreKeyPrefixError {
 /// The prefix prepends a fixed byte string to each physical Store key and
 /// stores the caller's logical key in the remaining bytes. QMDB, SQL, and
 /// other higher-level instances continue to build their own logical keys as
-/// before; a prefixed [`StoreClient`] maps those keys on the wire and maps
+/// before; a [`PrefixedStoreClient`] maps those keys on the wire and maps
 /// returned keys back before callers see them.
+///
+/// It wraps the general key codec [`Prefix`] to add what a Store client
+/// needs: logical range encoding, next-key search, selector scoping, and
+/// [`StoreKeyPrefixError`] failures.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct StoreKeyPrefix {
     inner: Prefix,
@@ -271,7 +276,7 @@ impl StoreKeyPrefix {
     /// un-namespaced.
     pub const fn identity() -> Self {
         Self {
-            inner: Prefix::empty(),
+            inner: Prefix::identity(),
         }
     }
 
@@ -350,8 +355,8 @@ impl StoreKeyPrefix {
 }
 
 /// A physical [`StoreClient`] paired with a [`StoreKeyPrefix`] that namespaces
-/// every key on the wire. The prefix can be the zero-width
-/// [`StoreKeyPrefix::identity`], representing the un-namespaced case.
+/// every key on the wire. Build one with [`StoreClient::prefixed`], or with
+/// [`StoreClient::unprefixed`] for the zero-width [`StoreKeyPrefix::identity`].
 #[derive(Clone, Debug)]
 pub struct PrefixedStoreClient {
     client: StoreClient,
@@ -359,15 +364,8 @@ pub struct PrefixedStoreClient {
 }
 
 impl PrefixedStoreClient {
-    /// Pair a physical client with an explicit namespace prefix.
-    pub const fn new(client: StoreClient, prefix: StoreKeyPrefix) -> Self {
+    const fn new(client: StoreClient, prefix: StoreKeyPrefix) -> Self {
         Self { client, prefix }
-    }
-
-    /// Pair a physical client with the zero-width [`StoreKeyPrefix::identity`],
-    /// so keys pass through untranslated.
-    pub const fn empty(client: StoreClient) -> Self {
-        Self::new(client, StoreKeyPrefix::identity())
     }
 
     /// The configured key prefix.
@@ -431,13 +429,13 @@ impl PrefixedStoreClient {
         })
     }
 
-    fn prefix_reduce_request(
+    fn prefix_reduce_params(
         &self,
-        request: &DomainRangeReduceRequest,
-    ) -> Result<DomainRangeReduceRequest, ClientError> {
-        let mut request = request.clone();
-        shift_reduce_request_key_offsets(self.prefix.prefix().len(), &mut request)?;
-        Ok(request)
+        params: &DomainRangeReduceParams,
+    ) -> Result<DomainRangeReduceParams, ClientError> {
+        let mut params = params.clone();
+        shift_reduce_params_key_offsets(self.prefix.prefix().len(), &mut params)?;
+        Ok(params)
     }
 
     // --- service-grouped accessors -------------------------------------------
@@ -472,9 +470,9 @@ impl PrefixedStoreClient {
         ReadSession::monotonic(self.clone(), None)
     }
 
-    /// Create a monotonic read session whose read floor starts at `sequence`.
-    pub fn create_session_with_sequence(&self, sequence: u64) -> ReadSession {
-        ReadSession::monotonic(self.clone(), Some(sequence))
+    /// Create a monotonic read session whose read floor starts at `min_sequence_number`.
+    pub fn create_session_with_min_sequence_number(&self, min_sequence_number: u64) -> ReadSession {
+        ReadSession::monotonic(self.clone(), Some(min_sequence_number))
     }
 
     // --- writes --------------------------------------------------------------
@@ -527,7 +525,7 @@ impl PrefixedStoreClient {
     pub(crate) async fn get_many(
         &self,
         keys: &[&Key],
-        batch_size: u32,
+        batch_size: usize,
     ) -> Result<GetManyStream, ClientError> {
         self.get_many_internal(keys, batch_size, None, None).await
     }
@@ -535,7 +533,7 @@ impl PrefixedStoreClient {
     pub(crate) async fn get_many_with_min_sequence_number(
         &self,
         keys: &[&Key],
-        batch_size: u32,
+        batch_size: usize,
         min_sequence_number: u64,
     ) -> Result<GetManyStream, ClientError> {
         self.get_many_internal(keys, batch_size, Some(min_sequence_number), None)
@@ -545,7 +543,7 @@ impl PrefixedStoreClient {
     pub(crate) async fn get_many_internal(
         &self,
         keys: &[&Key],
-        batch_size: u32,
+        batch_size: usize,
         min_sequence_number: Option<u64>,
         observed_sequence: Option<Arc<ObservedSequence>>,
     ) -> Result<GetManyStream, ClientError> {
@@ -738,13 +736,13 @@ impl PrefixedStoreClient {
         &self,
         start: &Key,
         end: &Key,
-        request: &DomainRangeReduceRequest,
+        params: &DomainRangeReduceParams,
         options: QueryStreamReadOptions,
     ) -> Result<ReduceStream, ClientError> {
         let (start, end) = self.encode_store_range(start, end)?;
-        let request = self.prefix_reduce_request(request)?;
+        let params = self.prefix_reduce_params(params)?;
         self.client
-            .range_reduce_stream_internal(&start, &end, &request, options)
+            .range_reduce_stream_internal(&start, &end, &params, options)
             .await
     }
 
@@ -809,9 +807,9 @@ impl PrefixedStoreClient {
 /// Returns the sole scalar frame after validating its shape and consuming the final status.
 pub async fn scalar_reduce_response(
     mut stream: ReduceStream,
-    request: &DomainRangeReduceRequest,
+    params: &DomainRangeReduceParams,
 ) -> Result<connectrpc::StreamMessage<proto_query::ReduceResponse>, ClientError> {
-    if !request.group_by.is_empty() {
+    if !params.group_by.is_empty() {
         return Err(ClientError::WireFormat(
             "grouped reductions require range_reduce_stream".to_string(),
         ));
@@ -820,7 +818,7 @@ pub async fn scalar_reduce_response(
         ClientError::WireFormat("scalar reduction stream returned no results".to_string())
     })?;
     let view = response.view();
-    if !view.groups.is_empty() || view.results.len() != request.reducers.len() {
+    if !view.groups.is_empty() || view.results.len() != params.reducers.len() {
         return Err(ClientError::WireFormat(
             "scalar reduction returned an invalid result shape".to_string(),
         ));
@@ -835,9 +833,9 @@ pub async fn scalar_reduce_response(
 
 async fn scalar_reduce_results(
     stream: ReduceStream,
-    request: &DomainRangeReduceRequest,
+    params: &DomainRangeReduceParams,
 ) -> Result<Vec<Option<KvReducedValue>>, ClientError> {
-    let response = scalar_reduce_response(stream, request).await?;
+    let response = scalar_reduce_response(stream, params).await?;
     let decoded =
         proto_to_domain_reduce_response(response.view()).map_err(ClientError::WireFormat)?;
     Ok(decoded
@@ -850,7 +848,7 @@ async fn scalar_reduce_results(
 /// A physical Store write batch assembled from one or more logical clients.
 ///
 /// Use [`Self::push`] with the specific prefixed client that produced each
-/// logical key, then [`Self::commit`] once to submit all rows in one atomic
+/// logical key, then [`Self::commit`] once to submit all entries in one atomic
 /// Store `Put`.
 #[derive(Clone, Debug, Default)]
 pub struct StoreWriteBatch {
@@ -861,8 +859,8 @@ pub struct StoreWriteBatch {
 /// A batch cannot be split under the supplied limits.
 #[derive(Debug, Clone, Copy, Eq, PartialEq, thiserror::Error)]
 pub enum SplitError {
-    #[error("max_rows must be greater than zero")]
-    ZeroRows,
+    #[error("max_entries must be greater than zero")]
+    ZeroEntries,
     #[error("max_encoded_bytes must be greater than zero")]
     ZeroEncodedBytes,
     #[error(
@@ -902,18 +900,18 @@ impl StoreWriteBatch {
         self.entries.reserve(additional);
     }
 
-    /// Stage a logical row under `client`'s namespace.
+    /// Stage a logical entry under `store`'s namespace.
     ///
-    /// The key is encoded as it is staged, so rows from several namespaces
-    /// can share one batch. [`Self::commit`] writes the encoded rows
+    /// The key is encoded as it is staged, so entries from several namespaces
+    /// can share one batch. [`Self::commit`] writes the encoded entries
     /// verbatim through the physical client.
     pub fn push(
         &mut self,
-        client: &PrefixedStoreClient,
+        store: &PrefixedStoreClient,
         key: &Key,
         value: impl IntoStoreWriteValue,
     ) -> Result<&mut Self, ClientError> {
-        let key = client.encode_store_key(key)?;
+        let key = store.encode_store_key(key)?;
         let value = value.into_store_write_value();
         self.encoded_len += put_entry_encoded_len(&key, &value);
         self.entries.push((key, value));
@@ -932,9 +930,13 @@ impl StoreWriteBatch {
     ///
     /// Zero limits and entries that cannot fit alone return an error. An empty
     /// batch produces no batches when both limits are positive.
-    pub fn split(self, max_rows: usize, max_encoded_bytes: usize) -> Result<Vec<Self>, SplitError> {
-        if max_rows == 0 {
-            return Err(SplitError::ZeroRows);
+    pub fn split(
+        self,
+        max_entries: usize,
+        max_encoded_bytes: usize,
+    ) -> Result<Vec<Self>, SplitError> {
+        if max_entries == 0 {
+            return Err(SplitError::ZeroEntries);
         }
         if max_encoded_bytes == 0 {
             return Err(SplitError::ZeroEncodedBytes);
@@ -944,14 +946,14 @@ impl StoreWriteBatch {
         let mut entries = self.entries.into_iter();
         let mut offset = 0;
         while !entries.as_slice().is_empty() {
-            // Byte limits can make chunks much smaller than max_rows.
-            let mut rows = 0;
+            // Byte limits can make chunks much smaller than max_entries.
+            let mut count = 0;
             let mut encoded_len = 0;
-            for (key, value) in entries.as_slice().iter().take(max_rows) {
+            for (key, value) in entries.as_slice().iter().take(max_entries) {
                 let entry_encoded_len = put_entry_encoded_len(key, value);
                 if entry_encoded_len > max_encoded_bytes {
                     return Err(SplitError::EntryTooLarge {
-                        index: offset + rows,
+                        index: offset + count,
                         encoded_bytes: entry_encoded_len,
                         max_encoded_bytes,
                     });
@@ -959,22 +961,22 @@ impl StoreWriteBatch {
                 if entry_encoded_len > max_encoded_bytes - encoded_len {
                     break;
                 }
-                rows += 1;
+                count += 1;
                 encoded_len += entry_encoded_len;
             }
 
-            let mut batch_entries = Vec::with_capacity(rows);
-            batch_entries.extend(entries.by_ref().take(rows));
+            let mut batch_entries = Vec::with_capacity(count);
+            batch_entries.extend(entries.by_ref().take(count));
             batches.push(Self {
                 entries: batch_entries,
                 encoded_len,
             });
-            offset += rows;
+            offset += count;
         }
         Ok(batches)
     }
 
-    /// Submit all rows in one atomic `Put` without applying local size limits.
+    /// Submit all entries in one atomic `Put` without applying local size limits.
     pub async fn commit(&self, client: &StoreClient) -> Result<u64, ClientError> {
         client.put_prepared_physical(&self.entries).await
     }
@@ -987,16 +989,16 @@ impl StoreWriteBatch {
 /// each writer's input shape differs. Once a caller has a prepared handle,
 /// this trait provides the common lifecycle:
 ///
-/// 1. stage rows into a [`StoreWriteBatch`], consuming staged payloads if useful
+/// 1. stage entries into a [`StoreWriteBatch`], consuming staged payloads if useful
 /// 2. commit that batch
 /// 3. mark the prepared handle persisted with the returned Store sequence
 ///    number, or failed if staging/commit does not complete
-pub trait StoreBatchUpload {
+pub trait StoreWriteBatchUpload {
     type Prepared: Send;
     type Receipt: Send;
     type Error: std::fmt::Display + Send;
 
-    fn store_client(&self) -> &PrefixedStoreClient;
+    fn store(&self) -> &PrefixedStoreClient;
 
     fn stage_upload(
         &self,
@@ -1042,7 +1044,7 @@ pub trait StoreBatchUpload {
                 self.mark_upload_failed(prepared, message).await;
                 return Err(err);
             }
-            match batch.commit(self.store_client().client()).await {
+            match batch.commit(self.store().client()).await {
                 Ok(sequence_number) => {
                     Ok(self.mark_upload_persisted(prepared, sequence_number).await)
                 }
@@ -1807,15 +1809,6 @@ pub struct StoreClient {
     credential: Credential,
 }
 
-/// A value and the highest Store sequence observed by the reads that produced it.
-pub struct ReadResult<T> {
-    /// The result of the operation.
-    pub value: T,
-    /// The highest sequence reported by a read, or `None` if no read reported one.
-    /// Required floors are not observations.
-    pub sequence_number: Option<u64>,
-}
-
 /// A read session with a fixed or monotonic minimum Store sequence.
 ///
 /// A fixed session keeps its configured floor. A monotonic session raises the
@@ -1877,6 +1870,8 @@ impl StoreClient {
         Self::with_retry_config(url, RetryConfig::standard())
     }
 
+    /// Build a client for `url` with the given retry configuration.
+    ///
     /// Panics if `url` is not a valid endpoint. A malformed [`API_KEY_ENV`] is ignored rather
     /// than panicking, so use [`Self::builder`] to have it rejected.
     pub fn with_retry_config(url: &str, retry_config: RetryConfig) -> Self {
@@ -1891,6 +1886,11 @@ impl StoreClient {
     /// [`PrefixedStoreClient`] that namespaces every operation.
     pub fn prefixed(&self, prefix: StoreKeyPrefix) -> PrefixedStoreClient {
         PrefixedStoreClient::new(self.clone(), prefix)
+    }
+
+    /// The logical client with no key prefix, so keys pass through untranslated.
+    pub fn unprefixed(&self) -> PrefixedStoreClient {
+        PrefixedStoreClient::new(self.clone(), StoreKeyPrefix::identity())
     }
 
     /// Outgoing Connect request body compression (see [`ConnectRequestCompression`]).
@@ -1918,17 +1918,11 @@ impl StoreClient {
         }
     }
 
-    pub fn decode_error_details(
-        err: &ConnectError,
-    ) -> Result<exoware_proto::DecodedConnectError, buffa::DecodeError> {
-        proto_decode_connect_error(err)
-    }
-
     /// Submit a KV batch via Connect `Put`.
     ///
     /// On success returns the **store sequence number** from the response. Use it for immediate
     /// `get_with_min_sequence_number` / range calls or as the initial floor for
-    /// [`PrefixedStoreClient::create_session_with_sequence`].
+    /// [`PrefixedStoreClient::create_session_with_min_sequence_number`].
     /// If the request succeeds, the server accepts the full batch (count is `kvs.len()`).
     pub(crate) async fn put_physical(&self, kvs: &[(&Key, &[u8])]) -> Result<u64, ClientError> {
         let mut proto_kvs = Vec::with_capacity(kvs.len());
@@ -2058,7 +2052,7 @@ impl StoreClient {
     pub(crate) async fn get_many_internal(
         &self,
         proto_keys: Vec<Vec<u8>>,
-        batch_size: u32,
+        batch_size: usize,
         min_sequence_number: Option<u64>,
         observed_sequence: Option<Arc<ObservedSequence>>,
     ) -> Result<GetManyStream, ClientError> {
@@ -2073,7 +2067,7 @@ impl StoreClient {
                         .get_many(ProtoGetManyRequest {
                             keys: proto_keys.clone(),
                             min_sequence_number,
-                            batch_size,
+                            batch_size: u32::try_from(batch_size).unwrap_or(u32::MAX),
                             ..Default::default()
                         })
                         .await?;
@@ -2110,7 +2104,7 @@ impl StoreClient {
         let client = PruneServiceClient::new(self.connect_http.clone(), config);
         client
             .prune(ProtoPruneRequest {
-                policies: exoware_proto::prune_policies_to_proto(policies),
+                policies: exoware_proto::to_proto_prune_policies(policies),
                 ..Default::default()
             })
             .await
@@ -2215,7 +2209,7 @@ impl StoreClient {
         let request = exoware_proto::log::retention::v1::SetRetentionRequest {
             policy: policy
                 .as_ref()
-                .map(exoware_proto::retention_policy_to_proto)
+                .map(exoware_proto::to_proto_retention_policy)
                 .into(),
             ..Default::default()
         };
@@ -2382,12 +2376,12 @@ impl StoreClient {
         &self,
         start: &Key,
         end: &Key,
-        request: &DomainRangeReduceRequest,
+        params: &DomainRangeReduceParams,
         options: QueryStreamReadOptions,
     ) -> Result<ReduceStream, ClientError> {
         let config = self.streaming_client_config(self.query_uri.clone());
         let client = QueryServiceClient::new(self.connect_http.clone(), config);
-        let proto_params = proto_to_proto_reduce_params(request.clone());
+        let proto_params = proto_to_proto_reduce_params(params.clone());
         let min_sequence_number = options.min_sequence_number;
         let (stream, first) = self
             .send_with_retry(|| {
@@ -2482,9 +2476,9 @@ impl StoreClient {
     }
 }
 
-fn shift_reduce_request_key_offsets(
+fn shift_reduce_params_key_offsets(
     prefix_len: usize,
-    request: &mut DomainRangeReduceRequest,
+    params: &mut DomainRangeReduceParams,
 ) -> Result<(), StoreKeyPrefixError> {
     // A byte-aligned store prefix shifts every key field past its bytes.
     // `KeyField` offsets are byte-granular, so they shift by the whole prefix
@@ -2494,16 +2488,16 @@ fn shift_reduce_request_key_offsets(
     debug_assert!(prefix_len <= MAX_KEY_LEN);
     let shift_bytes = prefix_len as u16;
     let shift_bits = shift_bytes * 8;
-    for reducer in &mut request.reducers {
+    for reducer in &mut params.reducers {
         if let Some(expr) = &mut reducer.expr {
             shift_expr_key_offsets(shift_bytes, shift_bits, expr)?;
         }
     }
-    for expr in &mut request.group_by {
+    for expr in &mut params.group_by {
         shift_expr_key_offsets(shift_bytes, shift_bits, expr)?;
     }
-    for filter in request.filter.iter_mut().chain(
-        request
+    for filter in params.filter.iter_mut().chain(
+        params
             .reducers
             .iter_mut()
             .filter_map(|reducer| reducer.filter.as_mut()),
@@ -2592,7 +2586,13 @@ pub struct Stream<'a> {
 }
 
 impl<'a> Ingest<'a> {
-    pub async fn put(&self, kvs: &[(&Key, &[u8])]) -> Result<u64, ClientError> {
+    /// Write one entry in one atomic `Put`.
+    pub async fn put(&self, key: &Key, value: &[u8]) -> Result<u64, ClientError> {
+        self.c.put(&[(key, value)]).await
+    }
+
+    /// Write `kvs` in one atomic `Put`.
+    pub async fn put_many(&self, kvs: &[(&Key, &[u8])]) -> Result<u64, ClientError> {
         self.c.put(kvs).await
     }
 
@@ -2621,7 +2621,7 @@ impl<'a> Query<'a> {
     pub async fn get_many(
         &self,
         keys: &[&Key],
-        batch_size: u32,
+        batch_size: usize,
     ) -> Result<GetManyStream, ClientError> {
         self.c.get_many(keys, batch_size).await
     }
@@ -2629,7 +2629,7 @@ impl<'a> Query<'a> {
     pub async fn get_many_with_min_sequence_number(
         &self,
         keys: &[&Key],
-        batch_size: u32,
+        batch_size: usize,
         min_sequence_number: u64,
     ) -> Result<GetManyStream, ClientError> {
         self.c
@@ -2749,31 +2749,27 @@ impl<'a> Query<'a> {
         &self,
         start: &Key,
         end: &Key,
-        request: &DomainRangeReduceRequest,
+        params: &DomainRangeReduceParams,
     ) -> Result<Vec<Option<KvReducedValue>>, ClientError> {
-        scalar_reduce_results(
-            self.range_reduce_stream(start, end, request).await?,
-            request,
-        )
-        .await
+        scalar_reduce_results(self.range_reduce_stream(start, end, params).await?, params).await
     }
 
     pub async fn range_reduce_with_min_sequence_number(
         &self,
         start: &Key,
         end: &Key,
-        request: &DomainRangeReduceRequest,
+        params: &DomainRangeReduceParams,
         min_sequence_number: u64,
     ) -> Result<Vec<Option<KvReducedValue>>, ClientError> {
         scalar_reduce_results(
             self.range_reduce_stream_with_min_sequence_number(
                 start,
                 end,
-                request,
+                params,
                 min_sequence_number,
             )
             .await?,
-            request,
+            params,
         )
         .await
     }
@@ -2782,10 +2778,10 @@ impl<'a> Query<'a> {
         &self,
         start: &Key,
         end: &Key,
-        request: &DomainRangeReduceRequest,
+        params: &DomainRangeReduceParams,
     ) -> Result<ReduceStream, ClientError> {
         self.c
-            .range_reduce_stream_internal(start, end, request, QueryStreamReadOptions::default())
+            .range_reduce_stream_internal(start, end, params, QueryStreamReadOptions::default())
             .await
     }
 
@@ -2793,14 +2789,14 @@ impl<'a> Query<'a> {
         &self,
         start: &Key,
         end: &Key,
-        request: &DomainRangeReduceRequest,
+        params: &DomainRangeReduceParams,
         min_sequence_number: u64,
     ) -> Result<ReduceStream, ClientError> {
         self.c
             .range_reduce_stream_internal(
                 start,
                 end,
-                request,
+                params,
                 QueryStreamReadOptions {
                     min_sequence_number: Some(min_sequence_number),
                     observed_sequence: None,
@@ -2837,37 +2833,44 @@ impl<'a> Stream<'a> {
 
     /// `log.stream.v1.Service.Get` — `Ok(None)` collapses the server's
     /// `BATCH_EVICTED` / `BATCH_NOT_FOUND` error details.
-    pub async fn get(&self, sequence_number: u64) -> Result<Option<StoreBatch>, ClientError> {
+    pub async fn get_batch(&self, sequence_number: u64) -> Result<Option<StoreBatch>, ClientError> {
         self.c.get_batch(sequence_number).await
     }
 }
 
 impl<'a> Retention<'a> {
-    /// `log.retention.v1.Service.SetRetention` — install (`Some`) or clear
-    /// (`None`) the sequence-log retention rule. The rule is persistent and
-    /// continuously enforced as the log grows; eviction surfaces to
-    /// `log.stream.v1` subscribers as `BATCH_EVICTED`. Returns the lowest
-    /// retained sequence after one synchronous enforcement (`None` when the log
-    /// is empty / no floor exists yet).
+    /// `log.retention.v1.Service.SetRetention` — install the sequence-log
+    /// retention rule. The rule is persistent and continuously enforced as the
+    /// log grows; eviction surfaces to `log.stream.v1` subscribers as
+    /// `BATCH_EVICTED`. Returns the lowest retained sequence after one
+    /// synchronous enforcement (`None` when the log is empty / no floor exists
+    /// yet).
     pub async fn set_retention(
         &self,
-        policy: Option<crate::retention::RetentionPolicy>,
+        policy: crate::retention::RetentionPolicy,
     ) -> Result<Option<u64>, ClientError> {
-        self.c.set_retention(policy).await
+        self.c.set_retention(Some(policy)).await
+    }
+
+    /// `log.retention.v1.Service.SetRetention` with no policy — remove the
+    /// sequence-log retention rule. Returns the lowest retained sequence
+    /// (`None` when the log is empty).
+    pub async fn clear_retention(&self) -> Result<Option<u64>, ClientError> {
+        self.c.set_retention(None).await
     }
 }
 
 impl ReadSession {
     /// Create a session whose floor advances to the highest observed read sequence.
     /// `None` starts without a floor; `Some(0)` requires sequence zero.
-    pub fn monotonic(client: PrefixedStoreClient, initial_floor: Option<u64>) -> Self {
-        Self::new(client, initial_floor, ReadPolicy::Monotonic)
+    pub fn monotonic(store: PrefixedStoreClient, initial_floor: Option<u64>) -> Self {
+        Self::new(store, initial_floor, ReadPolicy::Monotonic)
     }
 
     /// Create a session whose read floor stays fixed as responses are observed.
     /// `None` sends no floor; `Some(0)` requires sequence zero.
-    pub fn fixed(client: PrefixedStoreClient, floor: Option<u64>) -> Self {
-        Self::new(client, floor, ReadPolicy::Fixed)
+    pub fn fixed(store: PrefixedStoreClient, floor: Option<u64>) -> Self {
+        Self::new(store, floor, ReadPolicy::Fixed)
     }
 
     fn new(client: PrefixedStoreClient, configured_floor: Option<u64>, policy: ReadPolicy) -> Self {
@@ -2894,10 +2897,10 @@ impl ReadSession {
     /// Raises the derived handle's floor if needed, leaving the original handle's
     /// configured floor unchanged. Both handles share observations, but the
     /// supplied requirement is not itself an observation.
-    pub fn with_min_sequence_number(&self, sequence: u64) -> Self {
+    pub fn with_min_sequence_number(&self, min_sequence_number: u64) -> Self {
         let mut session = self.clone();
-        if Some(sequence) > self.min_sequence_number() {
-            session.configured_floor = Some(sequence);
+        if Some(min_sequence_number) > self.min_sequence_number() {
+            session.configured_floor = Some(min_sequence_number);
         }
         session
     }
@@ -2909,10 +2912,10 @@ impl ReadSession {
         self.observed_sequence.get()
     }
 
-    /// Share this session's freshness state with another client for the same Store.
-    pub fn with_client(&self, client: PrefixedStoreClient) -> Self {
+    /// Share this session's freshness state with another store handle for the same Store.
+    pub fn with_store(&self, store: PrefixedStoreClient) -> Self {
         Self {
-            client,
+            client: store,
             ..self.clone()
         }
     }
@@ -2951,7 +2954,7 @@ impl ReadSession {
     pub async fn get_many(
         &self,
         keys: &[&Key],
-        batch_size: u32,
+        batch_size: usize,
     ) -> Result<GetManyStream, ClientError> {
         self.client
             .get_many_internal(
@@ -3024,26 +3027,22 @@ impl ReadSession {
         &self,
         start: &Key,
         end: &Key,
-        request: &DomainRangeReduceRequest,
+        params: &DomainRangeReduceParams,
     ) -> Result<Vec<Option<KvReducedValue>>, ClientError> {
-        scalar_reduce_results(
-            self.range_reduce_stream(start, end, request).await?,
-            request,
-        )
-        .await
+        scalar_reduce_results(self.range_reduce_stream(start, end, params).await?, params).await
     }
 
     pub async fn range_reduce_stream(
         &self,
         start: &Key,
         end: &Key,
-        request: &DomainRangeReduceRequest,
+        params: &DomainRangeReduceParams,
     ) -> Result<ReduceStream, ClientError> {
         self.client
             .range_reduce_stream_internal(
                 start,
                 end,
-                request,
+                params,
                 QueryStreamReadOptions {
                     min_sequence_number: self.min_sequence_number(),
                     observed_sequence: Some(self.observed_sequence.clone()),
@@ -3407,8 +3406,8 @@ mod tests {
         body.into()
     }
 
-    fn count_request() -> DomainRangeReduceRequest {
-        DomainRangeReduceRequest {
+    fn count_request() -> DomainRangeReduceParams {
+        DomainRangeReduceParams {
             reducers: vec![RangeReducerSpec {
                 filter: None,
                 op: RangeReduceOp::CountAll,
@@ -4039,7 +4038,7 @@ mod tests {
             .client_transport(transport.clone())
             .build()
             .unwrap()
-            .prefixed(StoreKeyPrefix::identity());
+            .unprefixed();
 
         let _ = client
             .query()
@@ -4064,6 +4063,34 @@ mod tests {
         let stream_encoding = connectrpc::Protocol::Connect.accept_encoding_header();
         assert_eq!(headers.get(stream_encoding).unwrap(), "zstd, gzip");
         assert_eq!(headers.get_all(stream_encoding).iter().count(), 1);
+    }
+
+    /// `get_many` sends `u32::MAX` for a batch size above it.
+    #[cfg(target_pointer_width = "64")]
+    #[tokio::test]
+    async fn get_many_saturates_batch_size() {
+        // Record the request for a batch size one past the wire field's maximum.
+        let transport = RecordingTransport::default();
+        let client = StoreClient::builder()
+            .url("http://query.internal")
+            .retry_config(RetryConfig::disabled())
+            .client_transport(transport.clone())
+            .build()
+            .unwrap()
+            .unprefixed();
+        let key = Key::from(b"key".to_vec());
+        let _ = client
+            .query()
+            .get_many(&[&key], u32::MAX as usize + 1)
+            .await;
+
+        // The streamed request follows a five-byte envelope prefix.
+        let requests = transport.requests();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].0.path(), "/store.query.v1.Service/GetMany");
+        let body = transport.bodies.lock().unwrap()[0].clone();
+        let request = proto_query::GetManyRequest::decode_from_slice(&body[5..]).unwrap();
+        assert_eq!(request.batch_size, u32::MAX);
     }
 
     #[tokio::test]
@@ -4134,7 +4161,7 @@ mod tests {
             .client_transport(transport.clone())
             .build()
             .unwrap()
-            .prefixed(StoreKeyPrefix::identity());
+            .unprefixed();
         let key = Key::from(b"key".to_vec());
         let start = Key::from(b"a".to_vec());
         let end = Key::from(b"z".to_vec());
@@ -4226,7 +4253,7 @@ mod tests {
             .client_transport(transport)
             .build()
             .unwrap()
-            .prefixed(StoreKeyPrefix::identity());
+            .unprefixed();
         let key = Key::from(b"key".to_vec());
         let start = Key::from(b"a".to_vec());
         let end = Key::from(b"z".to_vec());
@@ -4270,7 +4297,7 @@ mod tests {
                 .client_transport(transport.clone())
                 .build()
                 .unwrap()
-                .prefixed(StoreKeyPrefix::identity());
+                .unprefixed();
             let session = ReadSession::monotonic(client, initial_floor);
             let clone = session.clone();
             let key = Bytes::from_static(b"key");
@@ -4307,7 +4334,7 @@ mod tests {
             .client_transport(transport.clone())
             .build()
             .unwrap()
-            .prefixed(StoreKeyPrefix::identity());
+            .unprefixed();
         let session = client.create_session();
         let clone = session.clone();
         let key = Key::from(b"key".to_vec());
@@ -4413,7 +4440,7 @@ mod tests {
         let stronger = dependent.with_min_sequence_number(42);
         assert_eq!(stronger.evaluated_sequence(), Some(41));
         assert_eq!(stronger.min_sequence_number(), Some(42));
-        let rebound = dependent.with_min_sequence_number(10).with_client(
+        let rebound = dependent.with_min_sequence_number(10).with_store(
             client
                 .client()
                 .prefixed(StoreKeyPrefix::new("other/").unwrap()),
@@ -4436,18 +4463,18 @@ mod tests {
     #[tokio::test]
     async fn monotonic_dependency_readers_strengthen_floors_and_share_observations() {
         let transport = SessionSequenceTransport::default();
-        let client = StoreClient::builder()
+        let store = StoreClient::builder()
             .url("http://query.internal")
             .client_transport(transport.clone())
             .build()
             .unwrap()
-            .prefixed(StoreKeyPrefix::identity());
-        let session = ReadSession::monotonic(client.clone(), Some(27));
+            .unprefixed();
+        let session = ReadSession::monotonic(store.clone(), Some(27));
         let derived = session.with_min_sequence_number(40);
         assert_eq!(derived.min_sequence_number(), Some(40));
         assert_eq!(session.min_sequence_number(), Some(27));
         assert_eq!(derived.evaluated_sequence(), None);
-        let rebound = derived.with_client(client);
+        let rebound = derived.with_store(store);
         let key = Bytes::from_static(b"key");
 
         rebound.get(&key).await.unwrap();
@@ -4727,7 +4754,7 @@ mod tests {
 
     #[test]
     fn create_session_starts_unseeded() {
-        let client = PrefixedStoreClient::empty(StoreClient::new("http://localhost:8080/"));
+        let client = StoreClient::new("http://localhost:8080/").unprefixed();
         let session = client.create_session();
         assert_eq!(session.min_sequence_number(), None);
         assert_eq!(session.evaluated_sequence(), None);
@@ -4735,7 +4762,7 @@ mod tests {
 
     #[test]
     fn deriving_zero_strengthens_absence_without_lowering_or_mutating_the_parent() {
-        let client = PrefixedStoreClient::empty(StoreClient::new("http://localhost:8080/"));
+        let client = StoreClient::new("http://localhost:8080/").unprefixed();
         for parent in [
             ReadSession::monotonic(client.clone(), None),
             ReadSession::fixed(client, None),
@@ -4896,10 +4923,10 @@ mod tests {
     }
 
     #[test]
-    fn create_session_with_sequence_preserves_the_full_u64_floor_domain() {
-        let client = PrefixedStoreClient::empty(StoreClient::new("http://localhost:8080/"));
+    fn create_session_with_min_sequence_number_preserves_the_full_u64_floor_domain() {
+        let client = StoreClient::new("http://localhost:8080/").unprefixed();
         for sequence in [0, 27, u64::MAX] {
-            let session = client.create_session_with_sequence(sequence);
+            let session = client.create_session_with_min_sequence_number(sequence);
             assert_eq!(session.min_sequence_number(), Some(sequence));
             assert_eq!(session.evaluated_sequence(), None);
         }
@@ -5110,13 +5137,13 @@ mod tests {
     }
 
     #[test]
-    fn prefixed_reduce_request_shifts_nested_cast_fields() {
+    fn prefixed_reduce_params_shifts_nested_cast_fields() {
         let client = StoreClient::builder()
             .url("http://localhost:8080")
             .build()
             .unwrap()
             .prefixed(StoreKeyPrefix::new(vec![1, 2, 3]).unwrap());
-        let request_at = |byte_offset, bit_offset| DomainRangeReduceRequest {
+        let request_at = |byte_offset, bit_offset| DomainRangeReduceParams {
             reducers: vec![crate::RangeReducerSpec {
                 op: crate::RangeReduceOp::SumField,
                 expr: Some(KvExpr::CastFloat64(Box::new(KvExpr::Add(
@@ -5146,20 +5173,20 @@ mod tests {
         };
         let request = request_at(9, 12);
         assert_eq!(
-            client.prefix_reduce_request(&request).unwrap(),
+            client.prefix_reduce_params(&request).unwrap(),
             request_at(12, 36)
         );
         assert_eq!(request, request_at(9, 12));
     }
 
     #[test]
-    fn prefixed_reduce_request_shifts_key_field_offsets() {
+    fn prefixed_reduce_params_shifts_key_field_offsets() {
         let client = StoreClient::builder()
             .url("http://localhost:8080")
             .build()
             .unwrap()
             .prefixed(StoreKeyPrefix::new(vec![0x01, 0x02, 0x03]).unwrap());
-        let request = DomainRangeReduceRequest {
+        let request = DomainRangeReduceParams {
             reducers: vec![crate::RangeReducerSpec {
                 filter: Some(KvPredicate {
                     checks: vec![
@@ -5218,7 +5245,7 @@ mod tests {
             }),
         };
 
-        let shifted = client.prefix_reduce_request(&request).unwrap();
+        let shifted = client.prefix_reduce_params(&request).unwrap();
         let Some(KvExpr::Field(KvFieldRef::Key { byte_offset, .. })) =
             shifted.reducers[0].expr.as_ref()
         else {
@@ -5363,12 +5390,12 @@ mod tests {
         }
         let original = batch.clone();
         let row_bytes = put_entry_encoded_len(&batch.entries()[0].0, &batch.entries()[0].1);
-        for (max_rows, max_bytes) in [(2, usize::MAX), (9, 2 * row_bytes), (2, 2 * row_bytes)] {
-            let batches = batch.clone().split(max_rows, max_bytes).unwrap();
+        for (max_entries, max_bytes) in [(2, usize::MAX), (9, 2 * row_bytes), (2, 2 * row_bytes)] {
+            let batches = batch.clone().split(max_entries, max_bytes).unwrap();
             assert_eq!(batches.len(), 5);
             for part in &batches {
                 assert!(!part.is_empty());
-                assert!(part.len() <= max_rows);
+                assert!(part.len() <= max_entries);
                 assert!(part.encoded_len() <= max_bytes);
                 assert_eq!(part.encoded_len(), generated_batch_len(part));
             }
@@ -5393,7 +5420,7 @@ mod tests {
         assert!(StoreWriteBatch::new().split(1, 1).unwrap().is_empty());
         assert_eq!(
             StoreWriteBatch::new().split(0, 1).unwrap_err(),
-            SplitError::ZeroRows
+            SplitError::ZeroEntries
         );
         assert_eq!(
             StoreWriteBatch::new().split(1, 0).unwrap_err(),
@@ -5401,10 +5428,10 @@ mod tests {
         );
         assert_eq!(
             StoreWriteBatch::new().split(0, 0).unwrap_err(),
-            SplitError::ZeroRows
+            SplitError::ZeroEntries
         );
 
-        let client = PrefixedStoreClient::empty(StoreClient::new("http://localhost:8080"));
+        let client = StoreClient::new("http://localhost:8080").unprefixed();
         let mut batch = StoreWriteBatch::new();
         batch.push(&client, &Key::new(), b"").unwrap();
         batch
@@ -5550,7 +5577,7 @@ mod tests {
     #[test]
     fn identity_prefix_stages_keys_verbatim() {
         let base = StoreClient::new("http://localhost:8080");
-        let plain = PrefixedStoreClient::empty(base);
+        let plain = base.unprefixed();
         let key = Bytes::from_static(b"raw-key");
 
         let mut batch = StoreWriteBatch::new();

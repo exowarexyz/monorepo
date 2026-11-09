@@ -19,7 +19,6 @@ use commonware_storage::{
 };
 use commonware_utils::{NZUsize, NZU16, NZU64};
 use exoware_qmdb::MAX_OPERATION_SIZE;
-use exoware_sdk::PrefixedStoreClient;
 use std::num::NonZeroU64;
 
 type Digest = commonware_cryptography::sha256::Digest;
@@ -221,13 +220,12 @@ async fn test_unordered_round_trip() {
     let store_client = common::local_store_client().await;
     let source = build_variable_source().await;
 
-    let upload_client = PrefixedStoreClient::empty(store_client.clone());
+    let upload_client = store_client.unprefixed();
     common::commit_operations::<mmr::Family, _>(&upload_client, &source.operations, &op_cfg())
         .await
         .expect("commit upload");
 
-    let qmdb_client =
-        VariableClient::new(PrefixedStoreClient::empty(store_client.clone()), op_cfg());
+    let qmdb_client = VariableClient::new(store_client.unprefixed(), op_cfg());
     let watermark = qmdb_client
         .latest_published_watermark()
         .await
@@ -267,12 +265,12 @@ async fn test_unordered_fixed_round_trip() {
     let store_client = common::local_store_client().await;
     let source = build_fixed_source().await;
 
-    let upload_client = PrefixedStoreClient::empty(store_client.clone());
+    let upload_client = store_client.unprefixed();
     common::commit_operations::<mmr::Family, _>(&upload_client, &source.operations, &())
         .await
         .expect("commit fixed upload");
 
-    let qmdb_client = FixedClient::new(PrefixedStoreClient::empty(store_client.clone()), ());
+    let qmdb_client = FixedClient::new(store_client.unprefixed(), ());
     let watermark = qmdb_client
         .latest_published_watermark()
         .await

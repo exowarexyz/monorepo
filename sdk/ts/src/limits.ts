@@ -9,11 +9,9 @@ export interface PutLimits {
     maxValueLen?: number;
 }
 
-export type PutBatchOptions = PutLimits;
-
 type PutEntry = { key: Uint8Array; value: Uint8Array };
 
-export function normalizePutOptions(options: PutBatchOptions = {}): Required<PutBatchOptions> {
+export function normalizePutLimits(options: PutLimits = {}): Required<PutLimits> {
     const limits = {
         maxEntries: options.maxEntries ?? MAX_PUT_ENTRIES,
         maxEncodedBytes: options.maxEncodedBytes ?? MAX_REQUEST_MESSAGE_BYTES,
@@ -59,8 +57,8 @@ export function validatePutEntry(entry: PutEntry, index: number, maxValueLen: nu
     }
 }
 
-export function validatePut(entries: readonly PutEntry[], options: PutBatchOptions = {}): void {
-    const limits = normalizePutOptions(options);
+export function validatePut(entries: readonly PutEntry[], options: PutLimits = {}): void {
+    const limits = normalizePutLimits(options);
     if (entries.length === 0 || entries.length > limits.maxEntries) {
         throw new RangeError(`Put requires between 1 and ${limits.maxEntries} entries, got ${entries.length}`);
     }

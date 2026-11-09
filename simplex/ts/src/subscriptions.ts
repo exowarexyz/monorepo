@@ -1,4 +1,4 @@
-import { StoreClient, type StoreBatchEntry } from '@exowarexyz/sdk';
+import { PrefixedStoreClient, type StoreBatchEntry } from '@exowarexyz/sdk';
 
 import { verifyNotarization, verifyFinalization } from './certificate-verification.js';
 import {
@@ -97,7 +97,7 @@ export class SimplexSubscriptions<TNotarization = unknown, TFinalization = unkno
   private readonly verifier?: SimplexCertificateVerifier<TNotarization, TFinalization>;
 
   constructor(
-    private readonly store: StoreClient,
+    private readonly store: PrefixedStoreClient,
     options: SimplexSubscriptionsOptions<TNotarization, TFinalization> = {},
   ) {
     this.verifier = options.verifier;
@@ -106,7 +106,7 @@ export class SimplexSubscriptions<TNotarization = unknown, TFinalization = unkno
   async *subscribeRaw(
     kinds: SimplexRecordKind | readonly SimplexRecordKind[],
     options: SimplexStreamOptions = {},
-    callOptions?: Parameters<StoreClient['subscribe']>[1],
+    callOptions?: Parameters<PrefixedStoreClient['subscribe']>[1],
   ): AsyncIterable<SimplexStreamBatch<RawSimplexStreamEntry>> {
     const stream = this.store.subscribe(
       {
@@ -129,7 +129,7 @@ export class SimplexSubscriptions<TNotarization = unknown, TFinalization = unkno
 
   async *subscribeBlocks(
     options: SimplexStreamOptions = {},
-    callOptions?: Parameters<StoreClient['subscribe']>[1],
+    callOptions?: Parameters<PrefixedStoreClient['subscribe']>[1],
   ): AsyncIterable<SimplexStreamBatch<RawSimplexBlockEntry>> {
     for await (const batch of this.subscribeRaw(SimplexRecordKind.BlockByDigest, options, callOptions)) {
       yield {
@@ -141,7 +141,7 @@ export class SimplexSubscriptions<TNotarization = unknown, TFinalization = unkno
 
   async *subscribeHeaders(
     options: SimplexStreamOptions = {},
-    callOptions?: Parameters<StoreClient['subscribe']>[1],
+    callOptions?: Parameters<PrefixedStoreClient['subscribe']>[1],
   ): AsyncIterable<SimplexStreamBatch<RawSimplexHeaderEntry>> {
     for await (const batch of this.subscribeRaw(SimplexRecordKind.HeaderByDigest, options, callOptions)) {
       yield {
@@ -153,7 +153,7 @@ export class SimplexSubscriptions<TNotarization = unknown, TFinalization = unkno
 
   async *subscribeCertificatesRaw(
     options: SimplexCertificateStreamOptions = {},
-    callOptions?: Parameters<StoreClient['subscribe']>[1],
+    callOptions?: Parameters<PrefixedStoreClient['subscribe']>[1],
   ): AsyncIterable<SimplexStreamBatch<RawSimplexCertificateStreamEntry>> {
     const kinds = [
       SimplexRecordKind.NotarizationByRound,
@@ -172,7 +172,7 @@ export class SimplexSubscriptions<TNotarization = unknown, TFinalization = unkno
 
   async *subscribeCertificates(
     options: SimplexCertificateStreamOptions = {},
-    callOptions?: Parameters<StoreClient['subscribe']>[1],
+    callOptions?: Parameters<PrefixedStoreClient['subscribe']>[1],
   ): AsyncIterable<SimplexStreamBatch<VerifiedSimplexCertificateStreamEntry<TNotarization, TFinalization>>> {
     const verifier = this.requireVerifier();
     for await (const batch of this.subscribeCertificatesRaw(options, callOptions)) {

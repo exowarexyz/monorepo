@@ -19,7 +19,7 @@ use datafusion::{
     arrow::datatypes::DataType,
     physical_plan::{collect, execution_plan::reset_plan_states, ExecutionPlan},
 };
-use exoware_sdk::{transport::set_tcp_nodelay, StoreClient, StoreKeyPrefix};
+use exoware_sdk::{transport::set_tcp_nodelay, StoreClient};
 use exoware_server::{
     Ingest, IngestState, PutError, PutInput, Query, QueryExtra, QueryResult, QueryState, RangeScan,
     RangeScanBatch, RangeScanResult, Sequence,
@@ -403,7 +403,7 @@ impl Fixture {
             .client_transport(connectrpc::client::HttpClient::plaintext_http2_only())
             .build()
             .unwrap();
-        let mut schema = KvSchema::new(client.prefixed(StoreKeyPrefix::identity()));
+        let mut schema = KvSchema::new(client.unprefixed());
         for name in ["orders", "covered_orders", "text_orders"] {
             let mut indexes = vec![
                 IndexSpec::lexicographic("status_idx", vec!["status".into()])

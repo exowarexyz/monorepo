@@ -18,7 +18,7 @@ cargo add tokio --features macros,rt-multi-thread
 For local development, start the
 [simulator](../../examples/simulator/README.md) on port 8080. Each Store write
 returns a sequence number identifying its position in the Store's write order.
-This example writes a batch, then uses that sequence to read data at least as
+This example writes one entry, then uses that sequence to read data at least as
 recent as the write:
 
 ```rust
@@ -33,8 +33,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let store = client.prefixed(StoreKeyPrefix::new(Bytes::from_static(b"example/"))?);
     let key = Bytes::from_static(b"greeting");
 
-    let sequence = store.ingest().put(&[(&key, b"hello".as_slice())]).await?;
-    let reader = store.create_session_with_sequence(sequence);
+    let sequence = store.ingest().put(&key, b"hello").await?;
+    let reader = store.create_session_with_min_sequence_number(sequence);
     let value = reader.get(&key).await?;
     assert_eq!(value.as_deref(), Some(b"hello".as_slice()));
     Ok(())
@@ -65,7 +65,7 @@ independent. Prefix bytes count toward the physical key limit, so
 `max_logical_key_len()` reports the remaining capacity. The same mechanism lets
 [QMDB](../../qmdb/README.md) and [SQL](../../sql/README.md) instances share a Store.
 
-To write across namespaces atomically, stage each row through its owning client
+To write across namespaces atomically, stage each entry through its owning store
 and commit the batch through the underlying `StoreClient`:
 
 ```rust
@@ -79,10 +79,14 @@ batch.push(&accounts, &Bytes::from_static(b"7"), b"active")?;
 let sequence = batch.commit(&client).await?;
 ```
 
-A commit sends one atomic Put. To plan a larger upload, use `encoded_len()` to
-find its uncompressed protobuf size, including prefixes. Then use
-`split(max_rows, max_encoded_bytes)` to consume the batch and return ordered
-chunks within those limits. Each chunk is a separate write, so your
+A commit sends one atomic Put. Unlike the TypeScript SDK, `commit` and
+`put_prepared` do not check Put limits locally. The server rejects a Put with
+too many entries with `PUT_TOO_LARGE` (see `ClientError::put_too_large`), one
+over its message byte limit with `ResourceExhausted`, and an oversized value
+with `InvalidArgument`. To plan a larger upload, use `encoded_len()` to find
+its uncompressed protobuf size, including prefixes. Then use
+`split(max_entries, max_encoded_bytes)` to consume the batch and return
+ordered chunks within those limits. Each chunk is a separate write, so your
 application must handle partial completion and coordinate publication.
 Concurrent commits can be sequenced out of order.
 
@@ -90,7 +94,8 @@ Concurrent commits can be sequenced out of order.
 
 Query replicas may lag behind writes. A [`ReadSession`](https://docs.rs/exoware-sdk/latest/exoware_sdk/struct.ReadSession.html)
 sets a minimum sequence, or floor, that each query must satisfy. Pass a write's
-sequence to `create_session_with_sequence` when a read depends on that write.
+sequence to `create_session_with_min_sequence_number` when a read depends on
+that write.
 The session is monotonic: as it observes newer query responses or log batches,
 it raises the floor for subsequent requests. `create_session()` starts
 without a floor.
