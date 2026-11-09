@@ -1610,8 +1610,8 @@ mod tests {
         )
         .await;
         let logical_key = crate::codec::encode_primary_key(
-            fixture.table.model.table_prefix,
-            &[&crate::types::CellValue::FixedBinary(invalid_pk)],
+            &[],
+            [&crate::types::CellValue::FixedBinary(invalid_pk)],
             &fixture.table.model,
         )
         .unwrap();

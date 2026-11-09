@@ -66,7 +66,8 @@ impl TableWriter {
                 row.values.len()
             ));
         }
-        let base_key = encode_namespaced_primary_key(namespace, &row, &self.model)?;
+        let base_key =
+            encode_primary_key(namespace, row.primary_key_cells(&self.model), &self.model)?;
         let mut stored = stored_row_from_cells(&row, &self.model).map_err(|e| format!("{e}"))?;
         let pk_payload = base_key.slice(namespace.len() + self.model.primary_key_prefix.len()..);
         out.push((base_key, stored.encode()));

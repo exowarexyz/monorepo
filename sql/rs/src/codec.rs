@@ -311,25 +311,6 @@ fn decode_key_cell(
     Some((value, width))
 }
 
-#[cfg(test)]
-pub(crate) fn encode_primary_key(
-    table_prefix: u8,
-    pk_values: &[&CellValue],
-    model: &TableModel,
-) -> Result<Key, String> {
-    if table_prefix != model.table_prefix {
-        return Err("table prefix does not match model".to_string());
-    }
-    let prefix = &model.primary_key_prefix;
-    let mut payload = Vec::with_capacity(model.primary_key_width);
-    for (val, kind) in pk_values.iter().zip(model.primary_key_kinds.iter()) {
-        append_ordered_key_bytes(val, *kind, &mut payload)?;
-    }
-    prefix
-        .encode(&payload)
-        .map_err(|e| format!("failed to encode primary key: {e}"))
-}
-
 pub(crate) fn encode_primary_key_from_row(
     table_prefix: u8,
     row: &KvRow,
@@ -338,15 +319,15 @@ pub(crate) fn encode_primary_key_from_row(
     if table_prefix != model.table_prefix {
         return Err("table prefix does not match model".to_string());
     }
-    encode_namespaced_primary_key(&[], row, model)
+    encode_primary_key(&[], row.primary_key_cells(model), model)
 }
 
-/// Encode `row`'s primary key behind `namespace`, the Store namespace bytes the key carries on
-/// the wire, or nothing for a logical key. The key is built in one buffer, and the length
-/// limit applies to the whole key including the namespace.
-pub(crate) fn encode_namespaced_primary_key(
+/// Encode a primary key from its column values, in primary-key order, behind `namespace`, the
+/// Store namespace bytes the key carries on the wire, or nothing for a logical key. The key is
+/// built in one buffer, and the length limit applies to the whole key including the namespace.
+pub(crate) fn encode_primary_key<'a>(
     namespace: &[u8],
-    row: &KvRow,
+    pk_values: impl IntoIterator<Item = &'a CellValue>,
     model: &TableModel,
 ) -> Result<Key, String> {
     let mut key = key_buffer(
@@ -354,12 +335,8 @@ pub(crate) fn encode_namespaced_primary_key(
         &model.primary_key_prefix,
         model.primary_key_width,
     );
-    for (&idx, &kind) in model
-        .primary_key_indices
-        .iter()
-        .zip(&model.primary_key_kinds)
-    {
-        append_ordered_key_bytes(row.value_at(idx), kind, &mut key)?;
+    for (value, &kind) in pk_values.into_iter().zip(&model.primary_key_kinds) {
+        append_ordered_key_bytes(value, kind, &mut key)?;
     }
     finish_key(key).map_err(|e| format!("failed to encode primary key: {e}"))
 }
@@ -808,7 +785,7 @@ mod tests {
         let model = model();
         let entity = CellValue::Utf8("a\0é\u{1}z".into());
         let version = CellValue::UInt64(9);
-        let key = encode_primary_key(0, &[&entity, &version], &model).unwrap();
+        let key = encode_primary_key(&[], [&entity, &version], &model).unwrap();
         let selected = decode_primary_key_selected(0, &key, &model, &[false, true]).unwrap();
         assert!(matches!(
             selected.as_slice(),

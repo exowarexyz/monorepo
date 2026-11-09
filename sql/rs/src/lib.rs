@@ -2855,7 +2855,7 @@ mod tests {
             "longer-than-sixteen-bytes",
         ] {
             let value = CellValue::Utf8(name.to_string());
-            let stored = encode_primary_key(0, &[&value], &model).expect("stored key encodes");
+            let stored = encode_primary_key(&[], [&value], &model).expect("stored key encodes");
 
             let mut pred = QueryPredicate::default();
             pred.constraints
@@ -2890,7 +2890,7 @@ mod tests {
             .primary_key_ranges(&model, exoware_sdk::keys::MAX_KEY_LEN)
             .unwrap();
         let alice = CellValue::Utf8("alice".to_string());
-        let alice_key = encode_primary_key(0, &[&alice], &model).expect("stored key encodes");
+        let alice_key = encode_primary_key(&[], [&alice], &model).expect("stored key encodes");
         assert!(
             alice_key > ranges[0].end,
             "range for 'al' must exclude the stored key for 'alice'"
@@ -2927,7 +2927,7 @@ mod tests {
             let name = CellValue::Utf8("al".to_string());
             let id_value = CellValue::Int64(id);
             let stored =
-                encode_primary_key(0, &[&name, &id_value], &model).expect("stored key encodes");
+                encode_primary_key(&[], [&name, &id_value], &model).expect("stored key encodes");
             assert!(
                 ranges[0].start <= stored && stored <= ranges[0].end,
                 "range for name='al' must include stored key with id={id}"
@@ -2937,7 +2937,7 @@ mod tests {
         let other = CellValue::Utf8("alx".to_string());
         let id_value = CellValue::Int64(0);
         let excluded =
-            encode_primary_key(0, &[&other, &id_value], &model).expect("stored key encodes");
+            encode_primary_key(&[], [&other, &id_value], &model).expect("stored key encodes");
         assert!(
             excluded > ranges[0].end,
             "range for name='al' must exclude rows with name='alx'"
@@ -3229,8 +3229,8 @@ mod tests {
         let model_1 = simple_int64_model(1);
         let model_2 = simple_int64_model(2);
         let pk = CellValue::Int64(42);
-        let key_a = encode_primary_key(1, &[&pk], &model_1).expect("pk key encodes");
-        let key_b = encode_primary_key(2, &[&pk], &model_2).expect("pk key encodes");
+        let key_a = encode_primary_key(&[], [&pk], &model_1).expect("pk key encodes");
+        let key_b = encode_primary_key(&[], [&pk], &model_2).expect("pk key encodes");
         assert_ne!(key_a, key_b, "same PK under different prefixes must differ");
         assert!(
             decode_primary_key(1, &key_a, &model_1).is_some(),
@@ -3341,7 +3341,7 @@ mod tests {
             bucket[0] = first_byte;
 
             let pk = CellValue::FixedBinary(id.clone());
-            let primary = encode_primary_key(model.table_prefix, &[&pk], &model).unwrap();
+            let primary = encode_primary_key(&[], [&pk], &model).unwrap();
             // The family prefix bytes are fixed; the payload begins byte-aligned
             // immediately after them.
             assert_eq!(
@@ -3451,8 +3451,8 @@ mod tests {
         let model_0 = simple_int64_model(0);
         let model_1 = simple_int64_model(1);
         let pk = CellValue::Int64(42);
-        let key_a = encode_primary_key(0, &[&pk], &model_0).expect("pk key encodes");
-        let key_b = encode_primary_key(1, &[&pk], &model_1).expect("pk key encodes");
+        let key_a = encode_primary_key(&[], [&pk], &model_0).expect("pk key encodes");
+        let key_b = encode_primary_key(&[], [&pk], &model_1).expect("pk key encodes");
         assert_ne!(key_a, key_b);
         assert!(decode_primary_key(0, &key_a, &model_0).is_some());
         assert!(decode_primary_key(1, &key_a, &model_1).is_none());
@@ -4308,11 +4308,7 @@ mod tests {
             ],
         };
         let encoded = encode_base_row_value(&row, &model).unwrap();
-        let pk = row
-            .primary_key_values(&model)
-            .into_iter()
-            .cloned()
-            .collect::<Vec<_>>();
+        let pk = row.primary_key_cells(&model).cloned().collect::<Vec<_>>();
         let decoded = decode_base_row(pk, &encoded, &model).unwrap();
         assert!(matches!(&decoded.values[0], CellValue::UInt64(v) if *v == u64::MAX));
         assert!(matches!(&decoded.values[1], CellValue::Utf8(v) if v == "max"));
@@ -4353,11 +4349,7 @@ mod tests {
             ],
         };
         let encoded = encode_base_row_value(&row, &model).unwrap();
-        let pk = row
-            .primary_key_values(&model)
-            .into_iter()
-            .cloned()
-            .collect::<Vec<_>>();
+        let pk = row.primary_key_cells(&model).cloned().collect::<Vec<_>>();
         let decoded = decode_base_row(pk, &encoded, &model).unwrap();
         assert!(matches!(&decoded.values[0], CellValue::FixedBinary(v) if *v == hash_val));
     }
@@ -4450,11 +4442,7 @@ mod tests {
             values: vec![CellValue::Int64(1), CellValue::Decimal256(big_val)],
         };
         let encoded = encode_base_row_value(&row, &model).unwrap();
-        let pk = row
-            .primary_key_values(&model)
-            .into_iter()
-            .cloned()
-            .collect::<Vec<_>>();
+        let pk = row.primary_key_cells(&model).cloned().collect::<Vec<_>>();
         let decoded = decode_base_row(pk, &encoded, &model).unwrap();
         assert!(matches!(&decoded.values[1], CellValue::Decimal256(v) if *v == big_val));
     }
@@ -4502,7 +4490,7 @@ mod tests {
         .unwrap();
         let model = TableModel::from_config(&config).unwrap();
         let pk = CellValue::UInt64(12345);
-        let key = encode_primary_key(5, &[&pk], &model).expect("pk key encodes");
+        let key = encode_primary_key(&[], [&pk], &model).expect("pk key encodes");
         let decoded = decode_primary_key(5, &key, &model).unwrap();
         assert!(matches!(&decoded[0], CellValue::UInt64(12345)));
     }
@@ -4521,7 +4509,7 @@ mod tests {
         .unwrap();
         let model = TableModel::from_config(&config).unwrap();
         let pk = CellValue::Utf8("HELLO".to_string());
-        let key = encode_primary_key(3, &[&pk], &model).expect("pk key encodes");
+        let key = encode_primary_key(&[], [&pk], &model).expect("pk key encodes");
         let decoded = decode_primary_key(3, &key, &model).unwrap();
         assert!(matches!(&decoded[0], CellValue::Utf8(v) if v == "HELLO"));
     }
@@ -4541,7 +4529,7 @@ mod tests {
         let model = TableModel::from_config(&config).unwrap();
         let data = vec![0xDE, 0xAD, 0xBE, 0xEF, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
         let pk = CellValue::FixedBinary(data.clone());
-        let key = encode_primary_key(7, &[&pk], &model).expect("pk key encodes");
+        let key = encode_primary_key(&[], [&pk], &model).expect("pk key encodes");
         let decoded = decode_primary_key(7, &key, &model).unwrap();
         assert!(matches!(&decoded[0], CellValue::FixedBinary(v) if *v == data));
     }
@@ -4680,7 +4668,7 @@ mod tests {
         let pk_entity = CellValue::FixedBinary(entity.clone());
         let pk_version = CellValue::UInt64(42);
         let key =
-            encode_primary_key(1, &[&pk_entity, &pk_version], &model).expect("pk key encodes");
+            encode_primary_key(&[], [&pk_entity, &pk_version], &model).expect("pk key encodes");
 
         let decoded = decode_primary_key(1, &key, &model).unwrap();
         assert_eq!(decoded.len(), 2);
@@ -4705,11 +4693,11 @@ mod tests {
         let entity = vec![0xBB; 32];
         let pk_entity = CellValue::FixedBinary(entity);
 
-        let key_v1 = encode_primary_key(0, &[&pk_entity, &CellValue::UInt64(1)], &model)
+        let key_v1 = encode_primary_key(&[], [&pk_entity, &CellValue::UInt64(1)], &model)
             .expect("pk key encodes");
-        let key_v10 = encode_primary_key(0, &[&pk_entity, &CellValue::UInt64(10)], &model)
+        let key_v10 = encode_primary_key(&[], [&pk_entity, &CellValue::UInt64(10)], &model)
             .expect("pk key encodes");
-        let key_v100 = encode_primary_key(0, &[&pk_entity, &CellValue::UInt64(100)], &model)
+        let key_v100 = encode_primary_key(&[], [&pk_entity, &CellValue::UInt64(100)], &model)
             .expect("pk key encodes");
 
         // Versions must sort numerically (big-endian U64)
@@ -4834,7 +4822,7 @@ mod tests {
         assert_eq!(model.primary_key_width, 8);
 
         let pk = CellValue::Int64(42);
-        let key = encode_primary_key(0, &[&pk], &model).expect("pk key encodes");
+        let key = encode_primary_key(&[], [&pk], &model).expect("pk key encodes");
         let decoded = decode_primary_key(0, &key, &model).unwrap();
         assert_eq!(decoded.len(), 1);
         assert!(matches!(&decoded[0], CellValue::Int64(42)));
@@ -4939,8 +4927,8 @@ mod tests {
 
         // The start key should encode entity=CC..CC, version=0
         let expected_start = encode_primary_key(
-            0,
-            &[
+            &[],
+            [
                 &CellValue::FixedBinary(vec![0xCC; 16]),
                 &CellValue::UInt64(0),
             ],
@@ -4954,8 +4942,8 @@ mod tests {
 
         // The end key should encode entity=CC..CC, version=42, then 0xFF tail
         let expected_end_prefix = encode_primary_key(
-            0,
-            &[
+            &[],
+            [
                 &CellValue::FixedBinary(vec![0xCC; 16]),
                 &CellValue::UInt64(42),
             ],
@@ -6475,8 +6463,7 @@ mod tests {
         .expect("valid config");
         let model = TableModel::from_config(&config).expect("model");
         let resume_value = CellValue::Int64(3);
-        let resume_key =
-            encode_primary_key(model.table_prefix, &[&resume_value], &model).expect("resume key");
+        let resume_key = encode_primary_key(&[], [&resume_value], &model).expect("resume key");
 
         let report = backfill_schema
             .backfill_added_indexes_with_options(
@@ -7156,9 +7143,8 @@ mod tests {
         let first_results = {
             let mut results = Vec::with_capacity(BATCH_FLUSH_ROWS);
             for id in 0..BATCH_FLUSH_ROWS {
-                let key =
-                    encode_primary_key(model.table_prefix, &[&CellValue::Int64(id as i64)], &model)
-                        .expect("primary key");
+                let key = encode_primary_key(&[], [&CellValue::Int64(id as i64)], &model)
+                    .expect("primary key");
                 results.push((key, encoded_row.clone()));
             }
             results
@@ -7166,12 +7152,8 @@ mod tests {
         let first_frame = proto_range_entries_frame(first_results);
 
         let second_results = {
-            let key = encode_primary_key(
-                model.table_prefix,
-                &[&CellValue::Int64(BATCH_FLUSH_ROWS as i64)],
-                &model,
-            )
-            .expect("primary key");
+            let key = encode_primary_key(&[], [&CellValue::Int64(BATCH_FLUSH_ROWS as i64)], &model)
+                .expect("primary key");
             vec![(key, encoded_row)]
         };
         let second_frame = proto_range_entries_frame(second_results);
@@ -7246,10 +7228,10 @@ mod tests {
 
         let encoded_row = (StoredRow { values: vec![None] }).encode().to_vec();
 
-        let first_key = encode_primary_key(model.table_prefix, &[&CellValue::Int64(1)], &model)
-            .expect("first primary key");
-        let second_key = encode_primary_key(model.table_prefix, &[&CellValue::Int64(2)], &model)
-            .expect("second primary key");
+        let first_key =
+            encode_primary_key(&[], [&CellValue::Int64(1)], &model).expect("first primary key");
+        let second_key =
+            encode_primary_key(&[], [&CellValue::Int64(2)], &model).expect("second primary key");
 
         let first_frame = proto_range_entries_frame(vec![(first_key, encoded_row.clone())]);
         let second_frame = proto_range_entries_frame(vec![(second_key, encoded_row)]);
@@ -7534,8 +7516,8 @@ mod tests {
         .to_vec();
 
         let receiver_key = encode_primary_key(
-            model.table_prefix,
-            &[
+            &[],
+            [
                 &CellValue::UInt64(7),
                 &CellValue::UInt64(9),
                 &CellValue::UInt64(4),
@@ -7545,8 +7527,8 @@ mod tests {
         )
         .expect("receiver primary key");
         let sender_key = encode_primary_key(
-            model.table_prefix,
-            &[
+            &[],
+            [
                 &CellValue::UInt64(7),
                 &CellValue::UInt64(9),
                 &CellValue::UInt64(4),
