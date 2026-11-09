@@ -29,14 +29,17 @@ fn payload_bytes(limits: PutLimits, buffers: &DecodeBuffers) -> Result<usize, Co
     }
 
     // Transport admission remains held while exact copies reach the decoder.
-    let wire = mul(limits.wire_bytes, 2)?;
+    let wire = mul(limits.max_wire_bytes, 2)?;
 
     // Large fields can outgrow the requested byte capacity to the message limit.
     // Cover a returned chunk, the current arena, and replacement allocation overlap.
-    let arenas = mul(limits.message_bytes.max(1), 3)?;
+    let arenas = mul(limits.max_message_bytes.max(1), 3)?;
 
     // Returning a chunk transfers its range allocation. The next decode allocates another.
-    let entries = buffers.entry_capacity.min(limits.ingest.max_entries).max(1);
+    let entries = buffers
+        .entry_capacity
+        .min(limits.ingest_limits.max_entries)
+        .max(1);
     let ranges = mul(mul(entries, size_of::<EntryRanges>())?, 2)?;
     let frames = mul(FRAME_WORK_BUDGET - 1, size_of::<Bytes>())?;
     add(
@@ -111,8 +114,8 @@ mod tests {
                 DecodeBuffers::new(payload.len() + 64, 4096),
             ] {
                 let limits = PutLimits {
-                    wire_bytes: wire.len(),
-                    message_bytes: payload.len() + 19,
+                    max_wire_bytes: wire.len(),
+                    max_message_bytes: payload.len() + 19,
                     ..PutLimits::default()
                 };
 
@@ -167,17 +170,17 @@ mod tests {
         }
         for limits in [
             PutLimits {
-                wire_bytes: usize::MAX,
+                max_wire_bytes: usize::MAX,
                 ..limits
             },
             PutLimits {
-                message_bytes: usize::MAX,
+                max_message_bytes: usize::MAX,
                 ..limits
             },
             PutLimits {
-                ingest: crate::IngestLimits {
+                ingest_limits: crate::IngestLimits {
                     max_entries: usize::MAX,
-                    ..limits.ingest
+                    ..limits.ingest_limits
                 },
                 ..limits
             },

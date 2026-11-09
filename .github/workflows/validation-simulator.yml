@@ -80,7 +80,7 @@ jobs:
       - name: Run validation
         uses: ./.github/actions/run-validation
         with:
-          endpoint: http://127.0.0.1:8080
+          store-url: http://127.0.0.1:8080
           validation-bin: ${{ steps.bins.outputs.validation }}
           # Uses the default `balanced` scenario, which now mixes reads, writes, and scans.
           # Stamp the PR head commit (not the ephemeral merge SHA) into the report, summary, and

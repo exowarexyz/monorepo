@@ -1,7 +1,7 @@
 //! Exoware benchmark workload runner.
 //!
 //! Usage:
-//!   validation bench --url http://localhost:8080 --keys 10000 --ops 50000 --batch-size 100 --scenario balanced
+//!   validation bench --store-url http://localhost:8080 --keys 10000 --ops 50000 --batch-size 100 --scenario balanced
 //!
 //! Progress: `bench` emits `Benchmark progress` every `--progress-interval-secs` (default 10; 0 disables).
 
@@ -18,7 +18,7 @@ use crate::{
     value::{value_for_index, DEFAULT_VALUE_SIZE, VALUE_GENERATOR_VERSION},
     workload::{
         resolve_mix, worker_operation_count, worker_write_index, KeyDistribution, Operation,
-        Scenario, WorkerPlan, WorkloadSpec, ZipfSampler, DEFAULT_BENCH_RNG_SEED,
+        Scenario, WorkerPlan, WorkloadSpec, ZipfSampler, DEFAULT_BENCH_SEED,
         WORKLOAD_GENERATOR_VERSION,
     },
 };
@@ -41,7 +41,7 @@ pub struct Args {
     #[arg(
         long,
         conflicts_with_all = [
-            "url",
+            "store_url",
             "keys",
             "ops",
             "batch_size",
@@ -55,7 +55,7 @@ pub struct Args {
             "read_ratio",
             "write_ratio",
             "scan_ratio",
-            "rng_seed",
+            "seed",
             "read_retry_attempts",
             "request_compression",
             "key_len",
@@ -66,6 +66,7 @@ pub struct Args {
     manifest: Option<PathBuf>,
     #[command(flatten)]
     client: ClientArgs,
+    /// Keys written by load before bench starts; bench writes append after them.
     #[arg(long, default_value_t = 10000)]
     keys: u64,
     #[arg(long, default_value_t = 50000)]
@@ -103,8 +104,8 @@ pub struct Args {
     #[arg(long)]
     scan_ratio: Option<f64>,
     /// Deterministic RNG seed used for benchmark operation selection.
-    #[arg(long, default_value_t = DEFAULT_BENCH_RNG_SEED)]
-    rng_seed: u64,
+    #[arg(long, default_value_t = DEFAULT_BENCH_SEED)]
+    seed: u64,
     #[command(flatten)]
     keyspace: KeyspaceArgs,
     /// Size in bytes of generated values written by ingest operations.
@@ -131,7 +132,7 @@ pub struct Config {
     concurrency: usize,
     scenario: Scenario,
     workload: WorkloadSpec,
-    rng_seed: u64,
+    seed: u64,
     progress_interval_secs: u64,
     output: Option<PathBuf>,
 }
@@ -182,7 +183,7 @@ impl TryFrom<Args> for Config {
             concurrency: args.concurrency,
             scenario: args.scenario,
             workload,
-            rng_seed: args.rng_seed,
+            seed: args.seed,
             progress_interval_secs: args.progress_interval_secs,
             output: args.output,
         })
@@ -218,8 +219,8 @@ impl Config {
             .request_compression
             .context("current manifest requires request_compression")?;
         ensure!(
-            manifest.config.key_space > 0,
-            "manifest key_space must be > 0"
+            manifest.config.initial_keys > 0,
+            "manifest initial_keys must be > 0"
         );
         ensure!(
             manifest.config.concurrency > 0,
@@ -237,7 +238,7 @@ impl Config {
 
         Ok(Self {
             client: ClientConfig::new(
-                manifest.config.endpoint,
+                manifest.config.store_url,
                 manifest.config.read_retry_attempts,
             )?
             .with_request_compression(request_compression),
@@ -246,14 +247,14 @@ impl Config {
                 manifest.config.namespace,
                 manifest.config.key_len,
             )?,
-            initial_keys: manifest.config.key_space,
+            initial_keys: manifest.config.initial_keys,
             value_size: manifest.config.value_size,
             batch_size: manifest.config.batch_size,
             total_ops: manifest.config.total_ops,
             concurrency: manifest.config.concurrency,
             scenario: manifest.config.scenario,
             workload: manifest.config.workload,
-            rng_seed: manifest.seed,
+            seed: manifest.seed,
             progress_interval_secs,
             output,
         })
@@ -277,16 +278,16 @@ async fn run_workload(config: Config) -> anyhow::Result<BenchReport> {
         concurrency,
         scenario,
         workload,
-        rng_seed,
+        seed,
         progress_interval_secs,
         output,
     } = config;
 
     let client = Arc::new(build_client(&client_config)?);
     let report_config = BenchConfig {
-        endpoint: client_config.endpoint().to_owned(),
+        store_url: client_config.store_url().to_owned(),
         namespace,
-        key_space: initial_keys,
+        initial_keys,
         total_ops,
         concurrency,
         scenario,
@@ -313,7 +314,7 @@ async fn run_workload(config: Config) -> anyhow::Result<BenchReport> {
     let start = Instant::now();
 
     tracing::info!(
-        key_space = initial_keys,
+        initial_keys,
         total_ops,
         concurrency,
         namespace,
@@ -327,7 +328,7 @@ async fn run_workload(config: Config) -> anyhow::Result<BenchReport> {
         latest_window = workload.latest_window,
         latest_prob = workload.latest_prob,
         zipf_theta = workload.zipf_theta,
-        rng_seed,
+        seed,
         progress_interval_secs,
         "Starting benchmark phase"
     );
@@ -344,7 +345,7 @@ async fn run_workload(config: Config) -> anyhow::Result<BenchReport> {
 
         workers.spawn(async move {
             let mut plan = WorkerPlan::with_zipf_sampler(
-                rng_seed,
+                seed,
                 worker as u64,
                 worker_workload,
                 zipf_sampler,
@@ -458,7 +459,7 @@ async fn run_workload(config: Config) -> anyhow::Result<BenchReport> {
     let total = ops_done.load(Ordering::Relaxed);
     let report = BenchReport {
         config: report_config,
-        seed: rng_seed,
+        seed,
         elapsed_ms: u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
         operations: total,
         reads: totals.reads_ok + totals.reads_miss,
@@ -808,8 +809,8 @@ mod tests {
     fn sample_manifest() -> BenchManifest {
         BenchManifest::new(
             BenchConfig {
-                endpoint: "http://localhost:8080/".to_string(),
-                key_space: 1_000,
+                store_url: "http://localhost:8080/".to_string(),
+                initial_keys: 1_000,
                 namespace: 42,
                 total_ops: 10_000,
                 concurrency: 4,
@@ -843,7 +844,7 @@ mod tests {
     fn sample_args() -> Args {
         Args {
             client: ClientArgs {
-                url: "http://localhost:8080/".to_string(),
+                store_url: "http://localhost:8080/".to_string(),
                 read_retry_attempts: 3,
                 request_compression: RequestCompression::default(),
             },
@@ -861,7 +862,7 @@ mod tests {
             read_ratio: None,
             write_ratio: None,
             scan_ratio: None,
-            rng_seed: DEFAULT_BENCH_RNG_SEED,
+            seed: DEFAULT_BENCH_SEED,
             keyspace: KeyspaceArgs {
                 key_len: DEFAULT_KEY_LEN,
                 namespace: Some(42),
@@ -875,7 +876,7 @@ mod tests {
     #[test]
     fn config_normalizes_url() {
         let config = Config::try_from(sample_args()).expect("bench args should be valid");
-        assert_eq!(config.client.endpoint(), "http://localhost:8080");
+        assert_eq!(config.client.store_url(), "http://localhost:8080");
     }
 
     #[test]
@@ -981,7 +982,7 @@ mod tests {
     async fn write_operations_send_configured_ingest_batches() {
         let (url, batch_sizes) = spawn_ingest_harness().await;
         let mut args = sample_args();
-        args.client.url = url;
+        args.client.store_url = url;
         args.keys = 1;
         args.ops = 4;
         args.batch_size = 3;
@@ -1038,7 +1039,7 @@ mod tests {
             .insert(keyspace.inserted_key(0).to_vec());
 
         let mut args = sample_args();
-        args.client.url = url;
+        args.client.store_url = url;
         args.keys = initial_keys;
         args.ops = total_ops;
         args.batch_size = batch_size;
@@ -1049,7 +1050,7 @@ mod tests {
         args.read_ratio = Some(mix.read_ratio);
         args.write_ratio = Some(mix.write_ratio);
         args.scan_ratio = Some(mix.scan_ratio);
-        args.rng_seed = seed;
+        args.seed = seed;
         args.progress_interval_secs = 0;
 
         let config = Config::try_from(args).expect("latest config should validate");
@@ -1082,7 +1083,7 @@ mod tests {
         }
 
         let mut args = sample_args();
-        args.client.url = url;
+        args.client.store_url = url;
         args.keys = initial_keys;
         args.ops = 256;
         args.batch_size = 3;
@@ -1093,7 +1094,7 @@ mod tests {
         args.read_ratio = Some(0.5);
         args.write_ratio = Some(0.5);
         args.scan_ratio = Some(0.0);
-        args.rng_seed = 42;
+        args.seed = 42;
         args.progress_interval_secs = 0;
 
         let config = Config::try_from(args).expect("latest config should validate");
@@ -1131,7 +1132,7 @@ mod tests {
         )
         .expect("scan workload should validate");
         let mut plan =
-            WorkerPlan::with_zipf_sampler(DEFAULT_BENCH_RNG_SEED, 0, workload, None, 1, batch_size);
+            WorkerPlan::with_zipf_sampler(DEFAULT_BENCH_SEED, 0, workload, None, 1, batch_size);
         let expected_start_index = match plan.next_operation(initial_keys) {
             Operation::Scan { start, .. } => start,
             operation => panic!("expected scan operation, got {operation:?}"),
@@ -1142,7 +1143,7 @@ mod tests {
         let expected_end = keyspace.scan_upper_bound(&expected_start);
 
         let mut args = sample_args();
-        args.client.url = url;
+        args.client.store_url = url;
         args.keys = initial_keys;
         args.ops = 1;
         args.batch_size = batch_size;
@@ -1193,7 +1194,7 @@ mod tests {
         let config = Config::try_from_manifest(sample_manifest(), output.clone(), 0)
             .expect("manifest should parse");
 
-        assert_eq!(config.client.endpoint(), "http://localhost:8080");
+        assert_eq!(config.client.store_url(), "http://localhost:8080");
         assert_eq!(config.namespace, 42);
         assert_eq!(config.initial_keys, 1_000);
         assert_eq!(config.total_ops, 10_000);
@@ -1205,7 +1206,7 @@ mod tests {
         );
         assert_eq!(config.scenario, Scenario::ScanHeavy);
         assert_eq!(config.workload.key_dist, KeyDistribution::Latest);
-        assert_eq!(config.rng_seed, 123);
+        assert_eq!(config.seed, 123);
         assert_eq!(config.progress_interval_secs, 0);
         assert_eq!(config.output, output);
     }

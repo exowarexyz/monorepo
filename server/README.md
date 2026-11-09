@@ -50,6 +50,10 @@ a remote notification path that advances the query worker's local
 
 ## Implement writes and reads
 
+Names with `Ingest` refer to the `log.ingest.v1` service and capability, including
+its state, budget, and backend error. Names with `Put` refer to that service's single
+RPC and the adapter pipeline that reads its request.
+
 `Ingest::put` receives a borrowed `&mut PutInput`. Consume its batches into
 preparation storage, then call `finish().await` and require success before
 submitting anything for publication. Use `message_bound().await` to size
@@ -119,7 +123,7 @@ by [its backend configuration](../examples/simulator/src/rocks.rs).
 
 The Reduce RPC uses DataFusion aggregation. By default, group state stays in
 memory, and unordered aggregation consumes its input before returning results.
-To bound that state, use [QueryState::with_runtime](src/connect.rs) to supply
+To bound that state, use [QueryState::with_runtime_env](src/connect.rs) to supply
 a `RuntimeEnv` with a bounded memory pool and spill storage. The pool excludes
 backend, transient input, transport, and client buffers.
 

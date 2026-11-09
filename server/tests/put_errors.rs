@@ -5,8 +5,8 @@ use exoware_sdk::{
     limits::{PutTooLarge, MAX_KEY_LEN},
 };
 use exoware_server::{
-    ingest_error_to_connect, put_too_large_error, validate_put_count, validate_put_entry,
-    worker_not_ready_error, IngestError, IngestLimits,
+    put_too_large_error, validate_put_count, validate_put_entry, worker_not_ready_error,
+    IngestError, IngestLimits,
 };
 
 fn assert_validation(
@@ -89,15 +89,16 @@ fn backend_errors_preserve_codes_and_retry_details() {
             "invariant violated",
         ),
     ] {
-        let actual = ingest_error_to_connect(error);
+        let actual = error.into_connect();
         assert_eq!(actual.code, code);
         assert_eq!(actual.message.as_deref(), Some(message));
         assert!(actual.details.is_empty());
     }
     assert_retry(
-        ingest_error_to_connect(IngestError::Unavailable {
+        IngestError::Unavailable {
             message: "backend bouncing".into(),
-        }),
+        }
+        .into_connect(),
         "backend bouncing",
         "INGEST_UNAVAILABLE",
     );
@@ -115,7 +116,7 @@ fn size_errors_preserve_count_details() {
     };
     for error in [
         put_too_large_error(too_large),
-        ingest_error_to_connect(IngestError::PutTooLarge(too_large)),
+        IngestError::PutTooLarge(too_large).into_connect(),
         validate_put_count(3, limits).unwrap_err(),
     ] {
         assert_validation(

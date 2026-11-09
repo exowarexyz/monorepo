@@ -65,7 +65,7 @@ async fn parse_fragmented(
             content_length: Some(wire.len()),
         },
         PutLimits {
-            ingest: limits,
+            ingest_limits: limits,
             ..PutLimits::default()
         },
         Instant::now() + Duration::from_secs(30),

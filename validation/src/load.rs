@@ -1,7 +1,7 @@
 //! Exoware load generator.
 //!
 //! Usage:
-//!   validation load --url http://localhost:8080 --keys 10000
+//!   validation load --store-url http://localhost:8080 --keys 10000
 
 use crate::{
     client::{build_client, ClientArgs, ClientConfig},
@@ -312,7 +312,7 @@ mod tests {
     fn sample_args() -> Args {
         Args {
             client: ClientArgs {
-                url: "http://localhost:8080/".to_string(),
+                store_url: "http://localhost:8080/".to_string(),
                 read_retry_attempts: 3,
                 request_compression: RequestCompression::default(),
             },
@@ -335,7 +335,7 @@ mod tests {
     #[test]
     fn config_normalizes_url() {
         let config = Config::try_from(sample_args()).expect("load args should be valid");
-        assert_eq!(config.client.endpoint(), "http://localhost:8080");
+        assert_eq!(config.client.store_url(), "http://localhost:8080");
     }
 
     #[test]
@@ -404,7 +404,7 @@ mod tests {
     async fn load_reports_incomplete_without_retrying_permanent_ingest_errors() {
         let (url, puts) = spawn_ingest_harness(IngestFault::AlwaysInvalidArgument).await;
         let mut args = sample_args();
-        args.client.url = url;
+        args.client.store_url = url;
         args.keys = 4;
         args.batch_size = 2;
         args.concurrency = 2;
@@ -427,7 +427,7 @@ mod tests {
     async fn load_recovers_after_transient_ingest_failures() {
         let (url, puts) = spawn_ingest_harness(IngestFault::UnavailableFirst(3)).await;
         let mut args = sample_args();
-        args.client.url = url;
+        args.client.store_url = url;
         args.keys = 4;
         args.batch_size = 2;
         args.concurrency = 1;
@@ -444,7 +444,7 @@ mod tests {
     async fn load_stops_after_an_exhausted_batch() {
         let (url, puts) = spawn_ingest_harness(IngestFault::AlwaysUnavailable).await;
         let mut args = sample_args();
-        args.client.url = url;
+        args.client.store_url = url;
         args.keys = 4;
         args.batch_size = 2;
         args.concurrency = 1;

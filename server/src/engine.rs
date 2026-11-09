@@ -161,7 +161,7 @@ impl LogBatch {
     }
 
     /// Build a log batch from key-value pairs.
-    pub fn from_entries(sequence_number: u64, kvs: Vec<(Bytes, Bytes)>) -> Self {
+    pub fn from_kvs(sequence_number: u64, kvs: Vec<(Bytes, Bytes)>) -> Self {
         Self::from_response(StreamGetResponse {
             sequence_number,
             entries: kvs
@@ -234,20 +234,6 @@ impl FilteredBatch {
         Self { entries }
     }
 
-    /// Build a filtered batch from resolved key-value pairs.
-    pub fn from_kvs(kvs: Vec<(Bytes, Bytes)>) -> Self {
-        Self {
-            entries: kvs
-                .into_iter()
-                .map(|(key, value)| Entry {
-                    key: key.to_vec(),
-                    value,
-                    ..Default::default()
-                })
-                .collect(),
-        }
-    }
-
     /// Consume the batch into its entries.
     pub fn into_entries(self) -> Vec<Entry> {
         self.entries
@@ -256,7 +242,7 @@ impl FilteredBatch {
 
 /// Retained per-sequence batch-log access for stream replay and lookups.
 pub trait Log: Sequence {
-    /// Return the pre-encoded `GetResponse` for the `put_batch` call that was
+    /// Return the pre-encoded `GetResponse` for the `Ingest::put` request that was
     /// assigned `sequence_number`. Return `Ok(None)` when the batch is not
     /// available from this log.
     ///
@@ -309,20 +295,26 @@ pub trait Log: Sequence {
     /// Lowest retained batch sequence number, or `None` when the log is
     /// empty. Surfaced in `BATCH_EVICTED` error details so clients know where
     /// to resume from.
-    fn oldest_retained_batch(&self) -> impl Future<Output = Result<Option<u64>, String>> + Send;
+    fn oldest_retained_sequence(&self) -> impl Future<Output = Result<Option<u64>, String>> + Send;
 }
 
-/// Sequence-log retention capability (`log.stream.v1` SetRetention).
+/// Sequence-log retention capability (`log.retention.v1` SetRetention).
+///
+/// Both methods return the oldest retained sequence after one synchronous
+/// enforcement (`None` when the log is empty / no floor).
 pub trait Retention: Send + Sync + 'static {
-    /// Persist and apply the retention rule; `None` clears it. Returns the oldest retained
-    /// sequence after one synchronous enforcement (`None` when the log is empty / no floor).
+    /// Persist and apply `policy` as the retention rule, replacing any existing rule.
     fn set_retention(
         &self,
-        policy: Option<RetentionPolicy>,
+        policy: RetentionPolicy,
     ) -> impl Future<Output = Result<Option<u64>, String>> + Send;
+
+    /// Remove the persisted retention rule so later commits retain every batch.
+    fn clear_retention(&self) -> impl Future<Output = Result<Option<u64>, String>> + Send;
 }
 
-/// Compatibility facade for backends that serve every store capability.
+/// Blanket bound for backends that serve every store capability; required by
+/// [`AppState`](crate::AppState) and [`connect_stack`](crate::connect_stack).
 pub trait StoreEngine: Ingest + Query + Prune + Log + Retention {}
 
 impl<T: Ingest + Query + Prune + Log + Retention> StoreEngine for T {}
@@ -335,7 +327,7 @@ mod tests {
 
     #[test]
     fn log_response_preserves_binary_buffer() {
-        let batch = LogBatch::from_entries(1, vec![(Bytes::from_static(b"key"), Bytes::new())]);
+        let batch = LogBatch::from_kvs(1, vec![(Bytes::from_static(b"key"), Bytes::new())]);
         let encoded = batch.encode(CodecFormat::Proto).unwrap();
         assert_eq!(encoded, batch.response_bytes);
         assert_eq!(encoded.as_ptr(), batch.response_bytes.as_ptr());
@@ -362,7 +354,7 @@ mod tests {
                 .flatten()))
         }
 
-        fn oldest_retained_batch(
+        fn oldest_retained_sequence(
             &self,
         ) -> impl Future<Output = Result<Option<u64>, String>> + Send {
             ready(Ok(self.batch.as_ref().map(|_| 1)))
@@ -391,7 +383,7 @@ mod tests {
             Bytes::from_static(b"two"),
         );
         let log = TestLog {
-            batch: Some(LogBatch::from_entries(1, vec![matching, excluded])),
+            batch: Some(LogBatch::from_kvs(1, vec![matching, excluded])),
         };
         let filtered = futures::executor::block_on(log.get_batch_filtered(1, &matchers()))
             .unwrap()
@@ -401,7 +393,7 @@ mod tests {
         assert_eq!(entries[0].value.as_ref(), b"one");
 
         let retained_without_matches = TestLog {
-            batch: Some(LogBatch::from_entries(
+            batch: Some(LogBatch::from_kvs(
                 1,
                 vec![(Bytes::from_static(&[2]), Bytes::from_static(b"value"))],
             )),

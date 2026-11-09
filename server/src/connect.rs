@@ -235,7 +235,7 @@ pub struct IngestState<I> {
     /// Backend used for writes.
     pub ingest: Arc<I>,
     /// Limits enforced before writes reach the backend.
-    pub limits: IngestLimits,
+    pub ingest_limits: IngestLimits,
     pub put_config: crate::ingest::service::PutConfig,
     /// Gates ingest writes only.
     pub ready: Arc<AtomicBool>,
@@ -247,7 +247,7 @@ impl<I> Clone for IngestState<I> {
     fn clone(&self) -> Self {
         Self {
             ingest: self.ingest.clone(),
-            limits: self.limits,
+            ingest_limits: self.ingest_limits,
             put_config: self.put_config.clone(),
             ready: self.ready.clone(),
             notifier: self.notifier.clone(),
@@ -262,25 +262,22 @@ where
     pub fn new(ingest: Arc<I>) -> Self {
         Self {
             ingest,
-            limits: IngestLimits::default(),
+            ingest_limits: IngestLimits::default(),
             put_config: crate::ingest::service::PutConfig::default(),
             ready: Arc::new(AtomicBool::new(true)),
             notifier: None,
         }
     }
 
-    pub fn with_notifier(ingest: Arc<I>, notifier: Arc<dyn StreamNotifier>) -> Self {
-        Self {
-            ingest,
-            limits: IngestLimits::default(),
-            put_config: crate::ingest::service::PutConfig::default(),
-            ready: Arc::new(AtomicBool::new(true)),
-            notifier: Some(notifier),
-        }
+    /// Hands `notifier` to each `PutInput`, and the ingest backend advances it
+    /// after durable publication.
+    pub fn with_notifier(mut self, notifier: Arc<dyn StreamNotifier>) -> Self {
+        self.notifier = Some(notifier);
+        self
     }
 
-    pub const fn with_limits(mut self, limits: IngestLimits) -> Self {
-        self.limits = limits;
+    pub const fn with_ingest_limits(mut self, limits: IngestLimits) -> Self {
+        self.ingest_limits = limits;
         self
     }
     pub fn with_put_config(mut self, config: crate::ingest::service::PutConfig) -> Self {
@@ -293,7 +290,7 @@ impl<E> From<AppState<E>> for IngestState<E> {
     fn from(state: AppState<E>) -> Self {
         Self {
             ingest: state.engine,
-            limits: state.ingest_limits,
+            ingest_limits: state.ingest_limits,
             put_config: state.put_config,
             ready: state.ready,
             notifier: Some(state.stream),
@@ -324,7 +321,7 @@ where
     /// Creates a query service with DataFusion's shared, unbounded memory pool.
     ///
     /// Group state must fit in memory by default. Supply a native runtime with a
-    /// bounded pool through [`Self::with_runtime`] to enable native spilling.
+    /// bounded pool through [`Self::with_runtime_env`] to enable native spilling.
     /// The pool excludes transient input, backend, transport, and client buffers.
     pub fn new(query: Arc<Q>) -> Self {
         Self {
@@ -334,8 +331,8 @@ where
     }
 
     /// Supplies the worker's shared native memory pool and spill configuration.
-    pub fn with_runtime(mut self, runtime: Arc<RuntimeEnv>) -> Self {
-        self.context = Arc::new(TaskContext::default().with_runtime(runtime));
+    pub fn with_runtime_env(mut self, runtime_env: Arc<RuntimeEnv>) -> Self {
+        self.context = Arc::new(TaskContext::default().with_runtime(runtime_env));
         self
     }
 }
@@ -478,19 +475,21 @@ fn with_retry_hint(err: ConnectError) -> ConnectError {
     )
 }
 
-pub fn ingest_error_to_connect(err: IngestError) -> ConnectError {
-    match err {
-        IngestError::PutTooLarge(error) => validate::put_too_large_error(error),
-        IngestError::ResourceExhausted { message } => ConnectError::resource_exhausted(message),
-        IngestError::Unavailable { message } => with_retry_hint(with_error_info_detail(
-            ConnectError::unavailable(message),
-            ErrorInfo {
-                reason: REASON_INGEST_UNAVAILABLE.to_string(),
-                domain: INGEST_ERROR_DOMAIN.to_string(),
-                ..Default::default()
-            },
-        )),
-        IngestError::Internal { message } => ConnectError::internal(message),
+impl IngestError {
+    pub fn into_connect(self) -> ConnectError {
+        match self {
+            Self::PutTooLarge(error) => validate::put_too_large_error(error),
+            Self::ResourceExhausted { message } => ConnectError::resource_exhausted(message),
+            Self::Unavailable { message } => with_retry_hint(with_error_info_detail(
+                ConnectError::unavailable(message),
+                ErrorInfo {
+                    reason: REASON_INGEST_UNAVAILABLE.to_string(),
+                    domain: INGEST_ERROR_DOMAIN.to_string(),
+                    ..Default::default()
+                },
+            )),
+            Self::Internal { message } => ConnectError::internal(message),
+        }
     }
 }
 
@@ -607,7 +606,7 @@ where
         _ctx: Context,
         request: ServiceRequest<'_, exoware_proto::store::query::v1::RangeRequest>,
     ) -> connectrpc::ServiceResult<connectrpc::ServiceStream<RangeFrame>> {
-        let direction = validate::validate_range_request(request.view())?;
+        let mode = validate::validate_range_request(request.view())?;
         ensure_min_sequence_number(
             request.min_sequence_number,
             self.state.query.current_sequence(),
@@ -617,7 +616,7 @@ where
         let end_key: Key = wire.slice_ref(request.end);
         let limit = request.limit.map(|v| v as usize).unwrap_or(usize::MAX);
         let batch_size = (request.batch_size as usize).min(RANGE_STREAM_MAX_FRAME_ROWS);
-        let forward = direction == RangeMode::Forward;
+        let forward = mode == RangeMode::Forward;
         let result = self
             .state
             .query
@@ -801,11 +800,11 @@ where
     }
 }
 
-pub struct StreamConnect<B> {
-    state: StreamState<B>,
+pub struct StreamConnect<L> {
+    state: StreamState<L>,
 }
 
-impl<B> Clone for StreamConnect<B> {
+impl<L> Clone for StreamConnect<L> {
     fn clone(&self) -> Self {
         Self {
             state: self.state.clone(),
@@ -813,11 +812,11 @@ impl<B> Clone for StreamConnect<B> {
     }
 }
 
-impl<B> StreamConnect<B>
+impl<L> StreamConnect<L>
 where
-    B: Log,
+    L: Log,
 {
-    pub fn new(state: impl Into<StreamState<B>>) -> Self {
+    pub fn new(state: impl Into<StreamState<L>>) -> Self {
         Self {
             state: state.into(),
         }
@@ -860,14 +859,14 @@ where
 type OrderedBatchStream =
     Pin<Box<dyn Stream<Item = (u64, Result<Option<FilteredBatch>, String>)> + Send>>;
 
-fn ordered_batch_stream<B, S>(
-    log: Arc<B>,
+fn ordered_batch_stream<L, S>(
+    log: Arc<L>,
     sequences: S,
     mut first_batch: Option<FilteredBatch>,
     matchers: Arc<crate::stream::CompiledMatchers>,
 ) -> OrderedBatchStream
 where
-    B: Log,
+    L: Log,
     S: Stream<Item = u64> + Send + 'static,
 {
     Box::pin(
@@ -933,19 +932,19 @@ enum ReplayProgress {
     Done,
 }
 
-struct SubscriptionState<B> {
-    state: StreamState<B>,
+struct SubscriptionState<L> {
+    state: StreamState<L>,
     // Both streams are dropped at termination so buffered batches free at the
     // failure boundary instead of when the client tears the stream down.
     replay: Option<ReplayState>,
     live: Option<OrderedBatchStream>,
 }
 
-impl<B> SubscriptionState<B>
+impl<L> SubscriptionState<L>
 where
-    B: Log,
+    L: Log,
 {
-    fn new(state: StreamState<B>, replay: Option<ReplayState>, live: OrderedBatchStream) -> Self {
+    fn new(state: StreamState<L>, replay: Option<ReplayState>, live: OrderedBatchStream) -> Self {
         Self {
             state,
             replay,
@@ -1010,10 +1009,10 @@ where
             let oldest = self
                 .state
                 .log
-                .oldest_retained_batch()
+                .oldest_retained_sequence()
                 .await
                 .map_err(ConnectError::internal)?;
-            return Err(StreamConnect::<B>::batch_evicted_connect_error(oldest));
+            return Err(StreamConnect::<L>::batch_evicted_connect_error(oldest));
         };
         let entries = batch.into_entries();
         if entries.is_empty() {
@@ -1060,9 +1059,9 @@ fn domain_filter_from_subscribe_view(
     })
 }
 
-impl<B> StreamApi for StreamConnect<B>
+impl<L> StreamApi for StreamConnect<L>
 where
-    B: Log,
+    L: Log,
 {
     async fn subscribe(
         &self,
@@ -1097,7 +1096,7 @@ where
                     let oldest = self
                         .state
                         .log
-                        .oldest_retained_batch()
+                        .oldest_retained_sequence()
                         .await
                         .map_err(ConnectError::internal)?;
                     return Err(Self::batch_evicted_connect_error(oldest));
@@ -1154,7 +1153,7 @@ where
                     let oldest = self
                         .state
                         .log
-                        .oldest_retained_batch()
+                        .oldest_retained_sequence()
                         .await
                         .map_err(ConnectError::internal)?;
                     Err(Self::batch_evicted_connect_error(oldest))
@@ -1198,12 +1197,12 @@ where
     ) -> connectrpc::ServiceResult<SetRetentionResponse> {
         let policy = exoware_proto::parse_set_retention_request_view(request.view())
             .map_err(ConnectError::invalid_argument)?;
-        let oldest_retained_sequence = self
-            .state
-            .retention
-            .set_retention(policy)
-            .await
-            .map_err(ConnectError::internal)?;
+        let retention = &self.state.retention;
+        let oldest_retained_sequence = match policy {
+            Some(policy) => retention.set_retention(policy).await,
+            None => retention.clear_retention().await,
+        }
+        .map_err(ConnectError::internal)?;
         connectrpc::Response::ok(SetRetentionResponse {
             oldest_retained_sequence,
             ..Default::default()
@@ -1227,11 +1226,11 @@ pub(crate) type QueryService<Q> = ConnectRpcService<QueryServiceServer<QueryConn
 pub(crate) type PruneService<P> = ConnectRpcService<PruneServiceServer<PruneConnect<P>>>;
 pub(crate) type RetentionService<R> =
     ConnectRpcService<RetentionServiceServer<RetentionConnect<R>>>;
-pub(crate) type StreamService<B> = ConnectRpcService<StreamServiceServer<StreamConnect<B>>>;
-pub(crate) type QueryStack<Q, B> = ConnectRpcService<
-    Chain<QueryServiceServer<QueryConnect<Q>>, StreamServiceServer<StreamConnect<B>>>,
+pub(crate) type StreamService<L> = ConnectRpcService<StreamServiceServer<StreamConnect<L>>>;
+pub(crate) type QueryStack<Q, L> = ConnectRpcService<
+    Chain<QueryServiceServer<QueryConnect<Q>>, StreamServiceServer<StreamConnect<L>>>,
 >;
-pub type ConnectStack<I, Q, P, R, B> = crate::ingest::service::PutService<
+pub type ConnectStack<I, Q, P, R, L> = crate::ingest::service::PutService<
     I,
     Chain<
         QueryServiceServer<QueryConnect<Q>>,
@@ -1239,7 +1238,7 @@ pub type ConnectStack<I, Q, P, R, B> = crate::ingest::service::PutService<
             PruneServiceServer<PruneConnect<P>>,
             Chain<
                 RetentionServiceServer<RetentionConnect<R>>,
-                StreamServiceServer<StreamConnect<B>>,
+                StreamServiceServer<StreamConnect<L>>,
             >,
         >,
     >,
@@ -1266,9 +1265,9 @@ where
     RetentionServiceServer::new(RetentionConnect::new(state))
 }
 
-fn stream_server<B>(state: StreamState<B>) -> StreamServiceServer<StreamConnect<B>>
+fn stream_server<L>(state: StreamState<L>) -> StreamServiceServer<StreamConnect<L>>
 where
-    B: Log,
+    L: Log,
 {
     StreamServiceServer::new(StreamConnect::new(state))
 }
@@ -1310,22 +1309,22 @@ where
         .with_compression(connect_compression_registry())
 }
 
-pub fn stream_service<B>(state: StreamState<B>) -> StreamService<B>
+pub fn stream_service<L>(state: StreamState<L>) -> StreamService<L>
 where
-    B: Log,
+    L: Log,
 {
     ConnectRpcService::new(stream_server(state))
         .with_limits(connect_limits())
         .with_compression(connect_compression_registry())
 }
 
-pub fn query_stack<Q, B>(
+pub fn query_stack<Q, L>(
     query_state: QueryState<Q>,
-    stream_state: StreamState<B>,
-) -> QueryStack<Q, B>
+    stream_state: StreamState<L>,
+) -> QueryStack<Q, L>
 where
     Q: Query,
-    B: Log,
+    L: Log,
 {
     ConnectRpcService::new(Chain(
         query_server(query_state),
@@ -1550,6 +1549,20 @@ mod tests {
         fn retention_calls(&self) -> Vec<Option<RetentionPolicy>> {
             self.state.lock().expect("lock").retention_calls.clone()
         }
+
+        /// Record a retention call (`None` for a clear) and return the configured floor.
+        fn record_retention_call(
+            &self,
+            policy: Option<RetentionPolicy>,
+        ) -> Result<Option<u64>, String> {
+            self.state
+                .lock()
+                .map(|mut state| {
+                    state.retention_calls.push(policy);
+                    state.retention_floor
+                })
+                .map_err(|e| e.to_string())
+        }
     }
 
     impl Sequence for FakeEngine {
@@ -1688,10 +1701,10 @@ mod tests {
                     .hub
                     .publish(publish.sequence_offset + sequence_number);
             }
-            Ok(batch.map(|kvs| LogBatch::from_entries(sequence_number, kvs)))
+            Ok(batch.map(|kvs| LogBatch::from_kvs(sequence_number, kvs)))
         }
 
-        async fn oldest_retained_batch(&self) -> Result<Option<u64>, String> {
+        async fn oldest_retained_sequence(&self) -> Result<Option<u64>, String> {
             self.state
                 .lock()
                 .map(|state| state.oldest_retained)
@@ -1700,17 +1713,12 @@ mod tests {
     }
 
     impl Retention for FakeEngine {
-        async fn set_retention(
-            &self,
-            policy: Option<RetentionPolicy>,
-        ) -> Result<Option<u64>, String> {
-            self.state
-                .lock()
-                .map(|mut state| {
-                    state.retention_calls.push(policy);
-                    state.retention_floor
-                })
-                .map_err(|e| e.to_string())
+        async fn set_retention(&self, policy: RetentionPolicy) -> Result<Option<u64>, String> {
+            self.record_retention_call(Some(policy))
+        }
+
+        async fn clear_retention(&self) -> Result<Option<u64>, String> {
+            self.record_retention_call(None)
         }
     }
 
@@ -1915,10 +1923,10 @@ mod tests {
             if let Some(error) = error {
                 return Err(error);
             }
-            Ok(batch.map(|kvs| LogBatch::from_entries(sequence_number, kvs)))
+            Ok(batch.map(|kvs| LogBatch::from_kvs(sequence_number, kvs)))
         }
 
-        async fn oldest_retained_batch(&self) -> Result<Option<u64>, String> {
+        async fn oldest_retained_sequence(&self) -> Result<Option<u64>, String> {
             Ok(self
                 .state
                 .lock()
@@ -1930,11 +1938,12 @@ mod tests {
     }
 
     impl Retention for GatedLog {
-        async fn set_retention(
-            &self,
-            _policy: Option<RetentionPolicy>,
-        ) -> Result<Option<u64>, String> {
-            self.oldest_retained_batch().await
+        async fn set_retention(&self, _policy: RetentionPolicy) -> Result<Option<u64>, String> {
+            self.oldest_retained_sequence().await
+        }
+
+        async fn clear_retention(&self) -> Result<Option<u64>, String> {
+            self.oldest_retained_sequence().await
         }
     }
 
@@ -1963,7 +1972,7 @@ mod tests {
     impl Log for DispatchLog {
         async fn get_batch(&self, sequence_number: u64) -> Result<Option<LogBatch>, String> {
             self.get_batch_calls.fetch_add(1, Ordering::Relaxed);
-            Ok(Some(LogBatch::from_entries(
+            Ok(Some(LogBatch::from_kvs(
                 sequence_number,
                 vec![matching_kv(b"unfiltered", b"whole")],
             )))
@@ -1989,16 +1998,17 @@ mod tests {
             Ok(Some(FilteredBatch::from_entries(entries)))
         }
 
-        async fn oldest_retained_batch(&self) -> Result<Option<u64>, String> {
+        async fn oldest_retained_sequence(&self) -> Result<Option<u64>, String> {
             Ok(Some(1))
         }
     }
 
     impl Retention for DispatchLog {
-        async fn set_retention(
-            &self,
-            _policy: Option<RetentionPolicy>,
-        ) -> Result<Option<u64>, String> {
+        async fn set_retention(&self, _policy: RetentionPolicy) -> Result<Option<u64>, String> {
+            Ok(Some(1))
+        }
+
+        async fn clear_retention(&self) -> Result<Option<u64>, String> {
             Ok(Some(1))
         }
     }
@@ -2025,13 +2035,13 @@ mod tests {
                     Bytes::from_static(&[0xff, 0xff, 0xff, 0xff]),
                 )));
             }
-            Ok(Some(LogBatch::from_entries(
+            Ok(Some(LogBatch::from_kvs(
                 sequence_number,
                 vec![matching_kv(b"ok", &[sequence_number as u8])],
             )))
         }
 
-        async fn oldest_retained_batch(&self) -> Result<Option<u64>, String> {
+        async fn oldest_retained_sequence(&self) -> Result<Option<u64>, String> {
             Ok(Some(1))
         }
     }
@@ -2110,10 +2120,11 @@ mod tests {
     }
 
     impl Retention for PruneOnlyEngine {
-        async fn set_retention(
-            &self,
-            _policy: Option<RetentionPolicy>,
-        ) -> Result<Option<u64>, String> {
+        async fn set_retention(&self, _policy: RetentionPolicy) -> Result<Option<u64>, String> {
+            Ok(None)
+        }
+
+        async fn clear_retention(&self) -> Result<Option<u64>, String> {
             Ok(None)
         }
     }
@@ -2273,15 +2284,15 @@ mod tests {
             .expect("decode prune request")
     }
 
-    async fn subscribe_stream<B>(
-        connect: &StreamConnect<B>,
+    async fn subscribe_stream<L>(
+        connect: &StreamConnect<L>,
         since_sequence_number: Option<u64>,
     ) -> Result<
         Pin<Box<dyn Stream<Item = Result<SubscribeResponse, ConnectError>> + Send>>,
         ConnectError,
     >
     where
-        B: Log,
+        L: Log,
     {
         let bytes = subscribe_request_bytes(since_sequence_number);
         let request = buffa::view::OwnedView::<SubscribeRequestView<'static>>::decode(bytes.into())
@@ -2837,11 +2848,12 @@ mod tests {
     #[tokio::test]
     async fn ingest_uses_configured_value_limit() {
         let engine = Arc::new(FakeEngine::default());
-        let state = IngestState::new(engine).with_limits(IngestLimits {
-            max_value_len: 4,
-            ..IngestLimits::default()
-        });
-        let connect = state;
+        let connect = IngestState::new(engine)
+            .with_ingest_limits(IngestLimits {
+                max_value_len: 4,
+                ..IngestLimits::default()
+            })
+            .with_notifier(Arc::new(ManualNotifier::new(0)));
 
         let request = put_request(5);
         let err = dispatch_put(&connect, request)
@@ -3439,7 +3451,7 @@ mod tests {
             .with_memory_pool(Arc::new(FairSpillPool::new(256 * 1024 * 1024)))
             .build_arc()
             .unwrap();
-        let state = QueryState::new(engine.clone()).with_runtime(runtime);
+        let state = QueryState::new(engine.clone()).with_runtime_env(runtime);
         let cloned = state.clone();
         assert!(Arc::ptr_eq(&state.context, &cloned.context));
         let left = execute_reduce(
@@ -3931,8 +3943,8 @@ mod tests {
             Ok(Some(FilteredBatch::from_entries(entries)))
         }
 
-        async fn oldest_retained_batch(&self) -> Result<Option<u64>, String> {
-            self.inner.oldest_retained_batch().await
+        async fn oldest_retained_sequence(&self) -> Result<Option<u64>, String> {
+            self.inner.oldest_retained_sequence().await
         }
     }
 

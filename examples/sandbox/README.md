@@ -29,10 +29,10 @@ export AR_wasm32_unknown_unknown="$(brew --prefix llvm)/bin/llvm-ar"
    cargo run --package exoware-simulator -- --verbose server run --port 8080
    ```
 
-   Set `VITE_SIMULATOR_URL=http://localhost:8080` in
-   `examples/sandbox/.env.local` to point the web app at the simulator. The
-   simulator accepts requests without a bearer token. For a deployment that
-   requires one, set `VITE_TOKEN` to pass it to the SDK client.
+   Set `VITE_STORE_URL=http://localhost:8080` in
+   `examples/sandbox/.env.local` to point the Store and Log panels at the
+   simulator. The simulator accepts requests without a bearer token. For a
+   deployment that requires one, set `VITE_TOKEN` to pass it to the SDK client.
 
 2. **Install dependencies and run the web app**
 
@@ -56,7 +56,7 @@ export AR_wasm32_unknown_unknown="$(brew --prefix llvm)/bin/llvm-ar"
 - **Store:** Query immutable data.
 - **Ordered QMDB** (optional, requires `VITE_QMDB_URL`): operation-log and current-state
   proofs and live subscriptions.
-- **Simplex** (optional, requires `VITE_SIMPLEX_URL`): read and subscribe to
+- **Simplex** (optional, requires `VITE_SIMPLEX_STORE_URL`): read and subscribe to
   seeded Commonware Simplex blocks, notarizations, and finalizations, with
   latest-finalization verification through the Simplex WASM verifier.
 - **SQL** (optional, requires `VITE_SQL_URL`): run ad-hoc SQL queries and
@@ -134,7 +134,7 @@ With the simulator running:
 
 ## Simplex panel
 
-Set `VITE_SIMPLEX_URL` to display the Simplex panel. It reads Commonware
+Set `VITE_SIMPLEX_STORE_URL` to display the Simplex panel. It reads Commonware
 Simplex artifacts written by `simplex seed`, using the same key layout as the
 Rust `exoware-simplex` crate. Supply the scheme, namespace, and key material
 printed by the seeder below to configure the Simplex WASM verifier for those
@@ -158,7 +158,7 @@ With the simulator running:
 2. **Point the web app at the simulator**:
 
    ```bash
-   VITE_SIMPLEX_URL=http://127.0.0.1:8080 VITE_SIMPLEX_STORE_PREFIX=simplex npm run dev
+   VITE_SIMPLEX_STORE_URL=http://127.0.0.1:8080 VITE_SIMPLEX_STORE_PREFIX=simplex npm run dev
    ```
 
 3. **Read and verify artifacts in the UI:**

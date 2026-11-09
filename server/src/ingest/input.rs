@@ -1,7 +1,6 @@
 use super::{
     decode::{DecodeOutput, DecodeState, DecodeStep, WireBatch},
-    Admission, ByteLease, DecodeBuffers, IngestEvent, IngestObserver, PutChunk, PutError,
-    RequestLease,
+    Admission, ByteLease, DecodeBuffers, PutChunk, PutError, PutEvent, PutObserver, RequestLease,
 };
 use crate::validate::IngestLimits;
 use bytes::Bytes;
@@ -94,17 +93,17 @@ impl Default for PutMetadata {
 
 #[derive(Clone, Copy, Debug)]
 pub struct PutLimits {
-    pub wire_bytes: usize,
-    pub message_bytes: usize,
-    pub ingest: IngestLimits,
+    pub max_wire_bytes: usize,
+    pub max_message_bytes: usize,
+    pub ingest_limits: IngestLimits,
 }
 
 impl Default for PutLimits {
     fn default() -> Self {
         Self {
-            wire_bytes: exoware_sdk::limits::MAX_REQUEST_MESSAGE_BYTES,
-            message_bytes: exoware_sdk::limits::MAX_REQUEST_MESSAGE_BYTES,
-            ingest: IngestLimits::default(),
+            max_wire_bytes: exoware_sdk::limits::MAX_REQUEST_MESSAGE_BYTES,
+            max_message_bytes: exoware_sdk::limits::MAX_REQUEST_MESSAGE_BYTES,
+            ingest_limits: IngestLimits::default(),
         }
     }
 }
@@ -194,7 +193,7 @@ pub struct PutInput {
     limits: PutLimits,
     deadline: Instant,
     idle: Option<IdleTimeout>,
-    observer: Arc<dyn IngestObserver>,
+    observer: Arc<dyn PutObserver>,
     notifier: Option<Arc<dyn crate::stream::StreamNotifier>>,
     executor: Arc<dyn DecodeExecutor>,
     wire_bytes: usize,
@@ -211,7 +210,7 @@ impl PutInput {
         deadline: Instant,
         admission: Admission,
     ) -> Self {
-        limits.wire_bytes = limits.wire_bytes.min(admission.wire_bound());
+        limits.max_wire_bytes = limits.max_wire_bytes.min(admission.wire_bound());
         let state = DecodeState::new(
             metadata.encoding,
             limits,
@@ -242,8 +241,8 @@ impl PutInput {
         self
     }
 
-    pub fn with_idle_timeout(mut self, timeout: Option<Duration>) -> Self {
-        self.idle = timeout.map(|timeout| IdleTimeout {
+    pub const fn with_idle_timeout(mut self, timeout: Duration) -> Self {
+        self.idle = Some(IdleTimeout {
             timeout,
             remaining: timeout,
             expired: false,
@@ -257,7 +256,7 @@ impl PutInput {
     pub const fn parts(&self) -> Option<&http::request::Parts> {
         self.parts.as_ref()
     }
-    pub fn with_observer(mut self, observer: Arc<dyn IngestObserver>) -> Self {
+    pub fn with_observer(mut self, observer: Arc<dyn PutObserver>) -> Self {
         self.observer = observer;
         self
     }
@@ -265,11 +264,8 @@ impl PutInput {
         self.executor = executor;
     }
 
-    pub fn with_notifier(
-        mut self,
-        notifier: Option<Arc<dyn crate::stream::StreamNotifier>>,
-    ) -> Self {
-        self.notifier = notifier;
+    pub fn with_notifier(mut self, notifier: Arc<dyn crate::stream::StreamNotifier>) -> Self {
+        self.notifier = Some(notifier);
         self
     }
     pub fn notifier(&self) -> Option<Arc<dyn crate::stream::StreamNotifier>> {
@@ -295,9 +291,9 @@ impl PutInput {
             return Ok(self
                 .metadata
                 .content_length
-                .unwrap_or(self.limits.wire_bytes)
-                .min(self.limits.wire_bytes)
-                .min(self.limits.message_bytes));
+                .unwrap_or(self.limits.max_wire_bytes)
+                .min(self.limits.max_wire_bytes)
+                .min(self.limits.max_message_bytes));
         }
         if let Some(bound) = cached {
             return Ok(bound);
@@ -352,7 +348,7 @@ impl PutInput {
     fn observe_rejection(&mut self) {
         if !self.rejection_observed {
             self.rejection_observed = true;
-            self.observer.observe(IngestEvent::Rejected);
+            self.observer.observe(PutEvent::Rejected);
         }
     }
 
@@ -417,12 +413,12 @@ impl PutInput {
                     let Ok(bytes) = frame.into_data() else {
                         continue;
                     };
-                    if bytes.len() > self.limits.wire_bytes.saturating_sub(self.wire_bytes) {
+                    if bytes.len() > self.limits.max_wire_bytes.saturating_sub(self.wire_bytes) {
                         self.reception = Reception::WireLimit;
                         return Err(wire_limit_error().into());
                     }
                     self.wire_bytes += bytes.len();
-                    self.observer.observe(IngestEvent::WireBytes(bytes.len()));
+                    self.observer.observe(PutEvent::WireBytes(bytes.len()));
                     if bytes.is_empty() {
                         continue;
                     }
@@ -448,7 +444,7 @@ impl PutInput {
                     return Err(error.into());
                 }
                 None => {
-                    self.observer.observe(IngestEvent::HttpEof);
+                    self.observer.observe(PutEvent::HttpEof);
                     if self
                         .metadata
                         .content_length
@@ -488,11 +484,11 @@ impl PutInput {
             self.reception = Reception::Decoded;
         }
         let result = self.check_deadline().and(result);
-        self.observer.observe(IngestEvent::DecodedBytes(decoded));
+        self.observer.observe(PutEvent::DecodedBytes(decoded));
         self.observer
-            .observe(IngestEvent::DecodeElapsed(started.elapsed()));
+            .observe(PutEvent::DecodeElapsed(started.elapsed()));
         if let Ok(DecodeStep::Batch(batch)) = &result {
-            self.observer.observe(IngestEvent::Batch {
+            self.observer.observe(PutEvent::Batch {
                 entries: batch.ranges.len(),
                 bytes: batch.data.len(),
             });
@@ -507,7 +503,7 @@ impl PutInput {
         let mut wire_bytes = bytes.as_ref().map_or(0, Bytes::len);
         let frame_capacity = self
             .limits
-            .wire_bytes
+            .max_wire_bytes
             .saturating_sub(self.wire_bytes)
             .min(FRAME_WORK_BUDGET - 1);
         self.state
@@ -552,7 +548,7 @@ impl PutInput {
             }
         }
         self.observer
-            .observe(IngestEvent::ReceiveElapsed(started.elapsed()));
+            .observe(PutEvent::ReceiveElapsed(started.elapsed()));
         Ok(())
     }
 
@@ -607,9 +603,9 @@ impl PutInput {
             .ok_or_else(|| ConnectError::internal("ingest decode state detached"))?
             .finish()?;
         self.reception = Reception::Validated;
-        self.observer.observe(IngestEvent::Validated);
+        self.observer.observe(PutEvent::Validated);
         self.observer
-            .observe(IngestEvent::ValidationElapsed(started.elapsed()));
+            .observe(PutEvent::ValidationElapsed(started.elapsed()));
         Ok(())
     }
 
@@ -617,7 +613,7 @@ impl PutInput {
         let started = Instant::now();
         let outcome = self.drain_raw().await;
         self.observer
-            .observe(IngestEvent::CleanupElapsed(started.elapsed()));
+            .observe(PutEvent::CleanupElapsed(started.elapsed()));
         outcome
     }
 
@@ -640,7 +636,7 @@ impl PutInput {
             match self.raw_next(false).await {
                 Ok(Some(_)) => {}
                 Ok(None) => {
-                    self.observer.observe(IngestEvent::Drained {
+                    self.observer.observe(PutEvent::Drained {
                         bytes: self.wire_bytes,
                     });
                     return DrainOutcome::Complete;
@@ -794,7 +790,7 @@ mod tests {
     async fn idle_timeout_bounds_first_bytes_and_eof_without_restarting_cleanup() {
         for receive_data in [false, true] {
             let (input, budget, sender) = channel_input(1, 1024);
-            let mut input = input.with_idle_timeout(Some(Duration::from_secs(1)));
+            let mut input = input.with_idle_timeout(Duration::from_secs(1));
             if receive_data {
                 sender.send(Bytes::from_static(b"a")).await.unwrap();
                 assert_eq!(input.raw_next(true).await.unwrap().unwrap(), b"a"[..]);
@@ -816,7 +812,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn idle_timeout_does_not_extend_the_absolute_deadline() {
         let (input, _, _sender) = channel_input(1, 1024);
-        let mut input = input.with_idle_timeout(Some(Duration::from_secs(1)));
+        let mut input = input.with_idle_timeout(Duration::from_secs(1));
         let started = Instant::now();
         input.deadline = started + Duration::from_millis(100);
         assert!(input.raw_next(true).await.is_err());
@@ -829,7 +825,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn idle_wait_survives_cancellation_and_pauses_between_reads() {
         let (input, _, sender) = channel_input(2, 1024);
-        let mut input = input.with_idle_timeout(Some(Duration::from_secs(1)));
+        let mut input = input.with_idle_timeout(Duration::from_secs(1));
         input.deadline = Instant::now() + Duration::from_secs(60);
         let mut reading = Box::pin(input.raw_next(true));
         assert!(futures::poll!(&mut reading).is_pending());
@@ -874,7 +870,7 @@ mod tests {
             });
             let (mut input, _) = input(&[], 1, PutEncoding::Identity, PutLimits::default());
             input.body = box_body(StreamBody::new(frames));
-            let mut input = input.with_idle_timeout(Some(Duration::from_secs(1)));
+            let mut input = input.with_idle_timeout(Duration::from_secs(1));
             let started = Instant::now();
             assert_eq!(input.drain_rejected().await, DrainOutcome::Deadline);
             assert_eq!(started.elapsed(), Duration::from_secs(1));
@@ -904,7 +900,7 @@ mod tests {
         let (mut input, _) = input(&wire, 1, PutEncoding::Identity, PutLimits::default());
         input.deadline = Instant::now() + Duration::from_secs(60);
         input.set_executor(Arc::new(SlowExecutor));
-        let mut input = input.with_idle_timeout(Some(Duration::from_secs(1)));
+        let mut input = input.with_idle_timeout(Duration::from_secs(1));
         let started = Instant::now();
         assert_eq!(
             collect(&mut input).await.unwrap(),
@@ -938,7 +934,7 @@ mod tests {
                     ..PutMetadata::default()
                 },
                 PutLimits {
-                    message_bytes: message_limit,
+                    max_message_bytes: message_limit,
                     ..PutLimits::default()
                 },
                 Instant::now() + Duration::from_secs(1),
@@ -1142,7 +1138,7 @@ mod tests {
                 1,
                 PutEncoding::Zstd,
                 PutLimits {
-                    message_bytes: limit,
+                    max_message_bytes: limit,
                     ..PutLimits::default()
                 },
             );
@@ -1302,10 +1298,10 @@ mod tests {
 
     #[tokio::test]
     async fn executor_cpu_handoffs_emit_common_observations_once() {
-        struct Events(Arc<Mutex<Vec<IngestEvent>>>);
+        struct Events(Arc<Mutex<Vec<PutEvent>>>);
 
-        impl IngestObserver for Events {
-            fn observe(&self, event: IngestEvent) {
+        impl PutObserver for Events {
+            fn observe(&self, event: PutEvent) {
                 self.0.lock().unwrap().push(event);
             }
         }
@@ -1333,28 +1329,28 @@ mod tests {
             let decoded = recorded
                 .iter()
                 .filter_map(|event| match event {
-                    IngestEvent::DecodedBytes(bytes) => Some(bytes),
+                    PutEvent::DecodedBytes(bytes) => Some(bytes),
                     _ => None,
                 })
                 .sum::<usize>();
             assert_eq!(decoded, payload.len());
             let decode_events = recorded
                 .iter()
-                .filter(|event| matches!(event, IngestEvent::DecodeElapsed(_)))
+                .filter(|event| matches!(event, PutEvent::DecodeElapsed(_)))
                 .count();
             assert!(decode_events > 0);
             assert_eq!(
                 decode_events,
                 recorded
                     .iter()
-                    .filter(|event| matches!(event, IngestEvent::DecodedBytes(_)))
+                    .filter(|event| matches!(event, PutEvent::DecodedBytes(_)))
                     .count()
             );
             assert_eq!(
                 recorded
                     .iter()
                     .filter_map(|event| match event {
-                        IngestEvent::Batch { entries, .. } => Some(entries),
+                        PutEvent::Batch { entries, .. } => Some(entries),
                         _ => None,
                     })
                     .sum::<usize>(),
@@ -1363,7 +1359,7 @@ mod tests {
             assert_eq!(
                 recorded
                     .iter()
-                    .filter(|event| matches!(event, IngestEvent::Batch { .. }))
+                    .filter(|event| matches!(event, PutEvent::Batch { .. }))
                     .count(),
                 batches
             );
@@ -1378,9 +1374,9 @@ mod tests {
     async fn rejection_is_observed_once_across_backend_and_cleanup() {
         struct Rejections(Arc<AtomicUsize>);
 
-        impl IngestObserver for Rejections {
-            fn observe(&self, event: IngestEvent) {
-                if event == IngestEvent::Rejected {
+        impl PutObserver for Rejections {
+            fn observe(&self, event: PutEvent) {
+                if event == PutEvent::Rejected {
                     self.0.fetch_add(1, Ordering::Relaxed);
                 }
             }
@@ -1470,9 +1466,9 @@ mod tests {
                 Box::pin(async move { Ok(output) })
             }
         }
-        struct Events(Arc<Mutex<Vec<IngestEvent>>>);
-        impl IngestObserver for Events {
-            fn observe(&self, event: IngestEvent) {
+        struct Events(Arc<Mutex<Vec<PutEvent>>>);
+        impl PutObserver for Events {
+            fn observe(&self, event: PutEvent) {
                 self.0.lock().unwrap().push(event);
             }
         }
@@ -1509,7 +1505,7 @@ mod tests {
         assert_eq!(
             recorded
                 .iter()
-                .filter(|event| matches!(event, IngestEvent::DecodeElapsed(_)))
+                .filter(|event| matches!(event, PutEvent::DecodeElapsed(_)))
                 .count(),
             1
         );
@@ -1517,7 +1513,7 @@ mod tests {
             recorded
                 .iter()
                 .filter_map(|event| match event {
-                    IngestEvent::DecodedBytes(bytes) => Some(bytes),
+                    PutEvent::DecodedBytes(bytes) => Some(bytes),
                     _ => None,
                 })
                 .sum::<usize>(),
@@ -1525,7 +1521,7 @@ mod tests {
         );
         assert!(!recorded
             .iter()
-            .any(|event| matches!(event, IngestEvent::Batch { .. })));
+            .any(|event| matches!(event, PutEvent::Batch { .. })));
         drop(input);
         assert_eq!(budget.usage(), (0, 0));
     }
@@ -1643,7 +1639,7 @@ mod tests {
     async fn decoded_limit_has_consistent_errors_across_encoding_and_fragmentation() {
         let payload = entry(b"k", &[42; 20]);
         let limits = PutLimits {
-            message_bytes: 16,
+            max_message_bytes: 16,
             ..PutLimits::default()
         };
         for encoding in [PutEncoding::Identity, PutEncoding::Zstd] {
@@ -1700,7 +1696,7 @@ mod tests {
     #[tokio::test]
     async fn outer_structure_then_count_then_inner_then_business_precedence() {
         let limits = PutLimits {
-            ingest: IngestLimits {
+            ingest_limits: IngestLimits {
                 max_entries: 1,
                 max_value_len: 1,
             },
@@ -1727,7 +1723,7 @@ mod tests {
         for (index, (wire, message)) in cases.into_iter().enumerate() {
             let limits = if index == 3 {
                 PutLimits {
-                    ingest: IngestLimits {
+                    ingest_limits: IngestLimits {
                         max_entries: 2,
                         max_value_len: 1,
                     },
@@ -1770,10 +1766,10 @@ mod tests {
 
     #[tokio::test]
     async fn completed_input_finishes_once_and_later_rejection_revokes_success() {
-        struct Events(Arc<Mutex<Vec<IngestEvent>>>);
+        struct Events(Arc<Mutex<Vec<PutEvent>>>);
 
-        impl IngestObserver for Events {
-            fn observe(&self, event: IngestEvent) {
+        impl PutObserver for Events {
+            fn observe(&self, event: PutEvent) {
                 self.0.lock().unwrap().push(event);
             }
         }
@@ -1812,7 +1808,7 @@ mod tests {
             assert!(input.finish().await.is_err());
             assert!(!input.is_finished());
             let recorded = events.lock().unwrap();
-            for expected in [IngestEvent::Validated, IngestEvent::Rejected] {
+            for expected in [PutEvent::Validated, PutEvent::Rejected] {
                 assert_eq!(
                     recorded.iter().filter(|event| **event == expected).count(),
                     1
@@ -2050,10 +2046,10 @@ mod tests {
 
     #[tokio::test]
     async fn ended_and_failed_bodies_keep_their_errors_through_cleanup() {
-        struct Events(Arc<Mutex<Vec<IngestEvent>>>);
+        struct Events(Arc<Mutex<Vec<PutEvent>>>);
 
-        impl IngestObserver for Events {
-            fn observe(&self, event: IngestEvent) {
+        impl PutObserver for Events {
+            fn observe(&self, event: PutEvent) {
                 self.0.lock().unwrap().push(event);
             }
         }
@@ -2083,7 +2079,7 @@ mod tests {
             .lock()
             .unwrap()
             .iter()
-            .filter(|event| matches!(event, IngestEvent::HttpEof))
+            .filter(|event| matches!(event, PutEvent::HttpEof))
             .count();
         assert_eq!(eofs, 1);
         drop(input);

@@ -130,11 +130,11 @@ function streamEventId({ sequenceNumber, entry }: VerifiedSimplexEvent): string 
 }
 
 export function SimplexPanel({
-  simplexUrl,
+  simplexStoreUrl,
   storePrefix,
   showNotification,
 }: {
-  simplexUrl: string;
+  simplexStoreUrl: string;
   storePrefix: string;
   showNotification: NotificationFn;
 }) {
@@ -159,8 +159,8 @@ export function SimplexPanel({
   const [verifierStatus, setVerifierStatus] = useState<'loading' | 'ready' | 'error'>('loading');
   const store = useMemo(
     () =>
-      new StoreClient(simplexUrl).prefixed(new StoreKeyPrefix(new TextEncoder().encode(storePrefix))),
-    [simplexUrl, storePrefix],
+      new StoreClient(simplexStoreUrl).prefixed(new StoreKeyPrefix(new TextEncoder().encode(storePrefix))),
+    [simplexStoreUrl, storePrefix],
   );
   const session = useMemo(() => ReadSession.monotonic(store), [store]);
   const client = useMemo(
@@ -245,7 +245,7 @@ export function SimplexPanel({
     const controller = new AbortController();
     void (async () => {
       try {
-        const response = await fetch(`${simplexUrl.replace(/\/$/, '')}/health`, {
+        const response = await fetch(`${simplexStoreUrl.replace(/\/$/, '')}/health`, {
           signal: controller.signal,
         });
         setIsConnected(response.ok);
@@ -257,7 +257,7 @@ export function SimplexPanel({
       controller.abort();
       subscribeAbortRef.current?.abort();
     };
-  }, [simplexUrl]);
+  }, [simplexStoreUrl]);
 
   const applyVerifier = () => {
     try {
@@ -523,7 +523,7 @@ export function SimplexPanel({
           Run `simplex seed` and paste its verifier material here. Fetched and
           streamed certificates are verified before display.
         </p>
-        <p><strong>Store:</strong> {simplexUrl}</p>
+        <p><strong>Store:</strong> {simplexStoreUrl}</p>
         <p><strong>Status:</strong> {isConnected ? 'Connected' : 'Disconnected'}</p>
         <p><strong>Verifier:</strong> {verifierStatus}</p>
         <div className="form-row">
