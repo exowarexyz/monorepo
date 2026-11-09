@@ -311,8 +311,8 @@ mod tests {
             let mut per_entity = HashSet::new();
             for version in versions {
                 let key = encode_primary_key(
-                    3,
-                    &[
+                    &[],
+                    [
                         &CellValue::Utf8(entity.to_string()),
                         &CellValue::UInt64(version),
                     ],
@@ -359,8 +359,8 @@ mod tests {
 
         for (entity, version) in [(0u64, 0u64), (42, 7), (42, u64::MAX), (u64::MAX, 1)] {
             let key = encode_primary_key(
-                3,
-                &[&CellValue::UInt64(entity), &CellValue::UInt64(version)],
+                &[],
+                [&CellValue::UInt64(entity), &CellValue::UInt64(version)],
                 &model,
             )
             .expect("key");

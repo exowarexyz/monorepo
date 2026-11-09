@@ -685,12 +685,15 @@ pub(crate) struct KvRow {
 }
 
 impl KvRow {
-    pub(crate) fn primary_key_values(&self, model: &TableModel) -> Vec<&CellValue> {
+    /// The row's primary-key column values, in primary-key order.
+    pub(crate) fn primary_key_cells<'a>(
+        &'a self,
+        model: &'a TableModel,
+    ) -> impl Iterator<Item = &'a CellValue> + 'a {
         model
             .primary_key_indices
             .iter()
             .map(|&idx| &self.values[idx])
-            .collect()
     }
 
     pub(crate) fn value_at(&self, idx: usize) -> &CellValue {
