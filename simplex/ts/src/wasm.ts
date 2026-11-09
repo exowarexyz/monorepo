@@ -1,8 +1,8 @@
 import initWasm, * as wasm from './generated/wasm/exoware_simplex_wasm.js';
 import {
-  createSimplexVerifier,
+  createWasmSimplexCertificateVerifier,
   type VerifiedSimplexCertificate,
-  type SimplexVerifierOptions,
+  type SimplexCertificateVerifierOptions,
   type SimplexCertificateVerifier,
 } from './verification.js';
 
@@ -13,8 +13,8 @@ export function ensureSimplexWasm(initInput?: InitWasmInput): Promise<unknown> {
   return (wasmReady ??= initWasm(initInput));
 }
 
-export async function createWasmSimplexVerifier(
-  options: SimplexVerifierOptions,
+export async function loadWasmSimplexCertificateVerifier(
+  options: SimplexCertificateVerifierOptions,
   initInput?: InitWasmInput,
 ): Promise<
   SimplexCertificateVerifier<
@@ -23,5 +23,5 @@ export async function createWasmSimplexVerifier(
   >
 > {
   await ensureSimplexWasm(initInput);
-  return createSimplexVerifier(wasm, options);
+  return createWasmSimplexCertificateVerifier(wasm, options);
 }

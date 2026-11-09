@@ -1,11 +1,10 @@
 import { ReadSession, RangeMode, type PrefixedStoreClient } from '@exowarexyz/sdk';
 
-import { verifyNotarization, verifyFinalization } from './certificate-verification.js';
+import { verifyNotarized, verifyFinalized } from './certificate-verification.js';
 import {
   blockByDigestKey,
-  decodeSimplexBlockData,
+  finalizationByHeightKey,
   finalizationByRoundKey,
-  finalizedByHeightKey,
   headerByDigestKey,
   normalizeU64,
   notarizationByRoundKey,
@@ -13,36 +12,29 @@ import {
   SimplexRecordKind,
   u64FromKey,
   type BytesLike,
-  type SimplexBlockData,
   type U64Like,
 } from './encoding.js';
 import type { SimplexCertificateVerifier } from './verification.js';
 
-export interface SimplexReaderOptions<TNotarization = unknown, TFinalization = unknown> {
-  verifier?: SimplexCertificateVerifier<TNotarization, TFinalization>;
-}
+type CallOptions = Parameters<ReadSession['get']>[1];
 
-type ReadCallOptions = Parameters<ReadSession['get']>[1];
+/**
+ * Session-backed reader for Simplex records. Certificate reads take the
+ * verifier that checks them; their `*Raw` twins return unverified bytes.
+ */
+export class SimplexReader {
+  private session: ReadSession;
 
-export class SimplexReader<TNotarization = unknown, TFinalization = unknown> {
-  private readonly session: ReadSession;
-  private readonly verifier?: SimplexCertificateVerifier<TNotarization, TFinalization>;
-
-  /** A Store client starts a fresh monotonic session with no initial minimum. */
-  constructor(
-    store: PrefixedStoreClient | ReadSession,
-    options: SimplexReaderOptions<TNotarization, TFinalization> = {},
-  ) {
-    this.session = store instanceof ReadSession ? store : ReadSession.monotonic(store);
-    this.verifier = options.verifier;
+  /** Start a fresh monotonic session over `store` with no initial minimum. */
+  constructor(store: PrefixedStoreClient) {
+    this.session = ReadSession.monotonic(store);
   }
 
   /** Use an existing session's policy and shared observations. */
-  static withSession<TNotarization = unknown, TFinalization = unknown>(
-    session: ReadSession,
-    options: SimplexReaderOptions<TNotarization, TFinalization> = {},
-  ): SimplexReader<TNotarization, TFinalization> {
-    return new SimplexReader(session, options);
+  static withSession(session: ReadSession): SimplexReader {
+    const reader = Object.create(SimplexReader.prototype) as SimplexReader;
+    reader.session = session;
+    return reader;
   }
 
   minSequenceNumber(): bigint | undefined {
@@ -53,178 +45,161 @@ export class SimplexReader<TNotarization = unknown, TFinalization = unknown> {
     return this.session.evaluatedSequence();
   }
 
-  clone(): SimplexReader<TNotarization, TFinalization> {
-    return SimplexReader.withSession(this.session.clone(), { verifier: this.verifier });
+  clone(): SimplexReader {
+    return SimplexReader.withSession(this.session.clone());
   }
 
-  withMinSequenceNumber(sequence: bigint): SimplexReader<TNotarization, TFinalization> {
-    return SimplexReader.withSession(this.session.withMinSequenceNumber(sequence), {
-      verifier: this.verifier,
-    });
+  withMinSequenceNumber(minSequenceNumber: bigint): SimplexReader {
+    return SimplexReader.withSession(this.session.withMinSequenceNumber(minSequenceNumber));
   }
 
-  async getHeader(
-    digest: BytesLike,
-    callOptions?: ReadCallOptions,
-  ): Promise<Uint8Array | null> {
-    return this.getHeaderRaw(digest, callOptions);
-  }
-
+  /** Read stored header bytes, which stay unauthenticated until the caller verifies them. */
   async getHeaderRaw(
     digest: BytesLike,
-    callOptions?: ReadCallOptions,
+    options?: CallOptions,
   ): Promise<Uint8Array | null> {
-    return this.getRaw(headerByDigestKey(digest), callOptions);
+    return this.getRaw(headerByDigestKey(digest), options);
   }
 
-  async getBlock(
-    digest: BytesLike,
-    callOptions?: ReadCallOptions,
-  ): Promise<SimplexBlockData | null> {
-    const raw = await this.getBlockRaw(digest, callOptions);
-    return raw === null ? null : decodeSimplexBlockData(raw);
-  }
-
+  /**
+   * Read stored block bytes, which stay unauthenticated until the caller verifies
+   * them. `decodeSimplexBlockData` splits them into header and body.
+   */
   async getBlockRaw(
     digest: BytesLike,
-    callOptions?: ReadCallOptions,
+    options?: CallOptions,
   ): Promise<Uint8Array | null> {
-    return this.getRaw(blockByDigestKey(digest), callOptions);
+    return this.getRaw(blockByDigestKey(digest), options);
   }
 
-  async getNotarizationByRound(
+  async getNotarizedByRound<TNotarization>(
+    verifier: SimplexCertificateVerifier<TNotarization, unknown>,
     epoch: U64Like,
     view: U64Like,
-    callOptions?: ReadCallOptions,
+    options?: CallOptions,
   ): Promise<TNotarization | null> {
-    const verifier = this.requireVerifier();
     const key = notarizationByRoundKey(epoch, view);
-    const raw = await this.getRaw(key, callOptions);
+    const raw = await this.getRaw(key, options);
     if (raw === null) {
       return null;
     }
-    return verifyNotarization(verifier, raw, {
+    return verifyNotarized(verifier, raw, {
       kind: 'notarization',
       source: 'get',
       key,
-      value: raw,
+      raw,
       epoch: normalizeU64(epoch),
       view: normalizeU64(view),
     });
   }
 
-  async getNotarizationByRoundRaw(
+  async getNotarizedByRoundRaw(
     epoch: U64Like,
     view: U64Like,
-    callOptions?: ReadCallOptions,
+    options?: CallOptions,
   ): Promise<Uint8Array | null> {
-    return this.getRaw(notarizationByRoundKey(epoch, view), callOptions);
+    return this.getRaw(notarizationByRoundKey(epoch, view), options);
   }
 
-  async getFinalizationByRound(
+  async getFinalizedByRound<TFinalization>(
+    verifier: SimplexCertificateVerifier<unknown, TFinalization>,
     epoch: U64Like,
     view: U64Like,
-    callOptions?: ReadCallOptions,
+    options?: CallOptions,
   ): Promise<TFinalization | null> {
-    const verifier = this.requireVerifier();
     const key = finalizationByRoundKey(epoch, view);
-    const raw = await this.getRaw(key, callOptions);
+    const raw = await this.getRaw(key, options);
     if (raw === null) {
       return null;
     }
-    return verifyFinalization(verifier, raw, {
+    return verifyFinalized(verifier, raw, {
       kind: 'finalization',
       index: 'round',
       source: 'get',
       key,
-      value: raw,
+      raw,
       epoch: normalizeU64(epoch),
       view: normalizeU64(view),
     });
   }
 
-  async getFinalizationByRoundRaw(
+  async getFinalizedByRoundRaw(
     epoch: U64Like,
     view: U64Like,
-    callOptions?: ReadCallOptions,
+    options?: CallOptions,
   ): Promise<Uint8Array | null> {
-    return this.getRaw(finalizationByRoundKey(epoch, view), callOptions);
+    return this.getRaw(finalizationByRoundKey(epoch, view), options);
   }
 
-  async getFinalizationByHeight(
+  async getFinalizedByHeight<TFinalization>(
+    verifier: SimplexCertificateVerifier<unknown, TFinalization>,
     height: U64Like,
-    callOptions?: ReadCallOptions,
+    options?: CallOptions,
   ): Promise<TFinalization | null> {
-    const verifier = this.requireVerifier();
-    const key = finalizedByHeightKey(height);
-    const raw = await this.getRaw(key, callOptions);
+    const key = finalizationByHeightKey(height);
+    const raw = await this.getRaw(key, options);
     if (raw === null) {
       return null;
     }
-    return verifyFinalization(verifier, raw, {
+    return verifyFinalized(verifier, raw, {
       kind: 'finalization',
       index: 'height',
       source: 'get',
       key,
-      value: raw,
+      raw,
       height: normalizeU64(height),
     });
   }
 
-  async getFinalizationByHeightRaw(
+  async getFinalizedByHeightRaw(
     height: U64Like,
-    callOptions?: ReadCallOptions,
+    options?: CallOptions,
   ): Promise<Uint8Array | null> {
-    return this.getRaw(finalizedByHeightKey(height), callOptions);
+    return this.getRaw(finalizationByHeightKey(height), options);
   }
 
-  async latestFinalization(callOptions?: ReadCallOptions): Promise<TFinalization | null> {
-    const verifier = this.requireVerifier();
-    const row = await this.latestFinalizedRow(callOptions);
+  async latestFinalized<TFinalization>(
+    verifier: SimplexCertificateVerifier<unknown, TFinalization>,
+    options?: CallOptions,
+  ): Promise<TFinalization | null> {
+    const row = await this.latestFinalizedRow(options);
     if (!row) {
       return null;
     }
-    return verifyFinalization(verifier, row.value, {
+    return verifyFinalized(verifier, row.value, {
       kind: 'finalization',
       index: 'latest',
       source: 'get',
       key: row.key,
-      value: row.value,
+      raw: row.value,
       height: u64FromKey(row.key),
     });
   }
 
-  async latestFinalizationRaw(callOptions?: ReadCallOptions): Promise<Uint8Array | null> {
-    return (await this.latestFinalizedRow(callOptions))?.value ?? null;
+  async latestFinalizedRaw(options?: CallOptions): Promise<Uint8Array | null> {
+    return (await this.latestFinalizedRow(options))?.value ?? null;
   }
 
   private async latestFinalizedRow(
-    callOptions?: ReadCallOptions,
+    options?: CallOptions,
   ): Promise<{ key: Uint8Array; value: Uint8Array } | null> {
-    const range = rangeForKind(SimplexRecordKind.FinalizedByHeight);
+    const range = rangeForKind(SimplexRecordKind.FinalizationByHeight);
     const result = await this.session.range(
       range.start,
       range.end,
       1,
       4096,
       RangeMode.REVERSE,
-      callOptions,
+      options,
     );
     return result.results[0] ?? null;
   }
 
   private async getRaw(
     key: Uint8Array,
-    callOptions?: ReadCallOptions,
+    options?: CallOptions,
   ): Promise<Uint8Array | null> {
-    const result = await this.session.get(key, callOptions);
+    const result = await this.session.get(key, options);
     return result?.value ?? null;
-  }
-
-  private requireVerifier(): SimplexCertificateVerifier<TNotarization, TFinalization> {
-    if (!this.verifier) {
-      throw new Error('simplex certificate read requires a configured verifier; use the *Raw method for unverified bytes');
-    }
-    return this.verifier;
   }
 }

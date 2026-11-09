@@ -29,9 +29,9 @@ impl SimplexReader {
         Self { session }
     }
 
-    /// Derive a reader whose Store reads require at least `sequence`.
-    pub fn with_min_sequence_number(&self, sequence: u64) -> Self {
-        Self::with_session(self.session.with_min_sequence_number(sequence))
+    /// Derive a reader whose Store reads require at least `min_sequence_number`.
+    pub fn with_min_sequence_number(&self, min_sequence_number: u64) -> Self {
+        Self::with_session(self.session.with_min_sequence_number(min_sequence_number))
     }
 
     /// Return the minimum Store sequence required by subsequent reads.
@@ -76,7 +76,7 @@ impl SimplexReader {
         &self,
         height: commonware_consensus::types::Height,
     ) -> Result<Option<Bytes>, SimplexError> {
-        self.get_raw(keys::finalized_by_height(height)).await
+        self.get_raw(keys::finalization_by_height(height)).await
     }
 
     pub async fn latest_finalized_raw(&self) -> Result<Option<Bytes>, SimplexError> {
@@ -127,7 +127,7 @@ impl SimplexReader {
         self.decode_indexed(
             self.get_notarized_by_round_raw(round).await?,
             cfg,
-            |value: &Notarized<B, S, D>| value.proof.round() == round,
+            |value: &Notarized<B, S, D>| value.notarization.round() == round,
         )
     }
 
@@ -163,7 +163,7 @@ impl SimplexReader {
         self.decode_indexed(
             self.get_finalized_by_round_raw(round).await?,
             cfg,
-            |value: &Finalized<B, S, D>| value.proof.round() == round,
+            |value: &Finalized<B, S, D>| value.finalization.round() == round,
         )
     }
 
@@ -181,7 +181,7 @@ impl SimplexReader {
             return Ok(None);
         };
         let height =
-            keys::finalized_height_from_key(&key).ok_or(SimplexError::RecordKeyMismatch)?;
+            keys::finalization_height_from_key(&key).ok_or(SimplexError::RecordKeyMismatch)?;
         self.decode_indexed(Some(value), cfg, |value: &Finalized<B, S, D>| {
             value.header.height() == height
         })
@@ -192,7 +192,7 @@ impl SimplexReader {
     }
 
     async fn latest_finalized_row(&self) -> Result<Option<(Key, Bytes)>, SimplexError> {
-        let (start, end) = keys::range_for_kind(RecordKind::FinalizedByHeight);
+        let (start, end) = keys::range_for_kind(RecordKind::FinalizationByHeight);
         let rows = self
             .session
             .range_with_mode(&start, &end, 1, RangeMode::Reverse)

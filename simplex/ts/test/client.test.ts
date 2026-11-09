@@ -7,14 +7,14 @@ import {
   SimplexSubscriptions,
   SimplexWriter,
   headerByDigestKey,
-  createSimplexVerifier,
+  createWasmSimplexCertificateVerifier,
   createWasmSimplexBlockVerifier,
   createWasmSimplexHeaderVerifier,
   blockByDigestKey,
   bytesToHex,
   decodeSimplexBlockData,
   encodeSimplexBlockData,
-  finalizedByHeightKey,
+  finalizationByHeightKey,
   hexToBytes,
   normalizeU64,
   notarizationByRoundKey,
@@ -36,8 +36,8 @@ test('simplex keys match the Rust key layout', () => {
   assert.equal(bytesToHex(blockByDigestKey(digest)), `02${digest}`);
   assert.equal(bytesToHex(notarizationByRoundKey(0x100000000n, 7)), '0300000001000000000000000000000007');
   assert.equal(bytesToHex(finalizationByRoundKey(0x100000000n, 7)), '0400000001000000000000000000000007');
-  assert.equal(bytesToHex(finalizedByHeightKey(258n)), '050000000000000102');
-  const range = rangeForKind(SimplexRecordKind.FinalizedByHeight);
+  assert.equal(bytesToHex(finalizationByHeightKey(258n)), '050000000000000102');
+  const range = rangeForKind(SimplexRecordKind.FinalizationByHeight);
   assert.equal(bytesToHex(range.start), '05');
   assert.equal(bytesToHex(range.end), '06');
 });
@@ -47,7 +47,7 @@ test('u64 helper rejects unsafe JavaScript numbers', () => {
   assert.throws(() => normalizeU64(Number.MAX_SAFE_INTEGER + 1), /safe integer/);
 });
 
-test('stages block and finalization rows into one StoreWriteBatch', () => {
+test('stages block, finalization, and header rows into one StoreWriteBatch', () => {
   const store = new StoreClient('http://127.0.0.1:1').unprefixed();
   const simplex = new SimplexWriter(store);
   assert.deepEqual(simplex.prepareHeader({ digest: 'c0', header: 'a0' }), {
@@ -57,12 +57,14 @@ test('stages block and finalization rows into one StoreWriteBatch', () => {
       blocks: 0,
       notarizations: 0,
       finalizations: 0,
-      finalizedHeightIndexes: 0,
+      finalizationHeightIndexes: 0,
     },
   });
 
   const block = simplex.prepareBlock({ digest: 'd0', header: 'b0', body: 'c0c1' });
-  const finalization = simplex.prepareFinalization({
+  const finalization = simplex.prepareFinalized({
+    digest: 'e0',
+    header: 'e1',
     epoch: 0,
     view: 7,
     height: 11,
@@ -73,32 +75,74 @@ test('stages block and finalization rows into one StoreWriteBatch', () => {
     blocks: 1,
     notarizations: 0,
     finalizations: 0,
-    finalizedHeightIndexes: 0,
+    finalizationHeightIndexes: 0,
   });
   assert.deepEqual(finalization.summary, {
-    headers: 0,
+    headers: 1,
     blocks: 0,
     notarizations: 0,
     finalizations: 1,
-    finalizedHeightIndexes: 1,
+    finalizationHeightIndexes: 1,
   });
 
   const batch = simplex.stageUpload(block, new StoreWriteBatch());
   simplex.stageUpload(finalization, batch);
-  assert.equal(batch.length, 4);
+  assert.equal(batch.length, 5);
   assert.deepEqual(
     batch.entries().map((entry) => bytesToHex(entry.key)),
-    ['01d0', '02d0', '0400000000000000000000000000000007', '05000000000000000b'],
+    ['01d0', '02d0', '01e0', '0400000000000000000000000000000007', '05000000000000000b'],
   );
   assert.deepEqual(decodeSimplexBlockData(batch.entries()[1].value), {
     header: new Uint8Array([0xb0]),
     body: new Uint8Array([0xc0, 0xc1]),
   });
+  assert.deepEqual(batch.entries()[2].value, new Uint8Array([0xe1]));
+});
+
+test('stages notarization and header rows', () => {
+  const simplex = new SimplexWriter(new StoreClient('http://127.0.0.1:1').unprefixed());
+  const notarization = simplex.prepareNotarized({
+    digest: 'e0',
+    header: 'e1',
+    epoch: 0,
+    view: 7,
+    notarized: 'a1',
+  });
+  assert.deepEqual(notarization, {
+    entries: [
+      { key: headerByDigestKey('e0'), value: new Uint8Array([0xe1]) },
+      { key: notarizationByRoundKey(0, 7), value: new Uint8Array([0xa1]) },
+    ],
+    summary: {
+      headers: 1,
+      blocks: 0,
+      notarizations: 1,
+      finalizations: 0,
+      finalizationHeightIndexes: 0,
+    },
+  });
+});
+
+test('header rows require a non-empty digest and header', () => {
+  const simplex = new SimplexWriter(new StoreClient('http://127.0.0.1:1').unprefixed());
+  const empty = /non-empty digest and header/;
+  assert.throws(() => simplex.prepareHeader({ digest: '', header: 'e1' }), RangeError);
+  assert.throws(() => simplex.prepareHeader({ digest: 'e0', header: new Uint8Array() }), empty);
+  assert.throws(() => simplex.prepareBlock({ digest: '', header: 'e1', body: 'b0' }), empty);
+  // A certificate upload without digest and header must not write a header row
+  assert.throws(
+    () => simplex.prepareNotarized({ epoch: 0, view: 7, notarized: 'a1' } as never),
+    empty,
+  );
+  assert.throws(
+    () => simplex.prepareFinalized({ epoch: 0, view: 7, height: 11, finalized: 'f1' } as never),
+    empty,
+  );
 });
 
 test('upload validation rejects a finalization before ingest', async () => {
   const client = new StoreClient('http://127.0.0.1:1', {
-    putLimits: { maxEntries: 1 },
+    putLimits: { maxEntries: 2 },
   });
   let calls = 0;
   Object.defineProperty(client.ingest, 'put', {
@@ -110,20 +154,22 @@ test('upload validation rejects a finalization before ingest', async () => {
   const simplex = new SimplexWriter(client.unprefixed());
 
   await assert.rejects(
-    () => simplex.uploadFinalization({
+    () => simplex.uploadFinalized({
+      digest: 'e0',
+      header: 'e1',
       epoch: 0,
       view: 7,
       height: 11,
       finalized: 'f1',
     }),
-    /between 1 and 1 entries, got 2/,
+    /between 1 and 2 entries, got 3/,
   );
   assert.equal(calls, 0);
 });
 
 test('valid finalization upload remains one Put and one receipt', async () => {
   const client = new StoreClient('http://127.0.0.1:1', {
-    putLimits: { maxEntries: 2 },
+    putLimits: { maxEntries: 3 },
   });
   let calls = 0;
   let keys: string[] = [];
@@ -140,7 +186,9 @@ test('valid finalization upload remains one Put and one receipt', async () => {
   });
   const simplex = new SimplexWriter(client.unprefixed());
 
-  const receipt = await simplex.uploadFinalization({
+  const receipt = await simplex.uploadFinalized({
+    digest: 'e0',
+    header: 'e1',
     epoch: 0,
     view: 7,
     height: 11,
@@ -149,17 +197,18 @@ test('valid finalization upload remains one Put and one receipt', async () => {
 
   assert.equal(calls, 1);
   assert.deepEqual(keys, [
+    '01e0',
     '0400000000000000000000000000000007',
     '05000000000000000b',
   ]);
   assert.deepEqual(receipt, {
     storeSequenceNumber: 19n,
     summary: {
-      headers: 0,
+      headers: 1,
       blocks: 0,
       notarizations: 0,
       finalizations: 1,
-      finalizedHeightIndexes: 1,
+      finalizationHeightIndexes: 1,
     },
   });
 });
@@ -184,10 +233,10 @@ test('streams header and full block data separately', async () => {
   }
   assert.deepEqual(headerBatches[0].entries, [
     {
-      type: 'header',
+      kind: 'header',
       key: headerByDigestKey('01'),
       digest: new Uint8Array([0x01]),
-      header: new Uint8Array([0xaa]),
+      raw: new Uint8Array([0xaa]),
     },
   ]);
 
@@ -197,7 +246,7 @@ test('streams header and full block data separately', async () => {
   }
   assert.deepEqual(blockBatches[0].entries, [
     {
-      type: 'block',
+      kind: 'block',
       key: blockByDigestKey('01'),
       digest: new Uint8Array([0x01]),
       raw: full,
@@ -207,51 +256,29 @@ test('streams header and full block data separately', async () => {
   ]);
 });
 
-test('certificate getters require and apply a verifier', async () => {
+test('certificate getters apply the supplied verifier', async () => {
   const store = new StoreClient('http://127.0.0.1:1').unprefixed();
   const session = ReadSession.fixed(store);
-  let reads = 0;
   const rows = new Map<string, Uint8Array>([
     [bytesToHex(notarizationByRoundKey(0, 3)), new Uint8Array([0xa3])],
     [bytesToHex(finalizationByRoundKey(0, 4)), new Uint8Array([0xf4])],
   ]);
   session.get = async (key: Uint8Array) => {
-    reads++;
     const value = rows.get(bytesToHex(key));
     return value ? { value } : null;
   };
 
-  await assert.rejects(
-    () => SimplexReader.withSession(session).getNotarizationByRound(0, 3),
-    /requires a configured verifier/,
-  );
-  assert.equal(reads, 0);
-
   const verifier: SimplexCertificateVerifier<{ view: bigint }, { index: string }> = {
-    verifyNotarization: (bytes, context) =>
-      bytes[0] === 0xa3 ? { view: context.view } : null,
-    verifyFinalization: (bytes, context) =>
-      bytes[0] === 0xf4 ? { index: context.index } : null,
+    verifyNotarized: (bytes, context) =>
+      bytes[0] === 0xa3 && context.source === 'get' ? { view: context.view } : null,
+    verifyFinalized: (bytes, context) =>
+      bytes[0] === 0xf4 && context.source === 'get' ? { index: context.index } : null,
   };
-  const simplex = SimplexReader.withSession(session, { verifier });
+  const simplex = SimplexReader.withSession(session);
 
-  assert.deepEqual(await simplex.getNotarizationByRound(0, 3), { view: 3n });
-  assert.deepEqual(await simplex.getFinalizationByRound(0, 4), { index: 'round' });
-  assert.deepEqual(await simplex.getNotarizationByRoundRaw(0, 3), new Uint8Array([0xa3]));
-});
-
-test('reader captures its verifier option', async () => {
-  const session = ReadSession.fixed(new StoreClient('http://127.0.0.1:1').unprefixed());
-  session.get = async () => ({ value: new Uint8Array([0xa3]) });
-  const verifier: SimplexCertificateVerifier<string, string> = {
-    verifyNotarization: () => 'verified',
-    verifyFinalization: () => 'verified',
-  };
-  const options: { verifier?: SimplexCertificateVerifier<string, string> } = { verifier };
-  const reader = SimplexReader.withSession(session, options);
-  options.verifier = undefined;
-
-  assert.equal(await reader.getNotarizationByRound(0, 3), 'verified');
+  assert.deepEqual(await simplex.getNotarizedByRound(verifier, 0, 3), { view: 3n });
+  assert.deepEqual(await simplex.getFinalizedByRound(verifier, 0, 4), { index: 'round' });
+  assert.deepEqual(await simplex.getNotarizedByRoundRaw(0, 3), new Uint8Array([0xa3]));
 });
 
 test('readers preserve absent and explicit-zero session floors', async () => {
@@ -280,7 +307,7 @@ test('unary point reads use the session floor and forward call options', async (
     [bytesToHex(blockByDigestKey('02')), encodeSimplexBlockData('a2', 'b2')],
     [bytesToHex(notarizationByRoundKey(2, 3)), new Uint8Array([0xa3])],
     [bytesToHex(finalizationByRoundKey(2, 4)), new Uint8Array([0xa4])],
-    [bytesToHex(finalizedByHeightKey(5)), new Uint8Array([0xa5])],
+    [bytesToHex(finalizationByHeightKey(5)), new Uint8Array([0xa5])],
   ]);
   const callOptions = { timeoutMs: 1_234 };
   const calls: Array<[string, bigint | undefined, unknown]> = [];
@@ -294,33 +321,29 @@ test('unary point reads use the session floor and forward call options', async (
   };
 
   const verifier: SimplexCertificateVerifier<Uint8Array, Uint8Array> = {
-    verifyNotarization: (bytes) => bytes,
-    verifyFinalization: (bytes) => bytes,
+    verifyNotarized: (bytes) => bytes,
+    verifyFinalized: (bytes) => bytes,
   };
-  const simplex = SimplexReader.withSession(ReadSession.fixed(store, minSequenceNumber), { verifier });
+  const simplex = SimplexReader.withSession(ReadSession.fixed(store, minSequenceNumber));
 
-  await simplex.getHeader('01', callOptions);
   await simplex.getHeaderRaw('01', callOptions);
-  await simplex.getBlock('02', callOptions);
   await simplex.getBlockRaw('02', callOptions);
-  await simplex.getNotarizationByRound(2, 3, callOptions);
-  await simplex.getNotarizationByRoundRaw(2, 3, callOptions);
-  await simplex.getFinalizationByRound(2, 4, callOptions);
-  await simplex.getFinalizationByRoundRaw(2, 4, callOptions);
-  await simplex.getFinalizationByHeight(5, callOptions);
-  await simplex.getFinalizationByHeightRaw(5, callOptions);
+  await simplex.getNotarizedByRound(verifier, 2, 3, callOptions);
+  await simplex.getNotarizedByRoundRaw(2, 3, callOptions);
+  await simplex.getFinalizedByRound(verifier, 2, 4, callOptions);
+  await simplex.getFinalizedByRoundRaw(2, 4, callOptions);
+  await simplex.getFinalizedByHeight(verifier, 5, callOptions);
+  await simplex.getFinalizedByHeightRaw(5, callOptions);
 
   assert.deepEqual(calls, [
     [bytesToHex(headerByDigestKey('01')), minSequenceNumber, callOptions],
-    [bytesToHex(headerByDigestKey('01')), minSequenceNumber, callOptions],
-    [bytesToHex(blockByDigestKey('02')), minSequenceNumber, callOptions],
     [bytesToHex(blockByDigestKey('02')), minSequenceNumber, callOptions],
     [bytesToHex(notarizationByRoundKey(2, 3)), minSequenceNumber, callOptions],
     [bytesToHex(notarizationByRoundKey(2, 3)), minSequenceNumber, callOptions],
     [bytesToHex(finalizationByRoundKey(2, 4)), minSequenceNumber, callOptions],
     [bytesToHex(finalizationByRoundKey(2, 4)), minSequenceNumber, callOptions],
-    [bytesToHex(finalizedByHeightKey(5)), minSequenceNumber, callOptions],
-    [bytesToHex(finalizedByHeightKey(5)), minSequenceNumber, callOptions],
+    [bytesToHex(finalizationByHeightKey(5)), minSequenceNumber, callOptions],
+    [bytesToHex(finalizationByHeightKey(5)), minSequenceNumber, callOptions],
   ]);
 });
 
@@ -350,24 +373,24 @@ test('exact-height reads forward Connect call options', async () => {
   };
 
   const verifier: SimplexCertificateVerifier<Uint8Array, Uint8Array> = {
-    verifyNotarization: (bytes) => bytes,
-    verifyFinalization: (bytes) => bytes,
+    verifyNotarized: (bytes) => bytes,
+    verifyFinalized: (bytes) => bytes,
   };
-  const simplex = SimplexReader.withSession(ReadSession.fixed(store, minSequenceNumber), { verifier });
+  const simplex = SimplexReader.withSession(ReadSession.fixed(store, minSequenceNumber));
 
   assert.deepEqual(
-    await simplex.getFinalizationByHeight(5, callOptions),
+    await simplex.getFinalizedByHeight(verifier, 5, callOptions),
     value,
   );
   assert.deepEqual(
-    await simplex.getFinalizationByHeightRaw(5, callOptions),
+    await simplex.getFinalizedByHeightRaw(5, callOptions),
     value,
   );
   assert.deepEqual(
     calls.map(({ key, minSequenceNumber: minimum }) => [key, minimum]),
     [
-      [bytesToHex(finalizedByHeightKey(5)), minSequenceNumber],
-      [bytesToHex(finalizedByHeightKey(5)), minSequenceNumber],
+      [bytesToHex(finalizationByHeightKey(5)), minSequenceNumber],
+      [bytesToHex(finalizationByHeightKey(5)), minSequenceNumber],
     ],
   );
   assert.equal(calls[0].options, callOptions);
@@ -435,7 +458,7 @@ test('latest finalization reads forward minimum sequence numbers', async () => {
   const client = new StoreClient('http://127.0.0.1:1');
   const store = client.unprefixed();
   const minSequenceNumber = 29n;
-  const key = finalizedByHeightKey(7);
+  const key = finalizationByHeightKey(7);
   const value = new Uint8Array([0xa7]);
   const callOptions = { timeoutMs: 4_321 };
   const calls: Array<{ minimum: bigint | undefined; options: unknown }> = [];
@@ -447,13 +470,13 @@ test('latest finalization reads forward minimum sequence numbers', async () => {
   };
 
   const verifier: SimplexCertificateVerifier<Uint8Array, Uint8Array> = {
-    verifyNotarization: (bytes) => bytes,
-    verifyFinalization: (bytes) => bytes,
+    verifyNotarized: (bytes) => bytes,
+    verifyFinalized: (bytes) => bytes,
   };
-  const simplex = SimplexReader.withSession(ReadSession.fixed(store, minSequenceNumber), { verifier });
+  const simplex = SimplexReader.withSession(ReadSession.fixed(store, minSequenceNumber));
 
-  assert.deepEqual(await simplex.latestFinalization(callOptions), value);
-  assert.deepEqual(await simplex.latestFinalizationRaw(callOptions), value);
+  assert.deepEqual(await simplex.latestFinalized(verifier, callOptions), value);
+  assert.deepEqual(await simplex.latestFinalizedRaw(callOptions), value);
   assert.deepEqual(calls, [
     { minimum: minSequenceNumber, options: callOptions },
     { minimum: minSequenceNumber, options: callOptions },
@@ -484,7 +507,7 @@ test('WASM header verifier adapter passes payload and header', () => {
         kind: 'notarization',
         source: 'get',
         key: notarizationByRoundKey(0, 1),
-        value: new Uint8Array([0xee]),
+        raw: new Uint8Array([0xee]),
         epoch: 0n,
         view: 1n,
       },
@@ -522,7 +545,7 @@ test('WASM block verifier adapter passes payload, header, and body', () => {
         kind: 'notarization',
         source: 'get',
         key: notarizationByRoundKey(0, 1),
-        value: new Uint8Array([0xee]),
+        raw: new Uint8Array([0xee]),
         epoch: 0n,
         view: 1n,
       },
@@ -539,28 +562,28 @@ test('WASM block verifier adapter passes payload, header, and body', () => {
 
 test('Simplex WASM verifier adapter is scheme-parameterized', async () => {
   const headerVerifications: string[] = [];
-  const verifier = createSimplexVerifier(
+  const verifier = createWasmSimplexCertificateVerifier(
     {
-      verify_notarized_payload: (payload, identity, _scheme, namespace, material, bytes) => ({
+      verify_notarized: (payloadKind, identity, _scheme, namespace, material, bytes) => ({
         epoch: 0n,
         view: 11n,
         parent: 10n,
-        payload: payload === 'sha256' ? namespace : new Uint8Array(),
+        payload: payloadKind === 'sha256' ? namespace : new Uint8Array(),
         certificate: material,
         header: bytes,
       }),
-      verify_finalized_payload: (payload, identity, _scheme, namespace, material, bytes) => ({
+      verify_finalized: (payloadKind, identity, _scheme, namespace, material, bytes) => ({
         epoch: 0n,
         view: 12n,
         parent: 11n,
-        payload: payload === 'sha256' ? Array.from(namespace) : [],
+        payload: payloadKind === 'sha256' ? Array.from(namespace) : [],
         certificate: Array.from(material),
         header: Array.from(bytes),
       }),
     },
     {
       scheme: 'bls12381-threshold-vrf-min-sig',
-      payload: 'sha256',
+      payloadKind: 'sha256',
       identity: 'ed25519',
       namespace: '0a',
       verificationMaterial: '0b',
@@ -579,11 +602,11 @@ test('Simplex WASM verifier adapter is scheme-parameterized', async () => {
   );
 
   assert.deepEqual(
-    await verifier.verifyNotarization(new Uint8Array([0xc0]), {
+    await verifier.verifyNotarized(new Uint8Array([0xc0]), {
       kind: 'notarization',
       source: 'get',
       key: notarizationByRoundKey(0, 11),
-      value: new Uint8Array([0xc0]),
+      raw: new Uint8Array([0xc0]),
       epoch: 0n,
       view: 11n,
     }),
@@ -599,12 +622,12 @@ test('Simplex WASM verifier adapter is scheme-parameterized', async () => {
   );
 
   assert.deepEqual(
-    await verifier.verifyFinalization(new Uint8Array([0xd0]), {
+    await verifier.verifyFinalized(new Uint8Array([0xd0]), {
       kind: 'finalization',
       index: 'round',
       source: 'get',
       key: finalizationByRoundKey(0, 12),
-      value: new Uint8Array([0xd0]),
+      raw: new Uint8Array([0xd0]),
       epoch: 0n,
       view: 12n,
     }),
@@ -626,10 +649,10 @@ test('Simplex WASM verifier adapter is scheme-parameterized', async () => {
 
 test('Simplex WASM verifier adapter supports coding commitment payloads', async () => {
   const calls: string[] = [];
-  const verifier = createSimplexVerifier(
+  const verifier = createWasmSimplexCertificateVerifier(
     {
-      verify_notarized_payload: (payload, identity, scheme, namespace, material, bytes) => {
-        calls.push(`notarized:${payload}:${identity}:${scheme}:${bytesToHex(bytes)}`);
+      verify_notarized: (payloadKind, identity, scheme, namespace, material, bytes) => {
+        calls.push(`notarized:${payloadKind}:${identity}:${scheme}:${bytesToHex(bytes)}`);
         return {
           epoch: 0n,
           view: 3n,
@@ -639,8 +662,8 @@ test('Simplex WASM verifier adapter supports coding commitment payloads', async 
           header: bytes,
         };
       },
-      verify_finalized_payload: (payload, identity, scheme, namespace, material, bytes) => {
-        calls.push(`finalized:${payload}:${identity}:${scheme}:${bytesToHex(bytes)}`);
+      verify_finalized: (payloadKind, identity, scheme, namespace, material, bytes) => {
+        calls.push(`finalized:${payloadKind}:${identity}:${scheme}:${bytesToHex(bytes)}`);
         return {
           epoch: 0n,
           view: 4n,
@@ -653,27 +676,28 @@ test('Simplex WASM verifier adapter supports coding commitment payloads', async 
     },
     {
       scheme: 'bls12381-threshold-standard-min-sig',
-      payload: 'coding-commitment',
+      payloadKind: 'coding-commitment',
       identity: 'ed25519',
       namespace: 'aa',
       verificationMaterial: 'bb',
+      verifyHeader: () => true,
     },
   );
 
-  await verifier.verifyNotarization(new Uint8Array([0xc1]), {
+  await verifier.verifyNotarized(new Uint8Array([0xc1]), {
     kind: 'notarization',
     source: 'get',
     key: notarizationByRoundKey(0, 3),
-    value: new Uint8Array([0xc1]),
+    raw: new Uint8Array([0xc1]),
     epoch: 0n,
     view: 3n,
   });
-  await verifier.verifyFinalization(new Uint8Array([0xd1]), {
+  await verifier.verifyFinalized(new Uint8Array([0xd1]), {
     kind: 'finalization',
     index: 'round',
     source: 'get',
     key: finalizationByRoundKey(0, 4),
-    value: new Uint8Array([0xd1]),
+    raw: new Uint8Array([0xd1]),
     epoch: 0n,
     view: 4n,
   });
@@ -686,10 +710,10 @@ test('Simplex WASM verifier adapter supports coding commitment payloads', async 
 
 test('Simplex WASM verifier adapter passes non-SHA payloads through', async () => {
   const calls: string[] = [];
-  const verifier = createSimplexVerifier(
+  const verifier = createWasmSimplexCertificateVerifier(
     {
-      verify_notarized_payload: (payload, identity, scheme, namespace, material, bytes) => {
-        calls.push(`notarized:${payload}:${identity}:${scheme}:${bytesToHex(bytes)}`);
+      verify_notarized: (payloadKind, identity, scheme, namespace, material, bytes) => {
+        calls.push(`notarized:${payloadKind}:${identity}:${scheme}:${bytesToHex(bytes)}`);
         return {
           epoch: 0n,
           view: 5n,
@@ -699,8 +723,8 @@ test('Simplex WASM verifier adapter passes non-SHA payloads through', async () =
           header: bytes,
         };
       },
-      verify_finalized_payload: (payload, identity, scheme, namespace, material, bytes) => {
-        calls.push(`finalized:${payload}:${identity}:${scheme}:${bytesToHex(bytes)}`);
+      verify_finalized: (payloadKind, identity, scheme, namespace, material, bytes) => {
+        calls.push(`finalized:${payloadKind}:${identity}:${scheme}:${bytesToHex(bytes)}`);
         return {
           epoch: 0n,
           view: 6n,
@@ -713,27 +737,28 @@ test('Simplex WASM verifier adapter passes non-SHA payloads through', async () =
     },
     {
       scheme: 'ed25519',
-      payload: 'blake3',
+      payloadKind: 'blake3',
       identity: 'ed25519',
       namespace: '01',
       verificationMaterial: '02',
+      verifyHeader: () => true,
     },
   );
 
-  await verifier.verifyNotarization(new Uint8Array([0xa1]), {
+  await verifier.verifyNotarized(new Uint8Array([0xa1]), {
     kind: 'notarization',
     source: 'get',
     key: notarizationByRoundKey(0, 5),
-    value: new Uint8Array([0xa1]),
+    raw: new Uint8Array([0xa1]),
     epoch: 0n,
     view: 5n,
   });
-  await verifier.verifyFinalization(new Uint8Array([0xb1]), {
+  await verifier.verifyFinalized(new Uint8Array([0xb1]), {
     kind: 'finalization',
     index: 'round',
     source: 'get',
     key: finalizationByRoundKey(0, 6),
-    value: new Uint8Array([0xb1]),
+    raw: new Uint8Array([0xb1]),
     epoch: 0n,
     view: 6n,
   });
@@ -745,9 +770,9 @@ test('Simplex WASM verifier adapter passes non-SHA payloads through', async () =
 });
 
 test('Simplex WASM verifier adapter rejects failed header verification', async () => {
-  const verifier = createSimplexVerifier(
+  const verifier = createWasmSimplexCertificateVerifier(
     {
-      verify_notarized_payload: () => ({
+      verify_notarized: () => ({
         scheme: 'ed25519',
         epoch: 0n,
         view: 1n,
@@ -756,11 +781,11 @@ test('Simplex WASM verifier adapter rejects failed header verification', async (
         certificate: [0x02],
         header: [0x03],
       }),
-      verify_finalized_payload: () => null,
+      verify_finalized: () => null,
     },
     {
       scheme: 'ed25519',
-      payload: 'sha256',
+      payloadKind: 'sha256',
       identity: 'ed25519',
       namespace: '',
       verificationMaterial: '',
@@ -769,11 +794,11 @@ test('Simplex WASM verifier adapter rejects failed header verification', async (
   );
 
   assert.equal(
-    await verifier.verifyNotarization(new Uint8Array([0xc0]), {
+    await verifier.verifyNotarized(new Uint8Array([0xc0]), {
       kind: 'notarization',
       source: 'get',
       key: notarizationByRoundKey(0, 1),
-      value: new Uint8Array([0xc0]),
+      raw: new Uint8Array([0xc0]),
       epoch: 0n,
       view: 1n,
     }),
@@ -782,30 +807,31 @@ test('Simplex WASM verifier adapter rejects failed header verification', async (
 });
 
 test('Simplex WASM verifier adapter propagates verifier errors', async () => {
-  const verifier = createSimplexVerifier(
+  const verifier = createWasmSimplexCertificateVerifier(
     {
-      verify_notarized_payload: () => {
+      verify_notarized: () => {
         throw new Error('failed to decode notarized artifact: bad bytes');
       },
-      verify_finalized_payload: () => {
+      verify_finalized: () => {
         throw new Error('finalization certificate verification failed');
       },
     },
     {
       scheme: 'ed25519',
-      payload: 'sha256',
+      payloadKind: 'sha256',
       identity: 'ed25519',
       namespace: '',
       verificationMaterial: '',
+      verifyHeader: () => true,
     },
   );
 
   await assert.rejects(
-    async () => verifier.verifyNotarization(new Uint8Array([0xc0]), {
+    async () => verifier.verifyNotarized(new Uint8Array([0xc0]), {
       kind: 'notarization',
       source: 'get',
       key: notarizationByRoundKey(0, 1),
-      value: new Uint8Array([0xc0]),
+      raw: new Uint8Array([0xc0]),
       epoch: 0n,
       view: 1n,
     }),
@@ -813,29 +839,17 @@ test('Simplex WASM verifier adapter propagates verifier errors', async () => {
   );
 
   await assert.rejects(
-    async () => verifier.verifyFinalization(new Uint8Array([0xd0]), {
+    async () => verifier.verifyFinalized(new Uint8Array([0xd0]), {
       kind: 'finalization',
       index: 'round',
       source: 'get',
       key: finalizationByRoundKey(0, 2),
-      value: new Uint8Array([0xd0]),
+      raw: new Uint8Array([0xd0]),
       epoch: 0n,
       view: 2n,
     }),
     /finalization certificate verification failed/,
   );
-});
-
-test('certificate streams require a verifier before subscribing', async () => {
-  const store = new StoreClient('http://127.0.0.1:1').unprefixed();
-  let subscribed = false;
-  store.subscribe = async function* () {
-    subscribed = true;
-  };
-  const simplex = new SimplexSubscriptions(store);
-  const stream = simplex.subscribeCertificates()[Symbol.asyncIterator]();
-  await assert.rejects(stream.next(), /requires a configured verifier/);
-  assert.equal(subscribed, false);
 });
 
 test('streams and verifies certificate entries', async () => {
@@ -855,7 +869,7 @@ test('streams and verifies certificate entries', async () => {
           value: new Uint8Array([0x80]),
         },
         {
-          key: finalizedByHeightKey(9),
+          key: finalizationByHeightKey(9),
           value: new Uint8Array([0x90]),
         },
       ],
@@ -863,15 +877,16 @@ test('streams and verifies certificate entries', async () => {
   };
 
   const verifier: SimplexCertificateVerifier<{ view: bigint }, { marker: number }> = {
-    verifyNotarization: (bytes, context) =>
-      bytes[0] === 0x70 ? { view: context.view } : null,
-    verifyFinalization: (bytes) => ({ marker: bytes[0] }),
+    verifyNotarized: (bytes, context) =>
+      bytes[0] === 0x70 && context.source === 'stream' ? { view: context.view } : null,
+    verifyFinalized: (bytes, context) =>
+      context.source === 'stream' ? { marker: bytes[0] } : null,
   };
-  const simplex = new SimplexSubscriptions(store, { verifier });
+  const simplex = new SimplexSubscriptions(store);
 
   const batches = [];
-  for await (const batch of simplex.subscribeCertificates({
-    includeFinalizedByHeight: true,
+  for await (const batch of simplex.subscribeCertificates(verifier, {
+    includeFinalizationByHeight: true,
     sinceSequenceNumber: 10n,
   })) {
     batches.push(batch);
@@ -881,7 +896,7 @@ test('streams and verifies certificate entries', async () => {
     selectors: [
       { prefix: rangeForKind(SimplexRecordKind.NotarizationByRound).start, payloadRegex: '(?s-u).*' },
       { prefix: rangeForKind(SimplexRecordKind.FinalizationByRound).start, payloadRegex: '(?s-u).*' },
-      { prefix: rangeForKind(SimplexRecordKind.FinalizedByHeight).start, payloadRegex: '(?s-u).*' },
+      { prefix: rangeForKind(SimplexRecordKind.FinalizationByHeight).start, payloadRegex: '(?s-u).*' },
     ],
     sinceSequenceNumber: 10n,
   });
@@ -890,6 +905,14 @@ test('streams and verifies certificate entries', async () => {
     batches[0].entries.map((entry) => entry.certificate),
     [{ view: 7n }, { marker: 0x80 }, { marker: 0x90 }],
   );
+  assert.deepEqual(batches[0].entries[0], {
+    kind: 'notarization',
+    key: notarizationByRoundKey(0, 7),
+    epoch: 0n,
+    view: 7n,
+    raw: new Uint8Array([0x70]),
+    certificate: { view: 7n },
+  });
 });
 
 test('round getters and streams distinguish epochs at the same view', async () => {
@@ -910,21 +933,21 @@ test('round getters and streams distinguish epochs at the same view', async () =
     scheme: 'ed25519', epoch: BigInt(bytes[0]), view: 7n, parent: 6n,
     payload: [], certificate: [], header: [],
   });
-  const verifier = createSimplexVerifier({
-    verify_notarized_payload: (_payload, _identity, _scheme, _namespace, _material, bytes) => certificate(bytes),
-    verify_finalized_payload: (_payload, _identity, _scheme, _namespace, _material, bytes) => certificate(bytes),
-  }, { scheme: 'ed25519', payload: 'sha256', identity: 'ed25519', namespace: '', verificationMaterial: '' });
-  const reader = SimplexReader.withSession(session, { verifier });
+  const verifier = createWasmSimplexCertificateVerifier({
+    verify_notarized: (_payloadKind, _identity, _scheme, _namespace, _material, bytes) => certificate(bytes),
+    verify_finalized: (_payloadKind, _identity, _scheme, _namespace, _material, bytes) => certificate(bytes),
+  }, { scheme: 'ed25519', payloadKind: 'sha256', identity: 'ed25519', namespace: '', verificationMaterial: '', verifyHeader: () => true });
+  const reader = SimplexReader.withSession(session);
   for (const epoch of [2, 3]) {
-    assert.equal((await reader.getNotarizationByRound(epoch, 7))?.epoch, BigInt(epoch));
-    assert.equal((await reader.getFinalizationByRound(epoch, 7))?.epoch, BigInt(epoch));
-    assert.deepEqual(await reader.getNotarizationByRoundRaw(epoch, 7), new Uint8Array([epoch]));
-    assert.deepEqual(await reader.getFinalizationByRoundRaw(epoch, 7), new Uint8Array([epoch]));
+    assert.equal((await reader.getNotarizedByRound(verifier, epoch, 7))?.epoch, BigInt(epoch));
+    assert.equal((await reader.getFinalizedByRound(verifier, epoch, 7))?.epoch, BigInt(epoch));
+    assert.deepEqual(await reader.getNotarizedByRoundRaw(epoch, 7), new Uint8Array([epoch]));
+    assert.deepEqual(await reader.getFinalizedByRoundRaw(epoch, 7), new Uint8Array([epoch]));
   }
 
   requestedKeys.length = 0;
-  assert.equal(await reader.getNotarizationByRound(4, 7), null);
-  assert.equal(await reader.getFinalizationByRound(4, 7), null);
+  assert.equal(await reader.getNotarizedByRound(verifier, 4, 7), null);
+  assert.equal(await reader.getFinalizedByRound(verifier, 4, 7), null);
   assert.deepEqual(requestedKeys, [
     bytesToHex(notarizationByRoundKey(4, 7)),
     bytesToHex(finalizationByRoundKey(4, 7)),
@@ -933,13 +956,13 @@ test('round getters and streams distinguish epochs at the same view', async () =
   store.subscribe = async function* () {
     yield { sequenceNumber: 12n, entries };
   };
-  const subscriptions = new SimplexSubscriptions(store, { verifier });
+  const subscriptions = new SimplexSubscriptions(store);
   const rounds = [];
-  for await (const batch of subscriptions.subscribeCertificates()) {
+  for await (const batch of subscriptions.subscribeCertificates(verifier)) {
     for (const entry of batch.entries) {
       assert.ok('epoch' in entry);
       assert.equal(entry.certificate.epoch, entry.epoch);
-      rounds.push([entry.type, entry.certificate.epoch, entry.certificate.view]);
+      rounds.push([entry.kind, entry.certificate.epoch, entry.certificate.view]);
     }
   }
   assert.deepEqual(rounds, [
@@ -952,39 +975,65 @@ test('round getters and streams distinguish epochs at the same view', async () =
 
 test('built-in certificate verification binds epoch and view to the request', async () => {
   const certificate = { scheme: 'ed25519', epoch: 2n, view: 7n, parent: 6n, payload: [], certificate: [], header: [] };
-  const verifier = createSimplexVerifier({ verify_notarized_payload: () => certificate, verify_finalized_payload: () => certificate },
-    { scheme: 'ed25519', payload: 'sha256', identity: 'ed25519', namespace: '', verificationMaterial: '' });
-  const context = { kind: 'notarization' as const, source: 'get' as const, key: notarizationByRoundKey(2, 7), value: new Uint8Array(), epoch: 2n, view: 7n };
-  assert.ok(await verifier.verifyNotarization(new Uint8Array(), context));
-  assert.equal(await verifier.verifyNotarization(new Uint8Array(), { ...context, view: 8n }), null);
-  assert.equal(await verifier.verifyNotarization(new Uint8Array(), { ...context, epoch: 3n }), null);
+  const verifier = createWasmSimplexCertificateVerifier({ verify_notarized: () => certificate, verify_finalized: () => certificate },
+    { scheme: 'ed25519', payloadKind: 'sha256', identity: 'ed25519', namespace: '', verificationMaterial: '', verifyHeader: () => true });
+  const context = { kind: 'notarization' as const, source: 'get' as const, key: notarizationByRoundKey(2, 7), raw: new Uint8Array(), epoch: 2n, view: 7n };
+  assert.ok(await verifier.verifyNotarized(new Uint8Array(), context));
+  assert.equal(await verifier.verifyNotarized(new Uint8Array(), { ...context, view: 8n }), null);
+  assert.equal(await verifier.verifyNotarized(new Uint8Array(), { ...context, epoch: 3n }), null);
   assert.notDeepEqual(notarizationByRoundKey(2, 7), notarizationByRoundKey(3, 7));
 
   // The bundled WASM emits u64 fields as BigInt, so nothing else is accepted
-  const numeric = createSimplexVerifier({ verify_notarized_payload: () => ({ ...certificate, epoch: 2 }), verify_finalized_payload: () => certificate },
-    { scheme: 'ed25519', payload: 'sha256', identity: 'ed25519', namespace: '', verificationMaterial: '' });
-  await assert.rejects(async () => numeric.verifyNotarization(new Uint8Array(), context), /invalid epoch/);
+  const numeric = createWasmSimplexCertificateVerifier({ verify_notarized: () => ({ ...certificate, epoch: 2 }), verify_finalized: () => certificate },
+    { scheme: 'ed25519', payloadKind: 'sha256', identity: 'ed25519', namespace: '', verificationMaterial: '', verifyHeader: () => true });
+  await assert.rejects(async () => numeric.verifyNotarized(new Uint8Array(), context), /invalid epoch/);
 });
 
-test('latest finalization passes the indexed height to the verifier', async () => {
+test('built-in certificate verification always checks the header for height and latest reads', async () => {
+  const certificate = { scheme: 'ed25519', epoch: 2n, view: 7n, parent: 6n, payload: [], certificate: [], header: [0x05] };
+  const heights: bigint[] = [];
+  const verifier = createWasmSimplexCertificateVerifier({ verify_notarized: () => certificate, verify_finalized: () => certificate }, {
+    scheme: 'ed25519', payloadKind: 'sha256', identity: 'ed25519', namespace: '', verificationMaterial: '',
+    verifyHeader: ({ context, header }) => {
+      if (context.kind !== 'finalization' || context.index === 'round') {
+        return false;
+      }
+      heights.push(context.height);
+      return BigInt(header[0]) === context.height;
+    },
+  });
+  for (const index of ['height', 'latest'] as const) {
+    const context = { kind: 'finalization' as const, index, source: 'get' as const, key: finalizationByHeightKey(5), raw: new Uint8Array(), height: 5n };
+    assert.ok(await verifier.verifyFinalized(new Uint8Array(), context));
+    assert.equal(await verifier.verifyFinalized(new Uint8Array(), { ...context, height: 6n }), null);
+  }
+  assert.deepEqual(heights, [5n, 6n, 5n, 6n]);
+});
+
+test('latest finalization passes the indexed height to the verifier and rejects a failed header check', async () => {
   const store = new StoreClient('http://127.0.0.1:1').unprefixed();
   const session = ReadSession.fixed(store);
   session.range = async () => ({
-    results: [{ key: finalizedByHeightKey(11), value: new Uint8Array([0xb0]) }],
+    results: [{ key: finalizationByHeightKey(11), value: new Uint8Array([0xb0]) }],
     sequenceNumber: 1n,
   });
   const verifier: SimplexCertificateVerifier<unknown, { height: bigint }> = {
-    verifyNotarization: () => null,
-    verifyFinalization: (bytes, context) => {
+    verifyNotarized: () => null,
+    verifyFinalized: (bytes, context) => {
       assert.equal(bytes[0], 0xb0);
       assert.equal(context.kind, 'finalization');
       assert.equal(context.index, 'latest');
       return context.index === 'latest' ? { height: context.height } : null;
     },
   };
-  const simplex = SimplexReader.withSession(session, { verifier });
-  assert.deepEqual(await simplex.latestFinalization(), { height: 11n });
-  assert.deepEqual(await simplex.latestFinalizationRaw(), new Uint8Array([0xb0]));
+  const simplex = SimplexReader.withSession(session);
+  assert.deepEqual(await simplex.latestFinalized(verifier), { height: 11n });
+  assert.deepEqual(await simplex.latestFinalizedRaw(), new Uint8Array([0xb0]));
+
+  const certificate = { scheme: 'ed25519', epoch: 0n, view: 11n, parent: 10n, payload: [], certificate: [], header: [] };
+  const rejecting = createWasmSimplexCertificateVerifier({ verify_notarized: () => null, verify_finalized: () => certificate },
+    { scheme: 'ed25519', payloadKind: 'sha256', identity: 'ed25519', namespace: '', verificationMaterial: '', verifyHeader: () => false });
+  await assert.rejects(() => simplex.latestFinalized(rejecting), /simplex finalization verification failed/);
 });
 
 test('certificate streams reject round keys of the wrong width', async () => {
@@ -996,12 +1045,12 @@ test('certificate streams reject round keys of the wrong width', async () => {
     };
   };
   const verifier: SimplexCertificateVerifier = {
-    verifyNotarization: () => null,
-    verifyFinalization: () => null,
+    verifyNotarized: () => null,
+    verifyFinalized: () => null,
   };
-  const simplex = new SimplexSubscriptions(store, { verifier });
+  const simplex = new SimplexSubscriptions(store);
   await assert.rejects(async () => {
-    for await (const batch of simplex.subscribeCertificates()) {
+    for await (const batch of simplex.subscribeCertificates(verifier)) {
       assert.fail(`decoded a malformed key: ${batch.entries.length}`);
     }
   }, /invalid simplex round key length/);
