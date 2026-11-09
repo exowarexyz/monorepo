@@ -1,7 +1,7 @@
 pub use crate::service::server::encode::{
     encode_operation_multi_proof, encode_operation_range_proof,
 };
-use crate::{adapter::codec::op_count_for_watermark, QmdbError};
+use crate::{adapter::codec::op_count_for_tip, QmdbError};
 use bytes::Bytes;
 use commonware_codec::Codec;
 use commonware_cryptography::{Digest, Hasher};
@@ -20,12 +20,12 @@ use commonware_storage::{
 };
 use std::collections::HashMap;
 
-/// Operation range plus the raw Merkle proof material used to verify
-/// it. This is suitable for checkpointing and local Merkle continuation.
+/// Operation range plus the Merkle proof material used to verify
+/// it. This is suitable for local Merkle continuation.
 #[derive(Clone, Debug, PartialEq)]
 #[must_use]
-pub struct OperationRangeCheckpoint<D: Digest, F: Graftable> {
-    pub watermark: Location<F>,
+pub struct OperationRangeProof<D: Digest, F: Graftable> {
+    pub tip: Location<F>,
     /// Operations-log root the proof is checked against.
     pub ops_root: D,
     /// Links `ops_root` to the canonical root of a database with current state.
@@ -45,8 +45,8 @@ pub(crate) fn canonical_root<F: Graftable, H: Hasher>(
     witness.map_or(*ops_root, |witness| witness.root::<H>(ops_root))
 }
 
-impl<D: Digest, F: Graftable> OperationRangeCheckpoint<D, F> {
-    /// Canonical root at `watermark`: the current root when `ops_root_witness` is
+impl<D: Digest, F: Graftable> OperationRangeProof<D, F> {
+    /// Canonical root at `tip`: the current root when `ops_root_witness` is
     /// present, otherwise `ops_root`.
     pub fn canonical_root<H: Hasher<Digest = D>>(&self) -> D {
         canonical_root::<F, H>(&self.ops_root, self.ops_root_witness.as_ref())
@@ -63,7 +63,7 @@ impl<D: Digest, F: Graftable> OperationRangeCheckpoint<D, F> {
         )
     }
 
-    /// Reconstruct the Merkle frontier from an authenticated range ending at the watermark.
+    /// Reconstruct the Merkle frontier from an authenticated range ending at the tip.
     pub fn reconstruct_peaks<H: Hasher<Digest = D>>(
         &self,
     ) -> Result<Vec<(Position<F>, u32, D)>, QmdbError> {
@@ -79,35 +79,37 @@ impl<D: Digest, F: Graftable> OperationRangeCheckpoint<D, F> {
         H: Hasher<Digest = D>,
         S: Strategy,
     {
-        let size = Position::try_from(self.proof.leaves)
-            .map_err(|e| QmdbError::CorruptData(format!("invalid checkpoint leaf count: {e}")))?;
-
-        let checkpoint_leaves = self.watermark.checked_add(1).ok_or_else(|| {
-            QmdbError::CorruptData("checkpoint watermark exceeds the location domain".into())
+        let size = Position::try_from(self.proof.leaves).map_err(|e| {
+            QmdbError::CorruptData(format!("invalid operation range proof leaf count: {e}"))
         })?;
-        if checkpoint_leaves != self.proof.leaves {
+
+        let tip_leaves = self.tip.checked_add(1).ok_or_else(|| {
+            QmdbError::CorruptData("operation range proof tip exceeds the location domain".into())
+        })?;
+        if tip_leaves != self.proof.leaves {
             return Err(QmdbError::CorruptData(format!(
-                "checkpoint watermark implies {checkpoint_leaves} leaves, proof has {}",
+                "operation range proof tip implies {tip_leaves} leaves, proof has {}",
                 self.proof.leaves
             )));
         }
 
-        let operation_count = u64::try_from(self.encoded_operations.len())
-            .map_err(|_| QmdbError::CorruptData("checkpoint operation count exceeds u64".into()))?;
+        let operation_count = u64::try_from(self.encoded_operations.len()).map_err(|_| {
+            QmdbError::CorruptData("operation range proof operation count exceeds u64".into())
+        })?;
         let end_location = self
             .start_location
             .checked_add(operation_count)
-            .ok_or_else(|| QmdbError::CorruptData("checkpoint range end overflow".into()))?;
+            .ok_or_else(|| QmdbError::CorruptData("operation range proof end overflow".into()))?;
         if end_location != self.proof.leaves {
             return Err(QmdbError::CorruptData(format!(
-                "checkpoint range ends at {end_location}, expected {}",
+                "operation range proof ends at {end_location}, expected {}",
                 self.proof.leaves
             )));
         }
 
         if !self.verify::<H>() {
             return Err(QmdbError::CorruptData(
-                "reconstruct checkpoint peaks failed because the proof or pins are invalid".into(),
+                "reconstruct operation range proof peaks failed because the proof or pins are invalid".into(),
             ));
         }
 
@@ -120,13 +122,13 @@ impl<D: Digest, F: Graftable> OperationRangeCheckpoint<D, F> {
         )?;
         if extension.size != size {
             return Err(QmdbError::CorruptData(format!(
-                "checkpoint extension size mismatch. Expected {size}, got {}",
+                "operation range proof extension size mismatch. Expected {size}, got {}",
                 extension.size
             )));
         }
         if extension.root != self.ops_root {
             return Err(QmdbError::CorruptData(
-                "checkpoint extension root mismatch".into(),
+                "operation range proof extension root mismatch".into(),
             ));
         }
 
@@ -137,41 +139,45 @@ impl<D: Digest, F: Graftable> OperationRangeCheckpoint<D, F> {
 /// Operation-log membership proof for encoded operations at selected locations.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[must_use]
-pub struct RawBatchMultiProof<D: Digest, F: Graftable> {
-    pub watermark: Location<F>,
+pub struct OperationMultiProof<D: Digest, F: Graftable> {
+    pub tip: Location<F>,
     /// Operations-log root the proof is checked against.
     pub ops_root: D,
     /// Links `ops_root` to the canonical root of a database with current state.
     pub ops_root_witness: Option<OpsRootWitness<F, D>>,
     pub proof: Proof<F, D>,
-    pub operations: Vec<(Location<F>, Bytes)>,
+    pub encoded_operations: Vec<(Location<F>, Bytes)>,
 }
 
-impl<D: Digest, F: Graftable> RawBatchMultiProof<D, F> {
+impl<D: Digest, F: Graftable> OperationMultiProof<D, F> {
+    /// Canonical root at `tip`: the current root when `ops_root_witness` is
+    /// present, otherwise `ops_root`.
+    pub fn canonical_root<H: Hasher<Digest = D>>(&self) -> D {
+        canonical_root::<F, H>(&self.ops_root, self.ops_root_witness.as_ref())
+    }
+
     pub fn verify<H: Hasher<Digest = D>>(&self) -> bool {
         let hasher = commonware_storage::qmdb::hasher::<H>();
         self.proof
-            .verify_multi_inclusion(&hasher, &self.operations, &self.ops_root)
+            .verify_multi_inclusion(&hasher, &self.encoded_operations, &self.ops_root)
     }
 }
 
-/// Validate a `[start, start + max_locations)` window against the published
-/// watermark. Returns the exclusive end bound clamped to the watermark's
-/// available count (watermark + 1).
+/// Validate a `[start, start + max_locations)` window against the requested
+/// tip. Returns the exclusive end bound clamped to the tip's available count
+/// (tip + 1).
 pub(crate) fn resolve_range_bounds<F: Family>(
-    watermark: Location<F>,
+    tip: Location<F>,
     start_location: Location<F>,
     max_locations: u32,
 ) -> Result<Location<F>, crate::QmdbError> {
     if max_locations == 0 {
         return Err(crate::QmdbError::InvalidRangeLength);
     }
-    let count = watermark
-        .checked_add(1)
-        .ok_or_else(|| crate::QmdbError::CorruptData("watermark overflow".to_string()))?;
+    let count = op_count_for_tip(tip)?;
     if start_location >= count {
-        return Err(crate::QmdbError::RangeStartOutOfBounds {
-            start: start_location.as_u64(),
+        return Err(crate::QmdbError::LocationOutOfBounds {
+            location: start_location.as_u64(),
             count: count.as_u64(),
         });
     }
@@ -182,31 +188,31 @@ pub(crate) fn resolve_range_bounds<F: Family>(
 
 /// Operations a cached multi-proof covers: rows still to read at `Read`
 /// locations, or rows the caller already holds, such as a subscription frame.
-/// Locations are strictly ascending and at most the proof's watermark.
+/// Locations are strictly ascending and at most the proof's tip.
 pub(crate) enum MultiProofOperations<'a, F: Family> {
     Read(&'a [Location<F>]),
     Given(Vec<(Location<F>, Bytes)>),
 }
 
-/// Build and self-verify a `RawBatchMultiProof` over the given operations from
+/// Build and self-verify an `OperationMultiProof` over the given operations from
 /// the digests at `positions`, the operations' multi-proof plan, and the
 /// caller-supplied `root`.
-pub(crate) fn build_batch_multi_proof<F, H>(
+pub(crate) fn build_operation_multi_proof<F, H>(
     positions: &[Position<F>],
     digests: &HashMap<Position<F>, H::Digest>,
-    watermark: Location<F>,
+    tip: Location<F>,
     root: H::Digest,
     inactive_peaks: usize,
-    operations: Vec<(Location<F>, Bytes)>,
-) -> Result<RawBatchMultiProof<H::Digest, F>, crate::QmdbError>
+    encoded_operations: Vec<(Location<F>, Bytes)>,
+) -> Result<OperationMultiProof<H::Digest, F>, crate::QmdbError>
 where
     F: Graftable,
     H: Hasher,
 {
-    if operations.is_empty() {
+    if encoded_operations.is_empty() {
         return Err(crate::QmdbError::EmptyProofRequest);
     }
-    let leaves = op_count_for_watermark(watermark)?;
+    let leaves = op_count_for_tip(tip)?;
     let size = Position::try_from(leaves).map_err(crate::error::merkle_error)?;
     if inactive_peaks > F::peaks(size).count() {
         return Err(crate::error::merkle_error(merkle::Error::<F>::InvalidProof));
@@ -221,8 +227,8 @@ where
         })
         .collect::<Result<Vec<_>, _>>()
         .map_err(crate::error::merkle_error)?;
-    let raw = RawBatchMultiProof {
-        watermark,
+    let proof = OperationMultiProof {
+        tip,
         ops_root: root,
         ops_root_witness: None,
         proof: Proof {
@@ -230,28 +236,28 @@ where
             inactive_peaks,
             digests,
         },
-        operations,
+        encoded_operations,
     };
-    if !raw.verify::<H>() {
+    if !proof.verify::<H>() {
         return Err(crate::QmdbError::ProofVerification {
-            kind: crate::ProofKind::BatchMulti,
+            kind: crate::ProofKind::OperationMulti,
         });
     }
-    Ok(raw)
+    Ok(proof)
 }
 
-/// Build and self-verify an `OperationRangeCheckpoint` over `plan`'s range from
+/// Build and self-verify an `OperationRangeProof` over `plan`'s range from
 /// the digests at its positions and the pins before `start_location`, using the
 /// caller-supplied `root` and pre-loaded `encoded_operations`.
-pub(crate) fn build_operation_range_checkpoint<F, H>(
+pub(crate) fn build_operation_range_proof<F, H>(
     plan: RangePlan<F>,
     digests: &HashMap<Position<F>, H::Digest>,
-    watermark: Location<F>,
+    tip: Location<F>,
     start_location: Location<F>,
     root: H::Digest,
     inactive_peaks: usize,
     encoded_operations: Vec<Bytes>,
-) -> Result<OperationRangeCheckpoint<H::Digest, F>, crate::QmdbError>
+) -> Result<OperationRangeProof<H::Digest, F>, crate::QmdbError>
 where
     F: Graftable,
     H: Hasher,
@@ -271,8 +277,8 @@ where
             })
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let checkpoint = OperationRangeCheckpoint {
-        watermark,
+    let range_proof = OperationRangeProof {
+        tip,
         ops_root: root,
         ops_root_witness: None,
         start_location,
@@ -280,25 +286,25 @@ where
         proof,
         encoded_operations,
     };
-    if !checkpoint.verify::<H>() {
+    if !range_proof.verify::<H>() {
         return Err(crate::QmdbError::ProofVerification {
-            kind: crate::ProofKind::RangeCheckpoint,
+            kind: crate::ProofKind::OperationRange,
         });
     }
-    Ok(checkpoint)
+    Ok(range_proof)
 }
 
 /// Current proof for one active key's update operation.
 #[derive(Clone, Debug, PartialEq)]
 #[must_use]
-pub struct RawKeyValueProof<D: Digest, Op, const N: usize, F: Graftable> {
-    pub watermark: Location<F>,
+pub struct KeyValueProof<D: Digest, Op, const N: usize, F: Graftable> {
+    pub tip: Location<F>,
     pub root: D,
     pub proof: OperationProof<F, D, N>,
     pub operation: Op,
 }
 
-impl<D: Digest, Op, const N: usize, F: Graftable> RawKeyValueProof<D, Op, N, F>
+impl<D: Digest, Op, const N: usize, F: Graftable> KeyValueProof<D, Op, N, F>
 where
     Op: Codec + Clone + Operation<F>,
 {
@@ -313,7 +319,7 @@ where
 /// Current ordered key-exclusion proof payload.
 #[derive(Clone, Debug, PartialEq)]
 #[must_use]
-pub struct RawKeyExclusionProof<
+pub struct KeyExclusionProof<
     D: Digest,
     K: QmdbKey + Codec,
     V: Codec + Clone + Send + Sync,
@@ -321,7 +327,7 @@ pub struct RawKeyExclusionProof<
     F: Graftable,
     E: ValueEncoding<Value = V> = VariableEncoding<V>,
 > {
-    pub watermark: Location<F>,
+    pub tip: Location<F>,
     pub root: D,
     pub requested_key: K,
     pub proof: ExclusionProof<F, K, E, D, N>,
@@ -334,7 +340,7 @@ impl<
         const N: usize,
         F: Graftable,
         E: ValueEncoding<Value = V>,
-    > RawKeyExclusionProof<D, K, V, N, F, E>
+    > KeyExclusionProof<D, K, V, N, F, E>
 where
     ordered::Operation<F, K, E>: Codec + Clone,
 {
@@ -345,7 +351,7 @@ where
 
 #[derive(Clone, Debug, PartialEq)]
 #[must_use]
-pub enum RawKeyLookupProof<
+pub enum KeyLookupProof<
     D: Digest,
     K: QmdbKey + Codec,
     V: Codec + Clone + Send + Sync,
@@ -353,13 +359,13 @@ pub enum RawKeyLookupProof<
     F: Graftable,
     E: ValueEncoding<Value = V> = VariableEncoding<V>,
 > {
-    Hit(RawKeyValueProof<D, ordered::Operation<F, K, E>, N, F>),
-    Miss(RawKeyExclusionProof<D, K, V, N, F, E>),
+    Hit(KeyValueProof<D, ordered::Operation<F, K, E>, N, F>),
+    Miss(KeyExclusionProof<D, K, V, N, F, E>),
 }
 
 #[derive(Clone, Debug, PartialEq)]
 #[must_use]
-pub struct RawKeyRangeProof<
+pub struct KeyRangeProof<
     D: Digest,
     K: QmdbKey + Codec,
     V: Codec + Clone + Send + Sync,
@@ -367,9 +373,9 @@ pub struct RawKeyRangeProof<
     F: Graftable,
     E: ValueEncoding<Value = V> = VariableEncoding<V>,
 > {
-    pub watermark: Location<F>,
-    pub entries: Vec<RawKeyValueProof<D, ordered::Operation<F, K, E>, N, F>>,
-    pub start_proof: Option<RawKeyExclusionProof<D, K, V, N, F, E>>,
+    pub tip: Location<F>,
+    pub entries: Vec<KeyValueProof<D, ordered::Operation<F, K, E>, N, F>>,
+    pub start_proof: Option<KeyExclusionProof<D, K, V, N, F, E>>,
 }
 
 // `Verified*` types below all share one invariant: the Merkle proof has already
@@ -444,7 +450,7 @@ pub struct VerifiedKeyRange<
 /// current-state root.
 #[derive(Clone, Debug, PartialEq)]
 #[must_use]
-pub struct VerifiedCurrentRange<D: Digest, Op, const N: usize, F: Family> {
+pub struct VerifiedCurrentOperationRange<D: Digest, Op, const N: usize, F: Family> {
     pub tip: Location<F>,
     pub root: D,
     pub start_location: Location<F>,
@@ -454,8 +460,8 @@ pub struct VerifiedCurrentRange<D: Digest, Op, const N: usize, F: Family> {
 
 #[derive(Clone, Debug, PartialEq)]
 #[must_use]
-pub struct CurrentOperationRangeProofResult<D: Digest, Op, const N: usize, F: Graftable> {
-    pub watermark: Location<F>,
+pub struct CurrentOperationRangeProof<D: Digest, Op, const N: usize, F: Graftable> {
+    pub tip: Location<F>,
     pub root: D,
     pub start_location: Location<F>,
     pub proof: RangeProof<F, D>,
@@ -463,7 +469,7 @@ pub struct CurrentOperationRangeProofResult<D: Digest, Op, const N: usize, F: Gr
     pub chunks: Vec<[u8; N]>,
 }
 
-impl<D: Digest, Op, const N: usize, F: Graftable> CurrentOperationRangeProofResult<D, Op, N, F>
+impl<D: Digest, Op, const N: usize, F: Graftable> CurrentOperationRangeProof<D, Op, N, F>
 where
     Op: Codec,
 {
@@ -481,7 +487,8 @@ where
 mod tests {
     use super::*;
     use crate::service::proto::qmdb::v1::{
-        MultiProofOperation, OperationMultiProof, OperationRangeProof,
+        MultiProofOperation, OperationMultiProof as ProtoOperationMultiProof,
+        OperationRangeProof as ProtoOperationRangeProof,
     };
     use buffa::Message;
     use commonware_codec::{Copying, Decode, DecodeExt, Encode};
@@ -500,8 +507,8 @@ mod tests {
                     pending_chunk_digest: None.try_into().unwrap(),
                     partial_chunk: Some((start + 1, digest)),
                 });
-                let range = OperationRangeCheckpoint {
-                    watermark: Location::new(start + 1),
+                let range = OperationRangeProof {
+                    tip: Location::new(start + 1),
                     ops_root: digest,
                     ops_root_witness: witness.clone(),
                     start_location: Location::new(start),
@@ -516,7 +523,7 @@ mod tests {
 
                 // Encoding must match the generated protobuf and preserve every field.
                 let encoded_witness = witness.as_ref().map(Encode::encode).unwrap_or_default();
-                let expected = OperationRangeProof {
+                let expected = ProtoOperationRangeProof {
                     proof: range.proof.encode(),
                     start_location: start,
                     encoded_operations: range.encoded_operations.clone(),
@@ -526,7 +533,7 @@ mod tests {
                     ..Default::default()
                 };
                 let encoded = encode_operation_range_proof(&range);
-                let decoded = OperationRangeProof::decode_from_slice(&encoded).unwrap();
+                let decoded = ProtoOperationRangeProof::decode_from_slice(&encoded).unwrap();
                 assert_eq!(encoded, expected.encode_to_vec());
                 assert_eq!(decoded, expected);
                 assert_eq!(
@@ -545,22 +552,22 @@ mod tests {
                 }
 
                 // Multi-proof encoding must preserve each operation's location and bytes.
-                let multi = RawBatchMultiProof {
-                    watermark: range.watermark,
+                let multi = OperationMultiProof {
+                    tip: range.tip,
                     ops_root: digest,
                     ops_root_witness: range.ops_root_witness,
                     proof: range.proof,
-                    operations: range
+                    encoded_operations: range
                         .encoded_operations
                         .into_iter()
                         .enumerate()
                         .map(|(offset, bytes)| (Location::new(start + offset as u64), bytes))
                         .collect(),
                 };
-                let expected = OperationMultiProof {
+                let expected = ProtoOperationMultiProof {
                     proof: multi.proof.encode(),
                     operations: multi
-                        .operations
+                        .encoded_operations
                         .iter()
                         .map(|(location, bytes)| MultiProofOperation {
                             location: location.as_u64(),
@@ -573,7 +580,7 @@ mod tests {
                     ..Default::default()
                 };
                 let encoded = encode_operation_multi_proof(&multi);
-                let decoded = OperationMultiProof::decode_from_slice(&encoded).unwrap();
+                let decoded = ProtoOperationMultiProof::decode_from_slice(&encoded).unwrap();
                 assert_eq!(encoded, expected.encode_to_vec());
                 assert_eq!(decoded, expected);
             }

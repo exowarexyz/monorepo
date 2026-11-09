@@ -1,4 +1,4 @@
-//! Unordered QMDB ConnectRPC e2e: streamed range checkpoints plus client-side
+//! Unordered QMDB ConnectRPC e2e: streamed operation range proofs plus client-side
 //! validation of tampered proofs.
 
 mod common;
@@ -23,7 +23,7 @@ use connectrpc::{client::ClientConfig, ErrorCode};
 use exoware_qmdb::{
     adapter::upload::Publication,
     service::{
-        client::rpc::{CurrentOperationClient, OperationLogClient, OperationLogSubscribeProof},
+        client::rpc::{CurrentOperationClient, OperationLogClient, VerifiedSubscribeFrame},
         proto::qmdb::v1::{
             GetCurrentOperationRangeRequest as ProtoGetCurrentOperationRangeRequest,
             GetManyRequest as ProtoGetManyRequest,
@@ -78,7 +78,7 @@ type CurrentDb = LocalCurrentUnorderedDb<
 >;
 
 async fn spawn_qmdb_range_server(
-    raw_store: PrefixedStoreClient,
+    store: PrefixedStoreClient,
 ) -> (tokio::task::JoinHandle<()>, String) {
     common::spawn_connect_service(
         exoware_qmdb::service::server::unordered_operation_log_stack::<
@@ -88,13 +88,13 @@ async fn spawn_qmdb_range_server(
             Vec<u8>,
             N,
             commonware_storage::qmdb::value::VariableEncoding<Vec<u8>>,
-        >(raw_store, op_cfg()),
+        >(store, op_cfg()),
     )
     .await
 }
 
 async fn spawn_mmb_qmdb_range_server(
-    raw_store: PrefixedStoreClient,
+    store: PrefixedStoreClient,
 ) -> (tokio::task::JoinHandle<()>, String) {
     common::spawn_connect_service(
         exoware_qmdb::service::server::unordered_operation_log_stack::<
@@ -104,13 +104,13 @@ async fn spawn_mmb_qmdb_range_server(
             Vec<u8>,
             N,
             commonware_storage::qmdb::value::VariableEncoding<Vec<u8>>,
-        >(raw_store, op_cfg()),
+        >(store, op_cfg()),
     )
     .await
 }
 
 async fn spawn_qmdb_full_server(
-    raw_store: PrefixedStoreClient,
+    store: PrefixedStoreClient,
 ) -> (tokio::task::JoinHandle<()>, String) {
     common::spawn_connect_service(exoware_qmdb::service::server::unordered_stack::<
         mmr::Family,
@@ -119,7 +119,7 @@ async fn spawn_qmdb_full_server(
         Vec<u8>,
         N,
         commonware_storage::qmdb::value::VariableEncoding<Vec<u8>>,
-    >(raw_store, fixed_key_op_cfg(), ()))
+    >(store, fixed_key_op_cfg(), ()))
     .await
 }
 
@@ -530,12 +530,12 @@ async fn test_unordered_connect_get_operation_range_returns_verifiable_proof() {
     let error = common::operation_log_rpc_client(&qmdb_url)
         .get_operation_range(request.clone())
         .await
-        .expect_err("caller floor must govern an uncached publication lookup");
+        .expect_err("caller floor must govern an uncached watermark lookup");
     assert_eq!(error.code, connectrpc::ErrorCode::Aborted);
 
     for min_sequence_number in [None, Some(1)] {
         let proof = connect_client
-            .get_operation_range(
+            .operation_range(
                 ProtoGetOperationRangeRequest {
                     tip: u64::try_from(source.operations.len() - 1).expect("tip fits"),
                     start_location: 1,
@@ -571,7 +571,7 @@ async fn test_unordered_connect_get_operations_returns_verifiable_multi_proof() 
     let tip = u64::try_from(source.operations.len() - 1).expect("tip fits");
     let locations = vec![0, tip / 2, tip];
     let verified = operation_log_client(&qmdb_url)
-        .get_operations(
+        .operations(
             ProtoGetOperationsRequest {
                 tip,
                 locations: locations.clone(),
@@ -615,7 +615,7 @@ async fn test_unordered_current_get_operations_authenticates_ops_root_witness() 
 
     // The trusted root is the current root. The witness binds the ops root to it.
     let verified = client
-        .get_operations(request.clone(), &source.root)
+        .operations(request.clone(), &source.root)
         .await
         .expect("get operations under current root");
     assert_eq!(verified.root, source.root);
@@ -628,15 +628,59 @@ async fn test_unordered_current_get_operations_authenticates_ops_root_witness() 
     );
 
     let error = client
-        .get_operations(request, &Sha256::fill(0xAB))
+        .operations(request, &Sha256::fill(0xAB))
         .await
         .expect_err("witness must not verify under another root");
     assert!(matches!(
         error,
         QmdbError::ProofVerification {
-            kind: exoware_qmdb::ProofKind::BatchMulti
+            kind: exoware_qmdb::ProofKind::OperationMulti
         }
     ));
+}
+
+#[tokio::test]
+async fn test_unordered_current_operations_return_the_current_root() {
+    let store_client = common::local_store_client().await;
+    let source = build_current_source_batch().await;
+    commit_current_upload(&store_client, &source).await;
+
+    let (_qmdb_server, qmdb_url) = spawn_qmdb_full_server(store_client.unprefixed()).await;
+    let tip = source.latest_location;
+    let locations = [Location::new(0), tip];
+    let expected = locations
+        .iter()
+        .map(|&location| {
+            (
+                location,
+                source.operations[location.as_u64() as usize].clone(),
+            )
+        })
+        .collect::<Vec<_>>();
+
+    // The native reader derives the current root from the stored witness.
+    let native = exoware_qmdb::adapter::Unordered::<mmr::Family, Sha256, Digest, Vec<u8>, N>::new(
+        store_client.unprefixed(),
+        fixed_key_op_cfg(),
+    )
+    .operations(tip, &locations, None)
+    .await
+    .expect("native operations");
+    assert_eq!(native.tip, tip);
+    assert_eq!(native.root, source.root);
+    assert_eq!(native.operations, expected);
+
+    // The per-kind client verifies the same operations against the trusted root.
+    let client = key_lookup_client(&qmdb_url);
+    let verified = client
+        .operations(tip, &locations, None, &source.root)
+        .await
+        .expect("client operations");
+    assert_eq!(verified, native);
+    assert!(client
+        .operations(tip, &locations, None, &Sha256::fill(0xAB))
+        .await
+        .is_err());
 }
 
 #[tokio::test]
@@ -649,14 +693,14 @@ async fn test_unordered_connect_get_many_returns_present_key_proofs() {
     let connect_client = key_lookup_client(&qmdb_url);
 
     let results = connect_client
-        .get_many(
+        .get_hits(
             source.latest_location,
             &[source.alpha, source.beta],
             None,
             &source.root,
         )
         .await
-        .expect("get_many");
+        .expect("get_hits");
 
     let expected_alpha = latest_operation_for_fixed_key(&source.operations, source.alpha.as_ref());
     let expected_beta = latest_operation_for_fixed_key(&source.operations, source.beta.as_ref());
@@ -686,7 +730,7 @@ async fn test_unordered_current_operation_range_connect_returns_verifiable_proof
     let connect_client = current_operation_client(&qmdb_url);
 
     let proof = connect_client
-        .get_current_operation_range(
+        .current_operation_range(
             ProtoGetCurrentOperationRangeRequest {
                 tip: source.latest_location.as_u64(),
                 start_location: 0,
@@ -737,7 +781,7 @@ async fn test_unordered_current_endpoints_enforce_optional_sequence_minimum() {
         .await
         .expect_err("cold unordered get_many must enforce the sequence minimum");
     let cold_current = current
-        .get_current_operation_range(
+        .current_operation_range(
             ProtoGetCurrentOperationRangeRequest {
                 tip: source.latest_location.as_u64() + 1,
                 start_location: 0,
@@ -778,7 +822,7 @@ async fn test_unordered_current_endpoints_enforce_optional_sequence_minimum() {
             .await
             .expect("unordered get_many at available sequence");
         let _ = current
-            .get_current_operation_range(
+            .current_operation_range(
                 ProtoGetCurrentOperationRangeRequest {
                     tip: source.latest_location.as_u64(),
                     start_location: 0,
@@ -814,7 +858,7 @@ async fn test_unordered_current_endpoints_enforce_optional_sequence_minimum() {
         .await
         .expect("cached unordered get_many uses the publication floor");
     let _ = current
-        .get_current_operation_range(
+        .current_operation_range(
             ProtoGetCurrentOperationRangeRequest {
                 tip: source.latest_location.as_u64(),
                 start_location: 0,
@@ -1143,7 +1187,7 @@ async fn current_boundary_nodes<F: commonware_storage::merkle::Graftable + Parti
             assert_eq!(proof.location, *location);
             assert_eq!(proof.operation, operations[**location as usize]);
             let proof = range_client
-                .get_current_operation_range(
+                .current_operation_range(
                     ProtoGetCurrentOperationRangeRequest {
                         tip,
                         start_location: **location,
@@ -1226,14 +1270,14 @@ async fn test_unordered_connect_omits_missing_and_rejects_duplicate_range_and_st
     let missing = Sha256::fill(0xCC);
     let connect_client = key_lookup_client(&qmdb_url);
     let existing = connect_client
-        .get_many(
+        .get_hits(
             source.latest_location,
             &[source.alpha, missing],
             None,
             &source.root,
         )
         .await
-        .expect("unordered get_many with missing key");
+        .expect("unordered get_hits with missing key");
     let expected_alpha = latest_operation_for_fixed_key(&source.operations, source.alpha.as_ref());
     assert_eq!(existing.len(), 1);
     assert_eq!(existing[0].location, expected_alpha.0);
@@ -1265,13 +1309,13 @@ async fn test_unordered_connect_omits_missing_and_rejects_duplicate_range_and_st
 
     let stale_root = Sha256::fill(0xDD);
     let err = connect_client
-        .get_many(source.latest_location, &[source.alpha], None, &stale_root)
+        .get_hits(source.latest_location, &[source.alpha], None, &stale_root)
         .await
         .expect_err("stale root should be rejected");
     assert!(matches!(
         err,
         QmdbError::ProofVerification {
-            kind: exoware_qmdb::ProofKind::CurrentKeyValue
+            kind: exoware_qmdb::ProofKind::KeyValue
         }
     ));
 }
@@ -1402,15 +1446,14 @@ async fn test_unordered_connect_subscribe_emits_verifiable_range_proof() {
     tokio::time::sleep(Duration::from_millis(50)).await;
     commit_upload(&store_client, &source).await;
 
-    let frame: OperationLogSubscribeProof<Digest, BatchOperation, mmr::Family> =
-        tokio::time::timeout(
-            Duration::from_secs(5),
-            stream.message_with_root(common::trusted_root(source.root)),
-        )
-        .await
-        .expect("timeout")
-        .expect("stream result")
-        .expect("stream frame");
+    let frame: VerifiedSubscribeFrame<Digest, BatchOperation, mmr::Family> = tokio::time::timeout(
+        Duration::from_secs(5),
+        stream.message_with_root(common::trusted_root(source.root)),
+    )
+    .await
+    .expect("timeout")
+    .expect("stream result")
+    .expect("stream frame");
 
     assert!(frame.resume_sequence_number > 0);
     let expected: Vec<(Location<mmr::Family>, BatchOperation)> = source
@@ -1441,7 +1484,7 @@ async fn test_unordered_mmb_connect_subscribe_emits_verifiable_range_proof() {
     tokio::time::sleep(Duration::from_millis(50)).await;
     commit_mmb_upload(&store_client, &source).await;
 
-    let frame: OperationLogSubscribeProof<Digest, MmbBatchOperation, mmb::Family> =
+    let frame: VerifiedSubscribeFrame<Digest, MmbBatchOperation, mmb::Family> =
         tokio::time::timeout(
             Duration::from_secs(5),
             stream.message_with_root(common::trusted_root(source.root)),
@@ -1501,7 +1544,7 @@ async fn test_unordered_connect_client_rejects_invalid_streamed_proof() {
     assert!(matches!(
         err,
         QmdbError::ProofVerification {
-            kind: exoware_qmdb::ProofKind::BatchMulti
+            kind: exoware_qmdb::ProofKind::OperationMulti
         }
     ));
 }
@@ -1542,17 +1585,17 @@ async fn test_unordered_current_proofs_store_calls() {
     };
     // The first proof loads the tip; later ones read only their own rows and nodes
     assert_eq!(
-        store_calls(&query, client.get_raw(tip, source.alpha, None)).await,
+        store_calls(&query, client.get_proof(tip, &source.alpha, None)).await,
         calls(0, 2, 2),
     );
     assert_eq!(
-        store_calls(&query, client.get_raw(tip, source.alpha, None)).await,
+        store_calls(&query, client.get_proof(tip, &source.alpha, None)).await,
         calls(0, 1, 1),
     );
     assert_eq!(
         store_calls(
             &query,
-            client.get_many_raw(tip, &[source.alpha, source.beta], None),
+            client.get_hit_proofs(tip, &[source.alpha, source.beta], None),
         )
         .await,
         calls(0, 2, 2),
@@ -1560,7 +1603,7 @@ async fn test_unordered_current_proofs_store_calls() {
     assert_eq!(
         store_calls(
             &query,
-            client.current_operation_range_raw(tip, tip - 2, 2, None),
+            client.current_operation_range_proof(tip, tip - 2, 2, None),
         )
         .await,
         calls(0, 0, 1),
@@ -1572,7 +1615,7 @@ async fn test_unordered_current_proofs_store_calls() {
             &query,
             new_client()
                 .await
-                .get_many_raw(tip, &[source.alpha, source.beta], None),
+                .get_hit_proofs(tip, &[source.alpha, source.beta], None),
         )
         .await,
         calls(0, 3, 3),
@@ -1595,7 +1638,7 @@ async fn test_unordered_concurrent_cold_proofs_load_the_tip_once() {
     client.latest_published_watermark().await.unwrap();
 
     query.take_calls();
-    futures::future::try_join_all((0..4).map(|_| client.get_raw(tip, source.alpha, None)))
+    futures::future::try_join_all((0..4).map(|_| client.get_proof(tip, &source.alpha, None)))
         .await
         .unwrap();
     // One tip batch, then one proof-node batch per request

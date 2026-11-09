@@ -93,7 +93,10 @@ async fn check_large_locations<F: Graftable + PartialEq>(family: &str, start: u6
         qmdb_client.latest_published_watermark().await.unwrap(),
         Some(end - 1)
     );
-    assert_eq!(qmdb_client.root_at(end - 1).await.unwrap(), expected_root);
+    assert_eq!(
+        qmdb_client.root_at(end - 1, None).await.unwrap(),
+        expected_root
+    );
     let (server, url) = common::spawn_connect_service(
         exoware_qmdb::service::server::keyless_operation_log_stack::<
             F,
@@ -131,10 +134,7 @@ async fn check_large_locations<F: Graftable + PartialEq>(family: &str, start: u6
     }
     assert_eq!(std::fs::read_to_string(fixture_path).unwrap(), fixture);
     let rpc = OperationLogClient::<_, F, Sha256, Operation<F, Vec<u8>>>::plaintext(&url, config);
-    let verified = rpc
-        .get_operation_range(request, &expected_root)
-        .await
-        .unwrap();
+    let verified = rpc.operation_range(request, &expected_root).await.unwrap();
     assert_eq!(verified.start_location, start);
     assert_eq!(verified.operations, operations);
     let (response, _) = rpc

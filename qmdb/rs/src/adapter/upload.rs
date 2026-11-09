@@ -160,7 +160,7 @@ impl<D: Digest, F: Family> PreparedAuthenticatedRange<D, F> {
 pub fn prepare_authenticated_range<F, H, Op, S>(
     authenticated: &AuthenticatedOperationRange<'_, H::Digest, F>,
     expected_root: &H::Digest,
-    operation_cfg: &Op::Cfg,
+    op_cfg: &Op::Cfg,
     strategy: &S,
 ) -> Result<PreparedAuthenticatedRange<H::Digest, F>, QmdbError>
 where
@@ -172,7 +172,7 @@ where
     let extension = reconstruct_range::<F, H, _>(authenticated, strategy)?;
     if extension.root != *expected_root {
         return Err(QmdbError::ProofVerification {
-            kind: ProofKind::RangeCheckpoint,
+            kind: ProofKind::OperationRange,
         });
     }
 
@@ -183,7 +183,7 @@ where
         .enumerate()
         .map(|(offset, encoded)| {
             let location = authenticated.start_location + offset as u64;
-            let operation = Op::decode_cfg(Copying(encoded), operation_cfg).map_err(|error| {
+            let operation = Op::decode_cfg(Copying(encoded), op_cfg).map_err(|error| {
                 QmdbError::CorruptData(format!(
                     "failed to decode authenticated operation at {location}: {error}"
                 ))
@@ -589,30 +589,30 @@ where
     })
 }
 
-/// Stage the prepared rows and remaining supplied pins under the client's namespace.
+/// Stage the prepared rows and remaining supplied pins under the store's key prefix.
 pub fn stage_authenticated_range<D: Digest, F: Family>(
-    client: &PrefixedStoreClient,
+    store: &PrefixedStoreClient,
     prepared: PreparedAuthenticatedRange<D, F>,
     batch: &mut StoreWriteBatch,
 ) -> Result<(), QmdbError> {
     batch.reserve(prepared.rows.len() + prepared.pinned_nodes.len());
     for (key, value) in prepared.rows {
-        batch.push(client, &key, value)?;
+        batch.push(store, &key, value)?;
     }
     for (position, digest) in prepared.pinned_nodes {
-        batch.push(client, &encode_node_key(position), digest.encode())?;
+        batch.push(store, &encode_node_key(position), digest.encode())?;
     }
     Ok(())
 }
 
 /// Stage the watermark, the commit location that publishes the durable prefix, under the
-/// client's configured namespace.
+/// store's key prefix.
 ///
 /// The caller must only advance this location after every required row in the contiguous prefix
 /// is durable, or when those rows are staged in the same atomic Store batch. For current QMDBs,
 /// the current-state rows of every batch through this location must also be durable or staged.
 pub fn stage_watermark<F: Family>(
-    client: &PrefixedStoreClient,
+    store: &PrefixedStoreClient,
     watermark: Location<F>,
     batch: &mut StoreWriteBatch,
 ) -> Result<(), QmdbError> {
@@ -621,7 +621,7 @@ pub fn stage_watermark<F: Family>(
             "invalid published operation watermark {watermark}"
         )));
     }
-    batch.push(client, &encode_watermark_key(watermark), Vec::new())?;
+    batch.push(store, &encode_watermark_key(watermark), Vec::new())?;
     Ok(())
 }
 

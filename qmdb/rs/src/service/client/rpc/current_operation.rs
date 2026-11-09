@@ -2,7 +2,7 @@
 
 use super::{connect_error_to_qmdb, proof_digest_cap};
 use crate::{
-    proof::VerifiedCurrentRange,
+    proof::VerifiedCurrentOperationRange,
     request::OperationWindow,
     service::proto::qmdb::v1::{
         CurrentOperationRangeProof as ProtoCurrentOperationRangeProof,
@@ -38,6 +38,11 @@ where
     H::Digest: DecodeExt<()>,
     Op: Decode + Encode + Read,
 {
+    /// Client for the endpoint at `base` over plaintext HTTP.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `base` is not a valid URI.
     pub fn plaintext(base: &str, op_cfg: Op::Cfg) -> Self {
         Self::new(
             PreferZstdHttpClient::plaintext(),
@@ -72,11 +77,11 @@ where
         }
     }
 
-    pub async fn get_current_operation_range(
+    pub async fn current_operation_range(
         &self,
         request: GetCurrentOperationRangeRequest,
         expected_root: &H::Digest,
-    ) -> Result<VerifiedCurrentRange<H::Digest, Op, N, F>, QmdbError> {
+    ) -> Result<VerifiedCurrentOperationRange<H::Digest, Op, N, F>, QmdbError> {
         let tip = Location::<F>::new(request.tip);
         let window =
             OperationWindow::new(request.tip, request.start_location, request.max_locations)?;
@@ -98,7 +103,7 @@ where
             expected_root,
             window,
         )?;
-        Ok(VerifiedCurrentRange {
+        Ok(VerifiedCurrentOperationRange {
             tip,
             root,
             start_location: Location::<F>::new(proof.start_location),
@@ -166,7 +171,7 @@ where
         .collect::<Result<Vec<_>, QmdbError>>()?;
     if !proof.verify::<H, _, N>(start, &decoded_operations, &chunks, root) {
         return Err(QmdbError::ProofVerification {
-            kind: crate::ProofKind::CurrentRange,
+            kind: crate::ProofKind::CurrentOperationRange,
         });
     }
     Ok((*root, decoded_operations, chunks))

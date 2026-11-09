@@ -112,7 +112,7 @@ pub(crate) enum NodeSource<F: Family> {
     /// pruned chunks, whose bits are all zero.
     Ops,
     /// The stored grafted node at this grafted-tree position, latest version at
-    /// or below the watermark. An absent parent is rebuilt from its children.
+    /// or below the tip. An absent parent is rebuilt from its children.
     Grafted(Position<F>),
     /// Rebuilt from its children: the node spans the pruning boundary.
     Rebuilt,
@@ -158,7 +158,7 @@ pub(crate) struct ProofNodes<F: Family> {
     grafted: BTreeMap<Position<F>, Option<Bytes>>,
 }
 
-/// Read every node a current proof needs at `watermark`, given the
+/// Read every node a current proof needs at `tip`, given the
 /// operation-tree `positions` it requests, plus the rows at `keys`.
 ///
 /// Returns the rows found at `keys`, with absent rows left out, and the proof's [`ProofNodes`].
@@ -171,7 +171,7 @@ pub(crate) struct ProofNodes<F: Family> {
 pub(crate) async fn load_proof_nodes<F: Graftable, D: Digest, const N: usize>(
     session: &ReadSession,
     cache: &Arc<ReadCache<F, D>>,
-    watermark: Location<F>,
+    tip: Location<F>,
     pruned_chunks: u64,
     positions: impl IntoIterator<Item = Position<F>>,
     keys: BTreeSet<Key>,
@@ -204,9 +204,7 @@ pub(crate) async fn load_proof_nodes<F: Graftable, D: Digest, const N: usize>(
         let ((round_rows, ops_rows), grafted_rows) = futures::try_join!(
             fetch_rows(session, cache, &ops, round_keys),
             futures::future::try_join_all(grafted.keys().map(|&grafted_position| async move {
-                Ok::<_, crate::QmdbError>(
-                    load_grafted_node(session, watermark, grafted_position).await?,
-                )
+                Ok::<_, crate::QmdbError>(load_grafted_node(session, tip, grafted_position).await?)
             })),
         )?;
         rows.extend(round_rows);
@@ -231,14 +229,14 @@ fn children<F: Family>(position: Position<F>) -> [Position<F>; 2] {
 }
 
 /// The stored grafted node at `grafted_position`, latest version at or below
-/// `watermark`.
+/// `tip`.
 async fn load_grafted_node<F: Family>(
     session: &ReadSession,
-    watermark: Location<F>,
+    tip: Location<F>,
     grafted_position: Position<F>,
 ) -> Result<Option<Bytes>, exoware_sdk::ClientError> {
     let start = encode_grafted_node_key(grafted_position, Location::new(0));
-    let end = encode_grafted_node_key(grafted_position, watermark);
+    let end = encode_grafted_node_key(grafted_position, tip);
     let rows = session
         .range_with_mode(&start, &end, 1, RangeMode::Reverse)
         .await?;
@@ -322,7 +320,7 @@ impl<F: Graftable> ProofNodes<F> {
     }
 }
 
-/// The bitmap chunks at a watermark that no grafted node covers, which every
+/// The bitmap chunks at a tip that no grafted node covers, which every
 /// current proof reads, keyed by chunk index and cleared below the inactivity
 /// floor.
 pub(crate) type BitmapTail = BTreeMap<u64, Bytes>;
@@ -344,15 +342,15 @@ pub(crate) struct ProofBitmap<const N: usize> {
 }
 
 impl<const N: usize> ProofBitmap<N> {
-    /// Bitmap at `watermark` holding its `tail`, whose chunks must be present
-    /// exactly when the watermark has them. A proof of one location adds its
+    /// Bitmap at `tip` holding its `tail`, whose chunks must be present
+    /// exactly when the tip has them. A proof of one location adds its
     /// [`Self::chunk_to_prove`].
     pub(crate) fn new<F: Graftable>(
-        watermark: Location<F>,
+        tip: Location<F>,
         pruned_chunks: u64,
         tail: &BitmapTail,
     ) -> Result<Self, crate::QmdbError> {
-        let leaves = crate::adapter::codec::op_count_for_watermark(watermark)?;
+        let leaves = crate::adapter::codec::op_count_for_tip(tip)?;
         let len = leaves.as_u64();
         let chunk_bits = crate::adapter::codec::bitmap_chunk_bits::<N>();
         let complete = len / chunk_bits;
@@ -363,16 +361,16 @@ impl<const N: usize> ProofBitmap<N> {
             .map_err(crate::error::current_proof_error)?;
         if !indices.eq(tail.keys().copied()) {
             return Err(crate::QmdbError::CorruptData(
-                "current bitmap tail does not match its watermark".into(),
+                "current bitmap tail does not match its tip".into(),
             ));
         }
 
-        // Every proof at this watermark reads the tail chunks, so they are
+        // Every proof at this tip reads the tail chunks, so they are
         // loaded up front.
         let mut bitmap = Self {
             len,
             complete_chunks: chunk_slot(complete)?,
-            last_chunk: chunk_slot(chunk_index_for_location::<F, N>(watermark))?,
+            last_chunk: chunk_slot(chunk_index_for_location::<F, N>(tip))?,
             pruned_chunks: chunk_slot(pruned_chunks)?,
             chunks: std::collections::BTreeMap::new(),
         };
@@ -468,13 +466,13 @@ mod tests {
 
     // N = 1 gives eight-bit chunks (grafting height 3). Each chunk's byte is its index.
     fn load<F: Graftable>(
-        watermark: u64,
+        tip: u64,
         pruned_chunks: u64,
         location: Option<u64>,
     ) -> Result<(ProofBitmap<1>, Vec<u64>), crate::QmdbError> {
-        // Build the tail the adapter caches for this watermark and pruning.
-        let watermark = Location::<F>::new(watermark);
-        let leaves = crate::adapter::codec::op_count_for_watermark(watermark)?;
+        // Build the tail the adapter caches for this tip and pruning.
+        let tip = Location::<F>::new(tip);
+        let leaves = crate::adapter::codec::op_count_for_tip(tip)?;
         let mut requested = required_chunks::<F, 1>(leaves, leaves.as_u64(), pruned_chunks, None)
             .map_err(crate::error::current_proof_error)?
             .collect::<Vec<_>>();
@@ -482,7 +480,7 @@ mod tests {
             .iter()
             .map(|&index| (index, Bytes::from(vec![index as u8])))
             .collect();
-        let mut bitmap = ProofBitmap::<1>::new(watermark, pruned_chunks, &tail)?;
+        let mut bitmap = ProofBitmap::<1>::new(tip, pruned_chunks, &tail)?;
 
         // A proof of `location` reads at most one chunk beyond the tail.
         if let Some(location) = location {
@@ -550,12 +548,12 @@ mod tests {
     }
 
     #[test]
-    fn test_rejects_a_tail_that_does_not_match_the_watermark() {
+    fn test_rejects_a_tail_that_does_not_match_the_tip() {
         // 17 MMB leaves have a pending chunk and a partial last chunk
-        let watermark = Location::<mmb::Family>::new(16);
+        let tip = Location::<mmb::Family>::new(16);
         let chunk = |byte: u8| Bytes::from(vec![byte]);
 
-        // Missing, malformed or extra chunks do not match the watermark
+        // Missing, malformed or extra chunks do not match the tip
         for wrong in [
             BTreeMap::from([(2, chunk(2))]),
             BTreeMap::from([(1, chunk(1))]),
@@ -564,25 +562,25 @@ mod tests {
             BTreeMap::from([(0, chunk(0)), (1, chunk(1)), (2, chunk(2))]),
         ] {
             assert!(matches!(
-                ProofBitmap::<1>::new(watermark, 0, &wrong),
+                ProofBitmap::<1>::new(tip, 0, &wrong),
                 Err(crate::QmdbError::CorruptData(_))
             ));
         }
 
         // Exactly the pending and partial chunks match
         let tail = BTreeMap::from([(1, chunk(1)), (2, chunk(2))]);
-        assert!(ProofBitmap::<1>::new(watermark, 0, &tail).is_ok());
+        assert!(ProofBitmap::<1>::new(tip, 0, &tail).is_ok());
     }
 
     #[test]
     fn test_readable_view_matches_commonware_prunable_bitmap() {
         use commonware_utils::bitmap::{Prunable, Readable};
-        for (watermark, pruned) in [(12u64, 0usize), (15, 0), (20, 1), (23, 2)] {
+        for (tip, pruned) in [(12u64, 0usize), (15, 0), (20, 1), (23, 2)] {
             let mut prunable = Prunable::<1>::new_with_pruned_chunks(pruned).unwrap();
-            while Readable::len(&prunable) <= watermark {
+            while Readable::len(&prunable) <= tip {
                 prunable.push(false);
             }
-            let (bitmap, _) = load::<mmr::Family>(watermark, pruned as u64, None).unwrap();
+            let (bitmap, _) = load::<mmr::Family>(tip, pruned as u64, None).unwrap();
             assert_eq!(bitmap.len(), Readable::len(&prunable));
             assert_eq!(
                 bitmap.complete_chunks(),
@@ -825,7 +823,7 @@ mod tests {
             .iter()
             .map(|position| Sha256::hash(&[&position.as_u64().to_be_bytes()]))
             .collect::<Vec<_>>();
-        let watermark = Location::new(15);
+        let tip = Location::new(15);
         let queries = NodeQueries {
             rows: positions
                 .iter()
@@ -836,7 +834,7 @@ mod tests {
                     } else {
                         encode_grafted_node_key(
                             grafting::ops_to_grafted_pos(position, grafting::height::<1>()),
-                            watermark,
+                            tip,
                         )
                     };
                     (key, Bytes::copy_from_slice(digest.as_ref()))
@@ -854,7 +852,7 @@ mod tests {
             load_proof_nodes::<mmr::Family, Digest, 1>(
                 &session,
                 &Arc::new(ReadCache::new()),
-                watermark,
+                tip,
                 0,
                 positions.iter().copied(),
                 BTreeSet::new(),
@@ -885,7 +883,7 @@ mod tests {
     async fn test_absent_grafted_parent_is_rebuilt_from_children_read_ahead() {
         // With one-byte chunks (grafting height 3), the 16-leaf MMR's root (30)
         // is a grafted parent over the grafted leaves 14 and 29.
-        let watermark = Location::<mmr::Family>::new(15);
+        let tip = Location::<mmr::Family>::new(15);
         let height = grafting::height::<1>();
         let child = |position: u64| {
             let position = Position::<mmr::Family>::new(position);
@@ -900,7 +898,7 @@ mod tests {
                     (
                         encode_grafted_node_key(
                             grafting::ops_to_grafted_pos(position, height),
-                            watermark,
+                            tip,
                         ),
                         Bytes::copy_from_slice(digest.as_ref()),
                     )
@@ -915,7 +913,7 @@ mod tests {
         let (_, read) = load_proof_nodes::<mmr::Family, Digest, 1>(
             &session,
             &Arc::new(ReadCache::new()),
-            watermark,
+            tip,
             0,
             [root],
             BTreeSet::new(),

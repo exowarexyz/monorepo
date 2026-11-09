@@ -117,6 +117,7 @@ where
                 let batch = db.new_batch().append(b"eighth-value".to_vec());
                 batch
                     .with_inactivity_floor(db.bounds().end - 1)
+                    .with_metadata(b"commit-metadata".to_vec())
                     .merkleize(&db)
                     .await
                     .expect("merkleize")
@@ -257,7 +258,7 @@ where
         || {
             let qmdb_client = variable_client::<F>(store_client.clone());
             let loc = source.latest_location;
-            async move { qmdb_client.root_at(loc).await }
+            async move { qmdb_client.root_at(loc, None).await }
         },
         "root_at",
     )
@@ -266,11 +267,24 @@ where
 
     let qmdb_client = variable_client::<F>(store_client.clone());
     let got: Vec<u8> = qmdb_client
-        .get_at(source.queried_location, source.latest_location)
+        .get_at(source.latest_location, source.queried_location, None)
         .await
         .expect("get_at")
         .expect("present");
     assert_eq!(got, source.queried_value);
+    assert_eq!(
+        qmdb_client
+            .get_at(source.latest_location, source.latest_location, None)
+            .await
+            .expect("get_at commit"),
+        Some(b"commit-metadata".to_vec())
+    );
+    let above_tip = source.latest_location + 1;
+    assert!(matches!(
+        qmdb_client.get_at(source.latest_location, above_tip, None).await,
+        Err(exoware_qmdb::QmdbError::LocationOutOfBounds { location, count })
+            if location == above_tip.as_u64() && count == above_tip.as_u64()
+    ));
 
     let proof = qmdb_client
         .operation_range(
@@ -284,77 +298,75 @@ where
     assert_eq!(proof.root, source.root);
     assert_eq!(proof.operations, source.operations);
 
-    let checkpoint = qmdb_client
-        .operation_range_checkpoint(
+    let range_proof = qmdb_client
+        .operation_range_proof(
             source.latest_location,
             Location::new(0),
             source.operations.len() as u32,
             None,
         )
         .await
-        .expect("checkpoint");
-    assert!(checkpoint.verify::<commonware_cryptography::Sha256>());
-    let mut malformed_checkpoint = checkpoint.clone();
-    malformed_checkpoint
-        .pinned_nodes
-        .push(malformed_checkpoint.ops_root);
+        .expect("range proof");
+    assert!(range_proof.verify::<commonware_cryptography::Sha256>());
+    let mut malformed_proof = range_proof.clone();
+    malformed_proof.pinned_nodes.push(malformed_proof.ops_root);
     assert!(
-        !malformed_checkpoint.verify::<commonware_cryptography::Sha256>(),
-        "zero-start checkpoints must not verify with pinned nodes"
+        !malformed_proof.verify::<commonware_cryptography::Sha256>(),
+        "zero-start proofs must not verify with pinned nodes"
     );
-    assert!(malformed_checkpoint
+    assert!(malformed_proof
         .reconstruct_peaks::<commonware_cryptography::Sha256>()
         .is_err());
-    let peaks = checkpoint
+    let peaks = range_proof
         .reconstruct_peaks::<commonware_cryptography::Sha256>()
         .expect("reconstruct_peaks");
     let hasher = commonware_storage::qmdb::hasher::<commonware_cryptography::Sha256>();
     let reconstructed_root = commonware_storage::merkle::hasher::Hasher::<F>::root(
         &hasher,
-        checkpoint.proof.leaves,
-        checkpoint.proof.inactive_peaks,
+        range_proof.proof.leaves,
+        range_proof.proof.inactive_peaks,
         peaks.iter().map(|(_, _, digest)| digest),
     )
     .expect("reconstruct root");
-    assert_eq!(reconstructed_root, checkpoint.ops_root);
+    assert_eq!(reconstructed_root, range_proof.ops_root);
 
-    let suffix_checkpoint = qmdb_client
-        .operation_range_checkpoint(source.latest_location, source.latest_location, 1, None)
+    let suffix_proof = qmdb_client
+        .operation_range_proof(source.latest_location, source.latest_location, 1, None)
         .await
-        .expect("suffix checkpoint");
-    assert!(suffix_checkpoint.verify::<commonware_cryptography::Sha256>());
-    assert!(!suffix_checkpoint.pinned_nodes.is_empty());
+        .expect("suffix range proof");
+    assert!(suffix_proof.verify::<commonware_cryptography::Sha256>());
+    assert!(!suffix_proof.pinned_nodes.is_empty());
     assert!(
-        suffix_checkpoint.proof.inactive_peaks > 0,
-        "suffix checkpoint must exercise folded inactive peaks"
+        suffix_proof.proof.inactive_peaks > 0,
+        "suffix range proof must exercise folded inactive peaks"
     );
-    let range_digests = suffix_checkpoint
+    let range_digests = suffix_proof
         .proof
         .verify_range_inclusion_and_extract_digests(
             &hasher,
-            suffix_checkpoint.start_location,
-            &suffix_checkpoint.encoded_operations,
-            &suffix_checkpoint.ops_root,
+            suffix_proof.start_location,
+            &suffix_proof.encoded_operations,
+            &suffix_proof.ops_root,
         )
         .expect("verify suffix range");
     assert!(
         peaks
             .iter()
             .any(|(peak, _, _)| !range_digests.iter().any(|(position, _)| position == peak)),
-        "suffix checkpoint must exercise a peak omitted by range extraction"
+        "suffix range proof must exercise a peak omitted by range extraction"
     );
     assert_eq!(
-        suffix_checkpoint
+        suffix_proof
             .reconstruct_peaks::<commonware_cryptography::Sha256>()
             .expect("reconstruct suffix peaks"),
         peaks,
     );
 
-    let mut suffix_without_pins = suffix_checkpoint.clone();
+    let mut suffix_without_pins = suffix_proof.clone();
     suffix_without_pins.pinned_nodes.clear();
-    let mut suffix_with_wrong_pin = suffix_checkpoint.clone();
+    let mut suffix_with_wrong_pin = suffix_proof.clone();
     suffix_with_wrong_pin.pinned_nodes[0] = suffix_with_wrong_pin.ops_root;
-    let mut suffix_with_extra_pin = suffix_checkpoint.clone();
+    let mut suffix_with_extra_pin = suffix_proof.clone();
     suffix_with_extra_pin
         .pinned_nodes
         .push(suffix_with_extra_pin.ops_root);
@@ -369,19 +381,19 @@ where
             .is_err());
     }
 
-    let mut checkpoint_with_wrong_watermark = suffix_checkpoint.clone();
-    checkpoint_with_wrong_watermark.watermark -= 1;
-    assert!(checkpoint_with_wrong_watermark.verify::<commonware_cryptography::Sha256>());
-    assert!(checkpoint_with_wrong_watermark
+    let mut proof_with_wrong_tip = suffix_proof.clone();
+    proof_with_wrong_tip.tip -= 1;
+    assert!(proof_with_wrong_tip.verify::<commonware_cryptography::Sha256>());
+    assert!(proof_with_wrong_tip
         .reconstruct_peaks::<commonware_cryptography::Sha256>()
         .is_err());
 
-    let middle_checkpoint = qmdb_client
-        .operation_range_checkpoint(source.latest_location, source.latest_location - 1, 1, None)
+    let middle_proof = qmdb_client
+        .operation_range_proof(source.latest_location, source.latest_location - 1, 1, None)
         .await
-        .expect("middle checkpoint");
-    assert!(middle_checkpoint.verify::<commonware_cryptography::Sha256>());
-    assert!(middle_checkpoint
+        .expect("middle range proof");
+    assert!(middle_proof.verify::<commonware_cryptography::Sha256>());
+    assert!(middle_proof
         .reconstruct_peaks::<commonware_cryptography::Sha256>()
         .is_err());
 
@@ -406,7 +418,7 @@ where
         || {
             let qmdb_client = variable_client::<F>(store_client.clone());
             let loc = source.continued_latest_location;
-            async move { qmdb_client.root_at(loc).await }
+            async move { qmdb_client.root_at(loc, None).await }
         },
         "continued root_at",
     )
@@ -428,7 +440,7 @@ async fn test_keyless_fixed_round_trip() {
         || {
             let qmdb_client = fixed_client::<mmr::Family>(store_client.clone());
             let loc = source.latest_location;
-            async move { qmdb_client.root_at(loc).await }
+            async move { qmdb_client.root_at(loc, None).await }
         },
         "fixed root_at",
     )
@@ -440,7 +452,7 @@ async fn test_keyless_fixed_round_trip() {
 
     let qmdb_client = fixed_client::<mmr::Family>(store_client.clone());
     let got: Digest = qmdb_client
-        .get_at(source.queried_location, source.latest_location)
+        .get_at(source.latest_location, source.queried_location, None)
         .await
         .expect("fixed get_at")
         .expect("present");

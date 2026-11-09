@@ -42,16 +42,20 @@ pub(crate) fn error_key<K: AsRef<[u8]> + ?Sized>(key: &K) -> Vec<u8> {
 /// without string matching on the error message.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ProofKind {
-    /// Single-key current-state proof (`KeyLookupService.Get`).
-    CurrentKeyValue,
-    /// Current ordered proof that a key is inactive.
-    CurrentKeyExclusion,
-    /// Operation-log membership proof over selected operations.
-    BatchMulti,
-    /// Contiguous operation range proof (sync checkpoint).
-    RangeCheckpoint,
-    /// Contiguous current-state range proof.
-    CurrentRange,
+    /// [`KeyValueProof`](crate::proof::KeyValueProof): a key's current value.
+    KeyValue,
+    /// [`KeyExclusionProof`](crate::proof::KeyExclusionProof): an ordered key
+    /// is inactive.
+    KeyExclusion,
+    /// [`OperationMultiProof`](crate::proof::OperationMultiProof): operations at
+    /// selected locations.
+    OperationMulti,
+    /// [`OperationRangeProof`](crate::proof::OperationRangeProof): a contiguous
+    /// operation range.
+    OperationRange,
+    /// [`CurrentOperationRangeProof`](crate::proof::CurrentOperationRangeProof):
+    /// a contiguous operation range with its activity bitmap.
+    CurrentOperationRange,
     /// [`Publication`](crate::adapter::upload::Publication): a current batch
     /// whose root and operation-log witness bind to the expected root.
     Publication,
@@ -60,11 +64,11 @@ pub enum ProofKind {
 impl std::fmt::Display for ProofKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let s = match self {
-            Self::CurrentKeyValue => "current key-value",
-            Self::CurrentKeyExclusion => "current key-exclusion",
-            Self::BatchMulti => "batch multi",
-            Self::RangeCheckpoint => "range checkpoint",
-            Self::CurrentRange => "current range",
+            Self::KeyValue => "key-value",
+            Self::KeyExclusion => "key-exclusion",
+            Self::OperationMulti => "operation multi",
+            Self::OperationRange => "operation range",
+            Self::CurrentOperationRange => "current operation range",
             Self::Publication => "publication",
         };
         f.write_str(s)
@@ -76,9 +80,10 @@ impl From<crate::request::InvalidWindow> for QmdbError {
         use crate::request::InvalidWindow;
         match err {
             InvalidWindow::TipOverflow => Self::TipOverflow,
-            InvalidWindow::StartOutOfBounds { start, count } => {
-                Self::RangeStartOutOfBounds { start, count }
-            }
+            InvalidWindow::StartOutOfBounds { start, count } => Self::LocationOutOfBounds {
+                location: start,
+                count,
+            },
             InvalidWindow::ZeroMaximum => Self::InvalidRangeLength,
         }
     }
@@ -97,9 +102,9 @@ impl From<crate::request::InvalidLocations> for QmdbError {
 pub enum QmdbError {
     #[error(transparent)]
     Client(#[from] ClientError),
-    #[error("proof request must contain at least one key")]
+    #[error("proof request must not be empty")]
     EmptyProofRequest,
-    #[error("range proof max_locations must be > 0")]
+    #[error("range length must be > 0")]
     InvalidRangeLength,
     #[error("range limit {limit} exceeds maximum {max}")]
     RangeLimitTooLarge { limit: u32, max: u32 },
@@ -110,18 +115,27 @@ pub enum QmdbError {
     },
     #[error("duplicate key in proof request: {key:?}")]
     DuplicateRequestedKey { key: Vec<u8> },
-    #[error("requested location {requested} is above published watermark {available}")]
-    WatermarkTooLow { requested: u64, available: u64 },
-    #[error("proof key not found at watermark {watermark}: {key:?}")]
-    ProofKeyNotFound { watermark: u64, key: Vec<u8> },
-    #[error("requested key is not active at watermark {watermark}: {key:?}")]
-    KeyNotActive { watermark: u64, key: Vec<u8> },
-    #[error("current proofs are only available at uploaded batch locations; no batch ends at {location}")]
-    CurrentProofRequiresBatchBoundary { location: u64 },
-    #[error("current boundary state has not been uploaded for batch location {location}")]
-    CurrentBoundaryStateMissing { location: u64 },
-    #[error("range proof start {start} is out of bounds for watermark with {count} leaves")]
-    RangeStartOutOfBounds { start: u64, count: u64 },
+    /// The requested tip cannot be read because no watermark has been published. The other
+    /// not-yet-published outcome is [`Self::WatermarkTooLow`]. The Connect server maps both to
+    /// `out_of_range`.
+    #[error("no watermark has been published; requested tip {tip}")]
+    NoPublishedWatermark { tip: u64 },
+    /// The requested tip is above the published watermark. The other not-yet-published outcome
+    /// is [`Self::NoPublishedWatermark`]. The Connect server maps both to `out_of_range`.
+    #[error("requested tip {tip} is above published watermark {watermark}")]
+    WatermarkTooLow { tip: u64, watermark: u64 },
+    #[error("requested key not found at tip {tip}: {key:?}")]
+    KeyNotFound { tip: u64, key: Vec<u8> },
+    #[error("requested key is not active at tip {tip}: {key:?}")]
+    KeyNotActive { tip: u64, key: Vec<u8> },
+    #[error(
+        "current proofs are only available at uploaded batch locations; no batch ends at tip {tip}"
+    )]
+    CurrentProofRequiresBatchBoundary { tip: u64 },
+    #[error("current-state rows have not been uploaded for the batch ending at tip {tip}")]
+    CurrentStateMissing { tip: u64 },
+    #[error("location {location} is out of bounds for tip with {count} leaves")]
+    LocationOutOfBounds { location: u64, count: u64 },
     #[error("invalid requested locations: {0}")]
     InvalidRequestedLocations(String),
     #[error("requested tip exceeds the operation location domain")]

@@ -2,7 +2,7 @@ use crate::{
     adapter::{
         codec::{
             encode_node_key, encode_operation_key, encode_ops_root_witness_key,
-            merkle_size_for_watermark, op_count_for_watermark,
+            merkle_size_for_tip, op_count_for_tip,
         },
         core::load_operation_bytes_range,
         read_cache::{ReadCache, RootContext},
@@ -10,8 +10,8 @@ use crate::{
     decode_digest,
     error::merkle_error,
     proof::{
-        build_batch_multi_proof, build_operation_range_checkpoint, MultiProofOperations,
-        OperationRangeCheckpoint, RawBatchMultiProof,
+        build_operation_multi_proof, build_operation_range_proof, MultiProofOperations,
+        OperationMultiProof, OperationRangeProof,
     },
     QmdbError,
 };
@@ -32,24 +32,23 @@ use std::{
     sync::Arc,
 };
 
-pub(crate) async fn load_operation_range_checkpoint<F, H, Fut>(
+pub(crate) async fn load_operation_range_proof<F, H, Fut>(
     session: &ReadSession,
     cache: &Arc<ReadCache<F, H::Digest>>,
-    watermark: Location<F>,
+    tip: Location<F>,
     start: Location<F>,
     end: Location<F>,
     with_witness: bool,
     resolve_inactive_peaks: impl FnOnce(Bytes) -> Fut,
-) -> Result<OperationRangeCheckpoint<H::Digest, F>, QmdbError>
+) -> Result<OperationRangeProof<H::Digest, F>, QmdbError>
 where
     F: Graftable,
     H: Hasher,
     Fut: Future<Output = Result<usize, QmdbError>>,
 {
-    let size = merkle_size_for_watermark(watermark)?;
-    let plan =
-        RangePlan::new(op_count_for_watermark(watermark)?, start..end).map_err(merkle_error)?;
-    // The checkpoint also carries the pins that extend the prefix before `start`.
+    let size = merkle_size_for_tip(tip)?;
+    let plan = RangePlan::new(op_count_for_tip(tip)?, start..end).map_err(merkle_error)?;
+    // The proof also carries the pins that extend the prefix before `start`.
     let proof_positions = plan
         .positions()
         .into_iter()
@@ -63,14 +62,14 @@ where
     let metadata = load_published_reads::<F, H, _>(
         session,
         cache,
-        watermark,
+        tip,
         &positions,
         keys,
         with_witness,
         resolve_inactive_peaks,
     );
 
-    // Both reads inherit the publication check's observed floor. Interpret range errors
+    // Both reads inherit the watermark check's observed floor. Interpret range errors
     // after inactivity metadata and root peaks, regardless of completion order.
     let (mut reads, operations) = futures::try_join!(metadata, async {
         let operations = if *end - *start > 1 {
@@ -91,17 +90,17 @@ where
         operations?
     };
     let digests = decode_nodes(&reads.nodes, proof_positions)?;
-    let mut checkpoint = build_operation_range_checkpoint::<F, H>(
+    let mut proof = build_operation_range_proof::<F, H>(
         plan,
         &digests,
-        watermark,
+        tip,
         start,
         reads.context.root,
         reads.context.inactive_peaks,
         operations,
     )?;
-    checkpoint.ops_root_witness = reads.witness?;
-    Ok(checkpoint)
+    proof.ops_root_witness = reads.witness?;
+    Ok(proof)
 }
 
 /// Return `positions` and every peak of a structure of `size`, sorted and
@@ -152,25 +151,25 @@ fn decode_nodes<F: Family, D: Digest>(
 pub(crate) async fn load_operations_multi_proof<F, H, Fut>(
     session: &ReadSession,
     cache: &Arc<ReadCache<F, H::Digest>>,
-    watermark: Location<F>,
+    tip: Location<F>,
     operations: MultiProofOperations<'_, F>,
     with_witness: bool,
     resolve_inactive_peaks: impl FnOnce(Bytes) -> Fut,
-) -> Result<RawBatchMultiProof<H::Digest, F>, QmdbError>
+) -> Result<OperationMultiProof<H::Digest, F>, QmdbError>
 where
     F: Graftable,
     H: Hasher,
     Fut: Future<Output = Result<usize, QmdbError>>,
 {
-    let size = merkle_size_for_watermark(watermark)?;
+    let size = merkle_size_for_tip(tip)?;
     let locations = match &operations {
         MultiProofOperations::Read(locations) => locations.to_vec(),
         MultiProofOperations::Given(operations) => {
             operations.iter().map(|(location, _)| *location).collect()
         }
     };
-    let proof_positions = multi_proof_positions(op_count_for_watermark(watermark)?, &locations)
-        .map_err(merkle_error)?;
+    let proof_positions =
+        multi_proof_positions(op_count_for_tip(tip)?, &locations).map_err(merkle_error)?;
     let positions = with_peaks(size, proof_positions.iter().copied());
     let keys = match &operations {
         MultiProofOperations::Read(locations) => locations
@@ -182,7 +181,7 @@ where
     let mut reads = load_published_reads::<F, H, _>(
         session,
         cache,
-        watermark,
+        tip,
         &positions,
         keys,
         with_witness,
@@ -207,10 +206,10 @@ where
         MultiProofOperations::Given(operations) => operations,
     };
     let digests = decode_nodes(&reads.nodes, proof_positions.iter().copied())?;
-    let mut proof = build_batch_multi_proof::<F, H>(
+    let mut proof = build_operation_multi_proof::<F, H>(
         &proof_positions,
         &digests,
-        watermark,
+        tip,
         reads.context.root,
         reads.context.inactive_peaks,
         operations,
@@ -219,7 +218,7 @@ where
     Ok(proof)
 }
 
-/// Rows, nodes, root context, and ops-root witness for one published watermark.
+/// Rows, nodes, root context, and ops-root witness for one tip.
 struct PublishedReads<F: Graftable, D: Digest> {
     rows: HashMap<Key, Bytes>,
     nodes: BTreeMap<Position<F>, Option<Bytes>>,
@@ -229,11 +228,11 @@ struct PublishedReads<F: Graftable, D: Digest> {
 }
 
 /// Read `keys` and the planned `positions` in one batched request, adding the
-/// watermark operation and witness rows only when the cache lacks them.
+/// tip operation and witness rows only when the cache lacks them.
 async fn load_published_reads<F, H, Fut>(
     session: &ReadSession,
     cache: &Arc<ReadCache<F, H::Digest>>,
-    watermark: Location<F>,
+    tip: Location<F>,
     positions: &[Position<F>],
     mut keys: BTreeSet<Key>,
     with_witness: bool,
@@ -244,49 +243,49 @@ where
     H: Hasher,
     Fut: Future<Output = Result<usize, QmdbError>>,
 {
-    let context = cache.cached_context(watermark);
-    let witness = with_witness.then(|| cache.witness(watermark)).flatten();
+    let context = cache.cached_context(tip);
+    let witness = with_witness.then(|| cache.witness(tip)).flatten();
     if context.is_none() {
-        keys.insert(encode_operation_key(watermark));
+        keys.insert(encode_operation_key(tip));
     }
     if with_witness && witness.is_none() {
-        keys.insert(encode_ops_root_witness_key(watermark));
+        keys.insert(encode_ops_root_witness_key(tip));
     }
     let (rows, nodes) = fetch_rows(session, cache, positions, keys).await?;
 
-    // Fetch each request's rows before coalescing metadata work so a cold watermark
+    // Fetch each request's rows before coalescing metadata work so a cold tip
     // does not add another network phase for followers.
     // The gate shares the floor walk. After failure, followers retry in their own sessions.
     let (context, context_guard) = match context {
         Some(context) => (Some(context), None),
-        None => cache.context(watermark).await,
+        None => cache.context(tip).await,
     };
     let context = match context {
         Some(context) => context,
         None => {
-            let operation = rows.get(&encode_operation_key(watermark)).ok_or_else(|| {
-                QmdbError::CorruptData(format!("missing operation row at location {watermark}"))
+            let operation = rows.get(&encode_operation_key(tip)).ok_or_else(|| {
+                QmdbError::CorruptData(format!("missing operation row at location {tip}"))
             })?;
             let inactive_peaks = resolve_inactive_peaks(operation.clone()).await?;
             RootContext {
-                root: root::<F, H>(&nodes, watermark, inactive_peaks)?,
+                root: root::<F, H>(&nodes, tip, inactive_peaks)?,
                 inactive_peaks,
             }
         }
     };
     let witness_cached = witness.is_some();
     let witness = witness
-        .or_else(|| rows.get(&encode_ops_root_witness_key(watermark)).cloned())
+        .or_else(|| rows.get(&encode_ops_root_witness_key(tip)).cloned())
         .map(|bytes| {
             let witness = OpsRootWitness::<F, H::Digest>::decode(Copying(bytes.as_ref())).map_err(
                 |error| {
                     QmdbError::CorruptData(format!(
-                        "current ops-root witness at {watermark} decode error: {error}"
+                        "current ops-root witness at {tip} decode error: {error}"
                     ))
                 },
             )?;
             if !witness_cached {
-                cache.put_witness(watermark, bytes);
+                cache.put_witness(tip, bytes);
             }
             Ok::<_, QmdbError>(witness)
         })
@@ -294,7 +293,7 @@ where
 
     // Published metadata is immutable. Share it without waiting for this request's
     // operation scan or proof, which each caller still verifies independently.
-    cache.put_context(watermark, context);
+    cache.put_context(tip, context);
     drop(context_guard);
     Ok(PublishedReads {
         rows,
@@ -306,10 +305,10 @@ where
 
 pub(crate) fn root<F: Family, H: Hasher>(
     nodes: &BTreeMap<Position<F>, Option<Bytes>>,
-    watermark: Location<F>,
+    tip: Location<F>,
     inactive_peaks: usize,
 ) -> Result<H::Digest, QmdbError> {
-    let size = merkle_size_for_watermark(watermark)?;
+    let size = merkle_size_for_tip(tip)?;
     let mut peaks = Vec::new();
     for (position, _) in F::peaks(size) {
         let bytes = nodes
@@ -324,11 +323,7 @@ pub(crate) fn root<F: Family, H: Hasher>(
         )?);
     }
     commonware_storage::qmdb::hasher::<H>()
-        .root(
-            op_count_for_watermark(watermark)?,
-            inactive_peaks,
-            peaks.iter(),
-        )
+        .root(op_count_for_tip(tip)?, inactive_peaks, peaks.iter())
         .map_err(|error| QmdbError::CommonwareMerkle(error.to_string()))
 }
 

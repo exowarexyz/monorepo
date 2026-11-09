@@ -2,8 +2,8 @@
 
 use super::rpc::{OperationLogClient, OperationLogSubscription};
 use crate::{
-    proof::VerifiedOperationRange,
-    service::proto::qmdb::v1::{GetOperationRangeRequest, SubscribeRequest},
+    proof::{VerifiedOperationRange, VerifiedOperations},
+    service::proto::qmdb::v1::{GetOperationRangeRequest, GetOperationsRequest, SubscribeRequest},
     QmdbError,
 };
 use bytes::Bytes;
@@ -11,7 +11,11 @@ use commonware_codec::{Decode, DecodeExt, Encode, Read};
 use commonware_cryptography::Hasher;
 use commonware_storage::{
     merkle::{Graftable, Location},
-    qmdb::{immutable, operation::Key as QmdbKey, value::ValueEncoding},
+    qmdb::{
+        immutable,
+        operation::Key as QmdbKey,
+        value::{ValueEncoding, VariableEncoding},
+    },
 };
 use connectrpc::client::{ClientConfig, ClientTransport};
 use exoware_sdk::proto::PreferZstdHttpClient;
@@ -19,13 +23,14 @@ use http_body::Body;
 use std::fmt::Display;
 
 /// Verifying client for an immutable-QMDB endpoint: the operation log.
-pub struct Immutable<T, F, H, K, V, E>
-where
+pub struct Immutable<
+    T,
     F: Graftable,
     H: Hasher,
     K: QmdbKey,
     V: commonware_codec::Codec + Clone + Send + Sync,
-    E: ValueEncoding<Value = V>,
+    E: ValueEncoding<Value = V> = VariableEncoding<V>,
+> where
     immutable::Operation<F, K, E>: Encode + Read,
 {
     operation_log: OperationLogClient<T, F, H, immutable::Operation<F, K, E>>,
@@ -41,6 +46,11 @@ where
     E: ValueEncoding<Value = V>,
     immutable::Operation<F, K, E>: Decode + Encode + Read,
 {
+    /// Client for the endpoint at `base` over plaintext HTTP.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `base` is not a valid URI.
     pub fn plaintext(base: &str, op_cfg: <immutable::Operation<F, K, E> as Read>::Cfg) -> Self {
         Self::new(
             PreferZstdHttpClient::plaintext(),
@@ -81,11 +91,11 @@ where
         start_location: Location<F>,
         max_locations: u32,
         min_sequence_number: Option<u64>,
-        root: &H::Digest,
+        expected_root: &H::Digest,
     ) -> Result<VerifiedOperationRange<H::Digest, immutable::Operation<F, K, E>, F>, QmdbError>
     {
         self.operation_log
-            .get_operation_range(
+            .operation_range(
                 GetOperationRangeRequest {
                     tip: tip.as_u64(),
                     start_location: start_location.as_u64(),
@@ -93,12 +103,34 @@ where
                     min_sequence_number,
                     ..Default::default()
                 },
-                root,
+                expected_root,
             )
             .await
     }
 
-    /// Subscribe to proof-carrying batches of the operation log.
+    /// Verified operations at `locations` of `tip`, in request order.
+    pub async fn operations(
+        &self,
+        tip: Location<F>,
+        locations: &[Location<F>],
+        min_sequence_number: Option<u64>,
+        expected_root: &H::Digest,
+    ) -> Result<VerifiedOperations<H::Digest, immutable::Operation<F, K, E>, F>, QmdbError> {
+        self.operation_log
+            .operations(
+                GetOperationsRequest {
+                    tip: tip.as_u64(),
+                    locations: locations.iter().map(|location| location.as_u64()).collect(),
+                    min_sequence_number,
+                    ..Default::default()
+                },
+                expected_root,
+            )
+            .await
+    }
+
+    /// Subscribe to proof-carrying batches of the operation log. `request` is passed
+    /// through to the service unchanged.
     pub async fn subscribe(
         &self,
         request: SubscribeRequest,

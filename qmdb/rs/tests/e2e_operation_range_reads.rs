@@ -40,6 +40,7 @@ use exoware_sdk::{
     },
     PrefixedStoreClient, RetryConfig, StoreClient, StoreKeyPrefix, StoreWriteBatch,
 };
+use futures::future::FutureExt as _;
 use std::{
     collections::{BTreeMap, BTreeSet},
     sync::{Arc, Mutex},
@@ -589,7 +590,7 @@ async fn verify_variant_range(
                 url,
                 ordered_cfg(),
             )
-            .get_operation_range(query, root)
+            .operation_range(query, root)
             .await
             .unwrap();
             assert_eq!(proof.operations, ordered_operations()[start..end]);
@@ -599,7 +600,7 @@ async fn verify_variant_range(
                 url,
                 immutable_cfg(),
             )
-            .get_operation_range(query, root)
+            .operation_range(query, root)
             .await
             .unwrap();
             assert_eq!(proof.operations, immutable_operations()[start..end]);
@@ -623,7 +624,7 @@ async fn boundary_singletons_batch_nodes_and_preserve_response_floors() {
         let mut query = request(14, 14, 1);
         query.min_sequence_number = Some(floor);
         let proof = proof_client(&url)
-            .get_operation_range(query, &root)
+            .operation_range(query, &root)
             .await
             .unwrap();
         assert_eq!(proof.operations, operations[14..]);
@@ -655,7 +656,7 @@ async fn historical_commit_uses_cached_greater_publication() {
     );
     let url = fixture.keyless(store).await;
     let proof = proof_client(&url)
-        .get_operation_range(request(3, 1, 1), &root)
+        .operation_range(request(3, 1, 1), &root)
         .await
         .unwrap();
     assert_eq!(proof.operations, operations[1..2]);
@@ -699,7 +700,7 @@ async fn unpublished_tip_precedes_bad_ranges_and_corrupt_rows_including_zero() {
     let root = fixture.stage(&store, &operations, &((0..=10000).into(), ()));
     let url = fixture.keyless(store).await;
     let proof = proof_client(&url)
-        .get_operation_range(request(0, 0, 1), &root)
+        .operation_range(request(0, 0, 1), &root)
         .await
         .unwrap();
     assert_eq!(proof.operations, operations);
@@ -734,7 +735,7 @@ async fn assert_operation_scan_overlap(publication: u64) {
     let url = fixture.keyless(store).await;
     let query = tokio::spawn(async move {
         proof_client(&url)
-            .get_operation_range(request(14, 2, 9), &root)
+            .operation_range(request(14, 2, 9), &root)
             .await
     });
     batch_gate.wait().await;
@@ -773,14 +774,11 @@ async fn cold_singleton_does_not_wait_for_another_proofs_operation_scan() {
     let url = fixture.keyless(store).await;
     let client = proof_client(&url);
     let range_client = client.clone();
-    let range = tokio::spawn(async move {
-        range_client
-            .get_operation_range(request(14, 2, 9), &root)
-            .await
-    });
+    let range =
+        tokio::spawn(async move { range_client.operation_range(request(14, 2, 9), &root).await });
     range_gate.wait().await;
     let mut singleton =
-        tokio::spawn(async move { client.get_operation_range(request(14, 14, 1), &root).await });
+        tokio::spawn(async move { client.operation_range(request(14, 14, 1), &root).await });
     fixture
         .store
         .wait_for_calls(2, |call| matches!(call, Call::GetMany(_)))
@@ -852,7 +850,7 @@ async fn clones_share_publication_roots_and_nodes() {
     let client = Keyless::new(store, ((0..=10000).into(), ()));
     let first = client.clone();
     let proof = first
-        .operation_range_checkpoint(Location::new(14), Location::new(1), 1, None)
+        .operation_range_proof(Location::new(14), Location::new(1), 1, None)
         .await
         .unwrap();
     assert_eq!(proof.ops_root, root);
@@ -863,7 +861,7 @@ async fn clones_share_publication_roots_and_nodes() {
     );
     fixture.store.state.lock().unwrap().calls.clear();
     let proof = client
-        .operation_range_checkpoint(Location::new(14), Location::new(1), 1, None)
+        .operation_range_proof(Location::new(14), Location::new(1), 1, None)
         .await
         .unwrap();
     assert_eq!(proof.ops_root, root);
@@ -883,7 +881,7 @@ async fn clones_share_publication_roots_and_nodes() {
 
     fixture.store.state.lock().unwrap().rows.remove(&key(3, 14));
     let proof = client
-        .operation_range_checkpoint(Location::new(14), Location::new(1), 1, None)
+        .operation_range_proof(Location::new(14), Location::new(1), 1, None)
         .await
         .unwrap();
     assert_eq!(proof.ops_root, root);
@@ -909,7 +907,7 @@ async fn operations_multi_proof_reads_rows_and_nodes_in_one_batch() {
     let locations = [1u64, 7, 14];
     let verify = || async {
         let proof = client
-            .get_operations(
+            .operations(
                 GetOperationsRequest {
                     tip: 14,
                     locations: locations.to_vec(),
@@ -930,7 +928,7 @@ async fn operations_multi_proof_reads_rows_and_nodes_in_one_batch() {
         );
     };
 
-    // Cold: the publication lookup, then rows, planned nodes, and the watermark row together.
+    // Cold: the watermark lookup, then rows, planned nodes, and the watermark row together.
     verify().await;
     let calls = fixture.store.calls();
     assert_eq!(calls.len(), 2);
@@ -963,6 +961,15 @@ async fn reject_invalid_native_multi_proof_requests<F: Graftable>() {
         store.clone(),
         ((0..=10000).into(), ()),
     );
+    let ordered = exoware_qmdb::adapter::Ordered::<F, Sha256, Vec<u8>, Vec<u8>, 32>::new(
+        store.clone(),
+        ordered_cfg(),
+        key_cfg(),
+    );
+    let immutable = exoware_qmdb::adapter::Immutable::<F, Sha256, Vec<u8>, Vec<u8>>::new(
+        store.clone(),
+        immutable_cfg(),
+    );
     let unordered = exoware_qmdb::adapter::Unordered::<F, Sha256, Vec<u8>, Vec<u8>, 32>::new(
         store,
         ordered_cfg(),
@@ -986,6 +993,14 @@ async fn reject_invalid_native_multi_proof_requests<F: Graftable>() {
                 .operation_multi_proof(Location::new(tip), &locations, Some(99))
                 .await
                 .unwrap_err(),
+            ordered
+                .operation_multi_proof(Location::new(tip), &locations, Some(99))
+                .await
+                .unwrap_err(),
+            immutable
+                .operation_multi_proof(Location::new(tip), &locations, Some(99))
+                .await
+                .unwrap_err(),
             unordered
                 .operation_multi_proof(Location::new(tip), &locations, Some(99))
                 .await
@@ -1001,7 +1016,7 @@ async fn reject_invalid_native_multi_proof_requests<F: Graftable>() {
         assert!(fixture.store.calls().is_empty());
     }
 
-    // Valid requests reach publication lookup, including those above the RPC count limit.
+    // Valid requests reach watermark lookup, including those above the RPC count limit.
     for (tip, locations) in [
         (maximum - 1, vec![maximum - 1]),
         (1024, (0..=1024).collect()),
@@ -1013,6 +1028,14 @@ async fn reject_invalid_native_multi_proof_requests<F: Graftable>() {
                 .operation_multi_proof(Location::new(tip), &locations, None)
                 .await
                 .unwrap_err(),
+            ordered
+                .operation_multi_proof(Location::new(tip), &locations, None)
+                .await
+                .unwrap_err(),
+            immutable
+                .operation_multi_proof(Location::new(tip), &locations, None)
+                .await
+                .unwrap_err(),
             unordered
                 .operation_multi_proof(Location::new(tip), &locations, None)
                 .await
@@ -1021,10 +1044,10 @@ async fn reject_invalid_native_multi_proof_requests<F: Graftable>() {
         for error in errors {
             assert!(matches!(
                 error,
-                exoware_qmdb::QmdbError::WatermarkTooLow { .. }
+                exoware_qmdb::QmdbError::NoPublishedWatermark { .. }
             ));
         }
-        assert_eq!(fixture.store.calls().len(), 2);
+        assert_eq!(fixture.store.calls().len(), 4);
     }
 }
 
@@ -1101,11 +1124,11 @@ async fn native_multi_proofs_authenticate_large_requests_and_preserve_publicatio
         };
 
         // Authenticate every requested operation against the independently staged root.
-        assert_eq!(proof.watermark, Location::new(tip));
+        assert_eq!(proof.tip, Location::new(tip));
         assert_eq!(proof.ops_root, root);
         assert!(proof.verify::<Sha256>());
         assert_eq!(
-            proof.operations,
+            proof.encoded_operations,
             locations
                 .iter()
                 .map(|&location| (location, encoded[location.as_u64() as usize].clone()))
@@ -1119,10 +1142,175 @@ async fn native_multi_proofs_authenticate_large_requests_and_preserve_publicatio
         assert_eq!(boundary_batch(&calls, tip).min_sequence_number, Some(23));
 
         // Tampering with an operation must fail verification.
-        let mut tampered = proof.operations[1].1.to_vec();
+        let mut tampered = proof.encoded_operations[1].1.to_vec();
         tampered[0] ^= 1;
-        proof.operations[1].1 = tampered.into();
+        proof.encoded_operations[1].1 = tampered.into();
         assert!(!proof.verify::<Sha256>());
+    }
+}
+
+/// Root and unproved value reads on a cold reader send the caller's floor to the watermark
+/// lookup, so a floor above the publication sequence aborts there.
+#[tokio::test]
+async fn cold_root_and_value_reads_send_floor_to_watermark_lookup() {
+    // Stage each database kind in its own Store. Each Store serves the publication and every
+    // later read at sequence 23.
+    let unordered_operations = (0..15)
+        .map(|index| {
+            if index == 14 {
+                UnorderedOp::CommitFloor(None, Location::new(4))
+            } else {
+                UnorderedOp::Delete(vec![index])
+            }
+        })
+        .collect::<Vec<_>>();
+    let fixtures = [
+        Fixture::new().await,
+        Fixture::new().await,
+        Fixture::new().await,
+        Fixture::new().await,
+    ];
+    let [keyless, immutable, ordered, unordered] = &fixtures;
+    keyless.stage(
+        &keyless.prefixed(&[]),
+        &operations(),
+        &((0..=10000).into(), ()),
+    );
+    immutable.stage(
+        &immutable.prefixed(&[]),
+        &immutable_operations(),
+        &immutable_cfg(),
+    );
+    ordered.stage(
+        &ordered.prefixed(&[]),
+        &ordered_operations(),
+        &ordered_cfg(),
+    );
+    unordered.stage(
+        &unordered.prefixed(&[]),
+        &unordered_operations,
+        &ordered_cfg(),
+    );
+    for fixture in &fixtures {
+        let mut state = fixture.store.state.lock().unwrap();
+        state.publication_sequence = 23;
+        state.get_sequence = 23;
+        state.batch_sequences = vec![23];
+    }
+
+    // Each read builds a fresh reader, so its first Store call is the watermark lookup.
+    let cold_keyless = || Keyless::new(keyless.prefixed(&[]), ((0..=10000).into(), ()));
+    let cold_immutable = || Immutable::new(immutable.prefixed(&[]), immutable_cfg());
+    let cold_ordered = || Ordered::new(ordered.prefixed(&[]), ordered_cfg(), key_cfg());
+    let cold_unordered = || Unordered::new(unordered.prefixed(&[]), ordered_cfg());
+    let tip = Location::new(14);
+    let keys = [vec![1]];
+    for (floor, published) in [(Some(17), true), (Some(24), false)] {
+        let reads = [
+            (
+                "keyless root_at",
+                keyless,
+                async { cold_keyless().root_at(tip, floor).await.map(drop) }.boxed_local(),
+            ),
+            (
+                "keyless get_at",
+                keyless,
+                async {
+                    cold_keyless()
+                        .get_at(tip, Location::new(1), floor)
+                        .await
+                        .map(drop)
+                }
+                .boxed_local(),
+            ),
+            (
+                "immutable root_at",
+                immutable,
+                async { cold_immutable().root_at(tip, floor).await.map(drop) }.boxed_local(),
+            ),
+            (
+                "immutable get_at",
+                immutable,
+                async {
+                    cold_immutable()
+                        .get_at(tip, &keys[0], floor)
+                        .await
+                        .map(drop)
+                }
+                .boxed_local(),
+            ),
+            (
+                "ordered root_at",
+                ordered,
+                async { cold_ordered().root_at(tip, floor).await.map(drop) }.boxed_local(),
+            ),
+            (
+                "ordered ops_root_at",
+                ordered,
+                async { cold_ordered().ops_root_at(tip, floor).await.map(drop) }.boxed_local(),
+            ),
+            (
+                "ordered get_many_at",
+                ordered,
+                async {
+                    cold_ordered()
+                        .get_many_at(tip, &keys, floor)
+                        .await
+                        .map(drop)
+                }
+                .boxed_local(),
+            ),
+            (
+                "unordered root_at",
+                unordered,
+                async { cold_unordered().root_at(tip, floor).await.map(drop) }.boxed_local(),
+            ),
+            (
+                "unordered ops_root_at",
+                unordered,
+                async { cold_unordered().ops_root_at(tip, floor).await.map(drop) }.boxed_local(),
+            ),
+            (
+                "unordered get_many_at",
+                unordered,
+                async {
+                    cold_unordered()
+                        .get_many_at(tip, &keys, floor)
+                        .await
+                        .map(drop)
+                }
+                .boxed_local(),
+            ),
+        ];
+
+        // The floor reaches the watermark lookup, and a floor the publication does not meet ends
+        // the read there.
+        for (name, fixture, read) in reads {
+            fixture.store.state.lock().unwrap().calls.clear();
+            let result = read.await;
+            let calls = fixture.store.calls();
+            assert!(
+                matches!(
+                    calls.first(),
+                    Some(Call::Range(range)) if range.mode == TraversalMode::Reverse
+                        && range.min_sequence_number == floor
+                ),
+                "{name} must send its floor to the watermark lookup"
+            );
+            if published {
+                result.unwrap_or_else(|error| panic!("{name} must succeed: {error}"));
+            } else {
+                assert!(
+                    matches!(
+                        result,
+                        Err(exoware_qmdb::QmdbError::Client(ref error))
+                            if error.rpc_code() == Some(ErrorCode::Aborted)
+                    ),
+                    "{name} must abort in the watermark lookup"
+                );
+                assert_eq!(calls.len(), 1, "{name} must stop at the watermark lookup");
+            }
+        }
     }
 }
 
@@ -1151,11 +1339,11 @@ async fn native_fixed_keyless_large_multi_proof_matches_browser_fixture() {
         .operation_multi_proof(Location::new(tip), &locations, None)
         .await
         .unwrap();
-    assert_eq!(proof.operations.len(), 1025);
+    assert_eq!(proof.encoded_operations.len(), 1025);
     assert_eq!(proof.ops_root, root);
     assert!(proof.verify::<Sha256>());
     assert_eq!(
-        proof.operations,
+        proof.encoded_operations,
         locations
             .iter()
             .map(|&location| (location, operations[location.as_u64() as usize].encode()))
@@ -1172,7 +1360,7 @@ async fn native_fixed_keyless_large_multi_proof_matches_browser_fixture() {
             .join(","),
         hex::encode(encode_operation_multi_proof(&proof)),
         proof
-            .operations
+            .encoded_operations
             .iter()
             .map(|(_, operation)| hex::encode(operation))
             .collect::<Vec<_>>()
@@ -1199,14 +1387,14 @@ async fn eleven_concurrent_singletons_fetch_each_node_once() {
     let mut queries = Vec::new();
     let first = client.clone();
     queries.push(tokio::spawn(async move {
-        first.get_operation_range(request(14, 0, 1), &root).await
+        first.operation_range(request(14, 0, 1), &root).await
     }));
     gate.wait().await;
     for location in 1..11 {
         let client = client.clone();
         queries.push(tokio::spawn(async move {
             client
-                .get_operation_range(request(14, location, 1), &root)
+                .operation_range(request(14, location, 1), &root)
                 .await
         }));
     }
@@ -1280,7 +1468,7 @@ async fn cancelled_node_leader_does_not_make_follower_wait_for_replacement() {
     let client = Keyless::new(store, ((0..=10000).into(), ()));
     let read = |client: Keyless| async move {
         client
-            .operation_range_checkpoint(Location::new(14), Location::new(1), 1, None)
+            .operation_range_proof(Location::new(14), Location::new(1), 1, None)
             .await
     };
     let leader_gate = Gate::new();
@@ -1411,7 +1599,7 @@ async fn ordered_and_immutable_clones_reuse_publication_and_proof_caches() {
                 let client = Ordered::new(store, ordered_cfg(), key_cfg());
                 let first = client.clone();
                 let proof = first
-                    .operation_range_checkpoint(Location::new(14), Location::new(1), 1, None)
+                    .operation_range_proof(Location::new(14), Location::new(1), 1, None)
                     .await
                     .unwrap();
                 assert_eq!(proof.ops_root, root);
@@ -1422,7 +1610,7 @@ async fn ordered_and_immutable_clones_reuse_publication_and_proof_caches() {
                 );
                 fixture.store.state.lock().unwrap().calls.clear();
                 let proof = client
-                    .operation_range_checkpoint(Location::new(14), Location::new(1), 1, None)
+                    .operation_range_proof(Location::new(14), Location::new(1), 1, None)
                     .await
                     .unwrap();
                 assert_eq!(proof.ops_root, root);
@@ -1433,7 +1621,7 @@ async fn ordered_and_immutable_clones_reuse_publication_and_proof_caches() {
                 );
                 fixture.store.state.lock().unwrap().rows.remove(&key(3, 14));
                 let proof = client
-                    .operation_range_checkpoint(Location::new(14), Location::new(1), 1, None)
+                    .operation_range_proof(Location::new(14), Location::new(1), 1, None)
                     .await
                     .unwrap();
                 assert_eq!(proof.ops_root, root);
@@ -1447,7 +1635,7 @@ async fn ordered_and_immutable_clones_reuse_publication_and_proof_caches() {
                 let client = Immutable::new(store, immutable_cfg());
                 let first = client.clone();
                 let proof = first
-                    .operation_range_checkpoint(Location::new(14), Location::new(1), 1, None)
+                    .operation_range_proof(Location::new(14), Location::new(1), 1, None)
                     .await
                     .unwrap();
                 assert_eq!(proof.ops_root, root);
@@ -1458,7 +1646,7 @@ async fn ordered_and_immutable_clones_reuse_publication_and_proof_caches() {
                 );
                 fixture.store.state.lock().unwrap().calls.clear();
                 let proof = client
-                    .operation_range_checkpoint(Location::new(14), Location::new(1), 1, None)
+                    .operation_range_proof(Location::new(14), Location::new(1), 1, None)
                     .await
                     .unwrap();
                 assert_eq!(proof.ops_root, root);
@@ -1469,7 +1657,7 @@ async fn ordered_and_immutable_clones_reuse_publication_and_proof_caches() {
                 );
                 fixture.store.state.lock().unwrap().rows.remove(&key(3, 14));
                 let proof = client
-                    .operation_range_checkpoint(Location::new(14), Location::new(1), 1, None)
+                    .operation_range_proof(Location::new(14), Location::new(1), 1, None)
                     .await
                     .unwrap();
                 assert_eq!(proof.ops_root, root);
@@ -1582,7 +1770,7 @@ async fn separate_namespaces_do_not_share_cached_nodes_or_roots() {
     assert_ne!(roots[0], roots[1]);
     for (index, prefix) in [0xa1, 0xb2].into_iter().enumerate() {
         let proof = proof_client(&urls[index])
-            .get_operation_range(request(1, 0, 1), &roots[index])
+            .operation_range(request(1, 0, 1), &roots[index])
             .await
             .unwrap();
         assert_eq!(proof.operations, vec![Operation::Append(vec![prefix])]);
@@ -1645,13 +1833,13 @@ async fn unordered_noncommit_tip_shares_floor_without_waiting_for_operation_scan
     let range_client = client.clone();
     let range = tokio::spawn(async move {
         range_client
-            .operation_range_checkpoint(Location::new(6), Location::new(0), 2, None)
+            .operation_range_proof(Location::new(6), Location::new(0), 2, None)
             .await
     });
     range_gate.wait().await;
     let mut singleton = tokio::spawn(async move {
         client
-            .operation_range_checkpoint(Location::new(6), Location::new(6), 1, None)
+            .operation_range_proof(Location::new(6), Location::new(6), 1, None)
             .await
     });
     let result = tokio::time::timeout(Duration::from_secs(1), &mut singleton).await;
@@ -1705,7 +1893,7 @@ async fn missing_witness_is_reloaded_after_a_successful_cached_proof() {
     let url = fixture.unordered(store, cfg).await;
     let client = OperationLogClient::<_, mmr::Family, Sha256, UnorderedOp>::plaintext(&url, cfg);
     let _ = client
-        .get_operation_range(request(0, 0, 1), &root)
+        .operation_range(request(0, 0, 1), &root)
         .await
         .unwrap();
 

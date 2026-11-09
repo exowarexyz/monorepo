@@ -40,14 +40,14 @@ async function readOperations(
     merkleFamily: 'mmr',
     hashFamily: 'sha256',
   });
-  return client.getOperations(request, trustedRoot);
+  return client.operations(request, trustedRoot);
 }
 ```
 
 `request` contains a `tip: bigint` and nonempty, strictly ascending
 `locations: bigint[]` at or below that tip. The RPC accepts up to 1,024 locations.
 The result contains each location and its `encodedOperation: Uint8Array`. For
-consecutive entries, use `getOperationRange` with `tip`, `startLocation`, and
+consecutive entries, use `operationRange` with `tip`, `startLocation`, and
 `maxLocations`. It verifies the exact interval
 `[startLocation, min(startLocation + maxLocations, tip + 1))`.
 
@@ -56,7 +56,7 @@ consecutive entries, use `getOperationRange` with `tip`, `startLocation`, and
 always use binary protobuf and ignore `useBinaryFormat`, because each proof goes
 to WASM as the bytes the server sent for it, and JSON can't carry it that way.
 Unary proof requests also accept `minSequenceNumber` to set the minimum Store
-sequence for checking publication of the requested tip.
+sequence for checking that the published watermark covers the requested tip.
 
 Locations and sequences use `bigint`, while request counts and WASM byte sizes
 use unsigned 32-bit numbers. Pass roots as digest bytes. For byte arguments that
@@ -70,10 +70,10 @@ the log to it. For an operation-log-only database, supply the operation-log root
 A root returned by the proof server is not itself trusted.
 
 `OperationRangeProof` and `OperationMultiProof` establish membership in the log,
-so an included update need not still be active. `Current*` proofs additionally
-authenticate activity at the requested batch boundary, the final commit
-location of an applied batch. That boundary can be older than the latest
-published state.
+so an included update need not still be active. The current-state proofs behind
+key lookups, key ranges, and `currentOperationRange` additionally authenticate
+activity at the tip, which must be a commit whose publication was uploaded. That
+tip can be older than the latest published watermark.
 
 ## Query current ordered state
 
@@ -84,14 +84,23 @@ verification checks bounds and forward pagination over authenticated successor
 links. For other database kinds and encodings, use raw log verification. It
 verifies encoded operations without decoding them as ordered operations or
 supplying generic current-state queries.
+Method names say which form they return. On the clients the class carries it:
+`QmdbLogClient.operationRange` returns encoded operations and
+`QmdbOrderedClient.operationRange` returns decoded ordered ones. The shared
+`QmdbProofVerifier` names it in each method instead, as `verifyRawOperationRange`
+and `verifyRawOperations` versus `verifyOrderedOperationRange`.
+The fixed-size reads count what they check: `getFixedKeylessAppend` and
+`getFixedUnorderedUpdate` check one operation, while
+`getFixedKeylessAppends` and `getFixedUnorderedUpdates` check many in one proof.
 
 ## Verify proofs from another transport
 
 When your application transports proofs itself, pass the original request
 context and trusted root to [`QmdbProofVerifier`](src/verification.ts). Its range
-methods accept `OperationRangeProof` protobuf bytes, while `verifyOperations`
-and the `*Many` methods accept `OperationMultiProof` bytes. For example, this
-verifies a batch of expected fixed-size keyless appends:
+methods accept `OperationRangeProof` protobuf bytes, while `verifyRawOperations`,
+`verifyFixedKeylessAppends`, and `verifyFixedUnorderedUpdates` accept
+`OperationMultiProof` bytes. For example, this verifies a batch of expected
+fixed-size keyless appends:
 
 ```ts
 import { QmdbProofVerifier } from '@exowarexyz/qmdb';
@@ -104,7 +113,7 @@ async function verifyAppends(
   trustedRoot: Uint8Array,
   expected: { location: bigint; value: Uint8Array }[],
 ) {
-  return verifier.verifyFixedKeylessAppendMany(
+  return verifier.verifyFixedKeylessAppends(
     proofBytes,
     { tip },
     trustedRoot,
@@ -125,9 +134,10 @@ module.
 
 `QmdbOrderedClient.subscribe` accepts exact, prefix, and regex filters built with
 `matchExact`, `matchPrefix`, and `matchRegex`. Each frame contains a `tip`,
-`resumeSequenceNumber`, and decoded proof. Decoding checks internal consistency.
-Compare `frame.proof.root` with an independently trusted root for `frame.tip`
-before using its operations.
+`resumeSequenceNumber`, and the decoded `root` and `operations`. Decoding checks
+internal consistency but not the root, unlike the Rust client's
+`VerifiedSubscribeFrame`. Compare `frame.root` with an independently trusted
+root for `frame.tip` before using its operations.
 
 Resume with `sinceSequenceNumber: frame.resumeSequenceNumber + 1n`. A frame may
 contain only part of an uploaded range, and later frames can repeat operations

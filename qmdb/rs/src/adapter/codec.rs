@@ -87,20 +87,15 @@ pub(crate) fn decode_current_boundary_metadata<D: Digest>(
         .map_err(|e| QmdbError::CorruptData(format!("{label} decode error: {e}")))
 }
 
-pub(crate) fn merkle_size_for_watermark<F: Family>(
-    watermark: Location<F>,
-) -> Result<Position<F>, QmdbError> {
-    let leaves = op_count_for_watermark(watermark)?;
+pub(crate) fn merkle_size_for_tip<F: Family>(tip: Location<F>) -> Result<Position<F>, QmdbError> {
+    let leaves = op_count_for_tip(tip)?;
     Position::try_from(leaves)
-        .map_err(|e| QmdbError::CorruptData(format!("invalid merkle size for watermark: {e}")))
+        .map_err(|e| QmdbError::CorruptData(format!("invalid merkle size for tip: {e}")))
 }
 
-pub(crate) fn op_count_for_watermark<F: Family>(
-    watermark: Location<F>,
-) -> Result<Location<F>, QmdbError> {
-    watermark
-        .checked_add(1)
-        .ok_or_else(|| QmdbError::CorruptData("watermark overflow".to_string()))
+pub(crate) fn op_count_for_tip<F: Family>(tip: Location<F>) -> Result<Location<F>, QmdbError> {
+    tip.checked_add(1)
+        .ok_or_else(|| QmdbError::CorruptData("tip overflow".to_string()))
 }
 
 pub(crate) const fn ensure_encoded_value_size(len: usize) -> Result<(), QmdbError> {
@@ -328,22 +323,19 @@ pub(crate) fn encode_ops_root_witness_key<F: Family>(location: Location<F>) -> K
         .expect("ops root witness key length should fit")
 }
 
-pub(crate) fn encode_grafted_node_key<F: Family>(
-    position: Position<F>,
-    watermark: Location<F>,
-) -> Key {
+pub(crate) fn encode_grafted_node_key<F: Family>(position: Position<F>, tip: Location<F>) -> Key {
     let mut payload = [0u8; 16];
     payload[..8].copy_from_slice(&position.as_u64().to_be_bytes());
-    payload[8..].copy_from_slice(&watermark.as_u64().to_be_bytes());
+    payload[8..].copy_from_slice(&tip.as_u64().to_be_bytes());
     GRAFTED_NODE_PREFIX
         .encode(&payload)
         .expect("grafted node key length should fit")
 }
 
-pub(crate) fn encode_chunk_key<F: Family>(chunk_index: u64, watermark: Location<F>) -> Key {
+pub(crate) fn encode_chunk_key<F: Family>(chunk_index: u64, tip: Location<F>) -> Key {
     let mut payload = [0u8; 16];
     payload[..8].copy_from_slice(&chunk_index.to_be_bytes());
-    payload[8..].copy_from_slice(&watermark.as_u64().to_be_bytes());
+    payload[8..].copy_from_slice(&tip.as_u64().to_be_bytes());
     CHUNK_PREFIX
         .encode(&payload)
         .expect("chunk key length should fit")
@@ -351,7 +343,7 @@ pub(crate) fn encode_chunk_key<F: Family>(chunk_index: u64, watermark: Location<
 
 /// Clear every bitmap bit below `floor` within the chunk at `chunk_index`.
 ///
-/// Bits below the inactivity floor are definitionally 0 at any watermark. The
+/// Bits below the inactivity floor are definitionally 0 at any tip. The
 /// producer does not republish a chunk every time floor advancement flips one
 /// of its bits, so the stored payload may carry stale 1s. Fold those clears
 /// in deterministically at read time. Mirrors the bit layout used by

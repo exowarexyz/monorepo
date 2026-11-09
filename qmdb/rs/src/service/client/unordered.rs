@@ -5,11 +5,13 @@ use super::rpc::{
     OperationLogClient, OperationLogSubscription,
 };
 use crate::{
-    proof::{VerifiedCurrentRange, VerifiedKeyValue, VerifiedOperationRange},
+    proof::{
+        VerifiedCurrentOperationRange, VerifiedKeyValue, VerifiedOperationRange, VerifiedOperations,
+    },
     service::proto::qmdb::v1::{
         current_key_lookup_result, CurrentKeyLookupResult, CurrentKeyValueProof,
-        GetCurrentOperationRangeRequest, GetManyRequest, GetOperationRangeRequest, GetRequest,
-        SubscribeRequest,
+        GetCurrentOperationRangeRequest, GetManyRequest, GetOperationRangeRequest,
+        GetOperationsRequest, GetRequest, SubscribeRequest,
     },
     QmdbError,
 };
@@ -92,7 +94,7 @@ where
         if !matches!(&verified.operation, unordered::Operation::Update(update) if update.0.encode().as_ref() == requested_key)
         {
             return Err(QmdbError::ProofVerification {
-                kind: crate::ProofKind::CurrentKeyValue,
+                kind: crate::ProofKind::KeyValue,
             });
         }
         Ok(verified)
@@ -134,18 +136,18 @@ where
                 };
                 let unordered::Operation::Update(update) = &verified.operation else {
                     return Err(QmdbError::ProofVerification {
-                        kind: crate::ProofKind::CurrentKeyValue,
+                        kind: crate::ProofKind::KeyValue,
                     });
                 };
                 let key = update.0.encode();
                 let Some(&request_index) = requested.get(key.as_ref()) else {
                     return Err(QmdbError::ProofVerification {
-                        kind: crate::ProofKind::CurrentKeyValue,
+                        kind: crate::ProofKind::KeyValue,
                     });
                 };
                 if last_index.is_some_and(|last| request_index <= last) {
                     return Err(QmdbError::ProofVerification {
-                        kind: crate::ProofKind::CurrentKeyValue,
+                        kind: crate::ProofKind::KeyValue,
                     });
                 }
                 last_index = Some(request_index);
@@ -183,6 +185,11 @@ where
     E: ValueEncoding<Value = V>,
     unordered::Operation<F, K, E>: Decode + Encode + Read,
 {
+    /// Client for the endpoint at `base` over plaintext HTTP.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `base` is not a valid URI.
     pub fn plaintext(base: &str, op_cfg: <unordered::Operation<F, K, E> as Read>::Cfg) -> Self {
         Self::new(
             PreferZstdHttpClient::plaintext(),
@@ -225,13 +232,13 @@ where
         }
     }
 
-    /// Verified current-state proof for `key` at `tip`.
+    /// Verified current-state value for `key` at `tip`.
     pub async fn get(
         &self,
         tip: Location<F>,
         key: &K,
         min_sequence_number: Option<u64>,
-        root: &H::Digest,
+        expected_root: &H::Digest,
     ) -> Result<VerifiedKeyValue<H::Digest, unordered::Operation<F, K, E>, F>, QmdbError> {
         self.key_lookup
             .get(
@@ -241,19 +248,19 @@ where
                     min_sequence_number,
                     ..Default::default()
                 },
-                root,
+                expected_root,
             )
             .await
     }
 
     /// Verified current-state hits for `keys`, in request order. Missing or
     /// inactive keys are omitted: unordered QMDB has no exclusion proofs.
-    pub async fn get_many(
+    pub async fn get_hits(
         &self,
         tip: Location<F>,
         keys: &[K],
         min_sequence_number: Option<u64>,
-        root: &H::Digest,
+        expected_root: &H::Digest,
     ) -> Result<Vec<VerifiedKeyValue<H::Digest, unordered::Operation<F, K, E>, F>>, QmdbError> {
         self.key_lookup
             .get_many(
@@ -263,7 +270,7 @@ where
                     min_sequence_number,
                     ..Default::default()
                 },
-                root,
+                expected_root,
             )
             .await
     }
@@ -276,11 +283,13 @@ where
         start_location: Location<F>,
         max_locations: u32,
         min_sequence_number: Option<u64>,
-        root: &H::Digest,
-    ) -> Result<VerifiedCurrentRange<H::Digest, unordered::Operation<F, K, E>, N, F>, QmdbError>
-    {
+        expected_root: &H::Digest,
+    ) -> Result<
+        VerifiedCurrentOperationRange<H::Digest, unordered::Operation<F, K, E>, N, F>,
+        QmdbError,
+    > {
         self.current_operation
-            .get_current_operation_range(
+            .current_operation_range(
                 GetCurrentOperationRangeRequest {
                     tip: tip.as_u64(),
                     start_location: start_location.as_u64(),
@@ -288,19 +297,21 @@ where
                     min_sequence_number,
                     ..Default::default()
                 },
-                root,
+                expected_root,
             )
             .await
     }
 
     /// Commonware sync target for `range`, authenticated against the trusted
-    /// current `root`.
+    /// current `expected_root`.
     pub async fn current_sync_target(
         &self,
         range: NonEmptyRange<Location<F>>,
-        root: &H::Digest,
+        expected_root: &H::Digest,
     ) -> Result<SyncTarget<F, H::Digest>, QmdbError> {
-        self.operation_log.current_sync_target(range, root).await
+        self.operation_log
+            .current_sync_target(range, expected_root)
+            .await
     }
 
     /// Verified contiguous operations `[start_location, start_location + max_locations)`,
@@ -311,11 +322,11 @@ where
         start_location: Location<F>,
         max_locations: u32,
         min_sequence_number: Option<u64>,
-        root: &H::Digest,
+        expected_root: &H::Digest,
     ) -> Result<VerifiedOperationRange<H::Digest, unordered::Operation<F, K, E>, F>, QmdbError>
     {
         self.operation_log
-            .get_operation_range(
+            .operation_range(
                 GetOperationRangeRequest {
                     tip: tip.as_u64(),
                     start_location: start_location.as_u64(),
@@ -323,12 +334,34 @@ where
                     min_sequence_number,
                     ..Default::default()
                 },
-                root,
+                expected_root,
             )
             .await
     }
 
-    /// Subscribe to proof-carrying batches of the operation log.
+    /// Verified operations at `locations` of `tip`, in request order.
+    pub async fn operations(
+        &self,
+        tip: Location<F>,
+        locations: &[Location<F>],
+        min_sequence_number: Option<u64>,
+        expected_root: &H::Digest,
+    ) -> Result<VerifiedOperations<H::Digest, unordered::Operation<F, K, E>, F>, QmdbError> {
+        self.operation_log
+            .operations(
+                GetOperationsRequest {
+                    tip: tip.as_u64(),
+                    locations: locations.iter().map(|location| location.as_u64()).collect(),
+                    min_sequence_number,
+                    ..Default::default()
+                },
+                expected_root,
+            )
+            .await
+    }
+
+    /// Subscribe to proof-carrying batches of the operation log. `request` is passed
+    /// through to the service unchanged.
     pub async fn subscribe(
         &self,
         request: SubscribeRequest,

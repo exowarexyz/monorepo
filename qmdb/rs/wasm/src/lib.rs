@@ -176,36 +176,6 @@ where
     Ok(ops_root)
 }
 
-fn verify_multi_from_proto<F, H>(
-    proto: &OperationMultiProof,
-    root: &H::Digest,
-) -> Result<
-    (
-        H::Digest,
-        Vec<(Location<F>, OrderedOperation<F, Vec<u8>, Vec<u8>>)>,
-    ),
-    String,
->
-where
-    F: merkle::Graftable,
-    H: commonware_cryptography::Hasher,
-    H::Digest: DecodeExt<()>,
-    OrderedOperation<F, Vec<u8>, Vec<u8>>:
-        Decode + Encode + Read<Cfg = ((RangeCfg<usize>, ()), (RangeCfg<usize>, ()))>,
-{
-    let operations = decode_multi_operations_from_proto::<F>(proto)?;
-    let target_root =
-        operation_target_root::<F, H>(&proto.ops_root, &proto.ops_root_witness, root)?;
-    let max_digests = proof_digest_cap::<H::Digest>(&proto.proof);
-    let proof =
-        merkle::Proof::<F, H::Digest>::decode_cfg(Copying(proto.proof.as_ref()), &max_digests)
-            .map_err(|err| format!("failed to decode operation multi proof: {err}"))?;
-    if !proof.verify_multi::<H, _>(&operations, &target_root) {
-        return Err("operation multi proof failed verification".to_string());
-    }
-    Ok((*root, operations))
-}
-
 fn decode_multi_with_embedded_root_from_proto<F, H>(
     proto: &OperationMultiProof,
 ) -> Result<
@@ -563,14 +533,14 @@ where
     Ok((location, OrderedOperation::Update(update)))
 }
 
-/// Verify that `requested_key` has no active value under `current_root`.
+/// Verify that `requested_key` has no active value under `root`.
 ///
 /// Returns the successor key that closes the excluding span, or `None` when the proof shows the
 /// database has no active keys.
 fn verify_key_exclusion_from_proto<F, H>(
     proto: &CurrentKeyExclusionProof,
     requested_key: &[u8],
-    current_root: &H::Digest,
+    root: &H::Digest,
     config: &CurrentProofConfig,
 ) -> Result<Option<Vec<u8>>, String>
 where
@@ -595,7 +565,7 @@ where
     // A span proof must strictly contain the requested key, and a commit proof must show an empty
     // database. Commonware checks either case and authenticates the anchoring operation.
     let requested_key = decode_vec_key_wire(requested_key)?;
-    if !proof.verify::<H>(&requested_key, current_root) {
+    if !proof.verify::<H>(&requested_key, root) {
         return Err("current key-exclusion proof failed verification".to_string());
     }
 
@@ -888,7 +858,7 @@ where
     let max_digests = proof_digest_cap::<H::Digest>(&proto.proof);
     let proof =
         merkle::Proof::<F, H::Digest>::decode_cfg(Copying(proto.proof.as_ref()), &max_digests)
-            .map_err(|err| format!("failed to decode operations multi proof: {err}"))?;
+            .map_err(|err| format!("failed to decode operation multi proof: {err}"))?;
     locations.validate(
         proto.operations.iter().map(|operation| operation.location),
         proof.leaves.as_u64(),
@@ -908,7 +878,7 @@ where
         &operations,
         &target_root,
     ) {
-        return Err("operations multi proof failed verification".to_string());
+        return Err("operation multi proof failed verification".to_string());
     }
     Ok((*root, operations))
 }
@@ -1025,7 +995,7 @@ where
 
 fn lookup_results_to_js<F, H>(
     proto: &GetManyResponse,
-    current_root: &H::Digest,
+    root: &H::Digest,
     requested_keys: &[Vec<u8>],
     config: &CurrentProofConfig,
 ) -> Result<JsValue, JsValue>
@@ -1054,19 +1024,15 @@ where
             .ok_or_else(|| js_err("getMany result missing hit/miss proof"))?
         {
             current_key_lookup_result::Result::Hit(proof) => {
-                let (location, operation) = verify_key_value_for_key_from_proto::<F, H>(
-                    proof,
-                    requested_key,
-                    current_root,
-                    config,
-                )
-                .map_err(js_err)?;
+                let (location, operation) =
+                    verify_key_value_for_key_from_proto::<F, H>(proof, requested_key, root, config)
+                        .map_err(js_err)?;
                 set_field(&entry, "type", &JsValue::from_str("hit"))?;
                 set_field(&entry, "location", &location_to_bigint(location))?;
                 set_field(&entry, "operation", &to_js_operation(operation)?)?;
             }
             current_key_lookup_result::Result::Miss(proof) => {
-                verify_key_exclusion_from_proto::<F, H>(proof, requested_key, current_root, config)
+                verify_key_exclusion_from_proto::<F, H>(proof, requested_key, root, config)
                     .map_err(js_err)?;
                 set_field(&entry, "type", &JsValue::from_str("miss"))?;
             }
@@ -1080,7 +1046,7 @@ where
 
 fn verify_get_range_from_proto<F, H>(
     proto: &GetRangeResponse,
-    current_root: &H::Digest,
+    root: &H::Digest,
     start_key: &[u8],
     end_key: Option<&[u8]>,
     config: &CurrentProofConfig,
@@ -1100,9 +1066,7 @@ where
         .transpose()?;
     let mut decoded = Vec::new();
     for proof in &proto.entries {
-        decoded.push(
-            verify_key_value_from_proto::<F, H>(proof, current_root, config).map_err(js_err)?,
-        );
+        decoded.push(verify_key_value_from_proto::<F, H>(proof, root, config).map_err(js_err)?);
     }
 
     let keys = decoded
@@ -1114,7 +1078,7 @@ where
             .start_proof
             .as_option()
             .ok_or_else(|| js_err("key range missing start boundary proof"))?;
-        verify_key_exclusion_from_proto::<F, H>(proof, start_key_wire, current_root, config)
+        verify_key_exclusion_from_proto::<F, H>(proof, start_key_wire, root, config)
             .map_err(js_err)?
     } else {
         None
@@ -1196,37 +1160,7 @@ pub fn decode_operation_multi_proof_operations(
 }
 
 #[wasm_bindgen]
-pub fn verify_operation_multi_proof(
-    bytes: Vec<u8>,
-    root: &[u8],
-    merkle_family: &str,
-    hash_family: &str,
-) -> Result<JsValue, JsValue> {
-    let proto = decode_proto::<OperationMultiProof>(bytes, "operation multi proof")?;
-    with_hash_family!(hash_family, "operation multi proof", {
-        let root = decode_digest::<<H as commonware_cryptography::Hasher>::Digest>(
-            root,
-            "operation proof root",
-        )
-        .map_err(js_err)?;
-        match normalize_family(merkle_family, "operation multi proof").map_err(js_err)? {
-            "mmr" => {
-                let (root, operations) =
-                    verify_multi_from_proto::<mmr::Family, H>(&proto, &root).map_err(js_err)?;
-                operation_proof_to_js(root, operations)
-            }
-            "mmb" => {
-                let (root, operations) =
-                    verify_multi_from_proto::<mmb::Family, H>(&proto, &root).map_err(js_err)?;
-                operation_proof_to_js(root, operations)
-            }
-            _ => unreachable!("normalize_family only returns supported values"),
-        }
-    })
-}
-
-#[wasm_bindgen]
-pub fn verify_operation_range_proof(
+pub fn verify_ordered_operation_range_proof(
     bytes: Vec<u8>,
     root: &[u8],
     merkle_family: &str,
@@ -1301,7 +1235,7 @@ pub fn verify_raw_operation_range_proof(
 
 #[wasm_bindgen]
 #[allow(clippy::too_many_arguments)]
-pub fn verify_fixed_keyless_append_proof(
+pub fn verify_fixed_keyless_append_range_proof(
     bytes: Vec<u8>,
     root: &[u8],
     merkle_family: &str,
@@ -1369,7 +1303,7 @@ pub fn verify_fixed_keyless_append_proof(
 
 #[wasm_bindgen]
 #[allow(clippy::too_many_arguments)]
-pub fn verify_fixed_unordered_update_proof(
+pub fn verify_fixed_unordered_update_range_proof(
     bytes: Vec<u8>,
     root: &[u8],
     merkle_family: &str,
@@ -1442,7 +1376,7 @@ pub fn verify_fixed_unordered_update_proof(
 /// `expected_locations`. Return encoded operations in location order. Locations must be
 /// nonempty, strictly ascending, and at most `expected_tip`.
 #[wasm_bindgen]
-pub fn verify_operations_proof(
+pub fn verify_raw_operation_multi_proof(
     bytes: Vec<u8>,
     root: &[u8],
     merkle_family: &str,
@@ -1452,14 +1386,14 @@ pub fn verify_operations_proof(
 ) -> Result<JsValue, JsValue> {
     let locations = OperationLocations::new(expected_tip, &expected_locations)
         .map_err(|err| js_err(err.to_string()))?;
-    let proto = decode_proto::<OperationMultiProof>(bytes, "operations multi proof")?;
-    with_hash_family!(hash_family, "operations multi proof", {
+    let proto = decode_proto::<OperationMultiProof>(bytes, "operation multi proof")?;
+    with_hash_family!(hash_family, "operation multi proof", {
         let root = decode_digest::<<H as commonware_cryptography::Hasher>::Digest>(
             root,
-            "operations multi proof root",
+            "operation multi proof root",
         )
         .map_err(js_err)?;
-        match normalize_family(merkle_family, "operations multi proof").map_err(js_err)? {
+        match normalize_family(merkle_family, "operation multi proof").map_err(js_err)? {
             "mmr" => {
                 let (root, operations) =
                     verify_raw_operations::<mmr::Family, H>(&proto, &root, &locations)
@@ -1483,7 +1417,7 @@ pub fn verify_operations_proof(
 /// `value_size`-byte value per location.
 #[wasm_bindgen]
 #[allow(clippy::too_many_arguments)]
-pub fn verify_fixed_keyless_append_operations_proof(
+pub fn verify_fixed_keyless_append_multi_proof(
     bytes: Vec<u8>,
     root: &[u8],
     merkle_family: &str,
@@ -1502,14 +1436,14 @@ pub fn verify_fixed_keyless_append_operations_proof(
         "keyless value",
     )
     .map_err(js_err)?;
-    let proto = decode_proto::<OperationMultiProof>(bytes, "operations multi proof")?;
-    with_hash_family!(hash_family, "operations multi proof", {
+    let proto = decode_proto::<OperationMultiProof>(bytes, "operation multi proof")?;
+    with_hash_family!(hash_family, "operation multi proof", {
         let root = decode_digest::<<H as commonware_cryptography::Hasher>::Digest>(
             root,
-            "operations multi proof root",
+            "operation multi proof root",
         )
         .map_err(js_err)?;
-        match normalize_family(merkle_family, "operations multi proof").map_err(js_err)? {
+        match normalize_family(merkle_family, "operation multi proof").map_err(js_err)? {
             "mmr" => {
                 let (root, operations) =
                     verify_raw_operations::<mmr::Family, H>(&proto, &root, &locations)
@@ -1533,7 +1467,7 @@ pub fn verify_fixed_keyless_append_operations_proof(
 /// `key_size`-byte key per location.
 #[wasm_bindgen]
 #[allow(clippy::too_many_arguments)]
-pub fn verify_fixed_unordered_update_operations_proof(
+pub fn verify_fixed_unordered_update_multi_proof(
     bytes: Vec<u8>,
     root: &[u8],
     merkle_family: &str,
@@ -1553,14 +1487,14 @@ pub fn verify_fixed_unordered_update_operations_proof(
         "unordered key",
     )
     .map_err(js_err)?;
-    let proto = decode_proto::<OperationMultiProof>(bytes, "operations multi proof")?;
-    with_hash_family!(hash_family, "operations multi proof", {
+    let proto = decode_proto::<OperationMultiProof>(bytes, "operation multi proof")?;
+    with_hash_family!(hash_family, "operation multi proof", {
         let root = decode_digest::<<H as commonware_cryptography::Hasher>::Digest>(
             root,
-            "operations multi proof root",
+            "operation multi proof root",
         )
         .map_err(js_err)?;
-        match normalize_family(merkle_family, "operations multi proof").map_err(js_err)? {
+        match normalize_family(merkle_family, "operation multi proof").map_err(js_err)? {
             "mmr" => {
                 let (root, operations) =
                     verify_raw_operations::<mmr::Family, H>(&proto, &root, &locations)
@@ -1628,7 +1562,7 @@ pub fn encode_vec_key(key: &[u8]) -> Vec<u8> {
 }
 
 #[wasm_bindgen]
-pub fn verify_current_key_value_proof(
+pub fn verify_key_value_proof(
     bytes: Vec<u8>,
     root: &[u8],
     merkle_family: &str,
@@ -1673,9 +1607,9 @@ pub fn verify_current_key_value_proof(
 }
 
 #[wasm_bindgen]
-pub fn verify_get_many_response(
+pub fn verify_key_lookup_proof(
     bytes: Vec<u8>,
-    current_root: &[u8],
+    root: &[u8],
     merkle_family: &str,
     hash_family: &str,
     current_chunk_size: usize,
@@ -1684,29 +1618,21 @@ pub fn verify_get_many_response(
     let proto = decode_proto::<GetManyResponse>(bytes, "getMany response")?;
     let requested_keys = js_key_array_to_vec(requested_keys)?;
     with_hash_family!(hash_family, "getMany response", {
-        let current_root = decode_digest::<<H as commonware_cryptography::Hasher>::Digest>(
-            current_root,
-            "current root",
-        )
-        .map_err(js_err)?;
+        let root =
+            decode_digest::<<H as commonware_cryptography::Hasher>::Digest>(root, "current root")
+                .map_err(js_err)?;
         let config = current_proof_config::<<H as commonware_cryptography::Hasher>::Digest>(
             current_chunk_size,
             "getMany response",
         )
         .map_err(js_err)?;
         match normalize_family(merkle_family, "getMany response").map_err(js_err)? {
-            "mmr" => lookup_results_to_js::<mmr::Family, H>(
-                &proto,
-                &current_root,
-                &requested_keys,
-                &config,
-            ),
-            "mmb" => lookup_results_to_js::<mmb::Family, H>(
-                &proto,
-                &current_root,
-                &requested_keys,
-                &config,
-            ),
+            "mmr" => {
+                lookup_results_to_js::<mmr::Family, H>(&proto, &root, &requested_keys, &config)
+            }
+            "mmb" => {
+                lookup_results_to_js::<mmb::Family, H>(&proto, &root, &requested_keys, &config)
+            }
             _ => unreachable!("normalize_family only returns supported values"),
         }
     })
@@ -1714,9 +1640,9 @@ pub fn verify_get_many_response(
 
 #[wasm_bindgen]
 #[allow(clippy::too_many_arguments)]
-pub fn verify_get_range_response(
+pub fn verify_key_range_proof(
     bytes: Vec<u8>,
-    current_root: &[u8],
+    root: &[u8],
     merkle_family: &str,
     hash_family: &str,
     current_chunk_size: usize,
@@ -1728,11 +1654,9 @@ pub fn verify_get_range_response(
     let proto = decode_proto::<GetRangeResponse>(bytes, "getRange response")?;
     let end_key = has_end_key.then_some(end_key);
     with_hash_family!(hash_family, "getRange response", {
-        let current_root = decode_digest::<<H as commonware_cryptography::Hasher>::Digest>(
-            current_root,
-            "current root",
-        )
-        .map_err(js_err)?;
+        let root =
+            decode_digest::<<H as commonware_cryptography::Hasher>::Digest>(root, "current root")
+                .map_err(js_err)?;
         let config = current_proof_config::<<H as commonware_cryptography::Hasher>::Digest>(
             current_chunk_size,
             "getRange response",
@@ -1740,20 +1664,10 @@ pub fn verify_get_range_response(
         .map_err(js_err)?;
         match normalize_family(merkle_family, "getRange response").map_err(js_err)? {
             "mmr" => verify_get_range_from_proto::<mmr::Family, H>(
-                &proto,
-                &current_root,
-                start_key,
-                end_key,
-                &config,
-                limit,
+                &proto, &root, start_key, end_key, &config, limit,
             ),
             "mmb" => verify_get_range_from_proto::<mmb::Family, H>(
-                &proto,
-                &current_root,
-                start_key,
-                end_key,
-                &config,
-                limit,
+                &proto, &root, start_key, end_key, &config, limit,
             ),
             _ => unreachable!("normalize_family only returns supported values"),
         }

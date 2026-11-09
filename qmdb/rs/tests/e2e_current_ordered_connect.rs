@@ -24,7 +24,7 @@ use connectrpc::{
 };
 use exoware_qmdb::{
     adapter::upload::{stage_watermark, Publication},
-    proof::{RawKeyExclusionProof, RawKeyLookupProof, VerifiedKeyLookup},
+    proof::{KeyLookupProof, VerifiedKeyLookup},
     service::proto::qmdb::v1::{
         current_key_lookup_result, CurrentOperationServiceClient,
         GetCurrentOperationRangeRequest as ProtoGetCurrentOperationRangeRequest,
@@ -65,7 +65,8 @@ type ConnectClient = exoware_qmdb::service::client::Ordered<
 >;
 /// One commit's writes, where `None` deletes the key.
 type TipWrites = Vec<(Vec<u8>, Option<Vec<u8>>)>;
-type KeyExclusionProof = RawKeyExclusionProof<Digest, Vec<u8>, Vec<u8>, N, mmr::Family>;
+type KeyExclusionProof =
+    exoware_qmdb::proof::KeyExclusionProof<Digest, Vec<u8>, Vec<u8>, N, mmr::Family>;
 type Db = LocalQmdbDb<
     mmr::Family,
     cw_tokio::Context,
@@ -81,9 +82,7 @@ fn encoded_key(key: &[u8]) -> Bytes {
     key.to_vec().encode()
 }
 
-async fn spawn_qmdb_server(
-    raw_store: PrefixedStoreClient,
-) -> (tokio::task::JoinHandle<()>, String) {
+async fn spawn_qmdb_server(store: PrefixedStoreClient) -> (tokio::task::JoinHandle<()>, String) {
     common::spawn_connect_service(exoware_qmdb::service::server::ordered_stack::<
         mmr::Family,
         Sha256,
@@ -91,7 +90,7 @@ async fn spawn_qmdb_server(
         Vec<u8>,
         N,
         VariableEncoding<Vec<u8>>,
-    >(raw_store, op_cfg(), key_cfg()))
+    >(store, op_cfg(), key_cfg()))
     .await
 }
 
@@ -471,13 +470,13 @@ async fn miss_proof(
 ) -> KeyExclusionProof {
     let key = key.as_bytes().to_vec();
     let mut lookups = ordered
-        .get_many_raw(tip.latest_location, std::slice::from_ref(&key), None)
+        .get_many_proofs(tip.latest_location, std::slice::from_ref(&key), None)
         .await
-        .expect("get_many_raw");
-    let Some(RawKeyLookupProof::Miss(proof)) = lookups.pop() else {
+        .expect("get_many_proofs");
+    let Some(KeyLookupProof::Miss(proof)) = lookups.pop() else {
         panic!("{} should be a miss", text(&key));
     };
-    assert_eq!(proof.watermark, tip.latest_location);
+    assert_eq!(proof.tip, tip.latest_location);
     assert_eq!(proof.root, tip.root);
     assert_eq!(proof.requested_key, key);
     assert!(proof.verify::<Sha256>());
@@ -526,20 +525,20 @@ async fn range_page(
 ) -> RangePage {
     let start = start.as_bytes().to_vec();
     let end = end.map(|end| end.as_bytes().to_vec());
-    let raw = ordered
-        .get_range_raw(tip.latest_location, start.clone(), end.clone(), limit, None)
+    let proof = ordered
+        .get_range_proof(tip.latest_location, start.clone(), end.clone(), limit, None)
         .await
-        .expect("get_range_raw");
-    for entry in &raw.entries {
+        .expect("get_range_proof");
+    for entry in &proof.entries {
         assert_eq!(entry.root, tip.root);
         assert!(entry.verify::<Sha256>());
     }
-    if let Some(proof) = &raw.start_proof {
-        assert_eq!(proof.root, tip.root);
-        assert_eq!(proof.requested_key, start);
-        assert!(proof.verify::<Sha256>());
+    if let Some(start_proof) = &proof.start_proof {
+        assert_eq!(start_proof.root, tip.root);
+        assert_eq!(start_proof.requested_key, start);
+        assert!(start_proof.verify::<Sha256>());
     }
-    let keys = raw
+    let keys = proof
         .entries
         .iter()
         .map(|entry| text(entry.operation.key().expect("entry key")))
@@ -559,7 +558,7 @@ async fn range_page(
     RangePage {
         keys,
         next_start_key: verified.next_start_key.as_deref().map(text),
-        start_proof: raw.start_proof.as_ref().map(cover),
+        start_proof: proof.start_proof.as_ref().map(cover),
     }
 }
 
@@ -642,8 +641,8 @@ fn tamper_get_many_response(mut response: ProtoGetManyResponse) -> ProtoGetManyR
 
 #[tokio::test]
 async fn test_ordered_connect_rejects_malformed_request_keys() {
-    let raw_store = StoreClient::new("http://127.0.0.1:1").unprefixed();
-    let (server, url) = spawn_qmdb_server(raw_store).await;
+    let store = StoreClient::new("http://127.0.0.1:1").unprefixed();
+    let (server, url) = spawn_qmdb_server(store).await;
     let lookup = rpc_client(&url);
     let ranges = range_rpc_client(&url);
     // A one-byte value length without its payload is invalid Vec key encoding
@@ -696,8 +695,8 @@ async fn test_ordered_connect_rejects_malformed_request_keys() {
 
 #[tokio::test]
 async fn test_ordered_connect_rejects_get_range_limit_above_maximum() {
-    let raw_store = StoreClient::new("http://127.0.0.1:1").unprefixed();
-    let (server, url) = spawn_qmdb_server(raw_store).await;
+    let store = StoreClient::new("http://127.0.0.1:1").unprefixed();
+    let (server, url) = spawn_qmdb_server(store).await;
     let ranges = range_rpc_client(&url);
     let request = |limit| ProtoGetRangeRequest {
         start_key: encoded_key(b"alpha"),
@@ -735,6 +734,39 @@ async fn test_ordered_connect_get_returns_current_key_value_proof() {
     assert_eq!(proof.root, source.root);
     assert_eq!(proof.location, expected.0);
     assert_eq!(proof.operation, expected.1);
+}
+
+#[tokio::test]
+async fn test_ordered_operations_return_the_current_root() {
+    let store_client = common::local_store_client().await;
+    let source = build_source_batch().await;
+    commit_upload(&store_client, &source).await;
+    let (_qmdb_server, qmdb_url) = spawn_qmdb_server(store_client.unprefixed()).await;
+    let tip = source.latest_location;
+    let locations = [Location::new(0), tip];
+    let expected = locations
+        .iter()
+        .map(|&location| {
+            (
+                location,
+                source.operations[location.as_u64() as usize].clone(),
+            )
+        })
+        .collect::<Vec<_>>();
+
+    let native = TestOrderedClient::new(store_client.unprefixed(), op_cfg(), key_cfg())
+        .operations(tip, &locations, None)
+        .await
+        .expect("native operations");
+    assert_eq!(native.tip, tip);
+    assert_eq!(native.root, source.root);
+    assert_eq!(native.operations, expected);
+
+    let verified = key_lookup_client(&qmdb_url)
+        .operations(tip, &locations, None, &source.root)
+        .await
+        .expect("client operations");
+    assert_eq!(verified, native);
 }
 
 #[tokio::test]
@@ -1158,7 +1190,7 @@ async fn test_historical_bounded_range_skips_future_suffix() {
 
     query.reset_update_reads();
     let range = ordered
-        .get_range_raw(
+        .get_range_proof(
             tips[0].latest_location,
             b"a".to_vec(),
             Some(b"b".to_vec()),
@@ -1263,8 +1295,8 @@ async fn test_ordered_connect_get_range_spans_walk_pages() {
     // locations without reading the index again
     let limit = 40;
     query.reset_update_reads();
-    let raw = ordered
-        .get_range_raw(
+    let proof = ordered
+        .get_range_proof(
             tips[0].latest_location,
             long_run_key(1).into_bytes(),
             None,
@@ -1272,8 +1304,8 @@ async fn test_ordered_connect_get_range_spans_walk_pages() {
             None,
         )
         .await
-        .expect("get_range_raw");
-    assert_eq!(raw.entries.len(), limit as usize);
+        .expect("get_range_proof");
+    assert_eq!(proof.entries.len(), limit as usize);
     assert_eq!(query.update_reads(), (1, 128));
     let earlier = range_page(&ordered, &connect, &tips[0], &long_run_key(1), None, limit).await;
     assert_eq!(
@@ -1296,13 +1328,13 @@ async fn miss_reads(
 ) -> (usize, usize) {
     query.reset_update_reads();
     ordered
-        .get_many_raw(
+        .get_many_proofs(
             tip.latest_location,
             std::slice::from_ref(&key.as_bytes().to_vec()),
             None,
         )
         .await
-        .expect("get_many_raw");
+        .expect("get_many_proofs");
     query.update_reads()
 }
 
@@ -1388,7 +1420,7 @@ async fn test_current_endpoints_enforce_cold_minimum_and_use_cached_publication(
                 ..Default::default()
             })
             .await
-            .expect_err("cold get publication lookup must enforce the sequence minimum")
+            .expect_err("cold get watermark lookup must enforce the sequence minimum")
             .code,
         lookup
             .get_many(ProtoGetManyRequest {
@@ -1398,7 +1430,7 @@ async fn test_current_endpoints_enforce_cold_minimum_and_use_cached_publication(
                 ..Default::default()
             })
             .await
-            .expect_err("cold get_many publication lookup must enforce the sequence minimum")
+            .expect_err("cold get_many watermark lookup must enforce the sequence minimum")
             .code,
         ranges
             .get_range(ProtoGetRangeRequest {
@@ -1410,7 +1442,7 @@ async fn test_current_endpoints_enforce_cold_minimum_and_use_cached_publication(
                 ..Default::default()
             })
             .await
-            .expect_err("cold get_range publication lookup must enforce the sequence minimum")
+            .expect_err("cold get_range watermark lookup must enforce the sequence minimum")
             .code,
         current_operations
             .get_current_operation_range(ProtoGetCurrentOperationRangeRequest {
@@ -1421,9 +1453,7 @@ async fn test_current_endpoints_enforce_cold_minimum_and_use_cached_publication(
                 ..Default::default()
             })
             .await
-            .expect_err(
-                "cold current operation publication lookup must enforce the sequence minimum",
-            )
+            .expect_err("cold current operation watermark lookup must enforce the sequence minimum")
             .code,
     ];
     assert_eq!(cold_errors, [connectrpc::ErrorCode::Aborted; 4]);
@@ -1842,7 +1872,7 @@ async fn test_ordered_connect_client_rejects_invalid_get_proof() {
     assert!(matches!(
         err,
         QmdbError::ProofVerification {
-            kind: exoware_qmdb::ProofKind::CurrentKeyValue
+            kind: exoware_qmdb::ProofKind::KeyValue
         }
     ));
 }
@@ -1897,7 +1927,7 @@ async fn test_ordered_connect_client_rejects_invalid_get_many_proof() {
     assert!(matches!(
         err,
         QmdbError::ProofVerification {
-            kind: exoware_qmdb::ProofKind::CurrentKeyValue
+            kind: exoware_qmdb::ProofKind::KeyValue
         }
     ));
 }
@@ -1942,7 +1972,7 @@ async fn test_ordered_connect_client_rejects_get_many_proof_for_different_key() 
     assert!(matches!(
         err,
         QmdbError::ProofVerification {
-            kind: exoware_qmdb::ProofKind::CurrentKeyValue
+            kind: exoware_qmdb::ProofKind::KeyValue
         }
     ));
 }

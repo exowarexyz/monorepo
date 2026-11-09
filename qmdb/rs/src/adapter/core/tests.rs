@@ -150,18 +150,23 @@ async fn publication_cache_distinguishes_absent_from_zero_and_keeps_smaller_publ
         let cache = PublicationCache::<mmr::Family>::default();
         for (requested, accepted) in [6, 0, 3, 5, 6].into_iter().zip(accepted) {
             calls.store(0, Ordering::SeqCst);
-            let watermark = Location::<mmr::Family>::new(requested);
-            let result = cache.require(&session, watermark).await;
+            let requested_tip = Location::<mmr::Family>::new(requested);
+            let result = cache.require(&session, requested_tip).await;
             assert_eq!(calls.load(Ordering::SeqCst), usize::from(!accepted));
             if accepted {
                 let resolved = result.unwrap();
-                assert_eq!(resolved.location, watermark);
+                assert_eq!(resolved.tip, requested_tip);
                 assert_eq!(resolved.sequence_number, sequence);
+            } else if let Some(published) = published {
+                assert!(matches!(
+                    result,
+                    Err(QmdbError::WatermarkTooLow { tip, watermark })
+                        if tip == requested && watermark == published
+                ));
             } else {
                 assert!(matches!(
                     result,
-                    Err(QmdbError::WatermarkTooLow { requested: actual, available })
-                        if actual == requested && available == published.unwrap_or(0)
+                    Err(QmdbError::NoPublishedWatermark { tip }) if tip == requested
                 ));
             }
             assert_eq!(session.min_sequence_number(), None);
@@ -202,7 +207,7 @@ async fn publication_cache_coalesces_misses_and_refreshes_without_data_observati
     });
     let mut observed_reads = 0;
     for (resolved, observed) in futures::future::join_all(readers).await {
-        assert_eq!(resolved.location, first);
+        assert_eq!(resolved.tip, first);
         assert_eq!(resolved.sequence_number, first_sequence);
         if let Some(sequence) = observed {
             assert_eq!(sequence, first_sequence);
@@ -231,7 +236,7 @@ async fn publication_cache_coalesces_misses_and_refreshes_without_data_observati
 
     let historical_session = ReadSession::fixed(store.clone(), None);
     let historical = cache.require(&historical_session, first).await.unwrap();
-    assert_eq!(historical.location, first);
+    assert_eq!(historical.tip, first);
     assert_eq!(historical.sequence_number, second_sequence);
     assert_eq!(historical_session.evaluated_sequence(), None);
     assert_eq!(calls.load(Ordering::SeqCst), 1);
@@ -255,7 +260,7 @@ async fn publication_cache_coalesces_misses_and_refreshes_without_data_observati
     );
     let caller = ReadSession::fixed(store.clone(), Some(data_sequence));
     let resolved = cache.require(&caller, first).await.unwrap();
-    assert_eq!(resolved.location, first);
+    assert_eq!(resolved.tip, first);
     assert_eq!(resolved.sequence_number, second_sequence);
     assert_eq!(caller.evaluated_sequence(), None);
     assert_eq!(calls.load(Ordering::SeqCst), 0);
@@ -333,8 +338,8 @@ async fn client_resolvers_keep_cached_publication_evidence_with_a_higher_caller_
 
     macro_rules! warm_resolver {
         ($client:expr) => {{
-            let result = $client.resolve_watermark(watermark, None).await.unwrap();
-            assert_eq!(result.location, watermark);
+            let result = $client.resolve_tip(watermark, None).await.unwrap();
+            assert_eq!(result.tip, watermark);
             assert_eq!(result.sequence_number, publication_sequence);
         }};
     }
@@ -354,14 +359,14 @@ async fn client_resolvers_keep_cached_publication_evidence_with_a_higher_caller_
     macro_rules! check_resolver {
         ($client:expr) => {{
             let result = $client
-                .resolve_watermark(watermark, Some(caller_floor))
+                .resolve_tip(watermark, Some(caller_floor))
                 .await
                 .unwrap();
-            assert_eq!(result.location, watermark);
+            assert_eq!(result.tip, watermark);
             assert_eq!(result.sequence_number, publication_sequence);
 
-            let cached = $client.resolve_watermark(watermark, None).await.unwrap();
-            assert_eq!(cached.location, watermark);
+            let cached = $client.resolve_tip(watermark, None).await.unwrap();
+            assert_eq!(cached.tip, watermark);
             assert_eq!(cached.sequence_number, publication_sequence);
             assert_eq!(calls.load(Ordering::SeqCst), 0);
         }};
@@ -403,8 +408,8 @@ async fn publication_cache_hits_bypass_blocked_miss_and_refresh() {
     assert!(matches!(
         miss.await,
         Err(QmdbError::WatermarkTooLow {
-            requested: 10,
-            available: 5
+            tip: 10,
+            watermark: 5
         })
     ));
 
@@ -456,24 +461,24 @@ async fn publication_cache_cancelled_lookup_releases_gate_and_waiter_retries() {
 #[tokio::test]
 async fn publication_cache_failed_lookup_preserves_evidence_and_allows_retry() {
     let (_bad_server, bad_url) = exoware_simulator::open_temp().await.unwrap();
-    let bad_raw = StoreClient::new(&bad_url);
-    let bad_store = bad_raw.unprefixed();
+    let bad_client = StoreClient::new(&bad_url);
+    let bad_store = bad_client.unprefixed();
     let covered = Location::<mmr::Family>::new(5);
     let mut batch = StoreWriteBatch::new();
     crate::adapter::upload::stage_watermark(&bad_store, covered, &mut batch).unwrap();
-    let covered_sequence = batch.commit(&bad_raw).await.unwrap();
+    let covered_sequence = batch.commit(&bad_client).await.unwrap();
     let corrupt = WATERMARK_PREFIX.encode(&[255]).unwrap();
     let mut batch = StoreWriteBatch::new();
     batch.push(&bad_store, &corrupt, b"".as_slice()).unwrap();
-    batch.commit(&bad_raw).await.unwrap();
+    batch.commit(&bad_client).await.unwrap();
 
     let (_good_server, good_url) = exoware_simulator::open_temp().await.unwrap();
-    let good_raw = StoreClient::new(&good_url);
-    let good_store = good_raw.unprefixed();
+    let good_client = StoreClient::new(&good_url);
+    let good_store = good_client.unprefixed();
     let requested = Location::<mmr::Family>::new(10);
     let mut batch = StoreWriteBatch::new();
     crate::adapter::upload::stage_watermark(&good_store, requested, &mut batch).unwrap();
-    let requested_sequence = batch.commit(&good_raw).await.unwrap();
+    let requested_sequence = batch.commit(&good_client).await.unwrap();
 
     let (session, permits, mut starts, origin) = gated_session(&bad_url);
     let cache = PublicationCache::<mmr::Family>::default();
@@ -553,7 +558,7 @@ async fn publication_cache_observations_answer_requires_without_store_reads() {
             .require(&session, Location::new(watermark))
             .await
             .unwrap();
-        assert_eq!(published.location.as_u64(), watermark);
+        assert_eq!(published.tip.as_u64(), watermark);
         assert_eq!(published.sequence_number, sequence);
     }
     assert!(
@@ -597,7 +602,7 @@ async fn publication_cache_keeps_observations_made_during_a_lookup() {
     permits.add_permits(1);
     assert_eq!(refresh.await.unwrap(), Some(Location::new(12)));
     let published = cache.published().unwrap();
-    assert_eq!(published.location.as_u64(), 12);
+    assert_eq!(published.tip.as_u64(), 12);
     assert_eq!(published.sequence_number, 60);
     assert!(starts.try_recv().is_err(), "only one lookup ran");
 }
@@ -615,7 +620,7 @@ fn publication_cache_keeps_sequence_paired_with_greatest_watermark() {
     ] {
         cache.remember(location.map(Location::new), sequence);
         let known = cache.published().unwrap();
-        assert_eq!(known.location.as_u64(), expected_location);
+        assert_eq!(known.tip.as_u64(), expected_location);
         assert_eq!(known.sequence_number, expected_sequence);
     }
 }
@@ -687,8 +692,8 @@ async fn publication_cache_refresh_preserves_evidence_on_lagging_and_empty_repli
         assert!(matches!(
             cache.require(&session, Location::new(10)).await,
             Err(QmdbError::WatermarkTooLow {
-                requested: 10,
-                available: 5
+                tip: 10,
+                watermark: 5
             })
         ));
         assert_eq!(calls.load(Ordering::SeqCst), 2);

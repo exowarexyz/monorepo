@@ -179,7 +179,7 @@ test('test_clients_join_proofs_split_across_occurrences', async (t) => {
     // occurrence. Protobuf merges each into the server's proof.
     for (const parts of [[{ proof: whole.proof }, { encodedOperation: whole.encodedOperation }], [whole, {}]]) {
       body = new Uint8Array(parts.flatMap((init) => [...occurrence(init)]));
-      const verified = await client.get(key.subarray(1), tip, get.root);
+      const verified = await client.get({ key: key.subarray(1), tip }, get.root);
       assert.equal(verified.proofSizeBytes, toBinary(CurrentKeyValueProofSchema, whole).length, family);
     }
 
@@ -205,10 +205,10 @@ test('test_clients_use_binary_even_when_json_is_requested', async (t) => {
   });
   const root = new Uint8Array(32);
   const ordered = new QmdbOrderedClient('http://qmdb.test', { useBinaryFormat: false });
-  await assert.rejects(ordered.get('a', 1n, root), /get response missing proof/);
+  await assert.rejects(ordered.get({ key: 'a', tip: 1n }, root), /get response missing proof/);
   const log = new QmdbLogClient('http://qmdb.test', { useBinaryFormat: false });
   await assert.rejects(
-    log.getOperationRange({ tip: 1n, startLocation: 0n, maxLocations: 1 }, root),
+    log.operationRange({ tip: 1n, startLocation: 0n, maxLocations: 1 }, root),
     /getOperationRange response missing proof/,
   );
   assert.deepEqual(contentTypes, ['application/proto', 'application/proto']);
@@ -228,10 +228,10 @@ test('test_clients_report_missing_proofs', async (t) => {
   const log = new QmdbLogClient('http://qmdb.test');
   const range = { tip: 1n, startLocation: 0n, maxLocations: 1 };
   const root = new Uint8Array(32);
-  await assert.rejects(ordered.get('a', 1n, root), /qmdb get response missing proof/);
-  await assert.rejects(ordered.getCurrentOperationRange(range, root), /getCurrentOperationRange response missing proof/);
-  await assert.rejects(ordered.getOperationRange(range, root), /getOperationRange response missing proof/);
-  await assert.rejects(log.getOperations({ tip: 1n, locations: [0n] }, root), /getOperations response missing proof/);
+  await assert.rejects(ordered.get({ key: 'a', tip: 1n }, root), /qmdb get response missing proof/);
+  await assert.rejects(ordered.currentOperationRange(range, root), /getCurrentOperationRange response missing proof/);
+  await assert.rejects(ordered.operationRange(range, root), /getOperationRange response missing proof/);
+  await assert.rejects(log.operations({ tip: 1n, locations: [0n] }, root), /getOperations response missing proof/);
   await assert.rejects(
     (async () => { for await (const _ of ordered.subscribe({})) { /* first frame throws */ } })(),
     /subscribe response missing proof/,
