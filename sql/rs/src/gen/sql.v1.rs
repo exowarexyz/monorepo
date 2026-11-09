@@ -675,9 +675,8 @@ pub struct Column {
         skip_serializing_if = "::buffa::json_helpers::skip_if::is_empty_str"
     )]
     pub name: ::buffa::alloc::string::String,
-    /// Arrow DataType rendered as its stable debug string (e.g., `Int64`,
-    /// `Utf8`, `Timestamp(Microsecond, None)`, `Decimal128(38, 10)`). Clients
-    /// that need typed handling should match against these exact strings.
+    /// Arrow DataType rendered by its `Display` implementation (e.g., `Int64`,
+    /// `Utf8`, `Decimal128(38, 10)`, `List(Int64)`).
     ///
     /// Field 2: `data_type`
     #[serde(
@@ -2821,9 +2820,8 @@ pub mod __buffa {
         pub struct ColumnView<'a> {
             /// Field 1: `name`
             pub name: &'a str,
-            /// Arrow DataType rendered as its stable debug string (e.g., `Int64`,
-            /// `Utf8`, `Timestamp(Microsecond, None)`, `Decimal128(38, 10)`). Clients
-            /// that need typed handling should match against these exact strings.
+            /// Arrow DataType rendered by its `Display` implementation (e.g., `Int64`,
+            /// `Utf8`, `Decimal128(38, 10)`, `List(Int64)`).
             ///
             /// Field 2: `data_type`
             pub data_type: &'a str,
@@ -3083,9 +3081,8 @@ pub mod __buffa {
             pub fn name(&self) -> &'_ str {
                 self.0.reborrow().name
             }
-            /// Arrow DataType rendered as its stable debug string (e.g., `Int64`,
-            /// `Utf8`, `Timestamp(Microsecond, None)`, `Decimal128(38, 10)`). Clients
-            /// that need typed handling should match against these exact strings.
+            /// Arrow DataType rendered by its `Display` implementation (e.g., `Int64`,
+            /// `Utf8`, `Decimal128(38, 10)`, `List(Int64)`).
             ///
             /// Field 2: `data_type`
             #[must_use]

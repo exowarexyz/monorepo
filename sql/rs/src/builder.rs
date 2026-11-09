@@ -38,7 +38,7 @@ pub(crate) enum ColumnBuilder {
     /// UTF-8 text values.
     Utf8(StringBuilder),
     /// Byte strings with the schema's fixed width.
-    FixedBinary(FixedSizeBinaryBuilder),
+    FixedSizeBinary(FixedSizeBinaryBuilder),
     /// Variable-length byte strings.
     Binary(BinaryBuilder),
     /// Lists of signed integer values.
@@ -64,7 +64,7 @@ impl ColumnBuilder {
             (Self::Decimal128(b), CellValue::Null) => b.append_null(),
             (Self::Decimal256(b), CellValue::Null) => b.append_null(),
             (Self::Utf8(builder), CellValue::Null) => builder.append_null(),
-            (Self::FixedBinary(b), CellValue::Null) => b.append_null(),
+            (Self::FixedSizeBinary(b), CellValue::Null) => b.append_null(),
             (Self::Binary(builder), CellValue::Null) => builder.append_null(),
             (Self::ListInt64(b), CellValue::Null) => b.append_null(),
             (Self::ListFloat64(b), CellValue::Null) => b.append_null(),
@@ -73,9 +73,9 @@ impl ColumnBuilder {
             (Self::Int64(b), CellValue::Int64(v)) => b.append_value(*v),
             (Self::UInt64(b), CellValue::UInt64(v)) => b.append_value(*v),
             (Self::Utf8(builder), CellValue::Utf8(v)) => builder.append_value(v),
-            (Self::FixedBinary(b), CellValue::FixedBinary(v)) => {
+            (Self::FixedSizeBinary(b), CellValue::FixedSizeBinary(v)) => {
                 b.append_value(v).map_err(|e| {
-                    DataFusionError::Execution(format!("FixedBinary append error: {e}"))
+                    DataFusionError::Execution(format!("FixedSizeBinary append error: {e}"))
                 })?
             }
             (Self::Binary(builder), CellValue::Binary(v)) => builder.append_value(v),
@@ -100,7 +100,7 @@ impl ColumnBuilder {
             Self::Decimal128(mut b) => Arc::new(b.finish()),
             Self::Decimal256(mut b) => Arc::new(b.finish()),
             Self::Utf8(mut b) => Arc::new(b.finish()),
-            Self::FixedBinary(mut b) => Arc::new(b.finish()),
+            Self::FixedSizeBinary(mut b) => Arc::new(b.finish()),
             Self::Binary(mut b) => Arc::new(b.finish()),
             Self::ListInt64(mut b) => Arc::new(b.finish()),
             Self::ListFloat64(mut b) => Arc::new(b.finish()),
@@ -173,7 +173,7 @@ pub(crate) fn make_column_builder(model: &TableModel, idx: usize) -> ColumnBuild
         }
         ColumnKind::Utf8 => ColumnBuilder::Utf8(StringBuilder::new()),
         ColumnKind::FixedSizeBinary(n) => {
-            ColumnBuilder::FixedBinary(FixedSizeBinaryBuilder::new(n as i32))
+            ColumnBuilder::FixedSizeBinary(FixedSizeBinaryBuilder::new(n as i32))
         }
         ColumnKind::Binary => ColumnBuilder::Binary(BinaryBuilder::new()),
         ColumnKind::List(elem) => match elem {
@@ -261,9 +261,11 @@ pub(crate) fn append_archived_non_pk_value(
             b.append_value(i256::from_le_bytes(arr))
         }
         (ColumnBuilder::Utf8(builder), StoredValue::Utf8(v)) => builder.append_value(v.as_str()),
-        (ColumnBuilder::FixedBinary(b), StoredValue::Bytes(v)) => b
-            .append_value(v.as_slice())
-            .map_err(|e| DataFusionError::Execution(format!("FixedBinary append error: {e}")))?,
+        (ColumnBuilder::FixedSizeBinary(b), StoredValue::Bytes(v)) => {
+            b.append_value(v.as_slice()).map_err(|e| {
+                DataFusionError::Execution(format!("FixedSizeBinary append error: {e}"))
+            })?
+        }
         (ColumnBuilder::Binary(builder), StoredValue::Bytes(v)) => {
             builder.append_value(v.as_slice())
         }

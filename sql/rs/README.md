@@ -31,8 +31,8 @@ use exoware_sql::{CellValue, IndexSpec, KvSchema, SqlContext, TableColumnConfig}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let client = StoreClient::new("http://localhost:8080").unprefixed();
-    let schema = KvSchema::new(client.clone()).table(
+    let store = StoreClient::new("http://localhost:8080").unprefixed();
+    let schema = KvSchema::new(store.clone()).table(
         "orders",
         vec![
             TableColumnConfig::new("order_id", DataType::Int64, false),
@@ -54,8 +54,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let sequence = writer.flush().await?;
 
     // Require the write's sequence so a lagging replica cannot answer the query.
-    let ctx = SqlContext::builder(client.clone())
-        .with_read_session(ReadSession::monotonic(client, Some(sequence)))
+    let ctx = SqlContext::builder(store.clone())
+        .with_read_session(ReadSession::monotonic(store, sequence))
         .build();
     ctx.register_schema(schema)?;
     ctx.sql("SELECT status, SUM(amount_cents) AS total FROM orders GROUP BY status")
@@ -122,12 +122,13 @@ sort by their columns in order, so put the columns that queries constrain by
 equality first. A range constraint on a later column narrows the scan only when
 every earlier column has an equality constraint.
 
-`KvSchema::table_versioned` declares an `(entity, version)` primary key. Use a
-`UInt64` column for the version. Versions sort numerically within each entity, so
+`KvSchema::versioned_table` declares an `(entity, version)` primary key. The
+version column must be `UInt64` and distinct from the entity column; other
+layouts return a planning error. Versions sort numerically within each entity, so
 the latest version at or below `V` is a short reverse range scan:
 
 ```rust
-let schema = KvSchema::new(client).table_versioned(
+let schema = KvSchema::new(store).versioned_table(
     "documents",
     vec![
         TableColumnConfig::new("doc_id", DataType::FixedSizeBinary(16), false),
@@ -200,14 +201,14 @@ do not repair it from the base row.
 Use `KvSchema::batch_writer` to write rows as `CellValue` vectors in column order.
 The `BatchWriter` encodes each row's base entry and all of its index entries, and
 `flush` uploads the pending rows across tables as one atomic Store batch. It
-returns the batch's sequence number, or `0` when nothing was pending. If a flush
+returns the batch's sequence number, or `None` when nothing was pending. If a flush
 fails, the writer retains that batch and retries it alone on the next flush,
 before uploading later rows.
 
 To commit SQL rows atomically with other Store writes, prepare them with
-`prepare_flush` and add them to an SDK `StoreWriteBatch` with `stage_flush`.
-Call `mark_flush_persisted` after a successful commit, or `mark_flush_failed`
-to retain the batch for retry.
+`prepare_upload` and add them to an SDK `StoreWriteBatch` with the SDK's
+`StoreWriteBatchUpload::stage_upload`. Call `mark_upload_persisted` after a
+successful commit, or `mark_upload_failed` to retain the batch for retry.
 
 SQL `INSERT` writes through the same schema, with each statement committed as one
 atomic batch. It materializes Arrow batches first, so `BatchWriter` avoids that
@@ -229,11 +230,11 @@ Rows written by an old writer during or after the backfill are missing from the 
 index.
 
 Build `schema` with the new index list, then pass the original `IndexSpec` values
-as `previous_indexes` when backfilling:
+as `previous_index_specs` when backfilling:
 
 ```rust
 let report = schema
-    .backfill_added_indexes("orders", &previous_indexes)
+    .backfill_added_indexes("orders", &previous_index_specs)
     .await?;
 ```
 
@@ -242,10 +243,10 @@ indexes. If the index list has not changed, it writes nothing and reports zero
 counts.
 
 For a resumable backfill, use `backfill_added_indexes_with_options_and_progress`.
-It sends each `Progress` event after flushing the writes covered by that event,
-so you can persist its `next_cursor` and pass it as
-`IndexBackfillOptions::start_from_primary_key` when resuming. The options also
-control the scan's response batch size.
+It sends each `Progress` event to the supplied Tokio `UnboundedSender` after
+flushing the writes covered by that event, so you can persist its `next_cursor`
+and pass it as `IndexBackfillOptions::start_cursor` when resuming. The options
+also control the scan's response batch size.
 
 ## Read consistency
 
@@ -267,7 +268,7 @@ You can also raise the minimum for a single query by deriving a context that
 shares the catalog and observations:
 
 ```rust
-let fresh = ctx.with_read_session(ctx.read_session().with_min_sequence_number(sequence));
+let fresh = ctx.with_read_session(ctx.read_session().with_min_sequence_number(min_sequence_number));
 fresh.sql("SELECT COUNT(*) FROM orders").await?.collect().await?;
 let observed = ctx.read_session().evaluated_sequence();
 ```
@@ -288,15 +289,15 @@ full table scan.
 ## Serving SQL
 
 To serve a schema over the `sql.v1` ConnectRPC API, create a `SqlServer` and mount
-it on an axum router with `sql_connect_stack`. The server registers the schema in
+it on an axum router with `sql_stack`. The server registers the schema in
 its own `SqlContext`:
 
 ```rust
 use std::sync::Arc;
-use exoware_sql::{sql_connect_stack, SqlServer};
+use exoware_sql::{sql_stack, SqlServer};
 
 let server = Arc::new(SqlServer::new(schema)?);
-let app = axum::Router::new().fallback_service(sql_connect_stack(server));
+let app = axum::Router::new().fallback_service(sql_stack(server));
 ```
 
 `Query` runs one SQL statement and returns an Arrow IPC stream that Rust clients

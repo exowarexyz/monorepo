@@ -34,17 +34,17 @@ use std::{
 
 /// Encodes rows of one table into Store entries.
 #[derive(Debug)]
-pub struct TableWriter {
+pub(crate) struct TableRowEncoder {
     /// Table layout that determines the primary-key and row-value encodings.
     model: Arc<TableModel>,
     /// Secondary indexes. Each row produces one index entry per spec, in this order.
     index_specs: Arc<Vec<ResolvedIndexSpec>>,
 }
 
-impl TableWriter {
+impl TableRowEncoder {
     /// Encodes `values`, given in table column order, as the base-row entry followed by one
     /// entry per secondary index.
-    pub fn encode_row(&self, values: Vec<CellValue>) -> Result<Vec<(Key, Bytes)>, String> {
+    pub(crate) fn encode_row(&self, values: Vec<CellValue>) -> Result<Vec<(Key, Bytes)>, String> {
         let row = KvRow { values };
         if row.values.len() != self.model.columns.len() {
             return Err(format!(
@@ -54,7 +54,8 @@ impl TableWriter {
             ));
         }
         let base_key = encode_primary_key_from_row(self.model.table_prefix, &row, &self.model)?;
-        let mut stored = stored_row_from_cells(&row, &self.model).map_err(|e| format!("{e}"))?;
+        let mut stored =
+            stored_row_from_cells(&row, &self.model).map_err(|e| e.message().into_owned())?;
         let pk_payload = base_key.slice(self.model.primary_key_prefix.len()..);
         let mut out = Vec::with_capacity(1 + self.index_specs.len());
         out.push((base_key, stored.encode()));
@@ -67,18 +68,24 @@ impl TableWriter {
 }
 
 /// Buffers rows across a schema's tables for upload in atomic Store batches.
+///
+/// `insert` rejects caller input with `DataFusionError::Plan`: an unknown table, a row of
+/// the wrong shape or type, or a key over the Store key limit. Upload failures from
+/// `flush` are returned as `DataFusionError::External` wrapping the Store client error.
+/// `KvSchema`'s index backfill follows the same split: `Plan` for its arguments, and
+/// `External` or `Execution` for Store and scan failures.
 #[derive(Debug)]
 pub struct BatchWriter {
     /// Store client whose namespace prefixes staged keys and that commits each batch.
-    client: PrefixedStoreClient,
+    store: PrefixedStoreClient,
     /// Row encoders keyed by registered table name.
-    tables: HashMap<String, TableWriter>,
+    tables: HashMap<String, TableRowEncoder>,
     /// Next ID assigned when pending entries are taken into a new batch. Retries reuse
     /// their original ID.
     next_request_id: u64,
-    /// Batches whose upload failed, awaiting retry by `prepare_flush` in request ID order.
+    /// Batches whose upload failed, awaiting retry by `prepare_upload` in request ID order.
     /// The mutex lets upload outcomes be reported through a shared reference.
-    failed_prepared: Mutex<Vec<PreparedBatch>>,
+    failed_prepared: Mutex<Vec<PreparedUpload>>,
     /// Encoded entries not yet taken into a batch, in insert order. Each row adds its
     /// base entry and then its index entries.
     pub(crate) pending_entries: Vec<(Key, Bytes)>,
@@ -86,18 +93,19 @@ pub struct BatchWriter {
 
 /// Entries taken from a `BatchWriter` for one upload attempt.
 ///
-/// Report the outcome with `mark_flush_persisted` or `mark_flush_failed`. The writer retains
-/// no copy until `mark_flush_failed` queues the batch for retry.
+/// Report the outcome with `StoreWriteBatchUpload::mark_upload_persisted` or
+/// `StoreWriteBatchUpload::mark_upload_failed`. The writer retains no copy until
+/// `mark_upload_failed` queues the batch for retry.
 #[derive(Debug)]
 #[must_use]
-pub struct PreparedBatch {
+pub struct PreparedUpload {
     /// Writer-assigned ID retained across retries.
     request_id: u64,
     /// Encoded entries in insert order, retained until the upload outcome is reported.
     entries: Vec<(Key, Bytes)>,
 }
 
-impl PreparedBatch {
+impl PreparedUpload {
     pub const fn request_id(&self) -> u64 {
         self.request_id
     }
@@ -111,11 +119,11 @@ impl PreparedBatch {
     }
 }
 
-/// Outcome of a persisted `PreparedBatch`.
+/// Outcome of a persisted `PreparedUpload`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct BatchReceipt {
+pub struct UploadReceipt {
     /// Request ID of the persisted batch.
-    pub writer_request_id: u64,
+    pub request_id: u64,
     /// Number of key-value entries written, counting index entries separately from base rows.
     pub entry_count: usize,
     /// Store sequence number returned by the commit.
@@ -123,13 +131,13 @@ pub struct BatchReceipt {
 }
 
 impl BatchWriter {
-    pub(crate) fn new(client: PrefixedStoreClient, tables: &[(String, Arc<KvTable>)]) -> Self {
+    pub(crate) fn new(store: PrefixedStoreClient, tables: &[(String, Arc<KvTable>)]) -> Self {
         let tables = tables
             .iter()
             .map(|(name, table)| {
                 (
                     name.clone(),
-                    TableWriter {
+                    TableRowEncoder {
                         model: table.model.clone(),
                         index_specs: table.index_specs.clone(),
                     },
@@ -137,7 +145,7 @@ impl BatchWriter {
             })
             .collect();
         Self {
-            client,
+            store,
             tables,
             next_request_id: 0,
             failed_prepared: Mutex::new(Vec::new()),
@@ -152,54 +160,48 @@ impl BatchWriter {
         &mut self,
         table_name: &str,
         values: Vec<CellValue>,
-    ) -> Result<&mut Self, String> {
-        let writer = self
+    ) -> DataFusionResult<&mut Self> {
+        let encoder = self
             .tables
             .get(table_name)
-            .ok_or_else(|| format!("unknown table '{table_name}'"))?;
-        let entries = writer.encode_row(values)?;
+            .ok_or_else(|| DataFusionError::Plan(format!("unknown table '{table_name}'")))?;
+        let entries = encoder.encode_row(values).map_err(DataFusionError::Plan)?;
         for (key, _) in &entries {
-            self.client
+            self.store
                 .encode_store_key(key)
-                .map_err(|e| e.to_string())?;
+                .map_err(|e| DataFusionError::Plan(e.to_string()))?;
         }
         self.pending_entries.extend(entries);
         Ok(self)
     }
 
-    pub fn pending_count(&self) -> usize {
+    /// Counts encoded entries awaiting upload: one base entry plus one entry per secondary
+    /// index for each buffered row, including entries in failed batches retained for retry.
+    pub fn pending_entry_count(&self) -> usize {
         self.pending_entries.len()
             + self
                 .failed_prepared
                 .lock()
                 .expect("failed prepared mutex poisoned")
                 .iter()
-                .map(PreparedBatch::entry_count)
+                .map(PreparedUpload::entry_count)
                 .sum::<usize>()
     }
 
-    /// Flushes the next prepared batch and returns its Store sequence number, or zero when
-    /// nothing is pending.
-    pub async fn flush(&mut self) -> DataFusionResult<u64> {
-        Ok(self
-            .flush_with_receipt()
-            .await?
-            .map(|receipt| receipt.store_sequence_number)
-            .unwrap_or(0))
-    }
-
-    /// Flushes the next prepared batch and returns its receipt, or `None` when nothing is
-    /// pending.
-    pub async fn flush_with_receipt(&mut self) -> DataFusionResult<Option<BatchReceipt>> {
-        let Some(prepared) = self.prepare_flush()? else {
+    /// Uploads the next prepared batch and returns its Store sequence number, or `None`
+    /// when nothing is pending.
+    pub async fn flush(&mut self) -> DataFusionResult<Option<u64>> {
+        let Some(prepared) = self.prepare_upload()? else {
             return Ok(None);
         };
-        Ok(Some(self.commit_upload(prepared).await?))
+        Ok(Some(
+            self.commit_upload(prepared).await?.store_sequence_number,
+        ))
     }
 
     /// Takes the failed batch with the lowest request ID, or else every pending entry as a new
     /// batch. Returns `None` when neither exists.
-    pub fn prepare_flush(&mut self) -> DataFusionResult<Option<PreparedBatch>> {
+    pub fn prepare_upload(&mut self) -> DataFusionResult<Option<PreparedUpload>> {
         if let Some(prepared) = self.take_failed_prepared() {
             return Ok(Some(prepared));
         }
@@ -208,45 +210,13 @@ impl BatchWriter {
         }
         let request_id = self.next_request_id;
         self.next_request_id += 1;
-        Ok(Some(PreparedBatch {
+        Ok(Some(PreparedUpload {
             request_id,
             entries: std::mem::take(&mut self.pending_entries),
         }))
     }
 
-    pub fn stage_flush(
-        &self,
-        prepared: &PreparedBatch,
-        batch: &mut StoreWriteBatch,
-    ) -> DataFusionResult<()> {
-        for (key, value) in &prepared.entries {
-            batch
-                .push(&self.client, key, value)
-                .map_err(|e| DataFusionError::External(Box::new(e)))?;
-        }
-        Ok(())
-    }
-
-    pub fn mark_flush_persisted(
-        &self,
-        prepared: PreparedBatch,
-        sequence_number: u64,
-    ) -> BatchReceipt {
-        BatchReceipt {
-            writer_request_id: prepared.request_id,
-            entry_count: prepared.entry_count(),
-            store_sequence_number: sequence_number,
-        }
-    }
-
-    pub fn mark_flush_failed(&self, prepared: PreparedBatch) {
-        self.failed_prepared
-            .lock()
-            .expect("failed prepared mutex poisoned")
-            .push(prepared);
-    }
-
-    fn take_failed_prepared(&self) -> Option<PreparedBatch> {
+    fn take_failed_prepared(&self) -> Option<PreparedUpload> {
         let mut failed = self
             .failed_prepared
             .lock()
@@ -260,12 +230,12 @@ impl BatchWriter {
 }
 
 impl StoreWriteBatchUpload for BatchWriter {
-    type Prepared = PreparedBatch;
-    type Receipt = BatchReceipt;
+    type Prepared = PreparedUpload;
+    type Receipt = UploadReceipt;
     type Error = DataFusionError;
 
     fn store(&self) -> &PrefixedStoreClient {
-        &self.client
+        &self.store
     }
 
     fn stage_upload(
@@ -273,7 +243,12 @@ impl StoreWriteBatchUpload for BatchWriter {
         prepared: &mut Self::Prepared,
         batch: &mut StoreWriteBatch,
     ) -> Result<(), Self::Error> {
-        self.stage_flush(prepared, batch)
+        for (key, value) in &prepared.entries {
+            batch
+                .push(&self.store, key, value)
+                .map_err(|e| DataFusionError::External(Box::new(e)))?;
+        }
+        Ok(())
     }
 
     fn commit_error(&self, error: exoware_sdk::ClientError) -> Self::Error {
@@ -289,7 +264,13 @@ impl StoreWriteBatchUpload for BatchWriter {
         Self: Sync + 'a,
         Self::Prepared: 'a,
     {
-        Box::pin(async move { self.mark_flush_persisted(prepared, sequence_number) })
+        Box::pin(async move {
+            UploadReceipt {
+                request_id: prepared.request_id,
+                entry_count: prepared.entry_count(),
+                store_sequence_number: sequence_number,
+            }
+        })
     }
 
     fn mark_upload_failed<'a>(
@@ -302,7 +283,10 @@ impl StoreWriteBatchUpload for BatchWriter {
         Self::Prepared: 'a,
     {
         Box::pin(async move {
-            self.mark_flush_failed(prepared);
+            self.failed_prepared
+                .lock()
+                .expect("failed prepared mutex poisoned")
+                .push(prepared);
         })
     }
 }
@@ -345,7 +329,7 @@ impl DataSink for KvIngestSink {
             pending_entries.extend(encoded_entries);
         }
 
-        flush_ingest_batch(&self.table.client, &mut pending_entries).await?;
+        flush_ingest_batch(&self.table.store, &mut pending_entries).await?;
         Ok(logical_rows_written)
     }
 }
@@ -436,7 +420,7 @@ fn extract_row(
             )?),
             ColumnKind::Utf8 => CellValue::Utf8(string_value_at(array, row_idx, &col.name)?),
             ColumnKind::FixedSizeBinary(_) => {
-                CellValue::FixedBinary(fixed_binary_value_at(array, row_idx, &col.name)?)
+                CellValue::FixedSizeBinary(fixed_size_binary_value_at(array, row_idx, &col.name)?)
             }
             ColumnKind::Binary => CellValue::Binary(binary_value_at(array, row_idx, &col.name)?),
             ColumnKind::List(elem) => list_value_at(array, row_idx, &col.name, elem)?,
@@ -567,7 +551,7 @@ pub(crate) fn encode_non_pk_cell_value(
             Ok(Some(StoredValue::Bytes(v.to_le_bytes().to_vec())))
         }
         (ColumnKind::Utf8, CellValue::Utf8(v)) => Ok(Some(StoredValue::Utf8(v.clone()))),
-        (ColumnKind::FixedSizeBinary(n), CellValue::FixedBinary(v)) => {
+        (ColumnKind::FixedSizeBinary(n), CellValue::FixedSizeBinary(v)) => {
             if v.len() != n {
                 return Err(DataFusionError::Execution(format!(
                     "column '{}' expects FixedSizeBinary({n}) value with exactly {n} bytes, got {}",
@@ -653,7 +637,7 @@ pub(crate) fn decode_base_row(
             (ColumnKind::Utf8, StoredValue::Utf8(v)) => CellValue::Utf8(v.as_str().to_string()),
             (ColumnKind::Binary, StoredValue::Bytes(v)) => CellValue::Binary(v.as_slice().to_vec()),
             (ColumnKind::FixedSizeBinary(_), StoredValue::Bytes(v)) => {
-                CellValue::FixedBinary(v.as_slice().to_vec())
+                CellValue::FixedSizeBinary(v.as_slice().to_vec())
             }
             (ColumnKind::List(elem), StoredValue::List(items)) => {
                 let mut cells = Vec::with_capacity(items.len());
@@ -747,7 +731,7 @@ fn binary_value_at(
     )))
 }
 
-fn fixed_binary_value_at(
+fn fixed_size_binary_value_at(
     array: &ArrayRef,
     row_idx: usize,
     column_name: &str,
@@ -836,7 +820,7 @@ fn collect_list<A: ArrayAccessor>(
 }
 
 pub(crate) async fn flush_ingest_batch(
-    client: &PrefixedStoreClient,
+    store: &PrefixedStoreClient,
     entries: &mut Vec<(Key, Bytes)>,
 ) -> DataFusionResult<u64> {
     if entries.is_empty() {
@@ -845,11 +829,11 @@ pub(crate) async fn flush_ingest_batch(
     let mut batch = StoreWriteBatch::new();
     for (key, value) in entries.iter() {
         batch
-            .push(client, key, value)
+            .push(store, key, value)
             .map_err(|e| DataFusionError::External(Box::new(e)))?;
     }
     let token = batch
-        .commit(client.client())
+        .commit(store.client())
         .await
         .map_err(|e| DataFusionError::External(Box::new(e)))?;
     entries.clear();
@@ -918,7 +902,7 @@ mod tests {
                         CellValue::Date32(-2),
                         CellValue::UInt64(9),
                         note,
-                        CellValue::FixedBinary(vec![0x12, 0xfe]),
+                        CellValue::FixedSizeBinary(vec![0x12, 0xfe]),
                         CellValue::Int64(-7),
                     ],
                 };
@@ -938,7 +922,7 @@ mod tests {
                 let stored = decode_stored_row(&base).unwrap();
                 let pk = [
                     CellValue::UInt64(9),
-                    CellValue::FixedBinary(vec![0x12, 0xfe]),
+                    CellValue::FixedSizeBinary(vec![0x12, 0xfe]),
                 ];
                 assert_eq!(
                     hex::encode(
@@ -982,11 +966,11 @@ mod tests {
 
         // A failed insert must not leave the base entry pending on its own.
         let mut writer = schema.batch_writer();
-        assert_eq!(
+        assert!(matches!(
             writer.insert("orders", row.values.clone()).unwrap_err(),
-            expected
-        );
-        assert_eq!(writer.pending_count(), 0);
+            DataFusionError::Plan(msg) if msg == expected
+        ));
+        assert_eq!(writer.pending_entry_count(), 0);
 
         // Backfill rebuilds the index key from the stored base row and must fail with the
         // writer's error.
@@ -1024,8 +1008,8 @@ mod tests {
         let err = writer
             .insert("orders", vec![CellValue::Utf8("i".repeat(251))])
             .unwrap_err();
-        assert!(err.contains("exceeds max"), "{err}");
-        assert_eq!(writer.pending_count(), 0);
+        assert!(err.to_string().contains("exceeds max"), "{err}");
+        assert_eq!(writer.pending_entry_count(), 0);
     }
 
     fn extract_row_from_batch(
@@ -1262,10 +1246,16 @@ mod tests {
         }
     }
 
-    #[test]
-    fn store_batch_upload_stage_preserves_rows_for_failed_retry() {
+    #[tokio::test]
+    async fn flush_without_pending_rows_returns_none() {
+        let mut writer = BatchWriter::new(StoreClient::new("http://127.0.0.1:1").unprefixed(), &[]);
+        assert_eq!(writer.flush().await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn stage_upload_preserves_entries_for_failed_retry() {
         let writer = BatchWriter::new(StoreClient::new("http://127.0.0.1:1").unprefixed(), &[]);
-        let mut prepared = PreparedBatch {
+        let mut prepared = PreparedUpload {
             request_id: 7,
             entries: vec![
                 (Bytes::from_static(b"a"), Bytes::from_static(&[1])),
@@ -1276,13 +1266,13 @@ mod tests {
         let mut batch = StoreWriteBatch::new();
 
         StoreWriteBatchUpload::stage_upload(&writer, &mut prepared, &mut batch)
-            .expect("stage flush");
+            .expect("stage upload");
 
         assert_eq!(batch.len(), 2);
         assert_eq!(prepared.entry_count(), 2);
         assert_eq!(prepared.entries, entries);
 
-        writer.mark_flush_failed(prepared);
+        StoreWriteBatchUpload::mark_upload_failed(&writer, prepared, String::new()).await;
         let mut retry = writer.take_failed_prepared().expect("failed batch queued");
         assert_eq!(retry.entry_count(), 2);
 

@@ -1,5 +1,8 @@
 use crate::codec::{primary_key_prefix, secondary_index_prefix};
-use datafusion::arrow::datatypes::{i256, DataType, Field, Schema, SchemaRef, TimeUnit};
+use datafusion::{
+    arrow::datatypes::{i256, DataType, Field, Schema, SchemaRef, TimeUnit},
+    common::{DataFusionError, Result as DataFusionResult},
+};
 use exoware_sdk::{
     keys::{Key, Prefix},
     PrefixedStoreClient,
@@ -12,13 +15,13 @@ use std::{
 /// Every table/index family is named by a single packed byte
 /// `(table_prefix << 4) | discriminator`: the high nibble is the table prefix
 /// and the low nibble is the family discriminator. Discriminator `0x0` is the
-/// primary-row family and `0x1..=0xF` names secondary index slot
+/// base-row family and `0x1..=0xF` names secondary index slot
 /// `discriminator - 1`. All families of table `t` occupy the contiguous byte
 /// range `[t << 4, (t << 4) | 0xF]`; these ranges are pairwise disjoint within
 /// and across tables, and the primary discriminator (`0`) sorts below every
 /// index family of the same table.
 pub(crate) const FAMILY_PREFIX_LEN: usize = 1;
-/// Discriminator nibble for a table's primary-row family.
+/// Discriminator nibble for a table's base-row family.
 pub(crate) const PRIMARY_FAMILY_DISCRIMINATOR: u8 = 0x00;
 /// Byte offset of the first payload byte within a primary/index key, measured
 /// from the store-stripped key (i.e. after the family prefix). Both families
@@ -42,7 +45,7 @@ pub(crate) const INDEX_BACKFILL_FLUSH_ENTRIES: usize = 4_096;
 /// Row and index-entry counts for one completed backfill invocation.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct IndexBackfillReport {
-    /// Primary rows decoded during this invocation.
+    /// Base rows decoded during this invocation.
     pub scanned_rows: u64,
     /// Newly appended index specifications populated by this invocation.
     pub indexes_backfilled: usize,
@@ -55,16 +58,17 @@ pub struct IndexBackfillReport {
 pub struct IndexBackfillOptions {
     /// Requested maximum rows per response batch. Backfill rejects zero.
     pub row_batch_size: usize,
-    /// Inclusive encoded primary-key cursor, including the table family byte and
-    /// excluding the client's namespace prefix. `None` starts at the family lower bound.
-    pub start_from_primary_key: Option<Key>,
+    /// Inclusive scan cursor, such as a `Progress::next_cursor` from an earlier run. It
+    /// includes the table family byte and excludes the client's namespace prefix. `None`
+    /// starts at the family lower bound.
+    pub start_cursor: Option<Key>,
 }
 
 impl Default for IndexBackfillOptions {
     fn default() -> Self {
         Self {
             row_batch_size: PAGE_SIZE,
-            start_from_primary_key: None,
+            start_cursor: None,
         }
     }
 }
@@ -80,12 +84,12 @@ pub enum IndexBackfillEvent {
         indexes_backfilled: usize,
         /// Requested maximum rows per streaming response batch.
         row_batch_size: usize,
-        /// Inclusive first scan key, including the primary-row family byte.
+        /// Inclusive first scan key, including the base-row family byte.
         start_cursor: Key,
     },
     /// Emitted after entries for a response batch have been flushed to ingestion.
     Progress {
-        /// Cumulative primary rows decoded during this invocation.
+        /// Cumulative base rows decoded during this invocation.
         scanned_rows: u64,
         /// Cumulative secondary entries submitted for ingestion during this invocation.
         index_entries_written: u64,
@@ -263,20 +267,24 @@ pub struct IndexSpec {
 
 impl IndexSpec {
     #[cfg(test)]
-    pub(crate) fn new(name: impl Into<String>, key_columns: Vec<String>) -> Result<Self, String> {
+    pub(crate) fn new(name: impl Into<String>, key_columns: Vec<String>) -> DataFusionResult<Self> {
         Self::lexicographic(name, key_columns)
     }
 
     pub fn lexicographic(
         name: impl Into<String>,
         key_columns: Vec<String>,
-    ) -> Result<Self, String> {
+    ) -> DataFusionResult<Self> {
         let name = name.into();
         if name.trim().is_empty() {
-            return Err("index name must not be empty".to_string());
+            return Err(DataFusionError::Plan(
+                "index name must not be empty".to_string(),
+            ));
         }
         if key_columns.is_empty() {
-            return Err("key_columns must not be empty".to_string());
+            return Err(DataFusionError::Plan(
+                "key_columns must not be empty".to_string(),
+            ));
         }
         Ok(Self {
             name,
@@ -286,7 +294,7 @@ impl IndexSpec {
         })
     }
 
-    pub fn z_order(name: impl Into<String>, key_columns: Vec<String>) -> Result<Self, String> {
+    pub fn z_order(name: impl Into<String>, key_columns: Vec<String>) -> DataFusionResult<Self> {
         Self::lexicographic(name, key_columns).map(|spec| spec.with_layout(IndexLayout::ZOrder))
     }
 
@@ -295,7 +303,7 @@ impl IndexSpec {
         self
     }
 
-    pub const fn with_layout(mut self, layout: IndexLayout) -> Self {
+    pub(crate) const fn with_layout(mut self, layout: IndexLayout) -> Self {
         self.layout = layout;
         self
     }
@@ -315,14 +323,6 @@ impl IndexSpec {
     pub const fn layout(&self) -> &IndexLayout {
         &self.layout
     }
-}
-
-pub fn default_orders_index_specs() -> Vec<IndexSpec> {
-    vec![IndexSpec::lexicographic(
-        "region_customer",
-        vec!["region".to_string(), "customer_id".to_string()],
-    )
-    .expect("default orders index must be valid")]
 }
 
 /// Table declaration after column and primary-key validation, before index resolution.
@@ -460,7 +460,7 @@ pub(crate) struct ResolvedIndexSpec {
 pub(crate) struct TableModel {
     /// Table identifier in the high nibble of its family bytes.
     pub(crate) table_prefix: u8,
-    /// Primary-row family byte, excluding the client's namespace prefix.
+    /// Base-row family byte, excluding the client's namespace prefix.
     pub(crate) primary_key_prefix: Prefix,
     /// Arrow schema in table-column order, with normalized timestamp and list types.
     pub(crate) schema: SchemaRef,
@@ -480,6 +480,22 @@ pub(crate) struct TableModel {
 }
 
 impl TableModel {
+    /// Returns the entity key kind when the primary key is `(entity, UInt64 version)` over
+    /// two distinct columns, the layout that version scans and retention rely on.
+    pub(crate) fn versioned_entity_kind(&self, table_name: &str) -> DataFusionResult<ColumnKind> {
+        let [entity, ColumnKind::UInt64] = self.primary_key_kinds.as_slice() else {
+            return Err(DataFusionError::Plan(format!(
+                "table '{table_name}' requires an (entity, UInt64 version) primary key"
+            )));
+        };
+        if self.primary_key_indices[0] == self.primary_key_indices[1] {
+            return Err(DataFusionError::Plan(
+                "entity and version must be distinct primary key columns".to_string(),
+            ));
+        }
+        Ok(*entity)
+    }
+
     pub(crate) fn from_config(config: &KvTableConfig) -> Result<Self, String> {
         let schema = config.to_schema();
         let mut columns = Vec::with_capacity(config.columns.len());
@@ -670,14 +686,14 @@ pub enum CellValue {
     /// UTF-8 string.
     Utf8(String),
     /// Bytes whose length must match the column's declared fixed width when encoded.
-    FixedBinary(Vec<u8>),
+    FixedSizeBinary(Vec<u8>),
     /// Variable-length bytes.
     Binary(Vec<u8>),
     /// Ordered elements. Storage requires non-null elements of the column's scalar list kind.
     List(Vec<Self>),
 }
 
-/// Owned row values encoded into a table's primary row and index entries.
+/// Owned row values encoded into a table's base row and index entries.
 #[derive(Debug, Clone)]
 pub(crate) struct KvRow {
     /// One cell per table column in schema order, including primary-key columns.
@@ -698,10 +714,10 @@ impl KvRow {
     }
 }
 
-/// Selected column values and primary-row locator decoded from a secondary-index key.
+/// Selected column values and base-row locator decoded from a secondary-index key.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct DecodedIndexEntry {
-    /// Encoded primary-row key with its family byte, excluding the client's namespace prefix.
+    /// Encoded base-row key with its family byte, excluding the client's namespace prefix.
     pub(crate) primary_key: Key,
     /// Cells in primary-key order. Empty when none were requested, otherwise
     /// unselected positions contain `CellValue::Null` placeholders.
@@ -740,8 +756,8 @@ pub(crate) struct IndexPlan {
 /// DataFusion table provider sharing a resolved schema and its storage namespace.
 #[derive(Debug, Clone)]
 pub(crate) struct KvTable {
-    /// Client whose namespace contains this table's primary rows and index entries.
-    pub(crate) client: PrefixedStoreClient,
+    /// Store client whose namespace contains this table's base rows and index entries.
+    pub(crate) store: PrefixedStoreClient,
     /// Shared schema and primary-key layout used by scans and writes.
     pub(crate) model: Arc<TableModel>,
     /// Shared index layouts in family-discriminator order. Empty means no secondary indexes.
@@ -749,11 +765,11 @@ pub(crate) struct KvTable {
 }
 
 impl KvTable {
-    pub(crate) fn new(client: PrefixedStoreClient, config: KvTableConfig) -> Result<Self, String> {
+    pub(crate) fn new(store: PrefixedStoreClient, config: KvTableConfig) -> Result<Self, String> {
         let model = Arc::new(TableModel::from_config(&config)?);
         let index_specs = Arc::new(model.resolve_index_specs(&config.index_specs)?);
         Ok(Self {
-            client,
+            store,
             model,
             index_specs,
         })

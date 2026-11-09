@@ -18,7 +18,7 @@ pub(crate) enum PredicateConstraint {
     /// Equality with the supplied boolean value.
     BoolEq(bool),
     /// Equality with the supplied fixed-size binary bytes.
-    FixedBinaryEq(Vec<u8>),
+    FixedSizeBinaryEq(Vec<u8>),
     /// Inclusive range of signed integers or temporal values. Dates use days (`Date32`)
     /// or milliseconds (`Date64`) since the Unix epoch, and timestamps use microseconds.
     IntRange {
@@ -66,7 +66,7 @@ pub(crate) enum PredicateConstraint {
     /// Membership in the sorted, distinct unsigned integers.
     UInt64In(Vec<u64>),
     /// Membership in the sorted, distinct fixed-size binary values.
-    FixedBinaryIn(Vec<Vec<u8>>),
+    FixedSizeBinaryIn(Vec<Vec<u8>>),
 }
 
 /// Inclusive bounds for one primary-key field, after any preceding point fields.
@@ -166,10 +166,10 @@ pub(crate) fn primary_key_range_constraint(
                     .collect(),
             )
         }
-        (ColumnKind::FixedSizeBinary(expected), PredicateConstraint::FixedBinaryEq(value))
+        (ColumnKind::FixedSizeBinary(expected), PredicateConstraint::FixedSizeBinaryEq(value))
             if value.len() == expected =>
         {
-            primary_key_point(CellValue::FixedBinary(value.clone()), expected)
+            primary_key_point(CellValue::FixedSizeBinary(value.clone()), expected)
         }
         (ColumnKind::Utf8, PredicateConstraint::StringIn(values)) => {
             PrimaryKeyRangeConstraint::Terminal(
@@ -182,13 +182,13 @@ pub(crate) fn primary_key_range_constraint(
                     .collect(),
             )
         }
-        (ColumnKind::FixedSizeBinary(_), PredicateConstraint::FixedBinaryIn(values)) => {
+        (ColumnKind::FixedSizeBinary(_), PredicateConstraint::FixedSizeBinaryIn(values)) => {
             PrimaryKeyRangeConstraint::Terminal(
                 values
                     .iter()
                     .map(|v| PrimaryKeyTerminalRange {
-                        lower: CellValue::FixedBinary(v.clone()),
-                        upper: CellValue::FixedBinary(v.clone()),
+                        lower: CellValue::FixedSizeBinary(v.clone()),
+                        upper: CellValue::FixedSizeBinary(v.clone()),
                     })
                     .collect(),
             )
@@ -291,7 +291,7 @@ impl QueryPredicate {
             ColumnKind::Utf8 => scalar_to_string(literal).is_some(),
             ColumnKind::Int64 => scalar_to_i64(literal).is_some(),
             ColumnKind::UInt64 => scalar_to_u64(literal).is_some(),
-            ColumnKind::FixedSizeBinary(_) => scalar_to_fixed_binary(literal).is_some(),
+            ColumnKind::FixedSizeBinary(_) => scalar_to_fixed_size_binary(literal).is_some(),
             _ => false,
         }
     }
@@ -360,7 +360,7 @@ impl QueryPredicate {
                     ColumnKind::Decimal128 => scalar_to_i128(literal).is_some() && range_ops,
                     ColumnKind::UInt64 => scalar_to_u64(literal).is_some() && range_ops,
                     ColumnKind::FixedSizeBinary(_) => {
-                        op == Operator::Eq && scalar_to_fixed_binary(literal).is_some()
+                        op == Operator::Eq && scalar_to_fixed_size_binary(literal).is_some()
                     }
                     ColumnKind::Decimal256 => scalar_to_i256(literal).is_some() && range_ops,
                     ColumnKind::Binary | ColumnKind::List(_) => false,
@@ -615,27 +615,29 @@ impl QueryPredicate {
                 if op != Operator::Eq {
                     return;
                 }
-                let Some(value) = scalar_to_fixed_binary(literal) else {
+                let Some(value) = scalar_to_fixed_size_binary(literal) else {
                     self.contradiction = true;
                     return;
                 };
                 match self.constraints.get(&col_idx) {
-                    Some(PredicateConstraint::FixedBinaryEq(existing)) if *existing != value => {
+                    Some(PredicateConstraint::FixedSizeBinaryEq(existing))
+                        if *existing != value =>
+                    {
                         self.contradiction = true;
                     }
-                    Some(PredicateConstraint::FixedBinaryIn(existing)) => {
+                    Some(PredicateConstraint::FixedSizeBinaryIn(existing)) => {
                         if existing.contains(&value) {
                             self.constraints
-                                .insert(col_idx, PredicateConstraint::FixedBinaryEq(value));
+                                .insert(col_idx, PredicateConstraint::FixedSizeBinaryEq(value));
                         } else {
                             self.contradiction = true;
                         }
                     }
-                    Some(PredicateConstraint::FixedBinaryEq(_))
+                    Some(PredicateConstraint::FixedSizeBinaryEq(_))
                     | Some(PredicateConstraint::IsNotNull)
                     | None => {
                         self.constraints
-                            .insert(col_idx, PredicateConstraint::FixedBinaryEq(value));
+                            .insert(col_idx, PredicateConstraint::FixedSizeBinaryEq(value));
                     }
                     Some(_) => {
                         self.contradiction = true;
@@ -763,15 +765,15 @@ impl QueryPredicate {
                 );
             }
             ColumnKind::FixedSizeBinary(_) => {
-                let values: Vec<_> = list.filter_map(scalar_to_fixed_binary).collect();
+                let values: Vec<_> = list.filter_map(scalar_to_fixed_size_binary).collect();
                 let values = match self.constraints.get(&col_idx) {
-                    Some(PredicateConstraint::FixedBinaryEq(existing)) => {
+                    Some(PredicateConstraint::FixedSizeBinaryEq(existing)) => {
                         if !values.contains(existing) {
                             self.contradiction = true;
                         }
                         return;
                     }
-                    Some(PredicateConstraint::FixedBinaryIn(existing)) => existing
+                    Some(PredicateConstraint::FixedSizeBinaryIn(existing)) => existing
                         .iter()
                         .filter(|v| values.contains(v))
                         .cloned()
@@ -785,8 +787,8 @@ impl QueryPredicate {
                 self.set_values_constraint(
                     col_idx,
                     values,
-                    PredicateConstraint::FixedBinaryEq,
-                    PredicateConstraint::FixedBinaryIn,
+                    PredicateConstraint::FixedSizeBinaryEq,
+                    PredicateConstraint::FixedSizeBinaryIn,
                 );
             }
             _ => {}
@@ -956,9 +958,9 @@ impl QueryPredicate {
                         max: Some(v),
                     })
                     .collect(),
-                PredicateConstraint::FixedBinaryIn(vals) => vals
+                PredicateConstraint::FixedSizeBinaryIn(vals) => vals
                     .iter()
-                    .map(|v| PredicateConstraint::FixedBinaryEq(v.clone()))
+                    .map(|v| PredicateConstraint::FixedSizeBinaryEq(v.clone()))
                     .collect(),
                 other => vec![other.clone()],
             };
@@ -1054,8 +1056,8 @@ impl QueryPredicate {
             (ColumnKind::Utf8, PredicateConstraint::StringEq(_))
             | (ColumnKind::Utf8, PredicateConstraint::StringIn(_))
             | (ColumnKind::Boolean, PredicateConstraint::BoolEq(_))
-            | (ColumnKind::FixedSizeBinary(_), PredicateConstraint::FixedBinaryEq(_))
-            | (ColumnKind::FixedSizeBinary(_), PredicateConstraint::FixedBinaryIn(_))
+            | (ColumnKind::FixedSizeBinary(_), PredicateConstraint::FixedSizeBinaryEq(_))
+            | (ColumnKind::FixedSizeBinary(_), PredicateConstraint::FixedSizeBinaryIn(_))
             | (ColumnKind::Int64, PredicateConstraint::IntIn(_))
             | (ColumnKind::UInt64, PredicateConstraint::UInt64In(_)) => true,
             (ColumnKind::Int64, PredicateConstraint::IntRange { min, max })
@@ -1099,11 +1101,11 @@ impl QueryPredicate {
                 | (ColumnKind::Float64, PredicateConstraint::FloatRange { .. })
                 | (
                     ColumnKind::FixedSizeBinary(_),
-                    PredicateConstraint::FixedBinaryEq(_)
+                    PredicateConstraint::FixedSizeBinaryEq(_)
                 )
                 | (
                     ColumnKind::FixedSizeBinary(_),
-                    PredicateConstraint::FixedBinaryIn(_)
+                    PredicateConstraint::FixedSizeBinaryIn(_)
                 )
                 | (
                     ColumnKind::Decimal128,
@@ -1359,15 +1361,15 @@ impl QueryPredicate {
             ColumnKind::FixedSizeBinary(n) => {
                 let mut bytes = vec![0u8; n];
                 if let Some(constraint) = constraint {
-                    let PredicateConstraint::FixedBinaryEq(data) = constraint else {
+                    let PredicateConstraint::FixedSizeBinaryEq(data) = constraint else {
                         return Err(format!(
-                            "missing fixed-binary constraint for '{}'",
+                            "missing fixed-size-binary constraint for '{}'",
                             col.name
                         ));
                     };
                     if data.len() > n {
                         return Err(format!(
-                            "fixed-binary constraint for '{}' exceeds width {}",
+                            "fixed-size-binary constraint for '{}' exceeds width {}",
                             col.name, n
                         ));
                     }
@@ -1416,7 +1418,7 @@ impl QueryPredicate {
                 PredicateConstraint::StringIn(v) => v.len(),
                 PredicateConstraint::IntIn(v) => v.len(),
                 PredicateConstraint::UInt64In(v) => v.len(),
-                PredicateConstraint::FixedBinaryIn(v) => v.len(),
+                PredicateConstraint::FixedSizeBinaryIn(v) => v.len(),
                 _ => 1,
             };
             count = count.saturating_mul(values);
@@ -1451,8 +1453,8 @@ impl QueryPredicate {
                 PredicateConstraint::UInt64In(v) => {
                     v.iter().copied().map(CellValue::UInt64).collect()
                 }
-                PredicateConstraint::FixedBinaryIn(v) => {
-                    v.iter().cloned().map(CellValue::FixedBinary).collect()
+                PredicateConstraint::FixedSizeBinaryIn(v) => {
+                    v.iter().cloned().map(CellValue::FixedSizeBinary).collect()
                 }
                 _ => match primary_key_range_constraint(kind, constraint) {
                     PrimaryKeyRangeConstraint::Point(point) => vec![point.value],
@@ -1610,7 +1612,7 @@ pub(crate) fn describe_predicate_constraint(constraint: &PredicateConstraint) ->
     match constraint {
         PredicateConstraint::StringEq(value) => format!("= '{}'", escape_plan_string(value)),
         PredicateConstraint::BoolEq(value) => format!("= {value}"),
-        PredicateConstraint::FixedBinaryEq(value) => format!("= 0x{}", hex_preview(value)),
+        PredicateConstraint::FixedSizeBinaryEq(value) => format!("= 0x{}", hex_preview(value)),
         PredicateConstraint::IntRange { min, max } => {
             describe_integral_range(min.map(|v| v.to_string()), max.map(|v| v.to_string()))
         }
@@ -1637,7 +1639,7 @@ pub(crate) fn describe_predicate_constraint(constraint: &PredicateConstraint) ->
         PredicateConstraint::UInt64In(values) => {
             describe_in_list(values.iter().map(ToString::to_string))
         }
-        PredicateConstraint::FixedBinaryIn(values) => {
+        PredicateConstraint::FixedSizeBinaryIn(values) => {
             describe_in_list(values.iter().map(|v| format!("0x{}", hex_preview(v))))
         }
     }
@@ -1758,8 +1760,10 @@ pub(crate) fn matches_constraint(value: &CellValue, constraint: &PredicateConstr
         (CellValue::UInt64(v), PredicateConstraint::UInt64In(values)) => {
             values.binary_search(v).is_ok()
         }
-        (CellValue::FixedBinary(v), PredicateConstraint::FixedBinaryEq(expected)) => v == expected,
-        (CellValue::FixedBinary(v), PredicateConstraint::FixedBinaryIn(values)) => {
+        (CellValue::FixedSizeBinary(v), PredicateConstraint::FixedSizeBinaryEq(expected)) => {
+            v == expected
+        }
+        (CellValue::FixedSizeBinary(v), PredicateConstraint::FixedSizeBinaryIn(values)) => {
             values.binary_search(v).is_ok()
         }
         (CellValue::Decimal256(v), PredicateConstraint::Decimal256Range { min, max }) => {
@@ -2050,7 +2054,7 @@ pub(crate) const fn scalar_to_i128(value: &ScalarValue) -> Option<i128> {
     }
 }
 
-pub(crate) fn scalar_to_fixed_binary(value: &ScalarValue) -> Option<Vec<u8>> {
+pub(crate) fn scalar_to_fixed_size_binary(value: &ScalarValue) -> Option<Vec<u8>> {
     match value {
         ScalarValue::FixedSizeBinary(_, Some(v)) => Some(v.clone()),
         ScalarValue::Binary(Some(v)) => Some(v.clone()),

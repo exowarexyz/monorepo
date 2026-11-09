@@ -1,11 +1,11 @@
 export { DataType, DateUnit, Int32, Int64, List, Table, TimeUnit, Vector } from 'apache-arrow';
 export {
   SqlClient,
-  type DecodedColumn,
-  type DecodedIndex,
-  type DecodedIndexLayout,
-  type DecodedQueryResult,
-  type DecodedSubscribeFrame,
-  type DecodedTable,
+  type ColumnInfo,
+  type IndexInfo,
+  type IndexLayout,
+  type QueryResult,
+  type SubscribeFrame,
+  type TableInfo,
   type SqlClientOptions,
 } from './client.js';

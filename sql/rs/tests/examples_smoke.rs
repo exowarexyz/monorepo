@@ -7,9 +7,7 @@ use datafusion::{
     },
     common::ScalarValue,
 };
-use exoware_sql::{
-    default_orders_index_specs, CellValue, IndexSpec, KvSchema, SqlContext, TableColumnConfig,
-};
+use exoware_sql::{CellValue, IndexSpec, KvSchema, SqlContext, TableColumnConfig};
 
 fn collect_i64_rows(
     batches: &[datafusion::arrow::record_batch::RecordBatch],
@@ -107,7 +105,22 @@ async fn orders_example_queries_work_end_to_end() {
     let ctx = SqlContext::new(client.unprefixed());
 
     let schema = KvSchema::new(client.unprefixed())
-        .orders_table("orders_kv", default_orders_index_specs())
+        .table(
+            "orders_kv",
+            vec![
+                TableColumnConfig::new("region", DataType::Utf8, false),
+                TableColumnConfig::new("customer_id", DataType::Int64, false),
+                TableColumnConfig::new("order_id", DataType::Int64, false),
+                TableColumnConfig::new("amount_cents", DataType::Int64, false),
+                TableColumnConfig::new("status", DataType::Utf8, false),
+            ],
+            vec!["order_id".to_string()],
+            vec![IndexSpec::lexicographic(
+                "region_customer",
+                vec!["region".to_string(), "customer_id".to_string()],
+            )
+            .expect("index")],
+        )
         .expect("orders schema");
     ctx.register_schema(schema).expect("register");
 
@@ -296,7 +309,7 @@ async fn versioned_example_queries_work_end_to_end() {
     let writer_client = client.clone();
 
     let schema = KvSchema::new(client.unprefixed())
-        .table_versioned(
+        .versioned_table(
             "documents",
             vec![
                 TableColumnConfig::new("doc_id", DataType::FixedSizeBinary(16), false),
@@ -315,8 +328,8 @@ async fn versioned_example_queries_work_end_to_end() {
     let doc_id_hex = "d0c1aabbccddeeff0011223344556677";
     let doc_id = hex::decode(doc_id_hex).expect("doc_id hex");
 
-    let mut batch = KvSchema::new(writer_client.unprefixed())
-        .table_versioned(
+    let mut writer = KvSchema::new(writer_client.unprefixed())
+        .versioned_table(
             "documents",
             vec![
                 TableColumnConfig::new("doc_id", DataType::FixedSizeBinary(16), false),
@@ -338,11 +351,11 @@ async fn versioned_example_queries_work_end_to_end() {
         (3, "Approved", "Approved content.", "Bob"),
         (4, "Published", "Final published content.", "Bob"),
     ] {
-        batch
+        writer
             .insert(
                 "documents",
                 vec![
-                    CellValue::FixedBinary(doc_id.clone()),
+                    CellValue::FixedSizeBinary(doc_id.clone()),
                     CellValue::UInt64(version),
                     CellValue::Utf8(title.to_string()),
                     CellValue::Utf8(body.to_string()),
@@ -351,7 +364,7 @@ async fn versioned_example_queries_work_end_to_end() {
             )
             .expect("insert document");
     }
-    batch.flush().await.expect("flush versioned batch");
+    writer.flush().await.expect("flush versioned batch");
 
     let latest_leq_two = ctx
         .sql(&format!(
@@ -410,7 +423,7 @@ async fn versioned_example_queries_work_end_to_end() {
 }
 
 #[tokio::test]
-async fn fixed_binary_example_filters_work_end_to_end() {
+async fn fixed_size_binary_example_filters_work_end_to_end() {
     let client = common::local_store_client().await;
     let ctx = SqlContext::new(client.unprefixed());
     let writer_client = client.clone();
@@ -446,7 +459,7 @@ async fn fixed_binary_example_filters_work_end_to_end() {
 
     ctx.register_schema(schema).expect("register");
 
-    let mut batch = KvSchema::new(writer_client.unprefixed())
+    let mut writer = KvSchema::new(writer_client.unprefixed())
         .table(
             "wallets",
             vec![
@@ -477,49 +490,49 @@ async fn fixed_binary_example_filters_work_end_to_end() {
         .batch_writer();
     let alice_addr = vec![0xAA; 20];
     let bob_addr = vec![0xBB; 20];
-    batch
+    writer
         .insert(
             "wallets",
             vec![
-                CellValue::FixedBinary(alice_addr.clone()),
+                CellValue::FixedSizeBinary(alice_addr.clone()),
                 CellValue::Utf8("Alice".to_string()),
                 CellValue::UInt64(1_000),
             ],
         )
         .expect("insert alice");
-    batch
+    writer
         .insert(
             "wallets",
             vec![
-                CellValue::FixedBinary(bob_addr.clone()),
+                CellValue::FixedSizeBinary(bob_addr.clone()),
                 CellValue::Null,
                 CellValue::UInt64(500),
             ],
         )
         .expect("insert bob");
-    batch
+    writer
         .insert(
             "transfers",
             vec![
-                CellValue::FixedBinary(vec![0xDE; 32]),
-                CellValue::FixedBinary(alice_addr.clone()),
-                CellValue::FixedBinary(bob_addr),
+                CellValue::FixedSizeBinary(vec![0xDE; 32]),
+                CellValue::FixedSizeBinary(alice_addr.clone()),
+                CellValue::FixedSizeBinary(bob_addr),
                 CellValue::UInt64(250),
                 CellValue::UInt64(18_500_000),
             ],
         )
         .expect("insert transfer");
-    batch.flush().await.expect("flush");
+    writer.flush().await.expect("flush");
 
     ctx.sql(
         "INSERT INTO wallets (address, label, balance_wei) \
          VALUES (X'CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC', 'Carol', 750)",
     )
     .await
-    .expect("fixed-binary sql insert")
+    .expect("fixed-size-binary sql insert")
     .collect()
     .await
-    .expect("collect fixed-binary insert");
+    .expect("collect fixed-size-binary insert");
 
     let alice_wallet = ctx
         .sql(

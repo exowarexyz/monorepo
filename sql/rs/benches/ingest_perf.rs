@@ -228,7 +228,7 @@ fn batch_writer_insert(c: &mut Criterion) {
         for row in rows {
             writer.insert("events", row).unwrap();
         }
-        assert_eq!(writer.pending_count(), ROWS * 3);
+        assert_eq!(writer.pending_entry_count(), ROWS * 3);
         writer
     };
     let input = rows();

@@ -84,7 +84,7 @@ impl Service for RangeHarness {
 }
 
 struct MockStore {
-    client: PrefixedStoreClient,
+    store: PrefixedStoreClient,
     requested_floors: Arc<Mutex<Vec<Option<u64>>>>,
     server: tokio::task::JoinHandle<()>,
 }
@@ -110,7 +110,7 @@ impl MockStore {
             axum::serve(listener, app).await.expect("serve mock Store");
         });
         Self {
-            client: StoreClient::new(&url).unprefixed(),
+            store: StoreClient::new(&url).unprefixed(),
             requested_floors,
             server,
         }
@@ -137,9 +137,9 @@ fn row_value() -> Bytes {
     StoredRow { values: vec![None] }.encode()
 }
 
-fn context_with_table(client: PrefixedStoreClient) -> SqlContext {
-    let ctx = SqlContext::new(client.clone());
-    let schema = KvSchema::new(client)
+fn context_with_table(store: PrefixedStoreClient) -> SqlContext {
+    let ctx = SqlContext::new(store.clone());
+    let schema = KvSchema::new(store)
         .table(
             "items",
             vec![TableColumnConfig::new("id", DataType::Int64, false)],
@@ -176,45 +176,45 @@ async fn execute_table_scan(ctx: &SqlContext) {
 }
 
 async fn run_two_scans(monotonic: bool, floor: Option<u64>) -> (Vec<Option<u64>>, Option<u64>) {
-    let store = MockStore::start(11).await;
+    let mock = MockStore::start(11).await;
     let session = if monotonic {
-        ReadSession::monotonic(store.client.clone(), floor)
+        ReadSession::monotonic(mock.store.clone(), floor)
     } else {
-        ReadSession::fixed(store.client.clone(), floor)
+        ReadSession::fixed(mock.store.clone(), floor)
     };
     let retained = session.clone();
-    let base = context_with_table(store.client.clone());
+    let base = context_with_table(mock.store.clone());
     let ctx = base.with_read_session(session);
 
     execute_table_scan(&ctx).await;
     execute_table_scan(&ctx).await;
 
-    (store.requested_floors(), retained.min_sequence_number())
+    (mock.requested_floors(), retained.min_sequence_number())
 }
 
 #[tokio::test]
 async fn default_context_retains_observations_and_independent_contexts_start_fresh() {
-    let store = MockStore::start(11).await;
-    let ctx = context_with_table(store.client.clone());
+    let mock = MockStore::start(11).await;
+    let ctx = context_with_table(mock.store.clone());
 
     execute_table_scan(&ctx).await;
     execute_table_scan(&ctx.clone()).await;
-    execute_table_scan(&context_with_table(store.client.clone())).await;
+    execute_table_scan(&context_with_table(mock.store.clone())).await;
 
-    assert_eq!(store.requested_floors(), [None, Some(11), None]);
+    assert_eq!(mock.requested_floors(), [None, Some(11), None]);
 }
 
 #[tokio::test]
 async fn builder_config_replacement_preserves_supplied_read_session() {
     for (monotonic, floor) in [(true, None), (true, Some(0)), (false, Some(0))] {
-        let store = MockStore::start(11).await;
-        let base = context_with_table(store.client.clone());
+        let mock = MockStore::start(11).await;
+        let base = context_with_table(mock.store.clone());
         let session = if monotonic {
-            ReadSession::monotonic(store.client.clone(), floor)
+            ReadSession::monotonic(mock.store.clone(), floor)
         } else {
-            ReadSession::fixed(store.client.clone(), floor)
+            ReadSession::fixed(mock.store.clone(), floor)
         };
-        let ctx = SqlContext::builder(store.client.clone())
+        let ctx = SqlContext::builder(mock.store.clone())
             .with_read_session(session.clone())
             .with_config(SessionConfig::new().with_batch_size(3))
             .with_config(SessionConfig::new().with_batch_size(5))
@@ -231,7 +231,7 @@ async fn builder_config_replacement_preserves_supplied_read_session() {
         execute_table_scan(&ctx).await;
 
         assert_eq!(
-            store.requested_floors(),
+            mock.requested_floors(),
             [floor, if monotonic { Some(11) } else { floor }]
         );
         assert_eq!(session.evaluated_sequence(), Some(11));
@@ -242,31 +242,31 @@ async fn builder_config_replacement_preserves_supplied_read_session() {
 
 #[tokio::test]
 async fn request_contexts_replace_the_base_session() {
-    let store = MockStore::start(11).await;
-    let base = context_with_table(store.client.clone());
+    let mock = MockStore::start(11).await;
+    let base = context_with_table(mock.store.clone());
     execute_table_scan(&base).await;
 
     for _ in 0..2 {
-        let ctx = base.with_read_session(ReadSession::monotonic(store.client.clone(), None));
+        let ctx = base.with_read_session(ReadSession::monotonic(mock.store.clone(), None));
         execute_table_scan(&ctx).await;
     }
 
-    assert_eq!(store.requested_floors(), [None, None, None]);
+    assert_eq!(mock.requested_floors(), [None, None, None]);
 }
 
 #[tokio::test]
 async fn monotonic_session_shares_observations_across_sql_statements() {
-    let store = MockStore::start(11).await;
-    let session = ReadSession::monotonic(store.client.clone(), None);
+    let mock = MockStore::start(11).await;
+    let session = ReadSession::monotonic(mock.store.clone(), None);
     let retained = session.clone();
-    let base = context_with_table(store.client.clone());
+    let base = context_with_table(mock.store.clone());
     let ctx = base.with_read_session(session);
 
     execute_table_scan(&ctx).await;
     assert_eq!(retained.evaluated_sequence(), Some(11));
     execute_table_scan(&ctx).await;
 
-    assert_eq!(store.requested_floors(), [None, Some(11)]);
+    assert_eq!(mock.requested_floors(), [None, Some(11)]);
 }
 
 #[tokio::test]
@@ -286,8 +286,8 @@ async fn fixed_and_monotonic_policies_preserve_absent_and_zero_floors() {
 
 #[tokio::test]
 async fn store_free_sql_does_not_create_an_observation() {
-    let store = MockStore::start(11).await;
-    let ctx = SqlContext::new(store.client.clone());
+    let mock = MockStore::start(11).await;
+    let ctx = SqlContext::new(mock.store.clone());
     let retained = ctx.read_session();
 
     let batches = ctx
@@ -302,7 +302,7 @@ async fn store_free_sql_does_not_create_an_observation() {
         batches.iter().map(|batch| batch.num_rows()).sum::<usize>(),
         1
     );
-    assert!(store.requested_floors().is_empty());
+    assert!(mock.requested_floors().is_empty());
     assert_eq!(retained.evaluated_sequence(), None);
 }
 

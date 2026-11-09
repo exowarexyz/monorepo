@@ -1,4 +1,7 @@
-use datafusion::arrow::{datatypes::DataType, util::pretty::print_batches};
+use datafusion::{
+    arrow::{datatypes::DataType, util::pretty::print_batches},
+    common::Result as DataFusionResult,
+};
 use exoware_sdk::StoreClient;
 use exoware_sql::{CellValue, KvSchema, SqlContext, TableColumnConfig};
 
@@ -29,8 +32,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn build_schema(client: StoreClient) -> Result<KvSchema, String> {
-    KvSchema::new(client.unprefixed()).table_versioned(
+fn build_schema(client: StoreClient) -> DataFusionResult<KvSchema> {
+    KvSchema::new(client.unprefixed()).versioned_table(
         "documents",
         vec![
             TableColumnConfig::new("doc_id", DataType::FixedSizeBinary(16), false),
@@ -53,14 +56,14 @@ fn demo_batch_writer_insert() {
     let client = StoreClient::new("http://localhost:8080");
     let schema = build_schema(client).unwrap();
 
-    let mut batch = schema.batch_writer();
+    let mut writer = schema.batch_writer();
     let doc_id = doc_id_bytes();
 
-    batch
+    writer
         .insert(
             "documents",
             vec![
-                CellValue::FixedBinary(doc_id.clone()),
+                CellValue::FixedSizeBinary(doc_id.clone()),
                 CellValue::UInt64(1),
                 CellValue::Utf8("Draft".to_string()),
                 CellValue::Utf8("Initial content...".to_string()),
@@ -69,11 +72,11 @@ fn demo_batch_writer_insert() {
         )
         .unwrap();
 
-    batch
+    writer
         .insert(
             "documents",
             vec![
-                CellValue::FixedBinary(doc_id.clone()),
+                CellValue::FixedSizeBinary(doc_id.clone()),
                 CellValue::UInt64(2),
                 CellValue::Utf8("Review".to_string()),
                 CellValue::Utf8("Revised content after review...".to_string()),
@@ -82,11 +85,11 @@ fn demo_batch_writer_insert() {
         )
         .unwrap();
 
-    batch
+    writer
         .insert(
             "documents",
             vec![
-                CellValue::FixedBinary(doc_id.clone()),
+                CellValue::FixedSizeBinary(doc_id.clone()),
                 CellValue::UInt64(4),
                 CellValue::Utf8("Published".to_string()),
                 CellValue::Utf8("Final published content.".to_string()),
@@ -95,11 +98,11 @@ fn demo_batch_writer_insert() {
         )
         .unwrap();
 
-    batch
+    writer
         .insert(
             "documents",
             vec![
-                CellValue::FixedBinary(doc_id.clone()),
+                CellValue::FixedSizeBinary(doc_id.clone()),
                 CellValue::UInt64(5),
                 CellValue::Utf8("Translated".to_string()),
                 CellValue::Utf8("Localized content.".to_string()),
@@ -108,11 +111,11 @@ fn demo_batch_writer_insert() {
         )
         .unwrap();
 
-    batch
+    writer
         .insert(
             "documents",
             vec![
-                CellValue::FixedBinary(doc_id),
+                CellValue::FixedSizeBinary(doc_id),
                 CellValue::UInt64(3),
                 CellValue::Utf8("Approved".to_string()),
                 CellValue::Utf8("Approved content.".to_string()),
@@ -121,7 +124,7 @@ fn demo_batch_writer_insert() {
         )
         .unwrap();
 
-    println!("  Queued {} document-version rows", batch.pending_count());
+    println!("  Queued {} entries", writer.pending_entry_count());
     println!("  (skipping flush -- no server in this demo)");
 }
 
