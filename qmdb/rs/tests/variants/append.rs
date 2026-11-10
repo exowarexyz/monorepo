@@ -1,5 +1,3 @@
-#![allow(clippy::type_complexity)]
-
 //! Full and compact append-only QMDB sources share the same Store and Connect adapters
 
 use crate::common;
