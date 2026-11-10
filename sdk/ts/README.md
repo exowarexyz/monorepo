@@ -70,7 +70,7 @@ const batchSequence = await batch.commit(client);
 
 `put` writes one entry and `putMany` writes several. Each call, like a batch
 commit, sends one atomic Put. They validate sizes before sending and throw
-`RangeError` for invalid batches; the Rust SDK skips this local check and lets
+`RangeError` for invalid batches. The Rust SDK skips this local check and lets
 the server reject an oversized Put. Configure entry, value, and encoded message limits for your
 deployment with `StoreClientOptions.putLimits`.
 

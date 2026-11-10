@@ -660,7 +660,8 @@ async function* performReduce(
         params: prefixReduceParams(params, prefix),
         ...(effective !== undefined ? { minSequenceNumber: effective } : {}),
     });
-    // The local controller ends the RPC when the consumer stops iterating; a
+
+    // The local controller ends the RPC when the consumer stops iterating, and a
     // caller-supplied signal aborts it as well.
     const controller = new AbortController();
     const callerSignal = options?.signal;

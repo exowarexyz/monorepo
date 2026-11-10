@@ -253,7 +253,7 @@ pub enum StoreKeyPrefixError {
 /// The prefix prepends a fixed byte string to each physical Store key and
 /// stores the caller's logical key in the remaining bytes. QMDB, SQL, and
 /// other higher-level instances continue to build their own logical keys as
-/// before; a [`PrefixedStoreClient`] maps those keys on the wire and maps
+/// before. A [`PrefixedStoreClient`] maps those keys on the wire and maps
 /// returned keys back before callers see them.
 ///
 /// It wraps the general key codec [`Prefix`] to add what a Store client
@@ -2839,12 +2839,12 @@ impl<'a> Stream<'a> {
 }
 
 impl<'a> Retention<'a> {
-    /// `log.retention.v1.Service.SetRetention` — install the sequence-log
-    /// retention rule. The rule is persistent and continuously enforced as the
-    /// log grows; eviction surfaces to `log.stream.v1` subscribers as
-    /// `BATCH_EVICTED`. Returns the lowest retained sequence after one
-    /// synchronous enforcement (`None` when the log is empty / no floor exists
-    /// yet).
+    /// Install the sequence-log retention rule through
+    /// `log.retention.v1.Service.SetRetention`. The rule is persistent and
+    /// continuously enforced as the log grows, and eviction surfaces to
+    /// `log.stream.v1` subscribers as `BATCH_EVICTED`. Returns the lowest
+    /// retained sequence after one synchronous enforcement (`None` when the
+    /// log is empty / no floor exists yet).
     pub async fn set_retention(
         &self,
         policy: crate::retention::RetentionPolicy,
@@ -2852,9 +2852,9 @@ impl<'a> Retention<'a> {
         self.c.set_retention(Some(policy)).await
     }
 
-    /// `log.retention.v1.Service.SetRetention` with no policy — remove the
-    /// sequence-log retention rule. Returns the lowest retained sequence
-    /// (`None` when the log is empty).
+    /// Remove the sequence-log retention rule by sending
+    /// `log.retention.v1.Service.SetRetention` with no policy. Returns the
+    /// lowest retained sequence (`None` when the log is empty).
     pub async fn clear_retention(&self) -> Result<Option<u64>, ClientError> {
         self.c.set_retention(None).await
     }
