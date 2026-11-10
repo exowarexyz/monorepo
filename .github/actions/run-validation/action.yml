@@ -10,7 +10,7 @@ inputs:
     required: false
     default: ""
   keys:
-    description: Initial key count; load writes exactly these keys, bench reads them and appends new keys after them.
+    description: Initial key count. Load writes exactly these keys, and bench reads them and appends new keys after them.
     required: false
     default: "5000"
   load-batch-size:

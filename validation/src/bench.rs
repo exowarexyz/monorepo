@@ -1,9 +1,11 @@
 //! Exoware benchmark workload runner.
 //!
 //! Usage:
-//!   validation bench --store-url http://localhost:8080 --keys 10000 --ops 50000 --batch-size 100 --scenario balanced
+//!   validation bench --store-url http://localhost:8080 --keys 10000 --ops 50000 \
+//!     --batch-size 100 --scenario balanced
 //!
-//! Progress: `bench` emits `Benchmark progress` every `--progress-interval-secs` (default 10; 0 disables).
+//! Progress: `bench` emits `Benchmark progress` every `--progress-interval-secs` seconds. The
+//! default is 10, and 0 disables it.
 
 use crate::{
     client::{build_client, ClientArgs, ClientConfig},
@@ -66,7 +68,7 @@ pub struct Args {
     manifest: Option<PathBuf>,
     #[command(flatten)]
     client: ClientArgs,
-    /// Keys written by load before bench starts; bench writes append after them.
+    /// Keys written by load before bench starts. Bench writes append after them.
     #[arg(long, default_value_t = 10000)]
     keys: u64,
     #[arg(long, default_value_t = 50000)]

@@ -313,7 +313,7 @@ pub trait Retention: Send + Sync + 'static {
     fn clear_retention(&self) -> impl Future<Output = Result<Option<u64>, String>> + Send;
 }
 
-/// Blanket bound for backends that serve every store capability; required by
+/// Blanket bound for backends that serve every store capability, required by
 /// [`AppState`](crate::AppState) and [`connect_stack`](crate::connect_stack).
 pub trait StoreEngine: Ingest + Query + Prune + Log + Retention {}
 
