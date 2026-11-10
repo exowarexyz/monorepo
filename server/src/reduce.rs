@@ -1091,6 +1091,33 @@ mod tests {
     }
 
     #[test]
+    fn excessive_stored_list_nesting_returns_an_error() {
+        use commonware_codec::Write as _;
+
+        let mut bytes = Vec::new();
+        1usize.write(&mut bytes);
+        true.write(&mut bytes);
+        for _ in 0..100_000 {
+            6u8.write(&mut bytes);
+            1usize.write(&mut bytes);
+        }
+        StoredValue::Int64(7).write(&mut bytes);
+        let rows = [(Key::from(b"a".to_vec()), Bytes::from(bytes))];
+        let params = scalar_params(vec![reducer(
+            RangeReduceOp::SumField,
+            Some(int64_value_field(0)),
+        )]);
+        let error = reduce(&rows, &params).expect_err("excessive list nesting");
+        assert!(
+            matches!(error, RangeError::Reduce(message) if message.contains("list nesting exceeds limit"))
+        );
+
+        let rows = [make_row(b"b", vec![Some(StoredValue::Int64(7))])];
+        let result = reduce(&rows, &params).expect("valid reduction");
+        assert_eq!(result.results[0].value, result_i64(7));
+    }
+
+    #[test]
     fn malformed_rows_and_expression_errors_fail_instead_of_skipping_rows() {
         let sum = reducer(RangeReduceOp::SumField, Some(int64_value_field(0)));
         let params = scalar_params(vec![reducer(RangeReduceOp::CountAll, None), sum]);
