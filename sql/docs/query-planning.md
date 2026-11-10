@@ -16,6 +16,11 @@ Without point lookups, the planner ranks the primary key and each secondary inde
 many leading key columns the predicate constrains, whether the index covers every
 projected and filtered column, the index layout, and the number of key ranges.
 
+A point lookup and a scan under a `LIMIT` report the most rows they can return as an
+estimate to DataFusion. When the estimate is below DataFusion's row threshold for a
+collected build side (`hash_join_single_partition_threshold_rows`), a hash join can
+collect that scan and skip hash repartitioning of its inputs.
+
 A covering index returns rows without touching base rows. A non-covering index first
 applies the predicates it can check from the index entry, then fetches the surviving
 base rows in bounded batches and checks the complete predicate against each one. When

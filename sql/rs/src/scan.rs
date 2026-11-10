@@ -8,7 +8,10 @@ use datafusion::{
         record_batch::RecordBatch,
     },
     catalog::Session,
-    common::{tree_node::TreeNodeRecursion, DFSchema, DataFusionError, Result as DataFusionResult},
+    common::{
+        stats::Precision, tree_node::TreeNodeRecursion, DFSchema, DataFusionError,
+        Result as DataFusionResult, Statistics,
+    },
     execution::context::TaskContext,
     logical_expr::{
         utils::{conjunction, iter_conjunction},
@@ -20,6 +23,7 @@ use datafusion::{
     },
     physical_plan::{
         execution_plan::{apply_expression_roots, Boundedness, EmissionType},
+        statistics::StatisticsArgs,
         stream::RecordBatchReceiverStreamBuilder,
         DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties, SendableRecordBatchStream,
         SortOrderPushdownResult,
@@ -622,6 +626,31 @@ impl ExecutionPlan for KvScanExec {
 
     fn fetch(&self) -> Option<usize> {
         self.fetch
+    }
+
+    /// Reports the most rows the scan can return when a contradiction, its point keys, or its fetch
+    /// bound them.
+    ///
+    /// The bound is inexact and every other statistic stays absent. DataFusion answers aggregates
+    /// from exact statistics without reading rows, and these bounds only say how many rows there
+    /// can be.
+    fn statistics_from_inputs(
+        &self,
+        _input_stats: &[Arc<Statistics>],
+        _args: &StatisticsArgs,
+    ) -> DataFusionResult<Arc<Statistics>> {
+        let points = if self.predicate.contradiction {
+            Some(0)
+        } else {
+            self.predicate
+                .primary_key_points(&self.model)?
+                .map(|keys| keys.len())
+        };
+        let mut statistics = Statistics::new_unknown(&self.schema());
+        if let Some(bound) = [points, self.fetch].into_iter().flatten().min() {
+            statistics.num_rows = Precision::Inexact(bound);
+        }
+        Ok(Arc::new(statistics))
     }
 
     fn try_pushdown_sort(
@@ -1235,11 +1264,14 @@ mod tests {
             datatypes::{DataType, TimeUnit},
             record_batch::RecordBatch,
         },
-        common::{Result as DataFusionResult, ScalarValue},
+        common::{stats::Precision, Result as DataFusionResult, ScalarValue, Statistics},
         datasource::MemTable,
         logical_expr::{col, in_list, lit},
         physical_expr::{expressions::Column, PhysicalSortExpr},
-        physical_plan::{ExecutionPlan, SortOrderPushdownResult},
+        physical_plan::{
+            statistics::{StatisticsArgs, StatisticsContext},
+            ExecutionPlan, SortOrderPushdownResult,
+        },
         prelude::SessionContext as DataFusionSessionContext,
     };
     use exoware_sdk::{
@@ -3149,6 +3181,101 @@ mod tests {
             ],
             "entries without rows must not each cost a request"
         );
+    }
+
+    /// A scan reports the most rows its point keys or fetch allow, so a join collects a point
+    /// lookup as its build side. The bound is never exact and no other statistic is set.
+    #[tokio::test]
+    async fn row_bounds_let_joins_collect_point_lookups() {
+        let fixture = Fixture::new(
+            vec![
+                column("a", DataType::Utf8, false),
+                column("b", DataType::Int64, false),
+                column("c", DataType::Int64, false),
+            ],
+            &["a", "b"],
+            vec![],
+            vec![
+                Arc::new(StringArray::from(vec!["x", "x", "y", "y", "z", "z"])),
+                Arc::new(Int64Array::from(vec![1, 2, 1, 2, 1, 2])),
+                Arc::new(Int64Array::from(vec![7, 8, 7, 7, 9, 7])),
+            ],
+        )
+        .await;
+
+        // The point lookup may be written on either side of the join.
+        for point_side in ["l", "r"] {
+            let sql = format!(
+                "SELECT l.a, l.b, r.a, r.b FROM orders l JOIN orders r ON l.c = r.c \
+                 WHERE {point_side}.a = 'x' AND {point_side}.b = 1 ORDER BY 1, 2, 3, 4"
+            );
+            let plan = fixture.plan(&sql).await;
+            let rendered = datafusion::physical_plan::displayable(plan.as_ref())
+                .indent(true)
+                .to_string();
+            assert!(
+                rendered.contains("mode=CollectLeft")
+                    && !rendered.contains("RepartitionExec: partitioning=Hash"),
+                "a one-row lookup must be collected without hash repartitioning\n{rendered}"
+            );
+            fixture.check(&sql).await;
+        }
+
+        // DataFusion answers COUNT(*) from an exact row count without reading. The bounds
+        // exceed the rows these scans return, so the counts must come from the rows.
+        for inner in [
+            "SELECT a FROM orders LIMIT 100",
+            "SELECT a FROM orders WHERE a IN ('x', 'nope') AND b IN (1, 2) LIMIT 100",
+        ] {
+            fixture
+                .check(&format!("SELECT COUNT(*) FROM ({inner}) AS t"))
+                .await;
+        }
+
+        // Point keys, a fetch, and a contradiction each bound the rows. A scan with none of
+        // them reports nothing.
+        let one_point = col("a").eq(lit("x")).and(col("b").eq(lit(1i64)));
+        let four_points = in_list(col("a"), vec![lit("x"), lit("nope")], false).and(in_list(
+            col("b"),
+            vec![lit(1i64), lit(2i64)],
+            false,
+        ));
+        let contradiction = col("a").eq(lit("x")).and(col("a").eq(lit("y")));
+        let key_range = col("a").eq(lit("x"));
+        for (case, filter, fetch, bound) in [
+            ("one point", Some(one_point), None, Some(1)),
+            ("four points", Some(four_points.clone()), None, Some(4)),
+            (
+                "four points under a fetch",
+                Some(four_points),
+                Some(3),
+                Some(3),
+            ),
+            ("a fetch", None, Some(5), Some(5)),
+            ("a contradiction", Some(contradiction), None, Some(0)),
+            ("a full scan", None, None, None),
+            ("a key range", Some(key_range), None, None),
+        ] {
+            let scan = KvScanExec::try_new(
+                &fixture.table,
+                &fixture.context.datafusion().state(),
+                None,
+                filter.as_slice(),
+                fetch,
+            )
+            .unwrap();
+            let mut expected = Statistics::new_unknown(&scan.schema());
+            if let Some(bound) = bound {
+                expected.num_rows = Precision::Inexact(bound);
+            }
+            assert_eq!(
+                *StatisticsContext::new()
+                    .compute(&scan, &StatisticsArgs::new())
+                    .unwrap(),
+                expected,
+                "{case} must report only its inexact row bound"
+            );
+        }
     }
 
     /// Sort and limit pushdown share the cached plan.
