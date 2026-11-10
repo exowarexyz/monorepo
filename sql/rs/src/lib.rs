@@ -753,6 +753,94 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn exclusive_float_bounds_keep_limit_requests_bounded() {
+        let state = MockState {
+            kv: Arc::new(Mutex::new(BTreeMap::new())),
+            range_calls: Arc::new(AtomicUsize::new(0)),
+            range_reduce_calls: Arc::new(AtomicUsize::new(0)),
+            sequence_number: Arc::new(AtomicU64::new(0)),
+        };
+        let (base_url, shutdown_tx) = spawn_mock_server(state.clone()).await;
+        let client = StoreClient::new(&base_url);
+        let tables = [
+            ("one_boundary", 1, true),
+            ("many_boundaries", 64, true),
+            ("reverse_rows", 64, false),
+        ];
+        let mut schema = KvSchema::new(client.unprefixed());
+        for (name, _, indexed) in tables {
+            schema = schema
+                .table(
+                    name,
+                    vec![
+                        TableColumnConfig::new("id", DataType::Int64, false),
+                        TableColumnConfig::new("x", DataType::Float64, false),
+                    ],
+                    vec!["id".into()],
+                    if indexed {
+                        vec![IndexSpec::new("x_idx", vec!["x".into()]).unwrap()]
+                    } else {
+                        vec![]
+                    },
+                )
+                .unwrap();
+        }
+        let mut writer = schema.batch_writer();
+        for (name, boundary_rows, _) in tables {
+            for id in 0..=boundary_rows + 1 {
+                let x = if id == 0 {
+                    0.0
+                } else if id == boundary_rows + 1 {
+                    2.0
+                } else {
+                    1.0
+                };
+                writer
+                    .insert(name, vec![CellValue::Int64(id), CellValue::Float64(x)])
+                    .unwrap();
+            }
+        }
+        writer.flush().await.unwrap();
+        let ctx = SqlContext::new(client.unprefixed());
+        ctx.register_schema(schema).unwrap();
+
+        let mut request_counts = Vec::new();
+        let mut plans = Vec::new();
+        for (name, boundary_rows, _) in &tables[..2] {
+            for (predicate, expected) in [("x > 1.0", boundary_rows + 1), ("x < 1.0", 0)] {
+                let sql = format!("SELECT id FROM {name} WHERE {predicate} LIMIT 1");
+                state.range_calls.store(0, AtomicOrdering::SeqCst);
+                let batches = ctx.sql(&sql).await.unwrap().collect().await.unwrap();
+                assert_eq!(collect_i64_column(&batches, 0), vec![expected]);
+                request_counts.push(state.range_calls.load(AtomicOrdering::SeqCst));
+                plans.push(physical_plan_text(&explain_plan_rows(&ctx, &sql).await));
+            }
+        }
+        assert_eq!(request_counts[0], request_counts[2], "{request_counts:?}");
+        assert!(
+            request_counts.iter().all(|&count| count == 1),
+            "{request_counts:?}"
+        );
+        for plan in plans {
+            assert!(
+                plan.contains("secondary_index(x_idx, lexicographic)"),
+                "{plan}"
+            );
+            assert!(plan.contains("exact=false, row_recheck=true"), "{plan}");
+        }
+
+        let sql = "SELECT id FROM reverse_rows WHERE x < 1.0 ORDER BY id DESC LIMIT 1";
+        let plan = physical_plan_text(&explain_plan_rows(&ctx, sql).await);
+        assert!(plan.contains("direction=Some(Reverse)"), "{plan}");
+        assert!(plan.contains("exact=false, row_recheck=true"), "{plan}");
+        state.range_calls.store(0, AtomicOrdering::SeqCst);
+        let batches = ctx.sql(sql).await.unwrap().collect().await.unwrap();
+        assert_eq!(collect_i64_column(&batches, 0), vec![0]);
+        assert_eq!(state.range_calls.load(AtomicOrdering::SeqCst), 1);
+        let _ = shutdown_tx.send(());
+    }
+
+    #[tokio::test]
     async fn explain_reports_secondary_index_scan_and_row_recheck() {
         let state = MockState {
             kv: Arc::new(Mutex::new(BTreeMap::new())),
