@@ -9,7 +9,7 @@ use axum::{
 use connectrpc::{client::ClientConfig, ConnectError, ErrorCode};
 use datafusion::{
     arrow::{
-        array::{ArrayRef, Int64Array},
+        array::{ArrayRef, AsArray, Int64Array},
         datatypes::DataType,
         ipc::reader::StreamReader,
         record_batch::RecordBatch,
@@ -400,6 +400,80 @@ async fn connect_query_rejects_server_file_and_runtime_access() {
 }
 
 #[tokio::test]
+async fn connect_query_rejects_shared_catalog_changes() {
+    let store = common::local_store_client().await;
+    let schema = items_schema(&store);
+    let mut writer = schema.batch_writer();
+    writer
+        .insert(
+            "items",
+            vec![CellValue::Int64(1), CellValue::Utf8("one".to_string())],
+        )
+        .expect("insert");
+    writer.flush().await.expect("flush").expect("rows pending");
+    let server = Arc::new(SqlServer::new(schema).expect("SQL server"));
+    let (client, handle) = serve_sql(server.clone()).await;
+
+    // Each statement would change the catalog, or how names resolve in it, for every caller.
+    for sql in [
+        "CREATE OR REPLACE TABLE items AS SELECT 2 AS id, 'two' AS value",
+        "DROP TABLE items",
+        "CREATE OR REPLACE VIEW items AS SELECT 3 AS id, 'three' AS value",
+        "CREATE TABLE copied_items AS SELECT * FROM items",
+        "CREATE TABLE empty_items (id BIGINT)",
+        "CREATE VIEW item_values AS SELECT value FROM items",
+        "CREATE SCHEMA scratch",
+        "CREATE DATABASE scratch_catalog",
+        "DROP SCHEMA public CASCADE",
+        "SET datafusion.catalog.default_schema = 'scratch'",
+        "SET datafusion.catalog.information_schema = true",
+        "RESET datafusion.catalog.default_schema",
+    ] {
+        let error = query_error(&client, sql).await;
+        assert_eq!(error.code, ErrorCode::InvalidArgument, "{sql}: {error:?}");
+    }
+
+    let response = client
+        .query(QueryRequest {
+            sql: "SELECT value FROM items WHERE id = 1".to_string(),
+            ..Default::default()
+        })
+        .await
+        .expect("served table still answers")
+        .into_view()
+        .to_owned_message();
+    let batches = StreamReader::try_new(response.results.as_ref(), None)
+        .expect("Arrow IPC results")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("Arrow IPC batches");
+    let values: Vec<_> = batches
+        .iter()
+        .flat_map(|batch| {
+            let column = batch.column(0).as_string::<i32>();
+            column
+                .iter()
+                .map(|value| value.map(str::to_string))
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    assert_eq!(values, vec![Some("one".to_string())]);
+    let ctx = server.context();
+    for table in ["copied_items", "empty_items", "item_values"] {
+        assert!(ctx.table_provider(table).await.is_err(), "{table}");
+    }
+    assert!(ctx.datafusion().catalog("scratch_catalog").is_none());
+    let catalog = ctx
+        .datafusion()
+        .catalog("datafusion")
+        .expect("default catalog");
+    assert!(catalog.schema("scratch").is_none());
+    let options = ctx.datafusion().state().config().options().clone();
+    assert_eq!(options.catalog.default_schema, "public");
+    assert!(!options.catalog.information_schema);
+    handle.abort();
+}
+
+#[tokio::test]
 async fn connect_query_preserves_session_settings() {
     let schema = KvSchema::new(common::local_store_client().await.unprefixed());
     let server = Arc::new(SqlServer::new(schema).expect("SQL server"));
@@ -689,7 +763,7 @@ async fn connect_query_preserves_configured_tables_and_views() {
 
     for sql in [
         "EXECUTE other_item",
-        "CREATE TABLE copied_items AS SELECT * FROM other_items",
+        "INSERT INTO items SELECT id, 'copied' FROM other_items",
     ] {
         let error = client
             .query(QueryRequest {

@@ -546,22 +546,33 @@ fn evaluate_batch(
     }))
 }
 
-/// Rejects remote statements that would read or write the server's files or replace its runtime
-/// environment. Like DataFusion's `SQLOptions::verify_plan`, the check visits every node,
-/// including subqueries and the inputs of `EXPLAIN` and `PREPARE`.
+/// Rejects remote statements that would read or write the server's files, replace its runtime
+/// environment, or change the catalog that every caller shares. Like DataFusion's
+/// `SQLOptions::verify_plan`, the check visits every node, including subqueries and the inputs of
+/// `EXPLAIN` and `PREPARE`.
 ///
-/// Embedders register file-backed tables and configure the runtime on the server's
-/// [`SqlContext`].
+/// `CREATE FUNCTION` and `DROP FUNCTION` stay available as session commands. Embedders
+/// register tables and views and configure the runtime on the server's [`SqlContext`].
 fn verify_remote_plan(plan: &LogicalPlan) -> DataFusionResult<()> {
     plan.apply_with_subqueries(|node| {
         let what = match node {
             LogicalPlan::Copy(_) => "COPY",
             LogicalPlan::Ddl(DdlStatement::CreateExternalTable(_)) => "CREATE EXTERNAL TABLE",
+            LogicalPlan::Ddl(DdlStatement::CreateFunction(_) | DdlStatement::DropFunction(_)) => {
+                return Ok(TreeNodeRecursion::Continue);
+            }
+            LogicalPlan::Ddl(_) => "changing the catalog",
             LogicalPlan::Statement(
                 Statement::SetVariable(SetVariable { variable, .. })
                 | Statement::ResetVariable(ResetVariable { variable }),
-            ) if variable.starts_with("datafusion.runtime.") => {
-                "changing datafusion.runtime options"
+            ) => {
+                if variable.starts_with("datafusion.runtime.") {
+                    "changing datafusion.runtime options"
+                } else if variable.starts_with("datafusion.catalog.") {
+                    "changing datafusion.catalog options"
+                } else {
+                    return Ok(TreeNodeRecursion::Continue);
+                }
             }
             _ => return Ok(TreeNodeRecursion::Continue),
         };

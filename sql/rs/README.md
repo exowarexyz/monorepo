@@ -306,13 +306,17 @@ session starting at the request's optional minimum sequence. The response also
 reports the highest Store sequence observed, omitting it when the statement read
 nothing from the Store.
 
+`Query` accepts queries and `EXPLAIN`, `INSERT INTO` registered tables, `SET`
+and `RESET` of options outside `datafusion.runtime` and `datafusion.catalog`,
+`PREPARE`, `EXECUTE`, `DEALLOCATE`, `CREATE FUNCTION`, and `DROP FUNCTION`.
 Session commands such as `SET`, `PREPARE`, and `CREATE FUNCTION` modify the
 server's shared context, so their effects persist into later requests.
+`CREATE FUNCTION` needs a function factory installed on the server's context.
 
-`Query` rejects statements that would reach the server's files or runtime. These
-are `COPY`, `CREATE EXTERNAL TABLE`, and `SET` or `RESET` of `datafusion.runtime`
-options. Register file-backed tables and set runtime options through
-`server.context()`.
+`Query` rejects catalog DDL such as `CREATE TABLE`, `CREATE VIEW`, and
+`DROP TABLE` because every caller shares the catalog. It rejects `COPY` and
+`CREATE EXTERNAL TABLE` because they reach the server's files. Register tables
+and views and set runtime options through `server.context()`.
 
 `Subscribe` streams rows from each Store batch that writes to a table and matches
 a scalar SQL predicate. Predicates cannot use subqueries, aggregates, window
