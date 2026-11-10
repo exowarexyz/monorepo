@@ -1,4 +1,5 @@
-use crate::{types::ColumnKind, KvSchema};
+use crate::KvSchema;
+use datafusion::common::{DataFusionError, Result as DataFusionResult};
 use exoware_sdk::{
     kv_codec::Utf8,
     prune_policy::{
@@ -19,33 +20,29 @@ impl KvSchema {
     /// create this schema.
     ///
     /// Store pruning does not cascade to secondary indexes. Disable this
-    /// primary-row retention policy before adding indexes to the table.
+    /// base-row retention policy before adding indexes to the table.
     pub fn keep_latest_versions_policy(
         &self,
         table_name: &str,
         count: usize,
-    ) -> Result<PrunePolicy, String> {
+    ) -> DataFusionResult<PrunePolicy> {
         let table = self
             .tables()
             .iter()
             .find(|(name, _)| name == table_name)
             .map(|(_, table)| table)
-            .ok_or_else(|| format!("unknown table '{table_name}' for version retention"))?;
+            .ok_or_else(|| {
+                DataFusionError::Plan(format!(
+                    "unknown table '{table_name}' for version retention"
+                ))
+            })?;
         if !table.index_specs.is_empty() {
-            return Err(format!(
+            return Err(DataFusionError::Plan(format!(
                 "version retention requires an unindexed table; '{table_name}' has secondary indexes"
-            ));
+            )));
         }
         let model = &table.model;
-        let [entity, ColumnKind::UInt64] = model.primary_key_kinds.as_slice() else {
-            return Err(format!(
-                "table '{table_name}' requires an (entity, UInt64 version) primary key for version retention"
-            ));
-        };
-        if model.primary_key_indices[0] == model.primary_key_indices[1] {
-            return Err("entity and version must be distinct primary key columns".to_string());
-        }
-        let entity_regex = match entity.fixed_key_width() {
+        let entity_regex = match model.versioned_entity_kind(table_name)?.fixed_key_width() {
             Some(width) => format!(".{{{width}}}"),
             None => ORDERED_UTF8_REGEX.to_string(),
         };
@@ -68,14 +65,14 @@ impl KvSchema {
             },
             retain: RetainPolicy::KeepLatest { count },
         };
-        validate_policy(&policy).map_err(|e| e.to_string())?;
+        validate_policy(&policy).map_err(|e| DataFusionError::Plan(e.to_string()))?;
         Ok(policy)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::ORDERED_UTF8_REGEX;
+    use super::{DataFusionError, DataFusionResult, ORDERED_UTF8_REGEX};
     use crate::{
         codec::{decode_variable_text, encode_primary_key, encode_string_variable, family_byte},
         types::{KvTableConfig, TableColumnConfig, TableModel, PRIMARY_FAMILY_DISCRIMINATOR},
@@ -109,8 +106,8 @@ mod tests {
     }
 
     fn versioned_schema(entity_type: DataType) -> KvSchema {
-        let client = StoreClient::new("http://localhost:8080").unprefixed();
-        let mut schema = KvSchema::new(client);
+        let store = StoreClient::new("http://localhost:8080").unprefixed();
+        let mut schema = KvSchema::new(store);
         for i in 0..3 {
             schema = schema
                 .table(
@@ -122,7 +119,7 @@ mod tests {
                 .expect("preceding table");
         }
         schema
-            .table_versioned(
+            .versioned_table(
                 "documents",
                 vec![
                     TableColumnConfig::new("entity", entity_type, false),
@@ -135,7 +132,7 @@ mod tests {
             .expect("versioned table")
     }
 
-    fn policy(entity_type: DataType, count: usize) -> Result<super::PrunePolicy, String> {
+    fn policy(entity_type: DataType, count: usize) -> DataFusionResult<super::PrunePolicy> {
         versioned_schema(entity_type).keep_latest_versions_policy("documents", count)
     }
 
@@ -167,7 +164,10 @@ mod tests {
     #[test]
     fn keep_latest_versions_rejects_zero_count() {
         let err = policy(DataType::FixedSizeBinary(32), 0).expect_err("zero count should fail");
-        assert!(err.contains("count must be > 0"));
+        assert!(
+            matches!(&err, DataFusionError::Plan(msg) if msg.contains("count must be > 0")),
+            "{err}"
+        );
     }
 
     #[test]
@@ -175,14 +175,17 @@ mod tests {
         let err = versioned_schema(DataType::Utf8)
             .keep_latest_versions_policy("missing", 1)
             .expect_err("unknown table should fail");
-        assert!(err.contains("unknown table 'missing'"));
+        assert!(
+            matches!(&err, DataFusionError::Plan(msg) if msg.contains("unknown table 'missing'")),
+            "{err}"
+        );
     }
 
     #[test]
     fn keep_latest_versions_rejects_indexed_tables() {
-        let client = StoreClient::new("http://localhost:8080").unprefixed();
-        let schema = KvSchema::new(client)
-            .table_versioned(
+        let store = StoreClient::new("http://localhost:8080").unprefixed();
+        let schema = KvSchema::new(store)
+            .versioned_table(
                 "documents",
                 vec![
                     TableColumnConfig::new("entity", DataType::Utf8, false),
@@ -200,7 +203,14 @@ mod tests {
         let err = schema
             .keep_latest_versions_policy("documents", 1)
             .expect_err("primary-only pruning would leave secondary entries");
-        assert!(err.contains("'documents' has secondary indexes"));
+        assert!(
+            matches!(
+                &err,
+                DataFusionError::Plan(msg)
+                    if msg.contains("'documents' has secondary indexes")
+            ),
+            "{err}"
+        );
     }
 
     #[test]
@@ -211,8 +221,8 @@ mod tests {
             vec!["version", "entity"],
             vec!["version", "version"],
         ] {
-            let client = StoreClient::new("http://localhost:8080").unprefixed();
-            let schema = KvSchema::new(client)
+            let store = StoreClient::new("http://localhost:8080").unprefixed();
+            let schema = KvSchema::new(store)
                 .table(
                     "documents",
                     vec![
@@ -225,7 +235,10 @@ mod tests {
                 )
                 .expect("valid table");
             assert!(
-                schema.keep_latest_versions_policy("documents", 1).is_err(),
+                matches!(
+                    schema.keep_latest_versions_policy("documents", 1),
+                    Err(DataFusionError::Plan(_))
+                ),
                 "unsupported primary key {primary_key:?}"
             );
         }
@@ -248,7 +261,9 @@ mod tests {
             )
             .err()
             .expect("duplicate table name should fail");
-        assert_eq!(err, "duplicate table name 'documents'");
+        assert!(
+            matches!(err, DataFusionError::Plan(msg) if msg == "duplicate table name 'documents'")
+        );
     }
 
     #[test]

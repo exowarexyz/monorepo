@@ -35,7 +35,7 @@ use exoware_sdk::{
 };
 use exoware_sql::{
     proto::sql::v1::{ServiceClient as SqlServiceClient, SubscribeRequest as SqlSubscribeRequest},
-    sql_connect_stack, CellValue, KvSchema, SqlServer, TableColumnConfig,
+    sql_stack, CellValue, KvSchema, SqlServer, TableColumnConfig,
 };
 use futures::stream::{FuturesUnordered, StreamExt};
 use std::{sync::Arc, time::Duration};
@@ -86,7 +86,7 @@ async fn spawn_sql_service(schema: KvSchema) -> (tokio::task::JoinHandle<()>, St
     let server = Arc::new(SqlServer::new(schema).expect("sql server"));
     let app = Router::new()
         .route("/health", get(health))
-        .fallback_service(sql_connect_stack(server));
+        .fallback_service(sql_stack(server));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind sql service")
@@ -100,7 +100,7 @@ async fn spawn_sql_service(schema: KvSchema) -> (tokio::task::JoinHandle<()>, St
     (handle, url)
 }
 
-async fn spawn_qmdb_service(client: PrefixedStoreClient) -> (tokio::task::JoinHandle<()>, String) {
+async fn spawn_qmdb_service(store: PrefixedStoreClient) -> (tokio::task::JoinHandle<()>, String) {
     let app = Router::new()
         .route("/health", get(health))
         .fallback_service(
@@ -109,7 +109,7 @@ async fn spawn_qmdb_service(client: PrefixedStoreClient) -> (tokio::task::JoinHa
                 Sha256,
                 Vec<u8>,
                 VariableEncoding<Vec<u8>>,
-            >(client, ((0..=10000).into(), ())),
+            >(store, ((0..=10000).into(), ())),
         );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -156,20 +156,20 @@ async fn next_frame(sub: &mut StreamSubscription, timeout_ms: u64) -> Option<Sto
         .and_then(|result| result.expect("stream frame"))
 }
 
-fn keyless_reader(client: PrefixedStoreClient) -> QmdbReader {
-    QmdbReader::new(client, ((0..=10000).into(), ()))
+fn keyless_reader(store: PrefixedStoreClient) -> QmdbReader {
+    QmdbReader::new(store, ((0..=10000).into(), ()))
 }
 
 async fn commit_qmdb_upload(
-    client: &PrefixedStoreClient,
+    store: &PrefixedStoreClient,
     operations: &[QmdbOperation],
 ) -> Result<u64, QmdbError> {
     let (_, prepared) = qmdb::prepare_operations(operations, &((0..=10000).into(), ()));
     let latest = prepared.latest_location();
     let mut batch = StoreWriteBatch::new();
-    stage_authenticated_range(client, prepared, &mut batch)?;
-    stage_watermark(client, latest, &mut batch)?;
-    Ok(batch.commit(client.client()).await?)
+    stage_authenticated_range(store, prepared, &mut batch)?;
+    stage_watermark(store, latest, &mut batch)?;
+    Ok(batch.commit(store.client()).await?)
 }
 
 fn qmdb_operations(label: &str, batch: usize) -> Vec<QmdbOperation> {
@@ -202,7 +202,7 @@ where
 }
 
 async fn drive_qmdb_uploads(
-    client: PrefixedStoreClient,
+    store: PrefixedStoreClient,
     batches: Vec<Vec<QmdbOperation>>,
 ) -> (Vec<QmdbOperation>, Vec<u64>, u64) {
     let mut expected = Vec::new();
@@ -214,16 +214,16 @@ async fn drive_qmdb_uploads(
             qmdb::prepare_operation_range(&expected, start, &((0..=10000).into(), ()));
 
         let mut data = StoreWriteBatch::new();
-        stage_authenticated_range(&client, prepared, &mut data).expect("stage qmdb data");
-        let client = client.clone();
-        in_flight.push(async move { data.commit(client.client()).await });
+        stage_authenticated_range(&store, prepared, &mut data).expect("stage qmdb data");
+        let store = store.clone();
+        in_flight.push(async move { data.commit(store.client()).await });
     }
     let mut sequences = Vec::new();
     while let Some(result) = in_flight.next().await {
         sequences.push(result.expect("qmdb data upload"));
     }
     assert!(
-        keyless_reader(client.clone())
+        keyless_reader(store.clone())
             .latest_published_watermark()
             .await
             .unwrap()
@@ -233,13 +233,13 @@ async fn drive_qmdb_uploads(
     // The caller publishes only after every preceding data upload has persisted
     let mut publication = StoreWriteBatch::new();
     stage_watermark(
-        &client,
+        &store,
         QmdbLocation::new(expected.len() as u64 - 1),
         &mut publication,
     )
     .expect("stage qmdb watermark");
     let published = publication
-        .commit(client.client())
+        .commit(store.client())
         .await
         .expect("publish qmdb watermark");
     (expected, sequences, published)
@@ -283,7 +283,7 @@ fn collect_int64_column(
 }
 
 #[tokio::test]
-async fn test_raw_prefixes_support_atomic_batch_fetch_range_and_stream() {
+async fn test_prefixed_clients_support_atomic_batch_get_range_and_stream() {
     let base = local_store_client().await;
     let a = base.prefixed(store_prefix(1));
     let b = base.prefixed(store_prefix(2));
@@ -386,8 +386,8 @@ async fn test_sql_schemas_are_isolated_by_store_prefix() {
         .expect("insert b3");
 
     let (seq_a, seq_b) = tokio::join!(writer_a.flush(), writer_b.flush());
-    assert!(seq_a.expect("flush a") > 0);
-    assert!(seq_b.expect("flush b") > 0);
+    assert!(seq_a.expect("flush a").expect("rows pending") > 0);
+    assert!(seq_b.expect("flush b").expect("rows pending") > 0);
 
     assert_eq!(
         query_sql_items(base.prefixed(store_prefix(0))).await,
@@ -402,10 +402,10 @@ async fn test_sql_schemas_are_isolated_by_store_prefix() {
 #[tokio::test]
 async fn test_sql_streaming_is_isolated_by_store_prefix() {
     let base = local_store_client().await;
-    let client_a = base.prefixed(store_prefix(0));
-    let client_b = base.prefixed(store_prefix(1));
-    let (_sql_server_a, sql_url_a) = spawn_sql_service(make_sql_schema(client_a.clone())).await;
-    let (_sql_server_b, sql_url_b) = spawn_sql_service(make_sql_schema(client_b.clone())).await;
+    let store_a = base.prefixed(store_prefix(0));
+    let store_b = base.prefixed(store_prefix(1));
+    let (_sql_server_a, sql_url_a) = spawn_sql_service(make_sql_schema(store_a.clone())).await;
+    let (_sql_server_b, sql_url_b) = spawn_sql_service(make_sql_schema(store_b.clone())).await;
     let sql_a = sql_rpc_client(&sql_url_a);
     let sql_b = sql_rpc_client(&sql_url_b);
 
@@ -425,11 +425,15 @@ async fn test_sql_streaming_is_isolated_by_store_prefix() {
         .expect("subscribe sql b");
     tokio::time::sleep(Duration::from_millis(50)).await;
 
-    let mut writer_b = make_sql_schema(client_b.clone()).batch_writer();
+    let mut writer_b = make_sql_schema(store_b.clone()).batch_writer();
     writer_b
         .insert("items", vec![CellValue::Int64(9), CellValue::Int64(900)])
         .expect("insert b stream");
-    let seq_b = writer_b.flush().await.expect("flush b stream");
+    let seq_b = writer_b
+        .flush()
+        .await
+        .expect("flush b stream")
+        .expect("rows pending");
     assert!(seq_b > 0);
 
     assert!(
@@ -452,11 +456,15 @@ async fn test_sql_streaming_is_isolated_by_store_prefix() {
     assert_eq!(collect_int64_column(&batches_b, 0), vec![9]);
     assert_eq!(collect_int64_column(&batches_b, 1), vec![900]);
 
-    let mut writer_a = make_sql_schema(client_a).batch_writer();
+    let mut writer_a = make_sql_schema(store_a).batch_writer();
     writer_a
         .insert("items", vec![CellValue::Int64(4), CellValue::Int64(400)])
         .expect("insert a stream");
-    let seq_a = writer_a.flush().await.expect("flush a stream");
+    let seq_a = writer_a
+        .flush()
+        .await
+        .expect("flush a stream")
+        .expect("rows pending");
     assert!(seq_a > 0);
 
     let frame_a = tokio::time::timeout(Duration::from_secs(2), sub_a.message())
@@ -474,8 +482,8 @@ async fn test_sql_streaming_is_isolated_by_store_prefix() {
     assert_eq!(collect_int64_column(&batches_a, 1), vec![400]);
 }
 
-fn make_sql_schema(client: PrefixedStoreClient) -> KvSchema {
-    KvSchema::new(client)
+fn make_sql_schema(store: PrefixedStoreClient) -> KvSchema {
+    KvSchema::new(store)
         .table(
             "items",
             vec![
@@ -488,9 +496,9 @@ fn make_sql_schema(client: PrefixedStoreClient) -> KvSchema {
         .expect("sql schema")
 }
 
-async fn query_sql_items(client: PrefixedStoreClient) -> (Vec<i64>, Vec<i64>) {
-    let ctx = exoware_sql::SqlContext::new(client.clone());
-    ctx.register_schema(make_sql_schema(client))
+async fn query_sql_items(store: PrefixedStoreClient) -> (Vec<i64>, Vec<i64>) {
+    let ctx = exoware_sql::SqlContext::new(store.clone());
+    ctx.register_schema(make_sql_schema(store))
         .expect("register schema");
     let batches = ctx
         .sql("SELECT id, amount_cents FROM items ORDER BY id")
@@ -508,8 +516,8 @@ async fn query_sql_items(client: PrefixedStoreClient) -> (Vec<i64>, Vec<i64>) {
 #[tokio::test]
 async fn test_prefixed_qmdb_uploads_handle_concurrent_inflight_batches_per_instance() {
     let base = local_store_client().await;
-    let client_a = base.prefixed(store_prefix(4));
-    let client_b = base.prefixed(store_prefix(5));
+    let store_a = base.prefixed(store_prefix(4));
+    let store_b = base.prefixed(store_prefix(5));
 
     let batches_a: Vec<Vec<QmdbOperation>> = (0..8).map(|idx| qmdb_operations("a", idx)).collect();
     let batches_b: Vec<Vec<QmdbOperation>> = (0..8).map(|idx| qmdb_operations("b", idx)).collect();
@@ -517,8 +525,8 @@ async fn test_prefixed_qmdb_uploads_handle_concurrent_inflight_batches_per_insta
     let total_b: usize = batches_b.iter().map(Vec::len).sum();
 
     let ((expected_a, sequences_a, published_a), (expected_b, sequences_b, published_b)) = tokio::join!(
-        drive_qmdb_uploads(client_a.clone(), batches_a),
-        drive_qmdb_uploads(client_b.clone(), batches_b)
+        drive_qmdb_uploads(store_a.clone(), batches_a),
+        drive_qmdb_uploads(store_b.clone(), batches_b)
     );
     assert_eq!(sequences_a.len(), 8);
     assert_eq!(sequences_b.len(), 8);
@@ -527,8 +535,8 @@ async fn test_prefixed_qmdb_uploads_handle_concurrent_inflight_batches_per_insta
 
     let latest_a = QmdbLocation::new((total_a - 1) as u64);
     let latest_b = QmdbLocation::new((total_b - 1) as u64);
-    let reader_a = keyless_reader(client_a);
-    let reader_b = keyless_reader(client_b);
+    let reader_a = keyless_reader(store_a);
+    let reader_b = keyless_reader(store_b);
 
     let proof_a = retry_qmdb(
         || {
@@ -596,9 +604,9 @@ async fn test_prefixed_qmdb_uploads_handle_concurrent_inflight_batches_per_insta
 #[tokio::test]
 async fn test_prepared_sql_and_qmdb_batches_commit_atomically_with_sequence_receipts() {
     let base = local_store_client().await;
-    let sql_client = base.prefixed(store_prefix(0));
-    let qmdb_client = base.prefixed(store_prefix(4));
-    let mut sql_writer = make_sql_schema(sql_client.clone()).batch_writer();
+    let sql_store = base.prefixed(store_prefix(0));
+    let qmdb_store = base.prefixed(store_prefix(4));
+    let mut sql_writer = make_sql_schema(sql_store.clone()).batch_writer();
     sql_writer
         .insert("items", vec![CellValue::Int64(42), CellValue::Int64(4200)])
         .expect("insert atomic sql");
@@ -613,17 +621,17 @@ async fn test_prepared_sql_and_qmdb_batches_commit_atomically_with_sequence_rece
         &((0..=10000).into(), ()),
     );
     let mut prepared_sql = sql_writer
-        .prepare_flush()
+        .prepare_upload()
         .expect("prepare sql")
         .expect("sql rows");
 
     assert_eq!(
-        query_sql_items(sql_client.clone()).await,
+        query_sql_items(sql_store.clone()).await,
         (vec![], vec![]),
         "prepared SQL rows must not be visible before the Store batch commits"
     );
     assert!(
-        keyless_reader(qmdb_client.clone())
+        keyless_reader(qmdb_store.clone())
             .latest_published_watermark()
             .await
             .expect("pre-commit watermark")
@@ -634,23 +642,23 @@ async fn test_prepared_sql_and_qmdb_batches_commit_atomically_with_sequence_rece
     let mut batch = StoreWriteBatch::new();
     StoreWriteBatchUpload::stage_upload(&sql_writer, &mut prepared_sql, &mut batch)
         .expect("stage sql");
-    stage_authenticated_range(&qmdb_client, prepared_qmdb_1, &mut batch).expect("stage qmdb 1");
-    stage_authenticated_range(&qmdb_client, prepared_qmdb_2, &mut batch).expect("stage qmdb 2");
-    stage_watermark(&qmdb_client, QmdbLocation::new(5), &mut batch).expect("stage qmdb watermark");
+    stage_authenticated_range(&qmdb_store, prepared_qmdb_1, &mut batch).expect("stage qmdb 1");
+    stage_authenticated_range(&qmdb_store, prepared_qmdb_2, &mut batch).expect("stage qmdb 2");
+    stage_watermark(&qmdb_store, QmdbLocation::new(5), &mut batch).expect("stage qmdb watermark");
 
     let sequence = batch.commit(&base).await.expect("atomic Store commit");
     let sql_receipt =
         StoreWriteBatchUpload::mark_upload_persisted(&sql_writer, prepared_sql, sequence).await;
-    assert_eq!(sql_receipt.writer_request_id, 0);
+    assert_eq!(sql_receipt.request_id, 0);
     assert_eq!(sql_receipt.store_sequence_number, sequence);
     assert_eq!(
-        keyless_reader(qmdb_client.clone())
+        keyless_reader(qmdb_store.clone())
             .latest_published_watermark()
             .await
             .unwrap(),
         Some(QmdbLocation::new(5))
     );
-    let qmdb_stream_batch = qmdb_client
+    let qmdb_stream_batch = qmdb_store
         .stream()
         .get_batch(sequence)
         .await
@@ -658,8 +666,8 @@ async fn test_prepared_sql_and_qmdb_batches_commit_atomically_with_sequence_rece
         .expect("QMDB rows must share the SQL Store sequence");
     assert_eq!(qmdb_stream_batch.sequence_number, sequence);
 
-    assert_eq!(query_sql_items(sql_client).await, (vec![42], vec![4200]));
-    let reader = keyless_reader(qmdb_client);
+    assert_eq!(query_sql_items(sql_store).await, (vec![42], vec![4200]));
+    let reader = keyless_reader(qmdb_store);
     let proof = retry_qmdb(
         || {
             let reader = reader.clone();
@@ -685,10 +693,10 @@ async fn test_prepared_sql_and_qmdb_batches_commit_atomically_with_sequence_rece
 #[tokio::test]
 async fn test_qmdb_streaming_is_isolated_by_store_prefix() {
     let base = local_store_client().await;
-    let client_a = base.prefixed(store_prefix(4));
-    let client_b = base.prefixed(store_prefix(5));
-    let (_qmdb_server_a, qmdb_url_a) = spawn_qmdb_service(client_a.clone()).await;
-    let (_qmdb_server_b, qmdb_url_b) = spawn_qmdb_service(client_b.clone()).await;
+    let store_a = base.prefixed(store_prefix(4));
+    let store_b = base.prefixed(store_prefix(5));
+    let (_qmdb_server_a, qmdb_url_a) = spawn_qmdb_service(store_a.clone()).await;
+    let (_qmdb_server_b, qmdb_url_b) = spawn_qmdb_service(store_b.clone()).await;
     let qmdb_a = qmdb_rpc_client(&qmdb_url_a);
     let qmdb_b = qmdb_rpc_client(&qmdb_url_b);
 
@@ -703,10 +711,10 @@ async fn test_qmdb_streaming_is_isolated_by_store_prefix() {
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     let ops_b = qmdb_operations("stream-b", 0);
-    commit_qmdb_upload(&client_b, &ops_b)
+    commit_qmdb_upload(&store_b, &ops_b)
         .await
         .expect("upload b stream");
-    let root_b = keyless_reader(client_b.clone())
+    let root_b = keyless_reader(store_b.clone())
         .root_at(QmdbLocation::new((ops_b.len() - 1) as u64))
         .await
         .expect("root b");
@@ -737,10 +745,10 @@ async fn test_qmdb_streaming_is_isolated_by_store_prefix() {
     assert_eq!(frame_b.operations, expected_qmdb_frame(&ops_b));
 
     let ops_a = qmdb_operations("stream-a", 0);
-    commit_qmdb_upload(&client_a, &ops_a)
+    commit_qmdb_upload(&store_a, &ops_a)
         .await
         .expect("upload a stream");
-    let root_a = keyless_reader(client_a.clone())
+    let root_a = keyless_reader(store_a.clone())
         .root_at(QmdbLocation::new((ops_a.len() - 1) as u64))
         .await
         .expect("root a");
@@ -768,7 +776,7 @@ async fn test_prefixed_prune_composes_selector_and_prunes_cleanly() {
     // reconstructs a codec from the MERGED selector (apply_key_prune_policy) and
     // strips.
     let base = local_store_client().await;
-    let client = base.prefixed(StoreKeyPrefix::new(vec![0x05, 0x06]).unwrap());
+    let store = base.prefixed(StoreKeyPrefix::new(vec![0x05, 0x06]).unwrap());
 
     // LOGICAL keys carry the logical family prefix 0x07 and the versioned-payload
     // layout used by prune_contract.rs. These are the LOGICAL keys handed to the
@@ -797,7 +805,7 @@ async fn test_prefixed_prune_composes_selector_and_prunes_cleanly() {
         (&alt_v7, b"alt-v7".as_slice()),
         (&alt_v8, b"alt-v8".as_slice()),
     ] {
-        batch.push(&client, key, value).expect("push versioned key");
+        batch.push(&store, key, value).expect("push versioned key");
     }
     batch.commit(&base).await.expect("commit versioned keys");
 
@@ -827,7 +835,7 @@ async fn test_prefixed_prune_composes_selector_and_prunes_cleanly() {
     // selector, producing merged physical prefix [0x05, 0x06, 0x07]
     // (prefix_prune_policies), and the server reconstructs a codec from the merged
     // selector and strips.
-    client.prune().prune(&[policy]).await.expect("prune");
+    store.prune().prune(&[policy]).await.expect("prune");
 
     // Verified through the prefixed client (which strips the store prefix
     // transparently). Because KeepLatest grouping depends on the server stripping
@@ -835,26 +843,26 @@ async fn test_prefixed_prune_composes_selector_and_prunes_cleanly() {
     // trailing byte (the old bit-codec bug) would break grouping and the wrong rows
     // would survive -- so exact KeepLatest correctness proves the merge + strip +
     // regex all work through the real composed path.
-    assert!(client
+    assert!(store
         .query()
         .get(&row_v1)
         .await
         .expect("get row v1")
         .is_none());
-    assert!(client
+    assert!(store
         .query()
         .get(&row_v2)
         .await
         .expect("get row v2")
         .is_none());
-    assert!(client
+    assert!(store
         .query()
         .get(&alt_v7)
         .await
         .expect("get alt v7")
         .is_none());
     assert_eq!(
-        client
+        store
             .query()
             .get(&row_v3)
             .await
@@ -863,7 +871,7 @@ async fn test_prefixed_prune_composes_selector_and_prunes_cleanly() {
         Some(b"row-v3".as_slice())
     );
     assert_eq!(
-        client
+        store
             .query()
             .get(&alt_v8)
             .await

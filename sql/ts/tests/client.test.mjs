@@ -5,6 +5,7 @@ import { create, fromBinary, toBinary } from '@bufbuild/protobuf';
 import { encodeEnvelopes } from '@connectrpc/connect/protocol';
 import { DataType, SqlClient, Table, TimeUnit } from '../dist/index.js';
 import { QueryRequestSchema, QueryResponseSchema } from '../dist/generated/proto/sql/v1/query_pb.js';
+import { TablesResponseSchema } from '../dist/generated/proto/sql/v1/schema_pb.js';
 import { SubscribeResponseSchema } from '../dist/generated/proto/sql/v1/stream_pb.js';
 
 const fixture = (name) => readFile(new URL(`fixtures/${name}.arrow`, import.meta.url));
@@ -142,4 +143,32 @@ test('missing or malformed IPC rejects the query', async (t) => {
     const body = toBinary(QueryResponseSchema, create(QueryResponseSchema, { results }));
     await assert.rejects(clientFor(t, body).query('SELECT fixture'));
   }
+});
+
+test('tables decode index layouts, including values this client does not know', async (t) => {
+  const body = toBinary(
+    TablesResponseSchema,
+    create(TablesResponseSchema, {
+      tables: [
+        {
+          name: 'points',
+          columns: [
+            { name: 'x', dataType: 'Int64' },
+            { name: 'y', dataType: 'Int64' },
+          ],
+          primaryKeyColumns: [0],
+          indexes: [
+            { name: 'by_x', layout: 0, keyColumns: [0] },
+            { name: 'xy', layout: 1, keyColumns: [0, 1] },
+            { name: 'future', layout: 7, keyColumns: [1] },
+          ],
+        },
+      ],
+    }),
+  );
+  const [table] = await clientFor(t, body).tables();
+  assert.deepEqual(
+    table.indexes.map((index) => index.layout),
+    ['lexicographic', 'z_order', 'unknown(7)'],
+  );
 });

@@ -139,7 +139,7 @@ impl ScanFilter {
 #[derive(Debug, Clone)]
 pub(crate) struct KvScanExec {
     /// Client for the Store namespace containing the table.
-    pub(crate) client: PrefixedStoreClient,
+    pub(crate) store: PrefixedStoreClient,
     /// Column types, primary-key layout, and row schema for the table.
     model: Arc<TableModel>,
     /// Resolved secondary indexes available to the scan.
@@ -211,7 +211,7 @@ impl KvScanExec {
             index: None,
         });
         let mut scan = Self {
-            client: table.client.clone(),
+            store: table.store.clone(),
             model,
             index_specs: table.index_specs.clone(),
             predicate,
@@ -364,7 +364,7 @@ impl KvScanExec {
                             PredicateConstraint::StringIn(_)
                                 | PredicateConstraint::IntIn(_)
                                 | PredicateConstraint::UInt64In(_)
-                                | PredicateConstraint::FixedBinaryIn(_)
+                                | PredicateConstraint::FixedSizeBinaryIn(_)
                         ) && QueryPredicate::constraint_is_point(self.model.column(i).kind, c)
                     })
                 })
@@ -445,7 +445,7 @@ impl KvScanExec {
     pub(crate) fn plan_diagnostics(&self) -> DataFusionResult<AccessPathDiagnostics> {
         build_scan_access_path_diagnostics(
             &self.model,
-            self.client.key_prefix().max_logical_key_len(),
+            self.store.key_prefix().max_logical_key_len(),
             &self.index_specs,
             &self.predicate,
             &self.plan.access,
@@ -530,8 +530,8 @@ impl ExecutionPlan for KvScanExec {
         // reading after this method returns.
         let mut builder = RecordBatchReceiverStreamBuilder::new(self.schema(), 2);
         let tx = builder.tx();
-        let session = read_session(context.session_config(), &self.client)?;
-        let key_prefix = self.client.key_prefix().clone();
+        let session = read_session(context.session_config(), &self.store)?;
+        let key_prefix = self.store.key_prefix().clone();
         let model = self.model.clone();
         let index_specs = self.index_specs.clone();
         let predicate = self.predicate.clone();
@@ -1313,7 +1313,7 @@ mod tests {
     /// Identical Store and in-memory tables for checking query results and Store reads.
     struct Fixture {
         /// SQL context backed by the test's Store query service.
-        store: crate::SqlContext,
+        context: crate::SqlContext,
         /// DataFusion context backed by an in-memory reference table.
         native: DataFusionSessionContext,
         /// Stored entries and observations for the current query.
@@ -1367,8 +1367,8 @@ mod tests {
                     .into_iter()
                     .map(|(key, value)| (prefix.encode_key(&key).unwrap(), value)),
             );
-            let store = crate::SqlContext::new(schema.client().clone());
-            store.register_schema(schema).unwrap();
+            let context = crate::SqlContext::new(schema.store().clone());
+            context.register_schema(schema).unwrap();
             let native = DataFusionSessionContext::new();
             native
                 .register_table(
@@ -1377,7 +1377,7 @@ mod tests {
                 )
                 .unwrap();
             Self {
-                store,
+                context,
                 native,
                 rows,
                 table,
@@ -1392,7 +1392,7 @@ mod tests {
             self.rows.requests.lock().unwrap().clear();
             self.rows.returned_rows.store(0, Ordering::SeqCst);
             self.rows.returned_bytes.store(0, Ordering::SeqCst);
-            let actual = values(self.store.datafusion(), sql).await.unwrap();
+            let actual = values(self.context.datafusion(), sql).await.unwrap();
             assert_eq!(actual, expected, "{sql}");
             let requests = self.rows.requests.lock().unwrap().clone();
             for request in &requests {
@@ -1554,14 +1554,14 @@ mod tests {
             // Execute the scan node itself so the test sees the batches it emits.
             let scan = KvScanExec::try_new(
                 &fixture.table,
-                &fixture.store.datafusion().state(),
+                &fixture.context.datafusion().state(),
                 Some(&vec![2]),
                 &filters,
                 Some(limit),
             )
             .unwrap();
             let batches = scan
-                .execute(0, fixture.store.datafusion().task_ctx())
+                .execute(0, fixture.context.datafusion().task_ctx())
                 .unwrap()
                 .try_collect::<Vec<_>>()
                 .await
@@ -1611,7 +1611,7 @@ mod tests {
         .await;
         let logical_key = crate::codec::encode_primary_key(
             fixture.table.model.table_prefix,
-            &[&crate::types::CellValue::FixedBinary(invalid_pk)],
+            &[&crate::types::CellValue::FixedSizeBinary(invalid_pk)],
             &fixture.table.model,
         )
         .unwrap();
@@ -1936,7 +1936,7 @@ mod tests {
                 let sql =
                     format!("SELECT {columns} FROM orders WHERE a = 1 ORDER BY {ordering} LIMIT 2");
                 let plan = fixture
-                    .store
+                    .context
                     .sql(&sql)
                     .await
                     .unwrap()
@@ -2379,7 +2379,7 @@ mod tests {
             // and row filter.
             fixture.check(sql).await;
             let mut plan = fixture
-                .store
+                .context
                 .datafusion()
                 .sql(sql)
                 .await
@@ -2480,7 +2480,7 @@ mod tests {
 
         // The leaf scan must keep the index plan with the reversed direction and the limit.
         let mut plan = fixture
-            .store
+            .context
             .datafusion()
             .sql(sql)
             .await
@@ -2523,7 +2523,7 @@ mod tests {
             // The IN list must yield two index ranges with the configured coverage.
             let scan = KvScanExec::try_new(
                 &fixture.table,
-                &fixture.store.datafusion().state(),
+                &fixture.context.datafusion().state(),
                 Some(&vec![2]),
                 &[in_list(col("tag"), vec![lit(7i64), lit(9i64)], false)],
                 Some(3),
@@ -2541,7 +2541,7 @@ mod tests {
             // The scan itself must emit exactly three amounts. The second range must contribute
             // only its first row.
             let batches = scan
-                .execute(0, fixture.store.datafusion().task_ctx())
+                .execute(0, fixture.context.datafusion().task_ctx())
                 .unwrap()
                 .try_collect::<Vec<_>>()
                 .await

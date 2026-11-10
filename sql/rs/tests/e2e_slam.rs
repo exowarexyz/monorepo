@@ -20,7 +20,7 @@ use datafusion::{
 use exoware_sdk::{proto::PreferZstdHttpClient, transport::set_tcp_nodelay, StoreKeyPrefix};
 use exoware_sql::{
     proto::sql::v1::{QueryRequest, ServiceClient},
-    sql_connect_stack, CellValue, IndexSpec, KvSchema, SqlServer, TableColumnConfig,
+    sql_stack, CellValue, IndexSpec, KvSchema, SqlServer, TableColumnConfig,
 };
 use std::sync::Arc;
 
@@ -75,7 +75,11 @@ async fn sql_full_pipeline_insert_and_query() {
             )
             .expect("insert row");
     }
-    let min_sequence = writer.flush().await.expect("flush batch");
+    let min_sequence = writer
+        .flush()
+        .await
+        .expect("flush batch")
+        .expect("rows pending");
     assert!(min_sequence > 0);
     let read_schema = KvSchema::new(read_client.unprefixed())
         .table(
@@ -266,7 +270,7 @@ async fn serve_sql(
         .expect("bind SQL server")
         .tap_io(set_tcp_nodelay);
     let base = format!("http://{}", listener.local_addr().expect("SQL address"));
-    let app = Router::new().fallback_service(sql_connect_stack(server));
+    let app = Router::new().fallback_service(sql_stack(server));
     let handle = tokio::spawn(async move {
         axum::serve(listener, app).await.expect("serve SQL");
     });
@@ -281,7 +285,7 @@ async fn serve_sql(
 async fn connect_query_preserves_session_settings() {
     let schema = KvSchema::new(common::local_store_client().await.unprefixed());
     let server = Arc::new(SqlServer::new(schema).expect("SQL server"));
-    let initial_batch_size = server.session().datafusion().state().config().batch_size();
+    let initial_batch_size = server.context().datafusion().state().config().batch_size();
     let (client, handle) = serve_sql(server.clone()).await;
 
     for (sql, expected) in [
@@ -296,7 +300,7 @@ async fn connect_query_preserves_session_settings() {
             .await
             .expect("update session setting");
         assert_eq!(
-            server.session().datafusion().state().config().batch_size(),
+            server.context().datafusion().state().config().batch_size(),
             expected,
             "{sql}"
         );
@@ -345,7 +349,7 @@ async fn connect_query_enforces_sequence_floor_and_returns_evaluated_sequence() 
             ],
         )
         .expect("insert");
-    let write_sequence = writer.flush().await.expect("flush");
+    let write_sequence = writer.flush().await.expect("flush").expect("rows pending");
 
     let server = Arc::new(SqlServer::new(schema).expect("SQL server"));
     let (client, handle) = serve_sql(server).await;
@@ -451,7 +455,7 @@ async fn connect_query_preserves_configured_tables_and_views() {
             vec![CellValue::Int64(1), CellValue::Utf8("one".to_string())],
         )
         .expect("insert");
-    let write_sequence = writer.flush().await.expect("flush");
+    let write_sequence = writer.flush().await.expect("flush").expect("rows pending");
 
     let other_schema =
         KvSchema::new(store_client.prefixed(StoreKeyPrefix::new("other/").expect("prefix")))
@@ -466,7 +470,11 @@ async fn connect_query_preserves_configured_tables_and_views() {
     other_writer
         .insert("other_items", vec![CellValue::Int64(2)])
         .expect("insert other item");
-    let other_sequence = other_writer.flush().await.expect("flush other item");
+    let other_sequence = other_writer
+        .flush()
+        .await
+        .expect("flush other item")
+        .expect("rows pending");
 
     let configured_batch = RecordBatch::try_from_iter(vec![(
         "id",
@@ -478,26 +486,26 @@ async fn connect_query_preserves_configured_tables_and_views() {
             .expect("configured table");
     let server = SqlServer::new(schema).expect("SQL server");
     server
-        .session()
+        .context()
         .register_schema(other_schema)
         .expect("register other namespace");
     server
-        .session()
+        .context()
         .register_table("configured_ids", Arc::new(configured_table))
         .expect("register configured table");
     server
-        .session()
+        .context()
         .sql("CREATE VIEW configured_items AS SELECT value FROM items WHERE id = 1")
         .await
         .expect("create configured view");
     let programmatic_plan = server
-        .session()
+        .context()
         .sql("SELECT value FROM items WHERE id = 1")
         .await
         .expect("plan programmatic view")
         .into_unoptimized_plan();
     server
-        .session()
+        .context()
         .register_table(
             "programmatic_items",
             Arc::new(ViewTable::new(programmatic_plan, None)),

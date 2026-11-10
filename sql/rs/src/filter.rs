@@ -553,14 +553,14 @@ pub(crate) fn compile_encoded_constraint(
             let max = max.map(|v| (encode_i256_ordered(v).to_vec(), true));
             EncodedConstraintCompile::Encoded(EncodedIndexConstraint::Range { min, max })
         }
-        (ColumnKind::FixedSizeBinary(expected), PredicateConstraint::FixedBinaryEq(value)) => {
+        (ColumnKind::FixedSizeBinary(expected), PredicateConstraint::FixedSizeBinaryEq(value)) => {
             if value.len() != expected {
                 EncodedConstraintCompile::Impossible
             } else {
                 EncodedConstraintCompile::Encoded(EncodedIndexConstraint::Eq(value.clone()))
             }
         }
-        (ColumnKind::FixedSizeBinary(expected), PredicateConstraint::FixedBinaryIn(values)) => {
+        (ColumnKind::FixedSizeBinary(expected), PredicateConstraint::FixedSizeBinaryIn(values)) => {
             let encoded = values
                 .iter()
                 .filter(|v| v.len() == expected)

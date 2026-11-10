@@ -25,9 +25,8 @@ message Table {
 // One column of a registered `Table`.
 message Column {
   string name = 1;
-  // Arrow DataType rendered as its stable debug string (e.g., `Int64`,
-  // `Utf8`, `Timestamp(Microsecond, None)`, `Decimal128(38, 10)`). Clients
-  // that need typed handling should match against these exact strings.
+  // Arrow DataType rendered by its `Display` implementation (e.g., `Int64`,
+  // `Utf8`, `Decimal128(38, 10)`, `List(Int64)`).
   string data_type = 2;
   bool nullable = 3;
 }

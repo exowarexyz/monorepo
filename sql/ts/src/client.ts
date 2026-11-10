@@ -38,40 +38,40 @@ function maxSequence(left?: bigint, right?: bigint): bigint | undefined {
   return left > right ? left : right;
 }
 
-export interface DecodedQueryResult {
+export interface QueryResult {
   sequenceNumber: bigint | undefined;
   table: Table;
 }
 
-export interface DecodedSubscribeFrame {
+export interface SubscribeFrame {
   sequenceNumber: bigint;
   table: Table;
 }
 
-export interface DecodedColumn {
+export interface ColumnInfo {
   name: string;
-  /** Arrow DataType debug string, e.g. `Int64`, `Utf8`, `Decimal128(38, 10)`. */
+  /** Arrow DataType display string, e.g. `Int64`, `Utf8`, `Decimal128(38, 10)`, `List(Int64)`. */
   dataType: string;
   nullable: boolean;
 }
 
-export type DecodedIndexLayout = 'lexicographic' | 'zorder';
+export type IndexLayout = 'lexicographic' | 'z_order' | `unknown(${number})`;
 
-export interface DecodedIndex {
+export interface IndexInfo {
   name: string;
-  layout: DecodedIndexLayout;
+  layout: IndexLayout;
   /** Names of columns in key order. */
   keyColumns: string[];
   /** Names of columns included in the index payload ("covered"). */
   coverColumns: string[];
 }
 
-export interface DecodedTable {
+export interface TableInfo {
   name: string;
-  columns: DecodedColumn[];
+  columns: ColumnInfo[];
   /** Names of primary-key columns in key-sort order. */
   primaryKeyColumns: string[];
-  indexes: DecodedIndex[];
+  indexes: IndexInfo[];
 }
 
 function decodeTableStream(bytes: Uint8Array): Table {
@@ -86,25 +86,32 @@ function decodeTableStream(bytes: Uint8Array): Table {
   return new Table(schema, batches);
 }
 
-function decodeQueryResult(response: SqlQueryResponse): DecodedQueryResult {
+function decodeQueryResult(response: SqlQueryResponse): QueryResult {
   return {
     sequenceNumber: response.sequenceNumber,
     table: decodeTableStream(response.results),
   };
 }
 
-function decodeSubscribeFrame(response: SqlSubscribeResponse): DecodedSubscribeFrame {
+function decodeSubscribeFrame(response: SqlSubscribeResponse): SubscribeFrame {
   return {
     sequenceNumber: response.sequenceNumber,
     table: decodeTableStream(response.results),
   };
 }
 
-function decodeLayout(layout: SqlIndexLayout): DecodedIndexLayout {
-  return layout === SqlIndexLayout.Z_ORDER ? 'zorder' : 'lexicographic';
+function decodeLayout(layout: SqlIndexLayout): IndexLayout {
+  switch (layout) {
+    case SqlIndexLayout.LEXICOGRAPHIC:
+      return 'lexicographic';
+    case SqlIndexLayout.Z_ORDER:
+      return 'z_order';
+    default:
+      return `unknown(${layout})`;
+  }
 }
 
-function decodeColumn(column: SqlColumn): DecodedColumn {
+function decodeColumn(column: SqlColumn): ColumnInfo {
   return {
     name: column.name,
     dataType: column.dataType,
@@ -112,7 +119,7 @@ function decodeColumn(column: SqlColumn): DecodedColumn {
   };
 }
 
-function decodeIndex(index: SqlIndex, columnNames: string[]): DecodedIndex {
+function decodeIndex(index: SqlIndex, columnNames: string[]): IndexInfo {
   const lookup = (idx: number) => columnNames[idx] ?? `#${idx}`;
   return {
     name: index.name,
@@ -122,7 +129,7 @@ function decodeIndex(index: SqlIndex, columnNames: string[]): DecodedIndex {
   };
 }
 
-function decodeTable(table: SqlTable): DecodedTable {
+function decodeTable(table: SqlTable): TableInfo {
   const columns = table.columns.map(decodeColumn);
   const columnNames = columns.map((c) => c.name);
   const lookup = (idx: number) => columnNames[idx] ?? `#${idx}`;
@@ -193,7 +200,7 @@ export class SqlClient {
     sql: string,
     minSequenceNumber?: bigint,
     options?: CallOptions,
-  ): Promise<DecodedQueryResult> {
+  ): Promise<QueryResult> {
     const requested = minimumSequence(minSequenceNumber);
     const floor = maxSequence(this.minSequenceNumber(), requested);
     const response = await this.rpc.query(
@@ -207,7 +214,7 @@ export class SqlClient {
     return decodeQueryResult(response);
   }
 
-  async tables(options?: CallOptions): Promise<DecodedTable[]> {
+  async tables(options?: CallOptions): Promise<TableInfo[]> {
     const response = await this.rpc.tables(
       create(SqlTablesRequestSchema, {}),
       options,
@@ -228,7 +235,7 @@ export class SqlClient {
       sinceSequenceNumber?: bigint;
     },
     options?: CallOptions,
-  ): AsyncIterable<DecodedSubscribeFrame> {
+  ): AsyncIterable<SubscribeFrame> {
     const stream = this.rpc.subscribe(
       create(SqlSubscribeRequestSchema, {
         table: request.table,
