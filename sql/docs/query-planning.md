@@ -35,7 +35,8 @@ batches before materializing the other projected columns.
 | `Boolean` | yes | no | no | yes |
 
 A chain of `OR` equalities on one column, such as `region = 'us' OR region = 'eu'`, is
-treated as an `IN` list.
+treated as an `IN` list. A Boolean column used as a predicate, its negation, `IS TRUE`,
+and `IS FALSE` count as equality on that column.
 
 Composite keys are constrained left to right. Equality on leading columns fixes the
 key prefix, and the first column with a range constraint, or with no constraint, sets

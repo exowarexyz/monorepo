@@ -585,6 +585,113 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn boolean_predicates_use_index_ranges_and_reduce() {
+        use datafusion::{arrow::array::BooleanArray, datasource::MemTable};
+
+        let state = MockState {
+            kv: Arc::new(Mutex::new(BTreeMap::new())),
+            range_calls: Arc::new(AtomicUsize::new(0)),
+            range_reduce_calls: Arc::new(AtomicUsize::new(0)),
+            sequence_number: Arc::new(AtomicU64::new(0)),
+        };
+        let (base_url, shutdown_tx) = spawn_mock_server(state.clone()).await;
+        let client = StoreClient::new(&base_url);
+        let mut schema = KvSchema::new(client.unprefixed());
+        for (name, nullable) in [("flags", false), ("nullable_flags", true)] {
+            schema = schema
+                .table(
+                    name,
+                    vec![
+                        TableColumnConfig::new("id", DataType::Int64, false),
+                        TableColumnConfig::new("b", DataType::Boolean, nullable),
+                    ],
+                    vec!["id".into()],
+                    if nullable {
+                        vec![]
+                    } else {
+                        vec![IndexSpec::new("b_idx", vec!["b".into()]).unwrap()]
+                    },
+                )
+                .unwrap();
+        }
+        let native = DataFusionSessionContext::new();
+        let mut writer = schema.batch_writer();
+        for (name, table) in schema.tables() {
+            let mut values = vec![Some(false), Some(true)];
+            if name == "nullable_flags" {
+                values.push(None);
+            }
+            for (id, value) in values.iter().enumerate() {
+                writer
+                    .insert(
+                        name,
+                        vec![
+                            CellValue::Int64(id as i64),
+                            value.map_or(CellValue::Null, CellValue::Boolean),
+                        ],
+                    )
+                    .unwrap();
+            }
+            let batch = RecordBatch::try_new(
+                table.model.schema.clone(),
+                vec![
+                    Arc::new(Int64Array::from_iter_values(0..values.len() as i64)),
+                    Arc::new(BooleanArray::from(values)),
+                ],
+            )
+            .unwrap();
+            native
+                .register_table(
+                    name,
+                    Arc::new(MemTable::try_new(batch.schema(), vec![vec![batch]]).unwrap()),
+                )
+                .unwrap();
+        }
+        writer.flush().await.unwrap();
+        let ctx = SqlContext::new(client.unprefixed());
+        ctx.register_schema(schema).unwrap();
+
+        for table in ["flags", "nullable_flags"] {
+            for predicate in [
+                "b",
+                "b = true",
+                "NOT b",
+                "b = false",
+                "b IS TRUE",
+                "b IS FALSE",
+            ] {
+                let sql = format!("SELECT id FROM {table} WHERE {predicate} ORDER BY id");
+                let actual = ctx.sql(&sql).await.unwrap().collect().await.unwrap();
+                let expected = native.sql(&sql).await.unwrap().collect().await.unwrap();
+                assert_eq!(
+                    collect_i64_column(&actual, 0),
+                    collect_i64_column(&expected, 0)
+                );
+                if table == "flags" {
+                    let plan = physical_plan_text(&explain_plan_rows(&ctx, &sql).await);
+                    assert!(
+                        plan.contains("secondary_index(b_idx, lexicographic)"),
+                        "{plan}"
+                    );
+                    assert!(!plan.contains("predicate=<none>"), "{plan}");
+                    assert!(!plan.contains("full_scan_like=true"), "{plan}");
+                }
+            }
+
+            let sql = format!("SELECT COUNT(*) FROM {table} WHERE b");
+            let plan = physical_plan_text(&explain_plan_rows(&ctx, &sql).await);
+            assert!(plan.contains("KvAggregateExec"), "{plan}");
+            state.range_calls.store(0, AtomicOrdering::SeqCst);
+            state.range_reduce_calls.store(0, AtomicOrdering::SeqCst);
+            let actual = ctx.sql(&sql).await.unwrap().collect().await.unwrap();
+            assert_count_scalar(&actual[0], 0, 0, 1);
+            assert_eq!(state.range_calls.load(AtomicOrdering::SeqCst), 0);
+            assert!(state.range_reduce_calls.load(AtomicOrdering::SeqCst) > 0);
+        }
+        let _ = shutdown_tx.send(());
+    }
+
+    #[tokio::test]
     async fn explain_reports_secondary_index_scan_and_row_recheck() {
         let state = MockState {
             kv: Arc::new(Mutex::new(BTreeMap::new())),
