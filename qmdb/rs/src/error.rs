@@ -116,12 +116,11 @@ pub enum QmdbError {
     #[error("duplicate key in proof request: {key:?}")]
     DuplicateRequestedKey { key: Vec<u8> },
     /// The requested tip cannot be read because no watermark has been published. The other
-    /// not-yet-published outcome is [`Self::WatermarkTooLow`]. The Connect server maps both to
-    /// `out_of_range`.
+    /// not-yet-published outcome is [`Self::WatermarkTooLow`].
     #[error("no watermark has been published; requested tip {tip}")]
     NoPublishedWatermark { tip: u64 },
     /// The requested tip is above the published watermark. The other not-yet-published outcome
-    /// is [`Self::NoPublishedWatermark`]. The Connect server maps both to `out_of_range`.
+    /// is [`Self::NoPublishedWatermark`].
     #[error("requested tip {tip} is above published watermark {watermark}")]
     WatermarkTooLow { tip: u64, watermark: u64 },
     #[error("requested key not found at tip {tip}: {key:?}")]

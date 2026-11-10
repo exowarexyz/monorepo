@@ -84,13 +84,12 @@ verification checks bounds and forward pagination over authenticated successor
 links. For other database kinds and encodings, use raw log verification. It
 verifies encoded operations without decoding them as ordered operations or
 supplying generic current-state queries.
-Method names say which form they return. On the clients the class carries it.
+
 `QmdbLogClient.operationRange` returns encoded operations and
-`QmdbOrderedClient.operationRange` returns decoded ordered ones. The shared
-`QmdbProofVerifier` names it in each method instead, as `verifyRawOperationRange`
-and `verifyRawOperations` versus `verifyOrderedOperationRange`.
-The fixed-size reads count what they check. `getFixedKeylessAppend` and
-`getFixedUnorderedUpdate` check one operation, while
+`QmdbOrderedClient.operationRange` returns decoded ordered ones.
+`QmdbProofVerifier` verifies encoded operations with `verifyRawOperationRange` and
+`verifyRawOperations`, and ordered ones with `verifyOrderedOperationRange`.
+`getFixedKeylessAppend` and `getFixedUnorderedUpdate` check one operation, while
 `getFixedKeylessAppends` and `getFixedUnorderedUpdates` check many in one proof.
 
 ## Verify proofs from another transport
@@ -135,9 +134,8 @@ module.
 `QmdbOrderedClient.subscribe` accepts exact, prefix, and regex filters built with
 `matchExact`, `matchPrefix`, and `matchRegex`. Each frame contains a `tip`,
 `resumeSequenceNumber`, and the decoded `root` and `operations`. Decoding checks
-internal consistency but not the root, unlike the Rust client's
-`VerifiedSubscribeFrame`. Compare `frame.root` with an independently trusted
-root for `frame.tip` before using its operations.
+internal consistency but not the root. Compare `frame.root` with an
+independently trusted root for `frame.tip` before using its operations.
 
 Resume with `sinceSequenceNumber: frame.resumeSequenceNumber + 1n`. A frame may
 contain only part of an uploaded range, and later frames can repeat operations

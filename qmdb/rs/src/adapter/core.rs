@@ -62,9 +62,10 @@ pub(crate) trait LatestValueResolver<F: Family, K: Codec, V: Codec> {
 /// known to include it. That sequence comes from a watermark lookup or from
 /// a subscription frame that carried the watermark row.
 ///
-/// Reads at that watermark or an earlier one can skip watermark lookup, given
-/// their data and proof reads must require at least the cached sequence as `min_sequence_number`.
-/// The watermark is stored as the greatest tip the cache can resolve.
+/// Reads at that watermark or an earlier one can skip the watermark lookup when
+/// their data and proof reads require at least the cached sequence as
+/// `min_sequence_number`. The watermark is stored as the greatest tip the cache
+/// can resolve.
 ///
 /// Share a cache only between clients for the same store and namespace.
 #[derive(Debug)]

@@ -16,10 +16,9 @@ Queries identify a database state by its tip, the inclusive final operation
 location, and its root, a hash commitment to that state. A tip is a location at
 or below the published watermark. Keyless and immutable roots and operation
 proofs need a tip that is a commit, current-state reads need a commit whose
-`Publication` was uploaded, and other reads accept any such tip. The `qmdb.v1`
-protocol and the TypeScript client also call it `tip`. The following example
-reads an already published keyless operation log through ConnectRPC. It uses
-variable-length byte values and verifies the response against an
+`Publication` was uploaded, and other reads accept any such tip. The following
+example reads an already published keyless operation log through ConnectRPC. It
+uses variable-length byte values and verifies the response against an
 application-supplied root:
 
 ```rust
@@ -108,8 +107,8 @@ proof.
 
 Current queries require uploaded current-state publications. For unordered QMDB,
 `get_hits` returns only active keys and omits the rest, because it has no
-exclusion proofs.
-For ordered QMDB, keys must have the same `K::Ord` ordering as their raw bytes.
+exclusion proofs. For ordered QMDB, keys must have the same `K::Ord` ordering as
+their raw bytes.
 
 Readers take a `PrefixedStoreClient` and the source's codec configuration. They
 support fixed and variable encodings, with `VariableEncoding<V>` as the default.

@@ -679,12 +679,22 @@ where
     /// `false`, so a walk reads only up to the keys its caller needs. Index
     /// order is raw key byte order, which [`Ordered`] requires to match `K::Ord`.
     ///
-    /// A key is visited as soon as its rows settle it: in reverse at its newest
-    /// version at or below `tip`, and forward at the first version above
-    /// `tip` or the next key. Later requests skip the rest of a settled
-    /// key's rows. Reads pages of at least `first_page_rows` rows, each later page
-    /// [`UPDATE_WALK_PAGE_GROWTH`] times larger up to [`UPDATE_WALK_MAX_PAGE_ROWS`],
-    /// so the Store reads little past the row where `visit` stops.
+    /// A key is visited as soon as its rows settle it, and later requests skip the rest of a
+    /// settled key's rows. With `tip` at 5 and each row named by its key and location, the walk
+    /// does this at each row:
+    ///
+    /// ```text
+    /// forward   a2        a4        a7                    b3
+    ///           hold a2   hold a4   above tip, visit a4   hold b3, visit it at the end
+    ///
+    /// reverse   b3        a7          a4         a2
+    ///           visit b3  above tip   visit a4   skip
+    /// ```
+    ///
+    /// The first page holds `first_page_rows` rows, raised to at least
+    /// [`UPDATE_WALK_FIRST_PAGE_ROWS`]. Each later page is [`UPDATE_WALK_PAGE_GROWTH`] times
+    /// larger, and no page exceeds [`UPDATE_WALK_MAX_PAGE_ROWS`], so the Store reads little past
+    /// the row where `visit` stops.
     async fn walk_latest_updates(
         session: &ReadSession,
         start: &Key,
