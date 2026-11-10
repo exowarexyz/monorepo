@@ -155,7 +155,7 @@ pub async fn assert_operations<F, Op>(
             ..Default::default()
         };
         let verified = client
-            .get_operations(request.clone(), trusted_root)
+            .operations(request.clone(), trusted_root)
             .await
             .expect("verify GetOperations against the trusted root");
         assert_eq!(verified.root, *trusted_root);

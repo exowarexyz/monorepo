@@ -2,14 +2,16 @@ use crate::{
     adapter::{
         codec::decode_update_location,
         core,
-        operation_range::{load_operation_range_checkpoint, load_operations_multi_proof},
+        operation_range::{load_operation_range_proof, load_operations_multi_proof},
         read_cache::ReadCache,
     },
     error::QmdbError,
     proof::{
-        MultiProofOperations, OperationRangeCheckpoint, RawBatchMultiProof, VerifiedOperationRange,
+        MultiProofOperations, OperationMultiProof, OperationRangeProof, VerifiedOperationRange,
+        VerifiedOperations,
     },
-    PublishedWatermark, VersionedValue,
+    request::OperationLocations,
+    ResolvedTip, VersionedValue,
 };
 use commonware_codec::{Codec, Copying, Decode, Encode, Read as CodecRead};
 use commonware_cryptography::Hasher;
@@ -35,7 +37,7 @@ pub struct Immutable<
 {
     store: PrefixedStoreClient,
     publication: Arc<core::PublicationCache<F>>,
-    operation_cfg: <immutable::Operation<F, K, E> as CodecRead>::Cfg,
+    op_cfg: <immutable::Operation<F, K, E> as CodecRead>::Cfg,
     read_cache: Arc<ReadCache<F, H::Digest>>,
     _marker: PhantomData<(F, H, K, E)>,
 }
@@ -53,7 +55,7 @@ where
         Self {
             store: self.store.clone(),
             publication: self.publication.clone(),
-            operation_cfg: self.operation_cfg.clone(),
+            op_cfg: self.op_cfg.clone(),
             read_cache: self.read_cache.clone(),
             _marker: PhantomData,
         }
@@ -86,12 +88,12 @@ where
     /// Read client for the Store namespace.
     pub fn new(
         store: PrefixedStoreClient,
-        operation_cfg: <immutable::Operation<F, K, E> as CodecRead>::Cfg,
+        op_cfg: <immutable::Operation<F, K, E> as CodecRead>::Cfg,
     ) -> Self {
         Self {
             store,
             publication: Arc::new(core::PublicationCache::default()),
-            operation_cfg,
+            op_cfg,
             read_cache: Arc::new(ReadCache::new()),
             _marker: PhantomData,
         }
@@ -106,12 +108,12 @@ where
     where
         V: AsRef<[u8]>,
     {
-        let op = immutable::Operation::<F, K, E>::decode_cfg(Copying(bytes), &self.operation_cfg)
+        let op = immutable::Operation::<F, K, E>::decode_cfg(Copying(bytes), &self.op_cfg)
             .map_err(|e| {
-            QmdbError::CorruptData(format!(
-                "failed to decode immutable operation at location {location}: {e}"
-            ))
-        })?;
+                QmdbError::CorruptData(format!(
+                    "failed to decode immutable operation at location {location}: {e}"
+                ))
+            })?;
         let key = op.key().map(<K as AsRef<[u8]>>::as_ref);
         let value: Option<&[u8]> = match &op {
             immutable::Operation::Set(_, value) => Some(value.as_ref()),
@@ -121,7 +123,7 @@ where
         Ok(inspect(key, value))
     }
 
-    /// Refresh publication evidence and return the greatest watermark observed by this client.
+    /// Refresh the watermark evidence and return the greatest watermark observed by this client.
     pub async fn latest_published_watermark(&self) -> Result<Option<Location<F>>, QmdbError> {
         let session = ReadSession::fixed(self.store.clone(), None);
         self.publication.refresh(&session).await
@@ -132,33 +134,40 @@ where
         self.publication.observe(location, sequence);
     }
 
-    pub(crate) async fn resolve_watermark(
+    pub(crate) async fn resolve_tip(
         &self,
-        watermark: Location<F>,
+        tip: Location<F>,
         min_sequence_number: Option<u64>,
-    ) -> Result<PublishedWatermark<F>, QmdbError> {
+    ) -> Result<ResolvedTip<F>, QmdbError> {
         let session = ReadSession::fixed(self.store.clone(), min_sequence_number);
-        self.publication.require(&session, watermark).await
+        self.publication.require(&session, tip).await
     }
 
-    pub async fn root_at(&self, watermark: Location<F>) -> Result<H::Digest, QmdbError> {
-        let watermark = self.resolve_watermark(watermark, None).await?;
-        let session = ReadSession::fixed(self.store.clone(), Some(watermark.sequence_number));
+    /// Root at `tip`, as the source database's `root()` returns it.
+    pub async fn root_at(
+        &self,
+        tip: Location<F>,
+        min_sequence_number: Option<u64>,
+    ) -> Result<H::Digest, QmdbError> {
+        let resolved = self.resolve_tip(tip, min_sequence_number).await?;
+        let session = ReadSession::fixed(self.store.clone(), Some(resolved.sequence_number));
         let inactive_peaks =
-            inactive_peaks_at::<F, K, V, E>(&session, watermark.location, &self.operation_cfg)
-                .await?;
-        core::compute_ops_root::<F, H>(&session, watermark.location, inactive_peaks).await
+            inactive_peaks_at::<F, K, V, E>(&session, resolved.tip, &self.op_cfg).await?;
+        core::compute_ops_root::<F, H>(&session, resolved.tip, inactive_peaks).await
     }
 
+    /// Latest value of `key` at or below `tip`, read from the update index
+    /// without a proof.
     pub async fn get_at(
         &self,
+        tip: Location<F>,
         key: &K,
-        watermark: Location<F>,
+        min_sequence_number: Option<u64>,
     ) -> Result<Option<VersionedValue<K, V, F>>, QmdbError> {
-        let watermark = self.resolve_watermark(watermark, None).await?;
-        let session = ReadSession::fixed(self.store.clone(), Some(watermark.sequence_number));
+        let resolved = self.resolve_tip(tip, min_sequence_number).await?;
+        let session = ReadSession::fixed(self.store.clone(), Some(resolved.sequence_number));
         let Some((row_key, _row_value)) =
-            core::load_latest_update_row(&session, watermark.location, key.as_ref()).await?
+            core::load_latest_update_row(&session, resolved.tip, key.as_ref()).await?
         else {
             return Ok(None);
         };
@@ -166,7 +175,7 @@ where
         let operation = core::load_operation_at::<F, immutable::Operation<F, K, E>>(
             &session,
             location,
-            &self.operation_cfg,
+            &self.op_cfg,
         )
         .await?;
         match operation {
@@ -186,70 +195,91 @@ where
         }
     }
 
-    /// Operation-range checkpoint: the proof, pinned nodes, and encoded operations.
-    pub async fn operation_range_checkpoint(
+    /// Verified proof for a contiguous operation range, with the pinned nodes
+    /// and encoded operations needed to verify and extend it.
+    pub async fn operation_range_proof(
         &self,
         tip: Location<F>,
         start_location: Location<F>,
         max_locations: u32,
         min_sequence_number: Option<u64>,
-    ) -> Result<OperationRangeCheckpoint<H::Digest, F>, QmdbError> {
-        let watermark = self.resolve_watermark(tip, min_sequence_number).await?;
-        self.operation_range_checkpoint_at(watermark, start_location, max_locations)
+    ) -> Result<OperationRangeProof<H::Digest, F>, QmdbError> {
+        let resolved = self.resolve_tip(tip, min_sequence_number).await?;
+        self.operation_range_proof_at(resolved, start_location, max_locations)
             .await
     }
 
-    pub(crate) async fn operation_range_checkpoint_at(
+    pub(crate) async fn operation_range_proof_at(
         &self,
-        watermark: PublishedWatermark<F>,
+        resolved: ResolvedTip<F>,
         start_location: Location<F>,
         max_locations: u32,
-    ) -> Result<OperationRangeCheckpoint<H::Digest, F>, QmdbError> {
-        let session = ReadSession::fixed(self.store.clone(), Some(watermark.sequence_number));
-        let watermark = watermark.location;
-        let end = crate::proof::resolve_range_bounds(watermark, start_location, max_locations)?;
-        let proof = load_operation_range_checkpoint::<F, H, _>(
+    ) -> Result<OperationRangeProof<H::Digest, F>, QmdbError> {
+        let session = ReadSession::fixed(self.store.clone(), Some(resolved.sequence_number));
+        let tip = resolved.tip;
+        let end = crate::proof::resolve_range_bounds(tip, start_location, max_locations)?;
+        let proof = load_operation_range_proof::<F, H, _>(
             &session,
             &self.read_cache,
-            watermark,
+            tip,
             start_location,
             end,
             false,
             |bytes| async move {
                 let operation = core::decode_operation_at::<F, immutable::Operation<F, K, E>>(
                     bytes.as_ref(),
-                    watermark,
-                    &self.operation_cfg,
+                    tip,
+                    &self.op_cfg,
                 )?;
-                inactive_peaks_from_operation::<F, K, V, E>(watermark, operation)
+                inactive_peaks_from_operation::<F, K, V, E>(tip, operation)
             },
         )
         .await?;
         Ok(proof)
     }
 
-    /// Multi-proof at a published watermark, built from the same cached reads
-    /// as [`Self::operation_range_checkpoint_at`].
-    pub(crate) async fn multi_proof_at(
+    /// Prove a nonempty set of strictly ascending operation locations at or below `tip`.
+    /// `min_sequence_number` is the minimum Store sequence for the watermark lookup.
+    pub async fn operation_multi_proof(
         &self,
-        watermark: PublishedWatermark<F>,
+        tip: Location<F>,
+        locations: &[Location<F>],
+        min_sequence_number: Option<u64>,
+    ) -> Result<OperationMultiProof<H::Digest, F>, QmdbError> {
+        // Validate the request and Merkle family bounds before reading the Store.
+        let requested = locations
+            .iter()
+            .map(|location| location.as_u64())
+            .collect::<Vec<_>>();
+        OperationLocations::with_max_leaves(tip.as_u64(), &requested, F::MAX_LEAVES.as_u64())?;
+
+        let resolved = self.resolve_tip(tip, min_sequence_number).await?;
+        self.operation_multi_proof_at(resolved, MultiProofOperations::Read(locations))
+            .await
+    }
+
+    /// Multi-proof at a resolved tip, built from the same cached reads
+    /// as [`Self::operation_range_proof_at`].
+    pub(crate) async fn operation_multi_proof_at(
+        &self,
+        resolved: ResolvedTip<F>,
         operations: MultiProofOperations<'_, F>,
-    ) -> Result<RawBatchMultiProof<H::Digest, F>, QmdbError> {
-        let session = ReadSession::fixed(self.store.clone(), Some(watermark.sequence_number));
-        let watermark = watermark.location;
+    ) -> Result<OperationMultiProof<H::Digest, F>, QmdbError> {
+        let session = ReadSession::fixed(self.store.clone(), Some(resolved.sequence_number));
+        let tip = resolved.tip;
         load_operations_multi_proof::<F, H, _>(
             &session,
             &self.read_cache,
-            watermark,
+            tip,
             operations,
             false,
             |bytes| async move {
                 let operation = core::decode_operation_at::<F, immutable::Operation<F, K, E>>(
                     bytes.as_ref(),
-                    watermark,
-                    &self.operation_cfg,
+                    tip,
+                    &self.op_cfg,
                 )?;
-                inactive_peaks_from_operation::<F, K, V, E>(watermark, operation)
+                inactive_peaks_from_operation::<F, K, V, E>(tip, operation)
             },
         )
         .await
@@ -264,30 +294,58 @@ where
         min_sequence_number: Option<u64>,
     ) -> Result<VerifiedOperationRange<H::Digest, immutable::Operation<F, K, E>, F>, QmdbError>
     {
-        let checkpoint = self
-            .operation_range_checkpoint(tip, start_location, max_locations, min_sequence_number)
+        let proof = self
+            .operation_range_proof(tip, start_location, max_locations, min_sequence_number)
             .await?;
-        let operations = checkpoint
+        let operations = proof
             .encoded_operations
             .iter()
             .enumerate()
             .map(|(offset, bytes)| {
-                let location = checkpoint.start_location + offset as u64;
-                immutable::Operation::<F, K, E>::decode_cfg(
-                    Copying(bytes.as_ref()),
-                    &self.operation_cfg,
+                let location = proof.start_location + offset as u64;
+                core::decode_operation_at::<F, immutable::Operation<F, K, E>>(
+                    bytes.as_ref(),
+                    location,
+                    &self.op_cfg,
                 )
-                .map_err(|e| {
-                    QmdbError::CorruptData(format!(
-                        "failed to decode authenticated operation at location {location}: {e}"
-                    ))
-                })
             })
             .collect::<Result<Vec<_>, _>>()?;
         Ok(VerifiedOperationRange {
-            tip: checkpoint.watermark,
-            root: checkpoint.canonical_root::<H>(),
-            start_location: checkpoint.start_location,
+            tip: proof.tip,
+            root: proof.canonical_root::<H>(),
+            start_location: proof.start_location,
+            operations,
+        })
+    }
+
+    /// Verified operations at `locations` of `tip`, in request order.
+    pub async fn operations(
+        &self,
+        tip: Location<F>,
+        locations: &[Location<F>],
+        min_sequence_number: Option<u64>,
+    ) -> Result<VerifiedOperations<H::Digest, immutable::Operation<F, K, E>, F>, QmdbError> {
+        let proof = self
+            .operation_multi_proof(tip, locations, min_sequence_number)
+            .await?;
+        let root = proof.canonical_root::<H>();
+        let operations = proof
+            .encoded_operations
+            .into_iter()
+            .map(|(location, bytes)| {
+                Ok((
+                    location,
+                    core::decode_operation_at::<F, immutable::Operation<F, K, E>>(
+                        bytes.as_ref(),
+                        location,
+                        &self.op_cfg,
+                    )?,
+                ))
+            })
+            .collect::<Result<Vec<_>, QmdbError>>()?;
+        Ok(VerifiedOperations {
+            tip: proof.tip,
+            root,
             operations,
         })
     }
@@ -295,8 +353,8 @@ where
 
 async fn inactive_peaks_at<F, K, V, E>(
     session: &ReadSession,
-    watermark: Location<F>,
-    operation_cfg: &<immutable::Operation<F, K, E> as CodecRead>::Cfg,
+    tip: Location<F>,
+    op_cfg: &<immutable::Operation<F, K, E> as CodecRead>::Cfg,
 ) -> Result<usize, QmdbError>
 where
     F: Graftable,
@@ -305,17 +363,13 @@ where
     E: ValueEncoding<Value = V>,
     immutable::Operation<F, K, E>: Decode,
 {
-    let operation = core::load_operation_at::<F, immutable::Operation<F, K, E>>(
-        session,
-        watermark,
-        operation_cfg,
-    )
-    .await?;
-    inactive_peaks_from_operation::<F, K, V, E>(watermark, operation)
+    let operation =
+        core::load_operation_at::<F, immutable::Operation<F, K, E>>(session, tip, op_cfg).await?;
+    inactive_peaks_from_operation::<F, K, V, E>(tip, operation)
 }
 
 fn inactive_peaks_from_operation<F, K, V, E>(
-    watermark: Location<F>,
+    tip: Location<F>,
     operation: immutable::Operation<F, K, E>,
 ) -> Result<usize, QmdbError>
 where
@@ -326,8 +380,8 @@ where
 {
     let immutable::Operation::Commit(_, floor) = operation else {
         return Err(QmdbError::CorruptData(format!(
-            "immutable watermark {watermark} does not point at a Commit operation"
+            "immutable tip {tip} does not point at a Commit operation"
         )));
     };
-    core::inactive_peaks(watermark, floor)
+    core::inactive_peaks(tip, floor)
 }

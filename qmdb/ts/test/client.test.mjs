@@ -32,9 +32,14 @@ test('test_size_arguments_reject_narrowing_before_initialization', async () => {
 });
 
 test('test_operation_windows_reject_invalid_bounds_before_initialization', async () => {
-  const clients = [new QmdbLogClient('http://127.0.0.1:1'), new QmdbOrderedClient('http://127.0.0.1:1')];
+  const log = new QmdbLogClient('http://127.0.0.1:1');
+  const ordered = new QmdbOrderedClient('http://127.0.0.1:1');
+  const reads = [
+    (request) => log.operationRange(request, ''),
+    (request) => ordered.operationRange(request, ''),
+  ];
   const valid = { tip: (1n << 53n) + 2n, startLocation: (1n << 53n) + 1n, maxLocations: 1 };
-  for (const client of clients) {
+  for (const read of reads) {
     for (const request of [
       { ...valid, maxLocations: 2 ** 32 },
       { ...valid, maxLocations: 0 },
@@ -44,7 +49,7 @@ test('test_operation_windows_reject_invalid_bounds_before_initialization', async
       { ...valid, minSequenceNumber: 1n << 64n },
       { ...valid, startLocation: valid.tip + 1n },
     ]) {
-      await assert.rejects(client.getOperationRange(request, ''), /32-bit|64-bit|window/);
+      await assert.rejects(read(request), /32-bit|64-bit|window/);
     }
   }
 });
@@ -71,13 +76,13 @@ const readFloorCases = [
     name: 'raw',
     fixture: 'any_unordered_variable_variable_keys_variable_values',
     Client: QmdbLogClient,
-    read: (client, request, root, options) => client.getOperationRange(request, root, options),
+    read: (client, request, root, options) => client.operationRange(request, root, options),
   },
   {
     name: 'ordered',
     fixture: 'any_ordered_variable_variable_keys_variable_values',
     Client: QmdbOrderedClient,
-    read: (client, request, root, options) => client.getOperationRange(request, root, options),
+    read: (client, request, root, options) => client.operationRange(request, root, options),
   },
   {
     name: 'fixed_keyless',
@@ -157,23 +162,23 @@ test('test_operations_requests_reject_invalid_locations_before_dispatch', async 
     { tip: 10n, locations: [0n], minSequenceNumber: -1n },
     { tip: 2000n, locations: Array.from({ length: 1025 }, (_, index) => BigInt(index)) },
   ]) {
-    await assert.rejects(client.getOperations(request, ''), /locations|location|64-bit|ascending|tip/);
+    await assert.rejects(client.operations(request, ''), /locations|location|64-bit|ascending|tip/);
   }
   await assert.rejects(
-    client.getFixedKeylessAppendMany({ tip: 10n }, '', [{ location: 1n, value: 'a' }, { location: 2n, value: 'bb' }]),
+    client.getFixedKeylessAppends({ tip: 10n }, '', [{ location: 1n, value: 'a' }, { location: 2n, value: 'bb' }]),
     /equal in size/,
   );
   await assert.rejects(
-    client.getFixedUnorderedUpdateMany({ tip: 10n }, '', [{ location: 1n, key: 'a' }, { location: 1n, key: 'b' }], 8),
+    client.getFixedUnorderedUpdates({ tip: 10n }, '', [{ location: 1n, key: 'a' }, { location: 1n, key: 'b' }], 8),
     /ascending/,
   );
   const locations = Array.from({ length: 1025 }, (_, index) => BigInt(index));
   await assert.rejects(
-    client.getFixedKeylessAppendMany({ tip: 2000n }, '', locations.map((location) => ({ location, value: 'a' }))),
+    client.getFixedKeylessAppends({ tip: 2000n }, '', locations.map((location) => ({ location, value: 'a' }))),
     /1024 locations/,
   );
   await assert.rejects(
-    client.getFixedUnorderedUpdateMany({ tip: 2000n }, '', locations.map((location) => ({ location, key: 'a' })), 8),
+    client.getFixedUnorderedUpdates({ tip: 2000n }, '', locations.map((location) => ({ location, key: 'a' })), 8),
     /1024 locations/,
   );
   assert.equal(fetch.mock.callCount(), 0);
@@ -229,7 +234,7 @@ for (const [fixtureName, merkleFamily, current] of [
     const client = new QmdbLogClient('http://qmdb.test', { merkleFamily });
     const request = { tip: fixture.tip, locations: fixture.locations, minSequenceNumber };
 
-    const verified = await client.getOperations(request, fixture.root);
+    const verified = await client.operations(request, fixture.root);
     // A current endpoint's witness binds the proven operation-log root to the trusted root.
     assert.deepEqual(Buffer.from(verified.root), fixture.root);
     assert.equal(fixture.proof.opsRootWitness.length > 0, current);
@@ -239,18 +244,18 @@ for (const [fixtureName, merkleFamily, current] of [
 
     const wrongRoot = Buffer.from(fixture.root);
     wrongRoot[0] ^= 1;
-    await assert.rejects(client.getOperations(request, wrongRoot));
+    await assert.rejects(client.operations(request, wrongRoot));
 
     // A proof for other locations than requested is rejected.
     // The transport captures `fetch` at construction, so use a fresh client.
     t.mock.restoreAll();
     mockOperationsService(t, fixture, undefined, false);
     const mismatched = new QmdbLogClient('http://qmdb.test', { merkleFamily });
-    await assert.rejects(mismatched.getOperations({ ...request, locations: fixture.locations.slice(1) }, fixture.root), /locations/);
+    await assert.rejects(mismatched.operations({ ...request, locations: fixture.locations.slice(1) }, fixture.root), /locations/);
   });
 }
 
-test('test_fixed_keyless_append_many_verifies_values', async (t) => {
+test('test_fixed_keyless_appends_verify_values', async (t) => {
   initWasm();
   const fixture = operationsFixture('keyless_fixed_full_fixed_values_mmr');
   mockOperationsService(t, fixture, undefined);
@@ -260,15 +265,15 @@ test('test_fixed_keyless_append_many_verifies_values', async (t) => {
   const expected = fixture.locations.map((location, index) => ({ location, value: values[index] }));
 
   // Expectations are sorted by location before the request is sent.
-  const verified = await client.getFixedKeylessAppendMany({ tip: fixture.tip }, fixture.root, [...expected].reverse());
+  const verified = await client.getFixedKeylessAppends({ tip: fixture.tip }, fixture.root, [...expected].reverse());
   assert.deepEqual(verified.operations.map(({ location }) => location), fixture.locations);
   assert.deepEqual(verified.operations.map(({ value }) => Buffer.from(value)), values.map((value) => Buffer.from(value)));
 
   const wrong = expected.map(({ location, value }) => ({ location, value: Buffer.from(value).fill(0xff) }));
-  await assert.rejects(client.getFixedKeylessAppendMany({ tip: fixture.tip }, fixture.root, wrong), /does not match expected value/);
+  await assert.rejects(client.getFixedKeylessAppends({ tip: fixture.tip }, fixture.root, wrong), /does not match expected value/);
 });
 
-test('test_fixed_unordered_update_many_verifies_keys', async (t) => {
+test('test_fixed_unordered_updates_verify_keys', async (t) => {
   initWasm();
   const fixture = operationsFixture('any_unordered_fixed_fixed_keys_fixed_values_mmr');
   mockOperationsService(t, fixture, undefined);
@@ -277,7 +282,7 @@ test('test_fixed_unordered_update_many_verifies_keys', async (t) => {
   const keys = fixture.operations.map((operation) => operation.subarray(1, 33));
   const expected = fixture.locations.map((location, index) => ({ location, key: keys[index] }));
 
-  const verified = await client.getFixedUnorderedUpdateMany({ tip: fixture.tip }, fixture.root, expected, 32);
+  const verified = await client.getFixedUnorderedUpdates({ tip: fixture.tip }, fixture.root, expected, 32);
   assert.deepEqual(verified.operations.map(({ location }) => location), fixture.locations);
   assert.deepEqual(verified.operations.map(({ key }) => Buffer.from(key)), keys.map((key) => Buffer.from(key)));
   assert.deepEqual(
@@ -286,5 +291,5 @@ test('test_fixed_unordered_update_many_verifies_keys', async (t) => {
   );
 
   const swapped = expected.map(({ location }, index) => ({ location, key: keys[1 - index] }));
-  await assert.rejects(client.getFixedUnorderedUpdateMany({ tip: fixture.tip }, fixture.root, swapped, 32), /key does not match/);
+  await assert.rejects(client.getFixedUnorderedUpdates({ tip: fixture.tip }, fixture.root, swapped, 32), /key does not match/);
 });

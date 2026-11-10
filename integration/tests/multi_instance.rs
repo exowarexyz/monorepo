@@ -17,7 +17,7 @@ use datafusion::arrow::{array::Int64Array, datatypes::DataType, ipc::reader::Str
 use exoware_qmdb::{
     adapter::upload::{stage_authenticated_range, stage_watermark},
     service::{
-        client::rpc::{OperationLogClient, OperationLogSubscribeProof},
+        client::rpc::{OperationLogClient, VerifiedSubscribeFrame},
         proto::qmdb::v1::SubscribeRequest as QmdbSubscribeRequest,
     },
     QmdbError,
@@ -566,7 +566,7 @@ async fn test_prefixed_qmdb_uploads_handle_concurrent_inflight_batches_per_insta
     let root_a = retry_qmdb(
         || {
             let reader = reader_a.clone();
-            async move { reader.root_at(latest_a).await }
+            async move { reader.root_at(latest_a, None).await }
         },
         "reader a root",
     )
@@ -574,7 +574,7 @@ async fn test_prefixed_qmdb_uploads_handle_concurrent_inflight_batches_per_insta
     let root_b = retry_qmdb(
         || {
             let reader = reader_b.clone();
-            async move { reader.root_at(latest_b).await }
+            async move { reader.root_at(latest_b, None).await }
         },
         "reader b root",
     )
@@ -715,7 +715,7 @@ async fn test_qmdb_streaming_is_isolated_by_store_prefix() {
         .await
         .expect("upload b stream");
     let root_b = keyless_reader(store_b.clone())
-        .root_at(QmdbLocation::new((ops_b.len() - 1) as u64))
+        .root_at(QmdbLocation::new((ops_b.len() - 1) as u64), None)
         .await
         .expect("root b");
 
@@ -732,15 +732,14 @@ async fn test_qmdb_streaming_is_isolated_by_store_prefix() {
         .is_err(),
         "qmdb prefix A subscriber must not receive prefix B operations"
     );
-    let frame_b: OperationLogSubscribeProof<Digest, QmdbOperation, QmdbFamily> =
-        tokio::time::timeout(
-            Duration::from_secs(5),
-            sub_b.message_with_root(|_| Ok(root_b)),
-        )
-        .await
-        .expect("qmdb b timeout")
-        .expect("qmdb b stream")
-        .expect("qmdb b frame");
+    let frame_b: VerifiedSubscribeFrame<Digest, QmdbOperation, QmdbFamily> = tokio::time::timeout(
+        Duration::from_secs(5),
+        sub_b.message_with_root(|_| Ok(root_b)),
+    )
+    .await
+    .expect("qmdb b timeout")
+    .expect("qmdb b stream")
+    .expect("qmdb b frame");
     assert!(frame_b.resume_sequence_number > 0);
     assert_eq!(frame_b.operations, expected_qmdb_frame(&ops_b));
 
@@ -749,19 +748,18 @@ async fn test_qmdb_streaming_is_isolated_by_store_prefix() {
         .await
         .expect("upload a stream");
     let root_a = keyless_reader(store_a.clone())
-        .root_at(QmdbLocation::new((ops_a.len() - 1) as u64))
+        .root_at(QmdbLocation::new((ops_a.len() - 1) as u64), None)
         .await
         .expect("root a");
 
-    let frame_a: OperationLogSubscribeProof<Digest, QmdbOperation, QmdbFamily> =
-        tokio::time::timeout(
-            Duration::from_secs(5),
-            sub_a.message_with_root(|_| Ok(root_a)),
-        )
-        .await
-        .expect("qmdb a timeout")
-        .expect("qmdb a stream")
-        .expect("qmdb a frame");
+    let frame_a: VerifiedSubscribeFrame<Digest, QmdbOperation, QmdbFamily> = tokio::time::timeout(
+        Duration::from_secs(5),
+        sub_a.message_with_root(|_| Ok(root_a)),
+    )
+    .await
+    .expect("qmdb a timeout")
+    .expect("qmdb a stream")
+    .expect("qmdb a frame");
     assert!(frame_a.resume_sequence_number > 0);
     assert_eq!(frame_a.operations, expected_qmdb_frame(&ops_a));
     assert_ne!(frame_a.root, frame_b.root);

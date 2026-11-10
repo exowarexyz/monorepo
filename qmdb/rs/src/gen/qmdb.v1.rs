@@ -1442,7 +1442,8 @@ pub struct GetRequest {
         skip_serializing_if = "::buffa::json_helpers::skip_if::is_zero_u64"
     )]
     pub tip: u64,
-    /// Minimum Store sequence for checking publication of the requested watermark.
+    /// Minimum Store sequence for checking that the published watermark covers
+    /// the requested tip.
     ///
     /// Field 3: `min_sequence_number`
     #[serde(
@@ -1632,7 +1633,8 @@ pub struct GetManyRequest {
         skip_serializing_if = "::buffa::json_helpers::skip_if::is_zero_u64"
     )]
     pub tip: u64,
-    /// Minimum Store sequence for checking publication of the requested watermark.
+    /// Minimum Store sequence for checking that the published watermark covers
+    /// the requested tip.
     ///
     /// Field 3: `min_sequence_number`
     #[serde(
@@ -2122,7 +2124,8 @@ pub struct GetRangeRequest {
         skip_serializing_if = "::buffa::json_helpers::skip_if::is_zero_u64"
     )]
     pub tip: u64,
-    /// Minimum Store sequence for checking publication of the requested watermark.
+    /// Minimum Store sequence for checking that the published watermark covers
+    /// the requested tip.
     ///
     /// Field 5: `min_sequence_number`
     #[serde(
@@ -2946,7 +2949,8 @@ pub struct GetOperationRangeRequest {
         skip_serializing_if = "::buffa::json_helpers::skip_if::is_zero_u32"
     )]
     pub max_locations: u32,
-    /// Minimum Store sequence for checking publication of the requested watermark.
+    /// Minimum Store sequence for checking that the published watermark covers
+    /// the requested tip.
     ///
     /// Field 4: `min_sequence_number`
     #[serde(
@@ -3288,7 +3292,8 @@ pub struct GetOperationsRequest {
         skip_serializing_if = "::buffa::json_helpers::skip_if::is_empty_vec"
     )]
     pub locations: ::buffa::alloc::vec::Vec<u64>,
-    /// Minimum Store sequence for checking publication of the requested watermark.
+    /// Minimum Store sequence for checking that the published watermark covers
+    /// the requested tip.
     ///
     /// Field 3: `min_sequence_number`
     #[serde(
@@ -3672,7 +3677,8 @@ pub struct GetCurrentOperationRangeRequest {
         skip_serializing_if = "::buffa::json_helpers::skip_if::is_zero_u32"
     )]
     pub max_locations: u32,
-    /// Minimum Store sequence for checking publication of the requested watermark.
+    /// Minimum Store sequence for checking that the published watermark covers
+    /// the requested tip.
     ///
     /// Field 4: `min_sequence_number`
     #[serde(
@@ -6620,7 +6626,8 @@ pub mod __buffa {
             ///
             /// Field 2: `tip`
             pub tip: u64,
-            /// Minimum Store sequence for checking publication of the requested watermark.
+            /// Minimum Store sequence for checking that the published watermark covers
+            /// the requested tip.
             ///
             /// Field 3: `min_sequence_number`
             pub min_sequence_number: ::core::option::Option<u64>,
@@ -6900,7 +6907,8 @@ pub mod __buffa {
             pub fn tip(&self) -> u64 {
                 self.0.reborrow().tip
             }
-            /// Minimum Store sequence for checking publication of the requested watermark.
+            /// Minimum Store sequence for checking that the published watermark covers
+            /// the requested tip.
             ///
             /// Field 3: `min_sequence_number`
             #[must_use]
@@ -6950,7 +6958,8 @@ pub mod __buffa {
             ///
             /// Field 2: `tip`
             pub tip: u64,
-            /// Minimum Store sequence for checking publication of the requested watermark.
+            /// Minimum Store sequence for checking that the published watermark covers
+            /// the requested tip.
             ///
             /// Field 3: `min_sequence_number`
             pub min_sequence_number: ::core::option::Option<u64>,
@@ -7246,7 +7255,8 @@ pub mod __buffa {
             pub fn tip(&self) -> u64 {
                 self.0.reborrow().tip
             }
-            /// Minimum Store sequence for checking publication of the requested watermark.
+            /// Minimum Store sequence for checking that the published watermark covers
+            /// the requested tip.
             ///
             /// Field 3: `min_sequence_number`
             #[must_use]
@@ -7900,7 +7910,8 @@ pub mod __buffa {
             pub limit: u32,
             /// Field 4: `tip`
             pub tip: u64,
-            /// Minimum Store sequence for checking publication of the requested watermark.
+            /// Minimum Store sequence for checking that the published watermark covers
+            /// the requested tip.
             ///
             /// Field 5: `min_sequence_number`
             pub min_sequence_number: ::core::option::Option<u64>,
@@ -8242,7 +8253,8 @@ pub mod __buffa {
             pub fn tip(&self) -> u64 {
                 self.0.reborrow().tip
             }
-            /// Minimum Store sequence for checking publication of the requested watermark.
+            /// Minimum Store sequence for checking that the published watermark covers
+            /// the requested tip.
             ///
             /// Field 5: `min_sequence_number`
             #[must_use]
@@ -9428,7 +9440,8 @@ pub mod __buffa {
             pub start_location: u64,
             /// Field 3: `max_locations`
             pub max_locations: u32,
-            /// Minimum Store sequence for checking publication of the requested watermark.
+            /// Minimum Store sequence for checking that the published watermark covers
+            /// the requested tip.
             ///
             /// Field 4: `min_sequence_number`
             pub min_sequence_number: ::core::option::Option<u64>,
@@ -9745,7 +9758,8 @@ pub mod __buffa {
             pub fn max_locations(&self) -> u32 {
                 self.0.reborrow().max_locations
             }
-            /// Minimum Store sequence for checking publication of the requested watermark.
+            /// Minimum Store sequence for checking that the published watermark covers
+            /// the requested tip.
             ///
             /// Field 4: `min_sequence_number`
             #[must_use]
@@ -10112,7 +10126,8 @@ pub mod __buffa {
             pub tip: u64,
             /// Field 2: `locations`
             pub locations: ::buffa::RepeatedView<'a, u64>,
-            /// Minimum Store sequence for checking publication of the requested watermark.
+            /// Minimum Store sequence for checking that the published watermark covers
+            /// the requested tip.
             ///
             /// Field 3: `min_sequence_number`
             pub min_sequence_number: ::core::option::Option<u64>,
@@ -10426,7 +10441,8 @@ pub mod __buffa {
             pub fn locations(&self) -> &::buffa::RepeatedView<'_, u64> {
                 &self.0.reborrow().locations
             }
-            /// Minimum Store sequence for checking publication of the requested watermark.
+            /// Minimum Store sequence for checking that the published watermark covers
+            /// the requested tip.
             ///
             /// Field 3: `min_sequence_number`
             #[must_use]
@@ -10789,7 +10805,8 @@ pub mod __buffa {
             pub start_location: u64,
             /// Field 3: `max_locations`
             pub max_locations: u32,
-            /// Minimum Store sequence for checking publication of the requested watermark.
+            /// Minimum Store sequence for checking that the published watermark covers
+            /// the requested tip.
             ///
             /// Field 4: `min_sequence_number`
             pub min_sequence_number: ::core::option::Option<u64>,
@@ -11110,7 +11127,8 @@ pub mod __buffa {
             pub fn max_locations(&self) -> u32 {
                 self.0.reborrow().max_locations
             }
-            /// Minimum Store sequence for checking publication of the requested watermark.
+            /// Minimum Store sequence for checking that the published watermark covers
+            /// the requested tip.
             ///
             /// Field 4: `min_sequence_number`
             #[must_use]

@@ -5,11 +5,11 @@ use crate::{
     adapter::codec::{
         decode_operation_location_key, decode_update_location, decode_watermark_location,
         encode_node_key, encode_operation_key, encode_update_key, ensure_encoded_value_size,
-        merkle_size_for_watermark, op_count_for_watermark, WATERMARK_PREFIX,
+        merkle_size_for_tip, op_count_for_tip, WATERMARK_PREFIX,
     },
     decode_digest,
     error::QmdbError,
-    PublishedWatermark, VersionedValue,
+    ResolvedTip, VersionedValue,
 };
 use bytes::Bytes;
 use commonware_codec::{Codec, Copying, Decode};
@@ -62,13 +62,15 @@ pub(crate) trait LatestValueResolver<F: Family, K: Codec, V: Codec> {
 /// known to include it. That sequence comes from a watermark lookup or from
 /// a subscription frame that carried the watermark row.
 ///
-/// Reads at that watermark or an earlier one can skip watermark lookup, given
-/// their data and proof reads must require at least the cached sequence as `min_sequence_number`.
+/// Reads at that watermark or an earlier one can skip the watermark lookup when
+/// their data and proof reads require at least the cached sequence as
+/// `min_sequence_number`. The watermark is stored as the greatest tip the cache
+/// can resolve.
 ///
 /// Share a cache only between clients for the same store and namespace.
 #[derive(Debug)]
 pub(crate) struct PublicationCache<F: Family> {
-    published: Mutex<Option<PublishedWatermark<F>>>,
+    published: Mutex<Option<ResolvedTip<F>>>,
     // Serializes watermark lookups, so a `require` that waits here can use
     // the result of the lookup it waited on. `published` has its own lock, so
     // updating it doesn't need this gate.
@@ -86,28 +88,27 @@ impl<F: Family> Default for PublicationCache<F> {
 
 impl<F: Family> PublicationCache<F> {
     fn remember(&self, available: Option<Location<F>>, sequence: u64) {
-        let Some(location) = available else {
+        let Some(watermark) = available else {
             return;
         };
         let mut published = self.published.lock().unwrap();
         if published.as_ref().is_none_or(|known| {
-            location > known.location
-                || (location == known.location && sequence < known.sequence_number)
+            watermark > known.tip || (watermark == known.tip && sequence < known.sequence_number)
         }) {
-            *published = Some(PublishedWatermark {
-                location,
+            *published = Some(ResolvedTip {
+                tip: watermark,
                 sequence_number: sequence,
             });
         }
     }
 
-    fn published(&self) -> Option<PublishedWatermark<F>> {
+    fn published(&self) -> Option<ResolvedTip<F>> {
         *self.published.lock().unwrap()
     }
 
-    fn published_sequence(&self, watermark: Location<F>) -> Option<u64> {
+    fn published_sequence(&self, tip: Location<F>) -> Option<u64> {
         self.published()
-            .filter(|known| known.location >= watermark)
+            .filter(|known| known.tip >= tip)
             .map(|known| known.sequence_number)
     }
 
@@ -124,25 +125,25 @@ impl<F: Family> PublicationCache<F> {
         let _gate = self.refresh_gate.lock().await;
         let (available, sequence) = read_latest_watermark_with_sequence(session).await?;
         self.remember(available, sequence);
-        Ok(self.published().map(|known| known.location))
+        Ok(self.published().map(|known| known.tip))
     }
 
     pub(crate) async fn require(
         &self,
         session: &ReadSession,
-        watermark: Location<F>,
-    ) -> Result<PublishedWatermark<F>, QmdbError> {
-        if let Some(sequence) = self.published_sequence(watermark) {
-            return Ok(PublishedWatermark {
-                location: watermark,
+        tip: Location<F>,
+    ) -> Result<ResolvedTip<F>, QmdbError> {
+        if let Some(sequence) = self.published_sequence(tip) {
+            return Ok(ResolvedTip {
+                tip,
                 sequence_number: sequence,
             });
         }
 
         let _gate = self.refresh_gate.lock().await;
-        if let Some(sequence) = self.published_sequence(watermark) {
-            return Ok(PublishedWatermark {
-                location: watermark,
+        if let Some(sequence) = self.published_sequence(tip) {
+            return Ok(ResolvedTip {
+                tip,
                 sequence_number: sequence,
             });
         }
@@ -151,27 +152,26 @@ impl<F: Family> PublicationCache<F> {
         self.remember(available, sequence);
         let published = self.published();
         match published.as_ref() {
-            Some(known) if known.location >= watermark => Ok(PublishedWatermark {
-                location: watermark,
+            Some(known) if known.tip >= tip => Ok(ResolvedTip {
+                tip,
                 sequence_number: known.sequence_number,
             }),
-            _ => Err(QmdbError::WatermarkTooLow {
-                requested: watermark.as_u64(),
-                available: published
-                    .as_ref()
-                    .map_or(0, |known| known.location.as_u64()),
+            Some(known) => Err(QmdbError::WatermarkTooLow {
+                tip: tip.as_u64(),
+                watermark: known.tip.as_u64(),
             }),
+            None => Err(QmdbError::NoPublishedWatermark { tip: tip.as_u64() }),
         }
     }
 }
 
 pub(crate) async fn load_latest_update_row<F: Family>(
     session: &ReadSession,
-    watermark: Location<F>,
+    tip: Location<F>,
     key: &[u8],
 ) -> Result<Option<(Key, Vec<u8>)>, QmdbError> {
     let start = encode_update_key(key, Location::<F>::new(0))?;
-    let end = encode_update_key(key, watermark)?;
+    let end = encode_update_key(key, tip)?;
     let rows = session
         .range_with_mode(&start, &end, 1, RangeMode::Reverse)
         .await?;
@@ -181,12 +181,12 @@ pub(crate) async fn load_latest_update_row<F: Family>(
         .map(|(key, value)| (key, value.to_vec())))
 }
 
-/// Loads each key's latest operation at `watermark` and decodes it with `resolver`.
-/// The session must require the publication sequence.
-pub(crate) async fn query_many_at<F, K, V, Q, R>(
+/// Loads each key's latest operation at `tip` and decodes it with `resolver`.
+/// The session must require the watermark sequence.
+pub(crate) async fn get_many_at<F, K, V, Q, R>(
     session: &ReadSession,
     keys: &[Q],
-    watermark: Location<F>,
+    tip: Location<F>,
     resolver: &R,
 ) -> Result<Vec<Option<VersionedValue<K, V, F>>>, QmdbError>
 where
@@ -200,7 +200,7 @@ where
         let key_bytes = key.as_ref();
         async move {
             let Some((row_key, _row_value)) =
-                load_latest_update_row(session, watermark, key_bytes).await?
+                load_latest_update_row(session, tip, key_bytes).await?
             else {
                 return Ok(None);
             };
@@ -216,13 +216,11 @@ where
 
 pub(crate) async fn compute_ops_root<F: Family, H: Hasher>(
     session: &ReadSession,
-    watermark: Location<F>,
+    tip: Location<F>,
     inactive_peaks: usize,
 ) -> Result<H::Digest, QmdbError> {
-    let size = merkle_size_for_watermark(watermark)?;
-    let leaves = watermark
-        .checked_add(1)
-        .ok_or_else(|| QmdbError::CorruptData("watermark overflow".to_string()))?;
+    let size = merkle_size_for_tip(tip)?;
+    let leaves = op_count_for_tip(tip)?;
     let peak_positions: Vec<(Position<F>, u32)> = F::peaks(size).collect();
     let fetched = if peak_positions.is_empty() {
         std::collections::HashMap::new()
@@ -257,13 +255,10 @@ pub(crate) async fn compute_ops_root<F: Family, H: Hasher>(
 }
 
 pub(crate) fn inactive_peaks<F: Family>(
-    watermark: Location<F>,
+    tip: Location<F>,
     inactivity_floor: Location<F>,
 ) -> Result<usize, QmdbError> {
-    Ok(F::inactive_peaks(
-        op_count_for_watermark(watermark)?,
-        inactivity_floor,
-    ))
+    Ok(F::inactive_peaks(op_count_for_tip(tip)?, inactivity_floor))
 }
 
 pub(crate) async fn load_operation_at<F: Family, Op>(

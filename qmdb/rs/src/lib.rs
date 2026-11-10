@@ -19,10 +19,11 @@
 //!   (e.g. [`adapter::Ordered`]), plus upload staging in [`adapter::upload`].
 //! - [`service`]: the `qmdb.v1` ConnectRPC services.
 //!   - [`service::proto`]: generated request, response, and proof messages.
-//!   - [`service::server`]: one Connect stack function per kind.
+//!   - [`service::server`]: a full stack and an operation-log-only stack per kind. Immutable
+//!     and keyless have only the latter.
 //!   - [`service::client`]: one verifying client per kind (e.g. [`service::client::Ordered`]),
 //!     built from the per-service clients in [`service::client::rpc`].
-//! - [`proof`]: raw and verified proof types shared by readers and clients.
+//! - [`proof`]: proof results and verified payloads shared by readers and clients.
 //! - [`error`]: [`QmdbError`] and [`ProofKind`].
 //!
 //! # Uploads and watermarks
@@ -72,10 +73,10 @@ pub struct VersionedValue<K, V, F: Family> {
     pub value: Option<V>,
 }
 
-/// A requested watermark and the minimum Store sequence that makes it readable.
+/// A requested tip and the minimum Store sequence at which a published watermark covers it.
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct PublishedWatermark<F: Family> {
-    pub(crate) location: Location<F>,
+pub(crate) struct ResolvedTip<F: Family> {
+    pub(crate) tip: Location<F>,
     pub(crate) sequence_number: u64,
 }
 

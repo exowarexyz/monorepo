@@ -3,7 +3,7 @@
 pub(crate) use super::encode::LookupResult;
 use super::{encode, qmdb_error_to_connect};
 use crate::{
-    proof::RawKeyValueProof,
+    proof::KeyValueProof,
     service::proto::qmdb::v1::{
         GetManyRequest, GetManyResponse, GetRequest, GetResponse, KeyLookupService,
     },
@@ -30,10 +30,7 @@ pub(crate) trait KeyLookupReader<const N: usize>: Send + Sync + 'static {
         key: &Self::Key,
         min_sequence_number: Option<u64>,
     ) -> impl Future<
-        Output = Result<
-            RawKeyValueProof<Self::Digest, Self::Operation, N, Self::Family>,
-            QmdbError,
-        >,
+        Output = Result<KeyValueProof<Self::Digest, Self::Operation, N, Self::Family>, QmdbError>,
     > + Send;
 
     fn key_lookup_proofs(

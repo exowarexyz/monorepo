@@ -213,7 +213,7 @@ async fn test_immutable_round_trip() {
         || {
             let qmdb_client = variable_client(store_client.clone());
             let loc = source.latest_location;
-            async move { qmdb_client.root_at(loc).await }
+            async move { qmdb_client.root_at(loc, None).await }
         },
         "root_at",
     )
@@ -222,7 +222,7 @@ async fn test_immutable_round_trip() {
 
     let qmdb_client = variable_client(store_client.clone());
     let got = qmdb_client
-        .get_at(&source.queried_key, source.latest_location)
+        .get_at(source.latest_location, &source.queried_key, None)
         .await
         .expect("get_at")
         .expect("present");
@@ -230,7 +230,7 @@ async fn test_immutable_round_trip() {
     assert_eq!(got.value, Some(source.queried_value.clone()));
     assert_eq!(
         qmdb_client
-            .get_at(&b"a".to_vec(), source.latest_location)
+            .get_at(source.latest_location, &b"a".to_vec(), None)
             .await
             .expect("prefix key")
             .expect("present")
@@ -238,7 +238,7 @@ async fn test_immutable_round_trip() {
         Some(b"alpha".to_vec()),
     );
     assert!(qmdb_client
-        .get_at(&b"a\0\0".to_vec(), source.latest_location)
+        .get_at(source.latest_location, &b"a\0\0".to_vec(), None)
         .await
         .expect("missing key")
         .is_none());
@@ -270,7 +270,7 @@ async fn test_immutable_fixed_round_trip() {
         || {
             let qmdb_client = fixed_client(store_client.clone());
             let loc = source.latest_location;
-            async move { qmdb_client.root_at(loc).await }
+            async move { qmdb_client.root_at(loc, None).await }
         },
         "fixed root_at",
     )
@@ -282,7 +282,7 @@ async fn test_immutable_fixed_round_trip() {
 
     let qmdb_client = fixed_client(store_client.clone());
     let got = qmdb_client
-        .get_at(&source.queried_key, source.latest_location)
+        .get_at(source.latest_location, &source.queried_key, None)
         .await
         .expect("fixed get_at")
         .expect("present");

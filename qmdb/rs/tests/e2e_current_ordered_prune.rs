@@ -1,9 +1,8 @@
 //! Ordered current-batch publications across local bitmap-chunk pruning.
 //!
-//! Remote current roots must match the source at every batch's watermark. Remote proofs
-//! must match it at the initial commit, at the first watermark merkleized over pruned
-//! chunks, at the last watermark, and at historical watermarks for keys that later
-//! batches expire.
+//! Remote current roots must match the source at every batch's tip. Remote proofs must
+//! match it at the initial commit, at the first tip merkleized over pruned chunks, at
+//! the last tip, and at historical tips for keys that later batches expire.
 
 mod common;
 
@@ -43,13 +42,13 @@ type OrderedPublication = Publication<mmr::Family, Digest, OrderedUpdate<Vec<u8>
 const BATCHES: u64 = 150;
 
 struct BatchOutcome {
-    watermark: Location<mmr::Family>,
+    tip: Location<mmr::Family>,
     root: Digest,
     publication: OrderedPublication,
 }
 
 struct ExpiredKeySnapshot {
-    watermark: Location<mmr::Family>,
+    tip: Location<mmr::Family>,
     root: Digest,
     key: Vec<u8>,
     value: Vec<u8>,
@@ -120,14 +119,14 @@ async fn test_mirror_ordered_prune_past_chunk_zero() {
                     let latest = db.bounds().end - 1;
                     if counter == 9 {
                         expired_key_snapshot = Some(ExpiredKeySnapshot {
-                            watermark: latest,
+                            tip: latest,
                             root: db.root(),
                             key: b"k-00000006".to_vec(),
                             value: b"v-00000006".to_vec(),
                         });
                     }
                     batches.push(BatchOutcome {
-                        watermark: latest,
+                        tip: latest,
                         root: db.root(),
                         publication,
                     });
@@ -172,7 +171,7 @@ async fn test_mirror_ordered_prune_past_chunk_zero() {
         .expect("initial upload must succeed");
     assert_eq!(
         qmdb_client
-            .root_at(Location::new(0))
+            .root_at(Location::new(0), None)
             .await
             .expect("root at the initial commit must load"),
         initial.root
@@ -184,79 +183,75 @@ async fn test_mirror_ordered_prune_past_chunk_zero() {
     assert_eq!(initial_range.root, initial.root);
     assert_eq!(initial_range.operations, *initial.operations);
 
-    // The remote root at each batch's watermark must equal the source root.
+    // The remote root at each batch's tip must equal the source root.
     for outcome in &batches {
         common::commit_publications(&upload_client, std::slice::from_ref(&outcome.publication))
             .await
             .expect("upload");
         let remote_root = qmdb_client
-            .root_at(outcome.watermark)
+            .root_at(outcome.tip, None)
             .await
             .expect("root_at");
         assert_eq!(
             remote_root, outcome.root,
-            "remote current_root disagrees with local at watermark {}",
-            outcome.watermark
+            "remote current_root disagrees with local at tip {}",
+            outcome.tip
         );
     }
 
-    // At the first watermark merkleized over pruned chunks and at the last
-    // watermark, a key the batch wrote and the batch's own operations must
-    // verify against the source root.
+    // At the first tip merkleized over pruned chunks and at the last tip, a key
+    // the batch wrote and the batch's own operations must verify against the
+    // source root.
     for index in [first_pruned, batches.len() - 1] {
         let outcome = &batches[index];
         let key = format!("k-{:08x}", 3 * index).into_bytes();
         let value = format!("v-{:08x}", 3 * index).into_bytes();
         let key_proof = qmdb_client
-            .get(outcome.watermark, &key, None)
+            .get(outcome.tip, &key, None)
             .await
-            .expect("key written at a pruned watermark must verify");
+            .expect("key written at a pruned tip must verify");
         assert_eq!(key_proof.root, outcome.root);
         match &key_proof.operation {
             OrderedOp::Update(update) => {
                 assert_eq!(update.key, key);
                 assert_eq!(update.value, value);
             }
-            _ => panic!("a key written at a pruned watermark must read as an Update operation"),
+            _ => panic!("a key written at a pruned tip must read as an Update operation"),
         }
         let publication = &outcome.publication;
         let range = qmdb_client
             .current_operation_range(
-                outcome.watermark,
+                outcome.tip,
                 publication.start_location,
                 publication.operations.len() as u32,
                 None,
             )
             .await
-            .expect("operations appended at a pruned watermark must verify");
+            .expect("operations appended at a pruned tip must verify");
         assert_eq!(range.root, outcome.root);
         assert_eq!(range.operations, *publication.operations);
     }
 
-    // The first batch's watermark must keep its root after every later batch is
+    // The first batch's tip must keep its root after every later batch is
     // published.
     let first = &batches[0];
     let remote_root_old = qmdb_client
-        .root_at(first.watermark)
+        .root_at(first.tip, None)
         .await
-        .expect("root_at (old watermark)");
+        .expect("root_at (old tip)");
     assert_eq!(
         remote_root_old, first.root,
-        "remote current_root at first watermark disagrees with local root"
+        "remote current_root at first tip disagrees with local root"
     );
 
-    // `k-00000006` is present at the captured old watermark, then rewritten
+    // `k-00000006` is present at the captured old tip, then rewritten
     // and deleted by later batches. Verifying it after all uploads proves
-    // historical current-state proofs use the requested watermark's root and
+    // historical current-state proofs use the requested tip's root and
     // update index, not the final active-key set.
     let expired_key_proof = qmdb_client
-        .get(
-            expired_key_snapshot.watermark,
-            &expired_key_snapshot.key,
-            None,
-        )
+        .get(expired_key_snapshot.tip, &expired_key_snapshot.key, None)
         .await
-        .expect("old watermark proof for later-expired key");
+        .expect("old tip proof for later-expired key");
     assert_eq!(expired_key_proof.root, expired_key_snapshot.root);
     match &expired_key_proof.operation {
         OrderedOp::Update(update) => {
@@ -266,29 +261,29 @@ async fn test_mirror_ordered_prune_past_chunk_zero() {
         _ => panic!("expected Update operation for old expired-key proof"),
     }
 
-    // The expired key must be inactive at the final watermark.
-    let final_watermark = batches.last().expect("at least one batch").watermark;
+    // The expired key must be inactive at the final tip.
+    let final_tip = batches.last().expect("at least one batch").tip;
     let latest_err = qmdb_client
-        .get(final_watermark, &expired_key_snapshot.key, None)
+        .get(final_tip, &expired_key_snapshot.key, None)
         .await
-        .expect_err("expired key should be inactive at final watermark");
+        .expect_err("expired key should be inactive at final tip");
     match latest_err {
         exoware_qmdb::QmdbError::KeyNotActive { .. }
-        | exoware_qmdb::QmdbError::ProofKeyNotFound { .. } => {}
+        | exoware_qmdb::QmdbError::KeyNotFound { .. } => {}
         other => panic!("unexpected final expired-key error: {other:?}"),
     }
 
-    // A range read at the first watermark must verify against that watermark's root.
+    // A range read at the first tip must verify against that tip's root.
     let old_range = qmdb_client
         .get_range(
-            first.watermark,
+            first.tip,
             b"k-00000000".to_vec(),
             Some(b"k-00000001".to_vec()),
             10,
             None,
         )
         .await
-        .expect("old watermark range proof");
+        .expect("old tip range proof");
     assert_eq!(old_range.entries.len(), 1);
     let entry = &old_range.entries[0];
     assert_eq!(entry.operation.key(), Some(&b"k-00000000".to_vec()));

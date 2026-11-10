@@ -278,7 +278,7 @@ async fn cached_publication_fences_dependent_reads() {
     let watermark = Location::new((all_operations.len() - 1) as u64);
 
     let error = qmdb
-        .get_at(&b"new-key".to_vec(), watermark)
+        .get_at(watermark, &b"new-key".to_vec(), None)
         .await
         .expect_err("replica 100 cannot satisfy publication evidence from sequence 101");
     assert!(
@@ -301,7 +301,7 @@ async fn cached_publication_fences_dependent_reads() {
 
     query.new_reads.store(usize::MAX, Ordering::SeqCst);
     let value = qmdb
-        .get_at(&b"new-key".to_vec(), watermark)
+        .get_at(watermark, &b"new-key".to_vec(), None)
         .await
         .unwrap()
         .unwrap();
@@ -309,34 +309,39 @@ async fn cached_publication_fences_dependent_reads() {
     let (expected_root, _) =
         common::prepare_operations::<Family, Operation>(&all_operations, &operation_cfg());
     let cloned = qmdb.clone();
-    assert_eq!(cloned.root_at(watermark).await.unwrap(), expected_root);
-    let checkpoint = qmdb
-        .operation_range_checkpoint(watermark, Location::new(0), 1, None)
+    assert_eq!(
+        cloned.root_at(watermark, None).await.unwrap(),
+        expected_root
+    );
+    let proof = qmdb
+        .operation_range_proof(watermark, Location::new(0), 1, None)
         .await
         .unwrap();
-    assert_eq!(checkpoint.ops_root, expected_root);
-    assert!(checkpoint.verify::<commonware_cryptography::Sha256>());
+    assert_eq!(proof.ops_root, expected_root);
+    assert!(proof.verify::<commonware_cryptography::Sha256>());
     assert_eq!(query.publication_reads.load(Ordering::SeqCst), 1);
 
     let previous_watermark = Location::new((first_operations.len() - 1) as u64);
     let previous = qmdb
-        .get_at(&b"key".to_vec(), previous_watermark)
+        .get_at(previous_watermark, &b"key".to_vec(), None)
         .await
         .unwrap()
         .unwrap();
     assert_eq!(previous.value, Some(b"old".to_vec()));
     let (previous_root, _) =
         common::prepare_operations::<Family, Operation>(&first_operations, &operation_cfg());
-    let checkpoint = qmdb
-        .operation_range_checkpoint(previous_watermark, Location::new(0), 1, None)
+    let proof = qmdb
+        .operation_range_proof(previous_watermark, Location::new(0), 1, None)
         .await
         .unwrap();
-    assert_eq!(checkpoint.ops_root, previous_root);
-    assert!(checkpoint.verify::<commonware_cryptography::Sha256>());
+    assert_eq!(proof.ops_root, previous_root);
+    assert!(proof.verify::<commonware_cryptography::Sha256>());
     assert_eq!(query.publication_reads.load(Ordering::SeqCst), 1);
 
     query.new_reads.store(0, Ordering::SeqCst);
-    let previous = qmdb.get_at(&b"key".to_vec(), previous_watermark).await;
+    let previous = qmdb
+        .get_at(previous_watermark, &b"key".to_vec(), None)
+        .await;
     assert!(
         matches!(previous, Err(QmdbError::Client(ref error)) if error.rpc_code() == Some(connectrpc::ErrorCode::Aborted)),
         "the greatest cached publication conservatively requires sequence 101"
@@ -405,7 +410,7 @@ async fn rpc_reads_do_not_inherit_previous_request_observations() {
     let error = rpc
         .get_operation_range(request(Some(101)))
         .await
-        .expect_err("explicit floor must govern an uncached publication lookup");
+        .expect_err("explicit floor must govern an uncached watermark lookup");
     assert_eq!(error.code, connectrpc::ErrorCode::Aborted);
     query.publication_reads.store(0, Ordering::SeqCst);
 
@@ -492,7 +497,7 @@ async fn publication_lookup_propagates_errors_after_the_watermark_frame() {
     let watermark = Location::new((operations.len() - 1) as u64);
     assert_eq!(
         client
-            .get_at(&b"key".to_vec(), watermark)
+            .get_at(watermark, &b"key".to_vec(), None)
             .await
             .unwrap()
             .unwrap()
@@ -502,7 +507,7 @@ async fn publication_lookup_propagates_errors_after_the_watermark_frame() {
     assert_eq!(
         query.publication_reads.load(Ordering::SeqCst),
         2,
-        "failed publication lookup must not populate the cache"
+        "failed watermark lookup must not populate the cache"
     );
     server.abort();
 }

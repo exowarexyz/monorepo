@@ -33,7 +33,7 @@ use exoware_qmdb::{
     adapter::upload::{
         prepare_publication, stage_authenticated_range, stage_watermark, Publication,
     },
-    proof::RawKeyLookupProof,
+    proof::KeyLookupProof,
     ProofKind, QmdbError, MAX_OPERATION_SIZE,
 };
 use exoware_sdk::StoreClient;
@@ -335,12 +335,13 @@ async fn test_ordered_round_trip() {
     assert_eq!(watermark, Some(source.latest_location));
 
     let queried = qmdb_client
-        .query_many_at(
-            &[b"alpha".as_slice(), b"beta".as_slice()],
+        .get_many_at(
             source.latest_location,
+            &[b"alpha".to_vec(), b"beta".to_vec()],
+            None,
         )
         .await
-        .expect("query_many_at");
+        .expect("get_many_at");
     assert_eq!(
         queried[0].as_ref().and_then(|v| v.value.clone()),
         source.values[b"alpha".as_slice()]
@@ -692,14 +693,14 @@ async fn test_ordered_mmb_persistent_interleaved_seed_batches_keep_current_proof
     );
     assert_eq!(
         qmdb_client
-            .root_at(latest_location)
+            .root_at(latest_location, None)
             .await
             .expect("current root"),
         expected_root
     );
     assert_eq!(
         qmdb_client
-            .ops_root_at(latest_location)
+            .ops_root_at(latest_location, None)
             .await
             .expect("ops root"),
         expected_ops_root
@@ -736,15 +737,22 @@ async fn test_ordered_fixed_round_trip() {
         .expect("watermark");
     assert_eq!(watermark, Some(source.latest_location));
 
-    let keys: Vec<Vec<u8>> = source.values.keys().cloned().collect();
+    let keys = source
+        .values
+        .keys()
+        .map(|key| {
+            commonware_codec::DecodeExt::decode(commonware_codec::Copying(key.as_slice()))
+                .expect("digest key")
+        })
+        .collect::<Vec<commonware_cryptography::sha256::Digest>>();
     let queried = qmdb_client
-        .query_many_at(&keys, source.latest_location)
+        .get_many_at(source.latest_location, &keys, None)
         .await
-        .expect("fixed query_many_at");
+        .expect("fixed get_many_at");
     for (key, value) in keys.iter().zip(queried.iter()) {
         assert_eq!(
             value.as_ref().and_then(|value| value.value),
-            source.values[key.as_slice()]
+            source.values[key.as_ref()]
         );
     }
 
@@ -798,7 +806,7 @@ async fn test_root_at_returns_current_root() {
         key_cfg(),
     );
     let root = qmdb_client
-        .root_at(source.latest_location)
+        .root_at(source.latest_location, None)
         .await
         .expect("root_at");
     let publication = source
@@ -921,11 +929,11 @@ async fn test_ordered_mmr_exclusion_proof_reads_one_update_page() {
     let missing = b"k-00002040x".to_vec();
     query.reset_update_reads();
     let mut lookups = qmdb_client
-        .get_many_raw(source.latest_location, std::slice::from_ref(&missing), None)
+        .get_many_proofs(source.latest_location, std::slice::from_ref(&missing), None)
         .await
         .unwrap();
     let (scans, rows) = query.update_reads();
-    let Some(RawKeyLookupProof::Miss(proof)) = lookups.pop() else {
+    let Some(KeyLookupProof::Miss(proof)) = lookups.pop() else {
         panic!("missing key should be a miss");
     };
     assert_eq!(proof.root, source.root);
@@ -1066,8 +1074,8 @@ where
     );
     for (tip, _, _) in &expected {
         assert!(matches!(
-            qmdb_client.root_at(*tip).await,
-            Err(exoware_qmdb::QmdbError::WatermarkTooLow { requested, available: 0 })
+            qmdb_client.root_at(*tip, None).await,
+            Err(exoware_qmdb::QmdbError::NoPublishedWatermark { tip: requested })
                 if requested == tip.as_u64()
         ));
     }
@@ -1085,13 +1093,13 @@ where
         Some(latest)
     );
     assert_eq!(
-        qmdb_client.root_at(Location::new(0)).await.unwrap(),
+        qmdb_client.root_at(Location::new(0), None).await.unwrap(),
         initial_root
     );
 
     for (tip, expected_root, expected_value) in expected {
         let root = qmdb_client
-            .root_at(tip)
+            .root_at(tip, None)
             .await
             .unwrap_or_else(|error| panic!("current root at uploaded tip {tip}: {error}"));
         assert_eq!(root, expected_root);
@@ -1165,33 +1173,33 @@ async fn test_ordered_current_proofs_store_calls() {
     };
     // The first proof loads the tip; later ones read only their own rows and nodes
     assert_eq!(
-        store_calls(&query, client.get_raw(tip, key(7), None)).await,
+        store_calls(&query, client.get_proof(tip, &key(7), None)).await,
         calls(0, 2, 3),
     );
     assert_eq!(
-        store_calls(&query, client.get_raw(tip, key(7), None)).await,
+        store_calls(&query, client.get_proof(tip, &key(7), None)).await,
         calls(0, 1, 2),
     );
     assert_eq!(
-        store_calls(&query, client.get_many_raw(tip, &present, None)).await,
+        store_calls(&query, client.get_many_proofs(tip, &present, None)).await,
         calls(0, 3, 6),
     );
     assert_eq!(
         store_calls(
             &query,
-            client.get_many_raw(tip, std::slice::from_ref(&missing), None),
+            client.get_many_proofs(tip, std::slice::from_ref(&missing), None),
         )
         .await,
         calls(0, 1, 3),
     );
     assert_eq!(
-        store_calls(&query, client.get_range_raw(tip, key(10), None, 5, None)).await,
+        store_calls(&query, client.get_range_proof(tip, key(10), None, 5, None)).await,
         calls(0, 5, 6),
     );
     assert_eq!(
         store_calls(
             &query,
-            client.current_operation_range_raw(tip, tip - 4, 4, None),
+            client.current_operation_range_proof(tip, tip - 4, 4, None),
         )
         .await,
         calls(0, 1, 2),
@@ -1199,7 +1207,11 @@ async fn test_ordered_current_proofs_store_calls() {
 
     // Requests proving several keys load a cold tip once
     assert_eq!(
-        store_calls(&query, new_client().await.get_many_raw(tip, &present, None)).await,
+        store_calls(
+            &query,
+            new_client().await.get_many_proofs(tip, &present, None)
+        )
+        .await,
         calls(0, 4, 7),
     );
     assert_eq!(
@@ -1207,7 +1219,7 @@ async fn test_ordered_current_proofs_store_calls() {
             &query,
             new_client()
                 .await
-                .get_range_raw(tip, key(10), None, 5, None),
+                .get_range_proof(tip, key(10), None, 5, None),
         )
         .await,
         calls(0, 6, 7),
@@ -1236,13 +1248,13 @@ async fn test_ordered_current_proof_reads_overlap() {
     let tip = source.latest_location;
     let key = b"k-00000007".to_vec();
     // Load the tip first, so the gated reads are the proof's own
-    let warm = client.get_raw(tip, &key, None).await.unwrap();
+    let warm = client.get_proof(tip, &key, None).await.unwrap();
     assert_eq!(warm.root, source.root);
     let deadline = std::time::Duration::from_secs(10);
 
     // A key proof reads its operation row and nodes while reading its chunk
     query.require_overlap(exoware_qmdb::CHUNK_FAMILY);
-    let proof = tokio::time::timeout(deadline, client.get_raw(tip, &key, None))
+    let proof = tokio::time::timeout(deadline, client.get_proof(tip, &key, None))
         .await
         .expect("operation batch and chunk read must overlap")
         .unwrap();
@@ -1252,7 +1264,7 @@ async fn test_ordered_current_proof_reads_overlap() {
     query.require_overlap(common::OPERATION_FAMILY);
     let range = tokio::time::timeout(
         deadline,
-        client.current_operation_range_raw(tip, tip - 4, 4, None),
+        client.current_operation_range_proof(tip, tip - 4, 4, None),
     )
     .await
     .expect("node batch and operation scan must overlap")

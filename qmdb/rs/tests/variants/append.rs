@@ -423,7 +423,7 @@ async fn check_connect<F, Op>(
         ..Default::default()
     };
     let verified = client
-        .get_operation_range(suffix.clone(), &batch.root)
+        .operation_range(suffix.clone(), &batch.root)
         .await
         .expect("verify Connect suffix against Commonware root");
     assert_eq!(verified.root, batch.root);
@@ -431,7 +431,7 @@ async fn check_connect<F, Op>(
     assert_eq!(verified.operations, batch.operations);
 
     let verified_prefix = client
-        .get_operation_range(
+        .operation_range(
             GetOperationRangeRequest {
                 tip: latest.as_u64(),
                 start_location: 0,
@@ -477,7 +477,7 @@ async fn check_connect<F, Op>(
     let mut wrong_root = batch.root;
     wrong_root.0[0] ^= 1;
     let error = client
-        .get_operation_range(suffix, &wrong_root)
+        .operation_range(suffix, &wrong_root)
         .await
         .expect_err("reject a modified trusted root");
     assert!(matches!(error, QmdbError::ProofVerification { .. }));
@@ -527,13 +527,13 @@ async fn check_immutable<F, K, V, E>(
                 .expect("published watermark"),
             Some(latest)
         );
-        let root = common::retry(|| reader.root_at(latest), "immutable variant root").await;
+        let root = common::retry(|| reader.root_at(latest, None), "immutable variant root").await;
         assert_eq!(root, batch.root);
 
         for (offset, operation) in batch.operations.iter().enumerate() {
             if let immutable::Operation::Set(key, value) = operation {
                 let found = reader
-                    .get_at(key, latest)
+                    .get_at(latest, key, None)
                     .await
                     .expect("read immutable key")
                     .expect("immutable key exists");
@@ -598,7 +598,7 @@ async fn check_keyless<F, V, E>(
                 .expect("published watermark"),
             Some(latest)
         );
-        let root = common::retry(|| reader.root_at(latest), "keyless variant root").await;
+        let root = common::retry(|| reader.root_at(latest, None), "keyless variant root").await;
         assert_eq!(root, batch.root);
 
         for (offset, operation) in batch.operations.iter().enumerate() {
@@ -608,7 +608,7 @@ async fn check_keyless<F, V, E>(
             };
             assert_eq!(
                 reader
-                    .get_at(batch.start + offset as u64, latest)
+                    .get_at(latest, batch.start + offset as u64, None)
                     .await
                     .expect("read keyless location"),
                 expected,

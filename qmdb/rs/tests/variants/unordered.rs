@@ -162,11 +162,11 @@ async fn check_mirror<F, K, V, E>(
 
         let uploaded = snapshot.operations.len();
         assert_eq!(
-            local.ops_root_at(tip).await.expect("ops root"),
+            local.ops_root_at(tip, None).await.expect("ops root"),
             snapshot.ops_root
         );
         let found = local
-            .query_many_at(&keys, tip)
+            .get_many_at(tip, &keys, None)
             .await
             .expect("native lookup");
         for (found, expected) in zip_eq(&found, &snapshot.values) {
@@ -186,9 +186,9 @@ async fn check_mirror<F, K, V, E>(
             .map_or(snapshot.ops_root, |publication| publication.root);
         assert_eq!(native_range.root, trusted_root);
         assert_eq!(native_range.operations, snapshot.operations);
-        assert_eq!(local.root_at(tip).await.expect("root"), trusted_root);
+        assert_eq!(local.root_at(tip, None).await.expect("root"), trusted_root);
         assert_eq!(
-            local.ops_root_at(tip).await.expect("ops root"),
+            local.ops_root_at(tip, None).await.expect("ops root"),
             snapshot.ops_root
         );
         let request = GetOperationRangeRequest {
@@ -198,7 +198,7 @@ async fn check_mirror<F, K, V, E>(
             ..Default::default()
         };
         let proof = remote
-            .get_operation_range(request.clone(), &trusted_root)
+            .operation_range(request.clone(), &trusted_root)
             .await
             .expect("remote historical proof");
         assert_eq!(proof.root, trusted_root);
@@ -214,7 +214,7 @@ async fn check_mirror<F, K, V, E>(
         .await;
         if uploaded >= 3 {
             let suffix = remote
-                .get_operation_range(
+                .operation_range(
                     GetOperationRangeRequest {
                         start_location: 1,
                         max_locations: 2,
@@ -227,7 +227,7 @@ async fn check_mirror<F, K, V, E>(
             assert_eq!(suffix.operations, snapshot.operations[1..3]);
         }
         assert!(remote
-            .get_operation_range(request.clone(), &wrong_root)
+            .operation_range(request.clone(), &wrong_root)
             .await
             .is_err());
 
@@ -272,14 +272,14 @@ async fn check_mirror<F, K, V, E>(
                 op_cfg.clone(),
             );
         assert!(bad_remote
-            .get_operation_range(request, &trusted_root)
+            .operation_range(request, &trusted_root)
             .await
             .is_err());
         bad_server.abort();
 
         if snapshot.publication.is_some() {
             assert_eq!(
-                local.root_at(tip).await.expect("current root"),
+                local.root_at(tip, None).await.expect("current root"),
                 trusted_root
             );
             let range_request = GetCurrentOperationRangeRequest {
@@ -289,19 +289,19 @@ async fn check_mirror<F, K, V, E>(
                 ..Default::default()
             };
             let proof = current
-                .get_current_operation_range(range_request.clone(), &trusted_root)
+                .current_operation_range(range_request.clone(), &trusted_root)
                 .await
                 .expect("current operation range");
             assert_eq!(proof.root, trusted_root);
             assert_eq!(proof.operations, snapshot.operations);
             assert!(current
-                .get_current_operation_range(range_request, &wrong_root)
+                .current_operation_range(range_request, &wrong_root)
                 .await
                 .is_err());
 
             // Reversed request order also checks omission of absent or deleted keys
             let results = lookup
-                .get_many(
+                .get_hits(
                     tip,
                     &keys.iter().rev().cloned().collect::<Vec<_>>(),
                     None,
@@ -339,13 +339,13 @@ async fn check_mirror<F, K, V, E>(
 
             // Store-direct reads and verified service reads agree through the same API
             let typed = lookup
-                .get_many(tip, &keys, None, &trusted_root)
+                .get_hits(tip, &keys, None, &trusted_root)
                 .await
-                .expect("typed get_many");
+                .expect("typed get_hits");
             let direct = local
-                .get_many(tip, &keys, None)
+                .get_hits(tip, &keys, None)
                 .await
-                .expect("native get_many");
+                .expect("native get_hits");
             assert_eq!(typed.len(), direct.len());
             for (typed, direct) in typed.iter().zip(&direct) {
                 assert_same_key_value(typed, direct);
@@ -388,7 +388,7 @@ async fn check_mirror<F, K, V, E>(
         .as_ref()
         .map_or(first.ops_root, |publication| publication.root);
     let proof = remote
-        .get_operation_range(
+        .operation_range(
             GetOperationRangeRequest {
                 tip: first.operations.len() as u64 - 1,
                 start_location: 0,

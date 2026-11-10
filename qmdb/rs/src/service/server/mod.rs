@@ -59,17 +59,19 @@ fn qmdb_error_to_connect(err: QmdbError) -> ConnectError {
         | QmdbError::RangeLimitTooLarge { .. }
         | QmdbError::InvalidKeyRange { .. }
         | QmdbError::DuplicateRequestedKey { .. }
-        | QmdbError::RangeStartOutOfBounds { .. }
+        | QmdbError::LocationOutOfBounds { .. }
         | QmdbError::InvalidRequestedLocations(_)
         | QmdbError::TipOverflow
         | QmdbError::EncodedValueTooLarge { .. }
         | QmdbError::SortableKeyTooLarge { .. } => ConnectError::invalid_argument(err.to_string()),
-        QmdbError::WatermarkTooLow { .. } => ConnectError::out_of_range(err.to_string()),
-        QmdbError::ProofKeyNotFound { .. } | QmdbError::KeyNotActive { .. } => {
+        QmdbError::NoPublishedWatermark { .. } | QmdbError::WatermarkTooLow { .. } => {
+            ConnectError::out_of_range(err.to_string())
+        }
+        QmdbError::KeyNotFound { .. } | QmdbError::KeyNotActive { .. } => {
             ConnectError::not_found(err.to_string())
         }
         QmdbError::CurrentProofRequiresBatchBoundary { .. }
-        | QmdbError::CurrentBoundaryStateMissing { .. } => {
+        | QmdbError::CurrentStateMissing { .. } => {
             ConnectError::failed_precondition(err.to_string())
         }
         QmdbError::Stream(_) => ConnectError::unavailable(err.to_string()),

@@ -2,7 +2,7 @@
 
 use super::{encode, key_lookup::decode_key, qmdb_error_to_connect};
 use crate::{
-    proof::RawKeyRangeProof,
+    proof::KeyRangeProof,
     service::proto::qmdb::v1::{GetRangeRequest, GetRangeResponse, OrderedKeyRangeService},
     QmdbError,
 };
@@ -34,7 +34,7 @@ pub(crate) trait KeyRangeReader<const N: usize>: Send + Sync + 'static {
         min_sequence_number: Option<u64>,
     ) -> impl Future<
         Output = Result<
-            RawKeyRangeProof<Self::Digest, Self::Key, Self::Value, N, Self::Family, Self::Encoding>,
+            KeyRangeProof<Self::Digest, Self::Key, Self::Value, N, Self::Family, Self::Encoding>,
             QmdbError,
         >,
     > + Send;

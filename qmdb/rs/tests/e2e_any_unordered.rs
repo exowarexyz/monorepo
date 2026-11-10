@@ -216,12 +216,13 @@ async fn test_unordered_round_trip() {
     assert_eq!(watermark, Some(source.latest_location));
 
     let queried = qmdb_client
-        .query_many_at(
-            &[b"alpha".as_slice(), b"beta".as_slice()],
+        .get_many_at(
             source.latest_location,
+            &[b"alpha".to_vec(), b"beta".to_vec()],
+            None,
         )
         .await
-        .expect("query_many_at");
+        .expect("get_many_at");
     assert_eq!(
         queried[0].as_ref().and_then(|v| v.value.clone()),
         source.values[b"alpha".as_slice()]
@@ -260,15 +261,22 @@ async fn test_unordered_fixed_round_trip() {
         .expect("watermark");
     assert_eq!(watermark, Some(source.latest_location));
 
-    let keys: Vec<Vec<u8>> = source.values.keys().cloned().collect();
+    let keys = source
+        .values
+        .keys()
+        .map(|key| {
+            commonware_codec::DecodeExt::decode(commonware_codec::Copying(key.as_slice()))
+                .expect("digest key")
+        })
+        .collect::<Vec<commonware_cryptography::sha256::Digest>>();
     let queried = qmdb_client
-        .query_many_at(&keys, source.latest_location)
+        .get_many_at(source.latest_location, &keys, None)
         .await
-        .expect("query_many_at fixed");
+        .expect("get_many_at fixed");
     for (key, value) in keys.iter().zip(queried.iter()) {
         assert_eq!(
             value.as_ref().and_then(|value| value.value),
-            source.values[key.as_slice()]
+            source.values[key.as_ref()]
         );
     }
 

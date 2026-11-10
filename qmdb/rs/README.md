@@ -13,9 +13,12 @@ through ConnectRPC and `service::client` verifies the responses.
 ## Read and verify
 
 Queries identify a database state by its tip, the inclusive final operation
-location, and its root, a hash commitment to that state. The following example
-reads an already published keyless operation log through ConnectRPC. It uses
-variable-length byte values and verifies the response against an
+location, and its root, a hash commitment to that state. A tip is a location at
+or below the published watermark. Keyless and immutable roots and operation
+proofs need a tip that is a commit, current-state reads need a commit whose
+`Publication` was uploaded, and other reads accept any such tip. The following
+example reads an already published keyless operation log through ConnectRPC. It
+uses variable-length byte values and verifies the response against an
 application-supplied root:
 
 ```rust
@@ -41,7 +44,7 @@ async fn read_prefix(
         ((0..=4096).into(), ()),
     );
     let result = client
-        .get_operation_range(
+        .operation_range(
             GetOperationRangeRequest {
                 tip: tip.as_u64(),
                 start_location: 0,
@@ -66,11 +69,12 @@ authentication, use `new` with a configured transport.
 `OperationMultiProof` authenticates entries at selected locations. Both establish
 log membership, so an included update need not still be active.
 
-For queries about active state, `Current*` proofs also authenticate the activity
-bitmap at a batch boundary, the final commit location of an applied batch.
-Current key proofs establish active values, and ordered key proofs can establish
-absence. "Current" refers to that requested boundary, which may be older than
-the latest published boundary.
+For queries about active state, the current-state proofs (`KeyValueProof`,
+`KeyExclusionProof`, and `CurrentOperationRangeProof`) also authenticate the
+activity bitmap at the tip, which must be a commit whose `Publication` was
+uploaded. Key-value proofs establish active values, and ordered key-exclusion
+proofs can establish absence. "Current" means current as of that tip, which may
+be older than the latest published watermark.
 
 For a database with current state, pass its trusted current root. The proof's
 operation-root witness binds the operation log to that root. For an
@@ -82,25 +86,29 @@ anchor.
 Range verification binds the tip and the exact interval
 `[start, min(start + max_locations, tip + 1))`. Multi-proof verification binds the
 tip and the requested locations. The `GetOperations` RPC requires a nonempty, strictly
-ascending list of at most 1,024 locations. The native
-`Unordered::operation_multi_proof` and `Keyless::operation_multi_proof` helpers
-accept larger valid sets.
+ascending list of at most 1,024 locations. Each native reader's
+`operation_multi_proof` accepts larger valid sets.
 
 ## Choose a reader and service
 
 Choose the `adapter` reader that matches your source database. All four expose
-operation roots and range proofs, with additional queries for each kind:
+operation roots, range proofs, and reads at selected locations (`operations` and
+`operation_multi_proof`), with additional queries for each kind:
 
 | Reader | Additional queries |
 | --- | --- |
-| `Ordered` | Indexed reads at a tip, current key hits, exclusions, and ordered key ranges |
-| `Unordered` | Indexed reads at a tip and current key hits |
+| `Ordered` | `get_many_at` by key, current key hits, exclusions, and ordered key ranges |
+| `Unordered` | `get_many_at` by key and current key hits |
 | `Immutable` | `get_at` by key |
 | `Keyless` | `get_at` by operation location |
 
+The `get_at` and `get_many_at` reads return indexed values at a tip without a
+proof.
+
 Current queries require uploaded current-state publications. For unordered QMDB,
-`get_many` omits missing or inactive keys because it has no exclusion proofs.
-For ordered QMDB, keys must have the same `K::Ord` ordering as their raw bytes.
+`get_hits` returns only active keys and omits the rest, because it has no
+exclusion proofs. For ordered QMDB, keys must have the same `K::Ord` ordering as
+their raw bytes.
 
 Readers take a `PrefixedStoreClient` and the source's codec configuration. They
 support fixed and variable encodings, with `VariableEncoding<V>` as the default.
@@ -125,9 +133,9 @@ services expose the operation log.
 To inspect the watermark, use `latest_published_watermark` for the greatest
 published location observed by a native reader and `root_at` for the canonical
 root at a tip. Ordered and unordered readers also expose the underlying log root
-through `ops_root_at`. On proof requests, an optional `min_sequence_number` sets
-the minimum Store sequence for the watermark lookup. Proof reads use the
-sequence observed by that lookup as their minimum.
+through `ops_root_at`. Every read at a tip takes an optional
+`min_sequence_number`, the minimum Store sequence for the watermark lookup.
+The read then uses the sequence observed by that lookup as its minimum.
 
 ## Upload and publish
 
@@ -160,7 +168,7 @@ use exoware_sdk::StoreWriteBatch;
 let prepared = prepare_authenticated_range::<F, H, Op, Sequential>(
     &range,
     &expected_root,
-    &operation_cfg,
+    &op_cfg,
     &Sequential,
 )?;
 let latest = prepared.latest_location();

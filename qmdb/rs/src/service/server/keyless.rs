@@ -5,9 +5,9 @@
 use super::{OperationLogReader, OperationLogServer};
 use crate::{
     adapter::Keyless,
-    proof::{MultiProofOperations, OperationRangeCheckpoint, RawBatchMultiProof},
+    proof::{MultiProofOperations, OperationMultiProof, OperationRangeProof},
     service::proto::qmdb::v1::OperationLogServiceServer,
-    PublishedWatermark, QmdbError,
+    QmdbError, ResolvedTip,
 };
 use commonware_codec::{Decode, Encode, Read};
 use commonware_cryptography::Hasher;
@@ -40,34 +40,33 @@ where
         Self::inspect_operation_kv(self, location, bytes, inspect)
     }
 
-    fn resolve_watermark(
+    fn resolve_tip(
         &self,
-        watermark: Location<F>,
+        tip: Location<F>,
         min_sequence_number: Option<u64>,
-    ) -> impl Future<Output = Result<PublishedWatermark<F>, QmdbError>> + Send {
-        Self::resolve_watermark(self, watermark, min_sequence_number)
+    ) -> impl Future<Output = Result<ResolvedTip<F>, QmdbError>> + Send {
+        Self::resolve_tip(self, tip, min_sequence_number)
     }
 
     fn observe_published(&self, location: Location<F>, sequence: u64) {
         Self::observe_published(self, location, sequence)
     }
 
-    fn operation_range_checkpoint_at(
+    fn operation_range_proof_at(
         &self,
-        watermark: PublishedWatermark<F>,
+        resolved: ResolvedTip<F>,
         start_location: Location<F>,
         max_locations: u32,
-    ) -> impl Future<Output = Result<OperationRangeCheckpoint<Self::Digest, F>, QmdbError>> + Send
-    {
-        Self::operation_range_checkpoint_at(self, watermark, start_location, max_locations)
+    ) -> impl Future<Output = Result<OperationRangeProof<Self::Digest, F>, QmdbError>> + Send {
+        Self::operation_range_proof_at(self, resolved, start_location, max_locations)
     }
 
-    fn multi_proof_at(
+    fn operation_multi_proof_at(
         &self,
-        watermark: PublishedWatermark<F>,
+        resolved: ResolvedTip<F>,
         operations: MultiProofOperations<'_, F>,
-    ) -> impl Future<Output = Result<RawBatchMultiProof<Self::Digest, F>, QmdbError>> + Send {
-        Self::multi_proof_at(self, watermark, operations)
+    ) -> impl Future<Output = Result<OperationMultiProof<Self::Digest, F>, QmdbError>> + Send {
+        Self::operation_multi_proof_at(self, resolved, operations)
     }
 }
 
@@ -80,14 +79,14 @@ pub fn keyless_operation_log_stack<
     V: commonware_codec::Codec + Clone + AsRef<[u8]> + Send + Sync + 'static,
     E: ValueEncoding<Value = V> + Send + Sync + 'static,
 >(
-    raw_store: PrefixedStoreClient,
+    store: PrefixedStoreClient,
     op_cfg: <keyless::Operation<F, E> as Read>::Cfg,
 ) -> ConnectRpcService<impl ::connectrpc::Dispatcher>
 where
     keyless::Operation<F, E>: Encode + Decode + Clone,
 {
-    let reader = Arc::new(Keyless::<F, H, V, E>::new(raw_store.clone(), op_cfg));
+    let reader = Arc::new(Keyless::<F, H, V, E>::new(store.clone(), op_cfg));
     super::stack(OperationLogServiceServer::new(OperationLogServer::new(
-        reader, raw_store,
+        reader, store,
     )))
 }

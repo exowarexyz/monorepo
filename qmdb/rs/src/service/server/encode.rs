@@ -1,7 +1,7 @@
 use crate::{
     proof::{
-        CurrentOperationRangeProofResult, OperationRangeCheckpoint, RawBatchMultiProof,
-        RawKeyExclusionProof, RawKeyLookupProof, RawKeyRangeProof, RawKeyValueProof,
+        CurrentOperationRangeProof, KeyExclusionProof, KeyLookupProof, KeyRangeProof,
+        KeyValueProof, OperationMultiProof, OperationRangeProof,
     },
     service::proto::qmdb::v1::{
         GetCurrentOperationRangeResponse, GetManyResponse, GetOperationRangeResponse,
@@ -142,10 +142,10 @@ fn write_multi_proof_operation(buf: &mut impl BufMut, location: u64, encoded_ope
     write_bytes_field(buf, 2, encoded_operation);
 }
 
-fn operation_multi_proof_len<D: Digest, F: Graftable>(proof: &RawBatchMultiProof<D, F>) -> usize {
+fn operation_multi_proof_len<D: Digest, F: Graftable>(proof: &OperationMultiProof<D, F>) -> usize {
     codec_field_len(1, &proof.proof)
         + proof
-            .operations
+            .encoded_operations
             .iter()
             .map(|(location, encoded)| {
                 message_field_len(2, multi_proof_operation_len(location.as_u64(), encoded))
@@ -161,10 +161,10 @@ fn operation_multi_proof_len<D: Digest, F: Graftable>(proof: &RawBatchMultiProof
 
 fn write_operation_multi_proof<D: Digest, F: Graftable>(
     buf: &mut impl BufMut,
-    proof: &RawBatchMultiProof<D, F>,
+    proof: &OperationMultiProof<D, F>,
 ) {
     write_codec_field(buf, 1, &proof.proof);
-    for (location, encoded) in &proof.operations {
+    for (location, encoded) in &proof.encoded_operations {
         let inner_len = multi_proof_operation_len(location.as_u64(), encoded);
         write_message_field(buf, 2, inner_len);
         write_multi_proof_operation(buf, location.as_u64(), encoded);
@@ -175,9 +175,7 @@ fn write_operation_multi_proof<D: Digest, F: Graftable>(
     }
 }
 
-fn operation_range_checkpoint_len<D: Digest, F: Graftable>(
-    proof: &OperationRangeCheckpoint<D, F>,
-) -> usize {
+fn operation_range_proof_len<D: Digest, F: Graftable>(proof: &OperationRangeProof<D, F>) -> usize {
     codec_field_len(1, &proof.proof)
         + varint_field_len(2, proof.start_location.as_u64())
         + proof
@@ -198,9 +196,9 @@ fn operation_range_checkpoint_len<D: Digest, F: Graftable>(
             .sum::<usize>()
 }
 
-fn write_operation_range_checkpoint<D: Digest, F: Graftable>(
+fn write_operation_range_proof<D: Digest, F: Graftable>(
     buf: &mut impl BufMut,
-    proof: &OperationRangeCheckpoint<D, F>,
+    proof: &OperationRangeProof<D, F>,
 ) {
     write_codec_field(buf, 1, &proof.proof);
     write_u64_field(buf, 2, proof.start_location.as_u64());
@@ -218,17 +216,17 @@ fn write_operation_range_checkpoint<D: Digest, F: Graftable>(
 
 /// Encode `proof` as a `qmdb.v1.OperationRangeProof` protobuf message.
 pub fn encode_operation_range_proof<D: Digest, F: Graftable>(
-    proof: &OperationRangeCheckpoint<D, F>,
+    proof: &OperationRangeProof<D, F>,
 ) -> Vec<u8> {
-    message_bytes(operation_range_checkpoint_len(proof), |buf| {
-        write_operation_range_checkpoint(buf, proof);
+    message_bytes(operation_range_proof_len(proof), |buf| {
+        write_operation_range_proof(buf, proof);
     })
     .to_vec()
 }
 
 /// Encode `proof` as a `qmdb.v1.OperationMultiProof` protobuf message.
 pub fn encode_operation_multi_proof<D: Digest, F: Graftable>(
-    proof: &RawBatchMultiProof<D, F>,
+    proof: &OperationMultiProof<D, F>,
 ) -> Vec<u8> {
     message_bytes(operation_multi_proof_len(proof), |buf| {
         write_operation_multi_proof(buf, proof);
@@ -237,7 +235,7 @@ pub fn encode_operation_multi_proof<D: Digest, F: Graftable>(
 }
 
 fn current_operation_range_proof_len<D: Digest, Op: Encode, const N: usize, F: Graftable>(
-    proof: &CurrentOperationRangeProofResult<D, Op, N, F>,
+    proof: &CurrentOperationRangeProof<D, Op, N, F>,
 ) -> usize {
     codec_field_len(1, &proof.proof)
         + varint_field_len(2, proof.start_location.as_u64())
@@ -255,7 +253,7 @@ fn current_operation_range_proof_len<D: Digest, Op: Encode, const N: usize, F: G
 
 fn write_current_operation_range_proof<D: Digest, Op: Encode, const N: usize, F: Graftable>(
     buf: &mut impl BufMut,
-    proof: &CurrentOperationRangeProofResult<D, Op, N, F>,
+    proof: &CurrentOperationRangeProof<D, Op, N, F>,
 ) {
     write_codec_field(buf, 1, &proof.proof);
     write_u64_field(buf, 2, proof.start_location.as_u64());
@@ -276,21 +274,21 @@ fn write_key_exclusion_proof<P: Encode>(buf: &mut impl BufMut, proof: &P) {
 }
 
 fn key_value_proof_len<D: Digest, Op: Encode, const N: usize, F: Graftable>(
-    proof: &RawKeyValueProof<D, Op, N, F>,
+    proof: &KeyValueProof<D, Op, N, F>,
 ) -> usize {
     codec_field_len(1, &proof.proof) + codec_field_len(2, &proof.operation)
 }
 
 fn write_key_value_proof<D: Digest, Op: Encode, const N: usize, F: Graftable>(
     buf: &mut impl BufMut,
-    proof: &RawKeyValueProof<D, Op, N, F>,
+    proof: &KeyValueProof<D, Op, N, F>,
 ) {
     write_codec_field(buf, 1, &proof.proof);
     write_codec_field(buf, 2, &proof.operation);
 }
 
 fn key_lookup_result_hit_len<D: Digest, Op: Encode, const N: usize, F: Graftable>(
-    proof: &RawKeyValueProof<D, Op, N, F>,
+    proof: &KeyValueProof<D, Op, N, F>,
 ) -> usize {
     let proof_len = key_value_proof_len(proof);
     message_field_len(1, proof_len)
@@ -298,7 +296,7 @@ fn key_lookup_result_hit_len<D: Digest, Op: Encode, const N: usize, F: Graftable
 
 fn write_key_lookup_result_hit<D: Digest, Op: Encode, const N: usize, F: Graftable>(
     buf: &mut impl BufMut,
-    proof: &RawKeyValueProof<D, Op, N, F>,
+    proof: &KeyValueProof<D, Op, N, F>,
 ) {
     let proof_len = key_value_proof_len(proof);
     write_message_field(buf, 1, proof_len);
@@ -313,7 +311,7 @@ fn key_lookup_result_miss_len<
     F: Graftable,
     E: ValueEncoding<Value = V>,
 >(
-    proof: &RawKeyExclusionProof<D, K, V, N, F, E>,
+    proof: &KeyExclusionProof<D, K, V, N, F, E>,
 ) -> usize
 where
     commonware_storage::qmdb::current::ordered::proof::constant::ExclusionProof<F, K, E, D, N>:
@@ -332,7 +330,7 @@ fn write_key_lookup_result_miss<
     E: ValueEncoding<Value = V>,
 >(
     buf: &mut impl BufMut,
-    proof: &RawKeyExclusionProof<D, K, V, N, F, E>,
+    proof: &KeyExclusionProof<D, K, V, N, F, E>,
 ) where
     commonware_storage::qmdb::current::ordered::proof::constant::ExclusionProof<F, K, E, D, N>:
         Encode,
@@ -343,7 +341,7 @@ fn write_key_lookup_result_miss<
 }
 
 pub(crate) fn get_response<D: Digest, Op: Encode, const N: usize, F: Graftable>(
-    proof: &RawKeyValueProof<D, Op, N, F>,
+    proof: &KeyValueProof<D, Op, N, F>,
 ) -> PreEncoded<GetResponse> {
     let proof_len = key_value_proof_len(proof);
     let len = message_field_len(1, proof_len);
@@ -360,7 +358,7 @@ pub(crate) trait LookupResult {
 }
 
 impl<D: Digest, Op: Encode, const N: usize, F: Graftable> LookupResult
-    for RawKeyValueProof<D, Op, N, F>
+    for KeyValueProof<D, Op, N, F>
 {
     fn result_len(&self) -> usize {
         key_lookup_result_hit_len(self)
@@ -378,7 +376,7 @@ impl<
         const N: usize,
         F: Graftable,
         E: ValueEncoding<Value = V>,
-    > LookupResult for RawKeyLookupProof<D, K, V, N, F, E>
+    > LookupResult for KeyLookupProof<D, K, V, N, F, E>
 where
     ordered::Operation<F, K, E>: Encode,
     commonware_storage::qmdb::current::ordered::proof::constant::ExclusionProof<F, K, E, D, N>:
@@ -424,7 +422,7 @@ pub(crate) fn get_range_response<
     F: Graftable,
     E: ValueEncoding<Value = V>,
 >(
-    proof: &RawKeyRangeProof<D, K, V, N, F, E>,
+    proof: &KeyRangeProof<D, K, V, N, F, E>,
 ) -> PreEncoded<GetRangeResponse>
 where
     ordered::Operation<F, K, E>: Encode,
@@ -460,17 +458,17 @@ where
 }
 
 pub(crate) fn get_operation_range_response<D: Digest, F: Graftable>(
-    proof: &OperationRangeCheckpoint<D, F>,
+    proof: &OperationRangeProof<D, F>,
 ) -> PreEncoded<GetOperationRangeResponse> {
-    let proof_len = operation_range_checkpoint_len(proof);
+    let proof_len = operation_range_proof_len(proof);
     PreEncoded::from_bytes_unchecked(message_bytes(message_field_len(1, proof_len), |buf| {
         write_message_field(buf, 1, proof_len);
-        write_operation_range_checkpoint(buf, proof);
+        write_operation_range_proof(buf, proof);
     }))
 }
 
 pub(crate) fn get_operations_response<D: Digest, F: Graftable>(
-    proof: &RawBatchMultiProof<D, F>,
+    proof: &OperationMultiProof<D, F>,
 ) -> PreEncoded<GetOperationsResponse> {
     let proof_len = operation_multi_proof_len(proof);
     PreEncoded::from_bytes_unchecked(message_bytes(message_field_len(1, proof_len), |buf| {
@@ -481,7 +479,7 @@ pub(crate) fn get_operations_response<D: Digest, F: Graftable>(
 
 pub(crate) fn subscribe_response<D: Digest, F: Graftable>(
     resume_sequence_number: u64,
-    proof: &RawBatchMultiProof<D, F>,
+    proof: &OperationMultiProof<D, F>,
 ) -> PreEncoded<SubscribeResponse> {
     let proof_len = operation_multi_proof_len(proof);
     let len = varint_field_len(1, resume_sequence_number) + message_field_len(2, proof_len);
@@ -498,7 +496,7 @@ pub(crate) fn get_current_operation_range_response<
     const N: usize,
     F: Graftable,
 >(
-    proof: &CurrentOperationRangeProofResult<D, Op, N, F>,
+    proof: &CurrentOperationRangeProof<D, Op, N, F>,
 ) -> PreEncoded<GetCurrentOperationRangeResponse> {
     let proof_len = current_operation_range_proof_len(proof);
     let len = message_field_len(1, proof_len);

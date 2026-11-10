@@ -63,7 +63,8 @@ message GetOperationRangeRequest {
   uint64 start_location = 2;
   uint32 max_locations = 3 [(buf.validate.field).uint32.gt = 0];
 
-  // Minimum Store sequence for checking publication of the requested watermark.
+  // Minimum Store sequence for checking that the published watermark covers
+  // the requested tip.
   optional uint64 min_sequence_number = 4;
 }
 
@@ -80,7 +81,8 @@ message GetOperationsRequest {
   uint64 tip = 1;
   repeated uint64 locations = 2 [(buf.validate.field).repeated = {min_items: 1, max_items: 1024}];
 
-  // Minimum Store sequence for checking publication of the requested watermark.
+  // Minimum Store sequence for checking that the published watermark covers
+  // the requested tip.
   optional uint64 min_sequence_number = 3;
 }
 

@@ -33,8 +33,10 @@ use exoware_sdk::proto::PreferZstdHttpClient;
 use http_body::Body;
 use std::{fmt::Display, marker::PhantomData, num::NonZeroU64, sync::Arc};
 
+/// Subscription frame whose operations were verified against the caller's
+/// trusted root. The proof is checked and dropped.
 #[derive(Clone, Debug, PartialEq)]
-pub struct OperationLogSubscribeProof<D: Digest, Op, F: Family> {
+pub struct VerifiedSubscribeFrame<D: Digest, Op, F: Family> {
     pub resume_sequence_number: u64,
     pub tip: Location<F>,
     /// Canonical root at `tip`; see [`crate::proof::VerifiedOperationRange::root`].
@@ -83,7 +85,7 @@ where
     pub async fn message_with_root<R>(
         &mut self,
         root_for_tip: R,
-    ) -> Result<Option<OperationLogSubscribeProof<H::Digest, Op, F>>, QmdbError>
+    ) -> Result<Option<VerifiedSubscribeFrame<H::Digest, Op, F>>, QmdbError>
     where
         R: FnOnce(Location<F>) -> Result<H::Digest, QmdbError>,
     {
@@ -110,7 +112,7 @@ where
             self.op_cfg.as_ref(),
             &expected_root,
         )?;
-        Ok(Some(OperationLogSubscribeProof {
+        Ok(Some(VerifiedSubscribeFrame {
             resume_sequence_number: frame.resume_sequence_number,
             tip,
             root,
@@ -151,6 +153,11 @@ where
     H::Digest: DecodeExt<()>,
     Op: Decode + Encode + Read,
 {
+    /// Client for the endpoint at `base` over plaintext HTTP.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `base` is not a valid URI.
     pub fn plaintext(base: &str, op_cfg: Op::Cfg) -> Self {
         Self::new(
             PreferZstdHttpClient::plaintext(),
@@ -182,7 +189,7 @@ where
         }
     }
 
-    pub async fn get_operation_range(
+    pub async fn operation_range(
         &self,
         request: GetOperationRangeRequest,
         expected_root: &H::Digest,
@@ -211,7 +218,7 @@ where
     }
 
     /// Fetch and verify the operations at `request.locations` of `request.tip`.
-    pub async fn get_operations(
+    pub async fn operations(
         &self,
         request: GetOperationsRequest,
         expected_root: &H::Digest,
@@ -233,9 +240,7 @@ where
         let merkle_proof =
             Proof::<F, H::Digest>::decode_cfg(Copying(proof.proof.as_ref()), &max_digests)
                 .map_err(|err| {
-                    QmdbError::CorruptData(format!(
-                        "failed to decode operations multi proof: {err}"
-                    ))
+                    QmdbError::CorruptData(format!("failed to decode operation multi proof: {err}"))
                 })?;
         locations
             .validate(
@@ -276,7 +281,7 @@ where
     pub async fn current_sync_target(
         &self,
         range: NonEmptyRange<Location<F>>,
-        expected_current_root: &H::Digest,
+        expected_root: &H::Digest,
     ) -> Result<SyncTarget<F, H::Digest>, QmdbError> {
         let proto = self
             .operation_range_proto(range.end(), range.start(), NonZeroU64::MIN)
@@ -284,7 +289,7 @@ where
         current_sync_target_from_witness::<F, H>(
             proto.ops_root.as_ref(),
             proto.ops_root_witness.as_ref(),
-            expected_current_root,
+            expected_root,
             range,
         )
     }
@@ -414,16 +419,20 @@ where
         })?;
     if !witness.verify::<H>(&ops_root, current_root) {
         return Err(QmdbError::ProofVerification {
-            kind: crate::ProofKind::RangeCheckpoint,
+            kind: crate::ProofKind::OperationRange,
         });
     }
     Ok(SyncTarget::new(ops_root, range))
 }
 
+/// The operations-log root a proof of `kind` must verify against: the embedded
+/// `ops_root` after checking it, directly or through its witness, against
+/// `expected_root`.
 fn operation_target_root<F, H>(
     ops_root: &[u8],
     ops_root_witness: &[u8],
     expected_root: &H::Digest,
+    kind: crate::ProofKind,
 ) -> Result<H::Digest, QmdbError>
 where
     F: Graftable,
@@ -438,9 +447,7 @@ where
     let ops_root = decode_digest::<H::Digest>(ops_root, "operation-log root")?;
     if ops_root_witness.is_empty() {
         if ops_root != *expected_root {
-            return Err(QmdbError::ProofVerification {
-                kind: crate::ProofKind::BatchMulti,
-            });
+            return Err(QmdbError::ProofVerification { kind });
         }
         return Ok(ops_root);
     }
@@ -451,9 +458,7 @@ where
             ))
         })?;
     if !witness.verify::<H>(&ops_root, expected_root) {
-        return Err(QmdbError::ProofVerification {
-            kind: crate::ProofKind::BatchMulti,
-        });
+        return Err(QmdbError::ProofVerification { kind });
     }
     Ok(ops_root)
 }
@@ -484,11 +489,15 @@ where
             Ok((Location::<F>::new(op.location), decoded))
         })
         .collect::<Result<Vec<_>, QmdbError>>()?;
-    let target_root =
-        operation_target_root::<F, H>(&proto.ops_root, &proto.ops_root_witness, root)?;
+    let target_root = operation_target_root::<F, H>(
+        &proto.ops_root,
+        &proto.ops_root_witness,
+        root,
+        crate::ProofKind::OperationMulti,
+    )?;
     if !proof.verify_multi::<H, _>(&operations, &target_root) {
         return Err(QmdbError::ProofVerification {
-            kind: crate::ProofKind::BatchMulti,
+            kind: crate::ProofKind::OperationMulti,
         });
     }
     Ok((*root, operations))
@@ -511,8 +520,12 @@ where
             "operation range proof has no operations".to_string(),
         ));
     }
-    let target_root =
-        operation_target_root::<F, H>(&proto.ops_root, &proto.ops_root_witness, root)?;
+    let target_root = operation_target_root::<F, H>(
+        &proto.ops_root,
+        &proto.ops_root_witness,
+        root,
+        crate::ProofKind::OperationRange,
+    )?;
     let max_digests = proof_digest_cap::<H::Digest>(&proto.proof);
     let proof = Proof::<F, H::Digest>::decode_cfg(Copying(proto.proof.as_ref()), &max_digests)
         .map_err(|err| {
@@ -548,7 +561,7 @@ where
         &target_root,
     ) {
         return Err(QmdbError::ProofVerification {
-            kind: crate::ProofKind::RangeCheckpoint,
+            kind: crate::ProofKind::OperationRange,
         });
     }
     Ok((*root, decoded_operations))

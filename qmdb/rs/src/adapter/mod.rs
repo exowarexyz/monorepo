@@ -1,13 +1,18 @@
-//! Commonware QMDB mapped onto the Exoware Store.
+//! Commonware QMDB on the Exoware Store.
 //!
-//! Writers stage authenticated operation ranges, current batch publications, and
-//! watermarks as Store rows with [`upload`].
-//! Readers ([`Ordered`], [`Unordered`], [`Immutable`], [`Keyless`]) serve
-//! historical and current proofs from those rows.
+//! [`upload`] prepares and stages what a writer uploads: authenticated operation ranges, current
+//! batch publications, and the watermarks that publish them.
 //!
-//! Each proven read has a raw variant (`*_raw`, or `operation_range_checkpoint`
-//! for `operation_range`) that returns the proof alongside the payload. Both are
-//! checked against the root stored with the proof.
+//! The readers ([`Ordered`], [`Unordered`], [`Immutable`], and [`Keyless`]) query the uploaded
+//! rows at a tip, a location at or below the published watermark, and build historical and current
+//! proofs from them. Keyless and immutable roots and operation proofs need a tip that is a commit,
+//! current-state reads need a commit whose publication was uploaded, and other reads accept any
+//! such tip.
+//!
+//! A read verifies its proof against the root the rows determine at that tip and returns the
+//! payload with that root, for the caller to compare with a root it trusts. The `*_proof` reads
+//! return the verified proof itself. The `get_at` and `get_many_at` reads return indexed values
+//! without a proof.
 
 pub(crate) mod codec;
 pub(crate) mod core;
