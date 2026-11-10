@@ -66,8 +66,9 @@ DataFusion aggregation.
 - **Aggregates:** `COUNT`, `SUM`, `MIN`, `MAX`, and numeric `AVG` returning a double
   (pushed as a sum and a count). Group-only queries and `SELECT DISTINCT` use the same
   grouping path. Aggregates with `DISTINCT`, such as `COUNT(DISTINCT x)`, run in
-  DataFusion. A finite `LIMIT` directly above a group-only aggregate keeps it in
-  DataFusion, where streaming and `DISTINCT` limit optimizations apply.
+  DataFusion. A finite `LIMIT` that reaches a group-only aggregate, directly or through
+  projections and subquery aliases, keeps it in DataFusion, where streaming and
+  `DISTINCT` limit optimizations apply.
 - **Expressions:** columns, literals, numeric `+`, `-`, `*`, `/`, `lower`, and
   `date_trunc('day', ...)` on timestamps without a timezone. Aliases and transparent
   projection chains are resolved. Identity casts, compatible string representations,

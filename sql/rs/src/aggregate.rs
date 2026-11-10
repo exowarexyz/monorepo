@@ -268,8 +268,14 @@ impl KvAggregatePushdownRule {
         plan: LogicalPlan,
         limited: bool,
     ) -> DataFusionResult<Transformed<LogicalPlan>> {
-        // DataFusion only stops distinct aggregation early when the limit sits directly above it.
-        let input_limited = matches!(plan, LogicalPlan::Limit(_)) && plan.fetch()?.is_some();
+        // DataFusion only stops distinct aggregation early when the limit sits directly above
+        // it. Its limit pushdown moves a limit below a projection or a subquery alias, so a
+        // limit above either of them reaches their input.
+        let input_limited = match &plan {
+            LogicalPlan::Limit(_) => plan.fetch()?.is_some(),
+            LogicalPlan::Projection(_) | LogicalPlan::SubqueryAlias(_) => limited,
+            _ => false,
+        };
 
         // A plan embedded in an expression, such as a scalar subquery, is a query of its own
         // with no limit above it.
@@ -2465,6 +2471,10 @@ mod tests {
         for (sql, unordered_input) in [
             ("SELECT DISTINCT id FROM orders LIMIT 1", false),
             ("SELECT DISTINCT status FROM orders LIMIT 1", true),
+            (
+                "SELECT x FROM (SELECT DISTINCT status AS x, region FROM orders) d LIMIT 1",
+                true,
+            ),
         ] {
             let native_plan = fixture
                 .native
@@ -2536,6 +2546,9 @@ mod tests {
         for sql in [
             "SELECT region FROM orders GROUP BY region ORDER BY region LIMIT 10",
             "SELECT region FROM orders GROUP BY region ORDER BY region DESC LIMIT 1",
+            "SELECT DISTINCT region FROM orders ORDER BY region LIMIT 1",
+            "SELECT x FROM (SELECT DISTINCT region AS x, status FROM orders ORDER BY x, status \
+             LIMIT 3) d LIMIT 1 OFFSET 1",
         ] {
             fixture.check(sql, 1).await;
         }
