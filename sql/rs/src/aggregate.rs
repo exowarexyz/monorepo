@@ -1325,9 +1325,9 @@ pub(crate) fn build_aggregate_reduce_job(
         None => (Vec::new(), None),
     };
 
-    // Every filter is a supported constraint, so the primary-key ranges are complete. When
-    // they also enforce each constraint, they hold exactly the rows the predicate accepts
-    // and the worker needs no filter. That covers key columns with no field reference.
+    // Every filter is a supported constraint, so the primary-key ranges are complete. When they
+    // also enforce each constraint, they hold exactly the rows the predicate accepts and the
+    // worker needs no filter, even for a key column that a worker filter cannot read.
     let filter = if filters.is_empty()
         || (matches!(access_path, AggregateAccessPath::PrimaryKey)
             && access_plan.predicate_fully_enforced_by_primary_key(&table.model))
@@ -3273,6 +3273,9 @@ mod tests {
 
         let (a, b, one) = (|| col("a"), || col("b"), || lit(1_i64));
         let equal = || a().eq(one());
+
+        // Columns, literals, comparisons, null tests, IN lists, and AND, OR, and NOT over them
+        // cannot raise.
         for expr in [
             a(),
             one(),
@@ -3295,6 +3298,9 @@ mod tests {
                 "cannot_raise must accept {expr}"
             );
         }
+
+        // Casts, arithmetic, functions, CASE, boolean tests, LIKE, BETWEEN, IS DISTINCT FROM, and
+        // any accepted form with one of them inside are refused.
         for expr in [
             cast(a(), DataType::Float64),
             try_cast(a(), DataType::Float64),

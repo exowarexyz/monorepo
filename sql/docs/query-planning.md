@@ -170,11 +170,9 @@ response, so the count can exceed the number of result rows. `store_requests` co
 `Reduce` requests it started. `elapsed_compute` covers decoding their responses and
 excludes time spent waiting for the Store.
 
-`EXPLAIN FORMAT TREE` shows the fields of a `KvAggregateExec` one per line, with line
-breaks in values escaped. A `jobs` line names its Reduce jobs. When there are several,
-each field lists one value per job in that order, separated by semicolons. DataFusion's
-tree renderer cuts a node off after 30 lines, so a node with many jobs loses its last
-fields there. `EXPLAIN` without `FORMAT TREE` lists every job in full.
+In `EXPLAIN FORMAT TREE`, a `jobs` line in the `KvAggregateExec` box names its Reduce
+jobs. When there are several, each field lists one value per job in that order,
+separated by semicolons.
 
 ## Reading EXPLAIN output
 
@@ -198,10 +196,10 @@ inside one read is not counted.
 | `full_scan_like=true` | The primary-key ranges are broad enough to resemble a full table scan. |
 | `constrained_prefix=<N>` | The number of leading key columns the predicate constrains. |
 
-`EXPLAIN FORMAT TREE` writes the same fields in the `KvScanExec` box, one per line, with
-line breaks in values escaped. DataFusion wraps long values and cuts a box after 30
-lines, so a long predicate can hide later fields. `EXPLAIN` without `FORMAT TREE` always
-shows every field.
+`EXPLAIN FORMAT TREE` writes the fields of each `KvScanExec` and `KvAggregateExec` in its
+box, one per line, with line breaks in values escaped. DataFusion wraps long values and
+cuts a box after 30 lines, so a long predicate or many jobs can hide later fields.
+`EXPLAIN` without `FORMAT TREE` always shows every field.
 
 An indexed scan with a residual check, for `WHERE status = 'open' AND amount_cents >= 5`
 over an index on `status`:

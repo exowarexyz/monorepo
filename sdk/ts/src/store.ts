@@ -762,6 +762,16 @@ const prefixedClientBindings = new WeakMap<PrefixedStoreClient, PrefixedClientBi
  * sequence observed by any clone. An absent floor sends no requirement, and zero is an explicit
  * floor. An initial floor is a requirement, not an observation. A write is observed only when its
  * commit sequence is recorded with `observeWrite`.
+ *
+ * A session created with floor 5 sends these minimum sequences as its reads observe 9, 12, and then
+ * 15:
+ *
+ * ```text
+ *                      read 1   read 2   read 3
+ * monotonic sends         5        9       12
+ * fixed sends             5        5        5
+ * response sequence       9       12       15
+ * ```
  */
 export class ReadSession {
     private policy: ReadPolicy = 'monotonic';
@@ -816,10 +826,6 @@ export class ReadSession {
 
     /**
      * Record the sequence a write committed at, with the same effect as a read observation.
-     *
-     * A monotonic session requires the sequence for reads started afterwards. A fixed session keeps
-     * its floor and reports the sequence through `evaluatedSequence()`. Clones share the
-     * observation.
      */
     observeWrite(sequenceNumber: bigint): void {
         if (typeof sequenceNumber !== 'bigint') {

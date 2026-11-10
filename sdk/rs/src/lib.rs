@@ -1816,6 +1816,16 @@ pub struct StoreClient {
 /// an exact snapshot. Clones share observations, including stream frames.
 /// An initial floor does not count as an observed sequence.
 ///
+/// A session created with floor 5 sends these minimum sequences as its reads
+/// observe 9, 12, and then 15:
+///
+/// ```text
+///                      read 1   read 2   read 3
+/// monotonic sends         5        9       12
+/// fixed sends             5        5        5
+/// response sequence       9       12       15
+/// ```
+///
 /// Streamed reads record response sequences as frames arrive, including the
 /// first frame fetched before the stream is returned to the caller. Log reads
 /// record successfully returned batches. A write is observed only when its
@@ -2916,10 +2926,6 @@ impl ReadSession {
 
     /// Record the sequence a write committed at, with the same effect as a read
     /// observation.
-    ///
-    /// A monotonic session requires the sequence for reads started afterwards. A
-    /// fixed session keeps its floor and reports the sequence through
-    /// [`Self::evaluated_sequence`]. Clones share the observation.
     pub fn observe_write(&self, sequence_number: u64) {
         self.observed_sequence.observe(sequence_number);
     }

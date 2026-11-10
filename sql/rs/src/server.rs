@@ -747,8 +747,6 @@ fn client_error_to_connect(err: &exoware_sdk::ClientError) -> ConnectError {
 /// Such an error comes from the caller's request, for example an unknown name or a bad setting
 /// value, so it is `invalid_argument` where the general mapping says `internal`. A failed Store
 /// call keeps its own code, and a DataFusion internal error marks a bug and stays `internal`.
-/// `CREATE FUNCTION` does not use this mapping, because its dispatch runs the embedder's function
-/// factory and the factory's faults are the server's.
 fn session_command_error_to_connect(err: DataFusionError) -> ConnectError {
     let keeps_code = match err.find_root() {
         DataFusionError::Internal(_) => true,
@@ -1674,6 +1672,7 @@ mod tests {
 
     #[test]
     fn too_many_insert_entries_map_to_invalid_argument() {
+        // The mapping finds a PutTooLarge beneath a context layer.
         let error = DataFusionError::External(Box::new(PutTooLarge {
             entries: 3,
             max_entries: 2,
@@ -1689,6 +1688,7 @@ mod tests {
 
     #[test]
     fn failed_store_calls_keep_their_codes_in_session_commands() {
+        // A malformed Store response and a Store internal error stay the server's faults.
         for store_error in [
             exoware_sdk::ClientError::WireFormat("truncated frame".into()),
             exoware_sdk::ClientError::Rpc(Box::new(ConnectError::internal("store fault"))),

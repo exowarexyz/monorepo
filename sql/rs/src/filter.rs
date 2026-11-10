@@ -380,9 +380,23 @@ impl ScanAccessPlan {
     ///
     /// A range bound holds the index key columns and then the primary-key columns, compared as
     /// one tuple. Bounds can therefore fix each leading column to one value and give the next
-    /// column an inclusive range. The proof counts no column after that range as enforced. It
-    /// accepts a predicate whose every constraint sits in the enforced part and is one the
-    /// bounds are known to encode.
+    /// column an inclusive range. These are the bounds of one of the two ranges for
+    /// `a = 7 AND b IN (2, 3) AND c >= 5` on an index over `(a, b, c)` with primary key `(id)`:
+    ///
+    /// ```text
+    ///            index key columns     suffix
+    ///           +-----+-----+-----+   +-----+
+    ///           |  a  |  b  |  c  |   | id  |
+    ///           +-----+-----+-----+   +-----+
+    ///   lower      7     2     5        min
+    ///   upper      7     2    max       max
+    ///           '---- enforced ---'   not enforced
+    /// ```
+    ///
+    /// Here `min` and `max` are the ends of a column's type. An entry with a greater `c` sorts
+    /// between the bounds whatever its `id`, so the proof counts no column after that range as
+    /// enforced. It accepts a predicate whose every constraint sits in the enforced part and is
+    /// one the bounds are known to encode.
     ///
     /// - An index key column encodes a single value, an IN list as one range per value, and an
     ///   inclusive range within its type. A strict float bound admits the bound itself, and a date

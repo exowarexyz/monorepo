@@ -510,9 +510,9 @@ impl DisplayAs for KvScanExec {
         let query_stats = format_query_stats_explain(QueryStatsExplainSurface::StreamedRangeDetail);
 
         // The tree format reads one `key=value` pair per line, so each value is escaped to stay
-        // on its line. The pairs are the facts of the one-line format, without a fetch or
-        // direction the scan does not have. DataFusion wraps long values and cuts a long node,
-        // so only the one-line format is complete.
+        // on its line. The pairs repeat the facts of the one-line format and omit an absent fetch
+        // or direction. DataFusion wraps long values and cuts a long node, so only the one-line
+        // format is complete.
         if t == DisplayFormatType::TreeRender {
             let mut pair = |name: &str, value: &dyn fmt::Display| {
                 writeln!(f, "{name}={}", escape_tree_value(&value.to_string()))
@@ -1009,11 +1009,20 @@ async fn stream_point_scan(
 /// Filters secondary-index entries before fetching and filtering their base rows.
 ///
 /// While the index key ranges are proven to enforce the whole predicate, every entry should yield
-/// one output row, so each range request asks only for the entries the limit still needs. A request
-/// that returns that many entries and leaves the limit unmet shows that an entry yielded no row,
-/// and it ends the sizing for the rest of the scan. A range that runs out first does not. Later
-/// range requests are unlimited and their lookups take full batches, so such entries are skipped a
-/// batch at a time and not with one request each.
+/// one output row, so each range request asks only for the `n` entries the limit still needs. A
+/// request that returns all `n` and leaves the limit unmet shows that an entry yielded no row, and
+/// the rest of the scan stops sizing its requests:
+///
+/// ```text
+///   sized     Range(limit n) ------------------------> GetMany(<= n keys) -----> rows
+///     |
+///     | all n entries returned and the limit still unmet
+///     v
+///   unsized   Range(no limit) after the last entry --> GetMany(full batches) --> rows
+/// ```
+///
+/// A range that runs out before `n` entries keeps the sizing. Unsized requests skip entries that
+/// yield no row a batch at a time and not with one request each.
 pub(crate) async fn stream_index_lookup_scan(
     tx: &tokio::sync::mpsc::Sender<DataFusionResult<RecordBatch>>,
     ctx: &ScanCtx<'_>,
@@ -2801,6 +2810,8 @@ mod tests {
             ("SELECT s FROM orders ORDER BY s", 0, true, None),
         ] {
             let (scan, rendered) = fixture.scan(sql).await;
+
+            // The plan reads the index in its key order with no sort and keeps the limit.
             assert!(
                 !rendered.contains("SortExec"),
                 "{sql} must plan no sort\n{rendered}"
@@ -2811,6 +2822,8 @@ mod tests {
                 "{sql} must read the index that holds its order\n{rendered}"
             );
             assert_eq!(scan.fetch, limit, "{sql} must carry its limit\n{rendered}");
+
+            // The Store sees one range request on that index, limited to the query's limit if any.
             let requests = fixture.check(sql).await;
             assert!(
                 matches!(
@@ -3450,6 +3463,8 @@ mod tests {
     #[tokio::test]
     async fn store_requests_counts_started_reads_and_not_sdk_retries() {
         let fixture = tagged_orders(3).await;
+
+        // The first range request fails once with a transient error, and the SDK retries it.
         *fixture.rows.failing_ranges.lock().unwrap() = 1;
         let metrics = fixture.scan_metrics("SELECT id FROM orders").await;
         assert_eq!(

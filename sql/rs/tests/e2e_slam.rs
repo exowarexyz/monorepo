@@ -445,8 +445,11 @@ async fn connect_query_rejects_shared_catalog_changes() {
         let error = query_error(&client, sql).await;
         assert_eq!(error.code, ErrorCode::InvalidArgument, "{sql}: {error:?}");
     }
+
+    // A setting outside the catalog and parser options is still accepted.
     query_row_count(&client, "SET datafusion.execution.batch_size = 17").await;
 
+    // The served table still answers with its stored row.
     let response = client
         .query(QueryRequest {
             sql: "SELECT value FROM items WHERE id = 1".to_string(),

@@ -300,8 +300,7 @@ impl StoreWriteBatchUpload for BatchWriter {
 /// The batch must fit the Store's limits for one write. Once it holds more than
 /// `MAX_PUT_ENTRIES` entries or `MAX_REQUEST_MESSAGE_BYTES` encoded bytes, the sink stops
 /// reading and fails without sending anything. Too many entries fail with `PutTooLarge` and
-/// too many bytes with `ResourcesExhausted`. `SqlServer` reports them with the codes the
-/// Store gives an oversized Put.
+/// too many bytes with `ResourcesExhausted`.
 #[derive(Debug)]
 pub(crate) struct KvIngestSink {
     /// Table provider supplying the sink's schema, row encodings, and Store namespace.
