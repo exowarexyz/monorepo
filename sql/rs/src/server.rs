@@ -764,7 +764,7 @@ fn validate_field_length(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::TableColumnConfig;
+    use crate::{types::KvTable, TableColumnConfig};
     use axum::serve::{Listener, ListenerExt};
     use buffa::Message;
     use datafusion::{
@@ -778,7 +778,7 @@ mod tests {
             ipc::reader::StreamReader,
             record_batch::RecordBatchOptions,
         },
-        datasource::MemTable,
+        datasource::{source_as_provider, MemTable},
         logical_expr::{create_udf, ColumnarValue, Volatility},
         physical_plan::stream::RecordBatchStreamAdapter,
     };
@@ -828,6 +828,81 @@ mod tests {
             assert_eq!(server.stream(name).unwrap().model.columns[0].name, name);
         }
         assert!(server.stream("unknown").is_err());
+    }
+
+    #[tokio::test]
+    async fn declared_table_names_are_exact_on_every_surface() {
+        // Parsed as SQL, `Orders` would fold to `orders`, the dotted names would split into a
+        // schema and a table, and the last name would lose its quotes.
+        let names = [
+            "orders",
+            "Orders",
+            "Order Events",
+            "a.b",
+            "public.Orders",
+            "\"Orders\"",
+        ];
+        let mut schema = KvSchema::new(StoreClient::new("http://127.0.0.1:1").unprefixed());
+        for name in names {
+            schema = schema
+                .table(
+                    name,
+                    vec![TableColumnConfig::new("id", DataType::Int64, false)],
+                    vec!["id".into()],
+                    vec![],
+                )
+                .unwrap();
+        }
+        let server = SqlServer::new(schema).unwrap();
+
+        // The prefix of the table a query scans tells which declared table its name reached.
+        let scanned_prefix = async |sql: String| {
+            let state = server.context().datafusion().state();
+            let plan = state.create_logical_plan(&sql).await.unwrap();
+            let mut prefix = None;
+            plan.apply(|node| {
+                if let LogicalPlan::TableScan(scan) = node {
+                    let provider = source_as_provider(&scan.source)?;
+                    let table = provider.downcast_ref::<KvTable>().unwrap();
+                    prefix = Some(table.model.table_prefix);
+                }
+                Ok(TreeNodeRecursion::Continue)
+            })
+            .unwrap();
+            prefix.unwrap()
+        };
+
+        // `Tables` lists the declared names.
+        let listed: Vec<_> = server
+            .describe_tables()
+            .into_iter()
+            .map(|table| table.name)
+            .collect();
+        assert_eq!(listed, names);
+
+        for (position, name) in names.into_iter().enumerate() {
+            let prefix = position as u8;
+
+            // `Subscribe` finds the table by its declared name, and a predicate qualifies
+            // columns with that name as a quoted identifier.
+            let stream = server.stream(name).unwrap();
+            assert_eq!(stream.model.table_prefix, prefix, "{name}");
+            let quoted = format!("\"{}\"", name.replace('"', "\"\""));
+            compile_subscription_predicate(
+                server.context().datafusion(),
+                &stream.model.schema,
+                name,
+                &format!("{quoted}.id = 1"),
+            )
+            .unwrap_or_else(|error| panic!("the qualifier {quoted} must resolve: {error}"));
+
+            // A query reaches the same table through the same quoted identifier.
+            let sql = format!("SELECT id FROM {quoted} WHERE {quoted}.id = 1");
+            assert_eq!(scanned_prefix(sql).await, prefix, "{name}");
+        }
+
+        // SQL folds an unquoted identifier to lower case, so it names another table.
+        assert_eq!(scanned_prefix("SELECT id FROM Orders".into()).await, 0);
     }
 
     #[test]

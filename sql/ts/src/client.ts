@@ -67,6 +67,10 @@ export interface IndexInfo {
 }
 
 export interface TableInfo {
+  /**
+   * Exact, case-sensitive table name. Pass it unchanged to `subscribe`. In SQL,
+   * double-quote it. The quotes are optional for a lower-case identifier.
+   */
   name: string;
   columns: ColumnInfo[];
   /** Names of primary-key columns in key-sort order. */

@@ -53,7 +53,9 @@ export const TablesRequestSchema: GenMessage<TablesRequest> = /*@__PURE__*/
  */
 export type Table = Message<"sql.v1.Table"> & {
   /**
-   * Name clients pass to `Subscribe.table` / reference in `Query.sql`.
+   * Exact, case-sensitive table name. Pass it unchanged as `Subscribe.table`.
+   * In SQL, double-quote it. The quotes are optional for a lower-case
+   * identifier.
    *
    * @generated from field: string name = 1;
    */

@@ -3,7 +3,9 @@ use async_trait::async_trait;
 use datafusion::{
     arrow::datatypes::SchemaRef,
     catalog::Session,
-    common::{tree_node::TreeNode, DataFusionError, Result as DataFusionResult, SchemaExt},
+    common::{
+        tree_node::TreeNode, DataFusionError, Result as DataFusionResult, SchemaExt, TableReference,
+    },
     datasource::{sink::DataSinkExec, TableProvider},
     logical_expr::{dml::InsertOp, Expr, TableProviderFilterPushDown, TableType},
     physical_expr::{
@@ -36,6 +38,15 @@ impl KvSchema {
         }
     }
 
+    /// Adds a table. `name` is the table's exact, case-sensitive name in SQL, in the `Tables`
+    /// and `Subscribe` RPCs, and in this crate's APIs.
+    ///
+    /// In SQL, a double-quoted identifier always names the table. The quotes are optional for
+    /// a lower-case identifier, because SQL folds unquoted identifiers to lower case.
+    ///
+    /// DataFusion parses a table name passed as a string the same way, for example in
+    /// [`SqlContext::table`] and `DataFrame::write_table`. Double-quote the name there too, or
+    /// pass `TableReference::bare(name)` where a reference is accepted.
     pub fn table(
         mut self,
         name: impl Into<String>,
@@ -109,8 +120,11 @@ impl KvSchema {
 
     /// Registers the tables in a SQL context.
     pub(crate) fn register_all(self, ctx: &SqlContext) -> DataFusionResult<()> {
+        // A declared name is the table's exact name, so each table is registered under a bare
+        // reference. DataFusion parses a plain string as SQL, folding its case and splitting it on
+        // dots.
         for (name, table) in self.tables {
-            ctx.register_table(name, table)?;
+            ctx.register_table(TableReference::bare(name), table)?;
         }
         Ok(())
     }

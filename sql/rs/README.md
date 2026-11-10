@@ -80,6 +80,11 @@ schema with the same tables in the same order. A schema supports at most 16
 tables, each with at most 15 secondary indexes. The
 [key layout](../docs/query-planning.md#key-layout) explains these limits.
 
+A table's name is exact and case-sensitive. In SQL, a double-quoted identifier
+always names the table, as in `SELECT * FROM "Orders"`. The quotes are optional
+for a lower-case identifier, because SQL folds unquoted identifiers to lower
+case. The `Tables` and `Subscribe` RPCs use the name as declared.
+
 When several SQL schemas, or SQL and [QMDB](../../qmdb/README.md), share a Store,
 give each a disjoint SDK `StoreKeyPrefix`. SQL scans are bounded by the schema's
 prefix, so overlapping prefixes can expose one tenant's keys in another's tables.
