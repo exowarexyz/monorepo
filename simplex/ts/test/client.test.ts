@@ -130,7 +130,7 @@ test('header rows require a non-empty digest and header', () => {
   assert.throws(() => simplex.prepareHeader({ digest: 'e0', header: new Uint8Array() }), empty);
   assert.throws(() => simplex.prepareBlock({ digest: '', header: 'e1', body: 'b0' }), empty);
 
-  // A certificate upload without digest and header must not write a header row
+  // A certificate upload without digest and header must not write a header row.
   assert.throws(
     () => simplex.prepareNotarized({ epoch: 0, view: 7, notarized: 'a1' } as never),
     empty,

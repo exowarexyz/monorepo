@@ -680,7 +680,7 @@ async fn indexed_reads_reject_certificates_stored_under_another_index() {
     }
 
     // A mis-keyed height row must fail its height read and the latest-finalized read, where it
-    // sorts last
+    // sorts last.
     let mut batch = StoreWriteBatch::new();
     batch
         .push(
