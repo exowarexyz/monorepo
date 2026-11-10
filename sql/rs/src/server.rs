@@ -597,12 +597,13 @@ fn evaluate_batch(
 }
 
 /// Rejects remote statements that would read or write the server's files, replace its runtime
-/// environment, change the catalog that every caller shares, or write other than with
-/// `INSERT INTO`. Like DataFusion's `SQLOptions::verify_plan`, the check visits every node,
-/// including subqueries and the inputs of `EXPLAIN` and `PREPARE`.
+/// environment, change the catalog or the SQL parsing that every caller shares, or write other
+/// than with `INSERT INTO`. Like DataFusion's `SQLOptions::verify_plan`, the check visits every
+/// node, including subqueries and the inputs of `EXPLAIN` and `PREPARE`.
 ///
 /// `CREATE FUNCTION` and `DROP FUNCTION` stay available as session commands. Embedders
-/// register tables and views and configure the runtime on the server's [`SqlContext`].
+/// register tables and views and configure the runtime and SQL parser on the server's
+/// [`SqlContext`].
 fn verify_remote_plan(plan: &LogicalPlan) -> DataFusionResult<()> {
     plan.apply_with_subqueries(|node| {
         let what = match node {
@@ -625,6 +626,8 @@ fn verify_remote_plan(plan: &LogicalPlan) -> DataFusionResult<()> {
                     "changing datafusion.runtime options"
                 } else if variable.starts_with("datafusion.catalog.") {
                     "changing datafusion.catalog options"
+                } else if variable.starts_with("datafusion.sql_parser.") {
+                    "changing datafusion.sql_parser options"
                 } else {
                     return Ok(TreeNodeRecursion::Continue);
                 }

@@ -438,10 +438,14 @@ async fn connect_query_rejects_shared_catalog_changes() {
         "SET datafusion.catalog.default_schema = 'scratch'",
         "SET datafusion.catalog.information_schema = true",
         "RESET datafusion.catalog.default_schema",
+        "SET datafusion.sql_parser.dialect = 'mysql'",
+        "RESET datafusion.sql_parser.dialect",
+        "SET datafusion.sql_parser.enable_ident_normalization = false",
     ] {
         let error = query_error(&client, sql).await;
         assert_eq!(error.code, ErrorCode::InvalidArgument, "{sql}: {error:?}");
     }
+    query_row_count(&client, "SET datafusion.execution.batch_size = 17").await;
 
     let response = client
         .query(QueryRequest {
@@ -482,6 +486,9 @@ async fn connect_query_rejects_shared_catalog_changes() {
     let options = ctx.datafusion().state().config().options().clone();
     assert_eq!(options.catalog.default_schema, "public");
     assert!(!options.catalog.information_schema);
+    assert_eq!(options.sql_parser.dialect, Default::default());
+    assert!(options.sql_parser.enable_ident_normalization);
+    assert_eq!(options.execution.batch_size.get(), 17);
     handle.abort();
 }
 

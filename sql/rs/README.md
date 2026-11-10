@@ -323,17 +323,21 @@ the Store. A result whose encoded stream exceeds 256 MiB fails with
 `RESOURCE_EXHAUSTED`.
 
 `Query` accepts queries and `EXPLAIN`, `INSERT INTO` registered tables, `SET`
-and `RESET` of options outside `datafusion.runtime` and `datafusion.catalog`,
-`PREPARE`, `EXECUTE`, `DEALLOCATE`, `CREATE FUNCTION`, and `DROP FUNCTION`.
-Session commands such as `SET`, `PREPARE`, and `CREATE FUNCTION` modify the
-server's shared context, so their effects persist into later requests.
+and `RESET` of options outside `datafusion.runtime`, `datafusion.catalog`, and
+`datafusion.sql_parser`, `PREPARE`, `EXECUTE`, `DEALLOCATE`, `CREATE FUNCTION`,
+and `DROP FUNCTION`. Session commands such as `SET`, `PREPARE`, and
+`CREATE FUNCTION` modify the server's shared context, so their effects persist
+into later requests. Every caller shares the session's settings, functions, and
+prepared statements, including statements the embedder prepared on
+`server.context()`. Serve `Query` only to callers trusted with all of them.
 `CREATE FUNCTION` needs a function factory installed on the server's context.
 
 `Query` rejects catalog DDL such as `CREATE TABLE`, `CREATE VIEW`, and
-`DROP TABLE` because every caller shares the catalog. It rejects `COPY` and
+`DROP TABLE` because every caller shares the catalog, and parser options because
+they decide how every caller's SQL is read. It rejects `COPY` and
 `CREATE EXTERNAL TABLE` because they reach the server's files, and `DELETE`,
 `UPDATE`, and other writes because `INSERT INTO` is the only write the service
-offers. Register tables and views and set runtime options through
+offers. Register tables and views and set runtime and parser options through
 `server.context()`.
 
 `Subscribe` streams rows from each Store batch that writes to a table and matches
