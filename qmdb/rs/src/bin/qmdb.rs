@@ -73,7 +73,8 @@ enum Command {
         store_url: String,
         #[arg(long, default_value = "")]
         store_prefix: String,
-        #[arg(long, default_value = "0.0.0.0")]
+        /// Address to listen on. The default accepts only connections from this machine.
+        #[arg(long, default_value = "127.0.0.1")]
         host: IpAddr,
         #[arg(long, default_value_t = 8081)]
         port: u16,
@@ -335,5 +336,25 @@ async fn main() -> std::process::ExitCode {
             eprintln!("qmdb failed: {err}");
             std::process::ExitCode::FAILURE
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn run_host(host_args: &[&str]) -> IpAddr {
+        let args = ["qmdb", "run", "--store-url", "http://127.0.0.1:8080"];
+        let cli = Cli::try_parse_from(args.iter().chain(host_args)).unwrap();
+        let Command::Run { host, .. } = cli.command else {
+            panic!("the arguments must parse as the run command");
+        };
+        host
+    }
+
+    #[test]
+    fn run_listens_on_loopback_unless_a_host_is_given() {
+        assert_eq!(run_host(&[]), IpAddr::from([127, 0, 0, 1]));
+        assert_eq!(run_host(&["--host", "0.0.0.0"]), IpAddr::from([0, 0, 0, 0]));
     }
 }
