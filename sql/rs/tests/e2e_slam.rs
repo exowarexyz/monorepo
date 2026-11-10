@@ -10,7 +10,7 @@ use connectrpc::{client::ClientConfig, ConnectError, ErrorCode};
 use datafusion::{
     arrow::{
         array::{ArrayRef, AsArray, Int64Array},
-        datatypes::DataType,
+        datatypes::{DataType, Int64Type},
         ipc::reader::StreamReader,
         record_batch::RecordBatch,
     },
@@ -22,7 +22,7 @@ use exoware_sdk::{
 };
 use exoware_sql::{
     proto::sql::v1::{QueryRequest, ServiceClient},
-    sql_stack, CellValue, IndexSpec, KvSchema, SqlServer, TableColumnConfig,
+    sql_stack, CellValue, IndexSpec, KvSchema, SqlContext, SqlServer, TableColumnConfig,
 };
 use std::sync::Arc;
 
@@ -470,6 +470,70 @@ async fn connect_query_rejects_shared_catalog_changes() {
     let options = ctx.datafusion().state().config().options().clone();
     assert_eq!(options.catalog.default_schema, "public");
     assert!(!options.catalog.information_schema);
+    handle.abort();
+}
+
+async fn sorted_ids(ctx: &SqlContext, table: &str) -> Vec<i64> {
+    let batches = ctx
+        .sql(&format!("SELECT id FROM {table} ORDER BY id"))
+        .await
+        .expect("plan ids")
+        .collect()
+        .await
+        .expect("collect ids");
+    batches
+        .iter()
+        .flat_map(|batch| {
+            batch
+                .column(0)
+                .as_primitive::<Int64Type>()
+                .values()
+                .to_vec()
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn connect_query_rejects_writes_other_than_insert() {
+    let schema = KvSchema::new(common::local_store_client().await.unprefixed());
+    let server = Arc::new(SqlServer::new(schema).expect("SQL server"));
+    let batch = RecordBatch::try_from_iter(vec![(
+        "id",
+        Arc::new(Int64Array::from(vec![1, 2, 3])) as ArrayRef,
+    )])
+    .expect("configured batch");
+    let table = MemTable::try_new(batch.schema(), vec![vec![batch]]).expect("configured table");
+    server
+        .context()
+        .register_table("configured_ids", Arc::new(table))
+        .expect("register configured table");
+    let (client, handle) = serve_sql(server.clone()).await;
+
+    // A MemTable applies DELETE and UPDATE while its physical plan is built, so EXPLAIN alone
+    // would change its rows.
+    for sql in [
+        "DELETE FROM configured_ids WHERE id = 1",
+        "UPDATE configured_ids SET id = 9 WHERE id = 2",
+        "EXPLAIN DELETE FROM configured_ids WHERE id = 3",
+        "PREPARE remove_id AS DELETE FROM configured_ids WHERE id = $1",
+    ] {
+        let error = query_error(&client, sql).await;
+        assert_eq!(error.code, ErrorCode::InvalidArgument, "{sql}: {error:?}");
+    }
+    query_error(&client, "EXECUTE remove_id(1)").await;
+    assert_eq!(
+        sorted_ids(server.context(), "configured_ids").await,
+        [1, 2, 3]
+    );
+
+    assert_eq!(
+        query_row_count(&client, "INSERT INTO configured_ids VALUES (4)").await,
+        1
+    );
+    assert_eq!(
+        sorted_ids(server.context(), "configured_ids").await,
+        [1, 2, 3, 4]
+    );
     handle.abort();
 }
 

@@ -315,8 +315,10 @@ server's shared context, so their effects persist into later requests.
 
 `Query` rejects catalog DDL such as `CREATE TABLE`, `CREATE VIEW`, and
 `DROP TABLE` because every caller shares the catalog. It rejects `COPY` and
-`CREATE EXTERNAL TABLE` because they reach the server's files. Register tables
-and views and set runtime options through `server.context()`.
+`CREATE EXTERNAL TABLE` because they reach the server's files, and `DELETE`,
+`UPDATE`, and other writes because `INSERT INTO` is the only write the service
+offers. Register tables and views and set runtime options through
+`server.context()`.
 
 `Subscribe` streams rows from each Store batch that writes to a table and matches
 a scalar SQL predicate. Predicates cannot use subqueries, aggregates, window

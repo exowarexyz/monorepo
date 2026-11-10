@@ -47,8 +47,8 @@ use datafusion::{
         DFSchema, DataFusionError, Result as DataFusionResult, TableReference,
     },
     logical_expr::{
-        simplify::SimplifyContext, DdlStatement, Expr, ExprSchemable, LogicalPlan, ResetVariable,
-        SetVariable, Statement,
+        dml::InsertOp, simplify::SimplifyContext, DdlStatement, DmlStatement, Expr, ExprSchemable,
+        LogicalPlan, ResetVariable, SetVariable, Statement, WriteOp,
     },
     optimizer::simplify_expressions::ExprSimplifier,
     physical_expr::PhysicalExpr,
@@ -547,9 +547,9 @@ fn evaluate_batch(
 }
 
 /// Rejects remote statements that would read or write the server's files, replace its runtime
-/// environment, or change the catalog that every caller shares. Like DataFusion's
-/// `SQLOptions::verify_plan`, the check visits every node, including subqueries and the inputs of
-/// `EXPLAIN` and `PREPARE`.
+/// environment, change the catalog that every caller shares, or write other than with
+/// `INSERT INTO`. Like DataFusion's `SQLOptions::verify_plan`, the check visits every node,
+/// including subqueries and the inputs of `EXPLAIN` and `PREPARE`.
 ///
 /// `CREATE FUNCTION` and `DROP FUNCTION` stay available as session commands. Embedders
 /// register tables and views and configure the runtime on the server's [`SqlContext`].
@@ -562,6 +562,11 @@ fn verify_remote_plan(plan: &LogicalPlan) -> DataFusionResult<()> {
                 return Ok(TreeNodeRecursion::Continue);
             }
             LogicalPlan::Ddl(_) => "changing the catalog",
+            LogicalPlan::Dml(DmlStatement {
+                op: WriteOp::Insert(InsertOp::Append),
+                ..
+            }) => return Ok(TreeNodeRecursion::Continue),
+            LogicalPlan::Dml(_) => "a write other than INSERT INTO",
             LogicalPlan::Statement(
                 Statement::SetVariable(SetVariable { variable, .. })
                 | Statement::ResetVariable(ResetVariable { variable }),
@@ -1063,6 +1068,35 @@ mod tests {
             check_ipc_fixture(name, &response.results);
         }
         task.abort();
+    }
+
+    #[tokio::test]
+    async fn remote_writes_other_than_insert_into_are_rejected() {
+        let ctx = DataFusionContext::new();
+        for name in ["target", "source"] {
+            let batch = predicate_batch();
+            ctx.register_table(
+                name,
+                Arc::new(MemTable::try_new(batch.schema(), vec![vec![batch]]).unwrap()),
+            )
+            .unwrap();
+        }
+        let verify = async |sql: &str| {
+            let plan = ctx.state().create_logical_plan(sql).await.unwrap();
+            verify_remote_plan(&plan)
+        };
+
+        for sql in [
+            "DELETE FROM target WHERE id = 1",
+            "UPDATE target SET status = 'x' WHERE id = 1",
+            "TRUNCATE TABLE target",
+            "MERGE INTO target USING source ON target.id = source.id WHEN MATCHED THEN DELETE",
+            "INSERT OVERWRITE target VALUES (5, 'x')",
+            "REPLACE INTO target VALUES (5, 'x')",
+        ] {
+            assert!(verify(sql).await.is_err(), "{sql}");
+        }
+        verify("INSERT INTO target VALUES (5, 'x')").await.unwrap();
     }
 
     #[tokio::test]
