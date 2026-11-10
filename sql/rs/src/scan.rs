@@ -269,11 +269,14 @@ impl KvScanExec {
         } else if filters
             .iter()
             .all(|filter| QueryPredicate::supports_filter(filter, &self.model))
-            && access.predicate_fully_enforced_by_primary_key(&self.model)
+            && (access.predicate_fully_enforced_by_primary_key(&self.model)
+                || (access.predicate_fully_enforced_by_primary_key_points()
+                    && self.predicate.primary_key_points(&self.model)?.is_some()))
         {
-            // Primary-key ranges enforce every filter, so the scan needs no row filter and
-            // only the projected and constrained columns. Column requirements only rank
-            // candidate indexes, so the narrower column set cannot make one eligible.
+            // The primary-key ranges or points the scan reads enforce every filter, so the scan
+            // needs no row filter and only the projected and constrained columns. Column
+            // requirements only rank candidate indexes, so the narrower column set cannot make
+            // one eligible.
             return Ok(());
         }
 
@@ -828,7 +831,9 @@ async fn get_rows(
 }
 
 /// Streams primary-key points in batches sized to the output flush threshold. Filters that
-/// the keys cannot enforce raise the batch to at least `MIN_FETCH_BATCH_ROWS`.
+/// the keys cannot enforce raise the batch to at least `MIN_FETCH_BATCH_ROWS`. So does a
+/// lookup that leaves the limit unmet, because a key without a row shows that the keys left
+/// may not each yield one.
 async fn stream_point_scan(
     tx: &tokio::sync::mpsc::Sender<DataFusionResult<RecordBatch>>,
     ctx: &ScanCtx<'_>,
@@ -841,14 +846,17 @@ async fn stream_point_scan(
     let exact = ctx.filter.is_none_or(|filter| filter.complete_ranges)
         && ctx
             .access_plan
-            .predicate_fully_enforced_by_primary_key(ctx.model);
-    let lookup_batch = if exact {
+            .predicate_fully_enforced_by_primary_key_points();
+    let mut lookup_batch = if exact {
         flush_threshold
     } else {
         flush_threshold.max(MIN_FETCH_BATCH_ROWS)
     };
-    for keys in keys.chunks(lookup_batch) {
-        let rows = get_rows(ctx, keys).await?;
+    let mut keys = keys;
+    while !keys.is_empty() {
+        let (lookup, rest) = keys.split_at(lookup_batch.min(keys.len()));
+        keys = rest;
+        let rows = get_rows(ctx, lookup).await?;
 
         ctx.append_rows(&rows, &mut output, &mut remaining)?;
         if output.row_count() >= flush_threshold
@@ -859,6 +867,7 @@ async fn stream_point_scan(
         if remaining == 0 {
             break;
         }
+        lookup_batch = lookup_batch.max(MIN_FETCH_BATCH_ROWS);
     }
     let _ = flush_projected_batch(tx, ctx, &mut output).await?;
     Ok(())
@@ -1459,6 +1468,33 @@ mod tests {
             let key = self.prefix.decode_key(key).unwrap();
             self.table.index_specs[index].prefix.matches(&key)
         }
+
+        /// Plans the query and returns the optimized physical plan.
+        async fn plan(&self, sql: &str) -> Arc<dyn ExecutionPlan> {
+            self.context
+                .sql(sql)
+                .await
+                .unwrap()
+                .create_physical_plan()
+                .await
+                .unwrap()
+        }
+
+        /// Plans the query and returns its first Store scan with the indented plan text.
+        async fn scan(&self, sql: &str) -> (KvScanExec, String) {
+            let plan = self.plan(sql).await;
+            let rendered = datafusion::physical_plan::displayable(plan.as_ref())
+                .indent(true)
+                .to_string();
+            let mut node = plan;
+            while let Some(child) = node.children().first() {
+                node = (*child).clone();
+            }
+            let scan = node
+                .downcast_ref::<KvScanExec>()
+                .expect("the plan must end in a Store scan");
+            (scan.clone(), rendered)
+        }
     }
 
     async fn values(
@@ -1871,6 +1907,92 @@ mod tests {
             "{requests:?}"
         );
         fixture.check("SELECT tenant, version FROM orders WHERE tenant IN ('a', 'b') AND version IN (1, 3, 99) AND amount > 20 ORDER BY tenant DESC, version DESC LIMIT 2").await;
+    }
+
+    /// IN lists on every primary-key column are read as points that enforce the predicate.
+    #[tokio::test]
+    async fn in_list_point_products_are_exact() {
+        let fixture = Fixture::new(
+            vec![
+                column("a", DataType::Utf8, false),
+                column("b", DataType::Int64, false),
+                column("amount", DataType::Int64, false),
+            ],
+            &["a", "b"],
+            vec![],
+            vec![
+                Arc::new(StringArray::from(vec!["x", "x", "y", "y", "z"])),
+                Arc::new(Int64Array::from(vec![1, 2, 1, 2, 1])),
+                Arc::new(Int64Array::from(vec![10, 20, 30, 40, 50])),
+            ],
+        )
+        .await;
+
+        // Duplicate members and absent keys change only which points are read.
+        for (predicate, points) in [
+            ("a IN ('x', 'y') AND b IN (1, 2)", 4),
+            ("a IN ('y', 'x', 'y', 'w') AND b IN (2, 1, 1, 9)", 9),
+        ] {
+            let sql = format!("SELECT a, b, amount FROM orders WHERE {predicate} ORDER BY a, b");
+            let (scan, rendered) = fixture.scan(&sql).await;
+            assert!(scan.filter.is_none(), "{predicate} must keep no row filter");
+            assert!(
+                rendered.contains("mode=primary_key_points, ")
+                    && rendered
+                        .contains(&format!("exact=true, row_recheck=false, ranges={points}, ")),
+                "{predicate} must read {points} exact points\n{rendered}"
+            );
+            assert_eq!(
+                shape(&fixture.check(&sql).await),
+                [("GetMany", points)],
+                "{predicate}"
+            );
+        }
+
+        // A limit sizes the first lookup. A key without a row disproves that each key yields
+        // one, so the next lookup must take the remaining keys together.
+        for (predicate, order, lookups) in [
+            ("a IN ('x', 'y') AND b IN (1, 2)", "a, b", vec![1]),
+            ("a IN ('x', 'y') AND b IN (1, 2)", "a DESC, b DESC", vec![1]),
+            ("a IN ('w', 'x') AND b IN (1, 2)", "a, b", vec![1, 3]),
+        ] {
+            let sql = format!(
+                "SELECT a, b, amount FROM orders WHERE {predicate} ORDER BY {order} LIMIT 1"
+            );
+            assert_eq!(
+                shape(&fixture.check(&sql).await),
+                lookups
+                    .into_iter()
+                    .map(|keys| ("GetMany", keys))
+                    .collect::<Vec<_>>(),
+                "{sql}"
+            );
+        }
+
+        // The points cannot enforce a predicate on a value column or an unsupported predicate,
+        // so the row filter and the minimum lookup batch stay.
+        for residual in ["amount > 15", "b % 2 = 0"] {
+            let sql = format!(
+                "SELECT a, b, amount FROM orders WHERE a IN ('x', 'y') AND b IN (1, 2) \
+                 AND {residual} ORDER BY a, b LIMIT 1"
+            );
+            let (scan, rendered) = fixture.scan(&sql).await;
+            assert!(scan.filter.is_some(), "{residual} must keep the row filter");
+            assert!(
+                rendered.contains("mode=primary_key_points, ")
+                    && rendered.contains("exact=false, row_recheck=true, ranges=4, "),
+                "{residual} must recheck rows\n{rendered}"
+            );
+            assert_eq!(shape(&fixture.check(&sql).await), [("GetMany", 4)], "{sql}");
+        }
+
+        // A range on a key column is read as key ranges. They do not enforce the constraint
+        // after the first IN list, so the row filter stays.
+        let sql = "SELECT a, b, amount FROM orders WHERE a IN ('x', 'y') AND b >= 2 ORDER BY a, b";
+        let (scan, rendered) = fixture.scan(sql).await;
+        assert!(scan.filter.is_some(), "key ranges must keep the row filter");
+        assert!(rendered.contains("mode=primary_key, "), "{rendered}");
+        fixture.check(sql).await;
     }
 
     #[tokio::test]

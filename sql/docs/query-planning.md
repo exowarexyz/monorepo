@@ -9,10 +9,12 @@ crate README first for table, key, and index design.
 
 DataFusion plans each query, and `exoware-sql` chooses how each table scan reads the
 Store. A predicate that fixes every primary-key column to a finite set of values uses
-bounded point lookups, with results restored to key order. Otherwise the planner
-ranks the primary key and each secondary index by how many leading key columns the
-predicate constrains, whether the index covers every projected and filtered column,
-the index layout, and the number of key ranges.
+bounded point lookups, with results restored to key order. The points enforce the
+supported constraints on key columns, so rows are rechecked only when the query has
+another predicate, such as one on a value column or an expression on a key column.
+Without point lookups, the planner ranks the primary key and each secondary index by how
+many leading key columns the predicate constrains, whether the index covers every
+projected and filtered column, the index layout, and the number of key ranges.
 
 A covering index returns rows without touching base rows. A non-covering index first
 applies the predicates it can check from the index entry, then fetches the surviving
@@ -143,11 +145,12 @@ query and adds runtime metrics.
 | Field | Meaning |
 |---|---|
 | `mode=primary_key` | Scans the table's primary-key range. |
+| `mode=primary_key_points` | Looks up the primary keys the predicate lists. |
 | `mode=secondary_index(<name>, <layout>)` | Scans the named index with a `lexicographic` or `z_order` layout. |
 | `predicate=...` | The predicate pushed to the scan, or `<none>`. |
-| `exact=true` | The key ranges enforce the whole pushed predicate. |
+| `exact=true` | The key ranges or points enforce the whole pushed predicate. |
 | `row_recheck=true` | Candidate rows are decoded and checked against the residual predicate. |
-| `ranges=<N>` | The number of key ranges read. |
+| `ranges=<N>` | The number of key ranges read, or of keys looked up. |
 | `full_scan_like=true` | The primary-key ranges are broad enough to resemble a full table scan. |
 | `constrained_prefix=<N>` | The number of leading key columns the predicate constrains. |
 

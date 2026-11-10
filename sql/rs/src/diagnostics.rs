@@ -95,7 +95,7 @@ pub(crate) fn build_scan_access_path_diagnostics(
     // namespace are dropped, as in execution.
     if let Some(mut keys) = predicate.primary_key_points(model)? {
         keys.retain(|key| key.len() <= max_logical_key_len);
-        let exact = complete_ranges && access_plan.predicate_fully_enforced_by_primary_key(model);
+        let exact = complete_ranges && access_plan.predicate_fully_enforced_by_primary_key_points();
         return Ok(AccessPathDiagnostics {
             mode: "primary_key_points".to_string(),
             predicate: predicate.describe(model),

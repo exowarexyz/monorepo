@@ -360,6 +360,17 @@ impl ScanAccessPlan {
         })
     }
 
+    /// Whether reading the cross product of primary-key points enforces every constraint.
+    ///
+    /// Each point fixes every key column to a value its constraint admits, so a row stored
+    /// under a point passes every primary-key check. A check on another column needs the row.
+    /// The answer holds only for a scan that reads the points and not key ranges.
+    pub(crate) fn predicate_fully_enforced_by_primary_key_points(&self) -> bool {
+        self.predicate_checks
+            .iter()
+            .all(|check| matches!(check, PredicateAccess::Pk { .. }))
+    }
+
     pub(crate) fn predicate_fully_enforced_by_index_key(
         &self,
         model: &TableModel,
