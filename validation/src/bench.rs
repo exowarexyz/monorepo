@@ -71,11 +71,13 @@ pub struct Args {
     /// Keys written by load before bench starts. Bench writes append after them.
     #[arg(long, default_value_t = 10000)]
     keys: u64,
+    /// Total number of benchmark operations across all workers.
     #[arg(long, default_value_t = 50000)]
     ops: u64,
     /// Number of key/value pairs in each benchmark write operation.
     #[arg(long, default_value_t = DEFAULT_INGEST_BATCH_SIZE)]
     batch_size: usize,
+    /// Number of concurrent benchmark workers.
     #[arg(long, default_value_t = 8)]
     concurrency: usize,
     /// Exoware scenario selector.
