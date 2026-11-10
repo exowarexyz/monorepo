@@ -25,7 +25,10 @@ pushdown, including reverse traversal after a fixed equality prefix.
 SQL predicates retain DataFusion semantics, including casts, functions, and null
 handling. `exoware-sql` extracts the predicate forms below to prune key ranges on
 primary-key and index key columns. Row scans evaluate remaining predicates on decoded
-batches before materializing the other projected columns.
+batches before materializing the other projected columns. Key-range pruning departs from
+those semantics in one way. A row outside the pruned key ranges is never read, so an error
+that a predicate would raise on that row, such as a division by zero in another conjunct,
+does not occur.
 
 | Column type | `=` | `<` `<=` `>` `>=` | `IN (...)` | `IS NULL`, `IS NOT NULL` |
 |---|---|---|---|---|
