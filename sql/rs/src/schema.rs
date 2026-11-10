@@ -6,7 +6,11 @@ use datafusion::{
     common::{tree_node::TreeNode, DataFusionError, Result as DataFusionResult, SchemaExt},
     datasource::{sink::DataSinkExec, TableProvider},
     logical_expr::{dml::InsertOp, Expr, TableProviderFilterPushDown, TableType},
-    physical_plan::ExecutionPlan,
+    physical_expr::{
+        expressions::{cast, Column},
+        PhysicalExpr,
+    },
+    physical_plan::{projection::ProjectionExec, ExecutionPlan},
 };
 use exoware_sdk::{kv_codec::decode_stored_row, PrefixedStoreClient};
 use std::sync::Arc;
@@ -411,17 +415,226 @@ impl TableProvider for KvTable {
         input: Arc<dyn ExecutionPlan>,
         insert_op: InsertOp,
     ) -> DataFusionResult<Arc<dyn ExecutionPlan>> {
-        self.schema()
-            .logically_equivalent_names_and_types(&input.schema())?;
+        let schema = self.schema();
+        let input_schema = input.schema();
+        schema.logically_equivalent_names_and_types(&input_schema)?;
         if insert_op != InsertOp::Append {
             return Err(DataFusionError::NotImplemented(format!(
                 "{insert_op} not implemented for kv table"
             )));
         }
 
+        // DataFusion accepts any input column castable to the table type, but only SQL
+        // INSERT plans the cast. Cast here with the same semantics so the sink always
+        // receives the table's types.
+        let input = if schema
+            .fields()
+            .iter()
+            .zip(input_schema.fields())
+            .all(|(table, input)| table.data_type() == input.data_type())
+        {
+            input
+        } else {
+            let exprs = schema
+                .fields()
+                .iter()
+                .enumerate()
+                .map(|(idx, field)| {
+                    let column: Arc<dyn PhysicalExpr> = Arc::new(Column::new(field.name(), idx));
+                    let expr = cast(column, &input_schema, field.data_type().clone())?;
+                    Ok((expr, field.name().clone()))
+                })
+                .collect::<DataFusionResult<Vec<_>>>()?;
+            Arc::new(ProjectionExec::try_new(exprs, input)?)
+        };
+
         let sink = KvIngestSink {
             table: self.clone(),
         };
         Ok(Arc::new(DataSinkExec::new(input, Arc::new(sink), None)))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{KvSchema, SqlContext, TableColumnConfig};
+    use datafusion::{
+        arrow::{
+            array::{
+                ArrayRef, Decimal128Array, DictionaryArray, Int32Array, Int64Array, NullArray,
+                TimestampMicrosecondArray,
+            },
+            datatypes::{DataType, Field, Int32Type, Schema, TimeUnit},
+            record_batch::RecordBatch,
+            util::pretty::pretty_format_batches,
+        },
+        common::Result as DataFusionResult,
+        dataframe::DataFrameWriteOptions,
+    };
+    use std::sync::Arc;
+
+    async fn write_batch(
+        ctx: &SqlContext,
+        table: &str,
+        batch: RecordBatch,
+    ) -> DataFusionResult<()> {
+        ctx.datafusion()
+            .read_batch(batch)?
+            .write_table(table, DataFrameWriteOptions::new())
+            .await
+            .map(|_| ())
+    }
+
+    async fn query(ctx: &SqlContext, sql: &str) -> Vec<String> {
+        let batches = ctx.sql(sql).await.unwrap().collect().await.unwrap();
+        pretty_format_batches(&batches)
+            .unwrap()
+            .to_string()
+            .lines()
+            .map(str::to_string)
+            .collect()
+    }
+
+    fn batch(columns: Vec<(&str, ArrayRef)>) -> RecordBatch {
+        let fields = columns
+            .iter()
+            .map(|(name, array)| Field::new(*name, array.data_type().clone(), true))
+            .collect::<Vec<_>>();
+        RecordBatch::try_new(
+            Arc::new(Schema::new(fields)),
+            columns.into_iter().map(|(_, array)| array).collect(),
+        )
+        .unwrap()
+    }
+
+    /// DataFrame inserts cast each column to the table type the way SQL INSERT does.
+    #[tokio::test]
+    async fn dataframe_insert_casts_input_to_table_types() {
+        let (_task, url) = exoware_simulator::open_temp()
+            .await
+            .expect("spawn simulator");
+        let store = exoware_sdk::StoreClient::new(&url).unprefixed();
+        let schema = KvSchema::new(store.clone())
+            .table(
+                "prices",
+                vec![
+                    TableColumnConfig::new("id", DataType::Int64, false),
+                    TableColumnConfig::new("amount", DataType::Decimal128(10, 2), true),
+                    TableColumnConfig::new(
+                        "at",
+                        DataType::Timestamp(TimeUnit::Microsecond, Some("+07:00".into())),
+                        true,
+                    ),
+                ],
+                vec!["id".to_string()],
+                vec![],
+            )
+            .unwrap()
+            .table(
+                "items",
+                vec![
+                    TableColumnConfig::new("id", DataType::Int64, false),
+                    TableColumnConfig::new("qty", DataType::Int64, true),
+                    TableColumnConfig::new("name", DataType::Utf8, true),
+                    TableColumnConfig::new("stock", DataType::UInt64, true),
+                ],
+                vec!["id".to_string()],
+                vec![],
+            )
+            .unwrap();
+        let ctx = SqlContext::new(store);
+        ctx.register_schema(schema).unwrap();
+
+        write_batch(
+            &ctx,
+            "prices",
+            batch(vec![
+                ("id", Arc::new(Int64Array::from(vec![1]))),
+                (
+                    "amount",
+                    Arc::new(
+                        Decimal128Array::from(vec![12345])
+                            .with_precision_and_scale(10, 4)
+                            .unwrap(),
+                    ),
+                ),
+                ("at", Arc::new(TimestampMicrosecondArray::from(vec![0]))),
+            ]),
+        )
+        .await
+        .unwrap();
+        ctx.sql(
+            "INSERT INTO prices VALUES (2, arrow_cast(1.2345, 'Decimal128(10, 4)'), \
+             arrow_cast(0, 'Timestamp(Microsecond, None)'))",
+        )
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .unwrap();
+        assert_eq!(
+            query(
+                &ctx,
+                "SELECT id, CAST(amount AS VARCHAR) AS amount, CAST(at AS BIGINT) AS at \
+                 FROM prices ORDER BY id"
+            )
+            .await,
+            vec![
+                "+----+--------+--------------+",
+                "| id | amount | at           |",
+                "+----+--------+--------------+",
+                "| 1  | 1.23   | -25200000000 |",
+                "| 2  | 1.23   | -25200000000 |",
+                "+----+--------+--------------+",
+            ]
+        );
+
+        write_batch(
+            &ctx,
+            "items",
+            batch(vec![
+                ("id", Arc::new(Int64Array::from(vec![1]))),
+                ("qty", Arc::new(Int32Array::from(vec![5]))),
+                (
+                    "name",
+                    Arc::new(DictionaryArray::<Int32Type>::from_iter(["bolt"])),
+                ),
+                ("stock", Arc::new(NullArray::new(1))),
+            ]),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            query(&ctx, "SELECT * FROM items").await,
+            vec![
+                "+----+-----+------+-------+",
+                "| id | qty | name | stock |",
+                "+----+-----+------+-------+",
+                "| 1  | 5   | bolt |       |",
+                "+----+-----+------+-------+",
+            ]
+        );
+
+        let err = write_batch(
+            &ctx,
+            "items",
+            batch(vec![
+                ("id", Arc::new(Int64Array::from(vec![2]))),
+                ("qty", Arc::new(Int64Array::from(vec![5]))),
+                (
+                    "name",
+                    Arc::new(DictionaryArray::<Int32Type>::from_iter(["nut"])),
+                ),
+                ("stock", Arc::new(Int64Array::from(vec![-1]))),
+            ]),
+        )
+        .await
+        .expect_err("a negative stock does not fit UInt64");
+        assert!(
+            err.to_string()
+                .contains("Can't cast value -1 to type UInt64"),
+            "{err}"
+        );
+        assert_eq!(query(&ctx, "SELECT id FROM items").await.len(), 5);
     }
 }
