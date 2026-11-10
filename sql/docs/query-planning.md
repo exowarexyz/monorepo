@@ -16,10 +16,14 @@ the index layout, and the number of key ranges.
 
 A covering index returns rows without touching base rows. A non-covering index first
 applies the predicates it can check from the index entry, then fetches the surviving
-base rows in bounded batches and checks the complete predicate against each one.
-Compatible lexicographic covering indexes also serve DataFusion's sort and `LIMIT`
-pushdown, including reverse traversal after a fixed equality prefix. Equality on a
-`Float64` zero matches both signed zeros, so it does not fix a prefix.
+base rows in bounded batches and checks the complete predicate against each one. When
+the index key ranges enforce the whole predicate, a `LIMIT` sizes each request for index
+entries and base rows by the rows still needed. A request that returns its full limit
+without meeting the `LIMIT` ends that sizing, and the scan reads the rest of the range
+without a limit and in full lookup batches. Compatible lexicographic covering indexes
+also serve DataFusion's sort and `LIMIT` pushdown, including reverse traversal after a
+fixed equality prefix. Equality on a `Float64` zero matches both signed zeros, so it does
+not fix a prefix.
 
 ## Predicate pushdown
 

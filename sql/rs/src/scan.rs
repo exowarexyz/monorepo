@@ -865,6 +865,13 @@ async fn stream_point_scan(
 }
 
 /// Filters secondary-index entries before fetching and filtering their base rows.
+///
+/// While the index key ranges are proven to enforce the whole predicate, every entry should yield
+/// one output row, so each range request asks only for the entries the limit still needs. A request
+/// that returns that many entries and leaves the limit unmet shows that an entry yielded no row,
+/// and it ends the sizing for the rest of the scan. A range that runs out first does not. Later
+/// range requests are unlimited and their lookups take full batches, so such entries are skipped a
+/// batch at a time and not with one request each.
 pub(crate) async fn stream_index_lookup_scan(
     tx: &tokio::sync::mpsc::Sender<DataFusionResult<RecordBatch>>,
     ctx: &ScanCtx<'_>,
@@ -880,73 +887,110 @@ pub(crate) async fn stream_index_lookup_scan(
     if key_predicate_plan.is_impossible() {
         return Ok(());
     }
+    let mut exact = ctx.filter.is_none_or(|filter| filter.complete_ranges)
+        && ctx
+            .access_plan
+            .predicate_fully_enforced_by_index_key(ctx.model, spec);
     let mut remaining = target_rows;
     let mut batch_builder = ProjectedBatchBuilder::from_access_plan(ctx.model, ctx.access_plan);
 
     'ranges: for range in &plan.ranges {
-        let mut stream = range_stream_with_direction(
-            ctx.session,
-            range,
-            usize::MAX,
-            flush_threshold.max(MIN_FETCH_BATCH_ROWS),
-            RangeMode::Forward,
-        )
-        .await?;
-        while let Some(chunk) = stream
-            .next_chunk()
-            .await
-            .map_err(|e| DataFusionError::External(Box::new(e)))?
-        {
-            let mut pk_batch: Vec<Key> = Vec::new();
-            let mut cover_rows = Vec::new();
-            let cover_filter = ctx.cover_filter;
-            for (key, index_value) in &chunk.rows {
-                if !key_predicate_plan.matches_key(key) {
-                    continue;
+        let mut range = range.clone();
+        loop {
+            let raw_limit = if exact && u32::try_from(remaining).is_ok() {
+                remaining
+            } else {
+                usize::MAX
+            };
+            let mut stream = range_stream_with_direction(
+                ctx.session,
+                &range,
+                raw_limit,
+                flush_threshold.max(MIN_FETCH_BATCH_ROWS),
+                RangeMode::Forward,
+            )
+            .await?;
+            let mut scanned = 0;
+            let mut last_key = None;
+            while let Some(chunk) = stream
+                .next_chunk()
+                .await
+                .map_err(|e| DataFusionError::External(Box::new(e)))?
+            {
+                scanned += chunk.rows.len();
+                if let Some((key, _)) = chunk.rows.last() {
+                    last_key = Some(key.clone());
                 }
-                let required_pk =
-                    cover_filter.map_or(&[][..], |filter| &filter.access.required_pk_mask);
-                let Some(decoded) = decode_secondary_index_key_with_masks(
-                    ctx.model.table_prefix,
-                    spec,
-                    ctx.model,
-                    key,
-                    Some(&[]),
-                    Some(required_pk),
-                ) else {
-                    continue;
-                };
-                if cover_filter.is_some() {
-                    let Some(row) =
-                        ctx.decode_value(decoded.primary_key_values, index_value, true)?
-                    else {
+                let mut pk_batch: Vec<Key> = Vec::new();
+                let mut cover_rows = Vec::new();
+                let cover_filter = ctx.cover_filter;
+                for (key, index_value) in &chunk.rows {
+                    if !key_predicate_plan.matches_key(key) {
+                        continue;
+                    }
+                    let required_pk =
+                        cover_filter.map_or(&[][..], |filter| &filter.access.required_pk_mask);
+                    let Some(decoded) = decode_secondary_index_key_with_masks(
+                        ctx.model.table_prefix,
+                        spec,
+                        ctx.model,
+                        key,
+                        Some(&[]),
+                        Some(required_pk),
+                    ) else {
                         continue;
                     };
-                    cover_rows.push(row);
+                    if cover_filter.is_some() {
+                        let Some(row) =
+                            ctx.decode_value(decoded.primary_key_values, index_value, true)?
+                        else {
+                            continue;
+                        };
+                        cover_rows.push(row);
+                    }
+                    pk_batch.push(decoded.primary_key);
                 }
-                pk_batch.push(decoded.primary_key);
+
+                if let Some(filter) = cover_filter {
+                    pk_batch = filter
+                        .select(ctx.model, &cover_rows)?
+                        .into_iter()
+                        .map(|i| pk_batch[i].clone())
+                        .collect();
+                }
+                if !pk_batch.is_empty() {
+                    let rows = get_rows(ctx, &pk_batch).await?;
+
+                    ctx.append_rows(&rows, &mut batch_builder, &mut remaining)?;
+                    if remaining == 0 {
+                        break 'ranges;
+                    }
+                    if batch_builder.row_count() >= flush_threshold
+                        && !flush_projected_batch(tx, ctx, &mut batch_builder).await?
+                    {
+                        return Ok(());
+                    }
+                }
+            }
+            if scanned < raw_limit {
+                break;
             }
 
-            if let Some(filter) = cover_filter {
-                pk_batch = filter
-                    .select(ctx.model, &cover_rows)?
-                    .into_iter()
-                    .map(|i| pk_batch[i].clone())
-                    .collect();
+            // The request returned every entry the limit needed, yet the limit is not met. Some
+            // entry yielded no row, so the rest of the range is read without sizing by demand.
+            exact = false;
+            let Some(last_key) = last_key else { break };
+            let Some(next) = ctx
+                .key_prefix
+                .next_key(&last_key)
+                .map_err(|e| DataFusionError::External(Box::new(e)))?
+            else {
+                break;
+            };
+            if next > range.end {
+                break;
             }
-            if !pk_batch.is_empty() {
-                let rows = get_rows(ctx, &pk_batch).await?;
-
-                ctx.append_rows(&rows, &mut batch_builder, &mut remaining)?;
-                if remaining == 0 {
-                    break 'ranges;
-                }
-                if batch_builder.row_count() >= flush_threshold
-                    && !flush_projected_batch(tx, ctx, &mut batch_builder).await?
-                {
-                    return Ok(());
-                }
-            }
+            range.start = next;
         }
     }
     let _ = flush_projected_batch(tx, ctx, &mut batch_builder).await?;
@@ -1442,6 +1486,19 @@ mod tests {
         IndexSpec::lexicographic(name, keys.iter().map(|name| name.to_string()).collect())
             .unwrap()
             .with_cover_columns(cover.iter().map(|name| name.to_string()).collect())
+    }
+
+    /// Summarizes each request as its kind with the entry limit of a range read or the key
+    /// count of a lookup.
+    fn shape(requests: &[Request]) -> Vec<(&'static str, usize)> {
+        requests
+            .iter()
+            .map(|request| match request {
+                Request::Get(_) => ("Get", 1),
+                Request::GetMany(keys) => ("GetMany", keys.len()),
+                Request::Range { limit, .. } => ("Range", *limit),
+            })
+            .collect()
     }
 
     #[tokio::test]
@@ -2649,6 +2706,113 @@ mod tests {
             });
             assert!(amounts.eq([10, 20, 30]));
         }
+    }
+
+    /// Builds a table whose rows all carry tag 7, so the tag index range holds every row.
+    async fn tagged_orders(count: i64) -> Fixture {
+        Fixture::new(
+            vec![
+                column("id", DataType::Int64, false),
+                column("tag", DataType::Int64, false),
+                column("amount", DataType::Int64, false),
+            ],
+            &["id"],
+            vec![index("tag", &["tag"], &[])],
+            vec![
+                Arc::new(Int64Array::from_iter_values(0..count)),
+                Arc::new(Int64Array::from(vec![7; count as usize])),
+                Arc::new(Int64Array::from_iter_values((0..count).map(|id| id * 10))),
+            ],
+        )
+        .await
+    }
+
+    /// An index lookup whose key enforces the predicate asks the Store for the entries and
+    /// base rows the limit needs.
+    #[tokio::test]
+    async fn limit_through_a_non_covering_index_fetches_only_the_limit() {
+        let fixture = tagged_orders(200).await;
+        for limit in [1, 3] {
+            let requests = fixture
+                .check(&format!("SELECT * FROM orders WHERE tag = 7 LIMIT {limit}"))
+                .await;
+            assert_eq!(
+                shape(&requests),
+                [("Range", limit), ("GetMany", limit)],
+                "LIMIT {limit} must read {limit} index entries and {limit} base rows"
+            );
+            assert!(
+                matches!(
+                    &requests[0],
+                    Request::Range { start, .. } if fixture.index_matches(0, start)
+                ),
+                "the range read must target the tag index"
+            );
+        }
+
+        // The index key cannot enforce a predicate on amount, so any entry may be rejected. The
+        // lookup must keep reading the range without a limit and fetching full batches.
+        for predicate in ["amount >= 20", "amount % 20 = 10"] {
+            let requests = fixture
+                .check(&format!(
+                    "SELECT * FROM orders WHERE tag = 7 AND {predicate} LIMIT 1"
+                ))
+                .await;
+            assert_eq!(
+                shape(&requests),
+                [
+                    ("Range", usize::MAX),
+                    ("GetMany", super::MIN_FETCH_BATCH_ROWS)
+                ],
+                "{predicate} must keep an unlimited index read and full lookup batches"
+            );
+        }
+    }
+
+    /// Index entries that yield no row cost a bounded number of requests under a limit.
+    #[tokio::test]
+    async fn limit_through_an_index_stays_bounded_when_entries_yield_no_rows() {
+        // One hundred index entries sort before every stored row and have no base row.
+        let fixture = tagged_orders(200).await;
+        let stale = 100;
+        let missing = RecordBatch::try_new(
+            fixture.table.model.schema.clone(),
+            vec![
+                Arc::new(Int64Array::from_iter_values(-stale..0)),
+                Arc::new(Int64Array::from(vec![7; stale as usize])),
+                Arc::new(Int64Array::from(vec![0; stale as usize])),
+            ],
+        )
+        .unwrap();
+        let entries = crate::writer::encode_insert_entries(
+            &missing,
+            &fixture.table.model,
+            &fixture.table.index_specs,
+        )
+        .unwrap();
+        fixture.rows.values.lock().unwrap().extend(
+            entries
+                .into_iter()
+                .filter(|(key, _)| !fixture.table.model.primary_key_prefix.matches(key))
+                .map(|(key, value)| (fixture.prefix.encode_key(&key).unwrap(), value)),
+        );
+
+        // The first entry disproves that each entry yields a row. The lookup must then read
+        // the rest of the range in full batches and still return the first stored row.
+        let requests = fixture
+            .check("SELECT * FROM orders WHERE tag = 7 LIMIT 1")
+            .await;
+        assert_eq!(
+            shape(&requests),
+            [
+                ("Range", 1),
+                ("GetMany", 1),
+                ("Range", usize::MAX),
+                ("GetMany", super::MIN_FETCH_BATCH_ROWS),
+                ("GetMany", super::MIN_FETCH_BATCH_ROWS),
+            ],
+            "entries without rows must not each cost a request"
+        );
     }
 
     /// Sort and limit pushdown share the cached plan.
