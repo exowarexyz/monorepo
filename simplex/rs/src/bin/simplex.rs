@@ -42,12 +42,16 @@ struct Cli {
 #[derive(Subcommand, Debug)]
 enum Command {
     Seed {
+        /// Store base URL.
         #[arg(long)]
         store_url: String,
+        /// Prefix for this instance's keys in the Store.
         #[arg(long, default_value = "")]
         store_prefix: String,
+        /// Seconds between uploaded blocks.
         #[arg(long, default_value_t = 2)]
         interval_secs: u64,
+        /// Height of the first block. Defaults to the current Unix time in seconds.
         #[arg(long)]
         start_height: Option<u64>,
     },

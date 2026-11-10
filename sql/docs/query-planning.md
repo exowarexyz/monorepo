@@ -9,16 +9,29 @@ crate README first for table, key, and index design.
 
 DataFusion plans each query, and `exoware-sql` chooses how each table scan reads the
 Store. A predicate that fixes every primary-key column to a finite set of values uses
-bounded point lookups, with results restored to key order. Otherwise the planner
-ranks the primary key and each secondary index by how many leading key columns the
-predicate constrains, whether the index covers every projected and filtered column,
-the index layout, and the number of key ranges.
+bounded point lookups, with results restored to key order. The points enforce the
+supported constraints on key columns, so rows are rechecked only when the query has
+another predicate, such as one on a value column or an expression on a key column.
+Without point lookups, the planner ranks the primary key and each secondary index by how
+many leading key columns the predicate constrains, whether the index covers every
+projected and filtered column, the index layout, and the number of key ranges.
+
+A point lookup and a scan under a `LIMIT` report the most rows they can return as an
+estimate to DataFusion. When the estimate is below DataFusion's row threshold for a
+collected build side (`hash_join_single_partition_threshold_rows`), a hash join can
+collect that scan and skip hash repartitioning of its inputs.
 
 A covering index returns rows without touching base rows. A non-covering index first
 applies the predicates it can check from the index entry, then fetches the surviving
-base rows in bounded batches and checks the complete predicate against each one.
-Compatible lexicographic covering indexes also serve DataFusion's sort and `LIMIT`
-pushdown, including reverse traversal after a fixed equality prefix. Equality on a
+base rows in bounded batches and checks the complete predicate against each one. When
+the index key ranges enforce the whole predicate, a `LIMIT` sizes each request for index
+entries and base rows by the rows still needed. A request that returns its full limit
+without meeting the `LIMIT` ends that sizing, and the scan reads the rest of the range
+without a limit and in full lookup batches. Compatible lexicographic covering indexes
+also serve DataFusion's sort and `LIMIT` pushdown, including reverse traversal after a
+fixed equality prefix. A scan with no filter also moves to such an index when the index
+key order matches a requested order that the primary key cannot serve, so
+`ORDER BY s LIMIT 7` over an index on `s` reads seven index entries. Equality on a
 `Float64` zero matches both signed zeros, so it does not fix a prefix.
 
 ## Predicate pushdown
@@ -53,6 +66,13 @@ the scan bounds. With a primary key of `(entity, version)`:
 | `entity IN (X, Y)` | `[X, 0]` to `[X, MAX]` and `[Y, 0]` to `[Y, MAX]` |
 | no primary-key constraint | the whole table |
 
+A secondary index key continues with the primary-key columns, so the same rule runs
+through both. In that suffix only an `Int64` or `UInt64` range narrows the key range.
+`EXPLAIN` reports `exact=true` for an index scan only when the planner can show that
+the range bounds enforce the whole predicate. It does not attempt this for a z-order
+index. With `exact=false` the scan checks each entry itself and applies a `LIMIT` after
+those checks, without passing it to the Store.
+
 ## Aggregate pushdown
 
 Supported single-table aggregates run through the Store's `Reduce` RPC. Store workers
@@ -69,36 +89,43 @@ DataFusion aggregation.
   DataFusion. A finite `LIMIT` that reaches a group-only aggregate, directly or through
   projections and subquery aliases, keeps it in DataFusion, where streaming and
   `DISTINCT` limit optimizations apply.
-- **Expressions:** columns, literals, numeric `+`, `-`, `*`, `/`, `lower`, and
-  `date_trunc('day', ...)` on timestamps without a timezone. Aliases and transparent
-  projection chains are resolved. Identity casts, compatible string representations,
-  decimal precision widening without rescaling, and integer-to-double `CAST` and
-  `TRY_CAST` are pushed. Narrowing casts, other functions, timezone-tagged
-  timestamps, and row limits between the scan and the aggregate stay in DataFusion.
+- **Expressions:** columns, literals, numeric `+`, `-`, `*`, `/`, negation of a signed
+  64-bit integer expression, `lower`, and `date_trunc('day', ...)` on timestamps without
+  a timezone. Aliases and transparent projection chains are resolved. Identity casts,
+  compatible string representations, decimal precision widening without rescaling, and
+  integer-to-double `CAST` and `TRY_CAST` are pushed. Narrowing casts, negation of a
+  double, other functions, timezone-tagged timestamps, and row limits between the scan
+  and the aggregate stay in DataFusion.
 - **Filters:** aggregate `FILTER` clauses and equivalent `CASE` guards are pushed when
   every predicate is exactly representable by the Store predicate compiler. A scalar
   aggregate applies its filter before evaluating its argument, so the filter also
-  narrows the access path. A grouped aggregate evaluates its argument before its
-  filter, so precomputed grouped arguments remain eligible. A precomputed argument
-  beneath a scalar `FILTER` or a `CASE` guard stays in DataFusion. Pushing it would
-  evaluate it after the guard and could suppress an error it raises.
+  narrows the access path. A grouped aggregate evaluates its argument before its filter,
+  so precomputed grouped arguments remain eligible. A precomputed expression beneath a
+  scalar `FILTER` or a `CASE` guard is followed only when it cannot raise. That covers
+  columns, literals, and comparisons, `IS [NOT] NULL`, `IN`, `AND`, `OR`, and `NOT` over
+  them, so a condition that several `CASE` expressions share can be pushed. Any other
+  precomputed expression keeps the aggregate in DataFusion. Pushing it would evaluate it
+  after the guard and could suppress an error it raises.
 - **Access path:** every filter, group, and aggregate input must be available from the
   chosen primary-key range or index. Primary-key ranges can filter on stored values
   at the worker, so unindexed predicates do not require returning rows. A covering
   index narrows the scanned range. Variable-width key columns, and key columns after
   them, have no fixed byte offset, so they are read from stored index values when
-  available and otherwise fall back to native decoding.
+  available and otherwise fall back to native decoding. A filter on such a column needs
+  no worker check when the primary-key ranges enforce the whole predicate, as with
+  `region = 'eu'` on a primary key of `(region, seq)`.
 
 ### Semantics
 
-Workers apply each request's complete row predicate before updating aggregate state,
-because raw range bounds can include rows that scan-time key checks would exclude.
+Workers apply each request's row predicate before updating aggregate state, because raw
+range bounds can include rows that scan-time key checks would exclude. A request carries
+no predicate when its primary-key ranges hold exactly the rows the filters accept.
 Workers evaluate expressions with DataFusion and Arrow, so results follow ordinary
 DataFusion semantics:
 
-- Integer addition, subtraction, multiplication, and sums wrap on overflow. Integer
-  division truncates and reports division by zero and overflow as errors. Floating
-  division follows IEEE rules, including zero divisors.
+- Integer addition, subtraction, multiplication, negation, and sums wrap on overflow.
+  Integer division truncates and reports division by zero and overflow as errors.
+  Floating division follows IEEE rules, including zero divisors.
 - `AVG` converts each integer input to a double before accumulating. NULLs follow SQL
   aggregate rules.
 - Floating-point results, including `NaN` extrema, follow DataFusion's partial and
@@ -108,14 +135,26 @@ DataFusion semantics:
   scan skips undecodable payloads, so queries over corrupt data can behave differently
   across plans.
 - Aggregates with native `FILTER` clauses keep every group, even groups where no row
-  passes a filter. When every aggregate has a `CASE` guard, the shared group-only
-  request keeps groups that no guard selects.
+  passes a filter. When every aggregate has a `CASE` guard, a request that lists every
+  group keeps the groups that no guard selects, and a guarded aggregate can share that
+  request.
 
 ### Execution
 
 Aggregates that share ranges, grouping expressions, and a row filter share one
 `Reduce` request, including grouped aggregates with different native filters. Output
 columns keep their original order. A group-only query uses one request per range.
+
+A guarded aggregate can also join a request that its query sends anyway, either for an
+unguarded aggregate or to list the groups, and apply its guard as its own filter. It
+joins only when the worker can evaluate the guard on that request's access path and the
+request's key ranges, group keys, and row filter stay the same. Under those conditions a
+scalar `FILTER` qualifies with any argument, because the worker applies it before
+evaluating the argument. A `CASE` guard qualifies when its value is a column, a literal,
+or a row count. A grouped aggregate would evaluate any other value on rows the guard
+excludes. Every other guard keeps a request of its own over the ranges it selects. A
+`FILTER` on a text key column is one of them, because the worker has no field reference
+for that column.
 
 All requests for a query use its read session. Range requests run concurrently up to
 the query's DataFusion `target_partitions` setting, each with the session's current
@@ -125,23 +164,42 @@ and spill configuration. Both stages keep groups in memory by default. Workers
 configure their own memory pool and spilling through `QueryState::with_runtime_env` in
 [`exoware-server`](../../server/README.md).
 
+`EXPLAIN ANALYZE` reports metrics on each `KvAggregateExec`. Its `output_rows` counts the
+partial-state rows it hands to the final aggregate, one per group in each `Reduce`
+response, so the count can exceed the number of result rows. `store_requests` counts the
+`Reduce` requests it started. `elapsed_compute` covers decoding their responses and
+excludes time spent waiting for the Store.
+
+In `EXPLAIN FORMAT TREE`, a `jobs` line in the `KvAggregateExec` box names its Reduce
+jobs. When there are several, each field lists one value per job in that order,
+separated by semicolons.
+
 ## Reading EXPLAIN output
 
 `EXPLAIN` returns `plan_type` and `plan` rows. The `physical_plan` row contains a
 `KvScanExec` for each row scan and a `KvAggregateExec` for each pushed aggregate. A
 `KvAggregateExec` lists one access path per Reduce job. `EXPLAIN ANALYZE` runs the
-query and adds runtime metrics.
+query and adds runtime metrics. A `KvScanExec` reports `output_rows`, `elapsed_compute`
+for the time it spent computing and not waiting on the Store, and `store_requests`.
+`store_requests` counts the Store reads a node started. A retry that the SDK makes
+inside one read is not counted.
 
 | Field | Meaning |
 |---|---|
 | `mode=primary_key` | Scans the table's primary-key range. |
+| `mode=primary_key_points` | Looks up the primary keys the predicate lists. |
 | `mode=secondary_index(<name>, <layout>)` | Scans the named index with a `lexicographic` or `z_order` layout. |
 | `predicate=...` | The predicate pushed to the scan, or `<none>`. |
-| `exact=true` | The key ranges enforce the whole pushed predicate. |
+| `exact=true` | The key ranges or points enforce the whole pushed predicate. |
 | `row_recheck=true` | Candidate rows are decoded and checked against the residual predicate. |
-| `ranges=<N>` | The number of key ranges read. |
+| `ranges=<N>` | The number of key ranges read, or of keys looked up. |
 | `full_scan_like=true` | The primary-key ranges are broad enough to resemble a full table scan. |
 | `constrained_prefix=<N>` | The number of leading key columns the predicate constrains. |
+
+`EXPLAIN FORMAT TREE` writes the fields of each `KvScanExec` and `KvAggregateExec` in its
+box, one per line, with line breaks in values escaped. DataFusion wraps long values and
+cuts a box after 30 lines, so a long predicate or many jobs can hide later fields.
+`EXPLAIN` without `FORMAT TREE` always shows every field.
 
 An indexed scan with a residual check, for `WHERE status = 'open' AND amount_cents >= 5`
 over an index on `status`:
@@ -165,9 +223,11 @@ returns partial sums that DataFusion merges. This is the plan to aim for with
 selective grouped aggregates.
 
 `mode=primary_key` with `predicate=<none>` or `full_scan_like=true`, or an unexpectedly
-large `ranges` count, signals a broad scan. To improve it, add or choose a more
-selective index, cover the columns the query reads so the index can answer it alone,
-or rewrite the predicate so more of it constrains leading key columns.
+large `ranges` count, signals a broad scan. So does a secondary index with
+`constrained_prefix=0` and `fetch=None`, the plan for a sort that reads a whole index in
+key order. To improve a broad scan, add or choose a more selective index, cover the
+columns the query reads so the index can answer it alone, or rewrite the predicate so
+more of it constrains leading key columns.
 
 ## Key layout
 
