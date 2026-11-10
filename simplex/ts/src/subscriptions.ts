@@ -1,6 +1,6 @@
 import { PrefixedStoreClient, type StoreBatchEntry } from '@exowarexyz/sdk';
 
-import { verifyNotarization, verifyFinalization } from './certificate-verification.js';
+import { verifyNotarized, verifyFinalized } from './certificate-verification.js';
 import {
   decodeSimplexBlockData,
   roundFromKey,
@@ -10,14 +10,14 @@ import {
 import type { SimplexCertificateVerifier } from './verification.js';
 
 export interface RawSimplexHeaderEntry {
-  type: 'header';
+  kind: 'header';
   key: Uint8Array;
   digest: Uint8Array;
-  header: Uint8Array;
+  raw: Uint8Array;
 }
 
 export interface RawSimplexBlockEntry {
-  type: 'block';
+  kind: 'block';
   key: Uint8Array;
   digest: Uint8Array;
   raw: Uint8Array;
@@ -26,28 +26,28 @@ export interface RawSimplexBlockEntry {
 }
 
 export interface RawSimplexNotarizationEntry {
-  type: 'notarization';
+  kind: 'notarization';
   epoch: bigint;
   key: Uint8Array;
   view: bigint;
-  notarized: Uint8Array;
+  raw: Uint8Array;
 }
 
 export interface RawSimplexFinalizationByRoundEntry {
-  type: 'finalization';
+  kind: 'finalization';
   index: 'round';
   epoch: bigint;
   key: Uint8Array;
   view: bigint;
-  finalized: Uint8Array;
+  raw: Uint8Array;
 }
 
 export interface RawSimplexFinalizationByHeightEntry {
-  type: 'finalization';
+  kind: 'finalization';
   index: 'height';
   key: Uint8Array;
   height: bigint;
-  finalized: Uint8Array;
+  raw: Uint8Array;
 }
 
 export type RawSimplexStreamEntry =
@@ -63,18 +63,9 @@ export type RawSimplexCertificateStreamEntry =
   | RawSimplexFinalizationByHeightEntry;
 
 export type VerifiedSimplexCertificateStreamEntry<TNotarization, TFinalization> =
-  | (Omit<RawSimplexNotarizationEntry, 'notarized'> & {
-      raw: Uint8Array;
-      certificate: TNotarization;
-    })
-  | (Omit<RawSimplexFinalizationByRoundEntry, 'finalized'> & {
-      raw: Uint8Array;
-      certificate: TFinalization;
-    })
-  | (Omit<RawSimplexFinalizationByHeightEntry, 'finalized'> & {
-      raw: Uint8Array;
-      certificate: TFinalization;
-    });
+  | (RawSimplexNotarizationEntry & { certificate: TNotarization })
+  | (RawSimplexFinalizationByRoundEntry & { certificate: TFinalization })
+  | (RawSimplexFinalizationByHeightEntry & { certificate: TFinalization });
 
 export interface SimplexStreamBatch<TEntry> {
   sequenceNumber: bigint;
@@ -86,22 +77,11 @@ export interface SimplexStreamOptions {
 }
 
 export interface SimplexCertificateStreamOptions extends SimplexStreamOptions {
-  includeFinalizedByHeight?: boolean;
+  includeFinalizationByHeight?: boolean;
 }
 
-export interface SimplexSubscriptionsOptions<TNotarization = unknown, TFinalization = unknown> {
-  verifier?: SimplexCertificateVerifier<TNotarization, TFinalization>;
-}
-
-export class SimplexSubscriptions<TNotarization = unknown, TFinalization = unknown> {
-  private readonly verifier?: SimplexCertificateVerifier<TNotarization, TFinalization>;
-
-  constructor(
-    private readonly store: PrefixedStoreClient,
-    options: SimplexSubscriptionsOptions<TNotarization, TFinalization> = {},
-  ) {
-    this.verifier = options.verifier;
-  }
+export class SimplexSubscriptions {
+  constructor(private readonly store: PrefixedStoreClient) {}
 
   async *subscribeRaw(
     kinds: SimplexRecordKind | readonly SimplexRecordKind[],
@@ -134,7 +114,7 @@ export class SimplexSubscriptions<TNotarization = unknown, TFinalization = unkno
     for await (const batch of this.subscribeRaw(SimplexRecordKind.BlockByDigest, options, callOptions)) {
       yield {
         sequenceNumber: batch.sequenceNumber,
-        entries: batch.entries.flatMap((entry) => (entry.type === 'block' ? [entry] : [])),
+        entries: batch.entries.flatMap((entry) => (entry.kind === 'block' ? [entry] : [])),
       };
     }
   }
@@ -146,7 +126,7 @@ export class SimplexSubscriptions<TNotarization = unknown, TFinalization = unkno
     for await (const batch of this.subscribeRaw(SimplexRecordKind.HeaderByDigest, options, callOptions)) {
       yield {
         sequenceNumber: batch.sequenceNumber,
-        entries: batch.entries.flatMap((entry) => (entry.type === 'header' ? [entry] : [])),
+        entries: batch.entries.flatMap((entry) => (entry.kind === 'header' ? [entry] : [])),
       };
     }
   }
@@ -158,57 +138,42 @@ export class SimplexSubscriptions<TNotarization = unknown, TFinalization = unkno
     const kinds = [
       SimplexRecordKind.NotarizationByRound,
       SimplexRecordKind.FinalizationByRound,
-      ...(options.includeFinalizedByHeight ? [SimplexRecordKind.FinalizedByHeight] : []),
+      ...(options.includeFinalizationByHeight ? [SimplexRecordKind.FinalizationByHeight] : []),
     ];
     for await (const batch of this.subscribeRaw(kinds, options, callOptions)) {
       yield {
         sequenceNumber: batch.sequenceNumber,
         entries: batch.entries.flatMap((entry) =>
-          entry.type === 'header' || entry.type === 'block' ? [] : [entry],
+          entry.kind === 'header' || entry.kind === 'block' ? [] : [entry],
         ),
       };
     }
   }
 
-  async *subscribeCertificates(
+  async *subscribeCertificates<TNotarization, TFinalization>(
+    verifier: SimplexCertificateVerifier<TNotarization, TFinalization>,
     options: SimplexCertificateStreamOptions = {},
     callOptions?: Parameters<PrefixedStoreClient['subscribe']>[1],
   ): AsyncIterable<SimplexStreamBatch<VerifiedSimplexCertificateStreamEntry<TNotarization, TFinalization>>> {
-    const verifier = this.requireVerifier();
     for await (const batch of this.subscribeCertificatesRaw(options, callOptions)) {
       const entries: VerifiedSimplexCertificateStreamEntry<TNotarization, TFinalization>[] = [];
       for (const entry of batch.entries) {
-        if (entry.type === 'notarization') {
-          const { notarized, ...event } = entry;
-          const { type: _type, ...fields } = event;
-          const certificate = await verifyNotarization(verifier, notarized, {
-            kind: 'notarization',
+        if (entry.kind === 'notarization') {
+          const certificate = await verifyNotarized(verifier, entry.raw, {
+            ...entry,
             source: 'stream',
-            ...fields,
-            value: notarized,
           });
-          entries.push({ ...event, raw: notarized, certificate });
+          entries.push({ ...entry, certificate });
         } else {
-          const { finalized, ...event } = entry;
-          const { type: _type, ...fields } = event;
-          const certificate = await verifyFinalization(verifier, finalized, {
-            kind: 'finalization',
+          const certificate = await verifyFinalized(verifier, entry.raw, {
+            ...entry,
             source: 'stream',
-            ...fields,
-            value: finalized,
           });
-          entries.push({ ...event, raw: finalized, certificate });
+          entries.push({ ...entry, certificate });
         }
       }
       yield { sequenceNumber: batch.sequenceNumber, entries };
     }
-  }
-
-  private requireVerifier(): SimplexCertificateVerifier<TNotarization, TFinalization> {
-    if (!this.verifier) {
-      throw new Error('simplex certificate read requires a configured verifier; use subscribeCertificatesRaw for unverified bytes');
-    }
-    return this.verifier;
   }
 }
 
@@ -229,11 +194,11 @@ function decodeRawStreamEntry(key: Uint8Array, value: Uint8Array): RawSimplexStr
   const kind = key[0] as SimplexRecordKind;
   switch (kind) {
     case SimplexRecordKind.HeaderByDigest:
-      return { type: 'header', key, digest: key.slice(1), header: value };
+      return { kind: 'header', key, digest: key.slice(1), raw: value };
     case SimplexRecordKind.BlockByDigest: {
       const block = decodeSimplexBlockData(value);
       return {
-        type: 'block',
+        kind: 'block',
         key,
         digest: key.slice(1),
         raw: value,
@@ -242,11 +207,11 @@ function decodeRawStreamEntry(key: Uint8Array, value: Uint8Array): RawSimplexStr
       };
     }
     case SimplexRecordKind.NotarizationByRound:
-      return { type: 'notarization', key, ...roundFromKey(key), notarized: value };
+      return { kind: 'notarization', key, ...roundFromKey(key), raw: value };
     case SimplexRecordKind.FinalizationByRound:
-      return { type: 'finalization', index: 'round', key, ...roundFromKey(key), finalized: value };
-    case SimplexRecordKind.FinalizedByHeight:
-      return { type: 'finalization', index: 'height', key, height: u64FromKey(key), finalized: value };
+      return { kind: 'finalization', index: 'round', key, ...roundFromKey(key), raw: value };
+    case SimplexRecordKind.FinalizationByHeight:
+      return { kind: 'finalization', index: 'height', key, height: u64FromKey(key), raw: value };
     default:
       throw new Error(`unknown simplex stream kind ${kind}`);
   }

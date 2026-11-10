@@ -6,7 +6,7 @@ export enum SimplexRecordKind {
   BlockByDigest = 2,
   NotarizationByRound = 3,
   FinalizationByRound = 4,
-  FinalizedByHeight = 5,
+  FinalizationByHeight = 5,
 }
 
 export interface SimplexBlockData {
@@ -48,7 +48,7 @@ export function toSimplexBytes(value: BytesLike): Uint8Array {
 
 export function encodeSimplexBlockData(
   header: BytesLike,
-  body: BytesLike = new Uint8Array(),
+  body: BytesLike,
 ): Uint8Array {
   const headerBytes = typeof header === 'string' ? hexToBytes(header) : header;
   const bodyBytes = typeof body === 'string' ? hexToBytes(body) : body;
@@ -149,8 +149,8 @@ export function finalizationByRoundKey(epoch: U64Like, view: U64Like): Uint8Arra
   return roundKey(SimplexRecordKind.FinalizationByRound, epoch, view);
 }
 
-export function finalizedByHeightKey(height: U64Like): Uint8Array {
-  return keyFromParts(SimplexRecordKind.FinalizedByHeight, u64Bytes(height));
+export function finalizationByHeightKey(height: U64Like): Uint8Array {
+  return keyFromParts(SimplexRecordKind.FinalizationByHeight, u64Bytes(height));
 }
 
 export function rangeForKind(kind: SimplexRecordKind): { start: Uint8Array; end: Uint8Array } {
