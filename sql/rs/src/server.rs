@@ -58,6 +58,7 @@ use datafusion::{
 };
 use exoware_sdk::{
     kv_codec::{decode_stored_row, Utf8},
+    limits::PutTooLarge,
     proto::{
         google::rpc::{bad_request::FieldViolation, BadRequest, ErrorInfo},
         with_bad_request_detail, with_error_info_detail,
@@ -678,7 +679,8 @@ fn compile_subscription_predicate(
 fn datafusion_error_to_connect(err: DataFusionError) -> ConnectError {
     // DataFusion wraps planner errors in Diagnostic and Context layers, so classify the root cause.
     // Arithmetic and conversion failures come from the values a statement computes, so they are the
-    // caller's errors.
+    // caller's errors. An INSERT with more entries than one Store write accepts is also the
+    // caller's error, and the Store reports such a Put the same way.
     match err.find_root() {
         DataFusionError::Plan(msg)
         | DataFusionError::Configuration(msg)
@@ -702,9 +704,12 @@ fn datafusion_error_to_connect(err: DataFusionError) -> ConnectError {
         }
         DataFusionError::ResourcesExhausted(msg) => ConnectError::resource_exhausted(msg.clone()),
         DataFusionError::External(external) => {
-            match external.downcast_ref::<exoware_sdk::ClientError>() {
-                Some(client_error) => client_error_to_connect(client_error),
-                None => ConnectError::internal(err.to_string()),
+            if let Some(client_error) = external.downcast_ref::<exoware_sdk::ClientError>() {
+                client_error_to_connect(client_error)
+            } else if let Some(too_large) = external.downcast_ref::<PutTooLarge>() {
+                ConnectError::invalid_argument(too_large.to_string())
+            } else {
+                ConnectError::internal(err.to_string())
             }
         }
         _ => ConnectError::internal(err.to_string()),
@@ -1626,6 +1631,21 @@ mod tests {
         assert_eq!(
             datafusion_error_to_connect(error).code,
             connectrpc::ErrorCode::ResourceExhausted
+        );
+    }
+
+    #[test]
+    fn too_many_insert_entries_map_to_invalid_argument() {
+        let error = DataFusionError::External(Box::new(PutTooLarge {
+            entries: 3,
+            max_entries: 2,
+        }))
+        .context("writing items");
+        let error = datafusion_error_to_connect(error);
+        assert_eq!(error.code, connectrpc::ErrorCode::InvalidArgument);
+        assert_eq!(
+            error.message.as_deref(),
+            Some("put has 3 entries, exceeding the limit of 2")
         );
     }
 

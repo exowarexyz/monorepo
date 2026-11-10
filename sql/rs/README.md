@@ -218,8 +218,11 @@ successful commit, or `mark_upload_failed` to retain the batch for retry.
 
 SQL `INSERT` writes through the same schema, with each statement committed as one
 atomic batch. It materializes Arrow batches first, so `BatchWriter` avoids that
-work for application ingest. The Store's request-size limit bounds each batch,
-and an oversized statement or flush returns the ingest error.
+work for application ingest. A statement must fit in one Store write. Once its
+entries pass the Store's entry or byte limit, `INSERT` stops reading its input
+and fails without writing. Too many entries return a `PutTooLarge` error and too
+many bytes `ResourcesExhausted`. An oversized flush returns the Store's ingest
+error.
 
 ## Adding indexes to existing tables
 
