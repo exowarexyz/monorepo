@@ -52,7 +52,7 @@ use datafusion::{
     },
     optimizer::simplify_expressions::ExprSimplifier,
     physical_expr::PhysicalExpr,
-    physical_plan::filter::batch_filter,
+    physical_plan::{filter::batch_filter, SendableRecordBatchStream},
     prelude::SessionContext as DataFusionContext,
 };
 use exoware_sdk::{
@@ -365,24 +365,12 @@ impl Service for SqlConnect {
                 .execute_logical_plan(plan)
                 .await
                 .map_err(datafusion_error_to_connect)?;
-            let mut batches = df
+            let batches = df
                 .execute_stream()
                 .await
                 .map_err(datafusion_error_to_connect)?;
-            let mut writer = StreamWriter::try_new(Vec::new(), &batches.schema())
-                .map_err(|error| datafusion_error_to_connect(error.into()))?;
-            while let Some(batch) = batches
-                .try_next()
-                .await
-                .map_err(datafusion_error_to_connect)?
-            {
-                writer
-                    .write(&batch)
-                    .map_err(|error| datafusion_error_to_connect(error.into()))?;
-            }
-            let results = writer
-                .into_inner()
-                .map_err(|error| datafusion_error_to_connect(error.into()))?
+            let results = encode_query_results(batches, MAX_CONNECTRPC_BODY_BYTES)
+                .await?
                 .into();
 
             let sequence_number = read_session.evaluated_sequence();
@@ -397,6 +385,41 @@ impl Service for SqlConnect {
             result.unwrap_or_else(|_| Err(ConnectError::internal("SQL query execution panicked")))
         })
     }
+}
+
+/// Encodes query results as one Arrow IPC stream. Encoding fails with `resource_exhausted`
+/// as soon as the stream exceeds `limit` bytes. That early return drops the batch stream and
+/// so cancels the rest of the query.
+async fn encode_query_results(
+    mut batches: SendableRecordBatchStream,
+    limit: usize,
+) -> Result<Vec<u8>, ConnectError> {
+    let exceeded = || {
+        ConnectError::resource_exhausted(format!(
+            "query results exceed the {limit}-byte response limit"
+        ))
+    };
+    let mut writer = StreamWriter::try_new(Vec::new(), &batches.schema())
+        .map_err(|error| datafusion_error_to_connect(error.into()))?;
+    while let Some(batch) = batches
+        .try_next()
+        .await
+        .map_err(datafusion_error_to_connect)?
+    {
+        writer
+            .write(&batch)
+            .map_err(|error| datafusion_error_to_connect(error.into()))?;
+        if writer.get_ref().len() > limit {
+            return Err(exceeded());
+        }
+    }
+    let results = writer
+        .into_inner()
+        .map_err(|error| datafusion_error_to_connect(error.into()))?;
+    if results.len() > limit {
+        return Err(exceeded());
+    }
+    Ok(results)
 }
 
 type BatchEvaluator =
@@ -689,6 +712,7 @@ mod tests {
         },
         datasource::MemTable,
         logical_expr::{create_udf, ColumnarValue, Volatility},
+        physical_plan::stream::RecordBatchStreamAdapter,
     };
     use exoware_sdk::{transport::set_tcp_nodelay, StoreClient};
     use futures::{FutureExt, StreamExt};
@@ -1347,6 +1371,54 @@ mod tests {
             .unwrap_err();
         assert_eq!(error.code, connectrpc::ErrorCode::InvalidArgument);
         task.abort();
+    }
+
+    #[tokio::test]
+    async fn query_results_stop_at_the_encoded_size_limit() {
+        // Encoding abandons the stream at the first batch that passes the limit.
+        let batch = RecordBatch::try_from_iter([(
+            "value",
+            Arc::new(Int64Array::from_iter_values(0..1024)) as ArrayRef,
+        )])
+        .unwrap();
+        let pulled = Arc::new(AtomicUsize::new(0));
+        let batches = stream::iter((0..3).map({
+            let (batch, pulled) = (batch.clone(), pulled.clone());
+            move |_| {
+                pulled.fetch_add(1, Ordering::Relaxed);
+                Ok(batch.clone())
+            }
+        }));
+        let batches = Box::pin(RecordBatchStreamAdapter::new(batch.schema(), batches));
+        let Err(error) = encode_query_results(batches, 1024).await else {
+            panic!("an 8 KiB batch was encoded under a 1 KiB limit");
+        };
+        assert_eq!(error.code, connectrpc::ErrorCode::ResourceExhausted);
+        assert_eq!(pulled.load(Ordering::Relaxed), 1);
+
+        // The limit covers the complete stream, including its end-of-stream marker.
+        let ctx = DataFusionContext::new();
+        let encode = async |limit| {
+            let batches = ctx
+                .sql("SELECT value FROM generate_series(1, 100000)")
+                .await
+                .unwrap()
+                .execute_stream()
+                .await
+                .unwrap();
+            encode_query_results(batches, limit).await
+        };
+        let results = encode(MAX_CONNECTRPC_BODY_BYTES).await.unwrap();
+        let rows: usize = StreamReader::try_new(results.as_slice(), None)
+            .unwrap()
+            .map(|batch| batch.unwrap().num_rows())
+            .sum();
+        assert_eq!(rows, 100_000);
+        assert_eq!(encode(results.len()).await.unwrap(), results);
+        let Err(error) = encode(results.len() - 1).await else {
+            panic!("a stream one byte longer than its limit was encoded");
+        };
+        assert_eq!(error.code, connectrpc::ErrorCode::ResourceExhausted);
     }
 
     #[tokio::test]

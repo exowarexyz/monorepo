@@ -304,7 +304,8 @@ let app = axum::Router::new().fallback_service(sql_stack(server));
 can decode with Arrow's `StreamReader`. Its Store reads share a new monotonic
 session starting at the request's optional minimum sequence. The response also
 reports the highest Store sequence observed, omitting it when the statement read
-nothing from the Store.
+nothing from the Store. A result whose encoded stream exceeds 256 MiB fails with
+`RESOURCE_EXHAUSTED`.
 
 `Query` accepts queries and `EXPLAIN`, `INSERT INTO` registered tables, `SET`
 and `RESET` of options outside `datafusion.runtime` and `datafusion.catalog`,
