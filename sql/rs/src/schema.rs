@@ -541,7 +541,7 @@ mod tests {
     async fn dataframe_insert_casts_input_to_table_types() {
         let (_task, url) = exoware_simulator::open_temp()
             .await
-            .expect("spawn simulator");
+            .expect("the simulator must start");
         let store = exoware_sdk::StoreClient::new(&url).unprefixed();
         let schema = KvSchema::new(store.clone())
             .table(
@@ -574,6 +574,7 @@ mod tests {
         let ctx = SqlContext::new(store);
         ctx.register_schema(schema).unwrap();
 
+        // A DataFrame and a SQL INSERT rescale the decimal and reinterpret the timestamp alike.
         write_batch(
             &ctx,
             "prices",
@@ -618,6 +619,7 @@ mod tests {
             ]
         );
 
+        // Narrower integers, dictionary strings, and an all-null column cast to the table types.
         write_batch(
             &ctx,
             "items",
@@ -644,6 +646,7 @@ mod tests {
             ]
         );
 
+        // A value that does not fit its table type fails the write and stores nothing.
         let err = write_batch(
             &ctx,
             "items",
@@ -707,7 +710,7 @@ mod tests {
     async fn filters_calling_async_functions_run_in_datafusion() {
         let (_task, url) = exoware_simulator::open_temp()
             .await
-            .expect("spawn simulator");
+            .expect("the simulator must start");
         let store = exoware_sdk::StoreClient::new(&url).unprefixed();
         let schema = KvSchema::new(store.clone())
             .table(
@@ -735,6 +738,7 @@ mod tests {
             .await
             .unwrap();
 
+        // The async filter runs above the scan and keeps only rows whose qty exceeds 3.
         assert_eq!(
             query(
                 &ctx,

@@ -218,8 +218,22 @@ pub(crate) struct CombinedAggregateJob {
 
 /// Compiled Store reductions that produce partial aggregate states for one SQL aggregate.
 ///
+/// Expressions whose jobs read the same ranges with the same group keys and row filter share one
+/// job, and a job sends one Reduce request per range:
+///
+/// ```text
+///   expressions   jobs                Reduce requests
+///
+///   expr 0 --+                   +--> range A --+
+///            +--> job 0 ---------+              |
+///   expr 1 --+                   +--> range B --+--> partial state rows
+///                                               |
+///   expr 2 -----> job 1 ------------> range C --+
+/// ```
+///
 /// Each job runs independently with its own access path and ranges. The same group can
 /// therefore appear in several rows, and DataFusion merges those rows in its final aggregate.
+/// `seed_job`, when present, sends its requests the same way.
 #[derive(Debug, Clone)]
 pub(crate) struct AggregatePushdownSpec {
     /// Store client for the table's key prefix.
@@ -4118,6 +4132,8 @@ mod tests {
 
         let fixture = Fixture::new().await;
         let (transport, starts, senders) = pending_ranges(&fixture, &[1, 3, 5, 7]).await;
+
+        // A Reduce response body with one counted group per key, tagged with a Store sequence.
         let frame = |keys: std::ops::Range<i64>, sequence_number| {
             let (results, groups) = exoware_sdk::to_proto_reduce_response(RangeReduceResponse {
                 results: vec![],
@@ -4142,6 +4158,8 @@ mod tests {
             };
             connectrpc::envelope::Envelope::data(response.encode_to_bytes()).encode()
         };
+
+        // Five buckets give five ranges, and two target partitions allow two requests in flight.
         let sql = "SELECT category, COUNT(*) FROM pending_ranges WHERE bucket IN (1, 3, 5, 7, 9) GROUP BY category";
         let (context, pool) = aggregate_session_with_pool(&fixture, 4 * 1024 * 1024, 2);
         let session = context.read_session();
@@ -4155,6 +4173,7 @@ mod tests {
         final_reduce_plan(plan.clone());
         let mut output = plan.execute(0, context.datafusion().task_ctx()).unwrap();
 
+        // Two ranges open before any response arrives, and neither sends a minimum sequence.
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
             loop {
                 assert!(futures::poll!(output.next()).is_pending());
@@ -4177,6 +4196,7 @@ mod tests {
                 .all(|request| starts[..2].contains(&request.start)));
         }
 
+        // The second range finishes first and records sequence 11 in the session.
         senders[1].unbounded_send(Ok(frame(1..2, 11))).unwrap();
         senders[1]
             .unbounded_send(Ok(connectrpc::envelope::Envelope::end_stream(
@@ -4196,6 +4216,7 @@ mod tests {
         .await
         .unwrap();
 
+        // The first range finishes at the older sequence 7, and the next two open at minimum 11.
         senders[0].unbounded_send(Ok(frame(0..1, 7))).unwrap();
         senders[0]
             .unbounded_send(Ok(connectrpc::envelope::Envelope::end_stream(
@@ -4226,6 +4247,7 @@ mod tests {
             }
         }
 
+        // The third range streams 1,024 groups at sequence 13 and reserves pool memory.
         senders[2].unbounded_send(Ok(frame(2..1026, 13))).unwrap();
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
             loop {
@@ -4238,6 +4260,9 @@ mod tests {
         })
         .await
         .unwrap();
+
+        // The current and prefetched bodies stay open until the output drops. Dropping it closes
+        // both, frees the pool, and opens no fifth range.
         assert!(!senders[2].is_closed());
         assert!(!senders[3].is_closed());
         drop(output);
@@ -4271,6 +4296,7 @@ mod tests {
         final_reduce_plan(plan.clone());
         let mut output = plan.execute(0, context.datafusion().task_ctx()).unwrap();
 
+        // Two target partitions let the first two jobs open their ranges before any response.
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
             loop {
                 assert!(futures::poll!(output.next()).is_pending());
@@ -4290,6 +4316,7 @@ mod tests {
             .all(|request| starts[..2].contains(&request.start)));
         assert!(senders.iter().all(|sender| !sender.is_closed()));
 
+        // Dropping the output closes both open bodies and never opens the third job.
         drop(output);
         assert!(senders[0].is_closed(), "first job body must be dropped");
         assert!(senders[1].is_closed(), "second job body must be dropped");

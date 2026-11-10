@@ -604,6 +604,8 @@ mod tests {
         .unwrap();
         let model = TableModel::from_config(&config).unwrap();
         let specs = model.resolve_index_specs(&config.index_specs).unwrap();
+
+        // Store ranges include their endpoints, so only inclusive float bounds are exact.
         for (min, max, exact) in [
             (Some((1.0, false)), None, false),
             (None, Some((1.0, false)), false),

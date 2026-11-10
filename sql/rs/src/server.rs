@@ -1253,6 +1253,7 @@ mod tests {
             verify_remote_plan(&plan)
         };
 
+        // Writes other than INSERT INTO are rejected, even INSERT OVERWRITE and REPLACE INTO.
         for sql in [
             "DELETE FROM target WHERE id = 1",
             "UPDATE target SET status = 'x' WHERE id = 1",
@@ -1263,6 +1264,8 @@ mod tests {
         ] {
             assert!(verify(sql).await.is_err(), "{sql}");
         }
+
+        // INSERT INTO the same table passes, so the rejections come from the write kind.
         verify("INSERT INTO target VALUES (5, 'x')").await.unwrap();
     }
 
@@ -1534,7 +1537,7 @@ mod tests {
         }));
         let batches = Box::pin(RecordBatchStreamAdapter::new(batch.schema(), batches));
         let Err(error) = encode_query_results(batches, 1024).await else {
-            panic!("an 8 KiB batch was encoded under a 1 KiB limit");
+            panic!("an 8 KiB batch must not encode under a 1 KiB limit");
         };
         assert_eq!(error.code, connectrpc::ErrorCode::ResourceExhausted);
         assert_eq!(pulled.load(Ordering::Relaxed), 1);
@@ -1559,7 +1562,7 @@ mod tests {
         assert_eq!(rows, 100_000);
         assert_eq!(encode(results.len()).await.unwrap(), results);
         let Err(error) = encode(results.len() - 1).await else {
-            panic!("a stream one byte longer than its limit was encoded");
+            panic!("a stream one byte longer than its limit must not encode");
         };
         assert_eq!(error.code, connectrpc::ErrorCode::ResourceExhausted);
     }

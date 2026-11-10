@@ -615,6 +615,8 @@ mod tests {
                 .unwrap();
         }
         let native = DataFusionSessionContext::new();
+
+        // Write the same rows to the Store and to in-memory tables that serve as the reference.
         let mut writer = schema.batch_writer();
         for (name, table) in schema.tables() {
             let mut values = vec![Some(false), Some(true)];
@@ -651,6 +653,8 @@ mod tests {
         let ctx = SqlContext::new(client.unprefixed());
         ctx.register_schema(schema).unwrap();
 
+        // Each Boolean predicate matches DataFusion, and on the indexed table it reads a
+        // constrained range of the index.
         for table in ["flags", "nullable_flags"] {
             for predicate in [
                 "b",
@@ -678,6 +682,7 @@ mod tests {
                 }
             }
 
+            // A count under a Boolean predicate runs as a Reduce without reading rows.
             let sql = format!("SELECT COUNT(*) FROM {table} WHERE b");
             let plan = physical_plan_text(&explain_plan_rows(&ctx, &sql).await);
             assert!(plan.contains("KvAggregateExec"), "{plan}");
@@ -728,6 +733,7 @@ mod tests {
         let ctx = SqlContext::new(client.unprefixed());
         ctx.register_schema(schema).unwrap();
 
+        // Contradictory equalities on a value column plan an empty scan and read nothing.
         let sql = "SELECT id FROM t WHERE s = 'a' AND s = 'b'";
         let plan = physical_plan_text(&explain_plan_rows(&ctx, sql).await);
         assert!(plan.contains("mode=empty"), "{plan}");
@@ -736,6 +742,7 @@ mod tests {
         assert!(batches.iter().all(|batch| batch.num_rows() == 0));
         assert_eq!(state.range_calls.load(AtomicOrdering::SeqCst), 0);
 
+        // A contradictory aggregate returns a zero count and a null sum without a range read.
         let batches = ctx
             .sql("SELECT COUNT(*), SUM(x) FROM t WHERE id = 1 AND id = 2")
             .await
@@ -785,6 +792,8 @@ mod tests {
                 )
                 .unwrap();
         }
+
+        // Each table holds one row at 0.0, `boundary_rows` rows at 1.0, and one row at 2.0.
         let mut writer = schema.batch_writer();
         for (name, boundary_rows, _) in tables {
             for id in 0..=boundary_rows + 1 {
@@ -804,6 +813,8 @@ mod tests {
         let ctx = SqlContext::new(client.unprefixed());
         ctx.register_schema(schema).unwrap();
 
+        // A strict bound's index range also holds the rows equal to the bound, so the LIMIT
+        // does not size the request, and one request serves any number of boundary rows.
         let mut request_counts = Vec::new();
         let mut plans = Vec::new();
         for (name, boundary_rows, _) in &tables[..2] {
@@ -829,6 +840,7 @@ mod tests {
             assert!(plan.contains("exact=false, row_recheck=true"), "{plan}");
         }
 
+        // A reverse primary-key scan rechecks the bound on each row and also needs one request.
         let sql = "SELECT id FROM reverse_rows WHERE x < 1.0 ORDER BY id DESC LIMIT 1";
         let plan = physical_plan_text(&explain_plan_rows(&ctx, sql).await);
         assert!(plan.contains("direction=Some(Reverse)"), "{plan}");

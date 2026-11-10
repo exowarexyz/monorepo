@@ -754,7 +754,8 @@ mod tests {
             value = StoredValue::List(vec![value]);
         }
         let bytes = value.encode();
-        let decoded = StoredValue::read(&mut Copying(&bytes)).expect("valid list nesting");
+        let decoded = StoredValue::read(&mut Copying(&bytes))
+            .expect("a list nested to the depth limit must decode");
         assert_eq!(decoded.encode(), bytes);
     }
 
@@ -771,6 +772,9 @@ mod tests {
     #[test]
     fn stored_value_bounds_recursion_on_small_stack() {
         let bytes = nested_list_bytes(100_000);
+
+        // On a 64 KiB stack, decoding 100,000 levels returns the nesting error and does not
+        // overflow.
         std::thread::Builder::new()
             .stack_size(64 * 1024)
             .spawn(move || {
@@ -781,9 +785,9 @@ mod tests {
                     CodecError::Invalid("StoredValue", "list nesting exceeds limit")
                 ));
             })
-            .expect("spawn decoder thread")
+            .expect("the decoder thread must spawn")
             .join()
-            .expect("decoder thread completes");
+            .expect("the decoder thread must not panic");
     }
 
     #[test]

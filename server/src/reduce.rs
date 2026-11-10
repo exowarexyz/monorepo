@@ -1094,6 +1094,7 @@ mod tests {
     fn excessive_stored_list_nesting_returns_an_error() {
         use commonware_codec::Write as _;
 
+        // One stored field nests 100,000 single-element lists around an Int64.
         let mut bytes = Vec::new();
         1usize.write(&mut bytes);
         true.write(&mut bytes);
@@ -1112,8 +1113,9 @@ mod tests {
             matches!(error, RangeError::Reduce(message) if message.contains("list nesting exceeds limit"))
         );
 
+        // The same reducer still sums a well-formed row.
         let rows = [make_row(b"b", vec![Some(StoredValue::Int64(7))])];
-        let result = reduce(&rows, &params).expect("valid reduction");
+        let result = reduce(&rows, &params).expect("a well-formed row must reduce");
         assert_eq!(result.results[0].value, result_i64(7));
     }
 

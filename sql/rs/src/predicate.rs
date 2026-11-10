@@ -2118,6 +2118,8 @@ mod tests {
         )
         .unwrap();
         let model = TableModel::from_config(&config).unwrap();
+
+        // The column, its negation, IS TRUE, and IS FALSE each become an equality that NULL fails.
         for (expr, expected) in [
             (col("b"), true),
             (Expr::Not(Box::new(col("b"))), false),
@@ -2134,6 +2136,8 @@ mod tests {
                 &predicate.constraints[&1]
             ));
         }
+
+        // A non-Boolean column is no predicate, and IS NOT TRUE and IS NOT FALSE hold for NULL.
         for expr in [
             col("id"),
             Expr::Not(Box::new(col("id"))),
@@ -2159,6 +2163,8 @@ mod tests {
         .unwrap();
         let model = TableModel::from_config(&config).unwrap();
         let equality = col("id").eq(Expr::Literal(ScalarValue::Int64(Some(1)), None));
+
+        // In either order, TRUE keeps the key equality, while FALSE and NULL leave no range.
         for value in [Some(true), Some(false), None] {
             let literal = Expr::Literal(ScalarValue::Boolean(value), None);
             assert!(QueryPredicate::supports_filter(&literal, &model));
@@ -2181,6 +2187,8 @@ mod tests {
                 }
             }
         }
+
+        // A lone TRUE constrains nothing and contradicts nothing.
         let predicate = QueryPredicate::from_filters(
             &[Expr::Literal(ScalarValue::Boolean(Some(true)), None)],
             &model,
