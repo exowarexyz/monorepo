@@ -389,6 +389,15 @@ impl ScanAccessPlan {
                 open_tail = true;
                 continue;
             };
+
+            // Store ranges include their endpoints, so the range for a strict float bound also
+            // holds rows equal to the bound.
+            if matches!(constraint, PredicateConstraint::FloatRange { min, max }
+                if min.is_some_and(|(_, inclusive)| !inclusive)
+                    || max.is_some_and(|(_, inclusive)| !inclusive))
+            {
+                return false;
+            }
             let kind = model.column(*col_idx).kind;
             if matches!(
                 compile_encoded_constraint(kind, constraint),
@@ -573,5 +582,49 @@ pub(crate) fn compile_encoded_constraint(
             }
         }
         _ => EncodedConstraintCompile::Unsupported,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use datafusion::arrow::datatypes::DataType;
+
+    #[test]
+    fn exclusive_float_bounds_require_recheck() {
+        let config = KvTableConfig::new(
+            0,
+            vec![
+                TableColumnConfig::new("id", DataType::Int64, false),
+                TableColumnConfig::new("x", DataType::Float64, false),
+            ],
+            vec!["id".into()],
+            vec![IndexSpec::new("x_idx", vec!["x".into()]).unwrap()],
+        )
+        .unwrap();
+        let model = TableModel::from_config(&config).unwrap();
+        let specs = model.resolve_index_specs(&config.index_specs).unwrap();
+
+        // Store ranges include their endpoints, so only inclusive float bounds are exact.
+        for (min, max, exact) in [
+            (Some((1.0, false)), None, false),
+            (None, Some((1.0, false)), false),
+            (Some((1.0, true)), None, true),
+            (None, Some((1.0, true)), true),
+            (Some((1.0, true)), Some((1.0, true)), true),
+            (Some((0.0, false)), Some((1.0, true)), false),
+            (Some((0.0, true)), Some((1.0, false)), false),
+        ] {
+            let mut predicate = QueryPredicate::default();
+            predicate
+                .constraints
+                .insert(1, PredicateConstraint::FloatRange { min, max });
+            let access = ScanAccessPlan::new(&model, &None, &predicate);
+            assert_eq!(
+                access.predicate_fully_enforced_by_index_key(&model, &specs[0]),
+                exact,
+                "min={min:?}, max={max:?}"
+            );
+        }
     }
 }

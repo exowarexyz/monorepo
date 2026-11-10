@@ -12,7 +12,9 @@ message TablesRequest {}
 
 // Server-registered table.
 message Table {
-  // Name clients pass to `Subscribe.table` / reference in `Query.sql`.
+  // Exact, case-sensitive table name. Pass it unchanged as `Subscribe.table`.
+  // In SQL, double-quote it. The quotes are optional for a lower-case
+  // identifier.
   string name = 1;
   // Columns in declaration order. `Subscribe` emits rows in this order.
   repeated Column columns = 2;

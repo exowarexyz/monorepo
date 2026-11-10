@@ -29,7 +29,7 @@ use crate::{
         Table as ProtoTable, TablesRequest, TablesResponse,
     },
     schema::KvSchema,
-    types::{IndexLayout, ResolvedIndexSpec, TableModel},
+    types::{IndexLayout, ResolvedIndexSpec, TableModel, MAX_TABLE_NAME_LEN},
     SqlContext,
 };
 #[cfg(test)]
@@ -38,23 +38,30 @@ use connectrpc::{ConnectError, ConnectRpcService, RequestContext as Context, Ser
 use datafusion::{
     arrow::{
         datatypes::{DataType, SchemaRef},
+        error::ArrowError,
         ipc::writer::StreamWriter,
         record_batch::RecordBatch,
     },
     common::{
+        plan_err,
         tree_node::{TreeNode, TreeNodeRecursion},
         DFSchema, DataFusionError, Result as DataFusionResult, TableReference,
     },
     logical_expr::{
-        simplify::SimplifyContext, DdlStatement, Expr, ExprSchemable, LogicalPlan, Statement,
+        dml::InsertOp, simplify::SimplifyContext, DdlStatement, DmlStatement, Expr, ExprSchemable,
+        LogicalPlan, ResetVariable, SetVariable, Statement, WriteOp,
     },
     optimizer::simplify_expressions::ExprSimplifier,
     physical_expr::PhysicalExpr,
-    physical_plan::filter::batch_filter,
+    physical_plan::{filter::batch_filter, SendableRecordBatchStream},
     prelude::SessionContext as DataFusionContext,
 };
 use exoware_sdk::{
     kv_codec::{decode_stored_row, Utf8},
+    proto::{
+        google::rpc::{bad_request::FieldViolation, BadRequest, ErrorInfo},
+        with_bad_request_detail, with_error_info_detail,
+    },
     selector::Selector,
     stream_filter::StreamFilter,
     PrefixedStoreClient, ReadSession, StoreBatch, StoreBatchEntry, StreamSubscription,
@@ -285,6 +292,10 @@ impl Service for SqlConnect {
     ) -> impl Future<Output = connectrpc::ServiceResult<SubscribeStream>> + Send {
         let server = self.server.clone();
         async move {
+            // Enforce the buf.validate lengths declared in stream.proto.
+            validate_field_length("table", request.table, 1, MAX_TABLE_NAME_LEN)?;
+            validate_field_length("where_sql", request.where_sql, 0, 4096)?;
+
             let table_name = request.table.to_string();
             let where_sql = request.where_sql.trim().to_string();
             let since = request.since_sequence_number.filter(|seq| *seq != 0);
@@ -334,6 +345,9 @@ impl Service for SqlConnect {
     ) -> impl Future<Output = connectrpc::ServiceResult<QueryResponse>> + Send {
         let server = self.server.clone();
         AssertUnwindSafe(async move {
+            // Enforce the buf.validate length declared in query.proto.
+            validate_field_length("sql", request.sql, 1, 65_535)?;
+
             let sql = request.sql.to_string();
             let min_sequence_number = request.min_sequence_number;
             let read_session = ReadSession::monotonic(server.store.clone(), min_sequence_number);
@@ -344,6 +358,7 @@ impl Service for SqlConnect {
                 .create_logical_plan(&sql)
                 .await
                 .map_err(datafusion_error_to_connect)?;
+            verify_remote_plan(&plan).map_err(datafusion_error_to_connect)?;
 
             // Session commands must outlive the request. Data reads keep the request's floor.
             let execution_ctx = match &plan {
@@ -362,24 +377,12 @@ impl Service for SqlConnect {
                 .execute_logical_plan(plan)
                 .await
                 .map_err(datafusion_error_to_connect)?;
-            let mut batches = df
+            let batches = df
                 .execute_stream()
                 .await
                 .map_err(datafusion_error_to_connect)?;
-            let mut writer = StreamWriter::try_new(Vec::new(), &batches.schema())
-                .map_err(|error| datafusion_error_to_connect(error.into()))?;
-            while let Some(batch) = batches
-                .try_next()
-                .await
-                .map_err(datafusion_error_to_connect)?
-            {
-                writer
-                    .write(&batch)
-                    .map_err(|error| datafusion_error_to_connect(error.into()))?;
-            }
-            let results = writer
-                .into_inner()
-                .map_err(|error| datafusion_error_to_connect(error.into()))?
+            let results = encode_query_results(batches, MAX_CONNECTRPC_BODY_BYTES)
+                .await?
                 .into();
 
             let sequence_number = read_session.evaluated_sequence();
@@ -394,6 +397,41 @@ impl Service for SqlConnect {
             result.unwrap_or_else(|_| Err(ConnectError::internal("SQL query execution panicked")))
         })
     }
+}
+
+/// Encodes query results as one Arrow IPC stream. Encoding fails with `resource_exhausted`
+/// as soon as the stream exceeds `limit` bytes. That early return drops the batch stream and
+/// so cancels the rest of the query.
+async fn encode_query_results(
+    mut batches: SendableRecordBatchStream,
+    limit: usize,
+) -> Result<Vec<u8>, ConnectError> {
+    let exceeded = || {
+        ConnectError::resource_exhausted(format!(
+            "query results exceed the {limit}-byte response limit"
+        ))
+    };
+    let mut writer = StreamWriter::try_new(Vec::new(), &batches.schema())
+        .map_err(|error| datafusion_error_to_connect(error.into()))?;
+    while let Some(batch) = batches
+        .try_next()
+        .await
+        .map_err(datafusion_error_to_connect)?
+    {
+        writer
+            .write(&batch)
+            .map_err(|error| datafusion_error_to_connect(error.into()))?;
+        if writer.get_ref().len() > limit {
+            return Err(exceeded());
+        }
+    }
+    let results = writer
+        .into_inner()
+        .map_err(|error| datafusion_error_to_connect(error.into()))?;
+    if results.len() > limit {
+        return Err(exceeded());
+    }
+    Ok(results)
 }
 
 type BatchEvaluator =
@@ -543,6 +581,46 @@ fn evaluate_batch(
     }))
 }
 
+/// Rejects remote statements that would read or write the server's files, replace its runtime
+/// environment, change the catalog that every caller shares, or write other than with
+/// `INSERT INTO`. Like DataFusion's `SQLOptions::verify_plan`, the check visits every node,
+/// including subqueries and the inputs of `EXPLAIN` and `PREPARE`.
+///
+/// `CREATE FUNCTION` and `DROP FUNCTION` stay available as session commands. Embedders
+/// register tables and views and configure the runtime on the server's [`SqlContext`].
+fn verify_remote_plan(plan: &LogicalPlan) -> DataFusionResult<()> {
+    plan.apply_with_subqueries(|node| {
+        let what = match node {
+            LogicalPlan::Copy(_) => "COPY",
+            LogicalPlan::Ddl(DdlStatement::CreateExternalTable(_)) => "CREATE EXTERNAL TABLE",
+            LogicalPlan::Ddl(DdlStatement::CreateFunction(_) | DdlStatement::DropFunction(_)) => {
+                return Ok(TreeNodeRecursion::Continue);
+            }
+            LogicalPlan::Ddl(_) => "changing the catalog",
+            LogicalPlan::Dml(DmlStatement {
+                op: WriteOp::Insert(InsertOp::Append),
+                ..
+            }) => return Ok(TreeNodeRecursion::Continue),
+            LogicalPlan::Dml(_) => "a write other than INSERT INTO",
+            LogicalPlan::Statement(
+                Statement::SetVariable(SetVariable { variable, .. })
+                | Statement::ResetVariable(ResetVariable { variable }),
+            ) => {
+                if variable.starts_with("datafusion.runtime.") {
+                    "changing datafusion.runtime options"
+                } else if variable.starts_with("datafusion.catalog.") {
+                    "changing datafusion.catalog options"
+                } else {
+                    return Ok(TreeNodeRecursion::Continue);
+                }
+            }
+            _ => return Ok(TreeNodeRecursion::Continue),
+        };
+        plan_err!("{what} is not supported by the SQL service")
+    })
+    .map(|_| ())
+}
+
 fn compile_subscription_predicate(
     ctx: &DataFusionContext,
     schema: &SchemaRef,
@@ -599,6 +677,8 @@ fn compile_subscription_predicate(
 
 fn datafusion_error_to_connect(err: DataFusionError) -> ConnectError {
     // DataFusion wraps planner errors in Diagnostic and Context layers, so classify the root cause.
+    // Arithmetic and conversion failures come from the values a statement computes, so they are the
+    // caller's errors.
     match err.find_root() {
         DataFusionError::Plan(msg)
         | DataFusionError::Configuration(msg)
@@ -609,6 +689,18 @@ fn datafusion_error_to_connect(err: DataFusionError) -> ConnectError {
         DataFusionError::SchemaError(schema_error, _) => {
             ConnectError::invalid_argument(schema_error.to_string())
         }
+        DataFusionError::ArrowError(arrow_error, _)
+            if matches!(
+                **arrow_error,
+                ArrowError::DivideByZero
+                    | ArrowError::ArithmeticOverflow(_)
+                    | ArrowError::CastError(_)
+                    | ArrowError::ParseError(_)
+            ) =>
+        {
+            ConnectError::invalid_argument(arrow_error.to_string())
+        }
+        DataFusionError::ResourcesExhausted(msg) => ConnectError::resource_exhausted(msg.clone()),
         DataFusionError::External(external) => {
             match external.downcast_ref::<exoware_sdk::ClientError>() {
                 Some(client_error) => client_error_to_connect(client_error),
@@ -627,10 +719,52 @@ fn client_error_to_connect(err: &exoware_sdk::ClientError) -> ConnectError {
     }
 }
 
+/// Rejects a string field whose length, in Unicode code points as buf.validate counts it, is
+/// outside `min_len..=max_len`. The error carries `BadRequest` and `ErrorInfo` details shaped
+/// like the Store's request validation errors.
+fn validate_field_length(
+    field: &str,
+    value: &str,
+    min_len: usize,
+    max_len: usize,
+) -> Result<(), ConnectError> {
+    let len = value.chars().count();
+    if (min_len..=max_len).contains(&len) {
+        return Ok(());
+    }
+    let description = format!("{field} must have {min_len} to {max_len} characters, got {len}");
+    let error = with_bad_request_detail(
+        ConnectError::invalid_argument(format!("{field} length is outside SQL service limits")),
+        BadRequest {
+            field_violations: vec![FieldViolation {
+                field: field.to_string(),
+                description: description.clone(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        },
+    );
+    Err(with_error_info_detail(
+        error,
+        ErrorInfo {
+            reason: "INVALID_FIELD_LENGTH".to_string(),
+            domain: "sql".to_string(),
+            metadata: [
+                ("min_len".to_string(), min_len.to_string()),
+                ("max_len".to_string(), max_len.to_string()),
+                ("description".to_string(), description),
+            ]
+            .into_iter()
+            .collect(),
+            ..Default::default()
+        },
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::TableColumnConfig;
+    use crate::{types::KvTable, TableColumnConfig};
     use axum::serve::{Listener, ListenerExt};
     use buffa::Message;
     use datafusion::{
@@ -644,8 +778,9 @@ mod tests {
             ipc::reader::StreamReader,
             record_batch::RecordBatchOptions,
         },
-        datasource::MemTable,
+        datasource::{source_as_provider, MemTable},
         logical_expr::{create_udf, ColumnarValue, Volatility},
+        physical_plan::stream::RecordBatchStreamAdapter,
     };
     use exoware_sdk::{transport::set_tcp_nodelay, StoreClient};
     use futures::{FutureExt, StreamExt};
@@ -693,6 +828,81 @@ mod tests {
             assert_eq!(server.stream(name).unwrap().model.columns[0].name, name);
         }
         assert!(server.stream("unknown").is_err());
+    }
+
+    #[tokio::test]
+    async fn declared_table_names_are_exact_on_every_surface() {
+        // Parsed as SQL, `Orders` would fold to `orders`, the dotted names would split into a
+        // schema and a table, and the last name would lose its quotes.
+        let names = [
+            "orders",
+            "Orders",
+            "Order Events",
+            "a.b",
+            "public.Orders",
+            "\"Orders\"",
+        ];
+        let mut schema = KvSchema::new(StoreClient::new("http://127.0.0.1:1").unprefixed());
+        for name in names {
+            schema = schema
+                .table(
+                    name,
+                    vec![TableColumnConfig::new("id", DataType::Int64, false)],
+                    vec!["id".into()],
+                    vec![],
+                )
+                .unwrap();
+        }
+        let server = SqlServer::new(schema).unwrap();
+
+        // The prefix of the table a query scans tells which declared table its name reached.
+        let scanned_prefix = async |sql: String| {
+            let state = server.context().datafusion().state();
+            let plan = state.create_logical_plan(&sql).await.unwrap();
+            let mut prefix = None;
+            plan.apply(|node| {
+                if let LogicalPlan::TableScan(scan) = node {
+                    let provider = source_as_provider(&scan.source)?;
+                    let table = provider.downcast_ref::<KvTable>().unwrap();
+                    prefix = Some(table.model.table_prefix);
+                }
+                Ok(TreeNodeRecursion::Continue)
+            })
+            .unwrap();
+            prefix.unwrap()
+        };
+
+        // `Tables` lists the declared names.
+        let listed: Vec<_> = server
+            .describe_tables()
+            .into_iter()
+            .map(|table| table.name)
+            .collect();
+        assert_eq!(listed, names);
+
+        for (position, name) in names.into_iter().enumerate() {
+            let prefix = position as u8;
+
+            // `Subscribe` finds the table by its declared name, and a predicate qualifies
+            // columns with that name as a quoted identifier.
+            let stream = server.stream(name).unwrap();
+            assert_eq!(stream.model.table_prefix, prefix, "{name}");
+            let quoted = format!("\"{}\"", name.replace('"', "\"\""));
+            compile_subscription_predicate(
+                server.context().datafusion(),
+                &stream.model.schema,
+                name,
+                &format!("{quoted}.id = 1"),
+            )
+            .unwrap_or_else(|error| panic!("the qualifier {quoted} must resolve: {error}"));
+
+            // A query reaches the same table through the same quoted identifier.
+            let sql = format!("SELECT id FROM {quoted} WHERE {quoted}.id = 1");
+            assert_eq!(scanned_prefix(sql).await, prefix, "{name}");
+        }
+
+        // SQL folds an unquoted identifier to lower case, so it names another table.
+        assert_eq!(scanned_prefix("SELECT id FROM Orders".into()).await, 0);
     }
 
     #[test]
@@ -1028,6 +1238,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn remote_writes_other_than_insert_into_are_rejected() {
+        let ctx = DataFusionContext::new();
+        for name in ["target", "source"] {
+            let batch = predicate_batch();
+            ctx.register_table(
+                name,
+                Arc::new(MemTable::try_new(batch.schema(), vec![vec![batch]]).unwrap()),
+            )
+            .unwrap();
+        }
+        let verify = async |sql: &str| {
+            let plan = ctx.state().create_logical_plan(sql).await.unwrap();
+            verify_remote_plan(&plan)
+        };
+
+        // Writes other than INSERT INTO are rejected, even INSERT OVERWRITE and REPLACE INTO.
+        for sql in [
+            "DELETE FROM target WHERE id = 1",
+            "UPDATE target SET status = 'x' WHERE id = 1",
+            "TRUNCATE TABLE target",
+            "MERGE INTO target USING source ON target.id = source.id WHEN MATCHED THEN DELETE",
+            "INSERT OVERWRITE target VALUES (5, 'x')",
+            "REPLACE INTO target VALUES (5, 'x')",
+        ] {
+            assert!(verify(sql).await.is_err(), "{sql}");
+        }
+
+        // INSERT INTO the same table passes, so the rejections come from the write kind.
+        verify("INSERT INTO target VALUES (5, 'x')").await.unwrap();
+    }
+
+    #[tokio::test]
     async fn query_rpc_returns_internal_on_count_overflow_and_remains_usable() {
         use crate::{proto::sql::v1::ServiceClient, TableColumnConfig};
         use buffa::Message;
@@ -1278,6 +1520,54 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn query_results_stop_at_the_encoded_size_limit() {
+        // Encoding abandons the stream at the first batch that passes the limit.
+        let batch = RecordBatch::try_from_iter([(
+            "value",
+            Arc::new(Int64Array::from_iter_values(0..1024)) as ArrayRef,
+        )])
+        .unwrap();
+        let pulled = Arc::new(AtomicUsize::new(0));
+        let batches = stream::iter((0..3).map({
+            let (batch, pulled) = (batch.clone(), pulled.clone());
+            move |_| {
+                pulled.fetch_add(1, Ordering::Relaxed);
+                Ok(batch.clone())
+            }
+        }));
+        let batches = Box::pin(RecordBatchStreamAdapter::new(batch.schema(), batches));
+        let Err(error) = encode_query_results(batches, 1024).await else {
+            panic!("an 8 KiB batch must not encode under a 1 KiB limit");
+        };
+        assert_eq!(error.code, connectrpc::ErrorCode::ResourceExhausted);
+        assert_eq!(pulled.load(Ordering::Relaxed), 1);
+
+        // The limit covers the complete stream, including its end-of-stream marker.
+        let ctx = DataFusionContext::new();
+        let encode = async |limit| {
+            let batches = ctx
+                .sql("SELECT value FROM generate_series(1, 100000)")
+                .await
+                .unwrap()
+                .execute_stream()
+                .await
+                .unwrap();
+            encode_query_results(batches, limit).await
+        };
+        let results = encode(MAX_CONNECTRPC_BODY_BYTES).await.unwrap();
+        let rows: usize = StreamReader::try_new(results.as_slice(), None)
+            .unwrap()
+            .map(|batch| batch.unwrap().num_rows())
+            .sum();
+        assert_eq!(rows, 100_000);
+        assert_eq!(encode(results.len()).await.unwrap(), results);
+        let Err(error) = encode(results.len() - 1).await else {
+            panic!("a stream one byte longer than its limit must not encode");
+        };
+        assert_eq!(error.code, connectrpc::ErrorCode::ResourceExhausted);
+    }
+
+    #[tokio::test]
     async fn query_parse_errors_map_to_invalid_argument() {
         let ctx = DataFusionContext::new();
         let DataFusionError::SQL(parser_error, _) = ctx.sql("SELECT FROM").await.unwrap_err()
@@ -1327,6 +1617,24 @@ mod tests {
                 "{sql}"
             );
         }
+    }
+
+    #[test]
+    fn wrapped_resource_exhaustion_maps_to_resource_exhausted() {
+        let error =
+            DataFusionError::ResourcesExhausted("memory pool is full".into()).context("sorting");
+        assert_eq!(
+            datafusion_error_to_connect(error).code,
+            connectrpc::ErrorCode::ResourceExhausted
+        );
+    }
+
+    #[test]
+    fn field_lengths_count_code_points() {
+        // Each "é" is one code point encoded in two bytes.
+        assert!(validate_field_length("table", &"é".repeat(255), 1, 255).is_ok());
+        let error = validate_field_length("table", &"é".repeat(256), 1, 255).unwrap_err();
+        assert_eq!(error.code, connectrpc::ErrorCode::InvalidArgument);
     }
 
     enum ControlledEvent {

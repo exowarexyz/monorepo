@@ -302,7 +302,11 @@ impl QueryPredicate {
     }
 
     pub(crate) fn supports_filter(expr: &Expr, model: &TableModel) -> bool {
+        if parse_boolean_column_predicate(expr, model).is_some() {
+            return true;
+        }
         match expr {
+            Expr::Literal(ScalarValue::Boolean(_), _) => true,
             Expr::BinaryExpr(binary) if binary.op == Operator::And => {
                 Self::supports_filter(binary.left.as_ref(), model)
                     && Self::supports_filter(binary.right.as_ref(), model)
@@ -370,7 +374,19 @@ impl QueryPredicate {
     }
 
     pub(crate) fn apply_expr(&mut self, expr: &Expr, model: &TableModel) {
+        if let Some((column, value)) = parse_boolean_column_predicate(expr, model) {
+            self.apply_comparison(
+                column,
+                Operator::Eq,
+                &ScalarValue::Boolean(Some(value)),
+                model,
+            );
+            return;
+        }
         match expr {
+            Expr::Literal(ScalarValue::Boolean(value), _) => {
+                self.contradiction |= *value != Some(true);
+            }
             Expr::IsNull(inner) => {
                 if let Some(column) = inner.try_as_col() {
                     if let Some(&col_idx) = model.columns_by_name.get(&column.name) {
@@ -1965,6 +1981,20 @@ pub(crate) fn collect_or_equalities(
     }
 }
 
+fn parse_boolean_column_predicate<'a>(
+    expr: &'a Expr,
+    model: &TableModel,
+) -> Option<(&'a str, bool)> {
+    let (column, value) = match expr {
+        Expr::Column(column) => (column, true),
+        Expr::Not(inner) | Expr::IsFalse(inner) => (inner.try_as_col()?, false),
+        Expr::IsTrue(inner) => (inner.try_as_col()?, true),
+        _ => return None,
+    };
+    let col_idx = *model.columns_by_name.get(&column.name)?;
+    (model.column(col_idx).kind == ColumnKind::Boolean).then_some((&column.name, value))
+}
+
 pub(crate) fn parse_simple_comparison(expr: &Expr) -> Option<(&str, Operator, &ScalarValue)> {
     let Expr::BinaryExpr(binary) = expr else {
         return None;
@@ -2073,6 +2103,99 @@ pub(crate) const fn scalar_to_i256(value: &ScalarValue) -> Option<i256> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use datafusion::logical_expr::col;
+
+    #[test]
+    fn boolean_column_predicates_require_boolean_columns() {
+        let config = KvTableConfig::new(
+            0,
+            vec![
+                TableColumnConfig::new("id", datafusion::arrow::datatypes::DataType::Int64, false),
+                TableColumnConfig::new("b", datafusion::arrow::datatypes::DataType::Boolean, true),
+            ],
+            vec!["id".into()],
+            vec![],
+        )
+        .unwrap();
+        let model = TableModel::from_config(&config).unwrap();
+
+        // The column, its negation, IS TRUE, and IS FALSE each become an equality that NULL fails.
+        for (expr, expected) in [
+            (col("b"), true),
+            (Expr::Not(Box::new(col("b"))), false),
+            (col("b").is_true(), true),
+            (col("b").is_false(), false),
+        ] {
+            assert!(QueryPredicate::supports_filter(&expr, &model));
+            let predicate = QueryPredicate::from_filters(&[expr], &model);
+            assert!(
+                matches!(predicate.constraints.get(&1), Some(PredicateConstraint::BoolEq(value)) if *value == expected)
+            );
+            assert!(!matches_constraint(
+                &CellValue::Null,
+                &predicate.constraints[&1]
+            ));
+        }
+
+        // A non-Boolean column is no predicate, and IS NOT TRUE and IS NOT FALSE hold for NULL.
+        for expr in [
+            col("id"),
+            Expr::Not(Box::new(col("id"))),
+            col("b").is_not_true(),
+            col("b").is_not_false(),
+        ] {
+            assert!(!QueryPredicate::supports_filter(&expr, &model));
+        }
+    }
+
+    #[test]
+    fn literal_predicates_preserve_truth_and_contradictions() {
+        let config = KvTableConfig::new(
+            0,
+            vec![TableColumnConfig::new(
+                "id",
+                datafusion::arrow::datatypes::DataType::Int64,
+                false,
+            )],
+            vec!["id".into()],
+            vec![],
+        )
+        .unwrap();
+        let model = TableModel::from_config(&config).unwrap();
+        let equality = col("id").eq(Expr::Literal(ScalarValue::Int64(Some(1)), None));
+
+        // In either order, TRUE keeps the key equality, while FALSE and NULL leave no range.
+        for value in [Some(true), Some(false), None] {
+            let literal = Expr::Literal(ScalarValue::Boolean(value), None);
+            assert!(QueryPredicate::supports_filter(&literal, &model));
+            for filters in [
+                vec![equality.clone(), literal.clone()],
+                vec![literal.clone(), equality.clone()],
+            ] {
+                let predicate = QueryPredicate::from_filters(&filters, &model);
+                assert_eq!(predicate.contradiction, value != Some(true));
+                if predicate.contradiction {
+                    assert!(predicate.primary_key_ranges(&model, 64).unwrap().is_empty());
+                } else {
+                    assert!(matches!(
+                        predicate.constraints.get(&0),
+                        Some(PredicateConstraint::IntRange {
+                            min: Some(1),
+                            max: Some(1),
+                        })
+                    ));
+                }
+            }
+        }
+
+        // A lone TRUE constrains nothing and contradicts nothing.
+        let predicate = QueryPredicate::from_filters(
+            &[Expr::Literal(ScalarValue::Boolean(Some(true)), None)],
+            &model,
+        );
+        assert!(!predicate.contradiction);
+        assert!(predicate.constraints.is_empty());
+    }
 
     #[test]
     fn integral_constraints_preserve_extreme_values() {

@@ -18,14 +18,18 @@ A covering index returns rows without touching base rows. A non-covering index f
 applies the predicates it can check from the index entry, then fetches the surviving
 base rows in bounded batches and checks the complete predicate against each one.
 Compatible lexicographic covering indexes also serve DataFusion's sort and `LIMIT`
-pushdown, including reverse traversal after a fixed equality prefix.
+pushdown, including reverse traversal after a fixed equality prefix. Equality on a
+`Float64` zero matches both signed zeros, so it does not fix a prefix.
 
 ## Predicate pushdown
 
 SQL predicates retain DataFusion semantics, including casts, functions, and null
 handling. `exoware-sql` extracts the predicate forms below to prune key ranges on
 primary-key and index key columns. Row scans evaluate remaining predicates on decoded
-batches before materializing the other projected columns.
+batches before materializing the other projected columns. Key-range pruning departs from
+those semantics in one way. A row outside the pruned key ranges is never read, so an error
+that a predicate would raise on that row, such as a division by zero in another conjunct,
+does not occur.
 
 | Column type | `=` | `<` `<=` `>` `>=` | `IN (...)` | `IS NULL`, `IS NOT NULL` |
 |---|---|---|---|---|
@@ -35,7 +39,8 @@ batches before materializing the other projected columns.
 | `Boolean` | yes | no | no | yes |
 
 A chain of `OR` equalities on one column, such as `region = 'us' OR region = 'eu'`, is
-treated as an `IN` list.
+treated as an `IN` list. A Boolean column used as a predicate, its negation, `IS TRUE`,
+and `IS FALSE` count as equality on that column.
 
 Composite keys are constrained left to right. Equality on leading columns fixes the
 key prefix, and the first column with a range constraint, or with no constraint, sets
@@ -61,8 +66,9 @@ DataFusion aggregation.
 - **Aggregates:** `COUNT`, `SUM`, `MIN`, `MAX`, and numeric `AVG` returning a double
   (pushed as a sum and a count). Group-only queries and `SELECT DISTINCT` use the same
   grouping path. Aggregates with `DISTINCT`, such as `COUNT(DISTINCT x)`, run in
-  DataFusion. A finite `LIMIT` directly above a group-only aggregate keeps it in
-  DataFusion, where streaming and `DISTINCT` limit optimizations apply.
+  DataFusion. A finite `LIMIT` that reaches a group-only aggregate, directly or through
+  projections and subquery aliases, keeps it in DataFusion, where streaming and
+  `DISTINCT` limit optimizations apply.
 - **Expressions:** columns, literals, numeric `+`, `-`, `*`, `/`, `lower`, and
   `date_trunc('day', ...)` on timestamps without a timezone. Aliases and transparent
   projection chains are resolved. Identity casts, compatible string representations,
