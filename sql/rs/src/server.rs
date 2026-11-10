@@ -58,6 +58,10 @@ use datafusion::{
 };
 use exoware_sdk::{
     kv_codec::{decode_stored_row, Utf8},
+    proto::{
+        google::rpc::{bad_request::FieldViolation, BadRequest, ErrorInfo},
+        with_bad_request_detail, with_error_info_detail,
+    },
     selector::Selector,
     stream_filter::StreamFilter,
     PrefixedStoreClient, ReadSession, StoreBatch, StoreBatchEntry, StreamSubscription,
@@ -288,6 +292,10 @@ impl Service for SqlConnect {
     ) -> impl Future<Output = connectrpc::ServiceResult<SubscribeStream>> + Send {
         let server = self.server.clone();
         async move {
+            // Enforce the buf.validate lengths declared in stream.proto.
+            validate_field_length("table", request.table, 1, 255)?;
+            validate_field_length("where_sql", request.where_sql, 0, 4096)?;
+
             let table_name = request.table.to_string();
             let where_sql = request.where_sql.trim().to_string();
             let since = request.since_sequence_number.filter(|seq| *seq != 0);
@@ -337,6 +345,9 @@ impl Service for SqlConnect {
     ) -> impl Future<Output = connectrpc::ServiceResult<QueryResponse>> + Send {
         let server = self.server.clone();
         AssertUnwindSafe(async move {
+            // Enforce the buf.validate length declared in query.proto.
+            validate_field_length("sql", request.sql, 1, 65_535)?;
+
             let sql = request.sql.to_string();
             let min_sequence_number = request.min_sequence_number;
             let read_session = ReadSession::monotonic(server.store.clone(), min_sequence_number);
@@ -706,6 +717,48 @@ fn client_error_to_connect(err: &exoware_sdk::ClientError) -> ConnectError {
     } else {
         ConnectError::internal(err.to_string())
     }
+}
+
+/// Rejects a string field whose length, in Unicode code points as buf.validate counts it, is
+/// outside `min_len..=max_len`. The error carries `BadRequest` and `ErrorInfo` details shaped
+/// like the Store's request validation errors.
+fn validate_field_length(
+    field: &str,
+    value: &str,
+    min_len: usize,
+    max_len: usize,
+) -> Result<(), ConnectError> {
+    let len = value.chars().count();
+    if (min_len..=max_len).contains(&len) {
+        return Ok(());
+    }
+    let description = format!("{field} must have {min_len} to {max_len} characters, got {len}");
+    let error = with_bad_request_detail(
+        ConnectError::invalid_argument(format!("{field} length is outside SQL service limits")),
+        BadRequest {
+            field_violations: vec![FieldViolation {
+                field: field.to_string(),
+                description: description.clone(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        },
+    );
+    Err(with_error_info_detail(
+        error,
+        ErrorInfo {
+            reason: "INVALID_FIELD_LENGTH".to_string(),
+            domain: "sql".to_string(),
+            metadata: [
+                ("min_len".to_string(), min_len.to_string()),
+                ("max_len".to_string(), max_len.to_string()),
+                ("description".to_string(), description),
+            ]
+            .into_iter()
+            .collect(),
+            ..Default::default()
+        },
+    ))
 }
 
 #[cfg(test)]
@@ -1496,6 +1549,14 @@ mod tests {
             datafusion_error_to_connect(error).code,
             connectrpc::ErrorCode::ResourceExhausted
         );
+    }
+
+    #[test]
+    fn field_lengths_count_code_points() {
+        // Each "é" is one code point encoded in two bytes.
+        assert!(validate_field_length("table", &"é".repeat(255), 1, 255).is_ok());
+        let error = validate_field_length("table", &"é".repeat(256), 1, 255).unwrap_err();
+        assert_eq!(error.code, connectrpc::ErrorCode::InvalidArgument);
     }
 
     enum ControlledEvent {

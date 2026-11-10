@@ -21,7 +21,7 @@ use exoware_sdk::{
     proto::PreferZstdHttpClient, transport::set_tcp_nodelay, StoreClient, StoreKeyPrefix,
 };
 use exoware_sql::{
-    proto::sql::v1::{QueryRequest, ServiceClient},
+    proto::sql::v1::{QueryRequest, ServiceClient, SubscribeRequest},
     sql_stack, CellValue, IndexSpec, KvSchema, SqlContext, SqlServer, TableColumnConfig,
 };
 use std::sync::Arc;
@@ -291,7 +291,7 @@ async fn query_error(client: &ServiceClient<PreferZstdHttpClient>, sql: &str) ->
         })
         .await
     else {
-        panic!("{sql} was accepted");
+        panic!("{} was accepted", sql.trim_end());
     };
     error
 }
@@ -551,6 +551,89 @@ async fn connect_query_reports_invalid_values_as_invalid_argument() {
         let error = query_error(&client, sql).await;
         assert_eq!(error.code, ErrorCode::InvalidArgument, "{sql}: {error:?}");
     }
+    handle.abort();
+}
+
+/// Returns the error a subscription ends with, whether the call or its first message carries it.
+async fn subscribe_error(
+    client: &ServiceClient<PreferZstdHttpClient>,
+    request: SubscribeRequest,
+) -> ConnectError {
+    let mut stream = match client.subscribe(request).await {
+        Ok(stream) => stream,
+        Err(error) => return error,
+    };
+    match tokio::time::timeout(std::time::Duration::from_secs(1), stream.message()).await {
+        Ok(Err(error)) => error,
+        _ => panic!("subscription was accepted"),
+    }
+}
+
+#[tokio::test]
+async fn connect_requests_enforce_declared_field_lengths() {
+    let store = common::local_store_client().await;
+    let server = Arc::new(SqlServer::new(items_schema(&store)).expect("SQL server"));
+    let (client, handle) = serve_sql(server).await;
+    let padded = |prefix: &str, len: usize| format!("{prefix}{}", " ".repeat(len - prefix.len()));
+
+    assert_eq!(
+        query_row_count(&client, &padded("SELECT 1", 65_535)).await,
+        1
+    );
+    let mut errors = vec![(
+        "sql",
+        query_error(&client, &padded("SELECT 1", 65_536)).await,
+    )];
+    for (field, request) in [
+        (
+            "table",
+            SubscribeRequest {
+                table: "x".repeat(256),
+                ..Default::default()
+            },
+        ),
+        (
+            "table",
+            SubscribeRequest {
+                table: String::new(),
+                ..Default::default()
+            },
+        ),
+        (
+            "where_sql",
+            SubscribeRequest {
+                table: "items".to_string(),
+                where_sql: padded("id = 1", 4_097),
+                ..Default::default()
+            },
+        ),
+    ] {
+        errors.push((field, subscribe_error(&client, request).await));
+    }
+    for (field, error) in errors {
+        assert_eq!(error.code, ErrorCode::InvalidArgument, "{field}: {error:?}");
+        let details = exoware_sdk::proto::decode_connect_error(&error).expect("error details");
+        assert_eq!(
+            details.bad_request.expect("bad request").field_violations[0].field,
+            field
+        );
+        assert_eq!(details.error_info.expect("error info").domain, "sql");
+    }
+
+    let mut stream = client
+        .subscribe(SubscribeRequest {
+            table: "items".to_string(),
+            where_sql: padded("id = 1", 4_096),
+            ..Default::default()
+        })
+        .await
+        .expect("subscription at the length limit");
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(500), stream.message())
+            .await
+            .is_err(),
+        "subscription at the length limit ended"
+    );
     handle.abort();
 }
 
