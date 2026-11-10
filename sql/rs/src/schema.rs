@@ -377,18 +377,22 @@ impl TableProvider for KvTable {
         filters
             .iter()
             .map(|expr| {
-                let relational = expr.exists(|node| {
-                    Ok(matches!(
-                        node,
+                // The scan evaluates filters synchronously on its own batches. Subqueries, outer
+                // references, unnest, and async functions need DataFusion operators, so filters
+                // using them stay above the scan.
+                let unsupported = expr.exists(|node| {
+                    Ok(match node {
                         Expr::ScalarSubquery(_)
-                            | Expr::InSubquery(_)
-                            | Expr::Exists(_)
-                            | Expr::SetComparison(_)
-                            | Expr::OuterReferenceColumn(..)
-                            | Expr::Unnest(_)
-                    ))
+                        | Expr::InSubquery(_)
+                        | Expr::Exists(_)
+                        | Expr::SetComparison(_)
+                        | Expr::OuterReferenceColumn(..)
+                        | Expr::Unnest(_) => true,
+                        Expr::ScalarFunction(function) => function.func.as_async().is_some(),
+                        _ => false,
+                    })
                 })?;
-                Ok(if relational || expr.is_volatile() {
+                Ok(if unsupported || expr.is_volatile() {
                     TableProviderFilterPushDown::Unsupported
                 } else {
                     TableProviderFilterPushDown::Exact
@@ -458,6 +462,7 @@ impl TableProvider for KvTable {
 #[cfg(test)]
 mod tests {
     use crate::{KvSchema, SqlContext, TableColumnConfig};
+    use async_trait::async_trait;
     use datafusion::{
         arrow::{
             array::{
@@ -468,8 +473,12 @@ mod tests {
             record_batch::RecordBatch,
             util::pretty::pretty_format_batches,
         },
-        common::Result as DataFusionResult,
+        common::{internal_err, Result as DataFusionResult},
         dataframe::DataFrameWriteOptions,
+        logical_expr::{
+            async_udf::{AsyncScalarUDF, AsyncScalarUDFImpl},
+            ColumnarValue, ScalarFunctionArgs, ScalarUDFImpl, Signature, Volatility,
+        },
     };
     use std::sync::Arc;
 
@@ -636,5 +645,90 @@ mod tests {
             "{err}"
         );
         assert_eq!(query(&ctx, "SELECT id FROM items").await.len(), 5);
+    }
+
+    /// Async identity function over Int64 that has no synchronous implementation.
+    #[derive(Debug, PartialEq, Eq, Hash)]
+    struct AsyncIdentity {
+        signature: Signature,
+    }
+
+    impl ScalarUDFImpl for AsyncIdentity {
+        fn name(&self) -> &str {
+            "async_identity"
+        }
+
+        fn signature(&self) -> &Signature {
+            &self.signature
+        }
+
+        fn return_type(&self, _arg_types: &[DataType]) -> DataFusionResult<DataType> {
+            Ok(DataType::Int64)
+        }
+
+        fn invoke_with_args(&self, _args: ScalarFunctionArgs) -> DataFusionResult<ColumnarValue> {
+            internal_err!("async_identity only runs asynchronously")
+        }
+    }
+
+    #[async_trait]
+    impl AsyncScalarUDFImpl for AsyncIdentity {
+        async fn invoke_async_with_args(
+            &self,
+            args: ScalarFunctionArgs,
+        ) -> DataFusionResult<ColumnarValue> {
+            Ok(args.args[0].clone())
+        }
+    }
+
+    /// A filter that calls an async function stays above the scan, where DataFusion
+    /// evaluates it asynchronously.
+    #[tokio::test]
+    async fn filters_calling_async_functions_run_in_datafusion() {
+        let (_task, url) = exoware_simulator::open_temp()
+            .await
+            .expect("spawn simulator");
+        let store = exoware_sdk::StoreClient::new(&url).unprefixed();
+        let schema = KvSchema::new(store.clone())
+            .table(
+                "items",
+                vec![
+                    TableColumnConfig::new("id", DataType::Int64, false),
+                    TableColumnConfig::new("qty", DataType::Int64, false),
+                ],
+                vec!["id".to_string()],
+                vec![],
+            )
+            .unwrap();
+        let ctx = SqlContext::new(store);
+        ctx.register_schema(schema).unwrap();
+        ctx.register_udf(
+            AsyncScalarUDF::new(Arc::new(AsyncIdentity {
+                signature: Signature::exact(vec![DataType::Int64], Volatility::Immutable),
+            }))
+            .into_scalar_udf(),
+        );
+        ctx.sql("INSERT INTO items VALUES (1, 2), (2, 5), (3, 4), (4, 1)")
+            .await
+            .unwrap()
+            .collect()
+            .await
+            .unwrap();
+
+        assert_eq!(
+            query(
+                &ctx,
+                "SELECT id, qty FROM items WHERE async_identity(qty) > 3 ORDER BY id"
+            )
+            .await,
+            vec![
+                "+----+-----+",
+                "| id | qty |",
+                "+----+-----+",
+                "| 2  | 5   |",
+                "| 3  | 4   |",
+                "+----+-----+",
+            ]
+        );
     }
 }
