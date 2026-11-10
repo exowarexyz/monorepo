@@ -195,6 +195,12 @@ and pruned chunk count are not authenticated and must come from the source of
 the batch. Stage the rows with `stage_authenticated_range` as above, and the
 same prefix rule governs when the watermark may advance past them.
 
+If a chunk or grafted node is wrong or missing, or the pruned chunk count is
+wrong, the upload still succeeds. A read that needs that value then returns an
+error at that batch's tip, and at later tips until a later batch rewrites the
+same chunk or node. To repair it, upload the batch's correct publication again
+and create new readers, because a reader caches what it has loaded.
+
 #### Initialization
 
 A new database's commit at location 0 belongs to no batch, so upload its
