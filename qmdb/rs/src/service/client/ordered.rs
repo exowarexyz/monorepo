@@ -23,13 +23,11 @@ use commonware_cryptography::Hasher;
 use commonware_storage::{
     merkle::{Graftable, Location},
     qmdb::{
-        any::{
-            ordered,
-            value::{ValueEncoding, VariableEncoding},
-        },
+        any::ordered,
         current::ordered::proof::constant::ExclusionProof,
         operation::Key as QmdbKey,
         sync::Target as SyncTarget,
+        value::{ValueEncoding, VariableEncoding},
     },
 };
 use commonware_utils::range::NonEmptyRange;

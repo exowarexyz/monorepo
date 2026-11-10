@@ -10,7 +10,10 @@ use commonware_runtime::{tokio as cw_tokio, Runner as _};
 use commonware_storage::{
     merkle::{mmb, mmr, Location, Proof},
     qmdb::{
-        any::unordered::variable::{Db as LocalUnorderedDb, Operation as UnorderedQmdbOperation},
+        any::unordered::variable::{
+            Db as LocalUnorderedDb, Operation as UnorderedQmdbOperation,
+            Update as UnorderedQmdbUpdate,
+        },
         current::unordered::variable::Db as LocalCurrentUnorderedDb,
     },
     translator::TwoCap,
@@ -18,7 +21,7 @@ use commonware_storage::{
 use commonware_utils::{NZUsize, NZU16, NZU64};
 use connectrpc::{client::ClientConfig, ErrorCode};
 use exoware_qmdb::{
-    adapter::upload::recover_boundary_state,
+    adapter::upload::Publication,
     service::{
         client::rpc::{CurrentOperationClient, OperationLogClient, OperationLogSubscribeProof},
         proto::qmdb::v1::{
@@ -31,7 +34,7 @@ use exoware_qmdb::{
             SubscribeRequest as ProtoSubscribeRequest,
         },
     },
-    CurrentBoundaryState, QmdbError, MAX_OPERATION_SIZE,
+    QmdbError, MAX_OPERATION_SIZE,
 };
 use exoware_sdk::{proto::PreferZstdHttpClient, PrefixedStoreClient, StoreClient};
 use std::{num::NonZeroU64, time::Duration};
@@ -43,6 +46,8 @@ type BatchOperation = UnorderedQmdbOperation<mmr::Family, Vec<u8>, Vec<u8>>;
 type MmbBatchProof = Proof<mmb::Family, Digest>;
 type MmbBatchOperation = UnorderedQmdbOperation<mmb::Family, Vec<u8>, Vec<u8>>;
 type FixedKeyOperation = UnorderedQmdbOperation<mmr::Family, Digest, Vec<u8>>;
+type FixedKeyPublication =
+    Publication<mmr::Family, Digest, UnorderedQmdbUpdate<Digest, Vec<u8>>, N>;
 type AnyDb = LocalUnorderedDb<
     mmr::Family,
     cw_tokio::Context,
@@ -82,7 +87,7 @@ async fn spawn_qmdb_range_server(
             Vec<u8>,
             Vec<u8>,
             N,
-            commonware_storage::qmdb::any::value::VariableEncoding<Vec<u8>>,
+            commonware_storage::qmdb::value::VariableEncoding<Vec<u8>>,
         >(raw_store, op_cfg()),
     )
     .await
@@ -98,7 +103,7 @@ async fn spawn_mmb_qmdb_range_server(
             Vec<u8>,
             Vec<u8>,
             N,
-            commonware_storage::qmdb::any::value::VariableEncoding<Vec<u8>>,
+            commonware_storage::qmdb::value::VariableEncoding<Vec<u8>>,
         >(raw_store, op_cfg()),
     )
     .await
@@ -113,7 +118,7 @@ async fn spawn_qmdb_full_server(
         Digest,
         Vec<u8>,
         N,
-        commonware_storage::qmdb::any::value::VariableEncoding<Vec<u8>>,
+        commonware_storage::qmdb::value::VariableEncoding<Vec<u8>>,
     >(raw_store, fixed_key_op_cfg(), ()))
     .await
 }
@@ -136,7 +141,7 @@ type RpcLookupVerifier = exoware_qmdb::service::client::rpc::UnorderedLookupVeri
     Digest,
     Vec<u8>,
     N,
-    commonware_storage::qmdb::any::value::VariableEncoding<Vec<u8>>,
+    commonware_storage::qmdb::value::VariableEncoding<Vec<u8>>,
 >;
 
 /// Request-level verifying client, for responses the typed API cannot shape.
@@ -212,24 +217,7 @@ struct CurrentSourceBatch {
     beta: Digest,
     root: Digest,
     operations: Vec<FixedKeyOperation>,
-    current_boundary: CurrentBoundaryState<Digest, N, mmr::Family>,
-}
-
-async fn boundary_from_current_source_db(
-    db: &CurrentDb,
-    operations: &[FixedKeyOperation],
-) -> CurrentBoundaryState<Digest, N, mmr::Family> {
-    let ops_root_witness = db.ops_root_witness().await.expect("ops root witness");
-    recover_boundary_state::<mmr::Family, Sha256, _, N, _, _>(
-        None,
-        operations,
-        db.root(),
-        0,
-        ops_root_witness,
-        |location| common::current_proof_chunk(db.range_proof(location, NZU64!(1))),
-    )
-    .await
-    .expect("recover unordered current boundary")
+    publications: Vec<FixedKeyPublication>,
 }
 
 async fn build_any_source_batch() -> AnySourceBatch {
@@ -265,14 +253,7 @@ async fn build_any_source_batch() -> AnySourceBatch {
                             format!("k-{batch_index:08}").into_bytes(),
                             Some(b"two".to_vec()),
                         );
-                    batch
-                        .merkleize(
-                            &db,
-                            None::<Vec<u8>>,
-                            &mut commonware_storage::qmdb::floor::Proportional,
-                        )
-                        .await
-                        .expect("merkleize")
+                    batch.merkleize(&db).await.expect("merkleize")
                 };
                 db = db.apply_batch(finalized).await.expect("apply");
 
@@ -352,14 +333,7 @@ async fn build_mmb_any_source_batch() -> MmbAnySourceBatch {
                             format!("k-{batch_index:08}").into_bytes(),
                             Some(b"two".to_vec()),
                         );
-                    batch
-                        .merkleize(
-                            &db,
-                            None::<Vec<u8>>,
-                            &mut commonware_storage::qmdb::floor::Proportional,
-                        )
-                        .await
-                        .expect("merkleize")
+                    batch.merkleize(&db).await.expect("merkleize")
                 };
                 db = db.apply_batch(finalized).await.expect("apply");
 
@@ -424,6 +398,7 @@ async fn build_current_source_batch() -> CurrentSourceBatch {
             )
             .await
             .expect("init");
+            let initial = Publication::initial(&db).expect("initial publication must be readable");
 
             let alpha = Sha256::fill(0xA1);
             let beta = Sha256::fill(0xB2);
@@ -432,24 +407,19 @@ async fn build_current_source_batch() -> CurrentSourceBatch {
                     .new_batch()
                     .write(alpha, Some(b"one".to_vec()))
                     .write(beta, Some(b"two".to_vec()));
-                batch
-                    .merkleize(
-                        &db,
-                        None::<Vec<u8>>,
-                        &mut commonware_storage::qmdb::floor::Proportional,
-                    )
-                    .await
-                    .expect("merkleize")
+                batch.merkleize(&db).await.expect("merkleize")
             };
+            let publication =
+                Publication::from_batch(&finalized, &db).expect("publication must be readable");
             db = db.apply_batch(finalized).await.expect("apply");
 
+            let root = db.root();
             let latest = db.bounds().end - 1;
             let n = NonZeroU64::new(*latest + 1).unwrap();
             let (_proof, ops): (BatchProof, Vec<FixedKeyOperation>) = db
                 .ops_historical_proof(latest + 1, Location::new(0), n)
                 .await
                 .expect("proof");
-            let boundary = boundary_from_current_source_db(&db, &ops).await;
 
             db = db.sync().await.expect("sync");
             db.destroy().await.expect("destroy");
@@ -458,9 +428,9 @@ async fn build_current_source_batch() -> CurrentSourceBatch {
                 latest_location: latest,
                 alpha,
                 beta,
-                root: boundary.root,
+                root,
                 operations: ops,
-                current_boundary: boundary,
+                publications: vec![initial, publication],
             }
         })
     })
@@ -489,14 +459,9 @@ async fn commit_mmb_upload(store_client: &StoreClient, batch: &MmbAnySourceBatch
 }
 
 async fn commit_current_upload(store_client: &StoreClient, batch: &CurrentSourceBatch) {
-    common::commit_current_operations::<mmr::Family, FixedKeyOperation, N>(
-        &store_client.unprefixed(),
-        &batch.operations,
-        &fixed_key_op_cfg(),
-        &batch.current_boundary,
-    )
-    .await
-    .expect("commit current upload");
+    common::commit_publications(&store_client.unprefixed(), &batch.publications)
+        .await
+        .expect("commit current upload");
 }
 
 fn latest_operation_for_fixed_key(
@@ -897,7 +862,8 @@ async fn aligned_commit_boundary<F: commonware_storage::merkle::Graftable + Part
             let mut db = Db::<F>::init(context.child(case_name), cfg, None)
                 .await
                 .expect("source init");
-            let mut previous: Vec<Operation<F>> = Vec::new();
+            let mut publications =
+                vec![Publication::initial(&db).expect("initial publication must be readable")];
             let mut snapshots = Vec::new();
             for round in 0..2 {
                 let mut batch = db.new_batch();
@@ -907,14 +873,10 @@ async fn aligned_commit_boundary<F: commonware_storage::merkle::Graftable + Part
                         batch = batch.write(key(index), Some(index.to_be_bytes().to_vec()));
                     }
                 }
-                let batch = batch
-                    .merkleize(
-                        &db,
-                        None::<Vec<u8>>,
-                        &mut commonware_storage::qmdb::floor::Proportional,
-                    )
-                    .await
-                    .expect("source merkleize");
+                let batch = batch.merkleize(&db).await.expect("source merkleize");
+                publications.push(
+                    Publication::from_batch(&batch, &db).expect("publication must be readable"),
+                );
                 db = db.apply_batch(batch).await.expect("source apply");
                 assert_eq!(*db.bounds().end, if round == 0 { 512 } else { 514 });
                 let (_, operations): (_, Vec<Operation<F>>) = db
@@ -943,21 +905,7 @@ async fn aligned_commit_boundary<F: commonware_storage::merkle::Graftable + Part
                     &db.root(),
                 ));
                 assert_eq!(chunks[0][N - 1] & 0x80 != 0, round == 0);
-                let source = &db;
-                let boundary = recover_boundary_state::<F, Sha256, _, N, _, _>(
-                    (!previous.is_empty()).then_some(previous.as_slice()),
-                    &operations,
-                    db.root(),
-                    0,
-                    db.ops_root_witness()
-                        .await
-                        .expect("source ops root witness"),
-                    |location| common::current_proof_chunk(source.range_proof(location, NZU64!(1))),
-                )
-                .await
-                .expect("recover current boundary");
-                previous = operations.clone();
-                snapshots.push((operations, boundary));
+                snapshots.push((operations, std::mem::take(&mut publications), db.root()));
             }
             db.destroy().await.expect("destroy source");
             snapshots
@@ -976,23 +924,28 @@ async fn aligned_commit_boundary<F: commonware_storage::merkle::Graftable + Part
             Digest,
             Vec<u8>,
             N,
-            commonware_storage::qmdb::any::value::VariableEncoding<Vec<u8>>,
+            commonware_storage::qmdb::value::VariableEncoding<Vec<u8>>,
         >(prefixed.clone(), op_cfg, ()))
         .await;
     let connect_client =
         exoware_qmdb::service::client::Unordered::<_, F, Sha256, Digest, Vec<u8>, N>::plaintext(
             &url, op_cfg,
         );
-    for (operations, boundary) in snapshots {
-        common::commit_current_operations(&prefixed, &operations, &op_cfg, &boundary)
+    for (operations, publications, root) in snapshots {
+        // Round-trip each snapshot's publications through their encoding before uploading.
+        let decoded = publications
+            .iter()
+            .map(|publication| common::round_trip_publication(publication, op_cfg))
+            .collect::<Vec<_>>();
+        common::commit_publications(&prefixed, &decoded)
             .await
-            .expect("publish current boundary");
+            .expect("commit publications");
         let proof = connect_client
             .get(
                 Location::new(operations.len() as u64 - 1),
                 &key(257),
                 None,
-                &boundary.root,
+                &root,
             )
             .await
             .expect("current proof after aligned commit boundary");
@@ -1055,7 +1008,9 @@ async fn current_boundary_nodes<F: commonware_storage::merkle::Graftable + Parti
             let mut db = Db::<F>::init(context.child(case_name), cfg, None)
                 .await
                 .expect("source init");
-            let mut previous: Vec<Operation<F>> = Vec::new();
+            let initial = Publication::initial(&db).expect("initial publication must be readable");
+            let mut operations = initial.operations.to_vec();
+            let mut publications = vec![initial];
             let mut snapshots = Vec::new();
             for round in 0..=empty_batches + 1 {
                 let mut batch = db.new_batch();
@@ -1068,25 +1023,22 @@ async fn current_boundary_nodes<F: commonware_storage::merkle::Graftable + Parti
                         batch = batch.write(key(index), Some(index.to_be_bytes().to_vec()));
                     }
                 }
-                let batch = batch
-                    .merkleize(&db, None::<Vec<u8>>, &mut commonware_storage::qmdb::floor::Proportional)
-                    .await
-                    .expect("source merkleize");
+                let batch = batch.merkleize(&db).await.expect("source merkleize");
+                let publication =
+                    Publication::from_batch(&batch, &db).expect("publication must be readable");
+                operations.extend(publication.operations.iter().cloned());
+                publications.push(publication);
                 db = db.apply_batch(batch).await.expect("source apply");
+
+                // Prune the source at its sync boundary every round. The next batch's publication
+                // records this prune in its pruned_chunks count.
+                let prune_boundary = db.sync_boundary();
+                db = db.prune(prune_boundary).await.expect("source prune");
                 if round < empty_batches {
                     continue;
                 }
 
-                // Capture the boundaries before and after the final batch, retaining the operation log
-                db = db.prune(Location::new(0)).await.expect("source prune");
-                let (_, operations): (_, Vec<Operation<F>>) = db
-                    .ops_historical_proof(
-                        db.bounds().end,
-                        Location::new(0),
-                        NonZeroU64::new(*db.bounds().end).unwrap(),
-                    )
-                    .await
-                    .expect("source operations");
+                // Capture snapshots before and after the final batch.
                 assert_eq!(
                     operations.len() as u64,
                     u64::from(key_count)
@@ -1102,18 +1054,26 @@ async fn current_boundary_nodes<F: commonware_storage::merkle::Graftable + Parti
                     operations.last(),
                     Some(Operation::CommitFloor(_, floor)) if floor.as_u64() == round + 2
                 ));
-                let pruned_chunks = *db.sync_boundary() / (N as u64 * 8);
-                assert_eq!(pruned_chunks, (round + 2) / (N as u64 * 8));
+                assert_eq!(
+                    publications
+                        .last()
+                        .expect("source publications must not be empty")
+                        .pruned_chunks,
+                    (round + 1) / (N as u64 * 8)
+                );
 
                 // Keys straddling chunk boundaries exercise mixed ancestors and delayed parent creation
-                let queries = [255, 256, 512]
+                let queries = [255, 256, 257, 512]
                     .into_iter()
                     .filter(|index| *index <= key_count)
                     .map(|index| {
                         let location = operations
                             .iter()
                             .rposition(|operation| {
-                                matches!(operation, Operation::Update(update) if update.0 == key(index))
+                                matches!(
+                                    operation,
+                                    Operation::Update(update) if update.0 == key(index)
+                                )
                             })
                             .expect("source key location");
                         (index, Location::new(location as u64))
@@ -1132,21 +1092,12 @@ async fn current_boundary_nodes<F: commonware_storage::merkle::Graftable + Parti
                     ));
                 }
 
-                let source = &db;
-                let boundary = recover_boundary_state::<F, Sha256, _, N, _, _>(
-                    (!previous.is_empty()).then_some(previous.as_slice()),
-                    &operations,
+                snapshots.push((
+                    operations.clone(),
+                    std::mem::take(&mut publications),
                     db.root(),
-                    pruned_chunks,
-                    db.ops_root_witness()
-                        .await
-                        .expect("source ops root witness"),
-                    |location| common::current_proof_chunk(source.range_proof(location, NZU64!(1))),
-                )
-                .await
-                .expect("recover current boundary");
-                previous = operations.clone();
-                snapshots.push((operations, boundary, queries));
+                    queries,
+                ));
             }
             db.destroy().await.expect("destroy source");
             snapshots
@@ -1165,7 +1116,7 @@ async fn current_boundary_nodes<F: commonware_storage::merkle::Graftable + Parti
             Digest,
             Vec<u8>,
             N,
-            commonware_storage::qmdb::any::value::VariableEncoding<Vec<u8>>,
+            commonware_storage::qmdb::value::VariableEncoding<Vec<u8>>,
         >(prefixed.clone(), op_cfg, ()))
         .await;
     let key_client =
@@ -1175,18 +1126,18 @@ async fn current_boundary_nodes<F: commonware_storage::merkle::Graftable + Parti
     let range_client =
         CurrentOperationClient::<_, F, Sha256, Operation<F>, N>::plaintext(&url, op_cfg);
 
-    // Re-query the older boundary after publication advances to preserve its bitmap and node versions
+    // Re-query the older batch after the watermark advances. Its bitmap and node versions survive.
     for (pass, index) in [0, 1, 0].into_iter().enumerate() {
-        let (operations, boundary, queries) = &snapshots[index];
+        let (operations, publications, root, queries) = &snapshots[index];
         if pass < 2 {
-            common::commit_current_operations(&prefixed, operations, &op_cfg, boundary)
+            common::commit_publications(&prefixed, publications)
                 .await
-                .expect("publish current boundary");
+                .expect("commit publications");
         }
         let tip = operations.len() as u64 - 1;
         for (key_index, location) in queries {
             let proof = key_client
-                .get(Location::new(tip), &key(*key_index), None, &boundary.root)
+                .get(Location::new(tip), &key(*key_index), None, root)
                 .await
                 .expect("current key proof across boundary transition");
             assert_eq!(proof.location, *location);
@@ -1199,7 +1150,7 @@ async fn current_boundary_nodes<F: commonware_storage::merkle::Graftable + Parti
                         max_locations: 1,
                         ..Default::default()
                     },
-                    &boundary.root,
+                    root,
                 )
                 .await
                 .expect("current range proof across boundary transition");
@@ -1214,7 +1165,7 @@ async fn test_current_unordered_variable_fixed_keys_variable_values_mmr_pruned_p
     current_boundary_nodes::<mmr::Family>(
         "current_unordered_variable_fixed_keys_variable_values_mmr_pruned_peak",
         500,
-        253,
+        254,
         0,
     )
     .await;
@@ -1225,7 +1176,7 @@ async fn test_current_unordered_variable_fixed_keys_variable_values_mmb_pruned_p
     current_boundary_nodes::<mmb::Family>(
         "current_unordered_variable_fixed_keys_variable_values_mmb_pruned_peak",
         500,
-        253,
+        254,
         0,
     )
     .await;
@@ -1236,7 +1187,7 @@ async fn test_current_unordered_variable_fixed_keys_variable_values_mmr_pruned_n
     current_boundary_nodes::<mmr::Family>(
         "current_unordered_variable_fixed_keys_variable_values_mmr_pruned_nested_peak",
         1040,
-        253,
+        254,
         0,
     )
     .await;
@@ -1247,7 +1198,7 @@ async fn test_current_unordered_variable_fixed_keys_variable_values_mmb_pruned_n
     current_boundary_nodes::<mmb::Family>(
         "current_unordered_variable_fixed_keys_variable_values_mmb_pruned_nested_peak",
         1040,
-        253,
+        254,
         0,
     )
     .await;

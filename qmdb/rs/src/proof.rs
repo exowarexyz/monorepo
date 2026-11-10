@@ -9,15 +9,13 @@ use commonware_parallel::{Sequential, Strategy};
 use commonware_storage::{
     merkle::{self, Family, Graftable, Location, Position, Proof, RangePlan},
     qmdb::{
-        any::{
-            ordered,
-            value::{ValueEncoding, VariableEncoding},
-        },
+        any::ordered,
         current::{
             ordered::proof::constant::ExclusionProof,
             proof::{constant::OperationProof, OpsRootWitness, RangeProof},
         },
         operation::{Key as QmdbKey, Operation},
+        value::{ValueEncoding, VariableEncoding},
     },
 };
 use std::collections::HashMap;
@@ -56,10 +54,10 @@ impl<D: Digest, F: Graftable> OperationRangeCheckpoint<D, F> {
 
     pub fn verify<H: Hasher<Digest = D>>(&self) -> bool {
         let hasher = commonware_storage::qmdb::hasher::<H>();
-        self.proof.verify_proof_and_pinned_nodes(
+        self.proof.verify_range_inclusion_with_pinned_nodes(
             &hasher,
-            &self.encoded_operations,
             self.start_location,
+            &self.encoded_operations,
             &self.pinned_nodes,
             &self.ops_root,
         )
@@ -152,13 +150,8 @@ pub struct RawBatchMultiProof<D: Digest, F: Graftable> {
 impl<D: Digest, F: Graftable> RawBatchMultiProof<D, F> {
     pub fn verify<H: Hasher<Digest = D>>(&self) -> bool {
         let hasher = commonware_storage::qmdb::hasher::<H>();
-        let elements: Vec<_> = self
-            .operations
-            .iter()
-            .map(|(loc, bytes)| (bytes.as_ref(), *loc))
-            .collect();
         self.proof
-            .verify_multi_inclusion(&hasher, &elements, &self.ops_root)
+            .verify_multi_inclusion(&hasher, &self.operations, &self.ops_root)
     }
 }
 

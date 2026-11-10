@@ -10,15 +10,13 @@ use commonware_runtime::{tokio as cw_tokio, Runner as _};
 use commonware_storage::{
     merkle::{mmb, mmr, Location, Proof},
     qmdb::{
-        any::{
-            ordered::{
-                variable::{Db as AnyOrderedQmdbDb, Operation as QmdbOperation},
-                Update,
-            },
-            value::VariableEncoding,
+        any::ordered::{
+            variable::{Db as AnyOrderedQmdbDb, Operation as QmdbOperation},
+            Update,
         },
         current::ordered::variable::Db as LocalQmdbDb,
         sync::{self as qmdb_sync, Request, Response, Source as _},
+        value::VariableEncoding,
     },
     translator::TwoCap,
 };
@@ -27,7 +25,7 @@ use commonware_utils::{
     NZUsize, NZU16, NZU64,
 };
 use exoware_qmdb::{
-    adapter::upload::recover_boundary_state,
+    adapter::upload::Publication,
     service::{
         client::rpc::{CurrentOperationClient, OperationLogClient, OperationLogSubscribeProof},
         proto::qmdb::v1::{
@@ -36,7 +34,7 @@ use exoware_qmdb::{
             SubscribeRequest as ProtoSubscribeRequest,
         },
     },
-    CurrentBoundaryState, QmdbError, MAX_OPERATION_SIZE,
+    QmdbError, MAX_OPERATION_SIZE,
 };
 use exoware_sdk::{
     common::kv::v1::{filter as proto_filter, Filter as ProtoFilter},
@@ -50,6 +48,7 @@ const MIN_MMB_OPERATIONS: usize = 10;
 type Digest = commonware_cryptography::sha256::Digest;
 type BatchProof = Proof<mmr::Family, Digest>;
 type BatchOperation = QmdbOperation<mmr::Family, Vec<u8>, Vec<u8>>;
+type BatchPublication<F> = Publication<F, Digest, Update<Vec<u8>, VariableEncoding<Vec<u8>>>, N>;
 type CurrentDb = LocalQmdbDb<
     mmr::Family,
     cw_tokio::Context,
@@ -128,24 +127,6 @@ fn mmb_operation_log_client(
     OperationLogClient::plaintext(base, op_cfg())
 }
 
-async fn boundary_from_source_db(
-    db: &CurrentDb,
-    previous_operations: Option<&[BatchOperation]>,
-    operations: &[BatchOperation],
-) -> CurrentBoundaryState<Digest, N, mmr::Family> {
-    let ops_root_witness = db.ops_root_witness().await.expect("ops root witness");
-    recover_boundary_state::<mmr::Family, Sha256, _, N, _, _>(
-        previous_operations,
-        operations,
-        db.root(),
-        0,
-        ops_root_witness,
-        |location| common::current_proof_chunk(db.range_proof(location, NZU64!(1))),
-    )
-    .await
-    .expect("recover_boundary_state")
-}
-
 fn op_cfg() -> <BatchOperation as commonware_codec::Read>::Cfg {
     (
         ((0..=MAX_OPERATION_SIZE).into(), ()),
@@ -159,14 +140,16 @@ fn key_cfg() -> <Vec<u8> as commonware_codec::Read>::Cfg {
 
 struct SourceBatch {
     operations: Vec<BatchOperation>,
-    current_boundary: CurrentBoundaryState<Digest, N, mmr::Family>,
+    root: Digest,
+    publications: Vec<BatchPublication<mmr::Family>>,
     inactivity_floor: Location<mmr::Family>,
 }
 
 struct MmbSourceBatch {
     ops_root: Digest,
     operations: Vec<MmbBatchOperation>,
-    current_boundary: CurrentBoundaryState<Digest, N, mmb::Family>,
+    root: Digest,
+    publications: Vec<BatchPublication<mmb::Family>>,
     inactivity_floor: Location<mmb::Family>,
 }
 
@@ -209,6 +192,8 @@ async fn build_source_batch() -> SourceBatch {
             .expect("init");
 
             let mut ops = Vec::new();
+            let mut publications =
+                vec![Publication::initial(&db).expect("initial publication must be readable")];
             let mut inactivity_floor = Location::<mmr::Family>::new(0);
             for _ in 0..64u64 {
                 let finalized = {
@@ -216,15 +201,11 @@ async fn build_source_batch() -> SourceBatch {
                         .new_batch()
                         .write(b"alpha".to_vec(), Some(b"one".to_vec()))
                         .write(b"beta".to_vec(), Some(b"two".to_vec()));
-                    batch
-                        .merkleize(
-                            &db,
-                            None::<Vec<u8>>,
-                            &mut commonware_storage::qmdb::floor::Proportional,
-                        )
-                        .await
-                        .expect("merkleize")
+                    batch.merkleize(&db).await.expect("merkleize")
                 };
+                publications.push(
+                    Publication::from_batch(&finalized, &db).expect("publication must be readable"),
+                );
                 db = db.apply_batch(finalized).await.expect("apply");
 
                 let latest = db.bounds().end - 1;
@@ -243,36 +224,20 @@ async fn build_source_batch() -> SourceBatch {
                 *inactivity_floor > 0,
                 "MMR subscribe fixture must exercise nonzero inactivity floor"
             );
-            let boundary = boundary_from_source_db(&db, None, &ops).await;
+            let root = db.root();
             db = db.sync().await.expect("sync");
             db.destroy().await.expect("destroy");
 
             SourceBatch {
                 operations: ops,
-                current_boundary: boundary,
+                root,
+                publications,
                 inactivity_floor,
             }
         })
     })
     .await
     .expect("join")
-}
-
-async fn boundary_from_mmb_source_db(
-    db: &MmbCurrentDb,
-    operations: &[MmbBatchOperation],
-) -> CurrentBoundaryState<Digest, N, mmb::Family> {
-    let ops_root_witness = db.ops_root_witness().await.expect("ops root witness");
-    recover_boundary_state::<mmb::Family, Sha256, _, N, _, _>(
-        None,
-        operations,
-        db.root(),
-        0,
-        ops_root_witness,
-        |location| common::current_proof_chunk(db.range_proof(location, NZU64!(1))),
-    )
-    .await
-    .expect("recover_boundary_state")
 }
 
 fn latest_mmb_inactivity_floor(operations: &[MmbBatchOperation]) -> Location<mmb::Family> {
@@ -309,6 +274,8 @@ async fn build_mmb_source_batch() -> MmbSourceBatch {
             .expect("init");
 
             let mut ops = Vec::new();
+            let mut publications =
+                vec![Publication::initial(&db).expect("initial publication must be readable")];
             let mut inactivity_floor = Location::<mmb::Family>::new(0);
             for batch_index in 0..64u64 {
                 let finalized = {
@@ -319,15 +286,11 @@ async fn build_mmb_source_batch() -> MmbSourceBatch {
                         .new_batch()
                         .write(b"alpha".to_vec(), Some(alpha_value))
                         .write(key, Some(value));
-                    batch
-                        .merkleize(
-                            &db,
-                            None::<Vec<u8>>,
-                            &mut commonware_storage::qmdb::floor::Proportional,
-                        )
-                        .await
-                        .expect("merkleize")
+                    batch.merkleize(&db).await.expect("merkleize")
                 };
+                publications.push(
+                    Publication::from_batch(&finalized, &db).expect("publication must be readable"),
+                );
                 db = db.apply_batch(finalized).await.expect("apply");
 
                 let latest = db.bounds().end - 1;
@@ -346,7 +309,7 @@ async fn build_mmb_source_batch() -> MmbSourceBatch {
                 *inactivity_floor > 0 && ops.len() >= MIN_MMB_OPERATIONS,
                 "MMB fixture must exercise nonzero inactivity floor and multiple sync batches"
             );
-            let boundary = boundary_from_mmb_source_db(&db, &ops).await;
+            let root = db.root();
             let ops_root = db.ops_root();
             db = db.sync().await.expect("sync");
             db.destroy().await.expect("destroy");
@@ -354,7 +317,8 @@ async fn build_mmb_source_batch() -> MmbSourceBatch {
             MmbSourceBatch {
                 ops_root,
                 operations: ops,
-                current_boundary: boundary,
+                root,
+                publications,
                 inactivity_floor,
             }
         })
@@ -386,6 +350,8 @@ async fn build_mmb_growing_source_batch() -> MmbGrowingSourceBatch {
             .expect("init");
 
             let mut ops = Vec::new();
+            let mut publications =
+                vec![Publication::initial(&db).expect("initial publication must be readable")];
             let mut inactivity_floor = Location::<mmb::Family>::new(0);
             let mut initial = None;
             let mut initial_len = None;
@@ -398,15 +364,11 @@ async fn build_mmb_growing_source_batch() -> MmbGrowingSourceBatch {
                         .new_batch()
                         .write(b"alpha".to_vec(), Some(alpha_value))
                         .write(key, Some(value));
-                    batch
-                        .merkleize(
-                            &db,
-                            None::<Vec<u8>>,
-                            &mut commonware_storage::qmdb::floor::Proportional,
-                        )
-                        .await
-                        .expect("merkleize")
+                    batch.merkleize(&db).await.expect("merkleize")
                 };
+                publications.push(
+                    Publication::from_batch(&finalized, &db).expect("publication must be readable"),
+                );
                 db = db.apply_batch(finalized).await.expect("apply");
 
                 let latest = db.bounds().end - 1;
@@ -419,12 +381,12 @@ async fn build_mmb_growing_source_batch() -> MmbGrowingSourceBatch {
                 ops = cumulative;
 
                 if initial.is_none() && *inactivity_floor > 0 && ops.len() >= MIN_MMB_OPERATIONS {
-                    let boundary = boundary_from_mmb_source_db(&db, &ops).await;
                     initial_len = Some(ops.len());
                     initial = Some(MmbSourceBatch {
                         ops_root: db.ops_root(),
                         operations: ops.clone(),
-                        current_boundary: boundary,
+                        root: db.root(),
+                        publications: std::mem::take(&mut publications),
                         inactivity_floor,
                     });
                     continue;
@@ -443,17 +405,19 @@ async fn build_mmb_growing_source_batch() -> MmbGrowingSourceBatch {
                 ops.len() >= initial.operations.len() + MIN_MMB_OPERATIONS,
                 "MMB growing fixture must add enough operations for multiple updated sync fetches"
             );
-            let boundary = boundary_from_mmb_source_db(&db, &ops).await;
+            let root = db.root();
             let ops_root = db.ops_root();
             db = db.sync().await.expect("sync");
             db.destroy().await.expect("destroy");
 
             MmbGrowingSourceBatch {
                 initial,
+                // The updated source continues the initial one and holds only later publications.
                 updated: MmbSourceBatch {
                     ops_root,
                     operations: ops,
-                    current_boundary: boundary,
+                    root,
+                    publications,
                     inactivity_floor,
                 },
             }
@@ -465,26 +429,16 @@ async fn build_mmb_growing_source_batch() -> MmbGrowingSourceBatch {
 
 async fn commit_upload(store_client: &StoreClient, batch: &SourceBatch) {
     let upload_client = store_client.unprefixed();
-    common::commit_current_operations(
-        &upload_client,
-        &batch.operations,
-        &op_cfg(),
-        &batch.current_boundary,
-    )
-    .await
-    .expect("commit upload");
+    common::commit_publications(&upload_client, &batch.publications)
+        .await
+        .expect("commit upload");
 }
 
 async fn commit_mmb_upload(store_client: &StoreClient, batch: &MmbSourceBatch) {
     let upload_client = store_client.unprefixed();
-    common::commit_current_operations(
-        &upload_client,
-        &batch.operations,
-        &op_cfg(),
-        &batch.current_boundary,
-    )
-    .await
-    .expect("commit upload");
+    common::commit_publications(&upload_client, &batch.publications)
+        .await
+        .expect("commit upload");
 }
 
 #[tokio::test]
@@ -503,11 +457,11 @@ async fn test_ordered_current_operation_range_connect_emits_verifiable_proof() {
                 max_locations: source.operations.len() as u32,
                 ..Default::default()
             },
-            &source.current_boundary.root,
+            &source.root,
         )
         .await
         .expect("get current operation range");
-    assert_eq!(proof.root, source.current_boundary.root);
+    assert_eq!(proof.root, source.root);
     assert_eq!(proof.start_location, Location::new(0));
     assert_eq!(proof.chunks.len(), 1);
     assert_eq!(proof.operations, source.operations);
@@ -528,7 +482,7 @@ async fn test_ordered_current_state_sync_from_connect_api_reconstructs_current_d
     let target = resolver
         .current_sync_target(
             commonware_utils::non_empty_range!(Location::new(0), op_count),
-            &source.current_boundary.root,
+            &source.root,
         )
         .await
         .expect("api sync target");
@@ -557,7 +511,7 @@ async fn test_ordered_current_state_sync_from_connect_api_reconstructs_current_d
                 op_cfg(),
                 NZU64!(8),
             );
-            let db: CurrentDb = qmdb_sync::sync(qmdb_sync::engine::Config {
+            let db: CurrentDb = qmdb_sync::sync(qmdb_sync::Config {
                 context: context.child("current_ordered_variable_mmr_sync_target"),
                 source: resolver,
                 target,
@@ -572,7 +526,7 @@ async fn test_ordered_current_state_sync_from_connect_api_reconstructs_current_d
             .await
             .expect("sync current db from API");
 
-            assert_eq!(db.root(), source.current_boundary.root);
+            assert_eq!(db.root(), source.root);
             assert_eq!(
                 db.get(&b"alpha".to_vec()).await.expect("get alpha"),
                 Some(b"one".to_vec())
@@ -622,11 +576,11 @@ async fn test_ordered_mmb_current_state_sync_from_nonzero_connect_api_reconstruc
     let target = resolver
         .current_sync_target(
             commonware_utils::non_empty_range!(start, op_count),
-            &source.current_boundary.root,
+            &source.root,
         )
         .await
         .expect("api nonzero current sync target");
-    let expected_current_root = source.current_boundary.root;
+    let expected_current_root = source.root;
 
     tokio::task::spawn_blocking(move || {
         cw_tokio::Runner::default().start(|context| async move {
@@ -639,7 +593,7 @@ async fn test_ordered_mmb_current_state_sync_from_nonzero_connect_api_reconstruc
                 op_cfg(),
                 NZU64!(8),
             );
-            let db: MmbCurrentDb = qmdb_sync::sync(qmdb_sync::engine::Config {
+            let db: MmbCurrentDb = qmdb_sync::sync(qmdb_sync::Config {
                 context: context.child("current_ordered_variable_mmb_nonzero_sync_target"),
                 source: resolver,
                 target,
@@ -706,10 +660,10 @@ async fn test_ordered_mmb_sync_source_returns_pinned_nodes_for_nonzero_fetches()
     };
     assert!(!pinned_nodes.is_empty());
     let elements = [op.encode()];
-    assert!(proof.verify_proof_and_pinned_nodes(
+    assert!(proof.verify_range_inclusion_with_pinned_nodes(
         &hasher,
-        &elements,
         start,
+        &elements,
         &pinned_nodes,
         &source.ops_root,
     ));
@@ -717,14 +671,14 @@ async fn test_ordered_mmb_sync_source_returns_pinned_nodes_for_nonzero_fetches()
     let current_target = connect_client
         .current_sync_target(
             commonware_utils::non_empty_range!(start, op_count),
-            &source.current_boundary.root,
+            &source.root,
         )
         .await
         .expect("current nonzero sync target");
-    assert!(proof.verify_proof_and_pinned_nodes(
+    assert!(proof.verify_range_inclusion_with_pinned_nodes(
         &hasher,
-        &elements,
         start,
+        &elements,
         &pinned_nodes,
         &current_target.root,
     ));
@@ -764,7 +718,7 @@ async fn test_ordered_mmb_operation_range_client_rejects_missing_nonzero_pinned_
         .into_view()
         .to_owned_message();
     let proof = mmb_operation_log_client(&qmdb_url)
-        .get_operation_range(request.clone(), &source.current_boundary.root)
+        .get_operation_range(request.clone(), &source.root)
         .await
         .expect("nonzero operation range verifies with pinned nodes");
     assert_eq!(proof.start_location, start);
@@ -798,7 +752,7 @@ async fn test_ordered_mmb_operation_range_client_rejects_missing_nonzero_pinned_
         .await;
     let connect_client = mmb_operation_log_client(&static_url);
     let err = connect_client
-        .get_operation_range(request, &source.current_boundary.root)
+        .get_operation_range(request, &source.root)
         .await
         .expect_err("missing pinned nodes should fail nonzero operation range verification");
     assert!(matches!(
@@ -849,7 +803,7 @@ async fn test_ordered_mmb_operation_range_client_rejects_extra_nonzero_pinned_no
         .await;
     let connect_client = mmb_operation_log_client(&static_url);
     let err = connect_client
-        .get_operation_range(request, &source.current_boundary.root)
+        .get_operation_range(request, &source.root)
         .await
         .expect_err("extra pinned nodes should fail operation range verification");
     assert!(matches!(
@@ -885,9 +839,7 @@ async fn test_ordered_mmb_operation_range_client_rejects_zero_start_pinned_nodes
         .cloned()
         .expect("operation range proof");
     assert!(proof.pinned_nodes.is_empty());
-    proof
-        .pinned_nodes
-        .push(source.current_boundary.root.encode());
+    proof.pinned_nodes.push(source.root.encode());
     response.proof = Some(proof).into();
 
     let (_static_server, static_url) =
@@ -897,7 +849,7 @@ async fn test_ordered_mmb_operation_range_client_rejects_zero_start_pinned_nodes
         .await;
     let connect_client = mmb_operation_log_client(&static_url);
     let err = connect_client
-        .get_operation_range(request, &source.current_boundary.root)
+        .get_operation_range(request, &source.root)
         .await
         .expect_err("zero-start pinned nodes should fail operation range verification");
     assert!(matches!(
@@ -937,10 +889,10 @@ async fn test_ordered_operation_range_connect_uses_current_root_witness() {
 
     let connect_client = operation_log_client(&qmdb_url);
     let proof = connect_client
-        .get_operation_range(request, &source.current_boundary.root)
+        .get_operation_range(request, &source.root)
         .await
         .expect("get operation range");
-    assert_eq!(proof.root, source.current_boundary.root);
+    assert_eq!(proof.root, source.root);
     assert_eq!(proof.start_location, Location::new(0));
     assert_eq!(proof.operations, source.operations);
 }
@@ -1046,7 +998,7 @@ async fn test_ordered_range_connect_subscribe_emits_verifiable_range_proof() {
     let frame: OperationLogSubscribeProof<Digest, BatchOperation, mmr::Family> =
         tokio::time::timeout(
             Duration::from_secs(5),
-            stream.message_with_root(common::trusted_root(source.current_boundary.root)),
+            stream.message_with_root(common::trusted_root(source.root)),
         )
         .await
         .expect("timeout")
@@ -1097,7 +1049,7 @@ async fn test_ordered_range_connect_client_rejects_invalid_streamed_proof() {
         .expect("subscribe");
 
     let err = stream
-        .message_with_root(common::trusted_root(source.current_boundary.root))
+        .message_with_root(common::trusted_root(source.root))
         .await
         .expect_err("tampered streamed proof should fail");
     assert!(matches!(
@@ -1129,7 +1081,7 @@ async fn test_ordered_range_connect_subscribe_emits_multi_proof_for_matching_key
     let frame: OperationLogSubscribeProof<Digest, BatchOperation, mmr::Family> =
         tokio::time::timeout(
             Duration::from_secs(5),
-            stream.message_with_root(common::trusted_root(source.current_boundary.root)),
+            stream.message_with_root(common::trusted_root(source.root)),
         )
         .await
         .expect("timeout")
@@ -1165,7 +1117,7 @@ async fn test_ordered_mmb_range_connect_subscribe_verifies_range_and_multi_proof
     let range_frame: OperationLogSubscribeProof<Digest, MmbBatchOperation, mmb::Family> =
         tokio::time::timeout(
             Duration::from_secs(5),
-            range_stream.message_with_root(common::trusted_root(source.current_boundary.root)),
+            range_stream.message_with_root(common::trusted_root(source.root)),
         )
         .await
         .expect("range timeout")
@@ -1192,7 +1144,7 @@ async fn test_ordered_mmb_range_connect_subscribe_verifies_range_and_multi_proof
     let multi_frame: OperationLogSubscribeProof<Digest, MmbBatchOperation, mmb::Family> =
         tokio::time::timeout(
             Duration::from_secs(5),
-            multi_stream.message_with_root(common::trusted_root(source.current_boundary.root)),
+            multi_stream.message_with_root(common::trusted_root(source.root)),
         )
         .await
         .expect("multi timeout")
@@ -1241,7 +1193,7 @@ async fn test_ordered_mmb_operation_log_any_sync_from_connect_api_reconstructs_a
                 op_cfg(),
                 NZU64!(8),
             );
-            let db: MmbAnyDb = qmdb_sync::sync(qmdb_sync::engine::Config {
+            let db: MmbAnyDb = qmdb_sync::sync(qmdb_sync::Config {
                 context: context.child("any_ordered_variable_mmb_sync_target"),
                 source: resolver,
                 target,
@@ -1311,7 +1263,7 @@ async fn test_ordered_mmb_operation_log_any_sync_from_nonzero_connect_api_recons
                 op_cfg(),
                 NZU64!(8),
             );
-            let db: MmbAnyDb = qmdb_sync::sync(qmdb_sync::engine::Config {
+            let db: MmbAnyDb = qmdb_sync::sync(qmdb_sync::Config {
                 context: context.child("any_ordered_variable_mmb_nonzero_sync_target"),
                 source: resolver,
                 target,
@@ -1401,7 +1353,7 @@ async fn test_ordered_mmb_operation_log_any_sync_accepts_target_update_from_grow
                 op_cfg(),
                 NZU64!(8),
             );
-            let db: MmbAnyDb = qmdb_sync::sync(qmdb_sync::engine::Config {
+            let db: MmbAnyDb = qmdb_sync::sync(qmdb_sync::Config {
                 context: context.child("any_ordered_variable_mmb_growing_sync_target"),
                 source: resolver,
                 target: initial_target,
@@ -1471,7 +1423,7 @@ async fn test_ordered_range_connect_subscribe_replays_since_cursor() {
 
     let frame = tokio::time::timeout(
         Duration::from_secs(5),
-        stream.message_with_root(common::trusted_root(source.current_boundary.root)),
+        stream.message_with_root(common::trusted_root(source.root)),
     )
     .await
     .expect("timeout")
@@ -1510,7 +1462,7 @@ async fn test_ordered_range_connect_subscribe_matches_prefix_and_regex_filters()
 
     let prefix_frame = tokio::time::timeout(
         Duration::from_secs(5),
-        prefix_stream.message_with_root(common::trusted_root(source.current_boundary.root)),
+        prefix_stream.message_with_root(common::trusted_root(source.root)),
     )
     .await
     .expect("prefix timeout")
@@ -1518,7 +1470,7 @@ async fn test_ordered_range_connect_subscribe_matches_prefix_and_regex_filters()
     .expect("prefix stream frame");
     let regex_frame = tokio::time::timeout(
         Duration::from_secs(5),
-        regex_stream.message_with_root(common::trusted_root(source.current_boundary.root)),
+        regex_stream.message_with_root(common::trusted_root(source.root)),
     )
     .await
     .expect("regex timeout")
@@ -1557,7 +1509,7 @@ async fn test_ordered_range_connect_subscribe_filters_by_value_regex_without_key
     let frame: OperationLogSubscribeProof<Digest, BatchOperation, mmr::Family> =
         tokio::time::timeout(
             Duration::from_secs(5),
-            stream.message_with_root(common::trusted_root(source.current_boundary.root)),
+            stream.message_with_root(common::trusted_root(source.root)),
         )
         .await
         .expect("timeout")
@@ -1592,7 +1544,7 @@ async fn test_ordered_range_connect_subscribe_intersects_key_and_value_filters()
 
     let frame = tokio::time::timeout(
         Duration::from_secs(5),
-        stream.message_with_root(common::trusted_root(source.current_boundary.root)),
+        stream.message_with_root(common::trusted_root(source.root)),
     )
     .await
     .expect("timeout")

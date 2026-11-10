@@ -10,9 +10,8 @@ use commonware_codec::{Codec, Encode, Read};
 use commonware_storage::{
     merkle::{Graftable, Location},
     qmdb::{
-        any::{ordered, value::ValueEncoding},
-        current::ordered::proof::constant::ExclusionProof,
-        operation::Key as QmdbKey,
+        any::ordered, current::ordered::proof::constant::ExclusionProof, operation::Key as QmdbKey,
+        value::ValueEncoding,
     },
 };
 use connectrpc::{PreEncoded, RequestContext as Context, ServiceRequest};

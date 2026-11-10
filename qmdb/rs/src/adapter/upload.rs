@@ -1,8 +1,28 @@
-//! Stateless preparation of authenticated Commonware operation ranges.
+//! Prepare Store rows for Commonware QMDB uploads.
 //!
-//! Ranges may overlap and contain several commits. All uploads to a namespace must belong to
-//! the same operation history, so repeated operation and Merkle node keys have identical values.
-//! The caller owns publication of the durable contiguous prefix through [`stage_watermark`].
+//! [`prepare_authenticated_range`] and [`prepare_publication`] each check their input against a
+//! trusted root before they prepare any row, and [`prepare_publication`] adds the batch's
+//! current-state rows. [`stage_authenticated_range`] adds prepared rows to a Store write batch,
+//! and [`stage_watermark`] adds the watermark that makes the durable prefix visible to readers.
+//! Nothing here reads the Store or keeps state between calls.
+//!
+//! ```text
+//!     AuthenticatedOperationRange                           Publication
+//!   and a trusted operation-log root                 and a trusted current root
+//!                  |                                             |
+//!     prepare_authenticated_range                       prepare_publication
+//!                  |                                             |
+//!                  '--------> PreparedAuthenticatedRange <-------'
+//!                                         |
+//!                             stage_authenticated_range                      watermark
+//!                                         |                                      |
+//!                                         v                               stage_watermark
+//!                                  StoreWriteBatch <-----------------------------'
+//! ```
+//!
+//! Ranges may overlap and contain several commits, and every upload to a namespace must belong
+//! to the same operation history, so repeated operation and Merkle node keys carry identical
+//! values and any upload can be retried.
 
 use crate::{
     adapter::{
@@ -12,27 +32,31 @@ use crate::{
             encode_update_index_value, encode_update_key, encode_watermark_key,
             ensure_encoded_value_size, CurrentBoundaryMetadata,
         },
-        core::extend_merkle_from_pinned_nodes,
+        core::{extend_merkle_from_pinned_nodes, MerkleExtension},
     },
-    CurrentBoundaryState, ProofKind, QmdbError,
+    error::current_proof_error,
+    ProofKind, QmdbError,
 };
-use commonware_codec::{Codec, Copying, Encode};
+use bytes::BufMut;
+use commonware_codec::{Buf, Codec, Copying, Encode, EncodeSize, RangeCfg, Read, ReadExt, Write};
 use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::Strategy;
 use commonware_storage::{
+    index::Unordered as UnorderedIndex,
+    journal::contiguous::Contiguous,
     merkle::{Family, Graftable, Location, Position},
     qmdb::{
-        any::{
-            operation::{Operation as AnyOperation, Update},
-            value::ValueEncoding,
-        },
-        current::grafting,
+        any::operation::{Operation as AnyOperation, Update},
+        current::{batch::MerkleizedBatch, db::Db, grafting, proof::OpsRootWitness},
         immutable, keyless,
-        operation::{Floored, Key as QmdbKey},
+        operation::{Committable, Floored, Key as QmdbKey},
+        value::ValueEncoding,
     },
+    Context,
 };
+use commonware_utils::{bitmap::Readable as _, iter::zip_eq};
 use exoware_sdk::{keys::Key, PrefixedStoreClient, StoreWriteBatch};
-use std::collections::BTreeSet;
+use std::{collections::BTreeSet, sync::Arc};
 
 /// An operation range and prefix frontier for authentication against a trusted root.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -92,7 +116,8 @@ where
     }
 }
 
-/// Deterministic logical Store rows authenticated against an independently trusted root.
+/// Deterministic logical Store rows prepared by [`prepare_authenticated_range`] or
+/// [`prepare_publication`].
 #[derive(Debug, PartialEq)]
 #[must_use]
 pub struct PreparedAuthenticatedRange<D: Digest, F: Family> {
@@ -100,13 +125,14 @@ pub struct PreparedAuthenticatedRange<D: Digest, F: Family> {
     pinned_nodes: Vec<(Position<F>, D)>,
     start_location: Location<F>,
     latest_location: Location<F>,
-    ops_root: D,
 }
 
 impl<D: Digest, F: Family> PreparedAuthenticatedRange<D, F> {
     /// Exclude supplied pins at these positions from staging, without omitting reconstructed nodes.
-    /// Omitted pins must be durable before publication and retained for proofs, as described in
-    /// the [pin omission contract](https://github.com/exowarexyz/monorepo/tree/main/qmdb/rs#pin-omission).
+    /// Omitted pins must be durable before the watermark covers them and retained for proofs, as
+    /// described under [pin omission].
+    ///
+    /// [pin omission]: https://github.com/exowarexyz/monorepo/tree/main/qmdb/rs#pin-omission
     pub fn without_pins_at(mut self, positions: &BTreeSet<Position<F>>) -> Self {
         self.pinned_nodes
             .retain(|(position, _)| !positions.contains(position));
@@ -121,55 +147,6 @@ impl<D: Digest, F: Family> PreparedAuthenticatedRange<D, F> {
     /// Inclusive final operation location in this range.
     pub const fn latest_location(&self) -> Location<F> {
         self.latest_location
-    }
-}
-
-impl<D: Digest, F: Graftable> PreparedAuthenticatedRange<D, F> {
-    /// Add caller-authenticated current-state boundary rows for this operation root.
-    ///
-    /// The boundary, including its `pruned_chunks` count, must come from the same trusted producer.
-    /// Use `recover_boundary_state` to authenticate recovered chunks and nodes against that
-    /// producer's current root. This method checks only the binding to the verified operation
-    /// root. It does not authenticate the supplied chunks, nodes, or pruned chunk count.
-    pub fn with_current_boundary<H: Hasher<Digest = D>, const N: usize>(
-        mut self,
-        boundary: &CurrentBoundaryState<D, N, F>,
-    ) -> Result<Self, QmdbError> {
-        if boundary.ops_root_witness.root::<H>(&self.ops_root) != boundary.root {
-            return Err(QmdbError::CorruptData(
-                "current boundary does not commit to the authenticated operation root".into(),
-            ));
-        }
-        self.rows
-            .reserve(2 + boundary.chunks.len() + boundary.grafted_nodes.len());
-        self.rows.push((
-            encode_current_meta_key(self.latest_location),
-            CurrentBoundaryMetadata {
-                root: boundary.root,
-                pruned_chunks: boundary.pruned_chunks,
-            }
-            .encode()
-            .to_vec(),
-        ));
-        self.rows.push((
-            encode_ops_root_witness_key(self.latest_location),
-            boundary.ops_root_witness.encode().to_vec(),
-        ));
-        for &(chunk_index, chunk) in &boundary.chunks {
-            self.rows.push((
-                encode_chunk_key(chunk_index, self.latest_location),
-                chunk.encode().to_vec(),
-            ));
-        }
-        for &(ops_position, digest) in &boundary.grafted_nodes {
-            let grafted_position =
-                grafting::ops_to_grafted_pos::<F>(ops_position, grafting::height::<N>());
-            self.rows.push((
-                encode_grafted_node_key(grafted_position, self.latest_location),
-                digest.encode().to_vec(),
-            ));
-        }
-        Ok(self)
     }
 }
 
@@ -190,6 +167,316 @@ where
     F: Family,
     H: Hasher,
     Op: UploadOperation<F>,
+    S: Strategy,
+{
+    let extension = reconstruct_range::<F, H, _>(authenticated, strategy)?;
+    if extension.root != *expected_root {
+        return Err(QmdbError::ProofVerification {
+            kind: ProofKind::RangeCheckpoint,
+        });
+    }
+
+    // Decode only once the range authenticates, and accept only canonical encodings.
+    let operations = authenticated
+        .encoded_operations
+        .iter()
+        .enumerate()
+        .map(|(offset, encoded)| {
+            let location = authenticated.start_location + offset as u64;
+            let operation = Op::decode_cfg(Copying(encoded), operation_cfg).map_err(|error| {
+                QmdbError::CorruptData(format!(
+                    "failed to decode authenticated operation at {location}: {error}"
+                ))
+            })?;
+            if operation.encode().as_ref() != encoded {
+                return Err(QmdbError::CorruptData(format!(
+                    "authenticated operation at {location} is not canonically encoded"
+                )));
+            }
+            Ok(operation)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    prepare_rows(authenticated, extension, &operations)
+}
+
+/// What an Exoware writer stores for one current QMDB batch. Replaying `operations` onto
+/// `pinned_nodes` under the final commit's floor rebuilds the operation-log root, and
+/// `ops_root_witness` binds that root to `root`.
+#[derive(Clone)]
+#[must_use]
+pub struct Publication<F: Graftable, D: Digest, U: Update, const N: usize> {
+    /// Location of the first operation.
+    pub start_location: Location<F>,
+    /// Operation-log frontier at `start_location`, in [`Family::nodes_to_pin`] order.
+    pub pinned_nodes: Vec<D>,
+    /// Operations the batch appends from `start_location`, ending with its commit.
+    pub operations: Arc<Vec<AnyOperation<F, U>>>,
+    /// Canonical current root after the batch.
+    pub root: D,
+    /// Witness binding the operation-log root after the batch to `root`.
+    pub ops_root_witness: OpsRootWitness<F, D>,
+    /// Bitmap chunks below this index were pruned when the batch was merkleized.
+    pub pruned_chunks: u64,
+    /// Bitmap chunks the batch wrote, by ascending index.
+    pub chunks: Vec<(u64, [u8; N])>,
+    /// Grafted nodes the batch appended or overwrote, by ascending operation-log position.
+    pub grafted_nodes: Vec<(Position<F>, D)>,
+}
+
+impl<F: Graftable, D: Digest, U: Update, const N: usize> Publication<F, D, U, N>
+where
+    AnyOperation<F, U>: Codec,
+{
+    /// Build `batch`'s publication from the batch and `db`. Call this before applying `batch`,
+    /// because its frontier is readable only until the batch's changes are flushed. The frontier
+    /// reads through `batch`'s unapplied ancestors, so they must still be held.
+    pub fn from_batch<E, C, I, H, S>(
+        batch: &MerkleizedBatch<F, D, U, N, S>,
+        db: &Db<F, E, C, I, H, U, N, S>,
+    ) -> Result<Self, QmdbError>
+    where
+        E: Context,
+        C: Contiguous<Item = AnyOperation<F, U>>,
+        I: UnorderedIndex<Value = Location<F>>,
+        H: Hasher<Digest = D>,
+        S: Strategy,
+    {
+        let pinned_nodes = batch.ops_pinned_nodes(db).map_err(current_proof_error)?;
+        let (start_location, operations) = batch.operations();
+        Ok(Self {
+            start_location,
+            pinned_nodes,
+            operations,
+            root: batch.root(),
+            ops_root_witness: batch.ops_root_witness().clone(),
+            pruned_chunks: batch.pruned_chunks(),
+            chunks: batch.chunks(),
+            grafted_nodes: batch.grafted_nodes(),
+        })
+    }
+
+    /// Build the publication of a new database's initial commit. No batch includes that commit,
+    /// so upload this publication before the one of the database's first batch.
+    pub fn initial<E, C, I, H, S>(db: &Db<F, E, C, I, H, U, N, S>) -> Result<Self, QmdbError>
+    where
+        E: Context,
+        C: Contiguous<Item = AnyOperation<F, U>>,
+        I: UnorderedIndex<Value = Location<F>>,
+        H: Hasher<Digest = D>,
+        S: Strategy,
+    {
+        if db.bounds().end != Location::new(1) {
+            return Err(QmdbError::CorruptData(
+                "initial publication must come from a database holding only its initial commit"
+                    .into(),
+            ));
+        }
+        let bitmap = db.bitmap();
+        Ok(Self {
+            start_location: Location::new(0),
+            pinned_nodes: Vec::new(),
+            operations: Arc::new(vec![AnyOperation::CommitFloor(None, Location::new(0))]),
+            root: db.root(),
+            ops_root_witness: db.ops_root_witness().clone(),
+            pruned_chunks: bitmap.pruned_chunks() as u64,
+            chunks: vec![(0, bitmap.get_chunk(0))],
+            grafted_nodes: Vec::new(),
+        })
+    }
+}
+
+/// Decoding limits for a [`Publication`].
+#[derive(Clone, Debug)]
+pub struct PublicationCfg<C> {
+    /// Configuration of each operation.
+    pub operation: C,
+    /// Accepted number of operations.
+    pub operations: RangeCfg<usize>,
+    /// Accepted number of bitmap chunks.
+    pub chunks: RangeCfg<usize>,
+    /// Accepted number of grafted nodes.
+    pub grafted_nodes: RangeCfg<usize>,
+}
+
+impl<F: Graftable, D: Digest, U: Update, const N: usize> Write for Publication<F, D, U, N>
+where
+    AnyOperation<F, U>: Write,
+{
+    fn write(&self, buf: &mut impl BufMut) {
+        self.start_location.write(buf);
+        self.pinned_nodes.write(buf);
+        self.operations.write(buf);
+        self.root.write(buf);
+        self.ops_root_witness.write(buf);
+        self.pruned_chunks.write(buf);
+        self.chunks.write(buf);
+        self.grafted_nodes.write(buf);
+    }
+}
+
+impl<F: Graftable, D: Digest, U: Update, const N: usize> EncodeSize for Publication<F, D, U, N>
+where
+    AnyOperation<F, U>: EncodeSize,
+{
+    fn encode_size(&self) -> usize {
+        self.start_location.encode_size()
+            + self.pinned_nodes.encode_size()
+            + self.operations.encode_size()
+            + self.root.encode_size()
+            + self.ops_root_witness.encode_size()
+            + self.pruned_chunks.encode_size()
+            + self.chunks.encode_size()
+            + self.grafted_nodes.encode_size()
+    }
+}
+
+impl<F: Graftable, D: Digest, U: Update, const N: usize> Read for Publication<F, D, U, N>
+where
+    AnyOperation<F, U>: Read,
+{
+    type Cfg = PublicationCfg<<AnyOperation<F, U> as Read>::Cfg>;
+
+    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
+        // The frontier at `start_location` has a fixed number of nodes.
+        let start_location = Location::<F>::read(buf)?;
+        let pins = F::nodes_to_pin(start_location).count();
+        Ok(Self {
+            start_location,
+            pinned_nodes: Vec::read_cfg(buf, &(RangeCfg::exact(pins), ()))?,
+            operations: Arc::read_cfg(buf, &(cfg.operations, cfg.operation.clone()))?,
+            root: D::read(buf)?,
+            ops_root_witness: OpsRootWitness::read(buf)?,
+            pruned_chunks: u64::read(buf)?,
+            chunks: Vec::read_cfg(buf, &(cfg.chunks, ((), ())))?,
+            grafted_nodes: Vec::read_cfg(buf, &(cfg.grafted_nodes, ((), ())))?,
+        })
+    }
+}
+
+/// Verify a current QMDB batch's [`Publication`] against `expected_root` and prepare its
+/// operation rows and current-state rows. The root must be trusted independently of the
+/// publication. The bitmap chunks, grafted nodes, and pruned chunk count are not authenticated
+/// and must come from the source of the batch.
+pub fn prepare_publication<F, H, U, S, const N: usize>(
+    publication: &Publication<F, H::Digest, U, N>,
+    expected_root: &H::Digest,
+    strategy: &S,
+) -> Result<PreparedAuthenticatedRange<H::Digest, F>, QmdbError>
+where
+    F: Graftable,
+    H: Hasher,
+    U: Update,
+    AnyOperation<F, U>: UploadOperation<F>,
+    S: Strategy,
+{
+    // Anchor the publication to the trusted root before hashing any operations.
+    if publication.root != *expected_root {
+        return Err(QmdbError::ProofVerification {
+            kind: ProofKind::Publication,
+        });
+    }
+
+    // Rebuild the authenticated range from the publication. A publication holds one batch, so
+    // its last operation must be its only commit. The floor of that commit fixes the canonical
+    // inactive peak count.
+    let operations = publication.operations.as_slice();
+    let (floor, earlier) = operations
+        .split_last()
+        .and_then(|(last, earlier)| Some((last.inactivity_floor()?, earlier)))
+        .ok_or_else(|| QmdbError::CorruptData("publication must end at a commit".into()))?;
+    if earlier.iter().any(Committable::is_commit) {
+        return Err(QmdbError::CorruptData(
+            "publication must not contain a commit before its last operation".into(),
+        ));
+    }
+    let end = publication
+        .start_location
+        .checked_add(operations.len() as u64)
+        .ok_or_else(|| {
+            QmdbError::CorruptData("publication end location must not overflow".into())
+        })?;
+    let encoded_operations = operations
+        .iter()
+        .map(|operation| operation.encode().to_vec())
+        .collect::<Vec<_>>();
+    let authenticated = AuthenticatedOperationRange {
+        start_location: publication.start_location,
+        end_location: end,
+        inactive_peaks: F::inactive_peaks(end, floor),
+        pinned_nodes: &publication.pinned_nodes,
+        encoded_operations: &encoded_operations,
+    };
+
+    // The range authenticates only if the witness binds its rebuilt operation-log root to the
+    // trusted root.
+    let extension = reconstruct_range::<F, H, _>(&authenticated, strategy)?;
+    if !publication
+        .ops_root_witness
+        .verify::<H>(&extension.root, expected_root)
+    {
+        return Err(QmdbError::ProofVerification {
+            kind: ProofKind::Publication,
+        });
+    }
+    let mut prepared = prepare_rows(&authenticated, extension, operations)?;
+
+    // Add the current-state rows at the range's final location.
+    let latest_location = prepared.latest_location;
+    let rows = &mut prepared.rows;
+    rows.reserve(2 + publication.chunks.len() + publication.grafted_nodes.len());
+    rows.push((
+        encode_current_meta_key(latest_location),
+        CurrentBoundaryMetadata {
+            root: publication.root,
+            pruned_chunks: publication.pruned_chunks,
+        }
+        .encode()
+        .to_vec(),
+    ));
+    rows.push((
+        encode_ops_root_witness_key(latest_location),
+        publication.ops_root_witness.encode().to_vec(),
+    ));
+    for &(chunk_index, chunk) in &publication.chunks {
+        rows.push((
+            encode_chunk_key(chunk_index, latest_location),
+            chunk.encode().to_vec(),
+        ));
+    }
+
+    // `grafting::ops_to_grafted_pos` panics for a node below the grafting height and, in an MMR,
+    // for a position that exceeds the node limit once two is added, so both are rejected first.
+    let grafting_height = grafting::height::<N>();
+    for &(ops_position, digest) in &publication.grafted_nodes {
+        if ops_position.checked_add(2).is_none() {
+            return Err(QmdbError::CorruptData(format!(
+                "grafted node at {ops_position} must not overflow"
+            )));
+        }
+        if F::pos_to_height(ops_position) < grafting_height {
+            return Err(QmdbError::CorruptData(format!(
+                "grafted node at {ops_position} must be at or above the grafting height"
+            )));
+        }
+        let grafted_position = grafting::ops_to_grafted_pos::<F>(ops_position, grafting_height);
+        rows.push((
+            encode_grafted_node_key(grafted_position, latest_location),
+            digest.encode().to_vec(),
+        ));
+    }
+    Ok(prepared)
+}
+
+/// Validate the shape of `authenticated` and rebuild its operation-log root and new Merkle nodes
+/// from its pins and encoded operations. The caller must check the rebuilt root against its
+/// trusted root before decoding or preparing anything from the range.
+fn reconstruct_range<F, H, S>(
+    authenticated: &AuthenticatedOperationRange<'_, H::Digest, F>,
+    strategy: &S,
+) -> Result<MerkleExtension<F, H::Digest>, QmdbError>
+where
+    F: Family,
+    H: Hasher,
     S: Strategy,
 {
     let start = authenticated.start_location;
@@ -214,51 +501,49 @@ where
         ensure_encoded_value_size(encoded.len())?;
     }
 
-    let pinned_positions = F::nodes_to_pin(start).collect::<Vec<_>>();
-    if authenticated.pinned_nodes.len() != pinned_positions.len() {
+    let pins = F::nodes_to_pin(start).count();
+    if authenticated.pinned_nodes.len() != pins {
         return Err(QmdbError::CorruptData(format!(
             "authenticated range has {} pins, expected {}",
             authenticated.pinned_nodes.len(),
-            pinned_positions.len()
+            pins
         )));
     }
 
     // Reconstruction also creates delayed MMB parents hidden by folded proof prefixes.
-    let extension = extend_merkle_from_pinned_nodes::<F, H, S, _>(
+    extend_merkle_from_pinned_nodes::<F, H, S, _>(
         authenticated.pinned_nodes.to_vec(),
         start,
         authenticated.encoded_operations.iter().map(Vec::as_slice),
         authenticated.inactive_peaks,
         strategy,
-    )?;
-    if extension.root != *expected_root {
-        return Err(QmdbError::ProofVerification {
-            kind: ProofKind::RangeCheckpoint,
-        });
-    }
+    )
+}
 
-    let latest_location = end.checked_sub(1).ok_or_else(|| {
-        QmdbError::CorruptData("authenticated range has no final operation".into())
-    })?;
-    let mut operation_rows = Vec::with_capacity(expected_count);
+/// Prepare the operation, index, and Merkle node rows of a range whose rebuilt root the caller
+/// has checked against its trusted root. `operations` are the range's canonical encodings,
+/// decoded, in order. The range's shape was validated when it was reconstructed.
+fn prepare_rows<F, D, Op>(
+    authenticated: &AuthenticatedOperationRange<'_, D, F>,
+    extension: MerkleExtension<F, D>,
+    operations: &[Op],
+) -> Result<PreparedAuthenticatedRange<D, F>, QmdbError>
+where
+    F: Family,
+    D: Digest,
+    Op: UploadOperation<F>,
+{
+    let start = authenticated.start_location;
+    let end = authenticated.end_location;
+    let latest_location = end - 1;
+    let mut operation_rows = Vec::with_capacity(operations.len());
     let mut index_rows = Vec::new();
     let mut final_floor = None;
-    for (offset, encoded) in authenticated.encoded_operations.iter().enumerate() {
-        let location = start.checked_add(offset as u64).ok_or_else(|| {
-            QmdbError::CorruptData("authenticated operation location overflow".into())
-        })?;
-        let operation =
-            Op::decode_cfg(Copying(encoded.as_slice()), operation_cfg).map_err(|error| {
-                QmdbError::CorruptData(format!(
-                    "failed to decode authenticated operation at {location}: {error}"
-                ))
-            })?;
-        if operation.encode().as_ref() != encoded.as_slice() {
-            return Err(QmdbError::CorruptData(format!(
-                "authenticated operation at {location} is not canonically encoded"
-            )));
-        }
-        final_floor = operation.has_floor();
+    for (offset, (operation, encoded)) in
+        zip_eq(operations, authenticated.encoded_operations).enumerate()
+    {
+        let location = start + offset as u64;
+        final_floor = operation.inactivity_floor();
         if let Some(floor) = final_floor {
             if !floor.is_valid() || floor > location {
                 return Err(QmdbError::CorruptData(format!(
@@ -284,10 +569,11 @@ where
 
     let mut rows = operation_rows;
     rows.extend(index_rows);
-    let pinned_nodes = pinned_positions
-        .into_iter()
-        .zip(authenticated.pinned_nodes.iter().copied())
-        .collect();
+    let pinned_nodes = zip_eq(
+        F::nodes_to_pin(start),
+        authenticated.pinned_nodes.iter().copied(),
+    )
+    .collect();
     rows.extend(
         extension
             .new_nodes
@@ -300,7 +586,6 @@ where
         pinned_nodes,
         start_location: start,
         latest_location,
-        ops_root: *expected_root,
     })
 }
 
@@ -320,11 +605,12 @@ pub fn stage_authenticated_range<D: Digest, F: Family>(
     Ok(())
 }
 
-/// Stage a published commit location under the client's configured namespace.
+/// Stage the watermark, the commit location that publishes the durable prefix, under the
+/// client's configured namespace.
 ///
 /// The caller must only advance this location after every required row in the contiguous prefix
 /// is durable, or when those rows are staged in the same atomic Store batch. For current QMDBs,
-/// the corresponding authenticated current boundary rows must also be available.
+/// the current-state rows of every batch through this location must also be durable or staged.
 pub fn stage_watermark<F: Family>(
     client: &PrefixedStoreClient,
     watermark: Location<F>,
@@ -342,18 +628,14 @@ pub fn stage_watermark<F: Family>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bytes::BufMut;
-    use commonware_codec::{Buf, DecodeExt, FixedSize, Read, Write};
+    use commonware_codec::{Decode, DecodeExt, FixedSize};
     use commonware_cryptography::{sha256::Digest as Sha256Digest, Sha256};
-    use commonware_parallel::{mocks::Explorer, Rayon, Sequential};
+    use commonware_parallel::{mocks::Explorer, rayon::ThreadPoolBuilder, Rayon, Sequential};
     use commonware_storage::{
         merkle::{mem::Mem, mmb, mmr},
         qmdb::{
-            any::{
-                ordered, unordered,
-                value::{FixedEncoding, VariableEncoding},
-            },
-            current::proof::OpsRootWitness,
+            any::{ordered, unordered},
+            value::{FixedEncoding, VariableEncoding},
         },
     };
     use commonware_utils::sequence::FixedBytes;
@@ -361,14 +643,13 @@ mod tests {
     use std::{
         collections::BTreeMap,
         num::NonZeroUsize,
-        sync::{
-            atomic::{AtomicUsize, Ordering},
-            Arc,
-        },
+        sync::atomic::{AtomicUsize, Ordering},
     };
 
     type FixedValueEncoding = FixedEncoding<FixedBytes<8>>;
     type FixedKeylessOperation<F> = keyless::Operation<F, FixedValueEncoding>;
+    type CodecUpdate = unordered::Update<FixedBytes<8>, FixedValueEncoding>;
+    type CodecPublication<F> = Publication<F, Sha256Digest, CodecUpdate, 32>;
 
     #[derive(Clone)]
     struct AuthenticatedRangeFixture<F: Family> {
@@ -598,7 +879,7 @@ mod tests {
         authenticate_frontier_pins::<mmb::Family>();
     }
 
-    // This decoder deliberately accepts aliases so canonical encoding validation is exercised
+    // This decoder accepts aliases so the tests exercise canonical encoding validation.
     struct AliasedCommit(u8);
 
     impl Write for AliasedCommit {
@@ -621,7 +902,7 @@ mod tests {
     }
 
     impl<F: Family> Floored<F> for AliasedCommit {
-        fn has_floor(&self) -> Option<Location<F>> {
+        fn inactivity_floor(&self) -> Option<Location<F>> {
             Some(Location::new(0))
         }
     }
@@ -828,7 +1109,7 @@ mod tests {
                 batches.push(staged);
             }
 
-            // Admitted predecessors can finish last, so publication waits for all prefix data
+            // Admitted predecessors can finish last, so the watermark waits for all prefix data
             let client = StoreClient::new("http://127.0.0.1:1").unprefixed();
             let latest = Location::<F>::new(12);
             let mut durable = BTreeMap::new();
@@ -837,14 +1118,14 @@ mod tests {
                 assert!(!durable.contains_key(&encode_watermark_key(latest)));
             }
             assert_eq!(durable, expected);
-            let mut publication = StoreWriteBatch::new();
-            stage_watermark(&client, latest, &mut publication).expect("publish complete prefix");
-            for (key, value) in publication.entries() {
+            let mut watermark = StoreWriteBatch::new();
+            stage_watermark(&client, latest, &mut watermark).expect("publish complete prefix");
+            for (key, value) in watermark.entries() {
                 durable.insert(client.decode_store_key(key).unwrap(), value.to_vec());
             }
             assert!(durable.contains_key(&encode_watermark_key(latest)));
 
-            // Reconstruct the retained Store frontier to serve a proof after publication
+            // Reconstruct the retained Store frontier to serve a proof after the watermark
             let end = Location::new(encoded.len() as u64);
             let start_size = Position::try_from(bootstrap.start_location).unwrap();
             let end_size = Position::try_from(end).unwrap();
@@ -876,10 +1157,10 @@ mod tests {
             let proof = memory
                 .range_proof(&hasher, bootstrap.start_location..end, 0)
                 .expect("served proof");
-            assert!(proof.verify_proof_and_pinned_nodes(
+            assert!(proof.verify_range_inclusion_with_pinned_nodes(
                 &hasher,
-                &encoded[*bootstrap.start_location as usize..],
                 bootstrap.start_location,
+                &encoded[*bootstrap.start_location as usize..],
                 &bootstrap.pinned_nodes,
                 &ranges[2].root,
             ));
@@ -941,8 +1222,10 @@ mod tests {
 
     fn assert_parallel_preparation<F: Family + PartialEq>() {
         // Force parallel work even for this small fixture
-        let strategy =
-            Explorer::parallel(&Rayon::new(NonZeroUsize::new(2).unwrap()).expect("Rayon strategy"));
+        let strategy = Explorer::parallel(
+            &Rayon::new(ThreadPoolBuilder::new(NonZeroUsize::new(2).unwrap()))
+                .expect("Rayon strategy"),
+        );
         for floor in [0, 512] {
             let mut operations = vec![FixedKeylessOperation::<F>::Commit(None, Location::new(0))];
             operations.extend(
@@ -979,80 +1262,90 @@ mod tests {
         assert_parallel_preparation::<mmb::Family>();
     }
 
-    #[test]
-    fn test_current_boundary_must_bind_to_the_authenticated_operation_root() {
-        let operations = committed_encoded_operations::<mmr::Family>();
-        let authenticated = authenticated_range_fixture::<mmr::Family>(&operations, 3, 0);
-        let witness = OpsRootWitness::<mmr::Family, _> {
-            grafted_root: Sha256::hash(&[b"grafted root"]),
-            pending_chunk_digest: Default::default(),
-            partial_chunk: None,
-        };
-        let mut boundary = CurrentBoundaryState::<_, 32, mmr::Family> {
-            root: witness.root::<Sha256>(&authenticated.root),
-            pruned_chunks: 0,
-            ops_root_witness: witness,
-            chunks: Vec::new(),
-            grafted_nodes: Vec::new(),
-        };
-        let prepared = authenticated.prepare().expect("prepare operation range");
-        let initial_rows = prepared.rows.len();
-        let pins = prepared.pinned_nodes.clone();
-        let prepared = prepared
-            .with_current_boundary::<Sha256, 32>(&boundary)
-            .expect("matching binding");
-        assert_eq!(prepared.rows.len(), initial_rows + 2);
-        assert_eq!(prepared.pinned_nodes, pins);
-        let existing_nodes = pins.iter().map(|(position, _)| *position).collect();
-        let mandatory = prepared.rows.iter().cloned().collect::<BTreeMap<_, _>>();
-        assert_eq!(
-            staged_rows(prepared.without_pins_at(&existing_nodes)),
-            mandatory
-        );
+    fn codec_publication<F: Graftable>() -> CodecPublication<F>
+    where
+        F::PendingChunk<Sha256Digest>: Default,
+    {
+        let start_location = Location::new(3);
+        CodecPublication {
+            start_location,
+            pinned_nodes: F::nodes_to_pin(start_location)
+                .map(|position| Sha256::hash(&[&position.to_be_bytes()]))
+                .collect(),
+            operations: Arc::new(vec![
+                AnyOperation::Update(unordered::Update(
+                    FixedBytes::new([1; 8]),
+                    FixedBytes::new([2; 8]),
+                )),
+                AnyOperation::Delete(FixedBytes::new([3; 8])),
+                AnyOperation::CommitFloor(Some(FixedBytes::new([4; 8])), Location::new(2)),
+            ]),
+            root: Sha256::hash(&[b"root"]),
+            ops_root_witness: OpsRootWitness {
+                grafted_root: Sha256::hash(&[b"grafted root"]),
+                pending_chunk_digest: Default::default(),
+                partial_chunk: Some((5, Sha256::hash(&[b"partial chunk"]))),
+            },
+            pruned_chunks: 1,
+            chunks: vec![(1, [6; 32]), (2, [7; 32])],
+            grafted_nodes: vec![(Position::new(510), Sha256::hash(&[b"grafted node"]))],
+        }
+    }
 
-        boundary.root = Sha256::hash(&[b"unrelated current root"]);
-        assert!(authenticated
-            .prepare()
-            .unwrap()
-            .with_current_boundary::<Sha256, 32>(&boundary)
-            .is_err());
+    fn codec_cfg() -> PublicationCfg<()> {
+        PublicationCfg {
+            operation: (),
+            operations: (0..=3).into(),
+            chunks: (0..=2).into(),
+            grafted_nodes: (0..=1).into(),
+        }
+    }
+
+    fn publication_codec_round_trips_and_enforces_limits<F: Graftable>()
+    where
+        F::PendingChunk<Sha256Digest>: Default,
+    {
+        // A publication within the configured limits round-trips.
+        let publication = codec_publication::<F>();
+        let encoded = publication.encode();
+        let decoded = CodecPublication::<F>::decode_cfg(encoded.clone(), &codec_cfg())
+            .expect("encoded publication must decode");
+        assert_eq!(decoded.encode(), encoded);
+
+        // Each vector longer than its configured limit is rejected.
+        for cfg in [
+            PublicationCfg {
+                operations: (0..=2).into(),
+                ..codec_cfg()
+            },
+            PublicationCfg {
+                chunks: (0..=1).into(),
+                ..codec_cfg()
+            },
+            PublicationCfg {
+                grafted_nodes: (0..=0).into(),
+                ..codec_cfg()
+            },
+        ] {
+            assert!(matches!(
+                CodecPublication::<F>::decode_cfg(encoded.clone(), &cfg),
+                Err(commonware_codec::Error::InvalidLength(_))
+            ));
+        }
+
+        // A frontier whose length does not match the start location is rejected.
+        let mut extra_pin = publication;
+        extra_pin.pinned_nodes.push(Sha256::hash(&[b"extra pin"]));
+        assert!(matches!(
+            CodecPublication::<F>::decode_cfg(extra_pin.encode(), &codec_cfg()),
+            Err(commonware_codec::Error::InvalidLength(_))
+        ));
     }
 
     #[test]
-    fn test_current_boundary_upload_keys_grafted_nodes_by_grafted_space_position() {
-        let digest = Sha256::hash(&[b"grafted-node"]);
-        let ops_position = Position::new(2046);
-        let latest_location = Location::new(1024);
-        let witness = commonware_storage::qmdb::current::proof::OpsRootWitness::<mmr::Family, _> {
-            grafted_root: digest,
-            pending_chunk_digest: Default::default(),
-            partial_chunk: None,
-        };
-        let boundary = CurrentBoundaryState::<_, 32, mmr::Family> {
-            root: witness.root::<Sha256>(&digest),
-            pruned_chunks: 0,
-            ops_root_witness: witness,
-            chunks: Vec::new(),
-            grafted_nodes: vec![(ops_position, digest)],
-        };
-        let prepared = PreparedAuthenticatedRange {
-            rows: Vec::new(),
-            pinned_nodes: Vec::new(),
-            start_location: Location::new(0),
-            latest_location,
-            ops_root: digest,
-        }
-        .with_current_boundary::<Sha256, 32>(&boundary)
-        .expect("matching binding");
-        let grafted_position = grafting::ops_to_grafted_pos(ops_position, grafting::height::<32>());
-        let expected_key = encode_grafted_node_key(grafted_position, latest_location);
-        let stale_ops_key = encode_grafted_node_key(ops_position, latest_location);
-
-        assert!(prepared
-            .rows
-            .iter()
-            .any(|(key, value)| key == &expected_key && value.as_slice() == digest.as_ref()));
-        assert!(!prepared.rows.iter().any(|(key, _)| key == &stale_ops_key));
+    fn test_publication_codec_round_trips_and_enforces_limits() {
+        publication_codec_round_trips_and_enforces_limits::<mmr::Family>();
+        publication_codec_round_trips_and_enforces_limits::<mmb::Family>();
     }
 
     #[test]
@@ -1082,9 +1375,9 @@ mod tests {
             .expect("source proof with an inactive prefix");
         let extracted = proof
             .verify_range_inclusion_and_extract_digests(
-                &commonware_storage::qmdb::hasher::<Sha256>(),
-                &authenticated.encoded_operations,
+                &hasher,
                 authenticated.start_location,
+                &authenticated.encoded_operations,
                 &authenticated.root,
             )
             .expect("verify source proof");
@@ -1120,7 +1413,7 @@ mod tests {
     }
 
     #[test]
-    fn test_staging_keeps_publication_explicit_and_uses_the_client_namespace() {
+    fn test_staging_keeps_watermark_explicit_and_uses_the_client_namespace() {
         let operations = committed_encoded_operations::<mmr::Family>();
         let prepared = authenticated_range_fixture::<mmr::Family>(&operations, 0, 0)
             .prepare()
@@ -1128,6 +1421,8 @@ mod tests {
         let latest = prepared.latest_location();
         let client = StoreClient::new("http://127.0.0.1:1")
             .prefixed(StoreKeyPrefix::new(b"authenticated-range/".to_vec()).expect("prefix"));
+
+        // Staging the range writes its presence row under the client's prefix and no watermark.
         let mut batch = StoreWriteBatch::new();
         stage_authenticated_range(&client, prepared, &mut batch).expect("stage range");
         let mut has_boundary = false;
@@ -1137,15 +1432,19 @@ mod tests {
             assert_ne!(logical, encode_watermark_key(latest));
         }
         assert!(has_boundary);
+
+        // Staging the watermark adds exactly one empty row after the data rows.
         let data_rows = batch.len();
-        stage_watermark(&client, latest, &mut batch).expect("stage publication");
-        let publication = &batch.entries()[data_rows..];
-        assert_eq!(publication.len(), 1);
+        stage_watermark(&client, latest, &mut batch).expect("stage watermark");
+        let watermark = &batch.entries()[data_rows..];
+        assert_eq!(watermark.len(), 1);
         assert_eq!(
-            client.decode_store_key(&publication[0].0).unwrap(),
+            client.decode_store_key(&watermark[0].0).unwrap(),
             encode_watermark_key(latest)
         );
-        assert!(publication.iter().all(|(_, value)| value.is_empty()));
+        assert!(watermark.iter().all(|(_, value)| value.is_empty()));
+
+        // An invalid watermark location fails and stages nothing.
         let staged = batch.len();
         assert!(stage_watermark(&client, mmr::Family::MAX_LEAVES, &mut batch).is_err());
         assert_eq!(batch.len(), staged);
