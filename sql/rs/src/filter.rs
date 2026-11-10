@@ -371,6 +371,28 @@ impl ScanAccessPlan {
             .all(|check| matches!(check, PredicateAccess::Pk { .. }))
     }
 
+    /// Whether the key ranges planned for an index are proven to admit only the entries the
+    /// predicate accepts.
+    ///
+    /// The proof is conservative. `true` means the ranges are exact, and `false` means only
+    /// that the proof does not cover them. It covers lexicographic indexes. A z-order key
+    /// interleaves its columns, and the proof does not analyze its ranges.
+    ///
+    /// A range bound holds the index key columns and then the primary-key columns, compared as
+    /// one tuple. Bounds can therefore fix each leading column to one value and give the next
+    /// column an inclusive range. The proof counts no column after that range as enforced. It
+    /// accepts a predicate whose every constraint sits in the enforced part and is one the
+    /// bounds are known to encode.
+    ///
+    /// - An index key column encodes a single value, an IN list as one range per value, and an
+    ///   inclusive range within its type. A strict float bound admits the bound itself, and a date
+    ///   bound that no date can meet is clamped to admit the type's first or last date, so the
+    ///   proof accepts neither.
+    /// - A primary-key column in the suffix encodes only an `Int64` or `UInt64` range. For any
+    ///   other constraint or column type, its bounds span every value of the column.
+    /// - A primary-key column that is also an index key column is enforced there. Its suffix
+    ///   position repeats that value, and the proof treats the position as fixed only for an
+    ///   integer column.
     pub(crate) fn predicate_fully_enforced_by_index_key(
         &self,
         model: &TableModel,
@@ -379,13 +401,9 @@ impl ScanAccessPlan {
         if spec.layout == IndexLayout::ZOrder {
             return false;
         }
-
-        // Key columns bound the scan in order, whether they come from the row value or
-        // the primary key, until the first column without a point constraint.
-        let mut open_tail = false;
-        for col_idx in &spec.key_columns {
-            let pk_pos = model.pk_position(*col_idx);
-            let Some(constraint) = self.predicate_checks.iter().find_map(|check| match check {
+        let constraint_on = |col_idx: usize| {
+            let pk_pos = model.pk_position(col_idx);
+            self.predicate_checks.iter().find_map(|check| match check {
                 PredicateAccess::Pk {
                     pk_pos: check_pos,
                     constraint,
@@ -394,51 +412,67 @@ impl ScanAccessPlan {
                     col_idx: check_col_idx,
                     constraint,
                     ..
-                } if check_col_idx == col_idx => Some(constraint),
+                } if *check_col_idx == col_idx => Some(constraint),
                 _ => None,
-            }) else {
-                open_tail = true;
+            })
+        };
+
+        // Bounds restrict a column only while every column before it is fixed to one value.
+        let mut fixed = true;
+        for &col_idx in &spec.key_columns {
+            let Some(constraint) = constraint_on(col_idx) else {
+                fixed = false;
                 continue;
             };
+            let kind = model.column(col_idx).kind;
 
             // Store ranges include their endpoints, so the range for a strict float bound also
             // holds rows equal to the bound.
-            if matches!(constraint, PredicateConstraint::FloatRange { min, max }
+            let strict = matches!(constraint, PredicateConstraint::FloatRange { min, max }
                 if min.is_some_and(|(_, inclusive)| !inclusive)
-                    || max.is_some_and(|(_, inclusive)| !inclusive))
+                    || max.is_some_and(|(_, inclusive)| !inclusive));
+            if !fixed
+                || strict
+                || !matches!(
+                    compile_encoded_constraint(kind, constraint),
+                    EncodedConstraintCompile::Encoded(_)
+                )
             {
                 return false;
             }
-            let kind = model.column(*col_idx).kind;
-            if matches!(
-                compile_encoded_constraint(kind, constraint),
-                EncodedConstraintCompile::Unsupported
-            ) {
-                return false;
-            }
-            if open_tail {
-                return false;
-            }
-            if !QueryPredicate::constraint_is_point(kind, constraint) {
-                open_tail = true;
-            }
+            fixed = QueryPredicate::constraint_is_point(kind, constraint);
         }
 
-        // Remaining primary-key constraints are enforced by the appended key suffix only
-        // while every key column is fixed to one value.
-        self.predicate_checks.iter().all(|check| match check {
-            PredicateAccess::Pk { pk_pos, constraint } => {
-                spec.key_columns
-                    .contains(&model.primary_key_indices[*pk_pos])
-                    || (!open_tail
-                        && !matches!(
-                            compile_encoded_constraint(
-                                model.primary_key_kinds[*pk_pos],
-                                constraint
-                            ),
-                            EncodedConstraintCompile::Unsupported
-                        ))
+        // The suffix bounds carry integer ranges alone. A suffix position stays fixed for an
+        // integer bound to one value, including one value of an IN list on a key column.
+        for (&col_idx, &kind) in model
+            .primary_key_indices
+            .iter()
+            .zip(&model.primary_key_kinds)
+        {
+            let constraint = constraint_on(col_idx);
+            let integer = matches!(kind, ColumnKind::Int64 | ColumnKind::UInt64);
+            let ranged = matches!(
+                constraint,
+                Some(
+                    PredicateConstraint::IntRange { .. } | PredicateConstraint::UInt64Range { .. }
+                )
+            );
+            if constraint.is_some()
+                && !spec.key_columns.contains(&col_idx)
+                && !(fixed && integer && ranged)
+            {
+                return false;
             }
+            fixed &= integer
+                && constraint.is_some_and(|constraint| {
+                    QueryPredicate::constraint_is_point(kind, constraint)
+                });
+        }
+
+        // No bound holds a column outside the index key and the primary key.
+        self.predicate_checks.iter().all(|check| match check {
+            PredicateAccess::Pk { .. } => true,
             PredicateAccess::NonPk { col_idx, .. } => spec.key_columns.contains(col_idx),
         })
     }
@@ -636,6 +670,333 @@ mod tests {
                 exact,
                 "min={min:?}, max={max:?}"
             );
+        }
+    }
+
+    /// Builds a table with one lexicographic index per list of key columns.
+    fn indexed_table(
+        columns: &[(&str, DataType)],
+        primary_key: &[&str],
+        indexes: &[&[&str]],
+    ) -> (TableModel, Vec<ResolvedIndexSpec>) {
+        let names = |names: &[&str]| {
+            names
+                .iter()
+                .map(|name| name.to_string())
+                .collect::<Vec<_>>()
+        };
+        let config = KvTableConfig::new(
+            0,
+            columns
+                .iter()
+                .map(|(name, data_type)| TableColumnConfig::new(*name, data_type.clone(), false))
+                .collect(),
+            names(primary_key),
+            indexes
+                .iter()
+                .map(|keys| IndexSpec::new(keys.join("_"), names(keys)).unwrap())
+                .collect(),
+        )
+        .unwrap();
+        let model = TableModel::from_config(&config).unwrap();
+        let specs = model.resolve_index_specs(&config.index_specs).unwrap();
+        (model, specs)
+    }
+
+    fn int_range(min: Option<i64>, max: Option<i64>) -> PredicateConstraint {
+        PredicateConstraint::IntRange { min, max }
+    }
+
+    fn unsigned_range(min: Option<u64>, max: Option<u64>) -> PredicateConstraint {
+        PredicateConstraint::UInt64Range { min, max }
+    }
+
+    /// Range bounds fix each leading column of the index key and its primary-key suffix to one
+    /// value, bound the next column with an inclusive range, and enforce nothing after it.
+    #[test]
+    fn index_ranges_are_exact_only_for_what_their_bounds_enforce() {
+        use PredicateConstraint::{IntIn, StringEq};
+        let is = |value| int_range(Some(value), Some(value));
+        let from = |value| int_range(Some(value), None);
+        let unsigned_is = |value| unsigned_range(Some(value), Some(value));
+        let unsigned_from = |value| unsigned_range(Some(value), None);
+        let named = || StringEq("n".into());
+        let check =
+            |model: &TableModel, spec: &ResolvedIndexSpec, case: &str, constraints, exact| {
+                let mut predicate = QueryPredicate::default();
+                predicate.constraints.extend::<Vec<_>>(constraints);
+                let access = ScanAccessPlan::new(model, &None, &predicate);
+                assert_eq!(
+                    access.predicate_fully_enforced_by_index_key(model, spec),
+                    exact,
+                    "{case} on index {}",
+                    spec.name
+                );
+            };
+
+        // Every index key ends with the primary key (id1, id2, name).
+        let (model, specs) = indexed_table(
+            &[
+                ("id1", DataType::Int64),
+                ("id2", DataType::UInt64),
+                ("name", DataType::Utf8),
+                ("tag", DataType::Int64),
+                ("day", DataType::Date32),
+            ],
+            &["id1", "id2", "name"],
+            &[&["tag"], &["tag", "id1"], &["day"]],
+        );
+        let [id1, id2, name, tag, day] = [0, 1, 2, 3, 4];
+        let [by_tag, by_tag_id1, by_day] = [&specs[0], &specs[1], &specs[2]];
+        for (case, spec, constraints, exact) in [
+            ("no constraint", by_tag, vec![], true),
+            ("key point", by_tag, vec![(tag, is(7))], true),
+            ("key IN list", by_tag, vec![(tag, IntIn(vec![7, 9]))], true),
+            ("key range", by_tag, vec![(tag, from(7))], true),
+            (
+                "first suffix range",
+                by_tag,
+                vec![(tag, is(7)), (id1, from(5))],
+                true,
+            ),
+            (
+                "range after a suffix point",
+                by_tag,
+                vec![(tag, is(7)), (id1, is(5)), (id2, unsigned_from(2))],
+                true,
+            ),
+            (
+                "suffix range under a key IN list",
+                by_tag,
+                vec![(tag, IntIn(vec![7, 9])), (id1, from(5))],
+                true,
+            ),
+            (
+                "key IN list that the suffix repeats",
+                by_tag_id1,
+                vec![
+                    (tag, is(7)),
+                    (id1, IntIn(vec![5, 6])),
+                    (id2, unsigned_from(2)),
+                ],
+                true,
+            ),
+            ("date range", by_day, vec![(day, from(3))], true),
+            (
+                "suffix range after a free suffix column",
+                by_tag,
+                vec![(tag, is(7)), (id2, unsigned_from(2))],
+                false,
+            ),
+            (
+                "suffix IN list",
+                by_tag,
+                vec![(tag, is(7)), (id1, IntIn(vec![5, 6]))],
+                false,
+            ),
+            (
+                "string suffix column",
+                by_tag,
+                vec![
+                    (tag, is(7)),
+                    (id1, is(5)),
+                    (id2, unsigned_is(2)),
+                    (name, named()),
+                ],
+                false,
+            ),
+            (
+                "date bound outside the type",
+                by_day,
+                vec![(day, from(i64::from(i32::MAX) + 1))],
+                false,
+            ),
+        ] {
+            check(&model, spec, case, constraints, exact);
+        }
+
+        // A string leads the primary-key suffix here. Range bounds never encode it there, even
+        // when the index key fixes it.
+        let (model, specs) = indexed_table(
+            &[
+                ("name", DataType::Utf8),
+                ("id", DataType::Int64),
+                ("tag", DataType::Int64),
+            ],
+            &["name", "id"],
+            &[&["tag", "name"]],
+        );
+        let [name, id, tag] = [0, 1, 2];
+        for (case, spec, constraints, exact) in [
+            (
+                "string key column that the suffix repeats",
+                &specs[0],
+                vec![(tag, is(7)), (name, named())],
+                true,
+            ),
+            (
+                "range after a repeated string key column",
+                &specs[0],
+                vec![(tag, is(7)), (name, named()), (id, from(5))],
+                false,
+            ),
+        ] {
+            check(&model, spec, case, constraints, exact);
+        }
+    }
+
+    /// An exact answer must hold against the ranges the planner builds. Over small tables and
+    /// every mix of constraints, the ranges admit every matching index entry, and exact ranges
+    /// admit no other entry.
+    #[test]
+    fn exact_index_ranges_admit_only_matching_entries() {
+        fn constraints(kind: ColumnKind) -> Vec<PredicateConstraint> {
+            use PredicateConstraint::{FloatRange, IntIn, StringEq, StringIn, UInt64In};
+            let float = |min, max| FloatRange { min, max };
+            match kind {
+                ColumnKind::Int64 => vec![
+                    int_range(Some(5), Some(5)),
+                    int_range(Some(5), None),
+                    int_range(Some(4), Some(5)),
+                    IntIn(vec![4, 6]),
+                ],
+                ColumnKind::UInt64 => vec![
+                    unsigned_range(Some(2), Some(2)),
+                    unsigned_range(None, Some(2)),
+                    UInt64In(vec![1, 3]),
+                ],
+                ColumnKind::Utf8 => vec![
+                    StringEq("n".into()),
+                    StringEq(String::new()),
+                    StringIn(vec![String::new(), "o".into()]),
+                ],
+                ColumnKind::Float64 => vec![
+                    float(Some((1.0, true)), Some((1.0, true))),
+                    float(Some((1.0, true)), None),
+                    float(Some((1.0, false)), None),
+                ],
+                ColumnKind::Date32 => vec![
+                    int_range(Some(5), Some(5)),
+                    int_range(None, Some(5)),
+                    int_range(Some(i64::from(i32::MAX) + 1), None),
+                ],
+                _ => unreachable!("the tables must use only these column kinds"),
+            }
+        }
+        fn values(kind: ColumnKind) -> Vec<CellValue> {
+            match kind {
+                ColumnKind::Int64 => [4, 5, 6].map(CellValue::Int64).to_vec(),
+                ColumnKind::UInt64 => [1, 2, 3].map(CellValue::UInt64).to_vec(),
+                ColumnKind::Utf8 => ["", "n", "o"].map(|v| CellValue::Utf8(v.into())).to_vec(),
+                ColumnKind::Float64 => [0.5, 1.0, 2.0].map(CellValue::Float64).to_vec(),
+                ColumnKind::Date32 => [0, 5, i32::MAX].map(CellValue::Date32).to_vec(),
+                _ => unreachable!("the tables must use only these column kinds"),
+            }
+        }
+        /// Returns every way to take one choice per column.
+        fn product<T: Clone>(columns: Vec<Vec<T>>) -> Vec<Vec<T>> {
+            columns.into_iter().fold(vec![Vec::new()], |rows, choices| {
+                let extend = |row: &Vec<T>| {
+                    let row = row.clone();
+                    choices.iter().map(move |choice| {
+                        let mut row = row.clone();
+                        row.push(choice.clone());
+                        row
+                    })
+                };
+                rows.iter().flat_map(extend).collect()
+            })
+        }
+
+        // The tables put integers and strings in each position of the index key and of the
+        // primary-key suffix, with and without a key column the suffix repeats.
+        for (model, specs) in [
+            indexed_table(
+                &[
+                    ("a", DataType::Int64),
+                    ("b", DataType::UInt64),
+                    ("tag", DataType::Int64),
+                    ("label", DataType::Utf8),
+                ],
+                &["a", "b"],
+                &[
+                    &["tag"],
+                    &["tag", "a"],
+                    &["tag", "b"],
+                    &["tag", "label"],
+                    &["label", "tag"],
+                    &["b", "a"],
+                ],
+            ),
+            indexed_table(
+                &[
+                    ("id", DataType::Int64),
+                    ("name", DataType::Utf8),
+                    ("version", DataType::UInt64),
+                    ("tag", DataType::Int64),
+                ],
+                &["id", "name", "version"],
+                &[
+                    &["tag"],
+                    &["tag", "id"],
+                    &["tag", "name"],
+                    &["tag", "version"],
+                ],
+            ),
+            indexed_table(
+                &[
+                    ("name", DataType::Utf8),
+                    ("id", DataType::Int64),
+                    ("score", DataType::Float64),
+                    ("day", DataType::Date32),
+                ],
+                &["name", "id"],
+                &[&["score"], &["day"], &["day", "score"], &["score", "name"]],
+            ),
+        ] {
+            let kinds = model.columns.iter().map(|col| col.kind);
+            let rows = product(kinds.clone().map(values).collect());
+            let choices = kinds.enumerate().map(|(idx, kind)| {
+                let constrained = constraints(kind).into_iter().map(move |c| Some((idx, c)));
+                std::iter::once(None).chain(constrained).collect()
+            });
+            for chosen in product(choices.collect()) {
+                let mut predicate = QueryPredicate::default();
+                predicate.constraints.extend(chosen.into_iter().flatten());
+                let access = ScanAccessPlan::new(&model, &None, &predicate);
+                for spec in &specs {
+                    // An index whose ranges cannot be built is never scanned.
+                    let prefix_len = predicate.leading_constrained_prefix(&model, spec);
+                    let Ok(ranges) = predicate.expand_index_ranges(&model, spec, prefix_len) else {
+                        continue;
+                    };
+                    let exact = access.predicate_fully_enforced_by_index_key(&model, spec);
+                    for values in &rows {
+                        let row = KvRow {
+                            values: values.clone(),
+                        };
+                        let key =
+                            encode_secondary_index_key(model.table_prefix, spec, &model, &row)
+                                .unwrap();
+                        let admitted = ranges
+                            .iter()
+                            .any(|range| range.start <= key && key <= range.end);
+                        let matches = predicate.matches_row(&row);
+                        assert!(
+                            admitted || !matches,
+                            "index {} must read the matching row {values:?} for {}",
+                            spec.name,
+                            predicate.describe(&model)
+                        );
+                        assert!(
+                            !exact || matches || !admitted,
+                            "index {} is exact for {}, so its ranges must not admit {values:?}",
+                            spec.name,
+                            predicate.describe(&model)
+                        );
+                    }
+                }
+            }
         }
     }
 }

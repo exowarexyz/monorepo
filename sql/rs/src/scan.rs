@@ -3285,6 +3285,71 @@ mod tests {
         );
     }
 
+    /// A range request carries the limit only when the range bounds enforce the whole
+    /// predicate. Otherwise entries the key check rejects would each use up a request.
+    #[tokio::test]
+    async fn index_range_limits_require_bounds_that_enforce_the_predicate() {
+        // Every row has tag 7, so each query reads one range of the tag index in (a, b) order.
+        // Two rows share each value of a.
+        let rows = 200;
+        let fixture = |indexes| {
+            Fixture::new(
+                vec![
+                    column("a", DataType::Int64, false),
+                    column("b", DataType::Int64, false),
+                    column("tag", DataType::Int64, false),
+                    column("payload", DataType::Int64, false),
+                ],
+                &["a", "b"],
+                indexes,
+                vec![
+                    Arc::new(Int64Array::from_iter_values((0..rows).map(|row| row / 2))),
+                    Arc::new(Int64Array::from_iter_values(0..rows)),
+                    Arc::new(Int64Array::from(vec![7; rows as usize])),
+                    Arc::new(Int64Array::from_iter_values(0..rows)),
+                ],
+            )
+        };
+
+        // The bounds of a (tag, a, b) range fix tag, then bound a, and bound b only once a is
+        // fixed. A constraint they cannot enforce leaves the range unlimited.
+        let by_tag = fixture(vec![index("tag", &["tag"], &[])]).await;
+
+        // Its key repeats a before the primary-key suffix (a, b).
+        let by_tag_a = fixture(vec![index("tag_a", &["tag", "a"], &[])]).await;
+        for (fixture, predicate, exact) in [
+            (&by_tag, "b IN (150, 190)", false),
+            (&by_tag, "b >= 150", false),
+            (&by_tag, "a >= 75", true),
+            (&by_tag, "a = 3 AND b >= 7", true),
+            (&by_tag_a, "a IN (3, 5) AND b >= 7", true),
+            (&by_tag_a, "a >= 3 AND b >= 7", false),
+        ] {
+            // The index covers the first projection and needs base rows for the second.
+            for (columns, lookup) in [("a, b, tag", false), ("a, b, tag, payload", true)] {
+                let sql =
+                    format!("SELECT {columns} FROM orders WHERE tag = 7 AND {predicate} LIMIT 1");
+                let requests = shape(&fixture.check(&sql).await);
+                let range = ("Range", if exact { 1 } else { usize::MAX });
+                assert_eq!(
+                    (requests.len(), requests[0]),
+                    (1 + usize::from(lookup), range),
+                    "{sql} must send one range request, limited only when exact"
+                );
+                assert!(
+                    !lookup || matches!(requests[1], ("GetMany", keys) if !exact || keys == 1),
+                    "{sql} must look up the rows of one range request, got {requests:?}"
+                );
+                let (scan, rendered) = fixture.scan(&sql).await;
+                assert!(
+                    scan.plan.index.is_some()
+                        && rendered.contains(&format!("exact={exact}, row_recheck={}, ", !exact)),
+                    "{sql} must plan an index scan with exact={exact}\n{rendered}"
+                );
+            }
+        }
+    }
+
     /// A scan reports the most rows its point keys or fetch allow, so a join collects a point
     /// lookup as its build side. The bound is never exact and no other statistic is set.
     #[tokio::test]

@@ -66,6 +66,13 @@ the scan bounds. With a primary key of `(entity, version)`:
 | `entity IN (X, Y)` | `[X, 0]` to `[X, MAX]` and `[Y, 0]` to `[Y, MAX]` |
 | no primary-key constraint | the whole table |
 
+A secondary index key continues with the primary-key columns, so the same rule runs
+through both. In that suffix only an `Int64` or `UInt64` range narrows the key range.
+`EXPLAIN` reports `exact=true` for an index scan only when the planner can show that
+the range bounds enforce the whole predicate. It does not attempt this for a z-order
+index. With `exact=false` the scan checks each entry itself and applies a `LIMIT` after
+those checks, without passing it to the Store.
+
 ## Aggregate pushdown
 
 Supported single-table aggregates run through the Store's `Reduce` RPC. Store workers
