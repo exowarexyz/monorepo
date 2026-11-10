@@ -193,7 +193,8 @@ pub(crate) struct AggregateReduceJob {
     pub(crate) request: RangeReduceParams,
     /// Primary key or secondary index key ranges to reduce, each sent as its own request.
     /// The ranges may cover more rows than the filters accept, and `request.filter` enforces
-    /// the rest. Empty when the predicate yields no range, so the job reduces nothing.
+    /// the rest. Primary-key ranges that hold exactly the accepted rows need no filter.
+    /// Empty when the predicate yields no range, so the job reduces nothing.
     pub(crate) ranges: Vec<KeyRange>,
 }
 
@@ -1152,7 +1153,14 @@ pub(crate) fn build_aggregate_reduce_job(
         },
         None => (Vec::new(), None),
     };
-    let filter = if filters.is_empty() {
+
+    // Every filter is a supported constraint, so the primary-key ranges are complete. When
+    // they also enforce each constraint, they hold exactly the rows the predicate accepts
+    // and the worker needs no filter. That covers key columns with no field reference.
+    let filter = if filters.is_empty()
+        || (matches!(access_path, AggregateAccessPath::PrimaryKey)
+            && access_plan.predicate_fully_enforced_by_primary_key(&table.model))
+    {
         None
     } else {
         let Some(filter) =
@@ -4721,5 +4729,227 @@ mod tests {
             values(&fixture.native, sql).await.unwrap()
         );
         assert!(fixture.rows.reductions.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn key_ranges_that_enforce_the_predicate_need_no_worker_filter() {
+        let fixture = Fixture::new().await;
+        let rows: Vec<(&str, u64, Option<i64>, Option<i64>)> = vec![
+            ("", 1, Some(1), Some(-1)),
+            ("e", 1, Some(2), Some(-2)),
+            ("e", 2, Some(3), None),
+            ("eu", 0, Some(23), Some(7)),
+            ("eu", 1, None, Some(9)),
+            ("eu", 2, Some(25), None),
+            ("eu", 3, Some(26), Some(8)),
+            ("eu", u64::MAX, Some(27), Some(-5)),
+            ("eu\0x", 1, Some(100), Some(100)),
+            (
+                "eu-central-longer-than-fifteen-bytes",
+                1,
+                Some(200),
+                Some(200),
+            ),
+            ("eu2", 1, Some(300), Some(300)),
+            ("us", 1, Some(400), Some(400)),
+            ("us", 2, Some(500), Some(500)),
+        ];
+        fixture
+            .install_indexed_table(
+                "c",
+                vec![
+                    TableColumnConfig::new("region", DataType::Utf8, false),
+                    TableColumnConfig::new("seq", DataType::UInt64, false),
+                    TableColumnConfig::new("v", DataType::Int64, true),
+                    TableColumnConfig::new("w", DataType::Int64, true),
+                ],
+                &["region", "seq"],
+                vec![],
+                rows.iter()
+                    .map(|&(region, seq, v, w)| KvRow {
+                        values: vec![
+                            CellValue::Utf8(region.to_string()),
+                            CellValue::UInt64(seq),
+                            v.map_or(CellValue::Null, CellValue::Int64),
+                            w.map_or(CellValue::Null, CellValue::Int64),
+                        ],
+                    })
+                    .collect(),
+                vec![
+                    Arc::new(StringArray::from_iter_values(rows.iter().map(|row| row.0))),
+                    Arc::new(UInt64Array::from_iter_values(rows.iter().map(|row| row.1))),
+                    Arc::new(Int64Array::from_iter(rows.iter().map(|row| row.2))),
+                    Arc::new(Int64Array::from_iter(rows.iter().map(|row| row.3))),
+                ],
+            )
+            .await;
+
+        // Each case lists its Reduce requests and the rows its ranges hold. The last two
+        // regions are too long for any key, so they have no range to read.
+        let unstorable_regions = [
+            "x".repeat(exoware_sdk::keys::MAX_KEY_LEN - 1),
+            "x".repeat(exoware_sdk::keys::MAX_KEY_LEN),
+        ];
+        for (predicate, requests, scanned_rows) in [
+            ("region = 'eu'", 1, 5),
+            ("region = 'eu' AND seq <= 2", 1, 3),
+            ("region = 'eu' AND seq = 18446744073709551615", 1, 1),
+            ("region = ''", 1, 1),
+            ("region = 'e'", 1, 2),
+            ("region = 'eu\0x'", 1, 1),
+            ("region = 'eu-central-longer-than-fifteen-bytes'", 1, 1),
+            ("region IN ('eu', 'us')", 2, 7),
+            ("region = 'missing'", 1, 0),
+            (
+                format!("region = '{}'", unstorable_regions[0]).as_str(),
+                0,
+                0,
+            ),
+            (
+                format!("region = '{}'", unstorable_regions[1]).as_str(),
+                0,
+                0,
+            ),
+        ] {
+            for projection in ["COUNT(*), SUM(v)", "MAX(w)"] {
+                let sql = format!("SELECT {projection} FROM c WHERE {predicate}");
+                fixture.check(&sql, requests).await;
+                assert_eq!(
+                    fixture.rows.scanned_rows.load(AtomicOrdering::Relaxed),
+                    scanned_rows,
+                    "the ranges must hold exactly the rows the predicate accepts: {sql}"
+                );
+                assert!(
+                    fixture
+                        .rows
+                        .reductions
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .all(|request| request.params.filter.as_option().is_none()),
+                    "ranges that enforce the predicate must replace the worker filter: {sql}"
+                );
+            }
+        }
+        fixture
+            .check(
+                "SELECT v, COUNT(*), MAX(w) FROM c WHERE region = 'eu' GROUP BY v ORDER BY v",
+                1,
+            )
+            .await;
+        let explain = values(
+            fixture.context.datafusion(),
+            "EXPLAIN SELECT COUNT(*), SUM(v) FROM c WHERE region = 'eu'",
+        )
+        .await
+        .unwrap();
+        assert!(
+            explain.iter().any(|row| {
+                let plan = row[1].to_string();
+                plan.contains("KvAggregateExec") && plan.contains("exact=true, row_recheck=false")
+            }),
+            "the pushed aggregate must report that its ranges enforce the predicate: {explain:?}"
+        );
+
+        // The ranges of these predicates admit rows the predicate rejects, and the worker
+        // cannot read region or seq from the key, so aggregation stays in DataFusion.
+        for sql in [
+            "SELECT COUNT(*), SUM(v) FROM c WHERE region IN ('eu', 'us') AND seq <= 2",
+            "SELECT COUNT(*), SUM(v) FROM c WHERE region = 'eu' AND v >= 25",
+            "SELECT COUNT(*), SUM(v) FROM c WHERE seq <= 2",
+        ] {
+            fixture.rows.reductions.lock().unwrap().clear();
+            assert_eq!(
+                values(fixture.context.datafusion(), sql).await.unwrap(),
+                values(&fixture.native, sql).await.unwrap(),
+                "{sql}"
+            );
+            assert!(
+                fixture.rows.reductions.lock().unwrap().is_empty(),
+                "a predicate the ranges do not enforce must not lose its filter: {sql}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn worker_filters_keep_the_checks_key_ranges_do_not_enforce() {
+        let fixture = Fixture::new().await;
+        for (sql, checks) in [
+            (
+                "SELECT COUNT(*), SUM(amount) FROM orders WHERE id >= 2",
+                None,
+            ),
+            (
+                "SELECT COUNT(*), SUM(amount) FROM orders WHERE id >= 2 AND status = 'open'",
+                Some(2),
+            ),
+            (
+                "SELECT COUNT(*), SUM(amount) FROM orders WHERE status = 'open'",
+                Some(1),
+            ),
+        ] {
+            fixture.check(sql, 1).await;
+            let requests = fixture.rows.reductions.lock().unwrap();
+            assert_eq!(
+                requests[0]
+                    .params
+                    .filter
+                    .as_option()
+                    .map(|filter| filter.checks.len()),
+                checks,
+                "the worker must check every constraint the ranges leave open: {sql}"
+            );
+        }
+
+        // The primary key alone would enforce this predicate. The planner reads the index on b, and
+        // its ranges bound b only, so they also hold rows of other a values.
+        let pairs = [(1, 1), (1, 2), (1, 3), (2, 2), (2, 3)];
+        fixture
+            .install_indexed_table(
+                "pairs",
+                vec![
+                    TableColumnConfig::new("a", DataType::Int64, false),
+                    TableColumnConfig::new("b", DataType::Int64, false),
+                    TableColumnConfig::new("v", DataType::Int64, false),
+                ],
+                &["a", "b"],
+                vec![IndexSpec::new("b_idx", vec!["b".to_string()])
+                    .unwrap()
+                    .with_cover_columns(vec!["v".to_string()])],
+                pairs
+                    .iter()
+                    .map(|&(a, b)| KvRow {
+                        values: vec![
+                            CellValue::Int64(a),
+                            CellValue::Int64(b),
+                            CellValue::Int64(a * 10 + b),
+                        ],
+                    })
+                    .collect(),
+                vec![
+                    Arc::new(Int64Array::from_iter_values(
+                        pairs.iter().map(|pair| pair.0),
+                    )),
+                    Arc::new(Int64Array::from_iter_values(
+                        pairs.iter().map(|pair| pair.1),
+                    )),
+                    Arc::new(Int64Array::from_iter_values(
+                        pairs.iter().map(|&(a, b)| a * 10 + b),
+                    )),
+                ],
+            )
+            .await;
+        let sql = "SELECT COUNT(*), SUM(v) FROM pairs WHERE a = 1 AND b >= 2";
+        fixture.check(sql, 1).await;
+        assert_eq!(fixture.rows.scanned_rows.load(AtomicOrdering::Relaxed), 4);
+        assert_eq!(
+            fixture.rows.reductions.lock().unwrap()[0]
+                .params
+                .filter
+                .as_option()
+                .map(|filter| filter.checks.len()),
+            Some(2),
+            "index ranges must keep the worker filter: {sql}"
+        );
     }
 }
