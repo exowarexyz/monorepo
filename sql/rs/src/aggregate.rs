@@ -270,7 +270,15 @@ impl KvAggregatePushdownRule {
     ) -> DataFusionResult<Transformed<LogicalPlan>> {
         // DataFusion only stops distinct aggregation early when the limit sits directly above it.
         let input_limited = matches!(plan, LogicalPlan::Limit(_)) && plan.fetch()?.is_some();
-        plan.map_children(|input| self.rewrite_with_limit(input, input_limited))?
+
+        // A plan embedded in an expression, such as a scalar subquery, is a query of its own
+        // with no limit above it.
+        let rewritten = plan.map_subqueries(|subquery| self.rewrite_with_limit(subquery, false))?;
+
+        rewritten
+            .transform_sibling(|plan| {
+                plan.map_children(|input| self.rewrite_with_limit(input, input_limited))
+            })?
             .transform_data(|node| {
                 if limited
                     && matches!(&node, LogicalPlan::Aggregate(aggregate) if aggregate.aggr_expr.is_empty())
@@ -2556,6 +2564,54 @@ mod tests {
             1,
             "{sql}: {paths:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn subquery_expression_aggregates_use_reduce() {
+        let fixture = Fixture::new().await;
+
+        // Decorrelation turns the first subquery into a join input. The others stay in
+        // expressions, where DataFusion plans each as a query of its own.
+        for (sql, scans) in [
+            (
+                "SELECT id FROM orders o WHERE amount = \
+                 (SELECT MAX(amount) FROM orders i WHERE i.status = o.status) ORDER BY id",
+                1,
+            ),
+            (
+                "SELECT id FROM orders WHERE amount > (SELECT AVG(amount) FROM orders)",
+                1,
+            ),
+            ("SELECT (SELECT COUNT(*) FROM orders)", 0),
+        ] {
+            let expected = values(&fixture.native, sql).await.unwrap();
+            let physical = fixture
+                .context
+                .sql(sql)
+                .await
+                .unwrap()
+                .create_physical_plan()
+                .await
+                .unwrap();
+            fixture.rows.paths.lock().unwrap().clear();
+            let actual = values(fixture.context.datafusion(), sql).await.unwrap();
+            assert_eq!(actual, expected, "{sql}");
+            let paths = fixture.rows.paths.lock().unwrap().clone();
+            assert_eq!(
+                paths.iter().filter(|p| p.ends_with("/Reduce")).count(),
+                1,
+                "{sql}: {paths:?}\n{}",
+                datafusion::physical_plan::displayable(physical.as_ref()).indent(true),
+            );
+            assert_eq!(
+                paths.iter().filter(|p| p.ends_with("/Range")).count(),
+                scans,
+                "{sql}: {paths:?}"
+            );
+            assert!(physical
+                .exists(|node| Ok(node.downcast_ref::<KvAggregateExec>().is_some()))
+                .unwrap());
+        }
     }
 
     #[tokio::test]
