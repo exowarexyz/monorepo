@@ -29,7 +29,7 @@ use crate::{
         Table as ProtoTable, TablesRequest, TablesResponse,
     },
     schema::KvSchema,
-    types::{IndexLayout, ResolvedIndexSpec, TableModel},
+    types::{IndexLayout, ResolvedIndexSpec, TableModel, MAX_TABLE_NAME_LEN},
     SqlContext,
 };
 #[cfg(test)]
@@ -293,7 +293,7 @@ impl Service for SqlConnect {
         let server = self.server.clone();
         async move {
             // Enforce the buf.validate lengths declared in stream.proto.
-            validate_field_length("table", request.table, 1, 255)?;
+            validate_field_length("table", request.table, 1, MAX_TABLE_NAME_LEN)?;
             validate_field_length("where_sql", request.where_sql, 0, 4096)?;
 
             let table_name = request.table.to_string();

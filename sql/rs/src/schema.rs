@@ -39,7 +39,8 @@ impl KvSchema {
     }
 
     /// Adds a table. `name` is the table's exact, case-sensitive name in SQL, in the `Tables`
-    /// and `Subscribe` RPCs, and in this crate's APIs.
+    /// and `Subscribe` RPCs, and in this crate's APIs. It has 1 to 255 characters, the range a
+    /// `Subscribe` request carries.
     ///
     /// In SQL, a double-quoted identifier always names the table. The quotes are optional for
     /// a lower-case identifier, because SQL folds unquoted identifiers to lower case.
@@ -55,6 +56,11 @@ impl KvSchema {
         index_specs: Vec<IndexSpec>,
     ) -> DataFusionResult<Self> {
         let name = name.into();
+        if !(1..=MAX_TABLE_NAME_LEN).contains(&name.chars().count()) {
+            return Err(DataFusionError::Plan(format!(
+                "table name must have 1 to {MAX_TABLE_NAME_LEN} characters"
+            )));
+        }
         if self.tables.iter().any(|(existing, _)| existing == &name) {
             return Err(DataFusionError::Plan(format!(
                 "duplicate table name '{name}'"
@@ -487,7 +493,7 @@ mod tests {
             record_batch::RecordBatch,
             util::pretty::pretty_format_batches,
         },
-        common::{internal_err, Result as DataFusionResult},
+        common::{internal_err, DataFusionError, Result as DataFusionResult},
         dataframe::DataFrameWriteOptions,
         logical_expr::{
             async_udf::{AsyncScalarUDF, AsyncScalarUDFImpl},
@@ -744,5 +750,23 @@ mod tests {
                 "+----+-----+",
             ]
         );
+    }
+
+    #[test]
+    fn table_names_fit_the_subscribe_request() {
+        let declare = |name: String| {
+            KvSchema::new(exoware_sdk::StoreClient::new("http://127.0.0.1:1").unprefixed()).table(
+                name,
+                vec![TableColumnConfig::new("id", DataType::Int64, false)],
+                vec!["id".to_string()],
+                vec![],
+            )
+        };
+
+        // Each "é" is one character in two bytes, so the limit counts characters.
+        assert!(declare("é".repeat(255)).is_ok());
+        for name in [String::new(), "é".repeat(256)] {
+            assert!(matches!(declare(name), Err(DataFusionError::Plan(_))));
+        }
     }
 }

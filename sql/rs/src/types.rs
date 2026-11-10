@@ -34,6 +34,10 @@ pub(crate) const INDEX_KEY_BYTE_OFFSET: usize = FAMILY_PREFIX_LEN;
 /// the primary family).
 pub(crate) const MAX_TABLES: usize = 16;
 pub(crate) const MAX_INDEX_SPECS: usize = 15;
+
+/// Longest table name in characters, the most that `SubscribeRequest.table` carries.
+pub(crate) const MAX_TABLE_NAME_LEN: usize = 255;
+
 pub(crate) const STRING_KEY_INLINE_LIMIT: usize = 15;
 pub(crate) const STRING_KEY_TERMINATOR: u8 = 0x00;
 pub(crate) const STRING_KEY_ESCAPE_PREFIX: u8 = 0x01;
