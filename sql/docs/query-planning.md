@@ -135,14 +135,26 @@ DataFusion semantics:
   scan skips undecodable payloads, so queries over corrupt data can behave differently
   across plans.
 - Aggregates with native `FILTER` clauses keep every group, even groups where no row
-  passes a filter. When every aggregate has a `CASE` guard, the shared group-only
-  request keeps groups that no guard selects.
+  passes a filter. When every aggregate has a `CASE` guard, a request that lists every
+  group keeps the groups that no guard selects, and a guarded aggregate can share that
+  request.
 
 ### Execution
 
 Aggregates that share ranges, grouping expressions, and a row filter share one
 `Reduce` request, including grouped aggregates with different native filters. Output
 columns keep their original order. A group-only query uses one request per range.
+
+A guarded aggregate can also join a request that its query sends anyway, either for an
+unguarded aggregate or to list the groups, and apply its guard as its own filter. It
+joins only when the worker can evaluate the guard on that request's access path and the
+request's key ranges, group keys, and row filter stay the same. Under those conditions a
+scalar `FILTER` qualifies with any argument, because the worker applies it before
+evaluating the argument. A `CASE` guard qualifies when its value is a column, a literal,
+or a row count. A grouped aggregate would evaluate any other value on rows the guard
+excludes. Every other guard keeps a request of its own over the ranges it selects. A
+`FILTER` on a text key column is one of them, because the worker has no field reference
+for that column.
 
 All requests for a query use its read session. Range requests run concurrently up to
 the query's DataFusion `target_partitions` setting, each with the session's current

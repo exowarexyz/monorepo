@@ -177,8 +177,9 @@ pub(crate) struct NormalizedAggregateExpr {
     pub(crate) func: AggregatePushdownFunction,
     /// Value reduced from each selected row.
     pub(crate) argument: AggregatePushdownArgument,
-    /// Aggregate-local `FILTER (WHERE ...)`, evaluated by the reducer. Scalar plans fold it
-    /// into `guard`.
+    /// Aggregate-local `FILTER (WHERE ...)`, evaluated by the reducer. Scalar plans fold it into
+    /// `guard`. A guard moves here when its aggregate joins the seed job or the job of an unguarded
+    /// aggregate.
     pub(crate) filter: Option<Expr>,
     /// Condition applied to the job's input, so it can narrow key ranges. Combines the
     /// disjunction of `CASE WHEN` conditions with `filter` for scalar aggregates.
@@ -197,6 +198,15 @@ pub(crate) struct AggregateReduceJob {
     /// the rest. Primary-key ranges that hold exactly the accepted rows need no filter.
     /// Empty when the predicate yields no range, so the job reduces nothing.
     pub(crate) ranges: Vec<KeyRange>,
+}
+
+impl AggregateReduceJob {
+    /// Whether one request per range can carry the reducers of both jobs.
+    fn shares_request(&self, other: &Self) -> bool {
+        self.ranges == other.ranges
+            && self.request.group_by == other.request.group_by
+            && self.request.filter == other.request.filter
+    }
 }
 
 /// Store job and output mapping compiled for one aggregate expression before jobs are merged.
@@ -243,9 +253,9 @@ pub(crate) struct AggregatePushdownSpec {
     /// Number of `GROUP BY` expressions. They are the leading fields of `schema` and of the
     /// state schema. Zero for a scalar aggregate.
     pub(crate) group_count: usize,
-    /// Reducer-free job that enumerates groups under the scan filters when all aggregates
-    /// are guarded, including grouping without aggregates. Preserves groups that none of
-    /// the aggregate jobs emit.
+    /// Reducer-free job that enumerates groups under the scan filters when every aggregate keeps
+    /// its guard as its own job's row filter, including grouping without aggregates. Preserves
+    /// groups that none of the aggregate jobs emit.
     pub(crate) seed_job: Option<AggregateReduceJob>,
     /// Jobs that compute the aggregate expressions. Each expression belongs to exactly one job.
     pub(crate) aggregate_jobs: Vec<CombinedAggregateJob>,
@@ -1075,11 +1085,10 @@ pub(crate) const fn rebase_output_plan(
 pub(crate) fn combine_aggregate_jobs(exprs: Vec<AggregateExprPlan>) -> Vec<CombinedAggregateJob> {
     let mut combined: Vec<CombinedAggregateJob> = Vec::new();
     for (output_idx, expr) in exprs.into_iter().enumerate() {
-        if let Some(existing) = combined.iter_mut().find(|candidate| {
-            candidate.job.ranges == expr.job.ranges
-                && candidate.job.request.group_by == expr.job.request.group_by
-                && candidate.job.request.filter == expr.job.request.filter
-        }) {
+        if let Some(existing) = combined
+            .iter_mut()
+            .find(|candidate| candidate.job.shares_request(&expr.job))
+        {
             let offset = existing.job.request.reducers.len();
             let rebased_output = rebase_output_plan(expr.output, offset);
             existing
@@ -1116,7 +1125,8 @@ pub(crate) fn try_build_aggregate_pushdown_spec(
 
     let mut aggregate_exprs = Vec::new();
     let mut aggregate_diagnostics = Vec::new();
-    let mut has_unguarded_aggregate = false;
+    let mut unguarded = Vec::new();
+    let mut maskable = Vec::new();
     for (expr_idx, expr) in aggr_exprs.iter().enumerate() {
         let data_type = schema
             .field(group_exprs.len() + expr_idx)
@@ -1126,6 +1136,7 @@ pub(crate) fn try_build_aggregate_pushdown_spec(
             Ok(normalized) => normalized,
             Err(_) => return Ok(None),
         };
+        let case_guarded = normalized.guard.is_some();
 
         // Native scalar aggregates filter rows before evaluating arguments, allowing
         // the same predicate to narrow the Store access path.
@@ -1134,7 +1145,6 @@ pub(crate) fn try_build_aggregate_pushdown_spec(
                 conjunction(normalized.guard.into_iter().chain(normalized.filter.take()));
         }
 
-        has_unguarded_aggregate |= normalized.guard.is_none();
         let mut filters = scan.filters.clone();
         if let Some(filter) = &normalized.guard {
             filters.push(filter.clone());
@@ -1143,7 +1153,7 @@ pub(crate) fn try_build_aggregate_pushdown_spec(
             table,
             &filters,
             &compiled_group_exprs,
-            Some((&normalized, data_type)),
+            Some((&normalized, data_type.clone())),
         )?
         else {
             return Ok(None);
@@ -1153,13 +1163,33 @@ pub(crate) fn try_build_aggregate_pushdown_spec(
         };
         aggregate_exprs.push(AggregateExprPlan { job, output });
         aggregate_diagnostics.push(diagnostics);
+
+        // A reducer filter is the worker's native aggregate FILTER. A scalar FILTER is that
+        // same construct and is applied before its argument is evaluated, here and in the
+        // worker. A CASE guard is a different construct. A grouped aggregate evaluates its
+        // argument on every row before its filter, so a CASE guard may become a reducer
+        // filter only when its argument cannot raise on the rows it excludes. Only a
+        // column, a literal, or a row count qualifies.
+        if normalized.guard.is_none() {
+            unguarded.push(expr_idx);
+        } else if (compiled_group_exprs.is_empty() && !case_guarded)
+            || matches!(
+                normalized.argument,
+                AggregatePushdownArgument::CountAll
+                    | AggregatePushdownArgument::Expr(
+                        PushdownValueExpr::Column(_) | PushdownValueExpr::Literal(_)
+                    )
+            )
+        {
+            maskable.push((expr_idx, normalized, data_type));
+        }
     }
 
     if aggregate_exprs.is_empty() && compiled_group_exprs.is_empty() {
         return Ok(None);
     }
 
-    let seed_job = if !compiled_group_exprs.is_empty() && !has_unguarded_aggregate {
+    let mut seed_job = if !compiled_group_exprs.is_empty() && unguarded.is_empty() {
         let Some((job, diagnostics, _)) =
             build_aggregate_reduce_job(table, &scan.filters, &compiled_group_exprs, None)?
         else {
@@ -1169,6 +1199,45 @@ pub(crate) fn try_build_aggregate_pushdown_spec(
     } else {
         None
     };
+
+    // The seed job and the jobs of unguarded aggregates run whatever the guards select. An
+    // aggregate whose guard may be a reducer filter joins one of them when its job would
+    // then read the same ranges with the same grouping and row filter, so its own job is
+    // never sent. The job it joins returns every group, so the seed job is not needed.
+    let mut masked = Vec::new();
+    for (expr_idx, mut normalized, data_type) in maskable {
+        normalized.filter = conjunction(
+            normalized
+                .filter
+                .take()
+                .into_iter()
+                .chain(normalized.guard.take()),
+        );
+        let Some((job, diagnostics, Some(output))) = build_aggregate_reduce_job(
+            table,
+            &scan.filters,
+            &compiled_group_exprs,
+            Some((&normalized, data_type)),
+        )?
+        else {
+            continue;
+        };
+        if seed_job
+            .iter()
+            .map(|(seed, _)| seed)
+            .chain(unguarded.iter().map(|&idx| &aggregate_exprs[idx].job))
+            .any(|runs_anyway| runs_anyway.shares_request(&job))
+        {
+            masked.push((expr_idx, AggregateExprPlan { job, output }, diagnostics));
+        }
+    }
+    if !masked.is_empty() {
+        seed_job = None;
+    }
+    for (expr_idx, plan, diagnostics) in masked {
+        aggregate_exprs[expr_idx] = plan;
+        aggregate_diagnostics[expr_idx] = diagnostics;
+    }
 
     let aggregate_jobs = combine_aggregate_jobs(aggregate_exprs);
     let aggregate_diagnostics = aggregate_jobs
@@ -2787,7 +2856,8 @@ mod tests {
     #[tokio::test]
     async fn interleaved_jobs_preserve_output_positions() {
         let fixture = Fixture::new().await;
-        fixture.check("SELECT SUM(amount), COUNT(*) FILTER (WHERE status = 'open'), AVG(amount), MIN(amount), MAX(amount) FROM orders", 2).await;
+        fixture.check("SELECT SUM(amount), COUNT(*) FILTER (WHERE status = 'open'), AVG(amount), MIN(amount), MAX(amount) FROM orders", 1).await;
+        fixture.check("SELECT SUM(amount), SUM(CASE WHEN status = 'open' THEN amount + 1 END), AVG(amount), MIN(amount), MAX(amount) FROM orders", 2).await;
         fixture.check("SELECT region, SUM(amount), COUNT(*) FILTER (WHERE status = 'open'), AVG(amount), MIN(amount), MAX(amount) FROM orders GROUP BY region ORDER BY region", 1).await;
     }
 
@@ -2807,7 +2877,231 @@ mod tests {
                 .all(|reducer| reducer.filter.as_option().is_some()));
         }
         assert_eq!(fixture.rows.scanned_rows.load(AtomicOrdering::Relaxed), 4);
-        fixture.check("SELECT region, SUM(CASE WHEN id > 1 THEN amount END) FILTER (WHERE status = 'open'), COUNT(*) FILTER (WHERE status = 'closed') FROM orders GROUP BY region ORDER BY region", 2).await;
+        fixture.check("SELECT region, SUM(CASE WHEN id > 1 THEN amount END) FILTER (WHERE status = 'open'), COUNT(*) FILTER (WHERE status = 'closed') FROM orders GROUP BY region ORDER BY region", 1).await;
+    }
+
+    #[tokio::test]
+    async fn guards_share_the_request_that_reads_the_unguarded_range() {
+        let fixture = Fixture::new().await;
+
+        // Each guarded aggregate joins the one request per range that its query needs
+        // anyway, as a reducer with its own filter. Groups that no guard selects remain.
+        for (sql, requests) in [
+            (
+                "SELECT region, SUM(CASE WHEN status = 'open' THEN amount END), \
+                 COUNT(CASE WHEN status = 'closed' THEN 1 END) \
+                 FROM orders GROUP BY region ORDER BY region",
+                1,
+            ),
+            // Both guards share one condition. DataFusion computes it in a projection.
+            (
+                "SELECT region, SUM(CASE WHEN status = 'open' THEN amount END), \
+                 COUNT(CASE WHEN status = 'open' THEN 1 END) \
+                 FROM orders GROUP BY region ORDER BY region",
+                1,
+            ),
+            (
+                "SELECT region, SUM(CASE WHEN status = 'open' THEN amount END), \
+                 COUNT(CASE WHEN status = 'open' THEN 1 END) \
+                 FROM orders WHERE id IN (1, 2, 4) GROUP BY region ORDER BY region",
+                3,
+            ),
+            (
+                "SELECT region, SUM(CASE WHEN status = 'missing' THEN amount END), \
+                 COUNT(CASE WHEN id = 99 THEN 1 END), \
+                 MIN(CASE WHEN id = 4 THEN amount END), \
+                 MAX(CASE WHEN status = 'open' THEN amount END) \
+                 FROM orders GROUP BY region ORDER BY region",
+                1,
+            ),
+            (
+                "SELECT COUNT(*), SUM(amount) FILTER (WHERE amount > 15), \
+                 SUM(amount) FILTER (WHERE status = 'open') FROM orders",
+                1,
+            ),
+            (
+                "SELECT COUNT(*), SUM(CASE WHEN id > 1 THEN amount END), \
+                 COUNT(CASE WHEN id = 4 THEN 1 END), \
+                 SUM(CASE WHEN status = 'open' THEN 1 END) FILTER (WHERE id < 4) FROM orders",
+                1,
+            ),
+            (
+                "SELECT region, COUNT(CASE WHEN status = 'open' THEN id END) \
+                 FROM orders WHERE id IN (1, 2, 4) GROUP BY region ORDER BY region",
+                3,
+            ),
+            // A scalar aggregate applies its FILTER before evaluating its argument, in
+            // DataFusion and in the worker, so the division never sees the first row.
+            (
+                "SELECT COUNT(*), SUM(id / (id - 1)) FILTER (WHERE id > 1) FROM orders",
+                1,
+            ),
+        ] {
+            fixture.check(sql, requests).await;
+            for request in fixture.rows.reductions.lock().unwrap().iter() {
+                assert!(
+                    request
+                        .params
+                        .reducers
+                        .iter()
+                        .any(|reducer| reducer.filter.as_option().is_some()),
+                    "a guard that shares a request must be a reducer filter: {sql}"
+                );
+            }
+        }
+
+        // A CASE value other than a column, a literal, or a row count keeps its guard as the row
+        // filter of its own job. As a reducer filter, the guard would come after the grouped
+        // division, and the division would fail on the first row. With no unguarded aggregate, the
+        // seed job still lists the groups.
+        for (sql, requests) in [
+            (
+                "SELECT COUNT(*), SUM(CASE WHEN id > 1 THEN id / (id - 1) END) FROM orders",
+                2,
+            ),
+            (
+                "SELECT region, COUNT(*), SUM(CASE WHEN id > 1 THEN id / (id - 1) END) \
+                 FROM orders GROUP BY region ORDER BY region",
+                2,
+            ),
+            (
+                "SELECT region, COUNT(*), AVG(CASE WHEN id > 1 THEN amount END) \
+                 FROM orders GROUP BY region ORDER BY region",
+                2,
+            ),
+            (
+                "SELECT region, SUM(CASE WHEN id > 1 THEN id / (id - 1) END), \
+                 MAX(CASE WHEN status = 'open' THEN amount + 1 END) \
+                 FROM orders GROUP BY region ORDER BY region",
+                3,
+            ),
+        ] {
+            fixture.check(sql, requests).await;
+        }
+
+        // Nothing reads the whole table here, so each guard keeps the range it narrows.
+        fixture
+            .check(
+                "SELECT SUM(amount) FILTER (WHERE id = 1), SUM(amount) FILTER (WHERE id = 4) \
+                 FROM orders",
+                2,
+            )
+            .await;
+        assert_eq!(fixture.rows.scanned_rows.load(AtomicOrdering::Relaxed), 2);
+
+        // An average shares its count and sum validity, so a group without a selected row
+        // must stay null.
+        fixture
+            .install_float_ranges(&[
+                (0, 0, Some(1), 1, Some(0.5)),
+                (0, 1, Some(1), 0, Some(1.5)),
+                (0, 2, Some(2), 0, Some(2.0)),
+                (1, 0, None, 1, None),
+            ])
+            .await;
+        fixture
+            .check(
+                "SELECT category, AVG(CASE WHEN flag = 1 THEN value END), \
+                 MIN(CASE WHEN flag = 0 THEN value END) \
+                 FROM float_ranges GROUP BY category ORDER BY category",
+                1,
+            )
+            .await;
+    }
+
+    #[tokio::test]
+    async fn guards_keep_ranges_that_no_other_job_reads() {
+        // The seed job reads the index range of one category. A guard on id reads one base
+        // row. It shares the seed's request only when the index also holds its argument.
+        for (cover_flag, requests, scanned_rows) in [(false, 2, 3), (true, 1, 2)] {
+            let fixture = Fixture::new().await;
+            let mut cover = vec!["amount".to_string()];
+            if cover_flag {
+                cover.push("flag".to_string());
+            }
+            let ids = [0, 1, 2, 3];
+            fixture
+                .install_indexed_table(
+                    "indexed",
+                    vec![
+                        TableColumnConfig::new("id", DataType::Int64, false),
+                        TableColumnConfig::new("category", DataType::Int64, false),
+                        TableColumnConfig::new("amount", DataType::Int64, false),
+                        TableColumnConfig::new("flag", DataType::Int64, false),
+                    ],
+                    &["id"],
+                    vec![IndexSpec::new("category_idx", vec!["category".to_string()])
+                        .unwrap()
+                        .with_cover_columns(cover)],
+                    ids.iter()
+                        .map(|&id| KvRow {
+                            values: vec![
+                                CellValue::Int64(id),
+                                CellValue::Int64(id / 2),
+                                CellValue::Int64(id * 10),
+                                CellValue::Int64(id % 2),
+                            ],
+                        })
+                        .collect(),
+                    vec![
+                        Arc::new(Int64Array::from_iter_values(ids)),
+                        Arc::new(Int64Array::from_iter_values(ids.iter().map(|id| id / 2))),
+                        Arc::new(Int64Array::from_iter_values(ids.iter().map(|id| id * 10))),
+                        Arc::new(Int64Array::from_iter_values(ids.iter().map(|id| id % 2))),
+                    ],
+                )
+                .await;
+            fixture
+                .check(
+                    "SELECT category, SUM(CASE WHEN id = 3 THEN flag END) FROM indexed \
+                     WHERE category = 1 GROUP BY category",
+                    requests,
+                )
+                .await;
+            assert_eq!(
+                fixture.rows.scanned_rows.load(AtomicOrdering::Relaxed),
+                scanned_rows,
+                "cover_flag={cover_flag}"
+            );
+        }
+
+        // The worker cannot read a text key column, so this FILTER cannot run as a reducer
+        // filter. Its own request reads the one entity that the key ranges select.
+        let fixture = Fixture::new().await;
+        let rows = [("1234567", 1, 10), ("1234567", 2, 20), ("other", 1, 30)];
+        fixture
+            .install_indexed_table(
+                "tight",
+                vec![
+                    TableColumnConfig::new("entity", DataType::Utf8, false),
+                    TableColumnConfig::new("version", DataType::UInt64, false),
+                    TableColumnConfig::new("v", DataType::Int64, false),
+                ],
+                &["entity", "version"],
+                vec![],
+                rows.iter()
+                    .map(|&(entity, version, v)| KvRow {
+                        values: vec![
+                            CellValue::Utf8(entity.to_string()),
+                            CellValue::UInt64(version),
+                            CellValue::Int64(v),
+                        ],
+                    })
+                    .collect(),
+                vec![
+                    Arc::new(StringArray::from_iter_values(rows.iter().map(|row| row.0))),
+                    Arc::new(UInt64Array::from_iter_values(rows.iter().map(|row| row.1))),
+                    Arc::new(Int64Array::from_iter_values(rows.iter().map(|row| row.2))),
+                ],
+            )
+            .await;
+        fixture
+            .check(
+                "SELECT COUNT(*), SUM(v) FILTER (WHERE entity = '1234567') FROM tight",
+                2,
+            )
+            .await;
+        assert_eq!(fixture.rows.scanned_rows.load(AtomicOrdering::Relaxed), 5);
     }
 
     #[tokio::test]
@@ -3345,7 +3639,7 @@ mod tests {
             "SELECT COUNT(*), SUM(id / (id - 1)) FILTER (WHERE id > 1) FROM orders",
             "SELECT COUNT(*), SUM(v / (v - 1)) FILTER (WHERE v > 1) FROM (SELECT id AS v FROM orders) q",
         ] {
-            fixture.check(sql, 2).await;
+            fixture.check(sql, 1).await;
         }
         fixture.rows.reductions.lock().unwrap().clear();
         for sql in [
@@ -4138,7 +4432,7 @@ mod tests {
     async fn sum_case_one_preserves_null_when_no_rows_contribute() {
         let fixture = Fixture::new().await;
         fixture.check("SELECT SUM(CASE WHEN status = 'missing' THEN 1 END), COUNT(CASE WHEN status = 'missing' THEN 1 END) FROM orders", 1).await;
-        fixture.check("SELECT region, SUM(CASE WHEN status = 'open' THEN 1 END), COUNT(*) FROM orders GROUP BY region ORDER BY region", 2).await;
+        fixture.check("SELECT region, SUM(CASE WHEN status = 'open' THEN 1 END), COUNT(*) FROM orders GROUP BY region ORDER BY region", 1).await;
     }
 
     #[tokio::test]
