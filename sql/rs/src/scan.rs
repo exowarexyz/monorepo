@@ -134,8 +134,9 @@ impl ScanFilter {
 
 /// A DataFusion leaf that reads a table through its primary key or a secondary index.
 ///
-/// Construction fixes column access and index selection. Limit and sort pushdown
-/// clone the scan and share its cached plan.
+/// Construction fixes column access and selects the access path from the filters. Limit and sort
+/// pushdown clone the scan and share its cached plan, except that sort pushdown can move a scan
+/// that returns every row of the table to a covering index whose key order matches the request.
 #[derive(Debug, Clone)]
 pub(crate) struct KvScanExec {
     /// Client for the Store namespace containing the table.
@@ -152,7 +153,7 @@ pub(crate) struct KvScanExec {
     filter: Option<ScanFilter>,
     /// Filter conjuncts evaluated from index entries before base-row lookups.
     cover_filter: Option<ScanFilter>,
-    /// Column access and index selection, shared by every clone of the scan.
+    /// Column access and index selection, shared by every clone that keeps the access path.
     plan: Arc<ScanPlan>,
     /// Direction required by sort pushdown. `None` defaults to forward traversal
     /// without promising an output ordering.
@@ -315,14 +316,18 @@ impl KvScanExec {
         self.direction.unwrap_or(RangeMode::Forward)
     }
 
-    /// Finds a scan direction that satisfies the requested ordering on the selected key.
-    fn order_direction_for_primary_key(&self, order: &LexOrdering) -> Option<RangeMode> {
+    /// Finds a scan direction that satisfies the requested ordering on the key of `index`, or
+    /// on the primary key when `index` is `None`.
+    fn key_order_direction(
+        &self,
+        index: Option<&ResolvedIndexSpec>,
+        order: &LexOrdering,
+    ) -> Option<RangeMode> {
         if self.predicate.contradiction {
             return None;
         }
-        let (key_columns, constant_prefix_len) = if let Some(plan) = &self.plan.index {
+        let (key_columns, constant_prefix_len) = if let Some(spec) = index {
             // Index ordering requires a covering lexicographic scan.
-            let spec = &self.index_specs[plan.spec_idx];
             if spec.layout != IndexLayout::Lexicographic
                 || !self.plan.access.index_covers_required_non_pk(spec)
             {
@@ -444,6 +449,34 @@ impl KvScanExec {
         }
 
         self.model.primary_key_indices.len()
+    }
+
+    /// Plans a full scan of a covering index whose key order satisfies the requested ordering.
+    ///
+    /// Only a scan that returns every row of the table may move to an index. Key constraints
+    /// and filters are planned against the access path the scan already has, and a fetch has
+    /// already chosen rows in the order of that path.
+    fn index_plan_for_order(&self, order: &LexOrdering) -> Option<(Arc<ScanPlan>, RangeMode)> {
+        if self.fetch.is_some() || self.filter.is_some() || !self.predicate.constraints.is_empty() {
+            return None;
+        }
+        self.index_specs
+            .iter()
+            .enumerate()
+            .find_map(|(spec_idx, spec)| {
+                let direction = self.key_order_direction(Some(spec), order)?;
+                let (start, end) = spec.prefix.bounds();
+                let plan = ScanPlan {
+                    access: self.plan.access.clone(),
+                    index: Some(IndexPlan {
+                        spec_idx,
+                        ranges: vec![KeyRange { start, end }],
+                        constrained_prefix_len: 0,
+                        constrained_column_count: 0,
+                    }),
+                };
+                Some((Arc::new(plan), direction))
+            })
     }
 
     pub(crate) fn plan_diagnostics(&self) -> DataFusionResult<AccessPathDiagnostics> {
@@ -607,7 +640,20 @@ impl ExecutionPlan for KvScanExec {
                 inner: Arc::new(self.clone()),
             });
         }
-        let Some(direction) = self.order_direction_for_primary_key(&expressions) else {
+
+        // The access path the scan already has serves the order when its key allows. Otherwise
+        // a scan that returns every row of the table can read a covering index that holds the
+        // order.
+        let chosen = self
+            .plan
+            .index
+            .as_ref()
+            .map(|plan| &self.index_specs[plan.spec_idx]);
+        let Some((plan, direction)) = self
+            .key_order_direction(chosen, &expressions)
+            .map(|direction| (self.plan.clone(), direction))
+            .or_else(|| self.index_plan_for_order(&expressions))
+        else {
             return Ok(SortOrderPushdownResult::Unsupported);
         };
         // Reversing under a fetch would change which rows the limit selects.
@@ -616,6 +662,7 @@ impl ExecutionPlan for KvScanExec {
         }
         Ok(SortOrderPushdownResult::Exact {
             inner: Arc::new(Self {
+                plan,
                 direction: Some(direction),
                 properties: Self::make_properties(self.schema(), Some(expressions)),
                 ..self.clone()
@@ -1181,8 +1228,8 @@ mod tests {
     use datafusion::{
         arrow::{
             array::{
-                ArrayRef, Decimal128Array, FixedSizeBinaryArray, Float64Array, Int64Array,
-                StringArray, TimestampMicrosecondArray, UInt64Array,
+                ArrayRef, Date32Array, Decimal128Array, FixedSizeBinaryArray, Float64Array,
+                Int64Array, StringArray, TimestampMicrosecondArray, UInt64Array,
             },
             compute::SortOptions,
             datatypes::{DataType, TimeUnit},
@@ -2543,6 +2590,173 @@ mod tests {
         fixture
             .check("SELECT rank FROM orders WHERE score = 0.0 ORDER BY rank LIMIT 2")
             .await;
+    }
+
+    /// Builds a table whose index key columns repeat values, with a lexicographic index on each of
+    /// `s`, `d32`, and `u` and a z-order index on `(zx, u)`.
+    async fn sortable_orders(nullable_key: bool) -> Fixture {
+        Fixture::new(
+            vec![
+                column("id", DataType::Int64, nullable_key),
+                column("s", DataType::Utf8, false),
+                column("d32", DataType::Date32, false),
+                column("u", DataType::UInt64, false),
+                column("zx", DataType::Int64, false),
+                column("payload", DataType::Utf8, false),
+            ],
+            &["id"],
+            vec![
+                index("ix_s", &["s"], &[]),
+                index("ix_d32", &["d32"], &[]),
+                index("ix_u", &["u"], &[]),
+                IndexSpec::z_order("ix_z", vec!["zx".into(), "u".into()]).unwrap(),
+            ],
+            vec![
+                Arc::new(Int64Array::from_iter_values(0..12)),
+                Arc::new(StringArray::from(vec![
+                    "b", "a", "c", "a", "b", "d", "a", "c", "e", "b", "a", "f",
+                ])),
+                Arc::new(Date32Array::from(vec![3, 1, 2, 1, 3, 5, 4, 4, 0, 2, 6, 1])),
+                Arc::new(UInt64Array::from(vec![9, 3, 3, 7, 1, 9, 5, 5, 2, 8, 3, 0])),
+                Arc::new(Int64Array::from(vec![4, 2, 2, 8, 6, 4, 0, 0, 1, 7, 3, 5])),
+                Arc::new(StringArray::from(
+                    (0..12).map(|i| format!("p{i}")).collect::<Vec<_>>(),
+                )),
+            ],
+        )
+        .await
+    }
+
+    /// A sort on the key of a covering index reads that index in key order when the scan has
+    /// no filter, so a limit reads only the rows it returns.
+    #[tokio::test]
+    async fn unfiltered_sort_reads_a_covering_index_in_key_order() {
+        let fixture = sortable_orders(false).await;
+        for (sql, index, forward, limit) in [
+            ("SELECT s FROM orders ORDER BY s LIMIT 7", 0, true, Some(7)),
+            (
+                "SELECT s FROM orders ORDER BY s DESC LIMIT 7",
+                0,
+                false,
+                Some(7),
+            ),
+            (
+                "SELECT s, id FROM orders ORDER BY s, id LIMIT 4",
+                0,
+                true,
+                Some(4),
+            ),
+            (
+                "SELECT id, s FROM orders ORDER BY s DESC, id DESC LIMIT 4",
+                0,
+                false,
+                Some(4),
+            ),
+            (
+                "SELECT d32 FROM orders ORDER BY d32 LIMIT 5",
+                1,
+                true,
+                Some(5),
+            ),
+            (
+                "SELECT u FROM orders ORDER BY u DESC LIMIT 3",
+                2,
+                false,
+                Some(3),
+            ),
+            ("SELECT s FROM orders ORDER BY s", 0, true, None),
+        ] {
+            let (scan, rendered) = fixture.scan(sql).await;
+            assert!(
+                !rendered.contains("SortExec"),
+                "{sql} must plan no sort\n{rendered}"
+            );
+            assert_eq!(
+                scan.plan.index.as_ref().map(|plan| plan.spec_idx),
+                Some(index),
+                "{sql} must read the index that holds its order\n{rendered}"
+            );
+            assert_eq!(scan.fetch, limit, "{sql} must carry its limit\n{rendered}");
+            let requests = fixture.check(sql).await;
+            assert!(
+                matches!(
+                    requests.as_slice(),
+                    [Request::Range { start, forward: actual, limit: entries, .. }]
+                    if fixture.index_matches(index, start)
+                        && *actual == forward
+                        && limit.is_none_or(|limit| limit == *entries)
+                ),
+                "{sql} must send one limited index range request, got {:?}",
+                shape(&requests)
+            );
+        }
+    }
+
+    /// A scan keeps its access path when no index can serve the sort or when its rows are
+    /// already chosen by a key constraint, a filter, or a limit.
+    #[tokio::test]
+    async fn sort_keeps_the_access_path_an_index_cannot_replace() {
+        let fixture = sortable_orders(false).await;
+        for (sql, mode) in [
+            // The index lacks a projected column.
+            (
+                "SELECT s, payload FROM orders ORDER BY s LIMIT 3",
+                "primary_key",
+            ),
+            // A z-order key does not sort by its first column.
+            ("SELECT zx FROM orders ORDER BY zx LIMIT 3", "primary_key"),
+            // The index key cannot serve mixed directions.
+            (
+                "SELECT s, id FROM orders ORDER BY s, id DESC LIMIT 3",
+                "primary_key",
+            ),
+            // Key constraints already chose the rows to read. The primary-key range alone
+            // enforces the first one, so its rows must come from that range.
+            (
+                "SELECT s, id FROM orders WHERE id >= 3 ORDER BY s, id LIMIT 2",
+                "primary_key",
+            ),
+            (
+                "SELECT s FROM orders WHERE u = 3 ORDER BY s LIMIT 2",
+                "secondary_index(ix_u, lexicographic)",
+            ),
+            // A filter is evaluated on every row before the sort.
+            (
+                "SELECT s FROM orders WHERE upper(s) <> 'A' ORDER BY s LIMIT 2",
+                "primary_key",
+            ),
+        ] {
+            let (_, rendered) = fixture.scan(sql).await;
+            assert!(
+                rendered.contains("SortExec") && rendered.contains(&format!("mode={mode}, ")),
+                "{sql} must sort rows read through {mode}\n{rendered}"
+            );
+            fixture.check(sql).await;
+        }
+
+        // The inner limit takes the first five rows in primary-key order. SQL allows any five, so
+        // the result is compared with those five and not with the reference table.
+        let sql = "SELECT s FROM (SELECT s FROM orders LIMIT 5) ORDER BY s";
+        let (scan, rendered) = fixture.scan(sql).await;
+        assert!(
+            rendered.contains("SortExec") && scan.plan.index.is_none() && scan.fetch == Some(5),
+            "a scan with a fetch must keep its access path\n{rendered}"
+        );
+        assert_eq!(
+            values(fixture.context.datafusion(), sql).await.unwrap(),
+            ["a", "a", "b", "b", "c"].map(|s| vec![ScalarValue::Utf8(Some(s.into()))]),
+            "{sql}"
+        );
+
+        // A key column declared nullable gives the index no proven order.
+        let fixture = sortable_orders(true).await;
+        let sql = "SELECT s FROM orders ORDER BY s LIMIT 7";
+        let (_, rendered) = fixture.scan(sql).await;
+        assert!(
+            rendered.contains("SortExec") && rendered.contains("mode=primary_key, "),
+            "a nullable key column must keep the sort\n{rendered}"
+        );
+        fixture.check(sql).await;
     }
 
     #[tokio::test]

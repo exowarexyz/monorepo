@@ -24,8 +24,10 @@ entries and base rows by the rows still needed. A request that returns its full 
 without meeting the `LIMIT` ends that sizing, and the scan reads the rest of the range
 without a limit and in full lookup batches. Compatible lexicographic covering indexes
 also serve DataFusion's sort and `LIMIT` pushdown, including reverse traversal after a
-fixed equality prefix. Equality on a `Float64` zero matches both signed zeros, so it does
-not fix a prefix.
+fixed equality prefix. A scan with no filter also moves to such an index when the index
+key order matches a requested order that the primary key cannot serve, so
+`ORDER BY s LIMIT 7` over an index on `s` reads seven index entries. Equality on a
+`Float64` zero matches both signed zeros, so it does not fix a prefix.
 
 ## Predicate pushdown
 
@@ -176,9 +178,11 @@ returns partial sums that DataFusion merges. This is the plan to aim for with
 selective grouped aggregates.
 
 `mode=primary_key` with `predicate=<none>` or `full_scan_like=true`, or an unexpectedly
-large `ranges` count, signals a broad scan. To improve it, add or choose a more
-selective index, cover the columns the query reads so the index can answer it alone,
-or rewrite the predicate so more of it constrains leading key columns.
+large `ranges` count, signals a broad scan. So does a secondary index with
+`constrained_prefix=0` and `fetch=None`, the plan for a sort that reads a whole index in
+key order. To improve a broad scan, add or choose a more selective index, cover the
+columns the query reads so the index can answer it alone, or rewrite the predicate so
+more of it constrains leading key columns.
 
 ## Key layout
 
