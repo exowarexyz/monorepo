@@ -3,6 +3,7 @@ import { Code, createClient } from '@connectrpc/connect';
 import { encodeEnvelope } from '@connectrpc/connect/protocol';
 import { Client, createTransport } from '../src/client';
 import { HttpError } from '../src/error';
+import { RetryInfoSchema } from '../src/gen/ts/google/rpc/error_details_pb';
 import { SubscribeResponseSchema } from '../src/gen/ts/log/v1/stream_pb';
 import * as query from '../src/gen/ts/store/v1/query_pb';
 import { StoreClient, type StoreBatch } from '../src/store';
@@ -229,5 +230,43 @@ describe('retry timeout', () => {
         expect(timeouts[0]).toBeGreaterThan(4_900);
         expect(timeouts[1]).toBeLessThanOrEqual(4_700);
         expect(timeouts[1]).toBeGreaterThan(0);
+    });
+});
+
+describe('opening errors', () => {
+    // Connect starts the call when the stream is created, before the caller reads it.
+    test('reach a caller who reads the stream later, without an unhandled rejection', async () => {
+        mockFetch(() => streamResponse([], 'invalid_argument'));
+        const unhandled = jest.fn();
+        process.on('unhandledRejection', unhandled);
+        try {
+            const stream = new Client(url, options(1)).query.range({});
+            await new Promise((resolve) => setTimeout(resolve, 50));
+            await expect(drain(stream)).rejects.toMatchObject({ code: Code.InvalidArgument });
+            await new Promise((resolve) => setImmediate(resolve));
+            expect(unhandled).not.toHaveBeenCalled();
+        } finally {
+            process.off('unhandledRejection', unhandled);
+        }
+    });
+
+    test('wait for the RetryInfo hint before retrying', async () => {
+        const hint = toBinary(RetryInfoSchema, create(RetryInfoSchema, { retryDelay: { nanos: 300_000_000 } }));
+        const error = {
+            code: 'aborted',
+            message: 'minimum consistency token is not yet visible',
+            details: [{ type: RetryInfoSchema.typeName, value: Buffer.from(hint).toString('base64') }],
+        };
+        const { fetch } = mockFetch(
+            () => new Response(encodeEnvelope(2, new TextEncoder().encode(JSON.stringify({ error }))), {
+                headers: { 'content-type': 'application/connect+proto' },
+            }),
+            () => streamResponse(frames.range),
+        );
+        const started = performance.now();
+        await drain(new Client(url, { ...options(2), retry: { maxAttempts: 2, initialBackoffMs: 0, maxBackoffMs: 2_000 } })
+            .query.range({}));
+        expect(performance.now() - started).toBeGreaterThanOrEqual(290);
+        expect(fetch).toHaveBeenCalledTimes(2);
     });
 });

@@ -1,5 +1,13 @@
 import type { DescMethod } from '@bufbuild/protobuf';
-import { createClient, type Client as ConnectClient, type Interceptor, Code, ConnectError } from '@connectrpc/connect';
+import type { Duration } from '@bufbuild/protobuf/wkt';
+import {
+    createClient,
+    type Client as ConnectClient,
+    type Interceptor,
+    type StreamResponse,
+    Code,
+    ConnectError,
+} from '@connectrpc/connect';
 import { createConnectTransport } from '@connectrpc/connect-web';
 import { CookieJar, fetchWithCookieJar } from './cookies.js';
 import { environmentApiKey, resolveCredential, type Credential } from './credential.js';
@@ -79,7 +87,11 @@ function putRetryHint(err: unknown): number | undefined {
         retries.length !== 1
     ) return undefined;
 
-    const duration = retries[0].retryDelay;
+    return durationMs(retries[0].retryDelay);
+}
+
+// Returns undefined for a missing, zero or malformed duration.
+function durationMs(duration: Duration | undefined): number | undefined {
     if (
         duration === undefined ||
         duration.seconds < 0n ||
@@ -94,6 +106,32 @@ function putRetryHint(err: unknown): number | undefined {
     return Number(duration.seconds * 1000n) + Math.ceil(duration.nanos / 1_000_000);
 }
 
+// Waits at least the server's hint, plus jitter of up to one backoff step, within maxBackoffMs.
+function hintedDelay(hint: number, attempt: number, config: RetryConfig): number {
+    const backoff = cappedBackoff(attempt, config);
+    // A negative or NaN backoff gives NaN, which `retryDelay` treats as giving up.
+    if (!(backoff >= 0)) return NaN;
+    const minimum = Math.min(Math.max(hint, backoff), config.maxBackoffMs);
+    const maximum = Math.min(config.maxBackoffMs, minimum + backoff);
+    return minimum + (maximum - minimum) * Math.random();
+}
+
+// Returns how long to wait before retrying after `err`, or undefined to give up.
+function retryDelay(err: unknown, attempt: number, isPut: boolean, config: RetryConfig): number | undefined {
+    if (!(err instanceof ConnectError)) return undefined;
+    let delay: number | undefined;
+    if (isPut) {
+        // Put retries only an admission rejection, which the server did not apply.
+        const hint = putRetryHint(err);
+        if (hint !== undefined && hint <= config.maxBackoffMs) delay = hintedDelay(hint, attempt, config);
+    } else if (RETRYABLE_CODES.has(err.code)) {
+        // A RetryInfo hint, such as the 1 s on CONSISTENCY_NOT_READY, sets the wait, as in the Rust SDK.
+        const hint = durationMs(err.findDetails(RetryInfoSchema)[0]?.retryDelay);
+        delay = hint === undefined ? retryBackoffDelay(attempt, config) : hintedDelay(hint, attempt, config);
+    }
+    return delay !== undefined && Number.isFinite(delay) && delay >= 0 ? delay : undefined;
+}
+
 function headerDeadline(header: Headers): number | undefined {
     const timeout = header.get('connect-timeout-ms');
     if (timeout === null || !/^\d+$/.test(timeout)) return undefined;
@@ -101,11 +139,33 @@ function headerDeadline(header: Headers): number | undefined {
     return Number.isFinite(timeoutMs) && timeoutMs >= 0 ? performance.now() + timeoutMs : undefined;
 }
 
-function checkCancellation(signal: AbortSignal, deadline: number | undefined): void {
-    if (signal.aborted) throw ConnectError.from(signal.reason, Code.Canceled);
+function cancellation(signal: AbortSignal, deadline: number | undefined): ConnectError | undefined {
+    if (signal.aborted) return ConnectError.from(signal.reason, Code.Canceled);
     if (deadline !== undefined && performance.now() >= deadline) {
-        throw new ConnectError('the operation timed out', Code.DeadlineExceeded);
+        return new ConnectError('the operation timed out', Code.DeadlineExceeded);
     }
+    return undefined;
+}
+
+function checkCancellation(signal: AbortSignal, deadline: number | undefined): void {
+    const err = cancellation(signal, deadline);
+    if (err) throw err;
+}
+
+// Reads the first frame before the response is returned, so an error raised as the stream opens can
+// still be retried. A retry then cannot repeat rows or groups the caller has seen.
+async function withFirstFrame(response: StreamResponse, requireFrame: boolean): Promise<StreamResponse> {
+    const iterator = response.message[Symbol.asyncIterator]();
+    const first = await iterator.next();
+    if (first.done && requireFrame) throw new ConnectError('reduction stream returned no frames', Code.Internal);
+    return {
+        ...response,
+        message: (async function* () {
+            if (first.done) return;
+            yield first.value;
+            yield* { [Symbol.asyncIterator]: () => iterator };
+        })(),
+    };
 }
 
 function waitForRetry(delay: number, signal: AbortSignal, deadline: number | undefined): Promise<void> {
@@ -154,6 +214,7 @@ function makeRetryInterceptor(config: RetryConfig): Interceptor {
         if (req.stream) {
             // Each retry must serialize the same input after Connect consumes its request iterator.
             // The fetch transport sends only server-streaming calls, whose input is one message.
+            // Connect's `createAsyncIterable` can be read only once, so this iterable is hand-written.
             const input = await req.message[Symbol.asyncIterator]().next();
             req = {
                 ...req,
@@ -164,60 +225,39 @@ function makeRetryInterceptor(config: RetryConfig): Interceptor {
                 },
             };
         }
-        let attempt = 1;
-        for (;;) {
+        for (let attempt = 1; ; attempt++) {
             checkCancellation(req.signal, deadline);
             if (deadline !== undefined) {
-                // A retry tells the server only the time left, not the caller's original timeout.
+                // Each attempt tells the server only the time left, so a retry doesn't resend the
+                // caller's original timeout.
                 req.header.set('connect-timeout-ms', String(Math.max(Math.ceil(deadline - performance.now()), 1)));
             }
+            let opened: StreamResponse | undefined;
             try {
                 const response = await next(req);
-                if (prefetch && response.stream) {
-                    // Before any result is exposed, a retry cannot duplicate delivered rows or groups.
-                    const iterator = response.message[Symbol.asyncIterator]();
-                    const first = await iterator.next();
-                    if (first.done && key === REDUCE_KEY) {
-                        throw new ConnectError('reduction stream returned no frames', Code.Internal);
-                    }
+                if (!prefetch || !response.stream) return response;
+                opened = response;
+                return await withFirstFrame(response, key === REDUCE_KEY);
+            } catch (err) {
+                const failure = cancellation(req.signal, deadline) ?? err;
+                const delay = failure === err && attempt < maxAttempts
+                    ? retryDelay(err, attempt, isPut, config)
+                    : undefined;
+                if (delay !== undefined) {
+                    await waitForRetry(delay, req.signal, deadline);
+                    continue;
+                }
+                // Connect starts a stream before the caller reads it, so a rejection here may have no
+                // handler yet and crash Node. A stream that opened reports its error when read instead.
+                if (opened) {
                     return {
-                        ...response,
+                        ...opened,
                         message: (async function* () {
-                            if (first.done) return;
-                            yield first.value;
-                            yield* { [Symbol.asyncIterator]: () => iterator };
+                            throw failure;
                         })(),
                     };
                 }
-                return response;
-            } catch (err) {
-                checkCancellation(req.signal, deadline);
-                if (isPut) {
-                    const hint = putRetryHint(err);
-                    if (!(attempt < maxAttempts) || hint === undefined || !(hint <= config.maxBackoffMs)) throw err;
-
-                    const backoff = cappedBackoff(attempt, config);
-                    if (!Number.isFinite(backoff) || backoff < 0) throw err;
-
-                    const minimum = Math.max(hint, backoff);
-                    const maximum = Math.min(config.maxBackoffMs, minimum + backoff);
-                    const delay = minimum + (maximum - minimum) * Math.random();
-                    if (!Number.isFinite(delay)) throw err;
-
-                    await waitForRetry(delay, req.signal, deadline);
-                    attempt++;
-                    continue;
-                }
-                if (
-                    attempt < maxAttempts &&
-                    err instanceof ConnectError &&
-                    RETRYABLE_CODES.has(err.code)
-                ) {
-                    await waitForRetry(retryBackoffDelay(attempt, config), req.signal, deadline);
-                    attempt++;
-                    continue;
-                }
-                throw err;
+                throw failure;
             }
         }
     };

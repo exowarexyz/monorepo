@@ -121,14 +121,14 @@ retried. Direct `client.ingest.put(request, options)` calls accept a `timeoutMs`
 or abort `signal` covering attempts and backoff.
 
 Other calls retry `aborted`, `unavailable`, and `resource_exhausted` errors,
-including those mapped from an HTTP status such as 503. Range, GetMany, and
-Reduce also retry such an error when it arrives before their first frame, so
-these calls resolve, and Connect's `onHeader` callback runs, only once that
-frame arrives. An error after the first
-frame, or inside a Subscribe stream, goes to the caller, so a retry never
-repeats results the caller has seen. Network failures are not retried. A call's
-`timeoutMs` or abort `signal` covers every attempt and backoff, and each retry
-sends the server only the time left.
+including those mapped from an HTTP status such as 503, and wait as long as the
+server's `RetryInfo` asks, up to `maxBackoffMs`. Range, GetMany, and Reduce also
+retry such an error when it arrives before their first frame. To do this they
+wait for that frame before returning, so Connect's `onHeader` callback runs only
+then. Errors after the first frame, and errors inside a Subscribe stream, go to
+the caller, so a retry never repeats results the caller has seen. Network
+failures are not retried. A call's `timeoutMs` or abort `signal` covers every
+attempt and backoff, and each retry sends the server only the time left.
 
 ## Status
 
