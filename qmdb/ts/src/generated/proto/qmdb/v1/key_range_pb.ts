@@ -46,7 +46,8 @@ export type GetRangeRequest = Message<"qmdb.v1.GetRangeRequest"> & {
   tip: bigint;
 
   /**
-   * Minimum Store sequence for checking publication of the requested watermark.
+   * Minimum Store sequence for checking that the published watermark covers
+   * the requested tip.
    *
    * @generated from field: optional uint64 min_sequence_number = 5;
    */
