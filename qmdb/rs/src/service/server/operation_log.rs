@@ -173,6 +173,7 @@ struct ReadyBatch<F: Family> {
     /// per-batch sequence here or the reconnect cursor would jump past
     /// unread siblings.
     batch_sequence: u64,
+    /// Encoded operations that passed the subscription's filters, in location order.
     matched: Vec<(Location<F>, Bytes)>,
 }
 

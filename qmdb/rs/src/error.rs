@@ -98,6 +98,9 @@ impl From<crate::request::InvalidLocations> for QmdbError {
     }
 }
 
+/// Errors returned by this crate. A read at a tip that is not published yet fails with
+/// [`Self::NoPublishedWatermark`] when no watermark has been published and with
+/// [`Self::WatermarkTooLow`] when the tip is above the published watermark.
 #[derive(Debug, thiserror::Error)]
 pub enum QmdbError {
     #[error(transparent)]
@@ -115,12 +118,8 @@ pub enum QmdbError {
     },
     #[error("duplicate key in proof request: {key:?}")]
     DuplicateRequestedKey { key: Vec<u8> },
-    /// The requested tip cannot be read because no watermark has been published. The other
-    /// not-yet-published outcome is [`Self::WatermarkTooLow`].
     #[error("no watermark has been published; requested tip {tip}")]
     NoPublishedWatermark { tip: u64 },
-    /// The requested tip is above the published watermark. The other not-yet-published outcome
-    /// is [`Self::NoPublishedWatermark`].
     #[error("requested tip {tip} is above published watermark {watermark}")]
     WatermarkTooLow { tip: u64, watermark: u64 },
     #[error("requested key not found at tip {tip}: {key:?}")]
