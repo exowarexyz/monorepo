@@ -819,6 +819,49 @@ async fn connect_query_enforces_sequence_floor_and_returns_evaluated_sequence() 
 }
 
 #[tokio::test]
+async fn connect_query_reports_the_commit_sequence_of_an_insert() {
+    let store = common::local_store_client().await;
+    let server = Arc::new(SqlServer::new(items_schema(&store)).expect("the server must build"));
+    let (client, handle) = serve_sql(server).await;
+    let query = async |sql: &str, min_sequence_number: Option<u64>| {
+        client
+            .query(QueryRequest {
+                sql: sql.to_string(),
+                min_sequence_number,
+                ..Default::default()
+            })
+            .await
+            .expect(sql)
+            .into_view()
+            .to_owned_message()
+    };
+
+    // The response carries the sequence of the batch the INSERT committed.
+    let sequence = query("INSERT INTO items VALUES (1, 'one')", None)
+        .await
+        .sequence_number
+        .expect("an INSERT must report its commit sequence");
+    let batch = store
+        .unprefixed()
+        .stream()
+        .get_batch(sequence)
+        .await
+        .expect("the Store log must be readable")
+        .expect("the commit must be in the Store log");
+    assert_eq!(batch.entries.len(), 1, "the INSERT must write one row");
+
+    // A read that requires the commit sees the row.
+    let response = query("SELECT value FROM items WHERE id = 1", Some(sequence)).await;
+    assert_eq!(result_row_count(&response.results), 1);
+    assert!(response.sequence_number >= Some(sequence));
+
+    // An INSERT that writes no rows reports no sequence.
+    let response = query("INSERT INTO items SELECT 2, 'two' WHERE false", None).await;
+    assert_eq!(response.sequence_number, None);
+    handle.abort();
+}
+
+#[tokio::test]
 async fn connect_query_preserves_configured_tables_and_views() {
     let store_client = common::local_store_client().await;
     let schema = KvSchema::new(store_client.unprefixed())

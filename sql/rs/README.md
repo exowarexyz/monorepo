@@ -271,8 +271,12 @@ snapshot, so reads within one statement can observe different sequences at or
 above that minimum.
 
 `SqlContext::new` starts a monotonic session with no minimum and shares it across
-the context's statements and clones. To read your own writes, start the session
-at the sequence returned by `flush`, as in [Getting started](#getting-started).
+the context's statements and clones. An `INSERT` records its commit sequence in
+the session of the context that runs it, as a read records the sequence it
+observes. A monotonic session then reads at or above the commit, and a fixed
+session reports it through `evaluated_sequence` and keeps its minimum. Writes
+through a `BatchWriter` are not recorded. To read them, start the session at the
+sequence returned by `flush`, as in [Getting started](#getting-started).
 You can also raise the minimum for a single query by deriving a context that
 shares the catalog and observations:
 
@@ -312,8 +316,10 @@ let app = axum::Router::new().fallback_service(sql_stack(server));
 `Query` runs one SQL statement and returns an Arrow IPC stream that Rust clients
 can decode with Arrow's `StreamReader`. Its Store reads share a new monotonic
 session starting at the request's optional minimum sequence. The response also
-reports the highest Store sequence observed, omitting it when the statement read
-nothing from the Store. A result whose encoded stream exceeds 256 MiB fails with
+reports the highest Store sequence the statement observed, including the commit
+of an `INSERT`. A later request can pass that sequence as its minimum to read
+the new rows. It is absent when the statement neither read from nor wrote to
+the Store. A result whose encoded stream exceeds 256 MiB fails with
 `RESOURCE_EXHAUSTED`.
 
 `Query` accepts queries and `EXPLAIN`, `INSERT INTO` registered tables, `SET`

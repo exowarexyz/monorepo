@@ -759,8 +759,9 @@ const prefixedClientBindings = new WeakMap<PrefixedStoreClient, PrefixedClientBi
  * A read session with a fixed or monotonic minimum Store sequence.
  *
  * Fixed sessions keep their configured floor. Monotonic sessions raise their floor to the highest
- * sequence observed by any clone. An absent floor sends no requirement; zero is an explicit floor.
- * An initial floor is a requirement, not an observation.
+ * sequence observed by any clone. An absent floor sends no requirement, and zero is an explicit
+ * floor. An initial floor is a requirement, not an observation. A write is observed only when its
+ * commit sequence is recorded with `observeWrite`.
  */
 export class ReadSession {
     private policy: ReadPolicy = 'monotonic';
@@ -777,12 +778,12 @@ export class ReadSession {
         this.configuredFloor = normalizeMinSequenceNumber(initialFloor);
     }
 
-    /** Create a session whose floor advances to the highest observed read sequence. */
+    /** Create a session whose floor advances to the highest observed sequence. */
     static monotonic(store: PrefixedStoreClient, initialFloor?: bigint): ReadSession {
         return ReadSession.fromStore(store, initialFloor, 'monotonic');
     }
 
-    /** Create a session whose read floor stays fixed as responses are observed. */
+    /** Create a session whose read floor stays fixed as sequences are observed. */
     static fixed(store: PrefixedStoreClient, floor?: bigint): ReadSession {
         return ReadSession.fromStore(store, floor, 'fixed');
     }
@@ -811,6 +812,23 @@ export class ReadSession {
     /** Highest Store sequence observed by this session. */
     evaluatedSequence(): bigint | undefined {
         return this.state.sequence;
+    }
+
+    /**
+     * Record the sequence a write committed at, with the same effect as a read observation.
+     *
+     * A monotonic session requires the sequence for reads started afterwards. A fixed session keeps
+     * its floor and reports the sequence through `evaluatedSequence()`. Clones share the
+     * observation.
+     */
+    observeWrite(sequenceNumber: bigint): void {
+        if (typeof sequenceNumber !== 'bigint') {
+            throw new TypeError('write sequence number must be a bigint');
+        }
+        if (sequenceNumber < 0n || sequenceNumber > MAX_U64) {
+            throw new RangeError('write sequence number must fit in u64');
+        }
+        this.observeSequence(sequenceNumber);
     }
 
     /** Return a handle that shares observations and retains this handle's policy and floor. */

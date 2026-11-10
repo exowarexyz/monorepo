@@ -24,7 +24,7 @@ use exoware_sdk::{
     keys::Key,
     kv_codec::{StoredRow, StoredValue},
     limits::{PutTooLarge, MAX_PUT_ENTRIES, MAX_REQUEST_MESSAGE_BYTES},
-    PrefixedStoreClient, StoreWriteBatch, StoreWriteBatchUpload,
+    PrefixedStoreClient, ReadSession, StoreWriteBatch, StoreWriteBatchUpload,
 };
 use futures::{future::BoxFuture, TryStreamExt};
 use std::{
@@ -294,7 +294,8 @@ impl StoreWriteBatchUpload for BatchWriter {
 ///
 /// Stages each input row with its index entries in one Store write batch while it reads the
 /// input, and commits the batch as one atomic write after the input ends. Reports the number of
-/// input rows written.
+/// input rows written. When the executing context has a `ReadSession`, the commit is recorded
+/// in it as an observation. An INSERT that writes no rows sends and records nothing.
 ///
 /// The batch must fit the Store's limits for one write. Once it holds more than
 /// `MAX_PUT_ENTRIES` entries or `MAX_REQUEST_MESSAGE_BYTES` encoded bytes, the sink stops
@@ -322,7 +323,7 @@ impl DataSink for KvIngestSink {
     async fn write_all(
         &self,
         mut data: SendableRecordBatchStream,
-        _context: &Arc<TaskContext>,
+        context: &Arc<TaskContext>,
     ) -> DataFusionResult<u64> {
         let store = &self.table.store;
         let mut staged = StoreWriteBatch::new();
@@ -352,10 +353,13 @@ impl DataSink for KvIngestSink {
         }
 
         if !staged.is_empty() {
-            staged
+            let sequence_number = staged
                 .commit(store.client())
                 .await
                 .map_err(|e| DataFusionError::External(Box::new(e)))?;
+            if let Some(session) = context.session_config().get_extension::<ReadSession>() {
+                session.observe_write(sequence_number);
+            }
         }
         Ok(logical_rows_written)
     }
@@ -885,12 +889,12 @@ mod tests {
             datatypes::{DataType, Field, Schema},
         },
         logical_expr::{create_udf, ColumnarValue, Volatility},
-        prelude::SessionConfig,
+        prelude::{SessionConfig, SessionContext as DataFusionContext},
     };
     use exoware_sdk::{
         kv_codec::decode_stored_row,
         limits::{PutTooLarge, MAX_PUT_ENTRIES, MAX_REQUEST_MESSAGE_BYTES},
-        RetryConfig, StoreClient, StoreKeyPrefix,
+        ReadSession, RetryConfig, StoreClient, StoreKeyPrefix,
     };
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -1527,6 +1531,56 @@ mod tests {
                 );
                 assert_eq!(store.puts(), puts, "a rejected INSERT must send no Put");
             }
+        }
+    }
+
+    #[tokio::test]
+    async fn insert_records_its_commit_as_an_observation() {
+        // Zero is a real commit sequence and is recorded like any other.
+        for sequence_number in [0, 11] {
+            let store = AckingStore::new(sequence_number);
+            let observed_after = async |ctx: &SqlContext, sql: &str| {
+                ctx.sql(sql).await.unwrap().collect().await.unwrap();
+                let session = ctx.read_session();
+                (session.evaluated_sequence(), session.min_sequence_number())
+            };
+
+            // A monotonic session requires the commit for later reads.
+            let ctx = store.items_context(|builder| builder);
+            assert_eq!(
+                observed_after(&ctx, "INSERT INTO items VALUES (1, 'a')").await,
+                (Some(sequence_number), Some(sequence_number))
+            );
+
+            // A fixed session reports the commit and keeps its floor.
+            let fixed = ReadSession::fixed(store.client(), Some(5));
+            let ctx = store.items_context(|builder| builder.with_read_session(fixed));
+            assert_eq!(
+                observed_after(&ctx, "INSERT INTO items VALUES (2, 'b')").await,
+                (Some(sequence_number), Some(5))
+            );
+
+            // An INSERT that writes no rows sends nothing and records nothing.
+            let ctx = store.items_context(|builder| builder);
+            assert_eq!(
+                observed_after(&ctx, "INSERT INTO items SELECT 3, 'c' WHERE false").await,
+                (None, None)
+            );
+            assert_eq!(store.puts(), 2);
+
+            // A DataFusion context without a read session still commits.
+            let plain = DataFusionContext::new();
+            plain
+                .register_table("items", ctx.table_provider("items").await.unwrap())
+                .unwrap();
+            plain
+                .sql("INSERT INTO items VALUES (4, 'd')")
+                .await
+                .unwrap()
+                .collect()
+                .await
+                .unwrap();
+            assert_eq!(store.puts(), 3);
         }
     }
 
