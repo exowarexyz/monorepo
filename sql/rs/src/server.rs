@@ -361,23 +361,37 @@ impl Service for SqlConnect {
                 .map_err(datafusion_error_to_connect)?;
             verify_remote_plan(&plan).map_err(datafusion_error_to_connect)?;
 
-            // Session commands must outlive the request. Data reads keep the request's floor.
-            let execution_ctx = match &plan {
+            // Session commands must outlive the request. Data reads, including the statement an
+            // EXECUTE runs, keep the request's floor. A failure to dispatch a session command or an
+            // EXECUTE is the caller's error and maps through `session_command_error_to_connect`.
+            // CREATE FUNCTION runs the embedder's function factory, so its errors keep the general
+            // mapping.
+            let (execution_ctx, session_command) = match &plan {
                 LogicalPlan::Statement(
                     Statement::SetVariable(_)
                     | Statement::ResetVariable(_)
                     | Statement::Prepare(_)
                     | Statement::Deallocate(_),
                 )
-                | LogicalPlan::Ddl(
-                    DdlStatement::CreateFunction(_) | DdlStatement::DropFunction(_),
-                ) => server.ctx.datafusion(),
-                _ => ctx.datafusion(),
+                | LogicalPlan::Ddl(DdlStatement::DropFunction(_)) => {
+                    (server.ctx.datafusion(), true)
+                }
+                LogicalPlan::Ddl(DdlStatement::CreateFunction(_)) => {
+                    (server.ctx.datafusion(), false)
+                }
+                LogicalPlan::Statement(Statement::Execute(_)) => (ctx.datafusion(), true),
+                _ => (ctx.datafusion(), false),
             };
             let df = execution_ctx
                 .execute_logical_plan(plan)
                 .await
-                .map_err(datafusion_error_to_connect)?;
+                .map_err(|error| {
+                    if session_command {
+                        session_command_error_to_connect(error)
+                    } else {
+                        datafusion_error_to_connect(error)
+                    }
+                })?;
             let batches = df
                 .execute_stream()
                 .await
@@ -722,6 +736,27 @@ fn client_error_to_connect(err: &exoware_sdk::ClientError) -> ConnectError {
     } else {
         ConnectError::internal(err.to_string())
     }
+}
+
+/// Maps an error raised while a session command such as `SET`, `EXECUTE`, or `DROP FUNCTION` is
+/// dispatched, before any statement runs.
+///
+/// Such an error comes from the caller's request, for example an unknown name or a bad setting
+/// value, so it is `invalid_argument` where the general mapping says `internal`. A failed Store
+/// call keeps its own code, and a DataFusion internal error marks a bug and stays `internal`.
+/// `CREATE FUNCTION` does not use this mapping, because its dispatch runs the embedder's function
+/// factory and the factory's faults are the server's.
+fn session_command_error_to_connect(err: DataFusionError) -> ConnectError {
+    let keeps_code = match err.find_root() {
+        DataFusionError::Internal(_) => true,
+        DataFusionError::External(external) => external.is::<exoware_sdk::ClientError>(),
+        _ => false,
+    };
+    let error = datafusion_error_to_connect(err);
+    if keeps_code || error.code != connectrpc::ErrorCode::Internal {
+        return error;
+    }
+    ConnectError::invalid_argument(error.message.unwrap_or_default())
 }
 
 /// Rejects a string field whose length, in Unicode code points as buf.validate counts it, is
@@ -1646,6 +1681,37 @@ mod tests {
         assert_eq!(
             error.message.as_deref(),
             Some("put has 3 entries, exceeding the limit of 2")
+        );
+    }
+
+    #[test]
+    fn failed_store_calls_keep_their_codes_in_session_commands() {
+        for store_error in [
+            exoware_sdk::ClientError::WireFormat("truncated frame".into()),
+            exoware_sdk::ClientError::Rpc(Box::new(ConnectError::internal("store fault"))),
+        ] {
+            let error = DataFusionError::External(Box::new(store_error)).context("creating f");
+            assert_eq!(
+                session_command_error_to_connect(error).code,
+                connectrpc::ErrorCode::Internal
+            );
+        }
+    }
+
+    #[test]
+    fn internal_errors_stay_internal_in_session_commands() {
+        let bug = DataFusionError::Internal("unexpected plan".into()).context("preparing p");
+        assert_eq!(
+            session_command_error_to_connect(bug).code,
+            connectrpc::ErrorCode::Internal
+        );
+
+        // The general mapping makes an unknown name internal, but in a session command it is the
+        // caller's error.
+        let unknown = DataFusionError::Execution("Prepared statement 'p' does not exist".into());
+        assert_eq!(
+            session_command_error_to_connect(unknown).code,
+            connectrpc::ErrorCode::InvalidArgument
         );
     }
 

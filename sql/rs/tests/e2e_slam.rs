@@ -10,12 +10,16 @@ use connectrpc::{client::ClientConfig, ConnectError, ErrorCode};
 use datafusion::{
     arrow::{
         array::{ArrayRef, AsArray, Int64Array},
-        datatypes::{DataType, Int64Type},
+        datatypes::{DataType, Field, Int64Type, Schema, SchemaRef},
         ipc::reader::StreamReader,
         record_batch::RecordBatch,
     },
-    common::ScalarValue,
+    catalog::{Session, TableProvider},
+    common::{exec_err, Result as DataFusionResult, ScalarValue},
     datasource::{MemTable, ViewTable},
+    execution::context::{FunctionFactory, RegisterFunction, SessionState},
+    logical_expr::{create_udf, CreateFunction, Expr, TableType, Volatility},
+    physical_plan::ExecutionPlan,
 };
 use exoware_sdk::{
     proto::PreferZstdHttpClient, transport::set_tcp_nodelay, StoreClient, StoreKeyPrefix,
@@ -529,7 +533,8 @@ async fn connect_query_rejects_writes_other_than_insert() {
         let error = query_error(&client, sql).await;
         assert_eq!(error.code, ErrorCode::InvalidArgument, "{sql}: {error:?}");
     }
-    query_error(&client, "EXECUTE remove_id(1)").await;
+    let error = query_error(&client, "EXECUTE remove_id(1)").await;
+    assert_eq!(error.code, ErrorCode::InvalidArgument, "{error:?}");
     assert_eq!(
         sorted_ids(server.context(), "configured_ids").await,
         [1, 2, 3]
@@ -561,6 +566,106 @@ async fn connect_query_reports_invalid_values_as_invalid_argument() {
     ] {
         let error = query_error(&client, sql).await;
         assert_eq!(error.code, ErrorCode::InvalidArgument, "{sql}: {error:?}");
+    }
+    handle.abort();
+}
+
+#[tokio::test]
+async fn connect_query_reports_failed_session_commands_as_invalid_argument() {
+    let schema = KvSchema::new(common::local_store_client().await.unprefixed());
+    let server = Arc::new(SqlServer::new(schema).expect("the server must build"));
+    let (client, handle) = serve_sql(server).await;
+    query_row_count(&client, "PREPARE taken AS SELECT 1").await;
+
+    // Each command gives a setting a bad value, reuses a name, or names nothing that exists.
+    for sql in [
+        "SET datafusion.execution.batch_size = 'abc'",
+        "PREPARE taken AS SELECT 2",
+        "EXECUTE nope",
+        "DEALLOCATE nope",
+        "DROP FUNCTION nope",
+    ] {
+        let error = query_error(&client, sql).await;
+        assert_eq!(error.code, ErrorCode::InvalidArgument, "{sql}: {error:?}");
+    }
+    handle.abort();
+}
+
+/// A function factory whose backend is down, so every `CREATE FUNCTION` fails on the server.
+#[derive(Debug)]
+struct UnavailableFunctionFactory;
+
+#[async_trait::async_trait]
+impl FunctionFactory for UnavailableFunctionFactory {
+    async fn create(
+        &self,
+        _state: &SessionState,
+        _statement: CreateFunction,
+    ) -> DataFusionResult<RegisterFunction> {
+        exec_err!("function backend is unavailable")
+    }
+}
+
+/// A table whose source is down, so building a plan that scans it fails on the server.
+#[derive(Debug)]
+struct UnavailableTable;
+
+#[async_trait::async_trait]
+impl TableProvider for UnavailableTable {
+    fn schema(&self) -> SchemaRef {
+        Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, false)]))
+    }
+
+    fn table_type(&self) -> TableType {
+        TableType::Base
+    }
+
+    async fn scan(
+        &self,
+        _state: &dyn Session,
+        _projection: Option<&Vec<usize>>,
+        _filters: &[Expr],
+        _limit: Option<usize>,
+    ) -> DataFusionResult<Arc<dyn ExecutionPlan>> {
+        exec_err!("table source is unavailable")
+    }
+}
+
+#[tokio::test]
+async fn connect_query_keeps_server_faults_around_session_commands_internal() {
+    let schema = KvSchema::new(common::local_store_client().await.unprefixed());
+    let server = Arc::new(SqlServer::new(schema).expect("the server must build"));
+    let ctx = server.context();
+    ctx.datafusion()
+        .state_ref()
+        .write()
+        .set_function_factory(Arc::new(UnavailableFunctionFactory));
+    ctx.register_udf(create_udf(
+        "broken",
+        vec![DataType::Int64],
+        DataType::Int64,
+        Volatility::Volatile,
+        Arc::new(|_| exec_err!("function backend is unavailable")),
+    ));
+    ctx.register_table("unavailable", Arc::new(UnavailableTable))
+        .expect("the unavailable table must register");
+    let (client, handle) = serve_sql(server).await;
+    for sql in [
+        "PREPARE scan_unavailable AS SELECT id FROM unavailable",
+        "PREPARE call_broken AS SELECT broken(1)",
+    ] {
+        query_row_count(&client, sql).await;
+    }
+
+    // The embedder's function factory fails, and the statement an EXECUTE starts fails when its
+    // plan is built or while it runs. None of these is the caller's mistake.
+    for sql in [
+        "CREATE FUNCTION f(BIGINT) RETURNS BIGINT RETURN $1",
+        "EXECUTE scan_unavailable",
+        "EXECUTE call_broken",
+    ] {
+        let error = query_error(&client, sql).await;
+        assert_eq!(error.code, ErrorCode::Internal, "{sql}: {error:?}");
     }
     handle.abort();
 }
