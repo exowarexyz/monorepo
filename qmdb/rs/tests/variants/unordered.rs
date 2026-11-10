@@ -31,13 +31,14 @@ use std::{fmt::Debug, num::NonZeroU64, sync::Arc};
 const N: usize = 32;
 type Digest = commonware_cryptography::sha256::Digest;
 
+/// One uploaded state of the source database. A database without current state uploads the
+/// range proof and pins in `range`. A current database uploads `publication`, verified against
+/// its own root.
 struct Snapshot<F: Graftable, K: QmdbKey, E: ValueEncoding> {
     start: Location<F>,
-    /// Range proof and pins that upload a database without current state.
     range: Option<(Proof<F, Digest>, Vec<Digest>)>,
     operations: Vec<unordered::Operation<F, K, E>>,
     ops_root: Digest,
-    /// Publication that uploads a current database, verified against its own root.
     publication: Option<Publication<F, Digest, unordered::Update<K, E>, N>>,
     values: Vec<Option<E::Value>>,
 }

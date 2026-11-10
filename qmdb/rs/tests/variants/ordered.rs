@@ -180,14 +180,14 @@ struct SourcePacket<F: Graftable> {
     encoded_operations: Vec<Vec<u8>>,
 }
 
+/// The source database after a batch. A database without current state uploads the operation
+/// range in `packet`. A current database uploads `publications`. The publications cover the new
+/// operations, and in the first snapshot they start with the initial commit's publication.
 struct Snapshot<F: Graftable, K: QmdbKey, V, E: ValueEncoding> {
     root: Digest,
     ops_root: Digest,
     operations: Vec<Operation<F, K, E>>,
-    /// Operation range that uploads a database without current state.
     packet: Option<SourcePacket<F>>,
-    /// Current publications covering the new operations, starting with the initial one in the
-    /// first snapshot.
     publications: Option<Vec<Publication<F, Digest, ordered::Update<K, E>, N>>>,
     activity: Option<Vec<bool>>,
     values: BTreeMap<K, V>,

@@ -132,12 +132,12 @@ fn key_cfg() -> <Vec<u8> as commonware_codec::Read>::Cfg {
     ((0..=MAX_OPERATION_SIZE).into(), ())
 }
 
+/// One tip of the source database. `publications` extend the uploaded log from the previous tip
+/// to this one, starting with the initial commit's publication for the first tip.
 struct SourceBatch {
     latest_location: Location<mmr::Family>,
     operations: Vec<BatchOperation>,
     root: Digest,
-    /// Publications extending the uploaded log from the previous tip to this one, starting with
-    /// the initial commit's publication for the first tip.
     publications: Vec<BatchPublication>,
 }
 
