@@ -190,6 +190,7 @@ pub enum KvReducedValue {
     FixedSizeBinary(Bytes),
 }
 
+/// A value in a stored row. Decoding rejects lists nested more than eight levels deep.
 #[derive(Debug, Clone)]
 pub enum StoredValue {
     Int64(i64),
@@ -198,7 +199,6 @@ pub enum StoredValue {
     Boolean(bool),
     Utf8(String),
     Bytes(Vec<u8>),
-    /// Nested values. The decoder accepts at most eight levels of list nesting.
     List(Vec<Self>),
 }
 

@@ -72,9 +72,11 @@ export interface TableInfo {
    * double-quote it. The quotes are optional for a lower-case identifier.
    */
   name: string;
+  /** Columns in declaration order. */
   columns: ColumnInfo[];
   /** Names of primary-key columns in key-sort order. */
   primaryKeyColumns: string[];
+  /** Secondary indexes declared on this table, in registration order. */
   indexes: IndexInfo[];
 }
 
