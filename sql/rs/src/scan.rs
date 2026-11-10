@@ -505,15 +505,42 @@ impl KvScanExec {
 }
 
 impl DisplayAs for KvScanExec {
-    fn fmt_as(&self, _t: DisplayFormatType, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self.plan_diagnostics() {
+    fn fmt_as(&self, t: DisplayFormatType, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let diagnostics = self.plan_diagnostics();
+        let query_stats = format_query_stats_explain(QueryStatsExplainSurface::StreamedRangeDetail);
+
+        // The tree format reads one `key=value` pair per line, so each value is escaped to stay
+        // on its line. The pairs are the facts of the one-line format, without a fetch or
+        // direction the scan does not have. DataFusion wraps long values and cuts a long node,
+        // so only the one-line format is complete.
+        if t == DisplayFormatType::TreeRender {
+            let mut pair = |name: &str, value: &dyn fmt::Display| {
+                writeln!(f, "{name}={}", escape_tree_value(&value.to_string()))
+            };
+            if let Some(fetch) = self.fetch {
+                pair("fetch", &fetch)?;
+            }
+            if let Some(direction) = self.direction {
+                pair("direction", &format_args!("{direction:?}"))?;
+            }
+            return match diagnostics {
+                Ok(diag) => {
+                    for (name, value) in access_path_fields(&diag) {
+                        pair(name, &value)?;
+                    }
+                    pair("query_stats", &query_stats)
+                }
+                Err(err) => pair("diagnostics_error", &err),
+            };
+        }
+        match diagnostics {
             Ok(diag) => write!(
                 f,
                 "KvScanExec: fetch={:?}, direction={:?}, {}, query_stats={}",
                 self.fetch,
                 self.direction,
                 format_access_path_diagnostics(&diag),
-                format_query_stats_explain(QueryStatsExplainSurface::StreamedRangeDetail)
+                query_stats
             ),
             Err(err) => write!(
                 f,
@@ -1628,6 +1655,26 @@ mod tests {
                 .downcast_ref::<KvScanExec>()
                 .expect("the plan must end in a Store scan");
             (scan.clone(), rendered)
+        }
+
+        /// Returns the lines of the scan's box in `EXPLAIN FORMAT TREE`, without its borders.
+        async fn tree_box(&self, sql: &str) -> Vec<String> {
+            let rows = values(
+                self.context.datafusion(),
+                &format!("EXPLAIN FORMAT TREE {sql}"),
+            )
+            .await
+            .unwrap();
+            rows[0][1]
+                .to_string()
+                .lines()
+                .skip_while(|line| !line.contains("KvScanExec"))
+                .take_while(|line| line.contains('│'))
+                .map(|line| {
+                    line.trim_matches(|c: char| c == '│' || c.is_whitespace())
+                        .to_string()
+                })
+                .collect()
         }
     }
 
@@ -3406,6 +3453,119 @@ mod tests {
         assert!(
             compute.is_some_and(|nanos| nanos > 0),
             "the scan must record compute time, got {compute:?}"
+        );
+    }
+
+    /// The tree format shows each fact of a scan on its own line. A value that fits the box
+    /// keeps its words whole.
+    #[tokio::test]
+    async fn tree_explain_shows_one_scan_fact_per_line() {
+        let fixture = sortable_orders(false).await;
+        for (sql, facts) in [
+            (
+                "SELECT id FROM orders",
+                vec![
+                    "mode: primary_key",
+                    "predicate: <none>",
+                    "exact: true",
+                    "row_recheck: false",
+                    "ranges: 1",
+                    "full_scan_like: true",
+                    "query_stats:",
+                ],
+            ),
+            (
+                "SELECT s FROM orders ORDER BY s DESC LIMIT 7",
+                vec![
+                    "fetch: 7",
+                    "direction: Reverse",
+                    "mode:",
+                    "secondary_index(ix_s,",
+                    "lexicographic)",
+                    "predicate: <none>",
+                    "full_scan_like: false",
+                    "constrained_prefix: 0",
+                ],
+            ),
+            (
+                "SELECT u, id FROM orders WHERE u IN (3, 5, 9)",
+                vec![
+                    "predicate:",
+                    "u IN (3, 5, 9)",
+                    "ranges: 3",
+                    "constrained_prefix: 1",
+                ],
+            ),
+        ] {
+            let lines = fixture.tree_box(sql).await;
+            for fact in facts {
+                assert!(
+                    lines.iter().any(|line| line == fact),
+                    "{sql} must show {fact:?} on its own line, got {lines:#?}"
+                );
+            }
+
+            // Every word in the box is a whole word of the one-line display, so no fact is
+            // missing from that display and no line breaks inside a word.
+            let (scan, _) = fixture.scan(sql).await;
+            let one_line = datafusion::physical_plan::displayable(&scan)
+                .one_line()
+                .to_string();
+            let words = |text: &str| {
+                text.split(|c: char| !c.is_alphanumeric() && c != '_')
+                    .filter(|word| !word.is_empty())
+                    .map(str::to_string)
+                    .collect::<std::collections::HashSet<_>>()
+            };
+            let known = words(&one_line);
+            for word in words(&lines.join(" ")) {
+                assert!(
+                    known.contains(&word),
+                    "{sql} must not show the fragment {word:?}, got {lines:#?}"
+                );
+            }
+        }
+    }
+
+    /// A line break inside a value stays inside that value, so a literal can neither add nor
+    /// replace a field of the tree display.
+    #[tokio::test]
+    async fn tree_explain_keeps_a_multi_line_value_in_its_field() {
+        // The two literals differ only where the first has a line break before `mode=`.
+        let fixture = sortable_orders(false).await;
+        let spoofed = fixture
+            .tree_box("SELECT s FROM orders WHERE s = 'a\nmode=spoof'")
+            .await;
+        let plain = fixture
+            .tree_box("SELECT s FROM orders WHERE s = 'a_nmode=spoof'")
+            .await;
+
+        // Only the predicate line may differ. It must show the break as an escape.
+        assert!(
+            spoofed.iter().any(|line| line == "secondary_index(ix_s,"),
+            "the literal must not replace the mode, got {spoofed:#?}"
+        );
+        let differing = spoofed
+            .iter()
+            .zip(&plain)
+            .filter(|(spoofed, plain)| spoofed != plain)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            (spoofed.len(), differing),
+            (
+                plain.len(),
+                vec![(
+                    &r"s = 'a\nmode=spoof'".to_string(),
+                    &"s = 'a_nmode=spoof'".to_string()
+                )]
+            ),
+            "the literal must stay one escaped predicate value, got {spoofed:#?}"
+        );
+
+        // Other control characters and the escape character itself stay distinguishable.
+        assert_eq!(
+            crate::diagnostics::escape_tree_value("a\\n\tb\u{7}\r\n"),
+            r"a\\n\tb\u{7}\r\n"
         );
     }
 

@@ -53,21 +53,45 @@ pub(crate) const fn format_query_stats_explain(surface: QueryStatsExplainSurface
     }
 }
 
+/// Escapes a value for one `key=value` line of DataFusion's tree display.
+///
+/// The tree display reads every line of a node as a separate pair, so a line break inside a
+/// value would start another pair. Control characters become escapes and a backslash is
+/// doubled, so the value stays on its line and distinct values stay distinct.
+pub(crate) fn escape_tree_value(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for c in value.chars() {
+        match c {
+            '\\' => escaped.push_str("\\\\"),
+            c if c.is_control() => escaped.extend(c.escape_default()),
+            c => escaped.push(c),
+        }
+    }
+    escaped
+}
+
+/// Returns the name and value of each fact about an access path, in display order.
+pub(crate) fn access_path_fields(diag: &AccessPathDiagnostics) -> Vec<(&'static str, String)> {
+    let mut fields = vec![
+        ("mode", diag.mode.clone()),
+        ("predicate", diag.predicate.clone()),
+        ("exact", diag.exact.to_string()),
+        ("row_recheck", (!diag.exact).to_string()),
+        ("ranges", diag.range_count.to_string()),
+        ("full_scan_like", diag.full_scan_like.to_string()),
+    ];
+    if let Some(len) = diag.constrained_prefix_len {
+        fields.push(("constrained_prefix", len.to_string()));
+    }
+    fields
+}
+
 pub(crate) fn format_access_path_diagnostics(diag: &AccessPathDiagnostics) -> String {
-    let constrained_prefix = diag
-        .constrained_prefix_len
-        .map(|len| format!(", constrained_prefix={len}"))
-        .unwrap_or_default();
-    format!(
-        "mode={}, predicate={}, exact={}, row_recheck={}, ranges={}, full_scan_like={}{}",
-        diag.mode,
-        diag.predicate,
-        diag.exact,
-        !diag.exact,
-        diag.range_count,
-        diag.full_scan_like,
-        constrained_prefix
-    )
+    access_path_fields(diag)
+        .into_iter()
+        .map(|(name, value)| format!("{name}={value}"))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 pub(crate) fn build_scan_access_path_diagnostics(

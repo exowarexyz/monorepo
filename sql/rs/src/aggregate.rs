@@ -626,7 +626,53 @@ impl QueryPlanner for KvQueryPlanner {
 }
 
 impl DisplayAs for KvAggregateExec {
-    fn fmt_as(&self, _t: DisplayFormatType, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt_as(&self, t: DisplayFormatType, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // The tree renderer shows each line as one `key=value` fact and keeps one value per key.
+        // Each access-path fact therefore lists its value for every job, in the order of the `jobs`
+        // line, with `none` for a job that lacks the fact. Each value is escaped to stay on its
+        // line.
+        if t == DisplayFormatType::TreeRender {
+            let diagnostics = &self.spec.diagnostics;
+            let labels = diagnostics
+                .seed_job
+                .iter()
+                .map(|_| "seed_job".to_string())
+                .chain((0..diagnostics.aggregate_jobs.len()).map(|idx| format!("job{idx}")))
+                .collect::<Vec<_>>();
+            let jobs = diagnostics
+                .seed_job
+                .iter()
+                .chain(&diagnostics.aggregate_jobs)
+                .map(access_path_fields)
+                .collect::<Vec<_>>();
+            let mut names = Vec::new();
+            for (name, _) in jobs.iter().flatten() {
+                if !names.contains(name) {
+                    names.push(*name);
+                }
+            }
+
+            writeln!(f, "grouped={}", diagnostics.grouped)?;
+            writeln!(f, "jobs={}", labels.join("; "))?;
+            for name in names {
+                let values = jobs
+                    .iter()
+                    .map(|fields| {
+                        fields.iter().find(|(field, _)| *field == name).map_or_else(
+                            || "none".to_string(),
+                            |(_, value)| escape_tree_value(value),
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                writeln!(f, "{name}={values}")?;
+            }
+            return write!(
+                f,
+                "query_stats={}",
+                format_query_stats_explain(QueryStatsExplainSurface::RangeReduceDetail)
+            );
+        }
         write!(
             f,
             "KvAggregateExec: grouped={}, seed_job={}, aggregate_jobs=[{}], query_stats={}",
@@ -4029,6 +4075,230 @@ mod tests {
                 "decoding responses must count as compute time: {sql}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn tree_explain_renders_one_fact_per_line() {
+        let fixture = Fixture::new().await;
+        let ids = [0, 1, 2, 3];
+        fixture
+            .install_indexed_table(
+                "indexed",
+                vec![
+                    TableColumnConfig::new("id", DataType::Int64, false),
+                    TableColumnConfig::new("category", DataType::Int64, false),
+                    TableColumnConfig::new("amount", DataType::Int64, false),
+                ],
+                &["id"],
+                vec![IndexSpec::new("category_idx", vec!["category".to_string()])
+                    .unwrap()
+                    .with_cover_columns(vec!["amount".to_string()])],
+                ids.iter()
+                    .map(|&id| KvRow {
+                        values: vec![
+                            CellValue::Int64(id),
+                            CellValue::Int64(id / 2),
+                            CellValue::Int64(id * 10),
+                        ],
+                    })
+                    .collect(),
+                vec![
+                    Arc::new(Int64Array::from_iter_values(ids)),
+                    Arc::new(Int64Array::from_iter_values(ids.iter().map(|id| id / 2))),
+                    Arc::new(Int64Array::from_iter_values(ids.iter().map(|id| id * 10))),
+                ],
+            )
+            .await;
+        let word = |c: char| c.is_alphanumeric() || c == '_';
+        let query_stats = vec![
+            "query_stats:",
+            "range_reduce(detail.extra:",
+            "server-defined metadata)",
+        ];
+
+        // The lines inside the KvAggregateExec box, below its title and separator.
+        let node_lines = |plan: &str| {
+            let lines = plan
+                .lines()
+                .map(|line| line.trim_matches(|c: char| c == '│' || c.is_whitespace()))
+                .collect::<Vec<_>>();
+            let title = lines
+                .iter()
+                .position(|line| *line == "KvAggregateExec")
+                .unwrap_or_else(|| panic!("the aggregate must be pushed:\n{plan}"));
+            lines[title + 2..]
+                .iter()
+                .take_while(|line| !line.starts_with('└'))
+                .map(|line| line.to_string())
+                .collect::<Vec<_>>()
+        };
+
+        // A fact that fits the box is one `key: value` line. A longer one is its key on a
+        // line followed by the wrapped value.
+        for (sql, facts) in [
+            (
+                "SELECT category, SUM(amount) FROM indexed GROUP BY category",
+                vec![
+                    vec!["grouped: true"],
+                    vec!["jobs: job0"],
+                    vec!["mode: primary_key"],
+                    vec!["predicate: <none>"],
+                    vec!["exact: true"],
+                    vec!["row_recheck: false"],
+                    vec!["ranges: 1"],
+                    vec!["full_scan_like: true"],
+                    query_stats.clone(),
+                ],
+            ),
+            (
+                "SELECT DISTINCT category FROM indexed WHERE id >= 2",
+                vec![
+                    vec!["grouped: true"],
+                    vec!["jobs: seed_job"],
+                    vec!["mode: primary_key"],
+                    vec!["predicate: id >= 2"],
+                    vec!["exact: true"],
+                    vec!["row_recheck: false"],
+                    vec!["ranges: 1"],
+                    vec!["full_scan_like: false"],
+                    query_stats.clone(),
+                ],
+            ),
+            // One job reads the index and the other the primary key, so only the first
+            // has a constrained prefix.
+            (
+                "SELECT SUM(amount) FILTER (WHERE category = 1), \
+                 SUM(amount) FILTER (WHERE id = 2) FROM indexed",
+                vec![
+                    vec!["grouped: false"],
+                    vec!["jobs: job0; job1"],
+                    vec![
+                        "mode:",
+                        "secondary_index",
+                        "(category_idx,",
+                        "lexicographic);",
+                        "primary_key",
+                    ],
+                    vec!["predicate:", "category = 1; id = 2"],
+                    vec!["exact: false; true"],
+                    vec!["row_recheck:", "true; false"],
+                    vec!["ranges: 1; 1"],
+                    vec!["full_scan_like:", "false; false"],
+                    vec!["constrained_prefix:", "1; none"],
+                    query_stats.clone(),
+                ],
+            ),
+        ] {
+            let explained = values(
+                fixture.context.datafusion(),
+                &format!("EXPLAIN FORMAT TREE {sql}"),
+            )
+            .await
+            .unwrap();
+            let plan = explained[0][1].to_string();
+            let node = node_lines(&plan);
+            assert_eq!(
+                node.iter().filter(|line| !line.is_empty()).count(),
+                facts.iter().map(Vec::len).sum::<usize>(),
+                "the node must show these facts and no others: {sql}\n{plan}"
+            );
+            for fact in facts {
+                assert!(
+                    node.windows(fact.len()).any(|window| window == fact),
+                    "the node must give {fact:?} lines of its own: {sql}\n{plan}"
+                );
+                for pair in fact.windows(2).skip(1) {
+                    assert!(
+                        !(pair[0].ends_with(word) && pair[1].starts_with(word)),
+                        "a line must not break inside a word: {pair:?}"
+                    );
+                }
+            }
+        }
+
+        // DataFusion's renderer cuts a node off after 30 lines, so twelve jobs lose their
+        // last fields in the tree. The indented format still lists every job.
+        let filters = (0..12)
+            .map(|id| format!("SUM(amount) FILTER (WHERE id = {id})"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!("SELECT {filters} FROM indexed");
+        let tree = values(
+            fixture.context.datafusion(),
+            &format!("EXPLAIN FORMAT TREE {sql}"),
+        )
+        .await
+        .unwrap();
+        let node = node_lines(&tree[0][1].to_string());
+        assert_eq!(
+            node.last().map(String::as_str),
+            Some("..."),
+            "the renderer must mark where it cut the node: {node:?}"
+        );
+        assert!(
+            !node.iter().any(|line| line == "query_stats:"),
+            "twelve jobs must not fit the box: {node:?}"
+        );
+        let indented = values(fixture.context.datafusion(), &format!("EXPLAIN {sql}"))
+            .await
+            .unwrap()
+            .iter()
+            .map(|row| row[1].to_string())
+            .collect::<String>();
+        for job in 0..12 {
+            assert!(
+                indented.contains(&format!("job{job}{{")),
+                "the indented plan must list job{job}:\n{indented}"
+            );
+        }
+    }
+
+    /// A line break inside a value stays inside that value, so a predicate literal can neither
+    /// add nor replace a fact of the tree display.
+    #[tokio::test]
+    async fn tree_explain_keeps_a_multi_line_value_in_its_field() {
+        let fixture = Fixture::new().await;
+
+        // The two literals differ only where the first has a line break before `mode=`.
+        let mut boxes = Vec::new();
+        for literal in ["a\nmode=spoof", "a_nmode=spoof"] {
+            let sql = format!(
+                "EXPLAIN FORMAT TREE SELECT COUNT(*) FROM orders WHERE status = '{literal}'"
+            );
+            let explained = values(fixture.context.datafusion(), &sql).await.unwrap();
+            let plan = explained[0][1].to_string();
+            assert!(
+                plan.contains("KvAggregateExec"),
+                "the aggregate must be pushed:\n{plan}"
+            );
+            boxes.push(
+                plan.lines()
+                    .map(|line| {
+                        line.trim_matches(|c: char| c == '│' || c.is_whitespace())
+                            .to_string()
+                    })
+                    .collect::<Vec<_>>(),
+            );
+        }
+
+        // Only the predicate value may differ, and it must show the break as an escape.
+        let differing = boxes[0]
+            .iter()
+            .zip(&boxes[1])
+            .filter(|(spoofed, plain)| spoofed != plain)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            (boxes[0].len(), differing),
+            (
+                boxes[1].len(),
+                vec![(
+                    &r"status = 'a\nmode=spoof'".to_string(),
+                    &"status = 'a_nmode=spoof'".to_string()
+                )]
+            ),
+            "the literal must stay one escaped predicate value, got {:#?}",
+            boxes[0]
+        );
     }
 
     fn final_reduce_plan(plan: Arc<dyn ExecutionPlan>) -> Arc<dyn ExecutionPlan> {
