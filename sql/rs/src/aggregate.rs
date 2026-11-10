@@ -668,7 +668,10 @@ impl ExecutionPlan for KvAggregateExec {
         let session = read_session(context.session_config(), &self.spec.store)?;
         let source = Arc::new(self.clone());
         let concurrency = context.session_config().target_partitions().max(1);
-        let jobs = self
+
+        // The ranges of every job share one concurrency bound. Responses are consumed in job
+        // order and then range order, so the final merge order stays stable.
+        let requests = self
             .spec
             .seed_job
             .clone()
@@ -677,12 +680,18 @@ impl ExecutionPlan for KvAggregateExec {
                 job,
                 expr_plans: Vec::new(),
             })
-            .chain(self.spec.aggregate_jobs.clone());
-        let batches = futures::stream::iter(jobs)
-            .map(move |job| {
-                execute_reduce_job(session.clone(), Arc::new(job), source.clone(), concurrency)
+            .chain(self.spec.aggregate_jobs.clone())
+            .flat_map(|job| {
+                let ranges = job.job.ranges.clone();
+                let job = Arc::new(job);
+                ranges.into_iter().map(move |range| (job.clone(), range))
+            });
+        let batches = futures::stream::iter(requests)
+            .map(move |(job, range)| {
+                execute_reduce_range(session.clone(), job, source.clone(), range)
             })
-            .flatten();
+            .buffered(concurrency)
+            .try_flatten();
         Ok(Box::pin(RecordBatchStreamAdapter::new(
             self.schema(),
             batches,
@@ -738,18 +747,6 @@ pub(crate) fn cast_scalar_value(
         return Ok(value);
     }
     value.cast_to(data_type)
-}
-
-fn execute_reduce_job(
-    session: ReadSession,
-    job: Arc<CombinedAggregateJob>,
-    source: Arc<KvAggregateExec>,
-    concurrency: usize,
-) -> impl futures::Stream<Item = DataFusionResult<RecordBatch>> {
-    futures::stream::iter(job.job.ranges.clone())
-        .map(move |range| execute_reduce_range(session.clone(), job.clone(), source.clone(), range))
-        .buffered(concurrency)
-        .try_flatten()
 }
 
 async fn execute_reduce_range(
@@ -3994,55 +3991,63 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn unseeded_reduce_ranges_start_concurrently_and_cancel_cleanly() {
-        use datafusion::execution::memory_pool::MemoryPool;
+    type ReduceBody = Result<Bytes, std::convert::Infallible>;
 
-        type BodyReceiver =
-            futures::channel::mpsc::UnboundedReceiver<Result<Bytes, std::convert::Infallible>>;
+    /// Store transport that records each Reduce request and streams its response body from the
+    /// sender registered for the range start. The body stays open until the test drops that
+    /// sender, so the test controls when each range responds and finishes.
+    #[derive(Clone)]
+    struct ControlledReduceTransport {
+        bodies:
+            Arc<Mutex<BTreeMap<Vec<u8>, futures::channel::mpsc::UnboundedReceiver<ReduceBody>>>>,
+        requests: Arc<Mutex<Vec<exoware_sdk::query::ReduceRequest>>>,
+    }
 
-        #[derive(Clone)]
-        struct ControlledReduceTransport {
-            bodies: Arc<Mutex<BTreeMap<Vec<u8>, BodyReceiver>>>,
-            requests: Arc<Mutex<Vec<exoware_sdk::query::ReduceRequest>>>,
+    impl connectrpc::client::ClientTransport for ControlledReduceTransport {
+        type ResponseBody = axum::body::Body;
+        type Error = connectrpc::ConnectError;
+
+        fn send(
+            &self,
+            request: axum::http::Request<connectrpc::client::ClientBody>,
+        ) -> connectrpc::client::BoxFuture<
+            'static,
+            Result<axum::http::Response<Self::ResponseBody>, Self::Error>,
+        > {
+            let transport = self.clone();
+            Box::pin(async move {
+                assert_eq!(request.uri().path(), "/store.query.v1.Service/Reduce");
+                let bytes =
+                    axum::body::to_bytes(axum::body::Body::new(request.into_body()), usize::MAX)
+                        .await
+                        .unwrap();
+                let request = crate::tests::decode_reduce_request(&bytes);
+                let receiver = transport
+                    .bodies
+                    .lock()
+                    .unwrap()
+                    .remove(&request.start)
+                    .expect("unexpected range or retry");
+                transport.requests.lock().unwrap().push(request);
+                Ok(axum::http::Response::builder()
+                    .header("content-type", "application/connect+proto")
+                    .body(axum::body::Body::from_stream(receiver))
+                    .unwrap())
+            })
         }
+    }
 
-        impl connectrpc::client::ClientTransport for ControlledReduceTransport {
-            type ResponseBody = axum::body::Body;
-            type Error = connectrpc::ConnectError;
-
-            fn send(
-                &self,
-                request: axum::http::Request<connectrpc::client::ClientBody>,
-            ) -> connectrpc::client::BoxFuture<
-                'static,
-                Result<axum::http::Response<Self::ResponseBody>, Self::Error>,
-            > {
-                let transport = self.clone();
-                Box::pin(async move {
-                    assert_eq!(request.uri().path(), "/store.query.v1.Service/Reduce");
-                    let bytes = axum::body::to_bytes(
-                        axum::body::Body::new(request.into_body()),
-                        usize::MAX,
-                    )
-                    .await
-                    .unwrap();
-                    let request = crate::tests::decode_reduce_request(&bytes);
-                    let receiver = transport
-                        .bodies
-                        .lock()
-                        .unwrap()
-                        .remove(&request.start)
-                        .expect("unexpected range or retry");
-                    transport.requests.lock().unwrap().push(request);
-                    Ok(axum::http::Response::builder()
-                        .header("content-type", "application/connect+proto")
-                        .body(axum::body::Body::from_stream(receiver))
-                        .unwrap())
-                })
-            }
-        }
-
+    /// Registers `pending_ranges`, keyed by `(bucket, id)`, on a Store whose Reduce responses
+    /// the test controls. Returns the transport with the range start and the response body
+    /// sender of each bucket.
+    async fn pending_ranges(
+        fixture: &Fixture,
+        buckets: &[i64],
+    ) -> (
+        ControlledReduceTransport,
+        Vec<Vec<u8>>,
+        Vec<futures::channel::mpsc::UnboundedSender<ReduceBody>>,
+    ) {
         let transport = ControlledReduceTransport {
             bodies: Arc::new(Mutex::new(BTreeMap::new())),
             requests: Arc::new(Mutex::new(Vec::new())),
@@ -4053,7 +4058,6 @@ mod tests {
             .client_transport(transport.clone())
             .build()
             .unwrap();
-        let fixture = Fixture::new().await;
         let schema = crate::KvSchema::new(client.unprefixed())
             .table(
                 "pending_ranges",
@@ -4075,7 +4079,7 @@ mod tests {
         let model = &provider.downcast_ref::<KvTable>().unwrap().model;
         let mut starts = Vec::new();
         let mut senders = Vec::new();
-        for bucket in [1, 3, 5, 7] {
+        for &bucket in buckets {
             let start = crate::codec::encode_primary_key_bound(
                 model.table_prefix,
                 &[&CellValue::Int64(bucket)],
@@ -4092,6 +4096,15 @@ mod tests {
             starts.push(start.to_vec());
             senders.push(sender);
         }
+        (transport, starts, senders)
+    }
+
+    #[tokio::test]
+    async fn unseeded_reduce_ranges_start_concurrently_and_cancel_cleanly() {
+        use datafusion::execution::memory_pool::MemoryPool;
+
+        let fixture = Fixture::new().await;
+        let (transport, starts, senders) = pending_ranges(&fixture, &[1, 3, 5, 7]).await;
         let frame = |keys: std::ops::Range<i64>, sequence_number| {
             let (results, groups) = exoware_sdk::to_proto_reduce_response(RangeReduceResponse {
                 results: vec![],
@@ -4223,6 +4236,52 @@ mod tests {
         assert_eq!(pool.reserved(), 0);
         let requests = transport.requests.lock().unwrap();
         assert_eq!(requests.len(), 4, "the fifth range must not open");
+    }
+
+    #[tokio::test]
+    async fn reduce_jobs_start_concurrently_and_cancel_cleanly() {
+        let fixture = Fixture::new().await;
+        let (transport, starts, senders) = pending_ranges(&fixture, &[1, 3, 5]).await;
+
+        // Each filter selects another bucket, so each aggregate is a job with its own range.
+        let sql = "SELECT COUNT(*) FILTER (WHERE bucket = 1), \
+                   COUNT(*) FILTER (WHERE bucket = 3), \
+                   COUNT(*) FILTER (WHERE bucket = 5) FROM pending_ranges";
+        let (context, _) = aggregate_session_with_pool(&fixture, 4 * 1024 * 1024, 2);
+        let plan = context
+            .sql(sql)
+            .await
+            .unwrap()
+            .create_physical_plan()
+            .await
+            .unwrap();
+        final_reduce_plan(plan.clone());
+        let mut output = plan.execute(0, context.datafusion().task_ctx()).unwrap();
+
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                assert!(futures::poll!(output.next()).is_pending());
+                if transport.requests.lock().unwrap().len() == 2 {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("two jobs must have a request in flight before any response arrives");
+        assert!(transport
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|request| starts[..2].contains(&request.start)));
+        assert!(senders.iter().all(|sender| !sender.is_closed()));
+
+        drop(output);
+        assert!(senders[0].is_closed(), "first job body must be dropped");
+        assert!(senders[1].is_closed(), "second job body must be dropped");
+        let requests = transport.requests.lock().unwrap();
+        assert_eq!(requests.len(), 2, "the third job must not open");
     }
 
     #[tokio::test]
