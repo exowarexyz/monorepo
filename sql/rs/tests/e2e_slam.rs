@@ -538,6 +538,23 @@ async fn connect_query_rejects_writes_other_than_insert() {
 }
 
 #[tokio::test]
+async fn connect_query_reports_invalid_values_as_invalid_argument() {
+    let schema = KvSchema::new(common::local_store_client().await.unprefixed());
+    let server = Arc::new(SqlServer::new(schema).expect("SQL server"));
+    let (client, handle) = serve_sql(server).await;
+    for sql in [
+        "SELECT 1/0",
+        "SELECT CAST('abc' AS BIGINT)",
+        "SELECT CAST('x' AS TIMESTAMP)",
+        "SELECT -(-9223372036854775807 - 1)",
+    ] {
+        let error = query_error(&client, sql).await;
+        assert_eq!(error.code, ErrorCode::InvalidArgument, "{sql}: {error:?}");
+    }
+    handle.abort();
+}
+
+#[tokio::test]
 async fn connect_query_preserves_session_settings() {
     let schema = KvSchema::new(common::local_store_client().await.unprefixed());
     let server = Arc::new(SqlServer::new(schema).expect("SQL server"));

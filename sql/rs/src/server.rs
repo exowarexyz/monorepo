@@ -38,6 +38,7 @@ use connectrpc::{ConnectError, ConnectRpcService, RequestContext as Context, Ser
 use datafusion::{
     arrow::{
         datatypes::{DataType, SchemaRef},
+        error::ArrowError,
         ipc::writer::StreamWriter,
         record_batch::RecordBatch,
     },
@@ -665,6 +666,8 @@ fn compile_subscription_predicate(
 
 fn datafusion_error_to_connect(err: DataFusionError) -> ConnectError {
     // DataFusion wraps planner errors in Diagnostic and Context layers, so classify the root cause.
+    // Arithmetic and conversion failures come from the values a statement computes, so they are the
+    // caller's errors.
     match err.find_root() {
         DataFusionError::Plan(msg)
         | DataFusionError::Configuration(msg)
@@ -675,6 +678,18 @@ fn datafusion_error_to_connect(err: DataFusionError) -> ConnectError {
         DataFusionError::SchemaError(schema_error, _) => {
             ConnectError::invalid_argument(schema_error.to_string())
         }
+        DataFusionError::ArrowError(arrow_error, _)
+            if matches!(
+                **arrow_error,
+                ArrowError::DivideByZero
+                    | ArrowError::ArithmeticOverflow(_)
+                    | ArrowError::CastError(_)
+                    | ArrowError::ParseError(_)
+            ) =>
+        {
+            ConnectError::invalid_argument(arrow_error.to_string())
+        }
+        DataFusionError::ResourcesExhausted(msg) => ConnectError::resource_exhausted(msg.clone()),
         DataFusionError::External(external) => {
             match external.downcast_ref::<exoware_sdk::ClientError>() {
                 Some(client_error) => client_error_to_connect(client_error),
@@ -1471,6 +1486,16 @@ mod tests {
                 "{sql}"
             );
         }
+    }
+
+    #[test]
+    fn wrapped_resource_exhaustion_maps_to_resource_exhausted() {
+        let error =
+            DataFusionError::ResourcesExhausted("memory pool is full".into()).context("sorting");
+        assert_eq!(
+            datafusion_error_to_connect(error).code,
+            connectrpc::ErrorCode::ResourceExhausted
+        );
     }
 
     enum ControlledEvent {
