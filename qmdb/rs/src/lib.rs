@@ -4,7 +4,7 @@
 //! against trusted roots. Ordered, unordered, immutable, and keyless databases are supported,
 //! with MMR or MMB Merkle trees.
 //!
-//! This crate prepares and stages upload rows; the application commits them to the Store.
+//! This crate prepares and stages upload rows, and the application commits them to the Store.
 //! [`adapter::upload::prepare_authenticated_range`] verifies an operation range against a
 //! trusted root and prepares its rows, [`adapter::upload::stage_authenticated_range`] stages
 //! them in a Store write batch, and [`adapter::upload::stage_watermark`] stages the watermark
@@ -33,7 +33,7 @@
 //!
 //! Preparation reads no remote state, so ranges may be uploaded concurrently and out of order,
 //! and a current batch's publication may be uploaded before the watermark reaches it. Only the
-//! watermark is monotonic: publishing watermark `W` means the whole contiguous prefix `[0, W]`
+//! watermark is monotonic. Publishing watermark `W` means the whole contiguous prefix `[0, W]`
 //! is durable and may be trusted by readers, which fence historical queries against it.
 //! Historical proofs use the operation-log Merkle nodes, which are stored once by `Position`.
 //!

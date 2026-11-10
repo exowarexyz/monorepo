@@ -118,7 +118,9 @@ pub struct PreparedAuthenticatedRange<D: Digest, F: Family> {
 impl<D: Digest, F: Family> PreparedAuthenticatedRange<D, F> {
     /// Exclude supplied pins at these positions from staging, without omitting reconstructed nodes.
     /// Omitted pins must be durable before the watermark covers them and retained for proofs, as
-    /// described in the [pin omission contract](https://github.com/exowarexyz/monorepo/tree/main/qmdb/rs#pin-omission).
+    /// described under [pin omission].
+    ///
+    /// [pin omission]: https://github.com/exowarexyz/monorepo/tree/main/qmdb/rs#pin-omission
     pub fn without_pins_at(mut self, positions: &BTreeSet<Position<F>>) -> Self {
         self.pinned_nodes
             .retain(|(position, _)| !positions.contains(position));

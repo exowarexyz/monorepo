@@ -198,7 +198,7 @@ same prefix rule governs when the watermark may advance past them.
 #### Initialization
 
 A new database's commit at location 0 belongs to no batch, so upload its
-publication once, before the first batch's; staging its rows and then watermark 0
+publication once, before the first batch's. Staging its rows and then watermark 0
 publishes location 0:
 
 ```rust,ignore
@@ -245,12 +245,12 @@ supplies those pins, you can avoid writing them again.
 and reconstructed nodes and all other prepared rows are always staged.
 
 Omit a pin only when the same authenticated digest in the same namespace and
-history will be durable before publication and retained for serving proofs.
-The pin may already be durable or depend on a pending predecessor upload. In
-the latter case, the application must preserve that dependency through failures,
-retries, and restarts. The library does not inspect Store or infer durability
-from range bounds, so keep all pins for a nonzero bootstrap or restart when
-their availability is not guaranteed.
+history will be durable before the watermark covers it and retained for serving
+proofs. The pin may already be durable or depend on a pending predecessor
+upload. In the latter case, the application must preserve that dependency
+through failures, retries, and restarts. The library does not inspect Store or
+infer durability from range bounds, so keep all pins for a nonzero bootstrap or
+restart when their availability is not guaranteed.
 
 ## Subscriptions and synchronization
 
@@ -259,7 +259,7 @@ returns an independently trusted root for each frame's tip. Filters select
 logical keys and values by exact bytes, prefixes, or regexes. To reconnect,
 resume from `resume_sequence_number + 1`.
 
-Delivery follows Store write frames and waits for publication to cover each
+Delivery follows Store write frames and waits for the watermark to cover each
 frame's operations. A frame can contain only part of an uploaded range.
 Overlapping locations within a frame are deduplicated, but retries in later
 frames can repeat operations. Consumers must tolerate at-least-once delivery.

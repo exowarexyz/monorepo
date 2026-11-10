@@ -1126,7 +1126,7 @@ async fn current_boundary_nodes<F: commonware_storage::merkle::Graftable + Parti
     let range_client =
         CurrentOperationClient::<_, F, Sha256, Operation<F>, N>::plaintext(&url, op_cfg);
 
-    // Re-query the older batch after the watermark advances: its bitmap and node versions survive
+    // Re-query the older batch after the watermark advances. Its bitmap and node versions survive.
     for (pass, index) in [0, 1, 0].into_iter().enumerate() {
         let (operations, publications, root, queries) = &snapshots[index];
         if pass < 2 {
