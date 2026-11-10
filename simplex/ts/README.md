@@ -54,7 +54,7 @@ application-specific `verifyHeader` callback. The WASM verifier checks
 certificate signatures against your trusted configuration and returns the signed
 epoch, view and payload with the attached header. For round reads, it also
 checks that the signed epoch and view match the requested index.
-Typed reads in the Rust package differ: they decode records and check index
+Typed reads in the Rust package differ. They decode records and check index
 bindings, but do not check signatures.
 
 Your `verifyHeader` callback authenticates the attached header against the

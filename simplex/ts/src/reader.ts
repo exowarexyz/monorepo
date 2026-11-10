@@ -20,7 +20,7 @@ type CallOptions = Parameters<ReadSession['get']>[1];
 
 /**
  * Session-backed reader for Simplex records. Certificate reads take the
- * verifier that checks them; their `*Raw` twins return unverified bytes.
+ * verifier that checks them, and their `*Raw` twins return unverified bytes.
  */
 export class SimplexReader {
   private session: ReadSession;
