@@ -6,7 +6,7 @@ use axum::{
     serve::{Listener, ListenerExt},
     Router,
 };
-use connectrpc::{client::ClientConfig, ErrorCode};
+use connectrpc::{client::ClientConfig, ConnectError, ErrorCode};
 use datafusion::{
     arrow::{
         array::{ArrayRef, Int64Array},
@@ -17,7 +17,9 @@ use datafusion::{
     common::ScalarValue,
     datasource::{MemTable, ViewTable},
 };
-use exoware_sdk::{proto::PreferZstdHttpClient, transport::set_tcp_nodelay, StoreKeyPrefix};
+use exoware_sdk::{
+    proto::PreferZstdHttpClient, transport::set_tcp_nodelay, StoreClient, StoreKeyPrefix,
+};
 use exoware_sql::{
     proto::sql::v1::{QueryRequest, ServiceClient},
     sql_stack, CellValue, IndexSpec, KvSchema, SqlServer, TableColumnConfig,
@@ -279,6 +281,122 @@ async fn serve_sql(
         ClientConfig::new(base.parse().expect("SQL URI")),
     );
     (client, handle)
+}
+
+async fn query_error(client: &ServiceClient<PreferZstdHttpClient>, sql: &str) -> ConnectError {
+    let Err(error) = client
+        .query(QueryRequest {
+            sql: sql.to_string(),
+            ..Default::default()
+        })
+        .await
+    else {
+        panic!("{sql} was accepted");
+    };
+    error
+}
+
+async fn query_row_count(client: &ServiceClient<PreferZstdHttpClient>, sql: &str) -> usize {
+    let response = client
+        .query(QueryRequest {
+            sql: sql.to_string(),
+            ..Default::default()
+        })
+        .await
+        .expect(sql)
+        .into_view()
+        .to_owned_message();
+    result_row_count(&response.results)
+}
+
+fn items_schema(store: &StoreClient) -> KvSchema {
+    KvSchema::new(store.unprefixed())
+        .table(
+            "items",
+            vec![
+                TableColumnConfig::new("id", DataType::Int64, false),
+                TableColumnConfig::new("value", DataType::Utf8, false),
+            ],
+            vec!["id".to_string()],
+            Vec::new(),
+        )
+        .expect("schema")
+}
+
+#[tokio::test]
+async fn connect_query_rejects_server_file_and_runtime_access() {
+    let store = common::local_store_client().await;
+    let server = Arc::new(SqlServer::new(items_schema(&store)).expect("SQL server"));
+    let (client, handle) = serve_sql(server.clone()).await;
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock")
+        .as_nanos();
+    let dir =
+        std::env::temp_dir().join(format!("exoware-sql-files-{}-{nanos}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    std::fs::write(dir.join("local.csv"), "local\n").expect("local file");
+    let path = |name: &str| dir.join(name).display().to_string();
+
+    // Each statement would read or write server files, or replace the runtime environment.
+    for (sql, written) in [
+        (
+            format!(
+                "EXPLAIN ANALYZE COPY (SELECT 1 AS id) TO '{}' STORED AS CSV",
+                path("explained.csv")
+            ),
+            Some("explained.csv"),
+        ),
+        (
+            format!(
+                "CREATE EXTERNAL TABLE local_file (line VARCHAR) STORED AS CSV LOCATION '{}'",
+                path("local.csv")
+            ),
+            None,
+        ),
+        (
+            format!(
+                "COPY (SELECT 1 AS id) TO '{}' STORED AS CSV",
+                path("copied.csv")
+            ),
+            Some("copied.csv"),
+        ),
+        (
+            format!(
+                "SET datafusion.runtime.temp_directory = '{}'",
+                path("spill")
+            ),
+            Some("spill"),
+        ),
+        ("RESET datafusion.runtime.temp_directory".to_string(), None),
+    ] {
+        let error = query_error(&client, &sql).await;
+        assert_eq!(error.code, ErrorCode::InvalidArgument, "{sql}: {error:?}");
+        if let Some(written) = written {
+            assert!(!dir.join(written).exists(), "{sql}");
+        }
+    }
+    assert!(server.context().table_provider("local_file").await.is_err());
+
+    // Queries, Store writes, session settings, and prepared statements remain available.
+    assert_eq!(
+        query_row_count(&client, "INSERT INTO items VALUES (1, 'one')").await,
+        1
+    );
+    assert_eq!(
+        query_row_count(&client, "SELECT value FROM items WHERE id = 1").await,
+        1
+    );
+    query_row_count(&client, "SET datafusion.execution.batch_size = 17").await;
+    query_row_count(
+        &client,
+        "PREPARE item AS SELECT value FROM items WHERE id = 1",
+    )
+    .await;
+    assert_eq!(query_row_count(&client, "EXECUTE item").await, 1);
+
+    std::fs::remove_dir_all(&dir).expect("remove temp dir");
+    handle.abort();
 }
 
 #[tokio::test]

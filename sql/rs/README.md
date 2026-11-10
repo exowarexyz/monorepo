@@ -309,6 +309,11 @@ nothing from the Store.
 Session commands such as `SET`, `PREPARE`, and `CREATE FUNCTION` modify the
 server's shared context, so their effects persist into later requests.
 
+`Query` rejects statements that would reach the server's files or runtime. These
+are `COPY`, `CREATE EXTERNAL TABLE`, and `SET` or `RESET` of `datafusion.runtime`
+options. Register file-backed tables and set runtime options through
+`server.context()`.
+
 `Subscribe` streams rows from each Store batch that writes to a table and matches
 a scalar SQL predicate. Predicates cannot use subqueries, aggregates, window
 functions, or row-expanding expressions. Each frame is an independent Arrow IPC

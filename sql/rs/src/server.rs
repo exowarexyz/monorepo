@@ -42,11 +42,13 @@ use datafusion::{
         record_batch::RecordBatch,
     },
     common::{
+        plan_err,
         tree_node::{TreeNode, TreeNodeRecursion},
         DFSchema, DataFusionError, Result as DataFusionResult, TableReference,
     },
     logical_expr::{
-        simplify::SimplifyContext, DdlStatement, Expr, ExprSchemable, LogicalPlan, Statement,
+        simplify::SimplifyContext, DdlStatement, Expr, ExprSchemable, LogicalPlan, ResetVariable,
+        SetVariable, Statement,
     },
     optimizer::simplify_expressions::ExprSimplifier,
     physical_expr::PhysicalExpr,
@@ -344,6 +346,7 @@ impl Service for SqlConnect {
                 .create_logical_plan(&sql)
                 .await
                 .map_err(datafusion_error_to_connect)?;
+            verify_remote_plan(&plan).map_err(datafusion_error_to_connect)?;
 
             // Session commands must outlive the request. Data reads keep the request's floor.
             let execution_ctx = match &plan {
@@ -541,6 +544,30 @@ fn evaluate_batch(
         results,
         ..Default::default()
     }))
+}
+
+/// Rejects remote statements that would read or write the server's files or replace its runtime
+/// environment. Like DataFusion's `SQLOptions::verify_plan`, the check visits every node,
+/// including subqueries and the inputs of `EXPLAIN` and `PREPARE`.
+///
+/// Embedders register file-backed tables and configure the runtime on the server's
+/// [`SqlContext`].
+fn verify_remote_plan(plan: &LogicalPlan) -> DataFusionResult<()> {
+    plan.apply_with_subqueries(|node| {
+        let what = match node {
+            LogicalPlan::Copy(_) => "COPY",
+            LogicalPlan::Ddl(DdlStatement::CreateExternalTable(_)) => "CREATE EXTERNAL TABLE",
+            LogicalPlan::Statement(
+                Statement::SetVariable(SetVariable { variable, .. })
+                | Statement::ResetVariable(ResetVariable { variable }),
+            ) if variable.starts_with("datafusion.runtime.") => {
+                "changing datafusion.runtime options"
+            }
+            _ => return Ok(TreeNodeRecursion::Continue),
+        };
+        plan_err!("{what} is not supported by the SQL service")
+    })
+    .map(|_| ())
 }
 
 fn compile_subscription_predicate(
