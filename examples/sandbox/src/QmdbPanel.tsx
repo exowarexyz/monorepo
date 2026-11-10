@@ -410,7 +410,7 @@ export function QmdbPanel({
       </div>
 
       <div className="form-section">
-        <h3>Get Many Current Proofs</h3>
+        <h3>Get Many Current Values</h3>
         <div className="form-row">
           <div className="form-group">
             <label htmlFor="qmdb-many-keys">Keys (comma-separated)</label>

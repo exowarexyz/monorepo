@@ -48,6 +48,7 @@ where
 {
     let size = merkle_size_for_tip(tip)?;
     let plan = RangePlan::new(op_count_for_tip(tip)?, start..end).map_err(merkle_error)?;
+
     // The proof also carries the pins that extend the prefix before `start`.
     let proof_positions = plan
         .positions()

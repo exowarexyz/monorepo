@@ -19,7 +19,7 @@
 //!   (e.g. [`adapter::Ordered`]), plus upload staging in [`adapter::upload`].
 //! - [`service`]: the `qmdb.v1` ConnectRPC services.
 //!   - [`service::proto`]: generated request, response, and proof messages.
-//!   - [`service::server`]: a full stack and an operation-log-only stack per kind; immutable
+//!   - [`service::server`]: a full stack and an operation-log-only stack per kind. Immutable
 //!     and keyless have only the latter.
 //!   - [`service::client`]: one verifying client per kind (e.g. [`service::client::Ordered`]),
 //!     built from the per-service clients in [`service::client::rpc`].

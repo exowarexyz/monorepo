@@ -255,7 +255,7 @@ for (const [fixtureName, merkleFamily, current] of [
   });
 }
 
-test('test_fixed_keyless_append_many_verifies_values', async (t) => {
+test('test_fixed_keyless_appends_verify_values', async (t) => {
   initWasm();
   const fixture = operationsFixture('keyless_fixed_full_fixed_values_mmr');
   mockOperationsService(t, fixture, undefined);
@@ -273,7 +273,7 @@ test('test_fixed_keyless_append_many_verifies_values', async (t) => {
   await assert.rejects(client.getFixedKeylessAppends({ tip: fixture.tip }, fixture.root, wrong), /does not match expected value/);
 });
 
-test('test_fixed_unordered_update_many_verifies_keys', async (t) => {
+test('test_fixed_unordered_updates_verify_keys', async (t) => {
   initWasm();
   const fixture = operationsFixture('any_unordered_fixed_fixed_keys_fixed_values_mmr');
   mockOperationsService(t, fixture, undefined);

@@ -138,7 +138,7 @@ export interface VerifiedKeyRange {
 
 /**
  * One subscription frame. Its operations are decoded and internally consistent
- * but not yet checked against a trusted root: compare `root` with the trusted
+ * but not yet checked against a trusted root. Compare `root` with the trusted
  * root for `tip` before using them.
  */
 export interface OrderedSubscribeFrame {
@@ -146,8 +146,8 @@ export interface OrderedSubscribeFrame {
   tip: bigint;
   /**
    * The root decoded from the frame's proof. When the proof includes an
-   * ops-root witness this is the current root reconstructed from that witness;
-   * otherwise it is the embedded operation-log root.
+   * ops-root witness, this is the current root reconstructed from that witness.
+   * Otherwise it is the embedded operation-log root.
    */
   root: Uint8Array;
   operations: LocatedOrderedOperation[];

@@ -34,7 +34,7 @@ use http_body::Body;
 use std::{fmt::Display, marker::PhantomData, num::NonZeroU64, sync::Arc};
 
 /// Subscription frame whose operations were verified against the caller's
-/// trusted root; the proof is checked and dropped.
+/// trusted root. The proof is checked and dropped.
 #[derive(Clone, Debug, PartialEq)]
 pub struct VerifiedSubscribeFrame<D: Digest, Op, F: Family> {
     pub resume_sequence_number: u64,

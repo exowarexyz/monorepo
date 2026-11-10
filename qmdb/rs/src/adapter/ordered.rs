@@ -698,9 +698,11 @@ where
         let mut page_rows =
             first_page_rows.clamp(UPDATE_WALK_FIRST_PAGE_ROWS, UPDATE_WALK_MAX_PAGE_ROWS);
         let mut last_row_key: Option<Key> = None;
-        // Rows arrive grouped by key; versions oldest first forward, newest first reverse.
+
+        // Rows arrive grouped by key, with versions oldest first forward and newest first reverse.
         // A key's versions may span pages, so the settled and pending keys carry across them.
         let mut settled_raw_key: Option<Vec<u8>> = None;
+
         // Forward, the newest version at or below `tip` so far of the current key.
         let mut pending: Option<(Vec<u8>, Location<F>, bool)> = None;
         loop {
@@ -1023,6 +1025,7 @@ where
         let session = ReadSession::fixed(self.store.clone(), Some(resolved.sequence_number));
         let tip = self.current_tip(&session, resolved.tip).await?;
         let start = encode_update_key(start_key.as_ref(), Location::<F>::new(0))?;
+
         // Keys at or past `end_key` that are written only above the tip never reach
         // `visit`, so bound the Store scan too. An end key too large to encode bounds nothing.
         let end = end_key

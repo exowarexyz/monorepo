@@ -684,7 +684,7 @@ async fn test_unordered_current_operations_return_the_current_root() {
 }
 
 #[tokio::test]
-async fn test_unordered_connect_get_many_returns_present_key_proofs() {
+async fn test_unordered_connect_get_hits_returns_present_keys() {
     let store_client = common::local_store_client().await;
     let source = build_current_source_batch().await;
     commit_current_upload(&store_client, &source).await;

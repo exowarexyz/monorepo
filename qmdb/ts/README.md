@@ -84,12 +84,12 @@ verification checks bounds and forward pagination over authenticated successor
 links. For other database kinds and encodings, use raw log verification. It
 verifies encoded operations without decoding them as ordered operations or
 supplying generic current-state queries.
-Method names say which form they return. On the clients the class carries it:
+Method names say which form they return. On the clients the class carries it.
 `QmdbLogClient.operationRange` returns encoded operations and
 `QmdbOrderedClient.operationRange` returns decoded ordered ones. The shared
 `QmdbProofVerifier` names it in each method instead, as `verifyRawOperationRange`
 and `verifyRawOperations` versus `verifyOrderedOperationRange`.
-The fixed-size reads count what they check: `getFixedKeylessAppend` and
+The fixed-size reads count what they check. `getFixedKeylessAppend` and
 `getFixedUnorderedUpdate` check one operation, while
 `getFixedKeylessAppends` and `getFixedUnorderedUpdates` check many in one proof.
 
