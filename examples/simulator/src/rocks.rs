@@ -1813,9 +1813,16 @@ mod tests {
         limits::{put_entry_encoded_len, MAX_VALUE_LEN},
         log::ingest::v1::PutRequest,
     };
-    use exoware_server::{Ingest, Log, Sequence};
+    use exoware_server::{Ingest, Log, PutDeadline, Sequence, TokioClock};
     use std::collections::BTreeSet;
     use tempfile::tempdir;
+
+    fn deadline() -> PutDeadline {
+        PutDeadline::after(
+            Arc::new(TokioClock::new()),
+            std::time::Duration::from_secs(5),
+        )
+    }
 
     fn wire_request(key: &[u8], value: &[u8]) -> Bytes {
         Bytes::from(
@@ -1858,7 +1865,7 @@ mod tests {
                 )),
                 exoware_server::ingest::PutMetadata::default(),
                 exoware_server::ingest::PutLimits::default(),
-                tokio::time::Instant::now() + std::time::Duration::from_secs(5),
+                deadline(),
                 admission,
             );
             assert_eq!(store.put(&mut input).await.unwrap(), 1, "{frames} frames");
@@ -1967,7 +1974,7 @@ mod tests {
             exoware_server::ingest::box_body(axum::body::Body::from(wire.repeat(2))),
             exoware_server::ingest::PutMetadata::default(),
             exoware_server::ingest::PutLimits::default(),
-            tokio::time::Instant::now() + std::time::Duration::from_secs(5),
+            deadline(),
             admission,
         );
         let mut batch = AdmittedBatch {
@@ -2067,7 +2074,7 @@ mod tests {
             exoware_server::ingest::box_body(axum::body::Body::from_stream(stream)),
             exoware_server::ingest::PutMetadata::default(),
             exoware_server::ingest::PutLimits::default(),
-            tokio::time::Instant::now() + std::time::Duration::from_secs(5),
+            deadline(),
             admission,
         )
         .with_observer(Arc::new(SeenBatch(seen.clone())));
@@ -2110,7 +2117,7 @@ mod tests {
             exoware_server::ingest::box_body(axum::body::Body::from_stream(stream)),
             exoware_server::ingest::PutMetadata::default(),
             exoware_server::ingest::PutLimits::default(),
-            tokio::time::Instant::now() + std::time::Duration::from_secs(5),
+            deadline(),
             admission,
         );
         assert!(store.put(&mut input).await.is_err());
@@ -2169,7 +2176,7 @@ mod tests {
             exoware_server::ingest::box_body(axum::body::Body::from_stream(stream)),
             exoware_server::ingest::PutMetadata::default(),
             exoware_server::ingest::PutLimits::default(),
-            tokio::time::Instant::now() + std::time::Duration::from_secs(5),
+            deadline(),
             admission,
         )
         .with_observer(observer);
@@ -2207,7 +2214,7 @@ mod tests {
             exoware_server::ingest::box_body(axum::body::Body::from(wire)),
             exoware_server::ingest::PutMetadata::default(),
             exoware_server::ingest::PutLimits::default(),
-            tokio::time::Instant::now() + std::time::Duration::from_secs(5),
+            deadline(),
             admission,
         )
         .with_notifier(Some(hub.clone()));
