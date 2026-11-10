@@ -107,11 +107,12 @@ with its parent but leaves the parent's configured floor unchanged.
 
 ## Request options
 
-The SDK sends uncompressed Connect requests. The server accepts Put only in
-binary protobuf format, so the SDK always uses that format for Put while
-`ClientOptions.useBinaryFormat` controls the other services. Custom ingest
-clients created with `createTransport` must pass `{ useBinaryFormat: true }`
-to satisfy the [Put compatibility contract](../../proto/README.md#put-client-compatibility).
+The SDK defaults to uncompressed protobuf over Connect. To use JSON for
+services other than Put, set `ClientOptions.useBinaryFormat` to `false`.
+
+[Put requires binary protobuf](../../proto/README.md#put-client-compatibility).
+When creating a custom ingest client with `createTransport`, leave
+`useBinaryFormat` enabled.
 
 `ClientOptions.retry` controls retries, and setting `maxAttempts` to `1`
 disables them. Under the [admission retry contract](../../proto/README.md#admission-retries),

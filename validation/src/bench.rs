@@ -300,17 +300,9 @@ async fn run_workload(config: Config) -> anyhow::Result<BenchReport> {
         read_retry_attempts: client_config.read_retry_attempts(),
         request_compression: Some(client_config.request_compression()),
     };
+    // Shared so the progress task can read it. Everything else a worker counts
+    // stays in its own `WorkerTally` until it finishes.
     let ops_done = Arc::new(AtomicU64::new(0));
-    let reads_ok = Arc::new(AtomicU64::new(0));
-    let reads_miss = Arc::new(AtomicU64::new(0));
-    let writes_ok = Arc::new(AtomicU64::new(0));
-    let scans_ok = Arc::new(AtomicU64::new(0));
-    let scans_rows = Arc::new(AtomicU64::new(0));
-    let errors = Arc::new(AtomicU64::new(0));
-
-    // Latency is recorded for every SDK attempt, including failed backend
-    // calls, so error-heavy runs still explain where time was spent.
-    let latencies = Arc::new(LatencyHistogramsRecorder::default());
 
     // Uniform and Zipfian reads sample the prepared fixture. Latest reads also
     // sample prior writes from the current worker's deterministic lane.
@@ -346,13 +338,6 @@ async fn run_workload(config: Config) -> anyhow::Result<BenchReport> {
         let client = client.clone();
         let keyspace = keyspace.clone();
         let ops_done = ops_done.clone();
-        let reads_ok = reads_ok.clone();
-        let reads_miss = reads_miss.clone();
-        let writes_ok = writes_ok.clone();
-        let scans_ok = scans_ok.clone();
-        let scans_rows = scans_rows.clone();
-        let errors = errors.clone();
-        let latencies = latencies.clone();
         let zipf_sampler = zipf_sampler.clone();
         let worker_ops = worker_operation_count(total_ops, concurrency, worker)?;
         let worker_workload = workload;
@@ -367,6 +352,7 @@ async fn run_workload(config: Config) -> anyhow::Result<BenchReport> {
                 batch_size,
             );
             let mut write_number = 0u64;
+            let mut tally = WorkerTally::default();
 
             for _ in 0..worker_ops {
                 match plan.next_operation(readable_key_count) {
@@ -374,17 +360,13 @@ async fn run_workload(config: Config) -> anyhow::Result<BenchReport> {
                         let key = keyspace.inserted_key(index);
                         let request_start = Instant::now();
                         let result = client.query().get(&key).await;
-                        latencies.record_read(request_start.elapsed());
+                        tally.latencies.record_read(request_start.elapsed());
                         match result {
-                            Ok(Some(_)) => {
-                                reads_ok.fetch_add(1, Ordering::Relaxed);
-                            }
-                            Ok(None) => {
-                                reads_miss.fetch_add(1, Ordering::Relaxed);
-                            }
+                            Ok(Some(_)) => tally.reads_ok += 1,
+                            Ok(None) => tally.reads_miss += 1,
                             Err(e) => {
                                 tracing::debug!("Lookup error: {e}");
-                                errors.fetch_add(1, Ordering::Relaxed);
+                                tally.errors += 1;
                             }
                         }
                     }
@@ -393,15 +375,15 @@ async fn run_workload(config: Config) -> anyhow::Result<BenchReport> {
                         let end_key = keyspace.scan_upper_bound(&start_key);
                         let request_start = Instant::now();
                         let result = client.query().range(&start_key, &end_key, limit).await;
-                        latencies.record_scan(request_start.elapsed());
+                        tally.latencies.record_scan(request_start.elapsed());
                         match result {
                             Ok(rows) => {
-                                scans_ok.fetch_add(1, Ordering::Relaxed);
-                                scans_rows.fetch_add(rows.len() as u64, Ordering::Relaxed);
+                                tally.scans_ok += 1;
+                                tally.scans_rows += rows.len() as u64;
                             }
                             Err(e) => {
                                 tracing::debug!("Range error: {e}");
-                                errors.fetch_add(1, Ordering::Relaxed);
+                                tally.errors += 1;
                             }
                         }
                     }
@@ -427,15 +409,13 @@ async fn run_workload(config: Config) -> anyhow::Result<BenchReport> {
 
                         let request_start = Instant::now();
                         let result = client.ingest().put(&refs).await;
-                        latencies.record_write(request_start.elapsed());
+                        tally.latencies.record_write(request_start.elapsed());
                         plan.record_write_result(batch_number, result.is_ok())?;
                         match result {
-                            Ok(_) => {
-                                writes_ok.fetch_add(1, Ordering::Relaxed);
-                            }
+                            Ok(_) => tally.writes_ok += 1,
                             Err(e) => {
                                 tracing::debug!("Ingest error: {e}");
-                                errors.fetch_add(1, Ordering::Relaxed);
+                                tally.errors += 1;
                             }
                         }
                     }
@@ -443,7 +423,7 @@ async fn run_workload(config: Config) -> anyhow::Result<BenchReport> {
 
                 ops_done.fetch_add(1, Ordering::Relaxed);
             }
-            Ok::<(), anyhow::Error>(())
+            Ok::<_, anyhow::Error>(tally)
         });
     }
 
@@ -464,7 +444,11 @@ async fn run_workload(config: Config) -> anyhow::Result<BenchReport> {
         },
     );
 
-    let workers_result = join_all_or_abort(&mut workers, "benchmark worker", |()| {}).await;
+    let mut totals = WorkerTally::default();
+    let workers_result = join_all_or_abort(&mut workers, "benchmark worker", |tally| {
+        totals.merge(&tally);
+    })
+    .await;
 
     stop_progress_task(progress_task).await;
     workers_result?;
@@ -472,19 +456,18 @@ async fn run_workload(config: Config) -> anyhow::Result<BenchReport> {
     let elapsed = start.elapsed();
     let finished_at = Utc::now();
     let total = ops_done.load(Ordering::Relaxed);
-    let read_misses = reads_miss.load(Ordering::Relaxed);
     let report = BenchReport {
         config: report_config,
         seed: rng_seed,
         elapsed_ms: u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
         operations: total,
-        reads: reads_ok.load(Ordering::Relaxed) + read_misses,
-        writes: writes_ok.load(Ordering::Relaxed),
-        errors: errors.load(Ordering::Relaxed),
-        scans: scans_ok.load(Ordering::Relaxed),
-        scan_rows: scans_rows.load(Ordering::Relaxed),
-        read_misses,
-        latency_histograms: latencies.snapshot(),
+        reads: totals.reads_ok + totals.reads_miss,
+        writes: totals.writes_ok,
+        errors: totals.errors,
+        scans: totals.scans_ok,
+        scan_rows: totals.scans_rows,
+        read_misses: totals.reads_miss,
+        latency_histograms: totals.latencies.snapshot(),
     };
     print_bench_report(&report);
     if report.read_misses > 0 {
@@ -506,6 +489,32 @@ async fn run_workload(config: Config) -> anyhow::Result<BenchReport> {
     }
 
     Ok(report)
+}
+
+/// What one benchmark worker observed. Latency is recorded for every SDK
+/// attempt, including failed backend calls, so error-heavy runs still explain
+/// where time was spent.
+#[derive(Default)]
+struct WorkerTally {
+    reads_ok: u64,
+    reads_miss: u64,
+    writes_ok: u64,
+    scans_ok: u64,
+    scans_rows: u64,
+    errors: u64,
+    latencies: LatencyHistogramsRecorder,
+}
+
+impl WorkerTally {
+    fn merge(&mut self, other: &Self) {
+        self.reads_ok += other.reads_ok;
+        self.reads_miss += other.reads_miss;
+        self.writes_ok += other.writes_ok;
+        self.scans_ok += other.scans_ok;
+        self.scans_rows += other.scans_rows;
+        self.errors += other.errors;
+        self.latencies.merge(&other.latencies);
+    }
 }
 
 fn worker_batch_write_index(
@@ -530,7 +539,10 @@ fn worker_batch_write_index(
 mod tests {
     use super::*;
     use crate::{client::RequestCompression, keyspace::DEFAULT_KEY_LEN};
-    use axum::Router;
+    use axum::{
+        serve::{Listener, ListenerExt},
+        Router,
+    };
     use clap::Parser;
     use connectrpc::{Chain, ConnectError, ConnectRpcService, RequestContext, ServiceRequest};
     use exoware_sdk::{
@@ -543,6 +555,7 @@ mod tests {
             ReduceRequest, ReduceResponse, Service as QueryService,
             ServiceServer as QueryServiceServer,
         },
+        transport::set_tcp_nodelay,
     };
     use futures::stream;
     use std::{
@@ -735,7 +748,8 @@ mod tests {
         let app = Router::new().fallback_service(connect);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
-            .expect("bind test listener");
+            .expect("bind test listener")
+            .tap_io(set_tcp_nodelay);
         let url = format!(
             "http://{}",
             listener.local_addr().expect("listener address")
@@ -755,7 +769,8 @@ mod tests {
         let app = Router::new().fallback_service(connect);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
-            .expect("bind test listener");
+            .expect("bind test listener")
+            .tap_io(set_tcp_nodelay);
         let url = format!(
             "http://{}",
             listener.local_addr().expect("listener address")
@@ -778,7 +793,8 @@ mod tests {
         let app = Router::new().fallback_service(connect);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
-            .expect("bind test listener");
+            .expect("bind test listener")
+            .tap_io(set_tcp_nodelay);
         let url = format!(
             "http://{}",
             listener.local_addr().expect("listener address")

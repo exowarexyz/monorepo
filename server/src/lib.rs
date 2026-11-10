@@ -1,4 +1,4 @@
-#![allow(clippy::result_large_err, clippy::type_complexity)]
+#![allow(clippy::type_complexity)]
 //! Store server for ingest/query/prune/retention/stream APIs.
 //!
 //! Use [`AppState`] with [`connect_stack`] for an all-in-one server, or the narrower

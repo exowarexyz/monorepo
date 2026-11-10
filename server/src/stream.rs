@@ -198,7 +198,10 @@ mod tests {
     use super::*;
     use crate::{Filter, Selector, StreamFilter, Utf8};
     use bytes::Bytes;
-    use exoware_sdk::keys::Key;
+    use exoware_sdk::{
+        keys::{Key, MAX_KEY_LEN},
+        stream_filter::{validate_filter, MAX_SELECTORS_PER_FILTER, MAX_VALUE_FILTERS_PER_FILTER},
+    };
 
     fn filter(prefix: u8, regex: &str) -> StreamFilter {
         StreamFilter {
@@ -388,11 +391,37 @@ mod tests {
         assert!(!matchers.matches(key(1, b"miss").as_ref(), b"v"));
         assert!(!matchers.matches(key(1, b"hit").as_ref(), b"other"));
 
-        let invalid = StreamFilter {
-            selectors: vec![],
-            value_filters: vec![],
-        };
-        assert!(CompiledMatchers::compile(&invalid).is_err());
+        // Subscribe handlers validate filters only through `compile`, so it
+        // must reject each kind of filter that `validate_filter` rejects.
+        let selector = filter(1, "^hit$").selectors.remove(0);
+        let invalid = [
+            StreamFilter {
+                selectors: vec![],
+                value_filters: vec![],
+            },
+            StreamFilter {
+                selectors: vec![selector; MAX_SELECTORS_PER_FILTER + 1],
+                value_filters: vec![],
+            },
+            filter_with_values(
+                1,
+                "^hit$",
+                vec![Filter::Exact(Bytes::from_static(b"v")); MAX_VALUE_FILTERS_PER_FILTER + 1],
+            ),
+            StreamFilter {
+                selectors: vec![Selector {
+                    prefix: Bytes::from(vec![1; MAX_KEY_LEN + 1]),
+                    payload_regex: Utf8::from("^hit$"),
+                }],
+                value_filters: vec![],
+            },
+            filter(1, " "),
+            filter_with_values(1, "^hit$", vec![Filter::Regex(" ".into())]),
+        ];
+        for filter in invalid {
+            assert!(validate_filter(&filter).is_err(), "{filter:?}");
+            assert!(CompiledMatchers::compile(&filter).is_err(), "{filter:?}");
+        }
     }
 
     #[test]

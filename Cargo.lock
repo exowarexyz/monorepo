@@ -550,7 +550,7 @@ dependencies = [
  "bitflags 2.13.1",
  "cexpr",
  "clang-sys",
- "itertools 0.10.5",
+ "itertools 0.13.0",
  "proc-macro2",
  "quote",
  "regex",
@@ -2669,7 +2669,6 @@ name = "exoware-integration"
 version = "2026.9.0"
 dependencies = [
  "axum",
- "buffa",
  "bytes",
  "commonware-cryptography",
  "commonware-parallel",
@@ -2709,7 +2708,6 @@ dependencies = [
  "connectrpc",
  "connectrpc-build",
  "criterion 0.5.1",
- "crossbeam-utils",
  "exoware-qmdb",
  "exoware-sdk",
  "exoware-server",
@@ -2757,10 +2755,11 @@ dependencies = [
  "buffa-types",
  "bytes",
  "commonware-codec",
+ "commonware-macros",
  "connectrpc",
  "connectrpc-build",
  "cookie_store",
- "crossbeam-utils",
+ "criterion 0.5.1",
  "futures",
  "hex",
  "http",
@@ -2779,7 +2778,7 @@ dependencies = [
  "tokio",
  "tower",
  "tracing",
- "zstd-safe",
+ "zstd",
 ]
 
 [[package]]
@@ -2823,7 +2822,6 @@ dependencies = [
  "commonware-consensus",
  "commonware-cryptography",
  "commonware-math",
- "commonware-p2p",
  "commonware-parallel",
  "commonware-resolver",
  "commonware-runtime",
@@ -2875,6 +2873,7 @@ dependencies = [
  "parking_lot",
  "regex",
  "reqwest",
+ "rlimit",
  "rocksdb",
  "tempfile",
  "tokio",
@@ -2904,11 +2903,8 @@ dependencies = [
  "futures",
  "hex",
  "http-body",
- "regex",
- "reqwest",
  "serde",
  "serde_json",
- "thiserror",
  "tokio",
  "tower-http 0.5.2",
  "tracing",
@@ -4675,7 +4671,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b570b25f7617e43d59005d0990ccb79e950a423952cea19671b7a876da390adf"
 dependencies = [
  "anyhow",
- "itertools 0.10.5",
+ "itertools 0.14.0",
  "proc-macro2",
  "quote",
  "syn 2.0.119",
@@ -5034,6 +5030,15 @@ dependencies = [
  "libc",
  "untrusted 0.9.0",
  "windows-sys 0.52.0",
+]
+
+[[package]]
+name = "rlimit"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f35ee2729c56bb610f6dba436bf78135f728b7373bdffae2ec815b2d3eb98cc3"
+dependencies = [
+ "libc",
 ]
 
 [[package]]

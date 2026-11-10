@@ -21,6 +21,7 @@ pub const fn crate_version() -> &'static str {
 
 const DIRECTORY_FLAG: &str = "directory";
 const PORT_FLAG: &str = "port";
+const MAX_OPEN_FILES_FLAG: &str = "max-open-files";
 const VERBOSE_FLAG: &str = "verbose";
 
 #[tokio::main]
@@ -62,6 +63,14 @@ async fn main() -> std::process::ExitCode {
                                 .default_value("8080")
                                 .value_parser(clap::value_parser!(u16))
                                 .action(ArgAction::Set),
+                        )
+                        .arg(
+                            Arg::new(MAX_OPEN_FILES_FLAG)
+                                .long(MAX_OPEN_FILES_FLAG)
+                                .help("Table files RocksDB keeps open. The process open-file limit must exceed it.")
+                                .default_value(server::DEFAULT_MAX_OPEN_FILES.to_string().leak() as &str)
+                                .value_parser(clap::value_parser!(i32).range(1..))
+                                .action(ArgAction::Set),
                         ),
                 ),
         )
@@ -97,7 +106,8 @@ async fn main() -> std::process::ExitCode {
             Some((server::RUN_CMD, m)) => {
                 let directory = m.get_one::<PathBuf>(DIRECTORY_FLAG).unwrap();
                 let port = m.get_one::<u16>(PORT_FLAG).unwrap();
-                match server::run(directory, *port).await {
+                let max_open_files = m.get_one::<i32>(MAX_OPEN_FILES_FLAG).unwrap();
+                match server::run(directory, *port, *max_open_files).await {
                     Ok(()) => return std::process::ExitCode::SUCCESS,
                     Err(e) => {
                         error!(error = ?e, "server failed");

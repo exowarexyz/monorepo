@@ -28,20 +28,19 @@ pub use keys::{Key, KeyMut, KeyValidationError, Prefix, PrefixError, Value, MAX_
 pub use proto::*;
 extern crate self as exoware_proto;
 
-use crate::proto::transport::{
-    BalancedHttp2Config as ProtoBalancedHttp2Config,
-    BalancedHttp2Transport as ProtoBalancedHttp2Transport,
-    ErasedClientTransport as ProtoErasedClientTransport,
-    ErasedResponseBody as ProtoErasedResponseBody,
+use crate::proto::{
+    transport::{
+        BalancedHttp2Config as ProtoBalancedHttp2Config,
+        BalancedHttp2Transport as ProtoBalancedHttp2Transport,
+        ErasedClientTransport as ProtoErasedClientTransport,
+        ErasedResponseBody as ProtoErasedResponseBody,
+    },
+    zstd_codec::ZstdCodec,
 };
 use bytes::Bytes;
-use connectrpc::{
-    client::{ClientConfig, ServerStream as ConnectServerStream},
-    compression::ZstdProvider,
-};
+use connectrpc::client::{ClientConfig, ServerStream as ConnectServerStream};
 pub use connectrpc::{ConnectError, ErrorCode};
 use credential::{client_error_from_connect, ApiKey, Credential, UnusableEnvKey};
-use crossbeam_utils::atomic::AtomicCell;
 use exoware_proto::{
     connect_compression_registry as proto_connect_compression_registry,
     decode_connect_error as proto_decode_connect_error,
@@ -71,7 +70,14 @@ use limits::{
 };
 use rand::RngExt as _;
 use rustls_platform_verifier::ConfigVerifierExt;
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{
+    collections::HashMap,
+    sync::{
+        atomic::{AtomicBool, AtomicU64, Ordering},
+        Arc,
+    },
+    time::Duration,
+};
 
 const DEFAULT_RETRY_MAX_ATTEMPTS: usize = 3;
 const DEFAULT_RETRY_INITIAL_BACKOFF_MS: u64 = 100;
@@ -148,7 +154,7 @@ impl ConnectRequestCompression {
 }
 
 /// Store client defaults: [`connect_compression_registry`] for codecs;
-/// [`PreferZstdHttpClient`] sets `Accept-Encoding: zstd, gzip` on responses.
+/// [`PreferZstdHttpClient`] reorders the request's accepted encodings to `zstd, gzip`.
 ///
 /// Request body compression uses [`ConnectRequestCompression`] (default none);
 /// connectrpc only supports one request encoding per config (see
@@ -160,7 +166,7 @@ fn store_connect_client_config(
 ) -> ClientConfig {
     let mut compression = proto_connect_compression_registry();
     if let ConnectRequestCompression::Zstd { level } = request_compression {
-        compression = compression.register(ZstdProvider::with_level(level));
+        compression = compression.register(ZstdCodec::with_level(level));
     }
 
     let config = ClientConfig::new(base_uri)
@@ -545,16 +551,9 @@ impl PrefixedStoreClient {
     ) -> Result<GetManyStream, ClientError> {
         let mut proto_keys: Vec<Vec<u8>> = Vec::with_capacity(keys.len());
         for key in keys {
-            let encoded = self.encode_store_key(key)?;
-            if !is_valid_key_size(encoded.len()) {
-                return Err(ClientError::WireFormat(format!(
-                    "key length {} is outside valid store key range ({}..={})",
-                    encoded.len(),
-                    keys::MIN_KEY_LEN,
-                    MAX_KEY_LEN
-                )));
-            }
-            proto_keys.push(encoded.to_vec());
+            // `encode_store_key` already rejects keys over `MAX_KEY_LEN`, and
+            // `MIN_KEY_LEN` is 0, so the encoded key is a valid size.
+            proto_keys.push(self.encode_store_key(key)?.to_vec());
         }
         let mut stream = self
             .client
@@ -780,12 +779,14 @@ impl PrefixedStoreClient {
         };
         let mut out = Vec::with_capacity(owned.entries.len());
         for entry in owned.entries {
-            let key = Bytes::from(entry.key);
-            if !self.prefix.matches(&key) {
-                continue;
-            }
+            let key = match self.prefix.decode_key(&Bytes::from(entry.key)) {
+                Ok(key) => key,
+                // Keys outside this prefix belong to other namespaces.
+                Err(StoreKeyPrefixError::PrefixMismatch) => continue,
+                Err(err) => return Err(err.into()),
+            };
             out.push(StoreBatchEntry {
-                key: self.decode_store_key(&key)?,
+                key,
                 value: entry.value,
             });
         }
@@ -1442,6 +1443,7 @@ fn is_batch_missing_error(err: &ConnectError) -> bool {
 /// Retry policy for idempotent reads and puts rejected before admission.
 #[derive(Clone, Copy, Debug)]
 pub struct RetryConfig {
+    /// At least 1. The field is private and `with_max_attempts` clamps it.
     max_attempts: usize,
     initial_backoff: Duration,
     max_backoff: Duration,
@@ -1476,12 +1478,9 @@ impl RetryConfig {
     }
 
     pub(crate) fn sanitized(self) -> Self {
-        let max_attempts = self.max_attempts.max(1);
-        let max_backoff = self.max_backoff.max(self.initial_backoff);
         Self {
-            max_attempts,
-            initial_backoff: self.initial_backoff,
-            max_backoff,
+            max_backoff: self.max_backoff.max(self.initial_backoff),
+            ..self
         }
     }
 }
@@ -1832,7 +1831,7 @@ pub struct ReadSession {
     client: PrefixedStoreClient,
     policy: ReadPolicy,
     configured_floor: Option<u64>,
-    state: Arc<SessionState>,
+    observed_sequence: Arc<ObservedSequence>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -1841,31 +1840,24 @@ enum ReadPolicy {
     Monotonic,
 }
 
-#[derive(Debug)]
-struct SessionState {
-    sequence: Arc<ObservedSequence>,
-}
-
-impl SessionState {
-    fn evaluated_sequence(&self) -> Option<u64> {
-        self.sequence.get()
-    }
-}
-
+/// The highest sequence observed so far. `seen` tells an observed zero apart
+/// from no observation and is set only after `max` includes that observation.
 #[derive(Debug, Default)]
 struct ObservedSequence {
-    value: AtomicCell<Option<u64>>,
+    max: AtomicU64,
+    seen: AtomicBool,
 }
 
 impl ObservedSequence {
     fn get(&self) -> Option<u64> {
-        self.value.load()
+        self.seen
+            .load(Ordering::Acquire)
+            .then(|| self.max.load(Ordering::Relaxed))
     }
 
     fn observe(&self, sequence: u64) {
-        self.value
-            .fetch_update(|current| Some(current.max(Some(sequence))))
-            .unwrap();
+        self.max.fetch_max(sequence, Ordering::Relaxed);
+        self.seen.store(true, Ordering::Release);
     }
 }
 
@@ -2072,7 +2064,7 @@ impl StoreClient {
     ) -> Result<GetManyStream, ClientError> {
         let config = self.streaming_client_config(self.query_uri.clone());
         let client = QueryServiceClient::new(self.connect_http.clone(), config);
-        let max_attempts = self.retry_config.max_attempts.max(1);
+        let max_attempts = self.retry_config.max_attempts;
         let mut attempt = 1usize;
         loop {
             let result = self
@@ -2333,7 +2325,7 @@ impl StoreClient {
         let config = self.streaming_client_config(self.query_uri.clone());
         let client = QueryServiceClient::new(self.connect_http.clone(), config);
         let min_sequence_number = options.min_sequence_number;
-        let max_attempts = self.retry_config.max_attempts.max(1);
+        let max_attempts = self.retry_config.max_attempts;
         let mut attempt = 1usize;
         loop {
             // Server-streaming RPCs cannot transparently recover mid-stream failures,
@@ -2464,7 +2456,7 @@ impl StoreClient {
         F: FnMut() -> Fut,
         Fut: std::future::Future<Output = Result<T, ConnectError>>,
     {
-        let max_attempts = self.retry_config.max_attempts.max(1);
+        let max_attempts = self.retry_config.max_attempts;
         let mut attempt = 1usize;
         loop {
             match make_request().await {
@@ -2832,7 +2824,8 @@ impl<'a> Stream<'a> {
     /// `log.stream.v1.Service.Subscribe` — see `StreamSubscription::next`
     /// for consuming delivered frames. `since_sequence_number = None` starts
     /// live from the next Put; `Some(N)` replays retained batches before
-    /// transitioning to live. An evicted `since` returns a
+    /// transitioning to live, and never delivers a batch below `N`, even when
+    /// `N` is past the latest published batch. An evicted `since` returns a
     /// `ConnectError::out_of_range` carrying `ErrorInfo.reason = "BATCH_EVICTED"`.
     pub async fn subscribe(
         &self,
@@ -2882,9 +2875,7 @@ impl ReadSession {
             client,
             policy,
             configured_floor,
-            state: Arc::new(SessionState {
-                sequence: Arc::new(ObservedSequence::default()),
-            }),
+            observed_sequence: Arc::new(ObservedSequence::default()),
         }
     }
 
@@ -2894,7 +2885,7 @@ impl ReadSession {
     pub fn min_sequence_number(&self) -> Option<u64> {
         match self.policy {
             ReadPolicy::Fixed => self.configured_floor,
-            ReadPolicy::Monotonic => self.configured_floor.max(self.state.evaluated_sequence()),
+            ReadPolicy::Monotonic => self.configured_floor.max(self.observed_sequence.get()),
         }
     }
 
@@ -2915,7 +2906,7 @@ impl ReadSession {
     ///
     /// Returns `None` until a response reports a sequence.
     pub fn evaluated_sequence(&self) -> Option<u64> {
-        self.state.evaluated_sequence()
+        self.observed_sequence.get()
     }
 
     /// Share this session's freshness state with another client for the same Store.
@@ -2930,7 +2921,7 @@ impl ReadSession {
     pub async fn get_batch(&self, sequence_number: u64) -> Result<Option<StoreBatch>, ClientError> {
         let batch = self.client.get_batch(sequence_number).await?;
         if let Some(batch) = &batch {
-            self.state.sequence.observe(batch.sequence_number);
+            self.observed_sequence.observe(batch.sequence_number);
         }
         Ok(batch)
     }
@@ -2942,7 +2933,7 @@ impl ReadSession {
         since_sequence_number: Option<u64>,
     ) -> Result<StreamSubscription, ClientError> {
         let mut subscription = self.client.subscribe(filter, since_sequence_number).await?;
-        subscription.observed_sequence = Some(self.state.sequence.clone());
+        subscription.observed_sequence = Some(self.observed_sequence.clone());
         Ok(subscription)
     }
 
@@ -2952,7 +2943,7 @@ impl ReadSession {
             .send_get(key, self.min_sequence_number())
             .await?;
         if let Some(detail) = detail {
-            self.state.sequence.observe(detail.sequence_number);
+            self.observed_sequence.observe(detail.sequence_number);
         }
         Ok(response.value)
     }
@@ -2967,7 +2958,7 @@ impl ReadSession {
                 keys,
                 batch_size,
                 self.min_sequence_number(),
-                Some(self.state.sequence.clone()),
+                Some(self.observed_sequence.clone()),
             )
             .await
     }
@@ -3023,7 +3014,7 @@ impl ReadSession {
                 mode,
                 QueryStreamReadOptions {
                     min_sequence_number: self.min_sequence_number(),
-                    observed_sequence: Some(self.state.sequence.clone()),
+                    observed_sequence: Some(self.observed_sequence.clone()),
                 },
             )
             .await
@@ -3055,7 +3046,7 @@ impl ReadSession {
                 request,
                 QueryStreamReadOptions {
                     min_sequence_number: self.min_sequence_number(),
-                    observed_sequence: Some(self.state.sequence.clone()),
+                    observed_sequence: Some(self.observed_sequence.clone()),
                 },
             )
             .await
@@ -3174,8 +3165,9 @@ mod tests {
     use crate::kv_codec::{KvFieldKind, KvPredicate, KvPredicateCheck, KvPredicateConstraint};
     use buffa::Message as _;
     use buffa_types::google::protobuf::Duration as ProtoDuration;
+    use commonware_macros::boxed;
     use connectrpc::{
-        compression::{CompressionProvider, GzipProvider},
+        compression::{CompressionProvider, GzipProvider, ZstdProvider},
         error::ErrorDetail,
     };
     use exoware_proto::query::TraversalMode as ProtoTraversalMode;
@@ -3714,6 +3706,7 @@ mod tests {
         }
     }
 
+    #[boxed]
     async fn assert_streaming_deadline<T>(
         future: impl std::future::Future<Output = Result<T, ClientError>>,
     ) {
@@ -3790,11 +3783,11 @@ mod tests {
     fn assert_single_zstd_put_frame(body: &[u8], protobuf: &[u8]) {
         assert!(body.starts_with(&[0x28, 0xb5, 0x2f, 0xfd]));
         assert_eq!(
-            zstd_safe::get_frame_content_size(body).unwrap(),
+            zstd::zstd_safe::get_frame_content_size(body).unwrap(),
             Some(protobuf.len() as u64)
         );
         assert_eq!(
-            zstd_safe::find_frame_compressed_size(body).unwrap(),
+            zstd::zstd_safe::find_frame_compressed_size(body).unwrap(),
             body.len()
         );
         let decoded = proto_connect_compression_registry()
@@ -3873,6 +3866,14 @@ mod tests {
             let stream_config = client.streaming_client_config(client.stream_uri.clone());
             assert!(stream_config.compression().supports("zstd"));
             assert!(stream_config.compression().supports("gzip"));
+            // Registering a request level must keep the SDK's zstd decompression, which returns
+            // responses with no spare capacity.
+            let response = stream_config
+                .compression()
+                .decompress_with_limit("zstd", fast.clone(), MAX_RESPONSE_MESSAGE_BYTES)
+                .unwrap();
+            assert_eq!(response, encoded);
+            assert_eq!(response.try_into_mut().unwrap().capacity(), encoded.len());
             if let Some(name) = compression.wire_name() {
                 assert_eq!(
                     stream_config
@@ -4057,7 +4058,9 @@ mod tests {
             headers.get("content-type").unwrap(),
             "application/connect+proto"
         );
-        assert_eq!(headers.get(ACCEPT_ENCODING).unwrap(), "zstd, gzip");
+        // Streams negotiate only through Connect-Accept-Encoding, and the transport adds no
+        // encodings the client didn't list.
+        assert!(headers.get(ACCEPT_ENCODING).is_none());
         let stream_encoding = connectrpc::Protocol::Connect.accept_encoding_header();
         assert_eq!(headers.get(stream_encoding).unwrap(), "zstd, gzip");
         assert_eq!(headers.get_all(stream_encoding).iter().count(), 1);
@@ -4769,6 +4772,17 @@ mod tests {
         for thread in threads {
             thread.join().unwrap();
         }
+        assert_eq!(observed.get(), Some(u64::MAX));
+    }
+
+    #[test]
+    fn observed_sequence_keeps_zero_apart_from_none() {
+        let observed = ObservedSequence::default();
+        assert_eq!(observed.get(), None);
+        observed.observe(0);
+        assert_eq!(observed.get(), Some(0));
+        observed.observe(u64::MAX);
+        observed.observe(3);
         assert_eq!(observed.get(), Some(u64::MAX));
     }
 

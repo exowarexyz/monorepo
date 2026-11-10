@@ -11,7 +11,6 @@ workspace = true
 
 [dependencies]
 axum = { workspace = true }
-buffa = { workspace = true }
 bytes = { workspace = true }
 commonware-cryptography = { workspace = true }
 commonware-parallel = { workspace = true }

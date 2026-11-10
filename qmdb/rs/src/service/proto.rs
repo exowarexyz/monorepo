@@ -15,6 +15,8 @@ pub mod qmdb {
         #![allow(elided_lifetimes_in_paths)]
         #![allow(clippy::use_self)]
         #![allow(clippy::missing_const_for_fn)]
+        #![allow(clippy::multiple_inherent_impl)]
+        #![allow(clippy::unused_async)]
         include!("../gen/qmdb.v1.rs");
     }
 }

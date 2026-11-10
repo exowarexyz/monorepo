@@ -32,7 +32,10 @@ mod tests {
         aggregate::*, builder::*, codec::*, diagnostics::*, filter::*, predicate::*, scan::*,
         types::*, writer::*, *,
     };
-    use axum::Router;
+    use axum::{
+        serve::{Listener, ListenerExt},
+        Router,
+    };
     use buffa::Message;
     use bytes::Bytes;
     use commonware_codec::Encode;
@@ -49,7 +52,7 @@ mod tests {
         },
         common::{config::ConfigOptions, ScalarValue},
         functions_aggregate::expr_fn::sum,
-        logical_expr::{col, in_list, Expr, Operator},
+        logical_expr::{col, expr::Case, in_list, Cast, Expr, Operator, TryCast},
         physical_expr::{expressions::Column, LexOrdering, PhysicalSortExpr},
         physical_optimizer::{
             limit_pushdown::LimitPushdown, pushdown_sort::PushdownSort, PhysicalOptimizerRule,
@@ -76,6 +79,7 @@ mod tests {
             ReduceRequest as ProtoReduceRequest, ReduceResponse as ProtoReduceResponse,
             Service as QueryService, ServiceServer as QueryServiceServer,
         },
+        transport::set_tcp_nodelay,
         PrefixedStoreClient, RangeMode, RangeTraversalDirection, StoreBatchUpload, StoreClient,
     };
     use exoware_server::{
@@ -115,6 +119,22 @@ mod tests {
         )
         .unwrap();
         TableModel::from_config(&config).unwrap()
+    }
+
+    /// Builds a primary-key scan over every column, without a row filter.
+    fn unfiltered_scan(
+        client: StoreClient,
+        model: Arc<TableModel>,
+        fetch: Option<usize>,
+    ) -> KvScanExec {
+        let table = KvTable {
+            client: PrefixedStoreClient::empty(client),
+            model,
+            index_specs: Arc::new(Vec::new()),
+        };
+        let state = DataFusionSessionContext::new().state();
+        KvScanExec::try_new(&table, &state, None, &[], fetch)
+            .expect("unfiltered scan must plan successfully")
     }
 
     fn key_payload(prefix: &Prefix, key: &Key, offset: usize, len: usize) -> Vec<u8> {
@@ -398,7 +418,8 @@ mod tests {
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
-            .expect("bind mock server");
+            .expect("bind mock server")
+            .tap_io(set_tcp_nodelay);
         let addr = listener.local_addr().expect("local addr");
         let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
         tokio::spawn(async move {
@@ -468,6 +489,47 @@ mod tests {
             .map(|(_, plan)| plan.as_str())
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    #[tokio::test]
+    async fn explain_reports_primary_key_point_reads() {
+        let state = MockState {
+            kv: Arc::new(Mutex::new(BTreeMap::new())),
+            range_calls: Arc::new(AtomicUsize::new(0)),
+            range_reduce_calls: Arc::new(AtomicUsize::new(0)),
+            sequence_number: Arc::new(AtomicU64::new(0)),
+        };
+        let (base_url, shutdown_tx) = spawn_mock_server(state).await;
+        let client = StoreClient::new(&base_url);
+
+        let schema = KvSchema::new(PrefixedStoreClient::empty(client))
+            .table(
+                "orders",
+                vec![
+                    TableColumnConfig::new("id", DataType::Int64, false),
+                    TableColumnConfig::new("status", DataType::Utf8, false),
+                ],
+                vec!["id".to_string()],
+                vec![],
+            )
+            .expect("schema must build");
+        let ctx = SqlContext::new(schema.client().clone());
+        ctx.register_schema(schema).expect("schema must register");
+
+        // Complete primary-key points are read directly, so the plan reports the key
+        // count and needs no row recheck.
+        let explain = physical_plan_text(
+            &explain_plan_rows(
+                &ctx,
+                "SELECT id, status FROM orders WHERE id IN (3, 20, 1, 10)",
+            )
+            .await,
+        );
+        assert!(explain.contains("mode=primary_key_points"), "{explain}");
+        assert!(explain.contains("ranges=4"), "{explain}");
+        assert!(explain.contains("row_recheck=false"), "{explain}");
+        assert!(explain.contains("full_scan_like=false"), "{explain}");
+        let _ = shutdown_tx.send(());
     }
 
     #[tokio::test]
@@ -721,9 +783,107 @@ mod tests {
         });
 
         let (argument, filter) =
-            normalize_count_aggregate_argument(&case_expr, &model).expect("normalize");
+            normalize_aggregate_argument(AggregatePushdownFunction::Count, &case_expr, &model)
+                .expect("normalize");
         assert_eq!(argument, AggregatePushdownArgument::CountAll);
         assert!(filter.is_some());
+    }
+
+    #[test]
+    fn cast_case_normalization_preserves_casts_and_eligibility() {
+        // `make_case` builds a CASE with one `status = 'open'` branch, and every accepted form
+        // must return that condition as its guard.
+        let (model, _) = test_model();
+        let guard = col("status").eq(Expr::Literal(
+            ScalarValue::Utf8(Some("open".to_string())),
+            None,
+        ));
+        let make_case = |then_expr: Expr, else_expr: Option<Expr>| {
+            Expr::Case(Case {
+                expr: None,
+                when_then_expr: vec![(Box::new(guard.clone()), Box::new(then_expr))],
+                else_expr: else_expr.map(Box::new),
+            })
+        };
+        let normalize = |func, expr: &Expr| normalize_case_aggregate_argument(func, expr, &model);
+        let null = Expr::Literal(ScalarValue::Int64(None), None);
+
+        for try_cast in [false, true] {
+            // Every form is checked under both CAST and TRY_CAST to Float64.
+            let cast = |expr| {
+                if try_cast {
+                    Expr::TryCast(TryCast::new(Box::new(expr), DataType::Float64))
+                } else {
+                    Expr::Cast(Cast::new(Box::new(expr), DataType::Float64))
+                }
+            };
+
+            // A null ELSE can be discarded, but the cast on each value must survive.
+            for else_expr in [
+                None,
+                Some(null.clone()),
+                Some(null.clone().alias("missing")),
+            ] {
+                let case = make_case(col("amount_cents"), else_expr);
+                for expr in [
+                    cast(case.clone()),
+                    cast(case.alias("value")).alias("cast_value"),
+                ] {
+                    assert_eq!(
+                        normalize(AggregatePushdownFunction::Sum, &expr),
+                        Some((
+                            AggregatePushdownArgument::Expr(PushdownValueExpr::CastFloat64(
+                                Box::new(PushdownValueExpr::Column(3)),
+                            )),
+                            guard.clone(),
+                        )),
+                        "{expr:?}",
+                    );
+                }
+            }
+
+            // Eligibility is syntactic, so a cast null ELSE is rejected like a non-null ELSE.
+            // A nested cast or THEN branches with different arguments are also rejected.
+            let mut unequal = make_case(col("amount_cents"), None);
+            let Expr::Case(case) = &mut unequal else {
+                unreachable!()
+            };
+            case.when_then_expr.push((
+                Box::new(col("customer_id").eq(Expr::Literal(ScalarValue::Int64(Some(1)), None))),
+                Box::new(col("order_id")),
+            ));
+            for expr in [
+                cast(make_case(
+                    col("amount_cents"),
+                    Some(Expr::Literal(ScalarValue::Int64(Some(0)), None)),
+                )),
+                cast(make_case(col("amount_cents"), Some(cast(null.clone())))),
+                cast(cast(make_case(col("amount_cents"), None))),
+                cast(unequal),
+            ] {
+                assert_eq!(
+                    normalize(AggregatePushdownFunction::Sum, &expr),
+                    None,
+                    "{expr:?}"
+                );
+            }
+
+            // COUNT counts every guarded row for an uncast non-null literal, but a cast literal
+            // compiles as a value expression.
+            let expr = cast(make_case(
+                Expr::Literal(ScalarValue::Int64(Some(1)), None),
+                None,
+            ));
+            assert_eq!(
+                normalize(AggregatePushdownFunction::Count, &expr),
+                Some((
+                    AggregatePushdownArgument::Expr(PushdownValueExpr::CastFloat64(Box::new(
+                        PushdownValueExpr::Literal(KvReducedValue::Int64(1)),
+                    ))),
+                    guard.clone(),
+                )),
+            );
+        }
     }
 
     #[test]
@@ -802,7 +962,6 @@ mod tests {
         let access_plan = ScanAccessPlan::new(&model, &Some(vec![]), &predicate);
         let plan = predicate
             .choose_index_plan(&model, &specs, &access_plan)
-            .expect("plan")
             .expect("exists");
         assert_eq!(plan.spec_idx, 0);
         assert_eq!(plan.constrained_prefix_len, 2);
@@ -848,7 +1007,6 @@ mod tests {
         let access_plan = ScanAccessPlan::new(&model, &Some(vec![]), &predicate);
         let plan = predicate
             .choose_index_plan(&model, &specs, &access_plan)
-            .expect("plan")
             .expect("exists");
         assert_eq!(specs[plan.spec_idx].name, "status_covering");
     }
@@ -877,11 +1035,156 @@ mod tests {
         let access_plan = ScanAccessPlan::new(&model, &Some(vec![]), &predicate);
         let plan = predicate
             .choose_index_plan(&model, &specs, &access_plan)
-            .expect("plan")
             .expect("exists");
         assert_eq!(specs[plan.spec_idx].name, "xy_z");
         assert_eq!(specs[plan.spec_idx].layout, IndexLayout::ZOrder);
         assert_eq!(plan.constrained_column_count, 2);
+    }
+
+    #[test]
+    fn index_range_budget_counts_distinct_combinations_and_keeps_fallbacks() {
+        let (model, _) = zorder_test_model();
+        for layout in [IndexLayout::Lexicographic, IndexLayout::ZOrder] {
+            // The composite `xy` index takes each layout in turn, and the single-column `x`
+            // index offers a narrower fallback.
+            let specs = model
+                .resolve_index_specs(&[
+                    IndexSpec::new("xy", vec!["x".into(), "y".into()])
+                        .unwrap()
+                        .with_layout(layout),
+                    IndexSpec::new("x", vec!["x".into()]).unwrap(),
+                ])
+                .unwrap();
+            for y_count in [64, 65] {
+                // Duplicate SQL literals do not consume additional range budget.
+                let filters = [("x", 64), ("y", y_count)].map(|(name, count)| {
+                    in_list(
+                        col(name),
+                        (0..count)
+                            .chain(0..count)
+                            .map(|n| Expr::Literal(ScalarValue::Int64(Some(n)), None))
+                            .collect(),
+                        false,
+                    )
+                });
+                let predicate = QueryPredicate::from_filters(&filters, &model);
+                let ranges = match layout {
+                    IndexLayout::Lexicographic => {
+                        predicate.expand_index_ranges(&model, &specs[0], 2)
+                    }
+                    IndexLayout::ZOrder => predicate.expand_zorder_index_ranges(&model, &specs[0]),
+                };
+                let access = ScanAccessPlan::new(&model, &Some(vec![]), &predicate);
+                let plan = predicate
+                    .choose_index_plan(&model, &specs, &access)
+                    .unwrap();
+                if y_count == 64 {
+                    // 64 distinct values per column expand to exactly the 4096-range budget.
+                    assert_eq!(ranges.unwrap().len(), 4096);
+                    assert_eq!(plan.spec_idx, 0);
+                } else {
+                    // An oversized product disqualifies only that index. Another
+                    // index, or primary-key access, must remain available.
+                    assert_eq!(ranges.unwrap_err(), "index range budget exceeded");
+                    assert_eq!(plan.spec_idx, 1);
+                    assert!(predicate
+                        .choose_index_plan(&model, &specs[..1], &access)
+                        .is_none());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn index_range_expansion_matches_one_range_per_value() {
+        let (model, specs) = test_model();
+        let column = |name| *model.columns_by_name.get(name).unwrap();
+        let strings = |label: &str, count| {
+            (0..count)
+                .map(|i| format!("{label}{i:04}"))
+                .collect::<Vec<_>>()
+        };
+
+        // A full-budget IN list on the leading index column, a range on the second, an IN list
+        // on a column outside the index, and a primary-key range that bounds the key suffix.
+        let mut predicate = QueryPredicate::default();
+        predicate.constraints.extend([
+            (
+                column("region"),
+                PredicateConstraint::StringIn(strings("region", 4096)),
+            ),
+            (
+                column("customer_id"),
+                PredicateConstraint::IntRange {
+                    min: Some(10),
+                    max: Some(20),
+                },
+            ),
+            (
+                column("status"),
+                PredicateConstraint::StringIn(strings("status", 64)),
+            ),
+            (
+                column("order_id"),
+                PredicateConstraint::IntRange {
+                    min: Some(100),
+                    max: None,
+                },
+            ),
+        ]);
+
+        // Expanding the product must equal expanding each value on its own.
+        let ranges = predicate.expand_index_ranges(&model, &specs[0], 2).unwrap();
+        let mut single = predicate.clone();
+        let expected = strings("region", 4096)
+            .into_iter()
+            .flat_map(|region| {
+                single
+                    .constraints
+                    .insert(column("region"), PredicateConstraint::StringEq(region));
+                single.expand_index_ranges(&model, &specs[0], 2).unwrap()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(ranges.len(), 4096);
+        assert_eq!(ranges, expected);
+
+        // The z-order expansion shares the same overlay loop.
+        let (model, specs) = zorder_test_model();
+        let column = |name| *model.columns_by_name.get(name).unwrap();
+        let point = |v| PredicateConstraint::IntRange {
+            min: Some(v),
+            max: Some(v),
+        };
+        let mut predicate = QueryPredicate::default();
+        predicate.constraints.extend([
+            (column("x"), PredicateConstraint::IntIn((0..64).collect())),
+            (column("y"), PredicateConstraint::IntIn((0..64).collect())),
+            (
+                column("id"),
+                PredicateConstraint::IntRange {
+                    min: None,
+                    max: Some(500),
+                },
+            ),
+        ]);
+        let ranges = predicate
+            .expand_zorder_index_ranges(&model, &specs[1])
+            .unwrap();
+        let mut single = predicate.clone();
+        let mut expected = Vec::new();
+        for x in 0..64 {
+            for y in 0..64 {
+                single.constraints.insert(column("x"), point(x));
+                single.constraints.insert(column("y"), point(y));
+                expected.extend(
+                    single
+                        .expand_zorder_index_ranges(&model, &specs[1])
+                        .unwrap(),
+                );
+            }
+        }
+        assert_eq!(ranges.len(), 4096);
+        assert_eq!(ranges, expected);
     }
 
     #[test]
@@ -1406,7 +1709,6 @@ mod tests {
         let access_plan = ScanAccessPlan::new(&model, &Some(vec![]), &pred);
         let plan = pred
             .choose_index_plan(&model, &specs, &access_plan)
-            .expect("plan")
             .expect("should find index");
         assert_eq!(plan.spec_idx, 0);
         assert_eq!(plan.constrained_prefix_len, 1);
@@ -1458,7 +1760,7 @@ mod tests {
             values: vec![CellValue::Int64(1), CellValue::Utf8("foo".to_string())],
         };
 
-        // (label = 'foo') AND (label IS NOT NULL) — IS NOT NULL is implied;
+        // (label = 'foo') AND (label IS NOT NULL): IS NOT NULL is implied, so the
         // predicate must reduce to StringEq('foo') in either order.
         for filters in [[&eq_foo, &is_not_null], [&is_not_null, &eq_foo]] {
             let owned: Vec<Expr> = filters.iter().map(|e| (*e).clone()).collect();
@@ -1471,7 +1773,7 @@ mod tests {
             assert!(pred.matches_row(&row_foo));
         }
 
-        // (label = 'foo') AND (label IS NULL) — must contradict in either order.
+        // (label = 'foo') AND (label IS NULL): must contradict in either order.
         for filters in [[&eq_foo, &is_null], [&is_null, &eq_foo]] {
             let owned: Vec<Expr> = filters.iter().map(|e| (*e).clone()).collect();
             assert!(QueryPredicate::from_filters(&owned, &model).contradiction);
@@ -3465,7 +3767,6 @@ mod tests {
         let access_plan = ScanAccessPlan::new(&model, &Some(vec![]), &pred);
         let plan = pred
             .choose_index_plan(&model, &specs, &access_plan)
-            .expect("plan")
             .expect("should find index");
         assert_eq!(plan.ranges.len(), 2);
     }
@@ -3851,11 +4152,11 @@ mod tests {
 
         assert_eq!(batch.pending_count(), 2);
         assert_ne!(
-            batch.pending_keys[0], batch.pending_keys[1],
+            batch.pending_entries[0].0, batch.pending_entries[1].0,
             "same PK in different tables must produce different keys"
         );
         assert_ne!(
-            batch.pending_keys[0][0], batch.pending_keys[1][0],
+            batch.pending_entries[0].0[0], batch.pending_entries[1].0[0],
             "table prefix byte must differ"
         );
     }
@@ -4094,7 +4395,7 @@ mod tests {
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("requires exactly 16 bytes"));
 
-        // Exact length (16 bytes) — must succeed
+        // Exact length (16 bytes) must succeed.
         let ok_row = KvRow {
             values: vec![CellValue::FixedBinary(vec![0xEF; 16]), CellValue::Int64(3)],
         };
@@ -5366,7 +5667,6 @@ mod tests {
         let access_plan = ScanAccessPlan::new(&model, &Some(vec![]), &pred);
         let plan = pred
             .choose_index_plan(&model, &specs, &access_plan)
-            .unwrap()
             .expect("fixed-binary equality should choose an index");
 
         assert_eq!(plan.constrained_prefix_len, 1);
@@ -5402,7 +5702,6 @@ mod tests {
         let access_plan = ScanAccessPlan::new(&model, &Some(vec![]), &pred);
         let plan = pred
             .choose_index_plan(&model, &specs, &access_plan)
-            .unwrap()
             .expect("decimal256 range should choose an index");
 
         assert_eq!(plan.constrained_prefix_len, 1);
@@ -5512,6 +5811,134 @@ mod tests {
         }
 
         let _ = shutdown_tx.send(());
+    }
+
+    /// Backfill builds index entries from stored rows with its own encoders,
+    /// separate from the insert path. Both must write the same bytes, or a
+    /// backfilled index returns different rows than one maintained on insert.
+    #[tokio::test]
+    async fn backfilled_index_entries_match_inserted_ones() {
+        fn columns() -> Vec<TableColumnConfig> {
+            let list = DataType::List(Arc::new(Field::new("item", DataType::Int64, true)));
+            vec![
+                TableColumnConfig::new("id", DataType::Utf8, false),
+                TableColumnConfig::new("seq", DataType::Int64, false),
+                TableColumnConfig::new("status", DataType::Utf8, false),
+                TableColumnConfig::new("amount", DataType::Float64, false),
+                TableColumnConfig::new("flag", DataType::Boolean, false),
+                TableColumnConfig::new("day", DataType::Date32, false),
+                TableColumnConfig::new("at", DataType::Date64, false),
+                TableColumnConfig::new(
+                    "ts",
+                    DataType::Timestamp(TimeUnit::Microsecond, None),
+                    false,
+                ),
+                TableColumnConfig::new("price", DataType::Decimal128(20, 2), false),
+                TableColumnConfig::new("big", DataType::Decimal256(40, 0), false),
+                TableColumnConfig::new("tag", DataType::FixedSizeBinary(2), false),
+                TableColumnConfig::new("qty", DataType::UInt64, false),
+                TableColumnConfig::new("note", DataType::Utf8, true),
+                TableColumnConfig::new("body", DataType::Binary, true),
+                TableColumnConfig::new("scores", list, true),
+            ]
+        }
+        fn indexes() -> Vec<IndexSpec> {
+            let names = |cols: &[&str]| cols.iter().map(|c| c.to_string()).collect();
+            vec![
+                IndexSpec::lexicographic(
+                    "wide",
+                    names(&[
+                        "status", "flag", "day", "at", "ts", "price", "big", "tag", "qty", "amount",
+                    ]),
+                )
+                .unwrap()
+                .with_cover_columns(names(&["note", "body", "scores"])),
+                IndexSpec::z_order("z", names(&["qty", "day"])).unwrap(),
+                IndexSpec::lexicographic("by_seq", names(&["seq"]))
+                    .unwrap()
+                    .with_cover_columns(names(&["note"])),
+            ]
+        }
+        fn row(i: i64) -> Vec<CellValue> {
+            let odd = i % 2 == 1;
+            vec![
+                CellValue::Utf8(format!("a\0b\u{1}é{i}")),
+                CellValue::Int64(if odd { i64::MIN + i } else { i64::MAX - i }),
+                CellValue::Utf8(if odd {
+                    String::new()
+                } else {
+                    format!("open{i}")
+                }),
+                CellValue::Float64(if odd { -0.0 } else { -1.5 * i as f64 }),
+                CellValue::Boolean(odd),
+                CellValue::Date32(-3 + i as i32),
+                CellValue::Date64(1_700_000_000_000 - i),
+                CellValue::Timestamp(-1 - i),
+                CellValue::Decimal128(-12_345 * i as i128),
+                CellValue::Decimal256(i256::from_i128(7 - i as i128)),
+                CellValue::FixedBinary(vec![0xFF, i as u8]),
+                CellValue::UInt64(if odd { u64::MAX } else { i as u64 }),
+                if odd {
+                    CellValue::Null
+                } else {
+                    CellValue::Utf8(format!("hi\u{ff}{i}"))
+                },
+                if odd {
+                    CellValue::Null
+                } else {
+                    CellValue::Binary(vec![0, 1, 0xFF, i as u8])
+                },
+                if odd {
+                    CellValue::Null
+                } else {
+                    CellValue::List(vec![CellValue::Int64(i), CellValue::Int64(-2)])
+                },
+            ]
+        }
+        // Insert six rows into a fresh store, with the indexes either declared
+        // up front or added afterwards by backfill, and return everything stored.
+        async fn store_contents(backfill: bool) -> BTreeMap<Key, Bytes> {
+            let state = MockState {
+                kv: Arc::new(Mutex::new(BTreeMap::new())),
+                range_calls: Arc::new(AtomicUsize::new(0)),
+                range_reduce_calls: Arc::new(AtomicUsize::new(0)),
+                sequence_number: Arc::new(AtomicU64::new(0)),
+            };
+            let (base_url, shutdown_tx) = spawn_mock_server(state.clone()).await;
+            let client = StoreClient::new(&base_url);
+            let schema = |indexes| {
+                KvSchema::new(PrefixedStoreClient::empty(client.clone()))
+                    .table("t", columns(), vec!["id".into(), "seq".into()], indexes)
+                    .unwrap()
+            };
+            let insert_schema = schema(if backfill { vec![] } else { indexes() });
+            let mut writer = insert_schema.batch_writer();
+            for i in 0..6 {
+                writer.insert("t", row(i)).unwrap();
+            }
+            writer.flush().await.unwrap();
+            if backfill {
+                let report = schema(indexes())
+                    .backfill_added_indexes_with_options(
+                        "t",
+                        &[],
+                        IndexBackfillOptions {
+                            row_batch_size: 4,
+                            start_from_primary_key: None,
+                        },
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(report.index_entries_written, 18);
+            }
+            let _ = shutdown_tx.send(());
+            let contents = state.kv.lock().unwrap().clone();
+            contents
+        }
+
+        let inserted = store_contents(false).await;
+        assert_eq!(inserted.len(), 24);
+        assert_eq!(store_contents(true).await, inserted);
     }
 
     #[tokio::test]
@@ -5656,8 +6083,68 @@ mod tests {
             .contains("index evolution must be append-only"));
     }
 
+    /// Backfill rejects changes to an existing index's cover columns or layout.
+    #[tokio::test]
+    async fn backfill_added_indexes_rejects_cover_or_layout_changes() {
+        // Both cases use the same current indexes to isolate changes in the previous specs.
+        let table = |previous: Vec<IndexSpec>| {
+            // The current schema gives status_idx a cover column and amount_idx a ZOrder layout.
+            let client = StoreClient::new("http://127.0.0.1:1");
+            let schema = KvSchema::new(PrefixedStoreClient::empty(client))
+                .table(
+                    "orders",
+                    vec![
+                        TableColumnConfig::new("id", DataType::Int64, false),
+                        TableColumnConfig::new("status", DataType::Utf8, false),
+                        TableColumnConfig::new("amount_cents", DataType::Int64, false),
+                    ],
+                    vec!["id".to_string()],
+                    vec![
+                        IndexSpec::new("status_idx", vec!["status".to_string()])
+                            .expect("index spec must be valid")
+                            .with_cover_columns(vec!["amount_cents".to_string()]),
+                        IndexSpec::new("amount_idx", vec!["amount_cents".to_string()])
+                            .expect("index spec must be valid")
+                            .with_layout(IndexLayout::ZOrder),
+                    ],
+                )
+                .expect("schema must build");
+
+            // Existing index definitions must match before backfill reads stored rows.
+            async move { schema.backfill_added_indexes("orders", &previous).await }
+        };
+
+        // Each case changes only cover columns or layout while keeping names and key columns fixed.
+        for previous in [
+            vec![
+                IndexSpec::new("status_idx", vec!["status".to_string()])
+                    .expect("index spec must be valid"),
+                IndexSpec::new("amount_idx", vec!["amount_cents".to_string()])
+                    .expect("index spec must be valid")
+                    .with_layout(IndexLayout::ZOrder),
+            ],
+            vec![
+                IndexSpec::new("status_idx", vec!["status".to_string()])
+                    .expect("index spec must be valid")
+                    .with_cover_columns(vec!["amount_cents".to_string()]),
+                IndexSpec::new("amount_idx", vec!["amount_cents".to_string()])
+                    .expect("index spec must be valid"),
+            ],
+        ] {
+            // Backfill must reject both changes as modifications to an existing index.
+            let err = table(previous)
+                .await
+                .expect_err("changed cover columns or layout must be rejected");
+            assert!(err
+                .to_string()
+                .contains("index evolution must be append-only"));
+        }
+    }
+
     #[tokio::test]
     async fn backfill_added_indexes_is_noop_when_no_new_indexes() {
+        // `existing` is both the table's only index and the backfill's previous index, so
+        // nothing needs backfilling.
         let client = StoreClient::new("http://127.0.0.1:1");
         let existing = IndexSpec::new("status_idx", vec!["status".to_string()])
             .expect("valid")
@@ -5675,11 +6162,32 @@ mod tests {
             )
             .expect("schema");
 
+        // A no-op backfill still reports `Started` with zero indexes and then `Completed`, so
+        // progress consumers see the run start and finish.
+        let (progress_tx, mut progress_rx) = mpsc::unbounded_channel();
         let report = schema
-            .backfill_added_indexes("orders", &[existing])
+            .backfill_added_indexes_with_options_and_progress(
+                "orders",
+                &[existing],
+                IndexBackfillOptions::default(),
+                Some(&progress_tx),
+            )
             .await
             .expect("no-op backfill should succeed");
         assert_eq!(report, IndexBackfillReport::default());
+        assert!(matches!(
+            progress_rx.try_recv().unwrap(),
+            IndexBackfillEvent::Started { table_name, indexes_backfilled: 0, .. }
+                if table_name == "orders"
+        ));
+        assert_eq!(
+            progress_rx.try_recv().unwrap(),
+            IndexBackfillEvent::Completed { report }
+        );
+        assert!(matches!(
+            progress_rx.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
     }
 
     #[tokio::test]
@@ -6680,22 +7188,15 @@ mod tests {
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
-            .expect("bind test listener");
+            .expect("bind test listener")
+            .tap_io(set_tcp_nodelay);
         let url = format!("http://{}", listener.local_addr().expect("listener addr"));
         tokio::spawn(async move {
             axum::serve(listener, app).await.expect("serve test app");
         });
 
         let client = StoreClient::new(&url);
-        let scan = KvScanExec::new(
-            PrefixedStoreClient::empty(client),
-            model.clone(),
-            Arc::new(Vec::new()),
-            QueryPredicate::default(),
-            None,
-            model.schema.clone(),
-            None,
-        );
+        let scan = unfiltered_scan(client, model.clone(), None);
 
         let missing_session = DataFusionSessionContext::new();
         assert!(matches!(
@@ -6767,7 +7268,8 @@ mod tests {
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
-            .expect("bind test listener");
+            .expect("bind test listener")
+            .tap_io(set_tcp_nodelay);
         let url = format!("http://{}", listener.local_addr().expect("listener addr"));
         tokio::spawn(async move {
             axum::serve(listener, app).await.expect("serve test app");
@@ -6817,13 +7319,9 @@ mod tests {
     #[test]
     fn kv_scan_physical_limit_pushdown_sets_leaf_fetch() {
         let model = Arc::new(simple_int64_model(0));
-        let scan = Arc::new(KvScanExec::new(
-            PrefixedStoreClient::empty(StoreClient::new("http://127.0.0.1:0")),
-            model.clone(),
-            Arc::new(Vec::new()),
-            QueryPredicate::default(),
-            None,
-            model.schema.clone(),
+        let scan = Arc::new(unfiltered_scan(
+            StoreClient::new("http://127.0.0.1:0"),
+            model,
             None,
         ));
         let limited: Arc<dyn ExecutionPlan> = Arc::new(GlobalLimitExec::new(scan, 0, Some(1)));
@@ -6841,13 +7339,9 @@ mod tests {
     #[test]
     fn kv_scan_sort_pushdown_preserves_limit() {
         let model = Arc::new(simple_int64_model(0));
-        let scan = Arc::new(KvScanExec::new(
-            PrefixedStoreClient::empty(StoreClient::new("http://127.0.0.1:0")),
-            model.clone(),
-            Arc::new(Vec::new()),
-            QueryPredicate::default(),
-            None,
-            model.schema.clone(),
+        let scan = Arc::new(unfiltered_scan(
+            StoreClient::new("http://127.0.0.1:0"),
+            model,
             None,
         ));
         let ordering = LexOrdering::new([PhysicalSortExpr {
@@ -6883,15 +7377,7 @@ mod tests {
         )
         .expect("config");
         let model = Arc::new(TableModel::from_config(&config).expect("model"));
-        let scan = KvScanExec::new(
-            PrefixedStoreClient::empty(StoreClient::new("http://127.0.0.1:0")),
-            model.clone(),
-            Arc::new(Vec::new()),
-            QueryPredicate::default(),
-            Some(2),
-            model.schema.clone(),
-            None,
-        );
+        let scan = unfiltered_scan(StoreClient::new("http://127.0.0.1:0"), model, Some(2));
         let ordering = LexOrdering::new([
             PhysicalSortExpr {
                 expr: Arc::new(Column::new("account", 0)),
@@ -7087,7 +7573,8 @@ mod tests {
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
-            .expect("bind test listener");
+            .expect("bind test listener")
+            .tap_io(set_tcp_nodelay);
         let url = format!("http://{}", listener.local_addr().expect("listener addr"));
         tokio::spawn(async move {
             axum::serve(listener, app).await.expect("serve test app");

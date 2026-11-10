@@ -20,6 +20,12 @@ is running. It stores data in `$HOME/.exoware_store_simulator` and preserves
 it between runs. Pass `--directory /path/to/data` to use a different RocksDB
 directory.
 
+RocksDB keeps up to `--max-open-files` table files open (default 16384) and
+closes the least recently read ones beyond that, so run the server under an
+open-file limit above it, for example `ulimit -n 65536`. A long session adds
+files for as long as it is written, and a cap below the state files a read
+probes makes reads reopen tables.
+
 Connect with the [Rust SDK](../../sdk/rs/README.md) or [TypeScript
 SDK](../../sdk/ts/README.md). The simulator accepts requests without
 credentials and enables permissive CORS for local browser development. To
