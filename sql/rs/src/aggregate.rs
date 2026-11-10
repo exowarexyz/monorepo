@@ -35,6 +35,7 @@ use datafusion::{
     physical_plan::{
         aggregates::{AggregateExec, AggregateMode, PhysicalGroupBy},
         execution_plan::{Boundedness, EmissionType},
+        metrics::{BaselineMetrics, ExecutionPlanMetricsSet, MetricBuilder, MetricsSet, Time},
         stream::RecordBatchStreamAdapter,
         DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties, SendableRecordBatchStream,
     },
@@ -271,6 +272,11 @@ pub(crate) struct KvAggregateExec {
     /// State values for fields a job does not compute, excluding group fields.
     /// Nullable fields start null, and non-nullable fields start at zero.
     empty_states: Vec<ScalarValue>,
+    /// Runtime metrics shown by `EXPLAIN ANALYZE`. `output_rows` counts partial-state rows,
+    /// `elapsed_compute` is the time spent decoding responses, and `store_requests` counts
+    /// the Reduce requests the node starts. A retry that the SDK makes inside one request is
+    /// not counted.
+    metrics: ExecutionPlanMetricsSet,
 }
 
 impl KvAggregatePushdownRule {
@@ -589,6 +595,7 @@ impl ExtensionPlanner for KvAggregateExtensionPlanner {
             )),
             state_offsets,
             empty_states,
+            metrics: ExecutionPlanMetricsSet::new(),
         });
         Ok(Some(Arc::new(AggregateExec::try_new(
             AggregateMode::Final,
@@ -689,6 +696,9 @@ impl ExecutionPlan for KvAggregateExec {
         let session = read_session(context.session_config(), &self.spec.store)?;
         let source = Arc::new(self.clone());
         let concurrency = context.session_config().target_partitions().max(1);
+        let baseline = BaselineMetrics::new(&self.metrics, partition);
+        let decode_time = baseline.elapsed_compute().clone();
+        let store_requests = MetricBuilder::new(&self.metrics).counter("store_requests", partition);
 
         // The ranges of every job share one concurrency bound. Responses are consumed in job
         // order and then range order, so the final merge order stays stable.
@@ -707,16 +717,27 @@ impl ExecutionPlan for KvAggregateExec {
                 let job = Arc::new(job);
                 ranges.into_iter().map(move |range| (job.clone(), range))
             });
-        let batches = futures::stream::iter(requests)
+        let mut batches = futures::stream::iter(requests)
             .map(move |(job, range)| {
-                execute_reduce_range(session.clone(), job, source.clone(), range)
+                store_requests.add(1);
+                execute_reduce_range(
+                    session.clone(),
+                    job,
+                    source.clone(),
+                    range,
+                    decode_time.clone(),
+                )
             })
             .buffered(concurrency)
             .try_flatten();
         Ok(Box::pin(RecordBatchStreamAdapter::new(
             self.schema(),
-            batches,
+            futures::stream::poll_fn(move |cx| baseline.record_poll(batches.poll_next_unpin(cx))),
         )))
+    }
+
+    fn metrics(&self) -> Option<MetricsSet> {
+        Some(self.metrics.clone_inner())
     }
 }
 
@@ -775,6 +796,7 @@ async fn execute_reduce_range(
     job: Arc<CombinedAggregateJob>,
     source: Arc<KvAggregateExec>,
     range: KeyRange,
+    decode_time: Time,
 ) -> DataFusionResult<BoxStream<'static, DataFusionResult<RecordBatch>>> {
     let responses = session
         .range_reduce_stream(&range.start, &range.end, &job.job.request)
@@ -784,12 +806,14 @@ async fn execute_reduce_range(
         let response = exoware_sdk::scalar_reduce_response(responses, &job.job.request)
             .await
             .map_err(|error| DataFusionError::External(Box::new(error)))?;
+        let _timer = decode_time.timer();
         let batch = source.decode_reduce_batch(&job, response.view())?;
         return Ok(futures::stream::once(futures::future::ready(Ok(batch))).boxed());
     }
     Ok(responses
         .map(move |response| {
             let response = response.map_err(|error| DataFusionError::External(Box::new(error)))?;
+            let _timer = decode_time.timer();
             source.decode_reduce_batch(&job, response.view())
         })
         .boxed())
@@ -2033,6 +2057,7 @@ mod tests {
             StringArray, UInt64Array,
         },
         datasource::MemTable,
+        physical_plan::metrics::MetricValue,
         prelude::SessionContext as DataFusionSessionContext,
     };
     use exoware_sdk::{
@@ -3926,6 +3951,84 @@ mod tests {
             )
             .await;
         assert_eq!(fixture.rows.scanned_rows.load(AtomicOrdering::Relaxed), 2);
+    }
+
+    #[tokio::test]
+    async fn explain_analyze_reports_partial_state_rows_and_reduce_requests() {
+        let fixture = Fixture::new().await;
+        for (sql, output_rows, store_requests) in [
+            (
+                "SELECT region, SUM(amount) FROM orders GROUP BY region",
+                3,
+                1,
+            ),
+            // Each of the two ranges returns one state row for the single result row.
+            (
+                "SELECT SUM(amount), MIN(amount) FROM orders WHERE id IN (1, 4)",
+                2,
+                2,
+            ),
+            (
+                "SELECT region, COUNT(*) FROM orders WHERE status = 'missing' GROUP BY region",
+                0,
+                1,
+            ),
+        ] {
+            let explained = values(
+                fixture.context.datafusion(),
+                &format!("EXPLAIN ANALYZE {sql}"),
+            )
+            .await
+            .unwrap();
+            let plan = explained[0][1].to_string();
+            let node = plan
+                .lines()
+                .find(|line| line.contains("KvAggregateExec"))
+                .unwrap_or_else(|| panic!("the aggregate must be pushed: {sql}\n{plan}"));
+            for metric in [
+                format!("output_rows={output_rows}"),
+                format!("store_requests={store_requests}"),
+            ] {
+                assert!(
+                    node.contains(&metric),
+                    "the node must report {metric}: {sql}\n{node}"
+                );
+            }
+
+            // A recorded time is never zero, while the rendered value cannot tell an
+            // unrecorded time from a short one.
+            let plan = fixture
+                .context
+                .sql(sql)
+                .await
+                .unwrap()
+                .create_physical_plan()
+                .await
+                .unwrap();
+            datafusion::physical_plan::collect(
+                plan.clone(),
+                fixture.context.datafusion().task_ctx(),
+            )
+            .await
+            .unwrap();
+            let mut decode_nanos = None;
+            plan.apply(|node| {
+                if node.downcast_ref::<KvAggregateExec>().is_some() {
+                    decode_nanos = node.metrics().and_then(|metrics| {
+                        metrics.iter().find_map(|metric| match metric.value() {
+                            MetricValue::ElapsedCompute(time) => Some(time.value()),
+                            _ => None,
+                        })
+                    });
+                }
+                Ok(TreeNodeRecursion::Continue)
+            })
+            .unwrap();
+            assert!(
+                decode_nanos.is_some_and(|nanos| nanos > 0),
+                "decoding responses must count as compute time: {sql}"
+            );
+        }
     }
 
     fn final_reduce_plan(plan: Arc<dyn ExecutionPlan>) -> Arc<dyn ExecutionPlan> {

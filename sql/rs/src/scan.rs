@@ -23,8 +23,9 @@ use datafusion::{
     },
     physical_plan::{
         execution_plan::{apply_expression_roots, Boundedness, EmissionType},
+        metrics::{BaselineMetrics, Count, ExecutionPlanMetricsSet, MetricBuilder, MetricsSet},
         statistics::StatisticsArgs,
-        stream::RecordBatchReceiverStreamBuilder,
+        stream::{RecordBatchReceiverStreamBuilder, RecordBatchStreamAdapter},
         DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties, SendableRecordBatchStream,
         SortOrderPushdownResult,
     },
@@ -34,9 +35,11 @@ use exoware_sdk::{
     kv_codec::{decode_stored_row, StoredRow},
     PrefixedStoreClient, RangeMode, RangeStream, ReadSession, StoreKeyPrefix,
 };
+use futures::{stream, StreamExt};
 use std::{
     collections::{HashMap, HashSet},
     fmt,
+    future::{poll_fn, Future},
     sync::Arc,
 };
 
@@ -164,6 +167,8 @@ pub(crate) struct KvScanExec {
     direction: Option<RangeMode>,
     /// Output schema, ordering guarantees, and single-partition execution metadata.
     pub(crate) properties: Arc<PlanProperties>,
+    /// Runtime metrics shown by `EXPLAIN ANALYZE`, shared by every clone of the scan.
+    metrics: ExecutionPlanMetricsSet,
 }
 
 /// Column access and index selection fixed when a scan is built.
@@ -226,6 +231,7 @@ impl KvScanExec {
             plan,
             direction: None,
             properties: Self::make_properties(projected_schema, None),
+            metrics: ExecutionPlanMetricsSet::new(),
         };
 
         // Finalize the plan with any columns needed only by row filters.
@@ -583,7 +589,14 @@ impl ExecutionPlan for KvScanExec {
         let filter = self.filter.clone();
         let cover_filter = self.cover_filter.clone();
 
-        builder.spawn(async move {
+        // Metrics follow DataFusion's definitions. Output is counted as the consumer receives
+        // it. Compute time is the time the scan task spends being polled, so waiting on the
+        // Store or on the consumer is not compute.
+        let baseline = BaselineMetrics::new(&self.metrics, partition);
+        let elapsed_compute = baseline.elapsed_compute().clone();
+        let store_requests = MetricBuilder::new(&self.metrics).counter("store_requests", partition);
+
+        let mut scan = Box::pin(async move {
             let ctx = ScanCtx {
                 session: &session,
                 key_prefix: &key_prefix,
@@ -593,6 +606,7 @@ impl ExecutionPlan for KvScanExec {
                 access_plan: &plan.access,
                 filter: filter.as_ref(),
                 cover_filter: cover_filter.as_ref(),
+                store_requests: &store_requests,
             };
             if let Err(e) = stream_kv_scan(
                 &tx,
@@ -608,8 +622,20 @@ impl ExecutionPlan for KvScanExec {
             }
             Ok(())
         });
+        builder.spawn(poll_fn(move |cx| {
+            let _timer = elapsed_compute.timer();
+            scan.as_mut().poll(cx)
+        }));
 
-        Ok(builder.build())
+        let mut batches = builder.build();
+        Ok(Box::pin(RecordBatchStreamAdapter::new(
+            self.schema(),
+            stream::poll_fn(move |cx| baseline.record_poll(batches.poll_next_unpin(cx))),
+        )))
+    }
+
+    fn metrics(&self) -> Option<MetricsSet> {
+        Some(self.metrics.clone_inner())
     }
 
     fn with_fetch(&self, limit: Option<usize>) -> Option<Arc<dyn ExecutionPlan>> {
@@ -718,6 +744,9 @@ pub(crate) struct ScanCtx<'a> {
     filter: Option<&'a ScanFilter>,
     /// Predicate applied to index entries before base-row lookups.
     cover_filter: Option<&'a ScanFilter>,
+    /// Counts each Store read the scan starts, a lookup or a range read. A retry that the SDK
+    /// makes inside one read is not counted.
+    store_requests: &'a Count,
 }
 
 impl ScanCtx<'_> {
@@ -882,6 +911,7 @@ async fn get_rows(
     keys: &[Key],
 ) -> DataFusionResult<Vec<(Vec<CellValue>, StoredRow)>> {
     let refs = keys.iter().collect::<Vec<_>>();
+    ctx.store_requests.add(1);
     let mut stream = ctx
         .session
         .get_many(&refs, keys.len())
@@ -988,7 +1018,7 @@ pub(crate) async fn stream_index_lookup_scan(
                 usize::MAX
             };
             let mut stream = range_stream_with_direction(
-                ctx.session,
+                ctx,
                 &range,
                 raw_limit,
                 flush_threshold.max(MIN_FETCH_BATCH_ROWS),
@@ -1127,7 +1157,7 @@ async fn stream_range_scan(
                 usize::MAX
             };
             let mut stream = range_stream_with_direction(
-                ctx.session,
+                ctx,
                 &range,
                 raw_limit,
                 flush_threshold.max(MIN_FETCH_BATCH_ROWS),
@@ -1232,13 +1262,14 @@ fn ordered_ranges<'a>(
 }
 
 async fn range_stream_with_direction(
-    session: &ReadSession,
+    ctx: &ScanCtx<'_>,
     range: &KeyRange,
     limit: usize,
     batch_size: usize,
     direction: RangeMode,
 ) -> DataFusionResult<RangeStream> {
-    session
+    ctx.store_requests.add(1);
+    ctx.session
         .range_stream_with_mode(&range.start, &range.end, limit, batch_size, direction)
         .await
         .map_err(|e| DataFusionError::External(Box::new(e)))
@@ -1263,12 +1294,15 @@ mod tests {
             compute::SortOptions,
             datatypes::{DataType, TimeUnit},
             record_batch::RecordBatch,
+            util::pretty::pretty_format_batches,
         },
         common::{stats::Precision, Result as DataFusionResult, ScalarValue, Statistics},
         datasource::MemTable,
         logical_expr::{col, in_list, lit},
         physical_expr::{expressions::Column, PhysicalSortExpr},
         physical_plan::{
+            collect,
+            metrics::{MetricValue, MetricsSet},
             statistics::{StatisticsArgs, StatisticsContext},
             ExecutionPlan, SortOrderPushdownResult,
         },
@@ -1323,6 +1357,8 @@ mod tests {
         returned_rows: Arc<AtomicUsize>,
         /// Key and value bytes returned by batch lookups and range cursors.
         returned_bytes: Arc<AtomicUsize>,
+        /// Range requests still to fail with a transient error after being recorded.
+        failing_ranges: Mutex<usize>,
     }
 
     impl Sequence for Rows {
@@ -1420,6 +1456,12 @@ mod tests {
                 limit,
                 forward,
             });
+            let mut failing = self.failing_ranges.lock().unwrap();
+            if *failing > 0 {
+                *failing -= 1;
+                return Err("transient range failure".into());
+            }
+            drop(failing);
             let mut rows: Vec<_> = self
                 .values
                 .lock()
@@ -1557,6 +1599,19 @@ mod tests {
                 .create_physical_plan()
                 .await
                 .unwrap()
+        }
+
+        /// Runs the query's plan and returns the metrics its Store scan recorded.
+        async fn scan_metrics(&self, sql: &str) -> MetricsSet {
+            let plan = self.plan(sql).await;
+            collect(plan.clone(), self.context.datafusion().task_ctx())
+                .await
+                .unwrap();
+            let mut node = plan;
+            while let Some(child) = node.children().first() {
+                node = (*child).clone();
+            }
+            node.metrics().expect("the scan must report metrics")
         }
 
         /// Plans the query and returns its first Store scan with the indented plan text.
@@ -3276,6 +3331,82 @@ mod tests {
                 "{case} must report only its inexact row bound"
             );
         }
+    }
+
+    /// `store_requests` counts the reads a scan starts. The SDK retries a failed request inside
+    /// one read, so the Store sees more requests than the metric reports.
+    #[tokio::test]
+    async fn store_requests_counts_started_reads_and_not_sdk_retries() {
+        let fixture = tagged_orders(3).await;
+        *fixture.rows.failing_ranges.lock().unwrap() = 1;
+        let metrics = fixture.scan_metrics("SELECT id FROM orders").await;
+        assert_eq!(
+            metrics.output_rows(),
+            Some(3),
+            "the retried read must succeed"
+        );
+        assert_eq!(
+            shape(&fixture.rows.requests.lock().unwrap())
+                .iter()
+                .map(|(kind, _)| *kind)
+                .collect::<Vec<_>>(),
+            ["Range", "Range"],
+            "the Store must see the failed request and its retry"
+        );
+        assert_eq!(
+            metrics.sum_by_name("store_requests").map(|v| v.as_usize()),
+            Some(1),
+            "store_requests must count the one read started"
+        );
+    }
+
+    /// EXPLAIN ANALYZE shows the rows a scan emitted and the Store reads it started.
+    #[tokio::test]
+    async fn explain_analyze_reports_scan_rows_and_store_requests() {
+        let fixture = tagged_orders(200).await;
+        for (sql, rows) in [
+            ("SELECT id FROM orders", 200),
+            ("SELECT * FROM orders WHERE tag = 7 LIMIT 3", 3),
+            ("SELECT * FROM orders WHERE id IN (500, 501)", 0),
+        ] {
+            // The metrics must agree with the rows returned and the requests the Store saw.
+            let requests = fixture.check(sql).await.len();
+            let batches = fixture
+                .context
+                .sql(&format!("EXPLAIN ANALYZE {sql}"))
+                .await
+                .unwrap()
+                .collect()
+                .await
+                .unwrap();
+            let rendered = pretty_format_batches(&batches).unwrap().to_string();
+            let line = rendered
+                .lines()
+                .find(|line| line.contains("KvScanExec"))
+                .unwrap_or_else(|| panic!("the analyzed plan must show the scan\n{rendered}"));
+            for metric in [
+                format!("output_rows={rows}"),
+                format!("store_requests={requests}"),
+            ] {
+                assert!(
+                    line.contains(&metric),
+                    "{sql} must report {metric} on the scan\n{line}"
+                );
+            }
+        }
+
+        // The scan task decodes rows and builds batches, so it must record compute time. The
+        // recorded value is read directly, because summing time metrics adds at least one
+        // nanosecond for each, even an empty one.
+        let metrics = fixture.scan_metrics("SELECT id FROM orders").await;
+        let compute = metrics.iter().find_map(|metric| match metric.value() {
+            MetricValue::ElapsedCompute(time) => Some(time.value()),
+            _ => None,
+        });
+        assert!(
+            compute.is_some_and(|nanos| nanos > 0),
+            "the scan must record compute time, got {compute:?}"
+        );
     }
 
     /// Sort and limit pushdown share the cached plan.

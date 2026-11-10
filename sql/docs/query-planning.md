@@ -142,12 +142,21 @@ and spill configuration. Both stages keep groups in memory by default. Workers
 configure their own memory pool and spilling through `QueryState::with_runtime_env` in
 [`exoware-server`](../../server/README.md).
 
+`EXPLAIN ANALYZE` reports metrics on each `KvAggregateExec`. Its `output_rows` counts the
+partial-state rows it hands to the final aggregate, one per group in each `Reduce`
+response, so the count can exceed the number of result rows. `store_requests` counts the
+`Reduce` requests it started. `elapsed_compute` covers decoding their responses and
+excludes time spent waiting for the Store.
+
 ## Reading EXPLAIN output
 
 `EXPLAIN` returns `plan_type` and `plan` rows. The `physical_plan` row contains a
 `KvScanExec` for each row scan and a `KvAggregateExec` for each pushed aggregate. A
 `KvAggregateExec` lists one access path per Reduce job. `EXPLAIN ANALYZE` runs the
-query and adds runtime metrics.
+query and adds runtime metrics. A `KvScanExec` reports `output_rows`, `elapsed_compute`
+for the time it spent computing and not waiting on the Store, and `store_requests`.
+`store_requests` counts the Store reads a node started. A retry that the SDK makes
+inside one read is not counted.
 
 | Field | Meaning |
 |---|---|
