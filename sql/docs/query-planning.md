@@ -69,12 +69,13 @@ DataFusion aggregation.
   DataFusion. A finite `LIMIT` that reaches a group-only aggregate, directly or through
   projections and subquery aliases, keeps it in DataFusion, where streaming and
   `DISTINCT` limit optimizations apply.
-- **Expressions:** columns, literals, numeric `+`, `-`, `*`, `/`, `lower`, and
-  `date_trunc('day', ...)` on timestamps without a timezone. Aliases and transparent
-  projection chains are resolved. Identity casts, compatible string representations,
-  decimal precision widening without rescaling, and integer-to-double `CAST` and
-  `TRY_CAST` are pushed. Narrowing casts, other functions, timezone-tagged
-  timestamps, and row limits between the scan and the aggregate stay in DataFusion.
+- **Expressions:** columns, literals, numeric `+`, `-`, `*`, `/`, negation of a signed
+  64-bit integer expression, `lower`, and `date_trunc('day', ...)` on timestamps without
+  a timezone. Aliases and transparent projection chains are resolved. Identity casts,
+  compatible string representations, decimal precision widening without rescaling, and
+  integer-to-double `CAST` and `TRY_CAST` are pushed. Narrowing casts, negation of a
+  double, other functions, timezone-tagged timestamps, and row limits between the scan
+  and the aggregate stay in DataFusion.
 - **Filters:** aggregate `FILTER` clauses and equivalent `CASE` guards are pushed when
   every predicate is exactly representable by the Store predicate compiler. A scalar
   aggregate applies its filter before evaluating its argument, so the filter also
@@ -99,9 +100,9 @@ no predicate when its primary-key ranges hold exactly the rows the filters accep
 Workers evaluate expressions with DataFusion and Arrow, so results follow ordinary
 DataFusion semantics:
 
-- Integer addition, subtraction, multiplication, and sums wrap on overflow. Integer
-  division truncates and reports division by zero and overflow as errors. Floating
-  division follows IEEE rules, including zero divisors.
+- Integer addition, subtraction, multiplication, negation, and sums wrap on overflow.
+  Integer division truncates and reports division by zero and overflow as errors.
+  Floating division follows IEEE rules, including zero divisors.
 - `AVG` converts each integer input to a double before accumulating. NULLs follow SQL
   aggregate rules.
 - Floating-point results, including `NaN` extrema, follow DataFusion's partial and

@@ -1462,6 +1462,27 @@ pub(crate) fn compile_pushdown_value_expr(
             };
             Ok((expr, kind))
         }
+        Expr::Negative(operand) => {
+            let (operand, kind) = compile_pushdown_value_expr(operand, model)?;
+
+            // Native negation wraps an Int64 array exactly like subtracting it from zero.
+            // It reports overflow for a constant operand and flips the sign of a Float64
+            // zero, so neither is pushed.
+            let mut columns = Vec::new();
+            operand.collect_columns(&mut columns);
+            if kind != KvFieldKind::Int64 || columns.is_empty() {
+                return Err(DataFusionError::Execution(
+                    "negation pushdown requires an Int64 operand that reads a column".to_string(),
+                ));
+            }
+            Ok((
+                PushdownValueExpr::Sub(
+                    Box::new(PushdownValueExpr::Literal(KvReducedValue::Int64(0))),
+                    Box::new(operand),
+                ),
+                KvFieldKind::Int64,
+            ))
+        }
         Expr::Cast(cast) => compile_pushdown_cast(&cast.expr, cast.field.data_type(), model),
         Expr::TryCast(cast) => compile_pushdown_cast(&cast.expr, cast.field.data_type(), model),
         Expr::ScalarFunction(func) => compile_pushdown_scalar_function(func, model),
@@ -2752,6 +2773,50 @@ mod tests {
                 .unwrap();
         }
         fixture.check(sql, 1).await;
+    }
+
+    #[tokio::test]
+    async fn integer_negation_wraps_in_reduce_and_float_negation_stays_native() {
+        let fixture = Fixture::with_amounts([Some(i64::MIN), Some(30), None, Some(-20)]).await;
+        for sql in [
+            "SELECT SUM(-amount), MIN(-id), MIN(-amount), MAX(-amount), COUNT(-amount) FROM orders",
+            "SELECT region, SUM(-amount), AVG(-(amount + id)) FROM orders \
+             GROUP BY region ORDER BY region",
+            "SELECT -id, MIN(-amount) FROM orders GROUP BY -id ORDER BY 1",
+            "SELECT SUM(CASE WHEN status = 'open' THEN -amount END) FROM orders",
+        ] {
+            fixture.check(sql, 1).await;
+        }
+
+        // Native negation of a constant reports overflow, while a worker would wrap it.
+        let sql = "SELECT SUM(amount + -(-9223372036854775808)) FROM orders";
+        fixture.rows.reductions.lock().unwrap().clear();
+        for context in [&fixture.native, fixture.context.datafusion()] {
+            let error = values(context, sql).await.unwrap_err();
+            assert!(error.to_string().contains("Overflow"), "{sql}: {error}");
+        }
+        assert!(fixture.rows.reductions.lock().unwrap().is_empty(), "{sql}");
+
+        // Negating a positive zero yields a negative zero, and zero minus it does not.
+        fixture
+            .replace_value_column(
+                DataType::Float64,
+                vec![CellValue::Float64(0.0), CellValue::Null],
+                Arc::new(Float64Array::from(vec![Some(0.0), None])),
+            )
+            .await;
+        let sql = "SELECT MIN(-value), MAX(-value), SUM(-value) FROM numbers";
+        let expected = values(&fixture.native, sql).await.unwrap();
+        assert_eq!(
+            expected[0][1],
+            ScalarValue::Float64(Some(-0.0)),
+            "native negation must flip the sign of zero"
+        );
+        assert_eq!(
+            values(fixture.context.datafusion(), sql).await.unwrap(),
+            expected
+        );
+        assert!(fixture.rows.reductions.lock().unwrap().is_empty(), "{sql}");
     }
 
     #[tokio::test]
