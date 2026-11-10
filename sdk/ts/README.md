@@ -70,9 +70,8 @@ const batchSequence = await batch.commit(client);
 
 `put` writes one entry and `putMany` writes several. Each call, like a batch
 commit, sends one atomic Put. They validate sizes before sending and throw
-`RangeError` for invalid batches. The Rust SDK skips this local check and lets
-the server reject an oversized Put. Configure entry, value, and encoded message limits for your
-deployment with `StoreClientOptions.putLimits`.
+`RangeError` for invalid batches. Configure entry, value, and encoded message
+limits for your deployment with `StoreClientOptions.putLimits`.
 
 To plan a larger upload, use `encodedLen()` to find the batch's uncompressed
 protobuf size, including prefixes. If it needs splitting, replace the single
@@ -107,9 +106,8 @@ To require a higher minimum for one reader, use
 `withMinSequenceNumber(sequence)`. The derived reader shares observations
 with its parent but leaves the parent's configured floor unchanged.
 
-Log subscriptions take a `StreamFilter`. In TypeScript it also carries the
-subscribe cursor `sinceSequenceNumber`, which the Rust SDK passes as a separate
-argument.
+Log subscriptions take a `StreamFilter`. It also carries the subscribe cursor
+`sinceSequenceNumber`.
 
 ## Request options
 

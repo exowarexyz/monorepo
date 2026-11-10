@@ -79,16 +79,15 @@ batch.push(&accounts, &Bytes::from_static(b"7"), b"active")?;
 let sequence = batch.commit(&client).await?;
 ```
 
-A commit sends one atomic Put. Unlike the TypeScript SDK, `commit` and
-`put_prepared` do not check Put limits locally. The server rejects a Put with
-too many entries with `PUT_TOO_LARGE` (see `ClientError::put_too_large`), one
-over its message byte limit with `ResourceExhausted`, and an oversized value
-with `InvalidArgument`. To plan a larger upload, use `encoded_len()` to find
-its uncompressed protobuf size, including prefixes. Then use
-`split(max_entries, max_encoded_bytes)` to consume the batch and return
-ordered chunks within those limits. Each chunk is a separate write, so your
-application must handle partial completion and coordinate publication.
-Concurrent commits can be sequenced out of order.
+A commit sends one atomic Put. `commit` and `put_prepared` do not check Put
+limits locally. The server rejects a Put with too many entries with
+`PUT_TOO_LARGE` (see `ClientError::put_too_large`), one over its message byte
+limit with `ResourceExhausted`, and an oversized value with `InvalidArgument`.
+To plan a larger upload, use `encoded_len()` to find its uncompressed protobuf
+size, including prefixes. Then use `split(max_entries, max_encoded_bytes)` to
+consume the batch and return ordered chunks within those limits. Each chunk is
+a separate write, so your application must handle partial completion and
+coordinate publication. Concurrent commits can be sequenced out of order.
 
 ## Read consistency
 

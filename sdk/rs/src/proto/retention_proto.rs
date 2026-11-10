@@ -1,10 +1,9 @@
 //! Parse protobuf retention messages into `retention` domain types.
 //!
 //! Conversion checks only protobuf shape. [`parse_set_retention_request_view`]
-//! also validates a present policy, and callers of
-//! [`to_domain_retention_policy`] call [`crate::retention::validate_policy`]
-//! before applying retention effects. The `buf.validate` annotations on the
-//! proto are documentation.
+//! also validates a present policy. Callers of [`to_domain_retention_policy`]
+//! must call [`crate::retention::validate_policy`] before applying retention
+//! effects. The `buf.validate` annotations on the proto are documentation.
 
 use crate::{
     log::retention::v1::{

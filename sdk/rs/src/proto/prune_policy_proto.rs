@@ -1,8 +1,8 @@
 //! Parse protobuf prune-policy messages into `prune_policy` domain types.
 //!
 //! Conversion checks only protobuf shape and numeric width conversions.
-//! [`parse_prune_request_view`] also validates the parsed document, and callers
-//! of [`to_domain_prune_policy`] call [`crate::prune_policy::validate_policy`]
+//! [`parse_prune_request_view`] also validates the parsed document. Callers of
+//! [`to_domain_prune_policy`] must call [`crate::prune_policy::validate_policy`]
 //! before applying policy effects.
 
 use crate::{
