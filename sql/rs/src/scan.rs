@@ -340,6 +340,7 @@ impl KvScanExec {
                         c.kind,
                         ColumnKind::Int64
                             | ColumnKind::UInt64
+                            | ColumnKind::Float64
                             | ColumnKind::Utf8
                             | ColumnKind::FixedSizeBinary(_)
                             | ColumnKind::Boolean
@@ -2273,6 +2274,96 @@ mod tests {
                     .await;
             }
         }
+    }
+
+    /// Float64 index keys and DataFusion sorts both use IEEE total order, so a covering index
+    /// serves ORDER BY and LIMIT without a sort.
+    #[tokio::test]
+    async fn float_index_keys_serve_sort_order() {
+        let fixture = Fixture::new(
+            vec![
+                column("id", DataType::Int64, false),
+                column("score", DataType::Float64, false),
+            ],
+            &["id"],
+            vec![index("score", &["score"], &[])],
+            vec![
+                Arc::new(Int64Array::from(vec![1, 2, 3, 4, 5, 6, 7, 8])),
+                Arc::new(Float64Array::from(vec![
+                    f64::NAN,
+                    1.0,
+                    -0.0,
+                    f64::NEG_INFINITY,
+                    f64::from_bits(f64::NAN.to_bits() + 1),
+                    0.0,
+                    -f64::NAN,
+                    f64::INFINITY,
+                ])),
+            ],
+        )
+        .await;
+        for (sql, forward, limit) in [
+            (
+                "SELECT score, id FROM orders WHERE score >= CAST('-NaN' AS DOUBLE) ORDER BY score",
+                true,
+                None,
+            ),
+            (
+                "SELECT score, id FROM orders WHERE score >= CAST('-NaN' AS DOUBLE) ORDER BY score LIMIT 7",
+                true,
+                Some(7),
+            ),
+            (
+                "SELECT score, id FROM orders WHERE score >= CAST('-NaN' AS DOUBLE) ORDER BY score DESC LIMIT 7",
+                false,
+                Some(7),
+            ),
+            (
+                "SELECT score FROM orders WHERE score <= CAST('NaN' AS DOUBLE) ORDER BY score DESC LIMIT 3",
+                false,
+                Some(3),
+            ),
+        ] {
+            let plan = fixture
+                .context
+                .sql(sql)
+                .await
+                .unwrap()
+                .create_physical_plan()
+                .await
+                .unwrap();
+            let rendered = datafusion::physical_plan::displayable(plan.as_ref())
+                .indent(true)
+                .to_string();
+            assert!(!rendered.contains("SortExec"), "{sql}\n{rendered}");
+            let requests = fixture.check(sql).await;
+            assert!(
+                matches!(requests.as_slice(), [Request::Range { start, forward: actual, limit: actual_limit, .. }]
+                if *actual == forward && limit.is_none_or(|limit| limit == *actual_limit) && fixture.index_matches(0, start)),
+                "{sql}: {requests:?}"
+            );
+        }
+
+        // SQL equality on zero matches both signed zeros. They are distinct keys, so the
+        // equality does not fix the leading column for a sort on the next one.
+        let fixture = Fixture::new(
+            vec![
+                column("id", DataType::Int64, false),
+                column("score", DataType::Float64, false),
+                column("rank", DataType::Int64, false),
+            ],
+            &["id"],
+            vec![index("score_rank", &["score", "rank"], &[])],
+            vec![
+                Arc::new(Int64Array::from(vec![1, 2, 3])),
+                Arc::new(Float64Array::from(vec![-0.0, 0.0, 1.0])),
+                Arc::new(Int64Array::from(vec![2, 1, 0])),
+            ],
+        )
+        .await;
+        fixture
+            .check("SELECT rank FROM orders WHERE score = 0.0 ORDER BY rank LIMIT 2")
+            .await;
     }
 
     #[tokio::test]

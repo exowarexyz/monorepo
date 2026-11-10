@@ -18,7 +18,8 @@ A covering index returns rows without touching base rows. A non-covering index f
 applies the predicates it can check from the index entry, then fetches the surviving
 base rows in bounded batches and checks the complete predicate against each one.
 Compatible lexicographic covering indexes also serve DataFusion's sort and `LIMIT`
-pushdown, including reverse traversal after a fixed equality prefix.
+pushdown, including reverse traversal after a fixed equality prefix. Equality on a
+`Float64` zero matches both signed zeros, so it does not fix a prefix.
 
 ## Predicate pushdown
 
