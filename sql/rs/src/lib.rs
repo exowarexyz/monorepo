@@ -731,7 +731,6 @@ mod tests {
         let _ = shutdown_tx.send(());
     }
 
-    /// `IndexSpec::new` keeps the name and key columns and rejects an empty name or key list.
     #[test]
     fn index_spec_constructor_sets_name_and_keys_and_rejects_empty_arguments() {
         let spec = IndexSpec::new(

@@ -72,8 +72,6 @@ impl TableRowEncoder {
 /// `insert` rejects caller input with `DataFusionError::Plan`: an unknown table, a row of
 /// the wrong shape or type, or a key over the Store key limit. Upload failures from
 /// `flush` are returned as `DataFusionError::External` wrapping the Store client error.
-/// `KvSchema`'s index backfill follows the same split: `Plan` for its arguments, and
-/// `External` or `Execution` for Store and scan failures.
 #[derive(Debug)]
 pub struct BatchWriter {
     /// Store client whose namespace prefixes staged keys and that commits each batch.

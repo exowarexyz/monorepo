@@ -128,6 +128,9 @@ impl KvSchema {
     /// Operational ordering requirement: start writing new rows with the new
     /// index specs before backfilling historical rows, or rows written during
     /// the backfill window may be missing from the new index.
+    ///
+    /// Invalid arguments fail with `DataFusionError::Plan`, and Store and scan
+    /// failures with `External` or `Execution`.
     pub async fn backfill_added_indexes(
         &self,
         table_name: &str,
