@@ -99,10 +99,13 @@ DataFusion aggregation.
 - **Filters:** aggregate `FILTER` clauses and equivalent `CASE` guards are pushed when
   every predicate is exactly representable by the Store predicate compiler. A scalar
   aggregate applies its filter before evaluating its argument, so the filter also
-  narrows the access path. A grouped aggregate evaluates its argument before its
-  filter, so precomputed grouped arguments remain eligible. A precomputed argument
-  beneath a scalar `FILTER` or a `CASE` guard stays in DataFusion. Pushing it would
-  evaluate it after the guard and could suppress an error it raises.
+  narrows the access path. A grouped aggregate evaluates its argument before its filter,
+  so precomputed grouped arguments remain eligible. A precomputed expression beneath a
+  scalar `FILTER` or a `CASE` guard is followed only when it cannot raise. That covers
+  columns, literals, and comparisons, `IS [NOT] NULL`, `IN`, `AND`, `OR`, and `NOT` over
+  them, so a condition that several `CASE` expressions share can be pushed. Any other
+  precomputed expression keeps the aggregate in DataFusion. Pushing it would evaluate it
+  after the guard and could suppress an error it raises.
 - **Access path:** every filter, group, and aggregate input must be available from the
   chosen primary-key range or index. Primary-key ranges can filter on stored values
   at the worker, so unindexed predicates do not require returning rows. A covering

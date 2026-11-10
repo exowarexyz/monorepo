@@ -398,8 +398,9 @@ fn aggregate_scan_input(
             _ => return Ok(None),
         };
 
-        // Input projections execute before scalar FILTER and CASE. Inlining their
-        // arguments behind those guards would suppress prior evaluation.
+        // Input projections execute before scalar FILTER and CASE. Inlining an expression
+        // behind those guards would suppress an error it raises on a row the guard
+        // excludes, so only expressions that cannot raise are followed.
         for expr in &expressions {
             let Expr::AggregateFunction(aggregate) = strip_alias_expr(expr) else {
                 continue;
@@ -412,10 +413,9 @@ fn aggregate_scan_input(
                         let Expr::Column(column) = expr else {
                             return Ok(false);
                         };
-                        Ok(!matches!(
-                            strip_alias_expr(&replacements[schema.index_of_column(column)?]),
-                            Expr::Column(_) | Expr::Literal(..)
-                        ))
+                        Ok(!cannot_raise(
+                            &replacements[schema.index_of_column(column)?],
+                        )?)
                     })?
                 {
                     return Ok(None);
@@ -437,6 +437,38 @@ fn aggregate_scan_input(
             .collect::<DataFusionResult<_>>()?;
         input = next;
     }
+}
+
+/// Whether evaluating `expr` cannot fail on any row, so it gives the same values and no
+/// error whether it runs before a guard or behind it.
+///
+/// Every node must be a column, a literal, a comparison, `IS [NOT] NULL`, `IN`, `AND`, `OR`, or
+/// `NOT`. After type coercion their operands have matching types, and Arrow's kernels for them fail
+/// only on mismatched types or lengths. Casts, arithmetic, function calls, and `CASE` are excluded.
+/// So are `IS TRUE` and `IS FALSE` tests, because DataFusion fails to plan them in a projection
+/// beneath an aggregate when their operand is nullable.
+fn cannot_raise(expr: &Expr) -> DataFusionResult<bool> {
+    let listed = |node: &Expr| match node {
+        Expr::Column(_)
+        | Expr::Literal(..)
+        | Expr::Not(_)
+        | Expr::IsNull(_)
+        | Expr::IsNotNull(_)
+        | Expr::InList(_) => true,
+        Expr::BinaryExpr(binary) => matches!(
+            binary.op,
+            Operator::Eq
+                | Operator::NotEq
+                | Operator::Lt
+                | Operator::LtEq
+                | Operator::Gt
+                | Operator::GtEq
+                | Operator::And
+                | Operator::Or
+        ),
+        _ => false,
+    };
+    Ok(!expr.exists(|node| Ok(!listed(node)))?)
 }
 
 impl OptimizerRule for KvAggregatePushdownRule {
@@ -2492,6 +2524,20 @@ mod tests {
             );
         }
 
+        /// Checks that the Store reduces the query without a row scan and matches native
+        /// DataFusion. The number of Reduce requests is left open.
+        async fn check_reduced(&self, sql: &str) {
+            let expected = values(&self.native, sql).await.unwrap();
+            self.rows.paths.lock().unwrap().clear();
+            let actual = values(self.context.datafusion(), sql).await.unwrap();
+            assert_eq!(actual, expected, "{sql}");
+            let paths = self.rows.paths.lock().unwrap();
+            assert!(
+                !paths.is_empty() && paths.iter().all(|path| path.ends_with("/Reduce")),
+                "the Store must reduce the query without scanning rows: {sql}: {paths:?}"
+            );
+        }
+
         async fn check(&self, sql: &str, reductions: usize) {
             let expected = values(&self.native, sql).await.unwrap();
             self.check_expected(sql, reductions, &expected).await;
@@ -2776,6 +2822,211 @@ mod tests {
              GROUP BY region ORDER BY region",
         ] {
             fixture.check(sql, 1).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn guards_follow_precomputed_conditions_that_cannot_raise() {
+        use datafusion::arrow::array::BooleanArray;
+
+        // West has no open order, and one status and one flag are unknown.
+        let fixture = Fixture::new().await;
+        type Row = (
+            i64,
+            Option<&'static str>,
+            Option<&'static str>,
+            Option<i64>,
+            i64,
+            Option<bool>,
+        );
+        let rows: Vec<Row> = vec![
+            (1, Some("east"), Some("open"), Some(10), 2, Some(true)),
+            (2, Some("east"), Some("closed"), Some(30), 0, Some(false)),
+            (3, Some("west"), Some("closed"), None, 1, None),
+            (4, Some("west"), None, Some(20), 4, Some(true)),
+            (5, None, Some("open"), Some(40), 5, Some(false)),
+            (6, Some("north"), Some("closed"), Some(50), 1, Some(false)),
+        ];
+        let text =
+            |value: Option<&str>| value.map_or(CellValue::Null, |v| CellValue::Utf8(v.into()));
+        fixture
+            .install_indexed_table(
+                "pivot",
+                vec![
+                    TableColumnConfig::new("id", DataType::Int64, false),
+                    TableColumnConfig::new("region", DataType::Utf8, true),
+                    TableColumnConfig::new("status", DataType::Utf8, true),
+                    TableColumnConfig::new("amount", DataType::Int64, true),
+                    TableColumnConfig::new("qty", DataType::Int64, false),
+                    TableColumnConfig::new("urgent", DataType::Boolean, true),
+                ],
+                &["id"],
+                vec![],
+                rows.iter()
+                    .map(|&(id, region, status, amount, qty, urgent)| KvRow {
+                        values: vec![
+                            CellValue::Int64(id),
+                            text(region),
+                            text(status),
+                            amount.map_or(CellValue::Null, CellValue::Int64),
+                            CellValue::Int64(qty),
+                            urgent.map_or(CellValue::Null, CellValue::Boolean),
+                        ],
+                    })
+                    .collect(),
+                vec![
+                    Arc::new(Int64Array::from_iter_values(rows.iter().map(|row| row.0))),
+                    Arc::new(StringArray::from_iter(rows.iter().map(|row| row.1))),
+                    Arc::new(StringArray::from_iter(rows.iter().map(|row| row.2))),
+                    Arc::new(Int64Array::from_iter(rows.iter().map(|row| row.3))),
+                    Arc::new(Int64Array::from_iter_values(rows.iter().map(|row| row.4))),
+                    Arc::new(BooleanArray::from_iter(rows.iter().map(|row| row.5))),
+                ],
+            )
+            .await;
+
+        // DataFusion computes a condition that two CASE expressions share once, in a
+        // projection beneath the aggregate. None of these conditions can raise there.
+        let pivot = |condition: &str| {
+            let aggregates = format!(
+                "SUM(CASE WHEN {condition} THEN amount END), COUNT(CASE WHEN {condition} THEN 1 END)"
+            );
+            [
+                format!("SELECT region, {aggregates} FROM pivot GROUP BY region ORDER BY region"),
+                format!("SELECT {aggregates} FROM pivot"),
+            ]
+        };
+        for condition in [
+            "status = 'open'",
+            "amount >= 20",
+            "status = 'closed' AND id > 2",
+            "status = 'open' OR status = 'closed'",
+            "id IN (1, 4, 5, 6)",
+            "status IN ('open', 'closed', 'held', 'void')",
+            "status IS NULL",
+            "amount IS NOT NULL",
+            "NOT urgent",
+        ] {
+            for sql in pivot(condition) {
+                fixture.check_reduced(&sql).await;
+            }
+        }
+        fixture
+            .check_reduced(
+                "SELECT region, SUM(CASE WHEN is_open THEN amount END), COUNT(*) FROM \
+                 (SELECT region, amount, status = 'open' AS is_open FROM pivot) q \
+                 GROUP BY region ORDER BY region",
+            )
+            .await;
+
+        // A projection evaluates these expressions on every row before any guard, so the division
+        // fails on the row whose quantity is zero and the cast on a status. Casts, function calls,
+        // and arithmetic stay where DataFusion evaluates them. So does IS TRUE, because DataFusion
+        // cannot plan it beneath an aggregate for a nullable operand. Each case names the error
+        // both plans must raise, if they must.
+        let mut refused = Vec::new();
+        for (condition, raises) in [
+            ("amount / qty > 1", Some("Divide by zero")),
+            ("CAST(status AS BIGINT) = 1", Some("Cannot cast")),
+            ("CAST(amount AS DOUBLE) > 15.5", None),
+            ("lower(status) = 'open'", None),
+            ("urgent IS TRUE", None),
+        ] {
+            refused.extend(pivot(condition).map(|sql| (sql, raises)));
+        }
+        for sql in [
+            "SELECT SUM(amount + 1) FILTER (WHERE status = 'open'), \
+             MAX(amount + 1) FILTER (WHERE status = 'closed') FROM pivot",
+            "SELECT region, SUM(CASE WHEN status = 'open' THEN v END), COUNT(*) FROM \
+             (SELECT region, status, amount + 1 AS v FROM pivot) q \
+             GROUP BY region ORDER BY region",
+        ] {
+            refused.push((sql.to_string(), None));
+        }
+        for (sql, raises) in refused {
+            fixture.rows.paths.lock().unwrap().clear();
+            let native = values(&fixture.native, &sql).await;
+            let store = values(fixture.context.datafusion(), &sql).await;
+            match (native, store) {
+                (Ok(native), Ok(store)) => {
+                    assert!(raises.is_none(), "{sql} must raise {raises:?}");
+                    assert_eq!(store, native, "{sql}");
+                }
+                (Err(native), Err(store)) => {
+                    for error in [native.to_string(), store.to_string()] {
+                        assert!(error.contains(raises.unwrap_or_default()), "{sql}: {error}");
+                    }
+                }
+                (native, store) => {
+                    panic!("both plans must raise or neither: {sql}: {native:?} / {store:?}")
+                }
+            }
+            let paths = fixture.rows.paths.lock().unwrap();
+            assert!(
+                !paths.iter().any(|path| path.ends_with("/Reduce")),
+                "an expression that is not known to be safe must stay ahead of its guard: {sql}"
+            );
+        }
+    }
+
+    #[test]
+    fn expressions_that_cannot_raise_form_a_closed_list() {
+        use datafusion::{
+            functions::string::expr_fn::lower,
+            logical_expr::{binary_expr, cast, not, try_cast, when},
+            prelude::{col, lit},
+        };
+
+        let (a, b, one) = (|| col("a"), || col("b"), || lit(1_i64));
+        let equal = || a().eq(one());
+        for expr in [
+            a(),
+            one(),
+            equal(),
+            a().not_eq(one()),
+            a().lt(b()),
+            a().lt_eq(one()),
+            a().gt(one()),
+            a().gt_eq(one()),
+            equal().and(b().is_null()),
+            equal().or(b().is_not_null()),
+            not(equal()),
+            b().is_null(),
+            b().is_not_null(),
+            a().in_list(vec![one(), b()], false),
+            a().in_list(vec![one()], true),
+        ] {
+            assert!(
+                cannot_raise(&expr).unwrap(),
+                "cannot_raise must accept {expr}"
+            );
+        }
+        for expr in [
+            cast(a(), DataType::Float64),
+            try_cast(a(), DataType::Float64),
+            a() + one(),
+            a() / b(),
+            Expr::Negative(Box::new(a())),
+            lower(a()),
+            when(equal(), b()).end().unwrap(),
+            a().is_true(),
+            a().is_not_true(),
+            a().is_false(),
+            a().is_not_false(),
+            a().is_unknown(),
+            a().is_not_unknown(),
+            a().like(lit("x")),
+            a().between(one(), b()),
+            binary_expr(a(), Operator::IsDistinctFrom, one()),
+            equal().and((a() / b()).gt(one())),
+            not(cast(a(), DataType::Boolean)),
+            a().in_list(vec![b() + one()], false),
+            (a() + one()).is_null(),
+        ] {
+            assert!(
+                !cannot_raise(&expr).unwrap(),
+                "cannot_raise must refuse {expr}"
+            );
         }
     }
 
