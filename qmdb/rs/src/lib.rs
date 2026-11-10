@@ -4,13 +4,9 @@
 //! against trusted roots. Ordered, unordered, immutable, and keyless databases are supported,
 //! with MMR or MMB Merkle trees.
 //!
-//! This crate prepares and stages upload rows, and the application commits them to the Store.
-//! [`adapter::upload::prepare_authenticated_range`] verifies an operation range against a
-//! trusted root and prepares its rows, [`adapter::upload::stage_authenticated_range`] stages
-//! them in a Store write batch, and [`adapter::upload::stage_watermark`] stages the watermark
-//! that publishes the durable prefix. A current QMDB uploads each batch as an
-//! [`adapter::upload::Publication`], which also carries the batch's current-state changes and
-//! is prepared by [`adapter::upload::prepare_publication`].
+//! [`adapter::upload`] verifies and stages upload rows, and the application commits them to the
+//! Store. A current QMDB uploads each batch as an [`adapter::upload::Publication`] that also
+//! carries the batch's current-state changes.
 //!
 //! Reads take one of two paths. The adapters ([`adapter::Ordered`], [`adapter::Unordered`],
 //! [`adapter::Immutable`], and [`adapter::Keyless`]) query the Store directly. The clients
@@ -36,6 +32,17 @@
 //! watermark is monotonic. Publishing watermark `W` means the whole contiguous prefix `[0, W]`
 //! is durable and may be trusted by readers, which fence historical queries against it.
 //! Historical proofs use the operation-log Merkle nodes, which are stored once by `Position`.
+//!
+//! ```text
+//!  durable     [0 ........ 99]              [200 ...... 299]
+//!  watermark               99
+//!
+//!  durable     [0 ........ 99][100 .... 199][200 ...... 299]
+//!  watermark                                            299
+//! ```
+//!
+//! A gap holds the watermark at the end of the prefix below it. Once the gap is durable, the
+//! watermark can move past every commit up to the next gap in one step.
 //!
 //! A publication's current-state rows (metadata, witness, bitmap chunks, and grafted nodes)
 //! are versioned by the batch's final location rather than by the watermark, so current proofs

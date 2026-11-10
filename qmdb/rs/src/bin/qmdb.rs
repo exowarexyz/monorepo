@@ -219,8 +219,7 @@ async fn seed(
                 upload(&store, &initial, &source_db.root()).await;
             }
 
-            // Resume the key counter from the number of applied batches. The decoded history is
-            // dropped once it is counted.
+            // Resume the key counter from the number of applied batches.
             let committed_batches = {
                 let (_, operations) = source_db
                     .ops_historical_proof(

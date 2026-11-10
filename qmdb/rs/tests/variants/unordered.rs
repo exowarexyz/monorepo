@@ -104,7 +104,7 @@ async fn check_mirror<F, K, V, E>(
             .map(|operation| operation.encode().to_vec())
             .collect::<Vec<_>>();
         let prepared = match &snapshot.publication {
-            // Current batches travel as encoded publications and are verified after decoding
+            // Current batches travel as encoded publications and are verified after decoding.
             Some(publication) => {
                 let decoded = common::round_trip_publication(publication, op_cfg.clone());
                 assert_eq!(decoded.start_location, snapshot.start);

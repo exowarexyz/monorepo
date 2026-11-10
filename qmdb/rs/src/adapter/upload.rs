@@ -1,12 +1,24 @@
 //! Prepare Store rows for Commonware QMDB uploads.
 //!
-//! [`prepare_authenticated_range`] checks a range of encoded operations and its prefix pins
-//! against a trusted operation-log root, then prepares its operation, index, and Merkle node
-//! rows. [`prepare_publication`] does the same for a current batch's [`Publication`] against a
-//! trusted current root and adds the batch's current-state rows. [`stage_authenticated_range`]
-//! adds prepared rows to a Store write batch, and [`stage_watermark`] adds the watermark that
-//! makes the durable prefix visible to readers. Nothing here reads the Store or keeps state
-//! between calls.
+//! [`prepare_authenticated_range`] and [`prepare_publication`] each check their input against a
+//! trusted root before they prepare any row, and [`prepare_publication`] adds the batch's
+//! current-state rows. [`stage_authenticated_range`] adds prepared rows to a Store write batch,
+//! and [`stage_watermark`] adds the watermark that makes the durable prefix visible to readers.
+//! Nothing here reads the Store or keeps state between calls.
+//!
+//! ```text
+//!     AuthenticatedOperationRange                           Publication
+//!   and a trusted operation-log root                 and a trusted current root
+//!                  |                                             |
+//!     prepare_authenticated_range                       prepare_publication
+//!                  |                                             |
+//!                  '--------> PreparedAuthenticatedRange <-------'
+//!                                         |
+//!                             stage_authenticated_range                      watermark
+//!                                         |                                      |
+//!                                         v                               stage_watermark
+//!                                  StoreWriteBatch <-----------------------------'
+//! ```
 //!
 //! Ranges may overlap and contain several commits, and every upload to a namespace must belong
 //! to the same operation history, so repeated operation and Merkle node keys carry identical
@@ -396,7 +408,7 @@ where
     };
 
     // The range authenticates only if the witness binds its rebuilt operation-log root to the
-    // trusted root. The operations are already decoded, so row preparation borrows them.
+    // trusted root.
     let extension = reconstruct_range::<F, H, _>(&authenticated, strategy)?;
     if !publication
         .ops_root_witness
@@ -867,7 +879,7 @@ mod tests {
         authenticate_frontier_pins::<mmb::Family>();
     }
 
-    // This decoder deliberately accepts aliases so canonical encoding validation is exercised
+    // This decoder accepts aliases so the tests exercise canonical encoding validation.
     struct AliasedCommit(u8);
 
     impl Write for AliasedCommit {
@@ -1409,6 +1421,8 @@ mod tests {
         let latest = prepared.latest_location();
         let client = StoreClient::new("http://127.0.0.1:1")
             .prefixed(StoreKeyPrefix::new(b"authenticated-range/".to_vec()).expect("prefix"));
+
+        // Staging the range writes its presence row under the client's prefix and no watermark.
         let mut batch = StoreWriteBatch::new();
         stage_authenticated_range(&client, prepared, &mut batch).expect("stage range");
         let mut has_boundary = false;
@@ -1418,6 +1432,8 @@ mod tests {
             assert_ne!(logical, encode_watermark_key(latest));
         }
         assert!(has_boundary);
+
+        // Staging the watermark adds exactly one empty row after the data rows.
         let data_rows = batch.len();
         stage_watermark(&client, latest, &mut batch).expect("stage watermark");
         let watermark = &batch.entries()[data_rows..];
@@ -1427,6 +1443,8 @@ mod tests {
             encode_watermark_key(latest)
         );
         assert!(watermark.iter().all(|(_, value)| value.is_empty()));
+
+        // An invalid watermark location fails and stages nothing.
         let staged = batch.len();
         assert!(stage_watermark(&client, mmr::Family::MAX_LEAVES, &mut batch).is_err());
         assert_eq!(batch.len(), staged);

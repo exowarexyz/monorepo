@@ -38,9 +38,8 @@ type Db = LocalOrderedDb<
 type OrderedPublication = Publication<mmr::Family, Digest, OrderedUpdate<Vec<u8>, Vec<u8>>, N>;
 
 /// Each batch appends 3 fresh writes and rewrites the key 3 counter-positions
-/// behind. With `N = 32` a bitmap chunk spans 256 bits, and the source prunes
-/// chunk 0 after roughly 55 batches, so 150 batches publish many more over a
-/// pruned bitmap.
+/// behind. With `N = 32` a bitmap chunk spans 256 bits, so 150 batches prune
+/// chunk 0 and publish later batches over a pruned bitmap.
 const BATCHES: u64 = 150;
 
 struct BatchOutcome {

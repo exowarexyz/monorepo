@@ -309,7 +309,7 @@ async fn verify_snapshots<F, K, V, E>(
         let mut data = StoreWriteBatch::new();
         match &snapshot.publications {
             // Current batches travel as encoded publications that tile the new operations and
-            // are verified after decoding against their own trusted roots
+            // are verified after decoding against their own trusted roots.
             Some(publications) => {
                 let mut next = Location::new(previous_count as u64);
                 for publication in publications {
@@ -921,7 +921,7 @@ macro_rules! capture_source_batch {
         })
     }};
     (current, $family:ty, $db:ident, $previous:ident, $batch:ident) => {{
-        // A new database's initial commit precedes its first batch
+        // A new database's initial commit precedes its first batch.
         let mut publications = Vec::new();
         if $previous.is_empty() {
             publications
