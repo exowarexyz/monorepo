@@ -69,21 +69,27 @@ struct Cli {
 #[derive(Subcommand, Debug)]
 enum Command {
     Run {
+        /// Store base URL.
         #[arg(long)]
         store_url: String,
+        /// Prefix for this instance's keys in the Store.
         #[arg(long, default_value = "")]
         store_prefix: String,
         /// Address to listen on. The default accepts only connections from this machine.
         #[arg(long, default_value = "127.0.0.1")]
         host: IpAddr,
+        /// Port to listen on.
         #[arg(long, default_value_t = 8081)]
         port: u16,
     },
     Seed {
+        /// Store base URL.
         #[arg(long)]
         store_url: String,
+        /// Prefix for this instance's keys in the Store.
         #[arg(long, default_value = "")]
         store_prefix: String,
+        /// Seconds between uploaded batches.
         #[arg(long, default_value_t = 2)]
         interval_secs: u64,
         /// Directory for the local ordered-QMDB state. Reuse it to resume the
