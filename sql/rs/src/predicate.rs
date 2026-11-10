@@ -306,6 +306,7 @@ impl QueryPredicate {
             return true;
         }
         match expr {
+            Expr::Literal(ScalarValue::Boolean(_), _) => true,
             Expr::BinaryExpr(binary) if binary.op == Operator::And => {
                 Self::supports_filter(binary.left.as_ref(), model)
                     && Self::supports_filter(binary.right.as_ref(), model)
@@ -383,6 +384,9 @@ impl QueryPredicate {
             return;
         }
         match expr {
+            Expr::Literal(ScalarValue::Boolean(value), _) => {
+                self.contradiction |= *value != Some(true);
+            }
             Expr::IsNull(inner) => {
                 if let Some(column) = inner.try_as_col() {
                     if let Some(&col_idx) = model.columns_by_name.get(&column.name) {
@@ -2138,6 +2142,51 @@ mod tests {
         ] {
             assert!(!QueryPredicate::supports_filter(&expr, &model));
         }
+    }
+
+    #[test]
+    fn literal_predicates_preserve_truth_and_contradictions() {
+        let config = KvTableConfig::new(
+            0,
+            vec![TableColumnConfig::new(
+                "id",
+                datafusion::arrow::datatypes::DataType::Int64,
+                false,
+            )],
+            vec!["id".into()],
+            vec![],
+        )
+        .unwrap();
+        let model = TableModel::from_config(&config).unwrap();
+        let equality = col("id").eq(Expr::Literal(ScalarValue::Int64(Some(1)), None));
+        for value in [Some(true), Some(false), None] {
+            let literal = Expr::Literal(ScalarValue::Boolean(value), None);
+            assert!(QueryPredicate::supports_filter(&literal, &model));
+            for filters in [
+                vec![equality.clone(), literal.clone()],
+                vec![literal.clone(), equality.clone()],
+            ] {
+                let predicate = QueryPredicate::from_filters(&filters, &model);
+                assert_eq!(predicate.contradiction, value != Some(true));
+                if predicate.contradiction {
+                    assert!(predicate.primary_key_ranges(&model, 64).unwrap().is_empty());
+                } else {
+                    assert!(matches!(
+                        predicate.constraints.get(&0),
+                        Some(PredicateConstraint::IntRange {
+                            min: Some(1),
+                            max: Some(1),
+                        })
+                    ));
+                }
+            }
+        }
+        let predicate = QueryPredicate::from_filters(
+            &[Expr::Literal(ScalarValue::Boolean(Some(true)), None)],
+            &model,
+        );
+        assert!(!predicate.contradiction);
+        assert!(predicate.constraints.is_empty());
     }
 
     #[test]

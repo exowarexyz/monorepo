@@ -692,6 +692,67 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn literal_predicates_skip_store_reads_for_contradictions() {
+        let state = MockState {
+            kv: Arc::new(Mutex::new(BTreeMap::new())),
+            range_calls: Arc::new(AtomicUsize::new(0)),
+            range_reduce_calls: Arc::new(AtomicUsize::new(0)),
+            sequence_number: Arc::new(AtomicU64::new(0)),
+        };
+        let (base_url, shutdown_tx) = spawn_mock_server(state.clone()).await;
+        let client = StoreClient::new(&base_url);
+        let schema = KvSchema::new(client.unprefixed())
+            .table(
+                "t",
+                vec![
+                    TableColumnConfig::new("id", DataType::Int64, false),
+                    TableColumnConfig::new("s", DataType::Utf8, false),
+                    TableColumnConfig::new("x", DataType::Int64, false),
+                ],
+                vec!["id".into()],
+                vec![],
+            )
+            .unwrap();
+        let mut writer = schema.batch_writer();
+        writer
+            .insert(
+                "t",
+                vec![
+                    CellValue::Int64(1),
+                    CellValue::Utf8("a".into()),
+                    CellValue::Int64(7),
+                ],
+            )
+            .unwrap();
+        writer.flush().await.unwrap();
+        let ctx = SqlContext::new(client.unprefixed());
+        ctx.register_schema(schema).unwrap();
+
+        let sql = "SELECT id FROM t WHERE s = 'a' AND s = 'b'";
+        let plan = physical_plan_text(&explain_plan_rows(&ctx, sql).await);
+        assert!(plan.contains("mode=empty"), "{plan}");
+        assert!(plan.contains("ranges=0"), "{plan}");
+        let batches = ctx.sql(sql).await.unwrap().collect().await.unwrap();
+        assert!(batches.iter().all(|batch| batch.num_rows() == 0));
+        assert_eq!(state.range_calls.load(AtomicOrdering::SeqCst), 0);
+
+        let batches = ctx
+            .sql("SELECT COUNT(*), SUM(x) FROM t WHERE id = 1 AND id = 2")
+            .await
+            .unwrap()
+            .collect()
+            .await
+            .unwrap();
+        assert_count_scalar(&batches[0], 0, 0, 0);
+        assert_eq!(
+            ScalarValue::try_from_array(batches[0].column(1), 0).unwrap(),
+            ScalarValue::Int64(None)
+        );
+        assert_eq!(state.range_calls.load(AtomicOrdering::SeqCst), 0);
+        let _ = shutdown_tx.send(());
+    }
+
+    #[tokio::test]
     async fn explain_reports_secondary_index_scan_and_row_recheck() {
         let state = MockState {
             kv: Arc::new(Mutex::new(BTreeMap::new())),
