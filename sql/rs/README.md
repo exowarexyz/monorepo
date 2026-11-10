@@ -123,7 +123,7 @@ equality first. A range constraint on a later column narrows the scan only when
 every earlier column has an equality constraint.
 
 `KvSchema::versioned_table` declares an `(entity, version)` primary key. The
-version column must be `UInt64` and distinct from the entity column; other
+version column must be `UInt64` and distinct from the entity column, and other
 layouts return a planning error. Versions sort numerically within each entity, so
 the latest version at or below `V` is a short reverse range scan:
 

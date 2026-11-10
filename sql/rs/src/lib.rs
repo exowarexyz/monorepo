@@ -1,9 +1,9 @@
 //! SQL over an Exoware Store, built on DataFusion.
 //!
-//! Names starting with `Kv` belong to the Store-backed key-layout layer: [`KvSchema`]
+//! Names starting with `Kv` belong to the Store-backed key-layout layer. [`KvSchema`]
 //! declares tables and maps rows and indexes to Store keys, and the `KvScanExec` and
 //! `KvAggregateExec` plan nodes read them. Names starting with `Sql` belong to the session
-//! and serving layer: [`SqlContext`] runs queries and [`SqlServer`] serves them over Connect.
+//! and serving layer. [`SqlContext`] runs queries and [`SqlServer`] serves them over Connect.
 //! Within a table, [`TableColumnConfig`] declares a column and [`IndexSpec`] declares a
 //! secondary index.
 
