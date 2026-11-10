@@ -50,10 +50,6 @@ a remote notification path that advances the query worker's local
 
 ## Implement writes and reads
 
-Names with `Ingest` refer to the `log.ingest.v1` service and capability, including
-its state, budget, and backend error. Names with `Put` refer to that service's single
-RPC and the adapter pipeline that reads its request.
-
 `Ingest::put` receives a borrowed `&mut PutInput`. Consume its batches into
 preparation storage, then call `finish().await` and require success before
 submitting anything for publication. Use `message_bound().await` to size
