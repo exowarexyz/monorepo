@@ -1,16 +1,16 @@
 name: Run Exoware validation
-description: Run validation load, bench, and validate against an Exoware endpoint.
+description: Run validation load, bench, and validate against an Exoware Store.
 
 inputs:
-  endpoint:
-    description: Exoware endpoint URL.
+  store-url:
+    description: Store base URL.
     required: true
   validation-bin:
     description: Optional path to a prebuilt validation binary.
     required: false
     default: ""
   keys:
-    description: Keyspace size; load writes exactly these keys and bench reads them back.
+    description: Initial key count. Load writes exactly these keys, and bench reads them and appends new keys after them.
     required: false
     default: "5000"
   load-batch-size:
@@ -41,10 +41,10 @@ inputs:
     description: Bench workload scenario.
     required: false
     default: balanced
-  bench-rng-seed:
-    description: Deterministic bench RNG seed.
+  bench-seed:
+    description: Deterministic bench RNG seed. Empty uses the validation binary's default.
     required: false
-    default: "1592639710"
+    default: ""
   validate-keys:
     description: Number of keys for validate.
     required: false
@@ -171,7 +171,7 @@ runs:
       shell: bash
       env:
         VALIDATION: ${{ steps.validation.outputs.path }}
-        ENDPOINT: ${{ inputs.endpoint }}
+        STORE_URL: ${{ inputs.store-url }}
         VALIDATION_NAMESPACE: ${{ steps.namespace.outputs.value }}
         KEYS: ${{ inputs.keys }}
         LOAD_BATCH_SIZE: ${{ inputs.load-batch-size }}
@@ -179,7 +179,7 @@ runs:
       run: |
         set -euo pipefail
         "$VALIDATION" load \
-          --url "$ENDPOINT" \
+          --store-url "$STORE_URL" \
           --namespace "$VALIDATION_NAMESPACE" \
           --keys "$KEYS" \
           --batch-size "$LOAD_BATCH_SIZE" \
@@ -189,30 +189,32 @@ runs:
       shell: bash
       env:
         VALIDATION: ${{ steps.validation.outputs.path }}
-        ENDPOINT: ${{ inputs.endpoint }}
+        STORE_URL: ${{ inputs.store-url }}
         VALIDATION_NAMESPACE: ${{ steps.namespace.outputs.value }}
         KEYS: ${{ inputs.keys }}
         BENCH_OPS: ${{ inputs.bench-ops }}
         BENCH_BATCH_SIZE: ${{ inputs.bench-batch-size }}
         BENCH_CONCURRENCY: ${{ inputs.bench-concurrency }}
         BENCH_SCENARIO: ${{ inputs.bench-scenario }}
-        BENCH_RNG_SEED: ${{ inputs.bench-rng-seed }}
+        BENCH_SEED: ${{ inputs.bench-seed }}
       run: |
         set -euo pipefail
         args=(
-          --url "$ENDPOINT"
+          --store-url "$STORE_URL"
           --namespace "$VALIDATION_NAMESPACE"
           --keys "$KEYS"
           --ops "$BENCH_OPS"
           --concurrency "$BENCH_CONCURRENCY"
           --scenario "$BENCH_SCENARIO"
-          --rng-seed "$BENCH_RNG_SEED"
           --progress-interval-secs 0
           --output "$RUNNER_TEMP/validation-bench-report.json"
         )
         # Empty means "use the binary's default" so the default lives in one place.
         if [[ -n "$BENCH_BATCH_SIZE" ]]; then
           args+=(--batch-size "$BENCH_BATCH_SIZE")
+        fi
+        if [[ -n "$BENCH_SEED" ]]; then
+          args+=(--seed "$BENCH_SEED")
         fi
         "$VALIDATION" bench "${args[@]}"
 
@@ -317,7 +319,7 @@ runs:
             )
 
         rows = [
-            ("Endpoint", config["endpoint"]),
+            ("Store URL", config["store_url"]),
             ("Commit", report.get("commit", "n/a")),
             ("Namespace", config["namespace"]),
             ("Scenario", config["scenario"]),
@@ -357,7 +359,7 @@ runs:
       shell: bash
       env:
         VALIDATION: ${{ steps.validation.outputs.path }}
-        ENDPOINT: ${{ inputs.endpoint }}
+        STORE_URL: ${{ inputs.store-url }}
         VALIDATE_KEYS: ${{ inputs.validate-keys }}
         VALIDATE_LOOKUP_SAMPLES: ${{ inputs.validate-lookup-samples }}
         VALIDATE_MISSING_SAMPLES: ${{ inputs.validate-missing-samples }}
@@ -365,7 +367,7 @@ runs:
       run: |
         set -euo pipefail
         "$VALIDATION" validate \
-          --url "$ENDPOINT" \
+          --store-url "$STORE_URL" \
           --keys "$VALIDATE_KEYS" \
           --lookup-samples "$VALIDATE_LOOKUP_SAMPLES" \
           --missing-samples "$VALIDATE_MISSING_SAMPLES" \

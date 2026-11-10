@@ -35,7 +35,7 @@ pub struct PutConfig {
     pub max_timeout: std::time::Duration,
     /// Limits waits for upload progress without charging backend processing time.
     pub idle_timeout: Option<std::time::Duration>,
-    pub observer: Option<Arc<dyn super::IngestObserver>>,
+    pub observer: Option<Arc<dyn super::PutObserver>>,
 }
 
 impl Default for PutConfig {
@@ -208,7 +208,7 @@ where
             let observer = state.put_config.observer.clone();
             let response = put(state, middleware, request.map(Body::new)).await;
             if let Some(observer) = observer {
-                observer.observe(super::IngestEvent::ResponseElapsed(started.elapsed()));
+                observer.observe(super::PutEvent::ResponseElapsed(started.elapsed()));
             }
             Ok(response)
         })
@@ -366,16 +366,20 @@ async fn put<I: Ingest>(
         box_body(body),
         metadata,
         PutLimits {
-            wire_bytes: state.put_config.max_wire_bytes,
-            ingest: state.limits,
+            max_wire_bytes: state.put_config.max_wire_bytes,
+            ingest_limits: state.ingest_limits,
             ..Default::default()
         },
         request_deadline,
         admission,
     )
-    .with_idle_timeout(state.put_config.idle_timeout)
-    .with_parts(parts)
-    .with_notifier(state.notifier.clone());
+    .with_parts(parts);
+    if let Some(timeout) = state.put_config.idle_timeout {
+        input = input.with_idle_timeout(timeout);
+    }
+    if let Some(notifier) = &state.notifier {
+        input = input.with_notifier(notifier.clone());
+    }
     if let Some(observer) = &state.put_config.observer {
         input = input.with_observer(observer.clone());
     }

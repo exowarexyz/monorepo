@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { StoreClient, type PrefixedStoreClient } from '@exowarexyz/sdk';
 import { Buffer } from 'buffer';
 import './App.css';
-import { QMDB_URL, SIMPLEX_URL, SIMPLEX_STORE_PREFIX, SQL_URL } from './env';
+import { QMDB_URL, SIMPLEX_STORE_URL, SIMPLEX_STORE_PREFIX, SQL_URL } from './env';
 import { LogPanel } from './LogPanel';
 import { QmdbPanel } from './QmdbPanel';
 import { SimplexPanel } from './SimplexPanel';
@@ -18,7 +18,7 @@ declare global {
 window.Buffer = Buffer;
 
 // Load environment variables from .env file
-const SIMULATOR_URL = import.meta.env.VITE_SIMULATOR_URL;
+const STORE_URL = import.meta.env.VITE_STORE_URL;
 const TOKEN = import.meta.env.VITE_TOKEN;
 
 interface Notification {
@@ -34,7 +34,7 @@ function App() {
   const [notifications, setNotifications] = useState<Notification[]>([]);
 
   useEffect(() => {
-    const client = new StoreClient(SIMULATOR_URL, TOKEN);
+    const client = new StoreClient(STORE_URL, TOKEN);
     setStore(client.unprefixed());
 
     testConnection(client).then((connected) => {
@@ -45,7 +45,7 @@ function App() {
             id: Math.random().toString(36).slice(2, 11),
             type: 'error',
             title: 'Connection Failed',
-            message: 'Unable to connect to the simulator backend'
+            message: 'Unable to connect to the Store'
           }
         ]);
       }
@@ -126,9 +126,9 @@ function App() {
       </div>
 
       {QMDB_URL && <QmdbPanel qmdbUrl={QMDB_URL} showNotification={showNotification} />}
-      {SIMPLEX_URL && (
+      {SIMPLEX_STORE_URL && (
         <SimplexPanel
-          simplexUrl={SIMPLEX_URL}
+          simplexStoreUrl={SIMPLEX_STORE_URL}
           storePrefix={SIMPLEX_STORE_PREFIX}
           showNotification={showNotification}
         />

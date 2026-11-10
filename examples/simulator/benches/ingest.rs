@@ -30,9 +30,7 @@ use bytes::Bytes;
 use commonware_allocator::mimalloc::{Config, MiMalloc, Purge, Reserve};
 use exoware_sdk::{common::kv::v1::Entry, log::ingest::v1::PutRequest};
 use exoware_server::{
-    ingest::{
-        box_body, BudgetConfig, IngestBudget, IngestEvent, IngestObserver, PutLimits, PutMetadata,
-    },
+    ingest::{box_body, BudgetConfig, IngestBudget, PutEvent, PutLimits, PutMetadata, PutObserver},
     Ingest, PutInput,
 };
 use exoware_simulator::RocksStore;
@@ -112,15 +110,15 @@ struct Observed {
     decode_nanos: AtomicUsize,
 }
 
-impl IngestObserver for Observed {
-    fn observe(&self, event: IngestEvent) {
+impl PutObserver for Observed {
+    fn observe(&self, event: PutEvent) {
         self.reservation_peak
             .fetch_max(self.budget.usage().1, Ordering::Relaxed);
         match event {
-            IngestEvent::Batch { .. } => {
+            PutEvent::Batch { .. } => {
                 self.chunks.fetch_add(1, Ordering::Relaxed);
             }
-            IngestEvent::DecodeElapsed(elapsed) => {
+            PutEvent::DecodeElapsed(elapsed) => {
                 self.decode_nanos
                     .fetch_add(elapsed.as_nanos() as usize, Ordering::Relaxed);
             }

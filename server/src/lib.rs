@@ -3,6 +3,10 @@
 //!
 //! Use [`AppState`] with [`connect_stack`] for an all-in-one server, or the narrower
 //! state and service constructors when capabilities are served separately.
+//!
+//! Names with `Ingest` refer to the `log.ingest.v1` service and capability, including its
+//! state, budget, and backend error. Names with `Put` refer to that service's single RPC and
+//! the adapter pipeline that reads its request.
 
 mod connect;
 mod engine;
@@ -12,11 +16,10 @@ mod stream;
 mod validate;
 
 pub use connect::{
-    connect_limits, connect_stack, consistency_not_ready_error, ingest_error_to_connect,
-    ingest_service, prune_service, query_service, query_stack, retention_service, stream_service,
-    worker_not_ready_error, AppState, IngestState, PruneState, QueryState, RetentionState,
-    StreamState, MAX_CONNECTRPC_BODY_BYTES, MAX_CONNECTRPC_ELEMENT_MEMORY_BYTES,
-    MAX_CONNECTRPC_MESSAGE_BYTES,
+    connect_limits, connect_stack, consistency_not_ready_error, ingest_service, prune_service,
+    query_service, query_stack, retention_service, stream_service, worker_not_ready_error,
+    AppState, IngestState, PruneState, QueryState, RetentionState, StreamState,
+    MAX_CONNECTRPC_BODY_BYTES, MAX_CONNECTRPC_ELEMENT_MEMORY_BYTES, MAX_CONNECTRPC_MESSAGE_BYTES,
 };
 pub use engine::{
     FilteredBatch, Ingest, IngestError, Log, LogBatch, Prune, Query, QueryExtra, QueryResult,
