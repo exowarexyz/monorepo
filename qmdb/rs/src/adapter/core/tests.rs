@@ -7,9 +7,7 @@ use commonware_cryptography::Sha256;
 use commonware_storage::merkle::mmr;
 use commonware_utils::sequence::FixedBytes;
 use connectrpc::client::{BoxFuture, ClientBody, ClientTransport};
-use exoware_sdk::{
-    proto::PreferZstdHttpClient, PrefixedStoreClient, RetryConfig, StoreClient, StoreWriteBatch,
-};
+use exoware_sdk::{proto::PreferZstdHttpClient, RetryConfig, StoreClient, StoreWriteBatch};
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
     Arc,
@@ -105,7 +103,7 @@ fn gated_session(
         .build()
         .unwrap();
     (
-        ReadSession::fixed(PrefixedStoreClient::empty(raw), None),
+        ReadSession::fixed(raw.unprefixed(), None),
         permits,
         starts,
         origin,
@@ -130,7 +128,7 @@ async fn publication_cache_distinguishes_absent_from_zero_and_keeps_smaller_publ
         .retry_config(RetryConfig::disabled())
         .build()
         .unwrap();
-    let store = PrefixedStoreClient::empty(raw.clone());
+    let store = raw.unprefixed();
     let session = ReadSession::fixed(store.clone(), None);
     let mut sequence = 0;
 
@@ -185,7 +183,7 @@ async fn publication_cache_coalesces_misses_and_refreshes_without_data_observati
         .retry_config(RetryConfig::disabled())
         .build()
         .unwrap();
-    let store = PrefixedStoreClient::empty(raw.clone());
+    let store = raw.unprefixed();
     let cache = Arc::new(PublicationCache::<mmr::Family>::default());
     let first = Location::new(5);
     let second = Location::new(10);
@@ -307,7 +305,7 @@ async fn client_resolvers_keep_cached_publication_evidence_with_a_higher_caller_
         .retry_config(RetryConfig::disabled())
         .build()
         .unwrap();
-    let store = PrefixedStoreClient::empty(raw.clone());
+    let store = raw.unprefixed();
     let watermark = Location::<mmr::Family>::new(5);
     let mut batch = StoreWriteBatch::new();
     crate::adapter::upload::stage_watermark(&store, watermark, &mut batch).unwrap();
@@ -378,7 +376,7 @@ async fn client_resolvers_keep_cached_publication_evidence_with_a_higher_caller_
 async fn publication_cache_hits_bypass_blocked_miss_and_refresh() {
     let (_server, url) = exoware_simulator::open_temp().await.unwrap();
     let raw = StoreClient::new(&url);
-    let store = PrefixedStoreClient::empty(raw.clone());
+    let store = raw.unprefixed();
     let covered = Location::<mmr::Family>::new(5);
     let mut batch = StoreWriteBatch::new();
     crate::adapter::upload::stage_watermark(&store, covered, &mut batch).unwrap();
@@ -431,7 +429,7 @@ async fn publication_cache_hits_bypass_blocked_miss_and_refresh() {
 async fn publication_cache_cancelled_lookup_releases_gate_and_waiter_retries() {
     let (_server, url) = exoware_simulator::open_temp().await.unwrap();
     let raw = StoreClient::new(&url);
-    let store = PrefixedStoreClient::empty(raw.clone());
+    let store = raw.unprefixed();
     let watermark = Location::<mmr::Family>::new(5);
     let mut batch = StoreWriteBatch::new();
     crate::adapter::upload::stage_watermark(&store, watermark, &mut batch).unwrap();
@@ -459,7 +457,7 @@ async fn publication_cache_cancelled_lookup_releases_gate_and_waiter_retries() {
 async fn publication_cache_failed_lookup_preserves_evidence_and_allows_retry() {
     let (_bad_server, bad_url) = exoware_simulator::open_temp().await.unwrap();
     let bad_raw = StoreClient::new(&bad_url);
-    let bad_store = PrefixedStoreClient::empty(bad_raw.clone());
+    let bad_store = bad_raw.unprefixed();
     let covered = Location::<mmr::Family>::new(5);
     let mut batch = StoreWriteBatch::new();
     crate::adapter::upload::stage_watermark(&bad_store, covered, &mut batch).unwrap();
@@ -471,7 +469,7 @@ async fn publication_cache_failed_lookup_preserves_evidence_and_allows_retry() {
 
     let (_good_server, good_url) = exoware_simulator::open_temp().await.unwrap();
     let good_raw = StoreClient::new(&good_url);
-    let good_store = PrefixedStoreClient::empty(good_raw.clone());
+    let good_store = good_raw.unprefixed();
     let requested = Location::<mmr::Family>::new(10);
     let mut batch = StoreWriteBatch::new();
     crate::adapter::upload::stage_watermark(&good_store, requested, &mut batch).unwrap();
@@ -524,7 +522,7 @@ async fn publication_lookups_respect_sdk_retry_budget() {
             )
             .build()
             .unwrap();
-        let session = ReadSession::fixed(PrefixedStoreClient::empty(raw), Some(1));
+        let session = ReadSession::fixed(raw.unprefixed(), Some(1));
         let cache = PublicationCache::<mmr::Family>::default();
 
         let error = cache.refresh(&session).await.unwrap_err();
@@ -568,7 +566,7 @@ async fn publication_cache_observations_answer_requires_without_store_reads() {
 async fn publication_cache_keeps_observations_made_during_a_lookup() {
     let (_server, url) = exoware_simulator::open_temp().await.unwrap();
     let raw = StoreClient::new(&url);
-    let store = PrefixedStoreClient::empty(raw.clone());
+    let store = raw.unprefixed();
     let mut batch = StoreWriteBatch::new();
     crate::adapter::upload::stage_watermark(&store, Location::<mmr::Family>::new(5), &mut batch)
         .unwrap();
@@ -634,7 +632,7 @@ async fn publication_cache_refresh_preserves_evidence_on_lagging_and_empty_repli
         (&empty_url, None, 4),
     ] {
         let raw = StoreClient::new(url);
-        let store = PrefixedStoreClient::empty(raw.clone());
+        let store = raw.unprefixed();
         let mut batch = StoreWriteBatch::new();
         if let Some(watermark) = watermark {
             crate::adapter::upload::stage_watermark(
@@ -668,7 +666,7 @@ async fn publication_cache_refresh_preserves_evidence_on_lagging_and_empty_repli
         .retry_config(RetryConfig::disabled())
         .build()
         .unwrap();
-    let session = ReadSession::fixed(PrefixedStoreClient::empty(raw), None);
+    let session = ReadSession::fixed(raw.unprefixed(), None);
     let cache = PublicationCache::<mmr::Family>::default();
     let watermark = Location::new(5);
     assert_eq!(cache.refresh(&session).await.unwrap(), Some(watermark));
@@ -697,7 +695,7 @@ async fn publication_cache_refresh_preserves_evidence_on_lagging_and_empty_repli
     }
 
     let raw = StoreClient::new(&new_url);
-    let store = PrefixedStoreClient::empty(raw.clone());
+    let store = raw.unprefixed();
     let mut batch = StoreWriteBatch::new();
     crate::adapter::upload::stage_watermark(&store, Location::<mmr::Family>::new(10), &mut batch)
         .unwrap();

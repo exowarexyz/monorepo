@@ -6,7 +6,7 @@ jest.mock('../src/credential', () => ({
     environmentApiKey: () => undefined,
 }));
 
-import { Client, createTransport } from '../src/client';
+import { StoreClient, createTransport } from '../src/client';
 import { EntrySchema } from '../src/gen/ts/common/v1/kv_pb';
 import { PutRequestSchema, PutResponseSchema } from '../src/gen/ts/log/v1/ingest_pb';
 import { GetRequestSchema, GetResponseSchema, Service as QueryService } from '../src/gen/ts/store/v1/query_pb';
@@ -17,8 +17,8 @@ import {
     type StoreBatchEntry,
 } from '../src/store';
 
-function client(options: ConstructorParameters<typeof Client>[1] = { token: '' }): Client {
-    return new Client('http://put-batch.test', options);
+function client(options: ConstructorParameters<typeof StoreClient>[1] = { token: '' }): StoreClient {
+    return new StoreClient('http://put-batch.test', options);
 }
 
 function request(entries: readonly StoreBatchEntry[]) {
@@ -37,7 +37,7 @@ function filled(length: number, byte: number): Uint8Array {
     return value;
 }
 
-function batch(entries: readonly StoreBatchEntry[], store = client().store()): StoreWriteBatch {
+function batch(entries: readonly StoreBatchEntry[], store = client().unprefixed()): StoreWriteBatch {
     const result = new StoreWriteBatch();
     for (const entry of entries) result.push(store, entry.key, entry.value);
     return result;
@@ -76,7 +76,7 @@ describe('protobuf Put accounting', () => {
     });
 
     test('counts the physical prefixed key', () => {
-        const store = client().store(new StoreKeyPrefix(filled(127, 0x50)));
+        const store = client().prefixed(new StoreKeyPrefix(filled(127, 0x50)));
         const write = batch([{ key: filled(1, 0x4b), value: filled(2, 0x56) }], store);
 
         expect(write.entries()[0].key).toHaveLength(128);
@@ -134,8 +134,8 @@ describe('protobuf Put accounting', () => {
 
 test('validates empty batches, value limits, and option domains', () => {
     const empty = new StoreWriteBatch();
-    expect(empty.split()).toEqual([]);
-    expect(() => empty.validate()).toThrow('Put requires between 1');
+    expect(empty.split({})).toEqual([]);
+    expect(() => empty.validate({})).toThrow('Put requires between 1');
 
     const write = batch([{ key: filled(1, 1), value: filled(2, 2) }]);
     expect(() => write.validate({ maxValueLen: 1 })).toThrow('value length 2 exceeds 1');
@@ -156,20 +156,20 @@ test('validation uses live mutable entry buffers', () => {
     expect(() => write.validate({ maxValueLen: 127 })).toThrow('value length 128 exceeds 127');
 });
 
-test('set, setMany, and putPrepared validate before invoking the transport', async () => {
+test('put, putMany, and putPrepared validate before invoking the transport', async () => {
     const sdk = client({
         token: '',
         putLimits: { maxEntries: 1, maxEncodedBytes: 64, maxValueLen: 1 },
     });
-    const store = sdk.store();
+    const store = sdk.unprefixed();
     const put = jest.spyOn(sdk.ingest, 'put');
 
-    await expect(store.set(filled(1, 1), filled(2, 2))).rejects.toThrow('value length 2 exceeds 1');
-    await expect(store.setMany([
+    await expect(store.put(filled(1, 1), filled(2, 2))).rejects.toThrow('value length 2 exceeds 1');
+    await expect(store.putMany([
         { key: filled(1, 1), value: filled(1, 1) },
         { key: filled(1, 2), value: filled(1, 2) },
     ])).rejects.toThrow('between 1 and 1 entries');
-    await expect(store.setMany([])).rejects.toThrow('between 1 and 1 entries');
+    await expect(store.putMany([])).rejects.toThrow('between 1 and 1 entries');
 
     const prepared = batch([{ key: filled(1, 1), value: filled(2, 2) }], store);
     await expect(store.putPrepared(prepared)).rejects.toThrow('value length 2 exceeds 1');
@@ -180,7 +180,7 @@ test('rejects an oversized raw key before invoking the transport', async () => {
     const sdk = client({ token: '' });
     const put = jest.spyOn(sdk.ingest, 'put');
 
-    await expect(sdk.store().set(filled(255, 1), new Uint8Array()))
+    await expect(sdk.unprefixed().put(filled(255, 1), new Uint8Array()))
         .rejects.toThrow('Put entry 0 key length 255 exceeds 254');
     expect(put).not.toHaveBeenCalled();
 });
@@ -198,12 +198,12 @@ test.each([undefined, false, true])('applies protobuf byte limits when binary is
     });
     const binaryPut = jest.spyOn(sdk.ingest, 'put')
         .mockResolvedValue(create(PutResponseSchema, { sequenceNumber: 9n }));
-    await expect(sdk.store().set(key, value)).resolves.toBe(9n);
+    await expect(sdk.unprefixed().put(key, value)).resolves.toBe(9n);
     expect(binaryPut).toHaveBeenCalledTimes(1);
 
     const tooSmall = client({ token: '', useBinaryFormat, putLimits: { maxEncodedBytes: binaryBytes - 1 } });
     const rejectedPut = jest.spyOn(tooSmall.ingest, 'put');
-    await expect(tooSmall.store().set(key, value))
+    await expect(tooSmall.unprefixed().put(key, value))
         .rejects.toThrow(`Put encoded size ${binaryBytes} exceeds ${binaryBytes - 1}`);
     expect(rejectedPut).not.toHaveBeenCalled();
 });
@@ -218,12 +218,12 @@ test('validates the prefixed request at its exact serialized-byte budget', async
     const accepted = client({ token: '', putLimits: { maxEncodedBytes: exact } });
     const acceptedPut = jest.spyOn(accepted.ingest, 'put')
         .mockResolvedValue(create(PutResponseSchema, { sequenceNumber: 11n }));
-    await expect(accepted.store(prefix).set(key, value)).resolves.toBe(11n);
+    await expect(accepted.prefixed(prefix).put(key, value)).resolves.toBe(11n);
     expect(acceptedPut).toHaveBeenCalledTimes(1);
 
     const rejected = client({ token: '', putLimits: { maxEncodedBytes: exact - 1 } });
     const rejectedPut = jest.spyOn(rejected.ingest, 'put');
-    await expect(rejected.store(prefix).set(key, value))
+    await expect(rejected.prefixed(prefix).put(key, value))
         .rejects.toThrow(`Put encoded size ${exact} exceeds ${exact - 1}`);
     expect(rejectedPut).not.toHaveBeenCalled();
 });
@@ -249,14 +249,14 @@ test.each([undefined, false, true])('Put is protobuf while Query follows binary 
 
     try {
         const sdk = client(useBinaryFormat === undefined ? { token: '' } : { token: '', useBinaryFormat });
-        const store = sdk.store();
+        const store = sdk.unprefixed();
         const key = filled(2, 1);
         const value = filled(3, 2);
         const entries = [{ key, value }];
 
-        await expect(store.set(key, value)).resolves.toBe(7n);
+        await expect(store.put(key, value)).resolves.toBe(7n);
         await expect(store.get(key)).resolves.toEqual({ value });
-        expect(store.putOptions).toEqual({
+        expect(store.putLimits).toEqual({
             maxEntries: 2_000_000,
             maxEncodedBytes: 256 * 1024 * 1024,
             maxValueLen: 32 * 1024 * 1024,
@@ -354,9 +354,9 @@ test('ingest and query share authentication, retries, and cookies in both direct
             retry: { maxAttempts: 2, initialBackoffMs: 0, maxBackoffMs: 1 },
         });
         const key = filled(1, 1);
-        await expect(sdk.store().set(key, filled(1, 2))).resolves.toBe(7n);
-        await expect(sdk.store().get(key)).resolves.toEqual({ value: filled(1, 2) });
-        await expect(sdk.store().set(key, filled(1, 2))).resolves.toBe(7n);
+        await expect(sdk.unprefixed().put(key, filled(1, 2))).resolves.toBe(7n);
+        await expect(sdk.unprefixed().get(key)).resolves.toEqual({ value: filled(1, 2) });
+        await expect(sdk.unprefixed().put(key, filled(1, 2))).resolves.toBe(7n);
         await expect(sdk.query.get(create(GetRequestSchema, { key }), {
             headers: { Authorization: 'Bearer caller-token' },
         })).resolves.toMatchObject({ value: filled(1, 2) });

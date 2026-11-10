@@ -45,7 +45,7 @@ use exoware_sdk::{
     },
     log::stream::v1::GetResponseView as StreamGetResponseView,
     prune_policy::{KeysScope, OrderEncoding, PrunePolicyDocument, RetainPolicy},
-    retention::{validate_retention_policy, RetentionPolicy},
+    retention::{self, RetentionPolicy},
     selector::compile_payload_regex,
 };
 use exoware_server::{
@@ -1036,7 +1036,7 @@ fn read_retention_policy(db: &DB) -> Result<Option<RetentionPolicy>, String> {
         Some(bytes) => {
             let policy = RetentionPolicy::decode(Copying(bytes.as_slice()))
                 .map_err(|e| format!("corrupt retention rule meta row: {e}"))?;
-            validate_retention_policy(&policy)
+            retention::validate_policy(&policy)
                 .map_err(|e| format!("corrupt retention rule meta row: {e}"))?;
             Ok(Some(policy))
         }

@@ -15,7 +15,7 @@ use commonware_storage::{
 };
 use commonware_utils::{NZUsize, NZU16, NZU64};
 use exoware_qmdb::{service::proto::qmdb::v1::GetOperationRangeRequest, QmdbError};
-use exoware_sdk::{PrefixedStoreClient, RetryConfig, StoreClient, StoreWriteBatch};
+use exoware_sdk::{RetryConfig, StoreClient, StoreWriteBatch};
 use exoware_server::{
     Query, QueryExtra, QueryResult, RangeScan, RangeScanBatch, RangeScanResult, Sequence,
 };
@@ -103,7 +103,7 @@ async fn build_two_publications() -> (Vec<Operation>, Vec<Operation>) {
 }
 
 fn snapshot_rows(operations: &[Operation]) -> BTreeMap<Bytes, Bytes> {
-    let staging_client = PrefixedStoreClient::empty(StoreClient::new("http://127.0.0.1:1"));
+    let staging_client = StoreClient::new("http://127.0.0.1:1").unprefixed();
     let (_, prepared) =
         common::prepare_operations::<Family, Operation>(operations, &operation_cfg());
     let latest = prepared.latest_location();
@@ -116,7 +116,7 @@ fn snapshot_rows(operations: &[Operation]) -> BTreeMap<Bytes, Bytes> {
 }
 
 fn publication_key() -> Bytes {
-    let store = PrefixedStoreClient::empty(StoreClient::new("http://127.0.0.1:1"));
+    let store = StoreClient::new("http://127.0.0.1:1").unprefixed();
     let mut batch = StoreWriteBatch::new();
     exoware_qmdb::adapter::upload::stage_watermark(&store, Location::<Family>::new(0), &mut batch)
         .unwrap();
@@ -279,7 +279,7 @@ async fn cached_publication_fences_dependent_reads() {
         .retry_config(RetryConfig::disabled())
         .build()
         .unwrap();
-    let store_client = PrefixedStoreClient::empty(store_client);
+    let store_client = store_client.unprefixed();
     let qmdb = Client::new(store_client, operation_cfg());
     let watermark = Location::new((all_operations.len() - 1) as u64);
 
@@ -383,13 +383,12 @@ async fn rpc_reads_do_not_inherit_previous_request_observations() {
         exoware_server::QueryState::new(query.clone()),
     ))
     .await;
-    let store = PrefixedStoreClient::empty(
-        StoreClient::builder()
-            .url(&query_url)
-            .retry_config(RetryConfig::disabled())
-            .build()
-            .unwrap(),
-    );
+    let store = StoreClient::builder()
+        .url(&query_url)
+        .retry_config(RetryConfig::disabled())
+        .build()
+        .unwrap()
+        .unprefixed();
     let (qmdb_server, qmdb_url) = common::spawn_connect_service(
         exoware_qmdb::service::server::immutable_operation_log_stack::<
             Family,
@@ -477,13 +476,12 @@ async fn publication_lookup_propagates_errors_after_the_watermark_frame() {
         exoware_server::QueryState::new(query.clone()),
     ))
     .await;
-    let store = PrefixedStoreClient::empty(
-        StoreClient::builder()
-            .url(&url)
-            .retry_config(RetryConfig::disabled())
-            .build()
-            .unwrap(),
-    );
+    let store = StoreClient::builder()
+        .url(&url)
+        .retry_config(RetryConfig::disabled())
+        .build()
+        .unwrap()
+        .unprefixed();
     let client = Client::new(store, operation_cfg());
 
     let error = client

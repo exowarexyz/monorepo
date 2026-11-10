@@ -24,7 +24,8 @@ use commonware_utils::{
     Acknowledgement as _, NZUsize, TestRng, NZU16, NZU64,
 };
 use exoware_sdk::{
-    PrefixedStoreClient, ReadSession, RetryConfig, StoreBatchUpload, StoreClient, StoreWriteBatch,
+    PrefixedStoreClient, ReadSession, RetryConfig, StoreClient, StoreWriteBatch,
+    StoreWriteBatchUpload,
 };
 use exoware_simplex::{
     init_marshal_resolver, keys, Finalized, Notarized, SimplexError, SimplexReader, SimplexWriter,
@@ -235,7 +236,7 @@ fn finalized(block: TestBlock, schemes: &[Scheme]) -> Finalized<TestBlock, Schem
 #[tokio::test]
 async fn uploads_and_reads_notarized_and_finalized_blocks() {
     let store = local_store_client().await;
-    let (reader, writer) = simplex_handles(PrefixedStoreClient::empty(store));
+    let (reader, writer) = simplex_handles(store.unprefixed());
     let schemes = schemes();
 
     let block1 = TestBlock::new(1, b"notarized");
@@ -317,7 +318,7 @@ async fn uploads_and_reads_notarized_and_finalized_blocks() {
 #[tokio::test]
 async fn prepared_uploads_can_share_one_store_batch() {
     let store = local_store_client().await;
-    let (reader, writer) = simplex_handles(PrefixedStoreClient::empty(store.clone()));
+    let (reader, writer) = simplex_handles(store.unprefixed());
     let schemes = schemes();
 
     let first = finalized(TestBlock::new(10, b"first"), &schemes);
@@ -347,7 +348,7 @@ async fn prepared_uploads_can_share_one_store_batch() {
 #[tokio::test]
 async fn readers_propagate_session_floors_without_changing_parent_policy() {
     let store = local_store_client().await;
-    let client = PrefixedStoreClient::empty(store);
+    let client = store.unprefixed();
     let writer = SimplexWriter::new(client.clone());
     let block = TestBlock::new(12, b"session floor");
     let receipt = writer.upload_header(&block).await.expect("upload header");
@@ -443,7 +444,7 @@ async fn marshal_resolver_sinks_finalized_chain_from_simplex_api() {
     const BLOCKS_TO_PROCESS: u64 = 5;
 
     let store = local_store_client().await;
-    let (reader, writer) = simplex_handles(PrefixedStoreClient::empty(store));
+    let (reader, writer) = simplex_handles(store.unprefixed());
     let schemes = schemes();
 
     let genesis = TestBlock::new(0, b"genesis");
@@ -599,7 +600,7 @@ async fn marshal_resolver_sinks_finalized_chain_from_simplex_api() {
 
 #[tokio::test]
 async fn round_indices_retain_same_view_across_epochs() {
-    let (reader, writer) = simplex_handles(PrefixedStoreClient::empty(local_store_client().await));
+    let (reader, writer) = simplex_handles(local_store_client().await.unprefixed());
     let schemes = schemes();
     let mut expected = Vec::new();
     for epoch in [0, 1, u32::MAX as u64 + 1] {
@@ -634,7 +635,7 @@ async fn round_indices_retain_same_view_across_epochs() {
 #[tokio::test]
 async fn round_reads_reject_certificates_stored_under_another_round() {
     let store = local_store_client().await;
-    let client = PrefixedStoreClient::empty(store.clone());
+    let client = store.unprefixed();
     let reader = SimplexReader::with_session(ReadSession::fixed(client.clone(), None));
     let schemes = schemes();
     let mut block = TestBlock::new(9, b"round binding");

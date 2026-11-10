@@ -77,7 +77,7 @@ impl Read for RetentionPolicy {
 
 /// Reject rules that cannot be enforced. `keep_latest` must keep at least one
 /// batch; the threshold and drop-all rules accept any value.
-pub fn validate_retention_policy(policy: &RetentionPolicy) -> anyhow::Result<()> {
+pub fn validate_policy(policy: &RetentionPolicy) -> anyhow::Result<()> {
     if let RetentionPolicy::KeepLatest { count } = policy {
         ensure!(*count > 0, "keep_latest count must be > 0");
     }
@@ -86,7 +86,7 @@ pub fn validate_retention_policy(policy: &RetentionPolicy) -> anyhow::Result<()>
 
 #[cfg(test)]
 mod tests {
-    use super::{validate_retention_policy, RetentionPolicy};
+    use super::{validate_policy, RetentionPolicy};
     use commonware_codec::{DecodeExt, Encode};
 
     fn round_trip(policy: &RetentionPolicy) {
@@ -105,18 +105,17 @@ mod tests {
 
     #[test]
     fn keep_latest_requires_positive_count() {
-        let err = validate_retention_policy(&RetentionPolicy::KeepLatest { count: 0 })
+        let err = validate_policy(&RetentionPolicy::KeepLatest { count: 0 })
             .expect_err("count 0 rejected");
         assert!(err.to_string().contains("keep_latest count must be > 0"));
 
-        validate_retention_policy(&RetentionPolicy::KeepLatest { count: 1 }).expect("count 1 ok");
+        validate_policy(&RetentionPolicy::KeepLatest { count: 1 }).expect("count 1 ok");
     }
 
     #[test]
     fn other_rules_validate() {
-        validate_retention_policy(&RetentionPolicy::GreaterThan { threshold: 0 }).expect("gt ok");
-        validate_retention_policy(&RetentionPolicy::GreaterThanOrEqual { threshold: 0 })
-            .expect("gte ok");
-        validate_retention_policy(&RetentionPolicy::DropAll).expect("drop_all ok");
+        validate_policy(&RetentionPolicy::GreaterThan { threshold: 0 }).expect("gt ok");
+        validate_policy(&RetentionPolicy::GreaterThanOrEqual { threshold: 0 }).expect("gte ok");
+        validate_policy(&RetentionPolicy::DropAll).expect("drop_all ok");
     }
 }

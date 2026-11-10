@@ -16,7 +16,7 @@ artifact.
 This function publishes a full block and its finalization in one Store Put:
 
 ```ts
-import { Client, StoreWriteBatch } from '@exowarexyz/sdk';
+import { StoreClient, StoreWriteBatch } from '@exowarexyz/sdk';
 import {
   SimplexWriter,
   type BlockUpload,
@@ -28,12 +28,12 @@ async function publish(
   block: BlockUpload,
   finalization: FinalizationUpload,
 ) {
-  const store = new Client(storeUrl).store();
-  const writer = new SimplexWriter(store);
+  const client = new StoreClient(storeUrl);
+  const writer = new SimplexWriter(client.unprefixed());
   const batch = new StoreWriteBatch();
   writer.stageUpload(writer.prepareBlock(block), batch);
   writer.stageUpload(writer.prepareFinalization(finalization), batch);
-  return batch.commit(store);
+  return batch.commit(client);
 }
 ```
 
@@ -59,7 +59,7 @@ For height or latest reads, it must also match the header's height to
 the verifier:
 
 ```ts
-import { Client } from '@exowarexyz/sdk';
+import { StoreClient } from '@exowarexyz/sdk';
 import {
   SimplexReader,
   type SimplexHeaderVerifier,
@@ -72,7 +72,7 @@ async function readLatest(
   options: SimplexVerifierOptions & { verifyHeader: SimplexHeaderVerifier },
 ) {
   const verifier = await createWasmSimplexVerifier(options);
-  const store = new Client(storeUrl).store();
+  const store = new StoreClient(storeUrl).unprefixed();
   return new SimplexReader(store, { verifier }).latestFinalization();
 }
 ```

@@ -21,7 +21,6 @@ use commonware_utils::{NZUsize, NZU16, NZU64};
 use exoware_qmdb::{
     adapter::upload::recover_boundary_state, CurrentBoundaryState, MAX_OPERATION_SIZE,
 };
-use exoware_sdk::PrefixedStoreClient;
 use std::num::NonZeroU64;
 
 const N: usize = 32;
@@ -215,10 +214,10 @@ async fn test_mirror_ordered_prune_past_chunk_zero() {
     // when it was last published; the server-side masking in
     // `load_bitmap_chunk` must fold that bit to 0 for the root recomputation
     // to match.
-    let upload_client = PrefixedStoreClient::empty(store_client.clone());
+    let upload_client = store_client.unprefixed();
     let qmdb_client: exoware_qmdb::adapter::Ordered<mmr::Family, Sha256, Vec<u8>, Vec<u8>, N> =
         exoware_qmdb::adapter::Ordered::new(
-            PrefixedStoreClient::empty(store_client.clone()),
+            store_client.unprefixed(),
             (
                 ((0..=MAX_OPERATION_SIZE).into(), ()),
                 ((0..=MAX_OPERATION_SIZE).into(), ()),

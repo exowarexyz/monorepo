@@ -497,7 +497,7 @@ async fn check_immutable<F, K, V, E>(
         .await
         .expect("join immutable source runner");
     let store = common::local_store_client().await;
-    let prefixed = PrefixedStoreClient::empty(store);
+    let prefixed = store.unprefixed();
     let reader = Arc::new(exoware_qmdb::adapter::Immutable::<F, Sha256, K, V, E>::new(
         prefixed.clone(),
         codec.clone(),
@@ -568,7 +568,7 @@ async fn check_keyless<F, V, E>(
         .await
         .expect("join keyless source runner");
     let store = common::local_store_client().await;
-    let prefixed = PrefixedStoreClient::empty(store);
+    let prefixed = store.unprefixed();
     let reader = Arc::new(exoware_qmdb::adapter::Keyless::<F, Sha256, V, E>::new(
         prefixed.clone(),
         codec.clone(),

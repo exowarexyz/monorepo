@@ -17,7 +17,7 @@ use commonware_storage::{
     },
 };
 use commonware_utils::{NZUsize, NZU16, NZU64};
-use exoware_sdk::{PrefixedStoreClient, StoreClient};
+use exoware_sdk::StoreClient;
 use std::num::NonZeroU64;
 
 type Digest = commonware_cryptography::sha256::Digest;
@@ -46,17 +46,14 @@ type FixedClient<F> = exoware_qmdb::adapter::Keyless<
 >;
 
 fn variable_client<F: Graftable>(store_client: StoreClient) -> VariableClient<F> {
-    VariableClient::new(
-        PrefixedStoreClient::empty(store_client),
-        ((0..=10000).into(), ()),
-    )
+    VariableClient::new(store_client.unprefixed(), ((0..=10000).into(), ()))
 }
 
 fn fixed_client<F: Graftable>(store_client: StoreClient) -> FixedClient<F>
 where
     FixedKeylessOperation<F, Digest>: commonware_codec::Read<Cfg = ()>,
 {
-    FixedClient::new(PrefixedStoreClient::empty(store_client), ())
+    FixedClient::new(store_client.unprefixed(), ())
 }
 
 struct VariableSource<F: Family> {
@@ -251,7 +248,7 @@ where
     let store_client = common::local_store_client().await;
     let source = build_variable_source::<F>().await;
 
-    let upload_client = PrefixedStoreClient::empty(store_client.clone());
+    let upload_client = store_client.unprefixed();
     common::commit_operations::<F, _>(
         &upload_client,
         &source.operations,
@@ -426,7 +423,7 @@ async fn test_keyless_fixed_round_trip() {
     let store_client = common::local_store_client().await;
     let source = build_fixed_source::<mmr::Family>().await;
 
-    let upload_client = PrefixedStoreClient::empty(store_client.clone());
+    let upload_client = store_client.unprefixed();
     common::commit_operations::<mmr::Family, _>(&upload_client, &source.operations, &())
         .await
         .expect("commit fixed upload");

@@ -38,7 +38,7 @@ where
 The upload writes the header and both finalization indices in one Store Put,
 where readers using the same Store prefix can find them. To combine artifacts
 with other writes, call the writer's `prepare_*` methods and stage the result in
-a `StoreWriteBatch` through the SDK's `StoreBatchUpload` trait.
+a `StoreWriteBatch` through the SDK's `StoreWriteBatchUpload` trait.
 
 ## Read and validate
 

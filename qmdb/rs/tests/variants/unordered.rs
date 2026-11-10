@@ -27,7 +27,7 @@ use exoware_qmdb::{
     },
     CurrentBoundaryState, MAX_OPERATION_SIZE,
 };
-use exoware_sdk::{PrefixedStoreClient, StoreWriteBatch};
+use exoware_sdk::StoreWriteBatch;
 use std::{fmt::Debug, num::NonZeroU64, sync::Arc};
 
 const N: usize = 32;
@@ -58,7 +58,7 @@ async fn check_mirror<F, K, V, E>(
     F::PendingChunk<Digest>: 'static,
 {
     let store = common::local_store_client().await;
-    let prefixed = PrefixedStoreClient::empty(store.clone());
+    let prefixed = store.unprefixed();
     let local = Arc::new(
         exoware_qmdb::adapter::Unordered::<F, Sha256, K, V, N, E>::new(
             prefixed.clone(),

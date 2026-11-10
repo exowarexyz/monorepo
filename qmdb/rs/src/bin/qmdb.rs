@@ -144,7 +144,7 @@ async fn publish_source_rows(
 ) -> Result<(), exoware_qmdb::QmdbError> {
     // Operation rows are capped at 64 KiB and this seed's boundary rows are smaller;
     // 1024 rows fit below Store's 256 MiB request limit, including keys and framing.
-    let physical = store_client.client().prefixed(StoreKeyPrefix::identity());
+    let physical = store_client.client().unprefixed();
     let mut batch = StoreWriteBatch::new();
     for (key, value) in rows.entries() {
         if batch.len() == 1024 {
@@ -541,7 +541,7 @@ mod tests {
                     .unwrap();
             });
             let client = StoreClient::new(&url).prefixed(StoreKeyPrefix::new(vec![0xaa]).unwrap());
-            let physical = client.client().prefixed(StoreKeyPrefix::identity());
+            let physical = client.client().unprefixed();
             let mut data = StoreWriteBatch::new();
             for index in 0..4097u64 {
                 let mut key = vec![0xf0];

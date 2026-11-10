@@ -36,7 +36,7 @@ use clap::ValueEnum;
 use exoware_sdk::{
     keys::{next_key, Key, MAX_KEY_LEN},
     kv_codec::KvReducedValue,
-    PrefixedStoreClient, RangeMode, RangeReduceOp, RangeReduceRequest, RangeReducerSpec,
+    PrefixedStoreClient, RangeMode, RangeReduceOp, RangeReduceParams, RangeReducerSpec,
 };
 use futures::stream::{self, StreamExt};
 use rand::{rngs::StdRng, seq::SliceRandom, RngExt, SeedableRng};
@@ -747,9 +747,8 @@ async fn run_overlap_ledger_write_mode(
         let label = format!("overlap-ledger append index {}", next_index);
         let mut attempt = 0u64;
         loop {
-            let refs = [(&record.key, record.value.as_slice())];
             let ingest = client.ingest();
-            let ingest_future = ingest.put(&refs);
+            let ingest_future = ingest.put(&record.key, &record.value);
             tokio::pin!(ingest_future);
             let put_result = tokio::select! {
                 _ = &mut shutdown => break 'writer,
@@ -1027,7 +1026,7 @@ async fn wait_for_reduce_count_match(
     let last = expected_records
         .last()
         .context("expected_records must not be empty for range reduction match")?;
-    let request = RangeReduceRequest {
+    let request = RangeReduceParams {
         reducers: vec![RangeReducerSpec {
             op: RangeReduceOp::CountAll,
             expr: None,
@@ -1181,7 +1180,6 @@ async fn check_batch_visibility(
     let mut by_key: HashMap<&Key, usize> =
         batch.iter().map(|&idx| (&records[idx].key, idx)).collect();
     let keys: Vec<&Key> = batch.iter().map(|&idx| &records[idx].key).collect();
-    let batch_size = u32::try_from(keys.len()).unwrap_or(u32::MAX);
     let permanent = |err: anyhow::Error| {
         PollOutcome::Permanent(err.context(format!(
             "point-read visibility query failed against {}",
@@ -1192,7 +1190,7 @@ async fn check_batch_visibility(
     let mut stream = match ctx
         .client
         .query()
-        .get_many_with_min_sequence_number(&keys, batch_size, ctx.min_sequence_number)
+        .get_many_with_min_sequence_number(&keys, keys.len(), ctx.min_sequence_number)
         .await
     {
         Ok(stream) => stream,

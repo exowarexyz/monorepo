@@ -829,7 +829,7 @@ mod tests {
             }
 
             // Admitted predecessors can finish last, so publication waits for all prefix data
-            let client = PrefixedStoreClient::empty(StoreClient::new("http://127.0.0.1:1"));
+            let client = StoreClient::new("http://127.0.0.1:1").unprefixed();
             let latest = Location::<F>::new(12);
             let mut durable = BTreeMap::new();
             for index in [2, 3, 1, 0] {

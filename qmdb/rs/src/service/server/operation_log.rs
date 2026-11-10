@@ -507,14 +507,14 @@ mod tests {
     #[tokio::test]
     async fn fixed_request_sessions_do_not_share_observations_or_advance_floors() {
         let (_task, url) = exoware_simulator::open_temp().await.expect("simulator");
-        let raw_store = PrefixedStoreClient::empty(exoware_sdk::StoreClient::new(&url));
+        let raw_store = exoware_sdk::StoreClient::new(&url).unprefixed();
         let first = exoware_sdk::ReadSession::fixed(raw_store.clone(), None);
         let second = exoware_sdk::ReadSession::fixed(raw_store.clone(), None);
         let explicit_zero = exoware_sdk::ReadSession::fixed(raw_store.clone(), Some(0));
         let key = Bytes::from_static(b"request-session-isolation");
         let sequence = raw_store
             .ingest()
-            .put(&[(&key, b"value")])
+            .put(&key, b"value")
             .await
             .expect("write fixture");
 
@@ -792,7 +792,7 @@ mod authenticated_upload_subscription_tests {
 
     async fn stream() -> BatchSubscribeStream<IngestReader> {
         let (_task, url) = exoware_simulator::open_temp().await.expect("simulator");
-        let client = exoware_sdk::PrefixedStoreClient::empty(exoware_sdk::StoreClient::new(&url));
+        let client = exoware_sdk::StoreClient::new(&url).unprefixed();
         let subscription = client
             .stream()
             .subscribe(sub::row_filter(), None)

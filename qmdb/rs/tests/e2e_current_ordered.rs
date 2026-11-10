@@ -30,7 +30,7 @@ use exoware_qmdb::{
     adapter::upload::recover_boundary_state, proof::RawKeyLookupProof, CurrentBoundaryState,
     MAX_OPERATION_SIZE,
 };
-use exoware_sdk::{PrefixedStoreClient, StoreClient};
+use exoware_sdk::StoreClient;
 use std::{
     collections::{BTreeMap, BTreeSet},
     num::NonZeroU64,
@@ -93,7 +93,7 @@ where
     BatchOperation<F>:
         commonware_codec::Codec + commonware_codec::Encode + commonware_codec::Decode,
 {
-    let upload_client = PrefixedStoreClient::empty(store_client.clone());
+    let upload_client = store_client.unprefixed();
     common::commit_current_operations(
         &upload_client,
         &source.operations,
@@ -426,7 +426,7 @@ async fn test_ordered_round_trip() {
     upload_source(&store_client, &source).await;
 
     let qmdb_client = VariableClient::<mmr::Family>::new(
-        PrefixedStoreClient::empty(store_client.clone()),
+        store_client.unprefixed(),
         op_cfg::<mmr::Family>(),
         key_cfg(),
     );
@@ -472,7 +472,7 @@ async fn test_ordered_mmb_round_trip() {
     upload_source(&store_client, &source).await;
 
     let qmdb_client = VariableClient::<mmb::Family>::new(
-        PrefixedStoreClient::empty(store_client.clone()),
+        store_client.unprefixed(),
         op_cfg::<mmb::Family>(),
         key_cfg(),
     );
@@ -530,7 +530,7 @@ async fn test_ordered_mmb_multi_peak_grafted_chunk_round_trip() {
         "test must cross a grafted chunk boundary"
     );
 
-    let upload_client = PrefixedStoreClient::empty(store_client.clone());
+    let upload_client = store_client.unprefixed();
     common::commit_current_operations(
         &upload_client,
         &source.operations,
@@ -542,7 +542,7 @@ async fn test_ordered_mmb_multi_peak_grafted_chunk_round_trip() {
 
     let qmdb_client: exoware_qmdb::adapter::Ordered<mmb::Family, Sha256, Vec<u8>, Vec<u8>, N> =
         exoware_qmdb::adapter::Ordered::new(
-            PrefixedStoreClient::empty(store_client.clone()),
+            store_client.unprefixed(),
             op_cfg::<mmb::Family>(),
             key_cfg(),
         );
@@ -668,7 +668,7 @@ async fn assert_incremental_seed_batches_keep_current_proofs_verifiable<F>(
         .await
         .expect("join");
 
-    let upload_client = PrefixedStoreClient::empty(store_client.clone());
+    let upload_client = store_client.unprefixed();
     let mut operations = Vec::new();
     for (delta, boundary) in &uploads {
         operations.extend_from_slice(delta);
@@ -677,11 +677,8 @@ async fn assert_incremental_seed_batches_keep_current_proofs_verifiable<F>(
             .expect("commit upload");
     }
 
-    let qmdb_client: VariableClient<F> = exoware_qmdb::adapter::Ordered::new(
-        PrefixedStoreClient::empty(store_client.clone()),
-        op_cfg::<F>(),
-        key_cfg(),
-    );
+    let qmdb_client: VariableClient<F> =
+        exoware_qmdb::adapter::Ordered::new(store_client.unprefixed(), op_cfg::<F>(), key_cfg());
     let key_proof = qmdb_client
         .get(latest_location, &latest_key, None)
         .await
@@ -770,7 +767,7 @@ async fn test_ordered_mmb_persistent_interleaved_seed_batches_keep_current_proof
                     )
                     .await
                     .expect("init");
-                    let upload_client = PrefixedStoreClient::empty(store.clone());
+                    let upload_client = store.unprefixed();
                     let mut previous_ops = Vec::<BatchOperation<mmb::Family>>::new();
                     let mut counter = 0u64;
 
@@ -845,7 +842,7 @@ async fn test_ordered_mmb_persistent_interleaved_seed_batches_keep_current_proof
         .expect("join");
 
     let qmdb_client: VariableClient<mmb::Family> = exoware_qmdb::adapter::Ordered::new(
-        PrefixedStoreClient::empty(store_client.clone()),
+        store_client.unprefixed(),
         op_cfg::<mmb::Family>(),
         key_cfg(),
     );
@@ -883,7 +880,7 @@ async fn test_ordered_fixed_round_trip() {
     let store_client = common::local_store_client().await;
     let source = build_fixed_source::<mmr::Family>().await;
 
-    let upload_client = PrefixedStoreClient::empty(store_client.clone());
+    let upload_client = store_client.unprefixed();
     common::commit_current_operations(
         &upload_client,
         &source.operations,
@@ -893,8 +890,7 @@ async fn test_ordered_fixed_round_trip() {
     .await
     .expect("commit fixed upload");
 
-    let qmdb_client =
-        FixedClient::<mmr::Family>::new(PrefixedStoreClient::empty(store_client.clone()), (), ());
+    let qmdb_client = FixedClient::<mmr::Family>::new(store_client.unprefixed(), (), ());
     let watermark = qmdb_client
         .latest_published_watermark()
         .await
@@ -958,7 +954,7 @@ async fn test_root_at_returns_current_root() {
     upload_source(&store_client, &source).await;
 
     let qmdb_client = VariableClient::<mmr::Family>::new(
-        PrefixedStoreClient::empty(store_client.clone()),
+        store_client.unprefixed(),
         op_cfg::<mmr::Family>(),
         key_cfg(),
     );
@@ -977,7 +973,7 @@ async fn test_current_operation_range_proof() {
     upload_source(&store_client, &source).await;
 
     let qmdb_client = VariableClient::<mmr::Family>::new(
-        PrefixedStoreClient::empty(store_client.clone()),
+        store_client.unprefixed(),
         op_cfg::<mmr::Family>(),
         key_cfg(),
     );
@@ -1001,7 +997,7 @@ async fn test_key_value_proof() {
     upload_source(&store_client, &source).await;
 
     let qmdb_client = VariableClient::<mmr::Family>::new(
-        PrefixedStoreClient::empty(store_client.clone()),
+        store_client.unprefixed(),
         op_cfg::<mmr::Family>(),
         key_cfg(),
     );
@@ -1026,7 +1022,7 @@ async fn assert_point_proof_reads_bounded_bitmap_chunks<F: Graftable>() {
     )
     .await;
     assert!(source.operations.len() / (N * 8) > 3);
-    let upload_client = PrefixedStoreClient::empty(store_client.clone());
+    let upload_client = store_client.unprefixed();
     common::commit_current_operations(
         &upload_client,
         &source.operations,
@@ -1035,11 +1031,8 @@ async fn assert_point_proof_reads_bounded_bitmap_chunks<F: Graftable>() {
     )
     .await
     .unwrap();
-    let qmdb_client: VariableClient<F> = exoware_qmdb::adapter::Ordered::new(
-        PrefixedStoreClient::empty(store_client),
-        op_cfg::<F>(),
-        key_cfg(),
-    );
+    let qmdb_client: VariableClient<F> =
+        exoware_qmdb::adapter::Ordered::new(store_client.unprefixed(), op_cfg::<F>(), key_cfg());
     query.bitmap_chunks.lock().unwrap().clear();
     let proof = qmdb_client
         .get(source.latest_location, &b"k-00000007".to_vec(), None)
@@ -1075,7 +1068,7 @@ async fn test_ordered_mmr_exclusion_proof_reads_one_update_page() {
         write_count,
     )
     .await;
-    let upload_client = PrefixedStoreClient::empty(store_client.clone());
+    let upload_client = store_client.unprefixed();
     common::commit_current_operations(
         &upload_client,
         &source.operations,
@@ -1085,7 +1078,7 @@ async fn test_ordered_mmr_exclusion_proof_reads_one_update_page() {
     .await
     .unwrap();
     let qmdb_client: VariableClient<mmr::Family> = exoware_qmdb::adapter::Ordered::new(
-        PrefixedStoreClient::empty(store_client),
+        store_client.unprefixed(),
         op_cfg::<mmr::Family>(),
         key_cfg(),
     );
@@ -1245,7 +1238,7 @@ where
     .expect("join source DB");
 
     let store_client = common::local_store_client().await;
-    let upload_client = PrefixedStoreClient::empty(store_client.clone());
+    let upload_client = store_client.unprefixed();
     let qmdb_client: VariableClient<F> =
         exoware_qmdb::adapter::Ordered::new(upload_client.clone(), op_cfg::<F>(), key_cfg());
     let mut expected_boundaries = Vec::new();
@@ -1336,7 +1329,7 @@ async fn test_ordered_current_proofs_store_calls() {
     )
     .await;
     common::commit_current_operations(
-        &PrefixedStoreClient::empty(store_client.clone()),
+        &store_client.unprefixed(),
         &source.operations,
         &op_cfg::<mmr::Family>(),
         &source.current_boundary,
@@ -1346,7 +1339,7 @@ async fn test_ordered_current_proofs_store_calls() {
     // A new client starts with an empty read cache
     let new_client = || async {
         let client: VariableClient<mmr::Family> = exoware_qmdb::adapter::Ordered::new(
-            PrefixedStoreClient::empty(store_client.clone()),
+            store_client.unprefixed(),
             op_cfg::<mmr::Family>(),
             key_cfg(),
         );
@@ -1427,7 +1420,7 @@ async fn test_ordered_current_proof_reads_overlap() {
     )
     .await;
     common::commit_current_operations(
-        &PrefixedStoreClient::empty(store_client.clone()),
+        &store_client.unprefixed(),
         &source.operations,
         &op_cfg::<mmr::Family>(),
         &source.current_boundary,
@@ -1435,7 +1428,7 @@ async fn test_ordered_current_proof_reads_overlap() {
     .await
     .unwrap();
     let client: VariableClient<mmr::Family> = exoware_qmdb::adapter::Ordered::new(
-        PrefixedStoreClient::empty(store_client),
+        store_client.unprefixed(),
         op_cfg::<mmr::Family>(),
         key_cfg(),
     );

@@ -17,9 +17,7 @@ use datafusion::{
     common::ScalarValue,
     datasource::{MemTable, ViewTable},
 };
-use exoware_sdk::{
-    proto::PreferZstdHttpClient, transport::set_tcp_nodelay, PrefixedStoreClient, StoreKeyPrefix,
-};
+use exoware_sdk::{proto::PreferZstdHttpClient, transport::set_tcp_nodelay, StoreKeyPrefix};
 use exoware_sql::{
     proto::sql::v1::{QueryRequest, ServiceClient},
     sql_connect_stack, CellValue, IndexSpec, KvSchema, SqlServer, TableColumnConfig,
@@ -38,7 +36,7 @@ async fn sql_full_pipeline_insert_and_query() {
     let write_client = common::local_store_client().await;
     let read_client = write_client.clone();
 
-    let write_schema = KvSchema::new(PrefixedStoreClient::empty(write_client))
+    let write_schema = KvSchema::new(write_client.unprefixed())
         .table(
             "slam_orders",
             vec![
@@ -79,7 +77,7 @@ async fn sql_full_pipeline_insert_and_query() {
     }
     let min_sequence = writer.flush().await.expect("flush batch");
     assert!(min_sequence > 0);
-    let read_schema = KvSchema::new(PrefixedStoreClient::empty(read_client.clone()))
+    let read_schema = KvSchema::new(read_client.unprefixed())
         .table(
             "slam_orders",
             vec![
@@ -96,7 +94,7 @@ async fn sql_full_pipeline_insert_and_query() {
         )
         .expect("schema");
 
-    let ctx = exoware_sql::SqlContext::new(PrefixedStoreClient::empty(read_client));
+    let ctx = exoware_sql::SqlContext::new(read_client.unprefixed());
     ctx.register_schema(read_schema).expect("register tables");
 
     // Full scan (all rows are now visible)
@@ -281,9 +279,7 @@ async fn serve_sql(
 
 #[tokio::test]
 async fn connect_query_preserves_session_settings() {
-    let schema = KvSchema::new(PrefixedStoreClient::empty(
-        common::local_store_client().await,
-    ));
+    let schema = KvSchema::new(common::local_store_client().await.unprefixed());
     let server = Arc::new(SqlServer::new(schema).expect("SQL server"));
     let initial_batch_size = server.session().datafusion().state().config().batch_size();
     let (client, handle) = serve_sql(server.clone()).await;
@@ -326,7 +322,7 @@ async fn connect_query_preserves_session_settings() {
 #[tokio::test]
 async fn connect_query_enforces_sequence_floor_and_returns_evaluated_sequence() {
     let store_client = common::local_store_client().await;
-    let schema = KvSchema::new(PrefixedStoreClient::empty(store_client))
+    let schema = KvSchema::new(store_client.unprefixed())
         .table(
             "items",
             vec![
@@ -437,7 +433,7 @@ async fn connect_query_enforces_sequence_floor_and_returns_evaluated_sequence() 
 #[tokio::test]
 async fn connect_query_preserves_configured_tables_and_views() {
     let store_client = common::local_store_client().await;
-    let schema = KvSchema::new(PrefixedStoreClient::empty(store_client.clone()))
+    let schema = KvSchema::new(store_client.unprefixed())
         .table(
             "items",
             vec![

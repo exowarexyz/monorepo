@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Client, type StoreClient } from '@exowarexyz/sdk';
+import { StoreClient, type PrefixedStoreClient } from '@exowarexyz/sdk';
 import { Buffer } from 'buffer';
 import './App.css';
 import { QMDB_URL, SIMPLEX_URL, SIMPLEX_STORE_PREFIX, SQL_URL } from './env';
@@ -29,14 +29,13 @@ interface Notification {
 }
 
 function App() {
-  const [storeClient, setStoreClient] = useState<StoreClient | null>(null);
+  const [store, setStore] = useState<PrefixedStoreClient | null>(null);
   const [isConnected, setIsConnected] = useState(false);
   const [notifications, setNotifications] = useState<Notification[]>([]);
 
   useEffect(() => {
-    const client = new Client(SIMULATOR_URL, TOKEN);
-    const store = client.store();
-    setStoreClient(store);
+    const client = new StoreClient(SIMULATOR_URL, TOKEN);
+    setStore(client.unprefixed());
 
     testConnection(client).then((connected) => {
       if (!connected) {
@@ -75,9 +74,9 @@ function App() {
     setNotifications((prev) => prev.filter((n) => n.id !== id));
   };
 
-  const testConnection = async (client: Client) => {
+  const testConnection = async (client: StoreClient) => {
     try {
-      await client.store().query(undefined, undefined, 1);
+      await client.unprefixed().range(undefined, undefined, 1);
       setIsConnected(true);
       return true;
     } catch (e) {
@@ -114,12 +113,12 @@ function App() {
 
       <div className="primary-panels">
         <StorePanel
-          client={storeClient}
+          store={store}
           showNotification={showNotification}
           onConnectionLost={() => setIsConnected(false)}
         />
         <LogPanel
-          client={storeClient}
+          store={store}
           showNotification={showNotification}
           onConnectionLost={() => setIsConnected(false)}
           onConnectionRestored={() => setIsConnected(true)}

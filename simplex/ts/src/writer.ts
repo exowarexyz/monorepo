@@ -1,4 +1,4 @@
-import { StoreClient, StoreWriteBatch } from '@exowarexyz/sdk';
+import { PrefixedStoreClient, StoreWriteBatch } from '@exowarexyz/sdk';
 
 import {
   blockByDigestKey,
@@ -59,7 +59,7 @@ export interface FinalizationUpload {
 }
 
 export class SimplexWriter {
-  constructor(private readonly store: StoreClient) {}
+  constructor(private readonly store: PrefixedStoreClient) {}
 
   prepareHeader(input: HeaderUpload): PreparedSimplexUpload {
     const header = toSimplexBytes(input.header);
@@ -118,7 +118,7 @@ export class SimplexWriter {
   }
 
   async uploadPrepared(upload: PreparedSimplexUpload): Promise<SimplexUploadReceipt> {
-    const sequence = await this.stageUpload(upload).commit(this.store);
+    const sequence = await this.store.putPrepared(this.stageUpload(upload));
     return { storeSequenceNumber: sequence, summary: upload.summary };
   }
 

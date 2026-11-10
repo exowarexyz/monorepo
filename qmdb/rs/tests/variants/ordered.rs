@@ -38,7 +38,7 @@ use exoware_qmdb::{
     },
     CurrentBoundaryState, MAX_OPERATION_SIZE,
 };
-use exoware_sdk::{proto::PreferZstdHttpClient, PrefixedStoreClient, StoreWriteBatch};
+use exoware_sdk::{proto::PreferZstdHttpClient, StoreWriteBatch};
 use std::{collections::BTreeMap, fmt::Debug, sync::Arc};
 
 const N: usize = 32;
@@ -240,7 +240,7 @@ async fn verify_snapshots<F, K, V, E>(
         .iter()
         .all(|snapshot| snapshot.boundary.is_some() == is_current));
     let store = common::local_store_client().await;
-    let prefixed = PrefixedStoreClient::empty(store);
+    let prefixed = store.unprefixed();
     let native = Arc::new(
         exoware_qmdb::adapter::Ordered::<F, Sha256, K, V, N, E>::new(
             prefixed.clone(),

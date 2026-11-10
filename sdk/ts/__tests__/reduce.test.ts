@@ -1,7 +1,7 @@
 import { create, fromBinary, toBinary, toJsonString } from '@bufbuild/protobuf';
 import { Code, ConnectError } from '@connectrpc/connect';
 import { encodeEnvelope } from '@connectrpc/connect/protocol';
-import { Client } from '../src/client';
+import { StoreClient } from '../src/client';
 import { HttpError } from '../src/error';
 import {
     ReduceParamsSchema,
@@ -11,7 +11,7 @@ import {
     type ReduceRequest,
     type ReduceResponse,
 } from '../src/gen/ts/store/v1/query_pb';
-import { ReadSession, StoreClient, StoreKeyPrefix } from '../src/store';
+import { ReadSession, PrefixedStoreClient, StoreKeyPrefix } from '../src/store';
 
 const start = new Uint8Array([1]);
 const end = new Uint8Array([2]);
@@ -27,8 +27,8 @@ function frame(group: bigint, sequenceNumber: bigint = 7n) {
     });
 }
 
-function clientWithReduce(reduce: Client['query']['reduce']): Client {
-    return { query: { reduce }, credential: 'absent' } as unknown as Client;
+function clientWithReduce(reduce: StoreClient['query']['reduce']): StoreClient {
+    return { query: { reduce }, credential: 'absent' } as unknown as StoreClient;
 }
 
 test.each(['store', 'session'])('reduce round trips and prefixes nested casts through %s', async (kind) => {
@@ -54,9 +54,9 @@ test.each(['store', 'session'])('reduce round trips and prefixes nested casts th
     });
     const prefix = new StoreKeyPrefix(new Uint8Array([1, 2, 3]));
     const store = kind === 'store'
-        ? new StoreClient(client, prefix)
-        : new ReadSession(client, prefix);
-    for await (const result of store.reduce(start, end, params)) {
+        ? new PrefixedStoreClient(client, prefix)
+        : ReadSession.monotonic(new PrefixedStoreClient(client, prefix));
+    for await (const result of store.rangeReduce(start, end, params)) {
         expect(result).toEqual(frame(1n));
     }
     expect(received!.params).toEqual(paramsAt(12, 36));
@@ -72,8 +72,8 @@ test('reduce preserves a missing cast child expression for server validation', a
         received = fromBinary(ReduceRequestSchema, toBinary(ReduceRequestSchema, request as ReduceRequest));
         yield frame(1n);
     });
-    const store = new StoreClient(client, new StoreKeyPrefix(new Uint8Array([1])));
-    for await (const result of store.reduce(start, end, params)) {
+    const store = new PrefixedStoreClient(client, new StoreKeyPrefix(new Uint8Array([1])));
+    for await (const result of store.rangeReduce(start, end, params)) {
         expect(result).toEqual(frame(1n));
     }
     expect(received!.params).toEqual(params);
@@ -110,9 +110,9 @@ test.each(['store', 'session'])('reduce prefixes reducer filters through %s', as
     });
     const prefix = new StoreKeyPrefix(new Uint8Array([1, 2, 3]));
     const store = kind === 'store'
-        ? new StoreClient(client, prefix)
-        : new ReadSession(client, prefix);
-    for await (const result of store.reduce(start, end, params)) {
+        ? new PrefixedStoreClient(client, prefix)
+        : ReadSession.monotonic(new PrefixedStoreClient(client, prefix));
+    for await (const result of store.rangeReduce(start, end, params)) {
         expect(result).toEqual(frame(1n));
     }
     const checks = received!.params!.reducers[0].filter!.checks;
@@ -148,15 +148,15 @@ describe.each([true, false])('Reduce responses with binary format %s', (useBinar
             return response([], undefined, useBinaryFormat);
         });
         try {
-            const client = new Client('http://reduce.test', {
+            const client = new StoreClient('http://reduce.test', {
                 token: '', useBinaryFormat,
                 retry: { maxAttempts: 3, initialBackoffMs: 0, maxBackoffMs: 0 },
             });
-            const session = new ReadSession(client);
+            const session = ReadSession.monotonic(new PrefixedStoreClient(client));
             const params = create(ReduceParamsSchema, { reducers: [{ op: RangeReduceOp.COUNT_ALL }] });
             const stream = kind === 'client'
                 ? client.query.reduce({ start, end, params })
-                : (kind === 'store' ? new StoreClient(client) : session).reduce(start, end, params);
+                : (kind === 'store' ? new PrefixedStoreClient(client) : session).rangeReduce(start, end, params);
             const next = stream[Symbol.asyncIterator]().next();
             if (kind === 'client') {
                 await expect(next).rejects.toBeInstanceOf(ConnectError);
@@ -178,11 +178,11 @@ describe.each([true, false])('Reduce responses with binary format %s', (useBinar
         const fetch = jest.spyOn(globalThis, 'fetch').mockImplementation(async () =>
             response([detail], undefined, useBinaryFormat));
         try {
-            const session = new ReadSession(new Client('http://reduce.test', { token: '', useBinaryFormat }));
+            const session = ReadSession.monotonic(new PrefixedStoreClient(new StoreClient('http://reduce.test', { token: '', useBinaryFormat })));
             const params = create(ReduceParamsSchema, {
                 groupBy: [{ expr: { case: 'literal', value: { value: { case: 'uint64Value', value: 1n } } } }],
             });
-            const stream = session.reduce(start, end, params)[Symbol.asyncIterator]();
+            const stream = session.rangeReduce(start, end, params)[Symbol.asyncIterator]();
             expect((await stream.next()).value).toEqual(detail);
             expect(session.minSequenceNumber()).toBe(7n);
             expect((await stream.next()).done).toBe(true);
@@ -200,13 +200,13 @@ test.each(['aborted', 'unavailable', 'resource_exhausted'])('reduce retries %s b
         return requests.length === 1 ? response([], code) : response([frame(1n)]);
     });
     try {
-        const client = new Client('http://reduce.test', {
+        const client = new StoreClient('http://reduce.test', {
             token: '',
             useBinaryFormat: true,
             retry: { maxAttempts: 2, initialBackoffMs: 0, maxBackoffMs: 0 },
         });
         const received = [];
-        for await (const result of new StoreClient(client).reduce(start, end, params)) {
+        for await (const result of new PrefixedStoreClient(client).rangeReduce(start, end, params)) {
             received.push(result);
         }
         expect(received).toEqual([frame(1n)]);
@@ -222,7 +222,7 @@ test('canceling Reduce during retry backoff prevents another request', async () 
     const fetch = jest.spyOn(globalThis, 'fetch').mockImplementation(async () => response([], 'unavailable'));
     try {
         const controller = new AbortController();
-        const client = new Client('http://reduce.test', {
+        const client = new StoreClient('http://reduce.test', {
             token: '',
             useBinaryFormat: true,
             retry: { maxAttempts: 2, initialBackoffMs: 100, maxBackoffMs: 100 },
@@ -254,9 +254,9 @@ test.each(['store', 'session'])('returning a %s reduce iterator aborts the nativ
         }), { headers: { 'content-type': 'application/connect+proto' } });
     });
     try {
-        const client = new Client('http://reduce.test', { token: '', useBinaryFormat: true });
-        const store = kind === 'store' ? new StoreClient(client) : new ReadSession(client);
-        const stream = store.reduce(start, end, params)[Symbol.asyncIterator]();
+        const client = new StoreClient('http://reduce.test', { token: '', useBinaryFormat: true });
+        const store = kind === 'store' ? new PrefixedStoreClient(client) : ReadSession.monotonic(new PrefixedStoreClient(client));
+        const stream = store.rangeReduce(start, end, params)[Symbol.asyncIterator]();
         expect((await stream.next()).value).toEqual(frame(1n));
         expect(signal?.aborted).toBe(false);
         await stream.return?.();
@@ -279,7 +279,7 @@ test('reduce yields frames on demand and returning cancels the underlying stream
             cancelled = true;
         }
     });
-    const stream = new StoreClient(client).reduce(start, end, params)[Symbol.asyncIterator]();
+    const stream = new PrefixedStoreClient(client).rangeReduce(start, end, params)[Symbol.asyncIterator]();
     expect((await stream.next()).value).toEqual(frame(1n));
     expect(secondPolled).toBe(false);
     expect(cancelled).toBe(false);
@@ -295,15 +295,15 @@ test('reduce observes metadata on frame consumption and sends the monotonic sess
         yield frame(1n);
         yield frame(2n, 7n);
     });
-    const session = new ReadSession(client);
-    const stream = session.reduce(start, end, params)[Symbol.asyncIterator]();
+    const session = ReadSession.monotonic(new PrefixedStoreClient(client));
+    const stream = session.rangeReduce(start, end, params)[Symbol.asyncIterator]();
     expect(session.minSequenceNumber()).toBeUndefined();
     await stream.next();
     expect(session.minSequenceNumber()).toBe(7n);
     await stream.next();
     expect(session.minSequenceNumber()).toBe(7n);
     expect((await stream.next()).done).toBe(true);
-    const second = session.reduce(start, end, params)[Symbol.asyncIterator]();
+    const second = session.rangeReduce(start, end, params)[Symbol.asyncIterator]();
     await second.next();
     await second.return?.();
     expect(floors).toEqual([undefined, 7n]);
@@ -312,12 +312,12 @@ test('reduce observes metadata on frame consumption and sends the monotonic sess
 test('reduce returns a midstream error without replaying delivered groups', async () => {
     const fetch = jest.spyOn(globalThis, 'fetch').mockImplementation(async () => response([frame(1n)], 'unavailable'));
     try {
-        const client = new Client('http://reduce.test', {
+        const client = new StoreClient('http://reduce.test', {
             token: '',
             useBinaryFormat: true,
             retry: { maxAttempts: 2, initialBackoffMs: 0, maxBackoffMs: 0 },
         });
-        const stream = new StoreClient(client).reduce(start, end, params)[Symbol.asyncIterator]();
+        const stream = new PrefixedStoreClient(client).rangeReduce(start, end, params)[Symbol.asyncIterator]();
         expect((await stream.next()).value).toEqual(frame(1n));
         await expect(stream.next()).rejects.toBeInstanceOf(HttpError);
         expect(fetch).toHaveBeenCalledTimes(1);

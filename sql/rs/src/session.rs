@@ -167,7 +167,7 @@ pub(crate) fn read_session(
 ) -> Result<ReadSession> {
     config
         .get_extension::<ReadSession>()
-        .map(|session| session.with_client(client.clone()))
+        .map(|session| session.with_store(client.clone()))
         .ok_or_else(|| {
             DataFusionError::Configuration(
                 "Store reads require a ReadSession; use exoware_sql::SqlContext".into(),

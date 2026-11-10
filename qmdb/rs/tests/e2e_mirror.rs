@@ -23,7 +23,6 @@ use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16, NZU64};
 use exoware_qmdb::{
     adapter::upload::recover_boundary_state, CurrentBoundaryState, MAX_OPERATION_SIZE,
 };
-use exoware_sdk::PrefixedStoreClient;
 use std::num::NonZeroU64;
 
 type Digest = commonware_cryptography::sha256::Digest;
@@ -41,7 +40,7 @@ async fn test_mirror_keyless_from_local() {
         b"gamma".to_vec(),
     ]])
     .await;
-    let upload_client = PrefixedStoreClient::empty(store_client.clone());
+    let upload_client = store_client.unprefixed();
     common::commit_operations::<mmr::Family, _>(
         &upload_client,
         &ops1,
@@ -51,7 +50,7 @@ async fn test_mirror_keyless_from_local() {
     .expect("upload 1");
     let qmdb_client: exoware_qmdb::adapter::Keyless<mmr::Family, Sha256, Vec<u8>> =
         exoware_qmdb::adapter::Keyless::new(
-            PrefixedStoreClient::empty(store_client.clone()),
+            store_client.unprefixed(),
             ((0..=MAX_OPERATION_SIZE).into(), ()),
         );
     assert_eq!(
@@ -150,7 +149,7 @@ async fn test_mirror_unordered_from_local() {
         (b"beta".to_vec(), Some(b"two".to_vec())),
     ]])
     .await;
-    let upload_client = PrefixedStoreClient::empty(store_client.clone());
+    let upload_client = store_client.unprefixed();
     common::commit_operations::<mmr::Family, _>(
         &upload_client,
         &ops1,
@@ -163,7 +162,7 @@ async fn test_mirror_unordered_from_local() {
     .expect("upload 1");
     let qmdb_client: exoware_qmdb::adapter::Unordered<mmr::Family, Sha256, Vec<u8>, Vec<u8>, N> =
         exoware_qmdb::adapter::Unordered::new(
-            PrefixedStoreClient::empty(store_client.clone()),
+            store_client.unprefixed(),
             (
                 ((0..=MAX_OPERATION_SIZE).into(), ()),
                 ((0..=MAX_OPERATION_SIZE).into(), ()),
@@ -279,7 +278,7 @@ async fn test_mirror_immutable_from_local() {
         (FixedBytes::new([0x22; 32]), b"two".to_vec()),
     ]])
     .await;
-    let upload_client = PrefixedStoreClient::empty(store_client.clone());
+    let upload_client = store_client.unprefixed();
     common::commit_operations::<mmr::Family, _>(
         &upload_client,
         &ops1,
@@ -289,7 +288,7 @@ async fn test_mirror_immutable_from_local() {
     .expect("upload 1");
     let qmdb_client: exoware_qmdb::adapter::Immutable<mmr::Family, Sha256, ImmK, Vec<u8>> =
         exoware_qmdb::adapter::Immutable::new(
-            PrefixedStoreClient::empty(store_client.clone()),
+            store_client.unprefixed(),
             ((), ((0..=MAX_OPERATION_SIZE).into(), ())),
         );
     assert_eq!(
@@ -423,7 +422,7 @@ async fn test_mirror_ordered_from_local() {
         None,
     )
     .await;
-    let upload_client = PrefixedStoreClient::empty(store_client.clone());
+    let upload_client = store_client.unprefixed();
     common::commit_current_operations::<mmr::Family, _, N>(
         &upload_client,
         &ops1,
@@ -438,7 +437,7 @@ async fn test_mirror_ordered_from_local() {
 
     let qmdb_client: exoware_qmdb::adapter::Ordered<mmr::Family, Sha256, Vec<u8>, Vec<u8>, N> =
         exoware_qmdb::adapter::Ordered::new(
-            PrefixedStoreClient::empty(store_client.clone()),
+            store_client.unprefixed(),
             (
                 ((0..=MAX_OPERATION_SIZE).into(), ()),
                 ((0..=MAX_OPERATION_SIZE).into(), ()),

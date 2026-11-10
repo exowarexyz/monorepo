@@ -147,7 +147,7 @@ fn latest_inactivity_floor(ops: &[BatchOperation]) -> Location<mmr::Family> {
 
 async fn commit_upload(store_client: &StoreClient, batch: &SourceBatch) {
     common::commit_operations::<mmr::Family, BatchOperation>(
-        &PrefixedStoreClient::empty(store_client.clone()),
+        &store_client.unprefixed(),
         &batch.operations,
         &((), ((0..=10000).into(), ())),
     )
@@ -194,8 +194,7 @@ async fn test_immutable_connect_subscribe_emits_verifiable_multi_proof() {
         *source.inactivity_floor > 0,
         "test must not rely on inactivity_floor = 0"
     );
-    let (_qmdb_server, qmdb_url) =
-        spawn_qmdb_server(PrefixedStoreClient::empty(store_client.clone())).await;
+    let (_qmdb_server, qmdb_url) = spawn_qmdb_server(store_client.unprefixed()).await;
     let connect_client = operation_log_client(&qmdb_url);
 
     let mut stream = connect_client
@@ -242,8 +241,7 @@ async fn test_immutable_connect_get_operation_range_returns_verifiable_proof() {
     );
     commit_upload(&store_client, &source).await;
 
-    let (_qmdb_server, qmdb_url) =
-        spawn_qmdb_server(PrefixedStoreClient::empty(store_client.clone())).await;
+    let (_qmdb_server, qmdb_url) = spawn_qmdb_server(store_client.unprefixed()).await;
     let connect_client = operation_log_client(&qmdb_url);
 
     let request = ProtoGetOperationRangeRequest {
@@ -297,8 +295,7 @@ async fn test_immutable_connect_client_rejects_invalid_streamed_proof() {
     );
     commit_upload(&store_client, &source).await;
 
-    let (_qmdb_server, qmdb_url) =
-        spawn_qmdb_server(PrefixedStoreClient::empty(store_client.clone())).await;
+    let (_qmdb_server, qmdb_url) = spawn_qmdb_server(store_client.unprefixed()).await;
     let rpc = common::operation_log_rpc_client(&qmdb_url);
     let mut raw_stream = rpc
         .subscribe(ProtoSubscribeRequest {
