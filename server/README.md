@@ -31,8 +31,8 @@ async fn serve<E: StoreEngine>(engine: Arc<E>) -> std::io::Result<()> {
 Call this function from a Tokio runtime. Replace `std::future::pending()` with
 your shutdown future to stop accepting connections and drain active requests.
 Shutdown signals open subscriptions at once, so a client that is reading sees
-a resumable `UNAVAILABLE` error, and returns as soon as every connection has
-closed. Connections still open 30 seconds after shutdown began are closed,
+a resumable `UNAVAILABLE` error. `serve` returns as soon as every connection
+has closed. Connections still open 30 seconds after shutdown began are closed,
 cutting off any response still in progress, so a client cannot hold the
 process open. To choose a different limit for a deployment, call
 `transport::serve_with_config` with a `ServeConfig` whose `shutdown_timeout`

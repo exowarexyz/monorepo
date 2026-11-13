@@ -77,11 +77,6 @@ impl SubscriptionLifetime {
         self
     }
 
-    /// The configured maximum lifetime, if any.
-    pub const fn max_duration(&self) -> Option<Duration> {
-        self.max_duration
-    }
-
     /// The configured jitter fraction.
     pub const fn jitter(&self) -> f64 {
         self.jitter
@@ -113,26 +108,29 @@ fn ended(reason: &str, message: &str) -> ConnectError {
 ///
 /// Created by [bound_subscription].
 pub struct BoundedSubscription<S, C> {
-    // Each part is dropped as soon as it can no longer matter, so backend
-    // resources are released when the subscription ends rather than when the
-    // transport drops the response body.
-    inner: Option<Pin<Box<S>>>,
-    close: Option<Pin<Box<C>>>,
+    // Dropped as soon as the subscription ends, so backend resources are
+    // released then rather than when the transport drops the response body.
+    active: Option<Active<S, C>>,
+}
+
+// Every field is boxed, so the wrapper is `Unpin` and can be borrowed
+// mutably without pin projection.
+struct Active<S, C> {
+    inner: Pin<Box<S>>,
+    close: Pin<Box<C>>,
     deadline: Option<Pin<Box<Sleep>>>,
 }
 
-impl<S, C> BoundedSubscription<S, C>
+impl<S, C> Active<S, C>
 where
     C: Future<Output = ()>,
 {
     fn poll_bounds(&mut self, cx: &mut Context<'_>) -> Option<ConnectError> {
-        if let Some(close) = &mut self.close {
-            if close.as_mut().poll(cx).is_ready() {
-                return Some(ended(
-                    REASON_SERVER_SHUTDOWN,
-                    "server is shutting down, resume from the last received sequence",
-                ));
-            }
+        if self.close.as_mut().poll(cx).is_ready() {
+            return Some(ended(
+                REASON_SERVER_SHUTDOWN,
+                "server is shutting down, resume from the last received sequence",
+            ));
         }
 
         // The clock is checked as well because a sleep can stay pending past its
@@ -146,13 +144,6 @@ where
         }
         None
     }
-
-    fn finish<T>(&mut self, item: Option<T>) -> Poll<Option<T>> {
-        self.inner = None;
-        self.close = None;
-        self.deadline = None;
-        Poll::Ready(item)
-    }
 }
 
 impl<S, C, T> Stream for BoundedSubscription<S, C>
@@ -163,29 +154,27 @@ where
     type Item = Result<T, ConnectError>;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        // Every field is boxed, so the wrapper is `Unpin` and can be borrowed
-        // mutably without pin projection.
         let this = self.get_mut();
-        if this.inner.is_none() {
+        let Some(active) = this.active.as_mut() else {
             return Poll::Ready(None);
-        }
-        if let Some(error) = this.poll_bounds(cx) {
-            return this.finish(Some(Err(error)));
+        };
+        if let Some(error) = active.poll_bounds(cx) {
+            this.active = None;
+            return Poll::Ready(Some(Err(error)));
         }
 
         // Bounds are checked again after a ready item, so a frame produced
         // after the bound by one long inner poll is never delivered.
-        let Some(inner) = this.inner.as_mut() else {
-            return Poll::Ready(None);
-        };
-        match inner.as_mut().poll_next(cx) {
-            Poll::Pending => Poll::Pending,
-            Poll::Ready(Some(Ok(item))) => match this.poll_bounds(cx) {
-                Some(error) => this.finish(Some(Err(error))),
-                None => Poll::Ready(Some(Ok(item))),
+        let item = std::task::ready!(active.inner.as_mut().poll_next(cx));
+        let item = match item {
+            Some(Ok(item)) => match active.poll_bounds(cx) {
+                Some(error) => Some(Err(error)),
+                None => return Poll::Ready(Some(Ok(item))),
             },
-            Poll::Ready(item) => this.finish(item),
-        }
+            item => item,
+        };
+        this.active = None;
+        Poll::Ready(item)
     }
 }
 
@@ -197,14 +186,12 @@ where
 /// a bound has been reached, so emit an opening checkpoint ahead of the
 /// returned stream rather than from inside it.
 ///
-/// A body is not polled while the peer withholds flow-control credit, so the
-/// bound cannot reach a stalled peer through the stream alone. Under
-/// [transport::serve], a response whose peer stopped granting credit is reset
-/// a short grace period after its lifetime, as long as the transport is still
-/// producing it. Once its final frame has been handed over, only the shutdown
-/// timeout of [transport::serve_with_config] bounds the remaining output. Call
-/// this from the request handler, before returning the response, so the
-/// transport can associate the lifetime with its request.
+/// Under [transport::serve], a response is also cut off shortly after its
+/// lifetime when the client has stopped reading it. That requires calling this
+/// from the request handler before it returns the response. Output that the
+/// transport has already taken in full is bounded only by the shutdown
+/// timeout. Elsewhere, the lifetime only takes effect while the client keeps
+/// reading.
 ///
 /// Built-in `log.stream.v1.Subscribe` handlers use this with
 /// [transport::ShutdownSignal::closed] as `close`. Backends that implement
@@ -225,9 +212,11 @@ where
     }
 
     BoundedSubscription {
-        inner: Some(Box::pin(stream)),
-        close: Some(Box::pin(close)),
-        deadline: deadline.map(|deadline| Box::pin(tokio::time::sleep_until(deadline))),
+        active: Some(Active {
+            inner: Box::pin(stream),
+            close: Box::pin(close),
+            deadline: deadline.map(|deadline| Box::pin(tokio::time::sleep_until(deadline))),
+        }),
     }
 }
 
@@ -309,7 +298,7 @@ mod tests {
         assert_eq!(reason(&error), REASON_SUBSCRIPTION_EXPIRED);
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn close_signal_ends_an_idle_stream() {
         let close = Arc::new(Notify::new());
         let waiter = close.clone();

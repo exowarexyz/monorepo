@@ -4,7 +4,6 @@ use axum::{routing::get, Router};
 use bytes::Bytes;
 use exoware_server::ingest::transport::{serve, serve_with_config, ServeConfig};
 use http::{Request, StatusCode};
-use socket2::SockRef;
 use std::{
     future::poll_fn,
     io,
@@ -17,7 +16,7 @@ use std::{
 };
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
-    net::{TcpListener, TcpStream},
+    net::{TcpListener, TcpSocket, TcpStream},
     sync::{oneshot, Notify},
     task::JoinHandle,
     time::{sleep, timeout, Instant},
@@ -149,8 +148,12 @@ impl Drop for Http2 {
 }
 
 async fn http1_get(addr: SocketAddr, path: &str) -> Result<TcpStream, Error> {
-    let mut tcp = TcpStream::connect(addr).await?;
-    SockRef::from(&tcp).set_recv_buffer_size(4096)?;
+    // Negotiate the small window at connect time so Linux can drain queued
+    // data without the stalls caused by shrinking it after the handshake.
+    let socket = TcpSocket::new_v4()?;
+    socket.set_recv_buffer_size(4096)?;
+    let mut tcp = socket.connect(addr).await?;
+
     tcp.write_all(format!("GET {path} HTTP/1.1\r\nHost: localhost\r\n\r\n").as_bytes())
         .await?;
     Ok(tcp)

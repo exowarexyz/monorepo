@@ -13,10 +13,11 @@ use rand::RngExt as _;
 use std::{
     future::Future,
     pin::Pin,
-    sync::{Arc, Mutex, PoisonError},
+    sync::Arc,
     task::{Context, Poll},
     time::Duration,
 };
+use sync_wrapper::SyncWrapper;
 use tokio::time::{Instant, Sleep};
 
 pub(crate) type SubscribeStream = ServerStream<ErasedResponseBody, SubscribeResponseView<'static>>;
@@ -108,16 +109,6 @@ impl SubscriptionRetryConfig {
         self
     }
 
-    /// Whether subscriptions resume automatically.
-    pub const fn enabled(&self) -> bool {
-        self.enabled
-    }
-
-    /// The budget for each outage, or `None` when outages are unbounded.
-    pub const fn outage_budget(&self) -> Option<Duration> {
-        self.outage_budget
-    }
-
     pub(crate) fn backoff(&self, failures: u32) -> Duration {
         // `checked_shl` only rejects shifts of 128 bits or more, which saturate
         // the factor instead. The multiplication is what catches a product too
@@ -172,6 +163,10 @@ impl Cursor {
     }
 }
 
+// connectrpc reports a failed response body, or a stream that ended without
+// its end message, as `Internal`. An HTTP error status it has no mapping for
+// becomes `Unknown`. Both are how a reset connection or a restarting server
+// can appear.
 const fn is_resumable(err: &ConnectError) -> bool {
     matches!(
         err.code,
@@ -202,10 +197,9 @@ impl Opener {
 }
 
 enum State {
-    // The transport future is `Send` but not `Sync`. The mutex is only ever
-    // reached through `get_mut`, so it never locks and only keeps the
-    // subscription `Sync`.
-    Opening(Mutex<OpenFuture>),
+    // The transport future is `Send` but not `Sync`. The wrapper only hands it
+    // out through `&mut self`, which keeps the subscription `Sync`.
+    Opening(SyncWrapper<OpenFuture>),
     Open(Box<SubscribeStream>),
     Backoff(Pin<Box<Sleep>>),
     Ended,
@@ -283,7 +277,7 @@ impl StreamSubscription {
         let credential = client.credential;
         let opener = Opener { client, request };
         let mut subscription = Self {
-            state: State::Opening(Mutex::new(opener.open(cursor))),
+            state: State::Opening(SyncWrapper::new(opener.open(cursor))),
             opener,
             config,
             credential,
@@ -368,16 +362,13 @@ impl StreamSubscription {
                     if sleep.as_mut().poll(cx).is_pending() {
                         return self.pending(cx);
                     }
-                    self.state = State::Opening(Mutex::new(self.opener.open(self.cursor)));
+                    self.state = State::Opening(SyncWrapper::new(self.opener.open(self.cursor)));
                 }
-                State::Opening(open) => {
-                    let open = open.get_mut().unwrap_or_else(PoisonError::into_inner);
-                    match open.as_mut().poll(cx) {
-                        Poll::Pending => return self.pending(cx),
-                        Poll::Ready(Ok(stream)) => self.state = State::Open(Box::new(stream)),
-                        Poll::Ready(Err(err)) => self.recover(err)?,
-                    }
-                }
+                State::Opening(open) => match open.get_mut().as_mut().poll(cx) {
+                    Poll::Pending => return self.pending(cx),
+                    Poll::Ready(Ok(stream)) => self.state = State::Open(Box::new(stream)),
+                    Poll::Ready(Err(err)) => self.recover(err)?,
+                },
             }
         }
     }
@@ -396,8 +387,7 @@ impl StreamSubscription {
     }
 
     // Applies a received frame. Empty frames, such as the opening checkpoint,
-    // and frames whose entries all fall outside the key prefix still move the
-    // cursor without being delivered.
+    // still move the cursor without being delivered.
     fn receive(&mut self, frame: SubscribeResponse) -> Result<Option<StoreBatch>, ClientError> {
         self.outage = None;
         let sequence_number = frame.sequence_number;

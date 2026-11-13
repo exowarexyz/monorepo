@@ -299,7 +299,11 @@ where
 
 /// Cuts off the current request's response a short grace period after `lifetime_end`.
 ///
-/// Outside [serve], or off the handler's task, this does nothing.
+/// Hyper does not poll a response body while the peer withholds flow-control
+/// credit, so a subscription cannot observe its own lifetime then. The cutoff
+/// covers that case until Hyper has taken the final frame. After that, only the
+/// shutdown timeout bounds the remaining output. Outside [serve], or once the
+/// handler has returned its response, this does nothing.
 pub(crate) fn arm_subscription_cutoff(lifetime_end: Instant) {
     let Some(cutoff) = lifetime_end.checked_add(STALLED_RESPONSE_GRACE) else {
         return;
@@ -327,21 +331,17 @@ pub(crate) fn arm_subscription_cutoff(lifetime_end: Instant) {
 ///
 /// [serve] inserts one into the extensions of every request. Long-lived
 /// handlers wait on [Self::closed] so they end promptly instead of being cut
-/// off at the shutdown timeout.
-#[derive(Clone, Debug)]
-pub struct ShutdownSignal(watch::Receiver<bool>);
+/// off at the shutdown timeout. The default signal never fires, which suits a
+/// handler served without [serve].
+#[derive(Clone, Debug, Default)]
+pub struct ShutdownSignal(CancellationToken);
 
 impl ShutdownSignal {
-    /// Whether shutdown has started.
-    pub fn is_shutting_down(&self) -> bool {
-        *self.0.borrow()
-    }
-
     /// Completes once shutdown has started, or immediately if it already has.
     ///
     /// A server that no longer exists counts as shut down.
-    pub async fn closed(mut self) {
-        let _ = self.0.wait_for(|started| *started).await;
+    pub async fn closed(self) {
+        self.0.cancelled_owned().await;
     }
 }
 
@@ -467,12 +467,11 @@ where
 /// client can hold the process open. Responses still being sent are cut off
 /// at that point.
 ///
-/// The tasks that serve connections and HTTP/2 streams have all been dropped,
-/// with the requests and sockets they own, by the time this returns. A task
-/// is only dropped once it yields, so a request that blocks its thread delays
-/// this. Work that a handler moved to blocking threads or to tasks of its own
-/// is not cancelled and can outlive this. Dropping the returned future stops
-/// every connection and stream task without waiting for them.
+/// By the time this returns, every request it accepted has finished or been
+/// cancelled and every connection is closed. A request that blocks its thread
+/// delays this. Work that a handler moved to blocking threads or to tasks of
+/// its own is not cancelled and can outlive this. Dropping the returned future
+/// cancels every request and connection without waiting for them to end.
 pub async fn serve_with_config<L, S, B, F>(
     mut listener: L,
     service: S,
@@ -489,9 +488,11 @@ where
     B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
     F: Future<Output = ()> + Send,
 {
-    let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let tasks = TaskTracker::new();
     let stop = CancellationToken::new();
+
+    // A child of `stop`, so dropping this future also signals every request.
+    let graceful = stop.child_token();
 
     // Every connection and stream task stops with this future, including
     // when it is dropped before shutdown completes.
@@ -506,7 +507,7 @@ where
                 let control = ConnectionControl::new();
                 let requests = control.clone();
                 let service = service.clone();
-                let signal = ShutdownSignal(shutdown_rx.clone());
+                let signal = ShutdownSignal(graceful.clone());
                 let service = hyper::service::service_fn(move |request: Request<hyper::body::Incoming>| {
                     let service = service.clone();
                     let control = requests.clone();
@@ -524,7 +525,7 @@ where
                         Ok::<_, Infallible>(response.map(|inner| CutoffBody { inner, cutoff }))
                     }
                 });
-                let mut shutdown = shutdown_rx.clone();
+                let graceful = graceful.clone();
                 let executor = StreamExecutor {
                     tasks: tasks.clone(),
                 };
@@ -541,7 +542,7 @@ where
                         _ = stop.cancelled() => {}
                         _ = control.cancelled() => {}
                         _ = &mut connection => {}
-                        _ = shutdown.changed() => {
+                        _ = graceful.cancelled() => {
                             connection.as_mut().graceful_shutdown();
                             tokio::select! {
                                 biased;
@@ -559,7 +560,7 @@ where
     // One deadline, set as shutdown begins, bounds the whole drain. Requests
     // that need longer are cancelled rather than allowed to hold the process.
     drop(listener);
-    shutdown_tx.send_replace(true);
+    graceful.cancel();
     tasks.close();
     let _ = tokio::time::timeout(config.shutdown_timeout, tasks.wait()).await;
 

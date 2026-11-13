@@ -26,11 +26,13 @@ const DEFAULT_SUBSCRIPTION_RETRY_CONFIG: Readonly<SubscriptionRetryConfig> = Obj
 export function normalizeSubscriptionRetry(
     config: Partial<SubscriptionRetryConfig> = {},
 ): Readonly<SubscriptionRetryConfig> {
-    // A field set to undefined is unset, so it keeps its default like a missing one.
-    const given = Object.fromEntries(
-        Object.entries(config).filter(([, value]) => value !== undefined),
-    ) as Partial<SubscriptionRetryConfig>;
-    const merged = { ...DEFAULT_SUBSCRIPTION_RETRY_CONFIG, ...given };
+    const defaults = DEFAULT_SUBSCRIPTION_RETRY_CONFIG;
+    const merged = {
+        enabled: config.enabled ?? defaults.enabled,
+        outageBudgetMs: config.outageBudgetMs ?? defaults.outageBudgetMs,
+        initialBackoffMs: config.initialBackoffMs ?? defaults.initialBackoffMs,
+        maxBackoffMs: config.maxBackoffMs ?? defaults.maxBackoffMs,
+    };
     if (typeof merged.enabled !== 'boolean') {
         throw new TypeError('subscription retry enabled must be a boolean');
     }
@@ -84,19 +86,19 @@ function canceled(signal: AbortSignal): ConnectError {
     return ConnectError.from(signal.reason, Code.Canceled);
 }
 
-/** Calls `fire` once `at` is reached and returns a function that cancels it. */
+/**
+ * Calls `fire` from a timer once `at` is reached and returns a function that cancels it.
+ *
+ * Even a time already reached waits for a timer, so a reopen loop with no backoff still lets
+ * aborts and other timers run.
+ */
 function scheduleAt(at: number, fire: () => void): () => void {
-    let timer: ReturnType<typeof setTimeout> | undefined;
+    let timer: ReturnType<typeof setTimeout>;
     const arm = () => {
-        const remaining = at - performance.now();
-        if (remaining <= 0) {
-            timer = undefined;
-            fire();
-            return;
-        }
+        const remaining = Math.max(Math.ceil(at - performance.now()), 0);
 
         // Timers can fire early, so wake and recheck instead of trusting one delay.
-        timer = setTimeout(arm, Math.min(Math.ceil(remaining), MAX_TIMER_MS));
+        timer = setTimeout(() => (performance.now() >= at ? fire() : arm()), Math.min(remaining, MAX_TIMER_MS));
     };
     arm();
     return () => clearTimeout(timer);

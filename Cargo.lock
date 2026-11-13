@@ -2774,6 +2774,7 @@ dependencies = [
  "reqwest",
  "rustls-platform-verifier",
  "serde",
+ "sync_wrapper",
  "thiserror",
  "tokio",
  "tower",

@@ -231,16 +231,18 @@ describe('resume', () => {
             opened.push(performance.now());
             return play(steps as Step[], options);
         });
-        const { store, since } = harness(attempts, { initialBackoffMs: 40, maxBackoffMs: 100 });
+        const { store, since } = harness(attempts, { initialBackoffMs: 40, maxBackoffMs: 400 });
 
         await expect(take(store.subscribe({ selectors }), 2)).resolves.toEqual([2n, 3n]);
         expect(since()).toEqual([undefined, 2n, 2n, 2n, 3n]);
         const gaps = opened.slice(1).map((at, index) => at - opened[index]);
         expect(gaps[0]).toBeGreaterThanOrEqual(39);
         expect(gaps[1]).toBeGreaterThanOrEqual(79);
-        expect(gaps[2]).toBeGreaterThanOrEqual(99);
+        expect(gaps[2]).toBeGreaterThanOrEqual(159);
+
+        // Without the reset this delay would be 320 ms, so the bound leaves room for a slow runner.
         expect(gaps[3]).toBeGreaterThanOrEqual(39);
-        expect(gaps[3]).toBeLessThan(99);
+        expect(gaps[3]).toBeLessThan(300);
     });
 
     test('backoff keeps growing while stale checkpoints reset the budget', async () => {
@@ -435,6 +437,19 @@ describe('cancellation', () => {
         await expect(pending).rejects.toMatchObject({ connectCode: Code.Canceled });
         expect(performance.now() - started).toBeLessThan(1000);
         expect(requests).toHaveLength(1);
+    });
+
+    // A reopen that fails without I/O must still let timers run, or a zero
+    // backoff spins in microtasks and the caller can never abort it.
+    test('aborting stops reopens that fail at once with no backoff', async () => {
+        const controller = new AbortController();
+        const { client, store } = harness([], { initialBackoffMs: 0, maxBackoffMs: 0, outageBudgetMs: 500 });
+        client.stream.subscribe = ((_request: SubscribeRequest, callOptions: CallOptions) =>
+            play([new ConnectError('down', Code.Unavailable)], callOptions)) as typeof client.stream.subscribe;
+        const pending = drain(store.subscribe({ selectors, sinceSequenceNumber: 1n }, { signal: controller.signal }));
+        setTimeout(() => controller.abort(), 20);
+
+        await expect(pending).rejects.toMatchObject({ connectCode: Code.Canceled });
     });
 
     test.each(['abortable', 'forever'] as const)(

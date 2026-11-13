@@ -112,7 +112,8 @@ with its parent but leaves the parent's configured floor unchanged.
 Without it, the subscription starts after the latest batch.
 
 ```ts
-for await (const batch of store.subscribe({ selectors: [{ prefix: encode('orders/') }] })) {
+const selectors = [{ prefix: encode('orders/'), payloadRegex: '(?s-u).*' }];
+for await (const batch of store.subscribe({ selectors })) {
     console.log(batch.sequenceNumber, batch.entries.length);
 }
 ```

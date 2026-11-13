@@ -1170,13 +1170,12 @@ where
 
         // Without the transport's signal, only the lifetime, a failure, or the
         // client ends the subscription.
-        let shutdown = ctx.extensions().get::<ShutdownSignal>().cloned();
-        let close = async move {
-            match shutdown {
-                Some(shutdown) => shutdown.closed().await,
-                None => std::future::pending().await,
-            }
-        };
+        let close = ctx
+            .extensions()
+            .get::<ShutdownSignal>()
+            .cloned()
+            .unwrap_or_default()
+            .closed();
         let bounded = bound_subscription(batches, self.state.subscription_lifetime, close);
         Ok(connectrpc::Response::stream(Box::pin(
             stream_util::once(async { Ok(checkpoint) }).chain(bounded),

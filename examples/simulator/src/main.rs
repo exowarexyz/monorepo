@@ -85,7 +85,7 @@ fn command(default_directory: &'static str) -> Command {
                             Arg::new(SUBSCRIPTION_JITTER_FLAG)
                                 .long(SUBSCRIPTION_JITTER_FLAG)
                                 .help("Fraction of the maximum subscription lifetime that jitter may remove, from 0 to 1.")
-                                .default_value("0.2")
+                                .default_value(SubscriptionLifetime::unbounded().jitter().to_string().leak() as &str)
                                 .value_parser(clap::value_parser!(f64))
                                 .action(ArgAction::Set),
                         )
