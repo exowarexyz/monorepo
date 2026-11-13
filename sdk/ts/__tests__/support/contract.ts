@@ -22,8 +22,8 @@ export function be64(value: bigint): Uint8Array {
     return encoded;
 }
 
-/** The bytes of the parts in order. */
-export function concat(...parts: Uint8Array[]): Uint8Array {
+/** The bytes of the parts in order. A part is a byte array or a list of byte values. */
+export function concat(...parts: ArrayLike<number>[]): Uint8Array {
     const out = new Uint8Array(parts.reduce((length, part) => length + part.length, 0));
     let offset = 0;
     for (const part of parts) {

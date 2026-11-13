@@ -393,28 +393,26 @@ describe.each(backends)('store contract on $name', (backend) => {
     });
 
     describe('freshness', () => {
-        const queries: [string, boolean, (floor: bigint) => Promise<unknown> | AsyncIterable<unknown>][] = [
-            ['Get', true, (floor) => client.query.get({ key: bytes(1), minSequenceNumber: floor })],
-            ['GetMany', true, (floor) =>
+        const queries: [string, (floor: bigint) => Promise<unknown> | AsyncIterable<unknown>][] = [
+            ['Get', (floor) => client.query.get({ key: bytes(1), minSequenceNumber: floor })],
+            ['GetMany', (floor) =>
                 client.query.getMany({ keys: [bytes(1)], batchSize: 1, minSequenceNumber: floor })],
-            ['Range', true, (floor) => client.query.range({ batchSize: 1, minSequenceNumber: floor })],
-            ['Reduce', backend.reduce, (floor) =>
+            ['Range', (floor) => client.query.range({ batchSize: 1, minSequenceNumber: floor })],
+            ['Reduce', (floor) =>
                 client.query.reduce({
                     params: { reducers: [{ op: RangeReduceOp.COUNT_ALL }] },
                     minSequenceNumber: floor,
                 })],
         ];
 
-        describe.each(queries)('%s', (_, supported, query) => {
-            const check = supported ? it : it.skip;
-
-            check('answers when the floor equals the sequence number', async () => {
+        describe.each(queries)('%s', (_, query) => {
+            it('answers when the floor equals the sequence number', async () => {
                 const sequenceNumber = await put(client, sampleRows);
                 const answer = query(sequenceNumber);
                 await (Symbol.asyncIterator in answer ? collect(answer) : answer);
             });
 
-            check('fails with the store sequence number when the floor is above it', async () => {
+            it('fails with the store sequence number when the floor is above it', async () => {
                 const sequenceNumber = await put(client, sampleRows);
                 const error = await failure(query(sequenceNumber + 1n));
                 expect(error.code).toBe(Code.Aborted);

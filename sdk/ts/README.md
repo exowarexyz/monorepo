@@ -162,7 +162,36 @@ every connection sees the same sequence of writes.
 
 The store follows the Store API with these differences from a server:
 
-- **Reduce** is not implemented and answers `UNIMPLEMENTED`.
+- **Reduce is evaluated in the page.** It reads its range in one transaction,
+  in batches of at most 4096 rows. `maxQueryBytes` bounds its aggregation state
+  together with the results that the expressions of one batch compute, and a
+  request that exceeds it fails with `RESOURCE_EXHAUSTED`.
+
+  A group counts 48 bytes for each of its keys and reducers, plus the bytes of
+  the text and binary values it keeps. Without `group_by` only those text and
+  binary bytes count. For each value that an expression computes, a batch counts
+  48 bytes plus the value's text or binary bytes. An expression computes one
+  value per row, or one per batch when it is built from literals alone. Values
+  read directly from a field are not counted. Without `group_by` a batch holds
+  the computed values of one reducer at a time.
+
+  `lower` follows the lowercase mapping of Unicode 18.0.0 on every JavaScript
+  engine.
+
+  Two kinds of expression answer `UNIMPLEMENTED`: `date_trunc_day` of a
+  string, and arithmetic between a timestamp or a duration and a duration of
+  another unit. A request nested deeper than 100 messages fails with
+  `INVALID_ARGUMENT`, and so does a Date64 literal of the smallest value inside
+  a larger expression. A request that the transport cannot decode, such as one
+  nested thousands of messages deep, is answered by the transport with an error
+  of its own.
+
+  Groups arrive in the order of their first row. Arithmetic and sums pass on
+  the sign and payload of a NaN operand. The NaN of an invalid operation such as
+  0/0 and the result of an operation on two NaNs have no defined sign and
+  payload, so a `MIN`, a `MAX` or a group key computed from one is unspecified.
+  A NaN literal, range bound or result keeps its bits only where the JavaScript
+  engine keeps them in a number.
 
 - **A database can come back empty.** A browser may evict an origin's storage
   under disk pressure unless the page holds persistent storage
@@ -224,6 +253,22 @@ The store follows the Store API with these differences from a server:
 
 `openIndexedDbStore(name, options)` takes the limits `maxPutEntries`,
 `maxValueLen`, `maxRequestBytes` and `maxQueryBytes`.
+
+## Development
+
+The lowercase mapping that `lower` follows in the browser store comes from
+tables generated from the Rust standard library. The tables carry a digest of
+the standard library's lowercase forms, and the tests of this package check on
+every run that the store reproduces it. A test of the Rust SDK compares the
+whole file of tables with the standard library whenever that library has the
+tables' Unicode version. The tables move to another Unicode version only when
+this command writes them anew, and the toolchain it runs with decides the
+version. Run it inside the repository, then update the Unicode version named
+above:
+
+```sh
+cargo test -p exoware-sdk --test lowercase_tables -- --ignored regenerate_lowercase_tables
+```
 
 ## Status
 

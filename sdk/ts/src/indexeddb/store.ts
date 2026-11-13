@@ -15,6 +15,7 @@ import { putHandler } from './ingest.js';
 import { Notifier } from './notifier.js';
 import { pruneHandler } from './prune.js';
 import { getHandler, getManyHandler, rangeHandler } from './query.js';
+import { reduceHandler } from './reduce/handler.js';
 import { setRetentionHandler } from './retention.js';
 import { getBatchHandler, subscribeHandler } from './stream.js';
 
@@ -48,9 +49,10 @@ export interface IndexedDbStoreOptions {
      */
     maxRequestBytes?: number;
     /**
-     * Maximum memory in bytes that one query or Prune may hold, 64 MiB by default. It bounds the
-     * answer of a query (key and value bytes plus 64 bytes per row) and the keys a Prune selects
-     * together with the matcher of one pattern at a time.
+     * Maximum memory in bytes that one query, Prune or Reduce may hold, 64 MiB by default. It
+     * bounds the answer of a query (key and value bytes plus 64 bytes per row), the keys a Prune
+     * selects together with the matcher of one pattern at a time, and the aggregation state of a
+     * Reduce together with the expression results of one batch of rows.
      */
     maxQueryBytes?: number;
 }
@@ -153,7 +155,8 @@ function openChannel(name: string): BroadcastChannel | undefined {
  * workers of the origin may have the same database open, through this module or another
  * implementation of the layout.
  *
- * Reduce is not served and answers UNIMPLEMENTED.
+ * Reduce is evaluated in this process, and the README of this package lists the expressions that
+ * answer UNIMPLEMENTED.
  */
 export async function openIndexedDbStore(
     name: string,
@@ -236,6 +239,7 @@ export async function openIndexedDbStore(
             get: unary(isOpen, getHandler(db, limits.maxQueryBytes)),
             getMany: serverStream(isOpen, getManyHandler(db, limits.maxQueryBytes)),
             range: serverStream(isOpen, rangeHandler(db, limits.maxQueryBytes)),
+            reduce: serverStream(isOpen, reduceHandler(db, limits.maxQueryBytes)),
         }, serviceOptions);
         router.service(PruneService, {
             prune: unary(isOpen, pruneHandler(db, limits.maxQueryBytes)),

@@ -77,6 +77,9 @@ import {
     type Row,
 } from './support/contract';
 
+/** A Reduce that counts the rows of its range. A request without start and end covers every row. */
+const countRows = { params: { reducers: [{ op: RangeReduceOp.COUNT_ALL }] } };
+
 const STORES = ['kv', 'log', 'meta'];
 const MAX_U64 = (1n << 64n) - 1n;
 const PUT_SCOPE = [['kv', 'log', 'meta'], 'readwrite', 'strict'];
@@ -404,18 +407,13 @@ describe('IndexedDB store', () => {
                 () => client.query.get({ key: bytes() }),
                 () => client.query.getMany({ keys: [bytes()], batchSize: 1 }),
                 () => client.query.range({ batchSize: 1 }),
+                () => client.query.reduce(countRows),
                 () => client.stream.get({ sequenceNumber: 1n }),
                 () => client.stream.subscribe({ selectors: [everyKey] }),
                 () => client.retention.setRetention({}),
                 () => client.prune.prune({ policies: [] }),
             ];
             await expectEveryCallFails(calls, Code.Unavailable, 'store is closed');
-        });
-
-        it('answers Reduce with UNIMPLEMENTED', async () => {
-            const { client } = await openStore();
-            const reduce = client.query.reduce({ params: { reducers: [{ op: RangeReduceOp.COUNT_ALL }] } });
-            expect((await failure(reduce)).code).toBe(Code.Unimplemented);
         });
     });
 
@@ -482,6 +480,7 @@ describe('IndexedDB store', () => {
                 [QUERY_SCOPE, () => client.query.get({ key: utf8('a') })],
                 [QUERY_SCOPE, () => collect(client.query.getMany({ keys: [utf8('a'), utf8('b')], batchSize: 1 }))],
                 [QUERY_SCOPE, () => collect(client.query.range({ batchSize: 1 }))],
+                [QUERY_SCOPE, () => collect(client.query.reduce(countRows))],
                 [LOG_SCOPE, () => client.stream.get({ sequenceNumber: 1n })],
                 [[['log', 'meta'], 'readwrite', 'strict'], () =>
                     client.retention.setRetention({ policy: { kind: { case: 'keepLatest', value: { count: 9n } } } })],
@@ -1467,6 +1466,9 @@ describe('IndexedDB store', () => {
                 () => client.query.range({ batchSize: 0 }),
                 () => client.query.range({ batchSize: 1, mode: 99 as TraversalMode }),
                 () => client.query.range({ batchSize: 1, end: new Uint8Array(255) }),
+                () => client.query.reduce({}),
+                () => client.query.reduce({ ...countRows, start: new Uint8Array(255) }),
+                () => client.query.reduce({ ...countRows, end: new Uint8Array(255) }),
                 () => client.stream.subscribe({}),
                 () => client.stream.subscribe({ selectors: [{ payloadRegex: '(' }] }),
                 () => client.stream.subscribe({ selectors: [everyKey], valueFilters: [{}] }),
@@ -1656,6 +1658,7 @@ describe('IndexedDB store', () => {
                 () => client.query.get({ key: utf8('a') }),
                 () => client.query.getMany({ keys: [utf8('a')], batchSize: 1 }),
                 () => client.query.range({ batchSize: 1 }),
+                () => client.query.reduce(countRows),
                 () => client.stream.get({ sequenceNumber: 1n }),
                 () => client.stream.subscribe({ selectors: [everyKey], sinceSequenceNumber: 1n }),
             ];
@@ -1678,6 +1681,8 @@ describe('IndexedDB store', () => {
                 () => client.query.get({ key: utf8('a') }),
                 () => client.query.getMany({ keys: [utf8('b'), utf8('a')], batchSize: 1 }),
                 () => client.query.range({ batchSize: 1 }),
+                () => client.query.reduce(countRows),
+                () => client.query.reduce({ ...countRows, start: utf8('a'), end: utf8('a') }),
                 () => client.stream.get({ sequenceNumber: 1n }),
                 () => client.stream.get({ sequenceNumber: 2n }),
                 () => client.stream.get({ sequenceNumber: 3n }),
@@ -1699,6 +1704,7 @@ describe('IndexedDB store', () => {
             const before = await contentOf(name);
             const calls: (() => Promise<unknown> | AsyncIterable<unknown>)[] = [
                 () => client.query.range({ batchSize: 1 }),
+                () => client.query.reduce(countRows),
                 () => client.prune.prune({
                     policies: [{ keys: { selector: everyKey }, retain: { kind: { case: 'dropAll', value: {} } } }],
                 }),

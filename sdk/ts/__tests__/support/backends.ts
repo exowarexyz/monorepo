@@ -19,8 +19,6 @@ export interface RestartableBackend extends OpenBackend {
 export interface Backend<Opened extends OpenBackend = OpenBackend> {
     /** Label of the backend in suite titles. */
     name: string;
-    /** Whether the store evaluates Reduce. */
-    reduce: boolean;
     /** Whether selectors accept every pattern of the Rust regex crate. */
     fullRegex: boolean;
     /** Whether Puts that queue together may commit as one batch with one sequence number. */
@@ -38,7 +36,6 @@ function connect(url: string): Client {
 }
 
 const simulatorBehavior = {
-    reduce: true,
     fullRegex: true,
     mergesConcurrentPuts: true,
     trimsAfterCommit: true,
@@ -81,7 +78,6 @@ export function freshDatabaseName(): string {
 /** The IndexedDB store on fake-indexeddb, in a fresh database for each open. */
 export const indexedDb: Backend<RestartableBackend> = {
     name: 'IndexedDB',
-    reduce: false,
     fullRegex: false,
     mergesConcurrentPuts: false,
     trimsAfterCommit: false,

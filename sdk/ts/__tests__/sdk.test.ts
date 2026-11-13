@@ -43,7 +43,6 @@ function makeStreamSelector(prefix: string) {
 const backends: Backend[] = [sharedSimulator, indexedDb];
 
 describe.each(backends)('Exoware TS SDK on $name', (backend) => {
-    const reduceIt = backend.reduce ? it : it.skip;
     let open: OpenBackend;
     let client: Client;
 
@@ -318,7 +317,7 @@ describe.each(backends)('Exoware TS SDK on $name', (backend) => {
             );
         });
 
-        reduceIt('should reduce with COUNT_ALL', async () => {
+        it('should reduce with COUNT_ALL', async () => {
             const store = client.store();
             const encoder = new TextEncoder();
             const prefix = 'reduce-count-';
@@ -356,7 +355,7 @@ describe.each(backends)('Exoware TS SDK on $name', (backend) => {
             expect(countValue!.value.value).toBe(3n);
         });
 
-        reduceIt('should reduce with SUM on a value field', async () => {
+        it('should reduce with SUM on a value field', async () => {
             const store = client.store();
             const encoder = new TextEncoder();
             const prefix = 'reduce-sum-';
