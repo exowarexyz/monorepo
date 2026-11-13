@@ -1,5 +1,5 @@
 import { create } from '@bufbuild/protobuf';
-import { createRouterTransport } from '@connectrpc/connect';
+import { Code, createRouterTransport } from '@connectrpc/connect';
 import { Client } from '../src/client';
 import { Service as IngestService } from '../src/gen/ts/log/v1/ingest_pb';
 import { Service as RetentionService } from '../src/gen/ts/log/v1/retention_pb';
@@ -7,6 +7,7 @@ import { Service as StreamService } from '../src/gen/ts/log/v1/stream_pb';
 import { Service as PruneService } from '../src/gen/ts/store/v1/prune_pb';
 import { Service as QueryService } from '../src/gen/ts/store/v1/query_pb';
 import { ReadSession } from '../src/store';
+import { abortCall, failure, until } from './support/contract';
 
 const encoder = new TextEncoder();
 
@@ -19,6 +20,7 @@ function memoryTransport() {
     const log: { key: Uint8Array; value: Uint8Array }[][] = [];
     const calls: string[] = [];
     const authorization: Array<string | null> = [];
+    const subscriptions: AbortSignal[] = [];
     const record = (method: string, header: Headers) => {
         calls.push(method);
         authorization.push(header.get('Authorization'));
@@ -64,9 +66,15 @@ function memoryTransport() {
                 const entries = log[Number(request.sequenceNumber) - 1] ?? [];
                 return { sequenceNumber: request.sequenceNumber, entries };
             },
+            // A subscription that never delivers. It records the signal of its call and ends when
+            // that signal aborts.
+            async *subscribe(_request, context) {
+                subscriptions.push(context.signal);
+                await new Promise((resolve) => context.signal.addEventListener('abort', resolve));
+            },
         });
     });
-    return { transport, calls, authorization };
+    return { transport, calls, authorization, subscriptions };
 }
 
 const realFetch = globalThis.fetch;
@@ -130,4 +138,21 @@ test('a read session observes sequence numbers over the given transport', async 
     expect(session.minSequenceNumber()).toBe(2n);
     await expect(session.get(key)).resolves.toMatchObject({ value: encoder.encode('w') });
     expect(fetchSpy).not.toHaveBeenCalled();
+});
+
+test('aborting a subscription ends it with CANCELED and reaches the handler', async () => {
+    const { transport, subscriptions } = memoryTransport();
+    const client = new Client(transport);
+    const controller = new AbortController();
+    const frames = client.stream.subscribe(
+        { selectors: [{ payloadRegex: '.' }] },
+        { signal: controller.signal },
+    );
+    const ended = failure(frames);
+    await until(() => subscriptions.length === 1);
+    expect(subscriptions[0].aborted).toBe(false);
+
+    abortCall(controller);
+    expect((await ended).code).toBe(Code.Canceled);
+    await until(() => subscriptions[0].aborted);
 });

@@ -121,6 +121,110 @@ admitted. Generic errors, timeouts, and lost responses are not automatically
 retried. Direct `client.ingest.put(request, options)` calls accept a `timeoutMs`
 or abort `signal` covering attempts and backoff.
 
+## A Store in the browser
+
+`@exowarexyz/sdk/indexeddb` keeps a Store in an IndexedDB database of the page's
+origin and serves it in process. The same `Client` talks to it:
+
+```ts
+import { Client } from '@exowarexyz/sdk';
+import { deleteIndexedDbStore, openIndexedDbStore } from '@exowarexyz/sdk/indexeddb';
+
+const local = await openIndexedDbStore('my-app');
+const client = new Client(local.transport);
+const encode = (text: string) => new TextEncoder().encode(text);
+
+const sequence = await client.store().set(encode('greeting'), encode('hello'));
+const result = await client.store().createSessionWithSequence(sequence).get(encode('greeting'));
+
+local.close();
+await deleteIndexedDbStore('my-app');
+```
+
+`local.transport` is an in-process Connect transport that does not retry,
+authenticate or compress. A `Client` built on a transport applies only its
+`putLimits` option.
+
+`local.routes` registers the same handlers on any Connect router, so an
+application can serve the store over a channel of its own. The routes carry the
+store's `maxRequestBytes`, so such a router refuses a larger request message
+whatever its own options are. That limit counts bytes. A message within it can
+still hold millions of empty Put entries or GetMany keys, and a router decodes
+every one of them before a handler can count them. An application that passes
+bytes from another page or peer to these routes must bound the number of
+repeated elements before the bytes are decoded. It also decides who may call
+Put, Prune and SetRetention.
+
+The [database layout](../../indexeddb/README.md) is a contract shared with
+other implementations. Pages and workers of one origin can open the same
+database at the same time. Each operation is one IndexedDB transaction, so
+every connection sees the same sequence of writes.
+
+The store follows the Store API with these differences from a server:
+
+- **Reduce** is not implemented and answers `UNIMPLEMENTED`.
+
+- **A database can come back empty.** A browser may evict an origin's storage
+  under disk pressure unless the page holds persistent storage
+  (`navigator.storage.persist()`), and after a crash of the whole browser
+  Chrome can find a database corrupt and delete it. Neither raises an error.
+  `local.created` is `true` when the open created the database, so check it when
+  you expected data. Sequence numbers then start again at 1, and a session that
+  holds a floor from before the loss fails with `ABORTED` until the store
+  reaches it.
+
+- **Queries are bounded by memory.** IndexedDB cannot hold a snapshot open for a
+  slow reader, so a Range or GetMany reads its whole answer before the first
+  frame. An answer of Get, GetMany or Range above `maxQueryBytes` (64 MiB by
+  default, counted as key and value bytes plus 64 bytes per row) fails with
+  `RESOURCE_EXHAUSTED`, and the store stops reading at the first row that takes
+  its answer above the limit. Read larger ranges in pages with `limit`. Pages
+  are separate queries and may see different sequence numbers.
+
+- **A Prune is bounded by the same limit.** It selects the keys of every policy
+  before it deletes any. Meanwhile it holds each matched key with its order
+  value, and the matcher of one pattern at a time. A request whose selection
+  exceeds `maxQueryBytes` fails with `RESOURCE_EXHAUSTED` and deletes nothing.
+  Prune a larger key family through narrower prefixes.
+
+- **Requests are smaller.** One Put carries at most `maxRequestBytes` of encoded
+  entries (64 MiB by default and at most the 256 MiB that a server accepts). Pass
+  `putLimits: { maxEncodedBytes }` to `Client` so that batches are split to fit.
+  `maxPutEntries` and `maxValueLen` default to the server's limits and cannot
+  be set above them. A Prune request holds at most 256 policies.
+
+- **Selector and filter regexes are a subset** of the Rust regex syntax, matched
+  over bytes in linear time. The subset has the flags `s` and `u`, literals,
+  `\xHH`, `.`, classes, `\d \s \w` without `u`, `^ $ \A \z`, groups, named
+  groups, alternation, and greedy or lazy repetition of an expression that
+  cannot match the empty string. A pattern has at most 1024 characters, groups
+  nested 32 deep, repetition counts up to 1000 and a compiled size of 4096
+  instructions. A pattern that a server accepts and that falls outside the
+  subset answers `UNIMPLEMENTED`. An invalid pattern answers `INVALID_ARGUMENT`,
+  except that these answer `UNIMPLEMENTED`: one longer than 1024 characters, one
+  with the flag `x`, and one with an unknown Unicode property name in braces
+  such as `\p{Bogus}`. A pattern that is invalid only because its compiled form
+  is too large for the Rust regex crate may answer `UNIMPLEMENTED` too.
+
+- **A subscription runs until its call is aborted or `local.close()` is
+  called.** The `subscribe` methods of `client.store()` and its sessions abort
+  their call when the consumer stops iterating. A direct
+  `client.stream.subscribe` call stays open after its consumer leaves the loop,
+  so pass a signal in its call options and abort it when you are done. Writes
+  from other pages reach subscribers through a `BroadcastChannel` message that
+  the writing page posts after each commit. The store does not poll, so if that
+  page dies between its commit and the message, subscribers elsewhere receive
+  the batch together with the next write or when they subscribe again.
+
+- **Writes are ordered one at a time.** Every Put gets its own sequence number,
+  applies the retention rule in the same transaction, and resolves after
+  IndexedDB has reported the commit as durable. A Prune is one transaction as
+  well. A long query delays writers in every page that has the database open,
+  and a long write delays readers.
+
+`openIndexedDbStore(name, options)` takes the limits `maxPutEntries`,
+`maxValueLen`, `maxRequestBytes` and `maxQueryBytes`.
+
 ## Status
 
 `@exowarexyz/sdk` is **ALPHA** software and is not yet recommended for production use.

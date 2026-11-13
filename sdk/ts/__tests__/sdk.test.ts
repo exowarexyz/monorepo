@@ -1,7 +1,8 @@
 import { create } from '@bufbuild/protobuf';
 import { Client } from '../src/client';
 import { StoreKeyPrefix, StoreWriteBatch, TraversalMode } from '../src/store';
-import { sharedSimulator, type Backend, type OpenBackend } from './support/backends';
+import { indexedDb, sharedSimulator, type Backend, type OpenBackend } from './support/backends';
+import { nextWithTimeout } from './support/contract';
 import {
     ReduceParamsSchema,
     RangeReducerSpecSchema,
@@ -39,28 +40,10 @@ function makeStreamSelector(prefix: string) {
     });
 }
 
-async function nextWithTimeout<T>(
-    iterator: AsyncIterator<T>,
-    timeoutMs: number = 5_000,
-): Promise<IteratorResult<T>> {
-    let timeout: NodeJS.Timeout | undefined;
-    try {
-        return await Promise.race([
-            iterator.next(),
-            new Promise<IteratorResult<T>>((_, reject) => {
-                timeout = setTimeout(() => reject(new Error('timed out waiting for stream')), timeoutMs);
-            }),
-        ]);
-    } finally {
-        if (timeout) {
-            clearTimeout(timeout);
-        }
-    }
-}
-
-const backends: Backend[] = [sharedSimulator];
+const backends: Backend[] = [sharedSimulator, indexedDb];
 
 describe.each(backends)('Exoware TS SDK on $name', (backend) => {
+    const reduceIt = backend.reduce ? it : it.skip;
     let open: OpenBackend;
     let client: Client;
 
@@ -335,7 +318,7 @@ describe.each(backends)('Exoware TS SDK on $name', (backend) => {
             );
         });
 
-        it('should reduce with COUNT_ALL', async () => {
+        reduceIt('should reduce with COUNT_ALL', async () => {
             const store = client.store();
             const encoder = new TextEncoder();
             const prefix = 'reduce-count-';
@@ -373,7 +356,7 @@ describe.each(backends)('Exoware TS SDK on $name', (backend) => {
             expect(countValue!.value.value).toBe(3n);
         });
 
-        it('should reduce with SUM on a value field', async () => {
+        reduceIt('should reduce with SUM on a value field', async () => {
             const store = client.store();
             const encoder = new TextEncoder();
             const prefix = 'reduce-sum-';
