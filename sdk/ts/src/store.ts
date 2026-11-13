@@ -678,6 +678,13 @@ export interface SubscribeFilters {
     sinceSequenceNumber?: bigint;
 }
 
+/**
+ * Subscribe to log batches until the stream ends or the consumer stops iterating.
+ *
+ * A Connect server stream stays open when its consumer leaves a `for await` loop, so the call
+ * runs under a signal of its own that aborts when this generator finishes. The caller's signal,
+ * if any, aborts that signal too, and every other call option is passed through unchanged.
+ */
 async function* performSubscribe(
     client: Client,
     filters: SubscribeFilters,
@@ -692,8 +699,16 @@ async function* performSubscribe(
             ? { sinceSequenceNumber: prefixed.sinceSequenceNumber }
             : {}),
     });
+    const controller = new AbortController();
+    const callerSignal = options?.signal;
+    const abort = () => controller.abort(callerSignal?.reason);
+    if (callerSignal?.aborted) {
+        abort();
+    } else {
+        callerSignal?.addEventListener('abort', abort, { once: true });
+    }
     try {
-        const stream = client.stream.subscribe(req, options);
+        const stream = client.stream.subscribe(req, { ...options, signal: controller.signal });
         for await (const frame of stream) {
             const batch = toStoreBatch(frame, prefix);
             if (batch.entries.length === 0) {
@@ -703,6 +718,9 @@ async function* performSubscribe(
         }
     } catch (e) {
         mapConnectToHttpError(e, client.credential);
+    } finally {
+        callerSignal?.removeEventListener('abort', abort);
+        controller.abort();
     }
 }
 
