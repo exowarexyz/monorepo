@@ -23,7 +23,6 @@ exoware-sdk = { workspace = true }
 exoware-server = { workspace = true }
 parking_lot = { workspace = true }
 reqwest = { workspace = true }
-regex = { workspace = true }
 rlimit = { workspace = true }
 rocksdb = { workspace = true }
 tempfile = { workspace = true }

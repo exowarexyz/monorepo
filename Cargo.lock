@@ -2873,7 +2873,6 @@ dependencies = [
  "futures",
  "http",
  "parking_lot",
- "regex",
  "reqwest",
  "rlimit",
  "rocksdb",

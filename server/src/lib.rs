@@ -26,6 +26,7 @@
 mod connect;
 mod engine;
 pub mod ingest;
+mod prune;
 mod reduce;
 mod stream;
 mod validate;
@@ -54,6 +55,7 @@ pub use ingest::{
     service::{PutConfig, PutMiddleware, PutService},
     PutError, PutInput,
 };
+pub use prune::PruneSelection;
 pub use reduce::RangeError;
 pub use stream::{
     CompiledMatchers, CompiledSelector, InvalidFilter, StreamHub, StreamNotification,
