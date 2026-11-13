@@ -2789,12 +2789,14 @@ dependencies = [
  "buffa",
  "buffa-types",
  "bytes",
+ "chrono",
  "commonware-codec",
  "commonware-parallel",
  "connectrpc",
  "datafusion",
  "exoware-sdk",
  "futures",
+ "getrandom 0.3.4",
  "h2",
  "http",
  "http-body",
@@ -2807,6 +2809,7 @@ dependencies = [
  "thiserror",
  "tokio",
  "tower",
+ "wasm-bindgen",
  "zstd",
 ]
 

@@ -38,7 +38,9 @@ pub use http::{Request, Response};
 pub use http_body::Body;
 use std::task::{Context, Poll};
 
+#[cfg(not(target_arch = "wasm32"))]
 mod client;
+#[cfg(not(target_arch = "wasm32"))]
 pub use client::*;
 
 /// zstd level for bodies this registry compresses, which are mostly query and stream

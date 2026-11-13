@@ -13,25 +13,42 @@ documentation = "https://docs.rs/exoware-server"
 workspace = true
 
 [dependencies]
-axum = { workspace = true }
 bytes = { workspace = true }
 buffa = { workspace = true }
 buffa-types = { workspace = true }
-connectrpc = { workspace = true }
 datafusion = { version = "55.0.0", default-features = false, features = ["datetime_expressions", "string_expressions"] }
 futures = { workspace = true }
 http = { workspace = true }
 http-body = "1"
 http-body-util = { workspace = true }
-hyper = { workspace = true }
-hyper-util = { version = "0.1", features = ["server-auto", "service", "tokio"] }
 h2 = "0.4"
 tower = { workspace = true }
 zstd = { version = "0.13", features = ["experimental"] }
 regex = { workspace = true }
 thiserror = { workspace = true }
-tokio = { workspace = true, features = ["sync", "time", "net", "rt", "macros"] }
 exoware-sdk = { workspace = true }
+
+# The socket server and its transports. tokio's network features do not build for wasm32.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+axum = { workspace = true }
+connectrpc = { workspace = true }
+hyper = { workspace = true }
+hyper-util = { version = "0.1", features = ["server-auto", "service", "tokio"] }
+tokio = { workspace = true, features = ["sync", "time", "net", "rt", "macros"] }
+
+# The same crates without their socket transports, and tokio without its timers. Keep the
+# versions equal to the workspace entries.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+axum = { version = "0.8.1", default-features = false }
+connectrpc = { version = "0.9.0" }
+tokio = { workspace = true, features = ["sync", "rt"] }
+wasm-bindgen = "0.2"
+# DataFusion draws randomness through rand 0.9, and its getrandom needs the browser backend on
+# wasm32. From getrandom 0.3.4 on, the feature alone selects that backend.
+getrandom = { version = "0.3.4", features = ["wasm_js"] }
+# DataFusion stamps operator metrics with chrono, and chrono reads the browser clock on wasm32
+# only with this feature.
+chrono = { version = "0.4", default-features = false, features = ["wasmbind"] }
 
 [dev-dependencies]
 commonware-codec = { workspace = true }

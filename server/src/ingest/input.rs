@@ -1,5 +1,6 @@
 use super::{
     decode::{DecodeOutput, DecodeState, DecodeStep, WireBatch},
+    time::{timeout_at, Instant},
     Admission, ByteLease, DecodeBuffers, IngestEvent, IngestObserver, PutChunk, PutError,
     RequestLease,
 };
@@ -10,7 +11,6 @@ use futures::FutureExt;
 use http_body::Body;
 use http_body_util::BodyExt;
 use std::{fmt::Display, pin::Pin, sync::Arc, task::Poll, time::Duration};
-use tokio::time::{timeout_at, Instant};
 
 pub(super) const FRAME_WORK_BUDGET: usize = 64;
 const DRAIN_BYTE_BUDGET: usize = 64 * 1024;
@@ -174,13 +174,18 @@ impl DecodeExecutor for BlockingDecodeExecutor {
         state: DecodeState,
         buffers: DecodeBuffers,
     ) -> futures::future::BoxFuture<'static, Result<DecodeOutput, PutError>> {
-        Box::pin(async move {
+        #[cfg(not(target_arch = "wasm32"))]
+        return Box::pin(async move {
             tokio::task::spawn_blocking(move || state.run(buffers))
                 .await
                 .map_err(|error| {
                     ConnectError::internal(format!("ingest CPU worker failed: {error}")).into()
                 })
-        })
+        });
+
+        // wasm32 has no threads, so the decode step runs in place.
+        #[cfg(target_arch = "wasm32")]
+        Box::pin(std::future::ready(Ok(state.run(buffers))))
     }
 }
 

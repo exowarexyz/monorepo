@@ -198,13 +198,22 @@ where
 
     fn call(&mut self, request: Request<B>) -> Self::Future {
         if request.uri().path() != PUT_PATH {
+            // The Connect dispatcher reads the Rust standard clock for a request that carries a
+            // timeout header, and wasm32 has no such clock.
+            #[cfg(target_arch = "wasm32")]
+            let request = {
+                let mut request = request;
+                request.headers_mut().remove("connect-timeout-ms");
+                request.headers_mut().remove("grpc-timeout");
+                request
+            };
             let call = self.other.call(request);
             return Box::pin(async move { Ok(call.await?.map(Body::new)) });
         }
         let state = self.state.clone();
         let middleware = self.middleware.clone();
         Box::pin(async move {
-            let started = tokio::time::Instant::now();
+            let started = super::time::Instant::now();
             let observer = state.put_config.observer.clone();
             let response = put(state, middleware, request.map(Body::new)).await;
             if let Some(observer) = observer {
@@ -227,7 +236,7 @@ async fn put<I: Ingest>(
     let (mut parts, body) = request.into_parts();
     let headers = parts.headers.clone();
     let parsed_timeout = request_timeout(&parts, state.put_config.timeout);
-    let request_deadline = tokio::time::Instant::now()
+    let request_deadline = super::time::Instant::now()
         + parsed_timeout
             .as_ref()
             .copied()
@@ -348,7 +357,7 @@ async fn put<I: Ingest>(
     if rejection.is_none() {
         for middleware in &middleware {
             let result =
-                tokio::time::timeout_at(request_deadline, middleware.call(&mut parts)).await;
+                super::time::timeout_at(request_deadline, middleware.call(&mut parts)).await;
             match result {
                 Ok(Ok(())) => {}
                 Ok(Err(error)) => {
@@ -381,7 +390,7 @@ async fn put<I: Ingest>(
     }
     let mut result = match rejection {
         Some(error) => Err(error),
-        None => match tokio::time::timeout_at(request_deadline, state.ingest.put(&mut input)).await
+        None => match super::time::timeout_at(request_deadline, state.ingest.put(&mut input)).await
         {
             Ok(Ok(sequence)) if input.is_finished() => Ok(sequence),
             Ok(Ok(_)) => Err(ConnectError::internal(

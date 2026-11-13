@@ -3,6 +3,25 @@
 //!
 //! Use [`AppState`] with [`connect_stack`] for an all-in-one server, or the narrower
 //! state and service constructors when capabilities are served separately.
+//!
+//! ## wasm32
+//!
+//! The crate builds for `wasm32-unknown-unknown` so a backend can serve the same stack inside a
+//! browser page, called as a `tower` service with requests held in memory. That target has no
+//! sockets, no threads and no Rust standard clock, and tokio drives no timers there. On wasm32:
+//!
+//! - `ingest::transport::serve` is absent.
+//! - Put deadlines are `ingest::Instant` readings of the page's monotonic clock,
+//!   `performance.now`. The crate arms no timer, so it notices a deadline only when the request
+//!   is polled. A wait during a Put is not cut short at its deadline and lasts until something
+//!   wakes it.
+//! - The Put decode step runs in place.
+//! - [`connect_stack`] and [`ingest_service`] remove the `connect-timeout-ms` and
+//!   `grpc-timeout` headers from requests other than Put, because the Connect dispatcher reads
+//!   the standard clock for them. The narrower service constructors pass requests to the
+//!   dispatcher unchanged, so their caller must not send those headers.
+//! - A panic ends the WebAssembly instance, even inside a Reduce kernel. Native builds report a
+//!   Reduce kernel panic as an error.
 
 mod connect;
 mod engine;
