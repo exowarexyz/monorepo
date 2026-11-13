@@ -1240,8 +1240,9 @@ describe('Reduce on the IndexedDB store alone', () => {
 
             // The version may end a sentence. A digit after it, or a dot and a digit, would make
             // it the beginning of a longer version.
-            const named = new RegExp('Unicode ' + UNICODE_VERSION.replace(/\./g, '\\.') + '(?![0-9]|\\.[0-9])');
-            expect(readFileSync(path.join(__dirname, '..', 'README.md'), 'utf8')).toMatch(named);
+            const readme = readFileSync(path.join(__dirname, '..', 'README.md'), 'utf8');
+            const rests = readme.split('Unicode ' + UNICODE_VERSION).slice(1);
+            expect(rests.some((rest) => !/^(?:[0-9]|\.[0-9])/.test(rest))).toBe(true);
         });
 
         test('gives the lowercase forms of the standard library for every scalar value alone and around a sigma', () => {
