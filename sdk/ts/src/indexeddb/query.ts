@@ -6,10 +6,13 @@
  * no pending request. A streamed answer therefore cannot keep reading while its consumer is slow.
  * Each query, a Get included, reads its whole answer into memory and charges every row it holds
  * to a byte budget.
+ *
+ * A Range or a GetMany whose call is canceled while it reads ends its transaction at the next row
+ * or key.
  */
 
 import type { MessageInitShape } from '@bufbuild/protobuf';
-import { Code, ConnectError } from '@connectrpc/connect';
+import { Code, ConnectError, type HandlerContext } from '@connectrpc/connect';
 import {
     TraversalMode,
     type DetailSchema,
@@ -20,7 +23,7 @@ import {
     type RangeFrameSchema,
     type RangeRequest,
 } from '../gen/ts/store/v1/query_pb.js';
-import { checkKeyLength, consistencyNotReady, fieldError } from './errors.js';
+import { canceled, checkKeyLength, consistencyNotReady, fieldError } from './errors.js';
 import {
     KV,
     META,
@@ -166,8 +169,10 @@ type FoundEntry = { key: Uint8Array; value?: Uint8Array };
 export function getManyHandler(db: IDBDatabase, maxQueryBytes: number) {
     return async function* (
         request: GetManyRequest,
+        context: HandlerContext,
     ): AsyncGenerator<MessageInitShape<typeof GetManyFrameSchema>> {
         const { keys } = request;
+        const { signal } = context;
         if (keys.length === 0) {
             throw fieldError(
                 DOMAIN,
@@ -191,6 +196,7 @@ export function getManyHandler(db: IDBDatabase, maxQueryBytes: number) {
             // A value is charged before the next one is read, so the answer exceeds the budget by
             // at most one value when the query fails.
             for (const key of keys) {
+                if (signal.aborted) throw canceled(signal);
                 const stored = await settle(kv.get(exactBuffer(key)));
                 const value = stored === undefined ? undefined : storedBytes(stored);
                 budget.charge(key.byteLength + (value?.byteLength ?? 0) + ROW_OVERHEAD_BYTES);
@@ -206,6 +212,7 @@ export function getManyHandler(db: IDBDatabase, maxQueryBytes: number) {
 export function rangeHandler(db: IDBDatabase, maxQueryBytes: number) {
     return async function* (
         request: RangeRequest,
+        context: HandlerContext,
     ): AsyncGenerator<MessageInitShape<typeof RangeFrameSchema>> {
         checkKeyLength(DOMAIN, 'start', request.start);
         checkKeyLength(DOMAIN, 'end', request.end);
@@ -222,6 +229,7 @@ export function rangeHandler(db: IDBDatabase, maxQueryBytes: number) {
         }
         const limit = request.limit ?? Infinity;
         const keys = limit === 0 ? undefined : keyRange(request.start, request.end);
+        const { signal } = context;
 
         const { sequenceNumber, result } = await snapshot(db, request.minSequenceNumber, async (kv) => {
             const rows: { key: Uint8Array; value: Uint8Array }[] = [];
@@ -229,6 +237,7 @@ export function rangeHandler(db: IDBDatabase, maxQueryBytes: number) {
             const budget = new QueryBudget(maxQueryBytes, 'range result');
             const direction = mode === TraversalMode.REVERSE ? 'prev' : 'next';
             await scanRows(kv, keys, direction, (key, value) => {
+                if (signal.aborted) throw canceled(signal);
                 budget.charge(key.byteLength + value.byteLength + ROW_OVERHEAD_BYTES);
                 rows.push({ key, value });
                 return rows.length < limit;

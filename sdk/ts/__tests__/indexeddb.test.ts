@@ -242,6 +242,23 @@ describe('IndexedDB store', () => {
         return { spy, calls };
     };
 
+    /** Makes the nth call of an IDBObjectStore method act as `fault` says. */
+    function onCall(
+        method: 'put' | 'delete' | 'get' | 'openCursor' | 'openKeyCursor',
+        nth: number,
+        fault: (store: IDBObjectStore, placed: () => IDBRequest) => IDBRequest,
+    ) {
+        const original = IDBObjectStore.prototype[method] as (...args: unknown[]) => IDBRequest;
+        let calls = 0;
+        return jest.spyOn(IDBObjectStore.prototype, method).mockImplementation(function (
+            this: IDBObjectStore,
+            ...args: unknown[]
+        ) {
+            const place = () => original.apply(this, args);
+            return ++calls === nth ? fault(this, place) : place();
+        } as never);
+    }
+
     afterEach(async () => {
         jest.restoreAllMocks();
         mockEncoding.failing = undefined;
@@ -594,22 +611,6 @@ describe('IndexedDB store', () => {
             return { ...opened, before: await contentOf(opened.name) };
         }
 
-        /** Makes the nth call of an IDBObjectStore method act as `fault` says. */
-        function onCall<M extends 'put' | 'delete'>(
-            method: M,
-            nth: number,
-            fault: (store: IDBObjectStore, placed: () => IDBRequest) => IDBRequest,
-        ) {
-            const original = IDBObjectStore.prototype[method] as (...args: unknown[]) => IDBRequest;
-            let calls = 0;
-            return jest.spyOn(IDBObjectStore.prototype, method).mockImplementation(function (
-                this: IDBObjectStore,
-                ...args: unknown[]
-            ) {
-                const place = () => original.apply(this, args);
-                return ++calls === nth ? fault(this, place) : place();
-            } as never);
-        }
         const throwing = () => {
             throw new Error('cannot place the request');
         };
@@ -1349,6 +1350,79 @@ describe('IndexedDB store', () => {
             expect((await failure(call)).code).toBe(Code.Canceled);
             expect((await delivered).value.sequenceNumber).toBe(1n);
             expect(await sequenceOf(client)).toBe(1n);
+        });
+
+        const dropUnder = (prefix: string): MessageInitShape<typeof PolicySchema> => ({
+            keys: { selector: { prefix: utf8(prefix), payloadRegex: '(?s-u).*' } },
+            retain: { kind: { case: 'dropAll', value: {} } },
+        });
+
+        /**
+         * A store of three rows under a/, and a signal that aborts during the nth call of `method`
+         * on an object store. `calls` spies on that method, `steps` on the steps of cursors and
+         * `aborts` on the transactions that the store aborts.
+         */
+        async function canceledDuring(method: 'get' | 'openCursor' | 'openKeyCursor', nth: number) {
+            const { name, client } = await openStore();
+            await put(client, [1, 2, 3].map((i): Row => [utf8('a/' + i), utf8('v')]));
+            const before = await contentOf(name);
+            const controller = new AbortController();
+            const calls = onCall(method, nth, (_, place) => {
+                abortCall(controller);
+                return place();
+            });
+            const steps = jest.spyOn(IDBCursor.prototype, 'continue');
+            const aborts = jest.spyOn(IDBTransaction.prototype, 'abort');
+            return { name, client, before, signal: controller.signal, calls, steps, aborts };
+        }
+
+        it('ends the transaction of a Range at the next row when its call is canceled', async () => {
+            // The call is canceled as the scan opens its cursor, so the scan stops at the first row
+            // and never steps the cursor.
+            const { client, signal, steps, aborts } = await canceledDuring('openCursor', 1);
+            expect((await failure(client.query.range({ batchSize: 10 }, { signal }))).code).toBe(Code.Canceled);
+            await until(() => aborts.mock.calls.length > 0);
+            expect(aborts).toHaveBeenCalledTimes(1);
+            expect(steps).not.toHaveBeenCalled();
+        });
+
+        it('ends the transaction of a GetMany at the next key when its call is canceled', async () => {
+            // Call 1 reads the sequence number and call 2 the first key. The call is canceled
+            // during call 2, so no other key is read.
+            const { client, signal, calls, aborts } = await canceledDuring('get', 2);
+            const keys = [1, 2, 3].map((i) => utf8('a/' + i));
+            expect((await failure(client.query.getMany({ keys, batchSize: 10 }, { signal }))).code).toBe(Code.Canceled);
+            await until(() => aborts.mock.calls.length > 0);
+            expect(aborts).toHaveBeenCalledTimes(1);
+            expect(calls).toHaveBeenCalledTimes(2);
+        });
+
+        it('deletes nothing for a Prune that is canceled while it selects its keys', async () => {
+            // The call is canceled as the key cursor opens, so the scan stops at the first key.
+            const { name, client, before, signal, steps, aborts } = await canceledDuring('openKeyCursor', 1);
+            const deletes = jest.spyOn(IDBObjectStore.prototype, 'delete');
+            const call = client.prune.prune({ policies: [dropUnder('a/')] }, { signal });
+            expect((await failure(call)).code).toBe(Code.Canceled);
+            await until(() => aborts.mock.calls.length > 0);
+            expect(aborts).toHaveBeenCalledTimes(1);
+            expect(steps).not.toHaveBeenCalled();
+            expect(deletes).not.toHaveBeenCalled();
+            jest.restoreAllMocks();
+            expect(await contentOf(name)).toEqual(before);
+        });
+
+        it('deletes nothing for a Prune that is canceled after its last key and before its first delete', async () => {
+            // The second policy has no key. The call is canceled as the scan of that policy
+            // starts, when the first policy has selected every row.
+            const { name, client, before, signal, aborts } = await canceledDuring('openKeyCursor', 2);
+            const deletes = jest.spyOn(IDBObjectStore.prototype, 'delete');
+            const call = client.prune.prune({ policies: [dropUnder('a/'), dropUnder('b/')] }, { signal });
+            expect((await failure(call)).code).toBe(Code.Canceled);
+            await until(() => aborts.mock.calls.length > 0);
+            expect(aborts).toHaveBeenCalledTimes(1);
+            expect(deletes).not.toHaveBeenCalled();
+            jest.restoreAllMocks();
+            expect(await contentOf(name)).toEqual(before);
         });
     });
 

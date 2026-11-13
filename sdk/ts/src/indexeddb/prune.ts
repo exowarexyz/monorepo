@@ -5,6 +5,10 @@
  * The transaction first selects the keys to delete for every policy and only then places deletes.
  * The keys it holds while it selects and the matcher of the policy it scans are charged to the
  * query budget, so a selection that is too large fails before anything is deleted.
+ *
+ * A call that is canceled while the keys are selected ends the transaction at the next key and
+ * deletes nothing. A cancellation that arrives once the first delete is placed does not stop the
+ * Prune.
  */
 
 import type { MessageInitShape } from '@bufbuild/protobuf';
@@ -235,12 +239,13 @@ function capturerOf(regex: Regex, names: readonly string[]): RegexCapturer {
  * The matcher is charged to `budget` before it is built and released once the keys are selected,
  * so the budget holds one matcher at a time. Every key that joins a group is charged with its
  * order value, and every new group is charged for its identity. These charges stay until the
- * request ends.
+ * request ends. The scan fails at the next key once `signal` has aborted.
  */
 async function select(
     kv: IDBObjectStore,
     policy: CompiledPolicy,
     budget: QueryBudget,
+    signal: AbortSignal,
 ): Promise<Uint8Array[]> {
     const { selector, groupBy, orderBy, retain } = policy;
     const names = orderBy === undefined ? groupBy : [...groupBy, orderBy.captureGroup];
@@ -256,6 +261,7 @@ async function select(
 
     const groups = new Map<string, Candidate[]>();
     await walk(kv.openKeyCursor(keys), (cursor) => {
+        if (signal.aborted) throw canceled(signal);
         const key = rowKey(cursor.key);
         const payload = selector.payload(key);
         if (payload === undefined) return true;
@@ -309,12 +315,17 @@ export function pruneHandler(db: IDBDatabase, maxQueryBytes: number) {
         context: HandlerContext,
     ): Promise<MessageInitShape<typeof PruneResponseSchema>> => {
         const policies = compilePolicies(request);
-        if (context.signal.aborted) throw canceled(context.signal);
+        const { signal } = context;
+        if (signal.aborted) throw canceled(signal);
         await write(db, PRUNE_SCOPE, async (tx) => {
             const kv = tx.objectStore(KV);
             const budget = new QueryBudget(maxQueryBytes, 'prune selection');
             const selections: Uint8Array[][] = [];
-            for (const policy of policies) selections.push(await select(kv, policy, budget));
+            for (const policy of policies) selections.push(await select(kv, policy, budget, signal));
+
+            // The last point where a cancellation stops the Prune. The scan of a policy without
+            // keys visits none and so cannot see one.
+            if (signal.aborted) throw canceled(signal);
             await deleteKeys(kv, selections);
         });
         return {};
