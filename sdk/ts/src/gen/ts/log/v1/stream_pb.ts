@@ -47,11 +47,14 @@ export type SubscribeRequest = Message<"log.stream.v1.SubscribeRequest"> & {
    * Set to N -> the server first replays every retained batch with
    * `sequence_number >= N` in ascending order, then transitions seamlessly
    * into the live stream. No batch below N is delivered, even when N is past
-   * the latest published batch. In that case the stream stays silent until
-   * batch N is published. If `N` references a sequence number that has been
+   * the latest published batch. In that case no batch arrives until batch N
+   * is published. If `N` references a sequence number that has been
    * evicted from the log, the server returns OUT_OF_RANGE with an
    * `ErrorInfo { reason: "BATCH_EVICTED", metadata: { "oldest_retained": ... } }`
    * detail so callers can decide how to proceed.
+   *
+   * A client resuming after a disconnect sets this to one past the highest
+   * `sequence_number` it received, counting empty frames.
    *
    * @generated from field: optional uint64 since_sequence_number = 3;
    */
@@ -89,6 +92,13 @@ export const GetRequestSchema: GenMessage<GetRequest> = /*@__PURE__*/
  * `Put` batch that matched the subscriber's filter. Live and replayed frames
  * are indistinguishable by content; only the observed `sequence_number`
  * (strictly monotonically increasing either way) differs.
+ *
+ * The first frame of every subscription is a checkpoint with no `entries`.
+ * Its `sequence_number` is the latest published batch when the subscription
+ * started live, or N - 1 for a positive `since_sequence_number` N, even
+ * when N is past the latest published batch. It can be zero. Every later
+ * frame has a higher `sequence_number`. A frame with no `entries` delivers
+ * nothing but still advances the resume cursor.
  *
  * @generated from message log.stream.v1.SubscribeResponse
  */
@@ -142,6 +152,8 @@ export const GetResponseSchema: GenMessage<GetResponse> = /*@__PURE__*/
  * `Subscribe` delivers a `SubscribeResponse` per atomic `Put` batch whose
  * entries match any of the subscriber's `selectors`. Optional
  * `since_sequence_number` replays retained batches before transitioning live.
+ * Every subscription opens with an empty checkpoint frame that tells the
+ * client where to resume.
  *
  * `Get` returns the complete batch at a given sequence number (no filter
  * applied server-side). `SubscribeResponse` and `GetResponse` carry the

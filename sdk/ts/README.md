@@ -105,6 +105,37 @@ To require a higher minimum for one reader, use
 `withMinSequenceNumber(sequence)`. The derived reader shares observations
 with its parent but leaves the parent's configured floor unchanged.
 
+## Subscriptions
+
+`subscribe` streams each matching batch in sequence order. Set
+`sinceSequenceNumber` to replay retained batches from that sequence first.
+Without it, the subscription starts after the latest batch.
+
+```ts
+const selectors = [{ prefix: encode('orders/'), payloadRegex: '(?s-u).*' }];
+for await (const batch of store.subscribe({ selectors })) {
+    console.log(batch.sequenceNumber, batch.entries.length);
+}
+```
+
+A subscription resumes on its own when the stream ends, the connection drops, or
+the server is restarting. It reopens with the same filters from the next
+sequence, so no batch is skipped or delivered twice. Errors that a retry cannot
+fix are thrown instead. These include rejected credentials, invalid filters, and
+an `OUT_OF_RANGE` error with reason `BATCH_EVICTED` when the requested batches
+are no longer retained. A subscription without `sinceSequenceNumber` that fails
+before its first response also throws, because it has no position to resume
+from.
+
+`ClientOptions.subscriptionRetry` configures this. An outage lasts from a
+disconnect until the next response, and `outageBudgetMs` (60 seconds by
+default, `Infinity` for no limit) bounds each outage. After that the last
+error is thrown. Reconnects back off from `initialBackoffMs` up to
+`maxBackoffMs` until a new batch arrives. An idle subscription has no time
+limit. Set `enabled` to `false` to make a single attempt that ends with its
+stream. Abort the call option `signal` or stop iterating to cancel the
+subscription.
+
 ## Request options
 
 The SDK defaults to uncompressed protobuf over Connect. To use JSON for
@@ -114,8 +145,8 @@ services other than Put, set `ClientOptions.useBinaryFormat` to `false`.
 When creating a custom ingest client with `createTransport`, leave
 `useBinaryFormat` enabled.
 
-`ClientOptions.retry` controls retries, and setting `maxAttempts` to `1`
-disables them. Under the [admission retry contract](../../proto/README.md#admission-retries),
+`ClientOptions.retry` controls retries of other RPCs, and setting `maxAttempts`
+to `1` disables them. Under the [admission retry contract](../../proto/README.md#admission-retries),
 Put retries are limited to server rejections that confirm the batch was never
 admitted. Generic errors, timeouts, and lost responses are not automatically
 retried. Direct `client.ingest.put(request, options)` calls accept a `timeoutMs`
