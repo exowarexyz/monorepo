@@ -2,6 +2,7 @@
 members = [
     "server",
     "conformance",
+    "indexeddb/rs",
     "sdk/rs",
     "examples/simulator",
     "qmdb/rs",
