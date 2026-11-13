@@ -178,9 +178,9 @@ use bytes::Bytes;
 pub use range_traversal::{
     parse_range_traversal_direction, RangeTraversalDirection, RangeTraversalModeError,
 };
-pub use transport::{
-    connect_compression_registry, PreferZstd, PreferZstdHttpClient, PreferZstdLayer,
-};
+#[cfg(not(target_arch = "wasm32"))]
+pub use transport::PreferZstdHttpClient;
+pub use transport::{connect_compression_registry, PreferZstd, PreferZstdLayer};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RangeReduceOp {

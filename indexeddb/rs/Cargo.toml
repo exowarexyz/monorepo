@@ -1,0 +1,54 @@
+[package]
+name = "exoware-indexeddb"
+version.workspace = true
+edition.workspace = true
+publish = false
+license.workspace = true
+description = "Serve the Exoware Store from IndexedDB in a browser page."
+readme = "README.md"
+homepage.workspace = true
+repository = "https://github.com/exowarexyz/monorepo/tree/main/indexeddb/rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+buffa = { workspace = true }
+bytes = { workspace = true }
+exoware-sdk = { workspace = true }
+exoware-server = { workspace = true }
+futures = { workspace = true }
+js-sys = "0.3"
+# The store handle is Send and Sync because this version of wasm-bindgen implements both for
+# JS values on builds without the atomics target feature.
+wasm-bindgen = "0.2.127"
+wasm-bindgen-futures = "0.4"
+web-sys = { version = "0.3", features = [
+    "BroadcastChannel",
+    "DomException",
+    "DomStringList",
+    "Event",
+    "EventTarget",
+    "IdbCursor",
+    "IdbCursorDirection",
+    "IdbCursorWithValue",
+    "IdbDatabase",
+    "IdbFactory",
+    "IdbKeyRange",
+    "IdbObjectStore",
+    "IdbOpenDbRequest",
+    "IdbRequest",
+    "IdbTransaction",
+    "IdbVersionChangeEvent",
+    "MessageEvent",
+] }
+
+[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
+commonware-codec = { workspace = true }
+exoware-conformance = { path = "../../conformance" }
+http = { workspace = true }
+http-body = "1"
+http-body-util = { workspace = true }
+tower = { workspace = true }
+wasm-bindgen-test = "0.3"
+zstd = "0.13"

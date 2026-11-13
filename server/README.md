@@ -48,6 +48,13 @@ by the [stream coordination contract](src/stream.rs). `AppState` shares a local
 a remote notification path that advances the query worker's local
 `StreamNotifier` only after that worker can serve the announced batches.
 
+## Serve inside a browser page
+
+The crate also builds for `wasm32-unknown-unknown`. A backend that runs in a
+page, such as [exoware-indexeddb](../indexeddb/rs/README.md), serves requests
+held in memory through the `tower` service that `connect_stack` returns. The
+crate documentation lists what differs on that target.
+
 ## Implement writes and reads
 
 `Ingest::put` receives a borrowed `&mut PutInput`. Consume its batches into

@@ -1,21 +1,31 @@
-use axum::{body::Body, serve::Listener};
-use http::{Request, Response, Version};
+use super::time::Instant;
+use axum::body::Body;
+#[cfg(not(target_arch = "wasm32"))]
+use axum::serve::Listener;
+#[cfg(not(target_arch = "wasm32"))]
+use http::Request;
+use http::{Response, Version};
 use http_body::Body as _;
+#[cfg(not(target_arch = "wasm32"))]
 use hyper_util::{rt::TokioIo, server::conn::auto::Builder, service::TowerToHyperService};
+#[cfg(not(target_arch = "wasm32"))]
+use std::{convert::Infallible, future::Future, io};
 use std::{
-    convert::Infallible,
-    future::Future,
-    io,
     pin::Pin,
     task::{Context, Poll},
 };
-use tokio::{sync::watch, task::JoinSet, time::Instant};
+use tokio::sync::watch;
+#[cfg(not(target_arch = "wasm32"))]
+use tokio::task::JoinSet;
+#[cfg(not(target_arch = "wasm32"))]
 use tower::{service_fn, Service, ServiceExt};
 
+#[cfg(not(target_arch = "wasm32"))]
 tokio::task_local! {
     static STREAM_DEADLINE: watch::Sender<Option<Instant>>;
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 #[derive(Clone, Copy)]
 struct StreamExecutor;
 
@@ -51,11 +61,13 @@ impl http_body::Body for UploadBody {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 struct AdmissionBody {
     inner: Body,
     tail: Option<bytes::Bytes>,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl http_body::Body for AdmissionBody {
     type Data = bytes::Bytes;
     type Error = axum::Error;
@@ -86,6 +98,7 @@ impl http_body::Body for AdmissionBody {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl<F> hyper::rt::Executor<F> for StreamExecutor
 where
     F: Future + Send + 'static,
@@ -129,6 +142,7 @@ pub(super) fn admission_rejection_response(
     generation: Option<u64>,
 ) -> Response<Body> {
     let deadline = rejection_deadline(deadline);
+    #[cfg(not(target_arch = "wasm32"))]
     if version == Version::HTTP_2
         && STREAM_DEADLINE
             .try_with(|sender| sender.send_replace(Some(deadline)))
@@ -212,6 +226,7 @@ pub struct ConnectionControl {
 }
 
 impl ConnectionControl {
+    #[cfg(not(target_arch = "wasm32"))]
     fn new() -> Self {
         let (state, _) = watch::channel(State::default());
         Self { state }
@@ -277,6 +292,7 @@ impl ConnectionControl {
         })
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     async fn cancelled(&self) {
         let mut receiver = self.state.subscribe();
         loop {
@@ -299,6 +315,7 @@ impl ConnectionControl {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 /// Serves requests with connection control in their extensions and drains connections on shutdown.
 pub async fn serve<L, S, B, F>(mut listener: L, service: S, shutdown: F) -> io::Result<()>
 where

@@ -1,6 +1,6 @@
 # Exoware Store on IndexedDB: database layout (version 1)
 
-This document defines how an Exoware Store is laid out in an IndexedDB database. Every implementation that opens such a database MUST follow it. The TypeScript store in sdk/ts/src/indexeddb (published as @exowarexyz/sdk/indexeddb) is one such implementation. An implementation that follows this layout can open a database written by any other, in the same page or in another page of the same origin, at the same time.
+This document defines how an Exoware Store is laid out in an IndexedDB database. Every implementation that opens such a database MUST follow it. The TypeScript store in sdk/ts/src/indexeddb (published as @exowarexyz/sdk/indexeddb) is one such implementation. The Rust engine in indexeddb/rs (the crate exoware-indexeddb) is another. An implementation that follows this layout can open a database written by any other, in the same page or in another page of the same origin, at the same time.
 
 The words MUST, MUST NOT, SHOULD and MAY are used as in RFC 2119. Browser behavior described below is that of Chrome 157 unless another browser is named.
 
@@ -163,7 +163,7 @@ Inside one transaction over kv, delete the selected rows. Prune does not read or
 
 ### 5.5 Reading the log
 
-Read log[be64(n)] and meta.sequence in one transaction. A present row is batch n. An absent row with n greater than S was never written. An absent row with n at most S (including n = 0) was evicted, and the lowest key of log read in the same transaction is the oldest retained batch.
+Read log[be64(n)] and meta.sequence in one transaction. A present row is batch n. An absent row with n greater than S was never written. An absent row with n at most S (including n = 0) was evicted. The lowest key of log is the oldest retained batch. An implementation reads it in the same transaction or in one of its own, and in the second case it can already reflect a later eviction.
 
 ## 6. Notification of writes
 
@@ -180,6 +180,8 @@ IndexedDB has no change events. Writers announce committed batches on a Broadcas
 
 - An implementation sets its own limits on the largest value, the entries of a batch and the encoded entries of a batch, up to the limits of sdk/rs/src/limits.rs (254 byte keys, 32 MiB values, 2,000,000 entries and 256 MiB of encoded entries per batch). A reader MUST be able to read any row that those limits allow, with one exception. A reader MAY refuse a log value that holds more than 1,000,000 fields it does not know, counted over the value and its entries together. A writer MUST NOT store a value longer than 32 MiB, a batch of more than 2,000,000 entries, or a log value longer than 268,435,467 bytes, which is 256 MiB of encoded entries and 11 bytes for the sequence number field in its shortest encoding. A reader MAY refuse a row beyond these limits and MAY accept it.
 - The TypeScript store defaults to the limits of sdk/rs/src/limits.rs except for the encoded entries of a batch (the sum that put_encoded_len in sdk/rs/src/limits.rs computes), where its default is 64 MiB. Its limits on a value, on the entries of a batch and on the encoded entries of a batch can be lowered and cannot be set above those of sdk/rs/src/limits.rs. A Put writes its payload twice in one transaction (kv rows and the log row), and Chrome fails a transaction holding about 500 MiB of values with DataError "Failed to write blobs (InvalidBlob)" while 400 MiB commits.
+- The Rust engine defaults to the limits of sdk/rs/src/limits.rs except for the encoded entries of a batch, where its default is 64 MiB (Config::max_batch_bytes). That limit can be lowered and cannot be set above 256 MiB. Its limits on a value and on the entries of a batch are fixed, and it keeps them whatever the request stack in front of it allows.
 - A query reads all of its rows inside one transaction (section 5.2), so the TypeScript store holds the answer of a Get, GetMany or Range in memory, by default at most 64 MiB. It counts key bytes plus value bytes plus 64 bytes per row, and it bounds the keys that one Prune selects before it deletes by the same limit.
+- The Rust engine holds the answer of a Get, GetMany or Range in memory in the same way, by default at most 64 MiB (Config::max_query_bytes), and counts key bytes plus value bytes plus 64 bytes per row. The same limit bounds the rows that one Reduce reads, and for a Prune it bounds the keys to delete together with what the selection of a policy holds while that policy selects.
 - How an implementation counts and bounds the memory of a large query, schedules subscriptions, or matches selectors is not part of the layout.
 - Deleting a store is indexedDB.deleteDatabase(name).

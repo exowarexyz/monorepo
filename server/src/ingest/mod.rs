@@ -6,6 +6,7 @@ mod observe;
 pub mod parser;
 mod reception;
 pub mod service;
+mod time;
 pub mod transport;
 mod zstd;
 use crate::engine::IngestError;
@@ -20,6 +21,8 @@ pub use input::{
 pub use observe::{IngestEvent, IngestObserver};
 pub use reception::maximum_reception_bytes;
 pub use service::{PutConfig, PutMiddleware, PutService};
+#[cfg(target_arch = "wasm32")]
+pub use time::Instant;
 
 #[derive(Clone, Debug, thiserror::Error)]
 pub enum PutError {
