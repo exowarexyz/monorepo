@@ -2665,6 +2665,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "exoware-conformance"
+version = "2026.9.0"
+dependencies = [
+ "buffa",
+ "bytes",
+ "commonware-codec",
+ "exoware-sdk",
+ "exoware-server",
+ "futures",
+ "http",
+ "http-body",
+ "http-body-util",
+ "tokio",
+ "tower",
+]
+
+[[package]]
 name = "exoware-integration"
 version = "2026.9.0"
 dependencies = [
@@ -2868,6 +2885,7 @@ dependencies = [
  "commonware-allocator",
  "commonware-codec",
  "connectrpc",
+ "exoware-conformance",
  "exoware-sdk",
  "exoware-server",
  "futures",

@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "server",
+    "conformance",
     "sdk/rs",
     "examples/simulator",
     "qmdb/rs",

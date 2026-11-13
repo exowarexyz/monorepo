@@ -34,6 +34,7 @@ tower-http = { workspace = true }
 
 [dev-dependencies]
 connectrpc = { workspace = true }
+exoware-conformance = { path = "../../conformance" }
 futures = { workspace = true }
 http = { workspace = true }
 

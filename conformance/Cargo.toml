@@ -1,0 +1,27 @@
+[package]
+name = "exoware-conformance"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "Conformance cases every Exoware Store backend must pass."
+
+[lints]
+workspace = true
+
+[dependencies]
+buffa = { workspace = true }
+bytes = { workspace = true }
+commonware-codec = { workspace = true }
+exoware-sdk = { workspace = true }
+exoware-server = { workspace = true }
+futures = { workspace = true }
+http = { workspace = true }
+http-body = "1"
+http-body-util = { workspace = true }
+tower = { workspace = true }
+
+# A Put deadline is a tokio instant on native targets and an `exoware_server::ingest::Instant`
+# on wasm32.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+tokio = { workspace = true, features = ["time"] }
