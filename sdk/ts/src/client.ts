@@ -1,4 +1,11 @@
-import { createClient, type Client as ConnectClient, type Interceptor, Code, ConnectError } from '@connectrpc/connect';
+import {
+    createClient,
+    type Client as ConnectClient,
+    type Interceptor,
+    type Transport,
+    Code,
+    ConnectError,
+} from '@connectrpc/connect';
 import { createConnectTransport } from '@connectrpc/connect-web';
 import { CookieJar, fetchWithCookieJar } from './cookies.js';
 import { environmentApiKey, resolveCredential, type Credential } from './credential.js';
@@ -266,20 +273,42 @@ export class Client {
     public readonly query: ConnectClient<typeof QueryService>;
     public readonly retention: ConnectClient<typeof RetentionService>;
     public readonly stream: ConnectClient<typeof StreamService>;
+    /**
+     * Retry limits of the transport that the client builds from a base URL. A client given a
+     * `Transport` does not apply them.
+     */
     public readonly retryConfig: RetryConfig;
     public readonly putOptions: Readonly<Required<PutBatchOptions>>;
     /** Whether this client sends a credential, which is what makes a 401 explicable. */
     public readonly credential: Credential;
 
-    constructor(baseUrl: string, tokenOrOptions?: string | ClientOptions) {
+    /**
+     * Connect to a store at a base URL, or through a Connect `Transport`.
+     *
+     * Given a base URL, the client builds its transports from `tokenOrOptions`. Given a
+     * `Transport`, every service calls through it, `baseUrl` is empty and `credential` is
+     * `'absent'`. Of the options only `putLimits` applies. Whoever created the transport owns
+     * authentication, retries and the wire format, so the client does not apply `token`, `retry`
+     * or `useBinaryFormat` and does not read the API key environment variable.
+     */
+    constructor(baseUrlOrTransport: string | Transport, tokenOrOptions?: string | ClientOptions) {
         const opts = normalizeClientOptions(tokenOrOptions);
-        this.baseUrl = baseUrl.replace(/\/$/, '');
         this.retryConfig = opts.retry ?? DEFAULT_RETRY_CONFIG;
         this.putOptions = Object.freeze(normalizePutOptions(opts.putLimits));
-        const { create, credential } = transportFactory(opts);
-        const transport = create(this.baseUrl, opts.useBinaryFormat);
-        this.credential = credential;
-        this.ingest = createClient(IngestService, create(this.baseUrl, true));
+        let transport: Transport;
+        let ingestTransport: Transport;
+        if (typeof baseUrlOrTransport === 'string') {
+            this.baseUrl = baseUrlOrTransport.replace(/\/$/, '');
+            const { create, credential } = transportFactory(opts);
+            transport = create(this.baseUrl, opts.useBinaryFormat);
+            ingestTransport = create(this.baseUrl, true);
+            this.credential = credential;
+        } else {
+            this.baseUrl = '';
+            transport = ingestTransport = baseUrlOrTransport;
+            this.credential = 'absent';
+        }
+        this.ingest = createClient(IngestService, ingestTransport);
         this.prune = createClient(PruneService, transport);
         this.query = createClient(QueryService, transport);
         this.retention = createClient(RetentionService, transport);
