@@ -1,9 +1,5 @@
 import * as fs from 'fs';
-import * as path from 'path';
-import * as os from 'os';
-
-const tempDir = path.join(os.tmpdir(), 'exoware-ts-sdk-tests');
-const configFile = path.join(tempDir, 'config.json');
+import { sharedConfigFile as configFile, sharedTempDir as tempDir } from './__tests__/support/simulator';
 
 const teardown = async () => {
     if (fs.existsSync(configFile)) {
