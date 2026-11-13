@@ -249,7 +249,9 @@ The store follows the Store API with these differences from a server:
   applies the retention rule in the same transaction, and resolves after
   IndexedDB has reported the commit as durable. A Prune is one transaction as
   well. A long query delays writers in every page that has the database open,
-  and a long write delays readers.
+  and a long write delays readers. Aborting a call ends the transaction of a
+  Range or Reduce at the next row and of a GetMany at the next key, and a Prune
+  that is aborted before it places its first delete deletes nothing.
 
 `openIndexedDbStore(name, options)` takes the limits `maxPutEntries`,
 `maxValueLen`, `maxRequestBytes` and `maxQueryBytes`.
