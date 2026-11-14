@@ -6,16 +6,18 @@
 //! `LOAD_DIR=<empty dir> cargo run --release -p exoware-simulator --example store_load`.
 //!
 //! `LOAD_MODE=small` (the default) issues one Put at a time, shaped like a chain indexer
-//! following empty blocks: per block a few SQL and QMDB rows, a certificate, and a tiny
-//! publication barrier, each as its own Put. `LOAD_MODE=mixed` adds a 14,000-row, 1.26 MB
-//! Put per block and issues blocks from `LOAD_WRITERS` tasks (default 4) at once.
+//! following empty blocks. Each block is a few SQL and QMDB rows, a certificate, and a tiny
+//! publication barrier, each as its own Put. `LOAD_MODE=mixed` adds a Put of `LOAD_BLOCK_ROWS`
+//! 90-byte rows per block (default 14,000, which is 1.26 MB) and issues blocks from
+//! `LOAD_WRITERS` tasks (default 4) at once.
 //! `LOAD_COMMITS` is the number of Puts (default 100,000), `LOAD_WINDOW` the number of
 //! Puts per output row (default 1,000), and `LOAD_MAX_GIB` the on-disk size at which the run
 //! aborts (default 15). `LOAD_MERGE_FILES` is the number of commit groups between log file
 //! merges (default 1,024). The store otherwise uses the chain indexer's settings.
 //! `LOAD_SLOW_MS`, when set, reports every Put slower than that on stderr with the wall-clock
 //! time it finished, to line up with the RocksDB info log. `LOAD_BACKGROUND_JOBS`, when set,
-//! overrides RocksDB's `max_background_jobs`.
+//! overrides RocksDB's `max_background_jobs`, `LOAD_SUBCOMPACTIONS` its `max_subcompactions`, and
+//! `LOAD_RATE_MB` installs a rate limiter of that many MiB a second on flushes and compactions.
 //!
 //! `LOAD_MODE=verify` writes nothing. It opens a store that a `small` run filled and checks
 //! that every sequence is in the log and in the state exactly as that run wrote it, then
@@ -39,7 +41,6 @@ use std::{
 };
 use tokio::sync::mpsc;
 
-const BLOCK_ROWS: u64 = 14_000;
 const NS_QMDB: u8 = 0x00;
 const NS_SIMPLEX: u8 = 0x02;
 const NS_SQL: u8 = 0x03;
@@ -95,7 +96,7 @@ fn digest_key(namespace: u8, height: u64, row: u64) -> Bytes {
     Bytes::from(key)
 }
 
-/// A block's rows: half ordered SQL rows and half digest-keyed QMDB rows.
+/// A block's rows, half ordered SQL rows and half digest-keyed QMDB rows.
 fn block_rows(height: u64, rows: u64, value_len: usize) -> Vec<(Bytes, Bytes)> {
     (0..rows)
         .map(|row| {
@@ -218,6 +219,13 @@ fn open(dir: &Path, log_merge_files: usize) -> RocksStore {
     if let Ok(jobs) = std::env::var("LOAD_BACKGROUND_JOBS") {
         db_options.set_max_background_jobs(jobs.parse().expect("LOAD_BACKGROUND_JOBS"));
     }
+    if let Ok(rate) = std::env::var("LOAD_RATE_MB") {
+        let rate: i64 = rate.parse().expect("LOAD_RATE_MB");
+        db_options.set_ratelimiter(rate << 20, 100_000, 10);
+    }
+    if let Ok(threads) = std::env::var("LOAD_SUBCOMPACTIONS") {
+        db_options.set_max_subcompactions(threads.parse().expect("LOAD_SUBCOMPACTIONS"));
+    }
     db_options.set_bytes_per_sync(8 * 1024 * 1024);
     db_options.set_compaction_readahead_size(8 * 1024 * 1024);
     let four = NonZeroUsize::new(4).expect("nonzero");
@@ -293,12 +301,19 @@ async fn run_verify(store: RocksStore, dir: &Path) {
     );
 }
 
-/// Blocks issued from several tasks at once: a large Put, then the certificate and barrier.
-async fn run_mixed(store: RocksStore, commits: usize, writers: u64, mut report: Report) {
+/// Issues blocks from several tasks at once. Each block is a large Put, then the certificate
+/// and the barrier.
+async fn run_mixed(
+    store: RocksStore,
+    commits: usize,
+    writers: u64,
+    rows_per_block: u64,
+    mut report: Report,
+) {
     let blocks = (commits as u64).div_ceil(3);
     let next = Arc::new(AtomicU64::new(0));
     let (sender, mut latencies) = mpsc::unbounded_channel();
-    let value_len = (1_260_000 / BLOCK_ROWS as usize) - 33;
+    let value_len = 90 - 33;
     for _ in 0..writers {
         let store = store.clone();
         let next = next.clone();
@@ -309,10 +324,11 @@ async fn run_mixed(store: RocksStore, commits: usize, writers: u64, mut report: 
                 if height >= blocks {
                     return;
                 }
-                let rows =
-                    tokio::task::spawn_blocking(move || block_rows(height, BLOCK_ROWS, value_len))
-                        .await
-                        .expect("build block");
+                let rows = tokio::task::spawn_blocking(move || {
+                    block_rows(height, rows_per_block, value_len)
+                })
+                .await
+                .expect("build block");
                 for rows in [rows, certificate(height), barrier(height)] {
                     if sender.send(timed_put(&store, rows).await).is_err() {
                         return;
@@ -338,11 +354,12 @@ fn main() {
     let writers = setting("LOAD_WRITERS", 4u64);
     let max_bytes = setting("LOAD_MAX_GIB", 15u64) << 30;
     let log_merge_files = setting("LOAD_MERGE_FILES", 1_024usize);
+    let rows_per_block = setting("LOAD_BLOCK_ROWS", 14_000u64);
     let slow = std::env::var("LOAD_SLOW_MS")
         .ok()
         .map(|raw| Duration::from_millis(raw.parse().expect("LOAD_SLOW_MS is not a number")));
 
-    // Stock RocksDB keeps every table file open.
+    // The store may keep thousands of table files open.
     rlimit::increase_nofile_limit(u64::MAX).expect("raise the open-file limit");
     std::fs::create_dir_all(&dir).expect("create LOAD_DIR");
 
@@ -356,7 +373,7 @@ fn main() {
         let started = Instant::now();
         match mode.as_str() {
             "small" => run_small(store.clone(), commits, report).await,
-            "mixed" => run_mixed(store.clone(), commits, writers, report).await,
+            "mixed" => run_mixed(store.clone(), commits, writers, rows_per_block, report).await,
             "verify" => run_verify(store.clone(), &dir).await,
             other => panic!("unknown LOAD_MODE {other}"),
         }

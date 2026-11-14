@@ -22,13 +22,20 @@ async fn health() -> &'static str {
 /// Default for `--max-open-files`.
 pub const DEFAULT_MAX_OPEN_FILES: i32 = 16_384;
 
+/// RocksDB's stock refill period and fairness for a rate limiter.
+const RATE_LIMIT_REFILL_MICROS: i64 = 100_000;
+const RATE_LIMIT_FAIRNESS: i32 = 10;
+
 /// Store options for the served simulator. Every commit group adds a log SST, and a merge
 /// compacts them into large files once enough have gathered, so the files waiting for a merge
 /// number in the thousands. RocksDB's open tables are capped at `max_open_files` in case
 /// that backlog grows. Under pressure the table cache closes the log files, which are rarely
 /// read, and keeps the state files every point read probes. The process open-file limit must
 /// cover the cap.
-fn store_config(max_open_files: i32) -> RocksConfig {
+///
+/// `compaction_rate_limit` is the megabytes per second RocksDB may write in compactions and
+/// flushes (see [`RocksConfig::db_options`]), and `None` leaves them unlimited.
+fn store_config(max_open_files: i32, compaction_rate_limit: Option<u32>) -> RocksConfig {
     if let Ok(limit) = rlimit::Resource::NOFILE.get_soft() {
         if limit <= max_open_files as u64 {
             warn!(
@@ -39,6 +46,13 @@ fn store_config(max_open_files: i32) -> RocksConfig {
     }
     let mut config = RocksConfig::default();
     config.db_options.set_max_open_files(max_open_files);
+    if let Some(megabytes) = compaction_rate_limit {
+        config.db_options.set_ratelimiter(
+            i64::from(megabytes) * 1_000_000,
+            RATE_LIMIT_REFILL_MICROS,
+            RATE_LIMIT_FAIRNESS,
+        );
+    }
     config
 }
 
@@ -56,10 +70,11 @@ pub async fn run(
     directory: &Path,
     port: u16,
     max_open_files: i32,
+    compaction_rate_limit: Option<u32>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let app = app(RocksStore::open(
         directory,
-        Some(store_config(max_open_files)),
+        Some(store_config(max_open_files, compaction_rate_limit)),
     )?);
 
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
@@ -80,7 +95,7 @@ pub async fn open_temp(
     let data_dir = tempfile::tempdir()?;
     let app = app(RocksStore::open_owned(
         data_dir,
-        Some(store_config(DEFAULT_MAX_OPEN_FILES)),
+        Some(store_config(DEFAULT_MAX_OPEN_FILES, None)),
     )?);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await?

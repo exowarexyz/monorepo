@@ -2,9 +2,10 @@
 //! store still holds every row.
 //!
 //! The writer is this test binary run again as a child process, so the kill is a real process
-//! crash at a point the test does not choose: mid-ingestion, mid-merge, or between the two.
-//! A kill leaves the operating system's page cache intact, so this covers crash consistency
-//! of the engine's own steps and not what a power loss does to unsynced files.
+//! crash at a point the test does not choose. It can land inside an ingestion, inside a
+//! merge, or between the two. A kill leaves the operating system's page cache intact, so this
+//! covers crash consistency of the engine's own steps and not what a power loss does to
+//! unsynced files.
 
 use bytes::Bytes;
 use exoware_server::{Log, Query, Sequence};
