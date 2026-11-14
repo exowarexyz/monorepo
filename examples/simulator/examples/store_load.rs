@@ -16,8 +16,7 @@
 //! merges (default 1,024). The store otherwise uses the chain indexer's settings.
 //! `LOAD_SLOW_MS`, when set, reports every Put slower than that on stderr with the wall-clock
 //! time it finished, to line up with the RocksDB info log. `LOAD_BACKGROUND_JOBS`, when set,
-//! overrides RocksDB's `max_background_jobs`, `LOAD_SUBCOMPACTIONS` its `max_subcompactions`, and
-//! `LOAD_RATE_MB` installs a rate limiter of that many MiB a second on flushes and compactions.
+//! overrides RocksDB's `max_background_jobs`, and `LOAD_SUBCOMPACTIONS` its `max_subcompactions`.
 //!
 //! `LOAD_MODE=verify` writes nothing. It opens a store that a `small` run filled and checks
 //! that every sequence is in the log and in the state exactly as that run wrote it, then
@@ -218,10 +217,6 @@ fn open(dir: &Path, log_merge_files: usize) -> RocksStore {
     db_options.set_max_subcompactions(8);
     if let Ok(jobs) = std::env::var("LOAD_BACKGROUND_JOBS") {
         db_options.set_max_background_jobs(jobs.parse().expect("LOAD_BACKGROUND_JOBS"));
-    }
-    if let Ok(rate) = std::env::var("LOAD_RATE_MB") {
-        let rate: i64 = rate.parse().expect("LOAD_RATE_MB");
-        db_options.set_ratelimiter(rate << 20, 100_000, 10);
     }
     if let Ok(threads) = std::env::var("LOAD_SUBCOMPACTIONS") {
         db_options.set_max_subcompactions(threads.parse().expect("LOAD_SUBCOMPACTIONS"));

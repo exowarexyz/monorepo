@@ -22,7 +22,6 @@ pub const fn crate_version() -> &'static str {
 const DIRECTORY_FLAG: &str = "directory";
 const PORT_FLAG: &str = "port";
 const MAX_OPEN_FILES_FLAG: &str = "max-open-files";
-const COMPACTION_RATE_LIMIT_FLAG: &str = "compaction-rate-limit";
 const VERBOSE_FLAG: &str = "verbose";
 
 #[tokio::main]
@@ -72,13 +71,6 @@ async fn main() -> std::process::ExitCode {
                                 .default_value(server::DEFAULT_MAX_OPEN_FILES.to_string().leak() as &str)
                                 .value_parser(clap::value_parser!(i32).range(1..))
                                 .action(ArgAction::Set),
-                        )
-                        .arg(
-                            Arg::new(COMPACTION_RATE_LIMIT_FLAG)
-                                .long(COMPACTION_RATE_LIMIT_FLAG)
-                                .help("Megabytes per second RocksDB may write in compactions and flushes. Unlimited when omitted.")
-                                .value_parser(clap::value_parser!(u32).range(1..))
-                                .action(ArgAction::Set),
                         ),
                 ),
         )
@@ -115,8 +107,7 @@ async fn main() -> std::process::ExitCode {
                 let directory = m.get_one::<PathBuf>(DIRECTORY_FLAG).unwrap();
                 let port = m.get_one::<u16>(PORT_FLAG).unwrap();
                 let max_open_files = m.get_one::<i32>(MAX_OPEN_FILES_FLAG).unwrap();
-                let compaction_rate_limit = m.get_one::<u32>(COMPACTION_RATE_LIMIT_FLAG).copied();
-                match server::run(directory, *port, *max_open_files, compaction_rate_limit).await {
+                match server::run(directory, *port, *max_open_files).await {
                     Ok(()) => return std::process::ExitCode::SUCCESS,
                     Err(e) => {
                         error!(error = ?e, "server failed");

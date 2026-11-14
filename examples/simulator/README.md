@@ -27,13 +27,6 @@ log files in the background, so the file count grows with the bytes stored and
 not with the number of writes. A cap below the state files a read probes makes
 reads reopen tables.
 
-Compactions of the state rows grow with the store and write as fast as the
-disk allows, which slows commits on a disk they saturate. Pass
-`--compaction-rate-limit` with the megabytes per second RocksDB may write in
-compactions and flushes to leave commits a share of the bandwidth. The limit
-has to stay above the store's average compaction rate, or the backlog of files
-waiting for compaction grows.
-
 Connect with the [Rust SDK](../../sdk/rs/README.md) or [TypeScript
 SDK](../../sdk/ts/README.md). The simulator accepts requests without
 credentials and enables permissive CORS for local browser development. To
