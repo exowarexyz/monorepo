@@ -2,8 +2,9 @@
 //! store that delays every query, so the time mostly counts serial store round trips.
 //!
 //! `QMDB_PROOF_BENCH_DELAY_MS` sets the delay (default 10). `QMDB_PROOF_BENCH_RUNS` sets
-//! the runs per case (default 5). Each line reports the median time and the store
-//! queries one call sends. Each run uses a new client, so no read is cached.
+//! the runs per case (default 5, at least 1). Each line reports the median time and the
+//! fewest and most store queries one call sent. Each run uses a new client, so no read is
+//! cached.
 
 #[allow(dead_code, unused_imports)]
 #[path = "../tests/common/mod.rs"]
@@ -78,7 +79,10 @@ struct DelayedQuery {
 impl DelayedQuery {
     async fn wait(&self) {
         self.queries.fetch_add(1, Ordering::Relaxed);
-        tokio::time::sleep(self.delay).await;
+        // A zero sleep still waits for a timer tick.
+        if !self.delay.is_zero() {
+            tokio::time::sleep(self.delay).await;
+        }
     }
 }
 
@@ -274,7 +278,7 @@ async fn unordered_source() -> Source<UnorderedOp> {
 }
 
 /// Times one call per run on a client from `client` and prints the median and the
-/// queries one call sends.
+/// fewest and most queries one call sent.
 async fn measure<C, Fut>(
     name: &str,
     runs: usize,
@@ -285,21 +289,24 @@ async fn measure<C, Fut>(
     Fut: std::future::Future<Output = ()>,
 {
     let mut times = Vec::with_capacity(runs);
-    let mut queries = 0;
+    let mut queries = Vec::with_capacity(runs);
     for _ in 0..runs {
         let client = client();
         query.queries.store(0, Ordering::Relaxed);
         let start = Instant::now();
         call(client).await;
         times.push(start.elapsed());
-        queries = query.queries.load(Ordering::Relaxed);
+        queries.push(query.queries.load(Ordering::Relaxed));
     }
     times.sort();
+    queries.sort();
     println!(
-        "case={name} median_ms={:.1} min_ms={:.1} max_ms={:.1} queries={queries}",
+        "case={name} median_ms={:.1} min_ms={:.1} max_ms={:.1} min_queries={} max_queries={}",
         times[runs / 2].as_secs_f64() * 1e3,
         times[0].as_secs_f64() * 1e3,
         times[runs - 1].as_secs_f64() * 1e3,
+        queries[0],
+        queries[runs - 1],
     );
 }
 
@@ -328,13 +335,21 @@ async fn run(delay: Duration, runs: usize) {
         .collect();
     let one = vec![ordered_key(FIRST)];
 
-    let range = move |client: OrderedClient| async move {
-        let proof = client
-            .get_range_raw(latest, ordered_key(FIRST), None, BATCH as u32, None)
-            .await
-            .unwrap();
-        assert_eq!(proof.entries.len(), BATCH);
+    // A start key that is stored needs no start proof. One just below it does.
+    let range = |start: Vec<u8>, start_proof: bool| {
+        move |client: OrderedClient| {
+            let start = start.clone();
+            async move {
+                let proof = client
+                    .get_range_raw(latest, start, None, BATCH as u32, None)
+                    .await
+                    .unwrap();
+                assert_eq!(proof.entries.len(), BATCH);
+                assert_eq!(proof.start_proof.is_some(), start_proof);
+            }
+        }
     };
+    let absent_start = format!("k-{:08}x", FIRST - 1).into_bytes();
     let get_many = |keys: &[Vec<u8>], hit: bool| {
         let keys = keys.to_vec();
         move |client: OrderedClient| {
@@ -350,7 +365,22 @@ async fn run(delay: Duration, runs: usize) {
     };
 
     let query = &ordered_query;
-    measure("ordered_get_range_100", runs, query, new_ordered, range).await;
+    measure(
+        "ordered_get_range_100",
+        runs,
+        query,
+        new_ordered,
+        range(ordered_key(FIRST), false),
+    )
+    .await;
+    measure(
+        "ordered_get_range_100_absent_start",
+        runs,
+        query,
+        new_ordered,
+        range(absent_start, true),
+    )
+    .await;
     measure(
         "ordered_get_many_100_hits",
         runs,
@@ -417,6 +447,7 @@ fn main() {
     };
     let delay = Duration::from_millis(env("QMDB_PROOF_BENCH_DELAY_MS", 10));
     let runs = env("QMDB_PROOF_BENCH_RUNS", 5) as usize;
+    assert!(runs > 0, "QMDB_PROOF_BENCH_RUNS must be at least 1");
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
