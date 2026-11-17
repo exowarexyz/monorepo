@@ -670,11 +670,23 @@ impl ExecutionPlan for KvAggregateExec {
                 expr_plans: Vec::new(),
             })
             .chain(self.spec.aggregate_jobs.clone());
-        let batches = futures::stream::iter(jobs)
-            .map(move |job| {
-                execute_reduce_job(session.clone(), Arc::new(job), source.clone(), concurrency)
+        // One window over every job's ranges, so a later job's ranges open while an
+        // earlier job is still running. Output keeps job and range order, which keeps
+        // Final's float results deterministic.
+        let ranges = jobs.flat_map(|job| {
+            let job = Arc::new(job);
+            job.job
+                .ranges
+                .clone()
+                .into_iter()
+                .map(move |range| (job.clone(), range))
+        });
+        let batches = futures::stream::iter(ranges)
+            .map(move |(job, range)| {
+                execute_reduce_range(session.clone(), job, source.clone(), range)
             })
-            .flatten();
+            .buffered(concurrency)
+            .try_flatten();
         Ok(Box::pin(RecordBatchStreamAdapter::new(
             self.schema(),
             batches,
@@ -730,18 +742,6 @@ pub(crate) fn cast_scalar_value(
         return Ok(value);
     }
     value.cast_to(data_type)
-}
-
-fn execute_reduce_job(
-    session: ReadSession,
-    job: Arc<CombinedAggregateJob>,
-    source: Arc<KvAggregateExec>,
-    concurrency: usize,
-) -> impl futures::Stream<Item = DataFusionResult<RecordBatch>> {
-    futures::stream::iter(job.job.ranges.clone())
-        .map(move |range| execute_reduce_range(session.clone(), job.clone(), source.clone(), range))
-        .buffered(concurrency)
-        .try_flatten()
 }
 
 async fn execute_reduce_range(
