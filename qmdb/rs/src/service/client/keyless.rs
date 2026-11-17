@@ -6,11 +6,10 @@ use crate::{
     service::proto::qmdb::v1::{GetOperationRangeRequest, SubscribeRequest},
     QmdbError,
 };
-use bytes::Bytes;
-use commonware_codec::{Decode, DecodeExt, Encode, Read};
+use commonware_codec::{Encode, Read};
 use commonware_cryptography::Hasher;
 use commonware_storage::{
-    merkle::{Graftable, Location},
+    merkle::{Family, Graftable, Location},
     qmdb::{any::value::ValueEncoding, keyless},
 };
 use connectrpc::client::{ClientConfig, ClientTransport};
@@ -21,11 +20,9 @@ use std::fmt::Display;
 /// Verifying client for a keyless-QMDB endpoint: the operation log.
 pub struct Keyless<T, F, H, V, E>
 where
-    F: Graftable,
-    H: Hasher,
-    V: commonware_codec::Codec + Clone + Send + Sync,
+    F: Family,
     E: ValueEncoding<Value = V>,
-    keyless::Operation<F, E>: Encode + Read,
+    keyless::Operation<F, E>: Read,
 {
     operation_log: OperationLogClient<T, F, H, keyless::Operation<F, E>>,
 }
@@ -34,10 +31,8 @@ impl<F, H, V, E> Keyless<PreferZstdHttpClient, F, H, V, E>
 where
     F: Graftable,
     H: Hasher,
-    H::Digest: DecodeExt<()>,
-    V: commonware_codec::Codec + Clone + Send + Sync,
     E: ValueEncoding<Value = V>,
-    keyless::Operation<F, E>: Decode + Encode + Read,
+    keyless::Operation<F, E>: Encode + Read,
 {
     pub fn plaintext(base: &str, op_cfg: <keyless::Operation<F, E> as Read>::Cfg) -> Self {
         Self::new(
@@ -51,14 +46,11 @@ where
 impl<T, F, H, V, E> Keyless<T, F, H, V, E>
 where
     T: ClientTransport,
-    T::ResponseBody: Body<Data = Bytes> + Unpin,
     <T::ResponseBody as Body>::Error: Display,
     F: Graftable,
     H: Hasher,
-    H::Digest: DecodeExt<()>,
-    V: commonware_codec::Codec + Clone + Send + Sync,
     E: ValueEncoding<Value = V>,
-    keyless::Operation<F, E>: Decode + Encode + Read,
+    keyless::Operation<F, E>: Encode + Read,
 {
     pub fn new(
         transport: T,

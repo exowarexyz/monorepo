@@ -6,12 +6,10 @@ use crate::proto::qmdb::v1::{
     OperationRangeProof,
 };
 use buffa::{bytes::Bytes, Message};
-use commonware_codec::{
-    Copying, Decode, DecodeExt, DecodeRangeExt, Encode, FixedSize, RangeCfg, Read,
-};
+use commonware_codec::{Copying, Decode, DecodeExt, DecodeRangeExt, Encode, FixedSize, Read};
 use commonware_cryptography::{Blake3, Digest, Sha256};
 use commonware_storage::{
-    merkle::{self, Location},
+    merkle::{self, Family, Location},
     mmb, mmr,
     qmdb::{
         any::{
@@ -61,9 +59,8 @@ struct CurrentProofConfig {
 
 fn op_cfg<F>() -> <OrderedOperation<F, Vec<u8>, Vec<u8>> as Read>::Cfg
 where
-    F: merkle::Graftable,
-    OrderedOperation<F, Vec<u8>, Vec<u8>>:
-        Read<Cfg = ((RangeCfg<usize>, ()), (RangeCfg<usize>, ()))>,
+    F: Family,
+    OrderedOperation<F, Vec<u8>, Vec<u8>>:,
 {
     (
         ((0..=MAX_OPERATION_SIZE).into(), ()),
@@ -84,7 +81,7 @@ fn decode_proto<M: Message>(bytes: Vec<u8>, label: &str) -> Result<M, JsValue> {
     M::decode(&mut Bytes::from(bytes)).map_err(|err| js_err(format!("decode {label}: {err}")))
 }
 
-fn decode_digest<D: Digest + DecodeExt<()>>(bytes: &[u8], label: &str) -> Result<D, String> {
+fn decode_digest<D: DecodeExt<()>>(bytes: &[u8], label: &str) -> Result<D, String> {
     D::decode(Copying(bytes)).map_err(|err| format!("failed to decode {label}: {err}"))
 }
 
@@ -153,7 +150,6 @@ fn operation_target_root<F, H>(
 where
     F: merkle::Graftable,
     H: commonware_cryptography::Hasher,
-    H::Digest: DecodeExt<()>,
 {
     if ops_root.is_empty() {
         return Err("operation proof missing ops_root".to_string());
@@ -189,9 +185,7 @@ fn verify_multi_from_proto<F, H>(
 where
     F: merkle::Graftable,
     H: commonware_cryptography::Hasher,
-    H::Digest: DecodeExt<()>,
-    OrderedOperation<F, Vec<u8>, Vec<u8>>:
-        Decode + Encode + Read<Cfg = ((RangeCfg<usize>, ()), (RangeCfg<usize>, ()))>,
+    OrderedOperation<F, Vec<u8>, Vec<u8>>:,
 {
     let operations = decode_multi_operations_from_proto::<F>(proto)?;
     let target_root =
@@ -219,9 +213,7 @@ fn decode_multi_with_embedded_root_from_proto<F, H>(
 where
     F: merkle::Graftable,
     H: commonware_cryptography::Hasher,
-    H::Digest: DecodeExt<()>,
-    OrderedOperation<F, Vec<u8>, Vec<u8>>:
-        Decode + Encode + Read<Cfg = ((RangeCfg<usize>, ()), (RangeCfg<usize>, ()))>,
+    OrderedOperation<F, Vec<u8>, Vec<u8>>:,
 {
     let operations = decode_multi_operations_from_proto::<F>(proto)?;
     if proto.ops_root.is_empty() {
@@ -255,8 +247,7 @@ fn decode_multi_operations_from_proto<F>(
 ) -> Result<Vec<(Location<F>, OrderedOperation<F, Vec<u8>, Vec<u8>>)>, String>
 where
     F: merkle::Graftable,
-    OrderedOperation<F, Vec<u8>, Vec<u8>>:
-        Decode + Encode + Read<Cfg = ((RangeCfg<usize>, ()), (RangeCfg<usize>, ()))>,
+    OrderedOperation<F, Vec<u8>, Vec<u8>>:,
 {
     proto
         .operations
@@ -293,9 +284,7 @@ fn verify_operation_range_from_proto<F, H>(
 where
     F: merkle::Graftable,
     H: commonware_cryptography::Hasher,
-    H::Digest: DecodeExt<()>,
-    OrderedOperation<F, Vec<u8>, Vec<u8>>:
-        Decode + Encode + Read<Cfg = ((RangeCfg<usize>, ()), (RangeCfg<usize>, ()))>,
+    OrderedOperation<F, Vec<u8>, Vec<u8>>:,
 {
     if proto.encoded_operations.is_empty() {
         return Err("operation range proof has no operations".to_string());
@@ -372,7 +361,6 @@ fn verify_raw_operation_range<'a, F, H>(
 where
     F: merkle::Graftable,
     H: commonware_cryptography::Hasher,
-    H::Digest: DecodeExt<()>,
 {
     if proto.encoded_operations.is_empty() {
         return Err("operation range proof has no operations".to_string());
@@ -437,9 +425,7 @@ fn verify_current_operation_range_from_proto<F, H>(
 where
     F: merkle::Graftable,
     H: commonware_cryptography::Hasher,
-    H::Digest: DecodeExt<()>,
-    OrderedOperation<F, Vec<u8>, Vec<u8>>:
-        Decode + Encode + Read<Cfg = ((RangeCfg<usize>, ()), (RangeCfg<usize>, ()))>,
+    OrderedOperation<F, Vec<u8>, Vec<u8>>:,
 {
     // A range proof covers at least one operation and the bitmap chunk holding its activity bit.
     if proto.encoded_operations.is_empty() {
@@ -516,9 +502,7 @@ fn verify_key_value_from_proto<F, H>(
 where
     F: merkle::Graftable,
     H: commonware_cryptography::Hasher,
-    H::Digest: DecodeExt<()>,
-    OrderedOperation<F, Vec<u8>, Vec<u8>>:
-        Decode + Encode + Read<Cfg = ((RangeCfg<usize>, ()), (RangeCfg<usize>, ()))>,
+    OrderedOperation<F, Vec<u8>, Vec<u8>>:,
 {
     // Only an update operation can prove that a key has a value.
     let operation = OrderedOperation::<F, Vec<u8>, Vec<u8>>::decode_cfg(
@@ -560,9 +544,7 @@ fn verify_key_value_for_key_from_proto<F, H>(
 where
     F: merkle::Graftable,
     H: commonware_cryptography::Hasher,
-    H::Digest: DecodeExt<()>,
-    OrderedOperation<F, Vec<u8>, Vec<u8>>:
-        Decode + Encode + Read<Cfg = ((RangeCfg<usize>, ()), (RangeCfg<usize>, ()))>,
+    OrderedOperation<F, Vec<u8>, Vec<u8>>:,
 {
     let requested_key = decode_vec_key_wire(requested_key)?;
     let (location, update) = verify_key_value_from_proto::<F, H>(proto, root, config)?;
@@ -585,9 +567,7 @@ fn verify_key_exclusion_from_proto<F, H>(
 where
     F: merkle::Graftable,
     H: commonware_cryptography::Hasher,
-    H::Digest: DecodeExt<()>,
-    OrderedOperation<F, Vec<u8>, Vec<u8>>:
-        Decode + Encode + Read<Cfg = ((RangeCfg<usize>, ()), (RangeCfg<usize>, ()))>,
+    OrderedOperation<F, Vec<u8>, Vec<u8>>:,
 {
     // Decode with the source database's chunk size, which the proof does not encode.
     let max_digests = proof_digest_cap::<H::Digest>(&proto.proof);
@@ -890,7 +870,6 @@ fn verify_raw_operations<'a, F, H>(
 where
     F: merkle::Graftable,
     H: commonware_cryptography::Hasher,
-    H::Digest: DecodeExt<()>,
 {
     let target_root =
         operation_target_root::<F, H>(&proto.ops_root, &proto.ops_root_witness, root)?;
@@ -1047,9 +1026,7 @@ fn lookup_results_to_js<F, H>(
 where
     F: merkle::Graftable,
     H: commonware_cryptography::Hasher,
-    H::Digest: DecodeExt<()>,
-    OrderedOperation<F, Vec<u8>, Vec<u8>>:
-        Decode + Encode + Read<Cfg = ((RangeCfg<usize>, ()), (RangeCfg<usize>, ()))>,
+    OrderedOperation<F, Vec<u8>, Vec<u8>>:,
 {
     validate_requested_keys(requested_keys).map_err(js_err)?;
     if proto.results.len() != requested_keys.len() {
@@ -1104,9 +1081,7 @@ fn verify_get_range_from_proto<F, H>(
 where
     F: merkle::Graftable,
     H: commonware_cryptography::Hasher,
-    H::Digest: DecodeExt<()>,
-    OrderedOperation<F, Vec<u8>, Vec<u8>>:
-        Decode + Encode + Read<Cfg = ((RangeCfg<usize>, ()), (RangeCfg<usize>, ()))>,
+    OrderedOperation<F, Vec<u8>, Vec<u8>>:,
 {
     let start_key_wire = start_key;
     let start_key = decode_vec_key_wire(start_key_wire).map_err(js_err)?;
@@ -1779,6 +1754,7 @@ pub fn verify_get_range_response(
 mod tests {
     use super::*;
     use crate::proto::qmdb::v1::CurrentKeyLookupResult;
+    use commonware_codec::RangeCfg;
     use commonware_cryptography::sha256::Digest as Sha256Digest;
     use commonware_storage::{
         merkle::mem::Mem,

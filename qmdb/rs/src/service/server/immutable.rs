@@ -8,7 +8,7 @@ use crate::{
     service::proto::qmdb::v1::OperationLogServiceServer,
     PublishedWatermark, QmdbError,
 };
-use commonware_codec::{Decode, Encode, Read};
+use commonware_codec::{Decode, Read};
 use commonware_cryptography::Hasher;
 use commonware_storage::{
     merkle::{Graftable, Location},
@@ -21,11 +21,11 @@ use std::{future::Future, sync::Arc};
 impl<F, H, K, V, E> OperationLogReader for Immutable<F, H, K, V, E>
 where
     F: Graftable,
-    H: Hasher + Send + Sync + 'static,
-    K: QmdbKey + Send + Sync + 'static,
-    V: commonware_codec::Codec + Clone + AsRef<[u8]> + Send + Sync + 'static,
-    E: ValueEncoding<Value = V> + Send + Sync + 'static,
-    immutable::Operation<F, K, E>: Encode + Decode + Clone,
+    H: Hasher,
+    K: QmdbKey,
+    V: AsRef<[u8]> + 'static,
+    E: ValueEncoding<Value = V>,
+    immutable::Operation<F, K, E>: Decode,
 {
     type Family = F;
     type Digest = H::Digest;
@@ -73,16 +73,16 @@ where
 /// Mount the immutable-QMDB operation log, the only service immutable QMDB serves.
 pub fn immutable_operation_log_stack<
     F: Graftable,
-    H: Hasher + Send + Sync + 'static,
-    K: QmdbKey + Send + Sync + 'static,
-    V: commonware_codec::Codec + Clone + AsRef<[u8]> + Send + Sync + 'static,
-    E: ValueEncoding<Value = V> + Send + Sync + 'static,
+    H: Hasher,
+    K: QmdbKey,
+    V: AsRef<[u8]> + 'static,
+    E: ValueEncoding<Value = V>,
 >(
     raw_store: PrefixedStoreClient,
     op_cfg: <immutable::Operation<F, K, E> as Read>::Cfg,
 ) -> ConnectRpcService<impl ::connectrpc::Dispatcher>
 where
-    immutable::Operation<F, K, E>: Encode + Decode + Clone,
+    immutable::Operation<F, K, E>: Decode,
 {
     let reader = Arc::new(Immutable::<F, H, K, V, E>::new(raw_store.clone(), op_cfg));
     super::stack(OperationLogServiceServer::new(OperationLogServer::new(

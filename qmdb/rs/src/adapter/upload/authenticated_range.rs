@@ -37,7 +37,7 @@ use std::collections::BTreeSet;
 /// An operation range and prefix frontier for authentication against a trusted root.
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[must_use]
-pub struct AuthenticatedOperationRange<'a, D: Digest, F: Family> {
+pub struct AuthenticatedOperationRange<'a, D, F: Family> {
     /// Inclusive operation location where the range starts.
     pub start_location: Location<F>,
     /// Exclusive operation location committed by the expected root.
@@ -95,7 +95,7 @@ where
 /// Deterministic logical Store rows authenticated against an independently trusted root.
 #[derive(Debug, PartialEq)]
 #[must_use]
-pub struct PreparedAuthenticatedRange<D: Digest, F: Family> {
+pub struct PreparedAuthenticatedRange<D, F: Family> {
     rows: Vec<(Key, Vec<u8>)>,
     pinned_nodes: Vec<(Position<F>, D)>,
     start_location: Location<F>,
@@ -103,7 +103,7 @@ pub struct PreparedAuthenticatedRange<D: Digest, F: Family> {
     ops_root: D,
 }
 
-impl<D: Digest, F: Family> PreparedAuthenticatedRange<D, F> {
+impl<D, F: Family> PreparedAuthenticatedRange<D, F> {
     /// Exclude supplied pins at these positions from staging, without omitting reconstructed nodes.
     /// Omitted pins must be durable before publication and retained for proofs, as described in
     /// the [pin omission contract](https://github.com/exowarexyz/monorepo/tree/main/qmdb/rs#pin-omission).

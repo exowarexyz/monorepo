@@ -18,7 +18,7 @@ use crate::{
     QmdbError,
 };
 use bytes::Bytes;
-use commonware_codec::{Copying, Decode, DecodeExt, Encode, Read};
+use commonware_codec::{Copying, Decode, Encode, Read};
 use commonware_cryptography::Hasher;
 use commonware_storage::{
     merkle::{Graftable, Location},
@@ -43,9 +43,8 @@ use std::fmt::Display;
 pub struct OrderedLookupVerifier<F, H, K, V, const N: usize, E>
 where
     F: Graftable,
-    H: Hasher,
-    K: QmdbKey + commonware_codec::Codec,
-    V: commonware_codec::Codec + Clone + Send + Sync,
+    K: QmdbKey,
+    V: Decode,
     E: ValueEncoding<Value = V>,
     ordered::Operation<F, K, E>: Read,
     ordered::Update<K, E>: Read,
@@ -61,14 +60,12 @@ impl<F, H, K, V, const N: usize, E> OrderedLookupVerifier<F, H, K, V, N, E>
 where
     F: Graftable,
     H: Hasher,
-    H::Digest: DecodeExt<()>,
-    K: QmdbKey + commonware_codec::Codec,
-    V: commonware_codec::Codec + Clone + Send + Sync,
+    K: QmdbKey,
+    V: commonware_codec::Codec + Clone,
     E: ValueEncoding<Value = V>,
-    ordered::Operation<F, K, E>: Decode + Encode + Read,
+    ordered::Operation<F, K, E>: Encode + Read,
     ordered::Update<K, E>: Read,
-    ExclusionProof<F, K, E, H::Digest, N>:
-        Read<Cfg = (usize, <ordered::Update<K, E> as Read>::Cfg, V::Cfg)>,
+    ExclusionProof<F, K, E, H::Digest, N>:,
 {
     pub const fn new(
         op_cfg: <ordered::Operation<F, K, E> as Read>::Cfg,
@@ -122,14 +119,12 @@ impl<F, H, K, V, const N: usize, E> super::rpc::LookupVerifier
 where
     F: Graftable,
     H: Hasher,
-    H::Digest: DecodeExt<()>,
-    K: QmdbKey + commonware_codec::Codec,
-    V: commonware_codec::Codec + Clone + Send + Sync,
+    K: QmdbKey,
+    V: commonware_codec::Codec + Clone,
     E: ValueEncoding<Value = V>,
-    ordered::Operation<F, K, E>: Decode + Encode + Read,
+    ordered::Operation<F, K, E>: Encode + Read,
     ordered::Update<K, E>: Read,
-    ExclusionProof<F, K, E, H::Digest, N>:
-        Read<Cfg = (usize, <ordered::Update<K, E> as Read>::Cfg, V::Cfg)>,
+    ExclusionProof<F, K, E, H::Digest, N>:,
 {
     type Digest = H::Digest;
     type Hit = VerifiedKeyValue<H::Digest, ordered::Operation<F, K, E>, F>;
@@ -197,13 +192,13 @@ where
 pub struct Ordered<
     T,
     F: Graftable,
-    H: Hasher,
-    K: QmdbKey + commonware_codec::Codec,
-    V: commonware_codec::Codec + Clone + Send + Sync,
+    H,
+    K: QmdbKey,
+    V: commonware_codec::Codec,
     const N: usize,
     E: ValueEncoding<Value = V> = VariableEncoding<V>,
 > where
-    ordered::Operation<F, K, E>: Encode + Read,
+    ordered::Operation<F, K, E>: Read,
     ordered::Update<K, E>: Read,
 {
     key_lookup: KeyLookupClient<T, OrderedLookupVerifier<F, H, K, V, N, E>>,
@@ -216,14 +211,12 @@ impl<F, H, K, V, const N: usize, E> Ordered<PreferZstdHttpClient, F, H, K, V, N,
 where
     F: Graftable,
     H: Hasher,
-    H::Digest: DecodeExt<()>,
-    K: QmdbKey + commonware_codec::Codec,
-    V: commonware_codec::Codec + Clone + Send + Sync,
+    K: QmdbKey,
+    V: commonware_codec::Codec + Clone,
     E: ValueEncoding<Value = V>,
-    ordered::Operation<F, K, E>: Decode + Encode + Read,
+    ordered::Operation<F, K, E>: Encode + Read,
     ordered::Update<K, E>: Read,
-    ExclusionProof<F, K, E, H::Digest, N>:
-        Read<Cfg = (usize, <ordered::Update<K, E> as Read>::Cfg, V::Cfg)>,
+    ExclusionProof<F, K, E, H::Digest, N>:,
 {
     pub fn plaintext(
         base: &str,
@@ -245,19 +238,16 @@ where
 
 impl<T, F, H, K, V, const N: usize, E> Ordered<T, F, H, K, V, N, E>
 where
-    T: ClientTransport + Clone,
-    T::ResponseBody: Body<Data = Bytes> + Unpin,
+    T: ClientTransport,
     <T::ResponseBody as Body>::Error: Display,
     F: Graftable,
     H: Hasher,
-    H::Digest: DecodeExt<()>,
-    K: QmdbKey + commonware_codec::Codec,
-    V: commonware_codec::Codec + Clone + Send + Sync,
+    K: QmdbKey,
+    V: commonware_codec::Codec + Clone,
     E: ValueEncoding<Value = V>,
-    ordered::Operation<F, K, E>: Decode + Encode + Read,
+    ordered::Operation<F, K, E>: Encode + Read,
     ordered::Update<K, E>: Read,
-    ExclusionProof<F, K, E, H::Digest, N>:
-        Read<Cfg = (usize, <ordered::Update<K, E> as Read>::Cfg, V::Cfg)>,
+    ExclusionProof<F, K, E, H::Digest, N>:,
 {
     pub fn new(
         transport: T,

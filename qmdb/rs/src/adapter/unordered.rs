@@ -17,7 +17,7 @@ use crate::{
 use commonware_codec::{Codec, Copying, Decode, Encode};
 use commonware_cryptography::Hasher;
 use commonware_storage::{
-    merkle::{Graftable, Location},
+    merkle::{Family, Graftable, Location},
     qmdb::{
         any::{
             unordered,
@@ -30,10 +30,10 @@ use exoware_sdk::{PrefixedStoreClient, ReadSession};
 use std::{collections::BTreeSet, marker::PhantomData, sync::Arc};
 
 pub struct Unordered<
-    F: Graftable,
+    F: Family,
     H: Hasher,
-    K: QmdbKey + Codec,
-    V: Codec + Clone + Send + Sync,
+    K: QmdbKey,
+    V,
     const N: usize,
     E: ValueEncoding<Value = V> = VariableEncoding<V>,
 > where
@@ -46,14 +46,8 @@ pub struct Unordered<
     _marker: PhantomData<(F, H, K, E)>,
 }
 
-impl<
-        F: Graftable,
-        H: Hasher,
-        K: QmdbKey + Codec,
-        V: Codec + Clone + Send + Sync,
-        const N: usize,
-        E: ValueEncoding<Value = V>,
-    > Clone for Unordered<F, H, K, V, N, E>
+impl<F: Graftable, H: Hasher, K: QmdbKey, V, const N: usize, E: ValueEncoding<Value = V>> Clone
+    for Unordered<F, H, K, V, N, E>
 where
     unordered::Operation<F, K, E>: commonware_codec::Read,
 {
@@ -68,14 +62,8 @@ where
     }
 }
 
-impl<
-        F: Graftable,
-        H: Hasher,
-        K: QmdbKey + Codec,
-        V: Codec + Clone + Send + Sync,
-        const N: usize,
-        E: ValueEncoding<Value = V>,
-    > std::fmt::Debug for Unordered<F, H, K, V, N, E>
+impl<F: Graftable, H: Hasher, K: QmdbKey, V, const N: usize, E: ValueEncoding<Value = V>>
+    std::fmt::Debug for Unordered<F, H, K, V, N, E>
 where
     unordered::Operation<F, K, E>: commonware_codec::Read,
 {
@@ -89,10 +77,9 @@ impl<F, H, K, V, const N: usize, E> crate::adapter::core::LatestValueResolver<F,
 where
     F: Graftable,
     H: Hasher,
-    K: QmdbKey + Codec,
-    V: Codec + Clone + Send + Sync,
+    K: QmdbKey,
     E: ValueEncoding<Value = V>,
-    unordered::Operation<F, K, E>: Encode + Decode,
+    unordered::Operation<F, K, E>: Decode,
 {
     fn resolve_latest_value(
         &self,
@@ -127,8 +114,7 @@ impl<F, H, K, V, const N: usize, E> Unordered<F, H, K, V, N, E>
 where
     F: Graftable,
     H: Hasher,
-    K: QmdbKey + Codec,
-    V: Codec + Clone + Send + Sync,
+    K: QmdbKey,
     E: ValueEncoding<Value = V>,
     unordered::Operation<F, K, E>: commonware_codec::Read,
 {
@@ -151,7 +137,7 @@ impl<F, H, K, V, const N: usize, E> Unordered<F, H, K, V, N, E>
 where
     F: Graftable,
     H: Hasher,
-    K: QmdbKey + Codec,
+    K: QmdbKey,
     V: Codec + Clone + Send + Sync,
     E: ValueEncoding<Value = V>,
     unordered::Operation<F, K, E>: Encode + Decode,
@@ -595,11 +581,10 @@ fn decode_operation<F, K, V, E>(
     bytes: &[u8],
 ) -> Result<unordered::Operation<F, K, E>, QmdbError>
 where
-    F: Graftable,
-    K: QmdbKey + Codec,
-    V: Codec + Clone + Send + Sync,
+    F: Family,
+    K: QmdbKey,
     E: ValueEncoding<Value = V>,
-    unordered::Operation<F, K, E>: Encode + Decode,
+    unordered::Operation<F, K, E>: Decode,
 {
     unordered::Operation::<F, K, E>::decode_cfg(Copying(bytes), op_cfg).map_err(|e| {
         QmdbError::CorruptData(format!(
@@ -615,7 +600,7 @@ async fn load_ops_inactivity_floor_at<F, K, V, E>(
 ) -> Result<Location<F>, QmdbError>
 where
     F: Graftable,
-    K: QmdbKey + Codec,
+    K: QmdbKey,
     V: Codec + Clone + Send + Sync,
     E: ValueEncoding<Value = V>,
     unordered::Operation<F, K, E>: Encode + Decode,
@@ -632,10 +617,9 @@ async fn load_ops_inactivity_floor_from<F, K, V, E>(
 ) -> Result<Location<F>, QmdbError>
 where
     F: Graftable,
-    K: QmdbKey + Codec,
-    V: Codec + Clone + Send + Sync,
+    K: QmdbKey,
     E: ValueEncoding<Value = V>,
-    unordered::Operation<F, K, E>: Encode + Decode,
+    unordered::Operation<F, K, E>: Decode,
 {
     let mut location = watermark;
     loop {
@@ -660,7 +644,7 @@ async fn compute_ops_root<F, H, K, V, E>(
 where
     F: Graftable,
     H: Hasher,
-    K: QmdbKey + Codec,
+    K: QmdbKey,
     V: Codec + Clone + Send + Sync,
     E: ValueEncoding<Value = V>,
     unordered::Operation<F, K, E>: Encode + Decode,
@@ -676,7 +660,7 @@ async fn ops_inactive_peaks_at<F, K, V, E>(
 ) -> Result<usize, QmdbError>
 where
     F: Graftable,
-    K: QmdbKey + Codec,
+    K: QmdbKey,
     V: Codec + Clone + Send + Sync,
     E: ValueEncoding<Value = V>,
     unordered::Operation<F, K, E>: Encode + Decode,
@@ -693,10 +677,9 @@ async fn load_operation_at<F, K, V, E>(
 ) -> Result<unordered::Operation<F, K, E>, QmdbError>
 where
     F: Graftable,
-    K: QmdbKey + Codec,
-    V: Codec + Clone + Send + Sync,
+    K: QmdbKey,
     E: ValueEncoding<Value = V>,
-    unordered::Operation<F, K, E>: Encode + Decode,
+    unordered::Operation<F, K, E>: Decode,
 {
     let bytes = core::load_operation_bytes_at(session, location).await?;
     decode_operation::<F, K, V, E>(op_cfg, location, &bytes)
@@ -710,10 +693,9 @@ async fn load_operation_range<F, K, V, E>(
 ) -> Result<Vec<unordered::Operation<F, K, E>>, QmdbError>
 where
     F: Graftable,
-    K: QmdbKey + Codec,
-    V: Codec + Clone + Send + Sync,
+    K: QmdbKey,
     E: ValueEncoding<Value = V>,
-    unordered::Operation<F, K, E>: Encode + Decode,
+    unordered::Operation<F, K, E>: Decode,
 {
     core::load_operation_bytes_range(session, start_location, end_location_exclusive)
         .await?

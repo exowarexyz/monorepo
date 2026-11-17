@@ -122,7 +122,6 @@ impl SimplexReader {
         B: Block<Digest = D> + Read,
         S: certificate::Scheme,
         D: Digest,
-        <S::Certificate as commonware_codec::Read>::Cfg: Clone,
     {
         self.decode_indexed(
             self.get_notarized_by_round_raw(round).await?,
@@ -140,7 +139,6 @@ impl SimplexReader {
         B: Block<Digest = D> + Read,
         S: certificate::Scheme,
         D: Digest,
-        <S::Certificate as commonware_codec::Read>::Cfg: Clone,
     {
         self.decode_indexed(
             self.get_finalized_by_height_raw(height).await?,
@@ -158,7 +156,6 @@ impl SimplexReader {
         B: Block<Digest = D> + Read,
         S: certificate::Scheme,
         D: Digest,
-        <S::Certificate as commonware_codec::Read>::Cfg: Clone,
     {
         self.decode_indexed(
             self.get_finalized_by_round_raw(round).await?,
@@ -175,7 +172,6 @@ impl SimplexReader {
         B: Block<Digest = D> + Read,
         S: certificate::Scheme,
         D: Digest,
-        <S::Certificate as commonware_codec::Read>::Cfg: Clone,
     {
         let Some((key, value)) = self.latest_finalized_row().await? else {
             return Ok(None);

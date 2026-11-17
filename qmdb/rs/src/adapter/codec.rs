@@ -51,7 +51,7 @@ pub(crate) fn chunk_index_for_location<F: Family, const N: usize>(location: Loca
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct CurrentBoundaryMetadata<D: Digest> {
+pub(crate) struct CurrentBoundaryMetadata<D> {
     pub(crate) root: D,
     pub(crate) pruned_chunks: u64,
 }

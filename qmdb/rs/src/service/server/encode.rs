@@ -310,8 +310,8 @@ fn write_key_lookup_result_hit<D: Digest, Op: Encode, const N: usize, F: Graftab
 
 fn key_lookup_result_miss_len<
     D: Digest,
-    K: QmdbKey + commonware_codec::Codec,
-    V: commonware_codec::Codec + Clone + Send + Sync,
+    K: QmdbKey,
+    V,
     const N: usize,
     F: Graftable,
     E: ValueEncoding<Value = V>,
@@ -328,8 +328,8 @@ where
 
 fn write_key_lookup_result_miss<
     D: Digest,
-    K: QmdbKey + commonware_codec::Codec,
-    V: commonware_codec::Codec + Clone + Send + Sync,
+    K: QmdbKey,
+    V,
     const N: usize,
     F: Graftable,
     E: ValueEncoding<Value = V>,
@@ -374,14 +374,8 @@ impl<D: Digest, Op: Encode, const N: usize, F: Graftable> LookupResult
     }
 }
 
-impl<
-        D: Digest,
-        K: QmdbKey + commonware_codec::Codec,
-        V: commonware_codec::Codec + Clone + Send + Sync,
-        const N: usize,
-        F: Graftable,
-        E: ValueEncoding<Value = V>,
-    > LookupResult for RawKeyLookupProof<D, K, V, N, F, E>
+impl<D: Digest, K: QmdbKey, V, const N: usize, F: Graftable, E: ValueEncoding<Value = V>>
+    LookupResult for RawKeyLookupProof<D, K, V, N, F, E>
 where
     ordered::Operation<F, K, E>: Encode,
     commonware_storage::qmdb::current::ordered::proof::constant::ExclusionProof<F, K, E, D, N>:
@@ -421,8 +415,8 @@ pub(crate) fn get_many_response<R: LookupResult>(results: &[R]) -> PreEncoded<Ge
 
 pub(crate) fn get_range_response<
     D: Digest,
-    K: QmdbKey + commonware_codec::Codec,
-    V: commonware_codec::Codec + Clone + Send + Sync,
+    K: QmdbKey,
+    V,
     const N: usize,
     F: Graftable,
     E: ValueEncoding<Value = V>,

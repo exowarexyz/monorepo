@@ -48,7 +48,7 @@ async fn authenticate_location<M, H, Op, const N: usize, Prove, Fut>(
 where
     M: Graftable,
     H: Hasher,
-    Op: QmdbOperation<M> + Codec,
+    Op: Encode,
     Prove: FnMut(Location<M>) -> Fut,
     Fut: Future<Output = Result<(RangeProof<M, H::Digest>, [u8; N]), QmdbError>>,
 {
@@ -120,7 +120,6 @@ where
     M: Graftable,
     H: Hasher,
     Op: QmdbOperation<M> + Codec,
-    Op::Key: AsRef<[u8]>,
     Prove: FnMut(Location<M>) -> Fut,
     Fut: Future<Output = Result<(RangeProof<M, H::Digest>, [u8; N]), QmdbError>>,
 {
@@ -303,7 +302,6 @@ fn changed_chunk_representatives<F: Family, Op, const N: usize>(
 ) -> BTreeMap<u64, Location<F>>
 where
     Op: QmdbOperation<F>,
-    Op::Key: AsRef<[u8]>,
 {
     let previous_floor = previous_operations
         .and_then(|ops| ops.last())
@@ -443,7 +441,7 @@ where
 
 struct GraftedDigestContext<'a, F, H, Op, const N: usize, Prove>
 where
-    F: Graftable,
+    F: Family,
     H: Hasher,
 {
     grafting_height: u32,
@@ -462,7 +460,7 @@ async fn ensure_authenticated_grafted_digest<F, H, Op, const N: usize, Prove, Fu
 where
     F: Graftable,
     H: Hasher,
-    Op: QmdbOperation<F> + Codec,
+    Op: Codec,
     Prove: FnMut(Location<F>) -> Fut,
     Fut: Future<Output = Result<(RangeProof<F, H::Digest>, [u8; N]), QmdbError>>,
 {
@@ -508,7 +506,7 @@ async fn changed_grafted_ancestor_digests_for_chunk<F, H, Op, const N: usize, Pr
 where
     F: Graftable,
     H: Hasher,
-    Op: QmdbOperation<F> + Codec,
+    Op: Codec,
     Prove: FnMut(Location<F>) -> Fut,
     Fut: Future<Output = Result<(RangeProof<F, H::Digest>, [u8; N]), QmdbError>>,
 {
