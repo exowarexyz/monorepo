@@ -27,7 +27,7 @@ use commonware_storage::{
     },
 };
 use exoware_sdk::{PrefixedStoreClient, ReadSession};
-use std::{collections::BTreeSet, marker::PhantomData, sync::Arc};
+use std::{collections::BTreeSet, sync::Arc};
 
 pub struct Unordered<
     F: Family,
@@ -43,7 +43,6 @@ pub struct Unordered<
     publication: Arc<core::PublicationCache<F>>,
     op_cfg: <unordered::Operation<F, K, E> as commonware_codec::Read>::Cfg,
     read_cache: Arc<ReadCache<F, H::Digest>>,
-    _marker: PhantomData<(F, H, K, E)>,
 }
 
 impl<F: Family, H: Hasher, K: QmdbKey, V, const N: usize, E: ValueEncoding<Value = V>> Clone
@@ -57,7 +56,6 @@ where
             publication: self.publication.clone(),
             op_cfg: self.op_cfg.clone(),
             read_cache: self.read_cache.clone(),
-            _marker: PhantomData,
         }
     }
 }
@@ -128,7 +126,6 @@ where
             publication: Arc::new(core::PublicationCache::default()),
             op_cfg,
             read_cache: Arc::new(ReadCache::new()),
-            _marker: PhantomData,
         }
     }
 }
