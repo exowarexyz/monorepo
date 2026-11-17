@@ -214,6 +214,59 @@ where
     futures::future::join_all(futs).await.into_iter().collect()
 }
 
+/// Most per-key proofs one request builds at once.
+const PROOF_CONCURRENCY: usize = 16;
+
+/// Runs `futs` with at most [`PROOF_CONCURRENCY`] in flight and returns their outputs in
+/// input order. On failure it returns the earliest failing input's error, as running them
+/// one at a time would.
+pub(crate) async fn try_join_bounded<T, Fut>(
+    futs: impl IntoIterator<Item = Fut>,
+) -> Result<Vec<T>, QmdbError>
+where
+    Fut: std::future::Future<Output = Result<T, QmdbError>>,
+{
+    use futures::StreamExt as _;
+
+    let mut pending = futs.into_iter().enumerate();
+    let mut running = futures::stream::FuturesUnordered::new();
+    let mut outputs = Vec::new();
+    let mut first_error: Option<(usize, QmdbError)> = None;
+    loop {
+        // Unstarted inputs come after every started one, so after a failure none of
+        // them can be the earliest.
+        while first_error.is_none() && running.len() < PROOF_CONCURRENCY {
+            let Some((index, fut)) = pending.next() else {
+                break;
+            };
+            running.push(async move { (index, fut.await) });
+        }
+        let Some((index, output)) = running.next().await else {
+            break;
+        };
+        match output {
+            Ok(value) => {
+                if outputs.len() <= index {
+                    outputs.resize_with(index + 1, || None);
+                }
+                outputs[index] = Some(value);
+            }
+            Err(error) => {
+                if first_error.as_ref().is_none_or(|(first, _)| index < *first) {
+                    first_error = Some((index, error));
+                }
+            }
+        }
+    }
+    if let Some((_, error)) = first_error {
+        return Err(error);
+    }
+    Ok(outputs
+        .into_iter()
+        .map(|value| value.expect("every input finished"))
+        .collect())
+}
+
 pub(crate) async fn compute_ops_root<F: Family, H: Hasher>(
     session: &ReadSession,
     watermark: Location<F>,

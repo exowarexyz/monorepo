@@ -714,3 +714,41 @@ async fn publication_cache_refresh_preserves_evidence_on_lagging_and_empty_repli
     );
     assert_eq!(calls.load(Ordering::SeqCst), 1);
 }
+
+#[tokio::test(start_paused = true)]
+async fn try_join_bounded_keeps_order_and_bound_and_earliest_error() {
+    use std::time::Duration;
+
+    // Later inputs finish first, and no more than the bound run at once.
+    let running = Arc::new(AtomicUsize::new(0));
+    let peak = Arc::new(AtomicUsize::new(0));
+    let outputs = try_join_bounded((0..40u64).map(|index| {
+        let (running, peak) = (running.clone(), peak.clone());
+        async move {
+            let now = running.fetch_add(1, Ordering::SeqCst) + 1;
+            peak.fetch_max(now, Ordering::SeqCst);
+            tokio::time::sleep(Duration::from_millis(40 - index)).await;
+            running.fetch_sub(1, Ordering::SeqCst);
+            Ok(index)
+        }
+    }))
+    .await
+    .unwrap();
+    assert_eq!(outputs, (0..40).collect::<Vec<_>>());
+    assert_eq!(peak.load(Ordering::SeqCst), PROOF_CONCURRENCY);
+
+    // Input 7 fails after input 9 does, and its error is the one returned.
+    let error = try_join_bounded((0..20u64).map(|index| async move {
+        match index {
+            7 => {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+                Err(QmdbError::CorruptData("7".to_string()))
+            }
+            9 => Err(QmdbError::CorruptData("9".to_string())),
+            _ => Ok(index),
+        }
+    }))
+    .await
+    .unwrap_err();
+    assert!(matches!(error, QmdbError::CorruptData(message) if message == "7"));
+}

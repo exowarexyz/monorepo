@@ -938,22 +938,30 @@ where
         let session = ReadSession::fixed(self.store.clone(), Some(watermark.sequence_number));
         let tip = self.current_tip(&session, watermark.location).await?;
         let mut seen = BTreeSet::<Vec<u8>>::new();
-        let mut proofs = Vec::with_capacity(keys.len());
         for key in keys {
             let key_bytes = error_key(key);
             if !seen.insert(key_bytes.clone()) {
                 return Err(QmdbError::DuplicateRequestedKey { key: key_bytes });
             }
-            match self.key_value_proof_raw(&session, &tip, key.as_ref()).await {
-                Ok(proof) => proofs.push(RawKeyLookupProof::Hit(proof)),
-                Err(QmdbError::ProofKeyNotFound { .. } | QmdbError::KeyNotActive { .. }) => {
-                    let proof = self.key_exclusion_proof(&session, &tip, key).await?;
-                    proofs.push(RawKeyLookupProof::Miss(proof));
-                }
-                Err(err) => return Err(err),
-            }
         }
-        Ok(proofs)
+        // Keys are independent at a fixed session and tip, so prove them together.
+        let (session, tip) = (&session, &tip);
+        // Collected so the closure stays out of the future, which must be `Send`.
+        let proofs: Vec<_> = keys
+            .iter()
+            .map(|key| async move {
+                match self.key_value_proof_raw(session, tip, key.as_ref()).await {
+                    Ok(proof) => Ok(RawKeyLookupProof::Hit(proof)),
+                    Err(QmdbError::ProofKeyNotFound { .. } | QmdbError::KeyNotActive { .. }) => {
+                        self.key_exclusion_proof(session, tip, key)
+                            .await
+                            .map(RawKeyLookupProof::Miss)
+                    }
+                    Err(err) => Err(err),
+                }
+            })
+            .collect();
+        core::try_join_bounded(proofs).await
     }
 
     /// Verified ordered current-state range proof for `[start_key, end_key)`.
@@ -1020,23 +1028,32 @@ where
             },
         )
         .await?;
-        // The walk found each entry's location, so entries skip the key lookup.
-        let mut entries = Vec::with_capacity(active.len());
-        for (key, location) in &active {
-            let reads = self.proof_reads(&session, &tip, *location).await?;
-            let proof =
-                Self::active_key_proof(&self.op_cfg, &tip, reads, key.as_slice(), *location)?;
-            entries.push(proof);
-        }
-
-        let start_proof = if entries
-            .first()
-            .is_some_and(|entry| entry.operation.key() == Some(&start_key))
-        {
-            None
-        } else {
-            Some(self.key_exclusion_proof(&session, &tip, &start_key).await?)
+        // The walk found each entry's location, so entries skip the key lookup. Every
+        // read below needs only the session and tip, so they all run together.
+        let (session, tip) = (&session, &tip);
+        let entries: Vec<_> = active
+            .iter()
+            .map(|(key, location)| async move {
+                let reads = self.proof_reads(session, tip, *location).await?;
+                Self::active_key_proof(&self.op_cfg, tip, reads, key.as_slice(), *location)
+            })
+            .collect();
+        let entries = core::try_join_bounded(entries);
+        let start_proof = async {
+            // An entry's proof checks that its operation holds the walked key.
+            if active
+                .first()
+                .is_some_and(|(key, _)| key.as_slice() == start_key.as_ref())
+            {
+                return Ok(None);
+            }
+            self.key_exclusion_proof(session, tip, &start_key)
+                .await
+                .map(Some)
         };
+        let (entries, start_proof) = futures::join!(entries, start_proof);
+        // Entry errors first, as when the start proof ran after the entries.
+        let (entries, start_proof) = (entries?, start_proof?);
 
         Ok(RawKeyRangeProof {
             watermark: watermark.location,

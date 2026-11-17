@@ -571,21 +571,29 @@ where
         let session = ReadSession::fixed(self.store.clone(), Some(watermark.sequence_number));
         let tip = self.current_tip(&session, watermark.location).await?;
         let mut seen = BTreeSet::<Vec<u8>>::new();
-        let mut proofs = Vec::with_capacity(keys.len());
         for key in keys {
             let key_bytes = error_key(key);
             if !seen.insert(key_bytes.clone()) {
                 return Err(QmdbError::DuplicateRequestedKey { key: key_bytes });
             }
-            match self.key_value_proof_raw(&session, &tip, key.as_ref()).await {
-                Ok(proof) => proofs.push(proof),
-                Err(QmdbError::ProofKeyNotFound { .. } | QmdbError::KeyNotActive { .. }) => {
-                    continue;
-                }
-                Err(err) => return Err(err),
-            }
         }
-        Ok(proofs)
+        // Keys are independent at a fixed session and tip, so prove them together.
+        let (session, tip) = (&session, &tip);
+        // Collected so the closure stays out of the future, which must be `Send`.
+        let proofs: Vec<_> = keys
+            .iter()
+            .map(|key| async move {
+                match self.key_value_proof_raw(session, tip, key.as_ref()).await {
+                    Ok(proof) => Ok(Some(proof)),
+                    Err(QmdbError::ProofKeyNotFound { .. } | QmdbError::KeyNotActive { .. }) => {
+                        Ok(None)
+                    }
+                    Err(err) => Err(err),
+                }
+            })
+            .collect();
+        let proofs = core::try_join_bounded(proofs).await?;
+        Ok(proofs.into_iter().flatten().collect())
     }
 }
 
