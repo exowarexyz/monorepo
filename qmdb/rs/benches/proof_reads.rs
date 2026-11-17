@@ -10,6 +10,7 @@
 #[path = "../tests/common/mod.rs"]
 mod common;
 
+use common::CountingQuery;
 use commonware_cryptography::{Hasher as _, Sha256};
 use commonware_runtime::{
     buffer::paged::CacheRef, tokio as cw_tokio, Runner as _, Supervisor as _,
@@ -30,10 +31,7 @@ use exoware_qmdb::{
 use exoware_sdk::{PrefixedStoreClient, StoreClient};
 use std::{
     num::NonZeroU64,
-    sync::{
-        atomic::{AtomicUsize, Ordering},
-        Arc,
-    },
+    sync::Arc,
     time::{Duration, Instant},
 };
 
@@ -69,84 +67,10 @@ type UnorderedSourceDb = UnorderedDb<
     commonware_parallel::Sequential,
 >;
 
-/// A simulator store that waits `delay` before answering each query and counts them.
-struct DelayedQuery {
-    store: Arc<exoware_simulator::RocksStore>,
-    delay: Duration,
-    queries: AtomicUsize,
-}
-
-impl DelayedQuery {
-    async fn wait(&self) {
-        self.queries.fetch_add(1, Ordering::Relaxed);
-        // A zero sleep still waits for a timer tick.
-        if !self.delay.is_zero() {
-            tokio::time::sleep(self.delay).await;
-        }
-    }
-}
-
-impl exoware_server::Sequence for DelayedQuery {
-    fn current_sequence(&self) -> u64 {
-        exoware_server::Sequence::current_sequence(self.store.as_ref())
-    }
-}
-
-impl exoware_server::Query for DelayedQuery {
-    type RangeScan = <exoware_simulator::RocksStore as exoware_server::Query>::RangeScan;
-
-    async fn get(
-        &self,
-        key: bytes::Bytes,
-    ) -> Result<exoware_server::QueryResult<Option<bytes::Bytes>>, String> {
-        self.wait().await;
-        exoware_server::Query::get(self.store.as_ref(), key).await
-    }
-
-    async fn get_many(
-        &self,
-        keys: Vec<bytes::Bytes>,
-    ) -> Result<exoware_server::QueryResult<Vec<(bytes::Bytes, Option<bytes::Bytes>)>>, String>
-    {
-        self.wait().await;
-        exoware_server::Query::get_many(self.store.as_ref(), keys).await
-    }
-
-    async fn range_scan(
-        &self,
-        start: bytes::Bytes,
-        end: bytes::Bytes,
-        limit: usize,
-        forward: bool,
-    ) -> Result<exoware_server::RangeScanResult<Self::RangeScan>, String> {
-        self.wait().await;
-        exoware_server::Query::range_scan(self.store.as_ref(), start, end, limit, forward).await
-    }
-}
-
-/// A store whose writes are immediate and whose queries go through a [`DelayedQuery`].
-async fn delayed_store(delay: Duration) -> (Arc<DelayedQuery>, StoreClient) {
-    let store = Arc::new(
-        exoware_simulator::RocksStore::open_owned(tempfile::tempdir().unwrap(), None).unwrap(),
-    );
-    let query = Arc::new(DelayedQuery {
-        store: store.clone(),
-        delay,
-        queries: AtomicUsize::new(0),
-    });
-    let (_store_server, store_url) = common::spawn_connect_service(exoware_server::connect_stack(
-        exoware_server::AppState::new(store),
-    ))
-    .await;
-    let (_query_server, query_url) = common::spawn_connect_service(exoware_server::query_service(
-        exoware_server::QueryState::new(query.clone()),
-    ))
-    .await;
-    let client = StoreClient::builder()
-        .url(&store_url)
-        .query_url(&query_url)
-        .build()
-        .unwrap();
+/// A store whose writes are immediate and whose queries each wait `delay`.
+async fn delayed_store(delay: Duration) -> (Arc<CountingQuery>, StoreClient) {
+    let (query, client, _servers) = common::counting_store().await;
+    query.set_delay(delay);
     (query, client)
 }
 
@@ -282,7 +206,7 @@ async fn unordered_source() -> Source<UnorderedOp> {
 async fn measure<C, Fut>(
     name: &str,
     runs: usize,
-    query: &DelayedQuery,
+    query: &CountingQuery,
     client: impl Fn() -> C,
     call: impl Fn(C) -> Fut,
 ) where
@@ -292,11 +216,12 @@ async fn measure<C, Fut>(
     let mut queries = Vec::with_capacity(runs);
     for _ in 0..runs {
         let client = client();
-        query.queries.store(0, Ordering::Relaxed);
+        query.take_calls();
         let start = Instant::now();
         call(client).await;
         times.push(start.elapsed());
-        queries.push(query.queries.load(Ordering::Relaxed));
+        let calls = query.take_calls();
+        queries.push(calls.get + calls.get_many + calls.range);
     }
     times.sort();
     queries.sort();

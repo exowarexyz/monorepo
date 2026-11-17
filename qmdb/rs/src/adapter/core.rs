@@ -8,7 +8,7 @@ use crate::{
         merkle_size_for_watermark, op_count_for_watermark, WATERMARK_PREFIX,
     },
     decode_digest,
-    error::QmdbError,
+    error::{error_key, QmdbError},
     PublishedWatermark, VersionedValue,
 };
 use bytes::Bytes;
@@ -20,7 +20,7 @@ use commonware_storage::merkle::{
     hasher::Hasher as MerkleHasher, mem::Mem, Family, Location, Position,
 };
 use exoware_sdk::{keys::Key, RangeMode, ReadSession};
-use std::sync::Mutex;
+use std::{collections::BTreeSet, sync::Mutex};
 
 pub(crate) async fn read_latest_watermark_with_sequence<F: Family>(
     session: &ReadSession,
@@ -215,14 +215,31 @@ where
 }
 
 /// Most per-key proofs one request builds at once.
-const PROOF_CONCURRENCY: usize = 16;
+pub(crate) const PROOF_CONCURRENCY: usize = 16;
 
-/// Runs `run` on each input with at most [`PROOF_CONCURRENCY`] in flight and returns the
-/// outputs in input order. A future is built only when a slot opens. On failure it returns
-/// the earliest failing input's error, as running them one at a time would. It returns as
-/// soon as every input before that one has finished, and drops the rest.
+/// Rejects a request that names the same key twice.
+pub(crate) fn reject_duplicate_keys<Q: AsRef<[u8]>>(keys: &[Q]) -> Result<(), QmdbError> {
+    let mut seen = BTreeSet::new();
+    for key in keys {
+        if !seen.insert(key.as_ref()) {
+            return Err(QmdbError::DuplicateRequestedKey {
+                key: error_key(key),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Runs `run` on each input with at most `limit` in flight and returns the outputs in input
+/// order. A future is built only when a slot opens. On failure it returns the error a serial
+/// loop would, the earliest failing input's, once every input before it has finished, and
+/// drops the rest.
+///
+/// `StreamExt::buffered` keeps a finished output in its slot until every earlier input has
+/// finished, so one slow input stalls the rest. Here a slot frees as soon as its input does.
 pub(crate) async fn try_join_bounded<I, T, Fut>(
     inputs: I,
+    limit: usize,
     run: impl Fn(I::Item) -> Fut,
 ) -> Result<Vec<T>, QmdbError>
 where
@@ -231,50 +248,40 @@ where
 {
     use futures::StreamExt as _;
 
+    assert!(limit > 0, "try_join_bounded needs a nonzero limit");
     let mut pending = inputs.into_iter().enumerate();
     let mut running = futures::stream::FuturesUnordered::new();
-    let mut outputs: Vec<Option<T>> = Vec::new();
+    let mut results: Vec<Option<Result<T, QmdbError>>> = Vec::with_capacity(pending.size_hint().0);
     // Every input before `done` has succeeded.
     let mut done = 0;
-    let mut first_error: Option<(usize, QmdbError)> = None;
+    let mut failed = false;
     loop {
-        // Inputs start in order, so after a failure no unstarted input can be the earliest.
-        while first_error.is_none() && running.len() < PROOF_CONCURRENCY {
+        // Inputs start in order, so after a failure no unstarted input can fail earlier.
+        while !failed && running.len() < limit {
             let Some((index, input)) = pending.next() else {
                 break;
             };
-            outputs.push(None);
+            results.push(None);
             let fut = run(input);
             running.push(async move { (index, fut.await) });
         }
-        let Some((index, output)) = running.next().await else {
+        let Some((index, result)) = running.next().await else {
             break;
         };
-        match output {
-            Ok(value) => outputs[index] = Some(value),
-            Err(error) => {
-                if first_error.as_ref().is_none_or(|(first, _)| index < *first) {
-                    first_error = Some((index, error));
-                }
+        failed |= result.is_err();
+        results[index] = Some(result);
+        while let Some(Some(result)) = results.get(done) {
+            if result.is_err() {
+                let error = results.swap_remove(done).and_then(Result::err);
+                return Err(error.expect("checked above"));
             }
-        }
-        while outputs.get(done).is_some_and(Option::is_some) {
             done += 1;
         }
-        if first_error
-            .as_ref()
-            .is_some_and(|(first, _)| *first == done)
-        {
-            break;
-        }
     }
-    if let Some((_, error)) = first_error {
-        return Err(error);
-    }
-    Ok(outputs
+    results
         .into_iter()
-        .map(|value| value.expect("every input finished"))
-        .collect())
+        .map(|result| result.expect("every input finished"))
+        .collect()
 }
 
 pub(crate) async fn compute_ops_root<F: Family, H: Hasher>(

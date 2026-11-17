@@ -718,6 +718,7 @@ async fn publication_cache_refresh_preserves_evidence_on_lagging_and_empty_repli
 #[tokio::test(start_paused = true)]
 async fn try_join_bounded_keeps_order_and_bound_and_earliest_error() {
     use std::time::Duration;
+    const LIMIT: usize = 4;
 
     // Later inputs finish first, no more than the bound run at once, and a future is
     // built only when a slot opens.
@@ -726,7 +727,7 @@ async fn try_join_bounded_keeps_order_and_bound_and_earliest_error() {
     let built = Arc::new(AtomicUsize::new(0));
     let finished = Arc::new(AtomicUsize::new(0));
     let peak_built = Arc::new(AtomicUsize::new(0));
-    let outputs = try_join_bounded(0..40u64, |index| {
+    let outputs = try_join_bounded(0..40u64, LIMIT, |index| {
         let live = built.fetch_add(1, Ordering::SeqCst) + 1 - finished.load(Ordering::SeqCst);
         peak_built.fetch_max(live, Ordering::SeqCst);
         let (running, peak, finished) = (running.clone(), peak.clone(), finished.clone());
@@ -742,23 +743,32 @@ async fn try_join_bounded_keeps_order_and_bound_and_earliest_error() {
     .await
     .unwrap();
     assert_eq!(outputs, (0..40).collect::<Vec<_>>());
-    assert_eq!(peak.load(Ordering::SeqCst), PROOF_CONCURRENCY);
-    assert_eq!(peak_built.load(Ordering::SeqCst), PROOF_CONCURRENCY);
+    assert_eq!(peak.load(Ordering::SeqCst), LIMIT);
+    assert_eq!(peak_built.load(Ordering::SeqCst), LIMIT);
 
-    // Input 7 fails after input 9 does, and its error is the one returned.
-    let error = try_join_bounded(0..20u64, |index| async move {
-        match index {
-            7 => {
-                tokio::time::sleep(Duration::from_millis(5)).await;
-                Err(QmdbError::CorruptData("7".to_string()))
+    // Input 3 fails first and input 1 fails later. Input 1's error is returned, and no
+    // input starts after the first failure.
+    let built = AtomicUsize::new(0);
+    let error = try_join_bounded(0..20u64, LIMIT, |index| {
+        built.fetch_add(1, Ordering::SeqCst);
+        async move {
+            match index {
+                3 => Err(QmdbError::CorruptData("3".to_string())),
+                1 => {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                    Err(QmdbError::CorruptData("1".to_string()))
+                }
+                _ => {
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                    Ok(index)
+                }
             }
-            9 => Err(QmdbError::CorruptData("9".to_string())),
-            _ => Ok(index),
         }
     })
     .await
     .unwrap_err();
-    assert!(matches!(error, QmdbError::CorruptData(message) if message == "7"));
+    assert!(matches!(error, QmdbError::CorruptData(message) if message == "1"));
+    assert_eq!(built.load(Ordering::SeqCst), LIMIT);
 }
 
 #[tokio::test(start_paused = true)]
@@ -768,7 +778,7 @@ async fn try_join_bounded_returns_the_earliest_error_without_waiting_on_later_in
     // Input 0 fails at once while input 1 never finishes.
     let result = tokio::time::timeout(
         Duration::from_secs(5),
-        try_join_bounded(0..2u64, |index| async move {
+        try_join_bounded(0..2u64, PROOF_CONCURRENCY, |index| async move {
             if index == 0 {
                 return Err(QmdbError::CorruptData("0".to_string()));
             }
@@ -782,7 +792,7 @@ async fn try_join_bounded_returns_the_earliest_error_without_waiting_on_later_in
     // Input 1 fails first, so the helper waits for input 0 but not for input 2.
     let result = tokio::time::timeout(
         Duration::from_secs(5),
-        try_join_bounded(0..3u64, |index| async move {
+        try_join_bounded(0..3u64, PROOF_CONCURRENCY, |index| async move {
             match index {
                 0 => {
                     tokio::time::sleep(Duration::from_millis(10)).await;
@@ -800,7 +810,7 @@ async fn try_join_bounded_returns_the_earliest_error_without_waiting_on_later_in
     // An earlier input that fails later still wins.
     let result = tokio::time::timeout(
         Duration::from_secs(5),
-        try_join_bounded(0..3u64, |index| async move {
+        try_join_bounded(0..3u64, PROOF_CONCURRENCY, |index| async move {
             match index {
                 0 => {
                     tokio::time::sleep(Duration::from_millis(10)).await;

@@ -27,7 +27,7 @@ use commonware_storage::{
     },
 };
 use exoware_sdk::{PrefixedStoreClient, ReadSession};
-use std::{collections::BTreeSet, marker::PhantomData, sync::Arc};
+use std::{marker::PhantomData, sync::Arc};
 
 pub struct Unordered<
     F: Graftable,
@@ -564,22 +564,16 @@ where
         if keys.is_empty() {
             return Err(QmdbError::EmptyProofRequest);
         }
+        core::reject_duplicate_keys(keys)?;
 
         let watermark = self
             .resolve_watermark(watermark, min_sequence_number)
             .await?;
         let session = ReadSession::fixed(self.store.clone(), Some(watermark.sequence_number));
         let tip = self.current_tip(&session, watermark.location).await?;
-        let mut seen = BTreeSet::<Vec<u8>>::new();
-        for key in keys {
-            let key_bytes = error_key(key);
-            if !seen.insert(key_bytes.clone()) {
-                return Err(QmdbError::DuplicateRequestedKey { key: key_bytes });
-            }
-        }
         // Keys are independent at a fixed session and tip, so prove them together.
         let (session, tip) = (&session, &tip);
-        let proofs = core::try_join_bounded(keys, |key| async move {
+        let proofs = core::try_join_bounded(keys, core::PROOF_CONCURRENCY, |key| async move {
             match self.key_value_proof_raw(session, tip, key.as_ref()).await {
                 Ok(proof) => Ok(Some(proof)),
                 Err(QmdbError::ProofKeyNotFound { .. } | QmdbError::KeyNotActive { .. }) => {
