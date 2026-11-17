@@ -26,7 +26,7 @@ use std::{fmt::Display, marker::PhantomData, sync::Arc};
 pub struct CurrentOperationClient<T, F, H, Op: Read, const N: usize> {
     rpc: CurrentOperationServiceClient<T>,
     op_cfg: Arc<Op::Cfg>,
-    _marker: PhantomData<(F, H, Op)>,
+    _marker: PhantomData<(F, H)>,
 }
 
 impl<T, F, H, Op, const N: usize> Clone for CurrentOperationClient<T, F, H, Op, N>
