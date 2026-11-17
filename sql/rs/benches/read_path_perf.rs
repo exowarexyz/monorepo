@@ -4,6 +4,8 @@
 //! profiles include both client and in-process server work. Backend counters measure fetched key
 //! and value bytes, while body counters measure encoded Connect traffic without HTTP headers.
 //! SQL RPC cases include protobuf response decoding, but not client-side result materialization.
+//! `EXOWARE_SQL_BENCH_STORE_DELAY_MS` delays each Store read RPC by that many milliseconds
+//! (default 0), so overlapping requests shows up in execution time.
 
 use axum::{
     body::Body,
@@ -39,6 +41,7 @@ use std::{
         Arc, Mutex,
     },
     task::{Context, Poll},
+    time::Duration,
 };
 use tokio::runtime::Runtime;
 
@@ -90,6 +93,7 @@ struct Traffic {
     response_body_bytes: Arc<AtomicU64>,
     sql_request_body_bytes: Arc<AtomicU64>,
     sql_response_body_bytes: Arc<AtomicU64>,
+    store_delay: Duration,
 }
 
 impl Traffic {
@@ -174,20 +178,18 @@ async fn measure_traffic(
     request: Request,
     next: Next,
 ) -> Response {
-    match request.uri().path().rsplit('/').next() {
-        Some("Get") => {
-            traffic.get.fetch_add(1, Ordering::Relaxed);
+    let read = match request.uri().path().rsplit('/').next() {
+        Some("Get") => Some(&traffic.get),
+        Some("GetMany") => Some(&traffic.get_many),
+        Some("Range") => Some(&traffic.range),
+        Some("Reduce") => Some(&traffic.reduce),
+        _ => None,
+    };
+    if let Some(counter) = read {
+        counter.fetch_add(1, Ordering::Relaxed);
+        if !traffic.store_delay.is_zero() {
+            tokio::time::sleep(traffic.store_delay).await;
         }
-        Some("GetMany") => {
-            traffic.get_many.fetch_add(1, Ordering::Relaxed);
-        }
-        Some("Range") => {
-            traffic.range.fetch_add(1, Ordering::Relaxed);
-        }
-        Some("Reduce") => {
-            traffic.reduce.fetch_add(1, Ordering::Relaxed);
-        }
-        _ => {}
     }
     let (request_bytes, response_bytes) = if sql {
         (
@@ -380,7 +382,16 @@ impl Fixture {
             .enable_all()
             .build()
             .unwrap();
-        let backend = Arc::new(Backend::default());
+        let store_delay = std::env::var("EXOWARE_SQL_BENCH_STORE_DELAY_MS").map_or(0, |ms| {
+            ms.parse().expect("EXOWARE_SQL_BENCH_STORE_DELAY_MS")
+        });
+        let backend = Arc::new(Backend {
+            traffic: Arc::new(Traffic {
+                store_delay: Duration::from_millis(store_delay),
+                ..Traffic::default()
+            }),
+            ..Backend::default()
+        });
         let traffic = backend.traffic.clone();
         let app = Router::new()
             .route_service(
@@ -563,6 +574,7 @@ fn read_path_perf(c: &mut Criterion) {
         ("aggregate_filtered_index", "SELECT SUM(amount_cents) FILTER (WHERE status = 'open' AND amount_cents >= 59960) FROM covered_orders".to_string(), 1),
         ("aggregate_filtered_index_grouped", "SELECT id, SUM(amount_cents) FILTER (WHERE status = 'open' AND amount_cents >= 59960) FROM covered_orders GROUP BY id".to_string(), 6000),
         ("aggregate_grouped_ranges", "SELECT status, SUM(amount_cents), AVG(amount_cents) FROM orders WHERE id IN (0, 100, 200, 300, 400, 500, 600, 700) GROUP BY status".to_string(), 1),
+        ("aggregate_filtered_jobs", "SELECT COUNT(*), SUM(amount_cents) FILTER (WHERE status = 'open'), SUM(amount_cents) FILTER (WHERE status = 'closed') FROM orders".to_string(), 1),
         ("aggregate_sparse", format!("SELECT id, {} FROM orders GROUP BY id", (0..8).map(|i| format!("SUM(amount_cents) FILTER (WHERE amount_cents >= {})", i * 1000)).collect::<Vec<_>>().join(", ")), 6000),
     ];
     // Profiles include client and in-process server allocations on one runtime thread
