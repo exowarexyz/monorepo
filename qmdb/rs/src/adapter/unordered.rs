@@ -579,20 +579,16 @@ where
         }
         // Keys are independent at a fixed session and tip, so prove them together.
         let (session, tip) = (&session, &tip);
-        // Collected so the closure stays out of the future, which must be `Send`.
-        let proofs: Vec<_> = keys
-            .iter()
-            .map(|key| async move {
-                match self.key_value_proof_raw(session, tip, key.as_ref()).await {
-                    Ok(proof) => Ok(Some(proof)),
-                    Err(QmdbError::ProofKeyNotFound { .. } | QmdbError::KeyNotActive { .. }) => {
-                        Ok(None)
-                    }
-                    Err(err) => Err(err),
+        let proofs = core::try_join_bounded(keys, |key| async move {
+            match self.key_value_proof_raw(session, tip, key.as_ref()).await {
+                Ok(proof) => Ok(Some(proof)),
+                Err(QmdbError::ProofKeyNotFound { .. } | QmdbError::KeyNotActive { .. }) => {
+                    Ok(None)
                 }
-            })
-            .collect();
-        let proofs = core::try_join_bounded(proofs).await?;
+                Err(err) => Err(err),
+            }
+        })
+        .await?;
         Ok(proofs.into_iter().flatten().collect())
     }
 }

@@ -719,26 +719,34 @@ async fn publication_cache_refresh_preserves_evidence_on_lagging_and_empty_repli
 async fn try_join_bounded_keeps_order_and_bound_and_earliest_error() {
     use std::time::Duration;
 
-    // Later inputs finish first, and no more than the bound run at once.
+    // Later inputs finish first, no more than the bound run at once, and a future is
+    // built only when a slot opens.
     let running = Arc::new(AtomicUsize::new(0));
     let peak = Arc::new(AtomicUsize::new(0));
-    let outputs = try_join_bounded((0..40u64).map(|index| {
-        let (running, peak) = (running.clone(), peak.clone());
+    let built = Arc::new(AtomicUsize::new(0));
+    let finished = Arc::new(AtomicUsize::new(0));
+    let peak_built = Arc::new(AtomicUsize::new(0));
+    let outputs = try_join_bounded(0..40u64, |index| {
+        let live = built.fetch_add(1, Ordering::SeqCst) + 1 - finished.load(Ordering::SeqCst);
+        peak_built.fetch_max(live, Ordering::SeqCst);
+        let (running, peak, finished) = (running.clone(), peak.clone(), finished.clone());
         async move {
             let now = running.fetch_add(1, Ordering::SeqCst) + 1;
             peak.fetch_max(now, Ordering::SeqCst);
             tokio::time::sleep(Duration::from_millis(40 - index)).await;
             running.fetch_sub(1, Ordering::SeqCst);
+            finished.fetch_add(1, Ordering::SeqCst);
             Ok(index)
         }
-    }))
+    })
     .await
     .unwrap();
     assert_eq!(outputs, (0..40).collect::<Vec<_>>());
     assert_eq!(peak.load(Ordering::SeqCst), PROOF_CONCURRENCY);
+    assert_eq!(peak_built.load(Ordering::SeqCst), PROOF_CONCURRENCY);
 
     // Input 7 fails after input 9 does, and its error is the one returned.
-    let error = try_join_bounded((0..20u64).map(|index| async move {
+    let error = try_join_bounded(0..20u64, |index| async move {
         match index {
             7 => {
                 tokio::time::sleep(Duration::from_millis(5)).await;
@@ -747,8 +755,63 @@ async fn try_join_bounded_keeps_order_and_bound_and_earliest_error() {
             9 => Err(QmdbError::CorruptData("9".to_string())),
             _ => Ok(index),
         }
-    }))
+    })
     .await
     .unwrap_err();
     assert!(matches!(error, QmdbError::CorruptData(message) if message == "7"));
+}
+
+#[tokio::test(start_paused = true)]
+async fn try_join_bounded_returns_the_earliest_error_without_waiting_on_later_inputs() {
+    use std::time::Duration;
+
+    // Input 0 fails at once while input 1 never finishes.
+    let result = tokio::time::timeout(
+        Duration::from_secs(5),
+        try_join_bounded(0..2u64, |index| async move {
+            if index == 0 {
+                return Err(QmdbError::CorruptData("0".to_string()));
+            }
+            std::future::pending::<Result<u64, QmdbError>>().await
+        }),
+    )
+    .await
+    .expect("an error from the first input must not wait on later ones");
+    assert!(matches!(result, Err(QmdbError::CorruptData(message)) if message == "0"));
+
+    // Input 1 fails first, so the helper waits for input 0 but not for input 2.
+    let result = tokio::time::timeout(
+        Duration::from_secs(5),
+        try_join_bounded(0..3u64, |index| async move {
+            match index {
+                0 => {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                    Ok(index)
+                }
+                1 => Err(QmdbError::CorruptData("1".to_string())),
+                _ => std::future::pending().await,
+            }
+        }),
+    )
+    .await
+    .expect("the error must return once every earlier input finished");
+    assert!(matches!(result, Err(QmdbError::CorruptData(message)) if message == "1"));
+
+    // An earlier input that fails later still wins.
+    let result = tokio::time::timeout(
+        Duration::from_secs(5),
+        try_join_bounded(0..3u64, |index| async move {
+            match index {
+                0 => {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                    Err(QmdbError::CorruptData("0".to_string()))
+                }
+                1 => Err(QmdbError::CorruptData("1".to_string())),
+                _ => std::future::pending::<Result<u64, QmdbError>>().await,
+            }
+        }),
+    )
+    .await
+    .expect("the earliest error must return without waiting on input 2");
+    assert!(matches!(result, Err(QmdbError::CorruptData(message)) if message == "0"));
 }

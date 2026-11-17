@@ -217,45 +217,55 @@ where
 /// Most per-key proofs one request builds at once.
 const PROOF_CONCURRENCY: usize = 16;
 
-/// Runs `futs` with at most [`PROOF_CONCURRENCY`] in flight and returns their outputs in
-/// input order. On failure it returns the earliest failing input's error, as running them
-/// one at a time would.
-pub(crate) async fn try_join_bounded<T, Fut>(
-    futs: impl IntoIterator<Item = Fut>,
+/// Runs `run` on each input with at most [`PROOF_CONCURRENCY`] in flight and returns the
+/// outputs in input order. A future is built only when a slot opens. On failure it returns
+/// the earliest failing input's error, as running them one at a time would. It returns as
+/// soon as every input before that one has finished, and drops the rest.
+pub(crate) async fn try_join_bounded<I, T, Fut>(
+    inputs: I,
+    run: impl Fn(I::Item) -> Fut,
 ) -> Result<Vec<T>, QmdbError>
 where
+    I: IntoIterator,
     Fut: std::future::Future<Output = Result<T, QmdbError>>,
 {
     use futures::StreamExt as _;
 
-    let mut pending = futs.into_iter().enumerate();
+    let mut pending = inputs.into_iter().enumerate();
     let mut running = futures::stream::FuturesUnordered::new();
-    let mut outputs = Vec::new();
+    let mut outputs: Vec<Option<T>> = Vec::new();
+    // Every input before `done` has succeeded.
+    let mut done = 0;
     let mut first_error: Option<(usize, QmdbError)> = None;
     loop {
-        // Unstarted inputs come after every started one, so after a failure none of
-        // them can be the earliest.
+        // Inputs start in order, so after a failure no unstarted input can be the earliest.
         while first_error.is_none() && running.len() < PROOF_CONCURRENCY {
-            let Some((index, fut)) = pending.next() else {
+            let Some((index, input)) = pending.next() else {
                 break;
             };
+            outputs.push(None);
+            let fut = run(input);
             running.push(async move { (index, fut.await) });
         }
         let Some((index, output)) = running.next().await else {
             break;
         };
         match output {
-            Ok(value) => {
-                if outputs.len() <= index {
-                    outputs.resize_with(index + 1, || None);
-                }
-                outputs[index] = Some(value);
-            }
+            Ok(value) => outputs[index] = Some(value),
             Err(error) => {
                 if first_error.as_ref().is_none_or(|(first, _)| index < *first) {
                     first_error = Some((index, error));
                 }
             }
+        }
+        while outputs.get(done).is_some_and(Option::is_some) {
+            done += 1;
+        }
+        if first_error
+            .as_ref()
+            .is_some_and(|(first, _)| *first == done)
+        {
+            break;
         }
     }
     if let Some((_, error)) = first_error {
