@@ -252,8 +252,8 @@ where
     let mut pending = inputs.into_iter().enumerate();
     let mut running = futures::stream::FuturesUnordered::new();
     let mut results: Vec<Option<Result<T, QmdbError>>> = Vec::with_capacity(pending.size_hint().0);
-    // Every input before `done` has succeeded.
-    let mut done = 0;
+    // Every input before `next_unresolved` has succeeded.
+    let mut next_unresolved = 0;
     let mut failed = false;
     loop {
         // Inputs start in order, so after a failure no unstarted input can fail earlier.
@@ -270,12 +270,12 @@ where
         };
         failed |= result.is_err();
         results[index] = Some(result);
-        while let Some(Some(result)) = results.get(done) {
+        while let Some(Some(result)) = results.get(next_unresolved) {
             if result.is_err() {
-                let error = results.swap_remove(done).and_then(Result::err);
+                let error = results.swap_remove(next_unresolved).and_then(Result::err);
                 return Err(error.expect("checked above"));
             }
-            done += 1;
+            next_unresolved += 1;
         }
     }
     results

@@ -772,6 +772,24 @@ async fn try_join_bounded_keeps_order_and_bound_and_earliest_error() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn try_join_bounded_refills_slots_while_the_first_input_is_pending() {
+    let input_count = 4 * PROOF_CONCURRENCY;
+    let completed = std::cell::Cell::new(0);
+    let outputs = try_join_bounded(0..input_count, PROOF_CONCURRENCY, async |index| {
+        if index == 0 {
+            // Paused time advances only after the other runnable proofs finish.
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            assert_eq!(completed.get(), input_count - 1);
+        }
+        completed.set(completed.get() + 1);
+        Ok(index)
+    })
+    .await
+    .unwrap();
+    assert_eq!(outputs, (0..input_count).collect::<Vec<_>>());
+}
+
+#[tokio::test(start_paused = true)]
 async fn try_join_bounded_returns_the_earliest_error_without_waiting_on_later_inputs() {
     use std::time::Duration;
 

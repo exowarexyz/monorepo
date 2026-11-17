@@ -572,9 +572,9 @@ where
         let session = ReadSession::fixed(self.store.clone(), Some(watermark.sequence_number));
         let tip = self.current_tip(&session, watermark.location).await?;
         // Keys are independent at a fixed session and tip, so prove them together.
-        let (session, tip) = (&session, &tip);
-        let proofs = core::try_join_bounded(keys, core::PROOF_CONCURRENCY, |key| async move {
-            match self.key_value_proof_raw(session, tip, key.as_ref()).await {
+        let proofs = core::try_join_bounded(keys, core::PROOF_CONCURRENCY, async |key| {
+            let result = self.key_value_proof_raw(&session, &tip, key.as_ref()).await;
+            match result {
                 Ok(proof) => Ok(Some(proof)),
                 Err(QmdbError::ProofKeyNotFound { .. } | QmdbError::KeyNotActive { .. }) => {
                     Ok(None)

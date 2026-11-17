@@ -34,6 +34,7 @@ use commonware_storage::{
 };
 use commonware_utils::range::contains_cyclic;
 use exoware_sdk::{keys::Key, PrefixedStoreClient, RangeMode, ReadSession};
+use futures::FutureExt as _;
 use std::{marker::PhantomData, sync::Arc};
 
 /// Maximum number of entries in one key range proof request.
@@ -939,12 +940,11 @@ where
         let session = ReadSession::fixed(self.store.clone(), Some(watermark.sequence_number));
         let tip = self.current_tip(&session, watermark.location).await?;
         // Keys are independent at a fixed session and tip, so prove them together.
-        let (session, tip) = (&session, &tip);
-        core::try_join_bounded(keys, core::PROOF_CONCURRENCY, |key| async move {
-            match self.key_value_proof_raw(session, tip, key.as_ref()).await {
+        core::try_join_bounded(keys, core::PROOF_CONCURRENCY, async |key| {
+            match self.key_value_proof_raw(&session, &tip, key.as_ref()).await {
                 Ok(proof) => Ok(RawKeyLookupProof::Hit(proof)),
                 Err(QmdbError::ProofKeyNotFound { .. } | QmdbError::KeyNotActive { .. }) => self
-                    .key_exclusion_proof(session, tip, key)
+                    .key_exclusion_proof(&session, &tip, key)
                     .await
                     .map(RawKeyLookupProof::Miss),
                 Err(err) => Err(err),
@@ -1019,15 +1019,11 @@ where
         .await?;
         // The walk found each entry's location, so entries skip the key lookup. The entry
         // proofs and the start proof need only the session and tip, so they run together.
-        let (session, tip) = (&session, &tip);
-        let entries = core::try_join_bounded(
-            &active,
-            core::PROOF_CONCURRENCY,
-            |(key, location)| async move {
-                let reads = self.proof_reads(session, tip, *location).await?;
-                Self::active_key_proof(&self.op_cfg, tip, reads, key.as_slice(), *location)
-            },
-        );
+        let entries =
+            core::try_join_bounded(&active, core::PROOF_CONCURRENCY, async |(key, location)| {
+                let reads = self.proof_reads(&session, &tip, *location).await?;
+                Self::active_key_proof(&self.op_cfg, &tip, reads, key.as_slice(), *location)
+            });
         let start_proof = async {
             // An entry's proof checks that its operation holds the walked key.
             if active
@@ -1036,13 +1032,14 @@ where
             {
                 return Ok(None);
             }
-            self.key_exclusion_proof(session, tip, &start_key)
+            self.key_exclusion_proof(&session, &tip, &start_key)
                 .await
                 .map(Some)
         };
-        // An entry error takes precedence over a start proof error.
-        let (entries, start_proof) = futures::join!(entries, start_proof);
-        let (entries, start_proof) = (entries?, start_proof?);
+        // An entry error cancels the start proof. Report a start error only after all entries succeed.
+        let (entries, start_proof) =
+            futures::future::try_join(entries, start_proof.map(Ok)).await?;
+        let start_proof = start_proof?;
 
         Ok(RawKeyRangeProof {
             watermark: watermark.location,
