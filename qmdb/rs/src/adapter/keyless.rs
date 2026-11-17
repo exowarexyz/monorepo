@@ -21,7 +21,7 @@ use commonware_storage::{
     },
 };
 use exoware_sdk::{PrefixedStoreClient, ReadSession};
-use std::{marker::PhantomData, sync::Arc};
+use std::sync::Arc;
 
 pub struct Keyless<F: Family, H: Hasher, V, E: ValueEncoding<Value = V> = VariableEncoding<V>>
 where
@@ -31,7 +31,6 @@ where
     publication: Arc<core::PublicationCache<F>>,
     op_cfg: <keyless::Operation<F, E> as CodecRead>::Cfg,
     read_cache: Arc<ReadCache<F, H::Digest>>,
-    _marker: PhantomData<(F, H, E)>,
 }
 
 impl<F, H, V, E> Clone for Keyless<F, H, V, E>
@@ -47,7 +46,6 @@ where
             publication: self.publication.clone(),
             op_cfg: self.op_cfg.clone(),
             read_cache: self.read_cache.clone(),
-            _marker: PhantomData,
         }
     }
 }
@@ -81,7 +79,6 @@ where
             publication: Arc::new(core::PublicationCache::default()),
             op_cfg,
             read_cache: Arc::new(ReadCache::new()),
-            _marker: PhantomData,
         }
     }
 
