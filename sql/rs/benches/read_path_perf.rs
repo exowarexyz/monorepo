@@ -20,6 +20,7 @@ use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use datafusion::{
     arrow::datatypes::DataType,
     physical_plan::{collect, execution_plan::reset_plan_states, ExecutionPlan},
+    scalar::ScalarValue,
 };
 use exoware_sdk::{transport::set_tcp_nodelay, StoreClient, StoreKeyPrefix};
 use exoware_server::{
@@ -94,6 +95,7 @@ struct Traffic {
     sql_request_body_bytes: Arc<AtomicU64>,
     sql_response_body_bytes: Arc<AtomicU64>,
     store_delay: Duration,
+    target_partitions: AtomicU64,
 }
 
 impl Traffic {
@@ -121,6 +123,8 @@ impl Traffic {
             "READ_PATH_PROFILE {}",
             serde_json::json!({
                 "case": name, "phase": phase,
+                "store_delay_ms": self.store_delay.as_millis(),
+                "target_partitions": self.target_partitions.load(Ordering::Relaxed),
                 "allocation_calls": ALLOC_CALLS.load(Ordering::Relaxed),
                 "allocation_bytes": ALLOC_BYTES.load(Ordering::Relaxed),
                 "get": self.get.load(Ordering::Relaxed),
@@ -478,6 +482,10 @@ impl Fixture {
         });
         let sql_server = Arc::new(exoware_sql::SqlServer::new(schema).unwrap());
         let ctx = sql_server.session().clone();
+        traffic.target_partitions.store(
+            ctx.datafusion().copied_config().target_partitions() as u64,
+            Ordering::Relaxed,
+        );
         let app = Router::new()
             .fallback_service(exoware_sql::sql_connect_stack(sql_server))
             .layer(axum::middleware::from_fn_with_state(
@@ -528,6 +536,18 @@ impl Fixture {
         })
     }
 
+    fn first_row(&self, sql: &str) -> Vec<ScalarValue> {
+        let plan = self.plan(sql);
+        let batches = self
+            .runtime
+            .block_on(collect(plan, self.ctx.datafusion().task_ctx()))
+            .unwrap();
+        let batch = &batches[0];
+        (0..batch.num_columns())
+            .map(|column| ScalarValue::try_from_array(batch.column(column), 0).unwrap())
+            .collect()
+    }
+
     fn query_rpc(&self, sql: &str) {
         self.runtime.block_on(async {
             std::hint::black_box(
@@ -575,6 +595,7 @@ fn read_path_perf(c: &mut Criterion) {
         ("aggregate_filtered_index_grouped", "SELECT id, SUM(amount_cents) FILTER (WHERE status = 'open' AND amount_cents >= 59960) FROM covered_orders GROUP BY id".to_string(), 6000),
         ("aggregate_grouped_ranges", "SELECT status, SUM(amount_cents), AVG(amount_cents) FROM orders WHERE id IN (0, 100, 200, 300, 400, 500, 600, 700) GROUP BY status".to_string(), 1),
         ("aggregate_filtered_jobs", "SELECT COUNT(*), SUM(amount_cents) FILTER (WHERE status = 'open'), SUM(amount_cents) FILTER (WHERE status = 'closed') FROM orders".to_string(), 1),
+        ("aggregate_seeded_jobs", "SELECT status, SUM(CASE WHEN id < 3000 THEN amount_cents END), SUM(CASE WHEN id >= 3000 THEN amount_cents END) FROM orders GROUP BY status".to_string(), 2),
         ("aggregate_sparse", format!("SELECT id, {} FROM orders GROUP BY id", (0..8).map(|i| format!("SUM(amount_cents) FILTER (WHERE amount_cents >= {})", i * 1000)).collect::<Vec<_>>().join(", ")), 6000),
     ];
     // Profiles include client and in-process server allocations on one runtime thread
@@ -587,6 +608,17 @@ fn read_path_perf(c: &mut Criterion) {
         fixture.traffic.reset();
         assert_eq!(fixture.execute(plan.clone()), *expected_rows, "{name}");
         fixture.traffic.profile(name, "execution");
+        if matches!(*name, "aggregate_filtered_jobs" | "aggregate_seeded_jobs") {
+            // These cases exist to time several Reduce jobs, so check they still plan them.
+            assert_eq!(fixture.traffic.reduce.load(Ordering::Relaxed), 3, "{name}");
+        }
+        if *name == "aggregate_filtered_jobs" {
+            assert_eq!(
+                fixture.first_row(sql),
+                [6000, 89_970_000, 90_000_000].map(|value| ScalarValue::Int64(Some(value))),
+                "{name}"
+            );
+        }
         c.bench_with_input(
             BenchmarkId::new("exoware_sql_planning", name),
             sql,
