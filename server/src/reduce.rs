@@ -428,19 +428,19 @@ pub(crate) async fn execute_reduce<Q: Query>(
     })
 }
 
-struct ReducePartition<S: RangeScan> {
+struct ReducePartition<S> {
     scan: Mutex<Option<S>>,
     plan: Arc<ReducePlan>,
     extra: Arc<Mutex<QueryExtra>>,
 }
 
-impl<S: RangeScan> fmt::Debug for ReducePartition<S> {
+impl<S> fmt::Debug for ReducePartition<S> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ReducePartition").finish_non_exhaustive()
     }
 }
 
-struct InputState<S: RangeScan> {
+struct InputState<S> {
     plan: Arc<ReducePlan>,
     extra: Arc<Mutex<QueryExtra>>,
     scan: S,

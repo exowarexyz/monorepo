@@ -33,10 +33,10 @@ use std::{future::Future, sync::Arc};
 impl<F, H, K, V, const N: usize, E> OperationLogReader for Ordered<F, H, K, V, N, E>
 where
     F: Graftable,
-    H: Hasher + Send + Sync + 'static,
-    K: QmdbKey + commonware_codec::Codec + Send + Sync + 'static,
+    H: Hasher,
+    K: QmdbKey,
     V: commonware_codec::Codec + Clone + AsRef<[u8]> + Send + Sync + 'static,
-    E: ValueEncoding<Value = V> + Send + Sync + 'static,
+    E: ValueEncoding<Value = V>,
     ordered::Operation<F, K, E>: Encode + Decode,
 {
     type Family = F;
@@ -85,10 +85,10 @@ where
 impl<F, H, K, V, const N: usize, E> CurrentOperationReader<N> for Ordered<F, H, K, V, N, E>
 where
     F: Graftable,
-    H: Hasher + Send + Sync + 'static,
-    K: QmdbKey + commonware_codec::Codec + Send + Sync + 'static,
-    V: commonware_codec::Codec + Clone + AsRef<[u8]> + Send + Sync + 'static,
-    E: ValueEncoding<Value = V> + Send + Sync + 'static,
+    H: Hasher,
+    K: QmdbKey,
+    V: commonware_codec::Codec + Clone + Send + Sync + 'static,
+    E: ValueEncoding<Value = V>,
     ordered::Operation<F, K, E>: Encode + Decode,
 {
     type Family = F;
@@ -120,10 +120,10 @@ where
 impl<F, H, K, V, const N: usize, E> KeyLookupReader<N> for Ordered<F, H, K, V, N, E>
 where
     F: Graftable,
-    H: Hasher + Send + Sync + 'static,
-    K: QmdbKey + commonware_codec::Codec + Send + Sync + 'static,
-    V: commonware_codec::Codec + Clone + AsRef<[u8]> + Send + Sync + 'static,
-    E: ValueEncoding<Value = V> + Send + Sync + 'static,
+    H: Hasher,
+    K: QmdbKey,
+    V: commonware_codec::Codec + Clone + Send + Sync + 'static,
+    E: ValueEncoding<Value = V>,
     ordered::Operation<F, K, E>: Encode + Decode,
     ExclusionProof<F, K, E, H::Digest, N>: Encode,
 {
@@ -156,12 +156,12 @@ where
 impl<F, H, K, V, const N: usize, E> KeyRangeReader<N> for Ordered<F, H, K, V, N, E>
 where
     F: Graftable,
-    H: Hasher + Send + Sync + 'static,
-    K: QmdbKey + commonware_codec::Codec + Send + Sync + 'static,
-    V: commonware_codec::Codec + Clone + AsRef<[u8]> + Send + Sync + 'static,
-    E: ValueEncoding<Value = V> + Send + Sync + 'static,
+    H: Hasher,
+    K: QmdbKey,
+    V: commonware_codec::Codec + Clone + Send + Sync + 'static,
+    E: ValueEncoding<Value = V>,
     ordered::Operation<F, K, E>: Encode + Decode,
-    ExclusionProof<F, K, E, H::Digest, N>: Encode,
+    ExclusionProof<F, K, E, H::Digest, N>:,
 {
     type Family = F;
     type Digest = H::Digest;
@@ -186,11 +186,11 @@ where
 /// ranges, current operation ranges, and the operation log.
 pub fn ordered_stack<
     F: Graftable,
-    H: Hasher + Send + Sync + 'static,
-    K: QmdbKey + commonware_codec::Codec + Send + Sync + 'static,
+    H: Hasher,
+    K: QmdbKey,
     V: commonware_codec::Codec + Clone + AsRef<[u8]> + Send + Sync + 'static,
     const N: usize,
-    E: ValueEncoding<Value = V> + Send + Sync + 'static,
+    E: ValueEncoding<Value = V>,
 >(
     raw_store: PrefixedStoreClient,
     op_cfg: <ordered::Operation<F, K, E> as Read>::Cfg,
@@ -225,11 +225,11 @@ where
 /// Mount only the ordered-QMDB operation log.
 pub fn ordered_operation_log_stack<
     F: Graftable,
-    H: Hasher + Send + Sync + 'static,
-    K: QmdbKey + commonware_codec::Codec + Send + Sync + 'static,
+    H: Hasher,
+    K: QmdbKey,
     V: commonware_codec::Codec + Clone + AsRef<[u8]> + Send + Sync + 'static,
     const N: usize,
-    E: ValueEncoding<Value = V> + Send + Sync + 'static,
+    E: ValueEncoding<Value = V>,
 >(
     raw_store: PrefixedStoreClient,
     op_cfg: <ordered::Operation<F, K, E> as Read>::Cfg,

@@ -11,7 +11,7 @@ use crate::{
     request::OperationLocations,
     PublishedWatermark,
 };
-use commonware_codec::{Codec, Copying, Decode, Encode, Read as CodecRead};
+use commonware_codec::{Copying, Decode, Read as CodecRead};
 use commonware_cryptography::Hasher;
 use commonware_storage::{
     merkle::{Family, Graftable, Location},
@@ -23,12 +23,8 @@ use commonware_storage::{
 use exoware_sdk::{PrefixedStoreClient, ReadSession};
 use std::{marker::PhantomData, sync::Arc};
 
-pub struct Keyless<
-    F: Family,
-    H: Hasher,
-    V: Codec + Send + Sync,
-    E: ValueEncoding<Value = V> = VariableEncoding<V>,
-> where
+pub struct Keyless<F: Family, H: Hasher, V, E: ValueEncoding<Value = V> = VariableEncoding<V>>
+where
     keyless::Operation<F, E>: CodecRead,
 {
     store: PrefixedStoreClient,
@@ -42,7 +38,6 @@ impl<F, H, V, E> Clone for Keyless<F, H, V, E>
 where
     F: Family,
     H: Hasher,
-    V: Codec + Send + Sync,
     E: ValueEncoding<Value = V>,
     keyless::Operation<F, E>: CodecRead,
 {
@@ -61,7 +56,6 @@ impl<F, H, V, E> std::fmt::Debug for Keyless<F, H, V, E>
 where
     F: Family,
     H: Hasher,
-    V: Codec + Send + Sync,
     E: ValueEncoding<Value = V>,
     keyless::Operation<F, E>: CodecRead,
 {
@@ -74,9 +68,8 @@ impl<F, H, V, E> Keyless<F, H, V, E>
 where
     F: Graftable,
     H: Hasher,
-    V: Codec + Clone + Send + Sync,
     E: ValueEncoding<Value = V>,
-    keyless::Operation<F, E>: Encode + Decode + Clone,
+    keyless::Operation<F, E>: Decode,
 {
     /// Read client for the Store namespace.
     pub fn new(
@@ -301,7 +294,6 @@ async fn inactive_peaks_at<F, V, E>(
 ) -> Result<usize, QmdbError>
 where
     F: Graftable,
-    V: Codec + Clone + Send + Sync,
     E: ValueEncoding<Value = V>,
     keyless::Operation<F, E>: Decode,
 {
@@ -315,8 +307,7 @@ fn inactive_peaks_from_operation<F, V, E>(
     operation: keyless::Operation<F, E>,
 ) -> Result<usize, QmdbError>
 where
-    F: Graftable,
-    V: Codec + Clone + Send + Sync,
+    F: Family,
     E: ValueEncoding<Value = V>,
 {
     let keyless::Operation::Commit(_, floor) = operation else {

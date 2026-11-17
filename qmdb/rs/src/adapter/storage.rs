@@ -20,7 +20,7 @@ use std::{
     sync::Arc,
 };
 
-pub(crate) struct KvMerkleStorage<'a, F: Family, D: Digest> {
+pub(crate) struct KvMerkleStorage<'a, F: Family, D> {
     pub(crate) session: &'a ReadSession,
     pub(crate) size: Position<F>,
     pub(crate) _marker: PhantomData<D>,

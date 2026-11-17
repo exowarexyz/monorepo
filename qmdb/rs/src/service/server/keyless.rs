@@ -9,7 +9,7 @@ use crate::{
     service::proto::qmdb::v1::OperationLogServiceServer,
     PublishedWatermark, QmdbError,
 };
-use commonware_codec::{Decode, Encode, Read};
+use commonware_codec::{Decode, Read};
 use commonware_cryptography::Hasher;
 use commonware_storage::{
     merkle::{Graftable, Location},
@@ -22,10 +22,10 @@ use std::{future::Future, sync::Arc};
 impl<F, H, V, E> OperationLogReader for Keyless<F, H, V, E>
 where
     F: Graftable,
-    H: Hasher + Send + Sync + 'static,
-    V: commonware_codec::Codec + Clone + AsRef<[u8]> + Send + Sync + 'static,
-    E: ValueEncoding<Value = V> + Send + Sync + 'static,
-    keyless::Operation<F, E>: Encode + Decode + Clone,
+    H: Hasher,
+    V: AsRef<[u8]> + 'static,
+    E: ValueEncoding<Value = V>,
+    keyless::Operation<F, E>: Decode,
 {
     type Family = F;
     type Digest = H::Digest;
@@ -76,15 +76,15 @@ where
 /// key.
 pub fn keyless_operation_log_stack<
     F: Graftable,
-    H: Hasher + Send + Sync + 'static,
-    V: commonware_codec::Codec + Clone + AsRef<[u8]> + Send + Sync + 'static,
-    E: ValueEncoding<Value = V> + Send + Sync + 'static,
+    H: Hasher,
+    V: AsRef<[u8]> + 'static,
+    E: ValueEncoding<Value = V>,
 >(
     raw_store: PrefixedStoreClient,
     op_cfg: <keyless::Operation<F, E> as Read>::Cfg,
 ) -> ConnectRpcService<impl ::connectrpc::Dispatcher>
 where
-    keyless::Operation<F, E>: Encode + Decode + Clone,
+    keyless::Operation<F, E>: Decode,
 {
     let reader = Arc::new(Keyless::<F, H, V, E>::new(raw_store.clone(), op_cfg));
     super::stack(OperationLogServiceServer::new(OperationLogServer::new(
