@@ -1,8 +1,5 @@
 use super::*;
-use crate::{
-    engine::Ingest,
-    ingest::{DecodeBuffers, IngestBudget, PutError, PutInput, PutMiddleware},
-};
+use crate::ingest::{DecodeBuffers, IngestBudget, PutError, PutInput, PutMiddleware};
 use connectrpc::{
     client::{full_body, ClientConfig, ClientTransport},
     CodecFormat, ErrorCode,

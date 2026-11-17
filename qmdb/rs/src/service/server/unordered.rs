@@ -30,13 +30,13 @@ use connectrpc::{Chain, ConnectRpcService};
 use exoware_sdk::PrefixedStoreClient;
 use std::{future::Future, sync::Arc};
 
-impl<F, H, K, V, const N: usize, E> OperationLogReader for Unordered<F, H, K, V, N, E>
+impl<F, H, K, const N: usize, E> OperationLogReader for Unordered<F, H, K, E::Value, N, E>
 where
     F: Graftable,
     H: Hasher,
     K: QmdbKey,
-    V: commonware_codec::Codec + Clone + AsRef<[u8]> + Send + Sync + 'static,
-    E: ValueEncoding<Value = V>,
+    E: ValueEncoding,
+    E::Value: AsRef<[u8]>,
     unordered::Operation<F, K, E>: Encode + Decode,
 {
     type Family = F;
@@ -82,13 +82,12 @@ where
     }
 }
 
-impl<F, H, K, V, const N: usize, E> CurrentOperationReader<N> for Unordered<F, H, K, V, N, E>
+impl<F, H, K, const N: usize, E> CurrentOperationReader<N> for Unordered<F, H, K, E::Value, N, E>
 where
     F: Graftable,
     H: Hasher,
     K: QmdbKey,
-    V: commonware_codec::Codec + Clone + Send + Sync + 'static,
-    E: ValueEncoding<Value = V>,
+    E: ValueEncoding,
     unordered::Operation<F, K, E>: Encode + Decode,
 {
     type Family = F;
@@ -117,13 +116,12 @@ where
     }
 }
 
-impl<F, H, K, V, const N: usize, E> KeyLookupReader<N> for Unordered<F, H, K, V, N, E>
+impl<F, H, K, const N: usize, E> KeyLookupReader<N> for Unordered<F, H, K, E::Value, N, E>
 where
     F: Graftable,
     H: Hasher,
     K: QmdbKey,
-    V: commonware_codec::Codec + Clone + Send + Sync + 'static,
-    E: ValueEncoding<Value = V>,
+    E: ValueEncoding,
     unordered::Operation<F, K, E>: Encode + Decode,
 {
     type Family = F;
@@ -158,7 +156,7 @@ pub fn unordered_stack<
     F: Graftable,
     H: Hasher,
     K: QmdbKey,
-    V: commonware_codec::Codec + Clone + AsRef<[u8]> + Send + Sync + 'static,
+    V: AsRef<[u8]> + 'static,
     const N: usize,
     E: ValueEncoding<Value = V>,
 >(
@@ -187,7 +185,7 @@ pub fn unordered_operation_log_stack<
     F: Graftable,
     H: Hasher,
     K: QmdbKey,
-    V: commonware_codec::Codec + Clone + AsRef<[u8]> + Send + Sync + 'static,
+    V: AsRef<[u8]> + 'static,
     const N: usize,
     E: ValueEncoding<Value = V>,
 >(

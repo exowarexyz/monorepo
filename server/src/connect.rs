@@ -7,7 +7,7 @@ use crate::{
     reduce::{decode_group, execute_reduce, RangeError, ReduceExecution, REDUCE_BATCH_ROWS},
     stream::{StreamHub, StreamNotifier},
     validate::{self, IngestLimits},
-    FilteredBatch, IngestError, Log, LogBatch, Prune, Query, QueryExtra, RangeScan,
+    FilteredBatch, Ingest, IngestError, Log, LogBatch, Prune, Query, QueryExtra, RangeScan,
     RangeScanResult, Retention, StoreEngine,
 };
 use buffa::Message;
@@ -1254,7 +1254,7 @@ where
     StreamServiceServer::new(StreamConnect::new(state))
 }
 
-pub fn ingest_service<I>(state: IngestState<I>) -> IngestService<I> {
+pub fn ingest_service<I: Ingest>(state: IngestState<I>) -> IngestService<I> {
     crate::ingest::service::PutService::new(
         state,
         ConnectRpcService::new(connectrpc::Router::new()),
