@@ -673,13 +673,10 @@ impl ExecutionPlan for KvAggregateExec {
         // One window over every job's ranges, so a later job's ranges open while an
         // earlier job is still running. Output keeps job and range order, which keeps
         // Final's float results deterministic.
-        let ranges = jobs.flat_map(|job| {
+        let ranges = jobs.flat_map(|mut job| {
+            let ranges = std::mem::take(&mut job.job.ranges);
             let job = Arc::new(job);
-            job.job
-                .ranges
-                .clone()
-                .into_iter()
-                .map(move |range| (job.clone(), range))
+            ranges.into_iter().map(move |range| (job.clone(), range))
         });
         let batches = futures::stream::iter(ranges)
             .map(move |(job, range)| {
