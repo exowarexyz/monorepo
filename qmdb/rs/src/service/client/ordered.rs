@@ -24,7 +24,6 @@ use commonware_storage::{
     merkle::{Graftable, Location},
     qmdb::{
         any::ordered,
-        current::ordered::proof::constant::ExclusionProof,
         operation::Key as QmdbKey,
         sync::Target as SyncTarget,
         value::{ValueEncoding, VariableEncoding},
@@ -63,7 +62,6 @@ where
     E: ValueEncoding<Value = V>,
     ordered::Operation<F, K, E>: Encode + Read,
     ordered::Update<K, E>: Read,
-    ExclusionProof<F, K, E, H::Digest, N>:,
 {
     pub const fn new(
         op_cfg: <ordered::Operation<F, K, E> as Read>::Cfg,
@@ -122,7 +120,6 @@ where
     E: ValueEncoding<Value = V>,
     ordered::Operation<F, K, E>: Encode + Read,
     ordered::Update<K, E>: Read,
-    ExclusionProof<F, K, E, H::Digest, N>:,
 {
     type Digest = H::Digest;
     type Hit = VerifiedKeyValue<H::Digest, ordered::Operation<F, K, E>, F>;
@@ -214,7 +211,6 @@ where
     E: ValueEncoding<Value = V>,
     ordered::Operation<F, K, E>: Encode + Read,
     ordered::Update<K, E>: Read,
-    ExclusionProof<F, K, E, H::Digest, N>:,
 {
     pub fn plaintext(
         base: &str,
@@ -245,7 +241,6 @@ where
     E: ValueEncoding<Value = V>,
     ordered::Operation<F, K, E>: Encode + Read,
     ordered::Update<K, E>: Read,
-    ExclusionProof<F, K, E, H::Digest, N>:,
 {
     pub fn new(
         transport: T,
@@ -417,7 +412,10 @@ where
     ) -> Result<
         OperationLogSubscription<T::ResponseBody, F, H, ordered::Operation<F, K, E>>,
         QmdbError,
-    > {
+    >
+    where
+        T::ResponseBody: Unpin,
+    {
         self.operation_log.subscribe(request).await
     }
 }

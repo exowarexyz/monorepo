@@ -69,7 +69,7 @@ pub struct Ordered<
     _marker: PhantomData<(F, H, K, E)>,
 }
 
-impl<F: Graftable, H: Hasher, K: QmdbKey, V, const N: usize, E: ValueEncoding<Value = V>> Clone
+impl<F: Family, H: Hasher, K: QmdbKey, V, const N: usize, E: ValueEncoding<Value = V>> Clone
     for Ordered<F, H, K, V, N, E>
 where
     ordered::Operation<F, K, E>: commonware_codec::Read,
@@ -86,7 +86,7 @@ where
     }
 }
 
-impl<F: Graftable, H: Hasher, K: QmdbKey, V, const N: usize, E: ValueEncoding<Value = V>>
+impl<F: Family, H: Hasher, K: QmdbKey, V, const N: usize, E: ValueEncoding<Value = V>>
     std::fmt::Debug for Ordered<F, H, K, V, N, E>
 where
     ordered::Operation<F, K, E>: commonware_codec::Read,
@@ -1113,7 +1113,7 @@ enum ExclusionTarget<F: Family> {
     Commit(Location<F>),
 }
 
-impl<F: Graftable> ExclusionTarget<F> {
+impl<F: Family> ExclusionTarget<F> {
     const fn location(&self) -> Location<F> {
         match self {
             Self::Covering { location, .. } => *location,

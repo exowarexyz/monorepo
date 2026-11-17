@@ -60,7 +60,6 @@ struct CurrentProofConfig {
 fn op_cfg<F>() -> <OrderedOperation<F, Vec<u8>, Vec<u8>> as Read>::Cfg
 where
     F: Family,
-    OrderedOperation<F, Vec<u8>, Vec<u8>>:,
 {
     (
         ((0..=MAX_OPERATION_SIZE).into(), ()),
@@ -185,7 +184,6 @@ fn verify_multi_from_proto<F, H>(
 where
     F: merkle::Graftable,
     H: commonware_cryptography::Hasher,
-    OrderedOperation<F, Vec<u8>, Vec<u8>>:,
 {
     let operations = decode_multi_operations_from_proto::<F>(proto)?;
     let target_root =
@@ -213,7 +211,6 @@ fn decode_multi_with_embedded_root_from_proto<F, H>(
 where
     F: merkle::Graftable,
     H: commonware_cryptography::Hasher,
-    OrderedOperation<F, Vec<u8>, Vec<u8>>:,
 {
     let operations = decode_multi_operations_from_proto::<F>(proto)?;
     if proto.ops_root.is_empty() {
@@ -247,7 +244,6 @@ fn decode_multi_operations_from_proto<F>(
 ) -> Result<Vec<(Location<F>, OrderedOperation<F, Vec<u8>, Vec<u8>>)>, String>
 where
     F: merkle::Graftable,
-    OrderedOperation<F, Vec<u8>, Vec<u8>>:,
 {
     proto
         .operations
@@ -284,7 +280,6 @@ fn verify_operation_range_from_proto<F, H>(
 where
     F: merkle::Graftable,
     H: commonware_cryptography::Hasher,
-    OrderedOperation<F, Vec<u8>, Vec<u8>>:,
 {
     if proto.encoded_operations.is_empty() {
         return Err("operation range proof has no operations".to_string());
@@ -420,7 +415,6 @@ fn verify_current_operation_range_from_proto<F, H>(
 where
     F: merkle::Graftable,
     H: commonware_cryptography::Hasher,
-    OrderedOperation<F, Vec<u8>, Vec<u8>>:,
 {
     // A range proof covers at least one operation and the bitmap chunk holding its activity bit.
     if proto.encoded_operations.is_empty() {
@@ -493,7 +487,6 @@ fn verify_key_value_from_proto<F, H>(
 where
     F: merkle::Graftable,
     H: commonware_cryptography::Hasher,
-    OrderedOperation<F, Vec<u8>, Vec<u8>>:,
 {
     // Only an update operation can prove that a key has a value.
     let operation = OrderedOperation::<F, Vec<u8>, Vec<u8>>::decode_cfg(
@@ -535,7 +528,6 @@ fn verify_key_value_for_key_from_proto<F, H>(
 where
     F: merkle::Graftable,
     H: commonware_cryptography::Hasher,
-    OrderedOperation<F, Vec<u8>, Vec<u8>>:,
 {
     let requested_key = decode_vec_key_wire(requested_key)?;
     let (location, update) = verify_key_value_from_proto::<F, H>(proto, root, config)?;
@@ -558,7 +550,6 @@ fn verify_key_exclusion_from_proto<F, H>(
 where
     F: merkle::Graftable,
     H: commonware_cryptography::Hasher,
-    OrderedOperation<F, Vec<u8>, Vec<u8>>:,
 {
     // Decode with the source database's chunk size, which the proof does not encode.
     let max_digests = proof_digest_cap::<H::Digest>(&proto.proof);
@@ -1011,7 +1002,6 @@ fn lookup_results_to_js<F, H>(
 where
     F: merkle::Graftable,
     H: commonware_cryptography::Hasher,
-    OrderedOperation<F, Vec<u8>, Vec<u8>>:,
 {
     validate_requested_keys(requested_keys).map_err(js_err)?;
     if proto.results.len() != requested_keys.len() {
@@ -1066,7 +1056,6 @@ fn verify_get_range_from_proto<F, H>(
 where
     F: merkle::Graftable,
     H: commonware_cryptography::Hasher,
-    OrderedOperation<F, Vec<u8>, Vec<u8>>:,
 {
     let start_key_wire = start_key;
     let start_key = decode_vec_key_wire(start_key_wire).map_err(js_err)?;

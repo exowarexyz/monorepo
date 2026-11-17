@@ -16,7 +16,6 @@ use commonware_storage::{
     merkle::Graftable,
     qmdb::{
         any::ordered,
-        current::ordered::proof::constant::ExclusionProof,
         operation::Key as QmdbKey,
         value::{ValueEncoding, VariableEncoding},
     },
@@ -79,7 +78,6 @@ where
     E: ValueEncoding<Value = V>,
     ordered::Operation<F, K, E>: Encode + Read,
     ordered::Update<K, E>: Read,
-    ExclusionProof<F, K, E, H::Digest, N>:,
 {
     pub fn new(
         transport: T,
@@ -164,7 +162,6 @@ where
     E: ValueEncoding<Value = V>,
     ordered::Operation<F, K, E>: Encode + Read,
     ordered::Update<K, E>: Read,
-    ExclusionProof<F, K, E, H::Digest, N>:,
 {
     let encoded_start_key = start_key;
     let encoded_end_key = end_key;

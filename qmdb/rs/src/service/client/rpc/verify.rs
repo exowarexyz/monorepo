@@ -78,7 +78,6 @@ where
     E: ValueEncoding<Value = V>,
     ordered::Operation<F, K, E>: Encode + Read,
     ordered::Update<K, E>: Read,
-    ExclusionProof<F, K, E, H::Digest, N>:,
 {
     let max_digests = proof_digest_cap::<H::Digest>(&proto.proof);
     let proof = ExclusionProof::<F, K, E, H::Digest, N>::decode_cfg(
