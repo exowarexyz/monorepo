@@ -468,8 +468,9 @@ pub(crate) fn encode_base_row_value(row: &KvRow, model: &TableModel) -> DataFusi
     Ok(stored_row_from_cells(row, model)?.encode())
 }
 
-/// Write the same length and optional slots as a stored row. Uncovered columns
-/// occupy null slots so readers can address covered values by table position.
+/// Encode an index entry's value. It has the same layout as a stored row, one
+/// slot per table column. Columns the index doesn't cover are left null, so
+/// readers find covered values at their table positions.
 pub(crate) fn encode_index_value(base: &StoredRow, spec: &ResolvedIndexSpec) -> Bytes {
     let width = base.values.len();
     assert_eq!(width, spec.value_column_mask.len());
