@@ -43,7 +43,7 @@ where
     unordered::Operation<F, K, E>: Read,
 {
     op_cfg: <unordered::Operation<F, K, E> as Read>::Cfg,
-    _marker: std::marker::PhantomData<(H, V)>,
+    _marker: std::marker::PhantomData<H>,
 }
 
 impl<F, H, K, V, const N: usize, E> UnorderedLookupVerifier<F, H, K, V, N, E>
