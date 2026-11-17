@@ -37,7 +37,7 @@ pub struct BlockData<B> {
 }
 
 impl<B> BlockData<B> {
-    pub fn new(header: B) -> Self {
+    pub const fn new(header: B) -> Self {
         Self {
             header,
             body: Bytes::new(),

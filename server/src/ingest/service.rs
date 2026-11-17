@@ -1,21 +1,24 @@
-use std::convert::Infallible;
-use std::future::Future;
-use std::pin::Pin;
-use std::sync::Arc;
-use std::task::{Context, Poll};
-
+use super::{
+    box_body,
+    transport::{
+        admission_rejection_response, terminate_rejected_response, terminate_unfinished_response,
+        ConnectionControl,
+    },
+    DrainOutcome, PutEncoding, PutInput, PutLimits, PutMetadata,
+};
+use crate::{Ingest, IngestState};
 use axum::body::Body;
 use connectrpc::{ConnectError, ConnectRpcService, Dispatcher};
 use futures::future::BoxFuture;
 use http::{request::Parts, Request, Response};
-use tower::Service;
-
-use super::transport::{
-    admission_rejection_response, terminate_rejected_response, terminate_unfinished_response,
-    ConnectionControl,
+use std::{
+    convert::Infallible,
+    future::Future,
+    pin::Pin,
+    sync::Arc,
+    task::{Context, Poll},
 };
-use super::{box_body, DrainOutcome, PutEncoding, PutInput, PutLimits, PutMetadata};
-use crate::{Ingest, IngestState};
+use tower::Service;
 
 const PUT_PATH: &str = exoware_sdk::ingest::SERVICE_PUT_SPEC.procedure;
 
@@ -252,25 +255,19 @@ async fn put<I: Ingest>(
         .size_hint()
         .exact()
         .and_then(|length| usize::try_from(length).ok());
-    let known_bound = match (
-        declared_length.as_ref().ok().copied().flatten(),
-        exact_length,
-    ) {
+    let declared = declared_length.as_ref().ok().copied().flatten();
+    let known_bound = match (declared, exact_length) {
         (Some(declared), Some(exact)) => Some(declared.min(exact)),
         (declared, exact) => declared.or(exact),
     };
+    let compression = compressed(&parts);
     let metadata = PutMetadata {
-        encoding: if compressed(&parts).unwrap_or(false) {
+        encoding: if matches!(compression, Ok(true)) {
             PutEncoding::Zstd
         } else {
             PutEncoding::Identity
         },
-        content_length: declared_length
-            .as_ref()
-            .ok()
-            .copied()
-            .flatten()
-            .or(exact_length),
+        content_length: declared.or(exact_length),
     };
     let mut rejection = if let Err(error) = parsed_timeout {
         Some(error)
@@ -278,7 +275,7 @@ async fn put<I: Ingest>(
         Some(crate::connect::worker_not_ready_error())
     } else {
         validate_protocol(&parts)
-            .and_then(|()| compressed(&parts).map(|_| ()))
+            .and_then(|()| compression.map(|_| ()))
             .and_then(|()| declared_length.map(|_| ()))
             .and_then(|()| {
                 if metadata

@@ -1,25 +1,22 @@
 //! Verifying client for keyless QMDB.
 
-use std::fmt::Display;
-
+use super::rpc::{OperationLogClient, OperationLogSubscription};
+use crate::{
+    proof::VerifiedOperationRange,
+    service::proto::qmdb::v1::{GetOperationRangeRequest, SubscribeRequest},
+    QmdbError,
+};
 use bytes::Bytes;
 use commonware_codec::{Decode, DecodeExt, Encode, Read};
 use commonware_cryptography::Hasher;
-use commonware_storage::merkle::Location;
 use commonware_storage::{
-    merkle::Graftable,
+    merkle::{Graftable, Location},
     qmdb::{any::value::ValueEncoding, keyless},
 };
 use connectrpc::client::{ClientConfig, ClientTransport};
 use exoware_sdk::proto::PreferZstdHttpClient;
 use http_body::Body;
-
-use super::rpc::OperationLogSubscription;
-use crate::proof::VerifiedOperationRange;
-use crate::service::proto::qmdb::v1::{GetOperationRangeRequest, SubscribeRequest};
-use crate::QmdbError;
-
-use super::rpc::OperationLogClient;
+use std::fmt::Display;
 
 /// Verifying client for a keyless-QMDB endpoint: the operation log.
 pub struct Keyless<T, F, H, V, E>

@@ -5,23 +5,24 @@
 
 mod common;
 
-use std::num::NonZeroU64;
-
 use commonware_cryptography::Sha256;
-use commonware_runtime::tokio as cw_tokio;
-use commonware_runtime::{buffer::paged::CacheRef, Runner as _, Supervisor as _};
-use commonware_storage::merkle::{mmr, Location};
-use commonware_storage::qmdb::operation::Operation as _;
-use commonware_storage::qmdb::{
-    any::ordered::variable::Operation as OrderedOp,
-    current::ordered::variable::Db as LocalOrderedDb,
+use commonware_runtime::{
+    buffer::paged::CacheRef, tokio as cw_tokio, Runner as _, Supervisor as _,
 };
-use commonware_storage::translator::TwoCap;
+use commonware_storage::{
+    merkle::{mmr, Location},
+    qmdb::{
+        any::ordered::variable::Operation as OrderedOp,
+        current::ordered::variable::Db as LocalOrderedDb, operation::Operation as _,
+    },
+    translator::TwoCap,
+};
 use commonware_utils::{NZUsize, NZU16, NZU64};
 use exoware_qmdb::{
     adapter::upload::recover_boundary_state, CurrentBoundaryState, MAX_OPERATION_SIZE,
 };
 use exoware_sdk::PrefixedStoreClient;
+use std::num::NonZeroU64;
 
 const N: usize = 32;
 type Digest = commonware_cryptography::sha256::Digest;
@@ -85,7 +86,7 @@ async fn test_mirror_ordered_prune_past_chunk_zero() {
     let (batches, chunk_zero_pruned, expired_key_snapshot) =
         tokio::task::spawn_blocking(move || {
             cw_tokio::Runner::default().start(move |context| async move {
-                let page_cache = CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(8));
+                let page_cache = CacheRef::new(NZU16!(64), NZUsize!(8));
                 let cfg = common::current_variable_config(
                     "current_ordered_variable_mmr_pruned_source",
                     page_cache,
@@ -134,7 +135,7 @@ async fn test_mirror_ordered_prune_past_chunk_zero() {
                             .await
                             .expect("merkleize")
                     };
-                    (db, _) = db.apply_batch(finalized).await.expect("apply");
+                    db = db.apply_batch(finalized).await.expect("apply");
                     // Current pruning is now explicit in Commonware. Keep the
                     // historical operation log intact for this mirror test while
                     // allowing the current bitmap/grafted overlay to prune as far

@@ -1,19 +1,20 @@
 //! Contract tests for RocksDB simulator pruning (user-key scopes via `Prune`) and sequence-log
 //! retention (continuously enforced via `Retention`/`SetRetention`).
 
-use std::future::Future;
-
 use bytes::Bytes;
-use exoware_sdk::keys::Prefix;
-use exoware_sdk::kv_codec::Utf8;
-use exoware_sdk::prune_policy::{
-    GroupBy, KeysScope, OrderBy, OrderEncoding, PrunePolicy, PrunePolicyDocument, RetainPolicy,
-    PRUNE_POLICY_DOCUMENT_VERSION,
+use exoware_sdk::{
+    keys::Prefix,
+    kv_codec::Utf8,
+    prune_policy::{
+        GroupBy, KeysScope, OrderBy, OrderEncoding, PrunePolicy, PrunePolicyDocument, RetainPolicy,
+        PRUNE_POLICY_DOCUMENT_VERSION,
+    },
+    retention::RetentionPolicy,
+    selector::Selector,
 };
-use exoware_sdk::retention::RetentionPolicy;
-use exoware_sdk::selector::Selector;
 use exoware_server::{Log, Prune, Query, Retention, Sequence};
 use exoware_simulator::RocksStore;
+use std::future::Future;
 use tempfile::tempdir;
 
 const TEST_PREFIX: u8 = 1;

@@ -6,9 +6,11 @@ license.workspace = true
 publish = false
 description = "Unpublished cross-crate integration tests for Exoware."
 
+[lints]
+workspace = true
+
 [dependencies]
 axum = { workspace = true }
-buffa = { workspace = true }
 bytes = { workspace = true }
 commonware-cryptography = { workspace = true }
 commonware-parallel = { workspace = true }

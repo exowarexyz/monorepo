@@ -1,94 +1,143 @@
-use std::cmp::Ordering;
-use std::fmt;
-use std::hash::{Hash, Hasher};
-use std::sync::Arc;
-
+use crate::{diagnostics::*, filter::*, predicate::*, session::read_session, types::*};
 use async_trait::async_trait;
-use datafusion::arrow::array::{ArrayRef, UInt64Array};
-use datafusion::arrow::compute::cast_with_options;
-use datafusion::arrow::datatypes::{i256, DataType, Schema, SchemaRef, TimeUnit};
-use datafusion::arrow::record_batch::RecordBatch;
-use datafusion::catalog::Session;
-use datafusion::common::format::DEFAULT_CAST_OPTIONS;
-use datafusion::common::tree_node::{Transformed, TreeNode, TreeNodeRecursion};
-use datafusion::common::{DFSchemaRef, DataFusionError, Result as DataFusionResult, ScalarValue};
-use datafusion::datasource::source_as_provider;
-use datafusion::execution::context::{QueryPlanner, TaskContext};
-use datafusion::functions_aggregate::{
-    average::Avg,
-    count::Count,
-    min_max::{Max, Min},
-    sum::Sum,
+use datafusion::{
+    arrow::{
+        array::{ArrayRef, UInt64Array},
+        compute::cast_with_options,
+        datatypes::{i256, DataType, Schema, SchemaRef, TimeUnit},
+        record_batch::RecordBatch,
+    },
+    catalog::Session,
+    common::{
+        format::DEFAULT_CAST_OPTIONS,
+        tree_node::{Transformed, TreeNode, TreeNodeRecursion},
+        DFSchemaRef, DataFusionError, Result as DataFusionResult, ScalarValue,
+    },
+    datasource::source_as_provider,
+    execution::context::{QueryPlanner, TaskContext},
+    functions_aggregate::{
+        average::Avg,
+        count::Count,
+        min_max::{Max, Min},
+        sum::Sum,
+    },
+    logical_expr::{
+        physical_planning_context::PhysicalPlanningContext,
+        utils::{conjunction, disjunction},
+        Aggregate, Expr, ExprSchemable, Extension, LogicalPlan, Operator, UserDefinedLogicalNode,
+        UserDefinedLogicalNodeCore,
+    },
+    optimizer::optimizer::OptimizerRule,
+    physical_expr::{
+        aggregate::LoweredAggregateBuilder, expressions::Column, EquivalenceProperties,
+        Partitioning, PhysicalExpr,
+    },
+    physical_plan::{
+        aggregates::{AggregateExec, AggregateMode, PhysicalGroupBy},
+        execution_plan::{Boundedness, EmissionType},
+        stream::RecordBatchStreamAdapter,
+        DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties, SendableRecordBatchStream,
+    },
+    physical_planner::{DefaultPhysicalPlanner, ExtensionPlanner, PhysicalPlanner},
 };
-use datafusion::logical_expr::physical_planning_context::PhysicalPlanningContext;
-use datafusion::logical_expr::utils::{conjunction, disjunction};
-use datafusion::logical_expr::{
-    Aggregate, Expr, ExprSchemable, Extension, LogicalPlan, Operator, UserDefinedLogicalNode,
-    UserDefinedLogicalNodeCore,
-};
-use datafusion::optimizer::optimizer::OptimizerRule;
-use datafusion::physical_expr::aggregate::LoweredAggregateBuilder;
-use datafusion::physical_expr::expressions::Column;
-use datafusion::physical_expr::{EquivalenceProperties, Partitioning, PhysicalExpr};
-use datafusion::physical_plan::aggregates::{AggregateExec, AggregateMode, PhysicalGroupBy};
-use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
-use datafusion::physical_plan::{
-    stream::RecordBatchStreamAdapter, DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties,
-    SendableRecordBatchStream,
-};
-use datafusion::physical_planner::{DefaultPhysicalPlanner, ExtensionPlanner, PhysicalPlanner};
 use exoware_proto::{
     query, to_domain_reduced_value_from_view, RangeReduceOp, RangeReduceRequest, RangeReducerSpec,
 };
 use exoware_sdk as exoware_proto;
-use exoware_sdk::kv_codec::{
-    KvExpr, KvFieldKind, KvFieldRef, KvPredicate, KvPredicateCheck, KvPredicateConstraint,
-    KvReducedValue,
+use exoware_sdk::{
+    kv_codec::{
+        KvExpr, KvFieldKind, KvFieldRef, KvPredicate, KvPredicateCheck, KvPredicateConstraint,
+        KvReducedValue,
+    },
+    PrefixedStoreClient, ReadSession,
 };
-use exoware_sdk::{PrefixedStoreClient, ReadSession};
 use futures::{stream::BoxStream, StreamExt, TryStreamExt};
+use std::{
+    cmp::Ordering,
+    fmt,
+    hash::{Hash, Hasher},
+    sync::Arc,
+};
 
-use crate::diagnostics::*;
-use crate::filter::*;
-use crate::predicate::*;
-use crate::session::read_session;
-use crate::types::*;
-
+/// Optimizer rule that replaces a DataFusion `Aggregate` over a `KvTable` scan with a
+/// `KvAggregateNode` when every group and aggregate expression compiles to Store reductions.
+///
+/// The scan may sit beneath projections and subquery aliases, and plans the rule cannot
+/// compile are left unchanged.
 #[derive(Debug)]
 pub(crate) struct KvAggregatePushdownRule;
 
+/// Key space read by a Store reduction and used to locate each input column.
 #[derive(Debug, Clone)]
 pub(crate) enum AggregateAccessPath {
+    /// Base rows keyed by primary key. Columns come from the primary key bytes or the row value.
     PrimaryKey,
-    SecondaryIndex { spec_idx: usize },
+    /// Index entries supply columns from the index key, the trailing primary key, or
+    /// values the index stores.
+    SecondaryIndex {
+        /// Position in the table's resolved index specifications.
+        spec_idx: usize,
+    },
 }
 
+/// How one aggregate expression's DataFusion state columns are read from a job's reducer
+/// results. Indices point into the owning job's `request.reducers`.
 #[derive(Debug, Clone)]
 pub(crate) enum AggregateOutputPlan {
-    Direct { reducer_idx: usize },
-    Avg { sum_idx: usize, count_idx: usize },
+    /// One reducer result fills the expression's single state column.
+    Direct {
+        /// Reducer supplying the aggregate's only state value.
+        reducer_idx: usize,
+    },
+    /// Two reducer results fill the count and sum state columns of `AVG`.
+    Avg {
+        /// Sum reducer, mapped to the second state column.
+        sum_idx: usize,
+        /// Count reducer, mapped to the first state column.
+        count_idx: usize,
+    },
 }
 
+/// DataFusion aggregate function that can be pushed down to Store reductions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum AggregatePushdownFunction {
+    /// `COUNT`, reduced as a row count or a count of non-null argument values.
     Count,
+    /// Sum of non-null argument values.
     Sum,
+    /// Minimum non-null argument value.
     Min,
+    /// Maximum non-null argument value.
     Max,
+    /// `AVG`, reduced as a sum and a count of the argument. Pushdown requires a `Float64`
+    /// result type.
     Avg,
 }
 
+/// Scalar expression over table columns that Store reducers can evaluate per row.
+///
+/// The tree is independent of the access path. It becomes a `KvExpr` only once a job has
+/// chosen where each referenced column is decoded from.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum PushdownValueExpr {
+    /// Column at this index in the table model's columns.
     Column(usize),
+    /// Same value for every input row.
     Literal(KvReducedValue),
-    Add(Box<PushdownValueExpr>, Box<PushdownValueExpr>),
-    Sub(Box<PushdownValueExpr>, Box<PushdownValueExpr>),
-    Mul(Box<PushdownValueExpr>, Box<PushdownValueExpr>),
-    Div(Box<PushdownValueExpr>, Box<PushdownValueExpr>),
-    CastFloat64(Box<PushdownValueExpr>),
-    Lower(Box<PushdownValueExpr>),
-    DateTruncDay(Box<PushdownValueExpr>),
+    /// Sum of the operands.
+    Add(Box<Self>, Box<Self>),
+    /// Left operand minus right operand.
+    Sub(Box<Self>, Box<Self>),
+    /// Product of the operands.
+    Mul(Box<Self>, Box<Self>),
+    /// Left operand divided by right operand.
+    Div(Box<Self>, Box<Self>),
+    /// Conversion of an `Int64` or `UInt64` operand to `Float64`.
+    CastFloat64(Box<Self>),
+    /// Lowercase form of a `Utf8` operand.
+    Lower(Box<Self>),
+    /// `date_trunc('day', ...)` of a date or timezone-free timestamp operand.
+    DateTruncDay(Box<Self>),
 }
 
 impl PushdownValueExpr {
@@ -110,58 +159,107 @@ impl PushdownValueExpr {
     }
 }
 
+/// Value an aggregate function consumes from each row.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum AggregatePushdownArgument {
+    /// Every row counts, as in `COUNT(*)` or `COUNT` of a non-null literal. Only `COUNT` uses it.
     CountAll,
+    /// Expression evaluated for each row.
     Expr(PushdownValueExpr),
 }
 
+/// Aggregate call rewritten into a pushdown function, a per-row argument, and the row
+/// conditions that limit which rows it reduces.
 #[derive(Debug, Clone)]
 pub(crate) struct NormalizedAggregateExpr {
+    /// Aggregate function to reduce with.
     pub(crate) func: AggregatePushdownFunction,
+    /// Value reduced from each selected row.
     pub(crate) argument: AggregatePushdownArgument,
+    /// Aggregate-local `FILTER (WHERE ...)`, evaluated by the reducer. Scalar plans fold it
+    /// into `guard`.
     pub(crate) filter: Option<Expr>,
+    /// Condition applied to the job's input, so it can narrow key ranges. Combines the
+    /// disjunction of `CASE WHEN` conditions with `filter` for scalar aggregates.
     pub(crate) guard: Option<Expr>,
 }
 
+/// One Store range reduction, issued once per key range on a single access path.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct AggregateReduceJob {
+    /// Reducers, group keys, and row filter, all compiled against the job's access path.
+    /// Each range returns partial results per group, or one scalar result when `group_by` is
+    /// empty.
     pub(crate) request: RangeReduceRequest,
+    /// Primary key or secondary index key ranges to reduce, each sent as its own request.
+    /// The ranges may cover more rows than the filters accept, and `request.filter` enforces
+    /// the rest. Empty when the predicate yields no range, so the job reduces nothing.
     pub(crate) ranges: Vec<KeyRange>,
 }
 
+/// Store job and output mapping compiled for one aggregate expression before jobs are merged.
 #[derive(Debug, Clone)]
 pub(crate) struct AggregateExprPlan {
+    /// Job that reduces only this expression.
     pub(crate) job: AggregateReduceJob,
+    /// State mapping whose indices point into `job.request.reducers`.
     pub(crate) output: AggregateOutputPlan,
 }
 
+/// Store job shared by aggregate expressions with identical ranges, group keys, and row filter.
 #[derive(Debug, Clone)]
 pub(crate) struct CombinedAggregateJob {
+    /// Job whose reducers are the concatenation of every member expression's reducers.
     pub(crate) job: AggregateReduceJob,
+    /// Members as pairs of the expression's position in the aggregate's `aggr_expr` and its
+    /// output mapping, rebased onto the combined reducer list. Empty for the seed job.
     pub(crate) expr_plans: Vec<(usize, AggregateOutputPlan)>,
 }
 
+/// Compiled Store reductions that produce partial aggregate states for one SQL aggregate.
+///
+/// Each job runs independently with its own access path and ranges. The same group can
+/// therefore appear in several rows, and DataFusion merges those rows in its final aggregate.
 #[derive(Debug, Clone)]
 pub(crate) struct AggregatePushdownSpec {
+    /// Store client for the table's key prefix.
     pub(crate) client: PrefixedStoreClient,
+    /// Number of `GROUP BY` expressions. They are the leading fields of `schema` and of the
+    /// state schema. Zero for a scalar aggregate.
     pub(crate) group_count: usize,
+    /// Reducer-free job that enumerates groups under the scan filters when all aggregates
+    /// are guarded, including grouping without aggregates. Preserves groups that none of
+    /// the aggregate jobs emit.
     pub(crate) seed_job: Option<AggregateReduceJob>,
+    /// Jobs that compute the aggregate expressions. Each expression belongs to exactly one job.
     pub(crate) aggregate_jobs: Vec<CombinedAggregateJob>,
+    /// `EXPLAIN` details for the seed job and each entry of `aggregate_jobs`.
     pub(crate) diagnostics: AggregatePushdownDiagnostics,
+    /// Final output schema of the original aggregate: group fields followed by one field per
+    /// aggregate expression.
     pub(crate) schema: SchemaRef,
 }
 
+/// Leaf execution plan that runs Store reduce jobs and emits partial aggregate states.
+///
+/// It feeds an `AggregateExec` in `AggregateMode::Final` mode. That operator merges rows
+/// with equal group keys and evaluates each DataFusion aggregate from the merged states.
 #[derive(Debug, Clone)]
 pub(crate) struct KvAggregateExec {
+    /// Jobs to run and the shapes needed to decode their responses.
     pub(crate) spec: Arc<AggregatePushdownSpec>,
+    /// Single-partition, bounded properties whose schema is the group fields followed by every
+    /// aggregate's state fields in expression order.
     pub(crate) properties: Arc<PlanProperties>,
+    /// For each aggregate expression, the schema index of its first state field.
     state_offsets: Vec<usize>,
+    /// State values for fields a job does not compute, excluding group fields.
+    /// Nullable fields start null, and non-nullable fields start at zero.
     empty_states: Vec<ScalarValue>,
 }
 
 impl KvAggregatePushdownRule {
-    pub(crate) fn new() -> Self {
+    pub(crate) const fn new() -> Self {
         Self
     }
 
@@ -320,10 +418,15 @@ impl OptimizerRule for KvAggregatePushdownRule {
     }
 }
 
+/// Logical plan node that stands in for an aggregate whose input scan the Store reduces.
+///
+/// The node has no inputs because the Store jobs read the table directly.
 #[derive(Debug, Clone)]
 struct KvAggregateNode {
-    // The original aggregate owns the output schema and logical identity of the compiled Store job
+    /// Original aggregate. It owns the node's output schema and logical identity, and its
+    /// aggregate expressions plan the final DataFusion aggregation.
     aggregate: Aggregate,
+    /// Store jobs compiled from `aggregate`.
     spec: Arc<AggregatePushdownSpec>,
 }
 
@@ -469,6 +572,7 @@ impl ExtensionPlanner for KvAggregateExtensionPlanner {
     }
 }
 
+/// Query planner that adds `KvAggregateExtensionPlanner` to DataFusion's default planner.
 #[derive(Debug)]
 pub(crate) struct KvQueryPlanner;
 
@@ -582,62 +686,40 @@ pub(crate) fn reduced_value_to_scalar(
     value: Option<KvReducedValue>,
     data_type: &DataType,
 ) -> DataFusionResult<ScalarValue> {
-    Ok(match (data_type, value) {
-        (_, Some(KvReducedValue::Int64(v))) => {
-            cast_scalar_value(ScalarValue::Int64(Some(v)), data_type)?
-        }
-        (_, Some(KvReducedValue::UInt64(v))) => {
-            cast_scalar_value(ScalarValue::UInt64(Some(v)), data_type)?
-        }
-        (_, Some(KvReducedValue::Float64(v))) => {
-            cast_scalar_value(ScalarValue::Float64(Some(v)), data_type)?
-        }
-        (_, Some(KvReducedValue::Boolean(v))) => {
-            cast_scalar_value(ScalarValue::Boolean(Some(v)), data_type)?
-        }
-        (_, Some(KvReducedValue::Utf8(v))) => {
-            cast_scalar_value(ScalarValue::Utf8(Some(v)), data_type)?
-        }
-        (_, Some(KvReducedValue::Date32(v))) => {
-            cast_scalar_value(ScalarValue::Date32(Some(v)), data_type)?
-        }
-        (_, Some(KvReducedValue::Date64(v))) => {
-            cast_scalar_value(ScalarValue::Date64(Some(v)), data_type)?
-        }
+    let scalar = match (data_type, value) {
+        (_, Some(KvReducedValue::Int64(v))) => ScalarValue::Int64(Some(v)),
+        (_, Some(KvReducedValue::UInt64(v))) => ScalarValue::UInt64(Some(v)),
+        (_, Some(KvReducedValue::Float64(v))) => ScalarValue::Float64(Some(v)),
+        (_, Some(KvReducedValue::Boolean(v))) => ScalarValue::Boolean(Some(v)),
+        (_, Some(KvReducedValue::Utf8(v))) => ScalarValue::Utf8(Some(v)),
+        (_, Some(KvReducedValue::Date32(v))) => ScalarValue::Date32(Some(v)),
+        (_, Some(KvReducedValue::Date64(v))) => ScalarValue::Date64(Some(v)),
         (DataType::Timestamp(TimeUnit::Microsecond, tz), Some(KvReducedValue::Timestamp(v))) => {
-            ScalarValue::TimestampMicrosecond(Some(v), tz.clone())
+            return Ok(ScalarValue::TimestampMicrosecond(Some(v), tz.clone()));
         }
-        (_, Some(KvReducedValue::Timestamp(v))) => {
-            cast_scalar_value(ScalarValue::TimestampMicrosecond(Some(v), None), data_type)?
+        (_, Some(KvReducedValue::Timestamp(v))) => ScalarValue::TimestampMicrosecond(Some(v), None),
+        (DataType::Decimal128(precision, scale), Some(KvReducedValue::Decimal128(v))) => {
+            return Ok(ScalarValue::Decimal128(Some(v), *precision, *scale));
         }
-        (_, Some(KvReducedValue::Decimal128(v))) => match data_type {
-            DataType::Decimal128(precision, scale) => {
-                ScalarValue::Decimal128(Some(v), *precision, *scale)
-            }
-            _ => {
-                return Err(DataFusionError::Execution(format!(
-                    "unsupported reduced scalar conversion to {:?}",
-                    data_type
-                )))
-            }
-        },
-        (_, Some(KvReducedValue::Decimal256(v))) => match data_type {
-            DataType::Decimal256(precision, scale) => {
-                ScalarValue::Decimal256(Some(i256::from_le_bytes(v)), *precision, *scale)
-            }
-            _ => {
-                return Err(DataFusionError::Execution(format!(
-                    "unsupported reduced scalar conversion to {:?}",
-                    data_type
-                )))
-            }
-        },
-        (_, Some(KvReducedValue::FixedSizeBinary(v))) => cast_scalar_value(
-            ScalarValue::FixedSizeBinary(v.len() as i32, Some(v.to_vec())),
-            data_type,
-        )?,
-        (_, None) => ScalarValue::try_new_null(data_type)?,
-    })
+        (DataType::Decimal256(precision, scale), Some(KvReducedValue::Decimal256(v))) => {
+            return Ok(ScalarValue::Decimal256(
+                Some(i256::from_le_bytes(v)),
+                *precision,
+                *scale,
+            ));
+        }
+        (_, Some(KvReducedValue::Decimal128(_) | KvReducedValue::Decimal256(_))) => {
+            return Err(DataFusionError::Execution(format!(
+                "unsupported reduced scalar conversion to {:?}",
+                data_type
+            )));
+        }
+        (_, Some(KvReducedValue::FixedSizeBinary(v))) => {
+            ScalarValue::FixedSizeBinary(v.len() as i32, Some(v.to_vec()))
+        }
+        (_, None) => return ScalarValue::try_new_null(data_type),
+    };
+    cast_scalar_value(scalar, data_type)
 }
 
 pub(crate) fn cast_scalar_value(
@@ -847,7 +929,7 @@ impl KvAggregateExec {
     }
 }
 
-pub(crate) fn rebase_output_plan(
+pub(crate) const fn rebase_output_plan(
     output: AggregateOutputPlan,
     offset: usize,
 ) -> AggregateOutputPlan {
@@ -933,8 +1015,7 @@ pub(crate) fn try_build_aggregate_pushdown_spec(
             table,
             &filters,
             &compiled_group_exprs,
-            Some(&normalized),
-            Some(data_type),
+            Some((&normalized, data_type)),
         )?
         else {
             return Ok(None);
@@ -952,7 +1033,7 @@ pub(crate) fn try_build_aggregate_pushdown_spec(
 
     let seed_job = if !compiled_group_exprs.is_empty() && !has_unguarded_aggregate {
         let Some((job, diagnostics, _)) =
-            build_aggregate_reduce_job(table, &scan.filters, &compiled_group_exprs, None, None)?
+            build_aggregate_reduce_job(table, &scan.filters, &compiled_group_exprs, None)?
         else {
             return Ok(None);
         };
@@ -984,8 +1065,7 @@ pub(crate) fn build_aggregate_reduce_job(
     table: &KvTable,
     filters: &[Expr],
     group_exprs: &[PushdownValueExpr],
-    aggr_expr: Option<&NormalizedAggregateExpr>,
-    data_type: Option<DataType>,
+    aggregate: Option<(&NormalizedAggregateExpr, DataType)>,
 ) -> DataFusionResult<
     Option<(
         AggregateReduceJob,
@@ -1000,6 +1080,7 @@ pub(crate) fn build_aggregate_reduce_job(
         return Ok(None);
     }
     let predicate = QueryPredicate::from_filters(filters, &table.model);
+    let aggr_expr = aggregate.as_ref().map(|(expr, _)| *expr);
     let reducer_predicate = if let Some(filter) = aggr_expr.and_then(|expr| expr.filter.as_ref()) {
         if !QueryPredicate::supports_filter(filter, &table.model) {
             return Ok(None);
@@ -1032,25 +1113,19 @@ pub(crate) fn build_aggregate_reduce_job(
     } else {
         None
     };
-    let (reducers, output) = match (aggr_expr, data_type) {
-        (Some(expr), Some(data_type)) => match compile_aggregate_expr(
+    let (reducers, output) = match aggregate {
+        Some((expr, data_type)) => match compile_aggregate_expr(
             expr,
             &table.model,
             &table.index_specs,
             &access_path,
-            0,
             data_type,
             reducer_filter,
         ) {
             Ok((reducers, output)) => (reducers, Some(output)),
             Err(_) => return Ok(None),
         },
-        (None, None) => (Vec::new(), None),
-        _ => {
-            return Err(DataFusionError::Execution(
-                "aggregate reduction job configuration mismatch".to_string(),
-            ))
-        }
+        None => (Vec::new(), None),
     };
     let filter = if filters.is_empty() {
         None
@@ -1090,8 +1165,10 @@ pub(crate) fn choose_aggregate_access_path(
     predicate: &QueryPredicate,
     access_plan: &ScanAccessPlan,
 ) -> DataFusionResult<ChosenAggregateAccessPath> {
+    // A reduction over an index must find every required value there because
+    // it cannot fetch missing values from base rows.
     if let Some(index_plan) =
-        predicate.choose_index_plan(&table.model, &table.index_specs, access_plan)?
+        predicate.choose_index_plan(&table.model, &table.index_specs, access_plan)
     {
         if !index_plan.ranges.is_empty()
             && access_plan.index_covers_required_non_pk(&table.index_specs[index_plan.spec_idx])
@@ -1105,6 +1182,9 @@ pub(crate) fn choose_aggregate_access_path(
             ));
         }
     }
+
+    // Reading the primary-key family supplies all required values when no
+    // covering index is selected.
     Ok((
         predicate.primary_key_ranges(
             &table.model,
@@ -1120,14 +1200,10 @@ pub(crate) fn reduce_job_required_projection(
     aggr_expr: Option<&NormalizedAggregateExpr>,
     filter: Option<&QueryPredicate>,
 ) -> Vec<usize> {
-    let mut cols = group_exprs
-        .iter()
-        .flat_map(|group| {
-            let mut cols = Vec::new();
-            group.collect_columns(&mut cols);
-            cols
-        })
-        .collect::<Vec<_>>();
+    let mut cols = Vec::new();
+    for group in group_exprs {
+        group.collect_columns(&mut cols);
+    }
     if let Some(expr) = aggr_expr {
         if let AggregatePushdownArgument::Expr(argument) = &expr.argument {
             argument.collect_columns(&mut cols);
@@ -1158,7 +1234,6 @@ pub(crate) fn compile_aggregate_expr(
     model: &TableModel,
     index_specs: &[ResolvedIndexSpec],
     access_path: &AggregateAccessPath,
-    next_reducer_idx: usize,
     data_type: DataType,
     filter: Option<KvPredicate>,
 ) -> DataFusionResult<(Vec<RangeReducerSpec>, AggregateOutputPlan)> {
@@ -1192,8 +1267,8 @@ pub(crate) fn compile_aggregate_expr(
                 },
             ],
             AggregateOutputPlan::Avg {
-                sum_idx: next_reducer_idx,
-                count_idx: next_reducer_idx + 1,
+                sum_idx: 0,
+                count_idx: 1,
             },
         ));
     }
@@ -1207,9 +1282,7 @@ pub(crate) fn compile_aggregate_expr(
     };
     Ok((
         vec![RangeReducerSpec { op, expr, filter }],
-        AggregateOutputPlan::Direct {
-            reducer_idx: next_reducer_idx,
-        },
+        AggregateOutputPlan::Direct { reducer_idx: 0 },
     ))
 }
 
@@ -1238,7 +1311,7 @@ pub(crate) fn compile_reduce_filter(
     for col_idx in cols {
         checks.push(KvPredicateCheck {
             field: aggregate_field_ref(col_idx, model, index_specs, access_path)?,
-            constraint: compile_kv_predicate_constraint(predicate.constraints.get(&col_idx)?)?,
+            constraint: compile_kv_predicate_constraint(predicate.constraints.get(&col_idx)?),
         });
     }
     Some(KvPredicate {
@@ -1249,8 +1322,8 @@ pub(crate) fn compile_reduce_filter(
 
 pub(crate) fn compile_kv_predicate_constraint(
     constraint: &PredicateConstraint,
-) -> Option<KvPredicateConstraint> {
-    Some(match constraint {
+) -> KvPredicateConstraint {
+    match constraint {
         PredicateConstraint::StringEq(value) => KvPredicateConstraint::StringEq(value.clone()),
         PredicateConstraint::BoolEq(value) => KvPredicateConstraint::BoolEq(*value),
         PredicateConstraint::FixedBinaryEq(value) => {
@@ -1288,7 +1361,7 @@ pub(crate) fn compile_kv_predicate_constraint(
                 max: max.map(|v| v.to_le_bytes()),
             }
         }
-    })
+    }
 }
 
 #[allow(deprecated)]
@@ -1367,6 +1440,7 @@ pub(crate) fn compile_pushdown_value_expr(
     }
 }
 
+/// Resolves aggregate-expression columns against the table schema for type checking.
 #[derive(Debug)]
 struct AggregateExprSchema<'a>(&'a TableModel);
 
@@ -1431,73 +1505,66 @@ pub(crate) fn compile_pushdown_scalar_function(
     func: &datafusion::logical_expr::expr::ScalarFunction,
     model: &TableModel,
 ) -> DataFusionResult<(PushdownValueExpr, KvFieldKind)> {
-    let func_name = func.name().to_ascii_lowercase();
-    match func_name.as_str() {
-        "lower"
-            if func
-                .func
-                .inner()
-                .downcast_ref::<datafusion::functions::string::lower::LowerFunc>()
-                .is_some() =>
-        {
-            if func.args.len() != 1 {
-                return Err(DataFusionError::Execution(
-                    "lower() pushdown requires exactly one argument".to_string(),
-                ));
-            }
-            let (inner, kind) = compile_pushdown_value_expr(&func.args[0], model)?;
-            if kind != KvFieldKind::Utf8 {
-                return Err(DataFusionError::Execution(
-                    "lower() pushdown requires Utf8 input".to_string(),
-                ));
-            }
-            Ok((PushdownValueExpr::Lower(Box::new(inner)), KvFieldKind::Utf8))
+    let function = func.func.inner();
+    if function
+        .downcast_ref::<datafusion::functions::string::lower::LowerFunc>()
+        .is_some()
+    {
+        if func.args.len() != 1 {
+            return Err(DataFusionError::Execution(
+                "lower() pushdown requires exactly one argument".to_string(),
+            ));
         }
-        "date_trunc"
-            if func
-                .func
-                .inner()
-                .downcast_ref::<datafusion::functions::datetime::date_trunc::DateTruncFunc>()
-                .is_some() =>
-        {
-            if func.args.len() != 2 {
-                return Err(DataFusionError::Execution(
-                    "date_trunc() pushdown requires exactly two arguments".to_string(),
-                ));
-            }
-            let unit = extract_pushdown_string_literal(&func.args[0]).ok_or_else(|| {
-                DataFusionError::Execution(
-                    "date_trunc() pushdown requires a string literal unit".to_string(),
-                )
-            })?;
-            if !unit.eq_ignore_ascii_case("day") {
-                return Err(DataFusionError::Execution(
-                    "date_trunc() pushdown only supports 'day'".to_string(),
-                ));
-            }
-            if matches!(
-                func.args[1].get_type(&AggregateExprSchema(model))?,
-                DataType::Timestamp(_, Some(_))
-            ) {
-                return Err(DataFusionError::Execution(
-                    "date_trunc pushdown requires timestamps without timezone metadata".to_string(),
-                ));
-            }
-            let (inner, kind) = compile_pushdown_value_expr(&func.args[1], model)?;
-            if !matches!(
-                kind,
-                KvFieldKind::Date32 | KvFieldKind::Date64 | KvFieldKind::Timestamp
-            ) {
-                return Err(DataFusionError::Execution(
-                    "date_trunc('day', ...) pushdown requires Date32/Date64/Timestamp input"
-                        .to_string(),
-                ));
-            }
-            Ok((PushdownValueExpr::DateTruncDay(Box::new(inner)), kind))
+        let (inner, kind) = compile_pushdown_value_expr(&func.args[0], model)?;
+        if kind != KvFieldKind::Utf8 {
+            return Err(DataFusionError::Execution(
+                "lower() pushdown requires Utf8 input".to_string(),
+            ));
         }
-        _ => Err(DataFusionError::Execution(format!(
-            "pushdown expression does not support function '{func_name}'"
-        ))),
+        Ok((PushdownValueExpr::Lower(Box::new(inner)), KvFieldKind::Utf8))
+    } else if function
+        .downcast_ref::<datafusion::functions::datetime::date_trunc::DateTruncFunc>()
+        .is_some()
+    {
+        if func.args.len() != 2 {
+            return Err(DataFusionError::Execution(
+                "date_trunc() pushdown requires exactly two arguments".to_string(),
+            ));
+        }
+        let unit = extract_pushdown_string_literal(&func.args[0]).ok_or_else(|| {
+            DataFusionError::Execution(
+                "date_trunc() pushdown requires a string literal unit".to_string(),
+            )
+        })?;
+        if !unit.eq_ignore_ascii_case("day") {
+            return Err(DataFusionError::Execution(
+                "date_trunc() pushdown only supports 'day'".to_string(),
+            ));
+        }
+        if matches!(
+            func.args[1].get_type(&AggregateExprSchema(model))?,
+            DataType::Timestamp(_, Some(_))
+        ) {
+            return Err(DataFusionError::Execution(
+                "date_trunc pushdown requires timestamps without timezone metadata".to_string(),
+            ));
+        }
+        let (inner, kind) = compile_pushdown_value_expr(&func.args[1], model)?;
+        if !matches!(
+            kind,
+            KvFieldKind::Date32 | KvFieldKind::Date64 | KvFieldKind::Timestamp
+        ) {
+            return Err(DataFusionError::Execution(
+                "date_trunc('day', ...) pushdown requires Date32/Date64/Timestamp input"
+                    .to_string(),
+            ));
+        }
+        Ok((PushdownValueExpr::DateTruncDay(Box::new(inner)), kind))
+    } else {
+        Err(DataFusionError::Execution(format!(
+            "pushdown expression does not support function '{}'",
+            func.name().to_ascii_lowercase()
+        )))
     }
 }
 
@@ -1572,11 +1639,7 @@ pub(crate) fn normalize_aggregate_expr(
             agg.func.name()
         )));
     };
-    let (func, argument, case_filter) = if func == AggregatePushdownFunction::Count {
-        normalize_count_aggregate_argument(&agg.params.args[0], model)?
-    } else {
-        normalize_column_or_case_aggregate(func, &agg.params.args[0], model)?
-    };
+    let (argument, case_filter) = normalize_aggregate_argument(func, &agg.params.args[0], model)?;
 
     Ok(NormalizedAggregateExpr {
         func,
@@ -1586,47 +1649,18 @@ pub(crate) fn normalize_aggregate_expr(
     })
 }
 
-pub(crate) fn normalize_count_aggregate_argument(
-    arg: &Expr,
-    model: &TableModel,
-) -> DataFusionResult<(
-    AggregatePushdownFunction,
-    AggregatePushdownArgument,
-    Option<Expr>,
-)> {
-    if is_count_rows_arg(arg) {
-        return Ok((
-            AggregatePushdownFunction::Count,
-            AggregatePushdownArgument::CountAll,
-            None,
-        ));
-    }
-    if let Some((argument, filter)) =
-        normalize_case_aggregate_argument(AggregatePushdownFunction::Count, arg, model)?
-    {
-        return Ok((AggregatePushdownFunction::Count, argument, Some(filter)));
-    }
-    Ok((
-        AggregatePushdownFunction::Count,
-        AggregatePushdownArgument::Expr(compile_pushdown_value_expr(arg, model)?.0),
-        None,
-    ))
-}
-
-pub(crate) fn normalize_column_or_case_aggregate(
+pub(crate) fn normalize_aggregate_argument(
     func: AggregatePushdownFunction,
     arg: &Expr,
     model: &TableModel,
-) -> DataFusionResult<(
-    AggregatePushdownFunction,
-    AggregatePushdownArgument,
-    Option<Expr>,
-)> {
-    if let Some((argument, filter)) = normalize_case_aggregate_argument(func, arg, model)? {
-        return Ok((func, argument, Some(filter)));
+) -> DataFusionResult<(AggregatePushdownArgument, Option<Expr>)> {
+    if func == AggregatePushdownFunction::Count && is_count_rows_arg(arg) {
+        return Ok((AggregatePushdownArgument::CountAll, None));
+    }
+    if let Some((argument, filter)) = normalize_case_aggregate_argument(func, arg, model) {
+        return Ok((argument, Some(filter)));
     }
     Ok((
-        func,
         AggregatePushdownArgument::Expr(compile_pushdown_value_expr(arg, model)?.0),
         None,
     ))
@@ -1636,63 +1670,50 @@ pub(crate) fn normalize_case_aggregate_argument(
     func: AggregatePushdownFunction,
     arg: &Expr,
     model: &TableModel,
-) -> DataFusionResult<Option<(AggregatePushdownArgument, Expr)>> {
-    let cast_inner = match strip_alias_expr(arg) {
-        Expr::Cast(cast) => Some((&cast.expr, cast.field.data_type(), false)),
-        Expr::TryCast(cast) => Some((&cast.expr, cast.field.data_type(), true)),
-        _ => None,
+) -> Option<(AggregatePushdownArgument, Expr)> {
+    let (inner, cast) = match strip_alias_expr(arg) {
+        Expr::Cast(cast) => (cast.expr.as_ref(), Some((cast.field.data_type(), false))),
+        Expr::TryCast(cast) => (cast.expr.as_ref(), Some((cast.field.data_type(), true))),
+        expr => (expr, None),
     };
-    if let Some((inner, data_type, try_cast)) = cast_inner {
-        if let Expr::Case(case) = strip_alias_expr(inner) {
-            let mut case = case.clone();
-            let cast_branch = |expr: Expr| {
-                if try_cast {
-                    Expr::TryCast(datafusion::logical_expr::TryCast::new(
-                        Box::new(expr),
-                        data_type.clone(),
-                    ))
-                } else {
-                    Expr::Cast(datafusion::logical_expr::Cast::new(
-                        Box::new(expr),
-                        data_type.clone(),
-                    ))
-                }
-            };
-            case.when_then_expr = case
-                .when_then_expr
-                .into_iter()
-                .map(|(when, then)| (when, Box::new(cast_branch(*then))))
-                .collect();
-            // Null ELSE branches are unchanged by either cast
-            if case
-                .else_expr
-                .as_deref()
-                .is_some_and(|expr| aggregate_literal(expr).is_some_and(ScalarValue::is_null))
-            {
-                case.else_expr = None;
-            } else {
-                case.else_expr = case.else_expr.map(|expr| Box::new(cast_branch(*expr)));
-            }
-            return normalize_case_aggregate_argument(func, &Expr::Case(case), model);
-        }
-    }
-    let Expr::Case(case) = strip_alias_expr(arg) else {
-        return Ok(None);
+    let Expr::Case(case) = strip_alias_expr(inner) else {
+        return None;
     };
     if case.when_then_expr.is_empty() {
-        return Ok(None);
+        return None;
+    }
+
+    // A missing or literal-null ELSE contributes no aggregate value, including
+    // when the CASE result is cast. Other fallbacks need native evaluation.
+    if case
+        .else_expr
+        .as_deref()
+        .is_some_and(|expr| !aggregate_literal(expr).is_some_and(ScalarValue::is_null))
+    {
+        return None;
     }
 
     let mut argument = None;
     let mut filter = None;
     for (when_expr, then_expr) in &case.when_then_expr {
-        let branch_argument = match normalize_case_then_expr(func, then_expr.as_ref(), model) {
-            Ok(argument) => argument,
-            Err(_) => return Ok(None),
-        };
+        let casted = cast.map(|(data_type, try_cast)| {
+            if try_cast {
+                Expr::TryCast(datafusion::logical_expr::TryCast::new(
+                    then_expr.clone(),
+                    data_type.clone(),
+                ))
+            } else {
+                Expr::Cast(datafusion::logical_expr::Cast::new(
+                    then_expr.clone(),
+                    data_type.clone(),
+                ))
+            }
+        });
+        let branch_argument =
+            normalize_case_then_expr(func, casted.as_ref().unwrap_or(then_expr), model).ok()?;
         if let Some(ref current) = argument {
             if current != &branch_argument {
-                return Ok(None);
+                return None;
             }
         } else {
             argument = Some(branch_argument);
@@ -1701,18 +1722,7 @@ pub(crate) fn normalize_case_aggregate_argument(
         filter = disjunction(filter.into_iter().chain(Some(branch_filter)));
     }
 
-    if case
-        .else_expr
-        .as_deref()
-        .is_some_and(|expr| !aggregate_literal(expr).is_some_and(ScalarValue::is_null))
-    {
-        return Ok(None);
-    }
-
-    match (argument, filter) {
-        (Some(argument), Some(filter)) => Ok(Some((argument, filter))),
-        _ => Ok(None),
-    }
+    Some((argument?, filter?))
 }
 
 pub(crate) fn normalize_case_then_expr(
@@ -1956,25 +1966,37 @@ pub(crate) fn kv_field_kind(kind: ColumnKind) -> Option<KvFieldKind> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::{
+        extract::Request,
+        middleware::Next,
+        response::Response,
+        serve::{Listener, ListenerExt},
+        Router,
+    };
     use buffa::Message;
-    use std::collections::BTreeMap;
-    use std::sync::{
-        atomic::{AtomicUsize, Ordering as AtomicOrdering},
-        Mutex,
-    };
-
-    use axum::{extract::Request, middleware::Next, response::Response, Router};
     use bytes::Bytes;
-    use datafusion::arrow::array::{
-        ArrayRef, Decimal128Array, FixedSizeBinaryBuilder, Float64Array, Int64Array, StringArray,
-        UInt64Array,
+    use datafusion::{
+        arrow::array::{
+            ArrayRef, Decimal128Array, FixedSizeBinaryBuilder, Float64Array, Int64Array,
+            StringArray, UInt64Array,
+        },
+        datasource::MemTable,
+        prelude::SessionContext as DataFusionSessionContext,
     };
-    use datafusion::datasource::MemTable;
-    use datafusion::prelude::SessionContext as DataFusionSessionContext;
-    use exoware_sdk::{RangeReduceGroup, RangeReduceResponse, RangeReduceResult, StoreClient};
+    use exoware_sdk::{
+        transport::set_tcp_nodelay, RangeReduceGroup, RangeReduceResponse, RangeReduceResult,
+        StoreClient,
+    };
     use exoware_server::{
         Query, QueryExtra, QueryResult, QueryState, RangeScan, RangeScanBatch, RangeScanResult,
         Sequence,
+    };
+    use std::{
+        collections::BTreeMap,
+        sync::{
+            atomic::{AtomicUsize, Ordering as AtomicOrdering},
+            Mutex,
+        },
     };
 
     #[derive(Default)]
@@ -2118,7 +2140,10 @@ mod tests {
                         }
                     },
                 ));
-            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .unwrap()
+                .tap_io(set_tcp_nodelay);
             let url = format!("http://{}", listener.local_addr().unwrap());
             let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
             let client = PrefixedStoreClient::empty(StoreClient::new(&url));
@@ -2156,7 +2181,7 @@ mod tests {
                 };
                 let key = crate::codec::encode_primary_key_from_row(0, &row, model).unwrap();
                 let value = crate::writer::encode_base_row_value(&row, model).unwrap();
-                rows.values.lock().unwrap().insert(key, value.into());
+                rows.values.lock().unwrap().insert(key, value);
             }
             let batch = RecordBatch::try_new(
                 model.schema.clone(),
@@ -2211,17 +2236,14 @@ mod tests {
             for row in rows {
                 stored.insert(
                     crate::codec::encode_primary_key_from_row(0, &row, &table.model).unwrap(),
-                    crate::writer::encode_base_row_value(&row, &table.model)
-                        .unwrap()
-                        .into(),
+                    crate::writer::encode_base_row_value(&row, &table.model).unwrap(),
                 );
                 for spec in table.index_specs.iter() {
                     stored.insert(
                         crate::codec::encode_secondary_index_key(0, spec, &table.model, &row)
                             .unwrap(),
                         crate::writer::encode_secondary_index_value(&row, &table.model, spec)
-                            .unwrap()
-                            .into(),
+                            .unwrap(),
                     );
                 }
             }
@@ -2265,9 +2287,7 @@ mod tests {
                 };
                 stored.insert(
                     crate::codec::encode_primary_key_from_row(0, &row, model).unwrap(),
-                    crate::writer::encode_base_row_value(&row, model)
-                        .unwrap()
-                        .into(),
+                    crate::writer::encode_base_row_value(&row, model).unwrap(),
                 );
             }
             let batch = RecordBatch::try_new(
@@ -3079,19 +3099,19 @@ mod tests {
         batches: Vec<RecordBatch>,
         partial_final: bool,
     ) -> Vec<Vec<ScalarValue>> {
-        use datafusion::datasource::memory::MemorySourceConfig;
-        use datafusion::execution::context::SessionConfig;
-        use datafusion::functions_aggregate::{
-            count::count_udaf,
-            min_max::{max_udaf, min_udaf},
+        use datafusion::{
+            datasource::memory::MemorySourceConfig,
+            execution::context::SessionConfig,
+            functions_aggregate::{
+                count::count_udaf,
+                min_max::{max_udaf, min_udaf},
+            },
+            physical_expr::{aggregate::AggregateExprBuilder, expressions::Column, PhysicalExpr},
+            physical_plan::{
+                aggregates::{AggregateExec, AggregateMode, PhysicalGroupBy},
+                collect, ExecutionPlan,
+            },
         };
-        use datafusion::physical_expr::aggregate::AggregateExprBuilder;
-        use datafusion::physical_expr::expressions::Column;
-        use datafusion::physical_expr::PhysicalExpr;
-        use datafusion::physical_plan::aggregates::{
-            AggregateExec, AggregateMode, PhysicalGroupBy,
-        };
-        use datafusion::physical_plan::{collect, ExecutionPlan};
 
         let schema = batches[0].schema();
         let groups = PhysicalGroupBy::new_single(vec![(
@@ -3697,16 +3717,12 @@ mod tests {
                 };
                 stored.insert(
                     crate::codec::encode_primary_key_from_row(0, &row, &table.model).unwrap(),
-                    crate::writer::encode_base_row_value(&row, &table.model)
-                        .unwrap()
-                        .into(),
+                    crate::writer::encode_base_row_value(&row, &table.model).unwrap(),
                 );
                 let spec = &table.index_specs[0];
                 stored.insert(
                     crate::codec::encode_secondary_index_key(0, spec, &table.model, &row).unwrap(),
-                    crate::writer::encode_secondary_index_value(&row, &table.model, spec)
-                        .unwrap()
-                        .into(),
+                    crate::writer::encode_secondary_index_value(&row, &table.model, spec).unwrap(),
                 );
             }
         }
@@ -3793,8 +3809,10 @@ mod tests {
         crate::SqlContext,
         Arc<datafusion::execution::memory_pool::PeakRecordingPool>,
     ) {
-        use datafusion::execution::memory_pool::{FairSpillPool, PeakRecordingPool};
-        use datafusion::execution::runtime_env::RuntimeEnvBuilder;
+        use datafusion::execution::{
+            memory_pool::{FairSpillPool, PeakRecordingPool},
+            runtime_env::RuntimeEnvBuilder,
+        };
 
         let pool = Arc::new(PeakRecordingPool::new(Arc::new(FairSpillPool::new(limit))));
         let runtime = RuntimeEnvBuilder::new()
@@ -4312,16 +4330,12 @@ mod tests {
                 };
                 stored.insert(
                     crate::codec::encode_primary_key_from_row(0, &row, &table.model).unwrap(),
-                    crate::writer::encode_base_row_value(&row, &table.model)
-                        .unwrap()
-                        .into(),
+                    crate::writer::encode_base_row_value(&row, &table.model).unwrap(),
                 );
                 let spec = &table.index_specs[0];
                 stored.insert(
                     crate::codec::encode_secondary_index_key(0, spec, &table.model, &row).unwrap(),
-                    crate::writer::encode_secondary_index_value(&row, &table.model, spec)
-                        .unwrap()
-                        .into(),
+                    crate::writer::encode_secondary_index_value(&row, &table.model, spec).unwrap(),
                 );
             }
         }
@@ -4391,10 +4405,12 @@ mod tests {
 
     #[tokio::test]
     async fn naive_timestamp_casts_preserve_errors_and_nulls() {
-        use datafusion::arrow::array::TimestampMicrosecondArray;
-        use datafusion::functions_aggregate::expr_fn::min;
-        use datafusion::logical_expr::{Cast, TryCast};
-        use datafusion::prelude::col;
+        use datafusion::{
+            arrow::array::TimestampMicrosecondArray,
+            functions_aggregate::expr_fn::min,
+            logical_expr::{Cast, TryCast},
+            prelude::col,
+        };
 
         let fixture = Fixture::new().await;
         fixture

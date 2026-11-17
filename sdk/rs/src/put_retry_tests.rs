@@ -3,9 +3,13 @@ use buffa::Message as _;
 use buffa_types::google::protobuf::Duration as ProtoDuration;
 use connectrpc::error::ErrorDetail;
 use http_body_util::BodyExt as _;
-use std::collections::VecDeque;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Mutex;
+use std::{
+    collections::VecDeque,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Mutex,
+    },
+};
 
 enum Reply {
     Error(ConnectError),

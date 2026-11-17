@@ -1,9 +1,13 @@
 //! Immutable QMDB services: the operation log only. Key reads are Rust
 //! helpers on [`crate::adapter::Immutable`].
 
-use std::future::Future;
-use std::sync::Arc;
-
+use super::{OperationLogReader, OperationLogServer};
+use crate::{
+    adapter::Immutable,
+    proof::{MultiProofOperations, OperationRangeCheckpoint, RawBatchMultiProof},
+    service::proto::qmdb::v1::OperationLogServiceServer,
+    PublishedWatermark, QmdbError,
+};
 use commonware_codec::{Decode, Encode, Read};
 use commonware_cryptography::Hasher;
 use commonware_storage::{
@@ -12,12 +16,7 @@ use commonware_storage::{
 };
 use connectrpc::ConnectRpcService;
 use exoware_sdk::PrefixedStoreClient;
-
-use super::{OperationLogReader, OperationLogServer};
-use crate::adapter::Immutable;
-use crate::proof::{MultiProofOperations, OperationRangeCheckpoint, RawBatchMultiProof};
-use crate::service::proto::qmdb::v1::OperationLogServiceServer;
-use crate::{OperationKv, PublishedWatermark, QmdbError};
+use std::{future::Future, sync::Arc};
 
 impl<F, H, K, V, E> OperationLogReader for Immutable<F, H, K, V, E>
 where
@@ -31,12 +30,13 @@ where
     type Family = F;
     type Digest = H::Digest;
 
-    fn extract_operation_kv(
+    fn inspect_operation_kv<T>(
         &self,
         location: Location<F>,
         bytes: &[u8],
-    ) -> Result<OperationKv, QmdbError> {
-        Immutable::extract_operation_kv(self, location, bytes)
+        inspect: impl FnOnce(Option<&[u8]>, Option<&[u8]>) -> T,
+    ) -> Result<T, QmdbError> {
+        Self::inspect_operation_kv(self, location, bytes, inspect)
     }
 
     fn resolve_watermark(
@@ -44,11 +44,11 @@ where
         watermark: Location<F>,
         min_sequence_number: Option<u64>,
     ) -> impl Future<Output = Result<PublishedWatermark<F>, QmdbError>> + Send {
-        Immutable::resolve_watermark(self, watermark, min_sequence_number)
+        Self::resolve_watermark(self, watermark, min_sequence_number)
     }
 
     fn observe_published(&self, location: Location<F>, sequence: u64) {
-        Immutable::observe_published(self, location, sequence)
+        Self::observe_published(self, location, sequence)
     }
 
     fn operation_range_checkpoint_at(
@@ -58,7 +58,7 @@ where
         max_locations: u32,
     ) -> impl Future<Output = Result<OperationRangeCheckpoint<Self::Digest, F>, QmdbError>> + Send
     {
-        Immutable::operation_range_checkpoint_at(self, watermark, start_location, max_locations)
+        Self::operation_range_checkpoint_at(self, watermark, start_location, max_locations)
     }
 
     fn multi_proof_at(
@@ -66,7 +66,7 @@ where
         watermark: PublishedWatermark<F>,
         operations: MultiProofOperations<'_, F>,
     ) -> impl Future<Output = Result<RawBatchMultiProof<Self::Digest, F>, QmdbError>> + Send {
-        Immutable::multi_proof_at(self, watermark, operations)
+        Self::multi_proof_at(self, watermark, operations)
     }
 }
 

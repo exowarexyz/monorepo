@@ -1,14 +1,27 @@
 //! Verifying client for ordered QMDB.
 
-use std::fmt::Display;
-
+use super::rpc::{
+    verify::{verify_key_exclusion_from_proto, verify_key_value_from_proto},
+    CurrentOperationClient, KeyLookupClient, KeyRangeClient, OperationLogClient,
+    OperationLogSubscription,
+};
+use crate::{
+    proof::{
+        VerifiedCurrentRange, VerifiedKeyLookup, VerifiedKeyRange, VerifiedKeyValue,
+        VerifiedOperationRange,
+    },
+    service::proto::qmdb::v1::{
+        current_key_lookup_result, CurrentKeyLookupResult, CurrentKeyValueProof,
+        GetCurrentOperationRangeRequest, GetManyRequest, GetOperationRangeRequest, GetRangeRequest,
+        GetRequest, SubscribeRequest,
+    },
+    QmdbError,
+};
 use bytes::Bytes;
 use commonware_codec::{Copying, Decode, DecodeExt, Encode, Read};
 use commonware_cryptography::Hasher;
-use commonware_storage::merkle::Location;
-use commonware_storage::qmdb::sync::Target as SyncTarget;
 use commonware_storage::{
-    merkle::Graftable,
+    merkle::{Graftable, Location},
     qmdb::{
         any::{
             ordered,
@@ -16,28 +29,14 @@ use commonware_storage::{
         },
         current::ordered::proof::constant::ExclusionProof,
         operation::Key as QmdbKey,
+        sync::Target as SyncTarget,
     },
 };
 use commonware_utils::range::NonEmptyRange;
 use connectrpc::client::{ClientConfig, ClientTransport};
 use exoware_sdk::proto::PreferZstdHttpClient;
 use http_body::Body;
-
-use super::rpc::OperationLogSubscription;
-use crate::proof::{VerifiedCurrentRange, VerifiedKeyRange, VerifiedOperationRange};
-use crate::service::proto::qmdb::v1::{
-    GetCurrentOperationRangeRequest, GetManyRequest, GetOperationRangeRequest, GetRangeRequest,
-    GetRequest, SubscribeRequest,
-};
-
-use crate::proof::{VerifiedKeyLookup, VerifiedKeyValue};
-use crate::service::proto::qmdb::v1::{
-    current_key_lookup_result, CurrentKeyLookupResult, CurrentKeyValueProof,
-};
-use crate::QmdbError;
-
-use super::rpc::verify::{verify_key_exclusion_from_proto, verify_key_value_from_proto};
-use super::rpc::{CurrentOperationClient, KeyLookupClient, KeyRangeClient, OperationLogClient};
+use std::fmt::Display;
 
 /// Verifies ordered `KeyLookupService` responses: hits and exclusion-proven
 /// misses.
@@ -71,7 +70,7 @@ where
     ExclusionProof<F, K, E, H::Digest, N>:
         Read<Cfg = (usize, <ordered::Update<K, E> as Read>::Cfg, V::Cfg)>,
 {
-    pub fn new(
+    pub const fn new(
         op_cfg: <ordered::Operation<F, K, E> as Read>::Cfg,
         update_cfg: <ordered::Update<K, E> as Read>::Cfg,
         key_cfg: K::Cfg,
@@ -148,7 +147,7 @@ where
 
     fn verify_get_many(
         &self,
-        requested_keys: &[Vec<u8>],
+        requested_keys: &[Bytes],
         results: &[CurrentKeyLookupResult],
         root: &H::Digest,
     ) -> Result<Vec<Self::Lookup>, QmdbError> {
@@ -174,7 +173,7 @@ where
                     Some(current_key_lookup_result::Result::Miss(proof)) => {
                         verify_key_exclusion_from_proto::<F, H, K, V, N, E>(
                             proof,
-                            requested_key.as_slice(),
+                            requested_key.as_ref(),
                             root,
                             &self.update_cfg,
                             &self.key_cfg,
@@ -307,7 +306,7 @@ where
         self.key_lookup
             .get(
                 GetRequest {
-                    key: key.encode().to_vec(),
+                    key: key.encode(),
                     tip: tip.as_u64(),
                     min_sequence_number,
                     ..Default::default()
@@ -329,7 +328,7 @@ where
         self.key_lookup
             .get_many(
                 GetManyRequest {
-                    keys: keys.iter().map(|key| key.encode().to_vec()).collect(),
+                    keys: keys.iter().map(|key| key.encode()).collect(),
                     tip: tip.as_u64(),
                     min_sequence_number,
                     ..Default::default()
@@ -353,8 +352,8 @@ where
         self.key_range
             .get_range(
                 GetRangeRequest {
-                    start_key: start_key.encode().to_vec(),
-                    end_key: end_key.map(|key| key.encode().to_vec()),
+                    start_key: start_key.encode(),
+                    end_key: end_key.map(|key| key.encode()),
                     limit,
                     tip: tip.as_u64(),
                     min_sequence_number,

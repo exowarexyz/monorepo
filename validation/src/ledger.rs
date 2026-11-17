@@ -1,12 +1,12 @@
-use std::collections::HashSet;
-use std::fs::{self, File, OpenOptions};
-use std::io::{BufWriter, Write};
-use std::path::{Path, PathBuf};
-
+use crate::record::Record;
 use anyhow::{ensure, Context};
 use exoware_sdk::keys::{validate_key_size, Key};
-
-use crate::record::Record;
+use std::{
+    collections::HashSet,
+    fs::{self, File, OpenOptions},
+    io::{BufWriter, Write},
+    path::{Path, PathBuf},
+};
 
 // Minimum appends between snapshot checkpoints.
 const OVERLAP_LEDGER_SNAPSHOT_INTERVAL: u64 = 1_024;
@@ -403,9 +403,10 @@ fn decode_hex_bytes(hex_str: &str) -> anyhow::Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    use crate::keyspace::{Keyspace, DEFAULT_KEY_LEN};
-    use crate::value::overlap_value_for_index;
+    use crate::{
+        keyspace::{Keyspace, DEFAULT_KEY_LEN},
+        value::overlap_value_for_index,
+    };
 
     fn overlap_records(namespace: u64, keys: u64) -> Vec<Record> {
         let keyspace = Keyspace::from_u64_namespace(namespace, DEFAULT_KEY_LEN).unwrap();
