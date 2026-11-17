@@ -46,7 +46,7 @@ pub struct Unordered<
     _marker: PhantomData<(F, H, K, E)>,
 }
 
-impl<F: Graftable, H: Hasher, K: QmdbKey, V, const N: usize, E: ValueEncoding<Value = V>> Clone
+impl<F: Family, H: Hasher, K: QmdbKey, V, const N: usize, E: ValueEncoding<Value = V>> Clone
     for Unordered<F, H, K, V, N, E>
 where
     unordered::Operation<F, K, E>: commonware_codec::Read,
@@ -62,7 +62,7 @@ where
     }
 }
 
-impl<F: Graftable, H: Hasher, K: QmdbKey, V, const N: usize, E: ValueEncoding<Value = V>>
+impl<F: Family, H: Hasher, K: QmdbKey, V, const N: usize, E: ValueEncoding<Value = V>>
     std::fmt::Debug for Unordered<F, H, K, V, N, E>
 where
     unordered::Operation<F, K, E>: commonware_codec::Read,

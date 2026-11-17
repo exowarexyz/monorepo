@@ -3,7 +3,7 @@ use crate::{
     error::QmdbError,
     CurrentBoundaryState,
 };
-use commonware_codec::{Codec, Encode};
+use commonware_codec::Encode;
 use commonware_cryptography::Hasher;
 use commonware_storage::{
     merkle::{
@@ -119,7 +119,7 @@ pub async fn recover_boundary_state<M, H, Op, const N: usize, Prove, Fut>(
 where
     M: Graftable,
     H: Hasher,
-    Op: QmdbOperation<M> + Codec,
+    Op: QmdbOperation<M> + Encode,
     Prove: FnMut(Location<M>) -> Fut,
     Fut: Future<Output = Result<(RangeProof<M, H::Digest>, [u8; N]), QmdbError>>,
 {
@@ -460,7 +460,7 @@ async fn ensure_authenticated_grafted_digest<F, H, Op, const N: usize, Prove, Fu
 where
     F: Graftable,
     H: Hasher,
-    Op: Codec,
+    Op: Encode,
     Prove: FnMut(Location<F>) -> Fut,
     Fut: Future<Output = Result<(RangeProof<F, H::Digest>, [u8; N]), QmdbError>>,
 {
@@ -506,7 +506,7 @@ async fn changed_grafted_ancestor_digests_for_chunk<F, H, Op, const N: usize, Pr
 where
     F: Graftable,
     H: Hasher,
-    Op: Codec,
+    Op: Encode,
     Prove: FnMut(Location<F>) -> Fut,
     Fut: Future<Output = Result<(RangeProof<F, H::Digest>, [u8; N]), QmdbError>>,
 {

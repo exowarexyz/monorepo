@@ -97,7 +97,10 @@ where
     ) -> Result<
         OperationLogSubscription<T::ResponseBody, F, H, immutable::Operation<F, K, E>>,
         QmdbError,
-    > {
+    >
+    where
+        T::ResponseBody: Unpin,
+    {
         self.operation_log.subscribe(request).await
     }
 }

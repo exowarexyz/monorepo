@@ -162,7 +162,6 @@ where
     V: commonware_codec::Codec + Clone + Send + Sync + 'static,
     E: ValueEncoding<Value = V>,
     ordered::Operation<F, K, E>: Encode + Decode,
-    ExclusionProof<F, K, E, H::Digest, N>:,
 {
     type Family = F;
     type Digest = H::Digest;

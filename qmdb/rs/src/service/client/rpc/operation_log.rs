@@ -251,7 +251,10 @@ where
     pub async fn subscribe(
         &self,
         request: SubscribeRequest,
-    ) -> Result<OperationLogSubscription<T::ResponseBody, F, H, Op>, QmdbError> {
+    ) -> Result<OperationLogSubscription<T::ResponseBody, F, H, Op>, QmdbError>
+    where
+        T::ResponseBody: Unpin,
+    {
         let stream = self
             .rpc
             .subscribe(request)

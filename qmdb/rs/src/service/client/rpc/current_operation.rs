@@ -23,11 +23,24 @@ use std::{fmt::Display, marker::PhantomData, sync::Arc};
 
 /// Client for `qmdb.v1.CurrentOperationService`, parameterized on the Merkle
 /// family and current-state operation type.
-#[derive(Clone)]
 pub struct CurrentOperationClient<T, F, H, Op: Read, const N: usize> {
     rpc: CurrentOperationServiceClient<T>,
     op_cfg: Arc<Op::Cfg>,
     _marker: PhantomData<(F, H, Op)>,
+}
+
+impl<T, F, H, Op, const N: usize> Clone for CurrentOperationClient<T, F, H, Op, N>
+where
+    Op: Read,
+    CurrentOperationServiceClient<T>: Clone,
+{
+    fn clone(&self) -> Self {
+        Self {
+            rpc: self.rpc.clone(),
+            op_cfg: Arc::clone(&self.op_cfg),
+            _marker: PhantomData,
+        }
+    }
 }
 
 impl<F, H, Op, const N: usize> CurrentOperationClient<PreferZstdHttpClient, F, H, Op, N>
