@@ -30,13 +30,13 @@ use connectrpc::{Chain, ConnectRpcService};
 use exoware_sdk::PrefixedStoreClient;
 use std::{future::Future, sync::Arc};
 
-impl<F, H, K, V, const N: usize, E> OperationLogReader for Ordered<F, H, K, V, N, E>
+impl<F, H, K, const N: usize, E> OperationLogReader for Ordered<F, H, K, E::Value, N, E>
 where
     F: Graftable,
     H: Hasher,
     K: QmdbKey,
-    V: commonware_codec::Codec + Clone + AsRef<[u8]> + Send + Sync + 'static,
-    E: ValueEncoding<Value = V>,
+    E: ValueEncoding,
+    E::Value: AsRef<[u8]>,
     ordered::Operation<F, K, E>: Encode + Decode,
 {
     type Family = F;
@@ -82,13 +82,12 @@ where
     }
 }
 
-impl<F, H, K, V, const N: usize, E> CurrentOperationReader<N> for Ordered<F, H, K, V, N, E>
+impl<F, H, K, const N: usize, E> CurrentOperationReader<N> for Ordered<F, H, K, E::Value, N, E>
 where
     F: Graftable,
     H: Hasher,
     K: QmdbKey,
-    V: commonware_codec::Codec + Clone + Send + Sync + 'static,
-    E: ValueEncoding<Value = V>,
+    E: ValueEncoding,
     ordered::Operation<F, K, E>: Encode + Decode,
 {
     type Family = F;
@@ -117,13 +116,12 @@ where
     }
 }
 
-impl<F, H, K, V, const N: usize, E> KeyLookupReader<N> for Ordered<F, H, K, V, N, E>
+impl<F, H, K, const N: usize, E> KeyLookupReader<N> for Ordered<F, H, K, E::Value, N, E>
 where
     F: Graftable,
     H: Hasher,
     K: QmdbKey,
-    V: commonware_codec::Codec + Clone + Send + Sync + 'static,
-    E: ValueEncoding<Value = V>,
+    E: ValueEncoding,
     ordered::Operation<F, K, E>: Encode + Decode,
     ExclusionProof<F, K, E, H::Digest, N>: Encode,
 {
@@ -131,7 +129,7 @@ where
     type Digest = H::Digest;
     type Key = K;
     type Operation = ordered::Operation<F, K, E>;
-    type Lookup = RawKeyLookupProof<H::Digest, K, V, N, F, E>;
+    type Lookup = RawKeyLookupProof<H::Digest, K, E::Value, N, F, E>;
 
     fn key_value_proof(
         &self,
@@ -153,19 +151,18 @@ where
     }
 }
 
-impl<F, H, K, V, const N: usize, E> KeyRangeReader<N> for Ordered<F, H, K, V, N, E>
+impl<F, H, K, const N: usize, E> KeyRangeReader<N> for Ordered<F, H, K, E::Value, N, E>
 where
     F: Graftable,
     H: Hasher,
     K: QmdbKey,
-    V: commonware_codec::Codec + Clone + Send + Sync + 'static,
-    E: ValueEncoding<Value = V>,
+    E: ValueEncoding,
     ordered::Operation<F, K, E>: Encode + Decode,
 {
     type Family = F;
     type Digest = H::Digest;
     type Key = K;
-    type Value = V;
+    type Value = E::Value;
     type Encoding = E;
 
     fn key_range_proof(
@@ -175,7 +172,7 @@ where
         end_key: Option<K>,
         limit: u32,
         min_sequence_number: Option<u64>,
-    ) -> impl Future<Output = Result<RawKeyRangeProof<H::Digest, K, V, N, F, E>, QmdbError>> + Send
+    ) -> impl Future<Output = Result<RawKeyRangeProof<H::Digest, K, E::Value, N, F, E>, QmdbError>> + Send
     {
         Self::get_range_raw(self, tip, start_key, end_key, limit, min_sequence_number)
     }
@@ -187,7 +184,7 @@ pub fn ordered_stack<
     F: Graftable,
     H: Hasher,
     K: QmdbKey,
-    V: commonware_codec::Codec + Clone + AsRef<[u8]> + Send + Sync + 'static,
+    V: AsRef<[u8]> + 'static,
     const N: usize,
     E: ValueEncoding<Value = V>,
 >(
@@ -226,7 +223,7 @@ pub fn ordered_operation_log_stack<
     F: Graftable,
     H: Hasher,
     K: QmdbKey,
-    V: commonware_codec::Codec + Clone + AsRef<[u8]> + Send + Sync + 'static,
+    V: AsRef<[u8]> + 'static,
     const N: usize,
     E: ValueEncoding<Value = V>,
 >(

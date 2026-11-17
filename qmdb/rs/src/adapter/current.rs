@@ -172,7 +172,7 @@ async fn load_current_tip<F: Graftable, H: Hasher, const N: usize>(
 /// Bitmap chunk `index` at the tip, with bits below the floor cleared: the
 /// cached tail chunk when it is one, else its latest version at or below the
 /// watermark.
-async fn load_chunk<F: Graftable, D, const N: usize>(
+async fn load_chunk<F: Family, D, const N: usize>(
     session: &ReadSession,
     tip: &CurrentTip<F, D>,
     index: u64,
@@ -206,7 +206,7 @@ async fn load_chunk_row<F: Family, const N: usize>(
 }
 
 /// Bitmap chunks covering `[start, end)`.
-pub(crate) async fn load_chunks<F: Graftable, D: Digest, const N: usize>(
+pub(crate) async fn load_chunks<F: Family, D, const N: usize>(
     session: &ReadSession,
     tip: &CurrentTip<F, D>,
     start: Location<F>,
@@ -405,7 +405,7 @@ async fn load_current_boundary_metadata<F: Family, H: Hasher>(
     )
 }
 
-pub(crate) async fn load_current_boundary_root<F: Graftable, H: Hasher>(
+pub(crate) async fn load_current_boundary_root<F: Family, H: Hasher>(
     session: &ReadSession,
     location: Location<F>,
 ) -> Result<H::Digest, QmdbError> {

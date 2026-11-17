@@ -85,7 +85,7 @@ where
         requested_key: &[u8],
         op_bytes: Vec<u8>,
     ) -> Result<VersionedValue<K, V, F>, QmdbError> {
-        let operation = decode_operation::<F, K, V, E>(&self.op_cfg, location, &op_bytes)?;
+        let operation = decode_operation::<F, K, E>(&self.op_cfg, location, &op_bytes)?;
         let (key, value) = match operation {
             unordered::Operation::Update(update) => (update.0, Some(update.1)),
             unordered::Operation::Delete(key) => (key, None),
@@ -149,7 +149,7 @@ where
     where
         V: AsRef<[u8]>,
     {
-        let op = decode_operation::<F, K, V, E>(&self.op_cfg, location, bytes)?;
+        let op = decode_operation::<F, K, E>(&self.op_cfg, location, bytes)?;
         let key = op.key().map(<K as AsRef<[u8]>>::as_ref);
         let value: Option<&[u8]> = match &op {
             unordered::Operation::Update(update) => Some(update.1.as_ref()),
@@ -187,7 +187,7 @@ where
         {
             return current::load_current_boundary_root::<F, H>(&session, watermark.location).await;
         }
-        compute_ops_root::<F, H, K, V, E>(&self.op_cfg, &session, watermark.location).await
+        compute_ops_root::<F, H, K, E>(&self.op_cfg, &session, watermark.location).await
     }
 
     /// Operations-log root at `watermark`, as the source database's `ops_root()`
@@ -195,7 +195,7 @@ where
     pub async fn ops_root_at(&self, watermark: Location<F>) -> Result<H::Digest, QmdbError> {
         let watermark = self.resolve_watermark(watermark, None).await?;
         let session = ReadSession::fixed(self.store.clone(), Some(watermark.sequence_number));
-        compute_ops_root::<F, H, K, V, E>(&self.op_cfg, &session, watermark.location).await
+        compute_ops_root::<F, H, K, E>(&self.op_cfg, &session, watermark.location).await
     }
 
     /// Record a watermark published at `sequence`, as seen by a subscription.
@@ -244,8 +244,8 @@ where
             true,
             |bytes| async move {
                 let operation =
-                    decode_operation::<F, K, V, E>(&self.op_cfg, watermark, bytes.as_ref())?;
-                let floor = load_ops_inactivity_floor_from::<F, K, V, E>(
+                    decode_operation::<F, K, E>(&self.op_cfg, watermark, bytes.as_ref())?;
+                let floor = load_ops_inactivity_floor_from::<F, K, E>(
                     &self.op_cfg,
                     session,
                     watermark,
@@ -299,8 +299,8 @@ where
             true,
             |bytes| async move {
                 let operation =
-                    decode_operation::<F, K, V, E>(&self.op_cfg, watermark, bytes.as_ref())?;
-                let floor = load_ops_inactivity_floor_from::<F, K, V, E>(
+                    decode_operation::<F, K, E>(&self.op_cfg, watermark, bytes.as_ref())?;
+                let floor = load_ops_inactivity_floor_from::<F, K, E>(
                     &self.op_cfg,
                     session,
                     watermark,
@@ -366,7 +366,7 @@ where
                 start_location,
                 end
             ),
-            load_operation_range::<F, K, V, E>(&self.op_cfg, &session, start_location, end),
+            load_operation_range::<F, K, E>(&self.op_cfg, &session, start_location, end),
             current::load_chunks::<F, H::Digest, N>(&session, &tip, start_location, end),
         )?;
         let proof = current::range_proof::<F, H, N>(&tip, reads)?;
@@ -415,7 +415,7 @@ where
         watermark: Location<F>,
     ) -> Result<CurrentTip<F, H::Digest>, QmdbError> {
         current::current_tip::<F, H, N>(session, &self.read_cache, watermark, |bytes| {
-            match decode_operation::<F, K, V, E>(&self.op_cfg, watermark, bytes)? {
+            match decode_operation::<F, K, E>(&self.op_cfg, watermark, bytes)? {
                 unordered::Operation::Commit(_, floor) => Ok(floor),
                 _ => Err(QmdbError::CorruptData(format!(
                     "expected Commit at watermark {watermark}"
@@ -447,7 +447,7 @@ where
     ) -> Result<RawKeyValueProof<H::Digest, unordered::Operation<F, K, E>, N, F>, QmdbError> {
         let watermark = tip.watermark;
         let key_bytes = error_key(&key);
-        let operation = decode_operation::<F, K, V, E>(&self.op_cfg, location, &reads.operation)?;
+        let operation = decode_operation::<F, K, E>(&self.op_cfg, location, &reads.operation)?;
         let unordered::Operation::Update(update) = &operation else {
             return Err(QmdbError::KeyNotActive {
                 watermark: watermark.as_u64(),
@@ -573,7 +573,7 @@ where
     }
 }
 
-fn decode_operation<F, K, V, E>(
+fn decode_operation<F, K, E>(
     op_cfg: &<unordered::Operation<F, K, E> as commonware_codec::Read>::Cfg,
     location: Location<F>,
     bytes: &[u8],
@@ -581,7 +581,7 @@ fn decode_operation<F, K, V, E>(
 where
     F: Family,
     K: QmdbKey,
-    E: ValueEncoding<Value = V>,
+    E: ValueEncoding,
     unordered::Operation<F, K, E>: Decode,
 {
     unordered::Operation::<F, K, E>::decode_cfg(Copying(bytes), op_cfg).map_err(|e| {
@@ -591,32 +591,31 @@ where
     })
 }
 
-async fn load_ops_inactivity_floor_at<F, K, V, E>(
+async fn load_ops_inactivity_floor_at<F, K, E>(
     op_cfg: &<unordered::Operation<F, K, E> as commonware_codec::Read>::Cfg,
     session: &ReadSession,
     watermark: Location<F>,
 ) -> Result<Location<F>, QmdbError>
 where
-    F: Graftable,
+    F: Family,
     K: QmdbKey,
-    V: Codec + Clone + Send + Sync,
-    E: ValueEncoding<Value = V>,
-    unordered::Operation<F, K, E>: Encode + Decode,
+    E: ValueEncoding,
+    unordered::Operation<F, K, E>: Decode,
 {
-    let operation = load_operation_at::<F, K, V, E>(op_cfg, session, watermark).await?;
-    load_ops_inactivity_floor_from::<F, K, V, E>(op_cfg, session, watermark, operation).await
+    let operation = load_operation_at::<F, K, E>(op_cfg, session, watermark).await?;
+    load_ops_inactivity_floor_from::<F, K, E>(op_cfg, session, watermark, operation).await
 }
 
-async fn load_ops_inactivity_floor_from<F, K, V, E>(
+async fn load_ops_inactivity_floor_from<F, K, E>(
     op_cfg: &<unordered::Operation<F, K, E> as commonware_codec::Read>::Cfg,
     session: &ReadSession,
     watermark: Location<F>,
     mut operation: unordered::Operation<F, K, E>,
 ) -> Result<Location<F>, QmdbError>
 where
-    F: Graftable,
+    F: Family,
     K: QmdbKey,
-    E: ValueEncoding<Value = V>,
+    E: ValueEncoding,
     unordered::Operation<F, K, E>: Decode,
 {
     let mut location = watermark;
@@ -630,69 +629,67 @@ where
             )));
         }
         location -= 1;
-        operation = load_operation_at::<F, K, V, E>(op_cfg, session, location).await?;
+        operation = load_operation_at::<F, K, E>(op_cfg, session, location).await?;
     }
 }
 
-async fn compute_ops_root<F, H, K, V, E>(
+async fn compute_ops_root<F, H, K, E>(
     op_cfg: &<unordered::Operation<F, K, E> as commonware_codec::Read>::Cfg,
     session: &ReadSession,
     watermark: Location<F>,
 ) -> Result<H::Digest, QmdbError>
 where
-    F: Graftable,
+    F: Family,
     H: Hasher,
     K: QmdbKey,
-    V: Codec + Clone + Send + Sync,
-    E: ValueEncoding<Value = V>,
-    unordered::Operation<F, K, E>: Encode + Decode,
+    E: ValueEncoding,
+    unordered::Operation<F, K, E>: Decode,
 {
-    let inactive_peaks = ops_inactive_peaks_at::<F, K, V, E>(op_cfg, session, watermark).await?;
+    let inactive_peaks = ops_inactive_peaks_at::<F, K, E>(op_cfg, session, watermark).await?;
     core::compute_ops_root::<F, H>(session, watermark, inactive_peaks).await
 }
 
-async fn ops_inactive_peaks_at<F, K, V, E>(
+async fn ops_inactive_peaks_at<F, K, E>(
     op_cfg: &<unordered::Operation<F, K, E> as commonware_codec::Read>::Cfg,
     session: &ReadSession,
     watermark: Location<F>,
 ) -> Result<usize, QmdbError>
 where
-    F: Graftable,
+    F: Family,
     K: QmdbKey,
-    V: Codec + Clone + Send + Sync,
-    E: ValueEncoding<Value = V>,
-    unordered::Operation<F, K, E>: Encode + Decode,
+    E: ValueEncoding,
+    unordered::Operation<F, K, E>: Decode,
 {
     let inactivity_floor =
-        load_ops_inactivity_floor_at::<F, K, V, E>(op_cfg, session, watermark).await?;
+        load_ops_inactivity_floor_at::<F, K, E>(op_cfg, session, watermark).await?;
     core::inactive_peaks(watermark, inactivity_floor)
 }
 
-async fn load_operation_at<F, K, V, E>(
+async fn load_operation_at<F, K, E>(
     op_cfg: &<unordered::Operation<F, K, E> as commonware_codec::Read>::Cfg,
     session: &ReadSession,
     location: Location<F>,
 ) -> Result<unordered::Operation<F, K, E>, QmdbError>
 where
-    F: Graftable,
+    F: Family,
     K: QmdbKey,
-    E: ValueEncoding<Value = V>,
+    E: ValueEncoding,
     unordered::Operation<F, K, E>: Decode,
 {
     let bytes = core::load_operation_bytes_at(session, location).await?;
-    decode_operation::<F, K, V, E>(op_cfg, location, &bytes)
+    decode_operation::<F, K, E>(op_cfg, location, &bytes)
 }
 
-async fn load_operation_range<F, K, V, E>(
+async fn load_operation_range<F, K, E>(
     op_cfg: &<unordered::Operation<F, K, E> as commonware_codec::Read>::Cfg,
     session: &ReadSession,
     start_location: Location<F>,
     end_location_exclusive: Location<F>,
 ) -> Result<Vec<unordered::Operation<F, K, E>>, QmdbError>
 where
-    F: Graftable,
+    F: Family,
     K: QmdbKey,
-    E: ValueEncoding<Value = V>,
+    E: ValueEncoding,
     unordered::Operation<F, K, E>: Decode,
 {
     core::load_operation_bytes_range(session, start_location, end_location_exclusive)
@@ -700,7 +697,7 @@ where
         .into_iter()
         .enumerate()
         .map(|(offset, bytes)| {
-            decode_operation::<F, K, V, E>(op_cfg, start_location + offset as u64, &bytes)
+            decode_operation::<F, K, E>(op_cfg, start_location + offset as u64, &bytes)
         })
         .collect()
 }

@@ -80,7 +80,7 @@ fn decode_proto<M: Message>(bytes: Vec<u8>, label: &str) -> Result<M, JsValue> {
     M::decode(&mut Bytes::from(bytes)).map_err(|err| js_err(format!("decode {label}: {err}")))
 }
 
-fn decode_digest<D: DecodeExt<()>>(bytes: &[u8], label: &str) -> Result<D, String> {
+fn decode_digest<D: Digest>(bytes: &[u8], label: &str) -> Result<D, String> {
     D::decode(Copying(bytes)).map_err(|err| format!("failed to decode {label}: {err}"))
 }
 
