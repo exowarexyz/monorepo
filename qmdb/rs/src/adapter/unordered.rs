@@ -462,12 +462,11 @@ where
         location: Location<F>,
     ) -> Result<RawKeyValueProof<H::Digest, unordered::Operation<F, K, E>, N, F>, QmdbError> {
         let watermark = tip.watermark;
-        let key_bytes = error_key(&key);
         let operation = decode_operation::<F, K, V, E>(&self.op_cfg, location, &reads.operation)?;
         let unordered::Operation::Update(update) = &operation else {
             return Err(QmdbError::KeyNotActive {
                 watermark: watermark.as_u64(),
-                key: key_bytes,
+                key: error_key(&key),
             });
         };
         if update.0.as_ref() != key.as_ref() {
@@ -561,10 +560,7 @@ where
         min_sequence_number: Option<u64>,
     ) -> Result<Vec<RawKeyValueProof<H::Digest, unordered::Operation<F, K, E>, N, F>>, QmdbError>
     {
-        if keys.is_empty() {
-            return Err(QmdbError::EmptyProofRequest);
-        }
-        core::reject_duplicate_keys(keys)?;
+        core::validate_get_many_keys(keys)?;
 
         let watermark = self
             .resolve_watermark(watermark, min_sequence_number)

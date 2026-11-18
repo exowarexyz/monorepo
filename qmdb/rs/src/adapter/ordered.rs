@@ -929,10 +929,7 @@ where
         keys: &[K],
         min_sequence_number: Option<u64>,
     ) -> Result<Vec<RawKeyLookupProof<H::Digest, K, V, N, F, E>>, QmdbError> {
-        if keys.is_empty() {
-            return Err(QmdbError::EmptyProofRequest);
-        }
-        core::reject_duplicate_keys(keys)?;
+        core::validate_get_many_keys(keys)?;
 
         let watermark = self
             .resolve_watermark(watermark, min_sequence_number)

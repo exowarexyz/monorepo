@@ -169,16 +169,13 @@ pub(crate) async fn load_latest_update_row<F: Family>(
     session: &ReadSession,
     watermark: Location<F>,
     key: &[u8],
-) -> Result<Option<(Key, Vec<u8>)>, QmdbError> {
+) -> Result<Option<(Key, Bytes)>, QmdbError> {
     let start = encode_update_key(key, Location::<F>::new(0))?;
     let end = encode_update_key(key, watermark)?;
     let rows = session
         .range_with_mode(&start, &end, 1, RangeMode::Reverse)
         .await?;
-    Ok(rows
-        .into_iter()
-        .next()
-        .map(|(key, value)| (key, value.to_vec())))
+    Ok(rows.into_iter().next())
 }
 
 /// Loads each key's latest operation at `watermark` and decodes it with `resolver`.
@@ -217,8 +214,11 @@ where
 /// Most per-key proofs one request builds at once.
 pub(crate) const PROOF_CONCURRENCY: usize = 16;
 
-/// Rejects a request that names the same key twice.
-pub(crate) fn reject_duplicate_keys<Q: AsRef<[u8]>>(keys: &[Q]) -> Result<(), QmdbError> {
+/// A GetMany request must name at least one key, and each key must be unique.
+pub(crate) fn validate_get_many_keys<Q: AsRef<[u8]>>(keys: &[Q]) -> Result<(), QmdbError> {
+    if keys.is_empty() {
+        return Err(QmdbError::EmptyProofRequest);
+    }
     let mut seen = BTreeSet::new();
     for key in keys {
         if !seen.insert(key.as_ref()) {

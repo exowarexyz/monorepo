@@ -235,6 +235,19 @@ async fn measure<C, Fut>(
     );
 }
 
+async fn check_ordered_get_many(
+    client: OrderedClient,
+    tip: Location<Family>,
+    keys: &[Vec<u8>],
+    hit: bool,
+) {
+    let proofs = client.get_many_raw(tip, keys, None).await.unwrap();
+    assert_eq!(proofs.len(), keys.len());
+    assert!(proofs
+        .iter()
+        .all(|proof| matches!(proof, RawKeyLookupProof::Hit(_)) == hit));
+}
+
 async fn run(delay: Duration, runs: usize) {
     let (ordered_query, ordered_store) = delayed_store(delay).await;
     let source = ordered_source().await;
@@ -275,20 +288,6 @@ async fn run(delay: Duration, runs: usize) {
         }
     };
     let absent_start = format!("k-{:08}x", FIRST - 1).into_bytes();
-    let get_many = |keys: &[Vec<u8>], hit: bool| {
-        let keys = keys.to_vec();
-        move |client: OrderedClient| {
-            let keys = keys.clone();
-            async move {
-                let proofs = client.get_many_raw(latest, &keys, None).await.unwrap();
-                assert_eq!(proofs.len(), keys.len());
-                assert!(proofs
-                    .iter()
-                    .all(|proof| matches!(proof, RawKeyLookupProof::Hit(_)) == hit));
-            }
-        }
-    };
-
     let query = &ordered_query;
     measure(
         "ordered_get_range_100",
@@ -311,7 +310,7 @@ async fn run(delay: Duration, runs: usize) {
         runs,
         query,
         new_ordered,
-        get_many(&hits, true),
+        |client| check_ordered_get_many(client, latest, &hits, true),
     )
     .await;
     measure(
@@ -319,7 +318,7 @@ async fn run(delay: Duration, runs: usize) {
         runs,
         query,
         new_ordered,
-        get_many(&misses, false),
+        |client| check_ordered_get_many(client, latest, &misses, false),
     )
     .await;
     measure(
@@ -327,7 +326,7 @@ async fn run(delay: Duration, runs: usize) {
         runs,
         query,
         new_ordered,
-        get_many(&one, true),
+        |client| check_ordered_get_many(client, latest, &one, true),
     )
     .await;
 
@@ -353,12 +352,9 @@ async fn run(delay: Duration, runs: usize) {
                 ((), bytes_cfg()),
             )
         },
-        |client: UnorderedClient| {
-            let keys = keys.clone();
-            async move {
-                let proofs = client.get_many_raw(latest, &keys, None).await.unwrap();
-                assert_eq!(proofs.len(), keys.len());
-            }
+        async |client: UnorderedClient| {
+            let proofs = client.get_many_raw(latest, &keys, None).await.unwrap();
+            assert_eq!(proofs.len(), keys.len());
         },
     )
     .await;
