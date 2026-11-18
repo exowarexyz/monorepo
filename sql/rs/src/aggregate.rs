@@ -755,8 +755,11 @@ async fn execute_reduce_range(
         let response = exoware_sdk::scalar_reduce_response(responses, &job.job.request)
             .await
             .map_err(|error| DataFusionError::External(Box::new(error)))?;
-        let batch = source.decode_reduce_batch(&job, response.view())?;
-        return Ok(futures::stream::once(futures::future::ready(Ok(batch))).boxed());
+        // Keep the wire response compact until the ordered stream reaches this range.
+        return Ok(futures::stream::once(async move {
+            source.decode_reduce_batch(&job, response.view())
+        })
+        .boxed());
     }
     Ok(responses
         .map(move |response| {
@@ -4262,8 +4265,13 @@ mod tests {
             .client_transport(transport.clone())
             .build()
             .unwrap();
-        let fixture = Fixture::new().await;
-        let schema = crate::KvSchema::new(PrefixedStoreClient::empty(client))
+        let client = PrefixedStoreClient::empty(client);
+        let context = crate::SqlContext::builder(client.clone())
+            .with_config(
+                datafusion::prelude::SessionConfig::new().with_target_partitions(target_partitions),
+            )
+            .build();
+        let schema = crate::KvSchema::new(client)
             .table(
                 "pending_jobs",
                 vec![
@@ -4275,9 +4283,7 @@ mod tests {
                 vec![],
             )
             .unwrap();
-        fixture.store.register_schema(schema).unwrap();
-        let (context, _) =
-            aggregate_session_with_pool(&fixture, 4 * 1024 * 1024, target_partitions);
+        context.register_schema(schema).unwrap();
         let plan = context
             .sql(sql)
             .await
@@ -4308,15 +4314,21 @@ mod tests {
         transport: &IssueOrderReduceTransport,
         issued: usize,
     ) {
-        let result = tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            while transport.issued() < issued {
-                match futures::poll!(output.next()) {
-                    std::task::Poll::Ready(Some(batch)) => batches.push(batch.unwrap()),
-                    std::task::Poll::Ready(None) => panic!("the stream ended early"),
-                    std::task::Poll::Pending => tokio::task::yield_now().await,
+        use std::task::Poll;
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            futures::future::poll_fn(|cx| {
+                while let Poll::Ready(batch) = output.as_mut().poll_next(cx) {
+                    batches.push(batch.expect("the stream must stay open").unwrap());
                 }
-            }
-        })
+                if transport.issued() >= issued {
+                    Poll::Ready(())
+                } else {
+                    Poll::Pending
+                }
+            }),
+        )
         .await;
         assert!(
             result.is_ok(),
@@ -4342,11 +4354,7 @@ mod tests {
         // Three single-range jobs and a cap of two: job 1 opens while job 0 is
         // still pending, and job 2 waits for a slot.
         poll_until_issued(&mut output, &mut batches, &transport, 2).await;
-        for _ in 0..100 {
-            assert!(futures::poll!(output.next()).is_pending());
-            tokio::task::yield_now().await;
-        }
-        assert_eq!(transport.issued(), 2);
+        assert!(batches.is_empty());
         assert!(transport
             .requests
             .lock()
@@ -4365,10 +4373,19 @@ mod tests {
             .unbounded_send(Ok(reduce_frame(sum(100), 11)))
             .unwrap();
         senders[1].unbounded_send(Ok(reduce_end())).unwrap();
-        for _ in 0..100 {
-            assert!(futures::poll!(output.next()).is_pending());
-            tokio::task::yield_now().await;
-        }
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            futures::future::poll_fn(|cx| {
+                assert!(output.as_mut().poll_next(cx).is_pending());
+                if senders[1].is_closed() {
+                    std::task::Poll::Ready(())
+                } else {
+                    std::task::Poll::Pending
+                }
+            }),
+        )
+        .await
+        .expect("job 1 must drain while job 0 is pending");
         assert_eq!(transport.issued(), 2);
 
         let count = RangeReduceResponse {
@@ -4437,15 +4454,6 @@ mod tests {
             .unwrap();
         senders[0].unbounded_send(Ok(reduce_end())).unwrap();
         poll_until_issued(&mut output, &mut batches, &transport, 3).await;
-        for _ in 0..100 {
-            assert!(futures::poll!(output.next()).is_pending());
-            tokio::task::yield_now().await;
-        }
-        assert_eq!(
-            transport.issued(),
-            3,
-            "the window must hold the last job back"
-        );
 
         // While the seed's second range streams, it and the first aggregate job are
         // the two open requests, so the last job still waits.
@@ -4454,10 +4462,13 @@ mod tests {
             .unwrap();
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
             while batches.len() < 2 {
-                if let std::task::Poll::Ready(batch) = futures::poll!(output.next()) {
-                    batches.push(batch.expect("the stream must stay open").unwrap());
-                }
-                tokio::task::yield_now().await;
+                batches.push(
+                    output
+                        .next()
+                        .await
+                        .expect("the stream must stay open")
+                        .unwrap(),
+                );
             }
         })
         .await

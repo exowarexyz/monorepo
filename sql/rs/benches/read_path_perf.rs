@@ -19,7 +19,7 @@ use bytes::Bytes;
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use datafusion::{
     arrow::datatypes::DataType,
-    physical_plan::{collect, execution_plan::reset_plan_states, ExecutionPlan},
+    physical_plan::{collect, displayable, execution_plan::reset_plan_states, ExecutionPlan},
     scalar::ScalarValue,
 };
 use exoware_sdk::{transport::set_tcp_nodelay, StoreClient, StoreKeyPrefix};
@@ -119,14 +119,17 @@ impl Traffic {
         ALLOC_BYTES.store(0, Ordering::Relaxed);
     }
     fn profile(&self, name: &str, phase: &str) {
+        // Constructing the JSON report allocates too.
+        let allocation_calls = ALLOC_CALLS.load(Ordering::Relaxed);
+        let allocation_bytes = ALLOC_BYTES.load(Ordering::Relaxed);
         println!(
             "READ_PATH_PROFILE {}",
             serde_json::json!({
                 "case": name, "phase": phase,
                 "store_delay_ms": self.store_delay.as_millis(),
                 "target_partitions": self.target_partitions.load(Ordering::Relaxed),
-                "allocation_calls": ALLOC_CALLS.load(Ordering::Relaxed),
-                "allocation_bytes": ALLOC_BYTES.load(Ordering::Relaxed),
+                "allocation_calls": allocation_calls,
+                "allocation_bytes": allocation_bytes,
                 "get": self.get.load(Ordering::Relaxed),
                 "get_many": self.get_many.load(Ordering::Relaxed),
                 "range": self.range.load(Ordering::Relaxed),
@@ -609,7 +612,20 @@ fn read_path_perf(c: &mut Criterion) {
         assert_eq!(fixture.execute(plan.clone()), *expected_rows, "{name}");
         fixture.traffic.profile(name, "execution");
         if matches!(*name, "aggregate_filtered_jobs" | "aggregate_seeded_jobs") {
-            // These cases exist to time several Reduce jobs, so check they still plan them.
+            // Three RPCs could also come from a single job with three ranges.
+            let explain = displayable(plan.as_ref()).indent(false).to_string();
+            let node = explain
+                .lines()
+                .find(|line| line.contains("KvAggregateExec:"))
+                .expect(&explain);
+            let seeded = *name == "aggregate_seeded_jobs";
+            assert_eq!(node.contains("seed_job=none,"), !seeded, "{name}: {node}");
+            assert_eq!(
+                node.matches("{mode=").count(),
+                if seeded { 2 } else { 3 },
+                "{name}: {node}"
+            );
+            assert_eq!(node.matches(", ranges=1,").count(), 3, "{name}: {node}");
             assert_eq!(fixture.traffic.reduce.load(Ordering::Relaxed), 3, "{name}");
         }
         if *name == "aggregate_filtered_jobs" {
