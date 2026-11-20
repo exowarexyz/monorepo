@@ -13,7 +13,7 @@ use commonware_codec::{Decode, Encode, Read};
 use commonware_cryptography::Hasher;
 use commonware_storage::{
     merkle::{Graftable, Location},
-    qmdb::{any::value::ValueEncoding, keyless},
+    qmdb::{keyless, value::ValueEncoding},
 };
 use connectrpc::ConnectRpcService;
 use exoware_sdk::PrefixedStoreClient;

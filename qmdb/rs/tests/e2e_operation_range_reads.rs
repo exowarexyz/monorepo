@@ -12,10 +12,10 @@ use commonware_storage::{
         any::{
             ordered::{variable::Operation as OrderedOperation, Update as OrderedUpdate},
             unordered::variable::Operation as UnorderedOperation,
-            value::VariableEncoding,
         },
         immutable::variable::Operation as ImmutableOperation,
         keyless::variable::Operation as KeylessOperation,
+        value::VariableEncoding,
     },
 };
 use connectrpc::{ConnectError, ConnectRpcService, ErrorCode, RequestContext, ServiceRequest};
@@ -1128,7 +1128,7 @@ async fn native_multi_proofs_authenticate_large_requests_and_preserve_publicatio
 
 #[tokio::test]
 async fn native_fixed_keyless_large_multi_proof_matches_browser_fixture() {
-    use commonware_storage::qmdb::{any::value::FixedEncoding, keyless::fixed};
+    use commonware_storage::qmdb::{keyless::fixed, value::FixedEncoding};
     use commonware_utils::sequence::FixedBytes;
     use exoware_qmdb::proof::encode_operation_multi_proof;
 

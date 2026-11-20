@@ -19,11 +19,9 @@ use commonware_cryptography::Hasher;
 use commonware_storage::{
     merkle::{Graftable, Location},
     qmdb::{
-        any::{
-            unordered,
-            value::{ValueEncoding, VariableEncoding},
-        },
+        any::unordered,
         operation::{Key as QmdbKey, Operation as _},
+        value::{ValueEncoding, VariableEncoding},
     },
 };
 use exoware_sdk::{PrefixedStoreClient, ReadSession};

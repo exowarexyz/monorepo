@@ -1,7 +1,7 @@
 //! Commonware QMDB mapped onto the Exoware Store.
 //!
-//! Writers stage authenticated operation ranges and watermarks as Store rows with
-//! [`upload`].
+//! Writers stage authenticated operation ranges, current batch publications, and
+//! watermarks as Store rows with [`upload`].
 //! Readers ([`Ordered`], [`Unordered`], [`Immutable`], [`Keyless`]) serve
 //! historical and current proofs from those rows.
 //!

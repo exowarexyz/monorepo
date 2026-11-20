@@ -35,8 +35,8 @@ macro_rules! journal_config {
 macro_rules! source_config {
     (any, $encoding:ident, $prefix:expr, $cache:expr, $cfg:expr) => {
         commonware_storage::qmdb::any::Config {
-            merkle_config: crate::common::merkle_config($prefix, $cache.clone()),
-            journal_config: journal_config!($encoding, $prefix, $cache, $cfg),
+            merkle: crate::common::merkle_config($prefix, $cache.clone()),
+            log: journal_config!($encoding, $prefix, $cache, $cfg),
             translator: commonware_storage::translator::TwoCap,
             init_cache: None,
             init_buffer: commonware_utils::NZUsize!(1 << 21),
@@ -45,8 +45,8 @@ macro_rules! source_config {
     };
     (current, $encoding:ident, $prefix:expr, $cache:expr, $cfg:expr) => {
         commonware_storage::qmdb::current::Config {
-            merkle_config: crate::common::merkle_config($prefix, $cache.clone()),
-            journal_config: journal_config!($encoding, $prefix, $cache, $cfg),
+            merkle: crate::common::merkle_config($prefix, $cache.clone()),
+            log: journal_config!($encoding, $prefix, $cache, $cfg),
             grafted_metadata_partition: format!("{}-grafted-metadata", $prefix),
             translator: commonware_storage::translator::TwoCap,
             init_cache: None,
