@@ -1,5 +1,5 @@
 import { create } from '@bufbuild/protobuf';
-import { Code, ConnectError } from '@connectrpc/connect';
+import { Code, ConnectError, type CallOptions } from '@connectrpc/connect';
 import { Client } from '../src/client';
 import { SelectorSchema } from '../src/gen/ts/common/v1/kv_pb';
 import {
@@ -645,26 +645,60 @@ test('subscribe observes emitted batches before yielding and ignores omitted fra
     await stream.return?.();
 });
 
-test('subscribe forwards cancellation options and cleans up when the consumer stops', async () => {
-    const options = { signal: new AbortController().signal };
-    let seenOptions: unknown;
-    let cleanedUp = false;
+/**
+ * A Subscribe call that yields one batch and then stays open until its signal aborts. Like a
+ * Connect server stream, its iterator has no return method, so only the signal ends the call.
+ */
+function pendingSubscription(): { client: Client; calls: Array<CallOptions | undefined> } {
+    const calls: Array<CallOptions | undefined> = [];
     const client = mockClient({}, {
         subscribe: (_request, callOptions) => {
-            seenOptions = callOptions;
-            return (async function* () {
-                try {
-                    yield create(SubscribeResponseSchema, {
-                        sequenceNumber: 6n,
-                        entries: [{ key, value: key }],
-                    });
-                    await new Promise<never>(() => {});
-                } finally {
-                    cleanedUp = true;
-                }
+            calls.push(callOptions);
+            const frames = (async function* () {
+                yield create(SubscribeResponseSchema, {
+                    sequenceNumber: 6n,
+                    entries: [{ key, value: key }],
+                });
+                const signal = callOptions?.signal;
+                await new Promise<never>((_resolve, reject) => {
+                    signal?.addEventListener(
+                        'abort',
+                        () => reject(ConnectError.from(signal.reason, Code.Canceled)),
+                        { once: true },
+                    );
+                });
             })();
+            return {
+                [Symbol.asyncIterator]: () => ({ next: () => frames.next() }),
+            } as ReturnType<Client['stream']['subscribe']>;
         },
     });
+    return { client, calls };
+}
+
+test('subscribe aborts its call when the consumer leaves the loop', async () => {
+    const { client, calls } = pendingSubscription();
+
+    for await (const batch of new StoreClient(client).subscribe({
+        selectors: [create(SelectorSchema)],
+    })) {
+        expect(batch.sequenceNumber).toBe(6n);
+        expect(calls[0]?.signal?.aborted).toBe(false);
+        break;
+    }
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.signal?.aborted).toBe(true);
+});
+
+test('subscribe forwards call options under its own signal and aborts it when the consumer stops', async () => {
+    const { client, calls } = pendingSubscription();
+    const caller = new AbortController();
+    const removeListener = jest.spyOn(caller.signal, 'removeEventListener');
+    const options: CallOptions = {
+        signal: caller.signal,
+        timeoutMs: 1_234,
+        headers: { 'x-test': 'subscribe' },
+    };
     const session = ReadSession.fixed(new StoreClient(client), 4n);
     const stream = session.subscribe({ selectors: [create(SelectorSchema)] }, options)[
         Symbol.asyncIterator
@@ -673,9 +707,46 @@ test('subscribe forwards cancellation options and cleans up when the consumer st
     expect((await stream.next()).value?.sequenceNumber).toBe(6n);
     expect(session.evaluatedSequence()).toBe(6n);
     expect(session.minSequenceNumber()).toBe(4n);
-    expect(seenOptions).toBe(options);
+    const { signal, ...forwarded } = calls[0] ?? {};
+    expect(forwarded).toEqual({ timeoutMs: 1_234, headers: { 'x-test': 'subscribe' } });
+    expect(signal).not.toBe(caller.signal);
+    expect(signal?.aborted).toBe(false);
+
     await stream.return?.();
-    expect(cleanedUp).toBe(true);
+    expect(signal?.aborted).toBe(true);
+    expect(caller.signal.aborted).toBe(false);
+    expect(removeListener).toHaveBeenCalledWith('abort', expect.any(Function));
+});
+
+test('subscribe aborts its call when the caller signal aborts later', async () => {
+    const { client, calls } = pendingSubscription();
+    const caller = new AbortController();
+    const stream = new StoreClient(client)
+        .subscribe({ selectors: [create(SelectorSchema)] }, { signal: caller.signal })[
+            Symbol.asyncIterator
+        ]();
+
+    expect((await stream.next()).value?.sequenceNumber).toBe(6n);
+    const pending = stream.next();
+    caller.abort();
+
+    await expect(pending).rejects.toMatchObject({ status: 499 });
+    expect(calls[0]?.signal?.aborted).toBe(true);
+});
+
+test('subscribe starts its call aborted when the caller signal is already aborted', async () => {
+    const { client, calls } = pendingSubscription();
+    const caller = new AbortController();
+    caller.abort();
+    const stream = new StoreClient(client)
+        .subscribe({ selectors: [create(SelectorSchema)] }, { signal: caller.signal })[
+            Symbol.asyncIterator
+        ]();
+
+    await stream.next();
+    expect(calls[0]?.signal?.aborted).toBe(true);
+    expect(calls[0]?.signal?.reason).toBe(caller.signal.reason);
+    await stream.return?.();
 });
 
 test('subscribe preserves prior observations when the stream ends with an error', async () => {
