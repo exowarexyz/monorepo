@@ -4,10 +4,10 @@
 //! batch publications, and the watermarks that publish them.
 //!
 //! The readers ([`Ordered`], [`Unordered`], [`Immutable`], and [`Keyless`]) query the uploaded
-//! rows at a tip, a location at or below the published watermark, and build historical and current
-//! proofs from them. Keyless and immutable roots and operation proofs need a tip that is a commit,
-//! current-state reads need a commit whose publication was uploaded, and other reads accept any
-//! such tip.
+//! rows at a tip, a location at or below the published watermark, and build historical proofs from
+//! them. [`Ordered`] and [`Unordered`] also build current proofs. Keyless and immutable roots and
+//! operation proofs need a tip that is a commit, current-state reads need a commit whose
+//! publication was uploaded, and other reads accept any such tip.
 //!
 //! A read verifies its proof against the root the rows determine at that tip and returns the
 //! payload with that root, for the caller to compare with a root it trusts. The `*_proof` reads

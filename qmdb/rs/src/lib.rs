@@ -28,26 +28,31 @@
 //!
 //! # Uploads and watermarks
 //!
-//! Preparation reads no remote state, so ranges may be uploaded concurrently and out of order,
-//! and a current batch's publication may be uploaded before the watermark reaches it. Only the
-//! watermark is monotonic. Publishing watermark `W` means the whole contiguous prefix `[0, W]`
-//! is durable and may be trusted by readers, which fence historical queries against it.
-//! Historical proofs use the operation-log Merkle nodes, which are stored once by `Position`.
+//! Preparation reads no remote state, so writers can prepare ranges and current batch publications
+//! of one history concurrently and in any order. Uploading them out of order is safe because
+//! readers reject a query at any location above the greatest published watermark. Publishing
+//! watermark `W` asserts that the whole contiguous prefix `[0, W]` is durable, so publish it only
+//! once every row through `W` is durable or is committed in the same Store batch. Below, three
+//! ranges are uploaded and the middle one arrives last.
 //!
 //! ```text
-//!  durable     [0 ........ 99]              [200 ...... 299]
-//!  watermark               99
+//!  location     0                 99 100              199 200              299
+//!  durable      [==================]          gap         [==================]
+//!  watermark                       ^ 99
 //!
-//!  durable     [0 ........ 99][100 .... 199][200 ...... 299]
-//!  watermark                                            299
+//!  durable      [==================] [==================] [==================]
+//!  watermark                                                                 ^ 299
 //! ```
 //!
-//! A gap holds the watermark at the end of the prefix below it. Once the gap is durable, the
-//! watermark can move past every commit up to the next gap in one step.
+//! A gap keeps the watermark at or below the last commit of the prefix under it. Once the missing
+//! range is durable, the watermark can advance to the last commit before the next gap in one step.
 //!
-//! A publication's current-state rows (metadata, witness, bitmap chunks, and grafted nodes)
-//! are versioned by the batch's final location rather than by the watermark, so current proofs
-//! at earlier batches stay available after a later watermark is published.
+//! An operation-log Merkle node never changes once written, so it has one row, keyed by its
+//! `Position`, and historical proofs at every later watermark read that row. Current state does
+//! change, so a publication's current-state rows are keyed by the batch's final location. They hold
+//! the current root, pruned chunk count, witness, bitmap chunks, and grafted nodes. A later batch
+//! adds rows under new keys and overwrites none, so a current proof at an earlier batch reads the
+//! same rows after the watermark moves past it.
 
 pub mod adapter;
 pub mod error;

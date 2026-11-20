@@ -529,8 +529,8 @@ fn key_cfg() -> <Vec<u8> as commonware_codec::Read>::Cfg {
 fn ordered_operations() -> Vec<OrderedOp> {
     (0..15)
         .map(|index| match index {
-            0 => OrderedOp::CommitFloor(None, Location::new(0)),
-            14 => OrderedOp::CommitFloor(None, Location::new(4)),
+            0 => OrderedOp::Commit(None, Location::new(0)),
+            14 => OrderedOp::Commit(None, Location::new(4)),
             _ => OrderedOp::Update(OrderedUpdate {
                 key: vec![index],
                 value: vec![index + 32],
@@ -1071,7 +1071,7 @@ async fn native_multi_proofs_authenticate_large_requests_and_preserve_publicatio
             let operations = (0..count)
                 .map(|index| {
                     if index == tip {
-                        UnorderedOp::CommitFloor(None, Location::new(4))
+                        UnorderedOp::Commit(None, Location::new(4))
                     } else {
                         UnorderedOp::Delete(index.to_be_bytes().to_vec())
                     }
@@ -1158,7 +1158,7 @@ async fn cold_root_and_value_reads_send_floor_to_watermark_lookup() {
     let unordered_operations = (0..15)
         .map(|index| {
             if index == 14 {
-                UnorderedOp::CommitFloor(None, Location::new(4))
+                UnorderedOp::Commit(None, Location::new(4))
             } else {
                 UnorderedOp::Delete(vec![index])
             }
@@ -1815,14 +1815,14 @@ async fn unordered_noncommit_tip_shares_floor_without_waiting_for_operation_scan
     let fixture = Fixture::new().await;
     let store = fixture.prefixed(&[]);
     let operations = vec![
-        UnorderedOp::CommitFloor(None, Location::new(0)),
+        UnorderedOp::Commit(None, Location::new(0)),
         UnorderedOp::Delete(b"first".to_vec()),
         UnorderedOp::Delete(b"second".to_vec()),
         UnorderedOp::Delete(b"third".to_vec()),
-        UnorderedOp::CommitFloor(None, Location::new(4)),
+        UnorderedOp::Commit(None, Location::new(4)),
         UnorderedOp::Delete(b"fourth".to_vec()),
         UnorderedOp::Delete(b"fifth".to_vec()),
-        UnorderedOp::CommitFloor(None, Location::new(4)),
+        UnorderedOp::Commit(None, Location::new(4)),
     ];
     let cfg = (((0..=10000).into(), ()), ((0..=10000).into(), ()));
     fixture.stage(&store, &operations, &cfg);
@@ -1887,7 +1887,7 @@ async fn unordered_noncommit_tip_shares_floor_without_waiting_for_operation_scan
 async fn missing_witness_is_reloaded_after_a_successful_cached_proof() {
     let mut fixture = Fixture::new().await;
     let store = fixture.prefixed(&[]);
-    let operations = vec![UnorderedOp::CommitFloor(None, Location::new(0))];
+    let operations = vec![UnorderedOp::Commit(None, Location::new(0))];
     let cfg = (((0..=10000).into(), ()), ((0..=10000).into(), ()));
     let root = fixture.stage(&store, &operations, &cfg);
     let url = fixture.unordered(store, cfg).await;

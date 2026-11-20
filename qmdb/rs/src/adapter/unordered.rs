@@ -102,7 +102,7 @@ where
         let (key, value) = match operation {
             unordered::Operation::Update(update) => (update.0, Some(update.1)),
             unordered::Operation::Delete(key) => (key, None),
-            unordered::Operation::CommitFloor(_, _) => {
+            unordered::Operation::Commit(_, _) => {
                 return Err(QmdbError::CorruptData(format!(
                     "latest update row at {location} points to a commit operation"
                 )));
@@ -167,8 +167,8 @@ where
         let key = op.key().map(<K as AsRef<[u8]>>::as_ref);
         let value: Option<&[u8]> = match &op {
             unordered::Operation::Update(update) => Some(update.1.as_ref()),
-            unordered::Operation::CommitFloor(Some(value), _) => Some(value.as_ref()),
-            unordered::Operation::Delete(_) | unordered::Operation::CommitFloor(None, _) => None,
+            unordered::Operation::Commit(Some(value), _) => Some(value.as_ref()),
+            unordered::Operation::Delete(_) | unordered::Operation::Commit(None, _) => None,
         };
         Ok(inspect(key, value))
     }
@@ -443,9 +443,9 @@ where
     ) -> Result<CurrentTip<F, H::Digest>, QmdbError> {
         current::current_tip::<F, H, N>(session, &self.read_cache, tip, |bytes| {
             match decode_operation::<F, K, V, E>(&self.op_cfg, tip, bytes)? {
-                unordered::Operation::CommitFloor(_, floor) => Ok(floor),
+                unordered::Operation::Commit(_, floor) => Ok(floor),
                 _ => Err(QmdbError::CorruptData(format!(
-                    "expected CommitFloor at tip {tip}"
+                    "expected Commit at tip {tip}"
                 ))),
             }
         })
@@ -651,12 +651,12 @@ where
 {
     let mut location = tip;
     loop {
-        if let unordered::Operation::CommitFloor(_, floor) = operation {
+        if let unordered::Operation::Commit(_, floor) = operation {
             return Ok(floor);
         }
         if *location == 0 {
             return Err(QmdbError::CorruptData(format!(
-                "no CommitFloor found at or before tip {tip}"
+                "no Commit found at or before tip {tip}"
             )));
         }
         location -= 1;

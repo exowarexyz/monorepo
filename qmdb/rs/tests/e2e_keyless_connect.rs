@@ -821,10 +821,10 @@ async fn test_keyless_commonware_glue_state_sync_uses_operation_log_client() {
         BatchOperation,
     >::plaintext(&qmdb_url, ((0..=10000).into(), ()));
     let op_count = Location::new(source.operations.len() as u64);
-    let target = Target::new(
-        source.root,
-        commonware_utils::non_empty_range!(source.inactivity_floor, op_count),
-    );
+    let target = Target {
+        root: source.root,
+        range: commonware_utils::non_empty_range!(source.inactivity_floor, op_count),
+    };
 
     let start = source.inactivity_floor;
     let start_index = usize::try_from(*start).expect("start fits usize");

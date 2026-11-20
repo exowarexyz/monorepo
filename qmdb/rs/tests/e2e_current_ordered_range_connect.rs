@@ -161,10 +161,10 @@ fn latest_inactivity_floor(operations: &[BatchOperation]) -> Location<mmr::Famil
         .iter()
         .rev()
         .find_map(|operation| match operation {
-            BatchOperation::CommitFloor(_, floor) => Some(*floor),
+            BatchOperation::Commit(_, floor) => Some(*floor),
             _ => None,
         })
-        .expect("batch has CommitFloor")
+        .expect("operations must contain a commit")
 }
 
 async fn build_source_batch() -> SourceBatch {
@@ -243,10 +243,10 @@ fn latest_mmb_inactivity_floor(operations: &[MmbBatchOperation]) -> Location<mmb
         .iter()
         .rev()
         .find_map(|operation| match operation {
-            MmbBatchOperation::CommitFloor(_, floor) => Some(*floor),
+            MmbBatchOperation::Commit(_, floor) => Some(*floor),
             _ => None,
         })
-        .expect("batch has CommitFloor")
+        .expect("operations must contain a commit")
 }
 
 async fn build_mmb_source_batch() -> MmbSourceBatch {
@@ -1184,10 +1184,10 @@ async fn test_ordered_mmb_operation_log_any_sync_from_connect_api_reconstructs_a
         op_cfg(),
     );
     let op_count = Location::new(source.operations.len() as u64);
-    let target = qmdb_sync::Target::new(
-        source.ops_root,
-        commonware_utils::non_empty_range!(Location::new(0), op_count),
-    );
+    let target = qmdb_sync::Target {
+        root: source.ops_root,
+        range: commonware_utils::non_empty_range!(Location::new(0), op_count),
+    };
     let target_root = target.root;
 
     tokio::task::spawn_blocking(move || {
@@ -1254,10 +1254,10 @@ async fn test_ordered_mmb_operation_log_any_sync_from_nonzero_connect_api_recons
         op_cfg(),
     );
     let op_count = Location::new(source.operations.len() as u64);
-    let target = qmdb_sync::Target::new(
-        source.ops_root,
-        commonware_utils::non_empty_range!(start, op_count),
-    );
+    let target = qmdb_sync::Target {
+        root: source.ops_root,
+        range: commonware_utils::non_empty_range!(start, op_count),
+    };
     let target_root = target.root;
 
     tokio::task::spawn_blocking(move || {
@@ -1340,10 +1340,10 @@ async fn test_ordered_mmb_operation_log_any_sync_accepts_target_update_from_grow
     );
     let initial_op_count = Location::new(source.initial.operations.len() as u64);
     let updated_op_count = Location::new(source.updated.operations.len() as u64);
-    let initial_target = qmdb_sync::Target::new(
-        source.initial.ops_root,
-        commonware_utils::non_empty_range!(start, initial_op_count),
-    );
+    let initial_target = qmdb_sync::Target {
+        root: source.initial.ops_root,
+        range: commonware_utils::non_empty_range!(start, initial_op_count),
+    };
     let expected_initial_target = initial_target.clone();
 
     let (update_tx, update_rx) = ring::channel(NZUsize!(1));
@@ -1394,10 +1394,10 @@ async fn test_ordered_mmb_operation_log_any_sync_accepts_target_update_from_grow
     assert_eq!(reached_initial, expected_initial_target);
 
     commit_mmb_upload(&store_client, &source.updated).await;
-    let updated_target = qmdb_sync::Target::new(
-        source.updated.ops_root,
-        commonware_utils::non_empty_range!(start, updated_op_count),
-    );
+    let updated_target = qmdb_sync::Target {
+        root: source.updated.ops_root,
+        range: commonware_utils::non_empty_range!(start, updated_op_count),
+    };
     assert_ne!(updated_target, expected_initial_target);
     assert!(update_tx.send_lossy(updated_target.clone()));
 

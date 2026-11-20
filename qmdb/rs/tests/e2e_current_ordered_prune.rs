@@ -1,8 +1,4 @@
 //! Ordered current-batch publications across local bitmap-chunk pruning.
-//!
-//! Remote current roots must match the source at every batch's tip. Remote proofs must
-//! match it at the initial commit, at the first tip merkleized over pruned chunks, at
-//! the last tip, and at historical tips for keys that later batches expire.
 
 mod common;
 
@@ -36,9 +32,10 @@ type Db = LocalOrderedDb<
 >;
 type OrderedPublication = Publication<mmr::Family, Digest, OrderedUpdate<Vec<u8>, Vec<u8>>, N>;
 
-/// Each batch appends 3 fresh writes and rewrites the key 3 counter-positions
-/// behind. With `N = 32` a bitmap chunk spans 256 bits, so 150 batches prune
-/// chunk 0 and publish later batches over a pruned bitmap.
+/// Each batch writes 3 fresh keys, and every batch after the first rewrites the first key of the
+/// batch before it. With `N = 32` a bitmap chunk covers 256 operations, and the source prunes at
+/// its sync boundary after each batch. That boundary passes the end of chunk 0 before the last
+/// batch, so later batches are merkleized over a pruned bitmap.
 const BATCHES: u64 = 150;
 
 struct BatchOutcome {
@@ -54,13 +51,17 @@ struct ExpiredKeySnapshot {
     value: Vec<u8>,
 }
 
+/// The remote root equals the source root at every batch's tip. Proofs verify at the initial
+/// commit, at the first batch merkleized over pruned chunks, and at the last batch. After the last
+/// upload, the first batch's tip still serves its root and a range read, and a key that later
+/// batches rewrite and delete still proves its old value at its old tip and is inactive at the
+/// last one.
 #[tokio::test]
 async fn test_mirror_ordered_prune_past_chunk_zero() {
     let store_client = common::local_store_client().await;
 
-    // Phase 1 (blocking tokio runtime): drive the local QMDB through BATCHES
-    // batches, capturing the initial publication and each batch's publication
-    // and root, including after chunk 0 has been pruned.
+    // Drive the source through `BATCHES` batches on a blocking runtime, pruning after each, and
+    // capture the initial publication and every batch's publication, tip, and root.
     let (initial, batches, first_pruned, expired_key_snapshot) =
         tokio::task::spawn_blocking(move || {
             cw_tokio::Runner::default().start(move |context| async move {
@@ -89,6 +90,7 @@ async fn test_mirror_ordered_prune_past_chunk_zero() {
                 let mut expired_key_snapshot = None;
 
                 for _ in 0..BATCHES {
+                    // Merkleize the next batch and read its publication before applying it.
                     let finalized = {
                         let mut batch = db.new_batch();
                         for offset in 0..3u64 {
@@ -116,6 +118,8 @@ async fn test_mirror_ordered_prune_past_chunk_zero() {
                     let prune_boundary = db.sync_boundary();
                     db = db.prune(prune_boundary).await.expect("prune current");
 
+                    // Record the batch's tip and root, and snapshot `k-00000006` after the batch
+                    // that first writes it.
                     let latest = db.bounds().end - 1;
                     if counter == 9 {
                         expired_key_snapshot = Some(ExpiredKeySnapshot {
@@ -132,8 +136,8 @@ async fn test_mirror_ordered_prune_past_chunk_zero() {
                     });
                 }
 
-                // The source must merkleize a batch over pruned bitmap chunks, or no
-                // publication comes from a pruned source.
+                // At least one batch must be merkleized over pruned bitmap chunks, or the test
+                // would not cover a publication from a pruned source.
                 let first_pruned = batches
                     .iter()
                     .position(|outcome| outcome.publication.pruned_chunks > 0)
@@ -152,8 +156,7 @@ async fn test_mirror_ordered_prune_past_chunk_zero() {
         .await
         .expect("join");
 
-    // Phase 2: upload each publication to the remote store and read it back
-    // through an ordered reader.
+    // Upload through one client and read back through an ordered reader of the same store.
     let upload_client = store_client.unprefixed();
     let qmdb_client: exoware_qmdb::adapter::Ordered<mmr::Family, Sha256, Vec<u8>, Vec<u8>, N> =
         exoware_qmdb::adapter::Ordered::new(
@@ -199,9 +202,8 @@ async fn test_mirror_ordered_prune_past_chunk_zero() {
         );
     }
 
-    // At the first tip merkleized over pruned chunks and at the last tip, a key
-    // the batch wrote and the batch's own operations must verify against the
-    // source root.
+    // At the first batch merkleized over pruned chunks and at the last batch, the batch's first
+    // fresh key and the batch's whole operation range must verify against the source root.
     for index in [first_pruned, batches.len() - 1] {
         let outcome = &batches[index];
         let key = format!("k-{:08x}", 3 * index).into_bytes();

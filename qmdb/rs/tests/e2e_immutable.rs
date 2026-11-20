@@ -143,10 +143,7 @@ async fn build_fixed_source() -> FixedSource {
             use commonware_runtime::{buffer::paged::CacheRef, Supervisor as _};
             let page_cache = CacheRef::new(NZU16!(64), NZUsize!(8));
             let cfg = commonware_storage::qmdb::immutable::Config {
-                merkle: common::merkle_config(
-                    "immutable_fixed_full_mmr_source",
-                    page_cache.clone(),
-                ),
+                merkle: common::merkle_config("immutable_fixed_full_mmr_source"),
                 log: FixedJournalConfig {
                     partition: "immutable_fixed_full_mmr_source-log".to_string(),
                     items_per_blob: NZU64!(5),
@@ -156,6 +153,7 @@ async fn build_fixed_source() -> FixedSource {
                 },
                 translator: TwoCap,
                 init_buffer: NZUsize!(1 << 21),
+                init_concurrency: NZUsize!(1),
             };
             let mut db: FixedDb =
                 FixedDb::init(context.child("immutable_fixed_full_mmr_source"), cfg, None)
