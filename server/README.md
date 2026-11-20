@@ -86,7 +86,7 @@ to return the standard details and retry hint.
 
 Use `AppState::with_ingest_limits` to set validation limits and
 `AppState::with_put_config` to configure transport admission, wire size, deadlines,
-and observation. Ingest-only services expose the same controls through
+the clock, and observation. Ingest-only services expose the same controls through
 `IngestState`. Custom clients must send Connect unary protobuf with identity or
 bounded single-frame zstd encoding.
 
@@ -98,6 +98,12 @@ can override it with the `connect-timeout-ms` header, up to a five-minute ceilin
 The idle timeout includes waiting for HTTP EOF but excludes decoding and backend
 processing time. Set it to `None` to rely only on the absolute deadline, and size
 both timeouts for the maximum accepted request and the slowest supported link.
+
+`PutConfig.clock` controls request deadlines, idle timeouts, and elapsed-time
+measurements. It defaults to `TokioClock`. Deterministic tests can supply a
+`PutClock` backed by their runtime. Use a monotonic clock in production.
+Connection timers stay on Tokio. To run Put without a Tokio runtime, also replace
+the default blocking decoder through `PutInput::set_executor`.
 
 ### Put admission and memory
 
