@@ -1,9 +1,9 @@
 //! Commonware QMDB mapped onto the Exoware Store.
 //!
-//! Writers stage authenticated operation ranges, current batch publications, and
-//! watermarks as Store rows with [`upload`].
-//! Readers ([`Ordered`], [`Unordered`], [`Immutable`], [`Keyless`]) serve
-//! historical and current proofs from those rows.
+//! Writers stage authenticated operation ranges, current batch publications,
+//! and watermarks as Store rows with [`upload`]. Readers ([`Ordered`],
+//! [`Unordered`], [`Immutable`], [`Keyless`]) serve historical proofs from
+//! those rows, and [`Ordered`] and [`Unordered`] also serve current proofs.
 //!
 //! Each proven read has a raw variant (`*_raw`, or `operation_range_checkpoint`
 //! for `operation_range`) that returns the proof alongside the payload. Both are
