@@ -6,11 +6,10 @@ use crate::{
     service::proto::qmdb::v1::{GetOperationRangeRequest, SubscribeRequest},
     QmdbError,
 };
-use bytes::Bytes;
-use commonware_codec::{Decode, DecodeExt, Encode, Read};
+use commonware_codec::{Encode, Read};
 use commonware_cryptography::Hasher;
 use commonware_storage::{
-    merkle::{Graftable, Location},
+    merkle::{Family, Graftable, Location},
     qmdb::{any::value::ValueEncoding, immutable, operation::Key as QmdbKey},
 };
 use connectrpc::client::{ClientConfig, ClientTransport};
@@ -21,12 +20,10 @@ use std::fmt::Display;
 /// Verifying client for an immutable-QMDB endpoint: the operation log.
 pub struct Immutable<T, F, H, K, V, E>
 where
-    F: Graftable,
-    H: Hasher,
+    F: Family,
     K: QmdbKey,
-    V: commonware_codec::Codec + Clone + Send + Sync,
     E: ValueEncoding<Value = V>,
-    immutable::Operation<F, K, E>: Encode + Read,
+    immutable::Operation<F, K, E>: Read,
 {
     operation_log: OperationLogClient<T, F, H, immutable::Operation<F, K, E>>,
 }
@@ -35,11 +32,9 @@ impl<F, H, K, V, E> Immutable<PreferZstdHttpClient, F, H, K, V, E>
 where
     F: Graftable,
     H: Hasher,
-    H::Digest: DecodeExt<()>,
     K: QmdbKey,
-    V: commonware_codec::Codec + Clone + Send + Sync,
     E: ValueEncoding<Value = V>,
-    immutable::Operation<F, K, E>: Decode + Encode + Read,
+    immutable::Operation<F, K, E>: Encode + Read,
 {
     pub fn plaintext(base: &str, op_cfg: <immutable::Operation<F, K, E> as Read>::Cfg) -> Self {
         Self::new(
@@ -53,15 +48,12 @@ where
 impl<T, F, H, K, V, E> Immutable<T, F, H, K, V, E>
 where
     T: ClientTransport,
-    T::ResponseBody: Body<Data = Bytes> + Unpin,
     <T::ResponseBody as Body>::Error: Display,
     F: Graftable,
     H: Hasher,
-    H::Digest: DecodeExt<()>,
     K: QmdbKey,
-    V: commonware_codec::Codec + Clone + Send + Sync,
     E: ValueEncoding<Value = V>,
-    immutable::Operation<F, K, E>: Decode + Encode + Read,
+    immutable::Operation<F, K, E>: Encode + Read,
 {
     pub fn new(
         transport: T,
@@ -105,7 +97,10 @@ where
     ) -> Result<
         OperationLogSubscription<T::ResponseBody, F, H, immutable::Operation<F, K, E>>,
         QmdbError,
-    > {
+    >
+    where
+        T::ResponseBody: Unpin,
+    {
         self.operation_log.subscribe(request).await
     }
 }

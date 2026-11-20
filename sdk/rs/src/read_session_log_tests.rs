@@ -142,8 +142,7 @@ fn stream_body(
 
 fn client<T>(transport: T) -> PrefixedStoreClient
 where
-    T: connectrpc::client::ClientTransport<Error = ConnectError> + Clone + 'static,
-    T::ResponseBody: http_body::Body<Data = Bytes> + Send + Unpin + 'static,
+    T: connectrpc::client::ClientTransport<Error = ConnectError>,
     <T::ResponseBody as http_body::Body>::Error: std::fmt::Display,
 {
     StoreClient::builder()

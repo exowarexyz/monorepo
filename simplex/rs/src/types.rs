@@ -156,7 +156,6 @@ where
     B: Block<Digest = D> + Read,
     S: certificate::Scheme,
     D: Digest,
-    <S::Certificate as Read>::Cfg: Clone,
 {
     type Cfg = (<S::Certificate as Read>::Cfg, <B as Read>::Cfg);
 
@@ -237,7 +236,6 @@ where
     B: Block<Digest = D> + Read,
     S: certificate::Scheme,
     D: Digest,
-    <S::Certificate as Read>::Cfg: Clone,
 {
     type Cfg = (<S::Certificate as Read>::Cfg, <B as Read>::Cfg);
 

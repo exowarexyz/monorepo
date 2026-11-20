@@ -85,10 +85,7 @@ where
     BiMap::<K, V>::decode_cfg(Copying(bytes), &((0..=MAX_PARTICIPANTS).into(), (), ()))
 }
 
-fn read_identity<V: Variant>(bytes: &[u8]) -> Result<V::Public, commonware_codec::Error>
-where
-    V::Public: DecodeExt<()>,
-{
+fn read_identity<V: Variant>(bytes: &[u8]) -> Result<V::Public, commonware_codec::Error> {
     V::Public::decode(Copying(bytes))
 }
 
@@ -96,7 +93,6 @@ fn verify_notarized<S, D>(scheme: S, bytes: &[u8]) -> Result<VerifiedCertificate
 where
     S: commonware_consensus::simplex::scheme::Scheme<D>,
     D: Digest,
-    <S::Certificate as Read>::Cfg: Clone,
 {
     let mut reader = Copying(bytes);
     let proof = Notarization::<S, D>::read_cfg(&mut reader, &scheme.certificate_codec_config())
@@ -119,7 +115,6 @@ fn verify_finalized<S, D>(scheme: S, bytes: &[u8]) -> Result<VerifiedCertificate
 where
     S: commonware_consensus::simplex::scheme::Scheme<D>,
     D: Digest,
-    <S::Certificate as Read>::Cfg: Clone,
 {
     let mut reader = Copying(bytes);
     let proof = Finalization::<S, D>::read_cfg(&mut reader, &scheme.certificate_codec_config())
@@ -152,7 +147,6 @@ fn verify_artifact<S, D>(
 where
     S: commonware_consensus::simplex::scheme::Scheme<D>,
     D: Digest,
-    <S::Certificate as Read>::Cfg: Clone,
 {
     match artifact {
         ArtifactKind::Notarized => verify_notarized(scheme, bytes),
@@ -168,7 +162,7 @@ fn verify_for_identity<P, D>(
     artifact: ArtifactKind,
 ) -> Result<VerifiedCertificate, String>
 where
-    P: PublicKey + Read<Cfg = ()> + Ord,
+    P: PublicKey,
     D: Digest,
 {
     match scheme_name {

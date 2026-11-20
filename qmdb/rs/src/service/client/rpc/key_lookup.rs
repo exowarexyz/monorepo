@@ -58,7 +58,6 @@ impl<T: Clone, L> Clone for KeyLookupClient<T, L> {
 impl<T, L> KeyLookupClient<T, L>
 where
     T: ClientTransport,
-    T::ResponseBody: Body<Data = Bytes> + Unpin,
     <T::ResponseBody as Body>::Error: Display,
     L: LookupVerifier,
 {

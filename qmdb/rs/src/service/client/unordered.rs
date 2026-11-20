@@ -14,7 +14,7 @@ use crate::{
     QmdbError,
 };
 use bytes::Bytes;
-use commonware_codec::{Decode, DecodeExt, Encode, Read};
+use commonware_codec::{Encode, Read};
 use commonware_cryptography::Hasher;
 use commonware_storage::{
     merkle::{Graftable, Location},
@@ -38,9 +38,7 @@ use std::{collections::BTreeMap, fmt::Display};
 pub struct UnorderedLookupVerifier<F, H, K, V, const N: usize, E>
 where
     F: Graftable,
-    H: Hasher,
-    K: QmdbKey + commonware_codec::Codec,
-    V: commonware_codec::Codec + Clone + Send + Sync,
+    K: QmdbKey,
     E: ValueEncoding<Value = V>,
     unordered::Operation<F, K, E>: Read,
 {
@@ -51,9 +49,7 @@ where
 impl<F, H, K, V, const N: usize, E> UnorderedLookupVerifier<F, H, K, V, N, E>
 where
     F: Graftable,
-    H: Hasher,
-    K: QmdbKey + commonware_codec::Codec,
-    V: commonware_codec::Codec + Clone + Send + Sync,
+    K: QmdbKey,
     E: ValueEncoding<Value = V>,
     unordered::Operation<F, K, E>: Read,
 {
@@ -70,11 +66,10 @@ impl<F, H, K, V, const N: usize, E> super::rpc::LookupVerifier
 where
     F: Graftable,
     H: Hasher,
-    H::Digest: DecodeExt<()>,
-    K: QmdbKey + commonware_codec::Codec,
-    V: commonware_codec::Codec + Clone + Send + Sync,
+    K: QmdbKey,
+    V: Clone,
     E: ValueEncoding<Value = V>,
-    unordered::Operation<F, K, E>: Decode + Encode + Read,
+    unordered::Operation<F, K, E>: Encode + Read,
 {
     type Digest = H::Digest;
     type Hit = VerifiedKeyValue<H::Digest, unordered::Operation<F, K, E>, F>;
@@ -162,13 +157,13 @@ where
 pub struct Unordered<
     T,
     F: Graftable,
-    H: Hasher,
-    K: QmdbKey + commonware_codec::Codec,
-    V: commonware_codec::Codec + Clone + Send + Sync,
+    H,
+    K: QmdbKey,
+    V,
     const N: usize,
     E: ValueEncoding<Value = V> = VariableEncoding<V>,
 > where
-    unordered::Operation<F, K, E>: Encode + Read,
+    unordered::Operation<F, K, E>: Read,
 {
     key_lookup: KeyLookupClient<T, UnorderedLookupVerifier<F, H, K, V, N, E>>,
     current_operation: CurrentOperationClient<T, F, H, unordered::Operation<F, K, E>, N>,
@@ -179,11 +174,10 @@ impl<F, H, K, V, const N: usize, E> Unordered<PreferZstdHttpClient, F, H, K, V, 
 where
     F: Graftable,
     H: Hasher,
-    H::Digest: DecodeExt<()>,
-    K: QmdbKey + commonware_codec::Codec,
-    V: commonware_codec::Codec + Clone + Send + Sync,
+    K: QmdbKey,
+    V: Clone,
     E: ValueEncoding<Value = V>,
-    unordered::Operation<F, K, E>: Decode + Encode + Read,
+    unordered::Operation<F, K, E>: Encode + Read,
 {
     pub fn plaintext(base: &str, op_cfg: <unordered::Operation<F, K, E> as Read>::Cfg) -> Self {
         Self::new(
@@ -196,16 +190,14 @@ where
 
 impl<T, F, H, K, V, const N: usize, E> Unordered<T, F, H, K, V, N, E>
 where
-    T: ClientTransport + Clone,
-    T::ResponseBody: Body<Data = Bytes> + Unpin,
+    T: ClientTransport,
     <T::ResponseBody as Body>::Error: Display,
     F: Graftable,
     H: Hasher,
-    H::Digest: DecodeExt<()>,
-    K: QmdbKey + commonware_codec::Codec,
-    V: commonware_codec::Codec + Clone + Send + Sync,
+    K: QmdbKey,
+    V: Clone,
     E: ValueEncoding<Value = V>,
-    unordered::Operation<F, K, E>: Decode + Encode + Read,
+    unordered::Operation<F, K, E>: Encode + Read,
 {
     pub fn new(
         transport: T,
@@ -337,7 +329,10 @@ where
     ) -> Result<
         OperationLogSubscription<T::ResponseBody, F, H, unordered::Operation<F, K, E>>,
         QmdbError,
-    > {
+    >
+    where
+        T::ResponseBody: Unpin,
+    {
         self.operation_log.subscribe(request).await
     }
 }
