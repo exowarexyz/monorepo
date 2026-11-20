@@ -71,9 +71,9 @@ A root returned by the proof server is not itself trusted.
 
 `OperationRangeProof` and `OperationMultiProof` establish membership in the log,
 so an included update need not still be active. `Current*` proofs additionally
-authenticate activity at the requested batch boundary, the final commit
-location of an applied batch. That boundary can be older than the latest
-published state.
+authenticate activity at the requested batch boundary, a commit whose
+publication was uploaded. That boundary can be older than the latest published
+state.
 
 ## Query current ordered state
 

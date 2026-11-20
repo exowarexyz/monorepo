@@ -10,7 +10,7 @@ use bytes::Bytes;
 use commonware_cryptography::Sha256;
 use commonware_storage::{
     merkle::{mmr, Location},
-    qmdb::{any::value::VariableEncoding, keyless::variable::Operation as KeylessOperation},
+    qmdb::{keyless::variable::Operation as KeylessOperation, value::VariableEncoding},
 };
 use connectrpc::client::ClientConfig;
 use datafusion::arrow::{array::Int64Array, datatypes::DataType, ipc::reader::StreamReader};
