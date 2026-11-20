@@ -247,7 +247,7 @@ where
             use commonware_runtime::{buffer::paged::CacheRef, Supervisor as _};
             let page_cache = CacheRef::new(NZU16!(64), NZUsize!(8));
             let cfg = commonware_storage::qmdb::current::Config {
-                merkle: common::merkle_config("current_ordered_fixed_source", page_cache.clone()),
+                merkle: common::merkle_config("current_ordered_fixed_source"),
                 log: FixedJournalConfig {
                     partition: "current_ordered_fixed_source-log".to_string(),
                     items_per_blob: NZU64!(8),
@@ -260,7 +260,7 @@ where
                 translator: TwoCap,
                 init_cache: None,
                 init_buffer: NZUsize!(1 << 21),
-                init_concurrency: (),
+                init_concurrency: NZUsize!(1),
             };
             let mut db: FixedDb<F> =
                 FixedDb::init(context.child("current_ordered_fixed_source"), cfg, None)
@@ -472,6 +472,9 @@ async fn test_ordered_mmb_multi_peak_grafted_chunk_round_trip() {
     }
 }
 
+/// After 80 batches are uploaded one publication at a time, key proofs at the last tip match the
+/// source root for the last batch's first fresh key and for a sample of active keys. A range read
+/// returns the first 10 active keys of its interval in order.
 async fn assert_incremental_seed_batches_keep_current_proofs_verifiable<F>(
     partition_prefix: &'static str,
 ) where
@@ -479,6 +482,9 @@ async fn assert_incremental_seed_batches_keep_current_proofs_verifiable<F>(
     BatchOperation<F>: commonware_codec::Codec + Clone,
 {
     let store_client = common::local_store_client().await;
+
+    // Build 80 batches that write, rewrite, and delete keys. Track the expected active keys, and
+    // read each publication before applying its batch.
     let (publications, latest_location, latest_key, expected_root, expected_active) =
         tokio::task::spawn_blocking(move || {
             cw_tokio::Runner::default().start(|context| async move {
@@ -546,6 +552,7 @@ async fn assert_incremental_seed_batches_keep_current_proofs_verifiable<F>(
         .await
         .expect("join");
 
+    // Upload each publication in its own Store batch, in order.
     let upload_client = store_client.unprefixed();
     for publication in &publications {
         common::commit_publications(&upload_client, std::slice::from_ref(publication))
@@ -553,6 +560,7 @@ async fn assert_incremental_seed_batches_keep_current_proofs_verifiable<F>(
             .expect("commit upload");
     }
 
+    // The last batch's first fresh key proves against the source root at the last tip.
     let qmdb_client: VariableClient<F> =
         exoware_qmdb::adapter::Ordered::new(store_client.unprefixed(), op_cfg::<F>(), key_cfg());
     let key_proof = qmdb_client
@@ -567,6 +575,7 @@ async fn assert_incremental_seed_batches_keep_current_proofs_verifiable<F>(
         _ => panic!("expected Update operation"),
     }
 
+    // The first 24 and last 8 active keys prove their expected values.
     let mut sample_keys = BTreeSet::new();
     sample_keys.extend(expected_active.keys().take(24).cloned());
     sample_keys.extend(expected_active.keys().rev().take(8).cloned());
@@ -588,6 +597,7 @@ async fn assert_incremental_seed_batches_keep_current_proofs_verifiable<F>(
         }
     }
 
+    // A range read returns the first 10 active keys of its interval in order.
     let range = qmdb_client
         .get_range(
             latest_location,
@@ -617,6 +627,10 @@ async fn test_ordered_mmb_incremental_seed_batches_keep_current_proofs_verifiabl
     .await;
 }
 
+/// A publication read before its batch is applied can be uploaded after the batch is applied and
+/// synced. After two such batches from a persistent MMB source, the reader returns the source's
+/// current root and operation-log root at the last tip and verifies a current proof of
+/// `k-00000005`.
 #[tokio::test]
 async fn test_ordered_mmb_persistent_interleaved_seed_batches_keep_current_proofs_verifiable() {
     let store_client = common::local_store_client().await;
@@ -624,6 +638,9 @@ async fn test_ordered_mmb_persistent_interleaved_seed_batches_keep_current_proof
     let storage_path = storage_dir.path().to_owned();
     let store = store_client.clone();
 
+    // Open a persistent source and upload its initial publication. For each of two batches, read
+    // the publication before applying the batch and upload it after the batch is applied and
+    // synced.
     let (latest_location, expected_root, expected_ops_root) =
         tokio::task::spawn_blocking(move || {
             cw_tokio::Runner::new(cw_tokio::Config::new().with_storage_directory(storage_path))
@@ -686,6 +703,8 @@ async fn test_ordered_mmb_persistent_interleaved_seed_batches_keep_current_proof
         .await
         .expect("join");
 
+    // At the last tip, the reader must return both source roots and a key proof against the current
+    // root.
     let qmdb_client: VariableClient<mmb::Family> = exoware_qmdb::adapter::Ordered::new(
         store_client.unprefixed(),
         op_cfg::<mmb::Family>(),
@@ -954,6 +973,10 @@ async fn test_ordered_mmr_exclusion_proof_reads_one_update_page() {
     }
 }
 
+/// Two chained batches each cross a bitmap chunk boundary, and both publications are read before
+/// either batch is applied. After they are uploaded without a watermark, root reads at both batch
+/// tips fail. One watermark at the last tip then exposes the initial root and both batch roots, and
+/// each batch tip proves its own value of `alpha`.
 async fn assert_current_boundaries_survive_coalesced_publication<F>()
 where
     F: Graftable,
@@ -972,6 +995,7 @@ where
                     .expect("decoded publication must verify")
             };
 
+            // Open an empty source database and prepare its initial publication.
             let page_cache = CacheRef::new(NZU16!(64), NZUsize!(8));
             let cfg = common::current_variable_config(
                 "current_ordered_variable_coalesced_source",
@@ -989,8 +1013,8 @@ where
             let initial = Publication::initial(&db).expect("initial publication must be readable");
             let prepared_initial = prepare(&initial);
 
-            // Merkleize the second batch as a child of the first and read both publications
-            // while neither batch is applied.
+            // Merkleize two batches, the second as a child of the first, and read both publications
+            // before either batch is applied.
             let mut batches: Vec<(Arc<VariableBatch<F>>, _, _)> = Vec::new();
             for (batch_index, value) in [b"one".to_vec(), b"updated".to_vec()]
                 .into_iter()
@@ -1046,6 +1070,8 @@ where
     .await
     .expect("join source DB");
 
+    // Upload all three publications without a watermark. The reader must report no watermark and
+    // reject a root request at each batch tip.
     let store_client = common::local_store_client().await;
     let upload_client = store_client.unprefixed();
     let qmdb_client: VariableClient<F> =
@@ -1080,7 +1106,8 @@ where
         ));
     }
 
-    // Publish once after both prefixes and their versioned current-state rows are durable.
+    // Publish one watermark at the last tip once all three publications are durable. The reader
+    // must then report that watermark and return the initial root at location 0.
     let latest = expected.last().unwrap().0;
     let mut watermark = StoreWriteBatch::new();
     stage_watermark(&upload_client, latest, &mut watermark).expect("stage final watermark");
@@ -1097,16 +1124,17 @@ where
         initial_root
     );
 
+    // Each batch tip serves its own root and its own value of `alpha`.
     for (tip, expected_root, expected_value) in expected {
         let root = qmdb_client
             .root_at(tip, None)
             .await
-            .unwrap_or_else(|error| panic!("current root at uploaded tip {tip}: {error}"));
+            .unwrap_or_else(|error| panic!("uploaded tip {tip} must have a current root: {error}"));
         assert_eq!(root, expected_root);
         let proof = qmdb_client
             .get(tip, &b"alpha".to_vec(), None)
             .await
-            .unwrap_or_else(|error| panic!("current proof at uploaded tip {tip}: {error}"));
+            .unwrap_or_else(|error| panic!("uploaded tip {tip} must prove alpha: {error}"));
         assert_eq!(proof.root, expected_root);
         match proof.operation {
             BatchOperation::Update(update) => {
@@ -1275,6 +1303,10 @@ async fn test_ordered_current_proof_reads_overlap() {
     }
 }
 
+/// `prepare_publication` accepts an unmodified publication, and the prepared range spans exactly
+/// the batch's operations. It rejects a publication that does not bind to the trusted root, that
+/// does not hold exactly one commit as its last operation, or that carries a grafted node below the
+/// grafting height or at the node limit.
 #[tokio::test]
 async fn test_prepare_publication_rejects_unbound_publications() {
     // Read the initial publication and the publication of one source batch that is never
@@ -1344,8 +1376,8 @@ async fn test_prepare_publication_rejects_unbound_publications() {
         })
     ));
 
-    // Reordered operations rebuild a different operation-log root, which the witness does not
-    // bind to the publication's root.
+    // Swapping two operations changes the rebuilt operation-log root, and the witness cannot bind
+    // that root to the trusted current root.
     let mut reordered = publication.clone();
     let mut operations = reordered.operations.as_ref().clone();
     operations.swap(0, 1);
@@ -1357,8 +1389,8 @@ async fn test_prepare_publication_rejects_unbound_publications() {
         })
     ));
 
-    // The initial commit followed by the batch's operations rebuilds the batch's operation-log
-    // root from an empty frontier, and is rejected for holding two commits.
+    // Prepending the initial commit would rebuild the batch's operation-log root from an empty
+    // frontier. Preparation rejects the publication because it holds two commits.
     let mut glued = publication.clone();
     glued.start_location = Location::new(0);
     glued.pinned_nodes = Vec::new();
@@ -1394,14 +1426,20 @@ async fn test_prepare_publication_rejects_unbound_publications() {
         Err(QmdbError::CorruptData(_))
     ));
 
-    // A decoded grafted node too close to the family's node limit to convert is rejected.
+    // A decoded grafted node at the family's node limit is rejected. The limit is a node count, so
+    // no node sits at that position.
     let mut high_graft = publication.clone();
-    high_graft.grafted_nodes = vec![(Position::new(*mmr::Family::MAX_NODES - 1), root)];
+    high_graft.grafted_nodes = vec![(mmr::Family::MAX_NODES, root)];
     let high_graft = common::round_trip_publication(&high_graft, op_cfg::<mmr::Family>());
     assert!(matches!(
         prepare(&high_graft, &root),
-        Err(QmdbError::CorruptData(_))
+        Err(QmdbError::CorruptData(message)) if message.contains("node limit")
     ));
+
+    // The last position below the limit prepares.
+    let mut last_graft = publication.clone();
+    last_graft.grafted_nodes = vec![(Position::new(*mmr::Family::MAX_NODES - 1), root)];
+    let _ = prepare(&last_graft, &root).expect("the last node position must prepare");
 
     // A witness that does not bind the rebuilt operation-log root to the publication's root
     // fails publication verification.

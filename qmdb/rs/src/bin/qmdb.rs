@@ -7,8 +7,11 @@ use commonware_runtime::{
     buffer::paged::CacheRef, tokio as cw_tokio, Runner as _, Supervisor as _,
 };
 use commonware_storage::{
-    journal::contiguous::variable::Config as JournalConfig,
-    merkle::{full::Config as MerkleConfig, mmb, Location},
+    journal::{
+        authenticated::{Config as MerkleConfig, ResidentHeight},
+        contiguous::variable::Config as JournalConfig,
+    },
+    merkle::{mmb, Location},
     qmdb::{
         any::ordered::{variable::Operation as VariableOperation, Update},
         current::ordered::variable::{
@@ -185,13 +188,10 @@ async fn seed(
             let page_cache = CacheRef::new(NZU16!(64), NZUsize!(8));
             let cfg = CurrentOrderedVariableConfig {
                 merkle: MerkleConfig {
-                    journal_partition: "current-ordered-variable-mmb-seed-merkle-journal".into(),
-                    metadata_partition: "current-ordered-variable-mmb-seed-merkle-metadata".into(),
-                    items_per_blob: NZU64!(8),
-                    write_buffer: NZUsize!(1024),
+                    partition: "current-ordered-variable-mmb-seed-merkle-metadata".into(),
+                    resident_height: ResidentHeight::default(),
                     replay_buffer: NZUsize!(1024),
                     strategy: Sequential,
-                    page_cache: page_cache.clone(),
                 },
                 log: JournalConfig {
                     partition: "current-ordered-variable-mmb-seed-log".into(),
@@ -207,7 +207,7 @@ async fn seed(
                 translator: TwoCap,
                 init_cache: None,
                 init_buffer: NZUsize!(1 << 21),
-                init_concurrency: (),
+                init_concurrency: NZUsize!(1),
             };
             let mut source_db = Db::init(
                 context.child("current_ordered_variable_mmb_seed"),
@@ -217,8 +217,9 @@ async fn seed(
             .await
             .expect("init local ordered db");
 
-            // A new database's initial commit belongs to no batch, so upload its publication
-            // before the first batch.
+            // A new database's initial commit belongs to no batch, so it has a publication of its
+            // own. Every upload publishes a watermark, and every watermark covers location 0, so
+            // this publication is uploaded first.
             let end = source_db.bounds().end;
             if end == Location::new(1) {
                 let initial = Publication::initial(&source_db)

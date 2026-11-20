@@ -27,8 +27,6 @@ use std::num::NonZeroU64;
 
 type Digest = commonware_cryptography::sha256::Digest;
 
-// -------------------- Keyless --------------------
-
 #[tokio::test]
 async fn test_mirror_keyless_from_local() {
     let store_client = common::local_store_client().await;
@@ -132,8 +130,6 @@ async fn build_keyless_source(
     .await
     .expect("join")
 }
-
-// -------------------- Unordered --------------------
 
 type UnorderedOp =
     commonware_storage::qmdb::any::unordered::variable::Operation<mmr::Family, Vec<u8>, Vec<u8>>;
@@ -257,8 +253,6 @@ async fn build_any_unordered_source(
     .expect("join")
 }
 
-// -------------------- Immutable --------------------
-
 type ImmK = FixedBytes<32>;
 
 #[tokio::test]
@@ -367,15 +361,16 @@ async fn build_immutable_source(
     .expect("join")
 }
 
-// -------------------- Current ordered (publications) --------------------
-
 const N: usize = 32;
 type OrderedPublication = Publication<mmr::Family, Digest, OrderedUpdate<Vec<u8>, Vec<u8>>, N>;
 
+/// The initial commit's and the first batch's publications are uploaded together, then only the
+/// second batch's publication. After each upload, the remote root equals the source root.
 #[tokio::test]
 async fn test_mirror_ordered_from_local() {
     let store_client = common::local_store_client().await;
 
+    // Upload the initial commit's and the first batch's publications and check the remote root.
     let (latest1, root1, publications1) = build_current_ordered_source(vec![vec![
         (b"alpha".to_vec(), Some(b"one".to_vec())),
         (b"beta".to_vec(), Some(b"two".to_vec())),

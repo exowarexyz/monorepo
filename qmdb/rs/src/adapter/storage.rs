@@ -137,10 +137,11 @@ pub(crate) fn node_source<F: Graftable, const N: usize>(
     if (*leftmost).saturating_add(covered_chunks) <= pruned_chunks {
         return Ok(NodeSource::Ops);
     }
-    // A parent can cover both discarded all-zero chunks and retained chunks with active bits
-    // Activity changes before pruning can change its hash
-    // Pruning itself preserves the root
-    // Boundary deltas omit discarded chunks, so only wholly retained nodes reuse stored current hashes
+
+    // A node that covers only retained chunks is looked up among the stored grafted rows. A node
+    // that spans the pruning boundary is rebuilt from its children. A pruned chunk is all zero, so
+    // its grafted leaf has the digest of its operation-tree node, and the pruned side of the
+    // rebuild reads operation-tree nodes.
     if *leftmost >= pruned_chunks {
         return Ok(NodeSource::Grafted(grafted_position));
     }

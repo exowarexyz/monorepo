@@ -2170,7 +2170,7 @@ mod tests {
             assert!(QueryPredicate::supports_filter(&literal, &model));
             for filters in [
                 vec![equality.clone(), literal.clone()],
-                vec![literal.clone(), equality.clone()],
+                vec![literal, equality.clone()],
             ] {
                 let predicate = QueryPredicate::from_filters(&filters, &model);
                 assert_eq!(predicate.contradiction, value != Some(true));
