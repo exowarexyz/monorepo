@@ -167,7 +167,7 @@ impl LogBatch {
             entries: kvs
                 .into_iter()
                 .map(|(key, value)| Entry {
-                    key: key.to_vec(),
+                    key,
                     value,
                     ..Default::default()
                 })
@@ -240,7 +240,7 @@ impl FilteredBatch {
             entries: kvs
                 .into_iter()
                 .map(|(key, value)| Entry {
-                    key: key.to_vec(),
+                    key,
                     value,
                     ..Default::default()
                 })

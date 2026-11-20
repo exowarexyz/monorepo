@@ -64,7 +64,7 @@ fn fill_random(out: &mut [u8], state: &mut u64) {
     }
 }
 
-fn entry(key: Vec<u8>, value: Bytes) -> Entry {
+fn entry(key: Bytes, value: Bytes) -> Entry {
     Entry {
         key,
         value,
@@ -78,13 +78,13 @@ fn entry(key: Vec<u8>, value: Bytes) -> Entry {
 const SIMPLE_KEY_LEN: usize = 26;
 const SIMPLE_VALUE_LEN: usize = 58;
 
-fn simple_row(counter: u64, state: &mut u64) -> (Vec<u8>, Bytes) {
+fn simple_row(counter: u64, state: &mut u64) -> (Bytes, Bytes) {
     let mut key = vec![0u8; SIMPLE_KEY_LEN];
     key[..8].copy_from_slice(&counter.to_be_bytes());
     fill_random(&mut key[8..], state);
     let mut value = vec![0u8; SIMPLE_VALUE_LEN];
     fill_random(&mut value[..(SIMPLE_VALUE_LEN * 2).div_ceil(3)], state);
-    (key, Bytes::from(value))
+    (Bytes::from(key), Bytes::from(value))
 }
 
 fn simple_range_frame(state: &mut u64) -> Vec<u8> {
@@ -351,7 +351,7 @@ fn bodies() -> Vec<Body> {
             bytes: RangeFrame {
                 results: window
                     .iter()
-                    .map(|(key, value)| entry(key.clone(), value.clone()))
+                    .map(|(key, value)| entry(Bytes::copy_from_slice(key), value.clone()))
                     .collect(),
                 ..Default::default()
             }
@@ -368,7 +368,7 @@ fn bodies() -> Vec<Body> {
             sequence_number: 1,
             entries: wal
                 .into_iter()
-                .map(|(key, value)| entry(key, value))
+                .map(|(key, value)| entry(Bytes::from(key), value))
                 .collect(),
             ..Default::default()
         }

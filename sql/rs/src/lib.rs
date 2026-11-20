@@ -331,7 +331,7 @@ mod tests {
             results: results
                 .into_iter()
                 .map(|(key, value)| ProtoEntry {
-                    key: key.to_vec(),
+                    key,
                     value: value.into(),
                     ..Default::default()
                 })
