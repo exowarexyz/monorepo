@@ -744,7 +744,7 @@ impl PrefixedStoreClient {
         let (start, end) = self.encode_store_range(start, end)?;
         let request = self.prefix_reduce_request(request)?;
         self.client
-            .range_reduce_stream_internal(&start, &end, &request, options)
+            .range_reduce_stream_internal(&start, &end, request, options)
             .await
     }
 
@@ -2382,12 +2382,12 @@ impl StoreClient {
         &self,
         start: &Key,
         end: &Key,
-        request: &DomainRangeReduceRequest,
+        request: DomainRangeReduceRequest,
         options: QueryStreamReadOptions,
     ) -> Result<ReduceStream, ClientError> {
         let config = self.streaming_client_config(self.query_uri.clone());
         let client = QueryServiceClient::new(self.connect_http.clone(), config);
-        let proto_params = proto_to_proto_reduce_params(request.clone());
+        let proto_params = proto_to_proto_reduce_params(request);
         let min_sequence_number = options.min_sequence_number;
         let (stream, first) = self
             .send_with_retry(|| {

@@ -3,7 +3,7 @@ use bytes::{BufMut, Bytes};
 use commonware_codec::{
     Buf, Copying, EncodeSize, Error as CodecError, FixedSize, RangeCfg, Read, ReadExt, Write,
 };
-use std::cmp::Ordering;
+use std::{borrow::Cow, cmp::Ordering};
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Utf8(pub String);
@@ -446,18 +446,18 @@ pub fn extract_zorder_key_field(
     decode_ordered_key_field_bytes(bytes, kind)
 }
 
-fn extract_key_bytes(key: &Key, bit_offset: usize, width: usize) -> Option<Vec<u8>> {
+fn extract_key_bytes(key: &Key, bit_offset: usize, width: usize) -> Option<Cow<'_, [u8]>> {
     let end_bit = bit_offset.checked_add(width.checked_mul(8)?)?;
     if end_bit > key.len() * 8 {
         return None;
     }
     if bit_offset.is_multiple_of(8) {
         let byte_offset = bit_offset / 8;
-        return Some(key.get(byte_offset..byte_offset + width)?.to_vec());
+        return Some(Cow::Borrowed(key.get(byte_offset..byte_offset + width)?));
     }
     let mut out = vec![0u8; width];
     read_bits_to_bytes(key, bit_offset, &mut out, width * 8);
-    Some(out)
+    Some(Cow::Owned(out))
 }
 
 pub fn extract_stored_field(
@@ -781,6 +781,20 @@ mod tests {
         let err = extract_stored_field(&decoded, 0, KvFieldKind::Int64, false)
             .expect_err("missing non-nullable field should fail");
         assert!(err.contains("non-nullable"));
+    }
+
+    #[test]
+    fn extract_key_bytes_borrows_aligned_ranges_and_shifts_unaligned_ranges() {
+        let key = Key::from(vec![0x12, 0x34]);
+        assert!(matches!(
+            extract_key_bytes(&key, 8, 1),
+            Some(Cow::Borrowed([0x34]))
+        ));
+        assert_eq!(
+            extract_key_bytes(&key, 4, 1).as_deref(),
+            Some([0x23].as_slice())
+        );
+        assert_eq!(extract_key_bytes(&key, 9, 1), None);
     }
 
     #[test]
