@@ -26,12 +26,12 @@ for each status:
 
 ```rust
 use datafusion::arrow::datatypes::DataType;
-use exoware_sdk::{ReadSession, StoreClient, StoreKeyPrefix};
+use exoware_sdk::{ReadSession, StoreClient};
 use exoware_sql::{CellValue, IndexSpec, KvSchema, SqlContext, TableColumnConfig};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let client = StoreClient::new("http://localhost:8080").prefixed(StoreKeyPrefix::identity());
+    let client = StoreClient::new("http://localhost:8080").unprefixed();
     let schema = KvSchema::new(client.clone()).table(
         "orders",
         vec![

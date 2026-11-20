@@ -86,7 +86,7 @@ mod tests {
         kv_codec::Utf8,
         prune_policy::{validate_policy, OrderEncoding, RetainPolicy},
         selector::compile_payload_regex,
-        StoreClient, StoreKeyPrefix,
+        StoreClient,
     };
     use std::collections::HashSet;
 
@@ -109,7 +109,7 @@ mod tests {
     }
 
     fn versioned_schema(entity_type: DataType) -> KvSchema {
-        let client = StoreClient::new("http://localhost:8080").prefixed(StoreKeyPrefix::identity());
+        let client = StoreClient::new("http://localhost:8080").unprefixed();
         let mut schema = KvSchema::new(client);
         for i in 0..3 {
             schema = schema
@@ -180,7 +180,7 @@ mod tests {
 
     #[test]
     fn keep_latest_versions_rejects_indexed_tables() {
-        let client = StoreClient::new("http://localhost:8080").prefixed(StoreKeyPrefix::identity());
+        let client = StoreClient::new("http://localhost:8080").unprefixed();
         let schema = KvSchema::new(client)
             .table_versioned(
                 "documents",
@@ -211,8 +211,7 @@ mod tests {
             vec!["version", "entity"],
             vec!["version", "version"],
         ] {
-            let client =
-                StoreClient::new("http://localhost:8080").prefixed(StoreKeyPrefix::identity());
+            let client = StoreClient::new("http://localhost:8080").unprefixed();
             let schema = KvSchema::new(client)
                 .table(
                     "documents",

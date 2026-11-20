@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { Client, ReadSession, StoreWriteBatch } from '@exowarexyz/sdk';
+import { StoreClient, ReadSession, StoreWriteBatch } from '@exowarexyz/sdk';
 import {
   SimplexReader,
   SimplexRecordKind,
@@ -48,7 +48,7 @@ test('u64 helper rejects unsafe JavaScript numbers', () => {
 });
 
 test('stages block and finalization rows into one StoreWriteBatch', () => {
-  const store = new Client('http://127.0.0.1:1').store();
+  const store = new StoreClient('http://127.0.0.1:1').unprefixed();
   const simplex = new SimplexWriter(store);
   assert.deepEqual(simplex.prepareHeader({ digest: 'c0', header: 'a0' }), {
     entries: [{ key: headerByDigestKey('c0'), value: new Uint8Array([0xa0]) }],
@@ -97,7 +97,7 @@ test('stages block and finalization rows into one StoreWriteBatch', () => {
 });
 
 test('upload validation rejects a finalization before ingest', async () => {
-  const client = new Client('http://127.0.0.1:1', {
+  const client = new StoreClient('http://127.0.0.1:1', {
     putLimits: { maxEntries: 1 },
   });
   let calls = 0;
@@ -107,7 +107,7 @@ test('upload validation rejects a finalization before ingest', async () => {
       return { sequenceNumber: 1n };
     },
   });
-  const simplex = new SimplexWriter(client.store());
+  const simplex = new SimplexWriter(client.unprefixed());
 
   await assert.rejects(
     () => simplex.uploadFinalization({
@@ -122,7 +122,7 @@ test('upload validation rejects a finalization before ingest', async () => {
 });
 
 test('valid finalization upload remains one Put and one receipt', async () => {
-  const client = new Client('http://127.0.0.1:1', {
+  const client = new StoreClient('http://127.0.0.1:1', {
     putLimits: { maxEntries: 2 },
   });
   let calls = 0;
@@ -138,7 +138,7 @@ test('valid finalization upload remains one Put and one receipt', async () => {
       return { sequenceNumber: 19n };
     },
   });
-  const simplex = new SimplexWriter(client.store());
+  const simplex = new SimplexWriter(client.unprefixed());
 
   const receipt = await simplex.uploadFinalization({
     epoch: 0,
@@ -165,7 +165,7 @@ test('valid finalization upload remains one Put and one receipt', async () => {
 });
 
 test('streams header and full block data separately', async () => {
-  const store = new Client('http://127.0.0.1:1').store();
+  const store = new StoreClient('http://127.0.0.1:1').unprefixed();
   const full = encodeSimplexBlockData('aa', 'bbcc');
   store.subscribe = async function* () {
     yield {
@@ -208,7 +208,7 @@ test('streams header and full block data separately', async () => {
 });
 
 test('certificate getters require and apply a verifier', async () => {
-  const store = new Client('http://127.0.0.1:1').store();
+  const store = new StoreClient('http://127.0.0.1:1').unprefixed();
   const session = ReadSession.fixed(store);
   let reads = 0;
   const rows = new Map<string, Uint8Array>([
@@ -241,7 +241,7 @@ test('certificate getters require and apply a verifier', async () => {
 });
 
 test('reader captures its verifier option', async () => {
-  const session = ReadSession.fixed(new Client('http://127.0.0.1:1').store());
+  const session = ReadSession.fixed(new StoreClient('http://127.0.0.1:1').unprefixed());
   session.get = async () => ({ value: new Uint8Array([0xa3]) });
   const verifier: SimplexCertificateVerifier<string, string> = {
     verifyNotarization: () => 'verified',
@@ -255,8 +255,8 @@ test('reader captures its verifier option', async () => {
 });
 
 test('readers preserve absent and explicit-zero session floors', async () => {
-  const client = new Client('http://127.0.0.1:1');
-  const store = client.store();
+  const client = new StoreClient('http://127.0.0.1:1');
+  const store = client.unprefixed();
   const requested: Array<bigint | undefined> = [];
   const connectGet = client.query.get;
   type QueryGetResponse = Awaited<ReturnType<typeof connectGet>>;
@@ -272,8 +272,8 @@ test('readers preserve absent and explicit-zero session floors', async () => {
 });
 
 test('unary point reads use the session floor and forward call options', async () => {
-  const client = new Client('http://127.0.0.1:1');
-  const store = client.store();
+  const client = new StoreClient('http://127.0.0.1:1');
+  const store = client.unprefixed();
   const minSequenceNumber = 23n;
   const rows = new Map<string, Uint8Array>([
     [bytesToHex(headerByDigestKey('01')), new Uint8Array([0xa1])],
@@ -325,8 +325,8 @@ test('unary point reads use the session floor and forward call options', async (
 });
 
 test('exact-height reads forward Connect call options', async () => {
-  const client = new Client('http://127.0.0.1:1');
-  const store = client.store();
+  const client = new StoreClient('http://127.0.0.1:1');
+  const store = client.unprefixed();
   const minSequenceNumber = 31n;
   const value = new Uint8Array([0xa5]);
   const controller = new AbortController();
@@ -377,8 +377,8 @@ test('exact-height reads forward Connect call options', async () => {
 });
 
 test('default readers advance monotonically and share observations only with clones', async () => {
-  const client = new Client('http://127.0.0.1:1');
-  const store = client.store();
+  const client = new StoreClient('http://127.0.0.1:1');
+  const store = client.unprefixed();
   const requested: Array<bigint | undefined> = [];
   type QueryGetResponse = Awaited<ReturnType<typeof client.query.get>>;
   client.query.get = async (request) => {
@@ -400,8 +400,8 @@ test('default readers advance monotonically and share observations only with clo
 });
 
 test('derived readers strengthen only their handle and share observations', async () => {
-  const client = new Client('http://127.0.0.1:1');
-  const store = client.store();
+  const client = new StoreClient('http://127.0.0.1:1');
+  const store = client.unprefixed();
   const requested: Array<bigint | undefined> = [];
   const connectGet = client.query.get;
   type QueryGetResponse = Awaited<ReturnType<typeof connectGet>>;
@@ -432,8 +432,8 @@ test('derived readers strengthen only their handle and share observations', asyn
 });
 
 test('latest finalization reads forward minimum sequence numbers', async () => {
-  const client = new Client('http://127.0.0.1:1');
-  const store = client.store();
+  const client = new StoreClient('http://127.0.0.1:1');
+  const store = client.unprefixed();
   const minSequenceNumber = 29n;
   const key = finalizedByHeightKey(7);
   const value = new Uint8Array([0xa7]);
@@ -827,7 +827,7 @@ test('Simplex WASM verifier adapter propagates verifier errors', async () => {
 });
 
 test('certificate streams require a verifier before subscribing', async () => {
-  const store = new Client('http://127.0.0.1:1').store();
+  const store = new StoreClient('http://127.0.0.1:1').unprefixed();
   let subscribed = false;
   store.subscribe = async function* () {
     subscribed = true;
@@ -839,7 +839,7 @@ test('certificate streams require a verifier before subscribing', async () => {
 });
 
 test('streams and verifies certificate entries', async () => {
-  const store = new Client('http://127.0.0.1:1').store();
+  const store = new StoreClient('http://127.0.0.1:1').unprefixed();
   let capturedFilters: unknown;
   store.subscribe = async function* (filters) {
     capturedFilters = filters;
@@ -893,7 +893,7 @@ test('streams and verifies certificate entries', async () => {
 });
 
 test('round getters and streams distinguish epochs at the same view', async () => {
-  const store = new Client('http://127.0.0.1:1').store();
+  const store = new StoreClient('http://127.0.0.1:1').unprefixed();
   const session = ReadSession.fixed(store);
   const entries = [2, 3].flatMap((epoch) => [
     { key: notarizationByRoundKey(epoch, 7), value: new Uint8Array([epoch]) },
@@ -967,9 +967,9 @@ test('built-in certificate verification binds epoch and view to the request', as
 });
 
 test('latest finalization passes the indexed height to the verifier', async () => {
-  const store = new Client('http://127.0.0.1:1').store();
+  const store = new StoreClient('http://127.0.0.1:1').unprefixed();
   const session = ReadSession.fixed(store);
-  session.query = async () => ({
+  session.range = async () => ({
     results: [{ key: finalizedByHeightKey(11), value: new Uint8Array([0xb0]) }],
     sequenceNumber: 1n,
   });
@@ -988,7 +988,7 @@ test('latest finalization passes the indexed height to the verifier', async () =
 });
 
 test('certificate streams reject round keys of the wrong width', async () => {
-  const store = new Client('http://127.0.0.1:1').store();
+  const store = new StoreClient('http://127.0.0.1:1').unprefixed();
   store.subscribe = async function* () {
     yield {
       sequenceNumber: 1n,

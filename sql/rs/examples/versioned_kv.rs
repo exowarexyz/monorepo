@@ -1,5 +1,5 @@
 use datafusion::arrow::{datatypes::DataType, util::pretty::print_batches};
-use exoware_sdk::{StoreClient, StoreKeyPrefix};
+use exoware_sdk::StoreClient;
 use exoware_sql::{CellValue, KvSchema, SqlContext, TableColumnConfig};
 
 const DOC_ID_HEX: &str = "d0c1aabbccddeeff0011223344556677";
@@ -13,7 +13,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let base_url =
         std::env::var("EXOWARE_URL").unwrap_or_else(|_| "http://localhost:8080".to_string());
     let client = StoreClient::new(&base_url);
-    let ctx = SqlContext::new(client.prefixed(StoreKeyPrefix::identity()));
+    let ctx = SqlContext::new(client.unprefixed());
 
     // -- Define the versioned document table --
     let schema = build_schema(client)?;
@@ -30,7 +30,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn build_schema(client: StoreClient) -> Result<KvSchema, String> {
-    KvSchema::new(client.prefixed(StoreKeyPrefix::identity())).table_versioned(
+    KvSchema::new(client.unprefixed()).table_versioned(
         "documents",
         vec![
             TableColumnConfig::new("doc_id", DataType::FixedSizeBinary(16), false),

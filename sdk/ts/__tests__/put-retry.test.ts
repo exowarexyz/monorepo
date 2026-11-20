@@ -1,6 +1,6 @@
 import { create, toBinary } from '@bufbuild/protobuf';
 import { Code, ConnectError, createClient } from '@connectrpc/connect';
-import { Client, createTransport, type RetryConfig } from '../src/client';
+import { StoreClient, createTransport, type RetryConfig } from '../src/client';
 import { ErrorInfoSchema, RetryInfoSchema } from '../src/gen/ts/google/rpc/error_details_pb';
 import { PutRequestSchema, PutResponseSchema, Service as IngestService } from '../src/gen/ts/log/v1/ingest_pb';
 import { GetRequestSchema, GetResponseSchema } from '../src/gen/ts/store/v1/query_pb';
@@ -36,8 +36,8 @@ function accepted(): Response {
     });
 }
 
-function client(retry: Partial<RetryConfig> = {}): Client {
-    return new Client('http://put-retry.test', {
+function client(retry: Partial<RetryConfig> = {}): StoreClient {
+    return new StoreClient('http://put-retry.test', {
         token: '',
         retry: { maxAttempts: 3, initialBackoffMs: 10, maxBackoffMs: 100, ...retry },
     });
@@ -345,7 +345,7 @@ test('Store writes without a timeout retain their uncapped upload budget', async
         expect(init?.signal?.aborted).toBe(false);
         return accepted();
     });
-    const pending = client().store().set(new Uint8Array([1]), new Uint8Array([2]));
+    const pending = client().unprefixed().put(new Uint8Array([1]), new Uint8Array([2]));
     await jest.advanceTimersByTimeAsync(60_000);
     await expect(pending).resolves.toBe(7n);
 });

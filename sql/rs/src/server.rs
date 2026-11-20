@@ -661,9 +661,7 @@ mod tests {
     fn table_metadata_and_subscription_lookup_preserve_schema_order() {
         // Tables are declared out of name order, each with a column named after the table, so
         // a lookup that returns the wrong table is detectable.
-        let mut schema = KvSchema::new(PrefixedStoreClient::empty(StoreClient::new(
-            "http://127.0.0.1:1",
-        )));
+        let mut schema = KvSchema::new(StoreClient::new("http://127.0.0.1:1").unprefixed());
         let names = ["zeta", "alpha", "middle"];
         for name in names {
             schema = schema
@@ -833,7 +831,7 @@ mod tests {
                 .retry_config(exoware_sdk::RetryConfig::disabled())
                 .build()
                 .unwrap();
-            let schema = KvSchema::new(PrefixedStoreClient::empty(store))
+            let schema = KvSchema::new(store.unprefixed())
                 .table(
                     "observed",
                     vec![TableColumnConfig::new("id", DataType::Int64, false)],
@@ -888,9 +886,8 @@ mod tests {
         use crate::proto::sql::v1::ServiceClient;
         use connectrpc::client::{ClientConfig, HttpClient};
 
-        let schema = KvSchema::new(PrefixedStoreClient::empty(exoware_sdk::StoreClient::new(
-            "http://127.0.0.1:1",
-        )));
+        let schema =
+            KvSchema::new(exoware_sdk::StoreClient::new("http://127.0.0.1:1").unprefixed());
         let server = Arc::new(SqlServer::new(schema).unwrap());
         let layouts = ipc_layout_batch();
         server
@@ -1112,7 +1109,7 @@ mod tests {
             .retry_config(exoware_sdk::RetryConfig::disabled())
             .build()
             .unwrap();
-        let schema = KvSchema::new(PrefixedStoreClient::empty(client))
+        let schema = KvSchema::new(client.unprefixed())
             .table(
                 "counts",
                 vec![
@@ -1575,19 +1572,18 @@ mod tests {
     fn subscription_evaluates_decoded_frames_and_preserves_their_sequence() {
         let ctx = DataFusionContext::new();
         let batch = predicate_batch();
-        let schema = KvSchema::new(exoware_sdk::PrefixedStoreClient::empty(
-            exoware_sdk::StoreClient::new("http://127.0.0.1:1"),
-        ))
-        .table(
-            "orders",
-            vec![
-                crate::TableColumnConfig::new("id", DataType::Int64, false),
-                crate::TableColumnConfig::new("status", DataType::Utf8, true),
-            ],
-            vec!["id".to_string()],
-            vec![],
-        )
-        .unwrap();
+        let schema =
+            KvSchema::new(exoware_sdk::StoreClient::new("http://127.0.0.1:1").unprefixed())
+                .table(
+                    "orders",
+                    vec![
+                        crate::TableColumnConfig::new("id", DataType::Int64, false),
+                        crate::TableColumnConfig::new("status", DataType::Utf8, true),
+                    ],
+                    vec!["id".to_string()],
+                    vec![],
+                )
+                .unwrap();
         let table = &schema.tables()[0].1;
         let state = TableStream::new(table.model.clone(), table.index_specs.clone());
         let entries =

@@ -1,4 +1,4 @@
-import { ReadSession, TraversalMode, type StoreClient } from '@exowarexyz/sdk';
+import { ReadSession, RangeMode, type PrefixedStoreClient } from '@exowarexyz/sdk';
 
 import { verifyNotarization, verifyFinalization } from './certificate-verification.js';
 import {
@@ -30,7 +30,7 @@ export class SimplexReader<TNotarization = unknown, TFinalization = unknown> {
 
   /** A Store client starts a fresh monotonic session with no initial minimum. */
   constructor(
-    store: StoreClient | ReadSession,
+    store: PrefixedStoreClient | ReadSession,
     options: SimplexReaderOptions<TNotarization, TFinalization> = {},
   ) {
     this.session = store instanceof ReadSession ? store : ReadSession.monotonic(store);
@@ -202,12 +202,12 @@ export class SimplexReader<TNotarization = unknown, TFinalization = unknown> {
     callOptions?: ReadCallOptions,
   ): Promise<{ key: Uint8Array; value: Uint8Array } | null> {
     const range = rangeForKind(SimplexRecordKind.FinalizedByHeight);
-    const result = await this.session.query(
+    const result = await this.session.range(
       range.start,
       range.end,
       1,
       4096,
-      TraversalMode.REVERSE,
+      RangeMode.REVERSE,
       callOptions,
     );
     return result.results[0] ?? null;

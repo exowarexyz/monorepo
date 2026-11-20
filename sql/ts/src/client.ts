@@ -3,7 +3,7 @@ import { create } from '@bufbuild/protobuf';
 import { createClient, type CallOptions, type Client as ConnectClient } from '@connectrpc/connect';
 import {
   createTransport,
-  type ClientOptions as SdkClientOptions,
+  type StoreClientOptions,
 } from '@exowarexyz/sdk';
 import {
   QueryRequestSchema as SqlQueryRequestSchema,
@@ -21,7 +21,7 @@ import {
   SubscribeRequestSchema as SqlSubscribeRequestSchema,
   type SubscribeResponse as SqlSubscribeResponse,
 } from './generated/proto/sql/v1/stream_pb.js';
-export type SqlClientOptions = SdkClientOptions;
+export type SqlClientOptions = StoreClientOptions;
 
 function minimumSequence(value?: bigint): bigint | undefined {
   if (value === undefined) return undefined;

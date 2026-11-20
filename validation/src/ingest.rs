@@ -95,7 +95,7 @@ pub(crate) async fn ingest_with_retry(
     let refs = record_refs(records);
     let mut transient_retries = 0u64;
     for attempt in 1..=attempts {
-        match client.ingest().put(&refs).await {
+        match client.ingest().put_many(&refs).await {
             Ok(sequence_number) => {
                 return Ok(IngestOutcome {
                     sequence_number,
