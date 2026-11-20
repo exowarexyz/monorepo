@@ -460,30 +460,39 @@ where
             chunk.encode().to_vec(),
         ));
     }
-
-    // `grafting::ops_to_grafted_pos` panics for a node below the grafting height, and its
-    // arithmetic assumes a position within the family's node limit. A publication can carry any
-    // position, so a node below that height, or less than two positions below the limit, is
-    // rejected before the conversion.
-    let grafting_height = grafting::height::<N>();
     for &(ops_position, digest) in &publication.grafted_nodes {
-        if ops_position.checked_add(2).is_none() {
-            return Err(QmdbError::CorruptData(format!(
-                "grafted node at {ops_position} must not overflow"
-            )));
-        }
-        if F::pos_to_height(ops_position) < grafting_height {
-            return Err(QmdbError::CorruptData(format!(
-                "grafted node at {ops_position} must be at or above the grafting height"
-            )));
-        }
-        let grafted_position = grafting::ops_to_grafted_pos::<F>(ops_position, grafting_height);
         rows.push((
-            encode_grafted_node_key(grafted_position, latest_location),
+            encode_grafted_node_key(grafted_position::<F, N>(ops_position)?, latest_location),
             digest.encode().to_vec(),
         ));
     }
     Ok(prepared)
+}
+
+/// The grafted-tree position of the node at operation-tree position `ops_position`.
+///
+/// A publication can carry any position. Commonware's height and conversion arithmetic assumes a
+/// node position, and every node position lies below the family's node limit, so a position at or
+/// past the limit is rejected before its height is computed. `grafting::ops_to_grafted_pos` also
+/// panics for a node below the grafting height, so such a node is rejected before the conversion.
+fn grafted_position<F: Graftable, const N: usize>(
+    ops_position: Position<F>,
+) -> Result<Position<F>, QmdbError> {
+    if !ops_position.is_valid_index() {
+        return Err(QmdbError::CorruptData(format!(
+            "grafted node at {ops_position} must be below the node limit"
+        )));
+    }
+    let grafting_height = grafting::height::<N>();
+    if F::pos_to_height(ops_position) < grafting_height {
+        return Err(QmdbError::CorruptData(format!(
+            "grafted node at {ops_position} must be at or above the grafting height"
+        )));
+    }
+    Ok(grafting::ops_to_grafted_pos::<F>(
+        ops_position,
+        grafting_height,
+    ))
 }
 
 /// Validate the shape of `authenticated` and rebuild its operation-log root and new Merkle nodes
@@ -1460,6 +1469,53 @@ mod tests {
     fn test_publication_codec_round_trips_and_enforces_limits() {
         publication_codec_round_trips_and_enforces_limits::<mmr::Family>();
         publication_codec_round_trips_and_enforces_limits::<mmb::Family>();
+    }
+
+    /// Check [`grafted_position`] for family `F` at the grafting height, at the last node position,
+    /// and at and past the node limit. The last position converts when `last_is_grafted`.
+    fn grafted_position_bounds<F: Graftable>(last_is_grafted: bool) {
+        // Positions are checked for 32-byte chunks, and a rejection must name the check that
+        // refused the position.
+        const N: usize = 32;
+        let rejects = |position: u64, reason: &str| {
+            matches!(
+                grafted_position::<F, N>(Position::new(position)),
+                Err(QmdbError::CorruptData(message)) if message.contains(reason)
+            )
+        };
+
+        // The first node at the grafting height is grafted leaf 0, and the node one level below it
+        // is too low.
+        let height = grafting::height::<N>();
+        let first = F::subtree_root_position(Location::new(0), height);
+        assert_eq!(
+            grafted_position::<F, N>(first).expect("first grafted node must convert"),
+            Position::new(0)
+        );
+        let below = F::subtree_root_position(Location::new(0), height - 1);
+        assert!(rejects(*below, "grafting height"));
+
+        // The last position below the node limit is judged by its height alone.
+        let last = *F::MAX_NODES - 1;
+        if last_is_grafted {
+            assert!(grafted_position::<F, N>(Position::new(last)).is_ok());
+        } else {
+            assert!(rejects(last, "grafting height"));
+        }
+
+        // The limit and positions past it are rejected for the limit.
+        for past in [*F::MAX_NODES, *F::MAX_NODES + 1, u64::MAX] {
+            assert!(rejects(past, "node limit"));
+        }
+    }
+
+    /// Positions at the grafting height, at the last node, and at and past the node limit convert
+    /// or are rejected without a panic. The last MMR position is a root above the grafting height,
+    /// and the last MMB position is a parent below it.
+    #[test]
+    fn test_grafted_position_checks_the_node_limit_and_the_grafting_height() {
+        grafted_position_bounds::<mmr::Family>(true);
+        grafted_position_bounds::<mmb::Family>(false);
     }
 
     #[test]

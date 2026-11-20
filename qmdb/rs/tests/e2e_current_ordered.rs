@@ -1307,7 +1307,7 @@ async fn test_ordered_current_proof_reads_overlap() {
 /// `prepare_publication` accepts an unmodified publication, and the prepared range spans exactly
 /// the batch's operations. It rejects a publication that does not bind to the trusted root, that
 /// does not hold exactly one commit as its last operation, or that carries a grafted node below the
-/// grafting height or less than two positions below the node limit.
+/// grafting height or at the node limit.
 #[tokio::test]
 async fn test_prepare_publication_rejects_unbound_publications() {
     // Read the initial publication and the publication of one source batch that is never
@@ -1427,14 +1427,20 @@ async fn test_prepare_publication_rejects_unbound_publications() {
         Err(QmdbError::CorruptData(_))
     ));
 
-    // A decoded grafted node less than two positions below the family's node limit is rejected.
+    // A decoded grafted node at the family's node limit is rejected. The limit is a node count, so
+    // no node sits at that position.
     let mut high_graft = publication.clone();
-    high_graft.grafted_nodes = vec![(Position::new(*mmr::Family::MAX_NODES - 1), root)];
+    high_graft.grafted_nodes = vec![(mmr::Family::MAX_NODES, root)];
     let high_graft = common::round_trip_publication(&high_graft, op_cfg::<mmr::Family>());
     assert!(matches!(
         prepare(&high_graft, &root),
-        Err(QmdbError::CorruptData(_))
+        Err(QmdbError::CorruptData(message)) if message.contains("node limit")
     ));
+
+    // The last position below the limit prepares.
+    let mut last_graft = publication.clone();
+    last_graft.grafted_nodes = vec![(Position::new(*mmr::Family::MAX_NODES - 1), root)];
+    let _ = prepare(&last_graft, &root).expect("the last node position must prepare");
 
     // A witness that does not bind the rebuilt operation-log root to the publication's root
     // fails publication verification.
