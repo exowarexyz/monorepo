@@ -185,7 +185,7 @@ where
             use commonware_runtime::{buffer::paged::CacheRef, Supervisor as _};
             let page_cache = CacheRef::new(NZU16!(64), NZUsize!(8));
             let cfg = commonware_storage::qmdb::keyless::Config {
-                merkle: common::merkle_config("keyless_fixed_full_source", page_cache.clone()),
+                merkle: common::merkle_config("keyless_fixed_full_source"),
                 log: FixedJournalConfig {
                     partition: "keyless_fixed_full_source-log".to_string(),
                     items_per_blob: NZU64!(7),
@@ -193,6 +193,7 @@ where
                     write_buffer: NZUsize!(1024),
                     replay_buffer: NZUsize!(1024),
                 },
+                init_concurrency: NZUsize!(1),
             };
             let mut db: FixedDb<F> =
                 FixedDb::init(context.child("keyless_fixed_full_source"), cfg, None)

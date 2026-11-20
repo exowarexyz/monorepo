@@ -166,8 +166,8 @@ async fn build_source_batch_with_writes(
 }
 
 /// Apply each batch of writes as its own commit, returning each tip's operations from location 0
-/// with its batch's root and publications. Publications hold only their batch's changes, so
-/// upload tips in order.
+/// with its root and its batch's publication. The first tip also carries the initial commit's
+/// publication.
 async fn build_source_tips(
     partition_prefix: &'static str,
     batches: Vec<TipWrites>,
@@ -261,7 +261,8 @@ fn current_snapshot_rows(source: &SourceBatch) -> BTreeMap<Bytes, Bytes> {
         .map(|publication| common::round_trip_publication(publication, op_cfg()))
         .collect::<Vec<_>>();
     let mut batch = StoreWriteBatch::new();
-    common::stage_publications(&staging, &publications, &mut batch).expect("stage publications");
+    common::stage_publications(&staging, &publications, &mut batch)
+        .expect("decoded publications must stage");
     batch.entries().iter().cloned().collect()
 }
 

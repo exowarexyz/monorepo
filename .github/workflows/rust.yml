@@ -11,6 +11,7 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   UDEPS_VERSION: 0.1.57
+  CARGO_COOLDOWN_VERSION: 0.3.4
   NIGHTLY_VERSION: nightly-2026-06-21
 
 jobs:
@@ -20,7 +21,7 @@ jobs:
     timeout-minutes: 20
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Check disk space and configure swap
         uses: ./.github/actions/disk
       - name: Run setup
@@ -42,7 +43,7 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Check disk space and configure swap
         uses: ./.github/actions/disk
       - name: Run setup
@@ -56,7 +57,7 @@ jobs:
     timeout-minutes: 20
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Check disk space and configure swap
         uses: ./.github/actions/disk
       - name: Install nightly Rust toolchain
@@ -78,8 +79,43 @@ jobs:
         with:
           additional-cache-key: ${{ env.NIGHTLY_VERSION }}
       - name: Install cargo-udeps
-        uses: taiki-e/install-action@v2
+        uses: taiki-e/install-action@5488ac5a951645ce95062214902ac4b6bc1a1037 # v2.87.32
         with:
           tool: cargo-udeps@${{ env.UDEPS_VERSION }}
       - name: Check for unused dependencies
         run: cargo +${{ env.NIGHTLY_VERSION }} udeps --all-targets
+
+  # Rejects Cargo.lock changes that pull in a crate version published less than 7 days ago.
+  # Versions already locked on the base branch are exempt. See cooldown.toml.
+  cooldown:
+    name: Cooldown
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # Every step here talks to crates.io. Retrying more and disabling HTTP/2 multiplexing
+    # avoids spurious connection resets fetching the sparse index (same as commonware).
+    env:
+      CARGO_NET_RETRY: 30
+      CARGO_HTTP_MULTIPLEXING: false
+    steps:
+      # Check out the PR head (not the merge commit) with full history, so the script can
+      # find the merge base with the target branch.
+      - name: Checkout repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+      # The script skips the check when Cargo.lock is unchanged. Without this step, a PR
+      # could add a dependency to a Cargo.toml without updating Cargo.lock, pass the check,
+      # and have every other job resolve the new crate version on the fly.
+      - name: Check Cargo.lock is up to date
+        run: cargo metadata --locked --format-version 1 > /dev/null
+      # install-action has no manifest for cargo-cooldown, so it would fall back to
+      # cargo-binstall and an unverified prebuilt binary. Build from the crates.io source
+      # instead, with the dependency versions the crate was published with.
+      - name: Install cargo-cooldown
+        run: cargo install cargo-cooldown --version ${{ env.CARGO_COOLDOWN_VERSION }} --locked
+      - name: Check dependency cooldown
+        env:
+          COOLDOWN_BASE_REF: ${{ github.event.pull_request.base.ref }}
+        run: ./.github/scripts/check_dependency_cooldown.sh

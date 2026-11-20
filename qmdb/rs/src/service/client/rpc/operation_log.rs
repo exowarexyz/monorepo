@@ -422,7 +422,10 @@ where
             kind: crate::ProofKind::OperationRange,
         });
     }
-    Ok(SyncTarget::new(ops_root, range))
+    Ok(SyncTarget {
+        root: ops_root,
+        range,
+    })
 }
 
 /// The operations-log root a proof of `kind` must verify against: the embedded

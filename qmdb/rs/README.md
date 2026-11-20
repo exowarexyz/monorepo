@@ -187,33 +187,39 @@ intermediate commit.
 
 Workers can prepare and upload ranges independently and out of order, provided
 the application advances the watermark only after all required writes succeed.
-Repeated rows from the same history have identical keys and values, so the same
-packet can be retried. To make retries and recovery possible, persist operations,
-proof material, trusted roots, and any current-state publications before
-allowing the source to discard them.
+Repeated operation and Merkle node rows from the same history have identical
+keys and values, so the same packet can be retried. To make retries and recovery
+possible, persist operations, proof material, trusted roots, and any
+current-state publications before allowing the source to discard them.
 
 ### Current-state publications
 
 A current ordered or unordered database uploads a `Publication` for every batch:
-its operations and frontier plus the current-state rows (root, witness, bitmap
-chunks, and grafted nodes) that current queries need. `prepare_publication`
-checks the operations, frontier, and witness against an independently trusted
-current root and prepares all of those rows. The bitmap chunks, grafted nodes,
-and pruned chunk count are not authenticated and must come from the source of
-the batch. Stage the rows with `stage_authenticated_range` as above, and the
-same prefix rule governs when the watermark may advance past them.
+its operations and frontier plus the current-state rows (root, pruned chunk
+count, witness, bitmap chunks, and grafted nodes) that current queries need.
+`prepare_publication` checks the operations, frontier, and witness against an
+independently trusted current root and prepares all of those rows. The bitmap
+chunks, grafted nodes, and pruned chunk count are not authenticated and must
+come from the source of the batch. Stage the rows with
+`stage_authenticated_range` as above, and the same prefix rule governs when the
+watermark may advance past them.
 
-If a chunk or grafted node is wrong or missing, or the pruned chunk count is
-wrong, the upload still succeeds. A read that needs that value then returns an
-error at that batch's tip, and at later tips until a later batch rewrites the
-same chunk or node. To repair it, upload the batch's correct publication again
-and create new readers, because a reader caches what it has loaded.
+Because they are not authenticated, a missing or wrong chunk or grafted digest,
+or a wrong pruned chunk count, is not detected at upload. Current proofs can
+then fail at that batch's tip and at later tips that still read the same rows.
+To fill in a missing row, upload the batch's correct publication and create new
+readers, because a reader caches what it has loaded. Uploading over a wrong row
+does not reliably replace it, because the Store expects one value per key and
+may return either value once two are written. To recover from a wrong row,
+upload the history again under a fresh Store prefix.
 
 #### Initialization
 
-A new database's commit at location 0 belongs to no batch, so upload its
-publication once, before the first batch's. Staging its rows and then watermark 0
-publishes location 0:
+A new database's commit at location 0 belongs to no batch, so
+`Publication::initial` builds a publication for it alone. Every watermark covers
+location 0, so this publication's rows must be durable by the time the first
+watermark is published. Committing them in one Store batch with watermark 0
+publishes location 0 by itself. Prepare the publication like a batch's:
 
 ```rust,ignore
 use exoware_qmdb::adapter::upload::{prepare_publication, Publication};
@@ -225,9 +231,8 @@ let prepared =
 
 #### Updates
 
-Build each batch's publication before applying the batch and while its
-unapplied ancestors are still held. Its frontier is readable only until the
-batch's changes are flushed:
+Build each batch's publication before applying the batch, because a flush after
+the apply can discard frontier nodes the publication reads from the database:
 
 ```rust,ignore
 let batch = batch.merkleize(&db).await?;
@@ -237,9 +242,13 @@ let prepared =
 db = db.apply_batch(batch).await?;
 ```
 
-To upload later, persist the publication with its codec and decode it with a
-`PublicationCfg`. A persisted or uploaded publication commits the source to that
-batch, so rebuild it identically after a restart.
+To upload later or retry, persist the publication with its codec before the
+first attempt, and decode those bytes with a `PublicationCfg`. A publication
+rebuilt after the source prunes can carry a different pruned chunk count under
+the same root, and would then write a different value under a key the first
+attempt may have written. Once an upload may have written rows, the source must
+keep that batch in its history under the same Store prefix, even after a
+restart. Every upload to a namespace must belong to one operation history.
 
 Current-state rows are versioned by batch location. Unchanged chunks and nodes
 are inherited from earlier batches. Retain the rows needed for every historical

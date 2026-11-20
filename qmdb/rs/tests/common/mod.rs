@@ -12,8 +12,11 @@ use commonware_cryptography::Digest;
 use commonware_parallel::Sequential;
 use commonware_runtime::buffer::paged::CacheRef;
 use commonware_storage::{
-    journal::contiguous::variable::Config as VariableJournalConfig,
-    merkle::{full::Config as MerkleConfig, Family, Graftable},
+    journal::{
+        authenticated::{Config as MerkleConfig, ResidentHeight},
+        contiguous::variable::Config as VariableJournalConfig,
+    },
+    merkle::{Family, Graftable},
     qmdb::{
         any::{
             self,
@@ -23,7 +26,7 @@ use commonware_storage::{
     },
     translator::TwoCap,
 };
-use commonware_utils::{NZUsize, NZU64};
+use commonware_utils::NZUsize;
 use connectrpc::{
     client::ClientConfig, ConnectError, ConnectRpcService, ErrorCode, RequestContext as Context,
     ServiceRequest,
@@ -44,15 +47,12 @@ use exoware_sdk::{proto::PreferZstdHttpClient, transport::set_tcp_nodelay, Store
 use std::{convert::Infallible, num::NonZeroU64, time::Duration};
 
 #[allow(dead_code)]
-pub fn merkle_config(prefix: &str, page_cache: CacheRef) -> MerkleConfig<Sequential> {
+pub fn merkle_config(prefix: &str) -> MerkleConfig<Sequential> {
     MerkleConfig {
-        journal_partition: format!("{prefix}-merkle-journal"),
-        metadata_partition: format!("{prefix}-merkle-metadata"),
-        items_per_blob: NZU64!(8),
-        write_buffer: NZUsize!(1024),
+        partition: format!("{prefix}-merkle-metadata"),
+        resident_height: ResidentHeight::default(),
         replay_buffer: NZUsize!(1024),
         strategy: Sequential,
-        page_cache,
     }
 }
 
@@ -82,8 +82,9 @@ pub fn keyless_variable_config<C>(
     items_per_section: NonZeroU64,
 ) -> keyless::variable::Config<C, Sequential> {
     keyless::Config {
-        merkle: merkle_config(prefix, page_cache.clone()),
+        merkle: merkle_config(prefix),
         log: variable_journal_config(prefix, page_cache, codec_config, items_per_section),
+        init_concurrency: NZUsize!(1),
     }
 }
 
@@ -95,12 +96,12 @@ pub fn any_variable_config<C>(
     items_per_section: NonZeroU64,
 ) -> any::Config<TwoCap, VariableJournalConfig<C>, Sequential> {
     any::Config {
-        merkle: merkle_config(prefix, page_cache.clone()),
+        merkle: merkle_config(prefix),
         log: variable_journal_config(prefix, page_cache, codec_config, items_per_section),
         translator: TwoCap,
         init_cache: None,
         init_buffer: NZUsize!(1 << 21),
-        init_concurrency: (),
+        init_concurrency: NZUsize!(1),
     }
 }
 
@@ -112,13 +113,13 @@ pub fn current_variable_config<C>(
     items_per_section: NonZeroU64,
 ) -> current::Config<TwoCap, VariableJournalConfig<C>, Sequential> {
     current::Config {
-        merkle: merkle_config(prefix, page_cache.clone()),
+        merkle: merkle_config(prefix),
         log: variable_journal_config(prefix, page_cache, codec_config, items_per_section),
         grafted_metadata_partition: format!("{prefix}-grafted-metadata"),
         translator: TwoCap,
         init_cache: None,
         init_buffer: NZUsize!(1 << 21),
-        init_concurrency: (),
+        init_concurrency: NZUsize!(1),
     }
 }
 
@@ -130,10 +131,11 @@ pub fn immutable_variable_config<C>(
     items_per_section: NonZeroU64,
 ) -> immutable::variable::Config<TwoCap, C, Sequential> {
     immutable::Config {
-        merkle: merkle_config(prefix, page_cache.clone()),
+        merkle: merkle_config(prefix),
         log: variable_journal_config(prefix, page_cache, codec_config, items_per_section),
         translator: TwoCap,
         init_buffer: NZUsize!(1 << 21),
+        init_concurrency: NZUsize!(1),
     }
 }
 

@@ -85,18 +85,20 @@ fn fixed_journal_config(prefix: &str, cache: CacheRef) -> FixedJournalConfig {
 fn keyless_fixed_full_config(prefix: &str) -> keyless::fixed::Config<Sequential> {
     let cache = page_cache();
     keyless::Config {
-        merkle: common::merkle_config(prefix, cache.clone()),
+        merkle: common::merkle_config(prefix),
         log: fixed_journal_config(prefix, cache),
+        init_concurrency: NZUsize!(1),
     }
 }
 
 fn immutable_fixed_full_config(prefix: &str) -> immutable::fixed::Config<TwoCap, Sequential> {
     let cache = page_cache();
     immutable::Config {
-        merkle: common::merkle_config(prefix, cache.clone()),
+        merkle: common::merkle_config(prefix),
         log: fixed_journal_config(prefix, cache),
         translator: TwoCap,
         init_buffer: NZUsize!(1024),
+        init_concurrency: NZUsize!(1),
     }
 }
 
@@ -106,10 +108,9 @@ fn compact_config<C>(prefix: &str, codec: C) -> immutable::CompactConfig<C, Sequ
         witness: common::variable_journal_config(
             &format!("{prefix}-witness"),
             page_cache(),
-            (),
+            codec,
             NZU64!(7),
         ),
-        commit_codec_config: codec,
     }
 }
 

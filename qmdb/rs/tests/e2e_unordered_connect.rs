@@ -294,10 +294,10 @@ fn latest_inactivity_floor(operations: &[BatchOperation]) -> Location<mmr::Famil
         .iter()
         .rev()
         .find_map(|operation| match operation {
-            BatchOperation::CommitFloor(_, floor) => Some(*floor),
+            BatchOperation::Commit(_, floor) => Some(*floor),
             _ => None,
         })
-        .expect("batch has CommitFloor")
+        .expect("operations must contain a commit")
 }
 
 async fn build_mmb_any_source_batch() -> MmbAnySourceBatch {
@@ -374,10 +374,10 @@ fn latest_mmb_inactivity_floor(operations: &[MmbBatchOperation]) -> Location<mmb
         .iter()
         .rev()
         .find_map(|operation| match operation {
-            MmbBatchOperation::CommitFloor(_, floor) => Some(*floor),
+            MmbBatchOperation::Commit(_, floor) => Some(*floor),
             _ => None,
         })
-        .expect("batch has CommitFloor")
+        .expect("operations must contain a commit")
 }
 
 async fn build_current_source_batch() -> CurrentSourceBatch {
@@ -872,6 +872,8 @@ async fn test_unordered_current_endpoints_enforce_optional_sequence_minimum() {
         .expect("cached unordered current range uses the publication floor");
 }
 
+/// The connect client verifies a current proof of key 257 at tips 511 and 513. Commit 511 is the
+/// last operation of bitmap chunk 1, and the empty second batch clears its bit.
 async fn aligned_commit_boundary<F: commonware_storage::merkle::Graftable + PartialEq>(
     case_name: &'static str,
 ) where
@@ -934,7 +936,7 @@ async fn aligned_commit_boundary<F: commonware_storage::merkle::Graftable + Part
 
                 assert!(matches!(
                     operations.last(),
-                    Some(Operation::CommitFloor(_, floor)) if floor.as_u64() == round + 2
+                    Some(Operation::Commit(_, floor)) if floor.as_u64() == round + 2
                 ));
 
                 // The empty second batch moves an early key and clears commit 511 in chunk 1
@@ -983,7 +985,7 @@ async fn aligned_commit_boundary<F: commonware_storage::merkle::Graftable + Part
             .collect::<Vec<_>>();
         common::commit_publications(&prefixed, &decoded)
             .await
-            .expect("commit publications");
+            .expect("upload must succeed");
         let proof = connect_client
             .get(
                 Location::new(operations.len() as u64 - 1),
@@ -1015,6 +1017,11 @@ async fn test_current_unordered_variable_fixed_keys_variable_values_mmb_aligned_
     .await;
 }
 
+/// Key proofs and one-operation range proofs verify at the last two tips of a source that prunes at
+/// its sync boundary after every batch. The source writes `key_count` keys, applies `empty_batches`
+/// empty batches that each raise the inactivity floor, and then writes `appended_keys` more keys.
+/// The proofs cover the latest update of each of keys 255, 256, 257, and 512 that the first batch
+/// wrote. The older tip's proofs still verify after the newer tip's watermark is published.
 async fn current_boundary_nodes<F: commonware_storage::merkle::Graftable + PartialEq>(
     case_name: &'static str,
     key_count: u16,
@@ -1075,14 +1082,15 @@ async fn current_boundary_nodes<F: commonware_storage::merkle::Graftable + Parti
                 db = db.apply_batch(batch).await.expect("source apply");
 
                 // Prune the source at its sync boundary every round. The next batch's publication
-                // records this prune in its pruned_chunks count.
+                // records this prune in its `pruned_chunks` count.
                 let prune_boundary = db.sync_boundary();
                 db = db.prune(prune_boundary).await.expect("source prune");
                 if round < empty_batches {
                     continue;
                 }
 
-                // Capture snapshots before and after the final batch.
+                // Snapshot the last two tips. Each must first show the expected log length and
+                // commit floor, and its last publication must record the expected `pruned_chunks`.
                 assert_eq!(
                     operations.len() as u64,
                     u64::from(key_count)
@@ -1096,7 +1104,7 @@ async fn current_boundary_nodes<F: commonware_storage::merkle::Graftable + Parti
                 );
                 assert!(matches!(
                     operations.last(),
-                    Some(Operation::CommitFloor(_, floor)) if floor.as_u64() == round + 2
+                    Some(Operation::Commit(_, floor)) if floor.as_u64() == round + 2
                 ));
                 assert_eq!(
                     publications
@@ -1170,13 +1178,14 @@ async fn current_boundary_nodes<F: commonware_storage::merkle::Graftable + Parti
     let range_client =
         CurrentOperationClient::<_, F, Sha256, Operation<F>, N>::plaintext(&url, op_cfg);
 
-    // Re-query the older batch after the watermark advances. Its bitmap and node versions survive.
+    // Upload and query each snapshot in turn, then query the older snapshot again after the newer
+    // snapshot's watermark is published. Its proofs must still verify against its own root.
     for (pass, index) in [0, 1, 0].into_iter().enumerate() {
         let (operations, publications, root, queries) = &snapshots[index];
         if pass < 2 {
             common::commit_publications(&prefixed, publications)
                 .await
-                .expect("commit publications");
+                .expect("upload must succeed");
         }
         let tip = operations.len() as u64 - 1;
         for (key_index, location) in queries {
