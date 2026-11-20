@@ -5,6 +5,7 @@ module.exports = {
     globalSetup: '<rootDir>/jest.globalSetup.ts',
     globalTeardown: '<rootDir>/jest.globalTeardown.ts',
     testTimeout: 60000,
+    testPathIgnorePatterns: ['/node_modules/', '<rootDir>/__tests__/support/'],
     moduleNameMapper: {
         '^(\\.{1,2}/.*)\\.js$': '$1',
     },

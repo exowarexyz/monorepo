@@ -1,20 +1,8 @@
-import * as path from 'path';
-import * as fs from 'fs';
-import * as os from 'os';
 import { create } from '@bufbuild/protobuf';
-
-/**
- * These tests reach a local simulator that authenticates nothing, so the client is built without a
- * credential regardless of what the developer running them has exported. `credential.test.ts` is
- * where the environment lookup itself is covered.
- */
-jest.mock('../src/credential', () => ({
-    ...jest.requireActual('../src/credential'),
-    environmentApiKey: () => undefined,
-}));
-
 import { Client } from '../src/client';
 import { StoreKeyPrefix, StoreWriteBatch, TraversalMode } from '../src/store';
+import { indexedDb, sharedSimulator, type Backend, type OpenBackend } from './support/backends';
+import { nextWithTimeout } from './support/contract';
 import {
     ReduceParamsSchema,
     RangeReducerSpecSchema,
@@ -35,9 +23,6 @@ import {
 
 const MAX_KEY_LEN = 254;
 
-const tempDir = path.join(os.tmpdir(), 'exoware-ts-sdk-tests');
-const configFile = path.join(tempDir, 'config.json');
-
 function encodeStoredRowInt64(value: bigint): Uint8Array {
     const buf = new ArrayBuffer(11);
     const view = new DataView(buf);
@@ -55,33 +40,18 @@ function makeStreamSelector(prefix: string) {
     });
 }
 
-async function nextWithTimeout<T>(
-    iterator: AsyncIterator<T>,
-    timeoutMs: number = 5_000,
-): Promise<IteratorResult<T>> {
-    let timeout: NodeJS.Timeout | undefined;
-    try {
-        return await Promise.race([
-            iterator.next(),
-            new Promise<IteratorResult<T>>((_, reject) => {
-                timeout = setTimeout(() => reject(new Error('timed out waiting for stream')), timeoutMs);
-            }),
-        ]);
-    } finally {
-        if (timeout) {
-            clearTimeout(timeout);
-        }
-    }
-}
+const backends: Backend[] = [sharedSimulator, indexedDb];
 
-describe('Exoware TS SDK', () => {
+describe.each(backends)('Exoware TS SDK on $name', (backend) => {
+    let open: OpenBackend;
     let client: Client;
 
-    beforeAll(() => {
-        const config = JSON.parse(fs.readFileSync(configFile, 'utf-8'));
-        const baseUrl = `http://127.0.0.1:${config.port}`;
-        client = new Client(baseUrl);
+    beforeAll(async () => {
+        open = await backend.open();
+        client = open.client;
     });
+
+    afterAll(() => open.close());
 
     describe('StoreClient', () => {
         it('should set and get a value', async () => {
@@ -475,24 +445,6 @@ describe('Exoware TS SDK', () => {
             expect(session.minSequenceNumber()).toBe(10_000_000n);
         });
 
-        describe('retry config', () => {
-            it('should accept retry config in client constructor', () => {
-                const c = new Client('http://localhost:1234', {
-                    retry: { maxAttempts: 5, initialBackoffMs: 200, maxBackoffMs: 5000 },
-                });
-                expect(c.retryConfig.maxAttempts).toBe(5);
-                expect(c.retryConfig.initialBackoffMs).toBe(200);
-                expect(c.retryConfig.maxBackoffMs).toBe(5000);
-            });
-
-            it('should use default retry config when not specified', () => {
-                const c = new Client('http://localhost:1234');
-                expect(c.retryConfig.maxAttempts).toBe(3);
-                expect(c.retryConfig.initialBackoffMs).toBe(100);
-                expect(c.retryConfig.maxBackoffMs).toBe(2000);
-            });
-        });
-
         it('should prune keys per KeepLatest policy', async () => {
             const store = client.store();
             const encoder = new TextEncoder();
@@ -599,5 +551,25 @@ describe('Exoware TS SDK', () => {
                 expect(new Uint8Array(result!.value)).toEqual(new Uint8Array(value));
             });
         });
+    });
+});
+
+// An empty token keeps the EXOWARE_API_KEY of the developer's environment out of these clients.
+describe('retry config', () => {
+    it('should accept retry config in client constructor', () => {
+        const c = new Client('http://localhost:1234', {
+            token: '',
+            retry: { maxAttempts: 5, initialBackoffMs: 200, maxBackoffMs: 5000 },
+        });
+        expect(c.retryConfig.maxAttempts).toBe(5);
+        expect(c.retryConfig.initialBackoffMs).toBe(200);
+        expect(c.retryConfig.maxBackoffMs).toBe(5000);
+    });
+
+    it('should use default retry config when not specified', () => {
+        const c = new Client('http://localhost:1234', { token: '' });
+        expect(c.retryConfig.maxAttempts).toBe(3);
+        expect(c.retryConfig.initialBackoffMs).toBe(100);
+        expect(c.retryConfig.maxBackoffMs).toBe(2000);
     });
 });

@@ -19,6 +19,10 @@
         ".": {
             "types": "./dist/index.d.ts",
             "import": "./dist/index.js"
+        },
+        "./indexeddb": {
+            "types": "./dist/indexeddb/index.d.ts",
+            "import": "./dist/indexeddb/index.js"
         }
     },
     "files": [
@@ -41,6 +45,7 @@
     "devDependencies": {
         "@types/jest": "^29.5.12",
         "@types/node": "^20.14.9",
+        "fake-indexeddb": "^6.2.8",
         "jest": "^29.7.0",
         "portfinder": "^1.0.32",
         "ts-jest": "^29.2.2",
