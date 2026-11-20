@@ -127,7 +127,7 @@ where
         let (key, value) = match Self::decode_operation(&self.op_cfg, location, &op_bytes)? {
             ordered::Operation::Update(update) => (update.key, Some(update.value)),
             ordered::Operation::Delete(key) => (key, None),
-            ordered::Operation::CommitFloor(_, _) => {
+            ordered::Operation::Commit(_, _) => {
                 return Err(QmdbError::CorruptData(format!(
                     "latest update row at {location} points to a commit operation"
                 )));
@@ -267,8 +267,8 @@ where
         let key = op.key().map(<K as AsRef<[u8]>>::as_ref);
         let value: Option<&[u8]> = match &op {
             ordered::Operation::Update(update) => Some(update.value.as_ref()),
-            ordered::Operation::CommitFloor(Some(value), _) => Some(value.as_ref()),
-            ordered::Operation::Delete(_) | ordered::Operation::CommitFloor(None, _) => None,
+            ordered::Operation::Commit(Some(value), _) => Some(value.as_ref()),
+            ordered::Operation::Delete(_) | ordered::Operation::Commit(None, _) => None,
         };
         Ok(inspect(key, value))
     }
@@ -457,9 +457,9 @@ where
     ) -> Result<CurrentTip<F, H::Digest>, QmdbError> {
         current::current_tip::<F, H, N>(session, &self.read_cache, watermark, |bytes| {
             match Self::decode_operation(&self.op_cfg, watermark, bytes)? {
-                ordered::Operation::CommitFloor(_, floor) => Ok(floor),
+                ordered::Operation::Commit(_, floor) => Ok(floor),
                 _ => Err(QmdbError::CorruptData(format!(
-                    "expected CommitFloor at watermark {watermark}"
+                    "expected Commit at watermark {watermark}"
                 ))),
             }
         })
@@ -891,9 +891,9 @@ where
             ExclusionProof::KeyValue(op_proof, update)
         } else {
             let operation = Self::decode_operation(op_cfg, watermark, &reads.operation)?;
-            let ordered::Operation::CommitFloor(value, floor) = operation else {
+            let ordered::Operation::Commit(value, floor) = operation else {
                 return Err(QmdbError::CorruptData(format!(
-                    "empty ordered exclusion proof expected CommitFloor at watermark {watermark}"
+                    "empty ordered exclusion proof expected Commit at watermark {watermark}"
                 )));
             };
             if floor != watermark {
@@ -1069,12 +1069,12 @@ where
     ) -> Result<Location<F>, QmdbError> {
         let mut location = watermark;
         loop {
-            if let ordered::Operation::CommitFloor(_, floor) = operation {
+            if let ordered::Operation::Commit(_, floor) = operation {
                 return Ok(floor);
             }
             if *location == 0 {
                 return Err(QmdbError::CorruptData(format!(
-                    "no CommitFloor found at or before watermark {watermark}"
+                    "no Commit found at or before watermark {watermark}"
                 )));
             }
             location -= 1;

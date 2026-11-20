@@ -294,10 +294,10 @@ fn latest_inactivity_floor(operations: &[BatchOperation]) -> Location<mmr::Famil
         .iter()
         .rev()
         .find_map(|operation| match operation {
-            BatchOperation::CommitFloor(_, floor) => Some(*floor),
+            BatchOperation::Commit(_, floor) => Some(*floor),
             _ => None,
         })
-        .expect("batch has CommitFloor")
+        .expect("batch has Commit")
 }
 
 async fn build_mmb_any_source_batch() -> MmbAnySourceBatch {
@@ -374,10 +374,10 @@ fn latest_mmb_inactivity_floor(operations: &[MmbBatchOperation]) -> Location<mmb
         .iter()
         .rev()
         .find_map(|operation| match operation {
-            MmbBatchOperation::CommitFloor(_, floor) => Some(*floor),
+            MmbBatchOperation::Commit(_, floor) => Some(*floor),
             _ => None,
         })
-        .expect("batch has CommitFloor")
+        .expect("batch has Commit")
 }
 
 async fn build_current_source_batch() -> CurrentSourceBatch {
@@ -900,7 +900,7 @@ async fn aligned_commit_boundary<F: commonware_storage::merkle::Graftable + Part
 
                 assert!(matches!(
                     operations.last(),
-                    Some(Operation::CommitFloor(_, floor)) if floor.as_u64() == round + 2
+                    Some(Operation::Commit(_, floor)) if floor.as_u64() == round + 2
                 ));
 
                 // The empty second batch moves an early key and clears commit 511 in chunk 1
@@ -1062,7 +1062,7 @@ async fn current_boundary_nodes<F: commonware_storage::merkle::Graftable + Parti
                 );
                 assert!(matches!(
                     operations.last(),
-                    Some(Operation::CommitFloor(_, floor)) if floor.as_u64() == round + 2
+                    Some(Operation::Commit(_, floor)) if floor.as_u64() == round + 2
                 ));
                 assert_eq!(
                     publications

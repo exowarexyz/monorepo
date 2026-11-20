@@ -417,7 +417,10 @@ where
             kind: crate::ProofKind::RangeCheckpoint,
         });
     }
-    Ok(SyncTarget::new(ops_root, range))
+    Ok(SyncTarget {
+        root: ops_root,
+        range,
+    })
 }
 
 fn operation_target_root<F, H>(

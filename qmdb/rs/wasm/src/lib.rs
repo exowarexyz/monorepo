@@ -665,7 +665,7 @@ fn to_js_operation<F: merkle::Family>(
             set_field(&object, "type", &JsValue::from_str("delete"))?;
             set_field(&object, "key", &bytes_to_js(&key))?;
         }
-        OrderedOperation::CommitFloor(value, floor_location) => {
+        OrderedOperation::Commit(value, floor_location) => {
             set_field(&object, "type", &JsValue::from_str("commit_floor"))?;
             if let Some(value) = value {
                 set_field(&object, "value", &bytes_to_js(&value))?;
@@ -2255,7 +2255,7 @@ mod tests {
                     })
                 })
                 .collect::<Vec<_>>();
-            operations.push(OrderedOperation::CommitFloor(None, Location::new(1)));
+            operations.push(OrderedOperation::Commit(None, Location::new(1)));
             Self::from_operations(operations, true)
         }
 
@@ -2363,7 +2363,7 @@ mod tests {
                 OrderedOperation::Update(update) => {
                     UpstreamExclusionProof::KeyValue(self.operation_proof(index), update.clone())
                 }
-                OrderedOperation::CommitFloor(metadata, _) => UpstreamExclusionProof::<
+                OrderedOperation::Commit(metadata, _) => UpstreamExclusionProof::<
                     F,
                     Vec<u8>,
                     VariableEncoding<Vec<u8>>,
@@ -2562,10 +2562,7 @@ mod tests {
         )
         .is_err());
         let empty = CurrentFixture::<F, 64>::from_operations(
-            vec![OrderedOperation::CommitFloor(
-                Some(vec![7]),
-                Location::new(0),
-            )],
+            vec![OrderedOperation::Commit(Some(vec![7]), Location::new(0))],
             false,
         );
         assert_eq!(
@@ -2587,7 +2584,7 @@ mod tests {
                     value: Vec::new(),
                     next_key: Vec::new(),
                 }),
-                OrderedOperation::CommitFloor(None, Location::new(0)),
+                OrderedOperation::Commit(None, Location::new(0)),
             ],
             false,
         );
@@ -2663,7 +2660,7 @@ mod tests {
             .is_err());
         }
         let commit = CurrentFixture::<F, 64>::from_operations(
-            vec![OrderedOperation::CommitFloor(None, Location::new(0))],
+            vec![OrderedOperation::Commit(None, Location::new(0))],
             false,
         );
         let commit_proof = commit.exclusion(0);
@@ -2818,7 +2815,7 @@ mod tests {
             fixed_unordered_update_value(&delete, key.as_ref(), u64::SIZE).unwrap_err(),
             "expected unordered location is a delete"
         );
-        let commit = Unordered::<mmr::Family>::CommitFloor(Some(7), Location::new(2)).encode();
+        let commit = Unordered::<mmr::Family>::Commit(Some(7), Location::new(2)).encode();
         assert_eq!(
             fixed_unordered_update_value(&commit, key.as_ref(), u64::SIZE).unwrap_err(),
             "expected unordered location is a commit"
