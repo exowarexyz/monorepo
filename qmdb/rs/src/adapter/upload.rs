@@ -66,7 +66,7 @@ use commonware_storage::{
 };
 use commonware_utils::{bitmap::Readable as _, iter::zip_eq};
 use exoware_sdk::{keys::Key, PrefixedStoreClient, StoreWriteBatch};
-use std::{borrow::Borrow, collections::BTreeSet, sync::Arc};
+use std::{borrow::Borrow, collections::BTreeSet, ops::Range, sync::Arc};
 
 /// An operation range and prefix frontier for authentication against a trusted root.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -200,14 +200,20 @@ where
                 "authenticated operation at {location} is not canonically encoded"
             )));
         }
-        Ok(operation)
+        Ok((operation, encoded.clone()))
     };
     let operations = authenticated
         .encoded_operations
         .iter()
         .enumerate()
         .map(decode);
-    prepare_rows(authenticated, extension, operations)
+    prepare_rows(
+        authenticated.start_location..authenticated.end_location,
+        authenticated.inactive_peaks,
+        authenticated.pinned_nodes,
+        extension,
+        operations,
+    )
 }
 
 /// What an Exoware writer stores for one current QMDB batch. Replaying `operations` onto
@@ -412,10 +418,11 @@ where
         .iter()
         .map(|operation| operation.encode().to_vec())
         .collect::<Vec<_>>();
+    let inactive_peaks = F::inactive_peaks(end, floor);
     let authenticated = AuthenticatedOperationRange {
         start_location: publication.start_location,
         end_location: end,
-        inactive_peaks: F::inactive_peaks(end, floor),
+        inactive_peaks,
         pinned_nodes: &publication.pinned_nodes,
         encoded_operations: &encoded_operations,
     };
@@ -432,11 +439,14 @@ where
         });
     }
 
-    // Prepare the range's rows, then add the current-state rows at its final location.
+    // Prepare the range's rows, then add the current-state rows at its final location. The
+    // encodings built for authentication move into the operation rows.
     let mut prepared = prepare_rows::<_, _, AnyOperation<F, U>>(
-        &authenticated,
+        publication.start_location..end,
+        inactive_peaks,
+        &publication.pinned_nodes,
         extension,
-        operations.iter().map(Ok),
+        zip_eq(operations, encoded_operations).map(Ok),
     )?;
     let latest_location = prepared.latest_location;
     let rows = &mut prepared.rows;
@@ -548,31 +558,32 @@ where
     )
 }
 
-/// Prepare the operation, index, Merkle node, and presence rows of a range. `extension` must be
-/// what [`reconstruct_range`] returned for `authenticated`, with its root already authenticated.
-/// `operations` must yield the decoding of each of `authenticated.encoded_operations`, in order.
-/// Each operation is dropped before the next is taken.
+/// Prepare the operation, index, Merkle node, and presence rows of the range at `locations`.
+/// `inactive_peaks` and `pinned_nodes` must be that range's, and `extension` must be what
+/// [`reconstruct_range`] returned for it, with its root already authenticated. `operations` must
+/// yield each of the range's operations with its canonical encoding, in order. Each operation is
+/// dropped before the next is taken, and each encoding is moved into its operation row.
 fn prepare_rows<F, D, Op>(
-    authenticated: &AuthenticatedOperationRange<'_, D, F>,
+    locations: Range<Location<F>>,
+    inactive_peaks: usize,
+    pinned_nodes: &[D],
     extension: MerkleExtension<F, D>,
-    operations: impl IntoIterator<Item = Result<impl Borrow<Op>, QmdbError>>,
+    operations: impl IntoIterator<Item = Result<(impl Borrow<Op>, Vec<u8>), QmdbError>>,
 ) -> Result<PreparedAuthenticatedRange<D, F>, QmdbError>
 where
     F: Family,
     D: Digest,
     Op: UploadOperation<F>,
 {
-    let start = authenticated.start_location;
-    let end = authenticated.end_location;
+    let Range { start, end } = locations;
     let latest_location = end - 1;
-    let mut operation_rows = Vec::with_capacity(authenticated.encoded_operations.len());
+    let operations = operations.into_iter();
+    let mut operation_rows = Vec::with_capacity(operations.size_hint().0);
     let mut index_rows = Vec::new();
     let mut final_floor = None;
-    for (offset, (operation, encoded)) in
-        zip_eq(operations, authenticated.encoded_operations).enumerate()
-    {
+    for (offset, operation) in operations.enumerate() {
         let location = start + offset as u64;
-        let operation = operation?;
+        let (operation, encoded) = operation?;
         let operation = operation.borrow();
         final_floor = operation.inactivity_floor();
         if let Some(floor) = final_floor {
@@ -588,11 +599,11 @@ where
                 encode_update_index_value(value_present),
             ));
         }
-        operation_rows.push((encode_operation_key(location), encoded.clone()));
+        operation_rows.push((encode_operation_key(location), encoded));
     }
     let floor = final_floor
         .ok_or_else(|| QmdbError::CorruptData("authenticated range must end at a commit".into()))?;
-    if authenticated.inactive_peaks != F::inactive_peaks(end, floor) {
+    if inactive_peaks != F::inactive_peaks(end, floor) {
         return Err(QmdbError::CorruptData(
             "authenticated range has a noncanonical inactive peak count".into(),
         ));
@@ -600,11 +611,7 @@ where
 
     let mut rows = operation_rows;
     rows.extend(index_rows);
-    let pinned_nodes = zip_eq(
-        F::nodes_to_pin(start),
-        authenticated.pinned_nodes.iter().copied(),
-    )
-    .collect();
+    let pinned_nodes = zip_eq(F::nodes_to_pin(start), pinned_nodes.iter().copied()).collect();
     rows.extend(
         extension
             .new_nodes
