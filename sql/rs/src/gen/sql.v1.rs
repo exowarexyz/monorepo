@@ -1318,8 +1318,9 @@ pub struct QueryResponse {
         skip_serializing_if = "::buffa::json_helpers::skip_if::is_empty_bytes"
     )]
     pub results: ::buffa::bytes::Bytes,
-    /// Highest Store sequence observed by this query. Absent when the query does
-    /// not read Store.
+    /// Highest Store sequence this statement observed. A read observes the
+    /// sequence it read at, and an INSERT observes the sequence of its commit.
+    /// Absent when the statement neither reads from nor writes to the Store.
     ///
     /// Field 3: `sequence_number`
     #[serde(
@@ -3845,8 +3846,9 @@ pub mod __buffa {
             ///
             /// Field 1: `results`
             pub results: &'a [u8],
-            /// Highest Store sequence observed by this query. Absent when the query does
-            /// not read Store.
+            /// Highest Store sequence this statement observed. A read observes the
+            /// sequence it read at, and an INSERT observes the sequence of its commit.
+            /// Absent when the statement neither reads from nor writes to the Store.
             ///
             /// Field 3: `sequence_number`
             pub sequence_number: ::core::option::Option<u64>,
@@ -4108,8 +4110,9 @@ pub mod __buffa {
             pub fn results(&self) -> &'_ [u8] {
                 self.0.reborrow().results
             }
-            /// Highest Store sequence observed by this query. Absent when the query does
-            /// not read Store.
+            /// Highest Store sequence this statement observed. A read observes the
+            /// sequence it read at, and an INSERT observes the sequence of its commit.
+            /// Absent when the statement neither reads from nor writes to the Store.
             ///
             /// Field 3: `sequence_number`
             #[must_use]

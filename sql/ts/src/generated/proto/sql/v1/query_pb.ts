@@ -54,8 +54,9 @@ export type QueryResponse = Message<"sql.v1.QueryResponse"> & {
   results: Uint8Array;
 
   /**
-   * Highest Store sequence observed by this query. Absent when the query does
-   * not read Store.
+   * Highest Store sequence this statement observed. A read observes the
+   * sequence it read at, and an INSERT observes the sequence of its commit.
+   * Absent when the statement neither reads from nor writes to the Store.
    *
    * @generated from field: optional uint64 sequence_number = 3;
    */

@@ -35,6 +35,7 @@ use datafusion::{
     physical_plan::{
         aggregates::{AggregateExec, AggregateMode, PhysicalGroupBy},
         execution_plan::{Boundedness, EmissionType},
+        metrics::{BaselineMetrics, ExecutionPlanMetricsSet, MetricBuilder, MetricsSet, Time},
         stream::RecordBatchStreamAdapter,
         DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties, SendableRecordBatchStream,
     },
@@ -176,8 +177,9 @@ pub(crate) struct NormalizedAggregateExpr {
     pub(crate) func: AggregatePushdownFunction,
     /// Value reduced from each selected row.
     pub(crate) argument: AggregatePushdownArgument,
-    /// Aggregate-local `FILTER (WHERE ...)`, evaluated by the reducer. Scalar plans fold it
-    /// into `guard`.
+    /// Aggregate-local `FILTER (WHERE ...)`, evaluated by the reducer. Scalar plans fold it into
+    /// `guard`. A guard moves here when its aggregate joins the seed job or the job of an unguarded
+    /// aggregate.
     pub(crate) filter: Option<Expr>,
     /// Condition applied to the job's input, so it can narrow key ranges. Combines the
     /// disjunction of `CASE WHEN` conditions with `filter` for scalar aggregates.
@@ -193,8 +195,18 @@ pub(crate) struct AggregateReduceJob {
     pub(crate) request: RangeReduceParams,
     /// Primary key or secondary index key ranges to reduce, each sent as its own request.
     /// The ranges may cover more rows than the filters accept, and `request.filter` enforces
-    /// the rest. Empty when the predicate yields no range, so the job reduces nothing.
+    /// the rest. Primary-key ranges that hold exactly the accepted rows need no filter.
+    /// Empty when the predicate yields no range, so the job reduces nothing.
     pub(crate) ranges: Vec<KeyRange>,
+}
+
+impl AggregateReduceJob {
+    /// Whether one request per range can carry the reducers of both jobs.
+    fn shares_request(&self, other: &Self) -> bool {
+        self.ranges == other.ranges
+            && self.request.group_by == other.request.group_by
+            && self.request.filter == other.request.filter
+    }
 }
 
 /// Store job and output mapping compiled for one aggregate expression before jobs are merged.
@@ -241,9 +253,9 @@ pub(crate) struct AggregatePushdownSpec {
     /// Number of `GROUP BY` expressions. They are the leading fields of `schema` and of the
     /// state schema. Zero for a scalar aggregate.
     pub(crate) group_count: usize,
-    /// Reducer-free job that enumerates groups under the scan filters when all aggregates
-    /// are guarded, including grouping without aggregates. Preserves groups that none of
-    /// the aggregate jobs emit.
+    /// Reducer-free job that enumerates groups under the scan filters when every aggregate keeps
+    /// its guard as its own job's row filter, including grouping without aggregates. Preserves
+    /// groups that none of the aggregate jobs emit.
     pub(crate) seed_job: Option<AggregateReduceJob>,
     /// Jobs that compute the aggregate expressions. Each expression belongs to exactly one job.
     pub(crate) aggregate_jobs: Vec<CombinedAggregateJob>,
@@ -270,6 +282,11 @@ pub(crate) struct KvAggregateExec {
     /// State values for fields a job does not compute, excluding group fields.
     /// Nullable fields start null, and non-nullable fields start at zero.
     empty_states: Vec<ScalarValue>,
+    /// Runtime metrics shown by `EXPLAIN ANALYZE`. `output_rows` counts partial-state rows,
+    /// `elapsed_compute` is the time spent decoding responses, and `store_requests` counts
+    /// the Reduce requests the node starts. A retry that the SDK makes inside one request is
+    /// not counted.
+    metrics: ExecutionPlanMetricsSet,
 }
 
 impl KvAggregatePushdownRule {
@@ -391,8 +408,9 @@ fn aggregate_scan_input(
             _ => return Ok(None),
         };
 
-        // Input projections execute before scalar FILTER and CASE. Inlining their
-        // arguments behind those guards would suppress prior evaluation.
+        // Input projections execute before scalar FILTER and CASE. Inlining an expression
+        // behind those guards would suppress an error it raises on a row the guard
+        // excludes, so only expressions that cannot raise are followed.
         for expr in &expressions {
             let Expr::AggregateFunction(aggregate) = strip_alias_expr(expr) else {
                 continue;
@@ -405,10 +423,9 @@ fn aggregate_scan_input(
                         let Expr::Column(column) = expr else {
                             return Ok(false);
                         };
-                        Ok(!matches!(
-                            strip_alias_expr(&replacements[schema.index_of_column(column)?]),
-                            Expr::Column(_) | Expr::Literal(..)
-                        ))
+                        Ok(!cannot_raise(
+                            &replacements[schema.index_of_column(column)?],
+                        )?)
                     })?
                 {
                     return Ok(None);
@@ -430,6 +447,38 @@ fn aggregate_scan_input(
             .collect::<DataFusionResult<_>>()?;
         input = next;
     }
+}
+
+/// Whether evaluating `expr` cannot fail on any row, so it gives the same values and no
+/// error whether it runs before a guard or behind it.
+///
+/// Every node must be a column, a literal, a comparison, `IS [NOT] NULL`, `IN`, `AND`, `OR`, or
+/// `NOT`. After type coercion their operands have matching types, and Arrow's kernels for them fail
+/// only on mismatched types or lengths. Casts, arithmetic, function calls, and `CASE` are excluded.
+/// So are `IS TRUE` and `IS FALSE` tests, because DataFusion fails to plan them in a projection
+/// beneath an aggregate when their operand is nullable.
+fn cannot_raise(expr: &Expr) -> DataFusionResult<bool> {
+    let listed = |node: &Expr| match node {
+        Expr::Column(_)
+        | Expr::Literal(..)
+        | Expr::Not(_)
+        | Expr::IsNull(_)
+        | Expr::IsNotNull(_)
+        | Expr::InList(_) => true,
+        Expr::BinaryExpr(binary) => matches!(
+            binary.op,
+            Operator::Eq
+                | Operator::NotEq
+                | Operator::Lt
+                | Operator::LtEq
+                | Operator::Gt
+                | Operator::GtEq
+                | Operator::And
+                | Operator::Or
+        ),
+        _ => false,
+    };
+    Ok(!expr.exists(|node| Ok(!listed(node)))?)
 }
 
 impl OptimizerRule for KvAggregatePushdownRule {
@@ -588,6 +637,7 @@ impl ExtensionPlanner for KvAggregateExtensionPlanner {
             )),
             state_offsets,
             empty_states,
+            metrics: ExecutionPlanMetricsSet::new(),
         });
         Ok(Some(Arc::new(AggregateExec::try_new(
             AggregateMode::Final,
@@ -618,7 +668,53 @@ impl QueryPlanner for KvQueryPlanner {
 }
 
 impl DisplayAs for KvAggregateExec {
-    fn fmt_as(&self, _t: DisplayFormatType, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt_as(&self, t: DisplayFormatType, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // The tree renderer shows each line as one `key=value` fact and keeps one value per key.
+        // Each access-path fact therefore lists its value for every job, in the order of the `jobs`
+        // line, with `none` for a job that lacks the fact. Each value is escaped to stay on its
+        // line.
+        if t == DisplayFormatType::TreeRender {
+            let diagnostics = &self.spec.diagnostics;
+            let labels = diagnostics
+                .seed_job
+                .iter()
+                .map(|_| "seed_job".to_string())
+                .chain((0..diagnostics.aggregate_jobs.len()).map(|idx| format!("job{idx}")))
+                .collect::<Vec<_>>();
+            let jobs = diagnostics
+                .seed_job
+                .iter()
+                .chain(&diagnostics.aggregate_jobs)
+                .map(access_path_fields)
+                .collect::<Vec<_>>();
+            let mut names = Vec::new();
+            for (name, _) in jobs.iter().flatten() {
+                if !names.contains(name) {
+                    names.push(*name);
+                }
+            }
+
+            writeln!(f, "grouped={}", diagnostics.grouped)?;
+            writeln!(f, "jobs={}", labels.join("; "))?;
+            for name in names {
+                let values = jobs
+                    .iter()
+                    .map(|fields| {
+                        fields.iter().find(|(field, _)| *field == name).map_or_else(
+                            || "none".to_string(),
+                            |(_, value)| escape_tree_value(value),
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                writeln!(f, "{name}={values}")?;
+            }
+            return write!(
+                f,
+                "query_stats={}",
+                format_query_stats_explain(QueryStatsExplainSurface::RangeReduceDetail)
+            );
+        }
         write!(
             f,
             "KvAggregateExec: grouped={}, seed_job={}, aggregate_jobs=[{}], query_stats={}",
@@ -688,6 +784,9 @@ impl ExecutionPlan for KvAggregateExec {
         let session = read_session(context.session_config(), &self.spec.store)?;
         let source = Arc::new(self.clone());
         let concurrency = context.session_config().target_partitions().max(1);
+        let baseline = BaselineMetrics::new(&self.metrics, partition);
+        let decode_time = baseline.elapsed_compute().clone();
+        let store_requests = MetricBuilder::new(&self.metrics).counter("store_requests", partition);
 
         // The ranges of every job share one concurrency bound. Responses are consumed in job
         // order and then range order, so the final merge order stays stable.
@@ -706,16 +805,27 @@ impl ExecutionPlan for KvAggregateExec {
                 let job = Arc::new(job);
                 ranges.into_iter().map(move |range| (job.clone(), range))
             });
-        let batches = futures::stream::iter(requests)
+        let mut batches = futures::stream::iter(requests)
             .map(move |(job, range)| {
-                execute_reduce_range(session.clone(), job, source.clone(), range)
+                store_requests.add(1);
+                execute_reduce_range(
+                    session.clone(),
+                    job,
+                    source.clone(),
+                    range,
+                    decode_time.clone(),
+                )
             })
             .buffered(concurrency)
             .try_flatten();
         Ok(Box::pin(RecordBatchStreamAdapter::new(
             self.schema(),
-            batches,
+            futures::stream::poll_fn(move |cx| baseline.record_poll(batches.poll_next_unpin(cx))),
         )))
+    }
+
+    fn metrics(&self) -> Option<MetricsSet> {
+        Some(self.metrics.clone_inner())
     }
 }
 
@@ -774,6 +884,7 @@ async fn execute_reduce_range(
     job: Arc<CombinedAggregateJob>,
     source: Arc<KvAggregateExec>,
     range: KeyRange,
+    decode_time: Time,
 ) -> DataFusionResult<BoxStream<'static, DataFusionResult<RecordBatch>>> {
     let responses = session
         .range_reduce_stream(&range.start, &range.end, &job.job.request)
@@ -783,12 +894,14 @@ async fn execute_reduce_range(
         let response = exoware_sdk::scalar_reduce_response(responses, &job.job.request)
             .await
             .map_err(|error| DataFusionError::External(Box::new(error)))?;
+        let _timer = decode_time.timer();
         let batch = source.decode_reduce_batch(&job, response.view())?;
         return Ok(futures::stream::once(futures::future::ready(Ok(batch))).boxed());
     }
     Ok(responses
         .map(move |response| {
             let response = response.map_err(|error| DataFusionError::External(Box::new(error)))?;
+            let _timer = decode_time.timer();
             source.decode_reduce_batch(&job, response.view())
         })
         .boxed())
@@ -972,11 +1085,10 @@ pub(crate) const fn rebase_output_plan(
 pub(crate) fn combine_aggregate_jobs(exprs: Vec<AggregateExprPlan>) -> Vec<CombinedAggregateJob> {
     let mut combined: Vec<CombinedAggregateJob> = Vec::new();
     for (output_idx, expr) in exprs.into_iter().enumerate() {
-        if let Some(existing) = combined.iter_mut().find(|candidate| {
-            candidate.job.ranges == expr.job.ranges
-                && candidate.job.request.group_by == expr.job.request.group_by
-                && candidate.job.request.filter == expr.job.request.filter
-        }) {
+        if let Some(existing) = combined
+            .iter_mut()
+            .find(|candidate| candidate.job.shares_request(&expr.job))
+        {
             let offset = existing.job.request.reducers.len();
             let rebased_output = rebase_output_plan(expr.output, offset);
             existing
@@ -1013,7 +1125,8 @@ pub(crate) fn try_build_aggregate_pushdown_spec(
 
     let mut aggregate_exprs = Vec::new();
     let mut aggregate_diagnostics = Vec::new();
-    let mut has_unguarded_aggregate = false;
+    let mut unguarded = Vec::new();
+    let mut maskable = Vec::new();
     for (expr_idx, expr) in aggr_exprs.iter().enumerate() {
         let data_type = schema
             .field(group_exprs.len() + expr_idx)
@@ -1023,6 +1136,7 @@ pub(crate) fn try_build_aggregate_pushdown_spec(
             Ok(normalized) => normalized,
             Err(_) => return Ok(None),
         };
+        let case_guarded = normalized.guard.is_some();
 
         // Native scalar aggregates filter rows before evaluating arguments, allowing
         // the same predicate to narrow the Store access path.
@@ -1031,7 +1145,6 @@ pub(crate) fn try_build_aggregate_pushdown_spec(
                 conjunction(normalized.guard.into_iter().chain(normalized.filter.take()));
         }
 
-        has_unguarded_aggregate |= normalized.guard.is_none();
         let mut filters = scan.filters.clone();
         if let Some(filter) = &normalized.guard {
             filters.push(filter.clone());
@@ -1040,7 +1153,7 @@ pub(crate) fn try_build_aggregate_pushdown_spec(
             table,
             &filters,
             &compiled_group_exprs,
-            Some((&normalized, data_type)),
+            Some((&normalized, data_type.clone())),
         )?
         else {
             return Ok(None);
@@ -1050,13 +1163,33 @@ pub(crate) fn try_build_aggregate_pushdown_spec(
         };
         aggregate_exprs.push(AggregateExprPlan { job, output });
         aggregate_diagnostics.push(diagnostics);
+
+        // A reducer filter is the worker's native aggregate FILTER. A scalar FILTER is that
+        // same construct and is applied before its argument is evaluated, here and in the
+        // worker. A CASE guard is a different construct. A grouped aggregate evaluates its
+        // argument on every row before its filter, so a CASE guard may become a reducer
+        // filter only when its argument cannot raise on the rows it excludes. Only a
+        // column, a literal, or a row count qualifies.
+        if normalized.guard.is_none() {
+            unguarded.push(expr_idx);
+        } else if (compiled_group_exprs.is_empty() && !case_guarded)
+            || matches!(
+                normalized.argument,
+                AggregatePushdownArgument::CountAll
+                    | AggregatePushdownArgument::Expr(
+                        PushdownValueExpr::Column(_) | PushdownValueExpr::Literal(_)
+                    )
+            )
+        {
+            maskable.push((expr_idx, normalized, data_type));
+        }
     }
 
     if aggregate_exprs.is_empty() && compiled_group_exprs.is_empty() {
         return Ok(None);
     }
 
-    let seed_job = if !compiled_group_exprs.is_empty() && !has_unguarded_aggregate {
+    let mut seed_job = if !compiled_group_exprs.is_empty() && unguarded.is_empty() {
         let Some((job, diagnostics, _)) =
             build_aggregate_reduce_job(table, &scan.filters, &compiled_group_exprs, None)?
         else {
@@ -1066,6 +1199,45 @@ pub(crate) fn try_build_aggregate_pushdown_spec(
     } else {
         None
     };
+
+    // The seed job and the jobs of unguarded aggregates run whatever the guards select. An
+    // aggregate whose guard may be a reducer filter joins one of them when its job would
+    // then read the same ranges with the same grouping and row filter, so its own job is
+    // never sent. The job it joins returns every group, so the seed job is not needed.
+    let mut masked = Vec::new();
+    for (expr_idx, mut normalized, data_type) in maskable {
+        normalized.filter = conjunction(
+            normalized
+                .filter
+                .take()
+                .into_iter()
+                .chain(normalized.guard.take()),
+        );
+        let Some((job, diagnostics, Some(output))) = build_aggregate_reduce_job(
+            table,
+            &scan.filters,
+            &compiled_group_exprs,
+            Some((&normalized, data_type)),
+        )?
+        else {
+            continue;
+        };
+        if seed_job
+            .iter()
+            .map(|(seed, _)| seed)
+            .chain(unguarded.iter().map(|&idx| &aggregate_exprs[idx].job))
+            .any(|runs_anyway| runs_anyway.shares_request(&job))
+        {
+            masked.push((expr_idx, AggregateExprPlan { job, output }, diagnostics));
+        }
+    }
+    if !masked.is_empty() {
+        seed_job = None;
+    }
+    for (expr_idx, plan, diagnostics) in masked {
+        aggregate_exprs[expr_idx] = plan;
+        aggregate_diagnostics[expr_idx] = diagnostics;
+    }
 
     let aggregate_jobs = combine_aggregate_jobs(aggregate_exprs);
     let aggregate_diagnostics = aggregate_jobs
@@ -1152,7 +1324,14 @@ pub(crate) fn build_aggregate_reduce_job(
         },
         None => (Vec::new(), None),
     };
-    let filter = if filters.is_empty() {
+
+    // Every filter is a supported constraint, so the primary-key ranges are complete. When they
+    // also enforce each constraint, they hold exactly the rows the predicate accepts and the
+    // worker needs no filter, even for a key column that a worker filter cannot read.
+    let filter = if filters.is_empty()
+        || (matches!(access_path, AggregateAccessPath::PrimaryKey)
+            && access_plan.predicate_fully_enforced_by_primary_key(&table.model))
+    {
         None
     } else {
         let Some(filter) =
@@ -1453,6 +1632,27 @@ pub(crate) fn compile_pushdown_value_expr(
                 _ => unreachable!(),
             };
             Ok((expr, kind))
+        }
+        Expr::Negative(operand) => {
+            let (operand, kind) = compile_pushdown_value_expr(operand, model)?;
+
+            // Native negation wraps an Int64 array exactly like subtracting it from zero.
+            // It reports overflow for a constant operand and flips the sign of a Float64
+            // zero, so neither is pushed.
+            let mut columns = Vec::new();
+            operand.collect_columns(&mut columns);
+            if kind != KvFieldKind::Int64 || columns.is_empty() {
+                return Err(DataFusionError::Execution(
+                    "negation pushdown requires an Int64 operand that reads a column".to_string(),
+                ));
+            }
+            Ok((
+                PushdownValueExpr::Sub(
+                    Box::new(PushdownValueExpr::Literal(KvReducedValue::Int64(0))),
+                    Box::new(operand),
+                ),
+                KvFieldKind::Int64,
+            ))
         }
         Expr::Cast(cast) => compile_pushdown_cast(&cast.expr, cast.field.data_type(), model),
         Expr::TryCast(cast) => compile_pushdown_cast(&cast.expr, cast.field.data_type(), model),
@@ -2004,6 +2204,7 @@ mod tests {
             StringArray, UInt64Array,
         },
         datasource::MemTable,
+        physical_plan::metrics::MetricValue,
         prelude::SessionContext as DataFusionSessionContext,
     };
     use exoware_sdk::{
@@ -2392,6 +2593,20 @@ mod tests {
             );
         }
 
+        /// Checks that the Store reduces the query without a row scan and matches native
+        /// DataFusion. The number of Reduce requests is left open.
+        async fn check_reduced(&self, sql: &str) {
+            let expected = values(&self.native, sql).await.unwrap();
+            self.rows.paths.lock().unwrap().clear();
+            let actual = values(self.context.datafusion(), sql).await.unwrap();
+            assert_eq!(actual, expected, "{sql}");
+            let paths = self.rows.paths.lock().unwrap();
+            assert!(
+                !paths.is_empty() && paths.iter().all(|path| path.ends_with("/Reduce")),
+                "the Store must reduce the query without scanning rows: {sql}: {paths:?}"
+            );
+        }
+
         async fn check(&self, sql: &str, reductions: usize) {
             let expected = values(&self.native, sql).await.unwrap();
             self.check_expected(sql, reductions, &expected).await;
@@ -2641,7 +2856,8 @@ mod tests {
     #[tokio::test]
     async fn interleaved_jobs_preserve_output_positions() {
         let fixture = Fixture::new().await;
-        fixture.check("SELECT SUM(amount), COUNT(*) FILTER (WHERE status = 'open'), AVG(amount), MIN(amount), MAX(amount) FROM orders", 2).await;
+        fixture.check("SELECT SUM(amount), COUNT(*) FILTER (WHERE status = 'open'), AVG(amount), MIN(amount), MAX(amount) FROM orders", 1).await;
+        fixture.check("SELECT SUM(amount), SUM(CASE WHEN status = 'open' THEN amount + 1 END), AVG(amount), MIN(amount), MAX(amount) FROM orders", 2).await;
         fixture.check("SELECT region, SUM(amount), COUNT(*) FILTER (WHERE status = 'open'), AVG(amount), MIN(amount), MAX(amount) FROM orders GROUP BY region ORDER BY region", 1).await;
     }
 
@@ -2661,7 +2877,231 @@ mod tests {
                 .all(|reducer| reducer.filter.as_option().is_some()));
         }
         assert_eq!(fixture.rows.scanned_rows.load(AtomicOrdering::Relaxed), 4);
-        fixture.check("SELECT region, SUM(CASE WHEN id > 1 THEN amount END) FILTER (WHERE status = 'open'), COUNT(*) FILTER (WHERE status = 'closed') FROM orders GROUP BY region ORDER BY region", 2).await;
+        fixture.check("SELECT region, SUM(CASE WHEN id > 1 THEN amount END) FILTER (WHERE status = 'open'), COUNT(*) FILTER (WHERE status = 'closed') FROM orders GROUP BY region ORDER BY region", 1).await;
+    }
+
+    #[tokio::test]
+    async fn guards_share_the_request_that_reads_the_unguarded_range() {
+        let fixture = Fixture::new().await;
+
+        // Each guarded aggregate joins the one request per range that its query needs
+        // anyway, as a reducer with its own filter. Groups that no guard selects remain.
+        for (sql, requests) in [
+            (
+                "SELECT region, SUM(CASE WHEN status = 'open' THEN amount END), \
+                 COUNT(CASE WHEN status = 'closed' THEN 1 END) \
+                 FROM orders GROUP BY region ORDER BY region",
+                1,
+            ),
+            // Both guards share one condition. DataFusion computes it in a projection.
+            (
+                "SELECT region, SUM(CASE WHEN status = 'open' THEN amount END), \
+                 COUNT(CASE WHEN status = 'open' THEN 1 END) \
+                 FROM orders GROUP BY region ORDER BY region",
+                1,
+            ),
+            (
+                "SELECT region, SUM(CASE WHEN status = 'open' THEN amount END), \
+                 COUNT(CASE WHEN status = 'open' THEN 1 END) \
+                 FROM orders WHERE id IN (1, 2, 4) GROUP BY region ORDER BY region",
+                3,
+            ),
+            (
+                "SELECT region, SUM(CASE WHEN status = 'missing' THEN amount END), \
+                 COUNT(CASE WHEN id = 99 THEN 1 END), \
+                 MIN(CASE WHEN id = 4 THEN amount END), \
+                 MAX(CASE WHEN status = 'open' THEN amount END) \
+                 FROM orders GROUP BY region ORDER BY region",
+                1,
+            ),
+            (
+                "SELECT COUNT(*), SUM(amount) FILTER (WHERE amount > 15), \
+                 SUM(amount) FILTER (WHERE status = 'open') FROM orders",
+                1,
+            ),
+            (
+                "SELECT COUNT(*), SUM(CASE WHEN id > 1 THEN amount END), \
+                 COUNT(CASE WHEN id = 4 THEN 1 END), \
+                 SUM(CASE WHEN status = 'open' THEN 1 END) FILTER (WHERE id < 4) FROM orders",
+                1,
+            ),
+            (
+                "SELECT region, COUNT(CASE WHEN status = 'open' THEN id END) \
+                 FROM orders WHERE id IN (1, 2, 4) GROUP BY region ORDER BY region",
+                3,
+            ),
+            // A scalar aggregate applies its FILTER before evaluating its argument, in
+            // DataFusion and in the worker, so the division never sees the first row.
+            (
+                "SELECT COUNT(*), SUM(id / (id - 1)) FILTER (WHERE id > 1) FROM orders",
+                1,
+            ),
+        ] {
+            fixture.check(sql, requests).await;
+            for request in fixture.rows.reductions.lock().unwrap().iter() {
+                assert!(
+                    request
+                        .params
+                        .reducers
+                        .iter()
+                        .any(|reducer| reducer.filter.as_option().is_some()),
+                    "a guard that shares a request must be a reducer filter: {sql}"
+                );
+            }
+        }
+
+        // A CASE value other than a column, a literal, or a row count keeps its guard as the row
+        // filter of its own job. As a reducer filter, the guard would come after the grouped
+        // division, and the division would fail on the first row. With no unguarded aggregate, the
+        // seed job still lists the groups.
+        for (sql, requests) in [
+            (
+                "SELECT COUNT(*), SUM(CASE WHEN id > 1 THEN id / (id - 1) END) FROM orders",
+                2,
+            ),
+            (
+                "SELECT region, COUNT(*), SUM(CASE WHEN id > 1 THEN id / (id - 1) END) \
+                 FROM orders GROUP BY region ORDER BY region",
+                2,
+            ),
+            (
+                "SELECT region, COUNT(*), AVG(CASE WHEN id > 1 THEN amount END) \
+                 FROM orders GROUP BY region ORDER BY region",
+                2,
+            ),
+            (
+                "SELECT region, SUM(CASE WHEN id > 1 THEN id / (id - 1) END), \
+                 MAX(CASE WHEN status = 'open' THEN amount + 1 END) \
+                 FROM orders GROUP BY region ORDER BY region",
+                3,
+            ),
+        ] {
+            fixture.check(sql, requests).await;
+        }
+
+        // Nothing reads the whole table here, so each guard keeps the range it narrows.
+        fixture
+            .check(
+                "SELECT SUM(amount) FILTER (WHERE id = 1), SUM(amount) FILTER (WHERE id = 4) \
+                 FROM orders",
+                2,
+            )
+            .await;
+        assert_eq!(fixture.rows.scanned_rows.load(AtomicOrdering::Relaxed), 2);
+
+        // An average shares its count and sum validity, so a group without a selected row
+        // must stay null.
+        fixture
+            .install_float_ranges(&[
+                (0, 0, Some(1), 1, Some(0.5)),
+                (0, 1, Some(1), 0, Some(1.5)),
+                (0, 2, Some(2), 0, Some(2.0)),
+                (1, 0, None, 1, None),
+            ])
+            .await;
+        fixture
+            .check(
+                "SELECT category, AVG(CASE WHEN flag = 1 THEN value END), \
+                 MIN(CASE WHEN flag = 0 THEN value END) \
+                 FROM float_ranges GROUP BY category ORDER BY category",
+                1,
+            )
+            .await;
+    }
+
+    #[tokio::test]
+    async fn guards_keep_ranges_that_no_other_job_reads() {
+        // The seed job reads the index range of one category. A guard on id reads one base
+        // row. It shares the seed's request only when the index also holds its argument.
+        for (cover_flag, requests, scanned_rows) in [(false, 2, 3), (true, 1, 2)] {
+            let fixture = Fixture::new().await;
+            let mut cover = vec!["amount".to_string()];
+            if cover_flag {
+                cover.push("flag".to_string());
+            }
+            let ids = [0, 1, 2, 3];
+            fixture
+                .install_indexed_table(
+                    "indexed",
+                    vec![
+                        TableColumnConfig::new("id", DataType::Int64, false),
+                        TableColumnConfig::new("category", DataType::Int64, false),
+                        TableColumnConfig::new("amount", DataType::Int64, false),
+                        TableColumnConfig::new("flag", DataType::Int64, false),
+                    ],
+                    &["id"],
+                    vec![IndexSpec::new("category_idx", vec!["category".to_string()])
+                        .unwrap()
+                        .with_cover_columns(cover)],
+                    ids.iter()
+                        .map(|&id| KvRow {
+                            values: vec![
+                                CellValue::Int64(id),
+                                CellValue::Int64(id / 2),
+                                CellValue::Int64(id * 10),
+                                CellValue::Int64(id % 2),
+                            ],
+                        })
+                        .collect(),
+                    vec![
+                        Arc::new(Int64Array::from_iter_values(ids)),
+                        Arc::new(Int64Array::from_iter_values(ids.iter().map(|id| id / 2))),
+                        Arc::new(Int64Array::from_iter_values(ids.iter().map(|id| id * 10))),
+                        Arc::new(Int64Array::from_iter_values(ids.iter().map(|id| id % 2))),
+                    ],
+                )
+                .await;
+            fixture
+                .check(
+                    "SELECT category, SUM(CASE WHEN id = 3 THEN flag END) FROM indexed \
+                     WHERE category = 1 GROUP BY category",
+                    requests,
+                )
+                .await;
+            assert_eq!(
+                fixture.rows.scanned_rows.load(AtomicOrdering::Relaxed),
+                scanned_rows,
+                "cover_flag={cover_flag}"
+            );
+        }
+
+        // The worker cannot read a text key column, so this FILTER cannot run as a reducer
+        // filter. Its own request reads the one entity that the key ranges select.
+        let fixture = Fixture::new().await;
+        let rows = [("1234567", 1, 10), ("1234567", 2, 20), ("other", 1, 30)];
+        fixture
+            .install_indexed_table(
+                "tight",
+                vec![
+                    TableColumnConfig::new("entity", DataType::Utf8, false),
+                    TableColumnConfig::new("version", DataType::UInt64, false),
+                    TableColumnConfig::new("v", DataType::Int64, false),
+                ],
+                &["entity", "version"],
+                vec![],
+                rows.iter()
+                    .map(|&(entity, version, v)| KvRow {
+                        values: vec![
+                            CellValue::Utf8(entity.to_string()),
+                            CellValue::UInt64(version),
+                            CellValue::Int64(v),
+                        ],
+                    })
+                    .collect(),
+                vec![
+                    Arc::new(StringArray::from_iter_values(rows.iter().map(|row| row.0))),
+                    Arc::new(UInt64Array::from_iter_values(rows.iter().map(|row| row.1))),
+                    Arc::new(Int64Array::from_iter_values(rows.iter().map(|row| row.2))),
+                ],
+            )
+            .await;
+        fixture
+            .check(
+                "SELECT COUNT(*), SUM(v) FILTER (WHERE entity = '1234567') FROM tight",
+                2,
+            )
+            .await;
+        assert_eq!(fixture.rows.scanned_rows.load(AtomicOrdering::Relaxed), 5);
     }
 
     #[tokio::test]
@@ -2676,6 +3116,217 @@ mod tests {
              GROUP BY region ORDER BY region",
         ] {
             fixture.check(sql, 1).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn guards_follow_precomputed_conditions_that_cannot_raise() {
+        use datafusion::arrow::array::BooleanArray;
+
+        // West has no open order, and one status and one flag are unknown.
+        let fixture = Fixture::new().await;
+        type Row = (
+            i64,
+            Option<&'static str>,
+            Option<&'static str>,
+            Option<i64>,
+            i64,
+            Option<bool>,
+        );
+        let rows: Vec<Row> = vec![
+            (1, Some("east"), Some("open"), Some(10), 2, Some(true)),
+            (2, Some("east"), Some("closed"), Some(30), 0, Some(false)),
+            (3, Some("west"), Some("closed"), None, 1, None),
+            (4, Some("west"), None, Some(20), 4, Some(true)),
+            (5, None, Some("open"), Some(40), 5, Some(false)),
+            (6, Some("north"), Some("closed"), Some(50), 1, Some(false)),
+        ];
+        let text =
+            |value: Option<&str>| value.map_or(CellValue::Null, |v| CellValue::Utf8(v.into()));
+        fixture
+            .install_indexed_table(
+                "pivot",
+                vec![
+                    TableColumnConfig::new("id", DataType::Int64, false),
+                    TableColumnConfig::new("region", DataType::Utf8, true),
+                    TableColumnConfig::new("status", DataType::Utf8, true),
+                    TableColumnConfig::new("amount", DataType::Int64, true),
+                    TableColumnConfig::new("qty", DataType::Int64, false),
+                    TableColumnConfig::new("urgent", DataType::Boolean, true),
+                ],
+                &["id"],
+                vec![],
+                rows.iter()
+                    .map(|&(id, region, status, amount, qty, urgent)| KvRow {
+                        values: vec![
+                            CellValue::Int64(id),
+                            text(region),
+                            text(status),
+                            amount.map_or(CellValue::Null, CellValue::Int64),
+                            CellValue::Int64(qty),
+                            urgent.map_or(CellValue::Null, CellValue::Boolean),
+                        ],
+                    })
+                    .collect(),
+                vec![
+                    Arc::new(Int64Array::from_iter_values(rows.iter().map(|row| row.0))),
+                    Arc::new(StringArray::from_iter(rows.iter().map(|row| row.1))),
+                    Arc::new(StringArray::from_iter(rows.iter().map(|row| row.2))),
+                    Arc::new(Int64Array::from_iter(rows.iter().map(|row| row.3))),
+                    Arc::new(Int64Array::from_iter_values(rows.iter().map(|row| row.4))),
+                    Arc::new(BooleanArray::from_iter(rows.iter().map(|row| row.5))),
+                ],
+            )
+            .await;
+
+        // DataFusion computes a condition that two CASE expressions share once, in a
+        // projection beneath the aggregate. None of these conditions can raise there.
+        let pivot = |condition: &str| {
+            let aggregates = format!(
+                "SUM(CASE WHEN {condition} THEN amount END), COUNT(CASE WHEN {condition} THEN 1 END)"
+            );
+            [
+                format!("SELECT region, {aggregates} FROM pivot GROUP BY region ORDER BY region"),
+                format!("SELECT {aggregates} FROM pivot"),
+            ]
+        };
+        for condition in [
+            "status = 'open'",
+            "amount >= 20",
+            "status = 'closed' AND id > 2",
+            "status = 'open' OR status = 'closed'",
+            "id IN (1, 4, 5, 6)",
+            "status IN ('open', 'closed', 'held', 'void')",
+            "status IS NULL",
+            "amount IS NOT NULL",
+            "NOT urgent",
+        ] {
+            for sql in pivot(condition) {
+                fixture.check_reduced(&sql).await;
+            }
+        }
+        fixture
+            .check_reduced(
+                "SELECT region, SUM(CASE WHEN is_open THEN amount END), COUNT(*) FROM \
+                 (SELECT region, amount, status = 'open' AS is_open FROM pivot) q \
+                 GROUP BY region ORDER BY region",
+            )
+            .await;
+
+        // A projection evaluates these expressions on every row before any guard, so the division
+        // fails on the row whose quantity is zero and the cast on a status. Casts, function calls,
+        // and arithmetic stay where DataFusion evaluates them. So does IS TRUE, because DataFusion
+        // cannot plan it beneath an aggregate for a nullable operand. Each case names the error
+        // both plans must raise, if they must.
+        let mut refused = Vec::new();
+        for (condition, raises) in [
+            ("amount / qty > 1", Some("Divide by zero")),
+            ("CAST(status AS BIGINT) = 1", Some("Cannot cast")),
+            ("CAST(amount AS DOUBLE) > 15.5", None),
+            ("lower(status) = 'open'", None),
+            ("urgent IS TRUE", None),
+        ] {
+            refused.extend(pivot(condition).map(|sql| (sql, raises)));
+        }
+        for sql in [
+            "SELECT SUM(amount + 1) FILTER (WHERE status = 'open'), \
+             MAX(amount + 1) FILTER (WHERE status = 'closed') FROM pivot",
+            "SELECT region, SUM(CASE WHEN status = 'open' THEN v END), COUNT(*) FROM \
+             (SELECT region, status, amount + 1 AS v FROM pivot) q \
+             GROUP BY region ORDER BY region",
+        ] {
+            refused.push((sql.to_string(), None));
+        }
+        for (sql, raises) in refused {
+            fixture.rows.paths.lock().unwrap().clear();
+            let native = values(&fixture.native, &sql).await;
+            let store = values(fixture.context.datafusion(), &sql).await;
+            match (native, store) {
+                (Ok(native), Ok(store)) => {
+                    assert!(raises.is_none(), "{sql} must raise {raises:?}");
+                    assert_eq!(store, native, "{sql}");
+                }
+                (Err(native), Err(store)) => {
+                    for error in [native.to_string(), store.to_string()] {
+                        assert!(error.contains(raises.unwrap_or_default()), "{sql}: {error}");
+                    }
+                }
+                (native, store) => {
+                    panic!("both plans must raise or neither: {sql}: {native:?} / {store:?}")
+                }
+            }
+            let paths = fixture.rows.paths.lock().unwrap();
+            assert!(
+                !paths.iter().any(|path| path.ends_with("/Reduce")),
+                "an expression that is not known to be safe must stay ahead of its guard: {sql}"
+            );
+        }
+    }
+
+    #[test]
+    fn expressions_that_cannot_raise_form_a_closed_list() {
+        use datafusion::{
+            functions::string::expr_fn::lower,
+            logical_expr::{binary_expr, cast, not, try_cast, when},
+            prelude::{col, lit},
+        };
+
+        let (a, b, one) = (|| col("a"), || col("b"), || lit(1_i64));
+        let equal = || a().eq(one());
+
+        // Columns, literals, comparisons, null tests, IN lists, and AND, OR, and NOT over them
+        // cannot raise.
+        for expr in [
+            a(),
+            one(),
+            equal(),
+            a().not_eq(one()),
+            a().lt(b()),
+            a().lt_eq(one()),
+            a().gt(one()),
+            a().gt_eq(one()),
+            equal().and(b().is_null()),
+            equal().or(b().is_not_null()),
+            not(equal()),
+            b().is_null(),
+            b().is_not_null(),
+            a().in_list(vec![one(), b()], false),
+            a().in_list(vec![one()], true),
+        ] {
+            assert!(
+                cannot_raise(&expr).unwrap(),
+                "cannot_raise must accept {expr}"
+            );
+        }
+
+        // Casts, arithmetic, functions, CASE, boolean tests, LIKE, BETWEEN, IS DISTINCT FROM, and
+        // any accepted form with one of them inside are refused.
+        for expr in [
+            cast(a(), DataType::Float64),
+            try_cast(a(), DataType::Float64),
+            a() + one(),
+            a() / b(),
+            Expr::Negative(Box::new(a())),
+            lower(a()),
+            when(equal(), b()).end().unwrap(),
+            a().is_true(),
+            a().is_not_true(),
+            a().is_false(),
+            a().is_not_false(),
+            a().is_unknown(),
+            a().is_not_unknown(),
+            a().like(lit("x")),
+            a().between(one(), b()),
+            binary_expr(a(), Operator::IsDistinctFrom, one()),
+            equal().and((a() / b()).gt(one())),
+            not(cast(a(), DataType::Boolean)),
+            a().in_list(vec![b() + one()], false),
+            (a() + one()).is_null(),
+        ] {
+            assert!(
+                !cannot_raise(&expr).unwrap(),
+                "cannot_raise must refuse {expr}"
+            );
         }
     }
 
@@ -2744,6 +3395,50 @@ mod tests {
                 .unwrap();
         }
         fixture.check(sql, 1).await;
+    }
+
+    #[tokio::test]
+    async fn integer_negation_wraps_in_reduce_and_float_negation_stays_native() {
+        let fixture = Fixture::with_amounts([Some(i64::MIN), Some(30), None, Some(-20)]).await;
+        for sql in [
+            "SELECT SUM(-amount), MIN(-id), MIN(-amount), MAX(-amount), COUNT(-amount) FROM orders",
+            "SELECT region, SUM(-amount), AVG(-(amount + id)) FROM orders \
+             GROUP BY region ORDER BY region",
+            "SELECT -id, MIN(-amount) FROM orders GROUP BY -id ORDER BY 1",
+            "SELECT SUM(CASE WHEN status = 'open' THEN -amount END) FROM orders",
+        ] {
+            fixture.check(sql, 1).await;
+        }
+
+        // Native negation of a constant reports overflow, while a worker would wrap it.
+        let sql = "SELECT SUM(amount + -(-9223372036854775808)) FROM orders";
+        fixture.rows.reductions.lock().unwrap().clear();
+        for context in [&fixture.native, fixture.context.datafusion()] {
+            let error = values(context, sql).await.unwrap_err();
+            assert!(error.to_string().contains("Overflow"), "{sql}: {error}");
+        }
+        assert!(fixture.rows.reductions.lock().unwrap().is_empty(), "{sql}");
+
+        // Negating a positive zero yields a negative zero, and zero minus it does not.
+        fixture
+            .replace_value_column(
+                DataType::Float64,
+                vec![CellValue::Float64(0.0), CellValue::Null],
+                Arc::new(Float64Array::from(vec![Some(0.0), None])),
+            )
+            .await;
+        let sql = "SELECT MIN(-value), MAX(-value), SUM(-value) FROM numbers";
+        let expected = values(&fixture.native, sql).await.unwrap();
+        assert_eq!(
+            expected[0][1],
+            ScalarValue::Float64(Some(-0.0)),
+            "native negation must flip the sign of zero"
+        );
+        assert_eq!(
+            values(fixture.context.datafusion(), sql).await.unwrap(),
+            expected
+        );
+        assert!(fixture.rows.reductions.lock().unwrap().is_empty(), "{sql}");
     }
 
     #[tokio::test]
@@ -2950,7 +3645,7 @@ mod tests {
             "SELECT COUNT(*), SUM(id / (id - 1)) FILTER (WHERE id > 1) FROM orders",
             "SELECT COUNT(*), SUM(v / (v - 1)) FILTER (WHERE v > 1) FROM (SELECT id AS v FROM orders) q",
         ] {
-            fixture.check(sql, 2).await;
+            fixture.check(sql, 1).await;
         }
         fixture.rows.reductions.lock().unwrap().clear();
         for sql in [
@@ -3743,7 +4438,7 @@ mod tests {
     async fn sum_case_one_preserves_null_when_no_rows_contribute() {
         let fixture = Fixture::new().await;
         fixture.check("SELECT SUM(CASE WHEN status = 'missing' THEN 1 END), COUNT(CASE WHEN status = 'missing' THEN 1 END) FROM orders", 1).await;
-        fixture.check("SELECT region, SUM(CASE WHEN status = 'open' THEN 1 END), COUNT(*) FROM orders GROUP BY region ORDER BY region", 2).await;
+        fixture.check("SELECT region, SUM(CASE WHEN status = 'open' THEN 1 END), COUNT(*) FROM orders GROUP BY region ORDER BY region", 1).await;
     }
 
     #[tokio::test]
@@ -3853,6 +4548,308 @@ mod tests {
             )
             .await;
         assert_eq!(fixture.rows.scanned_rows.load(AtomicOrdering::Relaxed), 2);
+    }
+
+    #[tokio::test]
+    async fn explain_analyze_reports_partial_state_rows_and_reduce_requests() {
+        let fixture = Fixture::new().await;
+        for (sql, output_rows, store_requests) in [
+            (
+                "SELECT region, SUM(amount) FROM orders GROUP BY region",
+                3,
+                1,
+            ),
+            // Each of the two ranges returns one state row for the single result row.
+            (
+                "SELECT SUM(amount), MIN(amount) FROM orders WHERE id IN (1, 4)",
+                2,
+                2,
+            ),
+            (
+                "SELECT region, COUNT(*) FROM orders WHERE status = 'missing' GROUP BY region",
+                0,
+                1,
+            ),
+        ] {
+            let explained = values(
+                fixture.context.datafusion(),
+                &format!("EXPLAIN ANALYZE {sql}"),
+            )
+            .await
+            .unwrap();
+            let plan = explained[0][1].to_string();
+            let node = plan
+                .lines()
+                .find(|line| line.contains("KvAggregateExec"))
+                .unwrap_or_else(|| panic!("the aggregate must be pushed: {sql}\n{plan}"));
+            for metric in [
+                format!("output_rows={output_rows}"),
+                format!("store_requests={store_requests}"),
+            ] {
+                assert!(
+                    node.contains(&metric),
+                    "the node must report {metric}: {sql}\n{node}"
+                );
+            }
+
+            // A recorded time is never zero, while the rendered value cannot tell an
+            // unrecorded time from a short one.
+            let plan = fixture
+                .context
+                .sql(sql)
+                .await
+                .unwrap()
+                .create_physical_plan()
+                .await
+                .unwrap();
+            datafusion::physical_plan::collect(
+                plan.clone(),
+                fixture.context.datafusion().task_ctx(),
+            )
+            .await
+            .unwrap();
+            let mut decode_nanos = None;
+            plan.apply(|node| {
+                if node.downcast_ref::<KvAggregateExec>().is_some() {
+                    decode_nanos = node.metrics().and_then(|metrics| {
+                        metrics.iter().find_map(|metric| match metric.value() {
+                            MetricValue::ElapsedCompute(time) => Some(time.value()),
+                            _ => None,
+                        })
+                    });
+                }
+                Ok(TreeNodeRecursion::Continue)
+            })
+            .unwrap();
+            assert!(
+                decode_nanos.is_some_and(|nanos| nanos > 0),
+                "decoding responses must count as compute time: {sql}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn tree_explain_renders_one_fact_per_line() {
+        let fixture = Fixture::new().await;
+        let ids = [0, 1, 2, 3];
+        fixture
+            .install_indexed_table(
+                "indexed",
+                vec![
+                    TableColumnConfig::new("id", DataType::Int64, false),
+                    TableColumnConfig::new("category", DataType::Int64, false),
+                    TableColumnConfig::new("amount", DataType::Int64, false),
+                ],
+                &["id"],
+                vec![IndexSpec::new("category_idx", vec!["category".to_string()])
+                    .unwrap()
+                    .with_cover_columns(vec!["amount".to_string()])],
+                ids.iter()
+                    .map(|&id| KvRow {
+                        values: vec![
+                            CellValue::Int64(id),
+                            CellValue::Int64(id / 2),
+                            CellValue::Int64(id * 10),
+                        ],
+                    })
+                    .collect(),
+                vec![
+                    Arc::new(Int64Array::from_iter_values(ids)),
+                    Arc::new(Int64Array::from_iter_values(ids.iter().map(|id| id / 2))),
+                    Arc::new(Int64Array::from_iter_values(ids.iter().map(|id| id * 10))),
+                ],
+            )
+            .await;
+        let word = |c: char| c.is_alphanumeric() || c == '_';
+        let query_stats = vec![
+            "query_stats:",
+            "range_reduce(detail.extra:",
+            "server-defined metadata)",
+        ];
+
+        // The lines inside the KvAggregateExec box, below its title and separator.
+        let node_lines = |plan: &str| {
+            let lines = plan
+                .lines()
+                .map(|line| line.trim_matches(|c: char| c == '│' || c.is_whitespace()))
+                .collect::<Vec<_>>();
+            let title = lines
+                .iter()
+                .position(|line| *line == "KvAggregateExec")
+                .unwrap_or_else(|| panic!("the aggregate must be pushed:\n{plan}"));
+            lines[title + 2..]
+                .iter()
+                .take_while(|line| !line.starts_with('└'))
+                .map(|line| line.to_string())
+                .collect::<Vec<_>>()
+        };
+
+        // A fact that fits the box is one `key: value` line. A longer one is its key on a
+        // line followed by the wrapped value.
+        for (sql, facts) in [
+            (
+                "SELECT category, SUM(amount) FROM indexed GROUP BY category",
+                vec![
+                    vec!["grouped: true"],
+                    vec!["jobs: job0"],
+                    vec!["mode: primary_key"],
+                    vec!["predicate: <none>"],
+                    vec!["exact: true"],
+                    vec!["row_recheck: false"],
+                    vec!["ranges: 1"],
+                    vec!["full_scan_like: true"],
+                    query_stats.clone(),
+                ],
+            ),
+            (
+                "SELECT DISTINCT category FROM indexed WHERE id >= 2",
+                vec![
+                    vec!["grouped: true"],
+                    vec!["jobs: seed_job"],
+                    vec!["mode: primary_key"],
+                    vec!["predicate: id >= 2"],
+                    vec!["exact: true"],
+                    vec!["row_recheck: false"],
+                    vec!["ranges: 1"],
+                    vec!["full_scan_like: false"],
+                    query_stats.clone(),
+                ],
+            ),
+            // One job reads the index and the other the primary key, so only the first
+            // has a constrained prefix.
+            (
+                "SELECT SUM(amount) FILTER (WHERE category = 1), \
+                 SUM(amount) FILTER (WHERE id = 2) FROM indexed",
+                vec![
+                    vec!["grouped: false"],
+                    vec!["jobs: job0; job1"],
+                    vec![
+                        "mode:",
+                        "secondary_index",
+                        "(category_idx,",
+                        "lexicographic);",
+                        "primary_key",
+                    ],
+                    vec!["predicate:", "category = 1; id = 2"],
+                    vec!["exact: false; true"],
+                    vec!["row_recheck:", "true; false"],
+                    vec!["ranges: 1; 1"],
+                    vec!["full_scan_like:", "false; false"],
+                    vec!["constrained_prefix:", "1; none"],
+                    query_stats.clone(),
+                ],
+            ),
+        ] {
+            let explained = values(
+                fixture.context.datafusion(),
+                &format!("EXPLAIN FORMAT TREE {sql}"),
+            )
+            .await
+            .unwrap();
+            let plan = explained[0][1].to_string();
+            let node = node_lines(&plan);
+            assert_eq!(
+                node.iter().filter(|line| !line.is_empty()).count(),
+                facts.iter().map(Vec::len).sum::<usize>(),
+                "the node must show these facts and no others: {sql}\n{plan}"
+            );
+            for fact in facts {
+                assert!(
+                    node.windows(fact.len()).any(|window| window == fact),
+                    "the node must give {fact:?} lines of its own: {sql}\n{plan}"
+                );
+                for pair in fact.windows(2).skip(1) {
+                    assert!(
+                        !(pair[0].ends_with(word) && pair[1].starts_with(word)),
+                        "a line must not break inside a word: {pair:?}"
+                    );
+                }
+            }
+        }
+
+        // DataFusion's renderer cuts a node off after 30 lines, so twelve jobs lose their
+        // last fields in the tree. The indented format still lists every job.
+        let filters = (0..12)
+            .map(|id| format!("SUM(amount) FILTER (WHERE id = {id})"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!("SELECT {filters} FROM indexed");
+        let tree = values(
+            fixture.context.datafusion(),
+            &format!("EXPLAIN FORMAT TREE {sql}"),
+        )
+        .await
+        .unwrap();
+        let node = node_lines(&tree[0][1].to_string());
+        assert_eq!(
+            node.last().map(String::as_str),
+            Some("..."),
+            "the renderer must mark where it cut the node: {node:?}"
+        );
+        assert!(
+            !node.iter().any(|line| line == "query_stats:"),
+            "twelve jobs must not fit the box: {node:?}"
+        );
+        let indented = values(fixture.context.datafusion(), &format!("EXPLAIN {sql}"))
+            .await
+            .unwrap()
+            .iter()
+            .map(|row| row[1].to_string())
+            .collect::<String>();
+        for job in 0..12 {
+            assert!(
+                indented.contains(&format!("job{job}{{")),
+                "the indented plan must list job{job}:\n{indented}"
+            );
+        }
+    }
+
+    /// A line break inside a value stays inside that value, so a predicate literal can neither
+    /// add nor replace a fact of the tree display.
+    #[tokio::test]
+    async fn tree_explain_keeps_a_multi_line_value_in_its_field() {
+        let fixture = Fixture::new().await;
+
+        // The two literals differ only where the first has a line break before `mode=`.
+        let mut boxes = Vec::new();
+        for literal in ["a\nmode=spoof", "a_nmode=spoof"] {
+            let sql = format!(
+                "EXPLAIN FORMAT TREE SELECT COUNT(*) FROM orders WHERE status = '{literal}'"
+            );
+            let explained = values(fixture.context.datafusion(), &sql).await.unwrap();
+            let plan = explained[0][1].to_string();
+            assert!(
+                plan.contains("KvAggregateExec"),
+                "the aggregate must be pushed:\n{plan}"
+            );
+            boxes.push(
+                plan.lines()
+                    .map(|line| {
+                        line.trim_matches(|c: char| c == '│' || c.is_whitespace())
+                            .to_string()
+                    })
+                    .collect::<Vec<_>>(),
+            );
+        }
+
+        // Only the predicate value may differ, and it must show the break as an escape.
+        let differing = boxes[0]
+            .iter()
+            .zip(&boxes[1])
+            .filter(|(spoofed, plain)| spoofed != plain)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            (boxes[0].len(), differing),
+            (
+                boxes[1].len(),
+                vec![(
+                    &r"status = 'a\nmode=spoof'".to_string(),
+                    &"status = 'a_nmode=spoof'".to_string()
+                )]
+            ),
+            "the literal must stay one escaped predicate value, got {:#?}",
+            boxes[0]
+        );
     }
 
     fn final_reduce_plan(plan: Arc<dyn ExecutionPlan>) -> Arc<dyn ExecutionPlan> {
@@ -4721,5 +5718,227 @@ mod tests {
             values(&fixture.native, sql).await.unwrap()
         );
         assert!(fixture.rows.reductions.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn key_ranges_that_enforce_the_predicate_need_no_worker_filter() {
+        let fixture = Fixture::new().await;
+        let rows: Vec<(&str, u64, Option<i64>, Option<i64>)> = vec![
+            ("", 1, Some(1), Some(-1)),
+            ("e", 1, Some(2), Some(-2)),
+            ("e", 2, Some(3), None),
+            ("eu", 0, Some(23), Some(7)),
+            ("eu", 1, None, Some(9)),
+            ("eu", 2, Some(25), None),
+            ("eu", 3, Some(26), Some(8)),
+            ("eu", u64::MAX, Some(27), Some(-5)),
+            ("eu\0x", 1, Some(100), Some(100)),
+            (
+                "eu-central-longer-than-fifteen-bytes",
+                1,
+                Some(200),
+                Some(200),
+            ),
+            ("eu2", 1, Some(300), Some(300)),
+            ("us", 1, Some(400), Some(400)),
+            ("us", 2, Some(500), Some(500)),
+        ];
+        fixture
+            .install_indexed_table(
+                "c",
+                vec![
+                    TableColumnConfig::new("region", DataType::Utf8, false),
+                    TableColumnConfig::new("seq", DataType::UInt64, false),
+                    TableColumnConfig::new("v", DataType::Int64, true),
+                    TableColumnConfig::new("w", DataType::Int64, true),
+                ],
+                &["region", "seq"],
+                vec![],
+                rows.iter()
+                    .map(|&(region, seq, v, w)| KvRow {
+                        values: vec![
+                            CellValue::Utf8(region.to_string()),
+                            CellValue::UInt64(seq),
+                            v.map_or(CellValue::Null, CellValue::Int64),
+                            w.map_or(CellValue::Null, CellValue::Int64),
+                        ],
+                    })
+                    .collect(),
+                vec![
+                    Arc::new(StringArray::from_iter_values(rows.iter().map(|row| row.0))),
+                    Arc::new(UInt64Array::from_iter_values(rows.iter().map(|row| row.1))),
+                    Arc::new(Int64Array::from_iter(rows.iter().map(|row| row.2))),
+                    Arc::new(Int64Array::from_iter(rows.iter().map(|row| row.3))),
+                ],
+            )
+            .await;
+
+        // Each case lists its Reduce requests and the rows its ranges hold. The last two
+        // regions are too long for any key, so they have no range to read.
+        let unstorable_regions = [
+            "x".repeat(exoware_sdk::keys::MAX_KEY_LEN - 1),
+            "x".repeat(exoware_sdk::keys::MAX_KEY_LEN),
+        ];
+        for (predicate, requests, scanned_rows) in [
+            ("region = 'eu'", 1, 5),
+            ("region = 'eu' AND seq <= 2", 1, 3),
+            ("region = 'eu' AND seq = 18446744073709551615", 1, 1),
+            ("region = ''", 1, 1),
+            ("region = 'e'", 1, 2),
+            ("region = 'eu\0x'", 1, 1),
+            ("region = 'eu-central-longer-than-fifteen-bytes'", 1, 1),
+            ("region IN ('eu', 'us')", 2, 7),
+            ("region = 'missing'", 1, 0),
+            (
+                format!("region = '{}'", unstorable_regions[0]).as_str(),
+                0,
+                0,
+            ),
+            (
+                format!("region = '{}'", unstorable_regions[1]).as_str(),
+                0,
+                0,
+            ),
+        ] {
+            for projection in ["COUNT(*), SUM(v)", "MAX(w)"] {
+                let sql = format!("SELECT {projection} FROM c WHERE {predicate}");
+                fixture.check(&sql, requests).await;
+                assert_eq!(
+                    fixture.rows.scanned_rows.load(AtomicOrdering::Relaxed),
+                    scanned_rows,
+                    "the ranges must hold exactly the rows the predicate accepts: {sql}"
+                );
+                assert!(
+                    fixture
+                        .rows
+                        .reductions
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .all(|request| request.params.filter.as_option().is_none()),
+                    "ranges that enforce the predicate must replace the worker filter: {sql}"
+                );
+            }
+        }
+        fixture
+            .check(
+                "SELECT v, COUNT(*), MAX(w) FROM c WHERE region = 'eu' GROUP BY v ORDER BY v",
+                1,
+            )
+            .await;
+        let explain = values(
+            fixture.context.datafusion(),
+            "EXPLAIN SELECT COUNT(*), SUM(v) FROM c WHERE region = 'eu'",
+        )
+        .await
+        .unwrap();
+        assert!(
+            explain.iter().any(|row| {
+                let plan = row[1].to_string();
+                plan.contains("KvAggregateExec") && plan.contains("exact=true, row_recheck=false")
+            }),
+            "the pushed aggregate must report that its ranges enforce the predicate: {explain:?}"
+        );
+
+        // The ranges of these predicates admit rows the predicate rejects, and the worker
+        // cannot read region or seq from the key, so aggregation stays in DataFusion.
+        for sql in [
+            "SELECT COUNT(*), SUM(v) FROM c WHERE region IN ('eu', 'us') AND seq <= 2",
+            "SELECT COUNT(*), SUM(v) FROM c WHERE region = 'eu' AND v >= 25",
+            "SELECT COUNT(*), SUM(v) FROM c WHERE seq <= 2",
+        ] {
+            fixture.rows.reductions.lock().unwrap().clear();
+            assert_eq!(
+                values(fixture.context.datafusion(), sql).await.unwrap(),
+                values(&fixture.native, sql).await.unwrap(),
+                "{sql}"
+            );
+            assert!(
+                fixture.rows.reductions.lock().unwrap().is_empty(),
+                "a predicate the ranges do not enforce must not lose its filter: {sql}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn worker_filters_keep_the_checks_key_ranges_do_not_enforce() {
+        let fixture = Fixture::new().await;
+        for (sql, checks) in [
+            (
+                "SELECT COUNT(*), SUM(amount) FROM orders WHERE id >= 2",
+                None,
+            ),
+            (
+                "SELECT COUNT(*), SUM(amount) FROM orders WHERE id >= 2 AND status = 'open'",
+                Some(2),
+            ),
+            (
+                "SELECT COUNT(*), SUM(amount) FROM orders WHERE status = 'open'",
+                Some(1),
+            ),
+        ] {
+            fixture.check(sql, 1).await;
+            let requests = fixture.rows.reductions.lock().unwrap();
+            assert_eq!(
+                requests[0]
+                    .params
+                    .filter
+                    .as_option()
+                    .map(|filter| filter.checks.len()),
+                checks,
+                "the worker must check every constraint the ranges leave open: {sql}"
+            );
+        }
+
+        // The primary key alone would enforce this predicate. The planner reads the index on b, and
+        // its ranges bound b only, so they also hold rows of other a values.
+        let pairs = [(1, 1), (1, 2), (1, 3), (2, 2), (2, 3)];
+        fixture
+            .install_indexed_table(
+                "pairs",
+                vec![
+                    TableColumnConfig::new("a", DataType::Int64, false),
+                    TableColumnConfig::new("b", DataType::Int64, false),
+                    TableColumnConfig::new("v", DataType::Int64, false),
+                ],
+                &["a", "b"],
+                vec![IndexSpec::new("b_idx", vec!["b".to_string()])
+                    .unwrap()
+                    .with_cover_columns(vec!["v".to_string()])],
+                pairs
+                    .iter()
+                    .map(|&(a, b)| KvRow {
+                        values: vec![
+                            CellValue::Int64(a),
+                            CellValue::Int64(b),
+                            CellValue::Int64(a * 10 + b),
+                        ],
+                    })
+                    .collect(),
+                vec![
+                    Arc::new(Int64Array::from_iter_values(
+                        pairs.iter().map(|pair| pair.0),
+                    )),
+                    Arc::new(Int64Array::from_iter_values(
+                        pairs.iter().map(|pair| pair.1),
+                    )),
+                    Arc::new(Int64Array::from_iter_values(
+                        pairs.iter().map(|&(a, b)| a * 10 + b),
+                    )),
+                ],
+            )
+            .await;
+        let sql = "SELECT COUNT(*), SUM(v) FROM pairs WHERE a = 1 AND b >= 2";
+        fixture.check(sql, 1).await;
+        assert_eq!(fixture.rows.scanned_rows.load(AtomicOrdering::Relaxed), 4);
+        assert_eq!(
+            fixture.rows.reductions.lock().unwrap()[0]
+                .params
+                .filter
+                .as_option()
+                .map(|filter| filter.checks.len()),
+            Some(2),
+            "index ranges must keep the worker filter: {sql}"
+        );
     }
 }

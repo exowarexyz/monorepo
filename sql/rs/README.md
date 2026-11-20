@@ -218,8 +218,11 @@ successful commit, or `mark_upload_failed` to retain the batch for retry.
 
 SQL `INSERT` writes through the same schema, with each statement committed as one
 atomic batch. It materializes Arrow batches first, so `BatchWriter` avoids that
-work for application ingest. The Store's request-size limit bounds each batch,
-and an oversized statement or flush returns the ingest error.
+work for application ingest. A statement must fit in one Store write. Once its
+entries pass the Store's entry or byte limit, `INSERT` stops reading its input
+and fails without writing. Too many entries return a `PutTooLarge` error and too
+many bytes `ResourcesExhausted`. An oversized flush returns the Store's ingest
+error.
 
 ## Adding indexes to existing tables
 
@@ -268,8 +271,12 @@ snapshot, so reads within one statement can observe different sequences at or
 above that minimum.
 
 `SqlContext::new` starts a monotonic session with no minimum and shares it across
-the context's statements and clones. To read your own writes, start the session
-at the sequence returned by `flush`, as in [Getting started](#getting-started).
+the context's statements and clones. An `INSERT` records its commit sequence in
+the session of the context that runs it, as a read records the sequence it
+observes. A monotonic session then reads at or above the commit, and a fixed
+session reports it through `evaluated_sequence` and keeps its minimum. Writes
+through a `BatchWriter` are not recorded. To read them, start the session at the
+sequence returned by `flush`, as in [Getting started](#getting-started).
 You can also raise the minimum for a single query by deriving a context that
 shares the catalog and observations:
 
@@ -309,22 +316,28 @@ let app = axum::Router::new().fallback_service(sql_stack(server));
 `Query` runs one SQL statement and returns an Arrow IPC stream that Rust clients
 can decode with Arrow's `StreamReader`. Its Store reads share a new monotonic
 session starting at the request's optional minimum sequence. The response also
-reports the highest Store sequence observed, omitting it when the statement read
-nothing from the Store. A result whose encoded stream exceeds 256 MiB fails with
+reports the highest Store sequence the statement observed, including the commit
+of an `INSERT`. A later request can pass that sequence as its minimum to read
+the new rows. It is absent when the statement neither read from nor wrote to
+the Store. A result whose encoded stream exceeds 256 MiB fails with
 `RESOURCE_EXHAUSTED`.
 
 `Query` accepts queries and `EXPLAIN`, `INSERT INTO` registered tables, `SET`
-and `RESET` of options outside `datafusion.runtime` and `datafusion.catalog`,
-`PREPARE`, `EXECUTE`, `DEALLOCATE`, `CREATE FUNCTION`, and `DROP FUNCTION`.
-Session commands such as `SET`, `PREPARE`, and `CREATE FUNCTION` modify the
-server's shared context, so their effects persist into later requests.
+and `RESET` of options outside `datafusion.runtime`, `datafusion.catalog`, and
+`datafusion.sql_parser`, `PREPARE`, `EXECUTE`, `DEALLOCATE`, `CREATE FUNCTION`,
+and `DROP FUNCTION`. Session commands such as `SET`, `PREPARE`, and
+`CREATE FUNCTION` modify the server's shared context, so their effects persist
+into later requests. Every caller shares the session's settings, functions, and
+prepared statements, including statements the embedder prepared on
+`server.context()`. Serve `Query` only to callers trusted with all of them.
 `CREATE FUNCTION` needs a function factory installed on the server's context.
 
 `Query` rejects catalog DDL such as `CREATE TABLE`, `CREATE VIEW`, and
-`DROP TABLE` because every caller shares the catalog. It rejects `COPY` and
+`DROP TABLE` because every caller shares the catalog, and parser options because
+they decide how every caller's SQL is read. It rejects `COPY` and
 `CREATE EXTERNAL TABLE` because they reach the server's files, and `DELETE`,
 `UPDATE`, and other writes because `INSERT INTO` is the only write the service
-offers. Register tables and views and set runtime options through
+offers. Register tables and views and set runtime and parser options through
 `server.context()`.
 
 `Subscribe` streams rows from each Store batch that writes to a table and matches

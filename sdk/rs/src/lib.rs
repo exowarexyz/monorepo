@@ -1816,9 +1816,20 @@ pub struct StoreClient {
 /// an exact snapshot. Clones share observations, including stream frames.
 /// An initial floor does not count as an observed sequence.
 ///
+/// A session created with floor 5 sends these minimum sequences as its reads
+/// observe 9, 12, and then 15:
+///
+/// ```text
+///                      read 1   read 2   read 3
+/// monotonic sends         5        9       12
+/// fixed sends             5        5        5
+/// response sequence       9       12       15
+/// ```
+///
 /// Streamed reads record response sequences as frames arrive, including the
-/// first frame fetched before the stream is returned to the caller.
-/// Log reads record successfully returned batches.
+/// first frame fetched before the stream is returned to the caller. Log reads
+/// record successfully returned batches. A write is observed only when its
+/// commit sequence is recorded with [`Self::observe_write`].
 #[derive(Clone, Debug)]
 pub struct ReadSession {
     client: PrefixedStoreClient,
@@ -2861,14 +2872,14 @@ impl<'a> Retention<'a> {
 }
 
 impl ReadSession {
-    /// Create a session whose floor advances to the highest observed read sequence.
-    /// `None` starts without a floor; `Some(0)` requires sequence zero.
+    /// Create a session whose floor advances to the highest observed sequence.
+    /// `None` starts without a floor, and `Some(0)` requires sequence zero.
     pub fn monotonic(store: PrefixedStoreClient, initial_floor: Option<u64>) -> Self {
         Self::new(store, initial_floor, ReadPolicy::Monotonic)
     }
 
-    /// Create a session whose read floor stays fixed as responses are observed.
-    /// `None` sends no floor; `Some(0)` requires sequence zero.
+    /// Create a session whose read floor stays fixed as sequences are observed.
+    /// `None` sends no floor, and `Some(0)` requires sequence zero.
     pub fn fixed(store: PrefixedStoreClient, floor: Option<u64>) -> Self {
         Self::new(store, floor, ReadPolicy::Fixed)
     }
@@ -2905,11 +2916,18 @@ impl ReadSession {
         session
     }
 
-    /// Highest Store sequence reported by a read in this session.
+    /// Highest Store sequence this session has observed, from a read response or a
+    /// recorded write.
     ///
-    /// Returns `None` until a response reports a sequence.
+    /// Returns `None` until the first observation.
     pub fn evaluated_sequence(&self) -> Option<u64> {
         self.observed_sequence.get()
+    }
+
+    /// Record the sequence a write committed at, with the same effect as a read
+    /// observation.
+    pub fn observe_write(&self, sequence_number: u64) {
+        self.observed_sequence.observe(sequence_number);
     }
 
     /// Share this session's freshness state with another store handle for the same Store.
@@ -4349,6 +4367,52 @@ mod tests {
             *transport.requested_floors.lock().unwrap(),
             vec![None, Some(0)]
         );
+    }
+
+    #[tokio::test]
+    async fn recorded_writes_are_observations_under_each_policy() {
+        for (monotonic, initial_floor) in [(true, None), (false, Some(5))] {
+            let transport = SessionSequenceTransport::with_response_sequences([Some(3)]);
+            let client = StoreClient::builder()
+                .url("http://query.internal")
+                .retry_config(RetryConfig::disabled())
+                .client_transport(transport.clone())
+                .build()
+                .unwrap()
+                .unprefixed();
+            let session = if monotonic {
+                ReadSession::monotonic(client, initial_floor)
+            } else {
+                ReadSession::fixed(client, initial_floor)
+            };
+            let clone = session.clone();
+            let floor_after = |sequence: u64| {
+                if monotonic {
+                    Some(sequence)
+                } else {
+                    initial_floor
+                }
+            };
+
+            // Zero is a real commit sequence.
+            clone.observe_write(0);
+            assert_eq!(session.evaluated_sequence(), Some(0));
+            assert_eq!(session.min_sequence_number(), floor_after(0));
+
+            // The highest write is kept, and only a monotonic session requires it.
+            clone.observe_write(30);
+            session.observe_write(20);
+            assert_eq!(session.evaluated_sequence(), Some(30));
+            assert_eq!(session.min_sequence_number(), floor_after(30));
+
+            // The next read sends that floor, and its older response lowers nothing.
+            session.get(&Key::from(b"key".to_vec())).await.unwrap();
+            assert_eq!(
+                *transport.requested_floors.lock().unwrap(),
+                vec![floor_after(30)]
+            );
+            assert_eq!(clone.evaluated_sequence(), Some(30));
+        }
     }
 
     #[tokio::test]
