@@ -12,7 +12,7 @@
 //!
 //! Example:
 //!   cargo run --release -p exoware-validation -- validate \
-//!     --url http://localhost:8080 \
+//!     --store-url http://localhost:8080 \
 //!     --keys 100
 
 use crate::{
@@ -575,16 +575,16 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
     };
     match cli.mode {
         ValidateMode::Standard => {
-            run_standard_validation(&cli, &client, cli.client.endpoint(), timings).await
+            run_standard_validation(&cli, &client, cli.client.store_url(), timings).await
         }
         ValidateMode::OverlapLedgerWrite => {
             let namespace = cli
                 .namespace
                 .unwrap_or_else(|| default_run_namespace(cli.seed));
-            run_overlap_ledger_write_mode(&cli, &client, cli.client.endpoint(), namespace).await
+            run_overlap_ledger_write_mode(&cli, &client, cli.client.store_url(), namespace).await
         }
         ValidateMode::OverlapLedgerVerify => {
-            run_overlap_ledger_verify_mode(&cli, &client, cli.client.endpoint(), timings).await
+            run_overlap_ledger_verify_mode(&cli, &client, cli.client.store_url(), timings).await
         }
     }
 }

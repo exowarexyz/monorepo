@@ -17,7 +17,7 @@ pub use input::{
     box_body, BlockingDecodeExecutor, DecodeExecutor, DrainOutcome, PutBody, PutEncoding, PutInput,
     PutLimits, PutMetadata,
 };
-pub use observe::{IngestEvent, IngestObserver};
+pub use observe::{PutEvent, PutObserver};
 pub use reception::maximum_reception_bytes;
 pub use service::{PutConfig, PutMiddleware, PutService};
 
@@ -33,7 +33,7 @@ impl PutError {
     pub fn into_connect(self) -> ConnectError {
         match self {
             Self::Connect(error) => error,
-            Self::Backend(error) => crate::connect::ingest_error_to_connect(error),
+            Self::Backend(error) => error.into_connect(),
         }
     }
 }

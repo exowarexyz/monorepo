@@ -116,7 +116,7 @@ the query's DataFusion `target_partitions` setting, each with the session's curr
 minimum sequence, and their results merge in range order. Workers stream completed
 groups in batches, and the coordinator's final aggregate uses the query's memory pool
 and spill configuration. Both stages keep groups in memory by default. Workers
-configure their own memory pool and spilling through `QueryState::with_runtime` in
+configure their own memory pool and spilling through `QueryState::with_runtime_env` in
 [`exoware-server`](../../server/README.md).
 
 ## Reading EXPLAIN output

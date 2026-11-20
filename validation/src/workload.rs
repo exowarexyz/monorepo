@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::{ops::Range, sync::Arc};
 
 /// Default seed used when the caller does not provide one.
-pub const DEFAULT_BENCH_RNG_SEED: u64 = 0x5eed_c0de;
+pub const DEFAULT_BENCH_SEED: u64 = 0x5eed_c0de;
 
 /// Version of the deterministic operation-stream generator used in manifests.
 ///

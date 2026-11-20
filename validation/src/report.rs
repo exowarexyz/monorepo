@@ -43,9 +43,11 @@ const fn default_batch_size() -> usize {
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct BenchConfig {
-    pub endpoint: String,
+    #[serde(alias = "endpoint")]
+    pub store_url: String,
     pub namespace: u64,
-    pub key_space: u64,
+    #[serde(alias = "key_space")]
+    pub initial_keys: u64,
     pub total_ops: u64,
     pub concurrency: usize,
     pub scenario: Scenario,
@@ -248,11 +250,11 @@ impl Default for LatencyHistogramRecorder {
 impl fmt::Display for BenchReport {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(f, "benchmark report")?;
-        writeln!(f, "  endpoint: {}", self.config.endpoint)?;
+        writeln!(f, "  store_url: {}", self.config.store_url)?;
         writeln!(f, "  namespace: {}", self.config.namespace)?;
         writeln!(f, "  seed: {}", self.seed)?;
         writeln!(f, "  scenario: {:?}", self.config.scenario)?;
-        writeln!(f, "  key_space: {}", self.config.key_space)?;
+        writeln!(f, "  initial_keys: {}", self.config.initial_keys)?;
         writeln!(f, "  key_len: {}", self.config.key_len)?;
         writeln!(f, "  value_size: {}", self.config.value_size)?;
         writeln!(f, "  batch_size: {}", self.config.batch_size)?;
@@ -471,9 +473,9 @@ mod tests {
 
         BenchReport {
             config: BenchConfig {
-                endpoint: "http://localhost:8080".to_string(),
+                store_url: "http://localhost:8080".to_string(),
                 namespace: 42,
-                key_space: 1_000,
+                initial_keys: 1_000,
                 total_ops: 10_000,
                 concurrency: 4,
                 scenario: Scenario::Balanced,
@@ -549,6 +551,17 @@ mod tests {
         assert_eq!(parsed.report.latency_histograms.read.unit, "microseconds");
         assert_eq!(parsed.report.latency_histograms.read.count, 2);
         assert_eq!(parsed.report.latency_histograms.write.count, 1);
+    }
+
+    #[test]
+    fn bench_config_reads_earlier_field_names() {
+        let config = sample_report().config;
+        let json = serde_json::to_string(&config)
+            .expect("config should serialize")
+            .replace("\"store_url\"", "\"endpoint\"")
+            .replace("\"initial_keys\"", "\"key_space\"");
+        let parsed: BenchConfig = serde_json::from_str(&json).expect("config should deserialize");
+        assert_eq!(parsed, config);
     }
 
     #[test]

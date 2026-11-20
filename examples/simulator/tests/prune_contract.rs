@@ -62,12 +62,16 @@ fn has_batch(store: &RocksStore, sequence: u64) -> bool {
 }
 
 fn oldest_retained(store: &RocksStore) -> Option<u64> {
-    block_on(store.oldest_retained_batch()).expect("oldest retained")
+    block_on(store.oldest_retained_sequence()).expect("oldest retained")
 }
 
 /// Drives the `Retention` RPC surface (async trait method) the way the server does.
-fn set_retention(store: &RocksStore, policy: Option<RetentionPolicy>) -> Option<u64> {
+fn set_retention(store: &RocksStore, policy: RetentionPolicy) -> Option<u64> {
     block_on(store.set_retention(policy)).expect("set_retention")
+}
+
+fn clear_retention(store: &RocksStore) -> Option<u64> {
+    block_on(store.clear_retention()).expect("clear_retention")
 }
 
 fn prune_document(policies: &[PrunePolicy]) -> PrunePolicyDocument {
@@ -257,7 +261,7 @@ fn retention_keep_latest_tracks_frontier_continuously() {
 
     // One synchronous enforcement against frontier 3 keeps the newest two batches.
     assert_eq!(
-        set_retention(&store, Some(RetentionPolicy::KeepLatest { count: 2 })),
+        set_retention(&store, RetentionPolicy::KeepLatest { count: 2 }),
         Some(2)
     );
     assert!(!has_batch(&store, 1));
@@ -292,7 +296,7 @@ fn retention_greater_than_and_greater_than_or_equal_thresholds() {
 
     // `greater_than{2}` retains sequence numbers strictly above 2, so the floor is 3.
     assert_eq!(
-        set_retention(&store, Some(RetentionPolicy::GreaterThan { threshold: 2 })),
+        set_retention(&store, RetentionPolicy::GreaterThan { threshold: 2 }),
         Some(3)
     );
     assert!(!has_batch(&store, 1));
@@ -301,10 +305,7 @@ fn retention_greater_than_and_greater_than_or_equal_thresholds() {
 
     // Tightening to `greater_than_or_equal{4}` moves the floor to 4 (4 itself is retained).
     assert_eq!(
-        set_retention(
-            &store,
-            Some(RetentionPolicy::GreaterThanOrEqual { threshold: 4 })
-        ),
+        set_retention(&store, RetentionPolicy::GreaterThanOrEqual { threshold: 4 }),
         Some(4)
     );
     assert!(!has_batch(&store, 3));
@@ -321,7 +322,7 @@ fn retention_drop_all_keeps_log_empty_as_batches_arrive() {
     put_one(&store, b"b", b"2");
 
     // drop_all evicts everything up to the live frontier; the log has no retained row.
-    assert_eq!(set_retention(&store, Some(RetentionPolicy::DropAll)), None);
+    assert_eq!(set_retention(&store, RetentionPolicy::DropAll), None);
     assert_eq!(oldest_retained(&store), None);
     assert!(!has_batch(&store, 1));
     assert!(!has_batch(&store, 2));
@@ -344,13 +345,13 @@ fn retention_clear_stops_enforcement() {
     put_one(&store, b"c", b"3");
 
     assert_eq!(
-        set_retention(&store, Some(RetentionPolicy::KeepLatest { count: 2 })),
+        set_retention(&store, RetentionPolicy::KeepLatest { count: 2 }),
         Some(2)
     );
     assert!(!has_batch(&store, 1));
 
     // Clearing stops enforcement; already-evicted batches stay evicted.
-    set_retention(&store, None);
+    assert_eq!(clear_retention(&store), Some(2));
     assert!(!has_batch(&store, 1));
 
     // With the rule cleared the ingest path stops trimming: batches 4 and 5 join 2 and 3
@@ -384,7 +385,7 @@ fn keys_prune_and_retention_compose() {
             &[version_policy(RetainPolicy::KeepLatest { count: 1 })],
         );
         assert_eq!(
-            set_retention(&store, Some(RetentionPolicy::KeepLatest { count: 1 })),
+            set_retention(&store, RetentionPolicy::KeepLatest { count: 1 }),
             Some(last)
         );
 
@@ -422,8 +423,8 @@ fn retention_drop_all_survives_reopen() {
             &store,
             vec![(versioned_key(b"row", 2), Bytes::from_static(b"v2"))],
         );
-        set_retention(&store, Some(RetentionPolicy::DropAll));
-        assert!(block_on(store.oldest_retained_batch())
+        set_retention(&store, RetentionPolicy::DropAll);
+        assert!(block_on(store.oldest_retained_sequence())
             .expect("oldest")
             .is_none());
         last
