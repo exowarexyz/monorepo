@@ -8,7 +8,7 @@ use crate::{
         merkle_size_for_watermark, op_count_for_watermark, WATERMARK_PREFIX,
     },
     decode_digest,
-    error::QmdbError,
+    error::{error_key, QmdbError},
     PublishedWatermark, VersionedValue,
 };
 use bytes::Bytes;
@@ -20,7 +20,7 @@ use commonware_storage::merkle::{
     hasher::Hasher as MerkleHasher, mem::Mem, Family, Location, Position,
 };
 use exoware_sdk::{keys::Key, RangeMode, ReadSession};
-use std::sync::Mutex;
+use std::{collections::BTreeSet, sync::Mutex};
 
 pub(crate) async fn read_latest_watermark_with_sequence<F: Family>(
     session: &ReadSession,
@@ -169,16 +169,13 @@ pub(crate) async fn load_latest_update_row<F: Family>(
     session: &ReadSession,
     watermark: Location<F>,
     key: &[u8],
-) -> Result<Option<(Key, Vec<u8>)>, QmdbError> {
+) -> Result<Option<(Key, Bytes)>, QmdbError> {
     let start = encode_update_key(key, Location::<F>::new(0))?;
     let end = encode_update_key(key, watermark)?;
     let rows = session
         .range_with_mode(&start, &end, 1, RangeMode::Reverse)
         .await?;
-    Ok(rows
-        .into_iter()
-        .next()
-        .map(|(key, value)| (key, value.to_vec())))
+    Ok(rows.into_iter().next())
 }
 
 /// Loads each key's latest operation at `watermark` and decodes it with `resolver`.
@@ -212,6 +209,79 @@ where
         }
     });
     futures::future::join_all(futs).await.into_iter().collect()
+}
+
+/// Most per-key proofs one request builds at once.
+pub(crate) const PROOF_CONCURRENCY: usize = 16;
+
+/// A GetMany request must name at least one key, and each key must be unique.
+pub(crate) fn validate_get_many_keys<Q: AsRef<[u8]>>(keys: &[Q]) -> Result<(), QmdbError> {
+    if keys.is_empty() {
+        return Err(QmdbError::EmptyProofRequest);
+    }
+    let mut seen = BTreeSet::new();
+    for key in keys {
+        if !seen.insert(key.as_ref()) {
+            return Err(QmdbError::DuplicateRequestedKey {
+                key: error_key(key),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Runs `run` on each input with at most `limit` in flight and returns the outputs in input
+/// order. A future is built only when a slot opens. On failure it returns the error a serial
+/// loop would, the earliest failing input's, once every input before it has finished, and
+/// drops the rest.
+///
+/// `StreamExt::buffered` keeps a finished output in its slot until every earlier input has
+/// finished, so one slow input stalls the rest. Here a slot frees as soon as its input does.
+pub(crate) async fn try_join_bounded<I, T, Fut>(
+    inputs: I,
+    limit: usize,
+    run: impl Fn(I::Item) -> Fut,
+) -> Result<Vec<T>, QmdbError>
+where
+    I: IntoIterator,
+    Fut: std::future::Future<Output = Result<T, QmdbError>>,
+{
+    use futures::StreamExt as _;
+
+    assert!(limit > 0, "try_join_bounded needs a nonzero limit");
+    let mut pending = inputs.into_iter().enumerate();
+    let mut running = futures::stream::FuturesUnordered::new();
+    let mut results: Vec<Option<Result<T, QmdbError>>> = Vec::with_capacity(pending.size_hint().0);
+    // Every input before `next_unresolved` has succeeded.
+    let mut next_unresolved = 0;
+    let mut failed = false;
+    loop {
+        // Inputs start in order, so after a failure no unstarted input can fail earlier.
+        while !failed && running.len() < limit {
+            let Some((index, input)) = pending.next() else {
+                break;
+            };
+            results.push(None);
+            let fut = run(input);
+            running.push(async move { (index, fut.await) });
+        }
+        let Some((index, result)) = running.next().await else {
+            break;
+        };
+        failed |= result.is_err();
+        results[index] = Some(result);
+        while let Some(Some(result)) = results.get(next_unresolved) {
+            if result.is_err() {
+                let error = results.swap_remove(next_unresolved).and_then(Result::err);
+                return Err(error.expect("checked above"));
+            }
+            next_unresolved += 1;
+        }
+    }
+    results
+        .into_iter()
+        .map(|result| result.expect("every input finished"))
+        .collect()
 }
 
 pub(crate) async fn compute_ops_root<F: Family, H: Hasher>(

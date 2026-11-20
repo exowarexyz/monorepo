@@ -307,6 +307,7 @@ pub struct CountingQuery {
     /// Store requests of each kind.
     pub calls: std::sync::Mutex<StoreCalls>,
     overlap: std::sync::Mutex<Option<OverlapGate>>,
+    delay: std::sync::Mutex<std::time::Duration>,
 }
 
 /// Store requests served by a [`CountingQuery`], by kind.
@@ -318,6 +319,20 @@ pub struct StoreCalls {
 }
 
 impl CountingQuery {
+    /// Wait `delay` before answering each query.
+    #[allow(dead_code)]
+    pub fn set_delay(&self, delay: std::time::Duration) {
+        *self.delay.lock().unwrap() = delay;
+    }
+
+    async fn apply_delay(&self) {
+        let delay = *self.delay.lock().unwrap();
+        // A zero sleep still waits for a timer tick.
+        if !delay.is_zero() {
+            tokio::time::sleep(delay).await;
+        }
+    }
+
     /// Reset the update-index counters.
     #[allow(dead_code)]
     pub fn reset_update_reads(&self) {
@@ -406,6 +421,7 @@ impl exoware_server::Query for CountingQuery {
         key: bytes::Bytes,
     ) -> Result<exoware_server::QueryResult<Option<bytes::Bytes>>, String> {
         self.calls.lock().unwrap().get += 1;
+        self.apply_delay().await;
         exoware_server::Query::get(self.store.as_ref(), key).await
     }
 
@@ -415,6 +431,7 @@ impl exoware_server::Query for CountingQuery {
     ) -> Result<exoware_server::QueryResult<Vec<(bytes::Bytes, Option<bytes::Bytes>)>>, String>
     {
         self.calls.lock().unwrap().get_many += 1;
+        self.apply_delay().await;
         if let Some(barrier) = self.overlap_barrier(true, None) {
             barrier.wait().await;
         }
@@ -429,6 +446,7 @@ impl exoware_server::Query for CountingQuery {
         forward: bool,
     ) -> Result<exoware_server::RangeScanResult<Self::RangeScan>, String> {
         self.calls.lock().unwrap().range += 1;
+        self.apply_delay().await;
         if let Some(barrier) = self.overlap_barrier(false, start.first().copied()) {
             barrier.wait().await;
         }
@@ -474,6 +492,7 @@ pub async fn counting_store() -> (
         update_rows: Default::default(),
         calls: Default::default(),
         overlap: Default::default(),
+        delay: Default::default(),
     });
     let (store_server, store_url) = spawn_connect_service(exoware_server::connect_stack(
         exoware_server::AppState::new(store),
